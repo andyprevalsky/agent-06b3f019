@@ -18,6 +18,7 @@ tags:
 sources:
   - PR #1915
   - plan: .context/rca-playwright/semantic-callback-origin/findings.json
+  - plan: .context/rca-playwright/semantic-callback-origin/override-correction/findings.json
   - plan: .context/rca-playwright/semantic-observation-4092/analysis/findings.json
 repro: scripts/tests/run-deploy-semantic-stack.test.sh
 status: fixed
@@ -68,6 +69,17 @@ uses an explicit repository TypeScript loader so a real temporary directory does
 not accidentally depend on ancestor node_modules. Endpoint metadata is synthetic;
 no favorable callback or model response is substituted. Genuine provider routing
 and full timed UI acceptance remain required.
+
+An independent reuse review reproduced an inherited override gap: the existing
+export helper returned early for a configured callback URL, allowing loopback or
+a foreign HTTPS stack to bypass the new owned tunnel. In the run-owned lane only,
+reject a configured base that differs from the owned HTTPS origin. Require an
+origin-only base without user information, path prefixes, query or fragment;
+normalize an absent port to 443 without treating explicit port zero as absent.
+Preserve matching origins and trailing slash, ordinary unscoped overrides and
+local USERCONTENT identity. A generic error occurs before services or code agents
+start; the existing trap cleans up the owned tunnel. Both registered owning suites
+reproduce the original acceptance of the mismatching override before correction.
 
 ## Human feedback
 

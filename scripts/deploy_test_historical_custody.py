@@ -264,6 +264,7 @@ def pending_shapes(state, old):
          'invalid pending identities')
     if not pending:
         return
+    need(isinstance(state.get('pending_execution_contracts', {}), dict), 'malformed pending contract history')
     need(isinstance(old.get('gates'), list)
          and all(isinstance(g, dict) and isinstance(g.get('name'), str)
                  and isinstance(g.get('checks'), list) for g in old['gates']),
@@ -314,8 +315,7 @@ def pending_rca(state, old, protected):
              and gate.get('worker_transport') != 'benchmark-cloud-cli', 'pending gate is not admitted for nonfinancial RCA')
         check = f.get('check', '').partition('/')[2]
         need(f.get('check') == f.get('gate', '') + '/' + check and check in gate.get('checks', [])
-             and f.get('source') == state['source'] and f.get('command') == gate.get('command')
-             and f.get('complete') is True and f.get('native_result') == 'FAIL', 'incomplete/unbound pending failure')
+             and isinstance(f.get('source'), dict) and f.get('complete') is True and f.get('native_result') == 'FAIL', 'incomplete/unbound pending failure')
         need(isinstance(f.get('worker_result'), str) and f['worker_result'],
              'malformed pending adapter path')
         path = Path(f['worker_result'])
@@ -350,14 +350,65 @@ def pending_rca(state, old, protected):
              and adapter.get('cases', {}).get(check) == 'FAIL'
              and adapter.get('evidence', {}).get(check) == f.get('worker_evidence'),
              'pending adapter is incomplete or differs from failure/receipt')
-        request = {'token': receipt['token'], 'source': f['source'],
-                   'gate': f['gate'], 'checks': gate['checks']}
-        for field in ('worker_recipe', 'worker_root'):
-            if field in gate:
-                request[field] = gate[field]
+        need(f.get('command') == receipt.get('command'), 'pending original command changed')
+        original_files = {}
+        if f['source'] == state['source']:
+            need(f.get('command') == gate.get('command'), 'pending gate command changed')
+            request = {'token': receipt['token'], 'source': f['source'],
+                       'gate': f['gate'], 'checks': gate['checks']}
+            for field in ('worker_recipe', 'worker_root'):
+                if field in gate:
+                    request[field] = gate[field]
+        else:
+            # A carried failure still belongs to its original execution, not this plan's source.
+            # Use the complete saved producer request and exact retained receipt; never ancestry.
+            documents = {}
+            for name in ('request', 'receipt'):
+                file = path.with_name(name + '.json')
+                need(file.is_file() and not file.is_symlink() and file.resolve() == file,
+                     'original pending request/receipt missing')
+                documents[name] = c.bounded_read(file, 'original pending ' + name)
+                need(isinstance(documents[name], dict), 'malformed original pending document')
+                original_files[name + '_sha256'] = c.sha_file(file)
+            request = documents['request']
+            binding = receipt.get('execution_binding')
+            attempts = [a for a in state['attempts'] if any(r is receipt for r in a['results'])]
+            need(documents['receipt'] == receipt and len(attempts) == 1
+                 and attempts[0].get('source') == f['source']
+                 and request.get('phase') == attempts[0].get('phase') == f.get('phase')
+                 and all(request.get(k) == receipt.get(k) for k in ('token', 'source', 'gate'))
+                 and isinstance(request.get('checks'), list) and request['checks']
+                 and all(isinstance(v, str) and v for v in request['checks'])
+                 and len(request['checks']) == len(set(request['checks']))
+                 and request.get('skips') == {} and check in request['checks']
+                 and isinstance(request.get('worker_recipe'), dict)
+                 and isinstance(request.get('worker_root'), str) and request['worker_root']
+                 and isinstance(binding, dict)
+                 and all(isinstance(binding.get(k), str) and re.fullmatch('[0-9a-f]{64}', binding[k])
+                         for k in ('contract_digest', 'input_fingerprint', 'environment')),
+                 'original pending execution binding changed')
+            saved = state.get('pending_execution_contracts', {}).get(key)
+            if saved is None:
+                # Recover only byte-equivalent recorded contract fields, proven by the native digest.
+                original_gate = copy.deepcopy(gate)
+                original_gate['command'] = copy.deepcopy(receipt['command'])
+                original_gate['worker_recipe'] = copy.deepcopy(request['worker_recipe'])
+                original_gate['worker_root'] = request['worker_root']
+                saved = {'source': copy.deepcopy(f['source']), 'gate': original_gate}
+            need(isinstance(saved, dict) and saved.get('source') == f['source']
+                 and isinstance(saved.get('gate'), dict)
+                 and c.digest(saved['gate']) == binding['contract_digest']
+                 and saved['gate'].get('name') == f['gate']
+                 and saved['gate'].get('command') == f['command']
+                 and saved['gate'].get('checks') == request['checks']
+                 and saved['gate'].get('worker_recipe') == request['worker_recipe']
+                 and saved['gate'].get('worker_root') == request['worker_root'],
+                 'original pending contract digest changed')
+            original_files['execution_contract'] = copy.deepcopy(saved)
         c.validate_result(adapter, request, receipt['native_exit'])
         need(adapter['cases'] == receipt['cases'], 'pending native grades differ from receipt')
-        rows.append({'id': key, 'adapter_sha256': c.sha_file(path), 'receipt_sha256': c.digest(receipt)})
+        rows.append({'id': key, 'adapter_sha256': c.sha_file(path), 'receipt_sha256': c.digest(receipt),
+                     **original_files})
     return rows
 
 
@@ -667,7 +718,7 @@ def guard(state, gate, root, legacy=None, *, current=None):
     return custody
 
 
-def verify(state, root):
+def verify(state, root, *, allow_stale_elections=False):
     """Validate retained provenance and every protected obligation against the current plan."""
     import deploy_test_cycle as c
     verify_import_origin(state, root)
@@ -678,7 +729,8 @@ def verify(state, root):
         need(f['gate'] in gates and f['check'].split('/', 1)[1] in gates[f['gate']]['checks'], 'known historical task removed from plan')
     for gate in state['plan']['gates']:
         # Caller supplies legacy qualifications without recursively entering custody.
-        guard(state, gate, root, c.reuse_qualifications(state, gate, include_custody=False, root=root))
+        guard(state, gate, root, c.reuse_qualifications(state, gate, include_custody=False, root=root,
+            validate_elections=not allow_stale_elections))
 
 
 def verify_import_origin(state, root):

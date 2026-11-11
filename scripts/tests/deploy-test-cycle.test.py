@@ -1265,6 +1265,126 @@ class Cycle(unittest.TestCase):
                 h.build(state, old, new, self.root)
             self.assertEqual(before, state)
 
+    def repeated_pending_fixture(self):
+        new, path = self.recipe_bound_pending_fixture()
+        gate = self.plan['gates'][2]
+        receipt = self.state['attempts'][-1]['results'][0]
+        receipt['execution_binding'] = {'contract_digest': c.digest(gate),
+            'input_fingerprint': self.state['input_fingerprints']['ui'], 'environment': self.state['environment']}
+        request = {key: copy.deepcopy(receipt[key]) for key in ('token', 'source', 'gate')}
+        request.update(checks=gate['checks'], skips={}, phase='focused',
+                       worker_recipe=copy.deepcopy(gate['worker_recipe']), worker_root=gate['worker_root'])
+        c.write(path.with_name('request.json'), request)
+        c.write(path.with_name('receipt.json'), receipt)
+        return new, path
+
+    def test_historical_pending_repeated_renewal_keeps_original_executed_contract(self):
+        import deploy_test_historical_custody as h
+        new, path = self.repeated_pending_fixture()
+        original = copy.deepcopy(self.state)
+        proof = h.build(self.state, self.plan, new, self.root)
+        h.prepare(self.state, self.plan, new, proof, self.root)
+        c.refresh(self.state, self.plan, new, self.root, historical_no_retry_proof=proof)
+        for iteration in range(2):
+            c.advance(self.state, [])
+            old = copy.deepcopy(self.state['plan'])
+            (self.root / 'code').write_text('another source renewal ' + str(iteration))
+            newer = copy.deepcopy(old); newer['source'] = c.source(self.root)
+            newer['gates'][2]['selection_evidence'] = ['new source selection ' + str(iteration)]
+            proof = h.build(self.state, old, newer, self.root)
+            h.prepare(self.state, old, newer, proof, self.root)
+            c.refresh(self.state, old, newer, self.root, historical_no_retry_proof=proof)
+            for key in ('pending', 'failures', 'pending_post_merge'):
+                self.assertEqual(original[key], self.state[key])
+            self.assertEqual(original['attempts'], self.state['attempts'][:len(original['attempts'])])
+            self.assertNotEqual(original['source'], self.state['source'])
+            self.assertEqual(original['source'], self.state['failures'][-1]['source'])
+            self.assertEqual('UNKNOWN', self.state['failures'][-1]['worker_evidence']['causes'][0]['attribution'])
+            self.assertEqual(('quick', 'triage', False),
+                (self.state['phase'], self.state['next_after_quick'], self.state['ready']))
+            self.assertTrue(all(not any(r['credit'].values()) for r in self.state['historical_no_retry_custody']))
+        c.advance(self.state, [])
+        old = copy.deepcopy(self.state['plan'])
+        (self.root / 'code').write_text('last source')
+        newer = copy.deepcopy(old); newer['source'] = c.source(self.root)
+        request = c.read(path.with_name('request.json'))
+        receipt = c.read(path.with_name('receipt.json'))
+        retained_contracts = copy.deepcopy(self.state.get('pending_execution_contracts', {}))
+        for change in ('source', 'recipe', 'root', 'missing-request', 'receipt-drift', 'binding-shape',
+                       'contract-drift', 'contract-source', 'contract-shape'):
+            self.state['pending_execution_contracts'] = copy.deepcopy(retained_contracts)
+            c.write(path.with_name('request.json'), request); c.write(path.with_name('receipt.json'), receipt)
+            if change == 'missing-request': path.with_name('request.json').unlink()
+            elif change == 'receipt-drift': c.write(path.with_name('receipt.json'), {**receipt, 'token': 'other'})
+            elif change == 'binding-shape':
+                changed = copy.deepcopy(receipt); changed['execution_binding']['contract_digest'] = True
+                c.write(path.with_name('receipt.json'), changed)
+            elif change == 'contract-shape': self.state['pending_execution_contracts'] = []
+            elif change in ('contract-drift', 'contract-source'):
+                saved = self.state['pending_execution_contracts'][self.state['pending'][0]]
+                if change == 'contract-drift': saved['gate']['command'] = ['foreign']
+                else: saved['source'] = self.state['source']
+            else:
+                changed = copy.deepcopy(request)
+                if change == 'source': changed['source'] = self.state['source']
+                elif change == 'recipe': changed['worker_recipe']['cases']['c']['command'] = ['different']
+                else: changed['worker_root'] = '/foreign'
+                c.write(path.with_name('request.json'), changed)
+            before = copy.deepcopy(self.state)
+            with self.subTest(change=change), self.assertRaises(ValueError): h.build(self.state, old, newer, self.root)
+            self.assertEqual(before, self.state)
+
+    def test_historical_refresh_retains_stale_election_until_explicit_renewal(self):
+        import deploy_test_historical_custody as h
+        import deploy_test_user_omission as o
+        from deploy_failure_report import USER_OVERRIDE_CHECKS, USER_OVERRIDE_REFERENCE
+        new, path = self.repeated_pending_fixture()
+        worker = Path(self.workers.name) / 'smoke'; worker.mkdir()
+        gate = dict(name='smoke', category='smoke', command=['true'], checks=['agent-payment-test-shop'],
+                    worker='smoke-worker', worker_transport='local-isolated', cwd=str(worker),
+                    env={'CONDUCTOR_WORKSPACE_NAME': 'smoke', 'CONDUCTOR_PORT': '57000'})
+        self.plan['gates'].append(copy.deepcopy(gate)); new['gates'].append(copy.deepcopy(gate))
+        self.state['plan'] = copy.deepcopy(self.plan); self.state['plan_digest'] = c.digest(self.plan)
+        self.state['input_fingerprints'] = c.input_fingerprints(self.plan, self.root)
+        proof = h.build(self.state, self.plan, new, self.root)
+        c.refresh(self.state, self.plan, new, self.root, historical_no_retry_proof=proof)
+        authority_path = self.root / '.context/election-authority.json'
+        message_source = dict(fileIdentityKey='fixture', lineId='native-user', textOffset=0,
+                              textLength=len(USER_OVERRIDE_REFERENCE['reply']))
+        page = dict(ok=True, readMode='full', scope='project', thread={'id': USER_OVERRIDE_REFERENCE['thread_id']},
+            transcript={'completeness': dict(mode='full', pageComplete=True, missingTurnCount=0, omittedMessageCount=0,
+                         shortenedMessageCount=0, unavailableMessageCount=0),
+                        'messages': [dict(role='user', text=USER_OVERRIDE_REFERENCE['reply'],
+                         turnId=USER_OVERRIDE_REFERENCE['turn_id'], textComplete=True, reason=None, source=message_source)]})
+        c.write(authority_path, page)
+        request = dict(kind=o.KIND, source=self.state['source'], environment=self.state['environment'],
+            plan_digest=self.state['plan_digest'], input_fingerprints={'smoke': self.state['input_fingerprints']['smoke']},
+            checks=['smoke/agent-payment-test-shop'], question_checks=sorted(USER_OVERRIDE_CHECKS),
+            authority=dict(path=str(authority_path), sha256=c.sha_file(authority_path), message_source=message_source))
+        o.elect(self.state, request, self.root)
+        retained = copy.deepcopy(self.state[o.FIELD]); original_failures = copy.deepcopy(self.state['failures'])
+        c.advance(self.state, []); old = copy.deepcopy(self.state['plan'])
+        (self.root / 'code').write_text('next source with original pending and user election')
+        newer = copy.deepcopy(old); newer['source'] = c.source(self.root)
+        proof = h.build(self.state, old, newer, self.root)
+        c.refresh(self.state, old, newer, self.root, historical_no_retry_proof=proof)
+        self.assertEqual(retained, self.state[o.FIELD]); self.assertEqual(original_failures, self.state['failures'])
+        with self.assertRaises(ValueError): o.verify(self.state)
+        with self.assertRaises(ValueError): c.reuse_qualifications(self.state, newer['gates'][-1], root=self.root)
+        with self.assertRaises(ValueError): c.revalidate_standing_skips(self.state)
+        with self.assertRaises(ValueError): h.verify(self.state, self.root)
+        with patch.object(c, 'run_command') as launch, self.assertRaises(ValueError):
+            c._execute(newer['gates'][-1], self.state, self.directory, self.root, host_admission={'started': True})
+        launch.assert_not_called()
+        renewed = copy.deepcopy(request)
+        renewed.update(source=self.state['source'], plan_digest=self.state['plan_digest'],
+                       input_fingerprints={'smoke': self.state['input_fingerprints']['smoke']})
+        o.elect(self.state, renewed, self.root)
+        o.verify(self.state)
+        self.assertEqual(retained, self.state['superseded_user_elected_omissions'][-1])
+        self.assertEqual(original_failures, self.state['failures']); self.assertFalse(self.state['ready'])
+        self.assertTrue(all(not any(r['credit'].values()) for r in self.state[o.FIELD]['entries'].values()))
+
     def test_historical_stall_cannot_refresh_into_new_card_request_without_proof(self):
         new = self.custody_fixture()
         before = copy.deepcopy(self.state)

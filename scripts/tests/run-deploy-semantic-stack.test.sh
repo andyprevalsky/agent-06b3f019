@@ -325,7 +325,7 @@ STACK
 chmod +x "$FIXTURE/scripts/run.sh"
 callback_for_run() {
  rm -f "$FIXTURE/.context/tunnel-fixture/actions" "$FIXTURE/.context/tunnel-fixture/producer.log" "$FIXTURE/.context/services.json"
- expect_exit 0 env -u ROSE_UI_PUBLISH_BASE_URL -u USERCONTENT_BASE_URL -u PUBLIC_BASE_URL \
+ expect_exit 0 env -u USERCONTENT_BASE_URL -u PUBLIC_BASE_URL ROSE_UI_PUBLISH_BASE_URL="${2:-}" \
   CONDUCTOR_PORT=40000 CONDUCTOR_WORKSPACE_NAME=same-workspace ROSE_TRUST_CONDUCTOR_WORKSPACE_NAME=1 \
   DEPLOY_SEMANTIC_TOKEN="$1" PATH="$SHIMS:$PATH" PRODUCER_TSX_IMPORT="$ROOT_DIR/node_modules/tsx/dist/loader.mjs" PRODUCER_SOURCE="$ROOT_DIR/back-end/src/providers/agentTools/workspace.ts" \
   bash scripts/run-deploy-semantic-stack.sh
@@ -356,5 +356,21 @@ expect_exit 1 env -u ROSE_UI_PUBLISH_BASE_URL -u PUBLIC_BASE_URL CONDUCTOR_PORT=
  PRODUCER_TSX_IMPORT="$ROOT_DIR/node_modules/tsx/dist/loader.mjs" PRODUCER_SOURCE="$ROOT_DIR/back-end/src/providers/agentTools/workspace.ts" bash scripts/run-deploy-semantic-stack.sh
 ! grep -qE 'RESERVATION|SHARED_FALLBACK' "$FIXTURE/.context/tunnel-fixture/actions" || fail "run-scoped failure touched a shared reservation"
 
+
+
+# Scoped callback ownership: reject inherited loopback/foreign origins before publication.
+for inherited in http://localhost:40000 https://foreign.example.test; do
+ rm -f "$FIXTURE/.context/services.json" "$FIXTURE/.context/tunnel-fixture/producer.log"
+ expect_exit 1 env -u PUBLIC_BASE_URL ROSE_UI_PUBLISH_BASE_URL="$inherited" \
+  CONDUCTOR_PORT=40000 DEPLOY_SEMANTIC_TOKEN=dddddddddddddddddddddddddddddddd PATH="$SHIMS:$PATH" \
+  PRODUCER_TSX_IMPORT="$ROOT_DIR/node_modules/tsx/dist/loader.mjs" PRODUCER_SOURCE="$ROOT_DIR/back-end/src/providers/agentTools/workspace.ts" \
+  bash scripts/run-deploy-semantic-stack.sh
+ grep -Fq 'Run-scoped callback origin must match the owned public tunnel' "$FIXTURE/.context/deploy-smoke.log" || fail 'foreign inherited callback must fail closed'
+ [ ! -e "$FIXTURE/.context/tunnel-fixture/producer.log" ] || fail 'foreign override reached tools producer'
+ [ ! -e "$FIXTURE/.context/services.json" ] || fail 'foreign override published services'
+ grep -q '^cleanup ' "$FIXTURE/.context/tunnel-fixture/actions" || fail 'failed override did not clean owned tunnel'
+done
+MATCHING=$(callback_for_run aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa "https://$FIRST/")
+[ "$MATCHING" = "$FIRST" ] || fail 'matching scoped origin with trailing slash must remain valid'
 
 echo "run-deploy-semantic-stack: all checks passed"

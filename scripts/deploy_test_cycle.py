@@ -262,10 +262,13 @@ def initialize(plan: dict, root: Path) -> dict:
             "input_fingerprints": input_fingerprints(plan, root)}
 
 
-def reuse_qualifications(state: dict, gate: dict, *, include_custody=True, root=ROOT, custody_refresh=False) -> dict:
+def reuse_qualifications(state: dict, gate: dict, *, include_custody=True, root=ROOT, custody_refresh=False,
+                         validate_elections=True) -> dict:
     """Replay existing dispositions; projected source fields never replace native proof."""
     from deploy_failure_report import decision
-    revalidate_standing_skips(state)
+    if not validate_elections and include_custody:
+        raise ValueError('execution qualifications must validate user elections')
+    revalidate_standing_skips(state, include_user_elections=validate_elections)
     name, expected = gate['name'], {}
     for key, entry in state.get('skips', {}).items():
         if not key.startswith(name + '/') or entry['source'] != state['source']:
@@ -951,9 +954,10 @@ def validate_user_override(entry, state, check):
         raise ValueError('explicit user override current source/input/check binding changed')
 
 
-def revalidate_standing_skips(state: dict) -> None:
+def revalidate_standing_skips(state: dict, *, include_user_elections=True) -> None:
     from deploy_test_user_omission import verify as verify_user_elections
-    verify_user_elections(state)
+    if include_user_elections:
+        verify_user_elections(state)
     for key, entry in state.get('skips', {}).items():
         if entry.get('disposition') == 'user / overridden':
             validate_user_override(entry['rca'], state, key)
@@ -2326,7 +2330,7 @@ def refresh(state: dict, old: dict, new: dict, root: Path, *, election_proof: di
             from deploy_test_historical_custody import binding, verify
             if (state['plan'] != new or historical_no_retry_proof['current_binding'] != binding(new, root)):
                 raise ValueError('historical custody replay differs from current binding')
-            verify(state, root)
+            verify(state, root, allow_stale_elections=True)
             return
         rows = prepare(state, old, new, historical_no_retry_proof, root)
         candidate = copy.deepcopy(state)
@@ -2340,8 +2344,12 @@ def refresh(state: dict, old: dict, new: dict, root: Path, *, election_proof: di
             candidate['skips'].pop(r['original_failure']['check'], None)
         candidate['resource_warnings'] = [w for w in candidate.get('resource_warnings', []) if w['id'] not in protected]
         apply(candidate, rows, root)
+        for pending_row in historical_no_retry_proof.get('pending_rca', []):
+            if 'execution_contract' in pending_row:
+                candidate.setdefault('pending_execution_contracts', {})[pending_row['id']] = copy.deepcopy(
+                    pending_row['execution_contract'])
         candidate.setdefault('historical_custody_refreshes', []).append(digest(historical_no_retry_proof))
-        verify(candidate, root)  # Re-read native/current bindings before the one atomic publication.
+        verify(candidate, root, allow_stale_elections=True)  # Re-read native/current bindings before the one atomic publication.
         state.clear(); state.update(candidate)
         return
     if known(state, root):

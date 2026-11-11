@@ -18,6 +18,7 @@ tags:
 sources:
   - PR #1915
   - plan: .context/rca-playwright/pending-custody-refresh/v2/packet.json
+  - plan: .context/rca-playwright/pending-custody-refresh/repeated-renewal/packet.json
 repro: scripts/tests/deploy-test-cycle.test.py::Cycle.test_historical_custody_refresh_preserves_quiescent_nonfinancial_pending
 status: fixed
 ---
@@ -60,6 +61,23 @@ Independent correction review verifies refusal of the original unsafe controls
 and acceptance of the valid recipe-bound case. Financial custody validators and
 zero-credit semantics remain unchanged. Required source-bound gates and actual
 production verification remain separate obligations.
+
+A subsequent renewal exposed a second assumption: the preserved pending failure
+still names its original source, while the cycle now names the newer source.
+Validate carried failures against their saved original request, exact saved and
+retained receipt, original attempt source and phase, complete recipe and isolation
+root. Reconstruct a missing historical gate only when its digest equals the
+original native execution contract, then retain that immutable contract for later
+renewals. Source ancestry or a guessed current contract is insufficient.
+
+The repeated-renewal regression exercises three source generations while retaining
+original failure and native attempt records. It also reproduces a stale-election
+coupling: final financial-fact verification rejected a prospective omission before
+the new source could be published for explicit renewal. Only that source-refresh
+financial verification may omit prospective election projection. The stale election
+remains in the ledger, and default verification, qualifications, execution and
+native admission still refuse it until the existing explicit renewal operation.
+No financial execution or release credit follows from renewal.
 
 ## Human feedback
 
