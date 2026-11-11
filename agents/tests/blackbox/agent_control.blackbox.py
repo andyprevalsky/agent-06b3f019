@@ -907,6 +907,22 @@ async def test_resume_workflow_continues_a_stopped_code_session_outside_its_owne
     from workflows.code_agent_resume import CodeAgentResumeWorkflow
 
     spawns, posted = [], []
+    original_schema = {"fields": [{"name": "evidence", "type": "string"}]}
+    settings = {"model": "gpt-6.1-sol", "reasoning_effort": "high", "speed": "standard"}
+
+    @activity.defn(name="fetch_code_agent_resume_context")
+    async def fake_saved_context(agent_id, tool_call_id):
+        assert (agent_id, tool_call_id) == ("owner-1", "toolu_code_spawn")
+        return {
+            "version": 1,
+            "spawn_args": {"type": "code", "goal": "Original task", "output_schema": original_schema},
+            "attachments": [],
+            "cli_settings": settings,
+        }
+
+    @activity.defn(name="apply_resume_cost_activity")
+    async def fake_cost(*args):
+        return {"limit_reached": False}
 
     @activity.defn(name="resolve_code_agent_provider_activity")
     async def fake_provider(default_provider):
@@ -947,7 +963,7 @@ async def test_resume_workflow_continues_a_stopped_code_session_outside_its_owne
             env.client,
             task_queue="code-agent-resume",
             workflows=[CodeAgentResumeWorkflow],
-            activities=[fake_provider, fake_spawn, fake_post],
+            activities=[fake_provider, fake_spawn, fake_post, fake_saved_context, fake_cost],
             workflow_runner=production_workflow_runner(),
         ):
             result = await asyncio.wait_for(
@@ -968,10 +984,12 @@ async def test_resume_workflow_continues_a_stopped_code_session_outside_its_owne
         "toolu_code_spawn",
     )
     assert args[5] == [pointer], "the typed turn's files reach the resumed CLI"
+    assert args[4] == original_schema, "resuming preserves the original result contract"
     assert args[9] == "codex", "the stopped session's CLI is kept so its conversation continues"
     assert args[16] == {
         "code_session_id": "6f8f8f4d-c670-4bc8-b5df-e2c785c4a908",
         "task_name": "remove_rose_card_border",
+        "cli_settings": settings,
     }, args[16]
     assert result["tool_call_id"] == "toolu_code_spawn"
     tool_rows = [row for row in posted if row[2] == "TOOL"]

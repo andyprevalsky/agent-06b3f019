@@ -3438,6 +3438,7 @@ async def spawn_claude_code_activity(
         )
 
     structlog.contextvars.bind_contextvars(agent_id=agent_id)
+    source_code_provider = code_provider
 
     from helpers.model_pricing import get_model_pricing_with_fallback
 
@@ -3624,6 +3625,17 @@ async def spawn_claude_code_activity(
                 fresh_conversation=(code_session_request or {}).get("fresh_conversation") is True,
                 task_name=(code_session_request or {}).get("task_name"),
                 cli_settings=(code_session_request or {}).get("cli_settings"),
+                resume_config={
+                    "source_code_provider": source_code_provider,
+                    "spawn_args": {
+                        "type": "code", "goal": goal, "output_schema": output_schema,
+                        "github_repo_link": github_repo_url, "target": target, "task_name": task_name,
+                        "attachments": [item.get("original_filename") for item in attachments or []],
+                    },
+                    "attachments": attachments or [],
+                    "model": model,
+                    "fast_mode_cache_enabled": fast_mode_cache_enabled,
+                },
             )
             code_session_id = session_data.get("code_session_id") or code_session_id
             code_session_facts = _spawn_code_session_facts(session_data)

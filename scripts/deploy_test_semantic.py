@@ -57,9 +57,13 @@ def report_specs(suites, parents=()):
 
 
 def classify_lane(lane, expected, report, events, flaky=None, *, log=''):
+    """Classify complete native attempt chains; uncertain evidence stays unknown."""
     cases = {case_key(lane, row): 'UNVERIFIED' for row in expected}
     recovered = []
     try:
+        if (not isinstance(report, dict) or not isinstance(events, list)
+                or any(not isinstance(event, dict) for event in events)):
+            return cases
         observed = inventory(events)
         ids = {r['id'] for r in expected}
         if (observed != expected or len([e for e in events if e.get('event') == 'begin']) != 1
@@ -69,6 +73,9 @@ def classify_lane(lane, expected, report, events, flaky=None, *, log=''):
                 or any(e.get('event') not in ('begin', 'testBegin', 'hookEnd', 'testEnd', 'end')
                        or ('id' in e and e['id'] not in ids) for e in events)
                 or report.get('errors')):
+            return cases
+        if any(event.get('event') in ('testBegin', 'hookEnd', 'testEnd')
+               and event.get('id') not in ids for event in events):
             return cases
         rows = list(report_specs(report['suites']))
         if len(rows) != len(expected) or {r['id'] for r, _ in rows} != ids:
@@ -107,6 +114,7 @@ def classify_lane(lane, expected, report, events, flaky=None, *, log=''):
             retries = project['retries']
             results = test['results']
             if (not isinstance(results, list) or not 1 <= len(results) <= retries + 1
+                    or any(not isinstance(result, dict) for result in results)
                     or any(type(r.get('retry')) is not int or r['retry'] != i
                            for i, r in enumerate(results))
                     or any(r.get('status') not in ('passed', 'failed', 'timedOut') for r in results)
@@ -135,6 +143,8 @@ def classify_lane(lane, expected, report, events, flaky=None, *, log=''):
             if 'status' in test and test['status'] != native_status:
                 continue
             if status == 'FLAKY':
+                if flaky is None:
+                    continue  # Recovered passes require the native attribution-evidence channel.
                 errors = results[0].get('errors')
                 if not isinstance(errors, list) or not errors:
                     continue  # A recovered failure without its original evidence is incomplete.
@@ -238,6 +248,7 @@ def execute(request, root):
 
 
 def _execute(request, root):
+    """Run one source-bound sweep and retain invalid-lane diagnostics as unknown."""
     if source(root) != request['source'] or request.get('worker_root', str(root)) != str(root):
         raise ValueError('semantic source/worker root differs from request')
     directory = root / '.context/deploy-semantic' / hashlib.sha256(request['token'].encode()).hexdigest()
@@ -264,6 +275,8 @@ def _execute(request, root):
             for path in paths:
                 hashes[path.name] = hashlib.sha256(path.read_bytes()).hexdigest()
             events = events_at(paths[1])
+            if any(not isinstance(event, dict) for event in events):
+                raise ValueError('native lifecycle events must be JSON objects')
             cases.update(classify_lane(lane, selected[lane], read(paths[0]), events, recovered, log=str(paths[0])))
             lane_ends[lane] = events[-1].get('status') if events and events[-1].get('event') == 'end' else None
         except (OSError, ValueError, TypeError) as error:

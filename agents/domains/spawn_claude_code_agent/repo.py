@@ -339,6 +339,7 @@ async def create_e2b_session(
     fresh_conversation: bool = False,
     task_name: Optional[str] = None,
     cli_settings: Optional[dict[str, Any]] = None,
+    resume_config: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
     """Create an E2B sandbox session via back-end API.
 
@@ -370,6 +371,8 @@ async def create_e2b_session(
     if cli_settings:
         # A resuming turn's model / effort / speed (backend cliSettingsEnvOverrides).
         create_payload["cli_settings"] = cli_settings
+    if resume_config is not None:
+        create_payload["resume_config"] = resume_config
     if github_repo_url and target != "local":
         create_payload["github_repo_url"] = github_repo_url
     if target == "local":

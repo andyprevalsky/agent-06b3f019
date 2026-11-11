@@ -107,32 +107,11 @@ function preferredBenchmarkCardholderIds(
 /** AgentCard's terminal, mint-capable verification states. */
 const KYC_READY_STATUSES = new Set(['verified', 'approved']);
 
-/**
- * Resolve a sandbox org cardholder that actually exists AND can mint.
- *
- * Stale `BENCHMARK_AGENTCARD_CARDHOLDER_ID` values previously seeded Integration
- * rows that made every `create_card` return "Cardholder not found", which the
- * purchase path then rewrote as a funding-in-progress retry loop.
- *
- * Existing is necessary but NOT sufficient: a cardholder stuck at KYC `pending` resolves fine and
- * then fails the lifecycle gate at bootstrap. That is not hypothetical — the sandbox org holds two
- * cardholders, and `AGENTCARD_CARDHOLDER_ID` in `agents/.env` names the `pending` one, so plain
- * preference order deterministically picked the unusable cardholder while a `verified` one sat
- * right beside it. Preference order (including `BENCHMARK_CARDHOLDER_EMAILS`) is still honoured;
- * it is just filtered to cardholders that can actually mint. Ordering by known-good email and
- * filtering by live KYC state are complementary: the list encodes intent, the filter proves it.
- *
- * When nothing is verified we return the first candidate unchanged, so the caller's existing (and
- * more specific) KYC error is what the operator sees rather than a vaguer one from here.
- */
-export async function resolveBenchmarkCardholderId(
-  preferredIds: string[] = preferredBenchmarkCardholderIds(),
-  callOrgTool: AgentCardOrgToolCaller = defaultCallOrgTool
-): Promise<string> {
-  // Resolution loops over candidates, so every read shares one rate-limit budget.
-  const deadlineAtMs = orgRetryDeadlineAtMs();
-  const callWithinBudget: AgentCardOrgToolCaller = (toolName, args) =>
-    callOrgTool(toolName, args, deadlineAtMs);
+/** Read the complete org inventory before applying any cardholder preference. */
+async function listBenchmarkCardholders(
+  callWithinBudget: AgentCardOrgToolCaller,
+  deadlineAtMs: number
+): Promise<AgentCardSandboxCardholder[]> {
   const cardholders: AgentCardSandboxCardholder[] = [];
   const seen = new Set<string>();
   let total: number | undefined;
@@ -170,6 +149,36 @@ export async function resolveBenchmarkCardholderId(
       throw new Error('AgentCard cardholder pagination incomplete');
     }
   }
+  return cardholders;
+}
+
+/**
+ * Resolve a sandbox org cardholder that actually exists AND can mint.
+ *
+ * Stale `BENCHMARK_AGENTCARD_CARDHOLDER_ID` values previously seeded Integration
+ * rows that made every `create_card` return "Cardholder not found", which the
+ * purchase path then rewrote as a funding-in-progress retry loop.
+ *
+ * Existing is necessary but NOT sufficient: a cardholder stuck at KYC `pending` resolves fine and
+ * then fails the lifecycle gate at bootstrap. That is not hypothetical — the sandbox org holds two
+ * cardholders, and `AGENTCARD_CARDHOLDER_ID` in `agents/.env` names the `pending` one, so plain
+ * preference order deterministically picked the unusable cardholder while a `verified` one sat
+ * right beside it. Preference order (including `BENCHMARK_CARDHOLDER_EMAILS`) is still honoured;
+ * it is just filtered to cardholders that can actually mint. Ordering by known-good email and
+ * filtering by live KYC state are complementary: the list encodes intent, the filter proves it.
+ *
+ * When nothing is verified we return the first candidate unchanged, so the caller's existing (and
+ * more specific) KYC error is what the operator sees rather than a vaguer one from here.
+ */
+export async function resolveBenchmarkCardholderId(
+  preferredIds: string[] = preferredBenchmarkCardholderIds(),
+  callOrgTool: AgentCardOrgToolCaller = defaultCallOrgTool
+): Promise<string> {
+  // Resolution loops over candidates, so every read shares one rate-limit budget.
+  const deadlineAtMs = orgRetryDeadlineAtMs();
+  const callWithinBudget: AgentCardOrgToolCaller = (toolName, args) =>
+    callOrgTool(toolName, args, deadlineAtMs);
+  const cardholders = await listBenchmarkCardholders(callWithinBudget, deadlineAtMs);
   if (cardholders.length === 0) {
     throw new Error(
       'AgentCard sandbox org has no cardholders. Create one in sandbox mode at ' +

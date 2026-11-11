@@ -1,0 +1,33 @@
+{
+  "financial": {
+    "original_sandbox_unreleased_cents": 4396,
+    "native_state": "HELD purchase / RECLAIMING walletFunding / CLOSED zero-balance card / consumed transfer with releasedCents 0",
+    "current_financial_state": "UNVERIFIED",
+    "stalled_case": "agent-payment-abandonment",
+    "disposition": "historical no-retry custody; no remint/retry or financial cleanup credit"
+  },
+  "forensic_resources": [
+    {
+      "machine": "83d1141a209928",
+      "volume": "vol_42kxpdjl0zykm984",
+      "state": "retained stopped pre-stack forensic evidence; no deletion requested"
+    },
+    {
+      "machine": "89455df6e9e458",
+      "volume": "vol_r7ynk0go1zpd37nr",
+      "state": "retained forensic data; original stopped evidence preserved"
+    }
+  ],
+  "prior_isolated_validation": {
+    "excluded_resources": 15,
+    "retained_hub_owners": 4,
+    "test_credit": false,
+    "cleanup_credit": false
+  },
+  "documentary_gaps": [
+    "Five competing a035 startup Hub records have absent PIDs and no terminal receipts. Actual used shared Hub has verified termination.",
+    "Official native campaign CLI lacks source/lifecycle linkage despite source-bound native gate and fleet audits.",
+    "Production AgentCard Hub292117b3-4f11-45c9-8fdc-693b6dd69b5f registered with task queued/completed0 before billing preflight refusal. No task root/card/payment created; log streams stopped. Original queued metadata retained without a fabricated terminal record."
+  ],
+  "freedom": "Protected installation, services, configuration and instructions preserved unchanged."
+}

@@ -1,0 +1,15 @@
+{
+  "format": "PR1854-RENDER-RECOVERY-PREFLIGHT-V1",
+  "verified_at": "2026-11-10T01:14:38.207292+00:00",
+  "source": "https://api.render.com/v1/services/srv-d3jga77diees73cgrvk0/env-vars",
+  "http_method": "GET",
+  "pages_read": 2,
+  "key_sha256": "e351c7cc5b01303e579fe6d1df833940fdaadf325ca47314414ba10735fc7730",
+  "bucket": "trace-archive",
+  "all_five_recovery_fields_present": true,
+  "used_archived_key_for_bootstrap": false,
+  "raw_provider_response_saved": false,
+  "secret_values_printed_or_logged": false,
+  "restore_performed": false,
+  "all_five_fields_match_native_archive_configuration": true
+}
