@@ -7350,6 +7350,33 @@ class Cycle(unittest.TestCase):
                             c.reconcile(candidate, original['token'], incoming)
                         self.assertEqual(before, candidate)
 
+    def test_reconciled_failed_successor_renews_past_released_stale_attempt(self):
+        # Round 35: a source edit staled a later native attempt; its owner was released by a
+        # strict normal no-credit reconciliation, so renewal uses the last non-stale successor.
+        import deploy_test_native_cleanup as native
+        state, original, proof, successor, native_proof = self.reconciled_failed_successor_renewal_state()
+        stale_row = dict(gate=successor['gate'], token='stale-native-run', executed=True, complete=False,
+                         status='FAIL', cases=dict.fromkeys(successor['cases'], 'UNVERIFIED'))
+        state['attempts'].append(dict(phase='focused', stale=True, results=[stale_row]))
+        release = dict(kind=native.KIND, gate=successor['gate'], token='stale-native-run', credit_granted=False)
+        incoming = dict(proof, validation_source=state['source'])
+        for name, entry, accepted in (('released', release, True), ('unreleased', None, False),
+                                      ('credited', {**release, 'credit_granted': True}, False),
+                                      ('isolated', {**release, 'purpose': 'isolated-validation'}, False)):
+            with self.subTest(name=name):
+                candidate = copy.deepcopy(state)
+                if entry is not None:
+                    candidate['reconciled_owners']['stale-release'] = copy.deepcopy(entry)
+                before = copy.deepcopy(candidate)
+                if accepted:
+                    c.reconcile(candidate, original['token'], incoming)
+                    self.assertEqual(before['attempts'], candidate['attempts'])
+                    self.assertFalse(candidate['reconciled_owners'][proof['receipt_sha256']]['credit_granted'])
+                else:
+                    with self.assertRaises(ValueError):
+                        c.reconcile(candidate, original['token'], incoming)
+                    self.assertEqual(before, candidate)
+
     def test_failed_successor_renewal_uses_sealed_historical_environment_without_carryover(self):
         state, original, proof, successor, native_proof = self.reconciled_failed_successor_renewal_state()
         historical = copy.deepcopy(successor['execution_binding'])

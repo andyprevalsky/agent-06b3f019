@@ -2048,6 +2048,16 @@ def refusal_inventory(attempt, latest, gate):
             and set(request['checks']) | set(request['skips']) == set(cases))
 
 
+def stale_successor_released(state, prior, row):
+    """An executed stale row whose exact owner has a strict normal no-credit reconciliation."""
+    token = row.get('token')
+    entries = [e for e in state.get('reconciled_owners', {}).values() if e.get('token') == token]
+    return (isinstance(token, str) and token != prior['token'] and row.get('executed') is True
+            and row.get('complete') is False and len(entries) == 1
+            and entries[0].get('kind') == KIND and entries[0].get('gate') == prior['gate']
+            and entries[0].get('purpose') is None and entries[0].get('credit_granted') is False)
+
+
 def isolated_successor(state, prior, renewal_witness=None):
     """A known pre-dispatch source refusal is not a newer native execution.
 
@@ -2059,6 +2069,10 @@ def isolated_successor(state, prior, renewal_witness=None):
     """
     rows = [(attempt, row) for attempt in state.get('attempts', [])
             for row in attempt.get('results', []) if row.get('gate') == prior['gate']]
+    # A stale attempt (source changed mid-run) is superseded and never earns credit. Once its
+    # exact native owner is released by a normal no-credit reconciliation, renewal looks past it.
+    while rows and rows[-1][0].get('stale') is True and stale_successor_released(state, prior, rows[-1][1]):
+        rows.pop()
     if not rows:
         return None
     attempt, latest = rows[-1]
