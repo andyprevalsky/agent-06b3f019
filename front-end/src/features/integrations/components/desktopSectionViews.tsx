@@ -1,3 +1,4 @@
+import type { MeetingNotesProvider } from '../types';
 /**
  * Section/row view models for the Rose Desktop integrations list.
  *
@@ -10,7 +11,8 @@
  * file only contributes Compute's static Gemini row.
  */
 
-import { INTEGRATION_CATALOG, type IntegrationCatalogKey } from '../catalog';
+import { INTEGRATION_CATALOG } from '../config';
+import type { IntegrationCatalogKey } from '../types';
 import applePasswordsIcon from '@/assets/apple-passwords-icon.png';
 import chatgptIcon from '@/assets/chatgpt-icon.webp';
 import chromeIcon from '@/assets/chrome-icon.png';
@@ -25,13 +27,12 @@ import { gmailAccounts } from '../hooks/useIntegrationData';
 import type { useMessagesSync } from '../hooks/useMessagesSync';
 import type { usePasswordSync } from '../hooks/usePasswordSync';
 import type { usePlaidIntegration } from '../hooks/usePlaidIntegration';
-import type { MeetingNotesConnections } from './MeetingNotesSection';
+import type { MeetingNotesConnections } from '../types';
 import {
   MEETING_NOTES_PROVIDERS,
   MEETING_NOTES_DESCRIPTION,
   meetingNotesProviders,
-  type MeetingNotesProvider,
-} from '../meetingNotes';
+} from '../config';
 import BrowserIcon from './BrowserIcon';
 import { BrowserCookiesIcon } from './BrowserCookiesSection';
 import type {
@@ -68,7 +69,7 @@ import { visibleInstitutionItems } from './plaidItemView';
 import PlaidLogoIcon from './PlaidLogoIcon';
 import { InstagramIcon, LinkedInIcon, XIcon } from './SocialsSection';
 import { MeetingNotesIcon } from './MeetingNotesProviderCard';
-import { meetingNotesDetail } from '../meetingNotesView';
+import { meetingNotesDetail } from '../hooks/meetingNotesView';
 
 export interface DesktopIntegrationsProps {
   search: string;

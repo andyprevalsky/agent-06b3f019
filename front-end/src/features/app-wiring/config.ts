@@ -1,6 +1,7 @@
 import { createElement, lazy } from 'react';
 import type { RouteEntry } from './types';
 import { BACKEND_BASE_URL } from '@/lib/backendUrl';
+import ConnectIntegration from '@/pages/ConnectIntegration';
 import Terminal from '@/features/terminal';
 import { AgentContext, type AgentContextValue } from '@/features/agent-context';
 import { FirefliesCallback, GranolaCallback, PlaidOAuthRedirect } from '@/features/integrations';
@@ -63,6 +64,7 @@ export const ROUTE_TABLE: readonly RouteEntry[] = [
   { path: '/test_payment', component: TestPayment },
   { path: '/gate-playground', component: GatePlayground },
   { path: '/plaid-oauth-redirect', component: PlaidOAuthRedirect },
+  { path: '/connect/:provider', component: ConnectIntegration },
   { path: '/integrations/granola/callback', component: GranolaCallback },
   { path: '/integrations/fireflies/callback', component: FirefliesCallback },
   ...DEV_ROUTES,

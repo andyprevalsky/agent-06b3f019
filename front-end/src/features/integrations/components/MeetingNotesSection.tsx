@@ -1,21 +1,11 @@
+import type { MeetingNotesConnections } from '../types';
 /**
  * STATE MACHINE: MeetingNotesSection
  * [MOUNTED] → provider choices; each card owns independent connection/sync state.
  * Integrations → shared category → provider card → useMeetingNotes → mirrored API.
  */
-import type { useMeetingNotes } from '../hooks/useMeetingNotes';
-import {
-  MEETING_NOTES_TITLE,
-  MEETING_NOTES_DESCRIPTION,
-  MEETING_NOTES_PROVIDERS,
-  type MeetingNotesProvider,
-} from '../meetingNotes';
+import { MEETING_NOTES_TITLE, MEETING_NOTES_DESCRIPTION, MEETING_NOTES_PROVIDERS } from '../config';
 import MeetingNotesProviderCard from './MeetingNotesProviderCard';
-
-export type MeetingNotesConnections = Record<
-  MeetingNotesProvider,
-  ReturnType<typeof useMeetingNotes>
->;
 
 export default function MeetingNotesSection({
   connections,

@@ -17,11 +17,13 @@
  *   - Rose Desktop row: shows the signed-in account and disconnects from its chip
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { screen, waitFor, within } from '@testing-library/react';
+import { screen, waitFor, within, renderHook, act } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
 import { server } from './msw/server';
 import { renderWithProviders } from './test-wrapper';
+import { useMeetingNotes } from '@/features/integrations/hooks/useMeetingNotes';
+import { AUTH_SESSION_CHANGED_EVENT } from '@/lib/supabase';
 import Integrations from '@/pages/Integrations';
 import { GranolaCallback, FirefliesCallback } from '@/features/integrations/components';
 
@@ -472,5 +474,185 @@ describe.each([false, true])('integration search (Rose Desktop=%s)', (roseDeskto
     await user.clear(input);
     await user.type(input, '   ');
     expect(screen.getByRole('button', { name: 'Connect Fireflies' })).toBeVisible();
+  });
+});
+
+/** Identity and request-boundary regressions; same provider hooks as the live cards. */
+describe.each(providers)('$name account lifetime', ({ provider, document, authorizeUrl }) => {
+  beforeEach(() => {
+    mockSession();
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    localStorage.clear();
+    delete window.api;
+  });
+
+  it('waits for auth before reporting no meeting providers', async () => {
+    let finish = () => {};
+    server.use(
+      http.get(`${API_BASE}/invite-codes/check`, async () => {
+        await new Promise<void>((resolve) => {
+          finish = resolve;
+        });
+        return HttpResponse.json({ needsInviteCode: false });
+      }),
+    );
+    renderWithProviders(<Integrations initialSearch="meeting" />, { roseDesktop: false });
+    await screen.findByText('Browser Cookies');
+    expect(screen.queryByText('No integrations found')).not.toBeInTheDocument();
+    act(() => finish());
+    expect(await screen.findByRole('button', { name: 'Connect Granola' })).toBeVisible();
+  });
+
+  it.each(['connect', 'sync', 'disconnect'] as const)(
+    'clears recovered read errors but preserves failed %s actions',
+    async (action) => {
+      let read = 0;
+      server.use(
+        http.get(`${API_BASE}/integrations/${provider}`, () => {
+          read += 1;
+          return read === 2
+            ? HttpResponse.json({ message: 'read unavailable' }, { status: 503 })
+            : HttpResponse.json({ ...status(document, true, 4), backfillDone: false });
+        }),
+        http.post(`${API_BASE}/integrations/${provider}/sync`, () =>
+          HttpResponse.json({ message: 'manual action failed' }, { status: 500 }),
+        ),
+        http.post(`${API_BASE}/integrations/${provider}/oauth/start`, () =>
+          HttpResponse.json({ message: 'manual action failed' }, { status: 500 }),
+        ),
+        http.delete(`${API_BASE}/integrations/${provider}`, () =>
+          HttpResponse.json({ message: 'manual action failed' }, { status: 500 }),
+        ),
+      );
+      const { result } = renderHook(() => useMeetingNotes(provider, true));
+      await waitFor(() => expect(result.current.status?.connected).toBe(true));
+      await act(() => vi.advanceTimersByTimeAsync(10_000));
+      expect(result.current.error).toBe('read unavailable');
+      await act(() => vi.advanceTimersByTimeAsync(10_000));
+      expect(result.current.error).toBeNull();
+      await act(() => result.current[action]());
+      await act(() => vi.advanceTimersByTimeAsync(10_000));
+      expect(result.current.error).toBe('manual action failed');
+    },
+  );
+
+  it('resets disabled state and stops sync and sign-in polls', async () => {
+    let reads = 0;
+    server.use(
+      http.get(`${API_BASE}/integrations/${provider}`, () => {
+        reads += 1;
+        return HttpResponse.json({ ...status(document, true, 4), backfillDone: false });
+      }),
+      http.post(`${API_BASE}/integrations/${provider}/oauth/start`, () =>
+        HttpResponse.json({ authorizeUrl }),
+      ),
+    );
+    window.api = { isElectron: true, openExternal: vi.fn(async () => undefined) };
+    const { result, rerender } = renderHook(({ enabled }) => useMeetingNotes(provider, enabled), {
+      initialProps: { enabled: true },
+    });
+    await waitFor(() => expect(result.current.status?.connected).toBe(true));
+    await act(() => result.current.connect());
+    rerender({ enabled: false });
+    expect(result.current.status).toBeNull();
+    expect(result.current.busy).toBeNull();
+    const stopped = reads;
+    await act(() => vi.advanceTimersByTimeAsync(31_000));
+    expect(reads).toBe(stopped);
+  });
+
+  it.each([false, true])(
+    'fences late old-account reads when identity changes (same user reauth=%s)',
+    async (reauth) => {
+      let finish = () => {};
+      let reads = 0;
+      server.use(
+        http.get(`${API_BASE}/integrations/${provider}`, async () => {
+          reads += 1;
+          if (reads === 1) {
+            await new Promise<void>((resolve) => {
+              finish = resolve;
+            });
+            return HttpResponse.json(status(document, true, 4));
+          }
+          return HttpResponse.json({
+            ...status(document, true, 8),
+            accountEmail: 'new@example.com',
+          });
+        }),
+      );
+      const { result } = renderHook(() => useMeetingNotes(provider, true));
+      await waitFor(() => expect(reads).toBe(1));
+      const session = JSON.parse(localStorage.getItem('rose-session')!);
+      session.user.id = reauth ? 'test-user' : 'new-user';
+      act(() => {
+        if (reauth) {
+          localStorage.removeItem('rose-session');
+          window.dispatchEvent(new Event(AUTH_SESSION_CHANGED_EVENT));
+        }
+        localStorage.setItem('rose-session', JSON.stringify(session));
+        localStorage.setItem('app-user', JSON.stringify(session.user));
+        window.dispatchEvent(new Event(AUTH_SESSION_CHANGED_EVENT));
+      });
+      act(() => finish());
+      await waitFor(() => expect(result.current.status?.accountEmail).toBe('new@example.com'));
+    },
+  );
+
+  it.each([
+    ['connect', false],
+    ['sync', false],
+    ['disconnect', false],
+    ['connect', true],
+    ['sync', true],
+    ['disconnect', true],
+  ] as const)('fences superseded %s completions (failure=%s)', async (action, failure) => {
+    let finish = () => {};
+    const changed = vi.fn();
+    let started = false;
+    server.use(
+      http.get(`${API_BASE}/integrations/${provider}`, () =>
+        HttpResponse.json(status(document, true, 4)),
+      ),
+    );
+    const pending = async () => {
+      started = true;
+      await new Promise<void>((resolve) => {
+        finish = resolve;
+      });
+      if (failure)
+        return HttpResponse.json({ message: 'late old-account failure' }, { status: 500 });
+      return HttpResponse.json(action === 'connect' ? { authorizeUrl } : status(document, true, 4));
+    };
+    server.use(
+      http.post(`${API_BASE}/integrations/${provider}/oauth/start`, pending),
+      http.post(`${API_BASE}/integrations/${provider}/sync`, pending),
+      http.delete(`${API_BASE}/integrations/${provider}`, pending),
+    );
+    const openExternal = vi.fn(async () => undefined);
+    window.api = { isElectron: true, openExternal };
+    const { result, rerender } = renderHook(
+      ({ enabled }) => useMeetingNotes(provider, enabled, changed),
+      { initialProps: { enabled: true } },
+    );
+    await waitFor(() => expect(result.current.status?.connected).toBe(true));
+    let actionDone: Promise<void> | undefined;
+    act(() => {
+      actionDone = result.current[action]();
+    });
+    await waitFor(() => expect(started).toBe(true));
+    rerender({ enabled: false });
+    await act(async () => {
+      finish();
+      await actionDone;
+    });
+    expect(openExternal).not.toHaveBeenCalled();
+    expect(changed).not.toHaveBeenCalled();
+    expect(result.current.status).toBeNull();
+    expect(result.current.busy).toBeNull();
+    expect(result.current.error).toBeNull();
   });
 });

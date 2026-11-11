@@ -1,3 +1,4 @@
+import type { MeetingNotesProvider } from '../types';
 /**
  * STATE MACHINE: useMeetingNotesCallback (GranolaCallback page)
  *
@@ -10,11 +11,7 @@
 import { useEffect, useRef, useState } from 'react';
 
 import { completeMeetingNotesSignInApi } from '../api/meetingNotes';
-import {
-  meetingNotesProviders,
-  meetingNotesReturnKey,
-  type MeetingNotesProvider,
-} from '../meetingNotes';
+import { meetingNotesProviders, meetingNotesReturnKey } from '../config';
 
 export type MeetingNotesCallbackState = 'completing' | 'done' | 'error';
 

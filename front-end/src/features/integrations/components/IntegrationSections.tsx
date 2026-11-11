@@ -10,7 +10,8 @@
  * shows the plus and stays [MOUNTED] on click (no hook, no backend).
  */
 
-import { integrationMatchesSearch, type IntegrationCatalogKey } from '../catalog';
+import { integrationMatchesSearch } from '../hooks/integrationSearch';
+import type { IntegrationCatalogKey } from '../types';
 import type { ReactNode } from 'react';
 import type { useAccordion } from '../hooks/useAccordion';
 import type { useIntegrationData } from '../hooks/useIntegrationData';
@@ -21,7 +22,8 @@ import type { useMessagesSync } from '../hooks/useMessagesSync';
 import type { useGmailConnect } from '../hooks/useGmailConnect';
 import type { useIntegrationActions } from '../hooks/useIntegrationActions';
 import type { usePlaidIntegration } from '../hooks/usePlaidIntegration';
-import MeetingNotesSection, { type MeetingNotesConnections } from './MeetingNotesSection';
+import MeetingNotesSection from './MeetingNotesSection';
+import type { MeetingNotesConnections } from '../types';
 
 import BrowserCookiesSection from './BrowserCookiesSection';
 import PasswordsSection from './PasswordsSection';

@@ -24,6 +24,7 @@ import {
   daysAgo,
   meeting,
 } from './granola-sync.blackbox.helpers';
+import { reviewCases } from './fireflies-sync.blackbox.review-cases';
 import { FakeFireflies, REDIRECT, NOW, DAY } from './fireflies-sync.blackbox.helpers';
 import { assert, equal, runSuite, type TestCase } from './google-workspace-sync.blackbox.helpers';
 import { BASE_URL, apiHeaders, requestGrep, assertBody, assertStatus } from './data-grep.helpers';
@@ -235,6 +236,8 @@ for (const provider of oauthProviders) {
       }));
   }
 }
+
+tests.push(...reviewCases({ withUser, signIn, opts, rows }));
 
 test('OAuth stores encrypted grant and rejects foreign/replayed/expired state', async () =>
   withUser(async (id, fake) => {

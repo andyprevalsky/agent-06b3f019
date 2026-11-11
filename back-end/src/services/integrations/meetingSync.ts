@@ -99,7 +99,9 @@ export class MeetingSignInError extends Error {
   }
 }
 
-export function createMeetingSync<S extends MeetingSession>(provider: MeetingProvider<S>) {
+export function createMeetingSync<S extends MeetingSession>(
+  provider: MeetingProvider<S> & { getRetryAt?(error: unknown): number | null }
+) {
   const {
     id: PROVIDER,
     label,
@@ -668,9 +670,18 @@ export function createMeetingSync<S extends MeetingSession>(provider: MeetingPro
         log.warn(`${label} grant rejected`, { userId, error: message.slice(0, 200) });
         return { outcome: 'expired', error: reason };
       }
+      const retryAt = provider.getRetryAt?.(error);
+      const nextSyncAt = new Date(now.getTime() + MEETING_SYNC_INTERVAL_MS);
+      if (
+        typeof retryAt === 'number' &&
+        Number.isFinite(retryAt) &&
+        !Number.isNaN(new Date(retryAt).getTime()) &&
+        retryAt > nextSyncAt.getTime()
+      )
+        nextSyncAt.setTime(retryAt);
       const failed = await finish(c, 'SYNC_FAILED', {
         lastError: message,
-        nextSyncAt: new Date(now.getTime() + MEETING_SYNC_INTERVAL_MS),
+        nextSyncAt,
       });
       if (!failed) return { outcome: 'superseded' };
       await setIntegrationStatus(userId, IntegrationStatus.SYNC_FAILED, message, now);

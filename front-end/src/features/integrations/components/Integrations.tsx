@@ -34,7 +34,7 @@
  */
 
 import { useState } from 'react';
-import { hasIntegrationSearchResults, integrationMatchesSearch } from '../catalog';
+import { hasIntegrationSearchResults, integrationMatchesSearch } from '../hooks/integrationSearch';
 import IntegrationSearch from './IntegrationSearch';
 import { Loader2 } from 'lucide-react';
 
@@ -137,9 +137,9 @@ function usePageActions({
   });
 }
 
-export default function Integrations() {
+export default function Integrations({ initialSearch = '' }: { initialSearch?: string } = {}) {
   const handlers = useIntegrationHandlers();
-  const { isFullySignedIn, user } = useAuth();
+  const { isFullySignedIn, user, loading: authLoading } = useAuth();
 
   const accordion = useAccordion();
   const data = useIntegrationData();
@@ -151,7 +151,7 @@ export default function Integrations() {
   const gmail = useGmailConnect(data.fetchIntegrations);
   const plaid = usePlaidIntegration();
   const oauth = useOAuthRedirect(data.fetchIntegrations);
-  const [search, setSearch] = useState('');
+  const [search, setSearch] = useState(initialSearch);
   const [pebbleSetupOpen, setPebbleSetupOpen] = useState(false);
   const actions = usePageActions({ browser, passwords, compute, messages, gmail, fileUpload });
 
@@ -173,9 +173,11 @@ export default function Integrations() {
           <div hidden={!integrationMatchesSearch('iphone', search)}>
             <IPhoneConnectionSection key={user?.id ?? 'signed-out'} />
           </div>
-          {!data.loadingIntegrations && !hasIntegrationSearchResults(search, isFullySignedIn) && (
-            <IntegrationSearchEmpty onClear={() => setSearch('')} />
-          )}
+          {!data.loadingIntegrations &&
+            !authLoading &&
+            !hasIntegrationSearchResults(search, isFullySignedIn) && (
+              <IntegrationSearchEmpty onClear={() => setSearch('')} />
+            )}
           {data.loadingIntegrations ? (
             <div className="flex items-center justify-center py-8">
               <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />

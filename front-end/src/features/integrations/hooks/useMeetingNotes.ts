@@ -1,52 +1,186 @@
 /**
  * STATE MACHINE: useMeetingNotes
- *
- *   [LOADING] --status--> [DISCONNECTED] | [CONNECTED]
- *   [DISCONNECTED] --connect--> [SIGNING_IN]
- *     web:     browser goes to the provider sign-in, returns to the callback page
- *              (MeetingNotesCallback), which completes it and comes back here
- *     desktop: system browser opens the provider; poll status every 3 s until
- *              connected (gives up after 5 min) --> [CONNECTED]
- *   [CONNECTED] polls status every 10 s while a sync runs or history backfills
- *   [CONNECTED] --sync--> re-reads status
- *   [CONNECTED] --disconnect--> [DISCONNECTING] --done--> [DISCONNECTED]
+ * [DISABLED / USER CHANGED] → clear state, stop polls, invalidate all old reads/actions.
+ * [LOADING] --status--> [DISCONNECTED] | [CONNECTED]
+ * [DISCONNECTED] --connect--> [SIGNING IN] --callback / desktop poll--> [CONNECTED]
+ * [CONNECTED] --sync / backfill--> bounded status polling; EXPIRED stops polling.
+ * [CONNECTED] --disconnect--> [DISCONNECTED]
+ * Read recovery clears read errors; failed actions remain visible until another action.
  */
-
-import { useCallback, useEffect, useRef, useState } from 'react';
-
+import { useCallback, useEffect, useLayoutEffect, useState } from 'react';
 import {
   disconnectMeetingNotesApi,
   fetchMeetingNotesStatusApi,
   startMeetingNotesSignInApi,
   syncMeetingNotesApi,
-  type MeetingNotesStatus,
 } from '../api/meetingNotes';
 import {
   meetingNotesCallbackPath,
   meetingNotesReturnKey,
   MEETING_NOTES_PUBLIC_ORIGIN,
-  type MeetingNotesProvider,
-} from '../meetingNotes';
+} from '../config';
+import type { MeetingNotesProvider, MeetingNotesStatus } from '../types';
+import {
+  currentScope,
+  stopSignInPoll,
+  useMeetingNotesScope,
+  type MeetingNotesScope,
+} from './meetingNotesScope';
 
 const SYNC_POLL_MS = 10_000;
 const SIGN_IN_POLL_MS = 3_000;
 const SIGN_IN_TIMEOUT_MS = 5 * 60_000;
+const errorText = (error: unknown) => (error instanceof Error ? error.message : String(error));
 
-interface ElectronExternalApi {
-  openExternal: (url: string) => Promise<unknown>;
+function useMeetingNotesState() {
+  const [status, setStatus] = useState<MeetingNotesStatus | null>(null);
+  const [busy, setBusy] = useState<'connect' | 'sync' | 'disconnect' | null>(null);
+  const [readError, setReadError] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+  return { status, setStatus, busy, setBusy, readError, setReadError, actionError, setActionError };
+}
+type State = ReturnType<typeof useMeetingNotesState>;
+
+function useMeetingNotesStatus(
+  provider: MeetingNotesProvider,
+  scope: MeetingNotesScope,
+  state: State,
+) {
+  const { setStatus, setReadError } = state;
+  const refresh = useCallback(
+    async (fresh = false): Promise<MeetingNotesStatus | null> => {
+      if (!currentScope(scope)) return null;
+      if (scope.inFlight !== null) {
+        if (!fresh) return scope.inFlight;
+        await scope.inFlight;
+        if (!currentScope(scope)) return null;
+      }
+      const read = (async () => {
+        try {
+          const next = await fetchMeetingNotesStatusApi(provider);
+          if (!currentScope(scope)) return null;
+          setStatus(next);
+          setReadError(null);
+          return next;
+        } catch (error) {
+          if (currentScope(scope)) setReadError(errorText(error));
+          return null;
+        } finally {
+          scope.inFlight = null;
+        }
+      })();
+      scope.inFlight = read;
+      return read;
+    },
+    [provider, scope, setStatus, setReadError],
+  );
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
+  const syncing =
+    state.status?.status === 'SYNCING' ||
+    (state.status?.status === 'CONNECTED' && !state.status.backfillDone);
+  useEffect(() => {
+    if (!syncing || !currentScope(scope)) return;
+    const timer = setInterval(() => void refresh(), SYNC_POLL_MS);
+    return () => clearInterval(timer);
+  }, [scope, syncing, refresh]);
+  return refresh;
+}
+type Refresh = (fresh?: boolean) => Promise<MeetingNotesStatus | null>;
+
+function useMeetingNotesActions(
+  scope: MeetingNotesScope,
+  state: State,
+  refresh: Refresh,
+  onChange?: () => Promise<void> | void,
+) {
+  const { setBusy, setActionError, setReadError } = state;
+  return useCallback(
+    async (kind: 'sync' | 'disconnect', action: () => Promise<unknown>) => {
+      if (!currentScope(scope)) return;
+      const actionId = ++scope.action;
+      const current = () => currentScope(scope) && scope.action === actionId;
+      stopSignInPoll(scope);
+      setBusy(kind);
+      setActionError(null);
+      setReadError(null);
+      try {
+        await action();
+        if (!current()) return;
+        await refresh(true);
+        if (current()) await onChange?.();
+      } catch (error) {
+        if (current()) setActionError(errorText(error));
+      } finally {
+        if (current()) setBusy(null);
+      }
+    },
+    [scope, setBusy, setActionError, setReadError, refresh, onChange],
+  );
 }
 
-function electronExternalApi(): ElectronExternalApi | null {
-  const candidate: unknown = window.api;
-  if (
-    candidate !== null &&
-    typeof candidate === 'object' &&
-    'openExternal' in candidate &&
-    typeof candidate.openExternal === 'function'
-  ) {
-    return candidate as ElectronExternalApi;
-  }
-  return null;
+function useMeetingNotesConnect(
+  provider: MeetingNotesProvider,
+  scope: MeetingNotesScope,
+  state: State,
+  refresh: Refresh,
+  onChange?: () => Promise<void> | void,
+) {
+  const { setBusy, setActionError, setReadError } = state;
+  return useCallback(async () => {
+    if (!currentScope(scope)) return;
+    const actionId = ++scope.action;
+    const current = () => currentScope(scope) && scope.action === actionId;
+    stopSignInPoll(scope);
+    setBusy('connect');
+    setActionError(null);
+    setReadError(null);
+    const electron = window.api?.openExternal;
+    try {
+      const origin = electron ? MEETING_NOTES_PUBLIC_ORIGIN : window.location.origin;
+      const { authorizeUrl } = await startMeetingNotesSignInApi(
+        provider,
+        `${origin}${meetingNotesCallbackPath(provider)}`,
+      );
+      if (!current()) return;
+      if (!electron) {
+        sessionStorage.setItem(
+          meetingNotesReturnKey(provider),
+          window.location.pathname + window.location.search,
+        );
+        window.location.href = authorizeUrl;
+        return;
+      }
+      await electron(authorizeUrl);
+      if (!current()) return;
+      const startedAt = Date.now();
+      const finish = async (signedIn: boolean) => {
+        if (!current() || scope.signInPoll === null) return;
+        stopSignInPoll(scope);
+        setBusy(null);
+        if (signedIn) await onChange?.();
+      };
+      scope.signInPoll = setInterval(() => {
+        if (!current()) {
+          stopSignInPoll(scope);
+          return;
+        }
+        if (Date.now() - startedAt > SIGN_IN_TIMEOUT_MS) {
+          void finish(false);
+          return;
+        }
+        void refresh().then(async (next) => {
+          if (next?.connected && next.status !== 'EXPIRED') await finish(true);
+        });
+      }, SIGN_IN_POLL_MS);
+    } catch (error) {
+      if (current()) {
+        setActionError(errorText(error));
+        setBusy(null);
+      }
+    }
+  }, [provider, scope, setBusy, setActionError, setReadError, refresh, onChange]);
 }
 
 export function useMeetingNotes(
@@ -54,128 +188,27 @@ export function useMeetingNotes(
   enabled: boolean,
   onChange?: () => Promise<void> | void,
 ) {
-  const [status, setStatus] = useState<MeetingNotesStatus | null>(null);
-  const [busy, setBusy] = useState<'connect' | 'sync' | 'disconnect' | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const signInPoll = useRef<ReturnType<typeof setInterval> | null>(null);
-  const inFlight = useRef<Promise<MeetingNotesStatus | null> | null>(null);
-
-  // One status read at a time; concurrent callers share it, so no read can
-  // supersede another and a slow read always lands. `fresh` waits for any read
-  // already in flight and then starts a new one (after a sync or disconnect).
-  const refresh = useCallback(
-    async (fresh = false): Promise<MeetingNotesStatus | null> => {
-      if (inFlight.current !== null) {
-        if (!fresh) return inFlight.current;
-        await inFlight.current;
-      }
-      const read = (async () => {
-        try {
-          const next = await fetchMeetingNotesStatusApi(provider);
-          setStatus(next);
-          return next;
-        } catch (err) {
-          setError(err instanceof Error ? err.message : String(err));
-          return null;
-        } finally {
-          inFlight.current = null;
-        }
-      })();
-      inFlight.current = read;
-      return read;
-    },
-    [provider],
-  );
-
-  useEffect(() => {
-    if (enabled) void refresh();
-  }, [enabled, refresh]);
-
-  const syncing =
-    // EXPIRED and SYNC_FAILED keep `connected` but make no progress: no poll.
-    status?.status === 'SYNCING' || (status?.status === 'CONNECTED' && !status.backfillDone);
-  useEffect(() => {
-    if (!syncing) return undefined;
-    const timer = setInterval(() => void refresh(), SYNC_POLL_MS);
-    return () => clearInterval(timer);
-  }, [syncing, refresh]);
-
-  const stopSignInPoll = useCallback(() => {
-    if (signInPoll.current !== null) clearInterval(signInPoll.current);
-    signInPoll.current = null;
-  }, []);
-  useEffect(() => stopSignInPoll, [stopSignInPoll]);
-
-  const run = useCallback(
-    async (kind: 'sync' | 'disconnect', action: () => Promise<unknown>) => {
-      setBusy(kind);
-      setError(null);
-      try {
-        await action();
-        await refresh(true);
-        await onChange?.();
-      } catch (err) {
-        setError(err instanceof Error ? err.message : String(err));
-      } finally {
-        setBusy(null);
-      }
-    },
-    [refresh, onChange],
-  );
-
-  const connect = useCallback(async () => {
-    setBusy('connect');
-    setError(null);
-    stopSignInPoll();
-    const electron = electronExternalApi();
-    try {
-      // The provider returns to Rose's callback page, which finishes the sign-in
-      // with this user's session. The Mac app signs in through the system
-      // browser, so it returns to the public site instead of the app.
-      const origin = electron === null ? window.location.origin : MEETING_NOTES_PUBLIC_ORIGIN;
-      if (electron === null) {
-        sessionStorage.setItem(
-          meetingNotesReturnKey(provider),
-          window.location.pathname + window.location.search,
-        );
-      }
-      const { authorizeUrl } = await startMeetingNotesSignInApi(
-        provider,
-        `${origin}${meetingNotesCallbackPath(provider)}`,
-      );
-      if (electron === null) {
-        window.location.href = authorizeUrl;
-        return;
-      }
-      await electron.openExternal(authorizeUrl);
-      const startedAt = Date.now();
-      const finish = async (signedIn: boolean) => {
-        if (signInPoll.current === null) return;
-        stopSignInPoll();
-        setBusy(null);
-        if (signedIn) await onChange?.();
-      };
-      signInPoll.current = setInterval(() => {
-        // The deadline holds even while a status read is still pending.
-        if (Date.now() - startedAt > SIGN_IN_TIMEOUT_MS) {
-          void finish(false);
-          return;
-        }
-        void refresh().then(async (next) => {
-          // An EXPIRED grant still reads as connected; wait for the new one.
-          if (next?.connected === true && next.status !== 'EXPIRED') await finish(true);
-        });
-      }, SIGN_IN_POLL_MS);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-      setBusy(null);
-    }
-  }, [provider, refresh, onChange, stopSignInPoll]);
-
+  const scope = useMeetingNotesScope(provider, enabled);
+  const state = useMeetingNotesState();
+  const { setStatus, setBusy, setReadError, setActionError } = state;
+  useLayoutEffect(() => {
+    scope.active = true;
+    setStatus(null);
+    setBusy(null);
+    setReadError(null);
+    setActionError(null);
+    return () => {
+      scope.active = false;
+      stopSignInPoll(scope);
+    };
+  }, [scope, setStatus, setBusy, setReadError, setActionError]);
+  const refresh = useMeetingNotesStatus(provider, scope, state);
+  const run = useMeetingNotesActions(scope, state, refresh, onChange);
+  const connect = useMeetingNotesConnect(provider, scope, state, refresh, onChange);
   return {
-    status,
-    busy,
-    error,
+    status: state.status,
+    busy: state.busy,
+    error: state.actionError ?? state.readError,
     connect,
     sync: () => run('sync', () => syncMeetingNotesApi(provider)),
     disconnect: () => run('disconnect', () => disconnectMeetingNotesApi(provider)),

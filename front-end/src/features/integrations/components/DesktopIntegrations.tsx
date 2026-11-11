@@ -27,7 +27,7 @@
  *   Connect / "+ Add account" call the same hooks/actions the stock sections use.
  */
 
-import { integrationMatchesSearch } from '../catalog';
+import { integrationMatchesSearch } from '../hooks/integrationSearch';
 import { useMemo, type ReactNode } from 'react';
 
 import { mergeAccountsByProvider } from '../hooks/integrationAccounts';

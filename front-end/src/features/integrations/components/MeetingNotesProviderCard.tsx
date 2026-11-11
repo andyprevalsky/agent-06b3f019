@@ -13,10 +13,11 @@
 
 import { Loader2, Plus, RefreshCw } from 'lucide-react';
 
-import { meetingNotesDetail } from '../meetingNotesView';
+import { meetingNotesDetail } from '../hooks/meetingNotesView';
 import ConnectedAccountChip from './ConnectedAccountChip';
 import type { useMeetingNotes } from '../hooks/useMeetingNotes';
-import { meetingNotesProviders, type MeetingNotesProvider } from '../meetingNotes';
+import { meetingNotesProviders } from '../config';
+import type { MeetingNotesProvider } from '../types';
 
 interface MeetingNotesProviderCardProps {
   provider: MeetingNotesProvider;

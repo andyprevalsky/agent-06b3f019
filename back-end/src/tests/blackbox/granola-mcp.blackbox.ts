@@ -2,7 +2,10 @@
 import { readFileSync, writeFileSync } from 'node:fs';
 import { PrismaClient, Prisma } from '@prisma/client';
 import { prisma } from '../../providers/database';
-import { decryptPlaidAccessTokenOrThrow } from '../../providers/plaidCredentials';
+import {
+  decryptPlaidAccessTokenOrThrow,
+  encryptPlaidAccessToken,
+} from '../../providers/plaidCredentials';
 import {
   GranolaSession,
   parseMeetingList,
@@ -65,7 +68,13 @@ if (captureUser) {
           await local.user.findUniqueOrThrow({ where: { userId: captureUser } });
           const where = { userId_source: { userId: captureUser, source: 'granola' } };
           const data = {
-            config: { encryptedTokens: config.encryptedTokens } as Prisma.InputJsonValue,
+            // The UI fixture is a consumer, never the owner of the production
+            // refresh grant. It must expire rather than rotate shared credentials.
+            config: {
+              encryptedTokens: encryptPlaidAccessToken(
+                JSON.stringify({ ...tokens, refreshToken: null })
+              ),
+            } as Prisma.InputJsonValue,
             status: 'CONNECTED',
             cursor: {},
             nextSyncAt: null,

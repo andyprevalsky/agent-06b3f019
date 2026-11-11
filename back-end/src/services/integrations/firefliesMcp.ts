@@ -6,6 +6,7 @@
  * https://api.fireflies.ai/.well-known/oauth-authorization-server
  * No GraphQL or experimental search/fetch tools: listing requests JSON explicitly.
  */
+import { setTimeout as delay } from 'node:timers/promises';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { generatePkce, generateState } from '../../providers/agentcard/oauth';
@@ -26,7 +27,9 @@ const MAX_PAGES = 200;
 export class FirefliesMcpError extends Error {
   constructor(
     message: string,
-    readonly reconnect = false
+    readonly reconnect = false,
+    readonly status: number | null = null,
+    readonly retryAt: number | null = null
   ) {
     super(message);
     this.name = 'FirefliesMcpError';
@@ -39,17 +42,32 @@ async function post(
   contentType: string,
   fetcher: Fetcher
 ): Promise<Record<string, unknown>> {
-  const response = await fetcher(url, {
-    method: 'POST',
-    headers: { 'Content-Type': contentType, Accept: 'application/json' },
-    body,
-    signal: AbortSignal.timeout(REQUEST_MS),
-  });
-  const data = (await response.json()) as Record<string, unknown>;
+  let response: Response;
+  try {
+    response = await fetcher(url, {
+      method: 'POST',
+      headers: { 'Content-Type': contentType, Accept: 'application/json' },
+      body,
+      signal: AbortSignal.timeout(REQUEST_MS),
+    });
+  } catch {
+    throw new FirefliesMcpError('Fireflies OAuth request failed before an HTTP response');
+  }
+  const parsed: unknown = await response.json().catch(() => null);
+  const data = record(parsed);
+  const reconnect = data.error === 'invalid_grant' || data.error === 'invalid_client';
   if (!response.ok)
     throw new FirefliesMcpError(
-      `Fireflies OAuth ${response.status}`,
-      data.error === 'invalid_grant' || data.error === 'invalid_client'
+      `Fireflies OAuth HTTP ${response.status}${reconnect ? ` (${data.error})` : ''}`,
+      reconnect,
+      response.status
+    );
+  const required = url.endsWith('/register') ? 'client_id' : 'access_token';
+  if (typeof data[required] !== 'string' || !data[required])
+    throw new FirefliesMcpError(
+      `Fireflies OAuth HTTP ${response.status}: invalid response object or missing ${required}`,
+      false,
+      response.status
     );
   return data;
 }
@@ -152,13 +170,54 @@ export async function refreshTokens(
 function authFailure(error: unknown): boolean {
   return typeof error === 'object' && error !== null && 'code' in error && error.code === 401;
 }
+/** Optional scheduler capability; only an authenticated provider throttle carries a reset. */
+export function getRetryAt(error: unknown): number | null {
+  return error instanceof FirefliesMcpError && error.status === 429 ? error.retryAt : null;
+}
+async function waitForRateLimit(retryAt: number, deadline: number, signal?: AbortSignal) {
+  const valid = Number.isFinite(retryAt) && !Number.isNaN(new Date(retryAt).getTime());
+  const wait = retryAt - Date.now();
+  if (!valid || wait <= 0 || retryAt >= deadline)
+    throw new FirefliesMcpError(
+      `Fireflies MCP rate limited (429): retry after ${valid ? new Date(retryAt).toISOString() : 'provider rate-limit reset'}; cannot retry within the existing request budget`,
+      false,
+      429,
+      valid ? retryAt : null
+    );
+  const boundedSignal = signal ?? AbortSignal.timeout(Math.max(1, deadline - Date.now()));
+  // Timers can wake early; never send another quota-charged request before reset.
+  while (Date.now() < retryAt) {
+    await delay(Math.max(1, retryAt - Date.now()), undefined, { signal: boundedSignal });
+  }
+}
 export class FirefliesSession {
+  // Replaced on every authoritative window; never shared across sessions or syncs.
+  readonly listedNotes = new Map<string, MeetingNotes>();
   private constructor(private readonly client: Client) {}
   static async open(accessToken: string, fetcher: Fetcher = fetch): Promise<FirefliesSession> {
     const client = new Client({ name: 'rose-fireflies-sync', version: '1.0.0' });
     const transport = new StreamableHTTPClientTransport(new URL(FIREFLIES_MCP_URL), {
       requestInit: { headers: { Authorization: `Bearer ${accessToken}` } },
-      fetch: fetcher,
+      fetch: async (input, init) => {
+        const message = typeof init?.body === 'string' ? record(JSON.parse(init.body)) : {};
+        const budget = message.method === 'initialize' ? REQUEST_MS : 60_000;
+        const deadline = Date.now() + budget;
+        const signal = AbortSignal.any([
+          ...(init?.signal ? [init.signal] : []),
+          AbortSignal.timeout(budget),
+        ]);
+        for (;;) {
+          const response = await fetcher(input, { ...init, signal });
+          if (response.status !== 429) return response;
+          const header = response.headers.get('Retry-After');
+          const seconds = header === null || header.trim() === '' ? NaN : Number(header);
+          const retryAt = Number.isFinite(seconds)
+            ? Date.now() + seconds * 1000
+            : Date.parse(header ?? '');
+          await response.body?.cancel();
+          await waitForRateLimit(retryAt, deadline, signal);
+        }
+      },
     });
     try {
       await client.connect(transport, { timeout: REQUEST_MS });
@@ -170,17 +229,26 @@ export class FirefliesSession {
     }
   }
   async close(): Promise<void> {
+    this.listedNotes.clear();
     await this.client.close().catch(() => {});
   }
   async call(name: string, args: Record<string, unknown>): Promise<unknown> {
     let result;
-    try {
-      result = await this.client.callTool({ name, arguments: args }, undefined, {
-        timeout: 60_000,
-      });
-    } catch (error) {
-      if (authFailure(error)) throw new FirefliesMcpError('Fireflies access token rejected', true);
-      throw error;
+    const deadline = Date.now() + 60_000;
+    for (;;) {
+      try {
+        result = await this.client.callTool({ name, arguments: args }, undefined, {
+          timeout: Math.max(1, deadline - Date.now()),
+        });
+        break;
+      } catch (error) {
+        if (authFailure(error))
+          throw new FirefliesMcpError('Fireflies access token rejected', true);
+        const limited = record(error);
+        if (limited.code !== -32429) throw error;
+        const retryAt = record(limited.data).retryAfter;
+        await waitForRateLimit(typeof retryAt === 'number' ? retryAt : NaN, deadline);
+      }
     }
     if (result.isError === true) throw new FirefliesMcpError(`Fireflies ${name} refused`);
     if ('structuredContent' in result && result.structuredContent !== undefined)
@@ -227,6 +295,8 @@ export async function listMeetingsBetween(
   startMs: number,
   endMs: number
 ): Promise<MeetingRecord[]> {
+  session.listedNotes.clear();
+  const notes = new Map<string, MeetingNotes>();
   const meetings = new Map<string, MeetingRecord>();
   for (let page = 0; page < MAX_PAGES; page++) {
     const result = unwrap(
@@ -253,6 +323,9 @@ export async function listMeetingsBetween(
         throw new FirefliesMcpError(
           'Fireflies listing contains an invalid meeting; refusing reconciliation'
         );
+      if (!Object.hasOwn(m, 'summary'))
+        throw new FirefliesMcpError('Fireflies listing missing summary; refusing reconciliation');
+      notes.set(m.id, { summary: m.summary === null ? null : render(m.summary), rest: '' });
       if (!meetings.has(m.id)) added++;
       meetings.set(m.id, {
         id: m.id,
@@ -262,10 +335,16 @@ export async function listMeetingsBetween(
         details: render({ participants: m.participants ?? [], organizer: m.organizer_email ?? '' }),
       });
     }
-    if (result.length < PAGE_SIZE)
-      return [...meetings.values()].filter(
+    if (result.length < PAGE_SIZE) {
+      const listed = [...meetings.values()].filter(
         (m) => Date.parse(m.meetingAt) >= startMs && Date.parse(m.meetingAt) < endMs
       );
+      for (const meeting of listed) {
+        const note = notes.get(meeting.id);
+        if (note !== undefined) session.listedNotes.set(meeting.id, note);
+      }
+      return listed;
+    }
     if (page > 0 && added === 0)
       throw new FirefliesMcpError('Fireflies pagination did not advance');
   }
@@ -279,18 +358,25 @@ export async function getMeetingNotes(
 ): Promise<Map<string, MeetingNotes>> {
   const notes = new Map<string, MeetingNotes>();
   for (const id of ids) {
-    const result = await session.call('fireflies_get_summary', { transcriptId: id });
-    notes.set(id, { summary: render(unwrap(result, 'summary')), rest: '' });
+    const note = session.listedNotes.get(id);
+    if (note !== undefined) notes.set(id, note);
   }
   return notes;
 }
-export async function getTranscript(session: FirefliesSession, id: string): Promise<string | null> {
+export async function getTranscript(
+  session: FirefliesSession,
+  id: string
+): Promise<string | null | undefined> {
   const value = unwrap(
     await session.call('fireflies_get_transcript', { transcriptId: id }),
     'transcript'
   );
   if (typeof value === 'string') return value.trim() ? value : null;
   const obj = record(value);
+  // A known transcript without its nullable sentence layer is not a deletion.
+  // Empty/foreign envelopes and present non-array layers remain protocol errors.
+  if (obj.id === id && (obj.sentences === null || !Object.hasOwn(obj, 'sentences')))
+    return undefined;
   if (!Array.isArray(obj.sentences))
     throw new FirefliesMcpError('Fireflies transcript missing sentences');
   return (

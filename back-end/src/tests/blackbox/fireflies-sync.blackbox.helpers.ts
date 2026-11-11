@@ -11,8 +11,8 @@ export interface FakeTranscript {
   id: string;
   title: string;
   date: number;
-  summary: string;
-  transcript: string;
+  summary: string | null;
+  transcript: string | null | undefined;
 }
 export class FakeFireflies {
   meetings = new Map<string, FakeTranscript>();
@@ -122,6 +122,7 @@ export class FakeFireflies {
                 id: m.id,
                 title: m.title,
                 date: m.date,
+                summary: m.summary === null ? null : { overview: m.summary },
                 participants: ['ada@example.com'],
                 transcript_url: `https://app.fireflies.ai/view/${m.id}`,
               })),
@@ -134,7 +135,25 @@ export class FakeFireflies {
         else if (tool === 'fireflies_get_transcript')
           value = {
             transcript: {
-              sentences: [{ speaker_name: 'Ada', start_time: 0, end_time: 3, text: m.transcript }],
+              id: m.id,
+              title: m.title,
+              ...(m.transcript === undefined
+                ? {}
+                : {
+                    sentences:
+                      m.transcript === null
+                        ? null
+                        : m.transcript === ''
+                          ? []
+                          : [
+                              {
+                                speaker_name: 'Ada',
+                                start_time: 0,
+                                end_time: 3,
+                                text: m.transcript,
+                              },
+                            ],
+                  }),
             },
           };
         else throw new Error(`Unexpected tool ${tool}`);

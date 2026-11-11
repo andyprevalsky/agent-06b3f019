@@ -1,9 +1,9 @@
 /** Shared meeting status text for cards and Desktop rows. */
-import type { useMeetingNotes } from './hooks/useMeetingNotes';
-import { meetingNotesProviders, type MeetingNotesProvider } from './meetingNotes';
+import type { MeetingNotesProvider, MeetingNotesConnection } from '../types';
+import { meetingNotesProviders } from '../config';
 
 export function meetingNotesDetail(
-  connection: ReturnType<typeof useMeetingNotes>,
+  connection: MeetingNotesConnection,
   provider: MeetingNotesProvider,
 ): string {
   const { name, meetingDocument } = meetingNotesProviders[provider];

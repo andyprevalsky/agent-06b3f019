@@ -22,7 +22,8 @@ import { Loader2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 
 import { useMeetingNotesCallback } from '../hooks/useMeetingNotesCallback';
-import { meetingNotesProviders, type MeetingNotesProvider } from '../meetingNotes';
+import { meetingNotesProviders } from '../config';
+import type { MeetingNotesProvider } from '../types';
 
 export default function MeetingNotesCallback({
   provider,

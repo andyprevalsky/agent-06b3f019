@@ -3,18 +3,9 @@
  */
 
 import { getAuthHeaders } from '../api';
-import { API_BASE_WITH_PATH } from '../config';
-import { meetingNotesProviders, type MeetingNotesProvider } from '../meetingNotes';
-
-export interface MeetingNotesStatus {
-  connected: boolean;
-  status: 'NOT_CONNECTED' | 'PENDING' | 'CONNECTED' | 'SYNCING' | 'SYNC_FAILED' | 'EXPIRED';
-  accountEmail: string | null;
-  backfillDone: boolean;
-  lastSuccessfulSyncAt: string | null;
-  lastError: string | null;
-  documents: Partial<Record<string, number>>;
-}
+import { API_BASE_WITH_PATH, meetingNotesProviders } from '../config';
+import type { MeetingNotesProvider, MeetingNotesStatus } from '../types';
+export type { MeetingNotesStatus } from '../types';
 
 async function meetingNotesJsonOrThrow<T>(
   provider: MeetingNotesProvider,
