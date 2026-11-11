@@ -18,9 +18,12 @@ export function useTeamSession() {
     const refresh = () => setUserId(currentTeamUserId);
     window.addEventListener(AUTH_SESSION_CHANGED_EVENT, refresh);
     window.addEventListener(IMPERSONATION_CHANGED_EVENT, refresh);
+    // Same-tab changes dispatch the events above; sign-out in another tab only fires `storage`.
+    window.addEventListener('storage', refresh);
     return () => {
       window.removeEventListener(AUTH_SESSION_CHANGED_EVENT, refresh);
       window.removeEventListener(IMPERSONATION_CHANGED_EVENT, refresh);
+      window.removeEventListener('storage', refresh);
     };
   }, []);
   return userId;

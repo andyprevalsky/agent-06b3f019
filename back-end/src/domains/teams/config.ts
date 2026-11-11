@@ -1,5 +1,7 @@
 export const SHAREABLE_PROVIDERS = ['gmail', 'imessage'] as const;
 export const CONTACT_LIMIT = 20;
+/** A SENDING claim older than this lease is presumed to have crashed before recording its result. */
+export const INVITE_SENDING_LEASE_MS = 10 * 60 * 1000;
 function configured(names: string[], fallback: string): string {
   for (const name of names) {
     const value = process.env[name]?.trim();

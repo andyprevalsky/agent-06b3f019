@@ -1,6 +1,7 @@
 import { prisma, runTransactionWithRetry } from '../../providers/database';
 import { TeamError } from './types';
 import { mutateTeam, userSelect } from './repoCore';
+import { INVITE_SENDING_LEASE_MS } from './config';
 
 export const findUser = (userId: string) =>
   prisma.user.findUnique({ where: { userId }, select: userSelect });
@@ -118,6 +119,9 @@ export async function accept(
       (trusted && member.userId !== null && member.userId !== userId)
     )
       throw new TeamError(404, 'Invitation not found');
+    // A token alone never transfers an invitation already bound to another account.
+    if (member.userId !== null && member.userId !== userId)
+      throw new TeamError(403, 'This invitation belongs to another account');
     if (
       member.status === 'INVITED' &&
       !trusted &&
@@ -189,12 +193,28 @@ export const usersForEmails = (emails: string[]) =>
     },
     select: userSelect,
   });
-export const claimDelivery = (id: string, tokenHash: string) =>
+/** Claims one send. UNKNOWN (possibly delivered) is reclaimed only on an explicit owner retry;
+ * a SENDING claim older than the lease is presumed crashed before finishDelivery. */
+export const claimDelivery = (
+  id: string,
+  tokenHash: string,
+  { retryUnknown = false, now = new Date() }: { retryUnknown?: boolean; now?: Date } = {}
+) =>
   prisma.teamMember.updateMany({
     where: {
       id,
       status: 'INVITED',
-      inviteDeliveryStatus: { in: ['PENDING', 'FAILED', 'UNAVAILABLE'] },
+      OR: [
+        {
+          inviteDeliveryStatus: {
+            in: ['PENDING', 'FAILED', 'UNAVAILABLE', ...(retryUnknown ? ['UNKNOWN'] : [])],
+          },
+        },
+        {
+          inviteDeliveryStatus: 'SENDING',
+          updatedAt: { lt: new Date(now.getTime() - INVITE_SENDING_LEASE_MS) },
+        },
+      ],
     },
     data: { inviteDeliveryStatus: 'SENDING', inviteTokenHash: tokenHash },
   });

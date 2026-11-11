@@ -1,6 +1,9 @@
 /**
  * STATE MACHINE: TeamDetails
  * [VIEW] → edit title → [DRAFT] → Save → [SAVING] → [VIEW | ERROR].
+ * [VIEW] + refreshed team.name → [VIEW] (untouched draft follows the server name);
+ * [DRAFT] + refreshed team.name → [DRAFT] (in-progress edit is preserved).
+ * Invite email: FAILED/UNAVAILABLE/PENDING → Retry; UNKNOWN → explicit Resend (may duplicate).
  * Members/opt-ins reflect refetched server state. Remove requires confirmation;
  * shares are changed one account/project and one team at a time.
  */
@@ -24,7 +27,11 @@ import { useShareableIntegrations, useTeamMutation, useTeamSession } from '@/hoo
 import TeamInvite from './TeamInvite';
 
 export default function TeamDetails({ team }: { team: Team }) {
-  const [name, setName] = useState(team.name);
+  const [title, setTitle] = useState({ base: team.name, value: team.name });
+  if (title.base !== team.name)
+    setTitle({ base: team.name, value: title.value === title.base ? team.name : title.value });
+  const name = title.value;
+  const setName = (value: string) => setTitle((current) => ({ ...current, value }));
   const [removing, setRemoving] = useState<string | null>(null);
   const userId = useTeamSession();
   const rename = useTeamMutation((title: string) => renameTeam(team.id, title));
@@ -32,7 +39,10 @@ export default function TeamDetails({ team }: { team: Team }) {
     await removeTeamMember(team.id, memberId);
     setRemoving(null);
   });
-  const retryInvite = useTeamMutation((email: string) => inviteTeamMember(team.id, email));
+  const retryInvite = useTeamMutation(
+    ({ email, resendUncertain }: { email: string; resendUncertain: boolean }) =>
+      inviteTeamMember(team.id, email, resendUncertain),
+  );
   const accounts = useShareableIntegrations();
   const projects = useQuery({
     queryKey: ['team-owned-projects', userId],
@@ -127,11 +137,28 @@ export default function TeamDetails({ team }: { team: Team }) {
                         disabled={retryInvite.isPending}
                         aria-label={`Retry invitation email to ${member.email}`}
                         onClick={() => {
-                          if (member.email) retryInvite.mutate(member.email);
+                          if (member.email)
+                            retryInvite.mutate({ email: member.email, resendUncertain: false });
                         }}
                         className="text-[#e8507f]"
                       >
                         Retry email
+                      </button>
+                    )}
+                  {member.email &&
+                    member.status === 'INVITED' &&
+                    member.inviteDeliveryStatus === 'UNKNOWN' && (
+                      <button
+                        type="button"
+                        disabled={retryInvite.isPending}
+                        aria-label={`Resend invitation email to ${member.email} (it may already have arrived)`}
+                        onClick={() => {
+                          if (member.email)
+                            retryInvite.mutate({ email: member.email, resendUncertain: true });
+                        }}
+                        className="text-[#e8507f]"
+                      >
+                        Resend email
                       </button>
                     )}
                   {removing === member.id ? (
@@ -150,7 +177,7 @@ export default function TeamDetails({ team }: { team: Team }) {
                     <button
                       className="text-muted-foreground hover:text-red-600"
                       onClick={() => setRemoving(member.id)}
-                      aria-label={`Remove ${member.email}`}
+                      aria-label={`Remove ${member.email ?? member.name ?? `team member ${member.id.slice(-6)}`}`}
                     >
                       Remove
                     </button>

@@ -46,11 +46,11 @@ export interface Team {
   integrationShares: TeamIntegrationShare[];
   projectShares: SharedTeamProject[];
 }
+/** `onRose` is present only for the caller's own contacts, never for an arbitrary typed address. */
 export interface TeamContact {
   name: string | null;
   email: string;
-  onRose: boolean;
-  userId: string | null;
+  onRose?: boolean;
 }
 export interface ShareableIntegration {
   integrationId: string;
@@ -103,11 +103,12 @@ export const renameTeam = (teamId: string, name: string) =>
   request<Team>(`/${id(teamId)}`, 'PATCH', { name });
 export const fetchTeamContacts = (query: string, signal?: AbortSignal) =>
   request<{ contacts: TeamContact[] }>(`/contacts?q=${id(query)}`, 'GET', undefined, signal);
-export const inviteTeamMember = (teamId: string, email: string) =>
+/** `resendUncertain` is the owner's explicit choice to resend an email that may already be delivered. */
+export const inviteTeamMember = (teamId: string, email: string, resendUncertain = false) =>
   request<{
     member: TeamMember;
     delivery: 'sent' | 'failed' | 'unknown' | 'sending' | 'unavailable' | 'pending';
-  }>(`/${id(teamId)}/invites`, 'POST', { email });
+  }>(`/${id(teamId)}/invites`, 'POST', resendUncertain ? { email, retry: true } : { email });
 export const previewTeamInvitation = (teamId: string, token: string, signal?: AbortSignal) =>
   request<Team>(`/${id(teamId)}/invitation`, 'POST', { token }, signal);
 export const acceptTeamInvitation = (teamId: string, token: string) =>

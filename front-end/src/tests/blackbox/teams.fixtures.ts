@@ -63,7 +63,7 @@ export function mockTeams(initial: Team[] = [makeTeam()], invitations: Team[] = 
   const state: TeamsResponse & { contacts: TeamContact[] } = {
     teams: initial,
     invitations,
-    contacts: [{ name: 'Tamy', email: 'tamara@roselabs.ai', onRose: true, userId: 'tamy-user' }],
+    contacts: [{ name: 'Tamy', email: 'tamara@roselabs.ai', onRose: true }],
   };
   const writes: { method: string; path: string; body: unknown }[] = [];
   server.use(
@@ -93,7 +93,7 @@ export function mockTeams(initial: Team[] = [makeTeam()], invitations: Team[] = 
       const contact = state.contacts.find((item) => item.email === body.email);
       const member = {
         id: `member-${team.members.length}`,
-        userId: contact?.userId ?? null,
+        userId: contact?.onRose ? `user-${body.email}` : null,
         name: contact?.name ?? null,
         email: body.email,
         role: 'MEMBER' as const,

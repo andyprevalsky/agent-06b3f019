@@ -38,6 +38,7 @@ Offline tests point FLY_FLAPS_BASE_URL at a fake Machines API
 from __future__ import annotations
 
 import argparse
+import email.utils
 import hashlib
 import json
 import os
@@ -77,13 +78,30 @@ LAST_USED_REFRESH_SECONDS = 600
 RATE_LIMIT_MAX_DELAY_SECONDS = 8.0
 
 
-def rate_limit_delay(retry_after, attempt):
-    """Seconds to wait after a 429: Retry-After when given, else capped exponential backoff with jitter."""
-    try:
-        delay = float(retry_after)
-    except (TypeError, ValueError):
-        delay = min(RATE_LIMIT_MAX_DELAY_SECONDS, 0.5 * (2 ** attempt)) * (0.5 + random.random() / 2)
-    return max(0.0, min(RATE_LIMIT_MAX_DELAY_SECONDS, delay))
+def rate_limit_delay(retry_after, attempt, now=None):
+    """Seconds to wait after a 429, or None when the server asks for longer than the budget.
+
+    Retry-After may be delta-seconds or an HTTP-date (RFC 9110 10.2.3); never retry earlier than
+    asked. Without it, use capped exponential backoff with jitter.
+    """
+    delay = None
+    if retry_after is not None:
+        text = str(retry_after).strip()
+        if text.isdigit():
+            delay = float(text)
+        else:
+            try:
+                when = email.utils.parsedate_to_datetime(text)
+                delay = when.timestamp() - (time.time() if now is None else now)
+            except (TypeError, ValueError, IndexError, OverflowError):
+                delay = None
+    if delay is None:
+        return min(RATE_LIMIT_MAX_DELAY_SECONDS, 0.5 * (2 ** attempt)) * (0.5 + random.random() / 2)
+    if delay > RATE_LIMIT_MAX_DELAY_SECONDS:
+        return None
+    return max(0.0, delay)
+
+
 EXIT_TIMEOUT = 3
 
 
@@ -137,7 +155,10 @@ class Api(Fly):
             except urllib.error.HTTPError as error:
                 if error.code != 429 or attempt == RATE_LIMIT_ATTEMPTS - 1:
                     return error.code, None
-                time.sleep(rate_limit_delay(error.headers.get("Retry-After"), attempt))
+                delay = rate_limit_delay(error.headers.get("Retry-After"), attempt)
+                if delay is None:  # asked to wait past this helper's budget: report the 429
+                    return error.code, None
+                time.sleep(delay)
             except (urllib.error.URLError, OSError, ValueError) as error:
                 raise WarmSourceError(f"{method} {path} -> {error}") from error
         return 429, None

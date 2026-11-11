@@ -135,7 +135,12 @@ export default function TeamInvite({ team }: { team: Team }) {
               >
                 <span className="block font-medium">{contact.name ?? contact.email}</span>
                 <span className="block break-all text-xs text-muted-foreground">
-                  {contact.email} · {contact.onRose ? 'On Rose' : 'Not on Rose yet'}
+                  {contact.email}
+                  {contact.onRose === undefined
+                    ? ''
+                    : contact.onRose
+                      ? ' · On Rose'
+                      : ' · Not on Rose yet'}
                   {team.members.some(
                     (member) => member.email?.toLowerCase() === contact.email.toLowerCase(),
                   )

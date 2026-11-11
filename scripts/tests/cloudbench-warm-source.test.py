@@ -10,6 +10,7 @@ nonces, metadata, Machines, volumes, snapshots); no flyctl, network or credentia
 """
 from __future__ import annotations
 
+import email.utils
 import http.server
 import json
 import os
@@ -345,6 +346,20 @@ class WarmSource(FakeApiCase):
         self.assertEqual(limited.stdout.split(), [set_a, machine_a, volume_a])
         self.assertIn("HTTP 429", limited.stderr)
         self.assertEqual(row["config"]["metadata"][self.mod["LAST_USED_KEY"]], "1")
+
+    def test_rate_limit_delay_honours_both_retry_after_forms_and_the_budget(self):
+        delay = self.mod["rate_limit_delay"]
+        cap = self.mod["RATE_LIMIT_MAX_DELAY_SECONDS"]
+        self.assertEqual(delay("3", 0), 3.0)
+        self.assertIsNone(delay(str(int(cap) + 52), 0))  # never retry before the server allows
+        now = 1_800_000_000.0
+        soon = email.utils.formatdate(now + 4, usegmt=True)
+        self.assertAlmostEqual(delay(soon, 0, now=now), 4.0, delta=1.0)
+        self.assertIsNone(delay(email.utils.formatdate(now + 120, usegmt=True), 0, now=now))
+        self.assertEqual(delay(email.utils.formatdate(now - 30, usegmt=True), 0, now=now), 0.0)
+        for attempt in range(6):  # no header: capped jittered backoff
+            self.assertTrue(0 < delay(None, attempt) <= cap)
+            self.assertTrue(0 < delay("garbage", attempt) <= cap)
 
     def test_ensure_reuses_an_interrupted_create_volume_and_waits_out_a_peer_claim(self):
         set_b, machine_b, volume_b = self.mod["names"](NODE_B, PY_B)

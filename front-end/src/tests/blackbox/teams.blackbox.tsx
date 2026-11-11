@@ -70,6 +70,16 @@ describe('Teams', () => {
     expect(api.state.teams[0].integrationShares).toEqual([]);
     expect(api.state.teams[0].members[1].status).toBe('INVITED');
   });
+  it('shows no Rose status for a typed address outside the caller contacts', async () => {
+    const api = mockTeams();
+    api.state.contacts = [{ name: null, email: 'stranger@example.test' }];
+    const user = userEvent.setup();
+    renderWithProviders(<Teams />);
+    await user.type(await screen.findByRole('combobox'), 'stranger@example.test');
+    const option = await screen.findByRole('option');
+    expect(option).toHaveTextContent('stranger@example.test');
+    expect(option).not.toHaveTextContent(/Rose/);
+  });
   it('supports keyboard selection and blocks a duplicate pending invitation', async () => {
     const api = mockTeams();
     const user = userEvent.setup();
@@ -451,6 +461,92 @@ describe('Teams', () => {
       );
     },
   );
+  it('resends an UNKNOWN invitation email only through the explicit uncertain-resend action', async () => {
+    const api = mockTeams([
+      makeTeam({
+        members: [
+          { ...owner },
+          {
+            ...owner,
+            id: 'retry-member',
+            email: 'retry@example.test',
+            role: 'MEMBER',
+            status: 'INVITED',
+            inviteDeliveryStatus: 'UNKNOWN',
+          },
+        ],
+      }),
+    ]);
+    const user = userEvent.setup();
+    renderWithProviders(<Teams />);
+    await screen.findByText('retry@example.test');
+    expect(screen.queryByRole('button', { name: /Retry invitation/ })).toBeNull();
+    await user.click(
+      screen.getByRole('button', {
+        name: 'Resend invitation email to retry@example.test (it may already have arrived)',
+      }),
+    );
+    await waitFor(() =>
+      expect(api.writes).toContainEqual({
+        method: 'POST',
+        path: '/team-rose/invites',
+        body: { email: 'retry@example.test', retry: true },
+      }),
+    );
+    expect(api.state.teams[0].members).toHaveLength(2);
+  });
+  it('labels removal of an email-less member without rendering "null"', async () => {
+    mockTeams([
+      makeTeam({
+        members: [
+          { ...owner },
+          {
+            ...owner,
+            id: 'member-phone-abc123',
+            userId: 'phone-user',
+            role: 'MEMBER',
+            email: null,
+            name: 'Phone friend',
+          },
+          {
+            ...owner,
+            id: 'member-anon-xyz789',
+            userId: 'anon-user',
+            role: 'MEMBER',
+            email: null,
+            name: null,
+          },
+        ],
+      }),
+    ]);
+    renderWithProviders(<Teams />);
+    expect(await screen.findByRole('button', { name: 'Remove Phone friend' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Remove team member xyz789' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /null/ })).toBeNull();
+  });
+  it('an untouched title follows a refreshed team name while an in-progress edit is kept', async () => {
+    const api = mockTeams([makeTeam(), makeTeam({ id: 'other', name: 'Other team' })]);
+    const user = userEvent.setup();
+    renderWithProviders(<Teams />);
+    const title = await screen.findByLabelText('Team title');
+    api.state.teams[0].name = 'Renamed elsewhere';
+    await user.click(screen.getByRole('button', { name: 'Refresh teams' }));
+    await waitFor(() => expect(title).toHaveValue('Renamed elsewhere'));
+    await user.clear(title);
+    await user.type(title, 'My draft');
+    api.state.teams[0].name = 'Renamed again';
+    await user.click(screen.getByRole('button', { name: 'Refresh teams' }));
+    expect(await screen.findByRole('button', { name: 'Renamed again' })).toBeInTheDocument();
+    expect(title).toHaveValue('My draft');
+  });
+  it('clears the Teams view when another tab signs out', async () => {
+    mockTeams();
+    renderWithProviders(<Teams />);
+    await screen.findByLabelText('Team title');
+    localStorage.removeItem('rose-session');
+    fireEvent(window, new StorageEvent('storage', { key: 'rose-session', newValue: null }));
+    await waitFor(() => expect(screen.queryByLabelText('Team title')).toBeNull());
+  });
   it.each(['SENT', 'SENDING', 'UNKNOWN'] as const)(
     'does not resend a %s invitation email',
     async (status) => {

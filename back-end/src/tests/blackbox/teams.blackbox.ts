@@ -10,6 +10,7 @@ import { test } from 'node:test';
 import { prisma } from '../../providers/database';
 import * as service from '../../domains/teams/service';
 import { TransactionalEmailDefinitiveError } from '../../providers/transactionalEmail';
+import { INVITE_SENDING_LEASE_MS } from '../../domains/teams/config';
 import { user, request, team, join, gmail } from './teams-harness';
 import './teams-batching.cases';
 
@@ -178,6 +179,22 @@ test('contacts use only caller records, match secondary email and refresh on-Ros
   );
 });
 
+test('contacts never reveal whether an arbitrary typed email has a Rose account', async () => {
+  const owner = await user();
+  const stranger = await user();
+  const known = await user();
+  await prisma.person.create({
+    data: { userId: owner.userId, firstName: 'Known', lastName: 'Friend', email: known.email },
+  });
+  const typed = (await request(owner, `/contacts?q=${encodeURIComponent(stranger.email)}`))
+    .contacts as Array<Record<string, unknown>>;
+  assert.deepEqual(typed, [{ name: null, email: stranger.email }]);
+  const own = (await request(owner, `/contacts?q=${encodeURIComponent(known.email)}`))
+    .contacts as Array<Record<string, unknown>>;
+  assert.deepEqual(own, [{ name: 'Known Friend', email: known.email, onRose: true }]);
+  assert(own.every((row) => !('userId' in row)));
+});
+
 test('shared projects expose only bounded metadata; owner settings and secrets remain private', async () => {
   const owner = await user();
   const member = await user();
@@ -291,6 +308,54 @@ test('invitation delivery records success and does not duplicate a sent or uncer
     throw new TransactionalEmailDefinitiveError('No sender');
   });
   assert.equal(failed.delivery, 'failed');
+});
+
+test('invite delivery reclaims a crashed SENDING claim after its lease and retries UNKNOWN only explicitly', async () => {
+  const owner = await user();
+  const id = String((await team(owner)).id);
+  let sends = 0;
+  const sender = async () => {
+    sends++;
+    return { id: `receipt-${sends}` };
+  };
+  const stuckEmail = `stuck-${randomUUID()}@example.test`;
+  const stuck = await prisma.teamMember.create({
+    data: { teamId: id, email: stuckEmail, inviteDeliveryStatus: 'SENDING' },
+  });
+  const fresh = await service.inviteMember(owner.userId, id, stuckEmail, sender);
+  assert.equal(fresh.delivery, 'sending', 'a live SENDING claim is not duplicated');
+  assert.equal(sends, 0);
+  const expired = new Date(Date.now() - INVITE_SENDING_LEASE_MS - 1000);
+  await prisma.$executeRaw`UPDATE "TeamMember" SET "updatedAt" = ${expired} WHERE "id" = ${stuck.id}`;
+  const reclaimed = await service.inviteMember(owner.userId, id, stuckEmail, sender);
+  assert.equal(reclaimed.delivery, 'sent');
+  assert.equal(sends, 1);
+  const uncertainEmail = `uncertain-${randomUUID()}@example.test`;
+  const uncertain = await service.inviteMember(owner.userId, id, uncertainEmail, async () => {
+    throw new Error('Connection lost after submit');
+  });
+  assert.equal(uncertain.delivery, 'unknown');
+  await request(owner, `/${id}/invites`, 'POST', { email: uncertainEmail, retry: 'yes' }, 400);
+  await service.inviteMember(owner.userId, id, uncertainEmail, sender);
+  assert.equal(sends, 1, 'a plain re-invite never resends a possibly delivered email');
+  const retried = await service.inviteMember(owner.userId, id, uncertainEmail, sender, true);
+  assert.equal(retried.delivery, 'sent', 'explicit owner retry reclaims UNKNOWN');
+  assert.equal(sends, 2);
+  await prisma.teamMember.updateMany({
+    where: { teamId: id, email: uncertainEmail },
+    data: { inviteDeliveryStatus: 'UNKNOWN' },
+  });
+  const hashOf = async () =>
+    (await prisma.teamMember.findFirstOrThrow({ where: { teamId: id, email: uncertainEmail } }))
+      .inviteTokenHash;
+  const before = await hashOf();
+  await request(owner, `/${id}/invites`, 'POST', { email: uncertainEmail }, 201);
+  assert.equal(await hashOf(), before, 'HTTP re-invite without retry does not reclaim UNKNOWN');
+  await request(owner, `/${id}/invites`, 'POST', { email: uncertainEmail, retry: true }, 201);
+  assert.notEqual(await hashOf(), before, 'HTTP retry=true claims a new delivery');
+  const member = await user();
+  await request(owner, `/${id}/invites`, 'POST', { email: member.email }, 201);
+  await request(member, `/${id}/invites`, 'POST', { email: uncertainEmail, retry: true }, 404);
 });
 
 test('mailbox proof is required for normal acceptance, stored hashed, and consumed once', async () => {
@@ -450,12 +515,22 @@ test('phone-only owner and newly invited phone-only member need no fabricated em
   assert.equal(first.team.id, second.team.id);
   assert.equal(first.team.members[0].email, null);
   assert.equal(first.invitation.member.userId, staleEmailMatch.userId);
-  await service.acceptInvite(member.userId, first.team.id, token);
+  await assert.rejects(
+    service.acceptInvite(member.userId, first.team.id, token),
+    (error: { status?: number }) => error.status === 403,
+    'a leaked token cannot move an invitation bound to another account to an email-less caller'
+  );
+  const bound = await prisma.teamMember.findUniqueOrThrow({
+    where: { id: first.invitation.member.id },
+  });
+  assert.equal(bound.status, 'INVITED');
+  assert.equal(bound.userId, staleEmailMatch.userId);
+  await service.acceptInvite(staleEmailMatch.userId, first.team.id, token);
   assert.equal(
     (await prisma.teamMember.findUniqueOrThrow({ where: { id: first.invitation.member.id } }))
-      .userId,
-    member.userId,
-    'mailbox proof overrides an unverified provisional match'
+      .status,
+    'ACCEPTED',
+    'the bound account accepts with the mailed token'
   );
 });
 

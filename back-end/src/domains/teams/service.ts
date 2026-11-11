@@ -106,7 +106,8 @@ export async function inviteMember(
   userId: string,
   teamId: string,
   email: string,
-  send = sendTransactionalEmail
+  send = sendTransactionalEmail,
+  retryUnknown = false
 ) {
   await requireMemberUser(userId);
   const member = await repo.invite(userId, teamId, email);
@@ -115,7 +116,10 @@ export async function inviteMember(
   let delivery = member.inviteDeliveryStatus;
   const token = randomBytes(32).toString('base64url');
   const tokenHash = createHash('sha256').update(token).digest('hex');
-  if (member.status === 'INVITED' && (await repo.claimDelivery(member.id, tokenHash)).count) {
+  if (
+    member.status === 'INVITED' &&
+    (await repo.claimDelivery(member.id, tokenHash, { retryUnknown })).count
+  ) {
     delivery = 'UNAVAILABLE';
     if (team) {
       try {

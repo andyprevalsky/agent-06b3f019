@@ -26,22 +26,24 @@ export async function contacts(userId: string, q: string) {
       }
     }
   }
+  // A typed address outside the caller's contacts is echoed back without any account lookup,
+  // so this endpoint cannot be used to probe which arbitrary emails have Rose accounts.
+  let typed: string | null = null;
   try {
-    const email = normalizedEmail(query);
-    candidates.set(email, candidates.get(email) ?? { name: null, email });
+    typed = normalizedEmail(query);
   } catch {
     /* Partial queries only search the caller's contacts. */
   }
   const selected = [...candidates.values()].slice(0, CONTACT_LIMIT);
   const users = selected.length ? await repo.usersForEmails(selected.map((row) => row.email)) : [];
+  const known = selected.map((row) => ({
+    ...row,
+    onRose: users.filter((user) => user.email?.trim().toLowerCase() === row.email).length === 1,
+  }));
   return {
-    contacts: selected.map((row) => {
-      const matches = users.filter((user) => user.email?.trim().toLowerCase() === row.email);
-      return {
-        ...row,
-        onRose: matches.length === 1,
-        userId: matches.length === 1 ? matches[0].userId : null,
-      };
-    }),
+    contacts:
+      typed === null || candidates.has(typed)
+        ? known
+        : [...known, { name: null, email: typed }].slice(0, CONTACT_LIMIT),
   };
 }

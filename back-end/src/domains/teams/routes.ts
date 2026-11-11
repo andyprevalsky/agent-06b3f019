@@ -76,10 +76,20 @@ router.patch(
 router.post(
   '/:id/invites',
   handle(async (req, res, userId) => {
-    const body = objectBody(req.body, ['email']);
+    const body = objectBody(req.body, ['email', 'retry']);
+    if (body.retry !== undefined && typeof body.retry !== 'boolean')
+      throw new TeamError(400, 'retry must be a boolean');
     res
       .status(201)
-      .json(await service.inviteMember(userId, uuid(req.params.id), normalizedEmail(body.email)));
+      .json(
+        await service.inviteMember(
+          userId,
+          uuid(req.params.id),
+          normalizedEmail(body.email),
+          undefined,
+          body.retry === true
+        )
+      );
   })
 );
 router.post(
