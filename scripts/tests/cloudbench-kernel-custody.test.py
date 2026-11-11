@@ -28,6 +28,7 @@ class GuestCustody(unittest.TestCase):
     def test_actual_guest_launch_blocks_allocation_but_preserves_reads_and_reuse(self):
         probe=r'''const assert=require('node:assert/strict');
 assert.equal(globalThis[Symbol.for('rose.test.kernelProxyCustody')],true,'guest backend must preload custody');
+assert.equal(globalThis[Symbol.for('rose.test.kernelResourceCustody')],true,'guest backend must refuse browser/profile allocation too');
 let calls=[];const guard=require(process.env.GUARD_FOR_TEST);
 guard.installKernelProxyCustody(async (url,init)=>{calls.push([String(url),init?.method||'GET']);return new Response('{}',{status:200});});
 (async()=>{for(const url of ['https://api.onkernel.com/proxies','https://api.kernel.sh/proxies','https://api.onkernel.com/browsers','https://api.onkernel.com/profiles'])assert.equal((await fetch(url,{method:'POST'})).status,409);

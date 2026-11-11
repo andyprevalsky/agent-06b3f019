@@ -242,7 +242,7 @@ class Inventory(Fixture):
         with patch.dict(os.environ, {'NODE_OPTIONS': '--max-old-space-size=128 --require=/controller-only/blackbox-kernel-proxy-custody.cjs',
                                      'CLOUDBENCH_KERNEL_PROXY_CUSTODY': '1'}):
             selected = g.kernel_custody_environment(self.root)
-            child = subprocess.run(['node', '-e', 'if(!globalThis[Symbol.for("rose.test.kernelResourceCustody")])process.exit(1);console.log("guard-loaded")'],
+            child = subprocess.run(['node', '-e', 'if(!globalThis[Symbol.for("rose.test.kernelProxyCustody")])process.exit(1);console.log("guard-loaded")'],
                                    env={**os.environ, **selected}, capture_output=True, text=True, timeout=8)
             self.assertEqual(child.returncode, 0, child.stderr)
             self.assertIn('guard-loaded', child.stdout)

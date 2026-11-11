@@ -11,12 +11,13 @@ async function main() {
   const original = globalThis.fetch;
   const originalBase = process.env.KERNEL_BASE_URL;
   let calls = 0;
-  globalThis.fetch = async () => {
+  const stub = async () => {
     calls += 1;
     return new Response(JSON.stringify({ items: [] }), {
       headers: { 'content-type': 'application/json' },
     });
   };
+  globalThis.fetch = stub;
   try {
     const require = createRequire(import.meta.url);
     const {
@@ -24,16 +25,42 @@ async function main() {
       installKernelProxyCustody,
     } = require('../../../scripts/blackbox-kernel-proxy-custody.cjs');
     // NODE_OPTIONS may have loaded the module before this test replaced fetch.
-    installKernelProxyCustody(globalThis.fetch);
+    installKernelProxyCustody(stub);
     const kernel = new Kernel({ apiKey: 'fixture', maxRetries: 0 });
     await assert.rejects(
       kernel.proxies.create({ type: 'mobile', name: 'fixture', config: { country: 'US' } }),
       /Blackbox proxy reuse required/
     );
     assert.equal(calls, 0, 'actual SDK create must be refused before provider fetch');
-    await assert.rejects(kernel.browsers.create({}), /Blackbox proxy reuse required/);
-    await assert.rejects(kernel.profiles.create({}), /Blackbox proxy reuse required/);
-    assert.equal(calls, 0, 'browser/profile SDK creates must also stop before fetch');
+    // Default (local blackbox) policy: live fixtures own and delete their
+    // browsers/profiles, so only shared proxy allocation is refused.
+    assert.equal(
+      Reflect.get(globalThis, Symbol.for('rose.test.kernelResourceCustody')),
+      false,
+      'default blackbox policy does not claim browser/profile custody'
+    );
+    await kernel.browsers.create({});
+    await kernel.profiles.create({});
+    assert.equal(calls, 2, 'fixture-owned browser/profile creates reach the provider');
+    calls = 0;
+    // Cloud guest policy: no fixture cleanup exists, so all three kinds are refused.
+    process.env.ROSE_KERNEL_ALL_RESOURCE_CUSTODY = '1';
+    try {
+      installKernelProxyCustody(stub);
+      assert.equal(Reflect.get(globalThis, Symbol.for('rose.test.kernelResourceCustody')), true);
+      // The SDK captures fetch at construction, so build a client after install.
+      const guest = new Kernel({ apiKey: 'fixture', maxRetries: 0 });
+      await assert.rejects(guest.browsers.create({}), /Blackbox proxy reuse required/);
+      await assert.rejects(guest.profiles.create({}), /Blackbox proxy reuse required/);
+      await assert.rejects(
+        guest.proxies.create({ type: 'mobile', name: 'fixture', config: { country: 'US' } }),
+        /Blackbox proxy reuse required/
+      );
+      assert.equal(calls, 0, 'all-resource policy stops browser/profile/proxy creates before fetch');
+    } finally {
+      delete process.env.ROSE_KERNEL_ALL_RESOURCE_CUSTODY;
+      installKernelProxyCustody(stub);
+    }
     await kernel.proxies.list({ query: 'existing', limit: 100 });
     assert.equal(calls, 1, 'listing shared proxies remains available');
     await kernel.proxies.retrieve('shared');

@@ -1366,7 +1366,7 @@ if ! gosu "$APP_USER" test -r "$REPO_DIR/back-end/scripts/blackbox-kernel-proxy-
     log "FATAL: cloud guest Kernel proxy custody preload is unreadable by stack user"
     finish 1
 fi
-STACK_ENV+=("NODE_OPTIONS=$KERNEL_PROXY_NODE_OPTIONS")
+STACK_ENV+=("NODE_OPTIONS=$KERNEL_PROXY_NODE_OPTIONS" "ROSE_KERNEL_ALL_RESOURCE_CUSTODY=1")
 fi
 # End cloud guest Kernel proxy custody
 log "launching stack (run.sh --benchmark) — base_port=$BASE_PORT wmh_port=$WMH_PORT workspace=$WORKSPACE_NAME simulate=$BENCH_SIMULATE"
