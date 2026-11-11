@@ -153,7 +153,7 @@ export async function routeToSupervisor(
   // The supervisor sends its response via Surge API.
   const abortController = registerSupervisorRun(userId);
 
-  const stopTyping = await startLinqTyping(fromPhone).catch(() => async () => undefined);
+  const typing = startLinqTyping(fromPhone).catch(() => async () => undefined);
   handleSmsSupervisorMessage({
     userId,
     phoneNumber: fromPhone,
@@ -179,6 +179,7 @@ export async function routeToSupervisor(
     )
     .finally(async () => {
       unregisterSupervisorRun(userId, abortController);
+      const stopTyping = await typing;
       await stopTyping();
     });
 }

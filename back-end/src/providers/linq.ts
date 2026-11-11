@@ -1,7 +1,7 @@
 /** Linq is the SMS surface's iMessage/RCS/SMS transport. Never retry ambiguous sends. */
 import { createHash, randomUUID } from 'node:crypto';
 import { createLogger } from './logger';
-import { getEphemeral, putEphemeral } from './sharedState';
+import { getEphemeral, putEphemeral, deleteEphemeral, withSerializedLock } from './sharedState';
 import { shouldMockMessagingSend } from './smsTransportMock';
 import { archiveJson } from './traceArchive';
 import { canonicalPhone } from './phoneAccountLookup';
@@ -15,6 +15,9 @@ export interface LinqChat {
   service: string;
 }
 export interface LinqSendOptions {
+  /** Reuse for retries of one logical operation. Omitted keys are new per call;
+   * legacy sendSms callers therefore have no cross-call retry deduplication. */
+  idempotencyKey?: string;
   archiveRootAgentId?: string;
   archiveContext?: Record<string, unknown>;
   abortSignal?: AbortSignal;
@@ -59,7 +62,6 @@ async function request(
     headers: {
       Authorization: `Bearer ${token}`,
       'Content-Type': 'application/json',
-      'Idempotency-Key': randomUUID(),
     },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     signal: options.abortSignal ?? AbortSignal.timeout(30000),
@@ -95,16 +97,36 @@ export async function sendLinqPayload(
         error: 'Linq credentials or sender number are not configured',
       };
     }
+    const idempotencyKey = options.idempotencyKey ?? message.idempotency_key ?? randomUUID();
+    if (
+      typeof idempotencyKey !== 'string' ||
+      idempotencyKey.trim() === '' ||
+      idempotencyKey.length > 255
+    ) {
+      return {
+        success: false,
+        definitiveFailure: true,
+        error: 'Linq idempotency key must contain 1–255 characters',
+      };
+    }
+    // Linq's documented deduplication field belongs inside message, not a header.
+    // Copy the caller's message so repeated operations do not mutate each other.
+    message = { ...message, idempotency_key: idempotencyKey };
     const chat = await getLinqChat(phone);
-    const path = chat ? `/chats/${encodeURIComponent(chat.chatId)}/messages` : '/chats';
-    const body = chat ? { message } : { from: process.env.LINQ_FROM_PHONE, to: [phone], message };
+    // Managed creation permits links in the first substantive message, unlike
+    // /chats. Do not bootstrap with a greeting or retry through another endpoint.
+    // This endpoint selects the line; only cache a returned configured-line chat.
+    const path = chat ? `/chats/${encodeURIComponent(chat.chatId)}/messages` : '/messages';
+    const body = chat ? { message } : { to: [phone], message };
     options.abortSignal?.throwIfAborted();
     options.onDeliveryAttempt?.();
     attempted = true;
     const response = await request(path, body, options);
     const result = (await response.json()) as {
+      from?: string;
       chat_id?: string;
-      chat?: { id?: string; message?: { id?: string } };
+      service?: string;
+      chat?: { id?: string; service?: string; message?: { id?: string; service?: string } };
       message?: { id?: string; service?: string };
       error?: unknown;
     };
@@ -137,10 +159,30 @@ export async function sendLinqPayload(
         error: 'Linq accepted the request without a message ID',
       };
     const chatId = result.chat_id ?? result.chat?.id ?? chat?.chatId;
+    if (
+      !chat &&
+      result.from !== undefined &&
+      canonicalPhone(result.from) !== canonicalPhone(process.env.LINQ_FROM_PHONE)
+    ) {
+      // Already accepted: returning a failure here could duplicate the message.
+      // Inbound ownership still requires LINQ_FROM_PHONE; never bind another
+      // sending line's chat into that configured line's cache.
+      log.warn('Linq managed send selected another line; chat not cached', {
+        from: result.from,
+        chatId,
+      });
+      return { success: true, messageSid };
+    }
     if (chatId)
       await rememberLinqChat(phone, {
         chatId,
-        service: result.message?.service ?? chat?.service ?? 'unknown',
+        service:
+          result.chat?.service ??
+          result.service ??
+          result.message?.service ??
+          result.chat?.message?.service ??
+          chat?.service ??
+          'unknown',
       }).catch((error: unknown) =>
         log.warn('Linq chat persistence failed after accepted send', { error: String(error) })
       );
@@ -190,27 +232,45 @@ export async function sendLinqReaction(messageId: string, emoji: string): Promis
   }
 }
 
-/** Refresh while the supervisor works and always clear on completion or failure. */
+/** Latest run owns typing across instances; completion cannot clear a newer run. */
 export async function startLinqTyping(phone: string): Promise<() => Promise<void>> {
   if (!isLinqEnabled(phone) || (await shouldMockMessagingSend('linq')) !== null)
     return async () => undefined;
   const chat = await getLinqChat(phone);
   if (!chat || chat.service !== 'iMessage') return async () => undefined;
   const path = `/chats/${encodeURIComponent(chat.chatId)}/typing`;
-  const refresh = async () => {
-    await request(path, undefined).catch((error: unknown) =>
-      log.warn('Linq typing failed', { error: String(error) })
+  const namespace = 'linq-typing-owner';
+  const key = chat.chatId;
+  const owner = randomUUID();
+  const lockKey = `${namespace}:${key}`;
+  const send = async (method = 'POST') => {
+    await request(path, undefined, { abortSignal: AbortSignal.timeout(3000) }, method).catch(
+      (error: unknown) => log.warn('Linq typing failed', { error: String(error) })
     );
   };
-  await refresh();
+  await withSerializedLock(lockKey, async () => {
+    await putEphemeral(namespace, key, { owner }, 120000);
+    await send();
+  });
   const timer = setInterval(() => {
-    void refresh();
+    void withSerializedLock(lockKey, async () => {
+      const current = await getEphemeral<{ owner: string }>(namespace, key);
+      if (current?.owner !== owner) {
+        clearInterval(timer);
+        return;
+      }
+      await putEphemeral(namespace, key, { owner }, 120000);
+      await send();
+    }).catch((error: unknown) => log.warn('Linq typing refresh failed', { error: String(error) }));
   }, 60000);
   timer.unref();
   return async () => {
     clearInterval(timer);
-    await request(path, undefined, {}, 'DELETE').catch((error: unknown) =>
-      log.warn('Linq typing stop failed', { error: String(error) })
-    );
+    await withSerializedLock(lockKey, async () => {
+      const current = await getEphemeral<{ owner: string }>(namespace, key);
+      if (current?.owner !== owner) return;
+      await deleteEphemeral(namespace, key);
+      await send('DELETE');
+    }).catch((error: unknown) => log.warn('Linq typing stop failed', { error: String(error) }));
   };
 }

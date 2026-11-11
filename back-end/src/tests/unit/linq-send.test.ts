@@ -6,6 +6,10 @@ async function main() {
   await mock.module('../../providers/sharedState', {
     namedExports: {
       getEphemeral: async (_namespace: string, key: string) => chats.get(key),
+      deleteEphemeral: async (_namespace: string, key: string) => {
+        chats.delete(key);
+      },
+      withSerializedLock: async (_key: string, fn: () => Promise<unknown>) => fn(),
       putEphemeral: async (_namespace: string, key: string, value: unknown) => {
         chats.set(key, value);
       },
@@ -44,18 +48,29 @@ async function main() {
   try {
     const first = await sendLinqMessage('+19729777432', 'Hello');
     assert.equal(first.messageSid, 'message');
-    assert.match(requests[0].url, /\/chats$/);
+    const firstMessage = requests[0].body.message as { idempotency_key: string };
+    assert.match(
+      firstMessage.idempotency_key,
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+    );
+    assert.match(requests[0].url, /\/v3\/messages$/);
     assert.deepEqual(requests[0].body, {
-      from: '+12054015445',
       to: ['+19729777432'],
-      message: { parts: [{ type: 'text', value: 'Hello' }] },
+      message: {
+        parts: [{ type: 'text', value: 'Hello' }],
+        idempotency_key: firstMessage.idempotency_key,
+      },
     });
     await rememberLinqChat('+19729777432', { chatId: 'chat', service: 'iMessage' });
-    await sendLinqMessage('+19729777432', 'Reply', { replyToMessageId: 'incoming' });
+    await sendLinqMessage('+19729777432', 'Reply', {
+      replyToMessageId: 'incoming',
+      idempotencyKey: 'reply-operation',
+    });
     assert.match(requests.at(-1)!.url, /\/chats\/chat\/messages$/);
     assert.deepEqual(requests.at(-1)!.body.message, {
       parts: [{ type: 'text', value: 'Reply' }],
       reply_to: { message_id: 'incoming' },
+      idempotency_key: 'reply-operation',
     });
     await sendLinqReaction('incoming', '❤️');
     assert.match(requests.at(-1)!.url, /\/messages\/incoming\/reactions$/);
