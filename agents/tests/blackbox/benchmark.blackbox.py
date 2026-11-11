@@ -887,7 +887,11 @@ def test_cloudbench_shell_controllers_require_fresh_identity_and_child_success()
     assert "CURRENT_RUN_ARTIFACT_SCRIPT" in driver
     assert "RUN_OUTPUT_MARKER" in driver
     assert 'git -C "$REPO_DIR" clean -ffd' in driver
-    assert driver.index('rm -rf "$CONTEXT_DIR"') < driver.index("applying uploaded local workspace patch")
+    assert 'rm -rf "$CONTEXT_DIR"' not in driver
+    assert 'os.rename(context, archive / "cloudbench")' in driver
+    assert 'archive = data / ("cloudbench-prior-context-" + token)' in driver
+    assert driver.index("CONTEXT_CUSTODY_READY=0") < driver.index("trap cleanup_stack EXIT")
+    assert driver.index("prepare_current_context ||", driver.index("# ── 0. Sanity:")) < driver.index("applying uploaded local workspace patch")
     assert "cloudbench-sync-prisma-client.sh" in driver
     assert 'bash "$SYNC_PRISMA_SCRIPT" "$REPO_DIR" "$APP_USER"' in driver
     assert "NEEDS_IMESSAGE_RELAY" in controller
@@ -915,6 +919,62 @@ def test_cloudbench_shell_controllers_require_fresh_identity_and_child_success()
     assert "create-worktree-patch.sh" in controller
     assert "remote-logs/cloudbench-driver.log" in controller
     assert "logs/worker.log" in controller
+
+
+def test_cloudbench_task_env_diagnostic_is_read_only():
+    """Inspecting task routing must not acquire or replace execution evidence."""
+    repo_root = Path(__file__).resolve().parents[3]
+    driver = repo_root / "scripts" / "cloudbench-run.sh"
+    for mode, token in (("1", ""), ("1", "diagnostic-owner"), ("0", ""), ("TRUE", "")):
+        with tempfile.TemporaryDirectory() as directory:
+            data = Path(directory)
+            repo = data / "repo"
+            subprocess.run(["git", "init", "-q", str(repo)], check=True, timeout=10)
+            catalog = repo / "agents/benchmarks"
+            catalog.mkdir(parents=True)
+            for name in ("tasks.json", "polar_tasks.json"):
+                (catalog / name).write_bytes((repo_root / "agents/benchmarks" / name).read_bytes())
+            context = repo / ".context/cloudbench"
+            context.mkdir(parents=True)
+            (context / "services.json").write_text('{"preserve":"original"}')
+            (data / f"cloudbench-shutdown-{token or 'boot'}.request").write_text("preserve")
+
+            def inventory():
+                return {
+                    str(path.relative_to(data)): (
+                        path.stat().st_ino,
+                        path.stat().st_mode,
+                        hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else None,
+                    )
+                    for path in data.rglob("*")
+                }
+
+            before = inventory()
+            result = subprocess.run(
+                ["bash", str(driver)],
+                env={
+                    **os.environ,
+                    "CLOUDBENCH_PRINT_TASK_ENV": mode,
+                    "CLOUDBENCH_REPO_DIR": str(repo),
+                    "CLOUDBENCH_DATA_DIR": str(data),
+                    "CLOUDBENCH_RUN_TOKEN": token,
+                    "CLOUDBENCH_REQUIRE_EXECUTION_PROVENANCE": "0",
+                    "CLOUDBENCH_CATALOG_SCRIPT": str(repo_root / "scripts/cloudbench_catalog.py"),
+                    "CLOUDBENCH_SEED_BUDGET_LIB": str(repo_root / "scripts/lib/cloudbench-seed-budget.sh"),
+                    "BENCH_TASKS": "chat-mode",
+                    "BENCH_TASKS_B64": "",
+                },
+                text=True,
+                capture_output=True,
+                timeout=10,
+            )
+            assert inventory() == before, (mode, token, result.stderr)
+            if mode == "1":
+                assert result.returncode == 0, result.stderr
+                assert "stack:FAST_MODE_CACHE_USE_LOCAL=1" in result.stdout
+            else:
+                assert result.returncode != 0
+                assert "context custody admission failed" in result.stdout + result.stderr
 
 
 def test_cloud_fleet_controller_detaches_by_default():
@@ -27552,6 +27612,7 @@ async def run_all_tests():
         "required_attachment_upload_failure_is_fatal",
         test_required_attachment_upload_failure_is_fatal,
     )
+    r.record("cloudbench_task_env_diagnostic_is_read_only", test_cloudbench_task_env_diagnostic_is_read_only)
     r.record(
         "cloud_fleet_controller_detaches_by_default",
         test_cloud_fleet_controller_detaches_by_default,

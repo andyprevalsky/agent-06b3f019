@@ -22,7 +22,29 @@ def scan_roots(workers, proc=Path('/proc'), *, birth_guard=False, excluded=()):
         birth = None
         if birth_guard:
             try:
-                birth = (entry / 'stat').read_text().rsplit(')', 1)[1].split()[19]
+                initial = (entry / 'stat').read_text().rsplit(')', 1)[1].split()
+                birth = initial[19]
+                if initial[0] == 'Z':
+                    if initial[17] != '1':
+                        raise ProcessAccessError('exited leader still has a thread group')
+                    # An exited process may remain unreaped. Prove that it has
+                    # no filesystem references before omitting it from custody.
+                    try:
+                        os.readlink(entry / 'cwd')
+                    except FileNotFoundError:
+                        pass
+                    else:
+                        raise ProcessAccessError('exited process retains a working directory')
+                    try:
+                        if list((entry / 'fd').iterdir()) or (entry / 'maps').read_bytes():
+                            raise ProcessAccessError('exited process retains file references')
+                        final = (entry / 'stat').read_text().rsplit(')', 1)[1].split()
+                        if final[0] != 'Z' or final[19] != birth or final[17] != '1':
+                            raise ProcessAccessError('exited process identity changed')
+                    except (FileNotFoundError, ProcessLookupError) as error:
+                        if entry.exists():
+                            raise ProcessAccessError('exited process ownership is unreadable') from error
+                    continue
             except FileNotFoundError:
                 continue
             except (OSError, IndexError) as error:

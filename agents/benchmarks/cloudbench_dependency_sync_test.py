@@ -29115,7 +29115,7 @@ def test_migration_resume_preserves_interrupted_pool_handoff(tmp_path: Path, reg
         assert record.read_bytes() == before_record
 
 
-def _private_source_preflight_fixture(tmp_path: Path, *, private: bool = True, corrupt: str = ""):
+def _private_source_preflight_fixture(tmp_path: Path, *, private: bool = True, corrupt: str = "", snapshot_empty_reads: int = 0):
     """Replay real source/stop/snapshot/dependency admission without a provider."""
     tmp_path.mkdir(parents=True, exist_ok=True)
     owner = "a" * 32
@@ -29215,6 +29215,7 @@ def _private_source_preflight_fixture(tmp_path: Path, *, private: bool = True, c
         ("snapshots.json", snapshots),
     ]:
         (tmp_path / name).write_text(json.dumps(value))
+    (tmp_path / "snapshot-empty-reads").write_text(str(snapshot_empty_reads))
     calls = tmp_path / "calls"
     calls.touch()
     common = tmp_path / "common"
@@ -29272,7 +29273,14 @@ FLY() {{
   case "$1 $2" in
     "machines list") cat "$FIXTURE/machines.json" ;;
     "volumes list") cat "$FIXTURE/volumes.json" ;;
-    "volume snapshots") cat "$FIXTURE/snapshots.json" ;;
+    "volume snapshots")
+      n="$(cat "$FIXTURE/snapshot-read-count" 2>/dev/null || echo 0)"
+      n=$((n+1)); echo "$n" > "$FIXTURE/snapshot-read-count"
+      if [ "$n" -le "$(cat "$FIXTURE/snapshot-empty-reads")" ]; then
+        printf '[]\\n'
+      else
+        cat "$FIXTURE/snapshots.json"
+      fi ;;
     *) echo 'unexpected provider mutation' >&2; return 88 ;;
   esac
 }}
@@ -29301,6 +29309,25 @@ def test_private_fleet_source_avoids_active_shared_warm(tmp_path: Path) -> None:
     assert "machine update" not in calls and "machine stop" not in calls
     assert "MAINTENANCE" not in calls
     assert "vol_shared" not in calls, "private source looked up shared snapshots"
+
+
+
+@pytest.mark.parametrize("empty_reads", [1, 2, 11])
+def test_private_fleet_source_waits_for_exact_snapshot_listing(tmp_path: Path, empty_reads: int) -> None:
+    result, calls = _private_source_preflight_fixture(tmp_path, snapshot_empty_reads=empty_reads)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "SELECTED=feedface000001:vol_private:vs_private" in result.stdout
+    assert calls.count("volume snapshots list vol_private") == empty_reads + 1
+    assert "vol_shared" not in calls and "MAINTENANCE" not in calls
+    assert "machine update" not in calls and "machine stop" not in calls
+
+
+def test_private_fleet_source_missing_snapshot_exhausts_bounded_reads(tmp_path: Path) -> None:
+    result, calls = _private_source_preflight_fixture(tmp_path, snapshot_empty_reads=12)
+    assert result.returncode != 0 and "SELECTED=" not in result.stdout
+    assert "snapshot identity missing or duplicate" in result.stderr
+    assert calls.count("volume snapshots list vol_private") == 12
+    assert "MAINTENANCE" not in calls and "machine update" not in calls and "machine stop" not in calls
 
 
 def test_private_fleet_source_keeps_shared_default(tmp_path: Path) -> None:
@@ -33025,7 +33052,9 @@ def test_fresh_role_bootstraps_before_repo_writes_and_ready_work(tmp_path: Path,
     repo = tmp_path / "repo"
     if role == "primary":
         source = DRIVER_SCRIPT.read_text()
-        body = source[source.index("# ── 0. Sanity:") : source.index("# ── 1. git-sync")]
+        custody_start = source.index("CONTEXT_CUSTODY_READY=0\n")
+        custody_end = source.index("\n}\n", custody_start) + len("\n}\n")
+        body = source[custody_start:custody_end] + "\n" + source[source.index("# ── 0. Sanity:") : source.index("# ── 1. git-sync")]
     else:
         source = WORKER_SCRIPT.read_text()
         body = source[source.index("# ── Sync the exact ref") : source.index("# Every autoscaled worker clone")]
@@ -33050,6 +33079,7 @@ REPO="$REPO_DIR"
 CONTEXT_DIR="$REPO_DIR/.context/cloudbench"
 DATA_DIR={shlex.quote(str(tmp_path))}
 RUN_OUTPUT_MARKER="$DATA_DIR/output-marker"
+CLOUDBENCH_RUN_TOKEN=fixture-fresh-role
 CLOUDBENCH_START_BARRIER=""
 APP_USER=""
 REF={ref}
@@ -33098,6 +33128,7 @@ printf ready > "$REPO_DIR/ready"
     assert subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip() == ref
     if role == "primary":
         assert (repo / ".context/cloudbench").is_dir()
+        assert (tmp_path / "cloudbench-prior-context-fixture-fresh-role").is_dir()
     else:
         assert (repo / "value").read_text() == "patched source"
         assert len(dependency_calls.read_text().splitlines()) == 2

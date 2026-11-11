@@ -12556,4 +12556,118 @@ class ExplicitAgentCardOverride(unittest.TestCase):
             self.assertFalse(any('agent-payment-' in arg for arg in seen['argv']))
 
 
+
+class ProcessScanExitedChildren(unittest.TestCase):
+    def test_privileged_scan_preserves_positive_unreaped_child_absence(self):
+        import deploy_test_process_scan as scan
+        self.assertNotEqual(os.geteuid(), 0)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.assertTrue(scan.privileged_scan([root])['quiescent'])
+            pid = os.fork()
+            if pid == 0:
+                os.chdir(root)
+                os._exit(0)
+            try:
+                wait_until(lambda: Path(f'/proc/{pid}/stat').read_text().rsplit(')', 1)[1].split()[0] == 'Z',
+                           timeout=3, description='owned child exited before scan')
+                self.assertTrue(scan.privileged_scan([root])['quiescent'])
+            finally:
+                os.waitpid(pid, 0)
+            self.assertTrue(scan.privileged_scan([root])['quiescent'])
+
+    def test_privileged_scan_rejects_exited_leader_with_live_thread(self):
+        import select
+        import deploy_test_process_scan as scan
+        program = ("import ctypes,os,sys,threading\n"
+                   "def worker():\n"
+                   "    fd=os.open(sys.argv[1]+'/held',os.O_CREAT|os.O_RDWR,0o600)\n"
+                   "    print('READY',flush=True)\n"
+                   "    os.read(0,1)\n"
+                   "    os.close(fd)\n"
+                   "threading.Thread(target=worker).start()\n"
+                   "ctypes.CDLL(None).pthread_exit(None)\n")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            child = subprocess.Popen([sys.executable, '-c', program, str(root)], cwd=root,
+                                     stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                     text=True)
+            try:
+                wait_until(lambda: bool(select.select([child.stdout], [], [], 0)[0]),
+                           timeout=5, description='owned live thread ready')
+                self.assertEqual(child.stdout.readline().strip(), 'READY')
+                def leader_exited():
+                    fields = Path(f'/proc/{child.pid}/stat').read_text().rsplit(')', 1)[1].split()
+                    return fields[0] == 'Z' and int(fields[17]) > 1
+                wait_until(leader_exited, timeout=3, description='leader exited with live worker')
+                with self.assertRaises(ValueError):
+                    scan.privileged_scan([root])
+            finally:
+                child.stdin.close()
+                try:
+                    child.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    child.kill()
+                    child.wait(timeout=5)
+                    raise
+                child.stdout.close()
+                child.stderr.close()
+            self.assertEqual(child.returncode, 0)
+            self.assertTrue(scan.privileged_scan([root])['quiescent'])
+
+    def test_zombie_scan_requires_empty_references_and_stable_identity(self):
+        import deploy_test_process_scan as scan
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            proc = root / 'proc'
+            entry = proc / '2000000000'
+            entry.mkdir(parents=True)
+            (entry / 'fd').mkdir()
+            (entry / 'maps').write_bytes(b'')
+            fields = ['Z'] + ['0'] * 18 + ['10']
+            fields[17] = '1'
+            body = '2000000000 (fixture) ' + ' '.join(fields)
+            (entry / 'stat').write_text(body)
+            scan.scan_roots([root], proc, birth_guard=True)
+            for artifact in ('cwd', 'fd/3', 'maps'):
+                with self.subTest(artifact=artifact):
+                    if artifact == 'cwd':
+                        (entry / artifact).symlink_to(root)
+                    else:
+                        (entry / artifact).write_text(str(root))
+                    with self.assertRaises(ValueError):
+                        scan.scan_roots([root], proc, birth_guard=True)
+                    if artifact == 'maps':
+                        (entry / artifact).write_bytes(b'')
+                    else:
+                        (entry / artifact).unlink()
+            (entry / 'maps').unlink()
+            with self.assertRaises(ValueError):
+                scan.scan_roots([root], proc, birth_guard=True)
+            (entry / 'maps').write_bytes(b'')
+            (entry / 'fd').rmdir()
+            with self.assertRaises(ValueError):
+                scan.scan_roots([root], proc, birth_guard=True)
+            (entry / 'fd').mkdir()
+            threaded = fields.copy()
+            threaded[17] = '2'
+            (entry / 'stat').write_text('2000000000 (fixture) ' + ' '.join(threaded))
+            with self.assertRaises(ValueError):
+                scan.scan_roots([root], proc, birth_guard=True)
+            (entry / 'stat').write_text(body)
+            original = Path.read_text
+            reads = 0
+            def changed(path, *args, **kwargs):
+                nonlocal reads
+                if path == entry / 'stat':
+                    reads += 1
+                    return body if reads == 1 else body.rsplit(' ', 1)[0] + ' 11'
+                return original(path, *args, **kwargs)
+            with patch.object(Path, 'read_text', changed), self.assertRaises(ValueError):
+                scan.scan_roots([root], proc, birth_guard=True)
+            (entry / 'stat').write_text(body.replace(') Z ', ') S '))
+            with self.assertRaises(ValueError):
+                scan.scan_roots([root], proc, birth_guard=True)
+
+
 if __name__ == '__main__': unittest.main()

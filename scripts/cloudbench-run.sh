@@ -377,10 +377,13 @@ PY
     CONTEXT_CUSTODY_READY=1
 }
 
-if [ -d "$REPO_DIR/.git" ]; then
-    prepare_current_context || { log "FATAL: context custody admission failed; preserving evidence"; exit 1; }
+# Environment inspection acquires no execution context and installs no cleanup traps.
+if [ "${CLOUDBENCH_PRINT_TASK_ENV:-0}" != 1 ]; then
+    if [ -d "$REPO_DIR/.git" ]; then
+        prepare_current_context || { log "FATAL: context custody admission failed; preserving evidence"; exit 1; }
+    fi
+    trap cleanup_stack EXIT
 fi
-trap cleanup_stack EXIT
 
 request_graceful_shutdown() {
     local signal_rc=0 signal_ignored_mask="unreadable" signal_caught_mask="unreadable" signal_process_group="unreadable"
@@ -418,13 +421,15 @@ request_graceful_shutdown() {
     # EXIT cleanup still drains run.sh (if started) before publishing the ack.
     exit 143
 }
-trap request_graceful_shutdown HUP INT TERM
+if [ "${CLOUDBENCH_PRINT_TASK_ENV:-0}" != 1 ]; then
+    trap request_graceful_shutdown HUP INT TERM
 
-# The status service persists a request before signalling, so a request racing
-# driver launch is consumed here rather than starting a benchmark after teardown.
-if [ -e "$SHUTDOWN_REQUEST_FILE" ]; then
-    log "shutdown request preceded driver startup; honoring it without launching a benchmark"
-    exit 143
+    # The status service persists a request before signalling, so a request racing
+    # driver launch is consumed here rather than starting a benchmark after teardown.
+    if [ -e "$SHUTDOWN_REQUEST_FILE" ]; then
+        log "shutdown request preceded driver startup; honoring it without launching a benchmark"
+        exit 143
+    fi
 fi
 
 # stack_wait_budget_seconds: the box's fallback-safe stack-health ceiling. A

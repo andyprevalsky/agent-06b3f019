@@ -1193,18 +1193,42 @@ PYCONFIG
 # with jitter) before concluding that the donor has no usable snapshot.
 # Sets SNAPSHOTS_JSON (the last valid listing, empty when no read was valid) and SNAPSHOT_LIST_ATTEMPTS_USED.
 list_donor_snapshots() {
-    local attempt candidate max_attempts=12 pause
+    local attempt candidate max_attempts=12 pause exact_snapshot="${1:-}"
     SNAPSHOTS_JSON=""
     SNAPSHOT_LIST_ATTEMPTS_USED=0
     for attempt in $(seq 1 "$max_attempts"); do
         SNAPSHOT_LIST_ATTEMPTS_USED="$attempt"
-        candidate="$(FLY volume snapshots list "$VOL_ID" -a "$APP" --json 2>/dev/null || true)"
+        if [ -n "$exact_snapshot" ]; then
+            candidate="$(FLY volume snapshots list "$VOL_ID" -a "$APP" --json)" || return 1
+            if ! printf '%s' "$candidate" | python3 -c '
+import json,sys
+rows=json.load(sys.stdin)
+assert isinstance(rows,list) and all(isinstance(row,dict) for row in rows)
+ids=[row.get("id") for row in rows]
+assert all(isinstance(value,str) and value for value in ids) and len(set(ids))==len(ids)
+' 2>/dev/null; then
+                echo "private fleet snapshot inventory invalid" >&2
+                return 1
+            fi
+        else
+            candidate="$(FLY volume snapshots list "$VOL_ID" -a "$APP" --json 2>/dev/null || true)"
+        fi
         if printf '%s' "$candidate" | python3 -c 'import json,sys; sys.exit(0 if isinstance(json.load(sys.stdin), list) else 1)' 2>/dev/null; then
             SNAPSHOTS_JSON="$candidate"
             # Fly can briefly return a valid but empty/still-hydrating list
             # while older completed snapshots exist. A valid JSON response is
             # not enough to conclude that the donor has no usable snapshot.
-            if [ -n "$(printf '%s' "$SNAPSHOTS_JSON" | python3 "$SNAPSHOT_SELECTOR_SCRIPT" 2>/dev/null || true)" ]; then
+            if [ -n "$exact_snapshot" ]; then
+                # Existence alone ends the read wait; the source verifier below
+                # still rejects duplicates, incomplete snapshots and stale identity.
+                if printf '%s' "$SNAPSHOTS_JSON" | python3 -c '
+import json,sys
+rows=json.load(sys.stdin)
+raise SystemExit(0 if any(isinstance(row,dict) and row.get("id")==sys.argv[1] for row in rows) else 1)
+' "$exact_snapshot"; then
+                    return 0
+                fi
+            elif [ -n "$(printf '%s' "$SNAPSHOTS_JSON" | python3 "$SNAPSHOT_SELECTOR_SCRIPT" 2>/dev/null || true)" ]; then
                 return 0
             fi
         fi
@@ -16264,10 +16288,13 @@ private_fleet_source_admission() {
     }
 }
 validate_private_fleet_source() {
-    local machines volumes snapshots
+    local machines volumes snapshots VOL_ID="$PRIVATE_SOURCE_VOLUME_ID"
+    # Reuse the normal bounded snapshot-list schedule for the exact private pin.
+    # Read machine and volume identity after the wait, then verify every field.
+    list_donor_snapshots "$PRIVATE_SOURCE_SNAPSHOT" || return 1
+    snapshots="$SNAPSHOTS_JSON"
     machines="$(FLY machines list -a "$APP" --json)" || return 1
     volumes="$(FLY volumes list -a "$APP" --json)" || return 1
-    snapshots="$(FLY volume snapshots list "$PRIVATE_SOURCE_VOLUME_ID" -a "$APP" --json)" || return 1
     printf '{"machines":%s,"volumes":%s,"snapshots":%s}' "$machines" "$volumes" "$snapshots" \
         | python3 "$SOURCE_HELPER" verify "$PRIVATE_SOURCE_FILE" --parked-memory "$WARM_PARKED_VM_MEMORY" --sha256 "$PRIVATE_SOURCE_SHA256"
 }

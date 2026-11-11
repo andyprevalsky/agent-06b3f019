@@ -419,6 +419,7 @@ PROC_OBSERVATION = "proc-observation"
 
 GATES = (
     Gate("deploy-test-cycle", ("python3", "scripts/tests/deploy-test-cycle.test.py"), exclusive=PROC_OBSERVATION),
+    Gate("deploy-focused10-settlement", ("python3", "scripts/tests/deploy-focused10-settlement.test.py"), exclusive=PROC_OBSERVATION),
     Gate("deploy-test-plan", ("python3", "scripts/tests/deploy-test-plan.test.py"), exclusive=PROC_OBSERVATION),
     Gate("deploy-test-worker", ("python3", "scripts/tests/deploy-test-worker.test.py")),
     Gate("deploy-test-semantic", ("python3", "scripts/tests/deploy-test-semantic.test.py")),

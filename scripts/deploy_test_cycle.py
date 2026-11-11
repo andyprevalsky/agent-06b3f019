@@ -1248,6 +1248,9 @@ def bounded_read(path, label: str) -> dict:
 def receipt_owner(gate: str, receipt: dict):
     """Owner retained by a gate's latest receipt. New receipts carry it directly; a legacy incomplete
     receipt without one is resolved from its recorded adapter result, identity-checked, failing closed."""
+    if receipt.get('kind') == 'focused10-negative-observation-v1':
+        from deploy_test_focused10_settlement import observation_owner
+        return observation_owner(receipt)
     if receipt.get("lingering_group") or receipt.get("cleanup_owner"):
         owner = receipt.get("cleanup_owner") or {}
         return owner.get("worker_cleanup_owner") if isinstance(owner.get("worker_cleanup_owner"), dict) else (owner or {"lingering": True})
@@ -1843,6 +1846,9 @@ def cloud_smoke_blocked(gate: dict, state: dict, held: dict) -> dict:
 
 
 def settled_round49_missing_request(state, directory, gate, request_path):
+    from deploy_test_focused10_settlement import recognized as focused10_recognized
+    if focused10_recognized(state, directory, gate, request_path):
+        return True
     from deploy_test_round49_retirement import recognized
     if recognized(state, directory, gate, request_path):
         return True
@@ -3127,7 +3133,7 @@ def verify_saved(directory: Path, root: Path, expect_head: str | None = None) ->
 def main(argv: list[str] | None = None) -> int:
     """Dispatch a validated cycle transition and persist its evidence."""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=['init', 'run', 'resume', 'status', 'triage', 'focus', 'refresh', 'rebind-local', 'prepare-bindings', 'triage-quick', 'triage-independent', 'repair-independent', 'attribute-flaky', 'initial-independent', 'final-independent', 'rca', 'verify', 'report', 'resolve', 'complete', 'reexecute', 'reconcile', 'standing-skip', 'collect-backend', 'accept-omitted-custody', 'prepare-agentcard-renewal', 'renew-agentcard-warning', 'prepare-historical-no-retry', 'prepare-historical-import', 'admit-historical-import', 'import-historical-custody', 'import-historical-no-retry'])
+    parser.add_argument("action", choices=['init', 'run', 'resume', 'status', 'triage', 'focus', 'refresh', 'rebind-local', 'prepare-bindings', 'triage-quick', 'triage-independent', 'repair-independent', 'attribute-flaky', 'initial-independent', 'final-independent', 'rca', 'verify', 'report', 'resolve', 'complete', 'reexecute', 'reconcile', 'standing-skip', 'collect-backend', 'accept-omitted-custody', 'prepare-agentcard-renewal', 'renew-agentcard-warning', 'prepare-historical-no-retry', 'prepare-historical-import', 'admit-historical-import', 'import-historical-custody', 'import-historical-no-retry', 'settle-focused10'])
     parser.add_argument('--donor-state', type=Path,
                         help='import-historical-no-retry: immutable independent donor cycle snapshot')
     parser.add_argument('--exclude-root', type=Path, action='append', default=[],
@@ -3163,6 +3169,8 @@ def main(argv: list[str] | None = None) -> int:
         plan = read(args.plan)
         directory = args.state_dir.resolve()
         with exclusive(directory):
+            from deploy_test_focused10_settlement import pending_guard
+            pending_guard(directory, args.action)
             journals = [directory / 'settlement-journal.json',
                         *sorted(directory.glob('settlement-round*-journal.json'))]
             for journal in journals:
@@ -3203,6 +3211,12 @@ def main(argv: list[str] | None = None) -> int:
                 with cancellation_handlers():
                     while not resume_independent and state["phase"] in {"quick", "initial", "focused", "failed-gates", "final"}:
                         run_phase(plan, state, directory, args.root, args.rca_launcher)
+            elif args.action == 'settle-focused10':
+                if args.input is None:
+                    raise ValueError('--input exact reviewed focused10 negative authority required')
+                from deploy_test_focused10_settlement import settle
+                settle(state, directory, args.root, read(args.input), sys.modules[__name__],
+                       lambda candidate: write(state_path, candidate))
             elif args.action == "collect-backend":
                 if args.input is None:
                     raise ValueError("--input sealed collection specification required")
