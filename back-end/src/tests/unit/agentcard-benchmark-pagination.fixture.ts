@@ -41,6 +41,40 @@ export async function testBenchmarkPagination(
     ]);
   }
 
+  // An uncounted full page may advance, but cannot select an identity before total closure.
+  {
+    const all = [
+      ...Array.from({ length: 100 }, (_, i) => ({ id: `uncounted-${i}` })),
+      { id: 'verified-after-total' },
+    ];
+    const calls: string[] = [];
+    const resolved = await resolveBenchmarkCardholderId(
+      ['verified-after-total'],
+      async (name, args) => {
+        calls.push(`${name}:${String(args?.offset ?? args?.cardholder_id ?? '')}`);
+        if (name === 'list_cardholders') {
+          const offset = Number(args?.offset);
+          assert.equal(args?.limit, 100);
+          return {
+            structuredContent: {
+              cardholders: all.slice(offset, offset + 100),
+              ...(offset === 0 ? {} : { total: all.length }),
+            },
+          };
+        }
+        assert.equal(name, 'get_cardholder_kyc_status');
+        assert.equal(args?.cardholder_id, 'verified-after-total');
+        return { structuredContent: { kyc_status: 'verified' } };
+      }
+    );
+    assert.equal(resolved, 'verified-after-total');
+    assert.deepEqual(calls, [
+      'list_cardholders:0',
+      'list_cardholders:100',
+      'get_cardholder_kyc_status:verified-after-total',
+    ]);
+  }
+
   // A foreign configured ID is never queried or accepted merely for reporting verified.
   {
     const resolved = await resolveBenchmarkCardholderId(['foreign'], async (name, args) => {
