@@ -5,6 +5,7 @@ import {
   AgentCardOrgRuntime,
   AgentCardOrgRuntimeError,
 } from '../../providers/agentcard/org-runtime';
+import { resolveBenchmarkCardholderId } from '../../providers/agentcard/benchmark-float';
 
 const CREDENTIAL_ENV = [
   'AGENTCARD_ORG_MCP_ACCESS_TOKEN',
@@ -371,6 +372,143 @@ async function main(): Promise<void> {
     assert.equal(mutationThrottleRequests, 3, 'a mutation must keep its three throttle attempts');
 
     console.log('PASS AgentCard org reads keep backing off a throttle within the budget');
+    // The org tool defaults to the newest 50 records. A verified preferred identity may be older.
+    // Synthetic identities retain the actually observed content + structuredContent envelope.
+    const inventory = Array.from({ length: 101 }, (_, index) => ({
+      id: `inventory-${index}`,
+      email: index === 100 ? 'agentcard-benchmark@roselabs.ai' : `fixture-${index}@example.test`,
+    }));
+    const pageRequests: Array<Record<string, unknown>> = [];
+    const statusIds: string[] = [];
+    const deadlines: Array<number | undefined> = [];
+    const inventoryRuntime = new AgentCardOrgRuntime(undefined, async (_input, init) => {
+      const request = JSON.parse(String(init?.body)) as {
+        params: { name: string; arguments: Record<string, unknown> };
+      };
+      const { name, arguments: args } = request.params;
+      let structuredContent: Record<string, unknown>;
+      if (name === 'list_cardholders') {
+        pageRequests.push(args);
+        const limit = typeof args.limit === 'number' ? args.limit : 50;
+        const offset = typeof args.offset === 'number' ? args.offset : 0;
+        const cardholders = inventory.slice(offset, offset + limit);
+        structuredContent = {
+          message: `${inventory.length} cardholder(s); showing ${cardholders.length}.`,
+          cardholders,
+          total: inventory.length,
+        };
+      } else {
+        assert.equal(name, 'get_cardholder_kyc_status', 'resolution must remain read-only');
+        const id = String(args.cardholder_id);
+        statusIds.push(id);
+        structuredContent = {
+          message: 'Synthetic verification result',
+          status: id === 'inventory-100' ? 'verified' : 'not_started',
+        };
+      }
+      return new Response(
+        JSON.stringify({
+          jsonrpc: '2.0',
+          id: 1,
+          result: {
+            content: [{ type: 'text', text: JSON.stringify(structuredContent) }],
+            structuredContent,
+          },
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } }
+      );
+    });
+    const preferred = await resolveBenchmarkCardholderId([], (name, args, deadlineAtMs) => {
+      deadlines.push(deadlineAtMs);
+      return inventoryRuntime.callTool(name, args, deadlineAtMs);
+    });
+    assert.equal(
+      preferred,
+      'inventory-100',
+      'verified preference beyond the first 100 must resolve'
+    );
+    assert.deepEqual(pageRequests, [
+      { limit: 100, offset: 0 },
+      { limit: 100, offset: 100 },
+    ]);
+    assert.deepEqual(
+      statusIds,
+      ['inventory-100'],
+      'preference order applies to the full inventory'
+    );
+    assert.equal(
+      new Set(deadlines).size,
+      1,
+      'all pagination and KYC reads share the original deadline'
+    );
+
+    const incompleteInventories = [
+      {
+        label: 'duplicate page',
+        pages: [
+          { cardholders: [{ id: 'first' }], total: 2 },
+          { cardholders: [{ id: 'first' }], total: 2 },
+        ],
+        error: /pagination did not advance/,
+      },
+      {
+        label: 'changed inventory',
+        pages: [
+          { cardholders: [{ id: 'first' }], total: 2 },
+          { cardholders: [{ id: 'second' }], total: 3 },
+        ],
+        error: /inventory changed during pagination/,
+      },
+      {
+        label: 'empty incomplete page',
+        pages: [{ cardholders: [], total: 1 }],
+        error: /pagination did not cover its total/,
+      },
+    ];
+    for (const scenario of incompleteInventories) {
+      let reads = 0;
+      await assert.rejects(
+        resolveBenchmarkCardholderId([], async (name) => {
+          assert.equal(
+            name,
+            'list_cardholders',
+            'incomplete inventory must not select any identity'
+          );
+          const page = scenario.pages[reads++];
+          assert.ok(page, 'malformed pagination must stop without another read');
+          return { structuredContent: page };
+        }),
+        scenario.error,
+        scenario.label
+      );
+      assert.equal(reads, scenario.pages.length);
+    }
+
+    const realNow = Date.now;
+    let pageClock = realNow();
+    let successfulPageReads = 0;
+    try {
+      Date.now = () => pageClock;
+      await assert.rejects(
+        resolveBenchmarkCardholderId([], async (name, _args, deadlineAtMs) => {
+          assert.equal(name, 'list_cardholders');
+          successfulPageReads += 1;
+          if (successfulPageReads > 1) {
+            throw new Error('another page was requested after the original deadline');
+          }
+          assert.ok(deadlineAtMs !== undefined);
+          pageClock = deadlineAtMs + 1;
+          return { structuredContent: { cardholders: inventory.slice(0, 100) } };
+        }),
+        /pagination exceeded its read deadline/
+      );
+      assert.equal(successfulPageReads, 1, 'successful pages must not rearm the original budget');
+    } finally {
+      Date.now = realNow;
+    }
+    console.log(
+      'PASS AgentCard benchmark selection covers all pages and refuses incomplete inventories'
+    );
   } finally {
     for (const name of CREDENTIAL_ENV) {
       const value = original[name];
