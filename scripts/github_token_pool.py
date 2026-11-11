@@ -18,10 +18,14 @@ next; exhausted members rank last, soonest reset first.
 
   python3 scripts/github_token_pool.py pick [--resource core|graphql|both] [--repo-root DIR]
   python3 scripts/github_token_pool.py status [--repo-root DIR]
+  python3 scripts/github_token_pool.py app-token [--min-ttl SECONDS] [--repo-root DIR]
 
 `pick` prints only the chosen token, for READ-ONLY calls (REST/curl or the real
 `gh` binary); writes that act as Andy (pushes, PRs, repo creation) must use
 GITHUB_TOKEN directly. `status` prints one line per member and never a token.
+`app-token` prints only the GitHub App installation token, minting a fresh one when
+the cached token expires within --min-ttl seconds; cloud guests that fetch minutes
+later use it because the devbox daemon rotates and revokes the user credential.
 """
 
 from __future__ import annotations
@@ -193,16 +197,17 @@ def _write_cache(cache: Path, payload: Mapping[str, object]) -> None:
 
 def app_token(
     app_id: str, installation_id: str, private_key_pem: str, base_url: str | None = None,
-    timeout: float = DEFAULT_TIMEOUT_SECONDS,
+    timeout: float = DEFAULT_TIMEOUT_SECONDS, min_ttl: float = APP_REFRESH_MARGIN_SECONDS,
 ) -> str | None:
-    """An unexpired installation token: the private cache, else a fresh mint. None on failure."""
+    """An installation token valid for more than `min_ttl` seconds: the private cache, else a
+    fresh mint. None on failure."""
     cache = _app_cache_path()
     key = f"{app_id}:{installation_id}"
     try:
         if not (_owned_private(cache.parent, directory=True) and _owned_private(cache, directory=False)):
             raise OSError("cache is absent or not private")
         cached = json.loads(cache.read_text())
-        if cached.get("key") == key and float(cached["expires_at"]) - time.time() > APP_REFRESH_MARGIN_SECONDS:
+        if cached.get("key") == key and float(cached["expires_at"]) - time.time() > max(min_ttl, APP_REFRESH_MARGIN_SECONDS):
             return str(cached["token"])
     except (OSError, ValueError, KeyError, TypeError):
         pass
@@ -225,6 +230,30 @@ def app_token(
         return None
     _write_cache(cache, {"key": key, "token": token, "expires_at": expires_at})
     return token
+
+
+def configured_app_token(
+    repo_root: Path | None = None, environ: Mapping[str, str] | None = None,
+    base_url: str | None = None, min_ttl: float = APP_REFRESH_MARGIN_SECONDS,
+) -> str | None:
+    """The GitHub App installation token alone, valid for more than `min_ttl` seconds.
+
+    Unlike the devbox's rotating user credential, an installation token is minted
+    from the App key here and is never revoked by the devbox daemon, so it stays
+    valid for a cloud guest that fetches minutes after the controller resolved it.
+    None when the App is not configured or the mint fails."""
+    root = REPO_ROOT if repo_root is None else Path(repo_root)
+    env = os.environ if environ is None else environ
+    files = [read_env_file(root / relative) for relative in ENV_FILES]
+    app_id, installation_id, key_b64 = (_lookup(key, env, files) for key in APP_KEYS)
+    if not (app_id and installation_id and key_b64):
+        return None
+    try:
+        pem = base64.b64decode(key_b64, validate=True).decode()
+    except ValueError:
+        print("github_token_pool: GITHUB_APP_PRIVATE_KEY_B64 is not valid base64 text", file=sys.stderr)
+        return None
+    return app_token(app_id, installation_id, pem, base_url, min_ttl=min_ttl)
 
 
 def members(
@@ -408,9 +437,21 @@ def main(argv: Sequence[str] | None = None) -> int:
     pick_parser = commands.add_parser("pick", help="print the token with the most remaining quota")
     pick_parser.add_argument("--resource", choices=RESOURCES, default="both")
     status_parser = commands.add_parser("status", help="print each member's quota (never the token)")
-    for sub in (pick_parser, status_parser):
+    app_parser = commands.add_parser(
+        "app-token", help="print the GitHub App installation token valid for at least --min-ttl seconds",
+    )
+    app_parser.add_argument("--min-ttl", type=float, default=APP_REFRESH_MARGIN_SECONDS)
+    for sub in (pick_parser, status_parser, app_parser):
         sub.add_argument("--repo-root", type=Path, default=None)
     args = parser.parse_args(argv)
+
+    if args.command == "app-token":
+        token = configured_app_token(args.repo_root, min_ttl=args.min_ttl)
+        if not token:
+            print("github_token_pool: no GitHub App installation token available", file=sys.stderr)
+            return 1
+        print(token)
+        return 0
 
     pool = members(args.repo_root)
     if args.command == "status":

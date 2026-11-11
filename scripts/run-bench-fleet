@@ -16580,13 +16580,14 @@ warm_deps_preflight() {
     echo "♻️  warm snapshot dep trees unproven/stale → central refresh ONCE (instead of ×${#BENCHES[@]} per-clone rsyncs) ..."
     # Export a live controller token so --refresh-deps never depends solely on
     # the durable Fly GITHUB_TOKEN secret (often missing/stale on the warm box).
-    if _refresh_tok_b64="$(controller_github_token_b64 2>/dev/null)"; then
-        export CLOUDBENCH_GITHUB_TOKEN_B64="$_refresh_tok_b64"
-    fi
-    unset _refresh_tok_b64
-    if CLOUDBENCH_LOCAL_PATCH_SOURCE="${FLEET_PATCH_FILE:-}" \
-       CLOUDBENCH_LOCAL_PATCH_SHA256="${FLEET_PATCH_SHA256:-}" \
-       bash "$RUN_BENCH_CLOUD_BIN" --refresh-deps --ref "$BENCH_REF" 2>&1 | while IFS= read -r _l; do printf '   %s\n' "$_l"; done; then
+    # Scope it to this command: the pipeline's left side runs in a subshell, so
+    # the export never pins one token into every later bench guest, where a
+    # credential rotation or the App token's expiry would revoke it.
+    _refresh_tok_b64="$(controller_github_token_b64 2>/dev/null)" || _refresh_tok_b64=""
+    if { [ -z "$_refresh_tok_b64" ] || export CLOUDBENCH_GITHUB_TOKEN_B64="$_refresh_tok_b64"
+         CLOUDBENCH_LOCAL_PATCH_SOURCE="${FLEET_PATCH_FILE:-}" \
+         CLOUDBENCH_LOCAL_PATCH_SHA256="${FLEET_PATCH_SHA256:-}" \
+         bash "$RUN_BENCH_CLOUD_BIN" --refresh-deps --ref "$BENCH_REF"; } 2>&1 | while IFS= read -r _l; do printf '   %s\n' "$_l"; done; then
         s_node=""; s_py=""; s_epoch=""; new_snap=""
         [ -f "$state" ] && read -r s_node s_py s_epoch new_snap < "$state" || true
         snap_epoch="$(snapshot_created_epoch "$new_snap")"
@@ -17857,8 +17858,8 @@ CONTROLLER_GITHUB_TOKEN_B64_CACHE="${CLOUDBENCH_GITHUB_TOKEN_B64:-}"
 controller_github_token_b64() {
     local token=""
     if [ -n "$CONTROLLER_GITHUB_TOKEN_B64_CACHE" ]; then
-        # Cached value may be stale empty b64 from a prior empty gh auth token —
-        # only reuse when decode is non-empty.
+        # An explicit request-scoped pin from the launcher. Reuse it only when
+        # it decodes non-empty (a prior empty gh auth token produced empty b64).
         token="$(printf '%s' "$CONTROLLER_GITHUB_TOKEN_B64_CACHE" | base64 -d 2>/dev/null || true)"
         if [ -n "$token" ]; then
             printf '%s' "$CONTROLLER_GITHUB_TOKEN_B64_CACHE"
@@ -17866,12 +17867,11 @@ controller_github_token_b64() {
         fi
         CONTROLLER_GITHUB_TOKEN_B64_CACHE=""
     fi
-    # Prefer live controller credentials (git insteadOf / gh hosts) over a
-    # stale injected GITHUB_TOKEN — see cloudbench_controller_github_token.
-    token="$(cloudbench_controller_github_token "$ROOT_DIR" 2>/dev/null || true)"
+    # Resolve per guest, never cached: workers are staged throughout a long run
+    # and the App token expires hourly while the devbox credential rotates.
+    token="$(cloudbench_guest_github_token "$ROOT_DIR" 2>/dev/null || true)"
     [ -n "$token" ] || return 1
-    CONTROLLER_GITHUB_TOKEN_B64_CACHE="$(printf '%s' "$token" | base64 | tr -d '\n')"
-    printf '%s' "$CONTROLLER_GITHUB_TOKEN_B64_CACHE"
+    printf '%s' "$token" | base64 | tr -d '\n'
 }
 
 worker_is_tracked() {  # worker_is_tracked <bench-output-dir> <worker-id>

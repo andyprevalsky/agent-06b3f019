@@ -1556,6 +1556,53 @@ cloudbench_controller_github_token() {
   cloudbench_resolve_controller_github_token "$@"
 }
 
+# A cloud guest fetches its ref minutes after the controller hands it a token
+# (Machine boot, credential handoff). On boxes.dev the controller credentials
+# above (Git helper, gh, .env GITHUB_TOKEN/GITHUB_DISPATCH_TOKEN) are the
+# daemon's user credential, which it rotates and revokes several times an hour:
+# a guest fetching after a rotation got `could not read Username` and the run
+# hit the infra stop (smoke/agent-payment-setup-resume, PR #1927 round 5).
+# Guests therefore get the GitHub App installation token, minted from the App
+# key with at least CLOUDBENCH_GUEST_GITHUB_TOKEN_MIN_TTL_SECONDS left; nothing
+# on the devbox revokes it. It is validated by a Contents read before use.
+cloudbench_guest_github_token_can_read_repo() {  # <token>
+  local repo_api="${CLOUDBENCH_GITHUB_REPO_API:-https://api.github.com/repos/Rose-Ai-Labs/rose}"
+  [ -n "${1:-}" ] || return 1
+  # The header goes through stdin so the token never appears in argv.
+  printf 'Authorization: Bearer %s\n' "$1" \
+    | curl -fsS -o /dev/null --connect-timeout 5 --max-time 15 -H @- \
+        -H 'User-Agent: rose-cloudbench' -H 'Accept: application/vnd.github+json' \
+        "$repo_api" 2>/dev/null
+}
+
+cloudbench_guest_durable_github_token() {  # [workspace-root]
+  local workspace_root="${1:-${CLOUDBENCH_FLEET_ROOT:-.}}" token
+  local min_ttl="${CLOUDBENCH_GUEST_GITHUB_TOKEN_MIN_TTL_SECONDS:-2700}"
+  [ -f "$workspace_root/scripts/github_token_pool.py" ] || return 1
+  token="$(cd "$workspace_root" && timeout 60 python3 scripts/github_token_pool.py \
+    app-token --min-ttl "$min_ttl" 2>/dev/null)" || return 1
+  cloudbench_guest_github_token_can_read_repo "$token" || return 1
+  printf '%s' "$token"
+}
+
+# Token handed to a cloud guest for its private-repo fetch. An explicit
+# request-scoped CLOUDBENCH_GITHUB_TOKEN_B64 pin wins; then the durable App
+# token; otherwise the controller chain, with a warning that rotation can
+# revoke it before the guest fetches. Never prints the token anywhere else.
+cloudbench_guest_github_token() {  # [workspace-root]
+  local workspace_root="${1:-${CLOUDBENCH_FLEET_ROOT:-.}}" token=""
+  if [ -n "${CLOUDBENCH_GITHUB_TOKEN_B64:-}" ]; then
+    token="$(printf '%s' "$CLOUDBENCH_GITHUB_TOKEN_B64" | base64 -d 2>/dev/null || true)"
+    [ -n "$token" ] && { printf '%s' "$token"; return 0; }
+  fi
+  if token="$(cloudbench_guest_durable_github_token "$workspace_root")" && [ -n "$token" ]; then
+    printf '%s' "$token"
+    return 0
+  fi
+  echo "WARN: no GitHub App installation token for guest fetch; using the controller credential, which a devbox rotation can revoke before the guest fetches" >&2
+  cloudbench_resolve_controller_github_token "$workspace_root"
+}
+
 cloudbench_github_basic_auth_header() {  # <token>
   local token="$1"
   [ -n "$token" ] || return 1

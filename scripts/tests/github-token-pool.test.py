@@ -300,6 +300,27 @@ class GithubTokenPoolTests(unittest.TestCase):
         self.assertEqual(len(APP_MINTS), minted + 1)
         self.assertEqual(cache.stat().st_mode & 0o777, 0o600)
 
+    def test_app_token_command_honours_min_ttl_for_late_guest_fetches(self) -> None:
+        # Cloud guests fetch minutes after the controller hands them a token. A
+        # cached App token with only minutes left must be re-minted for them.
+        APP_MINTS.clear()
+        APP_MINT_STATUS["777"] = 201
+        APP_EXPIRES_IN["seconds"] = 1200  # 20 minutes: fine for pick, too short for a guest
+        env = self.app_env()
+        env["GITHUB_APP_TOKEN_CACHE"] = os.environ["GITHUB_APP_TOKEN_CACHE"]
+        first = self.cli("app-token", environ=env)
+        self.assertEqual((first.returncode, first.stdout.strip()), (0, "app-token-1"), first.stderr)
+        again = self.cli("app-token", environ=env)
+        self.assertEqual(again.stdout.strip(), "app-token-1", "the default margin reuses a 20-minute token")
+        late = self.cli("app-token", "--min-ttl", "2700", environ=env)
+        self.assertEqual((late.returncode, late.stdout.strip()), (0, "app-token-2"),
+                         "a token expiring before --min-ttl is minted again")
+        self.assertEqual(len(APP_MINTS), 2)
+        self.assertNotIn("tok-primary", first.stdout + late.stdout, "only the App member is ever printed")
+        missing = self.cli("app-token", environ={"GITHUB_TOKEN": "tok-primary"})
+        self.assertEqual((missing.returncode, missing.stdout), (1, ""), "no App configured: fail, print nothing")
+        APP_EXPIRES_IN["seconds"] = 3600
+
     def tearDown(self) -> None:
         os.environ.pop("GITHUB_APP_TOKEN_CACHE", None)
 
