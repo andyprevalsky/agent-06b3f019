@@ -182,7 +182,7 @@ def test_commit_fixture_missing_origin_fails(tmp_path):
 
 @quarantine(
     since="2026-11-10",
-    repair="pending-handoff:be7609ba9f2a48879ca405c3ba6a49a3",
+    repair="https://boxes.dev/thread/thr_d0600bd7048f45cc9763b229460e6026",
     error="FileNotFoundError: [Errno 2] No such file or directory: '/tmp/pytest-of-runner/pytest-14/test_commit_fixture_rewritten_0/commit-locally-no-push/repo/.git/objects/maintenance.lock'",
     evidence='.context/rca-playwright/benchmark-flake/findings.json',
 )

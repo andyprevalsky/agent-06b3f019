@@ -312,7 +312,7 @@ test(
   quarantine(
     {
       since: '2026-11-11',
-      repair: 'pending-handoff:4e2eb84f5fdf415d9da6ce9e54b04f8d',
+      repair: 'https://boxes.dev/thread/thr_31af2156ceec4f51ad11a8f5f6d68449',
       error:
         'particles-worker: [{"rule":"fps-p50","message":"worker 1 p50 30 fps (min 55)","value":30,"limit":55}]',
       evidence: '.context/rca-playwright/final-ddd3/stability-examples/findings.json',

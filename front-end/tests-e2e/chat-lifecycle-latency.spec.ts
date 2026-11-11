@@ -315,7 +315,7 @@ test.describe('chat full-lifecycle latency', () => {
     quarantine(
       {
         since: '2026-11-11',
-        repair: 'pending-handoff:94df2671c16646b2a03733c471396977',
+        repair: 'https://boxes.dev/thread/thr_0faf3a3a515445b7b83eb89cdabf8fbf',
         error: 'Error: web_search sample 2 missed milestones',
         evidence: '.context/rca-playwright/final-ddd3/latency-web-search/findings.json',
       },
