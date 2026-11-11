@@ -396,15 +396,14 @@ def test_rating_keeps_the_merchant_scale_shown_on_the_page():
         "#12 in Hotels · 4.5 stars": "4.5 stars",
         "Top 10 · 4.6 stars": "4.6 stars",
         "250 guests · 4.5 stars": "4.5 stars",
-        "#1 of 25": "1 stars",
         "4 out of 5": "4 stars",
         "4.5/5": "4.5 stars",
     }
     # Owner decision 2026-11-08: no fixed-scale limit, so any other scale is kept as written.
-    other_scales_kept_as_written = ("9.2 out of 10", "9.2/10 Wonderful", "Rated 8.7 of 10", "94%", "250 guests",
+    other_scales_kept_as_written = ("9.2 out of 10", "9.2/10 Wonderful", "Rated 8.7 of 10", "94%",
                                     # A low score on a non-5 scale keeps its scale (CodeRabbit PR #1865).
                                     "3 out of 10", "3/10", "2 / 10 rating", "3%", "5 %")
-    still_rejected = ("N/A", "312 reviews")
+    still_rejected = ("N/A", "312 reviews", "250 guests", "#1 of 25")
     for model in (PaymentLineItem, WriteLockPurchaseItem):
         # 3) 5-point outputs are identical to the pre-fix validator.
         for submitted, normalized in unchanged_five_point.items():
@@ -487,6 +486,36 @@ def test_rating_any_scale_is_kept_as_written_and_nonsense_is_rejected():
             except ValidationError:
                 continue
             raise AssertionError(f"{model.__name__} accepted {nonsense!r} as rating {parsed.rating!r}")
+
+
+def test_rating_requires_a_score_expression_without_imposing_a_scale():
+    from pydantic import ValidationError
+    from browser_tools.schemas import PaymentLineItem, WriteLockPurchaseItem
+
+    valid_item = _sample_tool_call()["line_items"][0]
+    for model in (PaymentLineItem, WriteLockPurchaseItem):
+        base = {**valid_item, "title": valid_item["name"]}
+        for value in ("In stock: 12", "2026", "In stock: 4", "250 guests", "#1 of 25", "In stock 1 of 3 left"):
+            try:
+                model.model_validate({**base, "rating": value})
+            except ValidationError:
+                continue
+            raise AssertionError(f"{model.__name__} accepted non-score {value!r}")
+        for value in ("9.2 out of 10", "94%", "Score: 2026", "2026/3000", "3 of 10", "Rated 8.7 of 10", "4.8 stars out of 10", "4.8⭐/10", "8.7 score", "8.7 rating", "3.5 points out of 10", "Score: 3 on a scale of 10", "Score: 3", "3 stars (out of 10)"):
+            assert model.model_validate({**base, "rating": value}).rating == value
+        assert model.model_validate({**base, "rating": "Stock 4 · 4.8 stars"}).rating == "4.8 stars"
+        assert model.model_validate({**base, "rating": None}).rating is None
+
+    from browser_tools.schemas import BrowserToolArgsValidationError, validate_browser_tool_args
+
+    for value in ("In stock: 12", "2026"):
+        request = _sample_tool_call()
+        request["line_items"][0]["rating"] = value
+        try:
+            validate_browser_tool_args("request_payment_card", request)
+        except BrowserToolArgsValidationError:
+            continue
+        raise AssertionError(f"provider boundary accepted non-score {value!r}")
 
 
 def test_card_request_without_product_url_is_accepted_and_given_urls_stay_checked():
@@ -1358,6 +1387,7 @@ async def run_all_tests():
         "rating_any_scale_kept_nonsense_rejected",
         test_rating_any_scale_is_kept_as_written_and_nonsense_is_rejected,
     )
+    result.record("rating_score_expression", test_rating_requires_a_score_expression_without_imposing_a_scale)
     result.record(
         "card_request_without_product_url",
         test_card_request_without_product_url_is_accepted_and_given_urls_stay_checked,

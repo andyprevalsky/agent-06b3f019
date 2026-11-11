@@ -486,6 +486,30 @@ if [ "${CLOUDBENCH_FRESH_VOLUME:-0}" = 1 ]; then
     }
 fi
 
+# Fresh ordinary fleet primaries must boot the exact dependency-proven image.
+# machine clone has no image override; apply this to the owned inert Machine
+# with the existing --skip-start update before its boot barrier can release.
+fleet_fresh_boot_image_args() {
+    FLEET_BOOT_IMAGE_ARGS=()
+    local image="${CLOUDBENCH_FLEET_BOOT_IMAGE:-}"
+    if [ "${CLOUDBENCH_FRESH_VOLUME:-0}" = 1 ] \
+        && [ "${CLOUDBENCH_COLD_PRIMARY_BOOTSTRAP:-0}" != 1 ] \
+        && [ -z "${CLOUDBENCH_SOURCE_MANIFEST:-}" ]; then
+        if [ -z "${FLEET_MACHINE_ID:-}" ] || [ -z "${CLOUDBENCH_FLEET_RUN_TOKEN:-}" ] \
+            || [ "${CLOUDBENCH_ENV_VERIFIED:-0}" != 1 ] \
+            || [ "${CLOUDBENCH_BOOT_TRANSPORT:-config}" = staged ] \
+            || ! [[ "$image" =~ ^[^[:space:]@]+@sha256:[0-9a-f]{64}$ ]]; then
+            echo "Fresh fleet bootstrap lacks an immutable admitted image" >&2
+            return 2
+        fi
+        FLEET_BOOT_IMAGE_ARGS=(--image "$image")
+    elif [ -n "$image" ]; then
+        echo "Unexpected fresh-image handoff outside ordinary fresh fleet bootstrap" >&2
+        return 2
+    fi
+}
+fleet_fresh_boot_image_args || exit 2
+
 if [ "$IMAGE_BUILD_BUILDER_REQUESTED" = 1 ] && [ "$MODE" != build-image ]; then
     echo "--builder requires --build-image" >&2
     exit 2
@@ -5807,7 +5831,7 @@ if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ]; then
     if BOOT_UPDATE_MACHINE_ID="$mid" \
         BOOT_UPDATE_HOST_UNRESPONSIVE_MARKER="$OUT_DIR/boot-config-host-unresponsive" \
         boot_update_with_capacity_recovery "$_update_log" \
-          flyctl machine update "$mid" -a "$APP" "${_pool_shape_args[@]}" "${_envargs[@]}" \
+          flyctl machine update "$mid" -a "$APP" "${FLEET_BOOT_IMAGE_ARGS[@]}" "${_pool_shape_args[@]}" "${_envargs[@]}" \
           "${_lane_args[@]}" "${_boot_file_args[@]}" \
           --command "$_boot_command" --skip-health-checks --skip-start --yes; then
         _upd=1

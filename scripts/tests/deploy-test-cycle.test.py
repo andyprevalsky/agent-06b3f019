@@ -11598,6 +11598,32 @@ class UserDeployQuarantine(unittest.TestCase):
         import hashlib
         self.assertFalse((root/'.context/deploy-cloud'/hashlib.sha256(token.encode()).hexdigest()).exists())
 
+    def test_existing_quarantine_namespace_never_claims_preadmission_cleanup(self):
+        import hashlib
+        import deploy_test_cloud as cloud
+        for marker in ('present', 'missing'):
+            for kind in ('directory', 'dangling-symlink'):
+                with self.subTest(marker=marker, kind=kind):
+                    q,root,gate,state,directory,custody=self.fixture()
+                    request=dict(token='e'*32,source=state['source'],checks=[q.USER_DEPLOY_CASE],skips={})
+                    namespace=root/'.context/deploy-cloud'/hashlib.sha256(request['token'].encode()).hexdigest()
+                    namespace.parent.mkdir(parents=True)
+                    if kind=='directory':
+                        namespace.mkdir();(namespace/'retained-native-marker').write_bytes(b'preserve exact prior evidence')
+                    else:
+                        namespace.symlink_to(root/'not-created',target_is_directory=True)
+                    reasons={q.USER_DEPLOY_CASE:q.USER_DEPLOY_REASON} if marker=='present' else {}
+                    with patch.object(q,'catalog_deploy_quarantines',return_value=reasons), \
+                         patch.object(cloud,'source',side_effect=AssertionError('source crossed quarantine refusal')), \
+                         patch.object(cloud,'origin_fetchable',side_effect=AssertionError('origin crossed quarantine refusal')):
+                        with self.assertRaisesRegex(ValueError,'quarantine.*existing request namespace') as caught:
+                            cloud.execute(request,root)
+                        self.assertIs(type(caught.exception),ValueError)
+                    if kind=='directory':
+                        self.assertEqual(b'preserve exact prior evidence',(namespace/'retained-native-marker').read_bytes())
+                    else:
+                        self.assertTrue(namespace.is_symlink());self.assertFalse(namespace.exists())
+
     def test_new_policy_requires_exact_catalog_inventory_and_old_source_stays_neutral(self):
         q,root,gate,state,directory,custody=self.fixture()
         policy=q.user_deploy_exclusions(root,state['source'],gate,'a'*64,state['environment'])

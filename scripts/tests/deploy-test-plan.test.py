@@ -43,6 +43,23 @@ class Selection(unittest.TestCase):
         self.mock.stop()
         self.workers.cleanup()
 
+    def test_prior_cycle_without_smoke_retains_normal_selection(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder);directory=root/'.context/cycle';directory.mkdir(parents=True)
+            prior={'source':{'head':'original','digest':'original'},'gates':[{'name':'typescript'}]}
+            state={'source':prior['source'],'plan':prior,'plan_digest':p.digest(prior)}
+            p.write(directory/'cycle.json',state)
+            selected=['case-one','case-two']
+            actual,metadata=p.retained_quarantine_inventory(selected,root,directory)
+            self.assertIs(actual,selected);self.assertIsNone(metadata)
+            state['plan_digest']='changed';p.write(directory/'cycle.json',state)
+            with self.assertRaisesRegex(ValueError,'source/plan binding changed'):
+                p.retained_quarantine_inventory(selected,root,directory)
+            prior['gates']=[{'name':'smoke'},{'name':'smoke'}]
+            state['plan_digest']=p.digest(prior);p.write(directory/'cycle.json',state)
+            with self.assertRaisesRegex(ValueError,'one recorded native smoke gate'):
+                p.retained_quarantine_inventory(selected,root,directory)
+
     def test_untouched_frontend_omitted(self):
         plan=p.select(self.template,['back-end/src/one.ts'],self.result,self.bindings)
         self.assertEqual({'lint','be','smoke','format','typescript','backend-structural'},

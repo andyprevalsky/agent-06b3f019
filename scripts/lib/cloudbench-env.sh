@@ -2554,14 +2554,13 @@ cloudbench_warm_image_deps_match() {  # <machine-id> <node-fp> <python-fp>
 import json, re, sys
 
 machine_id, node, python, key = sys.argv[1:]
-image = ""
+image = "unknown"
 try:
     machines = [m for m in json.load(sys.stdin) if isinstance(m, dict) and m.get("id") == machine_id]
     if len(machines) != 1:
         raise ValueError("ambiguous donor")
     config = machines[0].get("config") or {}
     image = config.get("image") if isinstance(config.get("image"), str) else ""
-    print(image or "unknown")
     fields = str((config.get("metadata") or {}).get(key, "")).split()
     if not image or len(fields) != 3 or fields[1:] != [node, python]:
         raise ValueError("unproven image dependencies")
@@ -2571,9 +2570,22 @@ try:
     # Same rule as activation: a digest-pinned proof must match exactly; a tag
     # proof matches the tag the provider resolved to a digest.
     if image == proven or ("@" not in proven and image.split("@", 1)[0] == proven):
+        configured_digest = image.partition("@")[2]
+        reference = machines[0].get("image_ref")
+        if reference is not None and not isinstance(reference, dict):
+            print(image or "unknown")
+            raise SystemExit(2)
+        resolved_digest = (reference or {}).get("digest")
+        digest = resolved_digest or configured_digest
+        if (not isinstance(digest, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", digest)
+                or (configured_digest and configured_digest != digest)):
+            print(image or "unknown")
+            raise SystemExit(2)
+        print(image.split("@", 1)[0] + "@" + digest)
         raise SystemExit(0)
 except (TypeError, ValueError, AttributeError):
     pass
+print(image or "unknown")
 raise SystemExit(1)
 ' "$1" "$2" "$3" "$CLOUDBENCH_WARM_IMAGE_DEPS_KEY"
 }

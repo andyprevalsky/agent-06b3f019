@@ -178,6 +178,8 @@ def retained_quarantine_inventory(selected: list[str], root: Path,
     if state.get('plan_digest') != digest(prior) or state.get('source') != prior.get('source'):
         raise ValueError('quarantine inventory recorded source/plan binding changed')
     gates = [gate for gate in prior['gates'] if gate.get('name') == 'smoke']
+    if not gates:
+        return selected, None
     if len(gates) != 1:
         raise ValueError('quarantine inventory requires one recorded native smoke gate')
     gate = gates[0]

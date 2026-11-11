@@ -738,6 +738,9 @@ async def test_state_fetch_restore_with_a_live_stale_reader_reconnects_once():
                     )
                     assert not session.is_cdp_connected and not session.is_reconnecting
                     assert not root._message_handler_task.done()  # the stale reader is still running
+                    # Custody records every root assignment synchronously, including during the read
+                    # and between polls, retaining strong references so object IDs cannot be reused.
+                    clients_before_restore = set(session._native_custody.clients)
                     state = await asyncio.wait_for(service.get_browser_state(include_screenshot=False), 60)
                     assert state["url"] is not None
                     clients: list = []  # strong references, so identity checks cannot alias a freed client
@@ -759,6 +762,14 @@ async def test_state_fetch_restore_with_a_live_stale_reader_reconnects_once():
                     assert len(clients) == 1 and multiplexer.upstream_connections_opened == 2, (
                         f"reconnect storm: {len(clients)} root CDP clients and "
                         f"{multiplexer.upstream_connections_opened} upstream dials within 5s of the restore"
+                    )
+                    created_during_restore = [
+                        client for key, client in session._native_custody.clients.items()
+                        if key not in clients_before_restore
+                    ]
+                    assert len(created_during_restore) == 1 and created_during_restore[0] is session._cdp_client_root, (
+                        f"reconnect storm: {len(created_during_restore)} root CDP clients created "
+                        "during the state read and complete 5s restore observation window"
                     )
                     assert session.is_cdp_connected and not session.is_reconnecting
                     assert (await service.get_browser_state(include_screenshot=False))["url"] is not None
