@@ -7348,6 +7348,33 @@ class Cycle(unittest.TestCase):
         entry = state['reconciled_owners'][proof['receipt_sha256']]
         self.assertEqual(state['source'], entry['validation_source']); self.assertFalse(entry['credit_granted'])
 
+    def test_isolated_renewal_skips_strictly_reconciled_prepare_refusal(self):
+        # PR1682 round 29: a later campaign refused at cleanup-ticket prepare dispatched nothing.
+        state, paths, proof, gate, packet, original, folder, successor = self.clean_successor_renewal_state()
+        renewed = {**proof, 'validation_source':copy.deepcopy(state['source'])}
+        refused = dict(gate=gate['name'], token='prepare-refused', status='FAIL', complete=False, executed=True,
+                       cases=dict.fromkeys(gate['checks'], 'UNVERIFIED'), source=copy.deepcopy(state['source']))
+        state['attempts'].append(dict(phase='focused', results=[refused]))
+        import deploy_test_native_cleanup as native
+        entry = dict(kind=native.KIND, gate=gate['name'], token='prepare-refused', credit_granted=False,
+                     proof=dict(layout='campaign-cleanup-prepare-v1', receipt_sha256='f'*64))
+        state['reconciled_owners']['f'*64] = entry
+        for name, mutate in (('normal-layout', lambda e, r: e['proof'].update(layout='campaign-v1')),
+                             ('credited', lambda e, r: e.update(credit_granted=True)),
+                             ('executed-pass', lambda e, r: r['cases'].update({gate['checks'][0]: 'PASS'})),
+                             ('unreconciled', lambda e, r: e.update(token='other'))):
+            candidate = copy.deepcopy(state)
+            mutate(candidate['reconciled_owners']['f'*64], candidate['attempts'][-1]['results'][0])
+            before = copy.deepcopy(candidate)
+            with self.subTest(name=name), self.assertRaises(ValueError):
+                c.reconcile(candidate, original['token'], renewed)
+            self.assertEqual(before, candidate)
+        before = copy.deepcopy(state)
+        c.reconcile(state, original['token'], renewed)
+        self.assertEqual(state['source'], state['reconciled_owners'][proof['receipt_sha256']]['validation_source'])
+        self.assertEqual(before['attempts'], state['attempts'])
+        self.assertFalse(state['reconciled_owners'][proof['receipt_sha256']]['credit_granted'])
+
     def test_isolated_successor_renewal_rejects_bad_or_tampered_successors_atomically(self):
         state, paths, proof, gate, packet, original, folder, successor = self.clean_successor_renewal_state()
         renewed = {**proof, 'validation_source':copy.deepcopy(state['source'])}

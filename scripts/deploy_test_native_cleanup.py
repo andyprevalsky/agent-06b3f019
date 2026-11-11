@@ -1706,6 +1706,19 @@ def prelaunch_refusal(row):
             and all(v == 'UNVERIFIED' for v in row['cases'].values()))
 
 
+def prepare_refusal_reconciled(state, row):
+    """A campaign refused at cleanup-ticket prepare dispatched no controller; once its strict
+    campaign-cleanup-prepare-v1 proof is recorded it is not a successor execution."""
+    if not isinstance(row, dict) or row.get('complete') is not False or not row.get('token'):
+        return False
+    entries = [e for e in state.get('reconciled_owners', {}).values() if e.get('token') == row['token']]
+    return (len(entries) == 1 and entries[0].get('kind') == KIND and entries[0].get('purpose') is None
+            and entries[0].get('credit_granted') is False
+            and entries[0].get('proof', {}).get('layout') == 'campaign-cleanup-prepare-v1'
+            and entries[0].get('proof', {}).get('purpose') is None
+            and all(v in {'UNVERIFIED', 'SKIP'} for v in (row.get('cases') or {'': 'PASS'}).values()))
+
+
 def renew_isolated_validation(state, request_token, proof):
     """Renew only the next source of an already verified original operation."""
     from deploy_test_cycle import CANCEL, receipt_owner, source
@@ -1726,7 +1739,8 @@ def renew_isolated_validation(state, request_token, proof):
     # A pre-launch admission refusal (run_phase's exception row: no request token, never
     # executed) launched no worker and owns no resource, so it is not a successor execution.
     rows = [r for a in state.get('attempts', []) for r in a.get('results', [])
-            if r.get('gate') == prior['gate'] and not prelaunch_refusal(r)]
+            if r.get('gate') == prior['gate'] and not prelaunch_refusal(r)
+            and not prepare_refusal_reconciled(state, r)]
     latest = rows[-1] if rows else None
     if latest != receipt:
         if latest is not None and latest.get('complete') is False:
