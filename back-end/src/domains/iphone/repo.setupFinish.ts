@@ -45,7 +45,8 @@ export async function finishSetup(
   claim: SetupClaim,
   input: SetupInput,
   result: SetupOutcomeResult | null,
-  usageRecordId?: string
+  usageRecordId?: string,
+  failureCode?: string
 ) {
   return leases.transaction(async (tx) => {
     const device = await lockSetupCommit(tx, claim);
@@ -62,7 +63,7 @@ export async function finishSetup(
     const errorCode = !valid
       ? 'phone_setup_stale'
       : !succeeded
-        ? 'phone_setup_verifier_unavailable'
+        ? (failureCode ?? 'phone_setup_verifier_unavailable')
         : null;
     const usage =
       result !== null && 'usage' in result && usageRecordId !== undefined
