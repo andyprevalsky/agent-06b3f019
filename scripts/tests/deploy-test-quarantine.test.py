@@ -438,10 +438,16 @@ class ReleaseReport(unittest.TestCase):
         entry = {'attribution': 'NOT_INTRODUCED', 'evidence': 'rca-1', 'marker': 'tests/test_unit.py',
                  'post_merge': {**packet, 'repair_owner': REPAIR}}
         base = {'id': 'c' * 32, 'gate': 'structural', 'unit': 'suite-job', 'source': {'head': 'a' * 40}}
-        failure = 'FAIL: test_flaky_unit (__main__.Suite.test_flaky_unit)\nTraceback ...\n'
+        failure = ('FAIL: test_flaky_unit (__main__.Suite.test_flaky_unit)\nTraceback (most recent call last):\n'
+                   '  File "/w/tests/test_unit.py", line 4, in test_flaky_unit\n')
         recorded = q.validate_attribution({**base, 'detail': 'passed on rerun\n' + failure}, entry, self.root)
         self.assertEqual('tests/test_unit.py', recorded['marker'])
-        for detail in (None, 'no unittest header', failure.replace('Suite.', 'Other.')):
+        dotted = 'FAIL: test_flaky_unit (tests.test_unit.Suite.test_flaky_unit)\n'
+        self.assertEqual('tests/test_unit.py',
+                         q.validate_attribution({**base, 'detail': dotted}, entry, self.root)['marker'])
+        # Same class + method in ANOTHER module, or a __main__ id with no tie to the marker file, is refused.
+        for detail in (None, 'no unittest header', failure.replace('Suite.', 'Other.'),
+                       dotted.replace('tests.test_unit.', 'tests.test_other.'), failure.split('Traceback')[0]):
             with self.subTest(detail=detail), self.assertRaisesRegex(ValueError, 'no quarantine marker'):
                 q.validate_attribution({**base, 'detail': detail}, entry, self.root)
 

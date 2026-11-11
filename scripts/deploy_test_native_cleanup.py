@@ -382,6 +382,17 @@ def isolated_execution(fleet, life, root, receipt, proof, bound, document, tree)
                             for r in processes.splitlines() if not r.split()[2].startswith('Z')),
          'old controller still active')
     rows = [fields(bound(p)) for p in (audit / 'fresh').iterdir()] if (audit / 'fresh').exists() else []
+    # Rows a fleet cancelled while cloning never owned a Machine (retired_clone_rows): no Machine
+    # observation exists for them, so they are admitted only from a sealed, provider-verified release.
+    machine_less = [r for r in rows if not r.get('machine_id')]
+    need(not machine_less or not registry.exists() and meta.get('status') == 'provider-teardown-verified',
+         'machine-less rows need a sealed provider release')
+    need(all(r.get('fleet_owner_token') == owner and r.get('run_id') == fleet.name
+             and r.get('source') == 'fresh-clone' and r.get('app') == meta['app']
+             and (r.get('disposition') == 'destroyed-provider-retained'
+                  or r.get('disposition') == 'not-allocated-verified' and not r.get('volume_id'))
+             for r in machine_less), 'machine-less resource not retired')
+    rows = [r for r in rows if r.get('machine_id')]
     need(len({r['machine_id'] for r in rows}) == len(rows), 'duplicate old machine')
     observations = proof['execution_quiescence']
     for row in rows:
@@ -1610,7 +1621,7 @@ def validate(receipt, owner, proof):
                  and type(disposable.get('guest_cleanup_missing')) is bool
                  and type(disposable.get('runtime_evidence_missing')) is bool
                  and (disposable['guest_cleanup_missing'] or disposable['runtime_evidence_missing']), 'historical recovery facts')
-            recovered_runtime(fleet, owner_token, benches, rows, recovery[str(fleet)], bound, document)
+            recovered_runtime(fleet, owner_token, benches, machines, recovery[str(fleet)], bound, document)
             recovered[str(fleet)] = {'original_lifecycle': life, 'original_disposable_cleanup': disposable,
                                      'release_epoch': release, 'native_audit_sha256': seal, 'credit_granted': False}
         else:

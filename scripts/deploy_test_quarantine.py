@@ -130,6 +130,28 @@ def failed_unittest_names(occurrence: dict) -> list[str]:
     return _UNITTEST_FAILURE.findall(str(occurrence.get('detail') or ''))
 
 
+def named_test_matches(marker: dict, test_id: str, path: str, occurrence: dict) -> bool:
+    """A failed unittest id names this marker: same module (file), class and method.
+
+    A script-run suite reports its module as `__main__`; then the marker file must be that suite's own
+    file (its stem is the FLAKY unit) or the failing method's traceback frame must be in that file.
+    """
+    owner, name = marker.get('owner'), marker.get('name')
+    if not name or test_id.rsplit('.', 1)[-1] != name:
+        return False
+    parts = test_id.split('.')
+    if owner and (len(parts) < 3 or parts[-2] != owner):
+        return False
+    module = '.'.join(parts[:-2] if owner else parts[:-1])
+    stem = Path(path).name.removesuffix('.py').removesuffix('.test')
+    if module == '__main__':
+        suite = str(occurrence.get('unit') or '').split('[', 1)[0]
+        frame = re.search(r'File "[^"]*/' + re.escape(path) + r'", line \d+, in ' + re.escape(name) + r'\b',
+                          str(occurrence.get('detail') or ''))
+        return stem == suite or frame is not None
+    return Path(path).with_suffix('').as_posix().replace('/', '.').endswith(module)
+
+
 def validate_attribution(occurrence: dict, entry: dict, root: Path) -> dict:
     """The recorded /RCA attribution of one FLAKY occurrence, or ValueError.
 
@@ -158,11 +180,9 @@ def validate_attribution(occurrence: dict, entry: dict, root: Path) -> dict:
     path = entry.get('marker')
     if not isinstance(path, str) or not path.strip() or Path(path).is_absolute() or '..' in Path(path).parts:
         raise ValueError('NOT_INTRODUCED requires marker: the repo-relative test file carrying the quarantine marker')
-    named = failed_unittest_names(occurrence)
     found = [m for m in markers(root, [path])
              if unit_matches(m, occurrence['unit'])
-             or any(test_id.endswith('.' + '.'.join(filter(None, (m.get('owner'), m.get('name')))))
-                    for test_id in named)]
+             or any(named_test_matches(m, test_id, path, occurrence) for test_id in failed_unittest_names(occurrence))]
     if not found:
         raise ValueError(f"no quarantine marker for {occurrence['unit']} in {path}")
     # Repairs are dispatched only after merge (deploy-failure-policy.md): a NOT_INTRODUCED flake records

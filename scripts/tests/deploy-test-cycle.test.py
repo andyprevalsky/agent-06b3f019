@@ -5676,7 +5676,8 @@ class Cycle(unittest.TestCase):
         proof['files'][str(packet)] = c.sha_file(packet)
         return state, occurrence, paths, proof, gate, packet
 
-    def test_failed_infra_canary_is_execution_only_and_requires_positive_release(self):
+    def failed_infra_canary(self, rows=()):
+        """An isolated failed linked infra canary; `rows` are Machine-less audit rows (none by default)."""
         import hashlib
         import shutil
         state, failure, paths, proof, gate, packet = self.isolated_campaign_state()
@@ -5688,8 +5689,15 @@ class Cycle(unittest.TestCase):
         audit = fleet / 'teardown-ownership'
         (audit / 'source-audit').unlink()
         (audit / 'owned-clones.ids').write_text('')
-        (audit / 'owned-clones.names').write_text('')
+        (audit / 'owned-clones.names').write_text(''.join(r['clone_name'] + '\n' for r in rows))
         shutil.rmtree(audit / 'fresh')
+        if rows:  # Machine-less rows of a canary cancelled while cloning
+            (audit / 'fresh').mkdir()
+            app = dict(l.split('=', 1) for l in (audit / 'meta').read_text().splitlines())['app']
+            for row in rows:
+                values = dict(version='1', fleet_owner_token=life['fleet_owner_token'], run_id=fleet.name, app=app,
+                              source='fresh-clone', source_machine_id='donor', **row)
+                (audit / 'fresh' / row['clone_name']).write_text(''.join(f'{k}={v}\n' for k, v in values.items()))
         canonical = self.root / '.git/cloudbench-fleet-audits' / life['fleet_owner_token']
         shutil.rmtree(canonical); shutil.copytree(audit, canonical)
         digest = hashlib.sha256()
@@ -5712,9 +5720,16 @@ class Cycle(unittest.TestCase):
             f"owner: {life['fleet_owner_token']}; private controller diagnostics stay in this run directory.")
         log.write_text(text)
         proof['execution_quiescence'].pop('machine1')
+        for folder in (audit, canonical):
+            for row in rows:
+                proof['files'][str(folder / 'fresh' / row['clone_name'])] = ''
         def bind():
             proof['files'] = {p: c.sha_file(p) for p in proof['files'] if Path(p).is_file()}
         bind()
+        return state, failure, proof, fleet, life, life_path, audit, canonical, log, bind
+
+    def test_failed_infra_canary_is_execution_only_and_requires_positive_release(self):
+        state, failure, proof, fleet, life, life_path, audit, canonical, log, bind = self.failed_infra_canary()
         original = copy.deepcopy(state)
         c.reconcile(state, failure['id'], proof)
         entry = state['reconciled_owners'][proof['receipt_sha256']]
@@ -5746,6 +5761,19 @@ class Cycle(unittest.TestCase):
             c.reconcile(copy.deepcopy(original), failure['id'], proof)
         ordinary = copy.deepcopy(proof); ordinary.pop('purpose')
         with self.assertRaises(ValueError): c.reconcile(copy.deepcopy(original), failure['id'], ordinary)
+
+    def test_isolated_failed_canary_cancelled_while_cloning_needs_no_machine_observation(self):
+        # PR #1928 review: isolated_execution re-reads the canary's rows; Machine-less rows have no Machine
+        # observation and are admitted only from the sealed provider release.
+        rows = (dict(clone_name='cloudbench-a', machine_id='', volume_id='', disposition='not-allocated-verified'),
+                dict(clone_name='cloudbench-b', machine_id='', volume_id='vol_b',
+                     disposition='destroyed-provider-retained'))
+        state, failure, proof, *_ = self.failed_infra_canary(rows)
+        c.reconcile(state, failure['id'], proof)
+        self.assertFalse(state['reconciled_owners'][proof['receipt_sha256']]['credit_granted'])
+        self.tearDown(); self.setUp()
+        state, failure, proof, *_ = self.failed_infra_canary((dict(rows[0], volume_id='vol_a'),))
+        with self.assertRaises(ValueError): c.reconcile(state, failure['id'], proof)
 
     def normal_failed_canary_state(self, zero=False, machine_less=()):
         import hashlib, shutil
@@ -6568,6 +6596,31 @@ class Cycle(unittest.TestCase):
         self.assertEqual([], c.retained_owners(state, [occurrence['gate']]))
         (runtime / 'logs/worker.log').write_text('changed')
         self.assertEqual([occurrence['gate']], c.retained_owners(state, [occurrence['gate']]))
+
+    def test_campaign_recovered_v2_release_ignores_machine_less_clone_rows(self):
+        # PR #1928 review: recovery must cover only rows that own a Machine; a clone cancelled before its
+        # Machine existed (`not-allocated-verified`) is closed by the audit, not by runtime identity.
+        import hashlib, shutil
+        state, occurrence, paths, proof, fleet, runtime = self.recovered_campaign_state()
+        audit = fleet / 'teardown-ownership'
+        owner = dict(l.split('=', 1) for l in (audit / 'fresh/clone-j2').read_text().splitlines())['fleet_owner_token']
+        (audit / 'fresh/clone-j3').write_text(''.join(f'{k}={v}\n' for k, v in dict(
+            fleet_owner_token=owner, run_id=fleet.name, app='fixture', source='fresh-clone',
+            disposition='not-allocated-verified', machine_id='', clone_name='clone-j3', volume_id='').items()))
+        (audit / 'owned-clones.names').write_text('clone-j2\nclone-j3\n')
+        (audit / 'source-audit').unlink()
+        canonical = self.root / '.git/cloudbench-fleet-audits' / owner
+        shutil.rmtree(canonical); shutil.copytree(audit, canonical)
+        h = hashlib.sha256()
+        for path in sorted(audit.rglob('*'), key=lambda p: str(p.relative_to(audit))):
+            if path.is_file():
+                for raw in (str(path.relative_to(audit)).encode(), path.read_bytes()):
+                    h.update(len(raw).to_bytes(8, 'big')); h.update(raw)
+        (audit / 'source-audit').write_text(f'path={canonical}\nsha256={h.hexdigest()}\n')
+        for path in [*fleet.rglob('*'), *canonical.rglob('*')]:
+            if path.is_file(): proof['files'][str(path)] = c.sha_file(path)
+        c.reconcile(state, occurrence['id'], proof)
+        self.assertFalse(state['reconciled_owners'][proof['receipt_sha256']]['credit_granted'])
 
     def test_campaign_recovered_v2_identity_and_seal_refusals_are_atomic(self):
         state, occurrence, paths, proof, fleet, runtime = self.recovered_campaign_state()
