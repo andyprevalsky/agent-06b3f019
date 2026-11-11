@@ -1217,6 +1217,12 @@ def run_fake_driver(mdir):
     log(f"[cloudbench] fake driver started (bench={bench} ref={ref})")
     exit_code = 0
     if barrier:
+        # Match the real driver's primary readiness channel before its log fallback.
+        assert re.fullmatch(r"[A-Za-z0-9_.-]+", barrier), "invalid barrier identifier"
+        ready = Path(mdir, "data", f"cloudbench-start-{barrier}.ready")
+        assert not ready.parent.is_symlink(), "noncanonical readiness directory"
+        with ready.open("x"):
+            pass
         log(f"synchronized start barrier ready: {barrier}")
         release = os.path.join(mdir, "data", f"cloudbench-start-{barrier}.release")
         deadline = time.time() + 120
@@ -1230,6 +1236,8 @@ def run_fake_driver(mdir):
                 exit_code = 1
                 break
             time.sleep(0.5)
+        ready.unlink()
+        Path(release).unlink(missing_ok=True)
         if exit_code == 0:
             log(f"synchronized start barrier released: {barrier}")
     benchmark_started = exit_code == 0
@@ -2350,6 +2358,16 @@ elif args[:1] == ["proxy"]:
 
     class ProxyHandler(captured_handlers[0]):
         def do_GET(self):
+            # Only the current driver's exact regular ready file is delegated.
+            # Other paths retain the fake's existing bounded endpoint allowlist.
+            barrier = rb_export(rb_text, "CLOUDBENCH_START_BARRIER")
+            ready = Path(mdir, "data", f"cloudbench-start-{barrier}.ready")
+            if barrier and self.path == f"/cloudbench-start-{barrier}.ready":
+                if (not re.fullmatch(r"[A-Za-z0-9_.-]+", barrier)
+                        or ready.parent.is_symlink() or ready.is_symlink() or not ready.is_file()):
+                    self.send_error(404)
+                    return
+                return super().do_GET()
             if urlsplit(self.path).path == "/runtime-evidence":
                 return super().do_GET()
             if self.path == "/metrics":

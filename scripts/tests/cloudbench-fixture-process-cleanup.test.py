@@ -342,3 +342,140 @@ def check_fake_state_noop_publication(source: Path) -> None:
 
 check_fake_provider_compilation(ROOT / 'scripts/tests/cloudbench-multi-workstream.test.sh')
 check_fake_state_noop_publication(ROOT / 'scripts/tests/cloudbench-multi-workstream.test.sh')
+
+def check_fake_primary_ready_channel(source: Path) -> None:
+    """Execute the real fake-driver prefix and real HTTP/barrier consumers."""
+    import ast
+    import base64
+    import http.client
+    import http.server
+    import importlib.util
+    import io
+    import os
+    import re
+    import shlex
+    import threading
+    import time
+    from types import SimpleNamespace
+    from pathlib import PurePosixPath
+    sys.path.insert(0, str(ROOT / "scripts/lib"))
+    from condition_wait import WaitTimeout, wait_until
+    from urllib.parse import parse_qs, urlsplit
+
+    text = source.read_text()
+    marker = 'cat > "$FAKE_DIR/flyctl.py" <<\'PY\'\n'
+    start = text.index(marker) + len(marker)
+    fake = text[start:text.index('\nPY\n', start)]
+    tree = ast.parse(fake)
+    driver_node = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == 'run_fake_driver')
+    export_node = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == 'rb_export')
+    proxy_node = next(n for n in ast.walk(tree) if isinstance(n, ast.ClassDef) and n.name == 'ProxyHandler')
+    boundary = next(n.lineno for n in driver_node.body if isinstance(n, ast.Assign)
+                    and any(isinstance(t, ast.Name) and t.id == 'benchmark_started' for t in n.targets))
+    # The executing function is unchanged; stop immediately after its real
+    # barrier lifecycle, before unrelated benchmark-result work.
+    class BarrierComplete(Exception):
+        pass
+
+    with tempfile.TemporaryDirectory(prefix='fake-ready-protocol-') as folder:
+        root = Path(folder)
+        guest = root / 'guest'; (guest / 'data').mkdir(parents=True); (guest / 'tmp').mkdir()
+        run = 'ready-protocol-current'; token = 'native-token'
+        wrapper = '\n'.join(['export CLOUDBENCH_START_BARRIER='+run, 'export CLOUDBENCH_RUN_TOKEN='+token,
+                             'export REF='+'a'*40, 'export BENCH_TASKS_B64='+base64.b64encode(b'ready-control').decode()])+'\n'
+        (guest/'tmp/rb.sh').write_text(wrapper)
+        scope = dict(os=os, json=json, re=re, Path=Path, base64=base64, time=time,
+                     subprocess=subprocess, sys=sys, PurePosixPath=PurePosixPath, FAKE_DIR=str(root), MARKERS=str(root/'markers'))
+        exec(compile(ast.Module(body=[export_node, driver_node], type_ignores=[]), str(source), 'exec'), scope)
+        driver = scope['run_fake_driver']; outcomes=[]; begin=threading.Event()
+        def trace(frame, event, arg):
+            if event == 'line' and frame.f_code is driver.__code__ and frame.f_lineno == boundary:
+                outcomes.append(frame.f_locals['exit_code']); raise BarrierComplete()
+            return trace
+        def worker():
+            begin.wait()
+            sys.settrace(trace)
+            try: driver(str(guest))
+            except BarrierComplete: pass
+            except BaseException as error: outcomes.append(error)
+            finally: sys.settrace(None)
+
+        # Use exactly the production Handler factory that the fake proxy uses.
+        spec = importlib.util.spec_from_file_location('ready_native_status', ROOT/'scripts/cloudbench-status-server.py')
+        status = importlib.util.module_from_spec(spec); spec.loader.exec_module(status)
+        captured=[]
+        class CaptureServer:
+            def __init__(self, address, handler): captured.append(handler)
+            def serve_forever(self): pass
+        status.ThreadingHTTPServer=CaptureServer
+        status.parse_args=lambda: SimpleNamespace(directory=str(guest/'data'),barrier='',bind='127.0.0.1',port=0,ready_file='',run_token=token)
+        status.main()
+        scope.update(captured_handlers=captured,mdir=str(guest),rb_text=wrapper,urlsplit=urlsplit,parse_qs=parse_qs,
+                     hashlib=__import__('hashlib'),http=__import__('http'),SimpleNamespace=SimpleNamespace)
+        exec(compile(ast.Module(body=[proxy_node],type_ignores=[]),str(source),'exec'),scope)
+        server=http.server.ThreadingHTTPServer(('127.0.0.1',0),scope['ProxyHandler'])
+        thread=threading.Thread(target=server.serve_forever);thread.start()
+        started=False;actor=threading.Thread(target=worker)
+        def get(path):
+            con=http.client.HTTPConnection('127.0.0.1',server.server_port,timeout=2)
+            try: con.request('GET',path);response=con.getresponse();body=response.read();return response.status,body
+            finally:con.close()
+        ready=guest/'data'/('cloudbench-start-'+run+'.ready')
+        release=guest/'data'/('cloudbench-start-'+run+'.release')
+        try:
+            assert get('/'+ready.name)[0]==404, 'pre-readiness accepted'
+            assert get('/cloudbench-start-foreign.ready')[0]==404
+            outside=root/'outside';outside.write_text('private outside')
+            ready.symlink_to(outside)
+            assert get('/'+ready.name)[0]==404, 'ready symlink served'
+            ready.unlink()
+            assert get('/../outside')[0]==404 and get('/%2e%2e/outside')[0]==404
+            actor.start();started=True
+            # A real, late producer must remain unready until it actually runs.
+            assert get('/'+ready.name)[0]==404
+            begin.set()
+            try:
+                wait_until(lambda: ready.exists() or not actor.is_alive(), timeout=3,
+                           description="actual fake ready marker or driver termination")
+            except WaitTimeout:
+                pass  # Preserve the original marker assertion and its diagnostic.
+            assert ready.is_file(), 'actual fake driver omitted primary ready marker'
+            published=ready.stat().st_mtime_ns
+            assert get('/'+ready.name)==(200,b''), 'exact primary ready URL not served by native handler'
+            assert get('/cloudbench-start-foreign.ready')[0]==404
+            # Execute the actual controller barrier function with real curl.
+            fleet=(ROOT/'scripts/run-bench-fleet').read_text();a=fleet.index('release_start_barrier() {');b=fleet.index('\nif ! release_start_barrier;',a)
+            output=root/'output';output.mkdir();(output/'status-proxy.port').write_text(str(server.server_port));(output/'fleet-child.log').write_text('')
+            grep_calls=root/'fallback-calls'
+            setup='\n'.join(['set -uo pipefail','SYNCHRONIZED_START=1','RUN_ID='+shlex.quote(run),
+                'CHILD_PIDS=('+str(os.getpid())+')','CHILD_OUT=('+shlex.quote(str(output))+')','CHILD_MACHINE=(fixture)',
+                'CHILD_BENCH=(fixture)','START_BARRIER_WAIT_SECONDS=5','PER_BOX_BARRIER_WAIT_SECONDS=5','STRICT_BARRIER=1',
+                'INFRA_PROBE=1','SKIP_AUTOSCALER=0','CLOUDBENCH_BARRIER_TOKEN=fixture-token',
+                'fleet_infra_stop_check() { :; }','grep() { printf "fallback\\n" >> '+shlex.quote(str(grep_calls))+'; command grep "$@"; }'])
+            before=time.monotonic();result=subprocess.run(['bash','-c',setup+'\n'+fleet[a:b]+'\nrelease_start_barrier'],capture_output=True,text=True,timeout=8)
+            assert result.returncode==0,(result.stdout,result.stderr)
+            consumer_elapsed=time.monotonic()-before
+            assert not grep_calls.exists(), 'ready HTTP path still fell back to streamed log'
+            actor.join(timeout=3)
+            assert not actor.is_alive() and outcomes==[0],outcomes
+            assert not ready.exists() and not release.exists(), 'ready/release files survived native barrier completion'
+            # Existing compatibility fallback remains valid when its current-token log exists.
+            (output/'fleet-child.log').write_text('synchronized start barrier ready: '+run+'\n')
+            fallback=subprocess.run(['bash','-c',setup+'\n'+fleet[a:b]+'\nrelease_start_barrier'],capture_output=True,text=True,timeout=8)
+            assert fallback.returncode==0 and grep_calls.exists(),fallback.stderr
+            release.unlink(missing_ok=True)
+            # An actual driver error before readiness may never publish it.
+            (guest/'tmp/rb.sh').write_text(wrapper+'export LOCAL_PATCH_FILE=missing.patch\n')
+            try: driver(str(guest))
+            except FileNotFoundError: pass
+            else: raise AssertionError('pre-readiness error did not occur')
+            assert not ready.exists()
+            print('PASS: actual fake ready publisher/native HTTP/controller, zero compatibility fallback; publication_ns='+str(published)+' observation_seconds='+str(consumer_elapsed))
+        finally:
+            begin.set();release.touch()
+            if started:actor.join(timeout=3)
+            server.shutdown();server.server_close();thread.join(timeout=3)
+            assert not thread.is_alive() and (not started or not actor.is_alive()), 'protocol fixture leaked a thread'
+
+
+check_fake_primary_ready_channel(ROOT / 'scripts/tests/cloudbench-multi-workstream.test.sh')
