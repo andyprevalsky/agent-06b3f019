@@ -5524,14 +5524,12 @@
   "ready": true,
   "worktrees": [
     {
-      "branch": "refs/heads/records/pr-1933-closeout",
+      "branch": "refs/heads/main",
       "current": true,
       "locked": false,
       "needs_integration": false,
       "path": "/home/boxes/rose",
-      "uncommitted": [
-        "docs/handoffs/pr-1939-closeout/deletion-readiness.json"
-      ],
+      "uncommitted": [],
       "unpushed_commits": 0
     }
   ]
