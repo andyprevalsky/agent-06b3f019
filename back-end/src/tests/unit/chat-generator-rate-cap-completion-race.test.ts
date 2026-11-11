@@ -61,6 +61,9 @@ async function raceScenario(params: {
   qwenContent: string;
   /** GLM stops early at its token cap instead of streaming slowly to the end. */
   glmTruncated?: boolean;
+  /** Qwen stops at its token cap too, so the final waterfall must answer. */
+  qwenTruncated?: boolean;
+  waterfallContent?: string;
 }): Promise<void> {
   const originalFetch = globalThis.fetch;
   const originalCerebrasKey = process.env.CEREBRAS_API_KEY;
@@ -70,6 +73,7 @@ async function raceScenario(params: {
   process.env.OPENROUTER_API_KEY = 'generator-race-test';
   process.env.CEREBRAS_CHAT_HEDGE_MS = '0';
   let glmAborted = false;
+  let qwenRequests = 0;
   globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
     const url = typeof input === 'string' ? input : input.toString();
     if (url === CEREBRAS_API_URL) {
@@ -78,12 +82,21 @@ async function raceScenario(params: {
     assert.equal(url, OPENROUTER_API_URL);
     const model = (JSON.parse(String(init?.body)) as { model: string }).model;
     if (model === 'qwen/qwen3.8-27b') {
+      qwenRequests += 1;
+      // The rose-1-flash waterfall that runs after both fallback legs fail
+      // leads with the same Qwen model; its request is the second one.
+      if (params.waterfallContent && qwenRequests > 1) {
+        return delayedCompletion(params.waterfallContent, 10, 20, init?.signal ?? undefined, () => {
+          return undefined;
+        });
+      }
       return delayedCompletion(
         params.qwenContent,
         650,
         750,
         init?.signal ?? undefined,
-        () => undefined
+        () => undefined,
+        params.qwenTruncated ? 'length' : undefined
       );
     }
     assert.equal(model, 'z-ai/glm-5.3-flash');
@@ -121,7 +134,8 @@ async function raceScenario(params: {
     }))
       chunks.push(chunk);
     const text = chunks.map((chunk) => chunk.choices[0]?.delta?.content ?? '').join('');
-    assert.equal(text, params.qwenContent, `${params.schemaName}: first completed answer wins`);
+    const expected = params.waterfallContent ?? params.qwenContent;
+    assert.equal(text, expected, `${params.schemaName}: first completed answer wins`);
     if (!params.glmTruncated) {
       assert.equal(glmAborted, true, `${params.schemaName}: the slower GLM leg is cancelled`);
     }
@@ -165,6 +179,21 @@ async function run(): Promise<void> {
     glmContent: '{"reasoning":"glm hit its cap","action":"web_search","queries":["a","a a","a a a',
     qwenContent: '{"reasoning":"qwen finished cleanly","action":"web_search","queries":["a"]}',
     glmTruncated: true,
+  });
+  // Both fallback legs stop at their token caps: the classified fall-through
+  // error hands the call to the final waterfall instead of failing the turn.
+  await raceScenario({
+    schemaName: 'router_decision',
+    schemaProperties: {
+      reasoning: { type: 'string' },
+      action: { type: 'string' },
+      queries: { type: 'array' },
+    },
+    glmContent: '{"reasoning":"glm hit its cap","action":"web_search","queries":["a","a a',
+    qwenContent: '{"reasoning":"qwen hit its cap","action":"web_search","queries":["b","b b',
+    glmTruncated: true,
+    qwenTruncated: true,
+    waterfallContent: '{"reasoning":"waterfall answered","action":"web_search","queries":["c"]}',
   });
 }
 

@@ -102,7 +102,12 @@ exemption assumed router decisions were tool calls, but the router now emits
 a json_schema decision that `finalizeRouterDecisionFromStream` can use only
 when closed. A structured leg that ends with `finish_reason: length` (unclosed
 JSON at its token cap) now fails before the latch and drops out of the race,
-so it cannot beat a leg that finishes cleanly. Plain text and tool-call
+so it cannot beat a leg that finishes cleanly. Both pre-latch failures in
+`requireCompletedContent` (no content, token cap) are now `RoseStallError`, a
+classified fall-through error. When every leg fails, the call falls through
+to the final OpenRouter waterfall instead of surfacing an unclassified error
+that neither `runWithFallThrough` nor the router's regeneration handles. The
+substitute code review caught this. Plain text and tool-call
 streams still latch at first content. Pre-latch chunks stay buffered per branch
 and are replayed only for the winner, so callers still see one provider's
 output.
@@ -127,11 +132,13 @@ latches its inner fallback race on first content; it has no production
 occurrence and changing it would also stop progressive generator streaming
 there.
 
-Regression: `chat-generator-rate-cap-completion-race.test.ts` runs three
+Regression: `chat-generator-rate-cap-completion-race.test.ts` runs four
 scenarios. The original generator scenario. A `router_decision` scenario:
 Cerebras 429; GLM's first chunk at 50 ms but unclosed until 1.5 s; Qwen, started
 at 500 ms, completes at about 1.25 s. A truncation scenario: GLM completes first
-at 300 ms with `finish_reason: length`. Before the fix both router scenarios
+at 300 ms with `finish_reason: length`. And a both-legs-truncated scenario,
+answered by the final waterfall; with a plain `Error` instead of
+`RoseStallError` that scenario throws instead. Before the fix both router scenarios
 returned GLM's unclosed JSON
 (`AssertionError: router_decision: first completed answer wins`); after it,
 Qwen wins. Passed 5/5 consecutive runs. With only the truncation guard removed,

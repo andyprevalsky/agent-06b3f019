@@ -1,5 +1,5 @@
 import { clearsChatStallGuard, exclusiveCerebrasCompletion } from './cerebrasRoute';
-import { RosePaymentRequiredError, RoseRateLimitError } from './errors';
+import { RosePaymentRequiredError, RoseRateLimitError, RoseStallError } from './errors';
 import { PreContentFallThroughError, runWithFallThrough } from './fallThroughStream';
 import { hedgeStreams } from './hedgedStream';
 import { createLogger } from '../logger';
@@ -183,13 +183,17 @@ async function* requireCompletedContent(
   for await (const chunk of stream) {
     if (clearsChatStallGuard(chunk.kind)) hasContent = true;
     if (chunk.kind === 'usage') finishReason = chunk.data.finish_reason;
+    // Both failures are classified fall-through errors: when every leg fails,
+    // the caller's waterfall runs instead of the turn failing outright.
     if (chunk.kind === 'done' && !hasContent) {
-      throw new Error('OpenRouter fallback completed without content');
+      throw new RoseStallError('OpenRouter fallback completed without content');
     }
     // A structured reply cut off at its token cap is unclosed JSON: drop this
     // leg before it can latch, so a cleanly finished leg wins the race.
     if (chunk.kind === 'done' && rejectTruncated && finishReason === 'length') {
-      throw new Error('OpenRouter fallback stopped at its token cap (finish_reason=length)');
+      throw new RoseStallError(
+        'OpenRouter fallback stopped at its token cap (finish_reason=length)'
+      );
     }
     yield chunk;
   }
