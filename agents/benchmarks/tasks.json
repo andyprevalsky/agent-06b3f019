@@ -3,7 +3,7 @@
     "name": "test-mass-agent-run-0",
     "quarantine": {
       "since": "2026-11-09",
-      "repair": "pending-handoff:b2be041030b840a68535a65d2ee57560",
+      "repair": "https://boxes.dev/thread/thr_640c279c6b994dee83eed29581e18e5f",
       "error": "TREE STALL: newest-active leaf silent 518s (threshold 510s); initial pooled credential GET did not return before cancellation. First native attempt FAILED; one automatic retry PASS (FLAKY).",
       "evidence": "https://github.com/Rose-Ai-Labs/rose/pull/1854"
     },

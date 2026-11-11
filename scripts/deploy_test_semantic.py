@@ -115,7 +115,7 @@ def classify_lane(lane, expected, report, events):
                 continue
             cases[case_key(lane, item)] = {'passed': 'PASS', 'failed': 'FAIL',
                                          'timedOut': 'FAIL'}[results[-1]['status']]
-    except (KeyError, TypeError, ValueError):
+    except (AttributeError, KeyError, TypeError, ValueError):
         return dict.fromkeys(cases, 'UNVERIFIED')
     return cases
 

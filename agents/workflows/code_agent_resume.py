@@ -30,6 +30,7 @@ Rows are UI-only (``excludeFromModel``): nothing enters the owner's planner cont
 
 from __future__ import annotations
 
+import copy
 import json
 from datetime import timedelta
 from typing import Any, Dict, List, Optional
@@ -40,36 +41,48 @@ from temporalio.exceptions import ApplicationError
 
 with workflow.unsafe.imports_passed_through():
     from domains.spawn_claude_code_agent.handler import get_manager
+    from helpers.code_agent_resume_context import fetch_code_agent_resume_context
     from helpers.fetch_queue_pointer import fetch_agent_queue_pointer
     from helpers.generation_handoff import GenerationHandoffRequested, should_handoff_to_generation
     from helpers.handle_tool_event import handle_tool_event
     from tools.base import EventType, MessageStatus, ToolEvent
+    from utils.error_utils import extract_error_message
     from workflows.resume_billing import ResumeBillingMixin
 
 TOOL_NAME = "spawn_claude_code_agent"
 REQUIRED_FIELDS = ("agent_id", "user_id", "tool_call_id", "message")
 
 
-def resume_tool_call(request: Dict[str, Any]) -> Dict[str, Any]:
+def resume_tool_call(request: Dict[str, Any], saved: Dict[str, Any]) -> Dict[str, Any]:
     """The code spawn's arguments for the resumed run (the message is its next turn)."""
-    # A person supplies the next turn, not a planner's custom result fields.
-    # Declare no extra fields: the spawn still requires its standard rose_handoff
-    # (status, summary and git facts) and validates it on completion.
-    tool_call: Dict[str, Any] = {
-        "type": "code", "goal": request["message"], "output_schema": {"fields": []}
-    }
-    if request.get("task_name"):
+    original = saved.get("spawn_args")
+    if not isinstance(original, dict) or not isinstance(original.get("output_schema"), dict) or not original["output_schema"]:
+        raise ValueError("The original code-task output_schema is unavailable; refusing to replace it with a default.")
+    tool_call = copy.deepcopy(original)
+    execution = saved.get("execution")
+    if isinstance(execution, dict):
+        for key in ("github_repo_link", "target", "code_session_id"):
+            if key in execution:
+                tool_call[key] = execution[key]
+    # Like the owner's background wake, only the next conversation input changes.
+    tool_call["goal"] = request["message"]
+    if not tool_call.get("task_name") and request.get("task_name"):
         tool_call["task_name"] = request["task_name"]
     if request.get("code_session_id"):
         tool_call["code_session_id"] = request["code_session_id"]
-    if request.get("code_provider") in ("claude", "codex"):
-        tool_call["_resume_code_provider"] = request["code_provider"]
-    if isinstance(request.get("cli_settings"), dict) and request["cli_settings"]:
-        # The model / effort / speed picked on the typed turn: its first resumed turn uses them.
-        tool_call["_resume_cli_settings"] = dict(request["cli_settings"])
-    names = [item.get("original_filename") for item in request.get("attachments") or [] if isinstance(item, dict)]
-    if names:
-        tool_call["attachments"] = [name for name in names if isinstance(name, str)]
+    provider = saved.get("code_provider") or request.get("code_provider")
+    if provider in ("claude", "codex"):
+        tool_call["_resume_code_provider"] = provider
+    settings = dict(saved.get("cli_settings") or {})
+    settings.update(request.get("cli_settings") or {})
+    if not all(settings.get(key) for key in ("model", "reasoning_effort", "speed")):
+        raise ValueError(
+            "This historical code task has no complete saved CLI settings. Choose model, effort and speed "
+            "to continue; Rose will not guess different resume settings."
+        )
+    tool_call["_resume_cli_settings"] = settings
+    tool_call["_resume_attachments"] = copy.deepcopy(saved.get("attachments") or [])
+    tool_call["_user_attachments"] = copy.deepcopy(request.get("attachments") or [])
     return tool_call
 
 
@@ -186,14 +199,23 @@ class CodeAgentResumeWorkflow(ResumeBillingMixin):
                 task_queue=handoff.task_queue,
             )
         except Exception as error:
-            reason = str(error) or type(error).__name__
+            reason = extract_error_message(error) or type(error).__name__
             await self._post_failure(tool_call_id, reason)
             raise ApplicationError(f"code agent resume failed: {reason}", non_retryable=True) from error
         return {"tool_call_id": tool_call_id, "message_id": request.get("message_id"), "result": final}
 
     async def _run_spawn(self, request: Dict[str, Any], tool_call_id: str) -> Optional[str]:
         final: Optional[str] = None
-        async for event in get_manager().execute_tool(self, resume_tool_call(request), tool_call_id):
+        saved = await workflow.execute_activity(
+            fetch_code_agent_resume_context,
+            args=[self.agent_id, tool_call_id],
+            start_to_close_timeout=timedelta(seconds=40),
+            retry_policy=RetryPolicy(maximum_attempts=3),
+        )
+        self.model = saved.get("model") or self.model
+        if isinstance(saved.get("fast_mode_cache_enabled"), bool):
+            self.fast_mode_cache_enabled = saved["fast_mode_cache_enabled"]
+        async for event in get_manager().execute_tool(self, resume_tool_call(request, saved), tool_call_id):
             metadata = dict(getattr(event, "metadata", None) or {})
             metadata.setdefault("toolName", TOOL_NAME)
             metadata["excludeFromModel"] = True

@@ -44,3 +44,17 @@ test('preview credential mint boundary denies both issuers before side effects a
     );
   }
 });
+
+test('Index 01 credentials route refuses preview sessions before minting its API key', async () => {
+  const { default: router } = await import('../../domains/agents/routes.index01');
+  const layer = (
+    router.stack as Array<{
+      route?: { path: string; methods: Record<string, boolean>; stack: Array<{ handle: unknown }> };
+    }>
+  ).find((entry) => entry.route?.path === '/credentials' && entry.route.methods.post);
+  assert.ok(layer?.route, 'POST /credentials is registered');
+  const handles = layer.route.stack.map((entry) => entry.handle);
+  const guard = handles.indexOf(requireCredentialMintSession);
+  assert.ok(guard > 0, 'requireCredentialMintSession guards POST /api/index01/credentials');
+  assert.equal(guard, handles.length - 2, 'the guard runs right before the credential issuer');
+});

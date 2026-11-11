@@ -109,8 +109,6 @@ from health_server import (
     set_queue_observation,
     set_worker_status,
 )
-
-# Helper activities (workflow orchestration, not exposed to LLM)
 from helpers import (
     acknowledge_workflow_replacement_bootstrap,
     call_llm,
@@ -140,6 +138,9 @@ from helpers import (
 from helpers.activity_dispatch import ActivityDispatchLagInterceptor
 from helpers.agent_graph import send_agent_graph_message_activity
 from helpers.attachments import fetch_parent_attachments_activity, resolve_attachments_activity
+
+# Helper activities (workflow orchestration, not exposed to LLM)
+from helpers.code_agent_resume_context import fetch_code_agent_resume_context
 from helpers.error_alert import report_failure_activity
 from helpers.generation_handoff import parse_shutdown_grace_seconds
 from helpers.jev_progress import predict_jev_progress
@@ -1659,6 +1660,7 @@ async def main():
         mark_finished,
         materialize_oai_demo_report_files_activity,
         fetch_agent_config,
+        fetch_code_agent_resume_context,
         fetch_agent_queue_pointer,
         fetch_child_terminal_result_activity,
         fetch_model_pricing,

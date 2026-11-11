@@ -1,0 +1,131 @@
+{
+  "archive": {
+    "bucket": "trace-archive",
+    "ciphertext_sha256": "dae36053eb8c85ccf7a7f0fa96fd5f16223623d936a504cf9928d03e5ba92110",
+    "encryption_key_id": "trace-archive-prod-2026-07-03",
+    "files": 267031,
+    "format": "ROSE-PRIVATE-TAR-GCM-V1",
+    "frames": 1654,
+    "full_readback_verified": true,
+    "gzip_sha256": "1e50b55b66c55e21fbaa859d008185a222c286b78aab8fad10c23de19009322f",
+    "key": "devbox-closeout-private/pr1854-b1c419e7/20261110T011649825598Z.tar.gz.aesgcm",
+    "manifest_sha256": "4da9795d8b743df687f2cfa7017878380385799fc4b3bbf2a7fc258ae1772c6e",
+    "original_bytes": 46997594892,
+    "stored_bytes": 13867880174
+  },
+  "base": "58be9c28730a39033034853167a2a8c0cd686c65",
+  "blocking_findings": [],
+  "combined_diff_sha256": "0ed4f80bb980db50c4ef2b114de63d6b9594e4f9e8776ec9cad27d09c6da2685",
+  "computed_index_tree_sha1": "ccf01699363f42f65066abe702fe86683364e402",
+  "deletion_ready": false,
+  "format": "PR1854-RECORDS-REVIEW-V1",
+  "full_manifest_comparison": {
+    "all_invariants_equal": true,
+    "native_receipt_byte_identical": true,
+    "only_allowed_projection_changes": {
+      "proposed_disposition": 17297,
+      "reason": 17297,
+      "verification_receipt": 17297
+    },
+    "private_entries": 17362,
+    "private_sha256": "a03c72b63d35fc3c3fa5c836f8dcd3760ab1a2b215e7626574b5a463b6ff6cd2",
+    "public_entries": 17362,
+    "public_sha256": "c406fb92c98d09ca792424831f3cc6699147a9a879df6703c503a6eac8b3bbe2",
+    "ref_entries": 16950,
+    "sealed_ref_keyset_equal": true
+  },
+  "full_restore_performed": false,
+  "head": "782ebbde854060034ec4eac7fe53dfd1f590e300",
+  "independent_remote_verification_repeated": false,
+  "live_ref_coverage": {
+    "branches_examined": 604,
+    "local_only_branches_covered": 73,
+    "missing": [],
+    "stashes_covered": 1
+  },
+  "observed_at": "2026-11-10T02:44:22.218563+00:00",
+  "read_only_review": true,
+  "records_pr_merged_claimed": false,
+  "report_sha256": "e2a0ee3b9328cb71150b63a3e141caf95c28b894190abfcdf7ec72393715c4b7",
+  "required_followups": [
+    "Commit/push reviewed records",
+    "Regenerate readiness; independently review exact mechanical delta",
+    "Review/merge records-only PR and link from PR1854",
+    "Final canonical deletion-check READY with exact final refs",
+    "Preserve late public closeout/control records and report original-goal elapsed through actual READY"
+  ],
+  "reviewed_files": {
+    "agents/benchmarks/tasks.json": {
+      "bytes": 1125602,
+      "sha256": "31596f1d2976503efec8f2fb3b82d285ba9547e85d9e48ab5a5c052f99e65317",
+      "staged_blob": "8dc5d6974c329d19c05f1fd4ce2dc34fa212da49"
+    },
+    "docs/handoffs/pr-1854-closeout/archive-receipt.json": {
+      "bytes": 616,
+      "sha256": "a0599f4c2a3c7fb0a64168206501936bd45e59d0b7af0a37ef4948f406a8b86f",
+      "staged_blob": "2226d7ce845910186df217736d1f61deea4e0c66"
+    },
+    "docs/handoffs/pr-1854-closeout/capture-wrapper-controls.json": {
+      "bytes": 2632,
+      "sha256": "273fb2d2081e387c8ebecc57f522b201fee918c5a20523a02caaa02df5c25dd4",
+      "staged_blob": "b6bb07c8593269fabaa9d7335c16192132738c4b"
+    },
+    "docs/handoffs/pr-1854-closeout/capture-wrapper-review.json": {
+      "bytes": 2272,
+      "sha256": "04531e957874185b66e56f9a0533eef7fb74e3c746a151d49b6d883ce2d62ca1",
+      "staged_blob": "be2d52089340f84044d4e8eaff8558925905e5b5"
+    },
+    "docs/handoffs/pr-1854-closeout/deferred-review-findings.json": {
+      "bytes": 1399,
+      "sha256": "767d46912b8a8cb28ef14bdc6a6852f8e02ecb228232b1e13ed40ec2cf41d693",
+      "staged_blob": "0c49ccec3a57422cd4519cd9c693e300a8652a26"
+    },
+    "docs/handoffs/pr-1854-closeout/deletion-manifest.json": {
+      "bytes": 12497544,
+      "sha256": "c406fb92c98d09ca792424831f3cc6699147a9a879df6703c503a6eac8b3bbe2",
+      "staged_blob": "625f39f51bff1d6e925904c01430713aa0c76037"
+    },
+    "docs/handoffs/pr-1854-closeout/deletion-readiness.json": {
+      "bytes": 13700901,
+      "sha256": "00ecf7180257253a4c1a71cd2676b44f3ee826ece0a7e51b5dcfa8e77f38b3a9",
+      "staged_blob": "357357bf969944c941c36560079015582fb0f570"
+    },
+    "docs/handoffs/pr-1854-closeout/key-recovery-verification.json": {
+      "bytes": 611,
+      "sha256": "9363cb6a93345cc73f888ec7f5f4100b40d98d90b2e82acb282676349a182ce5",
+      "staged_blob": "38de795bb7992c0b1af3aa369ce243a48f00004f"
+    },
+    "docs/handoffs/pr-1854-closeout/manifest-projection.json": {
+      "bytes": 756,
+      "sha256": "14ee7832e3fc0a0304a8c31de6b42d72f3a05a85f9a849fe62e67fde183ba83c",
+      "staged_blob": "a7e204c96c5b4252277216cd1597eee1724a8d34"
+    },
+    "docs/handoffs/pr-1854-closeout/preservation-verification.json": {
+      "bytes": 2110,
+      "sha256": "09b71c4c00dbf3d343c3090c9427136757dc2070dc58d18d6c16a0b100f0a689",
+      "staged_blob": "1cf80256ef9a674c2902203b22606726394a4805"
+    },
+    "docs/handoffs/pr-1854-closeout/production-summary.json": {
+      "bytes": 2550,
+      "sha256": "c38568fe814c80c09b0138a7992b34b85039b6a53316a134d1519dbed33828d0",
+      "staged_blob": "837a6a75d52bb1f1dc040a51a986042547c4ee5c"
+    },
+    "docs/handoffs/pr-1854-closeout/recovery.json": {
+      "bytes": 1695,
+      "sha256": "a2c4682087c7399e6643060d0e2dea9753cf0c669645757b29f86f3b5e41fb1c",
+      "staged_blob": "4aa159a75c9fd5193fbe0ea10963c665a6c318cb"
+    },
+    "docs/handoffs/pr-1854-closeout/repair-handoff.json": {
+      "bytes": 974,
+      "sha256": "c780ddad53620f31f5103f7f379fd1d8820163f426bb3ddcc27efb637babf3a0",
+      "staged_blob": "65fbd3b8a67fef2af97ca31c849ad20492ea9330"
+    },
+    "docs/handoffs/pr-1854-closeout/retained-obligations.json": {
+      "bytes": 1568,
+      "sha256": "ae64b3f2096dafc5476f68c3ed0d67cbdf7e68630ff11b63301304d59cbe76c4",
+      "staged_blob": "cfcd1996e5a1afab735e69d22209f5a69d4e47aa"
+    }
+  },
+  "task_change": "Only /0/quarantine/repair pending-handoff token replaced by verified matched thread URL; no executable field delta",
+  "verdict": "CLEAN_WITH_PENDING_CANONICAL_READINESS"
+}
