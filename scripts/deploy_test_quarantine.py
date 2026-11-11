@@ -289,7 +289,8 @@ def validate_attribution(occurrence: dict, entry: dict, root: Path, *, state: di
     else:
         found = [m for m in markers(root, [path]) if unit_matches(m, occurrence['unit'])]
         if not found and entry.get('case') is not None:
-            found = _domain_case_markers(occurrence, entry['case'], root, path)
+            case_markers = _unittest_case_markers if '.' in str(entry['case']) else _domain_case_markers
+            found = case_markers(occurrence, entry['case'], root, path)
     if not found:
         raise ValueError(f"no quarantine marker for {occurrence['unit']} in {path}")
     # Repairs are dispatched only after merge (deploy-failure-policy.md): a NOT_INTRODUCED flake records
@@ -338,6 +339,29 @@ def _domain_case_markers(occurrence: dict, case: object, root: Path, path: str) 
     if len(names) != 1:
         raise ValueError(f'{path} must record case {case} with exactly one test function')
     return [m for m in markers(root, [path]) if m['name'] in names and m.get('owner') is None]
+
+
+_UNITTEST_FAILURE = re.compile(r'^(?:FAIL|ERROR): ([A-Za-z_]\w*) \((?:[A-Za-z_][\w.]*\.)?([A-Za-z_]\w*)\.\1\)$', re.M)
+_UNITTEST_SUMMARY = re.compile(r'^FAILED \(([^)]*)\)$', re.M)
+
+
+def _unittest_case_markers(occurrence: dict, case: object, root: Path, path: str) -> list[dict]:
+    """The marker for the single failed unittest case of a structural-suite FLAKY unit (e.g. `deploy-test-plan`).
+
+    A suite unit names its script, not a test, so the attribution names `<TestCase class>.<method>`. It binds
+    only when the marker file is that suite's script and the flaky first attempt's recorded unittest output
+    failed exactly that one case.
+    """
+    match = re.fullmatch(r'([A-Za-z_]\w*)\.([A-Za-z_]\w*)', case) if isinstance(case, str) else None
+    if match is None:
+        raise ValueError('case must be the recorded unittest case as <TestCase class>.<test method>')
+    if Path(path).name != f"{occurrence['unit']}.test.py":
+        raise ValueError(f"{path} is not the suite script of FLAKY unit {occurrence['unit']}")
+    detail = str(occurrence.get('detail') or '')
+    failed = [(owner, name) for name, owner in _UNITTEST_FAILURE.findall(detail)]
+    if failed != [(match[1], match[2])] or _UNITTEST_SUMMARY.findall(detail) not in (['failures=1'], ['errors=1']):
+        raise ValueError(f"case {case} is not the single failed case of FLAKY unit {occurrence['unit']}")
+    return [m for m in markers(root, [path]) if m['name'] == match[2] and m.get('owner') == match[1]]
 
 
 def link_repair(root: Path, occurrence_id: str, repair: str, paths: list[str] | None = None) -> list[str]:

@@ -447,6 +447,47 @@ class ReleaseReport(unittest.TestCase):
             q.validate_attribution({**occurrence, 'detail': several}, {**entry, 'case': 'real_model_controls'},
                                    self.root)
 
+    def test_structural_suite_flake_binds_the_marker_of_its_single_failed_unittest_case(self):
+        occurrence_id = 'd' * 32
+        suite = ("from test_quarantine import quarantine\n\n"
+                 "class Observation(unittest.TestCase):\n"
+                 "    @quarantine(since='2026-11-11', repair='pending-handoff:%s', error='AssertionError: boom', "
+                 "evidence='rca-3')\n"
+                 "    def test_scan(self):\n        pass\n\n"
+                 "    def test_other(self):\n        pass\n" % occurrence_id)
+        (self.root / 'tests' / 'suite.test.py').write_text(suite)
+        detail = ("passed on rerun: suite\n....F..\n" + "=" * 70 + "\n"
+                  "FAIL: test_scan (__main__.Observation.test_scan)\n" + "-" * 70 + "\n"
+                  "Traceback (most recent call last):\nAssertionError: boom\n\nRan 7 tests in 1.0s\n\n"
+                  "FAILED (failures=1)\n")
+        occurrence = {'id': occurrence_id, 'gate': 'structural', 'unit': 'suite', 'detail': detail,
+                      'source': {'head': 'a' * 40}}
+        packet = {k: 'x' for k in ('test', 'command', 'scope', 'error', 'source', 'evidence')}
+        entry = {'attribution': 'NOT_INTRODUCED', 'evidence': 'rca-3', 'marker': 'tests/suite.test.py',
+                 'post_merge': packet}
+        # A suite unit names its script, not a test: without the case label nothing binds.
+        with self.assertRaisesRegex(ValueError, 'no quarantine marker'):
+            q.validate_attribution(occurrence, entry, self.root)
+        recorded = q.validate_attribution(occurrence, {**entry, 'case': 'Observation.test_scan'}, self.root)
+        self.assertEqual(('NOT_INTRODUCED', 'suite', occurrence_id),
+                         tuple(recorded['post_merge'][k] for k in ('attribution', 'unit', 'occurrence')))
+        # An unmarked case, a case that did not fail, several failures, another script or a bad label never bind.
+        with self.assertRaisesRegex(ValueError, 'no quarantine marker'):
+            q.validate_attribution({**occurrence, 'detail': detail.replace('test_scan', 'test_other')},
+                                   {**entry, 'case': 'Observation.test_other'}, self.root)
+        with self.assertRaisesRegex(ValueError, 'single failed case'):
+            q.validate_attribution(occurrence, {**entry, 'case': 'Observation.test_other'}, self.root)
+        several = detail.replace('FAILED (failures=1)', 'FAIL: test_other (__main__.Observation.test_other)\n'
+                                 'FAILED (failures=2)')
+        with self.assertRaisesRegex(ValueError, 'single failed case'):
+            q.validate_attribution({**occurrence, 'detail': several}, {**entry, 'case': 'Observation.test_scan'},
+                                   self.root)
+        with self.assertRaisesRegex(ValueError, 'suite script'):
+            q.validate_attribution({**occurrence, 'unit': 'other-suite'},
+                                   {**entry, 'case': 'Observation.test_scan'}, self.root)
+        with self.assertRaisesRegex(ValueError, 'TestCase class'):
+            q.validate_attribution(occurrence, {**entry, 'case': 'Observation.test_scan.extra'}, self.root)
+
     def test_catalog_marker_backs_a_not_introduced_smoke_flake_and_bad_markers_are_refused(self):
         self.write_catalog()
         self.assertEqual({'cloud-smoke': META}, q.catalog_quarantines(self.root))
