@@ -28871,7 +28871,9 @@ def test_migration_resume_preserves_interrupted_pool_handoff(tmp_path: Path, reg
         assert record.read_bytes() == before_record
 
 
-def _private_source_preflight_fixture(tmp_path: Path, *, private: bool = True, corrupt: str = ""):
+def _private_source_preflight_fixture(
+    tmp_path: Path, *, private: bool = True, corrupt: str = "", transient_empty: int = 0
+):
     """Replay real source/stop/snapshot/dependency admission without a provider."""
     tmp_path.mkdir(parents=True, exist_ok=True)
     owner = "a" * 32
@@ -29028,7 +29030,10 @@ FLY() {{
   case "$1 $2" in
     "machines list") cat "$FIXTURE/machines.json" ;;
     "volumes list") cat "$FIXTURE/volumes.json" ;;
-    "volume snapshots") cat "$FIXTURE/snapshots.json" ;;
+    "volume snapshots")
+      empties=$(wc -l < "$FIXTURE/snapshot-reads" 2>/dev/null || echo 0)
+      echo read >> "$FIXTURE/snapshot-reads"
+      if [ "$empties" -lt "${{TRANSIENT_EMPTY:-0}}" ]; then echo '[]'; else cat "$FIXTURE/snapshots.json"; fi ;;
     *) echo 'unexpected provider mutation' >&2; return 88 ;;
   esac
 }}
@@ -29043,11 +29048,29 @@ cloudbench_manifest_fingerprint() {{ printf '%s\\n' {python}; }}
 warm_deps_preflight || exit $?
 printf 'SELECTED=%s:%s:%s\\n' "$WARM_ID" "$VOL_ID" "$SNAP_ID"
 """
-    env = {"PATH": os.environ["PATH"], "FIXTURE": str(tmp_path)}
+    env = {"PATH": os.environ["PATH"], "FIXTURE": str(tmp_path), "TRANSIENT_EMPTY": str(transient_empty)}
     if private:
         env["CLOUDBENCH_SOURCE_MANIFEST"] = str(tmp_path / "manifest.json")
     result = subprocess.run(["bash", "-c", script], env=env, text=True, capture_output=True, timeout=20, check=False)
     return result, calls.read_text()
+
+
+@pytest.mark.parametrize("empties, admitted", [(2, True), (6, False)])
+def test_private_fleet_source_rereads_transient_empty_snapshot_listing(
+    tmp_path: Path, empties: int, admitted: bool
+) -> None:
+    """Fly answered concurrent snapshot listings with rc=0 and [] (deploy round 33)."""
+    result, calls = _private_source_preflight_fixture(tmp_path, transient_empty=empties)
+    reads = calls.count("volume snapshots list vol_private")
+    if admitted:
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "SELECTED=feedface000001:vol_private:vs_private" in result.stdout
+        assert reads == empties + 1
+    else:
+        assert result.returncode != 0 and "SELECTED=" not in result.stdout
+        assert "private fleet source validation failed: snapshot identity missing or duplicate" in result.stderr
+        assert reads == 6
+    assert "machine update" not in calls and "machine stop" not in calls
 
 
 def test_private_fleet_source_avoids_active_shared_warm(tmp_path: Path) -> None:

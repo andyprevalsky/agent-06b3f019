@@ -10259,7 +10259,7 @@ class RelayStartupEvidence(unittest.TestCase):
         proof['receipt_sha256']=hashlib.sha256((Path(receipt['log']).parent/'receipt.json').read_bytes()).hexdigest()
         self.reseal();return receipt,owner,proof,fleet
 
-    def mixed_preallocation_fixture(self, graded_count=11):
+    def mixed_preallocation_fixture(self, graded_count=11, failed_helper=False):
         import hashlib, shutil
         from cloudbench_execution_provenance import build_config, build_task_matrix
         receipt, owner, proof, original = self.preallocation_fixture()
@@ -10278,7 +10278,9 @@ class RelayStartupEvidence(unittest.TestCase):
             batch = fleet / '_batch'
             self.save(batch / 'benches.json', [dict(name=name, mode='REAL')])
             life = json.loads((batch / 'lifecycle.json').read_text())
-            life.update(fleet_owner_token=token, run_id=fleet.name, status='failed' if index < 2 else 'verified', controller_exit_code=1 if index < 2 else 0)
+            helper = failed_helper and name == 'infra-probe'  # e.g. a cancelled re-auth helper run
+            life.update(fleet_owner_token=token, run_id=fleet.name, status='failed' if index < 2 or helper else 'verified',
+                        controller_exit_code=1 if index < 2 else 143 if helper else 0)
             if index >= 2:
                 matrix = build_task_matrix([name + '=real'])
                 self.save(fleet / 'execution-task-matrix.json', matrix)
@@ -10286,10 +10288,11 @@ class RelayStartupEvidence(unittest.TestCase):
                     base_sha=receipt['source']['head'], workspace_patch_sha256='none',
                     config=build_config('cloudbench-fleet-config-v1', ['task_count=1', 'task_matrix_sha256='+matrix['sha256']]),
                     controller_snapshot=dict(schema_version='cloudbench-controller-snapshot-v1', sha256='d'*64)))
+            failed = index < 2 or helper
             self.save(batch / 'run.json', dict(run_id=fleet.name, controller_exit_code=life['controller_exit_code'],
-                status='failed' if index < 2 else 'passed', tasks=[dict(name=name, passed=index >= 2,
-                status='INFRA_ERROR' if index < 2 else 'PASSED', lifecycle_stage='released',
-                failure_reason='no current run artifact produced' if index < 2 else None)]))
+                status='failed' if failed else 'passed', tasks=[dict(name=name, passed=not failed,
+                status='INFRA_ERROR' if failed else 'PASSED', lifecycle_stage='released',
+                failure_reason='no current run artifact produced' if failed else None)]))
             self.save(batch / 'disposable-cleanup.json', dict(schema='disposable-cleanup-v1', owner=token,
                 guest_cleanup_missing=False, runtime_evidence_missing=False, successful_runtime_inferred=False))
             canonical=self.base/'.git/cloudbench-fleet-audits'/token; shutil.copytree(audit,canonical)
@@ -10307,7 +10310,11 @@ class RelayStartupEvidence(unittest.TestCase):
                     controller_pid=pid,log=str(log),controller_command=['bash',str(self.base/'scripts/run-bench'),name,'--ref',receipt['source']['head'],'--foreground']))
         shutil.rmtree(seed)
         with (self.campaign/'r001-j0001.log').open('a') as stream:
+            if failed_helper:  # the shared infra-probe canary, linked the way the real controller logs it
+                stream.write(f"ref : {receipt['source']['head']}\nmode: --infra-probe (strict barrier, no LLM / run_benchmark)\n")
             stream.write(f'{self.base}/scripts/run-bench monitor {fleets[-1]}\n')
+            if failed_helper:
+                stream.write(f'owner: {len(names) + 256:032x}; private controller diagnostics stay in this run directory.\n')
         summary=json.loads((self.campaign/'summary.json').read_text()); summary.update(jobs=jobs,task_count=len(names),total_jobs=len(names),concurrency=len(names),peak_concurrency=len(names))
         self.save(self.campaign/'summary.json',summary)
         request_path=Path(receipt['log']).parent/'request.json';request=json.loads(request_path.read_text());request['checks']=names;request['skips']={k:{'kind':'historical-agentcard-no-retry-v1','disposition':'NO_RETRY_CUSTODY','source':receipt['source'], 'current_binding':{'source':receipt['source']},'current_execution':'UNVERIFIED','current_financial_state':'UNVERIFIED','credit':{'test_execution':False,'assertions':False,'financial_release':False}} for k in ('old-one','old-two')};self.save(request_path,request)
@@ -10332,6 +10339,14 @@ class RelayStartupEvidence(unittest.TestCase):
         self.assertEqual(before,{p:p.read_bytes() for p in before})
         for layout in ('campaign-v1','campaign-preallocation-v1'):
             with self.assertRaises(ValueError): self.validate_fixture(receipt,owner,{**proof,'layout':layout})
+
+    def test_mixed_preallocation_accepts_failed_non_job_helper_run_without_credit(self):
+        # Round 33: an infra stop cancelled a re-auth helper fleet that is no campaign job.
+        receipt,owner,proof,fleets=self.mixed_preallocation_fixture(failed_helper=True)
+        result=self.validate_fixture(receipt,owner,proof)
+        self.assertFalse(result['credit_granted'])
+        self.assertEqual(14,len(result['participants']))
+        self.assertEqual(['UNVERIFIED']*13+['SKIP']*2,list(receipt['cases'].values()))
 
     def test_mixed_preallocation_refuses_ambiguous_artifacts_source_and_ownership(self):
         import shutil

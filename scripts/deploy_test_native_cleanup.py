@@ -1382,7 +1382,8 @@ def validate(receipt, owner, proof, *, quarantine_archive=None):
         if fleet in parents:
             need({b['name'] for b in benches} == parents[fleet]['checks'], 'parent requested inventory')
         life = document(fleet / '_batch/lifecycle.json')
-        failed_canary = layout == 'campaign-v1' and fleet not in parents and life.get('status') == 'failed'
+        failed_canary = (layout in {'campaign-v1', 'campaign-mixed-preallocation-v1'} and fleet not in parents
+                         and life.get('status') == 'failed')
         run_path = fleet / '_batch/run.json'
         if isolated or preallocation or mixed or fleet in admission_parents or failed_canary:
             # These layouts consume the original projection. Bind its control
