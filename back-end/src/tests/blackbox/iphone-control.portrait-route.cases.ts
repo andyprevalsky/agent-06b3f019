@@ -1,6 +1,10 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'crypto';
-import { provePortraitRoute } from '../../providers/phonePortraitRoute';
+import {
+  portraitRouteBreakAt,
+  portraitRouteVerdict,
+  provePortraitRoute,
+} from '../../providers/phonePortraitRoute';
 import {
   portraitRouteCommands,
   portraitRouteEvents,
@@ -363,3 +367,35 @@ for (const [label, deviate, stage, next] of routeBreakCases)
       assert.match(routeBreak.next, /new Settings launch/);
     },
   ]);
+portraitRouteCases.push([
+  'portrait route break names the breaking event, keeping an earlier break over a later invalid row',
+  async () => {
+    const context = {
+      attemptId: 'attempt',
+      revision: 1,
+      firstRun: 'firstRun',
+      profileRevision: 1,
+      now: Date.now(),
+    };
+    const badLaunch = structuredClone(portraitRouteEvents('off', 'production'));
+    badLaunch[0].result = 'com.apple.mobileslideshow';
+    const launchVerdict = portraitRouteVerdict(badLaunch, context);
+    assert.ok('break' in launchVerdict);
+    assert.equal(launchVerdict.break.cursor, badLaunch[0].cursor, 'Invalid launch not named');
+    assert.equal(launchVerdict.break.operation, 'apps.launch');
+
+    const lost = structuredClone(portraitRouteEvents('off', 'production'));
+    const typed = lost.findIndex((e) => e.operation === 'input.text');
+    lost[typed + 1].result = unchangedSearchRows();
+    const prefix = lost.slice(0, typed + 4);
+    const later = { cursor: prefix.at(-1)!.cursor + 1, operation: 'input.tap' };
+    const kept = portraitRouteBreakAt(prefix, context, later);
+    assert.equal(kept.stage, 'results', 'Later invalid row hid the earlier semantic break');
+    assert.equal(kept.cursor, lost[typed + 1].cursor);
+
+    const valid = portraitRouteEvents('off', 'production').slice(0, typed + 2);
+    const reached = portraitRouteBreakAt(valid, context, later);
+    assert.equal(reached.cursor, later.cursor, 'Invalid row not reported after a valid prefix');
+    assert.equal(reached.stage, 'result_tap');
+  },
+]);

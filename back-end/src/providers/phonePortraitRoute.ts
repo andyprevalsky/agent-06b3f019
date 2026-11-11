@@ -129,6 +129,29 @@ const NEXT_STEP: Record<string, string> = {
 export function portraitRouteNext(stage: string) {
   return `${NEXT_STEP[stage] ?? NEXT_STEP.launch} ${RESTART}`;
 }
+/**
+ * The valid journal prefix decides first: an earlier semantic break wins over a later invalid row
+ * (failed, stale, foreign or a verify gap); otherwise the invalid row is reported at the stage the
+ * prefix reached.
+ */
+export function portraitRouteBreakAt(
+  events: PortraitRouteEvent[],
+  context: Context,
+  invalid: { cursor: number; operation: string } | undefined
+): PortraitRouteBreak {
+  const prefix = portraitRouteVerdict(events, context);
+  const last = events.at(-1);
+  if ('break' in prefix && last !== undefined && prefix.break.cursor < last.cursor)
+    return prefix.break;
+  const stage = 'break' in prefix ? prefix.break.stage : 'cc_ready';
+  const at = invalid ?? last;
+  return {
+    stage,
+    cursor: at?.cursor ?? 0,
+    operation: at?.operation ?? 'none',
+    next: portraitRouteNext(stage),
+  };
+}
 export function provePortraitRoute(
   events: PortraitRouteEvent[],
   context: Context
@@ -175,7 +198,7 @@ export function portraitRouteVerdict(
   if (prefix < 0) return reject();
   const route = events.slice(prefix);
   const first = route[0];
-  if (!settingsLaunch(first) || !Number.isSafeInteger(first.revision)) return reject();
+  if (!settingsLaunch(first) || !Number.isSafeInteger(first.revision)) return reject(first);
   let revision = first.revision;
   stage = 'root';
   let pending: ObservedTarget | null = null;
