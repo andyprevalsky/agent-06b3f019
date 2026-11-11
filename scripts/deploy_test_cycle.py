@@ -574,7 +574,22 @@ def _execute(gate: dict, state: dict, directory: Path, root: Path, *, host_admis
         request['custody_runtime'] = runtime_identity(root)
         request['custody_child_environment'] = environment_identity(env)
         write(folder / 'request.json', request)
-    admission = isolated_request(state, gate, request, root, env)
+    try:
+        admission = isolated_request(state, gate, request, root, env)
+    except ValueError as error:
+        from deploy_test_native_cleanup import ISOLATED_REFUSAL_KIND, ISOLATED_REFUSAL_REASON
+        if str(error) != ISOLATED_REFUSAL_REASON:
+            raise
+        # This branch precedes output/process creation and the adapter command.
+        # It is an admission refusal, never native execution or cleanup credit.
+        refusal = dict(gate=name, status='FAIL', complete=False,
+            cases=dict.fromkeys(gate['checks'], 'UNVERIFIED'), source=state['source'],
+            reason=str(error), token=token, executed=False, native_exit=None,
+            pre_command_refusal=dict(kind=ISOLATED_REFUSAL_KIND,
+                request=str(folder / 'request.json'), request_sha256=sha_file(folder / 'request.json'),
+                stage='isolated_request', command_started=False))
+        write(folder / 'receipt.json', refusal)
+        return refusal
     if admission:
         request['isolated_validation'] = admission
         write(folder / 'request.json', request)

@@ -329,3 +329,61 @@ The public reconcile action then recorded only the retained-owner qualification
 on the original source plan; all thirteen pending observations, native grades,
 raw complete/cleanup flags and two historical exclusions remain unchanged.
 A fresh whole-gate execution is still required for positive execution credit.
+
+
+## November 11 recurrence: pre-command refusal shadowed an executed successor
+
+PR1919 source e979f73b8930bedb3dd5d3dba1518520e2931d8d correctly refused
+smoke admission because the original isolated proof still named the preceding
+validation source. Request1958fbf77dd84099b9fb21a6259fca71 was sealed, but
+`isolated_request` raised `native cleanup: next source/inventory binding`
+before opening command output or calling `run_command`. Its directory contains
+only request.json; the token-derived native root is absent. All15 smoke cases
+remain UNVERIFIED. This was not a native benchmark execution or task failure.
+
+The public token renewal then failed with `native cleanup: failed successor
+execution`: latest-receipt selection chose the coordinator's tokenless exception
+row instead of the preceding fully sealed executed successor. The already
+published historical-inventory repair accepts that preceding thirteen-case
+successor against the expanded fifteen-case gate; inventory extension was not
+the failed boundary. A diagnostic copy also exposed an older original-failure-ID
+registration route that overwrote an existing changed proof without renewal
+history or the newer quiescence and successor guards. That route was not used
+to mutate canonical state.
+
+The fix authenticates this exact legacy refusal against immutable producer Git
+bytes, request hash, source, phase, full current inventory, a request-only
+namespace and absent native root. Future producers write a typed request-bound
+pre-command refusal before command creation. Only the immediately preceding
+executed successor is selected; unchanged successor, prior-proof, physical-root,
+current-source and full native-proof validation still run. Changed proofs for an
+already registered failure ID enter the same guarded renewal and append history;
+identical re-registration remains idempotent. Global latest-receipt selection is
+unchanged. No result, exclusion, financial obligation or cleanup verdict changes.
+
+No pre-existing failing test covered this producer/consumer combination. Five
+new permanent methods in scripts/tests/deploy-test-cycle.test.py cover the
+legacy and future producers, failure-ID routing, preserved fifteen-case debt and
+atomic refusal of unknown execution, tampered requests, extra artifacts, changed
+sources, original exclusions and live markers. On unchanged e979 production the
+same five-method invocation failed (one assertion failure, three errors); after
+the runtime change it passed five consecutive runs (3.984,3.689,3.815,3.809,
+3.557 seconds). The twelve existing isolated-renewal tests also passed. The test
+file stayed byte-identical across these runs, SHA256
+bfbe0b3770049ee8f300d056d4af3aea9d9655e068428ed79bd7e0c5a3d0ae84.
+
+Exact owning command: agents/venv/bin/python3 -B
+scripts/tests/deploy-test-cycle.test.py
+Cycle.test_precommand_refusal_renews_only_target_after_full_historical_successor
+Cycle.test_precommand_refusal_refuses_unknown_tampered_or_admitted_debt_atomically
+Cycle.test_existing_failure_id_changed_proof_uses_guarded_renewal_and_history
+Cycle.test_existing_failure_id_cannot_bypass_live_guard_or_changed_debt
+Cycle.test_future_precommand_producer_seals_zero_execution_and_renews_without_credit.
+
+The original official CLI refusal and unchanged-state/proof receipts are retained
+under .context/rca-e388d514/integration-renewal-owning-red.log and
+integration-renewal-before.json; regression logs are renewal-five-owning-red.log,
+renewal-five-owning-green-{1..5}.log and renewal-existing-isolated.log. Actual
+current-source public proof renewal and fresh full smoke execution remain
+separate required operations. This causal test does not establish benchmark
+success, financial settlement or historical cleanup completion.

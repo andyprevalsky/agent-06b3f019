@@ -70,3 +70,9 @@ rerun, with source attribution UNKNOWN and no waiver.
 Sources: plan: existing backend-coverage-blackbox gate, complete native units
 log SHA256 fccceca817f7dd7d7bc54e1cdbe6660c584bb179d5fecf32aebc0373e5ac9872;
 private PR1915 error-alert-unit/minimal attribution packet and replay receipt.
+
+### Recurrence — November 11, 2026
+
+The iPhone access-request `/push` full backend coverage run reproduced an earlier boundary in step 5: `the first alert reached the rejecting transport`, `0 !== 1` at line 147. The first rejected transport had not run after the fixed 30 ms sleep, before the existing retry-release guard was reached. Native evidence is retained in `.context/iphone-access-backend-coverage-final.log` and `.context/iphone-access-coverage-failed-073654/`; the failed run was terminated through its owned runner for disk capacity, with closed raw evidence preserved losslessly.
+
+Reuse the independently reviewed three-line barrier from published commit `0cb3184d956a30ae32a0f77b24986fa4d448bc6d`: collect rejection events and use the existing bounded `waitForCalls` helper before the unchanged rejection-count assertion. This completes the missing precondition of the prior guard without changing product alert behavior, timeout constants or assertions. The focused alert test passed after the barrier; final full-gate outcomes belong to the access-request push receipt.
