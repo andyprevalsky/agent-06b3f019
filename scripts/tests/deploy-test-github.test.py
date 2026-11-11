@@ -518,6 +518,78 @@ class Launcher(unittest.TestCase):
             self.assertEqual(result['evidence']['c']['remote_log'], gh.REMOTE_ROOT + '/.context/deploy-worker/h/a.log')
             self.assertEqual(result['evidence']['d']['log'], '/etc/passwd')
 
+    def test_preexisting_native_dumps_and_all_manifest_worker_logs_are_hash_bound(self):
+        # Explicit offline fixture bytes, never an original provider payload.
+        import hashlib
+        with tempfile.TemporaryDirectory() as tmp:
+            root, out = Path(tmp) / 'repo', Path(tmp) / 'out'
+            out.mkdir(); (root / '.context').mkdir(parents=True)
+            primary = root / 'agents/custom-worker.txt'
+            primary.parent.mkdir()
+            expected = {'.llm-dumps/offline-fixture/1-span-router.json': b'offline retention fixture'}
+            expected.update({f'agents/custom-worker{suffix}.txt': f'offline worker {i}'.encode()
+                             for i, suffix in enumerate([''] + [f'.{i}' for i in range(1, 8)])})
+            for rel, data in expected.items():
+                path = root / rel; path.parent.mkdir(parents=True, exist_ok=True); path.write_bytes(data)
+            private = root / '.context/private/.env.secret'; private.parent.mkdir(); private.write_text('offline-secret')
+            (root / '.context/services.json').write_text(json.dumps({'logs': {'worker': str(primary),
+                'backend': str(private), 'frontend': str(Path(tmp) / 'outside.txt')}}))
+            malformed = root / '.context/offline-fixture/services.json'
+            malformed.parent.mkdir(); malformed.write_text('[]')
+            secret = root / '.rose/tools.json'; secret.parent.mkdir(); secret.write_text('secret fixture')
+            (root / '.llm-dumps/offline-fixture/alias.json').symlink_to(secret)
+            (root / '.llm-dumps/alias-dir').symlink_to(secret.parent, target_is_directory=True)
+            (root / '.llm-dumps/offline-fixture/.env').write_text('secret fixture')
+            (primary.parent / 'custom-worker.extra.txt').write_text('unrelated')
+            large = root / '.llm-dumps/offline-fixture/oversize.json'
+            with large.open('wb') as stream: stream.truncate(gh.BUNDLE_FILE_BYTES + 1)
+            outside = Path(tmp) / 'outside.txt'; outside.write_text('outside fixture')
+            (root / '.context/outside.txt').symlink_to(outside)
+            with patch.object(gh, 'ROOT', root), patch.object(gh, 'publish_done') as publish:
+                self.assertEqual(gh.remote_bundle(type('Args', (), {'out': out})()), 0)
+            publish.assert_called_once_with(out, out / 'artifact')
+            self.assertEqual([rel for rel in expected if not (out / 'artifact/files' / rel).is_file()], [],
+                             'preexisting native dumps/worker streams excluded')
+            for rel, data in expected.items():
+                path = out / 'artifact/files' / rel
+                self.assertTrue(path.is_file(), f'preexisting native evidence lost: {rel}')
+                self.assertEqual(path.read_bytes(), data)
+            manifest = json.loads((out / 'artifact/bundle.json').read_text())
+            bound = {row['path']: row for row in manifest['captured']}
+            for rel, data in expected.items():
+                self.assertEqual(bound[rel]['sha256'], hashlib.sha256(data).hexdigest())
+                self.assertEqual(bound[rel]['bytes'], len(data))
+            self.assertTrue(any(row['path'] == str(large.relative_to(root)) for row in manifest['skipped']))
+            self.assertFalse((out / 'artifact/files/.rose').exists())
+            self.assertFalse((out / 'artifact/files/.context/private/.env.secret').exists())
+            self.assertTrue(any(row['path'] == '.context/private/.env.secret'
+                                and row.get('reason') == 'private_config' for row in manifest['skipped']))
+            self.assertFalse((out / 'artifact/files/.llm-dumps/offline-fixture/.env').exists())
+            self.assertFalse((out / 'artifact/files/.llm-dumps/offline-fixture/alias.json').exists())
+            self.assertFalse((out / 'artifact/files/agents/custom-worker.extra.txt').exists())
+            self.assertEqual(gh.BUNDLE_FILE_BYTES, 64 * 1024 * 1024)
+            self.assertEqual(gh.BUNDLE_TOTAL_BYTES, 400 * 1024 * 1024)
+
+    def test_capped_bundle_keeps_existing_dumps_before_bulk_coverage_json(self):
+        # Same capped selection as production, with small offline fixture bytes.
+        self.assertEqual(gh.BUNDLE_FILE_BYTES, 64 * 1024 * 1024)
+        self.assertEqual(gh.BUNDLE_TOTAL_BYTES, 400 * 1024 * 1024)
+        with tempfile.TemporaryDirectory() as tmp:
+            root, out = Path(tmp) / 'repo', Path(tmp) / 'out'
+            dump = root / '.llm-dumps/offline-fixture/last-request.json'
+            dump.parent.mkdir(parents=True); dump.write_bytes(b'd' * 60)
+            raw = root / '.context/test-runs/backend-coverage-failed-fixture/raw-v8'
+            raw.mkdir(parents=True); out.mkdir()
+            for index in range(8):
+                (raw / f'coverage-{index}.json').write_bytes(b'v' * 50)
+            with patch.object(gh, 'ROOT', root), patch.object(gh, 'BUNDLE_FILE_BYTES', 64), \
+                    patch.object(gh, 'BUNDLE_TOTAL_BYTES', 400), patch.object(gh, 'publish_done'):
+                gh.remote_bundle(type('Args', (), {'out': out})())
+            self.assertEqual((out / 'artifact/files' / dump.relative_to(root)).read_bytes(), b'd' * 60)
+            manifest = json.loads((out / 'artifact/bundle.json').read_text())
+            self.assertLessEqual(manifest['bytes'], 400)
+            self.assertTrue(any(row['path'].startswith('.context/') for row in manifest['skipped']))
+
     def test_capped_bundle_keeps_server_logs_before_bulk_coverage_json(self):
         # The PR #1762 shard-2 artifact dropped its 10 MB server log: 3,000 raw V8
         # and replay-cache JSON files, each smaller, had filled the 400 MB budget first.

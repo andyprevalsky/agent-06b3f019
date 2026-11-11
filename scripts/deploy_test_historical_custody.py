@@ -704,6 +704,8 @@ def admission(request, root):
     expected = c.reuse_qualifications(state, gate, root=root, include_custody=False)
     current = {k: state[k] for k in ('source', 'plan_digest', 'environment', 'input_fingerprints')}
     expected.update(guard(state, gate, root, expected, current=current))
+    from deploy_test_user_omission import qualifications as elected_qualifications
+    expected.update(elected_qualifications(state, gate, expected))
     need(request['skips'] == expected and request['checks'] == [x for x in gate['checks'] if x not in expected], 'admission inventory/qualification changed')
 
 

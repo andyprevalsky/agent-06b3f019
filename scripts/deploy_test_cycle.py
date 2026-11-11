@@ -297,6 +297,9 @@ def reuse_qualifications(state: dict, gate: dict, *, include_custody=True, root=
         current = (identical_inputs_binding(state, root)
                    if custody_refresh and state.get('historical_no_retry_custody') else None)
         expected.update(guard(state, gate, root, expected, current=current))
+    from deploy_test_user_omission import qualifications as elected_qualifications
+    if include_custody:
+        expected.update(elected_qualifications(state, gate, expected))
     if not set(expected) <= set(gate['checks']):
         raise ValueError('reuse qualification outside full inventory')
     return expected
@@ -361,6 +364,9 @@ def full_pass_binding(state: dict, gate: dict, *, root=ROOT, custody_refresh=Fal
                 or any(receipt.get('case_complete', {}).get(k) is not False
                        or receipt.get('current_execution', {}).get(k) != 'UNVERIFIED'
                        for k, v in skips.items() if v.get('disposition') == 'NO_RETRY_CUSTODY')
+                or any(receipt.get('case_complete', {}).get(k) is not False
+                       or receipt.get('current_execution', {}).get(k) != 'UNEXECUTED'
+                       for k, v in skips.items() if v.get('native_result') == 'UNEXECUTED')
                 or request.get('worker_recipe') != gate.get('worker_recipe')):
             return None
         worker = receipt.get('worker_result')
@@ -523,6 +529,9 @@ def _execute(gate: dict, state: dict, directory: Path, root: Path, *, host_admis
                  for w in state.get("resource_warnings", [])
                  if w["gate"] == name and w["source"] == state["source"]
                  and w.get("input_fingerprint") == state["input_fingerprints"].get(name)}
+    from deploy_test_user_omission import qualifications as elected_qualifications
+    elected = elected_qualifications(state, gate, {**case_skips, **qualified, **custody})
+    case_skips.update(elected)
     active = [c for c in gate["checks"] if c not in case_skips and c not in qualified and c not in custody]
     if not active:
         if any(v.get('disposition') == 'user / overridden' for v in case_skips.values()) and (
@@ -530,8 +539,10 @@ def _execute(gate: dict, state: dict, directory: Path, root: Path, *, host_admis
             raise ValueError('explicit all-skip gate requires successful native root admission')
         return {"gate": name, "status": "SKIP", "cases": {c: "SKIP" for c in gate["checks"]},
                 "native_exit": None, "executed": False, "source": state["source"], "resource_skips": qualified,
-                "custody_skips": custody, "case_complete": {c: False for c in custody},
-                "current_execution": {c: "UNVERIFIED" for c in custody}}
+                "custody_skips": custody, "elected_skips": elected,
+                "case_complete": {c: False for c in [*custody, *elected]},
+                "current_execution": {**{c: "UNVERIFIED" for c in custody},
+                                      **{c: "UNEXECUTED" for c in elected}}}
     # A worker must explicitly consume the case inventory, including exclusions.
     # Without a case-aware worker mixed skip/run would either rerun skipped tests
     # or silently omit checks, so reject it before launch.
@@ -670,8 +681,10 @@ def _execute(gate: dict, state: dict, directory: Path, root: Path, *, host_admis
     result = {"gate": name, "status": status, "cases": cases, "native_exit": code,
               "executed": host_admission.get('started', True), "complete": valid and complete,
               "reason": host_admission.get('reason', reason), "timed_out": timed_out,
-              "case_complete": {c: valid and v != 'UNVERIFIED' and c not in custody for c, v in cases.items()},
-              "current_execution": {c: "UNVERIFIED" for c in custody}, "custody_skips": custody,
+              "case_complete": {c: valid and v != 'UNVERIFIED' and c not in custody and c not in elected for c, v in cases.items()},
+              "current_execution": {**{c: "UNVERIFIED" for c in custody},
+                                    **{c: "UNEXECUTED" for c in elected}},
+              "custody_skips": custody, "elected_skips": elected,
               "cancelled": cancelled, "lingering_group": lingering,
               "source": state["source"], "started_at": started, "finished_at": time.time(),
               "command": gate["command"], "log": str(folder / "output.log"),
@@ -939,6 +952,8 @@ def validate_user_override(entry, state, check):
 
 
 def revalidate_standing_skips(state: dict) -> None:
+    from deploy_test_user_omission import verify as verify_user_elections
+    verify_user_elections(state)
     for key, entry in state.get('skips', {}).items():
         if entry.get('disposition') == 'user / overridden':
             validate_user_override(entry['rca'], state, key)
@@ -2565,7 +2580,7 @@ def verify_saved(directory: Path, root: Path, expect_head: str | None = None) ->
 def main(argv: list[str] | None = None) -> int:
     """Dispatch a validated cycle transition and persist its evidence."""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=["init", "run", "resume", "status", "triage", "focus", "refresh", "rebind-local", "triage-quick", "triage-independent", "repair-independent", "rca", "verify", "report", "resolve", "complete", "reexecute", "reconcile", "standing-skip", "accept-omitted-custody", "prepare-agentcard-renewal", "renew-agentcard-warning", "prepare-historical-no-retry", "prepare-historical-import", "admit-historical-import", "import-historical-custody", "import-historical-no-retry", "attribute-flaky"])
+    parser.add_argument("action", choices=["init", "run", "resume", "status", "triage", "focus", "refresh", "rebind-local", "triage-quick", "triage-independent", "repair-independent", "rca", "verify", "report", "resolve", "complete", "reexecute", "reconcile", "standing-skip", "elect-user-omission", "accept-omitted-custody", "prepare-agentcard-renewal", "renew-agentcard-warning", "prepare-historical-no-retry", "prepare-historical-import", "admit-historical-import", "import-historical-custody", "import-historical-no-retry", "attribute-flaky"])
     parser.add_argument('--donor-state', type=Path,
                         help='import-historical-no-retry: immutable independent donor cycle snapshot')
     parser.add_argument('--exclude-root', type=Path, action='append', default=[],
@@ -2584,6 +2599,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--plan", type=Path, required=True)
     parser.add_argument("--state-dir", type=Path, required=True)
     parser.add_argument("--input", type=Path)
+    parser.add_argument("--input-sha256", help="elect-user-omission: pinned typed request SHA256")
     parser.add_argument("--root", type=Path, default=ROOT)
     parser.add_argument("--rca-launcher", nargs=argparse.REMAINDER)
     args = parser.parse_args(argv)
@@ -2630,6 +2646,11 @@ def main(argv: list[str] | None = None) -> int:
                 with cancellation_handlers():
                     while state["phase"] in {"quick", "initial", "focused", "failed-gates", "final"}:
                         run_phase(plan, state, directory, args.root, args.rca_launcher)
+            elif args.action == 'elect-user-omission':
+                from deploy_test_user_omission import elect, pinned_document
+                if args.input is None or not args.input_sha256 or plan != state['plan']:
+                    raise ValueError('election requires pinned --input/--input-sha256 and exact current plan')
+                elect(state, pinned_document(args.input, args.input_sha256), args.root)
             elif args.action == "triage":
                 if args.input is None:
                     raise ValueError("--input RCA report required")
@@ -2789,6 +2810,8 @@ def main(argv: list[str] | None = None) -> int:
                     text += (f"FLAKY {f['gate']} :: {f['unit']} — "
                              + (f"{a['attribution']} · {a.get('fix_commit') or a.get('repair_agent') or 'post-merge packet'}"
                                 if a else "awaiting /RCA attribution (blocks merge)") + "\n")
+                from deploy_test_user_omission import report_lines as user_election_lines
+                text += ''.join(line + '\n' for line in user_election_lines(state))
                 for election in state.get('elected_omissions', []):
                     text += ('\nOPTIONAL COVERAGE SKIPPED (no task or cleanup credit)\n'
                              + election['reason'] + '\nNative: ' + election['native_result']

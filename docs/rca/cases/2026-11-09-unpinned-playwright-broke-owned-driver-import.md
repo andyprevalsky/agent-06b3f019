@@ -95,9 +95,11 @@ authentication failure. No services, credentials or browser workflow changed
 to collect the proof. Private original attachments and checksums are retained
 under `.context/rca-playwright/reconciliation-64d34/recurrence/`.
 
-This recurrence adds no production repair credit. The existing deployment is
-unmerged and requires an explicit verification review of the final stabilized
-source before rollout.
+This recurrence adds no production repair credit. The user approved one exact-source
+verification review for 4bcda6aa9cb5b7df9467e7fd2940e6638c686dcb. That review
+completed; the deployment remains unmerged and native production acceptance is
+still required. Subsequent tooling and diagnostic changes do not inherit that
+review approval.
 
 Independent review of the later production recurrence identified an artifact
 coverage gap: the warm benchmark Dockerfile import check does not validate the
@@ -109,13 +111,44 @@ command-level controls are not an image-build or production acceptance claim.
 The production artifact must actually build with this check before activation,
 and live installed-package/import readback and browser navigation remain required.
 
+## Validation follow-up on November 11
+
+The exact production Dockerfile built successfully on source 4bcda6a. A fresh
+container running as its final worker user verified installed Playwright 1.63.0
+and the unchanged real owner import; the existing 55 native startup/cancellation
+cases also passed in that image. These are local artifact controls, not a live
+rollout or navigation result.
+
+The current source-bound semantic run retained UI 53 PASS / 5 FAIL and latency
+5 PASS, complete cleanup and unchanged source. Three failures match the existing
+sidebar repair's native evidence; two real-agent message-count failures remain
+UNKNOWN. Four checksum-verified retained checkpoints expose failed Rose callback
+requests but do not establish their effective destination or timely parent
+publication. Neither a prior passing run nor the unchanged browser pin supplies
+causal attribution for these additional failures.
+
+Reuse the existing owner's published diagnostic collector from
+cf0aa8a31e46d2197492b9c59d220aae9010bcbe: retain already-created private model
+dumps and manifest/numeric worker logs under unchanged size limits, log only the
+constructed callback origin, and record fixed native monitor/close metadata.
+The actual existing owning checks fail before this reuse and pass afterward:
+70 transport tests, six backend tests and nine registered agent functions.
+Privacy and diagnostic-sink controls preserve normal URLs, providers, completion
+predicates, goals, deadlines, assertions and concurrency. This repairs an
+observation gap, not the original realtime behavior. Further native RCA and the
+assigned SDK production import/startup/navigation verification remain required.
+
 ## Related cases
 
 The warm-image fingerprint mismatch case concerns selecting a compatible dependency source. This incident also shows that equal unbounded manifest fingerprints do not establish an identical resolved SDK. The native driver ownership case remains the authority for cancellation and exact process cleanup. Neither an old passing task nor a source-only comparison replaces actual runtime proof.
 
 ## Human feedback
 
-No new feedback for this SDK repair. The existing assignment requires unchanged task assertions, deadlines, concurrency, privacy guards and native outcomes.
+The user approved only the exact-source verification review described above.
+The existing prohibition on new paid AgentCard operations and the exact selected
+check election remain in effect. The assignment retains unchanged assertions,
+deadlines, concurrency, privacy guards and native outcomes; it does not authorize
+account or physical-phone actions by this repair coordinator.
 
 ## Reusable lesson
 

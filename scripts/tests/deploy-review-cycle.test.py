@@ -2039,5 +2039,129 @@ class RetargetPriorAnalysisTest(unittest.TestCase):
             with self.subTest(reverse=reverse): self.invoke_case(control, False)
 
 
+
+
+class CompletedFindingsDispositionTest(unittest.TestCase):
+    """Finish(findings) then override uses the same final cycle, never reopens it."""
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.path = Path(self.temp.name) / 'ledger.json'
+        self.receipts = self.path.with_name('receipts.jsonl')
+        self.state = {'schema_version': 1, 'cycles': [
+            {'number': 1, 'kind': 'initial', 'head': HEAD_A, 'status': 'completed',
+             'result': 'findings', 'started_at': '2026-10-31T09:00:00Z', 'finished_at': '2026-10-31T09:05:00Z'},
+            {'number': 2, 'kind': 'incremental', 'head': HEAD_B, 'status': 'completed',
+             'result': 'clean', 'started_at': '2026-10-31T09:10:00Z', 'finished_at': '2026-10-31T09:15:00Z'},
+            {'number': 3, 'kind': 'verification', 'head': HEAD_C, 'status': 'completed',
+             'verification_approval': 'native-user-approval', 'result': 'findings',
+             'started_at': '2026-10-31T10:00:00Z', 'finished_at': '2026-10-31T10:16:00Z'}]}
+        self.data = evidence(reviews=[FINDINGS_REVIEW], check_runs=[FINISHED_CHECK],
+                             review_comments=[FINDING_COMMENT, DEFERRED_REPLY])
+        self.data['reviews'][0] = dict(FINDINGS_REVIEW, submitted_at='2026-10-31T10:15:00Z')
+        self.data['check_runs'][0] = dict(FINISHED_CHECK, started_at='2026-10-31T10:01:00Z')
+        self.data['review_comments'][0] = dict(FINDING_COMMENT, pull_request_review_id=FINDINGS_REVIEW['id'])
+        self.save()
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def save(self):
+        import hashlib
+        self.path.write_text(json.dumps(self.state))
+        self.before = self.path.read_bytes()
+        self.digest = hashlib.sha256(self.before).hexdigest()
+
+    def invoke(self, **changes):
+        options = dict(head=HEAD_C, pr='1656', finding_ids=[4431365241], deferred_to='followup/nonsecurity',
+                       evidence=MODULE.normalize_evidence(self.data, source='captured-test'),
+                       prior_rounds=0, receipts_path=self.receipts)
+        options.update(changes)
+        argv = ['deploy_review_cycle.py', '--state', str(self.path), 'override', '--head', options['head'],
+                '--pr', options['pr'], '--finding-ids', ','.join(map(str, options['finding_ids'])),
+                '--deferred-to', options['deferred_to'],
+                '--evidence-json', str(self.path.with_name('evidence.json')), '--receipt', str(self.receipts)]
+        if not changes.get('omit_digest'): self.data['prior_ledger_sha256'] = self.digest
+        self.path.with_name('evidence.json').write_text(json.dumps(self.data))
+        with patch.object(sys, 'argv', argv), patch.object(MODULE.subprocess, 'run', side_effect=AssertionError('no live calls')):
+            return MODULE.main()
+
+    def test_finish_findings_then_override_preserves_original_end_and_prefix(self):
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(self.invoke(), 0)
+        state = MODULE.read_state(self.path)
+        self.assertEqual(state['cycles'][:-1], self.state['cycles'][:-1])
+        self.assertEqual(len(state['cycles']), 3)
+        tail = state['cycles'][-1]
+        for key in ['head', 'number', 'kind', 'started_at', 'finished_at', 'verification_approval']:
+            self.assertEqual(tail[key], self.state['cycles'][-1][key])
+        self.assertEqual(tail['original_result'], 'findings')
+        self.assertEqual(tail['disposition'], 'overridden')
+        self.assertEqual(tail['prior_ledger_sha256'], self.digest)
+        self.assertIn('disposition_at', tail)
+        self.assertEqual(MODULE.require_mergeable(self.path, head=HEAD_C)['disposition'], 'overridden')
+        receipt = json.loads(self.receipts.read_text())
+        self.assertEqual(receipt['original_result'], 'findings')
+        self.assertEqual(receipt['original_finished_at'], self.state['cycles'][-1]['finished_at'])
+        with self.assertRaises(MODULE.ReviewCycleError): MODULE.next_cycle(state['cycles'])
+        after = self.path.read_bytes()
+        with self.assertRaises(SystemExit), contextlib.redirect_stdout(io.StringIO()): self.invoke()
+        self.assertEqual(after, self.path.read_bytes())
+
+    def test_completed_transition_rejects_concurrent_prefix_change(self):
+        original = MODULE._validate_completed_review if hasattr(MODULE, '_validate_completed_review') else None
+        if original is None:
+            self.fail('completed findings validation boundary is missing')
+        changed = self.before + b' '
+        def validate_then_change(*args):
+            original(*args)
+            self.path.write_bytes(changed)
+        with patch.object(MODULE, '_validate_completed_review', side_effect=validate_then_change), \
+                self.assertRaises(SystemExit), contextlib.redirect_stdout(io.StringIO()):
+            self.invoke()
+        self.assertEqual(self.path.read_bytes(), changed)
+        self.assertFalse(self.receipts.exists())
+
+    def test_completed_transition_rejects_wrong_state_source_and_evidence_without_writes(self):
+        original_state, original_data = deepcopy(self.state), deepcopy(self.data)
+        for case in ['clean', 'unavailable', 'skipped', 'older', 'other-head', 'schema', 'nonobject',
+                     'reviewless', 'wrong-review-head', 'wrong-review-time', 'check-pending',
+                     'wrong-check-head', 'wrong-review-binding', 'unanswered', 'missing-target',
+                     'prefix-drift', 'special-approval', 'missing-finish', 'bad-head', 'missing-approval',
+                     'no-digest', 'empty-findings', 'old-finding', 'bad-check-time', 'reply-wrapper']:
+            self.state, self.data = deepcopy(original_state), deepcopy(original_data)
+            if case in ['clean', 'unavailable']: self.state['cycles'][-1]['result'] = case
+            elif case == 'skipped': self.state['cycles'][-1].update(disposition='skipped', skip_reason='usage-cap')
+            elif case == 'older': self.state['cycles'].append(dict(self.state['cycles'][-1], head='d'*40))
+            elif case == 'other-head': self.state['cycles'][-1]['head'] = 'd'*40
+            elif case == 'schema': self.state['schema_version'] = True
+            elif case == 'nonobject': self.state['cycles'][0] = None
+            elif case == 'reviewless': self.data['reviews'] = []
+            elif case == 'wrong-review-head': self.data['reviews'][0]['commit_id'] = HEAD_B
+            elif case == 'wrong-review-time': self.data['reviews'][0]['submitted_at'] = '2026-10-30T10:15:00Z'
+            elif case == 'check-pending': self.data['check_runs'][0]['status'] = 'in_progress'
+            elif case == 'wrong-check-head': self.data['check_runs'][0]['head_sha'] = HEAD_B
+            elif case == 'wrong-review-binding': self.data['review_comments'][0]['pull_request_review_id'] = 1
+            elif case == 'unanswered': self.data['review_comments'] = self.data['review_comments'][:1]
+            elif case == 'special-approval': self.state['cycles'][-1]['one_final_review_approval'] = {'approval_id': 'x'}
+            elif case == 'missing-finish': del self.state['cycles'][-1]['finished_at']
+            elif case == 'bad-head': self.state['cycles'][0]['head'] = 'short'
+            elif case == 'missing-approval': del self.state['cycles'][-1]['verification_approval']
+            elif case == 'bad-check-time': self.data['check_runs'][0]['completed_at'] = '2026-10-30T10:15:50Z'
+            elif case == 'reply-wrapper': self.data['reviews'][0]['body'] = ''
+            elif case == 'old-finding':
+                self.data['review_comments'] += [dict(FINDING_COMMENT, id=1, original_commit_id=HEAD_A,
+                                                      pull_request_review_id=2),
+                                                 dict(DEFERRED_REPLY, id=2, in_reply_to_id=1)]
+            self.save()
+            if case == 'prefix-drift': self.path.write_bytes(self.before + b' ')
+            before = self.path.read_bytes()
+            with self.subTest(case=case), self.assertRaises(SystemExit), contextlib.redirect_stdout(io.StringIO()):
+                self.invoke(deferred_to='' if case == 'missing-target' else 'followup/nonsecurity',
+                            finding_ids=[] if case == 'empty-findings' else [1] if case == 'old-finding' else [4431365241],
+                            omit_digest=case == 'no-digest')
+            self.assertEqual(before, self.path.read_bytes())
+            self.assertFalse(self.receipts.exists())
+
+
 if __name__ == "__main__":
     unittest.main()
