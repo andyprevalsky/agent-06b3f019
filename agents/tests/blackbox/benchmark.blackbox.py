@@ -6730,7 +6730,9 @@ async def test_abandonment_timeout_surfaces_the_last_durable_mismatch():
     from benchmarks.benchmark_tasks import get_task_by_name
     from benchmarks.run_benchmark import _wait_for_expected_payment_lifecycle
 
+    # Provider inventory integrity is satisfied so the first durable mismatch is the HELD purchase.
     lifecycle = {
+        "integrity": dict(get_task_by_name("agent-payment-abandonment").expected_payment_lifecycle["integrity"]),
         "purchase": {"status": "HELD"},
         "walletFunding": {"status": "RECLAIMING"},
     }
@@ -6765,6 +6767,7 @@ async def test_abandonment_timeout_names_the_unreleased_agentcard_transfer():
     from benchmarks.run_benchmark import _wait_for_expected_payment_lifecycle
 
     lifecycle = {
+        "integrity": dict(get_task_by_name("agent-payment-abandonment").expected_payment_lifecycle["integrity"]),
         "purchase": {"status": "HELD"},
         "walletFunding": {"status": "RECLAIMING"},
         "agentCard": {"status": "CLOSED", "balanceCents": 0},
@@ -7121,6 +7124,9 @@ def test_agent_payment_catalog_requires_terminal_lifecycle_evidence():
         "purchaseCount": 1,
         "walletFundingCount": 1,
         "cardCount": 1,
+        "agentCardProviderCardCount": 1,
+        "agentCardProviderTransferCount": 1,
+        "agentCardProviderUnlinkedTransferCount": 0,
     }
     duplicate_lifecycle = deepcopy(idempotency.expected_payment_lifecycle)
     duplicate_lifecycle["integrity"]["cardCount"] = 2

@@ -136,6 +136,19 @@ def test_existing_catalog_rows_unchanged():
         for row in rows:
             validate_task_quarantine(row, row['name'])
             row.pop('quarantine', None)
+    # Strictly additive payment-lifecycle integrity checks (AgentCard provider inventory, PR #1864)
+    # strengthen an existing row; every original key and value must still be present unchanged.
+    for before, after in zip(old, current):
+        added = (after.get('expected_payment_lifecycle') or {}).get('integrity')
+        if not isinstance(added, dict):
+            continue
+        original = (before.get('expected_payment_lifecycle') or {}).get('integrity') or {}
+        assert all(added.get(key) == value for key, value in original.items()), before['name']
+        after['expected_payment_lifecycle'] = dict(after['expected_payment_lifecycle'])
+        if original:
+            after['expected_payment_lifecycle']['integrity'] = dict(original)
+        else:
+            after['expected_payment_lifecycle'].pop('integrity')
     # Sync retains every row from the reviewed main snapshot; phone tasks append only.
     assert current[:len(old)] == old
 
