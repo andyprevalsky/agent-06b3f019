@@ -132,7 +132,7 @@ additional-gate attribution remain in progress.
 
 Latest source-bound acceptance on cc11dc60c2db1b1a2869425bd2f07ce0a7662831:
 unchanged native chat-mode passed in 15.6 seconds, root
-013465d1-2a9d-47c9-b1ac-1dab8e7d06b4. The normal full publisher exited0,
+013465d1-2a9d-47c9-b1ac-1dab8e7d06b4. The normal full publisher exited 0,
 verified eight frontend messages in a fresh browser and recovered three authentic
 complete encrypted BASEs with all three call sites. Independent audit verified
 seven runtime files and cached encrypted/plaintext/materialized hashes. Five real
@@ -195,3 +195,22 @@ certify a permanently incomplete archive. The process-lifetime failure registry
 remains an explicit outage-pressure limit; this is no claim of arbitrary crash
 or unbounded-load durability. All three existing owning suites passed together.
 Fresh full native acceptance on this reviewed stabilization source is pending.
+
+
+## Later source-bound acceptance retained before stabilization
+
+On 1f81aab080d05ec4133de7ca0964b85aaf1fc9d0 the unchanged native chat-mode
+passed in 16.1 seconds at root 00b5ec12-022c-4840-aeab-64f729c65760. The normal full
+publisher exited 0 and verified 8 messages in a fresh frontend browser, durable
+last-call HTML and 3 genuine complete encrypted BASEs. Independent 24-check audit
+authenticated retained ciphertexts, plaintext/materialized hashes, all 3 call
+sites, full messages/schema/config/model/output and exact frontend response.
+Five startup stalls preceded the task; no task handler/provider error occurred.
+Controller exit 0 and stack cleanup are verified. The same source's native smoke
+campaign passed14/14 tasks with all 15 task/canary lifecycles verified.
+
+This pair is historical source-scoped evidence after any later stabilization;
+new source requires its own original native acceptance and full normal publisher.
+Original native chat PASS/publisher FAIL, missing effective capture environment
+and missing full original provider context remain unchanged. No arbitrary crash,
+shutdown or outage-pressure durability is claimed. Deployment remains open.
