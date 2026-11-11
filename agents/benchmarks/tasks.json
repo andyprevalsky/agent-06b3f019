@@ -949,12 +949,6 @@
   },
   {
     "name": "background-agent-message-smoke",
-    "quarantine": {
-      "since": "2026-11-10",
-      "repair": "pending-handoff:484cdec81d894f0899d8af1ec466e4d4",
-      "error": "Timeout after 182s (task timeout=180s) | Investigate: python agents/benchmarks/agent_latency.py e7d8ba91-c197-472a-9eea-1d7cf3a8877f | Cache/cost: python agents/benchmarks/run_benchmark.py --compare <run.json> | Agent status: ACTIVE (expected COMPLETED)",
-      "evidence": "docs/rca/cases/2026-11-10-background-message-completion-exceeded-deadline.md; original b865 native run e7d8ba91-c197-472a-9eea-1d7cf3a8877f, full private trace and source-exclusion review retained"
-    },
     "title": "Root Forwards A Mid-Run Message To A Background Agent",
     "prompt": "Use exactly one explore agent to inspect the official RFC Editor pages for RFC 9110 and RFC 9111. For each document, return its RFC number, exact title, publication month and year, official source URL, and a note. Have that single explore agent do all research: spawn it with run_in_background set to true, then wait for it to finish before you answer.",
     "timeout_seconds": 180,
@@ -8359,6 +8353,12 @@
   },
   {
     "name": "agent-payment-new-user-journey",
+    "quarantine": {
+      "since": "2026-11-11",
+      "repair": "pending-handoff:6d9f890076924ffeae02f2382aee6635",
+      "error": "Subscription Checkout failed: Locator.click: Timeout 10000ms exceeded.",
+      "evidence": "deploy PR #1946 smoke occurrence 6d9f890076924ffeae02f2382aee6635: harness Stripe hosted checkout (agents/benchmarks/subscription_checkout.py:119 get_by_text(\"Card\")) timed out before any agent ran; agent f07fe528-c8d5-4b9e-b774-de07f1bc7160; single rerun passed"
+    },
     "title": "New User Subscription To Confirmed Agent Payment",
     "description": "A dedicated non-admin account begins with exhausted free credit and no subscription or Stripe payment method. The harness completes hosted Stripe test Checkout, then the agent buys from the test portal with an approved payment card. The run requires ordered gates, a portal order ID, and settled backend funding.",
     "prompt": "Use a browser agent (spawn_agent with type=\"browser\") to go to {frontend_url}/test_payment and complete the visible Rose Labs Test Payment checkout. Buy exactly these 3 products and no others: Aurora Notebook, Ceramic Mug, and Canvas Tote. Use only the visible checkout UI. If subscription signup is required, wait for the user to finish it, then continue. Obtain a payment card through request_payment_card and wait for approval. Report the test portal confirmation order ID after the order is placed.",
