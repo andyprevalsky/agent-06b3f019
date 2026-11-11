@@ -36,6 +36,17 @@ class SemanticReports(unittest.TestCase):
         self.assertEqual(adapter.classify_lane('ui', [item], report, events),
                          {adapter.case_key('ui', item): 'FAIL'})
 
+    def test_malformed_report_objects_stay_unverified(self):
+        for shape in ('suite', 'nested_suite', 'spec', 'test'):
+            with self.subTest(shape=shape):
+                item, events, report = self.fixture()
+                if shape == 'suite': report['suites'] = ['x']
+                if shape == 'nested_suite': report['suites'][0]['suites'] = ['x']
+                if shape == 'spec': report['suites'][0]['specs'] = ['x']
+                if shape == 'test': report['suites'][0]['specs'][0]['tests'] = ['x']
+                self.assertEqual(adapter.classify_lane('ui', [item], report, events),
+                                 {adapter.case_key('ui', item): 'UNVERIFIED'})
+
     def test_incomplete_never_gets_assertion_credit(self):
         item, events, report = self.fixture()
         for change in ('before', 'after', 'end', 'skipped', 'interrupted', 'retry', 'extra', 'global'):
@@ -153,6 +164,8 @@ class SemanticReports(unittest.TestCase):
                         r['suites'][0]['specs'][0]['tests'][0]['results'][0]['status'] = 'passed'
                     if lane == 'ui' and defect == 'malformed_event':
                         e.append(malformed_event)
+                    if lane == 'ui' and defect == 'malformed_report':
+                        r['suites'][0]['specs'][0]['tests'] = ['x']
                     (folder / (lane + '.json')).write_text(json.dumps(r))
                     (folder / (lane + '.jsonl')).write_text(''.join(json.dumps(x) + '\n' for x in e))
                 receipt = {'token': request['token'], 'source': freeze, 'ready': True,
@@ -193,6 +206,17 @@ class SemanticReports(unittest.TestCase):
                 self.assertEqual(adapter.events_at(captured / 'ui.jsonl')[-1], malformed_event)
                 raw = json.loads((captured / 'ui.json').read_text())
                 self.assertEqual(raw['suites'][0]['specs'][0]['tests'][0]['results'][0]['status'], 'failed')
+            if defect == 'malformed_report':
+                native = result['evidence']['semantic-stack']['native_cases']
+                self.assertEqual(native[adapter.case_key('ui', selected['ui'][0])], 'UNVERIFIED')
+                self.assertEqual(native[adapter.case_key('latency', selected['latency'][0])], 'PASS')
+                captured = Path(result['evidence']['semantic-stack']['artifact_directory'])
+                self.assertEqual(json.loads((captured / 'result.json').read_text())['cases'],
+                                 {'semantic-stack': 'UNVERIFIED'})
+                self.assertTrue(result['cleanup_complete'])
+
+    def test_malformed_report_preserves_other_lane_and_writes_result(self):
+        self.run_worker('malformed_report')
 
     def test_malformed_final_native_event_is_unknown_with_lane_diagnostic(self):
         for value in (1, [], 'x', None):

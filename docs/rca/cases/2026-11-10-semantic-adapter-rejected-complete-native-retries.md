@@ -19,6 +19,7 @@ tags:
   - evidence
 sources:
   - PR #1915
+  - PR #1918
   - PR #1919
   - commit 009e97401550115295b42af9ef83be37bda55055
   - plan: .context/rca-playwright/semantic-retry/findings.json
@@ -122,6 +123,36 @@ healthy latency lane and the original malformed record are explicitly retained.
 The immutable prior capture still produces its three FAIL results. Final
 validation must bind this additional caller repair to its own frozen source.
 
+### PR1918 recurrence on November 10
+
+Native run 42922184900 on a5e1c0375238d99fdf52f28c8cb367df84310b70
+reported 53 UI passes, five UI failures and five latency passes. Complete native
+retry chains again became five UNVERIFIED cases under the old adapter. All nine
+reporting/driver/config modules are byte-identical at base 1f1e176a4736b2f948ba2fa5ffb2b119a7edbbc9,
+failed source a5e1c037 and the chat candidate b177933a. The immutable original
+capture fails the exact same assertion on all three, then passes under the exact
+published 9905809a46e392997e834801a3c7adce87267a10 implementation: 53 UI
+PASS, five UI FAIL, five latency PASS, aggregate FAIL with complete=true,
+native exit one and positive cleanup. The original receipt is never rewritten.
+
+The existing owner supplied a three-path patch; independent reuse preparation
+verified its hashes and base compatibility, ran the unchanged published permanent
+regressions RED on the old code and GREEN on the reused code, and passed the full
+thirteen-test suite. Parent integration independently reran all thirteen tests
+and the unchanged actual-capture replay successfully. Only this existing repair
+was reused; the owner's separate SDK/runtime changes were not imported. The five
+underlying UI failures retain their own attribution and post-merge obligations.
+
+The subsequent PR review found malformed suite and test objects could still
+raise `AttributeError` outside the existing invalid-data fallback. Registered
+shape cases reproduced three errors before adding that exception to the
+fallback. All fifteen owning tests then passed, including a worker case that
+writes an UNVERIFIED aggregate while preserving the other lane's result and
+cleanup evidence. Independent review also retained a native FAIL in that other
+lane; malformed evidence never receives assertion credit.
+
+### PR1919 recurrence
+
 PR #1919 independently reproduced the same boundary against its immutable
 native capture from GH run 42922686197: the original adapter yields 53 UI PASS,
 five UI UNVERIFIED and five latency PASS; the exact reviewed classifier from
@@ -130,8 +161,8 @@ and five latency PASS. The existing permanent retry regression fails on the
 original classifier; all thirteen owning tests pass after exact reuse. No
 original receipt, test assertion, retry budget or timeout was rewritten.
 The underlying UI failures retain their own attribution and repair requirements;
-this reporting correction grants none of them passing credit. The final native
-wrapper execution on PR #1919's frozen source remains pending.
+this reporting correction grants none of them passing credit. At that point, final native
+wrapper execution on PR #1919's frozen source remained pending.
 
 ## Human feedback
 

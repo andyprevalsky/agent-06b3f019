@@ -1056,6 +1056,23 @@ deploy lane, the tests a change can reach. Rules:
   on the frozen source. Coverage thresholds inside a selected full gate remain
   unchanged; a focused subset cannot masquerade as a full coverage pass.
 
+### Validate incrementally during implementation
+
+As each coherent change becomes testable, use the existing affected-test
+selector to run its correlated checks immediately; do not wait for all
+implementation to finish or for `/deploy` to begin. Start with cheap format,
+lint, type and focused checks, then run the affected full CI gates while
+independent work continues. Include the integration boundaries the change
+affects, not just the edited function. Batch coherent changes rather than
+launching full CI after every edit.
+
+Run checks against a recorded, stable source snapshot so concurrent edits
+cannot invalidate their evidence. Monitor results and start diagnosis as soon
+as a failure appears, keeping healthy independent checks running. Preserve
+eligible passing results through the existing source/input-bound reuse rules;
+rerun checks when their inputs change. This adds no new gate or paid benchmark
+campaign and does not replace final `/deploy` validation or its failure policy.
+
 ## Deploy command regression scheduling
 
 New tests must pass five consecutive runs with unchanged test code before being finalized, to catch flaky behavior.
