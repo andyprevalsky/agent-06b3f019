@@ -1,0 +1,51 @@
+{
+  "format": "PR1929-CLOSEOUT-V1",
+  "pr": 1929,
+  "merged_sha": "84853969a28a17752b2edb2b868dd95a9339f0ec",
+  "source_head": "f81c18497bbef8ed7b988dc013c540afb9bddf93",
+  "fix": "cherry-pick of #1920 67b90ec7d (sidebar finished disclosure + mobile activity presentation)",
+  "repaired_occurrences": [
+    "a5d37450f2204b8cbcc8ac22c1c33d6d",
+    "ab94492dfa694969acb1adde863532bd"
+  ],
+  "target_tests": {
+    "local_repro_main_72186aa4": "3 failed / 11 passed",
+    "local_with_fix": "14 passed",
+    "deploy_semantic_stack_f81c18497": "UI 58/58, latency 5/5 (3 targets PASS)",
+    "production_semantic_84853969a": "run 43055259199 success; Semantic frontend flows success"
+  },
+  "gates": {
+    "passed": [
+      "format",
+      "eslint",
+      "typescript",
+      "backend-structural",
+      "deploy-command-structural",
+      "backend-coverage-blackbox",
+      "frontend-coverage-blackbox",
+      "agents-coverage-blackbox",
+      "semantic-stack",
+      "e2b-smoke",
+      "cloudbench-controller",
+      "new-test-stability"
+    ],
+    "smoke": "11 PASS; test-mass-agent-run-0 QUARANTINED_FAIL (repair thr_640c279c); agent-payment-abandonment resource warning agentcard_release_stall (native SKIPPED, $43.96 sandbox unreleased, no pass credit)"
+  },
+  "review": "CodeRabbit skipped: organization usage spending cap (comment 6798400932); merged unreviewed",
+  "production": {
+    "vercel": "PASS deployment 7714210119",
+    "mac-release": "PASS run 43048220685 v1.1.315",
+    "semantic": "PASS run 43055259199; earlier run 43049162124 web_search sample 4 failed then passed on its single failed-job retry (FLAKY)"
+  },
+  "handoffs": [
+    {
+      "failure": "production web_search latency sample 4 route timeout (run 43049162124)",
+      "owner": "boxes.dev thread ph70f6m8f5t8mqk9nanmemjekd8j1cd8",
+      "status": "root-caused (Cerebras 429 fallback race latches first chunk); fix in flight"
+    }
+  ],
+  "followups": [
+    "AgentCard sandbox release stall: $43.96 unreleased (orgTransfer owt_80d3da096a827a0b72ffead7)"
+  ],
+  "overlap": "PR #1927 (ph7af50k) merged the identical sidebar commit as 5be050aca; sidebar files on main identical"
+}

@@ -134,11 +134,13 @@ export function shouldAutoCompactChat(
   return estimateContextTokens(messages) >= trigger;
 }
 
+/** Summarize selected context with the chat turn's agent and archive root. */
 async function summarizeMiddle(
   messages: ChatMessage[],
   middleIndices: number[],
   model: string,
-  agentId: string
+  agentId: string,
+  rootAgentId?: string
 ): Promise<string> {
   const middleText = formatMiddleForPrompt(messages, middleIndices);
   const prompt = `${NO_TOOLS_PREAMBLE}${PARTIAL_COMPACT_PROMPT}
@@ -159,6 +161,7 @@ ${NO_TOOLS_TRAILER}`;
     dump_context: {
       call_site: 'chat_compaction',
       agent_id: agentId,
+      root_agent_id: rootAgentId,
     },
   });
 
@@ -177,11 +180,13 @@ ${NO_TOOLS_TRAILER}`;
   return summary;
 }
 
+/** Compact the middle context using the chat turn's model and evidence ownership. */
 export async function compressChatContext(params: {
   messages: ChatMessage[];
   model: string;
   agentId: string;
   maxContextTokens?: number;
+  rootAgentId?: string;
 }): Promise<ChatMessage[]> {
   const maxContextTokens = params.maxContextTokens ?? CHAT_MAX_CONTEXT_TOKENS;
   const originalTokens = estimateContextTokens(params.messages);
@@ -202,7 +207,13 @@ export async function compressChatContext(params: {
     for (const { index, weight } of oversizedTools) {
       if (!shouldAutoCompactChat(compressed, maxContextTokens)) break;
       try {
-        const summary = await summarizeMiddle(compressed, [index], params.model, params.agentId);
+        const summary = await summarizeMiddle(
+          compressed,
+          [index],
+          params.model,
+          params.agentId,
+          params.rootAgentId
+        );
         const summarized: ChatMessage = {
           ...structuredClone(compressed[index]),
           text: summary,
@@ -238,7 +249,8 @@ export async function compressChatContext(params: {
         compressed,
         split.middleIndices,
         params.model,
-        params.agentId
+        params.agentId,
+        params.rootAgentId
       );
       compressed = [
         ...split.headIndices.map((index) => structuredClone(compressed[index])),
@@ -295,8 +307,10 @@ async function persistCompactionCheckpoint(params: {
   });
 }
 
+/** Enforce the existing context budget and persist successful compaction checkpoints. */
 export async function ensureChatContextWithinBudget(params: {
   agentId: string;
+  rootAgentId?: string;
   requestedModel: string;
   rawMessages: ChatMessage[];
   maxContextTokens?: number;
@@ -318,6 +332,7 @@ export async function ensureChatContextWithinBudget(params: {
         model: compactionModel,
         agentId: params.agentId,
         maxContextTokens,
+        rootAgentId: params.rootAgentId,
       });
       await persistCompactionCheckpoint({
         agentId: params.agentId,

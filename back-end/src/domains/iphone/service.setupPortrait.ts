@@ -4,6 +4,7 @@ import type { SetupInput } from '../../providers/phoneSetupState';
 import type { SetupClaim } from './repo.setupCommand';
 import type { PhoneClientFactory } from './types.operations';
 import { currentPortraitSession, recordPortraitProof } from './repo.setupPortrait';
+import { IPhoneError } from './types';
 import { provePortrait } from '../../providers/phonePortraitProof';
 import type { SetupLocalPortraitResult } from '../../providers/phoneSetupVerifier';
 
@@ -25,7 +26,11 @@ export async function observePortrait(
       context.session.id !== before.session.id ||
       context.route.digest !== before.route.digest
     )
-      throw new Error('Phone portrait observation expired');
+      throw new IPhoneError(
+        409,
+        'Phone portrait observation expired',
+        'phone_portrait_observation_expired'
+      );
     return remaining;
   }
   const first = await client.perform(before.session, 'screen.text', {}, await budget());

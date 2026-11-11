@@ -21,6 +21,32 @@ portraitRouteCases.push([
         provePortraitRoute(portraitRouteEvents(original), context)?.originalAssistiveTouch,
         original
       );
+    for (const original of ['on', 'off'] as const)
+      assert.equal(
+        provePortraitRoute(portraitRouteEvents(original, 'production'), context)
+          ?.originalAssistiveTouch,
+        original,
+        'Documented production launch/text shapes rejected'
+      );
+    for (const original of ['on', 'off'] as const)
+      assert.equal(
+        provePortraitRoute(portraitRouteEvents(original, 'production-cold'), context)
+          ?.originalAssistiveTouch,
+        original,
+        'Cold Settings relaunch (fresh: true) rejected'
+      );
+    const production = portraitRouteEvents('off', 'production');
+    for (const change of [
+      (e: typeof production) => (e[0].args = { name: 'Settings', fresh: 'yes' }),
+      (e: typeof production) => (e[0].args = { name: 'Settings', fresh: false, url: 'x' }),
+      (e: typeof production) => (e[0].result = 'com.apple.mobileslideshow'),
+      (e: typeof production) => (e[4].args = { s: 'AssistiveTouch', delay: 'x' }),
+      (e: typeof production) => (e[4].args = { s: 'AssistiveTouch', submit: true }),
+    ]) {
+      const route = structuredClone(production);
+      change(route);
+      assert.equal(provePortraitRoute(route, context), null, 'Production shape accepted mutation');
+    }
     const split = structuredClone(portraitRouteEvents());
     const menu = split[split.length - 3].result as Array<{
       text: string;
@@ -156,6 +182,11 @@ for (const app of ['Photos', 'Safari'] as const)
         requestKey: randomUUID(),
       });
       assert.equal(result.data.operation?.status, 'FAILED');
+      assert.equal(
+        result.data.operation?.errorCode,
+        'phone_portrait_route_unproven',
+        'Unproven native route was reported as a generic verifier outage'
+      );
       assert.equal(h.calls.length, before, 'Missing native route crossed into private capture');
       const check = (
         result.data.setup as { verification: { checks: { portrait_lock: { status: string } } } }
@@ -230,3 +261,34 @@ portraitRouteCases.push([
     );
   },
 ]);
+for (const [original, shape] of [
+  ['on', 'production'],
+  ['off', 'production'],
+  ['off', 'production-cold'],
+] as const)
+  portraitRouteCases.push([
+    `portrait verify proves the ${shape}-shaped native route (original ${original})`,
+    async (h) => {
+      const f = await freshSetup(h);
+      h.framePng = portraitFrame(original === 'on');
+      h.observationResult = portraitOcr();
+      await seedPortraitRoute(h, f, original, shape);
+      const evidence = await observe(h, f);
+      const result = await setupPost(h, f, {
+        action: 'verify',
+        verificationTarget: 'portrait_lock',
+        attemptId: f.setup.attemptId,
+        expectedRevision: f.setup.revision,
+        expectedCursor: evidence.cursor,
+        evidenceOperationIds: [evidence.id],
+        requestKey: randomUUID(),
+      });
+      assert.equal(result.data.operation?.errorCode, null);
+      assert.equal(result.data.operation?.status, 'SUCCEEDED');
+      assert.equal(
+        (result.data.setup as { verification: { checks: { portrait_lock: { status: string } } } })
+          .verification.checks.portrait_lock.status,
+        original === 'on' ? 'confirmed' : 'disabled'
+      );
+    },
+  ]);

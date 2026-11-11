@@ -25,16 +25,35 @@ const detailRows = () => [
   text('Customize Top Level Menu', 330, 580, 500),
   text('Single-Tap', 177, 772),
 ];
-export function portraitRouteCommands(original: AssistiveOriginal = 'off') {
+/** `production` mirrors the agent's documented wire shapes and the provider's bundle-ID launch result. */
+export type PortraitRouteShape = 'fixture' | 'production' | 'production-cold';
+export function portraitRouteCommands(
+  original: AssistiveOriginal = 'off',
+  shape: PortraitRouteShape = 'fixture'
+) {
+  const production = shape !== 'fixture';
   const events: { operation: string; args: Record<string, unknown>; result: unknown }[] = [];
   const op = (operation: string, args: Record<string, unknown>, result: unknown) =>
     events.push({ operation, args, result });
-  const read = (result: unknown) => op('screen.text', {}, result);
+  const read = (result: unknown) =>
+    op('screen.text', production ? { min_confidence: 0.3 } : {}, result);
   const tap = (x: number, y: number) => op('input.tap', { x, y }, true);
-  op('apps.launch', { name: 'Settings' }, 'Settings');
+  if (production)
+    op(
+      'apps.launch',
+      { name: 'Settings', fresh: shape === 'production-cold' },
+      'com.apple.Preferences'
+    );
+  else op('apps.launch', { name: 'Settings' }, 'Settings');
   read([text('Settings', 375, 84, 150), text('Search', 250, 1230, 300)]);
   tap(250, 1230);
-  op('input.text', { s: 'AssistiveTouch' }, true);
+  // The agent observes the focused search field before typing, as its instructions require.
+  if (production) read([text('Search', 375, 84, 150), text('Cancel', 680, 160, 90)]);
+  op(
+    'input.text',
+    production ? { s: 'AssistiveTouch', delay: 0.03, keystrokes: false } : { s: 'AssistiveTouch' },
+    true
+  );
   read([
     text('AssistiveTouch', 250, 160, 226),
     text('Accessibility → Touch → AssistiveTouch', 400, 207, 600),
@@ -67,8 +86,11 @@ export function portraitRouteCommands(original: AssistiveOriginal = 'off') {
   read(portraitOcr());
   return events;
 }
-export function portraitRouteEvents(original: AssistiveOriginal = 'off'): PortraitRouteEvent[] {
-  return portraitRouteCommands(original).map((e, i) => ({
+export function portraitRouteEvents(
+  original: AssistiveOriginal = 'off',
+  shape: PortraitRouteShape = 'fixture'
+): PortraitRouteEvent[] {
+  return portraitRouteCommands(original, shape).map((e, i) => ({
     ...e,
     cursor: i + 1,
     attemptId: 'attempt',
@@ -78,12 +100,13 @@ export function portraitRouteEvents(original: AssistiveOriginal = 'off'): Portra
 export async function seedPortraitRoute(
   h: Harness,
   f: SetupFixture,
-  original: AssistiveOriginal = 'off'
+  original: AssistiveOriginal = 'off',
+  shape: PortraitRouteShape = 'fixture'
 ) {
   const oldLaunch = h.launchResult,
     oldObservation = h.observationResult;
   try {
-    for (const e of portraitRouteCommands(original)) {
+    for (const e of portraitRouteCommands(original, shape)) {
       if (e.operation === 'apps.launch') h.launchResult = e.result;
       if (e.operation === 'screen.text') h.observationResult = e.result;
       const response = await h.request(f.userId, `/leases/${f.leaseId}/operations`, {
