@@ -6,17 +6,13 @@
  */
 
 import { z } from 'zod';
-import {
-  createStreamingCompletion,
-  markCacheable,
-  type CompletionChunk,
-  type CompletionOptions,
-} from '../rose';
+import { createStreamingCompletion, type CompletionChunk, type CompletionOptions } from '../rose';
 import { StructuredOutputAccumulator } from '../rose/structuredOutput';
 import { agentFastMode, cacheSet } from '../demoCacheStore';
 import { goalHash } from '../demoCacheNormalizeCore';
 import { contentKey } from '../demoCacheNormalizeKeys';
-import { GENERATOR_SYSTEM_PROMPT } from './chatPrompts';
+import { buildGeneratorSystemMessage } from './chatSystemContext';
+export { buildGeneratorSystemMessage } from './chatSystemContext';
 import { broadcastAssistantStream, generateStreamId } from './supabaseBroadcast';
 import { createLogger } from '../logger';
 import {
@@ -147,6 +143,7 @@ function extractStreamableReasoning(
 // ============================================
 // Generator LLM Call with Streaming
 // ============================================
+/** Bind generator parameters and capture context to the owning chat tree. */
 export function buildGeneratorCompletionOptions(params: ChatCompletionParams): CompletionOptions {
   return {
     model: params.model,
@@ -168,7 +165,11 @@ export function buildGeneratorCompletionOptions(params: ChatCompletionParams): C
         schema: GENERATOR_JSON_SCHEMA,
       },
     },
-    dump_context: { agent_id: params.agentId, call_site: 'chat_generator' },
+    dump_context: {
+      agent_id: params.agentId,
+      root_agent_id: params.rootAgentId,
+      call_site: 'chat_generator',
+    },
     speed: params.speed,
     ...(params.providerRoute !== undefined ? { provider_route: params.providerRoute } : {}),
     abort_signal: params.abortSignal,
@@ -177,17 +178,15 @@ export function buildGeneratorCompletionOptions(params: ChatCompletionParams): C
 
 type GeneratorLlmParams = {
   agentId: string;
+  rootAgentId?: string;
   messages: ChatMessage[];
   model: string;
   providerRoute?: ChatProviderRoute;
   abortSignal?: AbortSignal;
   streamGate?: TransactionalStreamGate;
+  userProfileContext?: string;
   projectContext?: string; // `## Project` section; '' or omitted = Home
 };
-
-/** Static generator prompt (cached prefix), then the agent's project section (projectContext.ts). */
-export const buildGeneratorSystemMessage = (projectContext = '') =>
-  markCacheable(GENERATOR_SYSTEM_PROMPT, projectContext);
 
 export async function callGeneratorLlm(params: GeneratorLlmParams): Promise<GeneratorResponse> {
   let attention: GeneratorAttentionLifecycle | undefined;
@@ -201,6 +200,7 @@ export async function callGeneratorLlm(params: GeneratorLlmParams): Promise<Gene
   }
 }
 
+/** Stream the chat answer while collecting its content, usage and completion state. */
 async function callGeneratorLlmCore(
   params: GeneratorLlmParams,
   setAttention: (attention: GeneratorAttentionLifecycle) => void
@@ -214,7 +214,7 @@ async function callGeneratorLlmCore(
   const openaiMessages: Array<{
     role: 'system' | 'user' | 'assistant';
     content: string | MultimodalContentBlock[];
-  }> = [buildGeneratorSystemMessage(params.projectContext)];
+  }> = [buildGeneratorSystemMessage(params.projectContext, params.userProfileContext)];
 
   for (const msg of params.messages) {
     if (msg.role === 'TOOL') {
@@ -355,6 +355,7 @@ async function callGeneratorLlmCore(
     createStreamingCompletion(
       buildGeneratorCompletionOptions({
         agentId: params.agentId,
+        rootAgentId: params.rootAgentId,
         model: params.model,
         messages: openaiMessages,
         providerRoute: params.providerRoute,

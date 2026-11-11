@@ -30,6 +30,7 @@ import {
 async function runAll(): Promise<void> {
   await import('./agents-account.cases');
   await import('./agents-list-create.cases');
+  await import('./agents-external-execution.cases');
   await import('./agents-sidebar-speed.cases');
   await import('./agents-messages.cases');
   await import('./agents-message-storage.cases');

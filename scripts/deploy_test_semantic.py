@@ -39,14 +39,29 @@ def inventory(events):
 
 
 def specs(suites):
+    if not isinstance(suites, list):
+        raise ValueError('native report suites must be a JSON array')
     for suite in suites:
-        yield from suite.get('specs', [])
+        if not isinstance(suite, dict):
+            raise ValueError('native report suites must contain JSON objects')
+        rows = suite.get('specs', [])
+        if not isinstance(rows, list):
+            raise ValueError('native report specs must be a JSON array')
+        for row in rows:
+            if not isinstance(row, dict):
+                raise ValueError('native report specs must contain JSON objects')
+            tests = row.get('tests', [])
+            if not isinstance(tests, list) or any(not isinstance(test, dict) for test in tests):
+                raise ValueError('native report tests must be a JSON array of objects')
+            yield row
         yield from specs(suite.get('suites', []))
 
 
 def classify_lane(lane, expected, report, events):
     """Classify complete native attempt chains; uncertain evidence stays unknown."""
     cases = {case_key(lane, row): 'UNVERIFIED' for row in expected}
+    # Validate nested envelopes before the classification catch so the lane owns diagnostics.
+    rows = list(specs(report.get('suites', []))) if isinstance(report, dict) else []
     try:
         if (not isinstance(report, dict) or not isinstance(events, list)
                 or any(not isinstance(event, dict) for event in events)):
@@ -62,7 +77,6 @@ def classify_lane(lane, expected, report, events):
         if any(event.get('event') in ('testBegin', 'hookEnd', 'testEnd')
                and event.get('id') not in expected_ids for event in events):
             return cases
-        rows = list(specs(report['suites']))
         if len(rows) != len(expected) or {r['id'] for r in rows} != {r['id'] for r in expected}:
             return cases
         for item in expected:
@@ -115,7 +129,7 @@ def classify_lane(lane, expected, report, events):
                 continue
             cases[case_key(lane, item)] = {'passed': 'PASS', 'failed': 'FAIL',
                                          'timedOut': 'FAIL'}[results[-1]['status']]
-    except (AttributeError, KeyError, TypeError, ValueError):
+    except (KeyError, TypeError, ValueError):
         return dict.fromkeys(cases, 'UNVERIFIED')
     return cases
 

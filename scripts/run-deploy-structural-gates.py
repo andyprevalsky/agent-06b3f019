@@ -420,6 +420,7 @@ PROC_OBSERVATION = "proc-observation"
 GATES = (
     Gate("deploy-test-cycle", ("python3", "scripts/tests/deploy-test-cycle.test.py"), exclusive=PROC_OBSERVATION),
     Gate("deploy-focused10-settlement", ("python3", "scripts/tests/deploy-focused10-settlement.test.py"), exclusive=PROC_OBSERVATION),
+    Gate("deploy-test-user-omission", ("python3", "scripts/tests/deploy-test-user-omission.test.py")),
     Gate("deploy-test-plan", ("python3", "scripts/tests/deploy-test-plan.test.py"), exclusive=PROC_OBSERVATION),
     Gate("deploy-test-worker", ("python3", "scripts/tests/deploy-test-worker.test.py")),
     Gate("deploy-test-semantic", ("python3", "scripts/tests/deploy-test-semantic.test.py")),
@@ -430,6 +431,7 @@ GATES = (
     Gate("deploy-cloud-smoke-speed", ("python3", "scripts/tests/deploy-cloud-smoke-speed.test.py")),
     Gate("deploy-gate-progress", ("python3", "scripts/tests/deploy-gate-progress.test.py")),
     Gate("deploy-test-quarantine", ("python3", "scripts/tests/deploy-test-quarantine.test.py")),
+    Gate("cloudbench-private-source-snapshot-read", ("python3", "scripts/tests/cloudbench-private-source-snapshot-read.test.py")),
     # In-definition @quarantine marker (scripts/lib/test_quarantine.py): runs, never blocks.
     Gate("test-quarantine", ("python3", "scripts/tests/test-quarantine.test.py")),
     Gate("deploy-prod", ("python3", "scripts/tests/deploy-prod.test.py")),

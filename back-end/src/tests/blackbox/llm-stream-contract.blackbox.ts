@@ -1,8 +1,13 @@
 #!/usr/bin/env tsx
+import {
+  testChatArchivedCompletionEvidence,
+  testCaptureRootFailureOwnership,
+} from './llm-stream-archive.cases';
 
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
+import os from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 
@@ -274,14 +279,27 @@ async function testChatCompletionDumps(consumerClose = false): Promise<void> {
 }
 
 async function main(): Promise<void> {
-  await testSharedFixtures();
-  testAmbiguousFinalItemsFailTyped();
-  await withIsolatedFundedKeyCooldowns(testCompletionClientPreservesItemProvenance);
-  await withIsolatedFundedKeyCooldowns(() => testChatCompletionDumps());
-  await withIsolatedFundedKeyCooldowns(() => testChatCompletionDumps(true));
-  await withIsolatedFundedKeyCooldowns(testInteractiveClockGrounding);
-  testInteractiveClockProviderCachePrefixes();
-  console.log(`PASS llm-stream-contract (${fixtures.cases.length} shared provider fixtures)`);
+  const originalEnv = { ...process.env };
+  const archiveDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'stream-contract-archive-'));
+  try {
+    process.env.TRACE_ARCHIVE_BACKEND = 'local';
+    process.env.TRACE_ARCHIVE_LOCAL_DIR = archiveDirectory;
+    await withIsolatedFundedKeyCooldowns(() => testChatArchivedCompletionEvidence());
+    await withIsolatedFundedKeyCooldowns(() => testChatArchivedCompletionEvidence(true));
+    await testCaptureRootFailureOwnership();
+    await testSharedFixtures();
+    testAmbiguousFinalItemsFailTyped();
+    await withIsolatedFundedKeyCooldowns(testCompletionClientPreservesItemProvenance);
+    await withIsolatedFundedKeyCooldowns(() => testChatCompletionDumps());
+    await withIsolatedFundedKeyCooldowns(() => testChatCompletionDumps(true));
+    await withIsolatedFundedKeyCooldowns(testInteractiveClockGrounding);
+    testInteractiveClockProviderCachePrefixes();
+    console.log(`PASS llm-stream-contract (${fixtures.cases.length} shared provider fixtures)`);
+  } finally {
+    for (const key of Object.keys(process.env)) if (!(key in originalEnv)) delete process.env[key];
+    Object.assign(process.env, originalEnv);
+    fs.rmSync(archiveDirectory, { recursive: true, force: true });
+  }
 }
 
 /** Inspect provider bodies, including cache markers and Responses routing keys. */

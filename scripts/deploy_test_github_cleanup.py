@@ -1,5 +1,6 @@
 """Cleanup-only GitHub terminal observation; never imports remote case PASS into cycle."""
 import hashlib
+import copy
 import json
 from pathlib import Path
 import time
@@ -45,6 +46,7 @@ def validate(state, receipt, owner, proof):
     """Authenticate original custody and fresh remote terminal proof, with no PASS adoption."""
     import deploy_test_cycle as c
     from deploy_test_github import ARTIFACT, REMOTE_ROOT, tag_name
+    need(isinstance(proof, dict), 'proof fields')
     retirement = proof.get('kind') == RETIREMENT_KIND
     fields = {'kind', 'token', 'receipt_sha256', 'original_files', 'artifact', 'remote'}
     if retirement:
@@ -57,7 +59,7 @@ def validate(state, receipt, owner, proof):
          and owner['transport'] == 'github-actions' and type(owner['run_id']) is int and owner['run_id'] > 0
          and owner['url'] == f"https://github.com/{REPO}/actions/runs/{owner['run_id']}", 'exact GitHub owner')
     folder = Path(receipt['log']).parent
-    need(set(proof['original_files']) == set(FILES), 'original file closure')
+    need(isinstance(proof['original_files'], dict) and set(proof['original_files']) == set(FILES), 'original file closure')
     for name in FILES:
         need(c.sha_file(folder / name) == proof['original_files'][name], 'original bytes changed: ' + name)
     need(proof['receipt_sha256'] == proof['original_files']['receipt.json']
@@ -66,13 +68,14 @@ def validate(state, receipt, owner, proof):
     request = read_evidence(folder / 'request.json', 'original request')
     adapter = read_evidence(folder / 'result.json', 'original adapter')
     process = read_evidence(folder / 'output.log.process.json', 'local process')
+    need(all(isinstance(doc, dict) for doc in (request, adapter, process)), 'native object shapes')
     need(all(doc.get(k) == receipt.get(k) for doc in (request, adapter) for k in ('token', 'source', 'gate'))
          and adapter.get('cleanup_owner') == owner and adapter.get('cleanup_complete') is False, 'adapter identity')
     need(process.get('quiescent') is True and process.get('orphaned_children') is False
          and process.get('remaining') == [] and process.get('error') is None
          and isinstance(process.get('reaped'), list) and bool(process['reaped']), 'local closure')
     import os
-    need(all(type(x.get('pid')) is int and x['pid'] > 0 and type(x.get('status')) is int
+    need(all(isinstance(x, dict) and type(x.get('pid')) is int and x['pid'] > 0 and type(x.get('status')) is int
              and 0 <= x['status'] <= 65535 and (os.WIFEXITED(x['status']) or os.WIFSIGNALED(x['status']))
              for x in process['reaped']), 'terminal local waits')
     child, supervisor, native = (process.get(k) for k in ('child_pid', 'supervisor_pid', 'native_exit'))
@@ -84,12 +87,19 @@ def validate(state, receipt, owner, proof):
     primary = next(r['status'] for r in waits if r['pid'] == child)
     need(os.waitstatus_to_exitcode(primary) == native, 'primary native wait mismatch')
     remote = proof['remote']
-    need(set(remote) == {'repository', 'run_id', 'run_attempt', 'job_ids', 'artifact_id', 'artifact_sha256'}
+    need(isinstance(remote, dict) and set(remote) == {'repository', 'run_id', 'run_attempt', 'job_ids', 'artifact_id', 'artifact_sha256'}
          and remote['repository'] == REPO and remote['run_id'] == owner['run_id']
          and all(type(remote[k]) is int and remote[k] > 0 for k in ('run_id', 'run_attempt', 'artifact_id')),
          'remote identity')
-    seen = observe(owner['run_id']); run = seen['run']; jobs = seen['jobs']; arts = seen['artifacts']
+    seen = observe(owner['run_id'])
+    need(isinstance(seen, dict) and all(isinstance(seen.get(k), dict) for k in ('run', 'jobs', 'artifacts')),
+         'remote observation objects')
+    run, jobs, arts = (seen[k] for k in ('run', 'jobs', 'artifacts'))
+    need(isinstance(jobs.get('jobs'), list) and all(isinstance(j, dict) for j in jobs['jobs'])
+         and isinstance(arts.get('artifacts'), list) and all(isinstance(a, dict) for a in arts['artifacts']),
+         'remote observation rows')
     old = adapter.get('remote', {})
+    need(isinstance(old, dict), 'original remote identity object')
     need(str(remote['run_attempt']) == str(old.get('run_attempt')) and old.get('run_id') == owner['run_id'], 'original attempt')
     need(run.get('id') == remote['run_id'] and type(run.get('id')) is int
          and run.get('run_attempt') == remote['run_attempt'] and type(run.get('run_attempt')) is int
@@ -118,10 +128,17 @@ def validate(state, receipt, owner, proof):
     need(c.sha_file(path) == remote['artifact_sha256'], 'artifact bytes')
     with zipfile.ZipFile(path) as z:
         names = z.namelist()
-        controls = ('request.json', 'timing.json') if retirement else ('request.json', 'result.json', 'timing.json')
-        need(len(names) == len(set(names)) and all(n in names for n in controls), 'artifact controls')
+        need(len(names) == len(set(names)), 'duplicate artifact members')
         if retirement:
+            controls = ('request.json', 'timing.json')
+            need(all(n in names for n in controls), 'artifact controls')
             need('result.json' not in names, 'present native result requires the normal cleanup proof')
+        else:
+            if 'result.json' not in names:
+                cancelled_controller(state, receipt, request, adapter, process, run, rows, z)
+                return proof['receipt_sha256']
+            controls = ('request.json', 'result.json', 'timing.json')
+            need(all(n in names for n in controls), 'artifact controls')
         docs = {}
         for n in controls:
             need(z.getinfo(n).file_size <= 64 * 1024 * 1024, 'artifact control bound')
@@ -138,6 +155,91 @@ def validate(state, receipt, owner, proof):
          and docs['timing.json'].get('worker_finished_at'), 'same-token native cleanup')
     # Task case status and original timeout/signals are preserved, never adopted as gate credit.
     return proof['receipt_sha256']
+
+
+def cancelled_controller(state, receipt, request, adapter, process, run, jobs, archive):
+    """VM closure is cleanup only for the exact hermetic controller fixture recipe.
+
+    This cannot certify semantic, cloud, financial or other external-resource work.
+    Original cancellation, exit, incomplete verdict and cases are never rewritten.
+    """
+    import deploy_test_cycle as c
+    from deploy_test_github import REMOTE_ROOT
+    name = 'cloudbench-controller'
+    gates = [g for g in state.get('plan', {}).get('gates', []) if g.get('name') == name]
+    need(len(gates) == 1 and state.get('source') == receipt['source']
+         and state['plan'].get('source') == receipt['source'], 'cancelled controller source/plan')
+    gate = gates[0]
+    command = receipt.get('command')
+    need(gate.get('worker_transport') == 'github-actions' and gate.get('worker_root') == REMOTE_ROOT
+         and gate.get('checks') == [name] and gate.get('command') == command
+         and isinstance(command, list) and all(isinstance(x, str) for x in command)
+         and command.count('--worker-script') == 1
+         and command[command.index('--worker-script') + 1:command.index('--worker-script') + 2]
+             == ['deploy_test_worker.py'], 'source-owned controller worker')
+    recipe = {'cases': {name: {'command': ['python3', 'scripts/run-cloudbench-controller-local.py'],
+              'cwd': '.', 'env': {'CONDUCTOR_WORKSPACE_NAME': 'deploy-cloudbench-controller',
+                                  'CONDUCTOR_PORT': '12000'}, 'aggregate': True}}}
+    need(request.get('gate') == name and request.get('checks') == [name] and request.get('skips') == {}
+         and request.get('worker_root') == adapter.get('worker_root') == REMOTE_ROOT
+         and request.get('worker_recipe') == gate.get('worker_recipe') == recipe
+         and adapter.get('recipe_digest') == c.digest(recipe)
+         and receipt.get('execution_binding') == {'input_fingerprint': state.get('input_fingerprints', {}).get(name),
+              'contract_digest': c.digest(gate), 'environment': state.get('environment')},
+         'exact hermetic controller recipe')
+    need(receipt.get('cancelled') is True and receipt.get('timed_out') is False
+         and process.get('cancelled') is True and process.get('timed_out') is False
+         and type(receipt.get('native_exit')) is int and receipt['native_exit'] == process['native_exit']
+         and adapter.get('complete') is False and adapter.get('cases') == {name: 'UNVERIFIED'}
+         and adapter.get('remote', {}).get('stop_cause') == 'SIGTERM'
+         and run.get('conclusion') == 'cancelled' and len(jobs) == 1,
+         'original cancelled incomplete controller')
+    job = jobs[0]
+    need(job.get('conclusion') == 'cancelled' and type(job.get('runner_id')) is int and job['runner_id'] > 0
+         and isinstance(job.get('runner_name'), str) and job['runner_name']
+         == adapter.get('remote', {}).get('runner_name'), 'cancelled exact ephemeral runner')
+    steps = job.get('steps')
+    need(isinstance(steps, list) and all(isinstance(s, dict) for s in steps), 'terminal runner steps')
+    required = [('Run gate', 'cancelled'), ('Bundle evidence', 'success'),
+                ('Release dependency mounts', 'success'), ('Run actions/upload-artifact@v4', 'success'),
+                ('Post Mount dependency disk', 'success'), ('Post Mount git mirror', 'success'),
+                ('Complete runner', 'success'), ('Complete job', 'success')]
+    numbers = []
+    for label, conclusion in required:
+        found = [s for s in steps if s.get('name') == label]
+        need(len(found) == 1 and found[0].get('status') == 'completed'
+             and found[0].get('conclusion') == conclusion and found[0].get('completed_at')
+             and type(found[0].get('number')) is int and found[0]['number'] > 0, 'runner cleanup step: ' + label)
+        numbers.append(found[0]['number'])
+    need(numbers == sorted(set(numbers)), 'runner cleanup step ordering')
+    controls = {}
+    for label in ('request.json', 'timing.json', 'bundle.json'):
+        need(label in archive.namelist() and archive.getinfo(label).file_size <= 64 * 1024 * 1024,
+             'cancelled artifact controls')
+        controls[label] = json.loads(archive.read(label))
+        need(isinstance(controls[label], dict), 'cancelled artifact control object')
+    timing, bundle = controls['timing.json'], controls['bundle.json']
+    need(controls['request.json'] == request and set(timing) == {'job_started_at', 'extracted_at'}
+         and all(type(timing[k]) in (int, float) and __import__('math').isfinite(timing[k])
+                 and timing[k] > 0 for k in timing)
+         and timing['job_started_at'] <= timing['extracted_at'], 'cancelled original request/timing')
+    need(set(bundle) == {'bytes', 'skipped', 'captured'} and bundle['skipped'] == []
+         and type(bundle['bytes']) is int and bundle['bytes'] >= 0
+         and isinstance(bundle['captured'], list), 'cancelled bundle manifest')
+    paths, total = set(), 0
+    for row in bundle['captured']:
+        need(isinstance(row, dict) and set(row) == {'path', 'bytes', 'sha256'}
+             and isinstance(row['path'], str) and row['path'] and not Path(row['path']).is_absolute()
+             and '..' not in Path(row['path']).parts and row['path'] not in paths
+             and type(row['bytes']) is int and 0 <= row['bytes'] <= 64 * 1024 * 1024,
+             'cancelled bundle row')
+        member = 'files/' + row['path']
+        need(member in archive.namelist() and archive.getinfo(member).file_size == row['bytes']
+             and hashlib.sha256(archive.read(member)).hexdigest() == row['sha256'], 'cancelled bundle bytes')
+        paths.add(row['path']); total += row['bytes']
+    need(total == bundle['bytes'] and {'files/' + p for p in paths}
+         == {n for n in archive.namelist() if n.startswith('files/') and not n.endswith('/')},
+         'cancelled bundle closure')
 
 
 def reconcile(state, occurrence, proof):
@@ -159,6 +261,11 @@ def reconcile(state, occurrence, proof):
     if proof['kind'] == RETIREMENT_KIND:
         entry.update(runtime_retired=True, native_cleanup_verified=False,
                      retirement_scope='cancelled ephemeral CI runner; original worker result remains unavailable')
+    else:
+        with zipfile.ZipFile(proof['artifact']) as archive:
+            if receipt['gate'] == 'cloudbench-controller' and 'result.json' not in archive.namelist():
+                entry['original_controller_gate'] = copy.deepcopy(next(
+                    gate for gate in state['plan']['gates'] if gate['name'] == receipt['gate']))
     previous = state.setdefault('reconciled_owners', {}).get(key)
     need(previous is None or previous == entry, 'conflicting certificate')
     state['reconciled_owners'][key] = entry
@@ -174,6 +281,19 @@ def still_bound(state, receipt, owner, entry):
                  'runtime retirement cannot become native cleanup credit')
         need(entry.get('credit_granted') is False and entry.get('token') == receipt.get('token')
              and entry.get('owner') == owner, 'certificate identity')
+        original_gate = entry.get('original_controller_gate')
+        if original_gate is not None:
+            import deploy_test_cycle as c
+            binding = receipt.get('execution_binding', {})
+            need(receipt['gate'] == 'cloudbench-controller' and isinstance(original_gate, dict)
+                 and c.digest(original_gate) == binding.get('contract_digest'), 'original controller contract changed')
+            # Cleanup belongs to the original execution, including after current
+            # source/input renewal. Revalidate its authenticated native contract;
+            # no old test result becomes credit for the refreshed selection.
+            state = {**state, 'source': receipt['source'],
+                     'plan': {'source': receipt['source'], 'gates': [original_gate]},
+                     'input_fingerprints': {receipt['gate']: binding['input_fingerprint']},
+                     'environment': binding['environment']}
         validate(state, receipt, owner, entry['proof'])
         return True
     except (EvidenceRejected, OSError, KeyError, TypeError, IndexError,

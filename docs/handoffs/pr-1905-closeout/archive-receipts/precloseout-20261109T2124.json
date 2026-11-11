@@ -1,0 +1,117 @@
+{
+  "format": "PR1905-PRIVATE-TAR-AESGCM-FRAMES-V1",
+  "label": "precloseout-20261109T2124",
+  "created_at": "2026-11-09T21:26:37.267811+00:00",
+  "bucket": "trace-archive",
+  "prefix": "devbox-closeout-private/pr1905/precloseout-20261109T2124",
+  "parts": [
+    {
+      "key": "devbox-closeout-private/pr1905/precloseout-20261109T2124/evidence.part0000.aesgcm",
+      "sha256": "84fad7bee076198b444a40806d54d7d8b7dd8b32254fa061bd6f324664d4b522",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/precloseout-20261109T2124/evidence.part0001.aesgcm",
+      "sha256": "96ddea0a3ff5c2ec74d06eb79bfc1238d31b8f93cc7f6c3b8bc2e342b70e1822",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/precloseout-20261109T2124/evidence.part0002.aesgcm",
+      "sha256": "308b356b4b5bd68bf0a2beca191e7793f6473ff60c444d12584e3764e1f0d157",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/precloseout-20261109T2124/evidence.part0003.aesgcm",
+      "sha256": "71fcec8ce258ad90cade52cf0e197500af449e986b381e14bf5809cbbd9e5d3b",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/precloseout-20261109T2124/evidence.part0004.aesgcm",
+      "sha256": "eacfd5e060130d182b7c2e7da38847da25553c9d6ff979985df21962d61d2f73",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/precloseout-20261109T2124/evidence.part0005.aesgcm",
+      "sha256": "d2052d24b99526613f933f7e3f93fbbdac7c973b8d3532669ad7a6dadb8a70d5",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/precloseout-20261109T2124/evidence.part0006.aesgcm",
+      "sha256": "425c958facea169586f1726abbebd42011dc4a4b0a509933ea1d165ee2f51a15",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/precloseout-20261109T2124/evidence.part0007.aesgcm",
+      "sha256": "2e6a36e28fa5bf48273ecc3ee6317de9c773edf1a62174fe12b83effacddeb81",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/precloseout-20261109T2124/evidence.part0008.aesgcm",
+      "sha256": "9d696e6f68d05ddeffa312c4da2cec4d4c89dc6c7c0ccc89870fac661821d9dc",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/precloseout-20261109T2124/evidence.part0009.aesgcm",
+      "sha256": "8cbc33c199f4a9877a001c78fb96e0c02018ce7f1407cd53a2f1342ae1fbc962",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/precloseout-20261109T2124/evidence.part0010.aesgcm",
+      "sha256": "c217436f944bdd12248c8712cc5a87276169f751f303dd3fdc6b22b4e03a37a6",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/precloseout-20261109T2124/evidence.part0011.aesgcm",
+      "sha256": "355e998492222e1a6a49a2ea6692c386704bf79360d9a2b817b7ee8c95518aaa",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/precloseout-20261109T2124/evidence.part0012.aesgcm",
+      "sha256": "21f6a3f7ed81f1681b23c92c9926ce26673f5cd6af8c38c6670f0913c89c818a",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/precloseout-20261109T2124/evidence.part0013.aesgcm",
+      "sha256": "bb220e1237fafdc6c48d91c5394b646a9ecafbefdbd6dbd9ae68b37e2704e08d",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/precloseout-20261109T2124/evidence.part0014.aesgcm",
+      "sha256": "14f9a2ea1b8e82dcf8499aa41c9e3a3b481ef0a78dc6d3395d531a0b39b36105",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/precloseout-20261109T2124/evidence.part0015.aesgcm",
+      "sha256": "1ae860962927dce0ca768814ef9d51ce820686485d14026eaab7881c3a24564d",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/precloseout-20261109T2124/evidence.part0016.aesgcm",
+      "sha256": "50805aa7b7717598f8e5570b52ec67f326ad2712de1517e0480e2da1ddf1a36d",
+      "plain_bytes": 24372098
+    }
+  ],
+  "sha256": "f5388d3f3bcfc706ea6ac20631624bfccb00f6a0d0cf3fb9b84407f1886058f8",
+  "member_count": 109851,
+  "member_manifest_sha256": "414491d5aa792d4e4d34b1d0b08410ea2c1ea1885d170f3678d122531059cff1",
+  "full_readback_verified": true,
+  "authenticated_decryption_verified": true,
+  "all_member_hashes_verified": true,
+  "excludes": [
+    ".context/assigned-pr1885-failures/original",
+    ".context/assigned-pr1885-failures/native-evidence.tar.gz",
+    ".context/assigned-pr1885-failures/private-preservation",
+    ".context/assigned-pr1885-failures/auth-options-rca/baseline/digest-clone",
+    ".context/frontend-builds",
+    ".context/benchmarks/seed-cache",
+    ".context/tsbuildinfo"
+  ],
+  "original_evidence_reference": "attachments/failure-evidence-receipt--bbe0d10ee40a41921ea3.json",
+  "original_verified_members": 1948,
+  "raw_logs_private": true,
+  "snapshot_not_final_closeout": true,
+  "previous_receipt_key": "devbox-closeout-private/pr1905/initial-20261109T2036/receipt.json",
+  "previous_receipt_sha256": "8b805eb739dc5d7980d2e32b886a3a4e39868e47c2e55ba5b4a8f1a6c458664b",
+  "reused_member_count": 3676,
+  "catalog_manifest_sha256": "9fbe04c34ae55d59f6e1ab45c2f24067eaba61dbe851a83cb7eddbf98269c6a1"
+}

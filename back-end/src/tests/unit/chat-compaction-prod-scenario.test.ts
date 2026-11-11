@@ -18,22 +18,26 @@ import {
 } from '../fixtures/chat-compaction-prod-3eb68a5c';
 
 async function main(): Promise<void> {
+  const dumpBindings: unknown[] = [];
   await mock.module('../../providers/rose', {
     namedExports: {
-      createStreamingCompletion: async () => ({
-        async *[Symbol.asyncIterator]() {
-          yield {
-            choices: [
-              {
-                delta: {
-                  content:
-                    '<summary>[CONTEXT SUMMARY]: summarized prior hotel research, candidate comparisons, and remaining user asks.</summary>',
+      createStreamingCompletion: async (options: { dump_context?: unknown }) => {
+        dumpBindings.push(options.dump_context);
+        return {
+          async *[Symbol.asyncIterator]() {
+            yield {
+              choices: [
+                {
+                  delta: {
+                    content:
+                      '<summary>[CONTEXT SUMMARY]: summarized prior hotel research, candidate comparisons, and remaining user asks.</summary>',
+                  },
                 },
-              },
-            ],
-          };
-        },
-      }),
+              ],
+            };
+          },
+        };
+      },
     },
   });
 
@@ -67,6 +71,7 @@ async function main(): Promise<void> {
 
   const projected = await ensureChatContextWithinBudget({
     agentId: PROD_CHAT_COMPACTION_AGENT_ID,
+    rootAgentId: PROD_CHAT_COMPACTION_AGENT_ID,
     requestedModel: 'rose-labs/rose-1-flash',
     rawMessages,
   });
@@ -86,6 +91,7 @@ async function main(): Promise<void> {
   const startupMessages = await loadChatModelMessages(
     {
       agentId: PROD_CHAT_COMPACTION_AGENT_ID,
+      rootAgentId: PROD_CHAT_COMPACTION_AGENT_ID,
       requestedModel: 'rose-labs/rose-1-flash',
     },
     {
@@ -109,6 +115,16 @@ async function main(): Promise<void> {
     checkpointWrites.length,
     2,
     'both startup paths should persist compaction checkpoints'
+  );
+
+  assert.deepEqual(
+    dumpBindings,
+    Array.from({ length: 2 }, () => ({
+      call_site: 'chat_compaction',
+      agent_id: PROD_CHAT_COMPACTION_AGENT_ID,
+      root_agent_id: PROD_CHAT_COMPACTION_AGENT_ID,
+    })),
+    'both compaction startup paths retain the explicit archive root'
   );
 
   process.stdout.write(

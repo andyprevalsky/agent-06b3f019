@@ -4295,6 +4295,7 @@ async def _run_all_tests():
     )
     r.record("codex_completed_turn_count", test_codex_completed_turn_count_counts_unique_turn_completed_events)
     r.record("native_codex_usage_retains_session_scope", test_native_codex_usage_retains_session_scope)
+    await r.record_async("monitor_diagnostics_non_string_event_types", test_monitor_diagnostics_preserve_non_string_event_types)
     await r.record_async("native_codex_terminal_finishes_idle_app_server", test_native_codex_terminal_event_finishes_idle_app_server)
     await r.record_async("native_codex_terminal_respects_hold_and_newer_active_turn", test_native_codex_terminal_respects_hold_and_newer_active_turn)
     await r.record_async(
@@ -5400,7 +5401,9 @@ async def test_claude_code_new_sandbox_rides_the_heartbeat_before_anything_else_
     async def finished_loop(**kwargs):
         return (0, False, [], 0, 0, [{"type": "result", "status": "completed", "text": "answer is 42"}])
 
+    diagnostic_log = MagicMock()
     with (
+        patch.object(service, "logger", diagnostic_log),
         recorder.patched(),
         patch.object(service, "save_claude_code_message", side_effect=save_message),
         patch.object(service, "_run_agentic_loop", side_effect=finished_loop),
@@ -5410,6 +5413,12 @@ async def test_claude_code_new_sandbox_rides_the_heartbeat_before_anything_else_
     assert seen_at_first_write == [True], (
         f"the session must be heartbeated before the first backend write, beats={[b[0] for b in beats]}"
     )
+
+    rows = [call.kwargs for call in diagnostic_log.info.call_args_list
+            if call.args[0] == "[ClaudeCode] Close acknowledged"]
+    assert len(rows) == 1 and rows[0]["close_reason"] == "close", rows
+    assert rows[0]["agent_id"] == "agent-cc" and rows[0]["task_id"] == "cc-task-1", rows
+    assert recorder.closed[0]["reason"] == "close", recorder.closed
 
 
 async def test_llm_heartbeats_inside_a_code_session_keep_the_session():
@@ -6920,17 +6929,26 @@ async def test_native_codex_terminal_event_finishes_idle_app_server():
     """The live app-server turn/completed shape is terminal even while stdio stays open."""
     from domains.spawn_claude_code_agent import service
 
-    for outcome, expected_code in (("completed", 0), ("failed", 1), ("interrupted", 1)):
+    for outcome, expected_code, turn_id in [
+        (outcome, code, value) for outcome, code in (("completed", 0), ("failed", 1), ("interrupted", 1))
+        for value in ("game-turn", "https://user:offline-sensitive@invalid.test/private?token=hidden", ["offline-sensitive"])
+    ]:
         class NativeTerminal(_FakeWsClient):
             async def listen(self):
-                await self.on_event({"version": 1, "provider": "codex", "type": "turn_started", "turn_id": "game-turn"})
-                terminal = {"version": 1, "provider": "codex", "type": "turn_ended", "raw_type": "turn/completed", "turn_id": "game-turn", "status": outcome, "turn_outcome": outcome, "timestamp": "2026-10-21T00:05:19.295Z"}
+                await self.on_event({"version": 1, "provider": "codex", "type": "turn_started", "turn_id": turn_id})
+                terminal = {"version": 1, "provider": "codex", "type": "turn_ended", "raw_type": "turn/completed", "turn_id": turn_id, "status": outcome, "turn_outcome": outcome, "timestamp": "2026-10-21T00:05:19.295Z"}
                 await self.on_event(terminal)
                 await self.on_event({**terminal, "type": "final", "exit_code": expected_code})
                 await asyncio.Event().wait()
 
         setup_mock({"/api/agents/": {"status": 200, "json": {"saved": True}}})
+        diagnostic_log = MagicMock()
+        def fail_only_diagnostic(message, **_kwargs):
+            if outcome == "interrupted" and message == "[ClaudeCode] Monitor state":
+                raise RuntimeError("offline diagnostic sink failure")
+        diagnostic_log.info.side_effect = fail_only_diagnostic
         with (
+            patch.object(service, "logger", diagnostic_log),
             patch.object(service, "ClaudeCodeWsClient", NativeTerminal),
             patch.object(service, "save_code_transcript_batch", AsyncMock(return_value=True)),
             patch("temporalio.activity.heartbeat"),
@@ -6938,6 +6956,15 @@ async def test_native_codex_terminal_event_finishes_idle_app_server():
             result = await asyncio.wait_for(service._run_agentic_loop(**_loop_kwargs([], code_provider="codex")), timeout=1.0)
         assert result[0] == expected_code, (outcome, result[0])
         assert service.codex_completed_turn_count(result[-1]) == (1 if outcome == "completed" else 0)
+        rows = [call.kwargs for call in diagnostic_log.info.call_args_list
+                if call.args[0] == "[ClaudeCode] Monitor state"]
+        assert rows, "native monitor metadata missing"
+        admitted = [row for row in rows if row["reason"] == "native_terminal_admitted"]
+        assert len(admitted) == 1 and admitted[0]["completion_admissible"] is True
+        assert admitted[0]["terminal_turn_id"] == ("game-turn" if turn_id == "game-turn" else None)
+        assert "offline-sensitive" not in json.dumps(rows) and "token=hidden" not in json.dumps(rows)
+        assert admitted[0]["terminal_outcome"] == outcome
+        assert admitted[0]["agent_id"] == "a" and admitted[0]["task_id"] == "t"
         teardown_mock()
 
 
@@ -6964,13 +6991,24 @@ async def test_native_codex_terminal_respects_hold_and_newer_active_turn():
                     await self.on_event({"provider": "codex", "type": "turn_ended", "raw_type": "turn/completed", "turn_id": "second", "status": "completed", "turn_outcome": "completed"})
                 await asyncio.Event().wait()
         setup_mock({"/api/agents/": {"status": 200, "json": {"saved": True}}})
+        diagnostic_log = MagicMock()
         with (
+            patch.object(service, "logger", diagnostic_log),
             patch.object(service, "ClaudeCodeWsClient", NativeWithMoreWork),
             patch.object(service, "save_code_transcript_batch", AsyncMock(return_value=True)),
             patch("temporalio.activity.heartbeat"),
         ):
             result = await asyncio.wait_for(service._run_agentic_loop(**_loop_kwargs([], code_provider="codex")), timeout=1.0)
         assert released and result[0] == 0, (guard, released, result[0])
+        rows = [call.kwargs for call in diagnostic_log.info.call_args_list
+                if call.args[0] == "[ClaudeCode] Monitor state"]
+        assert rows, "hold/turn metadata missing"
+        if guard == "held":
+            held = [row for row in rows if row["direct_hold"]]
+            assert held and all(row["completion_admissible"] is False for row in held)
+        else:
+            assert any(row["current_turn_id"] == "second" and row["terminal_turn_id"] is None for row in rows)
+        assert rows[-1]["reason"] == "native_terminal_admitted" and not rows[-1]["direct_hold"]
         teardown_mock()
 
 
@@ -6998,7 +7036,9 @@ async def test_native_codex_active_goal_outlives_a_completed_turn():
                 nonlocal finished
                 ended = {"provider": "codex", "type": "turn_ended", "raw_type": "turn/completed", "status": "completed", "turn_outcome": "completed"}
                 await self.on_event({"provider": "codex", "type": "turn_started", "turn_id": "t1"})
-                await self.on_event({"provider": "codex", "type": "goal", "status": "active"})
+                active = {"provider": "codex", "type": "goal", "status": "active", "objective": "offline-sensitive-objective", "arguments": {"token": "offline-sensitive-token"}}
+                await self.on_event(active)
+                await self.on_event(active)  # duplicate state must not add diagnostics
                 await self.on_event({**ended, "turn_id": "t1"})
                 first_turn_ended.set()
                 await continuation_allowed.wait()
@@ -7009,7 +7049,9 @@ async def test_native_codex_active_goal_outlives_a_completed_turn():
                 await asyncio.Event().wait()
 
         setup_mock({"/api/agents/": {"status": 200, "json": {"saved": True}}})
+        diagnostic_log = MagicMock()
         with (
+            patch.object(service, "logger", diagnostic_log),
             patch.object(service, "ClaudeCodeWsClient", GoalTurns),
             patch.object(service, "save_code_transcript_batch", AsyncMock(return_value=True)),
             patch("temporalio.activity.heartbeat"),
@@ -7018,6 +7060,14 @@ async def test_native_codex_active_goal_outlives_a_completed_turn():
             result = await asyncio.wait_for(service._run_agentic_loop(**_loop_kwargs([], code_provider="codex")), timeout=2.0)
         assert finished and result[0] == 0, (final_status, finished, result[0])
         assert service.codex_completed_turn_count(result[-1]) == 2, final_status
+        rows = [call.kwargs for call in diagnostic_log.info.call_args_list
+                if call.args[0] == "[ClaudeCode] Monitor state"]
+        assert rows, "native goal monitor metadata missing"
+        active_rows = [row for row in rows if row["goal_status"] == "active" and row["terminal_outcome"] is None]
+        assert len(active_rows) == 2, active_rows  # t1 active and t2 invalidation only
+        assert all(row["completion_admissible"] is False for row in rows if row["goal_status"] == "active")
+        assert rows[-1]["reason"] == "native_terminal_admitted" and rows[-1]["goal_status"] == final_status
+        assert "offline-sensitive" not in json.dumps(rows)
         teardown_mock()
 
 
@@ -7028,6 +7078,34 @@ def test_native_codex_usage_retains_session_scope():
         service._log_code_agent_event({"provider": "codex", "type": "usage", "usage_scope": "session", "usage": {"input_tokens": 200, "output_tokens": 50, "cached_input_tokens": 150}}, agent_id="agent", task_id="task", sandbox_id="sandbox")
     assert logger.info.call_args.kwargs["usage_scope"] == "session"
     assert logger.info.call_args.kwargs["output_tokens"] == 50
+
+
+async def test_monitor_diagnostics_preserve_non_string_event_types():
+    # Real callback must retain its pre-diagnostic behavior for malformed metadata.
+    from domains.spawn_claude_code_agent import service
+    for malformed in ([], {}):
+        errors = []
+        class MalformedReplay(_FakeWsClient):
+            async def listen(self):
+                try:
+                    await self.on_event({"provider": "claude", "type": malformed})
+                except Exception as error:
+                    errors.append(type(error).__name__)
+                await self.on_exit(0)
+        setup_mock({"/api/agents/": {"status": 200, "json": {"saved": True}}})
+        try:
+            with (
+                patch.object(service, "ClaudeCodeWsClient", MalformedReplay),
+                patch.object(service, "save_code_transcript_batch", AsyncMock(return_value=True)),
+                patch("temporalio.activity.heartbeat"),
+            ):
+                result = await asyncio.wait_for(service._run_agentic_loop(
+                    **_loop_kwargs([], code_provider="claude", code_session={"logged_events": 10})
+                ), timeout=1.0)
+            assert errors == [], errors
+            assert result[0] == 0, result[0]
+        finally:
+            teardown_mock()
 
 
 if __name__ == "__main__":

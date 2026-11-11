@@ -230,3 +230,83 @@ acceptance credit to recovered or interrupted executions.
 ## Reusable lesson
 
 Validate each allocation and runtime phase through its existing terminal owner contract while preserving every original byte and the independent final native release audit.
+
+
+## November 11, 2026: original-volume capture rejected verified append history
+
+This is a recurrence of the immutable-log assumption at an earlier admission
+boundary, `cloudbench-original-volume-capture.py::cross_check_receipts`. The
+October archive verifier's prefix rule did not cover this separate capture
+reader. Archive searches were `capture contradicts the recovery observation
+backend.log` and `stopped capture append-only log grew after live stat recovery
+manifest prefix`. The forensic phase case is related evidence, not a substitute
+for replaying this incident. The repair is integrated into the existing owning capture reader.
+
+The supported original-volume capture for Machine `812446f9e74318`, volume
+`vol_vwn5j8g236m7dx8v`, owner `6907dca0cb904bb1b60dec05fdec9bec` actually failed
+with `capture contradicts the recovery observation of
+repo/.context/cloudbench/logs/backend.log`. Its preserved failure and journal
+report restoration and stop; this worker did not query or mutate the provider.
+The task's original verdict and cleanup obligations remain independent.
+
+The old state observed 2,749,109 backend bytes. The earlier regular copied log
+contains 2,750,324 bytes and SHA256
+`8a7c298590f28d0e07db98e2a5fc6cabb35b717c94c86e58969465e86a875252`, exactly
+matching the original provider manifest. The retained stopped capture contains
+2,761,838 backend bytes and SHA256
+`30101fbd09e24be9c4508bd1f634626ae7bf8b2bcce88a981703e67d30deaca0`.
+Its first 2,750,324 bytes equal the entire earlier hash-bound copy. The size
+inequality is therefore not a contradiction: the observation, copy and final
+capture represent three different collection instants. Equality at both old
+checks made this authentic history impossible to admit.
+
+The isolated candidate changes only receipt-integrity classification. A backend
+size mismatch is accepted only when both receipts match the exact Machine and
+run token, the old observation explicitly reports a regular nonlinked log
+within its limit, its size is a nonnegative integer, a safely read complete
+nonempty earlier regular copy matches the native manifest SHA256, and
+`stat_size <= copied_size <= captured_size` with genuine growth beyond the
+stat and exact complete-prefix identity. The earlier copy's verified digest is
+included in `receipt_cross_checks`. Foreign receipts refuse explicitly. The
+original capture inventory/member checks, unsafe-path checks, existing JSON
+presence/size and recorded hash comparisons, native stop/config/volume proof, zero credit and release
+checks remain independent. The file reader checks regularity before `fdopen`,
+so a directory refusal also closes the descriptor; no size limit is increased.
+No receipt or original byte is rewritten.
+
+The exact real `cross_check_receipts` call against the retained original tar,
+state, manifest and copied log exits 1 with the recorded error before the fix
+and exits 0 with the isolated candidate. The same eleven new owning test methods
+in the existing registered `scripts/tests/cloudbench-bootstrap-recovery.test.py`
+run through its native unittest/sharding entrypoint: unchanged code has three
+append-case errors and eight passes; the candidate passes all eleven. Adversarial
+controls preserve refusal of changed prefixes, truncation, inconsistent sizes,
+foreign Machine/token receipts, missing or wrong native hashes, absent receipts
+or copied evidence, unsafe/nonregular copies and JSON presence/size contradictions or changed recorded run-JSON hashes. An exact
+unchanged log still uses the original exact-match path without needing a prior
+copy. Native-sized evidence exercises the existing 512 MiB cap rather than the
+1 MiB JSON default.
+
+Independent review approved the narrow delta and the integrated registered tests passed 11/11. A fresh supported inert capture then completed with the exact original configuration restored and the Machine stopped. The verified archive SHA256 is `033c2ea63a996c1d2c8ba73896f9bef5c61f65717a14b66193d6ff7cbeb13224`. The normal interrupted archive builder and exact-owner recovery subsequently completed; the native audit records provider teardown verified. The original failed capture, incomplete benchmark receipt and missing original run JSON remain preserved. Capture and archive evidence grant zero benchmark, financial or provider-session cleanup credit; physical retirement is a separate native receipt.
+
+The generalizable problem is a logical inconsistency between mutable collection
+observations and immutable receipt verification. Deleting size/hash validation
+would lose evidence; this candidate unifies acceptance of the one mutable
+backend-log history around the existing native hash and entire earlier bytes.
+It does not generalize append acceptance to JSON, other files or other owners.
+Work is bounded to one owner and existing capture size cap, outside the live
+agent hot path; it adds no per-agent channel, polling loop or shared lock at
+10,000 agents. Golden reference: not applicable (no approval-gated hunk).
+
+Human instruction for this recurrence: do not assume resizing is safe; preserve
+all permissions and guards; accept only cryptographically verified complete
+append history; keep foreign/missing-hash/truncated/changed-prefix/JSON evidence
+fail closed. The coordinator owns integration and actual capture/cleanup.
+
+Precision limit: services.json has only presence/size in these historical
+receipts, with no prior content hash. A same-length services.json mutation is
+therefore not observable by this preexisting guard and remains accepted on both
+sides; this patch does not newly permit it, and claims no arbitrary JSON
+immutability. A recorded run_json_sha256 still rejects same-length run JSON
+changes. No prior JSON receipt hash or original bytes are invented to fill this
+historical evidence gap.

@@ -2339,6 +2339,50 @@ start_machine() {  # start_machine <id>
     return 1
 }
 
+# Submit the post-config start for a boot-launched guest. The config update is
+# `--skip-start`, so this is the only start request the guest will ever get;
+# the data-plane fallback after it only observes. Fly can still be replacing
+# the clone's previous VM when the update returns: start is then refused with
+# `failed_precondition: machine getting replaced` / `machine still active`
+# (PR #1927 smoke, 8d967d3f534068: four blind retries spent in 17s, Machine
+# settled `stopped` afterwards and never booted). Wait on Fly's own settled
+# condition for this exact Machine between attempts and keep retrying only that
+# precondition until a bounded settle window ends. Other errors keep the
+# original attempt budget. Starting an already-started Machine is idempotent.
+boot_launch_start_after_config() {  # boot_launch_start_after_config <id> <log>
+    local id="$1" log="$2" ordinary_failures=0 remaining wait_seconds response start_status
+    local attempts="${CLOUDBENCH_BOOT_START_ATTEMPTS:-4}"
+    local start_timeout="${CLOUDBENCH_BOOT_START_TIMEOUT:-60}"
+    local settle_deadline=$((SECONDS + ${CLOUDBENCH_BOOT_START_SETTLE_SECONDS:-180}))
+    local wait_cap="${CLOUDBENCH_BOOT_START_SETTLE_WAIT_SECONDS:-60}"
+    while :; do
+        # Classify only this attempt's own response, then keep it in the log.
+        start_status=0
+        response="$(_with_timeout "$start_timeout" \
+            flyctl machine start "$id" -a "$APP" 2>&1)" || start_status=$?
+        [ -z "$response" ] || printf '%s\n' "$response" >> "$log"
+        [ "$start_status" -eq 0 ] && return 0
+        remaining=$((settle_deadline - SECONDS))
+        if printf '%s' "$response" | grep -q 'failed_precondition'; then
+            [ "$remaining" -gt 0 ] || return 1
+            wait_seconds="$wait_cap"
+            [ "$remaining" -lt "$wait_seconds" ] && wait_seconds="$remaining"
+            printf 'boot-start: %s refused mid-transition; waiting up to %ss for settled state\n' \
+                "$id" "$wait_seconds" >> "$log"
+            _with_timeout "$((wait_seconds + 15))" \
+                flyctl machine wait "$id" -a "$APP" --state settled \
+                --wait-timeout "${wait_seconds}s" >> "$log" 2>&1 || true
+            # A wait that returns at once must not turn into a start-API spin.
+            sleep 2
+            continue
+        fi
+        # Settle-window refusals never consume the ordinary retry budget.
+        ordinary_failures=$((ordinary_failures + 1))
+        [ "$ordinary_failures" -lt "$attempts" ] || return 1
+        sleep $(( ordinary_failures * 2 ))
+    done
+}
+
 # Stop the machine (keep it + volume). Safe default on every per-run exit path.
 stop_machine() {  # stop_machine <id>
     local id="$1"
@@ -5923,14 +5967,9 @@ except Exception:
     _start_log="$OUT_DIR/cloudbench-boot-start.log"
     : > "$_start_log"
     _start_ok=0
-    for _s in $(seq 1 "${CLOUDBENCH_BOOT_START_ATTEMPTS:-4}"); do
-        if _with_timeout "${CLOUDBENCH_BOOT_START_TIMEOUT:-60}" \
-              flyctl machine start "$mid" -a "$APP" >> "$_start_log" 2>&1; then
-            _start_ok=1
-            break
-        fi
-        sleep $(( _s * 2 ))
-    done
+    if boot_launch_start_after_config "$mid" "$_start_log"; then
+        _start_ok=1
+    fi
     if [ "$_start_ok" = 1 ]; then
         printf '%s\n' "$mid" > "$POST_CONFIG_START_MARKER.tmp.$$"
         mv "$POST_CONFIG_START_MARKER.tmp.$$" "$POST_CONFIG_START_MARKER"

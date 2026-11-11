@@ -6065,6 +6065,168 @@ async def test_agentcard_release_skip_retires_execution_without_repeating_financ
         )
 
 
+async def test_declared_judge_persists_its_isolated_identity_before_session_creation():
+    """A code-session Message must reference a persisted judge, never the graded root."""
+    import httpx
+    from benchmarks import run_benchmark as bench
+    from benchmarks.benchmark_tasks import get_task_by_name
+
+    rows = {}
+    archived = []
+    token_ids = []
+    graded_root = "70f3aa19-050a-4883-937a-d6b3dffdf3f7"
+
+    def request(req):
+        body = json.loads(req.content) if req.content else {}
+        if req.method == "POST" and req.url.path == "/api/agents":
+            assert req.headers["X-Agent-Execution-Mode"] == "external"
+            assert "start_phase" not in body and "parent_agent_id" not in body
+            assert body["fast_mode_cache_enabled"] is False
+            assert req.headers["X-Benchmark-Run"]
+            aid = body["agent_id"]
+            assert aid != graded_root
+            rows[aid] = body
+            return httpx.Response(201, json={"agent_id": aid, "execution_mode": "external"})
+        if req.method == "DELETE" and req.url.path.startswith("/api/agents/"):
+            archived.append(req.url.path.rsplit("/", 1)[-1])
+            return httpx.Response(204)
+        if req.method == "GET" and "-code-session/agent/" in req.url.path:
+            return httpx.Response(200, json={"sessions": []})
+        if req.method == "GET" and req.url.path.startswith("/api/agents/"):
+            return httpx.Response(200, json={
+                "messages": [], "agent": {"agent_id": req.url.path.rsplit("/", 1)[-1],
+                "progress": 0, "token_count": 0, "tokens_in": 0, "tokens_out": 0,
+                "context_size": 0, "message_count": 1},
+            })
+        if req.method == "PATCH" and req.url.path.endswith("/status"):
+            assert body["status"] == "COMPLETED"
+            return httpx.Response(200, json={})
+        if req.method == "POST" and req.url.path.endswith("/messages"):
+            aid = req.url.path.split("/")[-2]
+            return httpx.Response(201 if aid in rows else 500, json={"error": "Message_agentId_fkey"})
+        raise AssertionError((req.method, str(req.url)))
+
+    client_type = httpx.AsyncClient
+
+    def client(*args, **kwargs):
+        return client_type(*args, **kwargs, transport=httpx.MockTransport(request))
+
+    async def token(_user_id, aid):
+        token_ids.append(aid)
+        return {}
+
+    async def spawn(**kwargs):
+        aid = kwargs["agent_id"]
+        async with client_type(transport=httpx.MockTransport(request)) as api:
+            response = await api.post(f"http://identity.test/api/agents/{aid}/messages", json={"message": "session init"})
+        assert response.status_code == 201, response.text
+        assert token_ids == [aid]
+        return {"structured_response": {"score": 1.0, "reasoning": "verified"}}
+
+    task = get_task_by_name("test-mass-agent-run-0")
+    evaluator = next(e for e in task.evaluators if e["id"] == "t7-schema-task-complete")
+    data = {"agent": {"agent_id": graded_root}, "messages": [], "_benchmark": {}}
+    original_evidence = bench._declared_agentic_evaluator_evidence(data)
+    with (
+        patch.object(bench, "_sync_compute_tokens", lambda **_: None),
+        patch.object(bench, "_agentic_judge_code_provider", AsyncMock(return_value="codex")),
+        patch.object(bench, "_fetch_agentic_judge_compute_token", token),
+        patch.object(bench, "_api_headers", AsyncMock(return_value={"X-API-Key": "test-key"})),
+        patch.object(bench, "API_KEY", "test-key"),
+        patch.object(bench.httpx, "AsyncClient", client),
+        patch("helpers.attachments.upload_to_storage", AsyncMock(return_value={"id": "evidence"})),
+        patch("domains.spawn_claude_code_agent.service.spawn_claude_code_activity", spawn),
+    ):
+        result = await bench._call_declared_agentic_llm_judge(task, evaluator, data)
+    assert result["score"] == 1.0
+    assert archived == [result["judge_audit"]["judge_agent_id"]]
+    assert set(rows) == set(archived)
+    assert bench._declared_agentic_evaluator_evidence(data) == original_evidence
+    assert data["_benchmark"]["judge_audits"] == [result["judge_audit"]]
+
+
+@contextlib.asynccontextmanager
+async def _credential_test_judge_identity(**_kwargs):
+    """Credential-only controls isolate persistence; its FK contract is tested separately."""
+    yield
+
+
+async def test_judge_identity_archives_after_failure_and_cancellation():
+    import httpx
+    from benchmarks.judge_identity import judge_identity
+
+    for failure in (RuntimeError("session creation failed"), asyncio.CancelledError()):
+        calls = []
+        audit = {}
+
+        def request(req):
+            calls.append((req.method, req.url.path))
+            if req.method == "POST":
+                return httpx.Response(201, json={"agent_id": "judge", "execution_mode": "external"})
+            if req.method == "GET" and "-code-session/agent/" in req.url.path:
+                return httpx.Response(200, json={"sessions": []})
+            if req.method == "GET":
+                return httpx.Response(200, json={"agent": {
+                    "progress": 0, "token_count": 0, "tokens_in": 0, "tokens_out": 0,
+                    "context_size": 0, "message_count": 1,
+                }, "messages": []})
+            if req.method == "PATCH":
+                assert json.loads(req.content)["status"] == "FAILED"
+                return httpx.Response(200, json={})
+            assert req.method == "DELETE"
+            return httpx.Response(204)
+
+        client_type = httpx.AsyncClient
+        with patch("benchmarks.judge_identity.httpx.AsyncClient", lambda **kw: client_type(**kw, transport=httpx.MockTransport(request))):
+            try:
+                async with judge_identity(base_url="http://identity.test", headers={"X-API-Key": "test"}, agent_id="judge", goal="judge", audit=audit):
+                    raise failure
+            except BaseException as caught:
+                assert caught is failure
+            else:
+                raise AssertionError("cleanup must preserve the original failure/cancellation")
+        assert ("DELETE", "/api/agents/judge") in calls
+        assert audit["cleanup_verified"] is True
+        assert "execution_error" in audit and "trace" in audit
+
+
+async def test_judge_identity_retires_its_owned_paused_persistent_session():
+    import httpx
+    from benchmarks.judge_identity import judge_identity
+
+    retired = []
+    audit = {}
+
+    def request(req):
+        if req.method == "POST":
+            return httpx.Response(201, json={"agent_id": "judge", "execution_mode": "external"})
+        if req.url.path.endswith("/code-sessions/persistent"):
+            if req.method == "DELETE":
+                retired.append("persistent")
+            return httpx.Response(200, json={"owner_agent_id": "judge", "state": "RETIRED" if retired else "PAUSED"})
+        if req.method == "GET" and "-code-session/agent/" in req.url.path:
+            return httpx.Response(200, json={"sessions": [{
+                "id": "task", "status": "CLOSED", "closedAt": "2026-11-11T00:00:00Z", "codeSessionId": "persistent",
+            }]})
+        if req.method == "GET":
+            return httpx.Response(200, json={"agent": {
+                "progress": 0, "token_count": 0, "tokens_in": 0, "tokens_out": 0,
+                "context_size": 0, "message_count": 1,
+            }, "messages": []})
+        if req.method == "PATCH":
+            return httpx.Response(200, json={})
+        assert req.method == "DELETE" and req.url.path == "/api/agents/judge"
+        return httpx.Response(204)
+
+    client_type = httpx.AsyncClient
+    with patch("benchmarks.judge_identity.httpx.AsyncClient", lambda **kw: client_type(**kw, transport=httpx.MockTransport(request))):
+        async with judge_identity(base_url="http://identity.test", headers={"X-API-Key": "test"}, agent_id="judge", goal="judge", audit=audit):
+            pass
+    assert retired == ["persistent"]
+    assert audit["cleanup_verified"] is True
+    assert audit["persistent_sessions"] == [{"owner_agent_id": "judge", "state": "RETIRED"}]
+
+
 async def test_judge_compute_token_unavailable_is_a_skipped_test_not_infra():
     """RCA 2026-10-25 judge Codex token unavailable: under a 70-copy cloud fleet the only
     Codex account was in a provider cooldown when test-mass-agent-run-0's declared judge
@@ -6131,6 +6293,7 @@ async def test_judge_compute_token_unavailable_is_a_skipped_test_not_infra():
         }
     )
     with (
+        patch("benchmarks.judge_identity.judge_identity", _credential_test_judge_identity),
         patch.object(bench, "_sync_compute_tokens", lambda **_: None),
         patch("helpers.llm.fetch_gpt_code_token_activity", AsyncMock(return_value=None)),
         patch(
@@ -6217,6 +6380,7 @@ async def test_agentic_judge_follows_the_c15_credential_order_past_a_cooled_code
             side_effect=token_error, return_value={"accessToken": gpt_token} if gpt_token else None
         )
         with (
+            patch("benchmarks.judge_identity.judge_identity", _credential_test_judge_identity),
             patch.object(bench, "_sync_compute_tokens", lambda **_: True),
             patch.object(bench, "_fetch_agentic_judge_compute_token", token),
             patch("domains.spawn_claude_code_agent.repo.fetch_code_credential_availability", AsyncMock(return_value=plan)),
@@ -27365,6 +27529,18 @@ async def run_all_tests():
     r = BlackboxResult()
     r.record("browser_iteration_budget_preserves_trajectory_counting", test_browser_iteration_budget_preserves_trajectory_counting)
     await r.record_async("browser_budget_poller_waits_for_native_iteration_limit", test_browser_budget_poller_waits_for_native_iteration_limit)
+    await r.record_async(
+        "declared_judge_persists_its_isolated_identity_before_session_creation",
+        test_declared_judge_persists_its_isolated_identity_before_session_creation,
+    )
+    await r.record_async(
+        "judge_identity_archives_after_failure_and_cancellation",
+        test_judge_identity_archives_after_failure_and_cancellation,
+    )
+    await r.record_async(
+        "judge_identity_retires_its_owned_paused_persistent_session",
+        test_judge_identity_retires_its_owned_paused_persistent_session,
+    )
     from benchmarks.process_bench_test import run_process_controls
 
     r.record("process_bench_contract_and_adversarial_traces", run_process_controls)
