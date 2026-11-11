@@ -1451,17 +1451,10 @@ def run_fake_driver(mdir):
                 exit_code = 1
     if exit_code == 0 and os.path.exists(os.path.join(FAKE_DIR, "fail-worker-destroy-once")):
         deadline = time.time() + 30
-        controller_ws = os.environ["CLOUDBENCH_FAKE_CONTROLLER_WS"]
-        fatal_pattern = os.path.join(
-            controller_ws,
-            ".context",
-            "fleet",
-            "runs",
-            "*",
-            "autoscaler-worker-destroy-failure",
-            "autoscaler.failed",
-        )
-        while not glob.glob(fatal_pattern):
+        while True:
+            output = current_task_output()
+            if output is not None and (output / "autoscaler.failed").is_file():
+                break
             if time.time() >= deadline:
                 log("FATAL: worker scale-down never published its fail-closed result")
                 exit_code = 1

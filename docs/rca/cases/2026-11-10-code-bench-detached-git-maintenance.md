@@ -9,6 +9,7 @@ problem_class: logical-inconsistency-in-harness-contracts
 first_bad_boundary: Fixture Git returns without joining automatic maintenance before os.walk and tar.add consume its mutable repository
 symptoms:
   - FileNotFoundError on repo/.git/objects/maintenance.lock
+  - FileNotFoundError on origin.git/objects/maintenance.lock
   - code_bench_evaluator_proofs_permanent_gate
   - Git returned while maintenance still owned the archive input
 tags:
@@ -19,6 +20,8 @@ tags:
   - race
 sources:
   - PR #1881
+  - commit 6ec73775eb17e051cb64c1d0153968596c2a94c9
+  - task GitHub Actions run 42956070487
   - commit eaa16bf18045e9c82007fe67e5dc0b2599ef7521
   - task GitHub Actions run 42909060784
   - task GitHub Actions run 42769391635
@@ -65,3 +68,14 @@ The parent required an owning foreground-maintenance repair rather than ignoring
 ## Reusable lesson
 
 Join fixture-owned background writers before taking deterministic snapshots, and test that ownership boundary with an explicit readiness and exit handshake.
+
+
+### 2026-11-11 receiving-side recurrence
+
+Source6ec diagnostic run4 failed after three benchmark passes: the nested owning suite had1failed/88passed in test_commit_fixture_new_remote_branch_fails, with origin.git/objects/maintenance.lock disappearing during tar.add. Aggregate30PASS/2FAIL remains UNVERIFIED/incomplete; the whole1200-second controller failure is separate. The native writer PID and exact Git version remain unrecorded.
+
+A canonical local fixture/push with real Git2.43 Trace2 proves that sender -c flags do not reach receiving gc. An environment-only GIT_CONFIG_COUNT control also failed to propagate those settings. The smallest external candidate therefore configures gc.autoDetach=false and maintenance.autoDetach=false inside the fixture-owned bare origin before use. It does not disable maintenance or omit archive members. The actual receiving-gc regression is RED on original source and GREEN after this change. A held-writer model additionally exercises the bare-origin ownership boundary while retaining the previous direct-writer control.
+
+Five unchanged focused runs pass all three cases and the full owning suite passes91 cases (the89existing expansions plus two new receiving-boundary expansions). All seven fixture archive member sets and normalized metadata are unchanged. Six archives remain byte-identical; only commit-locally-no-push/origin.git/config changes, by the two explicit foreground settings. Every other member byte is identical. The existing unauthorized remote branch still produces exactly git.origin_unchanged. No prompt, evaluator, timeout, sample, retry or assertion was weakened. This config-only archive delta is intentional, not claimed byte-identical to its old baseline.
+
+This is an external candidate pending integration and the full original32-unit/five/eight/1200 validation. It does not reproduce the historical writer identity or claim the original native failure fixed. The parent authorized the bare-origin settings only after the environment-only propagation control failed.

@@ -10933,6 +10933,12 @@ def _extract_fleet_function(source: str, signature: str) -> str:
             heredoc_terminator = next(value for value in match.groups() if value)
         if line.startswith("}") and stripped == "}":
             function = source[start : offset + len(line)]
+            if signature == "bench_autoscaler() {" and "cloudbench_wait_for_autoscaler_terminal() {" in source:
+                return (
+                    _extract_fleet_function(source, "cloudbench_wait_for_autoscaler_terminal() {")
+                    + "\n"
+                    + function
+                )
             if signature == "cleanup() {" and "fleet_native_reap_open() {" in source:
                 return (
                     _extract_fleet_function(source, "fleet_native_reap_open() {")

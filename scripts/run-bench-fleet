@@ -18503,13 +18503,40 @@ PY
     return 0
 }
 
+cloudbench_wait_for_autoscaler_terminal() {  # <exact-child-finished-marker> <poll-seconds>
+    # Replace only the idle sleep child. This observes no provider or capacity
+    # state; the original finalizer remains the sole completion authority.
+    python3 - "$1" "$2" <<'PY_TERMINAL_WAIT'
+import math
+import os
+import sys
+import time
+
+marker, value = sys.argv[1:]
+seconds = float(value)
+if not math.isfinite(seconds) or seconds < 0:
+    raise SystemExit(1)
+deadline = time.monotonic() + seconds
+while True:
+    try:
+        if os.path.exists(marker):
+            raise SystemExit(10)
+    except OSError:
+        pass  # An unreadable observation cannot advance the normal poll.
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise SystemExit(0)
+    time.sleep(min(0.2, remaining))
+PY_TERMINAL_WAIT
+}
+
 bench_autoscaler() {  # <bench> <primary_cid> <workspace> <sim01> <out> <local-port-base> [exact-run-token]
     local bench="$1" cid="$2" ws="$3" sim="$4" out="$5" port_base="$6"
     local runtime_run_token="${7:-}"
     local pip="" metrics_proxy_pid="" metrics_proxy_pid_LEASE="" metrics_proxy_pid_TOKEN="" metrics_proxy_pid_LIVE="" metrics_port="" metrics_url=""
     local metrics_started_at scrape_failures=0 metrics_lease_owner_pid metrics_lease_token
     local ready_reconcile_rc=0 inventory_status=0
-    local scale_down_target="" scale_down_since="" scale_down_now=""
+    local scale_down_target="" scale_down_since="" scale_down_now="" terminal_poll_status=0
     # Bash 3.2 preserves $$ from the controller in async function subshells.
     # Controller ownership is intentional: per-autoscaler EXIT releases the
     # exact token, while controller cleanup sweeps the run prefix after SIGKILL.
@@ -18989,7 +19016,22 @@ bench_autoscaler() {  # <bench> <primary_cid> <workspace> <sim01> <out> <local-p
                 done
             fi
         fi
-        sleep "$AUTOSCALE_POLL"
+        terminal_poll_status=0
+        cloudbench_wait_for_autoscaler_terminal "$out/benchmark-child.finished" "$AUTOSCALE_POLL" \
+            || terminal_poll_status=$?
+        case "$terminal_poll_status" in
+            0) ;;  # The full original poll deadline elapsed.
+            10)
+                # Recheck the original marker and run the complete unchanged
+                # finalizer. A disappearing observation fails closed here.
+                complete_autoscaler_after_child
+                return $?
+                ;;
+            *)
+                fail_autoscaler "could not wait for benchmark child completion"
+                return 1
+                ;;
+        esac
     done
 }
 

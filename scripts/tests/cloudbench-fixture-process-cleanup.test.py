@@ -631,3 +631,300 @@ exit "$1"
 
 
 check_controller_phase_observability(ROOT / 'scripts/tests/cloudbench-multi-workstream.test.sh')
+
+def check_failed_autoscaler_barrier_uses_current_token(source: Path) -> None:
+    """A prior failure cannot satisfy this real fake-driver invocation's barrier."""
+    import ast
+    import glob
+    import os
+    import threading
+    import time
+    from types import SimpleNamespace
+    sys.path.insert(0, str(ROOT / 'scripts/lib'))
+    from condition_wait import wait_until
+
+    text = source.read_text()
+    marker = 'cat > "$FAKE_DIR/flyctl.py" <<\'PY\'\n'
+    start = text.index(marker) + len(marker)
+    tree = ast.parse(text[start:text.index('\nPY\n', start)])
+    driver = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == 'run_fake_driver')
+    current = next(n for n in driver.body if isinstance(n, ast.FunctionDef) and n.name == 'current_task_output')
+    gate = next(n for n in driver.body if isinstance(n, ast.If)
+                and 'fail-worker-destroy-once' in ast.unparse(n.test))
+    assert any(isinstance(n, ast.Constant) and n.value == 30 for n in ast.walk(gate)), 'original barrier deadline changed'
+    wrapper = ast.FunctionDef(name='barrier', args=ast.arguments(posonlyargs=[],args=[ast.arg(arg='initial_status')],kwonlyargs=[],kw_defaults=[],defaults=[]),
+                              body=[ast.Assign(targets=[ast.Name(id='exit_code',ctx=ast.Store())],value=ast.Name(id='initial_status',ctx=ast.Load())),gate,ast.Return(value=ast.Name(id='exit_code',ctx=ast.Load()))],decorator_list=[])
+    executable = compile(ast.fix_missing_locations(ast.Module(body=[current,wrapper],type_ignores=[])), str(source), 'exec')
+    with tempfile.TemporaryDirectory(prefix='current-autoscaler-barrier-') as directory:
+        root = Path(directory)
+        for mode in ('stale-prior', 'foreign-current', 'missing-current', 'current-ready', 'failed-input'):
+            case = root / mode; fake = case / 'fake'; fake.mkdir(parents=True)
+            (fake / 'fail-worker-destroy-once').touch()
+            workspace = case / 'workspace'; runs = workspace / '.context/fleet/runs'
+            bench = 'autoscaler-worker-destroy-failure'; token = 'current-token'
+            prior = runs / 'prior' / bench; prior.mkdir(parents=True)
+            (prior / 'runtime-evidence.owner.json').write_text(json.dumps({'run_token':'prior-token'}))
+            (prior / 'autoscaler.failed').write_text('prior failure')
+            own = runs / 'current' / bench; own.mkdir(parents=True)
+            if mode != 'missing-current':
+                (own / 'runtime-evidence.owner.json').write_text(json.dumps({'run_token':'foreign-token' if mode == 'foreign-current' else token}))
+            if mode in ('foreign-current','current-ready'):
+                (own / 'autoscaler.failed').write_text('published current-path failure')
+            waiting = threading.Event(); done = threading.Event(); outcomes = []; logs = []
+            delays = []
+            def observe_sleep(seconds):
+                delays.append(seconds)
+                waiting.set()
+                time.sleep(seconds)  # Observe the unchanged real delay; do not advance a fake clock.
+            clock = SimpleNamespace(time=time.time, sleep=observe_sleep)
+            scope = dict(Path=Path,glob=glob,time=clock,json=json,bench=bench,token=token,FAKE_DIR=str(fake),
+                         os=SimpleNamespace(path=os.path,environ={'CLOUDBENCH_FAKE_CONTROLLER_WS':str(workspace)}),log=logs.append)
+            exec(executable,scope)
+            if mode in ('current-ready','failed-input'):
+                initial = 1 if mode == 'failed-input' else 0
+                assert scope['barrier'](initial) == initial and not logs
+                continue
+            def execute():
+                try: outcomes.append(scope['barrier'](0))
+                except BaseException as error: outcomes.append(error)
+                finally: done.set()
+            child = threading.Thread(target=execute); child.start()
+            try:
+                wait_until(lambda: done.is_set() or waiting.is_set(),timeout=3,
+                           description='actual barrier probe or premature completion')
+                assert not any(isinstance(value, BaseException) for value in outcomes), outcomes
+                assert not done.is_set(), 'prior or foreign autoscaler.failed released the current run'
+                # Only the current invocation's exact owner and terminal marker release it.
+                (own / 'runtime-evidence.owner.json').write_text(json.dumps({'run_token':token}))
+                (own / 'autoscaler.failed').write_text('current failure')
+                child.join(timeout=3)
+                assert not child.is_alive() and outcomes == [0] and not logs, outcomes
+                assert delays and all(delay == 0.1 for delay in delays), delays
+                assert (prior / 'autoscaler.failed').read_text() == 'prior failure'
+            finally:
+                (own / 'runtime-evidence.owner.json').write_text(json.dumps({'run_token':token}))
+                (own / 'autoscaler.failed').write_text('current failure')
+                child.join(timeout=3)
+                assert not child.is_alive(), 'barrier control thread did not finish'
+    print('PASS: real fake-driver failure barrier ignores prior/foreign state and waits for current owner token')
+
+
+check_failed_autoscaler_barrier_uses_current_token(ROOT / 'scripts/tests/cloudbench-multi-workstream.test.sh')
+
+def check_autoscaler_wait_wakes_only_for_child(source: Path) -> None:
+    """Real terminal publication wakes finalization, never another capacity tick."""
+    import os
+    import shlex
+    import signal
+    import time
+    import resource
+    sys.path.insert(0, str(ROOT / 'scripts/lib'))
+    from condition_wait import wait_until
+
+    text = source.read_text()
+    start = text.index('    complete_autoscaler_after_child() {')
+    complete = text[start:text.index('    cleanup_autoscaler_jobs() {', start)]
+    start = text.index('run_fleet_child_supervised() {')
+    producer = text[start:text.index('\nmandatory_autoscaler_process_acceptable()', start)]
+    marker = 'cloudbench_wait_for_autoscaler_terminal() {'
+    if marker in text:
+        a = text.index(marker)
+        wait_function = text[a:text.index('\nbench_autoscaler()', a)]
+        a = text.index('        terminal_poll_status=0\n', text.index('bench_autoscaler()'))
+        wait_block = text[a:text.index('\n    done\n}', a)]
+    else:
+        wait_function = ''
+        a = text.rindex('        sleep "$AUTOSCALE_POLL"', text.index('bench_autoscaler()'), text.index('# ── Epoch-0 substrate preflight'))
+        wait_block = text[a:text.index('\n', a)+1]
+    if wait_function:
+        with tempfile.TemporaryDirectory(prefix='zero-terminal-poll-') as directory:
+            marker_path = Path(directory)/'benchmark-child.finished'
+            for interval in ('0', '0.0', '0e0', '.001', '1e-3'):
+                command = wait_function+'\ncloudbench_wait_for_autoscaler_terminal "$1" "$2"'
+                result = subprocess.run(['bash','-c',command,'wait',str(marker_path),interval],capture_output=True,text=True,timeout=3)
+                assert result.returncode==0, ('previously valid poll interval rejected',interval,result.returncode,result.stderr)
+            marker_path.write_text('0\n')
+            result = subprocess.run(['bash','-c',command,'wait',str(marker_path),'0'],capture_output=True,text=True,timeout=3)
+            assert result.returncode==10, 'zero poll omitted its existing terminal predicate'
+    prefix = r'''set -uo pipefail
+out="$CONTROL_DIR"
+bench=terminal-wait-control
+AUTOSCALE_POLL=10
+AUTOSCALER_FINALIZATION_WAIT_SECONDS=300
+FLEET_NATIVE_REAP_ENABLED=0
+reconcile_worker_ready_outcomes() { : > "$out/reconcile-observed"; return 0; }
+reconcile_worker_failure_outcomes() {
+    if [ -e "$out/injected-failure" ]; then
+        printf 'original worker failure\n' > "$out/autoscaler.failed"
+        return 1
+    fi
+}
+_pool_ids() { if [ -e "$out/worker.pending" ]; then printf 1; else printf 0; fi; }
+_ready_pool_ids() { printf 0; }
+fail_autoscaler() { printf '%s\n' "$1" > "$out/autoscaler.failed"; return 1; }
+'''
+    loop = r'''
+probe_loop() {
+    local terminal_poll_status=0 count=0
+    while :; do
+        if [ -e "$out/benchmark-child.finished" ]; then
+            complete_autoscaler_after_child
+            return $?
+        fi
+        count=$((count+1))
+        printf '%s\n' "$count" >> "$out/metrics-count"
+        [ "$count" -lt 2 ] || return 77
+        : > "$out/wait-entering"
+WAIT_BLOCK
+    done
+}
+probe_loop
+'''.replace('WAIT_BLOCK',wait_block)
+    with tempfile.TemporaryDirectory(prefix='terminal-only-wait-') as folder:
+        root = Path(folder)
+        def setup(name):
+            d = root/name;d.mkdir();(d/'desired-worker-count').write_text('0\n');return d
+        def launch(directory, hook=None, supervised=False):
+            env = dict(os.environ,CONTROL_DIR=str(directory),PYTHONDONTWRITEBYTECODE='1')
+            if hook:
+                env.update(PYTHONPATH=str(hook),HOOK_MARKER=str(directory/'benchmark-child.finished'),HOOK_STATE=str(directory/'hook-count'))
+            program = 'printf \"%s\\n\" \"$BASHPID\" > \"$CONTROL_DIR/controller.pid\"\n'+prefix+complete+'\n'+wait_function+'\n'+loop
+            command = ['bash','-c',program]
+            if supervised:
+                command = [sys.executable, str(ROOT/'scripts/cloudbench-local-supervisor.py'), '--receipt', str(directory/'supervisor.json'), '--', sys.executable, '-c', 'import os,sys; os.setsid(); os.execvp(sys.argv[1],sys.argv[1:])', *command]
+            child = subprocess.Popen(command,env=env,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,start_new_session=True)
+            child.supervised = supervised
+            return child
+        def retire(process):
+            if process.poll() is None:
+                if getattr(process, 'supervised', False):process.terminate()
+                else:os.killpg(process.pid,signal.SIGKILL)
+            process.communicate(timeout=5)
+        def ready(process,directory):
+            wait_until(lambda:(directory/'wait-entering').exists(),timeout=3,description='consumer entered the unchanged idle boundary')
+            # Require its real sleep/waiter child to have reached a sleeping state.
+            def sleeping_child():
+                try:
+                    controller_pid = (directory/'controller.pid').read_text().strip()
+                    children=(Path('/proc')/controller_pid/'task'/controller_pid/'children').read_text().split()
+                except OSError:return False
+                for pid in children:
+                    try:
+                        row=(Path('/proc')/pid/'stat').read_text().rsplit(')',1)[1].split()
+                        if row[0]=='S':return True
+                    except OSError:pass
+                return False
+            wait_until(sleeping_child,timeout=3,description='actual idle child blocked before terminal publication')
+        def publish(directory,status):
+            # Exercise the exact source producer: real child exits, its group is
+            # joined, then the finished status is atomically renamed into place.
+            result=subprocess.run(['bash','-c',producer+'\nrun_fleet_child_supervised "$1" bash -c "exit $2"','producer',str(directory/'benchmark-child.finished'),str(status)],
+                                  env=dict(os.environ,FLEET_NATIVE_REAP_ENABLED='0'),capture_output=True,text=True,timeout=5)
+            assert result.returncode==status,(result.returncode,result.stderr)
+            assert (directory/'benchmark-child.finished').read_text()==str(status)+'\n'
+        d=setup('late-real-producer');p=launch(d)
+        try:
+            ready(p,d);publish(d,0);published=time.monotonic()
+            stdout,stderr=p.communicate(timeout=12);delay=time.monotonic()-published
+            assert p.returncode==0,(p.returncode,stderr)
+            assert delay<2,'terminal publication waited for idle poll instead of finalization: '+str(delay)
+            assert (d/'metrics-count').read_text()=='1\n'
+            assert (d/'autoscaler.completed-after-child').read_text()=='0\n'
+            print('TERMINAL_WAKE_MEASUREMENT '+json.dumps({'marker_to_finalization_seconds':delay,'metrics_ticks':1}))
+        finally:retire(p)
+        # Foreign markers and a nonterminal signal are not completion authority.
+        d=setup('foreign-and-no-marker');(d/'foreign-child.finished').write_text('0\n');cpu_before=resource.getrusage(resource.RUSAGE_CHILDREN);p=launch(d);start=time.monotonic()
+        try:
+            ready(p,d);os.kill(p.pid,signal.SIGCONT)
+            stdout,stderr=p.communicate(timeout=13);elapsed=time.monotonic()-start
+            assert p.returncode==77 and elapsed>=10,(p.returncode,elapsed,stderr)
+            assert (d/'metrics-count').read_text()=='1\n2\n'
+            assert not (d/'autoscaler.completed-after-child').exists()
+            cpu_after=resource.getrusage(resource.RUSAGE_CHILDREN)
+            print('NONTERMINAL_POLL_MEASUREMENT '+json.dumps({'seconds':elapsed,'metrics_ticks':2,'child_cpu_seconds':(cpu_after.ru_utime+cpu_after.ru_stime)-(cpu_before.ru_utime+cpu_before.ru_stime)}))
+        finally:retire(p)
+        for name,status,failure in [('failed-child',1,False),('worker-failure',0,True),('pending-worker',0,False)]:
+            d=setup(name)
+            if failure:(d/'injected-failure').touch()
+            if name=='pending-worker':(d/'worker.pending').touch()
+            p=launch(d)
+            try:
+                ready(p,d);publish(d,status)
+                if name=='pending-worker':
+                    wait_until(lambda:(d/'reconcile-observed').exists(),timeout=3,description='unchanged finalizer saw committed pending worker')
+                    assert p.poll() is None and not (d/'autoscaler.completed-after-child').exists()
+                    (d/'worker.pending').unlink()
+                stdout,stderr=p.communicate(timeout=5)
+                assert p.returncode==(1 if failure else 0),(name,p.returncode,stderr)
+                assert (d/'metrics-count').read_text()=='1\n'
+                if failure:
+                    assert (d/'autoscaler.failed').read_text()=='original worker failure\n'
+                    assert not (d/'autoscaler.completed-after-child').exists()
+                else:assert (d/'autoscaler.completed-after-child').read_text()==str(status)+'\n'
+            finally:retire(p)
+        # Transient stat errors are not a notification; a disappearing hint is
+        # rechecked by the original finalizer and must fail closed before ticks.
+        for mode in ['transient','persistent','disappeared']:
+            d=setup(mode);hook=d/'hooks';hook.mkdir()
+            (hook/'sitecustomize.py').write_text('''import os
+from pathlib import Path
+original=os.path.exists
+def observed(path):
+ if str(path)!=os.environ.get('HOOK_MARKER'):return original(path)
+ state=Path(os.environ['HOOK_STATE'])
+ count=int(state.read_text()) if state.exists() else 0
+ state.write_text(str(count+1))
+ if MODE=='persistent' or (MODE=='transient' and count<3):raise OSError('injected stat failure')
+ value=original(path)
+ if MODE=='disappeared' and value:os.unlink(path)
+ return value
+os.path.exists=observed
+'''.replace('MODE',repr(mode)))
+            p=launch(d,hook)
+            try:
+                ready(p,d);published=time.monotonic();publish(d,0)
+                stdout,stderr=p.communicate(timeout=13)
+                if mode=='persistent':assert time.monotonic()-published>=9, 'stat errors advanced the original poll deadline'
+                assert p.returncode==(1 if mode=='disappeared' else 0),(mode,p.returncode,stderr)
+                assert (d/'metrics-count').read_text()=='1\n'
+                if mode=='disappeared':assert not (d/'autoscaler.completed-after-child').exists()
+                else:assert int((d/'hook-count').read_text())>=4
+            finally:retire(p)
+        for signum in [signal.SIGTERM,signal.SIGKILL]:
+            d=setup('signal-'+str(signum));p=launch(d,supervised=True)
+            try:
+                ready(p,d);controller_pid=int((d/'controller.pid').read_text());os.killpg(controller_pid,signum);p.communicate(timeout=10)
+                receipt=json.loads((d/'supervisor.json').read_text())
+                assert p.returncode==78 and receipt['native_exit']==-signum and receipt['quiescent'] and receipt['remaining']==[]
+                assert not (d/'autoscaler.completed-after-child').exists()
+            finally:retire(p)
+    print('PASS: terminal-only idle wait preserves metrics cadence, real producer, failures, pending work and cancellation')
+
+
+check_autoscaler_wait_wakes_only_for_child(ROOT / 'scripts/run-bench-fleet')
+
+
+def check_autoscaler_extractor_includes_terminal_wait(source: Path, extractor_source: Path) -> None:
+    """Exercise the actual shared extractor used by existing autoscaler fixtures."""
+    import ast
+    import re
+
+    node = next(node for node in ast.parse(extractor_source.read_text()).body
+                if isinstance(node, ast.FunctionDef) and node.name == '_extract_fleet_function')
+    namespace = {'re': re}
+    exec(compile(ast.Module(body=[node], type_ignores=[]), str(extractor_source), 'exec'), namespace)
+    bundle = namespace['_extract_fleet_function'](source.read_text(), 'bench_autoscaler() {')
+    assert bundle.count('cloudbench_wait_for_autoscaler_terminal() {') == 1, 'extracted autoscaler omitted terminal waiter'
+    with tempfile.TemporaryDirectory(prefix='extracted-terminal-wait-') as directory:
+        marker = Path(directory) / 'benchmark-child.finished'
+        command = bundle + '\ncloudbench_wait_for_autoscaler_terminal "$1" "$2"'
+        for interval in ('0', '0.0', '0e0', '.001', '1e-3'):
+            result = subprocess.run(['bash', '-c', command, 'wait', str(marker), interval], capture_output=True, text=True, timeout=3)
+            assert result.returncode == 0, (interval, result.returncode, result.stderr)
+        marker.write_text('1\n')
+        result = subprocess.run(['bash', '-c', command, 'wait', str(marker), '0'], capture_output=True, text=True, timeout=3)
+        assert result.returncode == 10, result.stderr
+
+
+check_autoscaler_extractor_includes_terminal_wait(
+    ROOT / 'scripts/run-bench-fleet', ROOT / 'agents/benchmarks/cloudbench_dependency_sync_test.py')
