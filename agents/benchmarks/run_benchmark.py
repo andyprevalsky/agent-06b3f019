@@ -8368,6 +8368,9 @@ def _free_credit_subscription_fixture_env(user_id: Optional[str] = None) -> dict
         raise RuntimeError("Local Victoria DB connection not found for free-credit subscription fixture")
     env = os.environ.copy()
     env["DATABASE_URL"] = database_url
+    # The fixture CLIs load back-end/.env, whose DIRECT_URL is the production pooler; an inherited
+    # DIRECT_URL must never survive beside the local DATABASE_URL (PR #1864 cloud smoke refusal).
+    env["DIRECT_URL"] = database_url
     env["BENCHMARK_USER_ID"] = user_id or _free_credit_subscription_gate_user_id()
     return env
 

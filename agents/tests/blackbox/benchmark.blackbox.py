@@ -3543,8 +3543,12 @@ def test_local_main_seeds_only_the_selected_child_payment_fixture():
                     assert command == ["npx", "tsx", "scripts/setup-benchmark-new-user-payment.ts"]
                     assert options["env"]["BENCHMARK_AGENTCARD_V2_USER_ID"] == manifest["agentcard_world_identity"]["providerUserId"], "new-user CLI inherited a sibling/shared provider identity"
                     assert options["env"]["BENCHMARK_USER_ID"] == "native-synthetic-new-user"
+                    # The CLI loads back-end/.env (production DIRECT_URL); both URLs must be the local DB.
+                    assert options["env"]["DATABASE_URL"] == "postgresql://postgres:postgres@localhost:5432/victoria_native_fixture"
+                    assert options["env"]["DIRECT_URL"] == options["env"]["DATABASE_URL"], "inherited remote DIRECT_URL reached the new-user fixture"
                     return SimpleNamespace(returncode=0, stdout="{}", stderr="")
                 with (
+                    patch.dict(os.environ, {"DIRECT_URL": "postgresql://remote.example:6543/prod"}),
                     patch.object(bench, "_local_victoria_database_url", return_value="postgresql://postgres:postgres@localhost:5432/victoria_native_fixture"),
                     patch.object(bench.subprocess, "run", side_effect=new_user_fixture) as fixture,
                 ):
