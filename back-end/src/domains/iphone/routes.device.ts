@@ -26,6 +26,7 @@ export function mountDeviceRoutes(router: Router, handle: Wrap, clientFactory: P
   // Screen of a READY session whoever holds the lease; no task binding, custody or activity.
   router.get(
     '/device/frame',
-    handle((_req, userId) => device.deviceFrame(userId, clientFactory))
+    // The owner (a user, not the internal key) keeps their own screen during a private phase.
+    handle((req, userId) => device.deviceFrame(userId, clientFactory, req.isInternal !== true))
   );
 }

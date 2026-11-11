@@ -1,0 +1,14 @@
+{
+  "status": "INITIAL_NATIVE_NOT_READY_CORRECTED_BEFORE_FINAL_CHECK",
+  "native_command": "python3 scripts/deploy_cli.py deletion-check --manifest docs/handoffs/pr-1837-closeout/deletion-manifest.json --receipt docs/handoffs/pr-1837-closeout/deletion-readiness.json",
+  "native_result": "NOT_READY",
+  "native_open_items": [
+    "uncommitted changes in /home/boxes/rose: docs/handoffs/pr-1837-closeout/proofs/final-forensic-capture.json, docs/handoffs/pr-1837-closeout/proofs/final-preservation-preflight-review.json",
+    "ignored path without a disposition: agents/providers/fast_cache/"
+  ],
+  "native_ready": false,
+  "native_ignored_paths_observed": 81,
+  "first_receipt_sha256": "0916ca999b77621c909454de98d991bc6faf8e6590db66277f466c3476c83250",
+  "owning_correction": "Commit the final proof edits and add the collapsed fast-cache directory disposition, backed by exact all-six current-byte hashes joined to the authenticated finite-tail inventory. No blanket cache assumption, original deletion or guard change.",
+  "completion_rule": "This initial failure remains a failure; final native CLI exit0 and committed clean ready receipt are separately required."
+}

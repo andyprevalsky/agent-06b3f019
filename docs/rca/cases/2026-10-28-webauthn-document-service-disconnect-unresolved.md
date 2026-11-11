@@ -4,7 +4,7 @@ date: 2026-10-28
 title: Popup native WebAuthn callback fails while its virtual authenticator remains available
 surface: agents
 component: browser-tilion-native-webauthn
-classification: unresolved
+classification: test-bug
 problem_class: observability-trace-capture-gap
 first_bad_boundary: Chromium Blink ScopedPromiseResolver reports an abandoned native Authenticator callback in the first popup document; the initiating native lifecycle event remains unproven
 symptoms:
@@ -21,8 +21,8 @@ sources:
   - PR #1627
   - commit 7c4ff6fe4acfc3e7b8caf0e6262c1fd8158e87e9
   - agent ph76vgnm45dgks2dts4rxqy1sd8h45j4
-repro: none-recorded
-status: open
+repro: agents/tests/blackbox/browser_tilion.blackbox.py multiplexer_arms_webauthn_popups
+status: fixed
 ---
 
 ## Problem
@@ -179,3 +179,37 @@ The unchanged source fa0310f9f6a55cd4f937f59ab4af51bd385b16fb reproduced the exa
 Read-only investigation matches this open document-service callback failure; it does not establish the initiating event. Original Chromium stderr was discarded and no raw CDP trace is available. No ACK barrier, wait extension, error acceptance or runtime patch is justified. The original failure remains recorded independently of any later unchanged test result.
 
 After coverage ended, the exact registered case from a byte-identical copy of the test module passed with exit0. Browser profiles were placed under /project for this scoped diagnostic; elapsed time was not recorded. The receipt is /project/rose-speed-comparison-20261028/webauthn-rca/owning-case-result.json. This is not a full-domain or coverage pass and does not prove the initiating event or a fix. No runtime, assertion, wait or timeout changed.
+
+## November 8 new-test-stability recurrence and repair
+
+Blacksmith new-test-stability at 7268c6f78 (8 lanes, busy loops to nproc):
+browser-tilion run 3/5 failed the UNARMED control,
+`AssertionError: control: unarmed chooser hangs; outcome='NotSupportedError'`,
+same native message. The unarmed multiplexer sends no WebAuthn command, so
+arming order cannot be the cause (the earlier raw-CDP repro already excluded
+the multiplexer). results.json carried an empty message because the domain
+returns only `result.all_passed`.
+
+Source: `AuthenticatorImpl::Create` (content/browser/webauth, 153.0.8010.12)
+returns without binding when `!render_frame_host->IsActive()` ("e.g. if a
+request arrives during a navigation"). The dropped receiver abandons the
+callback, ScopedPromiseResolver rejects NotSupportedError, and the per-window
+remote has no disconnect handler, so the same document keeps failing while a
+reload succeeds — exactly the earlier lifetime observation.
+
+Local repro on a loaded 8-vCPU devbox (4-8 concurrent loops + 6 busy loops):
+the popup request started during parse or at its load event, before the
+browser reports the popup's /popup commit, failed 17/496 (3.4%); the request
+started only after the browser-side `Target.targetInfoChanged` for /popup
+failed 0/120 in the paired concurrent cohort. A load-event start still fails
+(4/105): the renderer fires load before the loaded browser UI thread has
+processed the commit (parse-time calls precede that browser event by 20-75 ms).
+
+Fix (test fixture only; no wait or deadline changed): the popup defines
+`request()`; the test waits for the browser-side commit event, then calls it.
+D4's hold-before-resume guarantee is asserted directly from the gateway's
+ordered client commands (enable + addVirtualAuthenticator precede the popup
+session's runIfWaitingForDebugger; the unarmed control sends no WebAuthn
+command). Mutation check: removing `or arm_webauthn` from the hold fails it.
+The runner now names failing cases and the first error in results.json
+(`agents/tests/unit/test_blackbox_runner.py`).

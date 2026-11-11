@@ -24,12 +24,16 @@ async function currentGrant(
   return session;
 }
 
-export async function deviceFrame(userId: string, clientFactory: PhoneClientFactory) {
-  const snapshot = await repo.frameSnapshot(userId);
+export async function deviceFrame(
+  userId: string,
+  clientFactory: PhoneClientFactory,
+  owner = false
+) {
+  const snapshot = await repo.frameSnapshot(userId, owner);
   try {
     const client = clientFactory();
     const bytes = await client.frame(await currentGrant(snapshot, client));
-    await repo.frameStillValid(snapshot);
+    await repo.frameStillValid(snapshot, owner);
     return bytes;
   } catch (error) {
     if (error instanceof IPhoneError) throw error;

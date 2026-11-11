@@ -1,0 +1,17 @@
+{
+  "native_fixture_cleanup": "PASS; all synthetic DB rows and Temporal IDs removed or closed",
+  "native_smoke_verified_fleets": 14,
+  "owned_machines_retired": 16,
+  "owned_volumes_retired": 16,
+  "active_owner_claims": 0,
+  "all_captured_owner_pids_absent": true,
+  "final_group_publication_digest_matches": true,
+  "remaining_workspace_processes": [],
+  "native_agentcard": "SKIPPED under exact typed standing closed-card release-stall policy; not PASS",
+  "unreleased_sandbox_usd": 43.96,
+  "stripe_refund": "pending; no release/refund credit",
+  "durable_per_root_FE_and_LLM": "12/13 verified; missing chat root archive delivered as independent repair with original task PASS and publisher FAIL preserved",
+  "original_payment_journey_publication": "First failed, then same original run verified under exact captured owner with normal publisher; original HTTP cause UNKNOWN, no task retry/fix credit",
+  "native_benchmark_display": "Unchanged CLI renderer retains source/lifecycle metadata gaps; exact source/run custody and 14 native fleet audits are authoritative. No renderer/result edits.",
+  "preservation_limits": "Finite per-file on-disk snapshots; no atomic whole-filesystem/process/browser memory claim. Encrypted readback does not establish bucket access policy. Standard dependencies/caches are reproducible. No branch or Freedom component removed."
+}

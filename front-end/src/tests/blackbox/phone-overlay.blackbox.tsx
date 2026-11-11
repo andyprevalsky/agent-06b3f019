@@ -36,6 +36,9 @@ vi.mock(
 );
 
 const api = 'http://localhost:3001/api/iphone';
+const frameHeaders = { 'Content-Type': 'image/png' };
+const advancePhoneTime = (ms: number) => act(() => vi.advanceTimersByTimeAsync(ms));
+const waitForPhone = (assertion: () => void) => vi.waitFor(assertion, { timeout: 5000 });
 const phoneMessage = {
   message_id: 'phone-event',
   timestamp: '2026-10-18T20:00:00Z',
@@ -97,9 +100,7 @@ function fixture(status = 'ACTIVE') {
     http.get(`${api}/leases/lease-a/frame`, ({ request }) => {
       expect(request.headers.get('authorization')).toBe('Bearer synthetic-user');
       frames++;
-      return new HttpResponse(new Uint8Array([137, 80, 78, 71]), {
-        headers: { 'Content-Type': 'image/png' },
-      });
+      return new HttpResponse(new Uint8Array([137, 80, 78, 71]), { headers: frameHeaders });
     }),
     http.post(`${api}/leases/lease-a/control`, async ({ request }) => {
       const body = (await request.json()) as { mode: string };
@@ -156,6 +157,7 @@ beforeEach(() => {
   );
 });
 afterEach(() => {
+  vi.useRealTimers();
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });
@@ -259,9 +261,10 @@ describe('native phone overlay above the owned browser', () => {
 });
 
 it('aborts owned frame requests and revokes blobs on hide, with no hidden polling', async () => {
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
   const f = fixture();
   const view = render(<BrowserStatusBarFullscreen {...props()} />);
-  await screen.findByAltText('Cloud iPhone screen');
+  await waitForPhone(() => expect(screen.getByAltText('Cloud iPhone screen')).toBeInTheDocument());
   let release: () => void;
   const held = new Promise<void>((resolve) => {
     release = resolve;
@@ -273,28 +276,25 @@ it('aborts owned frame requests and revokes blobs on hide, with no hidden pollin
       started = true;
       request.signal.addEventListener('abort', aborted);
       await held;
-      return new HttpResponse(new Uint8Array([137, 80, 78, 71]), {
-        headers: { 'Content-Type': 'image/png' },
-      });
+      return new HttpResponse(new Uint8Array([137, 80, 78, 71]), { headers: frameHeaders });
     }),
   );
-  await waitFor(() => expect(started).toBe(true));
+  await waitForPhone(() => expect(started).toBe(true));
   vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('hidden');
   fireEvent(document, new Event('visibilitychange'));
-  await waitFor(() => expect(aborted).toHaveBeenCalledOnce());
+  await waitForPhone(() => expect(aborted).toHaveBeenCalledOnce());
   expect(screen.queryByAltText('Cloud iPhone screen')).not.toBeInTheDocument();
   expect(URL.revokeObjectURL).toHaveBeenCalled();
   const reads = f.reads.length;
   release();
-  await act(async () => {
-    await new Promise((resolve) => setTimeout(resolve, 1100));
-  });
+  await advancePhoneTime(1100);
   expect(f.reads.length).toBe(reads);
   view.unmount();
   vi.restoreAllMocks();
 });
 
 it('never overlaps frame requests and drops a late frame after task replacement', async () => {
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
   fixture();
   let release: () => void;
   const held = new Promise<void>((resolve) => {
@@ -310,19 +310,15 @@ it('never overlaps frame requests and drops a late frame after task replacement'
       request.signal.addEventListener('abort', aborted);
       await held;
       active--;
-      return new HttpResponse(new Uint8Array([137, 80, 78, 71]), {
-        headers: { 'Content-Type': 'image/png' },
-      });
+      return new HttpResponse(new Uint8Array([137, 80, 78, 71]), { headers: frameHeaders });
     }),
   );
   const view = render(<BrowserStatusBarFullscreen {...props()} />);
-  await waitFor(() => expect(active).toBe(1));
-  await act(async () => {
-    await new Promise((resolve) => setTimeout(resolve, 1100));
-  });
+  await waitForPhone(() => expect(active).toBe(1));
+  await advancePhoneTime(1100);
   expect(maxActive).toBe(1);
   view.rerender(<BrowserStatusBarFullscreen {...props({ taskId: 'task-b', messages: [] })} />);
-  await waitFor(() => expect(aborted).toHaveBeenCalledOnce());
+  await waitForPhone(() => expect(aborted).toHaveBeenCalledOnce());
   release();
   await act(async () => {
     await Promise.resolve();
@@ -490,6 +486,7 @@ it('supports a keyboard center tap using fresh point bounds and focuses explicit
 });
 
 it('reports rejected preparation as input not applied, clears submitted text, and never replays it', async () => {
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
   fixture();
   let textPosts = 0;
   server.use(
@@ -523,18 +520,21 @@ it('reports rejected preparation as input not applied, clears submitted text, an
     }),
   );
   render(<BrowserStatusBarFullscreen {...props()} />);
-  fireEvent.click(await screen.findByRole('button', { name: 'Take phone control' }));
-  await waitFor(() => expect(screen.getByRole('button', { name: 'Type' })).toBeEnabled());
+  await waitForPhone(() =>
+    expect(screen.getByRole('button', { name: 'Take phone control' })).toBeInTheDocument(),
+  );
+  fireEvent.click(screen.getByRole('button', { name: 'Take phone control' }));
+  await waitForPhone(() => expect(screen.getByRole('button', { name: 'Type' })).toBeEnabled());
   fireEvent.click(screen.getByRole('button', { name: 'Type' }));
   const field = screen.getByRole('textbox', { name: 'Text to type on phone' });
   fireEvent.change(field, { target: { value: 'sensitive-synthetic-input' } });
   fireEvent.click(screen.getByRole('button', { name: 'Send text' }));
-  expect(await screen.findByText(/Phone input was not applied/)).toBeInTheDocument();
+  await waitForPhone(() =>
+    expect(screen.getByText(/Phone input was not applied/)).toBeInTheDocument(),
+  );
   expect(field).toHaveValue('');
   expect(screen.queryByText(/PRIVATE-PROVIDER-DETAIL/)).not.toBeInTheDocument();
-  await act(async () => {
-    await new Promise((resolve) => setTimeout(resolve, 1100));
-  });
+  await advancePhoneTime(1100);
   expect(textPosts).toBe(1);
   expect(screen.getByText(/Phone input was not applied/)).toBeInTheDocument();
 });

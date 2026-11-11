@@ -1,0 +1,40 @@
+{
+  "status": "VERIFIED",
+  "key": "devbox-closeouts/report-bug-fetch-944bdbf4/auxiliary-closeout-af0e8ec9746449fba7048b95f67d13ba.enc",
+  "format": "ROSE-PRIVATE-TAR-GCM-V1",
+  "files": 236259,
+  "original_bytes": 2716389213,
+  "stored_bytes": 857429127,
+  "ciphertext_sha256": "5e3c8d5a92ed529e87f54b309a11265921003a10da12bad54c252477345304ed",
+  "manifest_sha256": "8c5266e06ddfc4d215a27c8f0ba659b8a34e94d527641587cc0a51ba225f73b1",
+  "native_receipt_sha256": "a2865b6dff0c954df01e30bce5cf3be74cc674c0045a0423c6884c1f3e4da0e6",
+  "full_authenticated_readback": true,
+  "independent_restore_exit": 0,
+  "every_restored_hash_size_and_membership_matches_approved_snapshot": true,
+  "source_regular_files_preserved": 236258,
+  "symlinks_recorded_without_following": 112,
+  "special_metadata_only": 0,
+  "policy_exclusions_deferred_final": 751,
+  "drift_writers_new_files_deferred_final": 0,
+  "enumeration_errors": 0,
+  "scope": [
+    "node_modules",
+    "codex",
+    "hermes-agent",
+    "openclaw",
+    "kimi-code",
+    "prime-agent",
+    ".devbox",
+    "package-lock.json",
+    "agents/helpers/__pycache__",
+    "agents/providers/fast_cache/__pycache__"
+  ],
+  "finished": "2026-11-08T16:07:32.545006+00:00",
+  "restore_copy_reconstructible": {
+    "root": "Private encrypted artifact location; reference hash ff6f2bdc19f008ff29e95fcbbad69bfef5e5e432df1a6f0dc7193a1a753992de",
+    "exact_receipt": "Private encrypted artifact location; reference hash ac3e0c62ce4b87ce5b6a53e67425471b392854323b09050bdeadea4502b9336f",
+    "current_every_member_hash_size_verified": true,
+    "policy": "Exclude from duplicate final archival only while exact receipt/hash qualification holds; keep proof/receipt/log metadata."
+  },
+  "limits": "Auxiliary per-file cut only. Managed config/locks and live .context/runtime records excluded/deferred. No source/permission/Git/cycle/DB/operational-provider changes; financial duties UNVERIFIED/no credit."
+}

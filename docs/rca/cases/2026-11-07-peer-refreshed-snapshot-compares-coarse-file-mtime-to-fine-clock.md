@@ -20,7 +20,7 @@ tags:
 sources:
   - PR #1747 deploy round 4 (source 02eb65acf1), gate agents-coverage-blackbox on a Blacksmith VM; passed in rounds 2, 3 and 5 and in 6 of 6 local reruns
 repro: python3 -c "write a file 40000 times and compare int(os.stat().st_mtime) with int(time.time()) read just before; 345 of 40000 pairs had the mtime second earlier"
-status: open
+status: fixed
 ---
 
 ## Problem
@@ -33,9 +33,7 @@ Gate: NOT_INTRODUCED (`scripts/run-bench-cloud` and the test are byte-identical 
 
 ## Solution
 
-Not done in PR #1747 (any source change reruns every gate); proposed fix:
-
-Compare against `since - 1` (one second covers the coarse-clock lag), keep the exact-manifest and exact-ref checks that carry the real proof, and add a deterministic regression: set the state file's mtime to `since - 1` with `os.utime` (accepted) and `since - 2` (refused).
+Fixed on feat/test-quarantine (2026-11-08). The request is stamped with the `st_mtime_ns` of a temp file created beside the state file, and `peer_refreshed_snapshot` compares the state file's `st_mtime_ns` against it. Both stamps come from the same filesystem clock, so a later peer write can never be ordered before the request; nothing was widened (the proposed `since - 1` was not needed). The exact-manifest and exact-ref checks are unchanged. Regression: `test_refresh_deps_applies_exact_workspace_before_rebuild[peer_refreshed_fine_clock_ahead]` shims `date` one second ahead; it failed with this RCA's error on the old comparison and passes 5/5 on the fix.
 
 10k-agent behavior: not agent-scaled; one comparison per refresh request.
 

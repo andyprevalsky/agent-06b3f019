@@ -9,6 +9,7 @@ while a client is attached.
 import asyncio
 import base64
 import contextlib
+import importlib.util
 import json
 import logging
 import os
@@ -30,6 +31,26 @@ from _test_utils import BlackboxResult
 
 TILION_SESSION = "sess_0123456789abcdef0123456789abcdef"
 TILION_TOKEN = "tok_secret_value_never_logged"
+# websockets' default close_timeout: the bound on the multiplexer's upstream
+# close handshake, which is what frees the provider's single client slot.
+_SLOT_RELEASE_TIMEOUT_SECONDS = 10.0
+
+
+def _load_condition_wait():
+    """The repo's canonical condition wait (scripts/lib/condition_wait.py; stdlib only)."""
+    path = Path(__file__).resolve().parents[3] / "scripts" / "lib" / "condition_wait.py"
+    spec = importlib.util.spec_from_file_location("condition_wait", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+_condition_wait = _load_condition_wait()
+
+
+async def _wait_until(predicate, timeout: float, what: str) -> None:
+    """Poll a real readiness condition up to a bound instead of sleeping blind."""
+    await _condition_wait.async_wait_until(predicate, timeout=timeout, description=what)
 
 
 class FakeTilionGateway:
@@ -46,6 +67,24 @@ class FakeTilionGateway:
         self._sockets: set = set()
         self.withhold = None  # predicate(raw request) -> True to never deliver its reply
         self.withheld_ids: set = set()
+        self.sent: list = []  # (sessionId, method) of every client command, in order
+        self.popup_sessions: set = set()  # sessions Chromium attached for targets with an opener
+        self._slot_released = asyncio.Event()
+
+    async def wait_released(self, timeout: float = _SLOT_RELEASE_TIMEOUT_SECONDS) -> None:
+        """Wait for the native transport to free the single client slot.
+
+        The multiplexer releases it with a websocket close handshake that the
+        server observes asynchronously; a fixed sleep raced that under load.
+        """
+        deadline = time.monotonic() + timeout
+        while self.active:
+            self._slot_released.clear()
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise AssertionError(f"slot not released within {timeout}s (active={self.active})")
+            with contextlib.suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(self._slot_released.wait(), remaining)
 
     async def drop_all(self) -> None:
         """Simulate Tilion dropping the attached client (network blip, LB)."""
@@ -70,6 +109,8 @@ class FakeTilionGateway:
 
                 async def up():
                     async for raw in downstream:
+                        sent = json.loads(raw)
+                        self.sent.append((sent.get("sessionId"), sent.get("method")))
                         if self.withhold is not None and self.withhold(raw):
                             self.withheld_ids.add((json.loads(raw).get("sessionId"), json.loads(raw).get("id")))
                         await upstream.send(raw)
@@ -77,6 +118,10 @@ class FakeTilionGateway:
                 async def down():
                     async for raw in upstream:
                         message = json.loads(raw)
+                        if message.get("method") == "Target.attachedToTarget":
+                            attached = message.get("params") or {}
+                            if (attached.get("targetInfo") or {}).get("openerId"):
+                                self.popup_sessions.add(attached.get("sessionId"))
                         if (message.get("sessionId"), message.get("id")) in self.withheld_ids:
                             continue  # the provider never answers this command
                         await downstream.send(raw)
@@ -95,6 +140,7 @@ class FakeTilionGateway:
         if downstream in self._sockets:
             self._sockets.remove(downstream)
             self.active -= 1
+            self._slot_released.set()
 
     async def __aenter__(self):
         quiet = logging.getLogger("browser_tilion.fake_gateway")
@@ -402,7 +448,7 @@ async def test_tilion_worker_attach_uses_one_upstream_socket():
                     if pw_browser is not None:
                         await pw_browser.close()
                     await _stop_dom_service(service)
-                await asyncio.sleep(0.2)
+                await gateway.wait_released()
                 assert gateway.active == 0, "worker teardown must release Tilion's single client slot"
                 assert service.cdp_bytes_received >= len(png), "the byte count outlives the disconnect"
                 assert gateway.rejected_4409 == 0
@@ -460,7 +506,7 @@ async def test_multiplexer_releases_upstream_when_clients_leave_and_reattaches()
                         assert second["id"] == 7 and "targetInfos" in second["result"], second
                         assert "sessionId" not in first and "sessionId" not in second
                         assert gateway.active == 1
-                    await asyncio.sleep(0.2)
+                    await gateway.wait_released()
                     assert gateway.active == 0, _multiplexer_release_failure(gateway, multiplexer, round_number)
                 assert multiplexer.upstream_connections_opened == 2
                 assert gateway.rejected_4409 == 0
@@ -514,11 +560,8 @@ async def test_state_fetch_restores_a_dropped_cdp_socket_when_no_reconnect_is_ru
                     assert (await service.get_browser_state(include_screenshot=False))["url"] is not None
                     session._intentional_stop = True  # the drop callback sees a deliberate stop and starts nothing
                     await gateway.drop_all()
-                    for _ in range(100):
-                        if not session.is_cdp_connected:
-                            break
-                        await asyncio.sleep(0.05)
-                    await asyncio.sleep(0.3)
+                    await _wait_until(lambda: not session.is_cdp_connected, 5, "CDP socket drop")
+                    await asyncio.sleep(0.3)  # the drop callback runs while the stop is still intentional
                     session._intentional_stop = False
                     assert not session.is_cdp_connected and not session.is_reconnecting
                     state = await asyncio.wait_for(service.get_browser_state(include_screenshot=False), 60)
@@ -543,7 +586,8 @@ async def test_state_fetch_waits_for_a_reconnect_browser_use_left_pending():
                     session = service.session
                     session._intentional_stop = True
                     await gateway.drop_all()
-                    await asyncio.sleep(0.5)
+                    await _wait_until(lambda: not session.is_cdp_connected, 5, "CDP socket drop")
+                    await asyncio.sleep(0.5)  # the drop callback runs while the stop is still intentional
                     session._intentional_stop = False
                     assert not session.is_cdp_connected and not session.is_reconnecting
                     real_reconnect = type(session)._auto_reconnect
@@ -581,7 +625,8 @@ async def test_state_fetch_reports_provider_close_when_the_socket_cannot_be_rest
                     session = service.session
                     session._intentional_stop = True
                     await gateway.drop_all()
-                    await asyncio.sleep(0.5)
+                    await _wait_until(lambda: not session.is_cdp_connected, 5, "CDP socket drop")
+                    await asyncio.sleep(0.5)  # the drop callback runs while the stop is still intentional
                     session._intentional_stop = False
                     gateway._server.close()  # the provider no longer accepts connections
                     with contextlib.suppress(Exception):
@@ -1760,6 +1805,10 @@ class DropOverlappingKeysGateway(FakeTilionGateway):
                 async def down():
                     async for raw in upstream:
                         message = json.loads(raw)
+                        if message.get("method") == "Target.attachedToTarget":
+                            attached = message.get("params") or {}
+                            if (attached.get("targetInfo") or {}).get("openerId"):
+                                self.popup_sessions.add(attached.get("sessionId"))
                         self._inflight.get(message.get("sessionId"), set()).discard(message.get("id"))
                         await downstream.send(raw)
 
@@ -1863,13 +1912,19 @@ async def _webauthn_site():
     navigator.credentials.get on load and recording how it settles."""
     from aiohttp import web
 
+    # The request starts only when the test calls request(): Chromium drops an
+    # Authenticator request that reaches the browser before it has processed the
+    # popup document's commit (AuthenticatorImpl::Create returns early for an
+    # inactive RenderFrameHost), and Blink then rejects it NotSupportedError
+    # "Error connecting to Web Authentication service." whether or not WebAuthn
+    # was armed. The hold-before-resume arming is asserted from CDP order instead.
     popup = (
         "<title>popup</title><script>window.webauthn='pending';"
-        "window.webauthnStart={url:location.href,focused:document.hasFocus(),"
+        "window.request=()=>{window.webauthnStart={url:location.href,focused:document.hasFocus(),"
         "visibility:document.visibilityState,readyState:document.readyState};"
         "navigator.credentials.get({publicKey:{challenge:new Uint8Array(32),timeout:60000}})"
         ".then(()=>{window.webauthn='resolved'}).catch(e=>{"
-        "window.webauthnError={name:e.name,message:e.message};window.webauthn=e.name});</script>"
+        "window.webauthnError={name:e.name,message:e.message};window.webauthn=e.name});};</script>"
     )
     app = web.Application()
     app.router.add_get("/", lambda _r: web.Response(content_type="text/html", text="<title>main</title>"))
@@ -1885,6 +1940,24 @@ async def _webauthn_site():
         await runner.cleanup()
 
 
+def _assert_popup_armed_before_resume(gateway: "FakeTilionGateway", arm_webauthn: bool) -> None:
+    """D4 needs arming to reach the popup before its first script runs: on the
+    popup's own session, WebAuthn.enable and addVirtualAuthenticator precede the
+    Runtime.runIfWaitingForDebugger that resumes it (one session is processed in
+    order). The unarmed control sends no WebAuthn command at all."""
+    webauthn = [entry for entry in gateway.sent if str(entry[1]).startswith("WebAuthn.")]
+    if not arm_webauthn:
+        assert not webauthn, f"unarmed control sent {webauthn!r}"
+        return
+    assert gateway.popup_sessions, "Chromium never attached the popup target"
+    for session in gateway.popup_sessions:
+        methods = [method for sent_session, method in gateway.sent if sent_session == session]
+        assert "Runtime.runIfWaitingForDebugger" in methods, f"popup never resumed: {methods!r}"
+        resumed = methods.index("Runtime.runIfWaitingForDebugger")
+        for arming in ("WebAuthn.enable", "WebAuthn.addVirtualAuthenticator"):
+            assert arming in methods[:resumed], f"{arming} not sent before the popup resumed: {methods[: resumed + 1]!r}"
+
+
 async def _popup_webauthn_outcome(arm_webauthn: bool) -> str:
     from browser_tools.cdp_multiplexer import SingleCdpConnectionMultiplexer
 
@@ -1893,13 +1966,29 @@ async def _popup_webauthn_outcome(arm_webauthn: bool) -> str:
             multiplexer = SingleCdpConnectionMultiplexer(gateway.cdp_url, arm_webauthn=arm_webauthn)
             browser = await playwright.chromium.connect_over_cdp(await multiplexer.start())
             try:
+                # Browser-side commit signal: DevTools reports the popup's /popup URL
+                # from the browser process once it has processed that navigation.
+                browser_session = await browser.new_browser_cdp_session()
+                committed = asyncio.get_running_loop().create_future()
+
+                def on_target(event):
+                    info = event.get("targetInfo") or {}
+                    if info.get("type") == "page" and str(info.get("url", "")).endswith("/popup"):
+                        if not committed.done():
+                            committed.set_result(info.get("targetId"))
+
+                browser_session.on("Target.targetCreated", on_target)
+                browser_session.on("Target.targetInfoChanged", on_target)
+                await browser_session.send("Target.setDiscoverTargets", {"discover": True})
                 context = browser.contexts[0]
                 page = context.pages[0] if context.pages else await context.new_page()
                 await page.goto(base + "/")
                 async with context.expect_page(timeout=15000) as popup_info:
                     await page.evaluate(f"window.open({json.dumps(base + '/popup')}, 'p', 'width=400,height=300')")
                 popup = await popup_info.value
+                await asyncio.wait_for(committed, timeout=15)
                 await popup.wait_for_load_state("load")
+                await popup.evaluate("request()")
                 outcome = "pending"
                 for _ in range(40):
                     outcome = await popup.evaluate("window.webauthn")
@@ -1912,6 +2001,7 @@ async def _popup_webauthn_outcome(arm_webauthn: bool) -> str:
                         "url:location.href,readyState:document.readyState,focused:document.hasFocus()})"
                     )
                     print(f"WebAuthn popup arm={arm_webauthn}: {details!r}")
+                _assert_popup_armed_before_resume(gateway, arm_webauthn)
                 return outcome
             finally:
                 await browser.close()
@@ -2246,6 +2336,10 @@ class LateFirstMouseGateway(FakeTilionGateway):
                 async def down():
                     async for raw in upstream:
                         message = json.loads(raw)
+                        if message.get("method") == "Target.attachedToTarget":
+                            attached = message.get("params") or {}
+                            if (attached.get("targetInfo") or {}).get("openerId"):
+                                self.popup_sessions.add(attached.get("sessionId"))
                         if self.late_key is not None and (message.get("sessionId"), message.get("id")) == self.late_key:
                             asyncio.create_task(deliver_late(raw))
                             continue
@@ -2434,6 +2528,10 @@ class SlowInputGateway(DropOverlappingKeysGateway):
                 async def down():
                     async for raw in upstream:
                         message = json.loads(raw)
+                        if message.get("method") == "Target.attachedToTarget":
+                            attached = message.get("params") or {}
+                            if (attached.get("targetInfo") or {}).get("openerId"):
+                                self.popup_sessions.add(attached.get("sessionId"))
                         key = (message.get("sessionId"), message.get("id"))
                         if key in input_ids:
                             input_ids.discard(key)

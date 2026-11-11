@@ -119,3 +119,50 @@ None recorded.
 When a test runner parallelizes processes with separate databases, give every
 shared on-disk store its own per-process path, because database-scoped locks do
 not exclude writers in other databases.
+
+
+## Recurrence — November 10, inherited and unsharded Hub paths
+
+During coding-agent rename validation, the full backend coverage run passed
+391 unit files and 251 of 253 blackbox domains. `benchmark-share` failed with
+`Hub directory /home/boxes/rose/.context/benchmark-hub is the shared worktree default`.
+The other failure was a stale running server's old title-length limit during
+parallel source edits, resolved by a fresh server on the frozen source.
+
+The previous isolation fix preserved an inherited Hub path and still assigned
+unsharded coverage to the shared default. The permanent harness regression had
+encoded those exceptions as expected behavior, so it could not enforce the
+stronger run-scoped storage invariant checked by the blackbox.
+
+`run-coverage.sh` now exports a unique shard/timestamp/PID path for every
+invocation before launching its children, even with an inherited developer
+path. The developer's shared Hub remains intact; only the test harness's path
+changes. Backend and blackbox consume the same exported directory.
+
+Executed unchanged permanent regression:
+`cd back-end && node --import tsx src/tests/unit/coverage-script.part2.test.ts`.
+Before: exit 1, actual `/repo/.context/benchmark-hub-shard1` failed the unique
+run-path assertion. After: exit 0, including all four lifecycle checks in
+17.274s. It checks unsharded runs, repeat invocations, shard/unit/probe variants
+and inherited shared/custom paths. Shell syntax, ESLint and Prettier passed.
+The parent reruns full sharded coverage; a partial rerun or merged C8 raw data
+alone is not represented as a newly passing full gate.
+
+No production query/channel/lock behavior changes; one directory per test run.
+No new human correction was recorded for this harness recurrence.
+
+
+## Final combined validation — November 10
+
+Source: commit 7fb7d7d91069e4461dd9365ad40b289ce99b7265. Full frontend coverage passed 324 files,
+4,732 tests passed and one skipped; line coverage 89.69%, branch coverage
+81.87%. Full backend failed-first sharded coverage passed all 253 selected
+blackbox domains and all 391 unit files (including the separately scheduled
+browser-performance probe), with line/statement coverage 90.26%, functions
+93.13% and branches 82.95%. Configured thresholds passed; backend teardown
+checks also passed. The coverage runner intentionally excludes the separate
+live credential-health domain. No production rollout or live account probe
+is implied by these local validation results.
+
+Commands: `cd front-end && npm run test:coverage`;
+`cd back-end && bash scripts/run-coverage-sharded.sh --failed-first 2 && bash ../scripts/tests/blackbox-backend-teardown.test.sh`.

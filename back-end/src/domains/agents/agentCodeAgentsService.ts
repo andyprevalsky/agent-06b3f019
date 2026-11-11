@@ -16,9 +16,12 @@ import { CODE_SANDBOX_IDLE_TIMEOUT_MS } from '../../providers/e2bCodeSessionSand
 import {
   CODE_AGENT_LIST_MAX_ROOTS,
   listCodeAgentsForRoots,
+  renameCodeAgentForUser,
   type GraphCodeSessionRow,
   type RootCodeAgentRow,
 } from './repoGraph';
+
+export { renameCodeAgentForUser };
 
 export const codeAgentsQuerySchema = z.object({
   root_ids: z

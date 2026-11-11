@@ -16,14 +16,25 @@ and the real code-spawn handler's:
 """
 
 import asyncio
+import copy
 import uuid
 from datetime import timedelta
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from _test_utils import BlackboxResult
 from temporalio import workflow
 
 POINTER = {"id": "f-1", "storage_path": "u/notes.txt", "original_filename": "notes.txt"}
+ORIGINAL_SPAWN_ARGS = {
+    "type": "code",
+    "goal": "Remove the rose border and return the evidence.",
+    "output_schema": {"fields": [{"name": "evidence", "type": "string", "required": True}]},
+    "github_repo_link": "https://github.com/example/original-project",
+    "target": "cloud",
+    "task_name": "remove_rose_card_border",
+    "attachments": ["notes.txt"],
+}
+ORIGINAL_SETTINGS = {"model": "original-model", "reasoning_effort": "xhigh", "speed": "fast"}
 
 
 @workflow.defn(name="OwnerProbe")
@@ -147,6 +158,17 @@ def _fakes(spawn_impl, posted, pointer_queue=None):
     async def fake_pointer():
         return {"task_queue": pointer_queue} if pointer_queue else {}
 
+    @activity.defn(name="fetch_code_agent_resume_context")
+    async def fake_resume_context(agent_id, tool_call_id):
+        return copy.deepcopy({
+            "version": 1,
+            "spawn_args": ORIGINAL_SPAWN_ARGS,
+            "attachments": [POINTER],
+            "cli_settings": ORIGINAL_SETTINGS,
+            "model": "rose-labs/rose-1-ultra",
+            "fast_mode_cache_enabled": True,
+        })
+
     @activity.defn(name="close_detached_code_session_activity")
     async def fake_close(*args):
         return None
@@ -160,7 +182,7 @@ def _fakes(spawn_impl, posted, pointer_queue=None):
         BILLED.append(("total", (owner_id, key, total)))
         return {"limit_reached": LIMIT_REACHED[0]}
 
-    return [fake_provider, fake_spawn, fake_post, fake_pointer, fake_close, fake_usage, fake_resume_cost]
+    return [fake_provider, fake_spawn, fake_post, fake_pointer, fake_close, fake_usage, fake_resume_cost, fake_resume_context]
 
 
 async def test_pause_signal_stops_a_supervised_run_through_the_spawn_pause_path():
@@ -190,6 +212,74 @@ async def test_pause_signal_stops_a_supervised_run_through_the_spawn_pause_path(
     assert paused[-1][3]["excludeFromModel"] is True and paused[-1][3]["toolCallId"] == "toolu_code_spawn"
 
 
+async def test_user_turn_resumes_through_the_real_code_activity():
+    """A queued user turn must reach session create, not just the supervisor's activity stub."""
+    import json
+
+    from temporalio.exceptions import ApplicationError
+
+    from domains.spawn_claude_code_agent import service
+
+    handoff = {"evidence": "Changelog checked.", "rose_handoff": {
+        "status": "complete", "summary": "Changelog updated.",
+        "branch": None, "commit": None, "pr_url": None, "merged": None,
+    }}
+    for provider in ("claude", "codex"):
+        created = AsyncMock(return_value={
+            "task_id": "resumed-task", "sandbox_id": "sandbox", "ws_url": "wss://test",
+            "uploaded_files": [],
+        })
+        closed = AsyncMock(return_value={
+            "output_files": [], "usage": {},
+            "handoff": {"status": "present", "content": json.dumps(handoff)},
+        })
+        posted = []
+
+        async def spawn(*args):
+            try:
+                return await service.spawn_claude_code_activity(*args)
+            except ValueError as error:
+                # Bound the pre-fix deterministic error: production otherwise retries forever.
+                raise ApplicationError(str(error), non_retryable=True) from error
+
+        with (
+            patch.dict("os.environ", {"ROSE_ENABLE_CODE_AGENT_VERIFIER": ""}),
+            patch.object(service, "create_e2b_session", created),
+            patch.object(service, "close_e2b_session", closed),
+            patch.object(service, "fetch_code_credential_availability", AsyncMock(return_value=None)),
+            patch.object(service, "_resolve_claude_token_for_activity", AsyncMock(return_value=None)),
+            patch.object(service, "SandboxLogCollector", lambda *a, **kw: AsyncMock()),
+            patch.object(service, "_run_agentic_loop", AsyncMock(return_value=(0, True, [], 0, 0, []))),
+            patch.object(service, "persist_terminal_output", AsyncMock()),
+            patch.object(service, "save_claude_code_message", AsyncMock()),
+            patch.object(service, "save_code_transcript_batch", AsyncMock()),
+            patch("helpers.model_pricing.get_model_pricing_with_fallback", AsyncMock(return_value={
+                "input_cents_per_1k": 0, "output_cents_per_1k": 0,
+            })),
+        ):
+            result = await _run(_fakes(spawn, posted), _request(code_provider=provider, attachments=[{
+                "storage_path": "user-1/new.txt", "original_filename": "new.txt",
+                "mime_type": "text/plain", "size_bytes": 10,
+            }]))
+        assert not isinstance(result, Exception), f"{provider}: {result}"
+        created.assert_awaited_once()
+        request = created.call_args.kwargs
+        assert request["code_session_id"] == _request()["code_session_id"]
+        assert request["code_provider"] == provider
+        assert request["goal"].startswith(_request()["message"])
+        schema = json.loads(request["goal"].split("Result JSON Schema for ", 1)[1].split(":\n", 1)[1])
+        assert schema == service.handoff_json_schema(ORIGINAL_SPAWN_ARGS["output_schema"])
+        assert request["github_repo_url"] == ORIGINAL_SPAWN_ARGS["github_repo_link"]
+        assert request["target"] == ORIGINAL_SPAWN_ARGS["target"]
+        assert request["cli_settings"] == ORIGINAL_SETTINGS
+        assert request["attachments"][0]["id"] == POINTER["id"]
+        assert len(request["attachments"]) == 2
+        assert request["attachments"][1]["storage_path"] == "user-1/new.txt"
+        assert "id" in request["attachments"][1] and "created_at" in request["attachments"][1]
+        assert request["fast_mode_cache_enabled"] is True
+        assert any(row[3].get("action_type") == "task_complete" and row[3].get("success") for row in posted)
+
+
 async def test_generation_handoff_continues_on_the_live_queue_and_reattaches():
     """A deploy drains the code activity: the run moves to the live queue, which reattaches."""
     from temporalio import activity
@@ -213,6 +303,91 @@ async def test_generation_handoff_continues_on_the_live_queue_and_reattaches():
     assert [queue for queue, _ in calls] == ["q-old", "q-live"], calls
     assert calls[1][1]["task_id"] == "task-new", "the live generation reattached the drained session"
     assert any(row[3].get("action_type") == "task_complete" and row[3].get("success") for row in posted)
+
+
+async def test_saved_resume_contract_and_legacy_declarations_are_recovered_without_defaults():
+    from temporalio.exceptions import ApplicationError
+
+    from helpers import code_agent_resume_context as recovery
+    from workflows.code_agent_resume import resume_tool_call
+
+    original = {**copy.deepcopy(ORIGINAL_SPAWN_ARGS), "tool": "spawn_agent", "tool_call_id": "toolu_code_spawn"}
+    rows = [
+        {"role": "USER", "file_pointer": POINTER},
+        {"role": "ASSISTANT", "metadata": {"tool_calls": [original]}},
+        {"role": "USER", "file_pointer": {**POINTER, "id": "later", "original_filename": "later.txt"}},
+    ]
+    with patch.object(recovery, "_fetch_agent_data_impl", AsyncMock(return_value={"messages": rows})):
+        legacy = await recovery.fetch_code_agent_resume_context("owner-1", "toolu_code_spawn")
+    assert legacy["spawn_args"] == original
+    assert [item["id"] for item in legacy["attachments"]] == [POINTER["id"]]
+    assert legacy["historical_settings_unrecorded"] is True
+    try:
+        resume_tool_call(_request(), legacy)
+    except ValueError as error:
+        assert "no complete saved CLI settings" in str(error)
+    else:
+        raise AssertionError("historical CLI settings must not be silently guessed")
+
+    explicit = resume_tool_call(_request(cli_settings=ORIGINAL_SETTINGS), legacy)
+    assert explicit["output_schema"] == original["output_schema"]
+    assert explicit["target"] == original["target"]
+    assert explicit["github_repo_link"] == original["github_repo_link"]
+
+    saved = {"version": 1, "spawn_args": original, "attachments": [POINTER], "cli_settings": ORIGINAL_SETTINGS}
+    rows += [
+        {"role": "TOOL", "metadata": {"toolCallId": "another-spawn", "codeAgentResumeConfig": saved}},
+        {"role": "TOOL", "metadata": {"toolCallId": "toolu_code_spawn", "codeAgentResumeConfig": saved}},
+    ]
+    before = copy.deepcopy(rows)
+    with patch.object(recovery, "_fetch_agent_data_impl", AsyncMock(return_value={"messages": rows})):
+        recovered = await recovery.fetch_code_agent_resume_context("owner-1", "toolu_code_spawn")
+    updated = resume_tool_call(_request(cli_settings={"speed": "standard"}), recovered)
+    assert updated["_resume_cli_settings"] == {**ORIGINAL_SETTINGS, "speed": "standard"}
+    assert updated["_resume_attachments"] == [POINTER]
+    updated["output_schema"]["fields"].append({"name": "new_field", "type": "string"})
+    assert rows == before, "resuming must not mutate the saved contract"
+
+    rows.append({"role": "TOOL", "metadata": {
+        "toolCallId": "toolu_code_spawn", "action_type": "user_direct_turn", "code_provider": "claude",
+        "effective_settings": {"model": "last-selected-model", "effort": "high", "speed": "standard"},
+    }})
+    with patch.object(recovery, "_fetch_agent_data_impl", AsyncMock(return_value={"messages": rows})):
+        latest = await recovery.fetch_code_agent_resume_context("owner-1", "toolu_code_spawn")
+    assert latest["cli_settings"] == {"model": "last-selected-model", "reasoning_effort": "high", "speed": "standard"}
+    assert resume_tool_call(_request(), latest)["_resume_code_provider"] == "claude"
+    legacy_with_receipt = rows[:3] + [rows[-1]]
+    with patch.object(recovery, "_fetch_agent_data_impl", AsyncMock(return_value={"messages": legacy_with_receipt})):
+        known_legacy = await recovery.fetch_code_agent_resume_context("owner-1", "toolu_code_spawn")
+    assert known_legacy["historical_settings_unrecorded"] is False
+    assert resume_tool_call(_request(), known_legacy)["_resume_cli_settings"] == latest["cli_settings"]
+
+    for bad in ([], [{"role": "ASSISTANT", "metadata": {"tool_calls": [original, {**original, "target": "local"}]}}]):
+        with patch.object(recovery, "_fetch_agent_data_impl", AsyncMock(return_value={"messages": bad})):
+            try:
+                await recovery.fetch_code_agent_resume_context("owner-1", "toolu_code_spawn")
+            except ApplicationError as error:
+                assert error.non_retryable is True
+                assert error.type == "CODE_AGENT_RESUME_CONFIG_UNAVAILABLE"
+            else:
+                raise AssertionError("missing or conflicting original parameters must not select defaults")
+
+
+async def test_missing_saved_settings_posts_an_actionable_error_without_spawning():
+    calls = []
+
+    async def never(*args):
+        calls.append(args)
+        raise AssertionError("a resume without its original settings must not launch")
+
+    posted = []
+    with patch.dict(ORIGINAL_SETTINGS, {}, clear=True):
+        result = await _run(_fakes(never, posted), _request())
+    assert isinstance(result, Exception), result
+    assert calls == []
+    errors = [row for row in posted if row[3].get("codeAgentResume") == "failed"]
+    assert len(errors) == 1 and errors[0][3]["toolStatus"] == "ERROR"
+    assert "Choose model, effort and speed" in errors[0][1]
 
 
 async def test_failures_post_could_not_resume_and_fail_non_retryably():
@@ -528,6 +703,9 @@ async def test_a_root_whose_stored_tree_reached_its_cap_stops():
 async def run_all_tests():
     print("code_agent_resume blackbox tests:")
     r = BlackboxResult()
+    await r.record_async("saved_resume_contract_recovery", test_saved_resume_contract_and_legacy_declarations_are_recovered_without_defaults)
+    await r.record_async("missing_settings_actionable_error", test_missing_saved_settings_posts_an_actionable_error_without_spawning)
+    await r.record_async("user_turn_real_code_activity", test_user_turn_resumes_through_the_real_code_activity)
     await r.record_async(
         "pause_stops_supervised_run", test_pause_signal_stops_a_supervised_run_through_the_spawn_pause_path
     )

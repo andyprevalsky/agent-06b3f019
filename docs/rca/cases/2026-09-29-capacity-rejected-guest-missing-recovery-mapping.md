@@ -21,6 +21,8 @@ tags:
 sources:
   - PR #1299
   - fleet run 20260929-191143-20488
+  - PR #1918
+  - fleet run 20261111-001957-3813409
 repro: agents/benchmarks/cloudbench_dependency_sync_test.py
 status: open
 ---
@@ -307,3 +309,74 @@ Its normal two-path checkpoint is commit
 The shared Git window was released immediately. This closes the local helper
 component, not the historical recovery, native release or exact benchmark
 outcome; the separate fleet integration owner retains those pending stages.
+
+## November 11 recurrence: configured fresh cohort cancelled before start
+
+PR1918's frozen `2d4c45c0da9c56e7145b2f3df8114cc5b95b7bb3` smoke
+preflight was cancelled while its two fresh primaries were being configured.
+The supervisor escalated to KILL and retained genuine waitpid records. The
+native adapter result was missing; all thirteen original smoke cases remain
+UNVERIFIED. Both outputs lacked `status-proxy.port`, `cloudbench-boot-start.log`,
+`post-config-start.accepted`, `cloudbench-run.json`, `worker-runtime-evidence`
+and `worker-clones.ids`. Replaying the actual production planner against the
+original registry failed at inline line 378 with
+`ValueError: missing stale-owner status proxy mapping`.
+
+This was a different phase from the rejected-start and inert pre-config cases
+above. Complete native configuration and payload bytes bound both Machines to
+the original source, exact owner ordinal tokens, incarnation and volumes.
+The recognized complete startup source creates clones with `sleep infinity`,
+updates their task configuration with `--skip-start`, then waits for the local
+boot-config barrier before issuing a start. The sole barrier removal precedes
+child launch; normal cleanup cannot erase an earlier release. That local
+release was absent. Complete native histories contained only initial launch
+pending/created and update/stopped events. The later in-guest task barrier would
+not be sufficient: stack and payment-fixture setup can precede it.
+
+The repair adds a separate, whole-cohort fresh-configured no-start proof to
+`cloudbench-prestart-recovery.py`. It pins complete historical startup and
+cancellation producer source hashes, verifies original cancellation/waitpid
+custody and owner birth, rejects worker ownership through output, audit,
+borrowed and shared-claim channels, and binds exact native config and event
+pairs. It preserves missing files and emits zero-credit typed evidence rather
+than a guest ACK. The canonical caller consumes that proof; runtime-latch and
+per-Machine reaper checks repeat native verification. The ordinary pool and
+post-start mapping predicates remain unchanged. No original-volume boot or
+capture was needed for this positively proven no-execution phase.
+
+Two introduced contract errors were caught and repaired. First, the new caller
+used `machine_config_exact_read`, whose CLI output is config-only, as a complete
+Machine record. The first live recovery therefore failed closed with
+`unsafe fresh native identity`. The initial test double had hidden the shape
+mismatch. A dedicated exact Machines API GET reader now preserves the full
+response, and the permanent caller/reaper tests exercise the real HTTP client
+against a loopback server, including refusal of a config-only response.
+Second, post-release verification incorrectly required empty audit ledgers.
+The canonical finalizer retains historical IDs/names; the actual verifier
+rejected them. It now requires their exact declared historical sets, without
+duplicates, missing or foreign entries, while preserving terminal audit and
+registry-absence checks. Neither repair erases original evidence.
+
+The parent then completed native recovery of nested owner
+`81db70ca91fb4a8096b50752d37050c2` and parent
+`f04ea4e37515465c8aea2aee01b7f358`. Both canonical commands returned success;
+the nested registry was removed and its audit records terminal
+`destroyed-provider-retained` dispositions. This is the recorded provider
+classification, not a claim that retained provider resources are physically
+absent. The read-only post-release verifier now succeeds on those actual
+originals, retaining the historical ledgers and zero proof credit. Independent
+review passed the exact final source tuple. All 23 owning tests pass, including
+native-shape, cancellation, worker, mutation and historical-ledger inverses;
+the suite is registered in the controller gate. Original failure/reproduction
+logs and exact hashes are under
+`.context/rca-ebb350db/cancelled-smoke-recovery/investigator/`.
+
+Archive searches used `missing stale-owner status proxy mapping` and
+`cancelled prestart fresh clone boot barrier recovery`. The shared mapping
+boundary recurred, but the positive phase proof and its consumer contracts
+differ from the older incidents. The user required no fabricated markers,
+ACKs, grades or donor changes, parent-owned provider/deploy actions, and exact
+original-volume retention until a valid consumer authorized release. The
+original thirteen UNVERIFIED smoke cases and five UI failures remain unchanged;
+fresh smoke and pipeline reconciliation are separate parent-owned work. This
+case remains open for its outstanding historical outcome requirements.
