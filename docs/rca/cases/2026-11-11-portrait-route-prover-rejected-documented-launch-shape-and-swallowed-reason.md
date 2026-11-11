@@ -20,7 +20,7 @@ tags:
 sources:
   - agent 09b554a3-7577-5ac0-9670-0f58dd668fa1 (lease d5337207, setup.verify cursors 25, 27, 69)
 repro: back-end/src/tests/blackbox/iphone-control.portrait-route.cases.ts (production-shaped route cases + Photos/Safari errorCode assertion)
-status: fixed
+status: mitigated
 ---
 
 ## Problem
@@ -76,6 +76,10 @@ verify 69 had an `input.drag` mid-route. The agent now sees these as
   other bundle IDs are still rejected.
 - 10k agents: no new queries, channels or shared state. There is one log line
   per failed verify.
+
+## Recurrence (2026-11-11, after PR #1935)
+
+Production confirmed that the swallow is fixed. Agent 08923d50 (lease ef01c7a8) got its portrait verify at cursor 36 (18:36:38Z) back as `phone_portrait_route_unproven`, and Render logged `[iPhoneSetup] verify failed ... code=phone_portrait_route_unproven`. The route was still unproven because the agent relaunched Settings cold (`fresh: true`, cursors 14/44/54/75/93), and the prover accepted only `fresh: false`. A cold launch is stronger evidence of a clean start, and the root read is still required, so the prover now accepts any boolean `fresh`. A non-boolean value is still rejected (regression: the `production-cold` route cases). The same route also showed one typing attempt that did not register followed by a retype (cursors 18-22). The strict sequence still rejects that, and the agent now sees the typed reason telling it to restart from a new launch. Status stays `mitigated` until a live portrait verify succeeds.
 
 ## Human feedback
 
