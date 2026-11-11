@@ -1,6 +1,7 @@
 /**
  * Right-aligned USER bubble with optional inline attachment row.
  *
+ * Long text: collapsed preview ⇄ expanded via UserMessageText; short text is full.
  * Copy is revealed on message hover or keyboard focus; its tooltip reads Copy.
  * Copy shows a checkmark and Copied for two seconds after a successful write.
  * META LINE (always, under the bubble): the local send time (formatMessageSentAt:
@@ -36,6 +37,7 @@ import {
 } from '../../hooks/codeAgentResume';
 import { roleConfig } from './constants';
 import { AttachmentDisplay } from './AttachmentDisplay';
+import { UserMessageText } from './UserMessageText';
 
 interface UserBubbleProps {
   message: Message;
@@ -60,10 +62,7 @@ export function UserBubble({ message, agentId }: UserBubbleProps) {
             config.border,
           )}
         >
-          <p data-testid="user-message-text" className="text-sm whitespace-pre-wrap break-words">
-            {toBrowser && <span className="text-muted-foreground">You → Browser: </span>}
-            {message.text}
-          </p>
+          <UserMessageText key={message.message_id} text={message.text} toBrowser={toBrowser} />
         </div>
       )}
       {attachments.length > 0 && (
