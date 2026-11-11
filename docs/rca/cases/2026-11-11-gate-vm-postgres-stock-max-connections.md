@@ -23,7 +23,8 @@ tags:
 sources:
   - PR #1932 gate backend-coverage-blackbox FLAKY ae9ae00ce96e4ceeb75d46cc9f1fa0c2 on source 3da522eb56aa (GitHub Actions run 43054793067); quarantined in 47745e800, merged ab95cc790
   - PR #1947 backend-unit repair (thread ph78s205f09d6ehkw33vdj12ss8j0tsn) hit the same refusal; measured cap 100 / peak 79 clients on gate run 42694223937
-  - commit f76adfe10 (branch fix/gate-vm-postgres-max-connections)
+  - commit f76adfe10 (branch fix/gate-vm-postgres-max-connections); the identical setup and regression bytes merged first via PR #1955 (423c51b8c)
+  - PR #1956 unquarantines the Lantern small-pool case; its backend-coverage-blackbox gate on blacksmith-16vcpu passed 261/261 with the case blocking
 repro: on a host Postgres set to max_connections=100, hold 90 idle client connections (the concurrent shard pools; the gate sweep measured a 94-client peak) and run `cd back-end && bash scripts/run-blackbox-tests.sh integrations` → 49 FAIL with "sorry, too many clients already", Lantern included, exit 1; the identical command at 300 → 1 passed, exit 0 (peak 120 clients); regression `python3 scripts/tests/deploy-test-github.test.py GateSetupPostgres` (deploy structural gate deploy-test-github)
 status: fixed
 ---
