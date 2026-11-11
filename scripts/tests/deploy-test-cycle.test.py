@@ -1792,6 +1792,31 @@ class Cycle(unittest.TestCase):
         self.workers.cleanup()
         self.temp.cleanup()
 
+    def test_refresh_retains_explicit_deploy_exclusion_without_pass_credit(self):
+        gate = self.plan['gates'][1]
+        gate.update(category='smoke', native_cloud=True, checks=['mass', 'peer'])
+        self.state = c.initialize(self.plan, self.root)
+        self.state.update(phase='needs-focused-plan', repair_gates=['api'])
+        old = copy.deepcopy(self.plan)
+        catalog = self.root / 'agents/benchmarks/tasks.json'
+        catalog.parent.mkdir(parents=True)
+        catalog.write_text(json.dumps([{'name':'mass', 'deploy_quarantine':'User requested exclusion'}, {'name':'peer'}]))
+        new = copy.deepcopy(old)
+        new['source'] = c.source(self.root)
+        new['gates'][1]['checks'] = ['peer']
+        history = copy.deepcopy(self.state['attempts'])
+        c.refresh(self.state, old, new, self.root)
+        self.assertEqual(history, self.state['attempts'])
+        self.assertFalse(self.state['ready'])
+        self.assertEqual({}, self.state['carried_passes'])
+        omission, = self.state['deploy_selection_omissions']
+        self.assertEqual({'api/mass':'User requested exclusion'}, omission['checks'])
+        self.assertIs(omission['executed'], False)
+        self.assertIs(omission['credit_granted'], False)
+        self.assertEqual(old['source'], omission['from_source'])
+        self.assertEqual(new['source'], omission['source'])
+        self.assertEqual(['peer'], self.state['plan']['gates'][1]['checks'])
+
     def local_rebind_fixture(self):
         import contextlib, io
         old = copy.deepcopy(self.plan)

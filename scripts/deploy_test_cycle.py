@@ -2389,12 +2389,17 @@ def _refresh(state: dict, old: dict, new: dict, root: Path, *, election_proof=No
     removed = {election['gate']} if election else set()
     if not old_gates.keys() <= new_gates.keys() | removed:
         raise ValueError("repair cannot silently remove originally selected gates")
+    selection_omissions = {}
     for name, gate in old_gates.items():
         if name in removed:
             continue
         preserve_contract(gate, new_gates[name])
         if not set(gate["checks"]) <= set(new_gates[name]["checks"]):
-            raise ValueError("repair cannot silently remove originally selected checks")
+            omissions = quarantine.deploy_selection_omissions(root, gate, new_gates[name])
+            pending_checks = {f['check'] for f in state['failures'] if f['id'] in state.get('pending', [])}
+            if any(name + '/' + check in pending_checks for check in omissions):
+                raise ValueError('adjudicate the original failure before excluding its future execution')
+            selection_omissions.update({name + '/' + check: reason for check, reason in omissions.items()})
     fingerprints = input_fingerprints(new, root)
     if (new["source"] == state["source"] and digest(new) == state["plan_digest"]
             and fingerprints == state["input_fingerprints"]):
@@ -2483,6 +2488,11 @@ def _refresh(state: dict, old: dict, new: dict, root: Path, *, election_proof=No
                             if name not in carried and name not in completed_repairs]
     from deploy_test_election import apply as apply_election
     apply_election(state, election)
+    if selection_omissions:
+        state.setdefault('deploy_selection_omissions', []).append({
+            'from_source': copy.deepcopy(state['source']), 'source': copy.deepcopy(new['source']),
+            'checks': selection_omissions, 'executed': False, 'credit_granted': False,
+        })
     if interrupted_refresh:
         state.pop('resume_phase')
     state.update(plan=new, source=new["source"], plan_digest=digest(new), ready=False, focused={},
