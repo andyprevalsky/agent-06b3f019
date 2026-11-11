@@ -1,6 +1,6 @@
 #!/usr/bin/env tsx
 /** Real shared pipeline + DB + HTTP routes; only Fireflies' remote fetch is faked. */
-import { randomUUID, generateKeyPairSync } from 'node:crypto';
+import { randomUUID, generateKeyPairSync, createHash } from 'node:crypto';
 import { prisma } from '../../providers/database';
 import {
   startFirefliesSignIn,
@@ -15,6 +15,7 @@ import {
   completeGranolaSignIn,
   syncGranolaUser,
   getGranolaStatus,
+  disconnectGranola,
 } from '../../services/integrations/granolaSync';
 import {
   FakeGranola,
@@ -72,6 +73,168 @@ const rows = (userId: string) =>
   });
 const tests: TestCase[] = [];
 const test = (name: string, fn: TestCase['fn']) => tests.push({ name, fn });
+
+// Pause callback A at the remote profile boundary, after it consumed its state.
+// B then mutates the persisted sign-in lifecycle before A can publish a grant.
+const oauthProviders = [
+  {
+    id: 'fireflies',
+    start: startFirefliesSignIn,
+    complete: completeFirefliesSignIn,
+    disconnect: disconnectFireflies,
+    status: getFirefliesStatus,
+    now: NOW,
+    redirect: REDIRECT,
+    fake: () => new FakeFireflies(),
+    profileTool: 'fireflies_get_user',
+  },
+  {
+    id: 'granola',
+    start: startGranolaSignIn,
+    complete: completeGranolaSignIn,
+    disconnect: disconnectGranola,
+    status: getGranolaStatus,
+    now: T0,
+    redirect: GRANOLA_REDIRECT,
+    fake: () => new FakeGranola(),
+    profileTool: 'get_account_info',
+  },
+];
+for (const provider of oauthProviders) {
+  for (const interleaving of ['pending', 'completed', 'disconnected', 'reconnected'] as const) {
+    test(`${provider.id} callback generation fences ${interleaving} sign-in`, async () =>
+      withUser(async (id) => {
+        const begin = async (fake: ReturnType<typeof provider.fake>) => {
+          const result = await provider.start(id, {
+            redirectUri: provider.redirect,
+            fetcher: fake.fetcher,
+            now: provider.now,
+          });
+          return new URL(result.authorizeUrl).searchParams.get('state') ?? '';
+        };
+        const complete = (state: string, fake: ReturnType<typeof provider.fake>) =>
+          provider.complete(id, state, 'good-code', { fetcher: fake.fetcher, now: provider.now });
+        const initial = provider.fake();
+        initial.email = 'initial@example.com';
+        await complete(await begin(initial), initial);
+        await prisma.userDataDocument.create({
+          data: {
+            userId: id,
+            source: `${provider.id}_note`,
+            externalId: 'old-account',
+            title: 'Old',
+            content: 'Original account document',
+            contentHash: createHash('sha256').update('Original account document').digest('hex'),
+          },
+        });
+        const a = provider.fake();
+        a.email = 'stale-a@example.com';
+        const stateA = await begin(a);
+        let entered!: () => void;
+        let release!: () => void;
+        const blocked = new Promise<void>((resolve) => {
+          entered = resolve;
+        });
+        const resumed = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        a.beforeTool = async (name) => {
+          if (name === provider.profileTool) {
+            entered();
+            await resumed;
+          }
+        };
+        const callbackA = complete(stateA, a).then(
+          () => null,
+          (error: unknown) => (error instanceof FirefliesSignInError ? error.code : String(error))
+        );
+        await blocked;
+        try {
+          // Duplicate callbacks must be rejected while the first exchange is in flight.
+          const duplicate = await complete(stateA, a).then(
+            () => null,
+            (error: unknown) => (error instanceof FirefliesSignInError ? error.code : String(error))
+          );
+          equal(duplicate, 'STATE_INVALID', 'in-flight duplicate callback rejected');
+          if (interleaving === 'disconnected' || interleaving === 'reconnected')
+            await provider.disconnect(id);
+          const b = provider.fake();
+          b.email = 'new-b@example.com';
+          const stateB = interleaving === 'disconnected' ? null : await begin(b);
+          if (stateB !== null && interleaving !== 'pending') await complete(stateB, b);
+          const before = await prisma.userDataProviderSyncState.findUnique({
+            where: { userId_source: { userId: id, source: provider.id } },
+          });
+          release();
+          const outcome = await callbackA;
+          const after = await prisma.userDataProviderSyncState.findUnique({
+            where: { userId_source: { userId: id, source: provider.id } },
+          });
+          if (interleaving === 'pending') {
+            equal(
+              (after?.config as { pending?: { state?: string } })?.pending?.state,
+              stateB,
+              'newer pending state survives callback A'
+            );
+          }
+          equal(outcome, 'STATE_INVALID', 'superseded callback rejected');
+          equal(
+            JSON.stringify(after?.config),
+            JSON.stringify(before?.config),
+            'newer pending/grant remains byte-for-byte intact'
+          );
+          if (interleaving === 'pending' && stateB !== null) {
+            equal(
+              (await provider.status(id)).accountEmail,
+              'initial@example.com',
+              'pending reconnect keeps current grant'
+            );
+            equal(
+              await prisma.userDataDocument.count({
+                where: { userId: id, source: `${provider.id}_note` },
+              }),
+              1,
+              'stale callback cannot purge current documents'
+            );
+            await complete(stateB, b);
+          }
+          if (interleaving === 'disconnected') {
+            equal((await provider.status(id)).connected, false, 'disconnect never resurrected');
+            equal(
+              await prisma.integration.count({ where: { userId: id, name: provider.id } }),
+              0,
+              'no integration resurrected'
+            );
+          } else {
+            equal(
+              (await provider.status(id)).accountEmail,
+              'new-b@example.com',
+              'newer callback can connect'
+            );
+            equal(
+              await prisma.userDataDocument.count({
+                where: { userId: id, source: `${provider.id}_note` },
+              }),
+              0,
+              'account switch removes old account documents'
+            );
+            equal(
+              await complete(stateA, a).then(
+                () => null,
+                (error: unknown) =>
+                  error instanceof FirefliesSignInError ? error.code : String(error)
+              ),
+              'STATE_INVALID',
+              'stale callback cannot replay'
+            );
+          }
+        } finally {
+          release();
+          await callbackA;
+        }
+      }));
+  }
+}
 
 test('OAuth stores encrypted grant and rejects foreign/replayed/expired state', async () =>
   withUser(async (id, fake) => {

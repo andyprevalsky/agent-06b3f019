@@ -27,6 +27,7 @@
  * upserts, so a repeated window is harmless.
  */
 
+import { randomUUID } from 'node:crypto';
 import { Prisma } from '@prisma/client';
 import { prisma, runTransactionWithRetry } from '../../providers/database';
 import { createLogger } from '../../providers/logger';
@@ -63,6 +64,8 @@ interface PendingConfig {
 }
 
 interface MeetingConfig {
+  /** Survives consuming pending until this callback commits or a newer start supersedes it. */
+  signInGeneration?: string;
   encryptedTokens?: string;
   accountEmail?: string | null;
   pending?: PendingConfig;
@@ -126,14 +129,6 @@ export function createMeetingSync<S extends MeetingSession>(provider: MeetingPro
 
   const sealTokens = (tokens: MeetingTokens) => encryptPlaidAccessToken(JSON.stringify(tokens));
 
-  async function loadConfig(userId: string): Promise<MeetingConfig | null> {
-    const row = await prisma.userDataProviderSyncState.findUnique({
-      where: where(userId),
-      select: { config: true },
-    });
-    return row === null ? null : ((row.config ?? {}) as MeetingConfig);
-  }
-
   async function setIntegrationStatus(
     userId: string,
     status: IntegrationStatus,
@@ -179,27 +174,17 @@ export function createMeetingSync<S extends MeetingSession>(provider: MeetingPro
       create: { userId, isAnonymous: true },
       update: {},
     });
-    const existing = await loadConfig(userId);
-    if (existing === null) {
-      await prisma.userDataProviderSyncState.create({
-        data: {
-          userId,
-          source: PROVIDER,
-          status: 'PENDING',
-          config: { pending: pendingConfig } as unknown as Prisma.InputJsonValue,
-          cursor: {},
-        },
-      });
-    } else {
-      // A reconnect keeps the current grant until the new sign-in completes; only
-      // the `pending` key is written so a concurrent token refresh is not undone.
-      await prisma.$executeRaw`
-      UPDATE "UserDataProviderSyncState"
-      SET config = jsonb_set(COALESCE(config, '{}'::jsonb), '{pending}', ${JSON.stringify(pendingConfig)}::jsonb),
+    const patch = JSON.stringify({ pending: pendingConfig, signInGeneration: pending.state });
+    // One atomic upsert orders concurrent starts and disconnects; it merges only
+    // the sign-in fields so refreshing the existing grant remains independent.
+    await prisma.$executeRaw`
+      INSERT INTO "UserDataProviderSyncState"
+        (id, "userId", source, status, config, cursor, "createdAt", "updatedAt")
+      VALUES (${randomUUID()}, ${userId}, ${PROVIDER}, 'PENDING', ${patch}::jsonb, '{}'::jsonb, now(), now())
+      ON CONFLICT ("userId", source) DO UPDATE
+      SET config = COALESCE("UserDataProviderSyncState".config, '{}'::jsonb) || EXCLUDED.config,
           "updatedAt" = now()
-      WHERE "userId" = ${userId} AND source = ${PROVIDER}
     `;
-    }
     return { authorizeUrl: pending.authorizeUrl };
   }
 
@@ -207,10 +192,13 @@ export function createMeetingSync<S extends MeetingSession>(provider: MeetingPro
    * Atomically take this user's pending sign-in when its state matches, so a
    * duplicate callback cannot use (or later clobber) a sign-in twice.
    */
-  async function consumePending(userId: string, state: string): Promise<PendingConfig | null> {
-    const rows = await prisma.$queryRaw<Array<{ pending: PendingConfig | null }>>`
+  async function consumePending(
+    userId: string,
+    state: string
+  ): Promise<{ pending: PendingConfig; rowId: string } | null> {
+    const rows = await prisma.$queryRaw<Array<{ pending: PendingConfig; rowId: string }>>`
     UPDATE "UserDataProviderSyncState" t
-    SET config = t.config - 'pending', "updatedAt" = now()
+    SET config = jsonb_set(t.config - 'pending', '{signInGeneration}', to_jsonb(${state}::text)), "updatedAt" = now()
     FROM (
       SELECT id, config->'pending' AS pending FROM "UserDataProviderSyncState"
       WHERE "userId" = ${userId} AND source = ${PROVIDER}
@@ -218,9 +206,9 @@ export function createMeetingSync<S extends MeetingSession>(provider: MeetingPro
       FOR UPDATE
     ) old
     WHERE t.id = old.id
-    RETURNING old.pending AS pending
+    RETURNING old.pending AS pending, t.id AS "rowId"
   `;
-    return rows[0]?.pending ?? null;
+    return rows[0] ?? null;
   }
 
   /**
@@ -242,10 +230,11 @@ export function createMeetingSync<S extends MeetingSession>(provider: MeetingPro
         `This ${label} sign-in belongs to another user`
       );
     }
-    const pending = await consumePending(userId, state);
-    if (pending === null) {
+    const consumed = await consumePending(userId, state);
+    if (consumed === null) {
       throw new MeetingSignInError('STATE_INVALID', `Unknown or already used ${label} sign-in`);
     }
+    const { pending, rowId } = consumed;
     const now = opts.now ?? new Date();
     if (pending.expiresAt < now.getTime()) {
       throw new MeetingSignInError('STATE_EXPIRED', `${label} sign-in expired; try again`);
@@ -266,37 +255,42 @@ export function createMeetingSync<S extends MeetingSession>(provider: MeetingPro
         error instanceof Error ? error.message : String(error)
       );
     }
-    const config = (await loadConfig(userId)) ?? {};
-    // A different provider account starts clean: the old account's meetings go.
-    // An unknown identity on either side may be a different account.
-    const previousEmail = config.accountEmail ?? null;
-    const hadGrant = config.encryptedTokens !== undefined;
-    const switched =
-      hadGrant &&
-      (previousEmail === null || accountEmail === null || previousEmail !== accountEmail);
-    // State row first, as in every sync transaction (fenced), so the two never
-    // lock in opposite orders.
-    await prisma.$transaction([
-      prisma.userDataProviderSyncState.update({
+    const encryptedTokens = sealTokens(tokens);
+    const switched = await runTransactionWithRetry(async (tx) => {
+      // Same state-row-first lock order as sync/disconnect. The row identity
+      // fences delete/recreate; the persisted generation fences newer starts,
+      // even after those callbacks have consumed their own pending sign-in.
+      const [current] = await tx.$queryRaw<Array<{ id: string; config: MeetingConfig | null }>>`
+        SELECT id, config FROM "UserDataProviderSyncState"
+        WHERE "userId" = ${userId} AND source = ${PROVIDER}
+        FOR UPDATE
+      `;
+      if (current?.id !== rowId || current.config?.signInGeneration !== state) {
+        throw new MeetingSignInError(
+          'STATE_INVALID',
+          `${label} sign-in was superseded or disconnected`
+        );
+      }
+      const config = current.config;
+      const previousEmail = config.accountEmail ?? null;
+      const hadGrant = config.encryptedTokens !== undefined;
+      const switched =
+        hadGrant &&
+        (previousEmail === null || accountEmail === null || previousEmail !== accountEmail);
+      await tx.userDataProviderSyncState.update({
         where: where(userId),
         data: {
           status: 'CONNECTED',
-          config: { encryptedTokens: sealTokens(tokens), accountEmail } as Prisma.InputJsonValue,
+          config: { encryptedTokens, accountEmail } as Prisma.InputJsonValue,
           ...(switched || !hadGrant ? { cursor: {} } : {}),
           nextSyncAt: now,
           lastError: null,
-          // Fences out any run still holding the previous claim (see claimToken).
           lastStartedAt: null,
         },
-      }),
-      ...(switched
-        ? [
-            prisma.userDataDocument.deleteMany({
-              where: { userId, source: { in: [...SOURCES] } },
-            }),
-          ]
-        : []),
-      prisma.integration.upsert({
+      });
+      if (switched)
+        await tx.userDataDocument.deleteMany({ where: { userId, source: { in: [...SOURCES] } } });
+      await tx.integration.upsert({
         where: { userId_name_accountId: { userId, name: PROVIDER, accountId: '' } },
         create: {
           userId,
@@ -312,8 +306,9 @@ export function createMeetingSync<S extends MeetingSession>(provider: MeetingPro
           failureReason: null,
           accountEmail,
         },
-      }),
-    ]);
+      });
+      return switched;
+    });
     log.info(`${label} connected`, { userId, switched });
     return { accountEmail };
   }
