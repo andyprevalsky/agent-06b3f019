@@ -85,7 +85,9 @@ explanations, and use type-exact serialized comparisons for JSON contracts.
 On published `94f96dd0d3c22905edba49726308699ce9ccba95`, normal pure
 reconciliation refused `native cleanup: successor contract` before any new
 launch. The complete prior `3b48` smoke successor retained its actual native
-exit 1, 14 PASS cases, one eligible SKIP and verified cleanup. Its original gate
+exit 1, 14 PASS cases, one FAIL and verified cleanup. The underlying task
+reported SKIPPED under the exact release-stall policy; that separate disposition
+does not change the canonical gate receipt. Its original gate
 digest `17cf4add7d3a87d6d588637d954e60c55287d4fc85563e233b3c50176bd03a5c`
 differed from the refreshed gate only in `selection_evidence`. The complete
 successor branch compared that historical digest directly with the current
