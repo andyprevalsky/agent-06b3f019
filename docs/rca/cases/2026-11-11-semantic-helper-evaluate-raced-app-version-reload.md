@@ -25,6 +25,9 @@ sources:
   - PR #1936
   - commit 0f8f6da4461195bcc720481ef52375fa511f7fb1
   - commit 7b946966b64ccab10aec7306da115b50e933af4c
+  - commit 1bdd93f9a0db300a1ead88685049c3edcec08281
+  - PR #1951
+  - commit 7fa4b30656b23fb53000864cbff0cd5c1fbd9f83
 repro: front-end/tests-e2e/app-version-reload-session.spec.ts
 status: fixed
 ---
@@ -84,6 +87,12 @@ failed 5/5 before the fix and passes 15/15 after. It runs in the deploy semantic
 stack lane (bundled `vite build` with a build id) and in the production gate. It
 skips on a dev server with no build id. 10k-agent behavior: test-only; no
 runtime path changes.
+
+Shipped in PR #1951 (merge 7fa4b3065). The production semantic gate on that
+merge (run 43099651687) passed 55 tests with 0 failures, including
+`mobile-layout.spec.ts:195` and the new regression. The first dispatch ended
+in `startup_failure` during GitHub's 2026-11-11 Actions incident and was rerun
+after recovery.
 
 Not fixed here (recorded for follow-up): the gate can still start before
 Vercel finishes promoting the merge. `scripts/deploy_prod.py` enables the
