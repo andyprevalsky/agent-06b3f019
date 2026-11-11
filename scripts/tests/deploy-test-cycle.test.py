@@ -7580,6 +7580,47 @@ class Cycle(unittest.TestCase):
         c.reconcile(state, original['token'], {**proof, 'validation_source':copy.deepcopy(state['source'])})
         self.assertEqual(same, state)
 
+    def test_clean_historical_successor_honors_catalog_deploy_omission_of_original_debt(self):
+        # Merged main: the successor ran without an original case that the catalog omits from
+        # all future deploys (user-directed). Only that authenticated omission may be absent.
+        state, paths, proof, gate, packet, original, folder, successor = self.historical_clean_successor_state()
+        omitted = 'task-14'
+        current = next(g for g in state['plan']['gates'] if g['name'] == gate['name'])
+        for g in (gate, current):
+            g['checks'] = [k for k in g['checks'] if k != omitted]; g['category'] = 'smoke'
+        request = c.read(folder / 'request.json'); request['checks'].remove(omitted)
+        c.write(folder / 'request.json', request)
+        successor['cases'].pop(omitted, None); successor.get('case_complete', {}).pop(omitted, None)
+        result = c.read(folder / 'result.json')
+        for key in ('cases', 'evidence', 'case_complete'):
+            if isinstance(result.get(key), dict): result[key].pop(omitted, None)
+        c.write(folder / 'result.json', result)
+        successor['native_cleanup_reference'].update(result_sha256=c.sha_file(folder / 'result.json'),
+                                                       native_evidence=result.get('evidence'))
+        historical = dict(copy.deepcopy(current), checks=[k for k in current['checks'] if k != 'new-current-browser-case'])
+        successor['execution_binding']['contract_digest'] = c.digest(historical)
+        c.write(folder / 'receipt.json', successor)
+        state['attempts'][-1]['results'][0] = successor
+        catalog = self.root / 'agents/benchmarks/tasks.json'; catalog.parent.mkdir(parents=True, exist_ok=True)
+        for rows, accepted in (([{'name': omitted, 'quarantine': {'error': 'still runs'}}], False),
+                               ([{'name': omitted, 'deploy_quarantine': 'User-directed exclusion'}], True)):
+            catalog.write_text(json.dumps(rows))
+            candidate = copy.deepcopy(state)
+            candidate['source'] = c.source(self.root); candidate['plan']['source'] = candidate['source']
+            candidate['plan_digest'] = c.digest(candidate['plan'])
+            renewed = {**proof, 'validation_source': copy.deepcopy(candidate['source'])}
+            before = copy.deepcopy(candidate)
+            with self.subTest(accepted=accepted):
+                if accepted:
+                    c.reconcile(candidate, original['token'], renewed)
+                    entry = candidate['reconciled_owners'][proof['receipt_sha256']]
+                    self.assertFalse(entry['credit_granted']); self.assertFalse(entry['cleanup_complete'])
+                    self.assertEqual(before['attempts'], candidate['attempts'])
+                else:
+                    with self.assertRaisesRegex(ValueError, 'preserve original debt'):
+                        c.reconcile(candidate, original['token'], renewed)
+                    self.assertEqual(before, candidate)
+
     def test_clean_historical_successor_refuses_noninventory_or_unbound_attempt_drift(self):
         state, paths, proof, gate, packet, original, folder, successor = self.historical_clean_successor_state()
         renewed = {**proof, 'validation_source':copy.deepcopy(state['source'])}

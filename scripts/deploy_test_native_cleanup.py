@@ -1852,7 +1852,17 @@ def clean_isolated_successor(state, prior, original, successor, renewal_witness=
              and len(set(checks)) == len(checks) and not set(checks) & set(skips),
              'successor historical inventory shape')
         historical_checks = set(checks) | set(skips)
-        need(set(original['cases']) <= historical_checks <= set(gate['checks']),
+        # Original debt stays mandatory unless the catalog omits a native smoke case from all
+        # future deploys; that omission grants no credit and never releases the debt itself.
+        omitted = set(original['cases']) - historical_checks
+        if omitted:
+            from deploy_test_quarantine import deploy_selection_omissions
+            try:
+                omitted -= set(deploy_selection_omissions(
+                    root, dict(gate, checks=[*gate['checks'], *sorted(omitted)]), gate))
+            except (ValueError, OSError):
+                pass
+        need(not omitted and historical_checks <= set(gate['checks']),
              'successor historical inventory must preserve original debt')
         admitted_gate = copy.deepcopy(gate)
         admitted_gate['checks'] = [name for name in gate['checks'] if name in historical_checks]
