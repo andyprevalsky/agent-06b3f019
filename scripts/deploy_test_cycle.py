@@ -496,10 +496,11 @@ def _execute(gate: dict, state: dict, directory: Path, root: Path, *, host_admis
     revalidate_standing_skips(state)
     if any(w.get('gate') == name and 'renewal' in w for w in state.get('resource_warnings', [])):
         reuse_qualifications(state, gate)
-    from deploy_test_historical_custody import guard, state_identity, known
+    from deploy_test_historical_custody import guard, state_identity, known, recovered_debt
     custody = {}
     if ('historical_custody_import' in state or known(state, root)
-            or state.get('historical_no_retry_custody') or state.get('historical_custody_history')):
+            or state.get('historical_no_retry_custody') or state.get('historical_custody_history')
+            or recovered_debt(state, gate)):
         legacy = reuse_qualifications(state, gate, include_custody=False, root=root)
         custody = guard(state, gate, root, legacy)
     token = uuid.uuid4().hex
@@ -2372,7 +2373,7 @@ def verify_saved(directory: Path, root: Path, expect_head: str | None = None) ->
 def main(argv: list[str] | None = None) -> int:
     """Dispatch a validated cycle transition and persist its evidence."""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=["init", "run", "resume", "status", "triage", "focus", "refresh", "rebind-local", "triage-quick", "triage-independent", "repair-independent", "rca", "verify", "report", "resolve", "complete", "reexecute", "reconcile", "standing-skip", "accept-omitted-custody", "prepare-agentcard-renewal", "renew-agentcard-warning", "prepare-historical-no-retry", "prepare-historical-import", "admit-historical-import", "import-historical-custody", "import-historical-no-retry"])
+    parser.add_argument("action", choices=["init", "run", "resume", "status", "triage", "focus", "refresh", "rebind-local", "triage-quick", "triage-independent", "repair-independent", "rca", "verify", "report", "resolve", "complete", "reexecute", "reconcile", "standing-skip", "accept-omitted-custody", "prepare-agentcard-renewal", "renew-agentcard-warning", "prepare-historical-no-retry", "prepare-historical-import", "admit-historical-import", "import-historical-custody", "import-historical-no-retry", "prepare-recovered-stall", "record-recovered-stall"])
     parser.add_argument('--donor-state', type=Path,
                         help='import-historical-no-retry: immutable independent donor cycle snapshot')
     parser.add_argument('--exclude-root', type=Path, action='append', default=[],
@@ -2502,6 +2503,19 @@ def main(argv: list[str] | None = None) -> int:
                         raise ValueError('--proof typed historical import preparation required')
                     admit_import(state, bounded_read(args.proof, 'historical import proof'), args.input, directory, args.root,
                                  donor_sha256=args.donor_sha256)
+            elif args.action in {'prepare-recovered-stall', 'record-recovered-stall'}:
+                from deploy_test_historical_custody import prepare_recovered, record_recovered
+                if plan != state['plan'] or args.input is None:
+                    raise ValueError('recovered stall requires exact current plan and --input native gzip')
+                if args.action == 'prepare-recovered-stall':
+                    print(json.dumps(prepare_recovered(state, args.input, args.root)))
+                    return 0
+                if args.proof is None:
+                    raise ValueError('recovered stall requires prepared --proof')
+                proof = bounded_read(args.proof, 'recovered native stall proof')
+                if proof['origin']['native_path'] != str(args.input):
+                    raise ValueError('recovered native path changed')
+                record_recovered(state, proof, args.root)
             elif args.action == 'prepare-historical-no-retry':
                 if args.input is None:
                     raise ValueError('--input previous plan required')
@@ -2590,6 +2604,14 @@ def main(argv: list[str] | None = None) -> int:
                     text += (f"\n{f['check']}: SKIPPED — historical no-retry custody; current-source behavior "
                              f"and financial state UNVERIFIED. Original native {f['worker_evidence']['native_task']['benchmark_status']}; "
                              f"historical unreleased {row['original_amount_cents']} cents. No execution or financial credit.\n")
+                for row in state.get('historical_native_stall_observations', []):
+                    origin = row['origin']
+                    text += (f"\n{row['check']}: historical native WARNING / NO_RETRY_CUSTODY; recorded "
+                             f"{row['recorded_at']}. Original {origin['native_benchmark_status']} at "
+                             f"{origin['native_timestamp']} source {origin['authority']['source']} "
+                             f"run {origin['native_run_id']}. Historical unreleased "
+                             f"{origin['original_amount_cents']} cents sandbox; current financial state UNKNOWN, "
+                             "current execution/assertions/cleanup UNVERIFIED. No PASS, release, refund or stability credit.\n")
                 warnings = state.get("resource_warnings", [])
                 if warnings:
                     text += "\nRESOURCE WARNINGS (third-party resource skipped with warning; no pass credit)\n"

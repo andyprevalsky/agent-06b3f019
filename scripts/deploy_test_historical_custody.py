@@ -249,6 +249,257 @@ def historical(state, failure, root):
             'authority': authority, 'native_closure': native_closure(path, root)}
 
 
+
+# This authority is the tracked PR1699 native observation, not an imported donor ledger.
+RECOVERED_KIND = 'historical-agentcard-native-stall-observation-v1'
+RECOVERED_KEY = 'historical_native_stall_observations'
+RECOVERED_AUTHORITY = {
+    'manifest': 'docs/handoffs/pr-1699-closeout/closeout-manifest.json',
+    'manifest_sha256': '67ad0d01a3950f796a0ad301a2a0eccd53293ac9244460b871ca6e32a8ffff2b',
+    'member': 'agentcard-release-stall/run.json.gz',
+    'gzip_sha256': 'f5cad35dd378874eefd3657cc09648eba226c66e70a9020f3c814acb94a839d5',
+    'raw_sha256': '7007f539aae75b4ccd995264ffc746e2ff0729ad5ddb67ab6747e777d9e27b7d',
+    'source': '9fa86f9ef974249609d6faec41f34cd93b50d098',
+    'task': 'agent-payment-abandonment',
+    'gate': 'smoke',
+}
+RECOVERED_ADDITION = {'agentCardProviderCardCount': 1, 'agentCardProviderTransferCount': 1,
+                      'agentCardProviderUnlinkedTransferCount': 0}
+RECOVERED_CREDIT = dict.fromkeys(('test_execution', 'assertions', 'financial_release',
+                                 'financial_refund', 'cleanup', 'stability'), False)
+
+
+def recovered_contract(root):
+    """One reviewed assertion-only migration; the legacy exact-equality path stays strict."""
+    import ast
+    import deploy_test_cycle as c
+    authority = RECOVERED_AUTHORITY
+    def original(path):
+        return subprocess.run(['git', 'show', authority['source'] + ':' + path], cwd=root,
+                              check=True, capture_output=True).stdout
+    def task(raw):
+        rows = [t for t in json.loads(raw) if t.get('name') == authority['task']]
+        need(len(rows) == 1, 'missing/ambiguous recovered task')
+        return rows[0]
+    old = task(original('agents/benchmarks/tasks.json'))
+    current = task((root / 'agents/benchmarks/tasks.json').read_bytes())
+    expected = copy.deepcopy(old)
+    need('integrity' not in expected['expected_payment_lifecycle'], 'unexpected original assertions')
+    expected['expected_payment_lifecycle']['integrity'] = RECOVERED_ADDITION
+    need(c.digest(current) == c.digest(expected) and old.get('production_only', False) is False
+         and 'agentcard-lifecycle-sandbox' in old.get('tags', []), 'recovered task migration differs')
+    def closure(raw):
+        nodes = {}
+        for node in ast.parse(raw).body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                nodes[node.name] = node
+            elif isinstance(node, (ast.Assign, ast.AnnAssign)):
+                for target in getattr(node, 'targets', [getattr(node, 'target', None)]):
+                    if isinstance(target, ast.Name):
+                        nodes[target.id] = node
+        pending = {'_agentcard_release_stalled', '_agentcard_release_skip_lifecycle',
+                   '_agentcard_release_skip_task', '_agentcard_release_prior_failure_is_settlement_only',
+                   '_validate_payment_lifecycle'}
+        need(pending <= nodes.keys(), 'missing recovered exception predicate')
+        found = {}
+        while pending:
+            name = pending.pop()
+            if name in found or name not in nodes:
+                continue
+            node = nodes[name]
+            found[name] = ast.dump(node, include_attributes=False)
+            pending.update(n.id for n in ast.walk(node) if isinstance(n, ast.Name)
+                           and isinstance(n.ctx, ast.Load) and n.id not in found)
+        return found
+    path = 'agents/benchmarks/run_benchmark.py'
+    before = closure(original(path))
+    need(before == closure((root / path).read_bytes()), 'recovered exception predicate changed')
+    return old, {'old_task_sha256': c.digest(old), 'current_task_sha256': c.digest(current),
+                 'predicate_sha256': c.digest(before), 'added_success_assertions': RECOVERED_ADDITION}
+
+
+def recovered_native(path, root):
+    """Authenticate old native claims without fabricating an adapter or fleet audit."""
+    import gzip
+    import hashlib
+    import math
+    import deploy_test_cycle as c
+    authority, path = RECOVERED_AUTHORITY, Path(path)
+    manifest = root / authority['manifest']
+    need(c.sha_file(manifest) == authority['manifest_sha256'], 'recovered authority changed')
+    need(c.read(manifest)['durable_evidence']['files'].get(authority['member']) == authority['gzip_sha256'],
+         'recovered member is not authenticated')
+    need(path.is_absolute() and path.resolve() == path and path.is_file() and not path.is_symlink()
+         and path.stat().st_size <= 4 * 1024 * 1024 and c.sha_file(path) == authority['gzip_sha256'],
+         'recovered native gzip changed')
+    with gzip.open(path, 'rb') as stream:
+        raw = stream.read(64 * 1024 * 1024 + 1)
+    need(len(raw) <= 64 * 1024 * 1024 and hashlib.sha256(raw).hexdigest() == authority['raw_sha256'],
+         'recovered native bytes changed')
+    doc = json.loads(raw)
+    rows = [t for t in doc['tasks'] if t.get('name') == authority['task']]
+    need(len(rows) == 1, 'missing/ambiguous recovered native row')
+    row = rows[0]
+    need(row.get('execution_provenance', {}).get('base_sha') == authority['source']
+         and doc.get('execution_provenance', {}).get('base_sha') == authority['source']
+         and row.get('status') == row.get('benchmark_status') == 'SKIPPED' and row.get('passed') is False
+         and isinstance(row.get('failure_reason'), str)
+         and row['failure_reason'].startswith(c.AGENTCARD_RELEASE_STALL_REASON)
+         and row.get('cleanup_failure', 'missing') is None and row.get('context_violations') == [],
+         'recovered native is not the standing warning')
+    old, contract = recovered_contract(root)
+    snap = row['logs']['agentcard_release_stall_lifecycle']
+    cleanup = row['logs']['cloud_cleanup_evidence']
+    final = cleanup['final']
+    need(isinstance(row.get('agent_id'), str) and bool(row['agent_id'])
+         and cleanup.get('errors') == [] and cleanup.get('root_agent_id') == row['agent_id'] == snap['agentId']
+         and snap == cleanup['agentcard_release_stall_lifecycles'].get(row['agent_id'])
+         and final.get('root_deleted') is True and final.get('unsealed_tree_agent_ids') == []
+         and final.get('tree_agent_ids') == [row['agent_id']], 'recovered native root/cleanup mismatch')
+    for session in final['browser_sessions']:
+        need(all(isinstance(session.get(k), str) and session[k] for k in ('provider', 'session_id')),
+             'recovered browser identity missing')
+        need(any(r.get('provider') == session.get('provider') and r.get('session_id') == session.get('session_id')
+                 and type(r.get('status')) is int and r['status'] in (200, 204, 404, 410)
+                 for r in cleanup.get('provider_receipts', [])), 'recovered browser closure unknown')
+    card, transfer, purchase, funding, hold = (snap[k] for k in
+                                              ('agentCard', 'orgTransfer', 'purchase', 'walletFunding', 'stripeHold'))
+    amount = transfer['amountCents']
+    need(all(isinstance(v, str) and v for v in (card.get('id'), transfer.get('id'), purchase.get('id'), hold.get('id')))
+         and type(amount) is int and amount == 4396
+         and type(transfer['transferredCents']) is int and transfer['transferredCents'] == amount
+         and type(transfer['releasedCents']) is int and transfer['releasedCents'] == 0
+         and transfer['livemode'] is False and transfer['status'] == 'consumed'
+         and card['status'] == 'CLOSED' and type(card['balanceCents']) is int and card['balanceCents'] == 0
+         and ('livemode' not in card or card['livemode'] is False)
+         and purchase['status'] == 'HELD' and funding['status'] == 'RECLAIMING'
+         and transfer['cardId'] == purchase['cardId'] == card['id']
+         and funding['providerTransferId'] == transfer['id']
+         and purchase['stripePaymentIntentId'] == hold['id']
+         and hold['livemode'] is False and snap['stripeRefund'] is None, 'recovered exact stall mismatch')
+    expected = copy.deepcopy(old['expected_payment_lifecycle'])
+    expected.pop('stripeRefund', None)
+    for section, fields in {'purchase': ('status',), 'walletFunding': ('status',),
+                            'orgTransfer': ('status', 'transferredCents', 'releasedCents')}.items():
+        for field in fields:
+            expected.get(section, {}).pop(field, None)
+    def matches(expected, actual):
+        if isinstance(expected, dict):
+            return isinstance(actual, dict) and all(k in actual and matches(v, actual[k]) for k, v in expected.items())
+        return type(expected) is type(actual) and expected == actual
+    need(matches(expected, snap), 'recovered original independent assertions failed')
+    purchases = [p for p in final['purchase_cleanup'] if p.get('purchase_id') == purchase['id']]
+    need(len(purchases) == 1 and matches({'agent_id': row['agent_id'], 'card_id': card['id'],
+         'provider_transfer_id': transfer['id'], 'stripe_payment_intent_id': hold['id'], 'total_cents': amount,
+         'status': 'HELD', 'funding_status': 'RECLAIMING'}, purchases[0]), 'recovered final purchase mismatch')
+    need(isinstance(doc.get('run_id'), str) and bool(doc['run_id'])
+         and isinstance(doc.get('timestamp'), str) and bool(doc['timestamp'])
+         and type(row.get('duration_seconds')) in (int, float)
+         and math.isfinite(row['duration_seconds']) and row['duration_seconds'] > 0, 'recovered native clock missing')
+    return {'native_path': str(path), 'authority': copy.deepcopy(authority), 'contract': contract,
+            'native_run_id': doc['run_id'], 'native_timestamp': doc['timestamp'],
+            'native_duration_seconds': row['duration_seconds'], 'root_id': row['agent_id'],
+            'card_id': card['id'], 'transfer_id': transfer['id'], 'purchase_id': purchase['id'],
+            'stripe_payment_intent_id': hold['id'], 'original_amount_cents': amount,
+            'native_status': row['status'], 'native_benchmark_status': row['benchmark_status'], 'native_passed': False,
+            'snapshot_sha256': c.digest(snap), 'original_integrity': copy.deepcopy(snap.get('integrity'))}
+
+
+def prepare_recovered(state, path, root):
+    import deploy_test_cycle as c
+    need(not c.CANCEL.is_set() and state.get('phase') in {'quick', 'initial', 'final', 'ready',
+         'needs-focused-plan', 'failed-gates', 'triage', 'stale'}
+         and not any(state.get(k) for k in ('running', 'live_failures', 'resume_phase', 'pending'))
+         and not c.retained_owners(state, [g['name'] for g in state['plan']['gates']]), 'recovered observation requires quiescence')
+    current = binding(state['plan'], root)
+    need(all(state.get(k) == current[k] for k in current), 'recovered observation binding changed')
+    origin = recovered_native(path, root)
+    gates = [g for g in state['plan']['gates'] if RECOVERED_AUTHORITY['task'] in g['checks']]
+    need(len(gates) == 1 and gates[0]['name'] == RECOVERED_AUTHORITY['gate']
+         and gates[0].get('case_protocol') is True, 'recovered check absent/ambiguous')
+    gate = gates[0]
+    legacy = c.reuse_qualifications(state, gate, include_custody=False, root=root)
+    custody = qualifications(state, gate, root, current=current)
+    need(RECOVERED_AUTHORITY['task'] not in {**legacy, **custody}, 'recovered mixed warning/waiver/custody')
+    return {'kind': RECOVERED_KIND, 'before_state_sha256': c.digest(state), 'current_binding': current,
+            'gate': gate['name'], 'check': gate['name'] + '/' + RECOVERED_AUTHORITY['task'], 'origin': origin}
+
+
+def record_recovered(state, proof, root):
+    import math
+    import time
+    import deploy_test_cycle as c
+    expected = prepare_recovered(state, proof['origin']['native_path'], root)
+    need(proof == expected, 'recovered preparation changed')
+    records = state.get(RECOVERED_KEY, [])
+    need(isinstance(records, list), 'malformed recovered observations')
+    verify_recovered(state, root)
+    same = [r for r in records if r['current_binding'] == proof['current_binding']]
+    need(not same, 'recovered binding already recorded')
+    record = {k: copy.deepcopy(v) for k, v in proof.items() if k != 'before_state_sha256'}
+    record.update(recorded_at=time.time(), disposition=DISPOSITION, current_execution='UNVERIFIED',
+                  current_financial_state='UNVERIFIED', credit=copy.deepcopy(RECOVERED_CREDIT))
+    need(math.isfinite(record['recorded_at']), 'invalid recovered recording clock')
+    state[RECOVERED_KEY] = [*records, record]
+
+
+def verify_recovered(state, root):
+    import math
+    import deploy_test_cycle as c
+    records = state.get(RECOVERED_KEY, [])
+    need(isinstance(records, list), 'malformed recovered observations')
+    for r in records:
+        need(set(r) == {'kind', 'current_binding', 'gate', 'check', 'origin', 'recorded_at', 'disposition',
+                        'current_execution', 'current_financial_state', 'credit'}
+             and r['kind'] == RECOVERED_KIND and r['disposition'] == DISPOSITION
+             and r['gate'] == RECOVERED_AUTHORITY['gate']
+             and r['check'] == r['gate'] + '/' + RECOVERED_AUTHORITY['task']
+             and r['current_execution'] == r['current_financial_state'] == 'UNVERIFIED'
+             and set(r['credit']) == set(RECOVERED_CREDIT) and all(v is False for v in r['credit'].values())
+             and type(r['recorded_at']) in (int, float)
+             and math.isfinite(r['recorded_at']) and r['recorded_at'] > 0
+             and c.digest(r['origin']) == c.digest(recovered_native(r['origin']['native_path'], root)), 'recovered observation changed')
+    need(len({c.digest(r['current_binding']) for r in records}) == len(records), 'duplicate recovered observation')
+    return records
+
+
+def recovered_debt(state, gate=None):
+    """The compiled exact-stall identity survives removal of its mutable observation field."""
+    task, name = RECOVERED_AUTHORITY['task'], RECOVERED_AUTHORITY['gate']
+    return bool(state.get(RECOVERED_KEY)) or bool(
+        gate and gate.get('name') == name and task in gate.get('checks', [])) or any(
+        g.get('name') == name and task in g.get('checks', [])
+        for g in state.get('plan', {}).get('gates', [])) or any(
+        f.get('check') == name + '/' + task for f in state.get('failures', []))
+
+
+def recovered_projection(record, source):
+    """Existing cleanup transport shape; canonical provenance/credit remain in the ledger."""
+    import deploy_test_cycle as c
+    return {'kind': KIND, 'disposition': DISPOSITION, 'source': source,
+            'current_binding': copy.deepcopy(record['current_binding']), 'current_execution': 'UNVERIFIED',
+            'current_financial_state': 'UNVERIFIED',
+            'credit': {'test_execution': False, 'assertions': False, 'financial_release': False},
+            'recovered_origin_kind': RECOVERED_KIND, 'recovered_record_sha256': c.digest(record)}
+
+
+def recovered_qualifications(state, gate, root, current, existing):
+    records = verify_recovered(state, root)
+    if not recovered_debt(state, gate):
+        return {}
+    task, name = RECOVERED_AUTHORITY['task'], RECOVERED_AUTHORITY['gate']
+    selected = [g for g in state.get('plan', {}).get('gates', []) if g.get('name') == name]
+    need(len(selected) == 1 and task in selected[0]['checks'], 'known recovered check removed')
+    if gate['name'] != name:
+        return {}
+    active = [r for r in records if r['current_binding'] == current]
+    if not active and not records and task in existing:
+        return {}  # The original strict legacy qualification remains authoritative.
+    need(len(active) == 1, 'known recovered stall has no current qualification')
+    need(task not in existing, 'mixed recovered custody')
+    return {task: recovered_projection(active[0], state['source'])}
+
+
 def binding(plan, root):
     import deploy_test_cycle as c
     need(plan['source'] == c.source(root), 'current source not frozen')
@@ -557,14 +808,18 @@ def guard(state, gate, root, legacy=None, *, current=None):
         need(case in gate['checks'], 'protected task removed')
         need(case in custody or case in legacy, 'known stall has no current no-retry qualification: ' + case)
     need(not set(custody) & set(legacy), 'mixed waiver and custody')
-    return custody
+    recovered = recovered_qualifications(state, gate, root,
+        (binding(state['plan'], root) if current is None else current) if state.get(RECOVERED_KEY) else None,
+        {**legacy, **custody})
+    need(not (set(recovered) & (set(custody) | set(legacy))), 'mixed recovered custody')
+    return {**custody, **recovered}
 
 
 def verify(state, root):
     """Validate retained provenance and every protected obligation against the current plan."""
     import deploy_test_cycle as c
     verify_import_origin(state, root)
-    if not (known(state, root) or state.get('historical_no_retry_custody') or state.get('historical_custody_history')):
+    if not (known(state, root) or state.get('historical_no_retry_custody') or state.get('historical_custody_history') or recovered_debt(state)):
         return
     gates = {g['name']: g for g in state['plan']['gates']}
     for f in known(state, root).values():
@@ -618,7 +873,7 @@ def state_identity(state):
     import deploy_test_cycle as c
     return c.digest({k: state.get(k) for k in ('source', 'plan_digest', 'environment', 'input_fingerprints',
                     'historical_no_retry_custody', 'historical_custody_history',
-                    'historical_custody_import', 'historical_custody_transfers')})
+                    'historical_custody_import', 'historical_custody_transfers', RECOVERED_KEY)})
 
 
 def debt_key(failure):
@@ -640,6 +895,7 @@ def canonical_override(state, default, root):
              and c.digest(canonical['plan']) == canonical.get('plan_digest'), 'malformed canonical cycle')
         verify_import_origin(canonical, root)
         found = known(canonical, root)
+        recovered = verify_recovered(canonical, root)
         history = canonical.get('historical_custody_history', [])
         # Re-derive every saved record from its exact native bytes, as donor import does; a stale
         # source is fine, but changed credit, provenance or native history is not coverage.
@@ -659,6 +915,10 @@ def canonical_override(state, default, root):
     covered = known(state, root)
     refuse(all(key in covered and debt_key(covered[key]) == debt_key(f) for key, f in found.items()),
            'canonical-custody-uncovered')
+    covered_origins = {c.digest(r['origin']) for r in verify_recovered(state, root)}
+    if recovered_debt(canonical):
+        refuse(bool(covered_origins) or bool(covered), 'canonical-custody-uncovered')
+    refuse(all(c.digest(r['origin']) in covered_origins for r in recovered), 'canonical-custody-uncovered')
     identity = c.digest(canonical)
     derived = ((state.get('historical_custody_import') or {}).get('donor', {}).get('state_digest') == identity
                or any(t.get('donor_state_sha256') == identity for t in state.get('historical_custody_transfers', [])))
@@ -684,6 +944,8 @@ def admission(request, root):
         refuse(override or (locator is not None and Path(locator).resolve() == default.resolve()),
                'canonical-locator-missing')
     if locator is None:
+        need(RECOVERED_AUTHORITY['task'] not in [*request.get('checks', []), *request.get('skips', {})],
+             'known recovered stall requires custody ledger')
         return  # standalone disposable requests with no canonical cycle have no recorded obligations
     path = Path(locator)
     need(path.is_absolute() and path.resolve() == path and path.is_relative_to(root / '.context')
