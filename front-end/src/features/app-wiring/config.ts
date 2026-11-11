@@ -3,7 +3,7 @@ import type { RouteEntry } from './types';
 import { BACKEND_BASE_URL } from '@/lib/backendUrl';
 import Terminal from '@/features/terminal';
 import { AgentContext, type AgentContextValue } from '@/features/agent-context';
-import { GranolaCallback, PlaidOAuthRedirect } from '@/features/integrations';
+import { FirefliesCallback, GranolaCallback, PlaidOAuthRedirect } from '@/features/integrations';
 
 const Index = lazy(() => import('@/features/index'));
 const Privacy = lazy(() => import('@/features/privacy'));
@@ -64,6 +64,7 @@ export const ROUTE_TABLE: readonly RouteEntry[] = [
   { path: '/gate-playground', component: GatePlayground },
   { path: '/plaid-oauth-redirect', component: PlaidOAuthRedirect },
   { path: '/integrations/granola/callback', component: GranolaCallback },
+  { path: '/integrations/fireflies/callback', component: FirefliesCallback },
   ...DEV_ROUTES,
   { path: '*', component: NotFound, isCatchAll: true },
 ];

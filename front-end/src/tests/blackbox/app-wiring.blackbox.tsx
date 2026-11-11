@@ -83,6 +83,18 @@ describe('App wiring', () => {
   // -----------------------------------------------------------------------
 
   describe('route mapping', () => {
+    it.each([
+      { provider: 'granola', name: 'Granola' },
+      { provider: 'fireflies', name: 'Fireflies' },
+    ])('routes $name OAuth returns to the shared callback page', async ({ provider, name }) => {
+      await renderAppRoutes(`/integrations/${provider}/callback`);
+      expect(
+        await screen.findByRole('heading', { name: `Couldn't connect ${name}` }),
+      ).toBeInTheDocument();
+      expect(screen.getByText(`${name} did not return a sign-in code.`)).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Back to Rose' })).toBeInTheDocument();
+    });
+
     it('"/" renders the Terminal page', async () => {
       mockSession();
       await renderAppRoutes('/');

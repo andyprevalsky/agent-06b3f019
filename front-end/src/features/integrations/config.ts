@@ -1,3 +1,8 @@
+import {
+  meetingNotesCallbackPath,
+  meetingNotesReturnKey,
+  MEETING_NOTES_PUBLIC_ORIGIN,
+} from './meetingNotes';
 import type { BrowserType } from '@/features/integration-handlers-context';
 import { BACKEND_BASE_URL } from '@/lib/backendUrl';
 
@@ -47,9 +52,9 @@ export const PLAID_OAUTH_REDIRECT_PATH = '/plaid-oauth-redirect';
  * callback). The Mac app opens sign-in in the system browser, so it returns to
  * the public site.
  */
-export const GRANOLA_CALLBACK_PATH = '/integrations/granola/callback';
-export const GRANOLA_RETURN_KEY = 'rose.granola.returnPath';
-export const GRANOLA_PUBLIC_ORIGIN = 'https://www.roselabs.ai';
+export const GRANOLA_CALLBACK_PATH = meetingNotesCallbackPath('granola');
+export const GRANOLA_RETURN_KEY = meetingNotesReturnKey('granola');
+export const GRANOLA_PUBLIC_ORIGIN = MEETING_NOTES_PUBLIC_ORIGIN;
 
 /** The backend redirects here after Google's consent, reopening the desktop app. */
 export const DESKTOP_OAUTH_RETURN_URL = 'roselabs://oauth-complete';

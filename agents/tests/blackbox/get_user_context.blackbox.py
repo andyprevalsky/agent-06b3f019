@@ -633,10 +633,12 @@ def test_format_user_context_lists_sync_failed_data_integrations():
         frequent_contacts=[],
         integrations=[
             {"name": "granola", "status": "SYNC_FAILED", "emailCredentials": []},
+            {"name": "fireflies", "status": "CONNECTED", "emailCredentials": []},
             {"name": "plaid", "status": "EXPIRED", "emailCredentials": []},
         ],
     )
-    assert "- granola" in result
+    assert "- Meeting note taker (granola.ai)" in result
+    assert "- Meeting note taker (fireflies.ai)" in result
     assert "plaid" not in result
     assert "searchable through an explore agent's grep" in result
 
