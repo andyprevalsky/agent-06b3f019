@@ -1,27 +1,32 @@
 ---
 id: 2026-11-03-worker-fps-failure-with-overlapping-deploy-lanes
 date: 2026-11-03
-title: Shipped particles-worker example failed FPS budgets during overlapping deploy work with cause unproven
+title: rose-ui check judged a CPU-starved particles-worker as jank because its host-busy signal was the lagging 1-minute load average
 surface: harness
 component: backend-browser-fps-probe
-classification: unresolved
-problem_class: observability-trace-capture-gap
-first_bad_boundary: particles-worker frame-rate verdict was below unchanged FPS budgets; renderer scheduling cause is unproven
+classification: our-bug
+problem_class: logical-inconsistency-in-harness-contracts
+first_bad_boundary: back-end/src/assets/user-ui/bin/rose-ui.cjs evaluateBudgets decided whether the host could judge fps from os.loadavg()[0] sampled before each entry, which lags a host that just became busy, instead of contention measured during the fps windows
 symptoms:
   - "particles-worker: fps-p50 value 30, minimum 55"
-  - "fps-p5 value 20, minimum 30; worst frame 100 ms"
   - check --examples passes every shipped example
-  - rose-ui-cli-browser.test.ts failed in backend coverage
+  - "worker 1 p50 30 fps (min 55)"
+  - new-test-stability occurrence 4e2eb84f5fdf415d9da6ce9e54b04f8d
+  - "fps-inconclusive host oversubscribed"
 tags:
   - fps
   - chromium
   - contention
   - observability
+  - load-average
+  - new-test-stability
 sources:
   - PR #1664
   - commit 61c3f876ee37d6b52a29c6d870d9459a90a33307
-repro: back-end/src/tests/unit/rose-ui-cli-browser.test.ts
-status: open
+  - PR #1915
+  - commit 72186aa4dc98bb4c519b745f8482af747030936c
+repro: back-end/src/tests/unit/rose-ui-fps-host-contention.test.ts
+status: fixed
 ---
 
 ## Problem
@@ -72,7 +77,7 @@ parent turn was a provider failure, not a test outcome or task completion.
 
 ## Reusable lesson
 
-Preserve a failed frame-rate verdict and capture renderer-level causal evidence before attributing it to overlapping host work or changing performance acceptance.
+Judge whether a host can fairly measure a performance budget from contention measured during the measured window itself, never from a lagging average sampled before it.
 
 
 ## 2026-11-09 PR1708 FULL39 recurrence observation (OPEN)
@@ -171,3 +176,97 @@ The final registered regression runs actual measureWindow,workerCall,measureRout
 All12 existing budget tests passed. Native unchanged six-browser-test command exit0, counts{'tests': 6, 'pass': 6, 'fail': 0, 'cancelled': 0, 'skipped': 0}, duration114.452s. Deliberatelyjanky and blockingGPU controls remain in that unmodified suite. Native FPS windows and raw result are retained and give integration evidence only, not original causality or performance improvement. The original browser test, frameStats,evaluateBudgets,budgets,worker probe and traced-window function hashes are unchanged.
 
 Frozen patch SHA256:7264e06ccde59be3882e7206c8f69275cf469d35ea13f8e8e9434f4fe82c900d. Same independent reviewer ph7dy was asked for R1/R2 recheck only after this hash froze; the independent recheck is P2_CLEAR on this exact patch and its result remains separately recorded. Parent owns integration and all full source gates. No canonical environment,provider,DB,service,review ledger,worker orFreedom state changed. All own processes at handoff:[].
+
+
+## 2026-11-11 new-test-stability recurrence: causal proof and fix (FIXED)
+
+Occurrence 4e2eb84f5fdf415d9da6ce9e54b04f8d: the new-test-stability gate (GitHub Actions
+run 43005917253, source d986931533, 8 vCPU) reran this unit 5 times with every CPU held
+by load slots (concurrent units plus busy CPU workers). Run 2 failed the unchanged
+assertion: `particles-worker: [{"rule":"fps-p50","message":"worker 1 p50 30 fps (min 55)","value":30,"limit":55}]`.
+PR #1915 quarantined the test (`pending-handoff:4e2eb84f…`); this repair removes that marker.
+
+Causal proof (local, 8 CPUs, unquarantined test, harness `.context/rose-ui-fps-rca/repro.sh`
+swapping only the CLI file):
+
+- Unchanged CLI, 7 steady busy loops: 3/3 pass, worker 60/30 (load/core 0.57-0.98).
+- Unchanged CLI, 12 steady loops: worker 60/20; the existing guard fires (load/core
+  1.26-1.66), so the result is `fps-inconclusive`, not a failure.
+- Unchanged CLI, 16 busy loops started at the same moment as the check (1-minute load
+  average under 1.5 beforehand): 2/2 FAIL, exactly `worker 1 p50 30 fps (min 55)`, with
+  `host.loadPerCore` 0.97 and 0.99 and a 60 fps blank baseline. The only variable
+  changed between pass and fail is external CPU load, so starvation by other processes
+  causes the 30 fps worker.
+- Fixed CLI, same cold-burst protocol: 7/7 pass (2 on the first candidate, 5 on the
+  final CLI). The worker is still starved to 30/20 every time, with load/core 0.91-1.08.
+  Measured in-window shares are other=0.83-0.89 in every window, so the result is
+  `fps-inconclusive` and the test passes.
+- Fixed CLI, 7 steady loops: other=0.77-0.78, worker 60/30. The budget was met, so
+  fps is judged and passes with no warning.
+- Fixed CLI, quiet host, full unchanged browser file: 7/7 pass, including the
+  deliberately janky and blocking-GPU negative controls. particles-worker is judged
+  at 60/60 with other=0.025, and no example has an inconclusive warning.
+
+First bad boundary: `evaluateBudgets` decided whether the host was fit to judge fps
+from `os.loadavg()[0]`, sampled once before each entry. The 1-minute average is an
+exponentially weighted value that lags a host that has just become busy. The
+stability gate starts and stops units and load workers beside the check, so the
+host can be oversubscribed while that average still reads at most 1.25 per core.
+The blank-page baseline does not catch this either: it runs once and only on the
+main thread, while the starved workload is an OffscreenCanvas WebGL worker on
+software GL (SwiftShader). That worker needs CPU on several threads and processes
+for every frame.
+
+Deepest owned cause: the checker's contract is "fps is judged only when the host
+can render fairly", but its signal for that was measured at a different time from
+the fps windows. It used a smoothed history, not what happened during those windows.
+
+Fix (`back-end/src/assets/user-ui/bin/rose-ui.cjs`):
+
+- `hostCpuSample()` reads `/proc/stat` busy/total ticks. It also reads the CPU ticks
+  (utime+stime+cutime+cstime) of the check's whole process tree, found by a ppid scan,
+  so reaped children stay counted.
+- `hostCpuShare()` turns two samples into `{other, own, idle}`.
+- `measureRoute` records `normal.hostCpu` for every fps window.
+- `evaluateBudgets` adds a busy condition: every fps window the verdict could use had
+  other processes above 50% of the host's CPU. The 1.25 load-average rule and the
+  blank-page rule are unchanged.
+
+It fails closed in four cases, and fps is then judged:
+
+- no `/proc`;
+- this process missing from `/proc` (another PID namespace);
+- the own-tree ticks went backwards (a tree process reaped outside the tree);
+- any window without a share.
+
+Budgets (p50 55, p5 30), window count and other rules are unchanged. Long-task,
+hidden-loop, reduced-motion, layout and bytes rules are still judged on a busy host.
+
+Policy, stated plainly (adversarial review finding 1): the 50% rule does not detect
+starvation itself. A healthy page can still reach 60 fps with 7 of 8 CPUs busy on an
+uncontended VM. The rule declares a host with more than half its CPU taken by others
+unfit to judge fps, whatever the page manages. `performance.md` tells agents this, and
+the warning tells them to re-run on a quiet host. A quiet host is still judged.
+
+Known limits, left open:
+
+- The share is an average over each window, so a short burst that starts mid-window
+  can still lower p5.
+- Kernel work the page causes (softirq, reclaim) counts as other.
+- A cgroup CPU quota throttling the check itself is not detected.
+- PSI (`/proc/pressure/cpu`) is absent on the devbox kernel and was not used.
+
+Regressions:
+
+- `rose-ui-fps-host-contention.test.ts`: the verdict on contended, mixed, quiet and
+  missing windows; tree attribution against a fake /proc, including reaped children
+  and process names with spaces and parentheses; the fail-closed cases.
+- `rose-ui-fps-window-selection.test.ts`: the real `measureRoute`, with host counters
+  injected, records one share per window and turns two contended slow windows into
+  inconclusive. A quiet retry is still judged. Host IO is now pinned in this harness;
+  it previously read the real host.
+- The unquarantined `rose-ui-cli-browser.test.ts`.
+
+All three new unit tests failed against the unchanged CLI and pass with the fix.
+Golden reference and 10k-agent impact: none. This is a local developer CLI; it
+samples /proc twice per fps window and has no runtime or agent fan-out.

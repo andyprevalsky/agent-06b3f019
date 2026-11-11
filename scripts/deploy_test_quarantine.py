@@ -58,6 +58,34 @@ BOXES_THREAD = re.compile(r'https://boxes\.dev/thread/[A-Za-z0-9_-]+')
 
 # --- progress rows -------------------------------------------------------------------------
 
+def deploy_selection_omissions(root: Path, before: dict, after: dict) -> dict[str, str]:
+    """Omit only catalog-excluded native smoke cases during source refresh.
+
+    This grants no execution or cleanup credit. Ordinary failure quarantines
+    still run and cannot authorize removal from the deploy selection.
+    """
+    removed = set(before['checks']) - set(after['checks'])
+    if not removed:
+        return {}
+    if any(gate.get('category') != 'smoke' or gate.get('native_cloud') is not True
+           for gate in (before, after)):
+        raise ValueError('repair cannot silently remove originally selected checks')
+    rows = json.loads((root / CATALOG).read_text())
+    if not isinstance(rows, list):
+        raise ValueError('deploy quarantine catalog must be an array')
+    reasons = {}
+    for row in rows:
+        if not isinstance(row, dict) or row.get('name') not in removed:
+            continue
+        name, reason = row['name'], row.get('deploy_quarantine')
+        if name in reasons or not isinstance(reason, str) or not reason.strip():
+            raise ValueError('removed deploy check lacks an unambiguous exclusion reason')
+        reasons[name] = reason
+    if set(reasons) != removed:
+        raise ValueError('repair cannot silently remove originally selected checks')
+    return reasons
+
+
 def slim(row: dict) -> dict:
     """A bounded copy of one progress row for receipts and state (first detail line only)."""
     out = {k: row[k] for k in ('unit', 'case', 'scope', 'status', 'at', 'log') if k in row}
