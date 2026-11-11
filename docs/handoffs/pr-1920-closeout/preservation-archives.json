@@ -73,6 +73,24 @@
         "manifest_sha256": "ca9e40004d88b5c3c243442359094576914eae117c344ef77e485d7043794f69",
         "full_readback_verified": true
       }
+    },
+    {
+      "receipt_file": "recovery-custody-checkpoint-archive-receipt.json",
+      "receipt_sha256": "b26427115fd4858cdaab8ce42ebc8e13099979a0d9de66172ef76d75a47dbe16",
+      "receipt": {
+        "format": "ROSE-PRIVATE-TAR-GCM-V1",
+        "bucket": "trace-archive",
+        "key": "devbox-closeout-private/pr1920-sidebar/20261111-recovery-custody-checkpoint-v1.tar.gz.aesgcm",
+        "encryption_key_id": "trace-archive-prod-2026-07-03",
+        "ciphertext_sha256": "426667814a6dbbbcf348ec888e1cb6056a38c120fbfbe17f24641d3db8b625c6",
+        "gzip_sha256": "f861c0fc53e03e66d7c7359607bcb1d2e34000a732090a88a0ee4c4f9c8762c7",
+        "stored_bytes": 9297280,
+        "frames": 2,
+        "files": 494,
+        "original_bytes": 16394225,
+        "manifest_sha256": "c4e30eca03730c198e56790605b0da0cccdd4d9882838edd1ac3f5dca4a31b61",
+        "full_readback_verified": true
+      }
     }
   ],
   "helper": {
