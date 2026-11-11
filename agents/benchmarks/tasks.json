@@ -8352,6 +8352,12 @@
   },
   {
     "name": "agent-payment-new-user-journey",
+    "quarantine": {
+      "since": "2026-11-11",
+      "repair": "pending-handoff:ee9594bc164d4a97816fa5324cb38dfe",
+      "error": "Expected gate {'type': 'subscription', 'gateKey': 'subscription', 'severity': 'blocking', 'action': {'kind': 'link'}}, observed write_lock",
+      "evidence": "PR #1931 smoke FLAKY occurrence ee9594bc164d4a97816fa5324cb38dfe"
+    },
     "title": "New User Subscription To Confirmed Agent Payment",
     "description": "A dedicated non-admin account begins with exhausted free credit and no subscription or Stripe payment method. The harness completes hosted Stripe test Checkout, then the agent buys from the test portal with an approved payment card. The run requires ordered gates, a portal order ID, and settled backend funding.",
     "prompt": "Use a browser agent (spawn_agent with type=\"browser\") to go to {frontend_url}/test_payment and complete the visible Rose Labs Test Payment checkout. Buy exactly these 3 products and no others: Aurora Notebook, Ceramic Mug, and Canvas Tote. Use only the visible checkout UI. If subscription signup is required, wait for the user to finish it, then continue. Obtain a payment card through request_payment_card and wait for approval. Report the test portal confirmation order ID after the order is placed.",
@@ -8534,6 +8540,12 @@
   },
   {
     "name": "agent-payment-setup-resume",
+    "quarantine": {
+      "since": "2026-11-11",
+      "repair": "pending-handoff:a03a667e5eee4edfa4c4286c09c88473",
+      "error": "Timeout after 901s (task timeout=900s)",
+      "evidence": "PR #1931 smoke FLAKY occurrence a03a667e5eee4edfa4c4286c09c88473"
+    },
     "title": "Agent Payment Setup And Auto Resume",
     "group": "pre-deploy",
     "prompt": "Use a browser agent to go to {frontend_url}/test_payment and complete the visible Rose Labs Test Payment checkout. Buy exactly these 3 products and no others: Aurora Notebook, Ceramic Mug, and Canvas Tote. Use only the visible checkout UI; do not navigate to source files or API endpoints. If One Time Agent Payment Setup is required after payment approval, wait for the user to complete it and then continue automatically with the same checkout.",
@@ -8659,6 +8671,12 @@
   },
   {
     "name": "agent-payment-idempotent-abandonment",
+    "quarantine": {
+      "since": "2026-11-11",
+      "repair": "pending-handoff:e2dad8dc592043b68b7a287fd18bd916",
+      "error": "Timeout after 904s (task timeout=900s)",
+      "evidence": "PR #1931 smoke FLAKY occurrence e2dad8dc592043b68b7a287fd18bd916"
+    },
     "title": "Agent Payment Idempotent Settlement",
     "group": "pre-deploy",
     "prompt": "The root agent must invoke spawn_browser_agent exactly twice, sequentially, against {frontend_url}/test_payment. In each browser task, select exactly these 3 products and no others: Aurora Notebook, Ceramic Mug, and Canvas Tote; prepare the visible Rose Labs Test Payment checkout; independently request a one-time payment card for the same unchanged order; and report the card last four. The first browser agent must leave checkout unsubmitted. Wait for it to finish before invoking the second browser agent. The second browser agent must independently request the same card again, verify the last four matches the first result, then submit the visible checkout and report the order confirmation. Use only the visible checkout UI; do not navigate to source files or API endpoints. After the second browser agent finishes, call attempt_completion exactly once with the grounded results. Do not call send_message_to_user_execute_phase or any progress-message tool.",
