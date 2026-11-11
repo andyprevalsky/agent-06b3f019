@@ -160,6 +160,20 @@ does not allocate outside the existing CLI or invent a cleanup receipt.
 If no appropriate worker is bound, planning refuses; it does not quietly
 serialize the suite locally.
 
+At an isolated native cleanup source-renewal boundary, a completed historical
+successor may have a different selection explanation while every execution field
+remains identical. Keep the generated current plan and original proof unchanged.
+Use `reconcile --proof <original-proof-with-new-validation-source> --input
+<historical-successor-witness>` with a separate
+`historical-clean-successor-v1` witness. It binds the successor request token,
+receipt SHA256, and a canonical `custody_state` path/SHA256 for the recovered
+admission snapshot. The snapshot must match the original request's admission
+seal and all historical source/plan/environment/input bindings. Only the
+string-list `selection_evidence` field may differ; execution changes refuse.
+This renews launch authority with zero test or cleanup credit. Original failures
+and obligations remain, and the final source must earn fresh full coverage.
+Missing authentic historical authority fails closed.
+
 Before a cloud launch, a genuine local Claude credential SKIP can be admitted
 through `deploy_test_cycle.py standing-skip --proof <proof.json>` with the
 normal `--plan`, `--state-dir`, and `--root` arguments. This uses the existing
@@ -368,6 +382,15 @@ only affected or unknown gates. A clean Git merge is not a test-dependency proof
 If pending execution ownership prevents another isolated lane from starting,
 report that exact unsupported transition and continue supported independent work;
 do not infer live execution from an owner label or infer cleanup from a dead PID.
+
+When the coordinator itself disappears before writing its round receipt, preserve
+that observation gap separately from terminal native worker results. After independent
+review of the original state and artifact hashes, `recover-round --proof <proof.json>`
+uses the same `--plan` and `--state-dir` arguments to settle the orphan round negatively.
+It rechecks current ownership and native cleanup, journals the original state, preserves
+valid existing outer receipts and exclusions, and records missing outer coverage as
+UNVERIFIED with no invented exit or positive reuse credit. Normal execution recovery
+and fresh affected gates remain required. Other uncommitted journals still block.
 
 The coordinator handles TERM/INT by stopping only the process groups it started
 and recording `interrupted`, never PASS or a provider waiver. Use `resume` only
@@ -620,3 +643,15 @@ current binding and complete transferred obligations. Removing any protected
 failure/history/projection fails closed during ordinary guard/admission/verify
 as well as replay. Duplicate identities and changed debt wrappers are rejected
 before atomic publication. No provider timestamps are refreshed.
+
+An already reconciled isolated native operation may later satisfy strict normal
+cleanup itself. At the existing quiescent renewal boundary, submit a **new separate**
+normal campaign-v1 proof with the original token or occurrence to `reconcile`.
+The original receipt, owner, source and prior file bindings must still validate;
+all normal native cleanup guards also run. This does not use a newer successor
+or change its completeness requirements. The coordinator archives the entire
+isolated entry under a verified history seal and records zero-credit normal
+retirement at the original receipt key. Exact replay is idempotent; changed
+replay refuses. Future admission/completion still rechecks the archived evidence.
+Retained service custody does not claim a historical service termination or a
+new test execution. Original failures and financial no-retry custody remain.

@@ -231,6 +231,7 @@ test.describe('mobile-layout', () => {
 // Desktop uses the same opening surface but must center the art itself, rather
 // than the combined art/caption stack. Keep the real CSS geometry under test.
 test('desktop opening ASCII stays centered on the large grid tile', async ({ page }) => {
+  const rec = attachRecorder(page);
   for (const viewport of [
     { width: 1440, height: 900 },
     { width: 768, height: 813 },
@@ -238,9 +239,13 @@ test('desktop opening ASCII stays centered on the large grid tile', async ({ pag
     await page.setViewportSize(viewport);
     if (HAS_INJECTED_SESSION) await injectSemanticSession(page);
     await page.goto(FRONTEND_URL, { waitUntil: 'domcontentloaded' });
-    if (HAS_INJECTED_SESSION) {
-      await expect(page.getByTestId('terminal-main-content')).toHaveClass(/md:pl-\[64px\]/);
-    }
+    await waitForDevLogin(page, rec);
+    // Dev login persists the browser-review user, whose reload opens Browse.
+    // Enter an empty chat through the same Home action a user would take.
+    const home = page.getByTestId('rose-home-project-row');
+    await page.mouse.move(viewport.width / 2, viewport.height / 2);
+    await page.getByTestId('rose-sidebar').hover({ position: { x: 30, y: 100 } });
+    await home.getByRole('button', { name: 'Create Super Agent', exact: true }).click();
     const frame = page.locator('pre[data-ascii-layer="frame"]').first();
     await expect(frame).toBeVisible();
     const tile = page.locator('[data-testid="terminal-grid-background-layer"] rect[width="429"]');
