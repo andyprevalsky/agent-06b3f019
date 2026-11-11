@@ -431,6 +431,26 @@ class ReleaseReport(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     q.catalog_quarantines(self.root)
 
+    def test_suite_level_flake_binds_only_the_test_its_traceback_names(self):
+        # Whole-file suites (deploy-test-worker) report the suite as the FLAKY unit (PR #1925, 2026-11-11).
+        packet = {**{k: 'x' for k in ('command', 'scope', 'error', 'source', 'evidence')},
+                  'test': 'Suite.test_flaky_unit'}
+        trace = 'Traceback (most recent call last):\n  File "tests/test_unit.py", line 5, in test_flaky_unit\n'
+        entry = {'attribution': 'NOT_INTRODUCED', 'evidence': 'rca-1', 'marker': 'tests/test_unit.py',
+                 'post_merge': {**packet, 'repair_owner': REPAIR}}
+        occurrence = {'id': 'c' * 32, 'gate': 'g', 'unit': 'test_unit', 'detail': trace, 'source': {'head': 'a' * 40}}
+        recorded = q.validate_attribution(occurrence, entry, self.root)
+        self.assertEqual(('tests/test_unit.py', 'test_unit'), (recorded['marker'], recorded['post_merge']['unit']))
+        refusals = {'traceback names another test': {**occurrence, 'detail': trace.replace('test_flaky_unit', 'test_other')},
+                    'no traceback': {**occurrence, 'detail': ''},
+                    'unit is another file': {**occurrence, 'unit': 'test_nested'}}
+        for label, bad in refusals.items():
+            with self.subTest(label), self.assertRaisesRegex(ValueError, 'no quarantine marker'):
+                q.validate_attribution(bad, entry, self.root)
+        with self.assertRaisesRegex(ValueError, 'no quarantine marker'):
+            q.validate_attribution(occurrence, {**entry, 'post_merge': {**entry['post_merge'], 'test': 'Suite.test_x'}},
+                                   self.root)
+
     def test_cli_prints_the_table(self):
         self.write_ledger(['QUARANTINED_PASS'] * 5)
         out = subprocess.run([sys.executable, str(ROOT / 'scripts/test_quarantine.py'), 'report', '--root',

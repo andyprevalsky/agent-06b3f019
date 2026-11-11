@@ -145,9 +145,6 @@ def validate_attribution(occurrence: dict, entry: dict, root: Path) -> dict:
     path = entry.get('marker')
     if not isinstance(path, str) or not path.strip() or Path(path).is_absolute() or '..' in Path(path).parts:
         raise ValueError('NOT_INTRODUCED requires marker: the repo-relative test file carrying the quarantine marker')
-    found = [m for m in markers(root, [path]) if unit_matches(m, occurrence['unit'])]
-    if not found:
-        raise ValueError(f"no quarantine marker for {occurrence['unit']} in {path}")
     # Repairs are dispatched only after merge (deploy-failure-policy.md): a NOT_INTRODUCED flake records
     # its post-merge packet, never a pre-merge repair thread.
     if entry.get('repair_agent'):
@@ -156,6 +153,15 @@ def validate_attribution(occurrence: dict, entry: dict, root: Path) -> dict:
     if not isinstance(packet, dict) or any(not packet.get(k) for k in ('test', 'command', 'scope', 'error',
                                                                         'source', 'evidence')):
         raise ValueError('a post-merge packet requires test, command, scope, error, source and evidence')
+    found = [m for m in markers(root, [path]) if unit_matches(m, occurrence['unit'])]
+    if not found and suite_unit(path, occurrence['unit']):
+        # A whole-file suite reports its FLAKY unit as the suite (deploy-test-worker). Bind the marker to the
+        # one test the packet names, and only when the original failure's own traceback names that test.
+        detail = occurrence.get('detail') or ''
+        found = [m for m in markers(root, [path]) if unit_matches(m, packet['test'])
+                 and re.search(r'\bin ' + re.escape(m['name']) + r'\b', detail)]
+    if not found:
+        raise ValueError(f"no quarantine marker for {occurrence['unit']} in {path}")
     owner = packet.get('repair_owner')
     expected = owner if owner else f"pending-handoff:{occurrence['id']}"
     if owner and not BOXES_THREAD.fullmatch(owner):
@@ -438,6 +444,12 @@ def markers(root: Path, paths: list[str] | None = None) -> list[dict]:
         # A real marker carries all four values (the wrappers refuse anything less); usage examples do not.
         out.extend(m for m in found if all(isinstance(m.get(k), str) and m[k].strip() for k in META_KEYS))
     return out
+
+
+def suite_unit(path: str, unit: str) -> bool:
+    """True when the FLAKY unit is the whole test file itself (`deploy-test-worker` for deploy-test-worker.test.py)."""
+    name = Path(path).name
+    return bool(unit) and name in (unit, f'{unit}.test.py', f'{unit}.py', f'{unit}.test.ts', f'{unit}.ts')
 
 
 def unit_matches(marker: dict, unit: str) -> bool:
