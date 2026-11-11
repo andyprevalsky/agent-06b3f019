@@ -117,7 +117,7 @@ async function listBenchmarkCardholders(
   let total: number | undefined;
   for (;;) {
     if (Date.now() >= deadlineAtMs)
-      throw new Error('AgentCard cardholder pagination deadline exceeded');
+      throw new Error('AgentCard cardholder inventory pagination exceeded its read deadline');
     const response = await callWithinBudget('list_cardholders', {
       limit: 100,
       offset: cardholders.length,
@@ -127,26 +127,36 @@ async function listBenchmarkCardholders(
     const pageRecord = asRecord(outer?.structuredContent) ?? outer;
     const pageTotal = pageRecord?.total;
     const rawPage = pageRecord?.cardholders;
+    // A page without a total cannot prove completeness: only a full page may defer it to the next read.
+    const untotaledFullPage = pageTotal === undefined && total === undefined && page.length === 100;
     if (
       !Array.isArray(rawPage) ||
       rawPage.length !== page.length ||
-      !Number.isSafeInteger(pageTotal) ||
-      (pageTotal as number) < 0 ||
-      (total !== undefined && pageTotal !== total) ||
       page.length > 100 ||
+      (!untotaledFullPage && (!Number.isSafeInteger(pageTotal) || (pageTotal as number) < 0))
+    ) {
+      throw new Error(
+        'AgentCard cardholder inventory pagination returned a malformed page or total'
+      );
+    }
+    if (total !== undefined && pageTotal !== total) {
+      throw new Error('AgentCard cardholder inventory changed during pagination');
+    }
+    if (
       page.some((cardholder) => seen.has(cardholder.id)) ||
       new Set(page.map((cardholder) => cardholder.id)).size !== page.length
     ) {
-      throw new Error('AgentCard cardholder pagination identity/total changed');
+      throw new Error('AgentCard cardholder inventory pagination did not advance');
     }
-    total = pageTotal as number;
     for (const cardholder of page) {
       seen.add(cardholder.id);
       cardholders.push(cardholder);
     }
+    if (untotaledFullPage) continue;
+    total = pageTotal as number;
     if (cardholders.length === total) break;
     if (cardholders.length > total || page.length === 0) {
-      throw new Error('AgentCard cardholder pagination incomplete');
+      throw new Error('AgentCard cardholder inventory pagination did not cover its total');
     }
   }
   return cardholders;
