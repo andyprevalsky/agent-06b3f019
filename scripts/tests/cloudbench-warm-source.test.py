@@ -332,11 +332,19 @@ class WarmSource(FakeApiCase):
         self.assertEqual(again.stdout.split(), [set_a, machine_a, volume_a])
         self.assertGreater(int(row["config"]["metadata"][self.mod["LAST_USED_KEY"]]), 1)
         self.assertEqual(self.fake.throttle_metadata_writes, 0)
-        # A persistent limit still fails closed after the bounded attempts, never loops forever.
+        # A fresh stamp needs no write: the next selectors in the same burst never touch Fly.
+        writes = sum(1 for method, path in self.fake.log if method == "POST" and "/metadata/" in path)
         self.fake.throttle_metadata_writes = 10 ** 6
-        refused = self.run_cli("ensure", "--node-fp", NODE_A, "--py-fp", PY_A, "--owner", "devbox-3", timeout=60)
-        self.assertNotEqual(refused.returncode, 0)
-        self.assertIn("HTTP 429", refused.stderr)
+        burst = self.run_cli("ensure", "--node-fp", NODE_A, "--py-fp", PY_A, "--owner", "devbox-3", timeout=60)
+        self.assertEqual(burst.returncode, 0, burst.stderr)
+        self.assertEqual(writes, sum(1 for method, path in self.fake.log if method == "POST" and "/metadata/" in path))
+        # A stale stamp under a persistent limit retries a bounded number of times, then still selects.
+        row["config"]["metadata"][self.mod["LAST_USED_KEY"]] = "1"
+        limited = self.run_cli("ensure", "--node-fp", NODE_A, "--py-fp", PY_A, "--owner", "devbox-4", timeout=60)
+        self.assertEqual(limited.returncode, 0, limited.stderr)
+        self.assertEqual(limited.stdout.split(), [set_a, machine_a, volume_a])
+        self.assertIn("HTTP 429", limited.stderr)
+        self.assertEqual(row["config"]["metadata"][self.mod["LAST_USED_KEY"]], "1")
 
     def test_ensure_reuses_an_interrupted_create_volume_and_waits_out_a_peer_claim(self):
         set_b, machine_b, volume_b = self.mod["names"](NODE_B, PY_B)

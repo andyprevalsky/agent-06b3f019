@@ -73,6 +73,7 @@ GONE = {"destroyed", "destroying"}
 COMPLETE_SNAPSHOT = {"created", "complete", "completed", "ready", "available"}
 LEASE_TTL_SECONDS = 30
 RATE_LIMIT_ATTEMPTS = 6
+LAST_USED_REFRESH_SECONDS = 600
 RATE_LIMIT_MAX_DELAY_SECONDS = 8.0
 
 
@@ -330,13 +331,35 @@ def source_config(donor, set_id, volume_id, now):
     return config
 
 
+def touch_last_used(api, row, now=None):
+    """Record use for retention without a write stampede.
+
+    Every job of a fleet (and every fleet on other devboxes) selects the same source within
+    seconds; Fly rate-limits writes to one Machine. A stamp younger than LAST_USED_REFRESH_SECONDS
+    already protects the source (retention grace is a day), so only the first selector writes.
+    A write still rate-limited after the bounded retries is bookkeeping, not selection: warn.
+    """
+    now = time.time() if now is None else now
+    value = metadata_of(row).get(LAST_USED_KEY, "0")
+    if str(value).isdigit() and now - int(value) < LAST_USED_REFRESH_SECONDS:
+        return False
+    try:
+        api.write_metadata(row["id"], LAST_USED_KEY, str(int(now)))
+    except WarmSourceError as error:
+        if "HTTP 429" not in str(error):
+            raise
+        print(f"⚠️  {error}; another selector refreshes it", file=sys.stderr)
+        return False
+    return True
+
+
 def ensure(api, node_fp, py_fp, owner, *, base=BASE_DONOR, ttl=1800, wait=3600, timeout=600):
     """Return (set, machine, volume) names, creating the set's stopped warm source once."""
     set_id, machine_name, volume_name = names(node_fp, py_fp)
     existing = find_named(api, machine_name)
     if existing:
         need(metadata_of(existing).get(SET_KEY) == set_id, f"{machine_name} is not tagged as this set's warm source")
-        api.write_metadata(existing["id"], LAST_USED_KEY, str(int(time.time())))
+        touch_last_used(api, existing)
         return set_id, machine_name, volume_name
     donor = base_donor(api, base)
     if not claim_acquire(api, donor["id"], set_id, owner, ttl, wait):
@@ -344,7 +367,7 @@ def ensure(api, node_fp, py_fp, owner, *, base=BASE_DONOR, ttl=1800, wait=3600, 
     try:
         existing = find_named(api, machine_name)
         if existing:  # a peer created it while this request waited
-            api.write_metadata(existing["id"], LAST_USED_KEY, str(int(time.time())))
+            touch_last_used(api, existing)
             return set_id, machine_name, volume_name
         mounts = (donor.get("config") or {}).get("mounts") or []
         need(len(mounts) == 1 and mounts[0].get("volume"), "base donor must mount exactly one volume")
