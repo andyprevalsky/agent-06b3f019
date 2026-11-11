@@ -10,10 +10,14 @@ first_bad_boundary: historical custody build rejects every nonempty pending list
 symptoms:
   - "historical custody: active/unknown coordinator"
   - completed semantic failure prevents preserving financial no-retry custody on a new source
-tags: [deploy, custody, source-binding, evidence]
+tags:
+  - deploy
+  - custody
+  - source-binding
+  - evidence
 sources:
   - PR #1915
-  - ".context/rca-playwright/pending-custody-refresh/v2/packet.json"
+  - plan: .context/rca-playwright/pending-custody-refresh/v2/packet.json
 repro: scripts/tests/deploy-test-cycle.test.py::Cycle.test_historical_custody_refresh_preserves_quiescent_nonfinancial_pending
 status: fixed
 ---
@@ -56,6 +60,12 @@ Independent correction review verifies refusal of the original unsafe controls
 and acceptance of the valid recipe-bound case. Financial custody validators and
 zero-credit semantics remain unchanged. Required source-bound gates and actual
 production verification remain separate obligations.
+
+## Human feedback
+
+The user requires the assigned repair through completed deployment and prohibits
+new paid AgentCard actions. This correction preserves the existing no-retry
+obligation and unresolved failures rather than asking to weaken those limits.
 
 ## Reusable lesson
 
