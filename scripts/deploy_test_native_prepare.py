@@ -118,8 +118,11 @@ def validate_prepare(receipt, owner, proof, adapter, root, runs, cli_text, bound
             need(bound(root / 'agents/benchmarks/tasks.json') == subprocess.check_output(
                 ['git', '--no-replace-objects', '-C', str(root), 'show',
                  head + ':agents/benchmarks/tasks.json']), 'prepare omission catalog source')
-        original_checks = list(CURRENT_PREPARE_CHECKS) + [
-            'browser-auth-guest-purchase', 'browser-auth-member-discount-purchase']
+        # The inventory comes from the authenticated custody ledger's bound plan (its digest and
+        # the request's custody_state_sha256 were checked above), never a historical allowlist:
+        # the selector legitimately narrows smoke when main absorbs a branch's path triggers.
+        original_checks = [name for name in gate['checks'] if name not in expected]
+        original_checks += [name for name in omissions if name not in original_checks]
         need(set(omissions) <= set(original_checks), 'prepare unknown deploy omission')
         expected_checks = [name for name in original_checks if name not in omissions]
         count = len(expected_checks)

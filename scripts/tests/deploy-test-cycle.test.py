@@ -9923,6 +9923,80 @@ class CleanupPrepareEvidence(unittest.TestCase):
         self.reseal()
         return receipt, owner, proof, request
 
+    def narrowed_prepare_fixture(self, dropped=('browser-auth-guest-purchase', 'browser-auth-member-discount-purchase')):
+        """The authenticated ledger plan selected fewer smoke checks than the historical 14."""
+        import hashlib
+        receipt, owner, proof, request = self.source_bound_prepare_fixture()
+        checks = [name for name in request['checks'] if name not in dropped]
+        width = len(checks)
+        request['checks'] = checks
+        ledger_path = Path(proof['custody_ledger'])
+        ledger = json.loads(ledger_path.read_text())
+        gate = ledger['plan']['gates'][0]
+        gate['checks'] = [name for name in gate['checks'] if name not in dropped]
+        ledger['plan_digest'] = c.digest(ledger['plan'])
+        self.save(ledger_path, ledger)
+        request['custody_state_sha256'] = c.digest(ledger)
+        folder = Path(receipt['log']).parent
+        self.save(folder/'request.json', request)
+        receipt.update(checks=checks, cases={**dict.fromkeys(checks, 'UNVERIFIED'),
+                                           'agent-payment-abandonment': 'SKIP'})
+        adapter = json.loads(Path(receipt['worker_result']).read_text())
+        adapter.update(checks=checks, cases=dict.fromkeys(checks, 'UNVERIFIED'),
+                       native_command=['bash', 'scripts/run-bench', *checks, '--runs', '1',
+                                       '--concurrency', str(width), '--retry-infra', '0',
+                                       '--ref', receipt['source']['head']])
+        self.save(Path(receipt['worker_result']), adapter)
+        summary = json.loads((self.campaign/'summary.json').read_text())
+        summary.update(concurrency=width, task_count=width, total_jobs=width)
+        summary['cleanup_cohorts'][0]['expected_count'] = width
+        summary['jobs'] = summary['jobs'][:width]
+        for job, name in zip(summary['jobs'], checks):
+            job.update(task=name, controller_command=['bash', str(self.base/'scripts/run-bench'),
+                                                      name, '--ref', receipt['source']['head'], '--foreground'])
+        self.save(self.campaign/'summary.json', summary)
+        self.save(self.campaign/'cleanup-cohorts/c001/manifest.json',
+                  dict(cohort_id='c001', jobs=dict.fromkeys(j['job_id'] for j in summary['jobs'])))
+        receipt['native_cleanup_reference']['result_sha256'] = hashlib.sha256(Path(receipt['worker_result']).read_bytes()).hexdigest()
+        self.save(folder/'receipt.json', receipt)
+        proof.update(receipt_sha256=hashlib.sha256((folder/'receipt.json').read_bytes()).hexdigest(),
+                     worker_result_sha256=receipt['native_cleanup_reference']['result_sha256'])
+        self.reseal()
+        return receipt, owner, proof, request
+
+    def test_source_bound_prepare_takes_inventory_from_authenticated_ledger_plan(self):
+        import deploy_test_native_prepare as prepare
+        import deploy_test_historical_custody as custody
+        receipt, owner, proof, request = self.narrowed_prepare_fixture()
+        before = {p: p.read_bytes() for p in self.base.rglob('*') if p.is_file()}
+        with patch.object(prepare, 'SOURCE_ROOT', self.base), \
+             patch.object(custody, 'state_identity', side_effect=c.digest), \
+             patch.object(custody, 'guard', return_value=request['skips']):
+            entry = self.validate_prepare_fixture(receipt, owner, proof)
+        self.assertFalse(entry['credit_granted'])
+        self.assertFalse(receipt['complete'])
+        self.assertEqual(12, list(receipt['cases'].values()).count('UNVERIFIED'))
+        self.assertEqual('SKIP', receipt['cases']['agent-payment-abandonment'])
+        self.assertEqual(before, {p: p.read_bytes() for p in self.base.rglob('*') if p.is_file()})
+
+    def test_source_bound_prepare_rejects_request_outside_ledger_plan(self):
+        import deploy_test_native_prepare as prepare
+        import deploy_test_historical_custody as custody
+        receipt, owner, proof, request = self.narrowed_prepare_fixture()
+        ledger_path = Path(proof['custody_ledger'])
+        ledger = json.loads(ledger_path.read_text())
+        ledger['plan']['gates'][0]['checks'].remove('chat-mode')  # request still names chat-mode
+        ledger['plan_digest'] = c.digest(ledger['plan'])
+        self.save(ledger_path, ledger)
+        request['custody_state_sha256'] = c.digest(ledger)
+        self.save(Path(receipt['log']).parent/'request.json', request)
+        self.reseal()
+        with patch.object(prepare, 'SOURCE_ROOT', self.base), \
+             patch.object(custody, 'state_identity', side_effect=c.digest), \
+             patch.object(custody, 'guard', return_value=request['skips']):
+            with self.assertRaisesRegex(ValueError, 'custody inventory'):
+                self.validate_prepare_fixture(receipt, owner, proof)
+
     def test_source_bound_prepare_accepts_only_authenticated_current_omission(self):
         import deploy_test_native_prepare as prepare
         import deploy_test_historical_custody as custody
