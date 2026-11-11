@@ -170,6 +170,18 @@ export function withAgentTools(
       taskId: session.taskId,
     });
     const url = `${userUiPublishBaseUrl()}${agentToolsBasePath(session.agentId)}`;
+    // Observe the constructed destination, never the credential-bearing URL.
+    // Logging is best-effort and cannot prevent tools materialization.
+    try {
+      log.info('agent_tools.destination', {
+        origin: new URL(url).origin,
+        agentId: session.agentId,
+        taskId: session.taskId,
+        provider: session.provider,
+      });
+    } catch {
+      // A diagnostic failure must not change the existing session behavior.
+    }
     const homeDir = session.homeDir ?? '/home/user';
     const base: UserUiWorkspace = workspace ?? { files: [], envs: {}, source: { kind: 'seed' } };
     // Pinned questions and inline views need the Rose Desktop UI; stock

@@ -321,3 +321,85 @@ function hasMobbinServer(workspace: UserUiWorkspace): boolean {
     'mobbin' in (JSON.parse(file.content.toString('utf8')) as McpConfig).mcpServers
   );
 }
+
+test('tools destination diagnostic contains actual origin and binding without URL secrets', () => {
+  const saved = process.env.ROSE_UI_PUBLISH_BASE_URL;
+  const write = process.stdout.write;
+  const lines: string[] = [];
+  try {
+    process.env.ROSE_UI_PUBLISH_BASE_URL =
+      'https://url-user:url-password@tools.example.test:9443/private?credential=hidden';
+    process.stdout.write = ((chunk: unknown) => {
+      lines.push(String(chunk));
+      return true;
+    }) as typeof write;
+    const workspace = session('/home/user', null, 'codex');
+    const diagnostic = lines.filter((line) => line.includes('agent_tools.destination'));
+    assert.equal(diagnostic.length, 1);
+    assert.ok(diagnostic[0].includes(new URL(workspace.envs.ROSE_TOOLS_URL).origin));
+    for (const value of ['mobbin-test-agent', 'mobbin-codex', 'codex'])
+      assert.ok(diagnostic[0].includes(value));
+    for (const value of [
+      'url-user',
+      'url-password',
+      '/private',
+      'credential',
+      'hidden',
+      workspace.envs.ROSE_TOOLS_TOKEN,
+    ]) {
+      assert.ok(
+        !diagnostic[0].includes(value),
+        `diagnostic leaked ${value === workspace.envs.ROSE_TOOLS_TOKEN ? 'token' : value}`
+      );
+    }
+    // Opaque or malformed destinations retain materialization without disclosing payloads.
+    const configured = process.env.ROSE_UI_PUBLISH_BASE_URL;
+    for (const base of [
+      'data:offline-sensitive?credential=hidden',
+      'offline-sensitive?credential=hidden',
+    ]) {
+      process.env.ROSE_UI_PUBLISH_BASE_URL = base;
+      const before = lines.length;
+      const opaque = withAgentTools(null, {
+        userId: 'mobbin-test-user',
+        agentId: 'mobbin-test-agent',
+        taskId: 'mobbin-codex',
+        provider: 'codex',
+        homeDir: '/home/user',
+        roseDesktop: false,
+      });
+      assert.equal(
+        opaque === null,
+        !base.startsWith('data:'),
+        'preserve opaque/malformed URL behavior'
+      );
+      if (opaque) assert.ok(opaque.envs.ROSE_TOOLS_URL.startsWith(base));
+      const diagnostic = lines
+        .slice(before)
+        .filter((line) => line.includes('agent_tools.destination'));
+      for (const line of diagnostic) {
+        assert.ok(
+          !line.includes('offline-sensitive') &&
+            !line.includes('credential') &&
+            !line.includes('hidden')
+        );
+        assert.ok(!line.includes(workspace.envs.ROSE_TOOLS_TOKEN));
+      }
+    }
+    process.env.ROSE_UI_PUBLISH_BASE_URL = configured;
+    // A broken diagnostic sink does not change files, env, or the return value.
+    process.stdout.write = (() => {
+      throw new Error('offline diagnostic sink failure');
+    }) as typeof write;
+    const after = session('/home/user', null, 'codex');
+    assert.equal(after.envs.ROSE_TOOLS_URL, workspace.envs.ROSE_TOOLS_URL);
+    assert.deepEqual(
+      after.files.map((file) => file.path),
+      workspace.files.map((file) => file.path)
+    );
+  } finally {
+    process.stdout.write = write;
+    if (saved === undefined) delete process.env.ROSE_UI_PUBLISH_BASE_URL;
+    else process.env.ROSE_UI_PUBLISH_BASE_URL = saved;
+  }
+});
