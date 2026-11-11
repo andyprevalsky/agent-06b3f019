@@ -981,6 +981,34 @@ def inventory_init_failure(root, runs, campaign, request, receipt, adapter, boun
         need(not Path('/proc', str(pid)).exists(), 'inventory init process remains')
 
 
+def mixed_exclusion_inventory(receipt, request, checks):
+    """Original exclusions of a mixed/partial campaign: historical no-retry custody rows, plus the named user
+    deploy quarantine only when it equals the hash-bound receipt's own recorded policy. Never credit."""
+    from deploy_test_historical_custody import KIND as CUSTODY_KIND
+    from deploy_test_quarantine import USER_DEPLOY_CASE, USER_DEPLOY_KIND
+    skips = request.get('skips', {})
+    need(isinstance(skips, dict) and not set(skips).intersection(checks), 'mixed original exclusion inventory')
+    recorded = receipt.get('user_deploy_quarantine') or {}
+    user = {name for name, value in skips.items()
+            if isinstance(value, dict) and value.get('kind') == USER_DEPLOY_KIND}
+    need(user <= {USER_DEPLOY_CASE} and set(recorded) == user
+         and all(skips[name] == recorded[name]
+                 and recorded[name].get('credit') == {'test_execution': False, 'assertions': False,
+                                                      'cleanup': False, 'financial_release': False}
+                 and receipt.get('user_deploy_quarantine_execution', {}).get(name) == 'UNVERIFIED'
+                 and receipt.get('cases', {}).get(name) == 'SKIP'
+                 and receipt.get('case_complete', {}).get(name) is False for name in user),
+         'mixed user deploy quarantine differs from its recorded receipt policy')
+    need(all(isinstance(v, dict) and v.get('kind') == CUSTODY_KIND
+             and v.get('disposition') == 'NO_RETRY_CUSTODY' and v.get('source') == receipt['source']
+             and v.get('current_binding', {}).get('source') == receipt['source']
+             and v.get('current_execution') == v.get('current_financial_state') == 'UNVERIFIED'
+             and v.get('credit') == {'test_execution': False, 'assertions': False, 'financial_release': False}
+             for name, v in skips.items() if name not in user),
+         'mixed original exclusion inventory')
+    return skips
+
+
 def partial_campaign_jobs(root, campaign, request, receipt, adapter, summary, proof):
     """Typed pre-execution closure, never task/financial credit or a guessed exit."""
     contract = proof['unstarted_campaign']
@@ -1305,16 +1333,7 @@ def validate(receipt, owner, proof):
         if staged_preallocation:
             expected_cases = dict.fromkeys(checks, 'UNVERIFIED')
             if mixed or partial:
-                from deploy_test_historical_custody import KIND as CUSTODY_KIND
-                skips = request.get('skips', {})
-                need(isinstance(skips, dict) and not set(skips).intersection(checks)
-                     and all(isinstance(v, dict) and v.get('kind') == CUSTODY_KIND
-                             and v.get('disposition') == 'NO_RETRY_CUSTODY' and v.get('source') == receipt['source']
-                             and v.get('current_binding', {}).get('source') == receipt['source']
-                             and v.get('current_execution') == v.get('current_financial_state') == 'UNVERIFIED'
-                             and v.get('credit') == {'test_execution': False, 'assertions': False, 'financial_release': False}
-                             for v in skips.values()),
-                     'mixed original exclusion inventory')
+                skips = mixed_exclusion_inventory(receipt, request, checks)
             else:
                 skips = request.get('skips')
                 need(isinstance(skips, dict) and not set(checks).intersection(skips),

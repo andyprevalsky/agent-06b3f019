@@ -11052,6 +11052,49 @@ class NativeUnstartedCampaign(unittest.TestCase):
 
 
 
+class MixedExclusionInventory(unittest.TestCase):
+    """A partial campaign may carry the receipt-recorded user deploy quarantine beside custody rows."""
+    def fixture(self):
+        from deploy_test_quarantine import USER_DEPLOY_CASE, USER_DEPLOY_KIND
+        source = dict(head='a'*40, digest='b'*64)
+        custody = dict(kind='historical-agentcard-no-retry-v1', disposition='NO_RETRY_CUSTODY', source=source,
+                       current_binding=dict(source=source), current_execution='UNVERIFIED',
+                       current_financial_state='UNVERIFIED',
+                       credit=dict(test_execution=False, assertions=False, financial_release=False))
+        user = dict(kind=USER_DEPLOY_KIND, disposition='USER_DEPLOY_QUARANTINE', source=source,
+                    credit=dict(test_execution=False, assertions=False, cleanup=False, financial_release=False))
+        request = dict(skips={'paid-task': custody, USER_DEPLOY_CASE: user})
+        receipt = dict(source=source, gate='smoke', user_deploy_quarantine={USER_DEPLOY_CASE: copy.deepcopy(user)},
+                       user_deploy_quarantine_execution={USER_DEPLOY_CASE: 'UNVERIFIED'},
+                       cases={USER_DEPLOY_CASE: 'SKIP', 'paid-task': 'SKIP', 'chat-mode': 'UNVERIFIED'},
+                       case_complete={USER_DEPLOY_CASE: False, 'paid-task': False, 'chat-mode': False})
+        return receipt, request, ['chat-mode'], USER_DEPLOY_CASE
+
+    def test_recorded_user_quarantine_is_accepted_beside_custody(self):
+        from deploy_test_native_cleanup import mixed_exclusion_inventory
+        receipt, request, checks, _ = self.fixture()
+        self.assertEqual(mixed_exclusion_inventory(receipt, request, checks), request['skips'])
+
+    def test_unrecorded_changed_or_credited_exclusions_are_refused(self):
+        from deploy_test_native_cleanup import mixed_exclusion_inventory
+        receipt, request, checks, case = self.fixture()
+        mutations = [
+            lambda r, q: r.pop('user_deploy_quarantine'),
+            lambda r, q: q['skips'][case].update(reason='changed'),
+            lambda r, q: [x['skips' if x is q else 'user_deploy_quarantine'][case]['credit'].update(cleanup=True) for x in (r, q)],
+            lambda r, q: r['user_deploy_quarantine_execution'].update({case: 'PASS'}),
+            lambda r, q: r['cases'].update({case: 'UNVERIFIED'}),
+            lambda r, q: q['skips'].update({'other': dict(q['skips'][case])}),
+            lambda r, q: q['skips']['paid-task']['credit'].update(test_execution=True),
+        ]
+        for index, mutate in enumerate(mutations):
+            r, q = copy.deepcopy(receipt), copy.deepcopy(request); mutate(r, q)
+            with self.subTest(index=index), self.assertRaises(ValueError):
+                mixed_exclusion_inventory(r, q, checks)
+        with self.assertRaisesRegex(ValueError, 'mixed original exclusion inventory'):
+            mixed_exclusion_inventory(receipt, request, checks + ['paid-task'])
+
+
 class NativeObservationLoss42(unittest.TestCase):
     """Capture-specific header admission never substitutes for full native closure."""
     def setUp(self):
