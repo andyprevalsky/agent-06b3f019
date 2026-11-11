@@ -160,27 +160,139 @@ def check_cleanup_selftest_does_not_repeat_prerequisites(source: Path) -> None:
     ]
     with tempfile.TemporaryDirectory(prefix='cleanup-prerequisite-control-') as folder:
         folder = Path(folder)
-        for mode, failure, wanted_status, wanted in (
-            ('1', '', 0, []),
-            ('0', '', 0, expected),
-            ('', '', 0, expected),
-            ('0', expected[3], 1, expected[:4]),
+        for mode, failure, wanted_status, wanted, shard in (
+            ('1', '', 0, [], ''),
+            ('0', '', 0, expected, ''),
+            ('', '', 0, expected, ''),
+            ('0', expected[3], 1, expected[:4], ''),
+            # A numbered scenario shard is a child of the parent that already
+            # ran every prerequisite; an explicit serial run still runs them.
+            ('0', '', 0, [], '2'),
+            ('', '', 0, expected, 'all'),
         ):
             record = folder / 'calls'
             record.write_text('')
             prefix = ('ROOT_DIR=/fixture\nCALL_RECORD=' + shlex.quote(str(record)) +
                       '\nFAIL_NAME=' + shlex.quote(failure) +
                       '\nCLOUDBENCH_TEST_CLEANUP_EXIT_SELF_TEST=' + shlex.quote(mode) +
+                      '\nCLOUDBENCH_TEST_SHARD=' + shlex.quote(shard) +
                       '\npython3() { local name="${1##*/}"; printf "%s\\n" "$name" >> "$CALL_RECORD"; '
                       '[ "$name" != "$FAIL_NAME" ]; }\n')
             result = subprocess.run(['bash', '-c', prefix + prerequisite_block], capture_output=True, text=True)
             actual = record.read_text().splitlines()
-            assert result.returncode == wanted_status, (mode, failure, result.returncode, result.stderr)
-            assert actual == wanted, (mode, failure, actual, wanted)
+            assert result.returncode == wanted_status, (mode, failure, shard, result.returncode, result.stderr)
+            assert actual == wanted, (mode, failure, shard, actual, wanted)
 
 
 check_cleanup_selftest_does_not_repeat_prerequisites(ROOT / 'scripts/tests/cloudbench-multi-workstream.test.sh')
 
+
+def check_scenario_shards(source: Path) -> None:
+    """Every scenario runs in exactly one concurrent shard; the parent fails if any shard fails."""
+    import os
+    import re
+
+    text = source.read_text()
+    lines = text.splitlines()
+    shards = re.search(r'^CLOUDBENCH_TEST_SHARDS=\(([0-9 ]+)\)$', text, re.M)
+    assert shards, 'scenario shard list is missing'
+    declared = shards.group(1).split()
+    # Column-0 if/fi pairs carry the top-level scenario structure; a shard gate
+    # is an if whose (possibly continued) condition names its shard.
+    stack, used, owners_seen = [], set(), []
+    start = next(i for i, line in enumerate(lines) if line.startswith('# Scenario 1 '))
+    function_end = heredoc_end = None
+    for index in range(start, len(lines)):
+        line = lines[index]
+        # Embedded heredoc programs are data to the shell structure.
+        if heredoc_end is not None:
+            if line.strip() == heredoc_end:
+                heredoc_end = None
+            continue
+        heredoc = re.search(r"<<-?\s*['\"]?([A-Za-z_][A-Za-z0-9_]*)['\"]?", line)
+        if heredoc:
+            heredoc_end = heredoc.group(1)
+        # Function bodies run where they are called, not where they are defined.
+        if function_end is not None:
+            if line == function_end:
+                function_end = None
+            continue
+        definition = re.match(r'^[a-z_]+\(\) *([{(])', line)
+        if definition:
+            function_end = '}' if definition.group(1) == '{' else ')'
+            continue
+        if line.startswith('if ') and re.search(r';\s*fi$', line):
+            continue  # a one-line conditional opens no scenario block
+        if line.startswith('if '):
+            condition, cursor = line, index
+            while not re.search(r'\bthen$', lines[cursor]):
+                cursor += 1
+                condition += lines[cursor]
+            gate = re.search(r'cloudbench_test_shard_selected ([0-9]+)', condition)
+            stack.append(gate.group(1) if gate else None)
+            if gate:
+                used.add(gate.group(1))
+        elif line == 'fi' or line.startswith('fi '):
+            assert stack, f'unbalanced top-level fi at line {index + 1}'
+            stack.pop()
+        elif line.startswith('echo "PASS: scenario '):
+            owners = [item for item in stack if item is not None]
+            assert len(owners) == 1, (index + 1, line, owners)
+            owners_seen.append(owners[0])
+        elif line.startswith('echo "PASS: every controller, including fail-closed runs'):
+            assert not [item for item in stack if item is not None], 'final reaping check must run in every shard'
+    assert not stack, 'unbalanced scenario shard gates'
+    assert used == set(declared), (used, declared)
+    assert set(owners_seen) == set(declared), owners_seen
+    assert len(owners_seen) >= 30, len(owners_seen)
+
+    begin = text.index('CLOUDBENCH_TEST_SHARDS=(')
+    end = text.index('# macOS maps /var to /private/var.', begin)
+    count = str(len(declared))
+    # A child records its start and proves concurrency by waiting until every
+    # declared shard has started, then fails only when selected to fail.
+    child = (
+        'touch "$SHARD_DIR/started-$CLOUDBENCH_TEST_SHARD"\n'
+        'if [ "$CLOUDBENCH_TEST_SHARD" != all ]; then\n'
+        '    for _ in $(seq 1 100); do\n'
+        '        [ "$(find "$SHARD_DIR" -name "started-[0-9]*" | wc -l)" -ge ' + count + ' ] && break\n'
+        '        sleep 0.1\n'
+        '    done\n'
+        '    [ "$(find "$SHARD_DIR" -name "started-[0-9]*" | wc -l)" -ge ' + count + ' ] || exit 7\n'
+        'fi\n'
+        'echo "child $CLOUDBENCH_TEST_SHARD ran"\n'
+        '[ "$CLOUDBENCH_TEST_SHARD" != "${FAIL_SHARD:-}" ]\n'
+    )
+    with tempfile.TemporaryDirectory(prefix='scenario-shards-') as folder:
+        folder = Path(folder)
+        script = folder / 'suite.sh'
+        script.write_text('set -uo pipefail\n' + text[begin:end] + child)
+
+        def run(**overrides):
+            for item in folder.glob('started-*'):
+                item.unlink()
+            env = {k: v for k, v in os.environ.items() if not k.startswith('CLOUDBENCH_TEST_')}
+            env.update(SHARD_DIR=str(folder), **overrides)
+            return subprocess.run(['bash', str(script)], capture_output=True, text=True, env=env, timeout=60)
+
+        result = run()
+        assert result.returncode == 0, (result.returncode, result.stdout, result.stderr)
+        for shard in declared:
+            assert f'[shard {shard}] child {shard} ran' in result.stdout, result.stdout
+            assert f'shard {shard} exit=0' in result.stdout, result.stdout
+        assert 'PASS: all multi-workstream scenario shards passed' in result.stdout, result.stdout
+        result = run(FAIL_SHARD=declared[-1])
+        assert result.returncode == 1, (result.returncode, result.stdout, result.stderr)
+        assert f'shard {declared[-1]} exit=1' in result.stdout, result.stdout
+        assert 'PASS: all multi-workstream' not in result.stdout, result.stdout
+        result = run(CLOUDBENCH_TEST_GROUP_TERM_ONLY='1')
+        assert result.returncode == 0 and result.stdout == 'child all ran\n', (result.stdout, result.stderr)
+        result = run(CLOUDBENCH_TEST_SHARD='9')
+        assert result.returncode == 2 and 'unknown CLOUDBENCH_TEST_SHARD' in result.stderr, result.stderr
+    print('PASS: multi-workstream scenarios run in exactly one concurrent shard and any shard failure fails the suite')
+
+
+check_scenario_shards(ROOT / 'scripts/tests/cloudbench-multi-workstream.test.sh')
 
 def check_cleanup_fixture_registration(root: Path) -> None:
     """The cleanup regression must have exactly one direct native structural recipe."""

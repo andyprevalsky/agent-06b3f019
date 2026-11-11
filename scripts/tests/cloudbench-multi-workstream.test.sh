@@ -39,9 +39,11 @@ source "$ROOT_DIR/scripts/lib/cloudbench-env.sh"
 # ownership and release with the minimum real allocation; the focused reserve
 # tests cover sizing and low-space behavior separately.
 export CLOUDBENCH_CLEANUP_DISK_RESERVE_MB="${CLOUDBENCH_CLEANUP_DISK_RESERVE_MB:-32}"
-# The recursive cleanup-exit probe exercises only cleanup(); the parent has
-# already run every prerequisite, so do not execute those suites a second time.
-if [ "${CLOUDBENCH_TEST_CLEANUP_EXIT_SELF_TEST:-0}" != "1" ]; then
+# The recursive cleanup-exit probe exercises only cleanup(), and a numbered
+# scenario shard is a child of a parent that already ran every prerequisite,
+# so neither executes those suites a second time.
+if [ "${CLOUDBENCH_TEST_CLEANUP_EXIT_SELF_TEST:-0}" != "1" ] \
+    && [[ ! "${CLOUDBENCH_TEST_SHARD:-}" =~ ^[1-9]$ ]]; then
     python3 "$ROOT_DIR/scripts/tests/cloudbench-worker-readiness-publication.test.py" || exit 1
     python3 "$ROOT_DIR/scripts/tests/cloudbench-fixture-port-allocation.test.py" || exit 1
     python3 "$ROOT_DIR/scripts/tests/cloudbench-fixture-process-cleanup.test.py" || exit 1
@@ -66,6 +68,90 @@ fleet_bench_app() {
     [ -n "$app" ] || return 1
     printf '%s' "$app"
 }
+
+# Independent scenario shards. Every shard is this same script with its own
+# private TMP_ROOT, fake provider, sandbox repository, workspaces, Hubs and
+# port window, so shards share no fixture state; each shard still runs the full
+# fixture setup and the final process-reaping checks against its own root.
+# A plain invocation runs the four shards concurrently and fails unless every
+# shard passes. Focused modes and CLOUDBENCH_TEST_SHARD=all keep the original
+# serial order. The scenarios, their order inside a shard, every assertion and
+# every controller timeout are unchanged; only independent groups overlap.
+CLOUDBENCH_TEST_SHARDS=(1 2 3 4)
+cloudbench_test_focused_mode() {
+    local name
+    for name in DISPOSABLE_ONLY EXACT_RECOVERY_ORDER_ONLY STARTUP_FAILURE_ONLY \
+        GROUP_TERM_ONLY GROUP_TERM_CASES READINESS_RETRY_ONLY MANDATORY_METRICS_ONLY \
+        CLEANUP_EXIT_SELF_TEST LISTENER_STATUS_SELF_TEST CLONE_SOURCE_RATE_LIMIT_REPRO \
+        RESTORING_VOLUME_REAP_REPRO REGISTRY_RETIRE_RACE_SELF_TEST PENDING_HUB_SELF_TEST \
+        STALE_HUB_REPLACEMENT_SELF_TEST RESET_HUB_SELF_TEST CONCURRENT_RUN_SELF_TEST; do
+        name="CLOUDBENCH_TEST_$name"
+        case "${!name:-0}" in 0|'') ;; *) return 0 ;; esac
+    done
+    return 1
+}
+cloudbench_test_shard_selected() {  # <shard>
+    [ "$CLOUDBENCH_TEST_SHARD" = all ] || [ "$CLOUDBENCH_TEST_SHARD" = "$1" ]
+}
+CLOUDBENCH_TEST_SHARD="${CLOUDBENCH_TEST_SHARD:-}"
+if [ -z "$CLOUDBENCH_TEST_SHARD" ] && cloudbench_test_focused_mode; then
+    CLOUDBENCH_TEST_SHARD=all
+fi
+case "$CLOUDBENCH_TEST_SHARD" in
+    ''|all) ;;
+    *)
+        case " ${CLOUDBENCH_TEST_SHARDS[*]} " in
+            *" $CLOUDBENCH_TEST_SHARD "*) ;;
+            *) echo "FAIL: unknown CLOUDBENCH_TEST_SHARD=$CLOUDBENCH_TEST_SHARD" >&2; exit 2 ;;
+        esac
+        ;;
+esac
+if [ -z "$CLOUDBENCH_TEST_SHARD" ]; then
+    shard_pids=()
+    shard_names=()
+    shard_status_dir="$(mktemp -d)"
+    stop_shards() {  # <exit-status>
+        local pid
+        trap - HUP INT TERM
+        for pid in "${shard_pids[@]}"; do
+            kill -TERM "$pid" 2>/dev/null || true
+        done
+        wait 2>/dev/null || true
+        rm -rf "$shard_status_dir"
+        exit "$1"
+    }
+    trap 'stop_shards 129' HUP
+    trap 'stop_shards 130' INT
+    trap 'stop_shards 143' TERM
+    for shard in "${CLOUDBENCH_TEST_SHARDS[@]}"; do
+        # Prefix every line so concurrent shard output stays attributable in
+        # the one native log, including after an outer timeout.
+        CLOUDBENCH_TEST_SHARD="$shard" bash "${BASH_SOURCE[0]}" "$@" \
+            > >(sed -u "s/^/[shard $shard] /") 2>&1 &
+        shard_pids+=("$!")
+        shard_names+=("$shard")
+    done
+    shard_failed=0
+    for index in "${!shard_pids[@]}"; do
+        shard_status=0
+        wait "${shard_pids[$index]}" || shard_status=$?
+        printf '%s\n' "$shard_status" > "$shard_status_dir/${shard_names[$index]}"
+        [ "$shard_status" -eq 0 ] || shard_failed=1
+    done
+    trap - HUP INT TERM
+    # Let the line-prefix readers flush before the verdict.
+    wait 2>/dev/null || true
+    for shard in "${shard_names[@]}"; do
+        echo "shard $shard exit=$(cat "$shard_status_dir/$shard")"
+    done
+    rm -rf "$shard_status_dir"
+    if [ "$shard_failed" -ne 0 ]; then
+        echo "FAIL: at least one multi-workstream scenario shard failed" >&2
+        exit 1
+    fi
+    echo "PASS: all multi-workstream scenario shards passed"
+    exit 0
+fi
 
 # macOS maps /var to /private/var. The recovery contract correctly requires a
 # canonical runs root, so create the fixture under its physical path.
@@ -3168,7 +3254,8 @@ if [ "${CLOUDBENCH_TEST_DISPOSABLE_ONLY:-0}" != "1" ] \
     && [ "${CLOUDBENCH_TEST_STARTUP_FAILURE_ONLY:-0}" != "1" ] \
     && [ "${CLOUDBENCH_TEST_GROUP_TERM_ONLY:-0}" != "1" ] \
     && [ "${CLOUDBENCH_TEST_READINESS_RETRY_ONLY:-0}" != "1" ] \
-    && [ "${CLOUDBENCH_TEST_MANDATORY_METRICS_ONLY:-0}" != "1" ]; then
+    && [ "${CLOUDBENCH_TEST_MANDATORY_METRICS_ONLY:-0}" != "1" ] \
+    && cloudbench_test_shard_selected 1; then
 # --provision-pool is a legacy new-pool request (043659fa8): without measured
 # new-Machine admission both concurrent workstreams must refuse before any
 # provider mutation and leave no pool ID, claim or fleet ownership behind.
@@ -4451,6 +4538,9 @@ if [ "${CLOUDBENCH_TEST_READINESS_RETRY_ONLY:-0}" = "1" ]; then
     exit 0
 fi
 
+# Shard 1: Hub ownership checks, startup visibility and scenarios 2 to
+# 2-wait-config. The Hubs above serve every shard.
+if cloudbench_test_shard_selected 1; then
 # A numeric PID is never hub ownership. Both a reused PID (birth mismatch) and
 # an exact live hub belonging to another workspace must be refused without
 # signaling the process.
@@ -4993,6 +5083,7 @@ fi
 assert_no_controller_script_snapshots "pre-detach configuration rejection"
 echo "PASS: scenario 2-wait-config — invalid recovery timeout fails before detach or allocation"
 fi
+fi
 
 if [ "${CLOUDBENCH_TEST_EXACT_RECOVERY_ORDER_ONLY:-0}" = "1" ] \
     || [ "${CLOUDBENCH_TEST_GROUP_TERM_ONLY:-0}" = "1" ]; then
@@ -5331,6 +5422,8 @@ PY
     SESSION_CONTROLLERS=()
     echo "PASS: scenario 2-group-term ($bench) — delivered stop drained to completion with no native stop; controller cleanup ${cleanup_seconds}s after the runner exited; exact owner retained for recovery"
 }
+# Shard 1: fixture reaper, process-group TERM and exact-recovery scenarios.
+if cloudbench_test_shard_selected 1; then
 # The fixture reaper must find and stop a leaked session-leader controller, so
 # a failed or timed-out case can never leave one running after TMP_ROOT is gone.
 leak_pid_file="$TMP_ROOT/session-leak.pid"
@@ -5573,6 +5666,24 @@ if [ "${CLOUDBENCH_TEST_EXACT_RECOVERY_ORDER_ONLY:-0}" = "1" ]; then
     echo "All exact stale-owner recovery ordering checks passed."
     exit 0
 fi
+# The 2-cancel runner outlives its SIGKILLed controller group by design and
+# ends only once its fake guest is retired. In serial order the next scenario's
+# reset_fake_state retired it; a sharded run applies the same transition here
+# and bounds that exit before the shared final reaping assertions run.
+if [ "$CLOUDBENCH_TEST_SHARD" != all ]; then
+    reset_fake_state
+    shard_boundary_deadline=$((SECONDS + 60))
+    while ps -axo args= 2>/dev/null | awk -v root="$TMP_ROOT/" \
+        'index($0, root) && $1 == "bash" && $2 ~ /\/run-bench-(fleet|cloud)$/ { found = 1 } END { exit !found }'; do
+        [ "$SECONDS" -lt "$shard_boundary_deadline" ] || break
+        sleep 0.5
+    done
+    echo "shard 1 boundary: retired fake guests; controllers settled after $((SECONDS - shard_boundary_deadline + 60))s"
+fi
+fi
+
+# Shard 2: scenarios 2a to 2f.
+if cloudbench_test_shard_selected 2; then
 
 # A freshly cloned Machine can already have its provider-authoritative 6PN
 # address while its derived .internal hostname is absent from Fly DNS. The
@@ -5770,6 +5881,10 @@ pending_record="$(find "$SANDBOX/.git/cloudbench-fleet-ownership" -path '*/clone
 rm -rf "$SANDBOX/.git/cloudbench-fleet-ownership"
 rm -f "$FAKE_DIR/desired-two" "$FAKE_DIR/block-worker-clone" "$FAKE_DIR/worker-clone-blocked"
 echo "PASS: scenario 2f — blocked provisioning requires causal terminal proof and recoverable ownership"
+fi
+
+# Shard 3: scenarios 2g to 2k.
+if cloudbench_test_shard_selected 3; then
 
 # Preserve both failure boundaries under falling demand. Missing guest evidence
 # is infrastructure failure; a separately captured post-supervisor startup
@@ -6015,6 +6130,10 @@ print(" ".join(sorted(m["name"] for m in machines)))
     fail "missing-terminal teardown leaked machines: $remaining"
 rm -f "$FAKE_DIR/desired-two" "$FAKE_DIR/worker-ready-before-child-no-terminal"
 echo "PASS: scenario 2k — capacity cannot pass without causal autoscaler completion"
+fi
+
+# Shard 4: scenarios 3 to 16.
+if cloudbench_test_shard_selected 4; then
 
 # ═════════════════════════════════════════════════════════════════════════════
 # Scenario 3 — stopped inventory cannot consume the active-compute ceiling
@@ -7187,6 +7306,7 @@ fi
 # Remove only this asserted, test-owned retained name-only record.
 rm -rf "$SANDBOX/.git/cloudbench-fleet-ownership"
 echo "PASS: scenario 16 — ambiguous clone name stays owned for reconciliation; retry runs and siblings are reaped"
+fi
 
 # Fail-closed scenarios exit nonzero by design, but every controller must still
 # reap its own snapshot/aggregator loops instead of orphaning them to init.
