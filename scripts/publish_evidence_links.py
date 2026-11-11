@@ -559,8 +559,18 @@ def _recorded_episode_diagnostics(messages: list) -> tuple[set[int], set[str]]:
                        and meta.get("toolStatus") in {"FINISHED", "ERROR"}
                        and _terminal_matches_recording_episode(meta, identity)
                        for i, meta in rows)
-        if not saved or not terminal:
+        logical_terminal = any(i > index and meta.get("action_type") == "task_complete"
+                               and meta.get("task_id") == identity[0]
+                               and meta.get("workflowGeneration") == identity[1]
+                               and meta.get("toolStatus") in {"FINISHED", "ERROR"}
+                               for i, meta in rows)
+        if not saved or not logical_terminal:
             missing.add(identity[0])
+            continue
+        # A pause/resume episode may save media without ending the logical task.
+        # Its later task terminal is checked by the caller. Only suppress a
+        # fenced diagnostic when this exact episode also has its own terminal.
+        if not terminal:
             continue
         for i, meta in rows:
             if (i > saved[-1][0] and meta.get("action_type") == "recording"

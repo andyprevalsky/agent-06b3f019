@@ -1,0 +1,27 @@
+{
+  "format": "PR1854-DEFERRED-REVIEW-FINDINGS-V1",
+  "policy": "Three delivered CodeRabbit reviews; user-authorized nonsecurity deferrals. Observations do not invent failed-test repair goals.",
+  "findings": [
+    {
+      "id": "4509179165",
+      "description": "Existing-backend Hub directory isolation",
+      "url": "https://github.com/Rose-Ai-Labs/rose/pull/1854#discussion_r4509179165",
+      "disposition": "deferred nonsecurity finding under delivered-review cap; repair not claimed",
+      "original_review_record_sha256": "040b38875311be2e56f7bd0f92b79c77587c8ae07b35987c1a36bd92773ca31f"
+    },
+    {
+      "id": "4509179173",
+      "description": "Skipped peer recovery must fail closed",
+      "url": "https://github.com/Rose-Ai-Labs/rose/pull/1854#discussion_r4509179173",
+      "disposition": "deferred nonsecurity finding under delivered-review cap; repair not claimed",
+      "original_review_record_sha256": "56e1908481e0513df6d739c2ce1ac2955abf6c46c7ef4ddc75ce9d4f0e698383"
+    },
+    {
+      "id": "4509179174",
+      "description": "SIGTERM stability-worker cancellation",
+      "url": "https://github.com/Rose-Ai-Labs/rose/pull/1854#discussion_r4509179174",
+      "disposition": "deferred nonsecurity finding under delivered-review cap; repair not claimed",
+      "original_review_record_sha256": "58b2d82d3ab6fdcf475f33b0523108fa46f88ae4e7bb31f37b6f4d2a6ef52ecd"
+    }
+  ]
+}

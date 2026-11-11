@@ -21,6 +21,8 @@ MAX_RAW_FORENSIC_RUN_BYTES = 128 * 1024 * 1024
 # 98 MB on 2026-11-07, beyond the 64 MiB receipt cap, so its verified cleanup could never be bound
 # and every later smoke launch was refused. Run records get their own, still finite, cap.
 RUN_RECORD_MAX_BYTES = 512 * 1024 * 1024
+# A complete multi-participant proof has a separate finite I/O allowance.
+MAX_RAW_RUN_PROOF_BYTES = RUN_RECORD_MAX_BYTES
 
 
 def fleet_git_common(root):
@@ -182,6 +184,35 @@ def recovered_runtime(fleet, owner_token, benches, rows, identities, bound, docu
     need(machines == {row['machine_id'] for row in rows}, 'recovered resource coverage')
 
 
+def stopped_pre_stack_execution(fleet, root, receipt, machine, token, evidence, bound, document):
+    """Launch isolation only for a positively captured pre-stack dependency rejection."""
+    native_driver = bound(root / 'scripts/cloudbench-run.sh', historical_head=receipt['source']['head'])
+    need(hashlib.sha256(native_driver).hexdigest()
+         == '1958de1798e8fdc46bd2081c1d530e9574c0957db80857d367802904f5ad5521',
+         'unreviewed pre-stack driver')
+    benches = json.loads(bound(fleet / '_batch/benches.json'))
+    need(len(benches) == 1, 'stopped startup task closure')
+    out = fleet / benches[0]['name']
+    need(bound(out / '.cid') == ('clone ' + machine + '\n').encode()
+         and document(out / 'runtime-evidence.owner.json')
+             == {'version': 1, 'machine_id': machine, 'run_token': token}, 'stopped startup owner')
+    import base64, gzip
+    payload = json.loads(gzip.decompress(bound(out / 'cloudbench-boot-payload.json.gz')))
+    need(base64.b64decode(payload['files']['cloudbench-run.sh'], validate=True) == native_driver,
+         'stopped startup driver payload changed')
+    path = out / 'remote-logs/cloudbench-driver.log'
+    need(evidence.get('startup_rejection_log') == str(path), 'stopped startup log binding')
+    log = bound(path).decode()
+    steps = re.findall(r'^\[cloudbench [0-9:]+\] STEP (\S+)$', log, re.M)
+    need(steps == ['git_sync', 'env_decode', 'dep_sync']
+         and log.count('RUNSTAMP-' + token + '\n') == 1
+         and ('[cloudbench] verified checkout ' + receipt['source']['head'] + '\n') in log
+         and log.count('FATAL: cloudbench dependency synchronization failed') == 1
+         and log.count('::CLOUDBENCH-DONE:: token=' + token + ' exit=1\n') == 1
+         and 'driver cleanup evidence interrupt_status=0 cleanup_ack=1' in log,
+         'stopped startup positive terminal boundary')
+
+
 def isolated_execution(fleet, life, root, receipt, proof, bound, document, tree):
     """Execution admission only; quarantined archives, finances and resources remain owned."""
     owner = life['fleet_owner_token']
@@ -229,18 +260,39 @@ def isolated_execution(fleet, life, root, receipt, proof, bound, document, tree)
                  'provider observation origin')
             pair = [r for r in packet['rows'] if r.get('expected_machine') == machine]
             need(len(pair) == 2 and {r['kind'] for r in pair} == {'machine', 'volume'}, 'provider pair closure')
+            stopped_startup = next(r for r in pair if r['kind'] == 'machine')['metadata'].get('state') == 'stopped'
+            if stopped_startup:
+                need(registry.exists() and row.get('disposition') == 'owned', 'stopped startup custody must remain quarantined')
+                stopped_pre_stack_execution(fleet, root, receipt, machine, token, evidence, bound, document)
             for observed in pair:
                 need(observed['method'] == 'GET' and observed['http_status'] == 200 and observed['no_retry'] is True
                      and observed['expected_volume'] == row['volume_id']
                      and re.fullmatch('[0-9a-f]{64}', observed['response_sha256']), 'provider response identity')
                 value = observed['metadata']
+                if stopped_startup:
+                    raw = bound(Path(observed['raw_response']))
+                    need(hashlib.sha256(raw).hexdigest() == observed['response_sha256'],
+                         'stopped startup provider response hash')
+                    native_value = json.loads(raw)
+                    need(native_value['id'] == value['id'] and native_value['state'] == value['state'],
+                         'stopped startup provider response state')
+                    if observed['kind'] == 'machine':
+                        env = native_value['config']['env']
+                        need({key: env.get(key) for key in ('REF', 'CLOUDBENCH_RUN_TOKEN')} == value['source_binding']
+                             and any(mount.get('volume') == row['volume_id'] and mount.get('path') == '/data'
+                                     for mount in native_value['config']['mounts']),
+                             'stopped startup provider source and mount')
+                    else:
+                        need(native_value['attached_machine_id'] == value['attached_machine_id'],
+                             'stopped startup provider attachment')
                 if observed['kind'] == 'machine':
-                    need(observed['id'] == value['id'] == machine and value['state'] == 'destroyed'
+                    need(observed['id'] == value['id'] == machine and value['state'] == ('stopped' if stopped_startup else 'destroyed')
                          and value['source_binding'] == {'REF': receipt['source']['head'], 'CLOUDBENCH_RUN_TOKEN': token},
                          'old execution not provider terminal')
                 else:
                     need(observed['id'] == value['id'] == row['volume_id']
-                         and value['state'] in {'pending_destroy', 'destroyed'} and value['attached_machine_id'] is None,
+                         and (value['state'] == 'created' and value['attached_machine_id'] == machine if stopped_startup
+                              else value['state'] in {'pending_destroy', 'destroyed'} and value['attached_machine_id'] is None),
                          'old volume remains attached')
         else:
             observed = document(evidence['current_os'])
@@ -935,7 +987,7 @@ def validate(receipt, owner, proof):
          and isinstance(proof['observed_by'], str) and proof['observed_by'].strip(), 'confirmation')
     bindings, used = proof['files'], set()
     run_artifacts = set()
-    raw_remaining = [MAX_RAW_FORENSIC_RUN_BYTES]
+    raw_remaining = [MAX_RAW_RUN_PROOF_BYTES]
     historical_sources = {}
     need(isinstance(bindings, dict), 'missing file bindings')
 
@@ -1264,14 +1316,16 @@ def validate(receipt, owner, proof):
         need(isinstance(benches, list) and benches and len({b['name'] for b in benches}) == len(benches), 'native inventory')
         if fleet in parents:
             need({b['name'] for b in benches} == parents[fleet]['checks'], 'parent requested inventory')
+        life = document(fleet / '_batch/lifecycle.json')
+        failed_canary = layout == 'campaign-v1' and fleet not in parents and life.get('status') == 'failed'
         run_path = fleet / '_batch/run.json'
-        if isolated or preallocation or mixed or fleet in admission_parents:
+        if isolated or preallocation or mixed or fleet in admission_parents or failed_canary:
             # These layouts consume the original projection. Bind its control
             # metadata through the bounded forensic reader; logs stay opaque.
             from deploy_test_run_artifact import read_run_artifact
             run = read_run_artifact(run_path, bindings.get(str(run_path)), MAX_RECEIPT_BYTES,
                                     raw_limit=min(RUN_RECORD_MAX_BYTES, MAX_RAW_FORENSIC_RUN_BYTES),
-                                    raw_remaining=raw_remaining)
+                                    raw_remaining=raw_remaining, raw_aggregate_limit=MAX_RAW_RUN_PROOF_BYTES)
             used.add(str(run_path))
             run_artifacts.add(str(run_path))
         else:
@@ -1287,10 +1341,8 @@ def validate(receipt, owner, proof):
             raw_remaining[0] -= verified_size
             used.add(str(run_path))
             run = None
-        life = document(fleet / '_batch/lifecycle.json')
         owner_token = life['fleet_owner_token']
         need(isinstance(owner_token, str) and re.fullmatch('[0-9a-f]{32}', owner_token), 'fleet owner')
-        failed_canary = isolated and fleet not in parents and life.get('status') == 'failed'
         need(type(life.get('version')) is int and life['version'] == 1 and life['run_id'] == fleet.name
              and life['workspace_root'] == str(root) and life['hub_publication_failed'] is False
              and type(life['controller_exit_code']) is int
@@ -1329,6 +1381,20 @@ def validate(receipt, owner, proof):
             link = canary_links.get(fleet)
             need(link and link['parent'] in parents, 'failed canary parent link')
             zero_allocation = isolated_canary_release(fleet, life, benches, run, root, receipt, proof, link, bound, tree)
+            if not isolated:
+                # Normal release of a failed probe still requires exact execution retirement.
+                processes = subprocess.check_output(['ps', '-ax', '-o', 'pid=,pgid=,stat='], text=True)
+                pid = int(fleet.name.rsplit('-', 1)[-1])
+                need(pid > 1 and not any(int(r.split()[0]) == pid or int(r.split()[1]) == pid
+                    for r in processes.splitlines() if not r.split()[2].startswith('Z')),
+                    'failed canary controller still active')
+                need(document(fleet / '_batch/disposable-cleanup.json').get('successful_runtime_inferred') is False,
+                     'failed canary runtime inference is not evidence')
+                if zero_allocation:
+                    for bench in benches:
+                        for name in ('cloudbench-run.json', '.cid', 'primary.ids', 'worker-clones.ids'):
+                            artifact = fleet / bench['name'] / name
+                            need(not artifact.exists() and not artifact.is_symlink(), 'failed canary zero-allocation artifact present')
         admission_parent = fleet in admission_parents
         if admission_parent:
             from deploy_test_native_admission import validate_parent
@@ -1463,14 +1529,30 @@ def clean_isolated_successor(state, prior, original, successor):
          and not rows[0][0].get('interrupted')
          and (rows[0][0]['phase'] != 'triage' or rows[0][0].get('independent_full') is True), 'successor full attempt')
     binding = successor.get('execution_binding', {})
-    need(binding.get('contract_digest') == digest(gate) and binding.get('environment') == state['environment']
-         and isinstance(binding.get('input_fingerprint'), str) and binding['input_fingerprint'], 'successor contract')
     folder = Path(successor['log']).parent
     need(bounded_read(folder / 'receipt.json', 'successor receipt') == successor, 'successor receipt changed')
     request = bounded_read(folder / 'request.json', 'successor request')
     need(all(request.get(k) == successor.get(k) for k in ('token', 'source', 'gate'))
          and request.get('worker_recipe') == gate.get('worker_recipe'), 'successor request identity')
     checks, skips = request['checks'], request['skips']
+    if binding.get('contract_digest') != digest(gate):
+        # Authenticate the complete historical gate, not current-case coverage. Only an
+        # inventory extension can be reconstructed: every other byte and old ordering
+        # must still hash to the immutable successor receipt's original contract.
+        attempt = rows[0][0]
+        need(attempt.get('source') == successor['source'] and not attempt.get('stale')
+             and request.get('phase') == attempt['phase'], 'successor historical attempt')
+        need(isinstance(checks, list) and checks and all(isinstance(v, str) for v in checks)
+             and isinstance(skips, dict) and all(isinstance(v, str) for v in skips)
+             and len(set(checks)) == len(checks) and not set(checks) & set(skips),
+             'successor historical inventory shape')
+        historical_checks = set(checks) | set(skips)
+        need(set(original['cases']) <= historical_checks <= set(gate['checks']),
+             'successor historical inventory must preserve original debt')
+        gate = copy.deepcopy(gate)
+        gate['checks'] = [name for name in gate['checks'] if name in historical_checks]
+    need(binding.get('contract_digest') == digest(gate) and binding.get('environment') == state['environment']
+         and isinstance(binding.get('input_fingerprint'), str) and binding['input_fingerprint'], 'successor contract')
     need(isinstance(checks, list) and checks and isinstance(skips, dict)
          and len(set(checks)) == len(checks) and not set(checks) & set(skips)
          and set(checks) | set(skips) == set(gate['checks'])

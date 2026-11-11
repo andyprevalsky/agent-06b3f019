@@ -128,6 +128,9 @@ class BenchmarkTask:
     # dataclass so catalog load does not reject the fields.
     deploy_category: Optional[str] = None
     deploy_canary: bool = False
+    # Deploy quarantine marker {since, repair, error, evidence} (long_horizon.validate_task_quarantine):
+    # the task still runs; deploy smoke reports its failure as non-blocking QUARANTINED_FAIL.
+    quarantine: Optional[dict] = None
 
     def __post_init__(self) -> None:
         # The catalog may list several files under "attachment"; keep the

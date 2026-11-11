@@ -3362,7 +3362,17 @@ async def spawn_claude_code_activity(
     No runtime limit (C11): the activity runs while the CLI works and heartbeats.
     An idle CLI is paused (status ``paused``, resumable), never failed.
     """
+    if not output_schema:
+        # Invalid scheduled arguments cannot heal on a worker/crash retry. Fail
+        # before installing heartbeat context or allocating a sandbox.
+        raise ApplicationError(
+            "output_schema is required for Claude Code agent - parent agent must provide structured output schema in tool call",
+            type="CODE_AGENT_OUTPUT_SCHEMA_REQUIRED",
+            non_retryable=True,
+        )
+
     structlog.contextvars.bind_contextvars(agent_id=agent_id)
+    source_code_provider = code_provider
 
     from helpers.model_pricing import get_model_pricing_with_fallback
 
@@ -3398,11 +3408,6 @@ async def spawn_claude_code_activity(
     action_summary: list[str] = []
     code_events: list[Dict[str, Any]] = []
     terminal_output_persisted_box = [False]
-
-    if not output_schema:
-        raise ValueError(
-            "output_schema is required for Claude Code agent - parent agent must provide structured output schema in tool call"
-        )
 
     if isinstance(attached, dict) and attached.get("target") == "local":
         target = "local"
@@ -3554,6 +3559,17 @@ async def spawn_claude_code_activity(
                 fresh_conversation=(code_session_request or {}).get("fresh_conversation") is True,
                 task_name=(code_session_request or {}).get("task_name"),
                 cli_settings=(code_session_request or {}).get("cli_settings"),
+                resume_config={
+                    "source_code_provider": source_code_provider,
+                    "spawn_args": {
+                        "type": "code", "goal": goal, "output_schema": output_schema,
+                        "github_repo_link": github_repo_url, "target": target, "task_name": task_name,
+                        "attachments": [item.get("original_filename") for item in attachments or []],
+                    },
+                    "attachments": attachments or [],
+                    "model": model,
+                    "fast_mode_cache_enabled": fast_mode_cache_enabled,
+                },
             )
             code_session_id = session_data.get("code_session_id") or code_session_id
             code_session_facts = _spawn_code_session_facts(session_data)

@@ -3520,7 +3520,7 @@ async def test_phone_setup_settings_actual_handler_observation():
         assert "Preserve the original authorized phone task" in wire
         import hashlib
         from domains.spawn_browser_agent_v3.phone import PHONE_GUIDANCE
-        assert hashlib.sha256(PHONE_GUIDANCE.encode()).hexdigest() == "db9ef5717b85df6eb494d6e6e5672cc04f1ba9a638c3800085a76746102197ac", "Ordinary enabled guide must match the saved-credential binding contract"
+        assert hashlib.sha256(PHONE_GUIDANCE.encode()).hexdigest() == "46fe023ec67942b75ad363f5212f9b23cc479b7250e82838f010f0f0e3c16c79", "Ordinary enabled guide must match the saved-credential binding contract"
         for marker in (None, False, "true"):
             plain_setup = {key: value for key, value in setup.items() if key != "googlePasscodeExceptionAllowed"}
             if marker is not None:

@@ -165,13 +165,16 @@ normalize_conductor_workspace_env() {
 
   pwd_physical="$(cd "$PWD" && pwd -P)"
   deploy_worktree_env="$pwd_physical/.context/deploy-worktree.env"
-  if [ -f "$deploy_worktree_env" ] && [ "${BENCHMARK_ISOLATED_RUN:-false}" != "true" ]; then
+  if [ -f "$deploy_worktree_env" ] && [ "${BENCHMARK_ISOLATED_RUN:-false}" != "true" ] \
+    && [ "${ROSE_STABILITY_UNIT_IDENTITY:-}" != "1" ]; then
     # /descend-created deploy worktrees are not registered with Conductor and
     # otherwise inherit their controller's identity and port range. Rehydrate
     # the durable child identity on every new shell before resolving resources.
     # A nested benchmark run already owns a separately reserved identity and
     # port range; rehydrating the parent here would collapse both stacks onto
-    # the deploy database.
+    # the deploy database. So does a new-test stability unit
+    # (select_affected_tests.py --stability): each concurrent backend unit owns
+    # its own victoria_<identity> database.
     . "$deploy_worktree_env"
     if [ "${ROSE_DEPLOY_WORKTREE_PATH:-}" != "$pwd_physical" ]; then
       echo "Deploy worktree config belongs to ${ROSE_DEPLOY_WORKTREE_PATH:-unknown}, not $pwd_physical." >&2

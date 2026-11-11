@@ -97,3 +97,43 @@ None recorded.
 When cloud smoke reports "0/N ready at the start barrier", read the per-task
 `fleet-child.log` for a pre-barrier dep-fingerprint FATAL and rebuild the warm
 image — a branch that changes dependencies invalidates the baked donor image.
+
+## November 9 recurrence: choose the existing compatible dependency source
+
+PR1896 source 3f15002fc6cfc1c8e8b48869653ef958a4e3486a scheduled eight
+nonfinancial tasks, with five separately approved payment overrides. Both first
+canary guests verified that exact source and their injected env digests, then
+failed at STEP dep_sync before stack or task execution. The native primary log
+binds source683e47df5094d8 to immutable image566037c7709a963dbd8fed0925e1d1a0f58fd82fb906064f1e29899d734e85d3.
+The proven snapshot vs_QZPKgY9N58AhmJQkMmRN matched controller metadata, but did
+not establish compatibility of the actual immutable image's JavaScript tree.
+
+Current native helpers compute Node02c5a55d4997901d12ed3cb2f4f4a92163e9b676e4e1af786679f544dbaefbd6
+and Python0c5b7ef2ccac8ee7daf75c6ed63f6d2aff3ab2689982d92c0f44f36663588a99.
+The recorded f852 chat-mode guest used source811d632f2650e8 and image
+90c986df0334674d8c2453f1809769ef2587ae2d8cdf5049fc88b06eee0316b7,
+passed dep_sync, then reached PostgreSQL, services and benchmark execution.
+The compared dependency manifests, Dockerfile and dependency helpers are
+unchanged from f852 to3f. Gate: NOT_INTRODUCED for that incremental source
+comparison; this is not a claim that the failed campaign passed.
+
+The supported current repair is local invocation selection of the already
+qualified dependency-specific pair cloudbench-warm-f1a098adc0f6 /
+cloudbench_data_f1a098adc0f6, with CLOUDBENCH_WARM_SOURCE_PER_DEPS=1 and its own
+profile/image canary stamp and lock. Explicit names avoid creating a different
+source through ensure. No shared donor image/configuration or production env
+is changed. The next canary must earn its stamp normally; no old stamp is
+copied, and guest dependency checks stay mandatory. The older rebuild recipe
+above is historical, not authorization to mutate another lane's donor.
+
+The original native threshold stopped at1/8 and cancelled seven peers. Ten
+participants (eight parents and two linked failed canaries) are retained. All
+original outcomes remain UNVERIFIED. Native resource-release seals and a
+separate cleanup-consumer correction permit only custody reconciliation; they
+do not establish a successful next-source benchmark or physical phone proof.
+
+Private evidence: .context/deploy-pr1896-continuation/smoke-rca/canary-deps-readonly.json,
+routing-addendum.json, dependency-source-comparison.json and the exact native
+campaign76b46237f8f591c9b506f4f650ef64249503ea9fa153b5af96c1a798b560cd54.
+The reviewed wrapper is .context/deploy-pr1896-continuation/run-normal-profile.sh.
+Required current-source validation and deployment remain pending.

@@ -1,0 +1,16 @@
+{
+  "runtime_reviewed_head": "d792e59539b453753d052fd9fb00a497f98ed930",
+  "coderabbit": "SKIPPED usage-cap; native NEUTRAL, not review PASS",
+  "evidence": "PR1885 issue comment6746670328 and exact-head check129351031135; initial source check129350828993 also retained privately",
+  "merged_unreviewed_by_coderabbit": true,
+  "external_provider_alert": "CodeRabbit organization spending cap \u2014 credential or billing change \u2014 NEEDS FIXING",
+  "golden_review": "GROUNDED exact production diff SHA2568f9e21cf1e3d54d4a9a411f09f49dad703f564009bcb2c153802cdbd23946eda; independent adversarial causal review retained",
+  "closeout_review": "The containing records-only PR must pass its exact-head review process, including any evidence-bound usage-cap disposition. Authoritative GitHub review/check/comment records and the PR linked from1885 bind that head; no false PASS.",
+  "initial_records_review": {
+    "head": "edf2d79e93f2f6d0bd2ef35af12536c487e460c6",
+    "native_check": 129431696317,
+    "native_result": "SKIPPED: path filters excluded all15 files; zero analysis, no review PASS",
+    "disposition": "unavailable; never executed",
+    "correction": "Broaden the existing closeout-directory exceptions to include pr-1885-closeout, then request exact new-head review. No exclusion added."
+  }
+}
