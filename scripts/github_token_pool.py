@@ -344,6 +344,23 @@ def rank(results: Sequence[Probe], resource: str = "both") -> list[Probe]:
     return [result for _key, result in sorted(ordered, key=lambda item: item[0])]
 
 
+def pick_member(
+    resource: str = "both",
+    repo_root: Path | None = None,
+    environ: Mapping[str, str] | None = None,
+    base_url: str | None = None,
+    timeout: float = DEFAULT_TIMEOUT_SECONDS,
+) -> Member | None:
+    """The best usable member (name and token), or None when no member is usable.
+
+    For READ-ONLY calls. Only GITHUB_TOKEN answers for the primary identity: a 404 or 403 from any
+    other member (machine account or App) may just mean that member lacks access, so callers retry
+    the read with GITHUB_TOKEN before treating it as an answer.
+    """
+    ranked = rank(probe(members(repo_root, environ, base_url), base_url, timeout), resource)
+    return ranked[0].member if ranked else None
+
+
 def pick_token(
     resource: str = "both",
     repo_root: Path | None = None,
@@ -352,8 +369,8 @@ def pick_token(
     timeout: float = DEFAULT_TIMEOUT_SECONDS,
 ) -> str | None:
     """The best usable member's token, or None when no member is usable."""
-    ranked = rank(probe(members(repo_root, environ, base_url), base_url, timeout), resource)
-    return ranked[0].member.token if ranked else None
+    member = pick_member(resource, repo_root, environ, base_url, timeout)
+    return member.token if member else None
 
 
 def _iso(epoch: int) -> str:

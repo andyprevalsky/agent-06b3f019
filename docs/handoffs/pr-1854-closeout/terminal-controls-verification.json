@@ -1,0 +1,10 @@
+{
+  "format": "PR1854-TERMINAL-CONTROLS-V1",
+  "captured_at": "20261110T025017Z",
+  "receipt": "docs/handoffs/pr-1854-closeout/terminal-controls-archive-receipt.json",
+  "files": 21,
+  "two_authenticated_full_readbacks_passed": true,
+  "copy_manifest_sha256": "f1e6985a3c8341e8c51cf6469cee8dff6e3dd27167e8d8d2fa5261b960142ef3",
+  "scope": "Immutable copies of post-capture review, wrapper control source/results and parent closeout control state. Subsequent PR/readiness receipts are preserved as reviewed Git records; this does not replace the primary runtime archive.",
+  "independent_full_restore_performed": false
+}

@@ -1,6 +1,12 @@
 [
   {
     "name": "test-mass-agent-run-0",
+    "quarantine": {
+      "since": "2026-11-09",
+      "repair": "https://boxes.dev/thread/thr_640c279c6b994dee83eed29581e18e5f",
+      "error": "TREE STALL: newest-active leaf silent 518s (threshold 510s); initial pooled credential GET did not return before cancellation. First native attempt FAILED; one automatic retry PASS (FLAKY).",
+      "evidence": "https://github.com/Rose-Ai-Labs/rose/pull/1854"
+    },
     "title": "Test Mass Agent Run - 0",
     "prompt": "I'm building a personal brand for health, longevity, technology, founder journey [I'll refine the angle]. Analyze the top 50 creators in this niche across YouTube, IG, TikTok, and Substack.\n\nUse a for_each agent run for the per-creator analysis: first identify the top 50 creators, then use spawn_general_purpose_agent_for_each / for_each so one agent analyzes each creator with the same template.\n\nFor each creator, pull their posting cadence, hook formulas, top 5 performing pieces of the last 90 days, and the gaps in what they cover. Then give me: (a) a positioning statement, (b) a 90-day content calendar across all 4 platforms, (c) 30 hook-tested video script openings, and (d) the 20 creators I should engage with weekly to get on their radar.",
     "timeout_seconds": 600,

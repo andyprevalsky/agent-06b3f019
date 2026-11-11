@@ -1,0 +1,17 @@
+{
+  "format": "PR1854-RECOVERY-V1",
+  "archive_receipt": "docs/handoffs/pr-1854-closeout/archive-receipt.json",
+  "restore_helper": "docs/handoffs/whm-b07d9037-preservation/private_archive.py",
+  "command": "agents/venv/bin/python docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-1854-closeout/archive-receipt.json --destination /new-empty-private-directory",
+  "requirements": "Authorized R2 credentials and matching existing TRACE_ARCHIVE_ENCRYPTION_KEY_B64. The independently verified existing Render service supplies these outside the archive; keep authorized Render access. No key values are committed.",
+  "key_proof": "docs/handoffs/pr-1854-closeout/key-recovery-verification.json",
+  "mapping": "Restored .cache/pr1854-preservation/20261110T011649825598Z/snapshot-map.json maps original absolute paths into payload/. Restore as evidence into a private directory first; never reactivate old custody locks, services or guests automatically.",
+  "git": "Three full --all --reflog bundles are self-contained and verified from empty repositories. All needed local refs and original Git runtime custody are retained. Never delete the original branches as part of this closeout.",
+  "limits": "Two authenticated remote full readbacks and final drift checks passed. Independent full restore was not performed. Local hardlink staging is not an independent copy; the verified remote encrypted object is.",
+  "cutoff": "Captured private input bytes at the recorded capture. Subsequent closeout review/PR/deletion-control records are preserved in this reviewed records-only follow-up. Runtime data and original evidence were not edited after capture.",
+  "terminal_controls": {
+    "receipt": "docs/handoffs/pr-1854-closeout/terminal-controls-archive-receipt.json",
+    "verification": "docs/handoffs/pr-1854-closeout/terminal-controls-verification.json",
+    "restore": "Use the same restore helper with this supplemental receipt and a separate new empty private directory. copy-manifest.json maps original control paths. This supplements the primary runtime archive; later reviewed Git records remain in the follow-up PR."
+  }
+}

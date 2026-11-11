@@ -3,10 +3,10 @@ import { execFile } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { setTimeout as sleep } from 'node:timers/promises';
 import { promisify } from 'node:util';
 import { test } from 'node:test';
 import { codePreviewAutostartCommand } from '../../providers/codePreview/preview';
+import { waitFor } from '../helpers/waitFor';
 
 // E2B commands.run waits for the command's output pipe. Backgrounding the whole
 // `mkdir && nohup …` list kept a subshell on that pipe for the preview's life,
@@ -31,7 +31,7 @@ test('preview autostart returns at once and leaves the preview running detached'
     const elapsed = Date.now() - started;
     assert.equal(stdout, '');
     assert.ok(elapsed < 2000, `autostart held the caller for ${elapsed} ms`);
-    for (let i = 0; i < 40 && !existsSync(marker); i++) await sleep(100);
+    await waitFor('the detached preview marker', () => existsSync(marker), { timeoutMs: 4000 });
     assert.ok(existsSync(marker), 'the detached preview never started');
   } finally {
     rmSync(home, { recursive: true, force: true });

@@ -45,14 +45,22 @@ def specs(suites):
 
 
 def classify_lane(lane, expected, report, events):
+    """Classify complete native attempt chains; uncertain evidence stays unknown."""
     cases = {case_key(lane, row): 'UNVERIFIED' for row in expected}
     try:
+        if (not isinstance(report, dict) or not isinstance(events, list)
+                or any(not isinstance(event, dict) for event in events)):
+            return cases
         observed = inventory(events)
         if (observed != expected or len([e for e in events if e.get('event') == 'begin']) != 1
                 or len([e for e in events if e.get('event') == 'end']) != 1
                 or events[-1].get('event') != 'end'
                 or events[-1].get('status') not in ('passed', 'failed')
                 or any(e.get('event') == 'globalError' for e in events) or report.get('errors')):
+            return cases
+        expected_ids = {item['id'] for item in expected}
+        if any(event.get('event') in ('testBegin', 'hookEnd', 'testEnd')
+               and event.get('id') not in expected_ids for event in events):
             return cases
         rows = list(specs(report['suites']))
         if len(rows) != len(expected) or {r['id'] for r in rows} != {r['id'] for r in expected}:
@@ -64,21 +72,50 @@ def classify_lane(lane, expected, report, events):
             if len(tests) != 1 or tests[0].get('expectedStatus') != 'passed':
                 continue
             results = tests[0]['results']
-            if len(results) != 1 or results[0].get('retry') != 0:
+            if (not isinstance(results, list) or not results
+                    or any(not isinstance(result, dict) for result in results)):
                 continue
-            result = results[0]
-            # Native Before Hooks completes before Playwright invokes the body;
-            # After Hooks completes after it. A failed hook is not a test failure.
+            retries = 0
+            if 'config' in report:
+                config = report['config']
+                if not isinstance(config, dict) or not isinstance(config.get('projects'), list):
+                    continue
+                projects = config['projects']
+                if any(not isinstance(project, dict) for project in projects):
+                    continue
+                matching = [project for project in projects if project.get('name') == item['project']]
+                if len(matching) != 1:
+                    continue
+                retries = matching[0].get('retries')
+            if type(retries) is not int or retries < 0 or len(results) > retries + 1:
+                continue
+            if (results[-1].get('status') in ('failed', 'timedOut')
+                    and len(results) != retries + 1):
+                continue
+            # Every observed retry must have its own complete native lifecycle.
             shape = [('testBegin', None), ('hookEnd', 'Before Hooks'),
                      ('hookEnd', 'After Hooks'), ('testEnd', None)]
-            if ([(e.get('event'), e.get('title')) for e in own] != shape
-                    or any(e.get('retry') != 0 for e in own)
-                    or not all(e.get('ok') is True for e in own if e['event'] == 'hookEnd')
-                    or own[-1].get('status') != result.get('status')):
+            valid = len(own) == len(results) * len(shape)
+            for retry, result in enumerate(results):
+                attempt = own[retry * len(shape):(retry + 1) * len(shape)]
+                if (type(result.get('retry')) is not int or result['retry'] != retry
+                        or [(e.get('event'), e.get('title')) for e in attempt] != shape
+                        or any(type(e.get('retry')) is not int or e['retry'] != retry for e in attempt)
+                        or not all(e.get('ok') is True for e in attempt if e['event'] == 'hookEnd')
+                        or attempt[-1].get('status') != result.get('status')
+                        or result.get('status') not in ('passed', 'failed', 'timedOut')
+                        or (retry < len(results) - 1 and result['status'] == 'passed')):
+                    valid = False
+                    break
+            if not valid:
+                continue
+            # A retried pass needs the existing FLAKY attribution channel.
+            # Keep it unknown until that channel is positively corroborated.
+            if len(results) > 1 and results[-1]['status'] == 'passed':
                 continue
             cases[case_key(lane, item)] = {'passed': 'PASS', 'failed': 'FAIL',
-                                         'timedOut': 'FAIL'}.get(result.get('status'), 'UNVERIFIED')
-    except (KeyError, TypeError, ValueError):
+                                         'timedOut': 'FAIL'}[results[-1]['status']]
+    except (AttributeError, KeyError, TypeError, ValueError):
         return dict.fromkeys(cases, 'UNVERIFIED')
     return cases
 
@@ -165,6 +202,7 @@ def execute(request, root):
 
 
 def _execute(request, root):
+    """Run one source-bound sweep and retain invalid-lane diagnostics as unknown."""
     if source(root) != request['source'] or request.get('worker_root', str(root)) != str(root):
         raise ValueError('semantic source/worker root differs from request')
     directory = root / '.context/deploy-semantic' / hashlib.sha256(request['token'].encode()).hexdigest()
@@ -191,6 +229,8 @@ def _execute(request, root):
             for path in paths:
                 hashes[path.name] = hashlib.sha256(path.read_bytes()).hexdigest()
             events = events_at(paths[1])
+            if any(not isinstance(event, dict) for event in events):
+                raise ValueError('native lifecycle events must be JSON objects')
             cases.update(classify_lane(lane, selected[lane], read(paths[0]), events))
             lane_ends[lane] = events[-1].get('status') if events and events[-1].get('event') == 'end' else None
         except (OSError, ValueError, TypeError) as error:

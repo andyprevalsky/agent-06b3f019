@@ -141,6 +141,7 @@ for (const fence of [
         requestKey,
       });
       try {
+        const frameEntryDeadlineMs = 5000;
         let timer: ReturnType<typeof setTimeout> | undefined;
         try {
           await Promise.race([
@@ -149,7 +150,10 @@ for (const fence of [
               throw new Error('Portrait returned before frame');
             }),
             new Promise<never>((_, reject) => {
-              timer = setTimeout(() => reject(new Error('Portrait frame did not begin')), 5000);
+              timer = setTimeout(
+                () => reject(new Error('Portrait frame did not begin')),
+                frameEntryDeadlineMs
+              );
             }),
           ]);
         } finally {

@@ -7,6 +7,15 @@ from pathlib import Path
 import pytest
 import structlog.contextvars
 
+from tests.unit._blackbox_harness import blackbox_harness as _harness
+
+
+@pytest.fixture(autouse=True)
+def _restore_blackbox_harness():
+    """run_single_domain imports _test_utils; restore its process-wide setup after each test."""
+    with _harness():
+        yield
+
 
 def load_runner():
     path = Path(__file__).resolve().parents[2] / "scripts" / "run_blackbox_tests.py"
@@ -235,3 +244,50 @@ def test_domains_and_concurrency_reach_the_suite_runner(monkeypatch):
         _run_main(load_runner(), monkeypatch, ["workflow", "--concurrency", "4", "web-search"], started)
     assert exited.value.code == 0
     assert started == [(["workflow", "web-search"], 4)]
+
+
+def test_failed_domain_names_its_failing_cases_and_first_error(tmp_path: Path):
+    """A domain returning only result.all_passed must not reach results.json with
+    an empty message: the failing case names and their first error are recorded."""
+    domain = tmp_path / "failing.blackbox.py"
+    domain.write_text(
+        "from _test_utils import BlackboxResult\n\n"
+        "def test_ok():\n    pass\n\n"
+        "async def test_bad():\n    raise AssertionError('control: outcome=NotSupportedError')\n\n"
+        "def test_worse():\n    raise RuntimeError('second')\n\n"
+        "async def run_all_tests():\n"
+        "    r = BlackboxResult()\n"
+        "    r.record('ok', test_ok)\n"
+        "    await r.record_async('bad_case', test_bad)\n"
+        "    r.record('worse_case', test_worse)\n"
+        "    return r.all_passed\n"
+    )
+    passing = tmp_path / "passing.blackbox.py"
+    passing.write_text(
+        "from _test_utils import BlackboxResult\n\n"
+        "def test_ok():\n    pass\n\n"
+        "async def run_all_tests():\n"
+        "    r = BlackboxResult()\n"
+        "    r.record('ok', test_ok)\n"
+        "    return r.all_passed\n"
+    )
+    counted = tmp_path / "counted.blackbox.py"
+    counted.write_text(
+        "from _test_utils import BlackboxResult\n\n"
+        "def test_bad():\n    raise ValueError('boom')\n\n"
+        "async def run_all_tests():\n"
+        "    r = BlackboxResult()\n"
+        "    r.record('only_bad', test_bad)\n"
+        "    return r.summary()\n"
+    )
+    runner = load_runner()
+    _, passed, message = asyncio.run(runner.run_single_domain(domain, "failing"))
+    assert not passed
+    assert "2 failed case(s): bad_case, worse_case" in message, message
+    assert "first error: bad_case: AssertionError: control: outcome=NotSupportedError" in message, message
+    # The next domain starts from an empty failure record.
+    assert asyncio.run(runner.run_single_domain(passing, "passing")) == ("passing", True, "")
+    _, passed, message = asyncio.run(runner.run_single_domain(counted, "counted"))
+    assert not passed
+    assert message.startswith("0 passed, 1 failed; 1 failed case(s): only_bad"), message
+    assert "ValueError: boom" in message and "bad_case" not in message, message

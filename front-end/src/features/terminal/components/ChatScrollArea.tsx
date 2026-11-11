@@ -32,8 +32,10 @@ interface ChatScrollAreaProps {
 
 /** Phone only: the caption is anchored inside the large grid tile (429px square
  * centered at 40% of the shell), 5.5rem above its bottom edge; the loader box
- * starts below the mobile header, so that offset is subtracted. md+ keeps the
- * original in-flow caption under the ASCII art. */
+ * starts below the mobile header, so that offset is subtracted. On desktop the
+ * caption keeps its November 3 position: half the original gap below the art
+ * edge, with its own half-height subtracted. It stays out of flow so the art
+ * remains independently centered. */
 /** Phone only: the art is absolutely centered 2.5rem above the large tile's
  * center (tile = 429px square at 40% of the shell; the loader box starts below
  * the mobile header, so that offset is subtracted), leaving the tile's lower
@@ -43,7 +45,7 @@ const OPENING_ASCII_CLASS =
   'relative scale-95 max-md:absolute max-md:left-1/2 max-md:top-[calc(0.4*var(--app-height,100dvh)-var(--mobile-terminal-header-height)-2.5rem)] max-md:-translate-x-1/2 max-md:-translate-y-1/2 max-md:[@media(max-height:720px)]:scale-[0.68] md:translate-y-0 md:scale-100';
 
 const OPENING_CAPTION_SLOT_CLASS =
-  '-mt-3 max-md:absolute max-md:inset-x-0 max-md:top-[calc(0.4*var(--app-height,100dvh)+214.5px-var(--mobile-terminal-header-height)-5.5rem)] max-md:!mt-0';
+  '-mt-3 max-md:absolute max-md:inset-x-0 max-md:top-[calc(0.4*var(--app-height,100dvh)+214.5px-var(--mobile-terminal-header-height)-5.5rem)] max-md:!mt-0 md:absolute md:left-1/2 md:top-full md:!mt-3 md:-translate-x-1/2 md:-translate-y-1/2';
 
 export function ChatScrollArea({ agents: a, drip, opening, messagesEndRef }: ChatScrollAreaProps) {
   const showLoader = !a.selectedAgentId || a.messages.length === 0;
@@ -74,16 +76,18 @@ export function ChatScrollArea({ agents: a, drip, opening, messagesEndRef }: Cha
       <div className="h-[var(--mobile-terminal-header-height)] md:h-24" />
       {a.selectedAgentId && a.agentDetail?.parent_agent_id && <div className="h-14" />}
 
+      {/* The grid is viewport-centered; the desktop chat column can be inset by
+          the sidebar, so the opening art must use the viewport too. */}
       <div
         data-testid="terminal-opening-loader"
-        className="pointer-events-none absolute inset-x-0 bottom-0 top-[var(--mobile-terminal-header-height)] flex items-center justify-center transition-all duration-700 ease-in-out md:inset-0 md:h-[100dvh]"
+        className="pointer-events-none absolute inset-x-0 bottom-0 top-[var(--mobile-terminal-header-height)] flex items-center justify-center transition-all duration-700 ease-in-out md:fixed md:inset-0 md:h-[100dvh]"
         style={{
           opacity: showLoader && showWaitlistCta ? 1 : 0.2,
           transform: showLoader ? 'translateY(0)' : 'translateY(8px)',
           zIndex: 18,
         }}
       >
-        <div className="space-y-6 text-center md:mb-[20vh]">
+        <div className="space-y-6 text-center md:relative md:mb-[20vh]">
           <div data-testid="terminal-opening-ascii-transform" className={OPENING_ASCII_CLASS}>
             <AsciiLoader
               showWarmingUp={false}

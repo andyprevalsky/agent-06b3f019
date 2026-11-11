@@ -9,6 +9,7 @@
  */
 
 import { Router, type Request } from 'express';
+import { requireCredentialMintSession } from '../../providers/credentialMintAuth';
 import { type HybridAuthRequest, hybridAuth } from '../../providers/hybridAuth';
 import { getClientIP } from '../../providers/geoip';
 import { createLogger } from '../../providers/logger';
@@ -41,6 +42,7 @@ function roseApiKeyFrom(req: Request): string | undefined {
 router.post(
   '/credentials',
   auth,
+  requireCredentialMintSession,
   asyncHandler<HybridAuthRequest>(async (req, res) => {
     if (routeGuards.rejectAnonymousCreate(req, res, 'Login required to connect Index 01')) return;
     if (await routeGuards.rejectGatedCreate(req, res)) return;

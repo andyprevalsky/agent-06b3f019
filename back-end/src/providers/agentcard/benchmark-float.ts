@@ -104,43 +104,66 @@ function preferredBenchmarkCardholderIds(
   return [...new Set(preferred)];
 }
 
-/** Follow the provider's declared offset contract under the resolver's original deadline. */
+/**
+ * Follow the provider's declared offset contract under the resolver's original deadline.
+ *
+ * The org tool defaults to the newest 50 records, so a verified preferred identity may sit on a
+ * later page. Pages are refused rather than guessed when the provider's inventory metadata is
+ * malformed, changes its total mid-walk, or stops advancing before covering that total.
+ */
 async function* benchmarkCardholderPages(
   callOrgTool: AgentCardOrgToolCaller,
   deadlineAtMs: number
 ): AsyncGenerator<AgentCardSandboxCardholder[]> {
-  const limit = 100; // Provider tools/list: documented maximum, not a total discovery cap.
+  const pageSize = 100; // Provider tools/list: documented maximum, not a total discovery cap.
   const seen = new Set<string>();
   let offset = 0;
+  let total: number | undefined;
   for (;;) {
     if (Date.now() >= deadlineAtMs) {
-      throw new Error('AgentCard cardholder discovery exceeded its original read deadline');
+      throw new Error(
+        'AgentCard cardholder inventory pagination exceeded its read deadline ' +
+          '(the original read deadline shared by every resolver read)'
+      );
     }
-    const result = await callOrgTool('list_cardholders', { limit, offset }, deadlineAtMs);
+    const result = await callOrgTool('list_cardholders', { limit: pageSize, offset }, deadlineAtMs);
     const outer = asRecord(result);
-    const structured = asRecord(outer?.structuredContent) ?? outer;
+    const record = asRecord(outer?.structuredContent) ?? outer;
     const page = extractCardholders(result);
-    const count = (structured?.cardholders as unknown[]).length;
-    const total = structured?.total;
-    if (
-      count > limit ||
-      page.length !== count ||
-      (total !== undefined && (!Number.isSafeInteger(total) || (total as number) < 0))
-    ) {
-      throw new Error('AgentCard cardholder pagination metadata is malformed');
+    const raw = record?.cardholders;
+    if (!Array.isArray(raw) || page.length !== raw.length) {
+      throw new Error('AgentCard cardholder inventory contains a record without an id');
+    }
+    const reportedTotal = record?.total;
+    if (reportedTotal !== undefined) {
+      if (
+        typeof reportedTotal !== 'number' ||
+        !Number.isSafeInteger(reportedTotal) ||
+        reportedTotal < 0 ||
+        raw.length > pageSize
+      ) {
+        throw new Error(
+          'AgentCard cardholder inventory returned an invalid total (pagination metadata is malformed)'
+        );
+      }
+      if (total !== undefined && reportedTotal !== total) {
+        throw new Error('AgentCard cardholder inventory changed during pagination');
+      }
+      total = reportedTotal;
     }
     const fresh = page.filter(({ id }) => !seen.has(id));
     for (const { id } of page) seen.add(id);
-    if (
-      (count === 0 && typeof total === 'number' && offset < total) ||
-      (offset > 0 && count > 0 && fresh.length === 0)
-    ) {
-      throw new Error('AgentCard cardholder pagination made no progress');
+    if (offset > 0 && page.length > 0 && fresh.length === 0) {
+      throw new Error('AgentCard cardholder inventory pagination did not advance (made no progress)');
+    }
+    if (raw.length === 0 && total !== undefined && offset < total) {
+      throw new Error(
+        'AgentCard cardholder inventory pagination did not cover its total (made no progress)'
+      );
     }
     yield page;
-    // Legacy fixtures without total are a single observed page; never invent another page.
-    if (total === undefined || offset + count >= (total as number)) return;
-    offset += count;
+    offset += raw.length;
+    if (total !== undefined ? offset >= total : raw.length < pageSize) return;
   }
 }
 

@@ -31,7 +31,7 @@ REPRODUCIBLE = ('node_modules/', '*/node_modules/', 'agents/venv/', '*/venv/', '
                 '*.pyc', '.pytest_cache/', '*/.pytest_cache/', '.mypy_cache/', '.ruff_cache/', '*/dist/',
                 '*/build/', '*/coverage/', 'coverage/', '*/test-results/', '*/playwright-report/',
                 '.context/tsbuildinfo/', '.context/frontend-builds/', 'openclaw/', 'hermes-agent/', 'codex/',
-                'prime-agent/', 'kimi-code/', 'htmlcov/', '*/htmlcov/', '*/.coverage', '.coverage')
+                'prime-agent/', 'kimi-code/', 'openworker/', 'htmlcov/', '*/htmlcov/', '*/.coverage', '.coverage')
 
 
 def git(*args: str, cwd: Path | None = None, check: bool = True) -> str:
@@ -232,14 +232,17 @@ def cmd_open_pr(args: argparse.Namespace) -> int:
         return 1
     existing = subprocess.run(['gh', 'pr', 'view', '--json', 'number', '--jq', '.number'],
                               cwd=ROOT, capture_output=True, text=True).stdout.strip()
-    if run([sys.executable, 'scripts/deploy_review_cycle.py', 'start', '--reset', '--kind', 'initial', '--head', sha]):
-        return 1
-    factory('stage-start', 'code-review')
+    unreviewable = no_reviewable_paths(sha, pr=existing, initial=True)
+    if unreviewable is None:
+        if run([sys.executable, 'scripts/deploy_review_cycle.py', 'start', '--reset', '--kind', 'initial',
+                '--head', sha]):
+            return 1
+        factory('stage-start', 'code-review')
     if run(['git', 'push', '-u', 'origin', branch]):
         return 1
     if existing:
         pr = int(existing)
-        if run(['gh', 'pr', 'comment', str(pr), '--body', '@coderabbitai review']):
+        if unreviewable is None and run(['gh', 'pr', 'comment', str(pr), '--body', '@coderabbitai review']):
             return 1
     else:
         if not args.title:
@@ -254,8 +257,28 @@ def cmd_open_pr(args: argparse.Namespace) -> int:
             return 1
         pr = int(match.group(1))
     write_json(PR_FILE, {'pr': pr, 'branch': branch, 'head': sha})
-    print(f'DEPLOY_OPEN_PR pr={pr} head={sha[:12]} review=initial')
+    print(f'DEPLOY_OPEN_PR pr={pr} head={sha[:12]} review={"initial" if unreviewable is None else NO_REVIEW}')
     return 0
+
+
+NO_REVIEW = 'no-reviewable-paths'
+
+
+def no_reviewable_paths(sha: str, *, pr: object = '', initial: bool = False) -> dict | None:
+    """Record SHA in the review ledger instead of requesting CodeRabbit when its path filters exclude every
+    changed path. None (any refusal) means: request the normal review."""
+    argv = [sys.executable, 'scripts/deploy_review_cycle.py', NO_REVIEW, '--head', sha, '--pr', str(pr or '')]
+    if initial:
+        argv += ['--reset', '--base', 'origin/main']
+    result = subprocess.run(argv, cwd=ROOT, capture_output=True, text=True)
+    if result.returncode:
+        why = (result.stderr or result.stdout).strip().splitlines()
+        print(f'DEPLOY_REVIEW reviewable: {why[-1][:200] if why else f"exit {result.returncode}"}')
+        return None
+    lines = result.stdout.strip().splitlines()
+    entry = json.loads(lines[-1])
+    print(entry['report_row'])
+    return entry
 
 
 def coderabbit_check(sha: str) -> tuple[str, str]:
@@ -277,7 +300,12 @@ RATE_LIMITED_CHECK = re.compile(r'rate limited|review limit', re.IGNORECASE)
 
 def cmd_review_wait(args: argparse.Namespace) -> int:
     pr = read_json(PR_FILE, 'open-pr')['pr']
-    review_head = review_state()['cycles'][-1]['head']
+    latest = review_state()['cycles'][-1]
+    review_head = latest['head']
+    if latest.get('kind') == NO_REVIEW:
+        # Decided before any request: nothing to wait for, and never a rate-limit re-request.
+        print(f'DEPLOY_REVIEW_WAIT {NO_REVIEW} head={review_head[:12]} (no CodeRabbit request)')
+        return 0
     waiter = ['bash', 'scripts/wait-for-code-review', '--pr', str(pr), '--head', review_head,
               '--timeout', str(args.timeout), '--poll', '5']
     code = run(waiter)
@@ -314,12 +342,30 @@ def review_state() -> dict:
 
 
 def cmd_review_finish(args: argparse.Namespace) -> int:
-    review_head = review_state()['cycles'][-1]['head']
+    latest = review_state()['cycles'][-1]
+    review_head = latest['head']
+    if latest.get('kind') == NO_REVIEW:
+        print(f'DEPLOY_REVIEW_FINISH head={review_head[:12]} result={NO_REVIEW} (closed when recorded) exit=0')
+        return 0
     factory('stage-finish', 'code-review')
     code = run([sys.executable, 'scripts/deploy_review_cycle.py', 'finish', '--head', review_head,
                 '--result', args.result])
     print(f'DEPLOY_REVIEW_FINISH head={review_head[:12]} result={args.result} exit={code}')
     return code
+
+
+def recorded_no_review(sha: str) -> bool:
+    """Whether the ledger's latest entry already records SHA as no-reviewable-paths (False when unreadable)."""
+    status = subprocess.run([sys.executable, 'scripts/deploy_review_cycle.py', 'status'], cwd=ROOT,
+                            capture_output=True, text=True)
+    if status.returncode:
+        return False
+    try:
+        cycles = json.loads(status.stdout).get('cycles') or []
+    except (json.JSONDecodeError, AttributeError):
+        return False
+    latest = cycles[-1] if cycles and isinstance(cycles[-1], dict) else {}
+    return latest.get('kind') == NO_REVIEW and latest.get('head') == sha
 
 
 def cmd_review_next(args: argparse.Namespace) -> int:
@@ -363,6 +409,14 @@ def cmd_review_next(args: argparse.Namespace) -> int:
                  '--one-final-review-approval', final_approval,
                  '--approved-head', approved_head, '--repo', str(ROOT)]
     else:
+        if recorded_no_review(head()) or no_reviewable_paths(head(), pr=opened['pr']) is not None:
+            # A HEAD already recorded as no-reviewable-paths (its push failed last time) resumes at the push:
+            # re-recording would refuse it as "already the latest recorded HEAD" and request a review.
+            if run(['git', 'push', 'origin', 'HEAD']):
+                return 1
+            write_json(PR_FILE, {**opened, 'head': head()})
+            print(f"DEPLOY_REVIEW_NEXT pr={opened['pr']} head={head()[:12]} review={NO_REVIEW}")
+            return 0
         nxt = subprocess.run([sys.executable, 'scripts/deploy_review_cycle.py', 'next'], cwd=ROOT,
                              capture_output=True, text=True)
         if nxt.returncode:

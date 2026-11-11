@@ -21,7 +21,7 @@ export async function fetchTreeState(busId: string): Promise<AgentTreeNode[]> {
 }
 
 /** Status of a Claude Code / Codex session (ClaudeCodeSessionStatus). */
-export type CodeAgentStatus = 'ACTIVE' | 'COMPLETED' | 'CLOSED' | 'ERROR';
+export type CodeAgentStatus = 'ACTIVE' | 'COMPLETED' | 'CLOSED' | 'ERROR' | 'PAUSED';
 
 /** The CLI a code agent ran; null for legacy rows that never recorded it. */
 export type CodeAgentProviderName = 'claude' | 'codex' | null;
@@ -55,6 +55,8 @@ export interface CodeAgentListItem {
   provider: CodeAgentProviderName;
   status: CodeAgentStatus;
   title: string;
+  /** A question parked on the spawning agent; the coding session is waiting. */
+  awaiting_parent?: { question: string; at: string } | null;
   /** Its container (the code session's sandbox); null when unknown (Mac and legacy runs). */
   container_state?: CodeContainerState | null;
   created_at: string;
@@ -101,4 +103,17 @@ export async function fetchAncestors(agentId: string): Promise<AncestorNode[]> {
       goal: row.goal ?? '',
     }))
     .filter((row: AncestorNode) => row.id.length > 0);
+}
+
+/** Rename a code session without changing its owning Rose agent. */
+export async function renameCodeAgent(taskId: string, title: string): Promise<void> {
+  const response = await fetch(
+    `${API_BASE_WITH_PATH}/agents/code-agents/${encodeURIComponent(taskId)}`,
+    {
+      method: 'PATCH',
+      headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title }),
+    },
+  );
+  if (!response.ok) throw new Error(`Failed to rename code agent (${response.status})`);
 }

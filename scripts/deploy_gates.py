@@ -84,6 +84,9 @@ RUNNABLE = {'quick', 'initial', 'focused', 'failed-gates', 'final'}
 STRUCTURAL_GATE, SEMANTIC_GATE = 'deploy-command-structural', 'semantic-stack'
 STRUCTURAL_WORKERS = 2  # standard template: run-deploy-structural-gates.py --max-workers 5
 SEMANTIC_WORKER_PROCESSES = 2  # run-deploy-semantic-stack.sh default: WORKER_PROCESSES=8
+# select_affected_tests.py --stability keeps nproc CPU load slots busy by default; on the local executor it
+# shares this host with the other gates, so its load is bounded. A Blacksmith VM runs it alone, unchanged.
+STABILITY_GATE, LOCAL_STABILITY_LOAD_WORKERS = 'new-test-stability', 2
 SEMANTIC_ENV = 'DEPLOY_SEMANTIC_WORKER_PROCESSES'
 # Executors (2026-11-06): Blacksmith VMs remove this host's memory/CPU queueing; local keeps the cuts above.
 EXECUTORS = ('blacksmith', 'local')
@@ -103,6 +106,8 @@ BLACKSMITH_RUNNERS = {
     'canonical-seed-whatsapp-content': 'blacksmith-2vcpu-ubuntu-2404',
     'live-probes': 'blacksmith-2vcpu-ubuntu-2404',
     'e2b-smoke': 'blacksmith-2vcpu-ubuntu-2404',
+    # Loads every CPU while it reruns new/changed tests 5x (select_affected_tests.py --stability).
+    'new-test-stability': 'blacksmith-8vcpu-ubuntu-2404',
 }
 DEFAULT_BLACKSMITH_RUNNER = 'blacksmith-4vcpu-ubuntu-2404'  # a gate added before it is sized here
 # The workflow sets the system-Postgres mode, trusted identity and checkout paths at job level; each VM is
@@ -384,6 +389,78 @@ def check_capacity(root: Path, workers: list[dict], proc: Path = Path('/proc')) 
     return report
 
 
+# Quick gates run on this host under fixed per-gate deadlines (120 s by default). Another thread's
+# load on a shared box (a repack, a CPU-burner stability check, a local benchmark) has failed them
+# with timeouts on unchanged source. Wait, bounded, until the 1-minute load average leaves headroom
+# instead of starting them on a saturated host; the deadlines themselves never change.
+CPU_HEADROOM_LOAD_PER_CPU = 1.0
+CPU_HEADROOM_MAX_WAIT_SECONDS = 600
+CPU_HEADROOM_POLL_SECONDS = 15
+
+
+def load_per_cpu(proc: Path = Path('/proc')) -> tuple[float, int]:
+    cpus = os.cpu_count() or 1
+    return float((proc / 'loadavg').read_text().split()[0]) / cpus, cpus
+
+
+def wait_for_cpu_headroom(proc: Path = Path('/proc'), *, max_wait: float = CPU_HEADROOM_MAX_WAIT_SECONDS,
+                          threshold: float = CPU_HEADROOM_LOAD_PER_CPU, poll: float = CPU_HEADROOM_POLL_SECONDS,
+                          clock=time.monotonic, sleep=time.sleep) -> dict:
+    """Wait until load1/CPU <= threshold or max_wait passes. Never stops or kills anything; on expiry the
+    gates start anyway with a warning naming the busiest processes, so the owner of that load can act."""
+    started = clock()
+    load, cpus = load_per_cpu(proc)
+    announced = False
+    while load > threshold and clock() - started < max_wait:
+        if not announced:
+            print(f'DEPLOY_GATES CPU wait: load {load * cpus:.1f} on {cpus} CPUs exceeds {threshold * cpus:.0f}; '
+                  f'waiting up to {max_wait:.0f} s before starting host gates. Busiest processes '
+                  '(stop only ones you own):', flush=True)
+            for line in busiest_processes(proc):
+                print('    ' + line, flush=True)
+            announced = True
+        sleep(poll)
+        load, cpus = load_per_cpu(proc)
+    waited = round(clock() - started, 1)
+    if load > threshold:
+        print(f'DEPLOY_GATES CPU WARNING: load {load * cpus:.1f} on {cpus} CPUs still exceeds '
+              f'{threshold * cpus:.0f} after {waited:.0f} s; host gates start on a saturated box and a timeout '
+              'there is host load until shown otherwise', flush=True)
+    return {'load_per_cpu': round(load, 2), 'cpus': cpus, 'waited_seconds': waited, 'headroom': load <= threshold}
+
+
+def _cpu_ticks(proc: Path) -> dict[str, tuple[int, str]]:
+    """pid -> (utime+stime ticks, command line) for every readable process."""
+    out = {}
+    for entry in proc.iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            stat = (entry / 'stat').read_text()
+            fields = stat[stat.rindex(')') + 2:].split()
+            args = (entry / 'cmdline').read_bytes().replace(b'\0', b' ').decode(errors='replace').strip()
+            out[entry.name] = (int(fields[11]) + int(fields[12]), args or stat[stat.index('(') + 1:stat.rindex(')')])
+        except (OSError, ValueError, IndexError):
+            continue
+    return out
+
+
+def busiest_processes(proc: Path, limit: int = 6, *, interval: float = 1.0, sleep=time.sleep) -> list[str]:
+    """Current top CPU consumers: CPU ticks used across a short sample, so a long-lived idle daemon
+    never outranks the process loading the box right now."""
+    try:
+        ticks = os.sysconf('SC_CLK_TCK')
+    except (OSError, ValueError):
+        return []
+    before = _cpu_ticks(proc)
+    sleep(interval)
+    after = _cpu_ticks(proc)
+    rows = [((used - before[pid][0]) / ticks / interval, pid, args)
+            for pid, (used, args) in after.items() if pid in before and used > before[pid][0]]
+    rows.sort(reverse=True)
+    return [f'pid {pid} {share * 100:.0f}% {args[:140]}' for share, pid, args in rows[:limit]]
+
+
 def layout(root: Path, head: str, needs_worker: list[str], executor: str = 'local') -> list[dict]:
     if executor not in EXECUTORS:
         raise Blocked('workers', f'unknown executor {executor!r}')
@@ -453,6 +530,9 @@ def build_template(structural_workers: int, semantic_worker_processes: int, stan
     if executor == 'blacksmith':  # neither cut gate is in BLACKSMITH_LOCAL_GATES
         return template
     for gate in template['gates']:
+        if gate['name'] == STABILITY_GATE and '--load-workers' not in gate['command']:
+            gate['command'] = [*gate['command'], '--load-workers', str(LOCAL_STABILITY_LOAD_WORKERS)]
+            continue
         if gate['name'] == STRUCTURAL_GATE:
             command = list(gate['command'])
             if command.count('--max-workers') != 1 or command.index('--max-workers') + 1 >= len(command):
@@ -801,6 +881,7 @@ def run(args, root: Path) -> int:
                   f"{capacity['available_mb']:.0f}), {capacity['disk_mb'] / 1024:.1f} GB disk (have "
                   f"{capacity['free_disk_mb'] / 1024:.1f})")
         if not args.dry_run:
+            wait_for_cpu_headroom()
             refresh_prisma_client(root)
         if sampler is not None:
             sampler.set_roots({w['gate']: Path(w['path']) for w in workers if w['mode'] in ('create', 'reuse')})
