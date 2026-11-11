@@ -12,6 +12,6 @@ Remaining items:
 - Cycle 2 merged unreviewed because of the confirmed CodeRabbit spending cap.
 - The sandbox AgentCard release stall leaves $43.96 unreleased.
 - The production AgentCard lane failed its preflight because there is no live KYC cardholder for identity 107; that change is user-only.
-- The production semantic test `mobile-layout.spec.ts:194` failed and was delegated: https://boxes.dev/thread/thr_36e63300c66b4921a608ea02e00b1415
+- Production semantic: `mobile-layout.spec.ts:194` FAILED in run 43085818750 and PASSED on its single rerun, run 43092615174, on the same merge, so it is recorded as FLAKY. The race repair is delegated: https://boxes.dev/thread/thr_36e63300c66b4921a608ea02e00b1415. Lane receipts are in `production-lanes.attempt1.json` and `production-lanes.attempt2.json`.
 
 Private records are in the encrypted archive described by `private-archive-receipt.json`. Restore with `docs/handoffs/whm-b07d9037-preservation/private_archive.py verify|restore --receipt <receipt>` into a new empty directory.
