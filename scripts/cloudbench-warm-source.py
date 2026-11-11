@@ -41,6 +41,7 @@ import argparse
 import hashlib
 import json
 import os
+import random
 import re
 import runpy
 import signal
@@ -71,6 +72,17 @@ PROTECTED_PREFIXES = ("whm_deploy", "rose_controller", "cloudbench_protected", "
 GONE = {"destroyed", "destroying"}
 COMPLETE_SNAPSHOT = {"created", "complete", "completed", "ready", "available"}
 LEASE_TTL_SECONDS = 30
+RATE_LIMIT_ATTEMPTS = 6
+RATE_LIMIT_MAX_DELAY_SECONDS = 8.0
+
+
+def rate_limit_delay(retry_after, attempt):
+    """Seconds to wait after a 429: Retry-After when given, else capped exponential backoff with jitter."""
+    try:
+        delay = float(retry_after)
+    except (TypeError, ValueError):
+        delay = min(RATE_LIMIT_MAX_DELAY_SECONDS, 0.5 * (2 ** attempt)) * (0.5 + random.random() / 2)
+    return max(0.0, min(RATE_LIMIT_MAX_DELAY_SECONDS, delay))
 EXIT_TIMEOUT = 3
 
 
@@ -112,15 +124,22 @@ class Api(Fly):
             headers["fly-machine-lease-nonce"] = nonce
         request = urllib.request.Request(url, data=None if body is None else json.dumps(body).encode(),
                                          method=method, headers=headers)
-        self.calls.append((method, path))
-        try:
-            with urllib.request.urlopen(request, timeout=self.timeout) as response:
-                payload = response.read()
-                return response.status, (json.loads(payload) if payload else None)
-        except urllib.error.HTTPError as error:
-            return error.code, None
-        except (urllib.error.URLError, OSError, ValueError) as error:
-            raise WarmSourceError(f"{method} {path} -> {error}") from error
+        # Fly rate-limits per-Machine writes (HTTP 429). A deploy smoke starts every job's
+        # controller at once and each records LAST_USED_KEY on the same source, so a 429 is
+        # expected contention, not a failure: honour Retry-After within a bounded budget.
+        for attempt in range(RATE_LIMIT_ATTEMPTS):
+            self.calls.append((method, path))
+            try:
+                with urllib.request.urlopen(request, timeout=self.timeout) as response:
+                    payload = response.read()
+                    return response.status, (json.loads(payload) if payload else None)
+            except urllib.error.HTTPError as error:
+                if error.code != 429 or attempt == RATE_LIMIT_ATTEMPTS - 1:
+                    return error.code, None
+                time.sleep(rate_limit_delay(error.headers.get("Retry-After"), attempt))
+            except (urllib.error.URLError, OSError, ValueError) as error:
+                raise WarmSourceError(f"{method} {path} -> {error}") from error
+        return 429, None
 
     def acquire_lease(self, machine_id, ttl=LEASE_TTL_SECONDS):
         status, body = self._leased("POST", f"/machines/{machine_id}/lease",

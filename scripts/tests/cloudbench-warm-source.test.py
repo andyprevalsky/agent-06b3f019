@@ -41,6 +41,7 @@ class FakeFly:
         self.snapshots = {}
         self.leases = {}
         self.log = []
+        self.throttle_metadata_writes = 0  # next N metadata writes answer 429 (Fly rate limit)
         self.add_volume("vol_base00000001", "cloudbench_data", attached="0b0000000000aa")
         self.snapshots["vol_base00000001"] = [
             {"id": "vs_old", "status": "created", "created_at": "2026-10-01T00:00:00Z", "size": 40},
@@ -112,6 +113,9 @@ class FakeFly:
                         self.leases.pop(mid)
                     return 200, {}
                 if rest and rest[0] == "metadata":
+                    if method == "POST" and self.throttle_metadata_writes > 0:
+                        self.throttle_metadata_writes -= 1
+                        return 429, {"error": "rate limit exceeded"}
                     if self.lease_held(mid, nonce):
                         return 409, {"error": "lease currently held"}
                     if method == "POST":
@@ -157,6 +161,8 @@ def serve(fake):
             status, payload = fake.handle(self.command, self.path, body, self.headers.get("fly-machine-lease-nonce"))
             raw = b"" if payload is None else json.dumps(payload).encode()
             self.send_response(status)
+            if status == 429:
+                self.send_header("Retry-After", "0")
             self.send_header("Content-Length", str(len(raw)))
             self.end_headers()
             self.wfile.write(raw)
@@ -311,6 +317,26 @@ class WarmSource(FakeApiCase):
         self.assertEqual(again.returncode, 0, again.stderr)
         self.assertEqual((len(self.fake.machines), len(self.fake.volumes)), (machines, volumes))
         self.assertGreater(int(metadata[self.mod["LAST_USED_KEY"]]), 1)
+
+    def test_ensure_rides_out_fly_metadata_rate_limits_and_still_bounds_them(self):
+        # Deploy smoke 2026-11-11: 15 concurrent jobs recorded LAST_USED_KEY on one source,
+        # Fly answered 429 and every job aborted "could not select this dependency set's warm source".
+        set_a, machine_a, volume_a = self.mod["names"](NODE_A, PY_A)
+        first = self.run_cli("ensure", "--node-fp", NODE_A, "--py-fp", PY_A, "--owner", "devbox-1")
+        self.assertEqual(first.returncode, 0, first.stderr)
+        row = next(m for m in self.fake.machines.values() if m["name"] == machine_a)
+        row["config"]["metadata"][self.mod["LAST_USED_KEY"]] = "1"
+        self.fake.throttle_metadata_writes = self.mod["RATE_LIMIT_ATTEMPTS"] - 1
+        again = self.run_cli("ensure", "--node-fp", NODE_A, "--py-fp", PY_A, "--owner", "devbox-2")
+        self.assertEqual(again.returncode, 0, again.stderr)
+        self.assertEqual(again.stdout.split(), [set_a, machine_a, volume_a])
+        self.assertGreater(int(row["config"]["metadata"][self.mod["LAST_USED_KEY"]]), 1)
+        self.assertEqual(self.fake.throttle_metadata_writes, 0)
+        # A persistent limit still fails closed after the bounded attempts, never loops forever.
+        self.fake.throttle_metadata_writes = 10 ** 6
+        refused = self.run_cli("ensure", "--node-fp", NODE_A, "--py-fp", PY_A, "--owner", "devbox-3", timeout=60)
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn("HTTP 429", refused.stderr)
 
     def test_ensure_reuses_an_interrupted_create_volume_and_waits_out_a_peer_claim(self):
         set_b, machine_b, volume_b = self.mod["names"](NODE_B, PY_B)
