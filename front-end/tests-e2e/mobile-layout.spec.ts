@@ -31,6 +31,7 @@ import {
   FRONTEND_URL,
   HAS_INJECTED_SESSION,
   attachRecorder,
+  countMessageRowsWithWorkExpanded,
   createAgent,
   deleteAgent,
   expectDevAuthenticated,
@@ -132,10 +133,11 @@ test.describe('mobile-layout', () => {
         )
         .toBe(true);
 
-      // Wait for ≥2 message bubbles (user goal + ≥1 assistant/tool).
-      const messageLocator = page.locator('[data-message-id]');
+      // Wait for ≥2 message bubbles (user goal + ≥1 assistant/tool). Live
+      // assistant/tool rows fold into a collapsed work group; open it so they
+      // render (and fall under the overflow check) before the agent finishes.
       await expect
-        .poll(() => messageLocator.count(), {
+        .poll(() => countMessageRowsWithWorkExpanded(page), {
           timeout: 120_000,
           message: 'Agent never produced ≥2 realtime message bubbles on mobile',
         })
