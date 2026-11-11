@@ -1,0 +1,10 @@
+{"i":2,"status":429,"err":"{\"error\":{\"message\":\"Provider returned error\",\"code\":429,\"metadata\":{\"raw\":\"z-ai/glm-5.3-flash is temporarily rate-limited upstream. Please retry shortly, or add your own provider key to use your own "}
+{"i":0,"host":"DigitalOcean","ms":1671,"firstContentMs":804,"chunks":36,"contentLen":345,"reasoningLen":0,"action":"web_search","actionIdx":0}
+{"i":1,"host":"DigitalOcean","ms":1796,"firstContentMs":823,"chunks":42,"contentLen":489,"reasoningLen":0,"action":"web_search","actionIdx":0}
+{"i":5,"status":429,"err":"{\"error\":{\"message\":\"Provider returned error\",\"code\":429,\"metadata\":{\"raw\":\"z-ai/glm-5.3-flash is temporarily rate-limited upstream. Please retry shortly, or add your own provider key to use your own "}
+{"i":4,"host":"DigitalOcean","ms":1675,"firstContentMs":826,"chunks":43,"contentLen":452,"reasoningLen":52,"action":"web_search","actionIdx":0}
+{"i":3,"host":"DigitalOcean","ms":3446,"firstContentMs":847,"chunks":136,"contentLen":1515,"reasoningLen":0,"action":"web_search","actionIdx":0}
+{"i":7,"host":"DigitalOcean","ms":1561,"firstContentMs":870,"chunks":34,"contentLen":370,"reasoningLen":15,"action":"web_search","actionIdx":0}
+{"i":8,"host":"DigitalOcean","ms":1573,"firstContentMs":824,"chunks":31,"contentLen":316,"reasoningLen":0,"action":"web_search","actionIdx":0}
+{"i":6,"host":"DigitalOcean","ms":2644,"firstContentMs":915,"chunks":83,"contentLen":851,"reasoningLen":20,"action":"web_search","actionIdx":0}
+{"provider":"digitalocean","n":9,"over13s":0,"p50":1675,"max":3446}

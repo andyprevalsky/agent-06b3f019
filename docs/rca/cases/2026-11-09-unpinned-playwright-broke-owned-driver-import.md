@@ -18,6 +18,7 @@ tags:
   - cloudbench
 sources:
   - PR #1905
+
   - PR #1915
   - commit cb7a8ae130a179f92bb20e1a1ab848f7d76d9092
 repro: executed
@@ -36,6 +37,8 @@ Both independent investigations reproduced the exact owning import failure with 
 
 ## Solution
 
+The requirements now pin Playwright 1.63.0, matching the SDK contract the existing owner implements. The existing post-copy image verification step also imports the real owner, so an incompatible graph fails before publication/activation. Retain its native process-exit, cancellation and resource ownership behavior; do not rename one private import and assume the newer SDK has identical internals. Keep the existing owning browser-cleanup suite and all browser/payment task assertions. A new compatible source-bound image and fresh native task/publisher/full-gate acceptance remain required before closure.
+
 The requirements now pin Playwright 1.63.0, matching the SDK contract the existing owner implements. The warm benchmark image verification step imports the real owner after source copy. The production worker Dockerfile also runs that import after switching to its final non-root runtime user, so each artifact rejects an incompatible graph during its own build before publication/activation. Retain its native process-exit, cancellation and resource ownership behavior; do not rename one private import and assume the newer SDK has identical internals. Keep the existing owning browser-cleanup suite and all browser/payment task assertions. A new compatible source-bound image and fresh native task/publisher/full-gate acceptance remain required before closure.
 
 ## Verification and retained limits
@@ -50,6 +53,7 @@ venv/bin/python tests/blackbox/browser_cleanup_receipt.blackbox.py
 ```
 
 Before repair the actual image installed 1.65 and the unchanged owner import/native cases failed. The installed 1.63 control passes the same native startup/cancellation assertions; it supplies no full task or image acceptance credit. The new image must pass its real import guard and the unchanged native browser/payment tasks at their original deadlines.
+
 
 ## Production recurrence on November 10
 
@@ -144,6 +148,8 @@ The warm-image fingerprint mismatch case concerns selecting a compatible depende
 
 ## Human feedback
 
+No new feedback for this SDK repair. The existing assignment requires unchanged task assertions, deadlines, concurrency, privacy guards and native outcomes.
+
 The user approved only the exact-source verification review described above.
 The existing prohibition on new paid AgentCard operations and the exact selected
 check election remain in effect. The assignment retains unchanged assertions,
@@ -153,3 +159,7 @@ account or physical-phone actions by this repair coordinator.
 ## Reusable lesson
 
 Pin an SDK when ownership depends on its private APIs. Verify the installed adapter boundary before publishing an image; matching unbounded manifests alone does not establish runtime compatibility.
+
+## PR1920 integration provenance
+
+The sidebar repair deploy reused the published owning implementation and tests after its original source-bound cloud smoke independently reached this same boundary. This reuse does not claim the originating repair goal or whole benchmark acceptance complete. Fresh final-source deployment validation remains independently required.

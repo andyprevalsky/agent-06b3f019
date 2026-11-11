@@ -74,6 +74,27 @@ function controlCenter(rows: TextRow[]) {
   return found.length === 1 ? found[0] : null;
 }
 
+/** Settings, by name, warm or cold (`fresh`); the provider reports its bundle ID. The root read still follows. */
+function settingsLaunch(e: PortraitRouteEvent) {
+  const keys = Object.keys(e.args);
+  return (
+    e.args.name === 'Settings' &&
+    keys.every((k) => k === 'name' || (k === 'fresh' && typeof e.args.fresh === 'boolean')) &&
+    (e.result === 'Settings' || e.result === 'com.apple.Preferences')
+  );
+}
+/** Exactly the AssistiveTouch query, with only the documented typing-pace options. */
+function assistiveQuery(args: Record<string, unknown>) {
+  return (
+    args.s === 'AssistiveTouch' &&
+    Object.entries(args).every(
+      ([k, v]) =>
+        k === 's' ||
+        (k === 'delay' && typeof v === 'number' && Number.isFinite(v) && v >= 0) ||
+        (k === 'keystrokes' && typeof v === 'boolean')
+    )
+  );
+}
 export const portraitRouteDigest = (events: PortraitRouteEvent[]) =>
   phoneCommandHash('portrait-causal-route-v1', events, 'agent');
 export function provePortraitRoute(
@@ -103,13 +124,7 @@ export function provePortraitRoute(
   if (prefix < 0) return null;
   const route = events.slice(prefix);
   const first = route[0];
-  if (
-    Object.keys(first.args).length !== 1 ||
-    first.args.name !== 'Settings' ||
-    first.result !== 'Settings' ||
-    !Number.isSafeInteger(first.revision)
-  )
-    return null;
+  if (!settingsLaunch(first) || !Number.isSafeInteger(first.revision)) return null;
   let revision = first.revision;
   let stage = 'root';
   let pending: ObservedTarget | null = null;
@@ -158,8 +173,7 @@ export function provePortraitRoute(
       continue;
     }
     if (e.operation === 'input.text') {
-      if (stage !== 'query' || Object.keys(e.args).length !== 1 || e.args.s !== 'AssistiveTouch')
-        return null;
+      if (stage !== 'query' || !assistiveQuery(e.args)) return null;
       stage = 'results';
       continue;
     }
@@ -196,6 +210,7 @@ export function provePortraitRoute(
       return null;
     const rows = portraitTextRows(e.result);
     if (rows === null) return null;
+    if (stage === 'query') continue; // Read-only look at the focused search field before typing.
     if (stage === 'root' || stage === 'root_tap') {
       if (!rows.some((r) => normal(r.text) === 'Settings' && r.y < 250)) return null;
       pending = named(rows, 'Search');

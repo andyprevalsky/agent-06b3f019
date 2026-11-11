@@ -30,6 +30,7 @@ import fs from 'node:fs';
 import {
   FRONTEND_URL,
   HAS_INJECTED_SESSION,
+  acrossAppReload,
   attachRecorder,
   createAgent,
   deleteAgent,
@@ -207,15 +208,17 @@ test.describe('mobile-layout', () => {
     // Previously the header used a hard-coded `width: 320px` inline style.
     // Fix: `width: min(320px, calc(100vw - 32px))` so it shrinks on
     // sub-320 px viewports and stays centered.
-    const result = await page.evaluate(() => {
-      const header = document.querySelector('header');
-      if (!header) return null;
-      const rect = header.getBoundingClientRect();
-      return {
-        center: Math.round(rect.left + rect.width / 2),
-        midpoint: Math.round(window.innerWidth / 2),
-      };
-    });
+    const result = await acrossAppReload(page, () =>
+      page.evaluate(() => {
+        const header = document.querySelector('header');
+        if (!header) return null;
+        const rect = header.getBoundingClientRect();
+        return {
+          center: Math.round(rect.left + rect.width / 2),
+          midpoint: Math.round(window.innerWidth / 2),
+        };
+      }),
+    );
     expect(result, 'Header element not found').not.toBeNull();
     if (result) {
       expect(
@@ -231,6 +234,7 @@ test.describe('mobile-layout', () => {
 // Desktop uses the same opening surface but must center the art itself, rather
 // than the combined art/caption stack. Keep the real CSS geometry under test.
 test('desktop opening ASCII stays centered on the large grid tile', async ({ page }) => {
+  const rec = attachRecorder(page);
   for (const viewport of [
     { width: 1440, height: 900 },
     { width: 768, height: 813 },
@@ -238,9 +242,13 @@ test('desktop opening ASCII stays centered on the large grid tile', async ({ pag
     await page.setViewportSize(viewport);
     if (HAS_INJECTED_SESSION) await injectSemanticSession(page);
     await page.goto(FRONTEND_URL, { waitUntil: 'domcontentloaded' });
-    if (HAS_INJECTED_SESSION) {
-      await expect(page.getByTestId('terminal-main-content')).toHaveClass(/md:pl-\[64px\]/);
-    }
+    await waitForDevLogin(page, rec);
+    // Dev login persists the browser-review user, whose reload opens Browse.
+    // Enter an empty chat through the same Home action a user would take.
+    const home = page.getByTestId('rose-home-project-row');
+    await page.mouse.move(viewport.width / 2, viewport.height / 2);
+    await page.getByTestId('rose-sidebar').hover({ position: { x: 30, y: 100 } });
+    await home.getByRole('button', { name: 'Create Super Agent', exact: true }).click();
     const frame = page.locator('pre[data-ascii-layer="frame"]').first();
     await expect(frame).toBeVisible();
     const tile = page.locator('[data-testid="terminal-grid-background-layer"] rect[width="429"]');

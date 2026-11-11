@@ -19,9 +19,14 @@ import * as repo from './repo';
 import { withActiveBrowserSessionShareLock } from './repoBrowserTargetedMessages';
 import { readTaskInboxMessages } from './agentToAgentService';
 import { buildUserMessageSignalValue } from './agentMessageSignal';
+import { ownedByExternalExecution } from './agentExternalExecution';
+import { createLogger } from '../../providers/logger';
 export { buildUserMessageSignalValue } from './agentMessageSignal';
 import { broadcastChatReactivation } from './agentMessageReactivation';
 import { resumeStoppedBrowser, stoppedAgentStatus } from './agentMessageResume';
+import { findGraphRootId } from './repoGraph';
+
+const log = createLogger('AgentMessages');
 
 /**
  * Agent statuses whose Temporal workflow has already ended. A follow-up message
@@ -103,6 +108,14 @@ async function routeUserMessage(
     }
   }
 
+  if (agentForChat !== null && ownedByExternalExecution(agentForChat)) {
+    // The stored row stays in the executor's trace; an external root never dispatches chat or Temporal.
+    log.info('[AgentMessages] External executor owns this root; message stored without dispatch', {
+      agentId,
+    });
+    return;
+  }
+
   if (agentForChat?.temporalWorkflowId !== undefined && agentForChat?.temporalWorkflowId !== null) {
     // A failed signal never fails the request: the row is durable and the
     // workflow polls for it.
@@ -110,8 +123,14 @@ async function routeUserMessage(
     if (authoredByWorkflow) await signalUserResponse(agentId, workflowId, messageText);
     else await deliverUserMessageToWorkflow(agentId, workflowId, messageText);
   } else if (agentForChat !== null && agentForChat !== undefined) {
+    const rootAgentId =
+      agentForChat.parentAgentId === null
+        ? agentId
+        : await findGraphRootId(agentId, agentForChat.userId);
+    if (rootAgentId === null) throw new Error(`Chat archive root unavailable for ${agentId}`);
     handleChatMessage({
       agentId,
+      rootAgentId,
       userId: agentForChat.userId,
       model: agentForChat.model,
     }).catch((err: unknown) => {

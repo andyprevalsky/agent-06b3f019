@@ -238,5 +238,45 @@ class DeployLiveProbeTests(unittest.TestCase):
         self.assertNotIn("npx", probe.argv)
 
 
+    def test_probe_names_list_every_probe_in_an_order_that_satisfies_each_after(self) -> None:
+        """The staged cycle runs one case per probe, one after another, in PROBE_NAMES order."""
+        module = _load_module()
+        commands = module.deploy_commands()
+        self.assertEqual(sorted(module.PROBE_NAMES), sorted(command.name for command in commands))
+        position = {name: index for index, name in enumerate(module.PROBE_NAMES)}
+        for command in commands:
+            if command.after is not None:
+                self.assertLess(position[command.after], position[command.name], command.name)
+
+    def test_only_runs_that_probe_alone_and_returns_its_exit(self) -> None:
+        module = _load_module()
+        seen: list[tuple] = []
+
+        def fake_run(commands):
+            seen.append(tuple((command.name, command.after) for command in commands))
+            return {command.name: 1 for command in commands}
+
+        with patch.object(module, "run_commands", fake_run):
+            self.assertEqual(1, module.main(["--only", "chat-router-failover-live"]))
+        # It does not wait for amplitude-live: that probe is its own, earlier case.
+        self.assertEqual([(("chat-router-failover-live", None),)], seen)
+        with patch.object(module, "run_commands", lambda commands: {c.name: 0 for c in commands}):
+            self.assertEqual(0, module.main(["--only", "migration-preflight"]))
+        with self.assertRaises(SystemExit):
+            module.main(["--only", "not-a-probe"])
+
+    def test_default_run_still_runs_every_probe_with_its_ordering(self) -> None:
+        module = _load_module()
+        seen: list[tuple] = []
+
+        def fake_run(commands):
+            seen.append(tuple((command.name, command.after) for command in commands))
+            return {command.name: 0 for command in commands}
+
+        with patch.object(module, "run_commands", fake_run):
+            self.assertEqual(0, module.main([]))
+        self.assertEqual([tuple((c.name, c.after) for c in module.deploy_commands())], seen)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1,0 +1,56 @@
+{
+  "format": "PR1940-PRIVATE-ARCHIVE-INDEX-V1",
+  "bucket_env": "R2_BUCKET_TRACE_ARCHIVE",
+  "key_env": "TRACE_ARCHIVE_ENCRYPTION_KEY_B64",
+  "key_fingerprint_sha256": "e351c7cc5b01303e579fe6d1df833940fdaadf325ca47314414ba10735fc7730",
+  "archives": {
+    "records": {
+      "format": "TAR+GZIP",
+      "sha256": "cacd5bd3d149d4fe16dda6b912b31dc69e82b3a33e7b542fc82c7691fe9cfca0",
+      "plain_bytes": 690139428,
+      "parts": [
+        {
+          "key": "devbox-closeout-private/pr1940/20261111T221915Z-records.tar.gz.part000.aesgcm",
+          "sha256": "18392d749ce5557e53838fe57acffe714ec87b26cba58698166642dc4e61ca20",
+          "plain_bytes": 268435456
+        },
+        {
+          "key": "devbox-closeout-private/pr1940/20261111T221915Z-records.tar.gz.part001.aesgcm",
+          "sha256": "a0ca42e56e862c235ca1fc4fc9ae4810cb3f238bf4d76734ca56dc54bc00c9ba",
+          "plain_bytes": 268435456
+        },
+        {
+          "key": "devbox-closeout-private/pr1940/20261111T221915Z-records.tar.gz.part002.aesgcm",
+          "sha256": "7b8a230ffe73a1471d954fc8b743b5afb948327587a9f7966cc8bb72c4090f1a",
+          "plain_bytes": 153268516
+        }
+      ],
+      "members": [
+        ".cloud-env",
+        ".context",
+        ".devbox",
+        ".env.npm",
+        "agents/.env",
+        "agents/.env.benchmark-temporal",
+        "agents/.env.cloudbench-upsert.lock",
+        "agents/navi-worker-log.txt",
+        "agents/providers/fast_cache",
+        "back-end/.env",
+        "back-end/.env.cloudbench-upsert.lock",
+        "back-end/backend-logs.log",
+        "front-end/.env",
+        "front-end/frontend-logs.log",
+        "hub-poller-logs.log",
+        "mac-app/.env",
+        "package-lock.json",
+        "research/.env",
+        "extra/rca-mobile",
+        "extra/var-tmp-rose-deploy"
+      ],
+      "extra": "RCA evidence (/home/boxes/rca-mobile without rebuildable dist-* and session secrets) and deploy wrapper/logs/cycle snapshots (/var/tmp/rose-deploy)"
+    }
+  },
+  "reused": {
+    "local-git-refs": "docs/handoffs/pr-1929-closeout/archive-index.json#local-git-refs (72 template branches + stash at identical tips)"
+  }
+}

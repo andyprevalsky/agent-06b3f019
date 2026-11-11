@@ -1,0 +1,10 @@
+{"i":1,"host":"Together","ms":2819,"firstContentMs":939,"chunks":32,"contentLen":1654,"reasoningLen":0,"action":"web_search","actionIdx":1}
+{"i":0,"host":"Together","ms":6608,"firstContentMs":922,"chunks":99,"contentLen":2768,"reasoningLen":0,"action":"web_search","actionIdx":1}
+{"i":2,"host":"Together","ms":11889,"firstContentMs":1343,"chunks":167,"contentLen":11682,"reasoningLen":0,"action":"PARSE_ERROR","actionIdx":-1}
+{"i":5,"host":"Together","ms":2344,"firstContentMs":533,"chunks":26,"contentLen":1334,"reasoningLen":0,"action":"web_search","actionIdx":1}
+{"i":4,"host":"Together","ms":10082,"firstContentMs":1451,"chunks":154,"contentLen":12433,"reasoningLen":0,"action":"PARSE_ERROR","actionIdx":-1}
+{"i":3,"host":"Together","ms":10180,"firstContentMs":538,"chunks":166,"contentLen":12656,"reasoningLen":0,"action":"PARSE_ERROR","actionIdx":-1}
+{"i":6,"host":"Together","ms":1990,"firstContentMs":1362,"chunks":11,"contentLen":409,"reasoningLen":0,"action":"web_search","actionIdx":1}
+{"i":8,"host":"Together","ms":2232,"firstContentMs":1869,"chunks":9,"contentLen":290,"reasoningLen":0,"action":"web_search","actionIdx":1}
+{"i":7,"host":"Together","ms":2654,"firstContentMs":1905,"chunks":11,"contentLen":409,"reasoningLen":0,"action":"web_search","actionIdx":1}
+{"provider":"together","n":9,"over13s":0,"p50":2819,"max":11889}
