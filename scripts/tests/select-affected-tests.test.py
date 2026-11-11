@@ -820,6 +820,68 @@ def check_stability_backend_lanes() -> None:
               "stability: an only-omitted check exits 0 and prints the omission, not a pass")
 
 
+
+def check_explicit_composite_stability_budget() -> None:
+    import tempfile
+
+    key = "cloudbench-controller:bash scripts/tests/cloudbench-multi-workstream.test.sh"
+    def planned(key=key, command=None, cases=None):
+        return sat.StabilityPlan(key, command or ["bash", "scripts/tests/cloudbench-multi-workstream.test.sh"],
+                                 ROOT, cases or [sat.WHOLE_UNIT], "test fixture")
+    check(sat.stability_timeout(planned(), 1200) == 1200, "explicit 1200-second caller bound is retained")
+    check(sat.STABILITY_RUN_TIMEOUT_SECONDS == 1200, "ordinary stability deadline stays 1200s")
+    check(sat.stability_timeout(planned(), None) == 2400, "exact whole composite receives explicit budget")
+    check(sat.stability_timeout(planned(key="other"), 1200) == 1200, "other unit keeps default budget")
+    check(sat.stability_timeout(planned(command=["bash", "other"]), 1200) == 1200,
+          "different command cannot receive composite budget")
+    check(sat.stability_timeout(planned(cases=["case"]), 1200) == 1200,
+          "individual case cannot receive composite budget")
+    check(sat.stability_timeout(planned(), 1) == 1, "explicit smaller budget is retained")
+    class Load:
+        def take(self): pass
+        def give(self): pass
+        def alive(self): return True
+    with tempfile.TemporaryDirectory() as folder:
+        seen = []
+        def completed(command, cwd, log, timeout, env, unset):
+            seen.append(timeout)
+            return 0, 0.01
+        with patch.object(sat, "_run_once", completed):
+            row = sat._run_plan(0, planned(), 5, None, Path(folder), Load())
+        check(row["status"] == "PASS" and row["consecutive_passes"] == 5 and seen == [2400] * 5,
+              "all five full commands execute with the explicit budget")
+        check(row["timeout_approval"] == "PR1682-STABILITY-COMPOSITE-BUDGET",
+              "effective budget and approval remain visible in results")
+        with patch.object(sat, "_run_once", return_value=(None, 2400)):
+            row = sat._run_plan(0, planned(), 5, None, Path(folder), Load())
+        check(row["status"] == "FAIL" and len(row["attempts"]) == 1,
+              "exceeding composite budget still fails and stops consecutive sequence")
+
+
+    # Public API and parser preserve an explicit default-sized caller bound.
+    class PublicLoad(Load):
+     tool='fake-owned-load';pids=[]
+     def __init__(self,*args):pass
+     def __enter__(self):return self
+     def __exit__(self,*args):return False
+    unit=sat.Unit('cloudbench-controller','bash scripts/tests/cloudbench-multi-workstream.test.sh',['scripts/tests/cloudbench-multi-workstream.test.sh'])
+    with tempfile.TemporaryDirectory()as d:
+     for supplied,expected in [(None,2400),(1200,1200),(1,1)]:
+      seen=[]
+      def complete(command,cwd,log,timeout,env,unset):
+       Path(log).write_text('fake runner complete\n');seen.append(timeout);return 0,0.01
+      with patch.object(sat,'CpuLoad',PublicLoad),patch.object(sat,'plan_unit',return_value=planned()),patch.object(sat,'_run_once',complete):
+       report=sat.run_stability([unit],timeout=supplied,load_workers=1,log_root=Path(d))
+      assert report['status']=='PASS' and seen==[expected]*5
+      captured=[]
+      def capture(*args,**kwargs):captured.append(args[3]);return {'status':'PASS'}
+      import contextlib,io
+      with patch.object(sat,'new_test_units',return_value=[unit]),patch.object(sat,'run_stability',capture),contextlib.redirect_stdout(io.StringIO()):
+       argv=['--stability','--changed-file','scripts/tests/cloudbench-multi-workstream.test.sh','--format','json']
+       if supplied is not None:argv+=['--stability-timeout',str(supplied)]
+       assert sat.main(argv)==0
+      assert captured==[supplied]
+
 def main() -> int:
     check_coverage_map_dependency_preflight()
     selector = sat.Selector()
@@ -882,6 +944,7 @@ def main() -> int:
 
     check_extraction_precision(selector)
     check_new_test_stability()
+    check_explicit_composite_stability_budget()
     check_stability_concurrency()
     check_stability_case_selection()
     check_stability_blackbox_cases()
