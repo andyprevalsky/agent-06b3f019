@@ -1,0 +1,14 @@
+{
+  "format": "ROSE-PRIVATE-TAR-GCM-V1",
+  "bucket": "trace-archive",
+  "key": "devbox-closeout-private/pr1934/20261111T1915Z-deploy-evidence.tar.gz.aesgcm",
+  "encryption_key_id": "trace-archive-prod-2026-07-03",
+  "ciphertext_sha256": "f1a4096d4dd70b7c636e4d2cdf2a400530d685c4e12d1c22f2f6ab9444d3967a",
+  "gzip_sha256": "e93a323bcb9901210d500f2ca6faf55558088dd955fb54323999d365065df15c",
+  "stored_bytes": 2118001032,
+  "frames": 253,
+  "files": 39801,
+  "original_bytes": 8812820497,
+  "manifest_sha256": "f60d211936a862004f15f1d8c79ec1774ec9981a117002cd39e56bb60f28617f",
+  "full_readback_verified": true
+}
