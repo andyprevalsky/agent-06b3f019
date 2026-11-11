@@ -1,5 +1,5 @@
 import { clearsChatStallGuard, exclusiveCerebrasCompletion } from './cerebrasRoute';
-import { RosePaymentRequiredError, RoseRateLimitError, RoseStallError } from './errors';
+import { RoseError, RosePaymentRequiredError, RoseRateLimitError, RoseStallError } from './errors';
 import { PreContentFallThroughError, runWithFallThrough } from './fallThroughStream';
 import { hedgeStreams } from './hedgedStream';
 import { createLogger } from '../logger';
@@ -131,7 +131,10 @@ export async function* raceDirectCerebrasOpenRouterFallbacks(params: {
             requestId: params.requestId,
             callSite: params.callSite,
           }),
-          params.latchOnComplete === true
+          {
+            requireCleanStop: params.latchOnComplete === true,
+            callerSignal: params.options.abort_signal,
+          }
         ),
     },
     hedge: {
@@ -145,7 +148,10 @@ export async function* raceDirectCerebrasOpenRouterFallbacks(params: {
             callSite: params.callSite,
             allowProviderFallback: true,
           }),
-          params.latchOnComplete === true
+          {
+            requireCleanStop: params.latchOnComplete === true,
+            callerSignal: params.options.abort_signal,
+          }
         ),
     },
     // The silent-stream path starts both together. A fast direct 429 uses a
@@ -176,26 +182,42 @@ export async function* raceDirectCerebrasOpenRouterFallbacks(params: {
 
 async function* requireCompletedContent(
   stream: AsyncIterable<RoseStreamChunk>,
-  rejectTruncated = false
+  opts: { requireCleanStop?: boolean; callerSignal?: AbortSignal } = {}
 ): AsyncIterable<RoseStreamChunk> {
   let hasContent = false;
   let finishReason: string | undefined;
-  for await (const chunk of stream) {
-    if (clearsChatStallGuard(chunk.kind)) hasContent = true;
-    if (chunk.kind === 'usage') finishReason = chunk.data.finish_reason;
-    // Both failures are classified fall-through errors: when every leg fails,
-    // the caller's waterfall runs instead of the turn failing outright.
-    if (chunk.kind === 'done' && !hasContent) {
-      throw new RoseStallError('OpenRouter fallback completed without content');
+  try {
+    for await (const chunk of stream) {
+      if (clearsChatStallGuard(chunk.kind)) hasContent = true;
+      if (chunk.kind === 'usage') finishReason = chunk.data.finish_reason;
+      // Both failures are classified fall-through errors: when every leg fails,
+      // the caller's waterfall runs instead of the turn failing outright.
+      if (chunk.kind === 'done' && !hasContent) {
+        throw new RoseStallError('OpenRouter fallback completed without content');
+      }
+      // A structured reply is complete only when the provider reports a normal
+      // stop. One cut off at its token cap, or a body that closed without any
+      // finish_reason, is unclosed JSON: drop this leg before it can latch, so
+      // a cleanly finished leg wins the race.
+      if (chunk.kind === 'done' && opts.requireCleanStop && finishReason !== 'stop') {
+        throw new RoseStallError(
+          `OpenRouter fallback ended without a clean stop (finish_reason=${finishReason ?? 'none'})`
+        );
+      }
+      yield chunk;
     }
-    // A structured reply cut off at its token cap is unclosed JSON: drop this
-    // leg before it can latch, so a cleanly finished leg wins the race.
-    if (chunk.kind === 'done' && rejectTruncated && finishReason === 'length') {
-      throw new RoseStallError(
-        'OpenRouter fallback stopped at its token cap (finish_reason=length)'
-      );
+  } catch (error) {
+    // A structured leg that fails mid-stream for any other reason must still
+    // fall through to the waterfall when every leg fails, so classify it.
+    // Caller cancellation (the router deadline or a closed turn) propagates unchanged.
+    if (!opts.requireCleanStop || error instanceof RoseError || opts.callerSignal?.aborted) {
+      throw error;
     }
-    yield chunk;
+    throw new RoseStallError(
+      `OpenRouter fallback stream failed before completing: ${
+        error instanceof Error ? error.message : String(error)
+      }`.slice(0, 300)
+    );
   }
 }
 

@@ -10,7 +10,10 @@ function delayedCompletion(
   finishMs: number,
   signal: AbortSignal | undefined,
   onAbort: () => void,
-  finishReason?: string
+  /** null: the body closes without any finish_reason. */
+  finishReason: string | null = 'stop',
+  /** Error the stream at finishMs instead of closing it. */
+  failMidStream = false
 ): Response {
   const encodedContent = new TextEncoder().encode(
     `data: ${JSON.stringify({
@@ -18,7 +21,7 @@ function delayedCompletion(
         {
           index: 0,
           delta: { content },
-          ...(finishReason ? { finish_reason: finishReason } : {}),
+          ...(finishReason !== null ? { finish_reason: finishReason } : {}),
         },
       ],
     })}\n\n`
@@ -28,6 +31,10 @@ function delayedCompletion(
     start(controller) {
       const first = setTimeout(() => controller.enqueue(encodedContent), firstContentMs);
       const done = setTimeout(() => {
+        if (failMidStream) {
+          controller.error(new TypeError('terminated'));
+          return;
+        }
         controller.enqueue(encodedDone);
         controller.close();
       }, finishMs);
@@ -59,8 +66,9 @@ async function raceScenario(params: {
   schemaProperties: Record<string, { type: string }>;
   glmContent: string;
   qwenContent: string;
-  /** GLM stops early at its token cap instead of streaming slowly to the end. */
+  /** GLM ends early: at its token cap, without any finish_reason, or by a read error. */
   glmTruncated?: boolean;
+  glmEnd?: 'length' | 'no-finish-reason' | 'read-error';
   /** Qwen stops at its token cap too, so the final waterfall must answer. */
   qwenTruncated?: boolean;
   waterfallContent?: string;
@@ -96,19 +104,24 @@ async function raceScenario(params: {
         750,
         init?.signal ?? undefined,
         () => undefined,
-        params.qwenTruncated ? 'length' : undefined
+        params.qwenTruncated ? 'length' : 'stop'
       );
     }
     assert.equal(model, 'z-ai/glm-5.3-flash');
     return delayedCompletion(
       params.glmContent,
       50,
-      params.glmTruncated ? 300 : 1500,
+      params.glmTruncated || params.glmEnd ? 300 : 1500,
       init?.signal ?? undefined,
       () => {
         glmAborted = true;
       },
-      params.glmTruncated ? 'length' : undefined
+      params.glmTruncated || params.glmEnd === 'length'
+        ? 'length'
+        : params.glmEnd === 'no-finish-reason' || params.glmEnd === 'read-error'
+          ? null
+          : 'stop',
+      params.glmEnd === 'read-error'
     );
   }) as typeof fetch;
 
@@ -136,7 +149,7 @@ async function raceScenario(params: {
     const text = chunks.map((chunk) => chunk.choices[0]?.delta?.content ?? '').join('');
     const expected = params.waterfallContent ?? params.qwenContent;
     assert.equal(text, expected, `${params.schemaName}: first completed answer wins`);
-    if (!params.glmTruncated) {
+    if (!params.glmTruncated && !params.glmEnd) {
       assert.equal(glmAborted, true, `${params.schemaName}: the slower GLM leg is cancelled`);
     }
   } finally {
@@ -192,6 +205,32 @@ async function run(): Promise<void> {
     glmContent: '{"reasoning":"glm hit its cap","action":"web_search","queries":["a","a a',
     qwenContent: '{"reasoning":"qwen hit its cap","action":"web_search","queries":["b","b b',
     glmTruncated: true,
+    qwenTruncated: true,
+    waterfallContent: '{"reasoning":"waterfall answered","action":"web_search","queries":["c"]}',
+  });
+  // A body that closes without any finish_reason is not a clean completion.
+  await raceScenario({
+    schemaName: 'router_decision',
+    schemaProperties: {
+      reasoning: { type: 'string' },
+      action: { type: 'string' },
+      queries: { type: 'array' },
+    },
+    glmContent: '{"reasoning":"glm closed early","action":"web_search","queries":["a","a ',
+    qwenContent: '{"reasoning":"qwen finished cleanly","action":"web_search","queries":["a"]}',
+    glmEnd: 'no-finish-reason',
+  });
+  // A GLM read error mid-stream plus a capped Qwen leg still reaches the waterfall.
+  await raceScenario({
+    schemaName: 'router_decision',
+    schemaProperties: {
+      reasoning: { type: 'string' },
+      action: { type: 'string' },
+      queries: { type: 'array' },
+    },
+    glmContent: '{"reasoning":"glm read failed","action":"web_search","queries":["a',
+    qwenContent: '{"reasoning":"qwen hit its cap","action":"web_search","queries":["b","b b',
+    glmEnd: 'read-error',
     qwenTruncated: true,
     waterfallContent: '{"reasoning":"waterfall answered","action":"web_search","queries":["c"]}',
   });

@@ -107,7 +107,17 @@ so it cannot beat a leg that finishes cleanly. Both pre-latch failures in
 classified fall-through error. When every leg fails, the call falls through
 to the final OpenRouter waterfall instead of surfacing an unclassified error
 that neither `runWithFallThrough` nor the router's regeneration handles. The
-substitute code review caught this. Plain text and tool-call
+substitute code review caught this. CodeRabbit then caught two more gaps,
+fixed in the same PR. First, a structured leg now latches only on an
+explicit `finish_reason: stop`, so a body that closes with no finish reason no
+longer counts as complete. Second, a structured leg that fails mid-stream with
+an unclassified error (for example a fetch `TypeError: terminated`) is
+re-raised as `RoseStallError`, so the waterfall still runs when every leg
+fails. Caller cancellation propagates unchanged. Live with the final code
+(`ratecap-live-fixed-v2.jsonl`): 15/15 decisions closed with no waterfall
+fallbacks (p50 1.86 s, max 8.5 s), and one GLM leg that hit
+`finish_reason=length` was rejected while the other leg answered. Real legs
+report `stop`. Plain text and tool-call
 streams still latch at first content. Pre-latch chunks stay buffered per branch
 and are replayed only for the winner, so callers still see one provider's
 output.
@@ -132,8 +142,9 @@ latches its inner fallback race on first content; it has no production
 occurrence and changing it would also stop progressive generator streaming
 there.
 
-Regression: `chat-generator-rate-cap-completion-race.test.ts` runs four
-scenarios. The original generator scenario. A `router_decision` scenario:
+Regression: `chat-generator-rate-cap-completion-race.test.ts` runs six
+scenarios (the two newest: GLM's body closes with no finish reason; GLM read
+error plus capped Qwen, answered by the waterfall). The original generator scenario. A `router_decision` scenario:
 Cerebras 429; GLM's first chunk at 50 ms but unclosed until 1.5 s; Qwen, started
 at 500 ms, completes at about 1.25 s. A truncation scenario: GLM completes first
 at 300 ms with `finish_reason: length`. And a both-legs-truncated scenario,
