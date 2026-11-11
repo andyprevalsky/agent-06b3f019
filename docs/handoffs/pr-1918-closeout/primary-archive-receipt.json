@@ -1,0 +1,14 @@
+{
+  "bucket": "trace-archive",
+  "ciphertext_sha256": "2be021071d864a25176467f84b284d399dd13fdf74ff31c6169c8b4c1b11bc32",
+  "encryption_key_id": "trace-archive-prod-2026-07-03",
+  "files": 167471,
+  "format": "ROSE-PRIVATE-TAR-GCM-V1",
+  "frames": 658,
+  "full_readback_verified": true,
+  "gzip_sha256": "fa94af88d87cb1093dcf49603512d8e770b1f717b156d1277668025a09aede26",
+  "key": "devbox-closeout-private/pr1918/20261111T052200Z-all-records.tar.gz.aesgcm",
+  "manifest_sha256": "a0e7bbdeee3b7e9bce4a8f1edd306c5b06ac4f3a1efaa27916553880e33f9448",
+  "original_bytes": 13107543659,
+  "stored_bytes": 5512830302
+}
