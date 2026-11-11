@@ -308,4 +308,3 @@ native provider audit; archive readiness alone is not resource release.
 ### Raw backend coverage on disk-constrained Linux runners
 
 When disk space cannot hold the raw V8 data, choose an existing absolute temporary-storage root with enough capacity, for example `cd back-end && BACKEND_COVERAGE_TMP_ROOT=/dev/shm npm run test:coverage`. The runner allocates a fresh directory under that root for each invocation and applies the same suites and thresholds. `/dev/shm` consumes RAM, so check both memory and storage headroom first. The default remains `back-end/coverage/tmp`; failures retain their raw evidence through the normal cleanup path. Do not remove or compress raw files while their producers are running.
-
