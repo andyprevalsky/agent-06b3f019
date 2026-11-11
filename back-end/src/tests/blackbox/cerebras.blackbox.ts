@@ -37,6 +37,44 @@ async function collect(stream: AsyncIterable<CompletionChunk>): Promise<Completi
   return chunks;
 }
 
+/**
+ * RCA ef18929c: a single transient non-OK /models response from a shared gate
+ * VM failed the live probe. Transient statuses are retried; any other non-OK
+ * status fails immediately and names the HTTP status.
+ */
+async function assertModelsReadRetriesOnlyTransientStatuses(): Promise<void> {
+  const originalFetch = globalThis.fetch;
+  const modelsUrl = CEREBRAS_API_URL.replace('/chat/completions', '/models');
+  const statuses: number[] = [];
+  const serve = (queue: number[]) => {
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      assert.equal(String(input), modelsUrl);
+      const status = queue.shift() ?? 200;
+      statuses.push(status);
+      return status === 200
+        ? new Response(JSON.stringify({ data: [{ id: 'qwen-3.8-27b' }] }), { status })
+        : new Response('{"type":"too_many_requests_error"}', { status });
+    }) as typeof fetch;
+  };
+  try {
+    serve([503]);
+    const ids = await fetchLiveCerebrasModelIds(modelsUrl, 'blackbox-cerebras-key');
+    assert.deepEqual([...ids], ['qwen-3.8-27b']);
+    assert.deepEqual(statuses, [503, 200]);
+
+    statuses.length = 0;
+    serve([401]);
+    await assert.rejects(
+      fetchLiveCerebrasModelIds(modelsUrl, 'blackbox-cerebras-key'),
+      /Cerebras \/models must be reachable for the live probe: HTTP 401/
+    );
+    assert.deepEqual(statuses, [401]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  process.stdout.write('PASS Cerebras /models read retries transient statuses only\n');
+}
+
 async function run(): Promise<void> {
   const originalFetch = globalThis.fetch;
   const oldCerebrasKey = process.env.CEREBRAS_API_KEY;
@@ -107,6 +145,8 @@ async function run(): Promise<void> {
 
   process.stdout.write('PASS synchronous Chat uses direct Cerebras qwen-3.8-27b exclusively\n');
 
+  await assertModelsReadRetriesOnlyTransientStatuses();
+
   // Live inventory probe: the archived GLM id must stay 404, and the configured
   // chat model must not return model_archived. Skipped when no real key.
   const liveKey = process.env.CEREBRAS_API_KEY;
@@ -117,22 +157,16 @@ async function run(): Promise<void> {
       CEREBRAS_API_URL.replace('/chat/completions', '/models'),
       liveKey
     );
-    if (ids) {
-      assert.equal(
-        ids.has(ARCHIVED_CEREBRAS_CHAT_MODEL),
-        false,
-        `archived ${ARCHIVED_CEREBRAS_CHAT_MODEL} must not reappear in Cerebras inventory`
-      );
-      assert.equal(
-        ids.has(CEREBRAS_CHAT_MODEL),
-        true,
-        `CEREBRAS_CHAT_MODEL=${CEREBRAS_CHAT_MODEL} must be present in Cerebras /models`
-      );
-    } else {
-      process.stdout.write(
-        'SKIP live Cerebras inventory assertions: /models unreachable (quarantined)\n'
-      );
-    }
+    assert.equal(
+      ids.has(ARCHIVED_CEREBRAS_CHAT_MODEL),
+      false,
+      `archived ${ARCHIVED_CEREBRAS_CHAT_MODEL} must not reappear in Cerebras inventory`
+    );
+    assert.equal(
+      ids.has(CEREBRAS_CHAT_MODEL),
+      true,
+      `CEREBRAS_CHAT_MODEL=${CEREBRAS_CHAT_MODEL} must be present in Cerebras /models`
+    );
 
     const probeBody = {
       ...buildCerebrasChatBody({
