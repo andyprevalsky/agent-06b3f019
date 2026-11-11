@@ -219,6 +219,26 @@ class WarmSource(FakeApiCase):
         with self.assertRaisesRegex(self.mod["WarmSourceError"], "HTTP 429"):
             self.api.write_metadata(mid, self.mod["LAST_USED_KEY"], "456")
 
+    def test_ensure_accepts_a_peer_fresh_last_used_when_fly_keeps_throttling(self):
+        # PR #1928 smoke: one of 13 jobs still got 429 after the client's backoff. A peer's write in the same
+        # burst keeps the set fresh, so ensure() succeeds; a stale value still fails the selection.
+        set_id, machine_name, _ = self.mod["names"](NODE_A, PY_A)
+        mid = "0c0000000000bb"
+        self.fake.add_machine(mid, machine_name, "stopped", metadata={
+            self.mod["SET_KEY"]: set_id, self.mod["LAST_USED_KEY"]: str(int(time.time()) - 30)})
+        real = self.fake.handle
+
+        def handle(method, path, body, nonce):
+            if "/metadata/" in path and method == "POST":
+                return 429, {"error": "rate limited"}
+            return real(method, path, body, nonce)
+
+        self.fake.handle = handle
+        self.assertEqual(machine_name, self.mod["ensure"](self.api, NODE_A, PY_A, "devbox-1")[1])
+        self.meta(mid)[self.mod["LAST_USED_KEY"]] = str(int(time.time()) - 3600)
+        with self.assertRaisesRegex(self.mod["WarmSourceError"], "HTTP 429"):
+            self.mod["ensure"](self.api, NODE_A, PY_A, "devbox-1")
+
     def test_names_are_per_dependency_set_and_never_task_shaped(self):
         set_a, machine_a, volume_a = self.mod["names"](NODE_A, PY_A)
         set_b, machine_b, _ = self.mod["names"](NODE_B, PY_B)
