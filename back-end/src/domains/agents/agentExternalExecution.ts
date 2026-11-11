@@ -25,16 +25,18 @@ export function assertExternalExecution(
 }
 
 /**
- * Recorded as an external root's start phase: its internal executor, not chat or
- * Temporal, runs this agent. External roots reject a public start_phase, so this
- * value never collides with a plan/execute start.
+ * Recorded as an external root's start phase in its create transaction: its
+ * internal executor, not chat or Temporal, is the root's only execution owner.
+ * External roots reject a public start_phase, so this never collides with a
+ * plan/execute start.
  */
 export const EXTERNAL_EXECUTION_START_PHASE = 'external';
 
-/** The external executor owns follow-up work until it records a terminal status. */
-export function ownedByExternalExecution(agent: {
-  workflowStartPhase: string | null;
-  status: string;
-}): boolean {
-  return agent.workflowStartPhase === EXTERNAL_EXECUTION_START_PHASE && agent.status === 'ACTIVE';
+/**
+ * External roots never gain a chat or Temporal lifecycle: in any status (ACTIVE,
+ * PAUSED or terminal) a follow-up is stored for the executor's trace, never
+ * dispatched, so no competing handler can start beside or after the executor.
+ */
+export function ownedByExternalExecution(agent: { workflowStartPhase: string | null }): boolean {
+  return agent.workflowStartPhase === EXTERNAL_EXECUTION_START_PHASE;
 }

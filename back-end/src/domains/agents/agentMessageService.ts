@@ -108,7 +108,7 @@ async function routeUserMessage(
   }
 
   if (agentForChat !== null && ownedByExternalExecution(agentForChat)) {
-    // The stored row stays visible; the external executor owns this root until it is terminal.
+    // The stored row stays in the executor's trace; an external root never dispatches chat or Temporal.
     log.info('[AgentMessages] External executor owns this root; message stored without dispatch', {
       agentId,
     });

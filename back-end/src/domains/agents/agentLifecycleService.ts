@@ -175,11 +175,8 @@ async function applyCreateBodyRules(
 }
 
 async function activateExternalExecution(agentId: string): Promise<null> {
-  // Persist ownership so follow-up messages never start chat or Temporal beside the executor.
-  await repo.updateAgent(agentId, {
-    status: 'ACTIVE',
-    workflowStartPhase: EXTERNAL_EXECUTION_START_PHASE,
-  });
+  // Ownership (workflowStartPhase) was written by the create transaction.
+  await repo.updateAgent(agentId, { status: 'ACTIVE' });
   return null;
 }
 
@@ -244,7 +241,8 @@ export async function createAgent(
     temporalWorkflowId: willStartWorkflow ? agentId : null,
     workflowMaxIterations: body.max_iterations,
     workflowContextGates: body.context_gates,
-    workflowStartPhase: body.start_phase,
+    workflowStartPhase:
+      options.externalExecution === true ? EXTERNAL_EXECUTION_START_PHASE : body.start_phase,
     workflowTaskQueue: body.task_queue,
     ...(await serverCreateFields(body, userId, isSubAgent, options)),
     projectId,

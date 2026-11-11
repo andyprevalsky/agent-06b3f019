@@ -10,9 +10,10 @@ import {
   prisma,
   randomUUID,
   test,
-  sleep,
+  createTestAgent,
   type CapturedCall,
 } from './agents-blackbox-harness';
+import { waitFor } from '../helpers/waitFor';
 
 test('external execution persists a detached Message owner without launching chat or Temporal', async () => {
   const session = await createAnonymousSession('external-execution');
@@ -74,7 +75,7 @@ test('external execution rejects public authentication and incompatible launch i
   }
 });
 
-test('external execution owns follow-up messages until terminal: stored, no chat or Temporal', async () => {
+test('external execution owns every follow-up for life: stored, never chat, Temporal or resume', async () => {
   const session = await createAnonymousSession('external-execution-followup');
   const id = randomUUID();
   const created = await request(`${BASE_URL}/api/agents`, {
@@ -84,34 +85,78 @@ test('external execution owns follow-up messages until terminal: stored, no chat
   });
   assertStatus(created.status, 201, created.data);
   trackedAgentIds.add(id);
-  const captureToken = `external-followup-${randomUUID()}`;
-  const text = `owner follow-up ${randomUUID().slice(0, 8)}`;
-  const posted = await request(`${BASE_URL}/api/agents/${id}/messages`, {
-    method: 'POST',
-    headers: { ...authHeaders(session.session.access_token), 'X-Capture-Token': captureToken },
-    body: JSON.stringify({ message: text }),
+  const marked = await prisma.agent.findUniqueOrThrow({ where: { id } });
+  assert(marked.workflowStartPhase === 'external', 'the create transaction must persist ownership');
+
+  const postFollowUp = async (agentId: string, captureToken: string, text: string) => {
+    const posted = await request(`${BASE_URL}/api/agents/${agentId}/messages`, {
+      method: 'POST',
+      headers: { ...authHeaders(session.session.access_token), 'X-Capture-Token': captureToken },
+      body: JSON.stringify({ message: text }),
+    });
+    assert(
+      posted.status >= 200 && posted.status < 300,
+      `follow-up must be accepted: ${posted.status}`
+    );
+  };
+  // Storing a row broadcasts its INSERT; any other outbound call (router/generator LLMs) is chat.
+  const chatCalls = async (captureToken: string): Promise<CapturedCall[]> => {
+    const captures = await request(`${BASE_URL}/api/test/captures?token=${captureToken}`);
+    assertStatus(captures.status, 200, captures.data);
+    return ((captures.data as { captures?: CapturedCall[] }).captures ?? []).filter(
+      (c) => !c.url.endsWith('/realtime/v1/api/broadcast')
+    );
+  };
+
+  const activeToken = `external-active-${randomUUID()}`;
+  const activeText = `active follow-up ${randomUUID().slice(0, 8)}`;
+  await postFollowUp(id, activeToken, activeText);
+  // The executor records a terminal status; a later follow-up still belongs to it.
+  const finished = await request(`${BASE_URL}/api/agents/${id}/status`, {
+    method: 'PATCH',
+    headers: apiKeyHeaders(session.user.id),
+    body: JSON.stringify({
+      status: 'COMPLETED',
+      progress: 1,
+      tokenCount: 0,
+      contextSize: 0,
+      messageCount: 1,
+    }),
   });
-  assert(
-    posted.status >= 200 && posted.status < 300,
-    `follow-up must be accepted: ${posted.status}`
+  assertStatus(finished.status, 200, finished.data);
+  const terminalToken = `external-terminal-${randomUUID()}`;
+  const terminalText = `terminal follow-up ${randomUUID().slice(0, 8)}`;
+  await postFollowUp(id, terminalToken, terminalText);
+
+  // Positive control: the same route dispatches chat for an ordinary agent.
+  const ordinary = await createTestAgent(session.user.id, 'Ordinary chat control');
+  const controlToken = `ordinary-control-${randomUUID()}`;
+  await postFollowUp(ordinary, controlToken, `control follow-up ${randomUUID().slice(0, 8)}`);
+  await waitFor(
+    'chat dispatch for the ordinary control agent',
+    async () => (await chatCalls(controlToken)).length > 0,
+    { timeoutMs: 60_000 }
   );
-  await sleep(3000);
-  const captures = await request(`${BASE_URL}/api/test/captures?token=${captureToken}`);
-  assertStatus(captures.status, 200, captures.data);
-  // Storing the row broadcasts its INSERT; anything else (router/generator LLMs) is chat dispatch.
-  const calls = ((captures.data as { captures?: CapturedCall[] }).captures ?? []).filter(
-    (c) => !c.url.endsWith('/realtime/v1/api/broadcast')
-  );
-  assert(
-    calls.length === 0,
-    `external root follow-up must not dispatch chat: ${JSON.stringify(calls.map((c) => c.url)).slice(0, 400)}`
-  );
+
+  // Chat for the earlier external follow-ups would have started before the control's.
+  for (const token of [activeToken, terminalToken]) {
+    const calls = await chatCalls(token);
+    assert(
+      calls.length === 0,
+      `external root follow-up must not dispatch chat: ${JSON.stringify(calls.map((c) => c.url)).slice(0, 400)}`
+    );
+  }
   const row = await prisma.agent.findUniqueOrThrow({ where: { id } });
-  assert(row.status === 'ACTIVE' && row.temporalWorkflowId === null, 'must not start Temporal');
-  const messages = await prisma.message.findMany({ where: { agentId: id } });
   assert(
-    messages.some((m) => m.role === 'USER' && m.text === text),
-    'follow-up row must be stored'
+    row.status === 'COMPLETED' && row.temporalWorkflowId === null,
+    'an external root must not be reactivated or start Temporal'
   );
-  assert(!messages.some((m) => m.role === 'ASSISTANT'), 'chat must not reply beside the executor');
+  const userRows = (await prisma.message.findMany({ where: { agentId: id, role: 'USER' } })).filter(
+    (m) => m.text === activeText || m.text === terminalText
+  );
+  assert(userRows.length === 2, `both follow-ups must be stored, got ${userRows.length}`);
+  assert(
+    userRows.every((m) => !('resumedFrom' in ((m.metadata ?? {}) as Record<string, unknown>))),
+    'an external root follow-up must not claim a resume'
+  );
 });
