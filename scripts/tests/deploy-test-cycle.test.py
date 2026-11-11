@@ -5041,6 +5041,40 @@ class Cycle(unittest.TestCase):
         proof['files'] = {str(p): c.sha_file(p) for p in files}
         return state, occurrence, paths, proof, parents
 
+    def test_launched_campaign_interrupted_by_source_change_reconciles_from_its_cli_binding(self):
+        # PR #1928: the cycle interrupted a launched smoke campaign ("cloud command interrupted or source
+        # changed"); its adapter never recorded native_directory, so campaign-v1 binds the campaign through
+        # the CLI log while every fleet audit, provider release and process check still applies.
+        state, occurrence, paths, proof, parents = self.campaign_recon_state()
+        receipt = state['attempts'][-1]['results'][0]
+
+        def interrupted(reason):
+            adapter = c.read(paths['adapter'])
+            adapter.update(fleet_directory=None, reason=reason); c.write(paths['adapter'], adapter)
+            reference = receipt['native_cleanup_reference']
+            reference.update(native_directory=None, result_sha256=c.sha_file(paths['adapter']))
+            receipt['cleanup_owner']['native_cleanup_reference'] = reference
+            c.write(paths['receipt'], receipt)
+            candidate = copy.deepcopy(proof)
+            candidate.update(owner=copy.deepcopy(receipt['cleanup_owner']), receipt_sha256=c.sha_file(paths['receipt']),
+                             worker_result_sha256=c.sha_file(paths['adapter']))
+            return candidate
+
+        refused = interrupted('worker result identity/inventory mismatch')
+        before = copy.deepcopy(state)
+        with self.assertRaisesRegex(ValueError, 'campaign root binding'):
+            c.reconcile(state, occurrence['id'], refused)
+        self.assertEqual(before, state)
+        accepted = interrupted('cloud command interrupted or source changed')
+        stale = copy.deepcopy(state)  # the refresh's stale attempt: no occurrence, identified by its token
+        stale['phase'] = 'stale'; stale['attempts'][-1]['stale'] = True
+        stale_receipt = stale['attempts'][-1]['results'][0]
+        stale_receipt.update(executed=True)
+        c.write(paths['receipt'], stale_receipt)
+        accepted.update(receipt_sha256=c.sha_file(paths['receipt']))
+        c.reconcile(stale, stale_receipt['token'], accepted)
+        self.assertFalse(stale['reconciled_owners'][c.sha_file(paths['receipt'])]['credit_granted'])
+
     def unlaunched_campaign_state(self):
         import shutil
         import runpy
