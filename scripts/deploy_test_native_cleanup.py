@@ -2291,14 +2291,16 @@ def clean_isolated_successor(state, prior, original, successor, custody_state=No
          and not rows[0][0].get('interrupted')
          and (rows[0][0]['phase'] != 'triage' or rows[0][0].get('independent_full') is True), 'successor full attempt')
     binding = successor.get('execution_binding', {})
-    need(binding.get('environment') == state['environment']
+    # With a custody snapshot the execution environment is authenticated against that original
+    # state below; a later coordinator's environment cannot retroactively bind a historical run.
+    need((custody_state is not None or binding.get('environment') == state['environment'])
          and isinstance(binding.get('input_fingerprint'), str) and binding['input_fingerprint'], 'successor contract')
     folder = Path(successor['log']).parent
     need(bounded_read(folder / 'receipt.json', 'successor receipt') == successor, 'successor receipt changed')
     request = bounded_read(folder / 'request.json', 'successor request')
     need(all(request.get(k) == successor.get(k) for k in ('token', 'source', 'gate'))
          and request.get('worker_recipe') == gate.get('worker_recipe'), 'successor request identity')
-    execution_gate = gate
+    execution_gate, execution_environment = gate, state['environment']
     if custody_state is not None:
         from deploy_test_historical_custody import state_identity
         need(isinstance(custody_state, dict) and set(custody_state) == {'path', 'sha256'}
@@ -2317,7 +2319,7 @@ def clean_isolated_successor(state, prior, original, successor, custody_state=No
              'successor original custody binding')
         gates = [g for g in snapshot['plan']['gates'] if g.get('name') == prior['gate']]
         need(len(gates) == 1, 'successor original gate identity')
-        execution_gate = gates[0]
+        execution_gate, execution_environment = gates[0], snapshot['environment']
         need(set(execution_gate) == set(gate)
              and all(isinstance(g.get('selection_evidence'), list)
                      and all(isinstance(v, str) for v in g['selection_evidence'])
@@ -2343,7 +2345,7 @@ def clean_isolated_successor(state, prior, original, successor, custody_state=No
         gate = copy.deepcopy(execution_gate)
         gate['checks'] = [name for name in gate['checks'] if name in historical_checks]
         execution_gate = gate
-    need(binding.get('contract_digest') == digest(execution_gate) and binding.get('environment') == state['environment']
+    need(binding.get('contract_digest') == digest(execution_gate) and binding.get('environment') == execution_environment
          and isinstance(binding.get('input_fingerprint'), str) and binding['input_fingerprint'], 'successor contract')
     need(isinstance(checks, list) and checks and isinstance(skips, dict)
          and len(set(checks)) == len(checks) and not set(checks) & set(skips)

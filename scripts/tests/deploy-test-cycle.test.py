@@ -6171,6 +6171,24 @@ class Cycle(unittest.TestCase):
         self.assertIsNone(c.full_pass_binding(state, next(g for g in state['plan']['gates'] if g['name']==successor['gate'])))
         same=copy.deepcopy(state);c.reconcile(state,original['token'],incoming);self.assertEqual(same,state)
 
+    def test_clean_successor_custody_binds_its_original_environment_not_a_later_coordinator(self):
+        """PR1910 takeover: a new coordinator's environment differs from the one the successor ran in.
+
+        The custody snapshot authenticates the original environment; without that snapshot the
+        current environment must still match.
+        """
+        state, original, incoming, folder, snapshot, successor = self.historical_clean_successor_contract_state()
+        state['environment'] = 'e' * 64  # a later coordinator's process environment
+        without = {k: v for k, v in incoming.items() if k != 'successor_custody_state'}
+        before = copy.deepcopy(state)
+        with self.assertRaisesRegex(ValueError, 'successor'):
+            c.reconcile(state, original['token'], without)
+        self.assertEqual(before, state)
+        c.reconcile(state, original['token'], incoming)
+        entry = state['reconciled_owners'][incoming['receipt_sha256']]
+        self.assertFalse(entry['credit_granted']); self.assertFalse(entry['cleanup_complete'])
+        self.assertEqual(before['attempts'], state['attempts']); self.assertEqual(before['failures'], state['failures'])
+
     def test_clean_successor_historical_contract_refusals_remain_atomic(self):
         state, original, incoming, folder, path, successor = self.historical_clean_successor_contract_state()
         original_snapshot = path.read_bytes()
