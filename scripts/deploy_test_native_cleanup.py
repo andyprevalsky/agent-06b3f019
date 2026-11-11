@@ -1611,8 +1611,12 @@ def historical_successor_gate(witness, successor, request, current_gate, root=No
     if old_checks != new_checks:
         from deploy_test_quarantine import deploy_selection_omissions
         need(root is not None, 'historical successor omission requires catalog')
+        # Removals need catalog deploy omissions; later-selected cases only extend current
+        # coverage. The successor is still validated against the returned historical gate.
         removed = deploy_selection_omissions(root, historical, current_gate)
-        need(removed and new_checks == [k for k in old_checks if k not in removed],
+        kept = [k for k in old_checks if k not in removed]
+        need((removed or set(new_checks) - set(old_checks))
+             and [k for k in new_checks if k in set(old_checks)] == kept,
              'historical successor ordered catalog subset')
     need(set(historical) == set(current_gate)
          and all(isinstance(g.get('selection_evidence'), list)
@@ -2012,6 +2016,35 @@ def recovered_isolated_successor_v1(state, prior, original, successor):
         need(hashlib.sha256(sealed(path)).hexdigest() == expected, 'negative successor changed during validation')
 
 
+def refusal_inventory(attempt, latest, gate):
+    """The refusal covers the full gate inventory of its own attempt.
+
+    The current gate may only extend that inventory. An extension is authenticated by the
+    refused gate's own request in the attempt namespace (located through sibling receipts),
+    so a partial refusal row can never pass as a later-extended one.
+    """
+    if latest.get('cases') == dict.fromkeys(gate['checks'], 'UNVERIFIED'):
+        return True
+    from deploy_test_cycle import bounded_read
+    cases = latest.get('cases')
+    if (not isinstance(cases, dict) or not cases or set(cases.values()) != {'UNVERIFIED'}
+            or not set(cases) < set(gate['checks'])):
+        return False
+    folders = {Path(r['log']).parent.parent for r in attempt.get('results', [])
+               if r is not latest and isinstance(r.get('log'), str)}
+    if len(folders) != 1:
+        return False
+    path = folders.pop() / gate['name'] / 'request.json'
+    if path.is_symlink() or not path.is_file():
+        return False
+    request = bounded_read(path, 'refusal request')
+    return (request.get('gate') == gate['name'] and request.get('phase') == attempt.get('phase')
+            and request.get('source') == latest.get('source') == attempt.get('source')
+            and isinstance(request.get('checks'), list) and isinstance(request.get('skips'), dict)
+            and len(set(request['checks'])) == len(request['checks'])
+            and set(request['checks']) | set(request['skips']) == set(cases))
+
+
 def isolated_successor(state, prior, renewal_witness=None):
     """A known pre-dispatch source refusal is not a newer native execution.
 
@@ -2089,7 +2122,7 @@ def isolated_successor(state, prior, renewal_witness=None):
             and latest.get('reason') == 'native cleanup: next source/inventory binding'):
         gate = next(g for g in state['plan']['gates'] if g['name'] == prior['gate'])
         need(latest['status'] == 'FAIL' and latest['complete'] is False
-             and latest['cases'] == dict.fromkeys(gate['checks'], 'UNVERIFIED')
+             and refusal_inventory(attempt, latest, gate)
              and isinstance(latest['source'], dict) and set(latest['source']) == {'head', 'digest'}
              and isinstance(latest['source']['head'], str)
              and re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}', latest['source']['head'])
@@ -2100,10 +2133,16 @@ def isolated_successor(state, prior, renewal_witness=None):
                   or attempt.get('phase') == 'triage' and attempt.get('independent_full') is True)
              and not attempt.get('interrupted') and not attempt.get('stale')
              and len(rows) >= 2, 'unexecuted source refusal identity')
-        # Never skip another refusal, an unknown setup failure or a native attempt.
+        # Never skip an unknown refusal, an unknown setup failure or a native attempt. The one
+        # known earlier refusal (pre-dispatch custody source refusal) is resolved by its own fully
+        # authenticated branch on the history before this attempt; it needs its own native predecessor.
         previous = rows[-2][1]
         if previous.get('token') == prior['token']:
             return previous
+        if (set(previous) == {'gate', 'status', 'complete', 'cases', 'source', 'reason'}
+                and previous.get('reason') == 'historical custody: current source not frozen'):
+            index = next(i for i, a in enumerate(state['attempts']) if a is attempt)
+            return isolated_successor({**state, 'attempts': state['attempts'][:index]}, prior, renewal_witness)
         need(previous.get('executed') is True and previous.get('complete') is True,
              'source refusal requires immediate complete native predecessor')
         return previous

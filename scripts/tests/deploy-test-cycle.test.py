@@ -6710,6 +6710,47 @@ class Cycle(unittest.TestCase):
                 c.reconcile(state, selector, incoming)
                 self.assertEqual(same, state)
 
+    def test_isolated_renewal_accepts_refusal_after_authenticated_inventory_extension(self):
+        state, paths, proof, gate, packet, original, folder, successor = self.clean_successor_renewal_state()
+        namespace = self.root / '.context/deploy-pipeline/attempts/41/final'
+        sibling_log = namespace / 'peer/output.log'
+        sibling_log.parent.mkdir(parents=True); sibling_log.write_text('peer ran')
+        request_path = namespace / gate['name'] / 'request.json'
+        request_path.parent.mkdir(parents=True)
+        refused = list(gate['checks'])
+        c.write(request_path, dict(token='refused-token', source=copy.deepcopy(state['source']), gate=gate['name'],
+                                   checks=refused[1:], skips={refused[0]: {}}, phase='final'))
+        refusal = dict(gate=gate['name'], status='FAIL', complete=False,
+            cases=dict.fromkeys(refused, 'UNVERIFIED'), source=copy.deepcopy(state['source']),
+            reason='native cleanup: next source/inventory binding')
+        peer = dict(gate='peer', status='PASS', log=str(sibling_log))
+        state['attempts'][-1]['source'] = copy.deepcopy(successor['source'])
+        state['attempts'].append(dict(phase='final', source=copy.deepcopy(state['source']), results=[peer, refusal]))
+        # The current gate later gains a case; the refusal stays bound to its own request.
+        current = next(g for g in state['plan']['gates'] if g['name'] == gate['name'])
+        current['checks'] = [*current['checks'], 'later-selected-case']
+        incoming = dict(proof, validation_source=copy.deepcopy(state['source']))
+        raw = request_path.read_bytes()
+        for name, edit in [('partial-row', lambda s: s['attempts'][-1]['results'][1]['cases'].pop(refused[0])),
+                           ('request-gate', lambda s: c.write(request_path, {**c.read(request_path), 'gate': 'other'})),
+                           ('request-inventory', lambda s: c.write(request_path, {**c.read(request_path), 'skips': {}})),
+                           ('request-phase', lambda s: c.write(request_path, {**c.read(request_path), 'phase': 'focused'})),
+                           ('no-sibling', lambda s: s['attempts'][-1]['results'].pop(0)),
+                           ('request-absent', lambda s: request_path.unlink())]:
+            with self.subTest(name=name):
+                candidate = copy.deepcopy(state)
+                try:
+                    edit(candidate); before = copy.deepcopy(candidate)
+                    with self.assertRaises(ValueError): c.reconcile(candidate, original['token'], incoming)
+                    self.assertEqual(before, candidate)
+                finally:
+                    request_path.write_bytes(raw)
+        before = copy.deepcopy(state)
+        c.reconcile(state, original['token'], incoming)
+        self.assertEqual(before['attempts'], state['attempts'])
+        entry = state['reconciled_owners'][proof['receipt_sha256']]
+        self.assertFalse(entry['credit_granted']); self.assertFalse(entry['cleanup_complete'])
+
     def historical_renewal_witness(self, state, gate, folder, successor):
         import deploy_test_historical_custody as h
         snapshot = copy.deepcopy(state)
@@ -6764,6 +6805,35 @@ class Cycle(unittest.TestCase):
         same = copy.deepcopy(state)
         c.reconcile(state, original['token'], incoming, renewal_witness=witness)
         self.assertEqual(same, state)
+
+    def test_binding_refusal_stacked_on_custody_refusal_renews_through_extension(self):
+        import deploy_test_historical_custody as h
+        state, original, proof, gate, folder, successor, witness, peer_folder = self.custody_source_refusal_state()
+        prior = state['reconciled_owners'][proof['receipt_sha256']]
+        # A later admission on the renewed source refused before dispatch, after a later
+        # selection extended the current gate. Its own request authenticates its inventory.
+        refused = list(gate['checks'])
+        namespace = self.directory / 'attempts/31/focused'
+        sibling = namespace / 'peer/output.log'; sibling.parent.mkdir(parents=True); sibling.write_text('ran')
+        c.write(namespace / gate['name'] / 'request.json', dict(token='refused', source=copy.deepcopy(state['source']),
+                gate=gate['name'], checks=refused, skips={}, phase='focused'))
+        binding = dict(gate=gate['name'], status='FAIL', complete=False, cases=dict.fromkeys(refused, 'UNVERIFIED'),
+                       source=copy.deepcopy(state['source']), reason='native cleanup: next source/inventory binding')
+        state['attempts'].append(dict(phase='focused', source=copy.deepcopy(state['source']),
+                                      results=[dict(gate='peer', status='PASS', log=str(sibling)), binding]))
+        incoming = dict(proof, validation_source=copy.deepcopy(state['source']))
+        unchained = copy.deepcopy(state); unchained['attempts'][-1]['results'][1]['reason'] = 'unknown setup failure'
+        unchanged = copy.deepcopy(unchained)
+        with self.assertRaises(ValueError):
+            c.reconcile(unchained, original['token'], incoming, renewal_witness=witness)
+        self.assertEqual(unchanged, unchained)
+        before = copy.deepcopy(state)
+        c.reconcile(state, original['token'], incoming, renewal_witness=witness)
+        self.assertEqual(before['attempts'], state['attempts'])
+        self.assertEqual(before['failures'], state['failures'])
+        entry = state['reconciled_owners'][proof['receipt_sha256']]
+        self.assertFalse(entry['credit_granted']); self.assertFalse(entry['cleanup_complete'])
+        self.assertIsNone(c.full_pass_binding(state, gate))
 
     def test_custody_prelaunch_refusal_rejects_unknown_native_and_tampered_rows(self):
         state, original, proof, gate, folder, successor, witness, peer_folder = self.custody_source_refusal_state()
@@ -6921,6 +6991,7 @@ class Cycle(unittest.TestCase):
         witness = self.historical_renewal_witness(state, gate, folder, successor)
         # New admission has a legitimate changed environment and catalog-approved subset.
         gate['checks'].remove(omitted)
+        gate['checks'].insert(1, 'later-selected-case')  # a later selection may also extend coverage
         gate['selection_evidence'].append('new selection explanation')
         state['environment'] = c.environment_digest()  # overridden below through the real binding function
         with patch.object(c, 'environment_digest', return_value=c.digest('fresh private source environment')):
