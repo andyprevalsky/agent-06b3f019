@@ -479,3 +479,155 @@ def check_fake_primary_ready_channel(source: Path) -> None:
 
 
 check_fake_primary_ready_channel(ROOT / 'scripts/tests/cloudbench-multi-workstream.test.sh')
+
+def check_controller_phase_observability(source: Path) -> None:
+    """Observe real invocation boundaries without changing child status or streams."""
+    import os
+    import re
+    import shlex
+    import signal
+    import time
+    sys.path.insert(0, str(ROOT / 'scripts/lib'))
+    from condition_wait import wait_until
+
+    text = source.read_text()
+    start = text.index('\nrun_controller() {') + 1
+    function = text[start:text.index('\nwrite_dead_registry() {', start)]
+    pattern = re.compile(
+        r'^CLOUDBENCH_FIXTURE_CONTROLLER (START|END) pid=([0-9]+) '
+        r'started=([0-9]+\.[0-9]+) at=([0-9]+\.[0-9]+) '
+        r'label=([A-Za-z0-9_-]+\.log)(?: status=([0-9]+))?$')
+
+    def events(stderr):
+        rows = []
+        for line in stderr.splitlines():
+            assert len(line) <= 320, 'phase event exceeded its fixed bound'
+            match = pattern.fullmatch(line)
+            assert match, ('invalid or private phase output', line)
+            rows.append(match.groups())
+        return rows
+
+    with tempfile.TemporaryDirectory(prefix='controller-phase-control-') as folder:
+        root = Path(folder)
+        ws = root / 'ws'; (ws / 'scripts').mkdir(parents=True)
+        child = ws / 'scripts/run-bench-fleet'
+        child.write_text('''#!/usr/bin/env bash
+printf '%s\\n' "$@" > "$CONTROL_DIR/argv"
+printf '%s' "$CONDUCTOR_PORT:$CLOUDBENCH_POLL_INTERVAL" > "$CONTROL_DIR/environment"
+printf 'child stdout\\n'
+printf 'child stderr\\n' >&2
+if [ "$1" = hold ]; then
+    : > "$CONTROL_DIR/ready"
+    IFS= read -r _ < "$CONTROL_DIR/release"
+    exit 0
+fi
+exit "$1"
+''')
+        prefix = ('set -uo pipefail\n' + function + '\n' + '\n'.join(
+            name + '=' + shlex.quote(str(root)) for name in (
+                'FIXTURE_STORAGE', 'FAKE_BIN', 'TMP_ROOT', 'SCRIPT_SNAPSHOT_TMP', 'FAKE_DIR'))
+            + '\nFIXTURE_STORAGE_DEVICE=1\nFAKE_FLY_TOKEN=synthetic\n')
+
+        def command(directory, label, status, extra=''):
+            return (prefix + '\nexport CONTROL_DIR=' + shlex.quote(str(directory)) + '\n' + extra
+                    + '\nrun_controller ' + shlex.quote(str(ws)) + ' 32123 '
+                    + shlex.quote(str(directory / label)) + ' ' + shlex.quote(str(status)))
+
+        for status, label in ((0, 'controller-exit.log'), (1, 'controller-exit.log'),
+                              (143, 'controller-exit.log'), (0, 'disposable-success-ws-a.log')):
+            directory = root / ('exit-' + str(status) + '-' + label); directory.mkdir()
+            before = time.time()
+            result = subprocess.run(['bash', '-c', command(directory, label, status)],
+                                    capture_output=True, text=True, timeout=10)
+            after = time.time()
+            assert result.returncode == status, (status, result.returncode, result.stderr)
+            rows = events(result.stderr)
+            assert len(rows) == 2, 'controller invocation lacks bounded START/END timing events'
+            first, last = rows
+            assert first[0] == 'START' and last[0] == 'END' and first[1:3] == last[1:3]
+            assert first[5] is None and last[5] == str(status)
+            assert before - 1 <= float(first[2]) <= float(last[3]) <= after + 1
+            assert first[2] == first[3] and first[4] == last[4] == label
+            assert str(root) not in result.stderr and 'synthetic' not in result.stderr
+            assert result.stdout == ''
+            assert (directory / label).read_text() == 'child stdout\nchild stderr\n'
+            assert (directory / 'argv').read_text().splitlines() == [str(status), '--foreground']
+            assert (directory / 'environment').read_text() == '32123:2'
+
+        for label in ('private secret.log', 'controller-' + 'x' * 130 + '.log', 'controller-..log'):
+            directory = root / 'invalid'; directory.mkdir(exist_ok=True)
+            result = subprocess.run(['bash', '-c', command(directory, label, 0)],
+                                    capture_output=True, text=True, timeout=10)
+            assert result.returncode != 0 and not (directory / 'argv').exists()
+            assert label not in result.stderr and str(root) not in result.stderr
+
+        directory = root / 'broken-start'; directory.mkdir()
+        with open('/dev/full', 'w') as sink:
+            result = subprocess.run(['bash', '-c', command(directory, 'controller-broken.log', 0)],
+                                    stdout=subprocess.PIPE, stderr=sink, text=True, timeout=10)
+        assert result.returncode != 0 and not (directory / 'argv').exists(), 'failed START logger launched child'
+        # Inject only the builtin logger write failure after the real child boundary.
+        # A child failure must survive it, and child success may not mask it.
+        for status, expected in ((0, 1), (7, 7)):
+            directory = root / ('broken-end-' + str(status)); directory.mkdir()
+            extra = ("builtin() { if [[ ${2:-} == *' END '* ]]; then return 1; fi; command builtin \"$@\"; }")
+            result = subprocess.run(['bash', '-c', command(directory, 'controller-broken.log', status, extra)],
+                                    capture_output=True, text=True, timeout=10)
+            assert result.returncode == expected, ('failed END logger status', result.returncode, expected)
+            assert len(events(result.stderr)) == 1, 'failed logger fabricated END'
+
+        children = []
+        try:
+            for index in range(2):
+                directory = root / ('parallel-' + str(index)); directory.mkdir()
+                os.mkfifo(directory / 'release')
+                descriptor = os.open(directory / 'release', os.O_RDWR | os.O_NONBLOCK)
+                process = subprocess.Popen(['bash', '-c', command(directory, 'controller-parallel.log', 'hold')],
+                                           stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                           text=True, start_new_session=True)
+                children.append((process, directory, descriptor))
+            wait_until(lambda: all((d / 'ready').exists() for _, d, _ in children),
+                       timeout=5, description='both real fixture children started concurrently')
+            for _, _, descriptor in children:
+                os.write(descriptor, b'release\n')
+            pairs = []
+            for process, directory, _ in children:
+                stdout, stderr = process.communicate(timeout=5)
+                assert process.returncode == 0 and stdout == ''
+                rows = events(stderr); assert len(rows) == 2
+                assert rows[0][0] == 'START' and rows[1][0] == 'END' and rows[0][1:3] == rows[1][1:3]
+                assert int(rows[0][1]) == process.pid
+                pairs.append(rows)
+            assert pairs[0][0][1] != pairs[1][0][1], 'parallel invocations share an identity'
+            assert max(float(x[0][3]) for x in pairs) <= min(float(x[1][3]) for x in pairs), 'phase logger serialized children'
+        finally:
+            for process, _, descriptor in children:
+                if process.poll() is None:
+                    os.killpg(process.pid, signal.SIGKILL)
+                process.communicate(timeout=5)
+                os.close(descriptor)
+
+        for signum in (signal.SIGTERM, signal.SIGKILL):
+            directory = root / ('signal-' + str(signum)); directory.mkdir()
+            os.mkfifo(directory / 'release')
+            descriptor = os.open(directory / 'release', os.O_RDWR | os.O_NONBLOCK)
+            process = subprocess.Popen(['bash', '-c', command(directory, 'controller-signal.log', 'hold')],
+                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                       text=True, start_new_session=True)
+            try:
+                wait_until(lambda: (directory / 'ready').exists(), timeout=5,
+                           description='signal control reached its real child')
+                os.killpg(process.pid, signum)
+                stdout, stderr = process.communicate(timeout=5)
+                assert process.returncode == -signum and stdout == ''
+                rows = events(stderr)
+                assert len(rows) == 1 and rows[0][0] == 'START', 'signal fabricated a completed phase'
+            finally:
+                if process.poll() is None:
+                    os.killpg(process.pid, signal.SIGKILL)
+                process.communicate(timeout=5)
+                os.close(descriptor)
+    print('PASS: bounded controller START/END preserves status, streams, parallel identity and interrupted phases')
+
+
+check_controller_phase_observability(ROOT / 'scripts/tests/cloudbench-multi-workstream.test.sh')

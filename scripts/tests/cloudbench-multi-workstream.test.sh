@@ -2801,6 +2801,17 @@ os.execvp(sys.argv[1], sys.argv[1:])')
     # fake's ambiguous attempts never age out within a scenario, so bound that
     # wait: the real exact-name re-resolution still runs, then ownership is
     # retained and teardown fails closed exactly as each scenario asserts.
+    # Phase metadata shares the native outer stderr, never a new file or payload.
+    local phase_label="${log##*/}" phase_started="$EPOCHREALTIME" phase_pid="$BASHPID"
+    local phase_status=0 phase_observed
+    if [[ ! "$phase_label" =~ ^[A-Za-z0-9_-]+[.]log$ ]] \
+        || [ "${#phase_label}" -gt 128 ] \
+        || [[ ! "$phase_started" =~ ^[0-9]{1,12}[.][0-9]{1,9}$ ]]; then
+        builtin printf '%s\n' 'controller phase metadata is invalid' >&2
+        return 1
+    fi
+    builtin printf 'CLOUDBENCH_FIXTURE_CONTROLLER START pid=%s started=%s at=%s label=%s\n' \
+        "$phase_pid" "$phase_started" "$phase_started" "$phase_label" >&2 || return 1
     env -u CLOUDBENCH_SNAPSHOT_ID -u CLOUDBENCH_FLEET_ROOT \
         -u GIT_DIR -u GIT_COMMON_DIR -u GIT_WORK_TREE \
         -u BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS \
@@ -2838,7 +2849,14 @@ os.execvp(sys.argv[1], sys.argv[1:])')
         CLOUDBENCH_PROXY_POST_PROBE_SETTLE_SECONDS=0.1 \
         CLOUDBENCH_POLL_INTERVAL=2 \
         CLOUDBENCH_LAUNCH_SETTLE_SECONDS=1 \
-        "${session_leader[@]}" bash "$ws/scripts/$controller_entry" "${launch_args[@]}" > "$log" 2>&1
+        "${session_leader[@]}" bash "$ws/scripts/$controller_entry" "${launch_args[@]}" > "$log" 2>&1 \
+        || phase_status=$?
+    phase_observed="$EPOCHREALTIME"
+    if ! builtin printf 'CLOUDBENCH_FIXTURE_CONTROLLER END pid=%s started=%s at=%s label=%s status=%s\n' \
+        "$phase_pid" "$phase_started" "$phase_observed" "$phase_label" "$phase_status" >&2; then
+        [ "$phase_status" -ne 0 ] || return 1
+    fi
+    return "$phase_status"
 }
 
 write_dead_registry() {  # write_dead_registry <label> <policy> <host> <name> [id] [role]
