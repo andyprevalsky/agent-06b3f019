@@ -12,15 +12,11 @@ import asyncio
 import io
 import json
 import shutil
-import sys
 import subprocess
 import tarfile
 from pathlib import Path
 
 import pytest
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts" / "lib"))
-from test_quarantine import quarantine
 
 from benchmarks import code_bench as cb
 from benchmarks import code_bench_parity as parity
@@ -180,12 +176,24 @@ def test_commit_fixture_missing_origin_fails(tmp_path):
     assert _failed(_grade(tmp_path, COMMIT)) == ["git.origin_unchanged"]
 
 
-@quarantine(
-    since="2026-11-10",
-    repair="pending-handoff:be7609ba9f2a48879ca405c3ba6a49a3",
-    error="FileNotFoundError: [Errno 2] No such file or directory: '/tmp/pytest-of-runner/pytest-14/test_commit_fixture_rewritten_0/commit-locally-no-push/repo/.git/objects/maintenance.lock'",
-    evidence='.context/rca-playwright/benchmark-flake/findings.json',
-)
+def test_git_helper_never_starts_auto_maintenance(tmp_path):
+    """Commits and fetches run no `git maintenance`: newer git detaches it holding objects/maintenance.lock,
+    which vanished mid-archive (FileNotFoundError) in the rewritten-history fixture."""
+    repo = _workspace(tmp_path, COMMIT)
+    trace = tmp_path / "trace2.json"
+    env = {**cb._git_env(tmp_path), "GIT_TRACE2_EVENT": str(trace)}
+    (repo / "notes.txt").write_text("x\n")
+    cb._git(["add", "-A"], repo, env)
+    cb._git(["commit", "-q", "-m", "x"], repo, env)
+    cb._git(["fetch", "-q", "origin"], repo, env)
+    children = [
+        e.get("argv", []) for e in map(json.loads, trace.read_text().splitlines()) if e.get("event") == "child_start"
+    ]
+    assert children, "trace2 recorded no child processes; the probe is not observing git"
+    assert not [argv for argv in children if "maintenance" in argv or "gc" in argv], children
+    assert not (repo / ".git" / "objects" / "maintenance.lock").exists()
+
+
 def test_commit_fixture_rewritten_history_fails(tmp_path):
     repo = _solve(tmp_path, COMMIT)
     _git(repo, "checkout", "-q", "--orphan", "rewrite")

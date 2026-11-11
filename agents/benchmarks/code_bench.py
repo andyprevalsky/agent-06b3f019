@@ -198,9 +198,21 @@ def _git_env(home: Path) -> dict[str, str]:
     }
 
 
+# Auto-maintenance stays off: git newer than 2.51 (verified 2.56.1) detaches `maintenance run --auto` after commit/fetch and
+# hands objects/maintenance.lock to the daemon, which deletes it while an archive walk is reading
+# the repo (FileNotFoundError on the vanished lock). Fixture and grader repos must stay unchanged
+# once a git command returns.
+_GIT_FIXED_CONFIG = (
+    "-c", "core.fsmonitor=false",
+    "-c", "core.hooksPath=/dev/null",
+    "-c", "maintenance.auto=false",
+    "-c", "gc.auto=0",
+)
+
+
 def _git(args: list[str], cwd: Path, env: dict[str, str]) -> str:
     result = subprocess.run(
-        ["git", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", *args],
+        ["git", *_GIT_FIXED_CONFIG, *args],
         cwd=cwd,
         env=env,
         capture_output=True,
