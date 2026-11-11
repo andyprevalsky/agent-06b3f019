@@ -100,3 +100,50 @@ failed live phone benchmark; no device operation or benchmark prompt was run
 or altered to obtain this proof. Native proof, exact commands and negative
 controls are retained in the PR #1865 closeout evidence. The full normal
 agents coverage gate on the final integrated source remains required.
+
+
+## November 11 recurrence: authorized deploy-only mass quarantine (OPEN)
+
+Gate: INTRODUCED by PR1865's reviewed deploy-only user-quarantine repair
+`3a17a82150c28c67669f27a51682a2d234c2a452`, compared with parent4185ac910f.
+Native44 initial and rerun benchmark logs both report
+`phone_daily_existing_catalog_rows_unchanged: AssertionError`. Native
+occurrence7717607a030c47a8b818b6de2ca02c6b is UNVERIFIED/complete=false.
+The domain diagnostic additionally lists three expected negative ownership
+selftest cases; its owning test passed in both actual native logs. Those
+expected negatives are not additional runtime failures or a retention defect.
+
+The owning phone test still freezes the approved52b7 catalog. All215 rows
+and their order are identical between parent4185 and current3a17 except
+one field at index0: the user's exact deploy-only `deploy_quarantine` marker
+on `test-mass-agent-run-0`. Every phone row, prompt, evaluator, ordinary
+quarantine and other catalog field is preserved. The existing comparison
+removes validated ordinary quarantine, then rejects the newly approved field.
+
+The smallest correction is to advance only the immutable expected-catalog
+pin to already-reviewed3a17, preserving the whole comparison and all Python
+assert nodes. No deploy metadata is ignored or projected away. This also
+freezes the authorized marker so changed reasons, other-case markers and
+extra fields remain detectable. Step6a retains the existing exact comparison
+and adds no parser, exception framework or alternate production branch.
+Golden reference: not applicable (no approval-gated hunk). This same owning
+archive case and its November9 recurrence were read before proposing the fix.
+
+The exact existing callback, compiled with its canonical source filename and
+called through the same no-argument owning boundary as the native registry,
+passed against immutable parent4185 data in0.112s, failed current3a17 in0.117s,
+and passed the one-pin candidate in0.110s. Nine meaningful negative controls
+all reject unauthorized old/phone prompts, old/phone evaluators, changed mass
+reason, a marker on another case, an extra mass field, malformed ordinary
+quarantine and row reordering. All original assertions are AST-identical;
+the entire module AST differs only in that one immutable Git object string.
+Catalog bytes were never edited. Proof and original logs are under
+`/var/tmp/deploy-mf1108/rca-phone-catalog44/`. No global benchmark rerun or
+paid task was launched for this local causal proof.
+
+The user required finishing deploy while quarantining only the named mass
+test from future deploys; this correction preserves that authorized metadata
+and manual benchmark eligibility. No new human feedback about this recurrence
+was received. Source integration and complete fresh native agents validation
+remain pending with the deploy coordinator; this recurrence is OPEN and
+original native failures/outcomes remain unchanged.

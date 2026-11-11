@@ -128,7 +128,7 @@ def test_existing_catalog_rows_unchanged():
     import subprocess
     from pathlib import Path
     root = Path(__file__).resolve().parents[2]
-    old = json.loads(subprocess.check_output(['git', 'show', '52b7cc41f091286ce1c5d21d87aa7523f65b6814:agents/benchmarks/tasks.json'], cwd=root, text=True))
+    old = json.loads(subprocess.check_output(['git', 'show', '3a17a82150c28c67669f27a51682a2d234c2a452:agents/benchmarks/tasks.json'], cwd=root, text=True))
     current = json.loads((root / 'agents/benchmarks/tasks.json').read_text())
     # Quarantine is validated deploy metadata, not an executable task change.
     from benchmarks.long_horizon import validate_task_quarantine
