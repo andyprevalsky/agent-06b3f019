@@ -261,6 +261,26 @@ class Cycle(unittest.TestCase):
         self.assertIn('Original SKIPPED', text.getvalue())
         self.assertIn('4396 cents sandbox', text.getvalue())
 
+    def test_isolated_renewal_successor_skips_unlaunched_refusals(self):
+        # PR #1864: tokenless pre-launch refusals must not become the isolated-validation successor.
+        import deploy_test_native_cleanup as native
+        executed = {'gate': 'smoke', 'status': 'FAIL', 'complete': False, 'token': 't1', 'executed': True,
+                    'cases': {}, 'source': {'head': 'a'}}
+        refusal = {'gate': 'smoke', 'status': 'FAIL', 'complete': False, 'cases': {'x': 'UNVERIFIED'},
+                   'source': {'head': 'b'}, 'reason': 'native cleanup: next source/inventory binding'}
+        other = {'gate': 'eslint', 'status': 'PASS', 'complete': True, 'token': 't2'}
+        state = {'attempts': [{'results': [executed, other]}, {'results': [refusal]}, {'results': [dict(refusal)]}]}
+        self.assertIs(executed, native.launched_successor(state, 'smoke'))
+        self.assertTrue(native.unlaunched_refusal(refusal))
+        self.assertFalse(native.unlaunched_refusal(executed))
+        # A refusal row carrying any execution evidence is not skipped.
+        for extra in ({'token': 't3'}, {'executed': True}, {'log': '/x'}):
+            self.assertFalse(native.unlaunched_refusal({**refusal, **extra}))
+        later = {**executed, 'token': 't4'}
+        state['attempts'].append({'results': [later]})
+        self.assertIs(later, native.launched_successor(state, 'smoke'))
+        self.assertIsNone(native.launched_successor({'attempts': [{'results': [refusal]}]}, 'smoke'))
+
     def test_recovered_debt_coverage_requires_the_exact_recovered_check(self):
         # PR #1864 review: an unrelated covered failure must not satisfy canonical recovered stall debt.
         import deploy_test_historical_custody as h

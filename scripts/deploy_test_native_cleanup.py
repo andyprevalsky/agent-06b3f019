@@ -1678,9 +1678,30 @@ def reconciled_failed_isolated_successor_v1(state, prior, original, successor):
          'failed successor clocks')
 
 
+UNLAUNCHED_REFUSAL_KEYS = frozenset({'gate', 'status', 'complete', 'cases', 'source', 'reason'})
+
+
+def unlaunched_refusal(result):
+    """A coordinator-side pre-launch refusal: no token, worker, log or execution, so nothing was allocated."""
+    return (isinstance(result, dict) and set(result) == UNLAUNCHED_REFUSAL_KEYS
+            and result['status'] == 'FAIL' and result['complete'] is False
+            and isinstance(result['reason'], str) and result['reason'])
+
+
+def launched_successor(state, gate):
+    """Latest receipt for a gate that actually launched; pre-launch refusals cannot supersede an owner.
+
+    PR #1864: after a source refresh, a smoke launch refused before admission (missing renewal) left
+    a tokenless FAIL row as the gate's newest receipt, and renewal then rejected it as a failed
+    successor execution, so the isolated-validation binding could never move to the new source.
+    """
+    rows = [r for a in state.get('attempts', []) for r in a.get('results', []) if r.get('gate') == gate]
+    return next((r for r in reversed(rows) if not unlaunched_refusal(r)), None)
+
+
 def renew_isolated_validation(state, request_token, proof):
     """Renew only the next source of an already verified original operation."""
-    from deploy_test_cycle import CANCEL, latest_receipts, receipt_owner, source
+    from deploy_test_cycle import CANCEL, receipt_owner, source
     need(state.get('phase') in ISOLATED_RENEWAL_PHASES and state.get('ready') is False
          and not state.get('running')
          and 'live_failures' not in state and not CANCEL.is_set(), 'quiescent repair boundary required')
@@ -1695,7 +1716,7 @@ def renew_isolated_validation(state, request_token, proof):
     need(len(receipts) == 1, 'original receipt identity')
     receipt = receipts[0]
     reconciliation_occurrence(state, prior, receipt)
-    latest = latest_receipts(state).get(prior['gate'])
+    latest = launched_successor(state, prior['gate'])
     if latest != receipt:
         if latest is not None and latest.get('complete') is False:
             reconciled_failed_isolated_successor_v1(state, prior, receipt, latest)
