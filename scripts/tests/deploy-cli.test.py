@@ -136,6 +136,23 @@ class Freeze(Repo):
         self.assertEqual(calls[-1][4], d.head())
         self.assertIn('committed=1', out)
 
+    def test_commits_an_already_staged_deletion(self):
+        # `git revert --no-commit` / `git rm` stage a deletion: the path is in neither the index
+        # nor the worktree, so `git add -A -- <path>` died "pathspec did not match" (FLAKY
+        # 2d9047db marker release, 2026-11-11).
+        (self.root / 'gone.py').write_text('y = 1\n')
+        sh('git', 'add', 'gone.py', cwd=self.root)
+        sh('git', 'commit', '-qm', 'add gone', cwd=self.root)
+        sh('git', 'rm', '-q', 'gone.py', cwd=self.root)
+        (self.root / 'app.py').write_text('x = 2\n')
+        with patch.object(d, 'cmd_fix', return_value=0), patch.object(d, 'run', return_value=0):
+            code, out, _ = self.call(d.cmd_freeze, base='origin/main', message='release')
+        self.assertEqual(code, 0)
+        self.assertIn('committed=2', out)
+        self.assertEqual(sh('git', 'status', '--porcelain', cwd=self.root), '')
+        self.assertEqual(sorted(sh('git', 'show', '--name-status', '--format=', 'HEAD', cwd=self.root).split()),
+                         ['D', 'M', 'app.py', 'gone.py'])
+
     def test_stops_when_fix_fails(self):
         with patch.object(d, 'cmd_fix', return_value=1), patch.object(d, 'run') as runner:
             code, _, err = self.call(d.cmd_freeze, base='origin/main', message='x')
