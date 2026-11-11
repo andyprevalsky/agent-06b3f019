@@ -3187,6 +3187,147 @@ second="$(claim_pool_machine)" || exit 95
         self.assertNotIn('FORBIDDEN',result.stderr)
         self.assertTrue((self.source/'cloudbench-cold-handoffs/outgoing'/MACHINE).exists())
 
+class CaptureReceiptAppendTests(unittest.TestCase):
+    """Only a manifest-bound complete earlier backend log proves an append."""
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.out = Path(self.temp.name)
+        self.ns = runpy.run_path(str(ROOT / "cloudbench-original-volume-capture.py"))
+        self.ident = {"machine_id": MACHINE, "token": TOKEN}
+        self.log = "repo/.context/cloudbench/logs/backend.log"
+        self.services = "repo/.context/cloudbench/services.json"
+        self.run = "repo/.context/cloudbench/run.json"
+        self.earlier = b"original backend event\n" * 8
+        self.originals = {self.log: self.earlier + b"late original event\n",
+                          self.services: b'{"service":"stopped"}', self.run: b'{"status":"FAILED"}'}
+        self.state = dict(machine_id=MACHINE, guest_run_token=TOKEN,
+            backend_log=dict(exists=True, regular=True, symlink=False, within_limit=True,
+                             bytes=len(self.earlier) - 4),
+            services_manifest=dict(exists=True, bytes=len(self.originals[self.services])),
+            run_json=dict(exists=True, bytes=len(self.originals[self.run])))
+        self.manifest = dict(machine_id=MACHINE, guest_run_token=TOKEN,
+            evidence=dict(backend_log_sha256=hashlib.sha256(self.earlier).hexdigest(),
+                          run_json_sha256=hashlib.sha256(self.originals[self.run]).hexdigest()))
+        self.prior = self.out / "guest-cleanup.backend.log"
+        self.prior.write_bytes(self.earlier)
+
+    def receipts(self):
+        for name, data in (("state", self.state), ("provider-manifest", self.manifest)):
+            (self.out / ("guest-cleanup." + name + ".json")).write_text(json.dumps(data))
+
+    def call(self):
+        return self.ns["cross_check_receipts"](self.out, self.ident, self.originals)
+
+    def reject(self):
+        with self.assertRaises((self.ns["CaptureFailure"], self.ns["Refusal"])):
+            self.call()
+
+    def test_manifest_bound_append_preserves_all_original_receipts(self):
+        self.receipts()
+        before = {p.name: p.read_bytes() for p in self.out.iterdir()}
+        checks = self.call()
+        self.assertEqual(checks["guest-cleanup.backend.log"], self.manifest["evidence"]["backend_log_sha256"])
+        self.assertEqual({p.name: p.read_bytes() for p in self.out.iterdir()}, before)
+        self.assertEqual(checks["guest-cleanup.state.json"], hashlib.sha256(before["guest-cleanup.state.json"]).hexdigest())
+        self.assertEqual(checks["guest-cleanup.provider-manifest.json"], hashlib.sha256(before["guest-cleanup.provider-manifest.json"]).hexdigest())
+
+    def test_native_sized_copy_uses_existing_capture_limit(self):
+        self.earlier = b"e" * 2750324
+        self.prior.write_bytes(self.earlier)
+        self.originals[self.log] = self.earlier + b"s" * 11514
+        self.state["backend_log"]["bytes"] = 2749109
+        self.manifest["evidence"]["backend_log_sha256"] = hashlib.sha256(self.earlier).hexdigest()
+        self.receipts()
+        self.assertIn("guest-cleanup.backend.log", self.call())
+
+    def test_identical_log_keeps_existing_exact_match_contract(self):
+        self.originals[self.log] = self.earlier
+        self.state["backend_log"]["bytes"] = len(self.earlier)
+        self.prior.unlink()
+        self.receipts()
+        self.assertEqual(set(self.call()), {"guest-cleanup.state.json", "guest-cleanup.provider-manifest.json"})
+
+    def test_complete_copy_equal_to_capture_still_binds_a_lagging_stat(self):
+        self.originals[self.log] = self.earlier
+        self.receipts()
+        self.assertEqual(self.call()["guest-cleanup.backend.log"],
+                         self.manifest["evidence"]["backend_log_sha256"])
+
+    def test_changed_prefix_and_truncation_are_not_append(self):
+        self.receipts()
+        for data in (b"X" + self.originals[self.log][1:], self.earlier[:-1], b"replacement" * 40):
+            with self.subTest(kind=len(data)):
+                self.originals[self.log] = data
+                self.reject()
+
+    def test_foreign_receipt_machine_or_token_refuses(self):
+        for receipt in (self.state, self.manifest):
+            for field in ("machine_id", "guest_run_token"):
+                with self.subTest(receipt=receipt is self.state, field=field):
+                    original = receipt[field]
+                    receipt[field] = "foreign"
+                    self.receipts()
+                    self.reject()
+                    receipt[field] = original
+
+    def test_missing_or_incorrect_native_hash_refuses(self):
+        for value in (None, "", "f" * 64, "invalid", True):
+            with self.subTest(value=value):
+                self.manifest["evidence"]["backend_log_sha256"] = value
+                self.receipts()
+                self.reject()
+
+    def test_untrusted_observation_type_or_size_refuses(self):
+        observed = self.state["backend_log"]
+        for field, bad in (("bytes", -1), ("bytes", True), ("bytes", None),
+                           ("bytes", len(self.earlier) + 1), ("regular", False),
+                           ("symlink", True), ("within_limit", False), ("exists", False)):
+            with self.subTest(field=field, bad=bad):
+                previous = observed[field]
+                observed[field] = bad
+                self.receipts()
+                self.reject()
+                observed[field] = previous
+
+    def test_missing_receipts_or_prior_copy_refuse_append(self):
+        for name in ("guest-cleanup.state.json", "guest-cleanup.provider-manifest.json", "guest-cleanup.backend.log"):
+            with self.subTest(name=name):
+                self.receipts()
+                path = self.out / name
+                original = path.read_bytes()
+                path.unlink()
+                self.reject()
+                path.write_bytes(original)
+
+    def test_prior_copy_must_be_regular_and_native_hash_bound(self):
+        self.receipts()
+        for kind in ("changed", "empty", "symlink", "directory", "fifo"):
+            with self.subTest(kind=kind):
+                self.prior.unlink()
+                if kind == "changed": self.prior.write_bytes(b"foreign prefix")
+                elif kind == "empty": self.prior.write_bytes(b"")
+                elif kind == "symlink":
+                    target = self.out / "link-target"
+                    target.write_bytes(self.earlier)
+                    self.prior.symlink_to(target)
+                elif kind == "fifo": os.mkfifo(self.prior)
+                else: self.prior.mkdir()
+                self.reject()
+                if kind == "directory": self.prior.rmdir()
+                else: self.prior.unlink()
+                self.prior.write_bytes(self.earlier)
+
+    def test_backend_append_preserves_json_size_and_recorded_hash_checks(self):
+        self.receipts()
+        original = self.originals[self.run]
+        self.originals[self.run] = original.replace(b"FAILED", b"PASSED")
+        self.reject()
+        self.originals[self.run] = original
+        self.originals[self.services] += b" "
+        self.reject()
+
+
 class BillingStopRetainTests(unittest.TestCase):
     """Real helper/files/locks/timers; transport/PID mocked, deadline-only fsync isolated."""
     def setUp(self):

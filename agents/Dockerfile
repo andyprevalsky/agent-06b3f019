@@ -49,6 +49,9 @@ COPY . .
 RUN useradd -m -u 1000 worker && chown -R worker:worker /app
 USER worker
 
+# Verify the supported private SDK contract as the final runtime user.
+RUN python -B -c 'import runpy; runpy.run_path("browser_tools/playwright_owner.py"); print("Verified native Playwright owner import")'
+
 # Expose health check port
 EXPOSE 8080
 

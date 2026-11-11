@@ -61,6 +61,30 @@ def finite(value):
     return type(value) in (int, float) and math.isfinite(value)
 
 
+def native_run_admission(proof, participants, bindings):
+    """Explicit exact-size allocations inside the existing native proof budget."""
+    if 'native_run_admission' not in proof:
+        return {}
+    need(proof.get('layout') == 'campaign-v1' and proof.get('purpose') == 'isolated-validation',
+         'native run admission scope')
+    admission = proof['native_run_admission']
+    need(isinstance(admission, dict) and set(admission) == {'kind', 'files'}
+         and admission['kind'] == 'native-isolated-shared-raw-v1', 'native run admission shape')
+    allocations = admission['files']
+    expected = {str(fleet / '_batch/run.json') for fleet in participants}
+    need(isinstance(allocations, dict) and set(allocations) == expected,
+         'native run admission participant closure')
+    total = 0
+    for path, row in allocations.items():
+        need(isinstance(row, dict) and set(row) == {'bytes', 'sha256'}
+             and type(row['bytes']) is int and 0 < row['bytes'] <= RUN_RECORD_MAX_BYTES
+             and isinstance(row['sha256'], str) and re.fullmatch('[0-9a-f]{64}', row['sha256'])
+             and row['sha256'] == bindings.get(path), 'native run admission allocation')
+        total += row['bytes']
+    need(total <= MAX_RAW_RUN_PROOF_BYTES, 'native run aggregate raw admission bound exceeded')
+    return allocations
+
+
 def recovered_roots(path, bench, bound):
     """Replay the producer's sealed-tree, provider and terminal payment guards."""
     native = runpy.run_path(str(Path(__file__).with_name('cloudbench-exact-session-cleanup.py')))
@@ -1302,6 +1326,7 @@ def validate(receipt, owner, proof):
     zero_parents, graded_parents = set(), set()
     recovery = proof.get('recovered_runtime', {})
     need(isinstance(recovery, dict) and (not recovery or layout == 'campaign-v1'), 'recovery scope')
+    run_admission = native_run_admission(proof, participants, bindings)
     admission_parents = frozenset()
     if layout == 'campaign-admission-rejected-v1':
         from deploy_test_native_admission import validate_campaign
@@ -1323,9 +1348,12 @@ def validate(receipt, owner, proof):
             # These layouts consume the original projection. Bind its control
             # metadata through the bounded forensic reader; logs stay opaque.
             from deploy_test_run_artifact import read_run_artifact
+            allocation = run_admission.get(str(run_path))
             run = read_run_artifact(run_path, bindings.get(str(run_path)), MAX_RECEIPT_BYTES,
-                                    raw_limit=min(RUN_RECORD_MAX_BYTES, MAX_RAW_FORENSIC_RUN_BYTES),
-                                    raw_remaining=raw_remaining, raw_aggregate_limit=MAX_RAW_RUN_PROOF_BYTES)
+                                    raw_limit=allocation['bytes'] if allocation else min(
+                                        RUN_RECORD_MAX_BYTES, MAX_RAW_FORENSIC_RUN_BYTES),
+                                    raw_remaining=raw_remaining, raw_aggregate_limit=MAX_RAW_RUN_PROOF_BYTES,
+                                    expected_size=allocation['bytes'] if allocation else None)
             used.add(str(run_path))
             run_artifacts.add(str(run_path))
         else:
@@ -1490,8 +1518,10 @@ def validate(receipt, owner, proof):
         for path in bindings:
             if path in run_artifacts:
                 from deploy_test_run_artifact import read_run_artifact
+                allocation = run_admission.get(path)
                 read_run_artifact(path, bindings[path], MAX_RECEIPT_BYTES,
-                                  raw_limit=MAX_RAW_FORENSIC_RUN_BYTES)
+                                  raw_limit=allocation['bytes'] if allocation else MAX_RAW_FORENSIC_RUN_BYTES,
+                                  expected_size=allocation['bytes'] if allocation else None)
             else:
                 bound(path)  # Retain and re-hash ALL original debt evidence, including retained Hub owners.
     need(used == set(bindings), 'proof file closure')
