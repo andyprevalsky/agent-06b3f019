@@ -15,8 +15,10 @@ import { expandBar, mockProjectsApi, signedInUser } from './rose-sidebar.fixture
 import { renderWithProviders } from './test-wrapper';
 
 const RUNNING = { status: 'ACTIVE' as const, temporal_workflow_id: 'wf-1' };
-const at = (minutesAgo: number) =>
-  new Date(Date.parse('2026-11-07T12:00:00Z') - minutesAgo * 60_000).toISOString();
+// Relative to now: finished rows older than OLD_AGENT_AGE_MS (4 days) move to the old-agents
+// fold, so a fixed calendar anchor silently expired this contract on 2026-11-11T12:00Z.
+const NOW = Date.now();
+const at = (minutesAgo: number) => new Date(NOW - minutesAgo * 60_000).toISOString();
 
 function renderBar(overrides: Parameters<typeof defaultProps>[0]) {
   const user = signedInUser();
