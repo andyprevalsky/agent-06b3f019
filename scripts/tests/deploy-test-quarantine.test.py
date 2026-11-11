@@ -411,6 +411,42 @@ class ReleaseReport(unittest.TestCase):
         self.write_ledger(['QUARANTINED_FAIL'], unit='cloud-smoke', start=100)
         self.assertEqual((0, False), tuple(self.rows()['cloud-smoke'][k] for k in ('streak', 'ready')))
 
+    def test_blackbox_domain_flake_binds_the_marker_of_its_single_failed_recorded_case(self):
+        occurrence_id = 'c' * 32
+        domain = ("from test_quarantine import quarantine\n\n"
+                  "@quarantine(since='2026-11-11', repair='pending-handoff:%s', error='AssertionError: boom', "
+                  "evidence='rca-2')\n"
+                  "async def test_real_model_controls():\n    pass\n\n"
+                  "async def test_other():\n    pass\n\n"
+                  "async def main(r):\n"
+                  "    await r.record_async(\"real_model_controls\", test_real_model_controls)\n"
+                  "    await r.record_async(\"other\", test_other)\n" % occurrence_id)
+        (self.root / 'tests' / 'domain.blackbox.py').write_text(domain)
+        detail = ("\u274c dom FAIL (121 passed, 1 failed; 1 failed case(s): real_model_controls; "
+                  "first error: real_model_controls: AssertionError: boom)")
+        occurrence = {'id': occurrence_id, 'gate': 'agents', 'unit': 'dom', 'detail': detail,
+                      'source': {'head': 'a' * 40}}
+        packet = {k: 'x' for k in ('test', 'command', 'scope', 'error', 'source', 'evidence')}
+        entry = {'attribution': 'NOT_INTRODUCED', 'evidence': 'rca-2', 'marker': 'tests/domain.blackbox.py',
+                 'post_merge': packet}
+        # Without the case label a domain unit names no marked function.
+        with self.assertRaisesRegex(ValueError, 'no quarantine marker'):
+            q.validate_attribution(occurrence, entry, self.root)
+        recorded = q.validate_attribution(occurrence, {**entry, 'case': 'real_model_controls'}, self.root)
+        self.assertEqual(('NOT_INTRODUCED', 'dom', occurrence_id),
+                         tuple(recorded['post_merge'][k] for k in ('attribution', 'unit', 'occurrence')))
+        # An unmarked case, a case that did not fail, or several failed cases never bind.
+        with self.assertRaisesRegex(ValueError, 'no quarantine marker'):
+            q.validate_attribution({**occurrence, 'detail': detail.replace('real_model_controls', 'other')},
+                                   {**entry, 'case': 'other'}, self.root)
+        with self.assertRaisesRegex(ValueError, 'single failed case'):
+            q.validate_attribution(occurrence, {**entry, 'case': 'other'}, self.root)
+        several = detail.replace('1 failed; 1 failed case(s): real_model_controls',
+                                 '2 failed; 2 failed case(s): real_model_controls, other')
+        with self.assertRaisesRegex(ValueError, 'single failed case'):
+            q.validate_attribution({**occurrence, 'detail': several}, {**entry, 'case': 'real_model_controls'},
+                                   self.root)
+
     def test_catalog_marker_backs_a_not_introduced_smoke_flake_and_bad_markers_are_refused(self):
         self.write_catalog()
         self.assertEqual({'cloud-smoke': META}, q.catalog_quarantines(self.root))

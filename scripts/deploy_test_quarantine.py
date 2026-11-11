@@ -288,6 +288,8 @@ def validate_attribution(occurrence: dict, entry: dict, root: Path, *, state: di
                  and m['error'] == binding['error'] and m['evidence'] == entry['evidence']]
     else:
         found = [m for m in markers(root, [path]) if unit_matches(m, occurrence['unit'])]
+        if not found and entry.get('case') is not None:
+            found = _domain_case_markers(occurrence, entry['case'], root, path)
     if not found:
         raise ValueError(f"no quarantine marker for {occurrence['unit']} in {path}")
     # Repairs are dispatched only after merge (deploy-failure-policy.md): a NOT_INTRODUCED flake records
@@ -309,6 +311,33 @@ def validate_attribution(occurrence: dict, entry: dict, root: Path, *, state: di
               'unit': occurrence['unit'], 'gate': occurrence.get('gate'), 'marker': path}
     return {'attribution': attribution, 'evidence': entry['evidence'], 'marker': path, 'post_merge': packet,
             **({'native_binding': binding} if binding else {})}
+
+
+_DOMAIN_SINGLE_FAILURE = re.compile(r'\(\d+ passed, 1 failed; 1 failed case\(s\): ([A-Za-z_]\w*); first error: ')
+
+
+def _domain_case_markers(occurrence: dict, case: object, root: Path, path: str) -> list[dict]:
+    """The marker for one recorded case of a blackbox-domain FLAKY unit (e.g. `rose-browser-use`).
+
+    A domain unit names no test function, so the attribution names the recorded case label. It binds
+    only when the flaky first attempt failed exactly that one case and the marker file records that
+    label with exactly one function that carries the quarantine marker.
+    """
+    if not isinstance(case, str) or not re.fullmatch(r'[A-Za-z_]\w*', case):
+        raise ValueError('case must be the recorded blackbox case label')
+    failed = _DOMAIN_SINGLE_FAILURE.findall(str(occurrence.get('detail') or ''))
+    if failed != [case]:
+        raise ValueError(f"case {case} is not the single failed case of FLAKY unit {occurrence['unit']}")
+    try:
+        text = (root / path).read_text(errors='replace')
+    except OSError:
+        return []
+    functions = set(re.findall(r'\brecord(?:_async)?\(\s*([\'"])' + re.escape(case) + r'\1\s*,\s*([A-Za-z_]\w*)\s*\)',
+                               text))
+    names = {name for _quote, name in functions}
+    if len(names) != 1:
+        raise ValueError(f'{path} must record case {case} with exactly one test function')
+    return [m for m in markers(root, [path]) if m['name'] in names and m.get('owner') is None]
 
 
 def link_repair(root: Path, occurrence_id: str, repair: str, paths: list[str] | None = None) -> list[str]:
