@@ -3,6 +3,7 @@ import {
   type BrowserContext,
   type ConsoleMessage,
   type Page,
+  type Request,
   type Response as PlaywrightResponse,
 } from '@playwright/test';
 
@@ -157,31 +158,83 @@ export async function injectSemanticSession(page: Page): Promise<void> {
     window.localStorage.setItem('rose-session', session);
   }, INJECTED_SESSION);
   if (page.url() !== 'about:blank') {
-    await page.evaluate((session) => {
-      window.localStorage.setItem('rose-session', session);
-    }, INJECTED_SESSION);
+    await acrossAppReload(page, () =>
+      page.evaluate((session) => {
+        window.localStorage.setItem('rose-session', session);
+      }, INJECTED_SESSION),
+    );
+  }
+}
+
+const APP_RELOAD_RETRIES = 2;
+
+/**
+ * Production semantic runs start right after a deploy goes live, and later merges go live
+ * while they run. The app then reloads itself once onto the newer build (AppVersion 'load'
+ * check, or the index.html entry-load recovery), and an evaluate/reload that straddles that
+ * navigation fails with "Execution context was destroyed". Retry `operation` only when the
+ * main frame requested a new document beyond the operation's own `ownNavigations` during the
+ * call, after that document is ready; at most APP_RELOAD_RETRIES times. Any other error, or
+ * a third reload, still fails the test.
+ */
+export async function acrossAppReload<T>(
+  page: Page,
+  operation: () => Promise<T>,
+  ownNavigations = 0,
+): Promise<T> {
+  for (let retry = 0; ; retry++) {
+    let documents = 0;
+    let awaitingDocument = false;
+    const onRequest = (request: Request) => {
+      if (request.isNavigationRequest() && request.frame() === page.mainFrame()) {
+        documents++;
+        awaitingDocument = true;
+      }
+    };
+    const onLoaded = () => {
+      awaitingDocument = false;
+    };
+    page.on('request', onRequest);
+    page.on('domcontentloaded', onLoaded);
+    try {
+      return await operation();
+    } catch (error) {
+      if (documents <= ownNavigations || retry >= APP_RELOAD_RETRIES) throw error;
+      // The old document's context dies before the new one is parsed: wait for the latest
+      // requested document itself, not the load state the old document already reached.
+      await expect
+        .poll(() => awaitingDocument, { message: 'reloaded document never loaded' })
+        .toBe(false);
+    } finally {
+      page.off('request', onRequest);
+      page.off('domcontentloaded', onLoaded);
+    }
   }
 }
 
 export async function expectInjectedSessionRecognized(page: Page): Promise<void> {
   await injectSemanticSession(page);
-  await page.evaluate((session) => {
-    window.localStorage.setItem('rose-session', session);
-  }, INJECTED_SESSION);
-  await page.reload({ waitUntil: 'domcontentloaded' });
-  const sessionState = await page.evaluate(() => {
-    const raw = window.localStorage.getItem('rose-session');
-    if (!raw) return { hasSession: false, isAnonymous: null };
-    try {
-      const session = JSON.parse(raw);
-      return {
-        hasSession: !!session?.access_token,
-        isAnonymous: session?.user?.is_anonymous ?? null,
-      };
-    } catch {
-      return { hasSession: false, isAnonymous: null };
-    }
-  });
+  await acrossAppReload(page, () =>
+    page.evaluate((session) => {
+      window.localStorage.setItem('rose-session', session);
+    }, INJECTED_SESSION),
+  );
+  await acrossAppReload(page, () => page.reload({ waitUntil: 'domcontentloaded' }), 1);
+  const sessionState = await acrossAppReload(page, () =>
+    page.evaluate(() => {
+      const raw = window.localStorage.getItem('rose-session');
+      if (!raw) return { hasSession: false, isAnonymous: null };
+      try {
+        const session = JSON.parse(raw);
+        return {
+          hasSession: !!session?.access_token,
+          isAnonymous: session?.user?.is_anonymous ?? null,
+        };
+      } catch {
+        return { hasSession: false, isAnonymous: null };
+      }
+    }),
+  );
   if (!sessionState.hasSession || sessionState.isAnonymous !== false) {
     throw new Error(`Injected session not recognised: ${JSON.stringify(sessionState)}`);
   }
