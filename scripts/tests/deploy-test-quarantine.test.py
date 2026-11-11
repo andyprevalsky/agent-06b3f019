@@ -440,5 +440,193 @@ class ReleaseReport(unittest.TestCase):
         self.assertIn('2 quarantined test(s); 1 ready to release', out)
 
 
+class StructuralSuiteAttribution(unittest.TestCase):
+    def setUp(self):
+        import hashlib
+        self.hash = lambda raw: hashlib.sha256(raw).hexdigest()
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name).resolve()
+        git(self.root, 'init', '-q')
+        registry = self.root / 'scripts/run-deploy-structural-gates.py'
+        registry.parent.mkdir(parents=True)
+        registry.write_text("GATES = (Gate('deploy-test-cycle', ('python3', 'scripts/tests/deploy-test-cycle.test.py')), )\n")
+        head = commit(self.root)
+        self.path = 'scripts/tests/deploy-test-cycle.test.py'
+        self.target = self.root / self.path
+        self.target.parent.mkdir()
+        self.occurrence = {'id': 'a' * 32, 'gate': 'deploy-command-structural', 'unit': 'deploy-test-cycle',
+                           'native_result': 'FLAKY', 'attempts': 2, 'round': 12, 'phase': 'focused',
+                           'source': {'head': head, 'digest': 'd' * 64}, 'evidence': '/tmp/native/suite.log',
+                           'unit_finished_at': 123.0}
+        self.markers_for(('test_one', 'test_two'))
+        folder = self.root / '.context/test/attempts/12/focused/deploy-command-structural'
+        (folder / 'remote-artifact').mkdir(parents=True)
+        self.log = folder / 'remote-artifact/worker.log'
+        self.text = ("== deploy-test-cycle: exit=0 duration=1.0s ==\n"
+                     "ERROR: test_one (__main__.Cycle.test_one)\ntrace one\n"
+                     "ERROR: test_two (__main__.Cycle.test_two)\ntrace two\n"
+                     "Ran 499 tests in 1.0s\n\nFAILED (errors=2)\n"
+                     "--- rerun of deploy-test-cycle (attempt 2 of 2: Cycle.test_one Cycle.test_two) ---\n"
+                     "..\n----------------------------------------------------------------------\nRan 2 tests in 0.1s\n\nOK\n")
+        row = {'unit': 'deploy-test-cycle', 'status': 'FLAKY', 'attempts': 2, 'scope': 'suite',
+               'log': self.occurrence['evidence'], 'at': 123.0}
+        self.receipt = {'gate': 'deploy-command-structural', 'source': self.occurrence['source'],
+                        'executed': True, 'complete': True, 'native_exit': 0, 'flaky': [row],
+                        'timed_out': False, 'cancelled': False, 'lingering_group': False,
+                        'worker_evidence': {'deploy-command-structural': {
+                            'command': ['python3', 'scripts/run-deploy-structural-gates.py', '--max-workers', '4'],
+                            'native_exit': 0, 'status': 'PASS', 'flaky': [row], 'log': str(self.log),
+                            'timed_out': False, 'cancelled': False, 'lingering_group': False}}}
+        self.receipt_path = folder / 'receipt.json'
+        self.entry = {'attribution': 'NOT_INTRODUCED', 'evidence': 'docs/rca/case.md', 'marker': self.path,
+                      'post_merge': {k: 'original evidence' for k in ('test', 'command', 'scope', 'error', 'source', 'evidence')}}
+        self.seal()
+
+    def markers_for(self, names, repair=None):
+        repair = repair or 'pending-handoff:' + self.occurrence['id']
+        self.target.write_text('from test_quarantine import quarantine\nclass Cycle:\n' + ''.join(
+            "    @quarantine(since='2026-11-11', repair=%r, error='ValueError: old controller still active', evidence='docs/rca/case.md')\n"
+            "    def %s(self):\n        raise ValueError('original assertion remains')\n" % (repair, name)
+            for name in names))
+
+    def seal(self):
+        self.log.write_text(self.text)
+        worker = self.receipt['worker_evidence']['deploy-command-structural']
+        worker['sha256'] = self.hash(self.log.read_bytes())
+        self.receipt_path.write_text(json.dumps(self.receipt))
+        self.entry['suite_binding'] = {'receipt': str(self.receipt_path.relative_to(self.root)),
+                                      'receipt_sha256': self.hash(self.receipt_path.read_bytes()),
+                                      'log_sha256': worker['sha256']}
+
+    def validate(self):
+        return q.validate_attribution(self.occurrence, self.entry, self.root)
+
+    def test_all_original_cases_bound_and_suite_pass_cannot_count_for_release(self):
+        result = self.validate()
+        self.assertEqual(['Cycle.test_one', 'Cycle.test_two'], result['suite_binding']['cases'])
+        self.assertEqual(result['suite_binding'], result['post_merge']['suite_binding'])
+        for marker in q.markers(self.root, [self.path]):
+            self.assertFalse(q.unit_matches(marker, 'deploy-test-cycle'))
+            self.assertTrue(q.unit_matches(marker, 'Cycle.' + marker['name']))
+
+    def test_missing_or_wrong_owner_marker_and_wrong_handoff_refuse(self):
+        for body in ('one', 'owner', 'handoff'):
+            with self.subTest(body=body):
+                self.markers_for(('test_one',) if body == 'one' else ('test_one', 'test_two'),
+                                 'pending-handoff:' + 'b' * 32 if body == 'handoff' else None)
+                if body == 'owner':
+                    self.target.write_text(self.target.read_text().replace('class Cycle:', 'class Other:'))
+                with self.assertRaises(ValueError):
+                    self.validate()
+
+    def test_original_receipt_and_log_hash_changes_refuse(self):
+        self.receipt_path.write_text(self.receipt_path.read_text() + ' ')
+        with self.assertRaisesRegex(ValueError, 'hash changed'):
+            self.validate()
+        self.seal()
+        self.log.write_text(self.text + 'tampered')
+        with self.assertRaisesRegex(ValueError, 'hash changed'):
+            self.validate()
+
+    def test_wrong_source_native_flags_and_occurrence_binding_refuse(self):
+        import copy
+        original = copy.deepcopy(self.receipt)
+        for change in ('source', 'bool_exit', 'incomplete', 'timeout', 'row_time'):
+            with self.subTest(change=change):
+                self.receipt = copy.deepcopy(original)
+                if change == 'source':
+                    self.receipt['source'] = {'head': 'b' * 40}
+                elif change == 'bool_exit':
+                    self.receipt['native_exit'] = False
+                elif change == 'incomplete':
+                    self.receipt['complete'] = False
+                elif change == 'timeout':
+                    self.receipt['timed_out'] = True
+                else:
+                    self.receipt['flaky'][0]['at'] = 124.0
+                self.seal()
+                with self.assertRaises(ValueError):
+                    self.validate()
+
+    def test_ambiguous_or_uncovered_original_failures_and_rerun_refuse(self):
+        original = self.text
+        for text in (original.replace('errors=2', 'errors=3'),
+                     original.replace('Cycle.test_one Cycle.test_two', 'Cycle.test_one'),
+                     original.replace('ERROR: test_two', 'ERROR: setUpClass'),
+                     original.replace('Ran 2 tests', 'Ran 3 tests'),
+                     original.replace('\nOK\n', '\nOK (skipped=1)\n'),
+                     original + original):
+            with self.subTest(text=text):
+                self.text = text
+                self.seal()
+                with self.assertRaises(ValueError):
+                    self.validate()
+
+    def test_wrong_canonical_registration_and_path_refuse(self):
+        registry = self.root / 'scripts/run-deploy-structural-gates.py'
+        registry.write_text("GATES = (Gate('deploy-test-cycle', ('python3', 'scripts/tests/other.test.py')), )\n")
+        self.occurrence['source'] = {'head': commit(self.root), 'digest': 'e' * 64}
+        self.receipt['source'] = self.occurrence['source']
+        self.seal()
+        with self.assertRaisesRegex(ValueError, 'command mismatch'):
+            self.validate()
+        self.entry['marker'] = '../scripts/tests/deploy-test-cycle.test.py'
+        with self.assertRaises(ValueError):
+            self.validate()
+
+    def test_missing_direct_marker_keeps_original_error_without_explicit_binding(self):
+        self.entry.pop('suite_binding')
+        self.occurrence['unit'] = 'Cycle.test_unmarked'
+        with self.assertRaisesRegex(ValueError, 'no quarantine marker for Cycle.test_unmarked'):
+            self.validate()
+
+    def test_every_marker_evidence_must_match_attribution(self):
+        self.target.write_text(self.target.read_text().replace("evidence='docs/rca/case.md'",
+                                                              "evidence='docs/rca/other.md'", 1))
+        with self.assertRaisesRegex(ValueError, 'marker evidence differs'):
+            self.validate()
+
+    def test_missing_unknown_and_nonboolean_native_flags_refuse(self):
+        import copy
+        original = copy.deepcopy(self.receipt)
+        for target in ('receipt', 'worker'):
+            for key in ('timed_out', 'cancelled', 'lingering_group'):
+                for value in ('missing', None, 0, '', True):
+                    with self.subTest(target=target, key=key, value=value):
+                        self.receipt = copy.deepcopy(original)
+                        row = (self.receipt if target == 'receipt' else
+                               self.receipt['worker_evidence']['deploy-command-structural'])
+                        if value == 'missing':
+                            row.pop(key)
+                        else:
+                            row[key] = value
+                        self.seal()
+                        with self.assertRaises(ValueError):
+                            self.validate()
+
+    def test_log_symlink_outside_original_artifact_refuses(self):
+        outside = self.root / 'outside.log'
+        outside.write_text(self.text)
+        self.log.unlink()
+        self.log.symlink_to(outside)
+        with self.assertRaisesRegex(ValueError, 'resolved worker log outside'):
+            self.validate()
+
+    def test_registry_read_disables_git_replace_objects(self):
+        original = subprocess.run
+        with patch.object(q.subprocess, 'run', wraps=original) as run:
+            self.validate()
+        self.assertTrue(any(call.args[0][:3] == ['git', '--no-replace-objects', 'show']
+                            for call in run.call_args_list))
+
+    def test_direct_case_path_remains_valid_without_native_binding(self):
+        self.entry.pop('suite_binding')
+        self.occurrence['unit'] = 'Cycle.test_one'
+        result = self.validate()
+        self.assertNotIn('suite_binding', result)
+        self.assertNotIn('suite_binding', result['post_merge'])
+
+
 if __name__ == '__main__':
     unittest.main()

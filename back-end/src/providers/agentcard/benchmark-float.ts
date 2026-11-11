@@ -133,7 +133,43 @@ export async function resolveBenchmarkCardholderId(
   const deadlineAtMs = orgRetryDeadlineAtMs();
   const callWithinBudget: AgentCardOrgToolCaller = (toolName, args) =>
     callOrgTool(toolName, args, deadlineAtMs);
-  const cardholders = extractCardholders(await callWithinBudget('list_cardholders', {}));
+  const cardholders: AgentCardSandboxCardholder[] = [];
+  const seen = new Set<string>();
+  let total: number | undefined;
+  for (;;) {
+    if (Date.now() >= deadlineAtMs)
+      throw new Error('AgentCard cardholder pagination deadline exceeded');
+    const response = await callWithinBudget('list_cardholders', {
+      limit: 100,
+      offset: cardholders.length,
+    });
+    const page = extractCardholders(response);
+    const outer = asRecord(response);
+    const pageRecord = asRecord(outer?.structuredContent) ?? outer;
+    const pageTotal = pageRecord?.total;
+    const rawPage = pageRecord?.cardholders;
+    if (
+      !Array.isArray(rawPage) ||
+      rawPage.length !== page.length ||
+      !Number.isSafeInteger(pageTotal) ||
+      (pageTotal as number) < 0 ||
+      (total !== undefined && pageTotal !== total) ||
+      page.length > 100 ||
+      page.some((cardholder) => seen.has(cardholder.id)) ||
+      new Set(page.map((cardholder) => cardholder.id)).size !== page.length
+    ) {
+      throw new Error('AgentCard cardholder pagination identity/total changed');
+    }
+    total = pageTotal as number;
+    for (const cardholder of page) {
+      seen.add(cardholder.id);
+      cardholders.push(cardholder);
+    }
+    if (cardholders.length === total) break;
+    if (cardholders.length > total || page.length === 0) {
+      throw new Error('AgentCard cardholder pagination incomplete');
+    }
+  }
   if (cardholders.length === 0) {
     throw new Error(
       'AgentCard sandbox org has no cardholders. Create one in sandbox mode at ' +
