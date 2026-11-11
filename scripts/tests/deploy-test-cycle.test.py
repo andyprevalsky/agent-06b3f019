@@ -5472,6 +5472,40 @@ class Cycle(unittest.TestCase):
         proof['files'] = {str(p): c.sha_file(p) for p in files}
         return state, occurrence, paths, proof, parents
 
+    def test_launched_campaign_interrupted_by_source_change_reconciles_from_its_cli_binding(self):
+        # PR #1928: the cycle interrupted a launched smoke campaign ("cloud command interrupted or source
+        # changed"); its adapter never recorded native_directory, so campaign-v1 binds the campaign through
+        # the CLI log while every fleet audit, provider release and process check still applies.
+        state, occurrence, paths, proof, parents = self.campaign_recon_state()
+        receipt = state['attempts'][-1]['results'][0]
+
+        def interrupted(reason):
+            adapter = c.read(paths['adapter'])
+            adapter.update(fleet_directory=None, reason=reason); c.write(paths['adapter'], adapter)
+            reference = receipt['native_cleanup_reference']
+            reference.update(native_directory=None, result_sha256=c.sha_file(paths['adapter']))
+            receipt['cleanup_owner']['native_cleanup_reference'] = reference
+            c.write(paths['receipt'], receipt)
+            candidate = copy.deepcopy(proof)
+            candidate.update(owner=copy.deepcopy(receipt['cleanup_owner']), receipt_sha256=c.sha_file(paths['receipt']),
+                             worker_result_sha256=c.sha_file(paths['adapter']))
+            return candidate
+
+        refused = interrupted('worker result identity/inventory mismatch')
+        before = copy.deepcopy(state)
+        with self.assertRaisesRegex(ValueError, 'campaign root binding'):
+            c.reconcile(state, occurrence['id'], refused)
+        self.assertEqual(before, state)
+        accepted = interrupted('cloud command interrupted or source changed')
+        stale = copy.deepcopy(state)  # the refresh's stale attempt: no occurrence, identified by its token
+        stale['phase'] = 'stale'; stale['attempts'][-1]['stale'] = True
+        stale_receipt = stale['attempts'][-1]['results'][0]
+        stale_receipt.update(executed=True)
+        c.write(paths['receipt'], stale_receipt)
+        accepted.update(receipt_sha256=c.sha_file(paths['receipt']))
+        c.reconcile(stale, stale_receipt['token'], accepted)
+        self.assertFalse(stale['reconciled_owners'][c.sha_file(paths['receipt'])]['credit_granted'])
+
     def unlaunched_campaign_state(self):
         import shutil
         import runpy
@@ -6143,7 +6177,8 @@ class Cycle(unittest.TestCase):
         proof['files'][str(packet)] = c.sha_file(packet)
         return state, occurrence, paths, proof, gate, packet
 
-    def test_failed_infra_canary_is_execution_only_and_requires_positive_release(self):
+    def failed_infra_canary(self, rows=()):
+        """An isolated failed linked infra canary; `rows` are Machine-less audit rows (none by default)."""
         import hashlib
         import shutil
         state, failure, paths, proof, gate, packet = self.isolated_campaign_state()
@@ -6155,8 +6190,15 @@ class Cycle(unittest.TestCase):
         audit = fleet / 'teardown-ownership'
         (audit / 'source-audit').unlink()
         (audit / 'owned-clones.ids').write_text('')
-        (audit / 'owned-clones.names').write_text('')
+        (audit / 'owned-clones.names').write_text(''.join(r['clone_name'] + '\n' for r in rows))
         shutil.rmtree(audit / 'fresh')
+        if rows:  # Machine-less rows of a canary cancelled while cloning
+            (audit / 'fresh').mkdir()
+            app = dict(l.split('=', 1) for l in (audit / 'meta').read_text().splitlines())['app']
+            for row in rows:
+                values = dict(version='1', fleet_owner_token=life['fleet_owner_token'], run_id=fleet.name, app=app,
+                              source='fresh-clone', source_machine_id='donor', **row)
+                (audit / 'fresh' / row['clone_name']).write_text(''.join(f'{k}={v}\n' for k, v in values.items()))
         canonical = self.root / '.git/cloudbench-fleet-audits' / life['fleet_owner_token']
         shutil.rmtree(canonical); shutil.copytree(audit, canonical)
         digest = hashlib.sha256()
@@ -6179,9 +6221,16 @@ class Cycle(unittest.TestCase):
             f"owner: {life['fleet_owner_token']}; private controller diagnostics stay in this run directory.")
         log.write_text(text)
         proof['execution_quiescence'].pop('machine1')
+        for folder in (audit, canonical):
+            for row in rows:
+                proof['files'][str(folder / 'fresh' / row['clone_name'])] = ''
         def bind():
             proof['files'] = {p: c.sha_file(p) for p in proof['files'] if Path(p).is_file()}
         bind()
+        return state, failure, proof, fleet, life, life_path, audit, canonical, log, bind
+
+    def test_failed_infra_canary_is_execution_only_and_requires_positive_release(self):
+        state, failure, proof, fleet, life, life_path, audit, canonical, log, bind = self.failed_infra_canary()
         original = copy.deepcopy(state)
         c.reconcile(state, failure['id'], proof)
         entry = state['reconciled_owners'][proof['receipt_sha256']]
@@ -6213,6 +6262,25 @@ class Cycle(unittest.TestCase):
             c.reconcile(copy.deepcopy(original), failure['id'], proof)
         ordinary = copy.deepcopy(proof); ordinary.pop('purpose')
         with self.assertRaises(ValueError): c.reconcile(copy.deepcopy(original), failure['id'], ordinary)
+
+    def test_isolated_failed_canary_cancelled_while_cloning_needs_no_machine_observation(self):
+        # PR #1928 review: isolated_execution re-reads the canary's rows; Machine-less rows have no Machine
+        # observation and are admitted only from the sealed provider release.
+        rows = (dict(clone_name='cloudbench-a', machine_id='', volume_id='', disposition='not-allocated-verified'),
+                dict(clone_name='cloudbench-b', machine_id='', volume_id='vol_b',
+                     disposition='destroyed-provider-retained'))
+        state, failure, proof, *_ = self.failed_infra_canary(rows)
+        c.reconcile(state, failure['id'], proof)
+        self.assertFalse(state['reconciled_owners'][proof['receipt_sha256']]['credit_granted'])
+        self.tearDown(); self.setUp()
+        state, failure, proof, *_ = self.failed_infra_canary((dict(rows[0], volume_id='vol_a'),))
+        with self.assertRaises(ValueError): c.reconcile(state, failure['id'], proof)
+        # An audit changed after its seal cannot excuse Machine-less rows from observation.
+        self.tearDown(); self.setUp()
+        state, failure, proof, fleet, life, life_path, audit, canonical, log, bind = self.failed_infra_canary(rows)
+        (canonical / 'fresh' / 'cloudbench-a').write_text((canonical / 'fresh' / 'cloudbench-a').read_text() + 'x=1\n')
+        bind()
+        with self.assertRaises(ValueError): c.reconcile(state, failure['id'], proof)
 
     def test_cleanup_review_refusal_directly_after_original(self):
         """The actual six-field prelaunch refusal permits only source renewal."""
@@ -6421,7 +6489,7 @@ class Cycle(unittest.TestCase):
             helper.stdin.close()
             self.assertEqual(0, helper.wait(timeout=10))
 
-    def normal_failed_canary_state(self, zero=False):
+    def normal_failed_canary_state(self, zero=False, machine_less=()):
         import hashlib, shutil
         state, occurrence, paths, proof, parents = self.campaign_recon_state()
         old = parents[0].parent / 'canary'
@@ -6440,6 +6508,17 @@ class Cycle(unittest.TestCase):
                 (tree / 'owned-clones.ids').write_text('')
                 (tree / 'owned-clones.names').write_text('')
             for n in ('execution-provenance.json','execution-task-matrix.json'): (fleet / n).unlink()
+        if machine_less:  # a canary cancelled while cloning: audited rows, but no Machine ever existed
+            for tree in (audit, canonical):
+                shutil.rmtree(tree / 'fresh'); (tree / 'fresh').mkdir()
+                app = dict(l.split('=', 1) for l in (tree / 'meta').read_text().splitlines())['app']
+                for row in machine_less:
+                    values = dict(version='1', fleet_owner_token=owner, run_id=fleet.name, app=app,
+                                  source='fresh-clone', source_machine_id='donor', **row)
+                    (tree / 'fresh' / row['clone_name']).write_text(''.join(f'{k}={v}\n' for k, v in values.items()))
+                    proof['files'][str(tree / 'fresh' / row['clone_name'])] = ''
+                (tree / 'owned-clones.ids').write_text('')
+                (tree / 'owned-clones.names').write_text(''.join(r['clone_name'] + '\n' for r in machine_less))
         h=hashlib.sha256()
         for p in sorted(audit.rglob('*'),key=lambda p:str(p.relative_to(audit))):
             if p.is_file() and p.name!='source-audit':
@@ -6461,6 +6540,22 @@ class Cycle(unittest.TestCase):
         self.assertEqual(15,len(entry['participants']));self.assertFalse(entry['credit_granted'])
         self.assertNotIn('purpose',entry);self.assertEqual(before,state['attempts'])
         self.assertTrue(c._reconciled(state,state['attempts'][-1]['results'][0],proof['owner']))
+
+    def test_failed_canary_cancelled_while_cloning_reconciles_machine_less_rows(self):
+        # PR #1928: a canary cancelled mid-clone audited one `not-allocated-verified` row and one volume-only
+        # `destroyed-provider-retained` row; no Machine existed, so owned-clones.ids stayed empty.
+        rows = (dict(clone_name='cloudbench-a', machine_id='', volume_id='', disposition='not-allocated-verified'),
+                dict(clone_name='cloudbench-b', machine_id='', volume_id='vol_b',
+                     disposition='destroyed-provider-retained'))
+        state, occurrence, paths, proof, fleet = self.normal_failed_canary_state(machine_less=rows)
+        c.reconcile(state, occurrence['id'], proof)
+        self.assertFalse(state['reconciled_owners'][proof['receipt_sha256']]['credit_granted'])
+        for bad in ((dict(rows[0], volume_id='vol_a'), rows[1]),   # a not-allocated row cannot own a volume
+                    (rows[0], dict(rows[1], disposition='owned'))):  # an unretired resource stays blocking
+            with self.subTest(rows=bad):
+                self.tearDown(); self.setUp()  # each fixture owns a fresh workspace root
+                state, occurrence, paths, proof, fleet = self.normal_failed_canary_state(machine_less=bad)
+                with self.assertRaises(ValueError): c.reconcile(state, occurrence['id'], proof)
 
     def test_known_isolation_can_retire_normally_after_newer_complete_result(self):
         state, occurrence, paths, normal, fleet = self.normal_failed_canary_state()
@@ -8294,6 +8389,31 @@ class Cycle(unittest.TestCase):
         self.assertEqual([], c.retained_owners(state, [occurrence['gate']]))
         (runtime / 'logs/worker.log').write_text('changed')
         self.assertEqual([occurrence['gate']], c.retained_owners(state, [occurrence['gate']]))
+
+    def test_campaign_recovered_v2_release_ignores_machine_less_clone_rows(self):
+        # PR #1928 review: recovery must cover only rows that own a Machine; a clone cancelled before its
+        # Machine existed (`not-allocated-verified`) is closed by the audit, not by runtime identity.
+        import hashlib, shutil
+        state, occurrence, paths, proof, fleet, runtime = self.recovered_campaign_state()
+        audit = fleet / 'teardown-ownership'
+        owner = dict(l.split('=', 1) for l in (audit / 'fresh/clone-j2').read_text().splitlines())['fleet_owner_token']
+        (audit / 'fresh/clone-j3').write_text(''.join(f'{k}={v}\n' for k, v in dict(
+            fleet_owner_token=owner, run_id=fleet.name, app='fixture', source='fresh-clone',
+            disposition='not-allocated-verified', machine_id='', clone_name='clone-j3', volume_id='').items()))
+        (audit / 'owned-clones.names').write_text('clone-j2\nclone-j3\n')
+        (audit / 'source-audit').unlink()
+        canonical = self.root / '.git/cloudbench-fleet-audits' / owner
+        shutil.rmtree(canonical); shutil.copytree(audit, canonical)
+        h = hashlib.sha256()
+        for path in sorted(audit.rglob('*'), key=lambda p: str(p.relative_to(audit))):
+            if path.is_file():
+                for raw in (str(path.relative_to(audit)).encode(), path.read_bytes()):
+                    h.update(len(raw).to_bytes(8, 'big')); h.update(raw)
+        (audit / 'source-audit').write_text(f'path={canonical}\nsha256={h.hexdigest()}\n')
+        for path in [*fleet.rglob('*'), *canonical.rglob('*')]:
+            if path.is_file(): proof['files'][str(path)] = c.sha_file(path)
+        c.reconcile(state, occurrence['id'], proof)
+        self.assertFalse(state['reconciled_owners'][proof['receipt_sha256']]['credit_granted'])
 
     def test_campaign_recovered_v2_identity_and_seal_refusals_are_atomic(self):
         state, occurrence, paths, proof, fleet, runtime = self.recovered_campaign_state()
@@ -11103,6 +11223,26 @@ class RelayStartupEvidence(unittest.TestCase):
         proof.update(worker_result_sha256=reference['result_sha256'],layout='campaign-mixed-preallocation-v1')
         self.save(Path(receipt['log']).parent/'receipt.json',receipt);proof['receipt_sha256']=c.sha_file(Path(receipt['log']).parent/'receipt.json')
         self.reseal();return receipt,owner,proof,fleets
+
+    def test_mixed_preallocation_with_a_cancelled_infra_canary_reconciles(self):
+        # PR #1928 smoke: 10 jobs were refused before allocation (warm source 429) while the infra canary
+        # was TERMed mid-preflight; mixed preallocation must also admit that linked, released canary.
+        receipt, owner, proof, fleets = self.mixed_preallocation_fixture()
+        canary = fleets[-1]; batch = canary / '_batch'
+        life = json.loads((batch / 'lifecycle.json').read_text())
+        life.update(status='failed', controller_exit_code=143); self.save(batch / 'lifecycle.json', life)
+        self.save(batch / 'run.json', dict(run_id=canary.name, controller_exit_code=143, status='failed',
+            tasks=[dict(name='infra-probe', status='INFRA_ERROR', passed=False, lifecycle_stage='released',
+                        failure_reason='no current run artifact produced')]))
+        log = self.campaign / 'r001-j0001.log'
+        log.write_text(log.read_text().replace(f'{self.base}/scripts/run-bench monitor {canary}\n',
+            f"ref    : {receipt['source']['head']}  (committed source)\n"
+            'mode: --infra-probe (strict barrier, no LLM / run_benchmark)\n'
+            f'{self.base}/scripts/run-bench monitor {canary}\n'
+            f"owner: {life['fleet_owner_token']}; private controller diagnostics stay in this run directory.\n"))
+        self.reseal()
+        result = self.validate_fixture(receipt, owner, proof)
+        self.assertFalse(result['credit_granted'])
 
     def test_mixed_preallocation_cleanup_preserves_all_unverified_without_credit(self):
         receipt,owner,proof,fleets=self.mixed_preallocation_fixture()
