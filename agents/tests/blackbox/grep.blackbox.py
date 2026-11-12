@@ -948,10 +948,45 @@ def test_grep_filters_are_a_closed_object_with_every_source_block():
         GrepTool.model_validate({"tool": "grep", "filters": {"network": {"since": "7d"}}})
 
 
+async def test_meeting_notes_gate_and_tool_contract():
+    """Generic notes probe one OR gate and preserve provider filters for grep."""
+    from domains.grep.service import execute_grep
+    from utils.tool_schemas import GrepTool
+
+    description = GrepTool.model_fields["filters"].description
+    for key in ("meeting_notes", "granola", "fireflies", "fireflies_transcript"):
+        assert key in description, key
+    for provider in ("meeting_notes", "Meeting Notes", "meeting-notes", "granola", "fireflies", "fireflies_transcript"):
+        for nested in (False, True):
+            calls = []
+            filters = {"document_source": provider}
+            if nested:
+                filters = {"documents": filters}
+
+            async def execute(activity_fn, *, args, **kwargs):
+                name = getattr(activity_fn, "__name__", "")
+                calls.append((name, args))
+                if name == "source_status_activity":
+                    normalized = provider.lower().replace(" ", "_").replace("-", "_")
+                    assert args[1] == [normalized]
+                    return [{"source": normalized, "connector": "fireflies", "connected": True, "connectUrl": None}]
+                return {"matches": [], "total_matches": 0}
+
+            result = await execute_grep(
+                execute, {"source": "documents", "pattern": "budget", "filters": filters,
+                          "require_source_access": True}, "tc-meetings", "a-1", "u-1",
+            )
+            assert result["unavailable_sources"] == []
+            searches = [args[0] for name, args in calls if name == "grep_activity"]
+            assert len(searches) == 1
+            assert searches[0]["filters"] == filters
+
+
 async def run_all_tests():
     print("grep blackbox tests:")
     r = BlackboxResult()
     await r.record_async("happy_path", test_grep_happy_path)
+    await r.record_async("meeting_notes_gate_and_tool_contract", test_meeting_notes_gate_and_tool_contract)
     await r.record_async("boundary", test_grep_boundary)
     await r.record_async("boundary_normalizes_model_dump_keys", test_grep_boundary_normalizes_model_dump_keys)
     await r.record_async("agent_metadata_only", test_grep_agent_metadata_only)

@@ -117,7 +117,11 @@ export class FakeGranola {
       ? `<access_notice>The free Granola plan only includes the last 30 days of meeting history. Only notes whose creation date and meeting date are within that limit are returned. Providing a topic or note link to another Granola tool cannot bypass this MCP history limit. Review your Granola plan: https://notes.granola.ai/settings/team-and-billing?tab=billing&amp;utm_content=history-limit.</access_notice>\n\n`
       : '';
     const range = `<requested_range time_range="custom" timezone="America/Los_Angeles" start="${from}T00:00:00-07:00" end="${to}T00:00:00-07:00" end_inclusive="false">Requested meetings from ${from} through ${to}.${limited ? ` Meetings before ${this.historyStart} fall outside the plan's meeting history window.` : ''}</requested_range>`;
-    return `${notice}${range}\n\n${WARNING}\n\n${body}\n\n${pagination}`;
+    // Current provider envelope: pagination first, with upcoming calendar
+    // events distinct from actual recorded meeting notes (captured 2026-11-11).
+    const upcoming =
+      '<upcoming_meetings count="1"><meeting id="evt_future123" title="Future calendar event" meeting_at="2026-12-01T10:00:00Z"><known_participants /></meeting></upcoming_meetings>';
+    return `${pagination}\n\n${notice}${range}\n\n${WARNING}\n\n${upcoming}\n\n${body}`;
   }
 
   private tool(name: string, args: Record<string, unknown>): { text: string; isError?: boolean } {

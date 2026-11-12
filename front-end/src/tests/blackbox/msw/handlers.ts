@@ -40,6 +40,17 @@ export const handlers = [
       documents: {},
     }),
   ),
+  http.get(`${API_BASE}/integrations/fireflies`, () =>
+    HttpResponse.json({
+      connected: false,
+      status: 'NOT_CONNECTED',
+      accountEmail: null,
+      backfillDone: false,
+      lastSuccessfulSyncAt: null,
+      lastError: null,
+      documents: {},
+    }),
+  ),
   // Cloud iPhone is account-gated; no assigned phone unless a test overrides it.
   http.get(`${API_BASE}/iphone/connection`, () =>
     HttpResponse.json({
