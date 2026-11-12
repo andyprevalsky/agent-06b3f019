@@ -6,6 +6,7 @@
  * A reaction never satisfies the supervisor's substantive-reply gate.
  */
 import type { CompletionMessage } from '../rose';
+import { isLinqEnabled, sendLinqReaction } from '../linq';
 import { sendWhatsAppReaction } from '../whatsappCloud';
 import type { SupervisorChannel } from './channelDelivery';
 import { callWithRetries, dispatchToolSafely } from './supervisorResilience';
@@ -72,18 +73,17 @@ export async function reactToInboundMessage(
     if (config.abortSignal?.aborted) {
       throw config.abortSignal.reason ?? new Error('Reaction selection aborted');
     }
-    if (config.channel !== 'WHATSAPP') {
+    if (config.channel !== 'WHATSAPP' && !isLinqEnabled(config.phoneNumber)) {
       return {
         tool: toolCall.tool,
         success: true,
         result: JSON.stringify({ skipped: true, delivered: false }),
       };
     }
-    const delivery = await sendWhatsAppReaction(
-      config.phoneNumber,
-      config.inboundMessageId ?? '',
-      emoji
-    );
+    const delivery =
+      config.channel === 'WHATSAPP'
+        ? await sendWhatsAppReaction(config.phoneNumber, config.inboundMessageId ?? '', emoji)
+        : await sendLinqReaction(config.inboundMessageId ?? '', emoji);
     if (!delivery.success) {
       return {
         tool: toolCall.tool,

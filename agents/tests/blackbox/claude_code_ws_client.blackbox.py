@@ -14,10 +14,6 @@ from _test_utils import (
 )
 
 
-# Deliberate delay (not synchronization): the server starts this long after the client begins retrying.
-SERVER_LATE_START_S = 0.3
-
-
 def _make_client(**overrides):
     """Helper: build a client with minimal stub callbacks."""
     from helpers.claude_code_ws_client import ClaudeCodeWsClient
@@ -794,19 +790,34 @@ async def test_connect_with_retry_reaches_a_sandbox_that_comes_up_late():
     runner = web.AppRunner(app)
     await runner.setup()
 
+    client = _make_client(ws_url=f"ws://127.0.0.1:{port}", reconnect_delay=0.1)
+    real_connect = client.connect
+    handshakes: list[bool] = []
+    refused = asyncio.Event()
+
+    async def connect_and_record():
+        ok = await real_connect()
+        handshakes.append(ok)
+        if not ok:
+            refused.set()
+        return ok
+
     async def start_late():
-        # Simulates a sandbox whose WebSocket server comes up after the first connect attempts.
-        await asyncio.sleep(SERVER_LATE_START_S)
+        # Start listening only once a handshake has actually been refused.
+        await refused.wait()
         await web.TCPSite(runner, "127.0.0.1", port).start()
 
-    client = _make_client(ws_url=f"ws://127.0.0.1:{port}", reconnect_delay=0.1)
     starter = asyncio.create_task(start_late())
     try:
-        assert await client.connect_with_retry(attempts=8, deadline_s=20.0), client.last_error
+        with patch.object(client, "connect", new=connect_and_record):
+            assert await client.connect_with_retry(attempts=8, deadline_s=20.0), client.last_error
+        assert handshakes[0] is False and handshakes[-1] is True, handshakes
         await asyncio.wait_for(client.listen(), timeout=5)
         assert client._test_exits == [0]
     finally:
-        await starter
+        if not starter.done():
+            starter.cancel()
+        await asyncio.gather(starter, return_exceptions=True)
         await client.disconnect()
         await runner.cleanup()
 
