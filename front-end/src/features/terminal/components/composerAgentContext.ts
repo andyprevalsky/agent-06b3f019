@@ -32,6 +32,8 @@ export function useComposerActions() {
   return useMemo(
     () => ({
       onNavigate: (id: string) => owner.current?.handleSelectAgent(id),
+      onSelectAgent: (id: string | null) => owner.current?.handleSelectAgent(id),
+      onRefreshAgents: () => owner.current?.loadAgents(),
       onChange: (value: string) => owner.current?.setMessageInput(value),
       onSubmit: (...args: Parameters<AgentSlice['handleSendMessage']>) => {
         void owner.current?.handleSendMessage(...args);

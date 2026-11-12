@@ -364,7 +364,7 @@ describe('dark background', () => {
     const stock = render(
       <MobileGridEnergyPills patternOffset={{ x: 0, y: 0 }} selectedAgentId={null} />,
     );
-    expect(mobileEnergyPills()).toHaveLength(8);
+    expect(mobileEnergyPills()).toHaveLength(3);
     expect(mobilePillPaint()).toEqual(pillPaint(LIGHT_PILL_STOPS, ''));
     stock.unmount();
 
@@ -375,7 +375,7 @@ describe('dark background', () => {
         opacity={0.14}
       />,
     );
-    expect(mobileEnergyPills()).toHaveLength(8);
+    expect(mobileEnergyPills()).toHaveLength(3);
     expect(mobilePillPaint()).toEqual(pillPaint(LIGHT_PILL_STOPS, '0.14'));
   });
 

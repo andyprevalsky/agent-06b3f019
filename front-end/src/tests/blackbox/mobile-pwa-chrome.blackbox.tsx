@@ -45,6 +45,8 @@ import { renderWithProviders } from './test-wrapper';
 
 const PHONE = { width: 430, height: 932 };
 const EDGE = 8;
+// Comfortably past ContextMenuTrigger's 700ms long-press timer.
+const LONG_PRESS_ELAPSED_MS = 900;
 
 const dripStyles = {
   blur: 0,
@@ -173,6 +175,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.restoreAllMocks();
   setViewport(1024, 768);
   localStorage.clear();
@@ -315,8 +318,51 @@ describe('Long-press row menus on a phone', () => {
   });
 });
 
+describe('Long-press on iOS', () => {
+  it('never starts a text selection or callout on the row it opens the menu for', async () => {
+    const user = userEvent.setup();
+    const agent = { ...makeAgent({ agent_id: 'row-1', goal: 'Halloween costume' }) } as Agent;
+    renderHeader({ agents: [agent] });
+    await user.click(screen.getByRole('button', { name: 'Open menu' }));
+    const drawer = await screen.findByRole('dialog');
+    const row = await within(drawer).findByTestId('rose-agent-row-row-1');
+    // WebKit ignores pointerdown preventDefault for its long-press; only CSS stops it.
+    expect(row.className.split(/\s+/)).toEqual(
+      expect.arrayContaining(['select-none', '[-webkit-touch-callout:none]']),
+    );
+    const selection = window.getSelection()!;
+    selection.selectAllChildren(row);
+    fireEvent.pointerDown(row, { pointerType: 'touch', clientX: 216, clientY: 300 });
+    // Finger jitter while holding still is not a drag.
+    fireEvent.pointerMove(row, { pointerType: 'touch', clientX: 219, clientY: 303 });
+    await screen.findByTestId('rose-agent-menu', {}, { timeout: 2000 });
+    expect(selection.toString()).toBe('');
+  });
+
+  it('a real drag still cancels the long-press', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    renderWithProviders(
+      <ContextMenu>
+        <ContextMenuTrigger data-testid="row">Halloween costume</ContextMenuTrigger>
+        <ContextMenuContent data-testid="menu">
+          <ContextMenuItem>Rename agent</ContextMenuItem>
+        </ContextMenuContent>
+      </ContextMenu>,
+    );
+    const row = screen.getByTestId('row');
+    fireEvent.pointerDown(row, { pointerType: 'touch', clientX: 216, clientY: 300 });
+    fireEvent.pointerMove(row, { pointerType: 'touch', clientX: 216, clientY: 330 });
+    // Run the clock past the 700ms long-press timer without a wall-clock sleep.
+    act(() => {
+      vi.advanceTimersByTime(LONG_PRESS_ELAPSED_MS);
+    });
+    expect(screen.queryByTestId('menu')).not.toBeInTheDocument();
+  });
+});
+
 describe('Native long-press contextmenu on Android', () => {
   it('opens once, from the trigger left edge, never under the finger', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
     const opens: Array<[number, number]> = [];
     renderWithProviders(
       <ContextMenu>
@@ -337,7 +383,9 @@ describe('Native long-press contextmenu on Android', () => {
     fireEvent.contextMenu(row, { clientX: 216, clientY: 300 });
     await screen.findByTestId('menu');
     // Past the 700ms long-press timer: no second, re-anchoring open.
-    await new Promise((resolve) => setTimeout(resolve, 900));
+    act(() => {
+      vi.advanceTimersByTime(LONG_PRESS_ELAPSED_MS);
+    });
     const left = row.getBoundingClientRect().left;
     expect(opens).toEqual([[left + EDGE, 300]]);
   });
