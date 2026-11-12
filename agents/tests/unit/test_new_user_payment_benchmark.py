@@ -372,28 +372,31 @@ class _HostedCheckoutLayout:
     Element — Card radio, card form, country/postalCode, Link opt-in and Subscribe — inside one
     js.stripe.com iframe; the page itself only holds the promotion-code input, and hCaptcha adds an
     unrelated ``button[type=submit]`` frame.
-    ``card-only``: a card-only session shows the card form with no payment-method chooser.
+    ``*-card-only``: a ``payment_method_types=[card]`` session (both paths) shows a "Card" heading
+    and the card form already open, with no other method to choose.
     """
 
     def __init__(self, variant, geolocated_country):
         self.events = []
-        card_hidden = variant != "card-only"
-        if variant == "g-pay":
+        card_only = variant.endswith("-card-only")
+        card_hidden = not card_only
+        if variant.startswith("g-pay"):
             fields = [
                 _CheckoutElement("email", ['input[name="email"]', 'input[autocomplete="email"]']),
                 _CheckoutElement("card", [], text="Card"),
                 _CheckoutElement("number", ['input[name="number"]', 'input[autocomplete="cc-number"]'],
-                                 visible=False),
-                _CheckoutElement("expiry", ['input[name="expiry"]', 'input[autocomplete="cc-exp"]'], visible=False),
-                _CheckoutElement("cvc", ['input[name="cvc"]', 'input[autocomplete="cc-csc"]'], visible=False),
-                _CheckoutElement("name", ['input[name="name"]', 'input[autocomplete="cc-name"]'], visible=False),
+                                 visible=card_only),
+                _CheckoutElement("expiry", ['input[name="expiry"]', 'input[autocomplete="cc-exp"]'],
+                                 visible=card_only),
+                _CheckoutElement("cvc", ['input[name="cvc"]', 'input[autocomplete="cc-csc"]'], visible=card_only),
+                _CheckoutElement("name", ['input[name="name"]', 'input[autocomplete="cc-name"]'], visible=card_only),
                 _CheckoutElement("country", ['select[name="country"]', 'select[autocomplete="billing country"]'],
-                                 visible=False, value=geolocated_country),
+                                 visible=card_only, value=geolocated_country),
                 _CheckoutElement("postalCode", ['input[name="postalCode"]',
-                                                'input[autocomplete="billing postal-code"]'], visible=False),
-                _CheckoutElement("linkOptIn", ['input[name="linkOptIn"]'], visible=False, checked=True,
+                                                'input[autocomplete="billing postal-code"]'], visible=card_only),
+                _CheckoutElement("linkOptIn", ['input[name="linkOptIn"]'], visible=card_only, checked=True,
                                  element_id="payment-linkOptInInput"),
-                _CheckoutElement("linkOptInLabel", ['label[for="payment-linkOptInInput"]'], visible=False),
+                _CheckoutElement("linkOptInLabel", ['label[for="payment-linkOptInInput"]'], visible=card_only),
                 _CheckoutElement("submit", ['button[type="submit"]',
                                             'button[data-testid="payment-form-submit-button"]'], text="Subscribe"),
             ]
@@ -423,9 +426,8 @@ class _HostedCheckoutLayout:
                 _CheckoutElement("submit", ['button[type="submit"]',
                                             'button[data-testid="hosted-payment-submit-button"]'], text="Subscribe"),
             ]
-            if card_hidden:
-                fields.insert(1, _CheckoutElement("card", ['button[data-testid="card-accordion-item-button"]'],
-                                                  text="Card"))
+            fields.insert(1, _CheckoutElement("card", ['button[data-testid="card-accordion-item-button"]']
+                                              if card_hidden else [], text="Card"))
             self.frames = [_CheckoutFrame(self, "page", fields)]
 
     def element(self, name):
@@ -441,7 +443,7 @@ class _HostedCheckoutLayout:
             self.element("linkOptIn").checked = not self.element("linkOptIn").checked
 
 
-@pytest.mark.parametrize("variant", ["c-pay", "g-pay", "card-only"])
+@pytest.mark.parametrize("variant", ["c-pay", "g-pay", "c-pay-card-only", "g-pay-card-only"])
 @pytest.mark.parametrize("geolocated_country", ["US", "NL"])
 @pytest.mark.asyncio
 async def test_hosted_checkout_pays_in_every_real_checkout_layout(monkeypatch, variant, geolocated_country):
@@ -515,13 +517,13 @@ async def test_hosted_checkout_pays_in_every_real_checkout_layout(monkeypatch, v
     clock = iter(range(0, 100_000))
     monkeypatch.setattr(checkout.time, "monotonic", lambda: next(clock))
 
-    path = "g" if variant == "g-pay" else "c"
+    path = variant[0]
     result = await checkout.complete_test_subscription_checkout(
         "http://127.0.0.1:1", f"https://checkout.stripe.com/{path}/pay/cs_test_layout", user_id,
         stripe_key="sk_test_example", webhook_secret="whsec_example",
     )
 
-    payment_frame = "payment-element" if variant == "g-pay" else "page"
+    payment_frame = "payment-element" if variant.startswith("g-pay") else "page"
     filled = {event[2]: event[3] for event in layout.events if event[0] == "fill"}
     assert {event[1] for event in layout.events if event[0] == "fill"} == {payment_frame}
     assert filled == {"email": "bench-00000000@example.test", "number": "4242424242424242", "expiry": "1234",
