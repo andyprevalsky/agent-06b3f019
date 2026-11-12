@@ -1208,7 +1208,7 @@ def test_live_query_proof_rejects_zero_spend_tasks_before_provisioning():
     repo_root = Path(__file__).resolve().parents[3]
     with tempfile.TemporaryDirectory() as scratch:
         pool = Path(scratch) / "pool.json"
-        pool.write_text(json.dumps(["test-mass-agent-run-0"]))
+        pool.write_text(json.dumps(["demo-fleet-alpha"]))
         command = [
             "bash",
             str(repo_root / "scripts/run-fleet-infra-stability-proof"),
@@ -1234,7 +1234,7 @@ def test_live_query_proof_rejects_zero_spend_tasks_before_provisioning():
             command, cwd=repo_root, text=True, capture_output=True, timeout=NATIVE_VERIFICATION_TIMEOUT_SECONDS
         )
         assert ordinary.returncode == 0, ordinary.stdout + ordinary.stderr
-        assert json.loads(ordinary.stdout)["slices"][0]["names"] == ["test-mass-agent-run-0"]
+        assert json.loads(ordinary.stdout)["slices"][0]["names"] == ["demo-fleet-alpha"]
         # A DEMO-bound child can replay without a zero-spend evaluator or DEMO
         # tag. The Fast Mode button controls provider speed, not replay policy.
         pool.write_text(json.dumps(["single-creator-arm"]))
@@ -24403,7 +24403,8 @@ def test_suite_selection_excludes_incomplete_entries():
     assert "raise-my-round" not in all_names
     assert "smoke-backend-claude-code" not in all_names
     # Representative ready agent benchmarks stay in suite selection.
-    assert "test-mass-agent-run-0" in suite_names
+    # test-mass-agent-run-0 was retired by user direction (2026-11-12): never selected.
+    assert "test-mass-agent-run-0" not in suite_names
     assert "browser-agent" in suite_names
     assert {
         "user-data-prod-grep",

@@ -139,6 +139,12 @@ def test_existing_catalog_rows_unchanged():
             row.pop('quarantine', None)
             reason = row.pop('deploy_quarantine', None)
             assert reason is None or (isinstance(reason, str) and reason.strip()), row['name']
+    # User-directed retirement (status -> "retired") is the only allowed status
+    # change to a reviewed row; every other field must stay byte-identical.
+    retired_by_user = {'test-mass-agent-run-0'}
+    for before, after in zip(old, current):
+        if after['name'] in retired_by_user and after.get('status') == 'retired':
+            after['status'] = before.get('status')
     # Sync retains every row from the reviewed main snapshot; phone tasks append only.
     assert current[:len(old)] == old
 
