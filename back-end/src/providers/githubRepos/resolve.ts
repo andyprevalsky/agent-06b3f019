@@ -149,56 +149,105 @@ export interface CodeSessionRepoInput {
   agentRepoRef?: string | null;
   /** Project the session would restore. */
   projectId?: string;
+  /** Legacy `github_repo_url` the spawn passed (used only when there is no project). */
+  requestedRepoUrl?: string;
+}
+
+export interface CodeSessionRepoOverride {
+  repoUrl: string;
+  canonicalRef: string;
+  /** True when the session's own project restore does not apply (different repo or none). */
+  skipProject: boolean;
+  /** Folder (Rose project) the repo is connected through; its settings restore instead. */
+  repoProjectId: string | null;
+}
+
+/** The connection's folder, when that folder still carries the repo (its settings apply). */
+async function connectedProjectId(
+  userId: string,
+  connection: GithubRepoConnectionRecord
+): Promise<string | null> {
+  const projectId = connection.connectedRoseProjectRef;
+  if (projectId === null) return null;
+  const project = await findOwnedProjectRepo(userId, projectId);
+  return project !== null && sameGithubRepo(project.repoUrl, connection.repoUrl)
+    ? project.id
+    : null;
+}
+
+async function overrideFor(
+  userId: string,
+  connection: GithubRepoConnectionRecord,
+  skipProject: boolean
+): Promise<CodeSessionRepoOverride> {
+  return {
+    repoUrl: connection.repoUrl,
+    canonicalRef: connection.canonicalRef,
+    skipProject,
+    repoProjectId: skipProject ? await connectedProjectId(userId, connection) : null,
+  };
 }
 
 /**
  * A code session's repo from canonical refs: an explicit spawn ref, or an
  * agent ref that differs from its project's repo (an override persisted at
- * create), wins over the project restore. Legacy `github_repo_url` keeps its
- * old rule (the project restore ignores it), so the agent prompts stay true.
+ * create), wins over the project restore. Without a project, the agent's ref
+ * (or a legacy `github_repo_url`) that names a connected repo is used, so the
+ * tree never falls back to a throwaway `agent-<id>` repo. Whenever the
+ * session's own project is skipped, the folder the repo is connected through
+ * (`repoProjectId`) restores instead, so its startup script, env files and
+ * commands still apply. Legacy `github_repo_url` keeps its old rule when there
+ * is a project (the project restore ignores it), so the agent prompts stay true.
  * Null: no override (legacy resolution runs unchanged).
  */
 export async function resolveCodeSessionRepoOverride(
   userId: string | undefined,
   input: CodeSessionRepoInput
-): Promise<{ repoUrl: string; canonicalRef: string; skipProject: boolean } | null> {
+): Promise<CodeSessionRepoOverride | null> {
   const ref = input.githubRepoRef ?? '';
   const agentRef = input.agentRepoRef ?? null;
-  if (ref === '' && (agentRef === null || input.projectId === undefined)) return null;
+  const requestedUrl = input.requestedRepoUrl ?? '';
+  const noProject = input.projectId === undefined || input.projectId === '';
+  if (ref === '' && agentRef === null && (requestedUrl === '' || !noProject)) return null;
   if (userId === undefined || userId === '') {
     if (ref !== '') throw new GithubRepoRefNotFoundError(ref);
     return null;
   }
-  const project =
-    input.projectId !== undefined ? await findOwnedProjectRepo(userId, input.projectId) : null;
+  const project = noProject ? null : await findOwnedProjectRepo(userId, input.projectId!);
   const projectRepoUrl = project?.repoUrl ?? null;
   if (ref !== '') {
     const connection = await requireGithubRepoRef(userId, ref);
-    return {
-      repoUrl: connection.repoUrl,
-      canonicalRef: connection.canonicalRef,
-      skipProject: !sameGithubRepo(connection.repoUrl, projectRepoUrl),
-    };
+    return overrideFor(userId, connection, !sameGithubRepo(connection.repoUrl, projectRepoUrl));
+  }
+  if (noProject) {
+    // A legacy URL naming another repo keeps its old path; otherwise the agent's ref.
+    const candidate =
+      requestedUrl !== '' && (agentRef === null || !sameGithubRepo(requestedUrl, agentRef))
+        ? requestedUrl
+        : agentRef;
+    if (candidate === null) return null;
+    const connection = await resolveGithubRepoRef(userId, candidate);
+    return connection === null ? null : overrideFor(userId, connection, true);
   }
   if (project === null || agentRef === null || sameGithubRepo(agentRef, projectRepoUrl))
     return null;
   // A disconnected override falls back to the legacy project / tree repo path.
   const connection = await resolveGithubRepoRef(userId, agentRef);
-  return connection === null
-    ? null
-    : { repoUrl: connection.repoUrl, canonicalRef: connection.canonicalRef, skipProject: true };
+  return connection === null ? null : overrideFor(userId, connection, true);
 }
 
 /**
  * The project workspace a code session restores plus its canonical-ref repo
- * override (null workspace when the override replaces the project).
+ * override. When the override replaces the session's project, the repo's own
+ * connected folder restores (null when the repo has none).
  */
 export async function resolveCodeSessionWorkspace(
   userId: string | undefined,
   input: CodeSessionRepoInput
 ): Promise<{ projectWorkspace: ProjectWorkspace | null; repoOverrideUrl: string | undefined }> {
   const override = await resolveCodeSessionRepoOverride(userId, input);
-  const projectWorkspace =
-    override?.skipProject === true ? null : await resolveSessionProject(userId, input.projectId);
+  const projectId =
+    override?.skipProject === true ? (override.repoProjectId ?? undefined) : input.projectId;
+  const projectWorkspace = await resolveSessionProject(userId, projectId);
   return { projectWorkspace, repoOverrideUrl: override?.repoUrl };
 }

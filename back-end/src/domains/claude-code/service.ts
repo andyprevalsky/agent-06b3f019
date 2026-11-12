@@ -133,7 +133,10 @@ function sessionOptions(
   };
 }
 
-/** Project restore, unless a canonical repo ref (spawn's github_repo_ref or agent override) replaces it. */
+/**
+ * Project restore, unless a canonical repo ref (spawn's github_repo_ref or agent override)
+ * replaces it; then the repo's connected folder restores (its startup script, env files).
+ */
 function sessionWorkspace(
   params: CreateSessionParams,
   resolved: Awaited<ReturnType<typeof resolveAgentContext>>
@@ -142,6 +145,7 @@ function sessionWorkspace(
     githubRepoRef: params.github_repo_ref,
     agentRepoRef: resolved.repoRef,
     projectId: params.project_id ?? resolved.projectId,
+    requestedRepoUrl: params.github_repo_url,
   });
 }
 

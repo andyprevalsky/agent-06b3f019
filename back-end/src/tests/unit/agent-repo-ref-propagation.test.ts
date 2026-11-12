@@ -26,8 +26,11 @@ async function main(): Promise<void> {
   const { AgentProjectNotFoundError } = await import('../../domains/agents/agentProject');
   const { resolveBatchRepoFields, resolveCreateRepoFields } =
     await import('../../domains/agents/agentProject');
-  const { resolveCodeSessionRepoOverride, GithubRepoRefNotFoundError } =
-    await import('../../providers/githubRepos/resolve');
+  const {
+    resolveCodeSessionRepoOverride,
+    resolveCodeSessionWorkspace,
+    GithubRepoRefNotFoundError,
+  } = await import('../../providers/githubRepos/resolve');
   const { ensureAgentTreeRepo } = await import('../../providers/github');
   const { connectGithubRepo } = await import('../../providers/githubRepos/store');
   const { githubRepoIdentity } = await import('../../providers/githubRepos/refs');
@@ -41,7 +44,13 @@ async function main(): Promise<void> {
       data: { userId, name: 'Rose', repoUrl: ROSE_URL, syncSalt: 'a' },
     });
     const toolFolder = await prisma.project.create({
-      data: { userId, name: 'Tool', repoUrl: TOOL_URL, syncSalt: 'b' },
+      data: {
+        userId,
+        name: 'Tool',
+        repoUrl: TOOL_URL,
+        syncSalt: 'b',
+        startupScript: 'npm ci && npm run dev',
+      },
     });
     await prisma.githubRepoAccess.createMany({
       data: [
@@ -160,9 +169,11 @@ async function main(): Promise<void> {
 
     // 6. Code-session launch: the persisted override replaces the project restore,
     //    a matching ref keeps it, an explicit spawn ref is permission-checked.
+    //    A skipped project never drops the repo's settings: the folder the repo is
+    //    connected through restores instead (startup script, env files, commands).
     assert.deepEqual(
       await resolveCodeSessionRepoOverride(userId, { agentRepoRef: TOOL_REF, projectId: rose.id }),
-      { repoUrl: TOOL_URL, canonicalRef: TOOL_REF, skipProject: true }
+      { repoUrl: TOOL_URL, canonicalRef: TOOL_REF, skipProject: true, repoProjectId: toolFolder.id }
     );
     assert.equal(
       await resolveCodeSessionRepoOverride(userId, { agentRepoRef: ROSE_REF, projectId: rose.id }),
@@ -174,7 +185,7 @@ async function main(): Promise<void> {
         githubRepoRef: rose.id,
         projectId: toolFolder.id,
       }),
-      { repoUrl: ROSE_URL, canonicalRef: ROSE_REF, skipProject: true },
+      { repoUrl: ROSE_URL, canonicalRef: ROSE_REF, skipProject: true, repoProjectId: rose.id },
       'legacy project id as an explicit spawn ref'
     );
     await assert.rejects(
@@ -182,6 +193,76 @@ async function main(): Promise<void> {
       (error: unknown) => error instanceof GithubRepoRefNotFoundError,
       'another user cannot launch on this repo'
     );
+
+    // 7. A session pinned to a different repo restores THAT repo's folder settings
+    //    (before: the project restore was skipped and the repo cloned bare).
+    const pinned = await resolveCodeSessionWorkspace(userId, {
+      githubRepoRef: TOOL_REF,
+      projectId: rose.id,
+    });
+    assert.equal(pinned.repoOverrideUrl, TOOL_URL);
+    assert.equal(pinned.projectWorkspace?.project.id, toolFolder.id);
+    assert.equal(pinned.projectWorkspace?.project.startupScript, 'npm ci && npm run dev');
+    assert.equal(pinned.projectWorkspace?.project.repoUrl, TOOL_URL);
+    const persisted = await resolveCodeSessionWorkspace(userId, {
+      agentRepoRef: TOOL_REF,
+      projectId: rose.id,
+    });
+    assert.equal(persisted.projectWorkspace?.project.id, toolFolder.id, 'persisted override too');
+    const own = await resolveCodeSessionWorkspace(userId, {
+      agentRepoRef: ROSE_REF,
+      projectId: rose.id,
+    });
+    assert.equal(own.projectWorkspace?.project.id, rose.id, 'same repo keeps its own project');
+    assert.equal(own.repoOverrideUrl, undefined);
+
+    // 8. No project: a connected ref is the session repo (never a throwaway agent-<id>
+    //    repo) and restores its folder; a legacy URL for another repo keeps its old path.
+    assert.deepEqual(await resolveCodeSessionRepoOverride(userId, { agentRepoRef: TOOL_REF }), {
+      repoUrl: TOOL_URL,
+      canonicalRef: TOOL_REF,
+      skipProject: true,
+      repoProjectId: toolFolder.id,
+    });
+    const homeSession = await resolveCodeSessionWorkspace(userId, { agentRepoRef: TOOL_REF });
+    assert.equal(homeSession.repoOverrideUrl, TOOL_URL);
+    assert.equal(homeSession.projectWorkspace?.project.id, toolFolder.id);
+    assert.deepEqual(
+      await resolveCodeSessionRepoOverride(userId, { requestedRepoUrl: `${TOOL_URL}.git` }),
+      {
+        repoUrl: TOOL_URL,
+        canonicalRef: TOOL_REF,
+        skipProject: true,
+        repoProjectId: toolFolder.id,
+      },
+      'legacy github_repo_url naming a connected repo still gets its folder settings'
+    );
+    assert.equal(
+      await resolveCodeSessionRepoOverride(userId, {
+        agentRepoRef: TOOL_REF,
+        requestedRepoUrl: 'https://github.com/public-owner/unconnected',
+      }),
+      null,
+      'an explicit legacy URL for an unconnected repo keeps the legacy clone path'
+    );
+    assert.equal(await resolveCodeSessionRepoOverride(userId, {}), null);
+
+    // 9. A repo connected without a folder clones bare: there are no settings to restore.
+    const bareUrl = 'https://github.com/public-owner/bare';
+    await prisma.githubRepoAccess.create({ data: { userId, repoUrl: bareUrl } });
+    await connectGithubRepo({
+      userId,
+      identity: githubRepoIdentity(bareUrl)!,
+      defaultBranch: 'main',
+      connectedRoseProjectRef: null,
+      source: 'connect',
+    });
+    const bare = await resolveCodeSessionWorkspace(userId, {
+      githubRepoRef: 'gh:public-owner/bare',
+      projectId: rose.id,
+    });
+    assert.equal(bare.repoOverrideUrl, bareUrl);
+    assert.equal(bare.projectWorkspace, null);
   } finally {
     await prisma.agent.deleteMany({ where: { userId } });
     await prisma.githubRepoAccess.deleteMany({ where: { userId } });

@@ -105,12 +105,16 @@ async function resolveAgentRepoRef(agentId: string): Promise<string | null> {
   return null;
 }
 
-/** Project restore, unless a canonical repo ref (spawn's github_repo_ref or agent override) replaces it. */
+/**
+ * Project restore, unless a canonical repo ref (spawn's github_repo_ref or agent override)
+ * replaces it; then the repo's connected folder restores (its startup script, env files).
+ */
 async function sessionWorkspace(params: CreateSessionParams, userId: string) {
   return resolveCodeSessionWorkspace(userId, {
     githubRepoRef: params.github_repo_ref,
     agentRepoRef: await resolveAgentRepoRef(params.agent_id),
     projectId: await resolveAgentProjectId(params.agent_id),
+    requestedRepoUrl: params.github_repo_url,
   });
 }
 
