@@ -59,6 +59,7 @@ from helpers.activity_heartbeat import heartbeat_resume_details, safe_heartbeat
 from helpers.claude_code_ws_client import ClaudeCodeWsClient, ws_endpoint_reachable
 from helpers.e2b_log_collector import SandboxLogCollector
 from helpers.file_resolution import resolve_file_pointers_from_extracted, transform_schema_for_remote_session
+from helpers.github_repo_ref import explicit_github_repo_ref
 from helpers.tracing import traced
 from tools.base import MessageStatus
 from utils.code_transcript import (
@@ -3412,6 +3413,8 @@ async def spawn_claude_code_activity(
             persistent code session; omitted, the backend resumes the spawning
             agent's latest session for the repo (or creates one on a new branch).
             ``task_name`` (the spawn's) is stored on the task row as its title.
+            ``github_repo_ref`` (the spawn's explicit connected-repo selection) rides
+            here too, so the scheduled positional arguments stay unchanged.
 
     No runtime limit (C11): the activity runs while the CLI works and heartbeats.
     An idle CLI is paused (status ``paused``, resumable), never failed.
@@ -3450,6 +3453,7 @@ async def spawn_claude_code_activity(
     # The persistent session survives a paused/unreachable sandbox: a retry
     # resumes it by id even when its attached record must be discarded (C2).
     requested_code_session_id = (code_session_request or {}).get("code_session_id")
+    github_repo_ref = explicit_github_repo_ref((code_session_request or {}).get("github_repo_ref"))
     code_session_id: Optional[str] = (attached or {}).get("code_session_id") or (
         requested_code_session_id if isinstance(requested_code_session_id, str) else None
     )
@@ -3608,6 +3612,7 @@ async def spawn_claude_code_activity(
                 fast_mode_cache_enabled=fast_mode_cache_enabled,
                 code_session_id=code_session_id,
                 lease_owner=lease_owner,
+                github_repo_ref=github_repo_ref,
                 target=target,
                 local_device_id=local_device_id,
                 fresh_conversation=(code_session_request or {}).get("fresh_conversation") is True,
@@ -3618,6 +3623,7 @@ async def spawn_claude_code_activity(
                     "spawn_args": {
                         "type": "code", "goal": goal, "output_schema": output_schema,
                         "github_repo_link": github_repo_url, "target": target, "task_name": task_name,
+                        **({"github_repo_ref": github_repo_ref} if github_repo_ref else {}),
                         "attachments": [item.get("original_filename") for item in attachments or []],
                     },
                     "attachments": attachments or [],

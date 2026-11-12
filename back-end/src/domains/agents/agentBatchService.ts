@@ -1,4 +1,4 @@
-import { resolveBatchProjectIds, type BatchAgentResult } from './agentProject';
+import { batchAgentResults, resolveBatchProjectIds, type BatchAgentResult } from './agentProject';
 import { resolveCreateTaskPaths } from './agentTaskPathCreate';
 import { isWorkflowStartAdmissionPending } from '../../providers/workflowQueueAdmission';
 /**
@@ -333,21 +333,5 @@ export async function createAgentsBatch(args: BatchCreateAgentsArgs): Promise<Ba
     verifierType
   );
 
-  // Mirror input order; existing rows surface their stored status.
-  return bodies.map((body) => {
-    const agentId = body.agent_id!;
-    const newResult = newResultByAgentId.get(agentId);
-    if (newResult) return newResult;
-    const row = existingById.get(agentId)!;
-    return {
-      agent_id: row.id,
-      project_id: row.projectId,
-      folder_id: row.folderId,
-      status: row.status as BatchAgentResult['status'],
-      temporal_workflow_id: row.temporalWorkflowId,
-      goal: row.goal,
-      model: row.model,
-      already_existed: true,
-    };
-  });
+  return batchAgentResults(bodies, newResultByAgentId, existingById, repoFields);
 }
