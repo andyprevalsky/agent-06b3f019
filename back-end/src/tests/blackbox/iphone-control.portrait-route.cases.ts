@@ -12,7 +12,8 @@ import {
   seedPortraitRoute,
   unchangedSearchRows,
 } from './iphone-portrait-route.fixture';
-import { portraitFrame, portraitOcr } from './iphone-portrait.fixture';
+import { livePortraitOcr, portraitFrame, portraitOcr } from './iphone-portrait.fixture';
+import { portraitControlCenterAnchors } from '../../providers/phonePortraitProof';
 import { freshSetup, observe, setupPost, type SetupDto } from './iphone-control.setup-fixtures';
 import type { Case } from './iphone-control.cases';
 export const portraitRouteCases: Case[] = [];
@@ -397,5 +398,64 @@ portraitRouteCases.push([
     const reached = portraitRouteBreakAt(valid, context, later);
     assert.equal(reached.cursor, later.cursor, 'Invalid row not reported after a valid prefix');
     assert.equal(reached.stage, 'result_tap');
+  },
+]);
+portraitRouteCases.push([
+  'portrait Control Center anchors accept the live OCR hyphenation glyph and still reject other text',
+  async () => {
+    for (const glyph of ['-', '~'] as const)
+      assert.equal(
+        portraitControlCenterAnchors(livePortraitOcr(glyph)),
+        'Not Playing;Reduce Interruptions',
+        `Live Control Center OCR with '${glyph}' rejected`
+      );
+    const letter = livePortraitOcr().map((r) =>
+      r.text.startsWith('Interrup') ? { ...r, text: 'Interrup- X' } : r
+    );
+    assert.equal(portraitControlCenterAnchors(letter), null, 'A letter was joined as hyphenation');
+    assert.equal(
+      portraitControlCenterAnchors(livePortraitOcr().filter((r) => r.text !== 'tions')),
+      null
+    );
+    const context = {
+      attemptId: 'attempt',
+      revision: 1,
+      firstRun: 'firstRun',
+      profileRevision: 1,
+      now: Date.now(),
+    };
+    const route = portraitRouteEvents('on', 'production-cold');
+    route[route.length - 1].result = livePortraitOcr();
+    assert.ok(provePortraitRoute(route, context), 'Live Control Center read broke the route');
+  },
+]);
+portraitRouteCases.push([
+  'portrait verify proves a route ending on the live Control Center OCR',
+  async (h) => {
+    const f = await freshSetup(h);
+    h.framePng = portraitFrame(true);
+    h.observationResult = livePortraitOcr();
+    const commands = portraitRouteCommands('on', 'production-cold');
+    commands[commands.length - 1].result = livePortraitOcr();
+    await seedPortraitCommands(h, f, commands);
+    h.observationResult = livePortraitOcr('~');
+    const evidence = await observe(h, f);
+    h.observationResult = livePortraitOcr();
+    const result = await setupPost(h, f, {
+      action: 'verify',
+      verificationTarget: 'portrait_lock',
+      attemptId: f.setup.attemptId,
+      expectedRevision: f.setup.revision,
+      expectedCursor: evidence.cursor,
+      evidenceOperationIds: [evidence.id],
+      requestKey: randomUUID(),
+    });
+    assert.equal(result.data.operation?.errorCode, null);
+    assert.equal(result.data.operation?.status, 'SUCCEEDED');
+    assert.equal(
+      (result.data.setup as { verification: { checks: { portrait_lock: { status: string } } } })
+        .verification.checks.portrait_lock.status,
+      'confirmed'
+    );
   },
 ]);
