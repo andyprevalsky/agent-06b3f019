@@ -16155,9 +16155,28 @@ private_fleet_source_admission() {
 }
 validate_private_fleet_source() {
     local machines volumes snapshots
-    machines="$(FLY machines list -a "$APP" --json)" || return 1
-    volumes="$(FLY volumes list -a "$APP" --json)" || return 1
-    snapshots="$(FLY volume snapshots list "$PRIVATE_SOURCE_VOLUME_ID" -a "$APP" --json)" || return 1
+    # Read-only provider inventory is flaky under a 14-job cohort: listings fail
+    # transiently (HTTP/2 stream INTERNAL_ERROR) or the snapshot listing returns rc=0
+    # and [] (14 parallel reads: 23/28 empty; sequential reads complete). Re-read a
+    # bounded number of times; the strict validation below is unchanged.
+    local _inventory_read _inventory_ok
+    for _inventory_read in 1 2 3 4 5 6; do
+        _inventory_ok=0
+        if machines="$(FLY machines list -a "$APP" --json)" \
+            && volumes="$(FLY volumes list -a "$APP" --json)" \
+            && snapshots="$(FLY volume snapshots list "$PRIVATE_SOURCE_VOLUME_ID" -a "$APP" --json)"; then
+            _inventory_ok=1
+            printf '%s' "$snapshots" | python3 -c 'import json, sys
+rows = json.load(sys.stdin)
+sys.exit(0 if isinstance(rows, list) and any(isinstance(r, dict) and r.get("id") == sys.argv[1] for r in rows) else 1)' \
+                "$PRIVATE_SOURCE_SNAPSHOT" 2>/dev/null && break
+            echo "⚠️  provider snapshot listing omitted $PRIVATE_SOURCE_SNAPSHOT (read $_inventory_read/6)" >&2
+        else
+            echo "⚠️  provider inventory read failed (read $_inventory_read/6)" >&2
+        fi
+        [ "$_inventory_read" -lt 6 ] || { [ "$_inventory_ok" = 1 ] || return 1; break; }
+        sleep $((_inventory_read * 2))
+    done
     printf '{"machines":%s,"volumes":%s,"snapshots":%s}' "$machines" "$volumes" "$snapshots" \
         | python3 "$SOURCE_HELPER" verify "$PRIVATE_SOURCE_FILE" --parked-memory "$WARM_PARKED_VM_MEMORY" --sha256 "$PRIVATE_SOURCE_SHA256"
 }

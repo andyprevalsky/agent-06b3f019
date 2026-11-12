@@ -16,6 +16,7 @@ export default function RoseTaskAgentRow({
   depth,
   indented,
   status,
+  mobile = false,
   onSelectAgent,
 }: {
   node: TreeNode;
@@ -24,6 +25,7 @@ export default function RoseTaskAgentRow({
   depth: number;
   indented: boolean;
   status: AgentRunStatus;
+  mobile?: boolean;
   onSelectAgent: (id: string) => void;
 }) {
   const apps = useRoseApps();
@@ -44,7 +46,7 @@ export default function RoseTaskAgentRow({
       <span className="relative inline-grid h-5 w-5 flex-none place-items-center">
         <Icon className="h-4 w-4" aria-hidden="true" />
         <span className="absolute -right-1.5 -top-1">
-          <AgentStatusIndicator status={status} seed={node.agentId} />
+          <AgentStatusIndicator status={status} seed={node.agentId} mobile={mobile} />
         </span>
       </span>
       <span className="min-w-0 truncate">{node.goal}</span>

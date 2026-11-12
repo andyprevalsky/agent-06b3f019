@@ -3545,7 +3545,8 @@ class StoppedPreStackIsolation(unittest.TestCase):
             try: value = json.loads(path.read_text())
             except ValueError: continue
             cycle.write(path, replace(value))
-        self.fleet = Path(self.proof['campaign']).parent.parent / 'runs/20261103-080440-310001'
+        self.fleet = (Path(self.proof['campaign']).parent.parent / 'runs'
+                      / f'20261103-080440-{module.FIXTURE_CONTROLLER_PID_BASE + 1}')
         self.output = self.fleet / self.gate['name']
         self.output.mkdir(exist_ok=True)
         self.owner = cycle.read(self.fleet / '_batch/lifecycle.json')['fleet_owner_token']

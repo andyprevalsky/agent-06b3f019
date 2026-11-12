@@ -5,12 +5,15 @@ import { finishSetup, billSetup } from './repo.setupFinish';
 import { interaction } from './service.interactions';
 import { publicOperation, defaultPhoneClient } from './service.operations';
 import type { SetupInput } from '../../providers/phoneSetupState';
+import { createLogger } from '../../providers/logger';
+import { IPhoneError } from './types';
 import {
   verifyPhoneSetup,
   type SetupVerifier,
   type SetupOutcomeResult,
 } from '../../providers/phoneSetupVerifier';
 export { configureSetup } from './repo.setupProfile';
+const log = createLogger('iPhoneSetup');
 export async function submitSetup(
   userId: string,
   taskId: string,
@@ -22,7 +25,9 @@ export async function submitSetup(
   let command = claim.command;
   if (claim.execute) {
     let result: SetupOutcomeResult | null = null,
-      usageRecordId: string | undefined;
+      usageRecordId: string | undefined,
+      failureCode: string | undefined,
+      failureDetail: Record<string, unknown> | undefined;
     if (input.action === 'verify') {
       try {
         result =
@@ -46,11 +51,26 @@ export async function submitSetup(
           );
           usageRecordId = billed.id;
         }
-      } catch {
+      } catch (error) {
         result = null;
+        // A typed precondition is actionable for the agent; anything else stays a verifier outage.
+        failureCode =
+          error instanceof IPhoneError && error.code !== undefined ? error.code : undefined;
+        failureDetail = error instanceof IPhoneError ? error.detail : undefined;
+        log.warn('verify failed', {
+          operationId: claim.command.id,
+          leaseId: claim.lease.id,
+          agentId: claim.lease.agentId,
+          target: input.verificationTarget ?? 'apple_account',
+          code: failureCode ?? 'phone_setup_verifier_unavailable',
+          error: (error instanceof Error ? error.message : String(error)).slice(0, 200),
+          ...(failureDetail?.portraitRoute !== undefined
+            ? { portraitRoute: failureDetail.portraitRoute }
+            : {}),
+        });
       }
     }
-    command = await finishSetup(claim, input, result, usageRecordId);
+    command = await finishSetup(claim, input, result, usageRecordId, failureCode, failureDetail);
   }
   const state = await interaction(userId, taskId, undefined, clientFactory);
   const operation = await publicOperation(command);

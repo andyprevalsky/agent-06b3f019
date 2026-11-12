@@ -1,0 +1,14 @@
+{
+  "format": "ROSE-PRIVATE-TAR-GCM-V1",
+  "bucket": "trace-archive",
+  "key": "devbox-closeout-private/pr1939-websearch-latency/20261111T211047Z-stash.tar.gz.aesgcm",
+  "encryption_key_id": "trace-archive-prod-2026-07-03",
+  "ciphertext_sha256": "36f4aea16e3f87db41261236d7eb8528a472c855358de80e38f25ffb27bb5468",
+  "gzip_sha256": "36daa7483db8b1703c2d369224a53c5809151c9cfa8ae50f205ba61659f28877",
+  "stored_bytes": 35772,
+  "frames": 1,
+  "files": 1,
+  "original_bytes": 35172,
+  "manifest_sha256": "381097557cc953b74514b6a391b46cab69e41df496d055c4ca003f5c7baf8b03",
+  "full_readback_verified": true
+}

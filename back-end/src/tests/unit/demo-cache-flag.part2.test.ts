@@ -14,6 +14,7 @@ import assert from 'node:assert';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { buildChatTemporalStartParams } from '../../providers/chat/chatHandler';
+import { ROUTER_STAGES } from '../../providers/chat/chatSystemContext';
 
 let passed = 0;
 const failures: string[] = [];
@@ -144,8 +145,10 @@ test('chat router caches successful output without gating downstream work', () =
   assert.ok(router.includes('agentFastMode'), 'router must read Fast Mode flag');
   assert.ok(
     router.includes('contentKey(fastMode.goal, routerStage.callSite') &&
-      /initial: \{\s*callSite: 'chat_router',/.test(router) &&
-      /after_search: \{\s*callSite: 'chat_router_after_search',/.test(router),
+      router.includes('const routerStage = ROUTER_STAGES[stage]') &&
+      ROUTER_STAGES.initial.callSite === 'chat_router' &&
+      ROUTER_STAGES.after_search.callSite === 'chat_router_after_search' &&
+      ROUTER_STAGES.search_budget_spent.callSite === 'chat_router_after_search',
     'router must use a canonical request key per stage; the first route keeps chat_router'
   );
   assert.ok(router.includes('fastMode.writeEnabled'), 'router must honor write-through accounts');

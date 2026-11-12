@@ -1,0 +1,76 @@
+{
+  "format": "PR1905-PRIVATE-TAR-AESGCM-FRAMES-V1",
+  "label": "cc11-mass-handoff-20261110T2156",
+  "created_at": "2026-11-10T21:57:14.574932+00:00",
+  "bucket": "trace-archive",
+  "prefix": "devbox-closeout-private/pr1905/cc11-mass-handoff-20261110T2156",
+  "parts": [
+    {
+      "key": "devbox-closeout-private/pr1905/cc11-mass-handoff-20261110T2156/evidence.part0000.aesgcm",
+      "sha256": "d0f54eca811e02d607954070705d6c52d8bd4d26ef4de02fbc8c925a6220a73d",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/cc11-mass-handoff-20261110T2156/evidence.part0001.aesgcm",
+      "sha256": "cb396a7298723be7e24397e17a7f4fc935d388ae492bb2ac70c7484f1874de81",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/cc11-mass-handoff-20261110T2156/evidence.part0002.aesgcm",
+      "sha256": "820d38bfee92b6d62aa0e46cee4cb6c6ae3b4d331beffe84b09ed78f59d1242e",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/cc11-mass-handoff-20261110T2156/evidence.part0003.aesgcm",
+      "sha256": "bcd5fa3052778bac3ba1e89970a2ddf34d474dbb587045ba3fc991260753a2c9",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/cc11-mass-handoff-20261110T2156/evidence.part0004.aesgcm",
+      "sha256": "3d2e70fe1511de520583903382da2c0d6faa7ce822be46acdf337ab93c7daa19",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/cc11-mass-handoff-20261110T2156/evidence.part0005.aesgcm",
+      "sha256": "fd02f3dc269272f0b0ff3bd7a76ac5348769a595ba1e0546396d7d3dbf1ed874",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/cc11-mass-handoff-20261110T2156/evidence.part0006.aesgcm",
+      "sha256": "67b559f8729e46eee41d56ff1b6b6ab4f78e7709a6a7fbacfc9d1f7e021d7b7e",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/cc11-mass-handoff-20261110T2156/evidence.part0007.aesgcm",
+      "sha256": "b77036e3899895b1cf318255b606ff794f032dd86c578629cba966bc26ce6f36",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/cc11-mass-handoff-20261110T2156/evidence.part0008.aesgcm",
+      "sha256": "f30b41ef8b4871b94651b9667679eae1807888ff2bd39846a2042b5f84784166",
+      "plain_bytes": 24689742
+    }
+  ],
+  "sha256": "d157927f6b486ed3dfba3c1735283ac79608b5bb2c508746f5062222b10f99cf",
+  "member_count": 392,
+  "member_manifest_sha256": "7ad42b2b455ebf337bc6e1c7c0497a1a642f9faa094671dbd1b39732a16fd868",
+  "full_readback_verified": true,
+  "authenticated_decryption_verified": true,
+  "all_member_hashes_verified": true,
+  "excludes": [
+    ".context/assigned-pr1885-failures/ascii-fixture-repro/checkout",
+    ".context/assigned-pr1885-failures/cloud-smoke-rca/activation-checkout",
+    ".context/assigned-pr1885-failures/recovery-check",
+    ".context/assigned-pr1885-failures/original",
+    ".context/assigned-pr1885-failures/native-evidence.tar.gz",
+    ".context/assigned-pr1885-failures/private-preservation",
+    ".context/assigned-pr1885-failures/auth-options-rca/baseline/digest-clone",
+    ".context/frontend-builds",
+    ".context/tsbuildinfo"
+  ],
+  "original_evidence_reference": "attachments/failure-evidence-receipt--bbe0d10ee40a41921ea3.json",
+  "original_verified_members": 1948,
+  "raw_logs_private": true,
+  "snapshot_not_final_closeout": true,
+  "catalog_manifest_sha256": "7ad42b2b455ebf337bc6e1c7c0497a1a642f9faa094671dbd1b39732a16fd868"
+}

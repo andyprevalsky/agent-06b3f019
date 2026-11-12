@@ -21,6 +21,7 @@ import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { test } from 'node:test';
+import { runInNewContext } from 'node:vm';
 import { userUiAssetsDir, userUiExamplesDir, USER_UI_EXAMPLES } from '../../providers/userUi/seed';
 
 const assets = userUiAssetsDir();
@@ -96,6 +97,56 @@ function colorFraction(file: string, rgb: number[], tol = 14): number {
 const PRIMARY = [242, 13, 128];
 const BACKGROUND = [222, 239, 247];
 const smoke = folder('smoke', join(fixtures, 'smoke'));
+
+test('blocking fixture waits for delayed measurement and reads back exactly once', async () => {
+  const html = readFileSync(join(fixtures, 'blocking/root/slots/blocking/index.html'), 'utf8');
+  const script = html.match(/<script>([\s\S]*?)<\/script>/)?.[1];
+  assert.ok(script, 'the actual blocking fixture has its executable script');
+  let now = 0;
+  let nextId = 0;
+  const events: { at: number; callback: () => void }[] = [];
+  const readbacks: boolean[] = [];
+  const probe = { sampling: false };
+  const schedule = (callback: () => void, ms: number) => {
+    events.push({ at: now + ms, callback });
+    return ++nextId;
+  };
+  const gl = new Proxy(
+    {},
+    {
+      get: (_target, key) =>
+        key === 'readPixels' ? () => readbacks.push(probe.sampling) : () => ({}),
+    }
+  );
+  const window = { __roseProbe: probe };
+  runInNewContext(script, {
+    window,
+    document: { getElementById: () => ({ getContext: () => gl }) },
+    parent: { postMessage: () => {} },
+    setTimeout: (callback: () => void, ms: number) => schedule(callback, ms),
+    requestAnimationFrame: (callback: () => void) => schedule(callback, 16),
+  });
+  const advanceTo = async (end: number) => {
+    while (events.some((event) => event.at <= end)) {
+      events.sort((a, b) => a.at - b.at);
+      const event = events.shift()!;
+      now = event.at;
+      event.callback();
+      await Promise.resolve(); // Preserve the fixture's original async continuation.
+    }
+    now = end;
+  };
+  await advanceTo(10_000); // Measurement can start arbitrarily later than the old timer.
+  assert.deepEqual(readbacks, [], 'no GPU readback before actual measurement starts');
+  probe.sampling = true;
+  await advanceTo(11_000);
+  assert.deepEqual(readbacks, [true], 'one GPU readback inside the actual sampling window');
+  probe.sampling = false;
+  await advanceTo(20_000);
+  probe.sampling = true;
+  await advanceTo(30_000);
+  assert.deepEqual(readbacks, [true], 'the one-off readback never duplicates in later windows');
+});
 
 test('screenshot renders the local UI with its theme (pixel probe + safe-mode control)', async () => {
   const file = join(out, 'home.png');

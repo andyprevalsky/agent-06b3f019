@@ -128,6 +128,8 @@ class BenchmarkTask:
     # dataclass so catalog load does not reject the fields.
     deploy_category: Optional[str] = None
     deploy_canary: bool = False
+    # Explicit exclusion from deploy selection; manual benchmark execution remains available.
+    deploy_quarantine: Optional[str] = None
     # Deploy quarantine marker {since, repair, error, evidence} (long_horizon.validate_task_quarantine):
     # the task still runs; deploy smoke reports its failure as non-blocking QUARANTINED_FAIL.
     quarantine: Optional[dict] = None

@@ -349,7 +349,8 @@ codex_funded_fallback_configured() {
 }
 
 # Coverage data directory (NODE_V8_COVERAGE tells Node to dump raw coverage here)
-COV_TMP="$BACKEND_DIR/coverage/tmp$SHARD_SUFFIX"
+source "$SCRIPT_DIR/coverage-raw-directory.sh"
+COV_TMP="$(coverage_raw_directory "$BACKEND_DIR" "$SHARD_SUFFIX")"
 
 # Reserve one of the two currently-unused ports inside Conductor's ten-port
 # workspace allocation. Port arithmetic outside that allocation is only a
