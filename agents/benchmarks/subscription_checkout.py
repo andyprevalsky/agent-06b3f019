@@ -13,7 +13,6 @@ from urllib.parse import urlparse
 import httpx
 from playwright.async_api import async_playwright
 
-
 _SESSION_ID = re.compile(r"\bcs_test_[A-Za-z0-9]+\b")
 _CHROME_PATHS = (
     "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
