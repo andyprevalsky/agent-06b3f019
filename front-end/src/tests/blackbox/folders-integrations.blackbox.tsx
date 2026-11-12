@@ -20,6 +20,7 @@ import userEvent from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
 
 import Integrations from '@/pages/Integrations';
+import { GITHUB_REPOS_SECTION_ID, focusIntegrationsSection } from '@/lib/integrationsSection';
 import { useRoseApps } from '@/features/terminal-component-group/components/rose-apps/roseAppsState';
 import { RoseMobileAgentList } from '@/features/terminal-component-group/components/rose-sidebar/RoseMobileAgentList';
 import type { GithubRepo } from '@/features/integrations/api/githubRepos';
@@ -67,6 +68,7 @@ function githubReposBackend(folders: MockProjectsApi) {
       const body = (await request.json()) as {
         repo_url: string;
         connected_rose_project_ref?: string | null;
+        replace?: boolean;
       };
       const match = /github\.com\/([^/]+)\/([^/.]+)/i.exec(body.repo_url);
       if (match === null)
@@ -86,6 +88,33 @@ function githubReposBackend(folders: MockProjectsApi) {
           { status: 503, headers: { 'Retry-After': '120' } },
         );
       const folder = folders.projects.find((p) => p.id === body.connected_rose_project_ref);
+      const canonical = `gh:${owner}/${name}`.toLowerCase();
+      if (body.replace === true && folder !== undefined) {
+        // Switch: another folder lets go of the repo; this folder's old repos stay
+        // connected but unassociated; the folder points at the repo (server contract).
+        const existing = repos.find((r) => r.canonical_ref === canonical);
+        const other = folders.projects.find(
+          (p) => p.id === existing?.connected_rose_project_ref && p.id !== folder.id,
+        );
+        if (other !== undefined) other.repoUrl = null;
+        for (const r of repos)
+          if (r.connected_rose_project_ref === folder.id) r.connected_rose_project_ref = null;
+        folder.repoUrl = body.repo_url;
+        folder.githubConnected = true;
+        const switched =
+          existing ??
+          repo({
+            canonical_ref: canonical,
+            repo_name: name,
+            repo_url: body.repo_url,
+            owner: owner.toLowerCase(),
+            integration_id: `int-${name}`,
+            source: 'connect',
+          });
+        switched.connected_rose_project_ref = folder.id;
+        if (existing === undefined) repos.push(switched);
+        return HttpResponse.json(switched, { status: 201 });
+      }
       if (
         folder?.repoUrl != null &&
         !folder.repoUrl.toLowerCase().includes(`/${owner}/${name}`.toLowerCase())
@@ -255,9 +284,139 @@ describe('Folders in the left bar', () => {
       await waitFor(() => expect(scrolled).toHaveBeenCalled());
       expect(scrolled.mock.contexts[0]).toBe(github);
       expect(sessionStorage.getItem('rose:integrations-section-focus')).toBeNull();
+      // A folder without a repo has nothing to switch: no folder is pre-selected.
+      expect(within(github).getByRole('combobox', { name: 'Folder to switch' })).toHaveValue('');
     } finally {
       delete (HTMLElement.prototype as { scrollIntoView?: unknown }).scrollIntoView;
     }
+  });
+});
+
+describe("Switching a folder's repo", () => {
+  it('switch repo sends replace with the folder id; the folder then shows the new repo', async () => {
+    const folders = mockProjectsApi([roseFolder(), websiteFolder()]);
+    const repos = githubReposBackend(folders);
+    const user = userEvent.setup();
+    const view = renderWithProviders(<Integrations />, { roseDesktop: false });
+    const section = await screen.findByRole('region', { name: 'GitHub Repos' });
+    const form = await within(section).findByRole('form', { name: "Switch a folder's repo" });
+    const picker = within(form).getByRole('combobox', { name: 'Folder to switch' });
+    // Only folders that already have a repo can be switched.
+    expect(within(picker).queryByRole('option', { name: 'Website' })).toBeNull();
+    await user.selectOptions(picker, 'p-rose');
+    expect(within(form).getByTestId('switch-current-repo')).toHaveTextContent(
+      'gh:rose-ai-labs/rose',
+    );
+    await user.type(
+      within(form).getByRole('textbox', { name: 'New GitHub repository URL' }),
+      'https://github.com/acme/rose-next',
+    );
+    await user.click(within(form).getByRole('button', { name: 'Switch repo' }));
+
+    await waitFor(() => expect(requests('POST', '/integrations/github/repos')).toHaveLength(1));
+    expect(requests('POST', '/integrations/github/repos')[0].body).toEqual({
+      repo_url: 'https://github.com/acme/rose-next',
+      connected_rose_project_ref: 'p-rose',
+      replace: true,
+    });
+    await waitFor(() =>
+      expect(within(form).getByTestId('switch-current-repo')).toHaveTextContent(
+        'gh:acme/rose-next',
+      ),
+    );
+    expect(within(form).queryByRole('alert')).toBeNull();
+    // The old repo stays connected, now without a folder.
+    expect(repos.map((r) => [r.canonical_ref, r.connected_rose_project_ref])).toEqual([
+      ['gh:rose-ai-labs/rose', null],
+      ['gh:acme/rose-next', 'p-rose'],
+    ]);
+    const list = within(section).getByRole('list', { name: 'Connected GitHub repos' });
+    await waitFor(() => expect(list).toHaveTextContent('Folder: Rose'));
+    expect(list).toHaveTextContent('No folder');
+
+    // The folder's settings read the new repo.
+    view.unmount();
+    renderWithProviders(sidebar());
+    await user.click(await screen.findByRole('button', { name: 'Rose folder settings' }));
+    await waitFor(() =>
+      expect(screen.getByTestId('folder-github-repo')).toHaveTextContent('gh:acme/rose-next'),
+    );
+  });
+
+  it('switch repo refusals show inline (403) and change nothing', async () => {
+    const folders = mockProjectsApi([roseFolder()]);
+    const repos = githubReposBackend(folders);
+    const user = userEvent.setup();
+    renderWithProviders(<Integrations />, { roseDesktop: false });
+    const form = await screen.findByRole('form', { name: "Switch a folder's repo" });
+    await user.selectOptions(
+      within(form).getByRole('combobox', { name: 'Folder to switch' }),
+      'p-rose',
+    );
+    await user.type(
+      within(form).getByRole('textbox', { name: 'New GitHub repository URL' }),
+      'https://github.com/private-org/secret',
+    );
+    await user.click(within(form).getByRole('button', { name: 'Switch repo' }));
+    expect(await within(form).findByRole('alert')).toHaveTextContent(
+      /cannot access this repository/,
+    );
+    expect(folders.projects[0].repoUrl).toBe(ROSE_URL);
+    expect(repos).toHaveLength(1);
+  });
+
+  it('folder settings "Switch repo in Integrations" opens the panel with that folder pre-selected', async () => {
+    mockProjectsApi([roseFolder(), websiteFolder()]);
+    const user = userEvent.setup();
+    renderWithProviders(sidebar());
+    await user.click(await screen.findByRole('button', { name: 'Rose folder settings' }));
+    await user.click(await screen.findByRole('button', { name: 'Switch repo in Integrations' }));
+    expect(screen.getByTestId('open-app')).toHaveTextContent('integrations');
+    // The Integrations drawer the link opened (whether its GitHub section was already
+    // mounted, via the focus event, or mounts after, via the stored deep link).
+    const form = await screen.findByRole(
+      'form',
+      { name: "Switch a folder's repo" },
+      { timeout: 5000 },
+    );
+    await waitFor(() =>
+      expect(within(form).getByRole('combobox', { name: 'Folder to switch' })).toHaveValue(
+        'p-rose',
+      ),
+    );
+    expect(within(form).getByTestId('switch-current-repo')).toHaveTextContent(
+      'gh:rose-ai-labs/rose',
+    );
+    expect(within(form).getByRole('textbox', { name: 'New GitHub repository URL' })).toBeVisible();
+    expect(sessionStorage.getItem('rose:integrations-section-focus')).toBeNull();
+  });
+
+  it('a deep link stored before the panel mounts pre-selects on mount', async () => {
+    mockProjectsApi([roseFolder(), websiteFolder()]);
+    focusIntegrationsSection(GITHUB_REPOS_SECTION_ID, { folderId: 'p-rose' });
+    expect(sessionStorage.getItem('rose:integrations-section-focus')).not.toBeNull();
+    renderWithProviders(<Integrations />, { roseDesktop: false });
+    const form = await screen.findByRole('form', { name: "Switch a folder's repo" });
+    await waitFor(() =>
+      expect(within(form).getByRole('combobox', { name: 'Folder to switch' })).toHaveValue(
+        'p-rose',
+      ),
+    );
+    expect(sessionStorage.getItem('rose:integrations-section-focus')).toBeNull();
+  });
+
+  it('pre-selects the folder when the Integrations panel is already open', async () => {
+    mockProjectsApi([roseFolder(), websiteFolder()]);
+    const user = userEvent.setup();
+    renderWithProviders(<Integrations />, { roseDesktop: false });
+    const form = await screen.findByRole('form', { name: "Switch a folder's repo" });
+    const picker = within(form).getByRole('combobox', { name: 'Folder to switch' });
+    expect(picker).toHaveValue('');
+    renderWithProviders(sidebar());
+    await user.click(await screen.findByRole('button', { name: 'Rose folder settings' }));
+    await user.click(await screen.findByRole('button', { name: 'Switch repo in Integrations' }));
+    await waitFor(() => expect(picker).toHaveValue('p-rose'));
+    expect(sessionStorage.getItem('rose:integrations-section-focus')).toBeNull();
   });
 });
 
@@ -321,7 +480,7 @@ describe('GitHub Repos on the Integrations panel', () => {
     await waitFor(() =>
       expect(screen.getByTestId('folder-github-repo')).toHaveTextContent('gh:acme/website'),
     );
-    expect(screen.getByRole('button', { name: 'Change in Integrations' })).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Switch repo in Integrations' })).toBeVisible();
   });
 
   it('disconnects a repo from its row', async () => {

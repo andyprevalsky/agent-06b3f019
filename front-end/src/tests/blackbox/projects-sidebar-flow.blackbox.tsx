@@ -119,7 +119,7 @@ it('shows the folder repo read-only in settings; a rename uses /api/folders, the
   // No repo editing here any more: connecting / changing it lives on the Integrations panel.
   expect(screen.queryByRole('textbox', { name: 'Repository URL' })).toBeNull();
   expect(screen.queryByRole('button', { name: 'Change' })).toBeNull();
-  expect(screen.getByRole('button', { name: 'Change in Integrations' })).toBeVisible();
+  expect(screen.getByRole('button', { name: 'Switch repo in Integrations' })).toBeVisible();
   fireEvent.change(screen.getByRole('textbox', { name: 'Folder name' }), {
     target: { value: 'Rose app' },
   });

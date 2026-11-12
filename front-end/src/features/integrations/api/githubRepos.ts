@@ -3,7 +3,8 @@
  *
  *   GET    /api/integrations/github/repos        -> { repos: GithubRepo[] } (includes repos
  *                                                  auto-imported from legacy project connections)
- *   POST   /api/integrations/github/repos        { repo_url, connected_rose_project_ref?, default_branch? }
+ *   POST   /api/integrations/github/repos        { repo_url, connected_rose_project_ref?, default_branch?,
+ *                                                  replace? (switch a folder that already has a repo) }
  *                                                -> 201 GithubRepo
  *   DELETE /api/integrations/github/repos/:ref   -> { disconnected: true, canonical_ref }
  *
@@ -34,6 +35,8 @@ export interface ConnectGithubRepoInput {
   repo_url: string;
   connected_rose_project_ref?: string | null;
   default_branch?: string;
+  /** Switch the folder to this repo even when it has another one (else 409). */
+  replace?: boolean;
 }
 
 /** A refused GitHub repo request; `message` is the inline text the panel shows. */

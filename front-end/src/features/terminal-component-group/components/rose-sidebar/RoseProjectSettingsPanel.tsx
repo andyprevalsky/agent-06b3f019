@@ -7,8 +7,8 @@
  *   [PRISTINE] --edit--> [DIRTY] --Save (PUT edited subset)--> [SAVING] --ok--> [PRISTINE]
  *                                                              --fail--> [DIRTY] + error
  *   [DIRTY] + timeout outside 1..3600 --> [INVALID] inline hint, Save disabled
- *   GitHub repo: read-only (GET /api/folders github_repo); "Connect / Change in
- *   Integrations" opens the Integrations panel, where repos are connected
+ *   GitHub repo: read-only (GET /api/folders github_repo); "Connect / Switch repo
+ *   in Integrations" opens the Integrations panel, where repos are connected
  *
  * Sections (Rose light styles): GitHub repo (connected repo, read-only, + link
  * to Integrations; default branch, GitHub "Connected"/"Not connected" — never
@@ -47,13 +47,16 @@ function formatSyncedAt(iso: string): string {
   return new Date(iso).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
 }
 
-/** Opens the Integrations panel at its GitHub Repos section; null outside the apps provider. */
-function useOpenIntegrations(): (() => void) | null {
+/**
+ * Opens the Integrations panel at its GitHub Repos section with this folder
+ * pre-selected for switching; null outside the apps provider.
+ */
+function useOpenIntegrations(folderId: string): (() => void) | null {
   const apps = useRoseApps();
   if (apps === null) return null;
   return () => {
     if (apps.openApp !== 'integrations') apps.toggleApp('integrations');
-    focusIntegrationsSection(GITHUB_REPOS_SECTION_ID);
+    focusIntegrationsSection(GITHUB_REPOS_SECTION_ID, { folderId });
   };
 }
 
@@ -74,8 +77,8 @@ function GithubRepoSection({
   const folderRepo = useFolderGithubRepo(project.id);
   // While (or if) the folders list cannot load, the project row's repo stands in.
   const repoUrl = folderRepo === undefined ? project.repoUrl : (folderRepo?.repo_url ?? null);
-  const openIntegrations = useOpenIntegrations();
-  const linkLabel = repoUrl === null ? 'Connect in Integrations' : 'Change in Integrations';
+  const openIntegrations = useOpenIntegrations(project.id);
+  const linkLabel = repoUrl === null ? 'Connect in Integrations' : 'Switch repo in Integrations';
   return (
     <section aria-label="GitHub repo">
       <h3 className={H3}>GitHub repo</h3>

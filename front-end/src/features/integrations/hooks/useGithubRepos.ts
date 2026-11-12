@@ -7,6 +7,9 @@
  *     --201--> [READY] (list, folders and projects refetched) | inline connect error
  *             (403 access denied, 409 folder has another repo, 404 folder gone,
  *              400 not a GitHub URL, 503 rate limited)
+ *   [READY] --switchRepo(folder, repo_url)--> [SWITCHING] (POST ... replace: true: the
+ *     folder's old repo stays connected, unassociated) --201--> [READY] (refetched)
+ *     | inline switch error
  *   [READY] --disconnect(ref)--> [DISCONNECTING ref] --done--> [READY] (refetched)
  *                                                    --fail--> inline error on the list
  *
@@ -62,6 +65,15 @@ export function useGithubRepos(enabled: boolean) {
     mutationFn: (input: ConnectGithubRepoInput) => connectGithubRepoApi(input),
     onSuccess: refetchAll,
   });
+  const switchMutation = useMutation({
+    mutationFn: ({ folderId, repoUrl }: { folderId: string; repoUrl: string }) =>
+      connectGithubRepoApi({
+        repo_url: repoUrl,
+        connected_rose_project_ref: folderId,
+        replace: true,
+      }),
+    onSuccess: refetchAll,
+  });
   const disconnectMutation = useMutation({
     mutationFn: (canonicalRef: string) => disconnectGithubRepoApi(canonicalRef),
     onMutate: (canonicalRef) => setDisconnectingRef(canonicalRef),
@@ -93,5 +105,17 @@ export function useGithubRepos(enabled: boolean) {
       disconnectMutation.mutate(canonicalRef);
     },
     clearConnectError: () => connectMutation.reset(),
+    switching: switchMutation.isPending,
+    switchError: message(switchMutation.error),
+    /** Point a folder that already has a repo at another one; resolves true on success. */
+    switchRepo: async (folderId: string, repoUrl: string): Promise<boolean> => {
+      try {
+        await switchMutation.mutateAsync({ folderId, repoUrl });
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    clearSwitchError: () => switchMutation.reset(),
   };
 }

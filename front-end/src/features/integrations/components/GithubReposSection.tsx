@@ -4,8 +4,11 @@
  *   [LOADING] --> [LISTED] connected repos, each with its folder (if any), a
  *     "connected project" (auto-imported, e.g. the Rose repo: no reconnect
  *     needed) or "manual" badge, and ×
- *   folder settings' "Connect / Change in Integrations" --> panel opens scrolled
- *     to this section (lib/integrationsSection.ts)
+ *   folder settings' "Connect / Switch repo in Integrations" --> panel opens scrolled
+ *     to this section with that folder pre-selected (lib/integrationsSection.ts)
+ *   [LISTED] --Switch repo: folder that has a repo + new repo URL--> [SWITCHING]
+ *     (POST replace: true; the old repo stays connected, unassociated)
+ *     --ok--> [LISTED] (folder shows the new repo) | --refused--> inline error
  *   [LISTED] --repo URL (+ optional folder) · Connect--> [CONNECTING]
  *     --ok--> [LISTED] (form cleared) | --refused--> [LISTED] + inline error
  *   [LISTED] --× on a repo--> [DISCONNECTING] --done--> [LISTED] | inline error
@@ -18,7 +21,12 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { Github, Loader2, Plus, X } from 'lucide-react';
 
-import { GITHUB_REPOS_SECTION_ID, takeIntegrationsSectionFocus } from '@/lib/integrationsSection';
+import {
+  GITHUB_REPOS_SECTION_ID,
+  INTEGRATIONS_SECTION_FOCUS_EVENT,
+  takeIntegrationsSectionFocus,
+  type IntegrationsSectionFocus,
+} from '@/lib/integrationsSection';
 
 import type { useGithubRepos } from '../hooks/useGithubRepos';
 
@@ -139,14 +147,106 @@ function SourceBadge({ source }: { source: string }) {
   );
 }
 
+/** Switch a folder that already has a repo to another one (connect with replace). */
+function SwitchRepoForm({
+  github,
+  folderId,
+  onFolderChange,
+}: GithubReposSectionProps & { folderId: string; onFolderChange: (id: string) => void }) {
+  const [repoUrl, setRepoUrl] = useState('');
+  const withRepo = github.folders.filter((folder) => folder.github_repo !== null);
+  const selected = withRepo.find((folder) => folder.id === folderId) ?? null;
+  if (withRepo.length === 0) return null;
+  const submit = async (event: FormEvent) => {
+    event.preventDefault();
+    const url = repoUrl.trim();
+    if (selected === null || url === '') return;
+    if (await github.switchRepo(selected.id, url)) setRepoUrl('');
+  };
+  const inputClass =
+    'h-9 min-w-0 rounded-lg border border-border bg-background px-3 text-sm outline-none focus:border-foreground/40';
+  return (
+    <form
+      aria-label="Switch a folder's repo"
+      onSubmit={(e) => void submit(e)}
+      className="flex flex-col gap-2 border-t border-border p-4"
+    >
+      <div className="flex flex-wrap items-center gap-2">
+        <select
+          aria-label="Folder to switch"
+          value={selected?.id ?? NO_FOLDER}
+          onChange={(e) => {
+            onFolderChange(e.target.value);
+            github.clearSwitchError();
+          }}
+          className={`${inputClass} max-w-[12rem]`}
+        >
+          <option value={NO_FOLDER}>Switch a folder's repo…</option>
+          {withRepo.map((folder) => (
+            <option key={folder.id} value={folder.id}>
+              {folder.name}
+            </option>
+          ))}
+        </select>
+        {selected !== null && (
+          <>
+            <input
+              aria-label="New GitHub repository URL"
+              placeholder="https://github.com/owner/repo"
+              value={repoUrl}
+              onChange={(e) => {
+                setRepoUrl(e.target.value);
+                github.clearSwitchError();
+              }}
+              aria-invalid={github.switchError !== null}
+              className={`${inputClass} flex-1`}
+            />
+            <button
+              type="submit"
+              aria-label="Switch repo"
+              disabled={github.switching || repoUrl.trim() === ''}
+              className="flex h-9 items-center gap-1.5 rounded-lg bg-foreground px-3 text-sm font-medium text-background hover:bg-foreground/90 disabled:opacity-60"
+            >
+              {github.switching && <Loader2 className="h-4 w-4 animate-spin" />}
+              Switch repo
+            </button>
+          </>
+        )}
+      </div>
+      {selected?.github_repo != null && (
+        <p data-testid="switch-current-repo" className="text-xs text-muted-foreground">
+          {selected.name} uses {selected.github_repo.canonical_ref}. Its old repo stays connected.
+        </p>
+      )}
+      {github.switchError !== null && (
+        <p role="alert" className="text-xs text-destructive">
+          {github.switchError}
+        </p>
+      )}
+    </form>
+  );
+}
+
 export default function GithubReposSection({ github }: GithubReposSectionProps) {
   const folderName = (id: string | null) =>
     id === null ? null : (github.folders.find((folder) => folder.id === id)?.name ?? null);
   const sectionRef = useRef<HTMLElement>(null);
+  const [switchFolderId, setSwitchFolderId] = useState(NO_FOLDER);
   useEffect(() => {
-    // Folder settings' "Connect / Change in Integrations" opened the panel here.
-    if (takeIntegrationsSectionFocus(GITHUB_REPOS_SECTION_ID))
+    // Folder settings' "Connect / Switch repo in Integrations" opened the panel here.
+    const pending = takeIntegrationsSectionFocus(GITHUB_REPOS_SECTION_ID);
+    if (pending !== null) {
       sectionRef.current?.scrollIntoView?.({ block: 'start' });
+      if (pending.folderId !== null) setSwitchFolderId(pending.folderId);
+    }
+    // ... or asked again while the panel is already open.
+    const onFocus = (event: Event) => {
+      const focus = (event as CustomEvent<IntegrationsSectionFocus>).detail;
+      if (focus.sectionId === GITHUB_REPOS_SECTION_ID && focus.folderId !== null)
+        setSwitchFolderId(focus.folderId);
+    };
+    window.addEventListener(INTEGRATIONS_SECTION_FOCUS_EVENT, onFocus);
+    return () => window.removeEventListener(INTEGRATIONS_SECTION_FOCUS_EVENT, onFocus);
   }, []);
   return (
     <section
@@ -220,6 +320,11 @@ export default function GithubReposSection({ github }: GithubReposSectionProps) 
           {github.disconnectError}
         </p>
       )}
+      <SwitchRepoForm
+        github={github}
+        folderId={switchFolderId}
+        onFolderChange={setSwitchFolderId}
+      />
       <ConnectForm github={github} />
     </section>
   );
