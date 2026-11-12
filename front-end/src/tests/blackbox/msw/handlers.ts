@@ -7,6 +7,18 @@ import { http, HttpResponse } from 'msw';
 
 const API_BASE = 'http://localhost:3001/api';
 
+function folderDto(params: Record<string, unknown>) {
+  return {
+    id: String(params.id ?? 'folder-1'),
+    name: 'Folder',
+    legacy_project_id: String(params.id ?? 'folder-1'),
+    subfolders: [],
+    github_repo: null,
+    created_at: '2026-11-12T00:00:00.000Z',
+    updated_at: '2026-11-12T00:00:00.000Z',
+  };
+}
+
 export const handlers = [
   // Per-user UI: stock UI (nothing published) unless a test overrides it.
   http.get(`${API_BASE}/user-ui/active`, () => HttpResponse.json({ versionId: null })),
@@ -14,6 +26,28 @@ export const handlers = [
   // Rose Desktop left bar groups agents by project; none unless a test overrides.
   http.get(`${API_BASE}/projects`, () => HttpResponse.json({ projects: [] })),
   http.get(`${API_BASE}/folders`, () => HttpResponse.json({ folders: [] })),
+  // Folders are project aliases: create/rename take { name } only, never a repo.
+  http.post(`${API_BASE}/folders`, async ({ request }) => {
+    const body = (await request.json()) as Record<string, unknown>;
+    const name = typeof body.name === 'string' ? body.name : '';
+    if (Object.keys(body).some((key) => key !== 'name') || name === '')
+      return HttpResponse.json({ error: 'Invalid body' }, { status: 400 });
+    return HttpResponse.json(
+      {
+        id: 'folder-1',
+        name,
+        legacy_project_id: 'folder-1',
+        subfolders: [],
+        github_repo: null,
+        created_at: '2026-11-12T00:00:00.000Z',
+        updated_at: '2026-11-12T00:00:00.000Z',
+      },
+      { status: 201 },
+    );
+  }),
+  http.get(`${API_BASE}/folders/:id`, ({ params }) => HttpResponse.json(folderDto(params))),
+  http.patch(`${API_BASE}/folders/:id`, ({ params }) => HttpResponse.json(folderDto(params))),
+  http.delete(`${API_BASE}/folders/:id`, () => new HttpResponse(null, { status: 204 })),
   // Project settings mints a one-time `rose agent-init` code on open.
   http.post(`${API_BASE}/projects/cli-login-codes`, () =>
     HttpResponse.json(
@@ -31,6 +65,18 @@ export const handlers = [
   http.get(`${API_BASE}/integrations`, () => HttpResponse.json({ integrations: [] })),
   http.get(`${API_BASE}/integrations/plaid/items`, () => HttpResponse.json({ items: [] })),
   http.get(`${API_BASE}/integrations/github/repos`, () => HttpResponse.json({ repos: [] })),
+  http.post(`${API_BASE}/integrations/github/repos`, () =>
+    HttpResponse.json(
+      { error: 'GITHUB_ACCESS_DENIED', message: 'No default GitHub repo mock' },
+      { status: 403 },
+    ),
+  ),
+  http.delete(`${API_BASE}/integrations/github/repos/:ref`, () =>
+    HttpResponse.json(
+      { error: 'GITHUB_REPO_NOT_CONNECTED', message: 'Repo not connected' },
+      { status: 404 },
+    ),
+  ),
   http.get(`${API_BASE}/integrations/granola`, () =>
     HttpResponse.json({
       connected: false,

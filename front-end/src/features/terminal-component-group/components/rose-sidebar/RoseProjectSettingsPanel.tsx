@@ -23,6 +23,7 @@
  */
 
 import { MAX_STARTUP_TIMEOUT_S, MIN_STARTUP_TIMEOUT_S, type Project } from '@/lib/api/projects';
+import { GITHUB_REPOS_SECTION_ID, focusIntegrationsSection } from '@/lib/integrationsSection';
 import { cn } from '@/lib/utils';
 
 import { useRoseApps } from '../rose-apps/roseAppsState';
@@ -46,12 +47,13 @@ function formatSyncedAt(iso: string): string {
   return new Date(iso).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
 }
 
-/** Opens the Integrations panel (Rose Desktop apps); null outside the apps provider. */
+/** Opens the Integrations panel at its GitHub Repos section; null outside the apps provider. */
 function useOpenIntegrations(): (() => void) | null {
   const apps = useRoseApps();
   if (apps === null) return null;
   return () => {
     if (apps.openApp !== 'integrations') apps.toggleApp('integrations');
+    focusIntegrationsSection(GITHUB_REPOS_SECTION_ID);
   };
 }
 

@@ -1,9 +1,11 @@
 /**
  * STATE MACHINE: GithubReposSection (state in useGithubRepos)
  *
- *   [LOADING] --> [LISTED] connected repos, each with its folder (if any) and ×
- *     (repos auto-imported from a project, such as the Rose repo, are listed
- *      as-is: no reconnect needed)
+ *   [LOADING] --> [LISTED] connected repos, each with its folder (if any), a
+ *     "connected project" (auto-imported, e.g. the Rose repo: no reconnect
+ *     needed) or "manual" badge, and ×
+ *   folder settings' "Connect / Change in Integrations" --> panel opens scrolled
+ *     to this section (lib/integrationsSection.ts)
  *   [LISTED] --repo URL (+ optional folder) · Connect--> [CONNECTING]
  *     --ok--> [LISTED] (form cleared) | --refused--> [LISTED] + inline error
  *   [LISTED] --× on a repo--> [DISCONNECTING] --done--> [LISTED] | inline error
@@ -13,8 +15,10 @@
  * check the repo out). Folder settings show that association read-only.
  */
 
-import { useState, type FormEvent } from 'react';
+import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { Github, Loader2, Plus, X } from 'lucide-react';
+
+import { GITHUB_REPOS_SECTION_ID, takeIntegrationsSectionFocus } from '@/lib/integrationsSection';
 
 import type { useGithubRepos } from '../hooks/useGithubRepos';
 
@@ -113,11 +117,41 @@ function ConnectForm({ github }: GithubReposSectionProps) {
   );
 }
 
+/** Auto-imported from a project's legacy GitHub connection vs connected on this panel. */
+function SourceBadge({ source }: { source: string }) {
+  const imported = source === 'legacy_project';
+  return (
+    <span
+      data-testid="github-repo-source"
+      title={
+        imported
+          ? 'Imported from a folder that was already connected to GitHub'
+          : 'Connected on this panel'
+      }
+      className={`shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-medium ${
+        imported
+          ? 'bg-blue-500/10 text-blue-600 dark:text-blue-400'
+          : 'bg-muted text-muted-foreground'
+      }`}
+    >
+      {imported ? 'connected project' : 'manual'}
+    </span>
+  );
+}
+
 export default function GithubReposSection({ github }: GithubReposSectionProps) {
   const folderName = (id: string | null) =>
     id === null ? null : (github.folders.find((folder) => folder.id === id)?.name ?? null);
+  const sectionRef = useRef<HTMLElement>(null);
+  useEffect(() => {
+    // Folder settings' "Connect / Change in Integrations" opened the panel here.
+    if (takeIntegrationsSectionFocus(GITHUB_REPOS_SECTION_ID))
+      sectionRef.current?.scrollIntoView?.({ block: 'start' });
+  }, []);
   return (
     <section
+      ref={sectionRef}
+      id={GITHUB_REPOS_SECTION_ID}
       aria-label="GitHub Repos"
       className="rounded-lg border border-border bg-card/60 overflow-hidden"
     >
@@ -147,17 +181,19 @@ export default function GithubReposSection({ github }: GithubReposSectionProps) 
                 className="flex items-center justify-between gap-3 px-4 py-2.5 text-sm"
               >
                 <div className="flex min-w-0 flex-col">
-                  <a
-                    href={repo.repo_url}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="truncate font-medium hover:underline"
-                  >
-                    {label}
-                  </a>
+                  <div className="flex min-w-0 items-center gap-2">
+                    <a
+                      href={repo.repo_url}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="truncate font-medium hover:underline"
+                    >
+                      {label}
+                    </a>
+                    <SourceBadge source={repo.source} />
+                  </div>
                   <span className="truncate text-xs text-muted-foreground">
                     {folder !== null ? `Folder: ${folder}` : 'No folder'} · {repo.default_branch}
-                    {repo.source === 'legacy_project' ? ' · imported from a project' : ''}
                   </span>
                 </div>
                 <button

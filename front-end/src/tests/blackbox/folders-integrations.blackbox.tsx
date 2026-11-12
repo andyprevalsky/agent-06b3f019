@@ -175,6 +175,7 @@ function websiteFolder() {
 
 beforeEach(() => {
   localStorage.clear();
+  sessionStorage.clear();
   mockSession();
   clearCaptures();
 });
@@ -242,6 +243,21 @@ describe('Folders in the left bar', () => {
     expect(screen.getByTestId('open-app')).toHaveTextContent('none');
     await user.click(within(section).getByRole('button', { name: 'Connect in Integrations' }));
     expect(screen.getByTestId('open-app')).toHaveTextContent('integrations');
+    // The panel opens at its GitHub Repos section (deep link consumed on mount).
+    const scrolled = vi.fn();
+    Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', {
+      configurable: true,
+      value: scrolled,
+    });
+    try {
+      renderWithProviders(<Integrations />, { roseDesktop: false });
+      const github = await screen.findByRole('region', { name: 'GitHub Repos' });
+      await waitFor(() => expect(scrolled).toHaveBeenCalled());
+      expect(scrolled.mock.contexts[0]).toBe(github);
+      expect(sessionStorage.getItem('rose:integrations-section-focus')).toBeNull();
+    } finally {
+      delete (HTMLElement.prototype as { scrollIntoView?: unknown }).scrollIntoView;
+    }
   });
 });
 
@@ -254,7 +270,7 @@ describe('GitHub Repos on the Integrations panel', () => {
     const list = await within(section).findByRole('list', { name: 'Connected GitHub repos' });
     expect(within(list).getByText('rose-ai-labs/rose')).toBeVisible();
     await waitFor(() => expect(list).toHaveTextContent('Folder: Rose'));
-    expect(list).toHaveTextContent('imported from a project');
+    expect(within(list).getByTestId('github-repo-source')).toHaveTextContent('connected project');
     expect(requests('POST', '/integrations/github/repos')).toHaveLength(0);
   });
 
@@ -283,6 +299,11 @@ describe('GitHub Repos on the Integrations panel', () => {
     const list = within(section).getByRole('list', { name: 'Connected GitHub repos' });
     await waitFor(() => expect(list).toHaveTextContent('acme/website'));
     expect(list).toHaveTextContent('Folder: Website');
+    expect(
+      within(list)
+        .getAllByTestId('github-repo-source')
+        .map((b) => b.textContent),
+    ).toEqual(['connected project', 'manual']);
     expect(within(section).getByRole('textbox', { name: 'GitHub repository URL' })).toHaveValue('');
     expect(within(section).queryByRole('alert')).toBeNull();
     expect(repos).toHaveLength(2);
@@ -362,6 +383,20 @@ describe('GitHub Repos on the Integrations panel', () => {
     // Editing the URL clears the error.
     await user.type(input, 'x');
     expect(within(section).queryByRole('alert')).toBeNull();
+  });
+
+  it('shows 404 not connected inline when a repo was already disconnected elsewhere', async () => {
+    const folders = mockProjectsApi([roseFolder()]);
+    const repos = githubReposBackend(folders);
+    const user = userEvent.setup();
+    renderWithProviders(<Integrations />, { roseDesktop: false });
+    const list = await screen.findByRole('list', { name: 'Connected GitHub repos' });
+    repos.splice(0, repos.length); // disconnected in another tab
+    await user.click(within(list).getByRole('button', { name: 'Disconnect rose-ai-labs/rose' }));
+    const section = screen.getByRole('region', { name: 'GitHub Repos' });
+    expect(await within(section).findByRole('alert')).toHaveTextContent(
+      'This repository is not connected.',
+    );
   });
 
   it('shows the section in the Rose Desktop list too', async () => {
