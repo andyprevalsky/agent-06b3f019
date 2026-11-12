@@ -25,6 +25,7 @@ import type { useMessagesSync } from '../hooks/useMessagesSync';
 import type { usePasswordSync } from '../hooks/usePasswordSync';
 import type { usePlaidIntegration } from '../hooks/usePlaidIntegration';
 import type { useGranola } from '../hooks/useGranola';
+import type { useGithubRepos } from '../hooks/useGithubRepos';
 import BrowserIcon from './BrowserIcon';
 import { BrowserCookiesIcon } from './BrowserCookiesSection';
 import type {
@@ -81,6 +82,7 @@ export interface DesktopIntegrationsProps {
   actions: ReturnType<typeof useIntegrationActions>;
   plaid: ReturnType<typeof usePlaidIntegration>;
   granola: ReturnType<typeof useGranola>;
+  github: ReturnType<typeof useGithubRepos>;
 }
 
 export interface DesktopSectionView {

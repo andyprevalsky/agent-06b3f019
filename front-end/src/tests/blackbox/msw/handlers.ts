@@ -13,6 +13,7 @@ export const handlers = [
   http.get(`${API_BASE}/user-ui/versions`, () => HttpResponse.json({ versions: [] })),
   // Rose Desktop left bar groups agents by project; none unless a test overrides.
   http.get(`${API_BASE}/projects`, () => HttpResponse.json({ projects: [] })),
+  http.get(`${API_BASE}/folders`, () => HttpResponse.json({ folders: [] })),
   // Project settings mints a one-time `rose agent-init` code on open.
   http.post(`${API_BASE}/projects/cli-login-codes`, () =>
     HttpResponse.json(
@@ -29,6 +30,7 @@ export const handlers = [
   // Rose Desktop Integrations icon reads integration health; nothing connected by default.
   http.get(`${API_BASE}/integrations`, () => HttpResponse.json({ integrations: [] })),
   http.get(`${API_BASE}/integrations/plaid/items`, () => HttpResponse.json({ items: [] })),
+  http.get(`${API_BASE}/integrations/github/repos`, () => HttpResponse.json({ repos: [] })),
   http.get(`${API_BASE}/integrations/granola`, () =>
     HttpResponse.json({
       connected: false,

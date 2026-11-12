@@ -4,6 +4,8 @@
  * [MOUNTED] --> renders each section card delegating to domain hooks.
  *
  * Granola: GranolaSection over the page's useGranola (API key, sync, disconnect).
+ * GitHub Repos (signed in, before "Other"): GithubReposSection over useGithubRepos
+ * (list incl. auto-imported repos, connect with an optional folder, disconnect).
  * "Other" (last): Granola, then Pebble Index 01, whose plus opens the guided
  * setup modal (state owned by Integrations).
  *
@@ -21,6 +23,7 @@ import type { useGmailConnect } from '../hooks/useGmailConnect';
 import type { useIntegrationActions } from '../hooks/useIntegrationActions';
 import type { usePlaidIntegration } from '../hooks/usePlaidIntegration';
 import type { useGranola } from '../hooks/useGranola';
+import type { useGithubRepos } from '../hooks/useGithubRepos';
 
 import BrowserCookiesSection from './BrowserCookiesSection';
 import PasswordsSection from './PasswordsSection';
@@ -30,6 +33,7 @@ import SocialsSection from './SocialsSection';
 import PlaidSection from './PlaidSection';
 import FileSystemSection from './FileSystemSection';
 import GranolaSection from './GranolaSection';
+import GithubReposSection from './GithubReposSection';
 import PebbleIndexSection from './PebbleIndexSection';
 
 interface IntegrationSectionsProps {
@@ -52,6 +56,7 @@ interface IntegrationSectionsProps {
   actions: ReturnType<typeof useIntegrationActions>;
   plaid: ReturnType<typeof usePlaidIntegration>;
   granola: ReturnType<typeof useGranola>;
+  github: ReturnType<typeof useGithubRepos>;
 }
 
 function PlaidIntegrationSection({ plaid }: Pick<IntegrationSectionsProps, 'plaid'>) {
@@ -227,6 +232,7 @@ export default function IntegrationSections({
   actions,
   plaid,
   granola,
+  github,
 }: IntegrationSectionsProps) {
   return (
     <>
@@ -280,6 +286,8 @@ export default function IntegrationSections({
       />
 
       <FileSystemSection isAvailable={isFileSystemAvailable} />
+
+      {isFullySignedIn && <GithubReposSection github={github} />}
 
       <OtherSection
         isFullySignedIn={isFullySignedIn}

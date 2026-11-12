@@ -3,8 +3,9 @@
  *
  *   [MOUNTED] → flat sections in the existing order:
  *     Browser Cookies · Passwords · Messages · Compute · Banks & Financial Accounts
- *     · Socials · File System · Other (Granola; Pebble Index 01, whose Connect opens
- *     its setup modal)
+ *     · Socials · File System · GitHub Repos (signed in; GithubReposSection: connect
+ *     with an optional folder, disconnect) · Other (Granola; Pebble Index 01, whose
+ *     Connect opens its setup modal)
  *   Every integration row is a DesktopIntegrationRow: the stock app-icon tile, the
  *   row's ONE account chip (Gmail addresses, Plaid institutions and compute
  *   subscriptions keep listing several, as the stock page does) and a gradient
@@ -26,7 +27,7 @@
  *   Connect / "+ Add account" call the same hooks/actions the stock sections use.
  */
 
-import { useMemo, type ReactNode } from 'react';
+import { Fragment, useMemo, type ReactNode } from 'react';
 
 import { mergeAccountsByProvider } from '../hooks/integrationAccounts';
 import { useIntegrationRemoval } from '../hooks/useIntegrationRemoval';
@@ -36,6 +37,7 @@ import {
   useSyncRefresh,
 } from '../hooks/useSyncProgress';
 import DesktopComputeRow from './DesktopComputeRow';
+import GithubReposSection from './GithubReposSection';
 import { type DesktopIntegrationsProps, desktopSectionViews } from './desktopSectionViews';
 import DesktopIntegrationRow, {
   DesktopSectionHeader,
@@ -87,29 +89,36 @@ export default function DesktopIntegrations(props: DesktopIntegrationsProps) {
           </p>
         )}
         {sections.map(({ title, rows }) => (
-          <Section key={title} title={title}>
-            {title === 'Compute' && (
-              <>
-                <DesktopComputeRow
-                  provider="claude"
-                  isAvailable={props.isClaudeCodeAvailable}
-                  legacyRow={legacy('claude_code')}
-                  localSyncing={compute.claudeCodeSyncLoading}
-                  removal={removalPort}
-                />
-                <DesktopComputeRow
-                  provider="codex"
-                  isAvailable={props.isGptCodeAvailable}
-                  legacyRow={legacy('gpt_code')}
-                  localSyncing={compute.gptCodeSyncLoading}
-                  removal={removalPort}
-                />
-              </>
+          <Fragment key={title}>
+            {title === 'Other' && props.isFullySignedIn && (
+              <div className="my-3">
+                <GithubReposSection github={props.github} />
+              </div>
             )}
-            {rows.map((view) => (
-              <DesktopIntegrationRow key={view.key} view={view} />
-            ))}
-          </Section>
+            <Section title={title}>
+              {title === 'Compute' && (
+                <>
+                  <DesktopComputeRow
+                    provider="claude"
+                    isAvailable={props.isClaudeCodeAvailable}
+                    legacyRow={legacy('claude_code')}
+                    localSyncing={compute.claudeCodeSyncLoading}
+                    removal={removalPort}
+                  />
+                  <DesktopComputeRow
+                    provider="codex"
+                    isAvailable={props.isGptCodeAvailable}
+                    legacyRow={legacy('gpt_code')}
+                    localSyncing={compute.gptCodeSyncLoading}
+                    removal={removalPort}
+                  />
+                </>
+              )}
+              {rows.map((view) => (
+                <DesktopIntegrationRow key={view.key} view={view} />
+              ))}
+            </Section>
+          </Fragment>
         ))}
       </div>
       <RemoveAccountDialog

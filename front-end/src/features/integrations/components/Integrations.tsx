@@ -51,6 +51,7 @@ import {
 } from '../hooks';
 import { usePlaidIntegration } from '../hooks/usePlaidIntegration';
 import { useGranola } from '../hooks/useGranola';
+import { useGithubRepos } from '../hooks/useGithubRepos';
 
 import DesktopIntegrations from './DesktopIntegrations';
 import IntegrationModals from './IntegrationModals';
@@ -167,9 +168,10 @@ export default function Integrations() {
 function IntegrationSectionsSwitch({
   accordion,
   ...rest
-}: Omit<React.ComponentProps<typeof IntegrationSections>, 'granola'>) {
+}: Omit<React.ComponentProps<typeof IntegrationSections>, 'granola' | 'github'>) {
   const granola = useGranola(rest.isFullySignedIn, rest.data.fetchIntegrations);
-  const props = { ...rest, granola };
+  const github = useGithubRepos(rest.isFullySignedIn);
+  const props = { ...rest, granola, github };
   if (useRoseDesktop()) return <DesktopIntegrations {...props} />;
   return <IntegrationSections accordion={accordion} {...props} />;
 }
