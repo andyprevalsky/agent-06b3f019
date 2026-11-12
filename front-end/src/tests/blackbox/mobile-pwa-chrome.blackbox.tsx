@@ -43,6 +43,9 @@ import type { Agent, AgentDetail } from '@/lib/api';
 
 import { renderWithProviders } from './test-wrapper';
 
+// Deliberate wait (not synchronization): outlast the 700ms long-press timer, then assert nothing opened.
+const PAST_LONG_PRESS_MS = 900;
+
 const PHONE = { width: 430, height: 932 };
 const EDGE = 8;
 
@@ -348,7 +351,7 @@ describe('Long-press on iOS', () => {
     const row = screen.getByTestId('row');
     fireEvent.pointerDown(row, { pointerType: 'touch', clientX: 216, clientY: 300 });
     fireEvent.pointerMove(row, { pointerType: 'touch', clientX: 216, clientY: 330 });
-    await new Promise((resolve) => setTimeout(resolve, 900));
+    await new Promise((resolve) => setTimeout(resolve, PAST_LONG_PRESS_MS));
     expect(screen.queryByTestId('menu')).not.toBeInTheDocument();
   });
 });
@@ -375,7 +378,7 @@ describe('Native long-press contextmenu on Android', () => {
     fireEvent.contextMenu(row, { clientX: 216, clientY: 300 });
     await screen.findByTestId('menu');
     // Past the 700ms long-press timer: no second, re-anchoring open.
-    await new Promise((resolve) => setTimeout(resolve, 900));
+    await new Promise((resolve) => setTimeout(resolve, PAST_LONG_PRESS_MS));
     const left = row.getBoundingClientRect().left;
     expect(opens).toEqual([[left + EDGE, 300]]);
   });

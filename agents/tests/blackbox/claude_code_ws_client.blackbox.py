@@ -14,6 +14,10 @@ from _test_utils import (
 )
 
 
+# Deliberate delay (not synchronization): the server starts this long after the client begins retrying.
+SERVER_LATE_START_S = 0.3
+
+
 def _make_client(**overrides):
     """Helper: build a client with minimal stub callbacks."""
     from helpers.claude_code_ws_client import ClaudeCodeWsClient
@@ -791,7 +795,8 @@ async def test_connect_with_retry_reaches_a_sandbox_that_comes_up_late():
     await runner.setup()
 
     async def start_late():
-        await asyncio.sleep(0.3)
+        # Simulates a sandbox whose WebSocket server comes up after the first connect attempts.
+        await asyncio.sleep(SERVER_LATE_START_S)
         await web.TCPSite(runner, "127.0.0.1", port).start()
 
     client = _make_client(ws_url=f"ws://127.0.0.1:{port}", reconnect_delay=0.1)
