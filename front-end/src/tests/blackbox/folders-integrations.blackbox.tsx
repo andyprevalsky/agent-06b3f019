@@ -292,6 +292,12 @@ describe('Folders in the left bar', () => {
       expect(await within(github).findByRole('combobox', { name: 'Folder to switch' })).toHaveValue(
         '',
       );
+      // ... and the connect form connects into this folder.
+      await waitFor(() =>
+        expect(within(github).getByRole('combobox', { name: 'Folder (optional)' })).toHaveValue(
+          'p-site',
+        ),
+      );
     } finally {
       delete (HTMLElement.prototype as { scrollIntoView?: unknown }).scrollIntoView;
     }
@@ -427,6 +433,33 @@ describe("Switching a folder's repo", () => {
     await user.click(await screen.findByRole('button', { name: 'Switch repo in Integrations' }));
     await waitFor(() => expect(picker).toHaveValue('p-rose'));
     expect(sessionStorage.getItem('rose:integrations-section-focus')).toBeNull();
+  });
+
+  it('a folder without a repo is pre-selected in the connect form, and the connect uses it', async () => {
+    const folders = mockProjectsApi([roseFolder(), websiteFolder()]);
+    githubReposBackend(folders);
+    const user = userEvent.setup();
+    renderWithProviders(<Integrations />, { roseDesktop: false });
+    const section = await screen.findByRole('region', { name: 'GitHub Repos' });
+    const connectPicker = within(section).getByRole('combobox', { name: 'Folder (optional)' });
+    await waitFor(() =>
+      expect(within(connectPicker).getByRole('option', { name: 'Website' })).toBeTruthy(),
+    );
+    expect(connectPicker).toHaveValue('');
+    renderWithProviders(sidebar());
+    await user.click(await screen.findByRole('button', { name: 'Website folder settings' }));
+    await user.click(await screen.findByRole('button', { name: 'Connect in Integrations' }));
+    await waitFor(() => expect(connectPicker).toHaveValue('p-site'));
+    await user.type(
+      within(section).getByRole('textbox', { name: 'GitHub repository URL' }),
+      'https://github.com/acme/website',
+    );
+    await user.click(within(section).getByRole('button', { name: 'Connect GitHub repo' }));
+    await waitFor(() => expect(requests('POST', '/integrations/github/repos')).toHaveLength(1));
+    expect(requests('POST', '/integrations/github/repos')[0].body).toEqual({
+      repo_url: 'https://github.com/acme/website',
+      connected_rose_project_ref: 'p-site',
+    });
   });
 });
 

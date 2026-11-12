@@ -5,7 +5,9 @@
  *     "connected project" (auto-imported, e.g. the Rose repo: no reconnect
  *     needed) or "manual" badge, and ×
  *   folder settings' "Connect / Switch repo in Integrations" --> panel opens scrolled
- *     to this section with that folder pre-selected (lib/integrationsSection.ts)
+ *     to this section with that folder pre-selected (lib/integrationsSection.ts):
+ *     a folder that has a repo in "Switch a folder's repo", a folder without one
+ *     in the connect form's folder picker (once the folders list has loaded)
  *   [LISTED] --Switch repo: folder that has a repo + new repo URL--> [SWITCHING]
  *     (POST replace: true; the old repo stays connected, unassociated)
  *     --ok--> [LISTED] (folder shows the new repo) | --refused--> inline error
@@ -36,6 +38,12 @@ interface GithubReposSectionProps {
 
 const NO_FOLDER = '';
 
+/** A folder the panel was asked to focus; `nonce` counts each request. */
+interface FolderFocus {
+  folderId: string;
+  nonce: number;
+}
+
 export function GithubReposIcon() {
   return (
     <div className="flex h-full w-full items-center justify-center rounded-lg bg-[#24292f] text-white">
@@ -51,9 +59,19 @@ function detailText(github: GithubReposSectionProps['github']): string {
   return `${count} repo${count === 1 ? '' : 's'} connected`;
 }
 
-function ConnectForm({ github }: GithubReposSectionProps) {
+function ConnectForm({ github, focus }: GithubReposSectionProps & { focus: FolderFocus | null }) {
   const [repoUrl, setRepoUrl] = useState('');
   const [folderId, setFolderId] = useState(NO_FOLDER);
+  const appliedFocus = useRef<number | null>(null);
+  useEffect(() => {
+    // "Connect in Integrations" from a folder without a repo connects into that folder.
+    // Applied once per request, after the folders list has loaded.
+    if (focus === null || appliedFocus.current === focus.nonce) return;
+    const folder = github.folders.find((candidate) => candidate.id === focus.folderId);
+    if (folder === undefined) return;
+    appliedFocus.current = focus.nonce;
+    if (folder.github_repo === null) setFolderId(folder.id);
+  }, [focus, github.folders]);
   const submit = async (event: FormEvent) => {
     event.preventDefault();
     const url = repoUrl.trim();
@@ -232,18 +250,23 @@ export default function GithubReposSection({ github }: GithubReposSectionProps) 
     id === null ? null : (github.folders.find((folder) => folder.id === id)?.name ?? null);
   const sectionRef = useRef<HTMLElement>(null);
   const [switchFolderId, setSwitchFolderId] = useState(NO_FOLDER);
+  const [folderFocus, setFolderFocus] = useState<FolderFocus | null>(null);
   useEffect(() => {
+    const focusFolder = (folderId: string) => {
+      setSwitchFolderId(folderId);
+      setFolderFocus((previous) => ({ folderId, nonce: (previous?.nonce ?? 0) + 1 }));
+    };
     // Folder settings' "Connect / Switch repo in Integrations" opened the panel here.
     const pending = takeIntegrationsSectionFocus(GITHUB_REPOS_SECTION_ID);
     if (pending !== null) {
       sectionRef.current?.scrollIntoView?.({ block: 'start' });
-      if (pending.folderId !== null) setSwitchFolderId(pending.folderId);
+      if (pending.folderId !== null) focusFolder(pending.folderId);
     }
     // ... or asked again while the panel is already open.
     const onFocus = (event: Event) => {
       const focus = (event as CustomEvent<IntegrationsSectionFocus>).detail;
       if (focus.sectionId === GITHUB_REPOS_SECTION_ID && focus.folderId !== null)
-        setSwitchFolderId(focus.folderId);
+        focusFolder(focus.folderId);
     };
     window.addEventListener(INTEGRATIONS_SECTION_FOCUS_EVENT, onFocus);
     return () => window.removeEventListener(INTEGRATIONS_SECTION_FOCUS_EVENT, onFocus);
@@ -325,7 +348,7 @@ export default function GithubReposSection({ github }: GithubReposSectionProps) 
         folderId={switchFolderId}
         onFolderChange={setSwitchFolderId}
       />
-      <ConnectForm github={github} />
+      <ConnectForm github={github} focus={folderFocus} />
     </section>
   );
 }
