@@ -29,6 +29,7 @@ export const handlers = [
   // Rose Desktop Integrations icon reads integration health; nothing connected by default.
   http.get(`${API_BASE}/integrations`, () => HttpResponse.json({ integrations: [] })),
   http.get(`${API_BASE}/integrations/plaid/items`, () => HttpResponse.json({ items: [] })),
+  http.get(`${API_BASE}/integrations/github/repos`, () => HttpResponse.json({ repos: [] })),
   http.get(`${API_BASE}/integrations/granola`, () =>
     HttpResponse.json({
       connected: false,
