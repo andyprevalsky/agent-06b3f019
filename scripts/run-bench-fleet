@@ -12748,8 +12748,19 @@ recover_exact_stale_fleet_owner() {  # <32-hex-owner-token>
             fi
             ;;
         retain)
-            echo "❌ exact stale-owner cleanup policy retains durable ownership: $registry" >&2
-            return 1
+            # Resume an interrupted lost-guest release: the receipt is recorded and both latches are
+            # gone, but quarantine retain was not yet returned to reap. The helper re-reads every owned
+            # resource as provider-terminal before flipping the policy.
+            if [ "${RECOVER_ACCEPT_LOST_EVIDENCE:-0}" = 1 ] && [ "${RECOVER_PRIMARY_TO_POOL:-0}" != 1 ] \
+                && [ -f "$FLEET_AUDIT_ROOT/$token/runtime-evidence-lost.json" ] \
+                && python3 "$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-lost-evidence-release.py" \
+                    --registry "$registry" --audit-root "$FLEET_AUDIT_ROOT" \
+                    --app "$(registry_meta_value "$meta" app)" --root "$ROOT_DIR"; then
+                policy="$(registry_meta_value "$meta" cleanup_policy)"
+            else
+                echo "❌ exact stale-owner cleanup policy retains durable ownership: $registry" >&2
+                return 1
+            fi
             ;;
         *)
             echo "❌ exact stale-owner cleanup authorization state is unsafe: $registry" >&2
@@ -12866,7 +12877,11 @@ PY
     fi
     if [ "$needs_guest_recovery" = "1" ]; then
         echo "🧭 reconnecting exact owned guests for authenticated cleanup acknowledgement"
-        if ! fleet_recovery_reconnect_guest_shutdowns "$registry"; then
+        if ! fleet_recovery_reconnect_guest_shutdowns "$registry" \
+            && ! { [ "${RECOVER_ACCEPT_LOST_EVIDENCE:-0}" = 1 ] && [ "${RECOVER_PRIMARY_TO_POOL:-0}" != 1 ] \
+                   && python3 "$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-lost-evidence-release.py" \
+                       --registry "$registry" --audit-root "$FLEET_AUDIT_ROOT" --app "$(registry_meta_value "$meta" app)" \
+                       --root "$ROOT_DIR"; }; then
             # Runtime transfer may fail after every exact guest acknowledged
             # cleanup. Free one independently sealed own Machine slot while
             # retaining its volume, full ledger, failed exit and runtime latch.

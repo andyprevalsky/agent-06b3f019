@@ -83,12 +83,44 @@ class LostEvidenceRelease(unittest.TestCase):
                                         VOLUME: {"state": "pending_destroy", "attached_machine_id": None}})
         self.assertEqual({("GET", f"/machines/{MACHINE}"), ("GET", f"/volumes/{VOLUME}")}, set(client.calls))
         self.assertEqual("LOST", receipt["runtime_evidence"])
+        self.assertEqual("NOT_REQUIRED", receipt["guest_cleanup"])
         self.assertFalse(receipt["outcome_credit"])
         saved = json.loads((self.audit_root / TOKEN / "runtime-evidence-lost.json").read_text())
         self.assertEqual(receipt, saved)
         self.assertTrue(all(re.fullmatch("[0-9a-f]{64}", r["response_sha256"]) for r in saved["observations"]))
         self.assertFalse((self.registry / "runtime-evidence-unconfirmed").exists())
         self.assertTrue((self.registry / "meta").is_file(), "ordinary recovery still owns registry teardown")
+
+    def test_purged_guest_cleanup_latch_is_recorded_lost_with_evidence(self):
+        (self.registry / "guest-cleanup-unconfirmed").write_text("latch\n")
+        receipt, _ = self.release({})
+        self.assertEqual("LOST", receipt["guest_cleanup"])
+        self.assertEqual(["runtime-evidence-unconfirmed", "guest-cleanup-unconfirmed"], receipt["latches_cleared"])
+        self.assertFalse((self.registry / "guest-cleanup-unconfirmed").exists())
+        self.assertIn("cleanup_policy=reap", (self.registry / "meta").read_text())
+
+    def test_interrupted_guest_release_resumes_to_reap_only_after_terminal_reread(self):
+        (self.registry / "guest-cleanup-unconfirmed").write_text("latch\n")
+        meta = (self.registry / "meta").read_text().replace("cleanup_policy=reap", "cleanup_policy=retain")
+        (self.registry / "meta").write_text(meta)
+        self.release({})
+        (self.registry / "meta").write_text(meta)  # interrupted before the policy flip
+        with self.assertRaisesRegex(HELPER["Refused"], "not destroyed"):
+            self.release({MACHINE: {"state": "started"}})
+        self.assertIn("cleanup_policy=retain", (self.registry / "meta").read_text())
+        self.release({})
+        self.assertIn("cleanup_policy=reap", (self.registry / "meta").read_text())
+        with self.assertRaisesRegex(HELPER["Refused"], "already recorded"):
+            self.release({})
+
+    def test_guest_latch_alone_still_requires_terminal_resources(self):
+        (self.registry / "runtime-evidence-unconfirmed").unlink()
+        (self.registry / "guest-cleanup-unconfirmed").write_text("latch\n")
+        with self.assertRaisesRegex(HELPER["Refused"], "not destroyed"):
+            self.release({MACHINE: {"state": "stopped"}})
+        self.assertTrue((self.registry / "guest-cleanup-unconfirmed").is_file())
+        receipt, _ = self.release({MACHINE: {"state": "destroyed"}, VOLUME: {"state": "destroyed"}})
+        self.assertEqual("LOST", receipt["guest_cleanup"])
 
     def test_absent_resources_are_terminal(self):
         receipt, _ = self.release({})

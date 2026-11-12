@@ -18,7 +18,9 @@ It never mutates provider state. It refuses unless:
   attached to no Machine.
 
 On success it writes ``runtime-evidence-lost.json`` (every native read with its
-response hash) into the audit directory and clears only the evidence latch, so
+response hash) into the audit directory and clears only the evidence latches
+(``runtime-evidence-unconfirmed`` and, for a purged guest that can never
+acknowledge cleanup, ``guest-cleanup-unconfirmed``), so
 normal exact-owner recovery can finish its ordinary teardown and audit. The
 receipt records the loss; it never claims the evidence or the task outcome.
 """
@@ -35,6 +37,7 @@ import sys
 from pathlib import Path
 
 LATCH = "runtime-evidence-unconfirmed"
+GUEST_LATCH = "guest-cleanup-unconfirmed"
 RECEIPT = "runtime-evidence-lost.json"
 TERMINAL_MACHINE = {"destroyed"}
 TERMINAL_VOLUME = {"pending_destroy", "destroyed"}
@@ -132,10 +135,23 @@ def release(registry: Path, audit_root: Path, app: str, root: Path, client) -> d
     for key, expected in (("fleet_owner_token", token), ("app", app), ("workspace_root", str(root))):
         need(meta.get(key) == expected and audit_meta.get(key) == expected, f"identity mismatch: {key}")
     need(meta.get("run_id") == audit_meta.get("run_id"), "identity mismatch: run_id")
-    need((registry / LATCH).is_file() and not (registry / LATCH).is_symlink(),
-         "runtime evidence latch absent; use ordinary recovery")
-    need(not (audit / RECEIPT).exists(), "lost-evidence receipt already recorded")
+    latches = [name for name in (LATCH, GUEST_LATCH)
+               if (registry / name).is_file() and not (registry / name).is_symlink()]
     need(not process_alive(meta.get("pid", ""), meta.get("pid_start", "")), "original controller still running")
+    path = audit / RECEIPT
+    if path.exists() and not latches:
+        # Resume an interrupted release: the loss is recorded and both latches are gone, but the
+        # guest-cleanup quarantine policy was not yet returned to reap. Re-prove terminal state first.
+        prior = json.loads(path.read_text())
+        need(prior.get("fleet_owner_token") == token and prior.get("guest_cleanup") == "LOST"
+             and meta.get("cleanup_policy") == "retain", "lost-evidence receipt already recorded")
+        machines, volumes = owned_resources(registry, audit)
+        for m in sorted(machines): observe(client, "machine", m)
+        for v in sorted(volumes): observe(client, "volume", v)
+        set_policy_reap(registry)
+        return prior
+    need(latches, "runtime evidence latch absent; use ordinary recovery")
+    need(not path.exists(), "lost-evidence receipt already recorded")
     machines, volumes = owned_resources(registry, audit)
     rows = [observe(client, "machine", m) for m in sorted(machines)]
     rows += [observe(client, "volume", v) for v in sorted(volumes)]
@@ -147,15 +163,32 @@ def release(registry: Path, audit_root: Path, app: str, root: Path, client) -> d
         "observed_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         "operator_flag": "--accept-lost-runtime-evidence",
         "runtime_evidence": "LOST",
+        # A purged guest can never acknowledge browser/session cleanup either; record it, never infer it.
+        "guest_cleanup": "LOST" if GUEST_LATCH in latches else "NOT_REQUIRED",
+        "latches_cleared": latches,
         "outcome_credit": False,
         "observations": rows,
     }
-    path = audit / RECEIPT
     tmp = path.with_suffix(".tmp")
     tmp.write_text(json.dumps(receipt, indent=1) + "\n")
     os.replace(tmp, path)
-    (registry / LATCH).unlink()
+    if GUEST_LATCH in latches:
+        # Mirror fleet_registry_confirm_guest_teardown: leave quarantine (retain) for reap before
+        # removing the latch. Every owned resource is already provider-terminal, so nothing is kept.
+        set_policy_reap(registry)
+    for name in latches:
+        (registry / name).unlink()
     return receipt
+
+
+def set_policy_reap(registry: Path) -> None:
+    meta = registry / "meta"
+    lines = meta.read_text().splitlines()
+    need(sum(line.startswith("cleanup_policy=") for line in lines) == 1, "registry cleanup policy missing")
+    tmp = meta.with_name("meta.tmp.lost-evidence")
+    tmp.write_text("".join(("cleanup_policy=reap" if line.startswith("cleanup_policy=") else line) + "\n"
+                           for line in lines))
+    os.replace(tmp, meta)
 
 
 def main(argv: list[str] | None = None) -> int:

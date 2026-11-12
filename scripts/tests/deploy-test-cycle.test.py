@@ -6668,6 +6668,130 @@ class Cycle(unittest.TestCase):
         (runtime / 'logs/worker.log').write_text('changed')
         self.assertEqual([occurrence['gate']], c.retained_owners(state, [occurrence['gate']]))
 
+    def reseal_recovered(self, fleet, proof, edit):
+        """Apply `edit(audit)` to a fleet's local audit, mirror it canonically, reseal and rebind proof files."""
+        import hashlib
+        import shutil
+        audit = fleet / 'teardown-ownership'
+        owner = c.read(fleet / '_batch/lifecycle.json')['fleet_owner_token']
+        canonical = self.root / '.git/cloudbench-fleet-audits' / owner
+        (audit / 'source-audit').unlink()
+        edit(audit)
+        shutil.rmtree(canonical); shutil.copytree(audit, canonical)
+        h = hashlib.sha256()
+        for path in sorted(audit.rglob('*'), key=lambda p: str(p.relative_to(audit))):
+            if path.is_file():
+                for raw in (str(path.relative_to(audit)).encode(), path.read_bytes()):
+                    h.update(len(raw).to_bytes(8, 'big')); h.update(raw)
+        (audit / 'source-audit').write_text(f'path={canonical}\nsha256={h.hexdigest()}\n')
+        proof['files'] = {k: v for k, v in proof['files'].items() if Path(k).exists()}
+        for path in [*fleet.rglob('*'), *canonical.rglob('*')]:
+            if path.is_file(): proof['files'][str(path)] = c.sha_file(path)
+        return canonical
+
+    def test_campaign_lost_runtime_evidence_release_needs_provider_terminal_receipt(self):
+        # PR #1864: `--recover-stale-owner TOKEN --accept-lost-runtime-evidence` released owners whose
+        # Machines were destroyed before evidence capture; deploy custody accepts only that exact receipt.
+        state, occurrence, paths, proof, fleet, runtime = self.recovered_campaign_state()
+        owner = c.read(fleet / '_batch/lifecycle.json')['fleet_owner_token']
+        def receipt(machine_state, volume_state='pending_destroy', **changes):
+            return {**dict(schema='cloudbench-runtime-evidence-lost-v1', fleet_owner_token=owner, run_id=fleet.name,
+                           app='fixture', observed_at='2026-11-03T00:00:00+00:00',
+                           operator_flag='--accept-lost-runtime-evidence', runtime_evidence='LOST', outcome_credit=False,
+                           observations=[dict(kind='machine', id='48e7553f5dd4e8', state=machine_state),
+                                         dict(kind='volume', id='vol_fixture', state=volume_state,
+                                              attached_machine_id=None)]), **changes}
+        proof.pop('recovered_runtime')
+        proof['lost_runtime_evidence'] = [str(fleet)]
+        import shutil
+        shutil.rmtree(runtime.parent)  # destroyed before capture: no remote logs exist
+        unread = {'.cid', 'guest-shutdown.confirmed', 'runtime-evidence.owner.json'}  # recovered_runtime-only inputs
+        original_reseal = self.reseal_recovered
+        def reseal(fleet_, proof_, edit):
+            canonical = original_reseal(fleet_, proof_, edit)
+            for name in [k for k in proof_['files'] if Path(k).name in unread]:
+                proof_['files'].pop(name)
+            return canonical
+        self.reseal_recovered = reseal
+        before = copy.deepcopy(state)
+        for bad in (receipt('stopped'), receipt('destroyed', 'created'), receipt('destroyed', outcome_credit=True),
+                    receipt('destroyed', observed_at='2026-11-04T00:00:00+00:00')):
+            variant = copy.deepcopy(proof)
+            self.reseal_recovered(fleet, variant, lambda a: c.write(a / 'runtime-evidence-lost.json', bad))
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                c.reconcile(state, occurrence['id'], variant)
+            self.assertEqual(before, state)
+        self.reseal_recovered(fleet, proof, lambda a: c.write(a / 'runtime-evidence-lost.json', receipt('destroyed')))
+        c.reconcile(state, occurrence['id'], proof)
+        entry = state['reconciled_owners'][proof['receipt_sha256']]
+        release = entry['recovered_release_evidence'][str(fleet)]
+        self.assertEqual('LOST', release['runtime_evidence'])
+        self.assertFalse(release['credit_granted']); self.assertFalse(entry['credit_granted'])
+
+    def test_campaign_recovered_unlaunched_worker_clone_is_covered(self):
+        # PR #1864: an autoscaler worker clone provisioned but never started has no stack evidence.
+        state, occurrence, paths, proof, fleet, runtime = self.recovered_campaign_state()
+        bench = json.loads((fleet / '_batch/benches.json').read_text())[0]['name']
+        out = fleet / bench
+        owner = c.read(fleet / '_batch/lifecycle.json')['fleet_owner_token']
+        worker = '8747515a9131e8'
+        identity = dict(machine_id=worker, primary_machine_id='48e7553f5dd4e8', run_token=owner + '-0', version=1)
+        (out / 'worker-clones.ids').write_text(worker + '\n')
+        c.write(out / 'worker-runtime-evidence' / worker / 'owner.json', identity)
+        def add_row(audit):
+            (audit / 'owned-clones.ids').write_text('48e7553f5dd4e8\n' + worker + '\n')
+            (audit / 'owned-clones.names').write_text('clone-j2\nclone-w1\n')
+            (audit / 'fresh/clone-w1').write_text(''.join(f'{k}={v}\n' for k, v in dict(
+                fleet_owner_token=owner, run_id=fleet.name, app='fixture', source='fresh-clone',
+                disposition='destroyed-provider-retained', machine_id=worker, clone_name='clone-w1',
+                volume_id='vol_worker').items()))
+        before = copy.deepcopy(state)
+        for started in (True, None):
+            c.write(out / 'worker-runtime-evidence' / worker / 'not-launched.json', {**identity, 'worker_started': started})
+            variant = copy.deepcopy(proof)
+            self.reseal_recovered(fleet, variant, add_row)
+            with self.subTest(started=started), self.assertRaises(ValueError):
+                c.reconcile(state, occurrence['id'], variant)
+            self.assertEqual(before, state)
+        c.write(out / 'worker-runtime-evidence' / worker / 'not-launched.json', {**identity, 'worker_started': False})
+        self.reseal_recovered(fleet, proof, add_row)
+        c.reconcile(state, occurrence['id'], proof)
+        self.assertIn(proof['receipt_sha256'], state['reconciled_owners'])
+
+    def test_campaign_retired_hub_needs_its_exact_terminal_record(self):
+        # PR #1864: exact-owner recovery records `retired-exact-owner-verified-absent` once the Hub is gone.
+        state, occurrence, paths, proof, fleet, runtime = self.recovered_campaign_state()
+        meta = (fleet / 'teardown-ownership/meta').read_text()
+        fields = dict(line.split('=', 1) for line in meta.splitlines() if '=' in line)
+        hub = Path(fields['hub_owner_file'])
+        terminal = Path(str(hub) + '.terminal')
+        def record(**changes):
+            value = {**dict(version='1', owner_file=str(hub), owner_sha256=c.sha_file(hub), pid=fields['hub_pid'],
+                            pid_start=fields['hub_pid_start'], pgid=fields['hub_pid'], owner_token=fields['hub_owner_token'],
+                            disposition='terminated-verified'), **changes}
+            terminal.write_text(''.join(f'{k}={v}\n' for k, v in value.items()))
+        birth = 'proc-start:00000000-0000-4000-8000-000000000000:1'
+        fields['hub_pid_start'] = birth
+        def retire(audit):
+            (audit / 'meta').write_text(meta.replace('hub_disposition=retained-exact-owner-transfer-required',
+                                                     'hub_disposition=retired-exact-owner-verified-absent')
+                                        .replace('hub_pid_start=' + meta.split('hub_pid_start=')[1].split('\n')[0],
+                                                 'hub_pid_start=' + birth))
+        before = copy.deepcopy(state)
+        for changes in (dict(disposition='retained'), dict(owner_token='other'), dict(owner_sha256='0' * 64)):
+            record(**changes)
+            variant = copy.deepcopy(proof)
+            self.reseal_recovered(fleet, variant, retire)
+            variant['files'][str(terminal)] = c.sha_file(terminal)
+            with self.subTest(changes=changes), self.assertRaises(ValueError):
+                c.reconcile(state, occurrence['id'], variant)
+            self.assertEqual(before, state)
+        record()
+        self.reseal_recovered(fleet, proof, retire)
+        proof['files'][str(terminal)] = c.sha_file(terminal)
+        c.reconcile(state, occurrence['id'], proof)
+        self.assertIn(proof['receipt_sha256'], state['reconciled_owners'])
+
     def test_campaign_recovered_v2_identity_and_seal_refusals_are_atomic(self):
         state, occurrence, paths, proof, fleet, runtime = self.recovered_campaign_state()
         before = copy.deepcopy(state)
