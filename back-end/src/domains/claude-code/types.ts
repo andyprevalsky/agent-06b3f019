@@ -33,8 +33,9 @@ export const createSessionSchema = z
     goal: z.string(),
     attachments: z.array(filePointerSchema).optional(),
     github_repo_url: z.string().optional(),
-    // Connected repo by canonical ref (`gh:owner/repo`, URL or legacy project id); overrides
-    // the project restore when it names a different repo. 403 when not connected.
+    // Connected repo by canonical ref (`gh:owner/repo`, URL or legacy project id). When it names
+    // a different repo than the agent's project, the repo's own connected folder restores
+    // instead (its startup script, env files). 403 when not connected.
     github_repo_ref: z.string().trim().min(1).max(300).optional(),
     user_id: z.string().uuid().optional(), // Required for GitHub repo access check
     // Persistent code session to resume; omitted → the root's latest for this repo.
