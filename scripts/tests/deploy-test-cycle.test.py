@@ -7482,6 +7482,10 @@ class Cycle(unittest.TestCase):
         state['plan']['source'] = state['source']; state['plan_digest'] = c.digest(state['plan'])
         return state, original, proof, gate, folder, native
 
+    @quarantine(since='2026-11-12', repair='pending-handoff:578ec40192d64b4899e94402104f735a',
+                error='PermissionError: settlement process scan: same-user /proc/<pid>/environ unreadable',
+                evidence='PR #1864 new-test-stability occurrence 578ec40192d64b4899e94402104f735a (source eb02ae425): 3/5 under owned load; '
+                         'scan_same_user_processes refused an unreadable in-tree process')
     def test_negative_successor_renews_only_from_committed_journal_and_current_closure(self):
         state, original, proof, gate, folder, native = self.negative_successor_renewal_state()
         incoming = dict(proof, validation_source=copy.deepcopy(state['source']))
@@ -7531,6 +7535,10 @@ class Cycle(unittest.TestCase):
                 self.assertEqual(before, candidate)
             finally: journal.write_bytes(saved); marker.write_bytes(saved_marker)
 
+    @quarantine(since='2026-11-12', repair='pending-handoff:578ec40192d64b4899e94402104f735a',
+                error='PermissionError: settlement process scan: same-user /proc/<pid>/environ unreadable',
+                evidence='PR #1864 new-test-stability occurrence 578ec40192d64b4899e94402104f735a (source eb02ae425): 3/5 under owned load; '
+                         'scan_same_user_processes refused an unreadable in-tree process')
     def test_negative_successor_rejects_changed_history_admission_and_live_adapter_atomically(self):
         state, original, proof, gate, folder, native = self.negative_successor_renewal_state()
         incoming = dict(proof, validation_source=copy.deepcopy(state['source']))
