@@ -1090,6 +1090,12 @@ async def _run_agentic_loop(
             # A new turn: the next SDK result belongs to it.
             user_turns_seen += 1
             sdk_result_at = None
+        elif event.get("type") == "turn_started" and sdk_result_at is not None:
+            # The CLI started a turn of its own after a caught-up result (a /goal
+            # continuation, a background-task notification): it is working again,
+            # so that result was not its last. The turn's own result re-arms the grace.
+            user_turns_seen += 1
+            sdk_result_at = None
         if event.get("type") in ("goal", "turn_started", "turn_ended", "user_turn", "direct_chat"):
             log_monitor_state()
         if is_codex_completed_turn_event(event):

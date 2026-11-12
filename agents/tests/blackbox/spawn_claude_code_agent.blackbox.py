@@ -2527,6 +2527,104 @@ async def test_run_agentic_loop_sdk_result_zombie_ends_on_exit_grace():
     assert any(e.get("type") == "result" for e in events), events
 
 
+async def _run_post_result_script(events: list, *, hold_s: float, end_with_exit: bool, grace_s: float = 0.2):
+    """Drive the loop: events, hold_s more tool output, then exit 0 (or hang)."""
+    import asyncio as aio
+
+    from domains.spawn_claude_code_agent import service
+
+    class Scripted(_FakeWsClient):
+        async def listen(self):
+            await self.on_output("working", True)
+            for event in events:
+                await self.on_event({"version": 1, "provider": "claude", **event})
+            deadline = aio.get_event_loop().time() + hold_s
+            while aio.get_event_loop().time() < deadline:
+                await aio.sleep(0.02)
+                await self.on_output("tool output\n", False)
+            if end_with_exit:
+                await self.on_exit(0)
+            await aio.Event().wait()
+
+    summary: list[str] = []
+    outcome: dict = {}
+    with (
+        patch.object(service, "ClaudeCodeWsClient", Scripted),
+        patch.object(service, "SDK_POST_RESULT_EXIT_GRACE_S", grace_s),
+        patch.object(service, "CODE_SESSION_IDLE_PAUSE_S", 30.0),
+        patch.object(service, "SILENCE_TIMEOUT_S", 0.01),
+        patch.object(service, "save_code_transcript_batch", AsyncMock(return_value=True)),
+        patch("temporalio.activity.heartbeat"),
+    ):
+        t0 = aio.get_event_loop().time()
+        exit_code, attempt, _h, _i, _o, seen = await service._run_agentic_loop(
+            **_loop_kwargs(summary, loop_outcome=outcome)
+        )
+        elapsed = aio.get_event_loop().time() - t0
+    return exit_code, elapsed, summary, seen
+
+
+async def test_run_agentic_loop_cli_turn_after_result_is_not_cut_by_exit_grace():
+    """Bug B (agent 91cd1296, code session 8a5055cc): Claude's response never reached the parent.
+
+    A /goal run ends its first turn with an SDK result and the CLI then starts
+    a turn of its own (turn_started, tool calls) to keep working toward the goal
+    or to answer a background-task notification. The post-result grace stayed
+    armed from the first result, so the monitor detached mid-turn 180s later
+    ("Post-result exit grace exceeded") with no handoff written, and the parent
+    was told the child ended. The new turn disarms the grace; the run ends on the
+    CLI's own exit, so its handoff is read and delivered.
+    """
+    exit_code, elapsed, summary, seen = await _run_post_result_script(
+        [
+            {"type": "turn_started", "turn_id": "goal-set"},
+            {"type": "result", "status": "completed", "turn_id": "goal-set", "pending_turns": 0},
+            {"type": "turn_started", "turn_id": "426873fa"},
+            {"type": "tool_use", "name": "Bash", "tool_use_id": "t1", "turn_id": "426873fa"},
+            {"type": "tool_result", "tool_use_id": "t1", "turn_id": "426873fa"},
+            {"type": "tool_use", "name": "Bash", "tool_use_id": "t2", "turn_id": "426873fa"},
+        ],
+        hold_s=0.8,
+        end_with_exit=True,
+    )
+    assert exit_code == 0, (exit_code, summary)
+    assert elapsed >= 0.7, f"the live turn must hold the session past the grace, took {elapsed:.2f}s"
+    assert not any("Post-result exit grace" in line for line in summary), summary
+    assert any(e.get("turn_id") == "426873fa" for e in seen), seen
+
+
+async def test_run_agentic_loop_cli_turn_result_rearms_exit_grace():
+    """The self-started turn's own result re-arms the backstop: a CLI that never exits still ends."""
+    exit_code, elapsed, summary, _seen = await _run_post_result_script(
+        [
+            {"type": "result", "status": "completed", "turn_id": "goal-set", "pending_turns": 0},
+            {"type": "turn_started", "turn_id": "next"},
+            {"type": "tool_use", "name": "Bash", "tool_use_id": "t1", "turn_id": "next"},
+            {"type": "tool_result", "tool_use_id": "t1", "turn_id": "next"},
+            {"type": "result", "status": "completed", "turn_id": "next", "pending_turns": 0},
+        ],
+        hold_s=30.0,
+        end_with_exit=False,
+    )
+    assert exit_code == -1, (exit_code, summary)
+    assert elapsed < 3.0, f"the re-armed grace must still end a CLI that never exits, took {elapsed:.2f}s"
+    assert any("Post-result exit grace" in line for line in summary), summary
+
+
+async def test_run_agentic_loop_cli_turn_result_rearms_on_sandboxes_without_pending_turns():
+    """Older sandboxes (no pending_turns): counting results vs turns still re-arms after a CLI turn."""
+    exit_code, _elapsed, summary, _seen = await _run_post_result_script(
+        [
+            {"type": "result", "status": "completed"},
+            {"type": "turn_started", "turn_id": "next"},
+            {"type": "result", "status": "completed"},
+        ],
+        hold_s=30.0,
+        end_with_exit=False,
+    )
+    assert exit_code == -1 and any("Post-result exit grace" in line for line in summary), summary
+
+
 async def test_run_agentic_loop_post_result_exit_grace_breaks():
     """Stdout after SDK result that keeps refreshing silence must still hit exit grace."""
     import asyncio as aio
@@ -4227,6 +4325,18 @@ async def _run_all_tests():
     await r.record_async(
         "run_agentic_loop_post_result_exit_grace_breaks",
         test_run_agentic_loop_post_result_exit_grace_breaks,
+    )
+    await r.record_async(
+        "run_agentic_loop_cli_turn_after_result_not_cut_by_grace",
+        test_run_agentic_loop_cli_turn_after_result_is_not_cut_by_exit_grace,
+    )
+    await r.record_async(
+        "run_agentic_loop_cli_turn_result_rearms_grace",
+        test_run_agentic_loop_cli_turn_result_rearms_exit_grace,
+    )
+    await r.record_async(
+        "run_agentic_loop_cli_turn_rearms_without_pending_turns",
+        test_run_agentic_loop_cli_turn_result_rearms_on_sandboxes_without_pending_turns,
     )
     await r.record_async(
         "run_agentic_loop_keepalive_extends_sandbox",
