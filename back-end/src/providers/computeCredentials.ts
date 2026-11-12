@@ -374,6 +374,24 @@ async function persistOrReadDemoCacheAffinity(
   return existing ?? tokenType;
 }
 
+/**
+ * The live Claude access token of one claude_code row, for a read-only usage
+ * lookup (computeUsageRefresh). No side effects: it does not stamp lastUsedAt,
+ * lease, or touch the row's state; an expired or undecryptable token is null.
+ */
+export async function readClaudeAccessTokenForUsage(integrationId: string): Promise<string | null> {
+  const decryptionKey = process.env.CLAUDE_CREDENTIAL_DECRYPTION_KEY;
+  if (!decryptionKey) return null;
+  const integration = await prisma.integration.findFirst({
+    where: { id: integrationId, name: 'claude_code', status: 'CONNECTED' },
+  });
+  if (!integration) return null;
+  const decrypted = decryptIntegrationCredentials(integration, decryptionKey);
+  const envelope = decrypted ? parseClaudeEnvelope(decrypted) : null;
+  if (!envelope || claudeEnvelopeExpiredAt(envelope, Date.now()) !== null) return null;
+  return envelope.accessToken;
+}
+
 export async function fetchComputeUserToken(
   userId: string,
   tokenType: ComputeCodeCredentialType | null = null
@@ -519,8 +537,10 @@ export async function fetchComputeTokenForUser(
 
 /**
  * Keep a lineage lease live. The heartbeat may also carry the subscription
- * usage snapshot the worker last observed for this token; it is recorded only
- * while the lease is live, riding this existing per-call request.
+ * usage snapshot the worker last observed for this token (flushed right after
+ * each response, success or failure); it is recorded while the lease is live or
+ * was released within USAGE_RELEASED_LEASE_GRACE_MS (the flush of an agent's
+ * last response races its release), riding this existing per-call request.
  */
 export async function heartbeatComputeTokenLineage(
   lineageKey: string,
@@ -532,8 +552,7 @@ export async function heartbeatComputeTokenLineage(
     where: { lineageKey: trimmed, releasedAt: null },
     data: { lastUsedAt: new Date() },
   });
-  const usageRecorded =
-    result.count > 0 && usage !== null ? await recordSubscriptionUsage(trimmed, usage) : false;
+  const usageRecorded = usage !== null ? await recordSubscriptionUsage(trimmed, usage) : false;
   return { ok: result.count > 0, updated: result.count, usageRecorded };
 }
 
