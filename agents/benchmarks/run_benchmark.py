@@ -5819,7 +5819,8 @@ async def _poll_agent(
                                     "expected_gate": gate,
                                     "expected_gate_request_id": req_id,
                                 }
-                                print(f"    💳 Completing hosted Stripe Checkout for gate {req_id[:8]}")
+                                print(f"    💳 Completing hosted Stripe Checkout for gate {req_id[:8]} "
+                                      f"layout={urlparse(checkout_url).path[:7]}")
                                 try:
                                     checkout = await complete_test_subscription_checkout(
                                         base_url,
@@ -5837,7 +5838,8 @@ async def _poll_agent(
                                     )
                                 subscription_checkout_evidence = checkout
                                 data["_benchmark"]["subscription_checkout"] = checkout
-                                print(f"    ✅ Completed paid Stripe test Checkout {checkout['session_id'][:18]}")
+                                print(f"    ✅ Completed paid Stripe test Checkout {checkout['session_id'][:18]} "
+                                      f"layout=/{checkout.get('checkout_layout')}/pay/")
                                 continue
                             if task.expected_gate and _gate_request_matches_task(task, req):
                                 expected_gate_evidence = {

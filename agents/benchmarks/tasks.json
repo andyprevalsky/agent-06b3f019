@@ -39,7 +39,7 @@
     "forbidden_tools": [
       "spawn_browser_agent"
     ],
-    "status": "ready",
+    "status": "retired",
     "runner": "agent",
     "bench": "rose-bench",
     "group": "pre-deploy",

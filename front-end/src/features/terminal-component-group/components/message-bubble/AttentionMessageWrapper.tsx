@@ -49,6 +49,7 @@ export function AttentionMessageWrapper({
       attentionRequestId={attentionRequestId}
       onApprove={(requestId) => respondToAttentionRequest(requestId, 'Approved')}
       onDecline={(requestId) => rejectAttentionRequest(requestId)}
+      sentAt={isStreaming ? undefined : message.timestamp}
     />
   );
 }

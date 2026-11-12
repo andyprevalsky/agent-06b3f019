@@ -24,9 +24,17 @@
  * [FLOWING] --> SVG animateTransform moves each pill along a grid line
  *   |
  *   v (mobile viewport)
- * [LEAN_FLOWING] --> 8 flows, no blur filter; each pill is a CSS keyframe
+ * [LEAN_FLOWING] --> up to 8 flows, no blur filter; each pill is a CSS keyframe
  *                    translate3d animation (compositor-driven, no per-frame JS)
  *                    whose start time is pinned to the document timeline origin
+ *   |
+ *   v (per pill, from the even-odd mask geometry)
+ * [CLIPPED]  --> a flow whose track never shows through the mask at this
+ *                viewport is not mounted at all
+ * [PARKED]   --> while a pill is fully masked it holds still (step keyframe)
+ *                and jumps to where it re-enters; on-screen it follows the
+ *                exact same linear path. Masked motion still damaged the frame
+ *                and forced the chat backdrop blur to re-render every frame.
  *   |
  *   v (prefers-reduced-motion: reduce)
  * [HIDDEN] --> desktop: CSS hides animated pills
@@ -271,10 +279,12 @@ export function MobileGridEnergyPills({
     return () => window.removeEventListener('resize', resize);
   }, []);
 
-  const tracks = useMemo(
-    () => MOBILE_FLOWS.map((flow) => mobileFlowTrack(flow, width, height, patternOffset)),
-    [width, height, patternOffset],
-  );
+  const tracks = useMemo(() => {
+    const rects = mobileEnergyClipRects(width, height, selectedAgentId);
+    return MOBILE_FLOWS.map((flow) =>
+      mobileFlowTrack(flow, width, height, patternOffset, rects),
+    ).filter((track): track is MobileFlowTrack => track !== null);
+  }, [width, height, patternOffset, selectedAgentId]);
   const trackNames = tracks.map((track) => track.name).join(' ');
 
   // Phase: each pill's CSS animation starts at the document timeline origin, so
@@ -290,7 +300,7 @@ export function MobileGridEnergyPills({
     <div
       ref={layerRef}
       data-testid="terminal-grid-energy-canvas"
-      data-flow-count={MOBILE_FLOWS.length}
+      data-flow-count={tracks.length}
       className="absolute inset-0 overflow-hidden pointer-events-none z-[4]"
       style={{ width, height, clipPath: mobileEnergyClipPath(width, height, selectedAgentId) }}
     >
@@ -336,27 +346,93 @@ const pathNumber = (value: number): string => String(Number(value.toFixed(3)));
 const rectSubpath = (x: number, y: number, width: number, height: number): string =>
   `M${pathNumber(x)} ${pathNumber(y)}H${pathNumber(x + width)}V${pathNumber(y + height)}H${pathNumber(x)}Z`;
 
+type ClipRect = { x0: number; y0: number; x1: number; y1: number };
+
 /**
  * Even-odd clip of three rects (viewport, large center tile, bottom input
  * area): a pixel shows when an odd number of rects covers it, so the tile and
  * input cutouts hide pills and their overlap shows them again.
  */
-const mobileEnergyClipPath = (
+const mobileEnergyClipRects = (
   width: number,
   height: number,
   selectedAgentId: string | null,
-): string => {
+): ClipRect[] => {
   const inputClearance =
     selectedAgentId === null ? LANDING_CONTROLS_MOBILE_CLEARANCE : QUERY_INPUT_MOBILE_CLEARANCE;
   const inputAreaCutoutY = Math.max(0, height - inputClearance);
   const largeTileX = width / 2 - LARGE_TILE_MASK_HALF;
   const largeTileY = height * 0.4 - LARGE_TILE_MASK_HALF;
-  const subpaths = [
-    rectSubpath(0, 0, width, height),
-    rectSubpath(largeTileX, largeTileY, LARGE_TILE_MASK_SIZE, LARGE_TILE_MASK_SIZE),
-    rectSubpath(0, inputAreaCutoutY, width, inputClearance),
+  return [
+    { x0: 0, y0: 0, x1: width, y1: height },
+    {
+      x0: largeTileX,
+      y0: largeTileY,
+      x1: largeTileX + LARGE_TILE_MASK_SIZE,
+      y1: largeTileY + LARGE_TILE_MASK_SIZE,
+    },
+    { x0: 0, y0: inputAreaCutoutY, x1: width, y1: inputAreaCutoutY + inputClearance },
   ];
+};
+
+const mobileEnergyClipPath = (
+  width: number,
+  height: number,
+  selectedAgentId: string | null,
+): string => {
+  const subpaths = mobileEnergyClipRects(width, height, selectedAgentId).map((rect) =>
+    rectSubpath(rect.x0, rect.y0, rect.x1 - rect.x0, rect.y1 - rect.y0),
+  );
   return `path(evenodd, '${subpaths.join(' ')}')`;
+};
+
+/** A pill within this many px of the visible mask region still counts as
+ * visible, so clip-edge antialiasing never loses a partially covered pixel. */
+const PILL_VISIBILITY_MARGIN = 2;
+
+/**
+ * Along-axis intervals of the layer where some point of the cross band
+ * [c0, c1] shows through the even-odd mask (and lies inside the layer, which
+ * clips its overflow). Evaluated per cell of the rect-edge grid, where the
+ * covering parity is constant.
+ */
+const visibleAlongIntervals = (
+  rects: ClipRect[],
+  axis: Flow['axis'],
+  width: number,
+  height: number,
+  c0: number,
+  c1: number,
+): Array<[number, number]> => {
+  const horizontal = axis === 'x';
+  const alongExtent = horizontal ? width : height;
+  const crossExtent = horizontal ? height : width;
+  const cross0 = Math.max(0, c0);
+  const cross1 = Math.min(crossExtent, c1);
+  if (cross1 <= cross0 || alongExtent <= 0) return [];
+  const edges = (lo: number, hi: number, pick: (rect: ClipRect) => number[]) =>
+    [...new Set([lo, hi, ...rects.flatMap(pick).filter((v) => v > lo && v < hi)])].sort(
+      (a, b) => a - b,
+    );
+  const alongEdges = edges(0, alongExtent, (r) => (horizontal ? [r.x0, r.x1] : [r.y0, r.y1]));
+  const crossEdges = edges(cross0, cross1, (r) => (horizontal ? [r.y0, r.y1] : [r.x0, r.x1]));
+  const shows = (along: number, cross: number) => {
+    const [x, y] = horizontal ? [along, cross] : [cross, along];
+    return rects.filter((r) => x > r.x0 && x < r.x1 && y > r.y0 && y < r.y1).length % 2 === 1;
+  };
+  const intervals: Array<[number, number]> = [];
+  for (let i = 0; i < alongEdges.length - 1; i += 1) {
+    const [a0, a1] = [alongEdges[i], alongEdges[i + 1]];
+    let visible = false;
+    for (let j = 0; j < crossEdges.length - 1 && !visible; j += 1) {
+      visible = shows((a0 + a1) / 2, (crossEdges[j] + crossEdges[j + 1]) / 2);
+    }
+    if (!visible) continue;
+    const last = intervals[intervals.length - 1];
+    if (last && last[1] === a0) last[1] = a1;
+    else intervals.push([a0, a1]);
+  }
+  return intervals;
 };
 
 const hashString = (text: string): string => {
@@ -368,17 +444,31 @@ const hashString = (text: string): string => {
   return (hash >>> 0).toString(36);
 };
 
+interface MobileFlowTrack {
+  flow: Flow;
+  name: string;
+  keyframes: string;
+}
+
 /**
  * One pill's keyframes: an off-screen start to an off-screen end along its
  * flow axis (reverse flows run back), sitting on its grid line. The whole
  * position lives in the transform, so layout never snaps the line coordinate.
+ *
+ * Only the cycle fractions where the pill can show through the mask follow
+ * that linear path; in between the pill holds where it was masked
+ * (step-end) and jumps to its re-entry point, so the compositor sees no
+ * motion while nothing visible changes. Returns null when the pill never
+ * shows at all. Every visible frame is the same position as the plain
+ * from -> to animation at the same time.
  */
 const mobileFlowTrack = (
   flow: Flow,
   width: number,
   height: number,
   patternOffset: { x: number; y: number },
-): { flow: Flow; name: string; keyframes: string } => {
+  rects: ClipRect[],
+): MobileFlowTrack | null => {
   const horizontal = flow.axis === 'x';
   const extent = horizontal ? width : height;
   const travel = extent + GRID_SIZE * 2;
@@ -387,18 +477,51 @@ const mobileFlowTrack = (
   const line = horizontal
     ? gridLineAtRatio(patternOffset.y, height, flow.lineRatio) - HORIZONTAL_PILL_HEIGHT / 2
     : gridLineAtRatio(patternOffset.x, width, flow.lineRatio) - VERTICAL_PILL_WIDTH / 2;
+  const thickness = horizontal ? HORIZONTAL_PILL_HEIGHT : VERTICAL_PILL_WIDTH;
   const at = (along: number): string =>
     horizontal
       ? `translate3d(${pathNumber(along)}px, ${pathNumber(line)}px, 0)`
       : `translate3d(${pathNumber(line)}px, ${pathNumber(along)}px, 0)`;
-  const from = at(start);
-  const to = at(end);
-  const name = `${MOBILE_PILL_CLASS}-${flow.id}-${hashString(`${from} ${to}`)}`;
-  return {
-    flow,
-    name,
-    keyframes: `@keyframes ${name} { from { transform: ${from}; } to { transform: ${to}; } }`,
-  };
+  // The pill's leading coordinate `along` shows when [along, along + length]
+  // overlaps a visible interval; map those along ranges to cycle fractions.
+  const span = end - start;
+  const windows = visibleAlongIntervals(
+    rects,
+    flow.axis,
+    width,
+    height,
+    line - PILL_VISIBILITY_MARGIN,
+    line + thickness + PILL_VISIBILITY_MARGIN,
+  )
+    .map(([v0, v1]) => {
+      const f0 = (v0 - flow.length - PILL_VISIBILITY_MARGIN - start) / span;
+      const f1 = (v1 + PILL_VISIBILITY_MARGIN - start) / span;
+      return [Math.max(0, Math.min(f0, f1)), Math.min(1, Math.max(f0, f1))];
+    })
+    .filter(([f0, f1]) => f1 > f0)
+    .sort((a, b) => a[0] - b[0])
+    .reduce<number[][]>((merged, window) => {
+      const last = merged[merged.length - 1];
+      if (last && window[0] <= last[1]) last[1] = Math.max(last[1], window[1]);
+      else merged.push([...window]);
+      return merged;
+    }, []);
+  if (windows.length === 0) return null;
+
+  const position = (fraction: number) => start + fraction * span;
+  const offset = (fraction: number) => `${Number((fraction * 100).toFixed(6))}%`;
+  const frames: string[] = [];
+  if (windows[0][0] > 0) frames.push(`0% { transform: ${at(position(windows[0][0]))}; }`);
+  windows.forEach(([f0, f1], index) => {
+    frames.push(`${offset(f0)} { transform: ${at(position(f0))}; }`);
+    const hold = index < windows.length - 1 ? ' animation-timing-function: step-end;' : '';
+    frames.push(`${offset(f1)} { transform: ${at(position(f1))};${hold} }`);
+  });
+  const last = windows[windows.length - 1][1];
+  if (last < 1) frames.push(`100% { transform: ${at(position(last))}; }`);
+  const body = frames.join(' ');
+  const name = `${MOBILE_PILL_CLASS}-${flow.id}-${hashString(body)}`;
+  return { flow, name, keyframes: `@keyframes ${name} { ${body} }` };
 };
 
 const pillGradient = (direction: string): string =>

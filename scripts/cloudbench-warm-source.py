@@ -38,7 +38,6 @@ Offline tests point FLY_FLAPS_BASE_URL at a fake Machines API
 from __future__ import annotations
 
 import argparse
-import email.utils
 import hashlib
 import json
 import os
@@ -73,35 +72,6 @@ PROTECTED_PREFIXES = ("whm_deploy", "rose_controller", "cloudbench_protected", "
 GONE = {"destroyed", "destroying"}
 COMPLETE_SNAPSHOT = {"created", "complete", "completed", "ready", "available"}
 LEASE_TTL_SECONDS = 30
-RATE_LIMIT_ATTEMPTS = 6
-LAST_USED_REFRESH_SECONDS = 600
-RATE_LIMIT_MAX_DELAY_SECONDS = 8.0
-
-
-def rate_limit_delay(retry_after, attempt, now=None):
-    """Seconds to wait after a 429, or None when the server asks for longer than the budget.
-
-    Retry-After may be delta-seconds or an HTTP-date (RFC 9110 10.2.3); never retry earlier than
-    asked. Without it, use capped exponential backoff with jitter.
-    """
-    delay = None
-    if retry_after is not None:
-        text = str(retry_after).strip()
-        if text.isdigit():
-            delay = float(text)
-        else:
-            try:
-                when = email.utils.parsedate_to_datetime(text)
-                delay = when.timestamp() - (time.time() if now is None else now)
-            except (TypeError, ValueError, IndexError, OverflowError):
-                delay = None
-    if delay is None:
-        return min(RATE_LIMIT_MAX_DELAY_SECONDS, 0.5 * (2 ** attempt)) * (0.5 + random.random() / 2)
-    if delay > RATE_LIMIT_MAX_DELAY_SECONDS:
-        return None
-    return max(0.0, delay)
-
-
 EXIT_TIMEOUT = 3
 
 
@@ -132,6 +102,19 @@ def metadata_of(row) -> dict:
     return ((row or {}).get("config") or {}).get("metadata") or {}
 
 
+RATE_LIMIT_ATTEMPTS = 6
+RATE_LIMIT_MAX_DELAY = 16.0
+
+
+def rate_limit_delay(retry_after, attempt):
+    """Seconds to wait before retrying a 429: Fly's Retry-After when given, else jittered exponential backoff."""
+    try:
+        base = float(retry_after)
+    except (TypeError, ValueError):
+        base = min(2.0 ** attempt, RATE_LIMIT_MAX_DELAY)
+    return min(max(base, 0.0), RATE_LIMIT_MAX_DELAY) + random.uniform(0.0, 0.5)
+
+
 class Api(Fly):
     """Machines API client with the lease and lease-nonce calls this helper needs."""
 
@@ -143,9 +126,6 @@ class Api(Fly):
             headers["fly-machine-lease-nonce"] = nonce
         request = urllib.request.Request(url, data=None if body is None else json.dumps(body).encode(),
                                          method=method, headers=headers)
-        # Fly rate-limits per-Machine writes (HTTP 429). A deploy smoke starts every job's
-        # controller at once and each records LAST_USED_KEY on the same source, so a 429 is
-        # expected contention, not a failure: honour Retry-After within a bounded budget.
         for attempt in range(RATE_LIMIT_ATTEMPTS):
             self.calls.append((method, path))
             try:
@@ -153,15 +133,15 @@ class Api(Fly):
                     payload = response.read()
                     return response.status, (json.loads(payload) if payload else None)
             except urllib.error.HTTPError as error:
+                # A fleet's concurrent jobs share one warm source: Fly answers its burst of metadata
+                # writes with 429 (PR #1928 smoke, 10 of 13 jobs). Back off and retry; any other
+                # status, or a 429 that outlasts the bounded attempts, still reaches the caller.
                 if error.code != 429 or attempt == RATE_LIMIT_ATTEMPTS - 1:
                     return error.code, None
-                delay = rate_limit_delay(error.headers.get("Retry-After"), attempt)
-                if delay is None:  # asked to wait past this helper's budget: report the 429
-                    return error.code, None
-                time.sleep(delay)
+                time.sleep(rate_limit_delay(error.headers.get("Retry-After"), attempt))
             except (urllib.error.URLError, OSError, ValueError) as error:
                 raise WarmSourceError(f"{method} {path} -> {error}") from error
-        return 429, None
+        raise AssertionError("unreachable")
 
     def acquire_lease(self, machine_id, ttl=LEASE_TTL_SECONDS):
         status, body = self._leased("POST", f"/machines/{machine_id}/lease",
@@ -352,26 +332,27 @@ def source_config(donor, set_id, volume_id, now):
     return config
 
 
-def touch_last_used(api, row, now=None):
-    """Record use for retention without a write stampede.
+LAST_USED_FRESH_SECONDS = 600
 
-    Every job of a fleet (and every fleet on other devboxes) selects the same source within
-    seconds; Fly rate-limits writes to one Machine. A stamp younger than LAST_USED_REFRESH_SECONDS
-    already protects the source (retention grace is a day), so only the first selector writes.
-    A write still rate-limited after the bounded retries is bookkeeping, not selection: warn.
-    """
-    now = time.time() if now is None else now
-    value = metadata_of(row).get(LAST_USED_KEY, "0")
-    if str(value).isdigit() and now - int(value) < LAST_USED_REFRESH_SECONDS:
-        return False
+
+def touch_last_used(api, machine_id):
+    """Mark this set's warm source used. A fleet's concurrent jobs all touch one Machine; when Fly keeps
+    throttling (HTTP 429 past the client's backoff), a peer's write in the same burst already keeps the
+    source fresh for retention, so a recent recorded value satisfies the touch. Anything else still fails."""
     try:
-        api.write_metadata(row["id"], LAST_USED_KEY, str(int(now)))
+        api.write_metadata(machine_id, LAST_USED_KEY, str(int(time.time())))
     except WarmSourceError as error:
         if "HTTP 429" not in str(error):
             raise
-        print(f"⚠️  {error}; another selector refreshes it", file=sys.stderr)
-        return False
-    return True
+        row = next((r for r in api.machines() if r.get("id") == machine_id), None)
+        try:
+            recorded = float(metadata_of(row).get(LAST_USED_KEY, "0"))
+        except ValueError:
+            recorded = 0.0
+        if time.time() - recorded > LAST_USED_FRESH_SECONDS:
+            raise
+        log(f"warm source {machine_id}: last-used write throttled (429); a peer recorded it "
+            f"{int(time.time() - recorded)}s ago")
 
 
 def ensure(api, node_fp, py_fp, owner, *, base=BASE_DONOR, ttl=1800, wait=3600, timeout=600):
@@ -380,7 +361,7 @@ def ensure(api, node_fp, py_fp, owner, *, base=BASE_DONOR, ttl=1800, wait=3600, 
     existing = find_named(api, machine_name)
     if existing:
         need(metadata_of(existing).get(SET_KEY) == set_id, f"{machine_name} is not tagged as this set's warm source")
-        touch_last_used(api, existing)
+        touch_last_used(api, existing["id"])
         return set_id, machine_name, volume_name
     donor = base_donor(api, base)
     if not claim_acquire(api, donor["id"], set_id, owner, ttl, wait):
@@ -388,7 +369,7 @@ def ensure(api, node_fp, py_fp, owner, *, base=BASE_DONOR, ttl=1800, wait=3600, 
     try:
         existing = find_named(api, machine_name)
         if existing:  # a peer created it while this request waited
-            touch_last_used(api, existing)
+            touch_last_used(api, existing["id"])
             return set_id, machine_name, volume_name
         mounts = (donor.get("config") or {}).get("mounts") or []
         need(len(mounts) == 1 and mounts[0].get("volume"), "base donor must mount exactly one volume")

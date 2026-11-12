@@ -10,7 +10,6 @@ nonces, metadata, Machines, volumes, snapshots); no flyctl, network or credentia
 """
 from __future__ import annotations
 
-import email.utils
 import http.server
 import json
 import os
@@ -42,7 +41,6 @@ class FakeFly:
         self.snapshots = {}
         self.leases = {}
         self.log = []
-        self.throttle_metadata_writes = 0  # next N metadata writes answer 429 (Fly rate limit)
         self.add_volume("vol_base00000001", "cloudbench_data", attached="0b0000000000aa")
         self.snapshots["vol_base00000001"] = [
             {"id": "vs_old", "status": "created", "created_at": "2026-10-01T00:00:00Z", "size": 40},
@@ -114,9 +112,6 @@ class FakeFly:
                         self.leases.pop(mid)
                     return 200, {}
                 if rest and rest[0] == "metadata":
-                    if method == "POST" and self.throttle_metadata_writes > 0:
-                        self.throttle_metadata_writes -= 1
-                        return 429, {"error": "rate limit exceeded"}
                     if self.lease_held(mid, nonce):
                         return 409, {"error": "lease currently held"}
                     if method == "POST":
@@ -202,6 +197,48 @@ class FakeApiCase(unittest.TestCase):
 
 
 class WarmSource(FakeApiCase):
+    def test_metadata_write_backs_off_through_a_rate_limited_burst(self):
+        # PR #1928 smoke: 13 concurrent jobs wrote last-used metadata on one warm source and Fly answered
+        # 429; the write retries with backoff, and a 429 that never clears still fails the selection.
+        mid = self.donor
+        self.fake.add_machine(mid, "cloudbench-warm", "stopped")
+        real = self.fake.handle
+        throttled = {"left": 2}
+
+        def handle(method, path, body, nonce):
+            if "/metadata/" in path and method == "POST" and throttled["left"] > 0:
+                throttled["left"] -= 1
+                return 429, {"error": "rate limited"}
+            return real(method, path, body, nonce)
+
+        self.fake.handle = handle
+        self.api.write_metadata(mid, self.mod["LAST_USED_KEY"], "123")
+        self.assertEqual("123", self.meta(mid)[self.mod["LAST_USED_KEY"]])
+        self.assertEqual(0, throttled["left"])
+        throttled["left"] = self.mod["RATE_LIMIT_ATTEMPTS"]
+        with self.assertRaisesRegex(self.mod["WarmSourceError"], "HTTP 429"):
+            self.api.write_metadata(mid, self.mod["LAST_USED_KEY"], "456")
+
+    def test_ensure_accepts_a_peer_fresh_last_used_when_fly_keeps_throttling(self):
+        # PR #1928 smoke: one of 13 jobs still got 429 after the client's backoff. A peer's write in the same
+        # burst keeps the set fresh, so ensure() succeeds; a stale value still fails the selection.
+        set_id, machine_name, _ = self.mod["names"](NODE_A, PY_A)
+        mid = "0c0000000000bb"
+        self.fake.add_machine(mid, machine_name, "stopped", metadata={
+            self.mod["SET_KEY"]: set_id, self.mod["LAST_USED_KEY"]: str(int(time.time()) - 30)})
+        real = self.fake.handle
+
+        def handle(method, path, body, nonce):
+            if "/metadata/" in path and method == "POST":
+                return 429, {"error": "rate limited"}
+            return real(method, path, body, nonce)
+
+        self.fake.handle = handle
+        self.assertEqual(machine_name, self.mod["ensure"](self.api, NODE_A, PY_A, "devbox-1")[1])
+        self.meta(mid)[self.mod["LAST_USED_KEY"]] = str(int(time.time()) - 3600)
+        with self.assertRaisesRegex(self.mod["WarmSourceError"], "HTTP 429"):
+            self.mod["ensure"](self.api, NODE_A, PY_A, "devbox-1")
+
     def test_names_are_per_dependency_set_and_never_task_shaped(self):
         set_a, machine_a, volume_a = self.mod["names"](NODE_A, PY_A)
         set_b, machine_b, _ = self.mod["names"](NODE_B, PY_B)
@@ -318,48 +355,6 @@ class WarmSource(FakeApiCase):
         self.assertEqual(again.returncode, 0, again.stderr)
         self.assertEqual((len(self.fake.machines), len(self.fake.volumes)), (machines, volumes))
         self.assertGreater(int(metadata[self.mod["LAST_USED_KEY"]]), 1)
-
-    def test_ensure_rides_out_fly_metadata_rate_limits_and_still_bounds_them(self):
-        # Deploy smoke 2026-11-11: 15 concurrent jobs recorded LAST_USED_KEY on one source,
-        # Fly answered 429 and every job aborted "could not select this dependency set's warm source".
-        set_a, machine_a, volume_a = self.mod["names"](NODE_A, PY_A)
-        first = self.run_cli("ensure", "--node-fp", NODE_A, "--py-fp", PY_A, "--owner", "devbox-1")
-        self.assertEqual(first.returncode, 0, first.stderr)
-        row = next(m for m in self.fake.machines.values() if m["name"] == machine_a)
-        row["config"]["metadata"][self.mod["LAST_USED_KEY"]] = "1"
-        self.fake.throttle_metadata_writes = self.mod["RATE_LIMIT_ATTEMPTS"] - 1
-        again = self.run_cli("ensure", "--node-fp", NODE_A, "--py-fp", PY_A, "--owner", "devbox-2")
-        self.assertEqual(again.returncode, 0, again.stderr)
-        self.assertEqual(again.stdout.split(), [set_a, machine_a, volume_a])
-        self.assertGreater(int(row["config"]["metadata"][self.mod["LAST_USED_KEY"]]), 1)
-        self.assertEqual(self.fake.throttle_metadata_writes, 0)
-        # A fresh stamp needs no write: the next selectors in the same burst never touch Fly.
-        writes = sum(1 for method, path in self.fake.log if method == "POST" and "/metadata/" in path)
-        self.fake.throttle_metadata_writes = 10 ** 6
-        burst = self.run_cli("ensure", "--node-fp", NODE_A, "--py-fp", PY_A, "--owner", "devbox-3", timeout=60)
-        self.assertEqual(burst.returncode, 0, burst.stderr)
-        self.assertEqual(writes, sum(1 for method, path in self.fake.log if method == "POST" and "/metadata/" in path))
-        # A stale stamp under a persistent limit retries a bounded number of times, then still selects.
-        row["config"]["metadata"][self.mod["LAST_USED_KEY"]] = "1"
-        limited = self.run_cli("ensure", "--node-fp", NODE_A, "--py-fp", PY_A, "--owner", "devbox-4", timeout=60)
-        self.assertEqual(limited.returncode, 0, limited.stderr)
-        self.assertEqual(limited.stdout.split(), [set_a, machine_a, volume_a])
-        self.assertIn("HTTP 429", limited.stderr)
-        self.assertEqual(row["config"]["metadata"][self.mod["LAST_USED_KEY"]], "1")
-
-    def test_rate_limit_delay_honours_both_retry_after_forms_and_the_budget(self):
-        delay = self.mod["rate_limit_delay"]
-        cap = self.mod["RATE_LIMIT_MAX_DELAY_SECONDS"]
-        self.assertEqual(delay("3", 0), 3.0)
-        self.assertIsNone(delay(str(int(cap) + 52), 0))  # never retry before the server allows
-        now = 1_800_000_000.0
-        soon = email.utils.formatdate(now + 4, usegmt=True)
-        self.assertAlmostEqual(delay(soon, 0, now=now), 4.0, delta=1.0)
-        self.assertIsNone(delay(email.utils.formatdate(now + 120, usegmt=True), 0, now=now))
-        self.assertEqual(delay(email.utils.formatdate(now - 30, usegmt=True), 0, now=now), 0.0)
-        for attempt in range(6):  # no header: capped jittered backoff
-            self.assertTrue(0 < delay(None, attempt) <= cap)
-            self.assertTrue(0 < delay("garbage", attempt) <= cap)
 
     def test_ensure_reuses_an_interrupted_create_volume_and_waits_out_a_peer_claim(self):
         set_b, machine_b, volume_b = self.mod["names"](NODE_B, PY_B)

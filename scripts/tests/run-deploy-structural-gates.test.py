@@ -2027,6 +2027,22 @@ if __name__ == "__main__":
                          [("bash-split", "FLAKY", 2)])
         self.assertTrue(rows[0]["log"].endswith("/bash-split[2-of-2].log"))
 
+    def test_flaky_detail_keeps_failure_headers_inside_the_progress_tail(self) -> None:
+        # PR #1928: the progress row keeps only the detail's tail; a long traceback must not cut the
+        # "FAIL: name (module.Class.name)" header that suite-level FLAKY attribution matches.
+        sys.path.insert(0, str(ROOT / "scripts"))
+        import deploy_gate_progress as progress
+        first = ("FAIL: test_a (__main__.C.test_a)\nTraceback (most recent call last):\n"
+                 + "  frame\n" * 2000 + "AssertionError: boom\nRan 3 tests in 0.1s\n\nFAILED (failures=1)\n")
+        other = "ERROR: test_b (__main__.D.test_b)\nTraceback (most recent call last):\n  frame\n"
+        detail = self.module.flaky_detail(["suite[1/2]", "suite[2/2]"], [other, first])
+        tail = detail[-progress.DETAIL_LIMIT:]
+        self.assertTrue(detail.startswith("passed on rerun: suite[1/2], suite[2/2]\n" + first))
+        # Every flaky shard's failure stays attributable, not only the last shard's.
+        self.assertIn("FAIL: test_a (__main__.C.test_a)", tail)
+        self.assertIn("ERROR: test_b (__main__.D.test_b)", tail)
+        self.assertEqual("passed on rerun: suite\nno headers", self.module.flaky_detail(["suite"], ["no headers"]))
+
     def test_failure_parser_names_only_complete_own_unittest_failures(self) -> None:
         parse = self.module.failed_unittest_ids
         python = (sys.executable, "scripts/tests/x.test.py")

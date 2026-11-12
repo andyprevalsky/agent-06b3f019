@@ -2,7 +2,10 @@ import { readFileSync } from 'fs';
 import { join } from 'path';
 
 /** Rose contact phone number */
-export const ROSE_PHONE = '+14154498072';
+export const ROSE_PHONE =
+  process.env.SMS_PROVIDER === 'linq'
+    ? (process.env.LINQ_FROM_PHONE ?? '+14154498072')
+    : '+14154498072';
 
 /** Rose contact email */
 export const ROSE_EMAIL = 'rose@roselabs.ai';

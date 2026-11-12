@@ -34,7 +34,7 @@ export function isScreenshotFile(file: File): boolean {
   return file.type.startsWith('image/');
 }
 
-function markdownAlt(name: string): string {
+export function markdownAlt(name: string): string {
   return name.replace(/[[\]\n]/g, ' ').trim() || 'screenshot';
 }
 
