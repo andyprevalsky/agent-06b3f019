@@ -2043,6 +2043,23 @@ def isolated_successor_resources_disjoint(prior, successor, root, *, audit_seals
                      and fields(raw(canonical/'expected-fresh'/name))=={'clone_name':name,'source_machine_id':row['source_machine_id']},
                      'typed42 successor unallocated native authority')
                 continue  # The sealed native producer verified exact-name absence before release.
+            if not machine:
+                # A clone whose Volume was created but whose Machine the provider never launched
+                # (e.g. insufficient capacity for the existing volume): only that fresh Volume exists.
+                name=row.get('clone_name')
+                need(set(row)=={'version','fleet_owner_token','run_id','app','clone_name','source',
+                                'source_machine_id','machine_id','volume_id','disposition'}
+                     and row.get('version')=='1' and row.get('source')=='fresh-clone' and row.get('machine_id')==''
+                     and row.get('fleet_owner_token')==owner and row.get('run_id')==fleet.name
+                     and row.get('app')==meta.get('app') and isinstance(name,str)
+                     and re.fullmatch('cloudbench-[A-Za-z0-9._-]+',name) and path.name==name
+                     and isinstance(row.get('source_machine_id'),str) and re.fullmatch('[0-9a-f]{14}',row['source_machine_id'])
+                     and fields(raw(canonical/'expected-fresh'/name))=={'clone_name':name,'source_machine_id':row['source_machine_id']}
+                     and isinstance(volume,str) and re.fullmatch('vol_[A-Za-z0-9]+',volume)
+                     and volume not in old_volumes and volume not in seen_volumes,
+                     'typed42 successor overlaps retained allocation')
+                seen_volumes.add(volume)
+                continue
             need(isinstance(machine,str) and re.fullmatch('[0-9a-f]{14}',machine)
                  and isinstance(volume,str) and re.fullmatch('vol_[A-Za-z0-9]+',volume)
                  and row.get('fleet_owner_token')==owner and row.get('run_id')==fleet.name

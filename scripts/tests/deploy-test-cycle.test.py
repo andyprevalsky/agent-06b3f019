@@ -12180,6 +12180,29 @@ class NativeObservationLoss42FreshIsolation(unittest.TestCase):
         with self.assertRaises(ValueError):native.isolated_successor_resources_disjoint(prior,successor,root)
         install('b'*14,'vol_new');(audit/'fresh/clone').write_text('tampered=1\n')
         with self.assertRaises(ValueError):native.isolated_successor_resources_disjoint(prior,successor,root)
+        # A fresh clone whose Volume was created but whose Machine never launched (PR #1865 round 60).
+        def install_volume_only(volume, **changes):
+            (audit/'meta').write_text(fields(dict(fleet_owner_token=owner,workspace_root=str(root),run_id=fleet.name,app='bench-app')))
+            row=dict(version='1',fleet_owner_token=owner,run_id=fleet.name,app='bench-app',clone_name='cloudbench-clone',
+                     source='fresh-clone',source_machine_id='c'*14,machine_id='',volume_id=volume,
+                     disposition='destroyed-provider-retained')
+            row.update(changes)
+            (audit/'expected-fresh').mkdir(exist_ok=True)
+            (audit/'expected-fresh/cloudbench-clone').write_text(fields(dict(clone_name='cloudbench-clone',source_machine_id='c'*14)))
+            (audit/'fresh/clone').unlink(missing_ok=True);(audit/'fresh/cloudbench-clone').write_text(fields(row))
+            if local.exists():shutil.rmtree(local)
+            shutil.copytree(audit,local);digest=hashlib.sha256()
+            for path in sorted(local.rglob('*'),key=lambda p:str(p.relative_to(local))):
+                if path.is_file():
+                    for value in (str(path.relative_to(local)).encode(),path.read_bytes()):digest.update(len(value).to_bytes(8,'big'));digest.update(value)
+            seal=digest.hexdigest();(local/'source-audit').write_text(fields(dict(path=str(audit),sha256=seal)))
+            c.write(fleet/'_batch/lifecycle.json',dict(fleet_owner_token=owner,audit_sha256=seal))
+        install_volume_only('vol_new')
+        native.isolated_successor_resources_disjoint(prior,successor,root)
+        for volume,changes in [('vol_original',{}),('vol_copy',{}),('vol_new',{'source':'pool'}),
+                               ('vol_new',{'fleet_owner_token':'d'*32}),('vol_new',{'source_machine_id':'d'*14})]:
+            install_volume_only(volume,**changes)
+            with self.assertRaises(ValueError):native.isolated_successor_resources_disjoint(prior,successor,root)
 
 
 class UserDeployQuarantine(unittest.TestCase):
