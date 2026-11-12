@@ -26,6 +26,16 @@
  *   0 running agents → hidden (brief "All agents finished" after the last one)
  *   N running        → "Running N agents" ⇄ expanded live hierarchy
  *
+ * TASK COMPLETED BAR (TaskCompletedBar, attached below the banner, directly
+ *   above the query box):
+ *   viewed top-level agent COMPLETED → "Task Completed" · "Archive Agent"
+ *   anything else                    → hidden
+ *   Archive Agent → the sidebar's archive action → selection clears
+ *
+ *   ┌ BackgroundAgentsBanner ┐  (only while agents run / are paused)
+ *   ├ TaskCompletedBar       ┤  (only for a COMPLETED top-level agent)
+ *   └ QueryInput box         ┘
+ *
  * TEST OBSERVABILITY:
  *   terminal-input-area[data-chat-mode] mirrors the rendered chat/agent mode
  *   transition without changing interaction or visual behavior.
@@ -58,6 +68,7 @@ import {
   PinnedQuestionMount,
   NewAgentLocation,
   QueryInput,
+  TaskCompletedBar,
   useAppView,
   useOpenCodeAgent,
 } from '@/features/terminal-component-group';
@@ -301,7 +312,12 @@ function ChatQueryInputBox({ drip, models, modelsLoading, canSubmit }: ChatQuery
     <div className="relative z-10">
       <QueryInput
         liftAboveApps
-        topAttachment={<ComposerBackgroundAgents />}
+        topAttachment={
+          <>
+            <ComposerBackgroundAgents />
+            <ComposerTaskCompletedBar />
+          </>
+        }
         value={a.messageInput}
         onChange={actions.onChange}
         onSubmit={actions.onSubmit}
@@ -355,6 +371,19 @@ function ComposerBackgroundAgents() {
       selectedAgentId={a.selectedAgentId}
       messages={a.messages}
       onNavigate={actions.onNavigate}
+    />
+  );
+}
+
+function ComposerTaskCompletedBar() {
+  const a = useComposerAgent();
+  const actions = useComposerActions();
+  return (
+    <TaskCompletedBar
+      agent={a.agentDetail}
+      selectedAgentId={a.selectedAgentId}
+      onSelectAgent={actions.onSelectAgent}
+      onRefreshAgents={actions.onRefreshAgents}
     />
   );
 }
