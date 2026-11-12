@@ -15,7 +15,7 @@ import {
   describeProbes,
   sampleCerebrasChatProbes,
 } from './cerebras.latency.cases';
-import { fetchLiveCerebrasModelIds } from './cerebras.live.cases';
+import { fetchLiveCerebrasModelIds, retryAfterMs } from './cerebras.live.cases';
 
 const OK_SSE = [
   'data: {"choices":[{"index":0,"delta":{"content":"{\\"reasoning\\":\\"brief\\",\\"response\\":\\"done\\"}"}}]}',
@@ -52,17 +52,31 @@ async function assertModelsReadRetriesOnlyTransientStatuses(): Promise<void> {
   const originalFetch = globalThis.fetch;
   const modelsUrl = CEREBRAS_API_URL.replace('/chat/completions', '/models');
   const statuses: number[] = [];
-  const serve = (queue: number[]) => {
+  const serve = (queue: number[], headers: Record<string, string> = {}) => {
     globalThis.fetch = (async (input: string | URL | Request) => {
       assert.equal(String(input), modelsUrl);
       const status = queue.shift() ?? 200;
       statuses.push(status);
       return status === 200
         ? new Response(JSON.stringify({ data: [{ id: 'qwen-3.8-27b' }] }), { status })
-        : new Response('{"type":"too_many_requests_error"}', { status });
+        : new Response('<!doctype html><title>error code: 1015</title>', { status, headers });
     }) as typeof fetch;
   };
+  assert.equal(retryAfterMs(null), null);
+  assert.equal(retryAfterMs('soon'), null);
+  assert.equal(retryAfterMs('2'), 2_000);
+  assert.equal(retryAfterMs('600'), 30_000);
+  assert.equal(retryAfterMs(new Date(10_000).toUTCString(), 5_000), 5_000);
   try {
+    // Cloudflare's edge 429 names its own wait; the read honors it, then recovers.
+    serve([429], { 'retry-after': '1' });
+    const started = Date.now();
+    const limited = await fetchLiveCerebrasModelIds(modelsUrl, 'blackbox-cerebras-key');
+    assert.deepEqual([...limited], ['qwen-3.8-27b']);
+    assert.deepEqual(statuses, [429, 200]);
+    assert.ok(Date.now() - started >= 1_000, 'Retry-After must be waited before the next read');
+
+    statuses.length = 0;
     serve([503]);
     const ids = await fetchLiveCerebrasModelIds(modelsUrl, 'blackbox-cerebras-key');
     assert.deepEqual([...ids], ['qwen-3.8-27b']);
@@ -72,13 +86,15 @@ async function assertModelsReadRetriesOnlyTransientStatuses(): Promise<void> {
     serve([401]);
     await assert.rejects(
       fetchLiveCerebrasModelIds(modelsUrl, 'blackbox-cerebras-key'),
-      /Cerebras \/models must be reachable for the live probe: HTTP 401/
+      /Cerebras \/models must be reachable for the live probe: HTTP 401 after 1 attempt\(s\) .*cf-error=1015/
     );
     assert.deepEqual(statuses, [401]);
   } finally {
     globalThis.fetch = originalFetch;
   }
-  process.stdout.write('PASS Cerebras /models read retries transient statuses only\n');
+  process.stdout.write(
+    'PASS Cerebras /models read honors Retry-After and retries transient statuses only\n'
+  );
 }
 
 async function run(): Promise<void> {
