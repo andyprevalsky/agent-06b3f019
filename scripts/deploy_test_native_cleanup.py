@@ -1186,10 +1186,59 @@ def mixed_exclusion_inventory(receipt, request, checks):
     return skips
 
 
+def partial_parent_binding(job, parent, log_owner):
+    """Campaign-recorded run identity, or (for a sibling TERM'd by the breach before the campaign recorded
+    it) the exact identity from the job's own hash-bound log. Never a partial or mixed identity."""
+    recorded = (job.get('fleet_dir'), job.get('run_id'), job.get('fleet_owner_token'))
+    if recorded == (str(parent), parent.name, log_owner):
+        return True
+    return (recorded == (None, None, None) and job.get('status') == 'cancelled'
+            and job.get('task_status') == 'INFRA_ERROR' and isinstance(log_owner, str)
+            and re.fullmatch('[0-9a-f]{32}', log_owner) is not None)
+
+
+def partial_participant_allocated(fleet, benches):
+    """Whether a partial-campaign participant reached task allocation (any per-bench allocation artifact)."""
+    return any((fleet/bench['name']/name).exists() or (fleet/bench['name']/name).is_symlink()
+               for bench in benches for name in ('cloudbench-run.json', '.cid', 'primary.ids', 'worker-clones.ids'))
+
+
+def audit_seal_accepted(life, seal, *, recovered, recovery_sealed):
+    """The lifecycle seal, or an empty one for a failed run whose audit exact-owner recovery sealed later."""
+    if life.get('audit_sha256') == seal:
+        return True
+    return (recovered or recovery_sealed) and life.get('audit_sha256') == '' and life.get('status') == 'failed'
+
+
+def retired_hub_accepted(meta, runs):
+    """run-bench-fleet records retired-exact-owner-verified-absent only after proving the exact Hub birth
+    gone; re-check that absence now. Any other disposition takes the retained-Hub path."""
+    if meta.get('hub_disposition') != 'retired-exact-owner-verified-absent':
+        return False
+    need(Path(meta.get('hub_owner_file', '')).parent == runs / '_hub'
+         and re.fullmatch('[0-9a-f]{32}', meta.get('hub_owner_token', '')) is not None
+         and str(meta.get('hub_pid', '')).isdigit(), 'retired Hub identity')
+    retired_local_process(dict(pid=int(meta['hub_pid']), birth=meta.get('hub_pid_start')))
+    return True
+
+
+def relay_leases_retired(leases, document):
+    """A breach after tasks started leaves the shared relay's lease records: each must be terminal
+    (closed/abandoned) with its exact owner process gone. Nothing else may remain."""
+    need(not leases.is_symlink() and (not leases.exists() or leases.is_dir()), 'partial campaign relay consumers remain')
+    for lease in sorted(leases.iterdir()) if leases.exists() else ():
+        value = document(lease)
+        need(lease.suffix == '.json' and value.get('state') in ('closed', 'abandoned')
+             and type(value.get('owner_pid')) is int and isinstance(value.get('owner_start'), str),
+             'partial campaign relay consumers remain')
+        retired_local_process(dict(pid=value['owner_pid'], birth=value['owner_start']))
+
+
 def partial_campaign_jobs(root, campaign, request, receipt, adapter, summary, proof):
     """Typed pre-execution closure, never task/financial credit or a guessed exit."""
     contract = proof['unstarted_campaign']
-    need(set(proof) == {'kind','owner','request_token','source','receipt_sha256','worker_result_sha256',
+    # recovered_runtime is optional: exact-owner recovered participants bind their recaptured evidence.
+    need(set(proof) - {'recovered_runtime'} == {'kind','owner','request_token','source','receipt_sha256','worker_result_sha256',
                        'confirmed_at','observed_by','layout','campaign','files','unstarted_campaign'},
          'partial campaign proof fields')
     need(isinstance(contract, dict) and set(contract) == {'kind','version','producer_sha256','unstarted_jobs','credit'}
@@ -1223,11 +1272,16 @@ def partial_campaign_jobs(root, campaign, request, receipt, adapter, summary, pr
                  'partial campaign unstarted acquired identity or log')
             unstarted.append(job['job_id'])
         else:
-            need(type(job['controller_pid']) is int and job['controller_pid'] > 1
-                 and type(job['controller_exit_code']) is int and job['controller_exit_code'] in (1,143)
-                 # A job that failed on its own after the campaign declared the breach is recorded cancelled.
-                 and job['status'] in (('failed', 'cancelled') if job['controller_exit_code'] == 1 else ('cancelled',))
-                 and job.get('task_status') == 'INFRA_ERROR' and job.get('infra_failure') is True,
+            code = job.get('controller_exit_code')
+            infra = (type(code) is int and code in (1, 143)
+                     # A job that failed on its own after the campaign declared the breach is recorded cancelled.
+                     and job['status'] in (('failed', 'cancelled') if code == 1 else ('cancelled',))
+                     and job.get('task_status') == 'INFRA_ERROR' and job.get('infra_failure') is True)
+            # A sibling whose task already PASSED before the breach (exit 0), or that passed and was then
+            # TERM'd during the campaign's cancellation (143), keeps that genuine outcome; no credit is granted.
+            passed = (type(code) is int and job.get('task_status') == 'PASSED' and job.get('infra_failure') is False
+                      and ((code == 0 and job['status'] == 'passed') or (code == 143 and job['status'] == 'cancelled')))
+            need(type(job['controller_pid']) is int and job['controller_pid'] > 1 and (infra or passed),
                  'partial campaign launched terminal outcome')
             launched.append(job)
     stop = summary.get('infra_stop', {})
@@ -1520,7 +1574,7 @@ def validate(receipt, owner, proof):
                      'preallocation active/skip inventory')
             expected_cases.update(dict.fromkeys(skips, 'SKIP'))
             need(summary['status'] in {'failed','cancelled'} and not proof.get('purpose')
-                 and not proof.get('recovered_runtime') and (mixed or not summary.get('workspace_binding'))
+                 and (partial or not proof.get('recovered_runtime')) and (mixed or not summary.get('workspace_binding'))
                  and receipt['cases'] == expected_cases,
                  'preallocation outcomes')
             supervision=preallocation_processes(root,runs,campaign,request,receipt,adapter,document,bound)
@@ -1581,8 +1635,7 @@ def validate(receipt, owner, proof):
                  and job['controller_pid'] > 1 and one[0].name.rsplit('-', 1)[-1] == str(job['controller_pid']),
                  'campaign parent identity')
             if partial:
-                need(job.get('fleet_dir') == str(one[0]) and job.get('run_id') == one[0].name
-                     and job.get('fleet_owner_token') == preallocation_links[one[0]]['owner'],
+                need(partial_parent_binding(job, one[0], preallocation_links[one[0]].get('owner')),
                      'partial campaign original parent binding')
                 if job['status'] == 'cancelled' and job['controller_exit_code'] == 143:
                     need(sum(re.fullmatch(r'⚰️  controller received TERM \([0-9]{2}:[0-9]{2}:[0-9]{2}\)', line)
@@ -1735,7 +1788,8 @@ def validate(receipt, owner, proof):
             from deploy_test_native_admission import validate_parent
             validate_parent(fleet, life, benches, run, root, bound, document, tree)
         provenance_path, matrix_path = fleet / 'execution-provenance.json', fleet / 'execution-task-matrix.json'
-        if (preallocation or (mixed and fleet in zero_parents) or (failed_canary and zero_allocation) or admission_parent or fleet in cancelled_parent_zero) and not provenance_path.exists() and not matrix_path.exists():
+        partial_unallocated = partial and not partial_participant_allocated(fleet, benches)
+        if (preallocation or (mixed and fleet in zero_parents) or (failed_canary and zero_allocation) or admission_parent or fleet in cancelled_parent_zero or partial_unallocated) and not provenance_path.exists() and not matrix_path.exists():
             pass  # Positive native admission boundary and sealed ownership; absence alone proves nothing.
         else:
             provenance, matrix = document(provenance_path), document(matrix_path)
@@ -1743,17 +1797,18 @@ def validate(receipt, owner, proof):
                  and provenance['base_sha'] == receipt['source']['head'] and provenance['workspace_patch_sha256'] == 'none', 'execution source')
             need(len(benches) == len(matrix['tasks'])
                  and {b['name'] for b in benches} == {t['name'] for t in matrix['tasks']}, 'native inventory')
+        partial_allocated = False
         if partial:
             link = preallocation_links.get(fleet) if fleet in parents else canary_links.get(fleet)
-            need((fleet in parents or link and link['parent'] in parents)
-                 and isolated_canary_release(fleet, life, benches, run, root, receipt, proof, link, bound, tree),
-                 'partial campaign participant zero allocation')
-            for bench in benches:
-                for name in ('cloudbench-run.json','.cid','primary.ids','worker-clones.ids'):
-                    path = fleet/bench['name']/name
-                    need(not path.exists() and not path.is_symlink(), 'partial campaign task allocation artifact')
-            if fleet in parents:
-                zero_parents.add(fleet)
+            need(fleet in parents or link and link['parent'] in parents, 'partial campaign participant')
+            partial_allocated = partial_participant_allocated(fleet, benches)
+            if not partial_allocated:
+                need(isolated_canary_release(fleet, life, benches, run, root, receipt, proof, link, bound, tree),
+                     'partial campaign participant zero allocation')
+                if fleet in parents:
+                    zero_parents.add(fleet)
+            # A launched participant (parent or linked canary) that allocated before the breach is held to the full native audit below,
+            # exactly like a terminal campaign-v1 participant; no execution or financial credit is granted.
         if isolated:
             current_excluded = isolated_execution(fleet, life, root, receipt, proof, bound, document, tree,
                 execution_clock=(adapter['started_at'], adapter['finished_at']) if observation_loss else None)
@@ -1768,8 +1823,9 @@ def validate(receipt, owner, proof):
         seal = tree(audit)
         need(binding == {'path': str(canonical), 'sha256': seal}
              and tree(canonical) == seal
-             and (life['audit_sha256'] == seal or str(fleet) in recovery
-                  and life['audit_sha256'] == '' and life['status'] == 'failed'), 'native audit seal')
+             and audit_seal_accepted(life, seal, recovered=str(fleet) in recovery,
+                                     recovery_sealed=partial and fields(bound(audit / 'meta')).get('hub_disposition')
+                                     == 'retired-exact-owner-verified-absent'), 'native audit seal')
         meta = fields(bound(audit / 'meta'))
         need(meta.get('status') == 'provider-teardown-verified' and meta.get('version') == '1'
              and meta.get('fleet_owner_token') == owner_token and meta.get('run_id') == fleet.name
@@ -1803,6 +1859,9 @@ def validate(receipt, owner, proof):
         else:
             need(disposable.get('guest_cleanup_missing') is False
                  and disposable.get('runtime_evidence_missing') is False, 'guest cleanup')
+        if retired_hub_accepted(meta, runs):
+            audit_seals[str(audit)] = seal
+            continue
         need(meta['hub_disposition'] == 'retained-exact-owner-transfer-required', 'unsupported Hub disposition')
         hub = Path(meta['hub_owner_file'])
         need(hub.parent == runs / '_hub', 'Hub root')
@@ -1839,8 +1898,7 @@ def validate(receipt, owner, proof):
         else:
             location = Path(document(campaign/'shared-relay-location.json')['directory'])
             for leases in (campaign/'shared-relay/leases',location/'leases'):
-                need(not leases.is_symlink() and (not leases.exists() or leases.is_dir() and not any(leases.iterdir())),
-                     'partial campaign relay consumers remain')
+                relay_leases_retired(leases, document)
     need(isolated or set(recovered) == set(recovery), 'recovered fleet closure')
     if isolated:
         need(set(proof['execution_quiescence']) == set(excluded), 'execution observation closure')

@@ -11636,6 +11636,24 @@ class NativeUnstartedCampaign(unittest.TestCase):
             with self.assertRaises(ValueError):
                 partial_campaign_jobs(ROOT,campaign,request,receipt,{},changed,proof)
 
+    def test_siblings_that_passed_before_or_during_the_breach_keep_their_outcome(self):
+        from deploy_test_native_cleanup import partial_campaign_jobs
+        with tempfile.TemporaryDirectory() as tmp:
+            campaign=Path(tmp); request,receipt,summary,proof=self.fixture(campaign)
+            summary['jobs'][1].update(status='passed',controller_exit_code=0,task_status='PASSED',infra_failure=False)
+            self.assertEqual(partial_campaign_jobs(ROOT,campaign,request,receipt,{},summary,proof),
+                             frozenset(['r001-j0003']))
+            summary['jobs'][1].update(status='cancelled',controller_exit_code=143)
+            self.assertEqual(partial_campaign_jobs(ROOT,campaign,request,receipt,{},summary,proof),
+                             frozenset(['r001-j0003']))
+            for changes in [dict(status='passed',controller_exit_code=1),dict(status='failed',controller_exit_code=0),
+                            dict(status='passed',controller_exit_code=0,infra_failure=True),
+                            dict(status='passed',controller_exit_code=0,task_status='FAILED'),
+                            dict(status='cancelled',controller_exit_code=0)]:
+                changed=copy.deepcopy(summary);changed['jobs'][1].update(changes)
+                with self.subTest(changes=changes),self.assertRaises(ValueError):
+                    partial_campaign_jobs(ROOT,campaign,request,receipt,{},changed,proof)
+
     def test_unstarted_claim_refuses_real_log_and_every_allocated_identity(self):
         from deploy_test_native_cleanup import partial_campaign_jobs
         with tempfile.TemporaryDirectory() as tmp:
@@ -11713,6 +11731,75 @@ class MixedExclusionInventory(unittest.TestCase):
                 mixed_exclusion_inventory(r, q, checks)
         with self.assertRaisesRegex(ValueError, 'mixed original exclusion inventory'):
             mixed_exclusion_inventory(receipt, request, checks + ['paid-task'])
+
+
+class PartialCampaignAfterTasksStarted(unittest.TestCase):
+    """An infra breach after tasks started (PR #1865 round 63): allocated, recovered and TERM'd participants."""
+    def test_parent_binding_accepts_recorded_or_unrecorded_cancelled_identity_only(self):
+        from deploy_test_native_cleanup import partial_parent_binding
+        parent = Path('/runs/20261112-192652-1260625'); owner = 'a'*32
+        self.assertTrue(partial_parent_binding(dict(fleet_dir=str(parent),run_id=parent.name,fleet_owner_token=owner), parent, owner))
+        unrecorded = dict(fleet_dir=None,run_id=None,fleet_owner_token=None,status='cancelled',task_status='INFRA_ERROR')
+        self.assertTrue(partial_parent_binding(unrecorded, parent, owner))
+        for changes in [dict(status='failed'), dict(task_status='PASSED'), dict(run_id=parent.name), dict(fleet_owner_token=owner)]:
+            with self.subTest(changes=changes):
+                self.assertFalse(partial_parent_binding(dict(unrecorded, **changes), parent, owner))
+        self.assertFalse(partial_parent_binding(unrecorded, parent, None))
+        self.assertFalse(partial_parent_binding(dict(fleet_dir=str(parent),run_id=parent.name,fleet_owner_token='b'*32), parent, owner))
+
+    def test_allocation_detection_uses_per_bench_artifacts(self):
+        from deploy_test_native_cleanup import partial_participant_allocated
+        with tempfile.TemporaryDirectory() as tmp:
+            fleet = Path(tmp); (fleet/'bench').mkdir(); benches=[dict(name='bench')]
+            self.assertFalse(partial_participant_allocated(fleet, benches))
+            for name in ('cloudbench-run.json', '.cid', 'primary.ids', 'worker-clones.ids'):
+                (fleet/'bench'/name).write_text('x')
+                self.assertTrue(partial_participant_allocated(fleet, benches)); (fleet/'bench'/name).unlink()
+            (fleet/'bench'/'.cid').symlink_to(fleet/'missing')
+            self.assertTrue(partial_participant_allocated(fleet, benches))
+
+    def test_audit_seal_accepts_empty_lifecycle_only_for_recovered_failed_runs(self):
+        from deploy_test_native_cleanup import audit_seal_accepted
+        self.assertTrue(audit_seal_accepted(dict(audit_sha256='s', status='verified'), 's', recovered=False, recovery_sealed=False))
+        failed = dict(audit_sha256='', status='failed')
+        self.assertFalse(audit_seal_accepted(failed, 's', recovered=False, recovery_sealed=False))
+        self.assertTrue(audit_seal_accepted(failed, 's', recovered=True, recovery_sealed=False))
+        self.assertTrue(audit_seal_accepted(failed, 's', recovered=False, recovery_sealed=True))
+        self.assertFalse(audit_seal_accepted(dict(failed, status='verified'), 's', recovered=False, recovery_sealed=True))
+        self.assertFalse(audit_seal_accepted(dict(failed, audit_sha256='other'), 's', recovered=True, recovery_sealed=True))
+
+    def test_retired_hub_requires_identity_and_current_absence(self):
+        import deploy_test_native_cleanup as native
+        runs = Path('/r/runs')
+        meta = dict(hub_disposition='retired-exact-owner-verified-absent', hub_owner_file='/r/runs/_hub/agent-link-server.1.x.owner',
+                    hub_owner_token='c'*32, hub_pid='4242', hub_pid_start='proc-start:abc-1:5')
+        with patch.object(native, 'retired_local_process') as gone:
+            self.assertTrue(native.retired_hub_accepted(meta, runs))
+            gone.assert_called_once_with(dict(pid=4242, birth='proc-start:abc-1:5'))
+            self.assertFalse(native.retired_hub_accepted(dict(meta, hub_disposition='retained-exact-owner-transfer-required'), runs))
+            for changes in [dict(hub_owner_file='/elsewhere/x.owner'), dict(hub_owner_token='short'), dict(hub_pid='x')]:
+                with self.subTest(changes=changes), self.assertRaises(ValueError):
+                    native.retired_hub_accepted(dict(meta, **changes), runs)
+        with patch.object(native, 'retired_local_process', side_effect=ValueError('native cleanup: exact local process remains live')):
+            with self.assertRaises(ValueError): native.retired_hub_accepted(meta, runs)
+
+    def test_relay_leases_must_be_terminal_with_their_owner_gone(self):
+        import deploy_test_native_cleanup as native
+        with tempfile.TemporaryDirectory() as tmp:
+            leases = Path(tmp)/'leases'
+            native.relay_leases_retired(leases, lambda p: json.loads(p.read_text()))  # absent directory
+            leases.mkdir()
+            def write(state, **extra):
+                (leases/'l.json').write_text(json.dumps(dict(state=state, owner_pid=4242, owner_start='proc-start:abc-1:5', **extra)))
+            with patch.object(native, 'retired_local_process') as gone:
+                for state in ('closed', 'abandoned'):
+                    write(state); native.relay_leases_retired(leases, lambda p: json.loads(p.read_text()))
+                gone.assert_called_with(dict(pid=4242, birth='proc-start:abc-1:5'))
+                write('open')
+                with self.assertRaises(ValueError): native.relay_leases_retired(leases, lambda p: json.loads(p.read_text()))
+            write('closed')
+            with patch.object(native, 'retired_local_process', side_effect=ValueError('native cleanup: exact local process remains live')):
+                with self.assertRaises(ValueError): native.relay_leases_retired(leases, lambda p: json.loads(p.read_text()))
 
 
 class NativeObservationLoss42(unittest.TestCase):
