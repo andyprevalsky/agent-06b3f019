@@ -307,12 +307,22 @@ export async function acquireCodeSandbox(
   };
 }
 
-/** Credential env a Claude Code CLI reads at start (claudeCodeSandboxAuth.ts + gateway base). */
+/**
+ * Env a running Claude Code CLI cannot adopt and must restart for: its
+ * credential (claudeCodeSandboxAuth.ts + gateway base) and its git commit
+ * identity (codeAgentGitIdentity.ts). A CLI started with another identity,
+ * or none (before the pushing account was injected), would keep committing
+ * as an author GitHub cannot link, which Vercel refuses to deploy.
+ */
 export const CLAUDE_CREDENTIAL_ENV_KEYS = [
   'ANTHROPIC_API_KEY',
   'ANTHROPIC_BASE_URL',
   'CLAUDE_CODE_CREDENTIALS',
   'CLAUDE_CODE_OAUTH_TOKEN',
+  'GIT_AUTHOR_EMAIL',
+  'GIT_AUTHOR_NAME',
+  'GIT_COMMITTER_EMAIL',
+  'GIT_COMMITTER_NAME',
 ] as const;
 
 /**

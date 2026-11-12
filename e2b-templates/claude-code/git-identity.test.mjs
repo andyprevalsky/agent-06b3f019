@@ -14,7 +14,7 @@
 // Contract:
 //  - a fresh clone is configured with the passed identity;
 //  - a resumed workspace an older server set to the unlinkable identity is
-//    corrected to the passed identity;
+//    corrected to the passed identity, and so is a project workspace;
 //  - a commit made without any identity env is authored by that account.
 //
 // Run by `back-end/src/tests/unit/ws-server-git-identity.test.ts` in /deploy.
@@ -112,7 +112,7 @@ function staleWorkspace(home, remote, env) {
   return workspace;
 }
 
-async function runServer(server, { root, home, remote }) {
+async function runServer(server, { root, home, remote, extraEnv = {} }) {
   const bin = join(root, "bin");
   mkdirSync(bin, { recursive: true });
   writeFileSync(join(bin, server.cli), "#!/bin/sh\nexec sleep 60\n", {
@@ -136,6 +136,7 @@ async function runServer(server, { root, home, remote }) {
       GIT_COMMITTER_NAME: IDENTITY.name,
       GIT_COMMITTER_EMAIL: IDENTITY.email,
       ...server.env,
+      ...extraEnv,
     },
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -212,6 +213,31 @@ for (const server of SERVERS) {
       const remote = remoteRepo(root, env);
       const workspace = staleWorkspace(home, remote, env);
       await runServer(server, { root, home, remote });
+      const result = commitWithoutIdentityEnv(workspace, env);
+      assert.deepEqual(result.config, IDENTITY);
+      assert.equal(result.author, expected);
+      assert.equal(result.committer, expected);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+  test(`${server.name}: a project workspace set to the unlinkable Rose Agent identity is corrected`, async () => {
+    const root = mkdtempSync(
+      join(tmpdir(), `rose-git-identity-${server.name}-`),
+    );
+    try {
+      const home = join(root, "home");
+      mkdirSync(home);
+      const env = bareEnv(home);
+      const remote = remoteRepo(root, env);
+      const workspace = staleWorkspace(home, remote, env);
+      // A project session restores its own checkout and passes no GITHUB_REPO_URL.
+      await runServer(server, {
+        root,
+        home,
+        remote,
+        extraEnv: { ROSE_PROJECT_WORKDIR: workspace, GITHUB_REPO_URL: "" },
+      });
       const result = commitWithoutIdentityEnv(workspace, env);
       assert.deepEqual(result.config, IDENTITY);
       assert.equal(result.author, expected);

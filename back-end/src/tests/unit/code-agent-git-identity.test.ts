@@ -14,7 +14,10 @@
  *  - author and committer are both set (Vercel and GitHub read either);
  *  - one GitHub call per token per process; a failure is retried, not cached;
  *  - an unresolvable account fails the spawn instead of committing as nobody;
- *  - both cloud spawn paths (Claude Code, Codex) give these envs to the sandbox.
+ *  - REST core exhausted (shared primary token): GraphQL `viewer`, same token;
+ *  - only github.com repositories get an identity;
+ *  - both cloud spawn paths (Claude Code, Codex) give these envs to the sandbox,
+ *    and a live Claude CLI started without them is restarted, not reused.
  */
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -26,9 +29,14 @@ import {
   codeSandboxGitIdentityEnvs,
   GitCommitIdentityError,
   githubNoreplyEmail,
+  isGithubRepoUrl,
   resetGitCommitIdentityCacheForTests,
   resolveGitCommitIdentity,
 } from '../../providers/codeAgentGitIdentity';
+import {
+  CLAUDE_CREDENTIAL_ENV_KEYS,
+  credentialEnvDigest,
+} from '../../providers/e2bCodeSessionSandbox';
 
 interface Call {
   url: string;
@@ -133,20 +141,130 @@ test('an unresolvable account fails loudly, is not cached, and leaks no token', 
     fetchImpl
   );
   assert.equal(envs.GIT_AUTHOR_EMAIL, '25310436+andyprevalsky@users.noreply.github.com');
-  assert.equal(calls.length, 2, 'the failure was retried on the next spawn');
+  assert.equal(calls.length, 3, 'REST + GraphQL both refused; the next spawn retried');
 
   const unreachable = (async () => {
     throw new Error('getaddrinfo ENOTFOUND api.github.com');
   }) as typeof fetch;
   await assert.rejects(
     resolveGitCommitIdentity('other-token', unreachable),
-    /GitHub \/user unreachable: getaddrinfo ENOTFOUND/
+    /api\.github\.com\/user unreachable: getaddrinfo ENOTFOUND/
   );
   const malformed = fakeGithub({ odd: { status: 200, body: { login: 'no-id' } } });
   await assert.rejects(
     resolveGitCommitIdentity('odd', malformed.fetchImpl),
     /no account id\/login/
   );
+});
+
+test('REST core quota exhausted: the same token resolves through GraphQL viewer', async () => {
+  resetGitCommitIdentityCacheForTests();
+  const seen: Array<{ url: string; authorization: string | null; body: string | null }> = [];
+  const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
+    const url = input instanceof Request ? input.url : input.toString();
+    seen.push({
+      url,
+      authorization: new Headers(init?.headers).get('Authorization'),
+      body: typeof init?.body === 'string' ? init.body : null,
+    });
+    if (url === 'https://api.github.com/user') {
+      return new Response(
+        JSON.stringify({ message: 'API rate limit exceeded for user ID 25310436.' }),
+        { status: 403 }
+      );
+    }
+    return new Response(
+      JSON.stringify({
+        data: { viewer: { databaseId: 25310436, login: 'andyprevalsky', name: null } },
+      }),
+      { status: 200 }
+    );
+  }) as typeof fetch;
+  const identity = await resolveGitCommitIdentity('push-token', fetchImpl);
+  assert.deepEqual(identity, {
+    login: 'andyprevalsky',
+    name: 'andyprevalsky',
+    email: '25310436+andyprevalsky@users.noreply.github.com',
+  });
+  assert.deepEqual(
+    seen.map((call) => [call.url, call.authorization]),
+    [
+      ['https://api.github.com/user', 'Bearer push-token'],
+      ['https://api.github.com/graphql', 'Bearer push-token'],
+    ],
+    'both lookups ask about the pushing token itself, never another pool member'
+  );
+  assert.match(seen[1].body ?? '', /viewer \{ databaseId login name \}/);
+});
+
+test('only github.com repositories get an identity; an empty direct URL defers to the project', async () => {
+  resetGitCommitIdentityCacheForTests();
+  const saved = process.env.GITHUB_TOKEN;
+  process.env.GITHUB_TOKEN = 'push-token';
+  try {
+    const github = fakeGithub({ 'push-token': { status: 200, body: ANDY } });
+    for (const other of [
+      'https://gitlab.com/o/r',
+      'git@gitlab.com:o/r.git',
+      '/home/user/local-repo',
+      'not a url',
+    ]) {
+      assert.deepEqual(
+        await codeSandboxGitIdentityEnvs(other, 'push-token', github.fetchImpl),
+        {},
+        other
+      );
+    }
+    assert.equal(github.calls.length, 0, 'no GitHub call for a repository GitHub does not host');
+    assert.equal(isGithubRepoUrl('git@github.com:Rose-Ai-Labs/rose.git'), true);
+    assert.equal(isGithubRepoUrl('https://www.github.com/Rose-Ai-Labs/rose'), true);
+    const project = await codeSandboxGithubEnvs(
+      '',
+      'https://github.com/Rose-Ai-Labs/rose',
+      '',
+      github.fetchImpl
+    );
+    assert.equal(project.GITHUB_TOKEN, undefined, 'an empty direct URL clones nothing');
+    assert.equal(
+      project.GIT_AUTHOR_EMAIL,
+      '25310436+andyprevalsky@users.noreply.github.com',
+      "an empty direct URL must not hide the project's repository"
+    );
+  } finally {
+    if (saved === undefined) delete process.env.GITHUB_TOKEN;
+    else process.env.GITHUB_TOKEN = saved;
+  }
+});
+
+test('a live Claude CLI started without this identity is refused on attach and restarted', async () => {
+  resetGitCommitIdentityCacheForTests();
+  const github = fakeGithub({ 'push-token': { status: 200, body: ANDY } });
+  const identity = await codeSandboxGitIdentityEnvs(
+    'https://github.com/Rose-Ai-Labs/rose',
+    'push-token',
+    github.fetchImpl
+  );
+  const credential = { ANTHROPIC_API_KEY: 'sk-test' };
+  // The spawn's attach digest (backend) vs the running ws-server's own env:
+  // ws-server.mjs credentialDigest() hashes the same keys over process.env and
+  // refuses the turn (`credential_changed`) when they differ, which restarts the CLI.
+  const spawnDigest = credentialEnvDigest(CLAUDE_CREDENTIAL_ENV_KEYS, {
+    ...credential,
+    ...identity,
+  });
+  const preFixCli = credentialEnvDigest(CLAUDE_CREDENTIAL_ENV_KEYS, credential);
+  const otherAccount = credentialEnvDigest(CLAUDE_CREDENTIAL_ENV_KEYS, {
+    ...credential,
+    ...identity,
+    GIT_AUTHOR_EMAIL: '1+someone@users.noreply.github.com',
+  });
+  assert.notEqual(spawnDigest.digest, preFixCli.digest, 'a CLI started before the fix restarts');
+  assert.notEqual(spawnDigest.digest, otherAccount.digest, 'a CLI of another account restarts');
+  for (const key of Object.keys(identity)) {
+    assert.ok(spawnDigest.keys.includes(key), `${key} is part of the attach digest`);
+  }
+  const sameCli = credentialEnvDigest(CLAUDE_CREDENTIAL_ENV_KEYS, { ...credential, ...identity });
+  assert.equal(spawnDigest.digest, sameCli.digest, 'a CLI already on this identity stays attached');
 });
 
 test('a session with nothing to push gets no identity and makes no GitHub call', async () => {

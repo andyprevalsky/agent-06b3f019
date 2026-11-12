@@ -687,9 +687,15 @@ export async function applyCheckpoint(
           // Mixed reset: index matches HEAD, the restored working files stay.
           'git reset -q',
           ...rebuildTracked,
-          // The pushing account's identity (codeAgentGitIdentity.ts), never a
-          // fixed address GitHub cannot link: Vercel blocks such commits.
+          // A sandbox that pushes carries the pushing account's identity
+          // (codeAgentGitIdentity.ts): record it, since an address GitHub cannot
+          // link makes Vercel block the commit. GIT_AUTHOR_* also beats repo
+          // config at commit time, so the local-only default below never
+          // reaches a push; it keeps git usable where nothing pushes (an
+          // inspection restores without credentials).
           'if [ -n "${GIT_AUTHOR_NAME:-}" ] && [ -n "${GIT_AUTHOR_EMAIL:-}" ]; then git config user.name "$GIT_AUTHOR_NAME"; git config user.email "$GIT_AUTHOR_EMAIL"; fi',
+          'git config user.name >/dev/null || git config user.name "Rose Agent"',
+          'git config user.email >/dev/null || git config user.email "agent@roselabs.ai"',
         ].join('\n'),
         // A fresh sandbox re-downloads the remote: a control-plane bound, not a session limit.
         { timeoutMs: 20 * 60_000 }

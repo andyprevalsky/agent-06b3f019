@@ -4,7 +4,7 @@ import { resolve } from 'node:path';
 
 // run-unit-tests.ts discovers this wrapper during both unit and coverage runs.
 // The owning test runs the real claude-code and codex-code ws-server.mjs with real
-// git: a fresh clone and a resumed workspace both commit as the GitHub account
+// git: a fresh clone, a resumed workspace and a project workspace all commit as the GitHub account
 // whose token pushes (never the unlinkable Rose Agent identity Vercel blocks).
 const owningTest = resolve(
   __dirname,
@@ -23,4 +23,4 @@ assert.match(
   /# skipped 0\b/,
   'Owning sandbox git identity tests must run without skips'
 );
-assert.match(result.stdout, /# pass 4\b/, 'All four sandbox git identity cases must run');
+assert.match(result.stdout, /# pass 6\b/, 'All six sandbox git identity cases must run');

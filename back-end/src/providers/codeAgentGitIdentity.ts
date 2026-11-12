@@ -29,6 +29,7 @@ import { createLogger } from './logger';
 const log = createLogger('CodeAgentGitIdentity');
 
 const GITHUB_USER_URL = 'https://api.github.com/user';
+const GITHUB_GRAPHQL_URL = 'https://api.github.com/graphql';
 const RESOLVE_TIMEOUT_MS = 15_000;
 
 export interface GitCommitIdentity {
@@ -67,33 +68,85 @@ function tokenKey(token: string): string {
   return createHash('sha256').update(token).digest('hex');
 }
 
-async function fetchIdentity(token: string, fetchImpl: typeof fetch): Promise<GitCommitIdentity> {
+interface GithubAccount {
+  id: unknown;
+  login: unknown;
+  name: unknown;
+}
+
+async function githubRequest(
+  url: string,
+  token: string,
+  fetchImpl: typeof fetch,
+  init: RequestInit = {}
+): Promise<unknown> {
   let response: Response;
   try {
-    response = await fetchImpl(GITHUB_USER_URL, {
+    response = await fetchImpl(url, {
+      ...init,
       headers: {
         Authorization: `Bearer ${token}`,
         Accept: 'application/vnd.github+json',
         'User-Agent': 'rose-code-agent-git-identity',
+        ...(init.body !== undefined ? { 'Content-Type': 'application/json' } : {}),
       },
       signal: AbortSignal.timeout(RESOLVE_TIMEOUT_MS),
     });
   } catch (error) {
     throw new GitCommitIdentityError(
-      `GitHub /user unreachable: ${error instanceof Error ? error.message : String(error)}`
+      `${url} unreachable: ${error instanceof Error ? error.message : String(error)}`
     );
   }
   if (!response.ok) {
     const body = (await response.text().catch(() => '')).slice(0, 200);
-    throw new GitCommitIdentityError(`GitHub /user returned ${response.status}: ${body}`);
+    throw new GitCommitIdentityError(`${url} returned ${response.status}: ${body}`);
   }
-  const user = (await response.json()) as { id?: unknown; login?: unknown; name?: unknown };
-  if (typeof user.id !== 'number' || typeof user.login !== 'string' || user.login === '') {
-    throw new GitCommitIdentityError('GitHub /user returned no account id/login for the token');
+  return response.json();
+}
+
+function toIdentity(account: GithubAccount | undefined, source: string): GitCommitIdentity {
+  const { id, login, name } = account ?? {};
+  if (typeof id !== 'number' || typeof login !== 'string' || login === '') {
+    throw new GitCommitIdentityError(`${source} returned no account id/login for the token`);
   }
-  const name =
-    typeof user.name === 'string' && user.name.trim() !== '' ? user.name.trim() : user.login;
-  return { login: user.login, name, email: githubNoreplyEmail(user.id, user.login) };
+  const display = typeof name === 'string' && name.trim() !== '' ? name.trim() : login;
+  return { login, name: display, email: githubNoreplyEmail(id, login) };
+}
+
+/**
+ * REST `GET /user`, then GraphQL `viewer` with the same token: the two have
+ * separate quotas, and the shared primary token often exhausts REST core
+ * (0/5000 while GraphQL had 4976 left, 2026-11-12) right when a deploy
+ * restarts the backend and the first session must resolve its identity.
+ */
+async function fetchIdentity(token: string, fetchImpl: typeof fetch): Promise<GitCommitIdentity> {
+  try {
+    return toIdentity(
+      (await githubRequest(GITHUB_USER_URL, token, fetchImpl)) as GithubAccount,
+      'GitHub /user'
+    );
+  } catch (restError) {
+    try {
+      const body = JSON.stringify({ query: '{ viewer { databaseId login name } }' });
+      const result = (await githubRequest(GITHUB_GRAPHQL_URL, token, fetchImpl, {
+        method: 'POST',
+        body,
+      })) as { data?: { viewer?: { databaseId?: unknown; login?: unknown; name?: unknown } } };
+      const viewer = result.data?.viewer;
+      const identity = toIdentity(
+        viewer && { id: viewer.databaseId, login: viewer.login, name: viewer.name },
+        'GitHub GraphQL viewer'
+      );
+      log.warn('Resolved the code-agent git identity through GraphQL', {
+        restError: (restError as Error).message,
+      });
+      return identity;
+    } catch (graphqlError) {
+      throw new GitCommitIdentityError(
+        `${(restError as Error).message}; ${(graphqlError as Error).message}`
+      );
+    }
+  }
 }
 
 /**
@@ -140,16 +193,27 @@ export async function codeAgentGitIdentityEnvs(
 
 /**
  * The identity envs a code sandbox gets: the pushing account's when the
- * session has a repository to push (a `github_repo_url` session or a project
- * with a repo), none otherwise.
+ * session has a GitHub repository to push (a `github_repo_url` session or a
+ * project with a github.com repo), none otherwise.
  */
 export async function codeSandboxGitIdentityEnvs(
   repoUrl: string | null | undefined,
   token: string | undefined = process.env.GITHUB_TOKEN,
   fetchImpl: typeof fetch = fetch
 ): Promise<Record<string, string>> {
-  if (repoUrl === null || repoUrl === undefined || repoUrl.trim() === '') return {};
+  if (!isGithubRepoUrl(repoUrl)) return {};
   return codeAgentGitIdentityEnvs(token, fetchImpl);
+}
+
+/** github.com remotes only: another host's commits are not GitHub's to link (or Vercel's). */
+export function isGithubRepoUrl(repoUrl: string | null | undefined): boolean {
+  const url = (repoUrl ?? '').trim();
+  if (/^git@github\.com:/i.test(url)) return true;
+  try {
+    return ['github.com', 'www.github.com'].includes(new URL(url).hostname.toLowerCase());
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -173,7 +237,7 @@ export async function codeSandboxGithubEnvs(
     log.info(`GitHub repo configured${label ? ` for ${label}` : ''}: ${githubRepoUrl}`);
   }
   const identity = await codeSandboxGitIdentityEnvs(
-    githubRepoUrl ?? projectRepoUrl,
+    githubRepoUrl || projectRepoUrl,
     process.env.GITHUB_TOKEN,
     fetchImpl
   );
