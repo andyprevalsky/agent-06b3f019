@@ -143,6 +143,7 @@ function extractStreamableReasoning(
 // ============================================
 // Generator LLM Call with Streaming
 // ============================================
+/** Bind generator parameters and capture context to the owning chat tree. */
 export function buildGeneratorCompletionOptions(params: ChatCompletionParams): CompletionOptions {
   return {
     model: params.model,
@@ -164,7 +165,11 @@ export function buildGeneratorCompletionOptions(params: ChatCompletionParams): C
         schema: GENERATOR_JSON_SCHEMA,
       },
     },
-    dump_context: { agent_id: params.agentId, call_site: 'chat_generator' },
+    dump_context: {
+      agent_id: params.agentId,
+      root_agent_id: params.rootAgentId,
+      call_site: 'chat_generator',
+    },
     speed: params.speed,
     ...(params.providerRoute !== undefined ? { provider_route: params.providerRoute } : {}),
     abort_signal: params.abortSignal,
@@ -173,6 +178,7 @@ export function buildGeneratorCompletionOptions(params: ChatCompletionParams): C
 
 type GeneratorLlmParams = {
   agentId: string;
+  rootAgentId?: string;
   messages: ChatMessage[];
   model: string;
   providerRoute?: ChatProviderRoute;
@@ -194,6 +200,7 @@ export async function callGeneratorLlm(params: GeneratorLlmParams): Promise<Gene
   }
 }
 
+/** Stream the chat answer while collecting its content, usage and completion state. */
 async function callGeneratorLlmCore(
   params: GeneratorLlmParams,
   setAttention: (attention: GeneratorAttentionLifecycle) => void
@@ -348,6 +355,7 @@ async function callGeneratorLlmCore(
     createStreamingCompletion(
       buildGeneratorCompletionOptions({
         agentId: params.agentId,
+        rootAgentId: params.rootAgentId,
         model: params.model,
         messages: openaiMessages,
         providerRoute: params.providerRoute,

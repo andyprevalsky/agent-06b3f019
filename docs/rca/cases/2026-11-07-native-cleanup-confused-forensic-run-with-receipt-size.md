@@ -131,3 +131,18 @@ A pure replay validated all fourteen participants with credit_granted=false,
 cleanup_complete=false and obligations_preserved=true. It neither reconciled
 the live cycle nor cleared financial, browser, guest/runtime, provider or Hub
 custody. Required frozen-source gates and production acceptance remain pending.
+
+
+## November 11 recurrence: explicit allocation for one large native participant
+
+PR1920's original mass-agent participant contains 179,494,608 bytes. Its fourteen intact native batch records total 272,726,408 bytes, below the existing 536,870,912-byte proof allowance. The unchanged isolated validator refuses the largest record at the separate 134,217,728-byte per-run default. Two archive searches and the November 9 aggregate recurrence identify the same evidence-consumer contract family; the earlier aggregate correction does not itself admit this larger participant. Original errors, files and cleanup debt remain retained.
+
+The repair adds an optional typed `native_run_admission` to campaign-v1 isolated-validation proofs. It allocates exact positive integer byte counts and existing SHA256 bindings for every participant batch record. The participant set must match exactly, every hash must match the original proof binding, and the declared sum must fit the unchanged 512 MiB proof allowance before raw I/O. The reader checks the exact regular descriptor size against each allocation, then charges the same shared remaining budget once. Final immutable-file revalidation uses that same allocation without charging the already admitted record twice. No opt-in retains the original 128 MiB per-run rejection.
+
+The generic reader default, 64 MiB materialization and scalar bounds, 64 KiB streaming, JSON grammar, decoded duplicate checks, opaque-path policy, full hash and descriptor identity, cancellation and deadline checks remain unchanged. There is no compression, edited projection, removed participant or enlarged proof-wide allowance. Only exact original bytes receive admission. This is launch eligibility; it grants no test, financial, runtime-cleanup or physical-release credit.
+
+The authentic unchanged proof fails on the canonical reader and succeeds on the isolated candidate in 79.6 seconds, validating fourteen participants and sixteen execution exclusions with credit_granted=false, cleanup_complete=false and obligations_preserved=true. All original receipt and run hashes remain unchanged. The same actual declared total refuses when the existing proof-wide budget is one byte smaller. Independent review approved the exact patch after inspecting the real evidence replay and running all fourteen new registered controls.
+
+After integration, the coordinator ran thirteen typed-admission tests plus the public Cycle.reconcile integration case, all passing. The nineteen original parser tests pass unchanged; the three new pending-quick refresh regressions also pass in the combined source. Existing per-file refusal and aggregate-exhaustion assertions are retained. These focused checks do not claim a full deploy gate, a live reconciliation or a fresh benchmark pass. Final frozen-source gates remain required.
+
+Human instruction for this recurrence: preserve assertions, evidence bytes, permissions, timeouts and concurrency. Ordinary evidence admission keeps its default; the explicitly typed native allocation shares the existing finite proof budget and preserves all historical debt. This correction is outside the agent hot path, adds no provider/DB work or per-agent channel, and keeps bounded streaming memory. Golden reference is not applicable to these code-only evidence-consumer and owning-test changes.

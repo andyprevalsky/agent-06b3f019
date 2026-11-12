@@ -142,7 +142,7 @@ def select_full(
     passed = last_runs_passed(attempts)
     tasks = spb.load_tasks(catalog)
     allowed = admitted()
-    eligible = [t for t in tasks if t.name in passed and spb._eligible(t, "cloud") and t.name in allowed]
+    eligible = [t for t in tasks if t.name in passed and spb._eligible(t, "cloud", for_deploy=False) and t.name in allowed]
     excluded = sorted(passed - {t.name for t in eligible})
     order = {t.name: i for i, t in enumerate(tasks)}
     ranked = sorted(

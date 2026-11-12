@@ -1,0 +1,49 @@
+{
+  "format": "PR1905-PRIVATE-TAR-AESGCM-FRAMES-V1",
+  "label": "eaa-native-recovery-20261110T0621",
+  "created_at": "2026-11-10T06:21:42.258607+00:00",
+  "bucket": "trace-archive",
+  "prefix": "devbox-closeout-private/pr1905/eaa-native-recovery-20261110T0621",
+  "parts": [
+    {
+      "key": "devbox-closeout-private/pr1905/eaa-native-recovery-20261110T0621/evidence.part0000.aesgcm",
+      "sha256": "15ed571cf0fdf40118ad7a538224f4fec7dd624c0e783ace32d5b419243a049a",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/eaa-native-recovery-20261110T0621/evidence.part0001.aesgcm",
+      "sha256": "8f5bce054b9b3b434a888127e99205e4d7ef28bc76cf5ee10c6dc508fbc647c7",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/eaa-native-recovery-20261110T0621/evidence.part0002.aesgcm",
+      "sha256": "e6f8336535c112fb80ca519a15792c5f9abe3ae1a76d44e82033b889c06a42b3",
+      "plain_bytes": 13292884
+    }
+  ],
+  "sha256": "33040729153142f1b0ad9469a10ede43bec25eaa055fd72cd2e0f2a122c27a46",
+  "member_count": 232,
+  "member_manifest_sha256": "05c726af5219ad95eedca1f087019a8b3b68e0d195426a0c9ae8dd49c86be29c",
+  "full_readback_verified": true,
+  "authenticated_decryption_verified": true,
+  "all_member_hashes_verified": true,
+  "excludes": [
+    ".context/assigned-pr1885-failures/ascii-fixture-repro/checkout",
+    ".context/assigned-pr1885-failures/cloud-smoke-rca/activation-checkout",
+    ".context/assigned-pr1885-failures/recovery-check",
+    ".context/assigned-pr1885-failures/original",
+    ".context/assigned-pr1885-failures/native-evidence.tar.gz",
+    ".context/assigned-pr1885-failures/private-preservation",
+    ".context/assigned-pr1885-failures/auth-options-rca/baseline/digest-clone",
+    ".context/frontend-builds",
+    ".context/tsbuildinfo"
+  ],
+  "original_evidence_reference": "attachments/failure-evidence-receipt--bbe0d10ee40a41921ea3.json",
+  "original_verified_members": 1948,
+  "raw_logs_private": true,
+  "snapshot_not_final_closeout": true,
+  "previous_receipt_key": "devbox-closeout-private/pr1905/eaa-before-native-recovery-20261110T0617/receipt.json",
+  "previous_receipt_sha256": "96640f30d3bb79940818a276d487f8b804adb16ad81cc9a6306dae5d4ece289b",
+  "reused_member_count": 48552,
+  "catalog_manifest_sha256": "d6f1b1b5ce4303c726a9fb43ede37531f65312fdcaf8d74d213efe9e9b984a5b"
+}

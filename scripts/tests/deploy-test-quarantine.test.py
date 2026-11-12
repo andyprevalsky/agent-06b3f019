@@ -435,6 +435,8 @@ class ReleaseReport(unittest.TestCase):
         recorded = q.validate_attribution(occurrence, {**entry, 'case': 'real_model_controls'}, self.root)
         self.assertEqual(('NOT_INTRODUCED', 'dom', occurrence_id),
                          tuple(recorded['post_merge'][k] for k in ('attribution', 'unit', 'occurrence')))
+        # Merge revalidates the recorded attribution itself (attribution_block), so it must keep the case.
+        self.assertIsNone(q.attribution_block([{**occurrence, 'attribution': recorded}], self.root))
         # An unmarked case, a case that did not fail, or several failed cases never bind.
         with self.assertRaisesRegex(ValueError, 'no quarantine marker'):
             q.validate_attribution({**occurrence, 'detail': detail.replace('real_model_controls', 'other')},
@@ -466,6 +468,28 @@ class ReleaseReport(unittest.TestCase):
                 self.write_catalog(bad)
                 with self.assertRaises(ValueError):
                     q.catalog_quarantines(self.root)
+
+    def test_suite_level_flaky_unit_matches_the_marker_named_by_its_own_failure_output(self):
+        # The structural runner reports a FLAKY unit as the suite job ("deploy-test-plan"); the marker
+        # sits on the one method unittest named in that job's failed first attempt (PR #1928).
+        packet = {k: 'x' for k in ('test', 'command', 'scope', 'error', 'source', 'evidence')}
+        entry = {'attribution': 'NOT_INTRODUCED', 'evidence': 'rca-1', 'marker': 'tests/test_unit.py',
+                 'post_merge': {**packet, 'repair_owner': REPAIR}}
+        base = {'id': 'c' * 32, 'gate': 'structural', 'unit': 'suite-job', 'source': {'head': 'a' * 40}}
+        failure = ('FAIL: test_flaky_unit (__main__.Suite.test_flaky_unit)\nTraceback (most recent call last):\n'
+                   '  File "/w/tests/test_unit.py", line 4, in test_flaky_unit\n')
+        recorded = q.validate_attribution({**base, 'detail': 'passed on rerun\n' + failure}, entry, self.root)
+        self.assertEqual('tests/test_unit.py', recorded['marker'])
+        dotted = 'FAIL: test_flaky_unit (tests.test_unit.Suite.test_flaky_unit)\n'
+        self.assertEqual('tests/test_unit.py',
+                         q.validate_attribution({**base, 'detail': dotted}, entry, self.root)['marker'])
+        # Same class + method in ANOTHER module, or a __main__ id with no tie to the marker file, is refused.
+        unmarked = 'FAIL: test_other (tests.test_unit.Suite.test_other)\n'  # a second failure with no marker
+        for detail in (None, 'no unittest header', failure.replace('Suite.', 'Other.'),
+                       dotted.replace('tests.test_unit.', 'tests.test_other.'), failure.split('Traceback')[0],
+                       dotted + unmarked):
+            with self.subTest(detail=detail), self.assertRaisesRegex(ValueError, 'no quarantine marker'):
+                q.validate_attribution({**base, 'detail': detail}, entry, self.root)
 
     def test_cli_prints_the_table(self):
         self.write_ledger(['QUARANTINED_PASS'] * 5)

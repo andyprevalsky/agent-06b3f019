@@ -315,6 +315,44 @@ describe('Long-press row menus on a phone', () => {
   });
 });
 
+describe('Long-press on iOS', () => {
+  it('never starts a text selection or callout on the row it opens the menu for', async () => {
+    const user = userEvent.setup();
+    const agent = { ...makeAgent({ agent_id: 'row-1', goal: 'Halloween costume' }) } as Agent;
+    renderHeader({ agents: [agent] });
+    await user.click(screen.getByRole('button', { name: 'Open menu' }));
+    const drawer = await screen.findByRole('dialog');
+    const row = await within(drawer).findByTestId('rose-agent-row-row-1');
+    // WebKit ignores pointerdown preventDefault for its long-press; only CSS stops it.
+    expect(row.className.split(/\s+/)).toEqual(
+      expect.arrayContaining(['select-none', '[-webkit-touch-callout:none]']),
+    );
+    const selection = window.getSelection()!;
+    selection.selectAllChildren(row);
+    fireEvent.pointerDown(row, { pointerType: 'touch', clientX: 216, clientY: 300 });
+    // Finger jitter while holding still is not a drag.
+    fireEvent.pointerMove(row, { pointerType: 'touch', clientX: 219, clientY: 303 });
+    await screen.findByTestId('rose-agent-menu', {}, { timeout: 2000 });
+    expect(selection.toString()).toBe('');
+  });
+
+  it('a real drag still cancels the long-press', async () => {
+    renderWithProviders(
+      <ContextMenu>
+        <ContextMenuTrigger data-testid="row">Halloween costume</ContextMenuTrigger>
+        <ContextMenuContent data-testid="menu">
+          <ContextMenuItem>Rename agent</ContextMenuItem>
+        </ContextMenuContent>
+      </ContextMenu>,
+    );
+    const row = screen.getByTestId('row');
+    fireEvent.pointerDown(row, { pointerType: 'touch', clientX: 216, clientY: 300 });
+    fireEvent.pointerMove(row, { pointerType: 'touch', clientX: 216, clientY: 330 });
+    await new Promise((resolve) => setTimeout(resolve, 900));
+    expect(screen.queryByTestId('menu')).not.toBeInTheDocument();
+  });
+});
+
 describe('Native long-press contextmenu on Android', () => {
   it('opens once, from the trigger left edge, never under the finger', async () => {
     const opens: Array<[number, number]> = [];

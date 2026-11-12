@@ -1,0 +1,119 @@
+{
+  "schema": "pr1920-private-preservation-catalog-v1",
+  "scope": "Verified immutable evidence archives; terminal preservation and deletion readiness are separate receipts.",
+  "archives": [
+    {
+      "receipt_file": "immutable-archive-receipt.json",
+      "receipt_sha256": "dd9461a9aae93bcdeef1cd543a9dc4731413761486bf639eda1181023e168995",
+      "receipt": {
+        "format": "ROSE-PRIVATE-TAR-GCM-V1",
+        "bucket": "trace-archive",
+        "key": "devbox-closeout-private/pr1920-sidebar/20261111-original-and-local-refs-v1.tar.gz.aesgcm",
+        "encryption_key_id": "trace-archive-prod-2026-07-03",
+        "ciphertext_sha256": "6890a584332c495c2903c73d14f4e66a516505d955c4952f808948305c733f1b",
+        "gzip_sha256": "8a5dd8ee842a7a3c7d54ba9d58d701f5634e2a96cde171f287f995ca61ad76db",
+        "stored_bytes": 31087871,
+        "frames": 4,
+        "files": 99,
+        "original_bytes": 58534810,
+        "manifest_sha256": "9afdea01f9cf022aa3ec8a09650756f841717177cfb5053d16d78d26ebd16a92",
+        "full_readback_verified": true
+      }
+    },
+    {
+      "receipt_file": "browser-failure-archive-receipt.json",
+      "receipt_sha256": "3875135d7dc7ef30ba67c2c518dc71870c54091542c0dae1ddb6016c61545028",
+      "receipt": {
+        "format": "ROSE-PRIVATE-TAR-GCM-V1",
+        "bucket": "trace-archive",
+        "key": "devbox-closeout-private/pr1920-sidebar/20261111-browser-native-failures-v1.tar.gz.aesgcm",
+        "encryption_key_id": "trace-archive-prod-2026-07-03",
+        "ciphertext_sha256": "bb84217c91e2f63f2407f47bc617a05b7e1f05c8988ef927c6c46f5378b0115c",
+        "gzip_sha256": "45d2fb425ab3299a1ae7393b9d3ecc4341529c4d41b396c34d965be1e9afa320",
+        "stored_bytes": 18815764,
+        "frames": 3,
+        "files": 105,
+        "original_bytes": 70476788,
+        "manifest_sha256": "aa0e918f933cc36d5bbee20849dbdf57a675d1eaee110333a3b3f498b67bc960",
+        "full_readback_verified": true
+      }
+    },
+    {
+      "receipt_file": "original-cloud-campaign-archive-receipt.json",
+      "receipt_sha256": "423ddbb5a014c6dab24b6e448021d3ddc76cf310815d7669790205b6d2e2b0e0",
+      "receipt": {
+        "format": "ROSE-PRIVATE-TAR-GCM-V1",
+        "bucket": "trace-archive",
+        "key": "devbox-closeout-private/pr1920-sidebar/20261111-original-cloud-campaign-v1.tar.gz.aesgcm",
+        "encryption_key_id": "trace-archive-prod-2026-07-03",
+        "ciphertext_sha256": "e29890554d5210998eaae0bb38a8838f1f31ce457b34e52b653d10c08e966781",
+        "gzip_sha256": "eb32b33cc03fd1f2c44cf4b42c2cdaaedf63a024275d37a488cdddd69016e00e",
+        "stored_bytes": 671513923,
+        "frames": 81,
+        "files": 1720,
+        "original_bytes": 2007365458,
+        "manifest_sha256": "5b6bc836b518efb5c32a29af8a5a8f70e07ddb928705062d7b21bc7a67ddc2d6",
+        "full_readback_verified": true
+      }
+    },
+    {
+      "receipt_file": "independent-restore-archive-receipt.json",
+      "receipt_sha256": "d7c2945d70e1d71ee3dc6d0aafff9c87730d0996d5bbe5a82aa5ca08f94dfe36",
+      "receipt": {
+        "format": "ROSE-PRIVATE-TAR-GCM-V1",
+        "bucket": "trace-archive",
+        "key": "devbox-closeout-private/pr1920-sidebar/20261111-independent-restore-proof-v1.tar.gz.aesgcm",
+        "encryption_key_id": "trace-archive-prod-2026-07-03",
+        "ciphertext_sha256": "5536bcf6d0c1ba258a0ccbe877764274a3233068209db1fc8781ff8a9cafaa3b",
+        "gzip_sha256": "7e2e1ce9609508ab0bb91393a15bcd9eb6b8d62dfdf0a0051d4a3ebdb8e44c14",
+        "stored_bytes": 7779,
+        "frames": 1,
+        "files": 1,
+        "original_bytes": 29703,
+        "manifest_sha256": "ca9e40004d88b5c3c243442359094576914eae117c344ef77e485d7043794f69",
+        "full_readback_verified": true
+      }
+    },
+    {
+      "receipt_file": "recovery-custody-checkpoint-archive-receipt.json",
+      "receipt_sha256": "b26427115fd4858cdaab8ce42ebc8e13099979a0d9de66172ef76d75a47dbe16",
+      "receipt": {
+        "format": "ROSE-PRIVATE-TAR-GCM-V1",
+        "bucket": "trace-archive",
+        "key": "devbox-closeout-private/pr1920-sidebar/20261111-recovery-custody-checkpoint-v1.tar.gz.aesgcm",
+        "encryption_key_id": "trace-archive-prod-2026-07-03",
+        "ciphertext_sha256": "426667814a6dbbbcf348ec888e1cb6056a38c120fbfbe17f24641d3db8b625c6",
+        "gzip_sha256": "f861c0fc53e03e66d7c7359607bcb1d2e34000a732090a88a0ee4c4f9c8762c7",
+        "stored_bytes": 9297280,
+        "frames": 2,
+        "files": 494,
+        "original_bytes": 16394225,
+        "manifest_sha256": "c4e30eca03730c198e56790605b0da0cccdd4d9882838edd1ac3f5dca4a31b61",
+        "full_readback_verified": true
+      }
+    }
+  ],
+  "helper": {
+    "path": "docs/handoffs/whm-b07d9037-preservation/private_archive.py",
+    "sha256": "2e35e736660660bb6118a939d51b0dd008abe5efaa6387cf252d5d0536b75cf4",
+    "git_blob": "592c092502cae2f08015858f98cdd1b5d436310b",
+    "independent_managed_key_escrow": ".context/pr1634-archive-recovery.env",
+    "escrow_variable": "PR1634_ARCHIVE_RECOVERY_KEY_B64",
+    "key_fingerprint": "e351c7cc5b01303e579fe6d1df833940fdaadf325ca47314414ba10735fc7730",
+    "existing_recovery_adapter": "docs/handoffs/pr-1634-closeout/recover_closeout.py"
+  },
+  "independent_recovery": {
+    "devbox_id": "92d051c0-ae14-49f7-b187-2ee145957da2",
+    "separate_from_current_devbox": true,
+    "restored_files": 99,
+    "member_size_hash_matches": 99,
+    "mismatches": 0,
+    "extra_files": 0,
+    "original_bytes": 58534810,
+    "managed_key_retrieved_independently": true,
+    "managed_key_fingerprint_match": true,
+    "proof_sha256": "97a65d5dbb5ed8566d6a80a56658fecdc2e5699a853c281a52807c2ea38be867",
+    "proof_archive": "devbox-closeout-private/pr1920-sidebar/20261111-independent-restore-proof-v1.tar.gz.aesgcm",
+    "scope": "Original evidence/ref archive restored and rechecked with existing managed credentials, no key exchange. This grants preservation evidence only."
+  }
+}

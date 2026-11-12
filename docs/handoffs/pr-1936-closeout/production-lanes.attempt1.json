@@ -1,0 +1,121 @@
+{
+  "schema_version": 1,
+  "sha": "0f8f6da4461195bcc720481ef52375fa511f7fb1",
+  "pr": 1936,
+  "status": "FAIL",
+  "started_at": "2026-11-11T19:17:30Z",
+  "finished_at": "2026-11-11T19:30:11Z",
+  "changed_files": 3,
+  "selected": [
+    "render",
+    "fly",
+    "vercel",
+    "mac-release",
+    "wmh",
+    "backend-probes",
+    "workflow-migration",
+    "agentcard",
+    "semantic"
+  ],
+  "lanes": {
+    "render": {
+      "status": "SKIPPED-not-applicable",
+      "reason": "no back-end/ or scripts/run-bench-hub-poller change",
+      "applicable": false,
+      "depends_on": [],
+      "started_at": null,
+      "finished_at": null,
+      "exit_code": null,
+      "command": null,
+      "log": null
+    },
+    "fly": {
+      "status": "SKIPPED-not-applicable",
+      "reason": "no agent runtime or deploy-agents.yml change",
+      "applicable": false,
+      "depends_on": [],
+      "started_at": null,
+      "finished_at": null,
+      "exit_code": null,
+      "command": null,
+      "log": null
+    },
+    "vercel": {
+      "status": "SKIPPED-not-applicable",
+      "reason": "no front-end/ change",
+      "applicable": false,
+      "depends_on": [],
+      "started_at": null,
+      "finished_at": null,
+      "exit_code": null,
+      "command": null,
+      "log": null
+    },
+    "mac-release": {
+      "status": "SKIPPED-not-applicable",
+      "reason": "mac-app-release-decision ship=false reason=no-shipped-change (PR #1936 without MAC-APP-RELEASE)",
+      "applicable": false,
+      "depends_on": [],
+      "started_at": null,
+      "finished_at": null,
+      "exit_code": null,
+      "command": null,
+      "log": null
+    },
+    "wmh": {
+      "status": "SKIPPED-not-applicable",
+      "reason": "no WMH path change",
+      "applicable": false,
+      "depends_on": [],
+      "started_at": null,
+      "finished_at": null,
+      "exit_code": null,
+      "command": null,
+      "log": null
+    },
+    "backend-probes": {
+      "status": "SKIPPED-not-applicable",
+      "reason": "no back-end change",
+      "applicable": false,
+      "depends_on": [],
+      "started_at": null,
+      "finished_at": null,
+      "exit_code": null,
+      "command": null,
+      "log": null
+    },
+    "workflow-migration": {
+      "status": "SKIPPED-not-applicable",
+      "reason": "no agent cutover",
+      "applicable": false,
+      "depends_on": [],
+      "started_at": null,
+      "finished_at": null,
+      "exit_code": null,
+      "command": null,
+      "log": null
+    },
+    "agentcard": {
+      "status": "FAIL",
+      "reason": "run-bench agent-payment-production-abandonment exited 1; AgentCard release stall not qualified: no run record path was printed by this execution",
+      "applicable": true,
+      "depends_on": [],
+      "started_at": "2026-11-11T19:17:30Z",
+      "finished_at": "2026-11-11T19:18:01Z",
+      "exit_code": 1,
+      "command": "PATH=/home/boxes/rose/agents/venv/bin:$PATH VIRTUAL_ENV=/home/boxes/rose/agents/venv scripts/run-bench agent-payment-production-abandonment",
+      "log": "/home/boxes/rose/.context/deploy-pipeline/production-logs/agentcard.log"
+    },
+    "semantic": {
+      "status": "FAIL",
+      "reason": "production-semantic exited 1 (run 43085818750)",
+      "applicable": true,
+      "depends_on": [],
+      "started_at": "2026-11-11T19:17:30Z",
+      "finished_at": "2026-11-11T19:30:11Z",
+      "exit_code": 1,
+      "command": "/home/boxes/rose/agents/venv/bin/python3 scripts/run_deploy_pipeline.py production --merged-sha 0f8f6da4461195bcc720481ef52375fa511f7fb1 --state-dir /home/boxes/rose/.context/deploy-pipeline && /home/boxes/rose/agents/venv/bin/python3 scripts/run_deploy_pipeline.py production-semantic --merged-sha 0f8f6da4461195bcc720481ef52375fa511f7fb1 --state-dir /home/boxes/rose/.context/deploy-pipeline --frontend-url https://www.roselabs.ai --backend-url https://navi-j9a9.onrender.com",
+      "log": "/home/boxes/rose/.context/deploy-pipeline/production-logs/semantic.log"
+    }
+  }
+}
