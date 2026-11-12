@@ -1350,11 +1350,14 @@ def test_cold_image_native_terminal_progress_reaches_actual_watchdog(tmp_path, b
 def test_cold_image_native_terminal_progress_preserves_failure_and_cleanup(tmp_path, scenario, expected):
     process, state, log = _terminal_progress_harness(tmp_path, "native", scenario)
     if scenario == "cancel":
-        import time
-        deadline = time.monotonic() + 10
-        while not (state / "invocation.json").exists() and time.monotonic() < deadline:
-            time.sleep(0.02)
-        assert (state / "invocation.json").exists(), "Cancel only after the actual publisher starts"
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "condition_wait", Path(__file__).resolve().parents[2] / "scripts" / "lib" / "condition_wait.py")
+        condition_wait = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(condition_wait)
+        # Cancel only after the actual publisher starts.
+        condition_wait.wait_until(lambda: (state / "invocation.json").exists(), timeout=10,
+                                  description="publisher fixture started")
         process.terminate()
     stdout, stderr = process.communicate(timeout=45)
     assert process.returncode == expected, stdout + stderr

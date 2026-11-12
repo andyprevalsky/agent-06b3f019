@@ -1,0 +1,36 @@
+{
+ "run": "https://github.com/Rose-Ai-Labs/rose/actions/runs/43100083158",
+ "runner": "blacksmith-16vcpu-ubuntu-2404",
+ "source": {
+  "digest": "1a2c608537642d11966b86b4bcebe544090b4f219e24f3da98841e45ad237533",
+  "head": "82e0e9b51002728a04a4995ee5a64f29314476bd"
+ },
+ "complete": true,
+ "cases": {
+  "PASS": 261
+ },
+ "remote": {
+  "transport": "github-actions",
+  "run_id": 43100083158,
+  "run_attempt": "1",
+  "event_sha": "82e0e9b51002728a04a4995ee5a64f29314476bd",
+  "tag": "deploy-gates/16vcpu/backend-coverage-blackbox-4478d4abbf988621",
+  "runner_name": "blacksmith-16vcpu-ubuntu-2404-o4qxd4lcby4yaay2",
+  "url": "https://github.com/Rose-Ai-Labs/rose/actions/runs/43100083158",
+  "at": 1794431155.4492736,
+  "finished_at": 1794431861.4973574,
+  "rate_limited_seconds": 0.0,
+  "read_identity": "GITHUB_APP",
+  "read_fallbacks": 0,
+  "timing": {
+   "job_started_at": 1794431140.6581805,
+   "extracted_at": 1794431152.4114218,
+   "setup_finished_at": 1794431166.9969923,
+   "timing_run_started": true,
+   "worker_finished_at": 1794431849.6443422,
+   "worker_exit": 0
+  },
+  "launcher_started_at": 1794431125.4923265,
+  "launcher_finished_at": 1794431885.5507238
+ }
+}

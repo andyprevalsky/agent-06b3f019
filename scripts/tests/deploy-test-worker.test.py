@@ -3508,6 +3508,7 @@ class CerebrasRatchetHeadroom(unittest.TestCase):
 class StoppedPreStackIsolation(unittest.TestCase):
     """Versioned pre-stack receipts exercise the complete native admission consumer."""
     DRIVER_SHA256 = '1958de1798e8fdc46bd2081c1d530e9574c0957db80857d367802904f5ad5521'
+    DRIVER_SOURCE = '2d4c45c0da9c56e7145b2f3df8114cc5b95b7bb3'  # a commit carrying exactly that reviewed driver
 
     def setUp(self):
         import base64
@@ -3523,9 +3524,10 @@ class StoppedPreStackIsolation(unittest.TestCase):
         self.addCleanup(fixture.doCleanups)
         self.addCleanup(fixture.tearDown)
         self.root = fixture.root
-        # The fixture uses the actual versioned driver, not a mock of its SHA.
-        # Driver changes require a newly reviewed before-stack contract.
-        self.driver = (ROOT / 'scripts/cloudbench-run.sh').read_bytes()
+        # The fixture uses the actual reviewed historical driver bytes from Git, not a mock of its SHA
+        # and not the working copy: later driver changes need their own reviewed before-stack contract.
+        self.driver = subprocess.run(['git', '-C', str(ROOT), 'show', self.DRIVER_SOURCE + ':scripts/cloudbench-run.sh'],
+                                     check=True, capture_output=True).stdout
         self.assertEqual(self.DRIVER_SHA256, hashlib.sha256(self.driver).hexdigest())
         target = self.root / 'scripts/cloudbench-run.sh'
         target.parent.mkdir(exist_ok=True)
@@ -3544,7 +3546,8 @@ class StoppedPreStackIsolation(unittest.TestCase):
             try: value = json.loads(path.read_text())
             except ValueError: continue
             cycle.write(path, replace(value))
-        self.fleet = Path(self.proof['campaign']).parent.parent / 'runs/20261103-080440-310001'
+        self.fleet = (Path(self.proof['campaign']).parent.parent / 'runs'
+                      / f'20261103-080440-{module.FIXTURE_CONTROLLER_PID_BASE + 1}')
         self.output = self.fleet / self.gate['name']
         self.output.mkdir(exist_ok=True)
         self.owner = cycle.read(self.fleet / '_batch/lifecycle.json')['fleet_owner_token']

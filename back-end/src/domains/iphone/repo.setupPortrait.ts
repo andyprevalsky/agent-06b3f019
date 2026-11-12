@@ -32,7 +32,11 @@ export async function portraitSession(tx: Transaction, claim: SetupClaim, input:
     device.providerSessionEncrypted === null ||
     !(await setupCommitValid(tx, device, claim, input, command, setupState(device.setupEncrypted)))
   )
-    throw new IPhoneError(409, 'Phone portrait observation changed');
+    throw new IPhoneError(
+      409,
+      'Phone portrait observation changed',
+      'phone_portrait_observation_changed'
+    );
   const session = openPhoneValue<PhoneHarnessSession>(device.providerSessionEncrypted);
   if (
     session.id !== device.providerSessionId ||
@@ -47,9 +51,19 @@ export async function portraitSession(tx: Transaction, claim: SetupClaim, input:
     !Number.isFinite(session.expiresAt) ||
     session.expiresAt * 1000 <= now.getTime()
   )
-    throw new IPhoneError(409, 'Phone portrait session is not ready');
+    throw new IPhoneError(
+      409,
+      'Phone portrait session is not ready',
+      'phone_portrait_session_not_ready'
+    );
   const route = await currentPortraitRoute(tx, claim, input, now);
-  if (route === null) throw new IPhoneError(409, 'Phone native portrait route is unproven');
+  if ('break' in route)
+    throw new IPhoneError(
+      409,
+      'Phone native portrait route is unproven',
+      'phone_portrait_route_unproven',
+      { portraitRoute: route.break }
+    );
   return { session, route, deadlineAt: command.deadlineAt.getTime(), now: now.getTime() };
 }
 export const currentPortraitSession = (claim: SetupClaim, input: SetupInput) =>
@@ -66,7 +80,11 @@ export async function recordPortraitProof(
       proof.routeDigest !== current.route.digest ||
       proof.originalAssistiveTouch !== current.route.originalAssistiveTouch
     )
-      throw new IPhoneError(409, 'Phone native portrait route changed');
+      throw new IPhoneError(
+        409,
+        'Phone native portrait route changed',
+        'phone_portrait_route_changed'
+      );
     const command = await tx.iPhoneOperation.findUniqueOrThrow({ where: { id: claim.command.id } });
     const metadata = {
       ...proof,

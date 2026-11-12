@@ -2073,9 +2073,14 @@ start_ngrok_ephemeral_tunnel() {
     # every new worktree loses its primary domain. Run-scoped names are bound
     # without a reservation; only the per-worktree name is reserved.
     local fallback_label fallback_domain
-    fallback_label="$(dns_label_from_workspace)" || return 1
+    if [ -n "${BENCHMARK_PUBLIC_TUNNEL_RUN_ID:-}" ]; then
+        # Identity names only the endpoint; workspace/DB/queue identity is unchanged.
+        fallback_label="run-$(python3 -c 'import hashlib,sys; print(hashlib.sha256(sys.argv[1].encode()).hexdigest()[:24])' "$BENCHMARK_PUBLIC_TUNNEL_RUN_ID")" || return 1
+    else
+        fallback_label="$(dns_label_from_workspace)" || return 1
+    fi
     fallback_domain="rose-${fallback_label}-bench.${NGROK_DOMAIN_SUFFIX:-ngrok.app}"
-    if [ -n "${NGROK_API_KEY:-}" ] && [[ "${CONDUCTOR_WORKSPACE_NAME:-}" != *-bench-* ]]; then
+    if [ -n "${NGROK_API_KEY:-}" ] && [ -z "${BENCHMARK_PUBLIC_TUNNEL_RUN_ID:-}" ] && [[ "${CONDUCTOR_WORKSPACE_NAME:-}" != *-bench-* ]]; then
         ensure_ngrok_domain_reserved "$fallback_domain" soft ||
             echo "   Proceeding without pre-reservation of $fallback_domain."
     fi
@@ -2083,7 +2088,7 @@ start_ngrok_ephemeral_tunnel() {
     local -a ngrok_args=("http" "$FRONTEND_PORT")
     if [ -n "$fallback_domain" ]; then
         ngrok_args+=("--domain" "$fallback_domain")
-        echo "🌐 Falling back to ngrok (reserved $fallback_domain) → localhost:$FRONTEND_PORT"
+        echo "🌐 Falling back to ngrok (named $fallback_domain) → localhost:$FRONTEND_PORT"
     else
         echo "🌐 Falling back to an ephemeral ngrok tunnel → localhost:$FRONTEND_PORT"
     fi
@@ -2268,6 +2273,11 @@ start_public_tunnel() {
             # run when trycloudflare will not route.
             start_cloudflare_quick_tunnel && return 0
             start_ngrok_ephemeral_tunnel && return 0
+            if [ -n "${BENCHMARK_PUBLIC_TUNNEL_RUN_ID:-}" ]; then
+                reap_failed_ngrok_tunnel
+                echo "❌ Run-scoped public tunnel unavailable; refusing a shared workspace endpoint." >&2
+                exit 1
+            fi
             # No ngrok credentials at all → the reserved-domain path cannot
             # succeed either.
             if [ -z "${NGROK_AUTHTOKEN:-}" ] && ! ngrok config check >/dev/null 2>&1; then

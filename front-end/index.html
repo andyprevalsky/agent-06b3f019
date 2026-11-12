@@ -183,14 +183,29 @@
       // STATE MACHINE: entry-load recovery (before the bundle, so it survives its loss)
       // [LOADING] --entry module script loads--> [MOUNTED] (appVersion.ts owns later reloads)
       // [LOADING] --entry module graph fails (error event)--> [WAITING] 0.5s/1s/2s backoff
-      // [WAITING] --timer fires online--> [RELOADING] (charges 1 of 3 attempts per entry URL)
-      // [WAITING] --timer fires offline--> [OFFLINE] --online event--> [RELOADING]
+      // [WAITING] --timer fires online--> [REVALIDATING] (charges 1 of 3 attempts per entry URL)
+      // [REVALIDATING] --entry refetched past the HTTP cache (or 5s), online--> [RELOADING]
+      // [REVALIDATING] --offline after the refetch--> [OFFLINE_CHARGED] --online event--> [REVALIDATING]
+      // [WAITING] --timer fires offline--> [OFFLINE] --online event--> [REVALIDATING]
       // [LOADING] --budget for this entry URL spent--> [STATIC] (links only)
       // A document can outlive its deploy (edge-cached HTML across a production alias
       // switch); its hashed entry chunks then 404 and React never mounts, leaving only
       // the static links above. src/lib/appVersion.ts runs inside that bundle, so the
       // recovery must live here. Reloading fetches the live build's HTML.
+      // Vercel answers a missing /assets/* file with 404 plus that path's year-long
+      // immutable Cache-Control, and a reload replays such a cached 404 without asking
+      // the network. Refetch the entry with cache: 'reload' first so the browser cache
+      // holds the edge's current answer when the reloaded document requests it.
       (function () {
+        // Every browser that runs module scripts has fetch and Promise.
+        function revalidate(src) {
+          return Promise.race([
+            fetch(src, { cache: 'reload', credentials: 'same-origin' }).catch(function () {}),
+            new Promise(function (resolve) {
+              setTimeout(resolve, 5000);
+            }),
+          ]);
+        }
         var scheduled = false;
         function attemptsFor(key) {
           try {
@@ -200,11 +215,13 @@
             return window.name.indexOf('[' + key + ']') === -1 ? 0 : 3;
           }
         }
-        function reload(key, attempts) {
+        function reload(src, key, attempts) {
           // Charge the attempt only when the reload runs; an offline reload would replace
           // the static links with the browser's offline page.
           if (navigator.onLine === false) {
-            window.addEventListener('online', reload.bind(null, key, attempts), { once: true });
+            window.addEventListener('online', reload.bind(null, src, key, attempts), {
+              once: true,
+            });
             return;
           }
           try {
@@ -212,7 +229,20 @@
           } catch (_) {
             window.name += '[' + key + ']';
           }
-          location.reload();
+          revalidateAndReload(src);
+        }
+        // The attempt is already charged. If connectivity drops while revalidating, wait for
+        // online and revalidate again instead of navigating to the browser's offline page.
+        function revalidateAndReload(src) {
+          revalidate(src).then(function () {
+            if (navigator.onLine === false) {
+              window.addEventListener('online', revalidateAndReload.bind(null, src), {
+                once: true,
+              });
+              return;
+            }
+            location.reload();
+          });
         }
         window.addEventListener(
           'error',
@@ -225,7 +255,7 @@
             if (scheduled || attempts >= 3) return;
             scheduled = true;
             console.warn('[EntryLoad] ' + script.src + ' failed to load; reloading');
-            setTimeout(reload.bind(null, key, attempts), 500 * Math.pow(2, attempts));
+            setTimeout(reload.bind(null, script.src, key, attempts), 500 * Math.pow(2, attempts));
           },
           true,
         );

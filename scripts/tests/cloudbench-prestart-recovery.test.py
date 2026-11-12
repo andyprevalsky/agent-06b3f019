@@ -202,7 +202,10 @@ class FreshPrestartRecoveryTest(PrestartRecoveryTest):
             (self.audit / "by-machine-id" / machine).write_text(clone + "\n")
             (out / "primary.ids").write_text(machine + "\n")
             (out / "primary.names").write_text("")
-            files = {"cloudbench-run.sh": base64.b64encode((self.scripts / "cloudbench-run.sh").read_bytes()).decode()}
+            # The payload is the historical run's driver (pinned FRESH_SOURCE_PROTOCOL bytes at self.sha),
+            # not the current working copy, which later reviewed changes may legitimately modify.
+            driver = subprocess.check_output(["git", "-C", str(self.workspace), "show", self.sha + ":scripts/cloudbench-run.sh"])
+            files = {"cloudbench-run.sh": base64.b64encode(driver).decode()}
             payload = gzip.compress(json.dumps({"version": 1, "files": files}).encode(), mtime=0)
             (out / "cloudbench-boot-payload.json.gz").write_bytes(payload)
             native = {"id": machine, "name": clone, "state": "stopped", "version": "generation-1",
