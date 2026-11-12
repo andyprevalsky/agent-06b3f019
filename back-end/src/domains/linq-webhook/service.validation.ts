@@ -95,13 +95,20 @@ export function parseLinqPayload(
   if (fromPhone === null || fromPhone === ownerPhone || chatId === null || messageId === null)
     return null;
   if (service !== 'iMessage' && service !== 'SMS' && service !== 'RCS') return null;
+  // Linq marks late, possibly out-of-order recovered messages; never dispatch them live.
+  if (
+    (message.reconciled_at !== undefined && message.reconciled_at !== null) ||
+    (data.reconciled_at !== undefined && data.reconciled_at !== null)
+  )
+    return null;
   if (!Array.isArray(message.parts)) return null;
   const text: string[] = [];
   const attachments: ParsedLinqMessage['attachments'] = [];
   for (const part of message.parts) {
     const item = record(part);
     if (!item) continue;
-    if (item.type === 'text' && typeof item.value === 'string') text.push(item.value);
+    if ((item.type === 'text' || item.type === 'link') && typeof item.value === 'string')
+      text.push(item.value);
     if (item.type === 'media' && typeof item.url === 'string') {
       try {
         const url = new URL(item.url);

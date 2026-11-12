@@ -277,4 +277,13 @@ check('legacy 2025 payload requires explicit inbound and matching recipient iden
   Reflect.deleteProperty(legacy.data, 'recipient_phone');
   assert.equal(parseLinqPayload(legacy, owner), null);
 });
+check('link-only messages route their URL; reconciled recoveries never dispatch live', () => {
+  const linkOnly = event();
+  linkOnly.data.parts = [{ type: 'link', value: 'https://example.com/a' }];
+  assert.equal(parseLinqPayload(linkOnly, owner)?.messageBody, 'https://example.com/a');
+  const recovered = event() as ReturnType<typeof event> & { data: { reconciled_at?: string } };
+  recovered.data.reconciled_at = '2026-11-12T18:00:00Z';
+  assert.equal(parseLinqPayload(recovered, owner), null);
+  assert.ok(parseLinqPayload(event(), owner));
+});
 console.log(`linq-webhook-validation: ${count} tests passed`);

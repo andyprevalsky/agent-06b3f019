@@ -34,10 +34,17 @@ export interface LinqSendResult {
 }
 export function isLinqEnabled(phone?: string): boolean {
   if (process.env.SMS_PROVIDER !== 'linq') return false;
-  const recipients = process.env.LINQ_RECIPIENTS?.split(',')
+  const configured = process.env.LINQ_RECIPIENTS?.trim();
+  if (!configured) return true; // unset or blank: unrestricted rollout
+  const recipients = configured
+    .split(',')
     .map((value) => canonicalPhone(value))
-    .filter(Boolean);
-  return phone === undefined || !recipients?.length || recipients.includes(canonicalPhone(phone));
+    .filter(
+      (value): value is string => typeof value === 'string' && /^\+[1-9]\d{6,14}$/.test(value)
+    );
+  // A configured allowlist with no valid number must not widen to everyone.
+  if (!recipients.length) return false;
+  return phone === undefined || recipients.includes(canonicalPhone(phone) ?? '');
 }
 function chatKey(phone: string) {
   return `${process.env.LINQ_FROM_PHONE ?? ''}:${canonicalPhone(phone) ?? phone}`;
@@ -47,6 +54,9 @@ export function getLinqChat(phone: string): Promise<LinqChat | undefined> {
 }
 export function rememberLinqChat(phone: string, chat: LinqChat): Promise<void> {
   return putEphemeral(CHAT_NAMESPACE, chatKey(phone), { ...chat }, CHAT_TTL_MS);
+}
+function forgetLinqChat(phone: string): Promise<void> {
+  return deleteEphemeral(CHAT_NAMESPACE, chatKey(phone));
 }
 
 async function request(
@@ -143,7 +153,13 @@ export async function sendLinqPayload(
         },
       }).catch((error: unknown) => log.warn('Linq archive failed', { error: String(error) }));
     }
-    if (!response.ok)
+    if (!response.ok) {
+      // A cached chat Linq no longer knows would trap every later send; drop it so
+      // the next send resolves a chat again. This send is not retried here.
+      if (chat && response.status === 404)
+        await forgetLinqChat(phone).catch((error: unknown) =>
+          log.warn('Linq stale chat eviction failed', { error: String(error) })
+        );
       return {
         success: false,
         statusCode: response.status,
@@ -151,6 +167,7 @@ export async function sendLinqPayload(
           response.status >= 400 && response.status < 500 && response.status !== 408,
         error: `Linq API error ${response.status}: ${JSON.stringify(result.error ?? result)}`,
       };
+    }
     const messageSid = result.message?.id ?? result.chat?.message?.id;
     if (!messageSid)
       return {
@@ -201,7 +218,8 @@ export function sendLinqMessage(
   text: string,
   options: LinqSendOptions = {}
 ): Promise<LinqSendResult> {
-  const parts: Array<Record<string, unknown>> = [{ type: 'text', value: text }];
+  // Linq rejects an empty text part; media-only messages carry just the media.
+  const parts: Array<Record<string, unknown>> = text ? [{ type: 'text', value: text }] : [];
   if (options.mediaUrl) parts.push({ type: 'media', url: options.mediaUrl });
   return sendLinqPayload(
     phone,

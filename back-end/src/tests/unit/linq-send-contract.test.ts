@@ -47,6 +47,9 @@ function fixture() {
       ) => {
         chats.set(key, value);
       },
+      deleteEphemeral: async (_ns: string, key: string) => {
+        chats.delete(key);
+      },
     },
     './smsTransportMock': { shouldMockMessagingSend: async () => mockReason },
     './traceArchive': { archiveJson: async () => {} },
@@ -270,6 +273,33 @@ async function main() {
     );
     assert.equal(f.calls.length, 1);
     assert.equal(f.chats.size, 0);
+  });
+  await test('a configured allowlist with no valid number disables Linq; blank stays open', async () => {
+    const f = fixture();
+    f.env.LINQ_RECIPIENTS = 'not-a-phone, ';
+    assert.equal(f.api.isLinqEnabled('+19729777432'), false);
+    assert.equal(f.api.isLinqEnabled(), false);
+    f.env.LINQ_RECIPIENTS = '  ';
+    assert.equal(f.api.isLinqEnabled('+19729777432'), true);
+    f.env.LINQ_RECIPIENTS = '+19729777432';
+    assert.equal(f.api.isLinqEnabled('+19729777432'), true);
+    assert.equal(f.api.isLinqEnabled('+12025550000'), false);
+  });
+  await test('a 404 on a cached chat evicts it without retrying the send', async () => {
+    const f = fixture();
+    await f.api.sendLinqMessage('+19729777432', 'hello');
+    assert.equal(f.chats.size, 1);
+    f.setResponse({ error: 'chat not found' }, 404);
+    assert.equal((await f.api.sendLinqMessage('+19729777432', 'again')).success, false);
+    assert.equal(f.calls.length, 2);
+    assert.equal(f.chats.size, 0);
+  });
+  await test('media-only messages omit the empty text part', async () => {
+    const f = fixture();
+    await f.api.sendLinqMessage('+19729777432', '', { mediaUrl: 'https://roselabs.ai/a.png' });
+    assert.deepEqual(f.calls[0].body?.message.parts, [
+      { type: 'media', url: 'https://roselabs.ai/a.png' },
+    ]);
   });
   console.log(`linq-send-contract: ${passed} passed, ${failures.length} failed`);
   if (failures.length) process.exitCode = 1;
