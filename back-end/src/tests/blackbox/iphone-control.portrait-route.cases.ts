@@ -1,3 +1,4 @@
+import { performance } from 'node:perf_hooks';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'crypto';
 import {
@@ -413,6 +414,12 @@ portraitRouteCases.push([
       r.text.startsWith('Interrup') ? { ...r, text: 'Interrup- X' } : r
     );
     assert.equal(portraitControlCenterAnchors(letter), null, 'A letter was joined as hyphenation');
+    const flood = livePortraitOcr().map((r) =>
+      r.text.startsWith('Interrup') ? { ...r, text: 'Interrup' + '-'.repeat(30000) } : r
+    );
+    const started = performance.now();
+    assert.equal(portraitControlCenterAnchors(flood), null);
+    assert.ok(performance.now() - started < 250, 'Hyphen run cleanup is not bounded');
     assert.equal(
       portraitControlCenterAnchors(livePortraitOcr().filter((r) => r.text !== 'tions')),
       null

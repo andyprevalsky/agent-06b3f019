@@ -99,7 +99,7 @@ export const portraitRouteDigest = (events: PortraitRouteEvent[]) =>
   phoneCommandHash('portrait-causal-route-v1', events, 'agent');
 export type PortraitRouteBreak = { stage: string; cursor: number; operation: string; next: string };
 const RESTART =
-  'Restart from a new Settings launch at the root and redo the whole route: this failed setup.verify is part of the journal and ends the route, so verifying again without relaunching cannot pass.';
+  'This setup.verify failed and is now part of the journal, so the route cannot be proven again without a new Settings launch: restart from a new Settings launch at the root and redo the whole route.';
 /** The next native step each stage expects; returned to the agent when a route breaks. */
 const NEXT_STEP: Record<string, string> = {
   launch: 'apps.launch Settings, then screen.text of the Settings root showing Search.',

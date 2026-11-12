@@ -97,7 +97,8 @@ export function portraitControlCenterAnchors(value: unknown): string | null {
       .map((r) => r.text)
       .join('\n')
       // Live OCR leaves a stray '-' or '~' after the line-break hyphen ('Interrup- -' / 'tions').
-      .replace(/-[\s~-]*\n\s*/g, '')
+      // Bounded: one optional stray glyph, so long hyphen runs cannot backtrack quadratically.
+      .replace(/-[ \t]{0,2}[~-]?[ \t]{0,2}\n\s*/g, '')
       .replace(/\s+/g, ' ');
   return /\bNot Playing\b/.test(region(380, 170, 650, 440)) &&
     /\bReduce Interruptions\b/.test(region(180, 610, 359, 734))
