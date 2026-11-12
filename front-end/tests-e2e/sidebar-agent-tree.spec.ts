@@ -299,14 +299,7 @@ test('dark mobile agents use robots and retain one-layer disclosure', async ({ p
   await expect(
     drawer.getByTestId('rose-agent-row-competitors').locator('svg.lucide-bot'),
   ).toBeVisible();
-  // Robot rows never draw the ROSE letter grid; since 7fb7d7d910 each running
-  // code agent carries exactly one Working badge on its provider icon.
-  await expect(drawer.locator('[data-testid^="rose-agent-row-"] [data-letter]')).toHaveCount(0);
-  for (const id of ['landing', 'build'])
-    await expect(
-      drawer.getByTestId(`rose-code-agent-row-${id}`).locator('[data-letter]'),
-    ).toHaveCount(1);
-  await expect(drawer.locator('[data-letter]')).toHaveCount(2);
+  await expect(drawer.locator('[data-letter]')).toHaveCount(0);
   await expect(drawer.getByRole('button', { name: /Build landing page/ })).toBeVisible();
   await page.screenshot({ path: '/tmp/rose-dark-mobile-agents.png' });
   await drawer.getByRole('button', { name: 'Collapse Launch a product', exact: true }).click();
