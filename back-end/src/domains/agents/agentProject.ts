@@ -197,6 +197,8 @@ export async function resolveBatchProjectIds(
 export interface BatchAgentResult {
   project_id: string | null;
   folder_id: string | null;
+  /** Persisted Agent.githubRepoRef (canonical `gh:owner/repo`), null when none. */
+  github_repo_ref?: string | null;
   agent_id: string;
   status: 'STARTING_UP' | 'ACTIVE' | 'PAUSED' | 'COMPLETED' | 'FAILED';
   temporal_workflow_id: string | null;
@@ -204,4 +206,47 @@ export interface BatchAgentResult {
   model?: string;
   error?: string;
   already_existed?: boolean;
+}
+
+type StoredBatchAgent = {
+  id: string;
+  projectId: string | null;
+  folderId: string | null;
+  githubRepoRef: string | null;
+  status: string;
+  temporalWorkflowId: string | null;
+  goal: string;
+  model: string;
+};
+
+/**
+ * Batch results in input order, each with its persisted repo ref. Existing
+ * rows surface their stored status; a pending retry keeps its first create's ref.
+ */
+export function batchAgentResults(
+  bodies: CreateAgentBody[],
+  created: Map<string, BatchAgentResult>,
+  existingById: Map<string, StoredBatchAgent>,
+  repoFields: Map<string, AgentRepoRefFields>
+): BatchAgentResult[] {
+  return bodies.map((body) => {
+    const agentId = body.agent_id!;
+    const stored = existingById.get(agentId);
+    const ref =
+      stored !== undefined ? stored.githubRepoRef : repoFields.get(agentId)?.githubRepoRef;
+    const result = created.get(agentId);
+    if (result) return { ...result, github_repo_ref: ref ?? null };
+    const row = stored!;
+    return {
+      agent_id: row.id,
+      project_id: row.projectId,
+      folder_id: row.folderId,
+      github_repo_ref: row.githubRepoRef,
+      status: row.status as BatchAgentResult['status'],
+      temporal_workflow_id: row.temporalWorkflowId,
+      goal: row.goal,
+      model: row.model,
+      already_existed: true,
+    };
+  });
 }
