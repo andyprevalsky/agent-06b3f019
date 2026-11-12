@@ -11,6 +11,25 @@ import type { NotificationContent } from './notificationDelivery';
 
 const log = createLogger('NotificationCards');
 
+/** Write-lock / payment approval: the full approval text plus a review card for the agent. */
+export function approvalNotificationContent(
+  message: string,
+  agentUrl: string,
+  question: string,
+  isPayment: boolean
+): NotificationContent {
+  return {
+    message,
+    requiredLinks: [agentUrl],
+    card: {
+      url: agentUrl,
+      title: isPayment ? 'Payment approval needed' : 'Your approval is needed',
+      subtitle: question,
+      button: 'Review on RoseLabs',
+    },
+  };
+}
+
 export function plannerNotificationContent(
   message: string,
   sourceText: string,

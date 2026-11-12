@@ -16,7 +16,11 @@
 import { createLogger } from '../logger';
 import { sendSms, sendMms, getUserPhone } from '../smsQueue';
 import { sendOnChannel, type SupervisorChannel } from './channelDelivery';
-import { deliverNotificationCard, plannerNotificationContent } from './notificationCards';
+import {
+  approvalNotificationContent,
+  deliverNotificationCard,
+  plannerNotificationContent,
+} from './notificationCards';
 import { markWhatsAppReachable, markWhatsAppUnreachable } from '../whatsappReachability';
 import { ROSE_LABS_URL, SMS_TEMPLATES, getAgentUrl } from '../smsTemplates';
 import { getSignedUrl, uploadToStorage } from '../storage';
@@ -433,16 +437,7 @@ export async function notifyWriteLock(
   const message = formatPaymentApprovalBody(paymentCard, notification, question, agentUrl);
   const mediaUrl = getWriteLockMediaUrl(notification) ?? getPaymentCardMediaUrl(paymentCard);
   const rehostedMediaUrl = mediaUrl ? await rehostMmsAttachmentUrl(userId, mediaUrl) : null;
-  const approvalContent: NotificationContent = {
-    message,
-    requiredLinks: [agentUrl],
-    card: {
-      url: agentUrl,
-      title: paymentCard ? 'Payment approval needed' : 'Your approval is needed',
-      subtitle: question,
-      button: 'Review on RoseLabs',
-    },
-  };
+  const approvalContent = approvalNotificationContent(message, agentUrl, question, !!paymentCard);
 
   const result = rehostedMediaUrl
     ? await sendLifecycleMms(
