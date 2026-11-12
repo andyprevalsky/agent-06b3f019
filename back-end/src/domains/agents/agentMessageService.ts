@@ -25,6 +25,7 @@ import { createLogger } from '../../providers/logger';
 export { buildUserMessageSignalValue } from './agentMessageSignal';
 import { broadcastChatReactivation } from './agentMessageReactivation';
 import { resumeStoppedBrowser, stoppedAgentStatus } from './agentMessageResume';
+import { findGraphRootId } from './repoGraph';
 
 const log = createLogger('AgentMessages');
 
@@ -132,8 +133,14 @@ async function routeUserMessage(
     if (authoredByWorkflow) await signalUserResponse(agentId, workflowId, messageText);
     else await deliverUserMessageToWorkflow(agentId, workflowId, messageText);
   } else if (agentForChat !== null && agentForChat !== undefined) {
+    const rootAgentId =
+      agentForChat.parentAgentId === null
+        ? agentId
+        : await findGraphRootId(agentId, agentForChat.userId);
+    if (rootAgentId === null) throw new Error(`Chat archive root unavailable for ${agentId}`);
     handleChatMessage({
       agentId,
+      rootAgentId,
       userId: agentForChat.userId,
       model: agentForChat.model,
     }).catch((err: unknown) => {

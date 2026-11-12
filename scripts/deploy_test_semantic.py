@@ -42,8 +42,21 @@ def inventory(events):
 
 
 def specs(suites):
+    if not isinstance(suites, list):
+        raise ValueError('native report suites must be a JSON array')
     for suite in suites:
-        yield from suite.get('specs', [])
+        if not isinstance(suite, dict):
+            raise ValueError('native report suites must contain JSON objects')
+        rows = suite.get('specs', [])
+        if not isinstance(rows, list):
+            raise ValueError('native report specs must be a JSON array')
+        for row in rows:
+            if not isinstance(row, dict):
+                raise ValueError('native report specs must contain JSON objects')
+            tests = row.get('tests', [])
+            if not isinstance(tests, list) or any(not isinstance(test, dict) for test in tests):
+                raise ValueError('native report tests must be a JSON array of objects')
+            yield row
         yield from specs(suite.get('suites', []))
 
 
@@ -60,6 +73,8 @@ def classify_lane(lane, expected, report, events, flaky=None, *, log=''):
     """Classify complete native attempt chains; uncertain evidence stays unknown."""
     cases = {case_key(lane, row): 'UNVERIFIED' for row in expected}
     recovered = []
+    # Validate nested envelopes before the classification catch so the lane owns diagnostics.
+    list(specs(report.get('suites', []))) if isinstance(report, dict) else []
     try:
         if (not isinstance(report, dict) or not isinstance(events, list)
                 or any(not isinstance(event, dict) for event in events)):

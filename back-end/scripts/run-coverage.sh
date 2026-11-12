@@ -465,6 +465,8 @@ COV_LOG="$BACKEND_DIR/coverage/server$SHARD_SUFFIX.log"
 # artifacts and fake provider boundaries.
 export TRACE_ARCHIVE_ENABLED="${TRACE_ARCHIVE_ENABLED:-1}"
 export TRACE_ARCHIVE_LOCAL_DIR="${TRACE_ARCHIVE_LOCAL_DIR:-$ROOT_DIR/.context}"
+# Provider fixtures must not inherit the production sender selected in .env.
+export SMS_PROVIDER="${BLACKBOX_TEST_SMS_PROVIDER:-surge}"
 export BLACKBOX_TEST_FAKE_SURGE="${BLACKBOX_TEST_FAKE_SURGE:-1}"
 export BLACKBOX_TEST_FAKE_WHATSAPP="${BLACKBOX_TEST_FAKE_WHATSAPP:-1}"
 export BLACKBOX_TEST_FAKE_TWILIO="${BLACKBOX_TEST_FAKE_TWILIO:-1}"

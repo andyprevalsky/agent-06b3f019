@@ -33,6 +33,8 @@
  *   - atomicity: no multi-step transactions (shortcode + SMS are independent)
  *   - referential integrity: SmsShortcode has no FKs; agent lookup is a soft check
  *   - event/job cardinality: no async events emitted by these endpoints
+ *   - scope: completion notifications go only to agents the SMS/WhatsApp agent
+ *     created, replied to, or relayed an update for (behavior-6)
  *   - duplication prevention: completion notifications are deduplicated per agent;
  *     write_lock notifications send only the initial SMS per attention
  *     request and skip reminder payloads plus duplicate initial sends
@@ -127,6 +129,17 @@ import {
   testBoundary_notifyWriteLockStructuredMms,
   testBoundary_notifyWriteLockGenericWriteReturn,
 } from './send-sms.behavior-4';
+import {
+  testCompletionScope_smsCreatedAgentNotified,
+  testCompletionScope_smsSupervisorReplyNotified,
+  testCompletionScope_smsRelayedChildQuestionNotifiesRoot,
+  testCompletionScope_smsBudgetIncreaseNotified,
+  testCompletionScope_whatsappCreatedAgentNotified,
+  testCompletionScope_whatsappSupervisorReplyNotified,
+  testCompletionScope_whatsappRelayedQuestionNotified,
+  testCompletionScope_untouchedWebAgentNotNotified,
+  testCompletionScope_untouchedAgentOtherNoticesStillSent,
+} from './send-sms.behavior-6';
 
 // ==================== RUNNER ====================
 interface TestGroup {
@@ -394,6 +407,44 @@ async function runAll() {
         {
           name: 'notify completion renders benchmark preview without outbound SMS',
           fn: testBoundary_notifyCompletionPreviewForBenchmark,
+        },
+      ],
+    });
+    sequentialGroups.push({
+      name: 'Completion scope (SMS/WhatsApp agent interaction)',
+      tests: [
+        { name: 'SMS-created agent -> notified', fn: testCompletionScope_smsCreatedAgentNotified },
+        {
+          name: 'web agent the SMS agent replied to -> notified',
+          fn: testCompletionScope_smsSupervisorReplyNotified,
+        },
+        {
+          name: 'web root whose child question was relayed by SMS -> notified',
+          fn: testCompletionScope_smsRelayedChildQuestionNotifiesRoot,
+        },
+        {
+          name: 'web agent whose budget the SMS agent raised -> notified',
+          fn: testCompletionScope_smsBudgetIncreaseNotified,
+        },
+        {
+          name: 'WhatsApp-created agent -> notified on WhatsApp',
+          fn: testCompletionScope_whatsappCreatedAgentNotified,
+        },
+        {
+          name: 'web agent the WhatsApp agent replied to -> notified on WhatsApp',
+          fn: testCompletionScope_whatsappSupervisorReplyNotified,
+        },
+        {
+          name: 'Mac app agent whose question WhatsApp relayed -> notified on WhatsApp',
+          fn: testCompletionScope_whatsappRelayedQuestionNotified,
+        },
+        {
+          name: 'untouched web agent (kickoff only) -> no completion notice',
+          fn: testCompletionScope_untouchedWebAgentNotNotified,
+        },
+        {
+          name: 'untouched running agent -> kickoff and questions still sent',
+          fn: testCompletionScope_untouchedAgentOtherNoticesStillSent,
         },
       ],
     });

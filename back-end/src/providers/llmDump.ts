@@ -14,6 +14,9 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { createLogger } from './logger';
 import { currentTraceContext } from './tracing';
+import { archiveEnabled, encryptArtifact } from './traceArchive';
+import { storeWorkerArtifact } from './traceArchiveLifecycle';
+import { ownLlmCapture } from './llmCaptureTasks';
 
 const log = createLogger('LlmDump');
 
@@ -46,6 +49,7 @@ function safeJson(value: unknown): string {
 export interface LlmDumpPayload {
   call_site: string;
   agent_id?: string | null;
+  root_agent_id?: string | null;
   span_id?: string | null;
   model?: string | null;
   message_count: number;
@@ -127,4 +131,75 @@ export function updateLlmDump(dumpPath: string | null, patch: Record<string, unk
       error: error instanceof Error ? error.message.slice(0, 200) : String(error).slice(0, 200),
     });
   }
+}
+
+/** Archive completion at the finalizer; model streaming never waits on archive I/O. */
+export interface LlmCapture {
+  localPath: string | null;
+  agentId: string;
+  value: LlmDumpPayload & { span_id: string; dump_id: string };
+  startedAtMs: number;
+}
+
+/** Capture call identities and the start clock before provider streaming begins. */
+export function startLlmCapture(payload: LlmDumpPayload): LlmCapture {
+  const trace = currentTraceContext();
+  const agentId = payload.agent_id || trace?.agent_id || 'unbound';
+  const value = {
+    ...payload,
+    agent_id: agentId,
+    span_id: payload.span_id || trace?.span_id || randomUUID(),
+    dump_id: randomUUID(),
+  };
+  return { localPath: dumpLlmContext(value), agentId, value, startedAtMs: Date.now() };
+}
+
+/** Register the completed capture with both owners without blocking stream return. */
+export function finishLlmCapture(capture: LlmCapture, patch: Record<string, unknown>): void {
+  updateLlmDump(capture.localPath, patch);
+  if (!capture.value.root_agent_id) return;
+  const task = persistLlmCapture(capture, patch).catch((error: unknown) => {
+    log.warn('llm.context.archive_failed', {
+      agent_id: capture.agentId,
+      dump_id: capture.value.dump_id,
+      error: error instanceof Error ? error.name : 'unknown',
+    });
+    throw error;
+  });
+  ownLlmCapture(capture.agentId, task, capture.value.root_agent_id);
+}
+
+/** Encrypt the complete call under its explicit root, preserving its start time. */
+async function persistLlmCapture(
+  capture: LlmCapture,
+  patch: Record<string, unknown>
+): Promise<void> {
+  if (!archiveEnabled()) return;
+  const rootAgentId = capture.value.root_agent_id;
+  if (!rootAgentId) return;
+  const value = {
+    ...capture.value,
+    ...patch,
+    agent_id: capture.agentId,
+    root_agent_id: rootAgentId,
+    dump_id: capture.value.dump_id,
+    config: { ...capture.value.config, ...(patch.config as Record<string, unknown> | undefined) },
+    extra: { ...capture.value.extra, ...(patch.extra as Record<string, unknown> | undefined) },
+  };
+  const objectPath = `llm/${capture.value.dump_id}.json.gz.enc`;
+  const encrypted = encryptArtifact(
+    objectPath,
+    Buffer.from(safeJson(value)),
+    'application/json',
+    true
+  );
+  if (!encrypted) throw new Error('LLM archive encryption unavailable');
+  // This is the captured call-start clock, not upload/finish order.
+  encrypted.metadata.created_at_ms = capture.startedAtMs;
+  await storeWorkerArtifact({
+    rootAgentId,
+    path: objectPath,
+    ciphertextB64: encrypted.ciphertext.toString('base64'),
+    metadata: encrypted.metadata,
+  });
 }

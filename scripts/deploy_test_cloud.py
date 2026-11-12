@@ -389,6 +389,15 @@ def execute(request, root):
         if directory.exists() or directory.is_symlink():
             raise ValueError('cloud source differs with an existing request namespace')
         raise SourceRefusal(SOURCE_DIFFERS)
+    catalog = root / 'agents/benchmarks/tasks.json'
+    if catalog.is_file():
+        catalog_rows = json.loads(catalog.read_text())
+        excluded = {row['name']: row['deploy_quarantine'] for row in catalog_rows
+                    if isinstance(row, dict) and row.get('deploy_quarantine')}
+        requested_exclusions = set(checks) & set(excluded)
+        if requested_exclusions:
+            raise SourceRefusal('deploy plan includes quarantined tasks; regenerate selection: '
+                                + ', '.join(sorted(requested_exclusions)))
     if not origin_fetchable(root, request['source']['head']):
         if directory.exists() or directory.is_symlink():
             raise ValueError('unpushed cloud source with an existing request namespace')

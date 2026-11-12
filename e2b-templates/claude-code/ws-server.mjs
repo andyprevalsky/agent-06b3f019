@@ -2252,7 +2252,11 @@ function goalTurnText(rawTask, note = "") {
   }
   // A new spawn's goal reaches a live CLI already headed "Task:" (backend
   // attachLiveCodeCli); the first task is headed here.
-  const body = task.startsWith("Task:\n") ? task.slice("Task:\n".length) : task;
+  // A goal already written as `/goal <condition>` (a user's /goal, relayed by
+  // its parent) is that condition: it is not wrapped twice.
+  const body = (
+    task.startsWith("Task:\n") ? task.slice("Task:\n".length) : task
+  ).replace(/^\s*\/goal\s+/, "");
   let condition = `${note}Task:\n${body}`;
   if (condition.length > GOAL_CONDITION_MAX_CHARS) {
     const taskPath = join(

@@ -1156,8 +1156,9 @@ def test_mass_deploy_quarantine_cannot_reenter_through_floor_or_paths(tmp_path, 
     assert "Deploy quarantine (not run): test-mass-agent-run-0" in format_report(selection)
     task = next(t for t in load_tasks(CATALOG) if t.name == "test-mass-agent-run-0")
     assert not _eligible(task, surface)
-    # The executable task, smoke tag, prompt and evaluators remain in the catalog.
-    assert task.is_smoke and task.eligible_status
+    # User-directed retirement (2026-11-12): the definition, smoke tag and history stay in the
+    # catalog, but the task is no longer an eligible status for any selector.
+    assert task.is_smoke and task.status == "retired" and not task.eligible_status
     from .benchmark_tasks import get_task_by_name
     assert get_task_by_name(task.name).name == task.name
 
@@ -1195,6 +1196,39 @@ def test_stale_cloud_deploy_plan_cannot_admit_quarantined_mass(tmp_path, monkeyp
     launch.assert_not_called()
     assert not (tmp_path / ".context/deploy-cloud").exists()
 
+
+def test_refresh_omits_only_explicit_deploy_quarantines(tmp_path, monkeypatch):
+    monkeypatch.syspath_prepend(str(ROOT / "scripts"))
+    import deploy_test_quarantine as quarantine
+    from copy import deepcopy
+    catalog = tmp_path / "agents/benchmarks/tasks.json"
+    catalog.parent.mkdir(parents=True)
+    rows = [
+        {"name": "mass", "deploy_quarantine": "Explicit user exclusion"},
+        {"name": "ordinary", "quarantine": {"error": "Still runs"}},
+        {"name": "peer"},
+    ]
+    catalog.write_text(json.dumps(rows))
+    before = {"category": "smoke", "native_cloud": True, "checks": ["mass", "ordinary", "peer"]}
+    original = deepcopy(before)
+    after = {**before, "checks": ["ordinary", "peer"]}
+    assert quarantine.deploy_selection_omissions(tmp_path, before, after) == {"mass": "Explicit user exclusion"}
+    assert before == original
+    for checks in (["peer"], ["mass", "peer"], ["ordinary"]):
+        with pytest.raises(ValueError):
+            quarantine.deploy_selection_omissions(tmp_path, before, {**after, "checks": checks})
+    for bad in (False, 1, "", {}, None):
+        rows[0]["deploy_quarantine"] = bad
+        catalog.write_text(json.dumps(rows))
+        with pytest.raises(ValueError):
+            quarantine.deploy_selection_omissions(tmp_path, before, after)
+    rows[0]["deploy_quarantine"] = "Explicit user exclusion"
+    catalog.write_text(json.dumps(rows + [rows[0]]))
+    with pytest.raises(ValueError):
+        quarantine.deploy_selection_omissions(tmp_path, before, after)
+    catalog.write_text(json.dumps(rows))
+    with pytest.raises(ValueError):
+        quarantine.deploy_selection_omissions(tmp_path, {**before, "category": "backend"}, after)
 
 
 @pytest.mark.parametrize("surface", ["local", "cloud"])
@@ -1307,18 +1341,21 @@ def test_native_retained_quarantine_refuses_foreign_or_unbound_cycle(tmp_path, m
         planner.retained_quarantine_inventory(['remaining-task'], root, directory)
 
 
-def test_explicit_manual_full_selector_keeps_mass_eligible(tmp_path):
+def test_explicit_manual_full_selector_excludes_retired_mass(tmp_path):
     import io
     import runpy
 
     full = runpy.run_path(str(ROOT / 'scripts/cloudbench-full-selection.py'))
     attempts = tmp_path / 'attempts.jsonl'
     _write_attempts(attempts, [('test-mass-agent-run-0', True)] * full['PASS_STREAK'])
-    selected = full['select_full'](
-        CATALOG, attempts, 1, ['README.md'], lambda: 1000,
-        report=io.StringIO(), admitted=lambda: {'test-mass-agent-run-0'}, copy_cap=lambda: 20,
-    )
-    assert selected == ['test-mass-agent-run-0']
+    report = io.StringIO()
+    # Retired from all future runs (user-directed 2026-11-12), even when explicitly admitted.
+    with pytest.raises(SystemExit):
+        full['select_full'](
+            CATALOG, attempts, 1, ['README.md'], lambda: 1000,
+            report=report, admitted=lambda: {'test-mass-agent-run-0'}, copy_cap=lambda: 20,
+        )
+    assert 'not cloud-eligible (status/local-only/production-only/rootless): test-mass-agent-run-0' in report.getvalue()
 
 
 def test_native_facade_passes_only_its_explicit_configured_cycle(tmp_path, monkeypatch):

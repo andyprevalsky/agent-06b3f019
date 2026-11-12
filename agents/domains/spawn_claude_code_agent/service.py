@@ -24,6 +24,7 @@ from domains.spawn_claude_code_agent.config import (
     CODE_AGENT_ERRORS_HEARTBEAT_KEY,
     CODE_AGENT_PAUSED_STATUS,
     CODE_AGENT_RESIZE_YIELD_REASON,
+    CODE_AGENT_SESSION_FAILED_CODE,
     CODE_AGENT_USAGE_LIMIT_STATUS,
     CODE_SESSION_HEARTBEAT_KEY,
     CODE_SESSION_IDLE_PAUSE_S,
@@ -1090,6 +1091,12 @@ async def _run_agentic_loop(
             # A new turn: the next SDK result belongs to it.
             user_turns_seen += 1
             sdk_result_at = None
+        elif event.get("type") == "turn_started" and sdk_result_at is not None:
+            # The CLI started a turn of its own after a caught-up result (a /goal
+            # continuation, a background-task notification): it is working again,
+            # so that result was not its last. The turn's own result re-arms the grace.
+            user_turns_seen += 1
+            sdk_result_at = None
         if event.get("type") in ("goal", "turn_started", "turn_ended", "user_turn", "direct_chat"):
             log_monitor_state()
         if is_codex_completed_turn_event(event):
@@ -1179,8 +1186,10 @@ async def _run_agentic_loop(
         on_events_replay=on_events_replay,
     )
 
-    if not await ws_client.connect():
-        raise Exception("Failed to connect to Claude Code WebSocket")
+    # A reattach after a long run must survive a brief blip: one failed
+    # handshake used to end the whole session (tar_2b02efd49fc2466497723b3e).
+    if not await ws_client.connect_with_retry():
+        raise Exception(f"Failed to connect to Claude Code WebSocket: {ws_client.last_error or 'unknown error'}")
 
     listen_task = asyncio.create_task(ws_client.listen())
     action_summary.append("Connected to Claude Code WebSocket")
@@ -1298,7 +1307,9 @@ async def _run_agentic_loop(
                 break
 
             if ws_client.reconnects_exhausted:
-                await _handle_reconnect_exhausted(sandbox_id, agent_id, task_id, action_summary, code_provider)
+                await _handle_reconnect_exhausted(
+                    sandbox_id, agent_id, task_id, action_summary, code_provider, last_error=ws_client.last_error
+                )
 
             silence_duration = safe_time() - last_output_time
 
@@ -1526,6 +1537,7 @@ async def _handle_reconnect_exhausted(
     task_id: str,
     action_summary: list[str],
     code_provider: str = "claude",
+    last_error: Optional[str] = None,
 ) -> None:
     """Handle WebSocket reconnection exhaustion by diagnosing sandbox state."""
     logger.error(
@@ -1575,7 +1587,8 @@ async def _handle_reconnect_exhausted(
     else:
         action_summary.append("DIAGNOSIS: Could not determine sandbox health")
 
-    raise Exception("WebSocket connection to Claude Code sandbox lost after all reconnect attempts")
+    detail = f": {last_error}" if last_error else ""
+    raise Exception(f"WebSocket connection to Claude Code sandbox lost after all reconnect attempts{detail}")
 
 
 # ---------------------------------------------------------------------------
@@ -3347,6 +3360,54 @@ def _error_ends_the_run(error: BaseException) -> bool:
     return not activity.in_activity() or (isinstance(error, ApplicationError) and error.non_retryable)
 
 
+def code_session_failure_error(
+    error: BaseException,
+    original: BaseException,
+    facts: Optional[Dict[str, Any]],
+    *,
+    local: bool = False,
+) -> BaseException:
+    """The final error of a run whose code session exists, carrying how to resume it.
+
+    A run that died on a dropped connection used to reach the parent as a bare
+    one-liner (tar_2b02efd49fc2466497723b3e): no code_session_id, so the saved
+    sandbox, commits and checkpoint could not be resumed. This error keeps the
+    exact exception and adds the session id, the failure checkpoint and the
+    exact retry call. Without a code session (or on a Mac, which resumes by
+    folder) ``error`` is returned unchanged.
+    """
+    code_session_id = (facts or {}).get("code_session_id")
+    if local or not isinstance(code_session_id, str) or not code_session_id:
+        return error
+    exact = extract_error_message(original)
+    error_type = type(original).__name__
+    checkpoint_seq = (facts or {}).get("checkpoint_seq")
+    saved = f"saved at checkpoint {checkpoint_seq}" if checkpoint_seq is not None else "kept"
+    lines = [
+        f"Code agent run ended abnormally: {error_type}: {exact}",
+        f"Code session {code_session_id} was not lost: its sandbox files, commits and conversation are {saved}.",
+    ]
+    if (facts or {}).get("branch"):
+        lines.append(f"Branch: {facts['branch']}")
+    lines.append(
+        f"Resume it with spawn_agent(type='code', code_session_id='{code_session_id}', goal=<the same goal>)."
+    )
+    final = ApplicationError(
+        "\n".join(lines),
+        {
+            "code_session_id": code_session_id,
+            "code_session": dict(facts or {}),
+            "error": exact,
+            "error_type": error_type,
+            "retry": {"tool": "spawn_agent", "type": "code", "code_session_id": code_session_id},
+        },
+        type=CODE_AGENT_SESSION_FAILED_CODE,
+        non_retryable=True,
+    )
+    final.__cause__ = original
+    return final
+
+
 # ---------------------------------------------------------------------------
 # Temporal activity
 # ---------------------------------------------------------------------------
@@ -4470,7 +4531,10 @@ async def spawn_claude_code_activity(
                     ),
                 )
 
-                await close_e2b_session(task_id=task_id, code_provider=code_provider, reason="failure")
+                # The failure close checkpoints the sandbox (repos, files, CLI log)
+                # and pauses it; its facts name the checkpoint the resume restores.
+                close_data = await close_e2b_session(task_id=task_id, code_provider=code_provider, reason="failure")
+                code_session_facts = _merge_close_code_session_facts(code_session_facts, close_data)
             except Exception as cleanup_error:
                 logger.warning(
                     "[ClaudeCode] Cleanup failed on error",
@@ -4479,7 +4543,9 @@ async def spawn_claude_code_activity(
                     error=str(cleanup_error),
                 )
 
-        raise error
+        raise code_session_failure_error(
+            error, e, code_session_facts, local=bool(local_workspace_place(code_agent_meta))
+        )
 
     finally:
         session_heartbeats.close()

@@ -794,6 +794,53 @@ class OverrideDispositionTest(unittest.TestCase):
         self.assertEqual((receipt["disposition"], receipt["deferred_to"]),
                          ("overridden", "deploy/speed-followup-9-body-read"))
 
+    def completed_findings(self) -> dict:
+        # Three delivered reviews; finish through the same public action as the operator.
+        state = MODULE.read_state(self.state_path)
+        state["cycles"][1]["result"] = "findings"
+        state["cycles"][-1].update(number=3, kind="verification")
+        MODULE.write_state(self.state_path, state)
+        return MODULE.finish_cycle(self.state_path, head=HEAD_C, result="findings")
+
+    def completed_override_cli(self, data: dict, *, head=HEAD_C) -> subprocess.CompletedProcess:
+        evidence_path = self.state_path.parent / "evidence.json"
+        evidence_path.write_text(json.dumps(data))
+        return subprocess.run(
+            [sys.executable, "-B", str(ROOT / "scripts/deploy_review_cycle.py"),
+             "--state", str(self.state_path), "override", "--head", head, "--pr", "1656",
+             "--finding-ids", "4431365241", "--deferred-to", "deploy/speed-followup-9-body-read",
+             "--evidence-json", str(evidence_path), "--receipt", str(self.receipts)],
+            text=True, capture_output=True, check=False)
+
+    def test_completed_override_refusals_are_atomic(self) -> None:
+        self.completed_findings()
+        original = MODULE.read_state(self.state_path)
+        cases = [dict(result="clean"), dict(disposition="skipped", skip_reason="usage-cap"),
+                 dict(disposition="overridden"), dict(head=HEAD_A), dict(kind="post-cap-unreviewed"),
+                 dict(one_final_review_approval={"approval_id": "fixture:forbidden"}),
+                 dict(post_findings_review_approval={"approval_id": "fixture:forbidden"})]
+        for changes in cases + [None, "budget", "review-head", "unanswered", "other-unanswered"]:
+            with self.subTest(changes=changes):
+                state, data = deepcopy(original), deepcopy(self.data)
+                if isinstance(changes, dict):
+                    state["cycles"][-1].update(changes)
+                elif changes == "budget":
+                    state["cycles"][1]["result"] = "unavailable"
+                elif changes == "review-head":
+                    data["reviews"] = [{**FINDINGS_REVIEW, "commit_id": HEAD_A}]
+                elif changes == "unanswered":
+                    data["review_comments"] = [FINDING_COMMENT]
+                elif changes == "other-unanswered":
+                    data["review_comments"].append(review_comment(4431365300, HEAD_C, "another finding"))
+                else:
+                    state["cycles"].append(dict(head=HEAD_A, status="completed", result="findings"))
+                MODULE.write_state(self.state_path, state)
+                before = self.state_path.read_bytes()
+                result = self.completed_override_cli(data)
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertEqual(self.state_path.read_bytes(), before)
+                self.assertFalse(self.receipts.exists())
+
     def test_override_requires_three_rounds_counting_prior_deploys(self) -> None:
         MODULE.start_cycle(self.state_path, head=HEAD_A, kind="initial", reset=True)
         with self.assertRaisesRegex(MODULE.ReviewCycleError,

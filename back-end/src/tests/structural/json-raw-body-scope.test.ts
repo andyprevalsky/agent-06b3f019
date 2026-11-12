@@ -25,6 +25,7 @@ const RAW_BODY_CONSUMERS: Record<string, string> = {
   'domains/slack-auto-rca/routes.ts': "'/api/webhooks/slack/auto-rca'",
   'domains/sms-webhook/routes.ts': "'/api/sms'",
   'domains/whatsapp-webhook/routes.ts': "'/api/whatsapp'",
+  'domains/linq-webhook/routes.ts': "'/api/linq'",
   'domains/purchases/routes.ts': "'/api/purchases/webhooks/agentcard'",
 };
 
@@ -42,6 +43,12 @@ const server = fs.readFileSync(SERVER_FILE, 'utf-8');
 // 1. The global parser (app.use(express.json(...)) with no path) must not capture raw bodies.
 const globalParsers = [...server.matchAll(/app\.use\(\s*express\.json\(/g)];
 if (globalParsers.length === 0) failures.push('server.ts: no global express.json parser found');
+// Linq uses an express.raw Buffer rather than req.rawBody. Keep its exact-byte
+// parser ahead of global JSON even though it has no rawBody-property reader.
+const linqMountAt = server.indexOf(RAW_BODY_CONSUMERS['domains/linq-webhook/routes.ts']);
+if (linqMountAt < 0 || linqMountAt > (globalParsers[0]?.index ?? -1)) {
+  failures.push('Linq webhook must be mounted before global JSON parsing');
+}
 for (const match of globalParsers) {
   let depth = 0;
   let end = match.index;

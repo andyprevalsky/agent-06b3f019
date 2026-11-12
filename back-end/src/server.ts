@@ -52,6 +52,8 @@ import codexCodeRouter from './domains/codex-code/routes';
 import billingRouter from './domains/billing/routes';
 import apiKeysRouter from './domains/api-keys/routes';
 import smsWebhookRouter from './domains/sms-webhook/routes';
+import { routeToSupervisor, handleClearCommand } from './domains/sms-webhook/service';
+import { createLinqWebhookRouter } from './domains/linq-webhook/routes';
 import whatsappWebhookRouter from './domains/whatsapp-webhook/routes';
 import credentialPropagationRouter from './domains/credential-propagation/routes';
 import purchasesRouter, { agentCardWebhookHandler } from './domains/purchases/routes';
@@ -134,6 +136,9 @@ const PORT = process.env.PORT || 3001;
 // Webhooks must be mounted BEFORE express.json() middleware
 // (Stripe requires raw body for signature verification)
 app.use('/webhooks', webhooksRouter);
+
+// Linq authenticates exact bytes; its bounded raw parser must precede global JSON parsing.
+app.use('/api/linq', createLinqWebhookRouter({ routeToSupervisor, handleClearCommand }));
 
 // SMS Webhook from Surge (JSON body, preserve raw body for HMAC signature verification)
 app.use(

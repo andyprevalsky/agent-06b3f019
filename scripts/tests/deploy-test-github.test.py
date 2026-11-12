@@ -14,6 +14,7 @@ import copy
 import io
 import json
 import os
+import re
 from pathlib import Path
 import subprocess
 import sys
@@ -1412,6 +1413,63 @@ class GateSetupReleaseTools(unittest.TestCase):
             self.assertEqual(second.returncode, 0, second.stderr)
             self.assertIn("flyctl: installing the dependency disk's last good copy", second.stderr)
             self.assertTrue((tmp / 'home/.fly/bin/flyctl').exists())
+
+
+class GateSetupPostgres(unittest.TestCase):
+    """scripts/ci/deploy-gate-setup.sh postgres step, executed with stand-in sudo/systemctl/psql.
+
+    FLAKY ae9ae00c (2026-11-11): the gate VM kept PostgreSQL's stock max_connections=100 while the
+    devbox (scripts/cloud-build.sh) runs 300, so backend-coverage-blackbox's concurrent shard pools
+    were refused mid-gate with "sorry, too many clients already". The step must configure the
+    devbox value before the server restarts and refuse to continue unless the live server reports it.
+    """
+
+    STOCK = 'listen_addresses = localhost\nmax_connections = 100\t\t\t# (change requires restart)\n'
+
+    def run_block(self, tmp, applies=True):
+        text = (ROOT / 'scripts/ci/deploy-gate-setup.sh').read_text()
+        block = text[text.index('step "postgres $PG_MAJOR"'):text.index('# Release binaries (flyctl')]
+        block = block.replace('/etc/postgresql/', f'{tmp}/etc/')
+        conf = tmp / 'etc/16/main/postgresql.conf'
+        conf.parent.mkdir(parents=True)
+        conf.write_text(self.STOCK)
+        live = tmp / 'live'
+        live.write_text('100')  # the server the runner image already started
+        bin_dir = tmp / 'bin'
+        bin_dir.mkdir()
+        stubs = {
+            'sudo': '[ "$1" = -u ] && shift 2\nexec "$@"\n',
+            # A restart makes the server read the config file as it is at that moment.
+            'systemctl': ('[ "$1" = restart ] || exit 0\n' + (
+                f'sed -n "s/^max_connections = \\([0-9]*\\).*/\\1/p" {conf} > {live}\n' if applies else '')),
+            'pg_isready': 'exit 0\n',
+            'psql': f'case "$*" in *"SHOW max_connections"*) cat {live};; esac\n',
+            'createdb': 'exit 0\n',
+        }
+        for name, body in stubs.items():
+            (bin_dir / name).write_text('#!/usr/bin/env bash\n' + body)
+            (bin_dir / name).chmod(0o755)
+        env = {'PATH': f'{bin_dir}:/usr/bin:/bin', 'PG_MAJOR': '16'}
+        result = subprocess.run(['bash', '-c', 'set -euo pipefail\nstep() { :; }\n' + block], cwd=ROOT, env=env,
+                                capture_output=True, text=True, timeout=60)
+        return result, conf.read_text(), live.read_text().strip()
+
+    def test_gate_postgres_runs_the_devbox_connection_ceiling(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            result, conf, live = self.run_block(Path(tmp))
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn('max_connections = 300\n', conf)
+            self.assertEqual(live, '300', 'the restarted server must run the configured ceiling')
+        devbox = re.search(r"max_connections = (\d+)/", (ROOT / 'scripts/cloud-build.sh').read_text())
+        self.assertIsNotNone(devbox)
+        self.assertEqual(devbox.group(1), '300', 'gate VM and devbox Postgres must allow the same clients')
+
+    def test_gate_setup_fails_when_the_server_keeps_the_stock_ceiling(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            result, _, live = self.run_block(Path(tmp), applies=False)
+            self.assertEqual(live, '100')
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('postgres max_connections is 100, want 300', result.stderr)
 
 
 class GitHubTerminalCleanup(unittest.TestCase):

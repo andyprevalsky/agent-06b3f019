@@ -130,7 +130,7 @@ The PR is merged, every applicable production lane is verified or has a recorded
 
 Stop and ask the user only for a prompt, agent-behavior or trajectory-injection approval the golden-reference review did not clear; gates keep running, only the merge waits.
 
-Two more decisions stay with the user, though this skill adds no stop of its own: the verification-cycle approval id (the review ledger will not start that cycle without it), and a security or prod-impacting finding still open after cycle 3 (the user's answer of 2026-11-05; the ledger refuses a 4th cycle). See **Review**.
+Review cycles are never a stop: never ask the user to approve another review cycle (user, 2026-11-12). See **Review**.
 
 Stop immediately when the user says stop. Credential or billing changes only the user can make, provider credit exhaustion, review cycles, owner labels, monitoring deadlines, review-quota exhaustion, provider outages and failed rounds are never stops.
 
@@ -148,7 +148,7 @@ Everything not listed here must pass. Record every skip as `⚠️ Skipped` with
 | Codex E2B smoke | Every Codex credential path is out of credits (the test skips itself) | Never use `BLACKBOX_TEST_SKIP_DOMAINS` |
 | Benchmark judge | Confirmed third-party compute quota | |
 | Credential health: Anthropic, Parallel.ai | Any failure (warn-only) | Other providers' auth rejections block |
-| CodeRabbit | Confirmed quota or spending cap on the current HEAD: `deploy_review_cycle.py skip --reason usage-cap` | The PR body says it merged unreviewed |
+| CodeRabbit | Confirmed quota or spending cap on the current HEAD: `deploy_review_cycle.py skip --reason usage-cap`, at any cycle (1, 2, 3 or verification) | Never wait for the window or ask; the PR body says it merged unreviewed |
 | Mac-only checks on Linux | Always | Unverified, never PASS |
 | Mac local-execution acceptance | Device discovery shows no connected Mac | An auth error is not proof of absence |
 | Unselected categories | The gate planner omitted them | The plan lists every omission |
@@ -189,11 +189,11 @@ Details: `.claude/shared/deploy-failure-policy.md` and `docs/deploy-test-cycle.m
 ## Review
 
 - Cycle 1 starts when the PR opens; cycle 2 is one batched incremental review; cycle 3 only when cycle 2 found a valid issue; the ledger refuses a 4th.
-- After a clean cycle 2, gate fixes that changed source need a verification cycle, which the ledger only starts with the user's explicit approval id (`scripts/deploy review-next --verification-approval <id>`); batch every source fix into cycle 2 where possible, and ask for the id in the same message as any other pending question.
+- After a clean (or usage-cap skipped) cycle 2, never run another full verification review and never ask (user, 2026-11-12). Publish the later gate fixes with the standing approval, `scripts/deploy review-next --verification-approval user-standing-20261112`, and do not wait on it: skip it with `usage-cap` when out of quota, otherwise take whatever incremental review arrives with the gates. Batch source fixes into one push where possible.
 - Read the reviews for the exact HEAD from the reviews, inline comments and issue comments endpoints; a green check is not a review.
 - Fix every valid finding, including pre-existing ones; ignore only pure style nits.
 - Reply to every comment with `[FIXED]`, `[DEFERRED]`, `[IGNORED]`, `[DELEGATED]` or `[POST-MERGE REPAIR]`; `override` requires `[DEFERRED]` or `[FIXED]` on each deferred finding.
-- If cycle 3 still has valid findings, defer the non-security ones with `deploy_review_cycle.py override` and merge; fix security or prod-impacting ones, then ask the user how the fix is reviewed (the ledger refuses a 4th cycle).
+- If cycle 3 still has valid findings, defer the non-security ones with `deploy_review_cycle.py override` and merge; fix security or prod-impacting ones and continue with the standing approval (`--one-final-review-approval user-standing-20261112`, skipped as `usage-cap` when out of quota). Never ask the user to approve another review cycle.
 - A false-green or bot-posted request gets one `@coderabbitai full review` from the user's account.
 - Over 150 files: add the canonical path filters in a later stabilized commit; never weaken the review.
 - `open-pr`/`review-next` request nothing for a HEAD whose changed paths the `.coderabbit.yaml` path filters all exclude: the ledger records `no-reviewable-paths` (no cycle spent), carrying only a clean prior result.

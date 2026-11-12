@@ -65,6 +65,7 @@ def gate_deadline(gate: str) -> int:
 PREPARE_TIMEOUT_SECONDS = 3600
 PROVISION_JOBS = 4
 BACKEND_GATE = 'backend-coverage-blackbox'
+LIVE_PROBES_GATE = 'live-probes'
 CLOUD_GATE = 'smoke'
 CLOUD_SLOT = {'id': 'cloud-smoke-worker', 'transport': 'benchmark-cloud-cli'}
 SLOT_ENV = ('CONDUCTOR_WORKSPACE_NAME', 'CONDUCTOR_PORT')
@@ -232,6 +233,13 @@ def backend_recipe(root: Path, env: dict, timeout: float) -> dict:
     return handoff_recipe(aggregate, selection(root)[1], timeout)
 
 
+def live_probes_recipe(env: dict) -> dict:
+    """One case per live probe, run in PROBE_NAMES order (the worker runs cases one after another)."""
+    from run_deploy_live_probes import PROBE_NAMES
+    return {'cases': {name: {'command': ['python3', 'scripts/run_deploy_live_probes.py', '--only', name],
+                             'cwd': '.', 'env': dict(env), 'aggregate': False} for name in PROBE_NAMES}}
+
+
 def run_root(root: Path) -> Path:
     """The coordinator's deploy timing-run root (run-deploy-stage's DEPLOY_RUN_ROOT default)."""
     value = os.environ.get(RUN_ROOT_ENV)
@@ -258,6 +266,8 @@ def local_slot(root: Path, gate: str, path: Path, values: dict) -> dict:
             'env': env, 'timeout_seconds': gate_deadline(gate)}
     if gate == BACKEND_GATE:
         slot['recipe'] = backend_recipe(root, env, GATE_DEADLINE_SECONDS)
+    if gate == LIVE_PROBES_GATE:
+        slot['recipe'] = live_probes_recipe(env)
     return slot
 
 
@@ -269,6 +279,8 @@ def remote_slot(root: Path, gate: str) -> dict:
             'worker_root': GITHUB_WORKER_ROOT, 'env': env, 'timeout_seconds': gate_deadline(gate)}
     if gate == BACKEND_GATE:
         slot['recipe'] = backend_recipe(root, env, GATE_DEADLINE_SECONDS)
+    if gate == LIVE_PROBES_GATE:
+        slot['recipe'] = live_probes_recipe(env)
     return slot
 
 
