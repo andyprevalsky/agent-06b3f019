@@ -2101,6 +2101,49 @@ class Cycle(unittest.TestCase):
         self.workers.cleanup()
         self.temp.cleanup()
 
+    def test_refresh_admits_planner_resplit_of_legacy_aggregate_case_without_credit(self):
+        # PR #1865 (2026-11-12): main e12acbac47 split live-probes' single aggregate case into one case per
+        # probe; an in-flight cycle refused the regenerated plan ("replaced an original case command").
+        gate = self.plan['gates'][1]
+        env = {'CONDUCTOR_WORKSPACE_NAME': 'probes', 'CONDUCTOR_PORT': '12000'}
+        gate.update(checks=[gate['name']], worker_recipe={'cases': {gate['name']: {
+            'command': ['python3', 'probes.py'], 'cwd': '.', 'env': dict(env), 'aggregate': True}}})
+        name = gate['name']
+        self.state = c.initialize(self.plan, self.root)
+        self.state.update(phase='needs-focused-plan')
+        old = copy.deepcopy(self.plan)
+        def split(**case):
+            new = copy.deepcopy(old)
+            new['source'] = c.source(self.root)
+            new['gates'][1]['checks'] = ['one', 'two']
+            new['gates'][1]['worker_recipe'] = {'cases': {probe: {
+                'command': ['python3', 'probes.py', '--only', probe], 'cwd': '.', 'env': dict(env),
+                'aggregate': False, **case} for probe in ('one', 'two')}}
+            return new
+        history = copy.deepcopy(self.state['attempts'])
+        state = copy.deepcopy(self.state)
+        c.refresh(state, old, split(), self.root)
+        self.assertEqual(history, state['attempts'])
+        self.assertNotIn(name, state['carried_passes'])
+        self.assertEqual(['one', 'two'], state['plan']['gates'][1]['checks'])
+        # Any other contract change, a still-aggregate case or a pending failure keeps refusing.
+        for label, new in (('aggregate', split(aggregate=True)), ('cwd', split(cwd='elsewhere')),
+                           ('env', split(env={'CONDUCTOR_PORT': '1'})),
+                           ('timeout', (lambda n: (n['gates'][1].update(timeout_seconds=1), n)[1])(split()))):
+            with self.subTest(label=label):
+                candidate = copy.deepcopy(self.state)
+                with self.assertRaises(ValueError):
+                    c.refresh(candidate, old, new, self.root)
+                self.assertEqual(self.state, candidate)
+        pending = copy.deepcopy(self.state)
+        pending['failures'] = [dict(id='open', gate=name, check=name + '/' + name, native_result='FAIL',
+                                    source=copy.deepcopy(pending['source']))]
+        pending['pending'] = ['open']
+        unchanged = copy.deepcopy(pending)
+        with self.assertRaisesRegex(ValueError, 'adjudicate pending occurrences'):
+            c.refresh(pending, old, split(), self.root)
+        self.assertEqual(unchanged, pending)
+
     def test_refresh_retains_explicit_deploy_exclusion_without_pass_credit(self):
         gate = self.plan['gates'][1]
         gate.update(category='smoke', native_cloud=True, checks=['mass', 'peer'])

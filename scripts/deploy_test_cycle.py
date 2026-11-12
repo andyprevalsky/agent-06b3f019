@@ -30,7 +30,7 @@ import uuid
 import deploy_gate_progress as progress
 import deploy_test_quarantine as quarantine
 from deploy_test_process import CANCEL, cancellation_handlers, run_command
-from deploy_test_result import MAX_RECEIPT_BYTES, preserve_contract, validate as validate_result, validate_recipe
+from deploy_test_result import MAX_RECEIPT_BYTES, aggregate_resplit, preserve_contract, validate as validate_result, validate_recipe
 from deploy_test_isolation import validate as validate_isolation
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -2483,6 +2483,8 @@ def _refresh(state: dict, old: dict, new: dict, root: Path, *, election_proof=No
     for name, gate in old_gates.items():
         if name in removed:
             continue
+        if aggregate_resplit(gate, new_gates[name]):
+            continue  # planner split a legacy aggregate case into per-check cases; nothing carries
         preserve_contract(gate, new_gates[name])
         if not set(gate["checks"]) <= set(new_gates[name]["checks"]):
             omissions = quarantine.deploy_selection_omissions(root, gate, new_gates[name])
