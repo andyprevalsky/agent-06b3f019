@@ -168,8 +168,10 @@ change had introduced. Both were fixed in the same PR.
     passes with the fix.
   - The benchmark domain's failure message also named `judge_failure`,
     `native_failure` and `unexecuted_native`. Those are a nested run's
-    intentional stand-ins leaking through the global `_RECORDED_FAILURES`.
-    `_test_utils.isolated_failure_report()` now scopes them.
+    intentional stand-ins, which leak through the global
+    `_RECORDED_FAILURES`. This is a pre-existing naming artifact; scoping it
+    here made `new-test-stability` select a test that cannot run under a case
+    filter, so the change was dropped.
 - `deploy-command-structural`, `test-sleep-ratchet`: this change's fixed
   literal sleeps in `rose.blackbox.py` and `compute-usage-refresh.test.ts`
   became an Event that is never set and `waitFor`. Main's own over-baseline

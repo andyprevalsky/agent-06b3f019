@@ -26291,7 +26291,6 @@ async def test_benchmark_native_checks_overlap_judges_without_losing_ownership()
     with (
         contextlib.redirect_stdout(io.StringIO()),
         contextlib.redirect_stderr(io.StringIO()),
-        _test_utils.isolated_failure_report(),
         patch.dict(globals(), replacements),
         patch.object(BlackboxResult, "record", record_registered),
         patch.object(BlackboxResult, "record_async", record_registered_async),
