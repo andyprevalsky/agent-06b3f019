@@ -39,6 +39,79 @@ source "$ROOT_DIR/scripts/lib/cloudbench-env.sh"
 # ownership and release with the minimum real allocation; the focused reserve
 # tests cover sizing and low-space behavior separately.
 export CLOUDBENCH_CLEANUP_DISK_RESERVE_MB="${CLOUDBENCH_CLEANUP_DISK_RESERVE_MB:-32}"
+
+# The scenarios below are independent after the shared fixture setup (each
+# starts from reset_fake_state), and every copy of this suite owns a private
+# TMP_ROOT, port window and fixture process scan. A default run therefore
+# executes five scenario shards as concurrent copies of this script: every
+# scenario and assertion still runs exactly once, in its original order within
+# its shard. A focused switch (*_ONLY, *_SELF_TEST, *_CASES) or
+# CLOUDBENCH_TEST_SHARDS=1 keeps the original single-process run.
+CLOUDBENCH_TEST_SHARD_COUNT=5
+shard_runs() {  # shard_runs <n>: does this process run scenario shard n?
+    [ -z "${CLOUDBENCH_TEST_SHARD:-}" ] || [ "$CLOUDBENCH_TEST_SHARD" = "$1" ]
+}
+shard_suite() {  # run every shard concurrently (at most nproc at once); fail if any fails
+    local parallel shard pid rc status=0 logs
+    local -A shard_of=() shard_rc=()
+    parallel="$(nproc 2>/dev/null || echo 2)"
+    [ "$parallel" -ge 1 ] 2>/dev/null || parallel=2
+    [ "$parallel" -le "$CLOUDBENCH_TEST_SHARD_COUNT" ] || parallel="$CLOUDBENCH_TEST_SHARD_COUNT"
+    logs="$(mktemp -d)" || exit 1
+    SHARD_LOGS="$logs"
+    forward_to_shards() {  # each shard's own traps reap its fixture processes
+        local code="$1" pid
+        trap - HUP INT TERM
+        for pid in "${!shard_of[@]}"; do kill -TERM "$pid" 2>/dev/null || true; done
+        for pid in "${!shard_of[@]}"; do wait "$pid" 2>/dev/null || true; done
+        echo "❌ cloudbench-multi-workstream shards cancelled (exit $code)" >&2
+        rm -rf "$SHARD_LOGS"
+        exit "$code"
+    }
+    trap 'forward_to_shards 129' HUP
+    trap 'forward_to_shards 130' INT
+    trap 'forward_to_shards 143' TERM
+    reap_one_shard() {
+        pid=""
+        wait -n -p pid "${!shard_of[@]}"
+        rc=$?
+        [ -n "$pid" ] || return 1
+        shard_rc[${shard_of[$pid]}]=$rc
+        echo "◀ shard ${shard_of[$pid]}/$CLOUDBENCH_TEST_SHARD_COUNT exited $rc"
+        unset "shard_of[$pid]"
+    }
+    echo "▶ cloudbench-multi-workstream: $CLOUDBENCH_TEST_SHARD_COUNT scenario shards, $parallel concurrent"
+    for shard in $(seq 1 "$CLOUDBENCH_TEST_SHARD_COUNT"); do
+        while [ "${#shard_of[@]}" -ge "$parallel" ]; do reap_one_shard || break; done
+        CLOUDBENCH_TEST_SHARD="$shard" bash "${BASH_SOURCE[0]}" "$@" > "$logs/shard-$shard.log" 2>&1 &
+        shard_of[$!]=$shard
+    done
+    while [ "${#shard_of[@]}" -gt 0 ]; do reap_one_shard || break; done
+    trap - HUP INT TERM
+    for shard in $(seq 1 "$CLOUDBENCH_TEST_SHARD_COUNT"); do
+        echo "──── shard $shard/$CLOUDBENCH_TEST_SHARD_COUNT (exit ${shard_rc[$shard]:-missing}) ────"
+        cat "$logs/shard-$shard.log"
+        if [ "${shard_rc[$shard]:-1}" != 0 ]; then
+            echo "FAIL: cloudbench-multi-workstream shard $shard exited ${shard_rc[$shard]:-missing}" >&2
+            status=1
+        fi
+    done
+    rm -rf "$logs"
+    [ "$status" != 0 ] || echo "PASS: all $CLOUDBENCH_TEST_SHARD_COUNT cloudbench-multi-workstream scenario shards passed"
+    exit "$status"
+}
+focused_switch=0
+while IFS='=' read -r name _; do
+    case "$name" in
+        CLOUDBENCH_TEST_*_ONLY|CLOUDBENCH_TEST_*_SELF_TEST|CLOUDBENCH_TEST_*_CASES) focused_switch=1 ;;
+    esac
+done < <(env)
+if [ -z "${CLOUDBENCH_TEST_SHARD:-}" ] && [ "$focused_switch" = 0 ] && [ "${CLOUDBENCH_TEST_SHARDS:-5}" != 1 ]; then
+    SHARD_PARENT=1
+else
+    SHARD_PARENT=0
+fi
+if [ -z "${CLOUDBENCH_TEST_SHARD:-}" ]; then  # fixture contract prechecks run once, in the parent
 python3 "$ROOT_DIR/scripts/tests/cloudbench-worker-readiness-publication.test.py" || exit 1
 python3 "$ROOT_DIR/scripts/tests/cloudbench-fixture-port-allocation.test.py" || exit 1
 python3 "$ROOT_DIR/scripts/tests/cloudbench-fixture-process-cleanup.test.py" || exit 1
@@ -53,6 +126,8 @@ python3 "$ROOT_DIR/scripts/tests/cloudbench-runtime-evidence-collector.test.py" 
 python3 "$ROOT_DIR/scripts/tests/cloudbench-failed-runtime-evidence.test.py" || exit 1
 # Terminal bench.log bursts drain by bytes; runaway and stuck backlogs fail closed (P8).
 python3 "$ROOT_DIR/scripts/tests/cloudbench-bench-log-backlog.test.py" || exit 1
+fi
+[ "$SHARD_PARENT" = 0 ] || shard_suite "$@"
 
 # Resolve the fleet APP from run-bench-fleet at runtime so fixtures stay in
 # sync without hardcoding the bench app name (secret-scanner sensitive).
@@ -3253,7 +3328,7 @@ CONDUCTOR_PORT_B=$((HUB_PORT_B - 5764))
 # ═════════════════════════════════════════════════════════════════════════════
 # Scenario 1 — concurrent provisioning: two controllers, isolated pool machines
 # ═════════════════════════════════════════════════════════════════════════════
-if [ "${CLOUDBENCH_TEST_DISPOSABLE_ONLY:-0}" != "1" ] \
+if shard_runs 1 && [ "${CLOUDBENCH_TEST_DISPOSABLE_ONLY:-0}" != "1" ] \
     && [ "${CLOUDBENCH_TEST_EXACT_RECOVERY_ORDER_ONLY:-0}" != "1" ] \
     && [ "${CLOUDBENCH_TEST_STARTUP_FAILURE_ONLY:-0}" != "1" ] \
     && [ "${CLOUDBENCH_TEST_GROUP_TERM_ONLY:-0}" != "1" ] \
@@ -4697,6 +4772,7 @@ if [ "${CLOUDBENCH_TEST_STARTUP_FAILURE_ONLY:-0}" = "1" ]; then
     exit 0
 fi
 
+if shard_runs 1; then  # scenario 2 runs, detach, wait
 run_controller "$WS_A" "$CONDUCTOR_PORT_A" "$TMP_ROOT/controller-run-a.log" bench-alpha --timeout 240 &
 PID_A=$!
 PIDS+=("$PID_A")
@@ -5082,6 +5158,7 @@ if find "$SANDBOX/.git/cloudbench-fleet-ownership" -type f -print -quit 2>/dev/n
 fi
 assert_no_controller_script_snapshots "pre-detach configuration rejection"
 echo "PASS: scenario 2-wait-config — invalid recovery timeout fails before detach or allocation"
+fi  # shard 1 (scenario 2 runs)
 fi
 
 if [ "${CLOUDBENCH_TEST_EXACT_RECOVERY_ORDER_ONLY:-0}" = "1" ] \
@@ -5437,6 +5514,7 @@ PY
     SESSION_CONTROLLERS=()
     echo "PASS: scenario 2-group-term ($bench) — delivered stop drained to completion with no native stop; controller cleanup ${cleanup_seconds}s after the runner exited; exact owner retained for recovery"
 }
+if shard_runs 1; then  # scenario 2-group-term
 # The fixture reaper must find and stop a leaked session-leader controller, so
 # a failed or timed-out case can never leave one running after TMP_ROOT is gone.
 leak_pid_file="$TMP_ROOT/session-leak.pid"
@@ -5479,7 +5557,9 @@ if [ "${CLOUDBENCH_TEST_GROUP_TERM_ONLY:-0}" = "1" ]; then
     echo "All process-group TERM cancellation checks passed."
     exit 0
 fi
+fi  # shard 1 (group-term)
 
+if shard_runs 2; then  # scenarios 2-cancel-2d
 # Cooperative predeploy cancellation walks only the poller/waiter descendant
 # tree; the paid controller has already been reparented into its own session.
 # Drive a controller that ignores TERM after crossing provider allocation. The
@@ -5835,7 +5915,9 @@ assert_and_reset_disposable_failed_benchmark autoscaler-worker-required \
     fail "pre-supervisor failure did not retain its original evidence sources"
 rm -f "$FAKE_DIR/desired-two" "$FAKE_DIR/fail-worker-launch"
 echo "PASS: scenario 2d — failed autoscaled-worker launch fails the fleet closed"
+fi  # shard 2
 
+if shard_runs 3; then  # scenarios 2e-2g
 readiness_retry_contract
 
 # Pending provider work still requires causal autoscaler terminal completion.
@@ -5941,6 +6023,7 @@ print(" ".join(sorted(m["name"] for m in machines)))
     rm -f "$FAKE_DIR/oscillate-worker-desired" "$FAKE_DIR/fail-worker-launch" "$FAKE_DIR/fail-worker-after-start"
 done
 echo "PASS: scenario 2g — lower demand retains missing evidence and drains captured staging"
+fi  # shard 3
 
 # The sealed lifecycle keeps the run verdict (status) separate from proven cleanup and
 # names the failed autoscaler's bench, so a deploy can keep its peers' verdicts.
@@ -5959,6 +6042,7 @@ assert payload["cleanup_verified"] is (sys.argv[3] == "True"), payload
 PY
 }
 
+if shard_runs 4; then  # scenarios 2h-5
 # A provider destroy failure after cancellation cannot leave a tracked worker
 # permanently canceled if demand rebounds. The autoscaler must fail closed and
 # retain durable ownership for controller cleanup, which is allowed to retry.
@@ -6530,7 +6614,9 @@ remove_fake_machine_and_volume_exact "$orphan_id" "$orphan_volume" ||
 rm -rf "$orphan_registry"
 rm -f "$TMP_ROOT/capacity-reservations/reservations/${orphan_owner_token}-"* 2>/dev/null || true
 echo "PASS: scenario 5 — pre-ack quarantine survived SIGKILL and workspace-ledger deletion"
+fi  # shard 4
 
+if shard_runs 5; then  # scenarios 6-16
 # ═════════════════════════════════════════════════════════════════════════════
 # Scenario 6 — stale ownership with an active runner fails closed
 # ═════════════════════════════════════════════════════════════════════════════
@@ -7293,6 +7379,7 @@ fi
 # Remove only this asserted, test-owned retained name-only record.
 rm -rf "$SANDBOX/.git/cloudbench-fleet-ownership"
 echo "PASS: scenario 16 — ambiguous clone name stays owned for reconciliation; retry runs and siblings are reaped"
+fi  # shard 5
 
 # Fail-closed scenarios exit nonzero by design, but every controller must still
 # reap its own snapshot/aggregator loops instead of orphaning them to init.

@@ -170,6 +170,7 @@ Never skip for an unexplained failure, an auth failure our own configuration cau
 10. A failure in the final sweep goes back to step 2; a focused pass is never a deploy pass.
 11. Runners rerun a failed unit once on the same source (FLAKY if it passes, FAIL if not); never rerun anything else blind: each further rerun follows a repro, a fix and its regression.
 12. After merge, dispatch each NOT_INTRODUCED packet as a `/goal` on a new devbox in the Bugs folder at high effort and standard speed.
+13. A gate or test unit that fails on a timeout or time budget is work to speed up, not a decision for the user: profile where the time goes, then parallelize or shard the slow suite (independent cases in isolated concurrent processes), cut setup repetition, and remove real waits. Keep every case, assertion and timeout unchanged. Ask the user for an override only after a measured attempt shows the suite cannot fit, and include that measurement.
 
 Details: `.claude/shared/deploy-failure-policy.md` and `docs/deploy-test-cycle.md`.
 
