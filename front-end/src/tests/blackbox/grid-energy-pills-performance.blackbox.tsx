@@ -149,12 +149,32 @@ const maskRects = (layer: HTMLElement): Rect[] =>
     ([, x0, y0, x1, y1]) => [Number(x0), Number(y0), Number(x1), Number(y1)],
   );
 
-/** Independent check: does any point of the box show through the mask inside the layer? */
+/**
+ * Independent check: does any part of the box show through the mask inside the
+ * layer? The layer splits into cells along every mask-rect edge; parity is
+ * constant inside a cell, so the box shows iff it overlaps an odd cell.
+ * Exact and cheap (a few cells), so the 2000-step cycle sweep stays fast even
+ * under coverage instrumentation.
+ */
 const boxShows = (rects: Rect[], width: number, height: number, box: Rect, margin = 1) => {
   const [bx0, by0, bx1, by1] = [box[0] - margin, box[1] - margin, box[2] + margin, box[3] + margin];
-  // Sample strictly inside the layer (its edges are where mask parity is ambiguous).
-  for (let x = Math.max(0.25, bx0); x < Math.min(width, bx1); x += 0.5) {
-    for (let y = Math.max(0.25, by0); y < Math.min(height, by1); y += 0.5) {
+  const cuts = (lo: number, hi: number, edges: number[]) =>
+    [...new Set([lo, hi, ...edges.filter((v) => v > lo && v < hi)])].sort((a, b) => a - b);
+  const xs = cuts(
+    0,
+    width,
+    rects.flatMap(([x0, , x1]) => [x0, x1]),
+  );
+  const ys = cuts(
+    0,
+    height,
+    rects.flatMap(([, y0, , y1]) => [y0, y1]),
+  );
+  for (let i = 0; i < xs.length - 1; i += 1) {
+    if (xs[i + 1] <= bx0 || xs[i] >= bx1) continue;
+    for (let j = 0; j < ys.length - 1; j += 1) {
+      if (ys[j + 1] <= by0 || ys[j] >= by1) continue;
+      const [x, y] = [(xs[i] + xs[i + 1]) / 2, (ys[j] + ys[j + 1]) / 2];
       const cover = rects.filter(([x0, y0, x1, y1]) => x > x0 && x < x1 && y > y0 && y < y1);
       if (cover.length % 2 === 1) return true;
     }
