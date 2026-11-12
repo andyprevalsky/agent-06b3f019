@@ -15,6 +15,12 @@
  *   [signing_in] --cancel/unmount--> releases the remote browser --> [idle]
  *   [signing_in] --poll names passkeyUnavailableFor--> [signing_in] + passkey notice
  *
+ * Usage freshness (while mounted): refetch the list every 60s while the tab is
+ * visible, on window focus / visibilitychange, and once the earliest shown
+ * cooldown or window reset passes; `now` ticks every 30s so an expired
+ * cooldown flips without a round-trip. Background refetches are fire-and-forget:
+ * a failure keeps the last list and shows no error.
+ *
  * Lives in the hooks layer because it owns the API calls; the components layer
  * may not reach into `../api` directly.
  */
@@ -33,6 +39,34 @@ import {
 type Phase = 'idle' | 'starting' | 'signing_in' | 'error';
 
 const POLL_INTERVAL_MS = 2_000;
+const USAGE_REFRESH_MS = 60_000;
+const USAGE_TICK_MS = 30_000;
+
+/**
+ * Earliest moment after `after` at which a shown state changes on its own: a
+ * cooldown ends or a window resets. Null when none is pending.
+ */
+function nextUsageDeadline(
+  accounts: readonly ComputeAccount[],
+  after: number = Date.now(),
+): number | null {
+  let earliest: number | null = null;
+  for (const account of accounts) {
+    const times = [
+      account.cooldown === undefined ? account.rateLimitedUntil : account.cooldown?.until,
+      account.nextResetAt,
+      account.usage?.sevenDay?.resetsAt,
+      account.usage?.fiveHour?.resetsAt,
+    ];
+    for (const time of times) {
+      const at = time == null ? NaN : Date.parse(time);
+      if (Number.isFinite(at) && at > after && (earliest === null || at < earliest)) earliest = at;
+    }
+  }
+  return earliest;
+}
+
+const tabVisible = () => typeof document === 'undefined' || document.visibilityState !== 'hidden';
 
 export function useComputeAccounts(provider: string) {
   const [accounts, setAccounts] = useState<ComputeAccount[]>([]);
@@ -49,18 +83,78 @@ export function useComputeAccounts(provider: string) {
   const [runId, setRunId] = useState(0);
   const [removing, setRemoving] = useState<string | null>(null);
   const connectIdRef = useRef<string | null>(null);
+  const [now, setNow] = useState(() => Date.now());
+  const mountedRef = useRef(true);
+  const fetchSeqRef = useRef(0);
+  const lastFetchAtRef = useRef(0);
 
-  const refresh = useCallback(async () => {
-    try {
-      setAccounts(await fetchComputeAccounts(provider));
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    }
-  }, [provider]);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
+  // `quiet` = a background refetch: a failure keeps the last list, no error text.
+  const refresh = useCallback(
+    async (quiet = false) => {
+      const seq = ++fetchSeqRef.current;
+      lastFetchAtRef.current = Date.now();
+      try {
+        const next = await fetchComputeAccounts(provider);
+        if (!mountedRef.current || seq !== fetchSeqRef.current) return;
+        setAccounts(next);
+        setNow(Date.now());
+      } catch (err) {
+        if (quiet || !mountedRef.current) return;
+        setError(err instanceof Error ? err.message : String(err));
+      }
+    },
+    [provider],
+  );
 
   useEffect(() => {
     void refresh();
   }, [refresh]);
+
+  // Usage freshness; see the header.
+  const accountsRef = useRef(accounts);
+  accountsRef.current = accounts;
+  useEffect(() => {
+    const background = () => {
+      if (tabVisible()) void refresh(true).catch(() => undefined);
+    };
+    const poll = setInterval(background, USAGE_REFRESH_MS);
+    const tick = setInterval(() => {
+      const at = Date.now();
+      setNow(at);
+      const deadline = nextUsageDeadline(accountsRef.current, lastFetchAtRef.current);
+      if (deadline !== null && deadline <= at) background();
+    }, USAGE_TICK_MS);
+    const onVisibility = () => {
+      if (tabVisible()) background();
+    };
+    window.addEventListener('focus', background);
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => {
+      clearInterval(poll);
+      clearInterval(tick);
+      window.removeEventListener('focus', background);
+      document.removeEventListener('visibilitychange', onVisibility);
+    };
+  }, [refresh]);
+
+  // Refetch as soon as the earliest shown deadline passes (the tick is the backstop).
+  useEffect(() => {
+    const deadline = nextUsageDeadline(accounts);
+    if (deadline === null) return;
+    const delay = deadline - Date.now() + 1_000;
+    if (delay > USAGE_REFRESH_MS) return; // the 60s poll gets there first
+    const timer = setTimeout(() => {
+      if (tabVisible()) void refresh(true).catch(() => undefined);
+    }, delay);
+    return () => clearTimeout(timer);
+  }, [accounts, refresh]);
 
   // A remote browser bills until released, so an abandoned sign-in must not
   // outlive this component. Best effort: on sign-out the auth session is gone
@@ -160,6 +254,8 @@ export function useComputeAccounts(provider: string) {
     passkeyUnavailableFor,
     runId,
     removing,
+    /** Render clock, advanced on every tick and refetch. */
+    now,
     connect: handleConnect,
     cancel: handleCancel,
     remove: handleRemove,
