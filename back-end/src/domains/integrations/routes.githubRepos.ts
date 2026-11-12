@@ -3,7 +3,8 @@
  *
  *   GET    /api/integrations/github/repos                 accessible-repo inventory
  *                                                         {repos: [{repo_name, repo_url, canonical_ref, ...}]}
- *   POST   /api/integrations/github/repos                 connect {repo_url, connected_rose_project_ref?, default_branch?}
+ *   POST   /api/integrations/github/repos                 connect {repo_url, connected_rose_project_ref?, default_branch?, replace?}
+ *                                                         (replace: switch a folder that already has another repo; else 409)
  *   GET    /api/integrations/github/repos/resolve?ref=    canonical connection of any ref spelling
  *                                                         (gh:owner/repo, repo URL, project id, rose-project:<id>)
  *   DELETE /api/integrations/github/repos/:ref            disconnect (ref URL-encoded, any spelling)
@@ -28,6 +29,7 @@ const connectSchema = z.object({
   repo_url: z.string().min(1).max(500),
   connected_rose_project_ref: z.string().uuid().nullable().optional(),
   default_branch: z.string().min(1).max(255).optional(),
+  replace: z.boolean().optional(),
 });
 
 function resolveUserId(req: AuthRequest): string | undefined {

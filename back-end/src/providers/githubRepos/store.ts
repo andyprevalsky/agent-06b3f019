@@ -18,7 +18,12 @@
  */
 import { IntegrationStatus, IntegrationType, type Prisma } from '@prisma/client';
 import { prisma, runTransactionWithRetry } from '../database';
-import { GITHUB_REPO_INTEGRATION_NAME, githubRepoIdentity, type GithubRepoIdentity } from './refs';
+import {
+  GITHUB_REPO_INTEGRATION_NAME,
+  githubRepoIdentity,
+  sameGithubRepo,
+  type GithubRepoIdentity,
+} from './refs';
 
 export const GITHUB_REPO_LIST_LIMIT = 200;
 
@@ -190,6 +195,56 @@ export async function setProjectRepoUrlIfEmpty(
   await prisma.project.updateMany({
     where: { id: projectId, userId, repoUrl: null },
     data: { repoUrl },
+  });
+}
+
+/**
+ * Re-point a folder (project) at another repo in one transaction (connect with
+ * `replace`): a different folder the repo was connected through lets go of it
+ * (its repoUrl cleared when it still names the repo); this folder's other
+ * connections stay connected but unassociated; the repo's connection is
+ * written for this folder; the folder's repoUrl becomes the repo.
+ */
+export async function repointProjectRepo(
+  write: ConnectGithubRepoWrite & { connectedRoseProjectRef: string }
+): Promise<GithubRepoConnectionRecord> {
+  const { userId, identity, connectedRoseProjectRef: projectId } = write;
+  return runTransactionWithRetry(async (tx) => {
+    const current = await tx.githubRepoConnection.findUnique({
+      where: { userId_canonicalRef: { userId, canonicalRef: identity.canonicalRef } },
+      select: { connectedRoseProjectRef: true },
+    });
+    const otherFolderId = current?.connectedRoseProjectRef ?? null;
+    if (otherFolderId !== null && otherFolderId !== projectId) {
+      const other = await tx.project.findFirst({
+        where: { id: otherFolderId, userId },
+        select: { repoUrl: true },
+      });
+      if (
+        other !== null &&
+        other.repoUrl !== null &&
+        sameGithubRepo(other.repoUrl, identity.repoUrl)
+      ) {
+        await tx.project.updateMany({
+          where: { id: otherFolderId, userId },
+          data: { repoUrl: null },
+        });
+      }
+    }
+    await tx.githubRepoConnection.updateMany({
+      where: {
+        userId,
+        connectedRoseProjectRef: projectId,
+        canonicalRef: { not: identity.canonicalRef },
+      },
+      data: { connectedRoseProjectRef: null },
+    });
+    const connection = await writeConnection(tx, write);
+    await tx.project.updateMany({
+      where: { id: projectId, userId },
+      data: { repoUrl: identity.repoUrl },
+    });
+    return connection;
   });
 }
 

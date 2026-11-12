@@ -4,7 +4,7 @@
  * checkGithubRepoAccess). Folders no longer carry the connection; a repo
  * connected through one records it as connected_rose_project_ref.
  *
- *   connect(repo_url, connected_rose_project_ref?)
+ *   connect(repo_url, connected_rose_project_ref?, replace?)
  *     ─► checkGithubRepoAccess (grant, or public auto-grant)   403 / 429 otherwise
  *     ─► owned project check                                    404 / 409
  *     ─► Integration + GithubRepoConnection (one transaction)
@@ -25,6 +25,7 @@ import {
   findOwnedProjectRepo,
   importLegacyProjectConnections,
   listGithubRepoConnections,
+  repointProjectRepo,
   setProjectRepoUrlIfEmpty,
   type GithubRepoConnectionRecord,
 } from '../../providers/githubRepos/store';
@@ -92,6 +93,8 @@ export interface ConnectGithubRepoInput {
   repo_url: string;
   connected_rose_project_ref?: string | null;
   default_branch?: string;
+  /** Re-point the folder at this repo even when it has another one (else 409). */
+  replace?: boolean;
 }
 
 async function assertCloneAccess(userId: string, repoUrl: string): Promise<void> {
@@ -138,6 +141,7 @@ export async function connectGithubRepo(
     throw new GithubRepoIntegrationError(404, 'PROJECT_NOT_FOUND', 'Project not found');
   }
   if (
+    input.replace !== true &&
     project !== null &&
     project.repoUrl !== null &&
     !sameGithubRepo(project.repoUrl, identity.repoUrl)
@@ -149,13 +153,22 @@ export async function connectGithubRepo(
     );
   }
   await assertCloneAccess(userId, identity.repoUrl);
-  const connection = await writeConnection({
+  const write = {
     userId,
     identity,
     defaultBranch:
       input.default_branch ?? existing?.defaultBranch ?? project?.defaultBranch ?? 'main',
-    connectedRoseProjectRef: project?.id ?? null,
     source: existing?.source === 'legacy_project' ? 'legacy_project' : 'connect',
+  } as const;
+  if (input.replace === true && project !== null) {
+    // Switch repo: the folder's old repo stays connected, unassociated (store helper).
+    const connection = await repointProjectRepo({ ...write, connectedRoseProjectRef: project.id });
+    log.info('GitHub repo re-pointed', { userId, canonicalRef: identity.canonicalRef });
+    return toGithubRepoDto(connection);
+  }
+  const connection = await writeConnection({
+    ...write,
+    connectedRoseProjectRef: project?.id ?? null,
   });
   if (project !== null && project.repoUrl === null) {
     await setProjectRepoUrlIfEmpty(userId, project.id, identity.repoUrl);
