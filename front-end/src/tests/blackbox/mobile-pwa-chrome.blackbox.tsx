@@ -45,6 +45,8 @@ import { renderWithProviders } from './test-wrapper';
 
 const PHONE = { width: 430, height: 932 };
 const EDGE = 8;
+// Comfortably past ContextMenuTrigger's 700ms long-press timer.
+const LONG_PRESS_ELAPSED_MS = 900;
 
 const dripStyles = {
   blur: 0,
@@ -173,6 +175,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.restoreAllMocks();
   setViewport(1024, 768);
   localStorage.clear();
@@ -337,6 +340,7 @@ describe('Long-press on iOS', () => {
   });
 
   it('a real drag still cancels the long-press', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
     renderWithProviders(
       <ContextMenu>
         <ContextMenuTrigger data-testid="row">Halloween costume</ContextMenuTrigger>
@@ -345,24 +349,20 @@ describe('Long-press on iOS', () => {
         </ContextMenuContent>
       </ContextMenu>,
     );
-    vi.useFakeTimers({ shouldAdvanceTime: true });
-    try {
-      const row = screen.getByTestId('row');
-      fireEvent.pointerDown(row, { pointerType: 'touch', clientX: 216, clientY: 300 });
-      fireEvent.pointerMove(row, { pointerType: 'touch', clientX: 216, clientY: 330 });
-      // Past the 700ms long-press timer.
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(900);
-      });
-      expect(screen.queryByTestId('menu')).not.toBeInTheDocument();
-    } finally {
-      vi.useRealTimers();
-    }
+    const row = screen.getByTestId('row');
+    fireEvent.pointerDown(row, { pointerType: 'touch', clientX: 216, clientY: 300 });
+    fireEvent.pointerMove(row, { pointerType: 'touch', clientX: 216, clientY: 330 });
+    // Run the clock past the 700ms long-press timer without a wall-clock sleep.
+    act(() => {
+      vi.advanceTimersByTime(LONG_PRESS_ELAPSED_MS);
+    });
+    expect(screen.queryByTestId('menu')).not.toBeInTheDocument();
   });
 });
 
 describe('Native long-press contextmenu on Android', () => {
   it('opens once, from the trigger left edge, never under the finger', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
     const opens: Array<[number, number]> = [];
     renderWithProviders(
       <ContextMenu>
@@ -377,22 +377,17 @@ describe('Native long-press contextmenu on Android', () => {
         </ContextMenuContent>
       </ContextMenu>,
     );
-    vi.useFakeTimers({ shouldAdvanceTime: true });
-    try {
-      const row = screen.getByTestId('row');
-      fireEvent.pointerDown(row, { pointerType: 'touch', clientX: 216, clientY: 300 });
-      // Android Chrome fires its own contextmenu at the finger mid-press.
-      fireEvent.contextMenu(row, { clientX: 216, clientY: 300 });
-      await screen.findByTestId('menu');
-      // Past the 700ms long-press timer: no second, re-anchoring open.
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(900);
-      });
-      const left = row.getBoundingClientRect().left;
-      expect(opens).toEqual([[left + EDGE, 300]]);
-    } finally {
-      vi.useRealTimers();
-    }
+    const row = screen.getByTestId('row');
+    fireEvent.pointerDown(row, { pointerType: 'touch', clientX: 216, clientY: 300 });
+    // Android Chrome fires its own contextmenu at the finger mid-press.
+    fireEvent.contextMenu(row, { clientX: 216, clientY: 300 });
+    await screen.findByTestId('menu');
+    // Past the 700ms long-press timer: no second, re-anchoring open.
+    act(() => {
+      vi.advanceTimersByTime(LONG_PRESS_ELAPSED_MS);
+    });
+    const left = row.getBoundingClientRect().left;
+    expect(opens).toEqual([[left + EDGE, 300]]);
   });
 });
 

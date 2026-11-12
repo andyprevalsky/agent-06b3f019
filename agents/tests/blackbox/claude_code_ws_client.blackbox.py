@@ -790,20 +790,34 @@ async def test_connect_with_retry_reaches_a_sandbox_that_comes_up_late():
     runner = web.AppRunner(app)
     await runner.setup()
 
+    client = _make_client(ws_url=f"ws://127.0.0.1:{port}", reconnect_delay=0.1)
+    real_connect = client.connect
+    handshakes: list[bool] = []
+    refused = asyncio.Event()
+
+    async def connect_and_record():
+        ok = await real_connect()
+        handshakes.append(ok)
+        if not ok:
+            refused.set()
+        return ok
+
     async def start_late():
-        # Come up only after the client has observed a refused connect.
-        while client.last_error is None:
-            await asyncio.sleep(0)
+        # Start listening only once a handshake has actually been refused.
+        await refused.wait()
         await web.TCPSite(runner, "127.0.0.1", port).start()
 
-    client = _make_client(ws_url=f"ws://127.0.0.1:{port}", reconnect_delay=0.1)
     starter = asyncio.create_task(start_late())
     try:
-        assert await client.connect_with_retry(attempts=8, deadline_s=20.0), client.last_error
+        with patch.object(client, "connect", new=connect_and_record):
+            assert await client.connect_with_retry(attempts=8, deadline_s=20.0), client.last_error
+        assert handshakes[0] is False and handshakes[-1] is True, handshakes
         await asyncio.wait_for(client.listen(), timeout=5)
         assert client._test_exits == [0]
     finally:
-        await starter
+        if not starter.done():
+            starter.cancel()
+        await asyncio.gather(starter, return_exceptions=True)
         await client.disconnect()
         await runner.cleanup()
 
