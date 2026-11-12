@@ -21,6 +21,12 @@
  * cooldown flips without a round-trip. Background refetches are fire-and-forget:
  * a failure keeps the last list and shows no error.
  *
+ * Overlapping list requests (each numbered when it starts):
+ *   success → applied unless a newer request's success is already shown
+ *             (newest success wins, whatever order responses arrive in)
+ *   failure → foreground only, and only if no newer request has succeeded;
+ *             a newer success clears an error an older request set
+ *
  * Lives in the hooks layer because it owns the API calls; the components layer
  * may not reach into `../api` directly.
  */
@@ -86,6 +92,9 @@ export function useComputeAccounts(provider: string) {
   const [now, setNow] = useState(() => Date.now());
   const mountedRef = useRef(true);
   const fetchSeqRef = useRef(0);
+  // Number of the request whose list is shown, and of the one that set the error.
+  const appliedSeqRef = useRef(0);
+  const errorSeqRef = useRef<number | null>(null);
   const lastFetchAtRef = useRef(0);
 
   useEffect(() => {
@@ -102,11 +111,19 @@ export function useComputeAccounts(provider: string) {
       lastFetchAtRef.current = Date.now();
       try {
         const next = await fetchComputeAccounts(provider);
-        if (!mountedRef.current || seq !== fetchSeqRef.current) return;
+        // A newer success is already shown; an older one never replaces it, but a
+        // newer request still in flight (or failing later) does not discard this one.
+        if (!mountedRef.current || seq < appliedSeqRef.current) return;
+        appliedSeqRef.current = seq;
         setAccounts(next);
         setNow(Date.now());
+        if (errorSeqRef.current !== null && errorSeqRef.current < seq) {
+          errorSeqRef.current = null;
+          setError(null);
+        }
       } catch (err) {
-        if (quiet || !mountedRef.current) return;
+        if (quiet || !mountedRef.current || seq < appliedSeqRef.current) return;
+        errorSeqRef.current = seq;
         setError(err instanceof Error ? err.message : String(err));
       }
     },

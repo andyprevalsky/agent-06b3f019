@@ -15,7 +15,7 @@
  * cooling, never red; a window whose reset has passed counts as full.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
 
@@ -273,9 +273,12 @@ describe('usageMeterView states (C1-C5)', () => {
       },
       NOW,
     );
-    expect(view).toMatchObject({ tone: 'exhausted', remainingPct: 0 });
+    // A 5h block keeps the measured weekly remainder (7d 40% used → 60% left).
+    expect(view).toMatchObject({ tone: 'exhausted', remainingPct: 60 });
     expect(view.label).toBe(`resets ${clock(resetAt)}`);
-    expect(view.valueText).toBe(`Quota used up, resets ${clock(resetAt)}`);
+    expect(view.valueText).toBe(
+      `5-hour limit reached, resets ${clock(resetAt)}; 60% of weekly quota left`,
+    );
     expect(view.title).toMatch(/^Rate-limited until /);
   });
 
@@ -305,6 +308,31 @@ describe('usageMeterView states (C1-C5)', () => {
     );
     expect(view.tone).toBe('exhausted');
     expect(view.label).toBe(`resets ${clock(fiveReset)}`);
+    // Only the 5h window is spent: the 7d meter keeps its measured 40% left.
+    expect(view.remainingPct).toBe(40);
+    expect(view.valueText).toBe(
+      `5-hour limit reached, resets ${clock(fiveReset)}; 40% of weekly quota left`,
+    );
+  });
+
+  it('C3: an old 5h observation with no reset is not asserted exhausted', () => {
+    const usage = (observedAt: number) => ({
+      fiveHour: { usedPct: 100, resetsAt: null },
+      sevenDay: { usedPct: 30, resetsAt: at(NOW + 4 * 24 * HOUR) },
+      observedAt: at(observedAt),
+    });
+    // 7h old: that 5h window has certainly reset; the snapshot is just stale.
+    const old = usageMeterView(
+      { usage: usage(NOW - 7 * HOUR), rateLimitedUntil: null, cooldown: null },
+      NOW,
+    );
+    expect(old).toMatchObject({ tone: 'ok', stale: true, remainingPct: 70, label: null });
+    // A current one is still a used-up 5h window, with no invented reset.
+    const current = usageMeterView(
+      { usage: usage(NOW - 60_000), rateLimitedUntil: null, cooldown: null },
+      NOW,
+    );
+    expect(current).toMatchObject({ tone: 'exhausted', label: 'no reset info', remainingPct: 70 });
   });
 
   it('C3: used up with no provider reset says so instead of inventing one', () => {
@@ -399,6 +427,7 @@ describe('compute usage bars on the row', () => {
   afterEach(() => {
     localStorage.clear();
     vi.useRealTimers();
+    vi.restoreAllMocks();
     Object.defineProperty(document, 'visibilityState', { value: 'visible', configurable: true });
   });
 
@@ -427,6 +456,15 @@ describe('compute usage bars on the row', () => {
         cooldown: null,
       }),
       computeAccount('a5', 'empty@roselabs.ai', { cooldown: null, nextResetAt: null }),
+      computeAccount('a6', 'fivehour@roselabs.ai', {
+        usage: {
+          fiveHour: { usedPct: 100, resetsAt: new Date(soon).toISOString() },
+          sevenDay: { usedPct: 60, resetsAt: iso(4 * 24 * HOUR) },
+          observedAt: iso(-60_000),
+        },
+        cooldown: null,
+        nextResetAt: new Date(soon).toISOString(),
+      }),
     ]);
 
     const capped = meterOf('capped@roselabs.ai');
@@ -458,6 +496,59 @@ describe('compute usage bars on the row', () => {
     expect(empty).toHaveAttribute('data-usage-tone', 'unknown');
     expect(within(empty).getByText('No data yet')).toBeVisible();
     expect(within(empty).queryByText(/0%/)).toBeNull();
+
+    // Only the 5h window is spent: red with its visible reset, yet the weekly
+    // remainder (40%) is still drawn rather than emptied.
+    const fiveHour = meterOf('fivehour@roselabs.ai');
+    expect(fiveHour).toHaveAttribute('data-usage-tone', 'exhausted');
+    expect(within(fiveHour).getByText(`resets ${clock(soon)}`)).toBeVisible();
+    expect(within(fiveHour).getByRole('meter')).toHaveAttribute('aria-valuenow', '40');
+    expect(within(fiveHour).getByTestId('usage-fill')).toHaveStyle({ width: '40%' });
+  });
+
+  it('keeps a foreground list when a newer background refetch fails', async () => {
+    const list = racingClaudeList((mode) =>
+      mode === 'fail'
+        ? HttpResponse.json({ error: 'down' }, { status: 503 })
+        : HttpResponse.json({ accounts: [computeAccount('a1', 'kept@roselabs.ai')] }),
+    );
+    await renderDesktop({ handlers: desktopHandlers({}) });
+    await waitFor(() => expect(list.calls).toContain('hold'));
+    // A background refetch starts after the foreground load and fails first...
+    list.mode = 'fail';
+    window.dispatchEvent(new Event('focus'));
+    await waitFor(() => expect(list.calls).toContain('fail'));
+    // ...then the foreground load succeeds: its list is shown, not discarded.
+    list.release();
+    await waitFor(() =>
+      expect(within(rowEl('claude')).getByText('kept@roselabs.ai')).toBeVisible(),
+    );
+    expect(within(rowEl('claude')).queryByText(/Failed to load compute accounts/)).toBeNull();
+  });
+
+  it('a superseded foreground failure never shows an error beside a newer list', async () => {
+    const list = racingClaudeList((mode) =>
+      mode === 'ok'
+        ? HttpResponse.json({ accounts: [computeAccount('a1', 'newer@roselabs.ai')] })
+        : HttpResponse.json({ error: 'down' }, { status: 503 }),
+    );
+    await renderDesktop({ handlers: desktopHandlers({}) });
+    await waitFor(() => expect(list.calls).toContain('hold'));
+    // A newer background refetch succeeds first...
+    list.mode = 'ok';
+    window.dispatchEvent(new Event('focus'));
+    await waitFor(() =>
+      expect(within(rowEl('claude')).getByText('newer@roselabs.ai')).toBeVisible(),
+    );
+    // ...then the older foreground load fails: the newer list stands, with no error.
+    list.release();
+    await act(async () => {
+      await Promise.allSettled(list.responses);
+      // One task turn lets the hook's catch run after its fetch settled.
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    });
+    expect(within(rowEl('claude')).getByText('newer@roselabs.ai')).toBeVisible();
+    expect(within(rowEl('claude')).queryByText(/Failed to load compute accounts/)).toBeNull();
   });
 
   it('refetches every 60s while mounted and visible; not while hidden or after unmount', async () => {
@@ -563,6 +654,43 @@ describe('compute usage bars on the row', () => {
     );
   });
 });
+
+/**
+ * Claude list requests answered by `answer(mode)`, where `mode` is the value of
+ * `list.mode` when the request arrived; requests that arrive in 'hold' wait for
+ * `list.release()`. `responses` are the client's own fetches of the list, so a
+ * test can wait until each has settled in the page.
+ */
+function racingClaudeList(answer: (mode: string) => Response) {
+  let release: () => void = () => undefined;
+  const held = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const list = { mode: 'hold', calls: [] as string[], responses: [] as Promise<void>[], release };
+  serveList(() => listOf());
+  serveCompute([]);
+  server.use(
+    http.get(`${API_BASE}/compute-accounts`, ({ request }) => {
+      if (new URL(request.url).searchParams.get('provider') !== 'claude') {
+        return HttpResponse.json({ accounts: [] });
+      }
+      const mode = list.mode;
+      list.calls.push(mode);
+      return (mode === 'hold' ? held : Promise.resolve()).then(() => answer(mode));
+    }),
+  );
+  const realFetch = globalThis.fetch;
+  vi.spyOn(globalThis, 'fetch').mockImplementation((input, init) => {
+    const pending = realFetch(input, init);
+    const url = input instanceof Request ? input.url : String(input);
+    if (url.includes('/compute-accounts?provider=claude')) {
+      list.responses.push(pending.then(() => undefined));
+    }
+    return pending;
+  });
+  list.release = () => release();
+  return list;
+}
 
 function weeklyAt(usedPct: number, resetsAtMs: number) {
   return {

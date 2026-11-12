@@ -13153,7 +13153,7 @@ def test_code_session_rate_limit_event_maps_every_status():
 
 
 async def test_code_session_usage_report_is_fire_and_forget():
-    """The code-session usage POST runs in the background and is throttled per task."""
+    """The code-session usage POST runs in the background and sends the task's latest snapshot."""
     import domains.spawn_claude_code_agent.service as service
 
     posted: list[dict] = []
@@ -13164,7 +13164,7 @@ async def test_code_session_usage_report_is_fire_and_forget():
         await gate.wait()
         return True
 
-    service._code_usage_last_report.clear()
+    service._code_usage_reporters.clear()
     snap = {
         "observedAt": "2026-11-06T12:00:00Z",
         "fiveHour": {"usedPct": 1.0, "resetsAt": None},
@@ -13175,16 +13175,90 @@ async def test_code_session_usage_report_is_fire_and_forget():
     with patch.object(service, "report_code_session_subscription_usage", slow_report):
         started = time.monotonic()
         service.report_code_session_usage_soon("task-1", snap)
-        service.report_code_session_usage_soon("task-1", snap)  # throttled
-        service.report_code_session_usage_soon("task-1", {**snap, "status": "rejected"})  # status change: sent
+        service.report_code_session_usage_soon("task-1", {**snap, "fiveHour": {"usedPct": 2.0, "resetsAt": None}})
+        service.report_code_session_usage_soon("task-1", {**snap, "status": "rejected"})
         assert time.monotonic() - started < 0.05, "never awaits the report"
-        for _ in range(5):
-            await asyncio.sleep(0)
+        await _code_usage_wait(lambda: len(posted) == 1, "the background report")
         gate.set()
-        for _ in range(5):
-            await asyncio.sleep(0)
-    assert [p["usage"]["status"] for p in posted] == ["allowed", "rejected"], posted
-    service._code_usage_last_report.clear()
+        await _code_usage_wait(lambda: not service._code_usage_reporters["task-1"]["draining"], "the drain to finish")
+    # Superseded snapshots are never sent stale: only the latest one goes out.
+    assert [p["usage"]["status"] for p in posted] == ["rejected"], posted
+    service._code_usage_reporters.clear()
+
+
+def _code_usage_condition_wait():
+    import importlib.util
+
+    path = Path(__file__).resolve().parents[3] / "scripts" / "lib" / "condition_wait.py"
+    spec = importlib.util.spec_from_file_location("condition_wait", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+async def _code_usage_wait(predicate, description: str):
+    return await _code_usage_condition_wait().async_wait_until(predicate, timeout=5.0, description=description)
+
+
+async def test_code_session_usage_same_status_update_is_deferred_not_dropped():
+    """A same-status update inside the interval is sent when the interval ends (the session's final utilization)."""
+    import domains.spawn_claude_code_agent.service as service
+
+    posted: list[float] = []
+
+    async def report(_task_id, usage):
+        posted.append(usage["fiveHour"]["usedPct"])
+        return True
+
+    service._code_usage_reporters.clear()
+    snap = {"observedAt": "2026-11-06T12:00:00Z", "fiveHour": {"usedPct": 20.0, "resetsAt": None},
+            "sevenDay": None, "source": "code_session", "status": "allowed"}
+    with (
+        patch.object(service, "report_code_session_subscription_usage", report),
+        patch.object(service, "_CODE_USAGE_REPORT_MIN_INTERVAL_S", 0.2),
+    ):
+        service.report_code_session_usage_soon("task-2", snap)
+        await _code_usage_wait(lambda: posted == [20.0], "the first report")
+        service.report_code_session_usage_soon("task-2", {**snap, "fiveHour": {"usedPct": 60.0, "resetsAt": None}})
+        assert service._code_usage_reporters["task-2"]["pending"] is not None, "held, not dropped"
+        await _code_usage_wait(lambda: posted == [20.0, 60.0], "the deferred same-status report")
+    service._code_usage_reporters.clear()
+
+
+async def test_code_session_usage_failed_report_is_retried_not_marked_delivered():
+    """A report the backend did not accept is retried after the interval, bounded."""
+    import domains.spawn_claude_code_agent.service as service
+
+    attempts: list[float] = []
+
+    async def flaky_report(_task_id, usage):
+        attempts.append(usage["fiveHour"]["usedPct"])
+        if len(attempts) == 1:
+            raise TimeoutError("backend timed out")
+        return True
+
+    async def down(_task_id, _usage):
+        attempts.append(-1.0)
+        return False
+
+    service._code_usage_reporters.clear()
+    snap = {"observedAt": "2026-11-06T12:00:00Z", "fiveHour": {"usedPct": 35.0, "resetsAt": None},
+            "sevenDay": None, "source": "code_session", "status": "allowed"}
+    with patch.object(service, "_CODE_USAGE_REPORT_MIN_INTERVAL_S", 0.05):
+        with patch.object(service, "report_code_session_subscription_usage", flaky_report):
+            service.report_code_session_usage_soon("task-3", snap)
+            await _code_usage_wait(lambda: attempts == [35.0, 35.0], "the retry of the failed report")
+            state = service._code_usage_reporters["task-3"]
+            await _code_usage_wait(lambda: not state["draining"], "the drain to finish")
+            assert state["status"] == "allowed" and state["failures"] == 0, state
+        attempts.clear()
+        with patch.object(service, "report_code_session_subscription_usage", down):
+            service.report_code_session_usage_soon("task-4", snap)
+            state = service._code_usage_reporters["task-4"]
+            await _code_usage_wait(lambda: not state["draining"], "the bounded retries to stop")
+            assert attempts == [-1.0] * service._CODE_USAGE_REPORT_MAX_FAILURES, attempts
+            assert state["status"] is None, "an unaccepted report is never recorded as delivered"
+    service._code_usage_reporters.clear()
 
 
 def _usage_backend_handler(captured: dict, provider_response):
@@ -13401,6 +13475,14 @@ async def run_all_tests():
     r.record("usage_codex_limit_body_window", test_subscription_usage_codex_usage_limit_body_maps_to_window)
     r.record("code_session_rate_limit_event_all_statuses", test_code_session_rate_limit_event_maps_every_status)
     await r.record_async("code_session_usage_report_fire_and_forget", test_code_session_usage_report_is_fire_and_forget)
+    await r.record_async(
+        "code_session_usage_same_status_update_deferred",
+        test_code_session_usage_same_status_update_is_deferred_not_dropped,
+    )
+    await r.record_async(
+        "code_session_usage_failed_report_retried",
+        test_code_session_usage_failed_report_is_retried_not_marked_delivered,
+    )
     await r.record_async(
         "claude_429_usage_flushed_authoritative_cooldown",
         test_claude_429_usage_flushed_before_rotation_with_authoritative_cooldown,

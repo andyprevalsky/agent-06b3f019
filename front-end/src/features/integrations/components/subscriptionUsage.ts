@@ -8,6 +8,10 @@
  *
  *   authoritative cooldown OR a window used up  → exhausted (red track) + visible
  *                                                 "resets <when>" (or "no reset info")
+ *     only the 5h window spent (or a 5h cooldown) → still exhausted, but the 7d meter
+ *                                                 keeps its measured weekly remainder
+ *     a 5h window at 100% with no reset counts as spent only while its snapshot is
+ *     current (not older than STALE_MS): an older one has certainly reset since
  *   non-authoritative cooldown (stall/backoff)  → cooling: last known fill + visible
  *                                                 "retry in 12m" / "paused until <when>"
  *   7d window reported                          → ok (fill = % remaining)
@@ -142,13 +146,21 @@ export function usageMeterView(
   const fiveHour = usage?.fiveHour ?? null;
   const weekLeft = remainingPct(sevenDay, now);
   const fiveLeft = remainingPct(fiveHour, now);
-  const weekEmpty = weekLeft !== null && weekLeft <= 0;
-  const fiveEmpty = fiveLeft !== null && fiveLeft <= 0;
-  const exhausted = authoritative || weekEmpty || fiveEmpty;
-
   const observedAt = parse(usage?.observedAt);
   const age = Number.isFinite(observedAt) ? now - observedAt : NaN;
   const stale = cooldown === null && usage !== null && age > STALE_USAGE_MS;
+
+  const weekEmpty = weekLeft !== null && weekLeft <= 0;
+  // A 5h window outlives its snapshot by at most 5h: without a reset time, an
+  // observation older than STALE_USAGE_MS cannot show the window is still spent.
+  const fiveCurrent = fiveHour?.resetsAt != null || !(age > STALE_USAGE_MS);
+  const fiveEmpty = fiveLeft !== null && fiveLeft <= 0 && fiveCurrent;
+  const exhausted = authoritative || weekEmpty || fiveEmpty;
+  // Only the 5h window is blocked: the weekly remainder is still a measured value.
+  const fiveHourOnly =
+    !weekEmpty &&
+    weekLeft !== null &&
+    (fiveEmpty || (authoritative && cooldown.reason === 'usage_window_5h'));
 
   const lines = [
     cooldown !== null ? cooldownLine(cooldown, now) : null,
@@ -174,15 +186,15 @@ export function usageMeterView(
     if (reset === null && cooldown !== null && !authoritative) {
       label = `${label} · ${coolingHint(cooldown.until, now)}`;
     }
+    const when = reset !== null ? `resets ${formatWhen(reset, now)}` : 'no reset info';
     return {
-      remainingPct: 0,
+      remainingPct: fiveHourOnly ? weekLeft : 0,
       tone: 'exhausted',
       stale,
       label,
-      valueText:
-        reset !== null
-          ? `Quota used up, resets ${formatWhen(reset, now)}${asOf}`
-          : `Quota used up, no reset info${asOf}`,
+      valueText: fiveHourOnly
+        ? `5-hour limit reached, ${when}; ${Math.round(weekLeft)}% of weekly quota left${asOf}`
+        : `Quota used up, ${when}${asOf}`,
       title,
     };
   }

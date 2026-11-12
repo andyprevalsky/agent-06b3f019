@@ -5,7 +5,9 @@
  *   [OK]        "7d" + a bar filled to the % of the weekly quota left
  *               (stale snapshot → dimmed fill; "as of …" in the tooltip)
  *   [EXHAUSTED] authoritative cooldown or a used-up window → red "7d" + a full red
- *               track + visible "resets 3:49 PM" / "resets Nov 14" / "no reset info"
+ *               track + visible "resets 3:49 PM" / "resets Nov 14" / "no reset info";
+ *               when only the 5h window is blocked, the measured weekly remainder is
+ *               still drawn on that red track
  *   [COOLING]   Rose backoff (stall, default cooldown) → last known fill (or faint
  *               track) + visible "retry in 12m" / "paused until …"; never red
  *
@@ -38,7 +40,11 @@ export default function SubscriptionUsageMeter({
   now?: number;
 }) {
   const view = usageMeterView(account, now);
-  const showFill = (view.tone === 'ok' || view.tone === 'cooling') && view.remainingPct !== null;
+  const showFill =
+    view.remainingPct !== null &&
+    (view.tone === 'ok' ||
+      view.tone === 'cooling' ||
+      (view.tone === 'exhausted' && view.remainingPct > 0));
   return (
     <span
       className="flex min-w-0 shrink-0 items-center gap-2"

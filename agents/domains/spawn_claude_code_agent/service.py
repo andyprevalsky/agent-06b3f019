@@ -1057,9 +1057,6 @@ async def _run_agentic_loop(
             ]
             reported_undelivered.update(lost)
             await report_undelivered_code_turns(agent_id, task_id, lost, str(event.get("reason") or "rejected"))
-        subscription_usage = None if history else subscription_usage_from_event(event)
-        if subscription_usage is not None:
-            report_code_session_usage_soon(task_id, subscription_usage)
         usage_limit = None if history else usage_limit_from_event(event)
         if usage_limit is not None and loop_outcome is not None and "usage_limit" not in loop_outcome:
             loop_outcome["usage_limit"] = usage_limit
@@ -1138,6 +1135,11 @@ async def _run_agentic_loop(
         logged_events = len(code_events)
         if code_session is not None:
             code_session["logged_events"] = logged_events
+        # Below the replay guard: a reconnect resends the whole history, and a
+        # replayed rate_limit_event must not be reported again as a fresh observation.
+        subscription_usage = None if history else subscription_usage_from_event(event)
+        if subscription_usage is not None:
+            report_code_session_usage_soon(task_id, subscription_usage)
         _log_code_agent_event(event, agent_id=agent_id, task_id=task_id, sandbox_id=sandbox_id)
         logger.debug(
             "[ClaudeCode] Received code-agent event",
@@ -2859,31 +2861,68 @@ def subscription_usage_from_event(event: Dict[str, Any]) -> Optional[Dict[str, A
     return usage_from_rate_limit_event(info) if isinstance(info, dict) else None
 
 
-# One background usage report per task at most this often, unless the status changes.
+# Per task, one background drain sends the LATEST usage snapshot: a status change
+# at once, a same-status update once the interval since the last delivery ends
+# (deferred, never dropped), and a snapshot counts as delivered only when the
+# backend accepted it; a failed send is retried after the interval, bounded.
 _CODE_USAGE_REPORT_MIN_INTERVAL_S = 15.0
-_code_usage_last_report: Dict[str, tuple[float, Optional[str]]] = {}
+_CODE_USAGE_REPORT_MAX_FAILURES = 3
+_CODE_USAGE_MAX_TRACKED_TASKS = 4096
+_code_usage_reporters: Dict[str, Dict[str, Any]] = {}
 _code_usage_tasks: set["asyncio.Task[Any]"] = set()
 
 
+def _code_usage_reporter(task_id: str) -> Dict[str, Any]:
+    state = _code_usage_reporters.get(task_id)
+    if state is None:
+        state = {"pending": None, "status": None, "next_at": 0.0, "retry_at": 0.0, "failures": 0, "draining": False}
+        _code_usage_reporters[task_id] = state
+        for stale in list(_code_usage_reporters)[: max(0, len(_code_usage_reporters) - _CODE_USAGE_MAX_TRACKED_TASKS)]:
+            if not _code_usage_reporters[stale]["draining"]:
+                _code_usage_reporters.pop(stale)
+    return state
+
+
 def report_code_session_usage_soon(task_id: str, usage: Dict[str, Any]) -> None:
-    """Fire-and-forget the usage report; never blocks or raises into the event loop."""
-    now = time.monotonic()
-    status = usage.get("status")
-    last = _code_usage_last_report.get(task_id)
-    if last is not None and status == last[1] and now - last[0] < _CODE_USAGE_REPORT_MIN_INTERVAL_S:
-        return
-    _code_usage_last_report[task_id] = (now, status)
-    if len(_code_usage_last_report) > 4096:
-        _code_usage_last_report.pop(next(iter(_code_usage_last_report)))
-
-    async def _send() -> None:
-        with contextlib.suppress(Exception, asyncio.CancelledError):
-            await asyncio.wait_for(report_code_session_subscription_usage(task_id, usage), timeout=5.0)
-
+    """Fire-and-forget: hand the task's latest usage to its background drain; never blocks or raises."""
     with contextlib.suppress(Exception):
-        task = asyncio.get_running_loop().create_task(_send())
+        state = _code_usage_reporter(task_id)
+        state["pending"] = usage
+        if state["draining"]:
+            return
+        state["draining"] = True
+        task = asyncio.get_running_loop().create_task(_drain_code_session_usage(task_id, state))
         _code_usage_tasks.add(task)
         task.add_done_callback(_code_usage_tasks.discard)
+
+
+async def _drain_code_session_usage(task_id: str, state: Dict[str, Any]) -> None:
+    try:
+        while state["pending"] is not None:
+            usage = state["pending"]
+            due = max(state["retry_at"], state["next_at"] if usage.get("status") == state["status"] else 0.0)
+            wait = due - time.monotonic()
+            if wait > 0:
+                await asyncio.sleep(wait)
+                continue  # send whatever is latest once the interval ends
+            state["pending"] = None
+            delivered = False
+            with contextlib.suppress(Exception):
+                delivered = await asyncio.wait_for(report_code_session_subscription_usage(task_id, usage), timeout=5.0)
+            if delivered:
+                state.update(
+                    status=usage.get("status"),
+                    next_at=time.monotonic() + _CODE_USAGE_REPORT_MIN_INTERVAL_S,
+                    retry_at=0.0,
+                    failures=0,
+                )
+                continue
+            state["failures"] += 1
+            state["retry_at"] = time.monotonic() + _CODE_USAGE_REPORT_MIN_INTERVAL_S
+            if state["pending"] is None and state["failures"] < _CODE_USAGE_REPORT_MAX_FAILURES:
+                state["pending"] = usage
+    finally:
+        state["draining"] = False
 
 
 def usage_limit_from_event(event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
