@@ -5,6 +5,7 @@
  */
 
 import crypto from 'node:crypto';
+import { isLinqEnabled, sendLinqMessage } from './linq';
 import { prisma } from './database';
 import { createLogger } from './logger';
 import { logTruncate } from '../utils/log';
@@ -106,6 +107,7 @@ export async function sendSms(
   definitiveFailure?: boolean;
   statusCode?: number;
 }> {
+  if (isLinqEnabled(phoneNumber)) return sendLinqMessage(phoneNumber, message, options);
   const requestBody = {
     to: phoneNumber,
     body: message,
@@ -234,6 +236,8 @@ export async function sendMms(
   definitiveFailure?: boolean;
   statusCode?: number;
 }> {
+  if (isLinqEnabled(phoneNumber))
+    return sendLinqMessage(phoneNumber, message, { ...options, mediaUrl });
   const requestBody = {
     to: phoneNumber,
     body: message,
