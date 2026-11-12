@@ -218,7 +218,7 @@ function RoseSidebarBar(props: AppSidebarProps) {
   const createInProject = roseActions.onCreateAgentInProject;
   const projects = useRoseSidebarProjects((project, folderId) => {
     if (createInProject === undefined) {
-      notYet('New agent in a project');
+      notYet('New agent in a folder');
       return;
     }
     pendingGroup.mark(folderId ? `folder:${folderId}` : project.id);

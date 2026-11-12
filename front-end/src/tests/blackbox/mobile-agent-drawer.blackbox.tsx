@@ -166,14 +166,14 @@ describe('MobileAgentDrawer', () => {
     await u.click(screen.getByRole('button', { name: 'Open menu' }));
     expect(await screen.findByLabelText('Loading agents')).toBeInTheDocument();
     view.rerender(<MobileAgentDrawer {...defaultProps({ roseHeader: true })} />);
-    await u.click(await screen.findByRole('button', { name: '+ New project' }));
-    await u.type(screen.getByRole('textbox', { name: 'New project name' }), 'Website');
+    await u.click(await screen.findByRole('button', { name: '+ New folder' }));
+    await u.type(screen.getByRole('textbox', { name: 'New folder name' }), 'Website');
     // A background poll on an account with no agents: in flight again, first load settled.
     view.rerender(
       <MobileAgentDrawer {...defaultProps({ roseHeader: true, isLoadingAgents: true })} />,
     );
     expect(screen.queryByLabelText('Loading agents')).toBeNull();
-    expect(screen.getByRole('textbox', { name: 'New project name' })).toHaveValue('Website');
+    expect(screen.getByRole('textbox', { name: 'New folder name' })).toHaveValue('Website');
   });
 
   it('keeps the tab switcher below the iOS safe-area inset', async () => {
