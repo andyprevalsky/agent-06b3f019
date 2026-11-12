@@ -60,7 +60,9 @@ from helpers.activity_heartbeat import heartbeat_resume_details, safe_heartbeat
 from helpers.claude_code_ws_client import ClaudeCodeWsClient, ws_endpoint_reachable
 from helpers.e2b_log_collector import SandboxLogCollector
 from helpers.file_resolution import resolve_file_pointers_from_extracted, transform_schema_for_remote_session
+from helpers.llm import report_code_session_subscription_usage
 from helpers.tracing import traced
+from providers.rose.subscription_usage import usage_from_rate_limit_event
 from tools.base import MessageStatus
 from utils.code_transcript import (
     CodeTranscriptBuilder,
@@ -1055,6 +1057,9 @@ async def _run_agentic_loop(
             ]
             reported_undelivered.update(lost)
             await report_undelivered_code_turns(agent_id, task_id, lost, str(event.get("reason") or "rejected"))
+        subscription_usage = None if history else subscription_usage_from_event(event)
+        if subscription_usage is not None:
+            report_code_session_usage_soon(task_id, subscription_usage)
         usage_limit = None if history else usage_limit_from_event(event)
         if usage_limit is not None and loop_outcome is not None and "usage_limit" not in loop_outcome:
             loop_outcome["usage_limit"] = usage_limit
@@ -2838,6 +2843,47 @@ def build_code_agent_metadata(
             summary["merged_into"] = facts.get("merge_target")
         block["summary"] = summary
     return block
+
+
+def subscription_usage_from_event(event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """The account usage a Claude Code ``rate_limit_event`` reports, for EVERY status.
+
+    ``allowed`` / ``allowed_warning`` carry the window's utilization and reset
+    just like ``rejected`` does; all of them feed the compute screen's usage bar
+    (only ``rejected`` is also a usage limit, see ``usage_limit_from_event``).
+    """
+    if event.get("type") != "cli_message" or event.get("raw_type") != "rate_limit_event":
+        return None
+    message = event.get("cli_message") if isinstance(event.get("cli_message"), dict) else {}
+    info = message.get("rate_limit_info")
+    return usage_from_rate_limit_event(info) if isinstance(info, dict) else None
+
+
+# One background usage report per task at most this often, unless the status changes.
+_CODE_USAGE_REPORT_MIN_INTERVAL_S = 15.0
+_code_usage_last_report: Dict[str, tuple[float, Optional[str]]] = {}
+_code_usage_tasks: set["asyncio.Task[Any]"] = set()
+
+
+def report_code_session_usage_soon(task_id: str, usage: Dict[str, Any]) -> None:
+    """Fire-and-forget the usage report; never blocks or raises into the event loop."""
+    now = time.monotonic()
+    status = usage.get("status")
+    last = _code_usage_last_report.get(task_id)
+    if last is not None and status == last[1] and now - last[0] < _CODE_USAGE_REPORT_MIN_INTERVAL_S:
+        return
+    _code_usage_last_report[task_id] = (now, status)
+    if len(_code_usage_last_report) > 4096:
+        _code_usage_last_report.pop(next(iter(_code_usage_last_report)))
+
+    async def _send() -> None:
+        with contextlib.suppress(Exception, asyncio.CancelledError):
+            await asyncio.wait_for(report_code_session_subscription_usage(task_id, usage), timeout=5.0)
+
+    with contextlib.suppress(Exception):
+        task = asyncio.get_running_loop().create_task(_send())
+        _code_usage_tasks.add(task)
+        task.add_done_callback(_code_usage_tasks.discard)
 
 
 def usage_limit_from_event(event: Dict[str, Any]) -> Optional[Dict[str, Any]]:

@@ -97,6 +97,7 @@ from providers.rose.schema import (
     build_openai_response_format,
 )
 from providers.rose.structured_output import StructuredOutputAccumulator
+from providers.rose.subscription_usage import cooldown_reason as subscription_cooldown_reason
 from providers.rose.subscription_usage import take as take_subscription_usage
 from providers.rose.subscription_usage import token_fingerprint
 from providers.rose.transforms import reconstruct_agent_response
@@ -608,6 +609,7 @@ def _build_claude_auth_context(
             rate_limited_until=rate_limited_until,
             failure_reason=failure_reason,
             credential=credential_fingerprint(ctx.token),
+            rate_limit_reason=subscription_cooldown_reason(ctx.token, failure_reason),
         )
 
     async def _fetch_fresh(fetch_user_id: str) -> Optional[ComputeAuthContext]:
@@ -686,6 +688,7 @@ def _build_gpt_auth_context(
             rate_limited_until=rate_limited_until,
             failure_reason=failure_reason,
             credential=credential_fingerprint(ctx.token),
+            rate_limit_reason=subscription_cooldown_reason(ctx.token, failure_reason),
         )
 
     async def _fetch_fresh(fetch_user_id: str) -> Optional[ComputeAuthContext]:
@@ -7586,6 +7589,33 @@ async def heartbeat_compute_token_lineage_activity(
         return False
 
 
+async def report_code_session_subscription_usage(task_id: str, usage: Dict[str, Any]) -> bool:
+    """Record a code session's subscription usage (from the CLI's rate_limit_event).
+
+    Code sessions run the provider CLI in a sandbox, outside the lineage lease,
+    so their usage goes to the task's credential row by task id. Best-effort and
+    bounded (5 s); callers fire it in the background.
+    """
+    if not task_id or not usage:
+        return False
+    config = load_config()
+    try:
+        client = get_http_client()
+        response = await client.post(
+            f"{config.backend.api_url}/api/integrations/compute-code/code-session-usage",
+            headers={
+                "X-API-Key": config.backend.api_key or "",
+                "Content-Type": "application/json",
+            },
+            json={"taskId": task_id, "usage": usage},
+            timeout=5.0,
+        )
+        return response.status_code == 200
+    except Exception as e:
+        logger.warning(f"Code session usage report failed: {e}")
+        return False
+
+
 @activity.defn
 async def release_compute_token_lineage_activity(lineage_key: str) -> bool:
     """Release a compute-token lineage lease so rotation can acquire a different token."""
@@ -7686,12 +7716,18 @@ async def mark_compute_token_rate_limited_activity(
     rate_limited_until: Optional[str] = None,
     failure_reason: Optional[str] = None,
     credential: Optional[str] = None,
+    rate_limit_reason: Optional[str] = None,
 ) -> bool:
     """Mark the selected provider-typed compute token rate-limited in backend.
 
     ``integration_id`` and ``credential`` (the held token's fingerprint) name the
     exact leased login: the backend disables a login only when the report names
     it and the stored token is still the live one held (T7).
+
+    ``rateLimitAuthoritative`` says whether the provider supplied the reset
+    (``rate_limited_until``) or it is Rose's own ``cooldown_seconds`` backoff, and
+    ``rateLimitReason`` (stall | auth | usage_window[_5h|_7d] | rate_limit) why,
+    so the usage bar never shows a Rose backoff as an exhausted quota.
     """
     config = load_config()
     effective_rate_limited_until = rate_limited_until or (
@@ -7702,9 +7738,12 @@ async def mark_compute_token_rate_limited_activity(
         "type": token_type,
         "source": source,
         "rateLimitedUntil": effective_rate_limited_until,
+        "rateLimitAuthoritative": bool(rate_limited_until),
     }
     if failure_reason:
         body["failureReason"] = failure_reason
+    if rate_limit_reason:
+        body["rateLimitReason"] = rate_limit_reason
     if source == "pool" and pool_token_id:
         body["poolTokenId"] = pool_token_id
     if source == "user":
