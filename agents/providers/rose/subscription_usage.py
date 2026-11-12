@@ -134,9 +134,7 @@ def _claude_windows(headers: Mapping[str, str]) -> Dict[str, Optional[UsageWindo
     return {"fiveHour": window("5h"), "sevenDay": window("7d")}
 
 
-def _claude_rejected_window(
-    headers: Mapping[str, str], windows: Dict[str, Optional[UsageWindow]]
-) -> Optional[str]:
+def _claude_rejected_window(headers: Mapping[str, str], windows: Dict[str, Optional[UsageWindow]]) -> Optional[str]:
     """The window a `rejected` unified status names, marked 100% used in place."""
     claim = (headers.get("anthropic-ratelimit-unified-representative-claim") or "").strip().lower()
     key = _CLAIM_WINDOWS.get(claim)
@@ -146,9 +144,7 @@ def _claude_rejected_window(
     if key is None:
         return None
     current = windows.get(key)
-    resets_at = (current or {}).get("resetsAt") or _parse_epoch(
-        headers.get("anthropic-ratelimit-unified-reset")
-    )
+    resets_at = (current or {}).get("resetsAt") or _parse_epoch(headers.get("anthropic-ratelimit-unified-reset"))
     windows[key] = {"usedPct": 100.0, "resetsAt": resets_at}
     return key
 
@@ -199,9 +195,7 @@ def _codex_limit_reset(body: Optional[str], now: datetime) -> Optional[str]:
     return ""  # a usage-limit body without a usable reset
 
 
-def _codex_rejected_window(
-    windows: Dict[str, Optional[UsageWindow]], resets_at: Optional[str]
-) -> Optional[str]:
+def _codex_rejected_window(windows: Dict[str, Optional[UsageWindow]], resets_at: Optional[str]) -> Optional[str]:
     """Which Codex window a usage-limit 429 exhausted, when the headers say."""
     exhausted = [k for k, w in windows.items() if w is not None and w["usedPct"] >= 100]
     if len(exhausted) != 1:
@@ -362,9 +356,7 @@ def cooldown_reason(token: Optional[str], failure_reason: Optional[str]) -> str:
     return limit_reason(token) or "rate_limit"
 
 
-def usage_from_rate_limit_event(
-    info: Mapping[str, Any], now: Optional[datetime] = None
-) -> Optional[UsageSnapshot]:
+def usage_from_rate_limit_event(info: Mapping[str, Any], now: Optional[datetime] = None) -> Optional[UsageSnapshot]:
     """Claude Code SDK `rate_limit_event.rate_limit_info` → usage snapshot, for every status.
 
     `rateLimitType` five_hour → fiveHour, seven_day → sevenDay (model-specific

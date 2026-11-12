@@ -819,9 +819,7 @@ async def _attempt_with_token(
                 # Failure usage: x-codex-* headers plus a usage_limit_reached
                 # body's resets_at, delivered now (the token is about to be
                 # retried or rotated away).
-                observe_subscription_usage(
-                    "gpt", auth.token, response.headers, status_code=status, body=error_body
-                )
+                observe_subscription_usage("gpt", auth.token, response.headers, status_code=status, body=error_body)
                 flush_subscription_usage(auth, urgent=True)
 
                 if status == 429:

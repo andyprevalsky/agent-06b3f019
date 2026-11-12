@@ -608,7 +608,8 @@ def _build_claude_auth_context(
             cooldown_seconds=cooldown_seconds,
             rate_limited_until=rate_limited_until,
             failure_reason=failure_reason,
-            credential=credential_fingerprint(ctx.token),            rate_limit_reason=subscription_cooldown_reason(ctx.token, failure_reason),
+            credential=credential_fingerprint(ctx.token),
+            rate_limit_reason=subscription_cooldown_reason(ctx.token, failure_reason),
         )
 
     async def _fetch_fresh(fetch_user_id: str) -> Optional[ComputeAuthContext]:
@@ -686,7 +687,8 @@ def _build_gpt_auth_context(
             cooldown_seconds=cooldown_seconds,
             rate_limited_until=rate_limited_until,
             failure_reason=failure_reason,
-            credential=credential_fingerprint(ctx.token),            rate_limit_reason=subscription_cooldown_reason(ctx.token, failure_reason),
+            credential=credential_fingerprint(ctx.token),
+            rate_limit_reason=subscription_cooldown_reason(ctx.token, failure_reason),
         )
 
     async def _fetch_fresh(fetch_user_id: str) -> Optional[ComputeAuthContext]:

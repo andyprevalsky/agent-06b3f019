@@ -13120,7 +13120,11 @@ def test_code_session_rate_limit_event_maps_every_status():
     now = datetime(2026, 11, 6, 12, 0, tzinfo=timezone.utc)
 
     def event(info):
-        return {"type": "cli_message", "raw_type": "rate_limit_event", "cli_message": {"type": "rate_limit_event", "rate_limit_info": info}}
+        return {
+            "type": "cli_message",
+            "raw_type": "rate_limit_event",
+            "cli_message": {"type": "rate_limit_event", "rate_limit_info": info},
+        }
 
     allowed = {"status": "allowed", "rateLimitType": "five_hour", "utilization": 0.31, "resetsAt": 1762444800}
     assert usage_from_rate_limit_event(allowed, now) == {
@@ -13140,7 +13144,10 @@ def test_code_session_rate_limit_event_maps_every_status():
     assert snap["status"] == "rejected" and snap["source"] == "code_session"
     assert usage_limit_from_event(event(rejected)) is not None
     # Not an account window, or no utilization to report: nothing is invented.
-    assert subscription_usage_from_event(event({"status": "allowed", "rateLimitType": "overage", "utilization": 0.1})) is None
+    assert (
+        subscription_usage_from_event(event({"status": "allowed", "rateLimitType": "overage", "utilization": 0.1}))
+        is None
+    )
     assert subscription_usage_from_event(event({"status": "allowed", "rateLimitType": "five_hour"})) is None
     assert subscription_usage_from_event({"type": "cli_message", "raw_type": "result"}) is None
 
@@ -13158,7 +13165,13 @@ async def test_code_session_usage_report_is_fire_and_forget():
         return True
 
     service._code_usage_last_report.clear()
-    snap = {"observedAt": "2026-11-06T12:00:00Z", "fiveHour": {"usedPct": 1.0, "resetsAt": None}, "sevenDay": None, "source": "code_session", "status": "allowed"}
+    snap = {
+        "observedAt": "2026-11-06T12:00:00Z",
+        "fiveHour": {"usedPct": 1.0, "resetsAt": None},
+        "sevenDay": None,
+        "source": "code_session",
+        "status": "allowed",
+    }
     with patch.object(service, "report_code_session_subscription_usage", slow_report):
         started = time.monotonic()
         service.report_code_session_usage_soon("task-1", snap)
@@ -13285,10 +13298,19 @@ async def test_usage_flush_never_blocks_or_alters_the_completion():
 
     sse = "\n".join(
         _ev("message_start", {"type": "message_start", "message": {"usage": {"input_tokens": 3}}})
-        + _ev("content_block_start", {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}})
-        + _ev("content_block_delta", {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "ok"}})
+        + _ev(
+            "content_block_start",
+            {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}},
+        )
+        + _ev(
+            "content_block_delta",
+            {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "ok"}},
+        )
         + _ev("content_block_stop", {"type": "content_block_stop", "index": 0})
-        + _ev("message_delta", {"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 1}})
+        + _ev(
+            "message_delta",
+            {"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 1}},
+        )
         + _ev("message_stop", {"type": "message_stop"})
     )
     headers = {"Content-Type": "text/event-stream", "anthropic-ratelimit-unified-7d-utilization": "0.2"}
@@ -13296,7 +13318,9 @@ async def test_usage_flush_never_blocks_or_alters_the_completion():
 
     async def run(heartbeat):
         usage.clear()
-        auth = ClaudeAuthContext(token="flush-token", source="pool", user_id="u", lineage_key="lin", heartbeat_lease=heartbeat)
+        auth = ClaudeAuthContext(
+            token="flush-token", source="pool", user_id="u", lineage_key="lin", heartbeat_lease=heartbeat
+        )
         started = time.monotonic()
         chunks = await _drain(
             claude_auth_complete(
