@@ -181,7 +181,7 @@ async def test_hosted_checkout_pays_when_stripe_geolocates_the_guest_outside_the
     def rendered(selector):
         if selector == 'select[name="billingCountry"]':
             return "billingCountry" if geolocated_country else None
-        if selector in ("card", 'button[type="submit"]'):
+        if selector in ("card", 'button[data-testid="hosted-payment-submit-button"]'):
             return selector
         for name, autocomplete in names.items():
             if selector in (f'input[name="{name}"]', f'input[autocomplete="{autocomplete}"]'):
@@ -361,7 +361,7 @@ class _CheckoutFrame:
 
     def get_by_text(self, text, *, exact):
         assert exact is True
-        return _CheckoutLocator(self, [e for e in self.elements if e.visible and e.text == text])
+        return _CheckoutLocator(self, [e for e in self.elements if e.text == text])
 
 
 class _HostedCheckoutLayout:
@@ -510,10 +510,19 @@ async def test_hosted_checkout_pays_in_every_real_checkout_layout(monkeypatch, v
     async def no_sleep(seconds):
         pass
 
+    class Expect:
+        def __init__(self, locator):
+            self.locator = locator
+
+        async def not_to_be_checked(self, **kwargs):
+            assert not await self.locator.is_checked()
+
     monkeypatch.setattr(checkout, "async_playwright", Playwright)
     monkeypatch.setattr(checkout, "_stripe_session", stripe_session)
     monkeypatch.setattr(checkout.httpx, "AsyncClient", Client)
     monkeypatch.setattr(checkout.asyncio, "sleep", no_sleep)
+    # Lets the pre-fix driver's playwright `expect` run, so its /c/pay/ cases are real controls.
+    monkeypatch.setattr(checkout, "expect", Expect, raising=False)
     clock = iter(range(0, 100_000))
     monkeypatch.setattr(checkout.time, "monotonic", lambda: next(clock))
 
@@ -536,5 +545,6 @@ async def test_hosted_checkout_pays_in_every_real_checkout_layout(monkeypatch, v
     assert [event for event in layout.events if event[0] in ("click", "fill")].index(clicks[-1]) == \
         len([event for event in layout.events if event[0] in ("click", "fill")]) - 1, "nothing after submit"
     assert result["payment_status"] == "paid" and result["webhook_delivered"] is True
+    assert result["checkout_layout"] == path and result["link_opted_out"] is True
     assert session_reads[0] == "cs_test_layout" and len(session_reads) >= 2
     assert deliveries == ["http://127.0.0.1:1/webhooks/stripe"]
