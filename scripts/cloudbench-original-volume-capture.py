@@ -11,8 +11,9 @@ reports "original-volume runtime archive required". This helper:
    or destroyed resources and any existing capture, before any provider mutation;
 2. saves the exact original Machine config privately;
 3. replaces ``init.cmd`` with ``sleep infinity`` while the Machine is
-   stopped, then boots it. Explicit ``--isolate-services`` also removes network
-   services for this inert boot; default admission still refuses services.
+   stopped, then boots it. Well-formed network ``services`` (every fleet
+   clone inherits the donor's) are removed for this inert boot only and
+   restored exactly; ``--isolate-services`` is accepted for compatibility.
    No inherited ``init.exec``/``init.entrypoint`` is
    allowed, and the guest must show no driver process, so the original driver
    cannot run again;
@@ -484,9 +485,10 @@ def validate_original_config(config: object, ident: dict) -> None:
         raise Refusal("native Machine image is not digest-pinned")
     for key in ("services", "containers", "processes", "standbys", "schedule"):
         if config.get(key):
-            if key == "services" and ident.get("isolate_services"):
-                # Only network listeners are isolated. Other startup mechanisms
-                # remain unsupported under this explicit capture option.
+            if key == "services":
+                # Only network listeners are isolated (inert_variant) and the
+                # exact original is restored. Other startup mechanisms and
+                # malformed service lists remain unsupported.
                 services = config[key]
                 if isinstance(services, list) and all(isinstance(s, dict) for s in services):
                     continue
@@ -605,7 +607,6 @@ def local_identity(args: argparse.Namespace) -> dict:
         "audit": audit, "workspace": workspace, "app": meta["app"], "bench": args.bench,
         "ordinal": ordinal, "token": token, "kind": kind, "machine_id": machine,
         "volume_id": volume, "clone_name": clone,
-        "isolate_services": getattr(args, "isolate_services", False),
         "undelivered_native_stop": native_stop,
     }
 
@@ -1097,7 +1098,7 @@ def mutate_and_capture(fly: Fly, ident: dict, args, capture_dir: Path, artifacts
         raise Refusal(f"could not save the original config privately: {error}") from None
     inert = inert_variant(original)
     stage, mutated, local = "inert-config", False, None
-    restore_hint = ("--restore-original-config" + (" --isolate-services" if ident.get("isolate_services") else "")
+    restore_hint = ("--restore-original-config"
                     + (" --undelivered-native-stop" if ident.get("undelivered_native_stop") else ""))
     mutations: list[str] = []
 
@@ -1176,7 +1177,7 @@ def mutate_and_capture(fly: Fly, ident: dict, args, capture_dir: Path, artifacts
         "native_final_state": final_machine.get("state"),
         "native_final_volume_state": final_volume.get("state"),
         "inert_command": INERT_CMD, "guest_inert_sleepers": inventory.get("inert_sleepers"),
-        "services_isolated": bool(ident.get("isolate_services") and original.get("services")),
+        "services_isolated": bool(original.get("services")),
         "provider_mutations": mutations, "receipt_cross_checks": checks,
         **({"admission": "undelivered-native-stop",
             "guest_native_stop_sha256": ident["undelivered_native_stop"]["sha256"]}
@@ -1290,7 +1291,7 @@ def next_step(args: argparse.Namespace) -> int:
     print("   python3 scripts/cloudbench-original-volume-capture.py --registry " + shlex.quote(str(ident["registry"]))
           + " --bench " + shlex.quote(ident["bench"]) + " --machine-id " + ident["machine_id"]
           + " --volume-id " + ident["volume_id"] + " --capture-dir <new-private-0700-dir>"
-          + " --undelivered-native-stop [--isolate-services]")
+          + " --undelivered-native-stop")
     print("   scripts/run-bench --recover-stale-owner " + ident["owner"])
     return 0
 
@@ -1970,7 +1971,8 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--volume-id", required=True)
     parser.add_argument("--capture-dir", type=Path)
     parser.add_argument("--isolate-services", action="store_true",
-                        help="explicitly remove network services during inert capture and restore them exactly")
+                        help="compatibility no-op: well-formed services are always isolated during the "
+                             "inert capture and restored exactly")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--preflight-only", action="store_true")
     mode.add_argument("--restore-original-config", action="store_true")

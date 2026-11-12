@@ -1893,6 +1893,18 @@ if ! command -v flyctl >/dev/null 2>&1; then
     if [ -x "$HOME/.fly/bin/flyctl" ]; then export PATH="$HOME/.fly/bin:$PATH"; else
         echo "❌ flyctl not found on PATH." >&2; exit 1; fi
 fi
+# Every controller flyctl spawn drops the exact-owner recovery guard fd. Bash
+# cannot open it close-on-exec, and flyctl may fork a long-lived `flyctl agent`
+# daemon that would otherwise inherit the flock and hold it after recovery
+# exits, so the original-volume capture refuses "guard is held" (PR #1972).
+# Helpers that verify the guard still receive it through --guard-fd.
+flyctl() {
+    if [ -n "${REGISTRY_RECOVERY_GUARD_FD:-}" ]; then
+        command flyctl "$@" {REGISTRY_RECOVERY_GUARD_FD}<&-
+    else
+        command flyctl "$@"
+    fi
+}
 # shellcheck source=lib/cloudbench-inventory.sh
 source "${CLOUDBENCH_SCRIPT_SNAPSHOT:-$ROOT_DIR/scripts/lib}/cloudbench-inventory.sh"
 source "${CLOUDBENCH_SCRIPT_SNAPSHOT:-$ROOT_DIR/scripts/lib}/cloudbench-archived-reuse.sh"

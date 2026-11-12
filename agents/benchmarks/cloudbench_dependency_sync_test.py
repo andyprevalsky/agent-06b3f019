@@ -32121,13 +32121,12 @@ def test_failed_fleet_forensic_original_volume_preflight_is_read_only(
         result = _run_capture(fx, "--preflight-only", *extra)
     finally:
         fx.plane.close()
-    admitted = fault == "none" or (fault == "services" and isolate_services)
+    admitted = fault in ("none", "services")
     assert result.returncode == (0 if admitted else 3), result.stdout + result.stderr
     if admitted:
         assert json.loads(result.stdout)["preflight"] == "ok"
     else:
         reason = {
-            "services": "unsupported Machine config: services is set",
             "foreign-host": "owner belongs to another host",
             "containers": "unsupported Machine config: containers is set",
             "malformed-services": "unsupported Machine config: services is set",
@@ -32171,8 +32170,16 @@ def test_failed_fleet_forensic_original_volume_controls_are_in_permanent_gate() 
     assert required <= targets, f"original-volume controls missing from permanent gate: {required - targets}"
 
 
+@pytest.mark.parametrize("explicit_flag", [True, False])
 @pytest.mark.parametrize("fault", ["none", "guest-not-inert", "start-rejected", "restore-drift", "capture-interrupted"])
-def test_failed_fleet_forensic_original_volume_service_isolation(tmp_path: Path, fault: str) -> None:
+def test_failed_fleet_forensic_original_volume_service_isolation(
+    tmp_path: Path, fault: str, explicit_flag: bool
+) -> None:
+    """Every fleet clone inherits the donor's services (PR #1972 owner a4b2999b).
+
+    Default capture isolates well-formed services for the inert boot and
+    restores them exactly; the legacy --isolate-services flag is accepted.
+    """
     fx = _capture_fixture(tmp_path, fault)
     original = copy.deepcopy(fx.config)
     original["services"] = [{"protocol": "tcp", "internal_port": 8011,
@@ -32183,7 +32190,7 @@ def test_failed_fleet_forensic_original_volume_service_isolation(tmp_path: Path,
     before = _tree_bytes(fx.registry, fx.audit, fx.run)
     guest_before = _tree_bytes(fx.guest / "data")
     try:
-        result = _run_capture(fx, "--isolate-services")
+        result = _run_capture(fx, *(["--isolate-services"] if explicit_flag else []))
     finally:
         fx.plane.close()
     assert result.returncode == (0 if fault == "none" else 1), result.stdout + result.stderr
@@ -32200,14 +32207,15 @@ def test_failed_fleet_forensic_original_volume_service_isolation(tmp_path: Path,
         assert fx.plane.state["machine"]["config"] == original
         provenance = json.loads((fx.capture / f"{fx.machine}.provenance.json").read_bytes())
         assert provenance["native_release_verified"] is False and provenance["proof_credit"] == 0
+        assert provenance["services_isolated"] is True
         assert provenance["native_original_config_sha256"] == hashlib.sha256(
             json.dumps(original, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     else:
         failure = json.loads((fx.capture / f"{fx.machine}.capture-failure.json").read_bytes())
         assert failure["restored"] is (fault != "restore-drift")
         if fault == "restore-drift":
-            assert failure["next_step"] == "--restore-original-config --isolate-services"
-            assert "--restore-original-config --isolate-services" in result.stderr
+            assert failure["next_step"] == "--restore-original-config"
+            assert "--restore-original-config" in result.stderr
         assert not (fx.capture / f"{fx.machine}.provenance.json").exists()
 
 

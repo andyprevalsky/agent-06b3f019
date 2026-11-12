@@ -595,6 +595,10 @@ GATES = (
     ),
     Gate("cloudbench-cohort-reconcile", ("python3", "scripts/tests/cloudbench-cohort-reconcile.test.py")),
     Gate(
+        "cloudbench-recovery-guard-inheritance",
+        ("python3", "scripts/tests/cloudbench-recovery-guard-inheritance.test.py"),
+    ),
+    Gate(
         "cloudbench-fixed-native-worker",
         ("python3", "scripts/tests/cloudbench-fixed-native-worker.test.py"),
     ),
