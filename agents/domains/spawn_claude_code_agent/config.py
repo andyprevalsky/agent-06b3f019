@@ -151,6 +151,10 @@ LOCAL_TARGET_UNAVAILABLE_CODE: Final[str] = "LOCAL_TARGET_UNAVAILABLE"
 E2B_CAPACITY_EXHAUSTED_CODE: Final[str] = "E2B_CAPACITY_EXHAUSTED"
 # The backend answers session create 429 with this code when GitHub's rate limit stopped the repo access check.
 GITHUB_RATE_LIMITED_CODE: Final[str] = "GITHUB_RATE_LIMITED"
+# Error type of a run that ended abnormally after its code session existed. Its
+# message and details carry the exact error plus the code_session_id (and the
+# failure checkpoint) so the parent can resume instead of losing the work.
+CODE_AGENT_SESSION_FAILED_CODE: Final[str] = "CODE_AGENT_SESSION_FAILED"
 # Reason codes shared with back-end/src/providers/localDevices/messages.ts.
 LOCAL_TARGET_NOT_MAC_ORIGIN: Final[str] = "not_mac_origin"
 LOCAL_TARGET_DEVICE_DISCONNECTED: Final[str] = "device_disconnected"

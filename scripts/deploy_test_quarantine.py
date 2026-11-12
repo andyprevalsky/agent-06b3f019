@@ -248,6 +248,41 @@ def _suite_attribution_markers(occurrence: dict, entry: dict, root: Path, path: 
     return found, {**binding, 'cases': ids, 'command': ['python3', path], 'source': occurrence['source']}
 
 
+# unittest's own failure header (3.11): "FAIL: test_x (module.Class.test_x)".
+_UNITTEST_FAILURE = re.compile(r'^(?:FAIL|ERROR): \S+ \(([^()\s]+)\)', re.M)
+
+
+def failed_unittest_names(occurrence: dict) -> list[str]:
+    """Exact unittest ids a suite-level FLAKY unit printed for its failed first attempt.
+
+    The structural runner names a FLAKY unit after its whole suite job, while a quarantine marker
+    sits on one test method; the occurrence's own failure output is what ties the two together.
+    """
+    return _UNITTEST_FAILURE.findall(str(occurrence.get('detail') or ''))
+
+
+def named_test_matches(marker: dict, test_id: str, path: str, occurrence: dict) -> bool:
+    """A failed unittest id names this marker: same module (file), class and method.
+
+    A script-run suite reports its module as `__main__`; then the marker file must be that suite's own
+    file (its stem is the FLAKY unit) or the failing method's traceback frame must be in that file.
+    """
+    owner, name = marker.get('owner'), marker.get('name')
+    if not name or test_id.rsplit('.', 1)[-1] != name:
+        return False
+    parts = test_id.split('.')
+    if owner and (len(parts) < 3 or parts[-2] != owner):
+        return False
+    module = '.'.join(parts[:-2] if owner else parts[:-1])
+    stem = Path(path).name.removesuffix('.py').removesuffix('.test')
+    if module == '__main__':
+        suite = str(occurrence.get('unit') or '').split('[', 1)[0]
+        frame = re.search(r'File "[^"]*/' + re.escape(path) + r'", line \d+, in ' + re.escape(name) + r'\b',
+                          str(occurrence.get('detail') or ''))
+        return stem == suite or frame is not None
+    return Path(path).with_suffix('').as_posix().replace('/', '.').endswith(module)
+
+
 def native_case_binding(occurrence: dict, entry: dict, root: Path) -> tuple[dict, dict, dict]:
     """Bind an explicit RCA definition to its original canonical native receipt and log."""
     def need(ok, reason):
@@ -422,6 +457,12 @@ def validate_attribution(occurrence: dict, entry: dict, root: Path, *, state: di
         found = [m for m in markers(root, [path]) if unit_matches(m, occurrence['unit'])]
         if not found and entry.get('case') is not None and 'suite_binding' not in entry:
             found = _domain_case_markers(occurrence, entry['case'], root, path)
+        named = failed_unittest_names(occurrence)
+        if not found and named and 'suite_binding' not in entry:
+            # A suite-level unit is attributed only when EVERY failed test it names carries a marker here.
+            candidates = markers(root, [path])
+            matched = [[m for m in candidates if named_test_matches(m, test_id, path, occurrence)] for test_id in named]
+            found = [m for group in matched for m in group] if all(matched) else []
     if not found and 'suite_binding' not in entry:
         raise ValueError(f"no quarantine marker for {occurrence['unit']} in {path}")
     if not found:
@@ -447,9 +488,11 @@ def validate_attribution(occurrence: dict, entry: dict, root: Path, *, state: di
               'unit': occurrence['unit'], 'gate': occurrence.get('gate'), 'marker': path}
     if suite_binding is not None:
         packet['suite_binding'] = suite_binding
+    # The recorded attribution keeps its case label: merge revalidates it with attribution_block().
     return {'attribution': attribution, 'evidence': entry['evidence'], 'marker': path, 'post_merge': packet,
             **({'native_binding': binding} if binding else {}),
-            **({'suite_binding': suite_binding} if suite_binding is not None else {})}
+            **({'suite_binding': suite_binding} if suite_binding is not None else {}),
+            **({'case': entry['case']} if entry.get('case') is not None else {})}
 
 
 _DOMAIN_SINGLE_FAILURE = re.compile(r'\(\d+ passed, 1 failed; 1 failed case\(s\): ([A-Za-z_]\w*); first error: ')

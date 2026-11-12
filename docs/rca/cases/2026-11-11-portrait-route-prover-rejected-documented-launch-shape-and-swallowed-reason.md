@@ -20,7 +20,7 @@ tags:
 sources:
   - agent 09b554a3-7577-5ac0-9670-0f58dd668fa1 (lease d5337207, setup.verify cursors 25, 27, 69)
 repro: back-end/src/tests/blackbox/iphone-control.portrait-route.cases.ts (production-shaped route cases + Photos/Safari errorCode assertion)
-status: fixed
+status: mitigated
 ---
 
 ## Problem
@@ -76,6 +76,16 @@ verify 69 had an `input.drag` mid-route. The agent now sees these as
   other bundle IDs are still rejected.
 - 10k agents: no new queries, channels or shared state. There is one log line
   per failed verify.
+
+## Recurrence (2026-11-11, after PR #1935)
+
+Production confirmed that the swallow is fixed. Agent 08923d50 (lease ef01c7a8) got its portrait verify at cursor 36 (18:36:38Z) back as `phone_portrait_route_unproven`, and Render logged `[iPhoneSetup] verify failed ... code=phone_portrait_route_unproven`. The route was still unproven because the agent relaunched Settings cold (`fresh: true`, cursors 14/44/54/75/93), and the prover accepted only `fresh: false`. A cold launch is stronger evidence of a clean start, and the root read is still required, so the prover now accepts any boolean `fresh`. A non-boolean value is still rejected (regression: the `production-cold` route cases). The same route also showed one typing attempt that did not register followed by a retype (cursors 18-22). The strict sequence still rejects that, and the agent now sees the typed reason telling it to restart from a new launch. Status stays `mitigated` until a live portrait verify succeeds.
+
+## Recurrence 2 (2026-11-11, after PR #1947)
+
+Agent acbb9d3c (lease 2a140be8, verify cursor 24) failed the route, not on an observed lock-OFF verdict. A replay against the live prover showed the break at cursor 10: the AssistiveTouch query typed with `keystrokes: false` did not register (the field was unchanged and showed no results). Across three live runs, `keystrokes: false` lost the query twice, and the immediate retype with `keystrokes: true` worked twice out of two. The delays were 14-29 s, so this is not a settle race. The same run then tapped the AssistiveTouch label (x 177) instead of the switch, and verified before the Control Center steps.
+
+Fix (proof unchanged): `portraitRouteVerdict` reports the first breaking cursor, its stage and the next expected native step. It is stored as `operation.result.portraitRoute` on the failed verify and logged. PHONE_GUIDANCE now asks for `keystrokes: true` on that query and a tap on the switch, not the label (GROUNDED golden review portrait-route-guidance-2). The prover does not tolerate a retype: a lost query means restarting from a new launch. Regression: the "names the exact route break" cases in iphone-control.portrait-route.cases.ts. Replays of the real journals report stage `results` at cursors 10 and 19.
 
 ## Human feedback
 
