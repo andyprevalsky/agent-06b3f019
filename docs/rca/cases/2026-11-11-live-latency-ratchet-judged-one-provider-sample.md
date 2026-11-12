@@ -21,6 +21,8 @@ sources:
   - PR #1932 (quarantine marker pending-handoff:d2ba002c0abd4af6a10da8c847d6ec2c)
   - commit 668964a473074ffb111f930523335ecf9f31d913 (failed source)
   - task backend-coverage-blackbox gate run 43041365615 (blackbox:cerebras)
+  - PR #1954
+  - commit 36700b227ae8f953a472408421e64ba07e710477 (merge, production verified)
 repro: back-end/src/tests/blackbox/cerebras.latency.cases.ts
 status: fixed
 ---
