@@ -237,6 +237,9 @@ describe('compute usage bars on the row', () => {
   });
 
   it('renders the reset time, hints and "No data yet" as visible text, not only a tooltip', async () => {
+    // A fixed midday clock: "soon" (+1h) must stay on today's date, or the bar
+    // rightly shows "Nov 13" instead of a time (failed when run after 23:00).
+    vi.useFakeTimers({ toFake: ['Date'], now: NOW });
     const soon = Date.now() + HOUR;
     const weekReset = Date.now() + 3 * 24 * HOUR;
     await renderCompute([
