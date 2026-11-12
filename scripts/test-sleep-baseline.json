@@ -221,7 +221,6 @@
     "front-end/src/tests/blackbox/message-list-plan-thinking.blackbox.tsx": 1,
     "front-end/src/tests/blackbox/message-list-thinking-visibility.blackbox.tsx": 2,
     "front-end/src/tests/blackbox/message-list-thinking.blackbox.tsx": 2,
-    "front-end/src/tests/blackbox/mobile-pwa-chrome.blackbox.tsx": 1,
     "front-end/src/tests/blackbox/network-view.blackbox.tsx": 1,
     "front-end/src/tests/blackbox/quick-query-attachments.blackbox.ts": 2,
     "front-end/src/tests/blackbox/rose-apps-root-browser.fixtures.tsx": 1,
