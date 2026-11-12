@@ -148,7 +148,7 @@ Everything not listed here must pass. Record every skip as `⚠️ Skipped` with
 | Codex E2B smoke | Every Codex credential path is out of credits (the test skips itself) | Never use `BLACKBOX_TEST_SKIP_DOMAINS` |
 | Benchmark judge | Confirmed third-party compute quota | |
 | Credential health: Anthropic, Parallel.ai | Any failure (warn-only) | Other providers' auth rejections block |
-| CodeRabbit | Confirmed quota or spending cap on the current HEAD, at any cycle (1, 2, 3 or verification): `deploy_review_cycle.py skip --reason usage-cap` | Never wait for the window or ask; the PR body says it merged unreviewed |
+| CodeRabbit | Confirmed quota or spending cap on the current HEAD: `deploy_review_cycle.py skip --reason usage-cap`, at any cycle (1, 2, 3 or verification) | Never wait for the window or ask; the PR body says it merged unreviewed |
 | Mac-only checks on Linux | Always | Unverified, never PASS |
 | Mac local-execution acceptance | Device discovery shows no connected Mac | An auth error is not proof of absence |
 | Unselected categories | The gate planner omitted them | The plan lists every omission |
