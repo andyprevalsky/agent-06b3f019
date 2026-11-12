@@ -35,63 +35,91 @@ On 2026-11-12 the `agent-payment-new-user-journey` smoke failed about 22 seconds
 into the run, before any agent work began. It failed on PR #1975 twice and on
 PR #1981 once, with `Locator.click: Timeout 10000ms exceeded … waiting for
 get_by_text("Card", exact=True).last` at `subscription_checkout.py:119`. None of
-those PRs touched payment code. A same-source rerun of PR #1981 passed, and so
-did PR #1982 and an origin/main run. All three failing sessions were opened at
-`checkout.stripe.com/g/pay/…`. Every passing session was opened at `/c/pay/…`.
-The backend creates every session the same way (`createSubscriptionCheckoutSession`).
+those PRs touched payment code, and the driver and backend session code were
+last changed on 11-08. A same-source rerun of PR #1981 passed, as did PR #1982
+and an origin/main run on PR #1975's box.
+
+The owners' cloudbench driver logs show the Checkout URL each run received.
+PR #1981 run 20261112-192546-4064416 got
+`checkout.stripe.com/g/pay/cs_test_b0IjS1OUlZE2Ydwn…`. PR #1975 got
+`/g/pay/cs_test_b0apCawrJt0fmd4V…` and `/g/pay/cs_test_b0UsGwJ7Fam0zs1a…`.
+Every passing run received `/c/pay/…`. The backend creates every session the
+same way (`createSubscriptionCheckoutSession`, API `2025-02-24.acacia`).
 
 ## Diagnosis
 
-Stripe serves one hosted Checkout session in either of two layouts, chosen per
-session. `/c/pay/` renders the payment-method accordion, the card form and
-Subscribe in the top document. `/g/pay/` renders the whole Payment Element in a
-single `js.stripe.com/v3/elements-inner-…` iframe. That covers the Card radio,
-the `number/expiry/cvc/name` inputs, the `country` select, `postalCode`,
-`linkOptIn` and Subscribe (`data-testid="payment-form-submit-button"`). The top
-frame holds only the promotion-code input, and an hCaptcha frame carries its
-own `button[type=submit]`. The driver already filled fields across frames. Its
-Card click, Link opt-out (`enableStripePass`) and Subscribe lookup searched only
-the top page, and its ZIP/country selectors did not include the `/g/pay/` names.
+The hosted layout follows the URL path that Stripe returned in `session.url`,
+and one session renders either layout depending on the path it is opened at.
+`/c/pay/` renders the payment-method accordion, the card form and Subscribe
+(`hosted-payment-submit-button`) in the top document. `/g/pay/` renders the
+whole Payment Element in a single `js.stripe.com/v3/elements-inner-…` iframe.
+That covers the Card radio, the `number/expiry/cvc/name` inputs, the `country`
+select, `postalCode`, `linkOptIn` and Subscribe
+(`data-testid="payment-form-submit-button"`). The top frame holds only the
+promotion-code input, and an hCaptcha frame carries its own
+`button[type=submit]`. The driver already filled fields across frames. Its Card
+click, Link opt-out (`enableStripePass`) and Subscribe lookup searched only the
+top page, and its ZIP/country selectors did not include the `/g/pay/` names.
 
-Evidence:
-- Loading the actual failed session `cs_test_b0IjS1OUlZE2Ydwn` at `/g/pay/`
-  gave `get_by_text("Card", exact=True)` count 0 in the top frame and 1 in the
-  `elements-inner-habanero` frame. The screenshot shows the Card radio visibly
-  rendered. The DOM inventory of the failing variant before and after the Card
-  click is in `.context/stripe-card-rca/captures/`.
-- Live repro: the unchanged main driver ran against a freshly minted real
-  sandbox session opened at `/g/pay/`. It failed with the byte-identical smoke
-  error in 13.4 s. It failed the same way on a card-only `/g/pay/` session.
-- The same unchanged driver paid `/c/pay/` sessions. That explains the
-  pass/fail split on identical source.
-- Card-only sessions show a "Card" heading with the card form already open, on
-  both paths.
+Evidence (receipts in `.context/stripe-card-rca/` on the RCA box):
+- Loading the actual failed session `cs_test_b0IjS1OUlZE2Ydwn` at its smoke
+  `/g/pay/` path gave `get_by_text("Card", exact=True)` count 0 in the top frame
+  and 1 in the `elements-inner-habanero` frame. The screenshot shows the Card
+  radio visibly rendered. The per-frame DOM inventory before and after the Card
+  click is in `captures/gpay_walk_{before,after}.json`. The same three failed
+  sessions opened at the `/c/pay/` URL that the retrieve API returns today
+  render the `/c/pay/` layout (`captures/open_*`).
+- Live repro (`live-receipts.jsonl`): the repro rewrites the path of a freshly
+  minted sandbox session to `/g/pay/`, because Stripe cannot be made to issue
+  `/g/pay/`. On that session the unchanged main driver failed with the
+  byte-identical smoke error in 13.2 s. On a `/c/pay/` session it paid.
+- `fidelity_probe.json` covers both paths, with and without card-only
+  (`payment_method_types=[card]`). Card-only sessions show a "Card" heading
+  with the card form already open. The Link box has a `label[for]` in both
+  layouts (`enableStripePass` and `payment-linkOptInInput`).
+- Open unknown: what makes Stripe return `/g/pay/`. 12 of 12 fresh mints
+  (account-default and `2025-02-24.acacia`) returned `/c/pay/`. The same
+  backend code got both paths within minutes, so it is a Stripe-side choice
+  made per session. The driver no longer depends on it.
+
+The unchanged task could not be made to fail on the old driver locally, because
+the served path cannot be controlled. The direct-driver live repro above is the
+substitute. The task log now records the served layout (`layout=/g/pay/`) on
+both the start and completion lines.
+
+This is the second hosted-Checkout variant the driver did not model, after
+`2026-11-03-hosted-checkout-zip-observation-unresolved` (an IP-geolocated
+country with no ZIP). The missing guardrail was a list of the page variants
+Stripe serves, each with its DOM contract. The regression below is that list.
 
 ## Solution
 
-`agents/benchmarks/subscription_checkout.py` now does the following across every
-frame:
-- It selects the card method, or skips the selection when the card number
-  field is already visible.
-- It opts out of Link through either `enableStripePass` or `linkOptIn`. It
-  checks this again before submit and polls until the box is unchecked.
-- It pins the billing country through `billingCountry` or `country`.
-- It fills ZIP through `billingPostalCode`/`postalCode` (`postal-code` or
-  `billing postal-code`).
-- It clicks the Checkout's own Subscribe test ID, so it never clicks hCaptcha's
-  submit button.
+`agents/benchmarks/subscription_checkout.py` now handles both layouts:
+- It finds the frame where the card form is visible, clicking the Card choice
+  in whichever frame shows it only when the form is not already open. It clicks
+  once and retries every 5 s.
+- It does Link opt-out (`enableStripePass` or `linkOptIn`, via its
+  `label[for]`), billing country (`billingCountry` or `country`) and Subscribe
+  (either layout's test ID) in that frame only. It never scans the hCaptcha
+  frame and never falls back to the top page. It waits up to 30 s for Subscribe
+  and otherwise fails loudly.
+- It fills ZIP through `billingPostalCode`/`postalCode`.
+- It records `checkout_layout` and `link_opted_out` in the result.
 
 Payment verification is unchanged. Stripe must report the session `complete`,
 `paid`, with a subscription and a customer, before the signed webhook replay.
-With the fixed driver, live runs paid 6 of 6 real sandbox sessions across
-`/c/pay/`, `/g/pay/` and card-only on both paths.
+In `live-receipts.jsonl`, the fixed driver paid `/c/pay/`, `/g/pay/` and
+card-only sessions on both paths, each verified with Stripe and the webhook
+delivered.
 
 The regression is `test_hosted_checkout_pays_in_every_real_checkout_layout`. It
-encodes the captured DOM contract of both layouts and of card-only on each path,
-under US and NL geolocation, and it fails at line 119 on the old driver. It runs
-in the `agents-pytest` deploy lane through `scripts/run-coverage.sh` → `tests/unit`.
-This is a benchmark-only driver, with one browser per benchmark run and no effect
-on production or at 10k agents.
+encodes the captured DOM contract of `/c/pay/`, `/g/pay/` and card-only on each
+path, under US and NL geolocation. On the pre-fix driver, the four `g-pay`
+cases fail at the original `:119` Card click. The `c-pay` controls complete
+payment and the webhook, and fail only on the new `checkout_layout` field. It
+runs in the `agents-pytest` deploy lane through `scripts/run-coverage.sh` →
+`tests/unit`. This is a benchmark-only driver, with one browser per benchmark
+run and no effect on production or at 10k agents.
 
 ## Human feedback
 
