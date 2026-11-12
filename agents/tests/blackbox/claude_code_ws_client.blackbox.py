@@ -790,8 +790,11 @@ async def test_connect_with_retry_reaches_a_sandbox_that_comes_up_late():
     runner = web.AppRunner(app)
     await runner.setup()
 
+    # Simulated slow server start (not synchronization): the first attempts must be refused.
+    server_start_delay_s = 0.3
+
     async def start_late():
-        await asyncio.sleep(0.3)
+        await asyncio.sleep(server_start_delay_s)
         await web.TCPSite(runner, "127.0.0.1", port).start()
 
     client = _make_client(ws_url=f"ws://127.0.0.1:{port}", reconnect_delay=0.1)
