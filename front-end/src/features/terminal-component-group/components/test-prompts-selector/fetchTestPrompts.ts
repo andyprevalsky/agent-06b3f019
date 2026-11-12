@@ -14,7 +14,7 @@ import { fetchTestPromptCatalog } from '../../hooks';
 import type { TestPrompt } from './types';
 
 /** Dev default prompt — auto-loaded into QueryInput on mount in dev mode. */
-export const DEV_DEFAULT_PROMPT_TITLE = 'Test Mass Agent Run - 0';
+export const DEV_DEFAULT_PROMPT_TITLE = 'Basic Chat Response';
 
 let cachedPromptsPromise: Promise<TestPrompt[]> | null = null;
 

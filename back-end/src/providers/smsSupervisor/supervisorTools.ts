@@ -21,6 +21,10 @@ import { randomUUID } from 'node:crypto';
 import { prisma } from '../database';
 import { createMessage } from '../messages';
 import { recordPersonMessage } from '../personMessageStamp';
+import {
+  recordMessagingAgentInteraction,
+  SMS_SUPERVISOR_MESSAGE_SOURCE,
+} from '../messagingAgentInteraction';
 import { createLogger } from '../logger';
 import { deleteAgentRecursive } from '../agentKill';
 import { deliverUserMessageToWorkflow } from '../agentResume';
@@ -488,8 +492,9 @@ async function commitReplyToAgent(
       agentId: agent.id,
       text: message,
       role: 'USER',
-      metadata: { source: 'sms_supervisor' },
+      metadata: { source: SMS_SUPERVISOR_MESSAGE_SOURCE },
     }).then(recordPersonMessage);
+    await recordMessagingAgentInteraction(agent.id, 'reply_to_agent');
 
     log.info('Posted USER message', {
       phase: 'reply',

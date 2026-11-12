@@ -199,8 +199,9 @@ export async function mobileResourceMonitor(page: Page) {
     await page.evaluate(
       () => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())),
     );
-    await cdp.send('HeapProfiler.collectGarbage');
-    const heap = await cdp.send('Runtime.getHeapUsage');
+    const heap = {
+      usedSize: await retainedHeapBytes(cdp, () => page.waitForTimeout(HEAP_STABLE_INTERVAL_MS)),
+    };
     const dom = await cdp.send('Memory.getDOMCounters');
     const retained: Record<string, number> = {};
     for (const name of [
@@ -280,6 +281,44 @@ export async function mobileResourceMonitor(page: Page) {
     telemetryResponses,
     dispose: () => cdp.detach(),
   };
+}
+
+// Retained heap = the post-GC heap once the page is quiescent (RCA
+// 2026-11-12-mobile-heap-probe-sampled-in-flight-work-not-retained-heap):
+// - one HeapProfiler.collectGarbage can leave floating garbage that the next
+//   pass frees, so every read collects until a pass frees under HEAP_SETTLED_BYTES;
+// - a sample taken right after a navigation can land while the app is still
+//   working on it, holding megabytes that are live for a second or more and then
+//   released, so reads repeat once per HEAP_STABLE_INTERVAL_MS until two agree.
+// Reachable memory such as a leaked trajectory survives every pass and interval
+// and is measured in full; a heap still changing after MAX_HEAP_READS fails loudly.
+const HEAP_SETTLED_BYTES = 256 * 1024;
+const MAX_GC_PASSES = 8;
+const HEAP_STABLE_INTERVAL_MS = 1_000; // Idle observation between reads, never a latency assertion.
+const MAX_HEAP_READS = 10;
+
+async function settledHeapBytes(cdp: Pick<CDPSession, 'send'>) {
+  let previous = Infinity;
+  for (let pass = 0; pass < MAX_GC_PASSES; pass++) {
+    await cdp.send('HeapProfiler.collectGarbage');
+    const { usedSize } = await cdp.send('Runtime.getHeapUsage');
+    if (previous - usedSize < HEAP_SETTLED_BYTES) return Math.min(previous, usedSize);
+    previous = usedSize;
+  }
+  throw new Error(`post-GC heap still shrinking after ${MAX_GC_PASSES} collections`);
+}
+
+export async function retainedHeapBytes(cdp: Pick<CDPSession, 'send'>, idle: () => Promise<void>) {
+  let previous = await settledHeapBytes(cdp);
+  for (let read = 1; read < MAX_HEAP_READS; read++) {
+    await idle();
+    const current = await settledHeapBytes(cdp);
+    if (Math.abs(current - previous) < HEAP_SETTLED_BYTES) return Math.min(previous, current);
+    previous = current;
+  }
+  throw new Error(
+    `post-GC heap still changing after ${MAX_HEAP_READS} reads ${HEAP_STABLE_INTERVAL_MS} ms apart`,
+  );
 }
 
 async function retainedInstances(cdp: CDPSession, constructor: string) {
