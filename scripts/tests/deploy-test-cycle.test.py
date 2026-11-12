@@ -25,6 +25,14 @@ FIXTURE_CONTROLLER_PID_BASE = 2147480000
 os.environ.pop('DEPLOY_GATE_REQUEST', None)
 sys.path.insert(0, str(ROOT / 'scripts'))
 import deploy_test_cycle as c
+import importlib.util as _quarantine_util
+
+# scripts/test_quarantine.py (the CLI) already owns the `test_quarantine` module name here.
+_quarantine_spec = _quarantine_util.spec_from_file_location(
+    'lib_test_quarantine', Path(__file__).resolve().parents[1] / 'lib' / 'test_quarantine.py')
+_quarantine_module = _quarantine_util.module_from_spec(_quarantine_spec)
+_quarantine_spec.loader.exec_module(_quarantine_module)
+quarantine = _quarantine_module.quarantine
 import deploy_gate_progress as progress
 import deploy_test_process
 
@@ -12214,6 +12222,10 @@ class InterruptedRoundSettlement(unittest.TestCase):
         self.assertFalse((self.folder / 'settlement-round20-journal.json').exists())
         self.assertFalse((self.gdir / 'receipt.json').exists())
 
+    @quarantine(since='2026-11-12', repair='pending-handoff:578ec40192d64b4899e94402104f735a',
+                error='AssertionError: 2 != 0',
+                evidence='PR #1864 new-test-stability occurrence 578ec40192d64b4899e94402104f735a (source 256c03632): 3/5 under owned load; '
+                         'settlement: current process ownership unverifiable')
     def test_lost_outer_receipt_settles_negative_only_and_replays_exactly(self):
         self.assertEqual(self.recover(), 0)
         state = c.read(self.folder / 'cycle.json')
@@ -12289,6 +12301,10 @@ class InterruptedRoundSettlement(unittest.TestCase):
         finally:
             child.stdin.close(); child.wait(timeout=10); child.stdout.close()
 
+    @quarantine(since='2026-11-12', repair='pending-handoff:578ec40192d64b4899e94402104f735a',
+                error='AssertionError: False is not true',
+                evidence='PR #1864 new-test-stability occurrence 578ec40192d64b4899e94402104f735a (source 256c03632): 3/5 under owned load; '
+                         'settlement: current process ownership unverifiable')
     def test_durable_journal_recovers_partial_publication(self):
         real_write = c.write
         def interrupted(path, value):
