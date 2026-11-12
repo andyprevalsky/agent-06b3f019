@@ -665,15 +665,16 @@ with Path(sys.argv[1]).open(encoding="utf-8", errors="replace") as handle:
 
 forward_proof_cancellation() {
   local pid birth signal_name="${proof_signal:-}"
+  # This trapped controller shell must not run $(...) (see the waiter publication).
   if [ -z "$signal_name" ]; then
     [ -s "$PROOF_DIR/cancel.request" ] || return 0
-    signal_name="$(cat "$PROOF_DIR/cancel.request")"
+    IFS= read -r signal_name < "$PROOF_DIR/cancel.request" || [ -n "$signal_name" ] || return 1
   fi
   case "$signal_name" in HUP|INT|TERM) ;; *) return 1 ;; esac
   # In-memory intent remains actionable even if a full disk rejects the record.
   printf '%s\n' "$signal_name" > "$PROOF_DIR/cancel.request" 2>/dev/null || true
-  pid="$(cloudbench_tracked_owner_value "$PROOF_DIR/active-waiter.owner" pid)"
-  birth="$(cloudbench_tracked_owner_value "$PROOF_DIR/active-waiter.owner" pid_start)"
+  cloudbench_tracked_owner_value_into pid "$PROOF_DIR/active-waiter.owner" pid
+  cloudbench_tracked_owner_value_into birth "$PROOF_DIR/active-waiter.owner" pid_start
   case "$pid" in ''|*[!0-9]*) return 0 ;; esac
   # Address the exact waiter, whose existing trap forwards once to the tracked
   # group and enforces the existing cancellation/drain deadlines.

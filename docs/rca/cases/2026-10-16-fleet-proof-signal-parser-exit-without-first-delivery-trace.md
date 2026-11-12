@@ -131,7 +131,11 @@ cloudbench_pid_matches_start inside cloudbench_wait_tracked_detached.
 Mechanism, reduced (Bash 5.2.21): a subshell with `trap ':' TERM` looping on
 `x="$(f)"` while only that PID receives TERMs prints exactly
 `trap: line 2: unexpected EOF while looking for matching `)'` and
-`process substitution: line N: ...`; the substitution fails. With the same
+`process substitution: line N: ...`, and the trapped shell itself exits: no
+later statement in or after the function runs, so `|| true` guards cannot
+contain it. The CI evidence matches: no `FATAL: detached ownership handshake
+is malformed` line (an empty read would print it), slice-0.cleanup.json stayed
+`pending` and active-waiter.owner was never removed. With the same
 storm, a fork-free `while IFS= read -r` record reader and a pipeline producer
 whose tri-state is returned through the reader's exit status returned correct
 values on all iterations across 766,443 delivered TERMs.
@@ -207,6 +211,9 @@ status-grace loops; and a builtin read of the terminal status. The proof now
 publishes active-waiter.owner after the log-relay process substitution, just
 before the waiter; earlier cancellation is still caught by the existing
 cancel.request check before launch and by repeated forwarding afterwards.
+The trapped top-level controller's forward_proof_cancellation, which runs every
+0.1 seconds, reads cancel.request and active-waiter.owner with builtins for
+the same reason.
 The quarantine marker on the original test was removed.
 
 ## Human feedback
