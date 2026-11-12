@@ -227,3 +227,15 @@ All of these change what is on screen, so they were not implemented:
 - **Lower Amplitude session replay sampling on mobile:** product decision.
 - **Apply `appCover` to other opaque full-screen overlays:** `DocumentPreviewDrawer`, image lightbox,
   fullscreen browser view. Each needs its own opacity/geometry check.
+
+## 8. Delivery
+
+- Delivered to `origin/main` on 2026-11-12: merge `49d8d36f3` (perf commits `9f388089e`, `3fbe518ee`,
+  `acd1b9534`, `b3e8d832b`, `3171bb861`) on top of merge `5456caf71` (code-agent resilience); `main` HEAD
+  after publish `d7e7dfe1812432ef5b364c70c56730abc8024de0`.
+- Publish validation (push workflow): front-end `tsc --noEmit` clean; `vitest --coverage` 4752 pass / 1 skip
+  with 5 environment-attributed failures (2 ui-lifecycle symlink quirk in the temp worktree, 2 30 s load
+  timeouts passing in isolation, 1 pill test fixed by `d7e7dfe18`); agents blackbox domains pass except 2
+  pre-existing environmental e2b-templates hangs that also occur on `main`.
+- Pixel verification: 52/52 frozen-state screenshots with 0 differing pixels; visual effects and styles
+  unchanged.
