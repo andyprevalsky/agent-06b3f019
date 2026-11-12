@@ -23,6 +23,11 @@
  *     its reset, and nextResetAt only for a provider reset (never Rose's backoff)
  *   - a user cooldown that names no login never lands on sibling accounts
  *   - a code session's rate_limit_event usage lands on the task's login
+ *   - the backend's own Rose completions (chat path: fetchChatComputeAuth →
+ *     callWithChatComputeRotation → createStreamingCompletion) record the
+ *     account's usage from every response, success or 429, in the background:
+ *     a stalled usage write never delays the completion, and a 429's provider
+ *     reset becomes an authoritative cooldown naming the spent window
  */
 
 import { randomUUID } from 'node:crypto';
@@ -33,6 +38,11 @@ import {
   USAGE_RELEASED_LEASE_GRACE_MS,
   USAGE_WRITE_MIN_INTERVAL_MS,
 } from '../../providers/computeSubscriptionUsage';
+import { assertLocalDatabase } from './assertLocalDatabase';
+import { registerChatPathCases } from './compute-subscription-usage.chat.cases';
+
+// The chat-path cases run Rose in this process and write Integration rows.
+assertLocalDatabase();
 
 type TestFn = () => Promise<void>;
 const tests: Array<{ name: string; fn: TestFn }> = [];
@@ -125,6 +135,7 @@ const usage = (fiveHour: number, sevenDay: number, observedAt: string, sevenDayR
   sevenDay: { usedPct: sevenDay, resetsAt: sevenDayReset ?? at(3 * 86_400_000) },
 });
 
+const chatUsers: string[] = [];
 let claudeA = '';
 let claudeB = '';
 let codexA = '';
@@ -137,7 +148,7 @@ async function setup() {
 
 async function cleanup() {
   await prisma.computeTokenLineageLease.deleteMany({ where: { lineageKey: { in: leases } } });
-  for (const userId of [USER, OTHER_USER]) {
+  for (const userId of [USER, OTHER_USER, ...chatUsers]) {
     await prisma.integration.deleteMany({ where: { userId } });
     await prisma.computeAccountConnection.deleteMany({ where: { userId } });
   }
@@ -437,6 +448,15 @@ test("a code session's rate_limit_event usage lands on the task's login", async 
   } finally {
     await prisma.claudeCodeSession.delete({ where: { id: task.id } });
   }
+});
+
+registerChatPathCases({
+  test,
+  listAccounts,
+  run: RUN,
+  baseUrl: BASE_URL,
+  chatUsers,
+  integrationType: TYPE,
 });
 
 async function main() {

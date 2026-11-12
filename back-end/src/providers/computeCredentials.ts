@@ -7,6 +7,7 @@ import {
 } from './claudeOauthEnvelope';
 import { createLogger } from './logger';
 import { recordSubscriptionUsage, type SubscriptionUsageReport } from './computeSubscriptionUsage';
+import { rememberSubscriptionCredential } from './rose/subscriptionUsage';
 export { classifyReportedLogin, markComputeTokenUnavailable } from './computeLoginFailure';
 export {
   __clearGptApiKeyCooldownCache,
@@ -433,9 +434,28 @@ export async function fetchComputePoolToken(
   return selectFirstUsable(integrations, decryptionKey, 'pool', now);
 }
 
+type ComputeTokenForUserOptions = {
+  forcePool?: boolean;
+  excludePoolTokenIds?: string[];
+} & ComputeLeaseOptions;
+
+/**
+ * Lease a compute token for a user. The served row is remembered (by token
+ * fingerprint) so this process's own Rose completions on it record the
+ * account's usage onto that row (rose/subscriptionUsage.ts).
+ */
 export async function fetchComputeTokenForUser(
   userId: string,
-  options?: { forcePool?: boolean; excludePoolTokenIds?: string[] } & ComputeLeaseOptions
+  options?: ComputeTokenForUserOptions
+): Promise<ComputeCodeCredentialResult | null> {
+  const token = await leaseComputeTokenForUser(userId, options);
+  if (token !== null) rememberSubscriptionCredential(token);
+  return token;
+}
+
+async function leaseComputeTokenForUser(
+  userId: string,
+  options?: ComputeTokenForUserOptions
 ): Promise<ComputeCodeCredentialResult | null> {
   const fastCacheAffinityKey = normalizeDemoCacheAffinityKey(options?.fastCacheAffinityKey);
   const requestedTokenType = options?.tokenType ?? null;
