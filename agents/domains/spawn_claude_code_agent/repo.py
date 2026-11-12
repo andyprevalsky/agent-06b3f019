@@ -27,6 +27,7 @@ from domains.spawn_claude_code_agent.config import (
     LOCAL_TARGET_UNAVAILABLE_CODE,
 )
 from helpers.activity_heartbeat import safe_heartbeat
+from helpers.http_client import get_http_client
 from helpers.workflow_generation import (
     WorkflowGenerationSealed,
     raise_if_generation_sealed,
@@ -490,6 +491,35 @@ async def report_undelivered_code_turns(agent_id: str, task_id: str, turn_ids: l
             task_id=task_id,
             error=extract_error_message(e),
         )
+
+
+async def report_code_session_subscription_usage(task_id: str, usage: dict[str, Any]) -> bool:
+    """Record a code session's subscription usage (from the CLI's rate_limit_event).
+
+    Code sessions run the provider CLI in a sandbox, outside the lineage lease,
+    so their usage goes to the task's credential row by task id. Best-effort and
+    bounded (5 s); callers fire it in the background. Lives here, beside the
+    other code-session reports, so importing the code-session domain never pulls
+    in the LLM client stack (helpers.llm → openai).
+    """
+    if not task_id or not usage:
+        return False
+    config = load_config()
+    try:
+        client = get_http_client()
+        response = await client.post(
+            f"{config.backend.api_url}/api/integrations/compute-code/code-session-usage",
+            headers={
+                "X-API-Key": config.backend.api_key or "",
+                "Content-Type": "application/json",
+            },
+            json={"taskId": task_id, "usage": usage},
+            timeout=5.0,
+        )
+        return response.status_code == 200
+    except Exception as e:
+        logger.warning("[ClaudeCode] Code session usage report failed", task_id=task_id, error=extract_error_message(e))
+        return False
 
 
 async def persist_terminal_output(

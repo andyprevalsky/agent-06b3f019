@@ -13338,7 +13338,7 @@ async def test_usage_flush_never_blocks_or_alters_the_completion():
     async def hung(ctx):
         calls.append("hung")
         usage.take(ctx.token)
-        await asyncio.sleep(30)
+        await asyncio.Event().wait()  # never set: a heartbeat that never answers
 
     async def broken(ctx):
         calls.append("broken")

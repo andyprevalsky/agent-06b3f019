@@ -49,6 +49,7 @@ from domains.spawn_claude_code_agent.repo import (
     fetch_code_credential_availability,
     keepalive_e2b_session,
     persist_terminal_output,
+    report_code_session_subscription_usage,
     report_code_usage_limit,
     report_undelivered_code_turns,
     resize_e2b_session,
@@ -60,7 +61,6 @@ from helpers.activity_heartbeat import heartbeat_resume_details, safe_heartbeat
 from helpers.claude_code_ws_client import ClaudeCodeWsClient, ws_endpoint_reachable
 from helpers.e2b_log_collector import SandboxLogCollector
 from helpers.file_resolution import resolve_file_pointers_from_extracted, transform_schema_for_remote_session
-from helpers.llm import report_code_session_subscription_usage
 from helpers.tracing import traced
 from providers.rose.subscription_usage import usage_from_rate_limit_event
 from tools.base import MessageStatus

@@ -149,6 +149,33 @@ observations and Rose's own backoffs therefore rendered as an empty, red quota.
   `cooldown.authoritative: false` and `nextResetAt: null`. On the fix: exit 0,
   20/20, including "a stalled usage write never delays a chat-path completion".
 
+Deploy gates on PR #1981 (head f4d5b7cd9539) caught two problems this
+change had introduced. Both were fixed in the same PR.
+
+- `agents-coverage-blackbox`, benchmark domain: `TypeError: function() argument
+  'code' must be code, not str`.
+  - Cause: `spawn_claude_code_agent/service.py` imported
+    `helpers.llm.report_code_session_subscription_usage` at module level. That
+    loads `openai`, whose `_DefaultAsyncHttpxClient(httpx.AsyncClient)`
+    subclass fails while a benchmark test has `httpx.AsyncClient` patched to a
+    function.
+  - Fix: the helper moved next to `report_undelivered_code_turns` in
+    `spawn_claude_code_agent/repo.py`, so importing the code-session domain
+    never pulls in the LLM stack (`service.py` already imports `helpers.llm`
+    lazily).
+  - Repro: `BLACKBOX_CASE_FUNCTIONS=test_declared_judge_persists_its_isolated_identity_before_session_creation
+    python scripts/run_blackbox_tests.py benchmark` fails on f4d5b7cd9539 and
+    passes with the fix.
+  - The benchmark domain's failure message also named `judge_failure`,
+    `native_failure` and `unexecuted_native`. Those are a nested run's
+    intentional stand-ins leaking through the global `_RECORDED_FAILURES`.
+    `_test_utils.isolated_failure_report()` now scopes them.
+- `deploy-command-structural`, `test-sleep-ratchet`: this change's fixed
+  literal sleeps in `rose.blackbox.py` and `compute-usage-refresh.test.ts`
+  became an Event that is never set and `waitFor`. Main's own over-baseline
+  sleeps (`claude_code_ws_client.blackbox.py`, `mobile-pwa-chrome.blackbox.tsx`)
+  are NOT_INTRODUCED and are being repaired on main by their owner.
+
 At 10k agents the cost stays bounded. Each token sends at most one background
 heartbeat per 15 s on success and one per failure. The backend does one lease
 primary-key read and one conditional UPDATE per account per 15 s, whatever the

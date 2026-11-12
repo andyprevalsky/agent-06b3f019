@@ -7589,33 +7589,6 @@ async def heartbeat_compute_token_lineage_activity(
         return False
 
 
-async def report_code_session_subscription_usage(task_id: str, usage: Dict[str, Any]) -> bool:
-    """Record a code session's subscription usage (from the CLI's rate_limit_event).
-
-    Code sessions run the provider CLI in a sandbox, outside the lineage lease,
-    so their usage goes to the task's credential row by task id. Best-effort and
-    bounded (5 s); callers fire it in the background.
-    """
-    if not task_id or not usage:
-        return False
-    config = load_config()
-    try:
-        client = get_http_client()
-        response = await client.post(
-            f"{config.backend.api_url}/api/integrations/compute-code/code-session-usage",
-            headers={
-                "X-API-Key": config.backend.api_key or "",
-                "Content-Type": "application/json",
-            },
-            json={"taskId": task_id, "usage": usage},
-            timeout=5.0,
-        )
-        return response.status_code == 200
-    except Exception as e:
-        logger.warning(f"Code session usage report failed: {e}")
-        return False
-
-
 @activity.defn
 async def release_compute_token_lineage_activity(lineage_key: str) -> bool:
     """Release a compute-token lineage lease so rotation can acquire a different token."""

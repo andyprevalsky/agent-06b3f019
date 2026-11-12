@@ -23,6 +23,7 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 
 import { prisma } from '../../providers/database';
+import { waitFor } from '../helpers/waitFor';
 import { markUserTokenRateLimited } from '../../providers/claudeCredentials';
 import { markGptUserTokenRateLimited } from '../../providers/gptCredentials';
 import {
@@ -288,8 +289,7 @@ async function testUsageEndpointRefresh(): Promise<void> {
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(hung.calls.length, 1, 'one request per row even when scheduled twice');
   release();
-  await new Promise((resolve) => setTimeout(resolve, 10));
-  assert.equal(hung.stored.length, 1);
+  await waitFor('the released refresh to store its usage', () => hung.stored.length === 1, 2_000);
   scheduleClaudeUsageRefresh(null, hung);
   scheduleClaudeUsageRefresh('', hung);
 

@@ -243,6 +243,21 @@ def recorded_failures() -> list[str]:
     return list(_RECORDED_FAILURES)
 
 
+@contextlib.contextmanager
+def isolated_failure_report():
+    """Keep failures a nested ``run_all_tests()`` records out of the enclosing domain's report.
+
+    The runner names a failed domain's cases from this module-global list, so a
+    test that drives a nested run with intentional stand-in failures would
+    otherwise make them read as the domain's own failing cases.
+    """
+    prior = list(_RECORDED_FAILURES)
+    try:
+        yield
+    finally:
+        _RECORDED_FAILURES[:] = prior
+
+
 class BlackboxResult:
     """Accumulates pass/fail results for the test runner."""
 
