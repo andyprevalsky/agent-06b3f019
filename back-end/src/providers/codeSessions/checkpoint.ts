@@ -687,8 +687,9 @@ export async function applyCheckpoint(
           // Mixed reset: index matches HEAD, the restored working files stay.
           'git reset -q',
           ...rebuildTracked,
-          'git config user.name >/dev/null || git config user.name "Rose Agent"',
-          'git config user.email >/dev/null || git config user.email "agent@roselabs.ai"',
+          // The pushing account's identity (codeAgentGitIdentity.ts), never a
+          // fixed address GitHub cannot link: Vercel blocks such commits.
+          'if [ -n "${GIT_AUTHOR_NAME:-}" ] && [ -n "${GIT_AUTHOR_EMAIL:-}" ]; then git config user.name "$GIT_AUTHOR_NAME"; git config user.email "$GIT_AUTHOR_EMAIL"; fi',
         ].join('\n'),
         // A fresh sandbox re-downloads the remote: a control-plane bound, not a session limit.
         { timeoutMs: 20 * 60_000 }
