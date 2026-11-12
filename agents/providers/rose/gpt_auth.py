@@ -31,6 +31,7 @@ from providers.rose.errors import (
 from providers.rose.pools import PoolSpec
 from providers.rose.speed import openai_service_tier_for
 from providers.rose.streaming import parse_responses_sse
+from providers.rose.subscription_usage import flush as flush_subscription_usage
 from providers.rose.subscription_usage import observe as observe_subscription_usage
 from providers.rose.transport import get_error_body, post_codex_stream, post_openai_responses_stream
 from providers.rose.types import GptAuthContext, StreamChunk
@@ -791,8 +792,10 @@ async def _attempt_with_token(
                 connect_timeout_s=ttft_timeout_s,
             ) as response:
                 status = response.status_code
-                observe_subscription_usage("gpt", auth.token, response.headers)
                 if status == 200:
+                    observe_subscription_usage("gpt", auth.token, response.headers, status_code=status)
+                    # Background, throttled per token: never delays the stream.
+                    flush_subscription_usage(auth)
                     # Spans the SSE generation phase only — separates "the model
                     # streamed slowly" (the 56→3 tok/s collapse) from connect/TTFT.
                     async with stream_span(
@@ -813,6 +816,13 @@ async def _attempt_with_token(
                     return
 
                 error_body = get_error_body(response)
+                # Failure usage: x-codex-* headers plus a usage_limit_reached
+                # body's resets_at, delivered now (the token is about to be
+                # retried or rotated away).
+                observe_subscription_usage(
+                    "gpt", auth.token, response.headers, status_code=status, body=error_body
+                )
+                flush_subscription_usage(auth, urgent=True)
 
                 if status == 429:
                     if attempt < _MAX_ATTEMPTS_PER_TOKEN - 1:
