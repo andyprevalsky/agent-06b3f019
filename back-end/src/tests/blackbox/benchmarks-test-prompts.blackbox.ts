@@ -217,13 +217,21 @@ async function testPrompts_frontendUrlTokenRewritten() {
   }
 }
 
+// Mirrors DEV_DEFAULT_PROMPT_TITLE in front-end fetchTestPrompts.ts; it must name a non-retired task.
+const DEV_DEFAULT_PROMPT_TITLE = 'Basic Chat Response';
+// Retired by the user (63eaf1375): never offered as a test prompt again.
+const RETIRED_PROMPT_TITLE = 'Test Mass Agent Run - 0';
+
 async function testPrompts_devDefaultPresent() {
   // The FE auto-loads this title on mount in dev mode — it must exist in the catalog.
   const res = await request(`${BASE_URL}/api/benchmarks/test-prompts`);
   if (res.status !== 200) return;
   const body = res.data as { prompts: TestPrompt[] };
-  if (!body.prompts.some((p) => p.title === 'Test Mass Agent Run - 0')) {
-    throw new Error('Dev default prompt "Test Mass Agent Run - 0" missing from catalog');
+  if (!body.prompts.some((p) => p.title === DEV_DEFAULT_PROMPT_TITLE)) {
+    throw new Error(`Dev default prompt "${DEV_DEFAULT_PROMPT_TITLE}" missing from catalog`);
+  }
+  if (body.prompts.some((p) => p.title === RETIRED_PROMPT_TITLE)) {
+    throw new Error(`Retired prompt "${RETIRED_PROMPT_TITLE}" must not be offered`);
   }
 }
 
@@ -249,10 +257,8 @@ async function testPrompts_lastFivePassedReflectsRunHistory() {
   // Cement against the committed attempts ledger for two known tasks:
   //   - smoke tasks like "Basic Chat Response" (chat-mode) have a long
   //     trailing pass window → lastFivePassed true
-  //   - "Test Mass Agent Run - 0" lastFivePassed must match the ledger
-  //     (a single new pass must not be treated as a 5-pass green check,
-  //     and a frozen "always false" snapshot must not reject a real 5-pass
-  //     window). Hub uploads can add newer fails or extra samples.
+  //   - the retired "Test Mass Agent Run - 0" stays absent despite its ledger
+  //     history. Hub uploads can add newer fails or extra samples.
   const fs = await import('fs');
   const path = await import('path');
   const ledgerPath = path.join(
@@ -280,23 +286,23 @@ async function testPrompts_lastFivePassedReflectsRunHistory() {
   if (res.status !== 200) return;
   const body = res.data as { prompts: TestPrompt[] };
 
-  const mass = body.prompts.find((p) => p.title === 'Test Mass Agent Run - 0');
-  if (!mass) {
-    throw new Error('Dev default "Test Mass Agent Run - 0" missing — cannot assert fail streak');
+  // test-mass-agent-run-0 is retired; its ledger history must not resurrect it as a prompt.
+  if (body.prompts.some((p) => p.title === RETIRED_PROMPT_TITLE)) {
+    throw new Error(`Retired prompt "${RETIRED_PROMPT_TITLE}" returned despite its ledger history`);
   }
-  const massFlags = byTask.get('test-mass-agent-run-0') ?? [];
-  const massLastFive = massFlags.slice(-5);
-  const massLedgerLastFiveFail = massFlags.length >= 5 && massLastFive.every((p) => p === false);
-  const massLedgerLastFivePass = massFlags.length >= 5 && massLastFive.every((p) => p === true);
-  if (massLedgerLastFiveFail && mass.lastFivePassed) {
-    throw new Error('Test Mass Agent Run - 0 has last-5 ledger fails but lastFivePassed=true');
-  }
-  if (massLedgerLastFivePass && !mass.lastFivePassed) {
-    const anyGreen = body.prompts.some((p) => p.lastFivePassed);
-    if (!anyGreen) {
-      throw new Error(
-        'test-mass-agent-run-0 ledger last-5 all passed and no prompt has lastFivePassed=true'
-      );
+  // Fail streaks still gate the green check for every offered prompt: a task whose last five
+  // committed ledger attempts all failed must not report lastFivePassed=true.
+  const catalogPath = path.join(process.cwd(), '..', 'agents', 'benchmarks', 'tasks.json');
+  const catalog = JSON.parse(fs.readFileSync(catalogPath, 'utf8')) as Array<{
+    name: string;
+    title?: string;
+  }>;
+  const taskByTitle = new Map(catalog.filter((t) => t.title).map((t) => [t.title, t.name]));
+  for (const prompt of body.prompts) {
+    const flags = byTask.get(taskByTitle.get(prompt.title) ?? '') ?? [];
+    const lastFiveFailed = flags.length >= 5 && flags.slice(-5).every((p) => p === false);
+    if (lastFiveFailed && prompt.lastFivePassed) {
+      throw new Error(`${prompt.title} has last-5 ledger fails but lastFivePassed=true`);
     }
   }
 
