@@ -2281,6 +2281,11 @@ class _FakeWsClient:
     async def connect(self):
         return True
 
+    async def connect_with_retry(self):
+        # The service retries the handshake; stand-ins answer from connect().
+        self.last_error = None if await self.connect() else "connect refused"
+        return self.last_error is None
+
     async def disconnect(self):
         self.disconnected = True
 
@@ -4573,6 +4578,23 @@ async def _run_all_tests():
     await r.record_async(
         "cc_retryable_error_keeps_live_sandbox_for_retry",
         test_claude_code_retryable_error_keeps_the_live_sandbox_for_the_retry,
+    )
+    await r.record_async(
+        "cc_connect_failure_names_exact_error", test_run_agentic_loop_connect_failure_names_the_exact_error
+    )
+    await r.record_async("cc_reconnect_exhausted_includes_last_error", test_handle_reconnect_exhausted_includes_last_error)
+    r.record(
+        "cc_session_failure_error_surfaces_session_id",
+        test_code_session_failure_error_surfaces_session_id_and_exact_error,
+    )
+    r.record("cc_session_failure_error_without_session_unchanged", test_code_session_failure_error_without_a_session_is_unchanged)
+    r.record(
+        "cc_handler_reads_failed_code_session_through_wrapper",
+        test_handler_reads_the_failed_code_session_through_the_activity_wrapper,
+    )
+    await r.record_async(
+        "cc_final_socket_loss_returns_checkpointed_code_session",
+        test_final_socket_loss_returns_the_checkpointed_code_session_to_the_parent,
     )
     teardown_mock()
     return r.all_passed
@@ -7164,6 +7186,161 @@ async def test_monitor_diagnostics_preserve_non_string_event_types():
             assert result[0] == 0, result[0]
         finally:
             teardown_mock()
+
+
+# ── Abnormal end keeps the code session resumable (tar_2b02efd49fc2466497723b3e) ──
+
+
+async def test_run_agentic_loop_connect_failure_names_the_exact_error():
+    """The attach error carries why the handshake failed, not just that it did."""
+    from domains.spawn_claude_code_agent import service
+    from utils.terminal_filter import TerminalFilter
+
+    class Refused(_FakeWsClient):
+        async def connect(self):
+            return False
+
+    with (
+        patch.object(service, "ClaudeCodeWsClient", Refused),
+        patch("temporalio.activity.heartbeat"),
+    ):
+        try:
+            await service._run_agentic_loop(
+                agent_id="a",
+                task_id="t",
+                sandbox_id="sb",
+                goal="g",
+                ws_url="wss://x",
+                terminal=TerminalFilter(cols=80, rows=50),
+                model="m",
+                claude_token=None,
+                action_summary=[],
+                tool_call_id="tc",
+            )
+            raise AssertionError("should raise")
+        except AssertionError:
+            raise
+        except Exception as e:
+            assert str(e) == "Failed to connect to Claude Code WebSocket: connect refused", str(e)
+
+
+async def test_handle_reconnect_exhausted_includes_last_error():
+    """The exhausted-reconnect error keeps the final connect error."""
+    from domains.spawn_claude_code_agent import service
+
+    with patch.object(service, "check_sandbox_health", AsyncMock(return_value=None)):
+        try:
+            await service._handle_reconnect_exhausted("sb", "a1", "t1", [], last_error="TimeoutError")
+            raise AssertionError("should raise")
+        except AssertionError:
+            raise
+        except Exception as e:
+            assert str(e).endswith("lost after all reconnect attempts: TimeoutError"), str(e)
+
+
+def test_code_session_failure_error_surfaces_session_id_and_exact_error():
+    """A final failure with a code session hands the parent the id, checkpoint and retry call."""
+    from temporalio.exceptions import ApplicationError
+
+    from domains.spawn_claude_code_agent.config import CODE_AGENT_SESSION_FAILED_CODE
+    from domains.spawn_claude_code_agent.service import code_session_failure_error
+
+    original = Exception("Failed to connect to Claude Code WebSocket: TimeoutError")
+    facts = {"code_session_id": "cs_123", "checkpoint_seq": 7, "branch": "rose/task-abc"}
+    final = code_session_failure_error(original, original, facts)
+
+    assert isinstance(final, ApplicationError)
+    assert final.type == CODE_AGENT_SESSION_FAILED_CODE and final.non_retryable
+    assert "Exception: Failed to connect to Claude Code WebSocket: TimeoutError" in final.message
+    assert "cs_123" in final.message and "checkpoint 7" in final.message and "rose/task-abc" in final.message
+    assert "spawn_agent(type='code', code_session_id='cs_123'" in final.message
+    details = final.details[0]
+    assert details["code_session_id"] == "cs_123"
+    assert details["error"] == "Failed to connect to Claude Code WebSocket: TimeoutError"
+    assert details["error_type"] == "Exception"
+    assert details["retry"] == {"tool": "spawn_agent", "type": "code", "code_session_id": "cs_123"}
+    assert final.__cause__ is original
+
+
+def test_code_session_failure_error_without_a_session_is_unchanged():
+    """Before a code session exists (or on a Mac) the original error is raised as before."""
+    from domains.spawn_claude_code_agent.service import code_session_failure_error
+
+    err = Exception("session create failed")
+    assert code_session_failure_error(err, err, None) is err
+    assert code_session_failure_error(err, err, {"code_session_id": None}) is err
+    assert code_session_failure_error(err, err, {"code_session_id": "cs_1"}, local=True) is err
+
+
+def test_handler_reads_the_failed_code_session_through_the_activity_wrapper():
+    """The parent-facing failure keeps the session id even under Temporal's ActivityError wrapper."""
+    from domains.spawn_claude_code_agent.handler import _code_session_failure
+    from domains.spawn_claude_code_agent.service import code_session_failure_error
+
+    original = Exception("WebSocket connection to Claude Code sandbox lost after all reconnect attempts")
+    final = code_session_failure_error(original, original, {"code_session_id": "cs_9"})
+    wrapper = Exception("Activity task failed")
+    wrapper.__cause__ = final
+
+    found = _code_session_failure(wrapper)
+    assert found is not None
+    assert found["code_session_id"] == "cs_9"
+    assert found["retry"]["code_session_id"] == "cs_9"
+    assert "cs_9" in found["message"] and "lost after all reconnect attempts" in found["message"]
+    assert _code_session_failure(original) is None
+
+
+async def test_final_socket_loss_returns_the_checkpointed_code_session_to_the_parent():
+    """End to end: the run-ending lost socket checkpoints the sandbox and names the session.
+
+    The reported run died with a bare "Failed to connect to Claude Code
+    WebSocket": no code_session_id, so nothing it had done could be resumed.
+    """
+    from temporalio.exceptions import ApplicationError
+    from temporalio.testing import ActivityEnvironment
+
+    from domains.spawn_claude_code_agent import config, service
+    from domains.spawn_claude_code_agent.handler import _code_session_failure
+
+    class SessionRecorder(_CCBoundaryRecorder):
+        async def create_session(self, **kwargs):
+            created = await super().create_session(**kwargs)
+            return {**created, "code_session_id": "cs-abc", "branch": "rose/long-run"}
+
+        async def close_session(self, **kwargs):
+            closed = await super().close_session(**kwargs)
+            return {**closed, "code_session": {"code_session_id": "cs-abc", "state": "PAUSED", "checkpoint_seq": 4}}
+
+    recorder = SessionRecorder(ws_url="ws://unused")
+    spent = {"code_agent_errors": config.CODE_AGENT_ERROR_RETRY_LIMIT - 1}
+    env = ActivityEnvironment()
+    env.info = dataclasses.replace(env.info, attempt=9, heartbeat_details=[spent])
+
+    async def connect_failed(**kwargs):
+        raise Exception("Failed to connect to Claude Code WebSocket: TimeoutError")
+
+    with (
+        recorder.patched(),
+        patch.object(service, "_run_agentic_loop", side_effect=connect_failed),
+        patch.object(service, "fetch_code_credential_availability", AsyncMock(return_value=None)),
+    ):
+        try:
+            await asyncio.wait_for(env.run(service.spawn_claude_code_activity, *_cc_activity_args()), timeout=10)
+        except Exception as error:
+            raised = error
+        else:
+            raise AssertionError("the lost socket must raise")
+
+    assert isinstance(raised, ApplicationError) and raised.non_retryable, repr(raised)
+    assert raised.type == config.CODE_AGENT_SESSION_FAILED_CODE, raised.type
+    assert [call.get("reason") for call in recorder.closed] == ["failure"], recorder.closed
+    found = _code_session_failure(raised)
+    assert found is not None
+    assert found["code_session_id"] == "cs-abc"
+    assert found["code_session"]["checkpoint_seq"] == 4
+    assert found["error"] == "Failed to connect to Claude Code WebSocket: TimeoutError"
+    assert "checkpoint 4" in found["message"] and "rose/long-run" in found["message"]
+    assert "code_session_id='cs-abc'" in found["message"]
 
 
 if __name__ == "__main__":
