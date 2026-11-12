@@ -2,9 +2,11 @@
  * Report Bug screenshot picker: #bug-report-screenshot-input picks several
  * images, shows removable thumbnails, and appends uploaded image links to the
  * description on submit (the report-bug request stays `{ description }`).
+ * Picked thumbnails coexist with drag/drop: both count toward the pending
+ * uploads that keep Submit disabled, and both reach the submitted description.
  */
 import { describe, it, expect, afterEach } from 'vitest';
-import { screen, waitFor } from '@testing-library/react';
+import { fireEvent, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
 import { server } from './msw/server';
@@ -168,5 +170,85 @@ describe('Report Bug screenshot picker', () => {
 
     await u.click(screen.getByTestId('report-bug-submit'));
     await waitFor(() => expect(submitted).toBe('No screenshots'));
+  });
+
+  it('combines a dropped inline screenshot with a picked thumbnail and waits for both uploads', async () => {
+    mockSession(ANDY_USER_ID);
+    const u = userEvent.setup();
+    let releasePicked: (() => void) | null = null;
+    let submitted: string | undefined;
+    server.use(
+      http.post(`${API_BASE}/agents/:agentId/report-bug/screenshots`, async ({ request }) => {
+        const file = (await request.formData()).get('file') as File;
+        if (file.type === 'image/webp') {
+          await new Promise<void>((resolve) => {
+            releasePicked = resolve;
+          });
+          return HttpResponse.json(
+            {
+              success: true,
+              name: 'picked.webp',
+              url: 'https://img.example/p.webp',
+              expires_in: 1,
+            },
+            { status: 201 },
+          );
+        }
+        return HttpResponse.json(
+          { success: true, name: 'dropped.png', url: 'https://img.example/d.png', expires_in: 1 },
+          { status: 201 },
+        );
+      }),
+      http.post(`${API_BASE}/agents/:agentId/report-bug`, async ({ request }) => {
+        submitted = ((await request.json()) as { description?: string }).description;
+        return HttpResponse.json(
+          { success: true, name: 'Both', url: 'https://boxes.dev/x', run_id: 'run-both' },
+          { status: 201 },
+        );
+      }),
+    );
+
+    renderWithProviders(<ReportBugDialog agent={makeAgent()} />);
+    await u.click(screen.getByTestId('report-bug-trigger'));
+    const textarea = (await screen.findByTestId('report-bug-description')) as HTMLTextAreaElement;
+    await u.type(textarea, 'Combined case');
+
+    const picked = new File([new Uint8Array([0x52, 0x49, 0x46, 0x46])], 'picked.webp', {
+      type: 'image/webp',
+    });
+    await u.upload(screen.getByTestId('bug-report-screenshot-input'), picked);
+    const dropped = new File([new Uint8Array([0x89, 0x50, 0x4e, 0x47])], 'dropped.png', {
+      type: 'image/png',
+    });
+    fireEvent.drop(textarea, { dataTransfer: { files: [dropped], types: ['Files'] } });
+
+    await waitFor(() =>
+      expect(textarea.value).toBe('Combined case\n![dropped.png](https://img.example/d.png)\n'),
+    );
+    expect(screen.getByTestId('bug-report-screenshot-thumbnail')).toHaveAttribute(
+      'data-status',
+      'uploading',
+    );
+    expect(screen.getByTestId('report-bug-screenshot-hint')).toHaveTextContent(
+      'Uploading 1 screenshot…',
+    );
+    expect(screen.getByTestId('report-bug-submit')).toBeDisabled();
+
+    await waitFor(() => expect(releasePicked).not.toBeNull());
+    releasePicked!();
+    await waitFor(() =>
+      expect(screen.getByTestId('bug-report-screenshot-thumbnail')).toHaveAttribute(
+        'data-status',
+        'ready',
+      ),
+    );
+    expect(screen.getByTestId('report-bug-submit')).toBeEnabled();
+
+    await u.click(screen.getByTestId('report-bug-submit'));
+    await waitFor(() =>
+      expect(submitted).toBe(
+        'Combined case\n![dropped.png](https://img.example/d.png)\n\n![picked.webp](https://img.example/p.webp)',
+      ),
+    );
   });
 });
