@@ -41,6 +41,7 @@ import argparse
 import hashlib
 import json
 import os
+import random
 import re
 import runpy
 import signal
@@ -101,6 +102,19 @@ def metadata_of(row) -> dict:
     return ((row or {}).get("config") or {}).get("metadata") or {}
 
 
+RATE_LIMIT_ATTEMPTS = 6
+RATE_LIMIT_MAX_DELAY = 16.0
+
+
+def rate_limit_delay(retry_after, attempt):
+    """Seconds to wait before retrying a 429: Fly's Retry-After when given, else jittered exponential backoff."""
+    try:
+        base = float(retry_after)
+    except (TypeError, ValueError):
+        base = min(2.0 ** attempt, RATE_LIMIT_MAX_DELAY)
+    return min(max(base, 0.0), RATE_LIMIT_MAX_DELAY) + random.uniform(0.0, 0.5)
+
+
 class Api(Fly):
     """Machines API client with the lease and lease-nonce calls this helper needs."""
 
@@ -112,15 +126,22 @@ class Api(Fly):
             headers["fly-machine-lease-nonce"] = nonce
         request = urllib.request.Request(url, data=None if body is None else json.dumps(body).encode(),
                                          method=method, headers=headers)
-        self.calls.append((method, path))
-        try:
-            with urllib.request.urlopen(request, timeout=self.timeout) as response:
-                payload = response.read()
-                return response.status, (json.loads(payload) if payload else None)
-        except urllib.error.HTTPError as error:
-            return error.code, None
-        except (urllib.error.URLError, OSError, ValueError) as error:
-            raise WarmSourceError(f"{method} {path} -> {error}") from error
+        for attempt in range(RATE_LIMIT_ATTEMPTS):
+            self.calls.append((method, path))
+            try:
+                with urllib.request.urlopen(request, timeout=self.timeout) as response:
+                    payload = response.read()
+                    return response.status, (json.loads(payload) if payload else None)
+            except urllib.error.HTTPError as error:
+                # A fleet's concurrent jobs share one warm source: Fly answers its burst of metadata
+                # writes with 429 (PR #1928 smoke, 10 of 13 jobs). Back off and retry; any other
+                # status, or a 429 that outlasts the bounded attempts, still reaches the caller.
+                if error.code != 429 or attempt == RATE_LIMIT_ATTEMPTS - 1:
+                    return error.code, None
+                time.sleep(rate_limit_delay(error.headers.get("Retry-After"), attempt))
+            except (urllib.error.URLError, OSError, ValueError) as error:
+                raise WarmSourceError(f"{method} {path} -> {error}") from error
+        raise AssertionError("unreachable")
 
     def acquire_lease(self, machine_id, ttl=LEASE_TTL_SECONDS):
         status, body = self._leased("POST", f"/machines/{machine_id}/lease",
@@ -311,13 +332,36 @@ def source_config(donor, set_id, volume_id, now):
     return config
 
 
+LAST_USED_FRESH_SECONDS = 600
+
+
+def touch_last_used(api, machine_id):
+    """Mark this set's warm source used. A fleet's concurrent jobs all touch one Machine; when Fly keeps
+    throttling (HTTP 429 past the client's backoff), a peer's write in the same burst already keeps the
+    source fresh for retention, so a recent recorded value satisfies the touch. Anything else still fails."""
+    try:
+        api.write_metadata(machine_id, LAST_USED_KEY, str(int(time.time())))
+    except WarmSourceError as error:
+        if "HTTP 429" not in str(error):
+            raise
+        row = next((r for r in api.machines() if r.get("id") == machine_id), None)
+        try:
+            recorded = float(metadata_of(row).get(LAST_USED_KEY, "0"))
+        except ValueError:
+            recorded = 0.0
+        if time.time() - recorded > LAST_USED_FRESH_SECONDS:
+            raise
+        log(f"warm source {machine_id}: last-used write throttled (429); a peer recorded it "
+            f"{int(time.time() - recorded)}s ago")
+
+
 def ensure(api, node_fp, py_fp, owner, *, base=BASE_DONOR, ttl=1800, wait=3600, timeout=600):
     """Return (set, machine, volume) names, creating the set's stopped warm source once."""
     set_id, machine_name, volume_name = names(node_fp, py_fp)
     existing = find_named(api, machine_name)
     if existing:
         need(metadata_of(existing).get(SET_KEY) == set_id, f"{machine_name} is not tagged as this set's warm source")
-        api.write_metadata(existing["id"], LAST_USED_KEY, str(int(time.time())))
+        touch_last_used(api, existing["id"])
         return set_id, machine_name, volume_name
     donor = base_donor(api, base)
     if not claim_acquire(api, donor["id"], set_id, owner, ttl, wait):
@@ -325,7 +369,7 @@ def ensure(api, node_fp, py_fp, owner, *, base=BASE_DONOR, ttl=1800, wait=3600, 
     try:
         existing = find_named(api, machine_name)
         if existing:  # a peer created it while this request waited
-            api.write_metadata(existing["id"], LAST_USED_KEY, str(int(time.time())))
+            touch_last_used(api, existing["id"])
             return set_id, machine_name, volume_name
         mounts = (donor.get("config") or {}).get("mounts") or []
         need(len(mounts) == 1 and mounts[0].get("volume"), "base donor must mount exactly one volume")

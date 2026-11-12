@@ -1,0 +1,139 @@
+{
+  ".cloud-env": {
+    "archive": "devbox-closeout-private/pr1955/records-20261111/",
+    "catalog": "docs/handoffs/pr-1955-closeout/private-archive-receipt.json",
+    "disposition": "archived",
+    "sha256": "11042ce1600795b16a683ffdc846d122e2e7881f9c650c52d3827e5e4e47a3e0"
+  },
+  ".context/": {
+    "archive": "devbox-closeout-private/pr1955/records-20261111/",
+    "catalog": "docs/handoffs/pr-1955-closeout/private-archive-receipt.json",
+    "disposition": "archived",
+    "sha256": "11042ce1600795b16a683ffdc846d122e2e7881f9c650c52d3827e5e4e47a3e0"
+  },
+  ".devbox/": {
+    "archive": "devbox-closeout-private/pr1955/records-20261111/",
+    "catalog": "docs/handoffs/pr-1955-closeout/private-archive-receipt.json",
+    "disposition": "archived",
+    "sha256": "11042ce1600795b16a683ffdc846d122e2e7881f9c650c52d3827e5e4e47a3e0"
+  },
+  ".env.npm": {
+    "archive": "devbox-closeout-private/pr1955/records-20261111/",
+    "catalog": "docs/handoffs/pr-1955-closeout/private-archive-receipt.json",
+    "disposition": "archived",
+    "sha256": "11042ce1600795b16a683ffdc846d122e2e7881f9c650c52d3827e5e4e47a3e0"
+  },
+  ".llm-dumps/": {
+    "archive": "devbox-closeout-private/pr1955/records-20261111/",
+    "catalog": "docs/handoffs/pr-1955-closeout/private-archive-receipt.json",
+    "disposition": "archived",
+    "sha256": "11042ce1600795b16a683ffdc846d122e2e7881f9c650c52d3827e5e4e47a3e0"
+  },
+  "agents/.env": {
+    "archive": "devbox-closeout-private/pr1955/records-20261111/",
+    "catalog": "docs/handoffs/pr-1955-closeout/private-archive-receipt.json",
+    "disposition": "archived",
+    "sha256": "11042ce1600795b16a683ffdc846d122e2e7881f9c650c52d3827e5e4e47a3e0"
+  },
+  "agents/.env.benchmark-temporal": {
+    "archive": "devbox-closeout-private/pr1955/records-20261111/",
+    "catalog": "docs/handoffs/pr-1955-closeout/private-archive-receipt.json",
+    "disposition": "archived",
+    "sha256": "11042ce1600795b16a683ffdc846d122e2e7881f9c650c52d3827e5e4e47a3e0"
+  },
+  "agents/.env.cloudbench-upsert.lock": {
+    "archive": "devbox-closeout-private/pr1955/records-20261111/",
+    "catalog": "docs/handoffs/pr-1955-closeout/private-archive-receipt.json",
+    "disposition": "archived",
+    "sha256": "11042ce1600795b16a683ffdc846d122e2e7881f9c650c52d3827e5e4e47a3e0"
+  },
+  "agents/navi-worker-log.txt": {
+    "archive": "devbox-closeout-private/pr1955/records-20261111/",
+    "catalog": "docs/handoffs/pr-1955-closeout/private-archive-receipt.json",
+    "disposition": "archived",
+    "sha256": "11042ce1600795b16a683ffdc846d122e2e7881f9c650c52d3827e5e4e47a3e0"
+  },
+  "agents/providers/fast_cache/": {
+    "archive": "devbox-closeout-private/pr1955/records-20261111/",
+    "catalog": "docs/handoffs/pr-1955-closeout/private-archive-receipt.json",
+    "disposition": "archived",
+    "sha256": "11042ce1600795b16a683ffdc846d122e2e7881f9c650c52d3827e5e4e47a3e0"
+  },
+  "back-end/.env": {
+    "archive": "devbox-closeout-private/pr1955/records-20261111/",
+    "catalog": "docs/handoffs/pr-1955-closeout/private-archive-receipt.json",
+    "disposition": "archived",
+    "sha256": "11042ce1600795b16a683ffdc846d122e2e7881f9c650c52d3827e5e4e47a3e0"
+  },
+  "back-end/.env.cloudbench-upsert.lock": {
+    "archive": "devbox-closeout-private/pr1955/records-20261111/",
+    "catalog": "docs/handoffs/pr-1955-closeout/private-archive-receipt.json",
+    "disposition": "archived",
+    "sha256": "11042ce1600795b16a683ffdc846d122e2e7881f9c650c52d3827e5e4e47a3e0"
+  },
+  "back-end/backend-logs.log": {
+    "archive": "devbox-closeout-private/pr1955/records-20261111/",
+    "catalog": "docs/handoffs/pr-1955-closeout/private-archive-receipt.json",
+    "disposition": "archived",
+    "sha256": "11042ce1600795b16a683ffdc846d122e2e7881f9c650c52d3827e5e4e47a3e0"
+  },
+  "branch:backup/cerebras-chat-quota-prepush-20261002": {
+    "archive": "devbox-closeout-private/pr1955/records-20261111/",
+    "catalog": "docs/handoffs/pr-1955-closeout/private-archive-receipt.json",
+    "disposition": "archived",
+    "member": "/var/tmp/rca1947/closeout-private/local-refs.bundle",
+    "sha256": "11042ce1600795b16a683ffdc846d122e2e7881f9c650c52d3827e5e4e47a3e0",
+    "tip": "12d996f0d8e24b93c0e276d5b3f91887a0da9aca"
+  },
+  "docs/rca/INDEX.md": {
+    "archive": "devbox-closeout-private/pr1955/records-20261111/",
+    "catalog": "docs/handoffs/pr-1955-closeout/private-archive-receipt.json",
+    "disposition": "archived",
+    "sha256": "11042ce1600795b16a683ffdc846d122e2e7881f9c650c52d3827e5e4e47a3e0"
+  },
+  "front-end/.env": {
+    "archive": "devbox-closeout-private/pr1955/records-20261111/",
+    "catalog": "docs/handoffs/pr-1955-closeout/private-archive-receipt.json",
+    "disposition": "archived",
+    "sha256": "11042ce1600795b16a683ffdc846d122e2e7881f9c650c52d3827e5e4e47a3e0"
+  },
+  "front-end/frontend-logs.log": {
+    "archive": "devbox-closeout-private/pr1955/records-20261111/",
+    "catalog": "docs/handoffs/pr-1955-closeout/private-archive-receipt.json",
+    "disposition": "archived",
+    "sha256": "11042ce1600795b16a683ffdc846d122e2e7881f9c650c52d3827e5e4e47a3e0"
+  },
+  "hub-poller-logs.log": {
+    "archive": "devbox-closeout-private/pr1955/records-20261111/",
+    "catalog": "docs/handoffs/pr-1955-closeout/private-archive-receipt.json",
+    "disposition": "archived",
+    "sha256": "11042ce1600795b16a683ffdc846d122e2e7881f9c650c52d3827e5e4e47a3e0"
+  },
+  "mac-app/.env": {
+    "archive": "devbox-closeout-private/pr1955/records-20261111/",
+    "catalog": "docs/handoffs/pr-1955-closeout/private-archive-receipt.json",
+    "disposition": "archived",
+    "sha256": "11042ce1600795b16a683ffdc846d122e2e7881f9c650c52d3827e5e4e47a3e0"
+  },
+  "package-lock.json": {
+    "archive": "devbox-closeout-private/pr1955/records-20261111/",
+    "catalog": "docs/handoffs/pr-1955-closeout/private-archive-receipt.json",
+    "disposition": "archived",
+    "sha256": "11042ce1600795b16a683ffdc846d122e2e7881f9c650c52d3827e5e4e47a3e0"
+  },
+  "research/.env": {
+    "archive": "devbox-closeout-private/pr1955/records-20261111/",
+    "catalog": "docs/handoffs/pr-1955-closeout/private-archive-receipt.json",
+    "disposition": "archived",
+    "sha256": "11042ce1600795b16a683ffdc846d122e2e7881f9c650c52d3827e5e4e47a3e0"
+  },
+  "stash:0e2ffe95ba40a2d0c2b8ae9e884b4a85d96af3f2": {
+    "archive": "devbox-closeout-private/pr1955/records-20261111/",
+    "catalog": "docs/handoffs/pr-1955-closeout/private-archive-receipt.json",
+    "disposition": "archived",
+    "member": "/var/tmp/rca1947/closeout-private/local-refs.bundle",
+    "ref": "refs/closeout/stash0",
+    "sha256": "11042ce1600795b16a683ffdc846d122e2e7881f9c650c52d3827e5e4e47a3e0",
+    "tip": "0e2ffe95ba40a2d0c2b8ae9e884b4a85d96af3f2"
+  }
+}

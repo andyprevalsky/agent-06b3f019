@@ -8,7 +8,13 @@ import assert from 'node:assert/strict';
 import { createStreamingCompletion, type CompletionChunk } from '../../providers/rose';
 import { CEREBRAS_API_URL, OPENROUTER_API_URL } from '../../providers/rose/transport';
 import { retryWithBackoff } from '../../providers/retry';
-import { quarantine } from '../helpers/quarantine';
+import {
+  assertChatLatencyRatchet,
+  assertLatencyRatchetJudgesTypicalResponse,
+  cerebrasQueueMs,
+  describeProbes,
+  sampleCerebrasChatProbes,
+} from './cerebras.latency.cases';
 import { fetchLiveCerebrasModelIds } from './cerebras.live.cases';
 
 const OK_SSE = [
@@ -147,6 +153,9 @@ async function run(): Promise<void> {
 
   await assertModelsReadRetriesOnlyTransientStatuses();
 
+  await assertLatencyRatchetJudgesTypicalResponse();
+  process.stdout.write('PASS live latency ratchet judges the median of 3 probes\n');
+
   // Live inventory probe: the archived GLM id must stay 404, and the configured
   // chat model must not return model_archived. Skipped when no real key.
   const liveKey = process.env.CEREBRAS_API_KEY;
@@ -176,37 +185,43 @@ async function run(): Promise<void> {
       stream: false,
     };
     delete (probeBody as { stream_options?: unknown }).stream_options;
-    const probe = await retryWithBackoff(
-      async () => {
-        const started = Date.now();
-        const live = await fetch(CEREBRAS_API_URL, {
-          method: 'POST',
-          headers: {
-            Authorization: `Bearer ${liveKey}`,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify(probeBody),
-        });
-        return {
-          ok: live.ok,
-          status: live.status,
-          text: await live.text(),
-          elapsedMs: Date.now() - started,
-        };
-      },
-      {
-        maxRetries: 5,
-        getBackoffDelayMs: (_error, attempt) => 1_000 * attempt * attempt,
-        shouldRetryResult: (result) => {
-          const queueExceeded =
-            result.status === 429 ||
-            result.status === 402 ||
-            /too_many_requests|queue_exceeded|high traffic|payment_required/i.test(result.text);
-          return !result.ok && result.status !== 404 && queueExceeded;
+    const probeOnce = () =>
+      retryWithBackoff(
+        async () => {
+          const started = Date.now();
+          const live = await fetch(CEREBRAS_API_URL, {
+            method: 'POST',
+            headers: {
+              Authorization: `Bearer ${liveKey}`,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify(probeBody),
+          });
+          const text = await live.text();
+          return {
+            ok: live.ok,
+            status: live.status,
+            text,
+            elapsedMs: Date.now() - started,
+            queueMs: cerebrasQueueMs(text),
+            requestId: live.headers.get('x-request-id') ?? undefined,
+          };
         },
-        component: 'cerebras-chat-probe',
-      }
-    );
+        {
+          maxRetries: 5,
+          getBackoffDelayMs: (_error, attempt) => 1_000 * attempt * attempt,
+          shouldRetryResult: (result) => {
+            const queueExceeded =
+              result.status === 429 ||
+              result.status === 402 ||
+              /too_many_requests|queue_exceeded|high traffic|payment_required/i.test(result.text);
+            return !result.ok && result.status !== 404 && queueExceeded;
+          },
+          component: 'cerebras-chat-probe',
+        }
+      );
+    const probes = await sampleCerebrasChatProbes(probeOnce);
+    const probe = probes[probes.length - 1];
     assert.notEqual(
       probe.status,
       404,
@@ -226,27 +241,10 @@ async function run(): Promise<void> {
         true,
         `chat model probe must succeed: HTTP ${probe.status} ${probe.text.slice(0, 200)}`
       );
-      // The latency ratchet is quarantined (FLAKY d2ba002c: one 23.6 s Cerebras response, rerun passed);
-      // it still runs and reports; the status/inventory assertions above stay blocking.
-      const ratchetUnit = 'cerebras';
-      await quarantine(
-        {
-          since: '2026-11-11',
-          repair: 'https://boxes.dev/thread/thr_719de2a2f98548dfafffc794968d720b',
-          error:
-            'AssertionError [ERR_ASSERTION]: chat model probe must stay under the lifecycle ratchet (23593ms)',
-          evidence: '.context/rca-cerebras/d2ba002c/findings.json',
-        },
-        () => {
-          assert.ok(
-            probe.elapsedMs < 5_000,
-            `chat model probe must stay under the lifecycle ratchet (${probe.elapsedMs}ms)`
-          );
-        },
-        { unit: ratchetUnit }
-      )();
+      process.stdout.write(`INFO live Cerebras chat probes: ${describeProbes(probes)}\n`);
+      const medianMs = assertChatLatencyRatchet(probes);
       process.stdout.write(
-        `PASS live Cerebras chat model ${CEREBRAS_CHAT_MODEL} responds in ${probe.elapsedMs}ms\n`
+        `PASS live Cerebras chat model ${CEREBRAS_CHAT_MODEL} responds in ${medianMs}ms (median of ${probes.length})\n`
       );
     }
   } else {
