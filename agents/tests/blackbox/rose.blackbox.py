@@ -13261,6 +13261,72 @@ async def test_code_session_usage_failed_report_is_retried_not_marked_delivered(
     service._code_usage_reporters.clear()
 
 
+async def test_code_session_usage_keeps_each_window_while_deferred():
+    """One CLI event carries one window: a deferred report keeps the latest observation of each window."""
+    import domains.spawn_claude_code_agent.service as service
+
+    posted: list[dict] = []
+
+    async def report(_task_id, usage):
+        posted.append(usage)
+        return True
+
+    def event(five=None, seven=None):
+        return {"observedAt": "2026-11-06T12:00:00Z", "source": "code_session", "status": "allowed",
+                "fiveHour": None if five is None else {"usedPct": five, "resetsAt": None},
+                "sevenDay": None if seven is None else {"usedPct": seven, "resetsAt": None}}
+
+    service._code_usage_reporters.clear()
+    with (
+        patch.object(service, "report_code_session_subscription_usage", report),
+        patch.object(service, "_CODE_USAGE_REPORT_MIN_INTERVAL_S", 0.2),
+    ):
+        service.report_code_session_usage_soon("task-5", event(five=20.0))
+        await _code_usage_wait(lambda: len(posted) == 1, "the first report")
+        service.report_code_session_usage_soon("task-5", event(seven=30.0))
+        service.report_code_session_usage_soon("task-5", event(five=50.0))
+        await _code_usage_wait(lambda: len(posted) == 2, "the deferred report")
+    assert posted[1]["fiveHour"]["usedPct"] == 50.0 and posted[1]["sevenDay"]["usedPct"] == 30.0, posted[1]
+    service._code_usage_reporters.clear()
+
+
+async def test_lease_heartbeat_restores_usage_after_failed_delivery():
+    """A usage snapshot whose heartbeat POST failed rides the next heartbeat; a newer observation wins."""
+    from helpers.llm import _build_compute_auth_context
+    from providers.rose import subscription_usage as usage
+
+    usage.clear()
+    token = "claude-restore-token"
+    heartbeats: list[dict] = []
+    statuses = [503, 200]
+
+    def handler(req):
+        if "token/lineage-heartbeat" in str(req.url):
+            heartbeats.append(json.loads(req.content))
+            return httpx.Response(statuses[min(len(heartbeats), len(statuses)) - 1], json={"ok": True})
+        return httpx.Response(500, text="unexpected route")
+
+    set_mock_handler(handler)
+    auth = _build_compute_auth_context(
+        {"type": "claude", "accessToken": token, "source": "user", "integrationId": "integration-restore",
+         "lineageKey": "lineage-restore"},
+        "user-restore",
+    )
+    assert auth is not None and auth.heartbeat_lease is not None
+    snapshot = {"observedAt": "2026-11-06T12:00:00Z", "fiveHour": {"usedPct": 42.0, "resetsAt": None},
+                "sevenDay": None, "source": "response", "status": "allowed"}
+    usage.record(token, snapshot)
+    await auth.heartbeat_lease(auth)  # 503: not acknowledged
+    assert heartbeats[0]["usage"] == snapshot and usage.has_pending(token), "kept for the next heartbeat"
+    await auth.heartbeat_lease(auth)  # 200: delivered
+    assert heartbeats[1]["usage"] == snapshot and not usage.has_pending(token), heartbeats
+    newer = {**snapshot, "fiveHour": {"usedPct": 60.0, "resetsAt": None}}
+    usage.restore(token, newer)
+    usage.restore(token, snapshot)  # an older one never replaces a newer pending observation
+    assert usage.take(token) == newer
+    usage.clear()
+
+
 def _usage_backend_handler(captured: dict, provider_response):
     def handler(req):
         url = str(req.url)
@@ -13482,6 +13548,14 @@ async def run_all_tests():
     await r.record_async(
         "code_session_usage_failed_report_retried",
         test_code_session_usage_failed_report_is_retried_not_marked_delivered,
+    )
+    await r.record_async(
+        "code_session_usage_keeps_each_window",
+        test_code_session_usage_keeps_each_window_while_deferred,
+    )
+    await r.record_async(
+        "lease_heartbeat_restores_usage_after_failed_delivery",
+        test_lease_heartbeat_restores_usage_after_failed_delivery,
     )
     await r.record_async(
         "claude_429_usage_flushed_authoritative_cooldown",

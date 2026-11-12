@@ -2883,11 +2883,21 @@ def _code_usage_reporter(task_id: str) -> Dict[str, Any]:
     return state
 
 
+def _merge_code_usage(newer: Dict[str, Any], older: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """One CLI rate_limit_event carries one window: keep the latest observation of each window."""
+    if not older:
+        return newer
+    kept = {
+        key: older[key] for key in ("fiveHour", "sevenDay") if newer.get(key) is None and older.get(key) is not None
+    }
+    return {**newer, **kept}
+
+
 def report_code_session_usage_soon(task_id: str, usage: Dict[str, Any]) -> None:
     """Fire-and-forget: hand the task's latest usage to its background drain; never blocks or raises."""
     with contextlib.suppress(Exception):
         state = _code_usage_reporter(task_id)
-        state["pending"] = usage
+        state["pending"] = _merge_code_usage(usage, state["pending"])
         if state["draining"]:
             return
         state["draining"] = True
@@ -2919,7 +2929,9 @@ async def _drain_code_session_usage(task_id: str, state: Dict[str, Any]) -> None
                 continue
             state["failures"] += 1
             state["retry_at"] = time.monotonic() + _CODE_USAGE_REPORT_MIN_INTERVAL_S
-            if state["pending"] is None and state["failures"] < _CODE_USAGE_REPORT_MAX_FAILURES:
+            if state["pending"] is not None:
+                state["pending"] = _merge_code_usage(state["pending"], usage)
+            elif state["failures"] < _CODE_USAGE_REPORT_MAX_FAILURES:
                 state["pending"] = usage
     finally:
         state["draining"] = False

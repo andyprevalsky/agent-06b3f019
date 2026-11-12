@@ -8,8 +8,11 @@
  *
  *   authoritative cooldown OR a window used up  → exhausted (red track) + visible
  *                                                 "resets <when>" (or "no reset info")
- *     only the 5h window spent (or a 5h cooldown) → still exhausted, but the 7d meter
- *                                                 keeps its measured weekly remainder
+ *     unless the 7d window itself is spent (or a 7d cooldown), the 7d meter keeps
+ *                                                 its measured weekly remainder ("5-hour
+ *                                                 limit reached" / "Rate limited")
+ *     the 7d window spent                        → the shown reset is the weekly one (an
+ *                                                 earlier 5h reset does not unblock it)
  *     a 5h window at 100% with no reset counts as spent only while its snapshot is
  *     current (not older than STALE_MS): an older one has certainly reset since
  *   non-authoritative cooldown (stall/backoff)  → cooling: last known fill + visible
@@ -156,11 +159,12 @@ export function usageMeterView(
   const fiveCurrent = fiveHour?.resetsAt != null || !(age > STALE_USAGE_MS);
   const fiveEmpty = fiveLeft !== null && fiveLeft <= 0 && fiveCurrent;
   const exhausted = authoritative || weekEmpty || fiveEmpty;
-  // Only the 5h window is blocked: the weekly remainder is still a measured value.
-  const fiveHourOnly =
-    !weekEmpty &&
-    weekLeft !== null &&
-    (fiveEmpty || (authoritative && cooldown.reason === 'usage_window_5h'));
+  // The weekly window itself is the block: spent, or a provider cooldown naming it.
+  const weeklyBlocked = weekEmpty || (authoritative && cooldown.reason === 'usage_window_7d');
+  // Otherwise the weekly remainder is still a measured value: a 5h block or a
+  // plain provider rate limit never makes the weekly quota read as spent.
+  const weeklyMeasured = !weeklyBlocked && weekLeft !== null;
+  const fiveHourBlock = fiveEmpty || (authoritative && cooldown.reason === 'usage_window_5h');
 
   const lines = [
     cooldown !== null ? cooldownLine(cooldown, now) : null,
@@ -178,7 +182,13 @@ export function usageMeterView(
       : fiveEmpty
         ? parse(fiveHour?.resetsAt)
         : NaN;
+    // The reset that clears every binding limit: with the weekly window spent, a
+    // 5h reset that comes first (the backend's earliest nextResetAt) leaves it blocked.
+    const weeklyReset = weeklyBlocked
+      ? (future(parse(sevenDay?.resetsAt), now) ?? (authoritative ? cooldown.until : null))
+      : null;
     const reset =
+      weeklyReset ??
       future(parse(account.nextResetAt), now) ??
       (authoritative ? cooldown.until : null) ??
       future(bindingReset, now);
@@ -187,13 +197,14 @@ export function usageMeterView(
       label = `${label} · ${coolingHint(cooldown.until, now)}`;
     }
     const when = reset !== null ? `resets ${formatWhen(reset, now)}` : 'no reset info';
+    const blockedBy = fiveHourBlock ? '5-hour limit reached' : 'Rate limited';
     return {
-      remainingPct: fiveHourOnly ? weekLeft : 0,
+      remainingPct: weeklyMeasured ? weekLeft : 0,
       tone: 'exhausted',
       stale,
       label,
-      valueText: fiveHourOnly
-        ? `5-hour limit reached, ${when}; ${Math.round(weekLeft)}% of weekly quota left${asOf}`
+      valueText: weeklyMeasured
+        ? `${blockedBy}, ${when}; ${Math.round(weekLeft)}% of weekly quota left${asOf}`
         : `Quota used up, ${when}${asOf}`,
       title,
     };

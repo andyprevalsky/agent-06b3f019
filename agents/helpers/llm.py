@@ -98,6 +98,7 @@ from providers.rose.schema import (
 )
 from providers.rose.structured_output import StructuredOutputAccumulator
 from providers.rose.subscription_usage import cooldown_reason as subscription_cooldown_reason
+from providers.rose.subscription_usage import restore as restore_subscription_usage
 from providers.rose.subscription_usage import take as take_subscription_usage
 from providers.rose.subscription_usage import token_fingerprint
 from providers.rose.transforms import reconstruct_agent_response
@@ -632,11 +633,15 @@ def _build_claude_auth_context(
         )
 
     async def _heartbeat_lease(ctx: ComputeAuthContext) -> None:
-        await heartbeat_compute_token_lineage_activity(
+        usage = take_subscription_usage(ctx.token)
+        delivered = await heartbeat_compute_token_lineage_activity(
             ctx.lineage_key or "",
             integration_id=integration_id,
-            usage=take_subscription_usage(ctx.token),
+            usage=usage,
         )
+        if usage and not delivered:
+            # Not acknowledged: keep it for the next heartbeat (a newer observation wins).
+            restore_subscription_usage(ctx.token, usage)
 
     return ClaudeAuthContext(
         token=claude_token,
@@ -711,11 +716,15 @@ def _build_gpt_auth_context(
         )
 
     async def _heartbeat_lease(ctx: ComputeAuthContext) -> None:
-        await heartbeat_compute_token_lineage_activity(
+        usage = take_subscription_usage(ctx.token)
+        delivered = await heartbeat_compute_token_lineage_activity(
             ctx.lineage_key or "",
             integration_id=integration_id,
-            usage=take_subscription_usage(ctx.token),
+            usage=usage,
         )
+        if usage and not delivered:
+            # Not acknowledged: keep it for the next heartbeat (a newer observation wins).
+            restore_subscription_usage(ctx.token, usage)
 
     return GptAuthContext(
         token=gpt_token,

@@ -310,6 +310,16 @@ def take(token: Optional[str]) -> Optional[UsageSnapshot]:
         return _snapshots.pop(token_fingerprint(token), None)
 
 
+def restore(token: Optional[str], snapshot: Optional[UsageSnapshot]) -> None:
+    """Put back a snapshot whose delivery failed, unless a newer observation already replaced it."""
+    if not token or not snapshot:
+        return
+    key = token_fingerprint(token)
+    with _lock:
+        if key not in _snapshots:
+            _bump_bounded(_snapshots, key, snapshot)
+
+
 def has_pending(token: Optional[str]) -> bool:
     if not token:
         return False
