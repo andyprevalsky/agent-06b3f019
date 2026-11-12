@@ -1,0 +1,30 @@
+{
+ "failures": [
+  {
+   "id": "a82f8dced2274ae687f872f29b341b35",
+   "check": "smoke/agent-payment-abandonment",
+   "command": [
+    "/home/boxes/rose/agents/venv/bin/python3",
+    "/home/boxes/rose/scripts/deploy_test_cloud.py"
+   ],
+   "source": {
+    "head": "82e0e9b51002728a04a4995ee5a64f29314476bd",
+    "digest": "1a2c608537642d11966b86b4bcebe544090b4f219e24f3da98841e45ad237533"
+   },
+   "native_result": "FAIL",
+   "attribution": "NOT_INTRODUCED",
+   "description": "Standing AgentCard sandbox release stall (closed zero-balance card, org transfer consumed, releasedCents=0); natively SKIPPED, never PASS. PR #1955 changes only the gate-VM Postgres setup step, its regression and an RCA case; no AgentCard/payment path.",
+   "evidence": "smoke result.json evidence row (native SKIPPED, receipt sha 01aeb3cdc270686972c740ebe465f6118dacfff9f3e5f9c54536de2426edf1cf)",
+   "resource_skip": {
+    "reason_code": "agentcard_release_stall",
+    "receipt_sha256": "01aeb3cdc270686972c740ebe465f6118dacfff9f3e5f9c54536de2426edf1cf",
+    "receipt_reason": "AgentCard never released the closed card's org transfer (consumed, releasedCents=0); skipped under the standing user-approved warning policy, see docs/rca/cases/2026-10-02-agentcard-abandonment-closed-card-transfer-never-released.md: Payment lifecycle did not reach the expected terminal state before timeout: payment_lifecycle.purchase.status mismatch: expected 'VOIDED', got 'HELD'; last observed purchase.status='HELD', walletFunding.status='RECLAIMING', agentCard={\"status\": \"CLOSED\", \"balanceCents\": 0}, orgTransfer={\"id\": \"owt_97a057db92ab833bc9f7f9dd\", \"cardId\": \"card_9718be13d8797ffa5a02b68a\", \"status\": \"consumed\", \"transferredCents\": 4396, \"releasedCents\": 0} | Investigate: python agents/benchmarks/agent_latency.py fd1bdc04-9cd0-4998-86a6-a7e106797f1b | Cache/cost: python agents/benchmarks/run_benchmark.py --compare <run.json>",
+    "resource_scope": "third_party",
+    "exclusive_cause": true,
+    "provider": "AgentCard (sandbox)",
+    "evidence": "orgTransfer owt_97a057db92ab833bc9f7f9dd consumed releasedCents=0 (transferred 4396) on a CLOSED zero-balance card card_9718be13d8797ffa5a02b68a; docs/rca/cases/2026-10-02-agentcard-abandonment-closed-card-transfer-never-released.md",
+    "confirmed_at": 1794434065.5853446
+   }
+  }
+ ]
+}

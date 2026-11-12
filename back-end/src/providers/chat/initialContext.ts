@@ -42,6 +42,7 @@ interface InitialChatContextDependencies {
   findMessages: (agentId: string) => Promise<ChatDatabaseMessage[]>;
   ensureWithinBudget?: (params: {
     agentId: string;
+    rootAgentId?: string;
     requestedModel: string;
     rawMessages: ChatMessage[];
   }) => Promise<ChatMessage[]>;
@@ -53,6 +54,7 @@ export interface InitialChatContext {
 
 interface StartInitialChatContextConfig {
   agentId: string;
+  rootAgentId?: string;
   requestedModel: string;
 }
 
@@ -65,6 +67,7 @@ const defaultDependencies: InitialChatContextDependencies = {
   ensureWithinBudget: ensureChatContextWithinBudget,
 };
 
+/** Load and compact model-visible messages while carrying the chat archive root. */
 export async function loadChatModelMessages(
   config: StartInitialChatContextConfig,
   dependencies: InitialChatContextDependencies = defaultDependencies
@@ -82,6 +85,7 @@ export async function loadChatModelMessages(
   }
   return ensureWithinBudget({
     agentId: config.agentId,
+    rootAgentId: config.rootAgentId,
     requestedModel: config.requestedModel,
     rawMessages,
   });

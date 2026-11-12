@@ -8,6 +8,7 @@
  *     +--> dotCount: 1..3 (loading dots animation, only while shown)
  *     |
  *     v  page hidden OR loader out of view (IntersectionObserver)
+ *        OR app covered by an opaque full-screen overlay (lib/appCover)
  * [HELD] --> interval stopped on the current frame; resumes from it when the
  *            page is visible and the loader is in view again
  *
@@ -28,6 +29,7 @@
  */
 
 import { useEffect, useLayoutEffect, useRef, useState, type RefObject } from 'react';
+import { isAppCovered, subscribeAppCover } from '@/lib/appCover';
 import asciiFramesData from './ascii-frames.json';
 import asciiFramesEngineData from './ascii-frames-engine.json';
 
@@ -253,7 +255,7 @@ function useAsciiFrames(
     let inView = true;
 
     const sync = () => {
-      const run = inView && !document.hidden;
+      const run = inView && !document.hidden && !isAppCovered();
       if (run && interval === null) {
         interval = setInterval(() => {
           frameIndexRef.current = (frameIndexRef.current + 1) % frames.length;
@@ -274,11 +276,13 @@ function useAsciiFrames(
           });
     observer?.observe(container);
     document.addEventListener('visibilitychange', sync);
+    const unsubscribeCover = subscribeAppCover(sync);
     sync();
 
     return () => {
       observer?.disconnect();
       document.removeEventListener('visibilitychange', sync);
+      unsubscribeCover();
       if (interval !== null) clearInterval(interval);
     };
   }, [containerRef, frames, layersKey]);

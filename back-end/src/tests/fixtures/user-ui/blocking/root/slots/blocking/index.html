@@ -26,15 +26,18 @@
   const loc = gl.getAttribLocation(prog, 'p');
   gl.enableVertexAttribArray(loc);
   gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
-  // check settles, waits 1 s, then measures 2 s: 2.2 s after load is inside that window. The
+  // Wait for the existing probe's actual window; settlement/tracing can outlast a fixed timer.
   // readback runs after an await (a promise continuation in the microtask checkpoint), like most
   // async UI code; a plain callback is the simpler case.
   setTimeout(async () => {
+    while (!window.__roseProbe || !window.__roseProbe.sampling) {
+      await new Promise((resolve) => setTimeout(resolve, 16));
+    }
     await new Promise((resolve) => setTimeout(resolve, 0));
     gl.uniform1f(gl.getUniformLocation(prog, 'k'), 1.5);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
     gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array(4));
-  }, 2200);
+  }, 0);
   parent.postMessage({ type: 'rose:ready' }, '*');
 </script>
 </body>

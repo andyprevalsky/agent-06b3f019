@@ -1,4 +1,6 @@
 /** A document that outlives its deploy must not strand the app on the static shell. */
+import http from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { expect, test, type Page } from '@playwright/test';
 import { FRONTEND_URL } from './helpers';
 import { MOBILE_AGENTS, installMobileTrajectories } from './mobile-performance';
@@ -50,6 +52,70 @@ test('stale document whose entry chunk 404s reloads onto the live build and moun
   expect(new URL(page.url()).searchParams.get('agent-id')).toBe(MOBILE_AGENTS[0]);
   expect(loads.count).toBe(2);
 });
+// Vercel answers a missing /assets/* file with 404 plus that path's year-long immutable
+// Cache-Control, and a reload replays a cached 404 without asking the network. page.route
+// disables the browser HTTP cache, so a real origin in front of the frontend serves it.
+async function serveEntryCachedAs404Once(entry: string) {
+  let entryRequests = 0;
+  const server = http.createServer((request, response) => {
+    const url = new URL(request.url ?? '/', FRONTEND_URL);
+    if (url.pathname === entry && entryRequests++ === 0) {
+      response.writeHead(404, {
+        'cache-control': 'public, max-age=31536000, immutable',
+        'content-type': 'text/plain; charset=utf-8',
+      });
+      response.end('The page could not be found');
+      return;
+    }
+    const accept = request.headers.accept ?? '*/*';
+    fetch(url, { headers: { accept }, redirect: 'manual' })
+      .then(async (upstream) => {
+        const body = Buffer.from(await upstream.arrayBuffer());
+        const headers: Record<string, string> = {};
+        upstream.headers.forEach((value, name) => {
+          if (
+            !['connection', 'content-encoding', 'content-length', 'transfer-encoding'].includes(
+              name,
+            )
+          )
+            headers[name] = value;
+        });
+        response.writeHead(upstream.status, headers);
+        response.end(body);
+      })
+      .catch(() => {
+        response.writeHead(502);
+        response.end();
+      });
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  return {
+    origin: `http://127.0.0.1:${(server.address() as AddressInfo).port}`,
+    entryRequests: () => entryRequests,
+    close: () => {
+      server.closeAllConnections();
+      server.close();
+    },
+  };
+}
+test('an entry 404 cached as immutable is refetched before the reload and the app mounts', async ({
+  page,
+}) => {
+  page.setDefaultTimeout(30_000);
+  const origin = await serveEntryCachedAs404Once(await entryPath(page));
+  try {
+    const loads = countDocuments(page);
+    await page.goto(`${origin.origin}/?no-auto-login`, { waitUntil: 'domcontentloaded' });
+    // React replaces the static links in #root when the live entry runs.
+    await expect(page.locator('#root .rose-static-links')).toHaveCount(0);
+    await expect(page.locator('#root > *').first()).toBeAttached();
+    expect(loads.count).toBe(2);
+    // The cached 404 alone would never reach the origin again.
+    expect(origin.entryRequests()).toBeGreaterThanOrEqual(2);
+  } finally {
+    origin.close();
+  }
+});
 test('an entry that never loads stops after three bounded reloads', async ({ page }) => {
   await installMobileTrajectories(page);
   await failEntry(page, Number.POSITIVE_INFINITY);
@@ -92,4 +158,43 @@ test('connectivity lost during the backoff waits for online without spending an 
   await context.setOffline(false);
   await expect(page.getByRole('button', { name: 'Open menu', exact: true })).toBeVisible();
   expect(loads.count).toBe(2);
+});
+test('connectivity lost while revalidating the entry waits for online and charges one attempt', async ({
+  page,
+  context,
+}) => {
+  page.setDefaultTimeout(30_000);
+  await installMobileTrajectories(page);
+  const entry = await entryPath(page);
+  let requests = 0;
+  // The stale entry 404s online; the connection drops just as the recovery refetches it.
+  await page.route(
+    (url) => url.pathname === entry,
+    async (route) => {
+      requests++;
+      if (requests === 1)
+        return route.fulfill({ status: 404, contentType: 'text/plain', body: 'Not found' });
+      if (requests === 2) {
+        await context.setOffline(true);
+        return route.abort('internetdisconnected');
+      }
+      return route.continue();
+    },
+  );
+  const loads = countDocuments(page);
+  await page.goto(`${FRONTEND_URL}/?no-auto-login`, { waitUntil: 'domcontentloaded' });
+  await expect.poll(() => requests).toBe(2);
+  // No offline navigation: the static links stay, and the one attempt is charged once.
+  await page.waitForTimeout(2_000);
+  expect(loads.count).toBe(1);
+  await expect(page.locator('#root .rose-static-links')).toBeVisible();
+  const charged = () =>
+    page.evaluate(() =>
+      Object.entries(sessionStorage).filter(([key]) => key.startsWith('rose:entry-reload:')),
+    );
+  expect((await charged()).map(([, value]) => value)).toEqual(['1']);
+  await context.setOffline(false);
+  await expect(page.getByRole('button', { name: 'Open menu', exact: true })).toBeVisible();
+  expect(loads.count).toBe(2);
+  expect((await charged()).map(([, value]) => value)).toEqual(['1']);
 });

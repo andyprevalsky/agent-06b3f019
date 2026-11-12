@@ -1,0 +1,36 @@
+{
+  "format": "PR1905-PRIVATE-TAR-AESGCM-FRAMES-V1",
+  "label": "background-handoff-20261110T0435",
+  "created_at": "2026-11-10T04:16:06.578178+00:00",
+  "bucket": "trace-archive",
+  "prefix": "devbox-closeout-private/pr1905/background-handoff-20261110T0435",
+  "parts": [
+    {
+      "key": "devbox-closeout-private/pr1905/background-handoff-20261110T0435/evidence.part0000.aesgcm",
+      "sha256": "c1126200cc6d4ae2dc3f426dc38925359d100340a8318d7edb57769232192187",
+      "plain_bytes": 23926765
+    }
+  ],
+  "sha256": "d60bfcdb6a60e923a9eb7e3088f34b77b510bfa29aff0b1a3e37a844d8ef79d8",
+  "member_count": 965,
+  "member_manifest_sha256": "1a8c7f3accb776d130029e632d2296e833f5bbb94eab1865e8726314b0336468",
+  "full_readback_verified": true,
+  "authenticated_decryption_verified": true,
+  "all_member_hashes_verified": true,
+  "excludes": [
+    ".context/assigned-pr1885-failures/ascii-fixture-repro/checkout",
+    ".context/assigned-pr1885-failures/cloud-smoke-rca/activation-checkout",
+    ".context/assigned-pr1885-failures/recovery-check",
+    ".context/assigned-pr1885-failures/original",
+    ".context/assigned-pr1885-failures/native-evidence.tar.gz",
+    ".context/assigned-pr1885-failures/private-preservation",
+    ".context/assigned-pr1885-failures/auth-options-rca/baseline/digest-clone",
+    ".context/frontend-builds",
+    ".context/tsbuildinfo"
+  ],
+  "original_evidence_reference": "attachments/failure-evidence-receipt--bbe0d10ee40a41921ea3.json",
+  "original_verified_members": 1948,
+  "raw_logs_private": true,
+  "snapshot_not_final_closeout": true,
+  "catalog_manifest_sha256": "1a8c7f3accb776d130029e632d2296e833f5bbb94eab1865e8726314b0336468"
+}

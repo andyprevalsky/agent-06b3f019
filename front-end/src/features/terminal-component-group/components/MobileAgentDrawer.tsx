@@ -38,9 +38,13 @@
  * on the header's LEFT with a 40px target and opens the drawer from the LEFT
  * (the left bar's place); no count badge on it — the pill's bell carries the
  * unanswered count. The drawer content is unchanged.
+ *
+ * COVER: once the slide-in finishes, the opaque full-screen drawer hides the
+ * whole app, so the app shell stops painting and its ambient animations hold
+ * (lib/appCover). Closing uncovers it before the slide-out's first frame.
  */
 
-import { useRef, useState } from 'react';
+import { useLayoutEffect, useRef, useState } from 'react';
 import { LogOut, Menu } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
@@ -51,6 +55,7 @@ import {
   SheetTitle,
   SheetTrigger,
 } from '@/components/ui/sheet';
+import { coverApp, uncoverApp } from '@/lib/appCover';
 import { cn } from '@/lib/utils';
 
 import SidebarAgentList from './SidebarAgentList';
@@ -187,6 +192,13 @@ export default function MobileAgentDrawer({
     window.setTimeout(onLoginClick, 0);
   };
 
+  // Uncover in a layout effect: the app is visible again in the same frame the
+  // slide-out starts, never a frame later.
+  useLayoutEffect(() => {
+    if (!open) uncoverApp();
+  }, [open]);
+  useLayoutEffect(() => uncoverApp, []);
+
   const handleLogout = () => {
     onLogout();
     setOpen(false);
@@ -212,6 +224,10 @@ export default function MobileAgentDrawer({
       <SheetContent
         side={roseHeader ? 'left' : 'right'}
         onCloseAutoFocus={handleCloseAutoFocus}
+        onAnimationEnd={(event) => {
+          // Only the drawer's own slide-in, not animations of its contents.
+          if (open && event.target === event.currentTarget) coverApp(event.currentTarget);
+        }}
         onEscapeKeyDown={(event) => {
           if (event.target instanceof HTMLInputElement && event.target.dataset.projectNameEditor)
             event.preventDefault();
