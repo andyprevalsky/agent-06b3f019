@@ -1190,6 +1190,16 @@ def _require_spawn_output_schema_key(schema: Dict[str, Any]) -> None:
         required.append("output_schema")
 
 
+_GITHUB_REPO_REF_DESCRIPTION = (
+    "A GitHub repo the user connected to Rose: 'gh:owner/repo', its GitHub URL, 'owner/repo' "
+    "or a Rose project id. Code agents check it out; spawned agents keep it as their repo. "
+    "Explicit selection wins over inherited references (your repo, the project's repo). "
+    "Omit it to inherit. A repo that is not connected fails with an error naming it; it "
+    "never falls back to another repo. Ignored when code_session_id resumes a session, "
+    "which keeps its own repo."
+)
+
+
 class SpawnAgentTool(BaseModel):
     """Spawn an autonomous agent; type selects capabilities and per-type required fields.
 
@@ -1257,6 +1267,11 @@ class SpawnAgentTool(BaseModel):
             "uses the current project's repo when the agent is in a project, otherwise a repo "
             "created for this agent tree."
         ),
+    )
+    github_repo_ref: Optional[str] = Field(
+        default=None,
+        description="Optional when type='code', 'general_purpose' or 'for_each'; ignored for every other type. "
+        + _GITHUB_REPO_REF_DESCRIPTION,
     )
     code_session_id: Optional[str] = Field(
         default=None,
@@ -1452,6 +1467,10 @@ class SpawnAgentToolNoGP(BaseModel):
         description=(
             "Optional when type='code'. GitHub repository URL to clone and sync to. Ignored for every other type."
         ),
+    )
+    github_repo_ref: Optional[str] = Field(
+        default=None,
+        description="Optional when type='code'; ignored for every other type. " + _GITHUB_REPO_REF_DESCRIPTION,
     )
     code_session_id: Optional[str] = Field(
         default=None,
