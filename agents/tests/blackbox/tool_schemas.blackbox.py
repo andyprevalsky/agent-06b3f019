@@ -308,10 +308,9 @@ def test_grep_tool_schema_exact_contract():
     }
     assert props.isdisjoint(removed)
     assert GrepTool.__doc__.splitlines()[:3] == [
-        "Search your records, accounts teammates explicitly shared with you, and your current agent tree.",
+        "Search this user's local records and current agent tree.",
         "",
-        "- Results show each record's owner and account. Narrow with `owner_user_id`, `team_id` or `account_id` "
-        "(from the shared data map) before counting or paging.",
+        "- Also covers accounts teammates shared with this user; narrow by owner, team or account.",
     ]
     assert "scope" not in GrepTool.__doc__ and "shared_project_agents" not in GrepTool.__doc__
     descriptions = {

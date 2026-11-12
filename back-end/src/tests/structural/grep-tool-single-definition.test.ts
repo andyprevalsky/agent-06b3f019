@@ -86,7 +86,7 @@ function checkStrictMirrors(canonical: JsonSchema, strict: JsonSchema, at: strin
 check(GREP_TOOL_DEFINITION.name === 'grep', 'canonical definition must be named grep');
 check(
   GREP_TOOL_DEFINITION.description.startsWith(
-    'Search your records, accounts teammates explicitly shared with you, and your current agent tree.'
+    "Search this user's local records and current agent tree."
   ),
   'canonical description missing'
 );

@@ -8,9 +8,9 @@ and web chat read the definition generated from that model
 must be regenerated; ``tests/blackbox/grep.blackbox.py`` fails on any drift.
 """
 
-GREP_TOOL_PROMPT = """Search your records, accounts teammates explicitly shared with you, and your current agent tree.
+GREP_TOOL_PROMPT = """Search this user's local records and current agent tree.
 
-- Results show each record's owner and account. Narrow with `owner_user_id`, `team_id` or `account_id` (from the shared data map) before counting or paging.
+- Also covers accounts teammates shared with this user; narrow by owner, team or account.
 - `pattern` is a regex over record text. Omit it for metadata-only agent searches.
 - `sources` selects one or more sources; omitted defaults: messages, network, agent_network. `gmail` aliases email.
 - `agent_trajectories` contains prior user-owned chat, SMS, and Temporal runs, including R2 archives; `agent_network` contains the current tree.
