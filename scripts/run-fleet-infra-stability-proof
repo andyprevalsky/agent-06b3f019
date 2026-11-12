@@ -586,9 +586,6 @@ run_owned_proof_slice() {
   local self_pid="$BASHPID"
   trap ':' HUP INT TERM
   write_slice_cleanup pending || return 1
-  printf 'pid=%s\npid_start=%s\n' "$self_pid" \
-    "$(cloudbench_pid_start_time "$self_pid")" \
-    > "$PROOF_DIR/active-waiter.owner"
   if [ -s "$PROOF_DIR/cancel.request" ]; then
     write_slice_cleanup verified
     return 143
@@ -610,11 +607,13 @@ exit "$status"
     write_slice_cleanup failed_retained
     return 1
   fi
-  slice_pid="$(cloudbench_tracked_owner_value "$slice_owner" pid)"
-  slice_pid_start="$(cloudbench_tracked_owner_value "$slice_owner" pid_start)"
-  slice_group_token="$(cloudbench_tracked_owner_value "$slice_owner" group_token)"
+  local slice_pgid
+  cloudbench_tracked_owner_value_into slice_pid "$slice_owner" pid
+  cloudbench_tracked_owner_value_into slice_pid_start "$slice_owner" pid_start
+  cloudbench_tracked_owner_value_into slice_group_token "$slice_owner" group_token
+  cloudbench_tracked_owner_value_into slice_pgid "$slice_owner" pgid
   if [[ "$slice_pid" =~ ^[1-9][0-9]*$ ]] \
-    && [ "$(cloudbench_tracked_owner_value "$slice_owner" pgid)" = "$slice_pid" ] \
+    && [ "$slice_pgid" = "$slice_pid" ] \
     && [ -n "$slice_pid_start" ] && [[ "$slice_group_token" =~ ^[0-9a-f]{32}$ ]]; then
     slice_identity_valid=1
   fi
@@ -639,6 +638,13 @@ with Path(sys.argv[1]).open(encoding="utf-8", errors="replace") as handle:
             complete = True
 ' "$slice_raw_log") || relay_failed=1
   relay_pid=$!
+  # Publish this waiter for cancellation forwarding only now. Forwarding
+  # repeats until the waiter exits, and Bash 5.2 can run the trap inside a
+  # $(...) or <(...) parse in this shell, failing that substitution. From here
+  # every expansion is fork-free or a pipeline child (cloudbench_tristate_into).
+  printf 'pid=%s\npid_start=%s\n' "$self_pid" \
+    "$(cloudbench_pid_start_time "$self_pid")" \
+    > "$PROOF_DIR/active-waiter.owner"
   cloudbench_wait_tracked_detached "$slice_owner" "$slice_status" recover_proof_slice
   controller_rc=$?
   # The waiter resets its temporary traps. Further cancellation must not kill

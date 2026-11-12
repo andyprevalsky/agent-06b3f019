@@ -13,13 +13,13 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts" / "lib"))
-from test_quarantine import quarantine
 
 FIXTURE_PROCESS = runpy.run_path(str(ROOT / "scripts/tests/fixture_process.py"))
 NATIVE_COMPLETION = runpy.run_path(str(ROOT / "scripts/tests/native_completion_schedule.py"))
@@ -879,12 +879,35 @@ ps() {
     def test_failed_summary_log_cannot_abandon_owned_cleanup(self):
         self.run_case(log_fault="summary")
 
-    @quarantine(
-        since="2026-11-12",
-        repair="pending-handoff:6a8453c3ef3b46a08607ecdf27b9dcdc",
-        error="AssertionError: 0 != 1 : failed proof abandoned exact cleanup obligation",
-        evidence="PR #1921 deploy-command-structural FLAKY 6a8453c3ef3b46a08607ecdf27b9dcdc at b380b1eae7: https://github.com/Rose-Ai-Labs/rose/actions/runs/43288783754",
-    )
+    def test_repeated_waiter_cancellation_keeps_exact_cleanup(self):
+        # The supervisor re-forwards cancellation to the published waiter every
+        # 0.1s. Bash 5.2 can run that trap inside a $(...) or <(...) parse in the
+        # waiter, failing the substitution and abandoning recovery. Deliver the
+        # same TERM densely for the waiter's whole life so any such parse is hit.
+        stop = threading.Event()
+        delivered = []
+
+        def forward_repeatedly():
+            while not stop.is_set():
+                for path in (self.root / "proofs").glob("*/active-waiter.owner"):
+                    try:
+                        fields = dict(line.split("=", 1) for line in path.read_text().splitlines())
+                        os.kill(int(fields["pid"]), signal.SIGTERM)
+                        delivered.append(1)
+                    except (OSError, KeyError, ValueError):
+                        pass
+                time.sleep(0.0005)
+
+        storm = threading.Thread(target=forward_repeatedly, daemon=True)
+        storm.start()
+        try:
+            self.run_case(cancel=True)
+        finally:
+            stop.set()
+            storm.join(timeout=10)
+        self.assertGreater(len(delivered), 100, "waiter was never exposed to repeated cancellation")
+        self.assertNotIn("unexpected EOF", (self.root / "output.log").read_text())
+
     def test_cancellation_does_not_depend_on_body_pid_probe(self):
         self.run_case(cancel=True, unknown_body_probe=True)
         # The observer's completion pipe removes the old body-ps dependency.
