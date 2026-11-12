@@ -74,6 +74,7 @@ import plannerMemoryRouter from './domains/planner-memory/routes';
 import userUiRouter, { usercontentRouter } from './domains/user-ui/routes';
 import agentToolsRouter, { agentQuestionsRouter } from './domains/agent-tools/routes';
 import projectsRouter from './domains/projects/routes';
+import foldersRouter from './domains/projects/routes.topFolders';
 import worldModelsRouter from './domains/world-models/routes';
 import slackAutoRcaRouter from './domains/slack-auto-rca/routes';
 import downloadTelemetryRouter from './domains/download-telemetry/routes';
@@ -537,6 +538,7 @@ app.use('/api/planner-memory', plannerMemoryRouter); // Planner memory history t
 app.use('/api/user-ui', userUiRouter); // Per-user rose_user_ui versions (publish/activate/active)
 app.use('/api/agent-tools', agentToolsRouter); // display / messages / approvals for agents + code-agent sandboxes
 app.use('/api/projects', projectsRouter); // Owner-scoped Projects: settings, env files, codebase sync
+app.use('/api/folders', foldersRouter); // Folders: user-facing alias of Projects (no repo)
 app.use('/api/world-models', worldModelsRouter); // WMH-compatible simulation runtime shim
 // Anthropic tee-proxy for the code agent. Mounted OUTSIDE /api so the injected
 // ANTHROPIC_BASE_URL = <backend>/anthropic-proxy/<goalHash> resolves to /v1/messages.

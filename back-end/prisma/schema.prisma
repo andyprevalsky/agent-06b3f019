@@ -102,6 +102,10 @@ model Agent {
   memoryEnabled                    Boolean                     @default(true)
   isBenchmark                      Boolean                     @default(false)
   githubRepoUrl                    String?
+  /// Canonical connected-repo ref (`gh:<owner>/<repo>`, GithubRepoConnection.canonicalRef)
+  /// resolved at create: explicit override > parent's ref > the project's connection.
+  /// A ref, not a FK: it survives disconnect/reconnect; access is checked on use.
+  githubRepoRef                    String?
   /// LocalDevice.id of the Rose Mac app that started this root agent (C14).
   /// Null for web/PWA/SMS roots and for sub-agents (they resolve it via busId).
   originDeviceId                   String?
@@ -822,6 +826,36 @@ model GithubRepoAccess {
   @@index([userId])
 }
 
+/// A GitHub repository connected on the integrations panel ("github_repo"
+/// Integration row, accountId = canonicalRef). Replaces the project-level repo
+/// connection: a Project is now only a folder, and the repo it used to carry is
+/// imported here (source = legacy_project) with connectedRoseProjectRef pointing
+/// back at it. Clone permission stays the GithubRepoAccess grant.
+model GithubRepoConnection {
+  id                      String      @id @default(uuid())
+  userId                  String
+  integrationId           String
+  /// Stable, user-independent ref every API and Agent.githubRepoRef uses: `gh:<owner>/<repo>` (lowercase).
+  canonicalRef            String
+  /// Normalized https://github.com/<owner>/<repo> (case as GitHub/the user spelled it).
+  repoUrl                 String
+  owner                   String
+  repoName                String
+  defaultBranch           String      @default("main")
+  /// Project (now "folder") this repo was connected through; null = connected directly.
+  connectedRoseProjectRef String?
+  /// connect | legacy_project
+  source                  String      @default("connect")
+  createdAt               DateTime    @default(now())
+  updatedAt               DateTime    @updatedAt
+  integration             Integration @relation(fields: [integrationId], references: [id], onDelete: Cascade)
+  connectedRoseProject    Project?    @relation(fields: [connectedRoseProjectRef], references: [id], onDelete: SetNull)
+
+  @@unique([userId, canonicalRef])
+  @@index([integrationId])
+  @@index([connectedRoseProjectRef])
+}
+
 model MessageRecord {
   id                 String         @id @default(uuid())
   personId           String
@@ -982,6 +1016,7 @@ model Integration {
   updatedAt              DateTime                     @updatedAt
   emailCredentials       EmailIntegrationCredential[]
   plaidItems             PlaidItem[]
+  githubRepoConnections  GithubRepoConnection[]
 
   @@unique([userId, name, accountId])
   @@index([userId])
@@ -2237,6 +2272,7 @@ model Project {
   agents                    Agent[]
   cliLogins                 ProjectCliLogin[]
   folders                   ProjectFolder[]
+  githubRepoConnections     GithubRepoConnection[]
 
   @@unique([userId, name])
   @@index([userId, updatedAt])

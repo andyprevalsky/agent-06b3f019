@@ -13,6 +13,9 @@ export const createSessionSchema = z
     goal: z.string().min(1),
     attachments: z.array(z.any()).optional(),
     github_repo_url: z.string().optional(),
+    // Connected repo by canonical ref (`gh:owner/repo`, URL or legacy project id); overrides
+    // the project restore when it names a different repo. 403 when not connected.
+    github_repo_ref: z.string().trim().min(1).max(300).optional(),
     user_id: z.string().uuid(),
     fast_mode_cache_enabled: z.boolean().optional(),
     memory_enabled: z.boolean().optional(),
@@ -47,6 +50,7 @@ export interface CreateSessionParams {
   goal: string;
   attachments?: FilePointer[];
   github_repo_url?: string;
+  github_repo_ref?: string;
   user_id: string;
   fast_mode_cache_enabled?: boolean;
   memory_enabled?: boolean;

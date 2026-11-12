@@ -271,7 +271,7 @@ export async function createAgentsBatch(args: BatchCreateAgentsArgs): Promise<Ba
   }
   const parentById = await loadBatchParentExecutionFlags(bodies, userId);
   applyExecutionModeInheritanceForBatch(bodies, parentById);
-  await resolveBatchProjectIds(bodies, userId, parentById);
+  const repoFields = await resolveBatchProjectIds(bodies, userId, parentById);
   for (const body of bodies) {
     applyMemoryDefault(body, inheritsBenchmarkFromBatchParent(body, parentById));
     disableFastModeForWorldModel(body);
@@ -319,7 +319,7 @@ export async function createAgentsBatch(args: BatchCreateAgentsArgs): Promise<Ba
 
   const taskPaths = await resolveCreateTaskPaths(newBodies);
   newItems.forEach((item, index) => {
-    item.taskPath = taskPaths[index];
+    Object.assign(item, { taskPath: taskPaths[index] }, repoFields.get(item.agentId));
   });
   if (newItems.length > 0) {
     // Phase 1: atomic create. Rolls back on any error.
