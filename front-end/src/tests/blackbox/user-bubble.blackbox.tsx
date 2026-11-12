@@ -73,7 +73,7 @@ describe('user message collapse', () => {
 describe('agent message meta line', () => {
   const SENT_AT = '2026-11-12T19:51:00.000Z';
   const reply = '**Done.** Booked the table\nfor two at 7pm.';
-  const agentMessage = (toolStatus: string) =>
+  const agentMessage = (toolStatus: 'IN_PROGRESS' | 'FINISHED') =>
     baseMessage({
       role: 'TOOL',
       text: reply,
