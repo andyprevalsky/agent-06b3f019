@@ -64,6 +64,12 @@ ROOT_ENVIRONMENT_NONE = (
 )
 
 
+RETRACTED = ROOT_ENVIRONMENT_NONE.replace(
+    "\n</environment>",
+    f"\n\n{HEADING}\n\nNone now: no connected GitHub repositories (the earlier list no longer applies).\n</environment>",
+)
+
+
 def _block(github_repos=()):
     from helpers.environment_context import render_environment_block
 
@@ -82,7 +88,7 @@ def test_single_connection_renders_exactly_one_line():
         "Running agents you started: none\n\n"
         f"{HEADING}\n\n"
         "High-level info: the repositories you can use when creating a code agent "
-        "(pass canonical_ref as github_repo_ref):\n"
+        "(pass the gh:owner/repo ref in parentheses as github_repo_ref):\n"
         f"{ROSE_LINE}\n</environment>"
     ), block
     assert block.count("\n- ") == 1
@@ -184,7 +190,8 @@ async def test_fetch_is_owner_scoped_and_returns_only_public_identifiers():
         "repos": [
             {k: ROSE[k] for k in ("repo_name", "repo_url", "canonical_ref")},
             {k: HARNESS[k] for k in ("repo_name", "repo_url", "canonical_ref")},
-        ]
+        ],
+        "available": True,
     }, result
     block = _block(result["repos"])
     for absent in ("private-repo", "someone-else", "fb-scraper", API_KEY, "connected_rose_project_ref"):
@@ -203,7 +210,7 @@ async def test_stale_or_disconnected_repo_absent():
     assert ROSE_LINE in block and "world-model-harness" not in block, block
 
 
-async def test_fetch_failures_omit_the_section_without_raising():
+async def test_fetch_failures_are_unavailable_not_empty_and_never_raise():
     from domains.github_repo_inventory.repo import fetch_github_repo_inventory
 
     failures = [
@@ -218,10 +225,10 @@ async def test_fetch_failures_omit_the_section_without_raising():
     for failure in failures:
         with _backend(_Backend({"user-1": [ROSE]}, failure=failure)):
             repos = await fetch_github_repo_inventory("user-1")
-        assert repos == [], (failure, repos)
-        assert _block(repos) == ROOT_ENVIRONMENT_NONE
+        assert repos is None, (failure, repos)  # unavailable, never "no repos"
+        assert _block(repos) == ROOT_ENVIRONMENT_NONE  # nothing shown before: still omitted
     with _backend(_Backend({"user-1": [ROSE]})):
-        assert await fetch_github_repo_inventory("") == []
+        assert await fetch_github_repo_inventory("") is None
 
 
 # ------------------------------------------------------------------ workflow sync
@@ -241,6 +248,8 @@ def _workflow_sync(inventory_calls, inventory):
             current = inventory["value"]
             if isinstance(current, Exception):
                 raise current
+            if current is None:  # the activity could not read the inventory
+                return {"repos": [], "available": False}
             return {"repos": list(current)}
         return {"path": "/root/child"}  # resolve_agent_address_activity for sub-agents
 
@@ -289,10 +298,12 @@ async def test_root_sync_fetches_live_every_time_and_reflects_connect_disconnect
         inventory["value"] = [HARNESS, ROSE]  # newly connected
         await wf._sync_environment_context(rows)
         assert _texts(rows)[-1] == _block([ROSE, HARNESS]) and "world-model-harness" in _texts(rows)[-1]
-        inventory["value"] = []  # everything disconnected: the section disappears
+        inventory["value"] = []  # everything disconnected: the earlier list is retracted
         await wf._sync_environment_context(rows)
-        assert _texts(rows)[-1] == ROOT_ENVIRONMENT_NONE
-    assert len(calls) == 4, "one live fetch per sync, nothing cached"
+        assert _texts(rows)[-1] == RETRACTED, _texts(rows)[-1]
+        await wf._sync_environment_context(rows)  # still none: stable, no new row
+        assert len(_texts(rows)) == 3, _texts(rows)
+    assert len(calls) == 5, "one live fetch per sync, nothing cached"
     assert all(call["args"] == ["user-1"] for call in calls)
     assert all(call["retry"].maximum_attempts == 1 for call in calls)
 
@@ -304,6 +315,23 @@ async def test_root_sync_survives_a_failed_fetch():
         await wf._sync_environment_context(rows)
     assert _texts(rows) == [ROOT_ENVIRONMENT_NONE], _texts(rows)
     assert len(calls) == 1
+
+
+async def test_failed_fetch_keeps_the_listing_the_root_was_shown():
+    calls, inventory, rows = [], {"value": [ROSE]}, []
+    with _workflow_sync(calls, inventory):
+        wf = _new_workflow(rows)
+        await wf._sync_environment_context(rows)
+        shown = _texts(rows)
+        assert shown == [_block([ROSE])], shown
+        for failure in (TimeoutError("activity timed out"), None):  # raised, or available=False
+            inventory["value"] = failure
+            await wf._sync_environment_context(rows)
+            assert _texts(rows) == shown, "a failed fetch neither drops nor re-appends the listing"
+        inventory["value"] = [ROSE]  # recovered, unchanged: still no new row
+        await wf._sync_environment_context(rows)
+        assert _texts(rows) == shown
+    assert len(calls) == 4
 
 
 async def test_sub_agents_never_fetch_or_render_the_inventory():
@@ -324,12 +352,13 @@ async def run_all_tests():
     r.record("empty_inventory_byte_identical", test_empty_inventory_is_byte_identical_to_todays_block)
     await r.record_async("fetch_owner_scoped", test_fetch_is_owner_scoped_and_returns_only_public_identifiers)
     await r.record_async("stale_repo_absent", test_stale_or_disconnected_repo_absent)
-    await r.record_async("fetch_failures_omit_section", test_fetch_failures_omit_the_section_without_raising)
+    await r.record_async("fetch_failures_unavailable", test_fetch_failures_are_unavailable_not_empty_and_never_raise)
     await r.record_async(
         "root_sync_live_connect_disconnect",
         test_root_sync_fetches_live_every_time_and_reflects_connect_disconnect,
     )
     await r.record_async("root_sync_failed_fetch", test_root_sync_survives_a_failed_fetch)
+    await r.record_async("failed_fetch_keeps_listing", test_failed_fetch_keeps_the_listing_the_root_was_shown)
     await r.record_async("sub_agents_skip_inventory", test_sub_agents_never_fetch_or_render_the_inventory)
     return r.all_passed
 

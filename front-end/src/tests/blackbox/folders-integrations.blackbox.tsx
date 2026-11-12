@@ -169,14 +169,14 @@ function OpenAppProbe() {
   return <span data-testid="open-app">{useRoseApps()?.openApp ?? 'none'}</span>;
 }
 
-function sidebar() {
+function sidebar(onClose: () => void = vi.fn()) {
   return (
     <>
       <RoseMobileAgentList
         agents={agents}
         selectedAgentId={null}
         onSelectAgent={vi.fn()}
-        onClose={vi.fn()}
+        onClose={onClose}
         handlers={{
           onRenameAgent: vi.fn(),
           onCopyAgentLink: vi.fn(),
@@ -262,30 +262,36 @@ describe('Folders in the left bar', () => {
 
   it('folder settings show the repo read-only and link to the Integrations panel', async () => {
     mockProjectsApi([roseFolder(), websiteFolder()]);
-    const user = userEvent.setup();
-    renderWithProviders(sidebar());
-    await user.click(await screen.findByRole('button', { name: 'Website folder settings' }));
-    const section = screen.getByRole('region', { name: 'GitHub repo' });
-    await waitFor(() => expect(requests('GET', '/folders').length).toBeGreaterThan(0));
-    expect(within(section).getByTestId('folder-github-repo')).toHaveTextContent('No repository');
-    expect(within(section).queryByRole('textbox', { name: 'Repository URL' })).toBeNull();
-    expect(screen.getByTestId('open-app')).toHaveTextContent('none');
-    await user.click(within(section).getByRole('button', { name: 'Connect in Integrations' }));
-    expect(screen.getByTestId('open-app')).toHaveTextContent('integrations');
-    // The panel opens at its GitHub Repos section (deep link consumed on mount).
+    // Installed before the click: the drawer the link opens is lazy and may mount (and
+    // consume the deep link) while the click is still settling.
     const scrolled = vi.fn();
     Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', {
       configurable: true,
       value: scrolled,
     });
     try {
-      renderWithProviders(<Integrations />, { roseDesktop: false });
-      const github = await screen.findByRole('region', { name: 'GitHub Repos' });
+      const user = userEvent.setup();
+      renderWithProviders(sidebar());
+      await user.click(await screen.findByRole('button', { name: 'Website folder settings' }));
+      const section = screen.getByRole('region', { name: 'GitHub repo' });
+      await waitFor(() => expect(requests('GET', '/folders').length).toBeGreaterThan(0));
+      expect(within(section).getByTestId('folder-github-repo')).toHaveTextContent('No repository');
+      expect(within(section).queryByRole('textbox', { name: 'Repository URL' })).toBeNull();
+      expect(screen.getByTestId('open-app')).toHaveTextContent('none');
+      scrolled.mockClear();
+      await user.click(within(section).getByRole('button', { name: 'Connect in Integrations' }));
+      expect(screen.getByTestId('open-app')).toHaveTextContent('integrations');
+      // The Integrations drawer the link opened lands on its GitHub Repos section
+      // (deep link consumed on mount).
+      const github = await screen.findByRole('region', { name: 'GitHub Repos' }, { timeout: 5000 });
       await waitFor(() => expect(scrolled).toHaveBeenCalled());
       expect(scrolled.mock.contexts[0]).toBe(github);
       expect(sessionStorage.getItem('rose:integrations-section-focus')).toBeNull();
       // A folder without a repo has nothing to switch: no folder is pre-selected.
-      expect(within(github).getByRole('combobox', { name: 'Folder to switch' })).toHaveValue('');
+      // The switch form renders once the panel's own folders list has loaded.
+      expect(await within(github).findByRole('combobox', { name: 'Folder to switch' })).toHaveValue(
+        '',
+      );
     } finally {
       delete (HTMLElement.prototype as { scrollIntoView?: unknown }).scrollIntoView;
     }
@@ -368,10 +374,14 @@ describe("Switching a folder's repo", () => {
   it('folder settings "Switch repo in Integrations" opens the panel with that folder pre-selected', async () => {
     mockProjectsApi([roseFolder(), websiteFolder()]);
     const user = userEvent.setup();
-    renderWithProviders(sidebar());
+    const closeMenu = vi.fn();
+    renderWithProviders(sidebar(closeMenu));
     await user.click(await screen.findByRole('button', { name: 'Rose folder settings' }));
+    expect(closeMenu).not.toHaveBeenCalled();
     await user.click(await screen.findByRole('button', { name: 'Switch repo in Integrations' }));
     expect(screen.getByTestId('open-app')).toHaveTextContent('integrations');
+    // Mobile: the menu holding the folder settings closes, so the opened panel is visible.
+    expect(closeMenu).toHaveBeenCalledTimes(1);
     // The Integrations drawer the link opened (whether its GitHub section was already
     // mounted, via the focus event, or mounts after, via the stored deep link).
     const form = await screen.findByRole(
@@ -463,7 +473,12 @@ describe('GitHub Repos on the Integrations panel', () => {
         .getAllByTestId('github-repo-source')
         .map((b) => b.textContent),
     ).toEqual(['connected project', 'manual']);
-    expect(within(section).getByRole('textbox', { name: 'GitHub repository URL' })).toHaveValue('');
+    // The input clears once connect settles (after the repos/folders refetch).
+    await waitFor(() =>
+      expect(within(section).getByRole('textbox', { name: 'GitHub repository URL' })).toHaveValue(
+        '',
+      ),
+    );
     expect(within(section).queryByRole('alert')).toBeNull();
     expect(repos).toHaveLength(2);
 

@@ -29,7 +29,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Sequence
 from zoneinfo import ZoneInfo
 
-from helpers.github_repo_inventory import render_github_repos_section
+from helpers.github_repo_inventory import github_repos_section, previous_github_repos_section
 
 ENVIRONMENT_CONTEXT_KEY = "environmentContext"
 MAX_ENVIRONMENT_AGENTS = 8
@@ -101,12 +101,15 @@ def render_environment_block(
     own_path: Optional[str],
     is_root: bool,
     agents: Sequence[Dict[str, Any]],
-    github_repos: Sequence[Dict[str, Any]] = (),
+    github_repos: Optional[Sequence[Dict[str, Any]]] = (),
+    previous_block: Optional[str] = None,
 ) -> str:
     """The persisted ``<environment>`` block (stable between real changes: date, not time).
 
     A root also lists its user's connected GitHub repos (``github_repos``, the live
-    inventory, see helpers/github_repo_inventory.py); none → the section is omitted.
+    inventory, see helpers/github_repo_inventory.py): none ever → the section is omitted;
+    None (fetch failed) → the section of ``previous_block`` is kept; emptied after a shown
+    list → an explicit "no longer applies" line.
     """
     local, label = _local(now, tz_name)
     lines = [f"Current date: {local.strftime('%Y-%m-%d')} ({_zone_name(tz_name, label)})"]
@@ -123,7 +126,14 @@ def render_environment_block(
         lines.extend(_more_line(len(agents) - len(shown)))
     else:
         lines.append("Running agents you started: none")
-    repos_section = render_github_repos_section(list(github_repos)) if is_root else ""
+    repos_section = (
+        github_repos_section(
+            None if github_repos is None else list(github_repos),
+            previous_github_repos_section(previous_block),
+        )
+        if is_root
+        else ""
+    )
     if repos_section:
         lines.extend(["", repos_section])
     return "<environment>\n" + "\n".join(lines) + "\n</environment>"

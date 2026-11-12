@@ -11,8 +11,9 @@
            renders <environment-status> after the cached prefix (never persisted)
 
 A root also renders its user's connected GitHub repos: one live inventory
-activity (GET /api/integrations/github/repos) per sync, nothing cached, a
-failure omits the section.
+activity (GET /api/integrations/github/repos) per sync, nothing cached; a
+failed fetch keeps the listing of the latest environment row, and a list that
+empties after it was shown is retracted explicitly.
 
 Sources (no other workflow I/O): ``_background_tasks`` records (path, type,
 started_at, child ids), ``_environment_activity`` (latest IN_PROGRESS title a
@@ -106,6 +107,7 @@ class EnvironmentContextMixin:
             return
         own_path = await resolve_own_task_path(self)
         is_root = not int(getattr(self, "depth", 0) or 0)
+        latest = latest_environment_block_text(context)
         text = render_environment_block(
             now=simulated_now(self, workflow.now()),
             tz_name=self._environment_timezone(),
@@ -113,8 +115,9 @@ class EnvironmentContextMixin:
             is_root=is_root,
             agents=self._environment_running_agents(),
             github_repos=await fetch_root_github_repos(self) if is_root else [],
+            previous_block=latest,
         )
-        if latest_environment_block_text(context) == text:
+        if latest == text:
             return
         await self._post_message(
             text,

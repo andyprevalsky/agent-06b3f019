@@ -23,7 +23,8 @@ async function main(): Promise<void> {
   const { prisma } = await import('../../providers/database');
   const { createAgent } = await import('../../domains/agents/agentLifecycleService');
   const { createAgentSchema } = await import('../../domains/agents/types');
-  const { AgentProjectNotFoundError } = await import('../../domains/agents/agentProject');
+  const { AgentProjectNotFoundError, AgentGithubRepoNotConnectedError, agentProjectNotFoundBody } =
+    await import('../../domains/agents/agentProject');
   const { resolveBatchRepoFields, resolveCreateRepoFields } =
     await import('../../domains/agents/agentProject');
   const {
@@ -116,8 +117,15 @@ async function main(): Promise<void> {
     assert.equal((await row(none.agent_id)).githubRepoRef, null);
     await assert.rejects(
       createRoot({ github_repo_ref: 'https://github.com/private-owner/secret' }),
-      (error: unknown) => error instanceof AgentProjectNotFoundError
+      (error: unknown) =>
+        error instanceof AgentGithubRepoNotConnectedError &&
+        error instanceof AgentProjectNotFoundError &&
+        agentProjectNotFoundBody(error).code === 'GITHUB_REPO_NOT_CONNECTED'
     );
+    // Other not-found placements carry no repo code (the agents side keys on it).
+    assert.deepEqual(agentProjectNotFoundBody(new AgentProjectNotFoundError('Folder not found')), {
+      error: 'Folder not found',
+    });
 
     // 5. Sub-agents inherit the parent's ref; explicit project / ref win over it.
     const child = (extra: Record<string, unknown>) =>

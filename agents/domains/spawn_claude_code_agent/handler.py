@@ -49,7 +49,11 @@ from domains.spawn_claude_code_agent.service_target import (
 from helpers.activity_generation_drain import GENERATION_SUPERSEDED
 from helpers.attachments import FilePointer, extract_attachments_from_context
 from helpers.generation_handoff import GenerationHandoffRequested, park_pending_tool, take_tool_resume
-from helpers.github_repo_ref import GITHUB_REPO_REF_DENIED_CODE, explicit_github_repo_ref
+from helpers.github_repo_ref import (
+    GITHUB_REPO_REF_DENIED_CODE,
+    explicit_github_repo_ref,
+    local_target_repo_ref_message,
+)
 from helpers.tool_interrupts import tool_stop_requested
 from helpers.tracing import span
 from helpers.wait_condition_or_handoff import live_handoff_queue
@@ -495,6 +499,23 @@ class SpawnClaudeCodeAgentManager(ToolManager):
 
         code_provider = "unknown"
         target_info: Dict[str, Any] = dict(_resumed_target(code_session) or cloud_target())
+        if code_session is None and requested_target == CODE_TARGET_LOCAL and github_repo_ref:
+            # A connected repo is checked out in the cloud; a local run uses the Mac's own
+            # folder. Refuse the contradiction instead of silently dropping the selection.
+            conflict_message = local_target_repo_ref_message(github_repo_ref)
+            yield ToolEvent(
+                type=EventType.POST_MESSAGE,
+                title="Code session failed",
+                message=conflict_message,
+                status=MessageStatus.ERROR,
+                metadata={
+                    "toolName": "spawn_claude_code_agent",
+                    "code_provider": code_provider,
+                    "error_code": GITHUB_REPO_REF_DENIED_CODE,
+                    "code_agent": _failed_code_agent(target_info, conflict_message),
+                },
+            )
+            return
         if code_session is None and requested_target == CODE_TARGET_LOCAL:
             # Local runs only on the Mac that started this agent tree, and only
             # while its Rose Mac app is connected. Never wait, never fall back.

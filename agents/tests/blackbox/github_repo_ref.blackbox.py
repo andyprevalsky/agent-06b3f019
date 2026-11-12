@@ -108,7 +108,7 @@ class FakeBackend:
                 ]
                 return httpx.Response(201, json={"results": results})
         except LookupError:
-            return httpx.Response(404, json={"error": "GitHub repo not connected"})
+            return httpx.Response(404, json={"error": "GitHub repo not connected", "code": "GITHUB_REPO_NOT_CONNECTED"})
         if url.endswith("/api/claude-code-session/create"):
             if body.get("code_session_id"):
                 repo = self.sessions[body["code_session_id"]]
@@ -522,6 +522,34 @@ async def test_code_tool_ref_denial_is_error_row_not_fallback():
     assert "Do not pass" not in text and "API-only" not in text, text
 
 
+async def test_code_tool_local_target_with_ref_fails_without_starting():
+    from tools.base import MessageStatus
+
+    fake, events = await _run_code_tool(
+        {"goal": "fix", "output_schema": SCHEMA, "github_repo_ref": ROSE_REF, "target": "local"},
+        _denied_activity_error(ROSE_REF),
+    )
+    terminal = events[-1]
+    assert terminal.status == MessageStatus.ERROR, terminal.status
+    assert ROSE_REF in terminal.message and "target='local'" in terminal.message, terminal.message
+    assert terminal.metadata["error_code"] == "GITHUB_REPO_REF_DENIED"
+    assert terminal.metadata["code_agent"]["state"] == "failed"
+    # Neither the local-target lookup nor a code session ran: nothing was silently dropped.
+    assert fake.started == [], fake.started
+
+
+async def test_not_connected_classifier_reads_the_typed_code():
+    from helpers.github_repo_ref import is_repo_not_connected_response
+
+    typed = json.dumps({"error": "GitHub repo not connected", "code": "GITHUB_REPO_NOT_CONNECTED"})
+    assert is_repo_not_connected_response(404, typed)
+    # Same words without the typed code (e.g. a missing folder or route) are not this error.
+    assert not is_repo_not_connected_response(404, json.dumps({"error": "GitHub repo not connected"}))
+    assert not is_repo_not_connected_response(404, json.dumps({"error": "Folder not found"}))
+    assert not is_repo_not_connected_response(403, typed)
+    assert not is_repo_not_connected_response(404, "<html>Cannot POST /api/agents</html>")
+
+
 # ── resume: a code_session_id keeps the session's own repo ────────────────────────
 
 
@@ -597,6 +625,10 @@ async def run_all_tests():
     await r.record_async("batch_unconnected_non_retryable", test_batch_unconnected_ref_is_non_retryable_and_names_ref)
     await r.record_async("code_session_unconnected_403", test_code_session_unconnected_ref_raises_typed_403)
     await r.record_async("code_tool_denial_error_row", test_code_tool_ref_denial_is_error_row_not_fallback)
+    await r.record_async(
+        "code_tool_local_target_ref_refused", test_code_tool_local_target_with_ref_fails_without_starting
+    )
+    await r.record_async("not_connected_typed_code", test_not_connected_classifier_reads_the_typed_code)
     await r.record_async("resume_keeps_session_repo", test_resume_with_conflicting_ref_keeps_session_repo)
     await r.record_async("schema_documents_ref", test_spawn_schema_documents_github_repo_ref)
     teardown_mock()

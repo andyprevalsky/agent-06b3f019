@@ -84,7 +84,7 @@ def render_github_repos_section(repos: Any) -> str:
         GITHUB_REPOS_HEADING,
         "",
         "High-level info: the repositories you can use when creating a code agent "
-        "(pass canonical_ref as github_repo_ref):",
+        "(pass the gh:owner/repo ref in parentheses as github_repo_ref):",
     ]
     lines.extend(f"- {r['repo_name']} — {r['repo_url']} ({r['canonical_ref']})" for r in shown[:MAX_GITHUB_REPOS])
     hidden = len(shown) - MAX_GITHUB_REPOS
@@ -93,9 +93,40 @@ def render_github_repos_section(repos: Any) -> str:
     return "\n".join(lines)
 
 
+GITHUB_REPOS_NONE = "None now: no connected GitHub repositories (the earlier list no longer applies)."
+
+
+def previous_github_repos_section(block: Optional[str]) -> str:
+    """The repo section of an already rendered ``<environment>`` block ("" when it had none)."""
+    if not block:
+        return ""
+    start = block.find("\n" + GITHUB_REPOS_HEADING)
+    if start < 0:
+        return ""
+    end = block.rfind("\n</environment>")
+    return block[start + 1 : end if end > start else len(block)].rstrip()
+
+
+def github_repos_section(repos: Optional[Any], previous_section: str = "") -> str:
+    """The root's repo section given the live inventory and the section it was last shown.
+
+    None (fetch failed) keeps the last section unchanged; an empty inventory after a shown
+    one says so explicitly; an inventory that was never shown and is empty stays omitted.
+    """
+    if repos is None:
+        return previous_section
+    section = render_github_repos_section(repos)
+    if section or not previous_section:
+        return section
+    return f"{GITHUB_REPOS_HEADING}\n\n{GITHUB_REPOS_NONE}"
+
+
 __all__ = [
     "GITHUB_REPOS_HEADING",
+    "GITHUB_REPOS_NONE",
     "MAX_GITHUB_REPOS",
     "compact_github_repos",
+    "github_repos_section",
+    "previous_github_repos_section",
     "render_github_repos_section",
 ]

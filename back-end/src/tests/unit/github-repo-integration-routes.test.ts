@@ -163,6 +163,14 @@ async function main(): Promise<void> {
       (await call('POST', '/api/integrations/github/repos', { repo_url: 'x', extra: 1 })).status,
       400
     );
+    // default_branch follows the project branch rule (githubBranchSchema).
+    for (const default_branch of ['-x', 'a..b', 'has space', '', 'main/']) {
+      const badBranch = await call('POST', '/api/integrations/github/repos', {
+        repo_url: PUBLIC_URL,
+        default_branch,
+      });
+      assert.equal(badBranch.status, 400, `default_branch ${JSON.stringify(default_branch)}`);
+    }
 
     // Resolve: legacy refs → canonical; another user sees nothing.
     for (const ref of [rose.id, `rose-project:${rose.id}`, `${ROSE_URL}.git`, ROSE_REF]) {

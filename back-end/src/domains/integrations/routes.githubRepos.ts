@@ -14,6 +14,7 @@
 import { type Response, Router } from 'express';
 import { z } from 'zod';
 import { type AuthRequest, authenticate } from '../../providers/auth';
+import { githubBranchSchema } from '../../providers/githubRepos/branch';
 import { asyncHandler } from '../../utils/asyncHandler';
 import {
   GithubRepoIntegrationError,
@@ -28,7 +29,7 @@ const router = Router();
 const connectSchema = z.object({
   repo_url: z.string().min(1).max(500),
   connected_rose_project_ref: z.string().uuid().nullable().optional(),
-  default_branch: z.string().min(1).max(255).optional(),
+  default_branch: githubBranchSchema.optional(),
   replace: z.boolean().optional(),
 });
 

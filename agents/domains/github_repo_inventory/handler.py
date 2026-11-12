@@ -2,7 +2,8 @@
 
     AgentWorkflow._sync_environment_context (root only)
         ──▶ fetch_root_github_repos ──▶ fetch_github_repo_inventory_activity (one attempt)
-        ──▶ compacted entries, or [] on any failure (the section is then omitted)
+        ──▶ compacted entries ([] = none connected), or None when the fetch failed
+            (the environment block then keeps the listing the model was last shown)
 
 Fetched live on every sync (no cache), so connecting or disconnecting a repo
 shows up on the root's next turn. Imported inside the Temporal workflow sandbox.
@@ -10,7 +11,7 @@ shows up on the root's next turn. Imported inside the Temporal workflow sandbox.
 
 from __future__ import annotations
 
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from temporalio import workflow
 from temporalio.common import RetryPolicy
@@ -20,8 +21,8 @@ from domains.github_repo_inventory.service import fetch_github_repo_inventory_ac
 from helpers.github_repo_inventory import compact_github_repos
 
 
-async def fetch_root_github_repos(workflow_instance: Any) -> List[Dict[str, str]]:
-    """The workflow user's connected repos; [] without a user or when the fetch fails."""
+async def fetch_root_github_repos(workflow_instance: Any) -> Optional[List[Dict[str, str]]]:
+    """The workflow user's connected repos; [] without a user, None when the fetch failed."""
     user_id = getattr(workflow_instance, "user_id", None)
     if not isinstance(user_id, str) or not user_id:
         return []
@@ -34,5 +35,8 @@ async def fetch_root_github_repos(workflow_instance: Any) -> List[Dict[str, str]
         )
     except Exception as exc:
         workflow.logger.warning(f"[environment] GitHub repo inventory unavailable: {type(exc).__name__}")
-        return []
+        return None
+    if isinstance(result, dict) and result.get("available") is False:
+        workflow.logger.warning("[environment] GitHub repo inventory unavailable")
+        return None
     return compact_github_repos(result)

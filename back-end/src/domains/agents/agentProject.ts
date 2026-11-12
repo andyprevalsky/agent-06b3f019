@@ -31,6 +31,25 @@ export class AgentProjectNotFoundError extends Error {
   }
 }
 
+/** Typed 404 code for an explicit `github_repo_ref` the user has not connected. */
+export const GITHUB_REPO_NOT_CONNECTED_CODE = 'GITHUB_REPO_NOT_CONNECTED';
+
+/** The explicit repo ref is not connected: a 404 that carries a typed `code`. */
+export class AgentGithubRepoNotConnectedError extends AgentProjectNotFoundError {
+  readonly code = GITHUB_REPO_NOT_CONNECTED_CODE;
+  constructor() {
+    super('GitHub repo not connected');
+    this.name = 'AgentGithubRepoNotConnectedError';
+  }
+}
+
+/** JSON body of an AgentProjectNotFoundError response (typed code when it has one). */
+export function agentProjectNotFoundBody(error: AgentProjectNotFoundError) {
+  return error instanceof AgentGithubRepoNotConnectedError
+    ? { error: error.message, code: error.code }
+    : { error: error.message };
+}
+
 export class AgentPlacementConflictError extends Error {
   constructor() {
     super('Folder does not belong to the requested project');
@@ -102,7 +121,7 @@ async function asPlacementError<T>(work: () => Promise<T>): Promise<T> {
     return await work();
   } catch (error) {
     if (error instanceof GithubRepoRefNotFoundError) {
-      throw new AgentProjectNotFoundError('GitHub repo not connected');
+      throw new AgentGithubRepoNotConnectedError();
     }
     throw error;
   }

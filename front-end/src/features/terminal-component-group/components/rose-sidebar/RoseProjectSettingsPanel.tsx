@@ -9,6 +9,7 @@
  *   [DIRTY] + timeout outside 1..3600 --> [INVALID] inline hint, Save disabled
  *   GitHub repo: read-only (GET /api/folders github_repo); "Connect / Switch repo
  *   in Integrations" opens the Integrations panel, where repos are connected
+ *   (then onOpenedIntegrations: the mobile menu closes so that panel is visible)
  *
  * Sections (Rose light styles): GitHub repo (connected repo, read-only, + link
  * to Integrations; default branch, GitHub "Connected"/"Not connected" — never
@@ -51,12 +52,14 @@ function formatSyncedAt(iso: string): string {
  * Opens the Integrations panel at its GitHub Repos section with this folder
  * pre-selected for switching; null outside the apps provider.
  */
-function useOpenIntegrations(folderId: string): (() => void) | null {
+function useOpenIntegrations(folderId: string, onOpened?: () => void): (() => void) | null {
   const apps = useRoseApps();
   if (apps === null) return null;
   return () => {
     if (apps.openApp !== 'integrations') apps.toggleApp('integrations');
     focusIntegrationsSection(GITHUB_REPOS_SECTION_ID, { folderId });
+    // Mobile: the menu this panel sits in closes, so the opened panel is visible.
+    onOpened?.();
   };
 }
 
@@ -68,16 +71,18 @@ function GithubRepoSection({
   draft,
   setField,
   project,
+  onOpenedIntegrations,
 }: {
   draft: ProjectDraft;
   setField: SetField;
   project: Project;
+  onOpenedIntegrations?: () => void;
 }) {
   const lastSyncedAt = project.sync.lastSyncedAt;
   const folderRepo = useFolderGithubRepo(project.id);
   // While (or if) the folders list cannot load, the project row's repo stands in.
   const repoUrl = folderRepo === undefined ? project.repoUrl : (folderRepo?.repo_url ?? null);
-  const openIntegrations = useOpenIntegrations(project.id);
+  const openIntegrations = useOpenIntegrations(project.id, onOpenedIntegrations);
   const linkLabel = repoUrl === null ? 'Connect in Integrations' : 'Switch repo in Integrations';
   return (
     <section aria-label="GitHub repo">
@@ -209,6 +214,7 @@ export default function RoseProjectSettingsPanel({
   barExpandedWidth,
   onClose,
   embedded = false,
+  onOpenedIntegrations,
 }: {
   project: Project;
   barExpanded: boolean;
@@ -216,6 +222,8 @@ export default function RoseProjectSettingsPanel({
   barExpandedWidth?: number;
   onClose: () => void;
   embedded?: boolean;
+  /** After "Connect / Switch repo in Integrations" opened the panel (mobile closes its menu). */
+  onOpenedIntegrations?: () => void;
 }) {
   const form = useProjectSettingsForm(project);
   const content = (
@@ -231,7 +239,12 @@ export default function RoseProjectSettingsPanel({
           className="min-w-0 bg-transparent text-right outline-none"
         />
       </label>
-      <GithubRepoSection draft={form.draft} setField={form.setField} project={project} />
+      <GithubRepoSection
+        draft={form.draft}
+        setField={form.setField}
+        project={project}
+        onOpenedIntegrations={onOpenedIntegrations}
+      />
       <ProjectAgentSetupSection projectId={project.id} />
       <StartupSection
         draft={form.draft}
