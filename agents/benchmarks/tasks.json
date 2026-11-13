@@ -6189,6 +6189,12 @@
     ]
   },
   {
+    "quarantine": {
+      "since": "2026-11-13",
+      "repair": "pending-handoff:a11f1f0aba5e4d6ea010b086f5b54967",
+      "error": "Tool 'spawn_browser_agent' exceeded its exact root call limit during execution: expected 1, got 2 (Tilion sess_993d70* worker 503 on CDP connect and DELETE; browser agent recorded 0 steps). First native attempt FAILED; one automatic retry PASS (FLAKY).",
+      "evidence": "PR1910 deploy v3 smoke .context/deploy-cloud/c96ccd4b4bc36d6c51f4e4f74f752ad8d0f0cab7ea264ca9b2651ce259996b0f; RCA: tilion.ts validation+cleanup AggregateError skips replacement retry"
+    },
     "name": "browser-auth-member-discount-purchase",
     "title": "Hosted Purchase: Account Chosen For The Member Price",
     "description": "The shop lets guests buy, but members pay 10% less; the browser agent creates an account with the minted identity instead of checking out as a guest, and pays the member price.",
