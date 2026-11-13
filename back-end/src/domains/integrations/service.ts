@@ -54,6 +54,7 @@ import {
   isIntegrationAuthFailureReason,
 } from '../../providers/integrationConnectionSync';
 import * as repo from './repo';
+import { scheduleClaudeUsageRefresh } from '../../providers/computeUsageRefresh';
 import {
   redactLanternIntegration,
   updateLanternIntegration,
@@ -735,7 +736,10 @@ export async function getComputeCodeToken(
 }
 
 export { heartbeatComputeTokenLineage, releaseComputeTokenLineage };
-export { parseSubscriptionUsageReport } from '../../providers/computeSubscriptionUsage';
+export {
+  parseSubscriptionUsageReport,
+  recordCodeTaskSubscriptionUsage,
+} from '../../providers/computeSubscriptionUsage';
 
 /**
  * A worker's auth-failure report disables a login only when it names that login
@@ -775,6 +779,8 @@ export async function markTokenRateLimited(
     failureReason?: string;
     integrationId?: string;
     credential?: string;
+    rateLimitReason?: string;
+    rateLimitAuthoritative?: boolean;
   }
 ) {
   if (source === 'pool') {
@@ -786,6 +792,8 @@ export async function markTokenRateLimited(
     await markPoolTokenRateLimited(params.poolTokenId, {
       rateLimitedUntil: params.rateLimitedUntil,
       failureReason: params.failureReason,
+      rateLimitReason: params.rateLimitReason,
+      rateLimitAuthoritative: params.rateLimitAuthoritative,
     });
     return {
       ok: true,
@@ -805,6 +813,8 @@ export async function markTokenRateLimited(
       rateLimitedUntil: params.rateLimitedUntil,
       failureReason: params.failureReason,
       integrationId: params.integrationId,
+      rateLimitReason: params.rateLimitReason,
+      rateLimitAuthoritative: params.rateLimitAuthoritative,
     });
     return {
       ok: true,
@@ -831,10 +841,22 @@ export async function markComputeTokenRateLimited(
     region?: string;
     deployment?: string;
     retryAfterSeconds?: number;
+    rateLimitReason?: string;
+    rateLimitAuthoritative?: boolean;
   }
 ) {
   if (type === 'claude') {
-    return markTokenRateLimited(source, params);
+    const result = await markTokenRateLimited(source, params);
+    // Rose's own backoff (a 429 without a provider reset, a stall) says nothing
+    // about the account's windows: fetch them in the background so the usage
+    // bar shows real numbers. Never awaited; never on an auth failure.
+    if (
+      params.rateLimitAuthoritative !== true &&
+      !isIntegrationAuthFailureReason(params.failureReason)
+    ) {
+      scheduleClaudeUsageRefresh(source === 'pool' ? params.poolTokenId : params.integrationId);
+    }
+    return result;
   }
   if (type === 'gpt') {
     return markGptTokenRateLimited(source, params);
@@ -905,6 +927,8 @@ export async function markGptTokenRateLimited(
     failureReason?: string;
     integrationId?: string;
     credential?: string;
+    rateLimitReason?: string;
+    rateLimitAuthoritative?: boolean;
   }
 ) {
   if (source === 'pool') {
@@ -916,6 +940,8 @@ export async function markGptTokenRateLimited(
     await markGptPoolTokenRateLimited(params.poolTokenId, {
       rateLimitedUntil: params.rateLimitedUntil,
       failureReason: params.failureReason,
+      rateLimitReason: params.rateLimitReason,
+      rateLimitAuthoritative: params.rateLimitAuthoritative,
     });
     return {
       ok: true,
@@ -935,6 +961,8 @@ export async function markGptTokenRateLimited(
       rateLimitedUntil: params.rateLimitedUntil,
       failureReason: params.failureReason,
       integrationId: params.integrationId,
+      rateLimitReason: params.rateLimitReason,
+      rateLimitAuthoritative: params.rateLimitAuthoritative,
     });
     return {
       ok: true,

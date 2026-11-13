@@ -467,6 +467,19 @@ async function main(): Promise<void> {
         pages: [{ cardholders: [], total: 1 }],
         error: /pagination did not cover its total/,
       },
+      {
+        label: 'page beyond reported total',
+        pages: [{ cardholders: [{ id: 'first' }], total: 0 }],
+        error: /exceeded its reported total/,
+      },
+      {
+        label: 'later page beyond reported total',
+        pages: [
+          { cardholders: [{ id: 'first' }], total: 2 },
+          { cardholders: [{ id: 'second' }, { id: 'third' }], total: 2 },
+        ],
+        error: /exceeded its reported total/,
+      },
     ];
     for (const scenario of incompleteInventories) {
       let reads = 0;
