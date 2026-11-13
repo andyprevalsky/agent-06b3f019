@@ -1,0 +1,14 @@
+{
+  "parent_source": "facf1f1f8613293a82f153a7688e36866b274ecd",
+  "main_base": "8046dcbc3a67e7d4241d8eb6171b5c1652b85f71",
+  "adapter_sha256": "b3263af4f70d5bde0dd94688cc66b3f23efcc8f54c6e3cc9ef7e573b4932cb33",
+  "runtime_sha256": "ca66f193e74a934c56efbc21c4af7aea209c9c6d665be60a5e3b8a6e1c15380e",
+  "creator_sha256": "fa6f6566ca008eac6af09e190a501647f9195a55ce62d09fb71d42cea0e1d3ef",
+  "source_manifest_version": 2,
+  "source_environment_contract": "mandatory raw-base64 AGENTS_ENV_B64 and BACKEND_ENV_B64 SHA256",
+  "parent_image_input_closure": "approved566037; reconstructed tree13dfe71c0369200e5441ccfc4dc6dc5c3e08841e",
+  "original_failed_receipt_unchanged": true,
+  "new_parent_owned_source_required": true,
+  "parent_packet_independent_review": "pending at source freeze; coordinator must verify final receipt before integration",
+  "child_live_outcome": "pending; allocation is not benchmark qualification"
+}

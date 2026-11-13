@@ -5,71 +5,44 @@ The Machines API answered HTTP 200 with `[]` for an existing snapshot under conc
 reads (11/14 on 2026-11-11), which turned one smoke job into an INFRA stop. The real
 validate_private_fleet_source() must re-read until the selected snapshot appears, and
 still fail closed when it never does.
+
+The function now journals every original read privately and holds the source lease
+across reads (PR1910); these scenarios drive it through the owning lease-fleet harness
+(scripts/tests/cloudbench-source-lease-fleet.test.py) with the real bounded reader.
 """
-import os
-import re
-import subprocess
-import tempfile
+import runpy
 import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-SOURCE = ROOT / 'scripts' / 'run-bench-fleet'
-SNAPSHOT = 'vs_selected'
-
-HELPER = r'''import json, sys
-inventory = json.load(sys.stdin)
-sys.exit(0 if any(row.get("id") == "vs_selected" for row in inventory["snapshots"]) else 1)
-'''
-
-
-def function(name: str) -> str:
-    return re.search(r'^' + re.escape(name) + r'\(\) \{.*?^\}\n', SOURCE.read_text(), re.M | re.S).group()
+HARNESS = runpy.run_path(str(ROOT / 'scripts/tests/cloudbench-source-lease-fleet.test.py'))['PrivateSourceSnapshotReads']
 
 
 class PrivateSourceSnapshotRead(unittest.TestCase):
-    def run_case(self, empty_reads: int) -> tuple[subprocess.CompletedProcess, list[str]]:
-        with tempfile.TemporaryDirectory() as case:
-            helper = Path(case) / 'helper.py'
-            helper.write_text(HELPER)
-            script = function('validate_private_fleet_source') + r'''
-FLY() {
-  printf '%s\n' "$*" >> "$CASE/calls"
-  case "$1 $2" in
-    'machines list') printf '[]' ;;
-    'volumes list') printf '[]' ;;
-    'volume snapshots')
-      n=$(grep -c '^volume snapshots' "$CASE/calls")
-      if [ "$n" -le "$EMPTY_READS" ]; then printf '[]'; else printf '[{"id":"%s"}]' "$SNAPSHOT"; fi ;;
-    *) return 9 ;;
-  esac
-}
-sleep() { printf 'sleep %s\n' "$1" >> "$CASE/calls"; }
-validate_private_fleet_source
-'''
-            env = {**os.environ, 'CASE': case, 'EMPTY_READS': str(empty_reads), 'SNAPSHOT': SNAPSHOT,
-                   'PRIVATE_SOURCE_SNAPSHOT': SNAPSHOT, 'PRIVATE_SOURCE_VOLUME_ID': 'vol_source',
-                   'PRIVATE_SOURCE_FILE': '/dev/null', 'PRIVATE_SOURCE_SHA256': 'x', 'APP': 'fixture',
-                   'WARM_PARKED_VM_MEMORY': '2048', 'SOURCE_HELPER': str(helper)}
-            result = subprocess.run(['bash', '-c', 'set -u\n' + script], env=env, capture_output=True,
-                                    text=True, timeout=60)
-            return result, (Path(case) / 'calls').read_text().splitlines()
+    def run_case(self, empty_reads: int):
+        replies = [HARNESS.EMPTY] * empty_reads + [HARNESS.HEALTHY]
+        result, calls, files, modes, sleeps = HARNESS('validation').validation(replies)
+        snapshot_reads = sum(call[:3] == ['volume', 'snapshots', 'list'] for call in calls)
+        return result, snapshot_reads, sleeps
 
     def test_transient_empty_lists_are_reread_until_the_snapshot_appears(self):
-        result, calls = self.run_case(empty_reads=2)
+        result, snapshot_reads, sleeps = self.run_case(empty_reads=2)
         self.assertEqual(0, result.returncode, result.stderr)
-        self.assertEqual(3, sum(c.startswith('volume snapshots') for c in calls))
-        self.assertEqual(['sleep 2', 'sleep 4'], [c for c in calls if c.startswith('sleep')])
+        self.assertEqual(3, snapshot_reads)
+        self.assertEqual(2, len(sleeps))
+        self.assertTrue(all(5 * i <= v <= 5 * i + 3 for i, v in enumerate(sleeps, 1)), sleeps)
 
     def test_first_complete_list_is_used_without_rereading(self):
-        result, calls = self.run_case(empty_reads=0)
+        result, snapshot_reads, sleeps = self.run_case(empty_reads=0)
         self.assertEqual(0, result.returncode, result.stderr)
-        self.assertEqual(1, sum(c.startswith('volume snapshots') for c in calls))
+        self.assertEqual(1, snapshot_reads)
+        self.assertEqual([], sleeps)
 
     def test_a_snapshot_that_never_appears_still_fails_closed_after_bounded_reads(self):
-        result, calls = self.run_case(empty_reads=99)
+        result, snapshot_reads, sleeps = self.run_case(empty_reads=99)
         self.assertNotEqual(0, result.returncode)
-        self.assertEqual(6, sum(c.startswith('volume snapshots') for c in calls))
+        self.assertEqual(12, snapshot_reads)
+        self.assertIn('remained empty after 12 bounded reads', result.stderr)
 
 
 class WarmSnapshotEpochRead(unittest.TestCase):

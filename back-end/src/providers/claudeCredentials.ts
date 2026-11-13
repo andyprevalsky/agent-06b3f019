@@ -6,6 +6,11 @@ import {
 } from './integrationConnectionSync';
 import { claudeEnvelopeExpiredAt, parseClaudeEnvelope } from './claudeOauthEnvelope';
 import type { StoredLogin } from './codeLoginRejection';
+import {
+  cooldownMetaFields,
+  scopeUnnamedUserCooldown,
+  type CooldownMeta,
+} from './computeSubscriptionUsage';
 import { prisma } from './database';
 import { createLogger } from './logger';
 
@@ -433,7 +438,7 @@ export async function markPoolTokenRateLimited(
     rateLimitedUntil?: string | Date | null;
     cooldownMs?: number;
     failureReason?: string | null;
-  }
+  } & CooldownMeta
 ): Promise<void> {
   if (isIntegrationAuthFailureReason(options?.failureReason)) {
     await prisma.integration.update({
@@ -455,7 +460,7 @@ export async function markPoolTokenRateLimited(
   const until = resolveRateLimitedUntil(options?.rateLimitedUntil, options?.cooldownMs);
   const { count } = await prisma.integration.updateMany({
     where: { id: poolTokenId, ...notAlreadyBackedOffLonger(until) },
-    data: { rateLimitedUntil: until },
+    data: { rateLimitedUntil: until, ...cooldownMetaFields(options) },
   });
   if (count === 0) {
     // `updateMany` matched nothing, which has TWO causes: the row already has a
@@ -490,7 +495,7 @@ export async function markUserTokenRateLimited(
     failureReason?: string | null;
     accountId?: string | null;
     integrationId?: string | null;
-  }
+  } & CooldownMeta
 ): Promise<void> {
   if (isIntegrationAuthFailureReason(options?.failureReason)) {
     const scopedWhere = {
@@ -572,16 +577,26 @@ export async function markUserTokenRateLimited(
   }
 
   const until = resolveRateLimitedUntil(options?.rateLimitedUntil, options?.cooldownMs);
+  // A cooldown names the login that hit it. Without an integration or account
+  // id it may only land when the user has exactly one claude_code row; with
+  // several it would put every sibling subscription on cooldown (every usage
+  // bar red), so it is dropped instead.
+  const scope = await scopeUnnamedUserCooldown(
+    userId,
+    'claude_code',
+    ['CONNECTED', 'EXPIRED'],
+    options
+  );
+  if (scope === null) return;
   const { count } = await prisma.integration.updateMany({
     where: {
       userId,
       name: 'claude_code',
       status: { in: ['CONNECTED', 'EXPIRED'] },
-      ...(options?.integrationId ? { id: options.integrationId } : {}),
-      ...(options?.accountId ? { accountId: options.accountId } : {}),
+      ...scope,
       ...notAlreadyBackedOffLonger(until),
     },
-    data: { rateLimitedUntil: until },
+    data: { rateLimitedUntil: until, ...cooldownMetaFields(options) },
   });
   if (count === 0) {
     // Same disambiguation as the pool path: no match means either an existing

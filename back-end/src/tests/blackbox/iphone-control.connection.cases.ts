@@ -309,6 +309,94 @@ export const connectionCases: Case[] = [
     },
   ],
   [
+    'an owner-deleted setup agent ends setup: status is not_connected and Connect relaunches; a foreign agent still 409s',
+    async (h) => {
+      const f = await h.fixture();
+      await h.request(f.userId, `/leases/${f.leaseId}/release`, { method: 'POST' });
+      const device = await prisma.iPhoneDevice.findUniqueOrThrow({ where: { id: f.deviceId } });
+      const old = setupState(device.setupEncrypted);
+      assert.equal(
+        (
+          await h.request(f.userId, '/device/setup-profile', {
+            method: 'PUT',
+            body: {
+              expectedProfileRevision: old.profileRevision,
+              expectedAppleIdentity: 'deleted-owner@example.invalid',
+              expectedGoogleIdentity: 'deleted-google@example.invalid',
+            },
+          })
+        ).status,
+        200
+      );
+      const launched: string[] = [];
+      h.setupAgentLauncher = async (userId, _deviceId, reservation) => {
+        if (await prisma.agent.findUnique({ where: { id: reservation.agentId } })) return;
+        launched.push(reservation.agentId);
+        await prisma.agent.create({
+          data: {
+            id: reservation.agentId,
+            userId,
+            status: 'ACTIVE',
+            goal: 'Synthetic setup agent',
+            temporalWorkflowId: reservation.agentId,
+            temporalFirstExecutionRunId: randomUUID(),
+            temporalWorkflowStartPending: false,
+          },
+        });
+      };
+      const connect = async () => {
+        const revision = (await h.request(f.userId, '/connection', { actor: 'user' })).data
+          .connectionRevision;
+        return h.request(f.userId, '/connect', {
+          actor: 'user',
+          method: 'POST',
+          body: { requestKey: randomUUID(), expectedRevision: revision },
+        });
+      };
+      const first = await connect();
+      assert.equal(first.status, 200);
+      const firstAgent = first.data.setupAgentId as string;
+      // The production incident: the owner soft-deleted the reserved setup agent.
+      await prisma.agent.update({
+        where: { id: firstAgent },
+        data: { status: 'FAILED', deletedAt: new Date() },
+      });
+      const ended = await h.request(f.userId, '/connection', { actor: 'user' });
+      assert.equal(ended.status, 200, 'a deleted setup agent must not wedge the connection');
+      assert.equal(ended.data.status, 'not_connected');
+      const second = await connect();
+      assert.equal(second.status, 200, 'Connect must not be wedged by a deleted setup agent');
+      assert.notEqual(second.data.setupAgentId, firstAgent);
+      assert.deepEqual(launched, [firstAgent, second.data.setupAgentId]);
+      assert.equal(
+        (await prisma.iPhoneDevice.findUniqueOrThrow({ where: { userId: f.userId } })).id,
+        f.deviceId,
+        'Connect must keep the bound device'
+      );
+      assert.equal(
+        (await h.request(f.userId, '/connection', { actor: 'user' })).data.status,
+        'setting_up'
+      );
+      // A reservation pointing at another user's agent is still refused.
+      const foreign = await h.fixture();
+      const revision = (await h.request(f.userId, '/connection', { actor: 'user' })).data
+        .connectionRevision;
+      await prisma.agent.update({
+        where: { id: second.data.setupAgentId as string },
+        data: { userId: foreign.userId },
+      });
+      assert.equal((await h.request(f.userId, '/connection', { actor: 'user' })).status, 409);
+      const refused = await h.request(f.userId, '/connect', {
+        actor: 'user',
+        method: 'POST',
+        body: { requestKey: randomUUID(), expectedRevision: revision },
+      });
+      assert.equal(refused.status, 409);
+      assert.equal(refused.data.error, 'iPhone setup agent is unavailable');
+      assert.deepEqual(launched, [firstAgent, second.data.setupAgentId]);
+    },
+  ],
+  [
     'disabled Connect iPhone cannot start an agent or receive private grants',
     async (h) => {
       const f = await h.fixture();

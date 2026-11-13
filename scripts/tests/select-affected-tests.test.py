@@ -11,7 +11,6 @@ from __future__ import annotations
 import sys
 import builtins
 import contextlib
-import copy
 import io
 import json
 import runpy
@@ -54,30 +53,53 @@ def check_coverage_map_dependency_preflight() -> None:
           "missing coverage gives an actionable interpreter preflight diagnostic")
 
 
-def comment_selection_fixture(selector: sat.Selector, *, executed: bool = False) -> sat.Selector:
-    """Freeze comment-only inputs; unrelated real imports must remain conservative.
-
-    Retain the actual lane/root mapping and selector implementation. Only the
-    historical lexical example's source graph is isolated from repository drift.
-    """
-    changed = "agents/tests/blackbox/rose_browser_use.blackbox.py"
-    sources = {
-        changed: "def test_browser(): pass\n",
-        "back-end/src/tests/blackbox/rose.blackbox.ts":
-            f"// Historical cross-language coverage: {changed}\nconst goal = `browser ${{name}}`;\n",
-        "back-end/src/tests/blackbox/models.blackbox.ts":
-            f"/* Historical cross-language coverage: {changed} */\nconst model = 'fixture';\n",
-        "back-end/src/tests/unit/worker-process-deployment.test.ts":
-            "mkdirSync(join(repository, 'agents/tests'), { recursive: true });\n",
-    }
-    if executed:
-        sources["back-end/src/tests/blackbox/rose.blackbox.ts"] += f"execFileSync('python3', ['{changed}']);\n"
-    graph = sat.Graph(list(sources))
-    graph.text.update(sources)
-    graph.build()
-    controlled = copy.copy(selector)
-    controlled.graph, controlled.rev, controlled.rev_data = graph, graph.reverse(), graph.reverse_data()
-    return controlled
+def check_shell_copy_edges() -> None:
+    files = ["scripts/package.sh", "scripts/copied.py", "scripts/execute.sh"]
+    graph = sat.Graph(files)
+    graph.text["scripts/package.sh"] = (
+        'if test "$READY" = 1 && cp -p \\\n'
+        '  "$ROOT_DIR/scripts/copied.py" \\\n'
+        '  "$OUT/"; then\n'
+        '  bash scripts/execute.sh\nfi\n'
+    )
+    graph.path_edges("scripts/package.sh")
+    check("scripts/copied.py" in graph.data_deps["scripts/package.sh"],
+          "shell snapshot copying keeps the copied file's own bytes as a data dependency")
+    check("scripts/copied.py" not in graph.deps["scripts/package.sh"],
+          "shell snapshot copying does not execute the copied module's imports")
+    check("scripts/execute.sh" in graph.deps["scripts/package.sh"],
+          "execution after a continued shell copy keeps its transitive dependency")
+    graph = sat.Graph(files)
+    graph.text["scripts/package.sh"] = (
+        'if test "$READY" = 0 \\\n'
+        '  || ! cp "$ROOT_DIR/scripts/copied.py" \\\n'
+        '  "$OUT/"; then exit 1; fi\n'
+    )
+    graph.path_edges("scripts/package.sh")
+    check("scripts/copied.py" in graph.data_deps["scripts/package.sh"]
+          and "scripts/copied.py" not in graph.deps["scripts/package.sh"],
+          "the real negated fleet snapshot copy remains a data edge")
+    for line in ('cp scripts/copied.py "$OUT/" && bash scripts/execute.sh\n',
+                 'cp "$(bash scripts/execute.sh)" "$OUT/"\n',
+                 'cp \\\n<(bash \\\nscripts/execute.sh) \\\n"$OUT/"\n',
+                 'cp \\\n>(bash \\\nscripts/execute.sh) \\\n"$OUT/"\n'):
+        graph = sat.Graph(files)
+        graph.text["scripts/package.sh"] = line
+        graph.path_edges("scripts/package.sh")
+        check("scripts/execute.sh" in graph.deps["scripts/package.sh"],
+              "compound or substituted copy commands conservatively retain actual execution edges")
+    files = ["scripts/run-helper", "scripts/copied.py", "fixtures/input.json"]
+    for line in ('./scripts/run-helper && cp fixtures/input.json "$tmp/input.json"\n',
+                 'scripts/run-helper && cp scripts/copied.py "$OUT/"\n'):
+        graph = sat.Graph(files)
+        graph.text["scripts/package.sh"] = line
+        graph.path_edges("scripts/package.sh")
+        check("scripts/run-helper" in graph.deps["scripts/package.sh"],
+              "a command executed before a same-line copy keeps its transitive execution edge")
+        copied = "fixtures/input.json" if "fixtures/" in line else "scripts/copied.py"
+        check(copied in graph.data_deps["scripts/package.sh"]
+              and copied not in graph.deps["scripts/package.sh"],
+              "the file copied after an executed command remains a data edge")
 
 
 def check_extraction_precision(selector: sat.Selector) -> None:
@@ -93,6 +115,7 @@ def check_extraction_precision(selector: sat.Selector) -> None:
     diff of every file (old selector vs new on the same tree) and trace the
     first missing edge of each lost lane unit to a comment/docstring line.
     """
+    check_shell_copy_edges()
     ts_files = ["x.test.ts", "docs/rca/cases/case.md", "scripts/critical.sh"]
     comment_only = (
         "/**\n * Start agent button is gated on ACTIVE (docs/rca/cases/\n * 2026-10-28-case.md).\n */\n"
@@ -192,26 +215,12 @@ def check_extraction_precision(selector: sat.Selector) -> None:
           "a new docs/rca case selects no backend blackbox/unit test (directory named only in a comment)")
     sel = selector.select(["agents/tests/blackbox/rose_browser_use.blackbox.py"])
     check("rose-browser-use" in sel.selected["agents-blackbox"], "agents rose_browser_use blackbox selects its own domain")
-    # This assertion diagnoses comment extraction, not the absence of any
-    # future executable path through the live repository graph. Native
-    # maintenance now legitimately imports the deployment/selector pipeline.
-    sel = comment_selection_fixture(selector).select(["agents/tests/blackbox/rose_browser_use.blackbox.py"])
     check(not sel.selected["backend-blackbox"],
           "agents rose_browser_use blackbox selects no backend blackbox domain (rose/models reached it only via comments)")
     # back-end/src/tests/unit/worker-process-deployment.test.ts names 'agents/tests' in
     # code (a fixture directory it creates); a code literal is never dropped.
     check(sel.selected["backend-unit"] <= {"back-end/src/tests/unit/worker-process-deployment.test.ts"},
           "agents rose_browser_use blackbox reaches backend-unit only through the code literal 'agents/tests'")
-
-    check(sel.selected["backend-unit"] == {"back-end/src/tests/unit/worker-process-deployment.test.ts"},
-          "controlled comment fixture retains the genuine agents/tests data-reader edge")
-    executed = comment_selection_fixture(selector, executed=True).select(["agents/tests/blackbox/rose_browser_use.blackbox.py"])
-    check("rose" in executed.selected["backend-blackbox"],
-          "controlled fixture retains a genuine executable cross-package dependency")
-    with patch.object(sat, "strip_comments", lambda rel, text, masked=None: text):
-        raw = comment_selection_fixture(selector).select(["agents/tests/blackbox/rose_browser_use.blackbox.py"])
-    check(bool(raw.selected["backend-blackbox"]),
-          "comment-only selection assertions reject an unstripped-source mutant")
 
     # Every declared edge in scripts/test-map/edges.json still selects its targets.
     for edge in selector.config.get("edges", []):

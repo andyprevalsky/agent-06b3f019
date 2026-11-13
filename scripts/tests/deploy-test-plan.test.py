@@ -1214,7 +1214,7 @@ for line in sys.stdin:
                     self.scan()
                 self.reap(child)
 
-    @quarantine(since='2026-11-11', repair='pending-handoff:7a087289ad244447887849683a096b6e',
+    @quarantine(since='2026-11-11', repair='https://boxes.dev/thread/thr_246005fb0d8546518a40a6cd55d83a70',
                 error="AssertionError: [0.05] is not false : the service manager is skipped on evidence, not after the grace window",
                 evidence='PR #1928 deploy-command-structural FLAKY occurrence 7a087289ad244447887849683a096b6e (source 622d4e979)')
     def test_own_user_service_manager_is_skipped_only_on_cgroup_evidence(self):
@@ -1626,10 +1626,12 @@ class InterruptedFreshRecovery(unittest.TestCase):
         boot=Path('/proc/sys/kernel/random/boot_id').read_text().strip()
         birth=lambda n:f'proc-start:{boot}:{n}'
         self.parent_pid=99999998;hubpid=99999099
-        hub=self.runs/'_hub'/('agent-link-server.8765.'+'c'*32+'.owner')
+        # The custody check scans the host's live sockets: never claim a port a real Hub may hold.
+        hubport=reserved_loopback_port(self)
+        hub=self.runs/'_hub'/('agent-link-server.'+str(hubport)+'.'+'c'*32+'.owner')
         self.put(hub, '\n'.join(f'{k}={v}' for k,v in dict(version=1,pid=hubpid,pid_start=birth(10),pgid=hubpid,owner_token='c'*32,
             command=str(self.root/'agents/benchmarks/agent_link_server.py'),argv_sha256='a'*64,root=str(self.runs),runs_root=str(self.runs),
-            repo_root=str(self.root),context_dir=str(self.runs/'_hub'),host='127.0.0.1',port=8765,status='live-transfer-required').items())+'\n')
+            repo_root=str(self.root),context_dir=str(self.runs/'_hub'),host='127.0.0.1',port=hubport,status='live-transfer-required').items())+'\n')
         hub.chmod(0o444)
         self.hub=hub
         self.summary=copy.deepcopy(InterruptedFreshBoundary.SUMMARY)
