@@ -75,14 +75,14 @@ rl.on('line',line=>{
 rl.on('close',()=>{const done=()=>process.exit(0);if(loop)loop.on('exit',done);else done();});
 `;
 
-interface LiveServer {
+export interface LiveServer {
   child: ChildProcess;
   port: number;
   dir: string;
   alive: () => boolean;
 }
 
-function processAlive(pid: number | undefined): boolean {
+export function processAlive(pid: number | undefined): boolean {
   if (pid === undefined) return false;
   try {
     process.kill(pid, 0);
@@ -93,7 +93,7 @@ function processAlive(pid: number | undefined): boolean {
 }
 
 /** Start the ws-server as `node <home>/ws-server.mjs` (the sandbox's argv) with the stub CLI. */
-async function startLiveServer(
+export async function startLiveServer(
   home: string,
   previousTaskId: string,
   env: Record<string, string> = {}
@@ -147,13 +147,13 @@ async function startLiveServer(
   throw new Error(`ws-server never listened:\n${out}`);
 }
 
-function counterLines(dir: string): number[] {
+export function counterLines(dir: string): number[] {
   const path = join(dir, 'counter.txt');
   if (!existsSync(path)) return [];
   return readFileSync(path, 'utf8').split('\n').filter(Boolean).map(Number);
 }
 
-function turns(dir: string): Array<{ turn: number; text: string; pid: number }> {
+export function turns(dir: string): Array<{ turn: number; text: string; pid: number }> {
   const path = join(dir, 'turns.jsonl');
   if (!existsSync(path)) return [];
   return readFileSync(path, 'utf8')
@@ -162,7 +162,7 @@ function turns(dir: string): Array<{ turn: number; text: string; pid: number }> 
     .map((line) => JSON.parse(line) as { turn: number; text: string; pid: number });
 }
 
-async function until(what: string, predicate: () => boolean, timeoutMs = 15_000) {
+export async function until(what: string, predicate: () => boolean, timeoutMs = 15_000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     if (predicate()) return;
@@ -179,7 +179,7 @@ function thaw(server: LiveServer): void {
   process.kill(-(server.child.pid as number), 'SIGCONT');
 }
 
-async function pausedSession(ctx: CodeSessionLifecycleContext, label: string) {
+export async function pausedSession(ctx: CodeSessionLifecycleContext, label: string) {
   const agentId = randomUUID();
   await prisma.agent.create({
     data: { id: agentId, userId: ctx.userA, busId: agentId, goal: `Live resume ${label}` },
@@ -236,14 +236,14 @@ type AttachLive = (
   turnToken?: (taskId: string) => string
 ) => Promise<{ attached: boolean; reason: string; historyEvents?: number }>;
 
-function attachLiveCodeCli(): AttachLive {
+export function attachLiveCodeCli(): AttachLive {
   const attach = (codeSessionSandbox as unknown as { attachLiveCodeCli?: AttachLive })
     .attachLiveCodeCli;
   assert.equal(typeof attach, 'function', 'e2bCodeSessionSandbox exports attachLiveCodeCli');
   return attach as AttachLive;
 }
 
-const CLAUDE_KEYS = [
+export const CLAUDE_KEYS = [
   'ANTHROPIC_API_KEY',
   'ANTHROPIC_BASE_URL',
   'CLAUDE_CODE_CREDENTIALS',
@@ -332,7 +332,7 @@ export function registerCodeSessionLiveResumeCases(ctx: CodeSessionLifecycleCont
       assert.deepEqual(
         seen.map((turn) => turn.text),
         [
-          'Task:\nRun the counter loop',
+          '/goal Task:\nRun the counter loop',
           'Task:\nReport how many lines counter.txt has',
           'are you done?',
         ],
@@ -439,7 +439,7 @@ export function registerCodeSessionLiveResumeCases(ctx: CodeSessionLifecycleCont
       const seen = turns(server.dir);
       assert.deepEqual(
         seen.map((turn) => turn.text),
-        ['Task:\nRun the counter loop', goal],
+        ['/goal Task:\nRun the counter loop', goal],
         'the goal reached the CLI exactly once'
       );
       assert.equal(new Set(seen.map((turn) => turn.pid)).size, 1, 'one CLI process');
@@ -477,7 +477,7 @@ export function registerCodeSessionLiveResumeCases(ctx: CodeSessionLifecycleCont
       await until('the CLI to read both follow-up turns', () => turns(server.dir).length >= 3);
       assert.deepEqual(
         turns(server.dir).map((turn) => turn.text),
-        ['Task:\nRun the counter loop', 'Task:\nfirst follow-up', 'Task:\nsecond follow-up']
+        ['/goal Task:\nRun the counter loop', 'Task:\nfirst follow-up', 'Task:\nsecond follow-up']
       );
     } finally {
       try {

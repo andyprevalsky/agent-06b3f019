@@ -403,3 +403,117 @@ retained under `/var/tmp/pr1662-49-seed-ledger-isolation`. No live provider,
 production accounting cleanup, canonical state/source edit or full structural
 sweep was performed by this reduction. The parent-owned combined-source full
 gate is still required; prior round48 stop timing remains a separate UNKNOWN.
+
+## November 7 Google400: ordinary full-width campaigns omitted pending owners
+
+The ordinary 14-controller campaign `75588b14a9ecaa2a3efeb1caac10b589c1c79e3d1904977c21611f498acf3d87`
+on source `3c1f4603563862c70cb5e3eb5adbd4e21288f2c3` failed before task execution.
+Two jobs failed with `cleanup reserve admission failed: [Errno 28] insufficient
+physical cleanup floors for pending controllers`; two cancelled siblings also
+exited1 at the same floor guard or `cleanup reserve consumed controller operating
+headroom`. Other siblings exited through owned cancellation. A prior observation
+had7,758,327,808 free bytes. Fourteen preferred512MiB allocations plus256MiB
+working headroom do not fit that disk, while all32MiB minimum reserves plus the
+same working headroom do. These are unchanged policy values, not requested limits.
+
+The first bad boundary is ordinary campaign dispatch. `run-bench-campaign.py`
+prepared cleanup cohort tickets only when `strict_start` was enabled. This
+ordinary campaign had no `startup-cohorts` or cold ticket grant; its controllers
+registered as separate standalone groups. An early owner could consume its
+preferred reserve before a later owner's minimum and operating headroom became
+visible. The late failure is not evidence of cold-ticket double debit: this
+campaign never created those tickets. Physical floor checks correctly refused
+the overcommitted local disk.
+
+The owning regression uses the real campaign dispatcher, extracted native fleet
+reserve/release functions and existing cleanup-ticket helper against a finite
+8000MiB storage transport. Fourteen concurrent real child processes preserve
+512/32/256 policy, with ten allowed to admit before the last four register. The
+original dispatcher fails with the same physical-floor ENOSPC. The candidate
+passes all14, and a task-start event occurs before the final reserve attempt,
+proving this repair adds no task barrier. Sparse fixture files and bounded
+block-reporting transport model physical allocation without writing GiBs; this
+is accounting proof, not a real cloud task result.
+
+The scoped repair predeclares all known owner liabilities for ordinary schedules
+whose total job count is at most their requested concurrency. It reuses the
+existing strict-cohort budget preparation, owner assignment, claim, release and
+retirement protocol under a separate `cleanup-cohorts` directory. The strict
+startup canary, synchronization, scheduling loop, child argv and cleanup floors
+are unchanged. Rolling ordinary schedules with more jobs than concurrent slots
+retain their previous path and are explicitly outside this repair's claim.
+
+The identical final regression fails on the original producer and passes on the
+candidate. Eight campaign controls pass, including no-barrier ordering,
+preparation failure with no task dispatch, assignment failure with joined child
+and retired grant, and unchanged strict startup/failure controls. All11 existing
+cleanup-ticket tests also pass, including nested-canary ancestry and the single
+released nested slot. Original logs, exact patch hashes and commands are recorded
+in `.context/rca-google400/ordinary-cleanup-candidate/handoff.json`.
+
+The native75588 failed outcomes remain immutable. Supported normal preallocation
+reconciliation retains14 sealed zero-resource audits and two retired custody
+records with no acceptance credit. The original proof remains `still_bound`
+before and after candidate validation; no validator exception or producer proof
+rewrite was added. Fresh full-source gates and an actual14-task cloud smoke after
+integration remain pending. This recurrence therefore preserves this case's
+`mitigated` status and does not claim the deployment or Google/phone acceptance
+has completed.
+
+The user required keeping Freedom and all evidence, preserving concurrency and
+cleanup floors, and avoiding limit changes, resets or benchmark substitution.
+The accepted scope fixes cohort accounting before launch instead of deleting
+tracked history or introducing a synchronization barrier.
+
+## November 7 Google400: retired standalone headroom remained in ticket admission
+
+After the full-width accounting repair, campaign `b12b2d7c...` committed and
+released all14 cleanup claims and retired its budget. It failed later because
+the current schema's canonical PG15 seed was not published; it earned no task
+credit. After both schema-current seed publications, campaign `46904a5e...`
+failed before any controller launched with `cleanup_ticket_failure=prepare`.
+Only `prepare.lock` existed; no budget, grant or per-member claim had been
+written. The original exception and atomic free-space observation were not
+captured, so that historical error remains UNKNOWN.
+
+Readonly accounting nevertheless exposed a concrete admission defect. The
+filesystem's legacy ledger still retained ten consumed standalone owners from
+75588, all with absent native PIDs. Its bytes were unchanged. The ticket helper's
+`legacy_liability` charged2560MiB of working headroom indefinitely, while the
+legacy allocator's own budget uses live consumers. At the later observation,
+6,919,761,920 free bytes were below the7,214,202,880 bytes demanded by those
+retired floors plus15 slots (14owners and one nested canary) at unchanged
+32MiB cleanup minimum and256MiB working headroom. No dangling cold grant existed.
+This recalculation is current evidence, not a replacement for the missing
+original atomic sample or proof that a parallel PG16 publication caused it.
+
+The owning regression gives the real ticket CLI a private6500MiB volume,
+14members and ten spawned-then-joined standalone owner records. Original source
+fails the physical-floor check; the candidate admits the cohort with unchanged
+512/32/256 policy and exact historical ledger bytes. Only strictly valid
+standalone consumed owners with positively absent processes and no associated
+inflight allocation can stop contributing working headroom. Live or reused PIDs,
+permission/observation failures, pending members, cohorts and allocator debts
+retain liability; malformed records fail closed. No process, reserve file,
+provider resource or historical ledger record is removed.
+
+Fifteen helper tests pass, including all11 original tests, both stored birth
+formats, unknown/live/reused/debit controls and exact no-process `ps` semantics.
+All28 campaign tests pass. A separate causal fault-injection regression requires
+ordinary preparation failures to retain the actual exception class and a bounded
+message, omitting subprocess argv, OS filenames, tracebacks and injected bodies.
+The original producer lacks that field; the candidate passes all three injected
+exception classes. Strict startup behavior and its original tests are unchanged.
+Candidate patch and logs are recorded in
+`.context/rca-google400/stale-dead-candidate/handoff.json`.
+
+The candidate's readonly calculation over the actual ledger removes only the
+retired working-headroom charge; its SHA256 remains
+`f4c13463773c3d041e1e7422104aac1f80d3b1c4064f284b02b9dd4dd0bb6baf`.
+The normal typed zero-controller cleanup reconciliation subsequently completed
+with no acceptance credit; the original native outcome remains unchanged.
+Combined cycle tests passed 228/228 and all12 worker Prisma clients were prepared
+through the normal dependency command after the last owned worker retired.
+Final combined-source gates and a fresh real cloud smoke remain pending. This
+recurrence does not establish the uncaptured historical exception or claim
+production Google/phone acceptance.

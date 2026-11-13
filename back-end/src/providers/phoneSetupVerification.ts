@@ -30,6 +30,8 @@ export interface SetupProof {
   profileRevision: number;
   workflowId: string;
   providerEpoch: number;
+  /** Original native observation epoch when a confirmed stop carries the device settings. */
+  observedProviderEpoch?: number;
   expectedPhone: string | null;
   runtime?: SetupRuntime;
 }
@@ -73,13 +75,20 @@ export function proofCurrent(
 }
 export function verificationDto(
   value: SetupChecks | undefined,
-  context: Parameters<typeof proofCurrent>[1]
+  context: Parameters<typeof proofCurrent>[1],
+  runtimeObservation?: {
+    value: SetupChecks | undefined;
+    context: Parameters<typeof proofCurrent>[1];
+  }
 ) {
   const checks = Object.fromEntries(
     SETUP_TARGETS.map((target) => {
-      const proof = value?.checks[target];
+      const source = target === 'runtime' && runtimeObservation ? runtimeObservation.value : value;
+      const proof = source?.checks[target];
+      const binding =
+        target === 'runtime' && runtimeObservation ? runtimeObservation.context : context;
       const current =
-        value?.requirementsVersion === SETUP_REQUIREMENTS_VERSION && proofCurrent(proof, context);
+        source?.requirementsVersion === SETUP_REQUIREMENTS_VERSION && proofCurrent(proof, binding);
       return [
         target,
         {
@@ -106,13 +115,17 @@ export function verificationDto(
     context.expectedPhone !== null &&
     context.expectedGoogleIdentity !== undefined &&
     context.expectedGoogleIdentity !== '';
+  const runtimeValue = runtimeObservation ? runtimeObservation.value : value;
+  const runtimeContext = runtimeObservation?.context ?? context;
   const runtime =
-    value?.requirementsVersion === SETUP_REQUIREMENTS_VERSION ? value.checks.runtime : undefined;
+    runtimeValue?.requirementsVersion === SETUP_REQUIREMENTS_VERSION
+      ? runtimeValue.checks.runtime
+      : undefined;
   const currentRuntime =
-    proofCurrent(runtime, context) &&
+    proofCurrent(runtime, runtimeContext) &&
     runtime !== undefined &&
     runtime.status === 'confirmed' &&
-    (context.now?.getTime() ?? Date.now()) - Date.parse(runtime.observedAt) <= 120_000
+    (runtimeContext.now?.getTime() ?? Date.now()) - Date.parse(runtime.observedAt) <= 120_000
       ? runtime.runtime
       : undefined;
   const operationalStatus =
@@ -156,7 +169,85 @@ export function validSetupChecks(value: unknown): value is SetupChecks {
       typeof p.workflowId === 'string' &&
       Number.isSafeInteger(p.profileRevision) &&
       Number.isSafeInteger(p.providerEpoch) &&
+      (p.observedProviderEpoch === undefined ||
+        (Number.isSafeInteger(p.observedProviderEpoch) &&
+          p.observedProviderEpoch >= 0 &&
+          p.observedProviderEpoch <= p.providerEpoch)) &&
       typeof p.evidenceDigest === 'string' &&
       (p.expectedPhone === null || typeof p.expectedPhone === 'string')
   );
+}
+
+export type SetupStepStatus = 'pending' | 'in_progress' | 'done' | 'failed';
+export interface SetupProgress {
+  steps: Array<{ key: string; label: string; status: SetupStepStatus }>;
+}
+const PROGRESS_STEPS: ReadonlyArray<{
+  key: string;
+  label: string;
+  targets: readonly SetupTarget[];
+}> = [
+  { key: 'session', label: 'Phone booted', targets: [] },
+  { key: 'portrait_lock', label: 'Orientation locked', targets: ['portrait_lock'] },
+  { key: 'apple_account', label: 'Apple ID signed in', targets: ['apple_account'] },
+  {
+    key: 'icloud',
+    label: 'iCloud connected',
+    targets: ['icloud_messages', 'icloud_keychain', 'icloud_contacts'],
+  },
+  { key: 'imessage', label: 'iMessage on', targets: ['imessage', 'receive_address'] },
+  { key: 'gmail', label: 'Gmail connected', targets: ['gmail'] },
+  { key: 'passcode', label: 'Passcode set', targets: ['device_passcode'] },
+];
+/** Display projection of the stored checks for the connection screen; never a readiness grant.
+ * A current 'disabled' observation fails its step; a blocked setup fails its next open step. */
+export function setupProgress(
+  verification: ReturnType<typeof verificationDto>,
+  input: {
+    status: 'not_connected' | 'setting_up' | 'ready' | 'needs_reauth';
+    setupState: string;
+    providerState: string;
+    passcodeExceptionAllowed: boolean;
+  }
+): SetupProgress | null {
+  if (input.status === 'not_connected') return null;
+  const checks = verification.checks;
+  const confirmed = (target: SetupTarget) =>
+    checks[target].current && checks[target].status === 'confirmed';
+  const disabled = (target: SetupTarget) =>
+    checks[target].current && checks[target].status === 'disabled';
+  const booted =
+    input.providerState === 'READY' ||
+    SETUP_TARGETS.some((target) => checks[target].observedAt !== undefined);
+  const resolved = PROGRESS_STEPS.map((step): SetupStepStatus | null => {
+    if (input.status === 'ready') return 'done';
+    if (step.key === 'session') return booted ? 'done' : null;
+    if (step.key === 'passcode') {
+      if (verification.securityDisposition !== 'blocked') return 'done';
+      return disabled('device_passcode') && !input.passcodeExceptionAllowed ? 'failed' : null;
+    }
+    if (step.targets.every(confirmed)) return 'done';
+    if (
+      step.targets.some(disabled) ||
+      (step.key === 'apple_account' && input.status === 'needs_reauth')
+    )
+      return 'failed';
+    return null;
+  });
+  const next = resolved.indexOf(null);
+  return {
+    steps: PROGRESS_STEPS.map((step, index) => ({
+      key: step.key,
+      label: step.label,
+      status:
+        resolved[index] ??
+        (index !== next
+          ? 'pending'
+          : input.setupState === 'blocked'
+            ? 'failed'
+            : input.status === 'setting_up'
+              ? 'in_progress'
+              : 'pending'),
+    })),
+  };
 }

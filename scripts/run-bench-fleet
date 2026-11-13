@@ -790,7 +790,6 @@ if [ -z "${CLOUDBENCH_SCRIPT_SNAPSHOT:-}" ]; then
        "$ROOT_DIR/scripts/cloudbench-warm-source.py" \
        "$ROOT_DIR/scripts/cloudbench-aggregate-runs.py" \
        "$ROOT_DIR/scripts/cloudbench_execution_provenance.py" \
-       "$ROOT_DIR/scripts/cloudbench_preallocation.py" \
        "$ROOT_DIR/scripts/cloudbench_result.py" \
        "$ROOT_DIR/scripts/cloudbench-exact-session-cleanup.py" \
        "$ROOT_DIR/scripts/cloudbench-guest-recovery.py" \
@@ -3858,10 +3857,6 @@ def record(path: Path, required):
             raise SystemExit(1)
         fields[key] = value
     allowed = set(required)
-    if path == audit / "meta" and ({"controller_pid", "controller_pid_start"} & set(fields)):
-        allowed.update({"controller_pid", "controller_pid_start"})
-        if not re.fullmatch(r"[1-9][0-9]*", fields.get("controller_pid", "")) or not fields.get("controller_pid_start"):
-            raise SystemExit(1)
     if "source_manifest_sha256" in fields and path.name == "meta":
         allowed.add("source_manifest_sha256")
         digest = fields["source_manifest_sha256"]
@@ -4158,10 +4153,6 @@ PY
             printf 'run_id=%s\n' "$RUN_ID"
             printf 'app=%s\n' "$APP"
             printf 'workspace_root=%s\n' "$ROOT_DIR"
-            if [ -n "$(registry_meta_value "$FLEET_TEARDOWN_OWNERSHIP_DIR/meta" controller_pid)" ]; then
-                printf 'controller_pid=%s\n' "$(registry_meta_value "$FLEET_TEARDOWN_OWNERSHIP_DIR/meta" controller_pid)"
-                printf 'controller_pid_start=%s\n' "$(registry_meta_value "$FLEET_TEARDOWN_OWNERSHIP_DIR/meta" controller_pid_start)"
-            fi
             printf 'status=provider-teardown-verified\n'
             printf 'hub_disposition=%s\n' "$hub_disposition"
             printf 'hub_owner_file=%s\n' "$hub_owner_file"
@@ -6316,6 +6307,11 @@ fleet_reap_registry_record_native() {  # <registry> <mode> <version> <legacy-sta
             echo "❌ machine identity mismatch for $id ($actual_name != $clone_name); refusing cleanup" >&2
             return 1
         fi
+        local fresh_prestart_proof
+        fresh_prestart_proof="$(registry_meta_value "$registry/meta" runs_root)/$(registry_meta_value "$registry/meta" run_id)/_batch/fresh-prestart-recovery.json"
+        if [ "$state" != destroyed ] && { [ -e "$fresh_prestart_proof" ] || [ -L "$fresh_prestart_proof" ]; }; then
+            fleet_fresh_prestart_reap_guard "$registry" "$id" || return 1
+        fi
         if [ -z "$volume_id" ]; then
             volume_id="$(machine_volume_id "$id")"
             if [ -z "$volume_id" ] \
@@ -6527,8 +6523,12 @@ fleet_registry_release_verified() {
         --fleet "$FLEET_DIR" --owner "$FLEET_OWNER_TOKEN" --run "$RUN_ID"
 }
 
-acquire_registry_recovery_lock() {  # acquire_registry_recovery_lock <registry-dir>
-    local registry="$1" lock="$1/recovery-lock" tmp
+acquire_registry_recovery_lock() {  # acquire_registry_recovery_lock <registry-dir> [skip-busy]
+    # Returns 0 when acquired, 2 when the registry vanished, and 1 on refusal or
+    # timeout. With skip-busy, a recovery held by a live process returns 3 at
+    # once: that peer owns the registry exactly as a live controller would, so
+    # an unrelated startup scan must not queue behind its provider teardown.
+    local registry="$1" lock="$1/recovery-lock" tmp busy_policy="${2:-wait}"
     local guard="${registry%/*/*}/cloudbench-fleet-recovery-locks/${registry##*/}"
     # The capture helper uses this same persistent inode. Never unlink it:
     # removing the registry metadata must not split concurrent recoverers.
@@ -6564,6 +6564,8 @@ except BlockingIOError:
     raise SystemExit(1)
 PYGUARD
         if [ "$guard_status" -eq 1 ]; then
+            # The kernel releases flock on exit: contention proves a live holder.
+            if [ "$busy_policy" = skip-busy ]; then release_registry_recovery_guard; return 3; fi
             sleep 1
             continue
         fi
@@ -6587,7 +6589,9 @@ PYGUARD
         if [ -f "$lock/meta" ]; then
             registry_owner_alive "$lock/meta"
             case $? in
-                0) sleep 1; continue ;;
+                0)
+                    if [ "$busy_policy" = skip-busy ]; then release_registry_recovery_guard; return 3; fi
+                    sleep 1; continue ;;
                 1) rm -rf "$lock"; continue ;;
                 *) echo "❌ cannot prove stale recovery lock ownership for $registry" >&2; release_registry_recovery_guard; return 1 ;;
             esac
@@ -7551,9 +7555,17 @@ reconcile_stale_fleet_registries_full() {
             unresolved=1
             continue
         }
-        acquire_registry_recovery_lock "$registry"
+        acquire_registry_recovery_lock "$registry" skip-busy
         recovery_lock_status=$?
         [ "$recovery_lock_status" -eq 2 ] && continue
+        if [ "$recovery_lock_status" -eq 3 ]; then
+            # Concurrent jobs share this host-wide scan. The live recoverer
+            # finishes (or fails closed for) this registry; its clones remain
+            # visible to the provider capacity snapshot, refreshed below.
+            echo "↪️  stale fleet registry $(basename "$registry") is being recovered by a live peer; leaving it to that owner"
+            FLEET_STALE_RECONCILIATION_MAY_HAVE_MUTATED=1
+            continue
+        fi
         if [ "$recovery_lock_status" -ne 0 ]; then
             unresolved=1
             continue
@@ -10569,6 +10581,78 @@ PY
     echo "✅ rejected startup originals preserved for exact zero-credit cleanup"
 }
 
+fleet_prestart_machine_exact_read() {  # <machine-id>; full native identity, not CLI config-only
+    python3 - "$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-original-volume-capture.py" "$APP" "$1" <<'PY'
+import json, os, re, runpy, sys
+assert re.fullmatch(r'[0-9a-f]{14}', sys.argv[3])
+module = runpy.run_path(sys.argv[1])
+client = module['Fly'](sys.argv[2], os.environ['FLY_API_TOKEN'])
+native = client.api('GET', '/machines/' + sys.argv[3], timeout=30)
+assert isinstance(native, dict) and native.get('id') == sys.argv[3]
+print(json.dumps(native))
+PY
+}
+
+fleet_prestart_events_exact_read() {  # <machine-id>; independent complete history
+    python3 - "$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-original-volume-capture.py" "$APP" "$1" <<'PY'
+import json, os, re, runpy, sys
+assert re.fullmatch(r'[0-9a-f]{14}', sys.argv[3])
+module = runpy.run_path(sys.argv[1])
+client = module['Fly'](sys.argv[2], os.environ['FLY_API_TOKEN'])
+print(json.dumps(client.api('GET', '/machines/' + sys.argv[3] + '/events', timeout=30)))
+PY
+}
+
+fleet_recovery_confirm_fresh_prestart() {  # <registry-dir>; exact reads, no guest start
+    local registry="$1" native_dir canonical_dir machine phase status=1
+    native_dir="$(mktemp -d "${TMPDIR:-/tmp}/cloudbench-fresh-prestart.XXXXXX")" || return 1
+    canonical_dir="$(cd "$native_dir" && pwd -P)" || { rm -rf "$native_dir"; return 1; }
+    native_dir="$canonical_dir"
+    chmod 700 "$native_dir" || { rm -rf "$native_dir"; return 1; }
+    if python3 "$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-prestart-recovery.py" \
+        --registry "$registry" --audit-root "$FLEET_AUDIT_ROOT" --fresh-plan \
+        > "$native_dir/ids"; then
+        status=0
+        while IFS= read -r machine; do
+            for phase in before after; do
+                if ! fleet_prestart_machine_exact_read "$machine" > "$native_dir/$machine.$phase.json" \
+                    || ! fleet_prestart_events_exact_read "$machine" > "$native_dir/$machine.$phase.events.json"; then
+                    status=1; break
+                fi
+            done
+            [ "$status" = 0 ] || break
+        done < "$native_dir/ids"
+        if [ "$status" = 0 ]; then
+            python3 "$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-prestart-recovery.py" \
+                --registry "$registry" --audit-root "$FLEET_AUDIT_ROOT" \
+                --fresh-native-dir "$native_dir" || status=1
+        fi
+    fi
+    rm -rf "$native_dir"
+    [ "$status" = 0 ]
+}
+
+fleet_fresh_prestart_reap_guard() {  # <registry> <machine>; no-op for other phases
+    local registry="$1" machine="$2" proof native_dir canonical_dir phase status=0
+    proof="$(registry_meta_value "$registry/meta" runs_root)/$(registry_meta_value "$registry/meta" run_id)/_batch/fresh-prestart-recovery.json"
+    [ -e "$proof" ] || [ -L "$proof" ] || return 0
+    native_dir="$(mktemp -d "${TMPDIR:-/tmp}/cloudbench-prestart-reap.XXXXXX")" || return 1
+    canonical_dir="$(cd "$native_dir" && pwd -P)" || { rm -rf "$native_dir"; return 1; }
+    native_dir="$canonical_dir"
+    for phase in before after; do
+        fleet_prestart_machine_exact_read "$machine" > "$native_dir/$machine.$phase.json" \
+            && fleet_prestart_events_exact_read "$machine" > "$native_dir/$machine.$phase.events.json" \
+            || { status=1; break; }
+    done
+    if [ "$status" = 0 ]; then
+        python3 "$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-prestart-recovery.py" \
+            --registry "$registry" --audit-root "$FLEET_AUDIT_ROOT" \
+            --verify-fresh-machine "$machine" --native-dir "$native_dir" || status=1
+    fi
+    rm -rf "$native_dir"
+    [ "$status" = 0 ]
+}
+
 fleet_recovery_reconnect_guest_shutdowns() {  # <registry-dir>
     local _capture_details=""
     local registry="${1%/}" meta="$1/meta" barrier_token="" kind bench clone_name
@@ -10588,6 +10672,21 @@ fleet_recovery_reconnect_guest_shutdowns() {  # <registry-dir>
     if [ -e "$FLEET_AUDIT_ROOT/${registry##*/}/volume-migrations" ] \
         || [ -L "$FLEET_AUDIT_ROOT/${registry##*/}/volume-migrations" ]; then
         fleet_registry_resume_volume_migrations "$registry" || return 1
+    fi
+
+    # Fresh configured primaries can be cancelled before the local start
+    # barrier, before a proxy or runtime-owner file exists. Validate the whole
+    # exact cohort and seal a typed no-start proof; never manufacture an ACK.
+    if fleet_recovery_confirm_fresh_prestart "$registry"; then
+        FLEET_REGISTRY_DIR="$registry"
+        FLEET_REGISTRY_PUBLISHED=1
+        KEEP_CLONES=0
+        if ! fleet_registry_confirm_guest_teardown; then
+            FLEET_REGISTRY_DIR="$save_registry"; FLEET_REGISTRY_PUBLISHED="$save_published"; KEEP_CLONES="$save_keep"
+            return 1
+        fi
+        FLEET_REGISTRY_DIR="$save_registry"; FLEET_REGISTRY_PUBLISHED="$save_published"; KEEP_CLONES="$save_keep"
+        return 0
     fi
 
     # A canceled boot-config barrier can own stopped pool Machines without
@@ -11669,6 +11768,18 @@ fleet_recovery_confirm_runtime_evidence() {  # <exact dead-owner registry>; veri
     local FLEET_OWNER_TOKEN="${1##*/}" FLEET_TEARDOWN_OWNERSHIP_DIR
     local -a CHILD_OUT=() CHILD_MACHINE=()
     FLEET_TEARDOWN_OWNERSHIP_DIR="$(registry_meta_value "$registry/meta" audit_dir)"
+    local fresh_proof
+    fresh_proof="$(registry_meta_value "$registry/meta" runs_root)/$(registry_meta_value "$registry/meta" run_id)/_batch/fresh-prestart-recovery.json"
+    if [ -e "$fresh_proof" ] || [ -L "$fresh_proof" ]; then
+        [ ! -e "$registry/guest-cleanup-unconfirmed" ] && [ ! -L "$registry/guest-cleanup-unconfirmed" ] || return 1
+        fleet_recovery_confirm_fresh_prestart "$registry" || return 1
+        python3 "$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-prestart-recovery.py" \
+            --registry "$registry" --audit-root "$FLEET_AUDIT_ROOT" --verify-fresh || return 1
+        # No guest ever received a start. The typed producer/consumer proof is
+        # evidence, not a fabricated runtime bundle or benchmark outcome.
+        rm -f "$registry/runtime-evidence-unconfirmed" && cloudbench_fsync_directory "$registry"
+        return $?
+    fi
     if [ -e "$(registry_meta_value "$registry/meta" runs_root)/$(registry_meta_value "$registry/meta" run_id)/_forensic/manifest.json" ]; then
         manifest_schema="$(python3 - "$(registry_meta_value "$registry/meta" runs_root)/$(registry_meta_value "$registry/meta" run_id)/_forensic/manifest.json" <<'PY'
 import json, sys
@@ -15129,8 +15240,6 @@ OWNED_CLONE_NAMES_FILE="$audit_staging/owned-clones.names"
     printf 'run_id=%s\n' "$RUN_ID"
     printf 'app=%s\n' "$APP"
     printf 'workspace_root=%s\n' "$ROOT_DIR"
-    printf 'controller_pid=%s\n' "$$"
-    printf 'controller_pid_start=%s\n' "$FLEET_OWNER_PID_START"
     printf 'status=incomplete\n'
     if [ -n "$CENTRAL_HUB_OWNER_FILE" ]; then
         printf 'hub_disposition=retained-exact-owner-transfer-required\n'
@@ -15398,18 +15507,6 @@ cleanup() {
     # let a second signal interrupt teardown after the EXIT trap has begun.
     trap - EXIT
     trap '' HUP INT TERM
-    # Native terminal evidence only while still before resource admission.
-    if [ -f "$FLEET_DIR/preallocation-source.json" ] \
-       && [ ! -e "$FLEET_DIR/preallocation-abort.json" ] \
-       && [ ! -e "$FLEET_DIR/resource-admission.entered" ]; then
-        case "$result_ec" in
-            1|129|130|143)
-                python3 "$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench_preallocation.py" abort \
-                    --run "$FLEET_DIR" --owner "$FLEET_OWNER_TOKEN" --pid "$$" \
-                    --birth "$FLEET_OWNER_PID_START" --stage preallocation-interrupted \
-                    --exit-code "$result_ec" || { ec=1; teardown_failed=1; } ;;
-        esac
-    fi
     release_cleanup_disk_reserve || { ec=1; teardown_failed=1; }
     # Both auxiliary loops sleep in child processes. Killing only their Bash
     # roots reparents the current sleep into the detached controller group, so
@@ -15955,70 +16052,7 @@ fleet_scorecard_report() {
         --goal "$goal" "${fields[@]}" >/dev/null 2>&1 || true
 }
 fleet_scorecard_report launch
-# Freeze one workspace patch before maintenance and reuse it for every guest.
-FLEET_PATCH_FILE=""
-FLEET_PATCH_SHA256=""
-if [ -n "${CLOUDBENCH_LOCAL_PATCH_SOURCE:-}${CLOUDBENCH_LOCAL_PATCH_SHA256:-}${CLOUDBENCH_LOCAL_PATCH_BASE_REF:-}" ]; then
-    [ "${CLOUDBENCH_SKIP_LOCAL_PATCH:-0}" != 1 ] \
-        && [ "${CLOUDBENCH_LOCAL_PATCH_BASE_REF:-}" = "$BENCH_REF" ] \
-        && [ -s "${CLOUDBENCH_LOCAL_PATCH_SOURCE:-}" ] \
-        && [ -n "${CLOUDBENCH_LOCAL_PATCH_SHA256:-}" ] \
-        && [ "$(cloudbench_env_sha256 "$CLOUDBENCH_LOCAL_PATCH_SOURCE")" = "$CLOUDBENCH_LOCAL_PATCH_SHA256" ] || {
-        echo "❌ inherited fleet workspace patch identity mismatch" >&2
-        exit 1
-    }
-    FLEET_PATCH_FILE="$(mktemp)"
-    cp "$CLOUDBENCH_LOCAL_PATCH_SOURCE" "$FLEET_PATCH_FILE" || exit 1
-    [ "$(cloudbench_env_sha256 "$FLEET_PATCH_FILE")" = "$CLOUDBENCH_LOCAL_PATCH_SHA256" ] || exit 1
-elif [ "${CLOUDBENCH_SKIP_LOCAL_PATCH:-0}" != "1" ] \
-   && { [ "$REQUESTED_BENCH_REF" != "$BENCH_REF" ] \
-        || cloudbench_worktree_has_changes "$ROOT_DIR"; }; then
-    FLEET_PATCH_FILE="$(mktemp)"
-    fleet_patch_rc=0
-    cloudbench_prepare_workspace_patch \
-        "$ROOT_DIR" "$BENCH_REF" "$FLEET_PATCH_FILE" \
-        "$ROOT_DIR/scripts/create-worktree-patch.sh" || fleet_patch_rc=$?
-    if [ "$fleet_patch_rc" -eq "$CLOUDBENCH_PATCH_NO_DELTA" ]; then
-        # The unpushed HEAD carries only content the patch generator excludes
-        # (append-only history ledgers), so the base ref already IS the code
-        # under test. Shipping nothing is exactly equivalent here.
-        rm -f "$FLEET_PATCH_FILE"
-        FLEET_PATCH_FILE=""
-        echo "📦 no shippable workspace delta beyond $BENCH_REF (append-only ledgers only); guests run the base ref"
-    elif [ "$fleet_patch_rc" -ne 0 ]; then
-        echo "❌ could not create the fleet local workspace patch" >&2
-        exit 1
-    fi
-fi
-if [ -n "$FLEET_PATCH_FILE" ]; then
-    FLEET_PATCH_SHA256="$(cloudbench_env_sha256 "$FLEET_PATCH_FILE")"
-    [ -n "$FLEET_PATCH_SHA256" ] || {
-        echo "❌ could not fingerprint the fleet local workspace patch" >&2
-        exit 1
-    }
-fi
-
-
-if [ -z "$PROVISION_POOL" ]; then
-# Seal only pre-allocation identity here; full runtime configuration is frozen later.
-PREALLOCATION_ARGS=()
-for i in "${!BENCHES[@]}"; do
-    preallocation_mode="${CATALOG_MODES[$i]}"
-    is_sim_on "${BENCHES[$i]}" && preallocation_mode=simulate
-    PREALLOCATION_ARGS+=(--task "${BENCHES[$i]}=$preallocation_mode")
-done
-PREALLOCATION_HELPER="$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench_preallocation.py"
-python3 "$PREALLOCATION_HELPER" prepare --run "$FLEET_DIR" --root "$ROOT_DIR" \
-    --owner "$FLEET_OWNER_TOKEN" --pid "$$" --birth "$FLEET_OWNER_PID_START" \
-    --base "$BENCH_REF" --patch "${FLEET_PATCH_SHA256:-none}" --app "$APP" \
-    --snapshot "$CLOUDBENCH_SCRIPT_SNAPSHOT" --manifest "$CONTROLLER_SNAPSHOT_MANIFEST" \
-    "${PREALLOCATION_ARGS[@]}" || exit 1
-fi
 reserve_cleanup_disk_space || {
-    if [ -f "$FLEET_DIR/preallocation-source.json" ]; then
-        python3 "$PREALLOCATION_HELPER" abort --run "$FLEET_DIR" --owner "$FLEET_OWNER_TOKEN" \
-            --pid "$$" --birth "$FLEET_OWNER_PID_START" || exit 1
-    fi
     echo "❌ could not allocate the emergency fleet teardown disk reserve; refusing provider mutation" >&2
     exit 1
 }
@@ -16028,10 +16062,6 @@ reserve_cleanup_disk_space || {
 if [ -z "$PROVISION_POOL" ]; then
     require_central_hub_visibility || exit 1
     require_in_app_hub_visibility || exit 1
-fi
-# Crossing this boundary disables the pre-allocation-only cleanup path.
-if [ -f "$FLEET_DIR/preallocation-source.json" ]; then
-( set -o noclobber; printf '%s\n' "$FLEET_OWNER_TOKEN" > "$FLEET_DIR/resource-admission.entered" ) || exit 1
 fi
 reconcile_pool || exit 1   # stop + verify this workspace's pool before machine start
 normalize_current_pool_shape || exit 1
@@ -16125,9 +16155,28 @@ private_fleet_source_admission() {
 }
 validate_private_fleet_source() {
     local machines volumes snapshots
-    machines="$(FLY machines list -a "$APP" --json)" || return 1
-    volumes="$(FLY volumes list -a "$APP" --json)" || return 1
-    snapshots="$(FLY volume snapshots list "$PRIVATE_SOURCE_VOLUME_ID" -a "$APP" --json)" || return 1
+    # Read-only provider inventory is flaky under a 14-job cohort: listings fail
+    # transiently (HTTP/2 stream INTERNAL_ERROR) or the snapshot listing returns rc=0
+    # and [] (14 parallel reads: 23/28 empty; sequential reads complete). Re-read a
+    # bounded number of times; the strict validation below is unchanged.
+    local _inventory_read _inventory_ok
+    for _inventory_read in 1 2 3 4 5 6; do
+        _inventory_ok=0
+        if machines="$(FLY machines list -a "$APP" --json)" \
+            && volumes="$(FLY volumes list -a "$APP" --json)" \
+            && snapshots="$(FLY volume snapshots list "$PRIVATE_SOURCE_VOLUME_ID" -a "$APP" --json)"; then
+            _inventory_ok=1
+            printf '%s' "$snapshots" | python3 -c 'import json, sys
+rows = json.load(sys.stdin)
+sys.exit(0 if isinstance(rows, list) and any(isinstance(r, dict) and r.get("id") == sys.argv[1] for r in rows) else 1)' \
+                "$PRIVATE_SOURCE_SNAPSHOT" 2>/dev/null && break
+            echo "⚠️  provider snapshot listing omitted $PRIVATE_SOURCE_SNAPSHOT (read $_inventory_read/6)" >&2
+        else
+            echo "⚠️  provider inventory read failed (read $_inventory_read/6)" >&2
+        fi
+        [ "$_inventory_read" -lt 6 ] || { [ "$_inventory_ok" = 1 ] || return 1; break; }
+        sleep $((_inventory_read * 2))
+    done
     printf '{"machines":%s,"volumes":%s,"snapshots":%s}' "$machines" "$volumes" "$snapshots" \
         | python3 "$SOURCE_HELPER" verify "$PRIVATE_SOURCE_FILE" --parked-memory "$WARM_PARKED_VM_MEMORY" --sha256 "$PRIVATE_SOURCE_SHA256"
 }
@@ -16379,6 +16428,38 @@ if [ -z "$SNAP_ID" ]; then
     exit 1
 fi
 fi
+# Freeze one workspace patch before maintenance and reuse it for every guest.
+FLEET_PATCH_FILE=""
+FLEET_PATCH_SHA256=""
+if [ "${CLOUDBENCH_SKIP_LOCAL_PATCH:-0}" != "1" ] \
+   && { [ "$REQUESTED_BENCH_REF" != "$BENCH_REF" ] \
+        || cloudbench_worktree_has_changes "$ROOT_DIR"; }; then
+    FLEET_PATCH_FILE="$(mktemp)"
+    fleet_patch_rc=0
+    cloudbench_prepare_workspace_patch \
+        "$ROOT_DIR" "$BENCH_REF" "$FLEET_PATCH_FILE" \
+        "$ROOT_DIR/scripts/create-worktree-patch.sh" || fleet_patch_rc=$?
+    if [ "$fleet_patch_rc" -eq "$CLOUDBENCH_PATCH_NO_DELTA" ]; then
+        # The unpushed HEAD carries only content the patch generator excludes
+        # (append-only history ledgers), so the base ref already IS the code
+        # under test. Shipping nothing is exactly equivalent here.
+        rm -f "$FLEET_PATCH_FILE"
+        FLEET_PATCH_FILE=""
+        echo "📦 no shippable workspace delta beyond $BENCH_REF (append-only ledgers only); guests run the base ref"
+    elif [ "$fleet_patch_rc" -ne 0 ]; then
+        echo "❌ could not create the fleet local workspace patch" >&2
+        exit 1
+    fi
+fi
+if [ -n "$FLEET_PATCH_FILE" ]; then
+    FLEET_PATCH_SHA256="$(cloudbench_env_sha256 "$FLEET_PATCH_FILE")"
+    [ -n "$FLEET_PATCH_SHA256" ] || {
+        echo "❌ could not fingerprint the fleet local workspace patch" >&2
+        exit 1
+    }
+fi
+
+
 # ── Preflight: will clones inherit up-to-date dep trees from this snapshot? ──
 # When the warm snapshot's node_modules/venv are stale vs the current ref's
 # manifests, EVERY clone pays a multi-minute rsync refresh on bring-up — the
@@ -18036,9 +18117,9 @@ cleanup_failed_worker() {  # cleanup_failed_worker <output-dir> <worker-id>
     return "$rc"
 }
 
-# Provisioners publish only unique per-worker outcomes. Readiness reconciliation and cleanup share
-# the worker-ledger lock, eliminating append-vs-rewrite loss and keeping desired-capacity state
-# authoritative over stale child outcomes.
+# Readiness publication, reconciliation and cleanup share the worker-ledger lock,
+# eliminating append-vs-rewrite loss and keeping desired-capacity state authoritative
+# over stale child outcomes.
 reconcile_worker_ready_outcomes() {  # <bench-output-dir>
     local out="$1" marker name wid rc=0
     worker_ledger_lock_acquire "$out" || return $?
@@ -18363,6 +18444,11 @@ PY
               printf '%s|%s|%s\n' "$wid" "$runtime_run_token" "$primary_id" > "$ready_tmp" \
                   && mv "$ready_tmp" "$out/worker-$wid.qualification-ready" || return 1
           fi
+          # A bounded readiness consumer must not wait for the next metrics
+          # scrape to see an already queue-ready worker. Reuse the same locked
+          # reconciler as cleanup and the autoscaler, including its cancellation
+          # and exact tracked-worker checks.
+          reconcile_worker_ready_outcomes "$out"
       }
       log_worker_stage() {
           printf '[%s] %s\n' \
@@ -18462,7 +18548,11 @@ PY
       while [ "$SECONDS" -lt "$ready_deadline" ]; do
           worker_provision_cancelled && finish_cancelled_worker_provision
           if worker_operational "$wid" "$out"; then
-              publish_worker_ready
+              if ! publish_worker_ready; then
+                  worker_provision_cancelled && finish_cancelled_worker_provision
+                  discard_replaceable_worker \
+                      "worker $wid could not publish queue readiness; see worker-$wid.stage.log"
+              fi
               worker_provision_cancelled && finish_cancelled_worker_provision
               rm -f "$out/worker-$wid.pending"
               echo "  ✅ [$bench] worker $wid joined queue navi-agent-tasks-$ws"
@@ -19005,7 +19095,7 @@ fleet_infra_canary_preflight() {
     esac
     # A campaign must check its own abort/failure even when another cohort has
     # a fresh global PASS. The transaction helper owns that check.
-    if [ -z "${RUN_BENCH_CAMPAIGN_BARRIER_DIR:-}" ] && [ -z "${FLEET_PATCH_FILE:-}" ] && [ -f "$stamp" ]; then
+    if [ -z "${RUN_BENCH_CAMPAIGN_BARRIER_DIR:-}" ] && [ -f "$stamp" ]; then
         age=$(( $(date +%s) - $(stat -c %Y "$stamp" 2>/dev/null || echo 0) ))
         if [ "$age" -ge 0 ] && [ "$age" -lt "$ttl" ]; then
             echo "🛡  infra canary preflight: stamp fresh (${age}s < ${ttl}s) — $stamp"
@@ -19022,18 +19112,8 @@ fleet_infra_canary_preflight() {
     # The helper holds a shared transaction lock while it rechecks the stamp,
     # runs the canary, and stamps PASS. Its lock is distinct from the nested
     # controller lifecycle lock, so nested fleet entry cannot self-deadlock.
-    if [ "${REQUESTED_BENCH_REF:-${BENCH_REF:-}}" != "${BENCH_REF:-}" ] \
-       && [ "${CLOUDBENCH_SKIP_LOCAL_PATCH:-0}" = 1 ]; then
-        echo "❌ infra canary cannot omit the requested source patch" >&2
-        return 1
-    fi
-    # Preserve the requested source, not just its fetchable transport base:
-    # the nested fleet must package the same committed workspace delta.
     if CLOUDBENCH_INFRA_CANARY_COLD_BOOTSTRAP="${POOL_COLD_BOOTSTRAP:-0}" \
-        CLOUDBENCH_INFRA_CANARY_REF="${REQUESTED_BENCH_REF:-${BENCH_REF:-}}" \
-        CLOUDBENCH_LOCAL_PATCH_SOURCE="${FLEET_PATCH_FILE:-}" \
-        CLOUDBENCH_LOCAL_PATCH_SHA256="${FLEET_PATCH_SHA256:-}" \
-        CLOUDBENCH_LOCAL_PATCH_BASE_REF="${FLEET_PATCH_FILE:+$BENCH_REF}" \
+        CLOUDBENCH_INFRA_CANARY_REF="${BENCH_REF:-}" \
         python3 -S "$INFRA_CANARY_PREFLIGHT_SCRIPT" \
         --stamp "$stamp" \
         --lock "$lock" \

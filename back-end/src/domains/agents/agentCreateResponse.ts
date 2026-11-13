@@ -11,10 +11,12 @@ export function createAgentResponse(
   created: CreatedAgent,
   body: CreateAgentBody,
   isSubAgent: boolean,
-  workflowId: string | null
+  workflowId: string | null,
+  externalExecution = false
 ) {
   const { agent } = created;
   return {
+    ...(externalExecution ? { execution_mode: 'external' } : {}),
     agent_id: agent.id,
     progress: agent.progress,
     goal: agent.goal,

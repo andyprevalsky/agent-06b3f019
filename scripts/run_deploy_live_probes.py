@@ -4,21 +4,36 @@
 Independent probes start together. A probe with ``after`` starts once that
 probe exits, pass or fail, so two ``run-blackbox-tests.sh`` setups never race
 the same local database's schema sync and runtime SQL hooks.
+
+``--only NAME`` runs one probe by itself. The staged /deploy cycle binds each
+probe as its own case (deploy_gates.live_probes_recipe) and runs those cases
+one after another in PROBE_NAMES order, which keeps every ``after`` ordering, so
+one probe's result is recorded on its own instead of as one aggregate exit.
 """
 
 from __future__ import annotations
 
+import argparse
 import os
 import signal
 import subprocess
 import sys
 import time
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 PROGRESS_ENV = "DEPLOY_GATE_PROGRESS"
+# deploy_commands() names in an order that satisfies every ``after`` edge when run one by one.
+PROBE_NAMES = (
+    "credential-health",
+    "amplitude-live",
+    "chat-router-failover-live",
+    "browser-provider-live",
+    "report-bug-storage-live",
+    "migration-preflight",
+)
 
 
 def report_progress(probe: str, exit_code: int) -> None:
@@ -183,6 +198,42 @@ def deploy_commands() -> tuple[Command, ...]:
             ROOT / "back-end",
             after="amplitude-live",
         ),
+        # Real-internet provider cases kept out of the hermetic coverage gate.
+        # Same workspace test database as the stages above, so serialized.
+        Command(
+            "browser-provider-live",
+            (
+                "bash",
+                "../scripts/run-deploy-stage",
+                "browser-provider-live",
+                "--",
+                "env",
+                "BROWSER_PROVIDER_LIVE=1",
+                "BLACKBOX_TEST_CONCURRENCY=1",
+                "bash",
+                "scripts/run-blackbox-tests.sh",
+                "browser-provider",
+            ),
+            ROOT / "back-end",
+            after="chat-router-failover-live",
+        ),
+        Command(
+            "report-bug-storage-live",
+            (
+                "bash",
+                "../scripts/run-deploy-stage",
+                "report-bug-storage-live",
+                "--",
+                "env",
+                "REPORT_BUG_STORAGE_LIVE=1",
+                "BLACKBOX_TEST_CONCURRENCY=1",
+                "bash",
+                "scripts/run-blackbox-tests.sh",
+                "report-bug",
+            ),
+            ROOT / "back-end",
+            after="browser-provider-live",
+        ),
         # Read-only: EXPLAINs and counts every migration production has not applied
         # yet against its data, which local and CI databases never contain.
         Command(
@@ -200,8 +251,15 @@ def deploy_commands() -> tuple[Command, ...]:
     )
 
 
-def main() -> int:
-    results = run_commands(deploy_commands())
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--only", choices=PROBE_NAMES, help="run this one probe by itself")
+    args = parser.parse_args(argv)
+    commands = deploy_commands()
+    if args.only:
+        # Its predecessors ran as earlier cases (or not at all); it must not wait for them here.
+        commands = tuple(replace(command, after=None) for command in commands if command.name == args.only)
+    results = run_commands(commands)
     for name, exit_code in results.items():
         print(f"live probe {name}: exit={exit_code}")
     return 0 if all(exit_code == 0 for exit_code in results.values()) else 1

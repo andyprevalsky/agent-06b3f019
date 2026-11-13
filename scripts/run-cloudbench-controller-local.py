@@ -81,7 +81,6 @@ CASES = [
         'refresh_deps_tracks_exact_created_snapshot or '
         'refresh_deps_applies_exact_workspace_before_rebuild or '
         'fetch_ref_restores_dirty_exact_sha or '
-        'warm_checkout_failure_preserves_native_exit_and_logs_duration or '
         'warm_deps_preflight or '
         'fresh_controller_reuses_only_proven_donor_dependencies or '
         'verified_legacy_snapshot or '

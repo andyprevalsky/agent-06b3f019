@@ -31,7 +31,7 @@ REPRODUCIBLE = ('node_modules/', '*/node_modules/', 'agents/venv/', '*/venv/', '
                 '*.pyc', '.pytest_cache/', '*/.pytest_cache/', '.mypy_cache/', '.ruff_cache/', '*/dist/',
                 '*/build/', '*/coverage/', 'coverage/', '*/test-results/', '*/playwright-report/',
                 '.context/tsbuildinfo/', '.context/frontend-builds/', 'openclaw/', 'hermes-agent/', 'codex/',
-                'prime-agent/', 'kimi-code/', 'htmlcov/', '*/htmlcov/', '*/.coverage', '.coverage')
+                'prime-agent/', 'kimi-code/', 'openworker/', 'htmlcov/', '*/htmlcov/', '*/.coverage', '.coverage')
 
 
 def git(*args: str, cwd: Path | None = None, check: bool = True) -> str:
@@ -232,14 +232,17 @@ def cmd_open_pr(args: argparse.Namespace) -> int:
         return 1
     existing = subprocess.run(['gh', 'pr', 'view', '--json', 'number', '--jq', '.number'],
                               cwd=ROOT, capture_output=True, text=True).stdout.strip()
-    if run([sys.executable, 'scripts/deploy_review_cycle.py', 'start', '--reset', '--kind', 'initial', '--head', sha]):
-        return 1
-    factory('stage-start', 'code-review')
+    unreviewable = no_reviewable_paths(sha, pr=existing, initial=True)
+    if unreviewable is None:
+        if run([sys.executable, 'scripts/deploy_review_cycle.py', 'start', '--reset', '--kind', 'initial',
+                '--head', sha]):
+            return 1
+        factory('stage-start', 'code-review')
     if run(['git', 'push', '-u', 'origin', branch]):
         return 1
     if existing:
         pr = int(existing)
-        if run(['gh', 'pr', 'comment', str(pr), '--body', '@coderabbitai review']):
+        if unreviewable is None and run(['gh', 'pr', 'comment', str(pr), '--body', '@coderabbitai review']):
             return 1
     else:
         if not args.title:
@@ -254,8 +257,28 @@ def cmd_open_pr(args: argparse.Namespace) -> int:
             return 1
         pr = int(match.group(1))
     write_json(PR_FILE, {'pr': pr, 'branch': branch, 'head': sha})
-    print(f'DEPLOY_OPEN_PR pr={pr} head={sha[:12]} review=initial')
+    print(f'DEPLOY_OPEN_PR pr={pr} head={sha[:12]} review={"initial" if unreviewable is None else NO_REVIEW}')
     return 0
+
+
+NO_REVIEW = 'no-reviewable-paths'
+
+
+def no_reviewable_paths(sha: str, *, pr: object = '', initial: bool = False) -> dict | None:
+    """Record SHA in the review ledger instead of requesting CodeRabbit when its path filters exclude every
+    changed path. None (any refusal) means: request the normal review."""
+    argv = [sys.executable, 'scripts/deploy_review_cycle.py', NO_REVIEW, '--head', sha, '--pr', str(pr or '')]
+    if initial:
+        argv += ['--reset', '--base', 'origin/main']
+    result = subprocess.run(argv, cwd=ROOT, capture_output=True, text=True)
+    if result.returncode:
+        why = (result.stderr or result.stdout).strip().splitlines()
+        print(f'DEPLOY_REVIEW reviewable: {why[-1][:200] if why else f"exit {result.returncode}"}')
+        return None
+    lines = result.stdout.strip().splitlines()
+    entry = json.loads(lines[-1])
+    print(entry['report_row'])
+    return entry
 
 
 def coderabbit_check(sha: str) -> tuple[str, str]:
@@ -277,7 +300,12 @@ RATE_LIMITED_CHECK = re.compile(r'rate limited|review limit', re.IGNORECASE)
 
 def cmd_review_wait(args: argparse.Namespace) -> int:
     pr = read_json(PR_FILE, 'open-pr')['pr']
-    review_head = review_state()['cycles'][-1]['head']
+    latest = review_state()['cycles'][-1]
+    review_head = latest['head']
+    if latest.get('kind') == NO_REVIEW:
+        # Decided before any request: nothing to wait for, and never a rate-limit re-request.
+        print(f'DEPLOY_REVIEW_WAIT {NO_REVIEW} head={review_head[:12]} (no CodeRabbit request)')
+        return 0
     waiter = ['bash', 'scripts/wait-for-code-review', '--pr', str(pr), '--head', review_head,
               '--timeout', str(args.timeout), '--poll', '5']
     code = run(waiter)
@@ -314,7 +342,11 @@ def review_state() -> dict:
 
 
 def cmd_review_finish(args: argparse.Namespace) -> int:
-    review_head = review_state()['cycles'][-1]['head']
+    latest = review_state()['cycles'][-1]
+    review_head = latest['head']
+    if latest.get('kind') == NO_REVIEW:
+        print(f'DEPLOY_REVIEW_FINISH head={review_head[:12]} result={NO_REVIEW} (closed when recorded) exit=0')
+        return 0
     factory('stage-finish', 'code-review')
     code = run([sys.executable, 'scripts/deploy_review_cycle.py', 'finish', '--head', review_head,
                 '--result', args.result])
@@ -322,7 +354,41 @@ def cmd_review_finish(args: argparse.Namespace) -> int:
     return code
 
 
+def recorded_no_review(sha: str) -> bool:
+    """Whether the ledger's latest entry already records SHA as no-reviewable-paths (False when unreadable)."""
+    status = subprocess.run([sys.executable, 'scripts/deploy_review_cycle.py', 'status'], cwd=ROOT,
+                            capture_output=True, text=True)
+    if status.returncode:
+        return False
+    try:
+        cycles = json.loads(status.stdout).get('cycles') or []
+    except (json.JSONDecodeError, AttributeError):
+        return False
+    latest = cycles[-1] if cycles and isinstance(cycles[-1], dict) else {}
+    return latest.get('kind') == NO_REVIEW and latest.get('head') == sha
+
+
 def cmd_review_next(args: argparse.Namespace) -> int:
+    post_approval = getattr(args, 'post_findings_review_approval', None)
+    prior_hash = getattr(args, 'prior_ledger_sha256', None)
+    if post_approval is not None or prior_hash is not None:
+        if not post_approval or not prior_hash or not getattr(args, 'approved_head', None):
+            print('DEPLOY_REVIEW_NEXT BLOCKED: post-findings approval, approved HEAD and prior ledger SHA-256 are required', file=sys.stderr)
+            return 1
+        if args.verification_approval is not None or getattr(args, 'one_final_review_approval', None) is not None:
+            print('DEPLOY_REVIEW_NEXT BLOCKED: post-findings approval cannot combine with other approvals', file=sys.stderr)
+            return 1
+    final_approval = getattr(args, 'one_final_review_approval', None)
+    approved_head = getattr(args, 'approved_head', None)
+    if post_approval is None and (final_approval is not None or approved_head is not None):
+        if not final_approval or not approved_head:
+            print('DEPLOY_REVIEW_NEXT BLOCKED: --one-final-review-approval and --approved-head are both required',
+                  file=sys.stderr)
+            return 1
+        if args.verification_approval is not None:
+            print('DEPLOY_REVIEW_NEXT BLOCKED: cannot combine --verification-approval with --one-final-review-approval',
+                  file=sys.stderr)
+            return 1
     opened = read_json(PR_FILE, 'open-pr')
     if pending := uncommitted():
         print('DEPLOY_REVIEW_NEXT BLOCKED: commit the stabilization batch first: ' + ', '.join(pending[:10]),
@@ -332,15 +398,34 @@ def cmd_review_next(args: argparse.Namespace) -> int:
         print('DEPLOY_REVIEW_NEXT BLOCKED: parked benchmark-history rows are not committed; run '
               '`scripts/deploy ledger` so the review covers them', file=sys.stderr)
         return 1
-    nxt = subprocess.run([sys.executable, 'scripts/deploy_review_cycle.py', 'next'], cwd=ROOT,
-                         capture_output=True, text=True)
-    if nxt.returncode:
-        print(nxt.stdout + nxt.stderr, end='')
-        print('DEPLOY_REVIEW_NEXT BLOCKED: the ledger allows no further cycle; defer the remaining non-security '
-              'findings with `deploy_review_cycle.py override` and merge', file=sys.stderr)
-        return 1
-    kind, sha = json.loads(nxt.stdout)['kind'], head()
-    start = ['start', '--kind', kind, '--head', sha]
+    if post_approval is not None:
+        kind, sha = 'verification', head()
+        start = ['start', '--kind', kind, '--head', sha,
+                 '--post-findings-review-approval', post_approval, '--approved-head', approved_head,
+                 '--prior-ledger-sha256', prior_hash, '--repo', str(ROOT)]
+    elif final_approval is not None or approved_head is not None:
+        kind, sha = 'verification', head()
+        start = ['start', '--kind', kind, '--head', sha,
+                 '--one-final-review-approval', final_approval,
+                 '--approved-head', approved_head, '--repo', str(ROOT)]
+    else:
+        if recorded_no_review(head()) or no_reviewable_paths(head(), pr=opened['pr']) is not None:
+            # A HEAD already recorded as no-reviewable-paths (its push failed last time) resumes at the push:
+            # re-recording would refuse it as "already the latest recorded HEAD" and request a review.
+            if run(['git', 'push', 'origin', 'HEAD']):
+                return 1
+            write_json(PR_FILE, {**opened, 'head': head()})
+            print(f"DEPLOY_REVIEW_NEXT pr={opened['pr']} head={head()[:12]} review={NO_REVIEW}")
+            return 0
+        nxt = subprocess.run([sys.executable, 'scripts/deploy_review_cycle.py', 'next'], cwd=ROOT,
+                             capture_output=True, text=True)
+        if nxt.returncode:
+            print(nxt.stdout + nxt.stderr, end='')
+            print('DEPLOY_REVIEW_NEXT BLOCKED: the ledger allows no further cycle; defer the remaining non-security '
+                  'findings with `deploy_review_cycle.py override` and merge', file=sys.stderr)
+            return 1
+        kind, sha = json.loads(nxt.stdout)['kind'], head()
+        start = ['start', '--kind', kind, '--head', sha]
     if args.verification_approval:
         start += ['--verification-approval', args.verification_approval]
     if run([sys.executable, 'scripts/deploy_review_cycle.py', *start]):
@@ -500,7 +585,6 @@ def is_harness_process(exe: str | None, argv: str = '') -> bool:
 
 
 CODEX_SERVER_PREFIX = '/opt/devbox-tools/codex/'
-CODEX_SESSIONS = Path.home() / '.codex' / 'sessions'
 
 
 def stat_fields(proc: Path, pid: int) -> list[str] | None:
@@ -557,39 +641,48 @@ def current_code_mode_host(pid: int, exe: str | None, proc: Path, mine: set[int]
         return False
 
 
-def idle_daemon_codex_server(pid: int, exe: str | None, argv: str, proc: Path = Path('/proc'),
-                             sessions: Path = CODEX_SESSIONS, parents: dict[int, int] | None = None) -> bool:
-    """The devbox daemon's shared `codex app-server`, started in the agent's cwd, serving no Codex session.
+def shared_codex_server(pid: int, exe: str | None, argv: str, proc: Path = Path('/proc')) -> bool:
+    """The devbox daemon's shared `codex app-server`, started in the agent's cwd, busy or idle.
 
-    It is held ready for Codex threads and holds no workspace state while idle. It stays live work, and keeps
-    blocking deletion, the moment it runs anything (any child process) or a Codex session has written a
-    rollout since it started. A codex binary not parented by the daemon is never exempt.
+    The daemon keeps one for every Codex thread on the box; it holds no workspace state. A daemon restart
+    orphans the old server to PID 1, which is still the same shared server. Work a Codex thread runs through it
+    (shells, test runners) is its own process and is still found as live work. A codex binary launched any
+    other way, or any other codex subcommand, is never exempt.
     """
-    if not exe or not exe.startswith(CODEX_SERVER_PREFIX) or 'app-server' not in argv.split():
+    if not exe or not exe.startswith(CODEX_SERVER_PREFIX) or Path(exe).name != 'codex':
+        return False
+    words = argv.split()
+    if len(words) < 3 or words[1] != 'app-server' or '--listen' not in words:
         return False
     fields = stat_fields(proc, pid)
-    if not fields or len(fields) < 20:
+    if not fields or len(fields) < 2:
         return False
+    if fields[1] == '1':
+        return True
     try:
-        daemon = (proc / fields[1] / 'cmdline').read_bytes().replace(b'\0', b' ').decode(errors='replace')
+        parent = (proc / fields[1] / 'cmdline').read_bytes().replace(b'\0', b' ').decode(errors='replace')
     except OSError:
         return False
-    if f'{DAEMON_DIR}/' not in daemon:
+    return f'{DAEMON_DIR}/' in parent
+
+
+def shared_code_mode_host(pid: int, exe: str | None, proc: Path = Path('/proc')) -> bool:
+    """The shared Codex server's code-mode tool host: the same Codex install, parented by that server.
+
+    The tool processes it starts are their own processes and are still found as live work.
+    """
+    if not exe or not exe.startswith(CODEX_SERVER_PREFIX) or Path(exe).name != 'codex-code-mode-host':
         return False
-    if pid in (parent_map(proc) if parents is None else parents).values():
+    fields = stat_fields(proc, pid)
+    if not fields or len(fields) < 2:
         return False
     try:
-        btime = next(int(line.split()[1]) for line in (proc / 'stat').read_text().splitlines() if line.startswith('btime '))
-        started = btime + int(fields[19]) / os.sysconf('SC_CLK_TCK')
-    except (OSError, StopIteration, ValueError):
+        parent_exe = os.readlink(proc / fields[1] / 'exe')
+        parent_argv = (proc / fields[1] / 'cmdline').read_bytes().replace(b'\0', b' ').decode(errors='replace')
+    except OSError:
         return False
-    if sessions.is_dir():
-        try:
-            if any(path.is_file() and path.stat().st_mtime >= started for path in sessions.rglob('*')):
-                return False
-        except OSError:
-            return False
-    return True
+    return (Path(parent_exe).parent == Path(exe).parent
+            and shared_codex_server(int(fields[1]), parent_exe, parent_argv, proc))
 
 
 def live_processes(root: Path) -> list[dict]:
@@ -610,7 +703,8 @@ def live_processes(root: Path) -> list[dict]:
                 exe = os.readlink(entry / 'exe')
                 if (is_harness_process(exe, argv)
                         or current_code_mode_host(int(entry.name), exe, proc, mine, parents)
-                        or idle_daemon_codex_server(int(entry.name), exe, argv, proc, parents=parents)):
+                        or shared_codex_server(int(entry.name), exe, argv, proc)
+                        or shared_code_mode_host(int(entry.name), exe, proc)):
                     continue
             except OSError:
                 pass
@@ -764,6 +858,10 @@ def parser() -> argparse.ArgumentParser:
     ended.add_argument('--result', choices=['clean', 'findings'], required=True)
     nxt = sub.add_parser('review-next', help='open the next bounded review cycle on the pushed stabilization batch')
     nxt.add_argument('--verification-approval', help="user approval id for a verification cycle after a clean cycle 2")
+    nxt.add_argument('--post-findings-review-approval', help='New explicit user approval ID for one fifth remediation review')
+    nxt.add_argument('--prior-ledger-sha256', help='Exact prior ledger snapshot approved by the user')
+    nxt.add_argument('--one-final-review-approval', help='Explicit user evidence ID for one fourth verification')
+    nxt.add_argument('--approved-head', help='Exact40 HEAD named in that user decision')
     approval = sub.add_parser('approval', help='record an approval packet or decision; on approval rerun flagged guards')
     approval.add_argument('action', choices=['request', 'decide'])
     approval.add_argument('--decision', choices=['approved', 'grounded', 'rejected'])

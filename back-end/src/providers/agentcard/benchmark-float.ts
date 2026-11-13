@@ -107,6 +107,61 @@ function preferredBenchmarkCardholderIds(
 /** AgentCard's terminal, mint-capable verification states. */
 const KYC_READY_STATUSES = new Set(['verified', 'approved']);
 
+/** Read the complete org inventory before applying any cardholder preference. */
+async function listBenchmarkCardholders(
+  callWithinBudget: AgentCardOrgToolCaller,
+  deadlineAtMs: number
+): Promise<AgentCardSandboxCardholder[]> {
+  const pageSize = 100;
+  const inventory: AgentCardSandboxCardholder[] = [];
+  const seen = new Set<string>();
+  let offset = 0;
+  let total: number | undefined;
+  for (;;) {
+    if (Date.now() >= deadlineAtMs) {
+      throw new Error('AgentCard cardholder inventory pagination exceeded its read deadline');
+    }
+    const result = await callWithinBudget('list_cardholders', { limit: pageSize, offset });
+    const outer = asRecord(result);
+    const record = asRecord(outer?.structuredContent) ?? outer;
+    const page = extractCardholders(result);
+    const raw = record?.cardholders;
+    if (!Array.isArray(raw) || page.length !== raw.length) {
+      throw new Error('AgentCard cardholder inventory contains a record without an id');
+    }
+    const reportedTotal = record?.total;
+    if (reportedTotal !== undefined) {
+      if (
+        typeof reportedTotal !== 'number' ||
+        !Number.isSafeInteger(reportedTotal) ||
+        reportedTotal < 0
+      ) {
+        throw new Error('AgentCard cardholder inventory returned an invalid total');
+      }
+      if (total !== undefined && reportedTotal !== total) {
+        throw new Error('AgentCard cardholder inventory changed during pagination');
+      }
+      total = reportedTotal;
+    }
+    for (const cardholder of page) {
+      if (seen.has(cardholder.id)) {
+        throw new Error('AgentCard cardholder inventory pagination did not advance');
+      }
+      seen.add(cardholder.id);
+      inventory.push(cardholder);
+    }
+    offset += raw.length;
+    if (total !== undefined) {
+      if (offset > total || (raw.length === 0 && offset < total)) {
+        throw new Error('AgentCard cardholder inventory pagination did not cover its total');
+      }
+      if (offset === total) return inventory;
+    } else if (raw.length < pageSize) {
+      return inventory;
+    }
+  }
+}
+
 /**
  * Resolve a sandbox org cardholder that actually exists AND can mint.
  *
@@ -133,7 +188,7 @@ export async function resolveBenchmarkCardholderId(
   const deadlineAtMs = orgRetryDeadlineAtMs();
   const callWithinBudget: AgentCardOrgToolCaller = (toolName, args) =>
     callOrgTool(toolName, args, deadlineAtMs);
-  const cardholders = extractCardholders(await callWithinBudget('list_cardholders', {}));
+  const cardholders = await listBenchmarkCardholders(callWithinBudget, deadlineAtMs);
   if (cardholders.length === 0) {
     throw new Error(
       'AgentCard sandbox org has no cardholders. Create one in sandbox mode at ' +

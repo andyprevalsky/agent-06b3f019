@@ -17,6 +17,34 @@ def need(ok, message):
         raise ValueError('historical custody: ' + message)
 
 
+# Locator decisions made before the cloud request namespace exists. Each has a stable reason
+# code so deploy_test_cloud can publish a typed no-admission receipt; any other error stays generic.
+ADMISSION_REFUSALS = {
+    'request-locator-mismatch': 'historical custody: missing request-owned custody locator',
+    'canonical-locator-missing': 'historical custody: missing canonical custody locator',
+    'canonical-custody-unverifiable': 'historical custody: canonical custody history cannot be verified',
+    'canonical-custody-uncovered': 'historical custody: canonical custody obligations are not covered by the request-owned ledger',
+    'canonical-cycle-active': 'historical custody: canonical cycle is still active',
+    'canonical-cycle-owns-source': 'historical custody: canonical cycle owns the requested source',
+}
+
+
+class AdmissionRefusal(ValueError):
+    """A custody locator refusal raised by admission() before any allocation."""
+
+    def __init__(self, code, detail=None):
+        """Carry the stable reason code; the message is the exact registered refusal text."""
+        super().__init__(ADMISSION_REFUSALS[code])
+        self.reason_code = code
+        self.detail = detail
+
+
+def refuse(ok, code):
+    """Raise the typed pre-allocation refusal for ``code`` unless ``ok``."""
+    if not ok:
+        raise AdmissionRefusal(code)
+
+
 def task_contract(root, head, name):
     need(bool(re.fullmatch('[0-9a-f]{40}', head)), 'invalid original commit')
     result = subprocess.run(['git', 'show', head + ':agents/benchmarks/tasks.json'], cwd=root, capture_output=True)
@@ -229,12 +257,170 @@ def binding(plan, root):
             'input_fingerprints': c.input_fingerprints(plan, root)}
 
 
+def pending_shapes(state, old):
+    """Refuse malformed pending metadata before legacy owner/discovery readers run."""
+    pending = state.get('pending', [])
+    need(isinstance(pending, list) and all(isinstance(key, str) and key for key in pending),
+         'invalid pending identities')
+    if not pending:
+        return
+    need(isinstance(state.get('pending_execution_contracts', {}), dict), 'malformed pending contract history')
+    need(isinstance(old.get('gates'), list)
+         and all(isinstance(g, dict) and isinstance(g.get('name'), str)
+                 and isinstance(g.get('checks'), list) for g in old['gates']),
+         'malformed pending gate inventory')
+    need(isinstance(state.get('failures'), list) and isinstance(state.get('attempts'), list),
+         'malformed pending failure/attempt inventory')
+    for failure in state['failures']:
+        need(isinstance(failure, dict) and isinstance(failure.get('check'), str)
+             and isinstance(failure.get('gate'), str), 'malformed pending failure identity')
+        evidence, rca = failure.get('worker_evidence'), failure.get('rca')
+        need((evidence is None or isinstance(evidence, dict)) and (rca is None or isinstance(rca, dict)),
+             'malformed pending failure evidence')
+        if isinstance(evidence, dict) and 'native_task' in evidence:
+            need(isinstance(evidence['native_task'], dict), 'malformed pending native task')
+        if isinstance(rca, dict) and 'resource_skip' in rca:
+            need(isinstance(rca['resource_skip'], dict), 'malformed pending resource evidence')
+    for attempt in state['attempts']:
+        need(isinstance(attempt, dict) and isinstance(attempt.get('results'), list),
+             'malformed pending attempt')
+        for receipt in attempt['results']:
+            need(isinstance(receipt, dict) and isinstance(receipt.get('gate'), str)
+                 and ('cases' not in receipt or isinstance(receipt['cases'], dict)),
+                 'malformed pending receipt')
+
+
+def pending_rca(state, old, protected):
+    """Bind complete pending failures with recorded cleanup and no retained producer."""
+    import deploy_test_cycle as c
+    pending = state.get('pending', [])
+    need(isinstance(pending, list) and all(isinstance(key, str) and key for key in pending)
+         and len(pending) == len(set(pending)), 'invalid pending identities')
+    if not pending:
+        return []
+    need(state.get('phase') == 'triage' and state.get('ready') is False
+         and 'live_failures' not in state, 'pending RCA requires quiescent triage')
+    gates = {gate['name']: gate for gate in old['gates']}
+    need(len(gates) == len(old['gates']), 'duplicate pending gate contract')
+    rows = []
+    for key in pending:
+        matches = [f for f in state.get('failures', []) if isinstance(f, dict) and f.get('id') == key]
+        need(len(matches) == 1 and key not in protected, 'missing/duplicate/protected pending occurrence')
+        f = matches[0]
+        gate = gates.get(f.get('gate'), {})
+        # Semantic execution can create compute sessions. Admission requires its recorded
+        # complete gate/stack cleanup below, never a claim of universal resource absence.
+        # Unknown categories stay closed; no occurrence-ID exception is made.
+        need(gate.get('category') in c.QUICK | {'semantic-stack'} and not gate.get('native_cloud')
+             and gate.get('worker_transport') != 'benchmark-cloud-cli', 'pending gate is not admitted for nonfinancial RCA')
+        check = f.get('check', '').partition('/')[2]
+        need(f.get('check') == f.get('gate', '') + '/' + check and check in gate.get('checks', [])
+             and isinstance(f.get('source'), dict) and f.get('complete') is True and f.get('native_result') == 'FAIL', 'incomplete/unbound pending failure')
+        need(isinstance(f.get('worker_result'), str) and f['worker_result'],
+             'malformed pending adapter path')
+        path = Path(f['worker_result'])
+        need(path.is_absolute() and path.resolve() == path and path.is_file() and not path.is_symlink(),
+             'pending adapter missing or noncanonical')
+        adapter = c.bounded_read(path, 'pending adapter')
+        need(isinstance(adapter, dict) and isinstance(adapter.get('cases'), dict)
+             and isinstance(adapter.get('evidence'), dict), 'malformed pending adapter containers')
+        receipts = [r for a in state.get('attempts', []) for r in a.get('results', [])
+                    if r.get('worker_result') == str(path) and r.get('source') == f['source']
+                    and r.get('gate') == f['gate']]
+        need(len(receipts) == 1, 'missing/duplicate pending receipt')
+        receipt = receipts[0]
+        need(receipt.get('executed') is True and receipt.get('complete') is True
+             and type(receipt.get('native_exit')) is int and receipt['native_exit'] == 1
+             and receipt.get('status') == 'FAIL' and receipt.get('timed_out') is False
+             and receipt.get('cancelled') is False and receipt.get('lingering_group') is False
+             and ('interrupted' not in receipt or receipt['interrupted'] is False)
+             and ('reused' not in receipt or receipt['reused'] is False)
+             and ('source_unchanged' not in receipt or receipt['source_unchanged'] is True)
+             and receipt.get('cases', {}).get(check) == 'FAIL'
+             and not c.receipt_owner(f['gate'], receipt), 'pending receipt incomplete or owner unknown')
+        need(all(adapter.get(k) == receipt.get(k) for k in ('token', 'source', 'gate'))
+             and isinstance(adapter.get('token'), str) and bool(adapter['token'])
+             and adapter.get('complete') is True and adapter.get('cleanup_complete') is True
+             and adapter.get('source_unchanged') is True
+             and type(adapter.get('native_exit')) is int and adapter['native_exit'] == 1
+             and adapter.get('interrupted') is False and adapter.get('reused') is False
+             and all(key not in adapter or adapter[key] is False
+                     for key in ('timed_out', 'cancelled', 'lingering_group'))
+             and ('status' not in adapter or adapter['status'] == 'FAIL') and not adapter.get('cleanup_owner')
+             and adapter.get('cases', {}).get(check) == 'FAIL'
+             and adapter.get('evidence', {}).get(check) == f.get('worker_evidence'),
+             'pending adapter is incomplete or differs from failure/receipt')
+        need(f.get('command') == receipt.get('command'), 'pending original command changed')
+        original_files = {}
+        if f['source'] == state['source']:
+            need(f.get('command') == gate.get('command'), 'pending gate command changed')
+            request = {'token': receipt['token'], 'source': f['source'],
+                       'gate': f['gate'], 'checks': gate['checks']}
+            for field in ('worker_recipe', 'worker_root'):
+                if field in gate:
+                    request[field] = gate[field]
+        else:
+            # A carried failure still belongs to its original execution, not this plan's source.
+            # Use the complete saved producer request and exact retained receipt; never ancestry.
+            documents = {}
+            for name in ('request', 'receipt'):
+                file = path.with_name(name + '.json')
+                need(file.is_file() and not file.is_symlink() and file.resolve() == file,
+                     'original pending request/receipt missing')
+                documents[name] = c.bounded_read(file, 'original pending ' + name)
+                need(isinstance(documents[name], dict), 'malformed original pending document')
+                original_files[name + '_sha256'] = c.sha_file(file)
+            request = documents['request']
+            binding = receipt.get('execution_binding')
+            attempts = [a for a in state['attempts'] if any(r is receipt for r in a['results'])]
+            need(documents['receipt'] == receipt and len(attempts) == 1
+                 and attempts[0].get('source') == f['source']
+                 and request.get('phase') == attempts[0].get('phase') == f.get('phase')
+                 and all(request.get(k) == receipt.get(k) for k in ('token', 'source', 'gate'))
+                 and isinstance(request.get('checks'), list) and request['checks']
+                 and all(isinstance(v, str) and v for v in request['checks'])
+                 and len(request['checks']) == len(set(request['checks']))
+                 and request.get('skips') == {} and check in request['checks']
+                 and isinstance(request.get('worker_recipe'), dict)
+                 and isinstance(request.get('worker_root'), str) and request['worker_root']
+                 and isinstance(binding, dict)
+                 and all(isinstance(binding.get(k), str) and re.fullmatch('[0-9a-f]{64}', binding[k])
+                         for k in ('contract_digest', 'input_fingerprint', 'environment')),
+                 'original pending execution binding changed')
+            saved = state.get('pending_execution_contracts', {}).get(key)
+            if saved is None:
+                # Recover only byte-equivalent recorded contract fields, proven by the native digest.
+                original_gate = copy.deepcopy(gate)
+                original_gate['command'] = copy.deepcopy(receipt['command'])
+                original_gate['worker_recipe'] = copy.deepcopy(request['worker_recipe'])
+                original_gate['worker_root'] = request['worker_root']
+                saved = {'source': copy.deepcopy(f['source']), 'gate': original_gate}
+            need(isinstance(saved, dict) and saved.get('source') == f['source']
+                 and isinstance(saved.get('gate'), dict)
+                 and c.digest(saved['gate']) == binding['contract_digest']
+                 and saved['gate'].get('name') == f['gate']
+                 and saved['gate'].get('command') == f['command']
+                 and saved['gate'].get('checks') == request['checks']
+                 and saved['gate'].get('worker_recipe') == request['worker_recipe']
+                 and saved['gate'].get('worker_root') == request['worker_root'],
+                 'original pending contract digest changed')
+            original_files['execution_contract'] = copy.deepcopy(saved)
+        c.validate_result(adapter, request, receipt['native_exit'])
+        need(adapter['cases'] == receipt['cases'], 'pending native grades differ from receipt')
+        rows.append({'id': key, 'adapter_sha256': c.sha_file(path), 'receipt_sha256': c.digest(receipt),
+                     **original_files})
+    return rows
+
+
 def build(state, old, new, root):
     import deploy_test_cycle as c
-    need(c.digest(old) == state['plan_digest'], 'old plan mismatch')
+    pending_shapes(state, old)
+    need(c.digest(old) == state['plan_digest'] and old['source'] == state['source'], 'old plan mismatch')
     need(not c.CANCEL.is_set() and not c.retained_owners(state, [g['name'] for g in old['gates']])
-         and not any(state.get(k) for k in ('running', 'live_failures', 'resume_phase', 'pending')), 'active/unknown coordinator')
-    rows = [historical(state, f, root) for f in known(state, root).values()]
+         and not any(state.get(k) for k in ('running', 'live_failures', 'resume_phase')), 'active/unknown coordinator')
+    protected = known(state, root)
+    pending = pending_rca(state, old, protected)
+    rows = [historical(state, f, root) for f in protected.values()]
     need(rows, 'no historical stalls')
     for key in ('root_id', 'card_id', 'transfer_id', 'purchase_id'):
         need(len({r[key] for r in rows}) == len(rows), 'borrowed resource identity')
@@ -243,7 +429,7 @@ def build(state, old, new, root):
         f = r['original_failure']
         need(f['check'].split('/', 1)[1] in gates[f['gate']]['checks'], 'protected task removed')
     return {'kind': KIND, 'before_state_sha256': c.digest(state), 'old_plan_digest': c.digest(old),
-            'current_binding': binding(new, root), 'cases': rows}
+            'current_binding': binding(new, root), 'cases': rows, **({'pending_rca': pending} if pending else {})}
 
 
 def prepare(state, old, new, proof, root):
@@ -264,6 +450,83 @@ def apply(state, rows, root):
             history.append(copy.deepcopy(r))
 
 
+LEGACY_IMPORT_KIND = 'historical-agentcard-no-retry-import-v1'
+
+
+def prepare_import(state, donor_path, directory, root, *, donor_sha256):
+    """Bind exact donor obligations to a pristine independent cycle; never copy files."""
+    import deploy_test_cycle as c
+    fresh = c.initialize(state['plan'], root)
+    need(c.digest(state) == c.digest(fresh), 'import requires a normally initialized fresh cycle')
+    directory, donor_path = Path(directory), Path(donor_path)
+    for path in (directory, donor_path):
+        need(path.is_absolute() and path.resolve() == path and path.is_relative_to(root / '.context')
+             and not path.is_symlink(), 'noncanonical import path')
+    need(donor_path.name == 'cycle.json' and donor_path.is_file()
+         and donor_path != directory / 'cycle.json', 'invalid independent donor index')
+    need(not (directory / 'cycle.json').is_symlink(), 'symlinked target cycle')
+    need(not (directory / 'attempts').exists() and not (directory / 'attempts').is_symlink(),
+         'import target has an existing attempt namespace')
+    donor_sha = c.sha_file(donor_path)
+    need(isinstance(donor_sha256, str) and re.fullmatch('[0-9a-f]{64}', donor_sha256)
+         and donor_sha == donor_sha256, 'donor bytes differ from approved hash')
+    donor = c.bounded_read(donor_path, 'historical donor index')
+    need(not c.CANCEL.is_set() and not any(donor.get(k) for k in
+         ('running', 'live_failures', 'resume_phase', 'pending')), 'active/unknown donor coordinator')
+    validate_donor_rows(donor, root)
+    found = known(donor, root)
+    history = donor.get('historical_custody_history', [])
+    ids = [row['original_failure']['id'] for row in history]
+    need(ids and len(ids) == len(set(ids)) and set(ids) == set(found), 'donor custody inventory differs')
+    need(not any(w['id'] in ids for w in donor.get('resource_warnings', []))
+         and not any(found[i]['check'] in donor.get('skips', {}) for i in ids), 'mixed donor waiver and custody')
+    for identifier in ids:
+        for raw in (found[identifier]['worker_evidence']['path'], found[identifier]['worker_result']):
+            path = Path(raw)
+            need(path.is_absolute() and path.resolve() == path and path.is_file()
+                 and path.is_relative_to(root / '.context') and not path.is_symlink(), 'noncanonical native/adapter file')
+    rows = [historical(donor, found[identifier], root) for identifier in ids]
+    need(c.digest(rows) == c.digest(history), 'donor native custody history changed')
+    for key in ('root_id', 'card_id', 'transfer_id', 'purchase_id'):
+        need(len({row[key] for row in rows}) == len(rows), 'borrowed resource identity')
+    gates = {gate['name']: gate for gate in state['plan']['gates']}
+    for row in rows:
+        failure = row['original_failure']
+        gate = gates.get(failure['gate'], {})
+        need(failure['check'].split('/', 1)[1] in gate.get('checks', [])
+             and gate.get('case_protocol') is True, 'protected task or case protocol missing')
+    transfer_proof = build(donor, donor['plan'], state['plan'], root)
+    need(c.digest(transfer_proof['cases']) == c.digest(rows), 'donor transfer inventory differs')
+    need(c.sha_file(donor_path) == donor_sha, 'donor index changed during preparation')
+    return {'kind': LEGACY_IMPORT_KIND, 'donor_path': str(donor_path), 'donor_sha256': donor_sha,
+            'target_state': str(directory / 'cycle.json'), 'before_state_sha256': c.digest(fresh),
+            'current_binding': binding(state['plan'], root), 'cases': rows, 'transfer_proof': transfer_proof,
+            'failures': [copy.deepcopy(found[identifier]) for identifier in ids],
+            'pending_post_merge': [copy.deepcopy(p) for p in donor.get('pending_post_merge', []) if p['id'] in ids]}
+
+
+def admit_import(state, proof, donor_path, directory, root, *, donor_sha256):
+    """Revalidate everything before one state publication by the existing CLI writer."""
+    import deploy_test_cycle as c
+    fresh = c.initialize(state['plan'], root)
+    expected = prepare_import(fresh, donor_path, directory, root, donor_sha256=donor_sha256)
+    need(c.digest(proof) == c.digest(expected), 'import proof differs from exact donor/current binding')
+    # The hash-pinned interface is an adapter to the authoritative transfer
+    # protocol, including its persistent identities and pending-repair guards.
+    donor = c.bounded_read(Path(donor_path), 'historical donor index')
+    need(c.sha_file(donor_path) == donor_sha256, 'donor index changed before admission')
+    candidate = copy.deepcopy(fresh)
+    adopt(candidate, donor, donor['plan'], expected['transfer_proof'], root)
+    need(c.sha_file(donor_path) == donor_sha256, 'donor index changed during admission')
+    candidate['historical_custody_import'] = {'kind': LEGACY_IMPORT_KIND, 'proof_sha256': c.digest(expected),
+        'donor_path': expected['donor_path'], 'donor_sha256': expected['donor_sha256']}
+    verify(candidate, root)
+    if state.get('historical_custody_import'):
+        need(c.digest(state) == c.digest(candidate), 'import replay changed or cycle is no longer fresh')
+    else:
+        need(c.digest(state) == c.digest(fresh), 'import requires a normally initialized fresh cycle')
+    state.clear(); state.update(candidate)
+
 IMPORT_KIND = 'historical-agentcard-custody-import-v1'
 
 
@@ -278,6 +541,12 @@ def donor_rows(donor_path, index_path, donor_sha256, index_sha256, root):
     need(index.get('format') == 'PR1770-HISTORICAL-CUSTODY-RECOVERY-CONTENTS-V1'
          and index.get('files', {}).get(str(root / '.context/deploy-pipeline/cycle.json')) == donor_sha256,
          'donor snapshot not in pinned contents manifest')
+    return validate_donor_rows(donor, root)
+
+
+def validate_donor_rows(donor, root):
+    """Shared native/index inventory checks for both explicit provenance envelopes."""
+    import deploy_test_cycle as c
     history, active = donor.get('historical_custody_history', []), donor.get('historical_no_retry_custody', [])
     need(history and active, 'empty donor custody index')
     ids = [r['original_failure']['id'] for r in history]
@@ -431,11 +700,6 @@ def qualifications(state, gate, root, *, current=None):
             check = f['check'].split('/', 1)[1]
             need(check in gate['checks'] and check not in expected, 'duplicate/removed custody check')
             expected[check] = {**r, 'source': state['source']}
-    if state.get('completed_local_custody_history'):
-        from deploy_test_completed_local import qualifications as completed_qualifications
-        mapped = completed_qualifications(state, gate, root, current=current)
-        need(not set(mapped) & set(expected), 'duplicate custody authority')
-        expected.update(mapped)
     return expected
 
 
@@ -454,13 +718,10 @@ def guard(state, gate, root, legacy=None, *, current=None):
     return custody
 
 
-def verify(state, root):
+def verify(state, root, *, allow_stale_elections=False):
     """Validate retained provenance and every protected obligation against the current plan."""
     import deploy_test_cycle as c
     verify_import_origin(state, root)
-    if state.get('completed_local_custody_history'):
-        from deploy_test_completed_local import verify as verify_completed
-        verify_completed(state, root)
     if not (known(state, root) or state.get('historical_no_retry_custody') or state.get('historical_custody_history')):
         return
     gates = {g['name']: g for g in state['plan']['gates']}
@@ -468,7 +729,8 @@ def verify(state, root):
         need(f['gate'] in gates and f['check'].split('/', 1)[1] in gates[f['gate']]['checks'], 'known historical task removed from plan')
     for gate in state['plan']['gates']:
         # Caller supplies legacy qualifications without recursively entering custody.
-        guard(state, gate, root, c.reuse_qualifications(state, gate, include_custody=False, root=root))
+        guard(state, gate, root, c.reuse_qualifications(state, gate, include_custody=False, root=root,
+            validate_elections=not allow_stale_elections))
 
 
 def verify_import_origin(state, root):
@@ -476,6 +738,9 @@ def verify_import_origin(state, root):
     if 'historical_custody_import' not in state:
         return
     proof = state['historical_custody_import']
+    if isinstance(proof, dict) and proof.get('kind') == LEGACY_IMPORT_KIND:
+        verify_legacy_import_origin(state, proof, root)
+        return
     need(isinstance(proof, dict) and proof.get('kind') == IMPORT_KIND, 'malformed retained import provenance')
     origin = proof.get('donor')
     need(isinstance(origin, dict), 'malformed retained donor provenance')
@@ -490,25 +755,93 @@ def verify_import_origin(state, root):
          'custody import provenance/index changed')
 
 
+
+def verify_legacy_import_origin(state, proof, root):
+    """Revalidate the approved-SHA/adopt envelope without resetting a progressed cycle."""
+    import deploy_test_cycle as c
+    need(set(proof) == {'kind', 'proof_sha256', 'donor_path', 'donor_sha256'}
+         and re.fullmatch('[0-9a-f]{64}', proof.get('proof_sha256', ''))
+         and re.fullmatch('[0-9a-f]{64}', proof.get('donor_sha256', '')),
+         'malformed retained legacy import provenance')
+    path = Path(proof['donor_path'])
+    need(path.is_absolute() and path.resolve() == path and path.is_relative_to(root / '.context')
+         and path.name == 'cycle.json' and path.is_file() and not path.is_symlink()
+         and c.sha_file(path) == proof['donor_sha256'], 'legacy donor provenance changed')
+    donor = c.bounded_read(path, 'historical donor index')
+    _, found, rows = validate_donor_rows(donor, root)
+    need(all(r in state.get('historical_custody_history', []) for r in rows), 'historical failure removed')
+    need(set(found) <= known(state, root).keys(), 'historical failure removed')
+
 def state_identity(state):
     """Bind admission to current inputs and the complete retained custody provenance."""
     import deploy_test_cycle as c
     return c.digest({k: state.get(k) for k in ('source', 'plan_digest', 'environment', 'input_fingerprints',
                     'historical_no_retry_custody', 'historical_custody_history',
-                    'historical_custody_import', 'historical_custody_transfers', 'completed_local_custody_history')})
+                    'historical_custody_import', 'historical_custody_transfers')})
+
+
+def debt_key(failure):
+    """The identity of one no-remint obligation: original failure, source and native bytes."""
+    import deploy_test_cycle as c
+    return c.digest({**{k: failure.get(k) for k in ('id', 'gate', 'check', 'source')},
+                     'native_sha256': (failure.get('worker_evidence') or {}).get('sha256')})
+
+
+def canonical_override(state, default, root):
+    """Admit a request-owned alternate ledger beside the canonical default only when the default's
+    authoritative custody history is validated and either empty or covered by that ledger."""
+    import deploy_test_cycle as c
+    try:
+        need(default.is_file() and not default.is_symlink(), 'canonical custody state is not a regular file')
+        canonical = c.read(default)
+        need(isinstance(canonical, dict) and isinstance(canonical.get('failures'), list)
+             and isinstance(canonical.get('source'), dict) and isinstance(canonical.get('plan'), dict)
+             and c.digest(canonical['plan']) == canonical.get('plan_digest'), 'malformed canonical cycle')
+        verify_import_origin(canonical, root)
+        found = known(canonical, root)
+        history = canonical.get('historical_custody_history', [])
+        # Re-derive every saved record from its exact native bytes, as donor import does; a stale
+        # source is fine, but changed credit, provenance or native history is not coverage.
+        for saved in history:
+            need(historical(canonical, found[saved['original_failure']['id']], root) == saved,
+                 'canonical custody history changed')
+        for record in canonical.get('historical_no_retry_custody', []):
+            native = historical(canonical, found[record['original_failure']['id']], root)
+            exact = dict(kind=KIND, disposition=DISPOSITION, **native, current_binding=record.get('current_binding'),
+                         current_execution='UNVERIFIED', current_financial_state='UNVERIFIED',
+                         credit={'test_execution': False, 'assertions': False, 'financial_release': False})
+            need(record == exact and native in history, 'canonical custody record changed')
+        running = any(canonical.get(k) for k in ('running', 'live_failures', 'resume_phase'))
+    except (OSError, ValueError, KeyError, TypeError, IndexError, AttributeError) as error:
+        raise AdmissionRefusal('canonical-custody-unverifiable', f'{type(error).__name__}: {error}') from error
+    refuse(not running, 'canonical-cycle-active')
+    covered = known(state, root)
+    refuse(all(key in covered and debt_key(covered[key]) == debt_key(f) for key, f in found.items()),
+           'canonical-custody-uncovered')
+    identity = c.digest(canonical)
+    derived = ((state.get('historical_custody_import') or {}).get('donor', {}).get('state_digest') == identity
+               or any(t.get('donor_state_sha256') == identity for t in state.get('historical_custody_transfers', [])))
+    refuse(canonical['source'] != state['source'] or derived, 'canonical-cycle-owns-source')
 
 
 def admission(request, root):
+    """Bind a gate child's request to its custody ledger before the cloud namespace is created."""
     import deploy_test_cycle as c
     default = root / '.context/deploy-pipeline/cycle.json'
     locator = request.get('custody_state')
     request_path = Path(os.environ.get('DEPLOY_GATE_REQUEST', ''))
+    owner_state = None
     if (request_path.name == 'request.json' and len(request_path.parents) > 4
             and request_path.parents[3].name == 'attempts'):
         owner_state = request_path.parents[4] / 'cycle.json'
-        need(locator is not None and Path(locator).resolve() == owner_state.resolve(), 'missing request-owned custody locator')
-    if default.exists():
-        need(locator is not None and Path(locator).resolve() == default.resolve(), 'missing canonical custody locator')
+        refuse(locator is not None and Path(locator).resolve() == owner_state.resolve(), 'request-locator-mismatch')
+    override = False
+    if default.exists() or default.is_symlink():
+        # A supported non-default state directory owns its request; the canonical default must
+        # still be proven free of (or covered for) known no-remint obligations below.
+        override = owner_state is not None and owner_state.resolve() != default.resolve()
+        refuse(override or (locator is not None and Path(locator).resolve() == default.resolve()),
+               'canonical-locator-missing')
     if locator is None:
         return  # standalone disposable requests with no canonical cycle have no recorded obligations
     path = Path(locator)
@@ -517,6 +850,8 @@ def admission(request, root):
     state = c.read(path)
     need(request.get('custody_child_environment') == environment_identity(os.environ), 'admission environment changed')
     need(state_identity(state) == request.get('custody_state_sha256') and state['source'] == request['source'], 'custody state changed')
+    if override:
+        canonical_override(state, default, root)
     gate = next(g for g in state['plan']['gates'] if g['name'] == request['gate'])
     need(c.source(root) == state['source'] and c.digest(state['plan']) == state['plan_digest'], 'admission source/plan changed')
     need(request.get('custody_runtime') == runtime_identity(root), 'admission runtime files changed')
@@ -528,6 +863,8 @@ def admission(request, root):
     expected = c.reuse_qualifications(state, gate, root=root, include_custody=False)
     current = {k: state[k] for k in ('source', 'plan_digest', 'environment', 'input_fingerprints')}
     expected.update(guard(state, gate, root, expected, current=current))
+    from deploy_test_user_omission import qualifications as elected_qualifications
+    expected.update(elected_qualifications(state, gate, expected))
     need(request['skips'] == expected and request['checks'] == [x for x in gate['checks'] if x not in expected], 'admission inventory/qualification changed')
 
 
@@ -542,21 +879,3 @@ def runtime_identity(root):
     return {name: c.runtime_config_sha256(root / name) for name in
             ('.env', 'env.sh', 'back-end/.env', 'agents/.env', 'agents/.env.benchmark-temporal',
              'front-end/.env', 'front-end/.env.local') if (root / name).is_file()}
-
-
-def sandbox_stall_snapshot(snap):
-    """Exact typed sandbox settlement predicate, never a generic payment error."""
-    card, transfer, purchase, funding = (snap[k] for k in ('agentCard', 'orgTransfer', 'purchase', 'walletFunding'))
-    amount = transfer['amountCents']
-    need(all(isinstance(v, str) and v for v in (snap['agentId'], card.get('id'), transfer.get('id'), purchase.get('id')))
-         and type(amount) is int and amount > 0 and type(transfer['transferredCents']) is int
-         and transfer['transferredCents'] == amount and type(transfer['releasedCents']) is int
-         and transfer['releasedCents'] == 0 and transfer['livemode'] is False
-         and transfer['status'] == 'consumed' and card['status'] == 'CLOSED'
-         and type(card['balanceCents']) is int and card['balanceCents'] == 0
-         and ('livemode' not in card or card['livemode'] is False)
-         and purchase['status'] == 'HELD' and funding['status'] == 'RECLAIMING'
-         and transfer['cardId'] == purchase['cardId'] == card['id']
-         and funding['providerTransferId'] == transfer['id']
-         and snap['stripeHold']['livemode'] is False and snap['stripeRefund'] is None,
-         'not an exact sandbox settlement stall')

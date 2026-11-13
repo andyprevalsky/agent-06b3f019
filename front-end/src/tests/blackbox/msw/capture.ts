@@ -14,8 +14,10 @@ export interface CapturedRequest {
 }
 
 export const capturedRequests: CapturedRequest[] = [];
+let captureEpoch = 0;
 
 export function clearCaptures(): void {
+  captureEpoch += 1;
   capturedRequests.length = 0;
 }
 
@@ -27,6 +29,7 @@ export function installCapture(server: Pick<SetupServer, 'events'>): void {
   server.events.on('request:start', async ({ request }) => {
     // Only capture API requests, not static assets
     if (!request.url.includes('/api/')) return;
+    const epoch = captureEpoch;
 
     let body: unknown = null;
     try {
@@ -48,6 +51,7 @@ export function installCapture(server: Pick<SetupServer, 'events'>): void {
       headers[key] = value;
     });
 
+    if (epoch !== captureEpoch) return;
     capturedRequests.push({
       url: request.url,
       method: request.method,

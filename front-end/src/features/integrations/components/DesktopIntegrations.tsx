@@ -2,8 +2,10 @@
  * STATE MACHINE: DesktopIntegrations (Rose Desktop flag on; stock page unchanged when off)
  *
  *   [MOUNTED] → flat sections in the existing order:
- *     Browser Cookies · Passwords · Messages · Compute · Banks & Financial Accounts · Meetings
- *     · Socials · File System · CLIs
+ *     Browser Cookies · Passwords · Messages · Compute · Banks & Financial Accounts
+ *     · Socials · File System · Meeting note taker (Granola, Fireflies) · Other
+ *     (Pebble Index 01, whose Connect opens
+ *     its setup modal) · CLIs
  *   Every integration row is a DesktopIntegrationRow: the stock app-icon tile, the
  *   row's ONE account chip (Gmail addresses, Plaid institutions and compute
  *   subscriptions keep listing several, as the stock page does) and a gradient
@@ -25,6 +27,7 @@
  *   Connect / "+ Add account" call the same hooks/actions the stock sections use.
  */
 
+import { integrationMatchesSearch } from '../hooks/integrationSearch';
 import { useMemo, type ReactNode } from 'react';
 
 import { mergeAccountsByProvider } from '../hooks/integrationAccounts';
@@ -46,10 +49,21 @@ import CliIntegrationsSection from './CliIntegrationsSection';
 /** Refetch cadence while any account reports a running sync. */
 export const DESKTOP_SYNC_REFRESH_MS = 5_000;
 
-function Section({ title, children }: { title: string; children: ReactNode }) {
+function Section({
+  title,
+  description,
+  children,
+  hidden,
+}: {
+  title: string;
+  description?: string;
+  hidden: boolean;
+  children: ReactNode;
+}) {
   return (
-    <section aria-label={title}>
+    <section aria-label={title} hidden={hidden}>
       <DesktopSectionHeader>{title}</DesktopSectionHeader>
+      {description && <p className="mb-2 text-xs text-muted-foreground">{description}</p>}
       {children}
     </section>
   );
@@ -86,8 +100,13 @@ export default function DesktopIntegrations(props: DesktopIntegrationsProps) {
             {removal.error}
           </p>
         )}
-        {sections.map(({ title, rows }) => (
-          <Section key={title} title={title}>
+        {sections.map(({ catalogKey, title, description, rows }) => (
+          <Section
+            key={title}
+            title={title}
+            description={description}
+            hidden={!integrationMatchesSearch(catalogKey, props.search)}
+          >
             {title === 'Compute' && (
               <>
                 <DesktopComputeRow

@@ -1,0 +1,14 @@
+{
+  "format": "ROSE-PRIVATE-TAR-GCM-V1",
+  "bucket": "trace-archive",
+  "key": "devbox-closeouts/pr-1770/historical-stash-0e2ffe95-v1.enc",
+  "encryption_key_id": "trace-archive-prod-2026-07-03",
+  "ciphertext_sha256": "7a14a2ccb316435ffd91e07a96a33226f5f4dec7b2cafd2d18be56636423bb11",
+  "gzip_sha256": "9df15e3841f64a589b83e0423ff1bb8c55105deafa17837bcc17130985bbf2a0",
+  "stored_bytes": 36623,
+  "frames": 1,
+  "files": 2,
+  "original_bytes": 36134,
+  "manifest_sha256": "5f2ce5d452aea52e8985f57379b851a21e51e6ec1c426f385fa4bf2f51362888",
+  "full_readback_verified": true
+}

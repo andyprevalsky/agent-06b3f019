@@ -1,4 +1,4 @@
-import { act, fireEvent, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import { describe, it, expect, vi } from 'vitest';
 import { http, HttpResponse } from 'msw';
 import { subscribeToBus } from '@/lib/realtime';
@@ -104,6 +104,97 @@ function setup(activeChildren = true) {
   return onSelectAgent;
 }
 describe('sidebar agent hierarchy', () => {
+  it('folds completed and paused children into a drawer and returns resumed children to the list', async () => {
+    const select = setup(false);
+    expandBar();
+    fireEvent.click(await screen.findByRole('button', { name: 'Expand Launch report' }));
+    const children = within(screen.getByTestId('rose-agent-children-root'));
+    expect(screen.queryByTestId('rose-agent-row-worker')).toBeNull();
+    expect(screen.queryByTestId('rose-agent-row-done')).toBeNull();
+    const drawer = children.getByRole('button', { name: 'Finished agents (2)' });
+    expect(drawer).toHaveAttribute('aria-expanded', 'false');
+    fireEvent.click(drawer);
+    expect(screen.getByTestId('rose-agent-row-worker')).toBeInTheDocument();
+    fireEvent.click(screen.getByTestId('rose-agent-row-done'));
+    expect(select).toHaveBeenCalledWith('done');
+    fireEvent.click(drawer);
+
+    const handlers = vi
+      .mocked(subscribeToBus)
+      .mock.calls.filter(([id]) => id === 'root')
+      .at(-1)![1];
+    const update = (status: 'ACTIVE' | 'PAUSED' | 'COMPLETED') =>
+      act(() =>
+        handlers.onAgentStateChanged?.({
+          agentId: 'worker',
+          parentAgentId: 'root',
+          goal: 'Research',
+          status,
+          progress: 0,
+          toolsInUse: [],
+          messageCount: 1,
+          costCents: 0,
+        }),
+      );
+    update('ACTIVE');
+    expect(screen.getByTestId('rose-agent-row-worker')).toBeInTheDocument();
+    expect(children.getByRole('button', { name: 'Finished agents (1)' })).toHaveAttribute(
+      'aria-expanded',
+      'false',
+    );
+    update('PAUSED');
+    expect(screen.queryByTestId('rose-agent-row-worker')).toBeNull();
+    expect(children.getByRole('button', { name: 'Finished agents (2)' })).toBeInTheDocument();
+    update('COMPLETED');
+    fireEvent.click(children.getByRole('button', { name: 'Finished agents (2)' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Expand Research' }));
+    const nested = within(screen.getByTestId('rose-agent-children-worker'));
+    expect(screen.queryByTestId('rose-code-agent-row-code')).toBeNull();
+    fireEvent.click(nested.getByRole('button', { name: 'Finished agents (2)' }));
+    expect(screen.getByTestId('rose-code-agent-row-code')).toBeInTheDocument();
+    expect(screen.getByTestId('rose-agent-row-leaf')).toBeInTheDocument();
+  });
+
+  it('includes finished browser and explore tasks in the same drawer without extra subscriptions', async () => {
+    const select = setup();
+    await screen.findByTestId('rose-agent-count-root');
+    const handlers = vi
+      .mocked(subscribeToBus)
+      .mock.calls.filter(([id]) => id === 'root')
+      .at(-1)![1];
+    const subscriptions = vi.mocked(subscribeToBus).mock.calls.length;
+    act(() =>
+      handlers.onAgentStateChanged?.({
+        agentId: 'root',
+        parentAgentId: null,
+        goal: 'Launch report',
+        status: 'ACTIVE',
+        progress: 0,
+        toolsInUse: [],
+        messageCount: 1,
+        costCents: 0,
+        backgroundTasks: [
+          {
+            address: '/root/browser',
+            type: 'browser',
+            goal: 'Check the booking',
+            status: 'completed',
+          },
+          { address: '/root/explore', type: 'explore', goal: 'Find sources', status: 'completed' },
+        ],
+      }),
+    );
+    expandBar();
+    fireEvent.click(await screen.findByRole('button', { name: 'Expand Launch report' }));
+    expect(screen.queryByTestId('rose-task-agent-row-task:/root/browser')).toBeNull();
+    const drawer = screen.getByRole('button', { name: 'Finished agents (3)' });
+    fireEvent.click(drawer);
+    fireEvent.click(screen.getByTestId('rose-task-agent-row-task:/root/browser'));
+    expect(select).toHaveBeenCalledWith('root');
+    expect(screen.getByTestId('rose-task-agent-row-task:/root/explore')).toBeInTheDocument();
+    expect(vi.mocked(subscribeToBus).mock.calls).toHaveLength(subscriptions);
+  });
+
   it('updates the root ring directly from the shared tree bus', async () => {
     setup();
     await screen.findByTestId('rose-agent-count-root');
@@ -225,6 +316,7 @@ describe('sidebar agent hierarchy', () => {
     expandBar();
     fireEvent.click(await screen.findByRole('button', { name: 'Expand Launch report' }));
     await screen.findByTestId('rose-code-agent-row-code-run');
+    fireEvent.click(screen.getByRole('button', { name: 'Finished agents (3)' }));
     const rows = screen
       .getByTestId('rose-agent-children-root')
       .querySelectorAll<HTMLElement>(

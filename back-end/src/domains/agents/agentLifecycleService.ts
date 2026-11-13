@@ -1,3 +1,4 @@
+import { assertExternalExecution, EXTERNAL_EXECUTION_START_PHASE } from './agentExternalExecution';
 /**
  * Agent lifecycle service — create and delete agents.
  */
@@ -84,7 +85,12 @@ async function startChatMode(
   // The tree's GitHub repo is created when it first starts a code session
   // (ensureAgentTreeRepo), not for every chat: most chats never write code, and
   // every create shares one account-wide GitHub rate limit.
-  handleChatMessage({ agentId: agentDbId, userId, model: body.model }).catch((err: unknown) => {
+  handleChatMessage({
+    agentId: agentDbId,
+    rootAgentId: agentDbId,
+    userId,
+    model: body.model,
+  }).catch((err: unknown) => {
     void recoverChatHandlerFailure({
       agentId: agentDbId,
       userId,
@@ -123,8 +129,12 @@ async function resolveSubAgentBenchmarkFlag(
 
 /** Server-side create options that are not part of the public request body. */
 export interface CreateAgentOptions {
+  /** Internal execution owns this root's work; do not also launch chat or Temporal. */
+  externalExecution?: boolean;
   /** Internal independent spawn: recorded atomically before its workflow starts. */
   graphSpawn?: { title: string; folderId: string; requestHash: string };
+  /** Trusted normal iPhone connection root; never accepted from public create bodies. */
+  phoneSetupHash?: string;
   /** Root repository for code sessions, persisted in the create transaction. */
   githubRepoUrl?: string;
   /**
@@ -169,6 +179,12 @@ async function applyCreateBodyRules(
   await assertCodeSessionShareTarget(body, userId);
 }
 
+async function activateExternalExecution(agentId: string): Promise<null> {
+  // Ownership (workflowStartPhase) was written by the create transaction.
+  await repo.updateAgent(agentId, { status: 'ACTIVE' });
+  return null;
+}
+
 export async function createAgent(
   body: CreateAgentBody,
   userId: string,
@@ -177,6 +193,7 @@ export async function createAgent(
   isBenchmark = false,
   options: CreateAgentOptions = {}
 ) {
+  assertExternalExecution(body, isInternal, options.externalExecution);
   if (isInternal) body.goal = resolvePromptSecrets(body.goal);
   const verifier = { type: 'FLOAT_LLM_JUDGE' as const };
   const isSubAgent = body.parent_agent_id !== undefined;
@@ -229,44 +246,48 @@ export async function createAgent(
     temporalWorkflowId: willStartWorkflow ? agentId : null,
     workflowMaxIterations: body.max_iterations,
     workflowContextGates: body.context_gates,
-    workflowStartPhase: body.start_phase,
+    workflowStartPhase:
+      options.externalExecution === true ? EXTERNAL_EXECUTION_START_PHASE : body.start_phase,
     workflowTaskQueue: body.task_queue,
     ...(await serverCreateFields(body, userId, isSubAgent, options)),
     projectId,
     folderId,
     ...graphSpawnFields(options),
+    ...(options.phoneSetupHash === undefined ? {} : { phoneSetupHash: options.phoneSetupHash }),
     taskPath,
   });
   const archiveStartFixture = !isSubAgent ? await prepareAgentStartArchive(agent.agent.id) : null;
   await recordCodeSessionShare(body, userId, agent.agent.id);
 
-  const workflowId = await launchAgentWorkflow(
+  const workflowId = await launchAgentExecution(
     body,
     agent,
     userId,
     isSubAgent,
     agentId,
     verifier,
-    options.graphSpawn !== undefined
+    options
   );
-  if (options.graphSpawn !== undefined)
+  if (options.graphSpawn !== undefined || options.phoneSetupHash !== undefined)
     await repo.updateAgent(agentId, { temporalWorkflowStartPending: false });
 
   runPostCreateSideEffects(agent.agent.id, archiveStartFixture);
 
-  return createAgentResponse(agent, body, isSubAgent, workflowId);
+  return createAgentResponse(agent, body, isSubAgent, workflowId, options.externalExecution);
 }
 
 /* c8 ignore start -- launchAgentWorkflow delegates to Temporal-dependent functions */
-async function launchAgentWorkflow(
+async function launchAgentExecution(
   body: CreateAgentBody,
   agent: Awaited<ReturnType<typeof repo.createAgentTransaction>>,
   userId: string,
   isSubAgent: boolean,
   agentId: string,
   verifier: { type: 'FLOAT_LLM_JUDGE' },
-  independent = false
+  options: CreateAgentOptions
 ): Promise<string | null> {
+  if (options.externalExecution === true) return activateExternalExecution(agentId);
+  const independent = options.graphSpawn !== undefined || options.phoneSetupHash !== undefined;
   if (isSubAgent) {
     try {
       return await startSubAgentWorkflow(
@@ -313,7 +334,9 @@ async function launchAgentWorkflow(
 
 /** Soft-delete an agent tree via the canonical kill path (UI Archive / SMS /clear). */
 export async function deleteAgentRecursive(agentId: string): Promise<void> {
-  await killAgentRecursive(agentId, { terminateReason: 'Agent deleted by user' });
+  await killAgentRecursive(agentId, {
+    terminateReason: 'Agent deleted by user',
+  });
 }
 
 /** Delete an agent after verifying ownership. Returns true if found. */

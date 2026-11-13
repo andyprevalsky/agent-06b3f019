@@ -554,7 +554,7 @@ def test_cold_image_activation_propagates_owned_setup_failure(tmp_path):
 def test_cold_image_activation_quiesces_existing_donor_before_environment(tmp_path, initial):
     cloud = (ROOT / "scripts/run-bench-cloud").read_text()
     functions = []
-    for name in ("wait_for_activation_image", "activate_machine_environment", "inject_secrets"):
+    for name in ("activate_machine_environment", "inject_secrets"):
         start = cloud.index(name + "() {")
         end = cloud.index("\n}\n", start) + 3
         functions.append(cloud[start:end])
@@ -765,7 +765,7 @@ def test_cold_image_builder_rejected_before_auth(tmp_path, arguments):
     root = tmp_path / "checkout"
     libraries = root / "scripts/lib"
     libraries.mkdir(parents=True)
-    (libraries / "cloudbench-env.sh").write_text(f"source {shlex.quote(str(ROOT / 'scripts/lib/cloudbench-env.sh'))}\n")
+    (libraries / "cloudbench-env.sh").write_text("")
     (libraries / "cloudbench-app-env-lock.sh").write_text("")
     observed = tmp_path / "auth-called"
     (libraries / "cloudbench-github-token.sh").write_text(
@@ -1254,179 +1254,3 @@ def test_cold_image_stalled_publisher_attempt_retries_under_its_own_tag(tmp_path
         assert first_log.read_text().rstrip().endswith("ending this attempt for the normal retry.")
     for private in output.glob("*.private.log"):
         assert private.stat().st_mode & 0o777 == 0o600
-
-
-@pytest.mark.parametrize("settle", ["stopped", "started", "absent", "foreign", "malformed", "replacing", "wrong-image", "lost-lock"])
-def test_acknowledged_environment_update_settles_before_next_image_update(tmp_path, settle):
-    cloud = (ROOT / "scripts/run-bench-cloud").read_text()
-    start = cloud.index("machine_state_for_activation() {")
-    last = cloud.index("activate_machine_environment() {", start)
-    functions = cloud[start:cloud.index("\n}\n", last) + 3]
-    state = tmp_path / "state"; state.write_text("stopped")
-    calls = tmp_path / "calls"; calls.write_text("")
-    polls = tmp_path / "polls"; polls.write_text("0")
-    image = tmp_path / "image"; image.write_text("old")
-    script = functions + r"""
-APP=fixture
-assert_app_environment_lock_ownership() {
-    [ "$SETTLE" != lost-lock ] || [ ! -s "$CALLS" ]
-}
-FLY() {
-    if [ "$1 $2" = 'machines list' ]; then
-        state="$(cat "$STATE")"
-        if [ "$state" = replacing ]; then
-            polls=$(( $(cat "$POLLS") + 1 )); echo "$polls" > "$POLLS"
-            if [ "$polls" -gt 1 ]; then
-                case "$SETTLE" in
-                    stopped|wrong-image|lost-lock) state=stopped ;;
-                    *) state="$SETTLE" ;;
-                esac
-                echo "$state" > "$STATE"
-            fi
-        fi
-        if [ "$state" = absent ]; then echo '[]'; return 0; fi
-        if [ "$state" = foreign ]; then echo '[{"id":"foreign","state":"stopped"}]'; return 0; fi
-        if [ "$state" = malformed ]; then echo '{}'; return 0; fi
-        printf '[{"id":"warm","state":"%s","config":{"image":"%s"}}]\n' "$state" "$(cat "$IMAGE")"
-        return 0
-    fi
-    [ "$1 $2 $3" = 'machine update warm' ] || return 91
-    printf '%s\n' "$*" >> "$CALLS"
-    case "$*" in
-        *--image*) [ "$SETTLE" = wrong-image ] || echo desired > "$IMAGE" ;;
-    esac
-    echo replacing > "$STATE"; echo 0 > "$POLLS"
-    echo 'Machine warm updated successfully!'
-}
-activate_machine_environment warm warm || exit 31
-activate_machine_environment warm warm desired || exit 32
-"""
-    result = subprocess.run([BASH, "-c", script], env={**os.environ,
-        "STATE":str(state),"CALLS":str(calls),"POLLS":str(polls),"IMAGE":str(image),"SETTLE":settle,
-        "CLOUDBENCH_IMAGE_SETTLE_ATTEMPTS":"3","CLOUDBENCH_IMAGE_SETTLE_RETRY_DELAY":"0"},
-        capture_output=True,text=True,timeout=15)
-    updates = calls.read_text().splitlines()
-    if settle == "stopped":
-        assert result.returncode == 0, result.stderr
-        assert len(updates) == 2
-        assert state.read_text().strip() == "stopped"
-        assert image.read_text().strip() == "desired"
-    else:
-        assert result.returncode != 0, result.stdout
-        assert len(updates) == (2 if settle == "wrong-image" else 1)
-    assert all("--skip-start --yes" in call for call in updates)
-    if settle == "replacing":
-        assert polls.read_text().strip() == "3", "Existing settle budget must remain bounded"
-
-
-@pytest.mark.parametrize("race", ["started-image-read", "lost-lock-after-read"])
-def test_acknowledged_image_read_and_final_owner_must_both_be_stopped_owned(tmp_path, race):
-    cloud = (ROOT / "scripts/run-bench-cloud").read_text()
-    start = cloud.index("machine_state_for_activation() {")
-    last = cloud.index("activate_machine_environment() {", start)
-    functions = cloud[start:cloud.index("\n}\n", last) + 3]
-    (tmp_path / "reads").write_text("0");(tmp_path / "updates").write_text("")
-    script = functions + r"""
-APP=fixture
-assert_app_environment_lock_ownership() { [ ! -f "$DIR/lost-lock" ]; }
-FLY() {
-    if [ "$1 $2" = 'machines list' ]; then
-        n=$(( $(cat "$DIR/reads") + 1 )); echo "$n" > "$DIR/reads"
-        state=stopped; image=desired
-        if [ "$n" = 1 ]; then image=old; fi
-        if [ "$n" -ge 3 ]; then
-            if [ "$RACE" = started-image-read ]; then state=started
-            else touch "$DIR/lost-lock"; fi
-        fi
-        printf '[{"id":"warm","state":"%s","config":{"image":"%s"}}]\n' "$state" "$image"
-        return 0
-    fi
-    [ "$1 $2 $3" = 'machine update warm' ] || return 91
-    echo "$*" >> "$DIR/updates"; return 0
-}
-activate_machine_environment warm warm desired
-"""
-    result = subprocess.run([BASH,"-c",script],env={**os.environ,"DIR":str(tmp_path),"RACE":race,
-        "CLOUDBENCH_IMAGE_SETTLE_ATTEMPTS":"3","CLOUDBENCH_IMAGE_SETTLE_RETRY_DELAY":"0"},
-        capture_output=True,text=True,timeout=15)
-    assert result.returncode != 0, result.stdout
-    assert len((tmp_path / "updates").read_text().splitlines()) == 1
-    assert int((tmp_path / "reads").read_text()) == 3
-
-
-@pytest.mark.parametrize("purpose", ["maintenance", "idle-capacity"])
-@pytest.mark.parametrize("settle", ["stopped", "started", "wrong-shape", "absent", "foreign", "replacing", "lost-lock"])
-def test_acknowledged_resize_completes_before_native_prestart_or_finish(tmp_path, purpose, settle):
-    cloud = (ROOT / "scripts/run-bench-cloud").read_text()
-    start = cloud.index("wait_for_warm_resize() {") if "wait_for_warm_resize() {" in cloud else cloud.index("resize_stopped_warm_source() {")
-    last = cloud.index("resize_stopped_warm_source() {", start)
-    functions = cloud[start:cloud.index("\n}\n", last)+3]
-    (tmp_path / "state").write_text("stopped");(tmp_path / "polls").write_text("0")
-    (tmp_path / "updates").write_text("")
-    script = functions + r"""
-APP=fixture
-assert_app_environment_lock_ownership() {
-    [ "$SETTLE" != lost-lock ] || [ ! -s "$DIR/updates" ]
-}
-machine_state() { cat "$DIR/state"; }
-stop_machine_strict() { echo 'unexpected stop' >&2; return 91; }
-FLY() {
-    if [ "$1 $2" = 'machines list' ]; then
-        n=$(( $(cat "$DIR/polls") + 1 )); echo "$n" > "$DIR/polls"
-        state=replacing; cpus=99
-        if [ "$n" -gt 1 ]; then
-            state="$SETTLE"; cpus="$EXPECTED_CPUS"
-            [ "$SETTLE" != wrong-shape ] || { state=stopped; cpus=99; }
-            [ "$SETTLE" != lost-lock ] || state=stopped
-        fi
-        echo "$state" > "$DIR/state"
-        [ "$state" != absent ] || { echo '[]'; return 0; }
-        id=warm; [ "$state" != foreign ] || { id=foreign; state=stopped; }
-        printf '[{"id":"%s","state":"%s","config":{"guest":{"cpu_kind":"shared","cpus":%s,"memory_mb":%s}}}]\n' "$id" "$state" "$cpus" "$EXPECTED_MEMORY"
-        return 0
-    fi
-    [ "$1 $2 $3" = 'machine update warm' ] || return 92
-    echo "$*" >> "$DIR/updates"; echo replacing > "$DIR/state"; return 0
-}
-resize_stopped_warm_source warm "shared-cpu-${EXPECTED_CPUS}x" "$EXPECTED_MEMORY" "$PURPOSE" || exit 31
-# The next native prestart/finish observation requires stopped, not CLI0.
-[ "$(machine_state warm)" = stopped ] || exit 32
-"""
-    result = subprocess.run([BASH,"-c",script],env={**os.environ,"DIR":str(tmp_path),"SETTLE":settle,"PURPOSE":purpose,
-        "EXPECTED_CPUS":"4" if purpose == "maintenance" else "1",
-        "EXPECTED_MEMORY":"8192" if purpose == "maintenance" else "2048",
-        "CLOUDBENCH_IMAGE_SETTLE_ATTEMPTS":"3","CLOUDBENCH_IMAGE_SETTLE_RETRY_DELAY":"0"},
-        capture_output=True,text=True,timeout=15)
-    assert (result.returncode == 0) == (settle == "stopped"), result.stdout + result.stderr
-    updates = (tmp_path / "updates").read_text().splitlines()
-    assert len(updates) == 1
-    assert "--skip-start --yes" in updates[0]
-    if settle == "replacing":
-        assert (tmp_path / "polls").read_text().strip() == "3"
-
-
-@pytest.mark.parametrize("lost", ["entry", "retry"])
-def test_warm_resize_lost_owner_cannot_stop_or_issue_next_update(tmp_path, lost):
-    cloud = (ROOT / "scripts/run-bench-cloud").read_text()
-    start = cloud.index("wait_for_warm_resize() {")
-    last = cloud.index("resize_stopped_warm_source() {", start)
-    functions = cloud[start:cloud.index("\n}\n", last)+3]
-    (tmp_path / "updates").write_text("");(tmp_path / "stops").write_text("")
-    script = functions + r"""
-APP=fixture
-assert_app_environment_lock_ownership() { [ "$LOST" != entry ] && [ ! -s "$DIR/updates" ]; }
-machine_state() { [ "$LOST" = entry ] && echo started || echo stopped; }
-stop_machine_strict() { echo stop >> "$DIR/stops"; return 1; }
-sleep() { :; }
-FLY() {
-    [ "$1 $2 $3" = 'machine update warm' ] || return 91
-    echo "$*" >> "$DIR/updates"
-    echo 'lease currently held'; return 1
-}
-resize_stopped_warm_source warm shared-cpu-4x 8192 maintenance
-"""
-    result = subprocess.run([BASH,"-c",script],env={**os.environ,"DIR":str(tmp_path),"LOST":lost},
-        capture_output=True,text=True,timeout=15)
-    assert result.returncode != 0
-    assert (tmp_path / "stops").read_text() == ""
-    assert len((tmp_path / "updates").read_text().splitlines()) == (0 if lost == "entry" else 1)

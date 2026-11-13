@@ -26,31 +26,10 @@ def _positive_int(value: str) -> int:
     return parsed
 
 
-def _source_transport():
-    source = os.environ.get("CLOUDBENCH_LOCAL_PATCH_SOURCE", "")
-    digest = os.environ.get("CLOUDBENCH_LOCAL_PATCH_SHA256", "")
-    base = os.environ.get("CLOUDBENCH_LOCAL_PATCH_BASE_REF", "")
-    if source or digest or base:
-        if (os.environ.get("CLOUDBENCH_SKIP_LOCAL_PATCH", "0") == "1"
-                or not re.fullmatch("[0-9a-f]{40}", base)
-                or not re.fullmatch("[0-9a-f]{40}", os.environ.get("CLOUDBENCH_INFRA_CANARY_REF", ""))
-                or not re.fullmatch("[0-9a-f]{64}", digest)
-                or not source or not Path(source).is_file()
-                or not Path(source).stat().st_size
-                or hashlib.sha256(Path(source).read_bytes()).hexdigest() != digest):
-            raise ValueError("canary inherited source transport mismatch")
-    return {"requested_ref": os.environ.get("CLOUDBENCH_INFRA_CANARY_REF", ""),
-            "base_sha": base, "workspace_patch_sha256": digest or "none"}
-
-
 def _fresh_age(stamp: Path, ttl_seconds: int) -> int | None:
     try:
-        if _source_transport()["workspace_patch_sha256"] != "none":
-            lines = stamp.read_text().splitlines()
-            if len(lines) != 2 or json.loads(lines[1]) != _source_transport():
-                return None
         age = int(time.time() - stamp.stat().st_mtime)
-    except (FileNotFoundError, json.JSONDecodeError):
+    except FileNotFoundError:
         return None
     return age if 0 <= age < ttl_seconds else None
 
@@ -117,7 +96,6 @@ def _cohort_context(args):
         "nested_controller_lock": args.nested_controller_lock,
         "cold_bootstrap": os.environ.get("CLOUDBENCH_INFRA_CANARY_COLD_BOOTSTRAP", "0"),
         "bench_ref": os.environ.get("CLOUDBENCH_INFRA_CANARY_REF", ""),
-        "source_transport": _source_transport(),
     }
     identity = {
         "schema": "cloudbench-cohort-preflight-pass-v1",
@@ -242,7 +220,6 @@ def main() -> int:
     parser.add_argument("--canary", required=True, type=Path)
     parser.add_argument("--nested-controller-lock", required=True)
     args = parser.parse_args()
-    source_transport = _source_transport()
 
     args.stamp.parent.mkdir(parents=True, exist_ok=True)
     args.lock.parent.mkdir(parents=True, exist_ok=True)
@@ -358,9 +335,7 @@ def main() -> int:
             tickets, budget, _identity = _cohort_context(args)
             if not tickets["parent_active"](budget) or cohort_blocked():
                 return 1
-        if _source_transport() != source_transport:
-            raise ValueError("canary source transport changed during execution")
-        _write_stamp(args.stamp, json.dumps(source_transport, sort_keys=True))
+        _write_stamp(args.stamp)
         if parent_context:
             _publish_parent_receipt(args, parent_context, "N2_PASS")
         print(f"🛡  infra canary preflight PASS — stamped {args.stamp}")

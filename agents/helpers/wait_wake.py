@@ -74,6 +74,12 @@ def wait_baseline(wi: Any) -> int:
     return current
 
 
+def has_user_message_since(wi: Any, mark: int) -> bool:
+    """Unread user progress survives unrelated events evicting the bounded log."""
+    seq = getattr(wi, "_last_user_message_wake_seq", 0)
+    return isinstance(seq, int) and not isinstance(seq, bool) and seq > mark
+
+
 def wake_events_since(wi: Any, mark: int) -> List[Dict[str, Any]]:
     events = getattr(wi, "_wait_wake_events", None)
     if not isinstance(events, list):
@@ -99,6 +105,8 @@ def record_wake(wi: Any, kind: str, at: Optional[str] = None, **detail: Any) -> 
     """Append one wake event to ``wi``'s bounded log and bump its sequence."""
     seq = wake_mark(wi) + 1
     wi._wait_wake_seq = seq
+    if kind == "user_message":
+        wi._last_user_message_wake_seq = seq
     event: Dict[str, Any] = {"seq": seq, "kind": kind}
     if at:
         event["at"] = at

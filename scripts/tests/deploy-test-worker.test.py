@@ -12,7 +12,6 @@ import shutil
 import signal
 import threading
 import json
-import hashlib
 import os
 import runpy
 import subprocess
@@ -23,6 +22,10 @@ import unittest
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
+# The suite builds its own gate requests. A DEPLOY_GATE_REQUEST inherited from an
+# outer deploy worker (the local executor runs this suite inside a gate) would
+# make admission() demand that outer cycle's custody locator in-process.
+os.environ.pop('DEPLOY_GATE_REQUEST', None)
 sys.path.insert(0, str(ROOT / 'scripts'))
 import deploy_test_cycle as cycle
 import deploy_test_worker as worker
@@ -460,22 +463,19 @@ class Worker(unittest.TestCase):
 
 class Cloud(unittest.TestCase):
     def setUp(self):
-        # These direct adapter calls own standalone disposable requests, not
-        # the enclosing structural worker's request/result namespace.
-        request_env = patch.dict(os.environ, {key: value for key, value in os.environ.items()
-                                 if key not in ('DEPLOY_GATE_REQUEST', 'DEPLOY_GATE_RESULT')}, clear=True)
-        request_env.start(); self.addCleanup(request_env.stop)
+        # These native receipt fixtures own their adapter inputs, not the deploy's fanout.
+        environment = patch.dict(os.environ, {
+            'CLOUDBENCH_BROWSER_PROVIDER': 'tilion',
+            'CLOUDBENCH_PROVIDER_LIMITS_FILE': str(ROOT / 'scripts/cloudbench-provider-limits.json'),
+        })
+        environment.start()
+        self.addCleanup(environment.stop)
+        os.environ.pop('DEPLOY_CLOUD_CONCURRENCY', None)
+        # This standalone fixture owns its request, not the invoking gate's custody.
+        os.environ.pop('DEPLOY_GATE_REQUEST', None)
         import deploy_test_cloud as cloud
         import cloudbench_execution_provenance as provenance
         self.cloud=cloud;self.provenance=provenance
-        def prepared(request,root,directory):
-            path=directory/'workspace.patch';path.write_bytes(b'')
-            binding={'token':request['token'],'source':request['source'],'workspace_root':str(root.resolve()),
-                     'base_sha':request['source']['head'],'workspace_patch_sha256':'none','patch':str(path)}
-            cycle.write(directory/'source-transport.json',binding)
-            return binding
-        transport=patch.object(cloud,'prepare_source_transport',side_effect=prepared)
-        transport.start();self.addCleanup(transport.stop)
         # Offline: these fixtures never read the shared Tilion account (see CloudSharedProviderHeadroom).
         offline=patch.object(cloud.provider_headroom,'live_probes',return_value={});offline.start();self.addCleanup(offline.stop)
         # Offline: the frozen ref counts as pushed; deploy-cloud-smoke-speed covers the unpushed refusal.
@@ -512,17 +512,6 @@ class Cloud(unittest.TestCase):
     def tearDown(self):self.temp.cleanup()
 
     def collect(self):return self.cloud.collect(self.request,self.root,self.runs,1,1)
-
-    def test_standalone_fixture_preserves_real_enclosing_custody_refusal(self):
-        from deploy_test_historical_custody import admission
-        self.assertNotIn('DEPLOY_GATE_REQUEST', os.environ)
-        self.assertNotIn('DEPLOY_GATE_RESULT', os.environ)
-        admission(self.request, self.root)
-        enclosing = self.root / '.context/cycle/attempts/0/initial/smoke/request.json'
-        with patch.dict(os.environ, {'DEPLOY_GATE_REQUEST': str(enclosing)}):
-            with self.assertRaisesRegex(ValueError, 'missing request-owned custody locator'):
-                admission(self.request, self.root)
-
 
     def test_native_skip_is_failure_until_rca_and_passing_peer_survives(self):
         cases,evidence,cleaned,_=self.collect()
@@ -600,46 +589,39 @@ class Cloud(unittest.TestCase):
         argv=launch.call_args.args[0]
         self.assertEqual(['bash','scripts/run-bench','passing','--runs','1','--concurrency','1','--retry-infra','0','--ref','a'*40],argv)
         self.assertNotIn('failing',argv)
-        self.assertEqual('0',launch.call_args.kwargs['env']['CLOUDBENCH_SKIP_LOCAL_PATCH'])
+        self.assertEqual('1',launch.call_args.kwargs['env']['CLOUDBENCH_SKIP_LOCAL_PATCH'])
         self.assertTrue(result['complete'])
 
-    def test_original_adapter_result_seals_preallocation_artifacts(self):
-        def native(argv,**kwargs):
-            run=kwargs['cwd']/'.context/deploy-cloud'/hashlib.sha256(self.request['token'].encode()).hexdigest()/'runs/fixture'
-            (run/'teardown-ownership').mkdir(parents=True)
-            for name in ['preallocation-source.json','preallocation-abort.json','teardown-ownership/meta']:
-                (run/name).write_text(name)
-            return 1,False,False,False
-        with patch.object(self.cloud,'source',return_value=self.request['source']), \
-             patch.object(self.cloud,'run_command',side_effect=native), \
-             patch.object(self.cloud,'collect_campaign',return_value=(dict.fromkeys(self.request['checks'],'UNVERIFIED'),{},False,None)):
+    def test_cloud_admission_limit_preserves_every_selected_case(self):
+        with patch.dict(os.environ, {'DEPLOY_CLOUD_CONCURRENCY': '1'}), \
+             patch.object(self.cloud, 'source', return_value=self.request['source']), \
+             patch.object(self.cloud, 'run_command', return_value=(0,False,False,False)) as launch, \
+             patch.object(self.cloud, 'collect_campaign', return_value=({'passing':'PASS','failing':'PASS'},{},True,'native-run')):
             result=self.cloud.execute(self.request,self.root)
-        self.assertFalse(result['complete'])
-        run,entry=next(iter(result['preallocation_evidence'].items()))
-        self.assertEqual(hashlib.sha256(b'preallocation-source.json').hexdigest(),entry['preallocation-source.json'])
-        self.assertEqual(hashlib.sha256(b'teardown-ownership/meta').hexdigest(),entry['native_owner_sha256'])
-        Path(run,'preallocation-source.json').write_text('later replacement')
-        self.assertNotEqual(cycle.sha_file(Path(run,'preallocation-source.json')),entry['preallocation-source.json'])
+        argv=launch.call_args.args[0]
+        self.assertEqual(['passing','failing'],argv[2:4])
+        self.assertEqual('1',argv[argv.index('--concurrency')+1])
+        self.assertEqual('1',argv[argv.index('--runs')+1])
+        self.assertEqual('0',argv[argv.index('--retry-infra')+1])
+        self.assertEqual({'passing':'PASS','failing':'PASS'},result['cases'])
+        self.assertTrue(result['complete'])
 
-    def test_unpublished_request_keeps_head_so_native_fleet_ships_committed_delta(self):
-        def prepared(request, root, directory):
-            path=directory/'workspace.patch'
-            path.write_bytes(b'diff --git a/fixture.txt b/fixture.txt\nnew file mode 100644\n'
-                             b'--- /dev/null\n+++ b/fixture.txt\n@@ -0,0 +1 @@\n+unpublished fixture\n')
-            binding={'sealed_at':time.time(),'token':request['token'],'source':request['source'],
-                     'workspace_root':str(root.resolve()),'base_sha':'b'*40,
-                     'workspace_patch_sha256':hashlib.sha256(path.read_bytes()).hexdigest(),
-                     'patch':str(path.resolve()),'replayed_tree':'c'*40}
-            cycle.write(directory/'source-transport.json',binding)
-            return binding
-        with patch.object(self.cloud,'source',return_value=self.request['source']), \
-             patch.object(self.cloud,'prepare_source_transport',side_effect=prepared), \
-             patch.object(self.cloud,'run_command',return_value=(0,False,False,False)) as launch, \
-             patch.object(self.cloud,'collect_campaign',return_value=({'passing':'PASS','failing':'FAIL'},{},True,'native-run')):
-            result=self.cloud.execute(self.request,self.root)
-        self.assertEqual(self.request['source']['head'],launch.call_args.args[0][-1])
-        self.assertEqual('0',launch.call_args.kwargs['env']['CLOUDBENCH_SKIP_LOCAL_PATCH'])
-        self.assertEqual('b'*40,result['source_transport']['base_sha'])
+    def test_cloud_admission_limit_cannot_raise_provider_capacity(self):
+        checks=[str(i) for i in range(100)]
+        with patch.dict(os.environ, {'DEPLOY_CLOUD_CONCURRENCY': '1000'}):
+            limited=self.cloud.campaign_width(checks)
+        with patch.dict(os.environ, {}, clear=True):
+            provider_width=self.cloud.campaign_width(checks)
+        self.assertEqual(provider_width,limited)
+
+    def test_invalid_cloud_admission_limit_fails_before_launch(self):
+        for value in ('', '0', '-1', '1.5', ' 2', 'two'):
+            with self.subTest(value=value), patch.dict(os.environ, {'DEPLOY_CLOUD_CONCURRENCY':value}), \
+                 patch.object(self.cloud, 'source', return_value=self.request['source']), \
+                 patch.object(self.cloud, 'run_command') as launch:
+                with self.assertRaisesRegex(ValueError,'DEPLOY_CLOUD_CONCURRENCY'):
+                    self.cloud.execute(self.request,self.root)
+                launch.assert_not_called()
 
     def test_cloud_launch_records_selected_standing_skip_eligibility_before_dispatch(self):
         names=['browser-auth-guest-purchase','claude-only','ordinary']
@@ -677,160 +659,122 @@ class Cloud(unittest.TestCase):
         self.assertEqual(dict.fromkeys(names,'PASS'),result['cases'])
         self.assertTrue(result['complete'])
 
+    # --- quarantine markers and the single same-source rerun -------------------------------------
+    QMETA={'since':'2026-11-01','repair':'https://boxes.dev/thread/thr_smoke1',
+           'error':'AssertionError: no receipt','evidence':'runs/smoke-1/run.json'}
 
-class CloudSourceTransport(unittest.TestCase):
-    def setUp(self):
-        import deploy_test_cloud
-        self.cloud=deploy_test_cloud
-        self.temp=tempfile.TemporaryDirectory();self.root=Path(self.temp.name)
-        self.addCleanup(self.temp.cleanup)
-        self.git('init','-q');self.git('config','user.name','fixture');self.git('config','user.email','fixture@example.test')
-        (self.root/'.git/info/exclude').write_text('.context/\n')
-        scripts=self.root/'scripts';(scripts/'lib').mkdir(parents=True)
-        shutil.copyfile(ROOT/'scripts/create-worktree-patch.sh',scripts/'create-worktree-patch.sh')
-        helper=(ROOT/'scripts/lib/cloudbench-env.sh').read_text()
-        # Keep the real resolver but make its origin advertisement offline/negative.
-        (scripts/'lib/cloudbench-env.sh').write_text(helper+'\ncloudbench_origin_advertises_commit() { return 1; }\n')
-        (self.root/'code').write_text('base\n');self.git('add','.');self.git('commit','-qm','base')
-        self.base=self.git('rev-parse','HEAD');self.git('update-ref','refs/remotes/origin/main',self.base)
-        (self.root/'code').write_text('unpublished commit\n');self.git('commit','-qam','unpublished')
-        (self.root/'new-file').write_text('untracked runtime input\n')
-        (self.root/'new-file').chmod(0o755)
-        self.request={'token':'source-transport-fixture','source':cycle.source(self.root)}
-        self.directory=self.root/'.context/transport';self.directory.mkdir(parents=True)
-    def git(self,*args):
-        return subprocess.check_output(['git',*args],cwd=self.root,text=True).strip()
-    def prepare(self):return self.cloud.prepare_source_transport(self.request,self.root,self.directory)
-    def test_unpublished_commit_and_untracked_executable_replay_exactly(self):
-        before=self.git('status','--porcelain');binding=self.prepare()
-        self.assertEqual(self.base,binding['base_sha']);self.assertNotEqual('none',binding['workspace_patch_sha256'])
-        self.assertEqual(before,self.git('status','--porcelain'))
-        proof={'base_sha':self.base,'workspace_patch_sha256':binding['workspace_patch_sha256']}
-        self.cloud.verify_source_transport({**self.request,'_source_transport':binding},self.root,proof)
-    def test_wrong_source_refused_before_patch(self):
-        self.request['source']['digest']='wrong'
-        with self.assertRaisesRegex(ValueError,'requested freeze'):self.prepare()
-    def test_patch_omitting_runtime_file_is_refused(self):
-        generator=self.root/'scripts/create-worktree-patch.sh'
-        generator.write_text('#!/bin/sh\nexit 0\n');self.request['source']=cycle.source(self.root)
-        with self.assertRaisesRegex(ValueError,'reconstruct'):self.prepare()
-    def test_changed_worktree_stale_patch_wrong_base_and_missing_proof_refused(self):
-        binding=self.prepare();request={**self.request,'_source_transport':binding}
-        good={'base_sha':self.base,'workspace_patch_sha256':binding['workspace_patch_sha256']}
-        for field,value in [('base_sha','b'*40),('workspace_patch_sha256','c'*64)]:
-            with self.subTest(field=field), self.assertRaises(ValueError):
-                self.cloud.verify_source_transport(request,self.root,{**good,field:value})
-        with self.assertRaises(ValueError):self.cloud.verify_source_transport(self.request,self.root,good)
-        for field,value in [('token','wrong-token'),('workspace_root','/other')]:
-            with self.subTest(binding=field), self.assertRaisesRegex(ValueError,'mismatch'):
-                self.cloud.verify_source_transport({**request,'_source_transport':{**binding,field:value}},self.root,good)
-        path=Path(binding['patch']);original=path.read_bytes();path.write_bytes(original+b'\n')
-        with self.assertRaisesRegex(ValueError,'changed'):self.cloud.verify_source_transport(request,self.root,good)
-        path.write_bytes(original);(self.root/'code').write_text('changed during native run')
-        with self.assertRaisesRegex(ValueError,'changed'):self.cloud.verify_source_transport(request,self.root,good)
-    def test_native_cleanup_uses_the_same_prelaunch_seal_without_regrading(self):
-        from deploy_test_native_cleanup import execution_source_binding
-        binding=self.prepare();cycle.write(self.directory/'source-transport.json',binding)
-        adapter={'source_transport':binding,'started_at':time.time()}
-        runs=self.directory/'runs'
-        bound=lambda path:Path(path).read_bytes()
-        expected=(binding['base_sha'],binding['workspace_patch_sha256'])
-        self.assertEqual(expected,execution_source_binding(adapter,self.request,self.root,runs,cycle.read,bound))
-        # Cleanup still belongs to this old source after a later repair changes code.
-        (self.root/'code').write_text('later source does not rewrite old cleanup')
-        self.assertEqual(expected,execution_source_binding(adapter,self.request,self.root,runs,cycle.read,bound))
-        for change in ({'token':'wrong'},{'source':{}},{'workspace_root':'/other'},
-                       {'sealed_at':adapter['started_at']+1},{'replayed_tree':'bad'}):
-            altered={**binding,**change};cycle.write(self.directory/'source-transport.json',altered)
-            with self.subTest(change=change),self.assertRaises(ValueError):
-                execution_source_binding({**adapter,'source_transport':altered},self.request,self.root,runs,cycle.read,bound)
-        cycle.write(self.directory/'source-transport.json',binding)
-        Path(binding['patch']).write_bytes(b'stale')
-        with self.assertRaises(ValueError):execution_source_binding(adapter,self.request,self.root,runs,cycle.read,bound)
-        (self.directory/'source-transport.json').unlink()
-        with self.assertRaises(FileNotFoundError):execution_source_binding(adapter,self.request,self.root,runs,cycle.read,bound)
+    def campaign(self,verdicts,outcome='FAILED'):
+        """A collect_campaign return value: verdicts per task, native outcome for the failures."""
+        details={n:{'native_task':{'name':n,'passed':v=='PASS','benchmark_status':'PASSED' if v=='PASS' else outcome,
+                                   'status':'COMPLETED' if v=='PASS' else outcome,
+                                   'failure_reason':None if v=='PASS' else f'{n} failed'},'path':f'/runs/{n}'}
+                 for n,v in verdicts.items()}
+        return dict(verdicts),details,True,'campaign'
 
-    def test_published_clean_source_keeps_exact_no_patch_binding(self):
-        self.git('add','.');self.git('commit','-qm','publish');self.git('update-ref','refs/remotes/origin/main','HEAD')
-        self.request['source']=cycle.source(self.root);binding=self.prepare()
-        self.assertEqual(self.request['source']['head'],binding['base_sha'])
-        self.assertEqual('none',binding['workspace_patch_sha256'])
+    def run_smoke(self,collected,catalog=None):
+        """execute() with the native CLI and collector replaced; returns result, launches, rows, stdout."""
+        if catalog is not None:
+            path=self.root/'agents/benchmarks/tasks.json';path.parent.mkdir(parents=True,exist_ok=True)
+            cycle.write(path,catalog)
+        rows=self.root/'progress.jsonl';rows.unlink(missing_ok=True);out=io.StringIO()
+        with patch.object(self.cloud,'source',return_value=self.request['source']), \
+             patch.object(self.cloud,'run_command',return_value=(1,False,False,False)) as launch, \
+             patch.object(self.cloud,'collect_campaign',side_effect=collected) as collect, \
+             patch.dict(os.environ,{'DEPLOY_GATE_PROGRESS':str(rows)}), contextlib.redirect_stdout(out):
+            self.launch=launch
+            result=self.cloud.execute(self.request,self.root)
+        import deploy_gate_progress as progress
+        return result,launch,collect,progress.read_new(rows)[0],out.getvalue()
 
+    def test_failed_smoke_task_passing_its_single_rerun_is_flaky_and_the_gate_passes(self):
+        result,launch,collect,rows,out=self.run_smoke([self.campaign({'passing':'PASS','failing':'FAIL'}),
+                                                       self.campaign({'failing':'PASS'})])
+        self.assertEqual(2,launch.call_count)
+        rerun=launch.call_args_list[1].args[0]
+        self.assertEqual(['bash','scripts/run-bench','failing'],rerun[:3])  # that task only, same frozen ref
+        self.assertEqual(['--ref','a'*40],rerun[-2:])
+        self.assertNotIn('passing',rerun)
+        self.assertEqual(['failing'],collect.call_args_list[1].args[0]['checks'])
+        env=launch.call_args_list[1].kwargs['env']
+        self.assertTrue(env['RUN_BENCH_CAMPAIGN_ID'].endswith('-rerun'))
+        self.assertNotEqual(launch.call_args_list[0].kwargs['env']['CLOUDBENCH_RUNS_ROOT'],env['CLOUDBENCH_RUNS_ROOT'])
+        self.assertEqual({'passing':'PASS','failing':'PASS'},result['cases'])
+        self.assertTrue(result['complete'])
+        self.assertEqual('FAILED',result['evidence']['failing']['native_task']['benchmark_status'])  # first attempt kept
+        self.assertEqual('PASSED',result['evidence']['failing']['rerun']['native_task']['benchmark_status'])
+        self.assertEqual([('failing','FLAKY',2)],[(r['unit'],r['status'],r.get('attempts')) for r in rows])
+        self.assertIn('TEST_FLAKY unit=failing attempts=2 attribution=REQUIRED',out)
+        from deploy_test_result import validate
+        self.assertEqual((result['cases'],True),validate(result,self.request,0))  # adapter exit 0 = gate pass
+        state={'source':self.request['source'],'flaky':[],'phase':'initial','round':1}
+        opened=cycle.open_flaky(state,{'name':'smoke','checks':self.request['checks']},rows,self.root/'flaky')
+        self.assertEqual([('failing','smoke/failing')],[(o['unit'],o['check']) for o,_ in opened])
+        import deploy_test_quarantine as quarantine
+        self.assertIn('lack /RCA attribution',quarantine.attribution_block(state['flaky']))  # merge refuses
 
-class PreallocationProducer(unittest.TestCase):
-    def test_actual_reserve_boundary_seals_refusal_before_any_provider_action(self):
-        from cloudbench_execution_provenance import build_snapshot_manifest
-        source=(ROOT/'scripts/run-bench-fleet').read_text()
-        start=source.index('if [ -z "$PROVISION_POOL" ]; then\n# Seal only pre-allocation identity here;')
-        end=source.index('# Visibility can fail on imports',start)
-        fragment=source[start:end]
-        with tempfile.TemporaryDirectory() as temp:
-            root=Path(temp);subprocess.run(['git','init','-q',str(root)],check=True)
-            subprocess.run(['git','-C',str(root),'-c','user.name=f','-c','user.email=f@f','commit','--allow-empty','-qm','fixture'],check=True)
-            snapshot=root/'snapshot';snapshot.mkdir()
-            for name in ['cloudbench_preallocation.py','cloudbench_execution_provenance.py']:
-                shutil.copyfile(ROOT/'scripts'/name,snapshot/name)
-            manifest=root/'manifest.json';manifest.write_text(json.dumps(build_snapshot_manifest(snapshot)))
-            run=root/'run';run.mkdir()
-            env={**os.environ,'ROOT_DIR':str(root),'FLEET_DIR':str(run),'FLEET_OWNER_TOKEN':'b'*32,
-                 'FLEET_OWNER_PID_START':'fixture-birth','BENCH_REF':'a'*40,'FLEET_PATCH_SHA256':'none',
-                 'APP':'fixture','PROVISION_POOL':'','PYTHONDONTWRITEBYTECODE':'1','CLOUDBENCH_SCRIPT_SNAPSHOT':str(snapshot),'CONTROLLER_SNAPSHOT_MANIFEST':str(manifest)}
-            script="BENCHES=(case); CATALOG_MODES=(real); is_sim_on(){ return 1; }; reserve_cleanup_disk_space(){ echo 'cleanup reserve admission failed: [Errno 28] insufficient physical cleanup floors for pending controllers' >&2; return 1; };\n"+fragment+'\necho PROVIDER_ACTION'
-            result=subprocess.run(['bash','-c',script],env=env,capture_output=True,text=True,timeout=10)
-            self.assertEqual(1,result.returncode,result.stderr)
-            self.assertIn('insufficient physical cleanup floors',result.stderr)
-            self.assertNotIn('PROVIDER_ACTION',result.stdout)
-            self.assertTrue((run/'preallocation-source.json').is_file())
-            self.assertTrue((run/'preallocation-abort.json').is_file())
-            self.assertFalse((run/'resource-admission.entered').exists())
+    def test_failed_smoke_task_failing_its_rerun_fails_and_is_never_run_a_third_time(self):
+        result,launch,_,rows,out=self.run_smoke([self.campaign({'passing':'PASS','failing':'FAIL'}),
+                                                 self.campaign({'failing':'FAIL'})])
+        self.assertEqual(2,launch.call_count)
+        self.assertEqual({'passing':'PASS','failing':'FAIL'},result['cases'])
+        self.assertEqual('FAIL',result['rerun']['cases']['failing'])
+        self.assertEqual([],rows);self.assertNotIn('TEST_FLAKY',out)
+        from deploy_test_result import validate
+        self.assertEqual('FAIL',validate(result,self.request,1)[0]['failing'])
 
-    def test_native_owner_metadata_pair_is_preserved_and_strict(self):
-        source=(ROOT/'scripts/run-bench-fleet').read_text()
-        self.assertEqual(2,source.count("printf 'controller_pid=%s"))
-        self.assertEqual(2,source.count("printf 'controller_pid_start=%s"))
-        begin=source.index('def record(path: Path, required):')
-        function=source[begin:source.index('\naudit_meta = record',begin)]
-        with tempfile.TemporaryDirectory() as temp:
-            audit=Path(temp);path=audit/'meta'
-            env={'Path':Path,'re':__import__('re'),'hashlib':hashlib,'audit':audit}
-            exec(function,env)
-            for text in ['version=1\n','version=1\ncontroller_pid=123\ncontroller_pid_start=original-start\n']:
-                path.write_text(text);self.assertEqual('1',env['record'](path,{'version'})['version'])
-            for text in ['version=1\ncontroller_pid=123\n','version=1\ncontroller_pid_start=start\n',
-                         'version=1\ncontroller_pid=invalid\ncontroller_pid_start=start\n',
-                         'version=1\nunknown=extra\n']:
-                path.write_text(text)
-                with self.assertRaises(SystemExit):env['record'](path,{'version'})
+    def test_resource_skip_and_infra_outcomes_keep_their_rca_handling_without_a_rerun(self):
+        for outcome in ('SKIPPED','INFRA_ERROR'):
+            with self.subTest(outcome=outcome):
+                shutil.rmtree(self.root/'.context',ignore_errors=True)
+                result,launch,_,rows,_=self.run_smoke([self.campaign({'passing':'PASS','failing':'FAIL'},outcome)])
+                self.assertEqual(1,launch.call_count)
+                self.assertEqual('FAIL',result['cases']['failing']);self.assertNotIn('rerun',result)
+                self.assertEqual([],rows)
 
-    def test_exact_producer_order_and_authentic_reserve_abort(self):
-        import cloudbench_preallocation as producer
-        from cloudbench_execution_provenance import build_snapshot_manifest
-        from types import SimpleNamespace
-        source=(ROOT/'scripts/run-bench-fleet').read_text()
-        prepare=source.index('python3 "$PREALLOCATION_HELPER" prepare')
-        reserve=source.index('reserve_cleanup_disk_space || {',prepare)
-        entered=source.index('resource-admission.entered',reserve)
-        self.assertLess(prepare,reserve);self.assertLess(reserve,entered)
-        self.assertIn('python3 "$PREALLOCATION_HELPER" abort',source[reserve:entered])
-        with tempfile.TemporaryDirectory() as temp:
-            root=Path(temp);subprocess.run(['git','init','-q',str(root)],check=True)
-            subprocess.run(['git','-C',str(root),'-c','user.name=fixture','-c','user.email=f@f','commit','--allow-empty','-qm','fixture'],check=True)
-            snapshot=root/'snapshot';snapshot.mkdir();(snapshot/'helper').write_text('snapshot')
-            manifest=root/'manifest.json';manifest.write_text(json.dumps(build_snapshot_manifest(snapshot)))
-            run=root/'run';run.mkdir()
-            args=SimpleNamespace(manifest=manifest,snapshot=snapshot,task=['case=real'],base='a'*40,
-                patch='none',app='fixture',root=root,run=run,owner='b'*32,pid=987654321,birth='fixture',exit_code=1,stage='cleanup-reserve-refused')
-            producer.prepare(args);before=(run/'preallocation-source.json').read_bytes()
-            with self.assertRaises(FileExistsError):producer.prepare(args)
-            self.assertEqual(before,(run/'preallocation-source.json').read_bytes())
-            args.owner='wrong'
-            with self.assertRaises(ValueError):producer.abort(args)
-            args.owner='b'*32;(run/'resource-admission.entered').touch()
-            with self.assertRaises(ValueError):producer.abort(args)
-            (run/'resource-admission.entered').unlink();producer.abort(args)
-            abort=json.loads((run/'preallocation-abort.json').read_text())
-            self.assertEqual('cleanup-reserve-refused',abort['stage']);self.assertEqual(1,abort['native_exit'])
-            self.assertEqual(hashlib.sha256(before).hexdigest(),abort['source_sha256'])
+    def test_unverified_first_campaign_is_never_rerun(self):
+        verdicts,details,_,fleet=self.campaign({'passing':'PASS','failing':'FAIL'})
+        result,launch,_,_,_=self.run_smoke([(verdicts,details,False,fleet)])
+        self.assertEqual(1,launch.call_count);self.assertFalse(result['complete'])
+
+    def test_quarantined_smoke_task_runs_once_and_its_failure_is_non_blocking(self):
+        catalog=[{'name':'failing','quarantine':dict(self.QMETA)},{'name':'passing'}]
+        result,launch,_,rows,out=self.run_smoke([self.campaign({'passing':'PASS','failing':'FAIL'})],catalog)
+        self.assertEqual(1,launch.call_count)  # still runs, never rerun
+        self.assertIn('failing',launch.call_args.args[0])
+        self.assertEqual({'passing':'PASS','failing':'PASS'},result['cases']);self.assertTrue(result['complete'])
+        self.assertEqual([('failing','QUARANTINED_FAIL',self.QMETA)],[(r['unit'],r['status'],r['quarantine']) for r in rows])
+        self.assertEqual('failing failed',rows[0]['detail'])
+        self.assertIn(f"TEST_QUARANTINE status=QUARANTINED_FAIL unit=failing since=2026-11-01 repair={self.QMETA['repair']}",out)
+        self.assertEqual(('QUARANTINED_FAIL','FAIL'),tuple(result['evidence']['failing']['quarantine'][k] for k in ('status','native_case')))
+        self.assertEqual('FAILED',result['evidence']['failing']['native_task']['benchmark_status'])  # failure preserved
+
+    def test_quarantined_smoke_task_pass_and_unverified_outcomes(self):
+        catalog=[{'name':'failing','quarantine':dict(self.QMETA)}]
+        _,_,_,rows,_=self.run_smoke([self.campaign({'passing':'PASS','failing':'PASS'})],catalog)
+        self.assertEqual([('failing','QUARANTINED_PASS')],[(r['unit'],r['status']) for r in rows])
+        shutil.rmtree(self.root/'.context')
+        verdicts,details,_,fleet=self.campaign({'passing':'PASS','failing':'UNVERIFIED'})
+        result,_,_,rows,_=self.run_smoke([(verdicts,details,True,fleet)],catalog)
+        self.assertEqual('UNVERIFIED',result['cases']['failing']);self.assertEqual([],rows)  # unknown still blocks
+
+    def test_quarantined_smoke_task_skip_and_infra_outcomes_stay_blocking(self):
+        catalog=[{'name':'failing','quarantine':dict(self.QMETA)}]
+        for outcome in ('SKIPPED','INFRA_ERROR'):
+            with self.subTest(outcome=outcome):
+                shutil.rmtree(self.root/'.context',ignore_errors=True)
+                result,launch,_,rows,out=self.run_smoke([self.campaign({'passing':'PASS','failing':'FAIL'},outcome)],catalog)
+                self.assertEqual(1,launch.call_count)
+                self.assertEqual('FAIL',result['cases']['failing']);self.assertNotIn('quarantine',result['evidence']['failing'])
+                self.assertEqual([],rows);self.assertNotIn('TEST_QUARANTINE',out)
+
+    def test_invalid_task_quarantine_marker_is_refused_before_launch(self):
+        for bad in ({**self.QMETA,'repair':'https://example.com/x'},{k:v for k,v in self.QMETA.items() if k!='evidence'},
+                    {**self.QMETA,'since':'2026-13-01'},{**self.QMETA,'extra':'x'},'quarantined'):
+            with self.subTest(marker=bad):
+                with self.assertRaises(ValueError):
+                    self.run_smoke([],[{'name':'failing','quarantine':bad}])
+                self.launch.assert_not_called()
+                self.assertFalse((self.root/'.context/deploy-cloud').exists())  # nothing admitted
 
 
 class CloudCampaign(unittest.TestCase):
@@ -1852,6 +1796,155 @@ class Boxes(unittest.TestCase):
         self.assertIn('request control-project-threads', Path(result['transport_receipt']['cli_log']).read_text())
         self.assertEqual(1, len(self.calls_of('send')))  # no retry loop
 
+    @contextlib.contextmanager
+    def scripted_transport(self, cancel_after=None):
+        # Orchestration-only seam: preserve real envelopes, logs, absolute deadlines,
+        # and collector/parser behavior without paying OS startup for each fake CLI.
+        # Real run_cli deadline, signal and reap tests below remain subprocess-backed.
+        clock = [time.time()]
+        started = clock[0]
+        elapsed = [0.0]
+        events = []
+
+        def sleep(seconds):
+            elapsed[0] += seconds
+            clock[0] = started + elapsed[0]
+            if cancel_after is not None and elapsed[0] >= cancel_after:
+                events[-1]["cancel_elapsed"] = elapsed[0]
+                self.boxes.CANCEL.set()
+
+        def invoke(argv, *, timeout, completion_deadline=None):
+            config = cycle.read(self.config)
+            key = argv[1]
+            with self.calls.open('a') as stream:
+                stream.write(json.dumps(argv) + '\n')
+            if key == 'list' and '--all' not in argv:
+                key = 'list_page1'
+            reply = config.get(key, {'rc': 1, 'stdout': {}, 'stderr': 'unsupported'})
+            if isinstance(reply, list):
+                count = len(self.calls_of(key))
+                reply = reply[min(count - 1, len(reply) - 1)]
+            budget = min(timeout, max(0, completion_deadline - clock[0])) if completion_deadline is not None else timeout
+            events.append({'op': key, 'at': clock[0], 'budget': budget, 'deadline': completion_deadline})
+            duration = reply.get('sleep', 0)
+            if duration >= budget:
+                sleep(budget)
+                raise subprocess.TimeoutExpired(argv, timeout)
+            sleep(duration)
+            return reply.get('rc', 0), json.dumps(reply.get('stdout', {})).encode(), reply.get('stderr', '').encode()
+
+        with patch.object(self.boxes, 'run_cli', side_effect=invoke), patch.object(self.boxes, 'time') as timer:
+            timer.time.side_effect = lambda: clock[0]
+            timer.monotonic.side_effect = lambda: clock[0]
+            timer.sleep.side_effect = sleep
+            yield events
+
+
+    def test_crash_between_send_and_persist_adopts_the_existing_turn_strict_scripted(self):
+        directory = self.coordinator / '.context/deploy-boxes' / __import__('hashlib').sha256(b'tok-1').hexdigest()
+        prompt = self.boxes.build_prompt(self.request, self.binding)
+        cycle.write(directory / 'state.json', {'token': 'tok-1', 'idempotency_key': 'tok-1', 'thread': 'ph-worker',
+            'host': self.host, 'worker_root': str(self.root.resolve()), 'deadline_at': time.time() + 30,
+            'prompt_sha256': __import__('hashlib').sha256(prompt.encode()).hexdigest(), 'sent_attempted_at': time.time(),
+            'turn_id': None, 'message_id': None, 'cli_log': str(directory / 'cli.log'), 'stderr_log': str(directory / 'stderr.log')})
+        self.configure(reply=self.reply(), read={'rc': 0, 'stdout': self.wrap({}, status='ready', messages=[
+            {'role': 'user', 'state': 'ready', 'text': 'unrelated', 'turnId': 'turn-0'},
+            {'role': 'user', 'state': 'ready', 'text': prompt, 'turnId': 'turn-7'}])})
+        result = self.run_adapter()
+        self.assertEqual({'first': 'UNVERIFIED', 'second': 'UNVERIFIED'}, result['cases'])
+        self.assertEqual([], self.calls_of('send')); self.assertEqual('turn-7', result['transport_receipt']['turn_id'])
+        # an indeterminate send whose assignment cannot be found is never repeated: re-read until the deadline
+        state = cycle.read(directory / 'state.json'); state.update(turn_id=None, deadline_at=time.time() + 0.3)
+        cycle.write(directory / 'state.json', state)  # the ORIGINAL deadline governs, not a later argument
+        self.configure(reply=self.reply()); self.calls.unlink()
+        with self.scripted_transport() as events:
+            result = self.boxes.execute(self.request, self.coordinator, self.binding, 30)
+        self.assertEqual('list', events[0]['op'])
+        self.assertTrue(all(event['op'] == 'read' for event in events[1:]))
+        self.assertEqual('send_indeterminate_unadopted', result['reason']); self.assertEqual([], self.calls_of('send'))
+        self.assertGreater(len(self.calls_of('read')), 1); self.assertTrue(all(v == 'UNVERIFIED' for v in result['cases'].values()))
+        # a changed prompt under the same token is never resent
+        state = cycle.read(directory / 'state.json'); state['prompt_sha256'] = 'f' * 64; state['turn_id'] = None
+        cycle.write(directory / 'state.json', state); self.calls.unlink()
+        result = self.run_adapter()
+        self.assertTrue(all(v == 'UNVERIFIED' for v in result['cases'].values())); self.assertEqual([], self.calls_of('send'))
+
+
+    def test_initial_send_slice_timeout_adopts_nested_read_without_second_send_strict_scripted(self):
+        self.configure(reply=self.reply(), send={'sleep': .6}, read=[
+            {'sleep': .6}, {'rc': 0, 'stdout': self.nested_assignment()}])
+        started = time.time()
+        with self.scripted_transport() as events, patch.object(self.boxes, 'CLI_MAX_SECONDS', .3):
+            result = self.run_adapter(deadline=5)
+        self.assertEqual({'first': 'UNVERIFIED', 'second': 'UNVERIFIED'}, result['cases'])
+        self.assertFalse(result['complete']); self.assertFalse(result['cleanup_complete'])
+        self.assertEqual('native-evidence-unavailable',result['reason'])
+        self.assertEqual('turn-1',result['cleanup_owner']['turn_id'])
+        self.assertEqual(1, len(self.calls_of('send')))
+        self.assertEqual(2, len(self.calls_of('read')))
+        send = self.calls_of('send')[0]
+        self.assertEqual('tok-1', send[send.index('--idempotency-key') + 1])
+        self.assertEqual('turn-1', result['transport_receipt']['turn_id'])
+        directory = self.coordinator / '.context/deploy-boxes' / __import__('hashlib').sha256(b'tok-1').hexdigest()
+        state = cycle.read(directory / 'state.json')
+        self.assertGreaterEqual(state['deadline_at'], started + 5)
+        self.assertLess(state['deadline_at'], started + 5.2)
+        self.assertEqual('turn-1', state['turn_id'])
+
+        self.assertEqual(['list', 'send', 'read', 'read', 'wait', 'result'], [event['op'] for event in events])
+        self.assertTrue(all(event['at'] + event['budget'] <= event['deadline'] for event in events))
+
+
+    def test_initial_send_adoption_cancel_retains_owner_without_resending_strict_scripted(self):
+        self.configure(reply=self.reply(), send={'sleep': 3})
+        started = time.monotonic()
+        with self.scripted_transport(cancel_after=.35) as events, patch.object(self.boxes, 'CLI_MAX_SECONDS', .15):
+            result = self.run_adapter(deadline=5)
+        self.assertLess(time.monotonic() - started, .8)
+        self.assertEqual('send_indeterminate_unadopted', result['reason'])
+        self.assertFalse(result['complete']); self.assertFalse(result['cleanup_complete'])
+        self.assertEqual('tok-1', result['cleanup_owner']['request_token'])
+        self.assertEqual(1, len(self.calls_of('send')))
+        self.assertEqual([], self.calls_of('wait')); self.assertEqual([], self.calls_of('result'))
+
+        self.assertEqual(['list', 'send'], [event['op'] for event in events[:2]])
+        self.assertTrue(all(event['op'] == 'read' for event in events[2:]))
+        self.assertTrue(self.boxes.CANCEL.is_set())
+        elapsed = next(event["cancel_elapsed"] for event in events if "cancel_elapsed" in event)
+        self.assertGreaterEqual(elapsed, .35)
+        self.assertLess(elapsed, .8)
+
+
+    def test_cancel_before_send_never_invokes_the_cli_strict_scripted(self):
+        drive = self.boxes._drive
+        def cancel_before_first_call(*args, **kwargs):
+            self.boxes.CANCEL.set()  # after cancellation handlers initialize, before any CLI
+            return drive(*args, **kwargs)
+        with patch.object(self.boxes, '_drive', side_effect=cancel_before_first_call), \
+             patch.object(self.boxes, 'run_cli') as invoke:
+            result = self.run_adapter()
+        invoke.assert_not_called()
+        self.assertEqual([], self.calls_of('send'))
+        self.assertEqual('cancelled during native CLI call', result['reason'])
+        self.assertTrue(all(value == 'UNVERIFIED' for value in result['cases'].values()))
+
+
+    def test_wrong_hash_attachment_or_truncated_inline_without_attachment_is_unverified_strict_scripted(self):
+        self.configure(reply=self.reply(inline=False)); self.attach(self.native_bytes.replace('"PASS"', '"FAIL"', 1))
+        with self.scripted_transport() as events:
+            result = self.run_adapter(deadline=0.3)
+        self.assertTrue(all(v == 'UNVERIFIED' for v in result['cases'].values())); self.assertEqual('attachment_missing', result['reason'])
+        __import__('shutil').rmtree(self.coordinator / '.context')
+        truncated = self.reply().replace('DEPLOY_GATE_RESULT_JSON_END\n', '')
+        self.configure(reply=truncated)
+        with self.scripted_transport() as events:
+            result = self.run_adapter(deadline=0.3)
+        self.assertTrue(all(v == 'UNVERIFIED' for v in result['cases'].values())); self.assertEqual('attachment_missing', result['reason'])
+
+        self.assertEqual(['list', 'send', 'wait', 'result'], [event['op'] for event in events])
+
+
+
 
 def load(name, relative):
     spec = importlib.util.spec_from_file_location(name, ROOT / relative)
@@ -2081,7 +2174,6 @@ class LocalController(unittest.TestCase):
         'fleet_patch_packages_clean_unpushed_head_from_fetchable_base', 'autoscaler_scale_down_cancels_pending_worker',
         'fleet_registry_release_id_is_idempotent_with_other_records', 'refresh_deps_tracks_exact_created_snapshot',
         'refresh_deps_applies_exact_workspace_before_rebuild', 'fetch_ref_restores_dirty_exact_sha',
-        'warm_checkout_failure_preserves_native_exit_and_logs_duration',
         'warm_deps_preflight', 'fresh_controller_reuses_only_proven_donor_dependencies', 'verified_legacy_snapshot',
         'dependency_proof_publication', 'exact_volume_ownership_survives_delayed_visibility_and_failed_delete',
         'exact_recovery_routes_quarantined_owner_to_guest_recovery_before_reapers',
@@ -2399,7 +2491,7 @@ class Backend(unittest.TestCase):
         docker.chmod(0o700)
         env = {'CONDUCTOR_WORKSPACE_NAME': 'fixture', 'CONDUCTOR_PORT': '20000',
                'ROSE_TRUST_CONDUCTOR_WORKSPACE_NAME': '1', 'FAKE_POSTGRES': str(state),
-               'FAKE_DOCKER_CALLS': str(calls)}
+               'FAKE_DOCKER_CALLS': str(calls), 'BACKEND_COVERAGE_DATABASE_URL': ''}
         # A stopped fixture genuinely prevents the original setup; no fabricated result.
         setup = [sys.executable, '-c', "import json,os; from pathlib import Path; "
                  "assert json.loads(Path(os.environ['FAKE_POSTGRES']).read_text())['row']['running']; "
@@ -3213,6 +3305,8 @@ class CloudSharedProviderHeadroom(unittest.TestCase):
         for patcher in (patch.dict(os.environ,env),patch('time.time',side_effect=lambda:self.now[0]),
                         patch('time.sleep',side_effect=self.sleep)):
             patcher.start();self.addCleanup(patcher.stop)
+        # Test the account ceiling independently of the invoking deploy's width.
+        os.environ.pop('DEPLOY_CLOUD_CONCURRENCY', None)
 
     def sleep(self, seconds):
         self.sleeps.append(seconds);self.now[0]+=seconds
@@ -3286,6 +3380,32 @@ class CloudSharedProviderHeadroom(unittest.TestCase):
         with self.assertRaises(headroom.HeadroomUnavailable):
             headroom.tilion_live_sessions(self.KEY,'http://tilion.fixture.invalid',
                                           opener=lambda *_a:self.fail('plain-HTTP request was sent'))
+
+
+class FixtureEnvironmentIsolation(unittest.TestCase):
+    def test_cloud_request_custody_is_local_and_parent_environment_is_restored(self):
+        parent = '/tmp/fixture-parent/attempts/34/phase/gate/request.json'
+        with patch.dict(os.environ, {'DEPLOY_GATE_REQUEST': parent, 'DEPLOY_CLOUD_CONCURRENCY': '4'}):
+            result = unittest.TestResult()
+            Cloud('test_cloud_cli_gets_only_active_cases_and_frozen_ref').run(result)
+            self.assertTrue(result.wasSuccessful(), result.errors + result.failures)
+            self.assertEqual(parent, os.environ['DEPLOY_GATE_REQUEST'])
+            self.assertEqual('4', os.environ['DEPLOY_CLOUD_CONCURRENCY'])
+
+    def test_headroom_fixture_preserves_parent_width_and_explicit_limits(self):
+        with patch.dict(os.environ, {'DEPLOY_CLOUD_CONCURRENCY': '4'}):
+            result = unittest.TestResult()
+            CloudSharedProviderHeadroom('test_live_account_sessions_narrow_the_smoke_width').run(result)
+            self.assertTrue(result.wasSuccessful(), result.errors + result.failures)
+            self.assertEqual('4', os.environ['DEPLOY_CLOUD_CONCURRENCY'])
+            fixture = CloudSharedProviderHeadroom()
+            fixture.setUp()
+            try:
+                with patch.dict(os.environ, {'DEPLOY_CLOUD_CONCURRENCY': '4'}):
+                    self.assertEqual(4, fixture.width(FakeTilionListing(5))[0])
+            finally:
+                fixture.doCleanups()
+            self.assertEqual('4', os.environ['DEPLOY_CLOUD_CONCURRENCY'])
 
 
 class FakeCerebrasProbe:
@@ -3383,6 +3503,205 @@ class CerebrasRatchetHeadroom(unittest.TestCase):
              patch.object(self.headroom,'wait_for_cerebras',side_effect=lambda key,**kw:seen.append((key,kw['reserve'])) or False):
             self.assertEqual(1,self.headroom.main(['cerebras-wait','--timeout-seconds','5']))
         self.assertEqual([('dedicated',self.reserve)],seen)  # registry production_reserve_fraction 0.2
+
+
+class StoppedPreStackIsolation(unittest.TestCase):
+    """Versioned pre-stack receipts exercise the complete native admission consumer."""
+    DRIVER_SHA256 = '1958de1798e8fdc46bd2081c1d530e9574c0957db80857d367802904f5ad5521'
+
+    def setUp(self):
+        import base64
+        import gzip
+        import hashlib
+        import deploy_test_native_cleanup as native
+        self.native = native
+        spec = importlib.util.spec_from_file_location('native_cycle_fixtures', ROOT / 'scripts/tests/deploy-test-cycle.test.py')
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        fixture = module.Cycle()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        self.addCleanup(fixture.tearDown)
+        self.root = fixture.root
+        # The fixture uses the actual versioned driver, not a mock of its SHA.
+        # Driver changes require a newly reviewed before-stack contract.
+        self.driver = (ROOT / 'scripts/cloudbench-run.sh').read_bytes()
+        self.assertEqual(self.DRIVER_SHA256, hashlib.sha256(self.driver).hexdigest())
+        target = self.root / 'scripts/cloudbench-run.sh'
+        target.parent.mkdir(exist_ok=True)
+        target.write_bytes(self.driver)
+        subprocess.run(['git', '-C', str(self.root), 'add', 'scripts/cloudbench-run.sh'], check=True)
+        subprocess.run(['git', '-C', str(self.root), '-c', 'user.name=test', '-c',
+                        'user.email=test@example.com', 'commit', '-qm', 'reviewed startup driver'], check=True)
+        head = subprocess.check_output(['git', '-C', str(self.root), 'rev-parse', 'HEAD'], text=True).strip()
+        self.state, self.failure, self.paths, self.proof, self.gate, self.packet = fixture.isolated_campaign_state()
+        def replace(value):
+            if isinstance(value, dict): return {k: replace(v) for k, v in value.items()}
+            if isinstance(value, list): return [replace(v) for v in value]
+            return head if value == 'a' * 40 else value
+        self.state, self.proof = replace(self.state), replace(self.proof)
+        for path in (self.root / '.context').rglob('*.json'):
+            try: value = json.loads(path.read_text())
+            except ValueError: continue
+            cycle.write(path, replace(value))
+        self.fleet = (Path(self.proof['campaign']).parent.parent / 'runs'
+                      / f'20261103-080440-{module.FIXTURE_CONTROLLER_PID_BASE + 1}')
+        self.output = self.fleet / self.gate['name']
+        self.output.mkdir(exist_ok=True)
+        self.owner = cycle.read(self.fleet / '_batch/lifecycle.json')['fleet_owner_token']
+        self.token = self.owner + '-0'
+        self.machine, self.volume = 'old-machine', 'old-volume'
+        (self.output / '.cid').write_text('clone ' + self.machine + '\n')
+        cycle.write(self.output / 'runtime-evidence.owner.json',
+                    dict(version=1, machine_id=self.machine, run_token=self.token))
+        self.payload = self.output / 'cloudbench-boot-payload.json.gz'
+        self.payload.write_bytes(gzip.compress(json.dumps(dict(version=1, files={
+            'cloudbench-run.sh': base64.b64encode(self.driver).decode()})).encode()))
+        self.log = self.output / 'remote-logs/cloudbench-driver.log'
+        self.log.parent.mkdir()
+        self.log.write_text(
+            f'RUNSTAMP-{self.token}\n[cloudbench] verified checkout {head}\n'
+            '[cloudbench 20:01:29] STEP git_sync\n[cloudbench 20:01:29] STEP env_decode\n'
+            '[cloudbench 20:01:30] STEP dep_sync\n'
+            '[cloudbench] FATAL: warm image/volume JavaScript dependencies do not match the checked-out ref\n'
+            '[cloudbench 20:01:31] FATAL: cloudbench dependency synchronization failed\n'
+            f'::CLOUDBENCH-DONE:: token={self.token} exit=1\n'
+            '[boot 20:01:31] driver cleanup evidence interrupt_status=0 cleanup_ack=1\n')
+        self.rows = cycle.read(self.packet)['rows']
+        self.machine_row = next(r for r in self.rows if r['expected_machine'] == self.machine and r['kind'] == 'machine')
+        self.volume_row = next(r for r in self.rows if r['expected_machine'] == self.machine and r['kind'] == 'volume')
+        self.raw_machine = dict(id=self.machine, state='stopped', config=dict(
+            env=dict(REF=head, CLOUDBENCH_RUN_TOKEN=self.token), mounts=[dict(volume=self.volume, path='/data')]))
+        self.raw_volume = dict(id=self.volume, state='created', attached_machine_id=self.machine)
+        self.machine_row['metadata'].update(state='stopped')
+        self.volume_row['metadata'].update(state='created', attached_machine_id=self.machine)
+        self.proof['execution_quiescence'][self.machine]['startup_rejection_log'] = str(self.log)
+        self.reseal()
+
+    def reseal(self):
+        import hashlib
+        for row, data in ((self.machine_row, self.raw_machine), (self.volume_row, self.raw_volume)):
+            path = self.root / '.context' / ('raw-' + row['kind'] + '.json')
+            cycle.write(path, data)
+            row.update(raw_response=str(path), response_sha256=hashlib.sha256(path.read_bytes()).hexdigest())
+        cycle.write(self.packet, dict(endpoint_origin='https://api.machines.dev', app='fixture', rows=self.rows))
+        receipt = cycle.read(self.paths['receipt'])
+        receipt['native_cleanup_reference']['result_sha256'] = cycle.sha_file(self.paths['adapter'])
+        receipt['cleanup_owner']['native_cleanup_reference'] = receipt['native_cleanup_reference']
+        cycle.write(self.paths['receipt'], receipt)
+        self.state['attempts'][-1]['results'][0] = receipt
+        self.proof.update(owner=copy.deepcopy(receipt['cleanup_owner']),
+                          receipt_sha256=cycle.sha_file(self.paths['receipt']),
+                          worker_result_sha256=cycle.sha_file(self.paths['adapter']))
+        self.proof['files'] = {str(p): cycle.sha_file(p) for base in (
+            self.fleet.parent, Path(self.proof['campaign']), self.root / '.git/cloudbench-fleet-audits',
+            self.root / '.git/cloudbench-fleet-ownership') for p in base.rglob('*') if p.is_file()}
+        for path in (self.paths['receipt'].parent / 'request.json', self.fleet.parent.parent / 'cli.log',
+                     self.packet, Path(self.machine_row['raw_response']), Path(self.volume_row['raw_response']),
+                     self.root / 'scripts/cloudbench-run.sh'):
+            self.proof['files'][str(path)] = cycle.sha_file(path)
+
+    def validate(self):
+        receipt = cycle.read(self.paths['receipt'])
+        return self.native.validate(receipt, receipt['cleanup_owner'], self.proof)
+
+    def test_stopped_pre_stack_launch_preserves_original_failures_and_cleanup_debt(self):
+        before = copy.deepcopy(self.state)
+        original = self.paths['receipt'].read_bytes()
+        cycle.reconcile(self.state, self.failure['id'], self.proof)
+        entry = next(iter(self.state['reconciled_owners'].values()))
+        self.assertFalse(entry['credit_granted'])
+        self.assertFalse(entry['cleanup_complete'])
+        self.assertTrue(entry['obligations_preserved'])
+        self.assertEqual('isolated-validation', entry['purpose'])
+        self.assertEqual(before['attempts'], self.state['attempts'])
+        self.assertEqual(before['failures'], self.state['failures'])
+        self.assertEqual(original, self.paths['receipt'].read_bytes())
+        self.assertEqual({self.machine: self.volume, 'machine1': 'vol_fixture'}, entry['excluded_resources'])
+        self.assertEqual([], cycle.retained_owners(self.state, [self.gate['name']]))
+        self.assertEqual({'UNVERIFIED'}, set(cycle.read(self.paths['receipt'])['cases'].values()))
+        self.assertTrue((self.root / '.git/cloudbench-fleet-ownership' / self.owner).is_dir())
+
+    def test_stopped_pre_stack_still_refuses_a_live_original_controller(self):
+        # The fixture controller PID sits above every kernel pid_max, so a host process can never
+        # hold it (RCA 4fda5d31). The native refusal itself must still fire when one is live.
+        pid = int(self.fleet.name.rsplit('-', 1)[-1])
+        self.assertGreater(pid, 4194304)  # Linux PID_MAX_LIMIT
+        actual = self.native.subprocess.check_output
+        def processes(args, *a, **kw):
+            return f'999999 {pid} S\n' if args[:1] == ['ps'] else actual(args, *a, **kw)
+        before, original = copy.deepcopy(self.state), self.paths['receipt'].read_bytes()
+        with patch.object(self.native.subprocess, 'check_output', side_effect=processes):
+            with self.assertRaisesRegex(ValueError, 'old controller still active'):
+                cycle.reconcile(self.state, self.failure['id'], self.proof)
+        self.assertEqual(before, self.state)
+        self.assertEqual(original, self.paths['receipt'].read_bytes())
+
+    def test_stopped_pre_stack_rejects_unsafe_provider_or_current_identity(self):
+        cases = ('started', 'unknown', 'current-token', 'source', 'mount', 'forged-raw-state', 'raw-token',
+                 'detached-volume', 'wrong-volume-state', 'quarantine-missing')
+        originals = copy.deepcopy((self.rows, self.raw_machine, self.raw_volume))
+        registry = self.root / '.git/cloudbench-fleet-ownership' / self.owner
+        for case in cases:
+            with self.subTest(case=case):
+                self.rows, self.raw_machine, self.raw_volume = copy.deepcopy(originals)
+                self.machine_row = next(r for r in self.rows if r['expected_machine'] == self.machine and r['kind'] == 'machine')
+                self.volume_row = next(r for r in self.rows if r['expected_machine'] == self.machine and r['kind'] == 'volume')
+                if case in ('started', 'unknown'): self.machine_row['metadata']['state'] = case
+                if case == 'current-token': self.machine_row['metadata']['source_binding']['CLOUDBENCH_RUN_TOKEN'] = 'new-request-0'
+                if case == 'source': self.machine_row['metadata']['source_binding']['REF'] = 'f' * 40
+                if case == 'mount': self.raw_machine['config']['mounts'][0]['volume'] = 'foreign'
+                if case == 'forged-raw-state': self.raw_machine['state'] = 'started'
+                if case == 'raw-token': self.raw_machine['config']['env']['CLOUDBENCH_RUN_TOKEN'] = 'foreign'
+                if case == 'detached-volume': self.volume_row['metadata']['attached_machine_id'] = None
+                if case == 'wrong-volume-state': self.volume_row['metadata']['state'] = 'restoring'
+                if case == 'quarantine-missing': registry.rename(registry.with_name('held'))
+                self.reseal()
+                try:
+                    with self.assertRaises(ValueError): self.validate()
+                finally:
+                    if case == 'quarantine-missing': registry.with_name('held').rename(registry)
+
+    def test_stopped_pre_stack_rejects_unknown_driver_and_incomplete_terminal_receipts(self):
+        import base64
+        import gzip
+        original_log, original_payload = self.log.read_bytes(), self.payload.read_bytes()
+        driver_path = self.root / 'scripts/cloudbench-run.sh'
+        for case in ('driver-tamper', 'later-stack-step', 'missing-ack', 'missing-done', 'wrong-done-token', 'unknown-driver'):
+            with self.subTest(case=case):
+                self.log.write_bytes(original_log); self.payload.write_bytes(original_payload)
+                driver_path.write_bytes(self.driver)
+                if case in ('driver-tamper', 'unknown-driver'):
+                    changed = self.driver + b'\n# unreviewed driver\n'
+                    self.payload.write_bytes(gzip.compress(json.dumps(dict(version=1, files={
+                        'cloudbench-run.sh': base64.b64encode(changed).decode()})).encode()))
+                    if case == 'unknown-driver':
+                        driver_path.write_bytes(changed)
+                        subprocess.run(['git', '-C', str(self.root), 'add', 'scripts/cloudbench-run.sh'], check=True)
+                        subprocess.run(['git', '-C', str(self.root), '-c', 'user.name=test', '-c',
+                                        'user.email=test@example.com', 'commit', '-qm', 'unreviewed driver'], check=True)
+                        head = subprocess.check_output(['git', '-C', str(self.root), 'rev-parse', 'HEAD'], text=True).strip()
+                        receipt = cycle.read(self.paths['receipt'])
+                        old_head = receipt['source']['head']
+                        def replace(value):
+                            if isinstance(value, dict): return {k: replace(v) for k, v in value.items()}
+                            if isinstance(value, list): return [replace(v) for v in value]
+                            return head if value == old_head else value
+                        self.state, self.proof = replace(self.state), replace(self.proof)
+                        for path in (self.root / '.context').rglob('*.json'):
+                            try: value = json.loads(path.read_text())
+                            except ValueError: continue
+                            cycle.write(path, replace(value))
+                        self.raw_machine['config']['env']['REF'] = head
+                        self.machine_row['metadata']['source_binding']['REF'] = head
+                        self.log.write_bytes(original_log.replace(old_head.encode(), head.encode()))
+                if case == 'later-stack-step': self.log.write_bytes(original_log + b'[cloudbench 20:01:32] STEP stack\n')
+                if case == 'missing-ack': self.log.write_bytes(original_log.replace(b'cleanup_ack=1', b'cleanup_ack=0'))
+                if case == 'missing-done': self.log.write_bytes(original_log.replace(b'::CLOUDBENCH-DONE::', b'not-DONE'))
+                if case == 'wrong-done-token': self.log.write_bytes(original_log.replace(b'::CLOUDBENCH-DONE:: token=', b'::CLOUDBENCH-DONE:: token=wrong'))
+                self.reseal()
+                expected = 'unreviewed pre-stack driver' if case == 'unknown-driver' else ('driver payload changed' if case == 'driver-tamper' else 'positive terminal boundary')
+                with self.assertRaisesRegex(ValueError, expected): self.validate()
 
 
 if __name__=='__main__': unittest.main()

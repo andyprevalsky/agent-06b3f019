@@ -44,7 +44,10 @@ Every selected nonquick gate needs a worker binding:
     "transport": "local-isolated",
     "cwd": "/prepared-workers/backend",
     "worker_root": "/prepared-workers/backend",
-    "env": {"CONDUCTOR_WORKSPACE_NAME": "deploy-backend", "CONDUCTOR_PORT": "12000"},
+    "env": {
+      "CONDUCTOR_WORKSPACE_NAME": "deploy-backend",
+      "CONDUCTOR_PORT": "12000"
+    },
     "timeout_seconds": 3600
   }
 }
@@ -56,14 +59,33 @@ checkout, database, ports and teardown. It must validate the requested source
 before executing and return results. The orchestrator launches every selected
 worker concurrently; it does not add dependencies between coverage, semantics,
 smoke, AgentCard, live probes or E2B. Existing worker safety and cleanup remain.
+The native cloud adapter accepts `DEPLOY_CLOUD_CONCURRENCY` as a positive
+integer to reduce campaign fanout when observed shared Fly headroom cannot
+admit the default width. Bind it in the smoke gate's explicit environment and
+record the capacity evidence. It never raises the provider cap or drops tasks,
+runs, assertions, cleanup requirements or timeouts. This controls work within
+the one smoke campaign; independent categories still launch concurrently.
+
 Independent worker roots launch concurrently, including while an unrelated
 failure awaits RCA. There is no host-wide admission queue or capacity-driven
 serial fallback. An active operation on the same isolation root is refused
 before launch; its existing owner and deadline remain authoritative. A concrete
 capacity shortfall must be reported, not converted into hidden suite ordering.
 
-At quiescent TRIAGE or NEEDS-FOCUSED-PLAN, run independent full gates without
-disposing of the original failures or diagnosed repair obligations:
+At a quiescent `needs-focused-plan` boundary, `repair-independent` observes
+missing complete local categories while required repairs remain in the same plan.
+Use `--include-repair-local` to include complete original local repair contracts.
+Both modes admit only `local-isolated` workers, exclude native and legacy cloud
+smoke, honor actual leased-root exclusions, and retain `ready=false`. New failures
+enter normal TRIAGE. Cloud smoke still requires its fresh native admission.
+
+```bash
+python3 scripts/deploy_test_cycle.py repair-independent --plan "$PLAN" \
+  --state-dir "$STATE" --root "$SOURCE" --include-repair-local
+```
+
+At quiescent TRIAGE, run missing independent full gates without disposing of the
+original failures:
 
 ```bash
 python3 scripts/deploy_test_cycle.py triage-independent --plan "$PLAN" \
@@ -73,23 +95,23 @@ python3 scripts/deploy_test_cycle.py triage-independent --plan "$PLAN" \
 For changed source, the existing `refresh --input <old-plan>` also accepts
 quiescent TRIAGE: original pending occurrences, source identities and cleanup
 obligations stay recorded. New-source quick checks return to TRIAGE, where this
-action can observe independent full gates. Source/contract/input equivalence is
-still required to carry a full PASS; absent declared input scopes remain `*`, so
-actual source edits conservatively invalidate reuse rather than relabel old runs.
+action can observe independent full gates. Contract and environment equivalence
+is still required to carry a full PASS. Absent declared input scopes remain `*`:
+identical inputs carry, and changed inputs carry only when the affected-test graph
+(`deploy_test_plan.select` on the delta from the gate's native execution) selects
+no lane of that gate. Unknown impact reruns it: run_all or unmapped files, runtime
+configuration or plan changes, selector errors, pending failures and qualified
+cases.
 An old-source nonblocking diagnosis remains historical: it cannot create a
 new-source skip. The existing current-source renewal occurrence must be
 adjudicated explicitly; source-bound resource qualifications require current
 execution. Final full verification on the new source remains mandatory.
 
 Repeat `--exclude-root` for actual leased roots. Gates with pending failures,
-valid complete full receipts, retained cleanup owners, or excluded roots are left
-untouched. Retained worker identities and overlapping roots are also excluded.
-Selected gates keep the full original commands, checks and deadlines and launch together.
+valid complete full receipts, or excluded roots are left untouched. Selected
+gates keep the full original commands, checks and deadlines and launch together.
 The action appends genuine native attempts and any new failures, preserves all
-original failures, dispositions and repair obligations. Successful observations
-leave the original phase unchanged with ready=false; new failures enter TRIAGE
-without losing previously diagnosed repairs. A full observation is not a waiver
-or completion of the focused/final cycle.
+original pending failures and obligations, and returns to TRIAGE with ready=false.
 It cannot authorize merge or replace the final exact-source coverage verifier.
 The documented focused-then-full rerun sequence still applies to actual failed
 tests. Historical repair labels do not rerun an unchanged, already verified full
@@ -138,6 +160,20 @@ does not allocate outside the existing CLI or invent a cleanup receipt.
 If no appropriate worker is bound, planning refuses; it does not quietly
 serialize the suite locally.
 
+At an isolated native cleanup source-renewal boundary, a completed historical
+successor may have a different selection explanation while every execution field
+remains identical. Keep the generated current plan and original proof unchanged.
+Use `reconcile --proof <original-proof-with-new-validation-source> --input
+<historical-successor-witness>` with a separate
+`historical-clean-successor-v1` witness. It binds the successor request token,
+receipt SHA256, and a canonical `custody_state` path/SHA256 for the recovered
+admission snapshot. The snapshot must match the original request's admission
+seal and all historical source/plan/environment/input bindings. Only the
+string-list `selection_evidence` field may differ; execution changes refuse.
+This renews launch authority with zero test or cleanup credit. Original failures
+and obligations remain, and the final source must earn fresh full coverage.
+Missing authentic historical authority fails closed.
+
 Before a cloud launch, a genuine local Claude credential SKIP can be admitted
 through `deploy_test_cycle.py standing-skip --proof <proof.json>` with the
 normal `--plan`, `--state-dir`, and `--root` arguments. This uses the existing
@@ -160,9 +196,15 @@ can set `command` to an SSH argv ending in `python3 scripts/deploy_test_worker.p
 ```json
 {
   "cases": {
-    "coordinator": {"command": ["python3", "scripts/tests/deploy-test-cycle.test.py"]},
-    "selection": {"command": ["python3", "scripts/tests/deploy-test-plan.test.py"]},
-    "worker": {"command": ["python3", "scripts/tests/deploy-test-worker.test.py"]}
+    "coordinator": {
+      "command": ["python3", "scripts/tests/deploy-test-cycle.test.py"]
+    },
+    "selection": {
+      "command": ["python3", "scripts/tests/deploy-test-plan.test.py"]
+    },
+    "worker": {
+      "command": ["python3", "scripts/tests/deploy-test-worker.test.py"]
+    }
   }
 }
 ```
@@ -210,11 +252,14 @@ The coordinator supplies `DEPLOY_GATE_REQUEST` (JSON file) and
 ```json
 {
   "token": "copy the unique request token",
-  "source": {"head": "exact requested head", "digest": "exact requested digest"},
+  "source": {
+    "head": "exact requested head",
+    "digest": "exact requested digest"
+  },
   "gate": "backend-coverage-blackbox",
   "complete": true,
   "cleanup_complete": true,
-  "cases": {"selected-case-id": "PASS", "another-case-id": "FAIL"}
+  "cases": { "selected-case-id": "PASS", "another-case-id": "FAIL" }
 }
 ```
 
@@ -324,15 +369,28 @@ artifacts before merge. An identical full run already completed in a repair
 phase can also satisfy final coverage; a narrowed focused run cannot.
 
 A gate without declared `input_paths` conservatively depends on all source
-files. Such a gate can carry through a history-only or tree-identical sync,
-but an ordinary source change still requires a rerun. Legacy receipts missing
-the execution bindings also rerun. Never invent a narrow scope to obtain reuse.
+files. Such a gate carries through a history-only or tree-identical sync. After
+an ordinary source change it carries only with the basis `affected-test graph:
+delta selects no lane of this gate`, recording the delta files and selector
+result; the native fingerprint must reproduce from that delta, so any other
+input change reruns it. Legacy receipts missing the execution bindings also
+rerun. Final complete-source verification still rechecks every carried receipt.
+Never invent a narrow scope to obtain reuse.
 Do not invalidate all passing tests just because a conflict-free sync changed
 HEAD: compare each gate's actual inputs, preserve valid receipts, and execute
 only affected or unknown gates. A clean Git merge is not a test-dependency proof.
 If pending execution ownership prevents another isolated lane from starting,
 report that exact unsupported transition and continue supported independent work;
 do not infer live execution from an owner label or infer cleanup from a dead PID.
+
+When the coordinator itself disappears before writing its round receipt, preserve
+that observation gap separately from terminal native worker results. After independent
+review of the original state and artifact hashes, `recover-round --proof <proof.json>`
+uses the same `--plan` and `--state-dir` arguments to settle the orphan round negatively.
+It rechecks current ownership and native cleanup, journals the original state, preserves
+valid existing outer receipts and exclusions, and records missing outer coverage as
+UNVERIFIED with no invented exit or positive reuse credit. Normal execution recovery
+and fresh affected gates remain required. Other uncommitted journals still block.
 
 The coordinator handles TERM/INT by stopping only the process groups it started
 and recording `interrupted`, never PASS or a provider waiver. Use `resume` only
@@ -431,6 +489,92 @@ another exact binding. Pending post-merge debt survives until the existing
 `resolve` action records the actual repair link. Legacy warning renewal and
 compute-quota revocation keep their existing requirements.
 
+### Import custody into an independent repair cycle
+
+The refresh commands above operate on one existing cycle. An independent repair
+uses the ordinary current full plan and normal `init`, then the separate typed
+import below. The donor cycle is an immutable evidence index, never the current
+state. No donor attempt, PASS, READY, environment, fingerprint or legacy skip is
+imported. Original failures, native statuses, authority, pending auth repair or
+its actual repair link stay intact. Both current execution and financial state
+remain UNVERIFIED, with no credit; every peer still executes.
+
+First review and admit the exact immutable native/adapter files and complete
+fleet lifecycle/local/canonical audit trees required by `known()` and
+`historical()`. Include discovery dependencies even when they are not protected
+cases. Admission must check approved manifests, canonical paths and hashes,
+refuse symlinks/differing overlaps and create files without overwriting. This
+metadata API copies no files and cannot bypass missing closure, active owners,
+broken ownership symlinks, live PIDs, changed catalogs or native financial joins.
+Never overlay source, managed configuration, requests, live claims or a donor
+`cycle.json`. Obtain the approved donor-index hash from the verified preservation
+manifest; do not compute a replacement hash to authorize changed donor bytes.
+
+Keep the current cycle separate from historical `attempts/<round>` paths.
+Use the existing `DEPLOY_TEST_CYCLE_STATE_DIR` (or `gates --state-dir`) route;
+`DEPLOY_RUN_ROOT` selects timing receipts. There is no `ROSE_DEPLOY_RUN_ROOT`
+setting. Set these before plan generation/init and retain them throughout.
+Existing request-owned/canonical custody locator checks are unchanged. A custom
+cycle requires the default `.context/deploy-pipeline/cycle.json` to be absent.
+
+With the parent-frozen source and the normal template and provisioned inventory,
+the parent generates the full plan through `deploy_test_plan.py --inventory`
+and initializes it before any gate execution. `scripts/deploy gates --dry-run`
+shows the normal selection/worker commands; it is not a prepare-only execution
+mode. The following commands consume those already prepared paths:
+
+```sh
+python3 scripts/deploy_test_plan.py --inventory "$INVENTORY" --template "$TEMPLATE" --base origin/main --output "$PLAN"
+python3 scripts/deploy_test_cycle.py init --plan "$PLAN" --state-dir "$DEPLOY_TEST_CYCLE_STATE_DIR"
+python3 scripts/deploy_test_cycle.py prepare-historical-import --input "$DONOR" --donor-sha256 "$DONOR_SHA256" --plan "$PLAN" --state-dir "$DEPLOY_TEST_CYCLE_STATE_DIR" > "$IMPORT_PROOF"
+python3 scripts/deploy_test_cycle.py admit-historical-import --input "$DONOR" --donor-sha256 "$DONOR_SHA256" --proof "$IMPORT_PROOF" --plan "$PLAN" --state-dir "$DEPLOY_TEST_CYCLE_STATE_DIR"
+```
+
+`DONOR` is the absolute canonical path to the preserved donor `cycle.json`.
+`IMPORT_PROOF` is a new private output file. Preparation leaves the current
+cycle unchanged. Admission re-reads donor/native evidence and binds the exact
+target cycle path plus fresh current source/full-plan/environment/input hashes.
+It requires pristine initialized state and no existing attempt namespace. All
+validation precedes the cycle writer's atomic publication. Immediate exact
+replay is idempotent; drift or non-fresh current state refuses admission without
+changing it. This hash-pinned interface delegates admission to the same
+authoritative `adopt()` protocol as `import-historical-no-retry`, using the
+preserved donor's embedded plan. It records `historical_custody_transfers` with
+persistent protected failure identities in addition to import provenance;
+removing custody/history rows cannot erase those obligations. Existing legacy
+import metadata is not replayable over a cycle that already has attempts;
+preserve that cycle and route any metadata migration through its owner rather
+than resetting or importing it again.
+The shared `build()`/`adopt()` contract came from main commit
+`8e3fca1b12cdaab9636b2eae4e23e225d1261fc4`, integrated in PR #1830. The
+approved-SHA interface is a compatibility envelope around that contract,
+not a second transfer validator.
+`--historical-no-retry-proof` is accepted by same-cycle `refresh` and the
+donor-plan `import-historical-no-retry` flow below; supplying it to `init` fails
+instead of silently losing custody.
+
+After reviewing the admitted state, the parent runs the existing Python CLI
+entrypoint in the same pinned environment used for manual init/import:
+
+```sh
+python3 scripts/deploy_cli.py gates --state-dir "$DEPLOY_TEST_CYCLE_STATE_DIR"
+```
+
+Keep the same plan inputs, worker bindings and timing root. The `scripts/deploy`
+shell wrapper prepends dependency directories to `PATH`; invoking it after a
+manual Python init changes the bound environment and correctly refuses execution.
+The Python CLI entrypoint preserves that caller environment and uses the ordinary
+gate coordinator. No import command starts workers, contacts a
+provider, renews a provider warning, retries a payment, or clears repair debt.
+Production live-mode duties remain with their separate owner and are not
+eligible for this sandbox protocol.
+
+The shared prepare action selects the SHA/adopt compatibility envelope with
+`--input`, or the contents-index envelope with `--donor-state`/`--donor-index`.
+Mixed forms are refused. Both require the named plan to equal the current plan.
+Both reuse the same donor inventory/native guards; their versioned retained
+provenance remains verified during normal admission, including legacy cycles.
+
 ### Fresh-devbox history-only custody admission
 
 A foreign cycle is evidence, never a fresh cycle or READY result. On a fresh
@@ -499,3 +643,15 @@ current binding and complete transferred obligations. Removing any protected
 failure/history/projection fails closed during ordinary guard/admission/verify
 as well as replay. Duplicate identities and changed debt wrappers are rejected
 before atomic publication. No provider timestamps are refreshed.
+
+An already reconciled isolated native operation may later satisfy strict normal
+cleanup itself. At the existing quiescent renewal boundary, submit a **new separate**
+normal campaign-v1 proof with the original token or occurrence to `reconcile`.
+The original receipt, owner, source and prior file bindings must still validate;
+all normal native cleanup guards also run. This does not use a newer successor
+or change its completeness requirements. The coordinator archives the entire
+isolated entry under a verified history seal and records zero-credit normal
+retirement at the original receipt key. Exact replay is idempotent; changed
+replay refuses. Future admission/completion still rechecks the archived evidence.
+Retained service custody does not claim a historical service termination or a
+new test execution. Original failures and financial no-retry custody remain.

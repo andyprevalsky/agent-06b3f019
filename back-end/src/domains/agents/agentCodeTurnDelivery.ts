@@ -12,8 +12,10 @@
  * startup row (providers/codeSessions/startupTurns.ts); once the ws-server is
  * up but the CLI has not been given its task, the ws-server holds it. Either
  * way it becomes the CLI's next turn right after the task prompt, in arrival
- * order, and the sender is told `queued`. A session that finished or closed
- * is never "queued": that stays the truthful error.
+ * order, and the sender is told `queued`. Likewise while the user chats with
+ * the code agent directly: the message waits for the hand back (`queued`).
+ * A session that finished or closed is never "queued": that stays the
+ * truthful error.
  *
  * No question path: code agents only receive messages here.
  */
@@ -55,10 +57,17 @@ function deliveryError(delivery: TurnDelivery, endedMessage?: string): AgentGrap
     return new AgentGraphError(409, endedMessage ?? 'Code agent session has finished');
   }
   if (delivery.reason === 'relay_paused') {
-    // The user holds the session in direct chat; agent turns wait for the hand back.
+    // Only a ws-server built before agent turns queued during a direct hold
+    // (a sandbox still on the older template) refuses a plain agent turn.
     return new AgentGraphError(
       409,
       'The user is talking to this code agent directly; send again after they hand it back'
+    );
+  }
+  if (delivery.reason === 'relay_queue_full') {
+    return new AgentGraphError(
+      409,
+      'The user is talking to this code agent directly and its queue of waiting messages is full; send again once they hand it back'
     );
   }
   if (delivery.reason === 'startup_queue_full') return new AgentGraphError(409, STARTUP_QUEUE_FULL);
@@ -76,6 +85,13 @@ const STARTUP_QUEUE_FULL =
   'Code agent is still starting and its queue of waiting messages is full; send again once it runs';
 
 /**
+ * `queued`: waits for a code agent that is still starting; `held`: waits for the
+ * user to hand back a code agent they are chatting with directly. Both are
+ * accepted turns that become the CLI's next turn, never failures.
+ */
+export type CodeDeliveryStatus = 'delivered' | 'duplicate' | 'queued' | 'held';
+
+/**
  * Code agent target: the CLI's next user turn. The ws-server dedupes by turn
  * id for the session's life, so a retry after a lost ack (or after the chip
  * write below failed) never starts a second CLI turn.
@@ -89,7 +105,7 @@ export async function deliverToCodeAgent(args: {
   original: string;
   /** The 409 text when the CLI turn already ended (defaults to "has finished"). */
   endedMessage?: string;
-}): Promise<'delivered' | 'duplicate' | 'queued'> {
+}): Promise<CodeDeliveryStatus> {
   const { target } = args;
   if (target.streamUrl === null || target.status !== 'ACTIVE') {
     throw new AgentGraphError(409, 'Code agent session is not running');
@@ -121,7 +137,10 @@ export async function deliverToCodeAgent(args: {
     direction: 'received',
     codeTurnId: turnId,
   });
-  return delivery.status;
+  // A turn held while the user chats with the code agent directly: `held`.
+  return delivery.status === 'queued' && delivery.reason === 'direct_hold'
+    ? 'held'
+    : delivery.status;
 }
 
 /** A background task's inbox address (`<tool call id>` or `<tool call id>.run<n>`) → its tool call id. */
@@ -207,7 +226,7 @@ export async function deliverToRunningCodeTask(args: {
   sender: { id: string; label: string };
   key: string;
   text: string;
-}): Promise<{ message_id: string; status: 'delivered' | 'duplicate' | 'queued' }> {
+}): Promise<{ message_id: string; status: CodeDeliveryStatus }> {
   const toolCallId = taskToolCallId(args.taskAddress);
   const spawnKey = startupTurnsKey(args.ownerAgentId, toolCallId);
   const receivedId = deterministicMessageId(args.ownerAgentId, `${args.key}:received`);
@@ -275,7 +294,13 @@ export async function sendAgentMessageToRunningCodeTask(args: {
   idempotencyKey: string;
   text: string;
 }): Promise<
-  | { message_id: string; delivered: boolean; queued?: true; task_running: true }
+  | {
+      message_id: string;
+      delivered: boolean;
+      queued?: true;
+      queued_reason?: 'direct_hold';
+      task_running: true;
+    }
   | { error: string; status: number }
 > {
   const started = args.runStartedAt !== null ? new Date(args.runStartedAt) : null;
@@ -295,6 +320,16 @@ export async function sendAgentMessageToRunningCodeTask(args: {
       status: delivered.status,
     });
     // `queued`: accepted for a code agent still starting; it is its next turn once the CLI runs.
+    // `held`: accepted while the user chats with it directly; its next turn after the hand back.
+    if (delivered.status === 'held') {
+      return {
+        message_id: delivered.message_id,
+        delivered: false,
+        queued: true,
+        queued_reason: 'direct_hold',
+        task_running: true,
+      };
+    }
     return delivered.status === 'queued'
       ? { message_id: delivered.message_id, delivered: false, queued: true, task_running: true }
       : { message_id: delivered.message_id, delivered: true, task_running: true };

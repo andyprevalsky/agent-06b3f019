@@ -15,6 +15,7 @@ import { http, HttpResponse } from 'msw';
 import { server } from './msw/server';
 import { renderWithProviders } from './test-wrapper';
 import { makeItem as makePlaidItem } from './plaid.fixtures';
+import { resolvedLeft } from './rose-sidebar.fixtures';
 
 import QueryInput from '@/features/terminal-component-group/components/QueryInput';
 import BrowserStatusBar from '@/features/terminal-component-group/components/BrowserStatusBar';
@@ -70,6 +71,7 @@ function agentContext(messages: Message[], agentId: string): AgentContextValue {
     stagePendingAgentCreation: vi.fn(),
     reconcilePendingAgentCreation: vi.fn(async () => {}),
     rollbackPendingAgentCreation: vi.fn(() => false),
+    stageUserMessage: vi.fn(() => ({ confirm: vi.fn(), drop: vi.fn() })),
   };
 }
 
@@ -205,7 +207,8 @@ describe('top-right app icons', () => {
     expect(drawer).toHaveAttribute('data-state', 'open');
     // Full height, from the left bar to the window's right edge; no close X.
     expect(drawer).toHaveAttribute('data-variant', 'full');
-    expect(drawer.style.left).toBe('64px');
+    // Left follows the Rose bar's published offset (a pinned bar's width), else 64px.
+    expect(resolvedLeft(drawer)).toBe('64px');
     expect(drawer.style.right).toBe('0px');
     expect(drawer.style.top).toBe('0px');
     expect(within(drawer).queryByRole('button', { name: /close/i })).toBeNull();
@@ -223,7 +226,7 @@ describe('top-right app icons', () => {
     expect(screen.getByTestId('browser-app-drawer')).toHaveAttribute('data-state', 'closed');
   });
 
-  it('Phone shows only the floating Coming soon device, 24px off the right edge', async () => {
+  it('Phone shows only the floating device (device view), 24px off the right edge', async () => {
     const user = userEvent.setup();
     renderWithProviders(<RoseAppIcons />);
     expect(screen.queryByTestId('rose-phone')).toBeNull();
@@ -240,7 +243,11 @@ describe('top-right app icons', () => {
     const device = within(phone).getByTestId('rose-phone-device');
     expect([...phone.children]).toEqual([device]);
     expect(device.style.boxShadow).toContain('rgba(0,0,0,.35)');
-    expect(device).toHaveTextContent('Select an agent to view its phone.');
+    // No agent selected: the read-only device view (default: no enabled phone).
+    expect(within(device).getByTestId('phone-device-view')).toBeInTheDocument();
+    expect(
+      await within(device).findByText('Phone access requires the connected phone service.'),
+    ).toBeInTheDocument();
     expect(within(phone).queryAllByRole('button')).toHaveLength(0);
     expect(screen.getByTestId('rose-app-panel')).toHaveAttribute('data-state', 'closed');
     // One app at a time: opening Integrations hides the phone.

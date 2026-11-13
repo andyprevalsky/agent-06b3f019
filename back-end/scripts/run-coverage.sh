@@ -196,9 +196,10 @@ fi
 # Hermetic per-shard local stores (set after SHARD_SUFFIX is known).
 export USER_UI_STORAGE_LOCAL_DIR="${USER_UI_STORAGE_LOCAL_DIR:-$ROOT_DIR/.context/user-ui-storage$SHARD_SUFFIX}"
 export DISPLAY_STORAGE_LOCAL_DIR="${DISPLAY_STORAGE_LOCAL_DIR:-$ROOT_DIR/.context/display-storage$SHARD_SUFFIX}"
-# Benchmark Hub's index lock is a per-database advisory lock; concurrent shards
-# with separate databases must not share one local index.json.
-export BENCHMARK_HUB_LOCAL_DIR="${BENCHMARK_HUB_LOCAL_DIR:-$ROOT_DIR/.context/benchmark-hub$SHARD_SUFFIX}"
+# Coverage owns its Hub even when the developer environment points at a shared
+# index. Export once before launching either child: backend and blackbox must
+# use the same run-scoped path, including unsharded runs and repeated shards.
+export BENCHMARK_HUB_LOCAL_DIR="$ROOT_DIR/.context/test-runs/backend-coverage-hub$SHARD_SUFFIX-$(date +%s)-$$"
 
 # All coverage runs in one worktree share coverage/tmp, coverage/blackbox-run,
 # coverage/server.log, and the workspace database. Hold OS advisory locks in a
@@ -348,7 +349,8 @@ codex_funded_fallback_configured() {
 }
 
 # Coverage data directory (NODE_V8_COVERAGE tells Node to dump raw coverage here)
-COV_TMP="$BACKEND_DIR/coverage/tmp$SHARD_SUFFIX"
+source "$SCRIPT_DIR/coverage-raw-directory.sh"
+COV_TMP="$(coverage_raw_directory "$BACKEND_DIR" "$SHARD_SUFFIX")"
 
 # Reserve one of the two currently-unused ports inside Conductor's ten-port
 # workspace allocation. Port arithmetic outside that allocation is only a
@@ -462,6 +464,8 @@ COV_LOG="$BACKEND_DIR/coverage/server$SHARD_SUFFIX.log"
 # artifacts and fake provider boundaries.
 export TRACE_ARCHIVE_ENABLED="${TRACE_ARCHIVE_ENABLED:-1}"
 export TRACE_ARCHIVE_LOCAL_DIR="${TRACE_ARCHIVE_LOCAL_DIR:-$ROOT_DIR/.context}"
+# Provider fixtures must not inherit the production sender selected in .env.
+export SMS_PROVIDER="${BLACKBOX_TEST_SMS_PROVIDER:-surge}"
 export BLACKBOX_TEST_FAKE_SURGE="${BLACKBOX_TEST_FAKE_SURGE:-1}"
 export BLACKBOX_TEST_FAKE_WHATSAPP="${BLACKBOX_TEST_FAKE_WHATSAPP:-1}"
 export BLACKBOX_TEST_FAKE_TWILIO="${BLACKBOX_TEST_FAKE_TWILIO:-1}"
@@ -475,6 +479,9 @@ if [[ -z "${BENCHMARK_SHARE_SECRET:-}" ]]; then
   export BENCHMARK_SHARE_SECRET="$(openssl rand -hex 32)"
 fi
 # The instrumented backend starts independently of run-blackbox-tests.sh.
+# Full-suite phone fixtures explicitly opt in; never a product default or shared env write.
+# Preserve an explicit caller0 for rollout-denial coverage.
+export CLOUD_IPHONE_ENABLED="${CLOUD_IPHONE_ENABLED-1}"
 # OAuth URL cases need the same synthetic local client, never the production one.
 export GOOGLE_CLIENT_ID="${BLACKBOX_GOOGLE_CLIENT_ID:-rose-local-blackbox.apps.googleusercontent.com}"
 source "$SCRIPT_DIR/blackbox-auto-rca-env.sh"
@@ -785,8 +792,7 @@ export FAST_MODE_CACHE_DATABASE_URL="$LOCAL_DB_URL"
 echo "Starting backend with coverage collection on port $COV_PORT..."
 launch_coverage_process_group env \
   NODE_V8_COVERAGE="$COV_TMP" PORT="$COV_PORT" DISABLE_GMAIL_SYNC=1 \
-  NODE_OPTIONS="${NODE_OPTIONS:+$NODE_OPTIONS }--require=$(node -p 'JSON.stringify(process.argv[1])' "$SCRIPT_DIR/blackbox-kernel-proxy-custody.cjs")" \
-  DISABLE_GOOGLE_DATA_PURGE=1 \
+    DISABLE_GOOGLE_DATA_PURGE=1 \
   node --import tsx src/bootstrap.ts >"$COV_LOG" 2>&1
 BACKEND_PID="$LAUNCHED_COVERAGE_PID"
 BLACKBOX_PID=""

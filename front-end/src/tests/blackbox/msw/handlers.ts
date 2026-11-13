@@ -41,6 +41,40 @@ export const handlers = [
       documents: {},
     }),
   ),
+  http.get(`${API_BASE}/integrations/fireflies`, () =>
+    HttpResponse.json({
+      connected: false,
+      status: 'NOT_CONNECTED',
+      accountEmail: null,
+      backfillDone: false,
+      lastSuccessfulSyncAt: null,
+      lastError: null,
+      documents: {},
+    }),
+  ),
+  // Cloud iPhone is account-gated; no assigned phone unless a test overrides it.
+  http.get(`${API_BASE}/iphone/connection`, () =>
+    HttpResponse.json({
+      enabled: false,
+      configured: false,
+      status: 'not_connected',
+      setupAgentId: null,
+      connectionRevision: 0,
+    }),
+  ),
+  // Device view (Phone app default): no enabled phone unless a test overrides it.
+  http.get(`${API_BASE}/iphone/device`, () =>
+    HttpResponse.json({
+      enabled: false,
+      setupState: 'not_connected',
+      providerState: 'IDLE',
+      holder: null,
+      waiting: [],
+    }),
+  ),
+  http.get(`${API_BASE}/iphone/device/frame`, () =>
+    HttpResponse.json({ error: 'Phone is not running', state: 'IDLE' }, { status: 409 }),
+  ),
   // L-INTEG-CORE cheap progress poll: nothing changed unless a test overrides.
   http.get(`${API_BASE}/integrations/progress`, () =>
     HttpResponse.json({ cursor: '2026-10-20T00:00:00.000Z', changed: false }),

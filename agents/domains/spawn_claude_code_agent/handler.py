@@ -23,6 +23,7 @@ from domains.spawn_claude_code_agent.config import (
     CODE_AGENT_ACTIVITY_NO_DEADLINE,
     CODE_AGENT_DRAIN_YIELD_STATUS,
     CODE_AGENT_PAUSED_STATUS,
+    CODE_AGENT_SESSION_FAILED_CODE,
     CODE_AGENT_USAGE_LIMIT_STATUS,
     CODE_SESSION_HEARTBEAT_KEY,
     CODE_TARGET_LOCAL,
@@ -46,7 +47,7 @@ from domains.spawn_claude_code_agent.service_target import (
     resolve_code_agent_target_activity,
 )
 from helpers.activity_generation_drain import GENERATION_SUPERSEDED
-from helpers.attachments import extract_attachments_from_context
+from helpers.attachments import FilePointer, extract_attachments_from_context
 from helpers.generation_handoff import GenerationHandoffRequested, park_pending_tool, take_tool_resume
 from helpers.tool_interrupts import tool_stop_requested
 from helpers.tracing import span
@@ -234,6 +235,19 @@ def _github_rate_limited(error: BaseException) -> Optional[ApplicationError]:
     return _typed_application_error(error, GITHUB_RATE_LIMITED_CODE)
 
 
+def _code_session_failure(error: BaseException) -> Optional[Dict[str, Any]]:
+    """The resumable code session of a run that ended abnormally, if the activity attached one.
+
+    ``message`` keeps the exact exception and names the code_session_id and the
+    retry call; ``details`` carry the same facts for metadata.
+    """
+    failed = _typed_application_error(error, CODE_AGENT_SESSION_FAILED_CODE)
+    if failed is None:
+        return None
+    details = failed.details[0] if failed.details and isinstance(failed.details[0], dict) else {}
+    return {"message": failed.message, **details}
+
+
 def _failed_code_agent(target_info: Optional[Dict[str, Any]], message: str) -> Dict[str, Any]:
     """``metadata.code_agent`` for a run that failed before or outside the activity result."""
     return {**code_agent_metadata(target_info), "state": "failed", "failure_message": message}
@@ -363,6 +377,13 @@ def _user_pause_message(metadata: Dict[str, Any]) -> str:
     )
 
 
+def _note_code_provider(workflow_instance: Any, tool_call_id: str, code_provider: Any) -> None:
+    """Keep the CLI on the spawn's background record (wait_for names it 'code:<provider>')."""
+    note = getattr(workflow_instance, "_note_background_code_provider", None)
+    if callable(note):
+        note(tool_call_id, code_provider)
+
+
 class SpawnClaudeCodeAgentManager(ToolManager):
     """Manager for spawn_claude_code_agent tool."""
 
@@ -410,12 +431,36 @@ class SpawnClaudeCodeAgentManager(ToolManager):
         if tool_call.get("_fresh_conversation") is True:
             # continue_conversation=false resume: same session and sandbox, new CLI conversation.
             code_session_request = {**(code_session_request or {}), "fresh_conversation": True}
+        task_name = tool_call.get("task_name")
+        if isinstance(task_name, str) and task_name:
+            # Rides in the request dict so the activity's positional arguments are unchanged.
+            code_session_request = {**(code_session_request or {}), "task_name": task_name}
+        resume_cli_settings = tool_call.get("_resume_cli_settings")
+        if isinstance(resume_cli_settings, dict) and resume_cli_settings:
+            # The model / effort / speed the person picked on the turn that resumes it.
+            code_session_request = {**(code_session_request or {}), "cli_settings": dict(resume_cli_settings)}
         requested_target = normalize_code_target(tool_call.get("target"))
         user_id = workflow_instance.user_id
         agent_id = workflow_instance.agent_id
 
         # Resolve requested attachments from workflow context
-        attachments = _resolve_attachments(workflow_instance, requested_attachments, agent_id)
+        restored_attachments = tool_call.get("_resume_attachments")
+        attachments = (
+            list(restored_attachments)
+            if isinstance(restored_attachments, list)
+            else _resolve_attachments(workflow_instance, requested_attachments, agent_id)
+        )
+        # Files the owner attached to the typed turn that resumes this code agent
+        # (backend directChatResume.ts; set only by a user resume, never by the model).
+        attachments += [
+            {**FilePointer.from_dict(item).to_dict(), **item}
+            for item in tool_call.get("_user_attachments") or []
+            if isinstance(item, dict)
+        ]
+        attachments = list({
+            (item.get("id"), item.get("storage_path"), item.get("original_filename")): item
+            for item in attachments
+        }.values())
 
         # A previous generation parked this exact tool call across a deploy
         # (continue_as_new) while its sandbox kept running. The chip is still
@@ -488,6 +533,9 @@ class SpawnClaudeCodeAgentManager(ToolManager):
                 )
                 return
 
+        if isinstance(task_name, str) and task_name:
+            # metadata.code_agent.title: the code-agent view's header when opened without one.
+            target_info["title"] = task_name
         if code_session is None:
             local_device_name = target_info.get("device_name")
             yield ToolEvent(
@@ -542,7 +590,13 @@ class SpawnClaudeCodeAgentManager(ToolManager):
             if code_session is not None and code_session.get("code_provider"):
                 code_provider = code_session["code_provider"]
             else:
-                default_code_provider = _select_code_provider(workflow_instance, gpt_token)
+                # A user resume keeps the stopped session's CLI so its conversation continues.
+                resume_provider = tool_call.get("_resume_code_provider")
+                default_code_provider = (
+                    resume_provider
+                    if resume_provider in ("claude", "codex")
+                    else _select_code_provider(workflow_instance, gpt_token)
+                )
                 code_provider = await workflow.execute_activity(
                     resolve_code_agent_provider_activity,
                     args=[default_code_provider],
@@ -555,6 +609,7 @@ class SpawnClaudeCodeAgentManager(ToolManager):
                 code_provider=code_provider,
                 compute_token_provider=getattr(workflow_instance, "compute_token_provider", None),
             )
+            _note_code_provider(workflow_instance, tool_call_id, code_provider)
 
             async with span(
                 "claude_code_activity_wait",
@@ -777,6 +832,8 @@ class SpawnClaudeCodeAgentManager(ToolManager):
             tool_usage = _workflow_tool_usage(result)
 
             code_provider = result.get("code_provider") or code_provider
+            # A usage-limit provider switch inside the activity updates the record.
+            _note_code_provider(workflow_instance, tool_call_id, code_provider)
             success = result.get("success") is True
             output_files = result.get("output_files", [])
             paused = result.get("status") == CODE_AGENT_PAUSED_STATUS
@@ -906,6 +963,36 @@ class SpawnClaudeCodeAgentManager(ToolManager):
                         "code_provider": code_provider,
                         "error_code": GITHUB_RATE_LIMITED_CODE,
                         "code_agent": _failed_code_agent(target_info, github_limited.message),
+                    },
+                )
+                return
+
+            session_failure = _code_session_failure(e)
+            if session_failure is not None:
+                # The run died after its code session existed (e.g. a dropped
+                # WebSocket): hand the parent the exact error plus the
+                # code_session_id to resume, never a bare one-liner.
+                logger.error(
+                    "[ClaudeCode] Code session run failed; surfacing its session for a resume",
+                    agent_id=agent_id,
+                    code_provider=code_provider,
+                    code_session_id=session_failure.get("code_session_id"),
+                    error=session_failure.get("error"),
+                    error_type=session_failure.get("error_type"),
+                )
+                yield ToolEvent(
+                    type=EventType.POST_MESSAGE,
+                    title="Code session failed",
+                    message=session_failure["message"],
+                    status=MessageStatus.ERROR,
+                    metadata={
+                        "toolName": "spawn_claude_code_agent",
+                        "code_provider": code_provider,
+                        "error_code": CODE_AGENT_SESSION_FAILED_CODE,
+                        "code_session_id": session_failure.get("code_session_id"),
+                        "code_session": session_failure.get("code_session"),
+                        "retry": session_failure.get("retry"),
+                        "code_agent": _failed_code_agent(target_info, session_failure["message"]),
                     },
                 )
                 return

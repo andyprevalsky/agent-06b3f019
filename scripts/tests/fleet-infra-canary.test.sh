@@ -157,30 +157,6 @@ grep -Fq 'FAILED (exit=17)' "$PREFLIGHT_REPRO/output" \
 [ ! -e "$PREFLIGHT_REPRO/root/.context/fleet-infra-canary.last-pass" ] \
   || fail "failed canary must never stamp preflight success"
 
-# The parent resolved an unpublished source to a fetchable base. The nested
-# canary must keep the original request so its fleet packages the same delta.
-cat > "$PREFLIGHT_REPRO/root/scripts/run-fleet-infra-canary" <<'SH'
-#!/usr/bin/env bash
-printf '%s\n' "$CLOUDBENCH_INFRA_CANARY_REF" > "$CLOUDBENCH_TEST_CANARY_REF"
-[ "$CLOUDBENCH_LOCAL_PATCH_BASE_REF" = bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb ] || exit 81
-[ "$(sha256sum "$CLOUDBENCH_LOCAL_PATCH_SOURCE" | awk '{print $1}')" = "$CLOUDBENCH_LOCAL_PATCH_SHA256" ] || exit 82
-exit 17
-SH
-chmod +x "$PREFLIGHT_REPRO/root/scripts/run-fleet-infra-canary"
-printf 'complete parent delta\n' > "$PREFLIGHT_REPRO/parent.patch"
-PATCH_DIGEST="$(sha256sum "$PREFLIGHT_REPRO/parent.patch" | awk '{print $1}')"
-set +e
-FLEET_PATCH_FILE="$PREFLIGHT_REPRO/parent.patch" FLEET_PATCH_SHA256="$PATCH_DIGEST" \
-CLOUDBENCH_TEST_CANARY_REF="$PREFLIGHT_REPRO/ref" \
-  REQUESTED_BENCH_REF=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
-  BENCH_REF=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
-  bash "$PREFLIGHT_REPRO/run.sh" > "$PREFLIGHT_REPRO/ref.out" 2>&1
-PREFLIGHT_STATUS=$?
-set -e
-[ "$PREFLIGHT_STATUS" -eq 17 ] || fail "source-pinned canary must preserve its exit status"
-[ "$(cat "$PREFLIGHT_REPRO/ref")" = aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa ] \
-  || fail "nested canary lost requested source and would omit the committed workspace patch"
-
 # Two campaign controllers may have distinct lifecycle locks, but their
 # check→canary→stamp transaction is shared. Exactly one canary may run; the
 # follower must wait, observe the fresh stamp, and return success.
@@ -395,40 +371,6 @@ for name in sys.argv[2:]:
     if name.startswith("infra-canary-"):
         raise SystemExit(f"refusing fake name {name}")
 print("OK catalog sample:", ", ".join(sys.argv[2:]))
-PY
-
-# The sealed whole patch must survive the nested handoff and key the stamp.
-python3 - "$ROOT_DIR" <<'PY'
-import hashlib,json,os,runpy,subprocess,sys,tempfile
-from pathlib import Path
-from unittest.mock import patch
-root=Path(sys.argv[1]); helper=runpy.run_path(str(root/'scripts/cloudbench-infra-canary-preflight.py'))
-fleet=(root/'scripts/run-bench-fleet').read_text()
-block=fleet.split('# Freeze one workspace patch before maintenance and reuse it for every guest.\n',1)[1].split('\n\nif [ -z "$PROVISION_POOL" ]; then',1)[0]
-with tempfile.TemporaryDirectory() as d:
- d=Path(d); payload=d/'parent.patch';payload.write_bytes(b'complete parent patch: guard plus all other changes\n')
- sha=hashlib.sha256(payload.read_bytes()).hexdigest();base='b'*40;requested='a'*40
- env={'CLOUDBENCH_LOCAL_PATCH_SOURCE':str(payload),'CLOUDBENCH_LOCAL_PATCH_SHA256':sha,
-      'CLOUDBENCH_LOCAL_PATCH_BASE_REF':base,'CLOUDBENCH_INFRA_CANARY_REF':requested,
-      'CLOUDBENCH_SKIP_LOCAL_PATCH':'0'}
- with patch.dict(os.environ,env):
-  identity=helper['_source_transport']();assert identity=={'requested_ref':requested,'base_sha':base,'workspace_patch_sha256':sha}
-  stamp=d/'stamp';helper['_write_stamp'](stamp,json.dumps(identity,sort_keys=True));assert helper['_fresh_age'](stamp,3600) is not None
-  with patch.dict(os.environ,{'CLOUDBENCH_INFRA_CANARY_REF':'c'*40}):assert helper['_fresh_age'](stamp,3600) is None
-  with patch.dict(os.environ,{'CLOUDBENCH_LOCAL_PATCH_BASE_REF':'d'*40}):assert helper['_fresh_age'](stamp,3600) is None
-  for change in ({'CLOUDBENCH_SKIP_LOCAL_PATCH':'1'},{'CLOUDBENCH_LOCAL_PATCH_SHA256':'0'*64},{'CLOUDBENCH_LOCAL_PATCH_SOURCE':str(d/'missing')}):
-   with patch.dict(os.environ,change):
-    try:helper['_source_transport']()
-    except ValueError:pass
-    else:raise AssertionError('unverified source transport accepted')
- output=d/'copied.patch'
- script='set -euo pipefail\nsource "$HELPER"\nBENCH_REF="'+base+'"\nREQUESTED_BENCH_REF="'+requested+'"\n'+block+'\ncp "$FLEET_PATCH_FILE" "$OUTPUT"\nrm "$FLEET_PATCH_FILE"\n'
- launch={**os.environ,**env,'HELPER':str(root/'scripts/lib/cloudbench-env.sh'),'OUTPUT':str(output)}
- good=subprocess.run(['bash','-c',script],env=launch,capture_output=True,text=True);assert good.returncode==0,good.stderr
- assert output.read_bytes()==payload.read_bytes()
- for change in ({'CLOUDBENCH_SKIP_LOCAL_PATCH':'1'},{'CLOUDBENCH_LOCAL_PATCH_BASE_REF':'d'*40},{'CLOUDBENCH_LOCAL_PATCH_SHA256':'0'*64}):
-  bad=subprocess.run(['bash','-c',script],env={**launch,**change},capture_output=True,text=True);assert bad.returncode!=0
-print('OK exact sealed canary patch/base/stamp and refusal controls')
 PY
 
 echo "All fleet infra canary structural checks passed."

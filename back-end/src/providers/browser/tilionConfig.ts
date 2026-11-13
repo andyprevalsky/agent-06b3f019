@@ -18,9 +18,13 @@ export type TilionProxyType = 'residential' | 'mobile' | 'direct';
 
 /**
  * New Tilion sessions start on datacenter egress (Tilion's own default and the
- * cheaper exit); residential is reached through the normal rotation/recovery.
+ * cheaper exit); an explicit process override also supports controlled residential runs.
  */
-export const TILION_DEFAULT_PROXY_TYPE: TilionProxyType = 'direct';
+export function configuredTilionProxyType(value = process.env.TILION_PROXY_TYPE): TilionProxyType {
+  return tilionProxyType((value?.trim() || 'direct') as KernelProxyType | 'direct');
+}
+
+export const TILION_DEFAULT_PROXY_TYPE: TilionProxyType = configuredTilionProxyType();
 
 /**
  * A direct exit is placed only by its region. When the requested country has no

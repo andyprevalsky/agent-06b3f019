@@ -32,10 +32,12 @@
  *   SMOKE_BASE_URL   backend base URL     (default https://navi-j9a9.onrender.com)
  *   SMOKE_API_KEY    internal X-API-Key   (default: shared dev key, see CLAUDE.md)
  *   SMOKE_USER_ID    X-User-Id            (default: shared dev test user, see CLAUDE.md)
+ *   SCHEMA_MIGRATIONS_DIR  migrations the schema check replays (default: this
+ *                    checkout's; /deploy passes the commit production runs)
  */
 import { config } from 'dotenv';
 import { runAuthCorsPreflights } from '../src/providers/corsSmoke';
-import { driftProblems, SCHEMA_DRIFT_HINT, verifySchemaObjects } from './verify-schema-objects';
+import { schemaHints, schemaProblems, verifySchemaObjects } from './verify-schema-objects';
 config();
 
 const RAW_BASE_URL = (process.env.SMOKE_BASE_URL ?? 'https://navi-j9a9.onrender.com').replace(
@@ -220,13 +222,14 @@ async function main(): Promise<void> {
   } else if (!LOCAL_BASE && databaseUrl) {
     schemaChecks = 1;
     try {
-      const problems = driftProblems(await verifySchemaObjects(databaseUrl));
+      const report = await verifySchemaObjects(databaseUrl);
+      const problems = schemaProblems(report);
       if (problems.length > 0) failed++;
       console.log(
         `  ${problems.length > 0 ? '❌' : '✅'} ${'schema'.padEnd(18)} migration-declared objects`
       );
       for (const problem of problems) console.log(`       ${problem}`);
-      if (problems.length > 0) console.log(`       ${SCHEMA_DRIFT_HINT}`);
+      for (const hint of schemaHints(report)) console.log(`       ${hint}`);
     } catch (error) {
       failed++;
       console.log(`  ❌ ${'ERR'.padEnd(18)} migration-declared objects`);

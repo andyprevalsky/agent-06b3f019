@@ -1,0 +1,159 @@
+{
+  "format": "PR1905-PRIVATE-TAR-AESGCM-FRAMES-V1",
+  "label": "post-rca-20261109T233318",
+  "created_at": "2026-11-09T23:36:57.093163+00:00",
+  "bucket": "trace-archive",
+  "prefix": "devbox-closeout-private/pr1905/post-rca-20261109T233318",
+  "parts": [
+    {
+      "key": "devbox-closeout-private/pr1905/post-rca-20261109T233318/evidence.part0000.aesgcm",
+      "sha256": "e4701b63f5215efc30b1280b6dd584d27c05f780bd3a09716d25c3bf7e61552b",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/post-rca-20261109T233318/evidence.part0001.aesgcm",
+      "sha256": "a55013f6bfe020f346910cbb2f27e79fc1176e79e88695010f85bc389ae86f41",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/post-rca-20261109T233318/evidence.part0002.aesgcm",
+      "sha256": "d2fef582f7dc98580d56c7d337abda52bdebc6f60b99c59a66129f36c21464fb",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/post-rca-20261109T233318/evidence.part0003.aesgcm",
+      "sha256": "5fb9f99807c16e21231638c98da3558a97690a0fd9d0b73e4fe68c5c77146ef5",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/post-rca-20261109T233318/evidence.part0004.aesgcm",
+      "sha256": "df1cb750d75da6407777bbbe782c38464fa5fc49e51377475f0949c510be47d7",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/post-rca-20261109T233318/evidence.part0005.aesgcm",
+      "sha256": "50cede94b028af5fd2903f37c326c81380f78756511af672d08e5a32137dc0a5",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/post-rca-20261109T233318/evidence.part0006.aesgcm",
+      "sha256": "4af75b637470fc9813a40c3a31ec76bb4bd5af4d6ec627e65f0a298f97b1e34e",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/post-rca-20261109T233318/evidence.part0007.aesgcm",
+      "sha256": "a2fdf8a4cde582ac44e646895afa1d3362104052daa8249546a78cacdacf6f68",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/post-rca-20261109T233318/evidence.part0008.aesgcm",
+      "sha256": "5fbd8b3d4289a90dd0105d11959248dc76aada18a4f847d08cfd6908d61fa016",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/post-rca-20261109T233318/evidence.part0009.aesgcm",
+      "sha256": "47919c3806fd545329f880c88b734a25b6f2b72f48f939a98b2d75b37dcc0acb",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/post-rca-20261109T233318/evidence.part0010.aesgcm",
+      "sha256": "66a5078892a96f2dccaf3cf816e81595c584e5b6462b951060df48f38b334185",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/post-rca-20261109T233318/evidence.part0011.aesgcm",
+      "sha256": "c479b00ff14d3580064c7a3a58e5654939f1b8beade0fd126dbe17749e723a6c",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/post-rca-20261109T233318/evidence.part0012.aesgcm",
+      "sha256": "383d7644ccf9580349c5455df1f44b43ef10759f11e2cf36e3c360521ad1a062",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/post-rca-20261109T233318/evidence.part0013.aesgcm",
+      "sha256": "7131018cbc97ec62951b1f29e262381b6391635476f0fac4776b41f917e26006",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/post-rca-20261109T233318/evidence.part0014.aesgcm",
+      "sha256": "ef98e90c4a27003ab980f94afedbc18445dbe018957007b911f71ade6b68a17e",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/post-rca-20261109T233318/evidence.part0015.aesgcm",
+      "sha256": "381bac886aa8797bc4a7eced28724d7f3162c78a62a7e28a7ae905baf0d25237",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/post-rca-20261109T233318/evidence.part0016.aesgcm",
+      "sha256": "6859f1a2aa6d98069b13d1f36e7005fe472f655a44083472171d19b7fe595ffe",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/post-rca-20261109T233318/evidence.part0017.aesgcm",
+      "sha256": "f32cbeacea0ca5de40cd1ebd3c8cb97cb389fd2f345c19bd8f2a5d93ecb6d45d",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/post-rca-20261109T233318/evidence.part0018.aesgcm",
+      "sha256": "526f23cbe2b78bc6c295268390f348e0a961d6d0ea8183bf1f57ab4b82fb2837",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/post-rca-20261109T233318/evidence.part0019.aesgcm",
+      "sha256": "1b603e5a6b46057a0c5a31577c85d3f33430c63a37926ef5db74e0b7bf62d3bf",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/post-rca-20261109T233318/evidence.part0020.aesgcm",
+      "sha256": "8ffcc3c7a7969e6ffbbd9dc0f3171b720c71ccdab011a30bec0c71172c89fe05",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/post-rca-20261109T233318/evidence.part0021.aesgcm",
+      "sha256": "9ba111b31f0033dadc51811088dee73fdff3befd3663167170041f07bfb941be",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/post-rca-20261109T233318/evidence.part0022.aesgcm",
+      "sha256": "a2a54404f2ac003f30d32faaaf5dc17112d59c0eb5cf2d5372ab75f8b196ee70",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/post-rca-20261109T233318/evidence.part0023.aesgcm",
+      "sha256": "14cbe765838949b7230e99b2c3be952895e19ffbbabeedfc1dc5852037b94dcd",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/post-rca-20261109T233318/evidence.part0024.aesgcm",
+      "sha256": "b4b12ce14ec3651311026104080b0e585f5544ff1c331e8c9933354c837210b8",
+      "plain_bytes": 27247353
+    }
+  ],
+  "sha256": "521545ee42603e29e3b1d789a23ff17b1465594a787fbf44d6ff448e8ccd633e",
+  "member_count": 3893,
+  "member_manifest_sha256": "8b2a56a14e8cf6ad9b341aa8af6f8f6576f9a16fa2ad60c1d5a339a08e8e4a21",
+  "full_readback_verified": true,
+  "authenticated_decryption_verified": true,
+  "all_member_hashes_verified": true,
+  "excludes": [
+    ".context/assigned-pr1885-failures/cloud-smoke-rca/activation-checkout",
+    ".context/assigned-pr1885-failures/recovery-check",
+    ".context/assigned-pr1885-failures/original",
+    ".context/assigned-pr1885-failures/native-evidence.tar.gz",
+    ".context/assigned-pr1885-failures/private-preservation",
+    ".context/assigned-pr1885-failures/auth-options-rca/baseline/digest-clone",
+    ".context/frontend-builds",
+    ".context/benchmarks/seed-cache",
+    ".context/tsbuildinfo"
+  ],
+  "original_evidence_reference": "attachments/failure-evidence-receipt--bbe0d10ee40a41921ea3.json",
+  "original_verified_members": 1948,
+  "raw_logs_private": true,
+  "snapshot_not_final_closeout": true,
+  "previous_receipt_key": "devbox-closeout-private/pr1905/precloseout-20261109T2124/receipt.json",
+  "previous_receipt_sha256": "48b8769a5e64fa0296eb64f66978df867e012534032ee56039434c6db13415c2",
+  "reused_member_count": 113511,
+  "catalog_manifest_sha256": "fbb132c84c1d1361058d92c8275a89040201d9eab3ff1a80a5963dd77c90be52"
+}

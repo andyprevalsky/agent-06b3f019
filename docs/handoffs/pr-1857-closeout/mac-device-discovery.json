@@ -1,0 +1,9 @@
+{
+  "observed_at": "2026-11-08T23:19:17.099628+00:00",
+  "route": "GET /api/local-devices",
+  "user_id": "1f85ff25-6e29-4c1b-8739-f917bd101a30",
+  "authentication": "canonical generate-test-session.ts signed owner session, token held only in memory",
+  "http_status": 200,
+  "devices": [],
+  "acceptance": "SKIPPED-no-Mac-available"
+}

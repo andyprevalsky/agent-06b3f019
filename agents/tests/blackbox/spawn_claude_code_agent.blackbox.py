@@ -691,6 +691,7 @@ def _collatz_stream_events() -> list[dict]:
 
 
 def _collatz_handoff() -> dict:
+    """The declared fields of the Collatz result (the parent's structured response)."""
     seq = _collatz_27()
     return {
         "source_code": "n = 27\n...",
@@ -698,6 +699,24 @@ def _collatz_handoff() -> dict:
         "collatz_sequence": seq,
         "total_steps": 111,
     }
+
+
+def _standard_handoff(status: str = "complete", **overrides) -> dict:
+    """The standard rose_handoff fields every code agent writes."""
+    return {
+        "status": status,
+        "summary": "Ran collatz.py from 27; checked 112 numbers and 111 steps.",
+        "branch": None,
+        "commit": None,
+        "pr_url": None,
+        "merged": None,
+        **overrides,
+    }
+
+
+def _collatz_handoff_file(status: str = "complete") -> dict:
+    """The handoff file a code agent writes: standard fields plus the declared fields."""
+    return {"rose_handoff": _standard_handoff(status), **_collatz_handoff()}
 
 
 async def _run_verifier_with_handoff(handoff, *, events=None, output_schema=None, output_files=None):
@@ -741,7 +760,9 @@ def test_handoff_json_schema_is_fixed_by_output_schema():
         }
     )
     assert schema["type"] == "object" and schema["additionalProperties"] is False
-    assert schema["required"] == ["source_code", "stdout", "collatz_sequence", "total_steps"]
+    assert schema["required"] == ["rose_handoff", "source_code", "stdout", "collatz_sequence", "total_steps"]
+    assert schema["properties"]["rose_handoff"]["properties"]["status"]["enum"] == ["complete", "blocked", "failed"]
+    assert "question" not in schema["properties"]["rose_handoff"]["properties"]
     assert schema["properties"]["collatz_sequence"] == {
         "type": "array",
         "items": {"type": "integer"},
@@ -780,11 +801,11 @@ def test_handoff_json_schema_carries_declared_field_descriptions():
 
 async def test_handoff_valid_json_is_the_tool_result():
     """A schema-valid handoff is returned as the structured response and the tool result; no event log."""
-    handoff = _collatz_handoff()
+    handoff = _collatz_handoff_file()
     score, reasoning, struct, _i, _o = await _run_verifier_with_handoff(
         {"status": "present", "content": json.dumps(handoff)}
     )
-    assert struct == handoff, struct
+    assert struct == _collatz_handoff(), struct
     assert score == 1.0, reasoning
     assert json.dumps(handoff, ensure_ascii=False, indent=2) in reasoning, reasoning
     assert "code_agent_events" not in reasoning and "Terminal output" not in reasoning, reasoning
@@ -795,7 +816,7 @@ async def test_handoff_missing_or_invalid_is_reported_truthfully():
     cases = [
         ({"status": "missing"}, "no handoff file"),
         ({"status": "present", "content": "{not json"}, "not valid json"),
-        ({"status": "present", "content": json.dumps({**_collatz_handoff(), "total_steps": "111"})}, "total_steps"),
+        ({"status": "present", "content": json.dumps({**_collatz_handoff_file(), "total_steps": "111"})}, "total_steps"),
         (None, "no handoff file"),
     ]
     for handoff, expected in cases:
@@ -807,12 +828,79 @@ async def test_handoff_missing_or_invalid_is_reported_truthfully():
         assert "code_agent_events" not in reasoning and "Terminal output" not in reasoning, reasoning
 
 
+def test_handoff_task_is_a_goal_ending_in_the_handoff_condition():
+    """Every code-agent task carries its end condition: write the handoff valid against the schema file.
+
+    Andy, 2026-11-08 (root 0874662a): code agents had no clean end condition; the
+    goal must always include writing the output-schema file, and no questions.
+    """
+    from domains.spawn_claude_code_agent.service import (
+        CODE_AGENT_HANDOFF_PATH,
+        CODE_AGENT_HANDOFF_SCHEMA_PATH,
+        HANDOFF_END_CONDITION,
+        handoff_json_schema,
+        handoff_task_text,
+    )
+
+    text = handoff_task_text("Compute Collatz from 27.", COLLATZ_OUTPUT_SCHEMA)
+    marker = f"\n\nResult JSON Schema for {CODE_AGENT_HANDOFF_PATH}:\n"
+    goal, _, schema = text.rpartition(marker)
+    assert goal == f"Compute Collatz from 27.\n\n{HANDOFF_END_CONDITION}", goal
+    assert json.loads(schema) == handoff_json_schema(COLLATZ_OUTPUT_SCHEMA)
+    for phrase in (CODE_AGENT_HANDOFF_PATH, CODE_AGENT_HANDOFF_SCHEMA_PATH, "Do not ask questions", "assumptions"):
+        assert phrase in HANDOFF_END_CONDITION, phrase
+    # The schema stays out of the goal so Claude's 4000-character /goal cap holds.
+    assert len(goal) < 1_000, len(goal)
+
+
+def test_handoff_schema_reserves_the_standard_key():
+    """A declared field named rose_handoff cannot replace the standard fields."""
+    from domains.spawn_claude_code_agent.service import HANDOFF_STANDARD_SCHEMA, handoff_json_schema
+
+    schema = handoff_json_schema({"fields": [{"name": "rose_handoff", "type": "str"}, {"name": "x", "type": "int"}]})
+    assert schema["properties"]["rose_handoff"] == HANDOFF_STANDARD_SCHEMA
+    assert schema["required"] == ["rose_handoff", "x"]
+    assert handoff_json_schema(None)["required"] == ["rose_handoff"]
+
+
+async def test_handoff_blocked_or_failed_is_reported_without_declared_fields():
+    """A blocked/failed run says so in its standard fields; declared fields are not forced."""
+    for status in ("blocked", "failed"):
+        content = json.dumps({"rose_handoff": _standard_handoff(status, summary="No update card exists in front-end.")})
+        score, reasoning, struct, _i, _o = await _run_verifier_with_handoff({"status": "present", "content": content})
+        assert score < 1.0, (status, reasoning)
+        assert f"rose_handoff.status={status}" in reasoning, reasoning
+        assert "No update card exists in front-end." in reasoning, reasoning
+        assert struct == {}, struct
+
+
+async def test_handoff_complete_needs_standard_and_declared_fields():
+    """complete is only accepted with the standard fields and every required declared field."""
+    no_standard = json.dumps(_collatz_handoff())
+    no_field = json.dumps({k: v for k, v in _collatz_handoff_file().items() if k != "total_steps"})
+    for content, expected in ((no_standard, "rose_handoff"), (no_field, "total_steps")):
+        score, reasoning, struct, _i, _o = await _run_verifier_with_handoff({"status": "present", "content": content})
+        assert score < 1.0 and struct is None, (score, struct)
+        assert expected in reasoning, (expected, reasoning)
+
+
+async def test_claude_ws_server_starts_every_task_as_a_goal():
+    """The sandbox ws-server turns each task into ``/goal <task + end condition>`` and
+    hands a held session back once the goal handoff exists (goal-turn.test.mjs)."""
+    test_file = Path(__file__).resolve().parents[3] / "e2b-templates/claude-code/goal-turn.test.mjs"
+    process = await asyncio.create_subprocess_exec(
+        "node", "--test", str(test_file), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT
+    )
+    output, _ = await process.communicate()
+    assert process.returncode == 0, output.decode(errors="replace")
+
+
 async def test_handoff_replay_31f51d25_result_is_bounded():
     """Replay of j0026/31f51d25: the 125-snapshot stream used to make a 180k-char result."""
     events = _collatz_stream_events()
     raw = json.dumps(events, indent=2)
     assert len(raw) > 80_000, len(raw)  # the replay reproduces the quadratic stream
-    for handoff in ({"status": "present", "content": json.dumps(_collatz_handoff())}, {"status": "missing"}):
+    for handoff in ({"status": "present", "content": json.dumps(_collatz_handoff_file())}, {"status": "missing"}):
         _score, reasoning, _s, _i, _o = await _run_verifier_with_handoff(handoff, events=events)
         assert len(reasoning) < 5_000, len(reasoning)
 
@@ -1150,7 +1238,7 @@ async def test_close_timeout_reconciles_same_task_before_activity_completion():
     request_lost = asyncio.Event()
     close_requests = []
     beats = []
-    handoff = _collatz_handoff()
+    handoff = _collatz_handoff_file()
     receipt = {"output_files": [], "handoff": {"status": "present", "content": json.dumps(handoff)},
                "code_session": {"code_session_id": "session-close", "state": "PAUSED"}}
 
@@ -1193,7 +1281,7 @@ async def test_close_timeout_reconciles_same_task_before_activity_completion():
             backend_done.set()
             result = await asyncio.wait_for(activity_task, 5)
             assert result["success"] is True, result["message"]
-            assert result["structured_response"] == handoff
+            assert result["structured_response"] == _collatz_handoff()
             assert create.await_count == 1 and loop.await_count == 1, "close retry must not re-enter the CLI"
             assert len(close_requests) == 2 and close_requests[0] == close_requests[1]
             assert beats, "a closing activity keeps heartbeating while its backend finishes"
@@ -2193,6 +2281,11 @@ class _FakeWsClient:
     async def connect(self):
         return True
 
+    async def connect_with_retry(self):
+        # The service retries the handshake; stand-ins answer from connect().
+        self.last_error = None if await self.connect() else "connect refused"
+        return self.last_error is None
+
     async def disconnect(self):
         self.disconnected = True
 
@@ -2437,6 +2530,104 @@ async def test_run_agentic_loop_sdk_result_zombie_ends_on_exit_grace():
     assert any("Post-result exit grace" in line for line in summary), summary
     assert "idle_paused" not in outcome, "a declared result is verified, not paused"
     assert any(e.get("type") == "result" for e in events), events
+
+
+async def _run_post_result_script(events: list, *, hold_s: float, end_with_exit: bool, grace_s: float = 0.2):
+    """Drive the loop: events, hold_s more tool output, then exit 0 (or hang)."""
+    import asyncio as aio
+
+    from domains.spawn_claude_code_agent import service
+
+    class Scripted(_FakeWsClient):
+        async def listen(self):
+            await self.on_output("working", True)
+            for event in events:
+                await self.on_event({"version": 1, "provider": "claude", **event})
+            deadline = aio.get_event_loop().time() + hold_s
+            while aio.get_event_loop().time() < deadline:
+                await aio.sleep(0.02)
+                await self.on_output("tool output\n", False)
+            if end_with_exit:
+                await self.on_exit(0)
+            await aio.Event().wait()
+
+    summary: list[str] = []
+    outcome: dict = {}
+    with (
+        patch.object(service, "ClaudeCodeWsClient", Scripted),
+        patch.object(service, "SDK_POST_RESULT_EXIT_GRACE_S", grace_s),
+        patch.object(service, "CODE_SESSION_IDLE_PAUSE_S", 30.0),
+        patch.object(service, "SILENCE_TIMEOUT_S", 0.01),
+        patch.object(service, "save_code_transcript_batch", AsyncMock(return_value=True)),
+        patch("temporalio.activity.heartbeat"),
+    ):
+        t0 = aio.get_event_loop().time()
+        exit_code, attempt, _h, _i, _o, seen = await service._run_agentic_loop(
+            **_loop_kwargs(summary, loop_outcome=outcome)
+        )
+        elapsed = aio.get_event_loop().time() - t0
+    return exit_code, elapsed, summary, seen
+
+
+async def test_run_agentic_loop_cli_turn_after_result_is_not_cut_by_exit_grace():
+    """Bug B (agent 91cd1296, code session 8a5055cc): Claude's response never reached the parent.
+
+    A /goal run ends its first turn with an SDK result and the CLI then starts
+    a turn of its own (turn_started, tool calls) to keep working toward the goal
+    or to answer a background-task notification. The post-result grace stayed
+    armed from the first result, so the monitor detached mid-turn 180s later
+    ("Post-result exit grace exceeded") with no handoff written, and the parent
+    was told the child ended. The new turn disarms the grace; the run ends on the
+    CLI's own exit, so its handoff is read and delivered.
+    """
+    exit_code, elapsed, summary, seen = await _run_post_result_script(
+        [
+            {"type": "turn_started", "turn_id": "goal-set"},
+            {"type": "result", "status": "completed", "turn_id": "goal-set", "pending_turns": 0},
+            {"type": "turn_started", "turn_id": "426873fa"},
+            {"type": "tool_use", "name": "Bash", "tool_use_id": "t1", "turn_id": "426873fa"},
+            {"type": "tool_result", "tool_use_id": "t1", "turn_id": "426873fa"},
+            {"type": "tool_use", "name": "Bash", "tool_use_id": "t2", "turn_id": "426873fa"},
+        ],
+        hold_s=0.8,
+        end_with_exit=True,
+    )
+    assert exit_code == 0, (exit_code, summary)
+    assert elapsed >= 0.7, f"the live turn must hold the session past the grace, took {elapsed:.2f}s"
+    assert not any("Post-result exit grace" in line for line in summary), summary
+    assert any(e.get("turn_id") == "426873fa" for e in seen), seen
+
+
+async def test_run_agentic_loop_cli_turn_result_rearms_exit_grace():
+    """The self-started turn's own result re-arms the backstop: a CLI that never exits still ends."""
+    exit_code, elapsed, summary, _seen = await _run_post_result_script(
+        [
+            {"type": "result", "status": "completed", "turn_id": "goal-set", "pending_turns": 0},
+            {"type": "turn_started", "turn_id": "next"},
+            {"type": "tool_use", "name": "Bash", "tool_use_id": "t1", "turn_id": "next"},
+            {"type": "tool_result", "tool_use_id": "t1", "turn_id": "next"},
+            {"type": "result", "status": "completed", "turn_id": "next", "pending_turns": 0},
+        ],
+        hold_s=30.0,
+        end_with_exit=False,
+    )
+    assert exit_code == -1, (exit_code, summary)
+    assert elapsed < 3.0, f"the re-armed grace must still end a CLI that never exits, took {elapsed:.2f}s"
+    assert any("Post-result exit grace" in line for line in summary), summary
+
+
+async def test_run_agentic_loop_cli_turn_result_rearms_on_sandboxes_without_pending_turns():
+    """Older sandboxes (no pending_turns): counting results vs turns still re-arms after a CLI turn."""
+    exit_code, _elapsed, summary, _seen = await _run_post_result_script(
+        [
+            {"type": "result", "status": "completed"},
+            {"type": "turn_started", "turn_id": "next"},
+            {"type": "result", "status": "completed"},
+        ],
+        hold_s=30.0,
+        end_with_exit=False,
+    )
+    assert exit_code == -1 and any("Post-result exit grace" in line for line in summary), summary
 
 
 async def test_run_agentic_loop_post_result_exit_grace_breaks():
@@ -2696,7 +2887,9 @@ async def test_spawn_activity_does_not_fetch_claude_credential_for_codex():
 
 
 async def test_spawn_activity_requires_output_schema():
-    """Missing output_schema raises ValueError before any sandbox work."""
+    """A missing contract fails once, before sandbox work, even with unlimited crash retries."""
+    from temporalio.exceptions import ApplicationError
+
     from domains.spawn_claude_code_agent import service
 
     try:
@@ -2708,8 +2901,10 @@ async def test_spawn_activity_requires_output_schema():
             output_schema=None,
         )
         raise AssertionError("should raise")
-    except ValueError as e:
+    except ApplicationError as e:
         assert "output_schema is required" in str(e)
+        assert e.non_retryable is True
+        assert e.type == "CODE_AGENT_OUTPUT_SCHEMA_REQUIRED"
 
 
 async def test_spawn_activity_happy_path_end_to_end():
@@ -2816,7 +3011,7 @@ async def test_spawn_activity_returns_close_handoff_as_result():
     setup_mock({"/api/agents/": {"status": 200, "json": {"saved": True}}})
     fake_collector = AsyncMock()
     seen_create_session = {}
-    handoff = _collatz_handoff()
+    handoff = _collatz_handoff_file()
 
     async def fake_create_session(**kwargs):
         seen_create_session.update(kwargs)
@@ -2853,7 +3048,7 @@ async def test_spawn_activity_returns_close_handoff_as_result():
     assert seen_create_session["goal"].startswith("Compute Collatz from 27.")
     assert service.CODE_AGENT_HANDOFF_PATH in seen_create_session["goal"]
     assert result["success"] is True, result["message"]
-    assert result["structured_response"] == handoff
+    assert result["structured_response"] == _collatz_handoff()
     assert json.dumps(handoff, ensure_ascii=False, indent=2) in result["message"]
     assert "code_agent_events" not in result["message"]
     assert len(result["message"]) < 5_000, len(result["message"])
@@ -3382,6 +3577,33 @@ async def test_cc_execute_tool_happy_path_yields_finished():
     assert finished.metadata["success"] is True
     assert finished.data["usage"]["llm"][0]["tokens_in"] == 100
     assert finished.data["usage"]["service"][0]["cost_cents"] == 0.05
+
+
+async def test_cc_execute_tool_notes_the_code_provider_on_the_spawn_record():
+    """The handler keeps the CLI on the spawn's background record (wait_for 'code:<provider>').
+
+    It notes the selected provider, then the provider the activity actually ran (a
+    usage-limit switch inside the activity wins), always under the spawn's tool_call_id.
+    """
+    from domains.spawn_claude_code_agent.handler import SpawnClaudeCodeAgentManager
+
+    handle = _FakeActivityHandle(
+        result={"success": True, "message": "ok", "output_files": [], "code_provider": "codex"}
+    )
+    instance = _FakeCCWorkflowInstance()
+    noted = []
+    instance._note_background_code_provider = lambda task_id, provider: noted.append((task_id, provider))
+    restore = _patch_cc_workflow(_FakeCCWorkflow(handle))
+    try:
+        await _collect_cc_events(
+            SpawnClaudeCodeAgentManager().execute_tool(instance, {"goal": "fix it", "attachments": None}, "tc-cc")
+        )
+    finally:
+        restore()
+
+    assert len(noted) == 2, noted
+    assert {task_id for task_id, _ in noted} == {"tc-cc"}
+    assert noted[-1] == ("tc-cc", "codex")
 
 
 async def test_cc_execute_tool_records_forced_provider_without_serializing_credential():
@@ -4037,6 +4259,16 @@ async def _run_all_tests():
     await r.record_async("handoff_valid_json_is_tool_result", test_handoff_valid_json_is_the_tool_result)
     await r.record_async("handoff_missing_or_invalid_truthful", test_handoff_missing_or_invalid_is_reported_truthfully)
     await r.record_async("handoff_replay_31f51d25_bounded", test_handoff_replay_31f51d25_result_is_bounded)
+    r.record("handoff_task_is_goal_with_end_condition", test_handoff_task_is_a_goal_ending_in_the_handoff_condition)
+    r.record("handoff_schema_reserves_standard_key", test_handoff_schema_reserves_the_standard_key)
+    await r.record_async(
+        "handoff_blocked_or_failed_without_declared_fields",
+        test_handoff_blocked_or_failed_is_reported_without_declared_fields,
+    )
+    await r.record_async(
+        "handoff_complete_needs_standard_and_declared", test_handoff_complete_needs_standard_and_declared_fields
+    )
+    await r.record_async("claude_ws_server_task_is_a_goal", test_claude_ws_server_starts_every_task_as_a_goal)
     await r.record_async("handoff_spawn_activity_end_to_end", test_spawn_activity_returns_close_handoff_as_result)
     await r.record_async(
         "run_verifier_disabled_schema_incomplete",
@@ -4100,6 +4332,18 @@ async def _run_all_tests():
         test_run_agentic_loop_post_result_exit_grace_breaks,
     )
     await r.record_async(
+        "run_agentic_loop_cli_turn_after_result_not_cut_by_grace",
+        test_run_agentic_loop_cli_turn_after_result_is_not_cut_by_exit_grace,
+    )
+    await r.record_async(
+        "run_agentic_loop_cli_turn_result_rearms_grace",
+        test_run_agentic_loop_cli_turn_result_rearms_exit_grace,
+    )
+    await r.record_async(
+        "run_agentic_loop_cli_turn_rearms_without_pending_turns",
+        test_run_agentic_loop_cli_turn_result_rearms_on_sandboxes_without_pending_turns,
+    )
+    await r.record_async(
         "run_agentic_loop_keepalive_extends_sandbox",
         test_run_agentic_loop_keepalive_extends_attached_sandbox,
     )
@@ -4114,8 +4358,12 @@ async def _run_all_tests():
     )
     r.record("codex_completed_turn_count", test_codex_completed_turn_count_counts_unique_turn_completed_events)
     r.record("native_codex_usage_retains_session_scope", test_native_codex_usage_retains_session_scope)
+    await r.record_async("monitor_diagnostics_non_string_event_types", test_monitor_diagnostics_preserve_non_string_event_types)
     await r.record_async("native_codex_terminal_finishes_idle_app_server", test_native_codex_terminal_event_finishes_idle_app_server)
     await r.record_async("native_codex_terminal_respects_hold_and_newer_active_turn", test_native_codex_terminal_respects_hold_and_newer_active_turn)
+    await r.record_async(
+        "native_codex_active_goal_outlives_completed_turn", test_native_codex_active_goal_outlives_a_completed_turn
+    )
     # spawn_claude_code_activity
     await r.record_async(
         "spawn_activity_resolves_claude_credential",
@@ -4143,6 +4391,7 @@ async def _run_all_tests():
     await r.record_async("spawn_activity_error_reraises", test_spawn_activity_error_reraises_after_cleanup)
     # SpawnClaudeCodeAgentManager.execute_tool
     await r.record_async("cc_exec_happy", test_cc_execute_tool_happy_path_yields_finished)
+    await r.record_async("cc_exec_notes_code_provider", test_cc_execute_tool_notes_the_code_provider_on_the_spawn_record)
     await r.record_async(
         "cc_exec_forced_claude_no_serialized_credential",
         test_cc_execute_tool_records_forced_provider_without_serializing_credential,
@@ -4329,6 +4578,23 @@ async def _run_all_tests():
     await r.record_async(
         "cc_retryable_error_keeps_live_sandbox_for_retry",
         test_claude_code_retryable_error_keeps_the_live_sandbox_for_the_retry,
+    )
+    await r.record_async(
+        "cc_connect_failure_names_exact_error", test_run_agentic_loop_connect_failure_names_the_exact_error
+    )
+    await r.record_async("cc_reconnect_exhausted_includes_last_error", test_handle_reconnect_exhausted_includes_last_error)
+    r.record(
+        "cc_session_failure_error_surfaces_session_id",
+        test_code_session_failure_error_surfaces_session_id_and_exact_error,
+    )
+    r.record("cc_session_failure_error_without_session_unchanged", test_code_session_failure_error_without_a_session_is_unchanged)
+    r.record(
+        "cc_handler_reads_failed_code_session_through_wrapper",
+        test_handler_reads_the_failed_code_session_through_the_activity_wrapper,
+    )
+    await r.record_async(
+        "cc_final_socket_loss_returns_checkpointed_code_session",
+        test_final_socket_loss_returns_the_checkpointed_code_session_to_the_parent,
     )
     teardown_mock()
     return r.all_passed
@@ -4919,7 +5185,7 @@ async def test_agent_message_to_running_code_agent_is_delivered_once_and_answere
 
         assert outcome["status"] == "completed" and outcome["success"] is True, outcome
         turns = sandbox.turns()
-        assert turns[0].startswith("Task:\n"), turns
+        assert turns[0].startswith("/goal Task:\n"), turns  # every task is a /goal
         assert turns[1:] == [text], f"the CLI must read the agent turn exactly once, read {turns}"
         events = recorder.verified_events[0]
         user_turns = [event for event in events if event.get("type") == "user_turn"]
@@ -5215,7 +5481,9 @@ async def test_claude_code_new_sandbox_rides_the_heartbeat_before_anything_else_
     async def finished_loop(**kwargs):
         return (0, False, [], 0, 0, [{"type": "result", "status": "completed", "text": "answer is 42"}])
 
+    diagnostic_log = MagicMock()
     with (
+        patch.object(service, "logger", diagnostic_log),
         recorder.patched(),
         patch.object(service, "save_claude_code_message", side_effect=save_message),
         patch.object(service, "_run_agentic_loop", side_effect=finished_loop),
@@ -5225,6 +5493,12 @@ async def test_claude_code_new_sandbox_rides_the_heartbeat_before_anything_else_
     assert seen_at_first_write == [True], (
         f"the session must be heartbeated before the first backend write, beats={[b[0] for b in beats]}"
     )
+
+    rows = [call.kwargs for call in diagnostic_log.info.call_args_list
+            if call.args[0] == "[ClaudeCode] Close acknowledged"]
+    assert len(rows) == 1 and rows[0]["close_reason"] == "close", rows
+    assert rows[0]["agent_id"] == "agent-cc" and rows[0]["task_id"] == "cc-task-1", rows
+    assert recorder.closed[0]["reason"] == "close", recorder.closed
 
 
 async def test_llm_heartbeats_inside_a_code_session_keep_the_session():
@@ -5881,16 +6155,29 @@ async def test_cc_fresh_conversation_resume_keeps_session_and_drops_cli_resume()
     for tool_call, expected in (
         ({"goal": "g", "_fresh_conversation": True}, {"fresh_conversation": True}),
         ({"goal": "g"}, None),
+        # The spawn's task_name rides in the same request dict (the code agent's list title).
+        ({"goal": "g", "task_name": "fix_parser"}, {"task_name": "fix_parser"}),
+        (
+            {"goal": "g", "task_name": "fix_parser", "_fresh_conversation": True},
+            {"fresh_conversation": True, "task_name": "fix_parser"},
+        ),
     ):
         fake = _SequencedCCWorkflow(_CC_COMPLETED)
         restore = _patch_cc_workflow(fake)
         try:
-            await _collect_cc_events(
+            events = await _collect_cc_events(
                 SpawnClaudeCodeAgentManager().execute_tool(_HandoffCCWorkflowInstance(), tool_call, "tc-fresh")
             )
         finally:
             restore()
         assert fake.started[0][16] == expected, fake.started[0][16]
+        # metadata.code_agent.title names the code agent (its view header when opened from a URL).
+        titles = {
+            (getattr(event, "metadata", None) or {}).get("code_agent", {}).get("title")
+            for event in events
+            if (getattr(event, "metadata", None) or {}).get("code_agent")
+        }
+        assert titles == {tool_call.get("task_name")}, titles
 
     _setup()
     await create_e2b_session(agent_id="agent-1", goal="fix", user_id="u1", fresh_conversation=True)
@@ -5903,6 +6190,13 @@ async def test_cc_fresh_conversation_resume_keeps_session_and_drops_cli_resume()
     await create_e2b_session(agent_id="agent-1", goal="fix", user_id="u1")
     body = json.loads(assert_captured_call(url_contains="/api/claude-code-session/create", method="POST")["requestBody"])
     assert "fresh_conversation" not in body, body
+    assert "task_name" not in body, body
+
+    clear_captures()
+    _setup()
+    await create_e2b_session(agent_id="agent-1", goal="fix", user_id="u1", task_name="fix_parser")
+    body = json.loads(assert_captured_call(url_contains="/api/claude-code-session/create", method="POST")["requestBody"])
+    assert body["task_name"] == "fix_parser", body
 
 async def test_cc_manager_reattaches_after_worker_drain_on_same_queue():
     """A drained activity restarts against the same sandbox, not a new session."""
@@ -6715,17 +7009,26 @@ async def test_native_codex_terminal_event_finishes_idle_app_server():
     """The live app-server turn/completed shape is terminal even while stdio stays open."""
     from domains.spawn_claude_code_agent import service
 
-    for outcome, expected_code in (("completed", 0), ("failed", 1), ("interrupted", 1)):
+    for outcome, expected_code, turn_id in [
+        (outcome, code, value) for outcome, code in (("completed", 0), ("failed", 1), ("interrupted", 1))
+        for value in ("game-turn", "https://user:offline-sensitive@invalid.test/private?token=hidden", ["offline-sensitive"])
+    ]:
         class NativeTerminal(_FakeWsClient):
             async def listen(self):
-                await self.on_event({"version": 1, "provider": "codex", "type": "turn_started", "turn_id": "game-turn"})
-                terminal = {"version": 1, "provider": "codex", "type": "turn_ended", "raw_type": "turn/completed", "turn_id": "game-turn", "status": outcome, "turn_outcome": outcome, "timestamp": "2026-10-21T00:05:19.295Z"}
+                await self.on_event({"version": 1, "provider": "codex", "type": "turn_started", "turn_id": turn_id})
+                terminal = {"version": 1, "provider": "codex", "type": "turn_ended", "raw_type": "turn/completed", "turn_id": turn_id, "status": outcome, "turn_outcome": outcome, "timestamp": "2026-10-21T00:05:19.295Z"}
                 await self.on_event(terminal)
                 await self.on_event({**terminal, "type": "final", "exit_code": expected_code})
                 await asyncio.Event().wait()
 
         setup_mock({"/api/agents/": {"status": 200, "json": {"saved": True}}})
+        diagnostic_log = MagicMock()
+        def fail_only_diagnostic(message, **_kwargs):
+            if outcome == "interrupted" and message == "[ClaudeCode] Monitor state":
+                raise RuntimeError("offline diagnostic sink failure")
+        diagnostic_log.info.side_effect = fail_only_diagnostic
         with (
+            patch.object(service, "logger", diagnostic_log),
             patch.object(service, "ClaudeCodeWsClient", NativeTerminal),
             patch.object(service, "save_code_transcript_batch", AsyncMock(return_value=True)),
             patch("temporalio.activity.heartbeat"),
@@ -6733,6 +7036,15 @@ async def test_native_codex_terminal_event_finishes_idle_app_server():
             result = await asyncio.wait_for(service._run_agentic_loop(**_loop_kwargs([], code_provider="codex")), timeout=1.0)
         assert result[0] == expected_code, (outcome, result[0])
         assert service.codex_completed_turn_count(result[-1]) == (1 if outcome == "completed" else 0)
+        rows = [call.kwargs for call in diagnostic_log.info.call_args_list
+                if call.args[0] == "[ClaudeCode] Monitor state"]
+        assert rows, "native monitor metadata missing"
+        admitted = [row for row in rows if row["reason"] == "native_terminal_admitted"]
+        assert len(admitted) == 1 and admitted[0]["completion_admissible"] is True
+        assert admitted[0]["terminal_turn_id"] == ("game-turn" if turn_id == "game-turn" else None)
+        assert "offline-sensitive" not in json.dumps(rows) and "token=hidden" not in json.dumps(rows)
+        assert admitted[0]["terminal_outcome"] == outcome
+        assert admitted[0]["agent_id"] == "a" and admitted[0]["task_id"] == "t"
         teardown_mock()
 
 
@@ -6759,13 +7071,83 @@ async def test_native_codex_terminal_respects_hold_and_newer_active_turn():
                     await self.on_event({"provider": "codex", "type": "turn_ended", "raw_type": "turn/completed", "turn_id": "second", "status": "completed", "turn_outcome": "completed"})
                 await asyncio.Event().wait()
         setup_mock({"/api/agents/": {"status": 200, "json": {"saved": True}}})
+        diagnostic_log = MagicMock()
         with (
+            patch.object(service, "logger", diagnostic_log),
             patch.object(service, "ClaudeCodeWsClient", NativeWithMoreWork),
             patch.object(service, "save_code_transcript_batch", AsyncMock(return_value=True)),
             patch("temporalio.activity.heartbeat"),
         ):
             result = await asyncio.wait_for(service._run_agentic_loop(**_loop_kwargs([], code_provider="codex")), timeout=1.0)
         assert released and result[0] == 0, (guard, released, result[0])
+        rows = [call.kwargs for call in diagnostic_log.info.call_args_list
+                if call.args[0] == "[ClaudeCode] Monitor state"]
+        assert rows, "hold/turn metadata missing"
+        if guard == "held":
+            held = [row for row in rows if row["direct_hold"]]
+            assert held and all(row["completion_admissible"] is False for row in held)
+        else:
+            assert any(row["current_turn_id"] == "second" and row["terminal_turn_id"] is None for row in rows)
+        assert rows[-1]["reason"] == "native_terminal_admitted" and not rows[-1]["direct_hold"]
+        teardown_mock()
+
+
+async def test_native_codex_active_goal_outlives_a_completed_turn():
+    """An active thread goal continues the thread itself: a completed turn is not the end.
+
+    Without this, the attachment ended after turn 1 and paused the sandbox while
+    Codex's goal runtime was about to start the continuation turn.
+    """
+    from domains.spawn_claude_code_agent import service
+
+    for final_status in ("complete", "budgetLimited", "cleared"):
+        finished = False
+        first_turn_ended = asyncio.Event()
+        continuation_allowed = asyncio.Event()
+        real_sleep = asyncio.sleep
+
+        async def release_continuation_after_monitor_poll(_seconds):
+            if first_turn_ended.is_set():
+                continuation_allowed.set()
+            await real_sleep(0)
+
+        class GoalTurns(_FakeWsClient):
+            async def listen(self):
+                nonlocal finished
+                ended = {"provider": "codex", "type": "turn_ended", "raw_type": "turn/completed", "status": "completed", "turn_outcome": "completed"}
+                await self.on_event({"provider": "codex", "type": "turn_started", "turn_id": "t1"})
+                active = {"provider": "codex", "type": "goal", "status": "active", "objective": "offline-sensitive-objective", "arguments": {"token": "offline-sensitive-token"}}
+                await self.on_event(active)
+                await self.on_event(active)  # duplicate state must not add diagnostics
+                await self.on_event({**ended, "turn_id": "t1"})
+                first_turn_ended.set()
+                await continuation_allowed.wait()
+                await self.on_event({"provider": "codex", "type": "turn_started", "turn_id": "t2"})
+                await self.on_event({"provider": "codex", "type": "goal", "status": final_status})
+                finished = True
+                await self.on_event({**ended, "turn_id": "t2"})
+                await asyncio.Event().wait()
+
+        setup_mock({"/api/agents/": {"status": 200, "json": {"saved": True}}})
+        diagnostic_log = MagicMock()
+        with (
+            patch.object(service, "logger", diagnostic_log),
+            patch.object(service, "ClaudeCodeWsClient", GoalTurns),
+            patch.object(service, "save_code_transcript_batch", AsyncMock(return_value=True)),
+            patch("temporalio.activity.heartbeat"),
+            patch.object(service.asyncio, "sleep", new=release_continuation_after_monitor_poll),
+        ):
+            result = await asyncio.wait_for(service._run_agentic_loop(**_loop_kwargs([], code_provider="codex")), timeout=2.0)
+        assert finished and result[0] == 0, (final_status, finished, result[0])
+        assert service.codex_completed_turn_count(result[-1]) == 2, final_status
+        rows = [call.kwargs for call in diagnostic_log.info.call_args_list
+                if call.args[0] == "[ClaudeCode] Monitor state"]
+        assert rows, "native goal monitor metadata missing"
+        active_rows = [row for row in rows if row["goal_status"] == "active" and row["terminal_outcome"] is None]
+        assert len(active_rows) == 2, active_rows  # t1 active and t2 invalidation only
+        assert all(row["completion_admissible"] is False for row in rows if row["goal_status"] == "active")
+        assert rows[-1]["reason"] == "native_terminal_admitted" and rows[-1]["goal_status"] == final_status
+        assert "offline-sensitive" not in json.dumps(rows)
         teardown_mock()
 
 
@@ -6776,6 +7158,189 @@ def test_native_codex_usage_retains_session_scope():
         service._log_code_agent_event({"provider": "codex", "type": "usage", "usage_scope": "session", "usage": {"input_tokens": 200, "output_tokens": 50, "cached_input_tokens": 150}}, agent_id="agent", task_id="task", sandbox_id="sandbox")
     assert logger.info.call_args.kwargs["usage_scope"] == "session"
     assert logger.info.call_args.kwargs["output_tokens"] == 50
+
+
+async def test_monitor_diagnostics_preserve_non_string_event_types():
+    # Real callback must retain its pre-diagnostic behavior for malformed metadata.
+    from domains.spawn_claude_code_agent import service
+    for malformed in ([], {}):
+        errors = []
+        class MalformedReplay(_FakeWsClient):
+            async def listen(self):
+                try:
+                    await self.on_event({"provider": "claude", "type": malformed})
+                except Exception as error:
+                    errors.append(type(error).__name__)
+                await self.on_exit(0)
+        setup_mock({"/api/agents/": {"status": 200, "json": {"saved": True}}})
+        try:
+            with (
+                patch.object(service, "ClaudeCodeWsClient", MalformedReplay),
+                patch.object(service, "save_code_transcript_batch", AsyncMock(return_value=True)),
+                patch("temporalio.activity.heartbeat"),
+            ):
+                result = await asyncio.wait_for(service._run_agentic_loop(
+                    **_loop_kwargs([], code_provider="claude", code_session={"logged_events": 10})
+                ), timeout=1.0)
+            assert errors == [], errors
+            assert result[0] == 0, result[0]
+        finally:
+            teardown_mock()
+
+
+# ── Abnormal end keeps the code session resumable (tar_2b02efd49fc2466497723b3e) ──
+
+
+async def test_run_agentic_loop_connect_failure_names_the_exact_error():
+    """The attach error carries why the handshake failed, not just that it did."""
+    from domains.spawn_claude_code_agent import service
+    from utils.terminal_filter import TerminalFilter
+
+    class Refused(_FakeWsClient):
+        async def connect(self):
+            return False
+
+    with (
+        patch.object(service, "ClaudeCodeWsClient", Refused),
+        patch("temporalio.activity.heartbeat"),
+    ):
+        try:
+            await service._run_agentic_loop(
+                agent_id="a",
+                task_id="t",
+                sandbox_id="sb",
+                goal="g",
+                ws_url="wss://x",
+                terminal=TerminalFilter(cols=80, rows=50),
+                model="m",
+                claude_token=None,
+                action_summary=[],
+                tool_call_id="tc",
+            )
+            raise AssertionError("should raise")
+        except AssertionError:
+            raise
+        except Exception as e:
+            assert str(e) == "Failed to connect to Claude Code WebSocket: connect refused", str(e)
+
+
+async def test_handle_reconnect_exhausted_includes_last_error():
+    """The exhausted-reconnect error keeps the final connect error."""
+    from domains.spawn_claude_code_agent import service
+
+    with patch.object(service, "check_sandbox_health", AsyncMock(return_value=None)):
+        try:
+            await service._handle_reconnect_exhausted("sb", "a1", "t1", [], last_error="TimeoutError")
+            raise AssertionError("should raise")
+        except AssertionError:
+            raise
+        except Exception as e:
+            assert str(e).endswith("lost after all reconnect attempts: TimeoutError"), str(e)
+
+
+def test_code_session_failure_error_surfaces_session_id_and_exact_error():
+    """A final failure with a code session hands the parent the id, checkpoint and retry call."""
+    from temporalio.exceptions import ApplicationError
+
+    from domains.spawn_claude_code_agent.config import CODE_AGENT_SESSION_FAILED_CODE
+    from domains.spawn_claude_code_agent.service import code_session_failure_error
+
+    original = Exception("Failed to connect to Claude Code WebSocket: TimeoutError")
+    facts = {"code_session_id": "cs_123", "checkpoint_seq": 7, "branch": "rose/task-abc"}
+    final = code_session_failure_error(original, original, facts)
+
+    assert isinstance(final, ApplicationError)
+    assert final.type == CODE_AGENT_SESSION_FAILED_CODE and final.non_retryable
+    assert "Exception: Failed to connect to Claude Code WebSocket: TimeoutError" in final.message
+    assert "cs_123" in final.message and "checkpoint 7" in final.message and "rose/task-abc" in final.message
+    assert "spawn_agent(type='code', code_session_id='cs_123'" in final.message
+    details = final.details[0]
+    assert details["code_session_id"] == "cs_123"
+    assert details["error"] == "Failed to connect to Claude Code WebSocket: TimeoutError"
+    assert details["error_type"] == "Exception"
+    assert details["retry"] == {"tool": "spawn_agent", "type": "code", "code_session_id": "cs_123"}
+    assert final.__cause__ is original
+
+
+def test_code_session_failure_error_without_a_session_is_unchanged():
+    """Before a code session exists (or on a Mac) the original error is raised as before."""
+    from domains.spawn_claude_code_agent.service import code_session_failure_error
+
+    err = Exception("session create failed")
+    assert code_session_failure_error(err, err, None) is err
+    assert code_session_failure_error(err, err, {"code_session_id": None}) is err
+    assert code_session_failure_error(err, err, {"code_session_id": "cs_1"}, local=True) is err
+
+
+def test_handler_reads_the_failed_code_session_through_the_activity_wrapper():
+    """The parent-facing failure keeps the session id even under Temporal's ActivityError wrapper."""
+    from domains.spawn_claude_code_agent.handler import _code_session_failure
+    from domains.spawn_claude_code_agent.service import code_session_failure_error
+
+    original = Exception("WebSocket connection to Claude Code sandbox lost after all reconnect attempts")
+    final = code_session_failure_error(original, original, {"code_session_id": "cs_9"})
+    wrapper = Exception("Activity task failed")
+    wrapper.__cause__ = final
+
+    found = _code_session_failure(wrapper)
+    assert found is not None
+    assert found["code_session_id"] == "cs_9"
+    assert found["retry"]["code_session_id"] == "cs_9"
+    assert "cs_9" in found["message"] and "lost after all reconnect attempts" in found["message"]
+    assert _code_session_failure(original) is None
+
+
+async def test_final_socket_loss_returns_the_checkpointed_code_session_to_the_parent():
+    """End to end: the run-ending lost socket checkpoints the sandbox and names the session.
+
+    The reported run died with a bare "Failed to connect to Claude Code
+    WebSocket": no code_session_id, so nothing it had done could be resumed.
+    """
+    from temporalio.exceptions import ApplicationError
+    from temporalio.testing import ActivityEnvironment
+
+    from domains.spawn_claude_code_agent import config, service
+    from domains.spawn_claude_code_agent.handler import _code_session_failure
+
+    class SessionRecorder(_CCBoundaryRecorder):
+        async def create_session(self, **kwargs):
+            created = await super().create_session(**kwargs)
+            return {**created, "code_session_id": "cs-abc", "branch": "rose/long-run"}
+
+        async def close_session(self, **kwargs):
+            closed = await super().close_session(**kwargs)
+            return {**closed, "code_session": {"code_session_id": "cs-abc", "state": "PAUSED", "checkpoint_seq": 4}}
+
+    recorder = SessionRecorder(ws_url="ws://unused")
+    spent = {"code_agent_errors": config.CODE_AGENT_ERROR_RETRY_LIMIT - 1}
+    env = ActivityEnvironment()
+    env.info = dataclasses.replace(env.info, attempt=9, heartbeat_details=[spent])
+
+    async def connect_failed(**kwargs):
+        raise Exception("Failed to connect to Claude Code WebSocket: TimeoutError")
+
+    with (
+        recorder.patched(),
+        patch.object(service, "_run_agentic_loop", side_effect=connect_failed),
+        patch.object(service, "fetch_code_credential_availability", AsyncMock(return_value=None)),
+    ):
+        try:
+            await asyncio.wait_for(env.run(service.spawn_claude_code_activity, *_cc_activity_args()), timeout=10)
+        except Exception as error:
+            raised = error
+        else:
+            raise AssertionError("the lost socket must raise")
+
+    assert isinstance(raised, ApplicationError) and raised.non_retryable, repr(raised)
+    assert raised.type == config.CODE_AGENT_SESSION_FAILED_CODE, raised.type
+    assert [call.get("reason") for call in recorder.closed] == ["failure"], recorder.closed
+    found = _code_session_failure(raised)
+    assert found is not None
+    assert found["code_session_id"] == "cs-abc"
+    assert found["code_session"]["checkpoint_seq"] == 4
+    assert found["error"] == "Failed to connect to Claude Code WebSocket: TimeoutError"
+    assert "checkpoint 4" in found["message"] and "rose/long-run" in found["message"]
+    assert "code_session_id='cs-abc'" in found["message"]
 
 
 if __name__ == "__main__":

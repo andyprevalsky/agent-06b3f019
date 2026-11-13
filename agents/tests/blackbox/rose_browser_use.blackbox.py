@@ -21,8 +21,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(ROOT.parent / "scripts" / "lib"))
 
 from _test_utils import BlackboxResult, set_mock_handler, teardown_mock
+from test_quarantine import quarantine
 
 import httpx
 
@@ -3368,6 +3370,12 @@ async def test_native_autofill_control_history_matches_real_serializer():
     assert json.loads(turn_messages[1]["content"])["operation"]["id"] == "read-1"
 
 
+@quarantine(
+    since="2026-11-11",
+    repair="https://boxes.dev/thread/thr_8cefa6e4ed4f4244ae0919c0d2b3c8b3",
+    error="native_autofill_real_model_controls: AssertionError: ['(\\'presence\\', {\\'actual_model\\': \\'qwen/qwen3.8-27b\\', \\'mode\\': \\'waterfall\\', \\'request_id\\': \\'5a27176dbd4c\\'}",
+    evidence=".context/rca-playwright/final-schema-a4dc/flaky-autofill/findings.json",
+)
 async def test_native_autofill_real_model_synthetic_controls():
     """Real canonical decisions on synthetic OCR; no device execution or secrets."""
     from _test_utils import live_funded_azure
@@ -3521,7 +3529,7 @@ async def test_phone_setup_settings_actual_handler_observation():
         import hashlib
         from domains.spawn_browser_agent_v3.phone import PHONE_GUIDANCE
         # Combined reviewed current-screen guidance and upstream server-side credential binding.
-        assert hashlib.sha256(PHONE_GUIDANCE.encode()).hexdigest() == "5b12790d07335aafac6eefd6ccda75487065e3b1272189afcbfc36bc7c7dff71", "Ordinary enabled guide must match the saved-credential binding contract"
+        assert hashlib.sha256(PHONE_GUIDANCE.encode()).hexdigest() == "7a4d7de7d09b0c84b92e63087e72d1dd8a4f9f86954b21eb792a1848549b933c", "Ordinary enabled guide must match the saved-credential binding contract"
         for marker in (None, False, "true"):
             plain_setup = {key: value for key, value in setup.items() if key != "googlePasscodeExceptionAllowed"}
             if marker is not None:

@@ -686,47 +686,6 @@ cloudbench_apply_compute_token_authority() {  # <backend-env>
   echo "compute-token authority: $url"
 }
 
-# Production enums come only from the authenticated native readback caller.
-# Derive private guest bytes; approved local files remain immutable.
-cloudbench_write_guest_browser_env_files() {
-  python3 - "$@" <<'PYBROWSER'
-import hashlib, json, os, re, stat, sys
-agents, backend, prod_backend, prod_worker, directory = sys.argv[1:]
-allowed = {'kernel', 'tilion', 'steel', 'browser-use'}
-def need(ok, reason):
-    if not ok: raise SystemExit('guest browser projection: ' + reason)
-need(prod_backend in allowed and prod_worker in allowed, 'invalid production enum')
-info = os.lstat(directory)
-need(stat.S_ISDIR(info.st_mode) and info.st_uid == os.geteuid() and not info.st_mode & 0o077, 'private output directory required')
-sha = lambda raw: hashlib.sha256(raw).hexdigest()
-pattern = re.compile(rb'^(\s*(?:export\s+)?BROWSER_PROVIDER\s*=)([^\r\n]*)(\r?\n)?$')
-manifest = {'schema':'cloudbench-guest-browser-projection-v1',
-            'production_sources':{'backend':'render:Navi','worker':'fly:navi-whisper-lux'},
-            'production_browser_provider':prod_backend,'production_worker_browser_provider':prod_worker,
-            'allowed_changes':{'agents.env':['BROWSER_PROVIDER'],'backend.env':[]},'files':{}}
-for source, name, provider in ((agents,'agents.env',prod_worker),(backend,'backend.env',prod_backend)):
-    need(os.path.isfile(source) and not os.path.islink(source), 'regular source file required')
-    raw = open(source,'rb').read(); lines=raw.splitlines(keepends=True)
-    matches=[(i,pattern.fullmatch(line)) for i,line in enumerate(lines) if re.match(rb'^\s*(?:export\s+)?BROWSER_PROVIDER\s*=',line)]
-    need(len(matches)==1 and matches[0][1] is not None,'exact single explicit BROWSER_PROVIDER required')
-    index, match = matches[0]; original=match[2].strip()
-    if len(original)>=2 and original[:1]==original[-1:] and original[:1] in (b'"',b"'"): original=original[1:-1]
-    need(original.decode() in allowed,'invalid original provider')
-    if name=='backend.env':
-        need(original.decode()==provider,'backend provider must already match production')
-        body=raw
-    else:
-        lines[index]=match[1]+provider.encode()+(match[3] or b''); body=b''.join(lines)
-    need(open(source,'rb').read()==raw,'source changed during projection')
-    fd=os.open(os.path.join(directory,name),os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
-    with os.fdopen(fd,'wb') as target: target.write(body)
-    manifest['files'][name]={'original_sha256':sha(raw),'projected_sha256':sha(body),
-                             'original_provider':original.decode(),'projected_provider':provider}
-fd=os.open(os.path.join(directory,'browser-projection.json'),os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
-with os.fdopen(fd,'w') as target: json.dump(manifest,target,sort_keys=True); target.write('\n')
-PYBROWSER
-}
-
 cloudbench_validate_browser_provider_contract() {
   local agents_env="$1" backend_env="$2" prod_backend="$3" prod_worker="$4"
   local agents_provider backend_provider
@@ -2968,32 +2927,4 @@ if values["TEMPORAL_NAMESPACE"] == production:
 for name in ("TEMPORAL_ADDRESS", "TEMPORAL_NAMESPACE", "TEMPORAL_API_KEY"):
     print("export %s=%s" % (name, shlex.quote(values[name])))
 PY
-}
-
-# Guest-only Node launch policy; never rewrite production or staged dotenv blobs.
-cloudbench_kernel_proxy_node_options() {
-    local guard="$1/back-end/scripts/blackbox-kernel-proxy-custody.cjs"
-    if [ ! -f "$guard" ] || [ ! -r "$guard" ] || [ -L "$guard" ]; then
-        echo '❌ cloud guest Kernel proxy custody preload is missing or unsafe' >&2
-        return 1
-    fi
-    case "$guard" in
-        *'"'*|*'\'*|*$'\n'*|*$'\r'*)
-            echo '❌ cloud guest Kernel proxy custody path cannot be encoded safely' >&2
-            return 1 ;;
-    esac
-    printf '%s--require="%s"\n' "${NODE_OPTIONS:+$NODE_OPTIONS }" "$guard"
-}
-
-# Project a controller's existing custody preload into a fixed guest policy bit.
-# Never forward its checkout-specific NODE_OPTIONS path to another machine.
-cloudbench_kernel_proxy_custody_policy() {
-    case "${CLOUDBENCH_KERNEL_PROXY_CUSTODY-0}" in
-        0|1) ;;
-        *) echo '❌ invalid cloud guest Kernel proxy custody policy' >&2; return 1 ;;
-    esac
-    case "${NODE_OPTIONS:-}" in
-        *blackbox-kernel-proxy-custody.cjs*) printf '1\n' ;;
-        *) printf '%s\n' "${CLOUDBENCH_KERNEL_PROXY_CUSTODY-0}" ;;
-    esac
 }

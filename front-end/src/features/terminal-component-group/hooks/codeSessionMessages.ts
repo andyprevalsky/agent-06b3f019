@@ -6,6 +6,7 @@
 
 import type { Message } from '@/lib/api/types';
 
+import { withResumeStates } from './codeAgentResume';
 import { buildCodeSession, type CodeSessionInput } from './codeSessionTurns';
 
 /**
@@ -16,11 +17,11 @@ import { buildCodeSession, type CodeSessionInput } from './codeSessionTurns';
  * no activity contributes nothing (never an empty "Worked for" row).
  */
 export function codeSessionMessages(input: CodeSessionInput): Message[] {
-  return oneRowPerCall(
-    buildCodeSession(input)
-      .flatMap((entry) => (entry.kind === 'work' ? entry.turn.activities : [entry.message]))
-      .map(verbatim),
-  );
+  const rows = buildCodeSession(input)
+    .flatMap((entry) => (entry.kind === 'work' ? entry.turn.activities : [entry.message]))
+    .map(verbatim);
+  // A message that resumed a stopped code agent shows its resume state (UserBubble).
+  return oneRowPerCall(withResumeStates(input.messages, input.taskId, rows));
 }
 
 /** A thought-like row: a thinking record (thought tool row) or mid-turn narration (assistant text). */

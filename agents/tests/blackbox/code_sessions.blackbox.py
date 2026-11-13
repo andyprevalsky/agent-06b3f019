@@ -71,6 +71,10 @@ with (gate / "runs.jsonl").open("a") as runs:
                            "head": git("rev-parse", "HEAD")}) + "\n")
 
 def emit(message):
+    if message.get("type") == "result" and message.get("subtype") == "success" and not message.get("is_error"):
+        # A code agent's goal ends with its result handoff (ws-server goalTurnText).
+        (home / ".rose").mkdir(parents=True, exist_ok=True)
+        (home / ".rose" / "handoff.json").write_text("{}")
     print(json.dumps(message), flush=True)
 
 resume = argv[argv.index("--resume") + 1] if "--resume" in argv else None
@@ -626,13 +630,23 @@ async def test_idle_past_every_old_limit_is_paused_not_failed_then_resumes():
                 ActivityEnvironment().run(
                     service.spawn_claude_code_activity,
                     *_activity_args(
-                        code_session_request={"code_session_id": paused["code_session"]["code_session_id"]}
+                        code_session_request={
+                            "code_session_id": paused["code_session"]["code_session_id"],
+                            "task_name": "fix_parser_again",
+                        }
                     ),
                 ),
                 timeout=30,
             )
         assert resumed["status"] == "completed" and resumed["success"] is True, resumed
         assert backend.created[1]["code_session_id"] == "6c1d6f1e-0000-4000-8000-00000000c0de", backend.created
+        # Each spawn's task row carries its own task_name, a resume of the same session included.
+        assert backend.created[0]["task_name"] is None, backend.created
+        assert backend.created[1]["task_name"] == "fix_parser_again", backend.created
+        blocks = [m["code_agent"] for m in backend.messages if m.get("code_agent")]
+        resumed_blocks = [b for b in blocks if b.get("task_id") == "task-2"]
+        assert resumed_blocks and all(b.get("title") == "fix_parser_again" for b in resumed_blocks), blocks
+        assert all("title" not in b for b in blocks if b.get("task_id") == "task-1"), blocks
         second_run = session_home.runs()[-1]
         assert second_run["argv"][-2:] == ["--resume", _CLI_SESSION_ID] or (
             "--resume" in second_run["argv"]
@@ -2181,7 +2195,7 @@ async def test_user_pause_then_resume_keeps_the_live_cli_and_its_running_loop(
         assert len(session_home.runs()) == 1, f"one CLI process, never restarted: {session_home.runs()}"
         merged = json.loads((session_home.tmp / "merged_turns.json").read_text())
         assert [ack.get("status") for ack in backend.attach_acks] == ["delivered", "delivered"], backend.attach_acks
-        assert len(merged) == 2 and merged[0].startswith("Task:\nWrite answer.txt with the answer"), merged
+        assert len(merged) == 2 and merged[0].startswith("/goal Task:\nWrite answer.txt with the answer"), merged
         assert merged[1] == "ping from the parent", merged
         results = [e.get("text") or e.get("result") for e in backend.verified_events[-1] if e.get("type") == "result"]
         assert any(f"answer is {lines} lines" in str(text) for text in results) or any(

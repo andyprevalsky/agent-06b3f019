@@ -1,5 +1,4 @@
 #!/usr/bin/env tsx
-/* eslint-disable no-console */
 /** Unit/structural tests for Fast Mode code-agent/provider plumbing. */
 
 import assert from 'node:assert';
@@ -16,24 +15,32 @@ function test(name: string, fn: () => void): void {
   try {
     fn();
     passed += 1;
-    console.log(`  ✅ ${name}`);
+    process.stdout.write(`  ✅ ${name}\n`);
   } catch (err) {
     failures.push(`${name}: ${err instanceof Error ? err.message : String(err)}`);
-    console.log(`  ❌ ${name}`);
+    process.stdout.write(`  ❌ ${name}\n`);
   }
 }
 
 test('Claude Code sandbox enables Fast Mode through a live Claude Code model alias', () => {
   const e2bProvider = readFileSync(join(process.cwd(), 'src', 'providers', 'e2b.ts'), 'utf8');
   const e2bWorkDir = readFileSync(join(process.cwd(), 'src', 'providers', 'e2bWorkDir.ts'), 'utf8');
+  const resumeCli = readFileSync(
+    join(process.cwd(), 'src', 'providers', 'codeAgentResumeCli.ts'),
+    'utf8'
+  );
   const wsServer = readFileSync(
     join(process.cwd(), '..', 'e2b-templates', 'claude-code', 'ws-server.mjs'),
     'utf8'
   );
   assert.ok(
+    // Saved settings and explicit turn changes still resolve through the shared tier table.
     e2bProvider.includes(
-      "const { envs: cliSettings } = await codeAgentCliEnvs('claude', agentId);"
-    ),
+      "const { envs: cliSettings } = await codeAgentResumeCliEnvs('claude', agentId, options);"
+    ) &&
+      resumeCli.includes("import { codeAgentCliEnvs } from './codeAgentModels'") &&
+      resumeCli.includes('await resumeLaunchCliSettings(') &&
+      resumeCli.includes('return codeAgentCliEnvs(provider, agentId, settings)'),
     'backend must pick the Claude Code model from the shared tier table (codeAgentModels.ts)'
   );
   assert.ok(
@@ -155,7 +162,8 @@ test('Codex Code sandbox never routes through a Rose proxy or the DEMO cache', (
     assert.ok(!text.includes(forbidden), `${label} must not contain ${forbidden}`);
   }
   assert.ok(
-    e2bProvider.includes('envs.CODEX_SPEED = codexSpeed'),
+    // A person's resuming-turn speed (cli_settings) comes first, else the agent's.
+    e2bProvider.includes('envs.CODEX_SPEED = cli.speedOverride ?? codexSpeed'),
     'the Fast Mode button selects Codex native speed instead'
   );
   assert.ok(
@@ -290,7 +298,9 @@ test('Rose pool registry rejects unknown pool names', () => {
 // #17/#18/#19 — the cache only keys LLM/network responses, never live infra.
 
 if (failures.length > 0) {
-  console.error(`\n❌ ${failures.length} failed:\n${failures.map((f) => `  - ${f}`).join('\n')}`);
+  process.stderr.write(
+    `\n❌ ${failures.length} failed:\n${failures.map((f) => `  - ${f}`).join('\n')}\n`
+  );
   process.exit(1);
 }
-console.log(`\n✅ ${passed} demo-cache code-agent/provider tests passed`);
+process.stdout.write(`\n✅ ${passed} demo-cache code-agent/provider tests passed\n`);

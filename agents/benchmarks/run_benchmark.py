@@ -109,6 +109,17 @@ from benchmarks.phone_callee import (
     phone_search_text,
     resolve_callee_prompt,
 )
+from benchmarks.phone_critical_attention import PHONE_BENCH_TASK_NAMES
+from benchmarks.phone_daily import (
+    TASK_KINDS as PHONE_DAILY_TASKS,
+)
+from benchmarks.phone_daily import (
+    apply_daily_fixture,
+    cleanup_daily_phone,
+    evaluate_daily,
+    evaluate_sms_daily,
+    preflight_daily,
+)
 from benchmarks.plan_assertions import evaluate_plan_assertions, find_accepted_plan
 from benchmarks.polar_catalog import (
     is_polar_bench_task,
@@ -424,6 +435,8 @@ TEST_ASSETS_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "front-end
 REPO_ROOT = Path(__file__).resolve().parents[2]
 _AGENTS_ENV = os.path.join(os.path.dirname(__file__), "..", ".env")
 _BACKEND_ENV = os.path.join(os.path.dirname(__file__), "..", "..", "back-end", ".env")
+PHONE_BENCH_TASK_NAMES = PHONE_BENCH_TASK_NAMES | frozenset(PHONE_DAILY_TASKS)
+
 API_KEY = load_env_var("BACKEND_API_KEY", _AGENTS_ENV, _BACKEND_ENV)
 USER_ID = "1f85ff25-6e29-4c1b-8739-f917bd101a30"
 FREE_CREDIT_SUBSCRIPTION_GATE_TASK_NAME = "gate-subscription-free-credit"
@@ -3742,6 +3755,9 @@ async def _wait_for_expected_payment_lifecycle(
 
 
 PAYMENT_CLEANUP_TIMEOUT_SECONDS = 180
+# Owned-cleanup release-stall observations run inside PAYMENT_CLEANUP_TIMEOUT_SECONDS
+# at the task reconciliation poll cadence; they never extend that deadline.
+PAYMENT_CLEANUP_STALL_OBSERVATION_SECONDS = 10
 # Matches the existing stale RECLAIMING lease in purchaseCleanup.ts. This is
 # retry eligibility within the unchanged 420-second reconciliation window.
 PAYMENT_RECLAIM_RETRY_AFTER_SECONDS = 120
@@ -5805,7 +5821,8 @@ async def _poll_agent(
                                     "expected_gate": gate,
                                     "expected_gate_request_id": req_id,
                                 }
-                                print(f"    💳 Completing hosted Stripe Checkout for gate {req_id[:8]}")
+                                print(f"    💳 Completing hosted Stripe Checkout for gate {req_id[:8]} "
+                                      f"layout={urlparse(checkout_url).path[:7]}")
                                 try:
                                     checkout = await complete_test_subscription_checkout(
                                         base_url,
@@ -5823,7 +5840,8 @@ async def _poll_agent(
                                     )
                                 subscription_checkout_evidence = checkout
                                 data["_benchmark"]["subscription_checkout"] = checkout
-                                print(f"    ✅ Completed paid Stripe test Checkout {checkout['session_id'][:18]}")
+                                print(f"    ✅ Completed paid Stripe test Checkout {checkout['session_id'][:18]} "
+                                      f"layout=/{checkout.get('checkout_layout')}/pay/")
                                 continue
                             if task.expected_gate and _gate_request_matches_task(task, req):
                                 expected_gate_evidence = {
@@ -7022,9 +7040,38 @@ async def _refresh_browser_archive_snapshot(
             await asyncio.sleep(min(2, max(0, deadline - time.monotonic())))
 
 
-async def _finalize_owned_root_payments(base_url: str, root_id: str, evidence: dict) -> dict:
-    """Drain admitted purchases through canonical compensation before DB teardown."""
+async def _observe_owned_release_stall(base_url: str, pending: list[dict], evidence: dict) -> None:
+    """Record one complete lifecycle observation of the still-reclaiming owned purchases.
+
+    Lifecycle reads join provider views, and AgentCard intermittently rejects the healthy
+    org token. A failed read keeps the previous complete observation; the final ledger
+    must still match it before the release-stall warning can apply.
+    """
+    lifecycles = {}
+    try:
+        for agent_id in sorted({row["agent_id"] for row in pending}):
+            lifecycles[agent_id] = await get_test_payment_lifecycle(base_url, agent_id)
+    except Exception as error:
+        evidence["agentcard_release_stall_read_errors"] = evidence.get("agentcard_release_stall_read_errors", 0) + 1
+        evidence["agentcard_release_stall_last_read_error"] = str(error) or type(error).__name__
+        return
+    evidence["agentcard_release_stall_observation"] = {
+        "observed_at": datetime.now(timezone.utc).isoformat(),
+        "lifecycles": lifecycles,
+    }
+
+
+async def _finalize_owned_root_payments(
+    base_url: str, root_id: str, evidence: dict, *, observe_release_stall: bool = False
+) -> dict:
+    """Drain admitted purchases through canonical compensation before DB teardown.
+
+    A stalled AgentCard release always runs this drain to its deadline. For a task the
+    release waiver covers, observe the reclaiming purchases inside the same deadline so
+    the stall proof never rests on one provider read issued after it.
+    """
     attempted = set()
+    next_stall_observation = 0.0
     async with asyncio.timeout(PAYMENT_CLEANUP_TIMEOUT_SECONDS):
         while True:
             snapshot = await asyncio.to_thread(
@@ -7058,17 +7105,33 @@ async def _finalize_owned_root_payments(base_url: str, root_id: str, evidence: d
             if errors:
                 raise RuntimeError("; ".join(errors))
             if not new_attempts:
+                if (
+                    observe_release_stall
+                    and time.monotonic() >= next_stall_observation
+                    and all(row["status"] == "HELD" and row["funding_status"] == "RECLAIMING" for row in pending)
+                ):
+                    next_stall_observation = time.monotonic() + PAYMENT_CLEANUP_STALL_OBSERVATION_SECONDS
+                    await _observe_owned_release_stall(base_url, pending, evidence)
                 await asyncio.sleep(2)
 
 
 async def _owned_payments_release_stalled(base_url: str, evidence: dict, *, task_name: str) -> bool:
-    """Every still-pending owned purchase is waiting only on AgentCard release in the expected mode."""
+    """Every still-pending owned purchase is waiting only on AgentCard release in the expected mode.
+
+    Prefer the observation made inside the cleanup deadline; the final ledger rows must
+    still match it exactly. Read afresh only when no such observation exists.
+    """
     try:
         pending = cloud_batch_cleanup.pending_root_payments(evidence.get("payment_snapshot") or {})
     except Exception:
         return False
+    observation = evidence.get("agentcard_release_stall_observation")
+    observed = observation.get("lifecycles") if isinstance(observation, dict) else None
     lifecycles = {}
     for agent_id in sorted({row["agent_id"] for row in pending}):
+        if isinstance(observed, dict) and isinstance(observed.get(agent_id), dict):
+            lifecycles[agent_id] = observed[agent_id]
+            continue
         try:
             lifecycles[agent_id] = await get_test_payment_lifecycle(base_url, agent_id)
         except Exception:
@@ -7209,6 +7272,28 @@ async def _finalize_owned_cloud_batch(base_url: str, results: list, live_ids: di
             by_id[aid] = result
             stage_logs[aid] = logs if isinstance(logs, dict) else {}
         primary_ids.add(root_ids[-1])
+    phone_roots = {root for name in PHONE_BENCH_TASK_NAMES for root in live_ids.get(name, [])}
+    phone_roots.update(r.agent_id for r in results if r.name in PHONE_BENCH_TASK_NAMES and r.agent_id)
+    daily_roots = {root for name in PHONE_DAILY_TASKS for root in live_ids.get(name, [])}
+    daily_roots.update(r.agent_id for r in results if r.name in PHONE_DAILY_TASKS and r.agent_id)
+    for phone_root in phone_roots:
+        from benchmarks.phone_connectivity import ANDY, cleanup_phone
+        phone_user_id = _current_benchmark_user_id() if phone_root in daily_roots else ANDY
+        identity = _owned_cleanup_user_id.set(phone_user_id)
+        try:
+            if not await pause_agent(base_url, phone_root):
+                from benchmarks.phone_connectivity import PhoneCleanupBlocked
+                raise PhoneCleanupBlocked("Phone batch cleanup cannot quiesce exact root")
+            if phone_root in daily_roots:
+                await cleanup_daily_phone(base_url, phone_user_id, phone_root, _local_victoria_database_url(), API_KEY)
+            else:
+                await cleanup_phone(base_url, ANDY, phone_root, _local_victoria_database_url(), API_KEY)
+            critical_roots = set(live_ids.get("browser-cloud-iphone-critical-attention", [])) | {r.agent_id for r in results if r.name == "browser-cloud-iphone-critical-attention" and r.agent_id}
+            if phone_root in critical_roots:
+                from benchmarks.phone_critical_attention import cleanup_owner_transport
+                await asyncio.to_thread(cleanup_owner_transport, base_url, ANDY, phone_root, _local_victoria_database_url())
+        finally:
+            _owned_cleanup_user_id.reset(identity)
     owned = {aid for ids in live_ids.values() for aid in ids} | set(by_id)
     # The SMS supervisor is an in-backend tool loop, not a Temporal agent.
     # Its runner returns only after its own seeded-session cleanup completed.
@@ -7401,7 +7486,16 @@ async def _finalize_owned_cloud_batch(base_url: str, results: list, live_ids: di
                 try:
                     if before is None:
                         raise RuntimeError("exact payment ownership was not established")
-                    logs["cloud_payment_cleanup"] = await _finalize_owned_root_payments(base_url, aid, evidence)
+                    logs["cloud_payment_cleanup"] = await _finalize_owned_root_payments(
+                        base_url,
+                        aid,
+                        evidence,
+                        observe_release_stall=(
+                            result is not None
+                            and _agentcard_release_skip_task(result.name)
+                            and _agentcard_release_skip_enabled()
+                        ),
+                    )
                 except Exception as error:
                     detail = str(error) or type(error).__name__
                     if (
@@ -9996,7 +10090,7 @@ async def _apply_live_fixtures(task: "BenchmarkTask", base_url: str) -> list[dic
     tolerate_missing_claude = await _has_usable_anthropic_api_key_fallback(base_url)
     ctx = LiveFixtureContext(
         base_url=base_url,
-        user_id=USER_ID,
+        user_id=_current_benchmark_user_id() if task.name in PHONE_BENCH_TASK_NAMES else USER_ID,
         auth_realm=auth_realm,
         cookie_domains=cookie_domains,
         required_injectable_cookie_domains=required_cookie_domains,
@@ -12308,7 +12402,7 @@ def _judge_source_tree(data: dict) -> dict:
 def _compact_benchmark_state_for_judge(data: dict) -> dict:
     """Typed tree/usage only — full child transcripts 413 the judge (smoke10)."""
     raw = data.get("_benchmark") if isinstance(data.get("_benchmark"), dict) else {}
-    compact = {key: value for key, value in raw.items() if key not in {"tree", "all_agents", "first_level_gps"}}
+    compact = {key: value for key, value in raw.items() if key not in {"tree", "all_agents", "first_level_gps", "judge_audits"}}
     tree = _judge_source_tree(data)
     compact_tree: dict[str, dict] = {}
     if tree:
@@ -12695,14 +12789,6 @@ async def _call_declared_agentic_llm_judge(
     judge_agent_id = str(uuid.uuid4())
     tool_call_id = str(uuid.uuid4())
     code_provider = await _agentic_judge_code_provider(user_id)
-    token_data: dict[str, Any] = {}
-    if code_provider == "codex":
-        try:
-            token_data = await _fetch_agentic_judge_compute_token(user_id, judge_agent_id) or {}
-        except httpx.HTTPError as exc:
-            # Optional verifier auth: the spawn leases the CLI credential itself.
-            print(f"    ⚠ Agentic judge GPT token fetch failed ({type(exc).__name__}); continuing without it")
-
     if getattr(task, "process_spec", None) is not None:
         from benchmarks.process_bench import process_evidence
 
@@ -12717,38 +12803,62 @@ async def _call_declared_agentic_llm_judge(
         "application/json",
     )
 
-    result = await spawn_claude_code_activity(
-        user_id=user_id,
-        agent_id=judge_agent_id,
-        goal=_build_agentic_judge_goal(task, evaluator),
-        tool_call_id=tool_call_id,
-        output_schema=_AGENTIC_JUDGE_OUTPUT_SCHEMA,
-        attachments=[attachment],
-        code_provider=code_provider,
-        gpt_token=token_data.get("accessToken"),
-        gpt_account_id=token_data.get("accountId"),
-        gpt_token_source=token_data.get("source"),
-        gpt_token_pool_id=token_data.get("poolTokenId"),
-        fast_mode_cache_enabled=False,
-    )
-    # The preflight plan can still empty before the spawn leases (or the CLI hits a usage
-    # limit mid-judge). Every subscription and funded path exhausted is a compute-token
-    # SKIP (Andy 2026-10-25), never a no-verdict 0.0 task FAIL.
-    if result.get("failure_kind") == "no_credentials" or result.get("usage_limit"):
-        raise ComputeTokenUnavailable(
-            "Codex compute token unavailable for agentic benchmark judge: "
-            "the spawn found every subscription and funded credential exhausted"
-        )
+    from benchmarks.judge_identity import judge_identity
+    from config import load_config
 
-    score, reasoning = await _parse_agentic_judge_verdict(result)
-    usage_items = result.get("usage_items") if isinstance(result.get("usage_items"), list) else []
-    usage = aggregate_usage_items(usage_items) if usage_items else None
-    return {
-        "score": score,
-        "reasoning": reasoning,
-        "usage": usage,
-        "judge_audit": _agentic_judge_audit(judge_agent_id, attachment, evidence_bytes),
-    }
+    audit = _agentic_judge_audit(judge_agent_id, attachment, evidence_bytes)
+    data.setdefault("_benchmark", {}).setdefault("judge_audits", []).append(audit)
+    goal = _build_agentic_judge_goal(task, evaluator)
+    async with judge_identity(
+        base_url=load_config().backend.api_url,
+        headers=_internal_api_headers(user_id),
+        agent_id=judge_agent_id,
+        goal=goal,
+        audit=audit,
+    ):
+        token_data: dict[str, Any] = {}
+        if code_provider == "codex":
+            try:
+                token_data = await _fetch_agentic_judge_compute_token(user_id, judge_agent_id) or {}
+            except httpx.HTTPError as exc:
+                # Optional verifier auth: the spawn leases the CLI credential itself.
+                print(f"    ⚠ Agentic judge GPT token fetch failed ({type(exc).__name__}); continuing without it")
+
+        result = await spawn_claude_code_activity(
+            user_id=user_id,
+            agent_id=judge_agent_id,
+            goal=goal,
+            tool_call_id=tool_call_id,
+            output_schema=_AGENTIC_JUDGE_OUTPUT_SCHEMA,
+            attachments=[attachment],
+            code_provider=code_provider,
+            gpt_token=token_data.get("accessToken"),
+            gpt_account_id=token_data.get("accountId"),
+            gpt_token_source=token_data.get("source"),
+            gpt_token_pool_id=token_data.get("poolTokenId"),
+            fast_mode_cache_enabled=False,
+        )
+        # The preflight plan can still empty before the spawn leases (or the CLI hits a usage
+        # limit mid-judge). Every subscription and funded path exhausted is a compute-token
+        # SKIP (Andy 2026-10-25), never a no-verdict 0.0 task FAIL.
+        if result.get("failure_kind") == "no_credentials" or result.get("usage_limit"):
+            raise ComputeTokenUnavailable(
+                "Codex compute token unavailable for agentic benchmark judge: "
+                "the spawn found every subscription and funded credential exhausted"
+            )
+
+        score, reasoning = await _parse_agentic_judge_verdict(result)
+        usage_items = result.get("usage_items") if isinstance(result.get("usage_items"), list) else []
+        usage = aggregate_usage_items(usage_items) if usage_items else None
+        audit["verdict"] = {"score": score, "reasoning": reasoning}
+        audit["usage"] = usage
+        audit["output_files"] = result.get("output_files") or []
+        return {
+            "score": score,
+            "reasoning": reasoning,
+            "usage": usage,
+            "judge_audit": audit,
+        }
 
 
 def _agentic_judge_audit(judge_agent_id: str, attachment: Any, evidence_bytes: bytes) -> dict[str, Any]:
@@ -15306,6 +15416,18 @@ async def _run_single_task_as_run_user(
             f"{len(fixture['password_ids'])} bad password row(s)"
         )
 
+    if task.name in PHONE_BENCH_TASK_NAMES:
+        from benchmarks.phone_connectivity import device_id, guard
+        if task.name in PHONE_DAILY_TASKS:
+            preflight_daily(task.name, base_url, _current_benchmark_user_id())
+        else:
+            guard(base_url, _current_benchmark_user_id())
+        device_id()
+        if _interrupt_cleanup_contract() is None:
+            raise RuntimeError("Live phone benchmark requires owned --local cleanup retention contract")
+        if _is_simulate_mode() or task.demo_cache != "off":
+            raise RuntimeError("Live iPhone benchmark forbids simulation/demo cache")
+
     grep_fixture_manifest: Optional[dict] = None
     plaid_transactions_manifest: Optional[dict] = None
     plaid_transactions_fixture_action: Optional[str] = None
@@ -15427,6 +15549,7 @@ async def _run_single_task_as_run_user(
     start = time.time()
     start_time = datetime.now(timezone.utc)
     agent_id = ""
+    root_creation_attempted = False
     data: dict = {}
     last_snapshot: dict = {}
     archive_manifest_ref: Optional[str] = None
@@ -15439,6 +15562,46 @@ async def _run_single_task_as_run_user(
     interrupt_cleanup_started = False
     interrupt_cleanup_ready = False
     evaluated_failure_reason: Optional[str] = None
+    result: Optional[TaskResult] = None
+
+    phone_cleanup_complete = False
+    phone_critical_custody = None
+    phone_cleanup_deadline = None
+    phone_cleanup_receipt_started = _begin_interrupt_cleanup() if task.name in PHONE_BENCH_TASK_NAMES else False
+
+    async def ensure_phone_cleanup() -> None:
+        nonlocal phone_cleanup_complete, phone_cleanup_deadline
+        if task.name not in PHONE_BENCH_TASK_NAMES or phone_cleanup_complete:
+            return
+        if agent_id:
+            from benchmarks.phone_connectivity import cleanup_phone
+            if phone_cleanup_deadline is None:
+                phone_cleanup_deadline = time.monotonic() + 90
+            if not await pause_agent(base_url, agent_id):
+                from benchmarks.phone_connectivity import PhoneCleanupBlocked
+                raise PhoneCleanupBlocked("Phone cleanup cannot quiesce exact root; retain isolated database")
+            if task.name in PHONE_DAILY_TASKS:
+                await cleanup_daily_phone(base_url, _current_benchmark_user_id(), agent_id,
+                                          _local_victoria_database_url(), API_KEY)
+            else:
+                await cleanup_phone(base_url, _current_benchmark_user_id(), agent_id,
+                                    _local_victoria_database_url(), API_KEY, deadline=phone_cleanup_deadline)
+            if task.name == "browser-cloud-iphone-critical-attention":
+                from benchmarks.phone_critical_attention import cleanup_owner_transport, probe
+                await asyncio.to_thread(cleanup_owner_transport, base_url, _current_benchmark_user_id(), agent_id, _local_victoria_database_url())
+                if phone_critical_custody is not None:
+                    final_proof = await asyncio.to_thread(probe, base_url, _current_benchmark_user_id(), agent_id,
+                        _local_victoria_database_url(), mode="rejected", custody=phone_critical_custody)
+                    if not final_proof.get("valid"):
+                        from benchmarks.phone_connectivity import PhoneCleanupBlocked
+                        raise PhoneCleanupBlocked("PH-6D post-cleanup no-input proof invalid; retain isolated database")
+        phone_cleanup_complete = True
+        if phone_cleanup_receipt_started:
+            _complete_interrupt_cleanup()
+
+    async def delete_task_agent() -> None:
+        await ensure_phone_cleanup()
+        await delete_agent(base_url, agent_id)
 
     temp_csv_paths: list = []  # track temp files for cleanup
 
@@ -15509,6 +15672,20 @@ async def _run_single_task_as_run_user(
         # scenario intentionally removes shared browser state and must restore it
         # even when agent creation or evaluation fails.
         live_fixture_manifests = await _apply_live_fixtures(task, base_url)
+        if task.name in PHONE_DAILY_TASKS:
+            preflight_daily(task.name, base_url, _current_benchmark_user_id())
+        if task.name in PHONE_BENCH_TASK_NAMES:
+            from benchmarks.phone_connectivity import apply_fixture
+            if _is_simulate_mode() or task.demo_cache != "off":
+                raise RuntimeError("Live iPhone benchmark forbids simulation/demo cache")
+            if task.name in PHONE_DAILY_TASKS:
+                await apply_daily_fixture(task.name, base_url, _current_benchmark_user_id(), API_KEY, _local_victoria_database_url())
+            else:
+                await apply_fixture(base_url, _current_benchmark_user_id(), API_KEY)
+            if task.name == "browser-cloud-iphone-critical-attention":
+                from benchmarks.phone_critical_attention import configure_profile
+                await configure_profile(base_url, _current_benchmark_user_id(), API_KEY, _local_victoria_database_url())
+
         memory_fixture_manifests = await _apply_memory_fixtures(task, base_url)
         if memory_fixture_manifests:
             live_fixture_manifests.append({"kind": "memory", "fixtures": memory_fixture_manifests})
@@ -15516,17 +15693,20 @@ async def _run_single_task_as_run_user(
         if task.browser_profile_mode == "fresh" and not _is_simulate_mode():
             if not _is_local_base_url(base_url):
                 raise RuntimeError(f"{task.name}: fresh browser state requires an isolated local benchmark stack")
-            live_fixture_manifests.append(
-                _apply_fresh_browser_state_scenario(
-                    LiveFixtureContext(
-                        base_url=base_url,
-                        user_id=_current_benchmark_user_id(),
-                        auth_realm=str(task.browser_auth_realm),
+            from benchmarks.phone_live_auth import fresh_auth_realms
+            for auth_realm in fresh_auth_realms(task):
+                live_fixture_manifests.append(
+                    _apply_fresh_browser_state_scenario(
+                        LiveFixtureContext(
+                            base_url=base_url,
+                            user_id=_current_benchmark_user_id(),
+                            auth_realm=auth_realm,
+                        )
                     )
                 )
-            )
 
         if _effective_harness(task) == "codex":
+            root_creation_attempted = True
             from benchmarks.codex_runner import build_deps_from_module, run_codex_task
 
             fast_mode_cache = _resolved_fast_mode_cache(task)
@@ -15541,6 +15721,7 @@ async def _run_single_task_as_run_user(
                 fast_mode_cache_enabled=fast_mode_cache,
             )
 
+        root_creation_attempted = True
         custody = _task_root_custody.get()
         if custody is not None:
             custody["graded_creation"] = "unknown"
@@ -15789,6 +15970,41 @@ async def _run_single_task_as_run_user(
             if not grep_passed:
                 passed = False
                 failure_reason = grep_reason
+        if task.name in PHONE_DAILY_TASKS:
+            if PHONE_DAILY_TASKS[task.name] == "sms":
+                phone_ok, phone_reason, phone_proof = await evaluate_sms_daily(
+                    base_url, _current_benchmark_user_id(), agent_id,
+                    _local_victoria_database_url(), auth_test_site_manifest or {},
+                    {"X-API-Key": API_KEY, "X-User-Id": _current_benchmark_user_id()},
+                )
+            else:
+                phone_ok, phone_reason, phone_proof = await asyncio.to_thread(
+                    evaluate_daily, task.name, base_url, _current_benchmark_user_id(), agent_id,
+                    _local_victoria_database_url(),
+                )
+            data["_phone_daily_proof"] = phone_proof
+            if not phone_ok:
+                passed, failure_reason = False, phone_reason
+
+        if task.name == "browser-cloud-iphone-settings":
+            from benchmarks.phone_connectivity import evaluate_persisted, reported_heading
+            phone_ok, phone_reason, phone_proof = await asyncio.to_thread(
+                evaluate_persisted, base_url, _current_benchmark_user_id(), agent_id,
+                _local_victoria_database_url(), reported_heading(data),
+            )
+            if not phone_ok:
+                passed, failure_reason = False, phone_reason
+            data["_phone_connectivity_proof"] = phone_proof
+
+        if task.name == "browser-cloud-iphone-critical-attention":
+            from benchmarks.phone_critical_attention import evaluate_critical_attention
+            phone_ok, phone_reason, phone_proof = await evaluate_critical_attention(
+                base_url, _current_benchmark_user_id(), agent_id, _local_victoria_database_url())
+            phone_critical_custody = phone_proof.pop("_custody", None)
+            data["_phone_critical_attention_proof"] = phone_proof
+            if not phone_ok:
+                passed, failure_reason = False, phone_reason
+
         if phone_callee is not None and passed:
             phone_passed, phone_reason = await _evaluate_phone_call_task(
                 task,
@@ -16150,6 +16366,10 @@ async def _run_single_task_as_run_user(
             wmh_initial_state=_wmh_initial_state_evidence(task),
         )
 
+        # Confirm the physical allocation is reclaimed before publishing PASS
+        # or deleting this task's exact root.
+        await ensure_phone_cleanup()
+
         # Evaluation is complete. Publish its outcome before releasing agent
         # resources or entering the phone/fixture cleanup in finally.
         if on_task_evaluated is not None:
@@ -16192,7 +16412,7 @@ async def _run_single_task_as_run_user(
         # the caller explicitly wants failed agents kept alive for diagnostics.
         if _should_delete_agent_after_run(passed, keep_failed_agents):
             try:
-                await delete_agent(base_url, agent_id)
+                await delete_task_agent()
                 print(f"    🗑  Deleted agent {agent_id[:12]}")
             except Exception:
                 print(f"    ⚠ Failed to delete agent {agent_id[:12]}")
@@ -16367,6 +16587,7 @@ async def _run_single_task_as_run_user(
                 + (f" | Investigate: python agents/benchmarks/agent_latency.py {agent_id}" if agent_id else "")
                 + " | Cache/cost: python agents/benchmarks/run_benchmark.py --compare <run.json>"
             ),
+            stop_metadata={"root_creation_attempted": root_creation_attempted},
             logs=logs,
             archive_manifest_ref=archive_manifest_ref,
             world_model_fidelity=world_model_fidelity,
@@ -16402,6 +16623,15 @@ async def _run_single_task_as_run_user(
         return result
 
     finally:
+        # Failure/cancellation/kept-agent paths also retain the DB on unconfirmed
+        # phone cleanup through the existing owner receipt counters. A failed
+        # physical cleanup must not skip independent task-owned collector joins
+        # or replace an ERROR result that has already been published.
+        phone_cleanup_error = None
+        try:
+            await ensure_phone_cleanup()
+        except Exception as exc:
+            phone_cleanup_error = exc
         realtime_tree_error = None
         if realtime_tree_task:
             try:
@@ -16441,6 +16671,24 @@ async def _run_single_task_as_run_user(
             os.environ["BENCHMARK_DISABLE_SAVED_BROWSER_AUTH"] = previous_disable_saved_browser_auth
         if interrupt_cleanup_ready:
             _complete_interrupt_cleanup()
+        if phone_cleanup_error is not None:
+            if result is None or result.benchmark_status not in {"ERROR", "CANCELLED"}:
+                raise phone_cleanup_error
+            result.status = result.benchmark_status = "ERROR"
+            cleanup_detail = f"Phone cleanup failed: {type(phone_cleanup_error).__name__}: {phone_cleanup_error}"
+            result.failure_reason = f"{result.failure_reason} | {cleanup_detail}"
+            if result.logs is None:
+                result.logs = {}
+            result.logs.setdefault("failure_evidence", {}).setdefault("errors", []).append(cleanup_detail)
+            # Publish the retained original failure plus cleanup liability. The
+            # receipt stays pending/failed: no physical cleanup was confirmed.
+            if on_task_evaluated is not None:
+                try:
+                    publication = on_task_evaluated(result)
+                    if inspect.isawaitable(publication):
+                        await publication
+                except Exception as exc:
+                    print(f"    ⚠ evaluated outcome publication failed: {type(exc).__name__}")
         if realtime_tree_error is not None:
             raise realtime_tree_error
 
@@ -18069,6 +18317,15 @@ async def main_async(args):
                 cancelled = await asyncio.gather(*pending, return_exceptions=True)
                 for task_future, result in zip(pending, cancelled):
                     task = pending_results[task_future]
+                    evaluated_result = _evaluated_task_results.pop(task_future, None)
+                    if not isinstance(result, TaskResult) and evaluated_result is not None:
+                        interruption = result
+                        result = evaluated_result
+                        result.passed = False
+                        result.status = result.benchmark_status = "ERROR"
+                        result.failure_reason = (
+                            f"{result.failure_reason or ''} | Interrupted during task finalization: {interruption}"
+                        ).strip(" |")
                     if isinstance(result, TaskResult):
                         run.task_results.append(result)
                     else:
@@ -18105,6 +18362,20 @@ async def main_async(args):
                 _refuse_queued_after_interrupt(tasks, index + 1, run.task_results, _never_admitted_results)
     finally:
         _report_ticker_task.cancel()
+        await asyncio.gather(_report_ticker_task, return_exceptions=True)
+        # A task's finally can fail after publishing its ERROR, before the
+        # serial coordinator appends it. Transfer unconsumed occurrences before
+        # clearing the reporting overlay so terminal evidence never requeues.
+        pending_error = sys.exc_info()[1]
+        for pending_result in _evaluated_task_results.values():
+            if pending_error is not None:
+                pending_result.passed = False
+                pending_result.status = pending_result.benchmark_status = "ERROR"
+                pending_result.failure_reason = (
+                    f"{pending_result.failure_reason or ''} | Task finalization failed: "
+                    f"{type(pending_error).__name__}: {pending_error}"
+                ).strip(" |")
+            run.task_results.append(pending_result)
         _evaluated_task_results.clear()
         _emit_report(force=True)
         fly_total = await stop_fly_log_collector()

@@ -111,7 +111,6 @@ ROOT_DIR="${CLOUDBENCH_FLEET_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && p
 cd "$ROOT_DIR" || exit 1
 # shellcheck source=lib/cloudbench-env.sh
 source "${CLOUDBENCH_SCRIPT_SNAPSHOT:-$ROOT_DIR/scripts/lib}/cloudbench-env.sh"
-CLOUDBENCH_KERNEL_PROXY_CUSTODY="$(cloudbench_kernel_proxy_custody_policy)" || exit 1
 # Every guest refuses bench-app secrets lacking the committed guest namespace,
 # whichever launcher (or older checkout) staged them; a launcher may bind its own.
 CLOUDBENCH_EXPECTED_GUEST_TEMPORAL_NAMESPACE="${CLOUDBENCH_EXPECTED_GUEST_TEMPORAL_NAMESPACE:-$(cloudbench_expected_guest_temporal_namespace "$APP")}"
@@ -317,19 +316,12 @@ DASHBOARD="1"           # proxy + open the live dashboard (auto-off under CI).
 LOCAL_DASH_PORT="${CLOUDBENCH_DASH_BASE:-$(( ${CONDUCTOR_PORT:-3001} + 5764 ))}"
 FLEET_MACHINE_ID=""     # set by run-bench-fleet to pin a per-bench cloned machine.
 OUT_DIR=""              # set by run-bench-fleet to isolate a bench's .context outputs.
-MAINTENANCE_STATE=""
-MAINTENANCE_GATE=""
-MAINTENANCE_BUILD=""
-MAINTENANCE_POINTER=""
 SKIP_CONTROLLER_LOCK="0"  # set by run-bench-fleet (fleet owns one lock for its children).
 NO_OPEN="${NO_OPEN:-0}"   # legacy flag; nothing auto-opens a browser anymore (in-app hub).
 
 # ── Arg parsing ──────────────────────────────────────────────────────────────
 while [ $# -gt 0 ]; do
     case "$1" in
-        --maintenance-state) MAINTENANCE_STATE="${2:-}"; shift 2 ;;
-        --maintenance-gate) MAINTENANCE_GATE="${2:-}"; shift 2 ;;
-        --image-build-receipt) MAINTENANCE_BUILD="${2:-}"; shift 2 ;;
         --setup)          MODE="setup"; shift ;;
         --build-image)    MODE="build-image"; shift ;;
         --no-cache)       IMAGE_BUILD_NO_CACHE=1; shift ;;
@@ -561,9 +553,6 @@ fi
 # Run-scoped output root. Defaults to the shared .context; run-bench-fleet points
 # each per-bench child at its own dir so concurrent children never clobber each
 # other's report-card.json / run.json / live-dashboard dir.
-if [ -n "$MAINTENANCE_STATE$MAINTENANCE_GATE$MAINTENANCE_BUILD" ] && [ "$MODE" != setup ]; then
-    echo "native maintenance receipts require --setup" >&2; exit 2
-fi
 OUT_DIR="${OUT_DIR:-$ROOT_DIR/.context}"
 mkdir -p "$OUT_DIR" 2>/dev/null || true
 
@@ -1337,7 +1326,6 @@ names={a.get("Name") or a.get("name") for a in (apps or [])}
 sys.exit(0 if "'"$APP"'" in names else 1)' 2>/dev/null; then
         echo "✅ App $APP already exists"
     else
-        [ -z "$MAINTENANCE_POINTER" ] || { echo "native maintenance app identity unavailable" >&2; return 1; }
         echo "📦 Creating app $APP ..."
         FLY apps create "$APP" --org personal 2>&1 | sed 's/^/   /' || {
             FLY apps list 2>/dev/null | grep -q "$APP" || { echo "❌ Failed to create app $APP"; exit 1; }
@@ -1670,9 +1658,8 @@ validate_environment_contract() {
     local prod_backend prod_worker
     prod_backend="$(resolve_prod_backend_browser_provider)" || exit 1
     prod_worker="$(resolve_prod_worker_browser_provider)" || exit 1
-    cloudbench_write_guest_browser_env_files agents/.env back-end/.env "$prod_backend" "$prod_worker" "$1" || exit 1
     cloudbench_validate_browser_provider_contract \
-        "$1/agents.env" "$1/backend.env" "$prod_backend" "$prod_worker" || exit 1
+        agents/.env back-end/.env "$prod_backend" "$prod_worker" || exit 1
     # Refuse to stage a BACKEND_ENV_B64 that cannot run AgentCard payment tasks.
     cloudbench_require_agentcard_org_oauth back-end/.env || exit 1
     CLOUDBENCH_PROD_BROWSER_PROVIDER="$prod_backend"
@@ -1712,8 +1699,8 @@ if not isinstance(machines, list) or any(not isinstance(machine, dict) for machi
     raise SystemExit(2)
 machine_id = os.environ["MACHINE_ID"]
 machine = next((item for item in machines if item.get("id") == machine_id), None)
-if machine is None or machine.get("state") != "stopped":
-    raise SystemExit(2)
+if machine is None:
+    raise SystemExit(1)
 config = machine.get("config") or {}
 actual = config.get("image") if isinstance(config, dict) else None
 expected = os.environ["IMAGE_REF"]
@@ -1726,27 +1713,16 @@ raise SystemExit(0 if actual.split("@", 1)[0] == expected else 1)
 }
 
 wait_for_activation_image() {  # wait_for_activation_image <machine_id> <image_ref>
-    local machine_id="$1" image_ref="$2" state presence image_status attempt=1
+    local machine_id="$1" image_ref="$2" state presence attempt=1
     local attempts="${CLOUDBENCH_IMAGE_SETTLE_ATTEMPTS:-15}"
     local retry_delay="${CLOUDBENCH_IMAGE_SETTLE_RETRY_DELAY:-2}"
     while [ "$attempt" -le "$attempts" ]; do
-        assert_app_environment_lock_ownership || return 1
         state="$(machine_state_for_activation "$machine_id")"
         presence=$?
         [ "$presence" -eq 0 ] || return 1
-        if [ "$state" = "stopped" ]; then
-            image_status=0
-            if [ -n "$image_ref" ]; then
-                # The image read must itself prove stopped state; do not combine
-                # stopped from one inventory with image from a later active one.
-                machine_has_activation_image "$machine_id" "$image_ref"
-                image_status=$?
-                [ "$image_status" -le 1 ] || return 1
-            fi
-            if [ "$image_status" -eq 0 ]; then
-                assert_app_environment_lock_ownership || return 1
-                return 0
-            fi
+        if [ "$state" = "stopped" ] \
+            && machine_has_activation_image "$machine_id" "$image_ref"; then
+            return 0
         fi
         case "$state" in
             stopped|created|pending|replacing|stopping) ;;
@@ -1797,13 +1773,7 @@ activate_machine_environment() {  # activate_machine_environment <machine_id> [w
         output="$(FLY "${update_args[@]}" 2>&1)"
         status=$?
         printf '%s\n' "$output" | sed 's/^/      /'
-        if [ "$status" -eq 0 ]; then
-            # CLI acknowledgement can precede completion of this skip-start
-            # update. Do not hand a replacing Machine to the next mutation.
-            wait_for_activation_image "$machine_id" "$image_ref" && return 0
-            echo "      acknowledged update did not settle on stopped machine $machine_id" >&2
-            return 1
-        fi
+        [ "$status" -eq 0 ] && return 0
         if [ -n "$image_ref" ] \
             && wait_for_activation_image "$machine_id" "$image_ref"; then
             echo "      Fly CLI reported failure, but provider confirms desired image on stopped machine"
@@ -1862,7 +1832,6 @@ for machine in machines:
 activate_owned_machine_images() {  # activate_owned_machine_images <image_ref>
     local image_ref="$1" activation_targets role machine_id
     activation_targets="$(environment_activation_targets)" || return 1
-    maintenance_targets "$activation_targets" || return 1
     while IFS=$'\t' read -r role machine_id; do
         [ -n "$machine_id" ] || continue
         echo "   activating image on $role machine $machine_id (skip-start)"
@@ -1883,12 +1852,9 @@ _inject_secrets_locked() {
         echo "❌ agents/.env and back-end/.env are required to inject secrets." >&2
         exit 1
     fi
-    local browser_env_dir
-    browser_env_dir="$(mktemp -d "${TMPDIR:-/tmp}/cloudbench-browser-env.XXXXXX")" || exit 1
-    trap "rm -rf -- $(printf '%q' "$browser_env_dir")" EXIT
-    validate_environment_contract "$browser_env_dir"
+    validate_environment_contract
     local agents_b64 backend_b64 gh_token agents_sha backend_sha
-    local agents_src="$browser_env_dir/agents.env" backend_src="$browser_env_dir/backend.env"
+    local agents_src=agents/.env backend_src=back-end/.env
     local guest_temporal_override guest_env_dir="" guest_temporal_namespace=""
     # Guest-only Temporal namespace (see cloudbench_guest_temporal_override_file):
     # the staged blobs get the override; local and production env files do not.
@@ -1896,7 +1862,7 @@ _inject_secrets_locked() {
     if [ -n "$guest_temporal_override" ]; then
         guest_env_dir="$(mktemp -d "${TMPDIR:-/tmp}/cloudbench-guest-env.XXXXXX")" || exit 1
         if ! guest_temporal_namespace="$(cloudbench_write_guest_temporal_env_files \
-                "$agents_src" "$backend_src" "$guest_temporal_override" "$guest_env_dir")"; then
+                agents/.env back-end/.env "$guest_temporal_override" "$guest_env_dir")"; then
             rm -rf "$guest_env_dir"
             exit 1
         fi
@@ -1945,18 +1911,6 @@ _inject_secrets_locked() {
     else
         echo "   ⚠️  No validated durable GitHub token — staging empty GITHUB_TOKEN to clear stale secret"
     fi
-    python3 - "$browser_env_dir" <<'PYBROWSERSEAL'
-import hashlib, json, sys
-from pathlib import Path
-folder=Path(sys.argv[1]); manifest=json.loads((folder/'browser-projection.json').read_text())
-for name, source in (('agents.env',Path('agents/.env')),('backend.env',Path('back-end/.env'))):
-    row=manifest['files'][name]
-    if hashlib.sha256(source.read_bytes()).hexdigest()!=row['original_sha256'] or hashlib.sha256((folder/name).read_bytes()).hexdigest()!=row['projected_sha256']:
-        raise SystemExit('guest browser projection changed before staging')
-PYBROWSERSEAL
-    [ "$?" -eq 0 ] || exit 1
-    mkdir -p "$ROOT_DIR/.context"
-    cp "$browser_env_dir/browser-projection.json" "$ROOT_DIR/.context/cloudbench-browser-projection.json" || exit 1
     assert_app_environment_lock_ownership || exit 1
     FLY secrets set --stage -a "$APP" "${set_args[@]}" 2>&1 | sed 's/^/   /' || {
         echo "❌ Failed to stage benchmark environment secrets"; exit 1
@@ -1966,7 +1920,6 @@ PYBROWSERSEAL
         echo "❌ Could not resolve owned benchmark machines for environment activation." >&2
         exit 1
     }
-    maintenance_targets "$activation_targets" || return 1
     while IFS=$'\t' read -r role machine_id; do
         [ -n "$machine_id" ] || continue
         assert_app_environment_lock_ownership || exit 1
@@ -1992,7 +1945,6 @@ with open(path, "w") as handle:
         "browser_provider": provider,
         "worker_browser_provider": worker_provider,
         "guest_temporal_namespace": guest_namespace or None,
-        "browser_projection": json.load(open(".context/cloudbench-browser-projection.json")),
         "production_sources": {
             "backend": "render:Navi",
             "worker": "fly:navi-whisper-lux",
@@ -2004,78 +1956,26 @@ PY
     echo "✅ Secrets set (active)"
 }
 
-maintenance_begin() {
-    [ -n "$MAINTENANCE_STATE$MAINTENANCE_GATE$MAINTENANCE_BUILD" ] || return 0
-    [ -n "$MAINTENANCE_STATE" ] && [ -n "$MAINTENANCE_GATE" ] && [ -n "$MAINTENANCE_BUILD" ] &&
-        [ -n "${WARM_IMAGE_REF:-}" ] && [ -z "${CLOUDBENCH_SCRIPT_SNAPSHOT:-}" ] &&
-        [ "$WARM_PARKED_VM_SIZE" = shared-cpu-1x ] && [ "$WARM_PARKED_VM_MEMORY" = 2048 ] || return 1
-    # Same flock as deploy_test_cycle.exclusive; nonblocking, held by this shell
-    # from intent through final receipt. It cannot race an active coordinator.
-    local state_directory targets
-    state_directory="$(dirname "$MAINTENANCE_STATE")"
-    [ -d "$state_directory" ] || return 1
-    exec {MAINTENANCE_CYCLE_FD}>"$state_directory/lock" || return 1
-    flock -n "$MAINTENANCE_CYCLE_FD" || return 1
-    targets="$(environment_activation_targets)" || return 1
-    MAINTENANCE_POINTER="$OUT_DIR/cloudbench-maintenance.json"
-    python3 "$ROOT_DIR/scripts/cloudbench_maintenance.py" begin \
-        --root "$ROOT_DIR" --pid "$$" --state-fd "$MAINTENANCE_CYCLE_FD" \
-        --state "$MAINTENANCE_STATE" --gate "$MAINTENANCE_GATE" --build "$MAINTENANCE_BUILD" \
-        --image "$WARM_IMAGE_REF" --requested-ref "$BENCH_REF" --app "$APP" --targets "$targets" --pointer "$MAINTENANCE_POINTER" || return 1
-}
-
-maintenance_targets() {
-    [ -n "$MAINTENANCE_POINTER" ] || return 0
-    python3 - "$MAINTENANCE_POINTER" "$1" <<'PY_MAINTENANCE_TARGETS'
-import json,sys
-from pathlib import Path
-pointer=json.loads(Path(sys.argv[1]).read_text())
-intent=json.loads((Path(pointer['directory'])/'intent.json').read_text())
-if [line.split('\t') for line in sys.argv[2].splitlines()] != intent['targets']:
-    raise SystemExit('native maintenance target set changed')
-PY_MAINTENANCE_TARGETS
-}
-
-maintenance_prestart() {
-    [ -n "$MAINTENANCE_POINTER" ] || return 0
-    python3 "$ROOT_DIR/scripts/cloudbench_maintenance.py" prestart --pid "$$" --pointer "$MAINTENANCE_POINTER"
-}
-
-setup_release() {
-    local native_status="$1" capture_status=0
-    if [ -n "$MAINTENANCE_POINTER" ] && [ -f "$MAINTENANCE_POINTER" ]; then
-        python3 "$ROOT_DIR/scripts/cloudbench_maintenance.py" finish --pid "$$" \
-            --pointer "$MAINTENANCE_POINTER" --native-exit "$native_status" || capture_status=$?
-    fi
-    release_app_environment_lock
-    [ "$native_status" -eq 0 ] || return "$native_status"
-    return "$capture_status"
-}
-
 inject_secrets() {
-    if [ -n "$MAINTENANCE_POINTER" ]; then
-        assert_app_environment_lock_ownership || exit 1
-    else
-        acquire_app_environment_lock || exit 1
-    fi
+    acquire_app_environment_lock || exit 1
     # Setup owns donor maintenance. A canceled refresh may have left it live;
     # quiesce that exact named donor before strict skip-start env activation.
     if [ "${MODE:-}" = setup ] && [ -n "$(resolve_machine_id)" ]; then
         local setup_targets setup_role setup_machine setup_state
         setup_targets="$(environment_activation_targets)" || {
-            if [ -z "$MAINTENANCE_POINTER" ]; then release_app_environment_lock; fi; exit 1
+            release_app_environment_lock; exit 1
         }
         while IFS=$'\t' read -r setup_role setup_machine; do
             [ "$setup_role" = warm ] || continue
             assert_app_environment_lock_ownership || {
-                if [ -z "$MAINTENANCE_POINTER" ]; then release_app_environment_lock; fi; exit 1
+                release_app_environment_lock; exit 1
             }
             setup_state="$(machine_state_for_activation "$setup_machine")" || {
-                if [ -z "$MAINTENANCE_POINTER" ]; then release_app_environment_lock; fi; exit 1
+                release_app_environment_lock; exit 1
             }
             if [ "$setup_state" != stopped ]; then
                 stop_machine_strict "$setup_machine" || {
-                    if [ -z "$MAINTENANCE_POINTER" ]; then release_app_environment_lock; fi; exit 1
+                    release_app_environment_lock; exit 1
                 }
             fi
         done <<< "$setup_targets"
@@ -2085,9 +1985,7 @@ inject_secrets() {
     if [ "$status" -eq 0 ] && [ "${CLOUDBENCH_HOLD_APP_ENV_LOCK:-0}" = "1" ]; then
         return 0
     fi
-    # The setup EXIT trap records failure under the original native lease.
-    # Non-maintenance callers still release their own injection lease here.
-    if [ -z "$MAINTENANCE_POINTER" ]; then release_app_environment_lock; fi
+    release_app_environment_lock
     [ "$status" -eq 0 ] || exit "$status"
     return "$status"
 }
@@ -2199,7 +2097,7 @@ warm_source_fetch_ref() {  # warm_source_fetch_ref <machine-id> <sha>
     # when flyctl hangs after a mid-sync machine stop (descend I-07).
     # -C argv names only remote paths — never the token bytes (main).
     GIT_SYNC_TO="${CLOUDBENCH_GIT_SYNC_TIMEOUT:-240}"
-    local sync_rc=0 sync_started_seconds=$SECONDS
+    local sync_rc=0
     set +e
     ssh_exec "$mid" "set -e
 trap 'rm -f $remote_token' EXIT
@@ -2212,7 +2110,6 @@ echo \"::CLOUDBENCH-REF::\$REMOTE_REF\"" "$GIT_SYNC_TO" 2>&1 | grep -av '^Connec
     sync_rc=${PIPESTATUS[0]}
     set -e
     if [ "$sync_rc" -ne 0 ]; then
-        echo "warm checkout failure: machine=$mid native_exit=$sync_rc elapsed_seconds=$((SECONDS - sync_started_seconds)) bound_seconds=$GIT_SYNC_TO" >&2
         rm -f "$sync_log"
         echo "❌ exact remote checkout failed (ssh_exec timed out or remote error; bound=${GIT_SYNC_TO}s)" >&2
         return "$sync_rc"
@@ -2426,6 +2323,50 @@ start_machine() {  # start_machine <id>
     return 1
 }
 
+# Submit the post-config start for a boot-launched guest. The config update is
+# `--skip-start`, so this is the only start request the guest will ever get;
+# the data-plane fallback after it only observes. Fly can still be replacing
+# the clone's previous VM when the update returns: start is then refused with
+# `failed_precondition: machine getting replaced` / `machine still active`
+# (PR #1927 smoke, 8d967d3f534068: four blind retries spent in 17s, Machine
+# settled `stopped` afterwards and never booted). Wait on Fly's own settled
+# condition for this exact Machine between attempts and keep retrying only that
+# precondition until a bounded settle window ends. Other errors keep the
+# original attempt budget. Starting an already-started Machine is idempotent.
+boot_launch_start_after_config() {  # boot_launch_start_after_config <id> <log>
+    local id="$1" log="$2" ordinary_failures=0 remaining wait_seconds response start_status
+    local attempts="${CLOUDBENCH_BOOT_START_ATTEMPTS:-4}"
+    local start_timeout="${CLOUDBENCH_BOOT_START_TIMEOUT:-60}"
+    local settle_deadline=$((SECONDS + ${CLOUDBENCH_BOOT_START_SETTLE_SECONDS:-180}))
+    local wait_cap="${CLOUDBENCH_BOOT_START_SETTLE_WAIT_SECONDS:-60}"
+    while :; do
+        # Classify only this attempt's own response, then keep it in the log.
+        start_status=0
+        response="$(_with_timeout "$start_timeout" \
+            flyctl machine start "$id" -a "$APP" 2>&1)" || start_status=$?
+        [ -z "$response" ] || printf '%s\n' "$response" >> "$log"
+        [ "$start_status" -eq 0 ] && return 0
+        remaining=$((settle_deadline - SECONDS))
+        if printf '%s' "$response" | grep -q 'failed_precondition'; then
+            [ "$remaining" -gt 0 ] || return 1
+            wait_seconds="$wait_cap"
+            [ "$remaining" -lt "$wait_seconds" ] && wait_seconds="$remaining"
+            printf 'boot-start: %s refused mid-transition; waiting up to %ss for settled state\n' \
+                "$id" "$wait_seconds" >> "$log"
+            _with_timeout "$((wait_seconds + 15))" \
+                flyctl machine wait "$id" -a "$APP" --state settled \
+                --wait-timeout "${wait_seconds}s" >> "$log" 2>&1 || true
+            # A wait that returns at once must not turn into a start-API spin.
+            sleep 2
+            continue
+        fi
+        # Settle-window refusals never consume the ordinary retry budget.
+        ordinary_failures=$((ordinary_failures + 1))
+        [ "$ordinary_failures" -lt "$attempts" ] || return 1
+        sleep $(( ordinary_failures * 2 ))
+    done
+}
+
 # Stop the machine (keep it + volume). Safe default on every per-run exit path.
 stop_machine() {  # stop_machine <id>
     local id="$1"
@@ -2451,40 +2392,6 @@ stop_machine_strict() {  # stop_machine_strict <id>
         sleep 2
     done
     echo "❌ maintenance machine $id did not reach stopped state (state=${st:-unknown})" >&2
-    return 1
-}
-
-wait_for_warm_resize() {  # acknowledged own skip-start update only
-    local id="$1" size="$2" memory="$3" attempt=1 verdict inventory
-    local attempts="${CLOUDBENCH_IMAGE_SETTLE_ATTEMPTS:-15}"
-    local retry_delay="${CLOUDBENCH_IMAGE_SETTLE_RETRY_DELAY:-2}"
-    while [ "$attempt" -le "$attempts" ]; do
-        assert_app_environment_lock_ownership || return 1
-        inventory="$(FLY machines list -a "$APP" --json 2>/dev/null)" || return 1
-        verdict="$(printf '%s' "$inventory" | MACHINE_ID="$id" VM_SIZE="$size" VM_MEMORY="$memory" python3 -c '
-import json,os,re,sys
-try:
-    rows=json.load(sys.stdin)
-    if not isinstance(rows,list) or any(not isinstance(m,dict) for m in rows):raise ValueError()
-    matches=[m for m in rows if m.get("id")==os.environ["MACHINE_ID"]]
-    if len(matches)!=1:raise ValueError()
-    machine=matches[0];state=machine.get("state")
-    shape=re.fullmatch(r"(shared-cpu|performance)-([1-9][0-9]*)x",os.environ["VM_SIZE"])
-    if not shape:raise ValueError()
-    expected={"cpu_kind":"shared" if shape[1]=="shared-cpu" else "performance",
-              "cpus":int(shape[2]),"memory_mb":int(os.environ["VM_MEMORY"])}
-    if state=="stopped" and machine.get("config",{}).get("guest")==expected:print("ready")
-    elif state in ("stopped","created","pending","replacing","stopping"):print("pending")
-    else:raise ValueError()
-except (ValueError,TypeError,KeyError,AttributeError):raise SystemExit(1)
-')" || return 1
-        if [ "$verdict" = ready ]; then
-            assert_app_environment_lock_ownership || return 1
-            return 0
-        fi
-        [ "$attempt" -lt "$attempts" ] && sleep "$retry_delay"
-        attempt=$((attempt + 1))
-    done
     return 1
 }
 
@@ -2518,10 +2425,8 @@ resize_stopped_warm_source() {  # resize_stopped_warm_source <id> <size> <memory
         echo "❌ CLOUDBENCH_WARM_RESIZE_RETRY_MAX_SECONDS must be a non-negative integer (got: ${cap})" >&2
         return 1
     fi
-    assert_app_environment_lock_ownership || return 1
     state="$(machine_state "$id")"
     if [ "$state" != "stopped" ]; then
-        assert_app_environment_lock_ownership || return 1
         stop_machine_strict "$id" || return 1
     fi
     echo "🧮 sizing warm source for $purpose: $size/${memory}MB"
@@ -2529,14 +2434,11 @@ resize_stopped_warm_source() {  # resize_stopped_warm_source <id> <size> <memory
     # a peer workspace, or org API rate limits after park→prepare. Fail closed
     # after bounded attempts so a stuck donor cannot strand every later fleet.
     while true; do
-        assert_app_environment_lock_ownership || return 1
         update_rc=0
         update_out="$(FLY machine update "$id" -a "$APP" --vm-size "$size" --vm-memory "$memory" \
             --command "sleep infinity" --skip-start --yes 2>&1)" || update_rc=$?
         if [ "$update_rc" -eq 0 ]; then
-            wait_for_warm_resize "$id" "$size" "$memory" && return 0
-            echo "❌ acknowledged warm resize did not settle on stopped requested shape" >&2
-            return 1
+            return 0
         fi
         if printf '%s' "$update_out" | grep -Eqi 'lease currently held|failed to (obtain|get) lease'; then
             if [ "$attempt" -ge "$lease_attempts" ]; then
@@ -3011,15 +2913,11 @@ if [ "$MODE" = "setup" ]; then
     # warm source is an admission gap, never permission to create another one.
     setup_existing_machine="$(resolve_machine_id)" || { warm_source_machine_creation_admission; exit 78; }
     [ -n "$setup_existing_machine" ] || { warm_source_machine_creation_admission; exit 78; }
+    ensure_app
     CLOUDBENCH_HOLD_APP_ENV_LOCK=1
-    trap 'setup_status=$?; setup_release "$setup_status"; exit "$?"' EXIT
-    trap 'exit 130' INT
-    trap 'exit 143' TERM
-    if [ -n "$MAINTENANCE_STATE$MAINTENANCE_GATE$MAINTENANCE_BUILD" ]; then
-        acquire_app_environment_lock || exit 1
-        maintenance_begin || exit 1
-    fi
-    ensure_app || exit $?
+    trap 'release_app_environment_lock' EXIT
+    trap 'release_app_environment_lock; exit 130' INT
+    trap 'release_app_environment_lock; exit 143' TERM
     inject_secrets
 
     # ── Build + push the KEEP-ALIVE image (deps baked; CMD = sleep infinity) ──
@@ -3076,7 +2974,6 @@ print("1" if any(v.get("name")==os.environ["VN"] for v in data) else "0")' 2>/de
     write_state "$mid"
 
     prepare_warm_source "$mid" || exit 1
-    maintenance_prestart || exit 1
     require_machine_ready "$mid" || exit 1
 
     # ── git clone the repo into /data/repo (auth via validated controller token) ─
@@ -3158,10 +3055,15 @@ fi
 # Print the snapshot a peer published while this refresh request waited for the
 # app environment lock, when its proof covers the exact expected manifests and
 # passes the same complete-snapshot/epoch check the fleet applies afterwards.
-peer_refreshed_snapshot() {  # peer_refreshed_snapshot <request-epoch>
+# <request-mtime-ns> is a marker file's mtime taken when the request started, on
+# the state file's own filesystem: both times come from the same kernel clock.
+# (Comparing an mtime with `date +%s` let a peer's write just after a second
+# boundary read as one second older than the request, so it was not reused.)
+peer_refreshed_snapshot() {  # peer_refreshed_snapshot <request-mtime-ns>
     local since="$1" s_node="" s_py="" s_epoch="" s_snap="" written="" vol=""
+    [[ "$since" =~ ^[0-9]+$ ]] || return 1
     [ -f "$WARM_DEPS_STATE_FILE" ] || return 1
-    written="$(python3 -c 'import os, sys; print(int(os.stat(sys.argv[1]).st_mtime))' "$WARM_DEPS_STATE_FILE" 2>/dev/null)" || return 1
+    written="$(python3 -c 'import os, sys; print(os.stat(sys.argv[1]).st_mtime_ns)' "$WARM_DEPS_STATE_FILE" 2>/dev/null)" || return 1
     [ "${written:-0}" -ge "$since" ] || return 1
     read -r s_node s_py s_epoch s_snap < "$WARM_DEPS_STATE_FILE" || return 1
     [ "$s_node" = "$EXPECTED_NODE_FP" ] && [ "$s_py" = "$EXPECTED_PY_FP" ] && [ -n "$s_snap" ] || return 1
@@ -3306,7 +3208,13 @@ if len(mounts) == 1 and rows[0].get("id"): print(rows[0]["id"], mounts[0].get("v
     }
     echo "═══ run-bench-cloud --refresh-deps (ref $BENCH_REF) ═══"
     ensure_app
-    REFRESH_REQUESTED_EPOCH="$(date +%s)"
+    # The request's start as a fresh marker's mtime (ns) beside the state file,
+    # so peer_refreshed_snapshot compares two times from the same kernel clock.
+    mkdir -p "$(dirname "$WARM_DEPS_STATE_FILE")"
+    REFRESH_REQUEST_MARKER="$(mktemp "$(dirname "$WARM_DEPS_STATE_FILE")/.refresh-request.XXXXXX")"
+    REFRESH_REQUESTED_EPOCH="$(python3 -c 'import os, sys; print(os.stat(sys.argv[1]).st_mtime_ns)' "$REFRESH_REQUEST_MARKER")"
+    rm -f "$REFRESH_REQUEST_MARKER"
+    [ -n "$REFRESH_REQUESTED_EPOCH" ] || { echo "❌ could not stamp the refresh request" >&2; exit 1; }
     CLOUDBENCH_HOLD_APP_ENV_LOCK=1
     acquire_app_environment_lock || exit 1
     # Concurrent controllers queue here for the same refresh. Once one finishes,
@@ -5595,7 +5503,6 @@ if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ]; then
     [ -n "$_ghb64" ] || { echo "❌ No controller GitHub token for boot-launch." >&2; exit 1; }
     _envargs=(
         --env CLOUDBENCH_BOOT=1
-        --env "CLOUDBENCH_KERNEL_PROXY_CUSTODY=$CLOUDBENCH_KERNEL_PROXY_CUSTODY"
         --env CODEX_AUTH_PATH=
         --env CLOUDBENCH_CODEX_AUTH_HELPER=/cloudbench-codex-auth.py
         --env "CLOUDBENCH_CODEX_AUTH_SHA256=$CODEX_AUTH_SHA256"
@@ -5940,14 +5847,9 @@ except Exception:
     _start_log="$OUT_DIR/cloudbench-boot-start.log"
     : > "$_start_log"
     _start_ok=0
-    for _s in $(seq 1 "${CLOUDBENCH_BOOT_START_ATTEMPTS:-4}"); do
-        if _with_timeout "${CLOUDBENCH_BOOT_START_TIMEOUT:-60}" \
-              flyctl machine start "$mid" -a "$APP" >> "$_start_log" 2>&1; then
-            _start_ok=1
-            break
-        fi
-        sleep $(( _s * 2 ))
-    done
+    if boot_launch_start_after_config "$mid" "$_start_log"; then
+        _start_ok=1
+    fi
     if [ "$_start_ok" = 1 ]; then
         printf '%s\n' "$mid" > "$POST_CONFIG_START_MARKER.tmp.$$"
         mv "$POST_CONFIG_START_MARKER.tmp.$$" "$POST_CONFIG_START_MARKER"
@@ -6083,7 +5985,6 @@ STAGED_LOCAL_FILES+=("$WRAPPER_LOCAL")
     echo '}'
     echo "chmod +x /data/cloudbench-run.sh"
     echo "export REF=$(printf '%q' "$BENCH_REF")"
-    echo "export CLOUDBENCH_KERNEL_PROXY_CUSTODY=$CLOUDBENCH_KERNEL_PROXY_CUSTODY"
     echo "export CLOUDBENCH_GITHUB_TOKEN_B64=$(printf '%q' "$CONTROLLER_GITHUB_TOKEN_B64")"
     echo "export CLOUDBENCH_FETCH_REF_SCRIPT=/data/cloudbench-fetch-ref.sh"
     echo "export CLOUDBENCH_SYNC_DEPS_SCRIPT=/data/cloudbench-sync-deps.sh"

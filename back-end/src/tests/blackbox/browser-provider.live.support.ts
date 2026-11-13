@@ -3,6 +3,7 @@
 /** Live Kernel/Steel/Browser Use provider parity + rotate_ip ladder (split for max-lines). */
 
 import { randomUUID } from 'node:crypto';
+import { withBrowserProviderServer } from './browser-provider.fixture-server.support';
 import Kernel from '@onkernel/sdk';
 import jwt from 'jsonwebtoken';
 import { chromium } from 'playwright';
@@ -53,6 +54,10 @@ async function steelDefaultSessionBoots(): Promise<boolean> {
 }
 
 export async function runLiveProviderParity(): Promise<void> {
+  await withBrowserProviderServer('kernel', runConfiguredProviderParity);
+}
+
+async function runConfiguredProviderParity(): Promise<void> {
   const baseUrl = process.env.TEST_BASE_URL?.replace(/\/$/, '');
   if (!baseUrl) return;
   const apiKey = process.env.BACKEND_API_KEY?.trim();
@@ -105,8 +110,7 @@ export async function runLiveProviderParity(): Promise<void> {
     });
 
   await prisma.user.create({ data: { userId, name: 'Kernel Provider Blackbox' } });
-  // Pin Kernel through the persisted preference so this parity still runs on
-  // Kernel when the deployment default is Tilion (BROWSER_PROVIDER=tilion).
+  // The owned route server selects Kernel explicitly; its preference supplies proxy options.
   await prisma.browserContext.create({
     data: {
       userId,

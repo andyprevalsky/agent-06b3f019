@@ -141,8 +141,7 @@ python3(){ cat >/dev/null; echo STAGED; }
   self.assertEqual(json.loads((self.out/'terminal.json').read_text())['error_class'],'Cancelled')
  def environment_entry(self,args):
   repo=self.root/'fixture-repo';lib=repo/'scripts/lib';lib.mkdir(parents=True);(repo/'agents').mkdir();(repo/'back-end').mkdir()
-  (lib/'cloudbench-env.sh').write_bytes((ROOT/'lib/cloudbench-env.sh').read_bytes())
-  (lib/'cloudbench-app-env-lock.sh').write_text('# fixture: no provider or credential operations\n')
+  for name in ('cloudbench-env.sh','cloudbench-app-env-lock.sh'):(lib/name).write_text('# fixture: no provider or credential operations\n')
   (lib/'cloudbench-github-token.sh').write_text('cloudbench_export_controller_github_token(){ return 0; }\n')
   binp=self.root/'fixture-bin';binp.mkdir();fly=binp/'flyctl';receipt=self.root/'fly-call.json'
   fly.write_text('#!/usr/bin/env python3\nimport json,os,sys\nfrom pathlib import Path\nassert sys.argv[1:]==["secrets","list","-a","navi-whisper-lux-bench","--json"]\nPath(os.environ["FIXTURE_FLY_CALL"]).write_text(json.dumps(sys.argv[1:]))\nprint(json.dumps([{"Name":n} for n in "AGENTS_ENV_B64 BACKEND_ENV_B64 AGENTS_ENV_SHA256 BACKEND_ENV_SHA256 CLOUDBENCH_BROWSER_PROVIDER CLOUDBENCH_WORKER_BROWSER_PROVIDER GITHUB_TOKEN".split()]))\n');fly.chmod(0o755)

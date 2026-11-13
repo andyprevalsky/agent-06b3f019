@@ -2827,17 +2827,6 @@ readiness_function() {
   ' "$ROOT_DIR/scripts/run-bench-cloud"
 }
 
-warm_resize_fixture_helpers() {
-  # The extracted resize also uses the real owner and acknowledged-completion
-  # helpers. Bind a private lease to this live shell, never bypass the guard.
-  source "$ROOT_DIR/scripts/lib/cloudbench-app-env-lock.sh"
-  APP_ENV_LOCK_FILE="$TMP_ROOT/warm-resize-owner.lock"
-  printf '%s\n' "$$" > "$APP_ENV_LOCK_FILE"
-  function_body="$(readiness_function wait_for_warm_resize)"
-  [ -n "$function_body" ] || fail "could not load production wait_for_warm_resize"
-  eval "$function_body"
-}
-
 readiness_failures=0
 
 # The shared warm source is durable provider state and can retain a stale or
@@ -2848,27 +2837,14 @@ readiness_failures=0
   function_body="$(readiness_function resize_stopped_warm_source)"
   [ -n "$function_body" ] || fail "could not load production resize_stopped_warm_source"
   eval "$function_body"
-  warm_resize_fixture_helpers
   APP="cloudbench-readiness-regression"
   resize_args="$TMP_ROOT/warm-resize.args"
   machine_state() { echo stopped; }
-  FLY() {
-    case "$1 $2" in
-      'machine update') printf '%s\n' "$*" > "$resize_args" ;;
-      'machines list') printf '%s\n' '[{"id":"warm-1","state":"stopped","config":{"guest":{"cpu_kind":"shared","cpus":4,"memory_mb":8192}}}]' ;;
-      *) return 1 ;;
-    esac
-  }
+  FLY() { printf '%s\n' "$*" > "$resize_args"; }
   resize_stopped_warm_source warm-1 shared-cpu-4x 8192 maintenance >/dev/null ||
     fail "warm-source maintenance resize must succeed"
   grep -Fq -- '--command sleep infinity' "$resize_args" ||
     fail "warm-source resize must normalize the durable keepalive command"
-  release_app_environment_lock
-  : > "$resize_args"
-  if resize_stopped_warm_source warm-1 shared-cpu-4x 8192 maintenance >/dev/null 2>&1; then
-    fail "warm-source resize must refuse a missing owner lease"
-  fi
-  [ ! -s "$resize_args" ] || fail "unowned warm-source resize must not issue an update"
 ) || readiness_failures=$((readiness_failures + 1))
 
 (
@@ -3028,6 +3004,107 @@ readiness_failures=0
     fail "maintenance work executed after readiness failure"
 ) || readiness_failures=$((readiness_failures + 1))
 
+# Boot-launch post-config start on a fresh clone (PR #1927 smoke, Machine
+# 8d967d3f534068): Fly refused four starts in 17s with failed_precondition
+# `machine getting replaced` then `machine still active`, settled `stopped`
+# afterwards, and nothing re-requested start. The provider fake replays those
+# exact refusals for five starts, then accepts. The start must wait on Fly's
+# settled condition for the exact Machine and keep retrying that precondition
+# within its bounded window; ordinary errors keep the 4-attempt budget.
+boot_start_fixture() {  # boot_start_fixture <case> <per-call plan: P=precondition O=other A=accept>
+  local dir="$TMP_ROOT/boot-start-$1"
+  mkdir -p "$dir"
+  printf '%s\n' 0 > "$dir/starts"
+  : > "$dir/waits"
+  printf '%s\n' "$2" > "$dir/plan"
+  printf '%s' "$dir"
+}
+boot_start_plan() {  # boot_start_plan <count> <kind>
+  local i out=""
+  for i in $(seq 1 "$1"); do out="$out$2 "; done
+  printf '%s' "$out"
+}
+boot_start_fake_provider='
+  _with_timeout() { shift; "$@"; }
+  sleep() { :; }
+  flyctl() {
+    case "$1 $2" in
+      "machine start")
+        local n kind; n=$(( $(cat "$BOOT_FIXTURE/starts") + 1 ))
+        printf "%s\n" "$n" > "$BOOT_FIXTURE/starts"
+        # Hard stop for a pre-fix spin: SECONDS does not advance under the stubbed sleep.
+        [ "$n" -le 60 ] || { echo "$3 has been started"; return 0; }
+        kind="$(cut -d" " -f"$n" "$BOOT_FIXTURE/plan")"
+        case "$kind" in
+          P)
+            if [ "$n" -eq 1 ]; then
+              echo "Error: could not start machine $3: failed to start VM $3: failed_precondition: machine getting replaced, refusing to start (Request ID: 01M75DF1AATXMBN3RKN2JCREV4-sjc)" >&2
+            else
+              echo "Error: could not start machine $3: failed to start VM $3: failed_precondition: machine still active, refusing to start (Request ID: 01M75DFJ4YBNMKGRDBP59HGZ1M-sjc)" >&2
+            fi
+            return 1 ;;
+          O) echo "Error: could not start machine $3: failed to start VM $3: unavailable: host busy" >&2; return 1 ;;
+        esac
+        echo "$3 has been started"
+        ;;
+      "machine wait") printf "%s\n" "$*" >> "$BOOT_FIXTURE/waits" ;;
+      *) echo "unexpected flyctl $*" >&2; return 99 ;;
+    esac
+  }
+'
+(
+  function_body="$(readiness_function boot_launch_start_after_config)"
+  [ -n "$function_body" ] || fail "could not load production boot_launch_start_after_config"
+  eval "$function_body"
+  eval "$boot_start_fake_provider"
+  APP=bench-app
+  BOOT_FIXTURE="$(boot_start_fixture replaced "$(boot_start_plan 5 P)A")"
+  boot_launch_start_after_config 8d967d3f534068 "$BOOT_FIXTURE/start.log" ||
+    fail "boot start must survive Fly replacing/still-active refusals after config update"
+  [ "$(cat "$BOOT_FIXTURE/starts")" -eq 6 ] ||
+    fail "boot start must re-request start once Fly settles (starts=$(cat "$BOOT_FIXTURE/starts"))"
+  [ "$(grep -c '^machine wait 8d967d3f534068 -a bench-app --state settled ' "$BOOT_FIXTURE/waits")" -eq 5 ] ||
+    fail "boot start must wait for the exact Machine's settled state after each refusal"
+  grep -q 'machine still active, refusing to start' "$BOOT_FIXTURE/start.log" ||
+    fail "boot start must retain the provider refusal diagnostics"
+
+  # Bounded: an exhausted settle window stops after the refusal in hand.
+  BOOT_FIXTURE="$(boot_start_fixture window "$(boot_start_plan 59 P)")"
+  rc=0
+  CLOUDBENCH_BOOT_START_SETTLE_SECONDS=0 \
+    boot_launch_start_after_config 8d967d3f534068 "$BOOT_FIXTURE/start.log" || rc=$?
+  [ "$rc" -ne 0 ] && [ "$(cat "$BOOT_FIXTURE/starts")" -eq 1 ] ||
+    fail "boot start settle retry must be bounded (rc=$rc starts=$(cat "$BOOT_FIXTURE/starts"))"
+
+  # Other provider errors keep the original 4-attempt budget and never wait.
+  BOOT_FIXTURE="$(boot_start_fixture other "$(boot_start_plan 59 O)")"
+  rc=0
+  boot_launch_start_after_config 8d967d3f534068 "$BOOT_FIXTURE/start.log" || rc=$?
+  [ "$rc" -ne 0 ] && [ "$(cat "$BOOT_FIXTURE/starts")" -eq 4 ] && [ ! -s "$BOOT_FIXTURE/waits" ] ||
+    fail "non-precondition start errors must keep the 4-attempt budget (rc=$rc starts=$(cat "$BOOT_FIXTURE/starts"))"
+
+  # Settle-window refusals never consume the ordinary budget: after five
+  # refusals, a transient ordinary failure still gets its own retries.
+  BOOT_FIXTURE="$(boot_start_fixture mixed-recovers "$(boot_start_plan 5 P)$(boot_start_plan 3 O)A")"
+  boot_launch_start_after_config 8d967d3f534068 "$BOOT_FIXTURE/start.log" ||
+    fail "an ordinary failure after settle-window refusals must keep its retry budget (starts=$(cat "$BOOT_FIXTURE/starts"))"
+  [ "$(cat "$BOOT_FIXTURE/starts")" -eq 9 ] ||
+    fail "mixed refusals must reach the accepting start (starts=$(cat "$BOOT_FIXTURE/starts"))"
+
+  # Classify each response alone: an earlier refusal still in the log must not
+  # turn later ordinary failures into unbounded settle-window retries.
+  BOOT_FIXTURE="$(boot_start_fixture current-response "P $(boot_start_plan 58 O)")"
+  rc=0
+  boot_launch_start_after_config 8d967d3f534068 "$BOOT_FIXTURE/start.log" || rc=$?
+  [ "$rc" -ne 0 ] && [ "$(cat "$BOOT_FIXTURE/starts")" -eq 5 ] &&
+    [ "$(wc -l < "$BOOT_FIXTURE/waits")" -eq 1 ] ||
+    fail "only the current start response may select a settle wait (rc=$rc starts=$(cat "$BOOT_FIXTURE/starts") waits=$(wc -l < "$BOOT_FIXTURE/waits"))"
+) || readiness_failures=$((readiness_failures + 1))
+boot_start_call_sites="$(grep -c '^[[:space:]]*if boot_launch_start_after_config "\$mid" "\$_start_log"; then$' \
+  "$ROOT_DIR/scripts/run-bench-cloud" || true)"
+[ "$boot_start_call_sites" = "1" ] ||
+  fail "boot-launch must submit its post-config start through boot_launch_start_after_config (found=$boot_start_call_sites)"
+
 # A readiness helper that fails closed is useless if a caller bypasses it. All
 # three maintenance paths must use the combined gate, leaving the component
 # start and SSH calls reachable only inside that gate.
@@ -3061,7 +3138,6 @@ wait_call_sites="$(grep -c '^[[:space:]]*wait_for_ssh "' \
   ' "$ROOT_DIR/scripts/run-bench-cloud")"
   [ -n "$function_body" ] || fail "could not load resize_stopped_warm_source"
   eval "$function_body"
-  warm_resize_fixture_helpers
   APP="cloudbench-resize-rate-limit"
   CLOUDBENCH_WARM_RESIZE_ATTEMPTS=3
   CLOUDBENCH_WARM_RESIZE_RETRY_SECONDS=0
@@ -3074,10 +3150,6 @@ wait_call_sites="$(grep -c '^[[:space:]]*wait_for_ssh "' \
   stop_machine_strict() { return 0; }
   sleep() { :; }
   FLY() {
-    if [ "$1 $2" = 'machines list' ]; then
-      printf '%s\n' '[{"id":"mid-rl","state":"stopped","config":{"guest":{"cpu_kind":"shared","cpus":4,"memory_mb":8192}}}]'
-      return 0
-    fi
     local c
     c="$(cat "$call_file")"
     c=$((c + 1))
@@ -3101,7 +3173,6 @@ wait_call_sites="$(grep -c '^[[:space:]]*wait_for_ssh "' \
     capture && /^}$/ { exit }
   ' "$ROOT_DIR/scripts/run-bench-cloud")"
   eval "$function_body"
-  warm_resize_fixture_helpers
   APP="cloudbench-resize-rate-limit"
   CLOUDBENCH_WARM_RESIZE_ATTEMPTS=2
   CLOUDBENCH_WARM_RESIZE_RETRY_SECONDS=0
@@ -3127,7 +3198,6 @@ wait_call_sites="$(grep -c '^[[:space:]]*wait_for_ssh "' \
     capture && /^}$/ { exit }
   ' "$ROOT_DIR/scripts/run-bench-cloud")"
   eval "$function_body"
-  warm_resize_fixture_helpers
   APP="cloudbench-resize-concurrent"
   CLOUDBENCH_WARM_RESIZE_ATTEMPTS=3
   CLOUDBENCH_WARM_RESIZE_RETRY_SECONDS=0
@@ -3139,10 +3209,6 @@ wait_call_sites="$(grep -c '^[[:space:]]*wait_for_ssh "' \
   stop_machine_strict() { return 0; }
   sleep() { :; }
   FLY() {
-    if [ "$1 $2" = 'machines list' ]; then
-      printf '%s\n' '[{"id":"mid-cu","state":"stopped","config":{"guest":{"cpu_kind":"shared","cpus":4,"memory_mb":8192}}}]'
-      return 0
-    fi
     local c
     c="$(cat "$call_file")"
     c=$((c + 1))
@@ -3812,11 +3878,11 @@ guest_temporal_case() {  # <case> ; prints nothing on success
   local case_name="$1" dir="$TMP_ROOT/guest-temporal-$1"
   mkdir -p "$dir/repo/agents" "$dir/repo/back-end" "$dir/tmp"
   chmod 700 "$dir/tmp"
-  printf 'BROWSER_PROVIDER=kernel\nOPENAI_API_KEY=sk-agents\nTEMPORAL_ADDRESS=prod.example:7233\nTEMPORAL_NAMESPACE=prod-ns.acct\nTEMPORAL_API_KEY=prod-secret-key\nTEMPORAL_TASK_QUEUE=navi-agent-tasks\nTEMPORAL_ADDRESS_NOTE=keep\n' > "$dir/repo/agents/.env"
+  printf 'OPENAI_API_KEY=sk-agents\nTEMPORAL_ADDRESS=prod.example:7233\nTEMPORAL_NAMESPACE=prod-ns.acct\nTEMPORAL_API_KEY=prod-secret-key\nTEMPORAL_TASK_QUEUE=navi-agent-tasks\nTEMPORAL_ADDRESS_NOTE=keep\n' > "$dir/repo/agents/.env"
   if [ "$case_name" = appended ]; then
-    printf 'BROWSER_PROVIDER=kernel\nDATABASE_URL=postgres://prod\nTEMPORAL_TASK_QUEUE=navi-agent-tasks' > "$dir/repo/back-end/.env"
+    printf 'DATABASE_URL=postgres://prod\nTEMPORAL_TASK_QUEUE=navi-agent-tasks' > "$dir/repo/back-end/.env"
   else
-    printf 'BROWSER_PROVIDER=kernel\r\nDATABASE_URL=postgres://prod\r\nexport TEMPORAL_NAMESPACE=prod-ns.acct\r\nTEMPORAL_API_KEY="prod-secret-key"\r\nTEMPORAL_ADDRESS=prod.example:7233\r\n' > "$dir/repo/back-end/.env"
+    printf 'DATABASE_URL=postgres://prod\r\nexport TEMPORAL_NAMESPACE=prod-ns.acct\r\nTEMPORAL_API_KEY="prod-secret-key"\r\nTEMPORAL_ADDRESS=prod.example:7233\r\n' > "$dir/repo/back-end/.env"
   fi
   chmod 600 "$dir/repo/agents/.env" "$dir/repo/back-end/.env"
   local override="$dir/repo/agents/.env.benchmark-temporal"
@@ -3843,15 +3909,9 @@ guest_temporal_case() {  # <case> ; prints nothing on success
     capture && /^}$/ { exit }
   ' "$ROOT_DIR/scripts/run-bench-cloud")"
   [ -n "$function_body" ] || fail "could not load _inject_secrets_locked"
-  local maintenance_targets_body
-  maintenance_targets_body="$(readiness_function maintenance_targets)"
-  [ -n "$maintenance_targets_body" ] || fail "could not load production maintenance_targets"
   (
     cd "$dir/repo"
     eval "$function_body"
-    eval "$maintenance_targets_body"
-    # This fixture stages ordinary pool secrets, outside a maintenance capture.
-    MAINTENANCE_POINTER=""
     APP="$app"
     ROOT_DIR="$dir/repo"
     export TMPDIR="$dir/tmp"
@@ -3860,10 +3920,7 @@ guest_temporal_case() {  # <case> ; prints nothing on success
       explicit-missing) export CLOUDBENCH_GUEST_TEMPORAL_ENV_FILE="$dir/absent" ;;
       *) unset CLOUDBENCH_GUEST_TEMPORAL_ENV_FILE ;;
     esac
-    validate_environment_contract() {
-      CLOUDBENCH_PROD_BROWSER_PROVIDER=kernel; CLOUDBENCH_PROD_WORKER_BROWSER_PROVIDER=kernel
-      cloudbench_write_guest_browser_env_files agents/.env back-end/.env kernel kernel "$1"
-    }
+    validate_environment_contract() { CLOUDBENCH_PROD_BROWSER_PROVIDER=kernel; CLOUDBENCH_PROD_WORKER_BROWSER_PROVIDER=kernel; }
     resolve_durable_github_token() { echo gh-token; }
     assert_app_environment_lock_ownership() { return 0; }
     environment_activation_targets() { printf 'pool\tpool-1\n'; }
@@ -3922,8 +3979,8 @@ guest_temporal_case() {  # <case> ; prints nothing on success
       [ "$manifest_namespace" = None ] || fail "$case_name: manifest must not claim a guest namespace"
       ;;
     applied)
-      printf 'BROWSER_PROVIDER=kernel\nOPENAI_API_KEY=sk-agents\nTEMPORAL_ADDRESS=us-east-1.aws.api.temporal.io:7233\nTEMPORAL_NAMESPACE=bench-ns.acct\nTEMPORAL_API_KEY=guest-secret-key\nTEMPORAL_TASK_QUEUE=navi-agent-tasks\nTEMPORAL_ADDRESS_NOTE=keep\n' > "$dir/expected-agents"
-      printf 'BROWSER_PROVIDER=kernel\r\nDATABASE_URL=postgres://prod\r\nexport TEMPORAL_NAMESPACE=bench-ns.acct\r\nTEMPORAL_API_KEY=guest-secret-key\r\nTEMPORAL_ADDRESS=us-east-1.aws.api.temporal.io:7233\r\n' > "$dir/expected-backend"
+      printf 'OPENAI_API_KEY=sk-agents\nTEMPORAL_ADDRESS=us-east-1.aws.api.temporal.io:7233\nTEMPORAL_NAMESPACE=bench-ns.acct\nTEMPORAL_API_KEY=guest-secret-key\nTEMPORAL_TASK_QUEUE=navi-agent-tasks\nTEMPORAL_ADDRESS_NOTE=keep\n' > "$dir/expected-agents"
+      printf 'DATABASE_URL=postgres://prod\r\nexport TEMPORAL_NAMESPACE=bench-ns.acct\r\nTEMPORAL_API_KEY=guest-secret-key\r\nTEMPORAL_ADDRESS=us-east-1.aws.api.temporal.io:7233\r\n' > "$dir/expected-backend"
       cmp -s "$dir/staged-agents.env" "$dir/expected-agents" || fail "applied: guest agents env must change only the three Temporal keys"
       cmp -s "$dir/staged-backend.env" "$dir/expected-backend" || fail "applied: guest backend env must change only the three Temporal keys"
       grep -Fq 'guest Temporal namespace override: bench-ns.acct' "$dir/stdout" || fail "applied: staging must report the guest namespace"
@@ -3935,7 +3992,7 @@ guest_temporal_case() {  # <case> ; prints nothing on success
         fail "bench-applied: staged guest agents env must carry the committed bench namespace"
       ;;
     appended)
-      printf 'BROWSER_PROVIDER=kernel\nDATABASE_URL=postgres://prod\nTEMPORAL_TASK_QUEUE=navi-agent-tasks\nTEMPORAL_ADDRESS=us-east-1.aws.api.temporal.io:7233\nTEMPORAL_NAMESPACE=bench-ns.acct\nTEMPORAL_API_KEY=guest-secret-key\n' > "$dir/expected-backend"
+      printf 'DATABASE_URL=postgres://prod\nTEMPORAL_TASK_QUEUE=navi-agent-tasks\nTEMPORAL_ADDRESS=us-east-1.aws.api.temporal.io:7233\nTEMPORAL_NAMESPACE=bench-ns.acct\nTEMPORAL_API_KEY=guest-secret-key\n' > "$dir/expected-backend"
       cmp -s "$dir/staged-backend.env" "$dir/expected-backend" || fail "appended: absent guest Temporal keys must be appended"
       ;;
   esac

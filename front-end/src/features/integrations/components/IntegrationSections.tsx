@@ -4,12 +4,16 @@
  * [MOUNTED] --> renders each section card delegating to domain hooks.
  * Signed-in accounts also get CLI setup, with backend-verified connection state.
  *
- * Granola: GranolaSection over the page's useGranola (API key, sync, disconnect).
+ * Meeting note taker: shared Granola/Fireflies provider cards and hooks.
+ * Pebble Index 01 (last) opens the guided setup modal owned by Integrations.
  *
  * File System is a FE-only stub: website shows Download for Mac; Mac app
  * shows the plus and stays [MOUNTED] on click (no hook, no backend).
  */
 
+import { integrationMatchesSearch } from '../hooks/integrationSearch';
+import type { IntegrationCatalogKey } from '../types';
+import type { ReactNode } from 'react';
 import type { useAccordion } from '../hooks/useAccordion';
 import type { useIntegrationData } from '../hooks/useIntegrationData';
 import type { useBrowserSync } from '../hooks/useBrowserSync';
@@ -19,7 +23,8 @@ import type { useMessagesSync } from '../hooks/useMessagesSync';
 import type { useGmailConnect } from '../hooks/useGmailConnect';
 import type { useIntegrationActions } from '../hooks/useIntegrationActions';
 import type { usePlaidIntegration } from '../hooks/usePlaidIntegration';
-import type { useGranola } from '../hooks/useGranola';
+import MeetingNotesSection from './MeetingNotesSection';
+import type { MeetingNotesConnections } from '../types';
 
 import BrowserCookiesSection from './BrowserCookiesSection';
 import PasswordsSection from './PasswordsSection';
@@ -29,9 +34,10 @@ import SocialsSection from './SocialsSection';
 import PlaidSection from './PlaidSection';
 import FileSystemSection from './FileSystemSection';
 import CliIntegrationsSection from './CliIntegrationsSection';
-import GranolaSection from './GranolaSection';
+import PebbleIndexSection from './PebbleIndexSection';
 
 interface IntegrationSectionsProps {
+  search: string;
   isBrowserCookiesAvailable: boolean;
   isPasskeysAvailable: boolean;
   isIMessageAvailable: boolean;
@@ -40,6 +46,7 @@ interface IntegrationSectionsProps {
   isGptCodeAvailable: boolean;
   isFileSystemAvailable: boolean;
   isFullySignedIn: boolean;
+  onPebbleIndexConnect: () => void;
   accordion: ReturnType<typeof useAccordion>;
   data: ReturnType<typeof useIntegrationData>;
   browser: ReturnType<typeof useBrowserSync>;
@@ -49,7 +56,7 @@ interface IntegrationSectionsProps {
   gmail: ReturnType<typeof useGmailConnect>;
   actions: ReturnType<typeof useIntegrationActions>;
   plaid: ReturnType<typeof usePlaidIntegration>;
-  granola: ReturnType<typeof useGranola>;
+  meetingNotes: MeetingNotesConnections;
 }
 
 function PlaidIntegrationSection({ plaid }: Pick<IntegrationSectionsProps, 'plaid'>) {
@@ -135,90 +142,195 @@ function MessagesIntegrationSection({
   );
 }
 
-export default function IntegrationSections({
+function PasswordsIntegrationSection({
   isBrowserCookiesAvailable,
   isPasskeysAvailable,
-  isIMessageAvailable,
-  isWhatsAppAvailable,
-  isClaudeCodeAvailable,
-  isGptCodeAvailable,
-  isFileSystemAvailable,
-  isFullySignedIn,
   accordion,
   data,
-  browser,
   passwords,
-  compute,
-  messages,
-  gmail,
   actions,
-  plaid,
-  granola,
+}: Pick<
+  IntegrationSectionsProps,
+  | 'isBrowserCookiesAvailable'
+  | 'isPasskeysAvailable'
+  | 'accordion'
+  | 'data'
+  | 'passwords'
+  | 'actions'
+>) {
+  return (
+    <PasswordsSection
+      expanded={accordion.passwordsExpanded}
+      onToggle={() => accordion.toggleSection('passwords')}
+      isBrowserCookiesAvailable={isBrowserCookiesAvailable}
+      isPasskeysAvailable={isPasskeysAvailable}
+      chromePasswordsSynced={data.chromePasswordsSynced}
+      applePasswordsSynced={data.applePasswordsSynced}
+      passkeysSynced={data.passkeysSynced}
+      atlasPasswordsSynced={data.atlasPasswordsSynced}
+      passwordSyncLoading={passwords.passwordSyncLoading}
+      onChromeSync={() => void actions.onChromePasswordsSync()}
+      onPasskeysOpen={() => passwords.openCredentialExchangeModal()}
+      onAtlasPasswordsOpen={() => passwords.setAtlasPasswordsModalOpen(true)}
+    />
+  );
+}
+
+function SocialsIntegrationSection({
+  isBrowserCookiesAvailable,
+  accordion,
+  messages,
+  actions,
+}: Pick<
+  IntegrationSectionsProps,
+  'isBrowserCookiesAvailable' | 'accordion' | 'messages' | 'actions'
+>) {
+  return (
+    <SocialsSection
+      expanded={accordion.socialsExpanded}
+      onToggle={() => accordion.toggleSection('socials')}
+      isBrowserCookiesAvailable={isBrowserCookiesAvailable}
+      linkedinSyncLoading={messages.linkedinSyncLoading}
+      linkedinSyncStarted={messages.linkedinSyncStarted}
+      linkedinConnected={messages.linkedinConnected}
+      onLinkedInSync={() => void actions.onLinkedInSync()}
+    />
+  );
+}
+
+/** STATE MACHINE: mounted groups remain live while search changes visibility. */
+function SearchGroup({
+  catalogKey,
+  search,
+  children,
+}: {
+  catalogKey: IntegrationCatalogKey;
+  search: string;
+  children: ReactNode;
+}) {
+  return <div hidden={!integrationMatchesSearch(catalogKey, search)}>{children}</div>;
+}
+export default function IntegrationSections(props: IntegrationSectionsProps) {
+  const {
+    search,
+    isBrowserCookiesAvailable,
+    isPasskeysAvailable,
+    isIMessageAvailable,
+    isWhatsAppAvailable,
+    isClaudeCodeAvailable,
+    isGptCodeAvailable,
+    isFullySignedIn,
+    accordion,
+    data,
+    browser,
+    passwords,
+    compute,
+    messages,
+    gmail,
+    actions,
+    plaid,
+  } = props;
+  return (
+    <>
+      <SearchGroup catalogKey="browsers" search={search}>
+        <BrowserCookiesSection
+          isAvailable={isBrowserCookiesAvailable}
+          expanded={accordion.browsersExpanded}
+          onToggle={() => accordion.toggleSection('browsers')}
+          installedBrowsers={browser.installedBrowsers}
+          connectedBrowsers={data.connectedBrowsers}
+          browserSyncLoading={browser.browserSyncLoading}
+          onBrowserSync={(bt) => void actions.onBrowserSync(bt)}
+        />
+      </SearchGroup>
+
+      <SearchGroup catalogKey="passwords" search={search}>
+        <PasswordsIntegrationSection
+          isBrowserCookiesAvailable={isBrowserCookiesAvailable}
+          isPasskeysAvailable={isPasskeysAvailable}
+          accordion={accordion}
+          data={data}
+          passwords={passwords}
+          actions={actions}
+        />
+      </SearchGroup>
+
+      <SearchGroup catalogKey="messages" search={search}>
+        <MessagesIntegrationSection
+          isIMessageAvailable={isIMessageAvailable}
+          isWhatsAppAvailable={isWhatsAppAvailable}
+          accordion={accordion}
+          data={data}
+          messages={messages}
+          gmail={gmail}
+          actions={actions}
+        />
+      </SearchGroup>
+
+      {isFullySignedIn && (
+        <SearchGroup catalogKey="compute" search={search}>
+          <ComputeIntegrationSection
+            isClaudeCodeAvailable={isClaudeCodeAvailable}
+            isGptCodeAvailable={isGptCodeAvailable}
+            accordion={accordion}
+            data={data}
+            compute={compute}
+            actions={actions}
+          />
+        </SearchGroup>
+      )}
+
+      {isFullySignedIn && (
+        <SearchGroup catalogKey="banks" search={search}>
+          <PlaidIntegrationSection plaid={plaid} />
+        </SearchGroup>
+      )}
+
+      <SecondaryIntegrationSections {...props} />
+    </>
+  );
+}
+
+/** STATE MACHINE: secondary groups preserve state while search toggles visibility. */
+function SecondaryIntegrationSections({
+  search,
+  isBrowserCookiesAvailable,
+  isFileSystemAvailable,
+  isFullySignedIn,
+  onPebbleIndexConnect,
+  accordion,
+  messages,
+  actions,
+  meetingNotes,
 }: IntegrationSectionsProps) {
   return (
     <>
-      <BrowserCookiesSection
-        isAvailable={isBrowserCookiesAvailable}
-        expanded={accordion.browsersExpanded}
-        onToggle={() => accordion.toggleSection('browsers')}
-        installedBrowsers={browser.installedBrowsers}
-        connectedBrowsers={data.connectedBrowsers}
-        browserSyncLoading={browser.browserSyncLoading}
-        onBrowserSync={(bt) => void actions.onBrowserSync(bt)}
-      />
-
-      <PasswordsSection
-        expanded={accordion.passwordsExpanded}
-        onToggle={() => accordion.toggleSection('passwords')}
-        isBrowserCookiesAvailable={isBrowserCookiesAvailable}
-        isPasskeysAvailable={isPasskeysAvailable}
-        chromePasswordsSynced={data.chromePasswordsSynced}
-        applePasswordsSynced={data.applePasswordsSynced}
-        passkeysSynced={data.passkeysSynced}
-        atlasPasswordsSynced={data.atlasPasswordsSynced}
-        passwordSyncLoading={passwords.passwordSyncLoading}
-        onChromeSync={() => void actions.onChromePasswordsSync()}
-        onPasskeysOpen={() => passwords.openCredentialExchangeModal()}
-        onAtlasPasswordsOpen={() => passwords.setAtlasPasswordsModalOpen(true)}
-      />
-
-      <MessagesIntegrationSection
-        isIMessageAvailable={isIMessageAvailable}
-        isWhatsAppAvailable={isWhatsAppAvailable}
-        accordion={accordion}
-        data={data}
-        messages={messages}
-        gmail={gmail}
-        actions={actions}
-      />
-
-      {isFullySignedIn && (
-        <ComputeIntegrationSection
-          isClaudeCodeAvailable={isClaudeCodeAvailable}
-          isGptCodeAvailable={isGptCodeAvailable}
+      <SearchGroup catalogKey="socials" search={search}>
+        <SocialsIntegrationSection
+          isBrowserCookiesAvailable={isBrowserCookiesAvailable}
           accordion={accordion}
-          data={data}
-          compute={compute}
+          messages={messages}
           actions={actions}
         />
+      </SearchGroup>
+
+      <SearchGroup catalogKey="files" search={search}>
+        <FileSystemSection isAvailable={isFileSystemAvailable} />
+      </SearchGroup>
+
+      {isFullySignedIn && (
+        <SearchGroup catalogKey="meetingNotes" search={search}>
+          <MeetingNotesSection connections={meetingNotes} />
+        </SearchGroup>
       )}
-
-      {isFullySignedIn && <PlaidIntegrationSection plaid={plaid} />}
-
-      {isFullySignedIn && <GranolaSection granola={granola} />}
-
-      <SocialsSection
-        expanded={accordion.socialsExpanded}
-        onToggle={() => accordion.toggleSection('socials')}
-        isBrowserCookiesAvailable={isBrowserCookiesAvailable}
-        linkedinSyncLoading={messages.linkedinSyncLoading}
-        linkedinSyncStarted={messages.linkedinSyncStarted}
-        linkedinConnected={messages.linkedinConnected}
-        onLinkedInSync={() => void actions.onLinkedInSync()}
-      />
-
-      <FileSystemSection isAvailable={isFileSystemAvailable} />
-      {isFullySignedIn && <CliIntegrationsSection />}
+      <SearchGroup catalogKey="pebble" search={search}>
+        <PebbleIndexSection onConnect={onPebbleIndexConnect} />
+      </SearchGroup>
+      {isFullySignedIn && (
+        <SearchGroup catalogKey="clis" search={search}>
+          <CliIntegrationsSection />
+        </SearchGroup>
+      )}
     </>
   );
 }

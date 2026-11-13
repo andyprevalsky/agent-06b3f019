@@ -24,6 +24,7 @@ from domains.spawn_claude_code_agent.config import (
     CODE_AGENT_ERRORS_HEARTBEAT_KEY,
     CODE_AGENT_PAUSED_STATUS,
     CODE_AGENT_RESIZE_YIELD_REASON,
+    CODE_AGENT_SESSION_FAILED_CODE,
     CODE_AGENT_USAGE_LIMIT_STATUS,
     CODE_SESSION_HEARTBEAT_KEY,
     CODE_SESSION_IDLE_PAUSE_S,
@@ -49,6 +50,7 @@ from domains.spawn_claude_code_agent.repo import (
     keepalive_e2b_session,
     persist_terminal_output,
     report_code_usage_limit,
+    report_undelivered_code_turns,
     resize_e2b_session,
     save_claude_code_message,
     save_code_transcript_batch,
@@ -917,6 +919,53 @@ async def _run_agentic_loop(
     user_turns_seen = 0
     sdk_results_seen = 0
     native_codex_terminal: dict[str, Any] | None = None
+    # The native Codex thread goal (ws-server `goal` events). While it is active
+    # Codex starts continuation turns itself, so a completed turn is not the end.
+    codex_goal_status: str | None = None
+    # Agent turns the ws-server accepted (`queued`) and lost when the session
+    # ended (`user_turn_undelivered`): their senders are told once (the backend
+    # is idempotent per turn; this set only skips repeats within one attach).
+    reported_undelivered: set[str] = set()
+
+    diagnostic_turn_id: str | None = None
+    last_monitor_diagnostic: tuple | None = None
+
+    def log_monitor_state(reason: str = "state_changed") -> None:
+        # Fixed metadata only: never serialize events, objectives, arguments or auth.
+        nonlocal last_monitor_diagnostic
+        terminal = native_codex_terminal or {}
+        turn_id = terminal.get("turn_id")
+        if not isinstance(turn_id, str) or len(turn_id) > 128 or not all(
+            char.isascii() and (char.isalnum() or char in "-_.:") for char in turn_id
+        ):
+            turn_id = None
+        goal_status = codex_goal_status if codex_goal_status in {
+            None, "active", "complete", "budgetLimited", "cleared"
+        } else "other"
+        outcome = terminal.get("turn_outcome", terminal.get("status"))
+        outcome = outcome if outcome in {"completed", "failed", "interrupted"} else None
+        current_turn_id = diagnostic_turn_id
+        if not isinstance(current_turn_id, str) or len(current_turn_id) > 128 or not all(
+            char.isascii() and (char.isalnum() or char in "-_.:") for char in current_turn_id
+        ):
+            current_turn_id = None
+        state = (goal_status, direct_chat_active, current_turn_id, turn_id, outcome)
+        if reason == "state_changed" and state == last_monitor_diagnostic:
+            return
+        last_monitor_diagnostic = state
+        try:
+            logger.info(
+                "[ClaudeCode] Monitor state",
+                agent_id=agent_id, task_id=task_id, provider=code_provider,
+                reason=reason, goal_status=goal_status, direct_hold=direct_chat_active,
+                current_turn_id=current_turn_id, terminal_turn_id=turn_id, terminal_outcome=outcome,
+                completion_admissible=(
+                    code_provider == "codex" and native_codex_terminal is not None
+                    and not direct_chat_active and codex_goal_status != "active"
+                ),
+            )
+        except Exception:
+            pass  # Diagnostic sink failures cannot affect the monitor.
 
     def _mark_terminal_output_persisted() -> None:
         if terminal_output_persisted is not None:
@@ -935,6 +984,7 @@ async def _run_agentic_loop(
     async def on_exit(code: int) -> None:
         nonlocal exit_code
         exit_code = code
+        log_monitor_state("process_exit")
         logger.info("[ClaudeCode] Process exited", agent_id=agent_id, task_id=task_id, exit_code=code)
 
     async def on_connection_change(connected: bool) -> None:
@@ -963,9 +1013,12 @@ async def _run_agentic_loop(
         # replaces everything seen so far instead of appending to it.
         nonlocal completed_codex_turns
         nonlocal direct_chat_active, transcript, user_turns_seen, sdk_results_seen, native_codex_terminal
+        nonlocal codex_goal_status, diagnostic_turn_id
+        diagnostic_turn_id = None
         code_events.clear()
         latest_partials.clear()
         native_codex_terminal = None
+        codex_goal_status = None
         direct_chat_active = False
         user_turns_seen = 0
         sdk_results_seen = 0
@@ -984,12 +1037,24 @@ async def _run_agentic_loop(
         nonlocal completed_codex_turns, last_output_time
         nonlocal sdk_result_at, logged_events
         nonlocal direct_chat_active, user_turns_seen, sdk_results_seen, native_codex_terminal
+        nonlocal codex_goal_status
+        nonlocal diagnostic_turn_id
+        if event.get("provider") == "codex" and event.get("type") in ("turn_started", "turn_ended", "user_turn"):
+            diagnostic_turn_id = event.get("turn_id")
         last_output_time = safe_time()
         code_events.append(event)
         event_index = len(code_events) - 1
         # Events before this spawn's goal turn (attached to a live CLI) are the
         # earlier turns' history: their usage limit or login failure is not this run's.
         history = event_index < history_events
+        if not history and event.get("type") == "user_turn_undelivered":
+            lost = [
+                str(turn_id)
+                for turn_id in event.get("turn_ids") or []
+                if isinstance(turn_id, str) and turn_id and turn_id not in reported_undelivered
+            ]
+            reported_undelivered.update(lost)
+            await report_undelivered_code_turns(agent_id, task_id, lost, str(event.get("reason") or "rejected"))
         usage_limit = None if history else usage_limit_from_event(event)
         if usage_limit is not None and loop_outcome is not None and "usage_limit" not in loop_outcome:
             loop_outcome["usage_limit"] = usage_limit
@@ -1001,6 +1066,8 @@ async def _run_agentic_loop(
                 transcript_pending[record["id"]] = record
         _supersede_partial_snapshot(code_events, latest_partials, event_index)
         if event.get("provider") == "codex":
+            if event.get("type") == "goal":
+                codex_goal_status = event.get("status") if isinstance(event.get("status"), str) else None
             if event.get("type") == "turn_started":
                 native_codex_terminal = None
             elif event.get("type") == "user_turn" and (
@@ -1024,6 +1091,14 @@ async def _run_agentic_loop(
             # A new turn: the next SDK result belongs to it.
             user_turns_seen += 1
             sdk_result_at = None
+        elif event.get("type") == "turn_started" and sdk_result_at is not None:
+            # The CLI started a turn of its own after a caught-up result (a /goal
+            # continuation, a background-task notification): it is working again,
+            # so that result was not its last. The turn's own result re-arms the grace.
+            user_turns_seen += 1
+            sdk_result_at = None
+        if event.get("type") in ("goal", "turn_started", "turn_ended", "user_turn", "direct_chat"):
+            log_monitor_state()
         if is_codex_completed_turn_event(event):
             key = codex_completed_turn_event_key(event, len(code_events) - 1)
             if key not in completed_codex_turn_keys:
@@ -1111,8 +1186,10 @@ async def _run_agentic_loop(
         on_events_replay=on_events_replay,
     )
 
-    if not await ws_client.connect():
-        raise Exception("Failed to connect to Claude Code WebSocket")
+    # A reattach after a long run must survive a brief blip: one failed
+    # handshake used to end the whole session (tar_2b02efd49fc2466497723b3e).
+    if not await ws_client.connect_with_retry():
+        raise Exception(f"Failed to connect to Claude Code WebSocket: {ws_client.last_error or 'unknown error'}")
 
     listen_task = asyncio.create_task(ws_client.listen())
     action_summary.append("Connected to Claude Code WebSocket")
@@ -1142,6 +1219,7 @@ async def _run_agentic_loop(
                         reason=drain_reason,
                         elapsed_s=int(elapsed),
                     )
+                    log_monitor_state("worker_drain_detach")
                     raise CodeSessionDrained(drain_reason)
 
             # C15: a provider usage limit (or an unusable login the sandbox may
@@ -1154,6 +1232,7 @@ async def _run_agentic_loop(
                     task_id=task_id,
                     login_unusable=loop_outcome["login_unusable"],
                 )
+                log_monitor_state("provider_login_unusable")
                 action_summary.append("Provider login unusable; session saved for a retry")
                 break
             if loop_outcome is not None and loop_outcome.get("usage_limit"):
@@ -1163,6 +1242,7 @@ async def _run_agentic_loop(
                     task_id=task_id,
                     usage_limit=loop_outcome["usage_limit"],
                 )
+                log_monitor_state("provider_usage_limit")
                 action_summary.append("Provider usage limit reached; session saved for a retry")
                 break
 
@@ -1183,15 +1263,22 @@ async def _run_agentic_loop(
                         to=resize.get("to"),
                     )
                     action_summary.append(f"Sandbox resize requested: {resize.get('to')}")
+                    log_monitor_state("resize_detach")
                     raise CodeSessionResizeRequested(resize)
 
             # Codex app-server deliberately stays alive between native turns.
             # Its terminal lifecycle, rather than process exit or a silence
             # timeout, completes this attachment. A later start invalidates it;
             # a direct-chat hold keeps the attachment open until hand-back.
-            if code_provider == "codex" and native_codex_terminal is not None and not direct_chat_active:
+            if (
+                code_provider == "codex"
+                and native_codex_terminal is not None
+                and not direct_chat_active
+                and codex_goal_status != "active"
+            ):
                 outcome = native_codex_terminal.get("turn_outcome", native_codex_terminal.get("status"))
                 exit_code = 0 if outcome == "completed" else 1
+                log_monitor_state("native_terminal_admitted")
                 action_summary.append(f"Codex native turn ended: {outcome}")
                 break
 
@@ -1205,6 +1292,7 @@ async def _run_agentic_loop(
                 and not direct_chat_active
                 and (safe_time() - sdk_result_at) >= SDK_POST_RESULT_EXIT_GRACE_S
             ):
+                log_monitor_state("sdk_post_result_exit_grace")
                 grace_elapsed = safe_time() - sdk_result_at
                 logger.warning(
                     "[ClaudeCode] Post-result exit grace exceeded",
@@ -1219,7 +1307,9 @@ async def _run_agentic_loop(
                 break
 
             if ws_client.reconnects_exhausted:
-                await _handle_reconnect_exhausted(sandbox_id, agent_id, task_id, action_summary, code_provider)
+                await _handle_reconnect_exhausted(
+                    sandbox_id, agent_id, task_id, action_summary, code_provider, last_error=ws_client.last_error
+                )
 
             silence_duration = safe_time() - last_output_time
 
@@ -1241,6 +1331,7 @@ async def _run_agentic_loop(
                     silence_s=silence_duration,
                     idle_pause_s=CODE_SESSION_IDLE_PAUSE_S,
                 )
+                log_monitor_state("idle_pause")
                 action_summary.append(
                     f"Session idle for {int(silence_duration)}s with no tool in flight; pausing it (resumable)"
                 )
@@ -1446,6 +1537,7 @@ async def _handle_reconnect_exhausted(
     task_id: str,
     action_summary: list[str],
     code_provider: str = "claude",
+    last_error: Optional[str] = None,
 ) -> None:
     """Handle WebSocket reconnection exhaustion by diagnosing sandbox state."""
     logger.error(
@@ -1495,7 +1587,8 @@ async def _handle_reconnect_exhausted(
     else:
         action_summary.append("DIAGNOSIS: Could not determine sandbox health")
 
-    raise Exception("WebSocket connection to Claude Code sandbox lost after all reconnect attempts")
+    detail = f": {last_error}" if last_error else ""
+    raise Exception(f"WebSocket connection to Claude Code sandbox lost after all reconnect attempts{detail}")
 
 
 # ---------------------------------------------------------------------------
@@ -1881,13 +1974,62 @@ def _structured_response_from_code_evidence(
 # 2026-10-24); the declared output_schema fixes its structure. Keep in sync with
 # CODE_AGENT_HANDOFF_PATH in back-end/src/providers/codeAgentPrompt.ts.
 CODE_AGENT_HANDOFF_PATH = "/home/user/.rose/handoff.json"
+# The ws-server writes the result JSON Schema here from the task text, so the
+# /goal condition can name it without spending Claude's 4000-character goal cap.
+CODE_AGENT_HANDOFF_SCHEMA_PATH = "/home/user/.rose/handoff.schema.json"
+# Standard handoff fields every code agent writes, next to the declared fields
+# (Andy, 2026-11-08): how the run ended plus its git facts. No question field:
+# code agents do not ask questions, they assume and report.
+HANDOFF_STANDARD_KEY = "rose_handoff"
+HANDOFF_COMPLETE = "complete"
+HANDOFF_STATUSES = (HANDOFF_COMPLETE, "blocked", "failed")
+HANDOFF_STANDARD_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "description": "How this run ended. Always required.",
+    "properties": {
+        "status": {
+            "type": "string",
+            "enum": list(HANDOFF_STATUSES),
+            "description": (
+                "complete: the task is done and verified. blocked: an external condition you cannot change "
+                "stops you after reasonable attempts (name it and its evidence in summary). failed: the task "
+                "cannot be done here, shown by what you tried. Never blocked or failed because the work is "
+                "hard, slow, uncertain or would benefit from clarification."
+            ),
+        },
+        "summary": {
+            "type": "string",
+            "description": "What you did, what you verified, and every assumption you made.",
+        },
+        "branch": {"type": ["string", "null"], "description": "Branch your commits are on, or null."},
+        "commit": {"type": ["string", "null"], "description": "Full SHA of your latest commit, or null."},
+        "pr_url": {"type": ["string", "null"], "description": "Pull request URL, or null."},
+        "merged": {
+            "type": ["boolean", "null"],
+            "description": "True only if your change is verified merged into its merge target.",
+        },
+    },
+    "required": ["status", "summary", "branch", "commit", "pr_url", "merged"],
+    "additionalProperties": False,
+}
 # Structure used when the parent declared no output fields.
 DEFAULT_HANDOFF_SCHEMA: Dict[str, Any] = {
     "type": "object",
-    "properties": {"summary": {"type": "string", "description": "What you did and the result."}},
-    "required": ["summary"],
+    "properties": {HANDOFF_STANDARD_KEY: HANDOFF_STANDARD_SCHEMA},
+    "required": [HANDOFF_STANDARD_KEY],
     "additionalProperties": False,
 }
+# The goal's end condition (Andy, 2026-11-08): every code-agent task is a /goal
+# whose condition ends with writing the handoff. The ws-server prefixes /goal.
+HANDOFF_END_CONDITION = (
+    f"End condition: you are done only when {CODE_AGENT_HANDOFF_PATH} holds one JSON object valid against the "
+    f"JSON Schema in {CODE_AGENT_HANDOFF_SCHEMA_PATH} (show it in this conversation by printing the written "
+    "file and validating it against that schema with a command), with "
+    f"{HANDOFF_STANDARD_KEY}.status set to complete (the task is done and verified), or to blocked or failed "
+    "only after reasonable attempts show the task cannot be finished here, never because it is hard, slow, "
+    "uncertain or would benefit from clarification. Do not ask questions: nobody answers them. Make "
+    f"reasonable assumptions, proceed, and list them in {HANDOFF_STANDARD_KEY}.summary."
+)
 # Close responses without a ``handoff`` key come from sessions outside E2B (a
 # Mac folder or the local billing fallback); they keep the session-output result.
 _NO_HANDOFF_CONTRACT = object()
@@ -1920,25 +2062,47 @@ def handoff_json_schema(output_schema: Optional[Dict[str, Any]]) -> Dict[str, An
         name = field.get("name") if isinstance(field, dict) else None
         if not isinstance(name, str) or not name:
             continue
+        if name == HANDOFF_STANDARD_KEY:
+            continue  # reserved for the standard fields
         field_schema, _open_shape = _json_schema_for_response_field(field)
         properties[name] = _with_field_descriptions(field_schema, field)
         if field.get("required", True):
             required.append(name)
     if not properties:
         return DEFAULT_HANDOFF_SCHEMA
-    return {"type": "object", "properties": properties, "required": required, "additionalProperties": False}
+    return {
+        "type": "object",
+        "properties": {HANDOFF_STANDARD_KEY: HANDOFF_STANDARD_SCHEMA, **properties},
+        "required": [HANDOFF_STANDARD_KEY, *required],
+        "additionalProperties": False,
+    }
 
 
 def handoff_task_text(goal: str, output_schema: Optional[Dict[str, Any]]) -> str:
-    """The task sent to the code agent: the goal plus its result schema."""
+    """The task sent to the code agent: the goal, its end condition, then its result schema.
+
+    The ws-server writes the schema after the marker to CODE_AGENT_HANDOFF_SCHEMA_PATH
+    and starts the run as ``/goal <goal + end condition>``.
+    """
     schema = json.dumps(handoff_json_schema(output_schema), sort_keys=True)
-    return f"{goal}\n\nResult JSON Schema for {CODE_AGENT_HANDOFF_PATH}:\n{schema}"
+    return f"{goal}\n\n{HANDOFF_END_CONDITION}\n\nResult JSON Schema for {CODE_AGENT_HANDOFF_PATH}:\n{schema}"
+
+
+def handoff_standard_fields(result: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """The standard ``rose_handoff`` object of a parsed handoff, when present."""
+    standard = result.get(HANDOFF_STANDARD_KEY) if isinstance(result, dict) else None
+    return standard if isinstance(standard, dict) else None
 
 
 def _read_handoff(
     handoff: Optional[Dict[str, Any]], output_schema: Optional[Dict[str, Any]]
 ) -> tuple[Optional[Dict[str, Any]], Optional[str]]:
-    """Return ``(result, None)`` for a schema-valid handoff, else ``(None, reason)``."""
+    """Return ``(result, None)`` for a schema-valid handoff, else ``(None, reason)``.
+
+    A ``complete`` handoff must satisfy the whole schema. A blocked or failed one
+    reports the run truthfully: only its standard fields are required, and the
+    declared fields it does fill must still match their types.
+    """
     import jsonschema
 
     status = handoff.get("status") if isinstance(handoff, dict) else "missing"
@@ -1950,7 +2114,11 @@ def _read_handoff(
         result = json.loads(handoff["content"])
     except json.JSONDecodeError as exc:
         return None, f"The handoff file at {CODE_AGENT_HANDOFF_PATH} is not valid JSON: {exc}."
-    validator = jsonschema.Draft202012Validator(handoff_json_schema(output_schema))
+    schema = handoff_json_schema(output_schema)
+    standard = handoff_standard_fields(result)
+    if standard is not None and standard.get("status") != HANDOFF_COMPLETE:
+        schema = {**schema, "required": [HANDOFF_STANDARD_KEY]}
+    validator = jsonschema.Draft202012Validator(schema)
     errors = sorted(validator.iter_errors(result), key=lambda error: list(error.absolute_path))
     if errors:
         problems = "; ".join(
@@ -2091,15 +2259,22 @@ async def _handoff_result(
     evidence for judges only and never enter the tool result.
     """
     result, handoff_error = _read_handoff(handoff, output_schema)
+    standard = handoff_standard_fields(result)
+    reported_status = standard.get("status") if standard is not None else None
     has_fields = bool(isinstance(output_schema, dict) and output_schema.get("fields"))
-    structured = result if has_fields else None
+    # The parent's declared fields; the standard fields stay in the reasoning.
+    structured = (
+        {key: value for key, value in result.items() if key != HANDOFF_STANDARD_KEY}
+        if has_fields and isinstance(result, dict)
+        else None
+    )
     outcome, outcome_fields = _disabled_verifier_outcome(
         output_schema,
         structured if result is not None else None,
         attempt_completion=attempt_completion,
         exit_code=exit_code,
     )
-    complete = result is not None and outcome == "complete"
+    complete = result is not None and outcome == "complete" and reported_status in (None, HANDOFF_COMPLETE)
     score = 1.0 if complete else 0.5
     header = (
         f"Code-agent verifier off (provider={code_provider}, exit_code={exit_code}, "
@@ -2107,6 +2282,8 @@ async def _handoff_result(
     )
     if outcome == "failed":
         header += " The session ended without a success signal."
+    if reported_status not in (None, HANDOFF_COMPLETE):
+        header += f" The code agent reported {HANDOFF_STANDARD_KEY}.status={reported_status}."
     if result is not None:
         reasoning = (
             f"{header} Handoff from {CODE_AGENT_HANDOFF_PATH}, validated against the declared output schema:\n\n"
@@ -2124,6 +2301,7 @@ async def _handoff_result(
         exit_code=exit_code,
         handoff_status=handoff.get("status") if isinstance(handoff, dict) else None,
         handoff_valid=result is not None,
+        handoff_reported_status=reported_status,
         outcome=outcome,
         score=score,
     )
@@ -3116,6 +3294,54 @@ def _error_ends_the_run(error: BaseException) -> bool:
     return not activity.in_activity() or (isinstance(error, ApplicationError) and error.non_retryable)
 
 
+def code_session_failure_error(
+    error: BaseException,
+    original: BaseException,
+    facts: Optional[Dict[str, Any]],
+    *,
+    local: bool = False,
+) -> BaseException:
+    """The final error of a run whose code session exists, carrying how to resume it.
+
+    A run that died on a dropped connection used to reach the parent as a bare
+    one-liner (tar_2b02efd49fc2466497723b3e): no code_session_id, so the saved
+    sandbox, commits and checkpoint could not be resumed. This error keeps the
+    exact exception and adds the session id, the failure checkpoint and the
+    exact retry call. Without a code session (or on a Mac, which resumes by
+    folder) ``error`` is returned unchanged.
+    """
+    code_session_id = (facts or {}).get("code_session_id")
+    if local or not isinstance(code_session_id, str) or not code_session_id:
+        return error
+    exact = extract_error_message(original)
+    error_type = type(original).__name__
+    checkpoint_seq = (facts or {}).get("checkpoint_seq")
+    saved = f"saved at checkpoint {checkpoint_seq}" if checkpoint_seq is not None else "kept"
+    lines = [
+        f"Code agent run ended abnormally: {error_type}: {exact}",
+        f"Code session {code_session_id} was not lost: its sandbox files, commits and conversation are {saved}.",
+    ]
+    if (facts or {}).get("branch"):
+        lines.append(f"Branch: {facts['branch']}")
+    lines.append(
+        f"Resume it with spawn_agent(type='code', code_session_id='{code_session_id}', goal=<the same goal>)."
+    )
+    final = ApplicationError(
+        "\n".join(lines),
+        {
+            "code_session_id": code_session_id,
+            "code_session": dict(facts or {}),
+            "error": exact,
+            "error_type": error_type,
+            "retry": {"tool": "spawn_agent", "type": "code", "code_session_id": code_session_id},
+        },
+        type=CODE_AGENT_SESSION_FAILED_CODE,
+        non_retryable=True,
+    )
+    final.__cause__ = original
+    return final
+
+
 # ---------------------------------------------------------------------------
 # Temporal activity
 # ---------------------------------------------------------------------------
@@ -3246,11 +3472,22 @@ async def spawn_claude_code_activity(
         code_session_request: ``{"code_session_id": ...}`` to resume a specific
             persistent code session; omitted, the backend resumes the spawning
             agent's latest session for the repo (or creates one on a new branch).
+            ``task_name`` (the spawn's) is stored on the task row as its title.
 
     No runtime limit (C11): the activity runs while the CLI works and heartbeats.
     An idle CLI is paused (status ``paused``, resumable), never failed.
     """
+    if not output_schema:
+        # Invalid scheduled arguments cannot heal on a worker/crash retry. Fail
+        # before installing heartbeat context or allocating a sandbox.
+        raise ApplicationError(
+            "output_schema is required for Claude Code agent - parent agent must provide structured output schema in tool call",
+            type="CODE_AGENT_OUTPUT_SCHEMA_REQUIRED",
+            non_retryable=True,
+        )
+
     structlog.contextvars.bind_contextvars(agent_id=agent_id)
+    source_code_provider = code_provider
 
     from helpers.model_pricing import get_model_pricing_with_fallback
 
@@ -3287,11 +3524,6 @@ async def spawn_claude_code_activity(
     code_events: list[Dict[str, Any]] = []
     terminal_output_persisted_box = [False]
 
-    if not output_schema:
-        raise ValueError(
-            "output_schema is required for Claude Code agent - parent agent must provide structured output schema in tool call"
-        )
-
     if isinstance(attached, dict) and attached.get("target") == "local":
         target = "local"
         local_device_id = attached.get("device_id") or local_device_id
@@ -3303,6 +3535,10 @@ async def spawn_claude_code_activity(
         code_agent_meta["folder"] = attached["folder"]
     if isinstance(attached, dict) and attached.get("preview_url"):
         code_agent_meta["preview_url"] = attached["preview_url"]
+    task_name = (code_session_request or {}).get("task_name")
+    if isinstance(task_name, str) and task_name:
+        # metadata.code_agent.title: the code-agent view's header when opened without one.
+        code_agent_meta["title"] = task_name
     if isinstance(attached, dict) and isinstance(attached.get("sandbox_size"), dict):
         code_agent_meta["sandbox_size"] = attached["sandbox_size"]
 
@@ -3436,6 +3672,19 @@ async def spawn_claude_code_activity(
                 target=target,
                 local_device_id=local_device_id,
                 fresh_conversation=(code_session_request or {}).get("fresh_conversation") is True,
+                task_name=(code_session_request or {}).get("task_name"),
+                cli_settings=(code_session_request or {}).get("cli_settings"),
+                resume_config={
+                    "source_code_provider": source_code_provider,
+                    "spawn_args": {
+                        "type": "code", "goal": goal, "output_schema": output_schema,
+                        "github_repo_link": github_repo_url, "target": target, "task_name": task_name,
+                        "attachments": [item.get("original_filename") for item in attachments or []],
+                    },
+                    "attachments": attachments or [],
+                    "model": model,
+                    "fast_mode_cache_enabled": fast_mode_cache_enabled,
+                },
             )
             code_session_id = session_data.get("code_session_id") or code_session_id
             code_session_facts = _spawn_code_session_facts(session_data)
@@ -3819,6 +4068,13 @@ async def spawn_claude_code_activity(
             code_provider=code_provider,
             reason="idle" if idle_paused else "close",
         )
+        try:
+            logger.info(
+                "[ClaudeCode] Close acknowledged", agent_id=agent_id, task_id=task_id,
+                provider=code_provider, close_reason="idle" if idle_paused else "close",
+            )
+        except Exception:
+            pass  # Diagnostics cannot change close-result processing.
         output_files = close_data.get("output_files", [])
         claude_code_usage = close_data.get("usage")
         code_session_facts = _merge_close_code_session_facts(code_session_facts, close_data)
@@ -4209,7 +4465,10 @@ async def spawn_claude_code_activity(
                     ),
                 )
 
-                await close_e2b_session(task_id=task_id, code_provider=code_provider, reason="failure")
+                # The failure close checkpoints the sandbox (repos, files, CLI log)
+                # and pauses it; its facts name the checkpoint the resume restores.
+                close_data = await close_e2b_session(task_id=task_id, code_provider=code_provider, reason="failure")
+                code_session_facts = _merge_close_code_session_facts(code_session_facts, close_data)
             except Exception as cleanup_error:
                 logger.warning(
                     "[ClaudeCode] Cleanup failed on error",
@@ -4218,7 +4477,9 @@ async def spawn_claude_code_activity(
                     error=str(cleanup_error),
                 )
 
-        raise error
+        raise code_session_failure_error(
+            error, e, code_session_facts, local=bool(local_workspace_place(code_agent_meta))
+        )
 
     finally:
         session_heartbeats.close()

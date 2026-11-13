@@ -39,6 +39,8 @@ PATHS = {
     'canonical-seed-whatsapp-content': ['back-end/*', 'agents/*', 'scripts/*'],
     'seed-memory-ratchet': ['back-end/*', 'agents/*', 'scripts/*'],
     'mac-app-static': ['mac-app/*'],
+    # CLAUDE.md: new tests pass five consecutive runs under CPU load before they are finalized.
+    'new-test-stability': ['*/tests/*', '*.test.*', '*.blackbox.*', '*/test_*.py', '*_test.py'],
 }
 # Quick static checks that run only when triggered; every other quick category is mandatory.
 CONDITIONAL_QUICK = {'mac-app-static'}
@@ -52,6 +54,13 @@ ALWAYS = {
     'e2b-smoke': ('every deploy: the Claude Code E2B sandbox smoke is never diff-skipped '
                   '(DEPRECATED_deploy.md 6c L2226; measured ~106 s, ~840 MB)'),
 }
+
+
+def affected(changed: list[str], selector: Selector | None = None) -> dict:
+    """The dependency-graph result select() consumes; deploy_test_cycle reuses it for refresh carries."""
+    selected = (selector or Selector()).select(changed)
+    return {'all': selected.all_lanes, 'reasons': selected.reasons,
+            'lanes': {k: sorted(v) for k, v in selected.selected.items()}}
 
 
 def select(template: dict, changed: list[str], result: dict, binding: dict | None,
@@ -157,6 +166,11 @@ def standard_template(host: tuple = ()) -> dict:
     for gate in gates:
         if gate['name'] == 'eslint':
             gate.update(command=[sys.executable, 'scripts/check_deploy_static.py', 'lint'], cwd='.')
+        if gate['name'] == 'live-probes':
+            # One case per probe (deploy_gates.live_probes_recipe): a single aggregate exit is
+            # UNVERIFIED, so one provider-side probe failure could never be attributed on its own.
+            from run_deploy_live_probes import PROBE_NAMES
+            gate.update(checks=list(PROBE_NAMES))
         if gate['name'] == 'backend-coverage-blackbox':
             from deploy_test_backend import checks_for, selection
             gate.update(checks=checks_for(selection(ROOT)[1]), native_backend=True, case_protocol=True,
@@ -181,6 +195,12 @@ def standard_template(host: tuple = ()) -> dict:
         {"name": "mac-app-coverage-blackbox", "command": ["npm", "run", "test:coverage"],
          "cwd": "mac-app", "platform": "darwin", "checks": ["mac-app-coverage-blackbox"]},
         dict(MAC_APP_STATIC, command=list(MAC_APP_STATIC['command']), checks=list(MAC_APP_STATIC['checks'])),
+        # A non-quick gate: `scripts/deploy gates --executor blacksmith` gives it a remote Blacksmith slot
+        # (deploy_gates.layout), so the five loaded runs also execute once on that executor's VM. Under
+        # --executor local, deploy_gates.build_template bounds its --load-workers beside the other host gates.
+        {"name": "new-test-stability", "category": "new-test-stability",
+         "command": [sys.executable, "scripts/select_affected_tests.py", "--stability", "--base", "origin/main"],
+         "checks": ["new-test-stability"]},
     ]
     return {"gates": gates}
 
@@ -204,9 +224,7 @@ def main(argv: list[str] | None = None) -> int:
     if not args.list_selected and args.output is None:
         parser.error('the following arguments are required: --output')
     changed = changed_files(args.base, None)
-    selected = Selector().select(changed)
-    result = {'all': selected.all_lanes, 'reasons': selected.reasons,
-              'lanes': {k: sorted(v) for k, v in selected.selected.items()}}
+    result = affected(changed)
     template = json.loads(args.template.read_text()) if args.template else standard_template()
     if args.list_selected:
         selection = select(template, changed, result, None, base=args.base)

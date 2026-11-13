@@ -3,6 +3,12 @@
  */
 
 import { z } from 'zod';
+import { codeCliSettingsSchema } from '../../providers/codeCliSettings';
+import {
+  codeAgentResumeConfigSchema,
+  validateCodeResumeLease,
+  type CodeAgentResumeConfig,
+} from '../../providers/codeAgentResumeConfig';
 import type { FilePointer } from '../../providers/storage';
 import type { ProjectRestoreReport } from '../../providers/projects/types';
 
@@ -21,26 +27,33 @@ export const filePointerSchema = z.object({
   created_by_agent_id: z.string().optional(),
 });
 
-export const createSessionSchema = z.object({
-  agent_id: z.string().uuid(),
-  goal: z.string(),
-  attachments: z.array(filePointerSchema).optional(),
-  github_repo_url: z.string().optional(),
-  user_id: z.string().uuid().optional(), // Required for GitHub repo access check
-  // Persistent code session to resume; omitted → the root's latest for this repo.
-  code_session_id: z.string().uuid().optional(),
-  // Resume this session's sandbox and files in a new CLI conversation (paused-task resume).
-  fresh_conversation: z.boolean().optional(),
-  // Stable per tool call so Temporal retries of one spawn keep their lease.
-  lease_owner: z.string().min(1).max(200).optional(),
-  // Project default branch a new root session's branch is cut from (default: the repo's).
-  base_branch: z.string().min(1).max(255).optional(),
-  // C14: 'local' starts the session on the agent tree's Mac (Rose Mac app).
-  target: z.enum(['cloud', 'local']).optional(),
-  device_id: z.string().uuid().optional(),
-  /** Project to restore; defaults to the agent's own (or its root's) project. */
-  project_id: z.string().uuid().optional(),
-});
+export const createSessionSchema = z
+  .object({
+    agent_id: z.string().uuid(),
+    goal: z.string(),
+    attachments: z.array(filePointerSchema).optional(),
+    github_repo_url: z.string().optional(),
+    user_id: z.string().uuid().optional(), // Required for GitHub repo access check
+    // Persistent code session to resume; omitted → the root's latest for this repo.
+    code_session_id: z.string().uuid().optional(),
+    // Resume this session's sandbox and files in a new CLI conversation (paused-task resume).
+    fresh_conversation: z.boolean().optional(),
+    // Stable per tool call so Temporal retries of one spawn keep their lease.
+    lease_owner: z.string().min(1).max(200).optional(),
+    // Project default branch a new root session's branch is cut from (default: the repo's).
+    base_branch: z.string().min(1).max(255).optional(),
+    // C14: 'local' starts the session on the agent tree's Mac (Rose Mac app).
+    target: z.enum(['cloud', 'local']).optional(),
+    device_id: z.string().uuid().optional(),
+    /** Project to restore; defaults to the agent's own (or its root's) project. */
+    project_id: z.string().uuid().optional(),
+    // The spawn's task_name; the agents list shows it as the code agent's title.
+    task_name: z.string().min(1).max(200).nullable().optional(),
+    // A resuming turn's model / effort / speed: the first resumed turn runs on them.
+    cli_settings: codeCliSettingsSchema.optional(),
+    resume_config: codeAgentResumeConfigSchema.optional(),
+  })
+  .superRefine(validateCodeResumeLease);
 
 export const closeSessionSchema = z.object({
   task_id: z.string().uuid(),
@@ -72,6 +85,11 @@ export interface CreateSessionParams {
   base_branch?: string;
   /** Explicit Project; defaults to the agent's (or its root's) project. */
   project_id?: string;
+  /** The spawn's task_name (the code agent's title in the agents list). */
+  task_name?: string | null;
+  /** A resuming turn's model / effort / speed for the first resumed turn. */
+  cli_settings?: z.infer<typeof codeCliSettingsSchema>;
+  resume_config?: CodeAgentResumeConfig;
 }
 
 export interface CreateSessionResult {

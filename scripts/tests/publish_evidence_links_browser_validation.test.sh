@@ -924,6 +924,64 @@ for fault in ("headers-once", "body-once", "always", "always-late-receipt", "alw
         observed_requests,
     )
 
+
+def check_saved_pause_episode_before_later_task_terminal():
+    from copy import deepcopy
+    task = "saved-pause-task"
+    common = dict(toolName="spawn_browser_agent", task_id=task,
+                  workflowGeneration="saved-pause-generation", provider="tilion")
+    def episode(letter):
+        identity = dict(common, session_id="sess_" + letter * 32)
+        return [msg(**identity, action_type="recording", toolStatus="IN_PROGRESS",
+                    toolCallId=letter + "-start", recording_path="/same/index.html"),
+                msg(**identity, action_type="recording", toolStatus="FINISHED",
+                    recording_view_url="https://ok/" + letter)]
+    first, last = episode("a"), episode("b")
+    terminal = msg(**dict(common, session_id="sess_" + "b" * 32),
+                   action_type="task_complete", toolStatus="FINISHED")
+    complete = first + last + [terminal]
+    original = deepcopy(complete)
+    assert mod.validate_browser_agents_terminated_with_recording(agent, complete) == [], (
+        "a saved pause part does not independently terminate its logical task")
+    assert complete == original
+    for bad in (complete[:-1], first[:1] + last + [terminal]):
+        assert mod.validate_browser_agents_terminated_with_recording(agent, bad)
+    bad = deepcopy(complete); bad[1]["metadata"]["recording_view_url"] = "https://bad/unreachable"
+    assert mod.validate_browser_agents_terminated_with_recording(agent, bad)
+    # A foreign terminal must still never hide a fenced error for the old part.
+    fenced = msg(**dict(common, session_id="sess_" + "a" * 32), action_type="recording",
+                 toolStatus="FINISHED", toolCallId="a-start", recording_path="/same/index.html",
+                 error=True, errorCode="DEPLOY_INTERRUPTED", deploymentFenced=True)
+    assert mod.validate_browser_agents_terminated_with_recording(agent, complete + [fenced])
+
+
+def check_saved_episode_requires_later_logical_terminal():
+    from copy import deepcopy
+    common = dict(toolName="spawn_browser_agent", task_id="continued-task",
+                  workflowGeneration="continued-generation", provider="tilion")
+    def episode(letter):
+        identity = dict(common, session_id="sess_" + letter * 32)
+        return [msg(**identity, action_type="recording", toolStatus="IN_PROGRESS",
+                    toolCallId=letter + "-start", recording_path="/same/index.html"),
+                msg(**identity, action_type="recording", toolStatus="FINISHED",
+                    recording_view_url="https://ok/" + letter)]
+    old, later = episode("a"), episode("b")
+    old_terminal = msg(**dict(common, session_id="sess_" + "a" * 32),
+                       action_type="task_complete", toolStatus="FINISHED")
+    partial = old + [old_terminal] + later
+    assert mod.validate_browser_agents_terminated_with_recording(agent, partial), (
+        "an earlier terminal cannot close a later ordinary saved episode")
+    wrong_generation = msg(**dict(common, workflowGeneration="other-generation", session_id="sess_" + "b" * 32),
+                           action_type="task_complete", toolStatus="FINISHED")
+    assert mod.validate_browser_agents_terminated_with_recording(agent, partial + [wrong_generation]), (
+        "a later terminal from another generation cannot close the saved episode")
+    terminal = msg(**dict(common, session_id="sess_" + "b" * 32),
+                   action_type="task_complete", toolStatus="FINISHED")
+    complete = partial + [terminal]
+    original = deepcopy(complete)
+    assert mod.validate_browser_agents_terminated_with_recording(agent, complete) == []
+    assert complete == original
+
 def check_fenced_recording_episode_provenance():
     from copy import deepcopy
     identity = dict(toolName="spawn_browser_agent", task_id="episode-task",
@@ -1102,6 +1160,8 @@ def check_tilion_recording_episode_provenance():
 
 
 with patch.object(mod, "_probe_recording_view_url", lambda url, timeout=20.0: url.startswith("https://ok/")):
+    check_saved_pause_episode_before_later_task_terminal()
+    check_saved_episode_requires_later_logical_terminal()
     check_fenced_recording_episode_provenance()
     check_tilion_recording_episode_provenance()
 print("publish_evidence_links browser validation checks passed")

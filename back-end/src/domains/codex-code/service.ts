@@ -157,6 +157,10 @@ export async function createSession(params: CreateSessionParams) {
           memoryEnabled: params.memory_enabled,
           freshConversation: params.fresh_conversation === true,
           projectWorkspace,
+          taskName: params.task_name ?? null,
+          cliSettings: params.cli_settings ?? null,
+          resumeConfig: params.resume_config,
+          leaseOwner: params.lease_owner,
         },
         codeSession
       )

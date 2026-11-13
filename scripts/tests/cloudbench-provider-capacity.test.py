@@ -352,9 +352,6 @@ class ProviderCapacityCampaignTests(unittest.TestCase):
         self.assertEqual(width(50, 600, None), 50)  # bounded sliding campaign
         self.assertEqual(width(100, 10, None), 10)  # fewer jobs than width
         self.assertEqual(width(70, 70, None), 70)
-        # Unlike the subprocess cases above, runpy inherits this process's
-        # environment. Pin the same Kernel fixture here; otherwise the real
-        # back-end/.env (Tilion, cap 16) changes the expected 70/71 boundary.
         with mock.patch.dict(os.environ, clean_env(), clear=True), contextlib.redirect_stderr(io.StringIO()) as stderr:
             self.assertEqual(refusal(70), 0)
             self.assertEqual(refusal(71), 78)

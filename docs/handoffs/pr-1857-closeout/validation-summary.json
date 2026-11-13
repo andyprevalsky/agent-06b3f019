@@ -1,0 +1,217 @@
+{
+  "as_of": "2026-11-08T23:20:38.986510+00:00",
+  "source": {
+    "head": "cf85beba8d87fa02212065c0560f32198f09de01",
+    "digest": "8151be07ba488847bb6845f04382b2836c05bf86ff2d5c098a09e7f3cd423ce6"
+  },
+  "phase": "ready",
+  "ready": true,
+  "attempts": [
+    {
+      "phase": "quick",
+      "source": {
+        "head": "cf85beba8d87fa02212065c0560f32198f09de01",
+        "digest": "8151be07ba488847bb6845f04382b2836c05bf86ff2d5c098a09e7f3cd423ce6"
+      },
+      "results": [
+        {
+          "gate": "eslint",
+          "status": "PASS",
+          "native_exit": 0,
+          "executed": true,
+          "complete": true,
+          "reason": null,
+          "timed_out": false,
+          "cleanup_complete": null,
+          "source": {
+            "head": "cf85beba8d87fa02212065c0560f32198f09de01",
+            "digest": "8151be07ba488847bb6845f04382b2836c05bf86ff2d5c098a09e7f3cd423ce6"
+          }
+        },
+        {
+          "gate": "format",
+          "status": "PASS",
+          "native_exit": 0,
+          "executed": true,
+          "complete": true,
+          "reason": null,
+          "timed_out": false,
+          "cleanup_complete": null,
+          "source": {
+            "head": "cf85beba8d87fa02212065c0560f32198f09de01",
+            "digest": "8151be07ba488847bb6845f04382b2836c05bf86ff2d5c098a09e7f3cd423ce6"
+          }
+        },
+        {
+          "gate": "typescript",
+          "status": "PASS",
+          "native_exit": 0,
+          "executed": true,
+          "complete": true,
+          "reason": null,
+          "timed_out": false,
+          "cleanup_complete": null,
+          "source": {
+            "head": "cf85beba8d87fa02212065c0560f32198f09de01",
+            "digest": "8151be07ba488847bb6845f04382b2836c05bf86ff2d5c098a09e7f3cd423ce6"
+          }
+        },
+        {
+          "gate": "backend-structural",
+          "status": "PASS",
+          "native_exit": 0,
+          "executed": true,
+          "complete": true,
+          "reason": null,
+          "timed_out": false,
+          "cleanup_complete": null,
+          "source": {
+            "head": "cf85beba8d87fa02212065c0560f32198f09de01",
+            "digest": "8151be07ba488847bb6845f04382b2836c05bf86ff2d5c098a09e7f3cd423ce6"
+          }
+        }
+      ]
+    },
+    {
+      "phase": "initial",
+      "source": {
+        "head": "cf85beba8d87fa02212065c0560f32198f09de01",
+        "digest": "8151be07ba488847bb6845f04382b2836c05bf86ff2d5c098a09e7f3cd423ce6"
+      },
+      "results": [
+        {
+          "gate": "e2b-smoke",
+          "status": "PASS",
+          "native_exit": 0,
+          "executed": true,
+          "complete": true,
+          "reason": null,
+          "timed_out": false,
+          "cleanup_complete": null,
+          "source": {
+            "head": "cf85beba8d87fa02212065c0560f32198f09de01",
+            "digest": "8151be07ba488847bb6845f04382b2836c05bf86ff2d5c098a09e7f3cd423ce6"
+          }
+        },
+        {
+          "gate": "deploy-command-structural",
+          "status": "PASS",
+          "native_exit": 0,
+          "executed": true,
+          "complete": true,
+          "reason": null,
+          "timed_out": false,
+          "cleanup_complete": null,
+          "source": {
+            "head": "cf85beba8d87fa02212065c0560f32198f09de01",
+            "digest": "8151be07ba488847bb6845f04382b2836c05bf86ff2d5c098a09e7f3cd423ce6"
+          }
+        },
+        {
+          "gate": "frontend-coverage-blackbox",
+          "status": "PASS",
+          "native_exit": 0,
+          "executed": true,
+          "complete": true,
+          "reason": null,
+          "timed_out": false,
+          "cleanup_complete": null,
+          "source": {
+            "head": "cf85beba8d87fa02212065c0560f32198f09de01",
+            "digest": "8151be07ba488847bb6845f04382b2836c05bf86ff2d5c098a09e7f3cd423ce6"
+          }
+        },
+        {
+          "gate": "agents-coverage-blackbox",
+          "status": "PASS",
+          "native_exit": 0,
+          "executed": true,
+          "complete": true,
+          "reason": null,
+          "timed_out": false,
+          "cleanup_complete": null,
+          "source": {
+            "head": "cf85beba8d87fa02212065c0560f32198f09de01",
+            "digest": "8151be07ba488847bb6845f04382b2836c05bf86ff2d5c098a09e7f3cd423ce6"
+          }
+        },
+        {
+          "gate": "backend-coverage-blackbox",
+          "status": "PASS",
+          "native_exit": 0,
+          "executed": true,
+          "complete": true,
+          "reason": null,
+          "timed_out": false,
+          "cleanup_complete": null,
+          "source": {
+            "head": "cf85beba8d87fa02212065c0560f32198f09de01",
+            "digest": "8151be07ba488847bb6845f04382b2836c05bf86ff2d5c098a09e7f3cd423ce6"
+          }
+        },
+        {
+          "gate": "semantic-stack",
+          "status": "PASS",
+          "native_exit": 0,
+          "executed": true,
+          "complete": true,
+          "reason": null,
+          "timed_out": false,
+          "cleanup_complete": null,
+          "source": {
+            "head": "cf85beba8d87fa02212065c0560f32198f09de01",
+            "digest": "8151be07ba488847bb6845f04382b2836c05bf86ff2d5c098a09e7f3cd423ce6"
+          }
+        },
+        {
+          "gate": "cloudbench-controller",
+          "status": "PASS",
+          "native_exit": 0,
+          "executed": true,
+          "complete": true,
+          "reason": null,
+          "timed_out": false,
+          "cleanup_complete": null,
+          "source": {
+            "head": "cf85beba8d87fa02212065c0560f32198f09de01",
+            "digest": "8151be07ba488847bb6845f04382b2836c05bf86ff2d5c098a09e7f3cd423ce6"
+          }
+        },
+        {
+          "gate": "smoke",
+          "status": "PASS",
+          "native_exit": 0,
+          "executed": true,
+          "complete": true,
+          "reason": null,
+          "timed_out": false,
+          "cleanup_complete": null,
+          "source": {
+            "head": "cf85beba8d87fa02212065c0560f32198f09de01",
+            "digest": "8151be07ba488847bb6845f04382b2836c05bf86ff2d5c098a09e7f3cd423ce6"
+          }
+        }
+      ]
+    }
+  ],
+  "regression": {
+    "command": "cd front-end && npx vitest run src/tests/blackbox/message-list-thinking-visibility.blackbox.tsx",
+    "before": {
+      "failed": 1,
+      "passed": 6,
+      "seconds": 11.98
+    },
+    "after": {
+      "passed": 7,
+      "seconds": 11.68,
+      "consecutive_passes": 5
+    },
+    "related_tests_passed": 29,
+    "frontend_typecheck": "PASS",
+    "adversarial_review": "PASS"
+  },
+  "limits": [
+    "Historical browser socket receipt/pixels uncaptured",
+    "Model generation latency unchanged"
+  ]
+}

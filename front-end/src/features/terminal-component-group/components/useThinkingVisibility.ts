@@ -6,16 +6,19 @@
  * [VISIBLE] -- plan/blocker/terminal state/assistant arrives -> [HIDDEN]
  * [HIDDEN] -- chat mode, last persisted ASSISTANT, no stream -> stay [HIDDEN]
  *             (hung start_superintelligence: reasoning saved, no Cloud Agent chip)
+ * [HIDDEN] -- root stream starts alongside background child -> [VISIBLE]
+ *             (child progress does not own the root's model call)
  */
 import { useEffect, useRef, useState, type MutableRefObject } from 'react';
 import type { AgentDetail, Message } from '../hooks';
+import { isBackgroundSpawnRow } from '../hooks/backgroundSpawnRows';
 
 interface UseThinkingVisibilityOptions {
   showThinkingIndicator: boolean;
   agent: AgentDetail | null;
   filteredMessages: Message[];
   isChatMode: boolean;
-  hasStreamingBubbles: boolean;
+  hasLiveThinkingStream: boolean;
   hasStreamingPlan: boolean;
   hasStreamingTools: boolean;
   selectedAgentId: string | null;
@@ -33,21 +36,13 @@ function isLastAttentionBlocking(last: Message | undefined, isChatMode: boolean)
   return isQuestion === true || toolApproval === true;
 }
 
-function isLastToolInProgress(last: Message | undefined): boolean {
-  return (
-    last?.role === 'TOOL' &&
-    last.metadata?.toolStatus === 'IN_PROGRESS' &&
-    !last.metadata?.isUserAttentionMessage
-  );
-}
-
 function computeShouldShow(opts: UseThinkingVisibilityOptions): boolean {
   const {
     showThinkingIndicator,
     agent,
     filteredMessages,
     isChatMode,
-    hasStreamingBubbles,
+    hasLiveThinkingStream,
     hasStreamingPlan,
     hasStreamingTools,
   } = opts;
@@ -63,18 +58,18 @@ function computeShouldShow(opts: UseThinkingVisibilityOptions): boolean {
   if (!isAgentActive) return false;
 
   const last = filteredMessages[filteredMessages.length - 1];
-  if (isLastToolInProgress(last)) return false;
   if (isLastAttentionBlocking(last, isChatMode)) return false;
 
   const hasInProgressTool = filteredMessages.some(
     (m) =>
       m.role === 'TOOL' &&
       m.metadata?.toolStatus === 'IN_PROGRESS' &&
-      !m.metadata?.isUserAttentionMessage,
+      !m.metadata?.isUserAttentionMessage &&
+      !(hasLiveThinkingStream && isBackgroundSpawnRow(m)),
   );
   if (hasInProgressTool || hasStreamingPlan || hasStreamingTools) return false;
 
-  if (hasStreamingBubbles) return true;
+  if (hasLiveThinkingStream) return true;
 
   // Chat escalation persists the router ASSISTANT before the Cloud Agent chip.
   // If that persist is the last durable row and nothing is streaming, the

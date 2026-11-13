@@ -73,7 +73,7 @@ clone_or_refresh() {
   printf '/.ref-sha\n' >> "$dir/.git/info/exclude"
 }
 
-# The five clones are independent and network-bound (1.3 GB, ~2.5 min serially on
+# The reference clones are independent and network-bound (1.3 GB, ~2.5 min serially on
 # an E2B sandbox), so run them concurrently: a failed clone fails the script.
 clone_pids=()
 clone_or_refresh openclaw https://github.com/openclaw/openclaw.git & clone_pids+=($!)
@@ -81,12 +81,13 @@ clone_or_refresh hermes-agent https://github.com/nousresearch/hermes-agent.git &
 clone_or_refresh codex https://github.com/openai/codex.git & clone_pids+=($!)
 clone_or_refresh prime-agent https://github.com/PrimeIntellect-ai/prime-agent.git & clone_pids+=($!)
 clone_or_refresh kimi-code https://github.com/MoonshotAI/kimi-code.git & clone_pids+=($!)
+clone_or_refresh openworker https://github.com/andrewyng/openworker.git & clone_pids+=($!)
 clone_failed=0
 for pid in "${clone_pids[@]}"; do wait "$pid" || clone_failed=1; done
 [ "$clone_failed" = 0 ] || { echo "[sync-ref] a reference clone failed" >&2; exit 1; }
 
 # Refuse to rewrite the tip-record file unless every clone has .ref-sha.
-for dir in openclaw hermes-agent codex prime-agent kimi-code; do
+for dir in openclaw hermes-agent codex prime-agent kimi-code openworker; do
   if [ ! -f "$dir/.ref-sha" ]; then
     echo "Missing $dir/.ref-sha; refusing to rewrite prompt-review/REF_SHAS.txt" >&2
     echo "Pass --force to re-clone, or restore .ref-sha from the previous tip record." >&2
@@ -100,7 +101,7 @@ done
   echo "# This is NOT a checkout pin — --force re-clones current tip and updates"
   echo "# this file; re-run prompt-review renderers and commit rendered/ together."
   echo "# Refresh with: bash scripts/sync-reference-repos.sh --force"
-  for dir in openclaw hermes-agent codex prime-agent kimi-code; do
+  for dir in openclaw hermes-agent codex prime-agent kimi-code openworker; do
     echo "$dir $(cat "$dir/.ref-sha")"
   done
 } > prompt-review/REF_SHAS.txt

@@ -9,6 +9,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -234,24 +235,62 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def deploy_test_rows(event_log: Path) -> dict | None:
+    """Per-test rows (FAIL, FLAKY, QUARANTINED_*) and per-gate verdicts of the round this stage-finish closes.
+
+    Read from the deploy cycle's attempt progress files since the matching stage-start, failed
+    tests first within the bounded detail. Telemetry never blocks the stage: errors return None.
+    """
+    try:
+        import deploy_test_quarantine as quarantine
+
+        since = 0.0
+        for line in (event_log.read_text().splitlines() if event_log.is_file() else []):
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            if (isinstance(row, dict) and row.get("workflow") == "deploy" and row.get("event") == "stage-start"
+                    and row.get("value") == "runtime-blackbox"):
+                since = float(row.get("recorded_epoch") or since)
+        root = Path(git_value("rev-parse", "--show-toplevel") or Path.cwd())
+        attempts = quarantine.state_dir(root) / "attempts"
+        tests = quarantine.test_lines(quarantine.attempt_rows(attempts, since))
+        gates = quarantine.gate_rows(attempts, since)
+        detail = {}
+        if tests["lines"] or tests["omitted"]:
+            detail["tests"] = tests
+        if gates:
+            detail["gates"] = gates
+        return detail or None
+    except Exception as error:  # Telemetry must never change a gate result.
+        print(f"warning: could not collect deploy test rows: {type(error).__name__}", file=sys.stderr)
+        return None
+
+
 def main() -> int:
-    from factory_detail import parse_event_detail
+    from factory_detail import DETAIL_SCHEMA_VERSION, parse_event_detail
     from factory_metadata import load_metadata
 
     args = parse_args()
+    event_log = Path(
+        os.environ.get("FACTORY_EVENT_LOG", str(default_event_log()))
+    ).expanduser()
     try:
+        detail = parse_event_detail(args.detail)
+        if (args.workflow, args.event, args.value) == ("deploy", "stage-finish", "runtime-blackbox"):
+            rows = deploy_test_rows(event_log)
+            if rows is not None:
+                detail = {"schema_version": DETAIL_SCHEMA_VERSION, **detail, **rows}
         payload = factory_event_payload(
             args.workflow,
             args.event,
             args.value,
             metadata={"telemetry": load_metadata(args.metadata_file)},
-            detail=parse_event_detail(args.detail),
+            detail=detail,
         )
     except ValueError as error:
         raise SystemExit(str(error)) from error
-    event_log = Path(
-        os.environ.get("FACTORY_EVENT_LOG", str(default_event_log()))
-    ).expanduser()
     append_event(event_log, payload)
     if (args.workflow == "deploy" and args.event == "outcome" and args.value == "completed"
             and payload.get("run_id")):

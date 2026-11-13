@@ -1208,7 +1208,7 @@ def test_live_query_proof_rejects_zero_spend_tasks_before_provisioning():
     repo_root = Path(__file__).resolve().parents[3]
     with tempfile.TemporaryDirectory() as scratch:
         pool = Path(scratch) / "pool.json"
-        pool.write_text(json.dumps(["test-mass-agent-run-0"]))
+        pool.write_text(json.dumps(["demo-fleet-alpha"]))
         command = [
             "bash",
             str(repo_root / "scripts/run-fleet-infra-stability-proof"),
@@ -1234,7 +1234,7 @@ def test_live_query_proof_rejects_zero_spend_tasks_before_provisioning():
             command, cwd=repo_root, text=True, capture_output=True, timeout=NATIVE_VERIFICATION_TIMEOUT_SECONDS
         )
         assert ordinary.returncode == 0, ordinary.stdout + ordinary.stderr
-        assert json.loads(ordinary.stdout)["slices"][0]["names"] == ["test-mass-agent-run-0"]
+        assert json.loads(ordinary.stdout)["slices"][0]["names"] == ["demo-fleet-alpha"]
         # A DEMO-bound child can replay without a zero-spend evaluator or DEMO
         # tag. The Fast Mode button controls provider speed, not replay policy.
         pool.write_text(json.dumps(["single-creator-arm"]))
@@ -6006,6 +6006,168 @@ async def test_agentcard_release_skip_retires_execution_without_repeating_financ
         )
 
 
+async def test_declared_judge_persists_its_isolated_identity_before_session_creation():
+    """A code-session Message must reference a persisted judge, never the graded root."""
+    import httpx
+    from benchmarks import run_benchmark as bench
+    from benchmarks.benchmark_tasks import get_task_by_name
+
+    rows = {}
+    archived = []
+    token_ids = []
+    graded_root = "70f3aa19-050a-4883-937a-d6b3dffdf3f7"
+
+    def request(req):
+        body = json.loads(req.content) if req.content else {}
+        if req.method == "POST" and req.url.path == "/api/agents":
+            assert req.headers["X-Agent-Execution-Mode"] == "external"
+            assert "start_phase" not in body and "parent_agent_id" not in body
+            assert body["fast_mode_cache_enabled"] is False
+            assert req.headers["X-Benchmark-Run"]
+            aid = body["agent_id"]
+            assert aid != graded_root
+            rows[aid] = body
+            return httpx.Response(201, json={"agent_id": aid, "execution_mode": "external"})
+        if req.method == "DELETE" and req.url.path.startswith("/api/agents/"):
+            archived.append(req.url.path.rsplit("/", 1)[-1])
+            return httpx.Response(204)
+        if req.method == "GET" and "-code-session/agent/" in req.url.path:
+            return httpx.Response(200, json={"sessions": []})
+        if req.method == "GET" and req.url.path.startswith("/api/agents/"):
+            return httpx.Response(200, json={
+                "messages": [], "agent": {"agent_id": req.url.path.rsplit("/", 1)[-1],
+                "progress": 0, "token_count": 0, "tokens_in": 0, "tokens_out": 0,
+                "context_size": 0, "message_count": 1},
+            })
+        if req.method == "PATCH" and req.url.path.endswith("/status"):
+            assert body["status"] == "COMPLETED"
+            return httpx.Response(200, json={})
+        if req.method == "POST" and req.url.path.endswith("/messages"):
+            aid = req.url.path.split("/")[-2]
+            return httpx.Response(201 if aid in rows else 500, json={"error": "Message_agentId_fkey"})
+        raise AssertionError((req.method, str(req.url)))
+
+    client_type = httpx.AsyncClient
+
+    def client(*args, **kwargs):
+        return client_type(*args, **kwargs, transport=httpx.MockTransport(request))
+
+    async def token(_user_id, aid):
+        token_ids.append(aid)
+        return {}
+
+    async def spawn(**kwargs):
+        aid = kwargs["agent_id"]
+        async with client_type(transport=httpx.MockTransport(request)) as api:
+            response = await api.post(f"http://identity.test/api/agents/{aid}/messages", json={"message": "session init"})
+        assert response.status_code == 201, response.text
+        assert token_ids == [aid]
+        return {"structured_response": {"score": 1.0, "reasoning": "verified"}}
+
+    task = get_task_by_name("test-mass-agent-run-0")
+    evaluator = next(e for e in task.evaluators if e["id"] == "t7-schema-task-complete")
+    data = {"agent": {"agent_id": graded_root}, "messages": [], "_benchmark": {}}
+    original_evidence = bench._declared_agentic_evaluator_evidence(data)
+    with (
+        patch.object(bench, "_sync_compute_tokens", lambda **_: None),
+        patch.object(bench, "_agentic_judge_code_provider", AsyncMock(return_value="codex")),
+        patch.object(bench, "_fetch_agentic_judge_compute_token", token),
+        patch.object(bench, "_api_headers", AsyncMock(return_value={"X-API-Key": "test-key"})),
+        patch.object(bench, "API_KEY", "test-key"),
+        patch.object(bench.httpx, "AsyncClient", client),
+        patch("helpers.attachments.upload_to_storage", AsyncMock(return_value={"id": "evidence"})),
+        patch("domains.spawn_claude_code_agent.service.spawn_claude_code_activity", spawn),
+    ):
+        result = await bench._call_declared_agentic_llm_judge(task, evaluator, data)
+    assert result["score"] == 1.0
+    assert archived == [result["judge_audit"]["judge_agent_id"]]
+    assert set(rows) == set(archived)
+    assert bench._declared_agentic_evaluator_evidence(data) == original_evidence
+    assert data["_benchmark"]["judge_audits"] == [result["judge_audit"]]
+
+
+@contextlib.asynccontextmanager
+async def _credential_test_judge_identity(**_kwargs):
+    """Credential-only controls isolate persistence; its FK contract is tested separately."""
+    yield
+
+
+async def test_judge_identity_archives_after_failure_and_cancellation():
+    import httpx
+    from benchmarks.judge_identity import judge_identity
+
+    for failure in (RuntimeError("session creation failed"), asyncio.CancelledError()):
+        calls = []
+        audit = {}
+
+        def request(req):
+            calls.append((req.method, req.url.path))
+            if req.method == "POST":
+                return httpx.Response(201, json={"agent_id": "judge", "execution_mode": "external"})
+            if req.method == "GET" and "-code-session/agent/" in req.url.path:
+                return httpx.Response(200, json={"sessions": []})
+            if req.method == "GET":
+                return httpx.Response(200, json={"agent": {
+                    "progress": 0, "token_count": 0, "tokens_in": 0, "tokens_out": 0,
+                    "context_size": 0, "message_count": 1,
+                }, "messages": []})
+            if req.method == "PATCH":
+                assert json.loads(req.content)["status"] == "FAILED"
+                return httpx.Response(200, json={})
+            assert req.method == "DELETE"
+            return httpx.Response(204)
+
+        client_type = httpx.AsyncClient
+        with patch("benchmarks.judge_identity.httpx.AsyncClient", lambda **kw: client_type(**kw, transport=httpx.MockTransport(request))):
+            try:
+                async with judge_identity(base_url="http://identity.test", headers={"X-API-Key": "test"}, agent_id="judge", goal="judge", audit=audit):
+                    raise failure
+            except BaseException as caught:
+                assert caught is failure
+            else:
+                raise AssertionError("cleanup must preserve the original failure/cancellation")
+        assert ("DELETE", "/api/agents/judge") in calls
+        assert audit["cleanup_verified"] is True
+        assert "execution_error" in audit and "trace" in audit
+
+
+async def test_judge_identity_retires_its_owned_paused_persistent_session():
+    import httpx
+    from benchmarks.judge_identity import judge_identity
+
+    retired = []
+    audit = {}
+
+    def request(req):
+        if req.method == "POST":
+            return httpx.Response(201, json={"agent_id": "judge", "execution_mode": "external"})
+        if req.url.path.endswith("/code-sessions/persistent"):
+            if req.method == "DELETE":
+                retired.append("persistent")
+            return httpx.Response(200, json={"owner_agent_id": "judge", "state": "RETIRED" if retired else "PAUSED"})
+        if req.method == "GET" and "-code-session/agent/" in req.url.path:
+            return httpx.Response(200, json={"sessions": [{
+                "id": "task", "status": "CLOSED", "closedAt": "2026-11-11T00:00:00Z", "codeSessionId": "persistent",
+            }]})
+        if req.method == "GET":
+            return httpx.Response(200, json={"agent": {
+                "progress": 0, "token_count": 0, "tokens_in": 0, "tokens_out": 0,
+                "context_size": 0, "message_count": 1,
+            }, "messages": []})
+        if req.method == "PATCH":
+            return httpx.Response(200, json={})
+        assert req.method == "DELETE" and req.url.path == "/api/agents/judge"
+        return httpx.Response(204)
+
+    client_type = httpx.AsyncClient
+    with patch("benchmarks.judge_identity.httpx.AsyncClient", lambda **kw: client_type(**kw, transport=httpx.MockTransport(request))):
+        async with judge_identity(base_url="http://identity.test", headers={"X-API-Key": "test"}, agent_id="judge", goal="judge", audit=audit):
+            pass
+    assert retired == ["persistent"]
+    assert audit["cleanup_verified"] is True
+    assert audit["persistent_sessions"] == [{"owner_agent_id": "judge", "state": "RETIRED"}]
+
+
 async def test_judge_compute_token_unavailable_is_a_skipped_test_not_infra():
     """RCA 2026-10-25 judge Codex token unavailable: under a 70-copy cloud fleet the only
     Codex account was in a provider cooldown when test-mass-agent-run-0's declared judge
@@ -6072,6 +6234,7 @@ async def test_judge_compute_token_unavailable_is_a_skipped_test_not_infra():
         }
     )
     with (
+        patch("benchmarks.judge_identity.judge_identity", _credential_test_judge_identity),
         patch.object(bench, "_sync_compute_tokens", lambda **_: None),
         patch("helpers.llm.fetch_gpt_code_token_activity", AsyncMock(return_value=None)),
         patch(
@@ -6158,6 +6321,7 @@ async def test_agentic_judge_follows_the_c15_credential_order_past_a_cooled_code
             side_effect=token_error, return_value={"accessToken": gpt_token} if gpt_token else None
         )
         with (
+            patch("benchmarks.judge_identity.judge_identity", _credential_test_judge_identity),
             patch.object(bench, "_sync_compute_tokens", lambda **_: True),
             patch.object(bench, "_fetch_agentic_judge_compute_token", token),
             patch("domains.spawn_claude_code_agent.repo.fetch_code_credential_availability", AsyncMock(return_value=plan)),
@@ -6310,7 +6474,7 @@ async def test_owned_payment_release_stall_warns_instead_of_failing_cleanup():
         "reclaim_provider_transfer_id": None,
     }
 
-    async def stalled_payments(_base_url, _root_id, evidence):
+    async def stalled_payments(_base_url, _root_id, evidence, **_options):
         evidence["payment_snapshot"] = {"tree_agent_ids": [root], "purchase_cleanup": [row]}
         raise TimeoutError()
 
@@ -6362,6 +6526,138 @@ async def test_owned_payment_release_stall_warns_instead_of_failing_cleanup():
     ):
         result, error = await finalize(env, lifecycle)
         assert error is not None and "owned cloud evidence finalization failed" in str(error), lifecycle
+        assert (result.passed, result.benchmark_status) == (False, "ERROR")
+        assert result.logs["cloud_cleanup_evidence"]["errors"] == ["payment: TimeoutError"]
+
+
+async def test_owned_release_stall_proof_survives_agentcard_auth_flap_within_cleanup_deadline():
+    """Regression (smoke INFRA stop 2026-11-12, PRs #1975/#1981/#1983): a stalled release always
+    runs the real owned payment drain to its deadline, and its stall proof was one provider-backed
+    lifecycle read issued after that deadline. AgentCard's intermittent org-token 401 failed that
+    read, so cleanup raised, the guest never acknowledged cleanup and runtime evidence stayed
+    unsealed. The proof now comes from observations inside the unchanged deadline, bound to the
+    final ledger; a ledger that left the exact stall stays strict.
+    """
+    import time
+    from copy import deepcopy
+    from unittest.mock import AsyncMock
+
+    from benchmarks import run_benchmark as bench
+
+    root = "00000000-0000-4000-8000-000000000021"
+    window_seconds = 2.5
+    flap = RuntimeError(
+        'Failed to get payment lifecycle: 401 {"error":"AgentCard Organization MCP list_transfers failed: '
+        'Invalid or expired organization token","code":"agentcard_org_mcp_unauthorized"}'
+    )
+
+    def stall_row(lifecycle: dict, **changes) -> dict:
+        return {
+            "purchase_id": lifecycle["purchase"]["id"],
+            "agent_id": root,
+            "status": "HELD",
+            "card_id": lifecycle["purchase"]["cardId"],
+            "stripe_payment_intent_id": lifecycle["purchase"]["stripePaymentIntentId"],
+            "total_cents": lifecycle["purchase"]["totalCents"],
+            "funding_status": "RECLAIMING",
+            "provider_transfer_id": lifecycle["orgTransfer"]["id"],
+            "reclaim_provider_transfer_id": None,
+            **changes,
+        }
+
+    async def finalize(result, lifecycle: dict, ledger: list[dict]) -> tuple:
+        """`ledger` is the exact-tree payment row returned by successive drain reads."""
+        before = {"root_user_id": "test-owned-user", "tree_agent_ids": [root], "browser_sessions": []}
+        drain_reads = []
+        lifecycle_reads = []
+        started = time.monotonic()
+
+        def exact_root_sessions(_url, _root, *, require_deleted=False):
+            if not require_deleted:
+                return dict(before)
+            row = ledger[min(len(drain_reads), len(ledger) - 1)]
+            drain_reads.append(row)
+            return {
+                **before,
+                "root_deleted": True,
+                "unsealed_tree_agent_ids": [],
+                "purchase_cleanup": [dict(row)],
+            }
+
+        async def read_lifecycle(_url, agent_id):
+            assert agent_id == root
+            lifecycle_reads.append(time.monotonic() - started)
+            # AgentCard flaps on alternate reads, and again whenever the drain deadline has passed.
+            if len(lifecycle_reads) % 2 == 1 or time.monotonic() - started >= window_seconds:
+                raise flap
+            return deepcopy(lifecycle)
+
+        with (
+            patch.dict(os.environ, {bench.AGENTCARD_RELEASE_SKIP_ENV: "1"}),
+            patch.object(bench, "PAYMENT_CLEANUP_TIMEOUT_SECONDS", window_seconds),
+            patch.object(bench, "PAYMENT_CLEANUP_STALL_OBSERVATION_SECONDS", 0, create=True),
+            patch.object(bench.cloud_batch_cleanup, "exact_root_sessions", side_effect=exact_root_sessions),
+            patch.object(bench.cloud_batch_cleanup, "close_exact_root_sessions", return_value={}),
+            patch.object(bench, "pause_agent", AsyncMock(return_value=True)),
+            patch.object(bench, "delete_agent", AsyncMock(return_value=True)),
+            patch.object(bench, "_refresh_browser_archive_snapshot", AsyncMock(return_value={})),
+            patch.object(bench, "finalize_archive_and_score_world_model", AsyncMock(return_value=("ref", None))),
+            patch.object(bench, "abandon_test_payment", AsyncMock(return_value=deepcopy(lifecycle))),
+            patch.object(bench, "get_test_payment_lifecycle", read_lifecycle),
+            patch.object(bench, "fetch_local_worker_logs", return_value=[]),
+        ):
+            try:
+                await bench._finalize_owned_cloud_batch("test-owned-no-network", [result], {})
+            except RuntimeError as error:
+                return error, lifecycle_reads
+        return None, lifecycle_reads
+
+    def task_result(**fields):
+        return bench.TaskResult(
+            name="agent-payment-abandonment",
+            agent_id=root,
+            progress_score=1,
+            duration_seconds=1,
+            cost_cents=0,
+            message_count=0,
+            logs={"tree": {root: {}}},
+            **fields,
+        )
+
+    stalled = _agentcard_release_stall_lifecycle()
+    skip_reason = f"{bench.AGENTCARD_RELEASE_SKIP_REASON}: native stall at the task deadline"
+    native_failure = "Timeout after 904s (task timeout=900s)"
+
+    # #1975/#1981: the task itself already SKIPPED on the exact stall.
+    result = task_result(passed=False, status="SKIPPED", benchmark_status="SKIPPED", failure_reason=skip_reason)
+    error, reads = await finalize(result, stalled, [stall_row(stalled)])
+    assert error is None, error
+    assert reads and all(at < window_seconds for at in reads), reads
+    assert (result.passed, result.status, result.benchmark_status) == (False, "SKIPPED", "SKIPPED")
+    assert result.failure_reason == skip_reason
+    evidence = result.logs["cloud_cleanup_evidence"]
+    assert evidence["errors"] == []
+    assert evidence["warnings"] == [f"payment: {bench.AGENTCARD_RELEASE_SKIP_REASON}"]
+    assert evidence["agentcard_release_stall_read_errors"] >= 1
+    assert evidence["agentcard_release_stall_lifecycles"][root]["orgTransfer"]["releasedCents"] == 0
+
+    # #1983: an independent native task failure is kept while the stall stays a cleanup warning.
+    result = task_result(passed=False, status="COMPLETED", benchmark_status="FAIL", failure_reason=native_failure)
+    error, _ = await finalize(result, stalled, [stall_row(stalled)])
+    assert error is None, error
+    assert (result.passed, result.benchmark_status, result.failure_reason) == (False, "FAIL", native_failure)
+    assert result.logs["cloud_cleanup_evidence"]["errors"] == []
+
+    # Strict controls: a ledger that left the exact stall after the observation, or a
+    # provider state that is not the exact stall, still fails cleanup.
+    foreign = _agentcard_release_stall_lifecycle(cardId="card_someone_else")
+    for lifecycle, ledger in (
+        (stalled, [stall_row(stalled), stall_row(stalled, funding_status="RECLAIM_FAILED")]),
+        (foreign, [stall_row(foreign)]),
+    ):
+        result = task_result(passed=False, status="SKIPPED", benchmark_status="SKIPPED", failure_reason=skip_reason)
+        error, _ = await finalize(result, lifecycle, ledger)
+        assert error is not None and "owned cloud evidence finalization failed" in str(error), ledger
         assert (result.passed, result.benchmark_status) == (False, "ERROR")
         assert result.logs["cloud_cleanup_evidence"]["errors"] == ["payment: TimeoutError"]
 
@@ -15612,6 +15908,43 @@ def test_catalog_world_model_mode_is_optional_and_validated():
         validate_task_contract({**base, "world_model_mode": "sim"})
 
 
+def test_catalog_quarantine_marker_is_optional_and_uses_the_python_marker_rules():
+    """A smoke task's `quarantine` object carries the four @quarantine keys and the same validation."""
+    import pytest
+
+    from benchmarks.benchmark_tasks import BenchmarkTask, normalize_legacy_catalog_fields
+    from benchmarks.long_horizon import load_raw_catalog, validate_task_contract, validate_task_quarantine
+
+    base = {"name": "t", "bench": "pipeline-e2e"}
+    marker = {
+        "since": "2026-11-01",
+        "repair": "https://boxes.dev/thread/thr_smoke1",
+        "error": "AssertionError: no receipt",
+        "evidence": "runs/smoke-1/run.json",
+    }
+    validate_task_contract(dict(base))  # absent: not quarantined
+    validate_task_contract({**base, "quarantine": dict(marker)})
+    assert validate_task_quarantine({**base, "quarantine": dict(marker)}, "t") == marker
+    assert validate_task_quarantine(dict(base), "t") is None
+    # The runtime dataclass loader accepts the field (unknown catalog keys are a TypeError there).
+    raw = next(t for t in load_raw_catalog() if t["name"] == "demo-fleet-alpha")
+    task = BenchmarkTask(**normalize_legacy_catalog_fields({**raw, "quarantine": dict(marker)}))
+    assert task.quarantine == marker and task.prompt == raw["prompt"]
+    bad_markers = [
+        {**marker, "repair": "https://example.com/thread/x"},  # not a boxes.dev repair thread
+        {**marker, "since": "2026-02-30"},  # not a calendar date
+        {**marker, "error": "first\nsecond"},  # not one line
+        {**marker, "evidence": " "},
+        {k: v for k, v in marker.items() if k != "evidence"},  # missing field
+        {**marker, "owner": "me"},  # unknown field
+        "quarantined",
+        None,
+    ]
+    for bad in bad_markers:
+        with pytest.raises(ValueError, match="quarantine refused"):
+            validate_task_contract({**base, "quarantine": bad})
+
+
 def test_local_benchmark_task_queue_uses_conductor_workspace_only_for_local_urls():
     """Local benchmark agents are scheduled onto the queue the harness preflights."""
     import os
@@ -24203,7 +24536,8 @@ def test_suite_selection_excludes_incomplete_entries():
     assert "raise-my-round" not in all_names
     assert "smoke-backend-claude-code" not in all_names
     # Representative ready agent benchmarks stay in suite selection.
-    assert "test-mass-agent-run-0" in suite_names
+    # test-mass-agent-run-0 was retired by user direction (2026-11-12): never selected.
+    assert "test-mass-agent-run-0" not in suite_names
     assert "browser-agent" in suite_names
     assert {
         "user-data-prod-grep",
@@ -25872,6 +26206,15 @@ def test_predeploy_selector_rejects_production_only_tasks():
             test_predeploy_excludes_production_only_even_with_pass_streak(Path(folder), surface)
 
 
+def test_predeploy_selector_machine_formats_at_cap():
+    from benchmarks.select_predeploy_benches_test import test_cli_machine_formats_keep_cap_warning_on_stderr
+
+    for output_format in ("names", "json"):
+        for drop_extra in (False, True):
+            with tempfile.TemporaryDirectory() as folder:
+                test_cli_machine_formats_keep_cap_warning_on_stderr(Path(folder), output_format, drop_extra)
+
+
 def test_predeploy_selector_runs_agentcard_lifecycle_tasks_as_smoke():
     from benchmarks.select_predeploy_benches_test import (
         test_agentcard_sandbox_lifecycle_tasks_are_ordinary_smoke_with_isolated_fixtures,
@@ -26491,7 +26834,7 @@ async def test_agentcard_release_skip_catalog_owned_cleanup_stays_strict():
         "reclaim_provider_transfer_id": None,
     }
 
-    async def stalled_payments(_base_url, _root_id, evidence):
+    async def stalled_payments(_base_url, _root_id, evidence, **_options):
         evidence["payment_snapshot"] = {"tree_agent_ids": [root], "purchase_cleanup": [row]}
         raise TimeoutError()
 
@@ -27015,6 +27358,18 @@ def test_fly_log_subprocesses_close_their_transports_before_loop_shutdown():
 async def run_all_tests():
     print("benchmark blackbox tests:")
     r = BlackboxResult()
+    await r.record_async(
+        "declared_judge_persists_its_isolated_identity_before_session_creation",
+        test_declared_judge_persists_its_isolated_identity_before_session_creation,
+    )
+    await r.record_async(
+        "judge_identity_archives_after_failure_and_cancellation",
+        test_judge_identity_archives_after_failure_and_cancellation,
+    )
+    await r.record_async(
+        "judge_identity_retires_its_owned_paused_persistent_session",
+        test_judge_identity_retires_its_owned_paused_persistent_session,
+    )
     from benchmarks.process_bench_test import run_process_controls
 
     r.record("process_bench_contract_and_adversarial_traces", run_process_controls)
@@ -27158,6 +27513,10 @@ async def run_all_tests():
         "owned_payment_release_stall_warn_skip", test_owned_payment_release_stall_warns_instead_of_failing_cleanup
     )
     await r.record_async(
+        "owned_release_stall_proof_survives_auth_flap_within_deadline",
+        test_owned_release_stall_proof_survives_agentcard_auth_flap_within_cleanup_deadline,
+    )
+    await r.record_async(
         "agentcard_release_policy_owned_legacy_deadlines",
         test_agentcard_release_policy_covers_owned_and_legacy_deadlines_only_opted_in,
     )
@@ -27187,6 +27546,7 @@ async def run_all_tests():
     r.record("independent_runs_keep_distinct_records", test_independent_runs_keep_distinct_records)
     r.record("predeploy_selector_rejects_production_only", test_predeploy_selector_rejects_production_only_tasks)
     r.record("predeploy_selector_agentcard_lifecycle_smoke", test_predeploy_selector_runs_agentcard_lifecycle_tasks_as_smoke)
+    r.record("predeploy_selector_machine_formats_at_cap", test_predeploy_selector_machine_formats_at_cap)
     r.record(
         "local_cleanup_preserves_run_id_observers",
         test_local_cleanup_does_not_signal_processes_that_only_mention_run_id,
@@ -27345,6 +27705,33 @@ async def run_all_tests():
         "phone_call_parked_on_hold_static_check",
         test_phone_call_parked_on_hold_static_check_reads_the_finished_call_card,
     )
+    await r.record_async("failed_task_finally_preserves_published_error", test_failed_task_finally_preserves_published_error_in_terminal_report)
+    await r.record_async("interrupted_finalization_retains_one_error", test_interrupted_finalization_retains_one_error_occurrence)
+    # The explicit-only live-phone task's offline fixture/proof contracts recur
+    # with the existing benchmark suite; pytest owns parameter expansion.
+    from benchmarks import phone_live_auth_test
+    for name in sorted(dir(phone_live_auth_test)):
+        if name.startswith("test_"):
+            r.record("phone_live_auth_" + name[5:], _with_pytest_fixtures(getattr(phone_live_auth_test, name)))
+
+    from benchmarks import phone_boot_reset_test
+    for name in sorted(dir(phone_boot_reset_test)):
+        if name.startswith("test_"):
+            r.record("phone_boot_reset_" + name[5:], _with_pytest_fixtures(getattr(phone_boot_reset_test, name)))
+    from benchmarks import phone_daily_test
+    for name in sorted(dir(phone_daily_test)):
+        if name.startswith("test_"):
+            case = _with_pytest_fixtures(getattr(phone_daily_test, name))
+            if asyncio.iscoroutinefunction(case):
+                await r.record_async("phone_daily_" + name[5:], case)
+            else:
+                r.record("phone_daily_" + name[5:], case)
+
+    from benchmarks import phone_connectivity_test
+    for name in sorted(dir(phone_connectivity_test)):
+        if name.startswith("test_"):
+            r.record("phone_connectivity_" + name[5:], _with_pytest_fixtures(getattr(phone_connectivity_test, name)))
+
     from benchmarks import phone_callee_test, phone_hold_line_test
 
     for module, prefix in ((phone_hold_line_test, "phone_hold_line_"), (phone_callee_test, "phone_callee_")):
@@ -28961,6 +29348,10 @@ async def run_all_tests():
         "catalog_world_model_mode_is_optional_and_validated", test_catalog_world_model_mode_is_optional_and_validated
     )
     r.record(
+        "catalog_quarantine_marker_is_optional_and_uses_the_python_marker_rules",
+        test_catalog_quarantine_marker_is_optional_and_uses_the_python_marker_rules,
+    )
+    r.record(
         "benchmark_sms_source_override_updates_local_agent_source",
         test_benchmark_sms_source_override_updates_local_agent_source,
     )
@@ -29077,3 +29468,83 @@ async def run_all_tests():
     )
 
     return r.all_passed
+
+
+async def test_failed_task_finally_preserves_published_error_in_terminal_report():
+    """Execute the report owner's actual finalizer prefix after a task raises."""
+    import ast
+    import inspect
+    from types import SimpleNamespace
+    from benchmarks import run_benchmark as bench
+    from benchmarks.phone_connectivity import PhoneCleanupBlocked
+
+    task = SimpleNamespace(name="chat-mode", requires_browser_agent=False, world_model_mode=None, tags=[])
+    original = bench.TaskResult(name=task.name, passed=False, agent_id="synthetic-root",
+                               status="ERROR", benchmark_status="ERROR", progress_score=0,
+                               duration_seconds=1, cost_cents=0, message_count=0,
+                               failure_reason="original phone cleanup deadline exceeded")
+
+    async def executor(_base, _task, *, on_task_evaluated, **kwargs):
+        await on_task_evaluated(original)
+        raise PhoneCleanupBlocked("later task finally cleanup blocked")
+
+    namespace, cards = _live_report_producer_harness([task], executor, 1)
+    main = ast.parse(inspect.getsource(bench.main_async)).body[0]
+    owner = next(
+        node for node in main.body if isinstance(node, ast.Try)
+        and any(isinstance(child, ast.Name) and child.id == "_report_ticker_task"
+                for statement in node.finalbody for child in ast.walk(statement)))
+    prefix = []
+    for statement in owner.finalbody:
+        if isinstance(statement, ast.Assign) and any(isinstance(n, ast.Await) for n in ast.walk(statement)):
+            break
+        prefix.append(statement)
+    finish = ast.AsyncFunctionDef(name="_finish_report", args=ast.arguments(
+        posonlyargs=[], args=[], kwonlyargs=[], kw_defaults=[], defaults=[]), body=prefix, decorator_list=[])
+    exec(compile(ast.fix_missing_locations(ast.Module(body=[finish], type_ignores=[])),
+                 "<report-finalizer>", "exec"), namespace)
+    ticker = asyncio.create_task(asyncio.Event().wait())
+    namespace["_report_ticker_task"] = ticker
+    try:
+        with patch.object(bench.cloud_batch_cleanup, "contract", return_value=None):
+            try:
+                await namespace["_run_reported_task"](task)
+            except PhoneCleanupBlocked:
+                pass
+            assert cards[-1]["results"]["failed"] == 1
+            await namespace["_finish_report"]()
+            assert cards[-1]["tasks"] == {"total": 1, "running": 0, "completed": 1, "queued": 0}, "published ERROR reverted to queued during finalization"
+            assert namespace["run"].task_results == [original], "original immutable attempt must be saved as ERROR"
+            assert original.benchmark_status == "ERROR" and not original.passed
+    finally:
+        ticker.cancel()
+        await asyncio.gather(ticker, return_exceptions=True)
+
+
+async def test_interrupted_finalization_retains_one_error_occurrence():
+    from types import SimpleNamespace
+    from benchmarks import run_benchmark as bench
+
+    task = SimpleNamespace(name="chat-mode", requires_browser_agent=False, world_model_mode=None, tags=[])
+    evaluated = asyncio.Event()
+
+    async def executor(_base, _task, *, on_task_evaluated, **kwargs):
+        await on_task_evaluated(bench.TaskResult(
+            name=task.name, passed=True, agent_id="synthetic-interrupted-root", status="COMPLETED",
+            progress_score=1, duration_seconds=1, cost_cents=0, message_count=0))
+        evaluated.set()
+        await asyncio.Event().wait()
+
+    namespace, cards = _live_report_producer_harness([task], executor, 1)
+    with patch.object(bench.cloud_batch_cleanup, "contract", return_value=None):
+        coordinator = asyncio.create_task(namespace["_drive_parallel"]())
+        await evaluated.wait()
+        coordinator.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await coordinator
+        namespace["_tick_report_once"]()
+    results = namespace["run"].task_results
+    assert len(results) == 1 and results[0].agent_id == "synthetic-interrupted-root"
+    assert not results[0].passed and results[0].benchmark_status == "ERROR"
+    assert "Interrupted during task finalization" in results[0].failure_reason
+    assert cards[-1]["tasks"]["completed"] == 1 and cards[-1]["results"]["failed"] == 1

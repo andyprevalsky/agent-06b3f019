@@ -217,6 +217,8 @@ class Selection:
     pass_streak_required: int = DEFAULT_PASS_STREAK
     # Catalog eligibility/instructions only; runtime evidence owns every verdict.
     skip_eligibility: dict[str, list[str]] = field(default_factory=dict)
+    # Explicit user-approved omissions, never execution PASS or failure masking.
+    deploy_quarantined: dict[str, str] = field(default_factory=dict)
 
     @property
     def total(self) -> int:
@@ -231,6 +233,9 @@ def load_tasks(catalog: Path) -> list[TaskRef]:
     for item in raw:
         if not isinstance(item, dict) or not item.get("name"):
             continue
+        quarantine = item.get("deploy_quarantine")
+        if quarantine is not None and (not isinstance(quarantine, str) or not quarantine.strip()):
+            raise ValueError(f"{item['name']}: deploy_quarantine must be a nonempty reason")
         tags = tuple(str(t) for t in (item.get("tags") or []))
         timeout = item.get("timeout_seconds")
         try:
@@ -390,7 +395,9 @@ def categories_triggered_by_paths(changed_files: Sequence[str]) -> list[str]:
     return found
 
 
-def _eligible(task: TaskRef, surface: str) -> bool:
+def _eligible(task: TaskRef, surface: str, *, for_deploy: bool = True) -> bool:
+    if for_deploy and task.raw.get("deploy_quarantine"):
+        return False
     if not task.eligible_status or task.production_only:
         return False
     # Both local and cloud predeploy execute against isolated backends. The
@@ -667,6 +674,8 @@ def select_predeploy_benches(
         uncovered_categories=uncovered_categories,
         pass_streak_required=pass_streak,
         skip_eligibility=standing_skip_eligibility(tasks, selected),
+        deploy_quarantined={t.name: t.raw["deploy_quarantine"] for t in tasks
+                            if t.raw.get("deploy_quarantine")},
     )
 
 
@@ -685,6 +694,8 @@ def format_report(selection: Selection) -> str:
         f"Path extras ({len(selection.path_extras)}): {', '.join(selection.path_extras) or '(none)'}",
         f"TOTAL SELECTED: {selection.total} / {selection.cap}",
     ]
+    for name, reason in selection.deploy_quarantined.items():
+        lines.append(f"Deploy quarantine (not run): {name}: {reason}")
     if selection.skipped_history:
         lines.append(
             f"Skipped (need last {selection.pass_streak_required} historic passes) "
@@ -716,13 +727,13 @@ def format_report(selection: Selection) -> str:
     return "\n".join(lines)
 
 
-def scream_if_cap_hit(selection: Selection, stream=None, *, include_stdout: bool = True) -> None:
+def scream_if_cap_hit(selection: Selection, stream=None, *, machine_readable: bool = False) -> None:
     stream = stream or sys.stderr
     if not selection.cap_hit:
         if selection.total == selection.cap:
             msg = f"*** PREDEPLOY BENCH COUNT AT HARD CAP: {selection.total}/{selection.cap} ***"
             print(msg, file=stream)
-            if include_stdout:
+            if not machine_readable:
                 print(msg, file=sys.stdout)
         return
     text = CAP_SCREAM.format(
@@ -732,7 +743,7 @@ def scream_if_cap_hit(selection: Selection, stream=None, *, include_stdout: bool
         dropped=", ".join(selection.dropped) or "(none)",
     )
     print(text, file=stream)
-    if include_stdout:
+    if not machine_readable:
         print(text, file=sys.stdout)
 
 
@@ -814,9 +825,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         print("\n".join(selection.selected))
         if guidance := format_skip_eligibility(selection.skip_eligibility):
             print(guidance, file=sys.stderr)
-        # stdout is the task inventory consumed by the native deploy planner.
-        # Keep the full cap warning on stderr without inventing task rows.
-        scream_if_cap_hit(selection, include_stdout=False)
+        scream_if_cap_hit(selection, machine_readable=True)
     elif args.format == "report":
         print(format_report(selection))
         scream_if_cap_hit(selection)
@@ -825,6 +834,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             json.dumps(
                 {
                     "selected": selection.selected,
+                    "deploy_quarantined": selection.deploy_quarantined,
                     "floor": selection.floor,
                     "path_extras": selection.path_extras,
                     "dropped": selection.dropped,
@@ -845,7 +855,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 sort_keys=True,
             )
         )
-        scream_if_cap_hit(selection)
+        scream_if_cap_hit(selection, machine_readable=True)
     else:
         print(format_report(selection))
         scream_if_cap_hit(selection)

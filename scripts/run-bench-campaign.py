@@ -74,10 +74,14 @@ def join_native_hubs(root, campaign):
     if os.environ.get('DEPLOY_NATIVE_HUB_JOIN') != '1':
         return True
     runs = Path(os.environ.get('CLOUDBENCH_RUNS_ROOT', ''))
+    # deploy_test_cloud.launch owns <request>/ (first attempt) and <request>/rerun/ (its single rerun).
+    base = runs.parent
+    rerun = base.name == 'rerun'
+    request = base.parent if rerun else base
     if (not runs.is_absolute() or runs.resolve() != runs
-            or not re.fullmatch('[0-9a-f]{64}', runs.parent.name)
-            or runs != root/'.context/deploy-cloud'/runs.parent.name/'runs'
-            or campaign != runs.parent/'campaigns'/('deploy-'+runs.parent.name)):
+            or not re.fullmatch('[0-9a-f]{64}', request.name)
+            or request != root/'.context/deploy-cloud'/request.name or runs != base/'runs'
+            or campaign != base/'campaigns'/('deploy-'+request.name+('-rerun' if rerun else ''))):
         raise ValueError('native Hub join root is not request-owned')
     hub = runs/'_hub'
     if hub.is_symlink():
@@ -1006,6 +1010,35 @@ def claim_home_wireguard_peer(campaign_dir: Path) -> int:
     return descriptor
 
 
+RELAY_METADATA_TIMEOUT = 30
+RELAY_METADATA_ATTEMPTS = 3
+
+
+def read_relay_app_metadata(app: str, workspace: Path, environment: dict,
+                            deadline: float | None) -> subprocess.CompletedProcess:
+    """Read-only `flyctl status`; a transient Fly API stall gets bounded retries within the deadline."""
+    for attempt in range(1, RELAY_METADATA_ATTEMPTS + 1):
+        timeout = RELAY_METADATA_TIMEOUT
+        if deadline is not None:
+            timeout = min(timeout, deadline - time.monotonic())
+            if timeout <= 0:
+                raise ValueError('shared transport app metadata unavailable before the campaign deadline')
+        try:
+            metadata = subprocess.run(['flyctl', 'status', '-a', app, '--json'], cwd=workspace,
+                                      env=environment, capture_output=True, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            if attempt == RELAY_METADATA_ATTEMPTS:
+                raise
+            print(f'[campaign] flyctl status timed out after {timeout:.0f}s; retry {attempt}/{RELAY_METADATA_ATTEMPTS - 1}',
+                  file=sys.stderr)
+            continue
+        if metadata.returncode == 0 or attempt == RELAY_METADATA_ATTEMPTS:
+            return metadata
+        print(f'[campaign] flyctl status exited {metadata.returncode}; retry {attempt}/{RELAY_METADATA_ATTEMPTS - 1}',
+              file=sys.stderr)
+    raise AssertionError('unreachable')
+
+
 def start_shared_relay(root: Path, campaign_dir: Path, workspace: Path,
                        inventory: Path, deadline: float | None) -> dict:
     """Own one canonical Fly bootstrap and one relay until all children join."""
@@ -1049,24 +1082,7 @@ def _start_shared_relay(root: Path, campaign_dir: Path, workspace: Path,
     agent_socket = directory / 'fly-agent.sock'
     environment['FLY_AGENT_SOCKET_PATH'] = str(agent_socket)
     environment['FLY_AGENT_ISOLATED'] = '1'
-    try:
-        metadata = subprocess.run(['flyctl', 'status', '-a', app, '--json'], cwd=workspace,
-                                  env=environment, capture_output=True, timeout=30)
-    except FileNotFoundError as error:
-        if error.errno == 2 and error.filename == 'flyctl':
-            # This is before bootstrap/relay creation and before the dispatch loop.
-            # A separate terminal seal is required; this checkpoint alone grants nothing.
-            write_json_atomic(campaign_dir / 'startup-failure.json', {
-                'schema': 'campaign-startup-failure-v1', 'stage': 'shared-relay-app-status',
-                'source_ref': ref, 'producer_sha256': hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
-                'parent_pid': os.getpid(), 'parent_start': parent_start,
-                'errno': error.errno, 'filename': error.filename,
-                'operation': ['flyctl', 'status', '-a', app, '--json'],
-                'inventory_sources': {name: hashlib.sha256((inventory / 'scripts' / name).read_bytes()).hexdigest()
-                    for name in ('cloudbench-campaign-inventory.sh', 'cloudbench-inventory.sh',
-                                 'cloudbench-env.sh', 'cloudbench-machine-readiness.py', 'cloudbench-campaign-machines.py')},
-            })
-        raise
+    metadata = read_relay_app_metadata(app, workspace, environment, deadline)
     metadata_path = directory / 'app-metadata.private.json'
     metadata_path.write_bytes(metadata.stdout); metadata_path.chmod(0o600)
     if metadata.returncode: raise ValueError('shared transport app metadata unavailable')
@@ -1166,28 +1182,6 @@ def _start_shared_relay(root: Path, campaign_dir: Path, workspace: Path,
         try: archive_shared_relay(directory, archive)
         except OSError: pass  # Preserve the original startup failure and records.
         raise
-
-
-def seal_startup_cleanup(campaign, state, inventory_process, shared_relay):
-    """Seal only the known pre-dispatch ENOENT path after native child joins."""
-    failure = campaign / 'startup-failure.json'
-    if (not failure.is_file() or shared_relay is not None or inventory_process is None
-            or inventory_process.returncode != 0 or state.get('status') != 'failed'
-            or state.get('peak_concurrency') != 0 or not state.get('shared_inventory_failed')
-            or not state.get('jobs') or any(j.get('status') != 'cancelled'
-                or j.get('attempts') != [] or j.get('started_at') is not None
-                or j.get('controller_exit_code') is not None for j in state['jobs'])):
-        return
-    checkpoint = json.loads(failure.read_text())
-    if checkpoint['parent_pid'] != os.getpid():
-        return
-    write_json_atomic(campaign / 'startup-cleanup.json', {
-        'schema': 'campaign-startup-cleanup-v1', 'failure_sha256': hashlib.sha256(failure.read_bytes()).hexdigest(),
-        'summary_sha256': hashlib.sha256((campaign / 'summary.json').read_bytes()).hexdigest(),
-        'parent_pid': checkpoint['parent_pid'], 'parent_start': checkpoint['parent_start'],
-        'inventory_pid': inventory_process.pid, 'inventory_exit': inventory_process.returncode,
-        'relay_started': False, 'task_controllers_started': 0, 'resource_mutations': 0,
-    })
 
 
 def stop_shared_relay(value: dict) -> bool:
@@ -1573,16 +1567,20 @@ def main() -> int:
             "release_id": None,
             "abort": None,
         }
+    # Full-width ordinary campaigns also know every concurrently admitted owner.
+    # Predeclare cleanup liability without introducing a task-start rendezvous.
+    ordinary_cleanup = not strict_start and len(jobs) <= args.concurrency
+    cleanup_ticketed = strict_start or ordinary_cleanup
     cleanup_identity_module = cleanup_ticket_module(root) if strict_start else None
     cleanup_parent_birth = cleanup_identity_module.birth(os.getpid()) if strict_start else ""
     cohorts: list[dict[str, object]] = []
     parent_lock = None
-    if strict_start:
-        if os.environ.get("CLOUDBENCH_SYNCHRONIZED_START", "1") != "1":
+    if cleanup_ticketed:
+        if strict_start and os.environ.get("CLOUDBENCH_SYNCHRONIZED_START", "1") != "1":
             raise SystemExit(
                 "strict campaign startup requires synchronized fleet start"
             )
-        barrier_root = campaign_dir / "startup-cohorts"
+        barrier_root = campaign_dir / ("startup-cohorts" if strict_start else "cleanup-cohorts")
         barrier_root.mkdir(mode=0o700)
         parent_lock = (barrier_root / "parent.lock").open("w")
         fcntl.flock(parent_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -1610,10 +1608,11 @@ def main() -> int:
             cohorts.append(cohort)
             write_json_atomic(directory / "manifest.json", cohort["_manifest"])
             for job in members:
-                job["startup_cohort"] = cohort_id
-                job["startup_ready_at"] = None
+                if strict_start:
+                    job["startup_cohort"] = cohort_id
+                    job["startup_ready_at"] = None
                 job["_cohort"] = cohort
-        state["startup_cohorts"] = cohorts
+        state["startup_cohorts" if strict_start else "cleanup_cohorts"] = cohorts
     write_json_atomic(summary_path, state)
     print(
         f"🧪 benchmark campaign: tasks={len(args.task)} runs={args.runs} "
@@ -1716,6 +1715,29 @@ def main() -> int:
     # interrupt a running campaign.
     infra_reached = infra_stop_predicate()
     current_cohort: dict[str, object] | None = None
+
+    def prepare_cleanup_tickets(cohort: dict[str, object]) -> None:
+        nonlocal cleanup_identity_module, cleanup_parent_birth
+        if cleanup_identity_module is None:
+            # Persist the immutable dispatch plan and finish inventory admission
+            # before ordinary campaigns request cleanup allocation authority.
+            cleanup_identity_module = cleanup_ticket_module(root)
+            cleanup_parent_birth = cleanup_identity_module.birth(os.getpid())
+        common = subprocess.check_output(["git", "-C", str(workspace), "rev-parse", "--path-format=absolute", "--git-common-dir"], text=True).strip()
+        reserve_root = Path(common) / "cloudbench-fleet-ownership"
+        reserve_root.mkdir(mode=0o700, exist_ok=True)
+        policy = stress_environment if stress_environment is not None else os.environ
+        cleanup_ticket_command(root, "prepare", cohort,
+            "--manifest", str(cohort["_directory"] / "manifest.json"),
+            "--reserve-root", str(reserve_root),
+            "--parent-pid", str(os.getpid()), "--parent-start", cleanup_parent_birth,
+            "--preferred", policy.get("CLOUDBENCH_CLEANUP_DISK_RESERVE_MB", "512"),
+            "--minimum", policy.get("CLOUDBENCH_MIN_CLEANUP_DISK_RESERVE_MB", "32"),
+            "--headroom", policy.get("CLOUDBENCH_CONTROLLER_DISK_HEADROOM_MB", "256"),
+            "--canary-script", str(root / "scripts/cloudbench-infra-canary-preflight.py"),
+            "--canary-lock", policy.get("FLEET_INFRA_CANARY_LOCK", str(workspace / ".context/fleet-infra-canary-preflight.transaction.lock")),
+            "--canary-source-ref", subprocess.check_output(["git", "-C", str(root), "rev-parse", "HEAD"], text=True).strip())
+        cohort["_cleanup_tickets_prepared"] = True
 
     def publish_external_barrier(cohort: dict[str, object], status: str) -> None:
         """Atomic coordinator projection, rewritten only on change; terminal is sticky."""
@@ -2080,6 +2102,23 @@ def main() -> int:
                     first_failure = first_failure or 1
                     state["stress_defaults_failed"] = True
                     write_json_atomic(summary_path, state)
+            if ordinary_cleanup and not barrier_failure and not cohorts[0].get("_cleanup_tickets_prepared"):
+                try:
+                    prepare_cleanup_tickets(cohorts[0])
+                except (OSError, ValueError, subprocess.SubprocessError) as error:
+                    first_failure = first_failure or 1
+                    barrier_failure = True
+                    state["cleanup_ticket_failure"] = "prepare"
+                    # Keep the native refusal without exposing subprocess argv,
+                    # credentials, tracebacks or a file's contents in telemetry.
+                    if isinstance(error, subprocess.SubprocessError):
+                        message = "cleanup preparation subprocess failed"
+                    elif isinstance(error, OSError):
+                        message = os.strerror(error.errno) if error.errno else "cleanup preparation filesystem error"
+                    else:
+                        message = str(error).splitlines()[0][:400] if str(error) else "cleanup preparation validation failed"
+                    state["cleanup_ticket_error"] = {"type": type(error).__name__, "message": message}
+                    write_json_atomic(summary_path, state)
             if strict_start and not active and current_cohort and current_cohort.get("_cleanup_tickets_prepared") and not current_cohort.get("_cleanup_tickets_retired") and all(member["status"] not in {"queued", "running"} for member in current_cohort["_jobs"]):
                 try:
                     cleanup_ticket_command(root, "retire", current_cohort)
@@ -2092,21 +2131,7 @@ def main() -> int:
                 if current_cohort:
                     if not current_cohort.get("_cleanup_tickets_prepared"):
                         try:
-                            common = subprocess.check_output(["git", "-C", str(workspace), "rev-parse", "--path-format=absolute", "--git-common-dir"], text=True).strip()
-                            reserve_root = Path(common) / "cloudbench-fleet-ownership"
-                            reserve_root.mkdir(mode=0o700, exist_ok=True)
-                            policy = stress_environment if stress_environment is not None else os.environ
-                            cleanup_ticket_command(root, "prepare", current_cohort,
-                                "--manifest", str(current_cohort["_directory"] / "manifest.json"),
-                                "--reserve-root", str(reserve_root),
-                                "--parent-pid", str(os.getpid()), "--parent-start", cleanup_parent_birth,
-                                "--preferred", policy.get("CLOUDBENCH_CLEANUP_DISK_RESERVE_MB", "512"),
-                                "--minimum", policy.get("CLOUDBENCH_MIN_CLEANUP_DISK_RESERVE_MB", "32"),
-                                "--headroom", policy.get("CLOUDBENCH_CONTROLLER_DISK_HEADROOM_MB", "256"),
-                                "--canary-script", str(root / "scripts/cloudbench-infra-canary-preflight.py"),
-                                "--canary-lock", policy.get("FLEET_INFRA_CANARY_LOCK", str(workspace / ".context/fleet-infra-canary-preflight.transaction.lock")),
-                                "--canary-source-ref", subprocess.check_output(["git", "-C", str(root), "rev-parse", "HEAD"], text=True).strip())
-                            current_cohort["_cleanup_tickets_prepared"] = True
+                            prepare_cleanup_tickets(current_cohort)
                         except (OSError, ValueError, subprocess.SubprocessError):
                             # End through normal summary/Hub finalization, never a traceback.
                             first_failure = first_failure or 1
@@ -2384,7 +2409,7 @@ def main() -> int:
                     environment.pop("RUN_BENCH_CAMPAIGN_BARRIER_DIR", None)
                     environment.pop("RUN_BENCH_CAMPAIGN_COHORT", None)
                     environment.pop("RUN_BENCH_CAMPAIGN_E2E_DEADLINE_MONOTONIC", None)
-                if strict_start:
+                if cleanup_ticketed:
                     environment["RUN_BENCH_CLEANUP_COHORT_DIR"] = str(job["_cohort"]["_directory"])
                     environment["RUN_BENCH_CLEANUP_COHORT_ID"] = str(job["_cohort"]["cohort_id"])
                     environment["RUN_BENCH_CLEANUP_JOB"] = str(job["job_id"])
@@ -2407,7 +2432,7 @@ def main() -> int:
                 job["started_at"] = utc_now()
                 job["status"] = "running"
                 active[process.pid] = job
-                if strict_start:
+                if cleanup_ticketed:
                     try:
                         cleanup_ticket_command(root, "assign", job["_cohort"],
                             "--job", str(job["job_id"]), "--owner-pid", str(process.pid),
@@ -2688,7 +2713,6 @@ def main() -> int:
                       state={"passed": "COMPLETE", "failed": "FAILED", "cancelled": "ABORTED"}.get(state["status"], "ENDED"))
     if scorecard is not None:
         scorecard["print_instruction"](campaign_dir)
-    seal_startup_cleanup(campaign_dir, state, inventory_process, shared_relay)
     return result
 
 

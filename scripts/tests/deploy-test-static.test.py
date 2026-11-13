@@ -27,13 +27,6 @@ class Quick(unittest.TestCase):
         with patch.object(sys,'argv',['check',kind]), patch.object(quick,'changed_files',return_value=changed):
             return quick.main()
 
-    def test_lint_phases_keep_all_files_and_type_aware_diagnostics(self):
-        root = Path(__file__).resolve().parents[2]
-        result = subprocess.run(['node', str(root / 'back-end/scripts/lint-phase-order.test.mjs')],
-                                cwd=root, text=True, capture_output=True)
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertTrue(json.loads(result.stdout)['diagnosticsIdentical'])
-
     def test_docs_do_not_expand_existing_format_scope(self):
         self.write('README.md');self.write('settings.json')
         with patch.object(quick.subprocess,'run') as execute:

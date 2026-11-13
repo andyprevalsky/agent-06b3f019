@@ -93,8 +93,8 @@ class ReviewCycleTest(unittest.TestCase):
             )
 
 
-class SyncInheritanceTest(unittest.TestCase):
-    """A main-sync-only HEAD may inherit a clean review; anything else may not."""
+class SyncRepoFixture(unittest.TestCase):
+    """A feature branch with one clean reviewed HEAD and a moved main (no tests of its own)."""
 
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
@@ -150,6 +150,10 @@ class SyncInheritanceTest(unittest.TestCase):
     def inherit(self, head: str) -> dict:
         return MODULE.inherit_sync(self.state_path, head=head, base="main", repo=self.repo)
 
+
+class SyncInheritanceTest(SyncRepoFixture):
+    """A main-sync-only HEAD may inherit a clean review; anything else may not."""
+
     def test_generated_index_conflict_sync_inherits_and_is_mergeable(self) -> None:
         head = self.sync()
         entry = self.inherit(head)
@@ -199,6 +203,68 @@ class SyncInheritanceTest(unittest.TestCase):
         self.assertEqual(cycle["number"], 2)
 
 
+class PostCapUnreviewedTest(SyncRepoFixture):
+    """After three delivered rounds and the cap, later changes are recorded as merged unreviewed."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        # Replace the inherited clean initial cycle with three delivered rounds ending clean.
+        self.state_path.unlink()
+        heads = [self.reviewed]
+        for text in ("one\nfeature v2\n", "one\nfeature v3\n"):
+            self.write("app.py", text)
+            heads.append(self.commit("fix"))
+        for kind, head, result in (("initial", heads[0], "findings"), ("incremental", heads[1], "findings"),
+                                   ("verification", heads[2], "clean")):
+            MODULE.start_cycle(self.state_path, head=head, kind=kind, reset=kind == "initial")
+            MODULE.finish_cycle(self.state_path, head=head, result=result)
+        self.final = heads[2]
+
+    def record(self, head: str) -> dict:
+        return MODULE.post_cap_unreviewed(self.state_path, head=head, base="main", repo=self.repo,
+                                          reason="user pre-authorization: skip review after 3 rounds")
+
+    def test_conflicting_sync_and_later_commit_are_recorded_unreviewed_and_mergeable(self) -> None:
+        head = self.sync(extra={"app.py": "one\nfeature v3\nresolved with main\n"})
+        with self.assertRaisesRegex(MODULE.ReviewCycleError, "post-cap-unreviewed"):
+            self.inherit(head)
+        self.write("tool.py", "x\n")
+        later = self.commit("tooling after the cap")
+        entry = self.record(later)
+        self.assertEqual((entry["kind"], entry["disposition"], entry["inherited_from"]),
+                         ("post-cap-unreviewed", "unreviewed", self.final))
+        # main_only.py arrives reviewed on main; app.py (resolved) and tool.py are unreviewed.
+        self.assertEqual(entry["changed_files"], ["app.py", "docs/rca/INDEX.md", "tool.py"])
+        self.assertIn("merged unreviewed", entry["report_row"])
+        self.assertEqual(MODULE.require_mergeable(self.state_path, head=later)["head"], later)
+        with self.assertRaisesRegex(MODULE.ReviewCycleError, "cap reached"):
+            MODULE.next_cycle(MODULE.read_state(self.state_path)["cycles"])
+
+    def test_refused_before_the_cap_or_with_open_findings(self) -> None:
+        state = MODULE.read_state(self.state_path)
+        state["cycles"][-1]["result"] = "findings"
+        MODULE.write_state(self.state_path, state)
+        head = self.sync()
+        with self.assertRaisesRegex(MODULE.ReviewCycleError, "override"):
+            self.record(head)
+        state["cycles"] = state["cycles"][:1]
+        state["cycles"][0]["result"] = "clean"
+        MODULE.write_state(self.state_path, state)
+        with self.assertRaisesRegex(MODULE.ReviewCycleError, "cap is not reached"):
+            self.record(head)
+
+    def test_quota_skips_are_not_delivered_rounds(self) -> None:
+        state = MODULE.read_state(self.state_path)
+        state["cycles"][0].update(result="clean", disposition="skipped", skip_reason="usage-cap")
+        MODULE.write_state(self.state_path, state)
+        with self.assertRaisesRegex(MODULE.ReviewCycleError, "cap is not reached"):
+            self.record(self.sync())
+
+    def test_reason_is_required(self) -> None:
+        with self.assertRaisesRegex(MODULE.ReviewCycleError, "--reason"):
+            MODULE.post_cap_unreviewed(self.state_path, head=self.sync(), base="main", repo=self.repo, reason=" ")
+
+
 class ApprovedFinalVerificationTest(unittest.TestCase):
     setUp = ReviewCycleTest.setUp
     tearDown = ReviewCycleTest.tearDown
@@ -245,6 +311,171 @@ class ApprovedFinalVerificationTest(unittest.TestCase):
         self.assertEqual(len(MODULE.read_state(self.state_path)["cycles"]), 2)
 
 
+
+
+class NoReviewablePathsTest(unittest.TestCase):
+    """A HEAD whose changed paths CodeRabbit's committed path filters all exclude spends no review request."""
+
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.repo = Path(self.temp_dir.name) / "repo"
+        self.repo.mkdir()
+        self.state_path = Path(self.temp_dir.name) / ".context" / "deploy-review-cycle.json"
+        self.receipts = self.state_path.with_name(MODULE.RECEIPTS_NAME)
+        self.git("init", "-q", "-b", "main")
+        # The real config: the canonical filters must stay parseable by the ledger.
+        self.write(".coderabbit.yaml", (ROOT / ".coderabbit.yaml").read_text())
+        self.write("scripts/tool.py", "one\n")
+        self.write("scripts/tests/tool.test.py", "t1\n")
+        self.commit("base")
+        self.git("checkout", "-q", "-b", "feature")
+
+    def tearDown(self) -> None:
+        self.temp_dir.cleanup()
+
+    git = SyncInheritanceTest.git
+    write = SyncInheritanceTest.write
+    commit = SyncInheritanceTest.commit
+
+    def record(self, head: str, **kwargs) -> dict:
+        return MODULE.record_no_reviewable_paths(
+            self.state_path, head=head, repo=self.repo, receipts_path=self.receipts, **kwargs)
+
+    def reviewed(self, result: str = "clean") -> str:
+        self.write("scripts/tool.py", "one\nfeature\n")
+        head = self.commit("feature")
+        MODULE.start_cycle(self.state_path, head=head, kind="initial", reset=True)
+        MODULE.finish_cycle(self.state_path, head=head, result=result)
+        return head
+
+    def test_canonical_filters_exclude_tests_ledgers_and_docs_but_not_code(self) -> None:
+        include, exclude, _ = MODULE.path_filters(self.repo, "HEAD")
+        for name in ("scripts/tests/deploy-cli.test.py", "agents/tests/unit/test_x.py",
+                     "agents/benchmarks/history/task_attempts.jsonl", "docs/plans/a.md", "README.md",
+                     ".claude/commands/deploy.md", "back-end/src/x.blackbox.ts", "agents/x/__init__.py",
+                     "agents/config.py", "front-end/package-lock.json"):
+            self.assertFalse(MODULE.is_reviewable(name, include, exclude), name)
+        for name in ("scripts/deploy_cli.py", "agents/tools/x.py", "back-end/src/server.ts",
+                     "agents/tests/browser_tilion.blackbox.py", "agents/x/browser_tilion.blackbox.py",
+                     "agents/tests/BROWSER_TILION.blackbox.py", "agents/x/Browser_Tilion.blackbox.py",
+                     ".github/workflows/deploy.yml", ".github/notes.md"):
+            self.assertTrue(MODULE.is_reviewable(name, include, exclude), name)
+
+    def test_a_negated_extglob_in_a_middle_segment_stops_at_that_segment(self) -> None:
+        middle = MODULE.glob_regex("a/!(b)/c.py")
+        self.assertIsNone(middle.match("a/b/c.py"))
+        self.assertIsNotNone(middle.match("a/x/c.py"))
+        self.assertIsNotNone(middle.match("a/bb/c.py"))
+        include, exclude, _ = MODULE.path_filters(self.repo, "HEAD")
+        self.assertTrue(MODULE.is_reviewable("docs/handoffs/note.txt", include, exclude))
+        self.assertFalse(MODULE.is_reviewable("docs/plans/note.txt", include, exclude))
+
+    def test_unsupported_glob_syntax_refuses_rather_than_guessing(self) -> None:
+        for pattern in ("src/{a,b}/**", "**/[ab].py", "+(a).py", "a//b", ""):
+            with self.subTest(pattern=pattern), self.assertRaises(MODULE.ReviewCycleError):
+                MODULE.glob_regex(pattern)
+
+    def test_tests_only_batch_after_a_clean_review_is_recorded_without_spending_a_cycle(self) -> None:
+        first = self.reviewed()
+        self.write("scripts/tests/tool.test.py", "t2\n")
+        self.write("agents/benchmarks/history/task_attempts.jsonl", "{}\n")
+        head = self.commit("ledger rows and a test")
+        entry = self.record(head, pr="7")
+        self.assertEqual((entry["kind"], entry["result"], entry["inherited_from"]),
+                         ("no-reviewable-paths", "clean", first))
+        self.assertEqual(entry["changed_paths"],
+                         ["agents/benchmarks/history/task_attempts.jsonl", "scripts/tests/tool.test.py"])
+        self.assertIn("No reviewable paths", entry["report_row"])
+        self.assertEqual(MODULE.require_mergeable(self.state_path, head=head)["head"], head)
+        entries = MODULE.read_state(self.state_path)["cycles"]
+        self.assertEqual(MODULE.next_cycle(entries)["number"], 2, "no review budget consumed")
+        receipt = json.loads(self.receipts.read_text().splitlines()[-1])
+        self.assertEqual((receipt["pr"], receipt["head"], receipt["disposition"]), ("7", head, "no-reviewable-paths"))
+        self.write("scripts/tool.py", "one\nfeature\nmore\n")
+        later = self.commit("real code")
+        with self.assertRaisesRegex(MODULE.ReviewCycleError, "1 reviewable path"):
+            self.record(later)
+        self.assertEqual(MODULE.start_cycle(self.state_path, head=later, kind="incremental")["number"], 2)
+
+    def test_first_head_of_a_tests_only_branch_needs_no_initial_request(self) -> None:
+        self.write("scripts/tests/tool.test.py", "t2\n")
+        self.write("docs/plans/active/x.md", "plan\n")
+        head = self.commit("tests only")
+        entry = self.record(head, reset=True, base="main")
+        self.assertIsNone(entry["inherited_from"])
+        MODULE.require_mergeable(self.state_path, head=head)
+        self.assertEqual(MODULE.next_cycle(MODULE.read_state(self.state_path)["cycles"])["kind"], "initial")
+
+    def test_reviewable_or_unsafe_changes_request_the_review(self) -> None:
+        self.write("scripts/tool.py", "one\ncode\n")
+        head = self.commit("code")
+        with self.assertRaisesRegex(MODULE.ReviewCycleError, "reviewable path.*scripts/tool.py"):
+            self.record(head, reset=True, base="main")
+        with self.assertRaisesRegex(MODULE.ReviewCycleError, "needs --base"):
+            self.record(head, reset=True)
+        self.assertFalse(self.state_path.exists(), "a refusal records nothing")
+        self.reviewed()
+        cases = {
+            "config": ({".coderabbit.yaml": "reviews:\n  path_filters:\n    - '!**'\n"}, "coderabbit.yaml changed"),
+            "tilion": ({"agents/tests/browser_tilion.blackbox.py": "x\n"}, "reviewable path"),
+        }
+        base = self.git("rev-parse", "HEAD")
+        for name, (files, message) in cases.items():
+            with self.subTest(name=name):
+                self.git("checkout", "-q", "-B", f"case-{name}", base)
+                for path, text in files.items():
+                    self.write(path, text)
+                with self.assertRaisesRegex(MODULE.ReviewCycleError, message):
+                    self.record(self.commit(name))
+        self.git("checkout", "-q", "-B", "case-rename", base)
+        self.git("mv", "scripts/tool.py", "scripts/tests/tool_moved.test.py")
+        with self.assertRaisesRegex(MODULE.ReviewCycleError, "scripts/tool.py"):
+            self.record(self.commit("move code into an excluded path"))
+        self.git("checkout", "-q", "-B", "case-unrelated", "main")
+        self.write("docs/x.md", "x\n")
+        with self.assertRaisesRegex(MODULE.ReviewCycleError, "not an ancestor"):
+            self.record(self.commit("unrelated history"))
+        with self.assertRaisesRegex(MODULE.ReviewCycleError, "already the latest"):
+            self.record(base)
+
+    def test_findings_or_an_open_cycle_are_never_carried(self) -> None:
+        self.reviewed(result="findings")
+        self.write("docs/x.md", "x\n")
+        head = self.commit("docs")
+        with self.assertRaisesRegex(MODULE.ReviewCycleError, "findings need a review cycle"):
+            self.record(head)
+        MODULE.start_cycle(self.state_path, head=head, kind="incremental")
+        self.write("docs/y.md", "y\n")
+        with self.assertRaisesRegex(MODULE.ReviewCycleError, "still open"):
+            self.record(self.commit("more docs"))
+
+    def test_after_the_cap_an_excluded_only_batch_still_merges_without_an_override(self) -> None:
+        for index, (kind, result) in enumerate((("initial", "clean"), ("incremental", "findings"),
+                                                ("verification", "clean"))):
+            self.write("scripts/tool.py", f"v{index}\n")
+            head = self.commit(f"cycle {index}")
+            MODULE.start_cycle(self.state_path, head=head, kind=kind, reset=index == 0)
+            MODULE.finish_cycle(self.state_path, head=head, result=result)
+        self.write("scripts/tests/tool.test.py", "after cap\n")
+        head = self.commit("test fix")
+        self.record(head)
+        MODULE.require_mergeable(self.state_path, head=head)
+
+    def test_cli_prints_the_row_then_json_and_refusals_exit_nonzero(self) -> None:
+        self.write("docs/x.md", "x\n")
+        head = self.commit("docs")
+        argv = [sys.executable, str(ROOT / "scripts/deploy_review_cycle.py"), "--state", str(self.state_path),
+                "no-reviewable-paths", "--head", head, "--reset", "--base", "main", "--pr", "9"]
+        result = subprocess.run(argv, cwd=self.repo, capture_output=True, text=True, check=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        row, payload = result.stdout.splitlines()
+        self.assertTrue(row.startswith("Code Review | ➖ No reviewable paths | 1 changed path(s)"), row)
+        self.assertEqual(json.loads(payload)["head"], head)
+        self.write("scripts/tool.py", "code\n")
+        argv[argv.index(head)] = self.commit("code")
+        refused = subprocess.run(argv, cwd=self.repo, capture_output=True, text=True, check=False)
+        self.assertEqual((refused.returncode, refused.stdout), (1, ""))
+        self.assertIn("reviewable path(s): scripts/tool.py", refused.stderr)
 
 
 HEAD_A = "33d8cfbfed95812de3534a74bee0a0caa36f10fe"
@@ -562,6 +793,53 @@ class OverrideDispositionTest(unittest.TestCase):
         receipt = json.loads(self.receipts.read_text().splitlines()[-1])
         self.assertEqual((receipt["disposition"], receipt["deferred_to"]),
                          ("overridden", "deploy/speed-followup-9-body-read"))
+
+    def completed_findings(self) -> dict:
+        # Three delivered reviews; finish through the same public action as the operator.
+        state = MODULE.read_state(self.state_path)
+        state["cycles"][1]["result"] = "findings"
+        state["cycles"][-1].update(number=3, kind="verification")
+        MODULE.write_state(self.state_path, state)
+        return MODULE.finish_cycle(self.state_path, head=HEAD_C, result="findings")
+
+    def completed_override_cli(self, data: dict, *, head=HEAD_C) -> subprocess.CompletedProcess:
+        evidence_path = self.state_path.parent / "evidence.json"
+        evidence_path.write_text(json.dumps(data))
+        return subprocess.run(
+            [sys.executable, "-B", str(ROOT / "scripts/deploy_review_cycle.py"),
+             "--state", str(self.state_path), "override", "--head", head, "--pr", "1656",
+             "--finding-ids", "4431365241", "--deferred-to", "deploy/speed-followup-9-body-read",
+             "--evidence-json", str(evidence_path), "--receipt", str(self.receipts)],
+            text=True, capture_output=True, check=False)
+
+    def test_completed_override_refusals_are_atomic(self) -> None:
+        self.completed_findings()
+        original = MODULE.read_state(self.state_path)
+        cases = [dict(result="clean"), dict(disposition="skipped", skip_reason="usage-cap"),
+                 dict(disposition="overridden"), dict(head=HEAD_A), dict(kind="post-cap-unreviewed"),
+                 dict(one_final_review_approval={"approval_id": "fixture:forbidden"}),
+                 dict(post_findings_review_approval={"approval_id": "fixture:forbidden"})]
+        for changes in cases + [None, "budget", "review-head", "unanswered", "other-unanswered"]:
+            with self.subTest(changes=changes):
+                state, data = deepcopy(original), deepcopy(self.data)
+                if isinstance(changes, dict):
+                    state["cycles"][-1].update(changes)
+                elif changes == "budget":
+                    state["cycles"][1]["result"] = "unavailable"
+                elif changes == "review-head":
+                    data["reviews"] = [{**FINDINGS_REVIEW, "commit_id": HEAD_A}]
+                elif changes == "unanswered":
+                    data["review_comments"] = [FINDING_COMMENT]
+                elif changes == "other-unanswered":
+                    data["review_comments"].append(review_comment(4431365300, HEAD_C, "another finding"))
+                else:
+                    state["cycles"].append(dict(head=HEAD_A, status="completed", result="findings"))
+                MODULE.write_state(self.state_path, state)
+                before = self.state_path.read_bytes()
+                result = self.completed_override_cli(data)
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertEqual(self.state_path.read_bytes(), before)
+                self.assertFalse(self.receipts.exists())
 
     def test_override_requires_three_rounds_counting_prior_deploys(self) -> None:
         MODULE.start_cycle(self.state_path, head=HEAD_A, kind="initial", reset=True)
@@ -935,6 +1213,359 @@ esac
         self.assertEqual(calls[0][1:], ["scripts/deploy_review_cycle.py", "start", "--kind", "incremental",
                                         "--head", "d" * 40])
 
+class OneFinalReviewTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.repo = Path(self.tmp.name) / 'repo'; self.repo.mkdir()
+        self.state = Path(self.tmp.name) / 'ledger.json'
+        self.git('init', '-q')
+        (self.repo / 'source').write_text('frozen')
+        self.git('add', '.')
+        self.git('-c','user.name=test','-c','user.email=test@example.com','commit','-qm','frozen')
+        self.head = self.git('rev-parse','HEAD').strip()
+        entries = [dict(number=i,kind=kind,head=str(i)*40,status='completed',result='clean')
+                   for i,kind in enumerate(['initial','incremental','verification'],1)]
+        entries += [dict(number=i,kind='sync-inherited',head=str(i%10)*40,status='completed',result='clean')
+                    for i in range(4,18)]
+        self.original = {'schema_version':1,'cycles':entries,'original_cycle_identity':'PR1708-original'}
+        MODULE.write_state(self.state,self.original)
+        self.before = self.state.read_bytes()
+
+    def tearDown(self):self.tmp.cleanup()
+    def git(self,*args):
+        return subprocess.check_output(['git',*args],cwd=self.repo,text=True,stderr=subprocess.DEVNULL)
+    def start(self,**kw):
+        args=dict(head=self.head,kind='verification',one_final_review_approval='native-user-message:explicit',
+                  approved_head=self.head,repo=self.repo)
+        args.update(kw);return MODULE.start_cycle(self.state,**args)
+    def unchanged_refusal(self,**kw):
+        with self.assertRaises(MODULE.ReviewCycleError):self.start(**kw)
+        self.assertEqual(self.before,self.state.read_bytes())
+
+    def test_one_extra_is_open_then_normal_finish_not_authorization_clean(self):
+        value=self.start();self.assertEqual(4,value['number']);self.assertEqual('open',value['status'])
+        self.assertEqual(self.original['cycles'],MODULE.read_state(self.state)['cycles'][:-1])
+        self.assertEqual(17,value['one_final_review_approval']['prior_entries'])
+        with self.assertRaises(MODULE.ReviewCycleError):MODULE.require_mergeable(self.state,head=self.head)
+        MODULE.finish_cycle(self.state,head=self.head,result='clean')
+        self.assertEqual('clean',MODULE.require_mergeable(self.state,head=self.head)['result'])
+        with self.assertRaises(MODULE.ReviewCycleError):MODULE.start_cycle(self.state,head='f'*40,kind='verification')
+        with self.assertRaises(MODULE.ReviewCycleError):self.start(head='f'*40,approved_head='f'*40)
+        with self.assertRaises(MODULE.ReviewCycleError):MODULE.start_cycle(self.state,head='f'*40,kind='initial',reset=True)
+
+    def test_missing_wrongscope_dirty_and_combined_approval_refuse_atomically(self):
+        for kw in [dict(one_final_review_approval=None),dict(one_final_review_approval=''),
+                   dict(approved_head=None),dict(approved_head='f'*40),dict(head='short'),dict(kind='initial'),
+                   dict(reset=True),dict(verification_approval='other')]:
+            with self.subTest(kw=kw):self.unchanged_refusal(**kw)
+        (self.repo/'untracked').write_text('dirty');self.unchanged_refusal()
+
+    def test_unavailable_quota_nonclean_or_fewer_prior_reviews_never_qualify(self):
+        for change in ['findings','open','unavailable','quota','fewer']:
+            value=deepcopy(self.original)
+            if change=='fewer':value['cycles'].pop(0)
+            elif change=='quota':value['cycles'][1].update(disposition='skipped',skip_reason='usage-cap')
+            elif change=='open':value['cycles'][2]['status']='open'
+            else:value['cycles'][2]['result']=change
+            MODULE.write_state(self.state,value);self.before=self.state.read_bytes()
+            with self.subTest(change=change):self.unchanged_refusal()
+
+    def test_no_unavailable_or_quota_replacement_and_findings_block_merge(self):
+        self.start();saved=self.state.read_bytes()
+        with self.assertRaises(MODULE.ReviewCycleError):MODULE.finish_cycle(self.state,head=self.head,result='unavailable')
+        self.assertEqual(saved,self.state.read_bytes())
+        value=MODULE.read_state(self.state);cycle=value['cycles'][-1]
+        with self.assertRaises(MODULE.ReviewCycleError):
+            MODULE._close_with_disposition(self.state,self.state.with_suffix('.receipt'),value,cycle,
+                pr='1708',disposition='overridden',report_row='not allowed',fields={})
+        self.assertEqual(saved,self.state.read_bytes())
+        MODULE.finish_cycle(self.state,head=self.head,result='findings')
+        with self.assertRaises(MODULE.ReviewCycleError):MODULE.require_mergeable(self.state,head=self.head)
+        with self.assertRaises(MODULE.ReviewCycleError):MODULE.next_cycle(MODULE.read_state(self.state)['cycles'])
+
+
+    def test_exact_usage_cap_stays_qualified_without_authorizing_fifth(self):
+        self.start()
+        cap=dict(CAP_COMMENT,body=CAP_COMMENT['body'].replace(HEAD_C,self.head))
+        check=dict(RATE_LIMITED_CHECK,head_sha=self.head)
+        normalized=MODULE.normalize_evidence(evidence(issue_comments=[cap],check_runs=[check]),source='UNIT_TEST_ONLY')
+        value=MODULE.skip_cycle(self.state,head=self.head,pr='1708',reason='usage-cap',
+            evidence=normalized,receipts_path=self.state.with_suffix('.receipt'))
+        self.assertEqual('skipped',value['disposition'])
+        self.assertEqual(self.original['cycles'],MODULE.read_state(self.state)['cycles'][:-1])
+        self.assertEqual('skipped',MODULE.require_mergeable(self.state,head=self.head)['disposition'])
+        with self.assertRaises(MODULE.ReviewCycleError):MODULE.next_cycle(MODULE.read_state(self.state)['cycles'])
+        with self.assertRaises(MODULE.ReviewCycleError):self.start()
+        # A distinct clean HEAD must not bypass the consumed exception marker.
+        (self.repo/'source').write_text('different clean frozen source')
+        self.git('add','.')
+        self.git('-c','user.name=test','-c','user.email=test@example.com','commit','-qm','next frozen fixture')
+        next_head=self.git('rev-parse','HEAD').strip()
+        with self.assertRaisesRegex(MODULE.ReviewCycleError,'consumed'):
+            self.start(head=next_head,approved_head=next_head)
+
+
+class OneFinalMalformedLedgerTest(unittest.TestCase):
+    def test_nonobject_tail_returns_typed_failure_without_mutation(self):
+        for tail in (None, [], 'broken', 17, False):
+            with self.subTest(tail=tail), tempfile.TemporaryDirectory() as folder:
+                path = Path(folder) / 'ledger.json'
+                entries = [dict(number=i, kind=kind, head=str(i)*40, status='completed', result='clean')
+                           for i, kind in enumerate(('initial', 'incremental', 'verification'), 1)]
+                path.write_text(json.dumps({'schema_version': 1, 'cycles': [*entries, tail]}))
+                before = path.read_bytes()
+                out, err = io.StringIO(), io.StringIO()
+                with patch.object(sys, 'argv', ['deploy_review_cycle.py', '--state', str(path),
+                          'start', '--kind', 'verification', '--head', 'd'*40,
+                          '--one-final-review-approval', 'user:decision', '--approved-head', 'd'*40,
+                          '--repo', folder]), \
+                        patch.object(MODULE, 'git', side_effect=AssertionError('unexpected git')) as git, \
+                        patch.object(MODULE, 'write_state', side_effect=AssertionError('unexpected write')) as write, \
+                        patch.object(MODULE.subprocess, 'run', side_effect=AssertionError('unexpected subprocess')) as process, \
+                        contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                    try:
+                        with self.assertRaises(SystemExit) as caught:
+                            MODULE.main()
+                    finally:
+                        self.assertEqual(before, path.read_bytes())
+                        git.assert_not_called()
+                        write.assert_not_called()
+                        process.assert_not_called()
+                self.assertIsInstance(caught.exception.__cause__, MODULE.ReviewCycleError)
+                self.assertIn('one final review requires exactly three', str(caught.exception))
+                self.assertEqual(out.getvalue(), '')
+
+
+
+class PostFindingsProposalTest(unittest.TestCase):
+    """Synthetic 18-entry ledgers only; never a real approval or provider call."""
+    def setUp(self):
+        import hashlib
+        self.hashlib = hashlib
+        self.temp = tempfile.TemporaryDirectory()
+        self.path = Path(self.temp.name) / 'ledger.json'
+        self.head = 'e' * 40
+        entries = [dict(number=i, kind=kind, head=str(i)*40, status='completed', result='clean')
+                   for i, kind in enumerate(('initial', 'incremental', 'verification'), 1)]
+        entries += [dict(number=i, kind='sync-inherited', head='a'*40, status='completed', result='clean')
+                    for i in range(4, 18)]
+        prefix = dict(schema_version=1, cycles=entries, identity='SYNTHETIC_ONLY')
+        old_hash = hashlib.sha256((json.dumps(prefix, indent=2) + '\n').encode()).hexdigest()
+        entries.append(dict(number=4, kind='verification', head='4'*40, status='completed', result='findings',
+            one_final_review_approval=dict(approval_id='fixture:fourth', approved_head='4'*40,
+                prior_ledger_sha256=old_hash, prior_entries=17, review_position=4)))
+        self.original = deepcopy(prefix)
+        self.save(self.original)
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def save(self, state):
+        MODULE.write_state(self.path, state)
+        self.before = self.path.read_bytes()
+        self.digest = self.hashlib.sha256(self.before).hexdigest()
+
+    def invoke(self, **changes):
+        options = dict(head=self.head, kind='verification', post_findings_review_approval='fixture:NEW-decision',
+                       approved_head=self.head, prior_ledger_sha256=self.digest)
+        options.update(changes)
+        argv = ['deploy_review_cycle.py', '--state', str(self.path), 'start']
+        for key, value in options.items():
+            if value is not None:
+                argv.append('--' + key.replace('_', '-'))
+                if value is not True:
+                    argv.append(str(value))
+        output = io.StringIO()
+        def git(repo, *args):
+            return self.head if args[0] == 'rev-parse' else getattr(self, 'dirty', '')
+        with patch.object(sys, 'argv', argv), patch.object(MODULE, 'git', side_effect=git), \
+                patch.object(MODULE.subprocess, 'run', side_effect=AssertionError('external call forbidden')), \
+                contextlib.redirect_stdout(output):
+            try:
+                return MODULE.main(), output.getvalue()
+            except SystemExit as error:
+                return 1, str(error)
+
+    def refuse(self, **changes):
+        code, error = self.invoke(**changes)
+        self.assertEqual(code, 1, error)
+        self.assertEqual(self.before, self.path.read_bytes())
+        return error
+
+    def test_native_admission_preserves_all_18_and_requires_real_clean_finish(self):
+        code, output = self.invoke()
+        self.assertEqual(code, 0, output)
+        state = MODULE.read_state(self.path)
+        self.assertEqual(state['cycles'][:18], self.original['cycles'])
+        self.assertEqual(len(state['cycles']), 19)
+        self.assertEqual(state['identity'], 'SYNTHETIC_ONLY')
+        fifth = state['cycles'][-1]
+        self.assertEqual((fifth['number'], fifth['status']), (5, 'open'))
+        self.assertEqual(fifth['post_findings_review_approval']['prior_ledger_sha256'], self.digest)
+        with self.assertRaises(MODULE.ReviewCycleError):
+            MODULE.require_mergeable(self.path, head=self.head)
+        MODULE.finish_cycle(self.path, head=self.head, result='clean')
+        self.assertEqual(MODULE.require_mergeable(self.path, head=self.head)['number'], 5)
+        self.before = self.path.read_bytes()
+        self.assertIn('consumed', self.refuse(head='f'*40, approved_head='f'*40))
+
+    def test_missing_wrong_scope_dirty_and_combined_inputs_fail_closed(self):
+        for values in [dict(post_findings_review_approval=None), dict(post_findings_review_approval=''),
+                       dict(post_findings_review_approval='fixture:fourth'), dict(post_findings_review_approval='bad id'),
+                       dict(approved_head=None), dict(approved_head='f'*40), dict(head='f'*40, approved_head='f'*40), dict(head='short'),
+                       dict(prior_ledger_sha256=None), dict(prior_ledger_sha256='f'*64),
+                       dict(verification_approval='other'), dict(one_final_review_approval='other'),
+                       dict(reset=True), dict(kind='initial')]:
+            with self.subTest(values=values):
+                self.refuse(**values)
+        self.dirty = '?? untracked\n'
+        self.refuse()
+
+    def test_malformed_and_nonqualifying_ledgers_fail_closed(self):
+        for mutation in ('tail', 'marker', 'count', 'clean', 'quota', 'duplicate', 'badhead', 'badprefix', 'badschema', 'badnumber', 'baddigest'):
+            value = deepcopy(self.original)
+            if mutation == 'tail': value['cycles'].append(None)
+            elif mutation == 'marker': value['cycles'][-1]['one_final_review_approval'] = None
+            elif mutation == 'count': value['cycles'].pop(0)
+            elif mutation == 'clean': value['cycles'][-1]['result'] = 'clean'
+            elif mutation == 'quota': value['cycles'][1].update(disposition='skipped', skip_reason='usage-cap')
+            elif mutation == 'duplicate': value['cycles'][1]['head'] = value['cycles'][0]['head']
+            elif mutation == 'badhead': value['cycles'][-1]['head'] = 'wrong'
+            elif mutation == 'badschema': value['schema_version'] = True
+            elif mutation == 'badnumber': value['cycles'][0]['number'] = True
+            elif mutation == 'baddigest': value['cycles'][-1]['one_final_review_approval']['prior_ledger_sha256'] = 1
+            else: value['cycles'][-1]['one_final_review_approval']['prior_entries'] = 16
+            self.save(value)
+            with self.subTest(mutation=mutation): self.refuse()
+
+    def test_unavailable_skip_override_findings_twice_and_reset_stay_blocked(self):
+        self.assertEqual(self.invoke()[0], 0)
+        admitted = self.path.read_bytes()
+        with self.assertRaises(MODULE.ReviewCycleError):
+            MODULE.finish_cycle(self.path, head=self.head, result='unavailable')
+        for disposition in ('skipped', 'overridden'):
+            state = MODULE.read_state(self.path)
+            with self.assertRaises(MODULE.ReviewCycleError):
+                MODULE._close_with_disposition(self.path, self.path.with_suffix('.receipt'), state,
+                    state['cycles'][-1], pr='fixture', disposition=disposition, report_row='forbidden', fields={})
+            self.assertFalse(self.path.with_suffix('.receipt').exists())
+        self.assertEqual(admitted, self.path.read_bytes())
+        MODULE.finish_cycle(self.path, head=self.head, result='findings')
+        with self.assertRaises(MODULE.ReviewCycleError):
+            MODULE.require_mergeable(self.path, head=self.head)
+        self.before = self.path.read_bytes()
+        self.refuse()
+        self.refuse(reset=True)
+        self.refuse(post_findings_review_approval=None, prior_ledger_sha256=None, approved_head=None)
+
+    def test_existing_native_barriers_on_closed_fourth_findings(self):
+        with self.assertRaisesRegex(MODULE.ReviewCycleError, 'not mergeable'):
+            MODULE.require_mergeable(self.path, head='4'*40)
+        with self.assertRaisesRegex(MODULE.ReviewCycleError, 'unreviewed'):
+            MODULE.require_mergeable(self.path, head=self.head)
+        with self.assertRaisesRegex(MODULE.ReviewCycleError, 'no replacement or fifth'):
+            MODULE.next_cycle(self.original['cycles'])
+        with self.assertRaisesRegex(MODULE.ReviewCycleError, 'consumed'):
+            MODULE.start_cycle(self.path, head=self.head, kind='verification',
+                one_final_review_approval='fixture:NEW-decision', approved_head=self.head)
+        self.assertEqual(self.before, self.path.read_bytes())
+
+
+
+class PriorNativeApprovalReplayTest(unittest.TestCase):
+    def test_any_prior_native_approval_id_is_rejected_without_a_write(self):
+        for location in ('third', 'history-verification', 'history-final'):
+            with self.subTest(location=location):
+                fixture = PostFindingsProposalTest()
+                fixture.setUp()
+                try:
+                    state = deepcopy(fixture.original)
+                    reused = 'fixture:OLD-native-decision'
+                    if location == 'third':
+                        state['cycles'][2]['verification_approval'] = reused
+                    elif location == 'history-verification':
+                        state['cycles'][3]['verification_approval'] = reused
+                    else:
+                        state['cycles'][3]['one_final_review_approval'] = {'approval_id': reused}
+                    prefix = {**state, 'cycles': state['cycles'][:-1]}
+                    state['cycles'][-1]['one_final_review_approval']['prior_ledger_sha256'] = fixture.hashlib.sha256(
+                        (json.dumps(prefix, indent=2) + '\n').encode()).hexdigest()
+                    fixture.save(state)
+                    with patch.object(MODULE, 'write_state', wraps=MODULE.write_state) as write:
+                        code, output = fixture.invoke(post_findings_review_approval=reused)
+                    self.assertEqual(code, 1, output)
+                    self.assertIn('new explicit user approval', output)
+                    write.assert_not_called()
+                    self.assertEqual(fixture.before, fixture.path.read_bytes())
+                finally:
+                    fixture.tearDown()
+
+
+class FifthUsageCapPolicyTest(unittest.TestCase):
+    setUp = PostFindingsProposalTest.setUp
+    tearDown = PostFindingsProposalTest.tearDown
+    save = PostFindingsProposalTest.save
+    invoke = PostFindingsProposalTest.invoke
+    refuse = PostFindingsProposalTest.refuse
+
+    def cap_payload(self):
+        cap = dict(CAP_COMMENT, body=CAP_COMMENT['body'].replace(HEAD_C, self.head))
+        check = dict(RATE_LIMITED_CHECK, head_sha=self.head)
+        return evidence(issue_comments=[cap], check_runs=[check])
+
+    def native_skip(self, payload):
+        evidence_path = self.path.with_suffix('.evidence.json')
+        evidence_path.write_text(json.dumps(payload))
+        receipt = self.path.with_suffix('.receipts')
+        out = io.StringIO()
+        with patch.object(sys, 'argv', ['deploy_review_cycle.py', '--state', str(self.path),
+                'skip', '--head', self.head, '--pr', 'SYNTHETIC_ONLY', '--reason', 'usage-cap',
+                '--evidence-json', str(evidence_path), '--receipt', str(receipt)]), \
+                patch.object(MODULE.subprocess, 'run', side_effect=AssertionError('network forbidden')), \
+                contextlib.redirect_stdout(out):
+            try:
+                return MODULE.main(), out.getvalue(), receipt
+            except SystemExit as error:
+                return 1, str(error), receipt
+
+    def test_exact_usage_cap_is_skipped_never_pass_and_never_sixth(self):
+        self.assertEqual(self.invoke()[0], 0)
+        code, output, receipt = self.native_skip(self.cap_payload())
+        self.assertEqual(code, 0, output)
+        self.assertIn('⚠️ Skipped', output)
+        self.assertNotIn('PASS', output)
+        state = MODULE.read_state(self.path)
+        self.assertEqual(state['cycles'][:18], self.original['cycles'])
+        self.assertEqual(len(state['cycles']), 19)
+        fifth = state['cycles'][-1]
+        self.assertEqual((fifth['disposition'], fifth['skip_reason']), ('skipped', 'usage-cap'))
+        self.assertEqual(fifth['evidence']['issue_comment_id'], CAP_COMMENT['id'])
+        self.assertEqual(fifth['evidence']['check_run_id'], RATE_LIMITED_CHECK['id'])
+        self.assertEqual(MODULE.require_mergeable(self.path, head=self.head)['disposition'], 'skipped')
+        self.assertEqual(json.loads(receipt.read_text())['disposition'], 'skipped')
+        self.before = self.path.read_bytes()
+        self.assertIn('consumed', self.refuse(head='f'*40, approved_head='f'*40))
+        with self.assertRaises(MODULE.ReviewCycleError): MODULE.next_cycle(state['cycles'])
+        self.refuse(reset=True)
+
+    def test_fake_wrong_head_success_and_substantive_evidence_refused(self):
+        self.assertEqual(self.invoke()[0], 0)
+        before = self.path.read_bytes()
+        for mutation in ('empty', 'not-cap', 'wrong-comment-head', 'wrong-check-head', 'success', 'substantive'):
+            data = self.cap_payload()
+            if mutation == 'empty': data = evidence()
+            elif mutation == 'not-cap': data['issue_comments'][0]['body'] = 'Review rate limited ' + self.head
+            elif mutation == 'wrong-comment-head': data['issue_comments'][0]['body'] = CAP_COMMENT['body']
+            elif mutation == 'wrong-check-head': data['check_runs'][0]['head_sha'] = 'f'*40
+            elif mutation == 'success': data['check_runs'] = [dict(FINISHED_CHECK, head_sha=self.head)]
+            else: data['reviews'] = [dict(FINDINGS_REVIEW, commit_id=self.head)]
+            with self.subTest(mutation=mutation):
+                code, output, receipt = self.native_skip(data)
+                self.assertEqual(code, 1, output)
+                self.assertEqual(before, self.path.read_bytes())
+                self.assertFalse(receipt.exists())
+
+
 
 # Projections of authenticated PR1828 API captures, 2026-11-08; bodies are unmodified.
 MODERN_QUOTA_DATA = {'issue_comments': [{'id': 6720503588,
@@ -1277,6 +1908,307 @@ class ModernQuotaTest(unittest.TestCase):
         with self.assertRaisesRegex(MODULE.ReviewCycleError, 'substantive'):
             self.skip()
         self.assertFalse(self.receipts.exists())
+
+class RetargetUnexecutedTest(unittest.TestCase):
+    def setUp(self):
+        import hashlib
+        self.hashlib = hashlib
+        self.temp = tempfile.TemporaryDirectory()
+        root = Path(self.temp.name)
+        self.path, self.evidence = root/'ledger.json', root/'evidence.json'
+        self.old, self.new = '7'*40, '8'*40
+        self.clock = '2026-11-08T21:42:00+00:00'
+        entries = [dict(number=i, kind=k, head=str(i)*40, status='completed', result='clean')
+                   for i,k in enumerate(('initial','incremental','verification'),1)]
+        entries += [dict(number=i, kind='sync-inherited', head='a'*40, status='completed',result='clean') for i in range(4,18)]
+        entries.append(dict(number=4,kind='verification',head='4'*40,status='completed',result='findings',one_final_review_approval={'approval_id':'old-fourth'}))
+        entries.append(dict(number=5,kind='verification',head=self.old,status='open',started_at='2026-11-08T21:40:46+00:00',post_findings_review_approval=dict(approval_id='same-approved-slot',approved_head=self.old,prior_entries=18,review_position=5,prior_ledger_sha256='a'*64)))
+        self.state={'schema_version':1,'cycles':entries}
+        issue='https://api.github.com/repos/Rose-Ai-Labs/rose/issues/1708'
+        self.data={'complete':True,'capture_started_at':'2026-11-08T21:41:50+00:00','captured_at':'2026-11-08T21:41:59+00:00',
+          'pull_request':{'number':1708,'state':'open','head':{'sha':self.old},'base':{'repo':{'full_name':'Rose-Ai-Labs/rose'}},'user':{'login':'owner'}},
+          'reviews':[],'review_comments':[],
+          'issue_comments':[
+           {'id':30,'issue_url':issue,'user':{'type':'User','login':'owner'},'author_association':'MEMBER','body':'@coderabbitai review','created_at':'2026-11-08T21:40:52Z','updated_at':'2026-11-08T21:40:52Z'},
+           {'id':31,'issue_url':issue,'user':{'type':'Bot','login':MODULE.REVIEW_BOT},'performed_via_github_app':{'slug':'coderabbitai'},'body':'<!-- CodeRabbit review command invocation: v2:'+'a'*64+' -->\n<summary>Action not completed</summary>\nReview rate limited.','created_at':'2026-11-08T21:41:13Z','updated_at':'2026-11-08T21:41:21Z'}],
+          'check_runs':[{'id':32,'name':'CodeRabbit','head_sha':self.old,'app':{'slug':'coderabbitai'},'status':'completed','conclusion':'neutral','started_at':'2026-11-08T21:41:20Z','completed_at':'2026-11-08T21:41:20Z','output':{'title':'Review rate limited','summary':'\n'.join('| '+phase+' | Skipped | 0s |' for phase in ('Prepare review scope','Prepare repository workspace','Run analysis checks','Generate review feedback','Publish review results'))}}]}
+        self.save()
+
+    def tearDown(self): self.temp.cleanup()
+    def save(self):
+        self.path.write_text(json.dumps(self.state,indent=2)+'\n');self.before=self.path.read_bytes()
+        self.digest=self.hashlib.sha256(self.before).hexdigest();self.evidence.write_text(json.dumps(self.data))
+
+    def run_native(self, **changes):
+        options=dict(head=self.new,approved_head=self.new,approval='same-approved-slot',prior_ledger_sha256=self.digest,pr='1708',request_comment_id='30',repo=str(self.path.parent),github_repo='Rose-Ai-Labs/rose',evidence_json=str(self.evidence))
+        options.update(changes);argv=['deploy_review_cycle.py','--state',str(self.path),'retarget-unexecuted']
+        for k,v in options.items():
+            if v is not None:argv.extend(['--'+k.replace('_','-'),v])
+        def git(repo,*args):return self.new if args[:2]==('rev-parse','HEAD') else getattr(self,'dirty','')
+        out=io.StringIO()
+        with patch.object(sys,'argv',argv),patch.object(MODULE,'now',return_value=self.clock),patch.object(MODULE,'git',side_effect=git),patch.object(MODULE,'is_ancestor',return_value=getattr(self,'ancestor',True)),patch.object(MODULE.subprocess,'run',side_effect=AssertionError('unmocked external call')),contextlib.redirect_stdout(out),contextlib.redirect_stderr(out):
+            try:return MODULE.main(),out.getvalue()
+            except SystemExit as e:return (e.code if isinstance(e.code,int) else 1),str(e)
+
+    def test_native_success_keeps_slot_and_complete_history(self):
+        code,out=self.run_native();self.assertEqual(code,0,out)
+        state=json.loads(self.path.read_text());self.assertEqual(state['cycles'][:18],self.state['cycles'][:18]);self.assertEqual(len(state['cycles']),19)
+        last=state['cycles'][-1];self.assertEqual((last['number'],last['status'],last['head']),(5,'open',self.new))
+        history=last['unexecuted_retargets'][0];self.assertEqual(history['original_entry'],self.state['cycles'][-1]);self.assertEqual(history['prior_ledger_sha256'],self.digest)
+        self.assertEqual(history['evidence'],self.data);self.assertEqual(last['started_at'],self.state['cycles'][-1]['started_at'])
+        self.before=self.path.read_bytes();self.digest=self.hashlib.sha256(self.before).hexdigest()
+        code,out=self.run_native();self.assertNotEqual(code,0,out);self.assertEqual(self.before,self.path.read_bytes())
+        with self.assertRaises(MODULE.ReviewCycleError):MODULE.require_mergeable(self.path,head=self.new)
+        with self.assertRaises(MODULE.ReviewCycleError):MODULE.next_cycle(state['cycles'])
+        with self.assertRaises(MODULE.ReviewCycleError):MODULE.finish_cycle(self.path,head=self.new,result='unavailable')
+        with self.assertRaises(MODULE.ReviewCycleError):MODULE.start_cycle(self.path,head='9'*40,kind='verification',post_findings_review_approval='new',approved_head='9'*40,prior_ledger_sha256=self.digest)
+
+    def test_refuses_all_invalid_bindings_without_writes(self):
+        for change in [dict(approval='wrong'),dict(approved_head='9'*40),dict(prior_ledger_sha256='b'*64),dict(request_comment_id='99'),dict(head='short'),dict(pr='2')]:
+            with self.subTest(change=change):
+                code,out=self.run_native(**change);self.assertNotEqual(code,0,out);self.assertEqual(self.before,self.path.read_bytes())
+        self.dirty='?? uncommitted';self.assertNotEqual(self.run_native()[0],0);self.assertEqual(self.before,self.path.read_bytes())
+        self.dirty='';self.ancestor=False;self.assertNotEqual(self.run_native()[0],0);self.assertEqual(self.before,self.path.read_bytes())
+
+    def test_refuses_execution_and_incomplete_or_stale_evidence(self):
+        original=deepcopy(self.data)
+        for case in ('stale','incomplete','wrong-pr-head','wrong-actor','edited-request','full-request','wrong-reply','review','inline','queued','success','analysis','duplicate-analysis','wrong-check-head','malformed'):
+            self.data=deepcopy(original)
+            if case=='stale':self.data['capture_started_at']='2026-11-08T21:39:00Z'
+            elif case=='incomplete':self.data['complete']=False
+            elif case=='wrong-pr-head':self.data['pull_request']['head']['sha']='f'*40
+            elif case=='wrong-actor':self.data['issue_comments'][0]['user']['login']='other'
+            elif case=='edited-request':self.data['issue_comments'][0]['updated_at']='2026-11-08T21:41:00Z'
+            elif case=='full-request':self.data['issue_comments'].append(dict(self.data['issue_comments'][0],id=99,body='@coderabbitai full review'))
+            elif case=='wrong-reply':self.data['issue_comments'][1]['body']='<summary>Action not completed</summary>'
+            elif case=='review':self.data['reviews']=[{'id':5,'user':{'login':MODULE.REVIEW_BOT},'commit_id':self.old,'body':'Reviewed'}]
+            elif case=='inline':self.data['review_comments']=[{'id':6,'user':{'login':MODULE.REVIEW_BOT},'original_commit_id':self.old}]
+            elif case=='queued':self.data['check_runs'][0]['status']='in_progress'
+            elif case=='success':self.data['check_runs'][0]['conclusion']='success'
+            elif case=='analysis':self.data['check_runs'][0]['output']['summary']=self.data['check_runs'][0]['output']['summary'].replace('Run analysis checks | Skipped','Run analysis checks | Success')
+            elif case=='duplicate-analysis':self.data['check_runs'][0]['output']['summary']+='\n| Run analysis checks | Success | 1s |'
+            elif case=='wrong-check-head':self.data['check_runs'][0]['head_sha']='f'*40
+            else:self.data['reviews']=[None]
+            self.evidence.write_text(json.dumps(self.data))
+            with self.subTest(case=case):
+                code,out=self.run_native();self.assertNotEqual(code,0,out);self.assertEqual(self.before,self.path.read_bytes())
+
+    def test_prior_review_comment_repositioned_to_slot_head_is_not_slot_feedback(self):
+        # GitHub moves an earlier review's unresolved comment commit_id to the newest PR head;
+        # its original_commit_id still names the reviewed commit, so the slot never executed.
+        self.data['review_comments']=[{'id':7,'user':{'login':MODULE.REVIEW_BOT},'commit_id':self.old,
+                                       'original_commit_id':'4'*40,'created_at':'2026-11-07T20:43:08Z'}]
+        self.save()
+        code,out=self.run_native();self.assertEqual(code,0,out)
+        last=json.loads(self.path.read_text())['cycles'][-1]
+        self.assertEqual((last['status'],last['head']),('open',self.new))
+        self.assertEqual(last['unexecuted_retargets'][0]['evidence'],self.data)
+
+    def test_refuses_finished_slots_and_malformed_history(self):
+        original=deepcopy(self.state)
+        for case in ('clean','findings','unavailable','missing-prefix','malformed','wrong-marker'):
+            self.state=deepcopy(original)
+            if case in ('clean','findings','unavailable'):self.state['cycles'][-1].update(status='completed',result=case)
+            elif case=='missing-prefix':self.state['cycles'].pop(0)
+            elif case=='malformed':self.state['cycles'][1]=None
+            else:self.state['cycles'][-1]['post_findings_review_approval']['prior_entries']=17
+            self.save()
+            with self.subTest(case=case):
+                code,out=self.run_native();self.assertNotEqual(code,0,out);self.assertEqual(self.before,self.path.read_bytes())
+
+    def test_native_capture_uses_complete_helpers_and_current_pr(self):
+        with patch.object(MODULE,'_gh_pages',side_effect=lambda e:self.data['issue_comments'] if '/issues/' in e else self.data['reviews'] if e.endswith('/reviews') else self.data['review_comments']) as pages,patch.object(MODULE,'_gh_check_runs',return_value=self.data['check_runs']) as checks,patch.object(MODULE,'_gh_json',return_value=self.data['pull_request']) as api:
+            code,out=self.run_native(evidence_json=None)
+        self.assertEqual(code,0,out);self.assertEqual(pages.call_count,3);checks.assert_called_once_with('Rose-Ai-Labs/rose',self.old)
+        api.assert_called_once_with(['api','repos/Rose-Ai-Labs/rose/pulls/1708'])
+
+
+
+    def test_ledger_or_source_change_during_capture_cannot_commit_retarget(self):
+        def change_ledger(endpoint):
+            self.path.write_bytes(self.before + b' ')
+            return self.data['pull_request']
+        with patch.object(MODULE,'_gh_pages',side_effect=lambda e:self.data['issue_comments'] if '/issues/' in e else []),patch.object(MODULE,'_gh_check_runs',return_value=self.data['check_runs']),patch.object(MODULE,'_gh_json',side_effect=change_ledger),patch.object(MODULE,'write_state',side_effect=AssertionError('no retarget write')):
+            code,out=self.run_native(evidence_json=None)
+        self.assertNotEqual(code,0,out);self.assertEqual(self.path.read_bytes(),self.before+b' ')
+
+
+class RetargetPriorAnalysisTest(unittest.TestCase):
+    """Exact independent-review counterexamples; all files copied into temporary state."""
+    fixtures = Path(__file__).parent / 'fixtures/pending-fifth-retarget'
+
+    def invoke_case(self, data, reject):
+        import hashlib
+        original = (self.fixtures / 'original-ledger19.json').read_bytes()
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'ledger.json'
+            proof = Path(directory) / 'evidence.json'
+            path.write_bytes(original)
+            proof.write_text(json.dumps(data))
+            args = ['deploy_review_cycle.py', '--state', str(path), 'retarget-unexecuted',
+                    '--head', '8'*40, '--approved-head', '8'*40,
+                    '--approval', 'pr1708-extra-review-88942d6',
+                    '--prior-ledger-sha256', hashlib.sha256(original).hexdigest(),
+                    '--pr', '1708', '--request-comment-id', '6727500308',
+                    '--repo', directory, '--github-repo', 'Rose-Ai-Labs/rose', '--evidence-json', str(proof)]
+            with patch.object(sys, 'argv', args), patch.object(MODULE, 'now', return_value='2026-11-08T21:46:32Z'), \
+                    patch.object(MODULE, 'git', side_effect=lambda repo,*a:'8'*40 if a[0]=='rev-parse' else ''), \
+                    patch.object(MODULE, 'is_ancestor', return_value=True), \
+                    patch.object(MODULE.subprocess, 'run', side_effect=AssertionError('external call forbidden')), \
+                    patch.object(MODULE, 'write_state', wraps=MODULE.write_state) as write, \
+                    contextlib.redirect_stdout(io.StringIO()):
+                if reject:
+                    with self.assertRaisesRegex(SystemExit, 'analysis/publication not proven skipped'):
+                        MODULE.main()
+                    write.assert_not_called()
+                    self.assertEqual(original, path.read_bytes())
+                else:
+                    self.assertEqual(MODULE.main(), 0)
+                    state = json.loads(path.read_text())
+                    self.assertEqual(state['cycles'][:18], json.loads(original)['cycles'][:18])
+                    self.assertEqual(len(state['cycles']), 19)
+                    self.assertEqual(state['cycles'][-1]['unexecuted_retargets'][0]['check_run_id'], 128871013210)
+
+    def test_exact_reviewer_neutral_analysis_before_open_refused(self):
+        self.invoke_case(json.loads((self.fixtures / 'prior_analysis_before_slot_opened.input.json').read_text()), True)
+
+    def test_exact_reviewer_failed_analysis_before_open_refused(self):
+        self.invoke_case(json.loads((self.fixtures / 'failed_prior_analysis_before_slot_opened.input.json').read_text()), True)
+
+    def test_older_fully_skipped_check_allowed_in_both_orders(self):
+        data = json.loads((self.fixtures / 'prior_analysis_before_slot_opened.input.json').read_text())
+        older = data['check_runs'][-1]
+        self.assertEqual(older['id'], 123456789)
+        older['output']['summary'] = older['output']['summary'].replace('Run analysis checks | Success', 'Run analysis checks | Skipped')
+        for reverse in (False, True):
+            control = deepcopy(data)
+            if reverse: control['check_runs'].reverse()
+            with self.subTest(reverse=reverse): self.invoke_case(control, False)
+
+
+
+
+class CompletedFindingsDispositionTest(unittest.TestCase):
+    """Finish(findings) then override uses the same final cycle, never reopens it."""
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.path = Path(self.temp.name) / 'ledger.json'
+        self.receipts = self.path.with_name('receipts.jsonl')
+        self.state = {'schema_version': 1, 'cycles': [
+            {'number': 1, 'kind': 'initial', 'head': HEAD_A, 'status': 'completed',
+             'result': 'findings', 'started_at': '2026-10-31T09:00:00Z', 'finished_at': '2026-10-31T09:05:00Z'},
+            {'number': 2, 'kind': 'incremental', 'head': HEAD_B, 'status': 'completed',
+             'result': 'clean', 'started_at': '2026-10-31T09:10:00Z', 'finished_at': '2026-10-31T09:15:00Z'},
+            {'number': 3, 'kind': 'verification', 'head': HEAD_C, 'status': 'completed',
+             'verification_approval': 'native-user-approval', 'result': 'findings',
+             'started_at': '2026-10-31T10:00:00Z', 'finished_at': '2026-10-31T10:16:00Z'}]}
+        self.data = evidence(reviews=[FINDINGS_REVIEW], check_runs=[FINISHED_CHECK],
+                             review_comments=[FINDING_COMMENT, DEFERRED_REPLY])
+        self.data['reviews'][0] = dict(FINDINGS_REVIEW, submitted_at='2026-10-31T10:15:00Z')
+        self.data['check_runs'][0] = dict(FINISHED_CHECK, started_at='2026-10-31T10:01:00Z')
+        self.data['review_comments'][0] = dict(FINDING_COMMENT, pull_request_review_id=FINDINGS_REVIEW['id'])
+        self.save()
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def save(self):
+        import hashlib
+        self.path.write_text(json.dumps(self.state))
+        self.before = self.path.read_bytes()
+        self.digest = hashlib.sha256(self.before).hexdigest()
+
+    def invoke(self, **changes):
+        options = dict(head=HEAD_C, pr='1656', finding_ids=[4431365241], deferred_to='followup/nonsecurity',
+                       evidence=MODULE.normalize_evidence(self.data, source='captured-test'),
+                       prior_rounds=0, receipts_path=self.receipts)
+        options.update(changes)
+        argv = ['deploy_review_cycle.py', '--state', str(self.path), 'override', '--head', options['head'],
+                '--pr', options['pr'], '--finding-ids', ','.join(map(str, options['finding_ids'])),
+                '--deferred-to', options['deferred_to'],
+                '--evidence-json', str(self.path.with_name('evidence.json')), '--receipt', str(self.receipts)]
+        if not changes.get('omit_digest'): self.data['prior_ledger_sha256'] = self.digest
+        self.path.with_name('evidence.json').write_text(json.dumps(self.data))
+        with patch.object(sys, 'argv', argv), patch.object(MODULE.subprocess, 'run', side_effect=AssertionError('no live calls')):
+            return MODULE.main()
+
+    def test_finish_findings_then_override_preserves_original_end_and_prefix(self):
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(self.invoke(), 0)
+        state = MODULE.read_state(self.path)
+        self.assertEqual(state['cycles'][:-1], self.state['cycles'][:-1])
+        self.assertEqual(len(state['cycles']), 3)
+        tail = state['cycles'][-1]
+        for key in ['head', 'number', 'kind', 'started_at', 'finished_at', 'verification_approval']:
+            self.assertEqual(tail[key], self.state['cycles'][-1][key])
+        self.assertEqual(tail['original_result'], 'findings')
+        self.assertEqual(tail['disposition'], 'overridden')
+        self.assertEqual(tail['prior_ledger_sha256'], self.digest)
+        self.assertIn('disposition_at', tail)
+        self.assertEqual(MODULE.require_mergeable(self.path, head=HEAD_C)['disposition'], 'overridden')
+        receipt = json.loads(self.receipts.read_text())
+        self.assertEqual(receipt['original_result'], 'findings')
+        self.assertEqual(receipt['original_finished_at'], self.state['cycles'][-1]['finished_at'])
+        with self.assertRaises(MODULE.ReviewCycleError): MODULE.next_cycle(state['cycles'])
+        after = self.path.read_bytes()
+        with self.assertRaises(SystemExit), contextlib.redirect_stdout(io.StringIO()): self.invoke()
+        self.assertEqual(after, self.path.read_bytes())
+
+    def test_completed_transition_rejects_concurrent_prefix_change(self):
+        original = MODULE._validate_completed_review if hasattr(MODULE, '_validate_completed_review') else None
+        if original is None:
+            self.fail('completed findings validation boundary is missing')
+        changed = self.before + b' '
+        def validate_then_change(*args):
+            original(*args)
+            self.path.write_bytes(changed)
+        with patch.object(MODULE, '_validate_completed_review', side_effect=validate_then_change), \
+                self.assertRaises(SystemExit), contextlib.redirect_stdout(io.StringIO()):
+            self.invoke()
+        self.assertEqual(self.path.read_bytes(), changed)
+        self.assertFalse(self.receipts.exists())
+
+    def test_completed_transition_rejects_wrong_state_source_and_evidence_without_writes(self):
+        original_state, original_data = deepcopy(self.state), deepcopy(self.data)
+        for case in ['clean', 'unavailable', 'skipped', 'older', 'other-head', 'schema', 'nonobject',
+                     'reviewless', 'wrong-review-head', 'wrong-review-time', 'check-pending',
+                     'wrong-check-head', 'wrong-review-binding', 'unanswered', 'missing-target',
+                     'prefix-drift', 'special-approval', 'missing-finish', 'bad-head', 'missing-approval',
+                     'no-digest', 'empty-findings', 'old-finding', 'bad-check-time', 'reply-wrapper']:
+            self.state, self.data = deepcopy(original_state), deepcopy(original_data)
+            if case in ['clean', 'unavailable']: self.state['cycles'][-1]['result'] = case
+            elif case == 'skipped': self.state['cycles'][-1].update(disposition='skipped', skip_reason='usage-cap')
+            elif case == 'older': self.state['cycles'].append(dict(self.state['cycles'][-1], head='d'*40))
+            elif case == 'other-head': self.state['cycles'][-1]['head'] = 'd'*40
+            elif case == 'schema': self.state['schema_version'] = True
+            elif case == 'nonobject': self.state['cycles'][0] = None
+            elif case == 'reviewless': self.data['reviews'] = []
+            elif case == 'wrong-review-head': self.data['reviews'][0]['commit_id'] = HEAD_B
+            elif case == 'wrong-review-time': self.data['reviews'][0]['submitted_at'] = '2026-10-30T10:15:00Z'
+            elif case == 'check-pending': self.data['check_runs'][0]['status'] = 'in_progress'
+            elif case == 'wrong-check-head': self.data['check_runs'][0]['head_sha'] = HEAD_B
+            elif case == 'wrong-review-binding': self.data['review_comments'][0]['pull_request_review_id'] = 1
+            elif case == 'unanswered': self.data['review_comments'] = self.data['review_comments'][:1]
+            elif case == 'special-approval': self.state['cycles'][-1]['one_final_review_approval'] = {'approval_id': 'x'}
+            elif case == 'missing-finish': del self.state['cycles'][-1]['finished_at']
+            elif case == 'bad-head': self.state['cycles'][0]['head'] = 'short'
+            elif case == 'missing-approval': del self.state['cycles'][-1]['verification_approval']
+            elif case == 'bad-check-time': self.data['check_runs'][0]['completed_at'] = '2026-10-30T10:15:50Z'
+            elif case == 'reply-wrapper': self.data['reviews'][0]['body'] = ''
+            elif case == 'old-finding':
+                self.data['review_comments'] += [dict(FINDING_COMMENT, id=1, original_commit_id=HEAD_A,
+                                                      pull_request_review_id=2),
+                                                 dict(DEFERRED_REPLY, id=2, in_reply_to_id=1)]
+            self.save()
+            if case == 'prefix-drift': self.path.write_bytes(self.before + b' ')
+            before = self.path.read_bytes()
+            with self.subTest(case=case), self.assertRaises(SystemExit), contextlib.redirect_stdout(io.StringIO()):
+                self.invoke(deferred_to='' if case == 'missing-target' else 'followup/nonsecurity',
+                            finding_ids=[] if case == 'empty-findings' else [1] if case == 'old-finding' else [4431365241],
+                            omit_digest=case == 'no-digest')
+            self.assertEqual(before, self.path.read_bytes())
+            self.assertFalse(self.receipts.exists())
+
 
 if __name__ == "__main__":
     unittest.main()

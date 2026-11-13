@@ -1,0 +1,12 @@
+{
+  "original_deploy_start": "2026-11-08T22:35:19Z",
+  "native_deploy_finish": "2026-11-09T17:18:20Z",
+  "final_closeout_continues_after_native_finish": true,
+  "source": "Original native stage/check/receipt producer times and factory events; final card retains original start.",
+  "activity_limits": "Work event pairs spanning a harness/observation gap lack continuous support and are excluded from active-work totals. Uncovered time is waiting with reason unrecorded, not a user/provider-delay or active-work claim. Automation intervals use actual native receipt times.",
+  "excluded_work_ids": [
+    "question-final-closeout-records",
+    "question-production-migration-failure"
+  ],
+  "no_retrospective_work_times_invented": true
+}

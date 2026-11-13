@@ -1,0 +1,424 @@
+{
+  "format": "PR1905-PRIVATE-TAR-AESGCM-FRAMES-V1",
+  "label": "pre-renewal-20261111T0030",
+  "created_at": "2026-11-11T00:50:17.319206+00:00",
+  "bucket": "trace-archive",
+  "prefix": "devbox-closeout-private/pr1905/pre-renewal-20261111T0030",
+  "parts": [
+    {
+      "key": "devbox-closeout-private/pr1905/pre-renewal-20261111T0030/evidence.part0000.aesgcm",
+      "sha256": "b90425ceb955bf1927f3eb6fbe0929879ab5e18b026faafa4e7871279641c9d1",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/pre-renewal-20261111T0030/evidence.part0001.aesgcm",
+      "sha256": "970817d222058360f0c4bcdcae4f6cb4d39aa2672eb538d71c04f2cb0dd5d96b",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/pre-renewal-20261111T0030/evidence.part0002.aesgcm",
+      "sha256": "921a4ea5b3572c81c039df7d410dffe1af61593ae1a66990eb3b311de6675507",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/pre-renewal-20261111T0030/evidence.part0003.aesgcm",
+      "sha256": "741608903624b604b75029ab57c923d232a3412e4866c59ed72c38fc49f302df",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/pre-renewal-20261111T0030/evidence.part0004.aesgcm",
+      "sha256": "ec90508fee4a055c04c5f19065e87e63e09d8cd559d847d907cf1ce5e6b7d421",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/pre-renewal-20261111T0030/evidence.part0005.aesgcm",
+      "sha256": "06ee91ff6acaf70a0ef30fb0ee80ff9f3fc2e03b8a68c924a00bc32b88f00af0",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/pre-renewal-20261111T0030/evidence.part0006.aesgcm",
+      "sha256": "039f03b8a2cb1b2176ff89a627845127d809a097817a8aa903130fa6f54a21bf",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/pre-renewal-20261111T0030/evidence.part0007.aesgcm",
+      "sha256": "b1adb3c2c7731dd7e5065353e3523d3957d558fe8f595aca61b3380cfd9a4458",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/pre-renewal-20261111T0030/evidence.part0008.aesgcm",
+      "sha256": "2f5bdc02fe0374bcbecacb96a6c288e04fb090cf97c6a3cacbabfee905c2ec3e",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/pre-renewal-20261111T0030/evidence.part0009.aesgcm",
+      "sha256": "5d557cc42e37c43d915e34789ab25ce610ba4c9328804778223371d4ee9a71b1",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/pre-renewal-20261111T0030/evidence.part0010.aesgcm",
+      "sha256": "3128c07d6349926903f886fc7d30eee87c768b6adc5daabec5a653ff100ee744",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/pre-renewal-20261111T0030/evidence.part0011.aesgcm",
+      "sha256": "c2c164481bef640d1f3f065a8c8b7a87413402eab4439f5cdaead0f58d4bb1db",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/pre-renewal-20261111T0030/evidence.part0012.aesgcm",
+      "sha256": "d28291787fd6fc735988f9a2fb796483b3b436108a7225db203ad12309b0a779",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/pre-renewal-20261111T0030/evidence.part0013.aesgcm",
+      "sha256": "9f0b85552dd9101e3b3a8c8c24768d58f64c20ce157e106ae3852e2404773e8a",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/pre-renewal-20261111T0030/evidence.part0014.aesgcm",
+      "sha256": "16dfb19ccec60ee2e514d41158c8c5b1a23763a81220ad8d9cc6e53f969ef5db",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/pre-renewal-20261111T0030/evidence.part0015.aesgcm",
+      "sha256": "7ed2b9f92ac0e165abebb7eddfb9c0264883bb13127eed3b2f02cb0d2bdd42ce",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/pre-renewal-20261111T0030/evidence.part0016.aesgcm",
+      "sha256": "33afade47fbe35b661971ab7553aedaf8e1ff4a18c64420ce5312f79c342aa8c",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/pre-renewal-20261111T0030/evidence.part0017.aesgcm",
+      "sha256": "bca95b93a5787718306df5c8c25a28c1a30e72a34fd8c710b3fea44ce5098173",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/pre-renewal-20261111T0030/evidence.part0018.aesgcm",
+      "sha256": "70a97ed46355fc5946b4c60f14db44bc2a789e0b16af649aa91d89454ae28003",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/pre-renewal-20261111T0030/evidence.part0019.aesgcm",
+      "sha256": "8234b626eaca05fd93abc6ceef8501acc67017127424d6f7ecb4eafc8e70b57d",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/pre-renewal-20261111T0030/evidence.part0020.aesgcm",
+      "sha256": "296a430e28b9a3c4a0d261ba7ecf4565726b35a7b8c27b32e4b93de5f8adaa3b",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/pre-renewal-20261111T0030/evidence.part0021.aesgcm",
+      "sha256": "f48a7b56e7c8f6505be4204ae85e4f17375e2386a3470a2352f4f2bdb5aa4f2c",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/pre-renewal-20261111T0030/evidence.part0022.aesgcm",
+      "sha256": "08795e352fa0c17fee0ba06d645a3c9802cbcbca9c4ca32e39afdd992fa02dda",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/pre-renewal-20261111T0030/evidence.part0023.aesgcm",
+      "sha256": "84fb8884676da22a724ecd26f6fbc2c606e4c15a4da8d77f65ccf96c1c3b89e5",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/pre-renewal-20261111T0030/evidence.part0024.aesgcm",
+      "sha256": "82fe3bac63bc791b4f833b59ea75aa27f5205f30f6e0f3ec29077fc8acb25ccb",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/pre-renewal-20261111T0030/evidence.part0025.aesgcm",
+      "sha256": "e368bb6fa50eaa885e5b8d5cb6e210db342b31b55cae316cdf2ffea344de880c",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/pre-renewal-20261111T0030/evidence.part0026.aesgcm",
+      "sha256": "b7ec54df6d44736c7ad34eb89b7e6e1201652840b07c232d67a50b1c006c0be9",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/pre-renewal-20261111T0030/evidence.part0027.aesgcm",
+      "sha256": "50c1dd10a8d9a96fcd95d0a6177f929358dfde5c994e9a72e6dbfef318d8c95f",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/pre-renewal-20261111T0030/evidence.part0028.aesgcm",
+      "sha256": "0e517b9c4c2a7f119582e6ddb54ac639f01edd1bbb1684a859de6e84149fd190",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/pre-renewal-20261111T0030/evidence.part0029.aesgcm",
+      "sha256": "06451f4eb3ca92917ccd89ad3ff0b4c303334ac4fb338e7fbd3691c19e5b7bce",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/pre-renewal-20261111T0030/evidence.part0030.aesgcm",
+      "sha256": "33d48d9f4f4962668840521f92d1df31d268201520199e6fc0d780b741ed7993",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/pre-renewal-20261111T0030/evidence.part0031.aesgcm",
+      "sha256": "3c1edc9336daacd6f88cbfb3da2a0f34554f3eb31ff3eb9e641db3794fc68c5a",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/pre-renewal-20261111T0030/evidence.part0032.aesgcm",
+      "sha256": "e25248b1b6f00b9653e8c5ae17196638f58d063d6294a2a2ff978c437b58613b",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/pre-renewal-20261111T0030/evidence.part0033.aesgcm",
+      "sha256": "90529337a48b678396f036b5d697eda0e77fd292f95cb57bb6fd5cd303c85a17",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/pre-renewal-20261111T0030/evidence.part0034.aesgcm",
+      "sha256": "e1d2968132bec461bc975705db39ebfb5104a73eddec5ef6edda735424729530",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/pre-renewal-20261111T0030/evidence.part0035.aesgcm",
+      "sha256": "3cbc402a83e966112590c7ab1ccd3cac91eb8195a9051dc1eaaceb581527a1b9",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/pre-renewal-20261111T0030/evidence.part0036.aesgcm",
+      "sha256": "bd99e8dbc61dcf79d4da6d5c1e7ca918d03dd836aec17b0e210da27a1816c252",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/pre-renewal-20261111T0030/evidence.part0037.aesgcm",
+      "sha256": "fc90c0d322c91d572a1bdf7bd15dbb52e42f58adf1ab06d34639083757106407",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/pre-renewal-20261111T0030/evidence.part0038.aesgcm",
+      "sha256": "92cd5415cbe4451ee92723b2267d62349c6831fa53dd85076d03fa0d864ff16a",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/pre-renewal-20261111T0030/evidence.part0039.aesgcm",
+      "sha256": "6d766299ee4b96245d801ec8f31c1bbe1fd88d0fcee9c5ae61a30395c078ba10",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/pre-renewal-20261111T0030/evidence.part0040.aesgcm",
+      "sha256": "9439be2f57bbb00b0b8c5860a911f1896d15755879cba8f1020e8e8696b1d556",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/pre-renewal-20261111T0030/evidence.part0041.aesgcm",
+      "sha256": "c82502fa5601249e2f9843e4ab9f159e6f73e0ec1d5f83dc7667882688a125cd",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/pre-renewal-20261111T0030/evidence.part0042.aesgcm",
+      "sha256": "ecaf13fd5af847093754737608bb805b17d155cd47d32143ddd0ecf54c23f39a",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/pre-renewal-20261111T0030/evidence.part0043.aesgcm",
+      "sha256": "e5b3a6cb1aa518e76f9091c42ed577e6ebf8684aa7bb087e8e74fe5801d3d165",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/pre-renewal-20261111T0030/evidence.part0044.aesgcm",
+      "sha256": "ad7d5fdce2bc0d7b6620643929b7ed19a1a6c976f7c7f025b9141ad839cd95d3",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/pre-renewal-20261111T0030/evidence.part0045.aesgcm",
+      "sha256": "91a009fdead5879c0e5eacc1fd082ca32ecbb4f86a647e3a45e877cc116136c4",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/pre-renewal-20261111T0030/evidence.part0046.aesgcm",
+      "sha256": "b56457e27bacfa4aae1ebd9a85ec9c32761b70e9bfd005fe1cdcb91e2314fc85",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/pre-renewal-20261111T0030/evidence.part0047.aesgcm",
+      "sha256": "a05abae68db3548ac8228bd8d8e89a79d067e0aad321a2a8a6dd4645350ee293",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/pre-renewal-20261111T0030/evidence.part0048.aesgcm",
+      "sha256": "16ea3ff654eea4b7655f49672cf24191b2c4d2a9122311a02a025c0ccd7d9def",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/pre-renewal-20261111T0030/evidence.part0049.aesgcm",
+      "sha256": "0f30a4b78403a6740df687e7126a2cd58fa13ffa5058fead00a4076b0c0ce404",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/pre-renewal-20261111T0030/evidence.part0050.aesgcm",
+      "sha256": "ad0ff8d4178d5129a86b620ad479850e1857de7ed3566caf81ac9e8c004be88a",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/pre-renewal-20261111T0030/evidence.part0051.aesgcm",
+      "sha256": "dde586d95255c5cb2c8219eb128fac7b31576b4fe591c72c691c4d3e059d3c7f",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/pre-renewal-20261111T0030/evidence.part0052.aesgcm",
+      "sha256": "f84380fb6d37cbf7c8e8ef828f58f3d9202c0c99d89e896cd8689d256b8a6af5",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/pre-renewal-20261111T0030/evidence.part0053.aesgcm",
+      "sha256": "acadacb21a8bc3be6c8c41d686c8c908278801a75c88fb123edeb6d637724124",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/pre-renewal-20261111T0030/evidence.part0054.aesgcm",
+      "sha256": "5b34ee31bb1267a7750028d70345edca79c59652c7d064a54c0159328dc68fce",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/pre-renewal-20261111T0030/evidence.part0055.aesgcm",
+      "sha256": "e13fbe95c15b9f69e8fe395ec7dd2fc8153fdafc46c08eab14883ceb4acc12b0",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/pre-renewal-20261111T0030/evidence.part0056.aesgcm",
+      "sha256": "b62ab9fa497d98edfbba98322bb43d8a412466b358ca1aa10f1bc38de622c454",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/pre-renewal-20261111T0030/evidence.part0057.aesgcm",
+      "sha256": "5229d3585a4fcb29eea2fa23b9fa48ed3ddb7a9c1eedbf864334451bdb0624cf",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/pre-renewal-20261111T0030/evidence.part0058.aesgcm",
+      "sha256": "275a675d0ebd3b376e234a9a8201cb08c9cd4bb784495d469dc81f65ddd4f134",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/pre-renewal-20261111T0030/evidence.part0059.aesgcm",
+      "sha256": "673f490ec90d627b3f042be9603d91686da7d190b41b733ef061b7cb87144bbd",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/pre-renewal-20261111T0030/evidence.part0060.aesgcm",
+      "sha256": "3936fb7209ea649eda569902dabdb4b503c5f6dcfbffecf6c79e8ac71afe489a",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/pre-renewal-20261111T0030/evidence.part0061.aesgcm",
+      "sha256": "e183e022daf7e9a4bbd61d7d6b451d09b26a922996f8315955decc743a0702f7",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/pre-renewal-20261111T0030/evidence.part0062.aesgcm",
+      "sha256": "3b801143fb6f73eaf90bb0829793a069493f77a3d34a64f9d961f64334c06709",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/pre-renewal-20261111T0030/evidence.part0063.aesgcm",
+      "sha256": "0c0d0c1dece80d7016532e0f8c9b52ed5bd321a091eaf0d8b24e3744e67f931a",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/pre-renewal-20261111T0030/evidence.part0064.aesgcm",
+      "sha256": "c32f65f3c8cef3e78648e93564ddb37e991b437d4c37f4f198225091a1af1106",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/pre-renewal-20261111T0030/evidence.part0065.aesgcm",
+      "sha256": "e8bc733489de91131f454de3b2cf3c6c2a36981912f3aac83b4dc5b44ee97186",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/pre-renewal-20261111T0030/evidence.part0066.aesgcm",
+      "sha256": "2b3aa4c5198f9bfa37964f7847498dfb51ccd466bae4d7371af5cd77294bd0c6",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/pre-renewal-20261111T0030/evidence.part0067.aesgcm",
+      "sha256": "77ce6c488d043b2fa9f1a1396f857f6a192a60e66845bd64579c4383dd1c0112",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/pre-renewal-20261111T0030/evidence.part0068.aesgcm",
+      "sha256": "03410ef2f14e9635eb2b81767628c94d4391b5063056fffc8de6c876fe7b263a",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/pre-renewal-20261111T0030/evidence.part0069.aesgcm",
+      "sha256": "e3e96eb74ff88100522cb1c12d4c1f7cb0fff65d33ecbd77caeb3d1bce9b88c1",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/pre-renewal-20261111T0030/evidence.part0070.aesgcm",
+      "sha256": "c7a61b99385285c31558c8ab537db61c257155bee6e96cc83335186c5a827acd",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/pre-renewal-20261111T0030/evidence.part0071.aesgcm",
+      "sha256": "3e486c35e7249d3dfca26fa3431e375bfcaa3745971d8fa62fca7c91b249855d",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/pre-renewal-20261111T0030/evidence.part0072.aesgcm",
+      "sha256": "1a938628b35b05460ea0d90285fec9e33de6d66eee5ebde195c705e159cc5ed8",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/pre-renewal-20261111T0030/evidence.part0073.aesgcm",
+      "sha256": "926048349d956aeb65eb9c27007878069a76f126066a4910e2d64949fc05faa6",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/pre-renewal-20261111T0030/evidence.part0074.aesgcm",
+      "sha256": "25f57ddd09c4a6f448aa91ef1f162a7b18642ab90e3d73814aa85bae54c5662b",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/pre-renewal-20261111T0030/evidence.part0075.aesgcm",
+      "sha256": "8de13632319cc2958b97b146a557f8627f1f61c34873c486f1f38f978b93153b",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/pre-renewal-20261111T0030/evidence.part0076.aesgcm",
+      "sha256": "93cc1f3eecc3f4ba4c444b9ab586e724e240cd901bcd72ab712eef48ef0a7979",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/pre-renewal-20261111T0030/evidence.part0077.aesgcm",
+      "sha256": "ce6868c47e30621d82591909ce8cfc04acbfb32d4d3b539eafa8848e3058d718",
+      "plain_bytes": 1067647
+    }
+  ],
+  "sha256": "9da9b1c9aa984cfe1aa29cf8dc693ba83e19da722111947f1512d9dcbe8960dc",
+  "member_count": 30455,
+  "member_manifest_sha256": "1b1e9db3be8dea627d849bd7a07a03eeba1c3d6cedf47c4cb0bb7684e29b3e66",
+  "full_readback_verified": true,
+  "authenticated_decryption_verified": true,
+  "all_member_hashes_verified": true,
+  "excludes": [
+    ".context/assigned-pr1885-failures/ascii-fixture-repro/checkout",
+    ".context/assigned-pr1885-failures/cloud-smoke-rca/activation-checkout",
+    ".context/assigned-pr1885-failures/recovery-check",
+    ".context/assigned-pr1885-failures/original",
+    ".context/assigned-pr1885-failures/native-evidence.tar.gz",
+    ".context/assigned-pr1885-failures/private-preservation",
+    ".context/assigned-pr1885-failures/auth-options-rca/baseline/digest-clone",
+    ".context/frontend-builds",
+    ".context/tsbuildinfo"
+  ],
+  "original_evidence_reference": "attachments/failure-evidence-receipt--bbe0d10ee40a41921ea3.json",
+  "original_verified_members": 1948,
+  "raw_logs_private": true,
+  "snapshot_not_final_closeout": true,
+  "previous_receipt_key": "devbox-closeout-private/pr1905/premerge-20261110T0104/receipt.json",
+  "previous_receipt_sha256": "0c4ef059a8cd24a7973df29b8146ce9c6a1cd86226b19ed44b42f768a01a201e",
+  "reused_member_count": 131439,
+  "catalog_manifest_sha256": "ba44a838f581735d8bbd9c4959fac6bcd186e28d06c7185545c952ac0db960df"
+}

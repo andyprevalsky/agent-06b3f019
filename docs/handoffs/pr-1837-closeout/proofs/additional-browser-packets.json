@@ -1,0 +1,16 @@
+{
+  "receipt_sha256": "8d4b044c98792d7abbd9b36038b55597c0a65ba6fed2eb3e10c456d630f8d4de",
+  "empty_destination": "Private encrypted artifact location; reference hash fc2a7136b56e9c3dc7a69afadde0987cc69cf5e7b38ac3f24e2fbda66c808551",
+  "assigned_tarballs_byte_identical": [
+    {
+      "kind": "certificate",
+      "sha256": "fda6c46511175662a80374e58a84d2a8cd983c8d80175a4067e6f36b3c2688eb",
+      "bytes": 11288349
+    },
+    {
+      "kind": "parity-dns",
+      "sha256": "df41394ac891090d9e5b3134b44df739885bcdd87d1ab8f682f3c54b416b27f7",
+      "bytes": 55308642
+    }
+  ]
+}

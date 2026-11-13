@@ -2,6 +2,7 @@ import { act, cleanup, fireEvent, render, screen, within } from '@testing-librar
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { TrajectoryWorkGroup } from '@/features/terminal-component-group/components/TrajectoryWorkGroup';
 import { groupTrajectoryWork } from '@/features/terminal-component-group/components/trajectoryWorkGroups';
+import { withLiveTrajectory } from '@/features/terminal-component-group/components/trajectoryLiveMessages';
 import { AgentContext } from '@/features/agent-context';
 import { MessageList } from '@/features/terminal-component-group/components/MessageList';
 import { makeCtx } from './browser-agent-chip.fixtures';
@@ -246,16 +247,43 @@ describe('current work batch elapsed time and ring semantics', () => {
     expect(screen.getByTestId('trajectory-batch-elapsed')).toHaveTextContent('3.0s');
     expect(renderMessage.mock.calls.length).toBe(rendersWhenOpened);
   });
+  it('stays on the newest page while open as a running batch crosses a multiple of 50', () => {
+    const batch = (n: number) =>
+      group(Array.from({ length: n }, (_, i) => activity('read_file', `grow-${i}`, start + i)));
+    const show = (m: { message_id: string }) => <span>{m.message_id}</span>;
+    const view = render(<TrajectoryWorkGroup group={batch(100)} renderMessage={show} />);
+    fireEvent.click(screen.getByRole('button'));
+    expect(screen.getByText('2 / 2')).toBeInTheDocument();
+    expect(screen.getByText('grow-99')).toBeInTheDocument();
+    view.rerender(<TrajectoryWorkGroup group={batch(101)} renderMessage={show} />);
+    // A new third page appeared; the open view follows it (the 50 newest: 51–100).
+    expect(screen.getByText('3 / 3')).toBeInTheDocument();
+    expect(screen.getByText('grow-100')).toBeInTheDocument();
+    expect(screen.getByText('grow-51')).toBeInTheDocument();
+    expect(screen.queryByText('grow-50')).toBeNull();
+    // An older page stays one page back from the newest: pages count back from
+    // the newest activity, so its rows slide by one as each new activity lands.
+    fireEvent.click(screen.getByRole('button', { name: 'Previous activities' }));
+    expect(screen.getByText('2 / 3')).toBeInTheDocument();
+    expect(screen.getByText('grow-1')).toBeInTheDocument();
+    expect(screen.getByText('grow-50')).toBeInTheDocument();
+    view.rerender(<TrajectoryWorkGroup group={batch(102)} renderMessage={show} />);
+    expect(screen.getByText('2 / 3')).toBeInTheDocument();
+    expect(screen.queryByText('grow-1')).toBeNull();
+    expect(screen.getByText('grow-2')).toBeInTheDocument();
+    expect(screen.getByText('grow-51')).toBeInTheDocument();
+  });
   it('opens a long running batch on its latest page and names the history it controls', () => {
-    const messages = Array.from({ length: 45 }, (_, i) =>
+    const messages = Array.from({ length: 120 }, (_, i) =>
       activity('read_file', `long-${i}`, start + i),
     );
     render(<TrajectoryWorkGroup group={group(messages)} renderMessage={() => null} />);
     const toggle = screen.getByRole('button');
     expect(toggle).not.toHaveAttribute('aria-controls');
     fireEvent.click(toggle);
+    // 50 a page, anchored at the newest: the latest page holds the 50 most recent.
     expect(screen.getByText('3 / 3')).toBeInTheDocument();
-    expect(screen.getAllByTestId('trajectory-history-entry')).toHaveLength(5);
+    expect(screen.getAllByTestId('trajectory-history-entry')).toHaveLength(50);
     expect(toggle).toHaveAttribute(
       'aria-controls',
       screen.getByTestId('trajectory-work-history').id,
@@ -327,9 +355,37 @@ describe('current work batch elapsed time and ring semantics', () => {
     expect(line().querySelector('.lucide-arrow-down')).toBeNull();
     expect(screen.getByTestId('trajectory-activity-icon')).toHaveClass('lucide-lightbulb');
   });
-  it('does not invent elapsed time for a missing timestamp', () => {
-    const untimed = { ...activity('read_file'), timestamp: '' };
-    render(<TrajectoryWorkGroup group={group([untimed])} renderMessage={() => null} />);
-    expect(screen.getByTestId('trajectory-batch-elapsed')).toHaveTextContent('Timing unavailable');
+  it('starts the thinking clock on the client and reconciles to the server start without running backwards', () => {
+    vi.useFakeTimers();
+    const clientStart = start + 10_000;
+    vi.setSystemTime(clientStart);
+    // Rose starts thinking before the server's stream start is known: the live
+    // placeholder carries no timestamp, so the clock anchors to the client.
+    const thinking = (serverStart?: number) => (
+      <TrajectoryWorkGroup
+        group={group(withLiveTrajectory([], [], true, serverStart, 'ACTIVE'))}
+        renderMessage={() => null}
+      />
+    );
+    const view = render(thinking());
+    const elapsed = () => screen.getByTestId('trajectory-batch-elapsed');
+    const row = screen.getByTestId('trajectory-work-group');
+    expect(screen.getByTestId('trajectory-activity-line')).toHaveTextContent(/^Thinking$/);
+    expect(elapsed()).toHaveTextContent('0.0s');
+    act(() => vi.advanceTimersByTime(1500));
+    expect(elapsed()).toHaveTextContent('1.5s');
+    expect(screen.queryByText('Timing unavailable')).toBeNull();
+    // A server start after the client anchor (clock skew) never moves the clock back.
+    view.rerender(thinking(clientStart + 1000));
+    expect(elapsed()).toHaveTextContent('1.5s');
+    act(() => vi.advanceTimersByTime(500));
+    expect(elapsed()).toHaveTextContent('2.0s');
+    // The earlier recorded server start reconciles the clock forward; it never resets.
+    view.rerender(thinking(clientStart - 400));
+    expect(elapsed()).toHaveTextContent('2.4s');
+    act(() => vi.advanceTimersByTime(100));
+    expect(elapsed()).toHaveTextContent('2.5s');
+    expect(screen.getByTestId('trajectory-work-group')).toBe(row);
+    expect(screen.queryByText('Timing unavailable')).toBeNull();
   });
 });

@@ -6,7 +6,6 @@ common directory), so a fresh deploy worktree does not re-run the 2-machine cana
 another worktree passed within its TTL. The fleet's own fail-closed gate is unchanged.
 """
 import os
-import shutil
 from pathlib import Path
 import subprocess
 import sys
@@ -27,25 +26,54 @@ def repo_with_worktree(tmp):
     subprocess.run(['git', 'init', '-q', str(main)], check=True)
     env = {**os.environ, 'GIT_AUTHOR_NAME': 't', 'GIT_AUTHOR_EMAIL': 't@t', 'GIT_COMMITTER_NAME': 't',
            'GIT_COMMITTER_EMAIL': 't@t'}
-    # Keep the real source transport closed over a committed, local-only fixture.
-    (main / '.git/info/exclude').write_text('.context/\n')
-    for relative in ('scripts/lib/cloudbench-env.sh', 'scripts/create-worktree-patch.sh'):
-        target = main / relative
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(Path(cloud.__file__).parent.parent / relative, target)
-    subprocess.run(['git', 'add', '.'], cwd=main, check=True, env=env)
-    subprocess.run(['git', 'commit', '-q', '-m', 'c'], cwd=main, check=True, env=env)
-    subprocess.run(['git', 'update-ref', 'refs/remotes/origin/main', 'HEAD'], cwd=main, check=True, env=env)
+    subprocess.run(['git', 'commit', '-q', '--allow-empty', '-m', 'c'], cwd=main, check=True, env=env)
     subprocess.run(['git', 'worktree', 'add', '-q', '--detach', str(linked)], cwd=main, check=True)
     return main, linked
 
 
 class SharedCanaryStamp(unittest.TestCase):
     def setUp(self):
+        # This disposable fixture owns its request; the parent deploy owns its own.
+        environment = patch.dict(os.environ)
+        environment.start()
+        self.addCleanup(environment.stop)
+        os.environ.pop('DEPLOY_GATE_REQUEST', None)
         # Offline: fixture refs count as pushed unless a test exercises the real preflight.
         pushed = patch.object(cloud, 'origin_fetchable', return_value=True)
         pushed.start()
         self.addCleanup(pushed.stop)
+
+    def test_outer_request_does_not_rebind_fixture_custody(self):
+        with tempfile.TemporaryDirectory() as directory:
+            request = Path(directory) / '.context/deploy-pipeline/attempts/34/phase/gate/request.json'
+            request.parent.mkdir(parents=True)
+            request.write_text('{}')
+            env = dict(os.environ, DEPLOY_GATE_REQUEST=str(request))
+            result = subprocess.run([sys.executable, '-B', str(Path(__file__).resolve()),
+                'SharedCanaryStamp.test_the_smoke_launch_passes_the_shared_stamp_to_the_fleet'], env=env,
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+            self.assertEqual(result.returncode, 0, result.stdout)
+            self.assertIn('Ran 1 test', result.stdout)
+
+    def test_fixture_restores_request_and_native_owner_guard(self):
+        import deploy_test_historical_custody as custody
+        before = dict(os.environ)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            request = root / '.context/deploy-pipeline/attempts/34/phase/gate/request.json'
+            with patch.dict(os.environ, {'DEPLOY_GATE_REQUEST': str(request)}):
+                fixture = type(self)('test_the_smoke_launch_passes_the_shared_stamp_to_the_fleet')
+                try:
+                    fixture.setUp()
+                    self.assertFalse('DEPLOY_GATE_REQUEST' in os.environ)
+                finally:
+                    fixture.doCleanups()
+                self.assertEqual(os.environ['DEPLOY_GATE_REQUEST'], str(request))
+                for value in ({}, {'custody_state': str(root / '.context/foreign/cycle.json')}):
+                    with self.assertRaisesRegex(ValueError, 'missing request-owned custody locator'):
+                        custody.admission(value, root)
+        self.assertEqual(dict(os.environ), before)
+
     def test_historical_custody_guard_precedes_namespace_and_provider_admission(self):
         import deploy_test_historical_custody as custody
         with tempfile.TemporaryDirectory() as tmp:
@@ -123,6 +151,66 @@ class SharedCanaryStamp(unittest.TestCase):
             self.assertEqual(result['cases'], {'one': 'UNVERIFIED', 'two': 'UNVERIFIED'})
             self.assertFalse((root / '.context/deploy-cloud').exists())
 
+    def test_custody_locator_refusal_writes_typed_receipt_before_allocation(self):
+        # PR #1784 cycle bn6: a custody locator refusal took the generic BLOCKED path, so the
+        # coordinator retained a cleanup owner although no namespace or fleet existed.
+        import deploy_test_historical_custody as custody
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            request = {'token': 'a' * 32, 'source': {'head': 'a' * 40, 'digest': 'a' * 64},
+                       'gate': 'smoke', 'checks': ['one', 'two'], 'skips': {}}
+            request_path, result_path = root / 'request.json', root / 'result.json'
+            cloud.write(request_path, request)
+            mkdir_original = Path.mkdir
+            def result_parent_only(path, *args, **kwargs):
+                self.assertEqual(path, root, 'custody refusal crossed the allocation mkdir boundary')
+                return mkdir_original(path, *args, **kwargs)
+            refusal_error = custody.AdmissionRefusal('canonical-custody-uncovered', 'fixture detail')
+            with patch.dict(os.environ, DEPLOY_GATE_REQUEST=str(request_path), DEPLOY_GATE_RESULT=str(result_path)), \
+                    patch.object(sys, 'argv', ['deploy_test_cloud.py', '--root', str(root)]), \
+                    patch.object(cloud, 'source', return_value=request['source']), \
+                    patch.object(custody, 'admission', side_effect=refusal_error), \
+                    patch.object(Path, 'mkdir', autospec=True, side_effect=result_parent_only), \
+                    patch.object(cloud, 'campaign_width', side_effect=AssertionError('capacity')) as capacity, \
+                    patch.object(cloud, 'shared_canary_env', side_effect=AssertionError('canary')) as canary, \
+                    patch.object(cloud, 'run_command', side_effect=AssertionError('provider')) as provider:
+                self.assertEqual(cloud.main(), 2)
+                for sentinel in (capacity, canary, provider):
+                    sentinel.assert_not_called()
+            result = cloud.read(result_path)
+            self.assertEqual(result['admission'], {'kind': 'cloud-source-refusal-v1', 'admitted': False})
+            self.assertEqual(result['reason_code'], 'canonical-custody-uncovered')
+            self.assertEqual(result['reason'], custody.ADMISSION_REFUSALS['canonical-custody-uncovered'])
+            self.assertEqual((result['native_command'], result['fleet_directory'], result['evidence']), ([], None, {}))
+            self.assertEqual((result['complete'], result['cleanup_complete']), (False, True))
+            self.assertEqual(result['cases'], {'one': 'UNVERIFIED', 'two': 'UNVERIFIED'})
+            self.assertFalse((root / '.context/deploy-cloud').exists())
+
+    def test_custody_refusal_after_namespace_or_untyped_error_never_claims_no_admission(self):
+        import deploy_test_historical_custody as custody
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            request = {'token': 'a' * 32, 'source': {'head': 'a' * 40, 'digest': 'a' * 64},
+                       'gate': 'smoke', 'checks': ['one'], 'skips': {}}
+            request_path, result_path = root / 'request.json', root / 'result.json'
+            cloud.write(request_path, request)
+            namespace = root / '.context/deploy-cloud' / cloud.hashlib.sha256(request['token'].encode()).hexdigest()
+            for error, existing in ((custody.AdmissionRefusal('canonical-locator-missing'), True),
+                                    (ValueError('historical custody: admission input fingerprint changed'), False)):
+                if existing:
+                    namespace.mkdir(parents=True)
+                with self.subTest(error=str(error)), \
+                        patch.dict(os.environ, DEPLOY_GATE_REQUEST=str(request_path), DEPLOY_GATE_RESULT=str(result_path)), \
+                        patch.object(sys, 'argv', ['deploy_test_cloud.py', '--root', str(root)]), \
+                        patch.object(cloud, 'source', return_value=request['source']), \
+                        patch.object(custody, 'admission', side_effect=error), \
+                        patch.object(cloud, 'run_command', side_effect=AssertionError('provider')) as provider:
+                    self.assertEqual(cloud.main(), 2)
+                    provider.assert_not_called()
+                    self.assertFalse(result_path.exists())
+                if existing:
+                    namespace.rmdir()
+
     def test_origin_fetchable_is_the_fleet_preflight_without_patch_shipping(self):
         env = {**os.environ, 'GIT_AUTHOR_NAME': 't', 'GIT_AUTHOR_EMAIL': 't@t', 'GIT_COMMITTER_NAME': 't',
                'GIT_COMMITTER_EMAIL': 't@t', 'CLOUDBENCH_GITHUB_TOKEN_B64': ''}
@@ -146,13 +234,14 @@ class SharedCanaryStamp(unittest.TestCase):
 
     def test_other_refusals_never_claim_no_admission(self):
         with tempfile.TemporaryDirectory() as tmp:
-            _, root = repo_with_worktree(tmp)
-            request = {'token': 'a' * 32, 'source': cloud.source(root),
+            root = Path(tmp).resolve()
+            request = {'token': 'a' * 32, 'source': {'head': 'a' * 40, 'digest': 'a' * 64},
                        'gate': 'smoke', 'checks': ['one'], 'skips': {}}
-            request_path, result_path = Path(tmp) / 'request.json', Path(tmp) / 'result.json'
+            request_path, result_path = root / 'request.json', root / 'result.json'
             cloud.write(request_path, request)
             with patch.dict(os.environ, DEPLOY_GATE_REQUEST=str(request_path), DEPLOY_GATE_RESULT=str(result_path)), \
                     patch.object(sys, 'argv', ['deploy_test_cloud.py', '--root', str(root)]), \
+                    patch.object(cloud, 'source', return_value=request['source']), \
                     patch.object(cloud, 'campaign_width', return_value=0):
                 self.assertEqual(cloud.main(), 2)
                 self.assertFalse(result_path.exists())
@@ -197,41 +286,22 @@ class SharedCanaryStamp(unittest.TestCase):
 
         with tempfile.TemporaryDirectory(dir=os.environ.get('TMPDIR')) as tmp:
             _, linked = repo_with_worktree(tmp)
-            request['source'] = cloud.source(linked)
             with mock.patch.dict(os.environ), \
+                    mock.patch.object(cloud, 'source', lambda _root: request['source']), \
                     mock.patch.object(cloud, 'campaign_width', lambda _checks: 1), \
                     mock.patch.object(cloud, 'run_command', run_command), \
                     mock.patch.object(cloud, 'collect_campaign',
                                       lambda *_a: ({'browser-smoke': 'UNVERIFIED'}, {}, False, None)):
-                for key in ('FLEET_INFRA_CANARY_STAMP', 'FLEET_INFRA_CANARY_LOCK',
-                            'DEPLOY_GATE_REQUEST', 'DEPLOY_GATE_RESULT'):
+                for key in ('FLEET_INFRA_CANARY_STAMP', 'FLEET_INFRA_CANARY_LOCK'):
                     os.environ.pop(key, None)
                 expected = cloud.shared_canary_env(linked, {})
-                result = cloud.execute(request, linked)
-                binding = result['source_transport']
-                self.assertEqual(binding['source'], request['source'])
-                self.assertEqual(binding['base_sha'], request['source']['head'])
-                self.assertEqual(binding['workspace_patch_sha256'], 'none')
-                self.assertEqual(cloud.read(Path(binding['patch']).with_name('source-transport.json')), binding)
+                cloud.execute(request, linked)
         self.assertEqual(len(launches), 1)
         argv, env = launches[0]
         self.assertEqual(argv[:3], ['bash', 'scripts/run-bench', 'browser-smoke'])
         self.assertEqual(env['DEPLOY_CYCLE_FRESH'], '1')
         self.assertEqual({key: env[key] for key in expected}, expected)
         self.assertNotIn(str(linked), env['FLEET_INFRA_CANARY_STAMP'])  # not the worktree's .context
-
-    def test_standalone_fixture_still_refuses_foreign_request_custody(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            _, root = repo_with_worktree(tmp)
-            request = dict(checks=['browser-smoke'], skips={}, token='owned',
-                           source=cloud.source(root), gate='smoke')
-            foreign = Path(tmp) / 'foreign/attempts/0/initial/smoke/request.json'
-            with patch.dict(os.environ, DEPLOY_GATE_REQUEST=str(foreign)), \
-                    patch.object(cloud, 'run_command') as launch:
-                with self.assertRaisesRegex(ValueError, 'missing request-owned custody locator'):
-                    cloud.execute(request, root)
-                launch.assert_not_called()
-                self.assertFalse((root / '.context/deploy-cloud').exists())
 
 
 if __name__ == '__main__':

@@ -38,7 +38,8 @@ import { createAgentSchema as cliSetupAgentSchema } from './domains/agents/types
 import authRouter from './domains/auth/routes';
 import authOptionsRouter from './domains/auth-options/routes';
 import authAssistanceRouter from './domains/auth-assistance/routes';
-import iphoneRouter from './domains/iphone/routes';
+import { createIPhoneRouter } from './domains/iphone/routes';
+import { launchSetupAgent } from './domains/agents/service.phoneConnection';
 import agentPhoneRouter from './domains/agent-phone/routes';
 import x402Router from './domains/x402/routes';
 import claudeCodeRouter from './domains/claude-code/routes';
@@ -50,6 +51,8 @@ import codexCodeRouter from './domains/codex-code/routes';
 import billingRouter from './domains/billing/routes';
 import apiKeysRouter from './domains/api-keys/routes';
 import smsWebhookRouter from './domains/sms-webhook/routes';
+import { routeToSupervisor, handleClearCommand } from './domains/sms-webhook/service';
+import { createLinqWebhookRouter } from './domains/linq-webhook/routes';
 import whatsappWebhookRouter from './domains/whatsapp-webhook/routes';
 import credentialPropagationRouter from './domains/credential-propagation/routes';
 import purchasesRouter, { agentCardWebhookHandler } from './domains/purchases/routes';
@@ -132,6 +135,9 @@ const PORT = process.env.PORT || 3001;
 // Webhooks must be mounted BEFORE express.json() middleware
 // (Stripe requires raw body for signature verification)
 app.use('/webhooks', webhooksRouter);
+
+// Linq authenticates exact bytes; its bounded raw parser must precede global JSON parsing.
+app.use('/api/linq', createLinqWebhookRouter({ routeToSupervisor, handleClearCommand }));
 
 // SMS Webhook from Surge (JSON body, preserve raw body for HMAC signature verification)
 app.use(
@@ -504,7 +510,7 @@ app.use('/api/agent-queue-pointer', agentQueuePointerRouter);
 app.use('/api/worker-process-runtime', workerProcessRuntimeRouter);
 app.use('/api/auth-options', authOptionsRouter);
 app.use('/api/auth-assistance', authAssistanceRouter);
-app.use('/api/iphone', iphoneRouter);
+app.use('/api/iphone', createIPhoneRouter({ setupAgentLauncher: launchSetupAgent }));
 app.use('/api/credential-propagation', credentialPropagationRouter);
 app.use('/api/blueprints', authenticate, blueprintsRouter);
 app.use('/api/attention-requests', attentionRequestsRouter);

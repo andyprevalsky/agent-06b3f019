@@ -18,6 +18,7 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+import tarfile
 import tempfile
 import threading
 import unittest
@@ -56,13 +57,15 @@ class Fake:
     """Injected IO: records every command, gh call, HTTP request and output line."""
 
     def __init__(self, root: Path, changed: list[str], *, handler=None, http=None, gh=None, gh_exists=True,
-                 descendants=(), unknown=(), fetch_learns=False):
+                 descendants=(), unknown=(), fetch_learns=False, fetch_code=0, fetch_err=''):
         self.root, self.changed, self.handler, self.http, self.gh = root, changed, handler, http, gh
         self.gh_exists = gh_exists
         # `git merge-base --is-ancestor SHA <x>`: 0 for x in descendants, 128 for x in unknown (until a fetch of
         # origin main learns it when fetch_learns), else 1.
         self.descendants, self.unknown, self.fetch_learns = set(descendants), set(unknown), fetch_learns
+        self.fetch_code, self.fetch_err = fetch_code, fetch_err
         self.git: list[list[str]] = []
+        self.archived: list[str] = []
         self.runs: list[tuple[list[str], Path, dict]] = []
         self.factory: list[tuple[str, str]] = []
         self.requests: list[tuple[str, dict]] = []
@@ -81,6 +84,19 @@ class Fake:
         return self.handler(argv, cwd, env, on_line) if self.handler else 0
 
     def capture(self, argv, cwd, env, input=None):
+        if argv[:2] == ['git', 'archive']:
+            # `git archive --format=tar -o <out> <commit> back-end/prisma/migrations`
+            out, commit = argv[argv.index('-o') + 1], argv[-2]
+            if commit in self.unknown:
+                return 128, '', f'fatal: not a valid object name: {commit}'
+            with self.lock:
+                self.archived.append(commit)
+            source = Path(out).parent / 'src' / commit / dp.MIGRATIONS_PATH / f'{commit[:7]}_m'
+            source.mkdir(parents=True)
+            (source / 'migration.sql').write_text(f'-- {commit}\n')
+            with tarfile.open(out, 'w') as tar:
+                tar.add(source, arcname=f'{dp.MIGRATIONS_PATH}/{commit[:7]}_m')
+            return 0, '', ''
         if argv[:2] == ['git', 'rev-parse']:
             return 0, SHA + '\n', ''
         if argv[:2] == ['git', 'diff']:
@@ -91,6 +107,8 @@ class Fake:
             with self.lock:
                 self.git.append(list(argv))
             if argv[1] == 'fetch':
+                if self.fetch_code:
+                    return self.fetch_code, '', self.fetch_err
                 if self.fetch_learns:
                     self.unknown.clear()
                 return 0, '', ''
@@ -454,8 +472,10 @@ class DryRunTest(Base):
         self.assertRegex(text, r'render\s+APPLICABLE\s+back-end changed: back-end/src/a.ts')
         self.assertRegex(text, r'fly\s+SKIPPED-not-applicable')
         self.assertIn(f'run_deploy_pipeline.py production-render --merged-sha {SHA} --state-dir {self.state}', text)
-        self.assertIn('cd back-end && env -u SMOKE_BASE_URL -u SMOKE_HEALTH_URL -u SMOKE_FRONTEND_URL npx tsx '
+        self.assertIn('cd back-end && env -u SMOKE_BASE_URL -u SMOKE_HEALTH_URL -u SMOKE_FRONTEND_URL '
+                      "SCHEMA_MIGRATIONS_DIR='<that dir>/back-end/prisma/migrations' npx tsx "
                       'scripts/prod-endpoint-smoke.ts', text)
+        self.assertIn(f'git archive <render live_commit, else {SHA}> back-end/prisma/migrations', text)
         self.assertIn('--frontend-url https://www.roselabs.ai --backend-url https://navi-j9a9.onrender.com', text)
         self.assertIn('after: render, vercel', text)
         self.assertRegex(text, r'mac-release\s+APPLICABLE\s+mac-app-release-decision ship=true reason=shipped-surface')
@@ -730,6 +750,52 @@ class BackendProbesTest(Base):
         self.assertEqual((argv, cwd), (dp.SMOKE_ARGV, self.root / 'back-end'))
         self.assertNotIn('SMOKE_BASE_URL', env)
         self.assertEqual(env['KEEP'], '1')
+
+    def test_schema_replay_uses_the_commit_render_serves(self) -> None:
+        """2026-11-09: the PR #1803 lane replayed its pre-merge checkout, which lacked PR #1698's applied index drop,
+        and reported the dropped index as drift. The smoke replays the merge (or the live descendant) instead."""
+        fake = Fake(self.root, [], http=lambda url, headers: (200, b'{"logs": []}'))
+        self.assertTrue(dp.lane_backend_probes(self.ctx(fake))[0])
+        replay = Path(fake.runs[0][2]['SCHEMA_MIGRATIONS_DIR'])
+        self.assertEqual(replay, self.state / 'production-migrations' / SHA / dp.MIGRATIONS_PATH)
+        self.assertEqual((replay / f'{SHA[:7]}_m' / 'migration.sql').read_text(), f'-- {SHA}\n')
+        self.assertEqual((fake.archived, fake.git), ([SHA], []))
+        self.assertFalse(list((self.state / 'production-migrations').glob('*.tar')))
+        self.assertIn(f'[backend-probes] schema replay source: {dp.MIGRATIONS_PATH} at {SHA[:12]} (merge commit)',
+                      fake.lines)
+
+        live = 'abcdef0123456789abcdef0123456789abcdef01'
+        self.write_production(render={'status': 'verified-by-descendant', 'live_commit': live})
+        fake = Fake(self.root, [], http=lambda url, headers: (200, b'{"logs": []}'), unknown=[live],
+                    fetch_learns=True)
+        self.assertTrue(dp.lane_backend_probes(self.ctx(fake))[0])
+        self.assertEqual(fake.archived, [live])
+        self.assertEqual(fake.git, [['git', 'fetch', '--quiet', 'origin', 'main']])
+        self.assertEqual(Path(fake.runs[0][2]['SCHEMA_MIGRATIONS_DIR']),
+                         self.state / 'production-migrations' / live / dp.MIGRATIONS_PATH)
+
+    def test_unarchivable_production_commit_fails_before_the_smoke(self) -> None:
+        live = 'abcdef0123456789abcdef0123456789abcdef01'
+        self.write_production(render={'status': 'verified-by-descendant', 'live_commit': live})
+        fake = Fake(self.root, [], http=lambda url, headers: (200, b'{"logs": []}'), unknown=[live])
+        passed, reason, code = dp.lane_backend_probes(self.ctx(fake))
+        self.assertEqual((passed, code), (False, 1))
+        self.assertEqual(reason, f'git archive {live[:12]} back-end/prisma/migrations failed: '
+                                 f'fatal: not a valid object name: {live}')
+        self.assertEqual(fake.runs, [])
+        self.assertEqual(fake.git, [['git', 'fetch', '--quiet', 'origin', 'main']])
+
+    def test_failed_fetch_is_reported_beside_the_archive_error(self) -> None:
+        live = 'abcdef0123456789abcdef0123456789abcdef01'
+        self.write_production(render={'status': 'verified-by-descendant', 'live_commit': live})
+        fake = Fake(self.root, [], http=lambda url, headers: (200, b'{"logs": []}'), unknown=[live], fetch_code=128,
+                    fetch_err=f'fatal: unable to access origin {SECRETS["GITHUB_TOKEN"]}')
+        passed, reason, _code = dp.lane_backend_probes(self.ctx(fake))
+        self.assertFalse(passed)
+        self.assertEqual(reason, f'git archive {live[:12]} back-end/prisma/migrations failed: '
+                                 f'fatal: not a valid object name: {live}; '
+                                 'git fetch origin main exited 128: fatal: unable to access origin ***')
+        self.assertEqual(fake.runs, [])
 
 
 class FlyTest(Base):

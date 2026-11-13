@@ -1,0 +1,142 @@
+{
+  "format": "PR1708-CLOSEOUT-INVENTORY-V1",
+  "status": "initial-preservation-verified-release-in-progress",
+  "deletion_ready": false,
+  "source": {
+    "baseline": "d16c934b7e19446d7069c7f76d8dd550b2058a96",
+    "fix_commit": "2bd1a703727e5ece45e26a2cd82fb69b9a6a07b8",
+    "branch": "fix/browser-view-fresh-tilion",
+    "pr": 1708,
+    "disposition": "committed-and-pushed"
+  },
+  "groups": [
+    {
+      "paths": [
+        ".context/rca-browser-4f77 original evidence, reproductions, failed and successful validation logs",
+        ".context initial deploy/review/factory records",
+        "managed local env files and original cloud configuration",
+        "initial Browser RCA visualization HTML"
+      ],
+      "disposition": "durably-archived-and-verified",
+      "archive": "initial-private-archive.json",
+      "verification": "authenticated remote readback and restored all 129 members with matching SHA256"
+    },
+    {
+      "paths": [
+        "tracked source and RCA cases"
+      ],
+      "disposition": "committed",
+      "restore": "clone GitHub and checkout the release/closeout commits"
+    },
+    {
+      "paths": [
+        "node_modules",
+        "agents/venv",
+        "frontend dist",
+        "Vitest/Vite caches"
+      ],
+      "disposition": "reproducible-and-unneeded",
+      "regenerate": "restore committed lockfiles; bash scripts/cloud-build.sh; npm run build in front-end"
+    },
+    {
+      "paths": [
+        "/tmp/rose-rca-4f77-baseline",
+        "/tmp/rose-deploy-1708/* tracked source, dependency links and empty fixture database bases"
+      ],
+      "disposition": "reproducible-and-unneeded",
+      "regenerate": "baseline d16c934b7 plus committed regression tests; scripts/deploy_test_worker.py --prepare-checkout with the release SHA; independent local DBs and the listed port identities"
+    }
+  ],
+  "workers": [
+    {
+      "gate": "deploy-command-structural",
+      "root": "/tmp/rose-deploy-1708/deploy-command-structural",
+      "workspace": "deploy1708_1",
+      "base_port": "10000"
+    },
+    {
+      "gate": "seed-cache-decision",
+      "root": "/tmp/rose-deploy-1708/seed-cache-decision",
+      "workspace": "deploy1708_2",
+      "base_port": "10510"
+    },
+    {
+      "gate": "canonical-seed-whatsapp-content",
+      "root": "/tmp/rose-deploy-1708/canonical-seed-whatsapp-content",
+      "workspace": "deploy1708_3",
+      "base_port": "11020"
+    },
+    {
+      "gate": "backend-coverage-blackbox",
+      "root": "/tmp/rose-deploy-1708/backend-coverage-blackbox",
+      "workspace": "deploy1708_4",
+      "base_port": "11530"
+    },
+    {
+      "gate": "frontend-coverage-blackbox",
+      "root": "/tmp/rose-deploy-1708/frontend-coverage-blackbox",
+      "workspace": "deploy1708_5",
+      "base_port": "12040"
+    },
+    {
+      "gate": "agents-coverage-blackbox",
+      "root": "/tmp/rose-deploy-1708/agents-coverage-blackbox",
+      "workspace": "deploy1708_6",
+      "base_port": "12550"
+    },
+    {
+      "gate": "live-probes",
+      "root": "/tmp/rose-deploy-1708/live-probes",
+      "workspace": "deploy1708_7",
+      "base_port": "13060"
+    },
+    {
+      "gate": "agentcard-lifecycle",
+      "root": "/tmp/rose-deploy-1708/agentcard-lifecycle",
+      "workspace": "deploy1708_8",
+      "base_port": "13570"
+    },
+    {
+      "gate": "semantic-stack",
+      "root": "/tmp/rose-deploy-1708/semantic-stack",
+      "workspace": "deploy1708_9",
+      "base_port": "14080"
+    },
+    {
+      "gate": "e2b-smoke",
+      "root": "/tmp/rose-deploy-1708/e2b-smoke",
+      "workspace": "deploy1708_10",
+      "base_port": "14590"
+    },
+    {
+      "gate": "cloudbench-controller",
+      "root": "/tmp/rose-deploy-1708/cloudbench-controller",
+      "workspace": "deploy1708_11",
+      "base_port": "15100"
+    },
+    {
+      "gate": "seed-memory-ratchet",
+      "root": "/tmp/rose-deploy-1708/seed-memory-ratchet",
+      "workspace": "deploy1708_12",
+      "base_port": "21370"
+    }
+  ],
+  "final_delta_required": [
+    "all gate/worker outcomes including failures and cleanup receipts",
+    "production and code-review results",
+    "final factory publication and scorecard",
+    "owned-resource disposition and final deletion-readiness receipt"
+  ],
+  "key_recovery": {
+    "managed_file": ".context/pr1634-archive-recovery.env",
+    "variable": "PR1634_ARCHIVE_RECOVERY_KEY_B64",
+    "decoded_sha256": "e351c7cc5b01303e579fe6d1df833940fdaadf325ca47314414ba10735fc7730",
+    "managed_value_present_verified": true,
+    "config_files": [
+      "agents/.env",
+      "back-end/.env"
+    ],
+    "note": "Legacy archive encryption_key_id label is advisory; the recovery fingerprint is authoritative."
+  },
+  "protected_resources": "Preserve Freedom, its protected instruction copies, shared services and unrelated resources; this record authorizes no deletion."
+}
