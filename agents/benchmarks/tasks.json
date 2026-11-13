@@ -8678,6 +8678,12 @@
   },
   {
     "name": "agent-payment-idempotent-abandonment",
+    "quarantine": {
+      "since": "2026-11-13",
+      "repair": "pending-handoff:a9d11683c4174469ac2c7d5eca89d2d5",
+      "error": "Timeout after 905s (task timeout=900s)",
+      "evidence": "PR #2014 deploy b6ed04d2d smoke: first attempt (root 464ba8f6) timed out after its browser never started on Tilion dead east worker sess_993d7086* (DELETE /v1/session 503; 'Browser session init failed after 5 transient-proxy retries'), same-source rerun PASSED (FLAKY a9d11683); NOT_INTRODUCED, #2014 changes only deploy custody/renewal scripts; fix PR #2010 on main"
+    },
     "title": "Agent Payment Idempotent Settlement",
     "group": "pre-deploy",
     "prompt": "The root agent must invoke spawn_browser_agent exactly twice, sequentially, against {frontend_url}/test_payment. In each browser task, select exactly these 3 products and no others: Aurora Notebook, Ceramic Mug, and Canvas Tote; prepare the visible Rose Labs Test Payment checkout; independently request a one-time payment card for the same unchanged order; and report the card last four. The first browser agent must leave checkout unsubmitted. Wait for it to finish before invoking the second browser agent. The second browser agent must independently request the same card again, verify the last four matches the first result, then submit the visible checkout and report the order confirmation. Use only the visible checkout UI; do not navigate to source files or API endpoints. After the second browser agent finishes, call attempt_completion exactly once with the grounded results. Do not call send_message_to_user_execute_phase or any progress-message tool.",
