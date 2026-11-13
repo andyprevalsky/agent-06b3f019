@@ -110,6 +110,7 @@ from utils.response_schema_constraints import (
     value_satisfies_output_field_constraints,
 )
 from utils.rose_desktop import is_rose_desktop_user
+from utils.tool_call_ids import claim_tool_call_id, request_tool_call_ids
 from utils.tool_schemas import (
     ResponseSchemaBound,
     create_agent_action_model,
@@ -3114,6 +3115,8 @@ async def call_llm_structured_streaming(
         text_buffer = ""
         hidden_stream_bytes = 0
         tool_use_blocks: List[Dict[str, Any]] = []
+        # Ids this conversation already uses; each new native call claims a unique one.
+        taken_tool_call_ids = request_tool_call_ids(messages)
 
         # Tool detection tracking (for early IN_PROGRESS messages)
         detected_tools_ordered: List[tuple] = []  # (tool_name, tool_call_id, timestamp)
@@ -3357,12 +3360,20 @@ async def call_llm_structured_streaming(
                     if not isinstance(parsed_args, dict):
                         parsed_args = {}
                     tool_name = chunk.data.get("name", "") or ""
-                    # Keep the provider's tool_use id: a schema-invalid turn is
-                    # replayed on the parse retry, and a tool_use block can only
-                    # be paired with its tool_result by id.
+                    # The provider's id, made unique within the conversation: some
+                    # models (kimi-k3) reuse ids across turns, and two declarations
+                    # sharing one id poison every later request. The same id names
+                    # the parse-retry replay, the early IN_PROGRESS row and the
+                    # persisted declaration, so tool_use/tool_result pairing holds.
+                    provider_tool_call_id = chunk.data.get("id", "") or ""
+                    native_tool_call_id = (
+                        claim_tool_call_id(provider_tool_call_id, taken_tool_call_ids)
+                        if provider_tool_call_id
+                        else ""
+                    )
                     tool_use_blocks.append(
                         {
-                            "id": chunk.data.get("id", "") or "",
+                            "id": native_tool_call_id,
                             "name": tool_name,
                             "input": parsed_args,
                         }
@@ -3374,7 +3385,7 @@ async def call_llm_structured_streaming(
 
                     # Fire on_tool_detected for non-attention tools.
                     if on_tool_detected and tool_name and tool_name not in SKIP_EARLY_PROGRESS:
-                        tool_call_id = chunk.data.get("id") or str(uuid.uuid4())
+                        tool_call_id = native_tool_call_id or str(uuid.uuid4())
                         detected_tools_ordered.append((tool_name, tool_call_id, _safe_time()))
                         position = detected_tool_positions.get(tool_name, 0)
                         detected_tool_positions[tool_name] = position + 1
@@ -3389,7 +3400,7 @@ async def call_llm_structured_streaming(
                     # send_message_to_user on the native direct-token path arrives complete; emit
                     # the full message immediately rather than streaming partials.
                     if on_attention_stream and tool_name == "send_message_to_user":
-                        attention_tool_call_id = chunk.data.get("id") or str(uuid.uuid4())
+                        attention_tool_call_id = native_tool_call_id or str(uuid.uuid4())
                         detected_tools_ordered.append(("send_message_to_user", attention_tool_call_id, _safe_time()))
                         message_text = parsed_args.get("message", "") or ""
                         is_question = parsed_args.get("is_question", True)
