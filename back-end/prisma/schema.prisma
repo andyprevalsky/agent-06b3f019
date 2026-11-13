@@ -478,6 +478,8 @@ model User {
   projectCliLogins            ProjectCliLogin[]
   iphoneDevice                IPhoneDevice?
   iphoneLeases                IPhoneLease[]
+  ownedTeams                  Team[]
+  teamMemberships             TeamMember[]
 
   @@index([userId])
   @@index([inviteCode])
@@ -993,6 +995,7 @@ model Integration {
   updatedAt              DateTime                     @updatedAt
   emailCredentials       EmailIntegrationCredential[]
   plaidItems             PlaidItem[]
+  teamShares             TeamIntegrationShare[]
 
   @@unique([userId, name, accountId])
   @@index([userId])
@@ -2248,9 +2251,80 @@ model Project {
   agents                    Agent[]
   cliLogins                 ProjectCliLogin[]
   folders                   ProjectFolder[]
+  teamShares                TeamProjectShare[]
 
   @@unique([userId, name])
   @@index([userId, updatedAt])
+}
+
+/// Sharing is always explicit and evaluated against current accepted memberships.
+model Team {
+  id                String                 @id @default(uuid())
+  name              String
+  ownerUserId       String
+  createdAt         DateTime               @default(now())
+  updatedAt         DateTime               @updatedAt
+  owner             User                   @relation(fields: [ownerUserId], references: [userId], onDelete: Cascade)
+  members           TeamMember[]
+  integrationShares TeamIntegrationShare[]
+  projectShares     TeamProjectShare[]
+
+  @@index([ownerUserId])
+}
+
+model TeamMember {
+  id                   String                 @id @default(uuid())
+  teamId               String
+  userId               String?
+  email                String?
+  role                 String                 @default("MEMBER")
+  status               String                 @default("INVITED")
+  acceptedAt           DateTime?
+  inviteDeliveryStatus String                 @default("PENDING")
+  inviteMessageId      String?
+  inviteTokenHash      String?
+  createdAt            DateTime               @default(now())
+  updatedAt            DateTime               @updatedAt
+  team                 Team                   @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  user                 User?                  @relation(fields: [userId], references: [userId], onDelete: Cascade)
+  integrationShares    TeamIntegrationShare[]
+  projectShares        TeamProjectShare[]
+
+  @@unique([teamId, email])
+  @@unique([teamId, userId])
+  @@index([email, status])
+  @@index([userId, status])
+}
+
+model TeamIntegrationShare {
+  id            String      @id @default(uuid())
+  teamId        String
+  integrationId String
+  ownerUserId   String
+  provider      String
+  accountId     String      @default("")
+  accountEmail  String?
+  createdAt     DateTime    @default(now())
+  team          Team        @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  integration   Integration @relation(fields: [integrationId], references: [id], onDelete: Cascade)
+  member        TeamMember  @relation(fields: [teamId, ownerUserId], references: [teamId, userId], onDelete: Cascade)
+
+  @@unique([teamId, integrationId, accountId])
+  @@index([ownerUserId, provider, accountId])
+}
+
+model TeamProjectShare {
+  id          String     @id @default(uuid())
+  teamId      String
+  projectId   String
+  ownerUserId String
+  createdAt   DateTime   @default(now())
+  team        Team       @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  project     Project    @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  member      TeamMember @relation(fields: [teamId, ownerUserId], references: [teamId, userId], onDelete: Cascade)
+
+  @@unique([teamId, projectId])
+  @@index([ownerUserId])
 }
 
 /// One run of a project's template sync script (trigger: manual | snapshot |

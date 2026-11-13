@@ -87,6 +87,12 @@ Agent acbb9d3c (lease 2a140be8, verify cursor 24) failed the route, not on an ob
 
 Fix (proof unchanged): `portraitRouteVerdict` reports the first breaking cursor, its stage and the next expected native step. It is stored as `operation.result.portraitRoute` on the failed verify and logged. PHONE_GUIDANCE now asks for `keystrokes: true` on that query and a tap on the switch, not the label (GROUNDED golden review portrait-route-guidance-2). The prover does not tolerate a retype: a lost query means restarting from a new launch. Regression: the "names the exact route break" cases in iphone-control.portrait-route.cases.ts. Replays of the real journals report stage `results` at cursors 10 and 19.
 
+## Recurrence 3 (2026-11-12, after PR #1962)
+
+Agent 902ff679 (lease 5544f520) completed the whole native route (cursors 33-48, with keystrokes true working). It was still rejected at the Control Center read: the live OCR is `Reduce` / `Interrup- -` (or `Interrup- ~`) / `tions`, and `portraitControlCenterAnchors` joined only a bare trailing hyphen. The agent also re-verified right after a failed verify, but any failed `setup.verify` row inside the window invalidates the route.
+
+Fix: the anchor join tolerates a stray `-`/`~` after the line-break hyphen. A letter is still rejected, and the region and frame-mask checks are unchanged. `portraitRoute.next` now starts by saying that a failed verify ends the route and a new Settings launch is required. Regression: live Control Center OCR cases (unit plus API verify to `confirmed`). Replaying the real journal 33-48 now proves the route (`originalAssistiveTouch: on`).
+
 ## Human feedback
 
 None recorded.
