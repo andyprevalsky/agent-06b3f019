@@ -5,7 +5,7 @@ title: Fireflies sync rejected the live {data, warning} listing envelope
 surface: back-end
 component: fireflies-mcp
 classification: our-bug
-problem_class: test-double-diverged-from-provider-wire-contract
+problem_class: fixture-environment-data-mismatch
 first_bad_boundary: back-end/src/services/integrations/firefliesMcp.ts listMeetingsBetween only accepted {transcripts:[...]} (or a bare array) from fireflies_get_transcripts
 symptoms:
   - Fireflies listing is not a JSON transcript array; refusing reconciliation
@@ -15,6 +15,8 @@ tags:
   - mcp
   - envelope
   - sync
+sources:
+  - PR #2008
 repro: back-end/src/tests/blackbox/fireflies-mcp.blackbox.ts
 status: fixed
 ---
@@ -40,7 +42,7 @@ the empty one, failed closed. The fake provider in the sync helpers emitted
 the documented-but-not-served `{transcripts: [...]}` shape with snake_case
 fields, so all mocked suites passed.
 
-## Fix
+## Solution
 
 `listMeetingsBetween` accepts a top-level `data` array (keeping the nested
 legacy shape), and reads `organizerEmail` as well as `organizer_email`. The
@@ -54,7 +56,11 @@ Live capture against the user's account: empty recent window parses as 0
 meetings; a wide window lists 17 meetings and a real transcript parses
 (40,028 chars). fireflies-sync, granola-sync, granola-mcp and data-grep pass.
 
-## Prevention
+## Human feedback
+
+Andy reported `Fireflies · sync failed` with the exact error after connecting Fireflies in production, and asked for the fix plus the official Fireflies logo (not the screenshot).
+
+## Reusable lesson
 
 Provider adapters ship with an opt-in live capture test, and fakes reproduce
 captured wire shapes rather than documentation examples.
