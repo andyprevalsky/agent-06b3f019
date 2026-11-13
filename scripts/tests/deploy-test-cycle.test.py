@@ -12348,6 +12348,34 @@ class LocalCleanupQuietScan(unittest.TestCase):
                 finally:
                     child.kill(); child.wait(); child.stdout.close()
 
+    @unittest.skipUnless(sys.platform.startswith('linux'), 'Linux /proc zombie semantics')
+    def test_unreaped_exited_child_is_skipped_not_refused(self):
+        # PR #1865 stability (2026-11-13): an earlier test's exited but not yet reaped child is a
+        # zombie whose environ reads EACCES even though it is dumpable; the settlement scan refused
+        # it after the grace window ('current process ownership unverifiable'). It has exited.
+        import time
+        import deploy_test_local_cleanup as local
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            (root / '.context').mkdir()
+            (root / '.context/native-worker-admission.lock').write_text('')
+            child = subprocess.Popen([sys.executable, '-c', 'pass'], cwd=root)
+            try:
+                for _ in range(500):
+                    if Path(f'/proc/{child.pid}/stat').read_text().rsplit(') ', 1)[1].split()[0] == 'Z':
+                        break
+                    time.sleep(0.01)
+                with self.assertRaises(PermissionError):
+                    Path(f'/proc/{child.pid}/environ').read_bytes()
+                local.quiet(root)
+                # The settlement scan reads environ (deploy_test_cycle.recover_round inspect_owner).
+                seen, refused = [], []
+                deploy_test_process.scan_same_user_processes(
+                    lambda process: seen.append((process / 'environ').read_bytes()), refused.append, grace=0.3)
+                self.assertEqual([], refused)
+            finally:
+                child.wait()
+
     @unittest.skipUnless(sys.platform.startswith('linux'), 'Linux /proc credential semantics')
     def test_setuid_process_first_seen_as_ours_is_skipped_not_refused(self):
         # The Blacksmith failure (PR #1760): a sibling suite's `sudo -n` was first seen while its euid
