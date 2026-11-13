@@ -101,7 +101,7 @@ and both adapter creates landed on `sess_993d70`. The error was
 `BrowserSessionValidationError … failed validation and cleanup` →
 `Failed to resume session`. Resume replacements have no outer retry, so the agent
 redid the purchase and raised the extra `write_lock` at 06:17:47Z that failed the
-task. With the bound forced back to 2, the fixture's `resume-dead-dead-then-healthy`
+task. With the replacement bound forced back to 2, the fixture's `resume-dead-dead-then-healthy`
 scenario reproduces this exact error; with 4 it passes.
 
 ## Solution
@@ -112,19 +112,38 @@ scenario reproduces this exact error; with 4 it passes.
   validation and every allocated session is identified, it throws
   `BrowserSessionValidationError`. A create that returned no session id stays
   untyped and ambiguous.
-- `tilionCreateValidation.ts`: `TILION_VALIDATION_CREATE_ATTEMPTS = 4` bounds
-  creates per call. With one dead worker of three, two creates fail together about
-  1 in 9 times; four creates fail about 1 in 81. This covers init, resume
-  replacement, rotation and challenge recovery, which all go through `createRemote`.
+- `tilionCreateValidation.ts` sets the create budget per path. New task sessions
+  keep `TILION_TASK_CREATE_ATTEMPTS = 2`, because the worker's init loop (5 calls)
+  already retries them. Resume/rotation replacements and challenge recovery have no
+  outer retry and get `TILION_REPLACEMENT_CREATE_ATTEMPTS = 4`: with one dead
+  worker of three, about 1 in 81 calls fail instead of 1 in 9.
+- A create that returns a session id but no `connect_url` (a key without raw CDP)
+  is a permanent misconfiguration. It is released and fails at once with no second
+  create, and the init receipt stays latched (fixture scenario `no-connect-url`).
+- The golden-reference review of the first bound (4 on every path) came back
+  MIXED: grounded for paths without an outer retry, too broad for init, and it
+  retried a permanent error. Those three findings shaped this split.
 - `initialization.ts`: `BrowserSessionValidationError` joins the definite
   rejections. Under the row lock, and only when no binding exists, the receipt is
   released so the worker's retry creates afresh. Ambiguous allocations stay
   latched, and the fixture's `unidentified-allocation` scenario asserts that.
 - The regression runs from `runLogicalBrowserCases` in the `browser-session`
   blackbox domain (`--logical-browser-only`).
-- 10k agents: no new shared state. Per failed create there is at most one extra
-  provider create (bounded at 2 per init call) and one receipt delete on that
-  agent's own row. Retries stay inside the worker's existing bounded loop.
+- 10k agents: no new shared state. Work stays per agent: one receipt delete on
+  that agent's own row per typed failure.
+- Worst-case creates when every create fails validation:
+  - Init: 5 worker calls × up to 2 Tilion configs (a learned preference, then the
+    default; `providers/browser/index.ts`) × 2 creates = 20. Before this change,
+    one call made up to 4 creates and then the receipt latched.
+  - Root browser: 2.
+  - One resume or rotation: 4.
+  - One challenge recovery or compute-grant CDP session (both use the recovery
+    create): 4.
+- Each failed create may leave an unreleased Tilion session that counts against
+  the shared account until its idle timeout (3600 s). Because the orphan reaper only
+  sees sessions with rows, a full Tilion outage can use account slots about five
+  times faster per failing init than before. A durable record of unconfirmed
+  releases is a follow-up.
 - Not taken: pointing prod `TILION_BASE_URL` at oregon. The measured CDP p50 was
   75.7/77.3 ms east vs 13.9/15.0 ms oregon from the devbox, so prod's iad workers
   would pay about 62 ms more on every CDP round trip. Skipping workers by

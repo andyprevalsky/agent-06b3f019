@@ -36,7 +36,7 @@ const ALB_503 =
   `Content-Type: text/html\r\nContent-Length: ${Buffer.byteLength(ALB_503_BODY)}\r\n` +
   `Connection: close\r\n\r\n${ALB_503_BODY}`;
 
-type Worker = 'dead' | 'healthy' | 'no-id';
+type Worker = 'dead' | 'healthy' | 'no-id' | 'no-connect-url';
 
 const originalFetch = globalThis.fetch;
 globalThis.fetch = (async (input, init) => {
@@ -92,6 +92,7 @@ interface FakeTilion {
   creates: string[];
   deletes: Map<string, number>;
   unexpected: string[];
+  noConnectUrl: string[];
 }
 
 async function startFakeTilion(deadPort: number, healthyEndpoint: string): Promise<FakeTilion> {
@@ -102,6 +103,7 @@ async function startFakeTilion(deadPort: number, healthyEndpoint: string): Promi
     creates: [],
     deletes: new Map(),
     unexpected: [],
+    noConnectUrl: [],
   };
   const dead = new Set<string>();
   const released = new Set<string>();
@@ -126,13 +128,14 @@ async function startFakeTilion(deadPort: number, healthyEndpoint: string): Promi
         const id = `${prefix}${randomUUID().replace(/-/g, '').slice(0, 21)}`;
         state.creates.push(worker === 'no-id' ? '<no-id>' : id);
         if (worker === 'dead') dead.add(id);
+        if (worker === 'no-connect-url') state.noConnectUrl.push(id);
         const connectUrl =
           worker === 'dead' ? `ws://127.0.0.1:${deadPort}/cdp/${id}?token=t` : healthyEndpoint;
         json(res, 201, {
           ...(worker === 'no-id' ? {} : { session_id: id }),
           state: 'live',
           created_at: Date.now() / 1000,
-          connect_url: worker === 'no-id' ? null : connectUrl,
+          connect_url: worker === 'no-id' || worker === 'no-connect-url' ? null : connectUrl,
           exit_id: null,
         });
       } else if (sessionId && dead.has(sessionId)) {
@@ -210,7 +213,7 @@ async function main() {
   const { resumeOwnedBrowserSession } =
     await import('../../domains/browser-session/service.control');
   const { logicalBrowserTaskId } = await import('../../providers/browser/logicalSession');
-  const { TILION_VALIDATION_CREATE_ATTEMPTS } =
+  const { TILION_TASK_CREATE_ATTEMPTS } =
     await import('../../providers/browser/tilionCreateValidation');
   const userId = `tilion-dead-worker-${randomUUID()}`;
   const failures: string[] = [];
@@ -255,7 +258,7 @@ async function main() {
       if (tilion.plan.length !== 0)
         failures.push(`${name}: planned creates unused ${JSON.stringify(observed)}`);
     } else if (session !== null || tilion.creates.length !== plan.length) {
-      failures.push(`${name}: ambiguous allocation must stay latched ${JSON.stringify(observed)}`);
+      failures.push(`${name}: failed create must stay latched ${JSON.stringify(observed)}`);
     }
     for (const id of deadIds) {
       if ((tilion.deletes.get(id) ?? 0) === 0)
@@ -308,17 +311,23 @@ async function main() {
     // One dead create: the adapter's second create must land on the healthy worker.
     await scenario('dead-then-healthy', ['dead', 'healthy'], true);
     // Every adapter create dead: the worker's retry must create afresh.
-    const perCall = TILION_VALIDATION_CREATE_ATTEMPTS;
+    const perCall = TILION_TASK_CREATE_ATTEMPTS;
     const allDead = Array<Worker>(perCall).fill('dead');
     await scenario('all-adapter-creates-dead-then-healthy', [...allDead, 'healthy'], true);
     // A create that returned no session id is ambiguous: no retry may allocate again.
     await scenario('unidentified-allocation', Array<Worker>(perCall).fill('no-id'), false);
+    // A key without raw CDP is a permanent misconfiguration: one create, released, never retried.
+    await scenario('no-connect-url', ['no-connect-url'], false);
+    for (const id of tilion.noConnectUrl) {
+      if ((tilion.deletes.get(id) ?? 0) === 0)
+        failures.push(`no-connect-url: session ${id.slice(0, 11)} release never attempted`);
+    }
     // Resume replacements have no outer retry: the adapter's own creates must reach a healthy worker.
     await resumeScenario();
     assert.deepEqual(tilion.unexpected, [], 'Tilion calls outside the fixture contract');
     assert.deepEqual(failures, [], 'dead Tilion worker must not end browser init');
     console.log(
-      'PASS Tilion dead worker: second create, fresh worker retry, ambiguous latch, resume replacement'
+      'PASS Tilion dead worker: second create, fresh worker retry, latched non-retryable creates, resume replacement'
     );
   } finally {
     await prisma.toolSideEffect.deleteMany({

@@ -44,7 +44,8 @@ import type {
 } from './types';
 import {
   settleFailedTilionCreate,
-  TILION_VALIDATION_CREATE_ATTEMPTS,
+  TILION_REPLACEMENT_CREATE_ATTEMPTS,
+  TILION_TASK_CREATE_ATTEMPTS,
   TilionSessionValidationError,
   type TilionValidationAttempt,
 } from './tilionCreateValidation';
@@ -251,7 +252,8 @@ async function createPlacedSession(
 
 async function createRemote(
   location: ProxyGeoLocation,
-  proxyType: TilionProxyType
+  proxyType: TilionProxyType,
+  maxAttempts: number
 ): Promise<RemoteTilionSession> {
   // A dead worker refuses CDP *and* DELETE (ALB 503, 2026-11-13): an unconfirmed
   // release must not stop the next create, which lands on another worker.
@@ -261,9 +263,13 @@ async function createRemote(
     const sessionId = record.session_id;
     let browser: Browser | null = null;
     try {
-      if (!sessionId || !record.connect_url) {
-        throw new TilionSessionValidationError(
-          'Tilion create response omitted session_id or connect_url (raw CDP not enabled for this key?)'
+      if (!sessionId) {
+        throw new TilionSessionValidationError('Tilion create response omitted session_id');
+      }
+      if (!record.connect_url) {
+        // A key without raw CDP never gets a connect_url: another create cannot help.
+        throw new Error(
+          `Tilion session ${sessionId} has no connect_url (raw CDP not enabled for this key?)`
         );
       }
       browser = await connectValidatedBrowser(record.connect_url);
@@ -293,7 +299,7 @@ async function createRemote(
       await settleFailedTilionCreate(
         error,
         sessionId,
-        attempt < TILION_VALIDATION_CREATE_ATTEMPTS,
+        attempt < maxAttempts,
         failed,
         releaseTilionRemoteSession
       );
@@ -319,7 +325,7 @@ export async function createTilionSessionWithContext(
   }
 ): Promise<BrowserProviderSession & { geoTargeting: TilionGeoTargeting }> {
   const proxyType = tilionProxyType(options?.proxyType ?? TILION_DEFAULT_PROXY_TYPE);
-  const remote = await createRemote(location, proxyType);
+  const remote = await createRemote(location, proxyType, TILION_TASK_CREATE_ATTEMPTS);
   let row;
   try {
     row = await persistBrowserSessionRow({
@@ -382,7 +388,8 @@ export async function createTilionRecoverySession(
 }> {
   const remote = await createRemote(
     location,
-    tilionProxyType(options.proxyType ?? TILION_DEFAULT_PROXY_TYPE)
+    tilionProxyType(options.proxyType ?? TILION_DEFAULT_PROXY_TYPE),
+    TILION_REPLACEMENT_CREATE_ATTEMPTS
   );
   return {
     sessionId: remote.sessionId,
@@ -589,7 +596,7 @@ async function replaceSession(
       ? storedTilionProxyType(old.proxyTier)
       : TILION_DEFAULT_PROXY_TYPE);
 
-  const remote = await createRemote(location, proxyType);
+  const remote = await createRemote(location, proxyType, TILION_REPLACEMENT_CREATE_ATTEMPTS);
   let handedOff = false;
   try {
     if (state !== null) {

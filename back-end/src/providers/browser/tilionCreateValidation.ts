@@ -14,10 +14,16 @@ export class TilionSessionValidationError extends Error {}
 /**
  * Creates per call while each lands on a session that fails CDP validation.
  * Tilion places creates across its pool's workers; with one dead worker of three
- * (2026-11-13) two creates still failed together about 1 in 9 times, which ended
- * resume replacements that have no outer retry. Four bounds that to about 1 in 81.
+ * (2026-11-13) two creates still fail together about 1 in 9 times.
+ * - New task sessions keep the original 2. Init is retried by its caller (the
+ *   worker's init loop makes up to 5 calls, and a typed failure releases the init
+ *   receipt for each); the user-initiated root browser keeps the same budget.
+ * - Replacements (resume, rotation) and challenge recovery have no outer retry, so
+ *   they get 4 (about 1 in 81). Every failed create may leave an unreleased session
+ *   until Tilion's idle timeout, so the budget stays bounded per path.
  */
-export const TILION_VALIDATION_CREATE_ATTEMPTS = 4;
+export const TILION_TASK_CREATE_ATTEMPTS = 2;
+export const TILION_REPLACEMENT_CREATE_ATTEMPTS = 4;
 
 export interface TilionValidationAttempt {
   sessionId: string | undefined;
