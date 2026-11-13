@@ -16,6 +16,10 @@
  *
  * While isWaiting && !isStreaming:
  *   dashed yellow indicator + optional "Start Autonomous Execution" button.
+ *
+ * META LINE (settled messages with a sentAt, never while streaming): directly
+ * under the text, "<send time> [copy on hover]" (MessageMeta.AgentMessageMeta),
+ * the same record the user bubble carries, without a branch action.
  */
 import { memo, useState } from 'react';
 import { Check, Loader2, X } from 'lucide-react';
@@ -23,6 +27,7 @@ import { Button } from '@/components/ui/button';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import { MarkdownText } from '../MarkdownText';
 import { AutonomousExecutionIcon } from './AutonomousExecutionIcon';
+import { AgentMessageMeta } from './MessageMeta';
 
 interface AttentionMessageProps {
   attentionMessage: string;
@@ -34,6 +39,8 @@ interface AttentionMessageProps {
   attentionRequestId?: string;
   onApprove?: (requestId: string) => Promise<void>;
   onDecline?: (requestId: string) => Promise<void>;
+  /** ISO send time of the settled message; omitted for live streams and previews. */
+  sentAt?: string;
 }
 
 type ActionState = 'approving' | 'declining' | 'done' | null;
@@ -170,6 +177,7 @@ export const AttentionMessage = memo(function AttentionMessage({
   attentionRequestId,
   onApprove,
   onDecline,
+  sentAt,
 }: AttentionMessageProps) {
   const [hasAnimated, setHasAnimated] = useState(false);
   const [actionState, setActionState] = useState<ActionState>(null);
@@ -201,7 +209,7 @@ export const AttentionMessage = memo(function AttentionMessage({
     onDecline !== undefined;
 
   return (
-    <div className="flex gap-3 animate-in fade-in duration-300">
+    <div className="group/message flex gap-3 animate-in fade-in duration-300">
       <div className="flex-1 min-w-0 space-y-3">
         <div className="text-sm">
           <MarkdownText
@@ -211,6 +219,9 @@ export const AttentionMessage = memo(function AttentionMessage({
             onComplete={handleAnimationComplete}
           />
         </div>
+        {sentAt !== undefined && !isStreaming && (
+          <AgentMessageMeta text={attentionMessage} sentAt={sentAt} />
+        )}
 
         {isWaiting && !isStreaming && (
           <>

@@ -32,6 +32,7 @@ import {
   extractRateLimitedUntil,
   providerRequiredWaitMs,
 } from './rateLimitReset';
+import { observeSubscriptionUsage } from './subscriptionUsage';
 import { parseAnthropicSSE } from './streaming';
 import { isUncachedContext, SYSTEM_PROMPT_DYNAMIC_BOUNDARY } from './cache';
 import { applyAnthropicToolConfig, transformMessagesForAnthropic } from './transforms';
@@ -410,6 +411,14 @@ export async function* claudeAuthComplete(opts: ClaudeAuthOptions): AsyncIterabl
     }
 
     const status = response.status;
+    // Every subscription response carries the account's 5h/7d usage (a 429 also
+    // names the spent window); record it in the background, never awaited.
+    if (opts.auth.mode === 'oauth') {
+      observeSubscriptionUsage('claude', opts.auth.token, response.headers, {
+        status,
+        body: response.errorBody,
+      });
+    }
 
     if (status === 200) {
       if (!response.body) {

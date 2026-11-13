@@ -3,11 +3,12 @@
 Provides bidirectional communication with the Claude Code sandbox:
 - Receives stdout/stderr/buffer/exit messages
 - Sends stdin messages for follow-up prompts
-- Handles reconnection with exponential backoff
+- Handles reconnection with exponential backoff and jitter
 """
 
 import asyncio
 import json
+import random
 from typing import Any, Awaitable, Callable, Optional
 
 import aiohttp
@@ -21,6 +22,31 @@ logger = structlog.get_logger()
 # with 1009 before the exit queued behind it could be read, on every reattach.
 # The frame is history the sandbox already holds, so the client accepts it.
 WS_MAX_MSG_SIZE = 0
+
+# A dropped connection ended a 54-minute code session with "Failed to connect to
+# Claude Code WebSocket" (tar_2b02efd49fc2466497723b3e): the first connect of an
+# attach was a single try and a reconnect had ~2 real tries in 60s. Both now
+# retry with jittered exponential backoff inside these bounds.
+CONNECT_ATTEMPTS = 5
+CONNECT_DEADLINE_S = 150.0
+RECONNECT_DEADLINE_S = 180.0
+BACKOFF_CAP_S = 20.0
+
+
+def backoff_delay(
+    attempt: int,
+    base: float,
+    cap: float = BACKOFF_CAP_S,
+    rand: Optional[Callable[[], float]] = None,
+) -> float:
+    """Delay before retry ``attempt`` (1-based): exponential, capped, with equal jitter.
+
+    Half the capped exponential delay is fixed and half is random, so retries
+    from many workers after one network blip spread out instead of landing on
+    the sandbox together, and no delay collapses to zero.
+    """
+    exp = min(cap, base * (2 ** max(0, attempt - 1)))
+    return exp / 2 + (rand or random.random)() * exp / 2
 
 
 class ClaudeCodeWsClient:
@@ -47,6 +73,7 @@ class ClaudeCodeWsClient:
         max_reconnects: int = 5,
         reconnect_delay: float = 1.0,
         on_events_replay: Optional[Callable[[list[dict[str, Any]]], Awaitable[None]]] = None,
+        reconnect_deadline_s: float = RECONNECT_DEADLINE_S,
     ):
         """
         Initialize the WebSocket client.
@@ -65,6 +92,8 @@ class ClaudeCodeWsClient:
             on_events_replay: Callback for the server's full event history, sent on
                 every (re)connect. Replaces everything seen so far; without it each
                 replayed event goes to ``on_event``.
+            reconnect_deadline_s: Total time one reconnect may take before the
+                connection is given up.
         """
         self.ws_url = ws_url
         self.on_output = on_output
@@ -76,6 +105,8 @@ class ClaudeCodeWsClient:
         self.heartbeat_fn = heartbeat_fn
         self.max_reconnects = max_reconnects
         self.reconnect_delay = reconnect_delay
+        self.reconnect_deadline_s = reconnect_deadline_s
+        self.last_error: Optional[str] = None  # why the latest connect failed
 
         self._ws: Optional[aiohttp.ClientWebSocketResponse] = None
         self._session: Optional[aiohttp.ClientSession] = None
@@ -111,6 +142,7 @@ class ClaudeCodeWsClient:
             )
             self._running = True
             self._replay_pending = []
+            self.last_error = None
             logger.info("[ClaudeCodeWs] Connected", url=self.ws_url[:60])
 
             # Notify connection state change
@@ -120,8 +152,44 @@ class ClaudeCodeWsClient:
             return True
 
         except Exception as e:
-            logger.error("[ClaudeCodeWs] Connection failed", error=str(e))
+            self.last_error = f"{type(e).__name__}: {e}" if str(e) else type(e).__name__
+            logger.error("[ClaudeCodeWs] Connection failed", error=self.last_error)
             return False
+
+    async def connect_with_retry(
+        self,
+        attempts: int = CONNECT_ATTEMPTS,
+        deadline_s: float = CONNECT_DEADLINE_S,
+    ) -> bool:
+        """Connect, retrying a failed handshake with jittered exponential backoff.
+
+        A sandbox that is briefly unreachable (an E2B proxy blip, a ws-server
+        restart, a resume still settling) must not end the run on one failed
+        handshake. Gives up after ``attempts`` tries or once ``deadline_s`` has
+        passed; ``last_error`` then holds the final failure.
+        """
+        loop = asyncio.get_event_loop()
+        deadline = loop.time() + deadline_s
+        for attempt in range(1, attempts + 1):
+            if await self.connect():
+                return True
+            if attempt == attempts:
+                break
+            delay = backoff_delay(attempt, self.reconnect_delay)
+            if loop.time() + delay >= deadline:
+                logger.error("[ClaudeCodeWs] Connect deadline exceeded", deadline_s=deadline_s, attempts=attempt)
+                break
+            logger.warning(
+                "[ClaudeCodeWs] Connect failed; retrying",
+                attempt=attempt,
+                max_attempts=attempts,
+                delay_s=round(delay, 2),
+                error=self.last_error,
+            )
+            if self.heartbeat_fn:
+                self.heartbeat_fn(f"Retrying Claude Code WebSocket connect ({attempt}/{attempts})")
+            await asyncio.sleep(delay)
+        return False
 
     async def disconnect(self) -> None:
         """Disconnect from the WebSocket server."""
@@ -331,31 +399,34 @@ class ClaudeCodeWsClient:
 
     async def _reconnect(self) -> bool:
         """
-        Attempt reconnection with exponential backoff.
+        Attempt reconnection with jittered exponential backoff.
 
-        Total deadline of 60s prevents hanging when the sandbox is dead
-        (each connect() has a 30s timeout, so we get ~2 real attempts).
+        ``reconnect_deadline_s`` (180s by default) bounds the whole attempt so a
+        dead sandbox is diagnosed instead of retried forever, while leaving room
+        for several real attempts (each connect() has a 30s timeout).
 
         Returns:
             True if reconnected successfully, False if max retries exceeded or deadline hit.
         """
-        deadline = asyncio.get_event_loop().time() + 60.0  # 60s total deadline
+        deadline = asyncio.get_event_loop().time() + self.reconnect_deadline_s
 
         while self._reconnect_count < self.max_reconnects:
             if asyncio.get_event_loop().time() >= deadline:
-                logger.error("[ClaudeCodeWs] Reconnect deadline exceeded (60s)")
+                logger.error("[ClaudeCodeWs] Reconnect deadline exceeded", deadline_s=self.reconnect_deadline_s)
                 return False
 
             self._reconnect_count += 1
-            delay = self.reconnect_delay * (2 ** (self._reconnect_count - 1))
+            delay = backoff_delay(self._reconnect_count, self.reconnect_delay)
 
             logger.info(
                 "[ClaudeCodeWs] Reconnecting",
                 attempt=self._reconnect_count,
                 max_attempts=self.max_reconnects,
-                delay_s=delay,
+                delay_s=round(delay, 2),
             )
 
+            if self.heartbeat_fn:
+                self.heartbeat_fn(f"Reconnecting to Claude Code ({self._reconnect_count}/{self.max_reconnects})")
             await asyncio.sleep(delay)
 
             # Close existing connection if any

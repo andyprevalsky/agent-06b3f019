@@ -10,7 +10,9 @@
  *      +-- (agent change / panel close) --> reset to IDLE
  *
  * COMPOSING also accepts dragged or pasted screenshots (useBugReportScreenshots);
- * submit waits until every pending screenshot upload has finished.
+ * submit waits until every pending screenshot upload has finished. Screenshots
+ * picked with the file control (useBugReportAttachments) show as removable
+ * thumbnails and are appended to the description on submit.
  *
  * After launch we keep the boxes.dev link on-screen. Submit must not auto-open
  * it; Open / Copy stay as explicit user-gesture buttons.
@@ -18,6 +20,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { reportAgentBug, useToast, type AgentDetail } from '../../hooks';
+import { useBugReportAttachments, type BugReportAttachment } from './useBugReportAttachments';
 import { useBugReportScreenshots } from './useBugReportScreenshots';
 
 interface UseReportBugOptions {
@@ -40,6 +43,10 @@ export interface UseReportBugResult {
   uploadingScreenshots: number;
   /** Returns false when none of the files is an image. */
   attachScreenshots: (files: File[], cursor: number | null) => boolean;
+  /** Screenshots picked with the file control, shown as thumbnails. */
+  attachments: BugReportAttachment[];
+  addAttachments: (files: File[]) => void;
+  removeAttachment: (id: number) => void;
   start: () => void;
   cancel: () => void;
   submit: () => Promise<void>;
@@ -62,6 +69,14 @@ export function useReportBug({ agent, open }: UseReportBugOptions): UseReportBug
     setDescription,
     generationRef: submitGenerationRef,
   });
+  const {
+    attachments,
+    uploadingCount: uploadingAttachments,
+    addAttachments,
+    removeAttachment,
+    clearAttachments,
+    withAttachments,
+  } = useBugReportAttachments(agent?.agent_id ?? null, submitGenerationRef);
 
   useEffect(() => {
     if (!open) {
@@ -71,8 +86,9 @@ export function useReportBug({ agent, open }: UseReportBugOptions): UseReportBug
       setDescription('');
       setIsSubmitting(false);
       resetUploads();
+      clearAttachments();
     }
-  }, [open, resetUploads]);
+  }, [open, resetUploads, clearAttachments]);
 
   useEffect(() => {
     submitGenerationRef.current += 1;
@@ -81,7 +97,8 @@ export function useReportBug({ agent, open }: UseReportBugOptions): UseReportBug
     setDescription('');
     setIsSubmitting(false);
     resetUploads();
-  }, [agent?.agent_id, resetUploads]);
+    clearAttachments();
+  }, [agent?.agent_id, resetUploads, clearAttachments]);
 
   const start = useCallback(() => {
     setLaunched(null);
@@ -91,7 +108,8 @@ export function useReportBug({ agent, open }: UseReportBugOptions): UseReportBug
   const cancel = useCallback(() => {
     setShowComposer(false);
     setDescription('');
-  }, []);
+    clearAttachments();
+  }, [clearAttachments]);
 
   const dismissLaunched = useCallback(() => {
     setLaunched(null);
@@ -133,12 +151,13 @@ export function useReportBug({ agent, open }: UseReportBugOptions): UseReportBug
     const submittedAgentId = agent.agent_id;
     setIsSubmitting(true);
     try {
-      const result = await reportAgentBug(submittedAgentId, trimmed);
+      const result = await reportAgentBug(submittedAgentId, withAttachments(trimmed));
       if (submitGenerationRef.current !== generation) return;
       if (agent.agent_id !== submittedAgentId) return;
       setLaunched({ name: result.name, url: result.url, run_id: result.run_id });
       setShowComposer(false);
       setDescription('');
+      clearAttachments();
       toast({
         title: 'Bug report launched',
         description: 'A boxes.dev agent is investigating. Tap Open below to follow it.',
@@ -155,7 +174,7 @@ export function useReportBug({ agent, open }: UseReportBugOptions): UseReportBug
         setIsSubmitting(false);
       }
     }
-  }, [agent, description, toast]);
+  }, [agent, description, toast, withAttachments, clearAttachments]);
 
   return {
     showComposer,
@@ -163,8 +182,11 @@ export function useReportBug({ agent, open }: UseReportBugOptions): UseReportBug
     description,
     setDescription,
     isSubmitting,
-    uploadingScreenshots: uploadingCount,
+    uploadingScreenshots: uploadingCount + uploadingAttachments,
     attachScreenshots,
+    attachments,
+    addAttachments,
+    removeAttachment,
     start,
     cancel,
     submit,

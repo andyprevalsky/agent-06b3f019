@@ -1,3 +1,4 @@
+import type { getSharedDataMap } from './teamContext';
 /** Grep summary response types. */
 export interface SummaryThreadInfo {
   name: string;
@@ -6,6 +7,7 @@ export interface SummaryThreadInfo {
 }
 
 export interface SummaryResult {
+  teams?: Awaited<ReturnType<typeof getSharedDataMap>>;
   sources: {
     messages: {
       total_threads: number;

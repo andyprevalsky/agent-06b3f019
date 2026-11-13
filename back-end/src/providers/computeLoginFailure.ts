@@ -21,6 +21,7 @@ import {
 } from './gptCredentials';
 import { prisma } from './database';
 import { createLogger } from './logger';
+import { subscriptionCooldownMeta } from './rose/subscriptionUsage';
 
 const log = createLogger('ComputeCredentials');
 
@@ -66,7 +67,13 @@ export async function markComputeTokenUnavailable(
   rateLimitedUntil?: string
 ): Promise<void> {
   const failureReason = reason === 'auth_error' ? 'auth_error' : undefined;
-  const options = { failureReason, rateLimitedUntil };
+  // Why, and whether the provider gave this reset (vs Rose's default backoff):
+  // the usage bar shows only an authoritative cooldown as an exhausted quota.
+  const options = {
+    failureReason,
+    rateLimitedUntil,
+    ...subscriptionCooldownMeta(token.accessToken, reason, rateLimitedUntil),
+  };
   const integrationId = token.integrationId ?? token.poolTokenId;
 
   if (reason === 'auth_error') {

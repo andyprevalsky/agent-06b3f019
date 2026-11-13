@@ -914,6 +914,11 @@ class _ReplayWsClient:
     async def connect(self):
         return True
 
+    async def connect_with_retry(self):
+        # The service retries the handshake; stand-ins answer from connect().
+        self.last_error = None if await self.connect() else "connect refused"
+        return self.last_error is None
+
     async def disconnect(self):
         return None
 

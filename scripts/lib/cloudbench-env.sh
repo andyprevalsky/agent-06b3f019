@@ -68,6 +68,131 @@ cloudbench_env_sha256() {
   fi
 }
 
+# The controller stages this immutable source manifest separately from app
+# secrets. Call before decoding either blob: the companion app-secret digests
+# alone permit a coherent rotation to change an already prepared source.
+cloudbench_verify_source_guest_env() {
+  local source_env_helper="${CLOUDBENCH_SOURCE_ENV_HELPER:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)/cloudbench-source-env.py}"
+  [ -f "$source_env_helper" ] || { echo 'FATAL: missing source environment loader' >&2; return 1; }
+  local source_env_mode
+  source_env_mode="$(python3 "$source_env_helper" mode)" || return 1
+  case "$source_env_mode" in
+    none) ;;
+    owned-capsule-v1) python3 "$source_env_helper" check-effective || return 1 ;;
+    *) return 1 ;;
+  esac
+  python3 - <<'PY'
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import stat
+import sys
+import time
+
+def need(value):
+    if not value:
+        raise ValueError('source guest environment contract rejected')
+
+def unique(pairs):
+    result = {}
+    for key, value in pairs:
+        need(key not in result)
+        result[key] = value
+    return result
+
+def read(path):
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        before = os.fstat(fd)
+        need(stat.S_ISREG(before.st_mode) and before.st_size <= 1024 * 1024)
+        with os.fdopen(fd, 'rb', closefd=False) as stream:
+            raw = stream.read(1024 * 1024 + 1)
+        after = os.fstat(fd)
+        need((before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns)
+             == (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns))
+        need(len(raw) == before.st_size)
+        return raw
+    finally:
+        os.close(fd)
+
+try:
+    path, expected, protocol = (os.environ.get(key, '') for key in (
+        'CLOUDBENCH_SOURCE_MANIFEST_FILE', 'CLOUDBENCH_SOURCE_MANIFEST_SHA256',
+        'CLOUDBENCH_SOURCE_LEASE_PROTOCOL'))
+    provenance = os.environ.get('CLOUDBENCH_EXECUTION_PROVENANCE_FILE', '')
+    # Prefer an existing controller-owned destination to an arbitrary ambient
+    # path. The trusted worker wrapper selects /data; primary boot selects /.
+    fixed = ('/cloudbench-execution-provenance.json', '/data/cloudbench-execution-provenance.json')
+    candidates = ((provenance,) if provenance in fixed else ()) + fixed
+    provenance = next((candidate for candidate in candidates if os.path.lexists(candidate)), provenance)
+    document = json.loads(read(provenance), object_pairs_hook=unique) if provenance else None
+    if provenance:
+        need(isinstance(document, dict) and isinstance(document.get('config'), dict)
+             and isinstance(document['config'].get('values'), dict))
+    source_protocol = document['config']['values'].get('base_source_lease_protocol', 'none') if provenance else 'none'
+    need(source_protocol in ('none', 'cloudbench-source-lease-v1'))
+    if not any((path, expected, protocol)):
+        need(source_protocol == 'none')
+        sys.exit(0)  # Historical V1 launches have no source contract.
+    need(path and os.path.isabs(path) and re.fullmatch('[a-f0-9]{64}', expected)
+         and protocol == 'cloudbench-source-lease-v1')
+    raw = read(path)
+    need(hashlib.sha256(raw).hexdigest() == expected)
+    manifest = json.loads(raw, object_pairs_hook=unique)
+    need(isinstance(manifest, dict) and type(manifest.get('version')) is int
+         and manifest['version'] == 2 and manifest.get('lease_protocol') == protocol)
+    mode = manifest.get('guest_env_mode', 'none')
+    capsule = manifest.get('guest_env_capsule_sha256', 'none')
+    need(mode in ('none', 'owned-capsule-v1'))
+    need(os.environ.get('CLOUDBENCH_SOURCE_GUEST_ENV_MODE', 'none') == mode
+         and os.environ.get('CLOUDBENCH_SOURCE_GUEST_ENV_CAPSULE_SHA256', 'none') == capsule)
+    if document:
+        need(document['config']['values'].get('base_source_guest_env_mode', 'none') == mode
+             and document['config']['values'].get('base_source_guest_env_capsule_sha256', 'none') == capsule)
+    contract = manifest.get('guest_env_sha256')
+    need(isinstance(contract, dict) and set(contract) == {'AGENTS_ENV_B64', 'BACKEND_ENV_B64'})
+    need(all(isinstance(value, str) and re.fullmatch('[a-f0-9]{64}', value) for value in contract.values()))
+    if document:
+        need(document['config']['values']['base_source_manifest_sha256'] == expected)
+    observed = {}
+    for key, digest in contract.items():
+        value = os.environ.get(key, '')
+        need(value)
+        observed[key] = hashlib.sha256(value.encode()).hexdigest()
+        need(observed[key] == digest)
+    machine = os.environ.get('FLY_MACHINE_ID', '')
+    token = os.environ.get('CLOUDBENCH_RUN_TOKEN', '')
+    need(re.fullmatch('[a-f0-9]+', machine) and re.fullmatch('[A-Za-z0-9._-]{1,160}', token))
+    receipt = dict(schema='cloudbench-source-guest-env-v1', machine_id=machine,
+                   run_token=token, source_manifest_sha256=expected, guest_env_sha256=observed)
+    if mode == 'owned-capsule-v1':
+        receipt.update(guest_env_mode=mode, guest_env_capsule_sha256=capsule)
+    directory = Path(os.environ.get('CLOUDBENCH_DATA_DIR', '/data'))
+    need(directory.is_absolute())
+    target = directory / ('cloudbench-source-guest-env-' + token + '.json')
+    try:
+        fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    except FileExistsError:
+        saved = json.loads(read(target), object_pairs_hook=unique)
+        need(type(saved.pop('observed_at', None)) is int and saved == receipt)
+    else:
+        with os.fdopen(fd, 'wb') as stream:
+            stream.write((json.dumps(dict(receipt, observed_at=int(time.time())), sort_keys=True) + '\n').encode())
+            stream.flush()
+            os.fsync(stream.fileno())
+        fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+except (ValueError, OSError, KeyError, TypeError):
+    print('FATAL: prepared source guest environment contract rejected', file=sys.stderr)
+    sys.exit(1)
+PY
+}
+
 cloudbench_worktree_has_changes() {  # <repo-root>
   local repo="$1"
   local first_untracked
@@ -684,6 +809,46 @@ cloudbench_apply_compute_token_authority() {  # <backend-env>
   fi
   printf 'COMPUTE_TOKEN_AUTHORITY_URL=%s\nCOMPUTE_TOKEN_AUTHORITY_API_KEY=%s\n' "$url" "$api_key" >> "$backend_env"
   echo "compute-token authority: $url"
+}
+
+# Canonical parent projection: approved backend bytes remain unchanged.
+cloudbench_write_guest_browser_env_files() {
+  python3 - "$@" <<'PYBROWSER'
+import hashlib, json, os, re, stat, sys
+agents, backend, prod_backend, prod_worker, directory = sys.argv[1:]
+allowed = {'kernel', 'tilion', 'steel', 'browser-use'}
+def need(ok, reason):
+    if not ok: raise SystemExit('guest browser projection: ' + reason)
+need(prod_backend in allowed and prod_worker in allowed, 'invalid production enum')
+info = os.lstat(directory)
+need(stat.S_ISDIR(info.st_mode) and info.st_uid == os.geteuid() and not info.st_mode & 0o077, 'private output directory required')
+sha = lambda raw: hashlib.sha256(raw).hexdigest()
+pattern = re.compile(rb'^(\s*(?:export\s+)?BROWSER_PROVIDER\s*=)([^\r\n]*)(\r?\n)?$')
+manifest = {'schema':'cloudbench-guest-browser-projection-v1',
+            'production_sources':{'backend':'render:Navi','worker':'fly:navi-whisper-lux'},
+            'production_browser_provider':prod_backend,'production_worker_browser_provider':prod_worker,
+            'allowed_changes':{'agents.env':['BROWSER_PROVIDER'],'backend.env':[]},'files':{}}
+for source, name, provider in ((agents,'agents.env',prod_worker),(backend,'backend.env',prod_backend)):
+    need(os.path.isfile(source) and not os.path.islink(source), 'regular source file required')
+    raw = open(source,'rb').read(); lines=raw.splitlines(keepends=True)
+    matches=[(i,pattern.fullmatch(line)) for i,line in enumerate(lines) if re.match(rb'^\s*(?:export\s+)?BROWSER_PROVIDER\s*=',line)]
+    need(len(matches)==1 and matches[0][1] is not None,'exact single explicit BROWSER_PROVIDER required')
+    index, match = matches[0]; original=match[2].strip()
+    if len(original)>=2 and original[:1]==original[-1:] and original[:1] in (b'"',b"'"): original=original[1:-1]
+    need(original.decode() in allowed,'invalid original provider')
+    if name=='backend.env':
+        need(original.decode()==provider,'backend provider must already match production')
+        body=raw
+    else:
+        lines[index]=match[1]+provider.encode()+(match[3] or b''); body=b''.join(lines)
+    need(open(source,'rb').read()==raw,'source changed during projection')
+    fd=os.open(os.path.join(directory,name),os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+    with os.fdopen(fd,'wb') as target: target.write(body)
+    manifest['files'][name]={'original_sha256':sha(raw),'projected_sha256':sha(body),
+                             'original_provider':original.decode(),'projected_provider':provider}
+fd=os.open(os.path.join(directory,'browser-projection.json'),os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+with os.fdopen(fd,'w') as target: json.dump(manifest,target,sort_keys=True); target.write('\n')
+PYBROWSER
 }
 
 cloudbench_validate_browser_provider_contract() {
@@ -2988,4 +3153,32 @@ if values["TEMPORAL_NAMESPACE"] == production:
 for name in ("TEMPORAL_ADDRESS", "TEMPORAL_NAMESPACE", "TEMPORAL_API_KEY"):
     print("export %s=%s" % (name, shlex.quote(values[name])))
 PY
+}
+
+# Guest-only Node launch policy; never rewrite production or staged dotenv blobs.
+cloudbench_kernel_proxy_node_options() {
+    local guard="$1/back-end/scripts/blackbox-kernel-proxy-custody.cjs"
+    if [ ! -f "$guard" ] || [ ! -r "$guard" ] || [ -L "$guard" ]; then
+        echo '❌ cloud guest Kernel proxy custody preload is missing or unsafe' >&2
+        return 1
+    fi
+    case "$guard" in
+        *'"'*|*'\'*|*$'\n'*|*$'\r'*)
+            echo '❌ cloud guest Kernel proxy custody path cannot be encoded safely' >&2
+            return 1 ;;
+    esac
+    printf '%s--require="%s"\n' "${NODE_OPTIONS:+$NODE_OPTIONS }" "$guard"
+}
+
+# Project a controller's existing custody preload into a fixed guest policy bit.
+# Never forward its checkout-specific NODE_OPTIONS path to another machine.
+cloudbench_kernel_proxy_custody_policy() {
+    case "${CLOUDBENCH_KERNEL_PROXY_CUSTODY-0}" in
+        0|1) ;;
+        *) echo '❌ invalid cloud guest Kernel proxy custody policy' >&2; return 1 ;;
+    esac
+    case "${NODE_OPTIONS:-}" in
+        *blackbox-kernel-proxy-custody.cjs*) printf '1\n' ;;
+        *) printf '%s\n' "${CLOUDBENCH_KERNEL_PROXY_CUSTODY-0}" ;;
+    esac
 }

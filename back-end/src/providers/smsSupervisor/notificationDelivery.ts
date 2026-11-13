@@ -2,6 +2,7 @@ import type { CompletionMessage } from '../rose';
 import { createLogger } from '../logger';
 import { SMS_MAX_BODY_CHARACTERS } from '../smsDeliveryContract';
 import type { SupervisorChannel } from './channelDelivery';
+import type { LinqNotificationCard } from '../linqCards';
 import { rewriteNotification, SMS_NOTIFICATION_SYSTEM_PROMPT } from './notificationLlm';
 
 const log = createLogger('SmsNotification');
@@ -20,6 +21,7 @@ interface DeliveryResult {
 export interface NotificationContent {
   message: string;
   requiredLinks: readonly string[];
+  card?: LinqNotificationCard;
 }
 
 export class NotificationDeliveryError extends Error {

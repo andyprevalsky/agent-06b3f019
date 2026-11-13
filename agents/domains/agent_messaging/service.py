@@ -3,6 +3,9 @@
 list_agents      ──▶ explore_list_agents (inside the explore activity)
   (explore only)       ──▶ GET /api/agents/<owner>/tree?node&depth&cursor&q&path_prefix
                        ──▶ explore_tree_view (re-rooted at the explore task) ──▶ render_agent_view
+  + project_id/owner_user_id/team_id, or query
+                       ──▶ GET /api/data/project-agents (own + team-shared projects, metadata only)
+                       ──▶ render_project_agents
 wait_for node    ──▶ list_agent_tree_activity               ──▶ GET  /api/agents/<self>/tree?node&depth=1
 send_message_to_agent     ──▶ send_agent_message_to_address_activity  ──▶ POST /api/agents/<self>/send-agent-message {to}
   (own bg task)  ──▶ send_agent_message_activity             ──▶ POST /api/agents/<self>/agent-messages {recipient_task_id}
@@ -25,6 +28,7 @@ from temporalio import activity
 from domains.agent_messaging.config import HEADER_GOAL_LEN, RENDER_GOAL_LEN
 from domains.agent_messaging.repo import (
     fetch_agent_tree,
+    fetch_project_agents,
     post_agent_message,
     post_agent_message_to_address,
     post_kill_agent,
@@ -218,10 +222,42 @@ def render_agent_view(
     return "\n".join(lines + _render_tree(view, rel, paged=paged))
 
 
+PROJECT_AGENT_FILTERS = ("project_id", "owner_user_id", "team_id")
+_PROJECT_CURSOR = "projects:"
+
+
+def render_project_agents(
+    listing: Dict[str, Any], filters: Dict[str, str], *, skip_ids: frozenset = frozenset()
+) -> List[str]:
+    """Metadata rows for own and team-shared project agents, with owner and project on every row."""
+    listed = [a for a in listing.get("agents") or [] if isinstance(a, dict)]
+    rows = [a for a in listed if str(a.get("id")) not in skip_ids]
+    if not rows:
+        return [] if listed else ["No project agents match."]
+    lines = [f"Project agents ({len(rows)} of {int(listing.get('total') or len(rows))}; title and status only):"]
+    for row in rows:
+        owner = "you" if row.get("own") else f"{row.get('owner_name') or 'teammate'} ({row.get('owner_user_id')})"
+        lines.append(
+            f"- {_snippet(row.get('title'))} [{row.get('status')}] owner: {owner}; "
+            f"project: {row.get('project_name')} ({row.get('project_id')}); id {row.get('id')}"
+        )
+    if listing.get("next_offset") is not None:
+        args = ", ".join(f'{key}="{value}"' for key, value in filters.items())
+        cursor = f'cursor="{_PROJECT_CURSOR}{listing["next_offset"]}"'
+        lines.append(f"More: list_agents({args}{', ' if args else ''}{cursor})")
+    return lines
+
+
 def tree_query_params(tool_call: Dict[str, Any]) -> Tuple[Dict[str, str], Optional[str]]:
     """list_agents tool args → backend query params (or a validation error)."""
     params: Dict[str, str] = {}
-    for arg, param in (("node", "node"), ("cursor", "cursor"), ("query", "q"), ("path_prefix", "path_prefix")):
+    for arg, param in (
+        ("node", "node"),
+        ("cursor", "cursor"),
+        ("query", "q"),
+        ("path_prefix", "path_prefix"),
+        *((key, key) for key in PROJECT_AGENT_FILTERS),
+    ):
         value = tool_call.get(arg)
         if value is None or value == "":
             continue
@@ -369,8 +405,16 @@ async def explore_list_agents(
     params, error = tree_query_params(tool_call)
     if params.get("node") == "parent":
         params.pop("node")  # the owner is the backend caller: its own view
+    filters = {key: params.pop(key) for key in PROJECT_AGENT_FILTERS if key in params}
+    project_offset = None
+    if params.get("cursor", "").startswith(_PROJECT_CURSOR):
+        project_offset = params.pop("cursor")[len(_PROJECT_CURSOR) :]
+    # Filters select project agents; only owner_user_id=<you> keeps your own tree.
+    own_tree = project_offset is None and (not filters or filters == {"owner_user_id": user_id})
+    list_projects = bool(filters) or project_offset is not None or bool(params.get("q"))
     view: Dict[str, Any] = {}
-    if error is None:
+    projects: Dict[str, Any] = {}
+    if error is None and own_tree:
         try:
             view = await fetch_agent_tree(owner_agent_id, user_id, params)
         except Exception as exc:
@@ -378,6 +422,16 @@ async def explore_list_agents(
         else:
             if view.get("error"):
                 error = f"Could not list agents: {view['error']}"
+    if error is None and list_projects:
+        project_params = {**filters, **({"q": params["q"]} if params.get("q") else {})}
+        try:
+            projects = await fetch_project_agents(
+                user_id, {**project_params, **({"offset": project_offset} if project_offset else {})}
+            )
+        except Exception as exc:
+            projects = {"error": str(exc)}
+        if projects.get("error") and not own_tree:
+            error = f"Could not list agents: {projects['error']}"
     if error is not None:
         await handle_tool_event(
             event=ToolEvent(
@@ -390,6 +444,36 @@ async def explore_list_agents(
             user_id=user_id,
         )
         return {"error": True, "message": error}
+    project_lines: List[str] = []
+    if projects.get("error"):
+        project_lines = [f"Could not list project agents: {projects['error']}"]
+    elif list_projects:
+        tree_ids = frozenset(str(m.get("agent_id")) for m in view.get("matches") or [] if isinstance(m, dict))
+        project_lines = render_project_agents(
+            projects, {**filters, **({"query": params["q"]} if params.get("q") else {})}, skip_ids=tree_ids
+        )
+        if own_tree and project_lines == ["No project agents match."]:
+            project_lines = []  # a plain tree query with no shared hits renders unchanged
+    if not own_tree:
+        text = "\n".join(project_lines)
+        shared_count = len([a for a in projects.get("agents") or [] if isinstance(a, dict)])
+        await handle_tool_event(
+            event=ToolEvent(
+                type=EventType.POST_MESSAGE,
+                title=f"Listed {shared_count} agents",
+                message=text,
+                status=MessageStatus.FINISHED,
+                metadata={
+                    key: tool_call[key] for key in ("query", "cursor", *PROJECT_AGENT_FILTERS) if tool_call.get(key)
+                },
+            ),
+            agent_id=owner_agent_id,
+            tool_call_id=tool_call_id,
+            tool_name="list_agents",
+            execute_activity=execute_activity,
+            user_id=user_id,
+        )
+        return {"result": text, "usage": {"llm": [], "service": []}}
     caller_path = [e for e in view.get("caller_path") or [] if isinstance(e, dict)]
     explore_path = child_task_path(caller_path[-1].get("path") if caller_path else None, explore_task_name)
     explore_address = explore_path or f"{owner_agent_id}/{explore_task_id}"
@@ -401,10 +485,10 @@ async def explore_list_agents(
         explore_goal=explore_goal,
         default_view=not any(key in params for key in ("node", "cursor", "q", "path_prefix")),
     )
-    text = render_agent_view(view, self_agent_id=explore_address, query=params)
+    text = "\n".join([render_agent_view(view, self_agent_id=explore_address, query=params), *project_lines])
     metadata: Dict[str, Any] = {
         key: tool_call.get(key)
-        for key in ("query", "node", "path_prefix", "depth", "cursor")
+        for key in ("query", "node", "path_prefix", "depth", "cursor", *PROJECT_AGENT_FILTERS)
         if tool_call.get(key) not in (None, "")
     }
     # FE-only structured copy of this bounded view (the model reads `text`).

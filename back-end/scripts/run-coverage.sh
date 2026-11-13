@@ -464,6 +464,8 @@ COV_LOG="$BACKEND_DIR/coverage/server$SHARD_SUFFIX.log"
 # artifacts and fake provider boundaries.
 export TRACE_ARCHIVE_ENABLED="${TRACE_ARCHIVE_ENABLED:-1}"
 export TRACE_ARCHIVE_LOCAL_DIR="${TRACE_ARCHIVE_LOCAL_DIR:-$ROOT_DIR/.context}"
+# Provider fixtures must not inherit the production sender selected in .env.
+export SMS_PROVIDER="${BLACKBOX_TEST_SMS_PROVIDER:-surge}"
 export BLACKBOX_TEST_FAKE_SURGE="${BLACKBOX_TEST_FAKE_SURGE:-1}"
 export BLACKBOX_TEST_FAKE_WHATSAPP="${BLACKBOX_TEST_FAKE_WHATSAPP:-1}"
 export BLACKBOX_TEST_FAKE_TWILIO="${BLACKBOX_TEST_FAKE_TWILIO:-1}"
@@ -790,6 +792,7 @@ export FAST_MODE_CACHE_DATABASE_URL="$LOCAL_DB_URL"
 echo "Starting backend with coverage collection on port $COV_PORT..."
 launch_coverage_process_group env \
   NODE_V8_COVERAGE="$COV_TMP" PORT="$COV_PORT" DISABLE_GMAIL_SYNC=1 \
+  NODE_OPTIONS="${NODE_OPTIONS:+$NODE_OPTIONS }--require=$(node -p 'JSON.stringify(process.argv[1])' "$SCRIPT_DIR/blackbox-kernel-proxy-custody.cjs")" \
     DISABLE_GOOGLE_DATA_PURGE=1 \
   node --import tsx src/bootstrap.ts >"$COV_LOG" 2>&1
 BACKEND_PID="$LAUNCHED_COVERAGE_PID"
