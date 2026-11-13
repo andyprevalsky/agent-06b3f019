@@ -8541,6 +8541,12 @@
   },
   {
     "name": "agent-payment-setup-resume",
+    "quarantine": {
+      "since": "2026-11-13",
+      "repair": "pending-handoff:9a4a72a77dab428bb30648ea04b25e6a",
+      "error": "Timeout after 901s (task timeout=900s)",
+      "evidence": "PR #1972 deploy f93b9ad17f smoke: first attempt timed out with the agent still ACTIVE, same-source rerun PASSED (FLAKY 9a4a72a7); NOT_INTRODUCED, #1972 changes only back-end/src/providers/phonePortrait{Proof,Route}.ts and portrait tests"
+    },
     "title": "Agent Payment Setup And Auto Resume",
     "group": "pre-deploy",
     "prompt": "Use a browser agent to go to {frontend_url}/test_payment and complete the visible Rose Labs Test Payment checkout. Buy exactly these 3 products and no others: Aurora Notebook, Ceramic Mug, and Canvas Tote. Use only the visible checkout UI; do not navigate to source files or API endpoints. If One Time Agent Payment Setup is required after payment approval, wait for the user to complete it and then continue automatically with the same checkout.",
