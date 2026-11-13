@@ -1,7 +1,7 @@
 /**
  * STATE MACHINE: TerminalMainContent
  *
- * [VIEW] -> browse | settings | integrations | usage | admin-health | benchmarks | network | agents
+ * [VIEW] -> browse | settings | integrations | usage | teams | admin-health | benchmarks | network | agents
  * Each view is selected by TerminalContent's currentView state.
  * benchmarks is team-gated (admin allowlist or dev mode) and full-width.
  *
@@ -33,6 +33,7 @@ import Browse from '@/pages/Browse';
 import Integrations from '@/pages/Integrations';
 import Settings from '@/pages/Settings';
 import Usage from '@/pages/Usage';
+import Teams from '@/pages/Teams';
 
 import type { TerminalView } from '../types';
 import type { derivePendingApproval, derivePendingGates } from '../hooks/derivations';
@@ -114,6 +115,12 @@ function StandardView({ children }: { children: React.ReactNode }) {
 }
 
 function TerminalViewContent(props: MainContentProps) {
+  if (props.currentView === 'teams')
+    return (
+      <StandardView>
+        <Teams />
+      </StandardView>
+    );
   if (props.currentView === 'browse') return <Browse />;
   if (props.currentView === 'settings')
     return (

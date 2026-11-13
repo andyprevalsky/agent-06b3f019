@@ -63,6 +63,7 @@ import {
   useState,
   type ReactNode,
 } from 'react';
+import { captureTeamInviteLink, removeTeamInviteFromUrl } from '@/lib/teamInviteLink';
 import { createPortal } from 'react-dom';
 import { OPEN_AGENT_EVENT } from '@/lib/openAgent';
 import { PhoneLauncherContext, type PhoneLauncher } from '@/hooks/phoneLauncherContext';
@@ -92,6 +93,8 @@ interface ProviderProps {
   onSelectAgent?: (agentId: string) => void;
   /** Publish the layout CSS variables on <html> (only the app's terminal layout does). */
   publishLayout?: boolean;
+  /** Invitation auto-open waits for the existing signup/auth gate. */
+  invitationReady?: boolean;
   /** Sign out, offered at the bottom of the Settings panel. */
   onLogout?: () => void;
   onCreateAgentInProject?: (
@@ -200,6 +203,7 @@ export function RoseAppsProvider({
   selectedAgentId = null,
   onSelectAgent,
   publishLayout = false,
+  invitationReady = publishLayout,
   onLogout,
   onCreateAgentInProject,
   newAgentFolderId,
@@ -210,9 +214,24 @@ export function RoseAppsProvider({
   const [browserMode, setBrowserMode] = useState<'local' | 'remote'>(
     localLink ? 'local' : 'remote',
   );
-  const [openApp, setOpenApp] = useState<RoseApp | null>(
-    publishLayout && localLink ? 'browser' : null,
+  const [openApp, setOpenApp] = useState<RoseApp | null>(() =>
+    publishLayout && invitationReady && captureTeamInviteLink().teamId
+      ? 'teams'
+      : publishLayout && localLink
+        ? 'browser'
+        : null,
   );
+  const openedInvite = useRef(false);
+  useEffect(() => {
+    if (!publishLayout || !invitationReady) return;
+    removeTeamInviteFromUrl();
+    // This provider may have mounted while signed out. Its state initializer
+    // does not rerun when phone sign-in later enables the app layout.
+    if (!openedInvite.current && captureTeamInviteLink().teamId) {
+      openedInvite.current = true;
+      setOpenApp('teams');
+    }
+  }, [publishLayout, invitationReady]);
   /** Phone app pinned to the device view (opened from the iPhone integration row). */
   const [phoneDeviceView, setPhoneDeviceView] = useState(false);
   const [browserSelection, setBrowserSelection] = useState<{

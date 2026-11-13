@@ -10,6 +10,7 @@ must be regenerated; ``tests/blackbox/grep.blackbox.py`` fails on any drift.
 
 GREP_TOOL_PROMPT = """Search this user's local records and current agent tree.
 
+- Also covers accounts teammates shared with this user; narrow by owner, team or account.
 - `pattern` is a regex over record text. Omit it for metadata-only agent searches.
 - `sources` selects one or more sources; omitted defaults: messages, network, agent_network. `gmail` aliases email.
 - `agent_trajectories` contains prior user-owned chat, SMS, and Temporal runs, including R2 archives; `agent_network` contains the current tree.
