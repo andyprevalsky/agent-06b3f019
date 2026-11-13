@@ -257,6 +257,68 @@ export async function recordIntegrationUsage(
 }
 
 /**
+ * Reconcile a row's Rose backoff with what the provider just said about it.
+ * Only Rose's own non-authoritative cooldown (a 429 without a reset, a stall,
+ * or an older row with no metadata) is ever changed; a provider reset and an
+ * auth cooldown never are:
+ *   - allowed, no window spent → the backoff is lifted (the account serves again)
+ *   - rejected with the spent window's reset → the cooldown becomes that reset,
+ *     authoritative, so the account returns exactly when the provider says
+ * Production on 2026-11-13: rows cooled to 2026-12-01 on Rose's backoff while
+ * the provider reported 7d utilization 0 (allowed) or a 7d reset that day.
+ *
+ * 10k agents: one conditional UPDATE per usage refresh (at most one per row
+ * per refresh interval), never on the completion path.
+ */
+export async function reconcileRoseCooldown(
+  name: 'claude_code' | 'gpt_code',
+  report: SubscriptionUsageReport,
+  reason: CooldownReason | null,
+  now = new Date()
+): Promise<'lifted' | 'provider_reset' | 'unchanged'> {
+  const windows = [report.fiveHour, report.sevenDay].filter(
+    (w): w is UsageWindowReport => w !== null && w !== undefined
+  );
+  const spent = windows.filter((w) => w.usedPct >= 100);
+  const where = {
+    id: report.integrationId,
+    name,
+    rateLimitedUntil: { gt: now },
+    AND: [
+      { OR: [{ rateLimitAuthoritative: null }, { rateLimitAuthoritative: false }] },
+      { OR: [{ rateLimitReason: null }, { rateLimitReason: { not: 'auth' } }] },
+    ],
+  };
+  if (report.status === 'rejected') {
+    const named =
+      reason === 'usage_window_7d'
+        ? report.sevenDay
+        : reason === 'usage_window_5h'
+          ? report.fiveHour
+          : undefined;
+    const resets = (named ? [named] : spent)
+      .map((w) => w.resetsAt?.getTime() ?? NaN)
+      .filter((t) => Number.isFinite(t) && t > now.getTime());
+    if (resets.length === 0) return 'unchanged';
+    const result = await prisma.integration.updateMany({
+      where,
+      data: {
+        rateLimitedUntil: new Date(Math.max(...resets)),
+        rateLimitReason: reason ?? 'usage_window',
+        rateLimitAuthoritative: true,
+      },
+    });
+    return result.count > 0 ? 'provider_reset' : 'unchanged';
+  }
+  if (windows.length === 0 || spent.length > 0) return 'unchanged';
+  const result = await prisma.integration.updateMany({
+    where,
+    data: { rateLimitedUntil: null, rateLimitReason: null, rateLimitAuthoritative: null },
+  });
+  return result.count > 0 ? 'lifted' : 'unchanged';
+}
+
+/**
  * Record the subscription usage a code session's CLI reported (Claude Code's
  * rate_limit_event, every status) on the claude_code row the task ran on, so
  * code sessions feed the compute screen's usage bars like Rose calls do. A

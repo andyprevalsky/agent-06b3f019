@@ -22,13 +22,18 @@
  *     │                      yes
  *     │                       ▼
  *     │                 read token ──none/expired──► [idle]
- *     │                       ├──user:profile──► GET usage (5 s) ──200──► store (usage_endpoint) ──► [idle]
+ *     │                       ├──user:profile──► GET usage (5 s) ──200──► store (usage_endpoint) + reconcile ──► [idle]
  *     │                       │                       └──401/403──┐
  *     │                       ▼                                   ▼
- *     │                 quota check (max_tokens 1) ──unified headers──► store (response | rate_limit) ──► [idle]
+ *     │                 quota check (max_tokens 1) ──unified headers──► store (response | rate_limit) + reconcile ──► [idle]
  *     │                       ├──401/403, no headers──► [unavailable] backoff 60 min. NEVER an
  *     │                       │                         auth failure: the account is never touched
  *     └───────────────────────┴──other / network / bad body──► [idle] (retry after 5 min)
+ *
+ * reconcile (computeSubscriptionUsage reconcileRoseCooldown): an allowed
+ * observation lifts Rose's own non-authoritative backoff on the row; a rejected
+ * one replaces it with the provider's reset (authoritative). Provider resets and
+ * auth cooldowns are never changed.
  *
  * Triggers (never awaited by their callers): a non-authoritative cooldown
  * (429 without a provider reset, a stall) reported for a Claude row, and
@@ -49,7 +54,9 @@ import { randomUUID } from 'node:crypto';
 import { readClaudeUsageCredential } from './computeCredentials';
 import {
   parseUsagePayload,
+  reconcileRoseCooldown,
   recordIntegrationUsage,
+  type CooldownReason,
   type SubscriptionUsageReport,
 } from './computeSubscriptionUsage';
 import { createLogger } from './logger';
@@ -86,6 +93,12 @@ export interface RefreshDeps {
   readToken: (integrationId: string) => Promise<UsageCredential | null>;
   quotaCheck: (accessToken: string) => Promise<QuotaCheckResponse>;
   store: (report: SubscriptionUsageReport) => Promise<boolean>;
+  /** Align Rose's own backoff on the row with what the provider just said. */
+  reconcile: (
+    report: SubscriptionUsageReport,
+    reason: CooldownReason | null,
+    now: Date
+  ) => Promise<'lifted' | 'provider_reset' | 'unchanged'>;
   now: () => Date;
 }
 
@@ -95,8 +108,24 @@ const defaultDeps: RefreshDeps = {
   quotaCheck: (accessToken) =>
     claudeQuotaCheck({ token: accessToken, requestId: `usage-quota-${randomUUID()}` }),
   store: (report) => recordIntegrationUsage('claude_code', report),
+  reconcile: (report, reason, now) => reconcileRoseCooldown('claude_code', report, reason, now),
   now: () => new Date(),
 };
+
+/** Store a fresh provider observation, then align the row's Rose backoff with it. */
+async function storeAndReconcile(
+  report: SubscriptionUsageReport,
+  reason: CooldownReason | null,
+  now: Date,
+  deps: RefreshDeps
+): Promise<RefreshOutcome> {
+  const stored = await deps.store(report);
+  const cooldown = await deps.reconcile(report, reason, now);
+  if (cooldown !== 'unchanged') {
+    log.info('cooldown.reconciled', { integrationId: report.integrationId, cooldown });
+  }
+  return stored ? 'stored' : 'not_newer';
+}
 
 /** Next time each row may be fetched (ms epoch); bounded, insertion-ordered. */
 const nextAttemptAt = new Map<string, number>();
@@ -220,7 +249,7 @@ async function readUsageEndpoint(
   }
   const report = parseUsageEndpointBody(body, integrationId, now);
   if (report === null) return 'empty';
-  return (await deps.store(report)) ? 'stored' : 'not_newer';
+  return storeAndReconcile(report, null, now, deps);
 }
 
 /** The quota check's unified headers → the row's windows (the chat path's own parser). */
@@ -240,13 +269,13 @@ async function readQuotaHeaders(
     });
     return 'error';
   }
-  const { snapshot } = analyzeSubscriptionUsage('claude', response.headers, {
+  const { snapshot, reason } = analyzeSubscriptionUsage('claude', response.headers, {
     status: response.status,
     body: response.body,
     now,
   });
   const report = snapshot === null ? null : parseUsagePayload(snapshot, integrationId, now);
-  if (report !== null) return (await deps.store(report)) ? 'stored' : 'not_newer';
+  if (report !== null) return storeAndReconcile(report, reason, now, deps);
   if (response.status === 401 || response.status === 403) {
     // A refused token. Never an auth failure here: the lease path owns that
     // classification; the account keeps its state and we stop asking a while.

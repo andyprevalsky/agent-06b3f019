@@ -177,6 +177,31 @@ stay fresh from their own response headers and never trigger a check. Golden
 reference: cited above. The change has no approval-gated hunk; the prompt,
 agent-behavior and trajectory-injection guards report none.
 
+### Sibling: Rose backoffs that outlived the provider's own answer
+
+Production also held non-authoritative Rose backoffs far past anything the
+provider reported. On 2026-11-13, rows 88a02cdc and 074bfdd5 were cooled to
+2026-12-01 (`rate_limit`, not authoritative). A live quota check at 11:20Z
+reported 88a02cdc `allowed` (7d utilization 0) and 074bfdd5 rejected with its
+7d window resetting 11-13T17:00Z. The bars showed a 12-01 reset, and leasing
+skipped both accounts for weeks. The origin of those backoffs belongs to the
+zero-subscription-auth RCA (thread ph78x6xz).
+
+Fix (same PR): after every usage-endpoint or quota-check observation, the
+refresher calls `reconcileRoseCooldown` (computeSubscriptionUsage.ts). It
+only changes Rose's own non-authoritative cooldown; a provider reset or an
+auth cooldown is never touched. An allowed observation with no spent window
+lifts the backoff. A rejected one replaces it with the spent window's
+provider reset, marked authoritative, so the account returns exactly then.
+
+Repro: `compute-subscription-usage` cases "a quota check that says allowed
+lifts Rose's far-future backoff" and "a rejected quota check replaces Rose's
+backoff with the provider's reset" failed with the reconcile reverted. The row
+stayed cooled to +18 days, 28/30. With it, they pass 30/30, and "a provider
+reset or an auth cooldown is never changed by a quota check" holds. At 10k
+agents this adds one conditional UPDATE per refresh, which is at most one per
+row per 5 minutes and never on the completion path.
+
 ## Human feedback
 
 Andy, 2026-11-12 15:51Z (recorded in the relative case): "We need to display

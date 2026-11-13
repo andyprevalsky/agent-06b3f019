@@ -103,6 +103,7 @@ function fakeDeps(
       stored.push(report);
       return true;
     },
+    reconcile: async () => 'unchanged',
     now: () => NOW,
     ...overrides,
   };

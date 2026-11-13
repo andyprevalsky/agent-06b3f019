@@ -30,6 +30,9 @@ interface RefreshAccountDto {
     source: string;
     status: string | null;
   } | null;
+  rateLimitedUntil?: string | null;
+  cooldown?: { until: string; reason: string; authoritative: boolean } | null;
+  nextResetAt?: string | null;
 }
 
 export interface UsageRefreshContext {
@@ -106,7 +109,11 @@ export function registerUsageRefreshCases(ctx: UsageRefreshContext): void {
   }
 
   /** Refresh one row with Anthropic scripted for `token`; everything else is refused. */
-  async function refreshScripted(integrationId: string, token: string) {
+  async function refreshScripted(
+    integrationId: string,
+    token: string,
+    probe: 'allowed' | 'rejected7d' = 'allowed'
+  ) {
     const fiveHourReset = epochSeconds(3 * 3_600_000);
     const sevenDayReset = epochSeconds(4 * DAY_MS);
     const usageRequests: string[] = [];
@@ -123,6 +130,24 @@ export function registerUsageRefreshCases(ctx: UsageRefreshContext): void {
       }
       if (auth === `Bearer ${token}` && url === ANTHROPIC_API_URL) {
         quotaBodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+        if (probe === 'rejected7d') {
+          return new Response(
+            '{"type":"error","error":{"type":"rate_limit_error","message":"limit"}}',
+            {
+              status: 429,
+              headers: {
+                'content-type': 'application/json',
+                'anthropic-ratelimit-unified-status': 'rejected',
+                'anthropic-ratelimit-unified-representative-claim': 'seven_day',
+                'anthropic-ratelimit-unified-reset': String(sevenDayReset),
+                'anthropic-ratelimit-unified-5h-utilization': '0.10',
+                'anthropic-ratelimit-unified-5h-reset': String(fiveHourReset),
+                'anthropic-ratelimit-unified-7d-utilization': '1.0',
+                'anthropic-ratelimit-unified-7d-reset': String(sevenDayReset),
+              },
+            }
+          );
+        }
         return new Response(ONE_TOKEN_SSE, {
           status: 200,
           headers: {
@@ -210,4 +235,90 @@ export function registerUsageRefreshCases(ctx: UsageRefreshContext): void {
       await assertBarFromQuotaCheck(userId, accountId, refreshed);
     }
   );
+
+  /** A seeded login cooling down on Rose's own backoff until 18 days from now. */
+  async function coolOnRoseBackoff(
+    integrationId: string,
+    cooldown: { reason: string | null; authoritative: boolean | null; untilMs?: number }
+  ) {
+    const until = new Date(Date.now() + (cooldown.untilMs ?? 18 * DAY_MS));
+    await prisma.integration.update({
+      where: { id: integrationId },
+      data: {
+        rateLimitedUntil: until,
+        rateLimitReason: cooldown.reason,
+        rateLimitAuthoritative: cooldown.authoritative,
+      },
+    });
+    return until;
+  }
+
+  async function accountFor(userId: string, accountId: string) {
+    const account = (await ctx.listAccounts(userId, 'claude')).find(
+      (a) => a.accountId === accountId
+    );
+    assert(account, `account ${accountId} missing`);
+    return account;
+  }
+
+  ctx.test("a quota check that says allowed lifts Rose's far-future backoff", async () => {
+    const token = `usage-reconcile-allowed-${ctx.run}`;
+    const { userId, accountId, integrationId } = await seedLogin(token, ['user:inference']);
+    await coolOnRoseBackoff(integrationId, { reason: null, authoritative: null });
+    const refreshed = await refreshScripted(integrationId, token);
+    assert(refreshed.outcome === 'stored', `windows must be stored, got ${refreshed.outcome}`);
+    const account = await accountFor(userId, accountId);
+    assert(
+      account.cooldown === null && account.rateLimitedUntil === null,
+      `an allowed account must not stay cooled: ${JSON.stringify(account)}`
+    );
+    assert(account.usage?.status === 'allowed', JSON.stringify(account.usage));
+  });
+
+  ctx.test("a rejected quota check replaces Rose's backoff with the provider's reset", async () => {
+    const token = `usage-reconcile-rejected-${ctx.run}`;
+    const { userId, accountId, integrationId } = await seedLogin(token, ['user:inference']);
+    await coolOnRoseBackoff(integrationId, { reason: 'rate_limit', authoritative: false });
+    const refreshed = await refreshScripted(integrationId, token, 'rejected7d');
+    assert(refreshed.outcome === 'stored', `windows must be stored, got ${refreshed.outcome}`);
+    const reset = isoFromEpoch(refreshed.sevenDayReset);
+    const account = await accountFor(userId, accountId);
+    assert(
+      account.cooldown?.until === reset &&
+        account.cooldown.reason === 'usage_window_7d' &&
+        account.cooldown.authoritative,
+      `the cooldown must be the provider's 7d reset: ${JSON.stringify(account.cooldown)}`
+    );
+    assert(account.nextResetAt === reset, `next reset must be ${reset}: ${account.nextResetAt}`);
+  });
+
+  ctx.test('a provider reset or an auth cooldown is never changed by a quota check', async () => {
+    const providerToken = `usage-reconcile-provider-${ctx.run}`;
+    const provider = await seedLogin(providerToken, ['user:inference']);
+    const providerUntil = await coolOnRoseBackoff(provider.integrationId, {
+      reason: 'usage_window_5h',
+      authoritative: true,
+      untilMs: 2 * 3_600_000,
+    });
+    await refreshScripted(provider.integrationId, providerToken);
+    const providerAccount = await accountFor(provider.userId, provider.accountId);
+    assert(
+      providerAccount.cooldown?.until === providerUntil.toISOString() &&
+        providerAccount.cooldown.authoritative,
+      `a provider reset must stay: ${JSON.stringify(providerAccount.cooldown)}`
+    );
+    const authToken = `usage-reconcile-auth-${ctx.run}`;
+    const auth = await seedLogin(authToken, ['user:inference']);
+    const authUntil = await coolOnRoseBackoff(auth.integrationId, {
+      reason: 'auth',
+      authoritative: false,
+    });
+    await refreshScripted(auth.integrationId, authToken);
+    const authAccount = await accountFor(auth.userId, auth.accountId);
+    assert(
+      authAccount.cooldown?.until === authUntil.toISOString() &&
+        authAccount.cooldown.reason === 'auth',
+      `an auth cooldown must stay: ${JSON.stringify(authAccount.cooldown)}`
+    );
+  });
 }
