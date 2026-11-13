@@ -36,6 +36,10 @@ import pytest
 from benchmarks.fixture_host_guard import FIXTURE_DRAIN_SECONDS, FIXTURE_HOST_GUARD_SECONDS
 
 ROOT = Path(__file__).resolve().parents[2]
+_quarantine_spec = importlib.util.spec_from_file_location("lib_test_quarantine", ROOT / "scripts" / "lib" / "test_quarantine.py")
+_quarantine_module = importlib.util.module_from_spec(_quarantine_spec)
+_quarantine_spec.loader.exec_module(_quarantine_module)
+quarantine = _quarantine_module.quarantine
 SCRIPT = ROOT / "scripts" / "cloudbench-sync-deps.sh"
 PRISMA_SYNC_SCRIPT = ROOT / "scripts" / "cloudbench-sync-prisma-client.sh"
 ENV_HELPER_SCRIPT = ROOT / "scripts" / "lib" / "cloudbench-env.sh"
@@ -33386,6 +33390,12 @@ reserve_cleanup_disk_space
         )
 
 
+@quarantine(
+    since="2026-11-13",
+    repair="pending-handoff:b719330d9b8b470a931b1cc8dee72144",
+    error="subprocess.TimeoutExpired: cloudbench_cleanup_reserve_cohort.py (600s) 'cohort ready handoff absent'",
+    evidence="PR #1864 new-test-stability occurrence b719330d9b8b470a931b1cc8dee72144 (source b4dbb7d67): benchmark-live-results 1/5 under owned load; unchanged by this branch",
+)
 @pytest.mark.parametrize("handoff", ["admission", "cancel-before-admission"])
 def test_fleet_cleanup_releases_emergency_disk_reserve_for_cohort_budget(tmp_path: Path, handoff: str) -> None:
     """Fifty default owners retain cleanup and per-owner working floors together."""
