@@ -387,14 +387,14 @@ class ScopedNative(REUSE['NativeAdapter']):
                 need(False, 'lease release unresolved; no successor publication')
 
 
-def exact_machine(api, request, predecessor, config, *, state=None, instance=None, observation=None):
+def exact_machine(api, request, predecessor, config, *, state=None, instance=None, observation=None, volume_observation=None):
     value = observation if observation is not None else api.request('GET', '/machines/' + request['native']['machine_id'])
     need(value.get('id') == predecessor['machine_id'] and value.get('name') == predecessor['machine_name']
          and value.get('region') == predecessor['region'] and value.get('instance_id')
          and value.get('config') == config, 'native source identity/config changed')
     need(state is None or value.get('state') == state, 'native source state')
     need(instance is None or value['instance_id'] == instance, 'native source incarnation changed')
-    volume = api.request('GET', '/volumes/' + predecessor['volume_id'])
+    volume = volume_observation if volume_observation is not None else api.request('GET', '/volumes/' + predecessor['volume_id'])
     need(volume.get('id') == predecessor['volume_id'] and volume.get('region') == predecessor['region']
          and volume.get('attached_machine_id') == predecessor['machine_id']
          and volume.get('state') in SOURCE['readiness'].__globals__['MOUNTABLE_VOLUME_STATES'],
@@ -563,8 +563,12 @@ def delivery_commands(raw, directory):
     yield (['python3', '-c', 'import pathlib,os; d=pathlib.Path(' + repr(str(directory))
             + '); d.mkdir(mode=0o700); p=d/"worker.py"; p.touch(mode=0o600,exist_ok=False); print("CLOUDBENCH-DELIVERY:0")'],
            'CLOUDBENCH-DELIVERY:0')
-    for offset in range(0, len(raw), 12000):
-        block = raw[offset:offset + 12000]
+    # 22500 raw bytes encode to 30000 base64 characters. With the fixed wrapper
+    # this keeps each guest -c argument and the flyctl SSH -C string below
+    # 32 KiB, a quarter of Linux MAX_ARG_STRLEN, while halving the guest round
+    # trips (each one carries two exact Machine/Volume fence reads).
+    for offset in range(0, len(raw), 22500):
+        block = raw[offset:offset + 22500]
         end = offset + len(block)
         encoded = base64.b64encode(block).decode()
         command = ('import base64,pathlib,os; p=pathlib.Path(' + repr(target) + '); '
@@ -678,7 +682,11 @@ def stage_capsule(api,request):
         'immutable capsule publication readback')
 
 
-def guest_command(api, request, command, *, journal_name='ssh'):
+def guest_command(api, request, command, *, journal_name='ssh', fence=None):
+    """``fence`` is only the exact after-readback of the immediately preceding
+    command in one uninterrupted chain: no sleep, native call or guest effect
+    separates that readback from this command, so it is the same witness a
+    fresh read would give. It is re-validated against the current lease target."""
     if request.get('guest_transport','native-exec-v1') != 'cloudbench-ssh-guest-v1':
         return api.request('POST','/machines/'+request['native']['machine_id']+'/exec',dict(command=command,timeout=5))
     need(api.nonce and not api.lost and api.lease_version==api.target_version and api.target_version,
@@ -687,7 +695,11 @@ def guest_command(api, request, command, *, journal_name='ssh'):
     root=api.journal.parent/journal_name
     directory=root/str(len(list(root.glob('*'))) if root.exists() else 0)
     directory.mkdir(parents=True,mode=0o700)
-    before,volume=exact_machine(api,request,context['predecessor'],context['config'],state='started',instance=api.target_version)
+    if fence is None:
+        before,volume=exact_machine(api,request,context['predecessor'],context['config'],state='started',instance=api.target_version)
+    else:
+        before,volume=exact_machine(api,request,context['predecessor'],context['config'],state='started',
+                                    instance=api.target_version,observation=fence[0],volume_observation=fence[1])
     argv=ssh_argv(context['predecessor']['app'],api.mid,command)
     sent=dict(schema='cloudbench-ssh-command-v1',argv=argv,command=command,timeout=20,guest_timeout=5,
               nonce=api.nonce,instance_id=api.target_version,before=before,volume_before=volume,started=time.monotonic_ns())
@@ -704,19 +716,21 @@ def guest_command(api, request, command, *, journal_name='ssh'):
                 stdout=descriptor(directory/'stdout.private.log'),stderr=descriptor(directory/'stderr.private.log'),
                 finished=finished,after=after,volume_after=volume_after)
     save(directory/'result.json',answer)
-    return dict(exit_code=rc,stdout=stdout)
+    return dict(exit_code=rc,stdout=stdout,fence=(after,volume_after))
 
 
 def guest_job(api, request, deadline):
     mid = request['native']['machine_id']
     directory = '/tmp/cloudbench-prepare-delivery-' + request['nonce']
+    fence = None
     for command, expected in delivery_commands(guest_program(request).encode(), directory):
         need(time.monotonic() < deadline, 'guest delivery deadline')
-        ack = guest_command(api,request,command)
+        ack = guest_command(api,request,command,fence=fence)
         need(ack.get('exit_code') == 0 and ack.get('stdout', '').strip() == expected, 'guest delivery acknowledgement')
+        fence = ack.get('fence')
     # Explicit fork: the API exec itself exits quickly; the job has one immutable nonce path.
     launcher = job_launcher(Path(directory) / 'worker.py')
-    ack = guest_command(api,request,['python3','-c',launcher])
+    ack = guest_command(api,request,['python3','-c',launcher],fence=fence)
     need(ack.get('exit_code') == 0, 'guest job launch not acknowledged')
     job = json.loads(ack.get('stdout', ''))
     need(type(job.get('pid')) is int and job['pid'] > 1, 'guest job PID absent')

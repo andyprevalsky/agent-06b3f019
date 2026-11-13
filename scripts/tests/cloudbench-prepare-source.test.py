@@ -2221,6 +2221,35 @@ FRAGMENT
         receipt['ssh']=self.m['journal_index'](self.root/'output/ssh');path.write_text(json.dumps(receipt))
         with self.assertRaises(ValueError):verify()
 
+    def test_ssh_guest_delivery_bounds_round_trips_and_chains_exact_fences(self):
+        # Each SSH guest command costs a flyctl session plus bounded wire children
+        # for its exact Machine/Volume fences. Small chunks or a redundant fresh
+        # pre-read per chained command multiplied that cost until a preparation
+        # exceeded its fixed budget under load. Bound the work, never the time.
+        self.request['guest_transport']='cloudbench-ssh-guest-v1';self.enforce_exec_version=True
+        result=self.invoke();self.assertEqual(result.returncode,0,result.stderr)
+        self.m['verify_prepared_source'](self.root/'request.json',self.root/'output/result.json',self.root/'output/source-manifest.json',
+            source_ref=self.request['source_ref'],image_ref=self.image,node_fingerprint='b'*64,python_fingerprint='c'*64)
+        directory='/tmp/cloudbench-prepare-delivery-'+self.request['nonce']
+        sent_request=self.m['load'](self.root/'request.json')
+        commands=list(self.m['delivery_commands'](self.m['guest_program'](sent_request).encode(),directory))
+        ends=[int(expected.rsplit(':',1)[1]) for command,expected in commands]
+        blocks=[b-a for a,b in zip(ends[:-2],ends[1:-1])]
+        self.assertTrue(len(blocks)>1 and all(size>=22500 for size in blocks[:-1]) and sum(blocks)==ends[-1],blocks)
+        for command,expected in commands:
+            self.assertLess(max(len(arg.encode()) for arg in self.m['ssh_argv']('navi-whisper-lux-bench',self.mid,command)),32768)
+        receipt=self.m['load'](self.root/'output/result.json')
+        rows=self.m['verify_journal'](receipt['journal'],self.mid,self.vid,(self.shared['id'],))
+        ssh=sorted((self.root/'output/ssh').glob('*/request.json'),key=lambda p:int(p.parent.name))
+        chain=[(self.m['load'](p),self.m['load'](p.parent/'result.json')) for p in ssh[:len(commands)+1]]
+        self.assertEqual([sent['command'] for sent,answer in chain[:-1]],[command for command,expected in commands])
+        own,volume='/machines/'+self.mid,'/volumes/'+self.vid
+        for (previous_sent,previous),(sent,answer) in zip(chain,chain[1:]):
+            self.assertEqual((sent['before'],sent['volume_before']),(previous['after'],previous['volume_after']))
+            gap=[(r['method'],r['path']) for r in rows if previous['finished']<=r['started'] and r['finished']<=sent['started']
+                 and r['path'] in (own,volume)]
+            self.assertEqual(gap,[('GET',own),('GET',volume)])
+
     def test_ssh_native_mount_drift_refuses_and_never_publishes(self):
         self.request['guest_transport']='cloudbench-ssh-guest-v1';self.fault='ssh-mount-drift'
         result=self.invoke();self.assertNotEqual(result.returncode,0)
