@@ -12,7 +12,7 @@ import type {
   PlaidLinkTokenResponse,
 } from './types';
 
-export type { ComputeAccount } from './types';
+export type { ComputeAccount, ComputeCooldown } from './types';
 
 export function getAuthHeaders(): Record<string, string> {
   const session = getStoredSession();

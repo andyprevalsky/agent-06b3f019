@@ -6195,6 +6195,12 @@
     ]
   },
   {
+    "quarantine": {
+      "since": "2026-11-13",
+      "repair": "pending-handoff:a11f1f0aba5e4d6ea010b086f5b54967",
+      "error": "Tool 'spawn_browser_agent' exceeded its exact root call limit during execution: expected 1, got 2 (Tilion sess_993d70* worker 503 on CDP connect and DELETE; browser agent recorded 0 steps). First native attempt FAILED; one automatic retry PASS (FLAKY).",
+      "evidence": "PR1910 deploy v3 smoke .context/deploy-cloud/c96ccd4b4bc36d6c51f4e4f74f752ad8d0f0cab7ea264ca9b2651ce259996b0f; RCA: tilion.ts validation+cleanup AggregateError skips replacement retry"
+    },
     "name": "browser-auth-member-discount-purchase",
     "quarantine": {
       "since": "2026-11-13",
@@ -8078,7 +8084,19 @@
     "deploy_canary": true
   },
   {
+    "quarantine": {
+      "since": "2026-11-13",
+      "repair": "pending-handoff:3d3568b403944e04a7c3dcfb05d6d19d",
+      "error": "Timeout after 454s (task timeout=450s); browser agent recorded 0 trajectory step(s) (Tilion session failed validation and cleanup). First native attempt FAILED; one automatic retry PASS (FLAKY).",
+      "evidence": "PR1910 deploy v4 smoke .context/deploy-cloud/65859a55107834e382ede51c1e35453a1954dc1a7a562382c3f4c87cf817a265; RCA: Tilion sess_993d70* worker 503 on CDP connect + DELETE; tilion.ts validation+cleanup AggregateError skipped the replacement retry (fixed in this PR)"
+    },
     "name": "browser-smoke",
+    "quarantine": {
+      "since": "2026-11-13",
+      "repair": "https://boxes.dev/thread/thr_381f455399324e108a7a23c08f441082",
+      "error": "Browser agent 0412e08f-d76d-53f8-836c-a01ca6d81ce4 recorded 0 trajectory step(s); expected at least 1 per browser agent",
+      "evidence": "PR #1981 deploy round 11 (head 321f5f0a8b14, 2026-11-13 ~02:10Z): Tilion browser session init failed before any step (\"Browser session init failed after 5 transient-proxy retries: {\\\"error\\\":\\\"Browser initialization failed before readiness\\\"}\"); the single same-source rerun passed; PR #1981 touches no browser code"
+    },
     "title": "Browser Agent Page Read",
     "prompt": "Use a browser agent to visit https://www.roselabs.ai and report the main color palette visible on the page. Name at least three prominent colors.",
     "timeout_seconds": 300,
@@ -8252,6 +8270,12 @@
   },
   {
     "name": "agent-payment-test-shop",
+    "quarantine": {
+      "since": "2026-11-13",
+      "repair": "https://boxes.dev/thread/ph77xhnm0m7s6kedpb159aqmbh8j5w3n",
+      "error": "Timeout after 905s (task timeout=900s)",
+      "evidence": "PR #2015 deploy 43a856b49 smoke: browser resume hit Tilion east dead worker sess_993d70* ('Failed to resume session: Tilion session sess_993d7086307a426dbe17da00b29f0f8d failed validation and cleanup', agent 23abff70), respawned and ran out the 900s budget; same-source rerun PASSED (FLAKY c59d68b1). NOT_INTRODUCED: task is not chat mode and #2015 changes only the chat router schema order; dead-worker resume fixed by PR #2010 (7d3fc34ca)"
+    },
     "title": "Agent Payment Test Shop",
     "prompt": "Use a browser agent (spawn_agent with type=\"browser\" \u2014 do NOT delegate this to a general_purpose sub-agent) to go to {frontend_url}/test_payment and complete the visible Rose Labs Test Payment checkout. Buy exactly these 3 products and no others: Aurora Notebook, Ceramic Mug, and Canvas Tote.",
     "timeout_seconds": 900,
@@ -8370,7 +8394,19 @@
     }
   },
   {
+    "quarantine": {
+      "since": "2026-11-13",
+      "repair": "pending-handoff:1f9eca18a4744006a75aba4053eabf98",
+      "error": "Expected gate subscription, observed write_lock after Tilion session failed validation and cleanup. First native attempt FAILED; one automatic retry PASS (FLAKY).",
+      "evidence": "PR1910 deploy v4 smoke .context/deploy-cloud/65859a55107834e382ede51c1e35453a1954dc1a7a562382c3f4c87cf817a265; RCA: Tilion sess_993d70* worker 503 on CDP connect + DELETE; tilion.ts validation+cleanup AggregateError skipped the replacement retry (fixed in this PR)"
+    },
     "name": "agent-payment-new-user-journey",
+    "quarantine": {
+      "since": "2026-11-13",
+      "repair": "https://boxes.dev/thread/thr_381f455399324e108a7a23c08f441082",
+      "error": "Timeout after 1204s (task timeout=1200s) | Expected paid Stripe test Checkout and local webhook delivery",
+      "evidence": "PR #1981 deploy round 11 (head 321f5f0a8b14, 2026-11-13 ~02:27Z): every browser sub-agent (02:02:12 through 02:21:21) failed at Tilion session init (\"Transient browser session init failure; retrying with a fresh proxy\" x4, then \"Browser automation failed\") on sess_993d70a733c5/sess_993d70ee6a2d, the dead us-east worker fixed by PR #2010, so Checkout was never paid; the guest backend.log has no AgentCard 429/401 lines (corrected from the round-11 AgentCard attribution); the single same-source rerun passed; PR #1981 touches no browser or payment code"
+    },
     "title": "New User Subscription To Confirmed Agent Payment",
     "description": "A dedicated non-admin account begins with exhausted free credit and no subscription or Stripe payment method. The harness completes hosted Stripe test Checkout, then the agent buys from the test portal with an approved payment card. The run requires ordered gates, a portal order ID, and settled backend funding.",
     "prompt": "Use a browser agent (spawn_agent with type=\"browser\") to go to {frontend_url}/test_payment and complete the visible Rose Labs Test Payment checkout. Buy exactly these 3 products and no others: Aurora Notebook, Ceramic Mug, and Canvas Tote. Use only the visible checkout UI. If subscription signup is required, wait for the user to finish it, then continue. Obtain a payment card through request_payment_card and wait for approval. Report the test portal confirmation order ID after the order is placed.",
@@ -8553,6 +8589,12 @@
   },
   {
     "name": "agent-payment-setup-resume",
+    "quarantine": {
+      "since": "2026-11-13",
+      "repair": "https://boxes.dev/thread/ph701cd5nwt9pn2tjrzcjv5pch8j46n5",
+      "error": "Timeout after 901s (task timeout=900s)",
+      "evidence": "PR #1972 deploy f93b9ad17f smoke: first attempt timed out with the agent still ACTIVE, same-source rerun PASSED (FLAKY 9a4a72a7); NOT_INTRODUCED, #1972 changes only back-end/src/providers/phonePortrait{Proof,Route}.ts and portrait tests"
+    },
     "title": "Agent Payment Setup And Auto Resume",
     "group": "pre-deploy",
     "prompt": "Use a browser agent to go to {frontend_url}/test_payment and complete the visible Rose Labs Test Payment checkout. Buy exactly these 3 products and no others: Aurora Notebook, Ceramic Mug, and Canvas Tote. Use only the visible checkout UI; do not navigate to source files or API endpoints. If One Time Agent Payment Setup is required after payment approval, wait for the user to complete it and then continue automatically with the same checkout.",
@@ -23571,5 +23613,161 @@
       }
     ],
     "enforce_declared_evaluators": true
+  },
+  {
+    "timeout_seconds": 300,
+    "is_chat_mode": false,
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "teams",
+      "grep",
+      "DAILY"
+    ],
+    "price_limit_cents": 150,
+    "requires_browser_agent": false,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": null,
+    "start_phase": "execute",
+    "min_tool_counts": {
+      "spawn_agent": 1,
+      "grep": 3
+    },
+    "forbidden_tools": [
+      "web_search",
+      "web_fetch",
+      "spawn_browser_agent",
+      "spawn_claude_code_agent",
+      "message_person",
+      "send_email"
+    ],
+    "status": "ready",
+    "runner": "agent",
+    "bench": "pipeline-e2e",
+    "group": "daily",
+    "demo_cache": "off",
+    "enforce_declared_evaluators": true,
+    "environment": {
+      "mode": "hybrid",
+      "db_fixtures": [
+        "team_data_v1"
+      ],
+      "base_images": [],
+      "live_fixtures": [
+        "live"
+      ],
+      "services": [
+        "backend",
+        "temporal"
+      ],
+      "secrets": [],
+      "live_targets": [],
+      "context_notes": "Synthetic exact-account grants and messages in isolated DB. No external messages. Contains two direct teams, overlap, unrelated team, invited member, private same-provider inbox, revoked credential and unattributed rows."
+    },
+    "name": "team-daily-investor-email-count",
+    "title": "Team daily investor email count",
+    "prompt": "For the records whose text starts with ROSE-TEAM-INVESTORS, how many investor emails did our team send on November 10, 2026? Use explore/grep to count sent messages across my own and explicitly shared accounts. Report the total and a per-owner breakdown from returned provenance. Exclude received replies. Also report separate counts for ROSE-TEAM-INVESTORS Atlas and ROSE-TEAM-INVESTORS Orbit, using exact team IDs from context. Read actual results; do not infer counts from team size. Return clear lines Total sent investor emails: N, Atlas: N, Orbit: N, and Own: N. This is read-only; do not send anything.",
+    "evaluators": [
+      {
+        "id": "teams_execution",
+        "method": "static_check",
+        "criteria": [
+          "No failed tools or external actions."
+        ],
+        "checks": [
+          {
+            "type": "no_tool_failures"
+          }
+        ]
+      },
+      {
+        "id": "teams_grounded_data",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "Require exact grounded counts: total=6, Atlas=5, Orbit=4, own=2. Total has reader=2, teammate=3, orbit owner=1. The same three teammate messages shared to both teams count once overall. Every count must be backed by successful grep results in root/explore tool evidence, with account/owner provenance. Reject narration alone, private/revoked/unattributed/pending/transitive content, or external communication."
+        ],
+        "judge_prompt": "Require exact grounded counts: total=6, Atlas=5, Orbit=4, own=2. Total has reader=2, teammate=3, orbit owner=1. The same three teammate messages shared to both teams count once overall. Every count must be backed by successful grep results in root/explore tool evidence, with account/owner provenance. Reject narration alone, private/revoked/unattributed/pending/transitive content, or external communication."
+      }
+    ]
+  },
+  {
+    "timeout_seconds": 300,
+    "is_chat_mode": false,
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "teams",
+      "grep",
+      "DAILY"
+    ],
+    "price_limit_cents": 150,
+    "requires_browser_agent": false,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": null,
+    "start_phase": "execute",
+    "min_tool_counts": {
+      "spawn_agent": 1,
+      "grep": 3
+    },
+    "forbidden_tools": [
+      "web_search",
+      "web_fetch",
+      "spawn_browser_agent",
+      "spawn_claude_code_agent",
+      "message_person",
+      "send_email"
+    ],
+    "status": "ready",
+    "runner": "agent",
+    "bench": "pipeline-e2e",
+    "group": "daily",
+    "demo_cache": "off",
+    "enforce_declared_evaluators": true,
+    "environment": {
+      "mode": "hybrid",
+      "db_fixtures": [
+        "team_data_v1"
+      ],
+      "base_images": [],
+      "live_fixtures": [
+        "live"
+      ],
+      "services": [
+        "backend",
+        "temporal"
+      ],
+      "secrets": [],
+      "live_targets": [],
+      "context_notes": "Synthetic exact-account grants and messages in isolated DB. No external messages. Contains two direct teams, overlap, unrelated team, invited member, private same-provider inbox, revoked credential and unattributed rows."
+    },
+    "name": "team-daily-access-boundaries",
+    "title": "Team daily account boundaries",
+    "prompt": "Audit read-only access for records starting with ROSE-TEAM-BOUNDARIES using explore/grep. Report how many matching SENT investor emails are accessible with default scope and own scope. Find the ROSE-TEAM-BOUNDARIES Atlas team and report whether any PRIVATE-tagged message or context record is readable there (search PRIVATE with context). Inspect the shared project map and name the discoverable project agent, without reading its goals, messages, environment or credentials. Return lines Accessible sent emails: N, Own sent emails: N, Private messages exposed: N. Do not send messages or change sharing.",
+    "evaluators": [
+      {
+        "id": "teams_execution",
+        "method": "static_check",
+        "criteria": [
+          "No failed tools or external actions."
+        ],
+        "checks": [
+          {
+            "type": "no_tool_failures"
+          }
+        ]
+      },
+      {
+        "id": "teams_grounded_data",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "Require exact grounded default accessible sent=6, own sent=2, private exposed=0. Tool evidence must include successful PRIVATE search with no returned private text plus successful count queries, and discoverable Shared investor research agent metadata. Never accept a private message, credential, project script, or SECRET_GOAL/SECRET_STARTUP value in returned tool context. Narration without tool evidence fails."
+        ],
+        "judge_prompt": "Require exact grounded default accessible sent=6, own sent=2, private exposed=0. Tool evidence must include successful PRIVATE search with no returned private text plus successful count queries, and discoverable Shared investor research agent metadata. Never accept a private message, credential, project script, or SECRET_GOAL/SECRET_STARTUP value in returned tool context. Narration without tool evidence fails."
+      }
+    ]
   }
 ]

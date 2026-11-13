@@ -385,6 +385,18 @@ def test_tool_manager_get_approval_question_not_implemented():
         assert "get_approval_question" in str(e)
 
 
+def test_grep_shared_provenance_survives_transcript_formatting():
+    from tools.base import format_tool_message
+    result = {"matches": [
+        {"source": "messages", "path": "messages/a/one", "content": "Investor sent email", "ownership": {"owner_user_id": "owner-a", "account_id": "work-a@example.test", "team_ids": ["atlas", "orbit"], "provider": "gmail", "shared": True, "owner_name": "A", "unexpected_token": "MUST_NOT_EXPOSE"}, "records": [{"message_id": "one", "owner_user_id": "owner-a", "account_id": "work-a@example.test"}]},
+        {"source": "messages", "path": "messages/b/two", "content": "Investor sent email", "ownership": {"owner_user_id": "owner-b", "account_id": "work-b@example.test", "team_ids": ["orbit"], "provider": "gmail", "shared": True, "owner_name": "B"}, "records": [{"message_id": "two", "owner_user_id": "owner-b", "account_id": "work-b@example.test"}]},
+    ], "total_matches": 2}
+    text = format_tool_message({}, result, 0.1, 0)
+    for value in ["owner_user_id", "owner-a", "owner-b", "account_id", "work-a@example.test", "work-b@example.test", "team_ids", "atlas", "orbit", "message_id", "one", "two"]:
+        assert value in text, f"Grep transcript dropped {value}"
+    assert "MUST_NOT_EXPOSE" not in text
+
+
 async def run_all_tests():
     print("tools-base blackbox tests:")
     r = BlackboxResult()
@@ -408,6 +420,7 @@ async def run_all_tests():
     r.record("format_result_services_empty", test_format_result_services_empty)
     r.record("format_result_fallback_json", test_format_result_fallback_json)
     r.record("format_tool_message", test_format_tool_message)
+    r.record("grep_shared_provenance", test_grep_shared_provenance_survives_transcript_formatting)
     r.record("extract_root_error_plain_exception", test_extract_root_error_plain_exception)
     r.record("extract_root_error_application_error", test_extract_root_error_application_error)
     r.record("format_error_message_with_params", test_format_error_message_with_params)
