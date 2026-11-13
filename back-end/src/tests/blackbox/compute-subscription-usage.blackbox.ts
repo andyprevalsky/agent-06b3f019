@@ -21,7 +21,8 @@
  *   - a lease's last flush is kept shortly after its release; later, nothing
  *   - the cooldown is returned with the account: why, whether the provider gave
  *     its reset, and nextResetAt only for a provider reset (never Rose's backoff)
- *   - a user cooldown that names no login never lands on sibling accounts
+ *   - a user cooldown that names no login never lands on sibling accounts; one
+ *     naming the held token's fingerprint cools exactly that login
  *   - the agent loop's lease (no integration id) names its login by credential
  *     fingerprint; usage lands on that login only, never a sibling or another user's
  *   - a code session's rate_limit_event usage lands on the task's login
@@ -45,6 +46,7 @@ import {
 } from '../../providers/computeSubscriptionUsage';
 import { assertLocalDatabase } from './assertLocalDatabase';
 import { registerChatPathCases } from './compute-subscription-usage.chat.cases';
+import { registerCooldownReportCases } from './compute-subscription-usage.cooldown.cases';
 import { registerLeaseUsageCases } from './compute-subscription-usage.lease.cases';
 import { registerUsageRefreshCases } from './compute-subscription-usage.refresh.cases';
 
@@ -483,6 +485,15 @@ registerLeaseUsageCases({
   apiKey: API_KEY,
   chatUsers,
   leases,
+  integrationType: TYPE,
+});
+
+registerCooldownReportCases({
+  test,
+  run: RUN,
+  baseUrl: BASE_URL,
+  apiKey: API_KEY,
+  chatUsers,
   integrationType: TYPE,
 });
 
