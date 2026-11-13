@@ -72,6 +72,13 @@ def own_process_entries():
     return iter(owned)
 
 
+def only_processes(*pids):
+    """Scan exactly these processes (this test and the children it created), not leftovers from earlier
+    tests: a slow-exiting non-dumpable descendant of a previous case must not refuse this one."""
+    return patch.object(deploy_test_process, 'process_entries',
+                        lambda: iter([Path('/proc', str(pid)) for pid in (os.getpid(), *pids)]))
+
+
 def setUpModule():
     # Disposable fixtures own their custody; an enclosing deploy request belongs
     # to the runner. Tests for request ownership install their own explicit path.
@@ -7182,11 +7189,7 @@ class Cycle(unittest.TestCase):
             phase='focused', state_sha256=c.sha_file(self.directory / 'cycle.json'),
             plan_digest=state['plan_digest'], native={gate['name']: native},
             files={str(p):c.sha_file(p) for p in (folder/'request.json', folder/'result.json')})
-        import deploy_test_process
-        # The offline journal has no live adapters; isolate this setup from the host process table so a
-        # loaded runner's transiently unreadable same-user process cannot refuse it (cf. 8e36ec4714).
-        with patch.object(c, 'settlement_native', return_value=native), \
-             patch.object(deploy_test_process, 'scan_same_user_processes', lambda inspect, refuse, grace=2.0: None):
+        with patch.object(c, 'settlement_native', return_value=native), only_processes():
             c.recover_round(state['plan'], self.directory, self.root, recovery)
         state = c.read(self.directory / 'cycle.json')
         state.update(source=c.source(self.root), phase='needs-focused-plan', ready=False)
@@ -7195,117 +7198,120 @@ class Cycle(unittest.TestCase):
 
     def test_negative_successor_renews_only_from_committed_journal_and_current_closure(self):
         state, original, proof, gate, folder, native = self.negative_successor_renewal_state()
-        incoming = dict(proof, validation_source=copy.deepcopy(state['source']))
-        before = copy.deepcopy(state)
-        with patch.object(c, 'settlement_native', return_value=native) as collector:
-            c.reconcile(state, original['token'], incoming)
-            collector.assert_called_once()
-            same = copy.deepcopy(state); c.reconcile(state, original['token'], incoming)
-            self.assertEqual(same, state)
-        for key in before:
-            if key not in ('reconciled_owners', 'reconciled_owner_history'):
-                self.assertEqual(before[key], state[key], key)
-        entry = state['reconciled_owners'][proof['receipt_sha256']]
-        self.assertEqual(state['source'], entry['validation_source'])
-        self.assertFalse(entry['credit_granted']); self.assertFalse(entry['cleanup_complete'])
-        recovered = state['attempts'][-1]['results'][0]
-        self.assertIsNone(recovered['native_exit']); self.assertFalse(recovered['positive_credit'])
-        self.assertNotIn('isolated_validation', recovered)
-        self.assertIsNone(c.full_pass_binding(state, gate))
-        request = dict(token='fresh-after-negative-recovery', source=state['source'], checks=gate['checks'], skips={})
-        self.assertEqual(1, len(c.isolated_request(state, gate, request, self.root, {})))
-        for closure in ({'tampered': 'closure'}, ValueError('live or unknown native owner')):
-            candidate = copy.deepcopy(before)
-            kwargs = {'side_effect':closure} if isinstance(closure, Exception) else {'return_value':closure}
-            with patch.object(c, 'settlement_native', **kwargs), self.assertRaises(ValueError):
-                c.reconcile(candidate, original['token'], incoming)
-            self.assertEqual(before, candidate)
-        journal = self.directory/'settlement-round20-journal.json'
-        marker = self.directory/'settlement-round20-committed.json'
-        for path in (journal, marker, folder/'request.json', folder/'result.json', folder/'receipt.json'):
-            raw = path.read_bytes(); path.unlink()
-            try:
+        with only_processes():
+            incoming = dict(proof, validation_source=copy.deepcopy(state['source']))
+            before = copy.deepcopy(state)
+            with patch.object(c, 'settlement_native', return_value=native) as collector:
+                c.reconcile(state, original['token'], incoming)
+                collector.assert_called_once()
+                same = copy.deepcopy(state); c.reconcile(state, original['token'], incoming)
+                self.assertEqual(same, state)
+            for key in before:
+                if key not in ('reconciled_owners', 'reconciled_owner_history'):
+                    self.assertEqual(before[key], state[key], key)
+            entry = state['reconciled_owners'][proof['receipt_sha256']]
+            self.assertEqual(state['source'], entry['validation_source'])
+            self.assertFalse(entry['credit_granted']); self.assertFalse(entry['cleanup_complete'])
+            recovered = state['attempts'][-1]['results'][0]
+            self.assertIsNone(recovered['native_exit']); self.assertFalse(recovered['positive_credit'])
+            self.assertNotIn('isolated_validation', recovered)
+            self.assertIsNone(c.full_pass_binding(state, gate))
+            request = dict(token='fresh-after-negative-recovery', source=state['source'], checks=gate['checks'], skips={})
+            self.assertEqual(1, len(c.isolated_request(state, gate, request, self.root, {})))
+            for closure in ({'tampered': 'closure'}, ValueError('live or unknown native owner')):
                 candidate = copy.deepcopy(before)
-                with patch.object(c, 'settlement_native', return_value=native), self.assertRaises(ValueError):
+                kwargs = {'side_effect':closure} if isinstance(closure, Exception) else {'return_value':closure}
+                with patch.object(c, 'settlement_native', **kwargs), self.assertRaises(ValueError):
                     c.reconcile(candidate, original['token'], incoming)
                 self.assertEqual(before, candidate)
-            finally: path.write_bytes(raw)
-        saved, saved_marker = journal.read_bytes(), marker.read_bytes()
-        for field in ('positive_credit', 'original_state_hex', 'proof_digest', 'after_state', 'receipts'):
-            altered = json.loads(saved)
-            altered[field] = True if field == 'positive_credit' else ('00' if field == 'original_state_hex' else {})
-            c.write(journal, altered); c.write(marker, {'journal_sha256':c.sha_file(journal)})
-            try:
-                candidate = copy.deepcopy(before)
-                with patch.object(c, 'settlement_native', return_value=native), self.assertRaises(ValueError):
-                    c.reconcile(candidate, original['token'], incoming)
-                self.assertEqual(before, candidate)
-            finally: journal.write_bytes(saved); marker.write_bytes(saved_marker)
+            journal = self.directory/'settlement-round20-journal.json'
+            marker = self.directory/'settlement-round20-committed.json'
+            for path in (journal, marker, folder/'request.json', folder/'result.json', folder/'receipt.json'):
+                raw = path.read_bytes(); path.unlink()
+                try:
+                    candidate = copy.deepcopy(before)
+                    with patch.object(c, 'settlement_native', return_value=native), self.assertRaises(ValueError):
+                        c.reconcile(candidate, original['token'], incoming)
+                    self.assertEqual(before, candidate)
+                finally: path.write_bytes(raw)
+            saved, saved_marker = journal.read_bytes(), marker.read_bytes()
+            for field in ('positive_credit', 'original_state_hex', 'proof_digest', 'after_state', 'receipts'):
+                altered = json.loads(saved)
+                altered[field] = True if field == 'positive_credit' else ('00' if field == 'original_state_hex' else {})
+                c.write(journal, altered); c.write(marker, {'journal_sha256':c.sha_file(journal)})
+                try:
+                    candidate = copy.deepcopy(before)
+                    with patch.object(c, 'settlement_native', return_value=native), self.assertRaises(ValueError):
+                        c.reconcile(candidate, original['token'], incoming)
+                    self.assertEqual(before, candidate)
+                finally: journal.write_bytes(saved); marker.write_bytes(saved_marker)
 
     def test_negative_successor_rejects_changed_history_admission_and_live_adapter_atomically(self):
         state, original, proof, gate, folder, native = self.negative_successor_renewal_state()
-        incoming = dict(proof, validation_source=copy.deepcopy(state['source']))
-        recovered = state['attempts'][-1]['results'][0]
-        for name, metadata in recovered['custody_skips'].items():
-            self.assertEqual(recovered['cases'][name], 'SKIP')
-            self.assertEqual(recovered['current_execution'][name], 'UNVERIFIED')
-            self.assertFalse(metadata['financial_cleanup_credit'])
-        target = copy.deepcopy(state)
-        target.update(environment=c.digest('changed target environment'))
-        target['input_fingerprints'][gate['name']] = c.digest('changed target input')
-        next(g for g in target['plan']['gates'] if g['name'] == gate['name'])['env'] = {'TARGET':'changed'}
-        target['plan_digest'] = c.digest(target['plan'])
-        with patch.object(c, 'settlement_native', return_value=native):
-            c.reconcile(target, original['token'], incoming)
-        self.assertEqual(state['attempts'], target['attempts'])
-        self.assertEqual(state['failures'], target['failures'])
-        mutations = [
-            lambda s:s['attempts'][0].update(source={'head':'changed', 'digest':'changed'}),
-            lambda s:s['attempts'][-1]['results'][0].update(native_exit=1),
-            lambda s:s['attempts'][-1]['results'][0].update(positive_credit=True),
-            lambda s:s['attempts'][-1]['results'][0].update(timed_out=False),
-            lambda s:s['attempts'][-1]['results'][0].update(started_at=1),
-        ]
-        for mutate in mutations:
-            candidate = copy.deepcopy(state); mutate(candidate); before = copy.deepcopy(candidate)
-            with patch.object(c, 'settlement_native', return_value=native), self.assertRaises(ValueError):
-                c.reconcile(candidate, original['token'], incoming)
-            self.assertEqual(before, candidate)
-        # A journal/hash update cannot replace the exact original isolation admission.
-        journal = self.directory/'settlement-round20-journal.json'
-        marker = self.directory/'settlement-round20-committed.json'
-        paths = (folder/'request.json', folder/'receipt.json', journal, marker)
-        saved = {p:p.read_bytes() for p in paths}
-        for field in ('original_receipt_sha256', 'source', 'excluded_resources', 'new_request_token'):
-            candidate = copy.deepcopy(state)
-            request = json.loads(saved[folder/'request.json'])
-            request['isolated_validation'][0][field] = 'foreign'
-            c.write(folder/'request.json', request)
-            row = candidate['attempts'][-1]['results'][0]
-            row['recovery_evidence']['files'][str(folder/'request.json')] = c.sha_file(folder/'request.json')
-            c.write(folder/'receipt.json', row)
-            j = json.loads(saved[journal]); j['after_state']['attempts'][-1] = copy.deepcopy(candidate['attempts'][-1])
-            j['receipts'][str(folder/'receipt.json')] = copy.deepcopy(row)
-            snapshot_raw = bytes.fromhex(j['original_state_hex']); snapshot = json.loads(snapshot_raw)
-            recovery = dict(kind='interrupted-round-settlement-v1', source=snapshot['source'], round=20,
-                phase='focused', state_sha256=__import__('hashlib').sha256(snapshot_raw).hexdigest(),
-                plan_digest=snapshot['plan_digest'], files=row['recovery_evidence']['files'], native={gate['name']:native})
-            j['proof_digest'] = c.digest(recovery)
-            c.write(journal, j); c.write(marker, {'journal_sha256':c.sha_file(journal)})
-            before = copy.deepcopy(candidate)
-            try:
-                with patch.object(c, 'settlement_native', return_value=native), self.assertRaisesRegex(ValueError, 'original isolation binding'):
+        with only_processes():
+            incoming = dict(proof, validation_source=copy.deepcopy(state['source']))
+            recovered = state['attempts'][-1]['results'][0]
+            for name, metadata in recovered['custody_skips'].items():
+                self.assertEqual(recovered['cases'][name], 'SKIP')
+                self.assertEqual(recovered['current_execution'][name], 'UNVERIFIED')
+                self.assertFalse(metadata['financial_cleanup_credit'])
+            target = copy.deepcopy(state)
+            target.update(environment=c.digest('changed target environment'))
+            target['input_fingerprints'][gate['name']] = c.digest('changed target input')
+            next(g for g in target['plan']['gates'] if g['name'] == gate['name'])['env'] = {'TARGET':'changed'}
+            target['plan_digest'] = c.digest(target['plan'])
+            with patch.object(c, 'settlement_native', return_value=native):
+                c.reconcile(target, original['token'], incoming)
+            self.assertEqual(state['attempts'], target['attempts'])
+            self.assertEqual(state['failures'], target['failures'])
+            mutations = [
+                lambda s:s['attempts'][0].update(source={'head':'changed', 'digest':'changed'}),
+                lambda s:s['attempts'][-1]['results'][0].update(native_exit=1),
+                lambda s:s['attempts'][-1]['results'][0].update(positive_credit=True),
+                lambda s:s['attempts'][-1]['results'][0].update(timed_out=False),
+                lambda s:s['attempts'][-1]['results'][0].update(started_at=1),
+            ]
+            for mutate in mutations:
+                candidate = copy.deepcopy(state); mutate(candidate); before = copy.deepcopy(candidate)
+                with patch.object(c, 'settlement_native', return_value=native), self.assertRaises(ValueError):
                     c.reconcile(candidate, original['token'], incoming)
                 self.assertEqual(before, candidate)
-            finally:
-                for path, raw in saved.items(): path.write_bytes(raw)
+            # A journal/hash update cannot replace the exact original isolation admission.
+            journal = self.directory/'settlement-round20-journal.json'
+            marker = self.directory/'settlement-round20-committed.json'
+            paths = (folder/'request.json', folder/'receipt.json', journal, marker)
+            saved = {p:p.read_bytes() for p in paths}
+            for field in ('original_receipt_sha256', 'source', 'excluded_resources', 'new_request_token'):
+                candidate = copy.deepcopy(state)
+                request = json.loads(saved[folder/'request.json'])
+                request['isolated_validation'][0][field] = 'foreign'
+                c.write(folder/'request.json', request)
+                row = candidate['attempts'][-1]['results'][0]
+                row['recovery_evidence']['files'][str(folder/'request.json')] = c.sha_file(folder/'request.json')
+                c.write(folder/'receipt.json', row)
+                j = json.loads(saved[journal]); j['after_state']['attempts'][-1] = copy.deepcopy(candidate['attempts'][-1])
+                j['receipts'][str(folder/'receipt.json')] = copy.deepcopy(row)
+                snapshot_raw = bytes.fromhex(j['original_state_hex']); snapshot = json.loads(snapshot_raw)
+                recovery = dict(kind='interrupted-round-settlement-v1', source=snapshot['source'], round=20,
+                    phase='focused', state_sha256=__import__('hashlib').sha256(snapshot_raw).hexdigest(),
+                    plan_digest=snapshot['plan_digest'], files=row['recovery_evidence']['files'], native={gate['name']:native})
+                j['proof_digest'] = c.digest(recovery)
+                c.write(journal, j); c.write(marker, {'journal_sha256':c.sha_file(journal)})
+                before = copy.deepcopy(candidate)
+                try:
+                    with patch.object(c, 'settlement_native', return_value=native), self.assertRaisesRegex(ValueError, 'original isolation binding'):
+                        c.reconcile(candidate, original['token'], incoming)
+                    self.assertEqual(before, candidate)
+                finally:
+                    for path, raw in saved.items(): path.write_bytes(raw)
         child = subprocess.Popen([sys.executable, '-c', 'import sys;print("ready",flush=True);sys.stdin.read()'],
             cwd='/tmp', env={**os.environ, 'DEPLOY_GATE_TOKEN':state['attempts'][-1]['results'][0]['token']},
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, start_new_session=True)
         try:
             self.assertEqual(child.stdout.readline().strip(), 'ready')
             candidate = copy.deepcopy(state)
-            with patch.object(c, 'settlement_native', return_value=native), self.assertRaisesRegex(ValueError, 'live adapter'):
+            with patch.object(c, 'settlement_native', return_value=native), only_processes(child.pid), \
+                    self.assertRaisesRegex(ValueError, 'live adapter'):
                 c.reconcile(candidate, original['token'], incoming)
             self.assertEqual(state, candidate)
         finally:
