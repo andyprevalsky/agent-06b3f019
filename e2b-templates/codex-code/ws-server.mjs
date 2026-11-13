@@ -857,6 +857,7 @@ const CODEX_RESUME_SESSION_ID = /^[A-Za-z0-9-]{1,128}$/.test(
 // home is /home/user in the E2B template.
 let workDir = projectMode ? PROJECT_WORKDIR : home;
 const REPO_WORKDIR = join(home, "workspace");
+if (projectMode) configureGitIdentity(workDir);
 // A resumed persistent code session already holds the repo (local branches,
 // commits, uncommitted edits): refresh the credentialed remote, never re-clone.
 if (GITHUB_REPO_URL && !projectMode && existsSync(join(REPO_WORKDIR, ".git"))) {
@@ -876,6 +877,7 @@ if (GITHUB_REPO_URL && !projectMode && existsSync(join(REPO_WORKDIR, ".git"))) {
         cwd: workDir,
       });
     }
+    configureGitIdentity(workDir);
     writeFileSync(join(workDir, "AGENTS.md"), CODE_AGENT_SYSTEM_PROMPT);
     log("info", "Resuming existing repository", { workDir });
   } catch (err) {
@@ -898,12 +900,7 @@ if (GITHUB_REPO_URL && !projectMode && existsSync(join(REPO_WORKDIR, ".git"))) {
       stdio: "pipe",
       env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
     });
-    execFileSync("git", ["config", "user.name", "Rose Agent"], {
-      cwd: workDir,
-    });
-    execFileSync("git", ["config", "user.email", "agent@roselabs.ai"], {
-      cwd: workDir,
-    });
+    configureGitIdentity(workDir);
     writeFileSync(join(workDir, "AGENTS.md"), CODE_AGENT_SYSTEM_PROMPT);
     log("info", "Repository cloned", { workDir });
   } catch (err) {
@@ -925,6 +922,33 @@ if (!GITHUB_REPO_URL && !projectMode && CODE_AGENT_SYSTEM_PROMPT) {
 
 // Persistent code sessions work on their own branch (code-agent-persistent-
 // sessions.md §1b); same contract as the Claude Code ws-server.
+// Commits are authored by the GitHub account whose token pushes: the backend
+// passes it as GIT_AUTHOR_* / GIT_COMMITTER_* (codeAgentGitIdentity.ts), which
+// git already prefers over any repo config. Mirror it into the repo so a shell
+// without those envs commits the same way, and so a workspace an older server
+// configured with an identity GitHub cannot link (Vercel then blocks the
+// deploy) is corrected on resume. No envs: leave the repo's own config alone.
+function configureGitIdentity(dir) {
+  const name = process.env.GIT_AUTHOR_NAME;
+  const email = process.env.GIT_AUTHOR_EMAIL;
+  if (!name || !email) return;
+  try {
+    execFileSync("git", ["config", "user.name", name], {
+      cwd: dir,
+      stdio: "pipe",
+    });
+    execFileSync("git", ["config", "user.email", email], {
+      cwd: dir,
+      stdio: "pipe",
+    });
+  } catch (err) {
+    log("warn", "Could not configure the git commit identity", {
+      workDir: dir,
+      error: redactCredentials(err.message),
+    });
+  }
+}
+
 // Credentials never leave the server in text: a URL's userinfo and the token
 // itself are masked in every error that reaches a log, an event or the output.
 function redactCredentials(text) {

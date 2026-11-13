@@ -110,6 +110,7 @@ from benchmarks.phone_callee import (
     resolve_callee_prompt,
 )
 from benchmarks.phone_critical_attention import PHONE_BENCH_TASK_NAMES
+from benchmarks.team_data import TASK_MARKERS as TEAM_DATA_TASKS, apply_team_fixture, verified_fixture_database
 from benchmarks.phone_daily import (
     TASK_KINDS as PHONE_DAILY_TASKS,
 )
@@ -3755,6 +3756,9 @@ async def _wait_for_expected_payment_lifecycle(
 
 
 PAYMENT_CLEANUP_TIMEOUT_SECONDS = 180
+# Owned-cleanup release-stall observations run inside PAYMENT_CLEANUP_TIMEOUT_SECONDS
+# at the task reconciliation poll cadence; they never extend that deadline.
+PAYMENT_CLEANUP_STALL_OBSERVATION_SECONDS = 10
 # Matches the existing stale RECLAIMING lease in purchaseCleanup.ts. This is
 # retry eligibility within the unchanged 420-second reconciliation window.
 PAYMENT_RECLAIM_RETRY_AFTER_SECONDS = 120
@@ -5818,7 +5822,8 @@ async def _poll_agent(
                                     "expected_gate": gate,
                                     "expected_gate_request_id": req_id,
                                 }
-                                print(f"    💳 Completing hosted Stripe Checkout for gate {req_id[:8]}")
+                                print(f"    💳 Completing hosted Stripe Checkout for gate {req_id[:8]} "
+                                      f"layout={urlparse(checkout_url).path[:7]}")
                                 try:
                                     checkout = await complete_test_subscription_checkout(
                                         base_url,
@@ -5836,7 +5841,8 @@ async def _poll_agent(
                                     )
                                 subscription_checkout_evidence = checkout
                                 data["_benchmark"]["subscription_checkout"] = checkout
-                                print(f"    ✅ Completed paid Stripe test Checkout {checkout['session_id'][:18]}")
+                                print(f"    ✅ Completed paid Stripe test Checkout {checkout['session_id'][:18]} "
+                                      f"layout=/{checkout.get('checkout_layout')}/pay/")
                                 continue
                             if task.expected_gate and _gate_request_matches_task(task, req):
                                 expected_gate_evidence = {
@@ -7035,9 +7041,38 @@ async def _refresh_browser_archive_snapshot(
             await asyncio.sleep(min(2, max(0, deadline - time.monotonic())))
 
 
-async def _finalize_owned_root_payments(base_url: str, root_id: str, evidence: dict) -> dict:
-    """Drain admitted purchases through canonical compensation before DB teardown."""
+async def _observe_owned_release_stall(base_url: str, pending: list[dict], evidence: dict) -> None:
+    """Record one complete lifecycle observation of the still-reclaiming owned purchases.
+
+    Lifecycle reads join provider views, and AgentCard intermittently rejects the healthy
+    org token. A failed read keeps the previous complete observation; the final ledger
+    must still match it before the release-stall warning can apply.
+    """
+    lifecycles = {}
+    try:
+        for agent_id in sorted({row["agent_id"] for row in pending}):
+            lifecycles[agent_id] = await get_test_payment_lifecycle(base_url, agent_id)
+    except Exception as error:
+        evidence["agentcard_release_stall_read_errors"] = evidence.get("agentcard_release_stall_read_errors", 0) + 1
+        evidence["agentcard_release_stall_last_read_error"] = str(error) or type(error).__name__
+        return
+    evidence["agentcard_release_stall_observation"] = {
+        "observed_at": datetime.now(timezone.utc).isoformat(),
+        "lifecycles": lifecycles,
+    }
+
+
+async def _finalize_owned_root_payments(
+    base_url: str, root_id: str, evidence: dict, *, observe_release_stall: bool = False
+) -> dict:
+    """Drain admitted purchases through canonical compensation before DB teardown.
+
+    A stalled AgentCard release always runs this drain to its deadline. For a task the
+    release waiver covers, observe the reclaiming purchases inside the same deadline so
+    the stall proof never rests on one provider read issued after it.
+    """
     attempted = set()
+    next_stall_observation = 0.0
     async with asyncio.timeout(PAYMENT_CLEANUP_TIMEOUT_SECONDS):
         while True:
             snapshot = await asyncio.to_thread(
@@ -7071,17 +7106,33 @@ async def _finalize_owned_root_payments(base_url: str, root_id: str, evidence: d
             if errors:
                 raise RuntimeError("; ".join(errors))
             if not new_attempts:
+                if (
+                    observe_release_stall
+                    and time.monotonic() >= next_stall_observation
+                    and all(row["status"] == "HELD" and row["funding_status"] == "RECLAIMING" for row in pending)
+                ):
+                    next_stall_observation = time.monotonic() + PAYMENT_CLEANUP_STALL_OBSERVATION_SECONDS
+                    await _observe_owned_release_stall(base_url, pending, evidence)
                 await asyncio.sleep(2)
 
 
 async def _owned_payments_release_stalled(base_url: str, evidence: dict, *, task_name: str) -> bool:
-    """Every still-pending owned purchase is waiting only on AgentCard release in the expected mode."""
+    """Every still-pending owned purchase is waiting only on AgentCard release in the expected mode.
+
+    Prefer the observation made inside the cleanup deadline; the final ledger rows must
+    still match it exactly. Read afresh only when no such observation exists.
+    """
     try:
         pending = cloud_batch_cleanup.pending_root_payments(evidence.get("payment_snapshot") or {})
     except Exception:
         return False
+    observation = evidence.get("agentcard_release_stall_observation")
+    observed = observation.get("lifecycles") if isinstance(observation, dict) else None
     lifecycles = {}
     for agent_id in sorted({row["agent_id"] for row in pending}):
+        if isinstance(observed, dict) and isinstance(observed.get(agent_id), dict):
+            lifecycles[agent_id] = observed[agent_id]
+            continue
         try:
             lifecycles[agent_id] = await get_test_payment_lifecycle(base_url, agent_id)
         except Exception:
@@ -7436,7 +7487,16 @@ async def _finalize_owned_cloud_batch(base_url: str, results: list, live_ids: di
                 try:
                     if before is None:
                         raise RuntimeError("exact payment ownership was not established")
-                    logs["cloud_payment_cleanup"] = await _finalize_owned_root_payments(base_url, aid, evidence)
+                    logs["cloud_payment_cleanup"] = await _finalize_owned_root_payments(
+                        base_url,
+                        aid,
+                        evidence,
+                        observe_release_stall=(
+                            result is not None
+                            and _agentcard_release_skip_task(result.name)
+                            and _agentcard_release_skip_enabled()
+                        ),
+                    )
                 except Exception as error:
                     detail = str(error) or type(error).__name__
                     if (
@@ -15613,6 +15673,11 @@ async def _run_single_task_as_run_user(
         # scenario intentionally removes shared browser state and must restore it
         # even when agent creation or evaluation fails.
         live_fixture_manifests = await _apply_live_fixtures(task, base_url)
+        if task.name in TEAM_DATA_TASKS:
+            team_db, team_cloud = verified_fixture_database(_isolated_stack_database_url(), _benchmark_context_path(), base_url)
+            team_fixture = await asyncio.to_thread(apply_team_fixture, task.name, base_url,
+                _current_benchmark_user_id(), team_db, owned_cloud=team_cloud)
+            print(f"    Applied isolated team data fixture: {team_fixture['marker']}")
         if task.name in PHONE_DAILY_TASKS:
             preflight_daily(task.name, base_url, _current_benchmark_user_id())
         if task.name in PHONE_BENCH_TASK_NAMES:

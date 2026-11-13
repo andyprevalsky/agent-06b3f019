@@ -54,6 +54,55 @@ def check_coverage_map_dependency_preflight() -> None:
           "missing coverage gives an actionable interpreter preflight diagnostic")
 
 
+def check_shell_copy_edges() -> None:
+    files = ["scripts/package.sh", "scripts/copied.py", "scripts/execute.sh"]
+    graph = sat.Graph(files)
+    graph.text["scripts/package.sh"] = (
+        'if test "$READY" = 1 && cp -p \\\n'
+        '  "$ROOT_DIR/scripts/copied.py" \\\n'
+        '  "$OUT/"; then\n'
+        '  bash scripts/execute.sh\nfi\n'
+    )
+    graph.path_edges("scripts/package.sh")
+    check("scripts/copied.py" in graph.data_deps["scripts/package.sh"],
+          "shell snapshot copying keeps the copied file's own bytes as a data dependency")
+    check("scripts/copied.py" not in graph.deps["scripts/package.sh"],
+          "shell snapshot copying does not execute the copied module's imports")
+    check("scripts/execute.sh" in graph.deps["scripts/package.sh"],
+          "execution after a continued shell copy keeps its transitive dependency")
+    graph = sat.Graph(files)
+    graph.text["scripts/package.sh"] = (
+        'if test "$READY" = 0 \\\n'
+        '  || ! cp "$ROOT_DIR/scripts/copied.py" \\\n'
+        '  "$OUT/"; then exit 1; fi\n'
+    )
+    graph.path_edges("scripts/package.sh")
+    check("scripts/copied.py" in graph.data_deps["scripts/package.sh"]
+          and "scripts/copied.py" not in graph.deps["scripts/package.sh"],
+          "the real negated fleet snapshot copy remains a data edge")
+    for line in ('cp scripts/copied.py "$OUT/" && bash scripts/execute.sh\n',
+                 'cp "$(bash scripts/execute.sh)" "$OUT/"\n',
+                 'cp \\\n<(bash \\\nscripts/execute.sh) \\\n"$OUT/"\n',
+                 'cp \\\n>(bash \\\nscripts/execute.sh) \\\n"$OUT/"\n'):
+        graph = sat.Graph(files)
+        graph.text["scripts/package.sh"] = line
+        graph.path_edges("scripts/package.sh")
+        check("scripts/execute.sh" in graph.deps["scripts/package.sh"],
+              "compound or substituted copy commands conservatively retain actual execution edges")
+    files = ["scripts/run-helper", "scripts/copied.py", "fixtures/input.json"]
+    for line in ('./scripts/run-helper && cp fixtures/input.json "$tmp/input.json"\n',
+                 'scripts/run-helper && cp scripts/copied.py "$OUT/"\n'):
+        graph = sat.Graph(files)
+        graph.text["scripts/package.sh"] = line
+        graph.path_edges("scripts/package.sh")
+        check("scripts/run-helper" in graph.deps["scripts/package.sh"],
+              "a command executed before a same-line copy keeps its transitive execution edge")
+        copied = "fixtures/input.json" if "fixtures/" in line else "scripts/copied.py"
+        check(copied in graph.data_deps["scripts/package.sh"]
+              and copied not in graph.deps["scripts/package.sh"],
+              "the file copied after an executed command remains a data edge")
+
+
 def check_extraction_precision(selector: sat.Selector) -> None:
     """Comments and docstrings document; only code creates edges (never fewer code edges).
 
@@ -67,6 +116,7 @@ def check_extraction_precision(selector: sat.Selector) -> None:
     diff of every file (old selector vs new on the same tree) and trace the
     first missing edge of each lost lane unit to a comment/docstring line.
     """
+    check_shell_copy_edges()
     ts_files = ["x.test.ts", "docs/rca/cases/case.md", "scripts/critical.sh"]
     comment_only = (
         "/**\n * Start agent button is gated on ACTIVE (docs/rca/cases/\n * 2026-10-28-case.md).\n */\n"

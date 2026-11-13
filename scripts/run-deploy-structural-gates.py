@@ -105,6 +105,19 @@ UNITTEST_RAN = re.compile(r"^Ran (\d+) tests? in ", re.M)
 UNITTEST_OK = re.compile(r"^OK(?: \(([^)]*)\))?\s*$", re.M)
 
 
+def flaky_detail(labels: Sequence[str], first_outputs: Sequence[str]) -> str:
+    """FLAKY progress detail: the last failed first attempt, ending with EVERY flaky shard's failure headers.
+
+    The progress row keeps only the detail's tail (deploy_gate_progress.DETAIL_LIMIT); a long traceback
+    would otherwise cut the "FAIL: name (module.Class.name)" lines that suite-level /RCA attribution
+    matches against the quarantine marker (deploy_test_quarantine.failed_unittest_names), and a suite
+    with several flaky shards must name all of their failures so each one needs attribution.
+    """
+    headers = [m.group(0) for output in first_outputs for m in UNITTEST_FAILURE.finditer(output)]
+    tail = ("\nfailed unittest headers:\n" + "\n".join(headers)) if headers else ""
+    return f"passed on rerun: {', '.join(labels)}\n" + (first_outputs[-1] if first_outputs else "") + tail
+
+
 def failed_unittest_ids(command: Sequence[str], output: str) -> tuple[str, ...]:
     """The exact unittest ids to rerun, or () when the output does not name every failure.
 
@@ -516,6 +529,17 @@ GATES = (
         ("python3", "scripts/tests/cloudbench-cross-devbox-admission.test.py"),
     ),
     Gate("cloudbench-warm-source", ("python3", "scripts/tests/cloudbench-warm-source.test.py")),
+    Gate("cloudbench-prepare-source", ("python3", "scripts/tests/cloudbench-prepare-source.test.py")),
+    Gate("cloudbench-prepare-source-create", ("python3", "scripts/tests/cloudbench-prepare-source-create.test.py")),
+    Gate("cloudbench-source-version", ("python3", "scripts/tests/cloudbench-source-version.test.py")),
+    Gate("cloudbench-original-image-failure", ("python3", "scripts/tests/cloudbench-original-image-failure.test.py")),
+    Gate("cloudbench-source-lease", ("python3", "scripts/tests/cloudbench-source-lease.test.py")),
+    Gate("cloudbench-source-lease-fleet", ("python3", "scripts/tests/cloudbench-source-lease-fleet.test.py")),
+    Gate("cloudbench-source-lease-recovery", ("python3", "scripts/tests/cloudbench-source-lease-recovery.test.py")),
+    Gate("cloudbench-source-guest-env", ("python3", "scripts/tests/cloudbench-source-guest-env.test.py")),
+    Gate("cloudbench-source-env", ("python3", "scripts/tests/cloudbench-source-env.test.py")),
+    Gate("cloudbench-source-env-handoff", ("python3", "scripts/tests/cloudbench-source-env-handoff.test.py")),
+    Gate("cloudbench-kernel-custody", ("python3", "scripts/tests/cloudbench-kernel-custody.test.py")),
     Gate(
         "benchmark-successful-llm-evidence",
         ("python3", "scripts/tests/verify-successful-llm-queries.test.py"),
@@ -976,7 +1000,7 @@ def run_gates(
                             report_progress(
                                 suite,
                                 "FLAKY",
-                                detail=f"passed on rerun: {', '.join(suite_flaky)}\n" + flaky[suite_flaky[-1]],
+                                detail=flaky_detail(suite_flaky, [flaky[label] for label in suite_flaky]),
                                 # The failed first attempt is the evidence /RCA attributes.
                                 log=str(output_root / (suite_flaky[-1].replace("/", "-of-") + ".log")),
                             )

@@ -368,6 +368,28 @@ export async function loadBenchmarkTask(name: string): Promise<BenchmarkTask> {
   return task;
 }
 
+/**
+ * Count rendered `[data-message-id]` rows after opening every collapsed work group.
+ *
+ * A live agent's assistant/tool rows fold into one collapsed trajectory work
+ * group, and only user-facing rows (final answer, display, pinned question)
+ * render at the top level. Counting top-level bubbles therefore waited for the
+ * agent to FINISH, not for realtime rows to arrive: a slower code-agent CLI
+ * (Codex on a healthy GPT lease) kept the count at 1 past the spec timeout.
+ * Opening the disclosure renders the live rows themselves, which is what the
+ * realtime prerequisites measure. Called from `expect.poll`, so a header that
+ * re-renders mid-click is simply retried on the next poll.
+ */
+export async function countMessageRowsWithWorkExpanded(page: Page): Promise<number> {
+  const collapsed = page.locator(
+    '[data-testid="trajectory-work-group"] > button[aria-expanded="false"]',
+  );
+  for (let i = 0; i < 20 && (await collapsed.count()) > 0; i++) {
+    await collapsed.first().click();
+  }
+  return page.locator('[data-message-id]').count();
+}
+
 export async function deleteAgent(agentId: string): Promise<void> {
   // Cleanup helper: surface failures via console.warn so leaked agents are
   // visible in CI logs, but don't throw — test teardown must not mask the

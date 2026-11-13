@@ -145,6 +145,30 @@ const tests: Array<[string, () => Promise<void> | void]> = [
     },
   ],
   [
+    'every router stage schema writes the escalation goal and mode directly after action',
+    () => {
+      // Order-keeping hosts generate in declared order. With `queries` right
+      // after `action`, the live GLM failover wrote the re-plan brief into
+      // `queries` and the stale first request into `goal` (FLAKY 6a3ec2af).
+      for (const [name, , schema] of ROUTER_STAGE_PROMPTS) {
+        const order = Object.keys(schema.properties);
+        if (
+          JSON.stringify(order.slice(0, 4)) !==
+          JSON.stringify(['reasoning', 'action', 'goal', 'mode'])
+        ) {
+          throw new Error(
+            `${name} schema declares ${JSON.stringify(order)}; goal and mode must follow action`
+          );
+        }
+        if (JSON.stringify(schema.required) !== JSON.stringify(order)) {
+          throw new Error(
+            `${name} schema required ${JSON.stringify(schema.required)} must follow ${JSON.stringify(order)}`
+          );
+        }
+      }
+    },
+  ],
+  [
     'router Mode Selection prefers execute when in doubt and allows coding in execute',
     () => {
       for (const [name, prompt] of ROUTER_STAGE_PROMPTS) {

@@ -1,6 +1,25 @@
 from pathlib import Path
-import copy,json,os,runpy,unittest
+import base64,copy,json,os,runpy,unittest,zlib
 D=Path(__file__).resolve().parents[1];T=runpy.run_path(str(D/'tests/cloudbench-explicit-idle-admission.test.py'))
+
+# Actual pre-C1 wrapper from main8046dcbc, preserving the historical negative
+# control independently of current token exports and checkout Git history.
+# Extracted bytes SHA256: 6262003ce5695ce9d20975b92302eda04a801beb0fb9dc8210967b18ae6b75eb
+LEGACY_WORKER_WRAPPER_SOURCE=zlib.decompress(base64.b85decode(
+ 'c$}qHZEu@M5dPj@v7%|+>S~fyZ9d$IN*LA!1%m}Rt<|emYgo!EymeXPT5bP(7l;#VOvLG;$i}<#Jo7L!JF@@)P%xVD2uw7~S?M!q'
+ 'YX<sg`o?O8eCHb4Xm<5ZdGY<<YyzaSZO(29L*FQms}17$Ey>X4>YW5WJZ_TgPI@MI!O!Ni{v$!01F0k&Oo?>3I-wEx0;Ul-=V@`y'
+ 'Hd|TX!PkEPk4ZK;vaO#Q7JO<)KHwO_{&f<|(qj$BRuMf~k;soCXB@b2uAIHvNAbn?I!<jE#g6n^I*sZ?dk+297<rm&E`8-Z#2lXo'
+ 'NnV8;k_GWJB3yhj63Jyeg3pDXfo>dYwSYp|m&eqUJZJbDk$?gsM#>m`1utLj3*Zv``n7+)7$MtR+Zxj0(i@ar?y_JSlA;_XyWv~9'
+ 'rngX^W)vFB6i<VMl8ld{hV~6IptXc<pHifH6vrpWy@oD=H>NIr!$H0_)KhXtL-Cu)#cnjWyRzFe*Q+O1Wt^r2iSPE*b?d55@Fr(0'
+ '-;xlu?&}O+i0q1tj(s0bbCysM4o1sesG4Eg5Se;U@0Nyxm0zR1r7B$7YEz&`&~gwdiesU=Yh*Z{-@_HO7<1TWj^isA19mf26Vcbv'
+ '(sBC^X3l5SH5h)ug)z*q-|V8F1CORvf;kBR&+`Oq@+u24qof3R25`mmGQf%0ZL?c~45y^-kfNipJF%YTAxY$6ISWUJ*6Da3ZXe2$'
+ 'Wf^B7pu7a+2MH=pg`6T!Xs~+&wlNK2P+-Psy<RqYbhvOpfCKTE(A!p{@Rwq?o0LxogrA|d@=eDU!LdwjeNyJJ(O?D)s9OF&66O|!'
+ '{=S4ehJ$4H-N{_6EY<JFucT=g+Ke;l>}P`#)q0KUkRVN*6)1YVsw2m?)_+fb*GKenKj<Fdr@asID3{VObgp`SliGWfZhGp>g6NZL'
+ '`Vjes>#RN+Pcl3@H$A6*d%f;a3TIVkj7RjK6O}P$q7OASfEd9c%ClrQ)R6wO#$GF_`=$uT8qH0spPgF34n;H}{rt8we;h(wQL=~P'
+ 'S*rEGuKh{v1U(RCIhty9Y?S6!(U}lQE)KI?U@_CB$ADB>eLFb@|8E7Jp}u{8r5xbewI_YwoAkm?0<gj2;xI7w9wzDU_D0BXQHW{O'
+ 'EWLWRZ!3OGOCbI+2x6LqqCw<$v=lvrus^Xq2<`'
+)).decode()
+
 class Consumer(unittest.TestCase):
  def setUp(self):
   global C,H,G
@@ -53,7 +72,7 @@ class Consumer(unittest.TestCase):
   self.assertNotEqual(r.returncode,0);self.assertFalse(Path(f.request['consumer']['pool_ids_file']).exists())
  def test_actual_worker_wrapper_clears_old_identity(self):
   import subprocess,shlex
-  f=self.f;fleet=(D/'run-bench-fleet').read_text();start=fleet.index("    printf 'CLOUDBENCH_GITHUB_TOKEN_B64=%q\\n'");end=fleet.index('    ) &',start) if False else fleet.index('    (\n      # This is a child provisioner',start)
+  f=self.f;fleet=LEGACY_WORKER_WRAPPER_SOURCE;start=fleet.index("    printf 'CLOUDBENCH_GITHUB_TOKEN_B64=%q\\n'");end=fleet.index('    ) &',start) if False else fleet.index('    (\n      # This is a child provisioner',start)
   body=fleet[start:end];wrapper=f.root/'wrapper.sh';envfile=f.root/'worker.env';worker=f.root/'worker.py'
   worker.write_text('import json,os;print(json.dumps(dict(os.environ)))')
   seed=dict(wrapper=str(wrapper),worker_env=str(envfile),worker_github_token_b64='CURRENT',BENCH_REF='a'*40,worker_storage='borrowed',runtime_run_token='current-token',borrowed_worker='1',wid=f.mid,ws='current-workspace',pip='fd00::1',BOX_BACKEND_PORT='3001',BOX_WMH_PORT='3007',FLEET_WORKER_HEALTH_PORT='3103',sim='0',ready_file=str(f.root/'ready'),FLEET_PATCH_FILE='')

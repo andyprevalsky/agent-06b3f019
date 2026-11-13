@@ -569,6 +569,47 @@ class ReleaseReport(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     q.catalog_quarantines(self.root)
 
+    def test_suite_level_flaky_unit_matches_the_marker_named_by_its_own_failure_output(self):
+        # The structural runner reports a FLAKY unit as the suite job ("deploy-test-plan"); the marker
+        # sits on the one method unittest named in that job's failed first attempt (PR #1928).
+        packet = {k: 'x' for k in ('test', 'command', 'scope', 'error', 'source', 'evidence')}
+        entry = {'attribution': 'NOT_INTRODUCED', 'evidence': 'rca-1', 'marker': 'tests/test_unit.py',
+                 'post_merge': {**packet, 'repair_owner': REPAIR}}
+        base = {'id': 'c' * 32, 'gate': 'structural', 'unit': 'suite-job', 'source': {'head': 'a' * 40}}
+        failure = ('FAIL: test_flaky_unit (__main__.Suite.test_flaky_unit)\nTraceback (most recent call last):\n'
+                   '  File "/w/tests/test_unit.py", line 4, in test_flaky_unit\n')
+        recorded = q.validate_attribution({**base, 'detail': 'passed on rerun\n' + failure}, entry, self.root)
+        self.assertEqual('tests/test_unit.py', recorded['marker'])
+        dotted = 'FAIL: test_flaky_unit (tests.test_unit.Suite.test_flaky_unit)\n'
+        self.assertEqual('tests/test_unit.py',
+                         q.validate_attribution({**base, 'detail': dotted}, entry, self.root)['marker'])
+        # Same class + method in ANOTHER module, or a __main__ id with no tie to the marker file, is refused.
+        unmarked = 'FAIL: test_other (tests.test_unit.Suite.test_other)\n'  # a second failure with no marker
+        for detail in (None, 'no unittest header', failure.replace('Suite.', 'Other.'),
+                       dotted.replace('tests.test_unit.', 'tests.test_other.'), failure.split('Traceback')[0],
+                       dotted + unmarked):
+            with self.subTest(detail=detail), self.assertRaisesRegex(ValueError, 'no quarantine marker'):
+                q.validate_attribution({**base, 'detail': detail}, entry, self.root)
+
+    def test_suite_level_flake_with_truncated_header_binds_the_packet_test_by_its_traceback_frame(self):
+        # The recorded detail keeps only its tail; deploy-test-worker lost unittest's header (PR #1925).
+        entry = {'attribution': 'NOT_INTRODUCED', 'evidence': 'rca-1', 'marker': 'tests/test_unit.py',
+                 'post_merge': {**{k: 'x' for k in ('command', 'scope', 'error', 'source', 'evidence')},
+                                'test': 'Suite.test_flaky_unit', 'repair_owner': REPAIR}}
+        frame = '  File "/w/tests/test_unit.py", line 4, in test_flaky_unit\n    boom()\nValueError: boom\n'
+        base = {'id': 'c' * 32, 'gate': 'structural', 'unit': 'suite-job', 'source': {'head': 'a' * 40}}
+        self.assertEqual('tests/test_unit.py',
+                         q.validate_attribution({**base, 'detail': frame}, entry, self.root)['marker'])
+        refused = {'no frame': 'FAILED (errors=1)\n', 'frame in another file': frame.replace('tests/test_unit', 'tests/x'),
+                   'frame names another method': frame.replace('test_flaky_unit', 'test_other')}
+        for label, detail in refused.items():
+            with self.subTest(label), self.assertRaisesRegex(ValueError, 'no quarantine marker'):
+                q.validate_attribution({**base, 'detail': detail}, entry, self.root)
+        with self.assertRaisesRegex(ValueError, 'no quarantine marker'):  # the packet must name the marked test
+            q.validate_attribution({**base, 'detail': frame},
+                                   {**entry, 'post_merge': {**entry['post_merge'], 'test': 'Suite.test_other'}},
+                                   self.root)
+
     def test_cli_prints_the_table(self):
         self.write_ledger(['QUARANTINED_PASS'] * 5)
         out = subprocess.run([sys.executable, str(ROOT / 'scripts/test_quarantine.py'), 'report', '--root',

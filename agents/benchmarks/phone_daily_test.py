@@ -144,6 +144,12 @@ def _assert_existing_catalog_rows_unchanged(old, current):
             assert row.pop('deploy_quarantine', None) == _MASS_DEPLOY_QUARANTINE_REASON
         else:
             assert 'deploy_quarantine' not in row
+    # User-directed retirement (status -> "retired") is the only allowed status
+    # change to a reviewed row; every other field must stay byte-identical.
+    retired_by_user = {'test-mass-agent-run-0'}
+    for before, after in zip(old, current):
+        if after['name'] in retired_by_user and after.get('status') == 'retired':
+            after['status'] = before.get('status')
     assert current[:len(old)] == old
 
 

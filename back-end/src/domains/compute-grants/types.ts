@@ -18,22 +18,47 @@ export interface ConnectedAccountDto {
   /** Populated only when state is needs_reconnect, for the tooltip. */
   lastErrorReason: string | null;
   connectedAt: string;
-  /** Last subscription usage an agent observed on this account's token; null until one is used. */
+  /** Last subscription usage observed on this account's token; null until one is measured (unknown). */
   usage: AccountUsageDto | null;
-  /** Provider cooldown on this account's token: it serves nothing until this passes. */
+  /** Cooldown on this account's token: it serves nothing until this passes (kept for older clients). */
   rateLimitedUntil: string | null;
+  /** The active cooldown and why; null when none is active at read time. */
+  cooldown: CooldownDto | null;
+  /**
+   * Earliest future reset of a spent (100% used) window, else the end of an
+   * authoritative cooldown; null when no provider-given reset applies. Never
+   * Rose's own backoff.
+   */
+  nextResetAt: string | null;
 }
 
-/** One provider quota window; `usedPct` is 0-100 as of `AccountUsageDto.observedAt`. */
+/** One provider quota window; `usedPct` is 0-100 USED as of `AccountUsageDto.observedAt`. */
 export interface UsageWindowDto {
   usedPct: number;
   resetsAt: string | null;
 }
 
+export type UsageSourceDto = 'response' | 'rate_limit' | 'usage_endpoint' | 'code_session';
+export type UsageStatusDto = 'allowed' | 'allowed_warning' | 'rejected';
+
 export interface AccountUsageDto {
   fiveHour: UsageWindowDto | null;
   sevenDay: UsageWindowDto | null;
   observedAt: string;
+  /** Where this observation came from. */
+  source: UsageSourceDto;
+  /** The provider's unified status at that observation, when it said. */
+  status: UsageStatusDto | null;
+}
+
+export type CooldownReasonDto =
+  'usage_window_5h' | 'usage_window_7d' | 'usage_window' | 'rate_limit' | 'stall' | 'auth';
+
+export interface CooldownDto {
+  until: string;
+  reason: CooldownReasonDto;
+  /** true: the provider supplied this reset; false: Rose's default/stall backoff (not a spent quota). */
+  authoritative: boolean;
 }
 
 export interface ListConnectionsResponse {

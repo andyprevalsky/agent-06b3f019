@@ -14,6 +14,13 @@ const text = (label: string, x: number, y: number, w = 160, h = 28) => ({
   source: 'pixels',
   confidence: 1,
 });
+/** Real iOS Settings search after a typed query did not register (prod lease 2a140be8 cursor 10). */
+export const unchangedSearchRows = () => [
+  text('Suggestions', 132, 126),
+  text('Accessibility', 216, 226),
+  text('Recents', 99, 714),
+  text('C Q Search', 139, 1237, 300),
+];
 export const touchRows = (on = false) => [
   text('Touch', 375, 84, 98.4, 29.6),
   text('AssistiveTouch', 177, 236, 226, 28),
@@ -103,10 +110,18 @@ export async function seedPortraitRoute(
   original: AssistiveOriginal = 'off',
   shape: PortraitRouteShape = 'fixture'
 ) {
+  return seedPortraitCommands(h, f, portraitRouteCommands(original, shape));
+}
+/** Drives an explicit (possibly deviating) native command list through normal admission. */
+export async function seedPortraitCommands(
+  h: Harness,
+  f: SetupFixture,
+  commands: ReturnType<typeof portraitRouteCommands>
+) {
   const oldLaunch = h.launchResult,
     oldObservation = h.observationResult;
   try {
-    for (const e of portraitRouteCommands(original, shape)) {
+    for (const e of commands) {
       if (e.operation === 'apps.launch') h.launchResult = e.result;
       if (e.operation === 'screen.text') h.observationResult = e.result;
       const response = await h.request(f.userId, `/leases/${f.leaseId}/operations`, {

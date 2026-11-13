@@ -1,22 +1,39 @@
 /** Caller already holds setup's device/generation lock; evidence is encrypted provider journal only. */
 import { openPhoneValue } from '../../providers/phoneHarnessCredentials';
-import { provePortraitRoute, type PortraitRouteEvent } from '../../providers/phonePortraitRoute';
+import {
+  portraitRouteBreakAt,
+  portraitRouteNext,
+  portraitRouteVerdict,
+  type PortraitRouteBreak,
+  type PortraitRouteEvent,
+} from '../../providers/phonePortraitRoute';
 import type { SetupClaim } from './repo.setupCommand';
 import type { SetupInput } from '../../providers/phoneSetupState';
 import type { Transaction, IPhoneOperation } from './types';
+const routeBreak = (stage: string, row?: { cursor: number; operation: string }) => ({
+  break: {
+    stage,
+    cursor: row?.cursor ?? 0,
+    operation: row?.operation ?? 'none',
+    next: portraitRouteNext(stage),
+  } satisfies PortraitRouteBreak,
+});
+/** The proven route, or the first journal event that broke it and the native step it expected. */
 export async function currentPortraitRoute(
   tx: Transaction,
   claim: SetupClaim,
   input: SetupInput,
   now: Date
-) {
+): Promise<
+  { digest: string; originalAssistiveTouch: 'on' | 'off' } | { break: PortraitRouteBreak }
+> {
   const attempt = claim.state.attempt;
   if (
     attempt === undefined ||
     typeof attempt.firstExecutionRunId !== 'string' ||
     attempt.firstExecutionRunId.length === 0
   )
-    return null;
+    return routeBreak('launch');
   const rows = await tx.iPhoneOperation.findMany({
     where: {
       leaseId: claim.lease.id,
@@ -29,10 +46,17 @@ export async function currentPortraitRoute(
   rows.reverse();
   let start = -1;
   for (let i = 0; i < rows.length; i++) if (rows[i].operation === 'apps.launch') start = i;
-  if (start < 0) return null;
+  if (start < 0) return routeBreak('launch', rows.at(-1));
+  const context = {
+    attemptId: input.attemptId,
+    revision: input.expectedRevision,
+    firstRun: attempt.firstExecutionRunId,
+    profileRevision: claim.state.profileRevision,
+    now: now.getTime(),
+  };
   const events: PortraitRouteEvent[] = [];
   for (const row of rows.slice(start)) {
-    if (
+    const event =
       row.actor !== 'agent' ||
       row.state !== 'SUCCEEDED' ||
       row.providerEpoch !== claim.command.providerEpoch ||
@@ -42,20 +66,15 @@ export async function currentPortraitRoute(
       row.completedAt.getTime() < row.createdAt.getTime() ||
       row.completedAt.getTime() > now.getTime() ||
       now.getTime() - row.createdAt.getTime() > 300000
-    )
-      return null;
-    const event = journalEvent(row);
-    if (event === null) return null;
+        ? null
+        : journalEvent(row);
+    if (event === null) return { break: portraitRouteBreakAt(events, context, row) };
     events.push(event);
   }
-  if (events.at(-1)?.cursor !== claim.command.cursor - 1) return null;
-  return provePortraitRoute(events, {
-    attemptId: input.attemptId,
-    revision: input.expectedRevision,
-    firstRun: attempt.firstExecutionRunId,
-    profileRevision: claim.state.profileRevision,
-    now: now.getTime(),
-  });
+  if (events.at(-1)?.cursor !== claim.command.cursor - 1)
+    return { break: portraitRouteBreakAt(events, context, undefined) };
+  const verdict = portraitRouteVerdict(events, context);
+  return 'proof' in verdict ? verdict.proof : verdict;
 }
 
 function journalEvent(row: IPhoneOperation): PortraitRouteEvent | null {

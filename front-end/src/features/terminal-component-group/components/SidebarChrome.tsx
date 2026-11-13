@@ -98,7 +98,7 @@ export function SidebarSearch({
           onChange={(e) => onChange(e.target.value)}
           placeholder="Search"
           aria-label="Search agents"
-          className="h-8 rounded-md border-transparent bg-transparent pl-7 text-sm shadow-none hover:bg-gray-100 focus-visible:bg-gray-100 focus-visible:ring-0 focus-visible:ring-offset-0"
+          className="h-8 rounded-md border-transparent bg-transparent pl-7 shadow-none hover:bg-gray-100 focus-visible:bg-gray-100 focus-visible:ring-0 focus-visible:ring-offset-0"
         />
       </div>
     </div>
