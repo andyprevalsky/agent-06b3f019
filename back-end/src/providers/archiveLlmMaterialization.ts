@@ -108,18 +108,68 @@ function mergeUpdate(base: Payload, patch: Payload): void {
     }
   }
 }
+// The Python production writer submits base and partial-patch encryption to
+// independent executor jobs. Their recorded encryption-completion clocks do
+// not attest submission order. Recognize its exact immutable object protocol;
+// Node UUID/ordinal updates retain their base-ack chronology requirement.
+function isPythonAsyncPatch(base: Source, update: Source): boolean {
+  const dump = base.payload.dump_id;
+  if (
+    typeof dump !== 'string' ||
+    !/^[a-f0-9]{12}$/.test(dump) ||
+    base.path !== `llm/${dump}.json.gz.enc` ||
+    !Array.isArray(base.payload.messages) ||
+    base.payload.message_count !== base.payload.messages.length ||
+    typeof base.payload.call_site !== 'string' ||
+    update.payload.root_agent_id !== base.payload.root_agent_id ||
+    update.payload.agent_id !== base.payload.agent_id ||
+    update.payload.dump_id !== dump
+  )
+    return false;
+  const name = update.path.match(
+    /^llm-updates\/([a-f0-9]{12})-([1-9][0-9]*)-([\p{L}\p{N}_.-]{1,64})\.json\.gz\.enc$/u
+  );
+  if (!name || name[1] !== dump || !Number.isSafeInteger(Number(name[2]))) return false;
+  const patchKeys = new Set([
+    'agent_id',
+    'root_agent_id',
+    'span_id',
+    'dump_id',
+    'model',
+    'config',
+    'response_format',
+    'tools',
+    'output',
+    'extra',
+  ]);
+  return Object.keys(update.payload).every((key) => patchKeys.has(key));
+}
+
 function groupCalls(sources: Source[]): { base: Source; payload: Payload; updates: Source[] }[] {
   const calls = new Map<string, { base: Source; payload: Payload; updates: Source[] }>();
   const key = (source: Source): string => `${source.payload.agent_id}/${source.payload.dump_id}`;
   for (const source of sources.filter((item) => item.path.startsWith('llm/'))) {
     if (calls.has(key(source)) || !Array.isArray(source.payload.messages))
       throw new Error('Duplicate or malformed base call');
-    calls.set(key(source), { base: source, payload: structuredClone(source.payload), updates: [] });
+    calls.set(key(source), {
+      base: source,
+      payload: structuredClone(source.payload),
+      updates: [],
+    });
   }
   for (const update of sources.filter((item) => item.path.startsWith('llm-updates/'))) {
     const call = calls.get(key(update));
-    if (!call || update.createdAtMs < call.base.createdAtMs)
-      throw new Error('Orphan or pre-base archive update');
+    if (!call) throw new Error('Orphan or pre-base archive update');
+    if (update.createdAtMs < call.base.createdAtMs) {
+      if (!isPythonAsyncPatch(call.base, update))
+        throw new Error('Orphan or pre-base archive update');
+      // Preserve the raw envelope and its actual clock. This is a format-bound
+      // interpretation of encryption completion, not a reconstructed timestamp.
+      update.proof.ordering = {
+        protocol: 'python-async-partial-patch',
+        encryptionCompletionDeltaMs: update.createdAtMs - call.base.createdAtMs,
+      };
+    }
     mergeUpdate(call.payload, update.payload);
     call.updates.push(update);
   }
@@ -170,5 +220,9 @@ export async function materializeArchiveLlmDumps(
       'Latest BASE metadata.created_at_ms across requested root; recorded updates merged without synthetic provenance',
   };
   const proof = write(directory, 'manifest.json', json(manifest));
-  return { ...manifest, manifestPath: proof.path, manifestSha256: proof.sha256 };
+  return {
+    ...manifest,
+    manifestPath: proof.path,
+    manifestSha256: proof.sha256,
+  };
 }

@@ -50,3 +50,106 @@ None recorded.
 ## Reusable lesson
 
 A resource keyed by the checkout directory name is global once the directory name is the same on every CI machine.
+
+
+## Recurrence: remote code-session callback (2026-11-11)
+
+The November 7 fix removed the shared-domain collision, but its statement that no
+semantic spec needs a public origin omitted remote code sessions. On frozen
+`3b48f21a0379d93cba8937bc41f67aa2f97a1657`, round 8's actual semantic gate
+finished with 59 passes and two failures: the realtime and mobile agent cases
+remained at one message bubble. Both remote agents computed the requested result,
+then their `rose message` calls exited 1 with `could not reach Rose: fetch failed`.
+The original backend and worker logs are retained under the round 8 semantic
+remote artifact. Cleanup completed; these failures remain failures.
+
+Actual retained logs establish skipped public tunneling and a localhost backend.
+The runtime env files match the original custody after the canonical normalizer
+masks the rotating GitHub token; they contain no callback-origin override. The
+original generated sandbox callback URL itself was not retained, so its exact
+historical value is UNRECORDED. The real workspace constructor reproduces the
+loopback callback under the captured no-override configuration. This establishes
+the harness contract gap without inventing the original URL or a whole-gate
+baseline attribution. An initially suspected transcript validator rejection was
+replayed through the actual renderer and still produced one bubble; it is not
+this repair.
+
+The candidate reuses the existing named ephemeral ngrok path with a unique
+semantic request token, no domain reservation and no shared-domain fallback.
+Its reported HTTPS origin is bound before backend spawn, and that exact tunnel
+process is required for stack liveness. The semantic launch explicitly retains
+`DISABLE_FAST_MODE_PROXY=1`: opening callback ingress must not change the prior
+direct Claude OAuth model route into the local Anthropic proxy. The owning
+regression executes the actual Bash proxy branch and requires its Anthropic URL
+to stay empty and its Codex proxy variable to remain unset. Before any Playwright agent creation,
+the harness reads the existing authenticated queue-pointer route in observation
+mode both locally and publicly. Both must identify the unique queue in this
+stack's canonical services manifest and have identical pointer fields; redirects,
+foreign origins, dead endpoints and wrong stacks refuse. No new backend API is
+introduced, and observation mode does not admit a continuation.
+
+The registered owning shell regression runs actual tunnel publication and
+workspace callback construction with provider, HTTP and optional database
+boundaries doubled: the unchanged final regression fails on the old harness and
+passes on the candidate. It covers distinct concurrent run names, no reservation,
+exact env/HOME callback handoff, wrong-stack/foreign-origin/dead-endpoint refusal,
+and no external network or database requests. Original UI/latency specifications,
+prompts, assertions, workers and timeouts are unchanged. This local result is
+not a native semantic PASS: the unchanged full semantic gate must still pass on
+the integrated reviewed snapshot before the recurrence is considered resolved.
+
+The lesson is to inventory callbacks made by remote code tools as well as browser
+navigation when deciding whether an isolated test stack can omit public ingress.
+Use a uniquely owned endpoint and prove its route reaches this exact isolated
+stack before creating work; a static public origin or an unused local health
+check does not establish that binding.
+
+
+## Follow-up: cleanup fixture omitted the callback contract (2026-11-11)
+
+The callback repair introduced a separate offline fixture mismatch on frozen
+`6dba99e836331e74cca0ee57be320e9f83a1c17d`. Structural occurrence
+`eea7356baf4c4296a75a871a6077e51a` retained two failures in
+`test_actual_stack_shell_records_cleanup_exit_not_echo`: both cleanup-exit
+subcases expected shell exit 1 but received 2 at line 169. The native structural
+log records 11 tests and two failures; the subprocess stderr was empty. These
+results remain failures. This occurrence does not establish a production
+cleanup failure or a recurrence of the original remote callback transport error.
+
+Gate attribution for this fixture is INTRODUCED. Actual local Bash traces show
+its old `DEPLOY_SEMANTIC_TOKEN=request-token` failing the mandatory 32-character
+hex callback-token check before stack startup. The cleanup fixture also supplied
+none of the new callback manifest, tunnel-process and authenticated queue-pointer
+observation inputs. The exact original method passes against the retained
+pre-callback `3b48` shell and fails against the current shell. Thus the first bad
+boundary is outdated fixture setup, not cleanup-status recording.
+
+Archive searches were `test_actual_stack_shell_records_cleanup_exit_not_echo`
+and `semantic deploy fixture missing closure`. The September 11 lost-inner-
+evidence case and November 8 reporter-composition case were leads, not matching
+first-bad boundaries. Both original shell traces, the native failure excerpt,
+baseline result and candidate RED/GREEN are retained under
+`.context/preparation-recovery/semantic-cleanup-fixture-rca/`.
+
+The ignored test-only candidate supplies a protocol-valid request token and
+executes the unchanged inline Node callback validator. Filesystem/process,
+optional dotenv and HTTP boundaries are explicit local doubles; no tunnel,
+provider, database, browser or model is invoked. Six original assertions,
+including expected exit 1, cleanup exit/completion, lane results and readiness,
+remain AST-identical. The seventh still checks exact request-token equality;
+its input and expected fixture value both become the valid 32-character token.
+All other original test methods and the 20-second subprocess timeout are
+unchanged. No production guard is bypassed or weakened.
+
+The identical focused candidate command ran one method with both cleanup-exit
+subcases: RED with two failures in 0.064 seconds, then GREEN in 0.193 seconds.
+The retained original method against the pre-callback shell passed in 0.133
+seconds. These are provider-free owning-fixture results only. Root's separately
+retained native 61-case semantic PASS is not derived from this fixture. The
+candidate remains subject to independent review, integration and normal
+structural-gate acceptance; this record grants no whole-gate or deployment PASS.
+
+Coordinator constraint for this follow-up: preserve the original cleanup
+assertions, exit expectations, budgets and production guards; repair only the
+fixture's required inputs and retain the original failures. This is a current
+coordination constraint, not invented historical human feedback.

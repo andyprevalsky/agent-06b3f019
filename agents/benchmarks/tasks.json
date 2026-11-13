@@ -6189,6 +6189,12 @@
     ]
   },
   {
+    "quarantine": {
+      "since": "2026-11-13",
+      "repair": "pending-handoff:a11f1f0aba5e4d6ea010b086f5b54967",
+      "error": "Tool 'spawn_browser_agent' exceeded its exact root call limit during execution: expected 1, got 2 (Tilion sess_993d70* worker 503 on CDP connect and DELETE; browser agent recorded 0 steps). First native attempt FAILED; one automatic retry PASS (FLAKY).",
+      "evidence": "PR1910 deploy v3 smoke .context/deploy-cloud/c96ccd4b4bc36d6c51f4e4f74f752ad8d0f0cab7ea264ca9b2651ce259996b0f; RCA: tilion.ts validation+cleanup AggregateError skips replacement retry"
+    },
     "name": "browser-auth-member-discount-purchase",
     "title": "Hosted Purchase: Account Chosen For The Member Price",
     "description": "The shop lets guests buy, but members pay 10% less; the browser agent creates an account with the minted identity instead of checking out as a guest, and pays the member price.",
@@ -8066,6 +8072,12 @@
     "deploy_canary": true
   },
   {
+    "quarantine": {
+      "since": "2026-11-13",
+      "repair": "pending-handoff:3d3568b403944e04a7c3dcfb05d6d19d",
+      "error": "Timeout after 454s (task timeout=450s); browser agent recorded 0 trajectory step(s) (Tilion session failed validation and cleanup). First native attempt FAILED; one automatic retry PASS (FLAKY).",
+      "evidence": "PR1910 deploy v4 smoke .context/deploy-cloud/65859a55107834e382ede51c1e35453a1954dc1a7a562382c3f4c87cf817a265; RCA: Tilion sess_993d70* worker 503 on CDP connect + DELETE; tilion.ts validation+cleanup AggregateError skipped the replacement retry (fixed in this PR)"
+    },
     "name": "browser-smoke",
     "quarantine": {
       "since": "2026-11-13",
@@ -8364,6 +8376,12 @@
     }
   },
   {
+    "quarantine": {
+      "since": "2026-11-13",
+      "repair": "pending-handoff:1f9eca18a4744006a75aba4053eabf98",
+      "error": "Expected gate subscription, observed write_lock after Tilion session failed validation and cleanup. First native attempt FAILED; one automatic retry PASS (FLAKY).",
+      "evidence": "PR1910 deploy v4 smoke .context/deploy-cloud/65859a55107834e382ede51c1e35453a1954dc1a7a562382c3f4c87cf817a265; RCA: Tilion sess_993d70* worker 503 on CDP connect + DELETE; tilion.ts validation+cleanup AggregateError skipped the replacement retry (fixed in this PR)"
+    },
     "name": "agent-payment-new-user-journey",
     "quarantine": {
       "since": "2026-11-13",
