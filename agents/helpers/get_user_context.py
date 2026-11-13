@@ -529,6 +529,8 @@ def _format_user_context(
                 or emails
                 or (status == "SYNC_FAILED" and name.lower() != "gmail")
             ):
+                if name.lower() in {"granola", "fireflies"}:
+                    name = f"Meeting note taker ({name.lower()}.ai)"
                 if emails:
                     integration_lines.append(f"- {name}: {', '.join(emails)}")
                 else:
