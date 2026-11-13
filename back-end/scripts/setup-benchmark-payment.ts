@@ -33,6 +33,8 @@ import {
   requireOwnedLiveFixtureCustomer,
   type FixtureMode,
 } from './setup-benchmark-payment-guards';
+import { connectThenOpen } from './seed-local-helpers';
+import { prisma as sharedPrisma } from '../src/providers/database';
 
 // Cursor Cloud injects per-key secrets into the process env. A truncated
 // BENCHMARK_AGENTCARD_ORG_ID (seen as 7 chars) would otherwise beat the full
@@ -548,7 +550,12 @@ checks remain mandatory. Existing purchase history is preserved.
   assertDedicatedBenchmarkUser(userId, mode);
   assertUserMatchesMode(userId, mode);
   assertNonAdminBenchmarkUser(userId, mode);
-  const prisma = new PrismaClient();
+  // The AgentCard org imports above construct src/providers/database.ts's module client. Open
+  // this script's own client only after that client's first connect has run the Prisma engine's
+  // one-time TLS probe, which setenv()s SSL_CERT_FILE/DIR on an engine thread: a second client
+  // constructed earlier reads process.env during that write, and the fixture died with SIGSEGV
+  // and no output (docs/rca/cases/2026-11-08-prisma-engine-tls-probe-setenv-raced-second-client-getenv.md).
+  const prisma = await connectThenOpen(sharedPrisma, () => new PrismaClient());
   try {
     if (mode === 'live') {
       await provisionLiveFixture(prisma, userId, selectedCustomerId);
@@ -556,7 +563,7 @@ checks remain mandatory. Existing purchase history is preserved.
     }
     await seedSandboxFixture(prisma, userId);
   } finally {
-    await prisma.$disconnect();
+    await Promise.all([prisma.$disconnect(), sharedPrisma.$disconnect()]);
   }
 }
 

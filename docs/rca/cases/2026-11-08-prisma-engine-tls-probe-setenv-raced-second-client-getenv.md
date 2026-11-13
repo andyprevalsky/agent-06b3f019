@@ -84,6 +84,23 @@ rc 139 is ever seen.
 
 10k-agent behavior: none. The seed runs once per stack; one extra sequential connect at seed start.
 
+## Recurrence 2026-11-13 (PR #1981 smoke round r12): the cloud payment fixture
+
+Guest `agent-payment-test-shop` logged `seeding isolated payment fixture` at 04:03:08Z and
+`FATAL: setup-benchmark-payment.ts failed` at 04:03:09Z, with nothing in between. The driver
+captures the script's stdout and stderr (`cloudbench-boot.sh` runs the driver with `2>&1`), and a
+thrown error or `process.abort()` prints a stack. Only a signal death leaves no output, and a
+locally simulated SIGKILL reproduced that exact signature. Healthy guests print their first
+fixture line about 2 s after seeding starts, so this guest died in the first-connect window.
+`setup-benchmark-payment.ts` has the same two-client shape as the seed: its AgentCard org imports
+construct `src/providers/database.ts`'s module client, and `main()` then constructed a second
+client before either had connected. Fix: `main()` opens its client with
+`connectThenOpen(sharedPrisma, () => new PrismaClient())` and releases both. The driver now logs
+the fixture's exit code and signal, so the next occurrence is classified rather than inferred.
+Regression: `testPaymentFixtureOpensItsClientAfterTheModuleClient` in
+`seed-local-user.blackbox.ts`; it fails on the old script. The crash itself (about 1 in 1,000
+starts) was not reproduced natively for this script, so this instance's signal is unconfirmed.
+
 ## Human feedback
 
 None recorded.
