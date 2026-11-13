@@ -120,7 +120,9 @@ async function main(): Promise<void> {
       (error: unknown) =>
         error instanceof AgentGithubRepoNotConnectedError &&
         error instanceof AgentProjectNotFoundError &&
-        agentProjectNotFoundBody(error).code === 'GITHUB_REPO_NOT_CONNECTED'
+        agentProjectNotFoundBody(error).code === 'GITHUB_REPO_NOT_CONNECTED' &&
+        // The 404 names the repo it refused (tool contract: "fails with an error naming it").
+        agentProjectNotFoundBody(error).error.includes('private-owner/secret')
     );
     // Other not-found placements carry no repo code (the agents side keys on it).
     assert.deepEqual(agentProjectNotFoundBody(new AgentProjectNotFoundError('Folder not found')), {

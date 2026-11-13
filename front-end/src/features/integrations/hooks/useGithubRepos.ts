@@ -13,8 +13,13 @@
  *   [READY] --disconnect(ref)--> [DISCONNECTING ref] --done--> [READY] (refetched)
  *                                                    --fail--> inline error on the list
  *
- * Folders (GET /api/folders) feed the optional folder picker and share their cache
- * with the left bar, so a folder's settings show the new repo without a reload.
+ * Folders (GET /api/folders) feed the optional folder picker. Every change
+ * invalidates the left bar's folders too, so a folder's settings show the new repo
+ * without a reload.
+ *
+ * Both queries are keyed by the signed-in user id: after a sign-out and a different
+ * sign-in on the same device, the panel never renders the previous account's cached
+ * repos or folders (it loads the new account's). Signed out, nothing is fetched.
  */
 
 import { useState } from 'react';
@@ -37,29 +42,31 @@ function message(error: unknown): string | null {
   return error instanceof Error ? error.message : String(error);
 }
 
-export function useGithubRepos(enabled: boolean) {
+export function useGithubRepos(enabled: boolean, userId: string | null) {
   const queryClient = useQueryClient();
+  const active = enabled && userId !== null;
   const repos = useQuery({
-    queryKey: GITHUB_REPOS_QUERY_KEY,
+    queryKey: [...GITHUB_REPOS_QUERY_KEY, userId],
     queryFn: fetchGithubReposApi,
-    enabled,
+    enabled: active,
     retry: false,
   });
   const folders = useQuery({
-    queryKey: FOLDERS_QUERY_KEY,
+    queryKey: [...FOLDERS_QUERY_KEY, userId],
     queryFn: fetchFolders,
-    enabled,
+    enabled: active,
     staleTime: 60_000,
     retry: false,
   });
   const [disconnectingRef, setDisconnectingRef] = useState<string | null>(null);
 
+  // Prefix matches: the user-keyed queries here and the left bar's folders list.
   const refetchAll = () =>
-    Promise.all(
-      [GITHUB_REPOS_QUERY_KEY, FOLDERS_QUERY_KEY, PROJECTS_QUERY_KEY].map((queryKey) =>
-        queryClient.invalidateQueries({ queryKey, exact: true }),
-      ),
-    );
+    Promise.all([
+      queryClient.invalidateQueries({ queryKey: GITHUB_REPOS_QUERY_KEY }),
+      queryClient.invalidateQueries({ queryKey: FOLDERS_QUERY_KEY }),
+      queryClient.invalidateQueries({ queryKey: PROJECTS_QUERY_KEY, exact: true }),
+    ]);
 
   const connectMutation = useMutation({
     mutationFn: (input: ConnectGithubRepoInput) => connectGithubRepoApi(input),
@@ -83,7 +90,7 @@ export function useGithubRepos(enabled: boolean) {
 
   return {
     repos: repos.data ?? [],
-    loading: enabled && repos.isPending,
+    loading: active && repos.isPending,
     listError: message(repos.error),
     folders: folders.data ?? [],
     connecting: connectMutation.isPending,

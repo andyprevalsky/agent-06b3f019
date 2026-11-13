@@ -13,17 +13,22 @@
  *     the folder's settings show the new repo
  *   - refusals are inline: 403 access denied, 409 folder conflict, 400 invalid,
  *     503 rate limited; nothing is added
+ *   - the repo and folder caches are keyed by the signed-in user: another account
+ *     signing in on the same device never sees the previous account's repos
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { fireEvent, screen, waitFor, within } from '@testing-library/react';
+import { fireEvent, renderHook, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import type { ReactNode } from 'react';
 
 import Integrations from '@/pages/Integrations';
 import { GITHUB_REPOS_SECTION_ID, focusIntegrationsSection } from '@/lib/integrationsSection';
 import { useRoseApps } from '@/features/terminal-component-group/components/rose-apps/roseAppsState';
 import { RoseMobileAgentList } from '@/features/terminal-component-group/components/rose-sidebar/RoseMobileAgentList';
 import type { GithubRepo } from '@/features/integrations/api/githubRepos';
+import { useGithubRepos } from '@/features/integrations/hooks/useGithubRepos';
 
 import { makeAgent, mockSession } from './app-sidebar.fixtures';
 import { capturedRequests, clearCaptures } from './msw/capture';
@@ -603,6 +608,64 @@ describe('GitHub Repos on the Integrations panel', () => {
     const section = screen.getByRole('region', { name: 'GitHub Repos' });
     expect(await within(section).findByRole('alert')).toHaveTextContent(
       'This repository is not connected.',
+    );
+  });
+
+  it("never shows the previous account's repos or folders after another account signs in", async () => {
+    // One QueryClient for the whole page, as in the app: account A signs out, B signs in.
+    const owner = { current: 'user-a' };
+    let releaseB: () => void = () => {};
+    const bReady = new Promise<void>((resolve) => {
+      releaseB = resolve;
+    });
+    const reposOf = (user: string) =>
+      user === 'user-a'
+        ? [repo({ canonical_ref: 'gh:a-org/a-secret', repo_name: 'a-secret', owner: 'a-org' })]
+        : [repo({ canonical_ref: 'gh:b-org/b-app', repo_name: 'b-app', owner: 'b-org' })];
+    server.use(
+      http.get(`${API_BASE}/integrations/github/repos`, async () => {
+        const user = owner.current;
+        if (user === 'user-b') await bReady; // B's response is still in flight
+        return HttpResponse.json({ repos: reposOf(user) });
+      }),
+      http.get(`${API_BASE}/folders`, () =>
+        HttpResponse.json({
+          folders: [
+            { id: `${owner.current}-folder`, name: `${owner.current} folder`, github_repo: null },
+          ],
+        }),
+      ),
+    );
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const wrapper = ({ children }: { children: ReactNode }) => (
+      <QueryClientProvider client={client}>{children}</QueryClientProvider>
+    );
+    const { result, rerender } = renderHook(
+      ({ userId }: { userId: string | null }) => useGithubRepos(true, userId),
+      { wrapper, initialProps: { userId: 'user-a' as string | null } },
+    );
+    await waitFor(() =>
+      expect(result.current.repos.map((r) => r.canonical_ref)).toEqual(['gh:a-org/a-secret']),
+    );
+    await waitFor(() => expect(result.current.folders.map((f) => f.id)).toEqual(['user-a-folder']));
+
+    // Signed out: nothing of A's is shown, and nothing is fetched.
+    clearCaptures();
+    rerender({ userId: null });
+    expect(result.current.repos).toEqual([]);
+    expect(result.current.folders).toEqual([]);
+    expect(requests('GET', '/integrations/github/repos')).toHaveLength(0);
+
+    // B signs in: while B's list loads, A's cached repos and folders never render.
+    owner.current = 'user-b';
+    rerender({ userId: 'user-b' });
+    expect(result.current.repos).toEqual([]);
+    expect(result.current.loading).toBe(true);
+    await waitFor(() => expect(result.current.folders.map((f) => f.id)).toEqual(['user-b-folder']));
+    expect(result.current.repos).toEqual([]);
+    releaseB();
+    await waitFor(() =>
+      expect(result.current.repos.map((r) => r.canonical_ref)).toEqual(['gh:b-org/b-app']),
     );
   });
 

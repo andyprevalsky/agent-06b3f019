@@ -37,8 +37,8 @@ export const GITHUB_REPO_NOT_CONNECTED_CODE = 'GITHUB_REPO_NOT_CONNECTED';
 /** The explicit repo ref is not connected: a 404 that carries a typed `code`. */
 export class AgentGithubRepoNotConnectedError extends AgentProjectNotFoundError {
   readonly code = GITHUB_REPO_NOT_CONNECTED_CODE;
-  constructor() {
-    super('GitHub repo not connected');
+  constructor(readonly ref: string) {
+    super(`GitHub repo ${ref} is not connected for this user`);
     this.name = 'AgentGithubRepoNotConnectedError';
   }
 }
@@ -121,7 +121,7 @@ async function asPlacementError<T>(work: () => Promise<T>): Promise<T> {
     return await work();
   } catch (error) {
     if (error instanceof GithubRepoRefNotFoundError) {
-      throw new AgentGithubRepoNotConnectedError();
+      throw new AgentGithubRepoNotConnectedError(error.ref);
     }
     throw error;
   }

@@ -77,7 +77,8 @@ function useProjectsCache() {
   const refetch = () =>
     Promise.all([
       queryClient.invalidateQueries({ queryKey: PROJECTS_QUERY_KEY, exact: true }),
-      queryClient.invalidateQueries({ queryKey: FOLDERS_QUERY_KEY, exact: true }),
+      // Prefix: also the Integrations panel's user-keyed folders list.
+      queryClient.invalidateQueries({ queryKey: FOLDERS_QUERY_KEY }),
     ]);
   return {
     refetch,
