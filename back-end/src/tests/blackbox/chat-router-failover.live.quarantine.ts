@@ -12,7 +12,7 @@ export const liveFailoverCase = (run: () => Promise<void>, unit = 'chat-router-f
   quarantine(
     {
       since: '2026-11-13',
-      repair: 'pending-handoff:6a3ec2af295d4367864df3f052dc4985',
+      repair: 'https://boxes.dev/thread/ph7ej1g7ets5f9jg2rw6nb3red8j4bwe',
       error: 'AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:',
       evidence:
         'PR #1972 deploy f93b9ad17f live-probes: goalAnchorFailure at chat-router-failover.live.support.ts:373 on attempt 1, rerun PASS; NOT_INTRODUCED (portrait-only diff)',
