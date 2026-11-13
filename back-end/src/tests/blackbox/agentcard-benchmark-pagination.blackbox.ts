@@ -171,6 +171,22 @@ function fixture(total: number, changes = false) {
     /metadata is malformed/
   );
   passed++;
+  const overfullReads: string[] = [];
+  await assert.rejects(
+    helper.resolveBenchmarkCardholderId(['valid'], async (name) => {
+      overfullReads.push(name);
+      if (name === 'get_cardholder_kyc_status')
+        return { structuredContent: { kyc_status: 'verified' } };
+      return { structuredContent: { cardholders: [{ id: 'valid' }], total: 0 } };
+    }),
+    /exceeded its reported total/
+  );
+  assert.deepEqual(
+    overfullReads,
+    ['list_cardholders'],
+    'a page beyond the reported total must be rejected before the preferred early resolution'
+  );
+  passed++;
   await assert.rejects(
     helper.resolveBenchmarkCardholderId([], async (name, args) => ({
       structuredContent: {

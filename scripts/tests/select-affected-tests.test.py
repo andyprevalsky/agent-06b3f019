@@ -88,6 +88,18 @@ def check_shell_copy_edges() -> None:
         graph.path_edges("scripts/package.sh")
         check("scripts/execute.sh" in graph.deps["scripts/package.sh"],
               "compound or substituted copy commands conservatively retain actual execution edges")
+    files = ["scripts/run-helper", "scripts/copied.py", "fixtures/input.json"]
+    for line in ('./scripts/run-helper && cp fixtures/input.json "$tmp/input.json"\n',
+                 'scripts/run-helper && cp scripts/copied.py "$OUT/"\n'):
+        graph = sat.Graph(files)
+        graph.text["scripts/package.sh"] = line
+        graph.path_edges("scripts/package.sh")
+        check("scripts/run-helper" in graph.deps["scripts/package.sh"],
+              "a command executed before a same-line copy keeps its transitive execution edge")
+        copied = "fixtures/input.json" if "fixtures/" in line else "scripts/copied.py"
+        check(copied in graph.data_deps["scripts/package.sh"]
+              and copied not in graph.deps["scripts/package.sh"],
+              "the file copied after an executed command remains a data edge")
 
 
 def check_extraction_precision(selector: sat.Selector) -> None:
