@@ -258,7 +258,10 @@ def historical(state, failure, root):
         authority = {'kind': 'original_resource_warning', 'confirmation': rca['resource_skip'],
                      'original_warning': copy.deepcopy(original_warning)}
     else:
-        need(t['benchmark_status'] == 'FAILED' and decision(rca) == 'pending post-merge'
+        # A confirmed stall can end natively FAILED or ERROR (reconciliation raised after the final
+        # lifecycle read failed, PR #2014 smoke): both are complete non-passing rows; refusing custody
+        # would leave only a rerun that mints another card.
+        need(t['benchmark_status'] in ('FAILED', 'ERROR') and decision(rca) == 'pending post-merge'
              and f['disposition'] == 'pending post-merge' and not rca.get('resource_skip'), 'independent failure lacks canonical pending repair')
         pending = [p for p in state.get('pending_post_merge', []) if p['id'] == f['id']]
         resolved = failure != f

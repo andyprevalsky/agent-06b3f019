@@ -11,6 +11,7 @@ symptoms:
   - "historical() snap = cleanup['agentcard_release_stall_lifecycles'][t['agent_id']] KeyError"
   - "DEPLOY_CYCLE BLOCKED: '9a3babcc-d45d-43c7-9dfb-9095fbac47b4'"
   - prepare-historical-no-retry refused a changed-source refresh and forced a full gate rerun
+  - "DEPLOY_CYCLE BLOCKED: historical custody: independent failure lacks canonical pending repair"
 tags:
   - deploy
   - agentcard
@@ -21,6 +22,7 @@ sources:
   - PR #1972 deploy cycle deploy-pipeline-pr1972-r7 (READY on f93b9ad17fb1, refresh to dd4b27a38f2c)
   - commit 5fecafd337de7ba0ae7860637cea53235edb4dfe (PR #1972 merge)
   - agent 9a3babcc-d45d-43c7-9dfb-9095fbac47b4 (root), 4a71ddef-34a2-4bfd-ab7a-51413c2fafa6 (purchase owner)
+  - PR #2014 deploy smoke agent 6ead2d7b-e30f-4852-b149-9cbe7fe4f197 (stall row ended native ERROR)
 repro: python3 scripts/tests/deploy-test-cycle.test.py Cycle.test_historical_custody_binds_subagent_owned_stall_and_refuses_unprovable_owner
 status: fixed
 ---
@@ -96,6 +98,23 @@ follow-up: archiving a cycle by renaming its directory leaves its absolute
 attempt paths pointing at the next cycle's namespace. The fixture regression is
 the only end-to-end pass. 10k-agent behavior: per-row dictionary work over one
 native task, with no new I/O.
+
+## Recurrence in the repairing deploy (PR #2014)
+
+The same over-assumption appeared again during this repair's own deploy. In PR
+#2014's smoke, agent-payment-abandonment hit the exact sandbox stall
+(owt_88ebc5d1a2ed88b933dbea65, 4396 cents, released 0). Its native row ended
+`ERROR`, not `FAILED`: an AgentCard org-token 401/429 storm failed the final
+lifecycle reads, and `_wait_for_expected_payment_lifecycle` raised. The builder
+required `benchmark_status == 'FAILED'` for a canonical pending repair, so the
+refresh refused with "independent failure lacks canonical pending repair". The
+only remaining path, a full rerun, would mint another card after a confirmed
+stall. Custody now accepts both complete non-passing native outcomes, `FAILED`
+and `ERROR`; a `PASSED` row still refuses. Regression:
+`Cycle.test_historical_custody_keeps_no_retry_for_stall_row_that_ended_error`
+fails on the prior builder with the live refusal and passes with the fix. The
+live obligation then proved end to end, including the real native fleet
+closure.
 
 ## Human feedback
 

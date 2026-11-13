@@ -138,7 +138,7 @@ class EnvironmentIdentity(unittest.TestCase):
 
 
 class Cycle(unittest.TestCase):
-    def custody_fixture(self, top_level=None, gate_name="api", purchase_owner=None):
+    def custody_fixture(self, top_level=None, gate_name="api", purchase_owner=None, failed_status='FAILED'):
         import deploy_test_historical_custody as h
         mocked = patch.object(h, 'native_closure', return_value={'fixture': 'terminal native fleet'})
         mocked.start(); self.addCleanup(mocked.stop)
@@ -181,8 +181,8 @@ class Cycle(unittest.TestCase):
                          purchase_cleanup=[dict(agent_id=snap['agentId'], purchase_id=snap['purchase']['id'],
                           card_id=snap['agentCard']['id'], provider_transfer_id=snap['orgTransfer']['id'],
                           total_cents=4396, status='HELD', funding_status='RECLAIMING')])
-            row = dict(name=name, agent_id=root_id, passed=False, status='ACTIVE' if i else 'SKIPPED',
-                       benchmark_status='FAILED' if i else 'SKIPPED', failure_reason='auth then timeout' if i else self.STALL_REASON)
+            row = dict(name=name, agent_id=root_id, passed=False, status=('ERROR' if failed_status == 'ERROR' else 'ACTIVE') if i else 'SKIPPED',
+                       benchmark_status=failed_status if i else 'SKIPPED', failure_reason='auth then timeout' if i else self.STALL_REASON)
             native = dict(**row, cleanup_failure=None, context_violations=[],
                           execution_provenance={'base_sha': self.state['source']['head']},
                           logs={'cloud_cleanup_evidence': dict(errors=[], root_agent_id=root_id, final=final,
@@ -1602,6 +1602,29 @@ class Cycle(unittest.TestCase):
         h.verify(self.state, self.root)
         self.assertEqual({'agent-payment-abandonment', 'agent-payment-idempotent-abandonment'},
                          set(c.reuse_qualifications(self.state, new['gates'][1], root=self.root)))
+
+    def test_historical_custody_keeps_no_retry_for_stall_row_that_ended_error(self):
+        # PR #2014 smoke: agent-payment-abandonment hit the exact sandbox stall, but an AgentCard org-token
+        # 401/429 storm failed its final lifecycle read, so the native row ended ERROR, not FAILED. Its
+        # canonical pending repair must still carry no-retry custody; a refusal forces a re-minting rerun.
+        import deploy_test_historical_custody as h
+        new = self.custody_fixture(failed_status='ERROR')
+        proof = h.build(self.state, self.plan, new, self.root)
+        case = next(r for r in proof['cases'] if r['original_failure']['id'] == 'failure-1')
+        self.assertEqual('canonical_pending_repair', case['authority']['kind'])
+        c.refresh(self.state, self.plan, new, self.root, historical_no_retry_proof=proof)
+        self.assertEqual({'failure-0', 'failure-1'}, {r['original_failure']['id'] for r in self.state['historical_no_retry_custody']})
+        h.verify(self.state, self.root)
+        # Only complete non-passing native outcomes qualify; a PASSED row is never custody.
+        state = copy.deepcopy(self.state)
+        f = state['failures'][1]; file = Path(f['worker_evidence']['path']); doc = json.loads(file.read_bytes())
+        doc['tasks'][0]['benchmark_status'] = 'PASSED'; c.write(file, doc)
+        f['worker_evidence']['sha256'] = c.sha_file(file); f['worker_evidence']['native_task']['benchmark_status'] = 'PASSED'
+        adapter_path = Path(f['worker_result']); adapter = c.read(adapter_path)
+        adapter['evidence'][doc['tasks'][0]['name']] = f['worker_evidence']; c.write(adapter_path, adapter)
+        state.pop('historical_custody_history', None); state.pop('historical_no_retry_custody', None)
+        with self.assertRaisesRegex(ValueError, 'independent failure lacks canonical pending repair'):
+            h.historical(state, f, self.root)
 
     def test_historical_custody_rejects_tampering_and_missing_admission_proof(self):
         import deploy_test_historical_custody as h
