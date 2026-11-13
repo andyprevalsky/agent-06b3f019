@@ -13592,6 +13592,9 @@ async def run_all_tests():
     await r.record_async(
         "lease_heartbeat_restores_usage_after_failed_delivery",
         test_lease_heartbeat_restores_usage_after_failed_delivery,
+    )
+    await r.record_async(
+        "agent_loop_lease_usage_heartbeat_names_its_login",
         test_agent_loop_lease_usage_heartbeat_names_its_login,
     )
     await r.record_async(
