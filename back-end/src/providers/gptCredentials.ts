@@ -6,6 +6,11 @@ import {
 import type { StoredLogin } from './codeLoginRejection';
 import { prisma } from './database';
 import { decryptCredentialEnvelope } from './claudeCredentials';
+import {
+  cooldownMetaFields,
+  scopeUnnamedUserCooldown,
+  type CooldownMeta,
+} from './computeSubscriptionUsage';
 import { createLogger } from './logger';
 
 const log = createLogger('GptCredentials');
@@ -272,7 +277,10 @@ export async function fetchGptCodeCredentialsWithMeta(
 
 export async function markGptPoolTokenRateLimited(
   poolTokenId: string,
-  options?: { rateLimitedUntil?: string | Date | null; failureReason?: string | null }
+  options?: {
+    rateLimitedUntil?: string | Date | null;
+    failureReason?: string | null;
+  } & CooldownMeta
 ): Promise<void> {
   if (isIntegrationAuthFailureReason(options?.failureReason)) {
     await prisma.integration.update({
@@ -294,7 +302,7 @@ export async function markGptPoolTokenRateLimited(
   const until = resolveRateLimitedUntil(options?.rateLimitedUntil);
   const { count } = await prisma.integration.updateMany({
     where: { id: poolTokenId, ...notAlreadyBackedOffLonger(until) },
-    data: { rateLimitedUntil: until },
+    data: { rateLimitedUntil: until, ...cooldownMetaFields(options) },
   });
   if (count === 0) {
     // No match means EITHER an existing longer window (benign) OR a stale id the
@@ -319,12 +327,12 @@ export async function markGptPoolTokenRateLimited(
 
 export async function markGptIntegrationRateLimited(
   integrationId: string,
-  options?: { rateLimitedUntil?: string | Date | null }
+  options?: { rateLimitedUntil?: string | Date | null } & CooldownMeta
 ): Promise<void> {
   const until = resolveRateLimitedUntil(options?.rateLimitedUntil);
   const { count } = await prisma.integration.updateMany({
     where: { id: integrationId, ...notAlreadyBackedOffLonger(until) },
-    data: { rateLimitedUntil: until },
+    data: { rateLimitedUntil: until, ...cooldownMetaFields(options) },
   });
   if (count === 0) {
     const existing = await prisma.integration.findUnique({
@@ -427,7 +435,7 @@ export async function markGptUserTokenRateLimited(
     failureReason?: string | null;
     accountId?: string | null;
     integrationId?: string | null;
-  }
+  } & CooldownMeta
 ): Promise<void> {
   if (isIntegrationAuthFailureReason(options?.failureReason)) {
     const scopedWhere = {
@@ -509,16 +517,19 @@ export async function markGptUserTokenRateLimited(
   }
 
   const until = resolveRateLimitedUntil(options?.rateLimitedUntil);
+  // Never broaden an unnamed cooldown to sibling subscriptions (see
+  // scopeUnnamedUserCooldown): with several gpt_code rows it is dropped.
+  const scope = await scopeUnnamedUserCooldown(userId, 'gpt_code', ['CONNECTED'], options);
+  if (scope === null) return;
   const { count } = await prisma.integration.updateMany({
     where: {
       userId,
       name: 'gpt_code',
       status: 'CONNECTED',
-      ...(options?.integrationId ? { id: options.integrationId } : {}),
-      ...(options?.accountId ? { accountId: options.accountId } : {}),
+      ...scope,
       ...notAlreadyBackedOffLonger(until),
     },
-    data: { rateLimitedUntil: until },
+    data: { rateLimitedUntil: until, ...cooldownMetaFields(options) },
   });
   if (count === 0) {
     const existing = await prisma.integration.count({
