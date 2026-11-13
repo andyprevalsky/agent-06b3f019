@@ -518,8 +518,10 @@ async function main(): Promise<void> {
     };
 
     const sleeps: number[] = [];
+    let flapClockMs = 0;
     const sleep = async (ms: number): Promise<void> => {
       sleeps.push(ms);
+      flapClockMs += ms;
     };
     let listCalls = 0;
     const flapping: AgentCardOrgToolCaller = async (name, args) => {
@@ -530,15 +532,11 @@ async function main(): Promise<void> {
       }
       return healthyOrg(name, args);
     };
-    const fixture = await verifyBenchmarkOrgFixture(flapping, { sleep });
+    const fixture = await verifyBenchmarkOrgFixture(flapping, { sleep, now: () => flapClockMs });
     assert.equal(fixture.cardholderId, 'ch-ready');
     assert.equal(fixture.cardholderVerificationStatus, 'verified');
     assert.equal(fixture.sandboxFloat.availableCents, 200_000);
-    assert.deepEqual(
-      sleeps,
-      [30_000, 45_000],
-      'backpressure waits out the shared window with growing gaps'
-    );
+    assert.deepEqual(sleeps, [30_000, 75_000], 'backpressure waits out the shared window');
 
     // A sustained outage stays bounded and surfaces the provider's own error.
     let outageCalls = 0;
@@ -547,11 +545,14 @@ async function main(): Promise<void> {
       throw unauthorized(name);
     };
     const outageSleeps: number[] = [];
+    let outageClockMs = 0;
     await assert.rejects(
       () =>
         verifyBenchmarkOrgFixture(outage, {
+          now: () => outageClockMs,
           sleep: async (ms) => {
             outageSleeps.push(ms);
+            outageClockMs += ms;
           },
         }),
       (error: unknown) =>
@@ -562,7 +563,7 @@ async function main(): Promise<void> {
     assert.equal(outageCalls, 4, 'one initial attempt plus three bounded retries');
     assert.deepEqual(
       outageSleeps,
-      [30_000, 45_000, 60_000],
+      [30_000, 75_000, 75_000],
       'the same retries span the 180 s window'
     );
 

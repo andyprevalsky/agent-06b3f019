@@ -30,14 +30,15 @@ const MAX_RATE_LIMIT_WAIT_MS = 65_000;
  * retries: the fixed 60 s rate-limit window shared with every lane using these credentials, and
  * the intermittent HTTP 401 on a healthy secret (seen spanning 19 s, longer than the runtime's
  * 15 s auth-flap window). The fixture waits them out with 1 + 3 attempts and no new attempt once
- * 180 s have elapsed, so nested per-call retries cannot multiply the total wait. The gaps grow
- * (30 s, 45 s, 60 s) so those same attempts span the whole window: AgentCard answers a throttled
- * request with 401 and a replay extends the throttle, so fixed 30 s gaps spent every attempt
- * ~50 s before the window ended (PR #1975 smoke round 6b, 2026-11-13).
+ * 180 s have elapsed, so nested per-call retries cannot multiply the total wait. The first retry
+ * waits 30 s; each later one spreads the remaining window over the retries left (never under 30 s),
+ * so the last attempt starts at the end of the window however long each pass takes. AgentCard
+ * answers a throttled request with 401 and a replay extends the throttle, and fixed 30 s gaps
+ * spent every attempt ~50 s before the window ended (PR #1975 smoke round 6b, 2026-11-13).
  */
-const ORG_BACKPRESSURE_RETRY_DELAYS_MS = [30_000, 45_000, 60_000] as const;
+const ORG_BACKPRESSURE_MIN_RETRY_DELAY_MS = 30_000;
 const ORG_BACKPRESSURE_TOTAL_WAIT_MS = 180_000;
-const ORG_BACKPRESSURE_MAX_RETRIES = ORG_BACKPRESSURE_RETRY_DELAYS_MS.length;
+const ORG_BACKPRESSURE_MAX_RETRIES = 3;
 
 const AGENTCARD_DASHBOARD_URL = 'https://dashboard.agentcard.sh';
 /**
@@ -399,11 +400,21 @@ export async function waitOutBenchmarkOrgBackpressure<T>(
     try {
       return await verify();
     } catch (error) {
-      const delayMs = ORG_BACKPRESSURE_RETRY_DELAYS_MS[retries];
+      const elapsedMs = now() - startedAtMs;
+      const delayMs =
+        retries === 0
+          ? ORG_BACKPRESSURE_MIN_RETRY_DELAY_MS
+          : Math.max(
+              ORG_BACKPRESSURE_MIN_RETRY_DELAY_MS,
+              Math.floor(
+                (ORG_BACKPRESSURE_TOTAL_WAIT_MS - elapsedMs) /
+                  (ORG_BACKPRESSURE_MAX_RETRIES - retries)
+              )
+            );
       if (
         !isOrgBackpressureError(error) ||
-        delayMs === undefined ||
-        now() - startedAtMs + delayMs > ORG_BACKPRESSURE_TOTAL_WAIT_MS
+        retries >= ORG_BACKPRESSURE_MAX_RETRIES ||
+        elapsedMs + delayMs > ORG_BACKPRESSURE_TOTAL_WAIT_MS
       ) {
         throw error;
       }

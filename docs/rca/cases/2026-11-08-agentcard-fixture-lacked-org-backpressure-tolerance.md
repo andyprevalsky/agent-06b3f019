@@ -119,10 +119,7 @@ bounded the count and the window but spaced the attempts for a 60 s rate window,
 multi-minute throttle burst. PR #1994 found that AgentCard answers a throttled request with 401 and
 that replays extend the throttle.
 
-Fix: the same 1 + 3 attempts and the same 180 s cap, with growing gaps (30 s, 45 s, 60 s), so the
-last attempt lands near the end of the window instead of ~50 s early. There are no extra provider
-requests and no longer deadline. `agentcard-benchmark-float-burst.test.ts` replays a 140 s and a
-160 s burst on a virtual clock: it fails on main with the provider 401 and passes with the fix.
+Fix: the same 1 + 3 attempts and the same 180 s cap. The first retry still waits 30 s, so short flaps recover quickly. Each later retry spreads the remaining window over the retries left (never under 30 s), so the last attempt starts at the end of the window however long each pass takes. There are no extra provider requests and no longer deadline. `agentcard-benchmark-float-burst.test.ts` replays 140, 160 and 175 s bursts with immediate and 10 s passes on a virtual clock. On main it fails (passes at 0, 30, 60, 90 s) with the provider 401, and it passes with the fix. A burst outlasting the window still surfaces the provider 401 after 4 passes. CodeRabbit flagged the first growing-gap draft (30/45/60 s) for immediate-failure passes, which led to this window-anchored schedule.
 A second occurrence had the same shape. PR #1994's round-1 smoke guest `browser-auth-guest-purchase` saw its first 429 at 01:02:36Z, used all 1 + 3 passes and gave up at 01:04:46Z, ~115 s into the window. The sandbox throttle ended ~01:04:43Z for all six payment guests. That guest's first call was already a 429, so the load came from other concurrent consumers of the shared sandbox client; production's client stayed clean.
 Status stays `mitigated`: a burst longer than the 180 s window still fails the fixture, and the
 throttle's origin (shared org-wide budget) is unexplained.
