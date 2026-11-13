@@ -3277,6 +3277,11 @@ REMOTE_PY_FP=\$(cloudbench_manifest_fingerprint '$REMOTE_REPO' \"\${CLOUDBENCH_P
 echo \"::DEPS-REMOTE-REF::\$REMOTE_REF\"
 echo \"::DEPS-REMOTE-NODE::\$REMOTE_NODE_FP\"
 echo \"::DEPS-REMOTE-PY::\$REMOTE_PY_FP\"
+# Fresh-storage REAL clones boot this same image and sync deps from its baked
+# /app, not from this volume. Report the image's own fingerprints so the fleet
+# can keep those clones on this proven snapshot when the image is stale.
+echo \"::DEPS-IMAGE-NODE::\$(cloudbench_node_dependency_fingerprint /app 2>/dev/null || true)\"
+echo \"::DEPS-IMAGE-PY::\$(cloudbench_manifest_fingerprint /app \"\${CLOUDBENCH_PYTHON_MANIFESTS[@]}\" 2>/dev/null || true)\"
 # The donor is stopped by signal and snapshotted next; write back the synced
 # checkout and dependency trees first (see the native WMH refresh flush).
 sync -f '$REMOTE_REPO'
@@ -3292,6 +3297,8 @@ echo '::DEPS-REFRESH-DONE::'"
     REMOTE_REF="$(sed -n 's/^::DEPS-REMOTE-REF:://p' "$DEPS_LOG" | tail -1)"
     REMOTE_NODE_FP="$(sed -n 's/^::DEPS-REMOTE-NODE:://p' "$DEPS_LOG" | tail -1)"
     REMOTE_PY_FP="$(sed -n 's/^::DEPS-REMOTE-PY:://p' "$DEPS_LOG" | tail -1)"
+    IMAGE_NODE_FP="$(sed -n 's/^::DEPS-IMAGE-NODE:://p' "$DEPS_LOG" | tail -1)"
+    IMAGE_PY_FP="$(sed -n 's/^::DEPS-IMAGE-PY:://p' "$DEPS_LOG" | tail -1)"
     rm -f "$DEPS_LOG"
     if [ "$REMOTE_REF" != "$EXPECTED_REF" ] \
         || [ "$REMOTE_NODE_FP" != "$EXPECTED_NODE_FP" ] \
@@ -3330,6 +3337,14 @@ for m in json.load(sys.stdin) or []:
     # record the exact verified source ref this snapshot was produced from.
     # Sharded runs reuse a snapshot only for their own exact ref; a patched
     # workspace is not that ref, so it leaves no receipt.
+    # Sidecar: the baked image dependency fingerprints observed on the donor
+    # while it produced this snapshot (fleet fresh-storage admission reads it).
+    rm -f "$WARM_DEPS_STATE_FILE.image"
+    if [ -n "$IMAGE_NODE_FP" ] && [ -n "$IMAGE_PY_FP" ]; then
+        printf '%s %s %s %s %s\n' "$EXPECTED_NODE_FP" "$EXPECTED_PY_FP" "$NEW_SNAP" \
+            "$IMAGE_NODE_FP" "$IMAGE_PY_FP" > "$WARM_DEPS_STATE_FILE.image.$$" \
+            && mv -f "$WARM_DEPS_STATE_FILE.image.$$" "$WARM_DEPS_STATE_FILE.image"
+    fi
     rm -f "$WARM_DEPS_STATE_FILE.ref"
     if [ -z "$REFRESH_PATCH_FILE" ]; then
         printf '%s %s\n' "$EXPECTED_REF" "$NEW_SNAP" > "$WARM_DEPS_STATE_FILE.ref.$$" \

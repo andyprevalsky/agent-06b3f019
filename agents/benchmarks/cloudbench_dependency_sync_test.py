@@ -32638,6 +32638,41 @@ clone_machine_target {shlex.quote(str(tmp_path / "owned.ids"))} "$WARM_ID" share
 
 
 @pytest.mark.parametrize(
+    "sidecar,requested,expected",
+    [
+        ("node py vs_snap image_node py", "0", "snapshot"),  # image JS stale for this exact proof
+        ("node py vs_snap node image_py", "0", "snapshot"),  # image Python stale
+        ("node py vs_snap node py", "0", "fresh"),  # image already matches the manifests
+        ("node py vs_other image_node py", "0", "fresh"),  # proof for another snapshot
+        ("other py vs_snap image_node py", "0", "fresh"),  # proof for other manifests
+        ("node py vs_snap", "0", "fresh"),  # image fingerprints unknown
+        ("", "0", "fresh"),  # no refresh sidecar
+        ("node py vs_snap image_node py", "1", "fresh"),  # explicit --fresh-volumes wins
+    ],
+)
+def test_real_clones_keep_refreshed_snapshot_when_image_deps_are_stale(
+    tmp_path: Path, sidecar: str, requested: str, expected: str
+) -> None:
+    """Fresh storage syncs deps from the image's baked /app; a stale image must not be selected."""
+    source = fleet_source_text()
+    functions = "\n".join(
+        _extract_fleet_function(source, name + "() {")
+        for name in ["is_sim_on", "image_deps_stale_for_current_ref", "primary_clone_storage_mode"]
+    )
+    state = tmp_path / "cloudbench-warm-deps.fp"
+    if sidecar:
+        (tmp_path / "cloudbench-warm-deps.fp.image").write_text(sidecar + "\n")
+    script = (
+        f"FRESH_VOLUMES=1; FRESH_VOLUMES_REQUESTED={requested}; BENCHES=(alpha); CATALOG_MODES=(real); "
+        f"SIM_ON_CSV=''; WARM_DEPS_STATE_FILE={shlex.quote(str(state))}; CURRENT_NODE_FP=node; "
+        f"CURRENT_PY_FP=py; SNAP_ID=vs_snap\n{functions}\nprimary_clone_storage_mode alpha"
+    )
+    result = subprocess.run(["bash", "-c", "set -u\n" + script], text=True, capture_output=True, timeout=30)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == expected
+
+
+@pytest.mark.parametrize(
     "enabled,catalog,sim_on,allocated_source,expected",
     [
         ("1", "real", "", "clone", "fresh"),
@@ -32653,7 +32688,7 @@ def test_prebuilt_volume_selection_preserves_effective_simulation_assets(
 ) -> None:
     source = fleet_source_text()
     functions = "\n".join(
-        _extract_fleet_function(source, name + "() {") for name in ["is_sim_on", "primary_clone_storage_mode"]
+        _extract_fleet_function(source, name + "() {") for name in ["is_sim_on", "image_deps_stale_for_current_ref", "primary_clone_storage_mode"]
     )
     script = f"FRESH_VOLUMES={enabled}; BENCHES=(alpha); CATALOG_MODES=({catalog}); SIM_ON_CSV={shlex.quote(sim_on)}\n{functions}\nprimary_clone_storage_mode alpha"
     result = subprocess.run(
@@ -35262,7 +35297,7 @@ def test_private_fleet_source_fresh_target_region_routes_only_eligible_clones(tm
     # On unchanged source the absent option helper is represented as a no-op:
     # the actual clone still routes to ORD, establishing the causal routing RED.
     helpers = "\n".join(fn(name) if name + "() {" in source else name + "() { :; }"
-                         for name in ["is_sim_on", "primary_clone_storage_mode", "fresh_target_region_admission", "fresh_target_region_bind_destination"])
+                         for name in ["is_sim_on", "image_deps_stale_for_current_ref", "primary_clone_storage_mode", "fresh_target_region_admission", "fresh_target_region_bind_destination"])
     trace = tmp_path / "native-args"
     volume_trace = tmp_path / "volume-args"
     touched = tmp_path / "registry"
@@ -35452,7 +35487,7 @@ def test_private_fleet_source_fresh_volume_placement_routes_only_eligible_clones
     # On unchanged source the absent option helper is represented as a no-op:
     # the actual clone still routes to ORD, establishing the causal routing RED.
     helpers = "\n".join(fn(name) if name + "() {" in source else name + "() { :; }"
-                         for name in ["is_sim_on", "primary_clone_storage_mode", "fresh_target_region_admission", "fresh_target_region_bind_destination", "fresh_volume_placement_admission"])
+                         for name in ["is_sim_on", "image_deps_stale_for_current_ref", "primary_clone_storage_mode", "fresh_target_region_admission", "fresh_target_region_bind_destination", "fresh_volume_placement_admission"])
     trace = tmp_path / "native-args"
     volume_trace = tmp_path / "volume-args"
     touched = tmp_path / "registry"
