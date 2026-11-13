@@ -6813,6 +6813,114 @@ async def test_agentcard_release_policy_does_not_skip_actual_fetch_errors_or_can
             )
 
 
+async def test_release_stall_survives_failed_final_reads_when_owned_ledger_holds_it():
+    """Regression (PR #2005 smoke round 2, 2026-11-13): agent-payment-abandonment observed the exact
+    release stall, then every later lifecycle read failed in an AgentCard org 401/429 storm. The
+    task-phase deadline refused the stall because its final read failed, so the row was a native
+    ERROR, the gate re-ran the task and would have minted a new card. The last successful in-window
+    observation now qualifies only while a DB-only read of the owned ledger still holds that exact
+    stall; a ledger that left it, a foreign card, or a run without an owned ledger stays strict.
+    """
+    import pytest
+    from copy import deepcopy
+
+    from benchmarks import run_benchmark as bench
+    from benchmarks.benchmark_tasks import get_task_by_name
+
+    task = get_task_by_name("agent-payment-abandonment")
+    stalled = _agentcard_release_stall_lifecycle()
+    storm = RuntimeError(
+        'Failed to get payment lifecycle: 401 {"error":"AgentCard Organization MCP list_cards failed: '
+        'Invalid or expired organization token","code":"agentcard_org_mcp_unauthorized"}'
+    )
+
+    def ledger(lifecycle, **changes):
+        return {
+            "tree_agent_ids": [lifecycle["agentId"]],
+            "purchase_cleanup": [
+                {
+                    "purchase_id": lifecycle["purchase"]["id"],
+                    "agent_id": lifecycle["agentId"],
+                    "status": "HELD",
+                    "funding_status": "RECLAIMING",
+                    "card_id": lifecycle["purchase"]["cardId"],
+                    "stripe_payment_intent_id": lifecycle["purchase"]["stripePaymentIntentId"],
+                    "total_cents": lifecycle["purchase"]["totalCents"],
+                    "provider_transfer_id": lifecycle["orgTransfer"]["id"],
+                    "reclaim_provider_transfer_id": None,
+                    **changes,
+                }
+            ],
+        }
+
+    async def storm_reads(_base, _aid):
+        await asyncio.sleep(0.01)
+        raise storm
+
+    async def wait(lifecycle, exact_root_sessions):
+        with (
+            patch.dict(os.environ, {"BENCHMARK_SKIP_AGENTCARD_RELEASE_STALL": "1"}),
+            patch.object(bench.cloud_batch_cleanup, "exact_root_sessions", side_effect=exact_root_sessions),
+        ):
+            return await bench._wait_for_expected_payment_lifecycle(
+                "http://benchmark.invalid",
+                lifecycle["agentId"],
+                task,
+                deepcopy(lifecycle),
+                timeout_seconds=0.05,
+                poll_interval_seconds=0,
+                fetch_lifecycle=storm_reads,
+            )
+
+    with pytest.raises(bench.AgentCardReleaseStall) as caught:
+        await wait(stalled, lambda _base, _root: ledger(stalled))
+    assert caught.value.lifecycle["orgTransfer"]["releasedCents"] == 0
+
+    foreign = _agentcard_release_stall_lifecycle(cardId="card_someone_else")
+    for lifecycle, read in (
+        (stalled, lambda _base, _root: ledger(stalled, funding_status="RECLAIM_FAILED")),
+        (stalled, lambda _base, _root: ledger(stalled, card_id="card_other")),
+        (foreign, lambda _base, _root: ledger(foreign)),
+    ):
+        with pytest.raises(RuntimeError) as strict:
+            await wait(lifecycle, read)
+        assert not isinstance(strict.value, bench.AgentCardReleaseStall), lifecycle
+
+    # Round 2's exact exit: the deadline expires inside an owned recovery POST after a failed read.
+    calls = 0
+
+    async def storm_then_slow_recovery(_base, _aid):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise storm
+        await asyncio.sleep(1)
+        return deepcopy(stalled)
+
+    with (
+        patch.dict(os.environ, {"BENCHMARK_SKIP_AGENTCARD_RELEASE_STALL": "1"}),
+        patch.object(bench.cloud_batch_cleanup, "exact_root_sessions", side_effect=lambda _b, _r: ledger(stalled)),
+        pytest.raises(bench.AgentCardReleaseStall),
+    ):
+        await bench._wait_for_expected_payment_lifecycle(
+            "http://benchmark.invalid",
+            stalled["agentId"],
+            task,
+            deepcopy(stalled),
+            timeout_seconds=0.2,
+            poll_interval_seconds=0,
+            recover_lifecycle=storm_then_slow_recovery,
+        )
+
+    def no_owned_ledger(_base, _root):
+        raise RuntimeError("provider verification requires an owned cloud stack")
+
+    with pytest.raises(RuntimeError) as local:
+        await wait(stalled, no_owned_ledger)
+    assert not isinstance(local.value, bench.AgentCardReleaseStall)
+    assert "remained unavailable" in str(local.value)
+
+
 async def test_abandonment_waits_for_cron_reconciliation():
     """A delayed AgentCard release is observed through the same lifecycle endpoint cron updates."""
     from benchmarks.benchmark_tasks import get_task_by_name
@@ -27521,6 +27629,10 @@ async def run_all_tests():
     await r.record_async(
         "agentcard_release_policy_fetch_cancel_strict",
         test_agentcard_release_policy_does_not_skip_actual_fetch_errors_or_cancellation,
+    )
+    await r.record_async(
+        "release_stall_survives_failed_final_reads_with_owned_ledger",
+        test_release_stall_survives_failed_final_reads_when_owned_ledger_holds_it,
     )
     await r.record_async(
         "agentcard_release_policy_fresh_stall_after_recovered_read_error",

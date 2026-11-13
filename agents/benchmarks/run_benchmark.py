@@ -3617,6 +3617,43 @@ def _payment_reconciliation_timeout(
     return RuntimeError(message)
 
 
+async def _ledger_bound_release_stall(
+    base_url: str, agent_id: str, task: BenchmarkTask, lifecycle: object, error: str
+) -> Optional[AgentCardReleaseStall]:
+    """After a failed final read, accept the exact stall only while the owned ledger still holds it.
+
+    The last successful lifecycle observation inside the unchanged deadline must already be the
+    exact release stall. AgentCard's org-token 401/429 storms can fail every later provider-backed
+    read, so bind that observation to a DB-only read of the owned stack's ledger (no provider call):
+    the same purchase must still be HELD/RECLAIMING with the same card, transfer, payment intent and
+    total. Runs without an owned-stack ledger, or a ledger that left the stall, stay strict.
+    """
+    if not (_agentcard_release_skip_enabled() and _agentcard_release_skip_lifecycle(task.name, lifecycle)):
+        return None
+    try:
+        snapshot = await asyncio.to_thread(cloud_batch_cleanup.exact_root_sessions, base_url, agent_id)
+        purchase, transfer = lifecycle["purchase"], lifecycle["orgTransfer"]
+        rows = [row for row in snapshot["purchase_cleanup"] if row["purchase_id"] == purchase["id"]]
+    except Exception:
+        return None
+    if not (
+        len(rows) == 1
+        and rows[0].get("status") == "HELD"
+        and rows[0].get("funding_status") == "RECLAIMING"
+        and rows[0].get("card_id") == purchase.get("cardId")
+        and rows[0].get("provider_transfer_id") == transfer.get("id")
+        and rows[0].get("stripe_payment_intent_id") == purchase.get("stripePaymentIntentId")
+        and rows[0].get("total_cents") == purchase.get("totalCents")
+    ):
+        return None
+    return AgentCardReleaseStall(
+        "Payment lifecycle did not reach the expected terminal state before timeout: "
+        f"{error}{_payment_lifecycle_settlement_state(lifecycle)}; the final provider read failed and the "
+        "owned ledger still holds this exact stall",
+        lifecycle=lifecycle,
+    )
+
+
 async def _wait_for_expected_payment_lifecycle(
     base_url: str,
     agent_id: str,
@@ -3666,6 +3703,9 @@ async def _wait_for_expected_payment_lifecycle(
             return lifecycle
         if time.monotonic() >= deadline:
             if last_fetch_error is not None:
+                stall = await _ledger_bound_release_stall(base_url, agent_id, task, lifecycle, error)
+                if stall is not None:
+                    raise stall from last_fetch_error
                 raise RuntimeError(
                     "Payment lifecycle remained unavailable at the reconciliation deadline after "
                     f"{consecutive_fetch_errors} consecutive reads: {last_fetch_error}"
@@ -3731,9 +3771,12 @@ async def _wait_for_expected_payment_lifecycle(
             if isinstance(fetch_error, _PaymentReconciliationDeadline) or (
                 owned_timeout is not None and owned_timeout.expired()
             ):
-                raise _payment_reconciliation_timeout(
+                timeout = _payment_reconciliation_timeout(
                     error, lifecycle, task_name=task.name, allow_release_skip=last_fetch_error is None
-                ) from fetch_error
+                )
+                if last_fetch_error is not None and not isinstance(timeout, AgentCardReleaseStall):
+                    timeout = await _ledger_bound_release_stall(base_url, agent_id, task, lifecycle, error) or timeout
+                raise timeout from fetch_error
             # Lifecycle reads join local DB state with several read-only provider
             # views. A single transient provider timeout must not turn a
             # successfully compensated purchase into a benchmark failure. Keep
@@ -3744,6 +3787,9 @@ async def _wait_for_expected_payment_lifecycle(
             consecutive_fetch_errors += 1
             last_fetch_error = fetch_error
             if time.monotonic() >= deadline:
+                stall = await _ledger_bound_release_stall(base_url, agent_id, task, lifecycle, error)
+                if stall is not None:
+                    raise stall from fetch_error
                 raise RuntimeError(
                     "Payment lifecycle remained unavailable at the reconciliation deadline after "
                     f"{consecutive_fetch_errors} consecutive reads: {fetch_error}"
