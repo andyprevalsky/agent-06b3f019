@@ -28,6 +28,9 @@
  *     account's usage from every response, success or 429, in the background:
  *     a stalled usage write never delays the completion, and a 429's provider
  *     reset becomes an authoritative cooldown naming the spent window
+ *   - an account nothing has measured gets its windows and reset times in the
+ *     background: an inference-only login (setup-token, no user:profile) or one
+ *     the usage endpoint refuses gets them from one max_tokens 1 quota check
  */
 
 import { randomUUID } from 'node:crypto';
@@ -40,6 +43,7 @@ import {
 } from '../../providers/computeSubscriptionUsage';
 import { assertLocalDatabase } from './assertLocalDatabase';
 import { registerChatPathCases } from './compute-subscription-usage.chat.cases';
+import { registerUsageRefreshCases } from './compute-subscription-usage.refresh.cases';
 
 // The chat-path cases run Rose in this process and write Integration rows.
 assertLocalDatabase();
@@ -451,6 +455,15 @@ test("a code session's rate_limit_event usage lands on the task's login", async 
 });
 
 registerChatPathCases({
+  test,
+  listAccounts,
+  run: RUN,
+  baseUrl: BASE_URL,
+  chatUsers,
+  integrationType: TYPE,
+});
+
+registerUsageRefreshCases({
   test,
   listAccounts,
   run: RUN,

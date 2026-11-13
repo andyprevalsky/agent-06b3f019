@@ -8,7 +8,8 @@
  * each LLM attempt), so recording usage adds no provider request: this module
  * only validates that payload and stores it on the Integration row that served
  * the token. Code sessions report the CLI's rate_limit_event by task, and the
- * Claude usage endpoint (computeUsageRefresh) fills accounts nothing measured.
+ * Claude usage endpoint or a one-token quota check (computeUsageRefresh) fills
+ * accounts nothing measured.
  *
  *   source        response | rate_limit | usage_endpoint | code_session
  *   status        allowed | allowed_warning | rejected | null (provider's unified status)

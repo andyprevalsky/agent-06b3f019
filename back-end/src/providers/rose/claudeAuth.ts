@@ -25,7 +25,7 @@ import {
   RoseServerError,
   RoseStallError,
 } from './errors';
-import type { PoolSpec } from './pools';
+import { getPool, type PoolSpec } from './pools';
 import { anthropicSpeedFor, type AgentSpeed } from './speed';
 import {
   boundedRateLimitBackoffMs,
@@ -504,6 +504,47 @@ export async function* claudeAuthComplete(opts: ClaudeAuthOptions): AsyncIterabl
   // Unreachable in practice — loop body either yields, returns, or throws.
   if (lastError) throw new RoseServerError(`Anthropic exhausted retries: ${lastError.message}`);
   throw new RoseServerError('Anthropic exhausted retries');
+}
+
+/** Small fast model, as Claude Code's quota check uses (getSmallFastModel). */
+const QUOTA_CHECK_POOL = 'rose-1-mini';
+const QUOTA_CHECK_TIMEOUT_MS = 15_000;
+
+export interface ClaudeQuotaCheckResponse {
+  status: number;
+  headers: Headers;
+  /** Error body of a non-2xx response. */
+  body?: string;
+}
+
+/**
+ * Claude Code's quota check (claudeAiLimits.ts makeTestQuery / checkQuotaStatus):
+ * one subscription request, `max_tokens: 1` on the small fast model, made only
+ * for the `anthropic-ratelimit-unified-*` headers every subscription response
+ * (200 or 429) carries. It is how an inference-only token (a setup-token, which
+ * the usage endpoint refuses without `user:profile`) reports its windows.
+ * Same body builder and OAuth transport as claudeAuthComplete; one attempt, no
+ * retry or rotation, and the one-token stream is cancelled unread. The caller
+ * reads the headers.
+ */
+export async function claudeQuotaCheck(opts: {
+  token: string;
+  requestId: string;
+}): Promise<ClaudeQuotaCheckResponse> {
+  const body = buildAnthropicBody({
+    poolSpec: getPool(QUOTA_CHECK_POOL),
+    messages: [{ role: 'user', content: 'quota' }],
+    maxTokens: 1,
+  });
+  const response = await postAnthropicStream({
+    body,
+    claudeToken: opts.token,
+    requestId: opts.requestId,
+    callSite: 'usage_quota_check',
+    connectTimeoutMs: QUOTA_CHECK_TIMEOUT_MS,
+  });
+  await response.body?.cancel().catch(() => undefined);
+  return { status: response.status, headers: response.headers, body: response.errorBody };
 }
 
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {

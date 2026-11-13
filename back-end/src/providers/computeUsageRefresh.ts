@@ -1,11 +1,19 @@
 /**
- * Background retrieval of a Claude subscription's usage windows from Anthropic's
- * usage endpoint, for accounts the response-header path has not measured.
+ * Background retrieval of a Claude subscription's usage windows (and their
+ * reset times) for accounts the response-header path has not measured.
  *
- *   GET https://api.anthropic.com/api/oauth/usage
+ *   user:profile token:  GET https://api.anthropic.com/api/oauth/usage
  *     Authorization: Bearer <the account's OAuth access token>
  *     anthropic-beta: oauth-2025-04-20
  *   → { five_hour, seven_day, seven_day_opus, …: { utilization: 0-100 PERCENT, resets_at: ISO } | null }
+ *
+ *   inference-only token (setup-token, scopes ["user:inference"]), or one the
+ *   endpoint refuses: Claude Code's quota check (claudeAiLimits.ts
+ *   checkQuotaStatus), one max_tokens 1 subscription request (claudeQuotaCheck)
+ *   whose anthropic-ratelimit-unified-* headers (200 or 429) carry the windows.
+ *   The endpoint answers such a token 403 permission_error "OAuth token does not
+ *   meet scope requirement user:profile"; Claude Code only calls it with
+ *   user:profile (usage.ts fetchUtilization → hasProfileScope).
  *
  * STATE MACHINE (per Integration row, per process)
  *
@@ -14,10 +22,12 @@
  *     │                      yes
  *     │                       ▼
  *     │                 read token ──none/expired──► [idle]
- *     │                       ▼
- *     │                 GET usage (5 s) ──200──► store (source usage_endpoint) ──► [idle]
- *     │                       ├──401/403──► [unavailable] backoff 60 min. NEVER an auth
- *     │                       │             failure: the account is not expired or touched
+ *     │                       ├──user:profile──► GET usage (5 s) ──200──► store (usage_endpoint) ──► [idle]
+ *     │                       │                       └──401/403──┐
+ *     │                       ▼                                   ▼
+ *     │                 quota check (max_tokens 1) ──unified headers──► store (response | rate_limit) ──► [idle]
+ *     │                       ├──401/403, no headers──► [unavailable] backoff 60 min. NEVER an
+ *     │                       │                         auth failure: the account is never touched
  *     └───────────────────────┴──other / network / bad body──► [idle] (retry after 5 min)
  *
  * Triggers (never awaited by their callers): a non-authoritative cooldown
@@ -27,14 +37,24 @@
  * the next list. Codex has no usage endpoint; its windows come only from
  * response headers and usage_limit_reached bodies.
  *
- * 10k agents: at most one GET per account per REFRESH_MIN_INTERVAL_MS per
- * backend process, nothing on the completion path, and a response that already
- * carried usage headers keeps the row fresh so this never fires for busy accounts.
+ * 10k agents: per account row, not per agent. At most one refresh per row per
+ * REFRESH_MIN_INTERVAL_MS per backend process, each at most one GET plus one
+ * one-token request (an inference-only row: the one request only), nothing on
+ * the completion path, and a response that already carried usage headers keeps
+ * the row fresh so this never fires for busy accounts.
  */
 
-import { readClaudeAccessTokenForUsage } from './computeCredentials';
-import { recordIntegrationUsage, type SubscriptionUsageReport } from './computeSubscriptionUsage';
+import { randomUUID } from 'node:crypto';
+
+import { readClaudeUsageCredential } from './computeCredentials';
+import {
+  parseUsagePayload,
+  recordIntegrationUsage,
+  type SubscriptionUsageReport,
+} from './computeSubscriptionUsage';
 import { createLogger } from './logger';
+import { claudeQuotaCheck } from './rose/claudeAuth';
+import { analyzeSubscriptionUsage } from './rose/subscriptionUsage';
 
 const log = createLogger('ComputeUsageRefresh');
 
@@ -49,16 +69,31 @@ const MAX_TRACKED_ROWS = 10_000;
 export type RefreshOutcome =
   'stored' | 'not_newer' | 'throttled' | 'no_token' | 'unavailable' | 'empty' | 'error';
 
+export interface UsageCredential {
+  accessToken: string;
+  /** The grant carries `user:profile`, which the usage endpoint requires. */
+  profileScope: boolean;
+}
+
+export interface QuotaCheckResponse {
+  status: number;
+  headers: Pick<Headers, 'get'>;
+  body?: string;
+}
+
 export interface RefreshDeps {
   fetch: (url: string, init: RequestInit) => Promise<Response>;
-  readToken: (integrationId: string) => Promise<string | null>;
+  readToken: (integrationId: string) => Promise<UsageCredential | null>;
+  quotaCheck: (accessToken: string) => Promise<QuotaCheckResponse>;
   store: (report: SubscriptionUsageReport) => Promise<boolean>;
   now: () => Date;
 }
 
 const defaultDeps: RefreshDeps = {
   fetch: (url, init) => fetch(url, init),
-  readToken: readClaudeAccessTokenForUsage,
+  readToken: readClaudeUsageCredential,
+  quotaCheck: (accessToken) =>
+    claudeQuotaCheck({ token: accessToken, requestId: `usage-quota-${randomUUID()}` }),
   store: (report) => recordIntegrationUsage('claude_code', report),
   now: () => new Date(),
 };
@@ -142,21 +177,19 @@ export function parseUsageEndpointBody(
   };
 }
 
-/** Fetch and store one Claude row's usage now (subject to the per-row throttle). */
-export async function refreshClaudeUsage(
+/** One user:profile token's usage-endpoint read; 'refused' when it rejects the token. */
+async function readUsageEndpoint(
   integrationId: string,
-  deps: RefreshDeps = defaultDeps
-): Promise<RefreshOutcome> {
-  const now = deps.now();
-  if (!claimAttempt(integrationId, now.getTime())) return 'throttled';
-  const token = await deps.readToken(integrationId);
-  if (token === null || token === '') return 'no_token';
+  accessToken: string,
+  now: Date,
+  deps: RefreshDeps
+): Promise<RefreshOutcome | 'refused'> {
   let response: Response;
   try {
     response = await deps.fetch(USAGE_ENDPOINT_URL, {
       method: 'GET',
       headers: {
-        Authorization: `Bearer ${token}`,
+        Authorization: `Bearer ${accessToken}`,
         'anthropic-beta': USAGE_ENDPOINT_BETA,
         'Content-Type': 'application/json',
       },
@@ -170,12 +203,10 @@ export async function refreshClaudeUsage(
     return 'error';
   }
   if (response.status === 401 || response.status === 403) {
-    // The endpoint may not accept this token (scope, or an access token the
-    // device has not refreshed yet). That is "endpoint unavailable", never an
-    // auth failure: the account keeps its state; we only stop asking for a while.
-    setNextAttempt(integrationId, now.getTime() + UNAVAILABLE_BACKOFF_MS);
-    log.info('usage_endpoint.unavailable', { integrationId, status: response.status });
-    return 'unavailable';
+    // The endpoint does not accept this token (scope, or an access token the
+    // device has not refreshed yet): ask the inference endpoint instead.
+    log.info('usage_endpoint.refused', { integrationId, status: response.status });
+    return 'refused';
   }
   if (!response.ok) {
     log.info('usage_endpoint.http_error', { integrationId, status: response.status });
@@ -190,6 +221,57 @@ export async function refreshClaudeUsage(
   const report = parseUsageEndpointBody(body, integrationId, now);
   if (report === null) return 'empty';
   return (await deps.store(report)) ? 'stored' : 'not_newer';
+}
+
+/** The quota check's unified headers → the row's windows (the chat path's own parser). */
+async function readQuotaHeaders(
+  integrationId: string,
+  accessToken: string,
+  now: Date,
+  deps: RefreshDeps
+): Promise<RefreshOutcome> {
+  let response: QuotaCheckResponse;
+  try {
+    response = await deps.quotaCheck(accessToken);
+  } catch (error) {
+    log.info('quota_check.request_failed', {
+      integrationId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return 'error';
+  }
+  const { snapshot } = analyzeSubscriptionUsage('claude', response.headers, {
+    status: response.status,
+    body: response.body,
+    now,
+  });
+  const report = snapshot === null ? null : parseUsagePayload(snapshot, integrationId, now);
+  if (report !== null) return (await deps.store(report)) ? 'stored' : 'not_newer';
+  if (response.status === 401 || response.status === 403) {
+    // A refused token. Never an auth failure here: the lease path owns that
+    // classification; the account keeps its state and we stop asking a while.
+    setNextAttempt(integrationId, now.getTime() + UNAVAILABLE_BACKOFF_MS);
+    log.info('quota_check.unavailable', { integrationId, status: response.status });
+    return 'unavailable';
+  }
+  log.info('quota_check.no_usage', { integrationId, status: response.status });
+  return response.status >= 400 ? 'error' : 'empty';
+}
+
+/** Fetch and store one Claude row's usage now (subject to the per-row throttle). */
+export async function refreshClaudeUsage(
+  integrationId: string,
+  deps: RefreshDeps = defaultDeps
+): Promise<RefreshOutcome> {
+  const now = deps.now();
+  if (!claimAttempt(integrationId, now.getTime())) return 'throttled';
+  const credential = await deps.readToken(integrationId);
+  if (credential === null || credential.accessToken === '') return 'no_token';
+  if (credential.profileScope) {
+    const outcome = await readUsageEndpoint(integrationId, credential.accessToken, now, deps);
+    if (outcome !== 'refused') return outcome;
+  }
+  return readQuotaHeaders(integrationId, credential.accessToken, now, deps);
 }
 
 /**

@@ -376,11 +376,15 @@ async function persistOrReadDemoCacheAffinity(
 }
 
 /**
- * The live Claude access token of one claude_code row, for a read-only usage
- * lookup (computeUsageRefresh). No side effects: it does not stamp lastUsedAt,
- * lease, or touch the row's state; an expired or undecryptable token is null.
+ * The live Claude access token of one claude_code row, and whether its grant
+ * carries `user:profile` (the usage endpoint's scope; setup-tokens are
+ * `user:inference` only), for a read-only usage lookup (computeUsageRefresh).
+ * No side effects: it does not stamp lastUsedAt, lease, or touch the row's
+ * state; an expired or undecryptable token is null.
  */
-export async function readClaudeAccessTokenForUsage(integrationId: string): Promise<string | null> {
+export async function readClaudeUsageCredential(
+  integrationId: string
+): Promise<{ accessToken: string; profileScope: boolean } | null> {
   const decryptionKey = process.env.CLAUDE_CREDENTIAL_DECRYPTION_KEY;
   if (!decryptionKey) return null;
   const integration = await prisma.integration.findFirst({
@@ -390,7 +394,7 @@ export async function readClaudeAccessTokenForUsage(integrationId: string): Prom
   const decrypted = decryptIntegrationCredentials(integration, decryptionKey);
   const envelope = decrypted ? parseClaudeEnvelope(decrypted) : null;
   if (!envelope || claudeEnvelopeExpiredAt(envelope, Date.now()) !== null) return null;
-  return envelope.accessToken;
+  return { accessToken: envelope.accessToken, profileScope: envelope.profileScope };
 }
 
 export async function fetchComputeUserToken(
