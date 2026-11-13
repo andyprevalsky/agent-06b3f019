@@ -18,6 +18,9 @@ import unittest
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / "scripts" / "lib"))
+from test_quarantine import quarantine
+
 FIXTURE_PROCESS = runpy.run_path(str(ROOT / "scripts/tests/fixture_process.py"))
 NATIVE_COMPLETION = runpy.run_path(str(ROOT / "scripts/tests/native_completion_schedule.py"))
 BASH = shutil.which("bash") or "bash"
@@ -876,6 +879,12 @@ ps() {
     def test_failed_summary_log_cannot_abandon_owned_cleanup(self):
         self.run_case(log_fault="summary")
 
+    @quarantine(
+        since="2026-11-12",
+        repair="pending-handoff:6a8453c3ef3b46a08607ecdf27b9dcdc",
+        error="AssertionError: 0 != 1 : failed proof abandoned exact cleanup obligation",
+        evidence="PR #1921 deploy-command-structural FLAKY 6a8453c3ef3b46a08607ecdf27b9dcdc at b380b1eae7: https://github.com/Rose-Ai-Labs/rose/actions/runs/43288783754",
+    )
     def test_cancellation_does_not_depend_on_body_pid_probe(self):
         self.run_case(cancel=True, unknown_body_probe=True)
         # The observer's completion pipe removes the old body-ps dependency.

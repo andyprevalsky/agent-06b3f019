@@ -1,0 +1,14 @@
+{
+  "format": "ROSE-PRIVATE-TAR-GCM-V1",
+  "bucket": "trace-archive",
+  "key": "devbox-closeout-private/pr1921/20261113T002447Z-local-only-git-refs.tar.gz.aesgcm",
+  "encryption_key_id": "trace-archive-prod-2026-07-03",
+  "ciphertext_sha256": "6caed16ac7efa4b79037d5c7dd11271902cebf8de782040e4bba239d2d97dae9",
+  "gzip_sha256": "811f16bf44ef722dd251414c0191bc844715c7cd30dfacbf12c625cf798d95ca",
+  "stored_bytes": 985476782,
+  "frames": 118,
+  "files": 1,
+  "original_bytes": 988077294,
+  "manifest_sha256": "eaee6c0e17fe3f91ae7e7b2b2180b95ce60f63d88d78b926a1799b6bdc728eb7",
+  "full_readback_verified": true
+}

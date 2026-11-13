@@ -7,6 +7,7 @@ import { Prisma } from '@prisma/client';
 import { prisma } from '../../providers/database';
 import { GOOGLE_WORKSPACE_SOURCES } from '../../services/integrations/googleWorkspaceDocuments';
 import { GRANOLA_PROVIDER, GRANOLA_SOURCES } from '../../services/integrations/granolaDocuments';
+import { meetingSources } from '../../services/integrations/meetingDocuments';
 import { pageSize, regexPredicate } from './sharedGrepRepo';
 
 export interface DocumentGrepRow {
@@ -40,14 +41,16 @@ export interface DocumentSummaryResult {
 const NOT_GOOGLE_WORKSPACE = Prisma.sql`d.source NOT IN (${Prisma.join([...GOOGLE_WORKSPACE_SOURCES])})`;
 
 /**
- * A provider stored as several document sources: `granola` names all three
- * Granola layers (structured note, summary, transcript); each layer's own
- * source name still selects just that layer.
+ * Meeting providers store note, summary and transcript layers. Provider aliases
+ * select their own layers; meeting_notes selects both providers. Concrete layer
+ * names still select only that layer.
  */
 // A Map, not an object: `document_source` is caller input, and names such as
 // `constructor` or `__proto__` must never resolve to an inherited property.
 const DOCUMENT_SOURCE_FAMILIES = new Map<string, readonly string[]>([
   [GRANOLA_PROVIDER, GRANOLA_SOURCES],
+  ['fireflies', meetingSources('fireflies')],
+  ['meeting_notes', [...GRANOLA_SOURCES, ...meetingSources('fireflies')]],
 ]);
 
 function sourceIs(documentSource: string): Prisma.Sql {

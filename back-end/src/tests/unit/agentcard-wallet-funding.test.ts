@@ -1,7 +1,11 @@
 #!/usr/bin/env tsx
 
 import assert from 'node:assert/strict';
-import { AgentCardOrgRuntime, orgRetryDeadlineAtMs } from '../../providers/agentcard/org-runtime';
+import {
+  AgentCardOrgRuntime,
+  AgentCardOrgRuntimeError,
+  orgRetryDeadlineAtMs,
+} from '../../providers/agentcard/org-runtime';
 import { AgentCardCompanyWalletFundingProvider } from '../../providers/wallet-funding';
 
 const ORG_RUNTIME_ENV_NAMES = [
@@ -112,6 +116,114 @@ async function assertReleaseObserverSharesOneRetryBudget(): Promise<void> {
       if (value === undefined) delete process.env[name];
       else process.env[name] = value;
     }
+  }
+}
+
+/**
+ * Regression (smoke payment cleanup TimeoutError, 2026-11-12, PRs #1975/#1981): AgentCard's
+ * intermittent org-token 401 outlived the runtime's read auth-flap window during a stalled
+ * transfer's release observation. The observer rethrew it as an opaque failure, so
+ * `reclaimPurchaseWalletFunding` persisted the still-pending reclaim as RECLAIM_FAILED. The
+ * stalled RECLAIMING lease must instead stay release-pending: provider backpressure (the same
+ * typed 401/503/429 set the benchmark float treats as transient) says nothing about this transfer.
+ */
+async function assertOrgAuthFlapLeavesReleasePending(): Promise<void> {
+  const unauthorized = () =>
+    new AgentCardOrgRuntimeError(
+      'AgentCard Organization MCP list_transfers failed: Invalid or expired organization token',
+      401,
+      'agentcard_org_mcp_unauthorized'
+    );
+  const consumed = {
+    structuredContent: {
+      transfers: [{ id: 'owt-flap', status: 'consumed', amount_cents: 4396, released_cents: 0 }],
+    },
+  };
+  const request = {
+    userId: 'user-123',
+    purchaseId: 'purchase-flap',
+    amountCents: 4396,
+    currency: 'usd',
+    idempotencyKey: 'purchase-wallet-reclaim:purchase-flap',
+    providerTransferId: 'owt-flap',
+    reason: 'failed_company_transfer_release_retry',
+  };
+  const releasePending = (error: unknown) =>
+    error instanceof Error && /release is still pending/i.test(error.message);
+
+  // The flap interleaves with successful observations of the unreleased transfer.
+  let flapReads = 0;
+  const flapping = new AgentCardCompanyWalletFundingProvider(
+    async () => {
+      flapReads += 1;
+      if (flapReads % 2 === 1) throw unauthorized();
+      return consumed;
+    },
+    // The production schedule scaled to 1/600 (as above): 6 observations either way.
+    { attempts: 20, delayMs: 5 }
+  );
+  await assert.rejects(
+    () => flapping.reclaimUserWalletFunding(request),
+    releasePending,
+    'an org auth flap during a stalled release must leave the reclaim release-pending'
+  );
+  assert.equal(flapReads, 6, 'the flap must not shorten or lengthen the observation window');
+
+  // A flap that covers the whole window observes nothing, which is still not a failed reclaim.
+  for (const transient of [
+    unauthorized,
+    () =>
+      new AgentCardOrgRuntimeError(
+        'AgentCard Organization MCP list_transfers is temporarily unavailable',
+        503,
+        'agentcard_org_mcp_unavailable'
+      ),
+  ]) {
+    const unobserved = new AgentCardCompanyWalletFundingProvider(
+      async () => {
+        throw transient();
+      },
+      { attempts: 20, delayMs: 0 }
+    );
+    await assert.rejects(() => unobserved.reclaimUserWalletFunding(request), releasePending);
+  }
+
+  // A release seen after the flap still completes the reclaim.
+  let recoveredReads = 0;
+  const recovering = new AgentCardCompanyWalletFundingProvider(
+    async () => {
+      recoveredReads += 1;
+      if (recoveredReads === 1) throw unauthorized();
+      return {
+        structuredContent: {
+          transfers: [
+            { id: 'owt-flap', status: 'reclaimed', amount_cents: 4396, released_cents: 4396 },
+          ],
+        },
+      };
+    },
+    { attempts: 20, delayMs: 0 }
+  );
+  const released = await recovering.reclaimUserWalletFunding(request);
+  assert.equal(released.metadata?.status, 'release_confirmed');
+
+  // Strictness is unchanged for anything that is not provider backpressure.
+  for (const fatal of [
+    new AgentCardOrgRuntimeError('forbidden', 403, 'agentcard_org_mcp_unauthorized'),
+    new AgentCardOrgRuntimeError('bad request', 400, 'agentcard_org_mcp_unavailable'),
+    new Error('AgentCard Organization MCP list_transfers failed: transfer lookup rejected'),
+  ]) {
+    const strict = new AgentCardCompanyWalletFundingProvider(
+      async () => {
+        throw fatal;
+      },
+      { attempts: 20, delayMs: 0 }
+    );
+    await assert.rejects(
+      () => strict.reclaimUserWalletFunding(request),
+      (error: unknown) => error === fatal,
+      `${fatal.message} must still fail the reclaim`
+    );
   }
 }
 
@@ -375,6 +487,7 @@ async function main(): Promise<void> {
   );
 
   await assertReleaseObserverSharesOneRetryBudget();
+  await assertOrgAuthFlapLeavesReleasePending();
 
   process.stdout.write('AgentCard wallet funding release tests passed\n');
 }
