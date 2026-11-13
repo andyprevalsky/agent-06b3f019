@@ -63,6 +63,74 @@ function reclaim(provider: AgentCardCompanyWalletFundingProvider, n: number) {
     );
 }
 
+/**
+ * CodeRabbit cycle 1 on PR #2016: an in-flight recovery must never expire (a duplicate call would
+ * start), and a reclaim joining another's recovery waits only within its own deadline.
+ */
+async function assertInFlightRecoveryIsSharedWithinEachDeadline(): Promise<void> {
+  const realNow = Date.now;
+  const realSetTimeout = globalThis.setTimeout;
+  let clockMs = realNow();
+  Date.now = () => clockMs;
+  // Virtual clock: every timer fires at once and advances the clock by its delay.
+  globalThis.setTimeout = ((handler: (...args: unknown[]) => void, timeoutMs?: number) => {
+    if (typeof timeoutMs === 'number' && timeoutMs > 0) clockMs += timeoutMs;
+    return realSetTimeout(handler, 0);
+  }) as unknown as typeof setTimeout;
+  try {
+    let releaseRecovery: () => void = () => undefined;
+    const held = new Promise<void>((resolve) => {
+      releaseRecovery = resolve;
+    });
+    const recoveries: string[] = [];
+    const provider = (n: number) =>
+      new AgentCardCompanyWalletFundingProvider(
+        async (name, args) => {
+          if (name === 'recover_funds') {
+            recoveries.push(String(args.cardholder_id));
+            await held;
+            return { structuredContent: { status: 'completed', amount_cents: 0 } };
+          }
+          return {
+            structuredContent: {
+              transfers: [
+                {
+                  id: transferId(n),
+                  card_id: `card-coalesce-${n}`,
+                  amount_cents: 4396,
+                  transferred_cents: 4396,
+                  released_cents: 0,
+                  status: 'consumed',
+                },
+              ],
+            },
+          };
+        },
+        { attempts: 20, delayMs: 5 },
+        async () => 'cardholder-coalesce-inflight'
+      );
+    const first = reclaim(provider(4), 4);
+    while (recoveries.length === 0) await new Promise((resolve) => realSetTimeout(resolve, 5));
+    clockMs += 61_000; // the in-flight recovery is now older than the window
+    const second = await Promise.race([
+      reclaim(provider(5), 5),
+      new Promise((resolve) => realSetTimeout(() => resolve('blocked'), 3_000)),
+    ]);
+    assert.equal(second, 'pending', 'a joining reclaim finishes within its own deadline');
+    assert.deepEqual(
+      recoveries,
+      ['cardholder-coalesce-inflight'],
+      'an in-flight recovery is shared, never duplicated after the window'
+    );
+    releaseRecovery();
+    // The first reclaim keeps observing past the window, where a fresh accelerator is legitimate.
+    assert.equal(await first, 'pending');
+  } finally {
+    Date.now = realNow;
+    globalThis.setTimeout = realSetTimeout;
+  }
+}
+
 async function main(): Promise<void> {
   const realNow = Date.now;
   let offsetMs = 0;
@@ -100,6 +168,7 @@ async function main(): Promise<void> {
   } finally {
     Date.now = realNow;
   }
+  await assertInFlightRecoveryIsSharedWithinEachDeadline();
   process.stdout.write('AgentCard recover_funds accelerator coalescing tests passed\n');
 }
 

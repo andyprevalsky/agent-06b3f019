@@ -21,31 +21,49 @@ function delay(ms: number): Promise<void> {
  * The residual-recovery accelerator is cardholder-scoped and never substitutes for a transfer's own
  * release status. Concurrent release observations (cron, abandon, resume) each re-fired it on every
  * poll of a still-consumed transfer, spending the org-wide 120 requests/minute budget on repeats.
- * Run it at most once per cardholder per rate window; a concurrent caller shares the in-flight call.
+ * Run it at most once per cardholder per rate window; a concurrent caller shares the in-flight call
+ * for at most its own deadline.
  */
 const CARDHOLDER_RECOVERY_WINDOW_MS = 60_000;
-const cardholderRecoveries = new Map<string, { startedAtMs: number; done: Promise<unknown> }>();
+type CardholderRecovery = { startedAtMs: number; done: Promise<unknown>; settled: boolean };
+const cardholderRecoveries = new Map<string, CardholderRecovery>();
 
 async function coalesceCardholderRecovery(
   cardholderId: string,
+  waiterDeadlineAtMs: number,
   recover: () => Promise<unknown>
 ): Promise<void> {
   const now = Date.now();
   for (const [key, entry] of cardholderRecoveries) {
-    if (now - entry.startedAtMs >= CARDHOLDER_RECOVERY_WINDOW_MS) cardholderRecoveries.delete(key);
+    // An in-flight recovery never expires: replacing it would start a duplicate call.
+    if (entry.settled && now - entry.startedAtMs >= CARDHOLDER_RECOVERY_WINDOW_MS) {
+      cardholderRecoveries.delete(key);
+    }
   }
   const existing = cardholderRecoveries.get(cardholderId);
   if (existing !== undefined) {
-    await existing.done.catch(() => undefined);
+    if (existing.settled) return;
+    // Join the shared call only within this caller's own budget; its result is not required.
+    const remainingMs = waiterDeadlineAtMs - Date.now();
+    if (remainingMs <= 0) return;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    await Promise.race([
+      existing.done.catch(() => undefined),
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, remainingMs);
+      }),
+    ]);
+    if (timer !== undefined) clearTimeout(timer);
     return;
   }
-  const done = recover();
-  cardholderRecoveries.set(cardholderId, { startedAtMs: now, done });
+  const entry: CardholderRecovery = { startedAtMs: now, done: recover(), settled: false };
+  cardholderRecoveries.set(cardholderId, entry);
   try {
-    await done;
+    await entry.done;
+    entry.settled = true;
   } catch (error) {
     // A failed accelerator does not consume the window: the next observation may retry it.
-    cardholderRecoveries.delete(cardholderId);
+    if (cardholderRecoveries.get(cardholderId) === entry) cardholderRecoveries.delete(cardholderId);
     throw error;
   }
 }
@@ -367,7 +385,7 @@ export class AgentCardCompanyWalletFundingProvider implements WalletFundingProvi
           }
           if (cardholderId !== undefined) {
             const recoveryCardholderId = cardholderId;
-            await coalesceCardholderRecovery(recoveryCardholderId, () =>
+            await coalesceCardholderRecovery(recoveryCardholderId, retryDeadlineAtMs, () =>
               recoverCardholderFunds(recoveryCardholderId, (toolName, args) =>
                 this.toolCaller(toolName, args, retryDeadlineAtMs)
               )
