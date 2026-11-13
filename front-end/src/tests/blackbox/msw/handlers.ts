@@ -8,6 +8,11 @@ import { http, HttpResponse } from 'msw';
 const API_BASE = 'http://localhost:3001/api';
 
 export const handlers = [
+  // Teams never shares by default; individual suites exercise real mutations.
+  http.get(`${API_BASE}/teams`, () => HttpResponse.json({ teams: [], invitations: [] })),
+  http.get(`${API_BASE}/teams/shareable-integrations`, () =>
+    HttpResponse.json({ integrations: [] }),
+  ),
   // Per-user UI: stock UI (nothing published) unless a test overrides it.
   http.get(`${API_BASE}/user-ui/active`, () => HttpResponse.json({ versionId: null })),
   http.get(`${API_BASE}/user-ui/versions`, () => HttpResponse.json({ versions: [] })),
@@ -30,6 +35,17 @@ export const handlers = [
   http.get(`${API_BASE}/integrations`, () => HttpResponse.json({ integrations: [] })),
   http.get(`${API_BASE}/integrations/plaid/items`, () => HttpResponse.json({ items: [] })),
   http.get(`${API_BASE}/integrations/granola`, () =>
+    HttpResponse.json({
+      connected: false,
+      status: 'NOT_CONNECTED',
+      accountEmail: null,
+      backfillDone: false,
+      lastSuccessfulSyncAt: null,
+      lastError: null,
+      documents: {},
+    }),
+  ),
+  http.get(`${API_BASE}/integrations/fireflies`, () =>
     HttpResponse.json({
       connected: false,
       status: 'NOT_CONNECTED',

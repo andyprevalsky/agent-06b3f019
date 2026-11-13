@@ -17,6 +17,24 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/**
+ * Organization backpressure that says nothing about one transfer: the provider's throttle, its
+ * intermittent org-token 401 on a healthy secret (left after the runtime's read auth-flap window),
+ * and a transient 503. Same set as the benchmark float's backpressure classification.
+ */
+function isOrgReleaseObservationBackpressure(error: unknown): boolean {
+  if (
+    error instanceof AgentCardOrgRuntimeError &&
+    (error.code === 'agentcard_org_mcp_rate_limited' ||
+      (error.code === 'agentcard_org_mcp_unauthorized' && error.status === 401) ||
+      (error.code === 'agentcard_org_mcp_unavailable' && error.status === 503))
+  ) {
+    return true;
+  }
+  const message = error instanceof Error ? error.message : String(error);
+  return /too many requests|rate.?limit|\b429\b/i.test(message);
+}
+
 export interface WalletFundingRequest {
   userId: string;
   agentId?: string;
@@ -256,8 +274,9 @@ export class AgentCardCompanyWalletFundingProvider implements WalletFundingProvi
       try {
         result = await this.toolCaller('list_transfers', { limit: 100 }, retryDeadlineAtMs);
       } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        if (!/too many requests|rate.?limit|\b429\b/i.test(message)) throw error;
+        // Backpressure skips one observation; persisting it as a failed reclaim would turn a
+        // still-pending release (the stalled RECLAIMING lease) into RECLAIM_FAILED.
+        if (!isOrgReleaseObservationBackpressure(error)) throw error;
         if (attempt < observations) {
           await delay(waits[attempt - 1]);
           continue;

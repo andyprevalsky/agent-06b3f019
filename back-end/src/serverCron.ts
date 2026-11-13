@@ -19,6 +19,7 @@ import {
 import { runPlaidTransactionSyncJob } from './domains/integrations/service.plaidTransactions';
 import { runGmailSyncJob } from './services/integrations/gmailSync';
 import { scheduleGranolaSync } from './services/integrations/granolaCron';
+import { scheduleFirefliesSync } from './services/integrations/firefliesCron';
 import { runGoogleDataPurgeJob } from './services/integrations/googleDataPurge';
 import { runMessagingUploadJobs } from './domains/integrations/uploadService.messagingJobs';
 import { reconcileWorkflowLiveness } from './providers/workflowLivenessReconciler';
@@ -634,6 +635,7 @@ export function registerCronJobs(isProduction: boolean): void {
   scheduleMessagingUploadJobs();
   schedulePlaidSync();
   scheduleGranolaSync();
+  scheduleFirefliesSync();
   schedulePurchaseHoldReconcile();
   scheduleAgentCardOrgWalletMonitor();
   reportCoinbaseFiatRailDisabled();
