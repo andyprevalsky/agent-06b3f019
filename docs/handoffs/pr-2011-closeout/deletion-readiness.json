@@ -71,29 +71,11 @@
     "scripts/__pycache__/": "reproducible",
     "scripts/lib/__pycache__/": "reproducible"
   },
-  "live_processes": [
-    {
-      "argv": "/bin/bash -c source /home/boxes/.claude/shell-snapshots/snapshot-bash-1794551358784-c2cnso.sh 2>/dev/null || true && shopt -u extglob 2>/dev/null || true && { \\builtin unalias -- 'which'; \\builtin uns",
-      "cwd": "/home/boxes/rose",
-      "pid": 1501950
-    },
-    {
-      "argv": "cut -c1-250",
-      "cwd": "/home/boxes/rose",
-      "pid": 1501951
-    },
-    {
-      "argv": "ugrep -G --ignore-files --hidden -I --exclude-dir=.git --exclude-dir=.svn --exclude-dir=.hg --exclude-dir=.bzr --exclude-dir=.jj --exclude-dir=.sl -E OPEN|DEPLOY_DELETION",
-      "cwd": "/home/boxes/rose",
-      "pid": 1501952
-    }
-  ],
+  "live_processes": [],
   "manifest": "docs/handoffs/pr-2011-closeout/closeout-manifest.json",
   "open_items": [
-    "uncommitted changes in /home/boxes/rose: docs/handoffs/pr-2011-closeout/closeout-manifest.json, docs/handoffs/pr-2011-closeout/private-archive-receipt.json",
-    "live process 1501950 in this checkout: /bin/bash -c source /home/boxes/.claude/shell-snapshots/snapshot-bash-1794551358784-c2cnso.sh 2>/dev/null || true && shopt -u extglob 2>/dev/null || true && { \\builtin unalias -- 'which'; \\builtin uns",
-    "live process 1501951 in this checkout: cut -c1-250",
-    "live process 1501952 in this checkout: ugrep -G --ignore-files --hidden -I --exclude-dir=.git --exclude-dir=.svn --exclude-dir=.hg --exclude-dir=.bzr --exclude-dir=.jj --exclude-dir=.sl -E OPEN|DEPLOY_DELETION"
+    "1 unpushed commit(s) in /home/boxes/rose",
+    "branch records/pr-2011-closeout has 1 commit(s) on no remote"
   ],
   "pr": 2011,
   "preserved_refs": {
@@ -759,12 +741,8 @@
       "locked": false,
       "needs_integration": false,
       "path": "/home/boxes/rose",
-      "uncommitted": [
-        "docs/handoffs/pr-2011-closeout/closeout-manifest.json",
-        "docs/handoffs/pr-2011-closeout/deletion-readiness.json",
-        "docs/handoffs/pr-2011-closeout/private-archive-receipt.json"
-      ],
-      "unpushed_commits": 0
+      "uncommitted": [],
+      "unpushed_commits": 1
     }
   ]
 }
