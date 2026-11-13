@@ -77,6 +77,36 @@ FLEET_DIR="$EMPTY_FLEET"
             self.assertEqual(r.returncode,0,r.stderr)
             self.assertFalse(marker.exists(),'foreign reused PID received signal')
 
+    def test_unclosed_source_claim_reseals_terminal_verdict_and_keeps_recovery_authority(self):
+        """PR1910 CodeRabbit 4559306516: the sealed lifecycle must not keep exit 0 while the claim is retained."""
+        source=FLEET.read_text()
+        seal=re.search(r'^fleet_seal_source_claim_unresolved\(\) \{.*?^\}',source,re.M|re.S).group(0)
+        block=re.search(r'^    if ! finish_private_source_lease; then\n.*?^    fi\n',source,re.M|re.S).group(0)
+        lease=runpy.run_path(str(ROOT/'scripts/tests/cloudbench-source-lease.test.py'))
+        fixture=lease['SourceLease']('runTest');fixture.setUp();self.addCleanup(fixture.doCleanups)
+        process=fixture.start();process.terminate();process.communicate(timeout=5)
+        _,lifecycle=fixture.proof()
+        sealed=json.loads(lifecycle.read_text());sealed.update(status='verified',controller_exit_code=0,
+            hub_publication_failed=False,autoscaler_failed_benches=[])
+        fixture.write(lifecycle,sealed)
+        calls=Path(fixture.root)/'projection-calls'
+        script=(seal+'\nfinish_private_source_lease() { return 1; }\n'
+                'finalize_terminal_projection() { printf "%s\\n" "$1" >> "$CALLS"; }\nec=0\n'+block+'echo "ec=$ec"\n')
+        result=subprocess.run(['bash','-c',script],env={**os.environ,'FLEET_DIR':str(lifecycle.parent.parent),
+            'CALLS':str(calls),'SELF_MANAGED_HUB_RUN':'0'},capture_output=True,text=True,timeout=10)
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertIn('ec=1',result.stdout)
+        resealed=json.loads(lifecycle.read_text())
+        self.assertEqual((resealed['status'],resealed['controller_exit_code'],resealed['source_claim_closed']),('failed',1,False))
+        # Physical teardown facts are preserved, not rewritten into the claim result.
+        kept=[k for k in sealed if k not in ('status','controller_exit_code')]
+        self.assertEqual({k:resealed[k] for k in kept},{k:sealed[k] for k in kept})
+        self.assertEqual(calls.read_text(),'1\n')
+        # The exact-owner close still accepts the resealed verdict's preserved cleanup proof.
+        closed=fixture.invoke('close')
+        self.assertEqual(closed.returncode,0,closed.stderr)
+        self.assertNotIn(fixture.m['CLAIM_PREFIX']+lease['OWNER'],fixture.b.machines[fixture.mid]['config']['metadata'])
+
     def test_lost_lease_refuses_new_clone_admission_despite_matching_inventory(self):
         self.assertNotEqual(self.run_admission(1).returncode,0)
     def test_held_lease_admits_exact_ready_source(self):

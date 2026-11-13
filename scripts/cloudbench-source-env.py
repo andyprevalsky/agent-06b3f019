@@ -21,6 +21,9 @@ CAPSULE_ROOT = '/data/.cloudbench-private/env'
 PROVENANCE_PATHS = ('/cloudbench-execution-provenance.json', '/data/cloudbench-execution-provenance.json')
 ENV_KEYS = {'AGENTS_ENV_B64', 'BACKEND_ENV_B64'}
 PROVIDERS = {'tilion', 'kernel', 'steel', 'browser-use'}
+# The capsule's agents/.env and back-end/.env carry these. The worker and
+# backend load dotenv without override, so an inherited copy would win.
+FILE_OWNED_SCALARS = ('TEMPORAL_ADDRESS', 'TEMPORAL_NAMESPACE', 'TEMPORAL_API_KEY', 'BROWSER_PROVIDER')
 BINDING_KEYS = {'owner_token', 'create_nonce', 'source_ref', 'image_ref', 'node_fingerprint', 'python_fingerprint'}
 MAX_BYTES = 4 * 1024 * 1024
 
@@ -251,7 +254,7 @@ def load_guest(environ=None):
 
 
 def effective_env(capsule, environ):
-    env = dict(environ)
+    env = {key: value for key, value in environ.items() if key not in FILE_OWNED_SCALARS}
     env.update(capsule['env'])
     env.update({key.replace('_B64', '_SHA256'): value for key, value in capsule['decoded_sha256'].items()})
     env.update(CLOUDBENCH_BROWSER_PROVIDER=capsule['providers']['backend'],
@@ -266,7 +269,8 @@ def check_effective(environ=None):
         return None  # Existing ambient/V1 guard retains its unchanged checks.
     capsule, result = load_guest(env)
     expected = effective_env(capsule, {})
-    need(all(env.get(key) == value for key, value in expected.items()), 'effective owned environment differs')
+    need(all(env.get(key) == value for key, value in expected.items())
+         and not any(key in env for key in FILE_OWNED_SCALARS), 'effective owned environment differs')
     return result
 
 

@@ -820,6 +820,42 @@ def deleted_state(api, kind, identity):
             time.sleep(0.2)
 
 
+def delete_attempt(journal, intent, kind, identity):
+    """Current DELETE attempt and whether a definitive native refusal ended it.
+
+    Attempt 1 is the original delete.pending receipt; each later attempt has
+    its own retry receipt. Only a recorded definitive rejection permits another."""
+    retries = sorted(journal.glob(kind + '.delete.retry-*.json'))
+    attempt = 1 + len(retries)
+    for number, path in enumerate(retries, 2):
+        need(path.name == kind + '.delete.retry-' + str(number) + '.json'
+             and read(path) == envelope(intent, {'id': identity, 'attempt': number}), 'delete retry authority changed')
+    for path in journal.glob(kind + '.delete.rejected-*.json'):
+        value = record(journal, path.name, intent)
+        need(value.get('id') == identity and type(value.get('attempt')) is int and 1 <= value['attempt'] <= attempt
+             and path.name == kind + '.delete.rejected-' + str(value['attempt']) + '.json', 'delete rejection authority changed')
+    return attempt, (journal / (kind + '.delete.rejected-' + str(attempt) + '.json')).exists()
+
+
+def native_delete(api, journal, intent, kind, identity, attempt):
+    """Publish the attempt receipt, then DELETE once. A definitive native 4xx
+    refusal proves no deletion effect and is recorded; ambiguous outcomes (no
+    status, 5xx, 408) keep the existing GET-only reconciliation."""
+    if attempt == 1:
+        save(journal / (kind + '.delete.pending.json'), envelope(intent, {'id': identity}))
+    else:
+        save(journal / (kind + '.delete.retry-' + str(attempt) + '.json'), envelope(intent, {'id': identity, 'attempt': attempt}))
+    try:
+        api.api('DELETE', '/' + kind + 's/' + identity)
+    except Refusal as error:
+        status = getattr(error, 'native_status', None)
+        if getattr(error, 'diagnostic', None) is not None and type(status) is int and 400 <= status < 500 \
+                and status not in (404, 408):
+            save(journal / (kind + '.delete.rejected-' + str(attempt) + '.json'),
+                 envelope(intent, {'id': identity, 'attempt': attempt, 'native_status': status}))
+        raise
+
+
 def retirement_successor(args, journal, intent):
     paths = [args.prepared_request, args.prepared_result, args.prepared_manifest]
     need(all(paths) or not any(paths), 'complete prepared successor receipt chain required')
@@ -954,18 +990,22 @@ def execute(args, api, journal):
             create_once(api, journal, 'machine', request, intent)
             if not (journal / 'machine.deleted.json').exists():
                 pending_delete = journal / 'machine.delete.pending.json'
+                attempt, rejected = 0, True
                 if pending_delete.exists():
                     need(read(pending_delete) == envelope(intent, {'id': machine['id']}), 'delete authority changed')
+                    attempt, rejected = delete_attempt(journal, intent, 'machine', machine['id'])
+                if not rejected:
                     deleted_state(api, 'machines', machine['id'])
                 else:
+                    # First attempt, or a retry after a recorded definitive
+                    # refusal: repeat every ownership check under the lease.
                     protocol = runpy.run_path(str(HERE / 'cloudbench-source-lease.py'))
                     with protocol['Lease'](api, machine['id']) as leased:
                         protocol['retirement'](leased, args.owner_token, intent['nonce'], intent['nonce'])
                         verify_machine(leased, intent, machine, volume, successor)
                         consumer_guard(leased, intent, machine['id'], volume['id'])
                         protocol['put_metadata'](leased, protocol['RETIRING'], intent['nonce'])
-                        save(journal / 'machine.delete.pending.json', envelope(intent, {'id': machine['id']}))
-                        leased.api('DELETE', '/machines/' + machine['id'])
+                        native_delete(leased, journal, intent, 'machine', machine['id'], attempt + 1)
                         deleted_state(leased, 'machines', machine['id'])
                         leased.deleted = True
                 confirmed = deleted_state(api, 'machines', machine['id'])
@@ -973,13 +1013,15 @@ def execute(args, api, journal):
         if volume_ack.exists() and not (journal / 'volume.deleted.json').exists():
             volume = create_once(api, journal, 'volume', intent['volume_request'], intent)
             pending_delete = journal / 'volume.delete.pending.json'
+            attempt, rejected = 0, True
             if pending_delete.exists():
                 need(read(pending_delete) == envelope(intent, {'id': volume['id']}), 'delete authority changed')
+                attempt, rejected = delete_attempt(journal, intent, 'volume', volume['id'])
+            if not rejected:
                 deleted_state(api, 'volumes', volume['id'])
             else:
                 verify_volume(api, intent, volume)
-                save(journal / 'volume.delete.pending.json', envelope(intent, {'id': volume['id']}))
-                api.api('DELETE', '/volumes/' + volume['id'])
+                native_delete(api, journal, intent, 'volume', volume['id'], attempt + 1)
             confirmed = deleted_state(api, 'volumes', volume['id'])
             save(journal / 'volume.deleted.json', envelope(intent, {'id': volume['id'], 'native_state': confirmed}))
         need(not (journal / 'volume.pending.json').exists() or volume_ack.exists(), 'ambiguous volume create retained')
