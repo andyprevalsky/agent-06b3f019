@@ -888,7 +888,8 @@ ps() {
         delivered = []
 
         def forward_repeatedly():
-            while not stop.is_set():
+            # Pace delivery; the event ends the storm as soon as the case returns.
+            while not stop.wait(0.0005):
                 for path in (self.root / "proofs").glob("*/active-waiter.owner"):
                     try:
                         fields = dict(line.split("=", 1) for line in path.read_text().splitlines())
@@ -896,7 +897,6 @@ ps() {
                         delivered.append(1)
                     except (OSError, KeyError, ValueError):
                         pass
-                time.sleep(0.0005)
 
         storm = threading.Thread(target=forward_repeatedly, daemon=True)
         storm.start()
