@@ -7977,6 +7977,44 @@ class Cycle(unittest.TestCase):
         current=copy.deepcopy(state);current['source']={'head':'f'*40,'digest':'e'*64};current['plan']['source']=current['source']
         self.assertIsNone(c.full_pass_binding(current,current['plan']['gates'][1],root=self.root))
 
+    def test_clean_successor_historical_proof_keeps_other_gate_custody_inventory(self):
+        """CodeRabbit 4559306508: the post-result proof must hash the complete custody inventory."""
+        import deploy_test_historical_custody as h
+        import deploy_test_native_cleanup as n
+        state, prior, original, successor, folder, request = self.committed_historical_successor_fixture()
+        other = copy.deepcopy(state['historical_no_retry_custody'][0])
+        other['original_failure'] = {**other['original_failure'], 'id': 'other-gate-failure', 'gate': 'other-gate'}
+        state['historical_no_retry_custody'].insert(0, other)
+        request['custody_state_sha256'] = h.state_identity(state); c.write(folder/'request.json', request)
+        before = copy.deepcopy(state)
+        self.assertIsNone(n.clean_isolated_successor(state, prior, original, successor))
+        self.assertEqual(before, state)
+        request['custody_state_sha256'] = '0'*64; c.write(folder/'request.json', request)
+        with self.assertRaises(ValueError): n.clean_isolated_successor(state, prior, original, successor)
+
+    def test_clean_successor_historical_proof_accepts_mixed_legacy_and_custody_cases(self):
+        """CodeRabbit 4559306513: the post-result guard needs the authenticated legacy qualifications."""
+        import deploy_test_historical_custody as h
+        import deploy_test_native_cleanup as n
+        state, prior, original, successor, folder, request = self.committed_historical_successor_fixture()
+        gate = state['plan']['gates'][1]
+        waived = state['historical_no_retry_custody'].pop()['original_failure']['check'].split('/', 1)[1]
+        legacy = {'disposition': 'resource', 'source': copy.deepcopy(state['source'])}
+        request['skips'][waived] = legacy
+        request['custody_state_sha256'] = h.state_identity(state); c.write(folder/'request.json', request)
+        custody = {k: v for k, v in request['skips'].items() if k != waived}
+        successor.update(custody_skips=copy.deepcopy(custody),
+                         current_execution=dict.fromkeys(custody, 'UNVERIFIED'))
+        successor['case_complete'][waived] = True
+        c.write(folder/'receipt.json', successor); state['attempts'] = [dict(phase='focused', results=[successor])]
+        self.assertEqual(set(h.guard(state, gate, self.root, {waived: legacy})), set(custody))
+        with self.assertRaisesRegex(ValueError, 'no current no-retry qualification'):
+            h.guard(state, gate, self.root)
+        before = copy.deepcopy(state)
+        with patch.object(c, 'reuse_qualifications', return_value={waived: legacy}):
+            self.assertIsNone(n.clean_isolated_successor(state, prior, original, successor))
+        self.assertEqual(before, state)
+
     def test_clean_successor_historical_completion_and_authority_tampering_refuses(self):
         import deploy_test_native_cleanup as n
         state, prior, original, successor, folder, request = self.committed_historical_successor_fixture()

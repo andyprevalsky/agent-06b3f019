@@ -86,6 +86,11 @@ else:
         elif args[2] != authority["reviewer"] or args[args.index("--turn") + 1] != authority["turn"]:
             result = dict(ok=False)
         else:
+            racing = os.environ.get("REVIEW_TEST_DECIDE_DURING_RESULT")
+            if racing and not Path(racing + ".done").exists():
+                Path(racing + ".done").write_text("")
+                import subprocess
+                subprocess.run(json.loads(Path(racing).read_text()), check=True, capture_output=True)
             result = dict(ok=True, data=dict(status=authority["status"], turnId=authority.get("result_turn", authority["turn"]),
                           completedAt=authority.get("completedAt", 100),
                           executionInstanceId=authority.get("executionInstanceId", "test-devbox"),
@@ -283,6 +288,20 @@ def verify(row):
         self.assertEqual(state["decision"], None)
         self.assertEqual(state["code_only"]["reviewer"]["publicId"], "thr_" + "2" * 32)
         self.assertEqual(state["code_only"]["evidence_sha256"], hashlib.sha256(evidence.read_bytes()).hexdigest())
+
+    def test_decision_recorded_during_authority_verification_is_not_overwritten(self) -> None:
+        evidence = self.native_metadata_review()
+        racing = Path(self._tmp.name) / "decide-during-result.json"
+        racing.write_text(json.dumps([sys.executable, str(SCRIPT), "--repo", str(self.repo),
+                                      "decide", "--decision", "rejected", "--evidence", "human said no"]))
+        self.env["REVIEW_TEST_DECIDE_DURING_RESULT"] = str(racing)
+        code, result = self.classify(evidence)
+        self.assertTrue(Path(str(racing) + ".done").exists())
+        self.assertEqual(code, 2, result)
+        state = json.loads((self.repo / ".context/deploy-approval-batch.json").read_text())
+        self.assertEqual(state["decision"], "rejected")
+        self.assertNotIn("code_only", state)
+        self.assertNotEqual(self.batch("check")[0], 0)
 
     def test_code_only_classification_refuses_the_freeze_owner(self) -> None:
         self.assertEqual(self.classify(self.native_metadata_review(), owner=True)[0], 2)

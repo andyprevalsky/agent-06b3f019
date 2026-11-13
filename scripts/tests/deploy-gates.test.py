@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import shlex
 import subprocess
 import sys
 import signal
@@ -252,6 +253,17 @@ class Inventory(Fixture):
             remote = g.remote_slot(self.root, 'agents-coverage-blackbox')['env']
             self.assertIn(g.GITHUB_WORKER_ROOT, remote['NODE_OPTIONS'])
             self.assertNotIn('/controller-only/', remote['NODE_OPTIONS'])
+        for preload in ('--import=/controller-only/blackbox-kernel-proxy-custody.cjs',
+                        '--import /controller-only/blackbox-kernel-proxy-custody.cjs',
+                        '-r /controller-only/blackbox-kernel-proxy-custody.cjs'):
+            with self.subTest(preload=preload), patch.dict(os.environ, {'NODE_OPTIONS': preload,
+                                                                        'CLOUDBENCH_KERNEL_PROXY_CUSTODY': '0'}):
+                selected = g.kernel_custody_environment(self.root)
+                self.assertNotIn('/controller-only/', selected['NODE_OPTIONS'])
+                self.assertEqual(shlex.split(selected['NODE_OPTIONS']), ['--require=' + str(guard)])
+                child = subprocess.run(['node', '-e', 'if(!globalThis[Symbol.for("rose.test.kernelProxyCustody")])process.exit(1)'],
+                                       env={**os.environ, **selected}, capture_output=True, text=True, timeout=8)
+                self.assertEqual(child.returncode, 0, child.stderr)
         with patch.dict(os.environ, {'NODE_OPTIONS': '', 'CLOUDBENCH_KERNEL_PROXY_CUSTODY': '0'}):
             self.assertEqual(g.kernel_custody_environment(self.root), {})
         with patch.dict(os.environ, {'CLOUDBENCH_KERNEL_PROXY_CUSTODY': 'invalid'}):

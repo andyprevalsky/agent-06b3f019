@@ -29,6 +29,8 @@ Exit codes: 0 clear/covered, 1 re-request or rejected, 3 decision pending,
 from __future__ import annotations
 
 import argparse
+import contextlib
+import fcntl
 import hashlib
 import json
 import os
@@ -289,8 +291,9 @@ def freeze(repo: Path, state_path: Path, *, head: str, base_ref: str) -> dict:
     }
     diff_path = state_path.with_suffix(".diff")
     state_path.parent.mkdir(parents=True, exist_ok=True)
-    diff_path.write_text("".join(file_diff(repo, base, path) for path in files))
-    _write(state_path, state)
+    with _batch_lock(state_path):
+        diff_path.write_text("".join(file_diff(repo, base, path) for path in files))
+        _write(state_path, state)
     return {
         "status": "approval-required" if files else "clear",
         "head": head,
@@ -298,6 +301,15 @@ def freeze(repo: Path, state_path: Path, *, head: str, base_ref: str) -> dict:
         "guards": {name: entries for name, entries in flagged.items() if entries},
         "diff": str(diff_path) if files else None,
     }
+
+
+@contextlib.contextmanager
+def _batch_lock(path: Path):
+    """Serialize every batch mutation (freeze, decide, classify-code-only)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.with_name(f".{path.name}.lock").open("a") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        yield
 
 
 def _write(path: Path, state: dict) -> None:
@@ -317,17 +329,18 @@ def _read(path: Path) -> dict:
 
 
 def decide(state_path: Path, *, decision: str, evidence: str) -> dict:
-    state = _read(state_path)
-    if not state["files"]:
-        raise BatchError("nothing in this batch needs a decision")
-    if state.get("decision") not in (None,):
-        raise BatchError(f"batch already decided: {state['decision']}; freeze a new batch to re-request")
-    if state.get("code_only"):
-        raise BatchError("batch already classified code-only; freeze a new batch to re-request")
-    state["decision"] = decision
-    state["decided_at"] = _now()
-    state["evidence"] = evidence
-    _write(state_path, state)
+    with _batch_lock(state_path):
+        state = _read(state_path)
+        if not state["files"]:
+            raise BatchError("nothing in this batch needs a decision")
+        if state.get("decision") not in (None,):
+            raise BatchError(f"batch already decided: {state['decision']}; freeze a new batch to re-request")
+        if state.get("code_only"):
+            raise BatchError("batch already classified code-only; freeze a new batch to re-request")
+        state["decision"] = decision
+        state["decided_at"] = _now()
+        state["evidence"] = evidence
+        _write(state_path, state)
     return {"status": decision, "head": state["head"], "files": sorted(state["files"])}
 
 
@@ -433,9 +446,14 @@ def classify_code_only(repo: Path, state_path: Path, evidence: Path, review_thre
                   evidence_sha256=hashlib.sha256(raw.encode()).hexdigest(),
                   owner_thread=owner_thread, owner_turn=owner_turn)
     reviewer = verify_review_authority(state, review)
-    review["reviewer"] = reviewer
-    state["code_only"] = review
-    _write(state_path, state)
+    with _batch_lock(state_path):
+        # Verification waits on managed results; a decision or re-freeze
+        # recorded meanwhile must win over this stale, still-pending snapshot.
+        if _read(state_path) != state:
+            raise BatchError("batch changed during code-only authority verification; re-run against the current batch")
+        review["reviewer"] = reviewer
+        state["code_only"] = review
+        _write(state_path, state)
     return {"status": "code-only", "head": state["head"], "reviewer": reviewer["publicId"],
             "files": sorted(state["files"])}
 
