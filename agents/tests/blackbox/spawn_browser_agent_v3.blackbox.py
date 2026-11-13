@@ -29281,8 +29281,9 @@ async def test_private_browser_pause_urls_use_protected_continuity(_lifecycle_pr
     assert not failures, f"credential-bearing URL escaped activity pause boundary: {failures}"
 
 
-async def _resume_drained_browser_task_on_reused_session(ttl_ms, on_step):
+async def _resume_drained_browser_task_on_reused_session(ttl_ms, on_step, *, activity_budget=None, activity_elapsed=None):
     """Run a drained task resumed at step 3 on the live Steel session the backend let it reuse."""
+    import dataclasses
     from contextlib import ExitStack
 
     from temporalio.testing import ActivityEnvironment
@@ -29293,6 +29294,12 @@ async def _resume_drained_browser_task_on_reused_session(ttl_ms, on_step):
     from domains.spawn_browser_agent_v3.handler import spawn_browser_agent_activity_v3
 
     env = ActivityEnvironment()
+    if activity_budget is not None:
+        env.info = dataclasses.replace(
+            env.info,
+            start_to_close_timeout=activity_budget,
+            started_time=datetime.now(timezone.utc) - (activity_elapsed or timedelta(0)),
+        )
     fake_browser = SimpleNamespace(contexts=[SimpleNamespace(pages=[SimpleNamespace()])], close=AsyncMock())
     session_info = {
         "task_id": "task-1",
@@ -29455,6 +29462,65 @@ async def test_browser_task_keeps_stepping_on_a_reused_session_with_time_left():
     assert result["step_count"] == 5, result
     resume_mock.assert_not_awaited()
     close_mock.assert_not_awaited()
+
+
+async def test_browser_task_checkpoints_before_its_activity_start_to_close():
+    """A long, healthy task must checkpoint before its own StartToClose kills it.
+
+    Prod agent 0b54f65d (2026-11-13): a phone-setup browser task made 127 steady
+    steps (123 successful phone actions, last at 09:19:45) and was hard-killed
+    by the 30-minute StartToClose at 09:20:48 mid-step, returning no result. The
+    step loop already yields for deploy drain and session expiry; it must yield
+    the same way while one more supervised step plus teardown still fits in the
+    attempt, so the manager restarts the same task at the same step count.
+    """
+    from domains.spawn_browser_agent_v3.config import (
+        ACTIVITY_START_TO_CLOSE_TIMEOUT_MINUTES,
+        BROWSER_ACTIVITY_DEADLINE,
+        BROWSER_DRAIN_YIELD_STATUS,
+        BROWSER_SESSION_MIN_REMAINING_SECONDS,
+    )
+
+    budget = timedelta(minutes=ACTIVITY_START_TO_CLOSE_TIMEOUT_MINUTES)
+    assert budget.total_seconds() >= 2 * BROWSER_SESSION_MIN_REMAINING_SECONDS
+
+    async def step(env):
+        await asyncio.sleep(0)
+
+    result, llm_step, resume_mock, close_mock = await _resume_drained_browser_task_on_reused_session(
+        24 * 3600 * 1000,
+        step,
+        activity_budget=budget,
+        activity_elapsed=budget - timedelta(seconds=BROWSER_SESSION_MIN_REMAINING_SECONDS),
+    )
+    assert llm_step.await_count == 1, f"started a step the activity may not outlive: {llm_step.await_count}"
+    assert result["status"] == BROWSER_DRAIN_YIELD_STATUS, result
+    assert result["yield_reason"] == BROWSER_ACTIVITY_DEADLINE, result
+    assert result["step_count"] == 4 and result["task_id"] == "task-1", result
+    close_mock.assert_not_awaited()
+
+    # Control: the same budget with time left keeps stepping until a real drain.
+    steps = []
+
+    async def deploy_lands_on_the_second_step(env):
+        steps.append(1)
+        if len(steps) == 2:
+            env.worker_shutdown()
+
+    result, llm_step, _resume, _close = await _resume_drained_browser_task_on_reused_session(
+        24 * 3600 * 1000, deploy_lands_on_the_second_step, activity_budget=budget, activity_elapsed=timedelta(0)
+    )
+    assert llm_step.await_count == 2, "an attempt with time left must keep serving steps"
+    assert result["yield_reason"] != BROWSER_ACTIVITY_DEADLINE, result
+
+    # The 3m Fast Mode demo ceiling stays a hard ceiling (no yield loop).
+    from temporalio.testing import ActivityEnvironment
+    from domains.spawn_browser_agent_v3.handler import _activity_deadline_near
+
+    short = timedelta(minutes=3)
+    env = ActivityEnvironment()
+    env.info = dataclasses.replace(env.info, start_to_close_timeout=short, started_time=datetime.now(timezone.utc) - short)
+    assert env.run(_activity_deadline_near) is False
 
 
 async def test_reused_session_lifetime_fixture_isolates_cached_generation():
@@ -38381,6 +38447,10 @@ async def run_all_tests():
     await r.record_async(
         "reused_session_with_time_left_keeps_stepping",
         test_browser_task_keeps_stepping_on_a_reused_session_with_time_left,
+    )
+    await r.record_async(
+        "browser_task_checkpoints_before_activity_start_to_close",
+        test_browser_task_checkpoints_before_its_activity_start_to_close,
     )
     await r.record_async(
         "reused_session_lifetime_fixture_isolates_cached_generation",
