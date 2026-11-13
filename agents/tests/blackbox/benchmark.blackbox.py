@@ -6925,7 +6925,6 @@ async def test_release_stall_survives_failed_final_reads_when_owned_ledger_holds
         }
 
     async def storm_reads(_base, _aid):
-        await asyncio.sleep(0.01)
         raise storm
 
     async def wait(lifecycle, exact_root_sessions):
@@ -6939,7 +6938,8 @@ async def test_release_stall_survives_failed_final_reads_when_owned_ledger_holds
                 task,
                 deepcopy(lifecycle),
                 timeout_seconds=0.05,
-                poll_interval_seconds=0,
+                # The runner's own poll interval paces the failed reads toward the deadline.
+                poll_interval_seconds=0.01,
                 fetch_lifecycle=storm_reads,
             )
 
@@ -6965,7 +6965,7 @@ async def test_release_stall_survives_failed_final_reads_when_owned_ledger_holds
         calls += 1
         if calls == 1:
             raise storm
-        await asyncio.sleep(1)
+        await asyncio.Event().wait()  # the recovery never answers; only the owned deadline ends it
         return deepcopy(stalled)
 
     with (
