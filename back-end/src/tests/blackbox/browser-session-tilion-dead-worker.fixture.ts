@@ -1,5 +1,5 @@
 /**
- * Dead Tilion worker at browser init (2026-11-13, east pool, sess_993d70*):
+ * Dead Tilion worker at browser init and resume (2026-11-13, east pool, sess_993d70*):
  * POST /v1/session 201, then the CDP upgrade AND DELETE answer the AWS ALB's
  * "503 Service Temporarily Unavailable" (no healthy target); Tilion round-robins
  * the next create onto a healthy worker.
@@ -22,9 +22,10 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { createServer as createNetServer, type Socket } from 'node:net';
 import { chromium, type Browser } from 'playwright';
 
-const START_URL = 'https://shop.example.test/account';
-// Worker retry budget: agents SESSION_INIT_TRANSIENT_MAX_ATTEMPTS (5) after the first try.
-const WORKER_INIT_CALLS = 6;
+// Set once the loopback server listens: resume restores navigate real Chromium here.
+let START_URL = '';
+// Worker budget: the first call plus agents SESSION_INIT_TRANSIENT_MAX_ATTEMPTS (4) retries.
+const WORKER_INIT_CALLS = 5;
 // Captured 2026-11-13T05:20:44Z from east.back.tilion.dev for sess_993d70a19f01…
 // (CDP websocket upgrade and DELETE /v1/session/<id> returned these exact bytes).
 const ALB_503_BODY =
@@ -103,6 +104,7 @@ async function startFakeTilion(deadPort: number, healthyEndpoint: string): Promi
     unexpected: [],
   };
   const dead = new Set<string>();
+  const released = new Set<string>();
   const json = (res: ServerResponse, status: number, body: unknown) => {
     res.writeHead(status, { 'Content-Type': 'application/json', 'X-Request-ID': randomUUID() });
     res.end(JSON.stringify(body));
@@ -112,7 +114,10 @@ async function startFakeTilion(deadPort: number, healthyEndpoint: string): Promi
     req.on('end', () => {
       const path = new URL(req.url ?? '/', 'http://fixture').pathname;
       const sessionId = /^\/v1\/session\/([^/]+)/.exec(path)?.[1];
-      if (req.method === 'GET' && path === '/v1/regions') {
+      if (req.method === 'GET' && path === '/account') {
+        res.writeHead(200, { 'Content-Type': 'text/html' });
+        res.end('<title>Account</title><p>fixture</p>');
+      } else if (req.method === 'GET' && path === '/v1/regions') {
         json(res, 200, [{ code: 'us', name: 'United States', country: 'us' }]);
       } else if (req.method === 'POST' && path === '/v1/session') {
         const worker = state.plan.shift();
@@ -138,7 +143,24 @@ async function startFakeTilion(deadPort: number, healthyEndpoint: string): Promi
         json(res, 200, { live_view_url: `/v1/session/${sessionId}/live-view?token=t` });
       } else if (sessionId && req.method === 'DELETE') {
         state.deletes.set(sessionId, (state.deletes.get(sessionId) ?? 0) + 1);
+        released.add(sessionId);
         res.writeHead(204).end();
+      } else if (sessionId && req.method === 'GET' && path === `/v1/session/${sessionId}/status`) {
+        const now = Date.now() / 1000;
+        if (released.has(sessionId)) json(res, 404, { detail: 'session not found' });
+        else
+          json(res, 200, { state: 'ready', created_at: now - 30, ttl: 600, expires_at: now + 570 });
+      } else if (sessionId && req.method === 'GET' && path === `/v1/session/${sessionId}`) {
+        if (released.has(sessionId)) json(res, 410, { detail: 'session closed' });
+        else
+          json(res, 200, {
+            session_id: sessionId,
+            state: 'live',
+            created_at: Date.now() / 1000 - 30,
+            ttl: 600,
+            idle_timeout: 120,
+            connect_url: healthyEndpoint,
+          });
       } else {
         // Only the Tilion API surface is contract; hosts may probe any local listener.
         if (path.startsWith('/v1/')) state.unexpected.push(`${req.method} ${path}`);
@@ -159,6 +181,7 @@ async function main() {
   const healthy = await startHealthyWorker();
   const tilion = await startFakeTilion(dead.port, healthy.endpoint);
   process.env.TILION_BASE_URL = tilion.baseUrl;
+  START_URL = `${tilion.baseUrl}/account`;
   // Production shape: Tilion is the default provider with direct egress.
   process.env.BROWSER_PROVIDER = 'tilion';
   process.env.TILION_API_KEY = 'fixture-tilion-key';
@@ -170,7 +193,7 @@ async function main() {
     namedExports: {
       ...authOptions,
       getAuthOptions: async () => ({
-        realm: 'shop.example.test',
+        realm: '127.0.0.1',
         steel_session: null,
         cookie_bundles: [],
         passwords: [],
@@ -182,8 +205,13 @@ async function main() {
     },
   });
   const { prisma } = await import('../../providers/database');
-  const { initSession } = await import('../../domains/browser-session/service');
+  const { initSession, closeBrowserSession } =
+    await import('../../domains/browser-session/service');
+  const { resumeOwnedBrowserSession } =
+    await import('../../domains/browser-session/service.control');
   const { logicalBrowserTaskId } = await import('../../providers/browser/logicalSession');
+  const { TILION_VALIDATION_CREATE_ATTEMPTS } =
+    await import('../../providers/browser/tilionCreateValidation');
   const userId = `tilion-dead-worker-${randomUUID()}`;
   const failures: string[] = [];
 
@@ -240,17 +268,58 @@ async function main() {
     console.log(`scenario ${name}: ${JSON.stringify(observed)}`);
   }
 
+  /** A paused browser resumes onto a replacement session while two creates land dead. */
+  async function resumeScenario() {
+    const agentId = randomUUID();
+    await prisma.agent.create({ data: { id: agentId, userId, goal: 'tilion resume' } });
+    tilion.plan = ['healthy'];
+    tilion.creates.length = 0;
+    tilion.deletes.clear();
+    const first = await initSession(userId, agentId, START_URL);
+    await closeBrowserSession(first.session_id, true);
+    tilion.plan = ['dead', 'dead', 'healthy'];
+    tilion.creates.length = 0;
+    tilion.deletes.clear();
+    let resumed: { session_id?: string | null } | null = null;
+    let error: string | null = null;
+    try {
+      resumed = await resumeOwnedBrowserSession(logicalBrowserTaskId(agentId), userId);
+    } catch (failure) {
+      error = failure instanceof Error ? failure.message : String(failure);
+    }
+    const observed = {
+      creates: tilion.creates.map((id) => id.slice(0, 11)),
+      resumed: resumed?.session_id?.slice(0, 11) ?? null,
+      error: error?.slice(0, 160) ?? null,
+    };
+    if (!resumed?.session_id?.startsWith('sess_c3d0eb') || resumed.session_id === first.session_id)
+      failures.push(
+        `resume-dead-dead-then-healthy: no healthy replacement ${JSON.stringify(observed)}`
+      );
+    for (const id of tilion.creates.filter((created) => created.startsWith('sess_993d70'))) {
+      if ((tilion.deletes.get(id) ?? 0) === 0)
+        failures.push(`resume-dead-dead-then-healthy: dead ${id.slice(0, 11)} never released`);
+    }
+    console.log(`scenario resume-dead-dead-then-healthy: ${JSON.stringify(observed)}`);
+  }
+
   try {
     await prisma.user.create({ data: { userId, isAnonymous: false } });
     // One dead create: the adapter's second create must land on the healthy worker.
     await scenario('dead-then-healthy', ['dead', 'healthy'], true);
-    // Both adapter creates dead: the worker's retry must create afresh.
-    await scenario('dead-dead-then-healthy', ['dead', 'dead', 'healthy'], true);
+    // Every adapter create dead: the worker's retry must create afresh.
+    const perCall = TILION_VALIDATION_CREATE_ATTEMPTS;
+    const allDead = Array<Worker>(perCall).fill('dead');
+    await scenario('all-adapter-creates-dead-then-healthy', [...allDead, 'healthy'], true);
     // A create that returned no session id is ambiguous: no retry may allocate again.
-    await scenario('unidentified-allocation', ['no-id', 'no-id'], false);
+    await scenario('unidentified-allocation', Array<Worker>(perCall).fill('no-id'), false);
+    // Resume replacements have no outer retry: the adapter's own creates must reach a healthy worker.
+    await resumeScenario();
     assert.deepEqual(tilion.unexpected, [], 'Tilion calls outside the fixture contract');
     assert.deepEqual(failures, [], 'dead Tilion worker must not end browser init');
-    console.log('PASS Tilion dead worker: second create, fresh worker retry, ambiguous latch');
+    console.log(
+      'PASS Tilion dead worker: second create, fresh worker retry, ambiguous latch, resume replacement'
+    );
   } finally {
     await prisma.toolSideEffect.deleteMany({
       where: {

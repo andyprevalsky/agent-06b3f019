@@ -44,6 +44,7 @@ import type {
 } from './types';
 import {
   settleFailedTilionCreate,
+  TILION_VALIDATION_CREATE_ATTEMPTS,
   TilionSessionValidationError,
   type TilionValidationAttempt,
 } from './tilionCreateValidation';
@@ -292,7 +293,7 @@ async function createRemote(
       await settleFailedTilionCreate(
         error,
         sessionId,
-        attempt < 2,
+        attempt < TILION_VALIDATION_CREATE_ATTEMPTS,
         failed,
         releaseTilionRemoteSession
       );

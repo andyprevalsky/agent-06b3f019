@@ -11,6 +11,14 @@ const log = createLogger('Tilion');
 
 export class TilionSessionValidationError extends Error {}
 
+/**
+ * Creates per call while each lands on a session that fails CDP validation.
+ * Tilion places creates across its pool's workers; with one dead worker of three
+ * (2026-11-13) two creates still failed together about 1 in 9 times, which ended
+ * resume replacements that have no outer retry. Four bounds that to about 1 in 81.
+ */
+export const TILION_VALIDATION_CREATE_ATTEMPTS = 4;
+
 export interface TilionValidationAttempt {
   sessionId: string | undefined;
   /** The validation error, then the release error when DELETE was unconfirmed. */

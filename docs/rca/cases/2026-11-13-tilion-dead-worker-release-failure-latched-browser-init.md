@@ -47,6 +47,9 @@ Fly `iad` smoke guests and prod reach the east pool. The devbox reaches oregon
 (`sess_c41189*`, `sess_a651ef*`), where 4/4 passed, which is why local probes had
 looked clean.
 
+The worker was out of rotation from about 05:46Z (0 of 28 east creates landed on
+it) and came back by 06:14Z, so the failure is intermittent.
+
 Prod (Render, 2026-11-06..13): 0 `failed validation and cleanup`, 0 `before
 readiness`. The last prod Tilion allocation was 2026-11-12 20:17Z, so prod had no
 browser traffic during the outage. Prod uses the same east pool (`sess_993d70`
@@ -75,6 +78,32 @@ the receipt coalescer, the Tilion adapter, `tilionClient` HTTP and Playwright
 buggy revision, scenarios `dead-then-healthy` and `dead-dead-then-healthy` each
 made 1 create and saw `failed validation and cleanup` plus 5× `before readiness`.
 
+Exact task outcome (`scripts/run-bench --local browser-smoke`, unchanged task). The live
+worker had been drained, so a local forwarder (an experiment script, not committed)
+answered the first 4 creates the way the dead worker did. Each create was forwarded
+to east and the real session released at once; the response was re-pointed at a
+loopback plane returning the captured ALB 503 to CDP/GET/DELETE. Every other call
+went to real east. With the same environment on both revisions:
+
+- Buggy `fe09db83d`: FAIL in 399.9 s. Agent `d980de40-a5ed-48c7-932a-14d44b0179c3`:
+  `Browser agent b1912235-… recorded 0 trajectory step(s)`, 1 create, then
+  `Browser initialization failed before readiness` on every retry.
+- Fixed `2f201dbe23`: PASS in 233.5 s. Agent `3f3f9e2f-8772-4510-948c-2eaaf226cb5b`:
+  creates #1–#4 dead, #5 healthy within one browser agent.
+
+The stacks were torn down after the runs, so the FE links could not be re-opened;
+the run records are kept with the case evidence.
+
+Resume path (PR #2010 round-1 smoke, `agent-payment-setup-resume`, agent
+`172807c8-…`). The init fix recovered live at 06:15:02Z (`creating another` →
+`sess_c3d0eb`). At 06:16:41Z the write-lock resume asked for a replacement session,
+and both adapter creates landed on `sess_993d70`. The error was
+`BrowserSessionValidationError … failed validation and cleanup` →
+`Failed to resume session`. Resume replacements have no outer retry, so the agent
+redid the purchase and raised the extra `write_lock` at 06:17:47Z that failed the
+task. With the bound forced back to 2, the fixture's `resume-dead-dead-then-healthy`
+scenario reproduces this exact error; with 4 it passes.
+
 ## Solution
 
 - `tilion.ts` + `tilionCreateValidation.ts`: a CDP-validation failure moves on to
@@ -83,6 +112,10 @@ made 1 create and saw `failed validation and cleanup` plus 5× `before readiness
   validation and every allocated session is identified, it throws
   `BrowserSessionValidationError`. A create that returned no session id stays
   untyped and ambiguous.
+- `tilionCreateValidation.ts`: `TILION_VALIDATION_CREATE_ATTEMPTS = 4` bounds
+  creates per call. With one dead worker of three, two creates fail together about
+  1 in 9 times; four creates fail about 1 in 81. This covers init, resume
+  replacement, rotation and challenge recovery, which all go through `createRemote`.
 - `initialization.ts`: `BrowserSessionValidationError` joins the definite
   rejections. Under the row lock, and only when no binding exists, the receipt is
   released so the worker's retry creates afresh. Ambiguous allocations stay
