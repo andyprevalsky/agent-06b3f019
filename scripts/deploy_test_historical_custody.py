@@ -153,6 +153,27 @@ def lifecycle_view(snapshot):
     return view
 
 
+def stall_lifecycle(cleanup, root_id):
+    """The recorded release-stall lifecycle and the sealed-tree agent that owns its purchase.
+
+    run_benchmark keys each lifecycle by the agent of a still-pending purchase: the root, or the
+    browser sub-agent that requested the card (agent-payment-idempotent-abandonment, PR #1972).
+    It writes the map before judging the stall; a rejected stall is recorded in cleanup errors,
+    which callers require to be empty. Custody binds exactly one purchase, so exactly one
+    self-identified, well-formed snapshot is required. Anything else refuses with a typed
+    error instead of guessing an owner or leaving a second stalled purchase unbound.
+    """
+    need(isinstance(root_id, str) and bool(root_id), 'invalid native root identity')
+    lifecycles = cleanup.get('agentcard_release_stall_lifecycles')
+    need(isinstance(lifecycles, dict) and lifecycles, 'no release-stall lifecycle snapshot')
+    need(len(lifecycles) == 1, 'ambiguous release-stall lifecycles')
+    (owner, snap), = lifecycles.items()
+    need(isinstance(snap, dict) and snap.get('agentId') == owner, 'release-stall lifecycle owner mismatch')
+    need(all(isinstance(snap.get(k), dict) for k in ('agentCard', 'orgTransfer', 'purchase', 'walletFunding', 'stripeHold')),
+         'malformed release-stall lifecycle')
+    return owner, snap
+
+
 def historical(state, failure, root):
     """Re-read exact native bytes and join their resource/cleanup identities."""
     import deploy_test_cycle as c
@@ -187,14 +208,15 @@ def historical(state, failure, root):
          and t.get('context_violations') == [], 'native task/cleanup unknown')
     task = task_contract(root, f['source']['head'], t['name'])
     cleanup = t['logs']['cloud_cleanup_evidence']
-    snap = cleanup['agentcard_release_stall_lifecycles'][t['agent_id']]
-    need(cleanup.get('errors') == [] and cleanup.get('root_agent_id') == t['agent_id'] == snap['agentId'], 'cleanup/root mismatch')
+    owner, snap = stall_lifecycle(cleanup, t['agent_id'])
+    need(cleanup.get('errors') == [] and cleanup.get('root_agent_id') == t['agent_id'], 'cleanup/root mismatch')
     if 'agentcard_release_stall_lifecycle' in t['logs']:
         need(lifecycle_view(t['logs']['agentcard_release_stall_lifecycle']) == lifecycle_view(snap),
              'two native snapshots disagree')
     final = cleanup['final']
+    tree = final.get('tree_agent_ids')
     need(final.get('root_deleted') is True and final.get('unsealed_tree_agent_ids') == []
-         and t['agent_id'] in final.get('tree_agent_ids', []), 'native root not sealed')
+         and isinstance(tree, list) and t['agent_id'] in tree and owner in tree, 'native root not sealed')
     for session in final['browser_sessions']:
         need(any(r.get('provider') == session.get('provider') and r.get('session_id') == session.get('session_id')
                  and r.get('status') in (200, 204, 404, 410) for r in cleanup.get('provider_receipts', [])), 'browser cleanup unknown')
@@ -215,7 +237,7 @@ def historical(state, failure, root):
     matches = [p for p in final['purchase_cleanup'] if p.get('purchase_id') == purchase['id']]
     need(len(matches) == 1, 'missing/ambiguous final purchase')
     p = matches[0]
-    need(all(p.get(k) == v for k, v in {'agent_id': t['agent_id'], 'card_id': card['id'],
+    need(all(p.get(k) == v for k, v in {'agent_id': owner, 'card_id': card['id'],
          'provider_transfer_id': transfer['id'], 'total_cents': amount, 'status': 'HELD',
          'funding_status': 'RECLAIMING'}.items()), 'final purchase join changed')
     # Revalidate the original recorded adapter closure, independently of financial state.
