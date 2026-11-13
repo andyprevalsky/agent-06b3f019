@@ -33,7 +33,7 @@ const stubs: Record<string, unknown> = {
     markWhatsAppUnreachable: async () => {},
   },
   '../smsTemplates': { SMS_TEMPLATES, getAgentUrl, ROSE_LABS_URL },
-  '../storage': {},
+  './mmsAttachment': { rehostMmsAttachmentUrl: async () => null },
   './sessionStore': { appendLifecycleSms: async () => {} },
   './notificationDelivery': {
     deliverNotificationMessage,
@@ -43,6 +43,16 @@ const stubs: Record<string, unknown> = {
   './writeLockBody': {},
   '../smsDeliveryContract': { SMS_MAX_BODY_CHARACTERS },
   './emoji': { isEmojiOnlyMessage },
+  '../messagingAgentInteraction': { recordMessagingAgentInteraction: async () => {} },
+  './notificationCards': {
+    deliverNotificationCard: async () => {},
+    approvalNotificationContent: () => {
+      throw new Error('completion must not build an approval card');
+    },
+    plannerNotificationContent: () => {
+      throw new Error('completion must not build a planner card');
+    },
+  },
 };
 const exported: Record<string, (...args: unknown[]) => Promise<{ success: boolean }>> = {};
 vm.runInNewContext(code, {

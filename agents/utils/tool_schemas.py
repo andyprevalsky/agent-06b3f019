@@ -20,6 +20,7 @@ from pydantic import (
     model_validator,
 )
 
+from utils.grep_tool_contract import GREP_SOURCE_FILTER_KEYS, GREP_TOOL_PROMPT
 from utils.prompts import (
     PLANNER_RESPONSE_JOIN_DESCRIPTION,
     PLANNER_RESPONSE_TASKS_DESCRIPTION,
@@ -35,7 +36,6 @@ from utils.response_schema_constraints import (
     bounds_from_entries,
     coerce_direct_bounds_to_entries,
 )
-from utils.grep_tool_contract import GREP_SOURCE_FILTER_KEYS, GREP_TOOL_PROMPT
 from utils.tool_output_schema import ReadToolOutputTool
 from utils.user_facing_writing_prompt import user_facing_text_description
 from utils.wait_for_bounds import (
@@ -786,7 +786,8 @@ class GrepTool(BaseModel):
             "Ordinary results include messages and outputs; record_kind=all includes replayed "
             "inputs. "
             "transactions searches synced Plaid transaction rows. documents searches synced "
-            "ChatGPT/Claude exports, Apple Notes, Obsidian vault notes, Granola meeting notes, "
+            "ChatGPT/Claude exports, Apple Notes, Obsidian vault notes, "
+            "meeting note takers (granola.ai, fireflies.ai), "
             "and generic user documents. "
             "calendar searches the user's Google Calendar events; drive searches Google Drive "
             "file names, folders, and file text. "
@@ -818,6 +819,13 @@ class GrepTool(BaseModel):
     ] = Field(
         default=None,
         description="Legacy single-source alias for `sources`. Prefer `sources` (a list of the exact sources the task needs).",
+    )
+    owner_user_id: Optional[str] = Field(
+        default=None, description="Only this owner's records (ids from the shared data map)."
+    )
+    team_id: Optional[str] = Field(default=None, description="Only accounts shared with this team.")
+    account_id: Optional[str] = Field(
+        default=None, description='Only this inbox email ("" = default iMessage account).'
     )
     role: Optional[Literal["USER", "ASSISTANT", "TOOL"]] = Field(
         default=None,
@@ -922,9 +930,11 @@ class GrepTool(BaseModel):
             'source, nest its keys under the source name: {"calendar": {"since": "2026-11-02"}}; a messages '
             "block covers email, gmail, imessage and whatsapp. "
             "documents is an umbrella corpus, so set document_source to the concrete provider "
-            "(chatgpt, claude, apple_notes, obsidian, or granola). granola covers every Granola "
-            "meeting; granola_note (title, time, attendees, own notes), granola_summary or "
-            "granola_transcript searches just that layer. "
+            "(chatgpt, claude, apple_notes, obsidian, granola, or fireflies), or use meeting_notes "
+            "for meeting note takers (granola.ai, fireflies.ai). "
+            "granola and fireflies each cover that provider's meetings; granola_note, "
+            "granola_summary, granola_transcript, fireflies_note, fireflies_summary, or "
+            "fireflies_transcript searches just that layer. "
             "`path` takes a path from an earlier result "
             "(e.g. 'network/Andy Prevalsky.contact', 'messages/+15551234567.thread') "
             "to scope that path's own source to the record or thread; for agent_network and agent_trajectories "
@@ -1598,7 +1608,7 @@ class SpawnExploreAgentTool(BaseModel):
 
 
 class ListAgentsTool(BaseModel):
-    """Browse your agent tree like a table of contents: where you are, nearby agents, drill-down hints."""
+    """Browse your agent tree like a table of contents: where you are, nearby agents, drill-down hints. With project_id, owner_user_id or team_id it also lists teammates' agents in projects shared with you (title and status only)."""
 
     tool: Literal["list_agents"]
     node: Optional[str] = Field(
@@ -1611,6 +1621,9 @@ class ListAgentsTool(BaseModel):
     path_prefix: Optional[str] = Field(
         default=None, description="List agents at or below this path, e.g. /root/outreach."
     )
+    project_id: Optional[str] = Field(default=None, description="Only agents in this project.")
+    owner_user_id: Optional[str] = Field(default=None, description="Only this owner's project agents.")
+    team_id: Optional[str] = Field(default=None, description="Only projects shared with this team.")
 
 
 _AGENT_ADDRESS_DESCRIPTION = (

@@ -54,6 +54,8 @@ const stubs: Record<string, unknown> = {
     isWhatsAppConfigured: () => false,
   },
   '../../providers/whatsappReachability': { getWhatsAppReachable: async () => false },
+  // The messaging agent relayed this agent, so its completion belongs to the messaging thread.
+  '../../providers/messagingAgentInteraction': { hasMessagingAgentInteraction: async () => true },
 };
 const exports: Record<string, (...args: unknown[]) => Promise<unknown>> = {};
 vm.runInNewContext(code, {

@@ -2,6 +2,7 @@
 import { prisma, withoutQueryRetry } from '../database';
 import { getTemporalClient } from '../temporal';
 import { createLogger } from '../logger';
+import { recordMessagingAgentInteraction } from '../messagingAgentInteraction';
 import type { PendingOp, ToolResult } from './supervisorTools';
 
 const log = createLogger('SmsSupervisorTools');
@@ -119,6 +120,8 @@ export async function commitIncreaseBudget(
           : `Resulting budget exceeds the $${(MAX_PRICE_LIMIT_CENTS / 100).toFixed(2)} maximum`,
     };
   }
+
+  await recordMessagingAgentInteraction(agent.id, 'increase_budget');
 
   // The authoritative committed limit, not the pre-read projection.
   const {

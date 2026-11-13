@@ -4056,6 +4056,21 @@ class StoppedPreStackIsolation(unittest.TestCase):
         self.assertEqual({'UNVERIFIED'}, set(cycle.read(self.paths['receipt'])['cases'].values()))
         self.assertTrue((self.root / '.git/cloudbench-fleet-ownership' / self.owner).is_dir())
 
+    def test_stopped_pre_stack_still_refuses_a_live_original_controller(self):
+        # The fixture controller PID sits above every kernel pid_max, so a host process can never
+        # hold it (RCA 4fda5d31). The native refusal itself must still fire when one is live.
+        pid = int(self.fleet.name.rsplit('-', 1)[-1])
+        self.assertGreater(pid, 4194304)  # Linux PID_MAX_LIMIT
+        actual = self.native.subprocess.check_output
+        def processes(args, *a, **kw):
+            return f'999999 {pid} S\n' if args[:1] == ['ps'] else actual(args, *a, **kw)
+        before, original = copy.deepcopy(self.state), self.paths['receipt'].read_bytes()
+        with patch.object(self.native.subprocess, 'check_output', side_effect=processes):
+            with self.assertRaisesRegex(ValueError, 'old controller still active'):
+                cycle.reconcile(self.state, self.failure['id'], self.proof)
+        self.assertEqual(before, self.state)
+        self.assertEqual(original, self.paths['receipt'].read_bytes())
+
     def test_stopped_pre_stack_rejects_unsafe_provider_or_current_identity(self):
         cases = ('started', 'unknown', 'current-token', 'source', 'mount', 'forged-raw-state', 'raw-token',
                  'detached-volume', 'wrong-volume-state', 'quarantine-missing')

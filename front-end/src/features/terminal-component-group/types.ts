@@ -17,6 +17,7 @@ export type SidebarView =
   | 'settings'
   | 'usage'
   | 'network'
+  | 'teams'
   | 'admin-health'
   | 'benchmarks';
 

@@ -58,9 +58,14 @@ describe('Pebble Index 01 integration', () => {
     await waitFor(() => expect(within(list).getByText('Compute')).toBeInTheDocument());
     const rows = [...list.querySelectorAll('[data-testid^="integration-row-"]')];
     expect(rows[rows.length - 1]).toBe(rowEl('pebble-index'));
-    expect(rows[rows.length - 2]).toBe(rowEl('granola'));
+    expect(rows[rows.length - 2]).toBe(rowEl('fireflies'));
     const other = within(list).getByRole('region', { name: 'Other' });
-    expect(within(other).getByText('Granola')).toBeInTheDocument();
+    expect(within(list).getByRole('region', { name: 'Meeting note taker' })).toContainElement(
+      rowEl('granola'),
+    );
+    expect(within(list).getByRole('region', { name: 'Meeting note taker' })).toContainElement(
+      rowEl('fireflies'),
+    );
     expect(within(other).getByText('Pebble Index 01')).toBeInTheDocument();
     expect(within(rowEl('pebble-index')).getByText('Pebble Index 01')).toBeInTheDocument();
     expect(rowEl('pebble-index').querySelector('img[src*="pebble-index-icon"]')).not.toBeNull();
@@ -144,7 +149,7 @@ describe('Pebble Index 01 integration', () => {
     const user = userEvent.setup();
     renderIntegrations({ roseDesktop: false });
     const connect = await screen.findByRole('button', { name: 'Connect Pebble Index 01' });
-    const cards = connect.closest('.space-y-3')?.children;
+    const cards = connect.closest('.container')?.querySelector('.space-y-3')?.children;
     expect(cards?.[cards.length - 1]).toContainElement(connect);
     expect(cards?.[cards.length - 2]).toHaveTextContent('Granola');
     await user.click(connect);

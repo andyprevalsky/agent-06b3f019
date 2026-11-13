@@ -235,6 +235,9 @@ def test_grep_tool_schema_exact_contract():
         "pattern",
         "sources",
         "source",
+        "team_id",
+        "owner_user_id",
+        "account_id",
         "role",
         "record_kind",
         "surface",
@@ -291,6 +294,7 @@ def test_grep_tool_schema_exact_contract():
     assert "pattern" not in schema.get("required", [])
 
     removed = {
+        "scope",
         "path",
         "glob",
         "type",
@@ -303,6 +307,34 @@ def test_grep_tool_schema_exact_contract():
         "tool_status",
     }
     assert props.isdisjoint(removed)
+    assert GrepTool.__doc__.splitlines()[:3] == [
+        "Search this user's local records and current agent tree.",
+        "",
+        "- Also covers accounts teammates shared with this user; narrow by owner, team or account.",
+    ]
+    assert "scope" not in GrepTool.__doc__ and "shared_project_agents" not in GrepTool.__doc__
+    descriptions = {
+        name: schema["properties"][name]["description"] for name in ("owner_user_id", "team_id", "account_id")
+    }
+    assert descriptions == {
+        "owner_user_id": "Only this owner's records (ids from the shared data map).",
+        "team_id": "Only accounts shared with this team.",
+        "account_id": 'Only this inbox email ("" = default iMessage account).',
+    }
+
+
+def test_list_agents_tool_schema_exact_contract():
+    """list_agents adds project/owner/team filters for own + team-shared project agents."""
+    from utils.tool_schemas import ListAgentsTool
+
+    schema = ListAgentsTool.model_json_schema()
+    assert set(schema["properties"]) == {
+        "tool", "node", "depth", "cursor", "query", "path_prefix", "project_id", "owner_user_id", "team_id"
+    }
+    assert ListAgentsTool.__doc__.endswith(
+        "With project_id, owner_user_id or team_id it also lists teammates' agents in projects shared with you "
+        "(title and status only)."
+    )
 
 
 # ── WaitForTool validation ─────────────────────────────────────────────
@@ -1291,6 +1323,7 @@ async def run_all_tests():
     )
     r.record("planner_response_schema_compact", test_planner_response_schema_is_compact)
     r.record("grep_tool_schema_exact_contract", test_grep_tool_schema_exact_contract)
+    r.record("list_agents_tool_schema_exact_contract", test_list_agents_tool_schema_exact_contract)
     # WaitForTool validation
     r.record("wait_for_mutually_exclusive", test_wait_for_tool_mutually_exclusive_raises)
     r.record("wait_for_neither", test_wait_for_tool_neither_raises)

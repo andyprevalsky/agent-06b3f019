@@ -13,6 +13,7 @@ import { buildCodeAgentSystemPrompt, buildCodexHarnessSystemPrompt } from './cod
 import { uploadAttachmentsToSandbox } from './e2bAttachments';
 import { overlayCodexRoseBridge } from './e2bCodexHarness';
 import { workDirForGithubRepo } from './e2bWorkDir';
+import { codeSandboxGithubEnvs } from './codeAgentGitIdentity';
 import {
   fileHash,
   findLocalClaudeCodeWsServer,
@@ -334,14 +335,12 @@ async function createClaudeCodeSessionUnlocked(
   }
 
   // Add GitHub config if repo specified
-  if (githubRepoUrl) {
-    if (!process.env.GITHUB_TOKEN) {
-      throw new Error('GITHUB_TOKEN not configured - cannot clone repositories');
-    }
-    envs.GITHUB_REPO_URL = githubRepoUrl;
-    envs.GITHUB_TOKEN = process.env.GITHUB_TOKEN;
-    log.info(`GitHub repo configured: ${githubRepoUrl}`);
-  }
+  // Clone/push credentials, and the pushing account as the commit identity
+  // so GitHub links each commit and Vercel deploys it (codeAgentGitIdentity.ts).
+  Object.assign(
+    envs,
+    await codeSandboxGithubEnvs(githubRepoUrl, projectWorkspace?.project.repoUrl, '')
+  );
 
   const userUiWorkspace = await prepareCodeSessionWorkspace(userId, agentId, taskId, 'claude');
   applyUserUiSandboxEnvs(envs, userUiWorkspace);
@@ -596,14 +595,12 @@ export async function createCodexCodeSession(
   envs.CODEX_SPEED = cli.speedOverride ?? codexSpeed;
   log.info('Codex code-agent speed', { agentId, taskId, codexSpeed: envs.CODEX_SPEED });
 
-  if (githubRepoUrl) {
-    if (!process.env.GITHUB_TOKEN) {
-      throw new Error('GITHUB_TOKEN not configured - cannot clone repositories');
-    }
-    envs.GITHUB_REPO_URL = githubRepoUrl;
-    envs.GITHUB_TOKEN = process.env.GITHUB_TOKEN;
-    log.info(`GitHub repo configured for Codex: ${githubRepoUrl}`);
-  }
+  // Clone/push credentials, and the pushing account as the commit identity
+  // so GitHub links each commit and Vercel deploys it (codeAgentGitIdentity.ts).
+  Object.assign(
+    envs,
+    await codeSandboxGithubEnvs(githubRepoUrl, projectWorkspace?.project.repoUrl, 'Codex')
+  );
 
   const userUiWorkspace = await prepareCodeSessionWorkspace(userId, agentId, taskId, 'codex');
   applyUserUiSandboxEnvs(envs, userUiWorkspace);

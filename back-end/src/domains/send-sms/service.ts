@@ -20,6 +20,7 @@ import {
   type SupervisorChannel,
 } from '../../providers/smsSupervisor/channelDelivery';
 import { getWhatsAppReachable } from '../../providers/whatsappReachability';
+import { hasMessagingAgentInteraction } from '../../providers/messagingAgentInteraction';
 
 const log = createLogger('SendSMS');
 const COMPLETION_SMS_OPERATION_TYPE = 'lifecycle-sms.completion';
@@ -191,7 +192,7 @@ export async function dispatchNotification(data: NotifyInput): Promise<NotifyRes
   }
 
   if (data.event_type === 'completion') {
-    return dispatchCompletionOnce(data, payload, channels, finalAnswer);
+    return dispatchCompletionOnce(data, payload, channels, agent.source, finalAnswer);
   }
 
   const startNotification =
@@ -213,8 +214,20 @@ async function dispatchCompletionOnce(
   data: NotifyInput,
   payload: Record<string, unknown>,
   channels: SupervisorChannel[],
+  source: string,
   finalAnswer?: string
 ): Promise<NotifyResult> {
+  // Completion notices belong to the messaging thread only when the SMS/WhatsApp
+  // agent created, messaged or relayed for this agent; a web-started agent the
+  // user never touched over SMS finishes silently there (the web UI shows it).
+  if (!(await hasMessagingAgentInteraction({ id: data.agent_id, source }))) {
+    log.info('Completion skipped: messaging agent never interacted with this agent', {
+      agentId: data.agent_id,
+      source,
+    });
+    return { success: true, skipped: true, reason: 'no_messaging_agent_interaction' };
+  }
+
   const operationKey = `${COMPLETION_SMS_OPERATION_TYPE}:${data.agent_id}`;
   const claim = await claimToolSideEffect({
     operationKey,

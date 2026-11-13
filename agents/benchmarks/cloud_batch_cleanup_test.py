@@ -1108,7 +1108,7 @@ async def test_composite_result_finalizes_each_exact_root_without_changing_verdi
         events.append(("provider", aid))
         return {"root_agent_id": aid, "root_deleted": True}
 
-    async def payments(_url, aid, _evidence):
+    async def payments(_url, aid, _evidence, **_options):
         events.append(("payment", aid))
         return {"root_agent_id": aid, "purchases": []}
 
@@ -1492,7 +1492,7 @@ def test_exact_tree_query_excludes_unmaterialized_logical_browsers_on_real_postg
             assert snapshot["browser_sessions"] == []
             # A materialized Kernel session is still returned and owned exactly.
             materialized = sql(
-                f"""UPDATE "BrowserSession" SET "sessionId" = 'kernel_session_0001', status = 'ACTIVE'
+                """UPDATE "BrowserSession" SET "sessionId" = 'kernel_session_0001', status = 'ACTIVE'
                     WHERE id = 'logical-child'""",
                 "owned_fixture",
             )
@@ -1727,7 +1727,7 @@ async def test_archive_warning_preserves_terminal_result_and_exact_cleanup():
             assert len(evidence["warnings"]) == 1 and evidence["warnings"][0].startswith("archive:")
             delete.assert_awaited_once_with("http://localhost:1", ROOT)
             close.assert_called_once_with("http://localhost:1", ROOT, before, evidence=evidence)
-            compensate.assert_awaited_once_with("http://localhost:1", ROOT, evidence)
+            compensate.assert_awaited_once_with("http://localhost:1", ROOT, evidence, observe_release_stall=False)
             assert row.logs["cloud_provider_cleanup"] == release
             assert row.logs["cloud_payment_cleanup"] == payment
             assert "late cleanup diagnostic" in row.logs["worker_logs"]
@@ -2338,7 +2338,7 @@ async def test_interrupt_during_archive_wait_keeps_run_record_and_exact_cleanup(
                 raise RuntimeError("provider session still live")
             return {"root_agent_id": aid}
 
-        async def payments(_url, aid, _evidence):
+        async def payments(_url, aid, _evidence, **_options):
             events.append(("payments", aid))
             return {"root_agent_id": aid, "purchases": []}
 
@@ -2566,7 +2566,7 @@ async def _diagnostic_pipe_case(phase):
         if phase == 'provider':
             raise RuntimeError('genuine provider failure')
         return {'root_agent_id': aid, 'tree_sealed': True, 'root_deleted': True, 'provider_receipts': []}
-    async def payments(_url, aid, evidence):
+    async def payments(_url, aid, evidence, **_options):
         events.append(('payment', aid))
         if phase == 'payment':
             raise RuntimeError('genuine payment failure')
@@ -2617,8 +2617,8 @@ async def test_owned_cleanup_diagnostic_sink_preserves_real_failures():
 
 async def _cancelled_queue_owning_case(mode="allocated"):
     """Actual coordinator AST + actual scheduler/finalizer, only external edges fake."""
-    from contextlib import ExitStack
     import socket
+    from contextlib import ExitStack
     source=inspect.getsource(bench)
     tree=ast.parse(source)
     wrapper=next(n for n in ast.walk(tree) if isinstance(n,ast.AsyncFunctionDef) and n.name=='_run_reported_task')

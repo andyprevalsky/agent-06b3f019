@@ -135,6 +135,35 @@ describe('batch elapsed clock re-renders only when its label can change', () => 
     expect(result.current).toBe(formatWorkDuration(70_000));
   });
 
+  it('an optimistic client-started clock keeps the same cadence and reconciles forward', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(3_000_000);
+    let renders = 0;
+    const { result, rerender } = renderHook(
+      ({ startedAt }: { startedAt: number | null }) => {
+        renders += 1;
+        return useBatchElapsed(startedAt, true);
+      },
+      { initialProps: { startedAt: null as number | null } },
+    );
+    expect(result.current).toBe('0.0s');
+    const advance = (ms: number) => {
+      for (let t = 0; t < ms; t += 100) act(() => vi.advanceTimersByTime(100));
+    };
+    renders = 0;
+    advance(1_000);
+    expect(renders).toBe(10);
+    expect(result.current).toBe('1.0s');
+
+    // The server start arrives 59s earlier: the clock moves forward to it, never back.
+    rerender({ startedAt: 3_000_000 - 59_000 });
+    expect(result.current).toBe(formatWorkDuration(60_000));
+    renders = 0;
+    advance(10_000);
+    expect(renders).toBe(10);
+    expect(result.current).toBe(formatWorkDuration(70_000));
+  });
+
   it('shows each whole second as it is reached', () => {
     vi.useFakeTimers();
     vi.setSystemTime(2_000_250);

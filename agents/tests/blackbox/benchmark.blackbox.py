@@ -1268,7 +1268,7 @@ def test_live_query_proof_rejects_zero_spend_tasks_before_provisioning():
     repo_root = Path(__file__).resolve().parents[3]
     with tempfile.TemporaryDirectory() as scratch:
         pool = Path(scratch) / "pool.json"
-        pool.write_text(json.dumps(["test-mass-agent-run-0"]))
+        pool.write_text(json.dumps(["demo-fleet-alpha"]))
         command = [
             "bash",
             str(repo_root / "scripts/run-fleet-infra-stability-proof"),
@@ -1294,7 +1294,7 @@ def test_live_query_proof_rejects_zero_spend_tasks_before_provisioning():
             command, cwd=repo_root, text=True, capture_output=True, timeout=NATIVE_VERIFICATION_TIMEOUT_SECONDS
         )
         assert ordinary.returncode == 0, ordinary.stdout + ordinary.stderr
-        assert json.loads(ordinary.stdout)["slices"][0]["names"] == ["test-mass-agent-run-0"]
+        assert json.loads(ordinary.stdout)["slices"][0]["names"] == ["demo-fleet-alpha"]
         # A DEMO-bound child can replay without a zero-spend evaluator or DEMO
         # tag. The Fast Mode button controls provider speed, not replay policy.
         pool.write_text(json.dumps(["single-creator-arm"]))
@@ -6533,7 +6533,7 @@ async def test_owned_payment_release_stall_warns_instead_of_failing_cleanup():
         "reclaim_provider_transfer_id": None,
     }
 
-    async def stalled_payments(_base_url, _root_id, evidence):
+    async def stalled_payments(_base_url, _root_id, evidence, **_options):
         evidence["payment_snapshot"] = {"tree_agent_ids": [root], "purchase_cleanup": [row]}
         raise TimeoutError()
 
@@ -6585,6 +6585,138 @@ async def test_owned_payment_release_stall_warns_instead_of_failing_cleanup():
     ):
         result, error = await finalize(env, lifecycle)
         assert error is not None and "owned cloud evidence finalization failed" in str(error), lifecycle
+        assert (result.passed, result.benchmark_status) == (False, "ERROR")
+        assert result.logs["cloud_cleanup_evidence"]["errors"] == ["payment: TimeoutError"]
+
+
+async def test_owned_release_stall_proof_survives_agentcard_auth_flap_within_cleanup_deadline():
+    """Regression (smoke INFRA stop 2026-11-12, PRs #1975/#1981/#1983): a stalled release always
+    runs the real owned payment drain to its deadline, and its stall proof was one provider-backed
+    lifecycle read issued after that deadline. AgentCard's intermittent org-token 401 failed that
+    read, so cleanup raised, the guest never acknowledged cleanup and runtime evidence stayed
+    unsealed. The proof now comes from observations inside the unchanged deadline, bound to the
+    final ledger; a ledger that left the exact stall stays strict.
+    """
+    import time
+    from copy import deepcopy
+    from unittest.mock import AsyncMock
+
+    from benchmarks import run_benchmark as bench
+
+    root = "00000000-0000-4000-8000-000000000021"
+    window_seconds = 2.5
+    flap = RuntimeError(
+        'Failed to get payment lifecycle: 401 {"error":"AgentCard Organization MCP list_transfers failed: '
+        'Invalid or expired organization token","code":"agentcard_org_mcp_unauthorized"}'
+    )
+
+    def stall_row(lifecycle: dict, **changes) -> dict:
+        return {
+            "purchase_id": lifecycle["purchase"]["id"],
+            "agent_id": root,
+            "status": "HELD",
+            "card_id": lifecycle["purchase"]["cardId"],
+            "stripe_payment_intent_id": lifecycle["purchase"]["stripePaymentIntentId"],
+            "total_cents": lifecycle["purchase"]["totalCents"],
+            "funding_status": "RECLAIMING",
+            "provider_transfer_id": lifecycle["orgTransfer"]["id"],
+            "reclaim_provider_transfer_id": None,
+            **changes,
+        }
+
+    async def finalize(result, lifecycle: dict, ledger: list[dict]) -> tuple:
+        """`ledger` is the exact-tree payment row returned by successive drain reads."""
+        before = {"root_user_id": "test-owned-user", "tree_agent_ids": [root], "browser_sessions": []}
+        drain_reads = []
+        lifecycle_reads = []
+        started = time.monotonic()
+
+        def exact_root_sessions(_url, _root, *, require_deleted=False):
+            if not require_deleted:
+                return dict(before)
+            row = ledger[min(len(drain_reads), len(ledger) - 1)]
+            drain_reads.append(row)
+            return {
+                **before,
+                "root_deleted": True,
+                "unsealed_tree_agent_ids": [],
+                "purchase_cleanup": [dict(row)],
+            }
+
+        async def read_lifecycle(_url, agent_id):
+            assert agent_id == root
+            lifecycle_reads.append(time.monotonic() - started)
+            # AgentCard flaps on alternate reads, and again whenever the drain deadline has passed.
+            if len(lifecycle_reads) % 2 == 1 or time.monotonic() - started >= window_seconds:
+                raise flap
+            return deepcopy(lifecycle)
+
+        with (
+            patch.dict(os.environ, {bench.AGENTCARD_RELEASE_SKIP_ENV: "1"}),
+            patch.object(bench, "PAYMENT_CLEANUP_TIMEOUT_SECONDS", window_seconds),
+            patch.object(bench, "PAYMENT_CLEANUP_STALL_OBSERVATION_SECONDS", 0, create=True),
+            patch.object(bench.cloud_batch_cleanup, "exact_root_sessions", side_effect=exact_root_sessions),
+            patch.object(bench.cloud_batch_cleanup, "close_exact_root_sessions", return_value={}),
+            patch.object(bench, "pause_agent", AsyncMock(return_value=True)),
+            patch.object(bench, "delete_agent", AsyncMock(return_value=True)),
+            patch.object(bench, "_refresh_browser_archive_snapshot", AsyncMock(return_value={})),
+            patch.object(bench, "finalize_archive_and_score_world_model", AsyncMock(return_value=("ref", None))),
+            patch.object(bench, "abandon_test_payment", AsyncMock(return_value=deepcopy(lifecycle))),
+            patch.object(bench, "get_test_payment_lifecycle", read_lifecycle),
+            patch.object(bench, "fetch_local_worker_logs", return_value=[]),
+        ):
+            try:
+                await bench._finalize_owned_cloud_batch("test-owned-no-network", [result], {})
+            except RuntimeError as error:
+                return error, lifecycle_reads
+        return None, lifecycle_reads
+
+    def task_result(**fields):
+        return bench.TaskResult(
+            name="agent-payment-abandonment",
+            agent_id=root,
+            progress_score=1,
+            duration_seconds=1,
+            cost_cents=0,
+            message_count=0,
+            logs={"tree": {root: {}}},
+            **fields,
+        )
+
+    stalled = _agentcard_release_stall_lifecycle()
+    skip_reason = f"{bench.AGENTCARD_RELEASE_SKIP_REASON}: native stall at the task deadline"
+    native_failure = "Timeout after 904s (task timeout=900s)"
+
+    # #1975/#1981: the task itself already SKIPPED on the exact stall.
+    result = task_result(passed=False, status="SKIPPED", benchmark_status="SKIPPED", failure_reason=skip_reason)
+    error, reads = await finalize(result, stalled, [stall_row(stalled)])
+    assert error is None, error
+    assert reads and all(at < window_seconds for at in reads), reads
+    assert (result.passed, result.status, result.benchmark_status) == (False, "SKIPPED", "SKIPPED")
+    assert result.failure_reason == skip_reason
+    evidence = result.logs["cloud_cleanup_evidence"]
+    assert evidence["errors"] == []
+    assert evidence["warnings"] == [f"payment: {bench.AGENTCARD_RELEASE_SKIP_REASON}"]
+    assert evidence["agentcard_release_stall_read_errors"] >= 1
+    assert evidence["agentcard_release_stall_lifecycles"][root]["orgTransfer"]["releasedCents"] == 0
+
+    # #1983: an independent native task failure is kept while the stall stays a cleanup warning.
+    result = task_result(passed=False, status="COMPLETED", benchmark_status="FAIL", failure_reason=native_failure)
+    error, _ = await finalize(result, stalled, [stall_row(stalled)])
+    assert error is None, error
+    assert (result.passed, result.benchmark_status, result.failure_reason) == (False, "FAIL", native_failure)
+    assert result.logs["cloud_cleanup_evidence"]["errors"] == []
+
+    # Strict controls: a ledger that left the exact stall after the observation, or a
+    # provider state that is not the exact stall, still fails cleanup.
+    foreign = _agentcard_release_stall_lifecycle(cardId="card_someone_else")
+    for lifecycle, ledger in (
+        (stalled, [stall_row(stalled), stall_row(stalled, funding_status="RECLAIM_FAILED")]),
+        (foreign, [stall_row(foreign)]),
+    ):
+        result = task_result(passed=False, status="SKIPPED", benchmark_status="SKIPPED", failure_reason=skip_reason)
+        error, _ = await finalize(result, lifecycle, ledger)
+        assert error is not None and "owned cloud evidence finalization failed" in str(error), ledger
         assert (result.passed, result.benchmark_status) == (False, "ERROR")
         assert result.logs["cloud_cleanup_evidence"]["errors"] == ["payment: TimeoutError"]
 
@@ -24593,7 +24725,8 @@ def test_suite_selection_excludes_incomplete_entries():
     assert "raise-my-round" not in all_names
     assert "smoke-backend-claude-code" not in all_names
     # Representative ready agent benchmarks stay in suite selection.
-    assert "test-mass-agent-run-0" in suite_names
+    # test-mass-agent-run-0 was retired by user direction (2026-11-12): never selected.
+    assert "test-mass-agent-run-0" not in suite_names
     assert "browser-agent" in suite_names
     assert {
         "user-data-prod-grep",
@@ -26897,7 +27030,7 @@ async def test_agentcard_release_skip_catalog_owned_cleanup_stays_strict():
         "reclaim_provider_transfer_id": None,
     }
 
-    async def stalled_payments(_base_url, _root_id, evidence):
+    async def stalled_payments(_base_url, _root_id, evidence, **_options):
         evidence["payment_snapshot"] = {"tree_agent_ids": [root], "purchase_cleanup": [row]}
         raise TimeoutError()
 
@@ -27684,6 +27817,10 @@ async def run_all_tests():
         "owned_payment_release_stall_warn_skip", test_owned_payment_release_stall_warns_instead_of_failing_cleanup
     )
     await r.record_async(
+        "owned_release_stall_proof_survives_auth_flap_within_deadline",
+        test_owned_release_stall_proof_survives_agentcard_auth_flap_within_cleanup_deadline,
+    )
+    await r.record_async(
         "agentcard_release_policy_owned_legacy_deadlines",
         test_agentcard_release_policy_covers_owned_and_legacy_deadlines_only_opted_in,
     )
@@ -27886,6 +28023,11 @@ async def run_all_tests():
     for name in sorted(dir(phone_boot_reset_test)):
         if name.startswith("test_"):
             r.record("phone_boot_reset_" + name[5:], _with_pytest_fixtures(getattr(phone_boot_reset_test, name)))
+    from benchmarks import team_data_test
+    for name in sorted(dir(team_data_test)):
+        if name.startswith("test_"):
+            r.record("team_data_" + name[5:], _with_pytest_fixtures(getattr(team_data_test, name)))
+
     from benchmarks import phone_daily_test
     for name in sorted(dir(phone_daily_test)):
         if name.startswith("test_"):

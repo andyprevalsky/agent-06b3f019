@@ -192,7 +192,7 @@ async def test_grep_agent_metadata_only():
 
 
 async def test_fetch_local_data_summary():
-    """The explore agent's inventory is the backend's grep `summary` rendering, cached per user."""
+    """The explore agent's inventory is the backend's grep `summary` rendering, refreshed for revocable shares."""
     rendered = "LOCAL DATA SOURCES:\n\nmessages/ 5 threads, 120 messages\n    Alice  50 msgs"
     setup_mock({"/api/data/grep": {"status": 200, "json": {"sources": ["summary"], "message": rendered}}})
     with patch("temporalio.activity.heartbeat"):
@@ -206,7 +206,7 @@ async def test_fetch_local_data_summary():
     assert result == rendered and cached == rendered
     call = assert_captured_call(url_contains="/api/data/grep", method="POST", header_present="X-API-Key")
     assert json.loads(call["requestBody"]) == {"sources": ["summary"], "user_id": "user-42"}
-    assert len([c for c in get_captured_requests() if "/api/data/grep" in c["url"]]) == 1
+    assert len([c for c in get_captured_requests() if "/api/data/grep" in c["url"]]) == 2
 
 
 async def test_grep_empty_pattern():
@@ -948,10 +948,45 @@ def test_grep_filters_are_a_closed_object_with_every_source_block():
         GrepTool.model_validate({"tool": "grep", "filters": {"network": {"since": "7d"}}})
 
 
+async def test_meeting_notes_gate_and_tool_contract():
+    """Generic notes probe one OR gate and preserve provider filters for grep."""
+    from domains.grep.service import execute_grep
+    from utils.tool_schemas import GrepTool
+
+    description = GrepTool.model_fields["filters"].description
+    for key in ("meeting_notes", "granola", "fireflies", "fireflies_transcript"):
+        assert key in description, key
+    for provider in ("meeting_notes", "Meeting Notes", "meeting-notes", "granola", "fireflies", "fireflies_transcript"):
+        for nested in (False, True):
+            calls = []
+            filters = {"document_source": provider}
+            if nested:
+                filters = {"documents": filters}
+
+            async def execute(activity_fn, *, args, **kwargs):
+                name = getattr(activity_fn, "__name__", "")
+                calls.append((name, args))
+                if name == "source_status_activity":
+                    normalized = provider.lower().replace(" ", "_").replace("-", "_")
+                    assert args[1] == [normalized]
+                    return [{"source": normalized, "connector": "fireflies", "connected": True, "connectUrl": None}]
+                return {"matches": [], "total_matches": 0}
+
+            result = await execute_grep(
+                execute, {"source": "documents", "pattern": "budget", "filters": filters,
+                          "require_source_access": True}, "tc-meetings", "a-1", "u-1",
+            )
+            assert result["unavailable_sources"] == []
+            searches = [args[0] for name, args in calls if name == "grep_activity"]
+            assert len(searches) == 1
+            assert searches[0]["filters"] == filters
+
+
 async def run_all_tests():
     print("grep blackbox tests:")
     r = BlackboxResult()
     await r.record_async("happy_path", test_grep_happy_path)
+    await r.record_async("meeting_notes_gate_and_tool_contract", test_meeting_notes_gate_and_tool_contract)
     await r.record_async("boundary", test_grep_boundary)
     await r.record_async("boundary_normalizes_model_dump_keys", test_grep_boundary_normalizes_model_dump_keys)
     await r.record_async("agent_metadata_only", test_grep_agent_metadata_only)

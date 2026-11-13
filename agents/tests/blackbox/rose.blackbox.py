@@ -525,7 +525,7 @@ def test_cerebras_tools_keep_null_for_omittable_string_optionals():
     # Strict toolset (no open maps): the null branch is kept in the grammar.
     strict = sent({"list_agents": ListAgentsTool})["list_agents"]
     assert strict["strict"] is True
-    for name in ("node", "cursor", "query", "path_prefix"):
+    for name in ("node", "cursor", "query", "path_prefix", "project_id", "owner_user_id", "team_id"):
         keeps_null(strict["parameters"]["properties"][name], name)
         assert name not in strict["parameters"]["required"]
     depth = strict["parameters"]["properties"]["depth"]

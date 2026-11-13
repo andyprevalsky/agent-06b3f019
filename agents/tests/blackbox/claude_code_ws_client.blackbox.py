@@ -1,9 +1,7 @@
 """Blackbox tests for claude_code_ws_client domain."""
 
 import asyncio
-import importlib.util
 import json
-from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from _test_utils import (
@@ -14,18 +12,6 @@ from _test_utils import (
     assert_captured_call,
     setup_mock_fn,
 )
-
-
-def _load_condition_wait():
-    """The repo's canonical condition wait (scripts/lib/condition_wait.py; stdlib only)."""
-    path = Path(__file__).resolve().parents[3] / "scripts" / "lib" / "condition_wait.py"
-    spec = importlib.util.spec_from_file_location("condition_wait", path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-_condition_wait = _load_condition_wait()
 
 
 def _make_client(**overrides):
@@ -805,23 +791,33 @@ async def test_connect_with_retry_reaches_a_sandbox_that_comes_up_late():
     await runner.setup()
 
     client = _make_client(ws_url=f"ws://127.0.0.1:{port}", reconnect_delay=0.1)
+    real_connect = client.connect
+    handshakes: list[bool] = []
+    refused = asyncio.Event()
+
+    async def connect_and_record():
+        ok = await real_connect()
+        handshakes.append(ok)
+        if not ok:
+            refused.set()
+        return ok
 
     async def start_late():
-        # Listen only once the client's first handshake has actually been refused.
-        await _condition_wait.async_wait_until(
-            lambda: client.last_error is not None,
-            timeout=20.0,
-            description="first ws handshake refused",
-        )
+        # Start listening only once a handshake has actually been refused.
+        await refused.wait()
         await web.TCPSite(runner, "127.0.0.1", port).start()
 
     starter = asyncio.create_task(start_late())
     try:
-        assert await client.connect_with_retry(attempts=8, deadline_s=20.0), client.last_error
+        with patch.object(client, "connect", new=connect_and_record):
+            assert await client.connect_with_retry(attempts=8, deadline_s=20.0), client.last_error
+        assert handshakes[0] is False and handshakes[-1] is True, handshakes
         await asyncio.wait_for(client.listen(), timeout=5)
         assert client._test_exits == [0]
     finally:
-        await starter
+        if not starter.done():
+            starter.cancel()
+        await asyncio.gather(starter, return_exceptions=True)
         await client.disconnect()
         await runner.cleanup()
 
