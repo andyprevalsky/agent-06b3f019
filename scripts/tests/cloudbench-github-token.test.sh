@@ -392,7 +392,9 @@ class H(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         live = {line.strip() for line in (root / "live-tokens").read_text().splitlines() if line.strip()}
         auth = self.headers.get("Authorization", "")
-        ok = auth.startswith("Bearer ") and auth[len("Bearer "):] in live
+        token = auth[len("Bearer "):] if auth.startswith("Bearer ") else ""
+        # A metadata-only token reads the repository object but not its Git refs.
+        ok = token in live or (token.startswith("ghs_metadata_only") and "/git/" not in self.path)
         body, code = (b'{"ok":true}', 200) if ok else (b'{"message":"Bad credentials"}', 401)
         self.send_response(code)
         self.send_header("Content-Length", str(len(body)))
@@ -492,6 +494,9 @@ printf '%s' "$APP_TOKEN" >"$ROT/app-token"
 printf '%s\n' "$DEVBOX_NEW" >"$ROT/live-tokens"  # the App token cannot read the repo
 delivered="$(deliver machine-env 2>/dev/null)" || fail "an App token without repo access must fall back"
 [ "$delivered" = "$DEVBOX_NEW" ] || fail "an App token that fails the Contents read must not be delivered"
+printf '%s' "ghs_metadata_only_app_token" >"$ROT/app-token"  # Metadata read, no Contents
+delivered="$(deliver machine-env 2>/dev/null)" || fail "a metadata-only App token must fall back"
+[ "$delivered" = "$DEVBOX_NEW" ] || fail "an App token without Contents read must not be delivered"
 pinned="$(env -i HOME="$ROT" CLOUDBENCH_GITHUB_TOKEN_B64="$(printf '%s' 'pinned-request-token' | base64 | tr -d '\n')" \
   CLOUDBENCH_GITHUB_REPO_API="$ROT_API" CLOUDBENCH_FLEET_ROOT="$ROT/repo" PATH="$PATH_NO_GH" \
   bash -c '. "$1"; cloudbench_guest_github_token "$2"' _ "$ROOT_DIR/scripts/lib/cloudbench-env.sh" "$ROT/repo")"

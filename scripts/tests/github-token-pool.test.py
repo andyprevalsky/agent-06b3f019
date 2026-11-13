@@ -312,11 +312,20 @@ class GithubTokenPoolTests(unittest.TestCase):
         self.assertEqual((first.returncode, first.stdout.strip()), (0, "app-token-1"), first.stderr)
         again = self.cli("app-token", environ=env)
         self.assertEqual(again.stdout.strip(), "app-token-1", "the default margin reuses a 20-minute token")
+        APP_EXPIRES_IN["seconds"] = 3600  # the re-mint is a full one-hour token
         late = self.cli("app-token", "--min-ttl", "2700", environ=env)
         self.assertEqual((late.returncode, late.stdout.strip()), (0, "app-token-2"),
                          "a token expiring before --min-ttl is minted again")
         self.assertEqual(len(APP_MINTS), 2)
         self.assertNotIn("tok-primary", first.stdout + late.stdout, "only the App member is ever printed")
+        for bad in ("7200", "nan", "inf", "-1", "soon"):
+            refused = self.cli("app-token", "--min-ttl", bad, environ=env)
+            self.assertEqual((refused.returncode, refused.stdout), (2, ""), f"--min-ttl {bad} must be refused")
+        Path(env["GITHUB_APP_TOKEN_CACHE"]).unlink()  # force a fresh mint
+        APP_EXPIRES_IN["seconds"] = 600  # GitHub answers with less lifetime than the caller needs
+        short = self.cli("app-token", "--min-ttl", "2700", environ=env)
+        self.assertEqual((short.returncode, short.stdout), (1, ""), "a fresh token short of --min-ttl is not success")
+        self.assertIn("expires within --min-ttl", short.stderr)
         missing = self.cli("app-token", environ={"GITHUB_TOKEN": "tok-primary"})
         self.assertEqual((missing.returncode, missing.stdout), (1, ""), "no App configured: fail, print nothing")
         APP_EXPIRES_IN["seconds"] = 3600

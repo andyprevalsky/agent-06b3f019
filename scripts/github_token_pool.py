@@ -34,6 +34,7 @@ import argparse
 import base64
 import datetime as dt
 import json
+import math
 import os
 import secrets
 import stat
@@ -56,6 +57,8 @@ MEMBER_NAMES = (
 APP_MEMBER_NAME = "GITHUB_APP"
 APP_KEYS = ("GITHUB_APP_ID", "GITHUB_APP_INSTALLATION_ID", "GITHUB_APP_PRIVATE_KEY_B64")
 APP_REFRESH_MARGIN_SECONDS = 300
+# An installation token lives one hour; a longer requested lifetime can never be met.
+APP_MAX_MIN_TTL_SECONDS = 3300
 ENV_FILES = ("agents/.env", "back-end/.env")
 DEFAULT_API_BASE = "https://api.github.com"
 DEFAULT_TIMEOUT_SECONDS = 5.0
@@ -198,9 +201,11 @@ def _write_cache(cache: Path, payload: Mapping[str, object]) -> None:
 def app_token(
     app_id: str, installation_id: str, private_key_pem: str, base_url: str | None = None,
     timeout: float = DEFAULT_TIMEOUT_SECONDS, min_ttl: float = APP_REFRESH_MARGIN_SECONDS,
+    enforce_min_ttl: bool = False,
 ) -> str | None:
     """An installation token valid for more than `min_ttl` seconds: the private cache, else a
-    fresh mint. None on failure."""
+    fresh mint. None on failure, and with `enforce_min_ttl` also when even the fresh mint
+    expires within `min_ttl`."""
     cache = _app_cache_path()
     key = f"{app_id}:{installation_id}"
     try:
@@ -229,6 +234,10 @@ def app_token(
         print(f"github_token_pool: GitHub App token mint failed ({type(error).__name__})", file=sys.stderr)
         return None
     _write_cache(cache, {"key": key, "token": token, "expires_at": expires_at})
+    if enforce_min_ttl and expires_at - time.time() <= min_ttl:
+        print(f"github_token_pool: minted GitHub App token expires within --min-ttl {min_ttl:g}s",
+              file=sys.stderr)
+        return None
     return token
 
 
@@ -253,7 +262,7 @@ def configured_app_token(
     except ValueError:
         print("github_token_pool: GITHUB_APP_PRIVATE_KEY_B64 is not valid base64 text", file=sys.stderr)
         return None
-    return app_token(app_id, installation_id, pem, base_url, min_ttl=min_ttl)
+    return app_token(app_id, installation_id, pem, base_url, min_ttl=min_ttl, enforce_min_ttl=True)
 
 
 def members(
@@ -430,6 +439,19 @@ def _timeout() -> float:
         return DEFAULT_TIMEOUT_SECONDS
 
 
+def _min_ttl(value: str) -> float:
+    """--min-ttl: finite seconds a one-hour installation token can still satisfy."""
+    try:
+        seconds = float(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"not a number of seconds: {value!r}") from None
+    if not (math.isfinite(seconds) and 0 <= seconds <= APP_MAX_MIN_TTL_SECONDS):
+        raise argparse.ArgumentTypeError(
+            f"must be finite and between 0 and {APP_MAX_MIN_TTL_SECONDS} seconds (installation tokens last one hour)"
+        )
+    return seconds
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Run `pick` or `status`; returns the process exit code."""
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n", 1)[0])
@@ -440,7 +462,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     app_parser = commands.add_parser(
         "app-token", help="print the GitHub App installation token valid for at least --min-ttl seconds",
     )
-    app_parser.add_argument("--min-ttl", type=float, default=APP_REFRESH_MARGIN_SECONDS)
+    app_parser.add_argument("--min-ttl", type=_min_ttl, default=APP_REFRESH_MARGIN_SECONDS)
     for sub in (pick_parser, status_parser, app_parser):
         sub.add_argument("--repo-root", type=Path, default=None)
     args = parser.parse_args(argv)

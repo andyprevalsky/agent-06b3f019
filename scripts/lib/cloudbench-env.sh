@@ -1733,11 +1733,13 @@ cloudbench_controller_github_token() {
 cloudbench_guest_github_token_can_read_repo() {  # <token>
   local repo_api="${CLOUDBENCH_GITHUB_REPO_API:-https://api.github.com/repos/Rose-Ai-Labs/rose}"
   [ -n "${1:-}" ] || return 1
+  # GET /repos/OWNER/REPO needs only Metadata read; reading a Git ref needs the
+  # Contents permission a guest's git fetch uses.
   # The header goes through stdin so the token never appears in argv.
   printf 'Authorization: Bearer %s\n' "$1" \
     | curl -fsS -o /dev/null --connect-timeout 5 --max-time 15 -H @- \
         -H 'User-Agent: rose-cloudbench' -H 'Accept: application/vnd.github+json' \
-        "$repo_api" 2>/dev/null
+        "$repo_api/git/ref/heads/main" 2>/dev/null
 }
 
 cloudbench_guest_durable_github_token() {  # [workspace-root]
