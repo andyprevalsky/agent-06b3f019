@@ -80,34 +80,37 @@
     "scripts/__pycache__/": "reproducible",
     "scripts/lib/__pycache__/": "reproducible"
   },
-  "live_processes": [
-    {
-      "argv": "",
-      "cwd": "/home/boxes/rose",
-      "pid": 122707
-    }
-  ],
+  "live_processes": [],
   "manifest": "/home/boxes/rose/docs/handoffs/pr-1921-closeout/closeout-manifest.json",
-  "open_items": [
-    "uncommitted changes in /home/boxes/rose: docs/handoffs/pr-1921-closeout/archive-receipt.json, docs/handoffs/pr-1921-closeout/closeout-manifest.json",
-    "branch backup/cerebras-chat-quota-prepush-20261002 has 14 commit(s) on no remote",
-    "git stash entry 0e2ffe95ba40 is not preserved (archive it, then add a `stash:0e2ffe95ba40a2d0c2b8ae9e884b4a85d96af3f2` manifest entry)",
-    "live process 122707 in this checkout: None"
-  ],
+  "open_items": [],
   "pr": 1921,
-  "preserved_refs": {},
-  "ready": false,
+  "preserved_refs": {
+    "branch:backup/cerebras-chat-quota-prepush-20261002": {
+      "archive": "devbox-closeout-private/pr1921/20261113T002447Z-local-only-git-refs.tar.gz.aesgcm",
+      "disposition": "archived",
+      "recovery_receipt": "docs/handoffs/pr-1921-closeout/git-refs-archive-receipt.json",
+      "restore": "private_archive.py restore --receipt docs/handoffs/pr-1921-closeout/git-refs-archive-receipt.json --destination <empty dir>; git fetch <bundle> 'refs/*:refs/*'",
+      "sha256": "6caed16ac7efa4b79037d5c7dd11271902cebf8de782040e4bba239d2d97dae9",
+      "tip": "12d996f0d8e24b93c0e276d5b3f91887a0da9aca"
+    },
+    "stash:0e2ffe95ba40a2d0c2b8ae9e884b4a85d96af3f2": {
+      "archive": "devbox-closeout-private/pr1921/20261113T002447Z-local-only-git-refs.tar.gz.aesgcm",
+      "disposition": "archived",
+      "recovery_receipt": "docs/handoffs/pr-1921-closeout/git-refs-archive-receipt.json",
+      "restore": "private_archive.py restore --receipt docs/handoffs/pr-1921-closeout/git-refs-archive-receipt.json --destination <empty dir>; git fetch <bundle> 'refs/*:refs/*'",
+      "sha256": "6caed16ac7efa4b79037d5c7dd11271902cebf8de782040e4bba239d2d97dae9",
+      "tip": "0e2ffe95ba40a2d0c2b8ae9e884b4a85d96af3f2"
+    }
+  },
+  "ready": true,
   "worktrees": [
     {
-      "branch": "refs/heads/fix/meeting-note-takers-search",
+      "branch": "refs/heads/records/pr-1921-closeout",
       "current": true,
       "locked": false,
       "needs_integration": false,
       "path": "/home/boxes/rose",
-      "uncommitted": [
-        "docs/handoffs/pr-1921-closeout/archive-receipt.json",
-        "docs/handoffs/pr-1921-closeout/closeout-manifest.json"
-      ],
+      "uncommitted": [],
       "unpushed_commits": 0
     }
   ]
