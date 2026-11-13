@@ -20,6 +20,7 @@ from pydantic import (
     model_validator,
 )
 
+from utils.grep_tool_contract import GREP_SOURCE_FILTER_KEYS, GREP_TOOL_PROMPT
 from utils.prompts import (
     PLANNER_RESPONSE_JOIN_DESCRIPTION,
     PLANNER_RESPONSE_TASKS_DESCRIPTION,
@@ -35,7 +36,6 @@ from utils.response_schema_constraints import (
     bounds_from_entries,
     coerce_direct_bounds_to_entries,
 )
-from utils.grep_tool_contract import GREP_SOURCE_FILTER_KEYS, GREP_TOOL_PROMPT
 from utils.tool_output_schema import ReadToolOutputTool
 from utils.user_facing_writing_prompt import user_facing_text_description
 from utils.wait_for_bounds import (
@@ -787,6 +787,13 @@ class GrepTool(BaseModel):
     ] = Field(
         default=None,
         description="Legacy single-source alias for `sources`. Prefer `sources` (a list of the exact sources the task needs).",
+    )
+    owner_user_id: Optional[str] = Field(
+        default=None, description="Only this owner's records (ids from the shared data map)."
+    )
+    team_id: Optional[str] = Field(default=None, description="Only accounts shared with this team.")
+    account_id: Optional[str] = Field(
+        default=None, description='Only this inbox email ("" = default iMessage account).'
     )
     role: Optional[Literal["USER", "ASSISTANT", "TOOL"]] = Field(
         default=None,
@@ -1569,7 +1576,7 @@ class SpawnExploreAgentTool(BaseModel):
 
 
 class ListAgentsTool(BaseModel):
-    """Browse your agent tree like a table of contents: where you are, nearby agents, drill-down hints."""
+    """Browse your agent tree like a table of contents: where you are, nearby agents, drill-down hints. With project_id, owner_user_id or team_id it also lists teammates' agents in projects shared with you (title and status only)."""
 
     tool: Literal["list_agents"]
     node: Optional[str] = Field(
@@ -1582,6 +1589,9 @@ class ListAgentsTool(BaseModel):
     path_prefix: Optional[str] = Field(
         default=None, description="List agents at or below this path, e.g. /root/outreach."
     )
+    project_id: Optional[str] = Field(default=None, description="Only agents in this project.")
+    owner_user_id: Optional[str] = Field(default=None, description="Only this owner's project agents.")
+    team_id: Optional[str] = Field(default=None, description="Only projects shared with this team.")
 
 
 _AGENT_ADDRESS_DESCRIPTION = (

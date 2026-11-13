@@ -287,6 +287,18 @@ def format_result(result: Dict[str, Any]) -> str:  # noqa: C901
                 lines.append(f"role: {role}")
             if location:
                 lines.append(f"location: {json.dumps(location, default=str)}")
+            ownership = match.get("ownership")
+            if isinstance(ownership, dict):
+                safe_ownership = {key: ownership[key] for key in
+                    ("owner_user_id", "owner_name", "provider", "account_id", "shared", "team_ids")
+                    if key in ownership}
+                lines.append(f"ownership: {json.dumps(safe_ownership, default=str)}")
+            record_owners = [
+                {key: record[key] for key in ("message_id", "owner_user_id", "account_id") if key in record}
+                for record in match.get("records", []) if isinstance(record, dict)
+            ]
+            if record_owners:
+                lines.append(f"record_ownership: {json.dumps(record_owners, default=str)}")
             content = match.get("content")
             if content:
                 lines.append(str(content))

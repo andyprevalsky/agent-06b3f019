@@ -610,6 +610,7 @@ const RESUMING_REPO =
 
 if (projectMode) {
   workDir = PROJECT_WORKDIR;
+  configureGitIdentity(workDir);
   projects[workDir] = { allowedTools: ["*"], hasTrustDialogAccepted: true };
   writeFileSync(
     join(home, ".claude", "projects.json"),
@@ -639,6 +640,7 @@ if (projectMode) {
         cwd: workDir,
       });
     }
+    configureGitIdentity(workDir);
     writeFileSync(join(workDir, "CLAUDE.md"), CODE_AGENT_SYSTEM_PROMPT);
     projects[workDir] = { allowedTools: ["*"], hasTrustDialogAccepted: true };
     writeFileSync(
@@ -676,9 +678,7 @@ if (projectMode) {
     // Clone repo (off the event loop, atomically: see cloneRepoAtomically)
     await cloneRepoAtomically(authUrl, workDir);
 
-    // Configure git for commits
-    execSync(`git config user.name "Rose Agent"`, { cwd: workDir });
-    execSync(`git config user.email "agent@roselabs.ai"`, { cwd: workDir });
+    configureGitIdentity(workDir);
 
     writeFileSync(join(workDir, "CLAUDE.md"), CODE_AGENT_SYSTEM_PROMPT);
 
@@ -712,6 +712,33 @@ if (!GITHUB_REPO_URL && !projectMode && CODE_AGENT_SYSTEM_PROMPT) {
 // pushed branch, else cut it from CODE_AGENT_BASE_BRANCH (the parent agent's
 // branch for sub-agents) or, when that is empty, the repo's default branch.
 // A base that is not on the remote is reported, never silently replaced.
+// Commits are authored by the GitHub account whose token pushes: the backend
+// passes it as GIT_AUTHOR_* / GIT_COMMITTER_* (codeAgentGitIdentity.ts), which
+// git already prefers over any repo config. Mirror it into the repo so a shell
+// without those envs commits the same way, and so a workspace an older server
+// configured with an identity GitHub cannot link (Vercel then blocks the
+// deploy) is corrected on resume. No envs: leave the repo's own config alone.
+function configureGitIdentity(dir) {
+  const name = process.env.GIT_AUTHOR_NAME;
+  const email = process.env.GIT_AUTHOR_EMAIL;
+  if (!name || !email) return;
+  try {
+    execFileSync("git", ["config", "user.name", name], {
+      cwd: dir,
+      stdio: "pipe",
+    });
+    execFileSync("git", ["config", "user.email", email], {
+      cwd: dir,
+      stdio: "pipe",
+    });
+  } catch (err) {
+    log("warn", "Could not configure the git commit identity", {
+      workDir: dir,
+      error: redactCredentials(err.message),
+    });
+  }
+}
+
 // Credentials never leave the server in text: a URL's userinfo and the token
 // itself are masked in every error that reaches a log, an event or the output.
 function redactCredentials(text) {

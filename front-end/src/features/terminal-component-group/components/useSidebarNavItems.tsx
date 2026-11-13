@@ -6,6 +6,7 @@
 import { useMemo } from 'react';
 import {
   Activity,
+  Users,
   FlaskConical,
   Globe,
   Network,
@@ -72,6 +73,13 @@ export function useSidebarNavItems({
             },
           ]
         : []),
+      {
+        id: 'teams',
+        label: 'Teams',
+        icon: <Users className="h-4 w-4" />,
+        onClick: makeHandler('teams'),
+        isActive: currentView === 'teams',
+      },
       {
         id: 'integrations',
         label: 'Integrations',

@@ -134,6 +134,11 @@ import {
   testCompletionScope_smsSupervisorReplyNotified,
   testCompletionScope_smsRelayedChildQuestionNotifiesRoot,
   testCompletionScope_smsBudgetIncreaseNotified,
+  testCompletionScope_smsReplyToChildNotifiesRoot,
+  testCompletionScope_smsRelayedWriteLockNotified,
+  testCompletionScope_smsRelayedCostLimitNotified,
+  testCompletionScope_smsRelayedAgentCardSetupNotified,
+  testCompletionScope_relayFromChildWithoutBusIdNotifiesRoot,
   testCompletionScope_whatsappCreatedAgentNotified,
   testCompletionScope_whatsappSupervisorReplyNotified,
   testCompletionScope_whatsappRelayedQuestionNotified,
@@ -425,6 +430,26 @@ async function runAll() {
         {
           name: 'web agent whose budget the SMS agent raised -> notified',
           fn: testCompletionScope_smsBudgetIncreaseNotified,
+        },
+        {
+          name: 'web root whose child the SMS agent replied to -> notified (tree marker only)',
+          fn: testCompletionScope_smsReplyToChildNotifiesRoot,
+        },
+        {
+          name: 'web agent whose write-lock approval was relayed by SMS -> notified',
+          fn: testCompletionScope_smsRelayedWriteLockNotified,
+        },
+        {
+          name: 'web agent whose cost-limit notice was relayed by SMS -> notified',
+          fn: testCompletionScope_smsRelayedCostLimitNotified,
+        },
+        {
+          name: 'web agent whose AgentCard setup was relayed by SMS -> notified',
+          fn: testCompletionScope_smsRelayedAgentCardSetupNotified,
+        },
+        {
+          name: 'relay from a child without busId still notifies the root',
+          fn: testCompletionScope_relayFromChildWithoutBusIdNotifiesRoot,
         },
         {
           name: 'WhatsApp-created agent -> notified on WhatsApp',
