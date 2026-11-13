@@ -102,7 +102,8 @@ def original(state, occurrence, root):
             raise ValueError('native row mismatch')
     if task.get('execution_provenance', {}).get('base_sha') != failure['source']['head']:
         raise ValueError('native execution source mismatch')
-    if task.get('cleanup_failure', 'missing') is not None or task.get('context_violations') != []:
+    from deploy_test_historical_custody import warning_only_context
+    if task.get('cleanup_failure', 'missing') is not None or not warning_only_context(task.get('context_violations')):
         raise ValueError('independent native failure')
     from deploy_test_historical_custody import stall_lifecycle
     lifecycle = task['logs'].get('agentcard_release_stall_lifecycle')

@@ -12,6 +12,7 @@ symptoms:
   - "DEPLOY_CYCLE BLOCKED: '9a3babcc-d45d-43c7-9dfb-9095fbac47b4'"
   - prepare-historical-no-retry refused a changed-source refresh and forced a full gate rerun
   - "DEPLOY_CYCLE BLOCKED: historical custody: independent failure lacks canonical pending repair"
+  - "DEPLOY_CYCLE BLOCKED: historical custody: native task/cleanup unknown"
 tags:
   - deploy
   - agentcard
@@ -115,6 +116,17 @@ and `ERROR`; a `PASSED` row still refuses. Regression:
 fails on the prior builder with the live refusal and passes with the fix. The
 live obligation then proved end to end, including the real native fleet
 closure.
+
+A third occurrence came in the next round. agent-payment-test-shop's
+confirmed-stall row (owt_880a38775b323bb2a1fe566c) carried one warning-severity
+context violation, a whitespace-only assistant message. The builder required
+`context_violations == []` and refused with "native task/cleanup unknown".
+run_benchmark fails a row only on error severity, so custody now ignores
+warning-only lists; an error, malformed entry or non-list still refuses.
+Regression: `Cycle.test_historical_custody_ignores_warning_context_violations_only`.
+Common lesson across all three: custody re-validates native rows against
+narrower assumptions than the runner that produced them. Each mismatch turns a
+provable stall into a refusal, whose only fallback is a re-minting rerun.
 
 ## Human feedback
 

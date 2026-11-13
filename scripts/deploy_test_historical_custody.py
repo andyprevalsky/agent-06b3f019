@@ -153,6 +153,14 @@ def lifecycle_view(snapshot):
     return view
 
 
+def warning_only_context(violations):
+    """No error-severity context violation. run_benchmark fails a row only on error severity;
+    a warning (e.g. a whitespace-only assistant message) says nothing about payment cleanup.
+    Anything malformed or of another severity stays unknown."""
+    return isinstance(violations, list) and all(
+        isinstance(v, dict) and v.get('severity') == 'warning' for v in violations)
+
+
 def stall_lifecycle(cleanup, root_id):
     """The recorded release-stall lifecycle and the sealed-tree agent that owns its purchase.
 
@@ -205,7 +213,7 @@ def historical(state, failure, root):
     need(all(t.get(k) == v for k, v in e['native_task'].items()), 'native row changed')
     need(t.get('execution_provenance', {}).get('base_sha') == f['source']['head'], 'native source changed')
     need(t.get('passed') is False and t.get('cleanup_failure', 'missing') is None
-         and t.get('context_violations') == [], 'native task/cleanup unknown')
+         and warning_only_context(t.get('context_violations')), 'native task/cleanup unknown')
     task = task_contract(root, f['source']['head'], t['name'])
     cleanup = t['logs']['cloud_cleanup_evidence']
     owner, snap = stall_lifecycle(cleanup, t['agent_id'])

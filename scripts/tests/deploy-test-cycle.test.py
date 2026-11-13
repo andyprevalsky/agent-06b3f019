@@ -1626,6 +1626,31 @@ class Cycle(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'independent failure lacks canonical pending repair'):
             h.historical(state, f, self.root)
 
+    def test_historical_custody_ignores_warning_context_violations_only(self):
+        # PR #2014 smoke: agent-payment-test-shop's confirmed-stall row carried one warning-severity
+        # context violation (whitespace-only assistant message); run_benchmark fails rows only on
+        # error severity, so custody must not refuse and force a re-minting rerun.
+        import deploy_test_historical_custody as h
+        new = self.custody_fixture()
+        f = self.state['failures'][1]; file = Path(f['worker_evidence']['path']); raw = file.read_bytes()
+        adapter_path = Path(f['worker_result']); adapter_raw = adapter_path.read_bytes()
+        warning = {'message': 'Assistant message 23 has only whitespace text content.', 'message_index': 23,
+                   'rule': 'non_empty_content', 'severity': 'warning'}
+        for violations, ok in (([warning], True), ([dict(warning, severity='error')], False),
+                               ([warning, 'malformed'], False), (None, False)):
+            state = copy.deepcopy(self.state)
+            doc = json.loads(raw); doc['tasks'][0]['context_violations'] = violations; c.write(file, doc)
+            failure = state['failures'][1]; failure['worker_evidence']['sha256'] = c.sha_file(file)
+            adapter = json.loads(adapter_raw); adapter['evidence'][doc['tasks'][0]['name']] = failure['worker_evidence']
+            c.write(adapter_path, adapter)
+            if ok:
+                row = h.historical(state, failure, self.root)
+                self.assertEqual('canonical_pending_repair', row['authority']['kind'])
+            else:
+                with self.assertRaisesRegex(ValueError, 'native task/cleanup unknown'):
+                    h.historical(state, failure, self.root)
+            file.write_bytes(raw); adapter_path.write_bytes(adapter_raw)
+
     def test_historical_custody_rejects_tampering_and_missing_admission_proof(self):
         import deploy_test_historical_custody as h
         new = self.custody_fixture(); proof = h.build(self.state, self.plan, new, self.root)
