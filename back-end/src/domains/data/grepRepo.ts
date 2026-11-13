@@ -6,6 +6,7 @@
 
 import { Prisma } from '@prisma/client';
 import { prisma } from '../../providers/database';
+import { messageAccessPredicate, type MessageAccess } from './teamAccessRepo';
 import { pageSize, regexPredicate } from './sharedGrepRepo';
 
 export * from './agentNetworkGrepRepo';
@@ -13,6 +14,8 @@ export * from './documentGrepRepo';
 export * from './transactionGrepRepo';
 
 export interface MessageGrepRow {
+  userId: string;
+  googleAccountEmail: string | null;
   id: string;
   personId: string;
   channel: string;
@@ -88,9 +91,16 @@ function messageFilters(
   personId: string | undefined,
   since: Date | undefined,
   channel: string | undefined,
-  messageId?: string
+  messageId?: string,
+  personIds?: string[]
 ): Prisma.Sql {
   const parts: Prisma.Sql[] = [];
+  if (personIds !== undefined)
+    parts.push(
+      personIds.length
+        ? Prisma.sql`AND m."personId" IN (${Prisma.join(personIds)})`
+        : Prisma.sql`AND FALSE`
+    );
   if (personId !== undefined) parts.push(Prisma.sql`AND m."personId" = ${personId}`);
   if (since !== undefined) parts.push(Prisma.sql`AND m.timestamp >= ${since}`);
   if (channel !== undefined) parts.push(Prisma.sql`AND m.channel::text = ${channel}`);
@@ -102,6 +112,8 @@ function messageFilters(
 
 export async function countMessageGrepRows(params: {
   userId: string;
+  access: MessageAccess;
+  personIds?: string[];
   pattern: string;
   caseInsensitive: boolean;
   personId?: string;
@@ -110,11 +122,17 @@ export async function countMessageGrepRows(params: {
   channel?: string;
 }): Promise<number> {
   const predicate = regexPredicate(Prisma.sql`m.message`, params.pattern, params.caseInsensitive);
-  const filters = messageFilters(params.personId, params.since, params.channel, params.messageId);
+  const filters = messageFilters(
+    params.personId,
+    params.since,
+    params.channel,
+    params.messageId,
+    params.personIds
+  );
   const rows = await prisma.$queryRaw<Array<{ count: bigint }>>`
     SELECT COUNT(*)::bigint AS count
     FROM "MessageRecord" m
-    WHERE m."userId" = ${params.userId}
+    WHERE ${messageAccessPredicate(params.access)}
       AND ${predicate}
       ${filters}
   `;
@@ -187,4 +205,20 @@ export async function searchNetworkGrepRows(params: {
     ORDER BY p."messagesExchanged" DESC, p."lastName" ASC, p.id ASC
     LIMIT ${pageSize(params.limit, params.offset)}
   `;
+}
+
+/** Resolve a shared contact only if an authorized message identifies it. */
+export async function resolveMessagePersonIds(
+  access: MessageAccess,
+  identifier: string
+): Promise<string[]> {
+  const rows = await prisma.$queryRaw<Array<{ id: string }>>`
+    SELECT DISTINCT p.id FROM "Person" p JOIN "MessageRecord" m ON m."personId" = p.id
+    WHERE ${messageAccessPredicate(access)} AND (
+      p.id = ${identifier} OR lower(p.email) = lower(${identifier}) OR p."phoneNumber" = ${identifier}
+      OR lower(p."firstName") = lower(${identifier})
+      OR lower(concat_ws(' ', p."firstName", p."lastName")) = lower(${identifier})
+    ) ORDER BY p.id
+  `;
+  return rows.map((row) => row.id);
 }

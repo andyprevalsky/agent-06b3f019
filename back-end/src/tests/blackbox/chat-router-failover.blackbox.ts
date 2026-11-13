@@ -64,6 +64,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { prisma } from '../../providers/database';
+import { liveFailoverCase } from './chat-router-failover.live.quarantine';
 import { postMessage } from '../../domains/agents/agentMessageService';
 import { CHAT_HANDLER_FAILURE_NOTICE } from '../../providers/chat/chatHandlerFailure';
 import { CLOUD_AGENT_TOOL_NAME } from '../../providers/chat/cloudAgentLifecycleTool';
@@ -638,7 +639,7 @@ async function main(): Promise<void> {
     ? [
         [
           'live -- exact prod follow-up escalates through real OpenRouter',
-          testLiveFailoverEscalates,
+          liveFailoverCase(testLiveFailoverEscalates),
         ],
       ]
     : [
