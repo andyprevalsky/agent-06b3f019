@@ -50,11 +50,24 @@ looked clean.
 The worker was out of rotation from about 05:46Z (0 of 28 east creates landed on
 it) and came back by 06:14Z, so the failure is intermittent.
 
-Prod (Render, 2026-11-06..13): 0 `failed validation and cleanup`, 0 `before
-readiness`. The last prod Tilion allocation was 2026-11-12 20:17Z, so prod had no
-browser traffic during the outage. Prod uses the same east pool (`sess_993d70`
-served prod normally on 11-06..08), so each new prod browser agent had about a 1/3
-chance of landing on the dead worker on its first create.
+Prod impact, from ClickHouse prod worker logs (7-day retention) and Render backend logs:
+
+- One production occurrence. At 2026-11-13T08:26:57Z root agent
+  `83aef77e-ece7-598e-8837-dbbfe61678e8` got `sess_993d70b737a1…`, and Render logged
+  `failed validation and cleanup`. Both of its browser spawns then failed all 10
+  init calls with `Browser initialization failed before readiness`: 9 Render lines
+  at 08:27:03–08:28:00Z, matching ClickHouse's 10 worker init attempts. The agent
+  is PAUSED and its init receipt is still FAILED; releasing it waits on the owner.
+- No other prod agent was affected in the retention window. Render logged exactly
+  one `failed validation and cleanup` from 2026-11-06 to 2026-11-13.
+- Prod made no Tilion allocations during the reported smoke failure window
+  (04:34–04:58Z) on 11-13. Across 11-06..13 that window had one allocation (11-10)
+  and no failures.
+- Prod uses the same east pool, so each new browser agent was exposed until the fix.
+  On 11-13 prod made one Tilion allocation before the fix (Render live 08:49Z), at
+  08:26:54Z, and it landed on the dead worker. The only one after was 08:50:50Z, healthy.
+- After the fix there were 0 failures. A 09:16Z probe of main against east created
+  10 of 10 sessions; 5 landed on `sess_993d70` and all 5 recovered.
 
 ## Diagnosis
 
