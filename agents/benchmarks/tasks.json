@@ -8067,6 +8067,12 @@
   },
   {
     "name": "browser-smoke",
+    "quarantine": {
+      "since": "2026-11-13",
+      "repair": "pending-handoff:db2c6313acc74584917761b0463743d9",
+      "error": "Browser agent 06fd0b14-9993-543e-96eb-1f972ab1f4b5 recorded 0 trajectory step(s); expected at least 1 per browser agent",
+      "evidence": "PR #1975 deploy round 10 smoke on de716c37f5, occurrence db2c6313acc74584917761b0463743d9 (agent 1b6b0d18-4e60-4a84-9f52-eb8749cf48c5): Tilion session create HTTP 500 'Tilion session sess_993d70... failed validation and cleanup' at 06:12:11Z, then 'Browser initialization failed before readiness' on every fresh-proxy retry (11x), browser agent 0 steps; same-source rerun PASSED. Dead Tilion east-pool worker sess_993d70: RCA docs/rca/cases/2026-11-13-tilion-dead-worker-release-failure-latched-browser-init.md (PR #2010). Same signature in PR #1975 r7/r8, #1981 r11, #2005 r2 and #1864 on 2026-11-13."
+    },
     "title": "Browser Agent Page Read",
     "prompt": "Use a browser agent to visit https://www.roselabs.ai and report the main color palette visible on the page. Name at least three prominent colors.",
     "timeout_seconds": 300,
