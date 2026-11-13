@@ -25,14 +25,6 @@ FIXTURE_CONTROLLER_PID_BASE = 2147480000
 os.environ.pop('DEPLOY_GATE_REQUEST', None)
 sys.path.insert(0, str(ROOT / 'scripts'))
 import deploy_test_cycle as c
-import importlib.util as _quarantine_util
-
-# scripts/test_quarantine.py (the CLI) already owns the `test_quarantine` module name here.
-_quarantine_spec = _quarantine_util.spec_from_file_location(
-    'lib_test_quarantine', Path(__file__).resolve().parents[1] / 'lib' / 'test_quarantine.py')
-_quarantine_module = _quarantine_util.module_from_spec(_quarantine_spec)
-_quarantine_spec.loader.exec_module(_quarantine_module)
-quarantine = _quarantine_module.quarantine
 import deploy_gate_progress as progress
 import deploy_test_process
 
@@ -7482,10 +7474,6 @@ class Cycle(unittest.TestCase):
         state['plan']['source'] = state['source']; state['plan_digest'] = c.digest(state['plan'])
         return state, original, proof, gate, folder, native
 
-    @quarantine(since='2026-11-12', repair='pending-handoff:578ec40192d64b4899e94402104f735a',
-                error='PermissionError: settlement process scan: same-user /proc/<pid>/environ unreadable',
-                evidence='PR #1864 new-test-stability occurrence 578ec40192d64b4899e94402104f735a (source eb02ae425): 3/5 under owned load; '
-                         'scan_same_user_processes refused an unreadable in-tree process')
     def test_negative_successor_renews_only_from_committed_journal_and_current_closure(self):
         state, original, proof, gate, folder, native = self.negative_successor_renewal_state()
         incoming = dict(proof, validation_source=copy.deepcopy(state['source']))
@@ -7535,10 +7523,6 @@ class Cycle(unittest.TestCase):
                 self.assertEqual(before, candidate)
             finally: journal.write_bytes(saved); marker.write_bytes(saved_marker)
 
-    @quarantine(since='2026-11-12', repair='pending-handoff:578ec40192d64b4899e94402104f735a',
-                error='PermissionError: settlement process scan: same-user /proc/<pid>/environ unreadable',
-                evidence='PR #1864 new-test-stability occurrence 578ec40192d64b4899e94402104f735a (source eb02ae425): 3/5 under owned load; '
-                         'scan_same_user_processes refused an unreadable in-tree process')
     def test_negative_successor_rejects_changed_history_admission_and_live_adapter_atomically(self):
         state, original, proof, gate, folder, native = self.negative_successor_renewal_state()
         incoming = dict(proof, validation_source=copy.deepcopy(state['source']))
@@ -12230,10 +12214,6 @@ class InterruptedRoundSettlement(unittest.TestCase):
         self.assertFalse((self.folder / 'settlement-round20-journal.json').exists())
         self.assertFalse((self.gdir / 'receipt.json').exists())
 
-    @quarantine(since='2026-11-12', repair='pending-handoff:578ec40192d64b4899e94402104f735a',
-                error='AssertionError: 2 != 0',
-                evidence='PR #1864 new-test-stability occurrence 578ec40192d64b4899e94402104f735a (source 256c03632): 3/5 under owned load; '
-                         'settlement: current process ownership unverifiable')
     def test_lost_outer_receipt_settles_negative_only_and_replays_exactly(self):
         self.assertEqual(self.recover(), 0)
         state = c.read(self.folder / 'cycle.json')
@@ -12309,10 +12289,6 @@ class InterruptedRoundSettlement(unittest.TestCase):
         finally:
             child.stdin.close(); child.wait(timeout=10); child.stdout.close()
 
-    @quarantine(since='2026-11-12', repair='pending-handoff:578ec40192d64b4899e94402104f735a',
-                error='AssertionError: False is not true',
-                evidence='PR #1864 new-test-stability occurrence 578ec40192d64b4899e94402104f735a (source 256c03632): 3/5 under owned load; '
-                         'settlement: current process ownership unverifiable')
     def test_durable_journal_recovers_partial_publication(self):
         real_write = c.write
         def interrupted(path, value):
@@ -12478,6 +12454,29 @@ class LocalCleanupQuietScan(unittest.TestCase):
                         local.quiet(root)
                 finally:
                     child.kill(); child.wait(); child.stdout.close()
+
+    def test_unreaped_zombie_child_is_skipped_not_refused(self):
+        # PR #1864: an exited but unreaped same-user child reports EACCES on /proc/<pid>/environ, so the
+        # scan refused it as unverifiable for its 2 s grace and every later settlement scan failed.
+        import deploy_test_process
+        sys.path.insert(0, str(ROOT / 'scripts' / 'lib'))
+        from condition_wait import wait_until
+        child = subprocess.Popen([sys.executable, '-c', 'pass'])
+        state = Path('/proc') / str(child.pid) / 'stat'
+        wait_until(lambda: state.read_text().rsplit(') ', 1)[1].split()[0] == 'Z', timeout=10,
+                   description='child exited and is unreaped')
+        with self.assertRaises(PermissionError):
+            (Path('/proc') / str(child.pid) / 'environ').read_bytes()
+        inspected, refused = [], []
+        def inspect(process):
+            if process.name == str(child.pid):
+                inspected.append(process.name)
+                (process / 'environ').read_bytes()
+        try:
+            deploy_test_process.scan_same_user_processes(inspect, refused.append, grace=0.2)
+        finally:
+            child.wait()
+        self.assertEqual([], refused, 'a zombie cannot run code and must not be refused')
 
     @unittest.skipUnless(sys.platform.startswith('linux'), 'Linux /proc credential semantics')
     def test_setuid_process_first_seen_as_ours_is_skipped_not_refused(self):
