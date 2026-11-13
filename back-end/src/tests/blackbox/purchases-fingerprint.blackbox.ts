@@ -10,7 +10,6 @@ import * as purchasesRepo from '../../domains/purchases/repo';
 import * as purchasesService from '../../domains/purchases/service';
 import { prisma } from '../../providers/database';
 import { retryWithBackoff } from '../../providers/retry';
-import { quarantine } from '../helpers/quarantine';
 import { assert, StubCardStateProvider } from './purchases.testkit';
 
 config();
@@ -573,19 +572,7 @@ async function main(): Promise<void> {
     await testProductDescriptionNameParity();
     await testActiveCardSurvivesCanonicalizationUpgrade();
     await testUnicodeParity();
-    // NOT_INTRODUCED flake: the runner's Postgres refused this 21-way insert burst (max_connections).
-    const flakyUnit = 'purchases-fingerprint';
-    await quarantine(
-      {
-        since: '2026-11-11',
-        repair: 'https://boxes.dev/thread/thr_67089be547544b64a79f4e42886d5279',
-        error: 'Too many database connections opened: FATAL: sorry, too many clients already',
-        evidence:
-          'PR1910 deploy round 22 backend-coverage-blackbox rca/dffb463a2de34ec6875fc74fb17e9196',
-      },
-      testBackfillBeyondTwenty,
-      { unit: flakyUnit }
-    )();
+    await testBackfillBeyondTwenty();
     await testChargingMintGuard();
     console.log('PASS purchase fingerprint parity and legacy indexed backfill');
   } finally {
