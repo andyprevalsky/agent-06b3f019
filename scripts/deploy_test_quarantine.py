@@ -515,7 +515,9 @@ def validate_attribution(occurrence: dict, entry: dict, root: Path, *, state: di
             **({'case': entry['case']} if entry.get('case') is not None else {})}
 
 
-_DOMAIN_SINGLE_FAILURE = re.compile(r'\(\d+ passed, 1 failed; 1 failed case\(s\): ([A-Za-z_]\w*); first error: ')
+# run_blackbox_tests.py prefixes "<n> passed, <m> failed; " only when the domain returns counts;
+# a domain returning a bare bool reports "(1 failed case(s): ...)" with no counts.
+_DOMAIN_SINGLE_FAILURE = re.compile(r'\((?:\d+ passed, 1 failed; )?1 failed case\(s\): ([A-Za-z_]\w*); first error: ')
 
 
 def _domain_case_markers(occurrence: dict, case: object, root: Path, path: str) -> list[dict]:
