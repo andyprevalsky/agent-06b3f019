@@ -1,0 +1,165 @@
+{
+ ".cloud-env": {
+  "archive": "devbox-closeout-private/pr1921/20261112T235648Z-all-records.tar.gz.aesgcm",
+  "disposition": "archived",
+  "recovery_receipt": "docs/handoffs/pr-1921-closeout/archive-receipt.json",
+  "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-1921-closeout/archive-receipt.json --destination <empty dir>",
+  "sha256": "cd51ffa828983666f6d2eb8d858771419c4901b5f1484d723e02b224530ec3b1"
+ },
+ ".context/": {
+  "archive": "devbox-closeout-private/pr1921/20261112T235648Z-all-records.tar.gz.aesgcm",
+  "disposition": "archived",
+  "recovery_receipt": "docs/handoffs/pr-1921-closeout/archive-receipt.json",
+  "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-1921-closeout/archive-receipt.json --destination <empty dir>",
+  "sha256": "cd51ffa828983666f6d2eb8d858771419c4901b5f1484d723e02b224530ec3b1"
+ },
+ ".devbox/": {
+  "archive": "devbox-closeout-private/pr1921/20261112T235648Z-all-records.tar.gz.aesgcm",
+  "disposition": "archived",
+  "recovery_receipt": "docs/handoffs/pr-1921-closeout/archive-receipt.json",
+  "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-1921-closeout/archive-receipt.json --destination <empty dir>",
+  "sha256": "cd51ffa828983666f6d2eb8d858771419c4901b5f1484d723e02b224530ec3b1"
+ },
+ ".env.npm": {
+  "archive": "devbox-closeout-private/pr1921/20261112T235648Z-all-records.tar.gz.aesgcm",
+  "disposition": "archived",
+  "recovery_receipt": "docs/handoffs/pr-1921-closeout/archive-receipt.json",
+  "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-1921-closeout/archive-receipt.json --destination <empty dir>",
+  "sha256": "cd51ffa828983666f6d2eb8d858771419c4901b5f1484d723e02b224530ec3b1"
+ },
+ ".llm-dumps/": {
+  "archive": "devbox-closeout-private/pr1921/20261112T235648Z-all-records.tar.gz.aesgcm",
+  "disposition": "archived",
+  "recovery_receipt": "docs/handoffs/pr-1921-closeout/archive-receipt.json",
+  "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-1921-closeout/archive-receipt.json --destination <empty dir>",
+  "sha256": "cd51ffa828983666f6d2eb8d858771419c4901b5f1484d723e02b224530ec3b1"
+ },
+ "agents/.env": {
+  "archive": "devbox-closeout-private/pr1921/20261112T235648Z-all-records.tar.gz.aesgcm",
+  "disposition": "archived",
+  "recovery_receipt": "docs/handoffs/pr-1921-closeout/archive-receipt.json",
+  "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-1921-closeout/archive-receipt.json --destination <empty dir>",
+  "sha256": "cd51ffa828983666f6d2eb8d858771419c4901b5f1484d723e02b224530ec3b1"
+ },
+ "agents/.env.benchmark-temporal": {
+  "archive": "devbox-closeout-private/pr1921/20261112T235648Z-all-records.tar.gz.aesgcm",
+  "disposition": "archived",
+  "recovery_receipt": "docs/handoffs/pr-1921-closeout/archive-receipt.json",
+  "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-1921-closeout/archive-receipt.json --destination <empty dir>",
+  "sha256": "cd51ffa828983666f6d2eb8d858771419c4901b5f1484d723e02b224530ec3b1"
+ },
+ "agents/.env.cloudbench-upsert.lock": {
+  "archive": "devbox-closeout-private/pr1921/20261112T235648Z-all-records.tar.gz.aesgcm",
+  "disposition": "archived",
+  "recovery_receipt": "docs/handoffs/pr-1921-closeout/archive-receipt.json",
+  "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-1921-closeout/archive-receipt.json --destination <empty dir>",
+  "sha256": "cd51ffa828983666f6d2eb8d858771419c4901b5f1484d723e02b224530ec3b1"
+ },
+ "agents/.ruff_cache/": {
+  "archive": "devbox-closeout-private/pr1921/20261112T235648Z-all-records.tar.gz.aesgcm",
+  "disposition": "archived",
+  "recovery_receipt": "docs/handoffs/pr-1921-closeout/archive-receipt.json",
+  "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-1921-closeout/archive-receipt.json --destination <empty dir>",
+  "sha256": "cd51ffa828983666f6d2eb8d858771419c4901b5f1484d723e02b224530ec3b1"
+ },
+ "agents/navi-worker-log.txt": {
+  "archive": "devbox-closeout-private/pr1921/20261112T235648Z-all-records.tar.gz.aesgcm",
+  "disposition": "archived",
+  "recovery_receipt": "docs/handoffs/pr-1921-closeout/archive-receipt.json",
+  "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-1921-closeout/archive-receipt.json --destination <empty dir>",
+  "sha256": "cd51ffa828983666f6d2eb8d858771419c4901b5f1484d723e02b224530ec3b1"
+ },
+ "agents/providers/fast_cache/": {
+  "archive": "devbox-closeout-private/pr1921/20261112T235648Z-all-records.tar.gz.aesgcm",
+  "disposition": "archived",
+  "recovery_receipt": "docs/handoffs/pr-1921-closeout/archive-receipt.json",
+  "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-1921-closeout/archive-receipt.json --destination <empty dir>",
+  "sha256": "cd51ffa828983666f6d2eb8d858771419c4901b5f1484d723e02b224530ec3b1"
+ },
+ "back-end/.env": {
+  "archive": "devbox-closeout-private/pr1921/20261112T235648Z-all-records.tar.gz.aesgcm",
+  "disposition": "archived",
+  "recovery_receipt": "docs/handoffs/pr-1921-closeout/archive-receipt.json",
+  "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-1921-closeout/archive-receipt.json --destination <empty dir>",
+  "sha256": "cd51ffa828983666f6d2eb8d858771419c4901b5f1484d723e02b224530ec3b1"
+ },
+ "back-end/.env.cloudbench-upsert.lock": {
+  "archive": "devbox-closeout-private/pr1921/20261112T235648Z-all-records.tar.gz.aesgcm",
+  "disposition": "archived",
+  "recovery_receipt": "docs/handoffs/pr-1921-closeout/archive-receipt.json",
+  "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-1921-closeout/archive-receipt.json --destination <empty dir>",
+  "sha256": "cd51ffa828983666f6d2eb8d858771419c4901b5f1484d723e02b224530ec3b1"
+ },
+ "back-end/backend-logs.log": {
+  "archive": "devbox-closeout-private/pr1921/20261112T235648Z-all-records.tar.gz.aesgcm",
+  "disposition": "archived",
+  "recovery_receipt": "docs/handoffs/pr-1921-closeout/archive-receipt.json",
+  "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-1921-closeout/archive-receipt.json --destination <empty dir>",
+  "sha256": "cd51ffa828983666f6d2eb8d858771419c4901b5f1484d723e02b224530ec3b1"
+ },
+ "docs/rca/INDEX.md": {
+  "archive": "devbox-closeout-private/pr1921/20261112T235648Z-all-records.tar.gz.aesgcm",
+  "disposition": "archived",
+  "recovery_receipt": "docs/handoffs/pr-1921-closeout/archive-receipt.json",
+  "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-1921-closeout/archive-receipt.json --destination <empty dir>",
+  "sha256": "cd51ffa828983666f6d2eb8d858771419c4901b5f1484d723e02b224530ec3b1"
+ },
+ "front-end/.env": {
+  "archive": "devbox-closeout-private/pr1921/20261112T235648Z-all-records.tar.gz.aesgcm",
+  "disposition": "archived",
+  "recovery_receipt": "docs/handoffs/pr-1921-closeout/archive-receipt.json",
+  "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-1921-closeout/archive-receipt.json --destination <empty dir>",
+  "sha256": "cd51ffa828983666f6d2eb8d858771419c4901b5f1484d723e02b224530ec3b1"
+ },
+ "front-end/frontend-logs.log": {
+  "archive": "devbox-closeout-private/pr1921/20261112T235648Z-all-records.tar.gz.aesgcm",
+  "disposition": "archived",
+  "recovery_receipt": "docs/handoffs/pr-1921-closeout/archive-receipt.json",
+  "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-1921-closeout/archive-receipt.json --destination <empty dir>",
+  "sha256": "cd51ffa828983666f6d2eb8d858771419c4901b5f1484d723e02b224530ec3b1"
+ },
+ "hub-poller-logs.log": {
+  "archive": "devbox-closeout-private/pr1921/20261112T235648Z-all-records.tar.gz.aesgcm",
+  "disposition": "archived",
+  "recovery_receipt": "docs/handoffs/pr-1921-closeout/archive-receipt.json",
+  "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-1921-closeout/archive-receipt.json --destination <empty dir>",
+  "sha256": "cd51ffa828983666f6d2eb8d858771419c4901b5f1484d723e02b224530ec3b1"
+ },
+ "mac-app/.env": {
+  "archive": "devbox-closeout-private/pr1921/20261112T235648Z-all-records.tar.gz.aesgcm",
+  "disposition": "archived",
+  "recovery_receipt": "docs/handoffs/pr-1921-closeout/archive-receipt.json",
+  "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-1921-closeout/archive-receipt.json --destination <empty dir>",
+  "sha256": "cd51ffa828983666f6d2eb8d858771419c4901b5f1484d723e02b224530ec3b1"
+ },
+ "package-lock.json": {
+  "archive": "devbox-closeout-private/pr1921/20261112T235648Z-all-records.tar.gz.aesgcm",
+  "disposition": "archived",
+  "recovery_receipt": "docs/handoffs/pr-1921-closeout/archive-receipt.json",
+  "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-1921-closeout/archive-receipt.json --destination <empty dir>",
+  "sha256": "cd51ffa828983666f6d2eb8d858771419c4901b5f1484d723e02b224530ec3b1"
+ },
+ "research/.env": {
+  "archive": "devbox-closeout-private/pr1921/20261112T235648Z-all-records.tar.gz.aesgcm",
+  "disposition": "archived",
+  "recovery_receipt": "docs/handoffs/pr-1921-closeout/archive-receipt.json",
+  "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-1921-closeout/archive-receipt.json --destination <empty dir>",
+  "sha256": "cd51ffa828983666f6d2eb8d858771419c4901b5f1484d723e02b224530ec3b1"
+ },
+ "branch:backup/cerebras-chat-quota-prepush-20261002": {
+  "archive": "devbox-closeout-private/pr1921/20261113T002447Z-local-only-git-refs.tar.gz.aesgcm",
+  "disposition": "archived",
+  "sha256": "6caed16ac7efa4b79037d5c7dd11271902cebf8de782040e4bba239d2d97dae9",
+  "recovery_receipt": "docs/handoffs/pr-1921-closeout/git-refs-archive-receipt.json",
+  "restore": "private_archive.py restore --receipt docs/handoffs/pr-1921-closeout/git-refs-archive-receipt.json --destination <empty dir>; git fetch <bundle> 'refs/*:refs/*'",
+  "tip": "12d996f0d8e24b93c0e276d5b3f91887a0da9aca"
+ },
+ "stash:0e2ffe95ba40a2d0c2b8ae9e884b4a85d96af3f2": {
+  "archive": "devbox-closeout-private/pr1921/20261113T002447Z-local-only-git-refs.tar.gz.aesgcm",
+  "disposition": "archived",
+  "sha256": "6caed16ac7efa4b79037d5c7dd11271902cebf8de782040e4bba239d2d97dae9",
+  "recovery_receipt": "docs/handoffs/pr-1921-closeout/git-refs-archive-receipt.json",
+  "restore": "private_archive.py restore --receipt docs/handoffs/pr-1921-closeout/git-refs-archive-receipt.json --destination <empty dir>; git fetch <bundle> 'refs/*:refs/*'",
+  "tip": "0e2ffe95ba40a2d0c2b8ae9e884b4a85d96af3f2"
+ }
+}
