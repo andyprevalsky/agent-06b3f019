@@ -3805,6 +3805,9 @@ PAYMENT_CLEANUP_TIMEOUT_SECONDS = 180
 # Owned-cleanup release-stall observations run inside PAYMENT_CLEANUP_TIMEOUT_SECONDS
 # at the task reconciliation poll cadence; they never extend that deadline.
 PAYMENT_CLEANUP_STALL_OBSERVATION_SECONDS = 10
+# Owned cleanup's abandonment start is bounded by PAYMENT_CLEANUP_TIMEOUT_SECONDS alone. Its
+# shortest retry wait is 2 s, so this attempt count can never end the drain before that deadline.
+PAYMENT_CLEANUP_ABANDON_ATTEMPTS = PAYMENT_CLEANUP_TIMEOUT_SECONDS // 2 + 1
 # Matches the existing stale RECLAIMING lease in purchaseCleanup.ts. This is
 # retry eligibility within the unchanged 420-second reconciliation window.
 PAYMENT_RECLAIM_RETRY_AFTER_SECONDS = 120
@@ -7155,10 +7158,14 @@ async def _finalize_owned_root_payments(
                 # may be best effort, so only the next durable ledger read can
                 # complete this contract, including for non-abandonment tasks.
                 try:
+                    # A throttled org can refuse the abandon for minutes; the cleanup deadline is
+                    # the one authoritative bound, never a separate shorter attempt count.
                     await _start_payment_abandonment_with_recovery(
                         base_url,
                         agent_id,
+                        max_attempts=PAYMENT_CLEANUP_ABANDON_ATTEMPTS,
                         abandon_payment=abandon_test_payment,
+                        fetch_lifecycle=get_test_payment_lifecycle,
                     )
                 except Exception as error:
                     errors.append(f"{agent_id}: {str(error) or type(error).__name__}")

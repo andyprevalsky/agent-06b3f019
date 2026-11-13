@@ -6600,6 +6600,73 @@ async def test_owned_payment_release_stall_warns_instead_of_failing_cleanup():
         assert result.logs["cloud_cleanup_evidence"]["errors"] == ["payment: TimeoutError"]
 
 
+async def test_owned_cleanup_abandon_retries_until_the_cleanup_deadline():
+    """Regression (PR #2005 smoke round 5, 2026-11-13): agent-payment-idempotent-abandonment timed
+    out under an AgentCard org throttle. Owned cleanup's abandonment start then gave up after its
+    separate 3-attempt cap (30 s waits on the org 401) about 120 s into the unchanged 180 s cleanup
+    deadline. The driver withheld its cleanup acknowledgement, and the campaign INFRA-stopped. The
+    cleanup deadline is now the one bound: a throttle that clears inside it completes cleanup, and
+    the attempt count can never end the drain before it.
+    """
+    from unittest.mock import patch
+
+    import benchmarks.run_benchmark as bench
+
+    root, purchase = "00000000-0000-4000-8000-0000000c1ea0", "11111111-2222-4333-8444-555555555555"
+    row = {
+        "purchase_id": purchase,
+        "agent_id": root,
+        "status": "HELD",
+        "funding_status": "FUNDED",
+        "total_cents": 4396,
+        "card_id": "card_cleanup",
+        "stripe_payment_intent_id": "pi_cleanup",
+        "provider_transfer_id": "owt_cleanup",
+        "reclaim_provider_transfer_id": None,
+    }
+    throttled = Exception(
+        'Failed to abandon test payment: 401 {"error":"AgentCard Organization MCP list_transfers failed: '
+        'Invalid or expired organization token","code":"agentcard_org_mcp_unauthorized"}'
+    )
+    posts = []
+    refusals = 4  # one more refusal than the old 3-attempt cap allowed
+
+    async def abandon(_base_url, agent_id):
+        posts.append(agent_id)
+        if len(posts) <= refusals:
+            raise throttled
+        return {"purchase": {"status": "VOIDED"}}
+
+    async def lifecycle(_base_url, _agent_id):
+        return {"purchase": {"status": "HELD"}, "walletFunding": {"status": "FUNDED"}}
+
+    def sessions(_base_url, _root, require_deleted=False):
+        released = len(posts) > refusals
+        current = dict(row, status="VOIDED", funding_status="RECLAIMED") if released else dict(row)
+        return {"tree_agent_ids": [root], "purchase_cleanup": [current]}
+
+    sleeps = []
+
+    async def fake_sleep(seconds):
+        sleeps.append(seconds)
+
+    with (
+        patch.object(bench.asyncio, "sleep", fake_sleep),
+        patch.object(bench, "abandon_test_payment", abandon),
+        patch.object(bench, "get_test_payment_lifecycle", lifecycle),
+        patch.object(bench.cloud_batch_cleanup, "exact_root_sessions", side_effect=sessions),
+    ):
+        evidence = {}
+        result = await bench._finalize_owned_root_payments("http://backend", root, evidence)
+    assert result["root_agent_id"] == root
+    assert len(posts) == 5, posts
+    assert evidence["payment_snapshot"]["purchase_cleanup"][0]["status"] == "VOIDED"
+
+    # A throttle that never clears is still bounded by the unchanged cleanup deadline, not by the count.
+    assert bench.PAYMENT_CLEANUP_TIMEOUT_SECONDS == 180
+    assert bench.PAYMENT_CLEANUP_ABANDON_ATTEMPTS * 2 > bench.PAYMENT_CLEANUP_TIMEOUT_SECONDS
+
+
 async def test_owned_release_stall_proof_survives_agentcard_auth_flap_within_cleanup_deadline():
     """Regression (smoke INFRA stop 2026-11-12, PRs #1975/#1981/#1983): a stalled release always
     runs the real owned payment drain to its deadline, and its stall proof was one provider-backed
@@ -27688,6 +27755,10 @@ async def run_all_tests():
     )
     await r.record_async(
         "owned_payment_release_stall_warn_skip", test_owned_payment_release_stall_warns_instead_of_failing_cleanup
+    )
+    await r.record_async(
+        "owned_cleanup_abandon_retries_until_the_cleanup_deadline",
+        test_owned_cleanup_abandon_retries_until_the_cleanup_deadline,
     )
     await r.record_async(
         "owned_release_stall_proof_survives_auth_flap_within_deadline",
