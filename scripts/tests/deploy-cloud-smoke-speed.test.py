@@ -304,5 +304,120 @@ class SharedCanaryStamp(unittest.TestCase):
         self.assertNotIn(str(linked), env['FLEET_INFRA_CANARY_STAMP'])  # not the worktree's .context
 
 
+
+class SingleWidthRerunOwnsFlyTransport(unittest.TestCase):
+    """PR #1981 rounds 9 and 13: the single same-source rerun must not leave an unowned Fly agent.
+
+    A natively failed smoke task gets one rerun of just that task, so the rerun campaign has width 1.
+    run-bench-campaign started its owned inventory + shared relay (the campaign's private, joined
+    `flyctl agent`) only when --concurrency > 1, so the lone rerun controller's flyctl auto-started
+    the per-HOME `flyctl agent` daemon. That daemon outlived the campaign; the owned supervisor
+    TERMed it (orphaned_children=true, quiescent=true) and launch() reported the rerun as
+    "cloud command interrupted or source changed", so the gate went complete=false and every
+    smoke occurrence UNVERIFIED although the rerun was a clean native FAIL.
+    """
+
+    def setUp(self):
+        environment = patch.dict(os.environ)
+        environment.start()
+        self.addCleanup(environment.stop)
+        os.environ.pop('DEPLOY_GATE_REQUEST', None)
+        pushed = patch.object(cloud, 'origin_fetchable', return_value=True)
+        pushed.start()
+        self.addCleanup(pushed.stop)
+
+    def run_first_failure_then_rerun(self, rerun_process):
+        """Drive the real execute(): one native FAIL, then its single rerun with `rerun_process` flags."""
+        request = {'checks': ['chat-mode', 'agent-payment-idempotent-abandonment'], 'skips': {},
+                   'token': 'owned', 'source': {'head': 'a' * 40}, 'gate': 'smoke'}
+        failed = 'agent-payment-idempotent-abandonment'
+        native = {'native_task': {'name': failed, 'benchmark_status': 'FAILED', 'passed': False,
+                                  'failure_reason': 'Timeout after 900s'}}
+        launches = []
+
+        def run_command(argv, **kwargs):
+            launches.append((argv, kwargs['env']))
+            return (1, False, False, False) if len(launches) == 1 else (1, *rerun_process)
+
+        def collect(request_, *_args):
+            if request_['checks'] == request['checks']:
+                return {'chat-mode': 'PASS', failed: 'FAIL'}, {failed: native}, True, 'first'
+            return {failed: 'FAIL'}, {failed: native}, True, 'rerun'
+
+        with tempfile.TemporaryDirectory(dir=os.environ.get('TMPDIR')) as tmp:
+            _, linked = repo_with_worktree(tmp)
+            with mock.patch.object(cloud, 'source', lambda _root: request['source']), \
+                    mock.patch.object(cloud, 'campaign_width', lambda checks: len(checks)), \
+                    mock.patch.object(cloud, 'catalog_quarantines', lambda *_a: {}), \
+                    mock.patch.object(cloud, 'run_command', run_command), \
+                    mock.patch.object(cloud, 'collect_campaign', collect):
+                result = cloud.execute(request, linked)
+        return result, launches
+
+    def test_the_width_one_rerun_starts_the_campaign_owned_fly_transport(self):
+        import runpy
+        result, launches = self.run_first_failure_then_rerun((False, False, False))
+        self.assertEqual(len(launches), 2)
+        argv, env = launches[1]
+        self.assertEqual(argv[argv.index('--concurrency') + 1], '1')
+        # Feed the rerun's exact env and width to the real native campaign entrypoint.
+        module = runpy.run_path(str(Path(cloud.__file__).with_name('run-bench-campaign.py')))
+        namespace = module['main'].__globals__
+        owned = []
+
+        def start_shared_inventory(*_args, **_kwargs):
+            owned.append('inventory')
+            return None, None, Path(tmp) / 'inventory'
+
+        def start_shared_relay(*_args, **_kwargs):
+            # The relay owns the campaign's private, joined flyctl agent (FLY_AGENT_SOCKET_PATH).
+            owned.append('relay')
+            raise RuntimeError('fixture stops before any controller or provider call')
+
+        with tempfile.TemporaryDirectory(dir=os.environ.get('TMPDIR')) as tmp:
+            root = Path(tmp)
+            env.pop('CLOUDBENCH_CAMPAIGN_SHARED_RELAY', None)  # the native default (relay on, Linux)
+            arguments = ['campaign', '--root', str(root), '--runs', '1', '--concurrency', '1',
+                         '--retry-infra', '0', '--task=agent-payment-idempotent-abandonment']
+            replacements = dict(campaign_workspace=lambda r, _forward: (r, None),
+                                provider_capacity_refusal=lambda _n: None, scorecard_hooks=lambda: None,
+                                start_shared_inventory=start_shared_inventory,
+                                start_shared_relay=start_shared_relay,
+                                stop_shared_inventory=lambda *_a: True,
+                                publish_campaign_group=lambda *_a, **_kw: True,
+                                join_native_hubs=lambda *_a: True)
+            campaign_env = {**env, 'RUN_BENCH_CAMPAIGN_ROOT': str(root / 'campaigns'),
+                            'RUN_BENCH_CAMPAIGN_ID': 'width-one-rerun',
+                            'BENCHMARK_HUB_GROUP_RUN_ID': '', 'BENCHMARK_HUB_PARENT_RUN_ID': ''}
+            with patch.dict(namespace, replacements), patch.object(sys, 'argv', arguments), \
+                    patch.dict(os.environ, campaign_env, clear=True):
+                module['main']()
+        self.assertEqual(owned, ['inventory', 'relay'],
+                         'a width-1 deploy campaign must own its inventory/relay (private Fly agent); '
+                         'otherwise flyctl starts the unowned per-HOME agent daemon that outlives it')
+
+    def test_a_clean_native_rerun_failure_stays_a_verified_fail(self):
+        result, _launches = self.run_first_failure_then_rerun((False, False, False))
+        self.assertEqual(result['cases']['agent-payment-idempotent-abandonment'], 'FAIL')
+        self.assertEqual(result['cases']['chat-mode'], 'PASS')
+        self.assertIsNone(result['rerun']['reason'])
+        self.assertTrue(result['complete'])
+        self.assertTrue(result['cleanup_complete'])
+
+    def test_a_genuinely_lingering_rerun_stays_unverified_with_its_exact_cause(self):
+        for flags, cause in (((False, False, True), 'left a lingering process'),
+                             ((True, False, False), 'timed out'),
+                             ((False, True, False), 'was cancelled')):
+            with self.subTest(cause=cause):
+                result, _launches = self.run_first_failure_then_rerun(flags)
+                self.assertEqual(result['rerun']['cases'], {'agent-payment-idempotent-abandonment': 'UNVERIFIED'})
+                self.assertIn(cause, result['rerun']['reason'])
+                self.assertNotIn('source changed', result['rerun']['reason'])
+                self.assertFalse(result['complete'])
+                self.assertFalse(result['cleanup_complete'])
+                # A rerun never upgrades the first native failure.
+                self.assertEqual(result['cases']['agent-payment-idempotent-abandonment'], 'FAIL')
+
+
 if __name__ == '__main__':
     unittest.main()

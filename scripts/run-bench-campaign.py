@@ -2017,7 +2017,11 @@ def main() -> int:
             not stop_signal
             and not deadline_expired()
             and not startup_expired()
-            and args.concurrency > 1
+            # A width-1 campaign normally skips the shared feed. Without the relay, its lone
+            # controller's flyctl starts the unowned per-HOME `flyctl agent` daemon, which outlives
+            # the campaign. Owned callers (the /deploy smoke adapter, whose single same-source rerun
+            # has width 1) ask for the owned inventory, relay and private agent at any width.
+            and (args.concurrency > 1 or os.environ.get("CLOUDBENCH_CAMPAIGN_OWNED_TRANSPORT") == "1")
             and not all_production_only
             and os.environ.get("CLOUDBENCH_CAMPAIGN_SHARED_INVENTORY", "1") == "1"
         ):
