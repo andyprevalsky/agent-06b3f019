@@ -163,6 +163,39 @@ scenario reproduces this exact error; with 4 it passes.
   session-id prefix would be a string-matching classifier. Tilion support received
   the dead-worker evidence.
 
+## Related benchmark outcome
+
+`agent-payment-setup-resume` (FLAKY occurrence `9a4a72a77dab428bb30648ea04b25e6a`,
+quarantined by `dd4b27a38`) shared this cause. In the PR #1972 smoke on `f93b9ad17f`,
+agent `49ff2c32` ended `Timeout after 901s (task timeout=900s)` with the agent still
+`ACTIVE`. Every one of its five browser agents (04:13–04:18Z) died with `Browser
+session init failed after 5 transient-proxy retries: Browser initialization failed
+before readiness`, and the root then retried and diagnosed until the cap.
+`agent-payment-idempotent-abandonment` (`9a3babcc`) and `agent-payment-abandonment`
+(`8d781844`) in the same round show the same signature (225 and 221
+`before readiness` hits, respectively). Across the prod Hub, the setup-resume and
+idempotent-abandonment failures cluster from 2026-11-13T00Z (0–1 per hour on
+11-12, 3–10 per hour on 11-13 01–05Z).
+
+Exact command `bash scripts/run-bench agent-payment-setup-resume --runs 1
+--concurrency 1 --retry-infra 0 --ref <sha>`:
+
+- Buggy main `5fecafd337` (fleet run `20261113-064551-4062264`, agent `21c99d70`):
+  PASS but 530.7 s. The guest hit `sess_993d70` and logged `Failed to resume session`
+  five times, then the root recovered checkout through a new browser agent. That is
+  the same mechanism without crossing 900 s; the 2026-11-13 Hub sample of 510 runs had
+  a p50 of 202 s.
+- Fixed main `7d3fc34cac` (`--runs 5`, campaign `campaign-20261113-084219-1260968`):
+  5/5 PASS in 249.0, 217.4, 224.9, 311.2 and 232.1 s, with cleanup verified on
+  every fleet. Three of the five runs hit `sess_993d70`. In run
+  `20261113-084241-1265574` (agent `b8d3f38c`), `POST /api/browser-session/resume`
+  created on the dead worker twice (`failed validation; creating another
+  released=false`), placed the third create on `sess_c3d0eb`, and returned 200 in
+  36.4 s. A second resume did the same in 21.2 s.
+- An east probe at 2026-11-13T09:05Z still placed 2 of 9 direct creates on
+  `sess_993d70`: GET and DELETE returned 503 from `awselb/2.0`. The worker remained
+  in rotation while the fixed runs passed.
+
 ## Human feedback
 
 None recorded.
