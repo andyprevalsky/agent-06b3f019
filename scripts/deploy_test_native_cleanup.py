@@ -318,7 +318,9 @@ def stopped_inert_execution(fleet, root, receipt, proof, row, token, evidence, p
     helper = bound(root / 'scripts/cloudbench-original-volume-capture.py')
     # Reviewed 2026-11-11 (PR #1927): BILLING_GUEST is byte-identical to the ddde11af producer; the helper
     # changed only in host-side capture validation (regular_bytes, verify_capture, cross_check_receipts).
-    need(hashlib.sha256(helper).hexdigest() == '7622b415d3b300219a2f17bb1dad1ea723fac037220fcab0d89519461018eb06',
+    # Reviewed 2026-11-13 (PR #1990): BILLING_GUEST still byte-identical; only host-side admission changed
+    # (well-formed services isolated by default, provenance services_isolated, restore/next-step hints).
+    need(hashlib.sha256(helper).hexdigest() == '90831a30a1341a2e52ef684430f4ee01da5d49a9475752cb6c82c48082f8ee71',
          'stopped inert guest producer changed')
     source = next(ast.literal_eval(node.value) for node in ast.parse(helper).body
                   if isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == 'BILLING_GUEST'
