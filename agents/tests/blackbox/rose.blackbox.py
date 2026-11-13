@@ -13327,6 +13327,42 @@ async def test_lease_heartbeat_restores_usage_after_failed_delivery():
     usage.clear()
 
 
+
+async def test_agent_loop_lease_usage_heartbeat_names_its_login():
+    """call_llm builds its lease contexts without an integration id; the usage heartbeat
+    must still name the login (credential fingerprint) or the backend drops the snapshot."""
+    from helpers.llm import _build_claude_auth_context, _build_gpt_auth_context, credential_fingerprint
+    from providers.rose import subscription_usage as usage
+
+    usage.clear()
+    heartbeats: list[dict] = []
+
+    def handler(req):
+        if "token/lineage-heartbeat" in str(req.url):
+            heartbeats.append(json.loads(req.content))
+            return httpx.Response(200, json={"ok": True, "updated": 1, "usageRecorded": True})
+        return httpx.Response(500, text="unexpected route")
+
+    set_mock_handler(handler)
+    # The exact construction call_llm uses (helpers/llm.py): no integration_id.
+    common = {"source": "user", "user_id": "user-loop", "pool_token_id": None, "lineage_key": "lineage-loop",
+              "agent_id": "agent-loop", "root_agent_id": "agent-loop", "demo_cache_affinity_key": None}
+    claude = _build_claude_auth_context("claude-loop-token", **common)
+    gpt = _build_gpt_auth_context("gpt-loop-token", account_id="acct-loop", **common)
+    snapshot = {"observedAt": "2026-11-13T11:27:15Z", "fiveHour": {"usedPct": 2.0, "resetsAt": "2026-11-13T14:10:00Z"},
+                "sevenDay": {"usedPct": 17.0, "resetsAt": "2026-11-18T19:00:00Z"}, "source": "response",
+                "status": "allowed"}
+    for ctx in (claude, gpt):
+        assert ctx is not None and ctx.heartbeat_lease is not None, ctx
+        usage.record(ctx.token, snapshot)
+        await ctx.heartbeat_lease(ctx)
+    assert [h.get("credential") for h in heartbeats] == [
+        credential_fingerprint("claude-loop-token"),
+        credential_fingerprint("gpt-loop-token"),
+    ], heartbeats
+    assert all(h["usage"] == snapshot and "integrationId" not in h for h in heartbeats), heartbeats
+    usage.clear()
+
 def _usage_backend_handler(captured: dict, provider_response):
     def handler(req):
         url = str(req.url)
@@ -13556,6 +13592,7 @@ async def run_all_tests():
     await r.record_async(
         "lease_heartbeat_restores_usage_after_failed_delivery",
         test_lease_heartbeat_restores_usage_after_failed_delivery,
+        test_agent_loop_lease_usage_heartbeat_names_its_login,
     )
     await r.record_async(
         "claude_429_usage_flushed_authoritative_cooldown",

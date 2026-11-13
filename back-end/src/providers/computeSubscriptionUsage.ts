@@ -16,6 +16,11 @@
  *   cooldown      Integration.rateLimitedUntil + rateLimitReason + rateLimitAuthoritative
  *   nextResetAt   earliest future reset of a spent window, else an authoritative cooldown
  *
+ * A heartbeat that cannot name its login (the agent loop's lease carries no
+ * integration id) names its token by credential fingerprint instead: the
+ * lease's own user rows are matched against it (computeLoginFailure
+ * resolveUserLoginByCredential), never another user's rows.
+ *
  * 10k agents: one PK read of the lease plus one conditional UPDATE per
  * heartbeat that carries a snapshot. The UPDATE matches only when the row's
  * stored observation is older than USAGE_WRITE_MIN_INTERVAL_MS, so a busy
@@ -59,7 +64,10 @@ export interface UsageWindowReport {
 }
 
 export interface SubscriptionUsageReport {
+  /** The login that served the lease; '' when only `credential` names it. */
   integrationId: string;
+  /** Fingerprint of the token the agent held (codeLoginRejection credentialFingerprint). */
+  credential?: string;
   observedAt: Date;
   fiveHour?: UsageWindowReport | null;
   sevenDay?: UsageWindowReport | null;
@@ -121,6 +129,9 @@ export function parseUsagePayload(
   };
 }
 
+/** parseUsagePayload's placeholder for a report its credential names (never stored). */
+const UNNAMED_LOGIN = 'unnamed-login';
+
 /**
  * The optional `integrationId` + `usage` fields of a heartbeat body. Returns
  * null when the body carries no usable snapshot; a malformed snapshot is
@@ -131,7 +142,12 @@ export function parseSubscriptionUsageReport(
   now = new Date()
 ): SubscriptionUsageReport | null {
   const integrationId = typeof body.integrationId === 'string' ? body.integrationId.trim() : '';
-  return parseUsagePayload(body.usage, integrationId, now);
+  if (integrationId !== '') return parseUsagePayload(body.usage, integrationId, now);
+  // No login id: a token fingerprint still names it within the lease's own rows.
+  const credential = typeof body.credential === 'string' ? body.credential.trim() : '';
+  if (!/^[0-9a-f]{16}$/.test(credential)) return null;
+  const report = parseUsagePayload(body.usage, UNNAMED_LOGIN, now);
+  return report === null ? null : { ...report, integrationId: '', credential };
 }
 
 function integrationNameForTokenType(tokenType: string): 'claude_code' | 'gpt_code' | null {
@@ -183,7 +199,8 @@ async function applyUsageReport(
 export async function recordSubscriptionUsage(
   lineageKey: string,
   report: SubscriptionUsageReport,
-  now = new Date()
+  now = new Date(),
+  resolveLogin: ResolveUserLogin = async () => null
 ): Promise<boolean> {
   const lease = await prisma.computeTokenLineageLease.findUnique({
     where: { lineageKey },
@@ -199,16 +216,34 @@ export async function recordSubscriptionUsage(
   const name = integrationNameForTokenType(lease.tokenType);
   if (name === null) return false;
   let owner: { id: string } | { userId: string };
+  let integrationId = report.integrationId;
   if (lease.tokenSource === 'pool') {
-    if (lease.tokenIdentity !== report.integrationId) return false;
+    // A pool lease names its own row; a report may only confirm it.
+    if (integrationId === '') integrationId = lease.tokenIdentity;
+    if (lease.tokenIdentity !== integrationId) return false;
     owner = { id: lease.tokenIdentity };
   } else if (lease.tokenSource === 'user') {
     owner = { userId: lease.tokenIdentity };
+    if (integrationId === '') {
+      const resolved =
+        report.credential === undefined
+          ? null
+          : await resolveLogin(lease.tokenType, lease.tokenIdentity, report.credential);
+      if (resolved === null) return false;
+      integrationId = resolved;
+    }
   } else {
     return false;
   }
-  return applyUsageReport({ name, ...owner }, report);
+  return applyUsageReport({ name, ...owner }, { ...report, integrationId });
 }
+
+/** The user's login (Integration id) whose stored token has this fingerprint, or null. */
+export type ResolveUserLogin = (
+  tokenType: string,
+  userId: string,
+  credential: string
+) => Promise<string | null>;
 
 /**
  * Store a snapshot measured outside a lease (the Claude usage endpoint, a code

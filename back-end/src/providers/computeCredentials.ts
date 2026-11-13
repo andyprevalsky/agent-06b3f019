@@ -9,6 +9,7 @@ import { createLogger } from './logger';
 import { recordSubscriptionUsage, type SubscriptionUsageReport } from './computeSubscriptionUsage';
 import { rememberSubscriptionCredential } from './rose/subscriptionUsage';
 export { classifyReportedLogin, markComputeTokenUnavailable } from './computeLoginFailure';
+import { resolveUserLoginByCredential } from './computeLoginFailure';
 export {
   __clearGptApiKeyCooldownCache,
   __resetGptApiKeyCooldown,
@@ -576,7 +577,10 @@ export async function heartbeatComputeTokenLineage(
     where: { lineageKey: trimmed, releasedAt: null },
     data: { lastUsedAt: new Date() },
   });
-  const usageRecorded = usage !== null ? await recordSubscriptionUsage(trimmed, usage) : false;
+  const usageRecorded =
+    usage !== null
+      ? await recordSubscriptionUsage(trimmed, usage, new Date(), resolveUserLoginByCredential)
+      : false;
   return { ok: result.count > 0, updated: result.count, usageRecorded };
 }
 

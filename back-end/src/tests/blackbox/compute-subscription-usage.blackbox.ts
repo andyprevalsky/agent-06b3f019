@@ -22,6 +22,8 @@
  *   - the cooldown is returned with the account: why, whether the provider gave
  *     its reset, and nextResetAt only for a provider reset (never Rose's backoff)
  *   - a user cooldown that names no login never lands on sibling accounts
+ *   - the agent loop's lease (no integration id) names its login by credential
+ *     fingerprint; usage lands on that login only, never a sibling or another user's
  *   - a code session's rate_limit_event usage lands on the task's login
  *   - the backend's own Rose completions (chat path: fetchChatComputeAuth →
  *     callWithChatComputeRotation → createStreamingCompletion) record the
@@ -43,6 +45,7 @@ import {
 } from '../../providers/computeSubscriptionUsage';
 import { assertLocalDatabase } from './assertLocalDatabase';
 import { registerChatPathCases } from './compute-subscription-usage.chat.cases';
+import { registerLeaseUsageCases } from './compute-subscription-usage.lease.cases';
 import { registerUsageRefreshCases } from './compute-subscription-usage.refresh.cases';
 
 // The chat-path cases run Rose in this process and write Integration rows.
@@ -469,6 +472,17 @@ registerUsageRefreshCases({
   run: RUN,
   baseUrl: BASE_URL,
   chatUsers,
+  integrationType: TYPE,
+});
+
+registerLeaseUsageCases({
+  test,
+  listAccounts,
+  run: RUN,
+  baseUrl: BASE_URL,
+  apiKey: API_KEY,
+  chatUsers,
+  leases,
   integrationType: TYPE,
 });
 
