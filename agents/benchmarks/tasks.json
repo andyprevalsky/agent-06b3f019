@@ -8260,7 +8260,7 @@
     "name": "agent-payment-test-shop",
     "quarantine": {
       "since": "2026-11-13",
-      "repair": "pending-handoff:c59d68b1a2e74f31b0f062b2536439b2",
+      "repair": "https://boxes.dev/thread/thr_ee0cd695655e47e1aa41b8c546583888",
       "error": "Timeout after 905s (task timeout=900s)",
       "evidence": "PR #2015 deploy 43a856b49 smoke: browser resume hit Tilion east dead worker sess_993d70* ('Failed to resume session: Tilion session sess_993d7086307a426dbe17da00b29f0f8d failed validation and cleanup', agent 23abff70), respawned and ran out the 900s budget; same-source rerun PASSED (FLAKY c59d68b1). NOT_INTRODUCED: task is not chat mode and #2015 changes only the chat router schema order; dead-worker resume fixed by PR #2010 (7d3fc34ca)"
     },
