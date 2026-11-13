@@ -20,10 +20,11 @@ tags:
   - payment-benchmark
   - rate-limit
 sources:
+  - PR #1975 smoke round 6b (devbox 6253baf7, run 20261113-012150-2086617, job r001-j0007 agent-payment-test-shop)
   - PR #1813
   - PR #1786 deploy attempt 4, smoke campaign deploy-cloud/604a576acbf1c746c131fe58ef25977da4cad6fa81cd612760fc5c2fb16f7bd9
   - commit 34fd7d036b165e235a02a05197a4ddc00f6bc46e (failed source)
-repro: cd back-end && env -u FLY_APP_NAME npx tsx src/tests/unit/agentcard-benchmark-float.test.ts, plus test_agentcard_setup_retries_only_the_structured_org_rate_limit and test_abandon_retries_typed_org_auth_rejection_after_reconciling in agents/tests/blackbox/benchmark.blackbox.py; on the pre-fix behaviour the first verifyBenchmarkOrgFixture call rejects with "AgentCard Organization MCP list_cardholders failed: Invalid or expired organization token", and the KYC case reports "Missing expected rejection"; both pass on the fix
+repro: cd back-end && env -u FLY_APP_NAME npx tsx src/tests/unit/agentcard-benchmark-float.test.ts (and, for the 2026-11-13 recurrence, src/tests/unit/agentcard-benchmark-float-burst.test.ts), plus test_agentcard_setup_retries_only_the_structured_org_rate_limit and test_abandon_retries_typed_org_auth_rejection_after_reconciling in agents/tests/blackbox/benchmark.blackbox.py; on the pre-fix behaviour the first verifyBenchmarkOrgFixture call rejects with "AgentCard Organization MCP list_cardholders failed: Invalid or expired organization token", and the KYC case reports "Missing expected rejection"; both pass on the fix
 status: mitigated
 ---
 
@@ -104,6 +105,27 @@ guest and `agent-payment-setup-resume`; the remaining job (`agent-payment-abando
 stall, recorded as a skip and never a pass. Status stays `mitigated`: the provider 401/throttle's origin is unexplained.
 
 Golden reference: not applicable (no approval-gated hunk).
+
+## Recurrence 2026-11-13 (PR #1975 smoke round 6b): why the earlier fix did not hold
+
+Guest `agent-payment-test-shop` began seeding at 01:31:42Z. `list_cardholders` got two 429s at
+01:31:46–47Z, then the provider's 401 throttle answer ("Invalid or expired organization token").
+`waitOutBenchmarkOrgBackpressure` made all four passes (01:31:42, 01:32:30, 01:33:08, 01:33:53Z),
+each re-hitting 429/401, and gave up at 01:34:00Z. That was only ~138 s into its 180 s window,
+because the fixed 30 s gaps exhausted the 1 + 3 attempt count early. The org's last 401 in
+production Render logs was at 01:34:02Z, so the burst ended seconds after the fixture quit. The
+guest failed before the start barrier, and the campaign INFRA-stopped at 1/11. The earlier fix
+bounded the count and the window but spaced the attempts for a 60 s rate window, not for a
+multi-minute throttle burst. PR #1994 found that AgentCard answers a throttled request with 401 and
+that replays extend the throttle.
+
+Fix: the same 1 + 3 attempts and the same 180 s cap, with growing gaps (30 s, 45 s, 60 s), so the
+last attempt lands near the end of the window instead of ~50 s early. There are no extra provider
+requests and no longer deadline. `agentcard-benchmark-float-burst.test.ts` replays a 140 s and a
+160 s burst on a virtual clock: it fails on main with the provider 401 and passes with the fix.
+A second occurrence had the same shape. PR #1994's round-1 smoke guest `browser-auth-guest-purchase` saw its first 429 at 01:02:36Z, used all 1 + 3 passes and gave up at 01:04:46Z, ~115 s into the window. The sandbox throttle ended ~01:04:43Z for all six payment guests. That guest's first call was already a 429, so the load came from other concurrent consumers of the shared sandbox client; production's client stayed clean.
+Status stays `mitigated`: a burst longer than the 180 s window still fails the fixture, and the
+throttle's origin (shared org-wide budget) is unexplained.
 
 ## Human feedback
 

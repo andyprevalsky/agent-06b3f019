@@ -534,7 +534,11 @@ async function main(): Promise<void> {
     assert.equal(fixture.cardholderId, 'ch-ready');
     assert.equal(fixture.cardholderVerificationStatus, 'verified');
     assert.equal(fixture.sandboxFloat.availableCents, 200_000);
-    assert.deepEqual(sleeps, [30_000, 30_000], 'backpressure waits out the shared window');
+    assert.deepEqual(
+      sleeps,
+      [30_000, 45_000],
+      'backpressure waits out the shared window with growing gaps'
+    );
 
     // A sustained outage stays bounded and surfaces the provider's own error.
     let outageCalls = 0;
@@ -556,7 +560,11 @@ async function main(): Promise<void> {
         /Invalid or expired organization token/.test(error.message)
     );
     assert.equal(outageCalls, 4, 'one initial attempt plus three bounded retries');
-    assert.deepEqual(outageSleeps, [30_000, 30_000, 30_000]);
+    assert.deepEqual(
+      outageSleeps,
+      [30_000, 45_000, 60_000],
+      'the same retries span the 180 s window'
+    );
 
     // A real fixture defect is not backpressure and must fail on the first pass, with no wait.
     let defectSleeps = 0;
