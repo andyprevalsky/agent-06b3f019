@@ -2431,8 +2431,16 @@ def clean_isolated_successor(state, prior, original, successor, renewal_witness=
          'successor original isolation binding')
     custody = {k: v for k, v in skips.items() if v.get('disposition') == 'NO_RETRY_CUSTODY'}
     import deploy_test_historical_custody as h
-    known = {row['check'].split('/', 1)[1] for row in h.known(state, root).values()
-             if row['gate'] == gate['name']}
+    known_rows = [row for row in h.known(state, root).values() if row['gate'] == gate['name']]
+    known = {row['check'].split('/', 1)[1] for row in known_rows}
+    # Custody first recorded by this successor's own result cannot have been skipped by it:
+    # the successor executed that check and its failure created the custody.
+    own_rows = [row for row in known_rows
+                if row.get('source') == successor['source']
+                and row.get('worker_result') == str(folder / 'result.json')
+                and row['check'].split('/', 1)[1] in checks]
+    own_custody = {row['check'].split('/', 1)[1] for row in own_rows}
+    own_ids = {row['id'] for row in own_rows}
     if custody or known:
         import deploy_test_cycle as c
         # Discover authority from the canonical ledger, never an incoming skip label.
@@ -2440,7 +2448,7 @@ def clean_isolated_successor(state, prior, original, successor, renewal_witness=
         current = h.binding(state['plan'], root)
         need(current == {k: state.get(k) for k in current}, 'successor current custody inputs')
         qualified = h.guard(state, gate, root, legacy_current, current=current)
-        need(set(qualified) == set(custody), 'successor current custody inventory')
+        need(set(qualified) - own_custody == set(custody), 'successor current custody inventory')
     if custody:
         legacy = {k: v for k, v in skips.items() if k not in custody}
         bindings = [v.get('current_binding') for v in custody.values()]
@@ -2457,11 +2465,19 @@ def clean_isolated_successor(state, prior, original, successor, renewal_witness=
                       ('historical_custody_history', 'historical_custody_import',
                        'historical_custody_transfers', 'failures', 'pending_post_merge',
                        'resource_warnings', 'superseded_resource_warnings') if k in state}
+        # Rebuild admission time: custody first recorded by this successor's own failure did not exist yet.
+        if own_ids:
+            projection['failures'] = [f for f in projection.get('failures', []) if f.get('id') not in own_ids]
+            if 'historical_custody_history' in projection:
+                projection['historical_custody_history'] = [
+                    r for r in projection['historical_custody_history']
+                    if r.get('original_failure', {}).get('id') not in own_ids]
         projection.update(copy.deepcopy(admitted))
         projection['historical_no_retry_custody'] = [
             {k: copy.deepcopy(v) for k, v in custody[r['original_failure']['check'].split('/', 1)[1]].items()
              if k != 'source'} if r['original_failure']['gate'] == gate['name'] else copy.deepcopy(r)
-            for r in state.get('historical_no_retry_custody', [])]
+            for r in state.get('historical_no_retry_custody', [])
+            if r['original_failure'].get('id') not in own_ids]
         need(h.state_identity(projection) == request.get('custody_state_sha256'),
              'successor custody identity projection')
         historical = h.guard(projection, admitted_gate, root, legacy, current=admitted)
@@ -2475,7 +2491,7 @@ def clean_isolated_successor(state, prior, original, successor, renewal_witness=
             need(renewal_witness is not None, 'historical successor runtime witness required')
             historical_successor_runtime(root, admitted_gate, request, binding)
             runtime_bound = True
-        need(authority(qualified) == authority(custody)
+        need(authority({k: v for k, v in qualified.items() if k not in own_custody}) == authority(custody)
              and checks == [k for k in admitted_gate['checks'] if k not in skips]
              and runtime_bound
              and isinstance(request.get('custody_child_environment'), str)

@@ -7123,6 +7123,43 @@ class Cycle(unittest.TestCase):
         same = copy.deepcopy(state); c.reconcile(state, original['token'], incoming); self.assertEqual(same, state)
         self.assertEqual(files, {p:c.sha_file(p) for p in files})
 
+    def test_clean_successor_custody_created_by_its_own_failure_is_not_required_skipped(self):
+        # PR #1865 2026-11-13: round 67 smoke (the renewal successor) failed a payment task and that
+        # FAIL became new historical custody; renewal then demanded the successor had skipped it.
+        import deploy_test_historical_custody as h
+        state, original, proof, gate, folder, successor = self.custody_clean_successor_state()
+        executed = c.read(folder/'request.json')['checks'][0]
+        real_known, real_guard = h.known, h.guard
+        prior_custody = {k: v for k, v in c.read(folder/'request.json')['skips'].items()
+                         if v.get('disposition') == 'NO_RETRY_CUSTODY'}
+        def with_own(worker_result):
+            failure = dict(id='own', gate=gate['name'], check=gate['name'] + '/' + executed, native_result='FAIL',
+                           source=copy.deepcopy(successor['source']), worker_result=worker_result)
+            candidate = copy.deepcopy(state)
+            candidate['failures'] = [*candidate['failures'], failure]
+            return candidate, failure
+        def known(state_, root):
+            rows = dict(real_known({**state_, 'failures': [f for f in state_['failures'] if f['id'] != 'own']}, root))
+            rows.update({f['id']: f for f in state_['failures'] if f['id'] == 'own'})
+            return rows
+        def guard(state_, *args, **kwargs):
+            if any(f['id'] == 'own' for f in state_.get('failures', [])):
+                return {**prior_custody, executed: copy.deepcopy(next(iter(prior_custody.values())))}
+            return real_guard(state_, *args, **kwargs)
+        incoming = dict(proof, validation_source=copy.deepcopy(state['source']))
+        accepted, _ = with_own(str(folder/'result.json'))
+        with patch.object(h, 'known', known), patch.object(h, 'guard', guard):
+            c.reconcile(accepted, original['token'], incoming)
+        self.assertFalse(accepted['reconciled_owners'][proof['receipt_sha256']]['credit_granted'])
+        self.assertIn('own', [f['id'] for f in accepted['failures']])  # the new custody itself is retained
+        # The same custody from any other result is still required in the successor's skips.
+        refused, _ = with_own(str(folder.parent/'elsewhere/result.json'))
+        unchanged = copy.deepcopy(refused)
+        with patch.object(h, 'known', known), patch.object(h, 'guard', guard):
+            with self.assertRaisesRegex(ValueError, 'custody inventory'):
+                c.reconcile(refused, original['token'], incoming)
+        self.assertEqual(unchanged, refused)
+
     def test_clean_successor_custody_authenticates_distinct_refresh_inputs(self):
         import deploy_test_historical_custody as h
         state, original, proof, gate, folder, successor = self.custody_clean_successor_state()
