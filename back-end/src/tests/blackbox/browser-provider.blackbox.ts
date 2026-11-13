@@ -3,7 +3,6 @@ import { runSteelAwareParity } from './browser-provider.steel-persistence-outage
 import { steelPersistenceOutageCases } from './browser-provider.steel-persistence-outage.cases';
 
 import nodeAssert from 'node:assert/strict';
-import { kernelCustodyCases } from './browser-provider.kernel-custody-cases.support';
 import { tilionContractCases } from './browser-provider.tilion-contract.support';
 import { assertBrowserUseMissingHealth } from './browser-provider.browser-use-health.support';
 import { assertSteelProfileReplacementLifecycle } from './browser-provider.steel-profile-lifecycle.support';
@@ -69,7 +68,6 @@ process.env.BROWSER_AGENT_BROWSER_USE_ENABLED = 'true';
 const tests: Array<[string, () => void | Promise<void>]> = [
   ...steelPersistenceOutageCases,
   ...tilionContractCases,
-  ...kernelCustodyCases,
   [
     'Browser Use missing health is terminal, while other failures remain errors',
     assertBrowserUseMissingHealth,

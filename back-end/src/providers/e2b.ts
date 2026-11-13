@@ -27,6 +27,7 @@ import {
   CLAUDE_CREDENTIAL_ENV_KEYS,
   codeSessionBranchEnvs,
   codeSandboxUserId,
+  wsServerRunOptions,
   codeSessionTaskFields,
   type CodeAgentSessionResult,
   createLocalCodeSessionFallback,
@@ -120,14 +121,17 @@ export async function createClaudeCodeSession(
   fastModeCacheEnabled?: boolean,
   options: ClaudeCodeSessionOptions = {}
 ): Promise<CodeAgentSessionResult> {
-  return createClaudeCodeSessionUnlocked(
-    agentId,
-    goal,
-    attachments,
-    githubRepoUrl,
-    userId,
-    fastModeCacheEnabled,
-    options
+  // Serialize creates — concurrent reserve-script calls stampede E2B redis.
+  return withClaudeCodeCreateSlot(() =>
+    createClaudeCodeSessionUnlocked(
+      agentId,
+      goal,
+      attachments,
+      githubRepoUrl,
+      userId,
+      fastModeCacheEnabled,
+      options
+    )
   );
 }
 
@@ -460,13 +464,7 @@ async function createClaudeCodeSessionUnlocked(
   // Filesystem snapshots default commands to root; the coding harness requires
   // the user account and its home even when the source template defaulted to user.
   sandbox.commands
-    .run('node /home/user/ws-server.mjs', {
-      user: 'user',
-      cwd: '/home/user',
-      background: true,
-      timeoutMs: 0,
-      envs: { ...sessionEnvs, HOME: '/home/user' },
-    })
+    .run('node /home/user/ws-server.mjs', wsServerRunOptions(sessionEnvs))
     .catch((err) =>
       log.error('Failed to start WS server', {
         error: err instanceof Error ? err.message : String(err),
@@ -675,13 +673,7 @@ export async function createCodexCodeSession(
 
   // Filesystem snapshots do not preserve the base template's default command user.
   sandbox.commands
-    .run('node /home/user/ws-server.mjs', {
-      user: 'user',
-      cwd: '/home/user',
-      background: true,
-      timeoutMs: 0,
-      envs: { ...sessionEnvs, HOME: '/home/user' },
-    })
+    .run('node /home/user/ws-server.mjs', wsServerRunOptions(sessionEnvs))
     .catch((err) =>
       log.error('Failed to start Codex WS server', {
         error: err instanceof Error ? err.message : String(err),

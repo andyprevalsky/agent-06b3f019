@@ -136,6 +136,21 @@ class Freeze(Repo):
         self.assertEqual(calls[-1][4], d.head())
         self.assertIn('committed=1', out)
 
+    def test_commits_an_already_staged_deletion_with_other_edits(self):
+        (self.root / 'gone.py').write_text('y = 1\n')
+        sh('git', 'add', 'gone.py', cwd=self.root)
+        sh('git', 'commit', '-qm', 'add gone', cwd=self.root)
+        sh('git', 'rm', '-q', 'gone.py', cwd=self.root)
+        (self.root / 'app.py').write_text('x = 4\n')
+        (self.root / 'new.py').write_text('z = 1\n')
+        with patch.object(d, 'cmd_fix', return_value=0), patch.object(d, 'run', return_value=0):
+            code, out, _ = self.call(d.cmd_freeze, base='origin/main', message='staged deletion')
+        self.assertEqual(code, 0)
+        self.assertEqual(sh('git', 'status', '--porcelain', cwd=self.root), '')
+        changed = sh('git', 'show', '--name-status', '--format=', 'HEAD', cwd=self.root).split('\n')
+        self.assertEqual(sorted(filter(None, changed)), ['A\tnew.py', 'D\tgone.py', 'M\tapp.py'])
+        self.assertIn('committed=3', out)
+
     def test_stops_when_fix_fails(self):
         with patch.object(d, 'cmd_fix', return_value=1), patch.object(d, 'run') as runner:
             code, _, err = self.call(d.cmd_freeze, base='origin/main', message='x')
