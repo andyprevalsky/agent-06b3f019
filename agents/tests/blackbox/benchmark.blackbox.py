@@ -3640,6 +3640,77 @@ async def test_agentcard_setup_retries_transient_upstream_failure():
         assert calls == [409]
 
 
+async def test_agentcard_setup_retries_a_timed_out_idempotent_attempt():
+    """Regression (PR #2005 smoke round 4, 2026-11-13): agent-payment-idempotent-abandonment's second
+    setup POST rode out an AgentCard org 429/401 storm inside the backend (list_cardholders attempts
+    1..5) and answered after 31.5 s, past the client's unchanged 30 s request bound. The ReadTimeout
+    escaped the setup retry loop, the task ERRORed before any agent existed and the whole smoke
+    campaign INFRA-stopped. Every setup action is idempotent, so a timed-out attempt spends one of
+    the same scheduled retries as a 5xx; the request bound and the attempt count stay unchanged.
+    """
+    from unittest.mock import patch
+
+    import benchmarks.run_benchmark as bench
+
+    class FakeResponse:
+        status_code = 200
+        text = '{"status":"connected"}'
+
+        def json(self):
+            return {"status": "connected"}
+
+    def fake_client(outcomes):
+        calls = []
+
+        class FakeClient:
+            def __init__(self, timeout):
+                assert timeout == 30, "the per-request bound is unchanged"
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return None
+
+            async def post(self, url, *, headers, json):
+                outcome = outcomes[min(len(calls), len(outcomes) - 1)]
+                calls.append(outcome)
+                if outcome == "timeout":
+                    raise bench.httpx.ReadTimeout("")
+                return FakeResponse()
+
+        return FakeClient, calls
+
+    async def fake_headers():
+        return {"X-API-Key": "test"}
+
+    sleeps = []
+
+    async def fake_sleep(seconds):
+        sleeps.append(seconds)
+
+    with patch.object(bench, "_api_headers", fake_headers), patch.object(bench.asyncio, "sleep", fake_sleep):
+        client, calls = fake_client(["timeout", 200])
+        with patch.object(bench.httpx, "AsyncClient", client):
+            assert await bench.configure_benchmark_agentcard_setup("http://backend", "complete") == {
+                "status": "connected"
+            }
+        assert calls == ["timeout", 200]
+        assert sleeps == [bench.AGENTCARD_SETUP_RETRY_DELAYS_SECONDS[0]]
+
+        sleeps.clear()
+        client, calls = fake_client(["timeout"])
+        with patch.object(bench.httpx, "AsyncClient", client):
+            try:
+                await bench.configure_benchmark_agentcard_setup("http://backend", "prepare-residual")
+            except bench.httpx.ReadTimeout:
+                pass
+            else:
+                raise AssertionError("a timeout on every attempt must still fail the setup")
+        assert len(calls) == 1 + len(bench.AGENTCARD_SETUP_RETRY_DELAYS_SECONDS)
+        assert sleeps == list(bench.AGENTCARD_SETUP_RETRY_DELAYS_SECONDS)
+
+
 async def test_agentcard_setup_retries_only_the_structured_org_rate_limit():
     """2026-11-08 deploy smoke: prepare-residual returned the org-wide MCP throttle.
 
@@ -28594,6 +28665,10 @@ async def run_all_tests():
     await r.record_async(
         "agentcard_setup_retries_transient_upstream_failure",
         test_agentcard_setup_retries_transient_upstream_failure,
+    )
+    await r.record_async(
+        "agentcard_setup_retries_a_timed_out_idempotent_attempt",
+        test_agentcard_setup_retries_a_timed_out_idempotent_attempt,
     )
     await r.record_async(
         "agentcard_setup_retries_only_the_structured_org_rate_limit",

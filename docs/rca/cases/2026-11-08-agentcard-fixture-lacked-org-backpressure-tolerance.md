@@ -121,6 +121,20 @@ that replays extend the throttle.
 
 Fix: the same 1 + 3 attempts and the same 180 s cap. The first retry still waits 30 s, so short flaps recover quickly. Each later retry spreads the remaining window over the retries left (never under 30 s), so the last attempt starts at the end of the window however long each pass takes. There are no extra provider requests and no longer deadline. `agentcard-benchmark-float-burst.test.ts` replays 140, 160 and 175 s bursts with immediate and 10 s passes on a virtual clock. On main it fails (passes at 0, 30, 60, 90 s) with the provider 401, and it passes with the fix. A burst outlasting the window still surfaces the provider 401 after 4 passes. CodeRabbit flagged the first growing-gap draft (30/45/60 s) for immediate-failure passes, which led to this window-anchored schedule.
 A second occurrence had the same shape. PR #1994's round-1 smoke guest `browser-auth-guest-purchase` saw its first 429 at 01:02:36Z, used all 1 + 3 passes and gave up at 01:04:46Z, ~115 s into the window. The sandbox throttle ended ~01:04:43Z for all six payment guests. That guest's first call was already a 429, so the load came from other concurrent consumers of the shared sandbox client; production's client stayed clean.
+## Recurrence 2026-11-13 (PR #2005 smoke round 4): the harness side of the same gap
+
+`r001-j0009 agent-payment-idempotent-abandonment` saw its first setup POST return the structured
+401 and waited 30 s. Its second POST started at 07:25:41.787Z. Inside that one request the
+backend's org runtime retried a 429/401 storm (`list_cardholders` attempts 1–5) under its own
+retry budget and answered 401 at 07:26:13.290Z, after 31.5 s. The harness gives each setup POST
+30 s (`configure_benchmark_agentcard_setup`, `httpx.AsyncClient(timeout=30)`). The resulting
+`ReadTimeout` was not a typed retry state, so it escaped the loop. The task ERRORed before any
+agent existed, and the campaign INFRA-stopped at 1/13. Every setup action is idempotent, so a
+timed-out attempt now spends one of the same scheduled retries as a 5xx. The per-request bound and
+the attempt count are unchanged, and a timeout on every attempt still fails the setup.
+Regression: `agentcard_setup_retries_a_timed_out_idempotent_attempt` in the benchmark blackbox
+domain. It fails on 70681c8df with the escaped `ReadTimeout` and passes with the fix.
+
 Status stays `mitigated`: a burst longer than the 180 s window still fails the fixture, and the
 throttle's origin (shared org-wide budget) is unexplained.
 

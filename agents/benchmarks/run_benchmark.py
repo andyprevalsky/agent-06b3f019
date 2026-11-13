@@ -3951,14 +3951,27 @@ async def configure_benchmark_agentcard_setup(base_url: str, action: str) -> dic
     headers = await _api_headers()
     for attempt, retry_delay in enumerate((*AGENTCARD_SETUP_RETRY_DELAYS_SECONDS, None), start=1):
         async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.post(
-                f"{base_url}/api/test-payment/lifecycle/agentcard-setup",
-                headers=headers,
-                # The AgentCard integration must be reset/completed for the user the task actually runs
-                # as. Hardcoding the default benchmark user left the run user's integration untouched,
-                # so the setup fixture silently configured the wrong account.
-                json={"userId": _current_benchmark_user_id(), "action": action},
-            )
+            try:
+                resp = await client.post(
+                    f"{base_url}/api/test-payment/lifecycle/agentcard-setup",
+                    headers=headers,
+                    # The AgentCard integration must be reset/completed for the user the task actually
+                    # runs as. Hardcoding the default benchmark user left the run user's integration
+                    # untouched, so the setup fixture silently configured the wrong account.
+                    json={"userId": _current_benchmark_user_id(), "action": action},
+                )
+            except httpx.TimeoutException as timeout_error:
+                # The backend rides out an org 429/401 storm inside one request, with its own retry
+                # budget, so one request can outlast this unchanged per-request bound. Every action is
+                # idempotent, so a timed-out attempt spends one of the same retries as a 5xx.
+                if retry_delay is None:
+                    raise
+                print(
+                    f"    ⚠ AgentCard setup attempt {attempt} timed out; retrying in {retry_delay}s "
+                    f"({type(timeout_error).__name__})"
+                )
+                await asyncio.sleep(retry_delay)
+                continue
         if resp.status_code == 200:
             return resp.json()
         failure = f"Failed to {action} benchmark AgentCard setup: {resp.status_code} {resp.text[:300]}"
