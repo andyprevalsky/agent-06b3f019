@@ -8240,6 +8240,12 @@
   },
   {
     "name": "agent-payment-test-shop",
+    "quarantine": {
+      "since": "2026-11-13",
+      "repair": "pending-handoff:7ce7117df9eb4fb29508fffcf8f830b4",
+      "error": "Timeout after 903s (task timeout=900s) | Investigate: python agents/benchmarks/agent_latency.py f4cfe8de-e7f3-4d63-81c7-1cf01faea33f | Cache/cost: python agents/benchmarks/run_benchmark.py --compare <run.json> | Agent status: ACTIVE (expected COMPLETED) | Browser agent call_vldHINyYM6yyBdT2Uz8Xli6w recorded 0 trajectory step(s); expected at least 3 per browser agent",
+      "evidence": "PR #1975 deploy round 8 smoke on a679b1089c, occurrence 7ce7117df9eb4fb29508fffcf8f830b4 (agent f4cfe8de-e7f3-4d63-81c7-1cf01faea33f): Tilion session create HTTP 500 'Tilion session sess_993d7042... failed validation and cleanup', then 'Browser initialization failed before readiness' on every fresh-proxy retry (34x), browser agent 0 steps, 900s timeout; same-source rerun PASSED. Same Tilion signature in PR #1975 r7, #1981 r11, #2005 r2 and #1864 on 2026-11-13."
+    },
     "title": "Agent Payment Test Shop",
     "prompt": "Use a browser agent (spawn_agent with type=\"browser\" \u2014 do NOT delegate this to a general_purpose sub-agent) to go to {frontend_url}/test_payment and complete the visible Rose Labs Test Payment checkout. Buy exactly these 3 products and no others: Aurora Notebook, Ceramic Mug, and Canvas Tote.",
     "timeout_seconds": 900,
