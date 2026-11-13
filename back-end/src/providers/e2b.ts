@@ -29,7 +29,6 @@ import {
   codeSandboxUserId,
   codeSessionTaskFields,
   type CodeAgentSessionResult,
-  type ClaudeCodeSessionOptions,
   createLocalCodeSessionFallback,
   recordE2bCodeSessionSandbox,
   releaseSandboxAfterFailedRestore,
@@ -63,7 +62,7 @@ import {
   shouldSkipSandboxAnthropicGatewayForOauth,
 } from './claudeCodeSandboxAuth';
 export { createSandboxWithRetry, isTransientSandboxCreateError } from './e2bSandboxCreate';
-export type { CodeAgentSessionResult, ClaudeCodeSessionOptions } from './e2bCodeSessionSandbox';
+export type { CodeAgentSessionResult } from './e2bCodeSessionSandbox';
 export {
   closeClaudeCodeSession,
   connectToSandbox,

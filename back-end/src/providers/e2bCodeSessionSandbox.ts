@@ -83,15 +83,7 @@ export interface CodeAgentSessionResult {
   startup?: { wsReadyMs: number; cloneMs: number | null };
 }
 
-/** Persistent workspace and conversation controls for a Claude code spawn. */
-export interface ClaudeCodeSessionOptions {
-  /** Project restored into `~/workspace` before the CLI starts (PJ3 / C9). */
-  projectWorkspace?: ProjectWorkspace | null;
-  /** Persistent code session to resume or start (C1, C13). */
-  codeSession?: CodeSessionRow | null;
-  /** Keep the session's sandbox and files but start a new CLI conversation. */
-  freshConversation?: boolean;
-}
+export type { ClaudeCodeSessionOptions } from './codeSessionLaunchOptions';
 
 /** Sizing of a spawn (C16): the size it wants and the agent to attribute checkpoints to. */
 export interface SpawnSizing {
