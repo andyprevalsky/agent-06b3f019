@@ -21,6 +21,7 @@ export type RoseApp =
   | 'integrations'
   | 'benchmarks'
   | 'feedback'
+  | 'teams'
   | 'health'
   | 'settings';
 
