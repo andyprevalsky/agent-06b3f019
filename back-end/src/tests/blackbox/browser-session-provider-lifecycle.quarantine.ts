@@ -6,7 +6,7 @@ const providerLifecycle = {
   run: quarantine(
     {
       since: '2026-11-11',
-      repair: 'pending-handoff:2d9047dbcd51485cbefa5d3d6dae614a',
+      repair: 'https://boxes.dev/thread/thr_b1845257eacc4d5f971d93f96e7faf64',
       error:
         'Error: worker failed before ready: PrismaClientInitializationError: Too many database connections opened: FATAL: sorry, too many clients already',
       evidence:

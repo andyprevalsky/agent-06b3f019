@@ -8074,9 +8074,9 @@
   {
     "quarantine": {
       "since": "2026-11-13",
-      "repair": "https://boxes.dev/thread/thr_7ab578db49d2474cad54e3807e2c5220",
+      "repair": "https://boxes.dev/thread/thr_381f455399324e108a7a23c08f441082",
       "error": "Browser agent 0412e08f-d76d-53f8-836c-a01ca6d81ce4 recorded 0 trajectory step(s); expected at least 1 per browser agent || Timeout after 454s (task timeout=450s); browser agent recorded 0 trajectory step(s) (Tilion session failed validation and cleanup). First native attempt FAILED; one automatic retry PASS (FLAKY).",
-      "evidence": "Two FLAKY occurrences (3d3568b403944e04a7c3dcfb05d6d19d, 7efbfea418974dcfba7a6633ecfe820a), both Tilion sess_993d70* dead-worker browser init, fixed by PR #2010 (7d3fc34ca). [7efbfea418974dcfba7a6633ecfe820a] PR #1981 deploy round 11 (head 321f5f0a8b14, 2026-11-13 ~02:10Z): Tilion browser session init failed before any step (\"Browser session init failed after 5 transient-proxy retries: {\\\"error\\\":\\\"Browser initialization failed before readiness\\\"}\"); the single same-source rerun passed; PR #1981 touches no browser code || [3d3568b403944e04a7c3dcfb05d6d19d] PR1910 deploy v4 smoke .context/deploy-cloud/65859a55107834e382ede51c1e35453a1954dc1a7a562382c3f4c87cf817a265; RCA: Tilion sess_993d70* worker 503 on CDP connect + DELETE; tilion.ts validation+cleanup AggregateError skipped the replacement retry (fixed in this PR)"
+      "evidence": "PR #1981 deploy round 11 (head 321f5f0a8b14, 2026-11-13 ~02:10Z): Tilion browser session init failed before any step (\"Browser session init failed after 5 transient-proxy retries: {\\\"error\\\":\\\"Browser initialization failed before readiness\\\"}\"); the single same-source rerun passed; PR #1981 touches no browser code || Second FLAKY occurrence 3d3568b403944e04a7c3dcfb05d6d19d (PR1910, handed to https://boxes.dev/thread/thr_7ab578db49d2474cad54e3807e2c5220, merged here after PR1910's merge left a duplicate quarantine key): PR1910 deploy v4 smoke .context/deploy-cloud/65859a55107834e382ede51c1e35453a1954dc1a7a562382c3f4c87cf817a265; RCA: Tilion sess_993d70* worker 503 on CDP connect + DELETE; tilion.ts validation+cleanup AggregateError skipped the replacement retry (fixed in this PR)"
     },
     "name": "browser-smoke",
     "title": "Browser Agent Page Read",
@@ -8252,6 +8252,12 @@
   },
   {
     "name": "agent-payment-test-shop",
+    "quarantine": {
+      "since": "2026-11-13",
+      "repair": "https://boxes.dev/thread/ph77xhnm0m7s6kedpb159aqmbh8j5w3n",
+      "error": "Timeout after 905s (task timeout=900s)",
+      "evidence": "PR #2015 deploy 43a856b49 smoke: browser resume hit Tilion east dead worker sess_993d70* ('Failed to resume session: Tilion session sess_993d7086307a426dbe17da00b29f0f8d failed validation and cleanup', agent 23abff70), respawned and ran out the 900s budget; same-source rerun PASSED (FLAKY c59d68b1). NOT_INTRODUCED: task is not chat mode and #2015 changes only the chat router schema order; dead-worker resume fixed by PR #2010 (7d3fc34ca)"
+    },
     "title": "Agent Payment Test Shop",
     "prompt": "Use a browser agent (spawn_agent with type=\"browser\" \u2014 do NOT delegate this to a general_purpose sub-agent) to go to {frontend_url}/test_payment and complete the visible Rose Labs Test Payment checkout. Buy exactly these 3 products and no others: Aurora Notebook, Ceramic Mug, and Canvas Tote.",
     "timeout_seconds": 900,
@@ -8372,9 +8378,9 @@
   {
     "quarantine": {
       "since": "2026-11-13",
-      "repair": "https://boxes.dev/thread/thr_7ab578db49d2474cad54e3807e2c5220",
+      "repair": "https://boxes.dev/thread/thr_381f455399324e108a7a23c08f441082",
       "error": "Timeout after 1204s (task timeout=1200s) | Expected paid Stripe test Checkout and local webhook delivery || Expected gate subscription, observed write_lock after Tilion session failed validation and cleanup. First native attempt FAILED; one automatic retry PASS (FLAKY).",
-      "evidence": "Two FLAKY occurrences: 1f9eca18a4744006a75aba4053eabf98 is the Tilion sess_993d70* dead-worker browser init fixed by PR #2010 (7d3fc34ca); 8abcd151686b465ca5cce8790775632a is shared sandbox AgentCard org-client throttling (owners: AgentCard RCA thr_06b44679f994497bb619c09bdc1f3b74, PR #1994/#2016). Release needs 5 consecutive passes covering both. [8abcd151686b465ca5cce8790775632a] PR #1981 deploy round 11 (head 321f5f0a8b14, 2026-11-13 ~02:27Z): guest log carries 77 AgentCard \"Invalid or expired organization token\"/429/rate-limited lines (shared sandbox AgentCard client throttling under concurrent deploy smokes; coordinator ph78393f, PR #1994); the single same-source rerun passed; PR #1981 touches no payment code || [1f9eca18a4744006a75aba4053eabf98] PR1910 deploy v4 smoke .context/deploy-cloud/65859a55107834e382ede51c1e35453a1954dc1a7a562382c3f4c87cf817a265; RCA: Tilion sess_993d70* worker 503 on CDP connect + DELETE; tilion.ts validation+cleanup AggregateError skipped the replacement retry (fixed in this PR)"
+      "evidence": "PR #1981 deploy round 11 (head 321f5f0a8b14, 2026-11-13 ~02:27Z): every browser sub-agent (02:02:12 through 02:21:21) failed at Tilion session init (\"Transient browser session init failure; retrying with a fresh proxy\" x4, then \"Browser automation failed\") on sess_993d70a733c5/sess_993d70ee6a2d, the dead us-east worker fixed by PR #2010, so Checkout was never paid; the guest backend.log has no AgentCard 429/401 lines (corrected from the round-11 AgentCard attribution); the single same-source rerun passed; PR #1981 touches no browser or payment code || Second FLAKY occurrence 1f9eca18a4744006a75aba4053eabf98 (PR1910, handed to https://boxes.dev/thread/thr_7ab578db49d2474cad54e3807e2c5220, merged here after PR1910's merge left a duplicate quarantine key): PR1910 deploy v4 smoke .context/deploy-cloud/65859a55107834e382ede51c1e35453a1954dc1a7a562382c3f4c87cf817a265; RCA: Tilion sess_993d70* worker 503 on CDP connect + DELETE; tilion.ts validation+cleanup AggregateError skipped the replacement retry (fixed in this PR)"
     },
     "name": "agent-payment-new-user-journey",
     "title": "New User Subscription To Confirmed Agent Payment",
