@@ -6,14 +6,21 @@
  *   set ≥ 64 KB browser_http ─► Storage object (sha256 path) + row pointer
  *   get ─► rehydrated, sha256-verified value      missing object ─► miss
  *   identical re-record ─► no upload, no row write
- *   existing inline rows ─► batched backfill (dry run first, idempotent)
+ *   existing inline rows ─► batched backfill (dry run first, idempotent,
+ *                           confined to this run's key prefix)
+ *
+ * Open order: db.$connect() ─► engine TLS probe setenv()s SSL_CERT_FILE once
+ *             ─► only then import the store (app + DEMO-cache clients).
+ * A client constructed before that first connect reads process.env while the
+ * probe writes it (getenv/setenv race, a silent SIGSEGV; see RCA
+ * 2026-11-08-prisma-engine-tls-probe-setenv-raced-second-client-getenv).
  *
  * Storage is an in-memory fake behind the Supabase client's fetch; the cache
  * database must be the local one.
  */
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
-import { quarantine } from '../helpers/quarantine';
+import { connectThenOpen } from '../../../scripts/seed-local-helpers';
 
 const cacheUrl = process.env.FAST_MODE_CACHE_DATABASE_URL ?? process.env.DEMO_CACHE_DATABASE_URL;
 assert(cacheUrl, 'the blackbox runner must set FAST_MODE_CACHE_DATABASE_URL');
@@ -24,6 +31,7 @@ assert(
 process.env.SUPABASE_URL = 'http://storage.offload.test';
 process.env.SUPABASE_SERVICE_ROLE_KEY = 'offload-test-service-key';
 process.env.FAST_CACHE_MEMORY_TTL_MS = '0';
+const sslCertFileUnsetAtStart = process.env.SSL_CERT_FILE === undefined;
 
 const objects = new Map<string, Buffer>();
 let uploads = 0;
@@ -59,10 +67,20 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
 }) as typeof fetch;
 
 async function main(): Promise<void> {
-  const store = await import('../../providers/demoCacheStore');
   const { PrismaClient } = await import('@prisma/client');
   const db = new PrismaClient({ datasources: { db: { url: cacheUrl } } });
+  // Importing the store constructs the app client; it must wait for db's first connect.
+  const store = await connectThenOpen(db, () => import('../../providers/demoCacheStore'));
+  if (process.platform === 'linux' && sslCertFileUnsetAtStart) {
+    assert(
+      process.env.SSL_CERT_FILE !== undefined,
+      'the engine TLS probe must finish before the store constructs its Prisma clients'
+    );
+  }
   const prefix = `zz-offload-${crypto.randomBytes(4).toString('hex')}-`;
+  // Sorts after every key of this run (byte and locale order) without sharing its prefix,
+  // like a concurrent run's row on the same database.
+  const neighbor = `${prefix.slice(0, -1)}x-d`;
   const big = { status: 200, body_b64: crypto.randomBytes(90_000).toString('base64') };
   const small = { status: 200, body_b64: 'aGVsbG8=' };
   const row = (key: string) =>
@@ -126,16 +144,22 @@ async function main(): Promise<void> {
     await store.cacheSetWithAck({ key: `${prefix}e`, kind: 'llm', goalHash: 'g', value: forged });
     assert.deepEqual((await store.cacheGet(`${prefix}e`)).value, forged);
 
-    // 5. Existing inline rows move through the batched backfill; dry run first.
+    // 5. Existing inline rows move through the batched backfill; dry run first. The scan
+    //    stays inside its key prefix: another run's inline row is never moved.
     const legacy = `${prefix}d`;
     await db.$executeRaw`
       INSERT INTO "FastModeCacheEntry" (key, kind, "goalHash", value)
-      VALUES (${legacy}, 'browser_http', 'g', ${JSON.stringify(big)}::jsonb)`;
+      VALUES (${legacy}, 'browser_http', 'g', ${JSON.stringify(big)}::jsonb),
+             (${neighbor}, 'browser_http', 'g', ${JSON.stringify(big)}::jsonb)`;
+    const outside = await row(neighbor);
     const inline = await row(legacy);
-    const dry = await store.offloadFastCacheBatch(prefix, 10, { dryRun: true });
+    const dry = await store.offloadFastCacheBatch(prefix, 10, { dryRun: true, keyPrefix: prefix });
     assert.equal(dry.offloaded, 1, JSON.stringify(dry));
     assert.equal((await row(legacy)).xmin, inline.xmin, 'a dry run must not write');
-    const real = await store.offloadFastCacheBatch(prefix, 10, { concurrency: 4 });
+    const real = await store.offloadFastCacheBatch(prefix, 10, {
+      concurrency: 4,
+      keyPrefix: prefix,
+    });
     assert.deepEqual(
       real.offloadedRows.map((r) => r.key),
       [legacy],
@@ -145,32 +169,22 @@ async function main(): Promise<void> {
     assert(objects.has(real.offloadedRows[0].path), 'the receipt must name the stored object');
     assert.deepEqual((await store.cacheGet(legacy)).value, big);
     assert.equal(
-      (await store.offloadFastCacheBatch(prefix, 10)).offloaded,
+      (await store.offloadFastCacheBatch(prefix, 10, { keyPrefix: prefix })).offloaded,
       0,
       'a rerun is a no-op'
     );
+    assert.equal((await row(neighbor)).xmin, outside.xmin, 'a row outside the prefix is untouched');
     process.stdout.write(
       'PASS large browser_http cache values live in Storage behind verified pointers; reads, dedupe and backfill are exact\n'
     );
   } finally {
-    await db.$executeRaw`DELETE FROM "FastModeCacheEntry" WHERE key LIKE ${`${prefix}%`}`;
+    await db.$executeRaw`
+      DELETE FROM "FastModeCacheEntry" WHERE key LIKE ${`${prefix}%`} OR key = ${neighbor}`;
     await db.$disconnect();
   }
 }
 
-// NOT_INTRODUCED flake: the first attempt exited non-zero with no output (Prisma two-client crash signature).
-const flakyUnit = 'demo-cache-offload';
-quarantine(
-  {
-    since: '2026-11-11',
-    repair: 'pending-handoff:0d428d7de34f413ea3bfbeb74dabf1ba',
-    error: 'attempt 1 exited non-zero after 1552 ms with no output',
-    evidence:
-      'PR1910 deploy round 25 backend-coverage-blackbox rca/0d428d7de34f413ea3bfbeb74dabf1ba',
-  },
-  main,
-  { unit: flakyUnit }
-)()
+main()
   .then(() => process.exit(0))
   .catch((error: unknown) => {
     console.error(error);
