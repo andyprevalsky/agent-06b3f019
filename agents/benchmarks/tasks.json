@@ -8067,6 +8067,12 @@
   },
   {
     "name": "browser-smoke",
+    "quarantine": {
+      "since": "2026-11-13",
+      "repair": "pending-handoff:7efbfea418974dcfba7a6633ecfe820a",
+      "error": "Browser agent 0412e08f-d76d-53f8-836c-a01ca6d81ce4 recorded 0 trajectory step(s); expected at least 1 per browser agent",
+      "evidence": "PR #1981 deploy round 11 (head 321f5f0a8b14, 2026-11-13 ~02:10Z): Tilion browser session init failed before any step (\"Browser session init failed after 5 transient-proxy retries: {\\\"error\\\":\\\"Browser initialization failed before readiness\\\"}\"); the single same-source rerun passed; PR #1981 touches no browser code"
+    },
     "title": "Browser Agent Page Read",
     "prompt": "Use a browser agent to visit https://www.roselabs.ai and report the main color palette visible on the page. Name at least three prominent colors.",
     "timeout_seconds": 300,
@@ -8359,6 +8365,12 @@
   },
   {
     "name": "agent-payment-new-user-journey",
+    "quarantine": {
+      "since": "2026-11-13",
+      "repair": "pending-handoff:8abcd151686b465ca5cce8790775632a",
+      "error": "Timeout after 1204s (task timeout=1200s) | Expected paid Stripe test Checkout and local webhook delivery",
+      "evidence": "PR #1981 deploy round 11 (head 321f5f0a8b14, 2026-11-13 ~02:27Z): guest log carries 77 AgentCard \"Invalid or expired organization token\"/429/rate-limited lines (shared sandbox AgentCard client throttling under concurrent deploy smokes; coordinator ph78393f, PR #1994); the single same-source rerun passed; PR #1981 touches no payment code"
+    },
     "title": "New User Subscription To Confirmed Agent Payment",
     "description": "A dedicated non-admin account begins with exhausted free credit and no subscription or Stripe payment method. The harness completes hosted Stripe test Checkout, then the agent buys from the test portal with an approved payment card. The run requires ordered gates, a portal order ID, and settled backend funding.",
     "prompt": "Use a browser agent (spawn_agent with type=\"browser\") to go to {frontend_url}/test_payment and complete the visible Rose Labs Test Payment checkout. Buy exactly these 3 products and no others: Aurora Notebook, Ceramic Mug, and Canvas Tote. Use only the visible checkout UI. If subscription signup is required, wait for the user to finish it, then continue. Obtain a payment card through request_payment_card and wait for approval. Report the test portal confirmation order ID after the order is placed.",
@@ -8541,6 +8553,12 @@
   },
   {
     "name": "agent-payment-setup-resume",
+    "quarantine": {
+      "since": "2026-11-13",
+      "repair": "pending-handoff:eaa5c8e60ba14904bcd6f78931db2912",
+      "error": "AgentCard setup fixture failed: Failed to complete benchmark AgentCard setup: 502 {\"error\":\"Benchmark AgentCard cardholder resolution failed: AgentCard Organization MCP list_cardholders failed: Invalid or expired organization token\"} | Agent status: ACTIVE (expected COMPLETED)",
+      "evidence": "PR #1981 deploy round 11 (head 321f5f0a8b14, 2026-11-13 ~02:07Z): shared sandbox AgentCard org client rejected the org token on all 3 fixture attempts while several deploy smokes ran concurrently (coordinator ph78393f; retry-storm fix PR #1994); the single same-source rerun passed; PR #1981 touches no payment code"
+    },
     "title": "Agent Payment Setup And Auto Resume",
     "group": "pre-deploy",
     "prompt": "Use a browser agent to go to {frontend_url}/test_payment and complete the visible Rose Labs Test Payment checkout. Buy exactly these 3 products and no others: Aurora Notebook, Ceramic Mug, and Canvas Tote. Use only the visible checkout UI; do not navigate to source files or API endpoints. If One Time Agent Payment Setup is required after payment approval, wait for the user to complete it and then continue automatically with the same checkout.",
