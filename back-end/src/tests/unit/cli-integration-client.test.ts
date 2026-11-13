@@ -164,6 +164,10 @@ test('publish forwards reproducible installation and credential metadata', async
   }
 });
 
+// Simulated slow work, not synchronization: the fixture server holds these responses open.
+const INTERRUPTED_BODY_HOLD_MS = 30;
+const DELAYED_HEARTBEAT_MS = 300;
+
 test('publication waits for delayed headers once and bounds ambiguous responses', async () => {
   let calls = 0;
   let delay = 180;
@@ -174,7 +178,7 @@ test('publication waits for delayed headers once and bounds ambiguous responses'
     if (interruptBody) {
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.write('{');
-      setTimeout(() => res.destroy(), 30);
+      setTimeout(() => res.destroy(), INTERRUPTED_BODY_HOLD_MS);
       return;
     }
     setTimeout(() => res.end(JSON.stringify({ status: 'connected' })), delay);
@@ -305,7 +309,7 @@ async function nativeFixture(
       setTimeout(() => {
         heartbeatPending = false;
         res.end('{}');
-      }, 300);
+      }, DELAYED_HEARTBEAT_MS);
     } else if (req.url?.endsWith('/release') && heartbeatPending) {
       res.statusCode = 409;
       res.end(JSON.stringify({ error: 'heartbeat still writing' }));

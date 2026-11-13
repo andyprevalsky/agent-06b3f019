@@ -7,10 +7,17 @@ import os
 from pathlib import Path
 import signal
 import subprocess
+import sys
 import tempfile
 import time
 import types
 import unittest
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'lib'))
+from condition_wait import wait_until
+
+# Absence over time: let the native one-second watcher run at least one full iteration.
+WATCH_ITERATION_GRACE_SECONDS = 1.5
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -73,15 +80,11 @@ class Retention(unittest.TestCase):
         self.owner.kill();self.owner.wait(timeout=5)
 
     def wait_for(self, predicate):
-        deadline=time.monotonic()+5
-        while time.monotonic()<deadline:
-            if predicate():return
-            time.sleep(.05)
-        self.fail('fixture did not reach expected boundary')
+        wait_until(predicate, timeout=5, description='fixture did not reach expected boundary')
 
     def test_explicit_retention_survives_owner_exit_then_revocation_tears_down(self):
         self.launch()
-        time.sleep(1.5)  # At least one native one-second watch iteration after owner exit.
+        time.sleep(WATCH_ITERATION_GRACE_SECONDS)
         self.assertIsNone(self.stack.poll(),'watcher destroyed explicitly retained recovery stack')
         self.assertFalse((self.context/'dropped').exists(),'watcher dropped retained DB')
         self.record['state']='cleanup_verified'
@@ -133,7 +136,7 @@ class Retention(unittest.TestCase):
 
     def test_missing_cleanup_receipt_does_not_revoke_explicit_authority(self):
         self.launch(lambda:(self.context/'benchmark-cleanup-bench-token.status').unlink())
-        time.sleep(1.5)
+        time.sleep(WATCH_ITERATION_GRACE_SECONDS)
         self.assertIsNone(self.stack.poll())
         self.assertFalse((self.context/'dropped').exists())
 

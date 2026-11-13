@@ -5,7 +5,7 @@ import { mock } from 'node:test';
 // This in-memory SQL stand-in executes WHERE/order/LIMIT; no application DB or
 // provider is opened. Canned rows would hide this particular regression.
 const db = new DatabaseSync(':memory:');
-db.exec(`CREATE TABLE CodeSession(id TEXT PRIMARY KEY,userId TEXT,ownerAgentId TEXT,repoKey TEXT,state TEXT,lastActiveAt INTEGER,createdAt INTEGER,leaseOwner TEXT,leaseExpiresAt INTEGER);
+db.exec(`CREATE TABLE CodeSession(id TEXT PRIMARY KEY,userId TEXT,ownerAgentId TEXT,repoKey TEXT,state TEXT,lastActiveAt INTEGER,createdAt INTEGER,leaseOwner TEXT,leaseExpiresAt INTEGER,closingTaskId TEXT);
 CREATE TABLE Integration(id TEXT PRIMARY KEY,userId TEXT,name TEXT,type TEXT,config TEXT);`);
 const now = new Date('2026-11-06T00:00:00Z');
 process.env.CODE_SESSION_TTL_DAYS = '14';
@@ -114,9 +114,10 @@ function session(id: string, days: number, created: number, other: Record<string
     createdAt: created,
     leaseOwner: null,
     leaseExpiresAt: null,
+    closingTaskId: null,
     ...other,
   };
-  db.prepare('INSERT INTO CodeSession VALUES (?,?,?,?,?,?,?,?,?)').run(
+  db.prepare('INSERT INTO CodeSession VALUES (?,?,?,?,?,?,?,?,?,?)').run(
     ...Object.values(row).map(value)
   );
 }

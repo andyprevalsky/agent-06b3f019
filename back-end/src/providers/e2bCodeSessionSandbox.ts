@@ -728,18 +728,3 @@ export async function createLocalCodeSessionFallback(
   }
   return { ...local, resumedFrom: localHome?.resumedFrom ?? 'new', cliSessionId: resumeId };
 }
-
-/**
- * Background launch of the sandbox ws-server as the coding user. Filesystem
- * snapshots default commands to root, so user, cwd and HOME are explicit.
- * timeoutMs 0 = no timeout (the 60 s default killed the process).
- */
-export function wsServerRunOptions(envs: Record<string, string>) {
-  return {
-    user: 'user' as const,
-    cwd: '/home/user',
-    background: true as const,
-    timeoutMs: 0,
-    envs: { ...envs, HOME: '/home/user' },
-  };
-}

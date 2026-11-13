@@ -25,7 +25,9 @@ export async function fetchCliIntegrations(): Promise<CliIntegration[]> {
   const response = await fetch(`${API_BASE_WITH_PATH}/integrations/cli`, {
     headers: getAuthHeaders(),
   });
-  return (await cliResponse<{ integrations: CliIntegration[] }>(response)).integrations;
+  const { integrations } = await cliResponse<{ integrations?: unknown }>(response);
+  if (!Array.isArray(integrations)) throw new Error('Unexpected CLI response');
+  return integrations as CliIntegration[];
 }
 
 export async function connectCli(request: string, requestId: string): Promise<CliIntegration> {

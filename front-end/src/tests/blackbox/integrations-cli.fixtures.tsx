@@ -34,6 +34,13 @@ export function registerCliIntegrationTests() {
       vi.useRealTimers();
     });
 
+    it('keeps the integrations page mounted when the CLI list response has no integrations', async () => {
+      server.use(http.get(`${API_BASE}/integrations/cli`, () => HttpResponse.json({})));
+      renderWithProviders(<Integrations />, { roseDesktop });
+      expect(await screen.findByRole('alert')).toHaveTextContent('Unexpected CLI response');
+      expect(screen.getByRole('button', { name: 'Add CLI' })).toBeVisible();
+    });
+
     it('starts the requested CLI once with authentication and opens its setup agent', async () => {
       let submitted: Record<string, unknown> | undefined;
       let authorization: string | null = null;

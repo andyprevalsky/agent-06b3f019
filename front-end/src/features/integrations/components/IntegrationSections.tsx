@@ -319,6 +319,12 @@ function SecondaryIntegrationSections({
       </SearchGroup>
 
       {isFullySignedIn && (
+        <SearchGroup catalogKey="clis" search={search}>
+          <CliIntegrationsSection />
+        </SearchGroup>
+      )}
+
+      {isFullySignedIn && (
         <SearchGroup catalogKey="meetingNotes" search={search}>
           <MeetingNotesSection connections={meetingNotes} />
         </SearchGroup>
@@ -326,11 +332,6 @@ function SecondaryIntegrationSections({
       <SearchGroup catalogKey="pebble" search={search}>
         <PebbleIndexSection onConnect={onPebbleIndexConnect} />
       </SearchGroup>
-      {isFullySignedIn && (
-        <SearchGroup catalogKey="clis" search={search}>
-          <CliIntegrationsSection />
-        </SearchGroup>
-      )}
     </>
   );
 }

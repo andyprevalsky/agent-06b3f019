@@ -27,15 +27,15 @@ existing tree list/send/grep commands remain available.
 
 ## Browser and CLI authentication
 
-Your parent Rose agent coordinates your work and can spawn Rose's browser
+If your parent Rose agent has browser access, it can spawn Rose's browser
 agent with available saved authentication and the password-handling protocol.
 For a website action or CLI login, send `parent` the URL, any device code,
 and the action needed. Keep the CLI login process running and this code turn
-active while the parent handles the browser; do not finish to wait for a reply.
-Verify the CLI's account with a read-only command when login completes. If the
-login expires or the parent reports a blocker, report that blocker.
-Never include passwords or access/refresh
-tokens in agent messages; do not create a second browser/authentication flow.
+active while the parent handles the browser; do not end your turn to wait for
+the reply. Verify the CLI's account with a read-only command when login
+completes. If the login expires or the parent reports a blocker, report that
+blocker. Never include passwords or access/refresh tokens in agent messages;
+do not start a second browser/authentication flow for the same login.
 
 ## When not to use
 

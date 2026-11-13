@@ -72,5 +72,45 @@ validate_private_fleet_source
         self.assertEqual(6, sum(c.startswith('volume snapshots') for c in calls))
 
 
+class WarmSnapshotEpochRead(unittest.TestCase):
+    """warm_deps_preflight's snapshot_created_epoch: an omitted snapshot is re-read, not refused."""
+
+    def run_case(self, empty_reads: int, inventory: str = '') -> tuple[subprocess.CompletedProcess, list[str]]:
+        with tempfile.TemporaryDirectory() as case:
+            script = function('snapshot_created_epoch') + function('snapshot_epoch_from_inventory') + r'''
+FLY() {
+  printf '%s\n' "$*" >> "$CASE/calls"
+  n=$(grep -c '^volume snapshots' "$CASE/calls")
+  if [ "$n" -le "$EMPTY_READS" ]; then printf '[]'
+  else printf '[{"id":"%s","created_at":"2026-11-13T02:00:00Z"}]' "$SNAPSHOT"; fi
+}
+sleep() { printf 'sleep %s\n' "$1" >> "$CASE/calls"; }
+touch "$CASE/calls"
+if [ -n "$INVENTORY" ]; then snapshot_created_epoch "$SNAPSHOT" "$INVENTORY"; else snapshot_created_epoch "$SNAPSHOT"; fi
+'''
+            env = {**os.environ, 'CASE': case, 'EMPTY_READS': str(empty_reads), 'SNAPSHOT': SNAPSHOT,
+                   'INVENTORY': inventory, 'VOL_ID': 'vol_donor', 'APP': 'fixture'}
+            result = subprocess.run(['bash', '-c', 'set -u\n' + script], env=env, capture_output=True,
+                                    text=True, timeout=60)
+            return result, (Path(case) / 'calls').read_text().splitlines()
+
+    def test_transient_empty_listing_is_reread_until_the_snapshot_appears(self):
+        result, calls = self.run_case(empty_reads=2)
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual('1794535200', result.stdout.strip())
+        self.assertEqual(['sleep 2', 'sleep 4'], [c for c in calls if c.startswith('sleep')])
+
+    def test_snapshot_that_never_appears_fails_closed_after_six_reads(self):
+        result, calls = self.run_case(empty_reads=99)
+        self.assertEqual(1, result.returncode)
+        self.assertIn('exact snapshot absent', result.stderr)
+        self.assertEqual(6, sum(c.startswith('volume snapshots') for c in calls))
+
+    def test_captured_inventory_is_never_reread(self):
+        result, calls = self.run_case(empty_reads=0, inventory='[]')
+        self.assertEqual(1, result.returncode)
+        self.assertEqual([], calls)
+
+
 if __name__ == '__main__':
     unittest.main()

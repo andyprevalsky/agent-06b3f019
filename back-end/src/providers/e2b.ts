@@ -12,7 +12,7 @@ import { isAnthropicApiKeyOnCooldown } from './computeCredentials';
 import { buildCodeAgentSystemPrompt, buildCodexHarnessSystemPrompt } from './codeAgentPrompt';
 import { uploadAttachmentsToSandbox } from './e2bAttachments';
 import { overlayCodexRoseBridge } from './e2bCodexHarness';
-import { workDirForGithubRepo } from './e2bWorkDir';
+import { workDirForGithubRepo, WS_SERVER_BACKGROUND } from './e2bWorkDir';
 import { codeSandboxGithubEnvs } from './codeAgentGitIdentity';
 import {
   fileHash,
@@ -27,7 +27,6 @@ import {
   CLAUDE_CREDENTIAL_ENV_KEYS,
   codeSessionBranchEnvs,
   codeSandboxUserId,
-  wsServerRunOptions,
   codeSessionTaskFields,
   type CodeAgentSessionResult,
   createLocalCodeSessionFallback,
@@ -39,7 +38,6 @@ import {
 import { type CodeSessionRow } from './codeSessions/store';
 import { resolveCodexSpawnAuth } from './codeSessions/usageLimit';
 import { restoreSandboxProject } from './projects/workspace';
-import { withClaudeCodeCreateSlot } from './e2bCreateSlot';
 import {
   waitForSandboxWsServer,
   wsReadinessOutcome,
@@ -121,17 +119,16 @@ export async function createClaudeCodeSession(
   fastModeCacheEnabled?: boolean,
   options: ClaudeCodeSessionOptions = {}
 ): Promise<CodeAgentSessionResult> {
-  // Serialize creates — concurrent reserve-script calls stampede E2B redis.
-  return withClaudeCodeCreateSlot(() =>
-    createClaudeCodeSessionUnlocked(
-      agentId,
-      goal,
-      attachments,
-      githubRepoUrl,
-      userId,
-      fastModeCacheEnabled,
-      options
-    )
+  // E2B reserve calls are serialized inside acquireCodeSandbox (create/resume
+  // only). Taking the same non-reentrant slot here would deadlock that inner call.
+  return createClaudeCodeSessionUnlocked(
+    agentId,
+    goal,
+    attachments,
+    githubRepoUrl,
+    userId,
+    fastModeCacheEnabled,
+    options
   );
 }
 
@@ -464,7 +461,12 @@ async function createClaudeCodeSessionUnlocked(
   // Filesystem snapshots default commands to root; the coding harness requires
   // the user account and its home even when the source template defaulted to user.
   sandbox.commands
-    .run('node /home/user/ws-server.mjs', wsServerRunOptions(sessionEnvs))
+    .run('node /home/user/ws-server.mjs', {
+      ...WS_SERVER_BACKGROUND,
+      user: 'user',
+      cwd: '/home/user',
+      envs: { ...sessionEnvs, HOME: '/home/user' },
+    })
     .catch((err) =>
       log.error('Failed to start WS server', {
         error: err instanceof Error ? err.message : String(err),
@@ -673,7 +675,12 @@ export async function createCodexCodeSession(
 
   // Filesystem snapshots do not preserve the base template's default command user.
   sandbox.commands
-    .run('node /home/user/ws-server.mjs', wsServerRunOptions(sessionEnvs))
+    .run('node /home/user/ws-server.mjs', {
+      ...WS_SERVER_BACKGROUND,
+      user: 'user',
+      cwd: '/home/user',
+      envs: { ...sessionEnvs, HOME: '/home/user' },
+    })
     .catch((err) =>
       log.error('Failed to start Codex WS server', {
         error: err instanceof Error ? err.message : String(err),
