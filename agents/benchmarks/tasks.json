@@ -6196,6 +6196,12 @@
   },
   {
     "name": "browser-auth-member-discount-purchase",
+    "quarantine": {
+      "since": "2026-11-13",
+      "repair": "pending-handoff:ef4cada11ed648ff8471b6c07e187ca8",
+      "error": "Tool 'spawn_browser_agent' exceeded its exact root call limit during execution: expected 1, got 2. Full counts: {'agent_init': 1, 'cloud_agent': 1, 'spawn_browser_agent': 2, 'spawn_agent': 3, 'wait_for': 2, 'request_payment_card': 1, 'request_user_approval': 1, 'list_agents': 1, 'grep': 1} | Agent status: ACTIVE (expected COMPLETED)",
+      "evidence": "PR #1992 smoke gate on ef30705dab FLAKY ef4cada11ed648ff8471b6c07e187ca8 (first attempt FAILED run 20261113-032418-3667120, same-ref rerun PASSED); passed natively on 1b85b08dd with this PR's bytes unchanged"
+    },
     "title": "Hosted Purchase: Account Chosen For The Member Price",
     "description": "The shop lets guests buy, but members pay 10% less; the browser agent creates an account with the minted identity instead of checking out as a guest, and pays the member price.",
     "prompt": "Buy me a Canvas Tote from {auth_test_site_url}",
@@ -8672,6 +8678,12 @@
   },
   {
     "name": "agent-payment-idempotent-abandonment",
+    "quarantine": {
+      "since": "2026-11-13",
+      "repair": "pending-handoff:2e048a8382d94ab0ab3094208e350fda",
+      "error": "Timeout after 903s (task timeout=900s) | Investigate: python agents/benchmarks/agent_latency.py b3080c34-a03c-4f9d-9e82-f0e2e8f2b3da | Cache/cost: python agents/benchmarks/run_benchmark.py --compare <run.json> | Agent status: ACTIVE (expected COMPLETED) | Browser agent 4d5a07cb-a1f3-5668-adc9-15bf47433bc8 recorded 0 trajectory step(s); expected at least 2 per browser agent",
+      "evidence": "PR #1992 smoke gate on ef30705dab FLAKY 2e048a8382d94ab0ab3094208e350fda (first attempt FAILED run 20261113-032418-3667086, same-ref rerun PASSED); passed natively on 1b85b08dd with this PR's bytes unchanged"
+    },
     "title": "Agent Payment Idempotent Settlement",
     "group": "pre-deploy",
     "prompt": "The root agent must invoke spawn_browser_agent exactly twice, sequentially, against {frontend_url}/test_payment. In each browser task, select exactly these 3 products and no others: Aurora Notebook, Ceramic Mug, and Canvas Tote; prepare the visible Rose Labs Test Payment checkout; independently request a one-time payment card for the same unchanged order; and report the card last four. The first browser agent must leave checkout unsubmitted. Wait for it to finish before invoking the second browser agent. The second browser agent must independently request the same card again, verify the last four matches the first result, then submit the visible checkout and report the order confirmation. Use only the visible checkout UI; do not navigate to source files or API endpoints. After the second browser agent finishes, call attempt_completion exactly once with the grounded results. Do not call send_message_to_user_execute_phase or any progress-message tool.",
