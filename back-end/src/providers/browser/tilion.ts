@@ -282,22 +282,25 @@ async function createRemote(
       };
     } catch (error) {
       await browser?.close().catch(() => {});
-      if (sessionId) {
-        try {
-          await releaseTilionRemoteSession(sessionId);
-        } catch (releaseError) {
-          throw new AggregateError(
-            [error, releaseError],
-            `Tilion session ${sessionId} failed validation and cleanup`
-          );
-        }
-      }
+      let releaseError: unknown = null;
+      if (sessionId) await releaseTilionRemoteSession(sessionId).catch((e) => (releaseError = e));
+      // A dead worker fails validation AND the DELETE (503); its unreleased session must
+      // not cancel the one replacement attempt. The leak stays visible in the log.
       if (error instanceof TilionSessionValidationError && attempt < 2) {
         log.warn('Tilion session failed validation; creating another', {
           sessionId,
           error: error.message,
+          ...(releaseError === null
+            ? {}
+            : { unreleased: true, releaseError: String(releaseError) }),
         });
         continue;
+      }
+      if (releaseError !== null) {
+        throw new AggregateError(
+          [error, releaseError],
+          `Tilion session ${sessionId} failed validation and cleanup`
+        );
       }
       throw error;
     }

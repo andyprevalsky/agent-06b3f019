@@ -8072,6 +8072,12 @@
     "deploy_canary": true
   },
   {
+    "quarantine": {
+      "since": "2026-11-13",
+      "repair": "pending-handoff:3d3568b403944e04a7c3dcfb05d6d19d",
+      "error": "Timeout after 454s (task timeout=450s); browser agent recorded 0 trajectory step(s) (Tilion session failed validation and cleanup). First native attempt FAILED; one automatic retry PASS (FLAKY).",
+      "evidence": "PR1910 deploy v4 smoke .context/deploy-cloud/65859a55107834e382ede51c1e35453a1954dc1a7a562382c3f4c87cf817a265; RCA: Tilion sess_993d70* worker 503 on CDP connect + DELETE; tilion.ts validation+cleanup AggregateError skipped the replacement retry (fixed in this PR)"
+    },
     "name": "browser-smoke",
     "title": "Browser Agent Page Read",
     "prompt": "Use a browser agent to visit https://www.roselabs.ai and report the main color palette visible on the page. Name at least three prominent colors.",
@@ -8364,6 +8370,12 @@
     }
   },
   {
+    "quarantine": {
+      "since": "2026-11-13",
+      "repair": "pending-handoff:1f9eca18a4744006a75aba4053eabf98",
+      "error": "Expected gate subscription, observed write_lock after Tilion session failed validation and cleanup. First native attempt FAILED; one automatic retry PASS (FLAKY).",
+      "evidence": "PR1910 deploy v4 smoke .context/deploy-cloud/65859a55107834e382ede51c1e35453a1954dc1a7a562382c3f4c87cf817a265; RCA: Tilion sess_993d70* worker 503 on CDP connect + DELETE; tilion.ts validation+cleanup AggregateError skipped the replacement retry (fixed in this PR)"
+    },
     "name": "agent-payment-new-user-journey",
     "title": "New User Subscription To Confirmed Agent Payment",
     "description": "A dedicated non-admin account begins with exhausted free credit and no subscription or Stripe payment method. The harness completes hosted Stripe test Checkout, then the agent buys from the test portal with an approved payment card. The run requires ordered gates, a portal order ID, and settled backend funding.",

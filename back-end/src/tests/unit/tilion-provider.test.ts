@@ -372,6 +372,33 @@ async function main(): Promise<void> {
     assert.equal(rows.has('task-f'), false);
     assert.equal(live.size, 2, 'failed validation sessions must be released');
 
+    // ── B1b: dead worker fails validation AND release (503); replacement still runs ──
+    [validationFails, deleteStatus] = [1, [503, 503, 503, 503]];
+    const dead = `sess_${String(server.callsTo('POST', /^\/v1\/session$/).length + 1).padStart(32, '0')}`;
+    const US = { country: 'US' };
+    const replaced = await tilion.createTilionSessionWithContext(
+      'ctx-1',
+      'agent-1',
+      US,
+      undefined,
+      {
+        taskId: 'task-dead-worker',
+      }
+    );
+    assert(replaced.sessionId !== dead && rows.get('task-dead-worker')?.provider === 'tilion');
+    assert(live.has(dead), 'the unconfirmed release stays observable');
+    await tilion.releaseTilionRemoteSession(replaced.sessionId);
+    validationFails = 2;
+    deleteStatus = Array(8).fill(503);
+    const bothDead = await tilion
+      .createTilionSessionWithContext('ctx-1', 'agent-1', US, undefined, {
+        taskId: 'task-both-dead',
+      })
+      .catch((e) => e);
+    assert(bothDead instanceof AggregateError && /validation and cleanup/.test(bothDead.message));
+    assert.equal(rows.has('task-both-dead'), false);
+    deleteStatus = [];
+
     // ── B4/B5: release idempotency ──────────────────────────────────────────
     for (const status of [404, 410]) {
       deleteStatus = [status];
