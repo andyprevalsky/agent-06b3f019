@@ -299,7 +299,8 @@ test('dark mobile agents use robots and retain one-layer disclosure', async ({ p
   await expect(
     drawer.getByTestId('rose-agent-row-competitors').locator('svg.lucide-bot'),
   ).toBeVisible();
-  await expect(drawer.locator('[data-letter]')).toHaveCount(0);
+  // Rose agents keep robots; running code-agent rows show their own status letters (7fb7d7d91).
+  await expect(drawer.locator('[data-testid^="rose-agent-row-"] [data-letter]')).toHaveCount(0);
   await expect(drawer.getByRole('button', { name: /Build landing page/ })).toBeVisible();
   await page.screenshot({ path: '/tmp/rose-dark-mobile-agents.png' });
   await drawer.getByRole('button', { name: 'Collapse Launch a product', exact: true }).click();

@@ -13,6 +13,7 @@
  */
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
+import { quarantine } from '../helpers/quarantine';
 
 const cacheUrl = process.env.FAST_MODE_CACHE_DATABASE_URL ?? process.env.DEMO_CACHE_DATABASE_URL;
 assert(cacheUrl, 'the blackbox runner must set FAST_MODE_CACHE_DATABASE_URL');
@@ -157,7 +158,19 @@ async function main(): Promise<void> {
   }
 }
 
-main()
+// NOT_INTRODUCED flake: the first attempt exited non-zero with no output (Prisma two-client crash signature).
+const flakyUnit = 'demo-cache-offload';
+quarantine(
+  {
+    since: '2026-11-11',
+    repair: 'pending-handoff:0d428d7de34f413ea3bfbeb74dabf1ba',
+    error: 'attempt 1 exited non-zero after 1552 ms with no output',
+    evidence:
+      'PR1910 deploy round 25 backend-coverage-blackbox rca/0d428d7de34f413ea3bfbeb74dabf1ba',
+  },
+  main,
+  { unit: flakyUnit }
+)()
   .then(() => process.exit(0))
   .catch((error: unknown) => {
     console.error(error);

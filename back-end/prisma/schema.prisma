@@ -980,6 +980,17 @@ model Integration {
   usage7dUsedPct         Float?
   usage7dResetsAt        DateTime?
   usageObservedAt        DateTime?
+  /// Where the latest usage came from: response | rate_limit | usage_endpoint |
+  /// code_session; and the provider's unified status then (allowed |
+  /// allowed_warning | rejected), when it said.
+  usageSource            String?
+  usageStatus            String?
+  /// Why `rateLimitedUntil` is set (usage_window_5h | usage_window_7d |
+  /// usage_window | rate_limit | stall | auth) and whether the provider supplied
+  /// that reset (true) or it is Rose's own default/stall backoff (false). Null on
+  /// cooldowns written before these existed.
+  rateLimitReason        String?
+  rateLimitAuthoritative Boolean?
   createdAt              DateTime                     @default(now())
   updatedAt              DateTime                     @updatedAt
   emailCredentials       EmailIntegrationCredential[]
