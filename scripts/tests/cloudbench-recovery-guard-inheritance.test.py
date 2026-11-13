@@ -12,19 +12,23 @@ that daemonizes, then proves the guard is free once recovery releases it.
 from __future__ import annotations
 
 import fcntl
+import importlib.util
 import os
 import re
 import signal
 import subprocess
 import tempfile
-import time
 import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 FLEET = ROOT / "scripts" / "run-bench-fleet"
+_SPEC = importlib.util.spec_from_file_location("condition_wait", ROOT / "scripts" / "lib" / "condition_wait.py")
+condition_wait = importlib.util.module_from_spec(_SPEC)
+_SPEC.loader.exec_module(condition_wait)
 
 FAKE_FLYCTL = """#!/usr/bin/env bash
+if [ "${1:-}" = proxy ]; then exec sleep 30; fi
 # Daemonize like `flyctl agent run`: a detached child keeps every inherited fd.
 setsid bash -c 'echo $$ > "$FAKE_DAEMON_PID"; exec sleep 60' </dev/null >/dev/null 2>&1 &
 for _ in $(seq 1 50); do [ -s "$FAKE_DAEMON_PID" ] && break; sleep 0.1; done
@@ -54,7 +58,8 @@ class RecoveryGuardInheritance(unittest.TestCase):
         fake.write_text(FAKE_FLYCTL)
         fake.chmod(0o755)
         self.daemon_pid = root / "daemon.pid"
-        self.env = dict(os.environ, PATH=f"{bindir}:{os.environ['PATH']}",
+        (root / "tmp").mkdir()
+        self.env = dict(os.environ, PATH=f"{bindir}:{os.environ['PATH']}", TMPDIR=str(root / "tmp"),
                         FAKE_DAEMON_PID=str(self.daemon_pid), REGISTRY=str(self.registry),
                         FLEET_OWNER_HOST="fixture-host", FLEET_OWNER_PID_START="fixture-start")
         self.addCleanup(self._reap_daemon)
@@ -67,17 +72,17 @@ class RecoveryGuardInheritance(unittest.TestCase):
 
     def _script(self, body: str) -> str:
         source = FLEET.read_text()
-        parts = [_function(source, name) for name in (
-            "acquire_registry_recovery_lock", "release_registry_recovery_guard",
-            "release_registry_recovery_lock")]
-        # The controller's own flyctl spawn wrapper, when it defines one.
-        wrapper = re.search(r"^flyctl\(\) \{.*?^\}\n", source, re.M | re.S)
+        names = ["acquire_registry_recovery_lock", "release_registry_recovery_guard",
+                 "release_registry_recovery_lock"]
+        # The controller's guard-scoped flyctl shim, when it defines one.
+        names += [name for name in ("enable_recovery_guard_flyctl_shim",
+                                    "disable_recovery_guard_flyctl_shim")
+                  if re.search(r"^" + name + r"\(\) \{", source, re.M)]
         return "\n".join([
             "set -u",
             'registry_meta_value(){ sed -n "s/^$2=//p" "$1" 2>/dev/null | head -1; }',
             "registry_owner_alive(){ return 1; }",
-            *parts,
-            wrapper.group() if wrapper else "",
+            *[_function(source, name) for name in names],
             body,
         ])
 
@@ -102,9 +107,8 @@ release_registry_recovery_lock "$REGISTRY"
         result = subprocess.run(["bash", "-c", self._script(body)], env=self.env,
                                 capture_output=True, text=True, timeout=60)
         self.assertEqual(result.returncode, 0, result.stderr)
-        deadline = time.monotonic() + 5
-        while not self.daemon_pid.exists() and time.monotonic() < deadline:
-            time.sleep(0.05)
+        condition_wait.wait_until(lambda: self.daemon_pid.is_file() and self.daemon_pid.read_text().strip(),
+                                  timeout=5, description="fake flyctl daemon pid")
         daemon = int(self.daemon_pid.read_text().strip())
         os.kill(daemon, 0)  # the daemon really outlived the recoverer
         self.assertTrue(self._guard_free(),
@@ -142,6 +146,46 @@ release_registry_recovery_lock "$REGISTRY"
         result = subprocess.run(["bash", "-c", self._script(body)], env=self.env,
                                 capture_output=True, text=True, timeout=60)
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_background_flyctl_pid_is_flyctl_itself(self) -> None:
+        """`flyctl proxy ... &; pid=$!` must address flyctl, not a wrapper shell.
+
+        The controller TERMs `$!` to stop its data-plane proxies; an extra
+        parent shell would orphan the proxy inside the fleet process group.
+        """
+        body = r"""
+acquire_registry_recovery_lock "$REGISTRY" || exit 7
+flyctl proxy 1:2 fdaa::1 -a fixture-app &
+pid=$!
+for _ in $(seq 1 100); do
+    args="$(tr '\0' ' ' < /proc/$pid/cmdline 2>/dev/null)"
+    case "$args" in sleep\ 30*) break ;; esac
+    sleep 0.05
+done
+case "$args" in sleep\ 30*) ;; *) echo "pid $pid is '$args'" >&2; exit 13 ;; esac
+kill -TERM "$pid"; wait "$pid" 2>/dev/null
+release_registry_recovery_lock "$REGISTRY"
+"""
+        result = subprocess.run(["bash", "-c", self._script(body)], env=self.env,
+                                capture_output=True, text=True, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_release_restores_path_and_removes_shim(self) -> None:
+        body = """
+before="$PATH"
+acquire_registry_recovery_lock "$REGISTRY" || exit 7
+[ "$(type -P flyctl)" != "$FAKE_BIN/flyctl" ] || exit 15
+release_registry_recovery_lock "$REGISTRY"
+[ "$PATH" = "$before" ] || exit 16
+[ "$(type -P flyctl)" = "$FAKE_BIN/flyctl" ] || exit 17
+[ -z "${CLOUDBENCH_FLYCTL_CLOSE_FD:-}" ] || exit 18
+"""
+        env = dict(self.env, FAKE_BIN=str(Path(self.env["PATH"].split(":", 1)[0])))
+        result = subprocess.run(["bash", "-c", self._script(body)], env=env,
+                                capture_output=True, text=True, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        shims = list(Path(self.tmp.name).glob("tmp/cloudbench-guard-flyctl.*"))
+        self.assertEqual(shims, [])
 
 
 if __name__ == "__main__":

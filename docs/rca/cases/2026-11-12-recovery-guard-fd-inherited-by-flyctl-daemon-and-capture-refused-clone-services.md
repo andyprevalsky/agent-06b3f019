@@ -56,10 +56,17 @@ stranded PR #1788 owner a8a15138. No supported path could finish recovery.
 
 ## Solution
 
-- `run-bench-fleet` defines a `flyctl` wrapper that closes
-  `REGISTRY_RECOVERY_GUARD_FD` for every flyctl spawn. Python helpers that
-  verify the guard still receive it via `--guard-fd`; the recoverer's own lock
-  still fences concurrent captures (both asserted).
+- While the guard is held, `run-bench-fleet` puts a private PATH shim in front
+  of `flyctl`. The shim closes that one fd and then `exec`s the real flyctl, so
+  the process tree, `$!` and argv stay exactly those of flyctl. Releasing the
+  guard restores PATH and removes the shim. Python helpers that verify the
+  guard still receive it via `--guard-fd`, and the recoverer's own lock still
+  fences concurrent captures (both asserted).
+- A first attempt used a bash `flyctl()` function. It failed the
+  cloudbench-controller multi-workstream gate ("detached terminal status
+  arrived before its owned group drained"). For `flyctl proxy … &`, `$!` became
+  a bash subshell, so TERMing the metrics proxy orphaned the real proxy inside
+  the fleet's process group. The regression asserts that `$!` is flyctl itself.
 - The capture admits well-formed `services` by default: removed only for the
   inert boot, restored byte-exact, recorded as `services_isolated` in the
   zero-credit provenance. Malformed services and other startup mechanisms stay
@@ -75,6 +82,8 @@ None recorded.
 ## Reusable lesson
 
 A lock held on a Bash fd is inherited by every child, so any daemonizing child
-(flyctl agent, ssh master) must be spawned with that fd closed; and a safety
+(flyctl agent, ssh master) must be spawned with that fd closed, by an exec-based
+shim rather than a shell function (a function changes `$!` for background
+jobs); and a safety
 mode required for every real input must be the default, not an opt-in flag
 that the recovery hint never mentions.

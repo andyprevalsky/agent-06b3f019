@@ -51,6 +51,7 @@ import {
   recordPendingMint,
   observePendingUnusedMint,
 } from './treasury-rails-pending-mints';
+import { quarantine } from '../helpers/quarantine';
 
 loadDotenvWithCallerOverrides();
 
@@ -454,7 +455,24 @@ async function main(): Promise<void> {
   console.log('\ntreasury-rails blackbox: all checks passed');
 }
 
-void main().catch((error: unknown) => {
+// FLAKY occurrence dccaf8c71a0e4563890dbc702bd0b3e7 (PR #1990, NOT_INTRODUCED): AgentCard's sandbox
+// Organization MCP answered recover_funds with HTTP 429 through the whole retry budget; the domain
+// passed its rerun. The run still executes and reports; the post-merge repair owns the rate limit.
+const treasuryRailsUnit = 'treasury-rails';
+const runTreasuryRails = quarantine(
+  {
+    since: '2026-11-12',
+    repair: 'pending-handoff:dccaf8c71a0e4563890dbc702bd0b3e7',
+    error:
+      'treasury-rails blackbox FAILED: AgentCard Organization MCP rate limit exhausted for recover_funds after 3 attempts; upstream: AgentCard Organization MCP recover_funds is rate limited: recover_funds failed: Too many requests, please try again later',
+    evidence:
+      'PR #1990 backend-coverage-blackbox initial round 2 on 2e2b4318 (blackbox:treasury-rails FLAKY, rerun passed)',
+  },
+  main,
+  { unit: treasuryRailsUnit }
+);
+
+void runTreasuryRails().catch((error: unknown) => {
   const message = error instanceof Error ? error.message : String(error);
   // Mid-flight AgentCard org OAuth/token outages (after the initial wallet probe) are the same
   // credential-infra precondition as a failed first call — soft-skip rather than fail the gate.
