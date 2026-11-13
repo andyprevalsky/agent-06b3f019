@@ -77,30 +77,9 @@
     "scripts/__pycache__/": "reproducible",
     "scripts/lib/__pycache__/": "reproducible"
   },
-  "live_processes": [
-    {
-      "argv": "/bin/bash -c source /home/boxes/.claude/shell-snapshots/snapshot-bash-1794462026302-4n9lmv.sh 2>/dev/null || true && shopt -u extglob 2>/dev/null || true && { \\builtin unalias -- 'which'; \\builtin uns",
-      "cwd": "/home/boxes/rose",
-      "pid": 267196
-    },
-    {
-      "argv": "cut -c1-150",
-      "cwd": "/home/boxes/rose",
-      "pid": 267197
-    },
-    {
-      "argv": "ugrep -G --ignore-files --hidden -I --exclude-dir=.git --exclude-dir=.svn --exclude-dir=.hg --exclude-dir=.bzr --exclude-dir=.jj --exclude-dir=.sl -E DEPLOY_DELETION",
-      "cwd": "/home/boxes/rose",
-      "pid": 267199
-    }
-  ],
+  "live_processes": [],
   "manifest": "docs/handoffs/pr-1972-closeout/closeout-manifest.json",
-  "open_items": [
-    "uncommitted changes in /home/boxes/rose: docs/handoffs/pr-1947-closeout/deletion-readiness.json, docs/handoffs/pr-1972-closeout/deletion-readiness.json",
-    "live process 267196 in this checkout: /bin/bash -c source /home/boxes/.claude/shell-snapshots/snapshot-bash-1794462026302-4n9lmv.sh 2>/dev/null || true && shopt -u extglob 2>/dev/null || true && { \\builtin unalias -- 'which'; \\builtin uns",
-    "live process 267197 in this checkout: cut -c1-150",
-    "live process 267199 in this checkout: ugrep -G --ignore-files --hidden -I --exclude-dir=.git --exclude-dir=.svn --exclude-dir=.hg --exclude-dir=.bzr --exclude-dir=.jj --exclude-dir=.sl -E DEPLOY_DELETION"
-  ],
+  "open_items": [],
   "pr": 1972,
   "preserved_refs": {
     "branch:backup/cerebras-chat-quota-prepush-20261002": {
@@ -118,7 +97,7 @@
       "tip": "0e2ffe95ba40a2d0c2b8ae9e884b4a85d96af3f2"
     }
   },
-  "ready": false,
+  "ready": true,
   "worktrees": [
     {
       "branch": "refs/heads/records/pr-1972-closeout",
@@ -126,10 +105,7 @@
       "locked": false,
       "needs_integration": false,
       "path": "/home/boxes/rose",
-      "uncommitted": [
-        "docs/handoffs/pr-1947-closeout/deletion-readiness.json",
-        "docs/handoffs/pr-1972-closeout/deletion-readiness.json"
-      ],
+      "uncommitted": [],
       "unpushed_commits": 0
     }
   ]
