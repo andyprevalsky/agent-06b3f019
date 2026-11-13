@@ -16409,13 +16409,34 @@ for suffix in ('raw','stderr'):
 with os.fdopen(os.open(name+'.json', os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW, 0o600),'w') as stream:
     json.dump(value,stream,sort_keys=True);stream.write('\n');stream.flush();os.fsync(stream.fileno())
 PY_SOURCE_READ
-        [ "$rc" = 0 ] && [ "$(date +%s)" -lt "$deadline" ] || return 1
+        [ "$(date +%s)" -lt "$deadline" ] || return 1
+        # A journaled nonzero CLI exit (for example an HTTP/2 stream
+        # INTERNAL_ERROR under a 14-job cohort) is a transient failed read:
+        # 75 lets the bounded loop re-observe. A wrapper timeout (142) and any
+        # guard/journal failure above stay fail-closed.
+        if [ "$rc" != 0 ]; then
+            [ "$rc" != 142 ] || return 1
+            echo "⚠️  provider inventory read failed: $kind exit $rc (read $attempt/12)" >&2
+            return 75
+        fi
         validation_raw="$record.raw"
     }
+    private_source_validation_pause() {
+        # Same consistency envelope as list_donor_snapshots, never a new task
+        # deadline. A valid [] or failed read is unavailable observation, not
+        # absence proof.
+        pause=$((attempt * 5)); [ "$pause" -le 30 ] || pause=30
+        pause=$((pause + RANDOM % 4))
+        remaining=$((deadline - $(date +%s)))
+        [ "$remaining" -gt 0 ] || return 1
+        [ "$pause" -le "$remaining" ] || pause="$remaining"
+        sleep "$pause"
+    }
     for attempt in $(seq 1 12); do
-        private_source_validation_read snapshots volume snapshots list "$PRIVATE_SOURCE_VOLUME_ID" -a "$APP" --json || return 1
         status=0
-        python3 - "$SOURCE_HELPER" "$PRIVATE_SOURCE_FILE" "$PRIVATE_SOURCE_SHA256" "$validation_raw" <<'PY_SOURCE_SNAPSHOTS' || status=$?
+        private_source_validation_read snapshots volume snapshots list "$PRIVATE_SOURCE_VOLUME_ID" -a "$APP" --json || status=$?
+        if [ "$status" = 0 ]; then
+            python3 - "$SOURCE_HELPER" "$PRIVATE_SOURCE_FILE" "$PRIVATE_SOURCE_SHA256" "$validation_raw" <<'PY_SOURCE_SNAPSHOTS' || status=$?
 import hashlib, json, pathlib, runpy, sys
 try:
     helper=runpy.run_path(sys.argv[1]);raw=pathlib.Path(sys.argv[2]).read_bytes()
@@ -16427,26 +16448,23 @@ try:
 except (ValueError, TypeError, KeyError, OSError, AssertionError):
     print('private fleet source validation failed: snapshot inventory refused',file=sys.stderr);raise SystemExit(1)
 PY_SOURCE_SNAPSHOTS
-        if [ "$status" = 0 ]; then snapshot_raw="$validation_raw"; break; fi
-        [ "$status" = 75 ] || return 1
-        if [ "$attempt" = 12 ]; then
-            echo 'private fleet source validation failed: snapshot inventory remained empty after 12 bounded reads' >&2
-            return 1
+            [ "$status" != 75 ] || [ "$attempt" != 12 ] \
+                || echo 'private fleet source validation failed: snapshot inventory remained empty after 12 bounded reads' >&2
         fi
-        # Same consistency envelope as list_donor_snapshots, never a new task
-        # deadline. A valid [] is unavailable observation, not absence proof.
-        pause=$((attempt * 5)); [ "$pause" -le 30 ] || pause=30
-        pause=$((pause + RANDOM % 4))
-        remaining=$((deadline - $(date +%s)))
-        [ "$remaining" -gt 0 ] || return 1
-        [ "$pause" -le "$remaining" ] || pause="$remaining"
-        sleep "$pause"
+        if [ "$status" = 0 ]; then
+            snapshot_raw="$validation_raw"
+            # Refresh identity/storage AFTER the successful snapshot observation.
+            private_source_validation_read machines machines list -a "$APP" --json || status=$?
+            [ "$status" != 0 ] || machines_raw="$validation_raw"
+        fi
+        if [ "$status" = 0 ]; then
+            private_source_validation_read volumes volumes list -a "$APP" --json || status=$?
+            [ "$status" != 0 ] || volumes_raw="$validation_raw"
+        fi
+        [ "$status" != 0 ] || break
+        [ "$status" = 75 ] && [ "$attempt" != 12 ] || return 1
+        private_source_validation_pause || return 1
     done
-    # Refresh identity/storage AFTER the successful snapshot observation.
-    private_source_validation_read machines machines list -a "$APP" --json || return 1
-    machines_raw="$validation_raw"
-    private_source_validation_read volumes volumes list -a "$APP" --json || return 1
-    volumes_raw="$validation_raw"
     if [ "${PRIVATE_SOURCE_LEASE_PROTOCOL:-none}" != none ]; then
         private_source_lease_guard || return 1
     fi

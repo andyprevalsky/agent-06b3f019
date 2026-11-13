@@ -327,7 +327,6 @@ else:raise SystemExit('unexpected provider operation')
         variants=[('wrong',json.dumps([dict(rows[0],id='vs_foreign')]).encode(),{}),
                   ('duplicate',json.dumps([rows[0],rows[0]]).encode(),{}),
                   ('malformed',b'{not-json',{}),('null',b'null',{}),
-                  ('provider-exit',self.EMPTY,{'provider_exit':7}),
                   ('manifest',self.HEALTHY,{'tamper_manifest':True}),
                   ('guardian',self.EMPTY,{'guardian_lost':True})]
         for name,body,kwargs in variants:
@@ -336,6 +335,15 @@ else:raise SystemExit('unexpected provider operation')
                 self.assertNotEqual(result.returncode,0)
                 self.assertEqual(len(calls),1)
                 self.assertEqual(files['01-snapshots.raw'],body)
+        # A failed CLI read is a transient unavailable observation (main's
+        # HTTP/2 INTERNAL_ERROR re-read): each failure is journaled, re-read on
+        # the same bounded attempts/backoff/deadline, and still fails closed.
+        result,calls,files,*_=self.validation([self.EMPTY,self.HEALTHY],provider_exit=7)
+        self.assertNotEqual(result.returncode,0)
+        self.assertEqual(len(calls),12);self.assertTrue(all(v[:3]==['volume','snapshots','list'] for v in calls))
+        self.assertIn('provider inventory read failed: snapshots exit 7 (read 12/12)',result.stderr)
+        self.assertEqual([json.loads(files['%02d-snapshots.json'%i])['exit_code'] for i in range(1,13)],[7]*12)
+        self.assertNotIn('verify.status',files)
         for journal in ('symlink','reused'):
             with self.subTest(journal=journal):
                 result,calls,*_=self.validation([self.HEALTHY],journal=journal)

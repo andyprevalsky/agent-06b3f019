@@ -105,6 +105,19 @@ UNITTEST_RAN = re.compile(r"^Ran (\d+) tests? in ", re.M)
 UNITTEST_OK = re.compile(r"^OK(?: \(([^)]*)\))?\s*$", re.M)
 
 
+def flaky_detail(labels: Sequence[str], first_outputs: Sequence[str]) -> str:
+    """FLAKY progress detail: the last failed first attempt, ending with EVERY flaky shard's failure headers.
+
+    The progress row keeps only the detail's tail (deploy_gate_progress.DETAIL_LIMIT); a long traceback
+    would otherwise cut the "FAIL: name (module.Class.name)" lines that suite-level /RCA attribution
+    matches against the quarantine marker (deploy_test_quarantine.failed_unittest_names), and a suite
+    with several flaky shards must name all of their failures so each one needs attribution.
+    """
+    headers = [m.group(0) for output in first_outputs for m in UNITTEST_FAILURE.finditer(output)]
+    tail = ("\nfailed unittest headers:\n" + "\n".join(headers)) if headers else ""
+    return f"passed on rerun: {', '.join(labels)}\n" + (first_outputs[-1] if first_outputs else "") + tail
+
+
 def failed_unittest_ids(command: Sequence[str], output: str) -> tuple[str, ...]:
     """The exact unittest ids to rerun, or () when the output does not name every failure.
 
@@ -419,6 +432,7 @@ PROC_OBSERVATION = "proc-observation"
 
 GATES = (
     Gate("deploy-test-cycle", ("python3", "scripts/tests/deploy-test-cycle.test.py"), exclusive=PROC_OBSERVATION),
+    Gate("deploy-test-user-omission", ("python3", "scripts/tests/deploy-test-user-omission.test.py")),
     Gate("deploy-test-plan", ("python3", "scripts/tests/deploy-test-plan.test.py"), exclusive=PROC_OBSERVATION),
     Gate("deploy-test-worker", ("python3", "scripts/tests/deploy-test-worker.test.py")),
     Gate("deploy-test-semantic", ("python3", "scripts/tests/deploy-test-semantic.test.py")),
@@ -429,6 +443,7 @@ GATES = (
     Gate("deploy-cloud-smoke-speed", ("python3", "scripts/tests/deploy-cloud-smoke-speed.test.py")),
     Gate("deploy-gate-progress", ("python3", "scripts/tests/deploy-gate-progress.test.py")),
     Gate("deploy-test-quarantine", ("python3", "scripts/tests/deploy-test-quarantine.test.py")),
+    Gate("cloudbench-private-source-snapshot-read", ("python3", "scripts/tests/cloudbench-private-source-snapshot-read.test.py")),
     # In-definition @quarantine marker (scripts/lib/test_quarantine.py): runs, never blocks.
     Gate("test-quarantine", ("python3", "scripts/tests/test-quarantine.test.py")),
     Gate("deploy-prod", ("python3", "scripts/tests/deploy-prod.test.py")),
@@ -973,7 +988,7 @@ def run_gates(
                             report_progress(
                                 suite,
                                 "FLAKY",
-                                detail=f"passed on rerun: {', '.join(suite_flaky)}\n" + flaky[suite_flaky[-1]],
+                                detail=flaky_detail(suite_flaky, [flaky[label] for label in suite_flaky]),
                                 # The failed first attempt is the evidence /RCA attributes.
                                 log=str(output_root / (suite_flaky[-1].replace("/", "-of-") + ".log")),
                             )

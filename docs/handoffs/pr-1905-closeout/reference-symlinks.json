@@ -1,0 +1,50 @@
+[
+  {
+    "path": "codex/codex-rs/vendor/bubblewrap/LICENSE",
+    "target": "COPYING",
+    "exists": true,
+    "target_member_count": 1
+  },
+  {
+    "path": "openclaw/apps/macos/Tests/OpenClawIPCTests/GatewayTLSStoreFixture.swift",
+    "target": "../../../shared/OpenClawKit/Tests/OpenClawKitTests/GatewayTLSStoreFixture.swift",
+    "exists": true,
+    "target_member_count": 1
+  },
+  {
+    "path": "openclaw/extensions/lmstudio/CLAUDE.md",
+    "target": "AGENTS.md",
+    "exists": true,
+    "target_member_count": 1
+  },
+  {
+    "path": "openclaw/extensions/ollama/CLAUDE.md",
+    "target": "AGENTS.md",
+    "exists": true,
+    "target_member_count": 1
+  },
+  {
+    "path": "openclaw/extensions/vllm/CLAUDE.md",
+    "target": "AGENTS.md",
+    "exists": true,
+    "target_member_count": 1
+  },
+  {
+    "path": "openclaw/extensions/litellm/CLAUDE.md",
+    "target": "AGENTS.md",
+    "exists": true,
+    "target_member_count": 1
+  },
+  {
+    "path": "openclaw/.claude/skills",
+    "target": "../.agents/skills",
+    "exists": true,
+    "target_member_count": 239
+  },
+  {
+    "path": "kimi-code/CLAUDE.md",
+    "target": "AGENTS.md",
+    "exists": true,
+    "target_member_count": 1
+  }
+]

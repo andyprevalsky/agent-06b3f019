@@ -1,7 +1,17 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'crypto';
-import { provePortraitRoute } from '../../providers/phonePortraitRoute';
-import { portraitRouteEvents, seedPortraitRoute } from './iphone-portrait-route.fixture';
+import {
+  portraitRouteBreakAt,
+  portraitRouteVerdict,
+  provePortraitRoute,
+} from '../../providers/phonePortraitRoute';
+import {
+  portraitRouteCommands,
+  portraitRouteEvents,
+  seedPortraitCommands,
+  seedPortraitRoute,
+  unchangedSearchRows,
+} from './iphone-portrait-route.fixture';
 import { portraitFrame, portraitOcr } from './iphone-portrait.fixture';
 import { freshSetup, observe, setupPost, type SetupDto } from './iphone-control.setup-fixtures';
 import type { Case } from './iphone-control.cases';
@@ -21,6 +31,32 @@ portraitRouteCases.push([
         provePortraitRoute(portraitRouteEvents(original), context)?.originalAssistiveTouch,
         original
       );
+    for (const original of ['on', 'off'] as const)
+      assert.equal(
+        provePortraitRoute(portraitRouteEvents(original, 'production'), context)
+          ?.originalAssistiveTouch,
+        original,
+        'Documented production launch/text shapes rejected'
+      );
+    for (const original of ['on', 'off'] as const)
+      assert.equal(
+        provePortraitRoute(portraitRouteEvents(original, 'production-cold'), context)
+          ?.originalAssistiveTouch,
+        original,
+        'Cold Settings relaunch (fresh: true) rejected'
+      );
+    const production = portraitRouteEvents('off', 'production');
+    for (const change of [
+      (e: typeof production) => (e[0].args = { name: 'Settings', fresh: 'yes' }),
+      (e: typeof production) => (e[0].args = { name: 'Settings', fresh: false, url: 'x' }),
+      (e: typeof production) => (e[0].result = 'com.apple.mobileslideshow'),
+      (e: typeof production) => (e[4].args = { s: 'AssistiveTouch', delay: 'x' }),
+      (e: typeof production) => (e[4].args = { s: 'AssistiveTouch', submit: true }),
+    ]) {
+      const route = structuredClone(production);
+      change(route);
+      assert.equal(provePortraitRoute(route, context), null, 'Production shape accepted mutation');
+    }
     const split = structuredClone(portraitRouteEvents());
     const menu = split[split.length - 3].result as Array<{
       text: string;
@@ -156,6 +192,11 @@ for (const app of ['Photos', 'Safari'] as const)
         requestKey: randomUUID(),
       });
       assert.equal(result.data.operation?.status, 'FAILED');
+      assert.equal(
+        result.data.operation?.errorCode,
+        'phone_portrait_route_unproven',
+        'Unproven native route was reported as a generic verifier outage'
+      );
       assert.equal(h.calls.length, before, 'Missing native route crossed into private capture');
       const check = (
         result.data.setup as { verification: { checks: { portrait_lock: { status: string } } } }
@@ -228,5 +269,133 @@ portraitRouteCases.push([
       (on.data.operation as unknown as Record<string, unknown>).portraitActionHint,
       undefined
     );
+  },
+]);
+for (const [original, shape] of [
+  ['on', 'production'],
+  ['off', 'production'],
+  ['off', 'production-cold'],
+] as const)
+  portraitRouteCases.push([
+    `portrait verify proves the ${shape}-shaped native route (original ${original})`,
+    async (h) => {
+      const f = await freshSetup(h);
+      h.framePng = portraitFrame(original === 'on');
+      h.observationResult = portraitOcr();
+      await seedPortraitRoute(h, f, original, shape);
+      const evidence = await observe(h, f);
+      const result = await setupPost(h, f, {
+        action: 'verify',
+        verificationTarget: 'portrait_lock',
+        attemptId: f.setup.attemptId,
+        expectedRevision: f.setup.revision,
+        expectedCursor: evidence.cursor,
+        evidenceOperationIds: [evidence.id],
+        requestKey: randomUUID(),
+      });
+      assert.equal(result.data.operation?.errorCode, null);
+      assert.equal(result.data.operation?.status, 'SUCCEEDED');
+      assert.equal(
+        (result.data.setup as { verification: { checks: { portrait_lock: { status: string } } } })
+          .verification.checks.portrait_lock.status,
+        original === 'on' ? 'confirmed' : 'disabled'
+      );
+    },
+  ]);
+
+type RouteBreak = { stage: string; cursor: number; operation: string; next: string };
+const routeBreakCases: Array<
+  [string, (c: ReturnType<typeof portraitRouteCommands>) => void, string, RegExp]
+> = [
+  [
+    'a lost AssistiveTouch query (search field unchanged after typing)',
+    (c) => {
+      const typed = c.findIndex((e) => e.operation === 'input.text');
+      c.splice(typed + 1, c.length, {
+        operation: 'screen.text',
+        args: { min_confidence: 0.3 },
+        result: unchangedSearchRows(),
+      });
+    },
+    'results',
+    /keystrokes.*true/,
+  ],
+  [
+    'an AssistiveTouch label tap where the switch was required',
+    (c) => {
+      const toggle = c.findIndex((e) => e.operation === 'input.tap' && e.args.x === 645);
+      c.splice(toggle, c.length, {
+        operation: 'input.tap',
+        args: { x: 177, y: 271 },
+        result: true,
+      });
+    },
+    'toggle',
+    /switch/,
+  ],
+];
+for (const [label, deviate, stage, next] of routeBreakCases)
+  portraitRouteCases.push([
+    `portrait verify names the exact route break for ${label}`,
+    async (h) => {
+      const f = await freshSetup(h);
+      h.framePng = portraitFrame(false);
+      h.observationResult = portraitOcr();
+      const commands = portraitRouteCommands('off', 'production-cold');
+      deviate(commands);
+      await seedPortraitCommands(h, f, commands);
+      const evidence = await observe(h, f);
+      const before = h.calls.length;
+      const result = await setupPost(h, f, {
+        action: 'verify',
+        verificationTarget: 'portrait_lock',
+        attemptId: f.setup.attemptId,
+        expectedRevision: f.setup.revision,
+        expectedCursor: evidence.cursor,
+        evidenceOperationIds: [evidence.id],
+        requestKey: randomUUID(),
+      });
+      assert.equal(result.data.operation?.status, 'FAILED');
+      assert.equal(result.data.operation?.errorCode, 'phone_portrait_route_unproven');
+      assert.equal(h.calls.length, before, 'Unproven route crossed into private capture');
+      const routeBreak = (result.data.operation?.result as { portraitRoute?: RouteBreak } | null)
+        ?.portraitRoute;
+      assert.ok(routeBreak, 'Unproven route did not name where it broke');
+      assert.equal(routeBreak.stage, stage);
+      assert.ok(Number.isSafeInteger(routeBreak.cursor) && routeBreak.cursor > 0);
+      assert.match(routeBreak.next, next);
+      assert.match(routeBreak.next, /new Settings launch/);
+    },
+  ]);
+portraitRouteCases.push([
+  'portrait route break names the breaking event, keeping an earlier break over a later invalid row',
+  async () => {
+    const context = {
+      attemptId: 'attempt',
+      revision: 1,
+      firstRun: 'firstRun',
+      profileRevision: 1,
+      now: Date.now(),
+    };
+    const badLaunch = structuredClone(portraitRouteEvents('off', 'production'));
+    badLaunch[0].result = 'com.apple.mobileslideshow';
+    const launchVerdict = portraitRouteVerdict(badLaunch, context);
+    assert.ok('break' in launchVerdict);
+    assert.equal(launchVerdict.break.cursor, badLaunch[0].cursor, 'Invalid launch not named');
+    assert.equal(launchVerdict.break.operation, 'apps.launch');
+
+    const lost = structuredClone(portraitRouteEvents('off', 'production'));
+    const typed = lost.findIndex((e) => e.operation === 'input.text');
+    lost[typed + 1].result = unchangedSearchRows();
+    const prefix = lost.slice(0, typed + 4);
+    const later = { cursor: prefix.at(-1)!.cursor + 1, operation: 'input.tap' };
+    const kept = portraitRouteBreakAt(prefix, context, later);
+    assert.equal(kept.stage, 'results', 'Later invalid row hid the earlier semantic break');
+    assert.equal(kept.cursor, lost[typed + 1].cursor);
+
+    const valid = portraitRouteEvents('off', 'production').slice(0, typed + 2);
+    const reached = portraitRouteBreakAt(valid, context, later);
+    assert.equal(reached.cursor, later.cursor, 'Invalid row not reported after a valid prefix');
+    assert.equal(reached.stage, 'result_tap');
   },
 ]);

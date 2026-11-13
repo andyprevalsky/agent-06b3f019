@@ -14,6 +14,14 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import deploy_test_plan as p
+import importlib.util as _quarantine_util
+
+# scripts/test_quarantine.py (the CLI) already owns the `test_quarantine` module name here.
+_quarantine_spec = _quarantine_util.spec_from_file_location(
+    'lib_test_quarantine', Path(__file__).resolve().parents[1] / 'lib' / 'test_quarantine.py')
+_quarantine_module = _quarantine_util.module_from_spec(_quarantine_spec)
+_quarantine_spec.loader.exec_module(_quarantine_module)
+quarantine = _quarantine_module.quarantine
 
 
 class Selection(unittest.TestCase):
@@ -1206,6 +1214,9 @@ for line in sys.stdin:
                     self.scan()
                 self.reap(child)
 
+    @quarantine(since='2026-11-11', repair='pending-handoff:7a087289ad244447887849683a096b6e',
+                error="AssertionError: [0.05] is not false : the service manager is skipped on evidence, not after the grace window",
+                evidence='PR #1928 deploy-command-structural FLAKY occurrence 7a087289ad244447887849683a096b6e (source 622d4e979)')
     def test_own_user_service_manager_is_skipped_only_on_cgroup_evidence(self):
         # The Blacksmith failure (SHA 7b243b4ec, InterruptedCardRecovery / StructuralSupervisorCleanup): the
         # runner's `systemd --user` and `(sd-pam)` share our uid but are permanently non-dumpable, so cwd/fd

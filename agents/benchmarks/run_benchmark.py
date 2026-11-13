@@ -3755,6 +3755,9 @@ async def _wait_for_expected_payment_lifecycle(
 
 
 PAYMENT_CLEANUP_TIMEOUT_SECONDS = 180
+# Owned-cleanup release-stall observations run inside PAYMENT_CLEANUP_TIMEOUT_SECONDS
+# at the task reconciliation poll cadence; they never extend that deadline.
+PAYMENT_CLEANUP_STALL_OBSERVATION_SECONDS = 10
 # Matches the existing stale RECLAIMING lease in purchaseCleanup.ts. This is
 # retry eligibility within the unchanged 420-second reconciliation window.
 PAYMENT_RECLAIM_RETRY_AFTER_SECONDS = 120
@@ -5818,7 +5821,8 @@ async def _poll_agent(
                                     "expected_gate": gate,
                                     "expected_gate_request_id": req_id,
                                 }
-                                print(f"    💳 Completing hosted Stripe Checkout for gate {req_id[:8]}")
+                                print(f"    💳 Completing hosted Stripe Checkout for gate {req_id[:8]} "
+                                      f"layout={urlparse(checkout_url).path[:7]}")
                                 try:
                                     checkout = await complete_test_subscription_checkout(
                                         base_url,
@@ -5836,7 +5840,8 @@ async def _poll_agent(
                                     )
                                 subscription_checkout_evidence = checkout
                                 data["_benchmark"]["subscription_checkout"] = checkout
-                                print(f"    ✅ Completed paid Stripe test Checkout {checkout['session_id'][:18]}")
+                                print(f"    ✅ Completed paid Stripe test Checkout {checkout['session_id'][:18]} "
+                                      f"layout=/{checkout.get('checkout_layout')}/pay/")
                                 continue
                             if task.expected_gate and _gate_request_matches_task(task, req):
                                 expected_gate_evidence = {
@@ -7035,9 +7040,38 @@ async def _refresh_browser_archive_snapshot(
             await asyncio.sleep(min(2, max(0, deadline - time.monotonic())))
 
 
-async def _finalize_owned_root_payments(base_url: str, root_id: str, evidence: dict) -> dict:
-    """Drain admitted purchases through canonical compensation before DB teardown."""
+async def _observe_owned_release_stall(base_url: str, pending: list[dict], evidence: dict) -> None:
+    """Record one complete lifecycle observation of the still-reclaiming owned purchases.
+
+    Lifecycle reads join provider views, and AgentCard intermittently rejects the healthy
+    org token. A failed read keeps the previous complete observation; the final ledger
+    must still match it before the release-stall warning can apply.
+    """
+    lifecycles = {}
+    try:
+        for agent_id in sorted({row["agent_id"] for row in pending}):
+            lifecycles[agent_id] = await get_test_payment_lifecycle(base_url, agent_id)
+    except Exception as error:
+        evidence["agentcard_release_stall_read_errors"] = evidence.get("agentcard_release_stall_read_errors", 0) + 1
+        evidence["agentcard_release_stall_last_read_error"] = str(error) or type(error).__name__
+        return
+    evidence["agentcard_release_stall_observation"] = {
+        "observed_at": datetime.now(timezone.utc).isoformat(),
+        "lifecycles": lifecycles,
+    }
+
+
+async def _finalize_owned_root_payments(
+    base_url: str, root_id: str, evidence: dict, *, observe_release_stall: bool = False
+) -> dict:
+    """Drain admitted purchases through canonical compensation before DB teardown.
+
+    A stalled AgentCard release always runs this drain to its deadline. For a task the
+    release waiver covers, observe the reclaiming purchases inside the same deadline so
+    the stall proof never rests on one provider read issued after it.
+    """
     attempted = set()
+    next_stall_observation = 0.0
     async with asyncio.timeout(PAYMENT_CLEANUP_TIMEOUT_SECONDS):
         while True:
             snapshot = await asyncio.to_thread(
@@ -7071,17 +7105,33 @@ async def _finalize_owned_root_payments(base_url: str, root_id: str, evidence: d
             if errors:
                 raise RuntimeError("; ".join(errors))
             if not new_attempts:
+                if (
+                    observe_release_stall
+                    and time.monotonic() >= next_stall_observation
+                    and all(row["status"] == "HELD" and row["funding_status"] == "RECLAIMING" for row in pending)
+                ):
+                    next_stall_observation = time.monotonic() + PAYMENT_CLEANUP_STALL_OBSERVATION_SECONDS
+                    await _observe_owned_release_stall(base_url, pending, evidence)
                 await asyncio.sleep(2)
 
 
 async def _owned_payments_release_stalled(base_url: str, evidence: dict, *, task_name: str) -> bool:
-    """Every still-pending owned purchase is waiting only on AgentCard release in the expected mode."""
+    """Every still-pending owned purchase is waiting only on AgentCard release in the expected mode.
+
+    Prefer the observation made inside the cleanup deadline; the final ledger rows must
+    still match it exactly. Read afresh only when no such observation exists.
+    """
     try:
         pending = cloud_batch_cleanup.pending_root_payments(evidence.get("payment_snapshot") or {})
     except Exception:
         return False
+    observation = evidence.get("agentcard_release_stall_observation")
+    observed = observation.get("lifecycles") if isinstance(observation, dict) else None
     lifecycles = {}
     for agent_id in sorted({row["agent_id"] for row in pending}):
+        if isinstance(observed, dict) and isinstance(observed.get(agent_id), dict):
+            lifecycles[agent_id] = observed[agent_id]
+            continue
         try:
             lifecycles[agent_id] = await get_test_payment_lifecycle(base_url, agent_id)
         except Exception:
@@ -7436,7 +7486,16 @@ async def _finalize_owned_cloud_batch(base_url: str, results: list, live_ids: di
                 try:
                     if before is None:
                         raise RuntimeError("exact payment ownership was not established")
-                    logs["cloud_payment_cleanup"] = await _finalize_owned_root_payments(base_url, aid, evidence)
+                    logs["cloud_payment_cleanup"] = await _finalize_owned_root_payments(
+                        base_url,
+                        aid,
+                        evidence,
+                        observe_release_stall=(
+                            result is not None
+                            and _agentcard_release_skip_task(result.name)
+                            and _agentcard_release_skip_enabled()
+                        ),
+                    )
                 except Exception as error:
                     detail = str(error) or type(error).__name__
                     if (
@@ -12343,7 +12402,7 @@ def _judge_source_tree(data: dict) -> dict:
 def _compact_benchmark_state_for_judge(data: dict) -> dict:
     """Typed tree/usage only — full child transcripts 413 the judge (smoke10)."""
     raw = data.get("_benchmark") if isinstance(data.get("_benchmark"), dict) else {}
-    compact = {key: value for key, value in raw.items() if key not in {"tree", "all_agents", "first_level_gps"}}
+    compact = {key: value for key, value in raw.items() if key not in {"tree", "all_agents", "first_level_gps", "judge_audits"}}
     tree = _judge_source_tree(data)
     compact_tree: dict[str, dict] = {}
     if tree:
@@ -12730,14 +12789,6 @@ async def _call_declared_agentic_llm_judge(
     judge_agent_id = str(uuid.uuid4())
     tool_call_id = str(uuid.uuid4())
     code_provider = await _agentic_judge_code_provider(user_id)
-    token_data: dict[str, Any] = {}
-    if code_provider == "codex":
-        try:
-            token_data = await _fetch_agentic_judge_compute_token(user_id, judge_agent_id) or {}
-        except httpx.HTTPError as exc:
-            # Optional verifier auth: the spawn leases the CLI credential itself.
-            print(f"    ⚠ Agentic judge GPT token fetch failed ({type(exc).__name__}); continuing without it")
-
     if getattr(task, "process_spec", None) is not None:
         from benchmarks.process_bench import process_evidence
 
@@ -12752,38 +12803,62 @@ async def _call_declared_agentic_llm_judge(
         "application/json",
     )
 
-    result = await spawn_claude_code_activity(
-        user_id=user_id,
-        agent_id=judge_agent_id,
-        goal=_build_agentic_judge_goal(task, evaluator),
-        tool_call_id=tool_call_id,
-        output_schema=_AGENTIC_JUDGE_OUTPUT_SCHEMA,
-        attachments=[attachment],
-        code_provider=code_provider,
-        gpt_token=token_data.get("accessToken"),
-        gpt_account_id=token_data.get("accountId"),
-        gpt_token_source=token_data.get("source"),
-        gpt_token_pool_id=token_data.get("poolTokenId"),
-        fast_mode_cache_enabled=False,
-    )
-    # The preflight plan can still empty before the spawn leases (or the CLI hits a usage
-    # limit mid-judge). Every subscription and funded path exhausted is a compute-token
-    # SKIP (Andy 2026-10-25), never a no-verdict 0.0 task FAIL.
-    if result.get("failure_kind") == "no_credentials" or result.get("usage_limit"):
-        raise ComputeTokenUnavailable(
-            "Codex compute token unavailable for agentic benchmark judge: "
-            "the spawn found every subscription and funded credential exhausted"
-        )
+    from benchmarks.judge_identity import judge_identity
+    from config import load_config
 
-    score, reasoning = await _parse_agentic_judge_verdict(result)
-    usage_items = result.get("usage_items") if isinstance(result.get("usage_items"), list) else []
-    usage = aggregate_usage_items(usage_items) if usage_items else None
-    return {
-        "score": score,
-        "reasoning": reasoning,
-        "usage": usage,
-        "judge_audit": _agentic_judge_audit(judge_agent_id, attachment, evidence_bytes),
-    }
+    audit = _agentic_judge_audit(judge_agent_id, attachment, evidence_bytes)
+    data.setdefault("_benchmark", {}).setdefault("judge_audits", []).append(audit)
+    goal = _build_agentic_judge_goal(task, evaluator)
+    async with judge_identity(
+        base_url=load_config().backend.api_url,
+        headers=_internal_api_headers(user_id),
+        agent_id=judge_agent_id,
+        goal=goal,
+        audit=audit,
+    ):
+        token_data: dict[str, Any] = {}
+        if code_provider == "codex":
+            try:
+                token_data = await _fetch_agentic_judge_compute_token(user_id, judge_agent_id) or {}
+            except httpx.HTTPError as exc:
+                # Optional verifier auth: the spawn leases the CLI credential itself.
+                print(f"    ⚠ Agentic judge GPT token fetch failed ({type(exc).__name__}); continuing without it")
+
+        result = await spawn_claude_code_activity(
+            user_id=user_id,
+            agent_id=judge_agent_id,
+            goal=goal,
+            tool_call_id=tool_call_id,
+            output_schema=_AGENTIC_JUDGE_OUTPUT_SCHEMA,
+            attachments=[attachment],
+            code_provider=code_provider,
+            gpt_token=token_data.get("accessToken"),
+            gpt_account_id=token_data.get("accountId"),
+            gpt_token_source=token_data.get("source"),
+            gpt_token_pool_id=token_data.get("poolTokenId"),
+            fast_mode_cache_enabled=False,
+        )
+        # The preflight plan can still empty before the spawn leases (or the CLI hits a usage
+        # limit mid-judge). Every subscription and funded path exhausted is a compute-token
+        # SKIP (Andy 2026-10-25), never a no-verdict 0.0 task FAIL.
+        if result.get("failure_kind") == "no_credentials" or result.get("usage_limit"):
+            raise ComputeTokenUnavailable(
+                "Codex compute token unavailable for agentic benchmark judge: "
+                "the spawn found every subscription and funded credential exhausted"
+            )
+
+        score, reasoning = await _parse_agentic_judge_verdict(result)
+        usage_items = result.get("usage_items") if isinstance(result.get("usage_items"), list) else []
+        usage = aggregate_usage_items(usage_items) if usage_items else None
+        audit["verdict"] = {"score": score, "reasoning": reasoning}
+        audit["usage"] = usage
+        audit["output_files"] = result.get("output_files") or []
+        return {
+            "score": score,
+            "reasoning": reasoning,
+            "usage": usage,
+            "judge_audit": audit,
+        }
 
 
 def _agentic_judge_audit(judge_agent_id: str, attachment: Any, evidence_bytes: bytes) -> dict[str, Any]:

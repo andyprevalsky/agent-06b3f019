@@ -6210,6 +6210,7 @@ def test_post_config_start_rejected_ack_requires_current_guest_proof(
     post_start = post_start[: -len("\n    fi")] + "\n"
     poll = cloud.split('while :; do\n    now="$(date +%s)"', 1)[1]
     poll = poll.split("    # A later chunk", 1)[0]
+    start_helper = _extract_fleet_function(cloud, "boot_launch_start_after_config() {")
     native_calls = tmp_path / "native-start.calls"
     script = f"""set -eu
 source {shlex.quote(str(ENV_HELPER_SCRIPT))}
@@ -6241,6 +6242,7 @@ flyctl() {{
 sleep() {{ :; }}
 stage_explicit_codex_auth() {{ return 0; }}
 ensure_status_proxy() {{ kill -0 "$STATUS_PROXY_PID"; }}
+{start_helper}
 {post_start}
 now="$(date +%s)"
 {poll}
@@ -6292,9 +6294,19 @@ def test_boot_update_always_submits_a_bounded_post_config_start() -> None:
     assert "machine_state" not in post_config_start
     assert "machine_storage_ready" not in post_config_start
     assert "request_machine_start" not in post_config_start
-    assert "CLOUDBENCH_BOOT_START_ATTEMPTS" in post_config_start
-    assert "CLOUDBENCH_BOOT_START_TIMEOUT" in post_config_start
-    assert 'flyctl machine start "$mid"' in post_config_start
+    assert 'if boot_launch_start_after_config "$mid" "$_start_log"; then' in post_config_start
+    # The bounded start helper is the only post-config start path. It must not
+    # consult the shared inventory (which can still say `started`), and both
+    # its ordinary attempt budget and its Fly settle window stay bounded.
+    start_helper = _extract_fleet_function(cloud, "boot_launch_start_after_config() {")
+    assert "machine_state" not in start_helper
+    assert "machine_storage_ready" not in start_helper
+    assert "request_machine_start" not in start_helper
+    assert "CLOUDBENCH_BOOT_START_ATTEMPTS" in start_helper
+    assert "CLOUDBENCH_BOOT_START_TIMEOUT" in start_helper
+    assert "CLOUDBENCH_BOOT_START_SETTLE_SECONDS" in start_helper
+    assert 'flyctl machine start "$id"' in start_helper
+    assert 'flyctl machine wait "$id" -a "$APP" --state settled' in start_helper
     assert 'mv "$POST_CONFIG_START_MARKER.tmp.$$" "$POST_CONFIG_START_MARKER"' in post_config_start
     assert "post-config start accepted" in post_config_start
     claim_start = fleet.index("claim_pool_machine() {")
@@ -14381,6 +14393,11 @@ def test_exact_recovery_reconnects_quarantined_owned_guests_before_provider_reap
             extracted.append(fleet[start:end])
         else:
             extracted.append(_extract_fleet_function(fleet, signature))
+    # PR1910 recovery also releases its lock and closes the source consumer claim.
+    for signature in ("release_registry_recovery_lock() {", "fleet_close_recovered_source_consumer() {",
+                      "exact_recovery_is_pool_only() {", "fleet_recovery_confirm_fresh_prestart() {"):
+        if signature in fleet:
+            extracted.append(_extract_fleet_function(fleet, signature))
     functions = "\n".join(extracted)
     owner = "5a" * 16
     run_id = "20260910-021331-1465409"
@@ -14476,6 +14493,7 @@ def test_exact_recovery_reconnects_quarantined_owned_guests_before_provider_reap
 APP=bench-app
 FLEET_OWNERSHIP_ROOT={shlex.quote(str(ownership_root))}
 FLEET_AUDIT_ROOT={shlex.quote(str(audit_root))}
+CLOUDBENCH_SCRIPT_SNAPSHOT={shlex.quote(str(ROOT / "scripts"))}
 FLEET_OWNER_HOST=test-host
 FLEET_OWNER_PID_START="$(ps -p $$ -o lstart= | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
 FLEET_OWNER_TOKEN={owner}
@@ -18037,6 +18055,10 @@ def test_exact_recovery_hands_volume_only_owned_audit_to_registry_reaper(
             "fleet_registry_remove_if_empty() {",
             "acquire_registry_recovery_lock() {",
             "release_cleanup_disk_reserve() {",
+            "release_registry_recovery_lock() {",
+            "fleet_close_recovered_source_consumer() {",
+            "exact_recovery_is_pool_only() {",
+            "fleet_recovery_confirm_fresh_prestart() {",
             "recover_exact_stale_fleet_owner() {",
         )
     )
@@ -28985,7 +29007,9 @@ def test_migration_resume_preserves_interrupted_pool_handoff(tmp_path: Path, reg
         assert record.read_bytes() == before_record
 
 
-def _private_source_preflight_fixture(tmp_path: Path, *, private: bool = True, corrupt: str = ""):
+def _private_source_preflight_fixture(
+    tmp_path: Path, *, private: bool = True, corrupt: str = "", transient_empty: int = 0, transient_fail: int = 0
+):
     """Replay real source/stop/snapshot/dependency admission without a provider."""
     tmp_path.mkdir(parents=True, exist_ok=True)
     owner = "a" * 32
@@ -29147,9 +29171,16 @@ RUN_BENCH_CLOUD_BIN="$FIXTURE/run-bench-cloud"
 FLY() {{
   printf '%s\\n' "$*" >> "$FIXTURE/calls"
   case "$1 $2" in
-    "machines list") cat "$FIXTURE/machines.json" ;;
+    "machines list")
+      fails=$(wc -l 2>/dev/null < "$FIXTURE/machine-reads" || echo 0)
+      echo read >> "$FIXTURE/machine-reads"
+      if [ "$fails" -lt "${{TRANSIENT_FAIL:-0}}" ]; then echo 'Error: failed to list VMs: stream error; INTERNAL_ERROR' >&2; return 1; fi
+      cat "$FIXTURE/machines.json" ;;
     "volumes list") cat "$FIXTURE/volumes.json" ;;
-    "volume snapshots") cat "$FIXTURE/snapshots.json" ;;
+    "volume snapshots")
+      empties=$(wc -l 2>/dev/null < "$FIXTURE/snapshot-reads" || echo 0)
+      echo read >> "$FIXTURE/snapshot-reads"
+      if [ "$empties" -lt "${{TRANSIENT_EMPTY:-0}}" ]; then echo '[]'; else cat "$FIXTURE/snapshots.json"; fi ;;
     *) echo 'unexpected provider mutation' >&2; return 88 ;;
   esac
 }}
@@ -29163,11 +29194,45 @@ cloudbench_manifest_fingerprint() {{ printf '%s\\n' {python}; }}
 warm_deps_preflight || exit $?
 printf 'SELECTED=%s:%s:%s\\n' "$WARM_ID" "$VOL_ID" "$SNAP_ID"
 """
-    env = {"PATH": os.environ["PATH"], "FIXTURE": str(tmp_path)}
+    env = {"PATH": os.environ["PATH"], "FIXTURE": str(tmp_path), "TRANSIENT_EMPTY": str(transient_empty),
+           "TRANSIENT_FAIL": str(transient_fail)}
     if private:
         env["CLOUDBENCH_SOURCE_MANIFEST"] = str(tmp_path / "manifest.json")
     result = subprocess.run(["bash", "-c", script], env=env, text=True, capture_output=True, timeout=20, check=False)
     return result, calls.read_text()
+
+
+@pytest.mark.parametrize("empties, admitted", [(2, True), (12, False)])
+def test_private_fleet_source_rereads_transient_empty_snapshot_listing(
+    tmp_path: Path, empties: int, admitted: bool
+) -> None:
+    """Fly answered concurrent snapshot listings with rc=0 and [] (deploy round 33)."""
+    result, calls = _private_source_preflight_fixture(tmp_path, transient_empty=empties)
+    reads = calls.count("volume snapshots list vol_private")
+    if admitted:
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "SELECTED=feedface000001:vol_private:vs_private" in result.stdout
+        assert reads == empties + 1
+    else:
+        assert result.returncode != 0 and "SELECTED=" not in result.stdout
+        assert "snapshot inventory remained empty after 12 bounded reads" in result.stderr
+        assert reads == 12
+    assert "machine update" not in calls and "machine stop" not in calls
+
+
+@pytest.mark.parametrize("failures, admitted", [(2, True), (12, False)])
+def test_private_fleet_source_rereads_transient_failed_inventory(tmp_path: Path, failures: int, admitted: bool) -> None:
+    """Fly machines list failed with an HTTP/2 stream INTERNAL_ERROR in one job (deploy round 35)."""
+    result, calls = _private_source_preflight_fixture(tmp_path, transient_fail=failures)
+    reads = calls.count("machines list")
+    if admitted:
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "SELECTED=feedface000001:vol_private:vs_private" in result.stdout
+        assert reads >= failures + 1
+    else:
+        assert result.returncode != 0 and "SELECTED=" not in result.stdout
+        assert "provider inventory read failed: machines exit 1 (read 12/12)" in result.stderr
+    assert "machine update" not in calls and "machine stop" not in calls
 
 
 def test_private_fleet_source_avoids_active_shared_warm(tmp_path: Path) -> None:
@@ -36591,7 +36656,9 @@ def test_exact_owner_preconfig_entrypoint_routes_real_consumer_before_missing_pr
     entrypoint = Path(os.environ['CLOUDBENCH_PRECONFIG_ENTRYPOINT_UNDER_TEST']).read_text() if 'CLOUDBENCH_PRECONFIG_ENTRYPOINT_UNDER_TEST' in os.environ else source
     functions = ''.join(_extract_fleet_function(source, name + '() {') for name in (
         'registry_meta_value', 'fleet_registry_cleanup_state', 'fleet_preconfig_recovery_plan',
-        'fleet_recovery_confirm_preconfig_cohort', 'fleet_registry_build_guest_recovery_plan'))
+        'fleet_recovery_confirm_preconfig_cohort', 'fleet_registry_build_guest_recovery_plan',
+        'release_registry_recovery_lock', 'fleet_close_recovered_source_consumer',
+        'exact_recovery_is_pool_only', 'fleet_recovery_confirm_fresh_prestart'))
     functions += _extract_fleet_function(entrypoint, 'recover_exact_stale_fleet_owner() {')
     result = subprocess.run(['bash', '-c', f'''set -uo pipefail
 APP=fixture-app

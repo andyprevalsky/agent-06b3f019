@@ -411,6 +411,44 @@ class ReleaseReport(unittest.TestCase):
         self.write_ledger(['QUARANTINED_FAIL'], unit='cloud-smoke', start=100)
         self.assertEqual((0, False), tuple(self.rows()['cloud-smoke'][k] for k in ('streak', 'ready')))
 
+    def test_blackbox_domain_flake_binds_the_marker_of_its_single_failed_recorded_case(self):
+        occurrence_id = 'c' * 32
+        domain = ("from test_quarantine import quarantine\n\n"
+                  "@quarantine(since='2026-11-11', repair='pending-handoff:%s', error='AssertionError: boom', "
+                  "evidence='rca-2')\n"
+                  "async def test_real_model_controls():\n    pass\n\n"
+                  "async def test_other():\n    pass\n\n"
+                  "async def main(r):\n"
+                  "    await r.record_async(\"real_model_controls\", test_real_model_controls)\n"
+                  "    await r.record_async(\"other\", test_other)\n" % occurrence_id)
+        (self.root / 'tests' / 'domain.blackbox.py').write_text(domain)
+        detail = ("\u274c dom FAIL (121 passed, 1 failed; 1 failed case(s): real_model_controls; "
+                  "first error: real_model_controls: AssertionError: boom)")
+        occurrence = {'id': occurrence_id, 'gate': 'agents', 'unit': 'dom', 'detail': detail,
+                      'source': {'head': 'a' * 40}}
+        packet = {k: 'x' for k in ('test', 'command', 'scope', 'error', 'source', 'evidence')}
+        entry = {'attribution': 'NOT_INTRODUCED', 'evidence': 'rca-2', 'marker': 'tests/domain.blackbox.py',
+                 'post_merge': packet}
+        # Without the case label a domain unit names no marked function.
+        with self.assertRaisesRegex(ValueError, 'no quarantine marker'):
+            q.validate_attribution(occurrence, entry, self.root)
+        recorded = q.validate_attribution(occurrence, {**entry, 'case': 'real_model_controls'}, self.root)
+        self.assertEqual(('NOT_INTRODUCED', 'dom', occurrence_id),
+                         tuple(recorded['post_merge'][k] for k in ('attribution', 'unit', 'occurrence')))
+        # Merge revalidates the recorded attribution itself (attribution_block), so it must keep the case.
+        self.assertIsNone(q.attribution_block([{**occurrence, 'attribution': recorded}], self.root))
+        # An unmarked case, a case that did not fail, or several failed cases never bind.
+        with self.assertRaisesRegex(ValueError, 'no quarantine marker'):
+            q.validate_attribution({**occurrence, 'detail': detail.replace('real_model_controls', 'other')},
+                                   {**entry, 'case': 'other'}, self.root)
+        with self.assertRaisesRegex(ValueError, 'single failed case'):
+            q.validate_attribution(occurrence, {**entry, 'case': 'other'}, self.root)
+        several = detail.replace('1 failed; 1 failed case(s): real_model_controls',
+                                 '2 failed; 2 failed case(s): real_model_controls, other')
+        with self.assertRaisesRegex(ValueError, 'single failed case'):
+            q.validate_attribution({**occurrence, 'detail': several}, {**entry, 'case': 'real_model_controls'},
+                                   self.root)
+
     def test_catalog_marker_backs_a_not_introduced_smoke_flake_and_bad_markers_are_refused(self):
         self.write_catalog()
         self.assertEqual({'cloud-smoke': META}, q.catalog_quarantines(self.root))
@@ -431,6 +469,47 @@ class ReleaseReport(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     q.catalog_quarantines(self.root)
 
+    def test_suite_level_flaky_unit_matches_the_marker_named_by_its_own_failure_output(self):
+        # The structural runner reports a FLAKY unit as the suite job ("deploy-test-plan"); the marker
+        # sits on the one method unittest named in that job's failed first attempt (PR #1928).
+        packet = {k: 'x' for k in ('test', 'command', 'scope', 'error', 'source', 'evidence')}
+        entry = {'attribution': 'NOT_INTRODUCED', 'evidence': 'rca-1', 'marker': 'tests/test_unit.py',
+                 'post_merge': {**packet, 'repair_owner': REPAIR}}
+        base = {'id': 'c' * 32, 'gate': 'structural', 'unit': 'suite-job', 'source': {'head': 'a' * 40}}
+        failure = ('FAIL: test_flaky_unit (__main__.Suite.test_flaky_unit)\nTraceback (most recent call last):\n'
+                   '  File "/w/tests/test_unit.py", line 4, in test_flaky_unit\n')
+        recorded = q.validate_attribution({**base, 'detail': 'passed on rerun\n' + failure}, entry, self.root)
+        self.assertEqual('tests/test_unit.py', recorded['marker'])
+        dotted = 'FAIL: test_flaky_unit (tests.test_unit.Suite.test_flaky_unit)\n'
+        self.assertEqual('tests/test_unit.py',
+                         q.validate_attribution({**base, 'detail': dotted}, entry, self.root)['marker'])
+        # Same class + method in ANOTHER module, or a __main__ id with no tie to the marker file, is refused.
+        unmarked = 'FAIL: test_other (tests.test_unit.Suite.test_other)\n'  # a second failure with no marker
+        for detail in (None, 'no unittest header', failure.replace('Suite.', 'Other.'),
+                       dotted.replace('tests.test_unit.', 'tests.test_other.'), failure.split('Traceback')[0],
+                       dotted + unmarked):
+            with self.subTest(detail=detail), self.assertRaisesRegex(ValueError, 'no quarantine marker'):
+                q.validate_attribution({**base, 'detail': detail}, entry, self.root)
+
+    def test_suite_level_flake_with_truncated_header_binds_the_packet_test_by_its_traceback_frame(self):
+        # The recorded detail keeps only its tail; deploy-test-worker lost unittest's header (PR #1925).
+        entry = {'attribution': 'NOT_INTRODUCED', 'evidence': 'rca-1', 'marker': 'tests/test_unit.py',
+                 'post_merge': {**{k: 'x' for k in ('command', 'scope', 'error', 'source', 'evidence')},
+                                'test': 'Suite.test_flaky_unit', 'repair_owner': REPAIR}}
+        frame = '  File "/w/tests/test_unit.py", line 4, in test_flaky_unit\n    boom()\nValueError: boom\n'
+        base = {'id': 'c' * 32, 'gate': 'structural', 'unit': 'suite-job', 'source': {'head': 'a' * 40}}
+        self.assertEqual('tests/test_unit.py',
+                         q.validate_attribution({**base, 'detail': frame}, entry, self.root)['marker'])
+        refused = {'no frame': 'FAILED (errors=1)\n', 'frame in another file': frame.replace('tests/test_unit', 'tests/x'),
+                   'frame names another method': frame.replace('test_flaky_unit', 'test_other')}
+        for label, detail in refused.items():
+            with self.subTest(label), self.assertRaisesRegex(ValueError, 'no quarantine marker'):
+                q.validate_attribution({**base, 'detail': detail}, entry, self.root)
+        with self.assertRaisesRegex(ValueError, 'no quarantine marker'):  # the packet must name the marked test
+            q.validate_attribution({**base, 'detail': frame},
+                                   {**entry, 'post_merge': {**entry['post_merge'], 'test': 'Suite.test_other'}},
+                                   self.root)
+
     def test_cli_prints_the_table(self):
         self.write_ledger(['QUARANTINED_PASS'] * 5)
         out = subprocess.run([sys.executable, str(ROOT / 'scripts/test_quarantine.py'), 'report', '--root',
@@ -438,6 +517,157 @@ class ReleaseReport(unittest.TestCase):
                              check=True, timeout=60).stdout
         self.assertIn('Suite.test_flaky_unit', out)
         self.assertIn('2 quarantined test(s); 1 ready to release', out)
+
+
+
+class NativeDefinitionBinding(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        self.node = 'agents/benchmarks/code_bench_test.py::test_commit_fixture_rewritten_history_fails'
+        self.error = 'FileNotFoundError: missing maintenance.lock'
+        self.source = {'head': 'a' * 40, 'digest': 'b' * 64}
+        self.folder = self.root / '.context/deploy-pipeline/attempts/6/triage/agents-coverage-blackbox'
+        self.folder.mkdir(parents=True)
+        self.worker_root = '/home/runner/_work/rose/rose'
+        self.relative = '.context/test-runs/native/benchmark.log'
+        self.output_relative = '.context/deploy-worker/native/output.log'
+        self.log = self.folder / 'remote-artifact/files' / self.relative
+        self.output = self.folder / 'remote-artifact/files' / self.output_relative
+        self.log.parent.mkdir(parents=True)
+        self.output.parent.mkdir(parents=True)
+        self.marker = self.root / 'agents/benchmarks/code_bench_test.py'
+        self.marker.parent.mkdir(parents=True)
+        self.build()
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def save(self, name, value):
+        (self.folder / name).write_text(json.dumps(value))
+
+    def build(self):
+        import hashlib, copy
+        self.marker.write_text("@quarantine(since='2026-11-10', repair='pending-handoff:" + 'c' * 32 +
+            "', error='FileNotFoundError: missing maintenance.lock', evidence='rca')\n"
+            "def test_commit_fixture_rewritten_history_fails():\n    pass\n")
+        raw = ('FAILED ' + self.node + ' - ' + self.error + '\n1 failed, 87 passed in 5.93s\n').encode()
+        self.log.write_bytes(raw)
+        self.output.write_bytes(b'original output\n' + raw + b'automatic rerun PASS\n')
+        self.row = {'unit':'benchmark','status':'FLAKY','scope':'domain','attempts':2,'at':100,
+                    'log':self.worker_root + '/' + self.relative}
+        self.receipt = {'gate':'agents-coverage-blackbox','source':self.source,'token':'native-token',
+            'complete':True,'executed':True,'native_exit':0,'status':'PASS','flaky':[self.row],
+            'log':str(self.folder/'output.log'),'worker_result':str(self.folder/'result.json')}
+        self.request = {'gate':self.receipt['gate'],'source':self.source,'token':'native-token',
+                        'worker_root':self.worker_root,'phase':'triage'}
+        self.worker = {'gate':self.receipt['gate'],'source':self.source,'token':'native-token',
+            'complete':True,'worker_root':self.worker_root,'remote':{'transport':'github-actions','event_sha':self.source['head']},
+            'evidence':{self.receipt['gate']:{'status':'PASS','native_exit':0,'log':str(self.output),
+                'remote_log':self.worker_root+'/'+self.output_relative,
+                'sha256':hashlib.sha256(self.output.read_bytes()).hexdigest()}}}
+        for name, value in [('receipt.json',self.receipt),('request.json',self.request),('result.json',self.worker)]:
+            self.save(name,value)
+        self.occ = {'id':'c'*32,'source':self.source,'gate':self.receipt['gate'],'phase':'triage','round':6,
+                    'unit':'benchmark','check':'agents-coverage-blackbox/agents-coverage-blackbox','native_result':'FLAKY','attempts':2,'unit_finished_at':100,'evidence':self.row['log']}
+        self.state = {'source':self.source,'plan':{'gates':[{'name':self.receipt['gate'],'worker_root':self.worker_root}]},
+            'attempts':[{'source':self.source,'phase':'triage','results':[copy.deepcopy(self.receipt)]}], 'flaky':[self.occ]}
+        self.entry = {'attribution':'NOT_INTRODUCED','evidence':'rca','marker':'agents/benchmarks/code_bench_test.py',
+            'native_case':{'definition':self.node,'error':self.error,'log_sha256':hashlib.sha256(raw).hexdigest()},
+            'post_merge':{'test':self.node,'command':['python','-m','pytest','agents/benchmarks/code_bench_test.py'],
+                          'scope':'archive grader','error':self.error,'source':self.source,'evidence':'original native log'}}
+
+    def test_original_single_native_definition_binds_without_rewriting_unit(self):
+        import copy
+        original = copy.deepcopy(self.occ)
+        c.attribute_flaky(self.state,self.occ['id'],self.entry,self.root)
+        for key,value in original.items():
+            self.assertEqual(self.occ[key],value)
+        proof=self.occ['attribution']['native_binding']
+        self.assertEqual(proof['definition'],self.node)
+        self.assertEqual(proof['unit'],'benchmark')
+        self.assertEqual(self.state['pending_post_merge'][0]['packet']['test'],self.node)
+        self.assertIsNone(q.attribution_block(self.state['flaky'],self.root,state=self.state))
+        self.request['retained_document_drift'] = True
+        self.save('request.json', self.request)
+        self.assertIn('retained binding changed', q.attribution_block(self.state['flaky'], self.root))
+
+    def test_wrong_or_missing_original_native_binding_remains_blocked(self):
+        import copy, hashlib
+        for defect in ('source','token','gate','round','hash','path','traversal','multiple','missing','marker',
+                       'error','worker_root','recorded_receipt','output_hash','unbound_log','packet_source','malformed_rows','malformed_evidence','native_traversal'):
+            with self.subTest(defect=defect):
+                self.build()
+                if defect=='source': self.receipt['source']={'head':'d'*40,'digest':'e'*64};self.save('receipt.json',self.receipt)
+                if defect=='token': self.request['token']='foreign';self.save('request.json',self.request)
+                if defect=='gate': self.worker['gate']='foreign';self.save('result.json',self.worker)
+                if defect=='round': self.occ['round']=7
+                if defect=='hash': self.entry['native_case']['log_sha256']='0'*64
+                if defect=='path': self.entry['native_case']['definition']='agents/benchmarks/other.py::test_other'
+                if defect=='traversal': self.entry['marker']='../outside.py'
+                if defect=='multiple':
+                    raw=self.log.read_bytes()+b'FAILED agents/benchmarks/other.py::test_other - AssertionError: other\n'
+                    self.log.write_bytes(raw);self.output.write_bytes(raw)
+                    self.entry['native_case']['log_sha256']=hashlib.sha256(raw).hexdigest()
+                    self.worker['evidence'][self.receipt['gate']]['sha256']=hashlib.sha256(raw).hexdigest();self.save('result.json',self.worker)
+                if defect=='missing': self.log.unlink()
+                if defect=='marker': self.marker.write_text(self.marker.read_text().replace('def test_commit_fixture_rewritten_history_fails','def test_other'))
+                if defect=='error': self.entry['native_case']['error']='AssertionError: foreign'
+                if defect=='worker_root': self.request['worker_root']='/foreign';self.save('request.json',self.request)
+                if defect=='recorded_receipt': self.state['attempts'][0]['results'][0]['token']='foreign'
+                if defect=='output_hash': self.output.write_bytes(self.output.read_bytes()+b'drift')
+                if defect=='unbound_log':
+                    self.output.write_bytes(b'unrelated output');self.worker['evidence'][self.receipt['gate']]['sha256']=hashlib.sha256(self.output.read_bytes()).hexdigest();self.save('result.json',self.worker)
+                if defect=='malformed_rows': self.receipt['flaky']=[None];self.save('receipt.json',self.receipt)
+                if defect=='malformed_evidence': self.worker['evidence']=[];self.save('result.json',self.worker)
+                if defect=='native_traversal': self.receipt['flaky'][0]['log']=self.worker_root+'/../outside';self.occ['evidence']=self.receipt['flaky'][0]['log'];self.save('receipt.json',self.receipt)
+                if defect=='packet_source': self.entry['post_merge']['source']={'head':'f'*40,'digest':'e'*64}
+                with self.assertRaises(ValueError):
+                    c.attribute_flaky(self.state,self.occ['id'],self.entry,self.root)
+                self.assertNotIn('attribution',self.occ)
+
+
+    def test_reviewed_contradictions_and_malformed_lineage_block(self):
+        import hashlib
+        for defect in ('pytest_error', 'source_changed', 'interrupted', 'native_exit',
+                       'attempt_shape', 'result_shape', 'plan_shape'):
+            with self.subTest(defect=defect):
+                self.build()
+                if defect == 'pytest_error':
+                    raw = self.log.read_bytes().replace(b'1 failed, 87 passed', b'1 failed, 86 passed, 1 error')
+                    raw += b'ERROR agents/benchmarks/code_bench_test.py::test_other - RuntimeError: setup broke\n'
+                    self.log.write_bytes(raw)
+                    self.output.write_bytes(raw)
+                    self.entry['native_case']['log_sha256'] = hashlib.sha256(raw).hexdigest()
+                    self.worker['evidence'][self.receipt['gate']]['sha256'] = hashlib.sha256(raw).hexdigest()
+                if defect == 'source_changed': self.worker['source_unchanged'] = False
+                if defect == 'interrupted': self.worker['interrupted'] = True
+                if defect == 'native_exit': self.worker['native_exit'] = 1
+                if defect == 'attempt_shape': self.state['attempts'] = [None]
+                if defect == 'result_shape': self.state['attempts'][0]['results'] = [None]
+                if defect == 'plan_shape': self.state['plan'] = None
+                self.save('result.json', self.worker)
+                with self.assertRaises(ValueError):
+                    c.attribute_flaky(self.state, self.occ['id'], self.entry, self.root)
+                self.assertNotIn('attribution', self.occ)
+
+    def test_retained_binding_revalidates_original_state_and_plan(self):
+        for defect in ('receipt_token', 'captured_request', 'current_plan'):
+            with self.subTest(defect=defect):
+                self.build()
+                c.attribute_flaky(self.state, self.occ['id'], self.entry, self.root)
+                if defect == 'receipt_token':
+                    self.state['attempts'][0]['results'][0]['token'] = 'foreign'
+                elif defect == 'captured_request':
+                    self.request['worker_root'] = '/foreign'
+                    self.save('request.json', self.request)
+                else:
+                    self.state['plan']['gates'][0]['worker_root'] = '/new-current-worker'
+                block = q.attribution_block(self.state['flaky'], self.root, state=self.state)
+                if defect == 'current_plan':
+                    self.assertIsNone(block)
+                else:
+                    self.assertIsNotNone(block)
 
 
 if __name__ == '__main__':

@@ -56,9 +56,14 @@ require_text "$SCRIPT" 'BENCHMARK_BUNDLED_FRONTEND=true DISABLE_GMAIL_SYNC=1 BEN
 require_text "$SCRIPT" 'SEMANTIC_WORKER_PROCESSES="${DEPLOY_SEMANTIC_WORKER_PROCESSES:-8}"' "the stack must default to the Step 5 WORKER_PROCESSES=8"
 [ "$(grep -Ec '(^|[[:space:]])WORKER_PROCESSES=' "$SCRIPT")" = 1 ] || fail "only the defaulted override may set the stack's WORKER_PROCESSES"
 require_text "$SCRIPT" 'bash scripts/run.sh --benchmark > .context/deploy-smoke.log 2>&1 &' "stack must be the Step 5 run.sh --benchmark launch"
-# The no-shared-tunnel invariant remains; code sessions also require a callback.
-require_text "$SCRIPT" 'BENCHMARK_SKIP_PUBLIC_TUNNEL=0 NGROK_DOMAIN_SUFFIX=ngrok.app DISABLE_FAST_MODE_PROXY=1 BENCHMARK_BUNDLED_FRONTEND=true' "semantic callbacks must use the owned run-scoped tunnel"
-require_text "$SCRIPT" 'semantic_verify_callback || exit 1' "callback identity must precede all semantic agents"
+# 2026-11-11 (PR #1940): unroutable trycloudflare quick tunnels cost every Blacksmith run ~3.5 min and the
+# gate's 1800 s deadline cancelled runs whose UI and latency stages had passed. Go straight to run.sh's
+# run-scoped ngrok endpoint (zero quick-tunnel attempts), never the shared workspace domain.
+require_text "$SCRIPT" 'BENCHMARK_SKIP_PUBLIC_TUNNEL=0 BENCHMARK_EPHEMERAL_PUBLIC_TUNNEL=1 CLOUDFLARE_TUNNEL_MAX_ATTEMPTS=0' "the semantic stack must not spend its gate deadline on quick-tunnel retries"
+# 2026-11-07: every deploy's gate VM derived the same reserved ngrok domain, so a
+# concurrent deploy holding it killed this stack before readiness. No semantic spec
+# uses a public origin: the stack must start without a tunnel.
+# Public callback behavior is verified by the real launcher/helper fixture below.
 require_text "$SCRIPT" 'configure_deploy_local_env || exit 2' "the deploy environment library must gate every mode"
 require_text "$SCRIPT" 'bash scripts/resolve-deploy-stack-db.sh' "E2B smoke must prefer the running stack's database port"
 forbid_text "$SCRIPT" 'BLACKBOX_TEST_REPLAY_OUTBOUND=1' "the semantic stack stays capture-only"
@@ -252,92 +257,124 @@ run_e2b_case 143 "$CREDENTIAL_LOG" 143
 expect_output "E2B_SMOKE_VERDICT FAIL" "an interrupted runner is not a SKIPPED and keeps its native exit"
 [ ! -e "$SWEEP_MARKER" ] || fail "E2B-only mode must never sweep the worktree"
 
-# BEGIN SEMANTIC CALLBACK CONTRACT
-semantic_callback_contract() {
-python3 - "$ROOT_DIR" <<'CALLBACK'
-import json, os, pathlib, re, subprocess, sys, tempfile
-root=pathlib.Path(sys.argv[1]); source=(root/'scripts/run.sh').read_text()
-semantic=(root/'scripts/run-deploy-semantic-stack.sh').read_text()
-launch=re.search(r'^BENCHMARK_SKIP_PUBLIC_TUNNEL=.*$',semantic,re.M)[0]
-disable=re.search(r'(?:^| )DISABLE_FAST_MODE_PROXY=([^ ]+)',launch)
-proxy=source[source.index('if [ "${DISABLE_FAST_MODE_PROXY:-}" = "1" ]; then'):source.index('export BACKEND_LOG_FILE=')]
-def function(text,name):
-    match=re.search(r'^'+re.escape(name)+r'\(\) \{\n.*?^\}',text,re.M|re.S)
-    assert match,name
-    return match[0]
-with tempfile.TemporaryDirectory(prefix='semantic-callback-') as tmp:
-    tmp=pathlib.Path(tmp);bin=tmp/'bin';bin.mkdir()
-    ngrok=bin/'ngrok'
-    ngrok.write_text('#!'+sys.executable+'\n'+'''import json,os,signal,sys
-with open(os.environ['FAKE_ARGV'],'w') as f:json.dump(sys.argv[1:],f)
-if sys.argv[1:2]!=['http']:sys.exit(93)
-print(json.dumps(dict(msg='started tunnel',obj='tunnels',name='command_line',url=os.environ['FAKE_ORIGIN'],addr='http://localhost:12001')),flush=True)
-signal.pause()
-''');ngrok.chmod(0o755)
-    handoff_end=source.index('export_sandbox_backend_base_url\n')+len('export_sandbox_backend_base_url\n')
-    handoff_start=source.rfind('if [ -n "${DEPLOY_SEMANTIC_CALLBACK_TOKEN:-}" ]; then',0,handoff_end)
-    handoff=source[handoff_start:handoff_end] if handoff_start>=0 else 'export_sandbox_backend_base_url'
-    shell='set -euo pipefail\n. '+str(root/'scripts/lib/ngrok-tunnel.sh')+'\n. '+str(root/'scripts/lib/workspace-env.sh')+'\n'+function(source,'ngrok_reported_owned_origin')+'\n'+function(source,'start_ngrok_ephemeral_tunnel')+'''
-PIDS=();NAMES=();FRONTEND_PORT=12001;CONDUCTOR_WORKSPACE_NAME=rose
-NGROK_AUTHTOKEN=offline;NGROK_API_KEY=offline_present;NGROK_DOMAIN_SUFFIX=ngrok.app;ALLOWED_ORIGINS=http://localhost:12001
-RUN_CONTEXT_DIR="$FAKE_DIR";mkdir -p "$RUN_CONTEXT_DIR"
-dns_label_from_workspace() { printf rose; }
-ngrok_tunnel_edge_is_routing() { [ "$1" = "$FAKE_ORIGIN" ] && [ "$2" = 12001 ]; }
-trap 'if [ -n "${NGROK_PID:-}" ]; then kill "$NGROK_PID" 2>/dev/null || true; wait "$NGROK_PID" 2>/dev/null || true; fi' EXIT
-start_ngrok_ephemeral_tunnel "$DEPLOY_SEMANTIC_CALLBACK_TOKEN"
-public_tunnel_process_is_required ngrok 0
-! public_tunnel_process_is_optional ngrok 0
-BACKEND_URL=http://localhost:12000
-'''+handoff+'\n'+proxy+'''
-[ -z "$FAST_MODE_ANTHROPIC_PROXY_URL" ]
-[ -z "${FAST_MODE_CODEX_PROXY_URL+x}" ]
-printf 'OWNED_CALLBACK=%s\\n' "$ROSE_UI_PUBLISH_BASE_URL"
-'''
-    origins=[]
-    for token in ('a'*32,'b'*32):
-        origin='https://rose-semantic-bench-'+token+'-bench.ngrok.app';
-        env={**os.environ,'PATH':str(bin)+':'+os.environ['PATH'],'DEPLOY_SEMANTIC_CALLBACK_TOKEN':token,'FAKE_DIR':str(tmp/token),'FAKE_ARGV':str(tmp/(token+'.argv')),'FAKE_ORIGIN':origin,'DISABLE_FAST_MODE_PROXY':disable[1] if disable else '0','FAST_MODE_ANTHROPIC_PROXY_URL':'ambient-proxy-must-clear','FAST_MODE_CODEX_PROXY_URL':'ambient-codex-must-clear'}
-        result=subprocess.run(['bash','-c',shell],env=env,text=True,capture_output=True,timeout=15)
-        assert result.returncode==0, result.stdout+result.stderr
-        assert 'OWNED_CALLBACK='+origin in result.stdout
-        origins.append(next(line.split('=',1)[1] for line in result.stdout.splitlines() if line.startswith('OWNED_CALLBACK=')))
-        argv=json.loads((tmp/(token+'.argv')).read_text());assert argv[:2]==['http','12001'] and argv[argv.index('--domain')+1]==origin.removeprefix('https://')
-    assert origins[0]!=origins[1]
-    env['FAKE_ORIGIN']='https://foreign.ngrok.app'
-    result=subprocess.run(['bash','-c',shell],env=env,text=True,capture_output=True,timeout=15)
-    assert result.returncode!=0 and 'OWNED_CALLBACK=' not in result.stdout
-    print('PASS callback endpoint: two run-owned domains, no reservation, foreign publication refused; actual proxy branch remains disabled')
-    semantic=(root/'scripts/run-deploy-semantic-stack.sh').read_text()
-    program=semantic.split('semantic_verify_callback() {',1)[1].split("<<'NODE'\n",1)[1].split('\nNODE\n',1)[0]
-    assert semantic.index('semantic_verify_callback || exit 1')<semantic.index('semantic_report_lane ui\n')
-    driver=r'''const fs=require('node:fs'),vm=require('node:vm'),path=require('node:path'),assert=require('node:assert/strict');
-const root=process.argv[2],program=fs.readFileSync(process.argv[3],'utf8'),token='a'.repeat(32),origin=process.argv[4];
-assert.equal(origin,`https://rose-semantic-bench-${token}-bench.ngrok.app`);
-const crypto=require('node:crypto'),ts=require(path.join(root,'node_modules/typescript'));
-const runtimeEnv={PORT:'12000',BACKEND_URL:'http://localhost:12000',ROSE_UI_PUBLISH_BASE_URL:origin,AGENT_TOOLS_TOKEN_SECRET:'offline-owning-fixture-only'};
-const noDB=()=>{throw Error('DB forbidden');},logger={createLogger:()=>({info(){},warn(){},debug(){},error(){throw Error('workspace refused');}})};
-function load(rel,deps){const filename=path.join(root,rel),code=ts.transpileModule(fs.readFileSync(filename,'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022,esModuleInterop:true}}).outputText,module={exports:{}};vm.runInNewContext(code,{require:id=>Object.hasOwn(deps,id)?deps[id]:['fs/promises','path','fs','crypto'].includes(id)?require(id):noDB(),module,exports:module.exports,process:{env:runtimeEnv},Buffer,URL,__dirname:path.dirname(filename),__filename:filename});return module.exports;}
-const ui=load('back-end/src/providers/userUi/workspace.ts',{'../logger':logger,'../../utils/roseDesktop':{isRoseDesktopUser:()=>false},'./publishToken':{mintUserUiPublishToken:noDB},'./seed':{USER_UI_CLI_BIN_DIR:'.rose/bin',USER_UI_CLI_NAME:'rose-ui',userUiToolFiles:noDB},'./store':{findActiveUserUiVersion:noDB}});
-const tokenModule=load('back-end/src/providers/agentTools/token.ts',{});
-const tools=load('back-end/src/providers/agentTools/workspace.ts',{'../logger':logger,'../../utils/roseDesktop':{isRoseDesktopUser:()=>false},'../userUi/workspace':ui,'./mobbin':{MOBBIN_MCP_TOKEN_ENV:'MOBBIN_MCP_TOKEN',mobbinMcpServerConfig:noDB,mobbinMcpToken:()=>undefined},'./token':tokenModule});
-const workspace=tools.withAgentTools(null,{userId:'offline-user',agentId:'offline-agent',taskId:'offline-task',provider:'codex',roseDesktop:false});
-assert.equal(workspace.envs.ROSE_TOOLS_URL,origin+'/api/agent-tools/offline-agent');assert.equal(JSON.parse(workspace.files.find(f=>f.path==='.rose/tools.json').content).url,workspace.envs.ROSE_TOOLS_URL);
-console.log('PASS actual workspace origin/env/HOME handoff (external network/DB 0)');
-const queue='navi-agent-tasks-fixture-deploy-20261110231134-5052';
-(async()=>{for(const mutation of ['positive','wrong-stack','foreign-origin','dead-endpoint']){
- const manifest={worktree:root,status:'running',benchmark_mode:true,run_sh_pid:1234,ports:{backend:12000,frontend:12001},urls:{backend:'http://localhost:12000',public:mutation==='foreign-origin'?'https://foreign.ngrok.app':origin},temporal_task_queue:queue,services:[{name:'ngrok',pid:4321}]};
- const proc={env:{},argv:['node','-',root,token,'1234','12000'],exitCode:0,kill:(pid,sig)=>{assert.equal(pid,4321);assert.equal(sig,0);}};const calls=[];const output=[];
- const disk={realpathSync:p=>p,readFileSync:(p)=>{if(p.endsWith('/.context/services.json'))return JSON.stringify(manifest);if(p.endsWith('/back-end/.env'))return 'BACKEND_API_KEY=offline-owning-key';if(p==='/proc/4321/stat')return '4321 (ngrok) S 1234 0 0';if(p==='/proc/4321/cmdline')return Buffer.from(['ngrok','http','12001','--domain',new URL(origin).hostname,''].join('\0'));throw Error('unexpected file '+p);}};
- const fetch=async(url,options)=>{calls.push(url);assert.equal(options.redirect,'error');assert.equal(options.headers['X-Queue-Pointer-Observe'],'1');assert.equal(options.headers['X-API-Key'],'offline-owning-key');if(mutation==='dead-endpoint')throw Error('offline transport refusal');return {status:200,json:async()=>({managedDeploymentProtocol:1,continuationAdmitted:false,managedQueue:false,taskQueue:mutation==='wrong-stack'&&url.startsWith('https:')?'foreign-queue':queue,surfaceHash:null,updatedBy:null,updatedAt:null})};};
- await vm.runInNewContext(program,{require:id=>id==='node:fs'?disk:id.endsWith('/node_modules/dotenv')?require(path.join(root,'node_modules/dotenv')):require(id),process:proc,console:{log:v=>output.push(v),error:v=>output.push(v)},Buffer,URL,AbortSignal,fetch});
- assert.equal(proc.exitCode,mutation==='positive'?0:1,mutation);if(mutation==='positive'){assert.equal(calls.length,2);assert(output.some(s=>s.startsWith('SEMANTIC_CALLBACK_READY')));}if(mutation==='foreign-origin')assert.equal(calls.length,0);assert(!output.join('').includes('offline-owning-key'));
- console.log('PASS callback identity: '+mutation+' (external network/DB 0)');
-}})().catch(e=>{console.error(e);process.exitCode=1;});'''
-    (tmp/'preflight.js').write_text(program);(tmp/'driver.cjs').write_text(driver)
-    subprocess.run(['node',str(tmp/'driver.cjs'),str(root),str(tmp/'preflight.js'),origins[0]],check=True,timeout=15)
-CALLBACK
+# 6. The actual launcher environment must give the real tools producer a
+# run-owned public callback while the frontend/DB/workspace remain local.
+cp "$ROOT_DIR/scripts/lib/ngrok-tunnel.sh" "$FIXTURE/scripts/lib/"
+python3 - "$ROOT_DIR/scripts/run.sh" "$FIXTURE/.context/tunnel-functions.sh" <<'PY'
+from pathlib import Path
+import sys
+text=Path(sys.argv[1]).read_text();chunks=[]
+for name in ('dns_label_from_workspace','ngrok_reported_owned_origin','start_ngrok_ephemeral_tunnel','reap_failed_ngrok_tunnel','start_public_tunnel'):
+ start=text.index(name+'() {');end=text.index('\n}',start)+2;chunks.append(text[start:end])
+Path(sys.argv[2]).write_text('\n\n'.join(chunks)+'\n')
+start=text.index('if [ "${BENCHMARK_SKIP_PUBLIC_TUNNEL:-}" = "1" ]; then', text.index('# Public URL flow:'))
+end=text.index('export_sandbox_backend_base_url',start)+len('export_sandbox_backend_base_url')
+Path(sys.argv[2]).with_name('tunnel-flow.sh').write_text(text[start:end]+'\n')
+start=text.index('if [ "${DISABLE_FAST_MODE_PROXY:-}" = "1" ]; then',end)
+end=text.index('unset FAST_MODE_CODEX_PROXY_URL',start)+len('unset FAST_MODE_CODEX_PROXY_URL')
+Path(sys.argv[2]).with_name('proxy-flow.sh').write_text(text[start:end]+'\n')
+PY
+cat > "$SHIMS/curl" <<'TOOL'
+#!/usr/bin/env bash
+[ -f .context/services.json ]
+TOOL
+chmod +x "$SHIMS/curl"
+cat > "$FIXTURE/scripts/run-deploy-stage" <<'STAGE'
+#!/usr/bin/env bash
+exit 0
+STAGE
+cat > "$FIXTURE/scripts/run.sh" <<'STACK'
+#!/usr/bin/env bash
+set -euo pipefail
+. scripts/lib/workspace-env.sh
+. scripts/lib/ngrok-tunnel.sh
+. .context/tunnel-functions.sh
+RUN_CONTEXT_DIR="$PWD/.context/tunnel-fixture"
+mkdir -p "$RUN_CONTEXT_DIR"
+FRONTEND_PORT=$((CONDUCTOR_PORT + 1)); BACKEND_URL="http://localhost:$CONDUCTOR_PORT"; export BACKEND_URL
+ALLOWED_ORIGINS="http://localhost:$FRONTEND_PORT"
+PIDS=(999999); NAMES=(protected)
+NGROK_AUTHTOKEN=offline-fixture; NGROK_API_KEY=offline_fixture
+ensure_ngrok_domain_reserved() { echo RESERVATION >> "$RUN_CONTEXT_DIR/actions"; return 1; }
+start_cloudflare_quick_tunnel() { return 1; }
+start_ngrok_public_tunnel() { echo SHARED_FALLBACK >> "$RUN_CONTEXT_DIR/actions"; return 1; }
+ngrok_tunnel_edge_is_routing() { printf 'edge %s %s\n' "$1" "$2" >> "$RUN_CONTEXT_DIR/actions"; }
+# The fixture reports an endpoint only; no callback or model response is synthesized.
+ngrok() {
+ local port="$2" domain=""; shift 2
+ while [ "$#" -gt 0 ]; do if [ "$1" = --domain ]; then domain="$2"; shift; fi; shift; done
+ [ "${TEST_TUNNEL_FAIL:-0}" != 1 ] || domain=foreign.example.test
+ printf '{"msg":"started tunnel","obj":"tunnels","name":"command_line","url":"https://%s","addr":"http://localhost:%s"}\n' "$domain" "$port"
 }
-# END SEMANTIC CALLBACK CONTRACT
-semantic_callback_contract
+kill() { [ "${1:-}" = -0 ] || printf 'cleanup %s\n' "$1" >> "$RUN_CONTEXT_DIR/actions"; }
+trap 'reap_failed_ngrok_tunnel' EXIT
+. .context/tunnel-flow.sh
+. .context/proxy-flow.sh
+if [ -n "${BENCHMARK_PUBLIC_TUNNEL_RUN_ID:-}" ]; then
+ public_tunnel_process_is_required ngrok 1
+ ! public_tunnel_process_is_optional ngrok 1
+fi
+AGENT_TOOLS_TOKEN_SECRET=offline-fixture-only TSX_DISABLE_CACHE=1 NODE_DISABLE_COMPILE_CACHE=1 \
+ node --import "$PRODUCER_TSX_IMPORT" -e '
+const {withAgentTools}=require(process.env.PRODUCER_SOURCE);
+const w=withAgentTools(null,{userId:"fixture",agentId:"fixture-root",taskId:"fixture-task",provider:"codex",roseDesktop:false});
+console.log(JSON.stringify({callback:w.envs.ROSE_TOOLS_URL,backend:process.env.BACKEND_URL,workspace:process.env.CONDUCTOR_WORKSPACE_NAME,queue:process.env.TEMPORAL_TASK_QUEUE,frontend:process.env.SMOKE_FRONTEND_URL,db_port:process.env.LOCAL_DB_PORT,usercontent:process.env.USERCONTENT_BASE_URL,anthropic_proxy:process.env.FAST_MODE_ANTHROPIC_PROXY_URL,codex_proxy:process.env.FAST_MODE_CODEX_PROXY_URL,proxy_disabled:process.env.DISABLE_FAST_MODE_PROXY}));
+' > "$RUN_CONTEXT_DIR/producer.log"
+reap_failed_ngrok_tunnel
+[ "${PIDS[*]}" = 999999 ] && [ "${NAMES[*]}" = protected ]
+printf '{"status":"running","ports":{"backend":%s},"database":{"runtime_port":%s}}\n' "$CONDUCTOR_PORT" "$((CONDUCTOR_PORT+5))" > .context/services.json
+trap 'exit 0' TERM
+while :; do sleep 0.1; done
+STACK
+chmod +x "$FIXTURE/scripts/run.sh"
+callback_for_run() {
+ rm -f "$FIXTURE/.context/tunnel-fixture/actions" "$FIXTURE/.context/tunnel-fixture/producer.log" "$FIXTURE/.context/services.json"
+ expect_exit 0 env -u USERCONTENT_BASE_URL -u PUBLIC_BASE_URL ROSE_UI_PUBLISH_BASE_URL="${2:-}" \
+  CONDUCTOR_PORT=40000 CONDUCTOR_WORKSPACE_NAME=same-workspace ROSE_TRUST_CONDUCTOR_WORKSPACE_NAME=1 \
+  DEPLOY_SEMANTIC_TOKEN="$1" PATH="$SHIMS:$PATH" PRODUCER_TSX_IMPORT="$ROOT_DIR/node_modules/tsx/dist/loader.mjs" PRODUCER_SOURCE="$ROOT_DIR/back-end/src/providers/agentTools/workspace.ts" \
+  bash scripts/run-deploy-semantic-stack.sh
+ python3 - "$FIXTURE/.context/tunnel-fixture/producer.log" "$FIXTURE/.context/tunnel-fixture/actions" <<'PY'
+from pathlib import Path
+from urllib.parse import urlsplit
+import json,sys
+rows=[json.loads(x) for x in Path(sys.argv[1]).read_text().splitlines() if x.startswith('{')];r=rows[-1];u=urlsplit(r['callback']);actions=Path(sys.argv[2]).read_text() if Path(sys.argv[2]).exists() else ''
+assert u.scheme=='https' and u.hostname and u.hostname!='rose-rose.ngrok.app',r
+assert u.path=='/api/agent-tools/fixture-root',u.path
+assert r['backend']=='http://localhost:40000' and r['workspace']=='same-workspace',r
+assert r['queue'].startswith('navi-agent-tasks-same-workspace-deploy-'),r
+assert r['anthropic_proxy']=='' and r.get('codex_proxy') is None and r['proxy_disabled']=='1',r
+assert r['frontend']=='http://localhost:40001' and r['db_port']=='40005' and r['usercontent']=='http://localhost:40000',r
+assert 'RESERVATION' not in actions and 'SHARED_FALLBACK' not in actions,actions
+assert f'edge https://{u.hostname} 40001' in actions and 'cleanup ' in actions,actions
+print(u.hostname)
+PY
+}
+FIRST=$(callback_for_run aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa)
+SECOND=$(callback_for_run bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb)
+[ "$FIRST" != "$SECOND" ] || fail "distinct runs must own distinct tunnel domains"
+echo "callback-origin fixture: $FIRST / $SECOND; no reservation; local identity and owned cleanup preserved"
+# Foreign provider output must fail closed; never reuse a shared reserved name.
+rm -f "$FIXTURE/.context/services.json"
+expect_exit 1 env -u ROSE_UI_PUBLISH_BASE_URL -u PUBLIC_BASE_URL CONDUCTOR_PORT=40000 \
+ DEPLOY_SEMANTIC_TOKEN=cccccccccccccccccccccccccccccccc TEST_TUNNEL_FAIL=1 PATH="$SHIMS:$PATH" \
+ PRODUCER_TSX_IMPORT="$ROOT_DIR/node_modules/tsx/dist/loader.mjs" PRODUCER_SOURCE="$ROOT_DIR/back-end/src/providers/agentTools/workspace.ts" bash scripts/run-deploy-semantic-stack.sh
+! grep -qE 'RESERVATION|SHARED_FALLBACK' "$FIXTURE/.context/tunnel-fixture/actions" || fail "run-scoped failure touched a shared reservation"
+
+
+
+# Scoped callback ownership: reject inherited loopback/foreign origins before publication.
+for inherited in http://localhost:40000 https://foreign.example.test; do
+ rm -f "$FIXTURE/.context/services.json" "$FIXTURE/.context/tunnel-fixture/producer.log"
+ expect_exit 1 env -u PUBLIC_BASE_URL ROSE_UI_PUBLISH_BASE_URL="$inherited" \
+  CONDUCTOR_PORT=40000 DEPLOY_SEMANTIC_TOKEN=dddddddddddddddddddddddddddddddd PATH="$SHIMS:$PATH" \
+  PRODUCER_TSX_IMPORT="$ROOT_DIR/node_modules/tsx/dist/loader.mjs" PRODUCER_SOURCE="$ROOT_DIR/back-end/src/providers/agentTools/workspace.ts" \
+  bash scripts/run-deploy-semantic-stack.sh
+ grep -Fq 'Run-scoped callback origin must match the owned public tunnel' "$FIXTURE/.context/deploy-smoke.log" || fail 'foreign inherited callback must fail closed'
+ [ ! -e "$FIXTURE/.context/tunnel-fixture/producer.log" ] || fail 'foreign override reached tools producer'
+ [ ! -e "$FIXTURE/.context/services.json" ] || fail 'foreign override published services'
+ grep -q '^cleanup ' "$FIXTURE/.context/tunnel-fixture/actions" || fail 'failed override did not clean owned tunnel'
+done
+MATCHING=$(callback_for_run aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa "https://$FIRST/")
+[ "$MATCHING" = "$FIRST" ] || fail 'matching scoped origin with trailing slash must remain valid'
 
 echo "run-deploy-semantic-stack: all checks passed"

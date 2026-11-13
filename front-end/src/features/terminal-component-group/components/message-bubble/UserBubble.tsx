@@ -2,8 +2,8 @@
  * Right-aligned USER bubble with optional inline attachment row.
  *
  * Long text: collapsed preview ⇄ expanded via UserMessageText; short text is full.
- * Copy is revealed on message hover or keyboard focus; its tooltip reads Copy.
- * Copy shows a checkmark and Copied for two seconds after a successful write.
+ * Copy (MessageMeta.CopyMessageButton) is revealed on message hover or keyboard
+ * focus; its tooltip reads Copy, then a checkmark and Copied for two seconds.
  * META LINE (always, under the bubble): the local send time (formatMessageSentAt:
  * day label once before today), with one state to its left:
  *   resume (from real rows only, codeAgentResume.ts; live region, role="status"):
@@ -21,11 +21,7 @@
  * straight to that browser, not this agent: it reads "You → Browser: …" in the
  * code-agent "You → <agent>" text style.
  */
-import { useContext, useEffect, useState } from 'react';
-import { Check, Copy } from 'lucide-react';
-import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
-import { toast } from '@/hooks/use-toast';
-import { copyToClipboard } from '@/lib/clipboard';
+import { useContext } from 'react';
 import { formatMessageSentAt } from '@/lib/localDateTime';
 import { cn } from '@/lib/utils';
 import { AgentContext, type Message } from '../../hooks';
@@ -38,6 +34,7 @@ import {
 import { roleConfig } from './constants';
 import { AttachmentDisplay } from './AttachmentDisplay';
 import { UserMessageText } from './UserMessageText';
+import { CopyMessageButton } from './MessageMeta';
 
 interface UserBubbleProps {
   message: Message;
@@ -53,7 +50,7 @@ export function UserBubble({ message, agentId }: UserBubbleProps) {
     message.metadata?.excludeFromModel === true;
 
   return (
-    <div className="group/user-message flex flex-col items-end gap-2 animate-in fade-in duration-300">
+    <div className="group/message flex flex-col items-end gap-2 animate-in fade-in duration-300">
       {message.text && (
         <div
           className={cn(
@@ -72,47 +69,6 @@ export function UserBubble({ message, agentId }: UserBubbleProps) {
       )}
       <MetaLine message={message} />
     </div>
-  );
-}
-
-function CopyMessageButton({ text }: { text: string }) {
-  const [copied, setCopied] = useState(false);
-  useEffect(() => {
-    if (!copied) return;
-    const timer = window.setTimeout(() => setCopied(false), 2000);
-    return () => window.clearTimeout(timer);
-  }, [copied]);
-
-  async function copy() {
-    try {
-      await copyToClipboard(text);
-      setCopied(true);
-    } catch {
-      toast({ title: 'Could not copy message', variant: 'destructive' });
-    }
-  }
-
-  return (
-    <TooltipProvider delayDuration={300}>
-      <Tooltip>
-        <TooltipTrigger asChild>
-          <button
-            type="button"
-            aria-label={copied ? 'Copied' : 'Copy message'}
-            onClick={() => void copy()}
-            className="pointer-events-none opacity-0 group-hover/user-message:pointer-events-auto group-hover/user-message:opacity-100 focus-visible:pointer-events-auto focus-visible:opacity-100 inline-flex min-h-7 min-w-7 items-center justify-center gap-1 rounded-md px-1 text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-          >
-            {copied ? (
-              <Check className="h-3.5 w-3.5" aria-hidden />
-            ) : (
-              <Copy className="h-3.5 w-3.5" aria-hidden />
-            )}
-            <span aria-live="polite">{copied ? 'Copied' : ''}</span>
-          </button>
-        </TooltipTrigger>
-        <TooltipContent side="top">{copied ? 'Copied' : 'Copy'}</TooltipContent>
-      </Tooltip>
-    </TooltipProvider>
   );
 }
 

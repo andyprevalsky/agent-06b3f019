@@ -84,8 +84,11 @@ const CHAT_PATHS: ChatPathDefinition[] = [
   },
   {
     id: 'web_search',
+    // Ask for a published fact the live results carry. The after-search router
+    // escalates when results lack what was asked for, so a premise that is false
+    // on most days ("today's announcement") sent some samples to an agent.
     prompt: (marker) =>
-      `Search the web for today's Parallel Search Turbo latency announcement. Include ${marker} verbatim in the final answer.`,
+      `Search the web for Parallel Search Turbo's published median latency. Include ${marker} verbatim in the final answer.`,
     terminal: 'canonical_answer',
   },
   {

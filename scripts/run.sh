@@ -2049,10 +2049,6 @@ start_cloudflare_quick_tunnel() {
 # Reservation is best-effort: without NGROK_API_KEY (or if the API refuses) this
 # still falls back to a bare agent, which works fine for a lone worktree.
 start_ngrok_ephemeral_tunnel() {
-    local semantic_token="${1:-}"
-    if [ -n "$semantic_token" ]; then
-        [[ "$semantic_token" =~ ^[a-f0-9]{32}$ ]] || return 1
-    fi
     command -v ngrok >/dev/null 2>&1 || {
         echo "   ngrok fallback unavailable: ngrok is not installed."
         return 1
@@ -2078,13 +2074,14 @@ start_ngrok_ephemeral_tunnel() {
     # every new worktree loses its primary domain. Run-scoped names are bound
     # without a reservation; only the per-worktree name is reserved.
     local fallback_label fallback_domain
-    if [ -n "$semantic_token" ]; then
-        fallback_label="semantic-bench-$semantic_token"
+    if [ -n "${BENCHMARK_PUBLIC_TUNNEL_RUN_ID:-}" ]; then
+        # Identity names only the endpoint; workspace/DB/queue identity is unchanged.
+        fallback_label="run-$(python3 -c 'import hashlib,sys; print(hashlib.sha256(sys.argv[1].encode()).hexdigest()[:24])' "$BENCHMARK_PUBLIC_TUNNEL_RUN_ID")" || return 1
     else
         fallback_label="$(dns_label_from_workspace)" || return 1
     fi
     fallback_domain="rose-${fallback_label}-bench.${NGROK_DOMAIN_SUFFIX:-ngrok.app}"
-    if [ -z "$semantic_token" ] && [ -n "${NGROK_API_KEY:-}" ] && [[ "${CONDUCTOR_WORKSPACE_NAME:-}" != *-bench-* ]]; then
+    if [ -n "${NGROK_API_KEY:-}" ] && [ -z "${BENCHMARK_PUBLIC_TUNNEL_RUN_ID:-}" ] && [[ "${CONDUCTOR_WORKSPACE_NAME:-}" != *-bench-* ]]; then
         ensure_ngrok_domain_reserved "$fallback_domain" soft ||
             echo "   Proceeding without pre-reservation of $fallback_domain."
     fi
@@ -2092,7 +2089,7 @@ start_ngrok_ephemeral_tunnel() {
     local -a ngrok_args=("http" "$FRONTEND_PORT")
     if [ -n "$fallback_domain" ]; then
         ngrok_args+=("--domain" "$fallback_domain")
-        echo "🌐 Falling back to ngrok (reserved $fallback_domain) → localhost:$FRONTEND_PORT"
+        echo "🌐 Falling back to ngrok (named $fallback_domain) → localhost:$FRONTEND_PORT"
     else
         echo "🌐 Falling back to an ephemeral ngrok tunnel → localhost:$FRONTEND_PORT"
     fi
@@ -2270,12 +2267,6 @@ EOF
 }
 
 start_public_tunnel() {
-    if [ -n "${DEPLOY_SEMANTIC_CALLBACK_TOKEN:-}" ]; then
-        # A semantic code session calls back into this stack. Never fall back
-        # to a shared worktree endpoint or reserve one domain per gate.
-        start_ngrok_ephemeral_tunnel "$DEPLOY_SEMANTIC_CALLBACK_TOKEN" || exit 1
-        return 0
-    fi
     case "$(public_tunnel_provider_for_mode "${BENCHMARK_EPHEMERAL_PUBLIC_TUNNEL:-0}")" in
         cloudflare)
             # A single best-effort provider is a single point of failure for the
@@ -2283,6 +2274,11 @@ start_public_tunnel() {
             # run when trycloudflare will not route.
             start_cloudflare_quick_tunnel && return 0
             start_ngrok_ephemeral_tunnel && return 0
+            if [ -n "${BENCHMARK_PUBLIC_TUNNEL_RUN_ID:-}" ]; then
+                reap_failed_ngrok_tunnel
+                echo "❌ Run-scoped public tunnel unavailable; refusing a shared workspace endpoint." >&2
+                exit 1
+            fi
             # No ngrok credentials at all → the reserved-domain path cannot
             # succeed either.
             if [ -z "${NGROK_AUTHTOKEN:-}" ] && ! ngrok config check >/dev/null 2>&1; then
@@ -2824,15 +2820,6 @@ if [ "${BENCHMARK_SKIP_PUBLIC_TUNNEL:-}" = "1" ]; then
     echo "🌐 BENCHMARK_SKIP_PUBLIC_TUNNEL=1 — skipping public tunnel; PUBLIC_BASE_URL=$PUBLIC_BASE_URL (no selected task drives a browser)"
 else
     start_public_tunnel
-fi
-if [ -n "${DEPLOY_SEMANTIC_CALLBACK_TOKEN:-}" ]; then
-    [[ "$DEPLOY_SEMANTIC_CALLBACK_TOKEN" =~ ^[a-f0-9]{32}$ ]] &&
-        [ "$PUBLIC_BASE_URL" = "https://rose-semantic-bench-$DEPLOY_SEMANTIC_CALLBACK_TOKEN-bench.ngrok.app" ] &&
-        { [ -z "${ROSE_UI_PUBLISH_BASE_URL:-}" ] || [ "$ROSE_UI_PUBLISH_BASE_URL" = "$PUBLIC_BASE_URL" ]; } || {
-        echo "Semantic callback origin does not belong to this stack" >&2
-        exit 1
-    }
-    export ROSE_UI_PUBLISH_BASE_URL="$PUBLIC_BASE_URL"
 fi
 export_sandbox_backend_base_url
 # Fast-mode proxy routes sandbox code-agent (claude-code / codex) LLM calls

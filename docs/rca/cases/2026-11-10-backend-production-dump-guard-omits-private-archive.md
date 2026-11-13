@@ -70,3 +70,5 @@ The original user required full parallel testing with unchanged task budgets and
 ## Reusable lesson
 
 Preserve production plaintext suppression while producing and draining authenticated encrypted full-call records before claiming durable evidence.
+
+**Superseded (2026-11-13):** main fixed the same defect independently (`llmCaptureTasks`, RCA `2026-11-09-backend-llm-capture-omitted-encrypted-archive`); this branch adopted main's implementation and its `llm-stream-archive` coverage during the PR1910 sync, so `llm-dump-archive.blackbox.ts` was not shipped.
