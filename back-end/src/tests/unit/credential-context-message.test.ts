@@ -69,6 +69,16 @@ function harness(accepted = true, status = 'ACTIVE') {
       { exports: credentialExports, require: () => ({}) }
     );
   modules['./credentialContext'] = credentialExports;
+  // The real ownership predicate (type-only imports): this chat root is not externally executed.
+  const externalExports: Record<string, unknown> = {};
+  vm.runInNewContext(
+    ts.transpileModule(
+      fs.readFileSync(path.join(path.dirname(sourcePath), 'agentExternalExecution.ts'), 'utf8'),
+      { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }
+    ).outputText,
+    { exports: externalExports, require: () => ({}) }
+  );
+  modules['./agentExternalExecution'] = externalExports;
   vm.runInNewContext(js, { exports, require: (name: string) => modules[name] ?? {}, console });
   return { saved, signals, stamped, post: exports.postMessage };
 }

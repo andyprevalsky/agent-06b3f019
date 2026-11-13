@@ -336,20 +336,28 @@ describe('Long-press on iOS', () => {
     expect(selection.toString()).toBe('');
   });
 
-  it('a real drag still cancels the long-press', async () => {
-    renderWithProviders(
-      <ContextMenu>
-        <ContextMenuTrigger data-testid="row">Halloween costume</ContextMenuTrigger>
-        <ContextMenuContent data-testid="menu">
-          <ContextMenuItem>Rename agent</ContextMenuItem>
-        </ContextMenuContent>
-      </ContextMenu>,
-    );
-    const row = screen.getByTestId('row');
-    fireEvent.pointerDown(row, { pointerType: 'touch', clientX: 216, clientY: 300 });
-    fireEvent.pointerMove(row, { pointerType: 'touch', clientX: 216, clientY: 330 });
-    await new Promise((resolve) => setTimeout(resolve, 900));
-    expect(screen.queryByTestId('menu')).not.toBeInTheDocument();
+  it('a real drag still cancels the long-press', () => {
+    // Fake timers own the 700ms long-press timer, so passing it is deterministic.
+    vi.useFakeTimers();
+    try {
+      renderWithProviders(
+        <ContextMenu>
+          <ContextMenuTrigger data-testid="row">Halloween costume</ContextMenuTrigger>
+          <ContextMenuContent data-testid="menu">
+            <ContextMenuItem>Rename agent</ContextMenuItem>
+          </ContextMenuContent>
+        </ContextMenu>,
+      );
+      const row = screen.getByTestId('row');
+      fireEvent.pointerDown(row, { pointerType: 'touch', clientX: 216, clientY: 300 });
+      fireEvent.pointerMove(row, { pointerType: 'touch', clientX: 216, clientY: 330 });
+      act(() => {
+        vi.advanceTimersByTime(900);
+      });
+      expect(screen.queryByTestId('menu')).not.toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
