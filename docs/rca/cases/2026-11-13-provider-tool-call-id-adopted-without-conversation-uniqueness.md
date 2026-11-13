@@ -65,20 +65,36 @@ Result: `ValueError: ASSISTANT metadata.tool_calls reuses tool_call_id 'spawn_ag
 
 ## Solution
 
-At the ingestion boundary, `call_llm_structured_streaming` collects every id the outgoing request already uses (`utils.tool_call_ids.request_tool_call_ids`). Each native tool call then claims a conversation-unique id (`claim_tool_call_id`):
+`call_llm_structured_streaming` (the ingestion boundary) now claims a conversation-unique id for each native tool call with `utils.tool_call_ids.claim_tool_call_id`. The ids it must avoid are the union of two sets:
 
-- The provider id passes through unchanged when unique.
-- A repeat takes the first free `<id>__<n>`.
+- every id the outgoing request uses (`request_tool_call_ids`);
+- every id stored in the agent's context rows (`context_tool_call_ids`). `call_llm_activity` passes these as `reserved_tool_call_ids` on both its same-worker pending-context path and its cross-worker backend-fetch path.
 
-That one id names the parse-retry replay, the early IN_PROGRESS row and the persisted declaration, so tool_use/tool_result pairing holds. History is never rewritten, so the cached prefix stays byte-identical (asserted in the regression). The rename is deterministic, so Fast Mode stream replays assign the same id. Normal providers (`toolu_*`, `call_*`, uuids) never collide and are unchanged; the existing llm (270), rose (296), rose-browser-use (122) and run-agent (105) blackbox suites pass.
+The stored set is required. An adversarial review found that a declaration whose activity died before writing its terminal row is stripped from the request by `_ensure_tool_result_pairing`, yet `register_tool_call_declaration` still registers it on every later build. kimi-k3 numbers ids by the calls it can see, so it tends to re-emit exactly that id. Regression `provider_tool_call_id_never_reuses_a_stored_unanswered_declaration` failed on the first, request-only version (`pending: reused the stored id 'spawn_agent:3'`) and passes now.
 
-Golden references, which converge on this shape:
+How a claimed id behaves:
 
-- `kimi-code/packages/agent-core-v2/src/human/llm/protocol/rules/tool-call-ids.ts:128` `createToolCallIdNormalizer` takes history ids as taken, passes the first occurrence through and renames later ones to `<id>__<n>` at LLM ingestion.
-- `hermes-agent/agent/turn_tool_validation.py:89` with `agent/message_sanitization.py:544` `uniquify_tool_call_ids`: session ids are taken and never rewritten (prompt cache); the incoming duplicate gets a deterministic `<id>_d<n>`.
-- `openclaw/src/agents/tool-call-id.ts:392`: an occurrence-aware resolver gives repeated raw ids distinct ids.
+- A unique provider id passes through unchanged. A repeat takes the first free `<id>__<n>`.
+- That one id names the parse-retry replay, the early IN_PROGRESS row and the persisted declaration, so tool_use/tool_result pairing holds.
+- History is never rewritten, so the cached prefix is byte-identical (asserted in the regression).
+- The rename is deterministic, so Fast Mode stream replays and parse and token-escalation retries (which carry `reserved_tool_call_ids`) assign the same id.
 
-At 10k agents: an O(request tool calls) set build per LLM call, held per activity. No shared state, channel or query.
+Normal providers' ids (`toolu_*`, `call_*`, uuids) never collide and are unchanged. These blackbox suites pass: llm (271), rose (296), rose-browser-use (122), run-agent (105), dag-executor (63), background-agents, wait-for and user-tools. The in-process `run_agent` path (no `on_tool_detected`) already mints uuids and never adopted provider ids.
+
+Golden references (converging pattern):
+
+- `hermes-agent/agent/turn_tool_validation.py:89-98` collects the taken ids from the full session history (not the sanitized request), calls `uniquify_tool_call_ids` (`agent/message_sanitization.py:544`), never rewrites history ids (prompt cache), and gives the incoming duplicate a deterministic suffix.
+- `kimi-code/packages/agent-core-v2/src/human/llm/protocol/rules/tool-call-ids.ts:128` `createToolCallIdNormalizer` lets the first occurrence pass through and gives repeats `<id>__<n>`. Its taken set is the request because its projection keeps every declaration (`agent/loop/projection.ts:167-175`). Rose strips orphan declarations, which is why the stored rows are added here.
+- `openclaw/src/agents/tool-call-id.ts:392` uses an occurrence-aware resolver.
+
+Benchmark outcome: not claimed. The `browser-biometrics-webdecoy` smoke task's first failure was the Tilion browser-session init (`Browser initialization failed before readiness`). The parent thread attributed it NOT_INTRODUCED, on the provider side. This RCA's symptom is the harness `ValueError` that then killed the root agent. It is proven at the owning boundary by replaying the captured kimi-k3 request and response through the real activity and SSE parser. An exact `scripts/run-bench --local browser-biometrics-webdecoy` fail/pass pair would depend on kimi-k3 re-emitting the colliding id and on the live Tilion fault. It was not run, and this is recorded as an outcome-reproduction gap for the task, not for this mechanism.
+
+Open siblings (same class, not changed here):
+
+- The browser agent (`domains/spawn_browser_agent_v3/handler.py` `_browser_action_tool_call_id`) keeps provider ids verbatim in its turn history. `filter_browser_turn_messages` (`providers/rose/browser_use.py:1024`) keeps only the latest result per id, so a kimi-k3 browser agent that repeats an id across steps would silently drop an earlier result. No occurrence has been observed yet.
+- kimi ids contain `:`. That is outside Anthropic's `^[a-zA-Z0-9_-]+$` if a conversation moves to an Anthropic leg (`providers/rose/transforms.py:276`, no sanitizer). This predates the change, and `__<n>` does not make it worse.
+
+At 10k agents: one O(context rows) set per LLM call, local to the activity. No shared state, query or channel.
 
 ## Human feedback
 

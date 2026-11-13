@@ -763,15 +763,25 @@ def _kimi_sse(tool_calls: list, content: str = "") -> str:
     return "\n".join("data: " + json.dumps(event) for event in events if event) + "\ndata: [DONE]\n"
 
 
-async def _kimi_execute_turn(history_messages: list, tool_calls: list, content: str = ""):
-    """One real execute-loop activity on rose-1-oss/kimi-k3, served from a recorded response."""
+async def _kimi_execute_turn(history, tool_calls: list, content: str = "", *, stored_context: str = ""):
+    """One real execute-loop activity on rose-1-oss/kimi-k3, served from a recorded response.
+
+    ``history`` is the request's non-system messages, or, with ``stored_context``
+    set, the agent's stored context rows handed over the production way:
+    "pending" (same-worker slot) or "backend" (cross-worker fetch).
+    """
     import httpx
-    from helpers.llm import call_llm_activity
+    from helpers.llm import _pending_llm_context, call_llm_activity
+
+    agent_id = "3f6a83cd-164f-4e55-ab5d-39eb3923f92b"
+    requests = []
 
     def handler(request):
         if request.url.host != "openrouter.ai":
             return httpx.Response(200, json={"ok": True})
-        assert json.loads(request.content)["model"] == "moonshotai/kimi-k3"
+        body = json.loads(request.content)
+        assert body["model"] == "moonshotai/kimi-k3"
+        requests.append(body)
         return httpx.Response(200, text=_kimi_sse(tool_calls, content), headers={"content-type": "text/event-stream"})
 
     setup_mock_fn(handler)
@@ -780,21 +790,34 @@ async def _kimi_execute_turn(history_messages: list, tool_calls: list, content: 
     async def record_tool_event(**kwargs):
         early_in_progress.append((kwargs["tool_name"], kwargs["tool_call_id"]))
 
+    backend = AsyncMock(return_value={"agent": {"id": agent_id}, "messages": history})
+    if stored_context == "pending":
+        _pending_llm_context[agent_id] = (history, "Rose execute phase.", None, None, "stream-kimi:1")
     with (
         patch.dict(os.environ, {"CEREBRAS_API_KEY": "", "GPT_API_KEY": "", "ANTHROPIC_API_KEY": "", "AZURE_FOUNDRY_API_KEY": ""}),
         patch("temporalio.activity.heartbeat"),
         patch("helpers.llm.stream_assistant_chunk", new_callable=AsyncMock),
         patch("helpers.llm.stream_tool_event", side_effect=record_tool_event),
+        patch("helpers.fetch_config._fetch_agent_data_impl", new=backend),
+        patch("helpers.llm.asyncio.sleep", new=AsyncMock()),
     ):
-        result = await call_llm_activity(
-            messages_or_agent_id=[{"role": "system", "content": "Rose execute phase."}, *history_messages],
-            model="rose-labs/rose-1-oss",
-            tool_names=["spawn_agent", "wait_for"],
-            agent_id="3f6a83cd-164f-4e55-ab5d-39eb3923f92b",
-            stream_id="stream-kimi-reused-id",
-            call_site="execute_loop",
-            skip_cache_write=True,
-        )
+        try:
+            result = await call_llm_activity(
+                messages_or_agent_id=agent_id if stored_context else [{"role": "system", "content": "Rose execute phase."}, *history],
+                model="rose-labs/rose-1-oss",
+                tool_names=["spawn_agent", "wait_for"],
+                agent_id=agent_id,
+                stream_id="stream-kimi-reused-id",
+                call_site="execute_loop",
+                system_prompt="Rose execute phase." if stored_context else None,
+                skip_cache_write=True,
+                pending_context_token="stream-kimi:1" if stored_context == "pending" else None,
+                force_backend_context=stored_context == "backend",
+            )
+        finally:
+            _pending_llm_context.pop(agent_id, None)
+    assert backend.await_count == (1 if stored_context == "backend" else 0)
+    result["_requests"] = requests
     return result, early_in_progress
 
 
@@ -871,6 +894,48 @@ async def test_provider_reused_tool_call_id_keeps_later_llm_calls_buildable():
     assert "Started browser agent in background." in results[new_id]
     verifier = convert_context_to_messages(prior + turn, include_assistant=True)
     assert sum(1 for message in verifier if message["role"] == "tool") == len(declared)
+
+
+async def test_provider_tool_call_id_never_reuses_a_stored_unanswered_declaration():
+    """A stored declaration without a terminal result is stripped from the request but still registered.
+
+    When a tool's activity dies before its terminal row is written, the request
+    builder drops the orphan declaration, yet every later build still registers
+    it. kimi-k3 numbers ids by the calls it can see, so it is likely to emit that
+    stored id again. The claim must cover the stored context, not just the
+    request, on both the same-worker and the cross-worker activity paths.
+    """
+    from helpers.llm import build_llm_messages
+
+    fixture = json.loads(_KIMI_REUSED_ID_FIXTURE.read_text())
+    stored = [
+        {"role": "USER", "text": "Run the FCaptcha demo in a browser agent.", "timestamp": "2026-11-13T02:48:00+00:00"},
+        {
+            "role": "ASSISTANT",
+            "text": "",
+            "timestamp": "2026-11-13T02:49:00+00:00",
+            "metadata": {"tool_calls": [{"tool": "spawn_agent", "tool_call_id": "spawn_agent:3", "goal": "demo", "task_name": "fcaptcha_demo"}]},
+        },
+        {
+            "role": "TOOL",
+            "text": "Starting spawn_agent...",
+            "timestamp": "2026-11-13T02:49:01+00:00",
+            "metadata": {"toolCallId": "spawn_agent:3", "toolName": "spawn_agent", "toolStatus": "IN_PROGRESS"},
+        },
+        {"role": "USER", "text": "Continue.", "timestamp": "2026-11-13T02:49:30+00:00"},
+    ]
+    for stored_context in ("pending", "backend"):
+        result, early = await _kimi_execute_turn(
+            stored, fixture["response"]["tool_calls"], fixture["response"]["content"], stored_context=stored_context
+        )
+        sent_ids = {call["id"] for body in result["_requests"] for message in body["messages"] for call in message.get("tool_calls") or []}
+        assert "spawn_agent:3" not in sent_ids, "the unanswered declaration is stripped from the request"
+        [(_, new_id, _)] = result["detected_tools_ordered"]
+        assert new_id == "spawn_agent:3__2", f"{stored_context}: reused the stored id {new_id!r}"
+        assert early == [("spawn_agent", new_id)]
+        turn = _turn_rows(result, at=datetime(2026, 11, 13, 2, 50, tzinfo=timezone.utc), tool_text="Started.")
+        built = await build_llm_messages(stored + turn, "Rose execute phase.")
+        assert [call["id"] for message in built for call in message.get("tool_calls") or []] == [new_id]
 
 
 async def test_provider_tool_call_ids_stay_unique_within_one_response():
@@ -12018,6 +12083,10 @@ async def run_all_tests():
     await r.record_async(
         "provider_reused_tool_call_id_keeps_later_llm_calls_buildable",
         test_provider_reused_tool_call_id_keeps_later_llm_calls_buildable,
+    )
+    await r.record_async(
+        "provider_tool_call_id_never_reuses_a_stored_unanswered_declaration",
+        test_provider_tool_call_id_never_reuses_a_stored_unanswered_declaration,
     )
     await r.record_async(
         "provider_tool_call_ids_stay_unique_within_one_response",

@@ -27,6 +27,31 @@ def request_tool_call_ids(messages: Iterable[Any]) -> set[str]:
     return taken
 
 
+def context_tool_call_ids(rows: Iterable[Any]) -> set[str]:
+    """Every tool-call id stored in an agent's context rows.
+
+    ASSISTANT ``metadata.tool_calls[].tool_call_id`` declarations and TOOL
+    ``metadata.toolCallId`` rows (any status). This is a superset of the ids an
+    outgoing request carries: the request builder strips a declaration whose
+    result was never written, yet the declaration registry still checks it.
+    """
+    taken: set[str] = set()
+    for row in rows:
+        if not isinstance(row, Mapping):
+            continue
+        metadata = row.get("metadata")
+        if not isinstance(metadata, Mapping):
+            continue
+        tool_calls = metadata.get("tool_calls")
+        if isinstance(tool_calls, list):
+            for call in tool_calls:
+                if isinstance(call, Mapping) and call.get("tool_call_id"):
+                    taken.add(str(call["tool_call_id"]))
+        if metadata.get("toolCallId"):
+            taken.add(str(metadata["toolCallId"]))
+    return taken
+
+
 def claim_tool_call_id(provider_id: str, taken: set[str]) -> str:
     """Return a conversation-unique id for one new provider tool call, and reserve it.
 

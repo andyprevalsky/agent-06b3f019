@@ -13,7 +13,7 @@ import uuid
 from bisect import bisect_left
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Dict, List, Literal, Optional, Tuple, Type, TypeVar
+from typing import Any, Awaitable, Callable, Dict, Iterable, List, Literal, Optional, Tuple, Type, TypeVar
 
 import httpx  # Used with instructor
 import instructor  # Import at module level for Temporal workflow sandbox compatibility
@@ -110,7 +110,7 @@ from utils.response_schema_constraints import (
     value_satisfies_output_field_constraints,
 )
 from utils.rose_desktop import is_rose_desktop_user
-from utils.tool_call_ids import claim_tool_call_id, request_tool_call_ids
+from utils.tool_call_ids import claim_tool_call_id, context_tool_call_ids, request_tool_call_ids
 from utils.tool_schemas import (
     ResponseSchemaBound,
     create_agent_action_model,
@@ -3043,6 +3043,7 @@ async def call_llm_structured_streaming(
     deadline_s: Optional[float] = None,  # Override Rose top-level deadline; None uses Rose default
     ttft_timeout_s: Optional[float] = None,  # Override Rose TTFT timeout
     idle_timeout_s: Optional[float] = None,  # Override Rose idle/inter-chunk timeout (-1 disables)
+    reserved_tool_call_ids: Iterable[str] = (),  # Stored ids the request may omit; new tool calls never reuse them
     _exclude_anthropic_family: bool = False,  # Internal: refusal retry skips Anthropic direct/waterfall routes
     _is_escalation: bool = False,  # Internal: prevents infinite recursion on max_tokens escalation
     _parse_retry_attempt: int = 0,  # Internal: bounds re-generation on a malformed/schema-invalid structured output
@@ -3116,7 +3117,7 @@ async def call_llm_structured_streaming(
         hidden_stream_bytes = 0
         tool_use_blocks: List[Dict[str, Any]] = []
         # Ids this conversation already uses; each new native call claims a unique one.
-        taken_tool_call_ids = request_tool_call_ids(messages)
+        taken_tool_call_ids = request_tool_call_ids(messages) | set(reserved_tool_call_ids)
 
         # Tool detection tracking (for early IN_PROGRESS messages)
         detected_tools_ordered: List[tuple] = []  # (tool_name, tool_call_id, timestamp)
@@ -3700,6 +3701,7 @@ async def call_llm_structured_streaming(
                 call_site=call_site,
                 tool_choice=tool_choice,
                 context_tools=context_tools,
+                reserved_tool_call_ids=reserved_tool_call_ids,
                 _exclude_anthropic_family=_exclude_anthropic_family,
                 _is_escalation=True,
                 _parse_retry_attempt=_parse_retry_attempt,
@@ -3997,6 +3999,7 @@ async def call_llm_structured_streaming(
                     deadline_s=deadline_s,
                     ttft_timeout_s=ttft_timeout_s,
                     idle_timeout_s=idle_timeout_s,
+                    reserved_tool_call_ids=reserved_tool_call_ids,
                     _exclude_anthropic_family=_exclude_anthropic_family,
                     _is_escalation=_is_escalation,
                     _parse_retry_attempt=_parse_retry_attempt + 1,
@@ -6801,6 +6804,10 @@ async def call_llm_activity(
 
         # Resolve messages: either pre-built or build from shared context
         _context_key = None
+        # Every tool-call id the stored context holds. The request below omits a
+        # declaration whose result was never written, but the next build still
+        # registers it, so a new provider tool call must not reuse its id.
+        stored_tool_call_ids: set[str] = set()
         if isinstance(messages_or_agent_id, str):
             _context_key = messages_or_agent_id
             pending = (
@@ -6815,6 +6822,7 @@ async def call_llm_activity(
                 else:
                     context, _sys_prompt, pre_resolved_ids = pending
                     pending_user_id = user_id
+                stored_tool_call_ids = context_tool_call_ids(context)
                 messages = await build_llm_messages(
                     context,
                     _sys_prompt,
@@ -6838,6 +6846,7 @@ async def call_llm_activity(
                 )
                 data = await _fetch_agent_data_impl(_context_key)
                 context = data.get("messages", [])
+                stored_tool_call_ids = context_tool_call_ids(context)
                 messages = await build_llm_messages(
                     context,
                     system_prompt,
@@ -7018,6 +7027,7 @@ async def call_llm_activity(
                 skip_cache_write=skip_cache_write,
                 cache_sequence_id=cache_sequence_id,
                 tool_choice={"name": required_tool} if required_tool else None,
+                reserved_tool_call_ids=stored_tool_call_ids,
                 # Without this the agent loop's refusal reroute dies at the activity boundary:
                 # every retry goes back to the model that just refused, so one refusal becomes a
                 # guaranteed 3-strikes kill instead of a provider switch.
