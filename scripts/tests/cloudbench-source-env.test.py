@@ -292,7 +292,8 @@ os.environ.update(CLOUDBENCH_SOURCE_MANIFEST_FILE='/cloudbench-source-manifest.j
  CLOUDBENCH_SOURCE_GUEST_ENV_MODE='owned-capsule-v1',CLOUDBENCH_SOURCE_GUEST_ENV_CAPSULE_SHA256=c['capsule_sha'],
  CLOUDBENCH_EXECUTION_PROVENANCE_FILE=c['provenance'],
  AGENTS_ENV_B64='rotated-global',BACKEND_ENV_B64='rotated-global',AGENTS_ENV_SHA256='rotated',
- BACKEND_ENV_SHA256='rotated',CLOUDBENCH_BROWSER_PROVIDER='steel',CLOUDBENCH_WORKER_BROWSER_PROVIDER='steel')
+ BACKEND_ENV_SHA256='rotated',CLOUDBENCH_BROWSER_PROVIDER='steel',CLOUDBENCH_WORKER_BROWSER_PROVIDER='steel',
+ TEMPORAL_ADDRESS='ambient.example:7233',TEMPORAL_NAMESPACE='ambient-namespace',TEMPORAL_API_KEY='ambient-key',BROWSER_PROVIDER='steel')
 if c['bad']=='cleared-markers':
  for k in ('CLOUDBENCH_SOURCE_MANIFEST_FILE','CLOUDBENCH_SOURCE_MANIFEST_SHA256','CLOUDBENCH_SOURCE_LEASE_PROTOCOL','CLOUDBENCH_SOURCE_GUEST_ENV_MODE','CLOUDBENCH_SOURCE_GUEST_ENV_CAPSULE_SHA256'):os.environ.pop(k,None)
 if c['bad']=='ambiguous-peer':os.environ.pop('CLOUDBENCH_EXECUTION_PROVENANCE_FILE',None)
@@ -306,7 +307,12 @@ try:
  try:m['check_effective'](wrong)
  except Exception:pass
  else:raise AssertionError('marker bypassed effective check')
- command=[sys.executable,'-c',"import os,base64; assert b'BROWSER_PROVIDER=kernel' in base64.b64decode(os.environ['AGENTS_ENV_B64']); assert os.environ['CLOUDBENCH_BROWSER_PROVIDER']=='kernel'; print('EXEC_OK')"]
+ # dotenv loads without override: an inherited Temporal/browser scalar would beat the validated file value.
+ for k in ('TEMPORAL_ADDRESS','TEMPORAL_NAMESPACE','TEMPORAL_API_KEY','BROWSER_PROVIDER'):
+  try:m['check_effective'](dict(expected,**{k:'ambient'}))
+  except Exception:pass
+  else:raise AssertionError('ambient file-owned scalar bypassed effective check')
+ command=[sys.executable,'-c',"import os,base64; assert b'BROWSER_PROVIDER=kernel' in base64.b64decode(os.environ['AGENTS_ENV_B64']); assert os.environ['CLOUDBENCH_BROWSER_PROVIDER']=='kernel'; assert not {'TEMPORAL_ADDRESS','TEMPORAL_NAMESPACE','TEMPORAL_API_KEY','BROWSER_PROVIDER'} & set(os.environ); print('EXEC_OK')"]
  m['exec_guest'](command)
 except Exception:
  print('REFUSED',file=sys.stderr);sys.exit(1)

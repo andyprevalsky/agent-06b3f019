@@ -2023,6 +2023,41 @@ PY_SOURCE_RELEASE
     return "$status"
 }
 
+fleet_seal_source_claim_unresolved() {  # <lifecycle.json>: holder exited without closing its durable claim
+    # The holder's close needs the sealed lifecycle as its proof, so the claim
+    # result is known only afterward. Reseal the run verdict as failed while
+    # preserving the physical teardown facts (cleanup_verified, audit_sha256)
+    # that exact-owner claim recovery still requires.
+    [ -f "$1" ] && [ ! -L "$1" ] || return 0
+    python3 - "$1" <<'PY_SOURCE_CLAIM_VERDICT'
+import json
+import os
+import sys
+from pathlib import Path
+
+target = Path(sys.argv[1])
+payload = json.loads(target.read_text())
+if not isinstance(payload, dict) or payload.get("version") != 1:
+    raise SystemExit(1)
+payload.update(status="failed", controller_exit_code=1, source_claim_closed=False)
+temporary = target.with_name(f".lifecycle.{os.getpid()}.tmp")
+try:
+    with temporary.open("x") as handle:
+        json.dump(payload, handle, sort_keys=True)
+        handle.write("\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temporary, target)
+    descriptor = os.open(target.parent, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+finally:
+    temporary.unlink(missing_ok=True)
+PY_SOURCE_CLAIM_VERDICT
+}
+
 private_source_allows_provider_call() {
     [ -n "${PRIVATE_SOURCE_ID:-}" ] || return 0
     local verb="${1:-} ${2:-}" arg
@@ -16166,7 +16201,21 @@ PY
     if [ "$publication_failed" = "1" ]; then
         finalize_terminal_projection "$ec" || ec=1
     fi
-    finish_private_source_lease || ec=1
+    if ! finish_private_source_lease; then
+        ec=1
+        # The terminal verdict was sealed and published before the holder could
+        # close; record the retained claim there too, never only in the exit code.
+        if [ -f "$FLEET_DIR/_batch/lifecycle.json" ]; then
+            if ! fleet_seal_source_claim_unresolved "$FLEET_DIR/_batch/lifecycle.json" \
+                || ! finalize_terminal_projection "$ec"; then
+                echo "❌ could not record the retained source claim in the terminal verdict" >&2
+            elif [ "${SELF_MANAGED_HUB_RUN:-0}" = "1" ] && [ -n "${hub_final_action:-}" ] \
+                && ! python3 "$HUB_UPLOAD_HELPER" "$hub_final_action" "$FLEET_DIR/_batch/run.json" \
+                    --run-id "$BENCHMARK_HUB_PARENT_RUN_ID" --source direct-cloud-fleet; then
+                echo "❌ Hub republication of the retained source claim failed" >&2
+            fi
+        fi
+    fi
     # Teardown and final publication both need the snapshotted helpers.
     cleanup_owned_script_snapshot || ec=1
     exit "$ec"

@@ -423,6 +423,168 @@ class SourceLease(unittest.TestCase):
         self.assertFalse(any(k.startswith(self.m['CLAIM_PREFIX']) for k in self.b.machines[self.mid]['config']['metadata']))
 
 
+    def snapshot_replies(self, empty_reads):
+        actual, reads = self.b.respond, []
+        def reply(method, path, body):
+            if method == 'GET' and path.endswith('/volumes/vol_owned/snapshots'):
+                reads.append(path)
+                if len(reads) <= empty_reads:
+                    return 200, []
+            return actual(method, path, body)
+        self.b.respond = reply
+        return reads
+
+    def test_transient_empty_snapshot_list_is_reread_before_admission(self):
+        """PR1910 CodeRabbit 4559306460: the holder ran before the fleet's retrying validator."""
+        reads = self.snapshot_replies(empty_reads=2)
+        process = subprocess.Popen(self.command('hold'), env=self.b.env, stdout=subprocess.PIPE,
+                                   stderr=subprocess.PIPE, text=True)
+        self.processes.append(process)
+        try:
+            wait_until(lambda: self.ready.exists() or process.poll() is not None, timeout=20,
+                       description='source lease publisher READY or exit')
+        except WaitTimeout:
+            pass  # The assertion below reports the missing READY.
+        self.assertTrue(self.ready.exists(), process.communicate(timeout=5) if process.poll() is not None else 'no READY')
+        self.assertEqual(len(reads), 3)
+        self.assertEqual(self.invoke('check').returncode, 0)
+        self.assertIn(self.m['CLAIM_PREFIX']+OWNER, self.b.machines[self.mid]['config']['metadata'])
+
+    def test_persistently_missing_snapshot_still_refuses_admission(self):
+        reads = self.snapshot_replies(empty_reads=99)
+        result = subprocess.run(self.command('hold'), env=self.b.env, capture_output=True, text=True, timeout=30)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(len(reads), self.m['SNAPSHOT_READS'])
+        self.assertFalse(self.ready.exists())
+        self.assertFalse(any(k.startswith(self.m['CLAIM_PREFIX']) for k in self.b.machines[self.mid]['config']['metadata']))
+
+    def test_claim_receipt_precedes_native_claim_so_lost_ack_is_recoverable(self):
+        """PR1910 CodeRabbit 4559306472: a native claim must never exist without its local receipt."""
+        actual = self.b.respond
+        key = self.m['CLAIM_PREFIX'] + OWNER
+        def lost_ack(method, path, body):
+            answer = actual(method, path, body)
+            if method == 'POST' and path.endswith('/metadata/' + key):
+                return 503, {}
+            return answer
+        self.b.respond = lost_ack
+        result = subprocess.run(self.command('hold'), env=self.b.env, capture_output=True, text=True, timeout=8)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(self.ready.exists())
+        self.assertIn(key, self.b.machines[self.mid]['config']['metadata'])
+        self.b.respond = actual
+        saved = json.loads((self.journal/'claim.json').read_text())
+        self.assertEqual(saved['owned'], {'key': key, 'value': self.b.machines[self.mid]['config']['metadata'][key]})
+        self.proof()
+        result = subprocess.run(self.recovery_workspace_command(), env=self.b.env, capture_output=True, text=True, timeout=8)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn(key, self.b.machines[self.mid]['config']['metadata'])
+
+    def add_pool_transfer(self, mid='55555555555555', vid='vol_pooled', handoff=True):
+        (self.audit/'by-machine-id'/mid).write_text('cloudbench-pooled\n')
+        common = 'version=1\nfleet_owner_token='+OWNER+'\nrun_id='+RUN+'\napp='+FIXTURE['APP']+'\nclone_name=cloudbench-pooled\n'
+        (self.audit/'fresh/cloudbench-pooled').write_text(common+'source=fresh-clone\nsource_machine_id='+self.mid+
+            '\nmachine_id='+mid+'\nvolume_id='+vid+'\ndisposition=transferred-to-pool-stopped\n')
+        if handoff:
+            (self.audit/'pool-handoffs').mkdir(mode=0o700, exist_ok=True)
+            ledger = str(self.common/'cloudbench-pools/fixture.ids')
+            (self.audit/'pool-handoffs/cloudbench-pooled').write_text(common+'source=fresh-to-pool\nmachine_id='+mid+
+                '\nvolume_id='+vid+'\npool_ledger_file='+ledger+'\npool_meta_file='+ledger+'.deps\npool_meta_sha256='+'1'*64+
+                '\nclaim_sha256='+'2'*64+'\nlinearization=terminal-record-before-exact-claim-release\n')
+        self.b.machines[mid] = dict(id=mid, state='stopped', config={'metadata': {}, 'mounts': [{'volume': vid, 'path': '/data'}]})
+        self.b.volumes[vid] = dict(id=vid, state='created', attached_machine_id=mid)
+
+    def reseal_verified(self, lifecycle):
+        self.seal_changed_audit(lifecycle)
+        value = json.loads(lifecycle.read_text()); value['audit_sha256'] = self.m['digest_tree'](self.audit)
+        self.write(lifecycle, value)
+
+    def test_audited_pool_returned_primary_does_not_block_claim_closure(self):
+        """PR1910 CodeRabbit 4559306469: a stopped pool-returned primary stays indexed by the audit."""
+        process = self.start()
+        process.terminate(); process.communicate(timeout=5)
+        audit, lifecycle = self.proof()
+        self.add_pool_transfer(handoff=False)
+        self.reseal_verified(lifecycle)
+        self.assertNotEqual(self.invoke('close').returncode, 0)
+        self.assertIn(self.m['CLAIM_PREFIX']+OWNER, self.b.machines[self.mid]['config']['metadata'])
+        self.add_pool_transfer()
+        self.reseal_verified(lifecycle)
+        result = self.invoke('close')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn(self.m['CLAIM_PREFIX']+OWNER, self.b.machines[self.mid]['config']['metadata'])
+        self.assertEqual(self.b.machines['55555555555555']['state'], 'stopped')
+
+    def test_recovery_accepts_audited_pool_return_and_verified_no_allocation(self):
+        """PR1910 CodeRabbit 4559306469 and 4559306478 on the physical recovery path."""
+        process = self.start()
+        process.terminate(); process.communicate(timeout=5)
+        audit, lifecycle = self.proof()
+        value = json.loads(lifecycle.read_text()); value.update(cleanup_verified=False, audit_sha256='')
+        self.write(lifecycle, value)
+        (self.audit/'fresh/cloudbench-none').write_text('version=1\nfleet_owner_token='+OWNER+'\nrun_id='+RUN+
+            '\napp='+FIXTURE['APP']+'\nclone_name=cloudbench-none\nsource=fresh-clone\nsource_machine_id='+self.mid+
+            '\nmachine_id=\nvolume_id=\ndisposition=not-allocated-verified\n')
+        self.add_pool_transfer()
+        self.seal_changed_audit(lifecycle)
+        result = subprocess.run(self.recovery_workspace_command(), env=self.b.env, capture_output=True, text=True, timeout=8)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn(self.m['CLAIM_PREFIX']+OWNER, self.b.machines[self.mid]['config']['metadata'])
+        receipt = json.loads((self.journal/'recovered-physical-closure.json').read_text())
+        self.assertEqual(receipt['native_observations'],
+                         {'machines': {'55555555555555': 'transferred-to-pool-stopped'}, 'volumes': {}})
+
+    def test_verified_no_allocation_record_alone_permits_recovery(self):
+        """PR1910 CodeRabbit 4559306478: empty Machine and Volume IDs are the verified no-allocation shape."""
+        process = self.start()
+        process.terminate(); process.communicate(timeout=5)
+        audit, lifecycle = self.proof()
+        value = json.loads(lifecycle.read_text()); value.update(cleanup_verified=False, audit_sha256='')
+        self.write(lifecycle, value)
+        (self.audit/'fresh/cloudbench-none').write_text('version=1\nfleet_owner_token='+OWNER+'\nrun_id='+RUN+
+            '\napp='+FIXTURE['APP']+'\nclone_name=cloudbench-none\nsource=fresh-clone\nsource_machine_id='+self.mid+
+            '\nmachine_id=\nvolume_id=\ndisposition=not-allocated-verified\n')
+        self.seal_changed_audit(lifecycle)
+        result = subprocess.run(self.recovery_workspace_command(), env=self.b.env, capture_output=True, text=True, timeout=8)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn(self.m['CLAIM_PREFIX']+OWNER, self.b.machines[self.mid]['config']['metadata'])
+        # The no-allocation exception never admits an unverified empty shape.
+        (self.audit/'fresh/cloudbench-none').write_text((self.audit/'fresh/cloudbench-none').read_text()
+            .replace('disposition=not-allocated-verified', 'disposition=owned'))
+        self.assertRaises(Exception, self.m['original_resources'], self.audit, self.manifest, OWNER, RUN)
+
+    def test_recovery_replay_accepts_terminal_volume_advancing_to_absent(self):
+        """PR1910 CodeRabbit 4559306480: pending_destroy -> absent must not strand the original receipt."""
+        process = self.start()
+        process.terminate(); process.communicate(timeout=5)
+        audit, lifecycle = self.proof()
+        value = json.loads(lifecycle.read_text()); value.update(cleanup_verified=False, audit_sha256='')
+        self.write(lifecycle, value)
+        (self.audit/'fresh/cloudbench-volume-only').write_text('version=1\nfleet_owner_token='+OWNER+
+            '\nrun_id='+RUN+'\napp='+FIXTURE['APP']+'\nclone_name=cloudbench-volume-only\nmachine_id='
+            '\nvolume_id=vol_volumeonly\n')
+        self.seal_changed_audit(lifecycle)
+        self.b.volumes['vol_volumeonly'] = dict(id='vol_volumeonly', state='pending_destroy', attached_machine_id=None)
+        actual = self.b.respond
+        key = self.m['CLAIM_PREFIX'] + OWNER
+        def interrupted_removal(method, path, body):
+            if method == 'DELETE' and path.endswith('/metadata/' + key):
+                return 503, {}
+            return actual(method, path, body)
+        self.b.respond = interrupted_removal
+        result = subprocess.run(self.recovery_workspace_command(), env=self.b.env, capture_output=True, text=True, timeout=8)
+        self.assertNotEqual(result.returncode, 0)
+        original = (self.journal/'recovered-physical-closure.json').read_bytes()
+        self.assertIn(key, self.b.machines[self.mid]['config']['metadata'])
+        self.b.respond = actual
+        del self.b.volumes['vol_volumeonly']
+        result = subprocess.run(self.recovery_workspace_command(), env=self.b.env, capture_output=True, text=True, timeout=8)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn(key, self.b.machines[self.mid]['config']['metadata'])
+        self.assertEqual((self.journal/'recovered-physical-closure.json').read_bytes(), original)
+        self.assertEqual(json.loads(original)['native_observations']['volumes'], {'vol_volumeonly': 'pending_destroy'})
+
+
 class FleetGitCommon(unittest.TestCase):
     def test_same_canonical_path_implementation_without_deploy_planner_import(self):
         def implementation(path):

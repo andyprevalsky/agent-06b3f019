@@ -26,6 +26,9 @@ HERE = Path(__file__).resolve().parent
 C = runpy.run_path(str(HERE / 'cloudbench-prepare-source-create.py'))
 need, read, save, canonical = C['need'], C['read'], C['save'], C['canonical']
 PROTOCOL = 'cloudbench-source-lease-v1'
+# Native snapshot lists answered HTTP 200 [] for an existing snapshot under
+# concurrent reads (2026-11-11); the fleet validator re-reads, so must admission.
+SNAPSHOT_READS = 4
 CLAIM_PREFIX = 'cloudbench_source_consumer_'
 RETIRING = 'cloudbench_source_retiring'
 
@@ -110,9 +113,33 @@ def validate_source(lease, manifest):
     source = runpy.run_path(str(HERE / 'cloudbench-source.py'))
     shared = lease.api('GET', '/machines/' + manifest['shared_machine_id'])
     volume = lease.api('GET', '/volumes/' + manifest['volume_id'])
-    snapshots = lease.api('GET', '/volumes/' + manifest['volume_id'] + '/snapshots')
-    source['verify'](manifest, dict(machines=[machine, shared], volumes=[volume], snapshots=snapshots), parked_memory=2048)
+    snapshots = source_snapshots(lease, manifest)
+    source['verify'](manifest, {'machines': [machine, shared], 'volumes': [volume], 'snapshots': snapshots}, parked_memory=2048)
     return machine
+
+
+def source_snapshots(lease, manifest):
+    """Bounded GET-only re-reads of a list missing the selected snapshot or of a
+    transport/5xx failure. A definitive 4xx refusal or the final observation still
+    reaches verify(), which fails closed; the holder's admission deadline bounds it."""
+    path = '/volumes/' + manifest['volume_id'] + '/snapshots'
+    for attempt in range(1, SNAPSHOT_READS + 1):
+        try:
+            snapshots = lease.api('GET', path)
+        except C['Refusal'] as error:
+            status = getattr(error, 'native_status', None)
+            # Only a native transport or 5xx observation is transient; local
+            # refusals (for example a lost lease) and definitive 4xx are final.
+            if attempt == SNAPSHOT_READS or getattr(error, 'diagnostic', None) is None \
+                    or (status is not None and status < 500):
+                raise
+            snapshots = None
+        if isinstance(snapshots, list) and any(isinstance(row, dict) and row.get('id') == manifest['snapshot_id']
+                                               for row in snapshots):
+            return snapshots
+        if attempt < SNAPSHOT_READS:
+            time.sleep(attempt)
+    return snapshots
 
 
 def put_metadata(lease, key, value):
@@ -158,7 +185,7 @@ def canonical_custody(workspace, consumer_owner, run_id, manifest_digest, parent
                 manifest_digest=manifest_digest, original_registry_sha256=hashlib.sha256(C['STORAGE']['payload'](registry / 'meta')).hexdigest())
 
 
-def claim(lease, manifest, consumer_owner, run_id, claim_nonce, manifest_digest, custody):
+def claim(lease, manifest, consumer_owner, run_id, claim_nonce, manifest_digest, custody, persist):
     need(re.fullmatch('[0-9a-f]{32}', consumer_owner) and re.fullmatch('[A-Za-z0-9._-]+', run_id), 'invalid consumer owner/run')
     machine = validate_source(lease, manifest)
     key = CLAIM_PREFIX + consumer_owner
@@ -181,8 +208,12 @@ def claim(lease, manifest, consumer_owner, run_id, claim_nonce, manifest_digest,
              and peer.get('source_manifest_sha256') == manifest_digest and isinstance(peer.get('custody'), dict),
              'foreign or changed durable source consumer claim')
     need(key not in held or held[key] == value, 'existing own consumer claim differs; no adoption')
+    owned = {'key': key, 'value': value}
+    # Recovery authority is durable BEFORE the native claim can exist: an
+    # interrupted write or lost acknowledgement leaves a closable claim.
+    persist(owned)
     put_metadata(lease, key, value)
-    return dict(key=key, value=value)
+    return owned
 
 
 def audit_payload(path):
@@ -256,6 +287,39 @@ def cleanup_authority(proof, consumer_owner, run_id, manifest_digest, workspace,
     return audit
 
 
+TRANSFERRED = 'transferred-to-pool-stopped'
+
+
+def pool_transferred(audit, consumer_owner, run_id):
+    """Primaries whose ownership the fleet audit records as returned to the pool.
+
+    A fresh record with the terminal transfer disposition AND its exact
+    pool-handoff record (the fleet's own audit contract) is the only evidence; the
+    Machine then belongs to the pool, so its native state is no consumer evidence."""
+    result = {}
+    fresh = audit / 'fresh'
+    if not fresh.exists() and not fresh.is_symlink():
+        return result
+    C['STORAGE']['plain'](fresh, True)
+    for path in fresh.iterdir():
+        fields = C['STORAGE']['fields'](path)
+        if fields.get('disposition') != TRANSFERRED:
+            continue
+        handoff = C['STORAGE']['fields'](audit / 'pool-handoffs' / path.name)
+        need(fields.get('fleet_owner_token') == consumer_owner and fields.get('run_id') == run_id
+             and fields.get('app') == C['APP'] and fields.get('clone_name') == path.name
+             and re.fullmatch('[0-9a-f]{14}', fields.get('machine_id', ''))
+             and re.fullmatch('vol_[A-Za-z0-9]+', fields.get('volume_id', ''))
+             and (audit / 'by-machine-id' / fields['machine_id']).is_file()
+             and handoff.get('version') == '1' and handoff.get('fleet_owner_token') == consumer_owner
+             and handoff.get('run_id') == run_id and handoff.get('app') == C['APP']
+             and handoff.get('source') == 'fresh-to-pool' and handoff.get('clone_name') == path.name
+             and handoff.get('machine_id') == fields['machine_id'] and handoff.get('volume_id') == fields['volume_id'],
+             'original pool transfer audit differs')
+        result[fields['machine_id']] = fields['volume_id']
+    return result
+
+
 def close_claim(lease, manifest, owned, proof, consumer_owner, run_id, workspace):
     value = json.loads(owned['value'])
     audit = cleanup_authority(proof, consumer_owner, run_id, value['source_manifest_sha256'], workspace, value['custody'])
@@ -274,10 +338,11 @@ def close_claim(lease, manifest, owned, proof, consumer_owner, run_id, workspace
         need(not any(isinstance(v, str) and consumer_owner in v.split() for v in meta.values()),
              'consumer still has native fleet resources')
     native_by_id = {row['id']: row for row in rows}
+    transferred = pool_transferred(audit, consumer_owner, run_id)
     for path in (audit / 'by-machine-id').iterdir():
         need(re.fullmatch('[0-9a-f]{14}', path.name), 'invalid original fleet ledger Machine')
         row = native_by_id.get(path.name)
-        need(row is None or row.get('id') == path.name and row.get('state') == 'destroyed',
+        need(path.name in transferred or row is None or (row.get('id') == path.name and row.get('state') == 'destroyed'),
              'original consumer Machine remains after lease expiry')
     lease.api('DELETE', lease.prefix + '/metadata/' + owned['key'])
     need(owned['key'] not in metadata(lease.api('GET', lease.prefix)), 'durable consumer claim removal unconfirmed')
@@ -352,9 +417,11 @@ def hold(args):
         # 60-second parent startup budget. The native lease ends BEFORE READY.
         with C['DEADLINES']['bounded'](55):
             with Lease(native, manifest['machine_id'], wait=50) as lease:
-                owned = claim(lease, manifest, args.consumer_owner, args.run_id, nonce, manifest_digest, custody)
-                save(journal / 'claim.json', dict(manifest=manifest, owned=owned, consumer_owner=args.consumer_owner,
-                     run_id=args.run_id, parent_pid=args.parent_pid, parent_birth=parent_birth, workspace=str(args.workspace.absolute())))
+                def persist(owned):
+                    save(journal / 'claim.json', {'manifest': manifest, 'owned': owned, 'consumer_owner': args.consumer_owner,
+                         'run_id': args.run_id, 'parent_pid': args.parent_pid, 'parent_birth': parent_birth,
+                         'workspace': str(args.workspace.absolute())})
+                owned = claim(lease, manifest, args.consumer_owner, args.run_id, nonce, manifest_digest, custody, persist)
         ready.update(claimed=True, claim_guard_deadline_monotonic=time.monotonic() + 125)
         ready_publish(args.ready.absolute(), ready)
         heartbeat = time.monotonic()
@@ -400,15 +467,22 @@ def original_resources(audit, manifest, consumer_owner, run_id):
         machines.add(path.name)
     fresh = audit / 'fresh'
     C['STORAGE']['plain'](fresh, True)
+    transferred = pool_transferred(audit, consumer_owner, run_id)
     for path in fresh.iterdir():
         fields = C['STORAGE']['fields'](path)
         need(fields.get('version') == '1' and fields.get('fleet_owner_token') == consumer_owner
              and fields.get('run_id') == run_id and fields.get('app') == C['APP']
-             and fields.get('clone_name') == path.name
-             # A clone whose Machine was never allocated (ambiguous create) owns only its Volume.
-             and (fields.get('machine_id') in machines or fields.get('machine_id') == '')
+             and fields.get('clone_name') == path.name, 'original fresh resource ledger differs')
+        if fields.get('disposition') == 'not-allocated-verified':
+            # The fleet's verified no-allocation terminal shape owns no resource.
+            need(fields.get('machine_id') == '' and fields.get('volume_id') == '', 'original fresh resource ledger differs')
+            continue
+        need((fields.get('machine_id') in machines
+              # A clone whose Machine was never allocated (ambiguous create) owns only its Volume.
+              or fields.get('machine_id') == '')
              and re.fullmatch('vol_[A-Za-z0-9]+', fields.get('volume_id', '')), 'original fresh resource ledger differs')
-        volumes.add(fields['volume_id'])
+        if fields.get('disposition') != TRANSFERRED:
+            volumes.add(fields['volume_id'])
     migrations = audit / 'volume-migrations'
     if migrations.exists() or migrations.is_symlink():
         C['STORAGE']['plain'](migrations, True)
@@ -424,14 +498,17 @@ def original_resources(audit, manifest, consumer_owner, run_id):
             for key in ('old_volume_id', 'new_volume_id'):
                 need(re.fullmatch('vol_[A-Za-z0-9]+', receipt[key]), 'original migration Volume identity required')
                 volumes.add(receipt[key])
+    # A pool-returned primary keeps its (possibly migrated) attached Volume.
+    volumes -= set(transferred.values())
     need(not machines & C['PROTECTED_MACHINES'] and manifest['machine_id'] not in machines
-         and not volumes & C['PROTECTED_VOLUMES'] and manifest['volume_id'] not in volumes,
+         and not volumes & C['PROTECTED_VOLUMES'] and manifest['volume_id'] not in volumes
+         and not set(transferred.values()) & (C['PROTECTED_VOLUMES'] | {manifest['volume_id']}),
          'original consumer ledger aliases protected source resources')
-    return machines, volumes
+    return machines, volumes, transferred
 
 
 def physical_observations(lease, audit, manifest, consumer_owner, run_id):
-    machines, volumes = original_resources(audit, manifest, consumer_owner, run_id)
+    machines, volumes, transferred = original_resources(audit, manifest, consumer_owner, run_id)
     rows = C['inventory'](lease.api('GET', '/machines'), 'recovered original Machine')
     for row in rows:
         if row['id'] == lease.mid:
@@ -443,6 +520,9 @@ def physical_observations(lease, audit, manifest, consumer_owner, run_id):
     by_volume = {row['id']: row for row in C['inventory'](lease.api('GET', '/volumes'), 'recovered original Volume')}
     observed_machines, observed_volumes = {}, {}
     for mid in sorted(machines):
+        if mid in transferred:
+            observed_machines[mid] = TRANSFERRED  # pool-owned; its state is no consumer evidence
+            continue
         row = by_machine.get(mid)
         need(row is None or row.get('state') == 'destroyed', 'original recovered Machine is not absent')
         observed_machines[mid] = 'absent' if row is None else row['state']
@@ -480,7 +560,15 @@ def _recover_original_claim(lease, journal, saved, consumer_owner, run_id):
         receipt_path = journal / 'recovered-physical-closure.json'
         if receipt_path.exists():
             receipt = read(receipt_path)
-            need({key: receipt.get(key) for key in binding} == binding,
+            fixed = {key: value for key, value in binding.items() if key != 'native_observations'}
+            # The original receipt is preserved. A replay re-proves the same
+            # resource identities, each already in an accepted terminal state
+            # (pending_destroy may advance to absent), not identical labels.
+            recorded = receipt.get('native_observations')
+            need({key: receipt.get(key) for key in fixed} == fixed and isinstance(recorded, dict)
+                 and set(recorded) == set(observations)
+                 and all(isinstance(recorded[kind], dict) and set(recorded[kind]) == set(observations[kind])
+                         for kind in observations),
                  'original recovered physical closure evidence changed')
         else:
             receipt = dict(binding, producer=dict(pid=os.getpid(), birth=identity(os.getpid()),

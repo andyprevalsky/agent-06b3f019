@@ -1696,6 +1696,9 @@ class Boundary(unittest.TestCase):
             identity = suffix.split('/')[2]
             if identity not in self.machines: return 404, {}
             if method == 'DELETE':
+                if self.mode == 'machine-delete-rejected':
+                    self.mode = ''
+                    return 412, {}
                 del self.machines[identity]
                 if self.mode == 'delete-lost-response':
                     self.volumes['vol_owned']['attached_machine_id'] = None
@@ -1707,6 +1710,9 @@ class Boundary(unittest.TestCase):
             identity = suffix.split('/')[2]
             if identity not in self.volumes: return 404, {}
             if method == 'DELETE':
+                if self.mode == 'volume-delete-rejected':
+                    self.mode = ''
+                    return 409, {}
                 if self.mode == 'volume-pending-destroy':
                     self.volumes[identity]['state'] = 'pending_destroy'
                     return 202, {}
@@ -2180,6 +2186,29 @@ class Boundary(unittest.TestCase):
         machine_deletes = [c for c in self.calls if c[0] == 'DELETE' and c[1].endswith('/machines/22222222222222')]
         self.assertEqual(len(machine_deletes), 1)
         self.assertEqual(set(self.machines), {DONOR})
+
+    def test_definitive_delete_rejection_is_recorded_and_retried_once_rechecked(self):
+        """PR1910 CodeRabbit 4559306411: a 4xx DELETE refusal must not strand the resource on GET-only resume."""
+        for mode, kind, path in (('machine-delete-rejected', 'machine', '/machines/22222222222222'),
+                                 ('volume-delete-rejected', 'volume', '/volumes/vol_owned')):
+            with self.subTest(kind=kind):
+                self.tearDown(); self.setUp()
+                self.assertEqual(self.run_cli().returncode, 0)
+                self.mode = mode
+                self.assertNotEqual(self.run_cli(['cleanup', *self.args[1:]]).returncode, 0)
+                rejected = json.loads((self.root / ('journal/' + kind + '.delete.rejected-1.json')).read_text())
+                self.assertEqual((rejected['attempt'], rejected['native_status']), (1, 412 if kind == 'machine' else 409))
+                self.assertFalse((self.root / ('journal/' + kind + '.deleted.json')).exists())
+                result = self.run_cli(['cleanup', *self.args[1:]])
+                self.assertEqual(result.returncode, 0, result.stderr)
+                deletes = [c for c in self.calls if c[0] == 'DELETE' and c[1].endswith(path)]
+                self.assertEqual(len(deletes), 2)
+                self.assertTrue((self.root / ('journal/' + kind + '.delete.retry-2.json')).exists())
+                self.assertEqual(set(self.machines), {DONOR})
+                self.assertNotIn('vol_owned', self.volumes)
+                # A completed retirement repeats no delete.
+                self.assertEqual(self.run_cli(['cleanup', *self.args[1:]]).returncode, 0)
+                self.assertEqual(len([c for c in self.calls if c[0] == 'DELETE' and c[1].endswith(path)]), 2)
 
     def test_native_pending_destroy_volume_confirms_exact_retirement(self):
         self.assertEqual(self.run_cli().returncode, 0)
