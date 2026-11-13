@@ -5391,6 +5391,12 @@
   },
   {
     "name": "browser-auth-email-otp",
+    "quarantine": {
+      "since": "2026-11-13",
+      "repair": "pending-handoff:6c5f96b152e7456a9274bbf67184a474",
+      "error": "Tool 'spawn_browser_agent' exceeded its exact root call limit during execution: expected 1, got 2. Full counts: {'agent_init': 1, 'cloud_agent': 1, 'spawn_browser_agent': 2, 'spawn_agent': 2, 'wait_for': 1} | Agent status: ACTIVE (expected COMPLETED)",
+      "evidence": "PR1865 round 67 smoke: Tilion CDP 503 then FAILED browser initialization receipt blocked every transient-proxy retry (back-end/src/providers/browser/initialization.ts)"
+    },
     "title": "Hosted Sign-In: Code To The User's Own Inbox",
     "description": "The user's account is under an inbox they connected; the browser agent signs in with a code emailed there, not with the minted identity.",
     "prompt": "Tell me my member number for {auth_test_site_url}",
@@ -8539,6 +8545,12 @@
   },
   {
     "name": "agent-payment-setup-resume",
+    "quarantine": {
+      "since": "2026-11-13",
+      "repair": "pending-handoff:3b8bb09b848f45cb87600d663e12eae1",
+      "error": "Timeout after 902s (task timeout=900s) | Investigate: python agents/benchmarks/agent_latency.py f1c0c1ad-9365-4729-969b-679e66bbcb00 | Cache/cost: python agents/benchmarks/run_benchmark.py --compare <run.json> | Agent status: ACTIVE (expected COMPLETED)",
+      "evidence": "PR1865 round 67 smoke: Tilion CDP 503 then FAILED browser initialization receipt blocked every transient-proxy retry (back-end/src/providers/browser/initialization.ts)"
+    },
     "title": "Agent Payment Setup And Auto Resume",
     "group": "pre-deploy",
     "prompt": "Use a browser agent to go to {frontend_url}/test_payment and complete the visible Rose Labs Test Payment checkout. Buy exactly these 3 products and no others: Aurora Notebook, Ceramic Mug, and Canvas Tote. Use only the visible checkout UI; do not navigate to source files or API endpoints. If One Time Agent Payment Setup is required after payment approval, wait for the user to complete it and then continue automatically with the same checkout.",
