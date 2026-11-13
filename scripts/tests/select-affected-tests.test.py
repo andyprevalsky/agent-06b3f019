@@ -450,6 +450,23 @@ def check_stability_concurrency() -> None:
         check(report["status"] == "PASS" and apart and beside,
               "stability: units sharing an exclusive group never overlap; others run beside them")
 
+        # PR #1865 2026-11-13: a proc-observation unit (whole-/proc scan, refuses on unreadable
+        # same-user processes) failed beside arbitrary concurrent units; it now runs alone.
+        for path in marks.iterdir():
+            path.unlink()
+        gates = [(n, [sys.executable, str(observe), str(os.getpid()), str(marks), n, "1"])
+                 for n in ("before", "scan", "after")]
+        options = {"before": {}, "scan": {"exclusive": "proc-observation"}, "after": {}}
+        units = [sat.Unit("deploy-structural-gates", n, [str(observe)]) for n, _ in gates]
+        with patch.object(sat, "_structural_gates", return_value=gates), \
+                patch.object(sat, "_structural_gate_options", return_value=options):
+            report = sat.run_stability(units, load_workers=4, timeout=60, log_root=work / "logs-solo")
+        span = {n: [(float(r[2]), float(r[3])) for r in (line.split() for line in (marks / f"{n}.log").read_text().splitlines())]
+                for n in ("before", "scan", "after")}
+        alone = not any(a[0] < b[1] and b[0] < a[1] for a in span["scan"] for b in span["before"] + span["after"])
+        check(report["status"] == "PASS" and alone,
+              "stability: a proc-observation unit never overlaps any other unit")
+
 
 CASE_FIXTURE = '''import os
 import unittest
