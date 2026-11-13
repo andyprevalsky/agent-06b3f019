@@ -74,10 +74,6 @@ class RecoveryGuardInheritance(unittest.TestCase):
         source = FLEET.read_text()
         names = ["acquire_registry_recovery_lock", "release_registry_recovery_guard",
                  "release_registry_recovery_lock"]
-        # The controller's guard-scoped flyctl shim, when it defines one.
-        names += [name for name in ("enable_recovery_guard_flyctl_shim",
-                                    "disable_recovery_guard_flyctl_shim")
-                  if re.search(r"^" + name + r"\(\) \{", source, re.M)]
         return "\n".join([
             "set -u",
             'registry_meta_value(){ sed -n "s/^$2=//p" "$1" 2>/dev/null | head -1; }',

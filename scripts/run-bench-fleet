@@ -6548,7 +6548,30 @@ finally:
     os.close(fd)
 PYGUARD
     exec {REGISTRY_RECOVERY_GUARD_FD}< "$guard" || return 1
-    enable_recovery_guard_flyctl_shim || { release_registry_recovery_guard; return 1; }
+    # Bash cannot open the guard close-on-exec, so every child inherits its
+    # flock. flyctl may fork a long-lived `flyctl agent` daemon that would keep
+    # the guard held after recovery exits; the original-volume capture then
+    # refuses "exact-owner recovery guard is held" (PR #1972). While the guard
+    # is held, a private PATH shim closes that one fd and then execs the real
+    # flyctl, so the process tree, `$!` and argv stay exactly flyctl's (a shell
+    # function would make `flyctl proxy ... &` return a wrapper PID). Helpers
+    # that verify the guard still receive it through --guard-fd. Inline here:
+    # callers and fixtures extract this function on its own.
+    if [ -z "${RECOVERY_GUARD_FLYCTL_SHIM_DIR:-}" ] \
+        && CLOUDBENCH_REAL_FLYCTL="$(type -P flyctl)" && [ -n "$CLOUDBENCH_REAL_FLYCTL" ]; then
+        RECOVERY_GUARD_FLYCTL_SHIM_DIR="$(mktemp -d "${TMPDIR:-/tmp}/cloudbench-guard-flyctl.XXXXXX")" \
+            || { unset RECOVERY_GUARD_FLYCTL_SHIM_DIR; exec {REGISTRY_RECOVERY_GUARD_FD}<&-; unset REGISTRY_RECOVERY_GUARD_FD; return 1; }
+        printf '%s\n' '#!/usr/bin/env bash' \
+            '[ -z "${CLOUDBENCH_FLYCTL_CLOSE_FD:-}" ] || exec {CLOUDBENCH_FLYCTL_CLOSE_FD}<&-' \
+            'exec "$CLOUDBENCH_REAL_FLYCTL" "$@"' > "$RECOVERY_GUARD_FLYCTL_SHIM_DIR/flyctl" \
+            && chmod 700 "$RECOVERY_GUARD_FLYCTL_SHIM_DIR/flyctl" \
+            || { rm -rf "$RECOVERY_GUARD_FLYCTL_SHIM_DIR"; unset RECOVERY_GUARD_FLYCTL_SHIM_DIR; exec {REGISTRY_RECOVERY_GUARD_FD}<&-; unset REGISTRY_RECOVERY_GUARD_FD; return 1; }
+        RECOVERY_GUARD_SAVED_PATH="$PATH"
+        export CLOUDBENCH_REAL_FLYCTL CLOUDBENCH_FLYCTL_CLOSE_FD="$REGISTRY_RECOVERY_GUARD_FD"
+        export PATH="$RECOVERY_GUARD_FLYCTL_SHIM_DIR:$PATH"
+    else
+        unset CLOUDBENCH_REAL_FLYCTL
+    fi
     local guard_status=1
     for _ in $(seq 1 30); do
         guard_status=0
@@ -6604,43 +6627,13 @@ PYGUARD
     return 1
 }
 
-# Bash cannot open the recovery guard close-on-exec, so every child inherits
-# its flock. flyctl may fork a long-lived `flyctl agent` daemon that would keep
-# the guard held after recovery exits; the original-volume capture then refuses
-# "exact-owner recovery guard is held" (PR #1972). While the guard is held, a
-# PATH shim closes that one fd and then execs the real flyctl, so the process
-# tree, `$!` and argv stay exactly those of flyctl. Helpers that verify the
-# guard still receive it through --guard-fd.
-enable_recovery_guard_flyctl_shim() {
-    [ -z "${RECOVERY_GUARD_FLYCTL_SHIM_DIR:-}" ] || return 0
-    local real dir
-    real="$(type -P flyctl)" || return 0
-    dir="$(mktemp -d "${TMPDIR:-/tmp}/cloudbench-guard-flyctl.XXXXXX")" || return 1
-    cat > "$dir/flyctl" <<'SHIM' || { rm -rf "$dir"; return 1; }
-#!/usr/bin/env bash
-if [ -n "${CLOUDBENCH_FLYCTL_CLOSE_FD:-}" ]; then
-    exec {CLOUDBENCH_FLYCTL_CLOSE_FD}<&-
-fi
-exec "$CLOUDBENCH_REAL_FLYCTL" "$@"
-SHIM
-    chmod 700 "$dir/flyctl" || { rm -rf "$dir"; return 1; }
-    RECOVERY_GUARD_FLYCTL_SHIM_DIR="$dir"
-    RECOVERY_GUARD_SAVED_PATH="$PATH"
-    export CLOUDBENCH_REAL_FLYCTL="$real" CLOUDBENCH_FLYCTL_CLOSE_FD="$REGISTRY_RECOVERY_GUARD_FD"
-    export PATH="$dir:$PATH"
-}
-
-disable_recovery_guard_flyctl_shim() {
-    [ -n "${RECOVERY_GUARD_FLYCTL_SHIM_DIR:-}" ] || return 0
-    export PATH="$RECOVERY_GUARD_SAVED_PATH"
-    unset CLOUDBENCH_REAL_FLYCTL CLOUDBENCH_FLYCTL_CLOSE_FD RECOVERY_GUARD_SAVED_PATH
-    rm -f "$RECOVERY_GUARD_FLYCTL_SHIM_DIR/flyctl"
-    rmdir "$RECOVERY_GUARD_FLYCTL_SHIM_DIR" 2>/dev/null || true
-    unset RECOVERY_GUARD_FLYCTL_SHIM_DIR
-}
-
 release_registry_recovery_guard() {
-    disable_recovery_guard_flyctl_shim
+    if [ -n "${RECOVERY_GUARD_FLYCTL_SHIM_DIR:-}" ]; then
+        export PATH="$RECOVERY_GUARD_SAVED_PATH"
+        rm -f "$RECOVERY_GUARD_FLYCTL_SHIM_DIR/flyctl"
+        rmdir "$RECOVERY_GUARD_FLYCTL_SHIM_DIR" 2>/dev/null || true
+        unset CLOUDBENCH_REAL_FLYCTL CLOUDBENCH_FLYCTL_CLOSE_FD RECOVERY_GUARD_SAVED_PATH RECOVERY_GUARD_FLYCTL_SHIM_DIR
+    fi
     if [ -n "${REGISTRY_RECOVERY_GUARD_FD:-}" ]; then
         exec {REGISTRY_RECOVERY_GUARD_FD}<&-
         unset REGISTRY_RECOVERY_GUARD_FD
