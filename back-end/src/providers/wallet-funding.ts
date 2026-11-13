@@ -18,6 +18,39 @@ function delay(ms: number): Promise<void> {
 }
 
 /**
+ * The residual-recovery accelerator is cardholder-scoped and never substitutes for a transfer's own
+ * release status. Concurrent release observations (cron, abandon, resume) each re-fired it on every
+ * poll of a still-consumed transfer, spending the org-wide 120 requests/minute budget on repeats.
+ * Run it at most once per cardholder per rate window; a concurrent caller shares the in-flight call.
+ */
+const CARDHOLDER_RECOVERY_WINDOW_MS = 60_000;
+const cardholderRecoveries = new Map<string, { startedAtMs: number; done: Promise<unknown> }>();
+
+async function coalesceCardholderRecovery(
+  cardholderId: string,
+  recover: () => Promise<unknown>
+): Promise<void> {
+  const now = Date.now();
+  for (const [key, entry] of cardholderRecoveries) {
+    if (now - entry.startedAtMs >= CARDHOLDER_RECOVERY_WINDOW_MS) cardholderRecoveries.delete(key);
+  }
+  const existing = cardholderRecoveries.get(cardholderId);
+  if (existing !== undefined) {
+    await existing.done.catch(() => undefined);
+    return;
+  }
+  const done = recover();
+  cardholderRecoveries.set(cardholderId, { startedAtMs: now, done });
+  try {
+    await done;
+  } catch (error) {
+    // A failed accelerator does not consume the window: the next observation may retry it.
+    cardholderRecoveries.delete(cardholderId);
+    throw error;
+  }
+}
+
+/**
  * Organization backpressure that says nothing about one transfer: the provider's throttle, its
  * intermittent org-token 401 on a healthy secret (left after the runtime's read auth-flap window),
  * and a transient 503. Same set as the benchmark float's backpressure classification.
@@ -333,8 +366,11 @@ export class AgentCardCompanyWalletFundingProvider implements WalletFundingProvi
             cardholderResolved = true;
           }
           if (cardholderId !== undefined) {
-            await recoverCardholderFunds(cardholderId, (toolName, args) =>
-              this.toolCaller(toolName, args, retryDeadlineAtMs)
+            const recoveryCardholderId = cardholderId;
+            await coalesceCardholderRecovery(recoveryCardholderId, () =>
+              recoverCardholderFunds(recoveryCardholderId, (toolName, args) =>
+                this.toolCaller(toolName, args, retryDeadlineAtMs)
+              )
             );
           }
         } catch (error) {

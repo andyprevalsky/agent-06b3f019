@@ -296,7 +296,8 @@ async function main(): Promise<void> {
       };
     },
     { attempts: 4, delayMs: 0 },
-    async () => 'cardholder-own'
+    // Own cardholder id: the recovery accelerator is coalesced per cardholder per rate window.
+    async () => 'cardholder-foreign-recovery'
   );
   await assert.rejects(
     () =>
