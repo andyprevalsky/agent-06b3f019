@@ -73,44 +73,48 @@ validate_private_fleet_source
 
 
 class WarmSnapshotEpochRead(unittest.TestCase):
-    """warm_deps_preflight's snapshot_created_epoch: an omitted snapshot is re-read, not refused."""
+    """warm_deps_preflight re-reads a fresh listing that omits the recorded snapshot."""
 
-    def run_case(self, empty_reads: int, inventory: str = '') -> tuple[subprocess.CompletedProcess, list[str]]:
+    def run_case(self, empty_reads: int, native: str = '') -> tuple[subprocess.CompletedProcess, list[str]]:
         with tempfile.TemporaryDirectory() as case:
-            script = function('snapshot_created_epoch') + function('snapshot_epoch_from_inventory') + r'''
-FLY() {
-  printf '%s\n' "$*" >> "$CASE/calls"
-  n=$(grep -c '^volume snapshots' "$CASE/calls")
-  if [ "$n" -le "$EMPTY_READS" ]; then printf '[]'
-  else printf '[{"id":"%s","created_at":"2026-11-13T02:00:00Z"}]' "$SNAPSHOT"; fi
-}
-sleep() { printf 'sleep %s\n' "$1" >> "$CASE/calls"; }
-touch "$CASE/calls"
-if [ -n "$INVENTORY" ]; then snapshot_created_epoch "$SNAPSHOT" "$INVENTORY"; else snapshot_created_epoch "$SNAPSHOT"; fi
-'''
-            env = {**os.environ, 'CASE': case, 'EMPTY_READS': str(empty_reads), 'SNAPSHOT': SNAPSHOT,
-                   'INVENTORY': inventory, 'VOL_ID': 'vol_donor', 'APP': 'fixture'}
-            result = subprocess.run(['bash', '-c', 'set -u\n' + script], env=env, capture_output=True,
-                                    text=True, timeout=60)
+            state = Path(case) / 'receipt'
+            state.write_text(f'node python 1791903927 {SNAPSHOT}\n')
+            listing = native or (
+                'n=$(grep -c "^volume snapshots" "$CASE/calls")\n'
+                '  if [ "$n" -le "$EMPTY_READS" ]; then printf "[]"\n'
+                '  else printf \'[{"id":"%s","created_at":"2026-10-13T15:06:27Z"}]\' "$SNAPSHOT"; fi')
+            script = '\n'.join([
+                'set -uo pipefail', 'PRIVATE_SOURCE_FILE=""', 'APP=fixture', 'VOL_ID=vol_owned',
+                f'SNAP_ID={SNAPSHOT}', 'ROOT_DIR=fixture', 'BENCH_REF=fixture', 'warm_json="[]"',
+                'CLOUDBENCH_WARM_DEPS_AUTOREFRESH=0', 'CLOUDBENCH_PYTHON_MANIFESTS=(agents/requirements.txt)',
+                f'WARM_DEPS_STATE_FILE={state}', 'HYDRATED_WARM_DEPS_STATE=""', 'touch "$CASE/calls"',
+                'FLY() {\n  printf "%s\\n" "$*" >> "$CASE/calls"\n  ' + listing + '\n}',
+                'sleep() { printf "sleep %s\\n" "$1" >> "$CASE/calls"; }',
+                'cloudbench_node_dependency_fingerprint() { printf node; }',
+                'cloudbench_manifest_fingerprint() { printf python; }', 'git() { return 0; }',
+                function('warm_deps_recorded_state'), function('snapshot_created_epoch'),
+                function('warm_deps_preflight'), 'warm_deps_preflight'])
+            env = {**os.environ, 'CASE': case, 'EMPTY_READS': str(empty_reads), 'SNAPSHOT': SNAPSHOT}
+            result = subprocess.run(['bash', '-c', script], env=env, capture_output=True, text=True, timeout=60)
             return result, (Path(case) / 'calls').read_text().splitlines()
 
     def test_transient_empty_listing_is_reread_until_the_snapshot_appears(self):
         result, calls = self.run_case(empty_reads=2)
-        self.assertEqual(0, result.returncode, result.stderr)
-        self.assertEqual('1794535200', result.stdout.strip())
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        self.assertEqual(3, sum(c.startswith('volume snapshots') for c in calls))
         self.assertEqual(['sleep 2', 'sleep 4'], [c for c in calls if c.startswith('sleep')])
 
     def test_snapshot_that_never_appears_fails_closed_after_six_reads(self):
         result, calls = self.run_case(empty_reads=99)
         self.assertEqual(1, result.returncode)
-        self.assertIn('exact snapshot absent', result.stderr)
+        self.assertIn('refusing maintenance', result.stderr)
         self.assertEqual(6, sum(c.startswith('volume snapshots') for c in calls))
 
-    def test_captured_inventory_is_never_reread(self):
-        result, calls = self.run_case(empty_reads=0, inventory='[]')
+    def test_failed_provider_read_refuses_without_rereading(self):
+        result, calls = self.run_case(empty_reads=0, native='return 75')
         self.assertEqual(1, result.returncode)
-        self.assertEqual([], calls)
-
+        self.assertEqual(1, sum(c.startswith('volume snapshots') for c in calls))
+        self.assertEqual([], [c for c in calls if c.startswith('sleep')])
 
 if __name__ == '__main__':
     unittest.main()

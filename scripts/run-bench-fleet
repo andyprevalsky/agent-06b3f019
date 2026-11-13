@@ -16467,32 +16467,17 @@ fi
 # carries in a git-common state file (shared across sibling workspaces); heal
 # centrally ONCE when it drifts.
 snapshot_created_epoch() {  # snapshot_created_epoch <snap_id> [captured-inventory]
+    local snapshots query_status=0
     if [ "$#" -gt 1 ]; then
-        snapshot_epoch_from_inventory "$1" "$2"
-        return
-    fi
-    # A fresh provider listing is not authoritative when it omits the snapshot:
-    # Fly answers HTTP 200 [] for existing snapshots under concurrent reads.
-    # Re-read (bounded) on an omission or a failed read; an invalid inventory
-    # still refuses at once, and a snapshot that never appears fails closed.
-    local snapshots query_status epoch_status _epoch_read
-    for _epoch_read in 1 2 3 4 5 6; do
-        query_status=0
+        snapshots="$2"
+    else
         snapshots="$(FLY volume snapshots list "$VOL_ID" -a "$APP" --json 2>/dev/null)" || query_status=$?
         if [ "$query_status" -ne 0 ]; then
-            echo "snapshot epoch provider read failed (exit=$query_status, read $_epoch_read/6)" >&2
-            epoch_status=75
-        else
-            epoch_status=0
-            snapshot_epoch_from_inventory "$1" "$snapshots" || epoch_status=$?
-            [ "$epoch_status" -eq 1 ] || return "$epoch_status"
+            echo "snapshot epoch provider read failed (exit=$query_status)" >&2
+            return 75
         fi
-        [ "$_epoch_read" -lt 6 ] || return "$epoch_status"
-        sleep $((_epoch_read * 2))
-    done
-}
-snapshot_epoch_from_inventory() {  # snapshot_epoch_from_inventory <snap_id> <inventory-json>
-    printf '%s' "$2" | SID="$1" python3 -c '
+    fi
+    printf '%s' "$snapshots" | SID="$1" python3 -c '
 import json, os, sys
 from datetime import datetime
 try:
@@ -16560,7 +16545,18 @@ warm_deps_preflight() {
                 return 1
             }
         else
-            snap_epoch="$(snapshot_created_epoch "$SNAP_ID")" || {
+            # A fresh listing that omits the snapshot is not authoritative: Fly
+            # answers HTTP 200 [] for existing snapshots under concurrent reads.
+            # Re-read (bounded) only on that omission (exit 1); a failed read or
+            # an invalid inventory (75) still refuses at once.
+            local epoch_status _epoch_read
+            for _epoch_read in 1 2 3 4 5 6; do
+                epoch_status=0
+                snap_epoch="$(snapshot_created_epoch "$SNAP_ID")" || epoch_status=$?
+                [ "$epoch_status" -eq 1 ] && [ "$_epoch_read" -lt 6 ] || break
+                sleep $((_epoch_read * 2))
+            done
+            [ "$epoch_status" -eq 0 ] || {
                 echo "❌ warm snapshot freshness could not be verified; refusing maintenance" >&2
                 return 1
             }
