@@ -23,7 +23,7 @@ sources:
   - PR #1975 round-7 deploy smoke (browser-biometrics-webdecoy)
   - agent 3f6a83cd-164f-4e55-ab5d-39eb3923f92b
   - task browser-biometrics-webdecoy LLM dumps 775e2206c1a4, 369b842ea28c, 9cce7e697a91
-repro: agents/tests/blackbox/llm.blackbox.py::test_provider_reused_tool_call_id_keeps_later_llm_calls_buildable
+repro: agents/tests/blackbox/llm.blackbox.py::test_provider_reused_tool_call_id_keeps_later_llm_calls_buildable and ::test_provider_tool_call_id_never_reuses_a_stored_unanswered_declaration
 status: fixed
 ---
 
@@ -89,9 +89,12 @@ Golden references (converging pattern):
 
 Benchmark outcome: not claimed. The `browser-biometrics-webdecoy` smoke task's first failure was the Tilion browser-session init (`Browser initialization failed before readiness`). The parent thread attributed it NOT_INTRODUCED, on the provider side. This RCA's symptom is the harness `ValueError` that then killed the root agent. It is proven at the owning boundary by replaying the captured kimi-k3 request and response through the real activity and SSE parser. An exact `scripts/run-bench --local browser-biometrics-webdecoy` fail/pass pair would depend on kimi-k3 re-emitting the colliding id and on the live Tilion fault. It was not run, and this is recorded as an outcome-reproduction gap for the task, not for this mechanism.
 
+`status: fixed` covers the diagnosed symptom, the harness `ValueError` mechanism. The task outcome is not claimed, and its gap stays open with the Tilion attribution.
+
 Open siblings (same class, not changed here):
 
 - The browser agent (`domains/spawn_browser_agent_v3/handler.py` `_browser_action_tool_call_id`) keeps provider ids verbatim in its turn history. `filter_browser_turn_messages` (`providers/rose/browser_use.py:1024`) keeps only the latest result per id, so a kimi-k3 browser agent that repeats an id across steps would silently drop an earlier result. No occurrence has been observed yet.
+- Compaction plus the cross-worker fetch. The same-worker path reserves ids from the compacted context, while the cross-worker fallback (`call_llm_activity` → `_fetch_agent_data_impl`) builds from the raw backend rows with no compaction view. An id claimed after a compaction can therefore still collide with a pre-compaction declaration that a later cross-worker build registers. This depends on that existing view mismatch, which predates this change.
 - kimi ids contain `:`. That is outside Anthropic's `^[a-zA-Z0-9_-]+$` if a conversation moves to an Anthropic leg (`providers/rose/transforms.py:276`, no sanitizer). This predates the change, and `__<n>` does not make it worse.
 
 At 10k agents: one O(context rows) set per LLM call, local to the activity. No shared state, query or channel.
