@@ -8543,7 +8543,7 @@
     "name": "agent-payment-setup-resume",
     "quarantine": {
       "since": "2026-11-13",
-      "repair": "pending-handoff:9a4a72a77dab428bb30648ea04b25e6a",
+      "repair": "https://boxes.dev/thread/ph701cd5nwt9pn2tjrzcjv5pch8j46n5",
       "error": "Timeout after 901s (task timeout=900s)",
       "evidence": "PR #1972 deploy f93b9ad17f smoke: first attempt timed out with the agent still ACTIVE, same-source rerun PASSED (FLAKY 9a4a72a7); NOT_INTRODUCED, #1972 changes only back-end/src/providers/phonePortrait{Proof,Route}.ts and portrait tests"
     },
