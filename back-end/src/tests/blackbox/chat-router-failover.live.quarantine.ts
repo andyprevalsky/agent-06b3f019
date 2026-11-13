@@ -1,22 +1,9 @@
 /**
- * Quarantine for the live chat-router-failover blackbox case (FLAKY 6a3ec2af, PR #1972 deploy):
- * the live re-plan goal omitted the goal anchor once (goalAnchorFailure) and passed on rerun.
- * NOT_INTRODUCED; the repair is handed off after merge.
+ * Live chat-router-failover blackbox case. It was quarantined after FLAKY 6a3ec2af (PR #1972
+ * deploy: the live re-plan goal omitted the goal anchor once and passed on rerun, NOT_INTRODUCED).
+ * The marker was released on 2026-11-13 (PR #2014) after five consecutive passes; the case blocks again.
  *
  *   live case --pass--> PASS row
- *             --fail--> QUARANTINED_FAIL row (non-blocking, reported)
+ *             --fail--> FAIL row (blocking)
  */
-import { quarantine } from '../helpers/quarantine';
-
-export const liveFailoverCase = (run: () => Promise<void>, unit = 'chat-router-failover') =>
-  quarantine(
-    {
-      since: '2026-11-13',
-      repair: 'https://boxes.dev/thread/ph7ej1g7ets5f9jg2rw6nb3red8j4bwe',
-      error: 'AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:',
-      evidence:
-        'PR #1972 deploy f93b9ad17f live-probes: goalAnchorFailure at chat-router-failover.live.support.ts:373 on attempt 1, rerun PASS; NOT_INTRODUCED (portrait-only diff)',
-    },
-    run,
-    { unit }
-  );
+export const liveFailoverCase = (run: () => Promise<void>) => run;
