@@ -13,7 +13,11 @@
  * browser dependencies.
  */
 
-import { listComputeIntegrationUsage } from '../../providers/computeSubscriptionUsage';
+import {
+  accountUsageView,
+  listComputeIntegrationUsage,
+} from '../../providers/computeSubscriptionUsage';
+import { scheduleClaudeUsageRefresh, usageNeedsRefresh } from '../../providers/computeUsageRefresh';
 import { reconcileConnectionStatesFromIntegrations } from '../../providers/integrationConnectionSync';
 import { createLogger } from '../../providers/logger';
 import {
@@ -30,12 +34,7 @@ import {
   removeConnection,
   upsertAccountConnection,
 } from './repo';
-import type {
-  AccountUsageDto,
-  ConnectAccountInput,
-  ConnectedAccountDto,
-  UsageWindowDto,
-} from './types';
+import type { ConnectAccountInput, ConnectedAccountDto } from './types';
 
 const log = createLogger('ComputeGrants');
 
@@ -148,21 +147,8 @@ export async function connectAccount(
     connectedAt: row.createdAt.toISOString(),
     usage: null,
     rateLimitedUntil: null,
-  };
-}
-
-type UsageRow = Awaited<ReturnType<typeof listComputeIntegrationUsage>>[number];
-
-function windowDto(usedPct: number | null, resetsAt: Date | null): UsageWindowDto | null {
-  return usedPct === null ? null : { usedPct, resetsAt: resetsAt?.toISOString() ?? null };
-}
-
-function usageDto(row: UsageRow | undefined): AccountUsageDto | null {
-  if (row === undefined || row.usageObservedAt === null) return null;
-  return {
-    fiveHour: windowDto(row.usage5hUsedPct, row.usage5hResetsAt),
-    sevenDay: windowDto(row.usage7dUsedPct, row.usage7dResetsAt),
-    observedAt: row.usageObservedAt.toISOString(),
+    cooldown: null,
+    nextResetAt: null,
   };
 }
 
@@ -170,7 +156,12 @@ const PROVIDER_INTEGRATION: Record<string, string> = { claude: 'claude_code', co
 
 /**
  * Accounts for the FE rows. Grants are intentionally not exposed; each account
- * carries the usage agents last reported for the Integration row it mints into.
+ * carries the usage last observed for the Integration row it mints into, its
+ * cooldown (reason + whether the provider gave the reset) and nextResetAt.
+ *
+ * A Claude row with no usage, stale usage or a non-authoritative cooldown gets
+ * a background usage-endpoint refresh (computeUsageRefresh): never awaited, so
+ * this response is never delayed; its result shows on the next list.
  */
 export async function listConnectedAccounts(
   userId: string,
@@ -182,8 +173,12 @@ export async function listConnectedAccounts(
     listComputeIntegrationUsage(userId, provider),
   ]);
   const usageByAccount = new Map(usageRows.map((u) => [`${u.name}:${u.accountId}`, u]));
+  const now = new Date();
   return rows.map((r) => {
     const usage = usageByAccount.get(`${PROVIDER_INTEGRATION[r.provider] ?? ''}:${r.accountId}`);
+    if (usage !== undefined && usage.name === 'claude_code' && usageNeedsRefresh(usage, now)) {
+      scheduleClaudeUsageRefresh(usage.id);
+    }
     return {
       provider: r.provider,
       accountId: r.accountId,
@@ -191,8 +186,7 @@ export async function listConnectedAccounts(
       state: r.state,
       lastErrorReason: r.lastErrorReason,
       connectedAt: r.createdAt.toISOString(),
-      usage: usageDto(usage),
-      rateLimitedUntil: usage?.rateLimitedUntil?.toISOString() ?? null,
+      ...accountUsageView(usage, now),
     };
   });
 }

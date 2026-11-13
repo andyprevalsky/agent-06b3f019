@@ -4483,6 +4483,10 @@ async def _run_all_tests():
         test_run_agentic_loop_reconnect_replay_does_not_duplicate_events,
     )
     await r.record_async(
+        "cc_replayed_rate_limit_usage_reported_once",
+        test_run_agentic_loop_reports_replayed_rate_limit_usage_once,
+    )
+    await r.record_async(
         "cc_reattach_after_replay_exceeds_frame_limit",
         test_run_agentic_loop_reattaches_after_replay_exceeds_one_frame_limit,
     )
@@ -5617,6 +5621,75 @@ async def test_run_agentic_loop_reconnect_replay_does_not_duplicate_events():
     assert connections == 2, connections
     assert exit_code == 0
     assert events == all_events, f"replayed events must replace, not append: {events}"
+
+
+async def test_run_agentic_loop_reports_replayed_rate_limit_usage_once():
+    """A reconnect replays the whole history; its rate_limit_event usage is reported once, not again as fresh."""
+    from aiohttp import web
+
+    from domains.spawn_claude_code_agent import service
+    from utils.terminal_filter import TerminalFilter
+
+    rate_limit_event = {
+        "type": "cli_message",
+        "raw_type": "rate_limit_event",
+        "cli_message": {
+            "type": "rate_limit_event",
+            "rate_limit_info": {"status": "allowed", "rateLimitType": "five_hour", "utilization": 0.2,
+                                "resetsAt": 1_800_000_000},
+        },
+    }
+    first_events = [{"type": "agent_message", "text": "a"}, rate_limit_event]
+    all_events = [*first_events, {"type": "result", "status": "completed", "text": "c"}]
+    connections = 0
+    reported: list[dict] = []
+
+    async def handler(request):
+        nonlocal connections
+        ws = web.WebSocketResponse()
+        if not ws.can_prepare(request).ok:
+            return web.Response(status=400)
+        connections += 1
+        await ws.prepare(request)
+        if connections == 1:
+            await ws.send_str(json.dumps({"type": "code_agent_events", "data": first_events}))
+        else:
+            await ws.send_str(json.dumps({"type": "code_agent_events", "data": all_events}))
+            await ws.send_str(json.dumps({"type": "exit", "code": 0}))
+        await ws.close()
+        return ws
+
+    app = web.Application()
+    app.router.add_get("/", handler)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    port = _free_port()
+    await web.TCPSite(runner, "127.0.0.1", port).start()
+    try:
+        with (
+            patch("temporalio.activity.heartbeat"),
+            patch.object(service, "report_code_session_usage_soon", lambda _task, usage: reported.append(usage)),
+        ):
+            exit_code, *_rest, events = await asyncio.wait_for(
+                service._run_agentic_loop(
+                    agent_id="a",
+                    task_id="t",
+                    sandbox_id="sb",
+                    goal="g",
+                    ws_url=f"ws://127.0.0.1:{port}/",
+                    terminal=TerminalFilter(cols=80, rows=50),
+                    model="rose-labs/rose-1-flash",
+                    claude_token=None,
+                    action_summary=[],
+                    tool_call_id="tc",
+                ),
+                timeout=30,
+            )
+    finally:
+        await runner.cleanup()
+    assert connections == 2, connections
+    assert exit_code == 0 and events == all_events, events
+    assert [u["fiveHour"]["usedPct"] for u in reported] == [20.0], f"replayed usage was re-reported: {reported}"
 
 
 _STREAMING_STUB_PRELUDE = r"""

@@ -8029,6 +8029,253 @@ class Cycle(unittest.TestCase):
         same = copy.deepcopy(state); c.reconcile(state, original['token'], renewed)
         self.assertEqual(same, state)  # Historical successor binding survives repeated source renewals.
 
+    def test_isolated_renewal_ignores_an_unexecuted_prelaunch_refusal(self):
+        """PR1910 round 22: smoke refused before launch because renewal had not run yet.
+
+        That refusal issued no request and executed nothing; it must not become the
+        successor that blocks the renewal it was waiting for.
+        """
+        state, paths, proof, gate, packet, original, folder, successor = self.clean_successor_renewal_state()
+        refusal = dict(gate=gate['name'], status='FAIL', complete=False, source=copy.deepcopy(state['source']),
+                       reason='native cleanup: next source/inventory binding')
+        state['attempts'].append(dict(phase='focused', results=[refusal]))
+        before = copy.deepcopy(state)
+        renewed = {**proof, 'validation_source': copy.deepcopy(state['source'])}
+        c.reconcile(state, original['token'], renewed)
+        entry = state['reconciled_owners'][proof['receipt_sha256']]
+        self.assertEqual(state['source'], entry['validation_source'])
+        self.assertFalse(entry['credit_granted']); self.assertFalse(entry['cleanup_complete'])
+        self.assertEqual(before['attempts'], state['attempts'])  # the refusal FAIL stays recorded
+        self.assertEqual(before['failures'], state['failures'])
+
+    def test_isolated_renewal_still_judges_an_executed_incomplete_successor(self):
+        state, paths, proof, gate, packet, original, folder, successor = self.clean_successor_renewal_state()
+        executed = dict(gate=gate['name'], status='FAIL', complete=False, source=copy.deepcopy(state['source']),
+                        reason='executed but incomplete', token='executed-incomplete', executed=True)
+        state['attempts'].append(dict(phase='focused', results=[executed]))
+        before = copy.deepcopy(state)
+        with self.assertRaisesRegex(ValueError, 'failed successor execution'):
+            c.reconcile(state, original['token'], {**proof, 'validation_source': copy.deepcopy(state['source'])})
+        self.assertEqual(before, state)
+
+    def committed_historical_successor_fixture(self):
+        """Synthetic native custody uses the existing fixture; real retained records are replayed separately."""
+        import deploy_test_historical_custody as h
+        new = self.custody_fixture()
+        proof = h.build(self.state, self.plan, new, self.root)
+        c.refresh(self.state, self.plan, new, self.root, historical_no_retry_proof=proof)
+        state = self.state; gate = state['plan']['gates'][1]
+        skips = h.guard(state, gate, self.root)
+        checks = [name for name in gate['checks'] if name not in skips]
+        folder = self.directory / 'committed-successor'; token = 'committed-full-successor'
+        native = self.root / '.context/deploy-cloud' / __import__('hashlib').sha256(token.encode()).hexdigest()
+        prior = dict(gate=gate['name'], token='original-operation', owner={'worker_root':str(self.root)},
+                     proof={'receipt_sha256':'a'*64}, excluded_resources=[])
+        original = dict(token=prior['token'], finished_at=1000)
+        isolated = dict(original_receipt_sha256='a'*64, original_request_token=prior['token'],
+                        new_request_token=token, source=state['source'], new_native_root=str(native),
+                        excluded_resources=[], credit_granted=False)
+        request = dict(token=token, source=state['source'], gate=gate['name'], checks=checks, skips=skips,
+                       phase='focused', isolated_validation=[isolated], custody_state_sha256=h.state_identity(state),
+                       custody_runtime=h.runtime_identity(self.root),
+                       custody_child_environment=c.digest('offline captured child environment'))
+        leaf = folder/'native-task.json'; c.write(leaf, {'passed':True})
+        worker = dict(token=token, source=state['source'], gate=gate['name'],
+                      cases=dict.fromkeys(checks,'PASS'), complete=True, cleanup_complete=True, reused=False,
+                      evidence={name:dict(path=str(leaf),sha256=c.sha_file(leaf)) for name in checks},
+                      fleet_directory=str(native/'campaigns'/('deploy-'+native.name)),runner_log=str(native/'cli.log'))
+        c.write(folder/'result.json',worker)
+        successor = dict(gate=gate['name'], token=token, source=state['source'], status='PASS', executed=True,
+                         complete=True, native_exit=0, timed_out=False, cancelled=False, lingering_group=False,
+                         cleanup_owner=None, cases={**dict.fromkeys(skips,'SKIP'),**worker['cases']},
+                         case_complete={**dict.fromkeys(skips,False),**dict.fromkeys(checks,True)}, command=gate['command'],
+                         custody_skips=copy.deepcopy(skips), current_execution=dict.fromkeys(skips,'UNVERIFIED'),
+                         log=str(folder/'output.log'),worker_result=str(folder/'result.json'), started_at=1001,finished_at=1002,
+                         execution_binding=dict(contract_digest=c.digest(gate),input_fingerprint=state['input_fingerprints'][gate['name']],environment=state['environment']),
+                         isolated_validation=[isolated],native_cleanup_reference=dict(result=str(folder/'result.json'),
+                         native_directory=worker['fleet_directory'],cleanup_complete=True,result_sha256=c.sha_file(folder/'result.json'),native_evidence=worker['evidence']))
+        c.write(folder/'request.json',request);c.write(folder/'receipt.json',successor)
+        state['attempts']=[dict(phase='focused',results=[successor])]
+        return state, prior, original, successor, folder, request
+
+    def test_clean_successor_preserves_committed_historical_incomplete_skip_without_credit(self):
+        import deploy_test_native_cleanup as n
+        state, prior, original, successor, folder, request = self.committed_historical_successor_fixture()
+        before = copy.deepcopy(state); files={p:c.sha_file(p) for p in folder.glob('*.json')}
+        self.assertIsNone(n.clean_isolated_successor(state,prior,original,successor))
+        self.assertEqual(before,state);self.assertEqual(files,{p:c.sha_file(p) for p in files})
+        for name,value in request['skips'].items():
+            self.assertIs(successor['case_complete'][name],False);self.assertEqual('SKIP',successor['cases'][name])
+            self.assertEqual({'test_execution':False,'assertions':False,'financial_release':False},value['credit'])
+        current=copy.deepcopy(state);current['source']={'head':'f'*40,'digest':'e'*64};current['plan']['source']=current['source']
+        self.assertIsNone(c.full_pass_binding(current,current['plan']['gates'][1],root=self.root))
+
+    def test_clean_successor_historical_proof_keeps_other_gate_custody_inventory(self):
+        """CodeRabbit 4559306508: the post-result proof must hash the complete custody inventory."""
+        import deploy_test_historical_custody as h
+        import deploy_test_native_cleanup as n
+        state, prior, original, successor, folder, request = self.committed_historical_successor_fixture()
+        other = copy.deepcopy(state['historical_no_retry_custody'][0])
+        other['original_failure'] = {**other['original_failure'], 'id': 'other-gate-failure', 'gate': 'other-gate'}
+        state['historical_no_retry_custody'].insert(0, other)
+        request['custody_state_sha256'] = h.state_identity(state); c.write(folder/'request.json', request)
+        before = copy.deepcopy(state)
+        self.assertIsNone(n.clean_isolated_successor(state, prior, original, successor))
+        self.assertEqual(before, state)
+        request['custody_state_sha256'] = '0'*64; c.write(folder/'request.json', request)
+        with self.assertRaises(ValueError): n.clean_isolated_successor(state, prior, original, successor)
+
+    def test_clean_successor_historical_proof_accepts_mixed_legacy_and_custody_cases(self):
+        """CodeRabbit 4559306513: the post-result guard needs the authenticated legacy qualifications."""
+        import deploy_test_historical_custody as h
+        import deploy_test_native_cleanup as n
+        state, prior, original, successor, folder, request = self.committed_historical_successor_fixture()
+        gate = state['plan']['gates'][1]
+        waived = state['historical_no_retry_custody'].pop()['original_failure']['check'].split('/', 1)[1]
+        legacy = {'disposition': 'resource', 'source': copy.deepcopy(state['source'])}
+        request['skips'][waived] = legacy
+        request['custody_state_sha256'] = h.state_identity(state); c.write(folder/'request.json', request)
+        custody = {k: v for k, v in request['skips'].items() if k != waived}
+        successor.update(custody_skips=copy.deepcopy(custody),
+                         current_execution=dict.fromkeys(custody, 'UNVERIFIED'))
+        successor['case_complete'][waived] = True
+        c.write(folder/'receipt.json', successor); state['attempts'] = [dict(phase='focused', results=[successor])]
+        self.assertEqual(set(h.guard(state, gate, self.root, {waived: legacy})), set(custody))
+        with self.assertRaisesRegex(ValueError, 'no current no-retry qualification'):
+            h.guard(state, gate, self.root)
+        before = copy.deepcopy(state)
+        with patch.object(c, 'reuse_qualifications', return_value={waived: legacy}):
+            self.assertIsNone(n.clean_isolated_successor(state, prior, original, successor))
+        self.assertEqual(before, state)
+
+    def test_clean_successor_historical_completion_and_authority_tampering_refuses(self):
+        import deploy_test_native_cleanup as n
+        state, prior, original, successor, folder, request = self.committed_historical_successor_fixture()
+        skip=next(iter(request['skips']));active=request['checks'][0]
+        mutations=[('historical-true',lambda s,q:s['case_complete'].update({skip:True})),
+            ('historical-int',lambda s,q:s['case_complete'].update({skip:0})),
+            ('active-false',lambda s,q:s['case_complete'].update({active:False})),
+            ('ordinary-skip',lambda s,q:q['skips'][skip].update(disposition='ordinary')),
+            ('kind',lambda s,q:q['skips'][skip].update(kind='ordinary')),
+            ('credit',lambda s,q:q['skips'][skip]['credit'].update(test_execution=True)),
+            ('source',lambda s,q:q['skips'][skip].update(source={'head':'f'*40,'digest':'e'*64})),
+            ('binding',lambda s,q:q['skips'][skip]['current_binding'].update(plan_digest='0'*64)),
+            ('commitment',lambda s,q:q.update(custody_state_sha256='0'*64))]
+        for label,mutate in mutations:
+            with self.subTest(label=label):
+                candidate=copy.deepcopy(state);row=candidate['attempts'][0]['results'][0];q=copy.deepcopy(request)
+                mutate(row,q);c.write(folder/'request.json',q);c.write(folder/'receipt.json',row);before=copy.deepcopy(candidate)
+                with self.assertRaises(ValueError):n.clean_isolated_successor(candidate,prior,original,row)
+                self.assertEqual(before,candidate)
+        c.write(folder/'request.json',request);c.write(folder/'receipt.json',successor)
+
+    def test_clean_successor_historical_retained_history_and_native_bytes_are_required(self):
+        import deploy_test_native_cleanup as n
+        state, prior, original, successor, folder, request = self.committed_historical_successor_fixture()
+        for name in ['historical_custody_history','failures']:
+            candidate=copy.deepcopy(state);candidate[name]=[];row=candidate['attempts'][0]['results'][0]
+            with self.subTest(name=name),self.assertRaises(ValueError):n.clean_isolated_successor(candidate,prior,original,row)
+        native=Path(state['historical_no_retry_custody'][0]['original_failure']['worker_evidence']['path']);raw=native.read_bytes()
+        native.write_bytes(raw+b' ')
+        with self.assertRaises(ValueError):n.clean_isolated_successor(state,prior,original,successor)
+        native.write_bytes(raw)
+        self.assertIsNone(n.clean_isolated_successor(state,prior,original,successor))
+
+    def historical_clean_successor_contract_state(self):
+        from deploy_test_historical_custody import state_identity
+        state, paths, proof, gate, packet, original, folder, successor = self.clean_successor_renewal_state()
+        gate['selection_evidence'] = ['original dependency explanation']
+        successor['execution_binding']['contract_digest'] = c.digest(gate)
+        snapshot = copy.deepcopy(state)
+        snapshot['source'] = copy.deepcopy(successor['source'])
+        snapshot['plan']['source'] = copy.deepcopy(successor['source'])
+        snapshot['plan_digest'] = c.digest(snapshot['plan'])
+        snapshot['input_fingerprints'][gate['name']] = successor['execution_binding']['input_fingerprint']
+        path = self.directory / 'original-successor-custody.json'
+        c.write(path, snapshot)
+        request = c.read(folder / 'request.json')
+        request.update(custody_state=str(self.directory / 'cycle.json'), custody_state_sha256=state_identity(snapshot))
+        c.write(folder / 'request.json', request)
+        c.write(folder / 'receipt.json', successor)
+        gate['selection_evidence'] = ['refreshed dependency explanation']
+        incoming = dict(proof, validation_source=copy.deepcopy(state['source']),
+                        successor_custody_state=dict(path=str(path), sha256=c.sha_file(path)))
+        return state, original, incoming, folder, path, successor
+
+    def test_clean_successor_renewal_authenticates_original_selection_contract(self):
+        state, original, incoming, folder, snapshot, successor = self.historical_clean_successor_contract_state()
+        before = copy.deepcopy(state)
+        files = {p:c.sha_file(p) for p in [snapshot, *folder.glob('*.json')]}
+        c.reconcile(state, original['token'], incoming)
+        entry = state['reconciled_owners'][incoming['receipt_sha256']]
+        self.assertFalse(entry['credit_granted']); self.assertFalse(entry['cleanup_complete'])
+        self.assertNotIn('successor_custody_state', entry['proof'])
+        self.assertEqual(before['attempts'], state['attempts']); self.assertEqual(before['failures'], state['failures'])
+        self.assertEqual(before['round'], state['round']); self.assertEqual(before['phase'], state['phase'])
+        self.assertEqual(files, {p:c.sha_file(p) for p in files})
+        self.assertIsNone(c.full_pass_binding(state, next(g for g in state['plan']['gates'] if g['name']==successor['gate'])))
+        same=copy.deepcopy(state);c.reconcile(state,original['token'],incoming);self.assertEqual(same,state)
+
+    def test_clean_successor_custody_binds_its_original_environment_not_a_later_coordinator(self):
+        """PR1910 takeover: a new coordinator's environment differs from the one the successor ran in.
+
+        The custody snapshot authenticates the original environment; without that snapshot the
+        current environment must still match.
+        """
+        state, original, incoming, folder, snapshot, successor = self.historical_clean_successor_contract_state()
+        state['environment'] = 'e' * 64  # a later coordinator's process environment
+        without = {k: v for k, v in incoming.items() if k != 'successor_custody_state'}
+        before = copy.deepcopy(state)
+        with self.assertRaisesRegex(ValueError, 'successor'):
+            c.reconcile(state, original['token'], without)
+        self.assertEqual(before, state)
+        c.reconcile(state, original['token'], incoming)
+        entry = state['reconciled_owners'][incoming['receipt_sha256']]
+        self.assertFalse(entry['credit_granted']); self.assertFalse(entry['cleanup_complete'])
+        self.assertEqual(before['attempts'], state['attempts']); self.assertEqual(before['failures'], state['failures'])
+
+    def test_clean_successor_historical_contract_refusals_remain_atomic(self):
+        state, original, incoming, folder, path, successor = self.historical_clean_successor_contract_state()
+        original_snapshot = path.read_bytes()
+        changes = [
+            ('source',lambda d:d.update(source=dict(head='f'*40,digest='e'*64))),
+            ('environment',lambda d:d.update(environment='0'*64)),
+            ('fingerprint',lambda d:d['input_fingerprints'].update({successor['gate']:'foreign'})),
+            ('plan-digest',lambda d:d.update(plan_digest='0'*64)),
+            ('old-contract',lambda d:next(g for g in d['plan']['gates'] if g['name']==successor['gate']).update(command=['false'])),
+        ]
+        for name,change in changes:
+            with self.subTest(name=name):
+                doc=c.read(path);change(doc);c.write(path,doc)
+                proof=copy.deepcopy(incoming);proof['successor_custody_state']['sha256']=c.sha_file(path)
+                candidate=copy.deepcopy(state);before=copy.deepcopy(candidate)
+                with self.assertRaises(ValueError):c.reconcile(candidate,original['token'],proof)
+                self.assertEqual(before,candidate);path.write_bytes(original_snapshot)
+        for field,value in [('command',['false']),('checks',[]),('native_cloud',1),('worker_recipe',{'foreign':True}),('selection_evidence',[True])]:
+            with self.subTest(field=field):
+                candidate=copy.deepcopy(state);gate=next(g for g in candidate['plan']['gates'] if g['name']==successor['gate']);gate[field]=value
+                before=copy.deepcopy(candidate)
+                with self.assertRaises(ValueError):c.reconcile(candidate,original['token'],incoming)
+                self.assertEqual(before,candidate)
+        request_path=folder/'request.json';request_raw=request_path.read_bytes()
+        request=c.read(request_path);request['custody_state_sha256']='0'*64;c.write(request_path,request)
+        candidate=copy.deepcopy(state);before=copy.deepcopy(candidate)
+        with self.assertRaises(ValueError):c.reconcile(candidate,original['token'],incoming)
+        self.assertEqual(before,candidate);request_path.write_bytes(request_raw)
+        # Even a resealed snapshot/request cannot choose a different old full contract.
+        from deploy_test_historical_custody import state_identity
+        snapshot=c.read(path);oldgate=next(g for g in snapshot['plan']['gates'] if g['name']==successor['gate'])
+        oldgate['selection_evidence']=['invented old explanation'];snapshot['plan_digest']=c.digest(snapshot['plan'])
+        c.write(path,snapshot);request=c.read(request_path);request['custody_state_sha256']=state_identity(snapshot);c.write(request_path,request)
+        changed=copy.deepcopy(incoming);changed['successor_custody_state']['sha256']=c.sha_file(path)
+        candidate=copy.deepcopy(state);before=copy.deepcopy(candidate)
+        with self.assertRaisesRegex(ValueError,'successor contract'):c.reconcile(candidate,original['token'],changed)
+        self.assertEqual(before,candidate);request_path.write_bytes(request_raw);path.write_bytes(original_snapshot)
+        for proof in [dict(incoming,successor_custody_state=dict(path=str(path),sha256='0'*64)),
+                      {k:v for k,v in incoming.items() if k!='successor_custody_state'}]:
+            candidate=copy.deepcopy(state);before=copy.deepcopy(candidate)
+            with self.assertRaises(ValueError):c.reconcile(candidate,original['token'],proof)
+            self.assertEqual(before,candidate)
     def test_clean_successor_renewal_binds_historical_gate_for_selection_metadata_only(self):
         from deploy_test_historical_custody import state_identity
         state, paths, proof, gate, packet, original, folder, successor = self.clean_successor_renewal_state()
@@ -13126,6 +13373,970 @@ class ExplicitAgentCardOverride(unittest.TestCase):
             self.assertFalse(any('agent-payment-' in arg for arg in seen['argv']))
 
 
+class IsolatedRunlessWitnesses(unittest.TestCase):
+    """Launch-only typed witnesses: local fake native bytes, no network or resource effect."""
+    def setUp(self):
+        import hashlib, base64, time
+        self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup)
+        self.root=Path(self.temp.name);(self.root/'.git').mkdir()
+        self.owner='a'*32;self.mid='0123456789abcd';self.vid='vol_owned';self.ref='c'*40
+        self.fleet=self.root/'.context/deploy-cloud'/('d'*64)/'runs/20261110-000000-2147483001';self.fleet.mkdir(parents=True)
+        self.audit=self.root/'.git/cloudbench-fleet-audits'/self.owner;self.registry=self.root/'.git/cloudbench-fleet-ownership'/self.owner
+        for p in [self.audit/'fresh',self.audit/'by-machine-id',self.registry]:p.mkdir(parents=True)
+        self.meta='fleet_owner_token='+self.owner+'\nrun_id='+self.fleet.name+'\nworkspace_root='+str(self.root)+'\napp=fixture\nstatus=incomplete\n'
+        self.save(self.audit/'meta',self.meta);self.save(self.registry/'meta',self.meta+'cleanup_policy=reap\n')
+        self.save(self.registry/'runtime-evidence-unconfirmed','immutable original debt\n')
+        self.row=dict(fleet_owner_token=self.owner,run_id=self.fleet.name,app='fixture',clone_name='cloudbench-owned',
+            source='fresh-clone',source_machine_id='fedcba98765432',machine_id=self.mid,volume_id=self.vid,disposition='owned')
+        self.save(self.audit/'fresh/cloudbench-owned',''.join(k+'='+v+'\n' for k,v in self.row.items()))
+        self.save(self.audit/'by-machine-id'/self.mid,'cloudbench-owned\n')
+        source=dict(machine_id=self.row['source_machine_id']);raw=json.dumps(source).encode()
+        for p in [self.audit,self.registry,self.fleet]:self.save(p/'source-manifest.json',raw)
+        import cloudbench_execution_provenance as prov
+        values={'base_source_manifest_sha256':hashlib.sha256(raw).hexdigest()};config=dict(schema_version=prov.CONFIG_SCHEMA_VERSION,values=values)
+        self.save(self.fleet/'execution-provenance.json',dict(schema_version=prov.EXECUTION_SCHEMA_VERSION,base_sha=self.ref,workspace_patch_sha256='none',
+            controller_snapshot=dict(schema_version=prov.SNAPSHOT_SCHEMA_VERSION,sha256='b'*64),config=dict(config,sha256=prov.canonical_sha256(config))))
+        self.save(self.fleet/'execution-task-matrix.json',dict(tasks=['fixture']))
+        self.life=dict(fleet_owner_token=self.owner);self.receipt=dict(source=dict(head=self.ref),started_at=time.time()-30,finished_at=time.time()-20)
+        self.proof=dict(purpose='isolated-validation',confirmed_at=time.time()+1,execution_quiescence={})
+        self.native=__import__('deploy_test_native_cleanup');self.now=time.time()
+        self.binding=dict(app='fixture',owner=self.owner,run_id=self.fleet.name,machine_id=self.mid,
+            volume_id=self.vid,run_token=self.owner+'-0',source=self.ref)
+        self.machine=dict(id=self.mid,name='cloudbench-owned',instance_id='known-instance',state='started',
+            config=dict(image='image@sha256:'+'f'*64,env=dict(REF=self.ref,CLOUDBENCH_RUN_TOKEN=self.owner+'-0'),
+                        mounts=[dict(volume=self.vid,path='/data')]))
+        self.packet=self.root/'packet.json'
+
+    def save(self,path,value):
+        path=Path(path)
+        path.parent.mkdir(parents=True,exist_ok=True)
+        path.write_bytes(value if isinstance(value,bytes) else value.encode() if isinstance(value,str) else json.dumps(value).encode())
+        return str(path)
+
+    def pair(self,name,absent=False):
+        import hashlib
+        rows=[]
+        for kind,identifier,value in [('machine',self.mid,None if absent else self.machine),
+                ('volume',self.vid,dict(id=self.vid,encrypted=True,state='pending_destroy' if absent else 'created',
+                    attached_machine_id=None if absent else self.mid))]:
+            raw=json.dumps(value).encode();path=self.root/(name+'-'+kind+'.raw')
+            rows.append(dict(kind=kind,method='GET',path='/'+('machines/' if kind=='machine' else 'volumes/')+identifier,
+                no_retry=True,http_status=404 if absent and kind=='machine' else 200,
+                response_sha256=hashlib.sha256(raw).hexdigest(),body_path=self.save(path,raw),wire=str(self.root/(name+'-'+kind+'-wire'))))
+            wire=Path(rows[-1]['wire'])
+            self.save(wire/'request.json',dict(app='fixture',method='GET',path=rows[-1]['path'],body=None,headers={}))
+            import base64
+            self.save(wire/'0001-wire.json',dict(method='GET',path=rows[-1]['path'],status=rows[-1]['http_status'],
+                body_b64=base64.b64encode(raw).decode(),sha256=hashlib.sha256(raw).hexdigest()))
+        return dict(rows=rows,app='fixture')
+
+    def absent(self):
+        import hashlib,base64
+        n=self.native;canonical=lambda v:json.dumps(v,sort_keys=True,separators=(',',':')).encode()
+        effect=self.root/'.git/cloudbench-native-effect-fences'/self.owner/self.fleet.name/self.mid/'destroy'
+        fence=effect/hashlib.sha256(canonical([self.mid,self.machine['instance_id'],self.machine['config']])).hexdigest()
+        self.save(fence/'intent.json',dict(machine=self.machine,operation='destroy'));self.save(fence/'ack.json',dict(ok=True))
+        for kind,identifier in [('machine',self.mid),('volume',self.vid)]:
+            self.save(self.registry/('disposable-delete-'+kind+'-'+identifier+'.json'),dict(owner=self.owner,app='fixture',kind=kind,identifier=identifier))
+        nonce='original-lease';wire=None
+        for i,(method,url,result,status) in enumerate([
+                ('POST','/machines/'+self.mid+'/lease',{'data':{'nonce':nonce,'version':self.machine['instance_id']}},201),
+                ('GET','/machines/'+self.mid,self.machine,200),
+                ('DELETE','/machines/'+self.mid+'?force=true',{'ok':True},200),
+                ('DELETE','/machines/'+self.mid+'/lease',{'data':{'ok':True}},200)]):
+            d=effect/'wire'/str(i);raw=canonical(result)
+            self.save(d/'request.json',dict(app='fixture',method=method,path=url,body=None,
+                headers={} if method=='POST' else {'fly-machine-lease-nonce':nonce}))
+            self.save(d/'0001-wire.json',dict(method=method,path=url,status=status,body_b64=base64.b64encode(raw).decode(),
+                sha256=hashlib.sha256(raw).hexdigest(),monotonic_ns=i+1));self.save(d/'result.json',result)
+            if i==2:wire=d
+        packet=dict(self.pair('current',True),schema='original-absent-pair-v1',binding=self.binding,
+            endpoint_origin='https://api.machines.dev',observed_epoch=self.now,delete_fence=str(fence),delete_wire=str(wire))
+        self.save(self.packet,packet);return packet
+
+    def runless(self):
+        import base64,hashlib,shlex
+        n=self.native;original=self.fleet.parent.parent/'campaigns'/('deploy-'+self.fleet.parent.parent.name)/'shared-inventory/machines.json'
+        self.save(original,[self.machine]);task=self.fleet/'fixture'
+        self.save(self.fleet/'_batch/benches.json',[dict(name='fixture')])
+        self.save(task/'runtime-evidence.owner.json',dict(version=1,machine_id=self.mid,run_token=self.owner+'-0'))
+        self.save(task/'.cid','clone '+self.mid+'\n')
+        backend=task/'guest-cleanup.backend.log';self.save(backend,b'original log')
+        services=dict(schema_version=1,status='stopped',benchmark_mode=True,worktree='/data/repo',run_sh_pid=300,
+            services=[dict(name='backend',pid=301)],ports=dict(backend=3001,disabled=0))
+        state=dict(machine_id=self.mid,guest_run_token=self.owner+'-0',services_status='stopped',live_service_pids=[],
+            driver_pid=None,driver_state='exited',stopped_service_pids=[300,301]);self.save(task/'guest-cleanup.state.json',state)
+        def process(pid,parent):
+            values=['0']*50;values[0]='S';values[1]=str(parent);values[6]='0';values[19]='123'
+            raw=str(pid)+' (fixture) '+' '.join(values)
+            return dict(pid=pid,stat=raw,stat_after=raw,run_token='',cwd='/',exe='/bin/python3',
+                cmdline_b64=base64.b64encode(b'python3\0').decode())
+        empty='header\n';timewait='header\n0: 00000000:0BB9 00000000:0000 06 0 0 0 0 0 0\n'
+        scan=dict(schema='original-runless-proc-scan-v1',binding=self.binding,uid=0,machine_id=self.mid,repo_head=self.ref,
+            processes=[process(1,0),process(2,1),process(100,2)],ancestors=[100,2],self_pid=100,errors=[],run_present=False,
+            services_b64=base64.b64encode(json.dumps(services).encode()).decode(),backend_sha256=hashlib.sha256(backend.read_bytes()).hexdigest(),
+            sockets=dict(tcp=timewait,tcp6=empty,udp=empty,udp6=empty),finished_epoch=self.now)
+        cmd=shlex.join(['timeout','--signal=TERM','10s','/usr/bin/python3','-I','-B','-c',n.RUNLESS_SCAN,json.dumps(self.binding,sort_keys=True,separators=(',',':'))])
+        packet=dict(schema='original-runless-current-os-v1',binding=self.binding,endpoint_origin='https://api.machines.dev',observed_epoch=self.now,
+            before=self.save(self.root/'before.json',self.pair('before')),after=self.save(self.root/'after.json',self.pair('after')),
+            original_native=str(original),original_state=str(task/'guest-cleanup.state.json'),original_backend=str(backend),
+            scan=self.save(self.root/'scan.json',scan),ssh_stdout=self.save(self.root/'stdout.json',scan),ssh_stderr=self.save(self.root/'stderr',b''),
+            command=cmd,ssh_argv=['ssh','console','--quiet','-a','fixture','--machine',self.mid,'-C',cmd],ssh_exit=0,
+            program_sha256=hashlib.sha256(n.RUNLESS_SCAN.encode()).hexdigest())
+        self.save(self.packet,packet);return packet,scan
+
+    def invoke(self,kind):
+        self.proof['execution_quiescence']={self.mid:{kind:str(self.packet)}}
+        bound=lambda p:Path(p).read_bytes();document=lambda p:json.loads(bound(p))
+        with patch.object(self.native.subprocess,'check_output',return_value=''):
+            return self.native.isolated_execution(self.fleet,self.life,self.root,self.receipt,self.proof,bound,document,lambda p:'sealed')
+
+    def test_isolated_original_absent_pair_requires_original_authenticated_delete(self):
+        packet=self.absent();self.assertEqual(self.invoke('original_absent_pair'),{self.mid:self.vid})
+        original=copy.deepcopy(packet)
+        for key,value in [('owner','f'*32),('source','d'*40),('machine_id','ffffffffffffff'),('volume_id','vol_foreign')]:
+            packet=copy.deepcopy(original);packet['binding'][key]=value;self.save(self.packet,packet)
+            with self.subTest(key=key),self.assertRaises(ValueError):self.invoke('original_absent_pair')
+        self.save(self.packet,original)
+        saved_purpose=self.proof['purpose'];self.proof['purpose']=None
+        with self.assertRaises(ValueError):self.invoke('original_absent_pair')
+        self.proof['purpose']=saved_purpose
+        ack=Path(original['delete_fence'])/'ack.json';raw=ack.read_bytes();ack.unlink()
+        with self.assertRaises((ValueError,OSError)):self.invoke('original_absent_pair')
+        ack.write_bytes(raw);cross=copy.deepcopy(original);cross['delete_fence']=str(self.root/'foreign/intent')
+        self.save(self.packet,cross)
+        with self.assertRaises((ValueError,OSError)):self.invoke('original_absent_pair')
+        self.assertEqual((self.registry/'runtime-evidence-unconfirmed').read_text(),'immutable original debt\n')
+
+    def test_isolated_runless_requires_raw_quiescent_original_incarnation(self):
+        packet,scan=self.runless();self.assertEqual(self.invoke('runless_current_os'),{self.mid:self.vid})
+        # TIME_WAIT and disabled port0 above are legitimate; a live original listener is not.
+        for mutation in ['active-process','repo-command','listener','wrong-source','reused-instance','missing-program','crossroot']:
+            candidate=copy.deepcopy(packet);changed=copy.deepcopy(scan)
+            if mutation=='active-process':changed['processes'][0]['run_token']=self.owner+'-0'
+            if mutation=='repo-command':
+                import base64
+                changed['processes'][0]['cmdline_b64']=base64.b64encode(b'node\0/data/repo/back-end/dist/server.js\0').decode()
+            if mutation=='listener':changed['sockets']['tcp']=changed['sockets']['tcp'].replace(' 06 ',' 0A ')
+            if mutation=='wrong-source':changed['repo_head']='e'*40
+            if mutation=='missing-program':candidate['program_sha256']='0'*64
+            if mutation=='crossroot':candidate['binding']=dict(candidate['binding'],run_id='foreign')
+            if mutation=='reused-instance':
+                after=json.loads(Path(packet['after']).read_text());rawpath=Path(after['rows'][0]['body_path']);saved=rawpath.read_bytes()
+                native=json.loads(saved);native['instance_id']='reused';self.save(rawpath,native)
+                import hashlib
+                import base64
+                after['rows'][0]['response_sha256']=hashlib.sha256(rawpath.read_bytes()).hexdigest();self.save(packet['after'],after)
+                wire=Path(after['rows'][0]['wire']);record=json.loads((wire/'0001-wire.json').read_text())
+                record.update(body_b64=base64.b64encode(rawpath.read_bytes()).decode(),sha256=hashlib.sha256(rawpath.read_bytes()).hexdigest());self.save(wire/'0001-wire.json',record)
+            self.save(packet['scan'],changed);self.save(packet['ssh_stdout'],changed);self.save(self.packet,candidate)
+            with self.subTest(mutation=mutation),self.assertRaises(ValueError):self.invoke('runless_current_os')
+            if mutation=='reused-instance':
+                rawpath.write_bytes(saved);self.save(packet['after'],self.pair('after'))
+        self.assertEqual((self.registry/'runtime-evidence-unconfirmed').read_text(),'immutable original debt\n')
+
+
+    def test_runless_explicit_null_attachment_requires_positive_original_mount(self):
+        import base64,hashlib,stat
+        self.machine['region']='iad'
+        self.machine['config']['mounts'][0].update(name='cbs_owned',size_gb=40,encrypted=True)
+        packet,scan=self.runless()
+        packet['attachment_observation']='explicit-null-original-quarantined-v1'
+        filesystem=dict(mountinfo='1 0 8:0 / / rw - ext4 /dev/vda rw\n2 1 8:16 / /data rw - ext4 /dev/vdb rw\n3 2 0:25 / /data/repo/back-end/node_modules rw - overlay overlay rw\n',
+            paths={p:dict(device=d,inode=10+i,mode=stat.S_IFDIR|0o755,realpath=p) for i,(p,d) in enumerate([('/',2048),('/data',2064),('/data/repo',2064)])},
+            payloads={p:dict(device=2064,mode=stat.S_IFREG|0o600) for p in ('/data/repo/.context/cloudbench/services.json','/data/repo/.context/cloudbench/logs/backend.log')})
+        filesystem['mountinfo_after']=filesystem['mountinfo'];scan['filesystem']=filesystem
+        volume=dict(id=self.vid,name='cbs_owned',region='iad',size_gb=40,encrypted=True,state='created',attached_machine_id=None,attached_alloc_id=None)
+        def reseal(phase,value,kind='volume'):
+            pair=json.loads(Path(packet[phase]).read_text());row=next(x for x in pair['rows'] if x['kind']==kind)
+            raw=json.dumps(value).encode();self.save(row['body_path'],raw);row['response_sha256']=hashlib.sha256(raw).hexdigest()
+            wire=Path(row['wire'])/'0001-wire.json';record=json.loads(wire.read_text());record.update(body_b64=base64.b64encode(raw).decode(),sha256=row['response_sha256']);self.save(wire,record);self.save(packet[phase],pair)
+        for phase in ('before','after'):reseal(phase,volume)
+        def publish(value):self.save(packet['scan'],value);self.save(packet['ssh_stdout'],value);self.save(self.packet,packet)
+        publish(scan);self.assertEqual(self.invoke('runless_current_os'),{self.mid:self.vid})
+        for mutation in ('foreign','omitted','mount','payload-redirect','rootfs','payload-device','symlink','epoch','pid','socket'):
+            changed=copy.deepcopy(scan);v=copy.deepcopy(volume);m=copy.deepcopy(self.machine)
+            if mutation=='foreign':v['attached_machine_id']='foreign'
+            if mutation=='omitted':del v['attached_alloc_id']
+            if mutation=='mount':changed['filesystem']['mountinfo']=changed['filesystem']['mountinfo'].replace('/data rw','/elsewhere rw')
+            if mutation=='payload-redirect':
+                changed['filesystem']['mountinfo']+='4 2 0:26 / /data/repo/.context/cloudbench rw - overlay overlay rw\n'
+                changed['filesystem']['mountinfo_after']=changed['filesystem']['mountinfo']
+            if mutation=='rootfs':changed['filesystem']['paths']['/data']['device']=2048
+            if mutation=='payload-device':changed['filesystem']['payloads']['/data/repo/.context/cloudbench/services.json']['device']=2048
+            if mutation=='symlink':changed['filesystem']['paths']['/data/repo']['mode']=stat.S_IFLNK|0o777
+            if mutation=='epoch':m['instance_id']='foreign-instance'
+            if mutation=='pid':changed['processes'][0]['run_token']=self.owner+'-0'
+            if mutation=='socket':changed['sockets']['tcp']=changed['sockets']['tcp'].replace(' 06 ',' 0A ')
+            reseal('after',v);reseal('after',m,'machine');publish(changed)
+            with self.subTest(mutation=mutation),self.assertRaises(ValueError):self.invoke('runless_current_os')
+        self.assertEqual((self.registry/'runtime-evidence-unconfirmed').read_text(),'immutable original debt\n')
+
+    def test_runless_pins_only_original_terminal_infrastructure(self):
+        import base64,hashlib,shlex,stat,zlib
+        # Exact original CBC injected programs and prior aa33 scanner; portable without old Git objects.
+        capsules={'prior': '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', 'cloudbench-boot.sh': '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', 'cloudbench-status-server.py': 'eJztPWtz3DaS3/UraObDcpIZSnJs3UXJpEp25EQVW1LJindzWhdDDTEzXHFIhg/JE63++3Y3HgRJkMORnK2ru6U/WEMCjUaj0egXgC+e7ZZ5tnsdxrssvrXSdbFM4q93bNt+z7JbZs2ipAyuWTxbWn5WhHN/VuSWHweWP5uxtIA/Lb8sliwuwplfsMC69rMsZJmVsYj5OXMB0s7OPEtWlufNy6LMmOdZ4SpNMqwcJ4VfhEmc7+zId9ki9bOcyd9LP19G4bX6ufJn8u9/5Eks/05y+VemquZslrFCfcjDRexH6lcyu2GF+gVoyL8LtkrnYcQ41suiSN0caZFJtN/D/xH76fLy/IL9XrK8+AkIErFsbF0uM+YHYbzAj0TAjENJ/QJ7ISGcw0/+ocwieO9Sl+VX+uH9no/xa55GYbGzs/P+6M2x9+ro4uLk+MKaQi/dWbJKAU0ns6+OJv/jT/7Ym3zjepOPX9mjnXdHf/NeHZ++/sl7e/aj9/qnX05/9l79enn8Hqo+P3ju7b94sVN9P4I/zi5UgRfe3jcHBOLi+PXZh+OLX/GP45PzS1Xk4KX38utGmfeXR5fHqsS+t/fiv72X/9UE9MupKvJy/7n1pbW/9/yF+G/n7Pzy5Oz06C0Wuzx5d+wdfzj5AdA8htKOfbdaTmgkJlGycItPhT227AUOwCQI/UWc5MCEuYtsEQENdnYCNrdwQLysBP5cMW/FCj/wC9/B8TikYRhbK/9TuCpXh1YYFyNr8r11vS5YfrhjwRPOaejcjOVJdMucvMjCWTG9zEo2sp5N6SMviU/mhzCKH/yoZMdZlmSOXca5P2eWaN+S7QN2WD5g+SwL0yLJoH9J7iYpiwm1Mf468y5+ODt9+6v1T/7r9OzN2du3Z3+tfp++env2+mcO6y4slvh+HhCUCjTQKLu2R5afA8+X2YxV+F6zeZIx3vYcp4DDS7jI/nHijEaqKBAC5irNE/e9d/L+4vhHh1d388JbJQHQA7pRvcrDP5j1vSKuAtRLJ4CQwJzBukEX0Yhw8BPQFtjiEDuNlr+y9qvi/rxgSGIaSupnrWMR0gsg0og24ABGGuiA3Y61EmGcjBsV9N8r4rk4J7gOIaGAqF8EQ/3iINRPBWET/Zq0smZLP16wQKMZiMIyi4l0cmqIWcFuwwAkPPOQPrmTJUkh5wYU8YrkhsWHMPTASjMQ6nGZekhERu+ArDa9tWnuBDA9rqgoAvjI8YY14DguVyyDShYsFhaKrojBj7xI0hTGGuDNbsZWzFDMAvY+vfUXsK5MgBmBHPDzNmR3tJ5o3Wn1YZbEBftUaH2xdmEGsDTZdcW33WpRs7UuNno36qJSvQXx67MT7ChNozURK/dXilATIpSFjWawFFtFAhwaLkJY2JBVZ0kUsRkuwwKt3N0hgL/9VkNkas99mOKB/dtvVphTK5UEnYD4XBOxrWQOg8GbvFsmsCgjrOQuhjXSzwL8g8OxHOB5i33ycVihyl2S3cBABsCoUHbpw/pcFlF4CyVD0B8WgDsbuXwcy9jNl4gCDCabJVkAcgqEfDhjOckswSEAn7f1LaGLEgq+Z0iZMIrwHUcOcZ8l6Rpxx4IclV3eCVg3co4P+5RGHDlGcEEvcSXppeSvkYzEH1RwxOCBWBU0HG1YAMoUV3UcEw6PhCgTM1N0lZgJOEMMG7KsJAKtZ7ZeOIeC+NKNEj8AHjeucDrgsdW1UAsJP0ugOgpU0cCVDcqg/fHK5tTz0iyBtznL7Y9U3o+i5A56hKuyGCB7PGrTbKp43WIRUEYrXZFPkrtqHCuX0JakuWwOeKBYp8whdEfIubxAgV/wz33ru6noDPyBKkXf2HCeEFA0PhPcG8a3IH6SbI1F4IcfhRLbGKYkjsK9IBCMxAK69KUzly/uwwd6aeHECLETGQpkZ3/M8RuNHmS/71MX4VHJlFhM4wLkWHvkLqLk2hGwvyTAowdcVQiRvj6KvkCNZn+kDBZdkgNHqEytuV0JSS50JqLE5F7JuAdXjBRBIHmIREEQhxorq97RH9DBqwZzo4oCYkD+Tc0JkupojTk5dq/hM4sDRXT+1oY1P+bNYBs5zTmHCDQafeTU/gI0dEaMBiP913c//SUnaYbUcVKWQUdZagllH6YTKPIjkBRhDjKLBMsdSikpar4QklGAI6kXBRbqQpFrnRRIZslVpJ2RMOdyKLzhCyHolYWroUbarCaLc5T+KYo65/X5L7s44cfWD6+sNEmisZUuaJ55sBKEt2GxFsgKeDWMBZwM2ZA3iJRKUjS+YO0AgnXq3oe6rgSaImlRESeLxqoSVkNXIa64kh8/1mScfEsVCjAFI/i8p7AjmQiYEQj3Frk6dzTwYTxPpFYXtdW6jYq7lBo1pRaBKpV2oNoqtS+pImhaF+/VV1NLwkUNT858/vF7y2wh9U3rZosw8DPGYOnEJRS4d01GjDVjYQRMXJ/iQDJUOhz4AmoqmpeOPYWJtD8iquNrkledhlN+pc/Kj43VpWYqjtwAEAqYM+ItIfBc2hXVcuEuWEHyGMURDk99GUHNRi9IwocXrPStjYJedl8IfHgVJ3ewAqGa3Ld01Xig9tCa1oAehAGB57qM1C3ECAillYgo1Ms0Y5FfgpT1cuYDNj3qNzdOYeYrJRFFxjWquKBkoEQFoadEjjDuOHBgAsuP16CRgRIGuibHGQ22LLkDASbURE3mI1hUzO6yEKxhECGoJyIq8KWMQWNnqHKiiEliUuriZMLb4t0bE0CBBOn8gkBHr3+G9hN6R/VbvCw0UlAnQcMlbFDU19Uzah6Gn+v3tdVKUbS+UhF1eeUiW7ekCH5vSRExXk63hGgxB/rGujQyP+qdK8hzc1tD+u+x7UKXaP4YG0JGa0pkafJoFOGj7qaov3BAKC7SwnLO3tMUGWvTRVdnefff+MDnXdbQyo/DOSxavWbjykcWZNvYRIcNEdHWKJEAxtmjta91RiJqTdudIGui6sq9rbjOPpQ8pr17qFmNonOjVktXtkLPxoUPF58mbWXZQTZtjdbDzVqB4Lb2rWptg4lbG9xuYVl7tmABqVYOs8P77PktuYCLsc6RDoe6BnpQkppIrwov5WOlv9edO6058kyRss39V3y58mo1iDtrb3R2VCzawS8msh02/Rr9bNMYcm7cgyXxoHRBrv/XNUJYmFY1hVD5M02Ovs/pbMXnMQ5XfLA0mc6bna5idFs6KgdRc7xq78i/WP0kB2P1k3sYNQg1J+WTXZ2HLQEwQHkV/CzHD5dPu06FIFzwSSvCQaCZ+M9fHjSWxYyt/DBGXWfa6HGt2N0SKF0VbqN8HSWgHdX9y2AMOjzqMa6qjtrLshgvAtGGPJAgYN0COZifRWu73QQnhlumoFYwh1pqF6poMZmSh9tQrs8vLvryNLf1/wKeCsoMidDgKZIwV2S+kBuHQj6w1jfnic35zD6URF+yT/wvRzhwhJC8tylukYDMtfa5P4NLO1QgKvFvC6nngSp2WC3MNuEDb+j/B2kaUBzQzxYg5FBAytCoe4pOjdSXkoVe4jiqAkfZolzBYnFOX8So8mKuHwQIk7479mQShGCq4LKCSgP7vYSfAbeT+2qhS7NZYUzeuSmG0YQL4g2o96KTkzSMUe596cJ3lqHTgXvR0Id7cH5qnZzfHljQTEaORtd6FcYYSSUbQYCDIi8sZ8+lfyPgav8WAMyj9ayIQBVMPqHrF1ohD3jBTYwP76zrsrAYGcUYlhWwMh66RQ8MA+vlms38MicvLxlLEejSLEa3D0Eh5Lizy8Kuu320uQbMgTYwhH4ZFVP78NDupaUImetV+isAQ004cw2vAvy/xlAKM9RRZilV1dlOcCKKEs6DMHic6fA7iQ6tMMFC1XRKi76Dr13FXyPljOElZaYA8W3uip8yKMBnjPyoXghXEf8EKyiLb8Msiblf4PXbs19+4GFtESn3Ls9+Pj5Fp2KlLMl20X7Qo+ruvIyilV/Mlo4oQi7m0yRmTfXs/Rq4Y3X8CV0nwjOswKL8KcI5DqiuKIr+9DRaGS3bNAu1LOEP2dEdiSDHMkqtANaOkhjjHnxCgAEzpiWKTHrh7BQOfpfqkuEtYJH5n1lk8/swg2BZSXDShYWy7QGDGbQEk0ZZSN9aPpRMIxBRyICVuxTnj2gyYzDfROypzPxrWJLJxQcsBr30AwzgQAMzcl1YSCYOcs3nHrTiVZ2U8ZOWreZWZQy2fx0I1DdApeXfQ0UenVgF6HhOzYZ+A3PqNCneIIVoMeoBLzJSXBowD9YSZ//ApKGSgwZWL+mNlykp7uoGOSB1GspRNuV2L9ib8/DT1HZN/XcrT1bVpmhHkI9mrda05sfUyYZPn/p7x7VfjZCIfHsZbxRwidmcuX1fJxz6QdoKTrPyPCrzpcFPQmr2Op45rQpGfbvVUQEjCuMbR6PW2MQrdVAagxyTb6bBHvJ5EhfiM8f4b9TAW8PVLWNCfxXmOUwnL7nRFngUT0wXQ/bV3uQbfzL/eP/18we72c/tZCIljmF4RZuGQk7ly7LAELInV2KzN08WqznzRBW7FrnySWc3weD+Lx7AqsGBKjKbgLvNK6s2Clfo1QTlsCKzrblYJqTGZGVa9AXGDnv8feMOwDyjCfQqmFKISg0uxcgOO+O5/TDJtP8c4P5gWTLBqOyMhvRxIO3dLvfVrooGNuknYyODoLSChf3QHjo4oQANhDVYQXCZ4EM5Q3Fp5CLYsXft0aHMfqqomGS1Oir5jAdczDwo/RwCSfoPlTKN71Ugw2nECMQEp4BEO1LC+6v5eOXLlhDk0QxyW2jNcqFEtpNBKgnxJ1zMA1oVLzHFk5IbwTLwhLEl29fcSMozPqpIQvjw2c79WJwegNlhX9+4k7/bcS4CU70yeEBvMRPWhGkaBkq5tv7ZEK4tdKG0heHEwtnk6jfhW1+hYF27CaPIgeJja6/pTOFGQRg0+7ghaqBVxq5UfRbdBWGeY3QEW9WSLms8a9v2BfsH2A08/yhiu6QuBtb5yQ9S8eT5vBEPbVlljL52NPykLitDRUYqCrsBtVPMYiHFx97FqqC77CLHIHr4py2KSnoqdqfI6bX99z37CTzPPqXcXMXQj2a/oGwi22WqyVZDNEgA9eO1Y5o30L1sPVat8AgvvUSJoxFhJAOAfp5bIp/Z6Up01gYbx9XzwjgsPM/JWTQfW18ueSmyCg+t5BrHEV6r9zd3+hca/TrP40MRTSCzAl4DO7aUWTnFscKZMGq3IXqlGDDxzs/eXxKeHc1SHlI0p5CaTD+6xzWGstnRkNyVGgn9SMoCSM4maXkdhfmSBfZDW8EjiDmsQh4jb9WLvRcmhx2OpMn3a5DaZqjfAEb1bHxKFEwiGfOGn/NwUWas6V/tQABz16KQuJNaW8IEYFnOre0jaCnJwj+4VleZ2EbWfsWAKzPrXjCyqZsm/pUIaCw8hBBfDyVvNdYYWDSMZrs14c8yuB/evP3Ve3f0+qeT02Pv5AcDRUSjTm05llkoAq7RZYxh/Rb9/zZ5Xcn9izKeXBrSIh4J7p1w2p0EHJ6MfJk92mZOFMQUDpFiDdOP5aKrYGhw/wMppgYydQwZPjJ/qLL2O8OgrbpG6w4fMAUXZALjwtomzmuEHReTt1QMh3bPNjj/8RHcvGd9J4F+N7WAIgfmhqmjDXe2sSB3jtQyPwnPjIxZilHw9jrwAis94KGRjbmjnYhWqVs1+0pOG90MEM3JpD4kQAdiMz9OYpBXkUQtKFdp7lB/x5TH592wdS5czDkD+eCD4M+njj3GkTiEkehOkxBD4lStPKs1I/D8PA3hI5NUCX/OPTI0MGrmrJrKIH77fdC1SlWUoT7rG8W0oIM+mwc2IkzZUbUcpqAk1HJ4HzoEAz6DmJt0Odwc1g7xqYEb6cEXIxTdCYVusiRDl6XBfYYeMxWdV04zycZo2XSIpE75gc8Alxg0kZZFNwiiPpURzrCKMF9ZttEPZqja5QqrFZVuMVnH6A1r1JgtV0ngKNKCzZAcvDDoMloV4QbWK20hRdBBYwZv9HnpD6n0qtVRrw9Mf3qMnLF1VIAZdV0WRqNHPv3LYWsVxKAlNMFtF/RWbLkeVs1lLE+TOGfOc5OCSeWwmFjZDAxiaOExCyMKkIY1ybdZLfTdcjW8tFUMI+287JhS+NsJEQ2tTSnkbdj9vo82BfUB47nYEvggFbqDhtRGw93pFkk5WzqUtNfNjGGXm8fcEd31QZtEW+6QrvWxXhOoCogVRv23TbR+tsOHRc0maB3BHFNMT+bxckxWMFlPvQ0+72owN8Qb2pD4eL/c+xotJ43AAllLINvc/2F6OsZdtdc/83ogVF6ixpCS38jEMlqNlrPeAPnfzC6S5ntAc0FmXpsWUBCTKlVYGxH0UTyO+DweSlnS5PhIE1S+YBrn5aoRf5SRCOFgCosOgKCSiLxqy1cp1bCS4cJCAAVjT4pkIhjbwi1v7gbps5mvn8ZJQho2/XAVu2y1oImxQy5TaxrtDUS7DuBuJx87NSvpo6ywHAvXn/v+5MfL44t3nWu40Q3X1SkuBESnZkkZ8fTqa+Vo3FriDxzXx63LMs+MZx0M9Q41Tmd4rF/IMUbqCj8rJveiCQzScZ/ZaPNSN2QtMZCp6dz78bjXt0e5KihE5bEKjlIkWioGL+vKhFPH3hVW8kRt8kH3H7d/Jq1vJi/VU3xp2ojXnEb9PrOW223w/DY40DpYAZ8nusTkrjxM4Of7jkVamZDONCX/kvNlobkotGUqByc2JhM44PJqSx0llB1qkOXq48eBARYYhxR4oF3DjbZV1li1s09ujDZA4hjRzkC+z33l30AXW4xFHgQAePT6Zwv3wftZu4+NTRFqT0SDc0k9bjGn2LckbPf/Wx7KLmgdwVLMT+3aYGKeAhTBbUcZn1U60FaLKN/kpFL8xV5kvlfp86yf6MVasQKoqNL1fs8dwSWg76BFfsNY6l1Hfnzj8W2WHeYIPpzFBMhufY/MNNwNIIsSje4p09V+QDJGlH8vP1/xLx+5/6vfQ9JO/9Wy4eppwDJTpFt1/IxbjMzkF7uiN+0p6oTSb8vobfQc6LFpX4zp4YkPIj88v2qP1dXex4/9Cr9HyX5eK7XB4bCb2+FkQsZjjDpxJozm2u3fqzZki9TQ7UzU35r/eICj2Kj07A0pz6Vi5Xy5XKekjvi48POUnF3yuz8GmPLkYFxVHY3T4xc0gAJqsslrHntExOIEtMMkY5sQ2mzZqKJ3WsYgYbidI+9nthZ/IfG29+aZNq1WZyrQitM6gUc+Bgn+ReehYtYvF28nfBN1LvZ8ZiuQdX/Az4DWigWqInkDnMyRwOPVZvxojXjhWtWpMpTRy7MlimSWRDI9WORoBw14cr7yxGEAnDJKvaCtvICOj7m8DlAgKinKlK9X6G4FqT+jU94a4OY+ndmSJeViiS1jql0ZS5zmfH8OnxR15UdmTynZxFNWcYyKzI9zTAEhsedoetComXouHxK/HiY4KnhOWzR31TYuuSJbzFOgybFSR3rabhgPYxAbefG8H6SAOQxXhzVuQWpVMuakdlrGj0O/aT21oHTYp2J5qMDNlmV8U1NOBk0ftb7whvlOVZFKBR2gNCRjef3st57ymDUDfByEuONqQ9Ke6Ht7d6IicZemhgOvMWKPs6s5Hgq3Dk7VHxOnNZlKwTODeaTDpda9x3UCtcoKTMf+ujozWBrk/vJyWKetvE39uQb1/6bJ8M02hSJP/MRPBGi0oRUwRi30KTB0XUKHqjr/Qy1MyjcnT+y0COh21kUzjiJNwq2DKvX0JIXtU4MrT/WtDM5V0ojx6HwlM3W2c7n0a9dD5oVZt20yarvUI1OrVB4/jE0E+uXmWN2jeewzB+7+3/HWF9aRNY8YQxr6GW32ytX2thkQECewH4FAyZI8t/LwGjVBvnnMAAymfJLPfNRl/SAI+ZFPoIXy7Z/VSS94VBlmJQmrO1z52doATm07Y3zTGYUboLM8ruPnuPVMeLyEOo6bauh4FwM02piDYGTMaYae/ixXsSgG/wPmfNRpsyr6Aki1b8OTA4NhFSO/dHnEuiFVvtUtHGImtqrhpq9PdHJjo7Xe5QmfJ7p8BU7dOg62rmPcp8507KfUq6tdS31wam0OyJHq2ja1/wK3TTUhDUbBmMet9UX3PT0JlnJ6tE6w0Z8e/1a/afzovE98uvWQbfIhkmt+ON9jQtzNun9KTkSjkf9kRQyGIM9FaabViFOwtnLmNBSGOz8XR7gRyG0VhkdkVWydUfHnZVN0k7uFoeTO6syz2oam3tST3ug7duApsZA/PfJe6bYY99kV+0s7NVu5l0WEqIdtvRjIPohNJTtQaEj5MWQjyvOXFdWXgu15tGOo51K138uzrYb39+oNy9jZVk0+05hwc5s1FgPhy2ZrmBpDhJkBB6MT53NuzcOnb3ve8L14+GhJUNpRkYBEqsfYpW6NUWe+WSBsOJY5LMq9pW3d4pRLuhCkSFaYpg2avdg+Q35gOm6cj65J/z6yRELuboBnPuD2Pjy8l2rJ1Cl+HmTGcSNPhgFQwbIVoaUcHyg5vuVHTHIjA4MjYSEG3L8GOxc0EpOJ4QurTh5WT3GMiHIQeNePz97Is9bxYIXtWG+QdDNJhM+QJNPpMeBb93T3qeFijLY4V/fEkKNL9+3g2UCLMvLxLAug5ET69rmtx1dcCuHo2zTxMc4sGZXAZH7C0Xiwb2c1l/aGAvVBbeZ7BVtF1c0JqoXmYaD4yFnXOvRjbKmJeMH13yHT0rAxsMoJaHnyQoyR+Ld+GGG24mBZ2TayFDWfyc62RU8myRDmngjmmA7XMJygLClpPiN1EBW+2UQFPHZ5MAF0hPquJTHisv91Py7qvpJh6Mwjn85Nqh85CHT2iyJzkhwaqw4ftFHqN08g3DxZjCcdyjEfcxS2iwr9+Xxq7Mhjj1jsBSqfLc9hHEqqP4lkPaSTz0Z/St8Zkn2OhNrRkpRrpU0oeDWsbhgnzbrwalhdmrWNyq1jHftrf98b1NnaydE1kP3HDjafTdbxwOyQ7TJDklnB8CwYwG3VgdvA7JA6iTsmzNPTQwY7Cgad/imfjaeAyodi0o88DVQ+wltBoPpzudrhxRYp9NQXgtjHYI1TQA3lpU7zKkOX4nmYStXlNT9LEXjmAg9J7FJiBBOb9MxmYJ9rmTyoqc793aBVklHGNUqpQ+blfB5+kjf8cGtlIs+SR7ukpVSakyC3yH7sSmdM5nN4j0xMh/XwzEY8jaNFJqQ+B89THCmpgL/gRxpLyOqmi+31JjSqqzO3OOOqXGry9RO6ZK9xfActzryWJ3bd63mAovuYCVirQcBNFXirrfI+4EzqyoYgx9tkMTmisobAgvLXNQ/da4Bsdbndxo/VcWXYTn0kmoxBG18qEoHG7OezMHRGUj2ufwzYLFz5kclFuWlExfCtStqkZPkAPZ7EbEG2DZppbKGOndwwpgLvaqDaaNe+PQFrgqMhnSZ5+CiEBZdwd6M59nJAsRdesMcFuQll0VKF8/ufjibPXx6IY4AHY2xkyRb+bWDNM/hMcOpM+fi+apht6wUT/Mh9XhqXj9rCQBSqeKq9P5iKfTe19ig7nH7xu3GMN5lu7qhxVcTeGz/MOzn2mhV3jMUgsnHk7jsxgoFqQe4k42brhx9l1JWSSBYRWUGfwZKreq5idRRHGcYFZKZxbA3H5VR+FWVo8bI9hhZdjMT1doPSbzB4cXWGPmGOR4R3G3UoFm0qKOUa1Pqh+mtrtXgPWAmVuMJ8qDrcqbttWJXqx3KarZrPjgEq7WFchgWeFm7v25pU5puK9szXJQ1W7Fvl+oWo4cOz5vmpXSxQ45cOi6IrFiYE3/capz65GaN3nOYAmEuzG8uPUINDdzmmzfBTl9kE6DDJ2CJL7mjTFChaE6PJgzvZ1IHMSqSlSRTlrvWBZeF8DcucUcM2wKr5xHliIeWS40kq34qTpQt/nVtnzv7ISpk69rJjl10A6iHeLD5T/AWDmFdZOEAizO4GqVzIPdZ0IrS6F6oxPpwnzUPCv3m0XZXnejqwIIoRnVjma7HNIycEWc7YjaODNZcWJegAQTrnhiqTPala3wxFXFisAyODwgiiLw+kc9o3DuCptaSfwSP1rO09KpvnBD4bp990OmD+Dc/I+I+k/3dKelOxLkkINXGmhrFGdTVlv+LqWhuiOroGq09E8R6NSOOQgza0z+pkawM7IiE6uUD3YU5hfLqSZEBVIyUVcgTQxr3gXO7cczI8TO45VfYfdu8rohoyUrehRHPvmPk0ugHzrIf/H02Rz8LiQ3rz1s+LybskwEsg8JQ0KoEuLI+2I2LEMl7Uw2T4oYtS/dNGX4L40Jp09sozykelVWSQN1Tei6SvXNt4QjffjUStdHpAe+M5Lddox8VI+DzV5bkZ1a7rl2peUmTsFctzfyED8N4cd/cV4oq0Lweck6uLTH6zhscP8Z1al0scIcABdxWSQ5Uv1TAM9qFNF2vTxSthHFQweWW878ZQ3TG8a5BH3ODjzf1VGK3JbY5HmrlHb7yT0+PLg7pw55YbYY1o9J3egQ9oxHwTC94ENFn5dNHpLApxAySoAkl13fEyySnVBS/rya2gFJcM14HRkQ3f0i1FYYFNy+uDeFiXAIncWFBz0yy8xcwRpE1b6eze1UXygRMBrxqCv5IUg4305uT8/OLs8sw7Of9wMLbUyw8H3ocDDA638n7wGRKDxDMa2/JEJKLpJNd4ssE/HUygsZq4Ml7WcRzFUGPOW0h+0BPludGS/fidPnglUeNmkOpd7Q6h6vXIUBRvLMKTQFY3QZg5/Ic8xbPj0Bl+H7c8FhLv0wou5VGBb1p7LzFCOrXv7DG/aqXZsDpCcm6799pX3ODw4NJ9S7gpeFo/+Zui1yaviZCu6jIUTmE5ZkjR9oUo+mmXRDYBpHGJiyylTmVsElZvC2URnlMiL3biJ43v7ezshHjmN4L2PEr78zwUdp4nkvBa94Hw66NGO/8CVcMeWw=='}
+        source=lambda name:zlib.decompress(base64.b64decode(capsules[name]))
+        self.machine['config'].update(init=dict(cmd=['bash','/cloudbench-boot.sh']),files=[dict(guest_path='/'+name,raw_value=base64.b64encode(source(name)).decode()) for name in ('cloudbench-boot.sh','cloudbench-status-server.py')])
+        self.machine['config']['env'].update(CLOUDBENCH_STATUS_PORT='8011',CLOUDBENCH_START_BARRIER=self.fleet.name)
+        packet,scan=self.runless();scan['boot']='00000000-0000-0000-0000-000000000001'
+        def role(pid,birth,argv,cwd,exe,group):
+            row=copy.deepcopy(scan['processes'][0]);values=row['stat'].rsplit(') ',1)[1].split();values[1]='1';values[2]=str(group);values[19]=str(birth)
+            raw=str(pid)+' (fixture) '+' '.join(values)
+            row.update(pid=pid,stat=raw,stat_after=raw,cwd=cwd,exe=exe,run_token=self.owner+'-0',cmdline_b64=base64.b64encode(b'\0'.join(argv)+b'\0').decode());return row
+        scan['processes'] += [role(613,56,[b'sleep',b'infinity'],'/app','/usr/bin/sleep',0),role(862,405,[b'python3',b'/cloudbench-status-server.py',b'--directory',b'/data',b'--port',b'8011',b'--barrier',self.fleet.name.encode(),b'--run-token',(self.owner+'-0').encode()],'/data/repo','/usr/bin/python3.11',862)]
+        past=copy.deepcopy(scan);past['finished_epoch']-=1
+        prior=copy.deepcopy(packet);prior['scan']=self.save(self.root/'prior-scan.json',past);prior['ssh_stdout']=self.save(self.root/'prior-stdout.json',past)
+        prior['command']=shlex.join(['timeout','--signal=TERM','10s','/usr/bin/python3','-I','-B','-c',source('prior').decode(),json.dumps(self.binding,sort_keys=True,separators=(',',':'))]);prior['ssh_argv'][-1]=prior['command'];prior['program_sha256']=hashlib.sha256(source('prior')).hexdigest()
+        packet['infrastructure_prior']=self.save(self.root/'prior-packet.json',prior)
+        def identity(inode,digest='e'*64):return dict(device=2048,inode=inode,uid=0,mode=stat.S_IFREG|0o755,sha256=digest)
+        roles={}
+        for pid,path,inode in [(613,'/usr/bin/sleep',70),(862,'/usr/bin/python3.11',71)]:
+            roles[str(pid)]=dict(uid_status='Uid:\t1001\t1001\t1001\t1001\n',exe_path=path,exe=identity(inode),proc_exe=identity(inode),fd_links={},unsafe_startup={})
+        roles['862']['fd_links']={'3':'socket:[555]'};roles['862']['script']=identity(72,hashlib.sha256(source('cloudbench-status-server.py')).hexdigest())
+        scan['infrastructure']=dict(roles=roles,driver_state='exited\n',driver_pid_b64=None)
+        scan['sockets']['tcp6']='header\n0: 00000000000000000000000000000000:1F4B 00000000000000000000000000000000:0000 0A 0 0 0 0 0 555\n'
+        def publish(value):self.save(packet['scan'],value);self.save(packet['ssh_stdout'],value);self.save(self.packet,packet)
+        publish(scan);self.assertEqual(self.invoke('runless_current_os'),{self.mid:self.vid})
+        for mutation in ('argv','script','exe','uid','startup','birth','child','state','pid','foreign-socket','missing-socket','extra-listener','unknown-scoped','sleeper'):
+            changed=copy.deepcopy(scan);server=changed['infrastructure']['roles']['862']
+            if mutation=='argv':changed['processes'][-1]['cmdline_b64']=base64.b64encode(b'python3\0/cloudbench-status-server.py\0--evil\0').decode()
+            if mutation=='script':server['script']['sha256']='0'*64
+            if mutation=='exe':server['proc_exe']['inode']=99
+            if mutation=='uid':server['uid_status']='Uid: 1002 1002 1002 1002\n'
+            if mutation=='startup':server['unsafe_startup']={'LD_AUDIT':'1'*64}
+            if mutation=='birth':
+                changed['processes'][-1]['stat']=changed['processes'][-1]['stat'].replace(' 405 ',' 999 ');changed['processes'][-1]['stat_after']=changed['processes'][-1]['stat']
+            if mutation=='child':changed['processes'].append(role(900,99,[b'sleep',b'infinity'],'/','/usr/bin/sleep',0));changed['processes'][-1]['stat']=changed['processes'][-1]['stat'].replace(' S 1 ',' S 862 ')
+            if mutation=='state':changed['infrastructure']['driver_state']='running\n'
+            if mutation=='pid':changed['infrastructure']['driver_pid_b64']=base64.b64encode(b'999').decode()
+            if mutation=='foreign-socket':server['fd_links']={'3':'socket:[999]'}
+            if mutation=='missing-socket':changed['sockets']['tcp6']='header\n'
+            if mutation=='extra-listener':changed['sockets']['tcp6']+='0: 00000000:1F4C 00000000:0000 0A 0 0 0 0 0 555\n'
+            if mutation=='unknown-scoped':changed['processes'][0]['run_token']=self.owner+'-0'
+            if mutation=='sleeper':changed['processes'][-2]['cmdline_b64']=base64.b64encode(b'sleep\0'.join([b'evil',b'infinity'])+b'\0').decode()
+            publish(changed)
+            with self.subTest(mutation=mutation),self.assertRaises(ValueError):self.invoke('runless_current_os')
+        self.assertEqual((self.registry/'runtime-evidence-unconfirmed').read_text(),'immutable original debt\n')
+
+    def test_runless_collector_performs_only_finite_exact_gets_and_one_ssh(self):
+        import hashlib,base64
+        packet,scan=self.runless();self.save(self.fleet/'_batch/lifecycle.json',self.life)
+        receipt_path=self.root/'receipt.json';self.save(receipt_path,self.receipt)
+        ledger=self.audit/'fresh/cloudbench-owned';outer=self;calls=[];unresolved=False
+        class FakeFly:
+            base='https://api.machines.dev'
+            def flyctl(self,seconds,*argv):
+                outer.assertEqual(seconds,20);outer.assertEqual(argv[:3],('ssh','console','--quiet'))
+                outer.assertEqual(argv[argv.index('--machine')+1],outer.mid)
+                calls.append(('SSH',outer.mid));return 0,json.dumps(scan),''
+        class FakeAdapter:
+            def __init__(self,fly,journal):self.journal=journal;self.sequence=0
+            def request(self,method,path,timeout):
+                outer.assertEqual(method,'GET');outer.assertEqual(timeout,15);calls.append((method,path))
+                self.sequence+=1;folder=self.journal/str(self.sequence)
+                data=outer.machine if path.startswith('/machines/') else dict(id=outer.vid,encrypted=True,state='created',attached_machine_id=outer.mid)
+                if unresolved and path.startswith('/volumes/'):
+                    data.update(name='cbs_owned',size_gb=40,region='iad',attached_machine_id=None,attached_alloc_id=None)
+                raw=json.dumps(data).encode();outer.save(folder/'request.json',dict(app='fixture',method=method,path=path,body=None,headers={}))
+                outer.save(folder/'0001-wire.json',dict(method=method,path=path,status=200,body_b64=base64.b64encode(raw).decode(),sha256=hashlib.sha256(raw).hexdigest()))
+                return data
+        plan=dict(schema='original-isolation-read-plan-v1',branch='runless-os',root=str(self.root),fleet=str(self.fleet),
+            owner=self.owner,receipt=str(receipt_path),ledger=str(ledger),binding=self.binding,
+            collector_sha256=hashlib.sha256(Path(self.native.__file__).read_bytes()).hexdigest(),
+            original_native=packet['original_native'],original_state=packet['original_state'],original_backend=packet['original_backend'],
+            files={str(p):hashlib.sha256(p.read_bytes()).hexdigest() for p in self.root.rglob('*') if p.is_file()})
+        real=self.native.runpy.run_path
+        def dependencies(path,*args,**kwargs):
+            if str(path).endswith('cloudbench-archived-machine-reuse.py'):return {'NativeAdapter':FakeAdapter}
+            return real(path,*args,**kwargs)
+        output=self.root/'collection'
+        with patch.object(self.native.runpy,'run_path',side_effect=dependencies):
+            value=self.native.collect_isolated_witness(plan,output,fly_factory=lambda *args:FakeFly())
+        self.assertEqual(calls,[('GET','/machines/'+self.mid),('GET','/volumes/'+self.vid),('SSH',self.mid),
+                                ('GET','/machines/'+self.mid),('GET','/volumes/'+self.vid)])
+        self.assertEqual(value['schema'],'original-runless-current-os-v1')
+        self.assertFalse('qualified' in value)
+        calls.clear();unresolved=True
+        self.machine['region']='iad';self.machine['config']['mounts'][0].update(name='cbs_owned',size_gb=40,encrypted=True)
+        self.save(packet['original_native'],[self.machine]);plan['files'][packet['original_native']]=hashlib.sha256(Path(packet['original_native']).read_bytes()).hexdigest()
+        with patch.object(self.native.runpy,'run_path',side_effect=dependencies):
+            value=self.native.collect_isolated_witness(plan,self.root/'null-collection',fly_factory=lambda *args:FakeFly())
+        self.assertEqual(value['attachment_observation'],'explicit-null-original-quarantined-v1')
+        self.assertEqual(calls,[('GET','/machines/'+self.mid),('GET','/volumes/'+self.vid),('SSH',self.mid),
+                                ('GET','/machines/'+self.mid),('GET','/volumes/'+self.vid)])
+        calls.clear();self.machine['state']='stopped'
+        with patch.object(self.native.runpy,'run_path',side_effect=dependencies),self.assertRaises(ValueError):
+            self.native.collect_isolated_witness(plan,self.root/'stopped-collection',fly_factory=lambda *args:FakeFly())
+        self.assertEqual(calls,[('GET','/machines/'+self.mid),('GET','/volumes/'+self.vid)])
+
+
+
+SOURCE_REFUSAL_FIXTURE = (
+    'c-ri}33nq$dL{Z-FtVTRKGQ_SzNnA<MsAm<<>{7WNuKxSb@kziwF(vq&;VIdO;7#zcLNIvk^nNXXBDHg6bWQTMn-(w{q7eLfBj;d'
+    '!e|^PUwrx3FZy9LyiLE}zKZGQYV_gaW^j|P2E+8q-QK3_o7>4N%3kGBxSOQ-YH~gLIlUUE|GZ0++x~w{M#C?@{Nk@~zPQE5!#7`i'
+    '*?aSaF~Q5I9ifzq7`RK$8Y5B;#!Juhn=gKgt0tqnaY*G3-2E=OIJ;Rz@2pLRE6!=sA_PZLlG-QENV3^*M+4Py)<_(@MK@-5>gcF4'
+    'iju4qQPkT&iDF54t{sn7$t<$O^Mh3+Fl_|4k_9wNd5~6%H(z`#O}=%vY1ZKMRcFr$?^5`AQa=7OUKNkLxOS7tg?pQZw-@8P;RRV-'
+    '=kV1i&TpICxL<}BlRH1Vax(k$#*N+8Rl2&k9gVIo0)C!<;a&Lo?Ra!IjPsVS(`165E|z<8<?dp-2zbWqqWP`k(JzxUUcPeH#EtuK'
+    'UH+bSdh%{`v+B!9y1l!(7^lhI^~#$E5ppoPEk8Q%hH*5!e)eQP7+t5^@gPhten~z;ygsaIYM6exxGUHH2j+j6K0I#3-QB*scw0p4'
+    ';s)aJ&P~#a3$D|($Io#v2^g&9OaC$*^`8efleu6$e)yx#PrvV?6n>n_;mz!gN}F@tn+w3*<aQK4TuyH91@+ZC4E-xV`ZY~njYpI8'
+    'YOO|x58*0JwRS~gmy>snNi}QJsT3LEDoN`tb5fJYvt&L?Z(=Yy(P%l-!ecmSR9a={6Twf(d7GJd+&)y~c5uBI=OX79X&7Ji)A0T5'
+    'aZz%fQxr4_;e@j)D3yedIk-eH55YP^sCQ8@#)Ng0yG(>7BnD!AW=o<rS!$MW%!icL2$FcDjBAr!Bn+Plm6M5%2c@~tHf5P@^wb9#'
+    'tdU*{eCeJw+xKZ0-d(%#&lkluj-bi2C&9dN!mTBk(PSO*PG`<NY+#a{2r7Nx6y5h3g5(r8L`cD$i_$^97B7&;n7AiH6B4tT28pg4'
+    'PS8aLnF%TAl(WhtXrq)@QAiAZ@<eE(4NEa|M{<nH&h6S_D#E+LRlG#&gYknV;Oj`O3xY{%iPk~b=yc$bS!-F5;!KRDm;xsZCME}#'
+    'nPW6k7YLI=>RJB>lhG9<DPF#JSA*zo2cxM^`14;re(~F9ekNRv?&2#ErGmFGnOPAbL&9?^(S75DAU-lKk~K+ao`WV1Qznv!B2j{0'
+    'a-{iHxEl1YMsMMUzQqIIr(ST^H*WBD*lW~_L-k<(z{#TBeOr7pJmPR2y0fp~HJ}h5mV$xBGcE^ndwQsGnR(S)H!d>f=Az38Qx}xt'
+    '-=7Hml9Mlq=^JjLVE>iim$_@sgW+KEZvAcIOJ@2?5-IHRZN)O)P3Csk4Xzeu7#3~%DV^%pXc+FsW0-~y)6Yct@YYR!zMML!rO!sU'
+    '?&|VCMt<_}*-digx)m)fuKP2FbTEwR*ZT+JoBOdH6GAWkgW&(Oo|Wg$zS$6{;K%#MmR~WrVMtf^Z&^feJi_ne%k=Bu_A*REn}_>0'
+    '&jV9^ZK#rLyLq6ruM`}PS-$NTgh`iBf$;O?1hK_1PCE==&_`(bq^sqs`Rf#&nVRg2hwm>I;(4KYbV*Wav}PByKfA9q27A)dwRTo3'
+    'AH<?ReVeHxn+5duGq?!wXEyrDD25T#dKl+HuXmGovqqi`$s~*i1tk>mnvV5c4%bWH1!B#)GH(}YU0meRIL%_@d9=6G<C~dEPzskw'
+    '>Aemv%l9|m{>u+vU%vj~hwpxvd#qs|yUU{4cjKvO-;VFnto!5Z!4TTI(5LLKCJC-|SsB?{Wn@p4@d-3IodRk?)HVvpza+9xBq7E&'
+    'D<E{I&lEq10<zCk0oj=p@QK8oLh0lwl#Z`eI{sAYRs-;p>7E5t*(wNOC3c|(h^3A0!L)OG7~SKasqXPJ>E3F=JB13`Q>dU=tAgUG'
+    '3a-s|olXli@c(upC?S0<2p6J72ugY13U&}J6rZUUiZf~9TG=~+A~JpoMU-n5Q9f0~HreHMI=PH|_f|+lxFmWTg`{5!ib$4GOPUo@'
+    'i#{~|Ao?gjQ+<?Y(#JL;cnZ~2r%+9`RyEZ#Y`B`#IhBVr6o1HeajJxtL9zsG5vK~%C-yKJsXkMUROiBot0nIQO2|)=pwVlUP(SmJ'
+    '&neW?DPSR2wo^bR`-&RT3Mf+3HwRHa{h6wtK9@s$E_0_)y_2MA%v#kmPgQSYslv&WkSU||c1lQfpHU;NYNLdt&+TDwqWMhK(40vP'
+    'H_G2B6!IiV8@pB^?Pi61ULJHZo#b39vK>^ErmuzNwnb!WDS}va5S6r_sY=>TsN{1AJb_k<lSHVLtW!%$Hml{Ps=U)FsAb#Ii-Pop'
+    'C6u;tnwIyKq=(`6$>*t})Au^Rif)p|Qz+|6(yerD^$n%#@Z{RU*pum~kd|$!qn!1rRNSx@I%;H}A4o+%(;6H~&x|kE%HSz9^Ca0;'
+    'y0#RDvdwOEbw&Eglv6UR#dfGu$i6W|YTiOQx$P5nnB))rObc`<>x2VcEr%yiP<fg-cWv1Y<?CGM+T|dp(@sOSs~zB9GFI}rwpDnm'
+    'W#6g;`OeR@gopAo`_8pOcna0jCsEC{<vdhuRL%7Zu}-R_MjNqZd`m?iI%?V!_)w+$oE#=`OFz>JA1b<_q?^U@1nR2TanyDC%rOG^'
+    '50}$h%Qw@sQDW)xK}9ap&8Q4aaV%DFMbva93{^reE-tI^Mt8T%@;$t}x_bI``Zc5!Q@roOj4MuVcz1(2dp8>2-mgrV{d#XY!u>*&'
+    '<stabyL5NIbSAm74sEeAX7(b#-lS08;>m)US>e%>i^mB)nXLbKruF5$W+OLw=f?PWFno_VYc&2aUxpY5V?1;I`=_jhv-i7LdcSG$'
+    '+nv8ER&ZHFmF4>5g9J`)3&}AZjKkHCJ=Onab+{Q_4Z?gD($M*P*D&kl{c@@4Tn5<nyCM_QwNww1a(^veW3f_u`9-FZfR@tueRH9i'
+    'W{=nd50MS;R_mB1^E;IJxS>i^+H%!G&(>dLsQvgUE&h9V=P!yx+$=5sgN;7U%D-ZsAW7FZ+bsNhSmKR|ykEV$7>W5ccZ0=Z>gh;d'
+    '<g1i!AEbZDd6k!&zVKoN`I<7x7VF#)gHS4rZc$_m$j@dePMBvn&9qqHzP$SHS%2C_T2sMYUb=LkmiWP15(jHZHq2YgX4Jttqz~4T'
+    'Iao{fP%RY>>p(3XOu*^E1e_jB!0BEBK5c3i{oaRVvtQS)5+1ti)Ml0N<?ybwv*_`LhS}4GpRagq-xz<|*xHp`?b{Sj+uXD?rG2yV'
+    'X|pX0?b|;=Jsa7z^}_8N)z7-Uvi`AsgXU?2O;ug(o3@*qURj^gy7dLkzOMBKn!WvV=(-W##1OV`o^5`OwKPZjC-8MIuqjX5zIm~+'
+    '`Nmw+qX+%v<EI%#UrbS3nC_f%0Xx#a84upO+q4v2FVGyrGv$o+e%N~p&6>!$)Y`|ar3=BD5Q8^V0R08IK;UKbuSfg+Xqt?ntnBMT'
+    'sAmB;_(XF8S~1c9=ul^^*VM3}0~0zb{Nsc4B#EfFd-KI7HQ<k#Sq$tr<u7}!^FqTO{xs*Pde@`j0Eql#JJFO~NnRD8QC4(ZKw}9r'
+    '7jqVN*6GnN!!-V~r-RO=ZZ!ubMdsX4DM;YLYZ-(i;di~c;PoD&j$RzNx5Lro7KW;aIORicFznsF8%%n5Z0|ms(tk62bH|h?Z|-s;'
+    'xwqT`E=dF6@7_<ZfA~}H9~O}NH=ovqH;=d0cmcu#*R?D>o=B;crP^yFvayCbDRbHN%nMF5*-v=zoDwvC*}J%y=5#J@#v`A4|1c>Y'
+    '^0w#Qcsxks-}Z*1-XH(?r{1g5z~w!#|IMc}yp%``uQi16N5jhvNs-tX6AL0TJirnm5Ep1kLlWtvy2*dD-7V}(u0Bz9p49=o0Ckp+'
+    ')j4O8646P!<V9l2a-X86)EFtfQn~tq)=P+9fbeknNO)8%wY<iZ_Y#I>W3+cdO5+p)NS~_kwB8`$1qja*Pp6qfYr+c}5q{dT3K9-3'
+    'AgCxiWM)={r}Z8;FChxGkAx>0i;n<FgN?wW!bYM(EcVEIm$a(F)4ICqCB!`Xk?=^$qUO3R-pqn~X=LQuX_AQ4G}?-P+wW}m5-iW-'
+    'm?tGf$VzZ0lonY-Zfs881|SGSlap0=S}*o}2?6tCw-uB~N~TPx3PL5}q;tt-i5FE&WLt%&^|I8LkhXmc)hS~N!Lbxp2O)iQ%y5rZ'
+    'gW*IV@TtPndi$%FfVQ6G{Id&=IvJP?LO^hIi~#DHp=HhEo@i@v@3eBNH!Hg8Jsbnjo7LES*_#aA&E(zawl|1rcsscL(7PT?CWGPI'
+    '9>y%*-Avi9^odHAdMQ5bNd_?y6&<J9M2$wB%T#L?S+vZ@#7Q+vt!wCCfbb~xM0hfMTFAi*C%kkf2az<DnJDLcs8Fo^CIBxXAbOHP'
+    '^gv=Z<Qxq}P-MKclDkMuIey1`@fiuvCVKYOrFXaCUAbmW9rik2_lupjdVSb!;lAFmRYBqAWdOM4$&!<41M_!StWzm7A1}wF(e0z<'
+    'D_4V@rpH^AwFYnJU0Ey%dGp1`V;(`&W@_&Hw=_ZSE@D)d%W#->nVZaYWK<Y~Ho2rpmX#Y>N8>E#F>9ZN${}*}PivA1qh3;}xtkBO'
+    'ySp7tf-CbjUqCZe<Fvd6YrdH0eHst);OR=A&GSAD@h+ztc)47A)KC^M>)X3Kf4NlTbh(hXrN{3rw|J?^{OGCaqLE)l<DVxtE~Kg0'
+    'tX}SO)B>h90y3YXg?O~qsq6XVy!qmX*I)m!Ncwr-BMv4vqe)rCb1@gPC5fLF30^LQZyxzSn*6C)Z6i?gv*j++`+_Ji$E#W`%Z9Gq'
+    'd`Zf)4qm)p2-IB&X)?)oSBoR-%7VKz9xqAgxx^&>n!??*F7ReNdY^`+IDBbjJ?vaDCA%D8h_}guw~Gq&=}=uR>CmG!u2bc|nB8$d'
+    'ZoqkW_e)Y9AAI%Zi=~}$F0b9~c<}2ZlPB@+feM-#W0?t}M8xl01&cSAEC~mH9->T)iQo#mY&?xQGmdv)HqOttdt^m93j`8lyl2UB'
+    '<9H;hBubQmF-5~EImxI~E@t7aP%?2Tl}*uUg~3`JnfG7@7pS$}7%i;>UflQ~VoUvud;VFx`sUuO5}f<)JebCtqP>r1W;hz2(JVf6'
+    'yGYK(Omdb4zTvHxZdy6^`-|OfArJ=qDqa?&eRcU@y2q)kWjtSya+};Z!t`ED&F|#h;O5mVg@d;kB64|j)~~ynFTfkR_k)XH5INsK'
+    '(y#7*eYCSQUTNy!Aw`SjcL_EpIU*d3nbXLk;8bTH9U($6J0GE$k4VG!mjSwShltJ(hH-Au|2l6uZQt(T8k2E3T?9TG^0$M@E#mxq'
+    '^`So)y;}V;UoMH%FK&E&F&jZ*FBp}SO8jmZK*xWZ$<~)z1}-Gg-av{FzgYoXYZHvF$1f_SD2R2GTA59d)+4;*xHicwqe*5_#1Fx^'
+    '%y{KA27Xx>Qo@3S2aLj6Z3&H(rO1P4S!CfXqlzc%l~ze4>T*Ha+GZ&Pd_lr!%$Jcoi`#N^oMdL0iVRjTC~JbVNe7K!)GwAt+<drw'
+    'SHiVtoeI+Hlo>osFe&MXC(EExR6L_Wmos;sDPyfE`Jh0u5Sc5bxHO1o?eZechslw+&!I<w$lzoQ+yri8IZr7{nx(=RN8&A89NPR$'
+    'WR_K3AX;X4lR!L&EAT-X!6X+n84`*0LJ=3xBxmTWjFBl8wAGYT3`SDysaQU!?G%e#%%6F0W*)A5=mq5V>;L}x+n;{CeEseJy!<C6'
+    '=4JPIO@a7^dT*&B(UR%A@m%~;fZGa5XW#)0u#cE>?`4$IYFXr4vw1!LKYjiC|MB|Ue}2+5ESAF%0YAiOv@oz1(h`no;66xdgK{1p'
+    'J3*Z(q8ALlP}Zqvlp~9wooUVT5yuCW^uZ88e2Ll?0Y9OC()5Sd?5Cgp&HS@g|MtKB>Fa-e{fGbWr*HplzH3GSbeHgCx1%t+dS>?L'
+    'R%?3I{e)b*@NO`Cc!r5YM4l73iAVGJn&nkiPg`xLDKAcWizQun;DL+xzP4<-@O0>v;c!whOUTP&=;xQdA6?yDKU|4lFW>(%{BVuu'
+    '{XEn^o9pZM^Xum^)x)KeOD4Y8SO1!BzW)BZA11&4DnIzEf4#X!gHwn*Ux{7T?K4A_)lZ<}banoUPK*;K=lX;GCH?Q~Uq(`#FC<#w'
+    'rAtT$+%vwo|8DWR{pn5x@Ysuu3Z(8%x95iQ3K8a{KZp}_vvZNpG&_TiAuxXT)$`2f+rjOtXSis3&*W7javjc$=vRB^dxqT^w(E53'
+    'FkEwu`ij08K1&pR)jTk><j+@Y*P$Tz{Ax|yIeeVwc{XQnhO>mxSL>DL&9LOBW*LG(317b&<E;ioSktdA+|FM2;&$wYlZ+q6=|ArV'
+    '<HdcmH_d~q^wmi-<(GK)s~OU`8VrBFm~L`1?i;O4U%@wcnY9ijeo~sG9EjEUE)XX&?avY}OZ}hCRMUO4J8m#llp+FF`u>C2jzndU'
+    '!^QN+FO|zSAXc~t2r@2&68gdcW?djYq1G|0yw6`!Wtd=M-i{l;U4&0xB`3TAif3iXm2ukPfht=M2PzO5c}R##2Jxcz4tgP!1GE>0'
+    '!oz#vl*hc!!pjAgSu_k(2e}d{>kxI2c)<{?q(o}N12q{iB1n#C38A2wVnnSIv(i8}xi5u19kr+>h*{Xwee6^PffWQ+5LiKA1%VX='
+    'RuH%X1n%Wrx5jRJJ#7u-+N;eP^4F06C5HTmQ^e&+z0>0ISj`^^!65|T=IwHe+ezho6XE9yINK`h)&1rWli4SiWe6_kLvZr}2IioW'
+    'x6%+D(-=%G=;ZPo&xM~_XL#q&g=HO|-Za9Zj3&2VQKtI@{}hQGK|YJT-@AmX!TYqzte*wb%Uw(O<S|P4o^0Ls^2+w)c4d3Y7$K~n'
+    'Br44T(3q11fYOoz*f@h9pk)^=t%w(1>&($7>zv{|6tG0kS+>`-n(=^Td-C%s+mo%z_MYfbM@seN;Y;<}3DL_a)svrXsh)Ez6Tt;>'
+    'F(gfbg86cqkwCH|xg@ZXGq}KK&lDF3{5W@pk}MeojtwhH^`sQeD8i`7&ML{JFd<_YoE1Jwsu8OPDW!7Wq~MkIl4xzL6^VI4g{Y-^'
+    'XD`*0$1c^|U+mh4I$bQ!leIjrGBcH#smx4eW-2pNnVF83=gB?G^9busx4TlFCy!H}*N9dZ<#~JOb%xy;wl-W{^T2H6>SX2WDp&X7'
+    '%k$*H%JZ7kv4X$~0xJltAh3eK3IZz#+_F5c(YbDo-S&Fg4&`}`ZPt*#hWxcWZy!ZGQF-2){qA?I39`qi30i#u=gTV%vfGsgc}S;^'
+    '2w;8CnIY05Ni&3cp2p~O39=AkL|;@bBka)DMxICzUgF^hFwR*T)O5tc0ZW7I=TjPFTa^Z_R;P|s2-(9|2(^=?mr)^PKi|!~R9UrN'
+    'M$XF+08bJDjI$QVwiInJ613+mWe2dYs7Q=@6&=x$k+Qr!t*8(Zz(_s_2l(%`0sKlT*noJ$7Z9vX+2|{fNTMXM?A(NhTLI`3l?W8k'
+    'L#+@xdxela`et5xi`~|NPZtY?Y%LV3IpUflt~uhGBd$5(nj`LLp^*JF3x#Z#3x(`)3WXX$>!MI-?<~)-JHyt7HE14~jjVyKtU+ZB'
+    'UVNdDJy@YolR8!qSV3R~ffWQ+5LiKA1%X=@3N<>{gBA)kK5d6Wp~g0A$X`SLS}3%SBA&BQi18f@g&03Zq0o&RJKS@1aXT7aA)dOr'
+    'da1QS4-?a_Rw$wq0^y@{ie!@Dw3UKWmn1UuN}D8=B?uaoW?D0=A?cRE(I?8Jkqc*io?0Qz9EM7GL8C;hNDUMxiC{!_isQWwS1Z&c'
+    'wVzO}(1U<%tQA_TQQasPdU%V&l?$~Krx#H!gyH>M%Y`z4YDmD5nFOX80t8Be$1lbLrg$ANtb_wy5XWc&7RotCi632Jnh3k1Tu3RZ'
+    'bdmsBj0zc;NRfr;i1JqZ91;aUGYPV!l1~KwJPIycETC2+7OCYzXD=6eB=1Kl7usL!b_stvSTTg5t`$QySzMFFHCbGf#Wh)6lf|8^'
+    '7+US6J6|!hy4xM87}^;5>`^h)h+7vGLwo0XhTR#qHuORBz-*!q7_am}r4L?u#ZU{2+O}e-NgXQ)tRS$0zzPB@2&^Emg1{{+h8msg'
+    'K`VwDpSDBAP-B}l<gX!rtr*%z5zksNq;{<sQae@*Z6M6N3qQXdkM4$Xw!r=Z<1)cd7n5rU=SwXeQrnddQG}3+p=oUpMH(77*IsB5'
+    '6e10Wu-2szgZG{qW0@maA{Z;j>6A?ol<-F`9okellwE)h%fMU^!f>x6VqA<V22JyL$igA@`4kSRR)s@tRI4L3MCu4NM6D$2Wz-O<'
+    'O7zzpPtEbv98b;h)ErOE@pP2vSNjqDO3UtayDLP$Iug;}6kINd{=Jdeusg%nD(lxcFdMUes%HIa*6+m={pxT;e}g(!5LiKA1%VX='
+    'RuEW0U<HBO68%lib!+Ul*VA?(`kUIUA%6||E78A?BA%1z=X6J+pVMP(4HB*}g6X1MJR>AuD7*hKE$!HScwuOk4Mrrmaq1CQd1ZW-'
+    'aI!>&P!67!IaB<HfVq612-L`NL#%<8pL1i7oQOj3LbHibO6y#vTC-T<3?CCGhvWB~WcCx{_a6jgBfq~!pSnTmKfJ@?DE)TA^dcyI'
+    '4DaW<EeP;QU{plmr2~Khk`FL+7%E^Ct6<+G^PVBtK<vn*11zOHaUXN`_#)92+k(JeI!Y+z7SW0JK6*_gekYD72b9b#5do0c$>~`!'
+    '#9C)^*4~P;43DI`Ey%gI1$iXzN7)u+f3e#>^y%QHAQ<RcD^%0OHBDU8#5GM^)5JAR+{s#@)n2;un}V$Fc1LQ3Hby>s)Cx7C)<vz*'
+    '-g%y3cZRJEanL+4n}`EWD{)YXgO^?_)WV{+trcog#|i=~2&^Emg1`y_D+sJ0aLZbuM(29aO+gx;wnME@W1BVPuOWY}71~D;&sr-a'
+    'cdZqY$EX$Z<IyjZLYKbaT|geDq-C9uqDJr#If=|0t*NChS#-xz7G*%F;cZMpGU=m_Tq}}@pixQgZIafUvred-tOeyZr5ZsPmW_dO'
+    '3MmaV*(aY4SSKVupE@DgZXb~6y3~;xA$j;3p>~4wGHQh6XImo_oZzCwCz(k&)x;=JQq=IY0TwUt%(zFGf;UK%MjMjPRw>4^EbDGH'
+    'TTvrKf$<|TK1pr}50YUTn6ili<75Wh!${PgdIQLVU<6TvB$5j>?5Ol9)Ec3)*9ggD*9h$|cH4zKU91n1wLYk(hHGlLriN>3xTc0{'
+    'YPh5ILGshA50YK350b~J4{AiL_w_;h=68nO8MZcLLG!?DBnxCE3o2Rg;_HLt!RmvW)UkrV3IZz#tRS$0zzPB@2;8zhsL{C|v_7cu'
+    'X*<*hHMUtp{u=Vv`k;Lj@vQYhcGvnKdyM*^nKa+H57*`ITTI#o4E)VYtrW7`RSM~>p-Y@Qn-kTD8!Tdpn52aBhKJYA!I!XTqJz(t'
+    '<xFY-817<BN;(5wK4Ya&Py)S3nIP5{2!5P&F1aidM-(oyJz%Af{d_8gY^zG4jat=_njw4mnxS?g^)hOP>}Ojuq$CkQJ6t1b!C&Z@'
+    'Aq>H?ksfh|PejrfM9#hpW0I69g^@9mg$Tr()QXxRL>bgZFF57{uNxRCb`wJlsOG6+kua|mQ27)!38lH^h>$q93Sm<=wPxt-HAD8;'
+    'HADN0-L7F!7psSCtsbh0<C-|GiQ}3$u8HHCIPPfmko`2PhisRthwO2xhZ?c#qIziWoX@a3!`6mMXdal2RD!KkLZuR3eD#n$SoKho'
+    'I#v)^L0|=e6$DlgSV3R~fm>D&H9FUWRu45kZHMZi#x`rnUqk*{J+zM^p0j#L?0OQJpvSKsnxxyi8z|f4?)s%}H6*q?k_;MaIFp&g'
+    'Or4L0A|!ySWk+LxNXn!Fq6-3?<l%d*qKVRAtw4CFGop@j77$U!l*mpBt6?^P+L+-ULlz7Ne6#*=1w`WWIg(7!9SVq^D^@pZh{O@j'
+    'CTk~EFQSG>)FXsyey8SlYJR8YcWQp8=65<u@{3RN2qDqsBZS0}ju2`LE*B*K-neYoondQ}@oOHKO&LE?_Y<!fzZXyPi^Clu)TE9T'
+    '1Xd7OL0|=e6$DlgSV7>HB!8oGJt)cF__Q5J{>C<I$X`SLO7icch-W4F`K}~CKR(G1Wxc)`-IgDncf&XumXBX5-Osn9`+bg<BkHqI'
+    '4n(>sbIBl%J_STxEV~@MHBc>S8B0<?)1)A{gb~j;LWXnF{o4DaY{)qp3LP>Yz>2#_U<ESwUL26_=bsPV&v&5vH>p@hh<|=~;=i4I'
+    'y$s@?f3};4c%p%I1qHH~0-#F^0Q%zd1qYTvR4rAqk_bz(bje1i2{2jEjsa|i`<*_Pn`GSZ%pA{#Mj3L<Dkoq_P8l%>oiY<CDIrsk'
+    'h?|%vUIL3ru2b-y<oo?d>gFNCGg`?bZyvJ0*c~K5>flZy82egeRP)O<zg+XnHNRZ*%Qe5;%_1ZIX%-prE*BZ`;}jV+0@+28(camh'
+    'VRweD4dc)}FdG>MUKxkVIK22GBYv<Vqb7B%Ah3eK3IZz#tRS$0zzPDlEHY|zt_LkLYJA!bMMjNn){wu3{I$qvA4NQCk&)W9$VeTd'
+    '$jFaJzd(#H`~Z4%J066|#V^Un6h<FjYHg9)uC~ZQW)p&A>8(I$Xe@yU#>7n`J_Q!NNC?hi(l%1`I3xz;iOeUfLfP=<thGe}F|M>K'
+    '2PF|+a09I-2rfNh5#dNUU~Q55d}@nStJ<PQ&FV-=kvc+2Q7f@}86`#Pvn?q?ln^uw7@`4@Ws<-t@a%B8aOq00i0%VT;Y%HehI4iS'
+    '{+?zfgp@9>EGaSuV{H@MxB!NAj#v`C$|5A5oa2aFoW|{?MGjaEP=|;@F&d3cjuuo@ON!21QlySuQnbI=?Gp}lv64vDN}`%Xu1VyY'
+    'M6OBXnnbQi<c?MnsZX<#NOifANFAw?s0qI=Dv9>a{S3P^Y^`X8#(~*LE2v5<R9fN1R}!hiRT4F*V+DZ~1Xd7OL0|=e6$DlgxNRj-'
+    'lXE?6B~jDUcBv$4YO{v?HRP|AMEfY>IV*|eu4fX-6P!sjOut;*6(;RJFp<ObQj3Y?mgf=?kvNei;(3rjs33=~#bmTo5<zqFRO8>|'
+    'po~6iL5*e_QKSqMp>c@(oW(?lcT*xdX$K`vOj!<n*RVB4O0QHtTrrXSe9k43yPQk3TDiJWPb80UHc>mtdJ*+R7~apdo(NrWi8+!T'
+    'Q-Q@Kh@lkY2i#8!PR4K$j?r;3P>Ywa@bENP28^S#W@JS@QOe0>u0vp)sz@B+%D{(HZh*~lVECA74oEEs_dwawGH)&HZITEnw5;_+'
+    '=dLGuB=1M5C)!`^_6&+TSW+bG31~H&T(ikFn_RQWHJe<s$sH{zlAq=YXtK*EpvfbhfYu0M7bQh|XMl#?8MZe3Li50E;umB+4x#c3'
+    'FTSKm9_|FRCUvYJu!6t}0xJltAh3eK3Iew*DQa}C2Q4XTeA*5rMU8FNkiUlfwWMetMLcUsk>0hWNFQ@^B6oND?qV7~UEE*}-?>t*'
+    '@iOa)^mg?`nlq{?!Y+rXjxvg_1cb6N85K;h-l9o^P*4iZpez<)2EKusc>`??@tpNUlCr3|X4FV1p+`R>*A6xas!5|g;O0b4()%gZ'
+    '6X~rsCt9mn9VsT#hc6~-Csr?`m`H!N#YCBS1&{5CBbi4=q9Q6&CtwJJ&jMHmNJ~o=z0}-0c>Sy_BAV=gOkMCRiivDwC3K+yvx$4*'
+    '(ybCgc%3axFs8<(vh|=STM@dl4^0jc)1*B{O|U6IsKrF*Ehf^(E+*Pv?Dh$Vx>!l1Yb8-lBG)8xO(NGMa!n%FByvY9iS(ygNu;}6'
+    'Nu-ZcNz{m67nMYN=YEFW8MZdGLi50Eq!o0f6)LUp;wy>t!77QG)UkrV3IZz#tRS$0zzPB@2;8!gsL{C|w34XtX**OBHMUtp{u=Vv'
+    'N}_!f@tl=JitSiQw1|d|SV?r9u04K+T2A@omtIr!FjehpiUL9{>T?o^c{3G4tB7b9Ay<w8&evMR8HuM@`dCh8$q24FVh75tkxbdM'
+    '?opJo5;<f<lCT2OnH)sYRA!=_^WlIsMNM-23Dp!m2uS;yqRl$ijq0L@_d4KKMXdzvMN}7Ict6+bBCj>9no7jOqDfy$fieKE5Y|PJ'
+    'RrcO1nrT)6{#~bNvj<+)Bs$Brl&g+D)0vwrJu49dA`J)(qL{!m(};2yH<8&y0?#fx3XlY3Y2f!|^7x(y#cOrZxvPsF$@@{Ni}n}0'
+    '!-Pm3tTV#k*E*w`Vy-FXnqsag=9*%zDdtYr8Ljrxov$-m-R+Ll8EuSw_Svzh3CS+%jP}k44ZAaJt(Gr04$LOf0j{``4wZCx;dMqW'
+    'ENbf=iyG9ig1`y_D+sJ0u!6t}0xJmIcE_S7=X%&3i<+Lc%Z^1&ZPt*#hWxe8Xdgv9L!A*`7P@5(VSKwfqoo^<US~9M?=eWFWC$7_'
+    'p>zn+&t7Bn+uq6!#}T^dCXj>C2z|bC!;81jgfzw+LKo2a@=7nOLTZJOwX2YF3Z6MB;k+W83!Q`E6yZ5ZgocO!1u?PYGJ1-D1Q9Ud'
+    '(P<tG(}l`S{+tz3+>it;5o2OOM269`z@9!Pgz5n?-QE>atu?Uw6;dk%q<w|ddh774I_dyAd)A7p72|ZcimP@4`#D!!Ee~%kf~fhg'
+    'n*XZ#ubTg=`LCM)>QWIzgO}bWktVv+?ei8vw2OT9D1vAVE*C`*dqciqcZRJ^MzncgR%Aq%p<m62){N-OEP~j^qP8u9Xi~=t0xJlt'
+    'Ah3eK3IZz#tRQg9B8W!kx;1v&>uEa_K{U2mL;f1_*CL306meA%#LYO}xbZY_hO~tdCicUt$u;K4nBW&5U6j!G)i@#QxP3$%E|FZG'
+    'NU4>j2ri7s#u^Imla*1_3l6I?vyG2vUNZe;7$2ERt|+Fg&kg)Ho6^8nqqmR3D?^$04AVp-th-D+1Sv5mAu1h=QPF1-Ma~G$but)!'
+    'Od-<_J{U5`)SSD<piBzCpF$ek%qadpKWA%SoxJXx(pSqd#jE)g%%*WNWA)#B@s}Cnx-|YNai5gnPADy)SPt$yA*Le~&L=s!#rUH$'
+    'eW5L5Mz0!wj=&937qw6Y1`MPi%7jHsG(j8&@y-N;qnza-c?$W|8Nmg#Slh^<ksTj@x!d?hV->ZCtYOg*Z~!=vB9Zt3b|Y!E&G=K^'
+    '$NMPA@~ZLocsaz=9#J-zh^U-qNg=?r2$2w9dW6A-SWX?V1ym?&XNn+jmsNsLkdBYP-EI6eb9k)qf<}oEphg!H7+{N>;^^pB<8S*E'
+    ')|i`>!!Oae6&gOm!Y5G8nO6cHf^w(50GvxoJG8+yoDzYD;HA~6lQH*!bytU<@g0Xhy8y>119L$L!@Z6Gj_4t}pn2SC_?hf$N~~OI'
+    'eOz*yCr{v83EZlt5P5)YVc-CxbPnT@Wrz%8qB2|qfye{ez()oIEM2!gOzk%OIS~b9Mze{CIIMG-YRzH+Q3wb4Hr|(W+Sd?pY1yjr'
+    '4={8x1KRVT2p*^rcbJ3-N2!<zRgN2>yeh{^X(gB>rBIXTVxgQ9tmEU)cl5r+&Les>Wgj4f8QB;_e*y}CP|+u!wi<uarwoI)TK;J$'
+    'uayleu?{-!fRBN0VeGw@oVgUF5>SdDLKIXYPEA&mVj83IM#+wk|Bl`_zyd3oiU0<ol5nsD$z=qGOfiw|HsdcuzwAY$)ynZVCC1Xi'
+    '5K^8N3?(cJn=Iur;)^6>utoz_LMON_M{7y%Jwa&9tc$VZ-k0y_eJNuKo>mI00mXcD3@!kV4-ip-5NMn6m!!{t)yV4TM+Zc?2zCgB'
+    '8RPD(Og`fSp(J+^Knn1IBzU2uy+;J51+#G2CLnC}fOFj*f3c(e(d9@#8*+|@mLvWUq?F+xz_XcqFSZ(g)h}z`>FV&urKAHX3B}@c'
+    'Q!)iLW4JjStO7_5+%gH-&%#I_2xq|~>S5Lgg@DzHj*tJY;ZHHi66zk56d5L*A_xs!z$ORbNZ4ll73;%TP_okeB%2UoWttdgfc*{_'
+    '*mKWGWGoca7n$<}a4fOxZ1jl05>H0M4^4BxwBy6SYxvW2Ui&t~Z~I(n=+8>&N8pb)<9WIdpoeSah%}YWxu8D7iWq3dxud1hA~+4R'
+    '1N%pHfo06`ZV$iQ(fYJIu(sXsYuQJ)gb*vozw9Z80N)z?5a4Wyz|d#qA=^M8LKX!C1}DZd7=0I$K=5g3Bq2vQjE;L>sdtV3+idCC'
+    'Zu|}D8z>MFD|2sIV{!{87(E7`nP{X6CHkQv5&%9)3D?vC0=OUn(WHU%g)TbEW3;~G<FD9m<KM2pzvcMrK9!OQyE6Jw#381IOV5DG'
+    'FfYa`UGmY!A-E&}+VHv|p##a6RCAV8Bm9w25~+a<x*7d1mz%U2|G(^-!XDt3;c{t7S(5S?-ogkb{7M{T+!9-k9rFY)$GlK6kcf!K'
+    'Yn2%=hDYd+DAiIM;1M9;oX*L}cge+Fwv3(C*v#jnWk$VK-nU(LvRw|XU8<*DMxq^VZinvLVUTu_a=Uo0UD(miJGQgo&6Z}m>h5NA'
+    'H3%PO68PP>zkl7kN#ov>V(d*t?03D%?dYaAUFg&s4SRVop4|4vDc?=p)$e-4Q7@0iQ_5#~LFoAQ8B=3y-vVKwpC5PC$tH1{^G-`j'
+    'Thor`N;@8Hj)NPHhJ)a)`WSf3^5nzt_FcLigx>u(y;%=?i)Zy_a`Ct@@}Ql1<}J1syuvdttht*k7AJ>snfx*x%LR-V_q~IvU8Rfp'
+    '!`fNgsn+}S7T)X`mBBFO+=!`v84unLhVJTeX%+KwbgeWsl(>*=pfJ)3o-0bYD?){bapR0KVSI+00Q!d~gtgAv+e{FCllXLP>sFJ|'
+    'V3s#qftvj|Y4+o2lYAC4(A24oW}ubi9m)(eK5VTSC^=OvD5Ro=8SokgKp}jJ6d{F7h<Acwi8)C^G~8xrjY5P%jaLYaBqBY8w$|EG'
+    'LmFe=!wfV<R2$7e%>tb?3v{$OK8F=(?9?VJ&`$6UWCfZZw$=(L*4JEeAdnVTK$lY+BH#{gurwK^0@IlipJ__K#aw2u6XTj97*+r`'
+    'B+#I2)Dp7q3OwE2Pc)#f&A~uT#h)@2f3!J1ODxdTsg1EfE5SQdEYSF{^|1gVTx$uRWf&W*KroiWaoJJ?%e+g9NouF~7UCqh))w)t'
+    'O?WmzK%yc`IUwi_g2X_C-UkviWwth2fm#lE+H%OFP4YR+Kx3yinSpkacOWy+{IGRqpcGldwHr;^K!O0dM5JN4kpTJ#bRp)&`DquV'
+    'EQ+5Kvl&Q0NUI@;fG3)iQW(SyE=s$H8E8uWZZre6F6gv%K}Vb9bC`j~PHi#+?IiC&W}x|DYomcuZKw;+)FvA6vK*!1yq6MTZi4$a'
+    'HfyG`P)flNQN*^A((Geo0f9(iD}%*lGU&kAUJ1emZfY|osKw!@EDk@~9G?XfG<9ktCTJyihr$Gn4_i+Y@IE(;wh09w%aj<P{J;};'
+    'z`&*ul$vD)5syS>i9mp8Z>3E#6`2EO2n5mwZ^yOY!v-|5*c)v?U7&N?1v*EY<Z~E-#!hWA0_`O4Kt`bXVQY;5aIWNpnl_OD$!M2Y'
+    'n}Go|@m|5$WGfgVUM@T%rPNwehL}LA>`0*Hv|yJ6KtyDg?_&j;>S8upfx1lfw98bFHp%C(0*#&8WChwu-hr$@^TXEX1xO#WObu&e'
+    '1wx22Ym5KzFcOX7R1+#0;#{g20sN1NLEqyvB*-+{sNm@YQRtMWdsu;{YOjq}pe|QA?Q)f)P4YRcKx3yiS%G$vcOWa!{IIpLfDnCw'
+    '3AeHpNk9b@Um6G&XI2tOFTr)jh*ShAK~z|ZiDV<-=yLMRY5_E0oh)9I?^7_)P-eQhV4$v=J?X01qfPQzDh8T5wXtHLmE;|&VxaM1'
+    'Yt2BZiIq$m-X=3Zbnq#92Uw7}5>XN9gCi;>W^yJRpnwQZX$~rvau_EW3l>u3lxMOC`OXs3R7bwi4AjNjr(L{#v`IdP8EEX(CNt1Z'
+    '@(yGMnjf~FB%po64HL?=FayP^@GOJZ4Bks|Wr*XM1o(faUDDb|Nra-Nlnbg-U?>WAuA^ekC`b2-1{zKU+Z+wlRdlCZMR&AGK2J2z'
+    '(5cPQKpV+BSTxY|u(f8Otj&c}BGR@n1A^-aJ&;ZW;0Q{S4c?{5SOP52QUaGGKwpx$kTg>jyqPZGWj1<+Sa=UJ(6r)eqZz1+nNPcz'
+    '`Dl}T4l~f$sZC~}o#Y+J3^YG%eHpRs3#!mSn=)eRMP?#E3%K&xD`!ke5kM)DGRc`380F3|s-@>SJLbH!fF*zm+6K8#8FAzGn48Q%'
+    'UDJKqHQh&><a3yT#!hWA1MMX5KxUxjg5p(Xpv1Tq{)n}S23T~OIlzxxY>duXP{+7u8R1AMD`W7b%{G+Xet}66yqw51Yg#H}vX7@d'
+    '32DQMI2S)GO<TBfgX_z;cWxXnBfh&Tdyij_hNIgeS@%X^dfD^CPbYWRX?(f$a<bXuejW_xdkn<8@$3}Hd5ag*$IW*l7+pm?!w<&g'
+    'oXsz%2iOkper>;LvQ~>#i}R*#W_y)GxwX(!JUE0>yib?2o$}wMtH<vNr74H&?%o4#@3)noHFe*E=>$!`*lK(Jb?3e=&HAHLBHC={'
+    'zj_bo#jNhR5p-8%e_^?A-hG%9yE!%CcjM)whIg0ha5uRf#SintD`rO)$H92@DY~1_#A^4zdqcJE5oZ|im4`Sl4vd(K*7DgH`-|2i'
+    '+r2oW=8^c~ei0liSzIq*vrFlh$cb>De8_~OF_WpMG-^N<1GQzm@V;I~t7ym%hc--`-gZtO&K+tut@qpXuRVWxYRu3Xyf%dRvK*9t'
+    '86ek#+ee0LZq`P=Y<NHQ`;)nF&JDus*N+d!ILtqoeloia5!v*7g-3+3MEFdM5%kg6&s@o)l_iNMpme;fVooynM2FGWM$=MzC(6%w'
+    '&4kg4F)PWk=7|DJb73N<?&;(nYq9U#0LQy9Q+N!}&c@y<&KB+_UERQrJPIPLvN}gj%ECmFk_rL>nJ`E;p~-U63m^mZ5CfyMHCnK;'
+    'jgQtOW`a?h_jT?*xKdDxkK1{KrSq4cyP5SC^5JCWnV)!mBD>GgmdyhSC+dSrnM-C1p%RkJEW3=CG=vao8B0<iDw2ZW5=K1ZZc!+3'
+    'TsO4556pA1W_@Bf<$`t0TRq^6Ma))^QtA5b_-@Zotc4j_h{6JzJ+`gh1V=ctiFu9a8&KIn(+tEwAe>Y=dRSe|J-1~zyx`@eF;))C'
+    'f$kBtML^SuS(zHSgM<qU5nsd$^^CZBMqE83uAUKB&xosM#J$Kf;ucd8=c@g4`tVd{F6Sog-s`q=weQ{4-CX|u`sU3ur;Sg(EdOh4'
+    '4A=a2djDfLytu#7W8U9C&lHp!ryY7o7A)F2aK2#i<cE~O`UiC;Yq03_)5O8UeC>$`77tjPK3F_y?+n7?Nsp2UTh8?sd4$E|9#RSG'
+    'o>e~kIK6h+X)LbZ;5Qy7=iU}A?t0=07FRx27Egkr25}x?hz^{F8JEc?D`6QCJotwpn_+{+ee2-C;__uXwzy}lDZ9UEHR?RLpv|B2'
+    '*z7cVo5kG=vs!MXvrp~~>;0>)vaMx~=LYr^$?Vq2h~`Y!na&J9C1ui%EjuY?V&xjjgdvii?I?F-%0z3aR!iA*f(}QSEFYfwaw(G*'
+    'WcQYoNjs@NAZ60-fnA|YmIu6xl!>syDyE&oOH!a2$)TFT3YnxAA*E9BmP)0k&#LSc833~qLSDdNngrJeqfFXOYv(BwqxxJ)t3?B2'
+    ';zITaEfWF(o}><dhK?~ElPXn?##>>c0l1(x__Ap?(}X*foXpWCwt$I8FJ(9=V^VfyIu&E0@htvvJBM&I#>6Rr=CZ-6R|Eh<=U_Os'
+    'UXVm+hyfPGBd(XxQw)-%m}*QM5AcpcSeMSvm>AaA)LPmxSG5~o($3QC%a@dMG|KGSK$MP_CCejKO88PZuO;LgwiT0OX^a6jI0}-L'
+    'R)j(*ct~!GXr>dh(uOZ-H}aJ)seDQ0ODbPd`I5?)RK8?KzNDS2ZONB3Hr83bq;=0b#FsRu47$UY?43S1EML-kx;xC5(BO$Q+AzR@'
+    'q>QpG!eGK^I}sQoxeZ^k3=b+_avHv*MJBs-Dxy<-$%dWOj>?y`+lK6<e2J2aJrJKQF=1@BX71=qOo&{|%29fRB_@>CB_^A85!{k5'
+    'X(!bO<V)H;uyadHFyLL}OCk&KO40gctQJ6608S}-u8cE;qG^Dsa=xZXaN-K1qlJ^)W5n@FNga+aX*aE1=Swj9eJ)JNdo~azLD0-)'
+    'l;yB8lYt<qF3Z9hCe}o2DKCqWrOG9If+*tavhaj4A4QNDlvaev{<}mTlrSNj*i#WEl0sTPZs!q>MwkFmWNtFokx^kv=@9ytB*m;i'
+    'SB<kAGl20IDu>8nZ17f@FzO|hnmclC!h~7cM>vO&uw%|@H^!u$t=X3`!Mo{__$j4r<tQhQaZj1)!d6D$M-2l2_?V-BO7lRJ^#p%l'
+    '7m}q+@h#$+PRvRh#-!cISH`3=CY3R%j7eooDq~U^lN}k8cCNN1W761IXBm^$J@4WQleI~M?l2~MClC(Hn6#emE;A;P8*VTW+-fr2'
+    'QG!VlgDuFAI~%uJVFGwi8Ix13Flo$Xx6Va$lQDUIH1%;e<!W`V^NAS~E7vh5T-(!Z%0<_&V^YW1luK2{WYe+i+iuF$N~#aJDOalp'
+    'c5hQI)k(&LIJ^+IF?$iDM8|bZQZgzCW5LrHIFVN1c}$VuM8Uv5@LY~40kl!{aGP?qn%2&*Fj2G*7|NO!n0Q5ubc{2|72#exmt6{i'
+    'M+VD7s7u0f40{=kavZc*f*MGimR!@Aglol@1XB{V+H#^20}xhBQp-ai8lo$>*4FrF6NZ_TqqieV8Rpstf$)q7oesSvmt8DKI>DA)'
+    '+A#KUJAZJz1tw6>WJ{Tq6@ZD;%}zy393aA{z@itJ?i7=@k;3?dvS}JnrB7Ccasu=Dx8y2^kq`h5-7#Oa<Ca{lOwGQ8i8sc&z_n5W'
+    'dMi!Hip9c)N`Ya|N*Jj)Q=Vn!nRVQ<D5UpXU<8xmVvBI56SLB4ORiQUUkQ^+m{h`~5+;=}sf0--Om^LptCg#5yCqjsW8K}7t8LFa'
+    'xh0qCJYlkT{@}n{a<!fAE^o<Yf-p8Rp&1M&fnhF{?Wr7l8vq#Sc3X0(N|>B(ORlC=cI#wBN0*q$lM*H=ai2>5ODHWe<{TkPLYzt{'
+    '9BOj1YlMlRXJ29>kFmr=R>EYJ?C(gJw3F%s5+>~)*u5ntvXg`fSI%&FXk~INzR3o|JyA|`jTiQWx}YiZiIkr?2~kAiv?)u_4AD#-'
+    'j4)|8t(_-K2<-#h8LMRjWkLgjA;1O=oS#Z)$BoX4B^70|j`JwIMXV%J3{oT1<P=~Q697R_5WaS&n1mFPDm!5rsY$ds1C0g%Q|%Dl'
+    '7Lp`GUb0L?NUI_C0{<s62Ahm>2yPF(#KbOEt)5_s31`xN+|DB$jWSWj2w?>!QE321UyhLxida(eQk)r)sgXu#MLc4A4ROf9I;S`f'
+    'B_~ABzr@7!Idq<I+c9so8)eeY*z8N0XyG#g2``9o7#9K=7D}0fke@;cEq633BMES3&eC{EJYxy=n3_N-&szjEotTw2lu5ghuarrp'
+    'Oe$qkDU(W>RLZ1MCOc9l?Obh3%A~Qe&Qd0=d)~=4CbILC$=(@+!%`-#r@O<Hi3Vz?%0WSbU}Xz4z~7`XV9=ky7~5`*iL8`KC)SwA'
+    't&$Plq)bkHiiu_py%k>2C=uLIqsz{E!HDb>$NQawGEs!Bqf7)n(XL!-t(3829Q@Ae!S5?&f7dl8t)%*pYfM@_uyd42M^7;Uq7~&V'
+    '1><Ri(yC;W1fEaMX$?dLgbx_+lnID=9RO;1b1$^TH=OxJ{re%-n6#SK&Qm7T^f@s?TGO=3giFW`jhX}FN1_<8p(oNsr*ss?3zvy8'
+    'aPY}9=45n~L&S`w$#@?mX+@csOerztC_bJzLXBXQb6&HoxYLoyEbVkVE-NwZsmQou5;zreOc3(=15+kU33)QgL^CNqZs!q>Mwvti'
+    'u+Y>?r${CV@t;ybdPyRKiP0uWWr;5<+L_kOYN)qmNykK)H1a+vaK2S0RQ3rxwIr%z-fG8HCasLkzLZHopzq4*?-WDqRVi}gB6uG|'
+    '#!zO#pm$Jo?rF$OMxGqh2$NXOh6f@DTLd(nn3YzmOj?b6rA#ViQYn*4nN-T8QYMu$*>#mkD_7fgl}S@$-CbqUw&z`>Og@2wO!m$o'
+    '9C(#U+v)ByWnw9ZB+0`20Qg&NOiT(^k{ZMf(rrbV)Pqb;NtrYyvs))4x=ESv(;j4!6M+J7noWd=S?4m<n#B?t_?Y-P4l>cotXpNG'
+    '`Kb;vF>9raALAesUJo)^Df>H8Ches9fRstQ2X>A!;oUsQL;}o5XA#dvhLDCU#I%v9<h?VJ0nY%pNM-~F4y8`x#WWXX^{s<@Q1Niv'
+    'a<!Y*&Qm6w^p#bZCEGxmaF`dRjmP+V;l0F|tC$IfJm?&}_e^A;6;)I+ZzO>TDj;9WIcA$K&KPMr$V3O9fPsmHHB%xgB7JapRAMG)'
+    '!ii5rcuI3nz^0Zu$yl(ES*JXc%pI6A;l_}YZOlbD*B`g@2uGt#fcG&V7J+-xDN}Ef@v7|a3ph_y2xVD`%$edpA!GSI0Z<6X4Y5Y)'
+    'vma!_neKB88Rs2yR=Y7K?QG4yj7g?ec<Y4?#2X+v4P_>QVuFpIj=xQmO2A9}m7$|46Y8x_)&|Y}LQ`5vZzpD@4P(-7<SS!R8I#JG'
+    'RK}z-CY3R%jLD9SNjq2Dk}+v)th0<s>z;R!G2z`m$Yk#X!eJSc*3;c##)KOs9b=p`gbqAUm-%ZcMRCH~$h;L}!s|gMCuB^Ta@nnO'
+    '5glbr>`57uphQx#;9?a7B9*d7d2(4Mj*wYodmhF_uVYLE6{lfL?0PA)$6!osWlUDd{*H`EJE=Y(W76({-D6B_CmEB(w9$qjj8O(%'
+    'b~F}XrD;}BSFQ*^4O7JxBn)uY*2%JM5Cgon#=FI#)CXWp+D&Wc856<#f)PZKO-GpsjA}5(8<mMv0^vY3lsN=>fUOWHV0_3{Ne3`V'
+    'vxjt90h_E#I=!seZN->)8LS5g^|GvINL*`UGoseAKalcCQKyJ3`Pvu}*9JkHOu^zZ8FXOm&_|g_D%i;w6E1}LxSdBh8e@V;m*Hi&'
+    'vpG?X-dmn*+3^>1LxR)}Giq5h(HUoDS$RS!;Vwp~gfmK?oiP!l&$xnQvyOSI-6)fG#%AwDCY(l9&Up8-5MfbeFBl`<aLl(O*#OvC'
+    '=7h@tdCYm`xYJ5P$jbt6AGQc+Ix#D4D3f+0Un!GHnN-T8QYMu$sgy~jOm?J9+PT`6lu2V_ouy1#_q>yoiS0aPvUdjIu#`#b>FzRR'
+    'LLeNltWXVjJXlPkF>lHQ0mMs_-HtM`l`=UUWzv+)Zk>$iC}ncmqf8W{7ebBU2=ats*%*i$G{QI~eDdim`*NvulnFEB{EJMEag+(K'
+    'N13dY{T(Tjc2a#n%B0-`yGNOH^C%NThz{ihatrVYy#$V8&f`^pIEiCruThx{ycGkQ$tp(=piib-JO!>eKNw}wZd$v)$fQ)`GfYMk'
+    'Wny9mHjS}t|LSr%Y6KyG1N_G*(Cnhg09v#p*u4xPBV3?NTSJ3W*(uFhQ6{CbhG!YPF1w&A1hvHROhO{rX_vJ2v7D(vP05!a)|5$D'
+    'p`4D2IinmsFl8cyF(;!;AWLm2lcOJHBFhl-fR~HR8?C9OE?L+XOIegb%IIxOLNe(iW=t!Rh@eqPj+d9#oSib^ysryor#t4Xc4JK1'
+    '*_wSB69Mcf1I5Iuq**lHQZMn=4nvws795jIB2*6o;TZJPs%#K-a89jvUT+c4bYfQ8FedFrzA`42F{zA6WlSn#QW=xVnC!@yv~#sB'
+    '8I#7wI?I@}?s+E}lkT5nvUdXEu#8FT>FzLNVl^j93y6-g5F<n&T9mENgjEP8WY~@|sVA9qW08s6Di_gB#zdTUTQ16&64^;%H6{Sw'
+    'f*J17>tHzChV|z;{9UX){9W3UFedj=)^jNn$Jmxj)NQ#|%KnawNjs@NAY;<*ft_PaL^rqPvN<Q{qUJFKKv3iH7^*~2l!yc{GgSx8'
+    'fTx`aiC6+V=(z^?P22-=9gHz)H?7@YWMcbV3noS5K_(@Bgj6sBjOs}_uTB6=0@zVtNyjP6Az99Y2GWf-S>S$zm^tt=Rj%FH?^GBF'
+    'uz?hF$OS<I1lJiOQjyvOxde_*BpYE;5d>xtsF6|#L`(2{=rtx<ijxs00#|(8&LJG{>~~EN!pn@VQlJS#5d>mjvZFC1B_&?A?D-2+'
+    '>4EL7!pzWMt*}h$th74+8WYvWjaIXc`KsLrlXj+NZ^FcCC#-Yamvh}=RFjl|a=?=cur7siGCWU8$E-*WA#fIhl3uImT!H{>5zcgC'
+    'R@x9I?MA*5CY3O$gh?e#Dq&IylS-KENSL&9wJiyg#>P5Jn6&PB7YP&5{av~C&L13>FljyAo!*rTjx)eYtC%1>$_eK&mC`5gpgMFb'
+    '!bH?vxlTuzG^Vm!=OQ|K^t(Fk(eK#>N1Y7J1tFlwIwBgyi=pQ*IILsmm<Ym7v&2NNKP^Wc<LGx)36oW_zw6QOt)%*pN58jvVE2xG'
+    'SDhqGG7~YQ|J?XwlxG-BbeaRvGs?;apq53igOb@PM7mT-mjuj1RMhe04|k49yJ_t_VZuZo;$Vc*4U7qmKoKfO;sIf!6PN-~Rx3+P'
+    'U2;6Tn39hvijr)=w1l!FD*z{c@j3c-OH7#3)X;JepAC2*SJtK|Q<8)tgoTV?l7;b^IYzTjsTAa7?QJHJY7!5<D;H;6o$Tm$qfOhR'
+    '-_@}h6H2{T41%Few8YTBc{%>D;0l(UlhLIR%i%S%j5<Md42-S4Oxa~6{Q1u@p?x$Zq~IO%Ry!X3-pbhQOPOeDeStaL%CcGvqpe^}'
+    'qq71}7KtXOFiQmSf01yHd6$e5&qy+wIuo}DXgV<~t&V<gHS(1*sgy~jOe$qkDU(W>RLW%6qu*P(+O|i(H#OGXqu<;1ypu=2tIks<'
+    'duI?1eDr(U>FzLPLNHjsgK(qDFv^po1c*Fjf}vJ9Z?`KKQ<X9~-5QgoWOnOhL^mlDsZUCoNXnw-no%PmNM0HlxptZ)h!>4EoMl%o'
+    'x^`DCN%(2jn6R}{CiM|06R9g@vP$-Mq)ggL^#Li9b`R_vWr6|kB4tvd*Rlf>1!|7IyjzZeYs9yJyqN=U0fjn+iwGcB&Js_=7a>8z'
+    '%if>|qfFXOYv(BwE&64Bp0Q1o32{27gxDw>TB;L#Ob82nO43k7McxH2c%mdZC5;Wvb5Rathgmh2rp0272FiqbfrvIxioW^ml{2QS'
+    'HK9TzWs);7AR==J%e3@7=W?2YwCG79Lfat8fhiNi<jD>)(a;n7aXXK2yn{?QhL~D~$;6m23cC_yj1d?km|(p{CyXr9s+lm<CQ-iO'
+    '7(j!e4e{)hiKcyO2!-f%%v<e7nY1%Dd#^H)0Xj!CF&aTX7ZDTfQ#PWUULvy3oB;)CnpuoC6-G2U!o7v?qbrPU5zusER@zV|?MA**'
+    'CY3U&lu4ybDrHhBlS-NFNSU;AwJj-=#>P5JnY8YC7b%mqS%dCSCVOWP4ojJ|p6(7)CYe}FTY`@^E|VBVFgj`FlIAfxz8z%(cu*;m'
+    'ldUpoN@llCMs$-hp{G6jJsOKgB3cbL!iggoCo06U^PWePve<m%#H&o?x^1~MRVO;gM6H!FdW^H*X+8UWrR?uWnY5GY15zgK9@sg`'
+    'gm&}ncM5<4?<^S<QwddEvh~z?r(Bd;h3TfF+*ksnQ;?0NUI&5CBcnM<doaqR-L!U|GNG)`rI1>xrhU0o2_1d*lIoOTaGZ(wt(*d$'
+    '9i}m|j8K7F<rHyR0XGsJ@^l9;Ar!H#C=-$~ip1IsWU7hx%4k{+NU_Os;TiD&$C@&qlvLS~Kr<<$EtJLlTJ8@_nNTTDc94k_n(&X?'
+    'd4!`;CLUVpqxHfEof)-wKh5w4p2p~O$>&5KBBrODPH45ZHu6M*@Dkls9XR`)h`x}ND`Pt5t#+eK+8LXDDHG~>azsLzWXJ$PiPK0p'
+    '9ziq4o@#vSv{uTHP&R+&TI#^PwU|d1osC-rG@Y20Hk3)bk*}0VrA#ViQYn*4nN-T8QYJf6Chc5pOUk6NvCdK^t$W@@%7k|R?DxGh'
+    '2#2LiT2FVEDU+y#a0*b}31u8?qXYOCIs^=z<Z&y?gx0g)Pq@mYDVg0m8PU;ICZ|2g1W{>9L?`W%7l{E$`xG^$#z^Uv%4b<+Lg>0x'
+    'CW6SbuQEBtNhY$MWU^BBcce_(N%a9KlXeg6-YS!Bo@8PqLYk<(bjAbfS_H9?N<6_(TJ~rP*$4;dD=AaX;D11?xQJ7XjRzP#7-iCK'
+    'T02jfDAO0jaNTs03CBcP!)>5eM}(S!6Tyu%RBP*;Akk^UG(=8v5pn{O<<<z6O^7ln({7Oo`czUrFvMJ1nt+M})0q;VX-ZZYE;Hg-'
+    '#x>P6DQYAM6j4dU9BYOS9GEfDQlD&JF368<xi6PI`bj24Bu=D>upKG~3>If)n_7c6fnw$4sm8y_Vc4K^f@1VF@T3gX(-0y*J7c0m'
+    'UtpXJu^n?(yD=v1Y|XxmiNbuOEF$$zaIGRCT0y!!Avvo=yb387p2S+Nlr}U`3k1o_Mr_PDskew{Ix#D47?XA*Um26im{i83GA5NV'
+    'sf<ZwOm<{U+PT`6j7ei-on=f~_q>yfOuB!R$=(Ts!!jnVr@PBXnMke-pt=O^H!d&^Tj?=<PD?Lgxwl(nQjap}#v&8CRWhQRjEQ2W'
+    'WlR#la1I%Po)g8w<RFr!G85&T58*sVnUHmhOc2qZhB4u5rA)CSFeVE`^0FC|=d!;mW70~h56PIcdSK@m6AXA4855m6uoS>Mml_YS'
+    'JOa}*V3?Fbh)I=FXc2QFRwLAvE)&E>OgoxVNxJ95F($31weyULA$`IrV@-?+tfR;486ko*iKxhRDA=E7ql8IXFpjp2%gHz=lm)B|'
+    'A|~!>7E*_HjEUe71Vf}NXJ)|sCL4f<BV);6Y^BUjCQA}YTu7R!3Lb(k6{J5Ry7cPM+j7C&pKMz$rilEwokKVpV-hUvh)4XJS<X}l'
+    't)gHhkCS5nqPI3#pEz_5_6ABwa^U5xcuBc65>fy8x8+iOOAF5<JLar*WK3Gwntd4)mkli`A}b@848jk&R)htCkq|6t9-?uEI|`$!'
+    'h$WhN#fp>%=w`BPi+H9Jv(kz&X*KedF{zA6WlSn#QW=xVm{i7OSH`53t8L4eG&R;;#-we}yU3WVO&WBEG1)tTaA3xy?R0mTF;SW^'
+    '50n7kNbonDa>&}jiIokyqtaV3CW=+Y<aCTlQ!cx8GUA+!NpROUZtxaHY2NPMEzUgd#W-EL53k%Ef`jqk_Cp_$!FxcfCCs>-gIT`m'
+    ';{K-lAgdKB9F5;zPOk3W&aT7-c#^xC$4%+BjPmTOHS<>Xb6NUgnjo3CH6DeF>F@0YgpnuY!{bAxP1*US>@=YQW1^5Vy12|ty_D2N'
+    'o~UsI(Rf*Z27!^vctpHzYUTX=*kJ_ErJtklbDDSb)$R4otKjG3I2c_`*stX36;SBK^x}TGco7`G#|NXC4Njr_blUX!(IoHw&7QvK'
+    'eQu&{p5bPpzK{;B?-hO!_Z1F~H=Q-M6mE0bm%xsFJWN@x`(%}zPWw_M_0g9Hk=3bTbXQlSUl7lZ)Ai^USZFl9ohHNo%n6~t?cx9Y'
+    'w>?8B{Y$xe!IVxls1IC=j#Dm-VwgIe{wpWu)3sgGLA<+}YtDn+n*RPgLB5k5n0plU;6C__aG&WlJP4i!TR5ErB}ri$1hs|``Ijdk'
+    '1A$6kKz!t4E*Ez6k?jG522L~t{yAh91<No&CK?fd78CI-1&oX24tSnOL~lXjKVm#^JAm7KGb%rZ;EoS93ikOZC_<M!^<f_LV3QwP'
+    '{f|#6fk*D>ksK@$06Ur8yZM6&VV|yMJT0E68qqtT66AP!HMpL!4-&C~G0#<_r34n~8jr5#^7jdw;=;i83vgPNx=&#;pIEd{b_V=t'
+    'bPL4pZf5v<X&RQ^kWq4o!P5&C^duqrCp;%pAG~Qo=9c1c(p)EG!-QO1jlwh`x-=P2!PQDT{pkzgJ-ojfy`7``+tJO<13mvKzTiD_'
+    'd^HK<!OiVtIT^Wl>cdt2$veFI-~5+Xca!leKN!AB!}mS!Chy)1|EBl*#pTn~es7%aCaE{dz1w%Gmwp{gZU@7+y=j88ci&*|=FVRY'
+    'Chsu3y>Cao0?p>~^=3H1g%@|D-p$}9WjDBbGrYTYlb?G;>o>z6zWeT{%YXjnhp*mz@wW(9f7kn$KfZo_{|PIfeDm%9eEscD-~I5v'
+    'E`R^^pT7V4oB#gp<@aCzfR8S}|K^{|RRFthhChDy??3$hb@}xlLhO~lAkT%xDnI}ApT7R_50|q`{!ISz@y!>%dGkf@@BXfL^Gp0q'
+    'xqFuQD3{JIS{^=(4aTcn^{20Y|A%kBeSP`E>#zSAfB*R7<&VGr;hXP&`fBBU^E~TC2|-Kc)}(*)p|mo4!|(o|Z(sj#`G@a*oZkHp'
+    '??#i`(%WfozW)CEuhzr;H^WsU^6&rj$8Uc8!|NZuqMP4lSq4g5v%y+S14iZl{GT$*w>`8o$i4s43#036H;lcD_n7n#;r6QckC5K?'
+    'uZDM5S3UNRe@A~;BxCqy*ux*(@#o&fucgU9eD|l<uS!+HRKRApqWQnfF2^$pVDEkZ^-q8J>gm;A{%!fV%ze6=q*=@5PYUlwX!>8S'
+    'KJ>!X0I$&-OnSr7ZO^@jT$Os{ULK97g1V6T-cpLC_m6+aes}+JrNKOSGc5o8%OC&O<=5YTbNSPE|Ks(y)A<;u$>{2Rx<rp=JmYj?'
+    '@NUEMZjY`nFSR^s^EZ2ZO?kvW{06AwVVKa)-{9V_dJ^|T7N?)k=_iX~zojqO^b6?NEk1nn=3!747x3u?7jEeuG5rWXK%l0*TznyC'
+    '*IpFkznGDS7H2dm?_K=3T7>TH$)cN6!G3s7x#`=lzyI+Mkf|SD|H}`rp?g1l^QYI}{rgX45T`TwXkO=Xh5P>7;({_OAEDKYcK-O?'
+    'ci+$Ty<Cz9Ls*-K0WId{ss|r_dpG&&Z~yPvhb0E=UG!f6zu)|{^ugc%JuJ#ky`NtH@TcA%{{8#eH^l`^lWzA^?d0;Fm$({@ZpsAD'
+    'o1e?h__}wIXTmVISg+<;yZI{?alqHJyUM3{pJ@+fouBt>)~A{52>!Hh)2L)amliU&OcG4x_aT*dp98$S9n7rZMuR#vjSrIkn0<IG'
+    '=<~6k66v}3_wMHAtN&{P$;1=yf0#Xb_UlxS=HJ{$XODhgy7=!O3HeIdTFAtjk1v1x>FXbUTJ_~ZZJ#`$VO*XM2d1?5kB>#5KMQdY'
+    'JIx%-|KHxX_QsVQS^gEFKM$pRMLxXP58iPP))=onuxA!Km;r>y$jBDm6v-i}wuM3e_dQWnl*kgvVz(&jiYyzJC9>+?jLdkPlNlND'
+    '_NP03f0OcDonSbBxU~O(6F$)EA2xkmJJWHpmf^=kxZ?wNA34Gm2Y%&kE5~$AZQj}$uc@6a%deWD?dM+^<xR_Y$H>kBI8N;!<K!5w'
+    '<J-n)SUupcFDS#&p~2gi#%v6DTsg^l2Q=~1;rYqgHEKkwQgiS!N8<*{w8=`h<yie@^;tW4K04aEU}P?4ygqq%Js<VI-W}?>Y&PC5'
+    'Ghk27PT#OO+|^sp)<+8;z5>v+f#m;jl_y$~Vcg^due|DSUIfZN|HF%|5BYn1D7$ixCv7&c?*35B_xVu0$C&&*#+1uF##Dm4$A@U='
+    'm_BZ4e)y2P{t-x4($;f4eJX!0J3jM4->#2mwNrYbXK!DhZ&c_%RzEUdvh|}geai^0>m1qjkM!*9WVQKkPUWj4B&T?pkbIe~aCK*J'
+    'pG3S*BHkwv?~{o4NyPgk;%Ave{D>jhJ3>fq)rEaX-iPFUNZyC!eMsJi<b6o~iXr)97X!Z!$@`GJ56SzGybsCykh~Ac3kb<6??duF'
+    'B=1A=J|yo$@;)T*L-G<>GVMe1J|yo$@;)T*L-IZ(??dteLh}ABc^{JZA$cE?_aS*7lJ_Bb5g|G5&yx2cc^{JZA$cE?_aS*7k{1z@'
+    '+dd@kL-IZ(??duFB=1A=J|r(8B=66X_aS*7lJ_BbACmVWc^{G&k#W7>xZa24eMsJi<b6oqhva=oUPOA={u0zaB=1A=J|yo$@;)T*'
+    'L-G<rGL?Nu-iPFUNZyC!eMsJi<b6n9!oB2ude=TA??duFB=1A=J|yo$@*-IB{w#SPlJ_BbACmVWc^{JZA$bWQIfs2n-iPFUNZyC!'
+    'eMsJi<b6oq9g?kQ{1GI5#TOU)*81A}@M@mOyK^0{&fj9iUY)7v;px>#`U3*l#;EKQ8}UB$l>E={{^_^B|HCGpLZQz$o&*+od~tBf'
+    '@88=0b7yNc`&KVk^)LVY`+r$~=>kTJ2!4Kku>J}H{()P6=->YMf4~3p@Biud-~Vp&{5On`e(-GDzdk?Zza1Z(zw7HKo!|VaQ$FLP'
+    'BRx8}I5|0jUpzXx<%6B&#~;p4-W`w4$lmJtIsSIAnTH!kc*O699tg&`{?aXvK0Eo_IYRgyPr5#Tt4V@Bo!;le=X&w(^x#a--@U!p'
+    '!w(0P;pF1Rb-Hcj{qW?iUYs4u`N7|`50#Vm_j%Q^{_WtMegCiUR>%7O?w9bpi#G?WNOf=u=k^Bbb&oH+)wdmgABX3H#k=dPKi}4l'
+    'SO2c^?qc0B_p-yToV-0f(zPvIZLE8K=~n)Ba`vO1y|8&dx_E&}J-#@+c>n4{qv98D56@RUpf`GdV{>0Kq1RVmwab(~HVeMZjy^v7'
+    's`-5Q=}lJi;g`1<%ZK0Zwvmr-zsWQ{K4{w_KK$kmL%8KL+xmaY$8J~qPeyf%w%_vLo0R;MN8X~_H-GLfm0o>grOEQ{Y}GA%t-YIw'
+    'vD+1YViAZ37boNW>+>HEPw(Z<|N9agZ~pN{`7)FO8nmW0<`}(}gdpxzsdSA1VQtpP;6-H<kFO#)#Ce}<_HLH!vIo-iE(gs$7U1KS'
+    '37~|iM`_tfC^f}KLGV}~f#ixsz@LA<y|wny3TEJs*QUOwR}FoMqHJRB*~K-85b-z{UlKX+VzSQwJsqCE+5S*1?xk}z()vSiFJR2;'
+    'cHsZ{-K#gy?N|Ne?|S~~?BpEaVC4p0!E62W3as|k8kohkT%UaUT+R*+Nvt8pYqQVSD^&XO6pFuU8hv!~!+Ih<`SPy-C~%mk?=D`h'
+    'p1Gctp=W2WAM_pTXMTLg6)an;fZh~#-p2&a$I7kNq*H3g63+D(K3L$^w!q;r#{Mb9<zgJGFazt3Tmh+Dnt=a}$JD8KUzXzH;4Tuz'
+    'Y$3PqWB>uT1Yo_v-6rQ5%f&S!1h`$q74Uxwz{?6!HDneLv>7Ku5vw|8ZUdk5)8kihc+LbJ&oj>r+=D6{o?Z1BtRT6de8pixS|~A9'
+    'ji6aN`T$Z7AdJaT85+1mm!cHbj^|Mc_=SP;HE}yXIbzf4pZMr-@TJdM_Zok50#)LHsCkKg|NG~)=}wjRa-^3VJQlwXz_!La(X$P|'
+    'SqF7|h>zc$8fRCy#t&A#j?oXNFze^7K=ZZtk3-;Ti~aX})dTIB3BNt%!yk?>t@7Y=pLhvw*Ry#G60#|{wx{8<z(9)V#N&eRs+=?>'
+    'qxkm1K_e!C17ij$&lrcVAySy|kty{wu1%%>WQgj+3f_u#@Vj@%mvm}Fk~h=w;;$$D#W)-<j!!OLT<F=`Lp)pYud}xRHt#Q^-&K_K'
+    '*-yI(U48aLZ$V|B{oLJX?uJ*)!y|n$PV{{BY{2OAi{HF>EKR@jrqKs4Y|a7U%z(hgMt{B)k$(OpZX?;xe&QVn_<^6jjhr9&@wX%H'
+    '2b=X<kop4)audRTFcEHH1`qrEyBNi1y=eowH=$y+7x*FQ{?}^L`4^+9HL-quc5-q{$lk~Neazp-{C&*d$NYWF-^cu~5%Yh(5~r_u'
+    '?VmSsVtsc0aYym$7rtm@{?+GTAD*#32K&XRWvSbUH=gHRJ-OQ-$n6j0zUG14jZkw34mHcY_M@9l^)3m*we9cD=bHn$%bje~_bW+a'
+    'x0u70`roYXx2pGj)cF?my+K{?RL@=Ncz^ZVsc!dCubt}j3)IIxdSDB(nNffFBl!FEVVG>*=+lQ!W7O{t4v*&<uYcq|{$}I3@9&~l'
+    '`_y}uvS%rKma=CldzP|rmU2B|=lI>x(dx+jNcG~0?b^ZlSPtg>55*r!oTJ05C-XPvE7X_Kx19YQ=?b~MY`NB!!!`DHdZrd%R(=z!'
+    '1;=^zeofbmksWN(Uk<JuR>QsODmnPo<uCDot3Q8vdUp5|^yCWB`^P{0>EC|$zrO$DKmPC6|NQ-*|M>kMUjNIV|MdU<{q;Zo+h6|m'
+    'Prv*3%{J#Iso6gEe}4Pte|~NGjIUSO)BpI}KmYFapTGaZ_rLwi_pkr*ufP4nA2xZc>#zLrPrv*A^`HLbUw{9nKmKL?3qv0N^$z;?'
+    'KR;O}3ww}fe8{rsNB9XoZ~)$Xj4+Gv@pr7=I$`If{B;9_{^hs-`oA|T|L*+EvN(QYe{8YghnP=!b9gjvpU$6Q;NM*y&A;yN5hA|('
+    '&3}Iiwei{W_s17+^x{xnoB>hk-*mjV{Nit3e2UGFA;~8{J-D=|m#6Q4@guK(`Ig78e8n$+@ak*V9(hx?%zdAGW2Vj3hhI$!U;XId'
+    'G8_39yyeb^-154QnP;!B;F@3a&fA`JtDIL->VKt>*Pn3Pi`F)ymmgo>^Z9jeyzNnU%lJ9c-SO~sPWi#x!yncT;n%(9hNs;2Ld5se'
+    'lXLDz26K-u&Q3rZ&VJonZ+q0O6RAgt^`C1LpFHHY*Il}mgUvmI^I!MEn;vtkgsa;MaOy|={#S~3{Rul|`;g`Q^8C%`2zT{4*Is&b'
+    '*sp#8LFpH~>BcXw9{<ZD?5=nIikN-8iIOMNg5!^e#{)0f<h8AaeX!a7I{3+B%&S9n`{cC~b$n&l#x%Zr<t!av*ajT<z-_1K>-X8F'
+    '_zmCt%w77Aul)eS@AHzSVsMDFy<Pd;Z`M1L*N@C0<maB3f1J9@Z75r)8~32>7a!RZ-hEH%WXkzr>*;eIvc2Q<InTObqv>-VclZ9%'
+    'Cr|zcca~PGxV^3PSyOg(H|cX8bjv2v!#(oq-qFK7_2w<3hnUeDc8VTu*xMUK4>8~y_JtnovA1mp{rVT!Y4xuOooftj@3qrheCNLB'
+    '1o-ay92ejD+(X>&R%2h?(fk-hs*~uG#^Q$e<kO7Gc=xE2yK|JhBw<RW_+;0Ly_Ya3`q({{7>2uo3m!f^!3oa8v$v~Fp6`CM-r~tV'
+    '_?M~F;DKg3*7_&>x?9jceN*%eU=@#pljEcJFHX)5f4~AB+4{T?K0Y}<gtLFKiLWnKpy>qy9kk@={r|u!zqsJ@A76k>jl&DP9q{$!'
+    '-NhC4xTISjZyeac&%1LzT7#?0&wb+n#3IxxB0daMTN%scu1;pCZIIx(NlwsE3{e7eoUND2qm>MEC<Gl)*YcchlrmE2p=+gT>h{PR'
+    'k{ERN8oJb=Jyl<M&YELMcJD^|^i%`8Dr7fR;00it7`^o9Vpe#7O8qeh{m}aG3X$(EgHvr55NlTLW{yTNzYx0X1>QjI!cmQp;53+p'
+    '`>fq#rGpQ-d7oYCCEKn0Z+b4?0DrFT{9Vq5FVj2k6yDO+q9eN@;-mV|o63|q{VWQHK4z+J!XbMdoCzvYg3IM;%mxB$KZ0*vc|@S$'
+    '?X6sv>>JM%tpI~kO)w>xMrkF4p%YF&S04)kkG4pz=03_md~mUlVq(APSvqshAN&=6_>DKA*y|)AS4Jo-0!8UkCU5|I72ic1lT{lT'
+    'BNr8(p;kr2EhED96n+x3;Vx$bU+$@>=8}4L@cMuR3P<6Jdb~ib&e5m=8j*bkK+%{S^-=2}33%+&(2cN}joC(28NG9%in!+$o;6iy'
+    '0lw;o1N?&`O$1P&&CIiu9O}%8w1o-R^E7m$Y-U5KR|)tI%%kIjqvP4?DK^;6470Y<pdpDz7@~z~LWvlYByc#PxTi52X)_yG?jbW5'
+    ';fCqxGU|u{$et$?o;KqkH=Gc`ivlXOMqC|mG&v|ymG(4dBVJmHmzi>O5L1dIYCaYAAQGi|b^u?cm;qIeUD!MPqfCyNl^kYDDL)Or'
+    'aXA}g0TY7v#$aF43J^&f!>w+8M~Nkj>0AJ>3&~0DRa@pk0JiwcjQwfo#-$ep?FA|W4=f!dcDkNJz!bnBdf-R|6we{gO89|qK})0z'
+    '^bY-ySf?*fV>aq$HbQMP!B1M0kO0Rqxg-yAm0Ya|z8)&jVs$j&QOU<tTnL<M7gt=5PsDGu&1^UzPehAeO9TWjBS%STsJaw&(DZPs'
+    'HOx6PW0v4@YwgN-dO}=rq57vW8?>1XFg8b2sZdBj;ibTItmd8VGa<-Ud^fcyKC3Sk*pw=sr@p5Mr@{I(yr|2Y*(lnmrvQ&w#{dQ&'
+    'ErR5GC#n=@O8^#8`@~ax@>9Y1N{ytkfc)bfPs4BcOT6LJ!0M+7R1pMGBLZ~8adeQ7<}>I#yV*%x%oVJzjK(oE2Bl$51U~aLX2V_1'
+    'hO|}j6tFc_fR6wqI@uQiL~k&X2~>)=2J@ckrnGGDXnkg1QhHP@dPj2@|LS$OGGg|bk6Usw;0eLA{g~u42w7`x<|)A0p{uk3uFgY;'
+    '06{d6Fju31l1{EPSQjSQhY~NB@;MPWc6hc~vXO{dqc6@=7(smwuHi+B<&0LfvGnOj8@UO1W;TZ57bf2-4MEQ@r7KE|bphVZ(a4Yk'
+    'fh+)hi0oL#PKe|@Vi}!SS%C}3zz+-%W&Bvf!lb*JkF(yV|FDdaqD5|xZ|NAL1)?S+La>Ja0>6b6j0cWHcy&#j8XUBAxNSwyT8f~z'
+    'pR(GKN$U*c9(+!H#2kAN@r?>1bb&|7rROnVd}%nCXw+bbH^oZQ+A@db$!I4k2XFb}?C|fGLQ2S_Ov!_%lH}2AbA^@q1XVGLTVe=0'
+    '1H%tF3=9#eBEp7HvnVjzQiQxvJ{u>0J3d(D)SSOLJiV=^IA{pI1d3kZX@#c1B{lL6>k4dDXNq1Zf~flFD+pRn1(w;U&I0{@R0RG@'
+    'B{m&C9C~)};dhtEsxS5QWR;vdT#TGu6R2|nkSI0{grJ!0)U#w615swm;2K?(q?7_>UtOn(Kr|LC{iZ(l(TSzh9S+Oy(%79?RrWf?'
+    'i%$(|Jd@bQ1N0d#3aSpum2zsm#U$`j)SB-w@zB9Ym#^LY&W=a1uCpqPvsVLyX#fKk@^gSGmBv0tkcvFnYQw4b5z$r}Oy6VF?4s{^'
+    '!IHk!3${Hb=&I+z(mKA|YUsJT6w*w=X;gyM4yb8>@scm3%7x&GF%vGNk?C8}T&oHG#dP<F!;7o=ldF98wGN%X>L8y6$_gHl0Jf@U'
+    'qG>q}V3@ABM|G&5HPEl+2S01jkLA8TYmi^k79Vc*zNiU(L6`CR&AYy?+Inzwc>LqRDxc=;Wi7eB%mK3u)>On=Q)IwQ7+Nd%oj6X@'
+    'zuY7ff7jI(M|#dvOYS{Ezp(_)+9Eisw(l{0991|D0J~7TYVRd7MbOPwm*FSr25wA@vBP74UI1>_4irA|ngEf65zWHPxv6oG6rmuM'
+    'Dh8BViPBp_m|K`+pKxPQK<XA-1i^5l%^7kPAnyXhfivw`(9kB9GEplS97HRQhJZ8M`9WKleB0dESxQPD9(V*?x0Yx}t?V^}>5HSt'
+    'PQ4i>ICM4RMraU%nqwTWSYDWPw{zndZEv5`=pAGUtTEvGsWM_>vAzBb^`shzL#Y~5GNq*q4+_88G1{dFdKWjI;KQkh4hI8AoMW`@'
+    '=(alLaUPm04$jAe7hCp-SIIEV6sBOf7(tQc$#?@dZU|ztgYG(Y)WCyVO%ODaj9OeK2j-t=Bb}Zs?vY3>P-fMFxL5L0gnVw?n0_TU'
+    'b_BJp5(9<c$Bd;7Z}QI4f&MUt2KqGAn(JV}Q}aY>-IM@m+#~0E{8H(kEH|cmaAQAuX3q@VWalDKR1yrO%d8HvVH!f0hDFq>>c)^<'
+    'YsJ!H!AH?i7cA)pk7sTUeyUXg(hk8j-z+r?*6YPNAcO{Rt{y+(*tJ*^TT8W%+UKw_ek+>$)wr?ZjhYjnXD$gKoB=(xHvxjFh<dab'
+    'ZoG4#U&{}E)}WWbjdu?6OWNYY&EB`ljc;}t?WQACSNb50%^Fm=o?OB-2$z!aO?dSbYBBuQBcA9|vh))Va5p06A1Hibl6`uFI)}@y'
+    'wP_iru4Bl>PbgJWtWyuJ>x4B1=!9+gI`I=9!eWA2j?f-8z3e{nZP7%SK`n#fUVyC=1>Z`K(TN62OrB8+0(WsvO9bgHoWd{$9IT6B'
+    'XXh6t-R(5dh<k}#yf7HAHP7VXz^cIWQ}@$rP{=RIX^6f-{+{4e++c97#H}nv(7R|N;mKTibO0@DmkSyglJ%_t!;e15)M#uO!{Y`s'
+    'q}h8_U#Yk3V7Ih98E-m5^#fiq2d0$kjMKI`TI<0OrwSgKqSEBhLtsg8tJ!4Dy;i3_(_$9#xzWV-tZ8C<Ry48QgC@3#cS?3SM<K0A'
+    'W+v}PK&%0B3&2z*F_2x%BWO{Fs0y8)P7!!hrnq29H_#NzH}GV9N@@g#pqWRr4XaUopxUAa_+`M2s?iddq+>Sfggs}ORQ$K1xnGSY'
+    'j@mFj7`wEQ%18}JO-9CF41txr7@D|qpi88QI|sc4nz(b2U(yyIZuXuOO$_k{n%K#;GQ<bY0)9Akv`8QxIRb`rOqGi@PxPE>BBdO9'
+    'E2V=`v3i|(E=;mdXkwk-yIRQ7<Re3YY6i<FVP=qy0ez#kO0mUyDXEPl2eW7?-IZAS!sOeciPj`Ob@g5~gE2~|%|RZnSiwq_Mzmg-'
+    'bvD;s@;OWa!$^_3=j?h~+Ung-6MY#orHoO#T7&iZY)Q!{c#J{Gfose%?K~AW>1EnIX0S#_mJtq?RhA;?otd_b^{GY>#U7^BQ_ERO'
+    '43@-}dKd)yYn@edq!?!R8XLY4ic$%VmnY*5G?5FQKr;@ODUty(+r(lvypxBp57h<G{~+*6z79mv+-Yi}TC!V8Za9Q|W;F3;iJuEi'
+    'yjl9EN)zwY?n|1e&{GC%n+&&PcT$vrs#@)-7B{pM%eIZvdHjX!!&7VJmRjLZa#*q*UuO4ZUz+!QcF7eV@8ku`g_zS@hg&YK1Ecn8'
+    'p)~_JwFIXOFJ0Bj2)S=YbH5r*EP)|f>d9LOZ@vPQD_)o;=ZMKz3{BiQ&?VBuor7KiP24%iFKLSpH+xTuCgvMxVg;5SH3cy5nkfj#'
+    'Venx9w{?h`n+Kb+yX#R~X90O+AhzCz22K++WMPthLK8zSzIw+3g@GAHyHpFft>k>dQgxFy)jpvXes*B<S~^S@*mZb|cMFqmizenA'
+    'U7Aq50U5NFmPCWFvkdi#$jv<|KEZ()KMB63I!6X=^soV)OVi8SX(9qb12ZB(kpT8I5Ggd(8bceZ;1@7Oj(teaEHx%qL@=gND~V1a'
+    'S&E>~ja}ql$u4peV~ti-)N`B7%66qyqVcpCTUKR0VZ+g41oU}=Sf<oKJ>j8ajtiFl$+C-l4|b7qiQYp&J2mH}B}<3L|7WQ%VnlS;'
+    'M3MqdNl#-0tbPT4a#jOjX7vk}bc1L*52#}yD**&ZD49yhwUKjG2S%XyK75r_E4|Bc6pwcXcEO3`O!-^U+^@$jCJTEev2+8wfMDet'
+    ';r0T=EO9J|UF;g@*Ybm(HRwgKi(P~KlD7D8v-hOfMZBrp3m~=K<iqF0cS|E^spLVcj8Ot0_p#gTl$@p&n*`SYudsYi0Z+z{7AD!J'
+    'xr#-)0*pGaikQ>Ljym9XRt<Gd7hPAEy7yD^gjqr}poI-j<_xn9yfFE;ue8<RU8+Tk^D3^8_bn%}ZF{Q2#}Zr_G(gK^qUo)&#`Ji%'
+    'L-?ND#=@k#<4PL@Xg&>>tblaW4%@c`Ob3Sx^P8?RL)h3l`P!s*@ZezgFh{{3zAr`4yAGkiay1W0!L?C_T`#s&L@vdOcD6in;R+Ag'
+    '5NJBZW_;0Z*#@$GUpIMqGTv|q<-z%k9cDZ(7lC!km{|k@4E2Q(Il+_DOqP2<;$63h(1X@KqFYD?P<(dfUZQ`_hfwiZm3xW)URT<D'
+    'ij-Slo%c%|pn=eGz~2sjIAZpok>ssH;AlO=e?=I$cxG|Aa$m5d8)zC~qS8ii?A(Yk^61dY2IK$~S`dK>$sD<lj*%3X1aN{dJos$}'
+    'V5;AW=6*GrIMwCB(a$=HrRf8jloCc5E%c#rIptn<4s?l!P&)^`1e&;WkYCakA8z)Z7EQdd@(Hk~2QLh6_(nX*his)lK`5vvh|Qc7'
+    '^bxGeb^~MTz_N)gXHl>mZefyrLKAIS4R3ak2n;*s>Nrj(3S5mvD|VsJrR=MPx120r5nP$e$boBSzcBf>Xd*nJ^EtpOq_MOXX9C9n'
+    'cT9mMt+Los@*sxNLyNI!j!@RttVXEBUKb|a?KH81@Ag77wy5B^POZ9-Yh+z!)LF-nT;LTFi%^~tpvN^b2vkVj;Y~{s^e&oMvm1TX'
+    ';anVeb+D_5Rzt7ONeTkR2qEBA*^dkWhOj~%zNK_T7t2u9<;i%{mA2T5Bn82*-8y`TFS*uehp1_c5`uIPe@lI`js_h{&2wU<6HqBe'
+    'l$IjobEApRy7EbUR+UfUeJY>CAZ}>rRNI`R<qjSgIZNQ^N`dks7WE8TC<W0bLAJ)ZSbq-SJjZjvl5U_W<3EvVwLLq$Q`k3cUJ-AA'
+    'PGgR)j>>l7IHgouC2k2E8NV*h`gQtmMRUIzO|%O_2;J2>p(0RE%l}~@`^q_W?YbD6xO1ROq=`ERy#$)LbC6%s79Vc*o)%5Ksq%?&'
+    'JrDRjdx<HJsYwKKggIvS5k7y2?F{y)0)hpy4lTE|#hhIPEKduQ>=T;UNm`HGJ6RhPwXR}qmXK%4Id{!=w~M^DCWVH=lVbu)#>Whi'
+    'hoB3SZ#!4fy8I-;N_p#mRX_<_sAWvf)&~cEw5umOb(*EAQ>ZA&WKbg;J<(X0bhp#QWHmlDkJy;Ta8Xk1Jwkfuq85#oo?)diDR{A@'
+    ')ZoFJnySJr&$*DBQ1R}{Cpv4Yur)XBfEXSm!SzMz*2~Hv^d(DC={2S)_+KhK1tHPSjjg*;8OxLLrYmjTD)mfecoaAiJfV9gU`ooB'
+    ')eaY@osKr>sSoO`ThD9(R+~+M7gDe`KD){%@mW_siO;I?NxV<xli_=a);`RNgXbO`1%`!Y^&Dq#Rzl1wHAlrTeJR6Dk}!N432(}6'
+    '$?JLvO`WqWs!FMZp}EEe;bN#N(+z7{+AX7li<D$H;sg0$=IjuDYMpg_E1LV&Xrk@PXR=JTEGcVZVpg7{G31bDTMSLyInX82#GQj)'
+    '0!`dG$S-M&4>x;HiYBI;l1^b{)dzU)?7B9#OUcARn<In)KWp;<*>=0D0GESev;j>wS}zK|F1#?wKJBAmW%vE6`$L4QaIjQog>-6C'
+    'd$@H^4GQx#h^`<Mc9N00E1)Ajw1wP_Nw+1Pwu(`@7M&YujBKU$0j{TA;d9VH7MM$G0`3&J<2SW-7wZ_Xs2;;Y3S_2xB%SK&N^6y@'
+    'mW?T;OvkZ+6;_6)sM%R-!CXu4-P<)7*qr)2Qk@hABF9n$eP-+;J?mV>^sI6f(|vLkvuB@snq`I&n{UZ7k9`#mgT2E7r&=-xD!>5L'
+    'T<yf(>SK>$oo{r>cDz9}-jd&2z~VHSa93S`TeMN~32R7XNh_IM3ITx$o{XTbR+@YELS2XZRy6mku?rtUPLnBFS_1XKp~emot#n?('
+    'OBTZ}b`Erj>|*Djm%uJ|4)ROd;=|3}(_$Al)>UlI&j4;0d9*6ES3D_DZp>^d9h_(lIaA6$<Ds^dq$5_v8)K8UFv&hWgesy9@v06i'
+    'kCHNcN)8&BoD7iJ328EM^|j|}w&}9h0v2Vti(|}%$+w-WSQ#7wwh^kg=6T(V1LB^U#CyBKr&+9F1-w%l9lT>&CrvAxnXIjOT9|aV'
+    'vx_`y6_=b+&Phhd6*fFdbcQ)1*+JW=SvnRE9=3GwMC+ql9Qb6(&MigIJIn7YsM44Pp&}7mnsypFW~irBxSOtap)^gxl2e!sqX^c_'
+    '4bBn+=}gO$@rFaFz_3K{+J-1UCS)9hZ;OmvTy7wT4t}&1H$folkl|sxrH2US7-WvV6d|7*O?=jM71Oh-tC;RnS5Yh#AoCn;l@L&d'
+    '_Nk)`aaOZh7-3klWLFwSnPS$deMAsTR|nzC3zqZ}npR7^fo_ffTHB|STvFG`nVUF-T2krau&7$RwHlyG2teS$n1r;D%kXK*brpNJ'
+    '<|@D>)%yO{j<^OC>MEBRdr!-$e6nkxi>#}-YtW0Re6nkhU(yyIZuXuQO}weDVjnGIiaSkjHLdy#!XEGUPU5sC-y#xY4Zw88s-wU%'
+    '6Isdkgf)X`3zO{AL#Wzf^QA?XHFVY-$Rn}|_=VOKi&YFBO_Re<z!V3llmw_;a;9KK7bf2pP1IgBR%q{F{1wD0_f>x@s~QPCoHP??'
+    'lz>Fc>fxibMi51CW$)9}78fSn9bMWA?1>p(({`^xE+PqNd`)fUX)A0cUxKGB1x};d=@j%9>(@F1sf48ndKXPBW{9>MpIy^2q=Gla'
+    ')LR*?jjEQ68d=HpSe;9v>jJSMIOk!qNtY+%P0hSVLR|NmeQ(N<C`343ufs~+BHV*H7HhBo@;FOty<`D<Zc5f&LS-=;``l<^e%3Vc'
+    'Sry1k_bHIsMyw1K6|&Mxwl%4(1;;)+Uvehap>`{GW)MRcS}86$Th~_8h`uaX(#w+H))g4T_94y&wRK^1Vn+`8NvVM*E66Y469Q7Q'
+    'Y6w`zIoWD40H-eGx_DZ0flMj05}q!Z(geu#1Q>>hS4a{&Sq@FyHPA)U#9f141WnvE$S-M&4>x;HiYC%cxr&&8RX@(IZA@xh6O4;_'
+    'CM<;j!ueLfFRY7j?*q<XL_32-6@a>tykD4PpU}k864VH5OOfoZWX=)_C~=?O3c7$$%nm04L5tVyD>*E1Zlh2wfs0$1eA_fp*t(aw'
+    '4y~KkRF1Q_oV99zHmd_9*O{di;*mq^UHZ`66w6oU7-eD7-Eo?jYL({LoP<l%J)S<RLv$!ZxODq*6Ap7!aVn_~X{?AFGp}lFEJe^e'
+    'Y2x%17^}Nkh&VL6c3G_hQghPa`HHP;Mzre)hfb}&K=dOzm?##w@bYB5fhH191ir)}P!CpKXx;wNk!7TLSGt`l3f{poYU6BOBcZ$2'
+    'W5KcX#c1p^qlxsalTPVbC7sfJl1`(;(A{J|5in~P*AZ4|AZVt@Ik(BK%vcLI9d6nk2L+4FFlg^I<RxqM<u#h=Mx7PjRb3m|O;v|C'
+    '31f*NRsveeH5;O!GDDcK@QfHWrzCHo=v&d;uU8-wQwAiWcy3Ro6R{hv_jb{s=RB8FAamD17g->4*Ps_sAamCszoacb-0VFqnpke?'
+    '(q^y7ITSp)_O3EZXfb#!iK_x-9Sz7ECYkEUaP-49km)p%!<Z<_!X*2ICi<RcNaB5pxzC=tR=e5eQ_@_O>yY3h*We3*cuWr5sewy@'
+    'VwEQ37AD^oO(e%Py6nkWPYaivmGtqDG8rp`xGqc|B(rx=_EB7{sfVsDTE)S-wAH)gG;x#wJd&$jf&tUe(wHj<1yD&%!{<IGUMeX>'
+    'OVaEED~t7pa|W-X?3W_woqZG<kyDy@$s`ZA;)iGU910vC0%1%}t-3%gc{Ud<&vaBbthWSP8vXKQyn!Zy?0MlBqBZ!nR={o|FoN9!'
+    'Kf-N_t*>Bgj6cTo8i!CG5LMuz*ezxupBqgq&zdHdXGIgsecJ88N2L&C(6D5NSbQZV164V}V@b6gt?n}3+nlpjSUP9%I-A&Km9k(-'
+    'H_$ZYU?p2p9zdXuWn^tbjOk9tKt3%ryeMR`ralsVP;UxLR=8btAtgZXp}Aj;CXxpti3M1b-~>D3^oWIvQ@BPCzpxmZxO1ROq=`ER'
+    'y#$)LbC6%s79Vc*o)k^Y;Rc$RiK&1mV=lCTHigmca0-Cc`C>V6GrMAU4o0=i5i2ptz-@>NLcuMhuK7pFKB0*z!Z%b$K%m(-@3lcF'
+    '9U)i|)?)2A2yslE#sstqh-wWxC}WTV?78QK$+vx)Sg4K2DZ@=xyaW+DjtHT&OpOwAO(jh%E&DNQZ`rHNFu)Q)qH^yGlkTp&iP?kE'
+    'v*ws1!}LOe8)!b(E=9eYdFmwSrrC9~p7d4(w1nKUa3#MKLGPl8!*%l31tS-pN|chigfC$=tu!rkxOC|4ShZV#JJMDJY8!yPcnnI*'
+    'lkujc(=<br%C&kp8EYX3-wUsk)qH-p1OMi$StwY3iml__DRV0x@c`s<DMCIons~Fs&xI!5Ed5iZiFa!EB~9$151NE{Iq=lLt!GsT'
+    'n-PxGt{~c7MCDPf0y(H8Onxd;P0b37rL<s4FYiMYtRbMOSR+t?#zK)wY!euQtM%26JdzKodmfk#=r0Q#abVYiZOeWun)?;o?aiE~'
+    'OzDYJC&qgL$vjQKf9@g+YPYvzpv!Exw`0)DXt%dxkYCakA8z)Z0!@Vdz-6@R!c8S?atb|>M%%adFf>|i@lW<SC94HO#X7T%={sOL'
+    'XYt@vwvEVjs6_P(lk5|k7zP(Rg{af;XhDSX9AdZP`V%x`bwmL@gL|<n7NmZ-H2s8u)>vmB3zKh)CXVK4BnF~ZXj+CojvO@c&|)0d'
+    'dyuQiG1c0@mO>t4>6zr}fD57;7AD>8G!cFkh7VU8CC3&AxNt7g3&DeSuPz2~dje%lsj~x%ED4k0iCcEDL|%%Z&x2j;koX=^wZXO2'
+    'Dx+DMUQRx7v8x6)2?Uj{ZA^`zoW3weK~!xV1RkoFR)Pe-VCkP2ySSfre<+aImD5E0P@W(Zl?$alIAv-@tH7xJ^w4EHV2-`G(xZ&%'
+    'q0dG(a#*mW8$>foK<pf~r0HUE(Yg^q#(<yo9DKF%OtC@Q+^o4IlU?YeIo+Jrn4o<tn)}t*MXXMTYh&2OiV+}fbMX2IdE`aYa=Ntb'
+    '9O&2bgP%3%C9sQ~gZz@V_;9oLDD2|&Oi%fYSKGE{Dko5}_pi?1p8TlLt9~Hw&d&7s;y{moIy^f$ertcnR}SCu5Blozmw3R{pT9gk'
+    'JN$_+KK2P_%&XYZ17%;CX7d;`t<t<knAXi)!|W7F3E+FxYpKDz#=UpZ9lgpPV*K*v@MzpV{5W07sk=J0Bn->QP611xmSW37*4z(&'
+    '6nF~IMjs)I3TP-q$nNH9T<3CjcnXDpi#=HBiD_fz9HX@uU^O3XO@?zb;yF^PaM4tFSZX5)bkfC`vyXNk6Izji(|f(=K=|z`AO3Ls'
+    '^7Os!=1Ifz5eyQ!LA96Oa;}}T^|JyO2+Vd}3r?kVojx{p3dHQeh2cIN-|w9(8(1B5Xtq>F!SYrhbjMZ6I=q42L+D_2&0uH>-L(`}'
+    '+bEgM1<<Y>38eF`x2;3p>kD}F*DLc|3)pgJ2m)r{Cb(RQ#0BQp%k&Cu%m{fgORScRX9q?MvJd<3UaG5b?{~fOij}W_bZ~ymr{`}@'
+    'F4pfxj35;V#nS=@yiDx@1A+%`Mv#e|wSr8Vrli@0f>_R{hG00S%l+Q{`opoy>nle~s{y#=Lx2+D^|^(}wi$~lhhKm#4w)Y6WG%@D'
+    'EVRM9WZ^+zL)Pv>vV{8zzYeHiWapa~LrUn(u$w1?oN6}r6;(km6>*a$jV1&bQVQqN;D7_(JW6o`w&v?SU%a+`y&Qm?shRD1-8qwF'
+    'DE7eW!!b7S_W~x!-LB%<K6P}#k0H@^dNAwO?$_Fs!%YQvre7rb`juK4^wUReoto|QVUfY2UFdMqkQREyIjPS?IRJp=)nRNbI>zvw'
+    '<2_&b)5+1hw}3B)Kdimp`sD<dAzGbx7Tp6p6ns^l@UWbQ<_S366?W|_R=bkId8l{XWB}0IQmpodmtSSzaKL9LM@M?LS#wV`3*MA1'
+    '(Yo}G$0E*!gaNcNd=-S)>N^0X6iX2mB1;PeFhTf=<GwSlM=INvRzc!rRiU;Df(To55f8ss9XaUVw6jD~Uj*@-t+H9o&F-wvp2>&%'
+    '>f5F71a?Houn@gjc+zgCx6O$iYL=b`2uaFC9pnX+Zde%-^*VL*L=^}PIyfg>DaC$Y$=^WN2ZG!YzhA$2hT2y5;Z68pKp@w`E?I;k'
+    '@;nS3vLgg4th@`A;M<+maI%ffuD?|5!(+IYi<7hWFV8JtDX<41)C>q5gL)vijRcS0Df$!{e%{iUy(I4h+TO<mFqu}yYy?-sohyEH'
+    '*sl%&;d}kgh6U^19^k<XfoQqg{%l3uop7;2Wom5*zD_4lP)rT~@<p{^{o9U>o*h_X^P__kIM`Qbdj9U{;$uR_$S^=GXMvknpArF-'
+    'V}UKdyQ-&<BOLIAI+AMw>@X4AnW#^@Y$x-<#&w9V9AA7)EwJ7<%?Ch3s2`UAph&$tGXcTBt>;w7unCV!vvDf|+EWq`4IpNJuwel~'
+    '2zw@s2C<-8QB%Y}a8r=a5=Yp~=Z8xk-nxRqU@^K#H6bw0?z6|N0jsBAAq%UH=m8MPY!#cM-K~}wq}4hfZ`{JiC&!1vM=y^~ez5yb'
+    'nAE74VDBAxWU-BN0K$ZEhC$3=;uE?Nz{c}j6~VK5TSf^4i_!S;Mt)sW08(0naavm;1a26y2kAv1fibrPhb04mtw{kqAF~M%CzL6;'
+    'Y<o3S-NTK0S9QoOP07Ww`2f%{*V!WklmeavtOG#aD$QKs2s|vYBS6Ot7y>#4mjN0KuPu)^?oTyE3t%Zgn5l;%L^xluSP`lK>+E1m'
+    'f$VH0RqAjpK|1_wXkGFcwWY@!`E^aHk*&<%XbCetl)*gPF#6`g1iBUn2pdQ2fc69aFGo0hif}xuGtCwrY}`9<{$1A;fst8l#?s)V'
+    'hi#N#R^et`HpmCUf#_lI0mFsE%n@j{&YG;YNUb^P<Bj_hO~F*B5+hg`kVMy3Fr6LTaJG@am90=t2{B?Ra)Q;v4Z`H@^a?mPaD2Rx'
+    'U)PjkQw<Q(J%ddJ_-X?y!2|sU0DY~9-^Ti-i}Vh@kUCgVokKL@H4o?uca;*lt|=)_SfU-nvw~u0nSd3RwbltfdbB>kQ$UMbgE!3+'
+    'D5y%V@IhAm2m(FcxVJS$n;Piy8e#zWW^W9mM>hhvCCC;iaCguNaBXf7r%udtEft_0erU(J$b*i2%cpce<AB*7KIb$hlP4aw5l}0}'
+    'Y!MS-E80#=x3Pn%;cwOKw&a{2ZpIbS0Y+r0wE%LMF@$IBO&nMP@Dpum3Jel63n~SukKmpXht45eHx0{-O5l^;(C;jwNi=%_?<yGm'
+    'z~p$&k2mgZO^JfpbBfrW863@;en2k<BB--%D=56nG%~j+u-{>OK$vG^(QN<`@Z*jAx~AyFxK+tc=sjFspQ|k!qtGsO=oa8q)*N65'
+    'Nj&&3a5my9I8w(?(!=4Dovl=_YYG50)<1^U@~|?i&UP9Q{zm~X5liqzxI{E+R@6BGs1;C21;Nt>k3Q1ljeA>Dtk6A|1bAX!k_sXT'
+    'A_v<vpvXmO0CJb;9k5D-#RGF%s}Xp^(0GhTobfI015GUm=uRjg;>fVlS|b3L1OP=SMYL3EH`oCQn1_UcM#r#cp8<d$5YdKpnc(CH'
+    'oM3}8+Gf9iZvh+uV{d6n&R{j(?mmxbHQplI&N-}5DRr*VI*m6(Cr%z%t<VUyfKhS<T5~z|#~b&yrT{p408_io+-mP&Zvj3~>$K)N'
+    'Jz?@S7l!wUC6NOM?XjhZA=g*|ZS&)ed@K3{gl%yG$77r<=HgoQz85S4z)gqEcCvP=)^ZgxITz}x0vH6IB|IG41gwW<T9Xe0b_2ND'
+    'Ds17+t#`P&yrn4=U9pT?@Zt_{X^ldR@BprQXVjCyb6^8XaatSW!o3nlcuX)RuMddCcaHlLO@ZYJff0-v2?ojqs^QWAcW00X2-T`<'
+    'cFsV<3QiWT78BySP{4GLH}Wk_S?%XX0_r7c!CSeB29>v_yJ<jS3dQDToEeH|g~5|utA$H()XdvF*tokRU{OH)UZB+#>dItX7x5cG'
+    'q_}OCY-RUdv=R~U&OTb5Z$w;Se0C1F61Wu6k_OMHsaO@e<a)_5PXt!+k2mg5qK^-~1ISiDS?G#J5!>3dMY21|2&U7GG$#lJ%vEQB'
+    'bOAuur5bw3{qaVAT~m5?_)KP~0e65BU@1EcMC>U#G4?Ra5IZ9oh?S9DMbs}E!Kmhd{yZGM+S!zGEBb)-x7DVbb)7)OlmS;b)Fa?1'
+    'l*261SvDP_eJv`<*^wk1k1`Y|)yEt6wx$4L=L8qxIuJ`!ZlrzU2PxZb1_+%G&4FY<&wJ0-L<3;VvL^tAK|lKAjr_W%%!ttf(^!R&'
+    'Sb;w@c@LaDrNMc3g3feuv6)hLJ3T0)aV)mk($h>2$9<-{JlNXaV{QOD!6S<u&W{$l74+TGlnw_-E}LCCS1qlf%)psP%~9cGI=I<D'
+    'n76j&b0n)6**Rhg48m!dk2mgZO|g2FG<8rEJIsb9h6>L<KqZHvO9t-B9e)Q1&j~_WQn)J?p}_G1Ki<f<_EUr=Lg1K#GGaS;6R=^#'
+    '69f#+3X2xoNQ}T;SO!2?+YRS5JK(wXk{J&+Zi|l~RW*V^!p}~->%&G`7+?-Sbz4)w8&~HXUI0cga1S0FqU9UdDOkg^I80fAbVPlc'
+    'jf8Ap9O%9_|A^z>))X(69XIQ${zY^F;W1BgfF%IlF|Z2d<PnsTl~|@~r@zG+_8b*%h#qg`*EPl0><sBbH5z<io&`ZNBH&od-v~rI'
+    'i^Lv!jCNfMmdha(adstz>~6{fYWR-(6kE|})M1-NAbQa*$;brAnpP7E;S<i(z#6a>@NI)VMs-$Xu19BOq3y8s@y5NaDbw0wnX?|?'
+    'Y2XK=QWj&$J`Fbrn8ih_gq|{6#t?MHQnYlik7Km%9&hB=HN_68dkoVx1R#KK{E0a>9E?%NQHHm&+?~OR;8<n==4Ci5M1F5gejd&j'
+    '?kv!7T~h{pg=D+qj~Pd3G$EnzoO7*XL~9*Yfy#QdD?~gI;(Y=SoYw7TB1S#lxVJSWP*?8LGE(}=AEq|v%y8it>Z%5TWDpW($wF9>'
+    'VTpYX@Yh+3R@n99jr_W%#7RKn4*y}yW$30dpiWo-AeL2>2g`6CS_i#O){!z*Z+qq4yBXZW`NEx9l-oW9EG(5=dP|l)7jj^XEO*VG'
+    'EDx;1txo7i7}?-e@bK&yIrjlMojl&Sw>2d@2H}|ikKQ7A0aq;y?o+t|3zj%iC2P%u$+k@8NxlHm64Z%cpY(_`zU5QEF11>MG=M4~'
+    'V5w0f9C|FNV~P=cvgLshF}$V#-HzVusFv7ShC*ISch9SdZBQy6??0R+>aa5w4whX5xI3nDv@(B^MF#v&K-6tO4w$bDI5ve6>}M*5'
+    '18D3QD&cC$bsU_&d4FztXk$2kclNQ1cCW%NhNhtxsKE>g%)D1>&_Ny<4k}boogSMF1;lt2GZ3-E0J6>t7u%%$*tJmL-UI*&Qf1f^'
+    'xUEn}T!be9hzcQ;n7gE6t#@s2r+c<`;nvEahNZNE+mcm|`0(uqhpu+U4Of`p5#hu=s7NmbWC5I5t?{rmfL8z-EMBHCOH@xDd=(%K'
+    '!Y<`1%I#*_0C|BD!YZ|;gHrJD-T~_dfU=s~s@f(XZwn<raPK2^fCEQ%!PVELO1R5RtECk~cbhmMq!twOVCSmcplBh@@Yz(OG)sU@'
+    '4cx-bT(a{B{ZW(`F7`DuZL^EF>Zz?+t_rZy006ct;RyAyOR(H>5kH{hK(Dq{M^zoilI^!?k+NPhQ<e$0o79+@Qjuw=%%Kd;2JOM+'
+    'V2*WyQ#a|BU>1PX8Pu8PfS=}NbOZPPu4vl9qVsB>7rbu>ATewarU*D{_ZvC@C1noMqMr=@4GAZ_Q<v$0>f%Br+-0VCZmD53%d)cm'
+    'solcH48`uAk3Q|LV{9GaCygW#whWqx|0F+km7uh6v9FowV5g#_>J34Hy&Exw=2DDOOVa9l%ng*&(qfwfZ7w~`YPFKF?r|<s)@x=e'
+    'mVs=WwJ{p!W&s!ny$a$%NSjqG19}I!^U@v0g<o5Y4WVOkDf_;ZUWIp<X^M?%N>$-q5icEADG31vzQ^vZSgv=T>>xdSP-@_a&Fbxq'
+    'Ie;g0sS@roQ_#c4;4TQDT!^a79EPnar8>*ZP~sdzhPnnYc8)EK1g0DlMh|zE7B2QRGwob*$YAhxpkrm|wHLLkU>&Fk^2g+Jh=BtL'
+    'DI6Dr43>!iHfM)^S6QU2*UZ$;<%l5zUgH39nI|hW8{AC+npl&S(yz7&V`(ov+pZC4DMc&Ola|rC%hMfZ3J>H`cRVap%9JqZP;hVn'
+    'UBnHBWqO28g0zF|6F`RE^xNAtfUuB0-JeRh%S=n^2%NDeR~cgh%$q6as?E~FEV<p1A*<cL2y;^H<gBP7*9f));6E2G_H}Lw9G`l('
+    'tDhAT#ObUM62w+%-O}a+v|Ir%edw063)Gu@8zliUQdme4wryFjnW-0`zz9W6uBqjZ#tK&(G!Ihv*a-0vPFEKb0Esz8pX?k!tQj&!'
+    'vW()1cXHEInssmHL9;u-`0;(vG`P}ity^?hR=QUQ{@NMuvU;}ofmn(iyzx>c+-0T`@?hIX@*~<Yd}0@q^ghHAPN!i87-x#z%M3K4'
+    'as#p|$#$6vPg%Iw*UU5ryY2&hbxbfk1!IGfdTZT^|5g}nChvlDhLZ{&n#;52k%=bg&q4tHo!qort5)ZMbA2Nq1o#$cGeK-9G1e^c'
+    'bQPW`E1WHpop#}U)vCSrzLaJ>@h)zvCE984fMo_NU?9K(1<r=NDxhG{5L!=Twh0*D>^`rDRRiZ!$z!CpPziUL>GTaAwx=epuiEQo'
+    'pPl$bqxMzllcrEn!mGW9J6fd%_g1tuDX~|#aIvqMX;R<Xj9R%^WxHOpx^69)W|*xwXE)z?0^R3kvd%dN)S7`T)WL>jk+N>@^p0HM'
+    'Lamx#2lUBmnJ!`4H4Ql54xHF0me{W<h5$jWvgTWic7LHP<G3QWyUer=r>2w6^3=3tU&xJ?vTM#c!wp=sfQSz24pFAon48p^EL(}f'
+    'T&RRQqiM7oK0pi|p_9e{G)R{0UZeGyaueuww!m=1n1H}NGdN8qJB@0Nx-4AmYi1g;UJ0Z-6s%lRR}0kI^#WwrxQKPLW4m^aNCWm$'
+    'FcWq$-b#eU%+hs{vR*UOlubrU9GZ@DLa-SX+ywxFQo_^KE~Q1MtIHxVSj){Q07r0H%DyZ_iSOd3AZOFr?M0$id<jYIPSK?9+hnfR'
+    '$Y9uBLhNyN54Z;cqop^8iLeV_3zcw}ncAHm5->2$0D9Jt!HQ!fVA~WGFTm0|h?o#+3x^RWFn(<s;eT7_g|yO+_v5B;!x1jVld+iC'
+    'ib39LHAa99{S;->V=DqQOYS*xNY(l^kWzMWDaRG@E^b=Kv{oWx03h%LEpeu+FiV6?Z@ERYS#t&t`AEcSrTYM~=Y_30N?FDROS%j6'
+    '5?NsaYu*Ry4Yu7V0>N8K8zs9F<7Qzi$fRmHGnW525lZ2U>|nev#7xsK2EEC4G#lIXn2MzXYa#NrB7kOVdnUHS1bZ!GW;ZQ8K7gE4'
+    '2he9s#Zt05?gx4)l3KHG2%(6on!5tTs|$T(4?^CW-6|`iP*;-76jMXU1)`u;z0F0+y2VZH9u7Ve+<+5xcF8mq5S5mERpn^gXK+?g'
+    'iVnO`!C<SzJSD~<vW%VHaMyuMz{@y=;aI$9yJww}T~|-VvIf;#ztL<d!_ntt7l5XnK~=TVaTW8iPziVL^dcxiE1`sBel|49Vf2Au'
+    '$|T9k+<>Zz-GH+!vu-(B!Mh%;G?U%fTDaKPK`$0K&x92lnc$0q%m^M69S?va+tnrO0_@1gGzNY+ytg`c?1G1d>mp^nzSBF@jtz&i'
+    '%PfQKR3?=fZSSwcND)ufI*QmSsc&#dVwWVu5M$_;Z?=@KjCX+ED$;~19v^yMWgr6<ST_hrZFdVmM!U<EftH}x(ODQG5CNayy*Mva'
+    '!ky8S#QIeiM2%4K>e0FtkpzbWA+`Mm%Q_Fm&oJP8ZBc;@BS4gDu_A~I7yFu-&gyLE%hF!E!pBBy%*}q<oy20r6vQEVs!L5EyzM2q'
+    '8L{m64Mt7NT;gkHYK&Sn)11{uJPszA?J~Vmg_vL|62WD>gYzZpCeUN5)_4Gfws~DhlQMtT7ShB&Li6MhDrKgLCjhi3>q*X7%nHiw'
+    'axZ{K%`zvOwZbh9W5VAI6E9T4U1ka}2fL%(BJ6e5S<Vj^Tkjsq8!StOxfBBo0>kamHdSDy%@-gKZe!tMU+1P1m^b^-01FH&Ost}`'
+    'oST&*h}l_o4g*d_kQpnQ*^)pB0x6qwN_~;CZlyN}#oA{lD|#5A)8OBrtF}GFSkDpQd}?eN7>P>;m~bF(D|no2vve7b$lqzEGgv}K'
+    '>sU5m_S{FArH&CC@PK8d`_M_L=K&-bdWDEu?K-oS<;${A33r)kF3IYcTBTUS_`|u95l*_Z17ka{5S?b6twpQT<JF2%HxM8I;L21M'
+    'F7`Du4WZdhBnYaLLe=4A){b~-1wX}72&+{Mjul)yXEsn30IQg4w1DdtDeKmOOaQ@-O}v%H&B+opB9zqIl^I~*!3EF=1F*8x6Q((0'
+    't0~MX15~{(rpMe}H)NoJoB`zumxM(FNFW!Z@1Zo8oQ?uQ(?d$u8!#fCRx3Rr)DU<k#f3_^%S;*Y$k{y+&=;s~4TD^EK@vuhf|e-5'
+    'GIrQAz=U05h4KcghAnD^pu)n%z7BfZ5c9TVr!qvcVre<z3C;l<c##Y@)IFkU!z(aMaPbCNt0%i8wMbd7nQ4>Mt-5fs+VFN)KNhj$'
+    '7e8xGRe^wFtj;=IR<<Kk$tr1RgbF9Xq{lSV%OcH}mGBQf`-xZUO~2xI7jI6^4lmwscSpc%Sao$+bhgfW@KIUp_HzQdN{CBA1y82P'
+    '%|%C{un_*|YG-Hn!ur#hqVo$ryLfkcz&~8M3fYQXNC}A6D%@J>png7C=|Uccv14M`31j}|=w1L~oK+05i@_r4QQP2t;pw>+9UN!7'
+    'ch(X@L`ha`(=KSYK6Q+&*0CU9GAcE-n&L9>3dJ0zX(hhlVV;oI=-E&D^5jZ8a6nh<Vh(TV0Ryb!h_`)|$uYpZn1Xn?BTj7j*sRf2'
+    'E69g9;^A|Lw5KyS{p950{NjvH*G;BAz(e3d03vN!!>S^YYb827V^|gX*=H>vdK{{B@Ec1=i+C@Pady^d;t45FKRfx+?r2|~9RwZ?'
+    '(Q(g|#0&iLu!~hx5t34D6HXe_GNC&WoPk0F=(GYMRv0!zkDkoz92}j<x<keXZmfRfLB^y4_i8;)tTBbL`~q@eR{-4fy%30_58lN&'
+    'Cc-*UO%M+B)b!><DBsi$&Ui}m@VW$}!JO1d$tp`T#o$`RUxJkwf>LF;nPy2xm`^JRmMd|63e)qU!^PL`gYgYd+{MZ1x7D*!jt<QP'
+    'U=Amu=jR_Uk5{OF4<XowH<;;k0ypWcKpw@C(&WmJ2@7dpt~ftwuyua{X~+x7t@~I2;Hfr{eS+fMaN+bxiuduN-qTz?deY)OaodYe'
+    '+x9*tB0o*>p0@3!r>&gfX$OXni55>Y?mcbSLQmWFJ|2iXxOhMR!*}ae(XX$xV}5<vcNuT^ifyX@;k#8A=&v)fyBbjc!*}cDczyZs'
+    '*MG&okNN0xMs>Biqb<wX$;rhH&%?{{Nj*HhxbtNj)jT~s)uY2>eZ?0S`qnm2e0Via<lVWB^}Anfp0<|k=l>5NY>H9'
+)
+
+
+class SourceValidationRefusalCleanup(unittest.TestCase):
+    """Portable synthetic zero-effect filesystem/receipt model.
+
+    No secret preimage, original task/model payload or provider calls. The real
+    original88cb proof is separate. Git producer bytes and their expected policy hashes are explicitly synthetic
+    test doubles; all metadata, receipt/hash and new authority guards execute.
+    Real original17-blob custody is proved separately by actual88cb replay.
+    """
+    def setUp(self):
+        import base64, zlib, hashlib, runpy
+        self.temp = tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup)
+        self.root=Path(self.temp.name).resolve();self.sha=lambda p:hashlib.sha256(p.read_bytes()).hexdigest()
+        data=json.loads(zlib.decompress(base64.b85decode(SOURCE_REFUSAL_FIXTURE)).decode())
+        original=data['root'];self.producers=data['producer_bytes']
+        # Replace original process identities with values above Linux pid_max.
+        process_ids=set()
+        def collect(value,key=''):
+            if isinstance(value,dict):
+                for k,v in value.items():collect(v,k)
+            elif isinstance(value,list):
+                for v in value:collect(v,key)
+            elif isinstance(value,int) and (key=='pid' or key.endswith('_pid') or key in {'child_pid','supervisor_pid'}):process_ids.add(value)
+        for text in data['records'].values():
+            try:collect(json.loads(text))
+            except ValueError:pass
+        replacements={str(n):str(2147000000+i)for i,n in enumerate(sorted(process_ids))if n>1}
+        def rewrite(text):
+            text=text.replace(original,str(self.root))
+            for old,new in replacements.items():text=text.replace(old,new)
+            return text
+        for name,text in data['records'].items():
+            p=self.root/rewrite(name);p.parent.mkdir(parents=True,exist_ok=True);p.write_text(rewrite(text));p.chmod(0o600)
+        self.proof=json.loads(rewrite(json.dumps(data['proof'])))
+        self.receipt_path=Path(rewrite(data['receipt']));self.receipt=c.read(self.receipt_path)
+        self.campaign=Path(self.proof['campaign']);self.runs=self.campaign.parents[1]/'runs'
+        relay=self.campaign/'shared-relay';authority=c.read(relay/'authority.private.json')
+        authority['source_sha256']=hashlib.sha256(self.producers['scripts/cloudbench-shared-relay.py'].encode()).hexdigest();c.write(relay/'authority.private.json',authority)
+        owner_path=self.campaign/'shared-inventory/owner';owner_path.write_text(''.join(k+'='+v+'\n'for k,v in authority['inventory_owner'].items()))
+        old_inventory=str(self.campaign/'shared-inventory/scripts/cloudbench-campaign-inventory.sh');self.proof['files'].pop(old_inventory);self.proof['files'].pop(str(self.campaign/'shared-inventory/stop'))
+        self.proof['files'][str(owner_path)]=self.sha(owner_path)
+        authority_sha=self.sha(relay/'authority.private.json')
+        for name in ['startup-agent.json','ready.json','serve.once.json']:
+            value=c.read(relay/name);value['authority_sha256']=authority_sha;c.write(relay/name,value)
+        self.write=c.write
+        from deploy_test_historical_custody import environment_identity
+        from run_deploy_pipeline import LANE_TOKEN_ENV
+        parent=c.read(Path(self.proof['parent_environment_preimage']))
+        child={**parent,'DEPLOY_GATE_REQUEST':str(self.receipt_path.parent/'request.json'),
+            'DEPLOY_GATE_RESULT':self.receipt['worker_result'],'DEPLOY_GATE_TOKEN':self.receipt['token'],
+            progress.ENV:str(self.receipt_path.parent/'progress.jsonl'),'DEPLOY_LANE_SCOPED_REUSE':'0',
+            'DEPLOY_CYCLE_FRESH':'1',LANE_TOKEN_ENV:self.receipt['token']}
+        self.write(Path(self.proof['child_environment_preimage']),child)
+        request=c.read(self.receipt_path.parent/'request.json');request['custody_child_environment']=environment_identity(child);request['custody_runtime']={}
+        self.write(self.receipt_path.parent/'request.json',request)
+        self.receipt['execution_binding']['environment']=environment_identity(parent)
+        # Re-seal modeled canonical/local audits and semantic receipts after
+        # changing only workspace/process fixture identities, not authority.
+        def tree(path):
+            h=hashlib.sha256()
+            for p in sorted(path.rglob('*'),key=lambda p:str(p.relative_to(path))):
+                if p.is_file()and p.name!='source-audit':
+                    for value in [str(p.relative_to(path)).encode(),p.read_bytes()]:h.update(len(value).to_bytes(8,'big'));h.update(value)
+            return h.hexdigest()
+        recover=Path(self.proof['source_recovery_journal']);results=[]
+        for fleet in self.runs.iterdir():
+            if fleet.name=='_hub':continue
+            life=c.read(fleet/'_batch/lifecycle.json');owner=life['fleet_owner_token'];canonical=self.root/'.git/cloudbench-fleet-audits'/owner
+            manifest_sha=self.sha(fleet/'source-manifest.json')
+            for directory in [canonical,fleet/'teardown-ownership']:
+                meta=directory/'meta';values=dict(line.split('=',1)for line in meta.read_text().splitlines());values['source_manifest_sha256']=manifest_sha
+                meta.write_text(''.join(k+'='+v+'\n'for k,v in values.items()))
+            journal=fleet/'source-lease';claim=c.read(journal/'claim.json');value=json.loads(claim['owned']['value']);value['source_manifest_sha256']=manifest_sha;value['custody']['manifest_digest']=manifest_sha
+            claim['owned']['value']=json.dumps(value,sort_keys=True,separators=(',',':'));self.write(journal/'claim.json',claim)
+            ready=c.read(journal/'ready.json');ready['source_manifest_sha256']=manifest_sha;self.write(journal/'ready.json',ready)
+            seal=tree(canonical);life['audit_sha256']=seal;self.write(fleet/'_batch/lifecycle.json',life)
+            (fleet/'teardown-ownership/source-audit').write_text(f'path={canonical}\nsha256={seal}\n')
+            journal=fleet/'source-lease';physical=c.read(journal/'recovered-physical-closure.json')
+            physical['producer']['helper_sha256']=hashlib.sha256(self.producers['scripts/cloudbench-source-lease.py'].encode()).hexdigest()
+            physical['source_manifest_sha256']=manifest_sha;physical['custody']['manifest_digest']=manifest_sha
+            physical.update(source_audit_sha256=seal,original_claim_sha256=self.sha(journal/'claim.json'),
+                original_lifecycle_sha256=self.sha(fleet/'_batch/lifecycle.json'))
+            self.write(journal/'recovered-physical-closure.json',physical)
+            closed=c.read(journal/'recovered-close.json');closed['physical_receipt_sha256']=hashlib.sha256((json.dumps(physical,sort_keys=True,separators=(',',':'),allow_nan=False)+'\n').encode()).hexdigest();self.write(journal/'recovered-close.json',closed)
+            intent=c.read(recover/owner/'intent.json');intent['original_lifecycle_sha256']=physical['original_lifecycle_sha256'];self.write(recover/owner/'intent.json',intent)
+            result=c.read(recover/owner/'result.json');result['log_sha256']=self.sha(recover/owner/'canonical.log');self.write(recover/owner/'result.json',result);results.append(result)
+        intent=c.read(recover/'intent.json');by_owner={v['owner']:v for v in results};self.write(recover/'results.json',[by_owner[x]for x in intent['owners']])
+        native=runpy.run_path(str(ROOT/'scripts/run-bench-campaign.py'));summary=c.read(self.campaign/'summary.json');group=native['campaign_group_record'](summary);self.write(self.campaign/'hub-group.json',group)
+        ack=c.read(self.campaign/'hub-group-publication-ack.private.json');ack['record_sha256']=hashlib.sha256(json.dumps(group,sort_keys=True).encode()).hexdigest();self.write(self.campaign/'hub-group-publication-ack.private.json',ack)
+        adapter=Path(self.receipt['worker_result']);self.receipt['native_cleanup_reference']['result_sha256']=self.sha(adapter)
+        self.receipt['cleanup_owner']['native_cleanup_reference']=copy.deepcopy(self.receipt['native_cleanup_reference']);self.write(self.receipt_path,self.receipt)
+        self.proof.update(owner=copy.deepcopy(self.receipt['cleanup_owner']),receipt_sha256=self.sha(self.receipt_path),worker_result_sha256=self.sha(adapter))
+        self.resign()
+        import deploy_test_native_cleanup as native_cleanup
+        self.native=native_cleanup
+        self.policy=patch.object(native_cleanup,'SOURCE_REFUSAL_PRODUCERS',{k:hashlib.sha256(v.encode()).hexdigest()for k,v in self.producers.items()});self.policy.start();self.addCleanup(self.policy.stop)
+        actual=subprocess.check_output
+        def git_read(argv,*args,**kwargs):
+            if argv[0]=='git'and 'show'in argv:
+                name=argv[-1].split(':',1)[1]
+                return self.producers[name].encode()
+            return actual(argv,*args,**kwargs)
+        self.git=patch.object(subprocess,'check_output',side_effect=git_read);self.git.start();self.addCleanup(self.git.stop)
+
+    def resign(self):
+        files={}
+        for raw in self.proof['files']:
+            p=Path(raw)
+            if p.is_relative_to(self.root/'scripts'):
+                name='scripts/'+p.relative_to(self.root/'scripts').as_posix();files[raw]=__import__('hashlib').sha256(self.producers[name].encode()).hexdigest()
+            else:files[raw]=self.sha(p)
+        self.proof['files']=files
+
+    def validate(self):
+        return self.native.validate(self.receipt,self.receipt['cleanup_owner'],self.proof)
+
+    def test_source_refusal_keeps_original_signal_command_and_no_credit(self):
+        original=self.receipt_path.read_bytes();entry=self.validate()
+        self.assertEqual(len(entry['participants']),15)
+        self.assertTrue(entry['source_validation_refusal_cleanup'])
+        self.assertFalse(entry['credit_granted']);self.assertFalse(entry['financial_cleanup_credit'])
+        self.assertEqual(self.receipt_path.read_bytes(),original)
+        self.assertTrue(all(not row['original_cleanup_verified']for row in entry['original_status_facts'].values()))
+        self.assertIn({'command_exit':1,'signal_lifecycle_exit':143,'original_cleanup_verified':False},entry['original_status_facts'].values())
+        old=copy.deepcopy(self.proof);old['layout']='campaign-v1'
+        with self.assertRaisesRegex(ValueError,'native terminal lifecycle'):self.native.validate(self.receipt,self.receipt['cleanup_owner'],old)
+
+    def test_source_refusal_successor_rechecks_genuine_validator_and_flag(self):
+        import hashlib
+        successor=self.receipt
+        prior={'gate':successor['gate'],'token':'e'*32,'owner':copy.deepcopy(successor['cleanup_owner']),
+               'excluded_resources':{},'proof':{'receipt_sha256':'a'*64}}
+        original={'token':prior['token'],'finished_at':successor['started_at']-1}
+        expected=dict(original_receipt_sha256=prior['proof']['receipt_sha256'],original_request_token=prior['token'],
+            new_request_token=successor['token'],source=successor['source'],new_native_root=str(self.runs.parent),
+            excluded_resources={},credit_granted=False)
+        request=c.read(self.receipt_path.parent/'request.json');request['isolated_validation']=[expected]
+        self.write(self.receipt_path.parent/'request.json',request);successor['isolated_validation']=[expected]
+        self.write(self.receipt_path,successor);self.proof['receipt_sha256']=self.sha(self.receipt_path);self.resign()
+        entry=self.validate();entry['occurrence']=successor['token'];key=self.proof['receipt_sha256']
+        state={'plan':{'gates':[{'name':successor['gate'],'command':successor['command'],'checks':list(successor['cases'])}]},
+               'attempts':[{'phase':'focused','source':successor['source'],'results':[successor]}],
+               'reconciled_owners':{key:entry}}
+        before=copy.deepcopy(state)
+        self.native.reconciled_failed_isolated_successor_v1(state,prior,original,successor)
+        self.assertEqual(state,before)
+        for defect in ['missing_flag','wrong_layout','altered_proof','altered_input']:
+            with self.subTest(defect=defect):
+                changed=copy.deepcopy(state);record=changed['reconciled_owners'][key]
+                if defect=='missing_flag':record.pop('source_validation_refusal_cleanup')
+                if defect=='wrong_layout':record['proof']['layout']='unknown'
+                if defect=='altered_proof':record['proof']['files'][str(self.receipt_path.parent/'request.json')]='0'*64
+                if defect=='altered_input':
+                    path=Path(self.proof['child_environment_preimage']);raw=path.read_bytes();path.write_text('{}')
+                try:
+                    with self.assertRaises(ValueError):
+                        self.native.reconciled_failed_isolated_successor_v1(changed,prior,original,changed['attempts'][0]['results'][0])
+                finally:
+                    if defect=='altered_input':path.write_bytes(raw)
+
+    def test_source_refusal_changed_environment_or_lease_receipt_refuses(self):
+        for defect in ['environment','coherent_override','physical','intent','recovery_exit','unknown_file','claim','source_policy']:
+            with self.subTest(defect=defect):
+                if defect=='environment':p=Path(self.proof['child_environment_preimage']);value=c.read(p);value['BASH_ENV']='fixture';self.write(p,value)
+                elif defect=='coherent_override':
+                    from deploy_test_historical_custody import environment_identity
+                    for field in ['parent_environment_preimage','child_environment_preimage']:
+                        p=Path(self.proof[field]);value=c.read(p);value['BASH_ENV']='fixture';self.write(p,value)
+                    q=self.receipt_path.parent/'request.json';value=c.read(q);value['custody_child_environment']=environment_identity(c.read(Path(self.proof['child_environment_preimage'])));self.write(q,value)
+                    self.receipt['execution_binding']['environment']=environment_identity(c.read(Path(self.proof['parent_environment_preimage'])));self.write(self.receipt_path,self.receipt);self.proof['receipt_sha256']=self.sha(self.receipt_path)
+                else:
+                    fleet=next(f for f in self.runs.iterdir()if f.name!='_hub')
+                    if defect=='physical':p=fleet/'source-lease/recovered-physical-closure.json';value=c.read(p);value['native_observations']['machines']['foreign']={};self.write(p,value)
+                    if defect=='intent':p=fleet/'teardown-ownership/expected-fresh/intent';p.parent.mkdir(exist_ok=True);p.write_text('ambiguous create')
+                    if defect=='recovery_exit':p=Path(self.proof['source_recovery_journal'])/c.read(fleet/'_batch/lifecycle.json')['fleet_owner_token']/'result.json';value=c.read(p);value['exit_code']=1;self.write(p,value)
+                    if defect=='unknown_file':p=fleet/'teardown-ownership/unknown';p.write_text('unproven')
+                    if defect=='claim':p=fleet/'source-lease/claim.json';value=c.read(p);value['consumer_owner']='0'*32;self.write(p,value)
+                    if defect=='source_policy':p=None;name=next(iter(self.producers));prior=self.producers[name];self.producers[name]+='\n#changed'
+                # Re-seal the external hash map: semantic tamper must still fail.
+                self.resign()
+                with self.assertRaises(ValueError):self.validate()
+                self.tearDown();self.doCleanups();self.setUp()
 class TypedNativeRunAdmission(unittest.TestCase):
     def setUp(self):
         import deploy_test_native_cleanup, deploy_test_run_artifact
