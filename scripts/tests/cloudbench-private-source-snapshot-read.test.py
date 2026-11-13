@@ -10,11 +10,23 @@ The function now journals every original read privately and holds the source lea
 across reads (PR1910); these scenarios drive it through the owning lease-fleet harness
 (scripts/tests/cloudbench-source-lease-fleet.test.py) with the real bounded reader.
 """
+import os
+import re
 import runpy
+import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
+SOURCE = ROOT / 'scripts' / 'run-bench-fleet'
+SNAPSHOT = 'vs_selected'
+
+
+def function(name: str) -> str:
+    return re.search(r'^' + re.escape(name) + r'\(\) \{.*?^\}\n', SOURCE.read_text(), re.M | re.S).group()
+
+
 HARNESS = runpy.run_path(str(ROOT / 'scripts/tests/cloudbench-source-lease-fleet.test.py'))['PrivateSourceSnapshotReads']
 
 
