@@ -23,9 +23,10 @@
  *        │  hasMessagingAgentInteraction(root)  ── unique-key lookup
  *   completion notify (send-sms dispatchCompletionOnce)
  *
- * One row per root keeps the completion check O(1) however large the tree is.
- * Replies posted before this marker existed are still found through the
- * root's own `sms_supervisor` USER message.
+ * One row per root keeps the completion check a unique-key lookup however large
+ * the tree is. Only when that row is missing (untouched agents, or replies posted
+ * before this marker existed) does it fall back to the root's own
+ * `sms_supervisor` USER message, a scan bounded by that one agent's messages.
  */
 
 import { prisma } from './database';
@@ -37,6 +38,9 @@ export const MESSAGING_AGENT_INTERACTION_OPERATION_TYPE = 'messaging-agent.inter
 
 /** Message.metadata.source written by the supervisor's reply_to_agent commit. */
 export const SMS_SUPERVISOR_MESSAGE_SOURCE = 'sms_supervisor';
+
+/** Bound on the parent walk for rows whose busId is missing (spawn depth is far lower). */
+const MAX_ROOT_WALK = 64;
 
 export type MessagingAgentInteractionKind =
   | 'reply_to_agent'
@@ -56,6 +60,29 @@ function isMessagingSource(source: string): boolean {
 }
 
 /**
+ * The tree's root: the agent itself for a root, its busId for a descendant, or
+ * (rows restored without a busId) the end of its parentAgentId chain.
+ */
+async function resolveRootAgentId(agentId: string): Promise<string | null> {
+  let currentId = agentId;
+  for (let hop = 0; hop < MAX_ROOT_WALK; hop += 1) {
+    const agent = await prisma.agent.findUnique({
+      where: { id: currentId },
+      select: { parentAgentId: true, busId: true },
+    });
+    if (!agent) return hop === 0 ? null : currentId;
+    if (agent.parentAgentId === null) return currentId;
+    if (agent.busId !== null && agent.busId !== currentId) return agent.busId;
+    currentId = agent.parentAgentId;
+  }
+  log.warn('Root walk exceeded its bound; marking the last ancestor reached', {
+    agentId,
+    lastAncestorId: currentId,
+  });
+  return currentId;
+}
+
+/**
  * Durably mark the agent's tree as one the messaging agent interacted with.
  * Idempotent (first interaction wins). Best-effort: the reply or relay has
  * already happened, so a marker failure is logged and never thrown.
@@ -65,12 +92,8 @@ export async function recordMessagingAgentInteraction(
   kind: MessagingAgentInteractionKind
 ): Promise<void> {
   try {
-    const agent = await prisma.agent.findUnique({
-      where: { id: agentId },
-      select: { parentAgentId: true, busId: true },
-    });
-    if (!agent) return;
-    const rootAgentId = agent.parentAgentId === null ? agentId : (agent.busId ?? agentId);
+    const rootAgentId = await resolveRootAgentId(agentId);
+    if (rootAgentId === null) return;
     await prisma.toolSideEffect.createMany({
       data: [
         {
@@ -98,19 +121,18 @@ export async function hasMessagingAgentInteraction(agent: {
   source: string;
 }): Promise<boolean> {
   if (isMessagingSource(agent.source)) return true;
-  const [marker, reply] = await Promise.all([
-    prisma.toolSideEffect.findUnique({
-      where: { operationKey: messagingAgentInteractionKey(agent.id) },
-      select: { id: true },
-    }),
-    prisma.message.findFirst({
-      where: {
-        agentId: agent.id,
-        role: 'USER',
-        metadata: { path: ['source'], equals: SMS_SUPERVISOR_MESSAGE_SOURCE },
-      },
-      select: { id: true },
-    }),
-  ]);
-  return marker !== null || reply !== null;
+  const marker = await prisma.toolSideEffect.findUnique({
+    where: { operationKey: messagingAgentInteractionKey(agent.id) },
+    select: { id: true },
+  });
+  if (marker !== null) return true;
+  const reply = await prisma.message.findFirst({
+    where: {
+      agentId: agent.id,
+      role: 'USER',
+      metadata: { path: ['source'], equals: SMS_SUPERVISOR_MESSAGE_SOURCE },
+    },
+    select: { id: true },
+  });
+  return reply !== null;
 }
