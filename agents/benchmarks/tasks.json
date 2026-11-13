@@ -8081,7 +8081,7 @@
     "name": "browser-smoke",
     "quarantine": {
       "since": "2026-11-13",
-      "repair": "pending-handoff:7efbfea418974dcfba7a6633ecfe820a",
+      "repair": "https://boxes.dev/thread/thr_381f455399324e108a7a23c08f441082",
       "error": "Browser agent 0412e08f-d76d-53f8-836c-a01ca6d81ce4 recorded 0 trajectory step(s); expected at least 1 per browser agent",
       "evidence": "PR #1981 deploy round 11 (head 321f5f0a8b14, 2026-11-13 ~02:10Z): Tilion browser session init failed before any step (\"Browser session init failed after 5 transient-proxy retries: {\\\"error\\\":\\\"Browser initialization failed before readiness\\\"}\"); the single same-source rerun passed; PR #1981 touches no browser code"
     },
@@ -8385,9 +8385,9 @@
     "name": "agent-payment-new-user-journey",
     "quarantine": {
       "since": "2026-11-13",
-      "repair": "pending-handoff:8abcd151686b465ca5cce8790775632a",
+      "repair": "https://boxes.dev/thread/thr_381f455399324e108a7a23c08f441082",
       "error": "Timeout after 1204s (task timeout=1200s) | Expected paid Stripe test Checkout and local webhook delivery",
-      "evidence": "PR #1981 deploy round 11 (head 321f5f0a8b14, 2026-11-13 ~02:27Z): guest log carries 77 AgentCard \"Invalid or expired organization token\"/429/rate-limited lines (shared sandbox AgentCard client throttling under concurrent deploy smokes; coordinator ph78393f, PR #1994); the single same-source rerun passed; PR #1981 touches no payment code"
+      "evidence": "PR #1981 deploy round 11 (head 321f5f0a8b14, 2026-11-13 ~02:27Z): every browser sub-agent (02:02:12 through 02:21:21) failed at Tilion session init (\"Transient browser session init failure; retrying with a fresh proxy\" x4, then \"Browser automation failed\") on sess_993d70a733c5/sess_993d70ee6a2d, the dead us-east worker fixed by PR #2010, so Checkout was never paid; the guest backend.log has no AgentCard 429/401 lines (corrected from the round-11 AgentCard attribution); the single same-source rerun passed; PR #1981 touches no browser or payment code"
     },
     "title": "New User Subscription To Confirmed Agent Payment",
     "description": "A dedicated non-admin account begins with exhausted free credit and no subscription or Stripe payment method. The harness completes hosted Stripe test Checkout, then the agent buys from the test portal with an approved payment card. The run requires ordered gates, a portal order ID, and settled backend funding.",
