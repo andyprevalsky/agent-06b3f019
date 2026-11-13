@@ -1,5 +1,9 @@
 import { GREP_TOOL_STRICT_PARAMETERS } from '../grepTool';
 
+/** One terminal-action contract for every Router prompt and provider schema. */
+export const DIRECT_ANSWER_CONTRACT =
+  'Use direct_answer to finish the current user request. Choose it only when the available context supports a complete answer to what the user asked, with no further research, action, or user clarification needed. The answer must deliver the requested outcome. Search-failure reports, missing-information notices, progress updates, and clarification questions are not substitutes for an unmet requested outcome; continue the available searches or use start_superintelligence instead. If the user asked for status, progress, or an explanation of a limitation, that information itself may completely satisfy the request using available context.';
+
 /**
  * Universal structured-output schema for the chat router.
  *
@@ -21,8 +25,7 @@ export const ROUTER_JSON_SCHEMA = {
     action: {
       type: 'string',
       enum: ['direct_answer', 'web_search', 'grep', 'start_superintelligence'],
-      description:
-        'The action to take. Use direct_answer only when the chat reply itself will contain the requested representation. A pointer or limitation is not direct_answer; use start_superintelligence.',
+      description: DIRECT_ANSWER_CONTRACT,
     },
     queries: {
       type: 'array',

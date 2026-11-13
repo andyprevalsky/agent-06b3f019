@@ -14,7 +14,8 @@
  *   - filtering: external vitest smokes are excluded
  *   - adaptation: attachment urls live under /test-assets/, {frontend_url} token rewritten
  *   - lastFivePassed: boolean on every prompt; aligns with ledger when last 5 passed
- *   - dev default: the FE auto-load title exists in the catalog
+ *   - dev default: the FE auto-load title (DEV_DEFAULT_PROMPT_TITLE) is a ready,
+ *     served catalog task, and no status "retired" task is ever served
  *   - idempotency: identical across consecutive requests (same file on disk)
  *
  * Invariants not applicable:
@@ -217,21 +218,72 @@ async function testPrompts_frontendUrlTokenRewritten() {
   }
 }
 
-// Mirrors DEV_DEFAULT_PROMPT_TITLE in front-end fetchTestPrompts.ts; it must name a non-retired task.
-const DEV_DEFAULT_PROMPT_TITLE = 'Basic Chat Response';
-// Retired by the user (63eaf1375): never offered as a test prompt again.
-const RETIRED_PROMPT_TITLE = 'Test Mass Agent Run - 0';
+// ==================== CATALOG + DEV DEFAULT HELPERS ====================
+
+type CatalogRow = { name: string; title?: string; status?: string; runner?: string };
+
+async function readCatalogRows(): Promise<CatalogRow[]> {
+  // The committed catalog file, read independently of the service under test.
+  const fs = await import('fs');
+  const path = await import('path');
+  const file = path.join(process.cwd(), '..', 'agents', 'benchmarks', 'tasks.json');
+  return JSON.parse(fs.readFileSync(file, 'utf8')) as CatalogRow[];
+}
+
+async function frontEndDevDefaultTitle(): Promise<string> {
+  // The FE auto-loads DEV_DEFAULT_PROMPT_TITLE into the query box on mount in
+  // dev mode. Read it from the FE source so retiring that task (or moving the
+  // FE default to an unknown title) fails here instead of silently loading nothing.
+  const fs = await import('fs');
+  const path = await import('path');
+  const file = path.join(
+    process.cwd(),
+    '..',
+    'front-end/src/features/terminal-component-group/components/test-prompts-selector/fetchTestPrompts.ts'
+  );
+  const match = fs
+    .readFileSync(file, 'utf8')
+    .match(/export const DEV_DEFAULT_PROMPT_TITLE = (['"])(.+?)\1;/);
+  if (!match) throw new Error(`DEV_DEFAULT_PROMPT_TITLE not found in ${file}`);
+  return match[2];
+}
 
 async function testPrompts_devDefaultPresent() {
-  // The FE auto-loads this title on mount in dev mode — it must exist in the catalog.
+  // The FE auto-loads this title on mount in dev mode — it must be a ready,
+  // served catalog task, and retired tasks must never be served (status
+  // "retired" removes a task from every future run; its row stays in
+  // tasks.json only for history-ledger integrity).
+  const title = await frontEndDevDefaultTitle();
+  const rows = await readCatalogRows();
+  const row = rows.find((r) => r.title === title);
+  if (!row) {
+    throw new Error(`Dev default "${title}" (DEV_DEFAULT_PROMPT_TITLE) has no tasks.json row`);
+  }
+  const status = row.status ?? 'ready';
+  if (status !== 'ready') {
+    throw new Error(`Dev default "${title}" (${row.name}) has status "${status}", expected ready`);
+  }
+  if ((row.runner ?? 'agent') !== 'agent') {
+    throw new Error(`Dev default "${title}" (${row.name}) is not an agent-runner task`);
+  }
+  const retired = rows.filter((r) => r.status === 'retired');
+  if (retired.length === 0) {
+    // test-mass-agent-run-0 was retired by user direction (2026-11-12).
+    throw new Error('No retired catalog row — the retired-absence check would be vacuous');
+  }
+
   const res = await request(`${BASE_URL}/api/benchmarks/test-prompts`);
   if (res.status !== 200) return;
   const body = res.data as { prompts: TestPrompt[] };
-  if (!body.prompts.some((p) => p.title === DEV_DEFAULT_PROMPT_TITLE)) {
-    throw new Error(`Dev default prompt "${DEV_DEFAULT_PROMPT_TITLE}" missing from catalog`);
+  if (!body.prompts.some((p) => p.title === title)) {
+    throw new Error(
+      `Dev default prompt "${title}" (front-end DEV_DEFAULT_PROMPT_TITLE) missing from catalog`
+    );
   }
-  if (body.prompts.some((p) => p.title === RETIRED_PROMPT_TITLE)) {
-    throw new Error(`Retired prompt "${RETIRED_PROMPT_TITLE}" must not be offered`);
+  const served = new Set(body.prompts.map((p) => p.title));
+  const offered = retired.filter((r) => r.title !== undefined && served.has(r.title));
+  if (offered.length > 0) {
+    throw new Error(`Retired tasks still served: ${offered.map((r) => r.name).join(', ')}`);
   }
 }
 
@@ -254,11 +306,16 @@ async function testPrompts_lastFivePassedIsBoolean() {
 }
 
 async function testPrompts_lastFivePassedReflectsRunHistory() {
-  // Cement against the committed attempts ledger for two known tasks:
+  // Cement against the committed attempts ledger:
+  //   - the FE dev default (DEV_DEFAULT_PROMPT_TITLE) must have a known run
+  //     history, and its lastFivePassed must match its ledger window (a single
+  //     new pass must not be treated as a 5-pass green check, and a frozen
+  //     "always false" snapshot must not reject a real 5-pass window)
+  //   - fail streak: every served prompt whose last 5 ledger attempts all
+  //     failed must not carry the green check (at least one must exist)
   //   - smoke tasks like "Basic Chat Response" (chat-mode) have a long
   //     trailing pass window → lastFivePassed true
-  //   - the retired "Test Mass Agent Run - 0" stays absent despite its ledger
-  //     history. Hub uploads can add newer fails or extra samples.
+  // Hub uploads can add newer fails or extra samples.
   const fs = await import('fs');
   const path = await import('path');
   const ledgerPath = path.join(
@@ -273,37 +330,79 @@ async function testPrompts_lastFivePassedReflectsRunHistory() {
     throw new Error(`task_attempts.jsonl missing at ${ledgerPath}`);
   }
   // The ledger is the base file plus per-writer shards (history_ledger.py);
-  // the exported reader returns their union in recorded order.
+  // the exported reader returns their union in recorded order. Windows are
+  // judged newest-last by attempt timestamp, as the run history orders them.
   const { readTaskAttempts } = await import('../../domains/benchmarks/config');
-  const byTask = new Map<string, boolean[]>();
+  const attemptsByTask = new Map<string, { timestamp: string; passed: boolean }[]>();
   for (const attempt of readTaskAttempts()) {
-    const list = byTask.get(attempt.task) ?? [];
-    list.push(attempt.passed);
-    byTask.set(attempt.task, list);
+    const list = attemptsByTask.get(attempt.task) ?? [];
+    list.push({ timestamp: attempt.timestamp, passed: attempt.passed });
+    attemptsByTask.set(attempt.task, list);
   }
+  const byTask = new Map<string, boolean[]>();
+  for (const [task, list] of attemptsByTask) {
+    const ordered = [...list].sort((a, b) =>
+      a.timestamp === b.timestamp ? 0 : a.timestamp < b.timestamp ? -1 : 1
+    );
+    byTask.set(
+      task,
+      ordered.map((a) => a.passed)
+    );
+  }
+  const nameByTitle = new Map<string, string>();
+  for (const row of await readCatalogRows()) {
+    if (row.title !== undefined && row.status !== 'retired') nameByTitle.set(row.title, row.name);
+  }
+  const ledgerWindow = (prompt: TestPrompt) => {
+    const name = nameByTitle.get(prompt.title) ?? prompt.title;
+    const flags = byTask.get(name) ?? [];
+    const lastFive = flags.slice(-5);
+    return {
+      name,
+      attempts: flags.length,
+      allFail: flags.length >= 5 && lastFive.every((p) => p === false),
+      allPass: flags.length >= 5 && lastFive.every((p) => p === true),
+    };
+  };
 
   const res = await request(`${BASE_URL}/api/benchmarks/test-prompts`);
   if (res.status !== 200) return;
   const body = res.data as { prompts: TestPrompt[] };
 
-  // test-mass-agent-run-0 is retired; its ledger history must not resurrect it as a prompt.
-  if (body.prompts.some((p) => p.title === RETIRED_PROMPT_TITLE)) {
-    throw new Error(`Retired prompt "${RETIRED_PROMPT_TITLE}" returned despite its ledger history`);
+  const devTitle = await frontEndDevDefaultTitle();
+  const dev = body.prompts.find((p) => p.title === devTitle);
+  if (!dev) {
+    throw new Error(`Dev default "${devTitle}" missing — cannot assert its ledger window`);
   }
-  // Fail streaks still gate the green check for every offered prompt: a task whose last five
-  // committed ledger attempts all failed must not report lastFivePassed=true.
-  const catalogPath = path.join(process.cwd(), '..', 'agents', 'benchmarks', 'tasks.json');
-  const catalog = JSON.parse(fs.readFileSync(catalogPath, 'utf8')) as Array<{
-    name: string;
-    title?: string;
-  }>;
-  const taskByTitle = new Map(catalog.filter((t) => t.title).map((t) => [t.title, t.name]));
-  for (const prompt of body.prompts) {
-    const flags = byTask.get(taskByTitle.get(prompt.title) ?? '') ?? [];
-    const lastFiveFailed = flags.length >= 5 && flags.slice(-5).every((p) => p === false);
-    if (lastFiveFailed && prompt.lastFivePassed) {
-      throw new Error(`${prompt.title} has last-5 ledger fails but lastFivePassed=true`);
+  const devLedger = ledgerWindow(dev);
+  if (devLedger.attempts < 5) {
+    throw new Error(
+      `Dev default ${devLedger.name} has ${devLedger.attempts} ledger attempts — needs a known run history`
+    );
+  }
+  if (devLedger.allFail && dev.lastFivePassed) {
+    throw new Error(`${devLedger.name} has last-5 ledger fails but lastFivePassed=true`);
+  }
+  if (devLedger.allPass && !dev.lastFivePassed) {
+    const anyGreen = body.prompts.some((p) => p.lastFivePassed);
+    if (!anyGreen) {
+      throw new Error(
+        `${devLedger.name} ledger last-5 all passed and no prompt has lastFivePassed=true`
+      );
     }
+  }
+
+  const failStreaks = body.prompts.filter((p) => ledgerWindow(p).allFail);
+  if (failStreaks.length === 0) {
+    throw new Error('No served prompt has a last-5 ledger fail streak — cannot assert it');
+  }
+  const greenFailStreaks = failStreaks.filter((p) => p.lastFivePassed);
+  if (greenFailStreaks.length > 0) {
+    throw new Error(
+      `Last-5 ledger fails but lastFivePassed=true: ${greenFailStreaks
+        .map((p) => ledgerWindow(p).name)
+        .join(', ')}`
+    );
   }
 
   const chat = body.prompts.find((p) => p.title === 'Basic Chat Response');

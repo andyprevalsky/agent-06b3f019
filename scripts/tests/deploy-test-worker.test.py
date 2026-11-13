@@ -27,6 +27,7 @@ ROOT = Path(__file__).resolve().parents[2]
 # make admission() demand that outer cycle's custody locator in-process.
 os.environ.pop('DEPLOY_GATE_REQUEST', None)
 sys.path.insert(0, str(ROOT / 'scripts'))
+from lib.test_quarantine import quarantine
 import deploy_test_cycle as cycle
 import deploy_test_worker as worker
 
@@ -3607,6 +3608,12 @@ class StoppedPreStackIsolation(unittest.TestCase):
         receipt = cycle.read(self.paths['receipt'])
         return self.native.validate(receipt, receipt['cleanup_owner'], self.proof)
 
+    @quarantine(
+        since='2026-11-11',
+        repair='pending-handoff:4fda5d31658b416299ef38d253582b78',
+        error='ValueError: native cleanup: old controller still active',
+        evidence='Original .context/deploy-pipeline/rca/4fda5d31658b416299ef38d253582b78.json; RCA https://boxes.dev/thread/thr_5dd9c71054f94b38b1690882366ffc30',
+    )
     def test_stopped_pre_stack_launch_preserves_original_failures_and_cleanup_debt(self):
         before = copy.deepcopy(self.state)
         original = self.paths['receipt'].read_bytes()

@@ -14,7 +14,6 @@ import { fetchTestPromptCatalog } from '../../hooks';
 import type { TestPrompt } from './types';
 
 /** Dev default prompt — auto-loaded into QueryInput on mount in dev mode. */
-// Must name a non-retired catalog task (test-mass-agent-run-0 was retired by the user, 63eaf1375).
 export const DEV_DEFAULT_PROMPT_TITLE = 'Basic Chat Response';
 
 let cachedPromptsPromise: Promise<TestPrompt[]> | null = null;

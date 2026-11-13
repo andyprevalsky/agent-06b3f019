@@ -358,6 +358,16 @@ def validate_attribution(occurrence: dict, entry: dict, root: Path, *, state: di
             candidates = markers(root, [path])
             matched = [[m for m in candidates if named_test_matches(m, test_id, path, occurrence)] for test_id in named]
             found = [m for group in matched for m in group] if all(matched) else []
+        packet_test = str((entry.get('post_merge') or {}).get('test') or '') if isinstance(entry.get('post_merge'), dict) else ''
+        if not found and not named and packet_test:
+            # The recorded detail keeps only the failure's tail, so unittest's header can be cut off
+            # (PR #1925). Bind the packet's test only when the surviving traceback frame is that method
+            # in this marker file.
+            name = packet_test.rsplit('.', 1)[-1]
+            frame = re.search(r'File "[^"]*/' + re.escape(path) + r'", line \d+, in ' + re.escape(name) + r'\b',
+                              str(occurrence.get('detail') or ''))
+            found = [m for m in markers(root, [path]) if frame is not None
+                     and named_test_matches(m, '__main__.' + packet_test, path, occurrence)]
     if not found:
         raise ValueError(f"no quarantine marker for {occurrence['unit']} in {path}")
     # Repairs are dispatched only after merge (deploy-failure-policy.md): a NOT_INTRODUCED flake records
