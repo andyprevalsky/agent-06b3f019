@@ -2855,20 +2855,14 @@ def clean_isolated_successor(state, prior, original, successor, renewal_witness=
              and old_binding['input_fingerprints'].get(prior['gate']) == binding['input_fingerprint']
              and all(value.get('kind') == CUSTODY_KIND and value.get('current_binding') == old_binding
                      for value in historical.values()), 'successor historical custody authority')
-        # This committed projection is not an old full state. Current failure
-        # rows supply locators; guard() rejoins the committed original history
-        # and verifies the actual retained native closure without provider calls.
-        authority = {**copy.deepcopy(old_binding),
-            'historical_no_retry_custody': [{k:copy.deepcopy(v) for k,v in value.items() if k != 'source'}
-                                           for value in historical.values()],
-            'historical_custody_history': copy.deepcopy(state.get('historical_custody_history')),
-            'failures': copy.deepcopy(state.get('failures', [])),
-            'pending_post_merge': copy.deepcopy(state.get('pending_post_merge', []))}
-        for key in ('historical_custody_import', 'historical_custody_transfers'):
-            if key in state:
-                authority[key] = copy.deepcopy(state[key])
-        need(state_identity(authority) == request.get('custody_state_sha256')
-             and guard(authority, admitted_gate, root, current=old_binding) == historical,
+        # Reuse the identity-bearing projection admitted above: it keeps the
+        # complete custody inventory (other gates' rows, original order) that
+        # state_identity() hashes. guard() rejoins the committed original history,
+        # verifies the retained native closure without provider calls, and needs
+        # the same legacy qualifications for known cases that are not custody.
+        need(historical == custody and old_binding == admitted
+             and state_identity(projection) == request.get('custody_state_sha256')
+             and guard(projection, admitted_gate, root, legacy, current=old_binding) == historical,
              'successor historical custody proof')
         need(isinstance(successor.get('case_complete'), dict)
              and all(type(value) is bool for value in successor['case_complete'].values()),

@@ -259,14 +259,17 @@ def kernel_custody_environment(worker_root: Path) -> dict:
     selected = policy == '1' or any(guard_name in option for option in options)
     if not selected:
         return {}
+    # Every preload form that loads the coordinator guard (CommonJS --require/-r or the
+    # --import preload) is dropped; the worker gets exactly one worker-root guard.
+    preload_flags = ('--require', '-r', '--import')
     remapped = []
     index = 0
     while index < len(options):
         option = options[index]
-        if option in ('--require', '-r') and index + 1 < len(options) and guard_name in options[index + 1]:
+        if option in preload_flags and index + 1 < len(options) and guard_name in options[index + 1]:
             index += 2
             continue
-        if not (option.startswith(('--require=', '-r=')) and guard_name in option):
+        if not (option.startswith(tuple(flag + '=' for flag in preload_flags)) and guard_name in option):
             remapped.append(option)
         index += 1
     guard = worker_root / 'back-end/scripts' / guard_name
