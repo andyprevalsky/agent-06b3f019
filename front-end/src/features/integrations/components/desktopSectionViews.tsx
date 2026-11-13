@@ -1,3 +1,4 @@
+import type { MeetingNotesProvider } from '../types';
 /**
  * Section/row view models for the Rose Desktop integrations list.
  *
@@ -10,6 +11,8 @@
  * file only contributes Compute's static Gemini row.
  */
 
+import { INTEGRATION_CATALOG } from '../config';
+import type { IntegrationCatalogKey } from '../types';
 import applePasswordsIcon from '@/assets/apple-passwords-icon.png';
 import chatgptIcon from '@/assets/chatgpt-icon.webp';
 import chromeIcon from '@/assets/chrome-icon.png';
@@ -24,8 +27,13 @@ import { gmailAccounts } from '../hooks/useIntegrationData';
 import type { useMessagesSync } from '../hooks/useMessagesSync';
 import type { usePasswordSync } from '../hooks/usePasswordSync';
 import type { usePlaidIntegration } from '../hooks/usePlaidIntegration';
-import type { useGranola } from '../hooks/useGranola';
 import type { useGithubRepos } from '../hooks/useGithubRepos';
+import type { MeetingNotesConnections } from '../types';
+import {
+  MEETING_NOTES_PROVIDERS,
+  MEETING_NOTES_DESCRIPTION,
+  meetingNotesProviders,
+} from '../config';
 import BrowserIcon from './BrowserIcon';
 import { BrowserCookiesIcon } from './BrowserCookiesSection';
 import type {
@@ -61,9 +69,11 @@ import {
 import { visibleInstitutionItems } from './plaidItemView';
 import PlaidLogoIcon from './PlaidLogoIcon';
 import { InstagramIcon, LinkedInIcon, XIcon } from './SocialsSection';
-import { GranolaIcon } from './GranolaSection';
+import { MeetingNotesIcon } from './MeetingNotesProviderCard';
+import { meetingNotesDetail } from '../hooks/meetingNotesView';
 
 export interface DesktopIntegrationsProps {
+  search: string;
   isBrowserCookiesAvailable: boolean;
   isPasskeysAvailable: boolean;
   isIMessageAvailable: boolean;
@@ -81,12 +91,14 @@ export interface DesktopIntegrationsProps {
   gmail: ReturnType<typeof useGmailConnect>;
   actions: ReturnType<typeof useIntegrationActions>;
   plaid: ReturnType<typeof usePlaidIntegration>;
-  granola: ReturnType<typeof useGranola>;
+  meetingNotes: MeetingNotesConnections;
   github: ReturnType<typeof useGithubRepos>;
 }
 
 export interface DesktopSectionView {
+  catalogKey: IntegrationCatalogKey;
   title: string;
+  description?: string;
   rows: DesktopIntegrationView[];
 }
 
@@ -347,21 +359,42 @@ function socialRows(p: DesktopIntegrationsProps, removal: RemovalPort) {
   return views;
 }
 
-function granolaRow(p: DesktopIntegrationsProps, removal: RemovalPort): DesktopIntegrationView {
-  const row = p.data.connectedIntegrations.find((i) => i.name === 'granola');
-  const { granola } = p;
-  const label = granola.status?.accountEmail ?? 'Granola';
+function meetingNotesRow(
+  p: DesktopIntegrationsProps,
+  removal: RemovalPort,
+  provider: MeetingNotesProvider,
+): DesktopIntegrationView {
+  const row = p.data.connectedIntegrations.find((i) => i.name === provider);
+  const connection = p.meetingNotes[provider];
+  const { name } = meetingNotesProviders[provider];
+  const label = connection.status?.accountEmail ?? name;
+  const expired = connection.status?.status === 'EXPIRED';
+  const accounts = singleAccount(
+    row,
+    {
+      displayName: name,
+      label,
+      detail: meetingNotesDetail(connection, provider),
+      localSyncing: connection.busy === 'sync',
+    },
+    removal,
+  ).map((account) => ({
+    ...account,
+    onResync: () => void (expired ? connection.connect() : connection.sync()),
+    resyncLabel: expired ? `Reconnect ${name}` : `Sync ${name} now`,
+    resyncing: connection.busy === 'sync' || connection.busy === 'connect',
+  }));
   return {
-    key: 'granola',
-    name: 'Granola',
-    icon: tile(DropdownIconPreset.granola, <GranolaIcon />),
-    accounts: singleAccount(row, { displayName: 'Granola', label }, removal),
+    key: provider,
+    name,
+    icon: tile(DropdownIconPreset.granola, <MeetingNotesIcon provider={provider} />),
+    accounts,
     availability: 'ready',
-    onConnect: () => void granola.connect(),
-    connecting: granola.busy === 'connect',
+    onConnect: () => void connection.connect(),
+    connecting: connection.busy === 'connect',
     extra:
-      granola.error !== null ? (
-        <p className="ml-[46px] mt-1 text-xs text-destructive">{granola.error}</p>
+      connection.error !== null ? (
+        <p className="ml-[46px] mt-1 text-xs text-destructive">{connection.error}</p>
       ) : undefined,
   };
 }
@@ -391,19 +424,32 @@ function pebbleIndexRow(p: DesktopIntegrationsProps): DesktopIntegrationView {
 }
 
 /** Sections in the stock order; Compute and Banks need a fully signed-in account.
- * "Other" is always last: Granola (signed in) then Pebble Index 01. */
+ * Meeting note taker groups providers; "Other" is last with Pebble Index 01. */
 export function desktopSectionViews(
   p: DesktopIntegrationsProps,
   removal: RemovalPort,
 ): DesktopSectionView[] {
   const sections: DesktopSectionView[] = [
-    { title: 'Browser Cookies', rows: browserCookieRows(p, removal) },
-    { title: 'Passwords', rows: passwordRows(p, removal) },
-    { title: 'Messages', rows: messageRows(p, removal) },
+    {
+      catalogKey: 'browsers',
+      title: INTEGRATION_CATALOG.browsers.title,
+      rows: browserCookieRows(p, removal),
+    },
+    {
+      catalogKey: 'passwords',
+      title: INTEGRATION_CATALOG.passwords.title,
+      rows: passwordRows(p, removal),
+    },
+    {
+      catalogKey: 'messages',
+      title: INTEGRATION_CATALOG.messages.title,
+      rows: messageRows(p, removal),
+    },
   ];
   if (p.isFullySignedIn) {
     sections.push({
-      title: 'Compute',
+      catalogKey: 'compute',
+      title: INTEGRATION_CATALOG.compute.title,
       rows: [
         comingSoon(
           'gemini',
@@ -412,11 +458,34 @@ export function desktopSectionViews(
         ),
       ],
     });
-    sections.push({ title: 'Banks & Financial Accounts', rows: [plaidRow(p)] });
+    sections.push({
+      catalogKey: 'banks',
+      title: INTEGRATION_CATALOG.banks.title,
+      rows: [plaidRow(p)],
+    });
   }
-  sections.push({ title: 'Socials', rows: socialRows(p, removal) });
-  sections.push({ title: 'File System', rows: [fileSystemRow(p)] });
-  const other = p.isFullySignedIn ? [granolaRow(p, removal)] : [];
-  sections.push({ title: 'Other', rows: [...other, pebbleIndexRow(p)] });
+  sections.push({
+    catalogKey: 'socials',
+    title: INTEGRATION_CATALOG.socials.title,
+    rows: socialRows(p, removal),
+  });
+  sections.push({
+    catalogKey: 'files',
+    title: INTEGRATION_CATALOG.files.title,
+    rows: [fileSystemRow(p)],
+  });
+  if (p.isFullySignedIn) {
+    sections.push({
+      catalogKey: 'meetingNotes',
+      title: INTEGRATION_CATALOG.meetingNotes.title,
+      description: MEETING_NOTES_DESCRIPTION,
+      rows: MEETING_NOTES_PROVIDERS.map((provider) => meetingNotesRow(p, removal, provider)),
+    });
+  }
+  sections.push({
+    catalogKey: 'pebble',
+    title: INTEGRATION_CATALOG.pebble.title,
+    rows: [pebbleIndexRow(p)],
+  });
   return sections;
 }

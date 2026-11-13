@@ -100,11 +100,12 @@ export function mockWhatsAppMessageId(seed: string): string {
   return `wamid.${digest}`;
 }
 
-export type MessagingTransport = 'surge' | 'whatsapp' | 'agentphone' | 'twilio-verify';
+export type MessagingTransport = 'surge' | 'linq' | 'whatsapp' | 'agentphone' | 'twilio-verify';
 export type MessagingMockReason = 'benchmark_agent' | 'non_production_runtime';
 
 const FETCH_FAKE_FLAGS: Record<MessagingTransport, string> = {
   surge: 'BLACKBOX_TEST_FAKE_SURGE',
+  linq: 'BLACKBOX_TEST_FAKE_LINQ',
   whatsapp: 'BLACKBOX_TEST_FAKE_WHATSAPP',
   agentphone: 'BLACKBOX_TEST_FAKE_AGENTPHONE',
   'twilio-verify': 'BLACKBOX_TEST_FAKE_TWILIO',

@@ -4,8 +4,8 @@
  *   [MOUNTED] → flat sections in the existing order:
  *     Browser Cookies · Passwords · Messages · Compute · Banks & Financial Accounts
  *     · Socials · File System · GitHub Repos (signed in; GithubReposSection: connect
- *     with an optional folder, disconnect) · Other (Granola; Pebble Index 01, whose
- *     Connect opens its setup modal)
+ *     with an optional folder, disconnect) · Meeting note taker (Granola, Fireflies)
+ *     · Other (Pebble Index 01, whose Connect opens its setup modal)
  *   Every integration row is a DesktopIntegrationRow: the stock app-icon tile, the
  *   row's ONE account chip (Gmail addresses, Plaid institutions and compute
  *   subscriptions keep listing several, as the stock page does) and a gradient
@@ -27,6 +27,7 @@
  *   Connect / "+ Add account" call the same hooks/actions the stock sections use.
  */
 
+import { integrationMatchesSearch } from '../hooks/integrationSearch';
 import { Fragment, useMemo, type ReactNode } from 'react';
 
 import { mergeAccountsByProvider } from '../hooks/integrationAccounts';
@@ -38,6 +39,7 @@ import {
 } from '../hooks/useSyncProgress';
 import DesktopComputeRow from './DesktopComputeRow';
 import GithubReposSection from './GithubReposSection';
+import SearchGroup from './IntegrationSearchGroup';
 import { type DesktopIntegrationsProps, desktopSectionViews } from './desktopSectionViews';
 import DesktopIntegrationRow, {
   DesktopSectionHeader,
@@ -48,10 +50,21 @@ import RemoveAccountDialog from './RemoveAccountDialog';
 /** Refetch cadence while any account reports a running sync. */
 export const DESKTOP_SYNC_REFRESH_MS = 5_000;
 
-function Section({ title, children }: { title: string; children: ReactNode }) {
+function Section({
+  title,
+  description,
+  children,
+  hidden,
+}: {
+  title: string;
+  description?: string;
+  hidden: boolean;
+  children: ReactNode;
+}) {
   return (
-    <section aria-label={title}>
+    <section aria-label={title} hidden={hidden}>
       <DesktopSectionHeader>{title}</DesktopSectionHeader>
+      {description && <p className="mb-2 text-xs text-muted-foreground">{description}</p>}
       {children}
     </section>
   );
@@ -88,14 +101,20 @@ export default function DesktopIntegrations(props: DesktopIntegrationsProps) {
             {removal.error}
           </p>
         )}
-        {sections.map(({ title, rows }) => (
+        {sections.map(({ catalogKey, title, description, rows }) => (
           <Fragment key={title}>
-            {title === 'Other' && props.isFullySignedIn && (
-              <div className="my-3">
-                <GithubReposSection github={props.github} />
-              </div>
+            {catalogKey === 'meetingNotes' && props.isFullySignedIn && (
+              <SearchGroup catalogKey="githubRepos" search={props.search}>
+                <div className="my-3">
+                  <GithubReposSection github={props.github} />
+                </div>
+              </SearchGroup>
             )}
-            <Section title={title}>
+            <Section
+              title={title}
+              description={description}
+              hidden={!integrationMatchesSearch(catalogKey, props.search)}
+            >
               {title === 'Compute' && (
                 <>
                   <DesktopComputeRow

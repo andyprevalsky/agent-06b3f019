@@ -78,6 +78,7 @@ describe('Rose Desktop integrations: one account per integration', () => {
       'Socials',
       'File System',
       'GitHub Repos',
+      'Meeting note taker',
       'Other',
     ]);
     expect(within(list).queryByText(/manage/i)).not.toBeInTheDocument();

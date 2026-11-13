@@ -231,3 +231,37 @@ export interface ComputeAccount {
   /** Provider cooldown: the account serves nothing until this passes. */
   rateLimitedUntil: string | null;
 }
+
+/** Meeting note taker provider and connection contracts. */
+export type MeetingNotesProvider = 'granola' | 'fireflies';
+export interface MeetingNotesStatus {
+  connected: boolean;
+  status: 'NOT_CONNECTED' | 'PENDING' | 'CONNECTED' | 'SYNCING' | 'SYNC_FAILED' | 'EXPIRED';
+  accountEmail: string | null;
+  backfillDone: boolean;
+  lastSuccessfulSyncAt: string | null;
+  lastError: string | null;
+  documents: Partial<Record<string, number>>;
+}
+
+export interface MeetingNotesConnection {
+  status: MeetingNotesStatus | null;
+  busy: 'connect' | 'sync' | 'disconnect' | null;
+  error: string | null;
+  connect: () => Promise<void>;
+  sync: () => Promise<void>;
+  disconnect: () => Promise<void>;
+}
+export type MeetingNotesConnections = Record<MeetingNotesProvider, MeetingNotesConnection>;
+export type IntegrationCatalogKey =
+  | 'iphone'
+  | 'browsers'
+  | 'passwords'
+  | 'messages'
+  | 'compute'
+  | 'banks'
+  | 'socials'
+  | 'files'
+  | 'githubRepos'
+  | 'meetingNotes'
+  | 'pebble';
