@@ -27912,6 +27912,11 @@ async def run_all_tests():
     for name in sorted(dir(phone_boot_reset_test)):
         if name.startswith("test_"):
             r.record("phone_boot_reset_" + name[5:], _with_pytest_fixtures(getattr(phone_boot_reset_test, name)))
+    from benchmarks import team_data_test
+    for name in sorted(dir(team_data_test)):
+        if name.startswith("test_"):
+            r.record("team_data_" + name[5:], _with_pytest_fixtures(getattr(team_data_test, name)))
+
     from benchmarks import phone_daily_test
     for name in sorted(dir(phone_daily_test)):
         if name.startswith("test_"):

@@ -27,7 +27,6 @@ ROOT = Path(__file__).resolve().parents[2]
 # make admission() demand that outer cycle's custody locator in-process.
 os.environ.pop('DEPLOY_GATE_REQUEST', None)
 sys.path.insert(0, str(ROOT / 'scripts'))
-from lib.test_quarantine import quarantine
 import deploy_test_cycle as cycle
 import deploy_test_worker as worker
 
@@ -3608,12 +3607,6 @@ class StoppedPreStackIsolation(unittest.TestCase):
         receipt = cycle.read(self.paths['receipt'])
         return self.native.validate(receipt, receipt['cleanup_owner'], self.proof)
 
-    @quarantine(
-        since='2026-11-11',
-        repair='pending-handoff:4fda5d31658b416299ef38d253582b78',
-        error='ValueError: native cleanup: old controller still active',
-        evidence='Original .context/deploy-pipeline/rca/4fda5d31658b416299ef38d253582b78.json; RCA https://boxes.dev/thread/thr_5dd9c71054f94b38b1690882366ffc30',
-    )
     def test_stopped_pre_stack_launch_preserves_original_failures_and_cleanup_debt(self):
         before = copy.deepcopy(self.state)
         original = self.paths['receipt'].read_bytes()
@@ -3630,6 +3623,21 @@ class StoppedPreStackIsolation(unittest.TestCase):
         self.assertEqual([], cycle.retained_owners(self.state, [self.gate['name']]))
         self.assertEqual({'UNVERIFIED'}, set(cycle.read(self.paths['receipt'])['cases'].values()))
         self.assertTrue((self.root / '.git/cloudbench-fleet-ownership' / self.owner).is_dir())
+
+    def test_stopped_pre_stack_still_refuses_a_live_original_controller(self):
+        # The fixture controller PID sits above every kernel pid_max, so a host process can never
+        # hold it (RCA 4fda5d31). The native refusal itself must still fire when one is live.
+        pid = int(self.fleet.name.rsplit('-', 1)[-1])
+        self.assertGreater(pid, 4194304)  # Linux PID_MAX_LIMIT
+        actual = self.native.subprocess.check_output
+        def processes(args, *a, **kw):
+            return f'999999 {pid} S\n' if args[:1] == ['ps'] else actual(args, *a, **kw)
+        before, original = copy.deepcopy(self.state), self.paths['receipt'].read_bytes()
+        with patch.object(self.native.subprocess, 'check_output', side_effect=processes):
+            with self.assertRaisesRegex(ValueError, 'old controller still active'):
+                cycle.reconcile(self.state, self.failure['id'], self.proof)
+        self.assertEqual(before, self.state)
+        self.assertEqual(original, self.paths['receipt'].read_bytes())
 
     def test_stopped_pre_stack_rejects_unsafe_provider_or_current_identity(self):
         cases = ('started', 'unknown', 'current-token', 'source', 'mount', 'forged-raw-state', 'raw-token',

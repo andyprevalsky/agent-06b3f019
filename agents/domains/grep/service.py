@@ -186,7 +186,9 @@ def _extract_sources(tool_call: Dict[str, Any]) -> list:
     return _sources_named_by_filters(tool_call)
 
 
-def _source_status_targets(tool_call: Dict[str, Any]) -> tuple[list, Dict[str, set]]:
+def _source_status_targets(
+    tool_call: Dict[str, Any], user_id: Optional[str] = None
+) -> tuple[list, Dict[str, set]]:
     """Map requested grep sources to concrete connector keys for gate probing.
 
     `documents` is a searchable corpus, not a real connector. If the caller
@@ -195,6 +197,11 @@ def _source_status_targets(tool_call: Dict[str, Any]) -> tuple[list, Dict[str, s
     skipped until the concrete connector is resolved.
     """
     requested_sources = _extract_sources(tool_call)
+    # Team availability is authorized by the backend per account. A reader's
+    # missing personal connector must not block another member's shared inbox.
+    owner = tool_call.get("owner_user_id")
+    if tool_call.get("team_id") or (owner and owner != user_id):
+        requested_sources = [source for source in requested_sources if source not in {"email", "gmail", "imessage"}]
     document_provider = _document_provider(tool_call)
     targets: list = []
     target_to_search_sources: Dict[str, set] = {}
@@ -263,7 +270,7 @@ async def execute_grep(
         # can't pause) and hand the marker up. The parent workflow raises the
         # blocking source_connect gate after the explore agent returns.
         requested_sources = _extract_sources(tool_call)
-        gateable_sources, gate_target_search_sources = _source_status_targets(tool_call)
+        gateable_sources, gate_target_search_sources = _source_status_targets(tool_call, user_id)
         unavailable: list = []
         search_call = _backend_grep_call(tool_call)
         if gateable_sources:

@@ -395,8 +395,8 @@ describe('Rose left bar (flag on)', () => {
       within(roseBar())
         .getAllByRole('button')
         .map((b) => b.getAttribute('aria-label'))
-        .slice(-3);
-    expect(bottom()).toEqual(['Feedback', 'Archived', 'Andy Prevalsky']);
+        .slice(-4);
+    expect(bottom()).toEqual(['Feedback', 'Teams', 'Archived', 'Andy Prevalsky']);
     const bar = roseBar();
     expect(
       within(bar).getByRole('button', { name: 'Feedback' }).querySelector('svg.lucide-megaphone'),
@@ -406,7 +406,7 @@ describe('Rose left bar (flag on)', () => {
     unmount();
 
     renderBar({ showAdminHealth: true });
-    expect(bottom()).toEqual(['Biz health', 'Archived', 'Andy Prevalsky']);
+    expect(bottom()).toEqual(['Biz health', 'Teams', 'Archived', 'Andy Prevalsky']);
   });
 
   it('Biz health opens the admin health page in the right drawer; clicking again closes it', async () => {

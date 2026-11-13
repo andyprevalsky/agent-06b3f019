@@ -10,6 +10,7 @@ import userEvent from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
 import { renderWithProviders } from './test-wrapper';
 import { server } from './msw/server';
+import { mockTeams } from './teams.fixtures';
 import MobileAgentDrawer from '@/features/terminal-component-group/components/MobileAgentDrawer';
 import type { Agent } from '@/lib/api';
 
@@ -220,5 +221,26 @@ describe('MobileAgentDrawer', () => {
 
     await waitFor(() => expect(deletedId).toBe('a1'));
     await waitFor(() => expect(onRefreshAgents).toHaveBeenCalled());
+  });
+  it('closes the menu before opening Teams so the new panel owns focus', async () => {
+    mockTeams();
+    const user = userEvent.setup();
+    renderWithProviders(<MobileAgentDrawer {...defaultProps({ roseHeader: true })} />);
+    await user.click(screen.getByRole('button', { name: 'Open menu' }));
+    expect(screen.queryByRole('button', { name: 'Biz health' })).toBeNull();
+    await user.click(screen.getByRole('button', { name: 'Teams' }));
+    expect(await screen.findByLabelText('Team title')).toBeInTheDocument();
+    expect(screen.getByTestId('rose-app-panel')).toHaveAttribute('data-state', 'open');
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+  });
+  it('places Teams beside the admin-only Biz health mobile entry', async () => {
+    const session = JSON.parse(localStorage.getItem('rose-session')!);
+    session.user.id = '1f85ff25-6e29-4c1b-8739-f917bd101a30';
+    localStorage.setItem('rose-session', JSON.stringify(session));
+    const user = userEvent.setup();
+    renderWithProviders(<MobileAgentDrawer {...defaultProps({ roseHeader: true })} />);
+    await user.click(screen.getByRole('button', { name: 'Open menu' }));
+    const buttons = screen.getAllByRole('button').map((button) => button.textContent);
+    expect(buttons.indexOf('Teams')).toBe(buttons.indexOf('Biz health') + 1);
   });
 });

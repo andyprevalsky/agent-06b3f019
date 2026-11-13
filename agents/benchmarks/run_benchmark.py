@@ -110,6 +110,7 @@ from benchmarks.phone_callee import (
     resolve_callee_prompt,
 )
 from benchmarks.phone_critical_attention import PHONE_BENCH_TASK_NAMES
+from benchmarks.team_data import TASK_MARKERS as TEAM_DATA_TASKS, apply_team_fixture, verified_fixture_database
 from benchmarks.phone_daily import (
     TASK_KINDS as PHONE_DAILY_TASKS,
 )
@@ -15708,6 +15709,11 @@ async def _run_single_task_as_run_user(
         # scenario intentionally removes shared browser state and must restore it
         # even when agent creation or evaluation fails.
         live_fixture_manifests = await _apply_live_fixtures(task, base_url)
+        if task.name in TEAM_DATA_TASKS:
+            team_db, team_cloud = verified_fixture_database(_isolated_stack_database_url(), _benchmark_context_path(), base_url)
+            team_fixture = await asyncio.to_thread(apply_team_fixture, task.name, base_url,
+                _current_benchmark_user_id(), team_db, owned_cloud=team_cloud)
+            print(f"    Applied isolated team data fixture: {team_fixture['marker']}")
         if task.name in PHONE_DAILY_TASKS:
             preflight_daily(task.name, base_url, _current_benchmark_user_id())
         if task.name in PHONE_BENCH_TASK_NAMES:

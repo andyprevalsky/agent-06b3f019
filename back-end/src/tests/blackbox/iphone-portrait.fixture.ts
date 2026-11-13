@@ -32,3 +32,34 @@ export function portraitOcr() {
     { text: 'tions', confidence: 1, source: 'pixels', x: 230, y: 706, w: 60, h: 26 },
   ];
 }
+
+/** Real Control Center OCR from production (lease 5544f520 cursors 31/48): stray hyphenation glyph. */
+export function livePortraitOcr(glyph: '-' | '~' = '-') {
+  return [
+    {
+      text: '\u2022\u2022\u2022\u2022',
+      confidence: 1,
+      source: 'pixels',
+      x: 120,
+      y: 143,
+      w: 40,
+      h: 10,
+    },
+    { text: 'No SIM', confidence: 1, source: 'pixels', x: 193, y: 137, w: 94.3, h: 27.2 },
+    { text: 'Reduce', confidence: 1, source: 'pixels', x: 247, y: 643, w: 90.4, h: 23.8 },
+    {
+      text: `Interrup- ${glyph}`,
+      confidence: 1,
+      source: 'pixels',
+      x: 266,
+      y: 676,
+      w: 136.5,
+      h: 26.8,
+    },
+    { text: 'tions', confidence: 1, source: 'pixels', x: 230, y: 704, w: 64.4, h: 25 },
+    { text: 'J', confidence: 1, source: 'pixels', x: 316, y: 838, w: 24, h: 24 },
+    { text: '100%', confidence: 1, source: 'pixels', x: 552, y: 137, w: 76, h: 26 },
+    { text: 'Not Playing', confidence: 1, source: 'pixels', x: 482, y: 334, w: 144, h: 28 },
+    { text: '((p))', confidence: 0.5, source: 'pixels', x: 707, y: 778, w: 42, h: 32 },
+  ];
+}

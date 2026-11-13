@@ -8,7 +8,7 @@
  *   interaction (per channel)              completion notify
  *   created   source SMS | WHATSAPP   ─┐
  *   messaged  supervisor reply_to_agent ├─▶ delivered on SMS (+ WhatsApp mirror)
- *   relayed   question / budget update ─┘
+ *   relayed   question / approval / cost limit / card setup ─┘
  *   none      (kickoff receipt only)  ───▶ skipped: no_messaging_agent_interaction
  *
  * Messaged cases run the real inbound webhook → supervisor (scripted tool
@@ -60,7 +60,8 @@ async function createAgent(
   fixture: ScopedFixture,
   source: AgentSource,
   status: AgentStatus,
-  parentAgentId?: string
+  parentAgentId?: string,
+  busId: string | null | undefined = parentAgentId
 ): Promise<string> {
   const agent = await prisma.agent.create({
     data: {
@@ -69,7 +70,7 @@ async function createAgent(
       source,
       status,
       progress: status === 'COMPLETED' ? 1 : 0.4,
-      ...(parentAgentId !== undefined ? { parentAgentId, busId: parentAgentId, depth: 1 } : {}),
+      ...(parentAgentId !== undefined ? { parentAgentId, busId, depth: 1 } : {}),
     },
   });
   fixture.agentIds.push(agent.id);
@@ -85,6 +86,11 @@ async function cleanup(fixture: ScopedFixture): Promise<void> {
           messagingAgentInteractionKey(id),
         ]),
       },
+    },
+  });
+  await prisma.toolSideEffect.deleteMany({
+    where: {
+      operationKey: { startsWith: `lifecycle-sms.write_lock:attn-scope-${fixture.userId}` },
     },
   });
   await prisma.agent.deleteMany({
@@ -261,6 +267,27 @@ async function relayQuestion(fixture: ScopedFixture, agentId: string, channel: C
     assert(bodies.WHATSAPP.length === 1, `Relay WhatsApp not delivered: ${JSON.stringify(bodies)}`);
 }
 
+/** One delivered relay of `eventType` on the messaging thread, isolated by its capture token. */
+async function relayUpdate(
+  fixture: ScopedFixture,
+  agentId: string,
+  eventType: 'write_lock' | 'cost_limit' | 'agentcard_setup'
+) {
+  const payloads = {
+    write_lock: {
+      question: 'May I place the $42 order?',
+      attention_request_id: `attn-scope-${fixture.userId}-${agentId}`,
+      workflow_id: `wf-scope-${agentId}`,
+    },
+    cost_limit: { tree_cost_cents: 120, price_limit_cents: 100 },
+    agentcard_setup: { setup_url: 'https://rose.test/api/agentcard/connect?user=scope' },
+  };
+  const token = captureToken(`completion-scope-${eventType}`);
+  await notify(fixture, agentId, eventType, payloads[eventType], token);
+  const bodies = deliveredBodies(await readCapturesForToken(token), '');
+  assert(bodies.SMS.length === 1, `${eventType} relay not delivered: ${JSON.stringify(bodies)}`);
+}
+
 async function withFixture(
   channel: Channel,
   fn: (fixture: ScopedFixture) => Promise<void>
@@ -315,6 +342,59 @@ export async function testCompletionScope_smsBudgetIncreaseNotified() {
     );
     assert(result.success, `increase_budget failed: ${JSON.stringify(result)}`);
     await assertCompletionDelivered(fixture, agentId, 'SMS');
+  });
+}
+
+export async function testCompletionScope_smsReplyToChildNotifiesRoot() {
+  await withFixture('SMS', async (fixture) => {
+    const rootId = await createAgent(fixture, 'WEB', 'ACTIVE');
+    const childId = await createAgent(fixture, 'WEB', 'ACTIVE', rootId);
+    await supervisorRepliesToAgent(fixture, childId, 'SMS');
+    // Only the tree marker connects this root to the SMS agent: its own
+    // conversation never saw an sms_supervisor message.
+    const rootReplies = await prisma.message.count({
+      where: { agentId: rootId, metadata: { path: ['source'], equals: 'sms_supervisor' } },
+    });
+    assert(rootReplies === 0, `Root unexpectedly holds ${rootReplies} supervisor messages`);
+    const marker = await prisma.toolSideEffect.findUnique({
+      where: { operationKey: messagingAgentInteractionKey(rootId) },
+    });
+    assert(marker !== null, 'Child reply did not mark the root as interacted');
+    await assertCompletionDelivered(fixture, rootId, 'SMS');
+  });
+}
+
+export async function testCompletionScope_smsRelayedWriteLockNotified() {
+  await withFixture('SMS', async (fixture) => {
+    const agentId = await createAgent(fixture, 'WEB', 'ACTIVE');
+    await relayUpdate(fixture, agentId, 'write_lock');
+    await assertCompletionDelivered(fixture, agentId, 'SMS');
+  });
+}
+
+export async function testCompletionScope_smsRelayedCostLimitNotified() {
+  await withFixture('SMS', async (fixture) => {
+    const agentId = await createAgent(fixture, 'WEB', 'ACTIVE');
+    await relayUpdate(fixture, agentId, 'cost_limit');
+    await assertCompletionDelivered(fixture, agentId, 'SMS');
+  });
+}
+
+export async function testCompletionScope_smsRelayedAgentCardSetupNotified() {
+  await withFixture('SMS', async (fixture) => {
+    const agentId = await createAgent(fixture, 'WEB', 'ACTIVE');
+    await relayUpdate(fixture, agentId, 'agentcard_setup');
+    await assertCompletionDelivered(fixture, agentId, 'SMS');
+  });
+}
+
+export async function testCompletionScope_relayFromChildWithoutBusIdNotifiesRoot() {
+  await withFixture('SMS', async (fixture) => {
+    const rootId = await createAgent(fixture, 'WEB', 'ACTIVE');
+    // A restored row can lack busId; the marker must still reach the root.
+    const childId = await createAgent(fixture, 'WEB', 'ACTIVE', rootId, null);
+    await relayQuestion(fixture, childId, 'SMS');
+    await assertCompletionDelivered(fixture, rootId, 'SMS');
   });
 }
 

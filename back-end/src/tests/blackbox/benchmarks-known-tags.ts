@@ -141,4 +141,6 @@ export const KNOWN_TAGS = [
   'agent-graph',
   // Harness plumbing; matches the predeploy deploy_category of the same name.
   'harness',
+  // Explicit team account sharing (team-daily-* access-boundary benches).
+  'teams',
 ];
