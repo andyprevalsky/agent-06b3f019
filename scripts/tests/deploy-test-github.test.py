@@ -265,7 +265,8 @@ class Executor(unittest.TestCase):
                                 'GIT_COMMITTER_NAME': 't', 'GIT_COMMITTER_EMAIL': 't@x'})
         self.head = subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=self.root, check=True, capture_output=True,
                                    text=True).stdout.strip()
-        environ = patch.dict(os.environ, {'DEPLOY_WORKER_ROOT': str(self.workers)})
+        environ = patch.dict(os.environ, {'DEPLOY_WORKER_ROOT': str(self.workers),
+                                         'CLOUDBENCH_KERNEL_PROXY_CUSTODY': '0', 'NODE_OPTIONS': ''})
         environ.start()
         self.addCleanup(environ.stop)
         recipe = patch.object(g, 'backend_recipe', lambda root, env, timeout: {'sentinel': timeout, 'env': env})

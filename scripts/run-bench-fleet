@@ -786,6 +786,11 @@ if [ -z "${CLOUDBENCH_SCRIPT_SNAPSHOT:-}" ]; then
        "$ROOT_DIR/scripts/cloudbench-select-snapshot.py" \
        "$ROOT_DIR/scripts/cloudbench-worker-snapshot.py" \
        "$ROOT_DIR/scripts/cloudbench-source.py" \
+       "$ROOT_DIR/scripts/cloudbench-source-env.py" \
+       "$ROOT_DIR/scripts/cloudbench-source-lease.py" \
+       "$ROOT_DIR/scripts/deploy_test_native_cleanup.py" \
+       "$ROOT_DIR/scripts/cloudbench-prepare-source-create.py" \
+       "$ROOT_DIR/scripts/cloudbench-disposable-controller.py" \
        "$ROOT_DIR/scripts/cloudbench-warm-pool.py" \
        "$ROOT_DIR/scripts/cloudbench-warm-source.py" \
        "$ROOT_DIR/scripts/cloudbench-aggregate-runs.py" \
@@ -857,6 +862,7 @@ MACHINE_READINESS_SCRIPT="$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-machine-readine
 SNAPSHOT_SELECTOR_SCRIPT="$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-select-snapshot.py"
 WORKER_SNAPSHOT_HELPER="$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-worker-snapshot.py"
 SOURCE_HELPER="$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-source.py"
+SOURCE_LEASE_HELPER="$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-source-lease.py"
 WARM_SOURCE_HELPER="$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-warm-source.py"
 AGGREGATE_RUNS_SCRIPT="$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-aggregate-runs.py"
 EXECUTION_PROVENANCE_SCRIPT="$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench_execution_provenance.py"
@@ -1100,6 +1106,7 @@ POOL_COLD_BOOTSTRAP="0"  # future empty-checkout intent, never historical warm e
 PROVISION_POOL=""       # --provision-pool N: pre-provision N stopped clones (current image) then exit
 FRESH_VOLUMES="${CLOUDBENCH_FRESH_VOLUMES:-1}"
 FRESH_VOLUMES_REQUESTED=0
+SNAPSHOT_VOLUMES_REQUESTED=0
 INFRA_PROBE="${CLOUDBENCH_INFRA_PROBE:-0}"
 SKIP_AUTOSCALER="${CLOUDBENCH_SKIP_AUTOSCALER:-0}"
 QUALIFY_WORKER=0
@@ -1218,6 +1225,12 @@ list_donor_snapshots() {
 # ── Capture an explicit immutable fleet source ─────────────────────────────
 PRIVATE_SOURCE_FILE=""
 PRIVATE_SOURCE_SHA256="none"
+PRIVATE_SOURCE_LEASE_PROTOCOL="none"
+PRIVATE_SOURCE_GUEST_ENV_MODE="none"
+PRIVATE_SOURCE_GUEST_ENV_CAPSULE_SHA256="none"
+PRIVATE_SOURCE_LEASE_PID=""
+PRIVATE_SOURCE_LEASE_READY=""
+PRIVATE_SOURCE_LEASE_RELEASE=""
 PRIVATE_SOURCE_ID=""
 PRIVATE_SOURCE_VOLUME_ID=""
 SHARED_WARM_ID=""
@@ -1230,6 +1243,14 @@ if [ -n "${CLOUDBENCH_SOURCE_MANIFEST:-}" ]; then
         PRIVATE_SOURCE_REGION PRIVATE_SOURCE_NODE_FP PRIVATE_SOURCE_PY_FP \
         SHARED_WARM_ID SHARED_WARM_VOLUME_ID PRIVATE_SOURCE_INSTANCE_ID < <(python3 "$SOURCE_HELPER" fields "$PRIVATE_SOURCE_FILE")
     [ -n "$PRIVATE_SOURCE_ID" ] && [ -n "$SHARED_WARM_VOLUME_ID" ] || exit 1
+    PRIVATE_SOURCE_LEASE_PROTOCOL="$(python3 "$SOURCE_HELPER" protocol "$PRIVATE_SOURCE_FILE")" || exit 1
+    read -r PRIVATE_SOURCE_GUEST_ENV_MODE PRIVATE_SOURCE_GUEST_ENV_CAPSULE_SHA256 < <(
+        python3 - "$PRIVATE_SOURCE_FILE" <<'PY_CAPSULE_CAPTURE'
+import json, sys
+value = json.load(open(sys.argv[1]))
+print(value.get('guest_env_mode', 'none'), value.get('guest_env_capsule_sha256', 'none'))
+PY_CAPSULE_CAPTURE
+    )
     # Re-exec children consume the same captured bytes, never the caller's path.
     export CLOUDBENCH_SOURCE_MANIFEST="$PRIVATE_SOURCE_FILE"
 fi
@@ -1346,8 +1367,8 @@ while [ $# -gt 0 ]; do
             if [ "$#" -ge 2 ]; then shift 2; else shift; fi
             ;;
         --provision-pool) PROVISION_POOL="${2:-}"; shift 2 ;;   # one-time: create N stopped clones, then exit
-        --fresh-volumes) FRESH_VOLUMES=1; FRESH_VOLUMES_REQUESTED=1; shift ;;
-        --snapshot-volumes) FRESH_VOLUMES=0; FRESH_VOLUMES_REQUESTED=0; shift ;;
+        --fresh-volumes) FRESH_VOLUMES=1; FRESH_VOLUMES_REQUESTED=1; SNAPSHOT_VOLUMES_REQUESTED=0; shift ;;
+        --snapshot-volumes) FRESH_VOLUMES=0; FRESH_VOLUMES_REQUESTED=0; SNAPSHOT_VOLUMES_REQUESTED=1; shift ;;
         --qualify-worker) QUALIFY_WORKER=1; shift ;;
         --infra-probe)    INFRA_PROBE="1"; STRICT_BARRIER="1"; shift ;;
         --skip-autoscaler) SKIP_AUTOSCALER="1"; shift ;;
@@ -1368,6 +1389,24 @@ done
 # Maintenance reconciles its original ownership; never converts old borrowed resources.
 [ "$RECOVER_STALE_ONLY" != 1 ] || DISPOSABLE_LIFECYCLE=0
 case "$FRESH_VOLUMES" in 0|1) ;; *) echo "❌ invalid fresh-volume mode" >&2; exit 2 ;; esac
+owned_capsule_storage_admission() {
+    [ "${PRIVATE_SOURCE_GUEST_ENV_MODE:-none}" = owned-capsule-v1 ] || return 0
+    [ "${RECOVER_STALE_ONLY:-0}" != 1 ] || return 0
+    # This typed source stores its private capsule outside the checkout on its
+    # immutable Volume snapshot. Empty storage cannot execute its environment.
+    if [ "${FRESH_VOLUMES_REQUESTED:-0}" != 0 ] \
+        || { [ "${CLOUDBENCH_FRESH_VOLUMES:-0}" = 1 ] && [ "${SNAPSHOT_VOLUMES_REQUESTED:-0}" != 1 ]; } \
+        || [ "${POOL_COLD_BOOTSTRAP:-0}" = 1 ]; then
+        echo "❌ owned-capsule source requires its captured snapshot; explicit fresh-empty or cold bootstrap policy conflicts" >&2
+        return 1
+    fi
+    [ -n "${PRIVATE_SOURCE_FILE:-}" ] && [ -n "${PRIVATE_SOURCE_SNAPSHOT:-}" ] \
+        && [ "${PRIVATE_SOURCE_LEASE_PROTOCOL:-none}" = cloudbench-source-lease-v1 ]
+}
+owned_capsule_storage_admission || exit 2
+if [ "${PRIVATE_SOURCE_GUEST_ENV_MODE:-none}" = owned-capsule-v1 ]; then
+    FRESH_VOLUMES=0
+fi
 reuse_pool_only_admission() {
     [ "${POOL_REUSE_ONLY:-0}" = 1 ] || return 0
     # Recovery maintenance allocates no new Machine and must remain available.
@@ -1900,9 +1939,134 @@ source "${CLOUDBENCH_SCRIPT_SNAPSHOT:-$ROOT_DIR/scripts/lib}/cloudbench-archived
 FLY_API_TOKEN="$(resolve_fly_token)"
 [ -n "${FLY_API_TOKEN:-}" ] || { echo "❌ No Fly auth token found." >&2; exit 1; }
 export FLY_API_TOKEN
+private_source_holder_identity() {
+    python3 "${CLOUDBENCH_SCRIPT_SNAPSHOT:-$ROOT_DIR/scripts}/process-identity.py" "$PRIVATE_SOURCE_LEASE_PID"
+}
+
+private_source_lease_guard() {
+    [ "${PRIVATE_SOURCE_LEASE_PROTOCOL:-none}" != none ] || return 0
+    [ "$PRIVATE_SOURCE_LEASE_PROTOCOL" = cloudbench-source-lease-v1 ] || return 1
+    python3 "$SOURCE_LEASE_HELPER" check --ready "$PRIVATE_SOURCE_LEASE_READY" --manifest "$PRIVATE_SOURCE_FILE" \
+        --consumer-owner "$FLEET_OWNER_TOKEN" --run-id "$RUN_ID" \
+        --source-id "$PRIVATE_SOURCE_ID" --manifest-sha256 "$PRIVATE_SOURCE_SHA256" \
+        --parent-pid "$PRIVATE_SOURCE_LEASE_PARENT_PID"
+}
+
+start_private_source_lease() {
+    [ "${PRIVATE_SOURCE_LEASE_PROTOCOL:-none}" != none ] || return 0
+    PRIVATE_SOURCE_LEASE_PARENT_PID="$$"
+    PRIVATE_SOURCE_LEASE_READY="$FLEET_DIR/source-lease/ready.json"
+    PRIVATE_SOURCE_LEASE_RELEASE="$FLEET_DIR/source-lease/release.json"
+    python3 "$SOURCE_LEASE_HELPER" hold --manifest "$PRIVATE_SOURCE_FILE" \
+        --consumer-owner "$FLEET_OWNER_TOKEN" --run-id "$RUN_ID" --workspace "$ROOT_DIR" \
+        --journal "$FLEET_DIR/source-lease" --ready "$PRIVATE_SOURCE_LEASE_READY" \
+        --release-proof "$PRIVATE_SOURCE_LEASE_RELEASE" --parent-pid "$$" \
+        >"$FLEET_DIR/source-lease.log" 2>&1 &
+    PRIVATE_SOURCE_LEASE_PID=$!
+    PRIVATE_SOURCE_LEASE_BIRTH="$(private_source_holder_identity)" || return 1
+    local deadline=$((SECONDS + 60))
+    while [ ! -f "$PRIVATE_SOURCE_LEASE_READY" ]; do
+        if ! kill -0 "$PRIVATE_SOURCE_LEASE_PID" 2>/dev/null || [ "$SECONDS" -ge "$deadline" ]; then
+            echo "❌ private source lease was not admitted; no clone allocation authorized" >&2
+            return 1
+        fi
+        sleep 1
+    done
+    export PRIVATE_SOURCE_LEASE_PROTOCOL PRIVATE_SOURCE_LEASE_READY PRIVATE_SOURCE_LEASE_PARENT_PID \
+        PRIVATE_SOURCE_ID PRIVATE_SOURCE_SHA256 PRIVATE_SOURCE_FILE SOURCE_LEASE_HELPER FLEET_OWNER_TOKEN RUN_ID
+    private_source_lease_guard
+}
+
+finish_private_source_lease() {
+    [ -n "${PRIVATE_SOURCE_LEASE_PID:-}" ] || return 0
+    local status=0 deadline=$((SECONDS + ${CLOUDBENCH_CHILD_TERM_SECONDS:-30}))
+    if [ -z "${PRIVATE_SOURCE_LEASE_BIRTH:-}" ] || \
+        [ "$(private_source_holder_identity 2>/dev/null || true)" != "$PRIVATE_SOURCE_LEASE_BIRTH" ]; then
+        # A recycled PID or unreadable birth is never authority to signal or wait.
+        echo "❌ source holder identity unavailable; durable claim retained" >&2
+        return 1
+    fi
+    if [ -f "$FLEET_DIR/_batch/lifecycle.json" ] && [ -d "${FLEET_TEARDOWN_OWNERSHIP_DIR:-}" ]; then
+        python3 - "$PRIVATE_SOURCE_LEASE_RELEASE" "$FLEET_TEARDOWN_OWNERSHIP_DIR" "$FLEET_DIR/_batch/lifecycle.json" \
+            "$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-volume-migration.py" <<'PY_SOURCE_RELEASE' || status=1
+import json, runpy, sys
+from pathlib import Path
+path, audit, lifecycle, helper = sys.argv[1:]
+storage = runpy.run_path(helper)
+payload = (json.dumps({'audit_dir': audit, 'lifecycle': lifecycle}, sort_keys=True) + '\n').encode()
+storage['publish'](Path(path), payload, immutable=True)
+PY_SOURCE_RELEASE
+    else
+        status=1
+    fi
+    while kill -0 "$PRIVATE_SOURCE_LEASE_PID" 2>/dev/null && [ "$SECONDS" -lt "$deadline" ] && [ "$status" = 0 ]; do
+        # A completed child must be reaped even when kill -0 still sees a zombie.
+        case "$(ps -p "$PRIVATE_SOURCE_LEASE_PID" -o stat= 2>/dev/null)" in ''|Z*) break ;; esac
+        sleep 1
+    done
+    if kill -0 "$PRIVATE_SOURCE_LEASE_PID" 2>/dev/null; then
+        case "$(ps -p "$PRIVATE_SOURCE_LEASE_PID" -o stat= 2>/dev/null)" in
+            ''|Z*) ;;
+            *)
+                status=1
+                # The normal close budget is spent. Reuse the existing exact-job,
+                # birth-fenced tree join with no additional TERM grace.
+                if ! cloudbench_terminate_tree_and_wait 0 "$PRIVATE_SOURCE_LEASE_PID"; then
+                    echo "❌ source lease holder did not join; durable claim retained" >&2
+                    return 1
+                fi ;;
+        esac
+    fi
+    wait "$PRIVATE_SOURCE_LEASE_PID" || status=1
+    PRIVATE_SOURCE_LEASE_PID=""
+    [ "$status" = 0 ] || echo "❌ source consumer closure unresolved; durable claim retained" >&2
+    return "$status"
+}
+
+fleet_seal_source_claim_unresolved() {  # <lifecycle.json>: holder exited without closing its durable claim
+    # The holder's close needs the sealed lifecycle as its proof, so the claim
+    # result is known only afterward. Reseal the run verdict as failed while
+    # preserving the physical teardown facts (cleanup_verified, audit_sha256)
+    # that exact-owner claim recovery still requires.
+    [ -f "$1" ] && [ ! -L "$1" ] || return 0
+    python3 - "$1" <<'PY_SOURCE_CLAIM_VERDICT'
+import json
+import os
+import sys
+from pathlib import Path
+
+target = Path(sys.argv[1])
+payload = json.loads(target.read_text())
+if not isinstance(payload, dict) or payload.get("version") != 1:
+    raise SystemExit(1)
+payload.update(status="failed", controller_exit_code=1, source_claim_closed=False)
+temporary = target.with_name(f".lifecycle.{os.getpid()}.tmp")
+try:
+    with temporary.open("x") as handle:
+        json.dump(payload, handle, sort_keys=True)
+        handle.write("\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temporary, target)
+    descriptor = os.open(target.parent, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+finally:
+    temporary.unlink(missing_ok=True)
+PY_SOURCE_CLAIM_VERDICT
+}
+
 private_source_allows_provider_call() {
     [ -n "${PRIVATE_SOURCE_ID:-}" ] || return 0
     local verb="${1:-} ${2:-}" arg
+    case "$verb" in
+        "machine clone"|"machines clone"|"machine run"|"machines run")
+            if [ "${PRIVATE_SOURCE_LEASE_PROTOCOL:-none}" != none ]; then
+                private_source_lease_guard || return 1
+            fi ;;
+    esac
     case "$verb" in
         "machine update"|"machines update"|"machine start"|"machines start"|"machine stop"|"machines stop"|"machine destroy"|"machines destroy"|"machine restart"|"machines restart"|"volumes destroy"|"volume destroy"|"volumes update"|"volume update"|"ssh console"|"ssh sftp")
             for arg in "$@"; do
@@ -1958,6 +2122,7 @@ bench_simulates() {  # <task>; --sim-on or a catalog simulate task (the guest se
 }
 primary_clone_storage_mode() {
     local bench="$1" index
+    [ "${PRIVATE_SOURCE_GUEST_ENV_MODE:-none}" != owned-capsule-v1 ] || { printf snapshot; return; }
     [ "$FRESH_VOLUMES" = 1 ] || { printf snapshot; return; }
     is_sim_on "$bench" && { printf snapshot; return; }
     for index in "${!BENCHES[@]}"; do
@@ -6054,7 +6219,7 @@ fleet_disable_disposable_volume_snapshots() (  # <name> <Machine> <Volume> [snap
     [ "${DISPOSABLE_LIFECYCLE:-0}" = 1 ] || return 0
     fleet_current_disposable_registry "$FLEET_REGISTRY_DIR" || return 1
     # Pass the exact source-owned mutation guards to bounded child shells.
-    export -f FLY private_source_allows_provider_call \
+    export -f FLY private_source_allows_provider_call private_source_lease_guard \
         archived_reuse_helper archived_reuse_sftp_get archived_reuse_transport_args \
         archived_reuse_fenced_effect cloudbench_mutation_admission cloudbench_mutation_launch_code
     export APP GIT_COMMON_DIR PRIVATE_SOURCE_ID PRIVATE_SOURCE_VOLUME_ID SHARED_WARM_ID SHARED_WARM_VOLUME_ID \
@@ -12685,6 +12850,22 @@ recover_registry_primaries_to_pool() {  # exact recovery lock + canonical eviden
     done <<< "$proof_plan"
 }
 
+fleet_close_recovered_source_consumer() {  # <original owner>; canonical audit, never caller run paths
+    local owner="$1" audit="$FLEET_AUDIT_ROOT/$1" manifest digest protocol workspace
+    manifest="$audit/source-manifest.json"
+    digest="$(registry_meta_value "$audit/meta" source_manifest_sha256)"
+    if [ -z "$digest" ]; then
+        [ ! -e "$manifest" ] && [ ! -L "$manifest" ]
+        return $?
+    fi
+    protocol="$(python3 "$SOURCE_HELPER" protocol "$manifest" --sha256 "$digest")" || return 1
+    [ "$protocol" != none ] || return 0
+    [ "$protocol" = cloudbench-source-lease-v1 ] || return 1
+    workspace="$(registry_meta_value "$audit/meta" workspace_root)"
+    [ -n "$workspace" ] || return 1
+    python3 "$SOURCE_LEASE_HELPER" recover-close --workspace "$workspace" --consumer-owner "$owner"
+}
+
 recover_exact_stale_fleet_owner() {  # <32-hex-owner-token>
     local token="$1" registry="$FLEET_OWNERSHIP_ROOT/$1" meta orphan_audit
     local version app policy cleanup_state host owner_status recovery_lock_status
@@ -12705,6 +12886,7 @@ recover_exact_stale_fleet_owner() {  # <32-hex-owner-token>
             && [ "$(registry_meta_value "$orphan_audit/meta" fleet_owner_token)" = "$token" ] \
             && [ "$(registry_meta_value "$orphan_audit/meta" status)" \
                 = "provider-teardown-verified" ]; then
+            fleet_close_recovered_source_consumer "$token" || return 1
             fleet_publish_recovered_terminal_projection "$orphan_audit"
             return $?
         fi
@@ -12915,6 +13097,7 @@ PY
     fi
     release_registry_recovery_lock "$registry"
     fleet_registry_remove_if_empty "$registry" || return 1
+    fleet_close_recovered_source_consumer "$token" || return 1
     fleet_publish_recovered_terminal_projection "$FLEET_AUDIT_ROOT/$token"
 }
 
@@ -13086,6 +13269,9 @@ fleet_clone_with_queue_admission() {  # <native-seconds> <ledger> <clone-args...
 fleet_clone_volume_request() {  # <seconds> create|find <helper args...>; one JSON receipt on stdout
     local seconds="$1"
     shift
+    if [ "${1:-}" = create ] && [ "${PRIVATE_SOURCE_LEASE_PROTOCOL:-none}" != none ]; then
+        private_source_lease_guard || return 1
+    fi
     case "$seconds" in ''|*[!0-9]*|0) return 2 ;; esac
     python3 "${CLOUDBENCH_SCRIPT_SNAPSHOT:-$ROOT_DIR/scripts}/cloudbench-clone-volume.py" "$@" \
         --app "$APP" --timeout "$seconds"
@@ -13156,6 +13342,24 @@ clone_create_owned_volume() {  # <ledger> <clone> <source> <region> <vm-size> <v
         --inventory "${INVENTORY_INDEX:-}/current/admission-machines.json")
     CLONE_VOLUME_ID=""
     CLONE_VOLUME_OUT=""
+    if [ "${PRIVATE_SOURCE_GUEST_ENV_MODE:-none}" = owned-capsule-v1 ]; then
+        # Recheck the captured authority and the live consumer guard at the
+        # last boundary before the native Volume POST, including worker clones.
+        local captured_fields captured_id captured_volume captured_snapshot
+        captured_fields="$(python3 "$SOURCE_HELPER" fields "$PRIVATE_SOURCE_FILE" --sha256 "$PRIVATE_SOURCE_SHA256")" || return 3
+        read -r captured_id captured_volume captured_snapshot _ <<< "$captured_fields"
+        [ "$captured_id" = "$PRIVATE_SOURCE_ID" ] && [ "$captured_volume" = "$PRIVATE_SOURCE_VOLUME_ID" ] \
+            && [ "$captured_snapshot" = "$PRIVATE_SOURCE_SNAPSHOT" ] \
+            && [ "$storage_mode" = snapshot ] && [ "$snapshot_id" = "$captured_snapshot" ] \
+            && [ -n "$snapshot_id" ] && private_fleet_source_admission || return 3
+        python3 - "${INVENTORY_INDEX:-}/current/admission-machines.json" "$source_id" <<'PY_CAPSULE_ENCRYPTED' || return 3
+import json, sys
+rows=[row for row in json.load(open(sys.argv[1])) if row.get('id')==sys.argv[2]]
+assert len(rows)==1
+mounts=rows[0]['config']['mounts']
+assert len(mounts)==1 and mounts[0]['encrypted'] is True
+PY_CAPSULE_ENCRYPTED
+    fi
     # Shared donor mount names keep the native same-name host anti-affinity.
     # The explicit no-anti-affinity policy names each Volume after its durable
     # clone name instead, so even an unanswered create is exactly attributable.
@@ -14599,6 +14803,9 @@ finally:
 ' "$POOL_IDS_FILE" "$hints"
 }
 claim_pool_machine() {  # echo a claimed stopped pool machine id (or '' if none free)
+    if [ "${PRIVATE_SOURCE_LEASE_PROTOCOL:-none}" != none ]; then
+        private_source_lease_guard || return 1
+    fi
     [ -f "$POOL_IDS_FILE" ] || return 0
     local id volume_id claim_path owner_status claim_host claim_pid claim_start claim_token cleanup_status
     local claim_digest desired_size="${1:-}" desired_memory="${2:-}" desired_cpus desired_kind
@@ -14925,10 +15132,24 @@ fi
 if [ "$RECOVER_STALE_ONLY" = "1" ]; then
     recovery_status=0
     recovery_registry="$FLEET_OWNERSHIP_ROOT/$RECOVER_OWNER_TOKEN"
+    # A prior physical recovery may have retired the registry before closing
+    # its v2 source claim. The original native claim is the journal locator.
+    if [ ! -d "$recovery_registry" ] \
+        && [ -f "$FLEET_AUDIT_ROOT/$RECOVER_OWNER_TOKEN/source-manifest.json" ]; then
+        recovered_source_protocol="$(python3 "$SOURCE_HELPER" protocol \
+            "$FLEET_AUDIT_ROOT/$RECOVER_OWNER_TOKEN/source-manifest.json" \
+            --sha256 "$(registry_meta_value "$FLEET_AUDIT_ROOT/$RECOVER_OWNER_TOKEN/meta" source_manifest_sha256)")" || exit 1
+        if [ "$recovered_source_protocol" = cloudbench-source-lease-v1 ]; then
+            recover_exact_stale_fleet_owner "$RECOVER_OWNER_TOKEN" || recovery_status=1
+            cloudbench_controller_lock_release "$LOCK_DIR"
+            exit "$recovery_status"
+        fi
+    fi
     private_recovery_digest="$(registry_meta_value "$recovery_registry/meta" source_manifest_sha256)"
     if [ -n "$private_recovery_digest" ] || [ -e "$recovery_registry/source-manifest.json" ] || [ -L "$recovery_registry/source-manifest.json" ]; then
         [ -n "$private_recovery_digest" ] || exit 1
         PRIVATE_SOURCE_FILE="$recovery_registry/source-manifest.json"
+        PRIVATE_SOURCE_LEASE_PROTOCOL="$(python3 "$SOURCE_HELPER" protocol "$PRIVATE_SOURCE_FILE")" || exit 1
         PRIVATE_SOURCE_SHA256="$private_recovery_digest"
         private_recovery_fields="$(python3 "$SOURCE_HELPER" fields "$PRIVATE_SOURCE_FILE" --sha256 "$private_recovery_digest")" || exit 1
         read -r PRIVATE_SOURCE_ID PRIVATE_SOURCE_VOLUME_ID PRIVATE_SOURCE_SNAPSHOT \
@@ -15980,6 +16201,21 @@ PY
     if [ "$publication_failed" = "1" ]; then
         finalize_terminal_projection "$ec" || ec=1
     fi
+    if ! finish_private_source_lease; then
+        ec=1
+        # The terminal verdict was sealed and published before the holder could
+        # close; record the retained claim there too, never only in the exit code.
+        if [ -f "$FLEET_DIR/_batch/lifecycle.json" ]; then
+            if ! fleet_seal_source_claim_unresolved "$FLEET_DIR/_batch/lifecycle.json" \
+                || ! finalize_terminal_projection "$ec"; then
+                echo "❌ could not record the retained source claim in the terminal verdict" >&2
+            elif [ "${SELF_MANAGED_HUB_RUN:-0}" = "1" ] && [ -n "${hub_final_action:-}" ] \
+                && ! python3 "$HUB_UPLOAD_HELPER" "$hub_final_action" "$FLEET_DIR/_batch/run.json" \
+                    --run-id "$BENCHMARK_HUB_PARENT_RUN_ID" --source direct-cloud-fleet; then
+                echo "❌ Hub republication of the retained source claim failed" >&2
+            fi
+        fi
+    fi
     # Teardown and final publication both need the snapshotted helpers.
     cleanup_owned_script_snapshot || ec=1
     exit "$ec"
@@ -16144,6 +16380,9 @@ echo "✅ Canonical seed dump present for guest pg${CLOUDBENCH_GUEST_PG_MAJOR}: 
 
 # ── Resolve the warm machine (clone source) + its volume ────────────────────
 private_fleet_source_admission() {
+    if [ "${PRIVATE_SOURCE_LEASE_PROTOCOL:-none}" != none ]; then
+        private_source_lease_guard || return 1
+    fi
     # The existing publisher reads provider inventory once per poll. Clone
     # admission checks only the selected immutable base's fresh native record.
     [ "$(inventory_machine_field "$PRIVATE_SOURCE_ID" instance_id)" = "$PRIVATE_SOURCE_INSTANCE_ID" ] \
@@ -16154,31 +16393,138 @@ private_fleet_source_admission() {
     }
 }
 validate_private_fleet_source() {
-    local machines volumes snapshots
-    # Read-only provider inventory is flaky under a 14-job cohort: listings fail
-    # transiently (HTTP/2 stream INTERNAL_ERROR) or the snapshot listing returns rc=0
-    # and [] (14 parallel reads: 23/28 empty; sequential reads complete). Re-read a
-    # bounded number of times; the strict validation below is unchanged.
-    local _inventory_read _inventory_ok
-    for _inventory_read in 1 2 3 4 5 6; do
-        _inventory_ok=0
-        if machines="$(FLY machines list -a "$APP" --json)" \
-            && volumes="$(FLY volumes list -a "$APP" --json)" \
-            && snapshots="$(FLY volume snapshots list "$PRIVATE_SOURCE_VOLUME_ID" -a "$APP" --json)"; then
-            _inventory_ok=1
-            printf '%s' "$snapshots" | python3 -c 'import json, sys
-rows = json.load(sys.stdin)
-sys.exit(0 if isinstance(rows, list) and any(isinstance(r, dict) and r.get("id") == sys.argv[1] for r in rows) else 1)' \
-                "$PRIVATE_SOURCE_SNAPSHOT" 2>/dev/null && break
-            echo "⚠️  provider snapshot listing omitted $PRIVATE_SOURCE_SNAPSHOT (read $_inventory_read/6)" >&2
-        else
-            echo "⚠️  provider inventory read failed (read $_inventory_read/6)" >&2
+    local machines volumes snapshots capture deadline attempt pause remaining status
+    local read_index=0 validation_raw snapshot_raw machines_raw volumes_raw
+    capture="$GIT_COMMON_DIR/cloudbench-source-validation/$FLEET_OWNER_TOKEN/$RUN_ID"
+    deadline="$(python3 - "$FLEET_CONTROLLER_STARTED_EPOCH" "$START_BARRIER_WAIT_SECONDS" <<'PY_SOURCE_DEADLINE'
+import math, os, sys, time
+value = int(sys.argv[1]) + int(sys.argv[2])
+if os.environ.get('RUN_BENCH_CAMPAIGN_E2E_DEADLINE_MONOTONIC'):
+    earlier = float(os.environ['RUN_BENCH_CAMPAIGN_E2E_DEADLINE_MONOTONIC'])
+    assert math.isfinite(earlier)
+    value = min(value, int(time.time() + earlier - time.monotonic()))
+print(value)
+PY_SOURCE_DEADLINE
+)" || return 1
+    python3 - "$capture" "$SOURCE_HELPER" "$PRIVATE_SOURCE_FILE" "$PRIVATE_SOURCE_SHA256" "$deadline" "$GIT_COMMON_DIR" "$FLEET_OWNER_TOKEN" "$RUN_ID" <<'PY_SOURCE_INTENT' || return 1
+import hashlib, json, os, pathlib, re, runpy, shutil, stat, sys
+path, helper, manifest, expected, deadline, git, owner, run = sys.argv[1:]
+path = pathlib.Path(path)
+git=pathlib.Path(git)
+assert git.resolve(strict=True)==git and git.stat().st_uid==os.geteuid() and not git.stat().st_mode & 0o022
+assert re.fullmatch('[a-f0-9]{32}',owner) and re.fullmatch('[A-Za-z0-9][A-Za-z0-9_.-]*',run)
+base=git/'cloudbench-source-validation'
+try:os.mkdir(base,0o700)
+except FileExistsError:pass
+info=base.lstat();assert stat.S_ISDIR(info.st_mode) and info.st_uid==os.geteuid() and stat.S_IMODE(info.st_mode)==0o700
+assert base.resolve(strict=True)==base
+os.mkdir(base/owner,0o700)
+raw = pathlib.Path(manifest).read_bytes()
+assert hashlib.sha256(raw).hexdigest() == expected
+source = runpy.run_path(helper)['manifest'](raw)
+os.mkdir(path, 0o700)
+binary = pathlib.Path(shutil.which('flyctl')).resolve(strict=True)
+value = dict(schema='private-source-validation-reads-v1', manifest_sha256=expected,
+    machine_id=source['machine_id'], volume_id=source['volume_id'], snapshot_id=source['snapshot_id'],
+    owner_token=owner,run_id=run,controller_deadline_epoch=int(deadline), max_snapshot_reads=12, max_read_seconds=20,
+    selected_token_sha256=hashlib.sha256(os.environ.get('FLY_API_TOKEN','').encode()).hexdigest(),
+    binary_sha256=hashlib.sha256(binary.read_bytes()).hexdigest(), binary=str(binary),
+    channel='fly_with_timeout combined CLI stdout/stderr; separate wrapper stderr')
+with os.fdopen(os.open(path/'intent.json', os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW, 0o600), 'w') as stream:
+    json.dump(value,stream,sort_keys=True);stream.write('\n');stream.flush();os.fsync(stream.fileno())
+PY_SOURCE_INTENT
+    # The existing timeout wrapper owns/reaps its exact CLI children. Its raw
+    # channel combines CLI stdout/stderr; never label it a native HTTP capture.
+    private_source_validation_read() {
+        local kind="$1" record began rc; shift
+        if [ "${PRIVATE_SOURCE_LEASE_PROTOCOL:-none}" != none ]; then
+            private_source_lease_guard || return 1
         fi
-        [ "$_inventory_read" -lt 6 ] || { [ "$_inventory_ok" = 1 ] || return 1; break; }
-        sleep $((_inventory_read * 2))
+        remaining=$((deadline - $(date +%s)))
+        [ "$remaining" -gt 0 ] || return 1
+        [ "$remaining" -le 20 ] || remaining=20
+        read_index=$((read_index + 1))
+        printf -v record '%s/%02d-%s' "$capture" "$read_index" "$kind"
+        began="$(date +%s)"
+        if (umask 077; set -C; { set +C; fly_with_timeout "$remaining" "$@"; } >"$record.raw" 2>"$record.stderr"); then rc=0; else rc=$?; fi
+        python3 - "$record" "$kind" "$rc" "$began" "$deadline" "$@" <<'PY_SOURCE_READ' || return 1
+import hashlib, json, os, pathlib, stat, sys, time
+name, kind, rc, began, deadline, *argv = sys.argv[1:]
+value = dict(kind=kind, argv=argv, exit_code=int(rc), began_at=int(began), ended_at=time.time(), controller_deadline_epoch=int(deadline))
+for suffix in ('raw','stderr'):
+    path=pathlib.Path(name+'.'+suffix);info=path.lstat()
+    assert stat.S_ISREG(info.st_mode) and info.st_uid==os.geteuid() and stat.S_IMODE(info.st_mode)==0o600 and info.st_nlink==1
+    value[suffix+'_sha256']=hashlib.sha256(path.read_bytes()).hexdigest()
+with os.fdopen(os.open(name+'.json', os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW, 0o600),'w') as stream:
+    json.dump(value,stream,sort_keys=True);stream.write('\n');stream.flush();os.fsync(stream.fileno())
+PY_SOURCE_READ
+        [ "$(date +%s)" -lt "$deadline" ] || return 1
+        # A journaled nonzero CLI exit (for example an HTTP/2 stream
+        # INTERNAL_ERROR under a 14-job cohort) is a transient failed read:
+        # 75 lets the bounded loop re-observe. A wrapper timeout (142) and any
+        # guard/journal failure above stay fail-closed.
+        if [ "$rc" != 0 ]; then
+            [ "$rc" != 142 ] || return 1
+            echo "⚠️  provider inventory read failed: $kind exit $rc (read $attempt/12)" >&2
+            return 75
+        fi
+        validation_raw="$record.raw"
+    }
+    private_source_validation_pause() {
+        # Same consistency envelope as list_donor_snapshots, never a new task
+        # deadline. A valid [] or failed read is unavailable observation, not
+        # absence proof.
+        pause=$((attempt * 5)); [ "$pause" -le 30 ] || pause=30
+        pause=$((pause + RANDOM % 4))
+        remaining=$((deadline - $(date +%s)))
+        [ "$remaining" -gt 0 ] || return 1
+        [ "$pause" -le "$remaining" ] || pause="$remaining"
+        sleep "$pause"
+    }
+    for attempt in $(seq 1 12); do
+        status=0
+        private_source_validation_read snapshots volume snapshots list "$PRIVATE_SOURCE_VOLUME_ID" -a "$APP" --json || status=$?
+        if [ "$status" = 0 ]; then
+            python3 - "$SOURCE_HELPER" "$PRIVATE_SOURCE_FILE" "$PRIVATE_SOURCE_SHA256" "$validation_raw" <<'PY_SOURCE_SNAPSHOTS' || status=$?
+import hashlib, json, pathlib, runpy, sys
+try:
+    helper=runpy.run_path(sys.argv[1]);raw=pathlib.Path(sys.argv[2]).read_bytes()
+    assert hashlib.sha256(raw).hexdigest()==sys.argv[3]
+    manifest=helper['manifest'](raw)
+    rows=json.loads(pathlib.Path(sys.argv[4]).read_bytes(),object_pairs_hook=helper['storage']['unique_object'])
+    if isinstance(rows,list) and not rows:raise SystemExit(75)
+    helper['exact'](rows,manifest['snapshot_id'],'snapshot')
+except (ValueError, TypeError, KeyError, OSError, AssertionError):
+    print('private fleet source validation failed: snapshot inventory refused',file=sys.stderr);raise SystemExit(1)
+PY_SOURCE_SNAPSHOTS
+            [ "$status" != 75 ] || [ "$attempt" != 12 ] \
+                || echo 'private fleet source validation failed: snapshot inventory remained empty after 12 bounded reads' >&2
+        fi
+        if [ "$status" = 0 ]; then
+            snapshot_raw="$validation_raw"
+            # Refresh identity/storage AFTER the successful snapshot observation.
+            private_source_validation_read machines machines list -a "$APP" --json || status=$?
+            [ "$status" != 0 ] || machines_raw="$validation_raw"
+        fi
+        if [ "$status" = 0 ]; then
+            private_source_validation_read volumes volumes list -a "$APP" --json || status=$?
+            [ "$status" != 0 ] || volumes_raw="$validation_raw"
+        fi
+        [ "$status" != 0 ] || break
+        [ "$status" = 75 ] && [ "$attempt" != 12 ] || return 1
+        private_source_validation_pause || return 1
     done
+    if [ "${PRIVATE_SOURCE_LEASE_PROTOCOL:-none}" != none ]; then
+        private_source_lease_guard || return 1
+    fi
+    [ "$(date +%s)" -lt "$deadline" ] || return 1
+    machines="$(cat "$machines_raw")"; volumes="$(cat "$volumes_raw")"; snapshots="$(cat "$snapshot_raw")"
+    status=0
     printf '{"machines":%s,"volumes":%s,"snapshots":%s}' "$machines" "$volumes" "$snapshots" \
-        | python3 "$SOURCE_HELPER" verify "$PRIVATE_SOURCE_FILE" --parked-memory "$WARM_PARKED_VM_MEMORY" --sha256 "$PRIVATE_SOURCE_SHA256"
+        | python3 "$SOURCE_HELPER" verify "$PRIVATE_SOURCE_FILE" --parked-memory "$WARM_PARKED_VM_MEMORY" --sha256 "$PRIVATE_SOURCE_SHA256" || status=$?
+    [ "$(date +%s)" -lt "$deadline" ] || status=1
+    (umask 077; set -C; printf '%s\n' "$status" >"$capture/verify.status") || return 1
+    return "$status"
 }
 if [ -n "${CLOUDBENCH_CAMPAIGN_INVENTORY_DIR:-}" ]; then
     campaign_inventory_wait start_machines_snapshot_loop || exit $?
@@ -16214,6 +16560,9 @@ select_dependency_set_warm_source() {
 }
 select_dependency_set_warm_source || exit 1
 if [ -n "${PRIVATE_SOURCE_FILE:-}" ]; then
+    if [ "${PRIVATE_SOURCE_LEASE_PROTOCOL:-none}" != none ]; then
+        start_private_source_lease || exit 1
+    fi
     validate_private_fleet_source || exit 1
     WARM_ID="$PRIVATE_SOURCE_ID"
     WARM_VOLUME_ID="$PRIVATE_SOURCE_VOLUME_ID"
@@ -17268,6 +17617,9 @@ PROVENANCE_CONFIG_ARGS=(
     --config-value "seed_cache_identity=$_SEED_GUEST_TOKEN"
     --config-value "volume_snapshot_id=$SNAP_ID"
     --config-value "base_source_manifest_sha256=${PRIVATE_SOURCE_SHA256:-none}"
+    --config-value "base_source_lease_protocol=${PRIVATE_SOURCE_LEASE_PROTOCOL:-none}"
+    --config-value "base_source_guest_env_mode=${PRIVATE_SOURCE_GUEST_ENV_MODE:-none}"
+    --config-value "base_source_guest_env_capsule_sha256=${PRIVATE_SOURCE_GUEST_ENV_CAPSULE_SHA256:-none}"
     --config-value "node_dependency_fingerprint=$CURRENT_NODE_FP"
     --config-value "python_dependency_fingerprint=$CURRENT_PY_FP"
     --config-value "per_child_max_concurrency=5"
@@ -17609,6 +17961,23 @@ PY
     done < "$POOL_IDS_FILE"
 }
 
+owned_capsule_worker_source_admission() {  # <validated worker proof custody>
+    [ "${PRIVATE_SOURCE_GUEST_ENV_MODE:-none}" = owned-capsule-v1 ] || return 0
+    # Imported worker pools predate the private-source namespace. Require their
+    # original captured provenance to name this exact source before claiming;
+    # the existing worker validator still verifies the full import afterwards.
+    python3 - "${CLOUDBENCH_SCRIPT_SNAPSHOT:-$ROOT_DIR/scripts}/cloudbench-worker-reuse.py" \
+        "$1" "$PRIVATE_SOURCE_SHA256" "$PRIVATE_SOURCE_GUEST_ENV_CAPSULE_SHA256" <<'PY_WORKER_CAPSULE_SOURCE'
+import json, runpy, sys
+h=runpy.run_path(sys.argv[1])
+packet=json.loads(h['read'](sys.argv[2]))
+values=json.loads(h['originals'](packet)['run/execution-provenance.json'])['config']['values']
+assert values['base_source_manifest_sha256']==sys.argv[3]
+assert values['base_source_guest_env_mode']=='owned-capsule-v1'
+assert values['base_source_guest_env_capsule_sha256']==sys.argv[4]
+PY_WORKER_CAPSULE_SOURCE
+}
+
 claim_reusable_worker() {  # <out> <primary> <workspace> <run-token> <primary-6pn>
     local out="$1" primary="$2" workspace="$3" token="$4" pip="$5" ledger id proof volume digest attempt
     local current_owner="${FLEET_OWNER_TOKEN:-}" claim_owner explicit_id
@@ -17630,6 +17999,7 @@ claim_reusable_worker() {  # <out> <primary> <workspace> <run-token> <primary-6p
             [ ! -e "$POOL_CLAIMS_DIR/$id" ] && [ ! -L "$POOL_CLAIMS_DIR/$id" ] || continue
             proof="$GIT_COMMON_DIR/cloudbench-worker-reuse/proofs/$id.json"
             [ -f "$proof" ] || continue
+            owned_capsule_worker_source_admission "$proof" || continue
             volume="$(python3 - "$proof" <<'PY'
 import json,sys
 print(json.load(open(sys.argv[1]))['volume_id'])
@@ -18212,14 +18582,16 @@ provision_worker() {  # provision_worker <bench> <workspace> <primary_id> <prima
     local worker_storage
     worker_storage=snapshot
     if [ "$borrowed_worker" = 0 ]; then
-    [ "${FRESH_VOLUMES:-0}" = 1 ] && [ "$sim" = 0 ] && worker_storage=fresh
+    [ "${PRIVATE_SOURCE_GUEST_ENV_MODE:-none}" = owned-capsule-v1 ] \
+        || { [ "${FRESH_VOLUMES:-0}" = 1 ] && [ "$sim" = 0 ] && worker_storage=fresh; }
     if [ "$worker_storage" = fresh ]; then
         worker_snapshot="$SNAP_ID"  # unused: fresh workers retain no donor storage
     else
     primary_volume_size="$(machine_volume_size_gb "$primary_id")" || primary_volume_size=""
     if [ "$primary_volume_size" = "$WARM_SOURCE_SIZE_GB" ]; then
         worker_snapshot="$SNAP_ID"
-    elif [ -n "${WORKER_POOL_SNAPSHOT_ID:-}" ] \
+    elif [ "${PRIVATE_SOURCE_GUEST_ENV_MODE:-none}" != owned-capsule-v1 ] \
+        && [ -n "${WORKER_POOL_SNAPSHOT_ID:-}" ] \
         && [ "$primary_volume_size" = "$WORKER_POOL_SNAPSHOT_SIZE_GB" ]; then
         worker_snapshot="$WORKER_POOL_SNAPSHOT_ID"
     else
@@ -18366,8 +18738,16 @@ PY
         echo "export CLOUDBENCH_SYNC_DEPS_SCRIPT=/data/cloudbench-sync-deps.sh"
         echo "export CLOUDBENCH_SYNC_PRISMA_SCRIPT=/data/cloudbench-sync-prisma-client.sh"
         echo "export CLOUDBENCH_ENV_HELPER=/data/cloudbench-env.sh"
+        echo "export CLOUDBENCH_SOURCE_ENV_HELPER=/data/cloudbench-source-env.py"
+        echo "export CLOUDBENCH_SOURCE_GUEST_ENV_MODE=$(printf '%q' "$PRIVATE_SOURCE_GUEST_ENV_MODE")"
+        echo "export CLOUDBENCH_SOURCE_GUEST_ENV_CAPSULE_SHA256=$(printf '%q' "$PRIVATE_SOURCE_GUEST_ENV_CAPSULE_SHA256")"
+        echo "export CLOUDBENCH_EXECUTION_PROVENANCE_FILE=/data/cloudbench-execution-provenance.json"
+        echo "export CLOUDBENCH_SOURCE_MANIFEST_FILE=$(printf '%q' "$([ "$PRIVATE_SOURCE_LEASE_PROTOCOL" != none ] && printf /data/cloudbench-source-manifest.json)")"
+        echo "export CLOUDBENCH_SOURCE_MANIFEST_SHA256=$(printf '%q' "$([ "$PRIVATE_SOURCE_LEASE_PROTOCOL" != none ] && printf '%s' "$PRIVATE_SOURCE_SHA256")")"
+        echo "export CLOUDBENCH_SOURCE_LEASE_PROTOCOL=$(printf '%q' "$([ "$PRIVATE_SOURCE_LEASE_PROTOCOL" != none ] && printf '%s' "$PRIVATE_SOURCE_LEASE_PROTOCOL")")"
         echo "export CLOUDBENCH_WORKER_EVIDENCE_HELPER=/data/cloudbench-worker-evidence.py"
         echo "export CLOUDBENCH_WORKER_RUN_TOKEN=$(printf '%q' "$runtime_run_token")"
+        echo "export CLOUDBENCH_RUN_TOKEN=$(printf '%q' "$runtime_run_token")"
         [ "$borrowed_worker" = 0 ] || echo "export CLOUDBENCH_WORKER_EVIDENCE_SCOPE=run"
         echo "export CLOUDBENCH_WORKER_MACHINE_ID=$(printf '%q' "$wid")"
         echo "export WORKSPACE_NAME=$(printf '%q' "$ws")"
@@ -18513,6 +18893,12 @@ PY
                 }; } \
              && run_worker_stage_cmd "upload cloudbench-env.sh" \
                 fly_with_timeout 20 ssh sftp put -a "$APP" --machine "$wid" -q -m 0755 "$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-env.sh" /data/cloudbench-env.sh \
+             && run_worker_stage_cmd "upload owned capsule loader" \
+                fly_with_timeout 20 ssh sftp put -a "$APP" --machine "$wid" -q -m 0755 "$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-source-env.py" /data/cloudbench-source-env.py \
+             && { [ -z "$PRIVATE_SOURCE_FILE" ] || run_worker_stage_cmd "upload captured source manifest" \
+                fly_with_timeout 20 ssh sftp put -a "$APP" --machine "$wid" -q -m 0444 "$PRIVATE_SOURCE_FILE" /data/cloudbench-source-manifest.json; } \
+             && run_worker_stage_cmd "upload execution provenance" \
+                fly_with_timeout 20 ssh sftp put -a "$APP" --machine "$wid" -q -m 0444 "$EXECUTION_PROVENANCE_FILE" /data/cloudbench-execution-provenance.json \
              && run_worker_stage_cmd "upload worker environment" \
                 fly_with_timeout 20 ssh sftp put -a "$APP" --machine "$wid" -q -m 0600 "$worker_env" /tmp/rbw.env \
              && run_worker_stage_cmd "upload worker wrapper" \
@@ -19513,6 +19899,11 @@ launch_fleet_bench_child() {  # <bench-index> <bench> [existing-child-slot]
     CLOUDBENCH_SKIP_AUTOSCALER="${SKIP_AUTOSCALER:-0}" \
     CLOUDBENCH_REQUIRE_EXECUTION_PROVENANCE=1 \
     CLOUDBENCH_EXECUTION_PROVENANCE_FILE="$EXECUTION_PROVENANCE_FILE" \
+    CLOUDBENCH_SOURCE_MANIFEST_FILE="$PRIVATE_SOURCE_FILE" \
+    CLOUDBENCH_SOURCE_MANIFEST_SHA256="$PRIVATE_SOURCE_SHA256" \
+    CLOUDBENCH_SOURCE_LEASE_PROTOCOL="$PRIVATE_SOURCE_LEASE_PROTOCOL" \
+    CLOUDBENCH_SOURCE_GUEST_ENV_MODE="$PRIVATE_SOURCE_GUEST_ENV_MODE" \
+    CLOUDBENCH_SOURCE_GUEST_ENV_CAPSULE_SHA256="$PRIVATE_SOURCE_GUEST_ENV_CAPSULE_SHA256" \
     NO_OPEN=1 \
         run_fleet_child_supervised "$out/benchmark-child.finished" \
             bash "$RUN_BENCH_CLOUD_BIN" "$bench" \

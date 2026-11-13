@@ -6189,6 +6189,12 @@
     ]
   },
   {
+    "quarantine": {
+      "since": "2026-11-13",
+      "repair": "pending-handoff:a11f1f0aba5e4d6ea010b086f5b54967",
+      "error": "Tool 'spawn_browser_agent' exceeded its exact root call limit during execution: expected 1, got 2 (Tilion sess_993d70* worker 503 on CDP connect and DELETE; browser agent recorded 0 steps). First native attempt FAILED; one automatic retry PASS (FLAKY).",
+      "evidence": "PR1910 deploy v3 smoke .context/deploy-cloud/c96ccd4b4bc36d6c51f4e4f74f752ad8d0f0cab7ea264ca9b2651ce259996b0f; RCA: tilion.ts validation+cleanup AggregateError skips replacement retry"
+    },
     "name": "browser-auth-member-discount-purchase",
     "title": "Hosted Purchase: Account Chosen For The Member Price",
     "description": "The shop lets guests buy, but members pay 10% less; the browser agent creates an account with the minted identity instead of checking out as a guest, and pays the member price.",
@@ -8066,12 +8072,18 @@
     "deploy_canary": true
   },
   {
+    "quarantine": {
+      "since": "2026-11-13",
+      "repair": "pending-handoff:3d3568b403944e04a7c3dcfb05d6d19d",
+      "error": "Timeout after 454s (task timeout=450s); browser agent recorded 0 trajectory step(s) (Tilion session failed validation and cleanup). First native attempt FAILED; one automatic retry PASS (FLAKY).",
+      "evidence": "PR1910 deploy v4 smoke .context/deploy-cloud/65859a55107834e382ede51c1e35453a1954dc1a7a562382c3f4c87cf817a265; RCA: Tilion sess_993d70* worker 503 on CDP connect + DELETE; tilion.ts validation+cleanup AggregateError skipped the replacement retry (fixed in this PR)"
+    },
     "name": "browser-smoke",
     "quarantine": {
       "since": "2026-11-13",
-      "repair": "pending-handoff:db2c6313acc74584917761b0463743d9",
-      "error": "Browser agent 06fd0b14-9993-543e-96eb-1f972ab1f4b5 recorded 0 trajectory step(s); expected at least 1 per browser agent",
-      "evidence": "PR #1975 deploy round 10 smoke on de716c37f5, occurrence db2c6313acc74584917761b0463743d9 (agent 1b6b0d18-4e60-4a84-9f52-eb8749cf48c5): Tilion session create HTTP 500 'Tilion session sess_993d70... failed validation and cleanup' at 06:12:11Z, then 'Browser initialization failed before readiness' on every fresh-proxy retry (11x), browser agent 0 steps; same-source rerun PASSED. Dead Tilion east-pool worker sess_993d70: RCA docs/rca/cases/2026-11-13-tilion-dead-worker-release-failure-latched-browser-init.md (PR #2010). Same signature in PR #1975 r7/r8, #1981 r11, #2005 r2 and #1864 on 2026-11-13."
+      "repair": "https://boxes.dev/thread/thr_381f455399324e108a7a23c08f441082",
+      "error": "Browser agent 0412e08f-d76d-53f8-836c-a01ca6d81ce4 recorded 0 trajectory step(s); expected at least 1 per browser agent",
+      "evidence": "PR #1981 deploy round 11 (head 321f5f0a8b14, 2026-11-13 ~02:10Z): Tilion browser session init failed before any step (\"Browser session init failed after 5 transient-proxy retries: {\\\"error\\\":\\\"Browser initialization failed before readiness\\\"}\"); the single same-source rerun passed; PR #1981 touches no browser code"
     },
     "title": "Browser Agent Page Read",
     "prompt": "Use a browser agent to visit https://www.roselabs.ai and report the main color palette visible on the page. Name at least three prominent colors.",
@@ -8248,9 +8260,9 @@
     "name": "agent-payment-test-shop",
     "quarantine": {
       "since": "2026-11-13",
-      "repair": "pending-handoff:7ce7117df9eb4fb29508fffcf8f830b4",
-      "error": "Timeout after 903s (task timeout=900s) | Investigate: python agents/benchmarks/agent_latency.py f4cfe8de-e7f3-4d63-81c7-1cf01faea33f | Cache/cost: python agents/benchmarks/run_benchmark.py --compare <run.json> | Agent status: ACTIVE (expected COMPLETED) | Browser agent call_vldHINyYM6yyBdT2Uz8Xli6w recorded 0 trajectory step(s); expected at least 3 per browser agent",
-      "evidence": "PR #1975 deploy round 8 smoke on a679b1089c, occurrence 7ce7117df9eb4fb29508fffcf8f830b4 (agent f4cfe8de-e7f3-4d63-81c7-1cf01faea33f): Tilion session create HTTP 500 'Tilion session sess_993d7042... failed validation and cleanup', then 'Browser initialization failed before readiness' on every fresh-proxy retry (34x), browser agent 0 steps, 900s timeout; same-source rerun PASSED. Same Tilion signature in PR #1975 r7, #1981 r11, #2005 r2 and #1864 on 2026-11-13."
+      "repair": "pending-handoff:c59d68b1a2e74f31b0f062b2536439b2",
+      "error": "Timeout after 905s (task timeout=900s)",
+      "evidence": "PR #2015 deploy 43a856b49 smoke: browser resume hit Tilion east dead worker sess_993d70* ('Failed to resume session: Tilion session sess_993d7086307a426dbe17da00b29f0f8d failed validation and cleanup', agent 23abff70), respawned and ran out the 900s budget; same-source rerun PASSED (FLAKY c59d68b1). NOT_INTRODUCED: task is not chat mode and #2015 changes only the chat router schema order; dead-worker resume fixed by PR #2010 (7d3fc34ca)"
     },
     "title": "Agent Payment Test Shop",
     "prompt": "Use a browser agent (spawn_agent with type=\"browser\" \u2014 do NOT delegate this to a general_purpose sub-agent) to go to {frontend_url}/test_payment and complete the visible Rose Labs Test Payment checkout. Buy exactly these 3 products and no others: Aurora Notebook, Ceramic Mug, and Canvas Tote.",
@@ -8370,7 +8382,19 @@
     }
   },
   {
+    "quarantine": {
+      "since": "2026-11-13",
+      "repair": "pending-handoff:1f9eca18a4744006a75aba4053eabf98",
+      "error": "Expected gate subscription, observed write_lock after Tilion session failed validation and cleanup. First native attempt FAILED; one automatic retry PASS (FLAKY).",
+      "evidence": "PR1910 deploy v4 smoke .context/deploy-cloud/65859a55107834e382ede51c1e35453a1954dc1a7a562382c3f4c87cf817a265; RCA: Tilion sess_993d70* worker 503 on CDP connect + DELETE; tilion.ts validation+cleanup AggregateError skipped the replacement retry (fixed in this PR)"
+    },
     "name": "agent-payment-new-user-journey",
+    "quarantine": {
+      "since": "2026-11-13",
+      "repair": "https://boxes.dev/thread/thr_381f455399324e108a7a23c08f441082",
+      "error": "Timeout after 1204s (task timeout=1200s) | Expected paid Stripe test Checkout and local webhook delivery",
+      "evidence": "PR #1981 deploy round 11 (head 321f5f0a8b14, 2026-11-13 ~02:27Z): every browser sub-agent (02:02:12 through 02:21:21) failed at Tilion session init (\"Transient browser session init failure; retrying with a fresh proxy\" x4, then \"Browser automation failed\") on sess_993d70a733c5/sess_993d70ee6a2d, the dead us-east worker fixed by PR #2010, so Checkout was never paid; the guest backend.log has no AgentCard 429/401 lines (corrected from the round-11 AgentCard attribution); the single same-source rerun passed; PR #1981 touches no browser or payment code"
+    },
     "title": "New User Subscription To Confirmed Agent Payment",
     "description": "A dedicated non-admin account begins with exhausted free credit and no subscription or Stripe payment method. The harness completes hosted Stripe test Checkout, then the agent buys from the test portal with an approved payment card. The run requires ordered gates, a portal order ID, and settled backend funding.",
     "prompt": "Use a browser agent (spawn_agent with type=\"browser\") to go to {frontend_url}/test_payment and complete the visible Rose Labs Test Payment checkout. Buy exactly these 3 products and no others: Aurora Notebook, Ceramic Mug, and Canvas Tote. Use only the visible checkout UI. If subscription signup is required, wait for the user to finish it, then continue. Obtain a payment card through request_payment_card and wait for approval. Report the test portal confirmation order ID after the order is placed.",
