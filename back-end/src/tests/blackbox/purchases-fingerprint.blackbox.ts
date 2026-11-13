@@ -578,7 +578,7 @@ async function main(): Promise<void> {
     await quarantine(
       {
         since: '2026-11-11',
-        repair: 'pending-handoff:dffb463a2de34ec6875fc74fb17e9196',
+        repair: 'https://boxes.dev/thread/thr_67089be547544b64a79f4e42886d5279',
         error: 'Too many database connections opened: FATAL: sorry, too many clients already',
         evidence:
           'PR1910 deploy round 22 backend-coverage-blackbox rca/dffb463a2de34ec6875fc74fb17e9196',
