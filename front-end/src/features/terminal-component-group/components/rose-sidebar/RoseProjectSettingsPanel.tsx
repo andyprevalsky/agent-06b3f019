@@ -11,6 +11,8 @@
  *   in Integrations" opens the Integrations panel, where repos are connected
  *   (then onOpenedIntegrations: the mobile menu closes so that panel is visible)
  *
+ * Team sharing uses independent explicit opt-ins through /api/teams.
+ *
  * Sections (Rose light styles): GitHub repo (connected repo, read-only, + link
  * to Integrations; default branch, GitHub "Connected"/"Not connected" — never
  * an error — and Last synced)
@@ -22,6 +24,8 @@
  * header count = project.envFileCount) · Lifecycle (Auto-wake, Startup script
  * set/not set).
  */
+
+import { ProjectTeamSharing } from '@/components/teams/TeamSharing';
 
 import { MAX_STARTUP_TIMEOUT_S, MIN_STARTUP_TIMEOUT_S, type Project } from '@/lib/api/projects';
 import { GITHUB_REPOS_SECTION_ID, focusIntegrationsSection } from '@/lib/integrationsSection';
@@ -239,6 +243,7 @@ export default function RoseProjectSettingsPanel({
           className="min-w-0 bg-transparent text-right outline-none"
         />
       </label>
+      <ProjectTeamSharing projectId={project.id} />
       <GithubRepoSection
         draft={form.draft}
         setField={form.setField}

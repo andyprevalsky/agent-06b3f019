@@ -4,7 +4,8 @@
  * Thin wiring file — delegates all initialization to features/app-wiring.
  *
  * [CAPTURE] --> startPreviewHandoff (strip #rose_preview_handoff, begin redeem),
- *               captureBenchmarkShareToken — both before anything logs the URL
+ *               captureBenchmarkShareToken + captureTeamInviteAtEntry — before
+ *               auth routing or anything logs the URL
  *   |
  *   v
  * [INIT] --> initDevLogging, logStartupMode, initAmplitude
@@ -21,6 +22,7 @@ import { Toaster } from '@/components/ui/toaster';
 import { Toaster as Sonner } from '@/components/ui/sonner';
 import { IntegrationHandlersProvider } from '@/features/integration-handlers-context';
 import { initAppVersionWatch } from '@/lib/appVersion';
+import { captureTeamInviteAtEntry } from '@/lib/teamInviteLink';
 import { captureBenchmarkShareToken } from '@/lib/benchmarkShare';
 import { mountBlurLabIfRequested } from '@/dev/blur-lab/mountBlurLab';
 import { initThemeColorSync } from '@/lib/themeColor';
@@ -36,6 +38,7 @@ import './index.css';
 
 // Bootstrap side-effects (dev logging, analytics, viewport height). Bearer
 // fragments are removed first so neither logging nor analytics sees them.
+captureTeamInviteAtEntry();
 const previewHandoff = startPreviewHandoff();
 captureBenchmarkShareToken();
 initDevLogging();
