@@ -46,7 +46,8 @@ export async function finishSetup(
   input: SetupInput,
   result: SetupOutcomeResult | null,
   usageRecordId?: string,
-  failureCode?: string
+  failureCode?: string,
+  failureDetail?: Record<string, unknown>
 ) {
   return leases.transaction(async (tx) => {
     const device = await lockSetupCommit(tx, claim);
@@ -100,6 +101,7 @@ export async function finishSetup(
           success: succeeded,
           ...(usage ? { usage } : {}),
           ...(errorCode !== null ? { error: errorCode } : {}),
+          ...(!succeeded && valid && failureDetail ? failureDetail : {}),
         }),
       },
     });

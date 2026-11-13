@@ -173,7 +173,7 @@ test ! -e "$CASE/calls"
   import shlex
   root=MODULE.parents[1]
   source=Path(os.environ.get('CLOUDBENCH_TEST_EXPORT_CLOSURE_SOURCE',str(root/'scripts/run-bench-fleet'))).read_text()
-  functions='\n'.join(re.search(r'^'+name+r'\(\).*?^}\n',source,re.M|re.S).group() for name in ('private_source_allows_provider_call','FLY','fleet_disable_disposable_volume_snapshots'))
+  functions='\n'.join(re.search(r'^'+name+r'\(\).*?^}\n',source,re.M|re.S).group() for name in ('private_source_lease_guard','private_source_allows_provider_call','FLY','fleet_disable_disposable_volume_snapshots'))
   bindir=Path(self.tmp.name)/'bin';bindir.mkdir();state=Path(self.tmp.name)/'native-disabled';trace=Path(self.tmp.name)/'native-calls'
   fake=bindir/'flyctl';fake.write_text("#!/usr/bin/env python3\nimport json,os,sys\nfrom pathlib import Path\nargs=sys.argv[1:];state=Path(os.environ['FIXTURE_DISABLED'])\nwith Path(os.environ['FIXTURE_TRACE']).open('a') as out:out.write(json.dumps(args)+'\\n')\nif args[:2]==['machine','status']:value={'mounts':[{'volume':'vol_owned'}]}\nelif args[:2]==['volumes','update']:\n state.write_text('disabled');value={}\nelif args[:2]==['volumes','show']:value={'id':'vol_owned','state':'created','auto_backup_enabled':not state.exists(),'attached_machine_id':'abcd1234','size_gb':40,'snapshot_retention':5,'name':'fork'}\nelse:raise SystemExit(91)\nprint(json.dumps(value))\n");fake.chmod(0o700)
   values=dict(ROOT_DIR=str(root),CLOUDBENCH_SCRIPT_SNAPSHOT=str(root/'scripts'),DISPOSABLE_LIFECYCLE='1',

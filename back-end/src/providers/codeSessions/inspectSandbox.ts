@@ -398,7 +398,64 @@ export interface CliOutcome {
   error: string | null;
   /** A structured provider usage limit (Claude rate_limit_event rejected). */
   usageLimit: { resetsAt: unknown } | null;
+  /**
+   * The latest account usage window a Claude rate_limit_event reported, for
+   * EVERY status (allowed / allowed_warning carry utilization too); the
+   * `usage` payload of the code-session usage report.
+   */
+  usageReport: CliUsageReport | null;
   exitCode: number | null;
+}
+
+export interface CliUsageReport {
+  observedAt: string;
+  fiveHour: { usedPct: number; resetsAt: string | null } | null;
+  sevenDay: { usedPct: number; resetsAt: string | null } | null;
+  source: 'code_session';
+  status: 'allowed' | 'allowed_warning' | 'rejected' | null;
+}
+
+const RATE_LIMIT_WINDOWS: Record<string, 'fiveHour' | 'sevenDay'> = {
+  five_hour: 'fiveHour',
+  seven_day: 'sevenDay',
+};
+
+/**
+ * Claude Code `rate_limit_info` → usage report. five_hour / seven_day only
+ * (model-specific weekly and overage limits are not the account's bars);
+ * `utilization` is a 0-1 fraction, `resetsAt` epoch seconds. A rejected window
+ * without a utilization is 100% used; any other one without it is not reported.
+ */
+export function usageFromRateLimitInfo(
+  info: Record<string, unknown>,
+  now = new Date()
+): CliUsageReport | null {
+  const key =
+    typeof info.rateLimitType === 'string' ? RATE_LIMIT_WINDOWS[info.rateLimitType] : undefined;
+  if (key === undefined) return null;
+  const status =
+    info.status === 'allowed' || info.status === 'allowed_warning' || info.status === 'rejected'
+      ? info.status
+      : null;
+  const utilization =
+    typeof info.utilization === 'number' && Number.isFinite(info.utilization)
+      ? info.utilization
+      : null;
+  const usedPct = utilization !== null ? utilization * 100 : status === 'rejected' ? 100 : null;
+  if (usedPct === null) return null;
+  const resets = typeof info.resetsAt === 'number' && info.resetsAt > 1e9 ? info.resetsAt : null;
+  const window = {
+    usedPct: Math.min(100, Math.max(0, Math.round(usedPct * 100) / 100)),
+    resetsAt:
+      resets === null ? null : new Date(resets < 1e12 ? resets * 1000 : resets).toISOString(),
+  };
+  return {
+    observedAt: now.toISOString(),
+    fiveHour: key === 'fiveHour' ? window : null,
+    sevenDay: key === 'sevenDay' ? window : null,
+    source: 'code_session',
+    status,
+  };
 }
 
 /** Parse the CLI's structured output. Never reads prose for classification. */
@@ -412,6 +469,7 @@ export function parseCliOutcome(
   let answer: string | null = null;
   let error: string | null = null;
   let usageLimit: CliOutcome['usageLimit'] = null;
+  let usageReport: CliOutcome['usageReport'] = null;
   for (const line of stdout.split('\n')) {
     if (line.trim() === '') continue;
     let event: Record<string, unknown>;
@@ -424,6 +482,7 @@ export function parseCliOutcome(
       if (event.type === 'rate_limit_event') {
         const info = (event.rate_limit_info ?? {}) as Record<string, unknown>;
         if (info.status === 'rejected') usageLimit = { resetsAt: info.resetsAt ?? null };
+        usageReport = usageFromRateLimitInfo(info) ?? usageReport;
       }
       if (event.type === 'result') {
         const text = typeof event.result === 'string' ? event.result : '';
@@ -454,6 +513,7 @@ export function parseCliOutcome(
     answer: answer !== null ? answer.slice(0, MAX_ANSWER_CHARS) : null,
     error,
     usageLimit,
+    usageReport,
     exitCode,
   };
 }

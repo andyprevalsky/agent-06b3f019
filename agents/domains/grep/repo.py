@@ -1,6 +1,5 @@
 """Grep domain repo - data access via backend HTTP endpoints."""
 
-from datetime import datetime, timedelta
 from typing import Any, Dict, Optional
 
 import structlog
@@ -10,7 +9,6 @@ from config import load_config
 from domains.grep.config import (
     GREP_HTTP_TIMEOUT,
     LOG_PATTERN_MAX_LENGTH,
-    SUMMARY_CACHE_TTL_MINUTES,
     SUMMARY_HTTP_TIMEOUT,
 )
 from domains.grep.types import GrepResult
@@ -18,7 +16,7 @@ from helpers.http_client import get_http_client
 
 logger = structlog.get_logger()
 
-# Module-level cache for data summaries
+# Compatibility export for existing callers; authorization-bearing summaries are never cached.
 _data_summary_cache: Dict[str, Dict[str, Any]] = {}
 
 _GREP_HTTP_KEY_ALIASES = {
@@ -120,19 +118,14 @@ async def grep_activity(
 async def fetch_local_data_summary(user_id: str) -> str:
     """
     Fetch the inventory of the user's local data (grep source ``summary``).
-    Cached with 5-minute TTL.
+    Always fresh: the inventory includes revocable team account grants.
 
     The backend renders it, so this text and grep ``sources=["summary"]`` are
     one rendering. Returns formatted string for injection into explore agent
     system prompt; empty string when the backend is unreachable.
     """
-    global _data_summary_cache
-
-    now = datetime.utcnow()
-    if user_id in _data_summary_cache:
-        cached = _data_summary_cache[user_id]
-        if (now - cached["fetched_at"]) < timedelta(minutes=SUMMARY_CACHE_TTL_MINUTES):
-            return cached["summary"]
+    # Inventory contains team grants; fetch fresh on every exploration so a
+    # revoked membership never survives in the five-minute prompt cache.
 
     config = load_config()
     try:
@@ -148,7 +141,6 @@ async def fetch_local_data_summary(user_id: str) -> str:
         )
         response.raise_for_status()
         summary = str(response.json().get("message") or "No local data available.")
-        _data_summary_cache[user_id] = {"summary": summary, "fetched_at": now}
         return summary
 
     except Exception as e:

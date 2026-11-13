@@ -1,0 +1,10 @@
+{"i":1,"host":"Morph","ms":1491,"firstContentMs":460,"chunks":49,"contentLen":635,"reasoningLen":0,"action":"web_search","actionIdx":1}
+{"i":0,"host":"Morph","ms":8667,"firstContentMs":528,"chunks":438,"contentLen":6212,"reasoningLen":0,"action":"PARSE_ERROR","actionIdx":-1}
+{"i":2,"host":"Morph","ms":10030,"firstContentMs":605,"chunks":504,"contentLen":8569,"reasoningLen":0,"action":"PARSE_ERROR","actionIdx":-1}
+{"i":3,"host":"Morph","ms":1255,"firstContentMs":394,"chunks":51,"contentLen":555,"reasoningLen":0,"action":"web_search","actionIdx":1}
+{"i":4,"host":"Morph","ms":1334,"firstContentMs":462,"chunks":53,"contentLen":711,"reasoningLen":0,"action":"web_search","actionIdx":1}
+{"i":5,"host":"Morph","ms":10428,"firstContentMs":540,"chunks":595,"contentLen":13530,"reasoningLen":0,"action":"PARSE_ERROR","actionIdx":-1}
+{"i":7,"host":"Morph","ms":1223,"firstContentMs":440,"chunks":44,"contentLen":475,"reasoningLen":0,"action":"web_search","actionIdx":1}
+{"i":8,"host":"Morph","ms":1679,"firstContentMs":498,"chunks":61,"contentLen":662,"reasoningLen":0,"action":"web_search","actionIdx":1}
+{"i":6,"host":"Morph","ms":11692,"firstContentMs":501,"chunks":605,"contentLen":13531,"reasoningLen":0,"action":"PARSE_ERROR","actionIdx":-1}
+{"provider":"morph","n":9,"over13s":0,"p50":1679,"max":11692}

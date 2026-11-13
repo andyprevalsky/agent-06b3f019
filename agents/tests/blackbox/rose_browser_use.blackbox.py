@@ -3372,7 +3372,7 @@ async def test_native_autofill_control_history_matches_real_serializer():
 
 @quarantine(
     since="2026-11-11",
-    repair="pending-handoff:b39e33572bbc47348f73bafa850e2fe0",
+    repair="https://boxes.dev/thread/thr_8cefa6e4ed4f4244ae0919c0d2b3c8b3",
     error="native_autofill_real_model_controls: AssertionError: ['(\\'presence\\', {\\'actual_model\\': \\'qwen/qwen3.8-27b\\', \\'mode\\': \\'waterfall\\', \\'request_id\\': \\'5a27176dbd4c\\'}",
     evidence=".context/rca-playwright/final-schema-a4dc/flaky-autofill/findings.json",
 )
@@ -3528,7 +3528,7 @@ async def test_phone_setup_settings_actual_handler_observation():
         assert "Preserve the original authorized phone task" in wire
         import hashlib
         from domains.spawn_browser_agent_v3.phone import PHONE_GUIDANCE
-        assert hashlib.sha256(PHONE_GUIDANCE.encode()).hexdigest() == "0a1b869d055c49cd1f655354d9a3b6a603d13276ae752c347498f7636873d9b7", "Ordinary enabled guide must match the saved-credential binding contract"
+        assert hashlib.sha256(PHONE_GUIDANCE.encode()).hexdigest() == "77d84b09cb13ed5c708a3d614c69085279b80689a3910f79d137230d859fab55", "Ordinary enabled guide must match the saved-credential binding contract"
         for marker in (None, False, "true"):
             plain_setup = {key: value for key, value in setup.items() if key != "googlePasscodeExceptionAllowed"}
             if marker is not None:

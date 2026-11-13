@@ -1,0 +1,16 @@
+{"i":1,"ms":1374,"model":"z-ai/glm-5.3-flash","action":"web_search"}
+{"i":2,"ms":11857,"model":"z-ai/glm-5.3-flash","action":"PARSE_ERROR"}
+{"i":0,"ms":12789,"model":"z-ai/glm-5.3-flash","action":"PARSE_ERROR"}
+{"i":5,"ms":14055,"model":"z-ai/glm-5.3-flash","action":"PARSE_ERROR"}
+{"i":3,"ms":14170,"model":"z-ai/glm-5.3-flash","action":"PARSE_ERROR"}
+{"i":4,"ms":15002,"error":"The operation was aborted due to timeout"}
+{"i":7,"ms":1296,"model":"z-ai/glm-5.3-flash","action":"web_search"}
+{"i":8,"ms":12576,"model":"z-ai/glm-5.3-flash","action":"PARSE_ERROR"}
+{"i":6,"ms":13581,"model":"z-ai/glm-5.3-flash","action":"PARSE_ERROR"}
+{"i":10,"ms":1668,"model":"z-ai/glm-5.3-flash","action":"web_search"}
+{"i":9,"ms":15002,"error":"The operation was aborted due to timeout"}
+{"i":11,"ms":15003,"error":"The operation was aborted due to timeout"}
+{"i":12,"ms":2089,"model":"z-ai/glm-5.3-flash","action":"web_search"}
+{"i":14,"ms":2132,"model":"z-ai/glm-5.3-flash","action":"web_search"}
+{"i":13,"ms":2467,"model":"z-ai/glm-5.3-flash","action":"web_search"}
+{"n":15,"ok":12,"closed":6,"over13s":6,"p50":11857,"max":14170}

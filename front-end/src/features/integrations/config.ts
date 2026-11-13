@@ -1,5 +1,61 @@
+import type { MeetingNotesProvider, IntegrationCatalogKey } from './types';
 import type { BrowserType } from '@/features/integration-handlers-context';
 import { BACKEND_BASE_URL } from '@/lib/backendUrl';
+
+/** Shared provider metadata for the meeting note taker category. */
+
+export const MEETING_NOTES_TITLE = 'Meeting note taker';
+export const MEETING_NOTES_DESCRIPTION = 'granola.ai, fireflies.ai, etc.';
+export const MEETING_NOTES_PUBLIC_ORIGIN = 'https://www.roselabs.ai';
+export const MEETING_NOTES_PROVIDERS = ['granola', 'fireflies'] as const;
+
+export const meetingNotesProviders = {
+  granola: { name: 'Granola', domain: 'granola.ai', meetingDocument: 'granola_note' },
+  fireflies: { name: 'Fireflies', domain: 'fireflies.ai', meetingDocument: 'fireflies_note' },
+} as const;
+
+export const meetingNotesCallbackPath = (provider: MeetingNotesProvider) =>
+  `/integrations/${provider}/callback`;
+export const meetingNotesReturnKey = (provider: MeetingNotesProvider) =>
+  `rose.${provider}.returnPath`;
+
+export const INTEGRATION_CATALOG = {
+  iphone: { title: 'Cloud iPhone', aliases: 'ios mobile phone apps device' },
+  browsers: {
+    title: 'Browser Cookies',
+    aliases:
+      'chrome safari edge brave arc opera vivaldi chromium atlas browser cookies sessions websites login',
+  },
+  passwords: {
+    title: 'Passwords',
+    aliases: 'chrome apple icloud keychain passkeys credentials atlas passwords autofill',
+  },
+  messages: {
+    title: 'Messages',
+    aliases: 'imessage gmail google mail email whatsapp telegram messenger chat messages inbox',
+  },
+  compute: {
+    title: 'Compute',
+    aliases:
+      'claude anthropic claude.ai chatgpt codex openai chatgpt.com gemini google subscriptions models ai coding',
+  },
+  banks: {
+    title: 'Banks & Financial Accounts',
+    aliases: 'plaid plaid.com bank financial accounts money transactions balance',
+  },
+  socials: {
+    title: 'Socials',
+    aliases: 'x twitter x.com linkedin linkedin.com instagram instagram.com social contacts',
+  },
+  files: { title: 'File System', aliases: 'files folders documents disk mac local filesystem' },
+  meetingNotes: {
+    title: MEETING_NOTES_TITLE,
+    aliases: `${Object.values(meetingNotesProviders)
+      .map(({ name, domain }) => `${name} ${domain}`)
+      .join(' ')} meeting notes transcript transcripts summary summaries recording calls`,
+  },
+  pebble: { title: 'Other', aliases: 'pebble index 01 ring wearable audio recording webhook' },
+} as const satisfies Record<IntegrationCatalogKey, { title: string; aliases: string }>;
 
 export const API_BASE_URL = BACKEND_BASE_URL;
 
@@ -47,9 +103,9 @@ export const PLAID_OAUTH_REDIRECT_PATH = '/plaid-oauth-redirect';
  * callback). The Mac app opens sign-in in the system browser, so it returns to
  * the public site.
  */
-export const GRANOLA_CALLBACK_PATH = '/integrations/granola/callback';
-export const GRANOLA_RETURN_KEY = 'rose.granola.returnPath';
-export const GRANOLA_PUBLIC_ORIGIN = 'https://www.roselabs.ai';
+export const GRANOLA_CALLBACK_PATH = meetingNotesCallbackPath('granola');
+export const GRANOLA_RETURN_KEY = meetingNotesReturnKey('granola');
+export const GRANOLA_PUBLIC_ORIGIN = MEETING_NOTES_PUBLIC_ORIGIN;
 
 /** The backend redirects here after Google's consent, reopening the desktop app. */
 export const DESKTOP_OAUTH_RETURN_URL = 'roselabs://oauth-complete';

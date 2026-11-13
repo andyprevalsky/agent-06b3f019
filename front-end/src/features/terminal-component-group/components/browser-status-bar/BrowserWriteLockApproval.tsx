@@ -168,7 +168,7 @@ export function BrowserWriteLockApproval({
             placeholder="Add context (optional)..."
             value={contextInput}
             onChange={(e) => setContextInput(e.target.value)}
-            className="text-sm bg-muted"
+            className="bg-muted"
             disabled={disabled}
           />
         </div>

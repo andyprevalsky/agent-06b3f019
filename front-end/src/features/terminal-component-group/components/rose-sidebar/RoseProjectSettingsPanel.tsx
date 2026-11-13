@@ -8,6 +8,8 @@
  *   [DIRTY] + timeout outside 1..3600 --> [INVALID] inline hint, Save disabled
  *   Code repo: [SHOWING URL] --Change--> [EDITING URL] (saved with Save)
  *
+ * Team sharing uses independent explicit opt-ins through /api/teams.
+ *
  * Sections (Rose light styles): Code repo (repository URL + Change, default
  * branch, GitHub "Connected"/"Not connected" — never an error — and Last synced)
  * · Set up with your coding agent (copyable one-time setup prompt; its own
@@ -19,6 +21,7 @@
  * set/not set).
  */
 
+import { ProjectTeamSharing } from '@/components/teams/TeamSharing';
 import { useState } from 'react';
 
 import { MAX_STARTUP_TIMEOUT_S, MIN_STARTUP_TIMEOUT_S, type Project } from '@/lib/api/projects';
@@ -212,6 +215,7 @@ export default function RoseProjectSettingsPanel({
           className="min-w-0 bg-transparent text-right outline-none"
         />
       </label>
+      <ProjectTeamSharing projectId={project.id} />
       <CodeRepoSection draft={form.draft} setField={form.setField} project={project} />
       <ProjectAgentSetupSection projectId={project.id} />
       <StartupSection

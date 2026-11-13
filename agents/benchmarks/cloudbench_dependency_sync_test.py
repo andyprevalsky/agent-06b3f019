@@ -2833,10 +2833,30 @@ source """
         + shlex.quote(str(ROOT / "scripts/lib/run-process-cleanup.sh"))
         + """
 mkdir -p "$BENCHMARK_CONTEXT_DIR"
+health_pid=""
+if [ "${CLOUDBENCH_KERNEL_PROXY_CUSTODY-0}" = 1 ]; then
+    node back-end/fixture-health.cjs &
+    health_pid=$!
+    while [ ! -f "$BENCHMARK_CONTEXT_DIR/custody-health.ready" ]; do
+        kill -0 "$health_pid" || exit 1
+        sleep 0.02
+    done
+fi
 printf '{"status":"running"}\n' > "$BENCHMARK_CONTEXT_DIR/services.json"
-trap 'run_publish_stack_cleanup_status clean; exit 0' TERM INT
+trap '[ -z "$health_pid" ] || { kill -TERM "$health_pid" 2>/dev/null || true; wait "$health_pid" || true; }; run_publish_stack_cleanup_status clean; exit 0' TERM INT
 while :; do sleep 1; done
 """,
+    )
+    (repo / "back-end/fixture-health.cjs").write_text(
+        "const http=require('node:http');\n"
+        "const proxy=globalThis[Symbol.for('rose.test.kernelProxyCustody')];\n"
+        "const resource=globalThis[Symbol.for('rose.test.kernelResourceCustody')];\n"
+        "if(proxy!==true||resource!==true)throw new Error('real custody preload missing');\n"
+        "http.createServer((req,res)=>{res.writeHead(200,{\n"
+        "'x-rose-kernel-proxy-custody':'enforced-v1',\n"
+        "'x-rose-kernel-resource-custody':'enforced-v1'});res.end('{}');\n"
+        "}).listen(Number(process.env.CONDUCTOR_PORT),'127.0.0.1',()=>{\n"
+        "require('node:fs').writeFileSync(process.env.BENCHMARK_CONTEXT_DIR+'/custody-health.ready','ready');});\n"
     )
     runner_wrapper = repo / "agents/benchmarks/run_benchmark.py"
     runner_wrapper.write_text(
@@ -2982,8 +3002,14 @@ exec {str(ROOT / "agents/venv/bin/python")!r} "$@"
         controls / "target.py",
         "#!/usr/bin/env python3\nimport sys\nprint('local')\nprint('--port')\nprint(sys.argv[2])\n",
     )
+    real_env_functions = "\n".join(
+        _extract_fleet_function(ENV_HELPER_SCRIPT.read_text(), name + "() {")
+        for name in ("cloudbench_verify_source_guest_env", "cloudbench_kernel_proxy_node_options",
+                     "cloudbench_kernel_proxy_custody_policy")
+    )
     (controls / "env.sh").write_text(
-        """cloudbench_verify_env_file() { return 0; }
+        real_env_functions + "\n"
+        + """cloudbench_verify_env_file() { return 0; }
 cloudbench_require_guest_temporal_namespace() { return 0; }
 cloudbench_require_agentcard_org_oauth() { return 0; }
 cloudbench_validate_browser_provider_contract() { return 0; }
@@ -2991,6 +3017,11 @@ cloudbench_env_value() { return 0; }
 cloudbench_apply_compute_token_authority() { return 0; }
 """
     )
+    guard = repo / "back-end/scripts/blackbox-kernel-proxy-custody.cjs"
+    guard.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(ROOT / "back-end/scripts/blackbox-kernel-proxy-custody.cjs", guard)
+    shutil.copy2(ROOT / "back-end/scripts/verify-kernel-proxy-custody.cjs",
+                 guard.with_name("verify-kernel-proxy-custody.cjs"))
     (controls / "seed-budget.sh").write_text("stack_wait_budget_seconds() { printf '5\\n'; }\n")
 
     def unused_tcp_port() -> int:
@@ -3022,6 +3053,7 @@ cloudbench_apply_compute_token_authority() { return 0; }
             "CLOUDBENCH_BENCHMARK_TARGET_SCRIPT": str(controls / "target.py"),
             "CLOUDBENCH_CATALOG_SCRIPT": str(controls / "catalog.py"),
             "CLOUDBENCH_ENV_HELPER": str(controls / "env.sh"),
+            "CLOUDBENCH_SOURCE_ENV_HELPER": str(ROOT / "scripts/cloudbench-source-env.py"),
             "CLOUDBENCH_SEED_BUDGET_LIB": str(controls / "seed-budget.sh"),
             "CLOUDBENCH_DEPS_DIR": str(tmp_path / "deps"),
             "CLOUDBENCH_WMH_DIR": str(data_dir / "world-model"),
@@ -4064,6 +4096,76 @@ def test_cloud_patch_can_be_disabled_for_a_pinned_committed_ref() -> None:
     assert "local changes intentionally excluded" in provenance
 
 
+@pytest.mark.parametrize("scenario", ["frozen-none", "captured-patch", "tampered-patch", "missing-capture", "standalone"])
+def test_cloud_frozen_patch_handoff_ignores_later_workspace_edits(tmp_path: Path, scenario: str) -> None:
+    """Execute the real controller boundary and verifier after a late edit."""
+    repo = tmp_path / "checkout"
+    repo.mkdir()
+    tracked = repo / "tracked.txt"
+    tracked.write_text("committed base\n")
+    git = ["git", "-C", str(repo)]
+    for args in (["init", "-q"], ["add", "."],
+                 ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-qm", "base"]):
+        subprocess.run(git + args, check=True, capture_output=True)
+    snapshot, manifest, provenance = _make_execution_provenance(tmp_path)
+    captured = tmp_path / "captured.patch"
+    tracked.write_text("captured unpublished parent delta\n")
+    with captured.open("w") as output:
+        subprocess.run(["bash", str(WORKTREE_PATCH_SCRIPT), str(repo), "HEAD"],
+                       stdout=output, stderr=subprocess.PIPE, text=True, check=True)
+    captured_sha = hashlib.sha256(captured.read_bytes()).hexdigest()
+    document = json.loads(provenance.read_text())
+    document["workspace_patch_sha256"] = captured_sha if scenario in {
+        "captured-patch", "tampered-patch", "missing-capture"
+    } else "none"
+    provenance.write_text(json.dumps(document))
+    # This edit occurs AFTER the controller froze either its patch or "none".
+    tracked.write_text("unrelated later workspace edit\n")
+    if scenario == "tampered-patch":
+        captured.write_bytes(captured.read_bytes() + b"tampered\n")
+    cloud = CLOUD_SCRIPT.read_text()
+    start = cloud.index('LOCAL_PATCH_FILE=""')
+    end_marker = "verify_execution_provenance_contract || exit 1"
+    end = cloud.index(end_marker, start) + len(end_marker)
+    block = cloud[start:end].replace(
+        '"$ROOT_DIR/scripts/create-worktree-patch.sh"', shlex.quote(str(WORKTREE_PATCH_SCRIPT))
+    )
+    environment = os.environ.copy()
+    for key in ("CLOUDBENCH_SKIP_LOCAL_PATCH", "CLOUDBENCH_LOCAL_PATCH_SOURCE", "CLOUDBENCH_LOCAL_PATCH_SHA256"):
+        environment.pop(key, None)
+    environment.update(
+        CLOUDBENCH_REQUIRE_EXECUTION_PROVENANCE="0" if scenario == "standalone" else "1",
+        CLOUDBENCH_EXECUTION_PROVENANCE_FILE=str(provenance),
+        CLOUDBENCH_GUEST_EXECUTION_PROVENANCE_SCRIPT=str(EXECUTION_PROVENANCE_SCRIPT),
+        CLOUDBENCH_RESULT_SCRIPT=str(CLOUDBENCH_RESULT_SCRIPT),
+        CLOUDBENCH_RUNTIME_SCRIPT_ROOT=str(snapshot),
+        CONTROLLER_SNAPSHOT_MANIFEST=str(manifest), BENCH_REF="a" * 40,
+    )
+    if scenario in {"captured-patch", "tampered-patch"}:
+        environment.update(CLOUDBENCH_LOCAL_PATCH_SOURCE=str(captured),
+                           CLOUDBENCH_LOCAL_PATCH_SHA256=captured_sha)
+    result = subprocess.run(
+        ["bash", "-euc", 'source "$1"\nROOT_DIR="$2"\nSTAGED_LOCAL_FILES=()\n' + block
+         + '\nprintf "PATCH=%s\\n" "${LOCAL_PATCH_SHA256:-none}"',
+         "patch-handoff", str(ENV_HELPER_SCRIPT), str(repo)],
+        env=environment, text=True, capture_output=True, timeout=20,
+    )
+    if scenario == "tampered-patch":
+        assert result.returncode != 0
+        assert "shared local workspace patch checksum mismatch" in result.stderr
+    elif scenario == "missing-capture":
+        assert result.returncode != 0
+        assert "workspace patch does not match the staged guest patch" in result.stderr
+    else:
+        assert result.returncode == 0, result.stderr
+        actual = result.stdout.strip().split("PATCH=")[-1]
+        if scenario == "standalone":
+            assert re.fullmatch(r"[0-9a-f]{64}", actual)
+            assert actual != captured_sha
+        else:
+            assert actual == (captured_sha if scenario == "captured-patch" else "none")
+
+
 def test_boot_launch_delivers_the_exact_worktree_patch_to_every_guest() -> None:
     """The no-SSH launch path must not silently run the base checkout."""
     cloud = CLOUD_SCRIPT.read_text()
@@ -4502,6 +4604,7 @@ def test_autoscaled_worker_failure_publishes_durable_failure_marker(tmp_path: Pa
     (root / "scripts/cloudbench-worker.sh").write_text("#!/usr/bin/env bash\n")
     patch_file = tmp_path / "workspace.patch"
     patch_file.write_text("patch\n")
+    _, _, execution_provenance = _make_execution_provenance(tmp_path)
 
     for mode in (
         "storage-not-ready",
@@ -4522,6 +4625,13 @@ CLOUDBENCH_SCRIPT_SNAPSHOT={shlex.quote(str(root / "scripts"))}
 APP=test-app
 # This fixture owns ordinary test-app clones, never a disposable registry.
 DISPOSABLE_LIFECYCLE=0
+# Match the ordinary controller source capture defaults before staging workers.
+PRIVATE_SOURCE_FILE=""
+PRIVATE_SOURCE_SHA256=none
+PRIVATE_SOURCE_LEASE_PROTOCOL=none
+PRIVATE_SOURCE_GUEST_ENV_MODE=none
+PRIVATE_SOURCE_GUEST_ENV_CAPSULE_SHA256=none
+EXECUTION_PROVENANCE_FILE={shlex.quote(str(execution_provenance))}
 # Use the production initializer instead of inheriting ambient WMH fields.
 WMH_ENGINE=experiential
 unset WMH_MODEL_NAME WMH_EXECUTION_POLICY WMH_ROSE_POOL
@@ -6100,6 +6210,7 @@ def test_post_config_start_rejected_ack_requires_current_guest_proof(
     post_start = post_start[: -len("\n    fi")] + "\n"
     poll = cloud.split('while :; do\n    now="$(date +%s)"', 1)[1]
     poll = poll.split("    # A later chunk", 1)[0]
+    start_helper = _extract_fleet_function(cloud, "boot_launch_start_after_config() {")
     native_calls = tmp_path / "native-start.calls"
     script = f"""set -eu
 source {shlex.quote(str(ENV_HELPER_SCRIPT))}
@@ -6131,6 +6242,7 @@ flyctl() {{
 sleep() {{ :; }}
 stage_explicit_codex_auth() {{ return 0; }}
 ensure_status_proxy() {{ kill -0 "$STATUS_PROXY_PID"; }}
+{start_helper}
 {post_start}
 now="$(date +%s)"
 {poll}
@@ -6182,9 +6294,19 @@ def test_boot_update_always_submits_a_bounded_post_config_start() -> None:
     assert "machine_state" not in post_config_start
     assert "machine_storage_ready" not in post_config_start
     assert "request_machine_start" not in post_config_start
-    assert "CLOUDBENCH_BOOT_START_ATTEMPTS" in post_config_start
-    assert "CLOUDBENCH_BOOT_START_TIMEOUT" in post_config_start
-    assert 'flyctl machine start "$mid"' in post_config_start
+    assert 'if boot_launch_start_after_config "$mid" "$_start_log"; then' in post_config_start
+    # The bounded start helper is the only post-config start path. It must not
+    # consult the shared inventory (which can still say `started`), and both
+    # its ordinary attempt budget and its Fly settle window stay bounded.
+    start_helper = _extract_fleet_function(cloud, "boot_launch_start_after_config() {")
+    assert "machine_state" not in start_helper
+    assert "machine_storage_ready" not in start_helper
+    assert "request_machine_start" not in start_helper
+    assert "CLOUDBENCH_BOOT_START_ATTEMPTS" in start_helper
+    assert "CLOUDBENCH_BOOT_START_TIMEOUT" in start_helper
+    assert "CLOUDBENCH_BOOT_START_SETTLE_SECONDS" in start_helper
+    assert 'flyctl machine start "$id"' in start_helper
+    assert 'flyctl machine wait "$id" -a "$APP" --state settled' in start_helper
     assert 'mv "$POST_CONFIG_START_MARKER.tmp.$$" "$POST_CONFIG_START_MARKER"' in post_config_start
     assert "post-config start accepted" in post_config_start
     claim_start = fleet.index("claim_pool_machine() {")
@@ -10128,6 +10250,7 @@ def test_fleet_lifecycle_receipt_requires_final_registry_retirement(tmp_path: Pa
             "fleet_release_cleanup_capacity() {",
             "fleet_billing_stop_retained_idle() {",
             "fleet_registry_release_verified() {",
+            "finish_private_source_lease() {",
             "cleanup() {",
         )
     )
@@ -14270,6 +14393,11 @@ def test_exact_recovery_reconnects_quarantined_owned_guests_before_provider_reap
             extracted.append(fleet[start:end])
         else:
             extracted.append(_extract_fleet_function(fleet, signature))
+    # PR1910 recovery also releases its lock and closes the source consumer claim.
+    for signature in ("release_registry_recovery_lock() {", "fleet_close_recovered_source_consumer() {",
+                      "exact_recovery_is_pool_only() {", "fleet_recovery_confirm_fresh_prestart() {"):
+        if signature in fleet:
+            extracted.append(_extract_fleet_function(fleet, signature))
     functions = "\n".join(extracted)
     owner = "5a" * 16
     run_id = "20260910-021331-1465409"
@@ -14365,6 +14493,7 @@ def test_exact_recovery_reconnects_quarantined_owned_guests_before_provider_reap
 APP=bench-app
 FLEET_OWNERSHIP_ROOT={shlex.quote(str(ownership_root))}
 FLEET_AUDIT_ROOT={shlex.quote(str(audit_root))}
+CLOUDBENCH_SCRIPT_SNAPSHOT={shlex.quote(str(ROOT / "scripts"))}
 FLEET_OWNER_HOST=test-host
 FLEET_OWNER_PID_START="$(ps -p $$ -o lstart= | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
 FLEET_OWNER_TOKEN={owner}
@@ -17926,6 +18055,10 @@ def test_exact_recovery_hands_volume_only_owned_audit_to_registry_reaper(
             "fleet_registry_remove_if_empty() {",
             "acquire_registry_recovery_lock() {",
             "release_cleanup_disk_reserve() {",
+            "release_registry_recovery_lock() {",
+            "fleet_close_recovered_source_consumer() {",
+            "exact_recovery_is_pool_only() {",
+            "fleet_recovery_confirm_fresh_prestart() {",
             "recover_exact_stale_fleet_owner() {",
         )
     )
@@ -27582,7 +27715,9 @@ def test_cloud_bundled_frontend_ngrok_bootstrap(tmp_path: Path, scenario: str) -
         (binaries / name).chmod(0o755)
     driver = DRIVER_SCRIPT.read_text()
     start = driver.index('BENCH_TARGET_MODE_FOR_STACK=""')
-    end = driver.index('log "launching stack (run.sh --benchmark)', start)
+    # Exercise ngrok bootstrap only; custody launch/verification has its own
+    # real preload tests, including production-target refusal.
+    end = driver.index('# Cloud guest Kernel proxy custody', start)
     target = "prod" if scenario == "production" else "local"
     requested_repo = tmp_path / "historical-repo" if scenario == "historical" else ROOT
     requested_repo.mkdir(exist_ok=True)
@@ -28737,6 +28872,7 @@ def test_migrated_registry_reaps_seals_audit_and_retires_lock_directory(
             "fleet_release_cleanup_capacity() {",
             "fleet_billing_stop_retained_idle() {",
             "fleet_registry_release_verified() {",
+            "finish_private_source_lease() {",
         )
     )
     workspace = tmp_path / "workspace"
@@ -29012,6 +29148,13 @@ ROOT_DIR="$FIXTURE/workspace"
 GIT_COMMON_DIR="$FIXTURE/common"
 WARM_DEPS_STATE_FILE="$GIT_COMMON_DIR/cloudbench-warm-deps.fp"
 FLEET_DIR="$ROOT_DIR/.context/run"
+# This extracted preflight owns one explicit fixture operation and the same
+# original 20-second budget as its unchanged subprocess timeout below.
+FLEET_OWNER_TOKEN=cccccccccccccccccccccccccccccccc
+RUN_ID=private-source-preflight-fixture
+FLEET_CONTROLLER_STARTED_EPOCH="$(date +%s)"
+START_BARRIER_WAIT_SECONDS=20
+FLY_API_TOKEN=fixture-private-source-selected-token
 source {shlex.quote(str(ROOT / "scripts/lib/cloudbench-inventory.sh"))}
 mkdir -p "$FLEET_DIR"
 SOURCE_HELPER={shlex.quote(str(ROOT / "scripts/cloudbench-source.py"))}
@@ -29029,19 +29172,18 @@ FLY() {{
   printf '%s\\n' "$*" >> "$FIXTURE/calls"
   case "$1 $2" in
     "machines list")
-      fails=$(wc -l < "$FIXTURE/machine-reads" 2>/dev/null || echo 0)
+      fails=$(wc -l 2>/dev/null < "$FIXTURE/machine-reads" || echo 0)
       echo read >> "$FIXTURE/machine-reads"
       if [ "$fails" -lt "${{TRANSIENT_FAIL:-0}}" ]; then echo 'Error: failed to list VMs: stream error; INTERNAL_ERROR' >&2; return 1; fi
       cat "$FIXTURE/machines.json" ;;
     "volumes list") cat "$FIXTURE/volumes.json" ;;
     "volume snapshots")
-      empties=$(wc -l < "$FIXTURE/snapshot-reads" 2>/dev/null || echo 0)
+      empties=$(wc -l 2>/dev/null < "$FIXTURE/snapshot-reads" || echo 0)
       echo read >> "$FIXTURE/snapshot-reads"
       if [ "$empties" -lt "${{TRANSIENT_EMPTY:-0}}" ]; then echo '[]'; else cat "$FIXTURE/snapshots.json"; fi ;;
     *) echo 'unexpected provider mutation' >&2; return 88 ;;
   esac
 }}
-fly_with_timeout() {{ shift; FLY "$@"; }}
 pool_machine_state() {{ echo started; }}
 sleep() {{ :; }}
 cloudbench_node_dependency_fingerprint() {{ printf '%s\\n' {node}; }}
@@ -29060,7 +29202,7 @@ printf 'SELECTED=%s:%s:%s\\n' "$WARM_ID" "$VOL_ID" "$SNAP_ID"
     return result, calls.read_text()
 
 
-@pytest.mark.parametrize("empties, admitted", [(2, True), (6, False)])
+@pytest.mark.parametrize("empties, admitted", [(2, True), (12, False)])
 def test_private_fleet_source_rereads_transient_empty_snapshot_listing(
     tmp_path: Path, empties: int, admitted: bool
 ) -> None:
@@ -29073,12 +29215,12 @@ def test_private_fleet_source_rereads_transient_empty_snapshot_listing(
         assert reads == empties + 1
     else:
         assert result.returncode != 0 and "SELECTED=" not in result.stdout
-        assert "private fleet source validation failed: snapshot identity missing or duplicate" in result.stderr
-        assert reads == 6
+        assert "snapshot inventory remained empty after 12 bounded reads" in result.stderr
+        assert reads == 12
     assert "machine update" not in calls and "machine stop" not in calls
 
 
-@pytest.mark.parametrize("failures, admitted", [(2, True), (6, False)])
+@pytest.mark.parametrize("failures, admitted", [(2, True), (12, False)])
 def test_private_fleet_source_rereads_transient_failed_inventory(tmp_path: Path, failures: int, admitted: bool) -> None:
     """Fly machines list failed with an HTTP/2 stream INTERNAL_ERROR in one job (deploy round 35)."""
     result, calls = _private_source_preflight_fixture(tmp_path, transient_fail=failures)
@@ -29089,7 +29231,7 @@ def test_private_fleet_source_rereads_transient_failed_inventory(tmp_path: Path,
         assert reads >= failures + 1
     else:
         assert result.returncode != 0 and "SELECTED=" not in result.stdout
-        assert "provider inventory read failed (read 6/6)" in result.stderr
+        assert "provider inventory read failed: machines exit 1 (read 12/12)" in result.stderr
     assert "machine update" not in calls and "machine stop" not in calls
 
 
@@ -31494,6 +31636,9 @@ def test_failed_fleet_forensic_archive_admits_exact_reaper_before_final_release(
         _extract_fleet_function(fleet_source_text(), signature)
         for signature in (
             "registry_meta_value() {",
+            "release_registry_recovery_guard() {",
+            "release_registry_recovery_lock() {",
+            "fleet_close_recovered_source_consumer() {",
             "fleet_registry_cleanup_state() {",
             "fleet_recovery_confirm_forensic_retirement() {",
             "fleet_recovery_confirm_runtime_evidence() {",
@@ -31508,6 +31653,7 @@ def test_failed_fleet_forensic_archive_admits_exact_reaper_before_final_release(
     script = f"""set -u
 APP=bench-app
 FLEET_OWNER_HOST=fixture-host
+FLEET_OWNER_PID_START=fixture-birth
 FLEET_OWNERSHIP_ROOT={shlex.quote(str(registry.parent))}
 FLEET_AUDIT_ROOT={shlex.quote(str(audit_record.parents[2]))}
 FORENSIC_RETIREMENT_HELPER={shlex.quote(str(FORENSIC_RETIREMENT_SCRIPT))}
@@ -32710,6 +32856,12 @@ def test_prebuilt_volume_selection_preserves_effective_simulation_assets(
         "SKIP_AUTOSCALER": "0",
         "CLOUDBENCH_POOL_DYNAMIC_VM_SHAPE": "0",
         "EXECUTION_PROVENANCE_FILE": str(tmp_path / "fixture-provenance"),
+        # Match ordinary controller bootstrap before extracting its child handoff.
+        "PRIVATE_SOURCE_FILE": "",
+        "PRIVATE_SOURCE_SHA256": "none",
+        "PRIVATE_SOURCE_LEASE_PROTOCOL": "none",
+        "PRIVATE_SOURCE_GUEST_ENV_MODE": "none",
+        "PRIVATE_SOURCE_GUEST_ENV_CAPSULE_SHA256": "none",
         "BENCH_REF": "fixture-ref",
         "CHILD_RUN_TIMEOUT": "10",
         "RUN_BENCH_CLOUD_BIN": str(child),
@@ -34181,7 +34333,9 @@ def test_exact_recovery_consumes_runtime_receipt_publishes_audited_release(tmp_p
                   "registry_owner_alive() {", "acquire_registry_recovery_lock() {",
                   "release_cleanup_disk_reserve() {", "recover_exact_stale_fleet_owner() {",
                   "finalize_terminal_projection() {"]
-    for signature in ("fleet_finalize_released_projection() {", "fleet_publish_recovered_terminal_projection() {"):
+    for signature in ("release_registry_recovery_guard() {", "release_registry_recovery_lock() {",
+                      "fleet_close_recovered_source_consumer() {",
+                      "fleet_finalize_released_projection() {", "fleet_publish_recovered_terminal_projection() {"):
         if signature in fleet:
             signatures.append(signature)
     functions = _fleet_pid_identity_helpers(fleet) + "\n".join(_extract_fleet_function(fleet, signature) for signature in signatures)
@@ -34351,6 +34505,9 @@ def test_exact_recovery_consumes_runtime_receipt_publishes_audited_release_after
             "fleet_registry_cleanup_state() {",
             "registry_owner_alive() {",
             "acquire_registry_recovery_lock() {",
+            "release_registry_recovery_guard() {",
+            "release_registry_recovery_lock() {",
+            "fleet_close_recovered_source_consumer() {",
             "release_cleanup_disk_reserve() {",
             "recover_exact_stale_fleet_owner() {",
             "fleet_registry_remove_if_empty() {",
@@ -36499,7 +36656,9 @@ def test_exact_owner_preconfig_entrypoint_routes_real_consumer_before_missing_pr
     entrypoint = Path(os.environ['CLOUDBENCH_PRECONFIG_ENTRYPOINT_UNDER_TEST']).read_text() if 'CLOUDBENCH_PRECONFIG_ENTRYPOINT_UNDER_TEST' in os.environ else source
     functions = ''.join(_extract_fleet_function(source, name + '() {') for name in (
         'registry_meta_value', 'fleet_registry_cleanup_state', 'fleet_preconfig_recovery_plan',
-        'fleet_recovery_confirm_preconfig_cohort', 'fleet_registry_build_guest_recovery_plan'))
+        'fleet_recovery_confirm_preconfig_cohort', 'fleet_registry_build_guest_recovery_plan',
+        'release_registry_recovery_lock', 'fleet_close_recovered_source_consumer',
+        'exact_recovery_is_pool_only', 'fleet_recovery_confirm_fresh_prestart'))
     functions += _extract_fleet_function(entrypoint, 'recover_exact_stale_fleet_owner() {')
     result = subprocess.run(['bash', '-c', f'''set -uo pipefail
 APP=fixture-app

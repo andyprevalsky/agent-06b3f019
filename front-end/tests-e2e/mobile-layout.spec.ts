@@ -30,7 +30,9 @@ import fs from 'node:fs';
 import {
   FRONTEND_URL,
   HAS_INJECTED_SESSION,
+  acrossAppReload,
   attachRecorder,
+  countMessageRowsWithWorkExpanded,
   createAgent,
   deleteAgent,
   expectDevAuthenticated,
@@ -132,10 +134,11 @@ test.describe('mobile-layout', () => {
         )
         .toBe(true);
 
-      // Wait for ≥2 message bubbles (user goal + ≥1 assistant/tool).
-      const messageLocator = page.locator('[data-message-id]');
+      // Wait for ≥2 message bubbles (user goal + ≥1 assistant/tool). Live
+      // assistant/tool rows fold into a collapsed work group; open it so they
+      // render (and fall under the overflow check) before the agent finishes.
       await expect
-        .poll(() => messageLocator.count(), {
+        .poll(() => countMessageRowsWithWorkExpanded(page), {
           timeout: 120_000,
           message: 'Agent never produced ≥2 realtime message bubbles on mobile',
         })
@@ -207,15 +210,17 @@ test.describe('mobile-layout', () => {
     // Previously the header used a hard-coded `width: 320px` inline style.
     // Fix: `width: min(320px, calc(100vw - 32px))` so it shrinks on
     // sub-320 px viewports and stays centered.
-    const result = await page.evaluate(() => {
-      const header = document.querySelector('header');
-      if (!header) return null;
-      const rect = header.getBoundingClientRect();
-      return {
-        center: Math.round(rect.left + rect.width / 2),
-        midpoint: Math.round(window.innerWidth / 2),
-      };
-    });
+    const result = await acrossAppReload(page, () =>
+      page.evaluate(() => {
+        const header = document.querySelector('header');
+        if (!header) return null;
+        const rect = header.getBoundingClientRect();
+        return {
+          center: Math.round(rect.left + rect.width / 2),
+          midpoint: Math.round(window.innerWidth / 2),
+        };
+      }),
+    );
     expect(result, 'Header element not found').not.toBeNull();
     if (result) {
       expect(

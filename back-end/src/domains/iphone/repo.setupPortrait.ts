@@ -57,11 +57,12 @@ export async function portraitSession(tx: Transaction, claim: SetupClaim, input:
       'phone_portrait_session_not_ready'
     );
   const route = await currentPortraitRoute(tx, claim, input, now);
-  if (route === null)
+  if ('break' in route)
     throw new IPhoneError(
       409,
       'Phone native portrait route is unproven',
-      'phone_portrait_route_unproven'
+      'phone_portrait_route_unproven',
+      { portraitRoute: route.break }
     );
   return { session, route, deadlineAt: command.deadlineAt.getTime(), now: now.getTime() };
 }

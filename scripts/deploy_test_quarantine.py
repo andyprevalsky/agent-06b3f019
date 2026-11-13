@@ -146,6 +146,40 @@ def _git_ancestor(root: Path, ancestor: str, descendant: str) -> bool:
                           capture_output=True).returncode == 0
 
 
+# unittest's own failure header (3.11): "FAIL: test_x (module.Class.test_x)".
+_UNITTEST_FAILURE = re.compile(r'^(?:FAIL|ERROR): \S+ \(([^()\s]+)\)', re.M)
+
+
+def failed_unittest_names(occurrence: dict) -> list[str]:
+    """Exact unittest ids a suite-level FLAKY unit printed for its failed first attempt.
+
+    The structural runner names a FLAKY unit after its whole suite job, while a quarantine marker
+    sits on one test method; the occurrence's own failure output is what ties the two together.
+    """
+    return _UNITTEST_FAILURE.findall(str(occurrence.get('detail') or ''))
+
+
+def named_test_matches(marker: dict, test_id: str, path: str, occurrence: dict) -> bool:
+    """A failed unittest id names this marker: same module (file), class and method.
+
+    A script-run suite reports its module as `__main__`; then the marker file must be that suite's own
+    file (its stem is the FLAKY unit) or the failing method's traceback frame must be in that file.
+    """
+    owner, name = marker.get('owner'), marker.get('name')
+    if not name or test_id.rsplit('.', 1)[-1] != name:
+        return False
+    parts = test_id.split('.')
+    if owner and (len(parts) < 3 or parts[-2] != owner):
+        return False
+    module = '.'.join(parts[:-2] if owner else parts[:-1])
+    stem = Path(path).name.removesuffix('.py').removesuffix('.test')
+    if module == '__main__':
+        suite = str(occurrence.get('unit') or '').split('[', 1)[0]
+        frame = re.search(r'File "[^"]*/' + re.escape(path) + r'", line \d+, in ' + re.escape(name) + r'\b',
+                          str(occurrence.get('detail') or ''))
+        return stem == suite or frame is not None
+    return Path(path).with_suffix('').as_posix().replace('/', '.').endswith(module)
+
 
 def native_case_binding(occurrence: dict, entry: dict, root: Path) -> tuple[dict, dict, dict]:
     """Bind an explicit RCA definition to its original canonical native receipt and log."""
@@ -318,6 +352,22 @@ def validate_attribution(occurrence: dict, entry: dict, root: Path, *, state: di
         found = [m for m in markers(root, [path]) if unit_matches(m, occurrence['unit'])]
         if not found and entry.get('case') is not None:
             found = _domain_case_markers(occurrence, entry['case'], root, path)
+        named = failed_unittest_names(occurrence)
+        if not found and named:
+            # A suite-level unit is attributed only when EVERY failed test it names carries a marker here.
+            candidates = markers(root, [path])
+            matched = [[m for m in candidates if named_test_matches(m, test_id, path, occurrence)] for test_id in named]
+            found = [m for group in matched for m in group] if all(matched) else []
+        packet_test = str((entry.get('post_merge') or {}).get('test') or '') if isinstance(entry.get('post_merge'), dict) else ''
+        if not found and not named and packet_test:
+            # The recorded detail keeps only the failure's tail, so unittest's header can be cut off
+            # (PR #1925). Bind the packet's test only when the surviving traceback frame is that method
+            # in this marker file.
+            name = packet_test.rsplit('.', 1)[-1]
+            frame = re.search(r'File "[^"]*/' + re.escape(path) + r'", line \d+, in ' + re.escape(name) + r'\b',
+                              str(occurrence.get('detail') or ''))
+            found = [m for m in markers(root, [path]) if frame is not None
+                     and named_test_matches(m, '__main__.' + packet_test, path, occurrence)]
     if not found:
         raise ValueError(f"no quarantine marker for {occurrence['unit']} in {path}")
     # Repairs are dispatched only after merge (deploy-failure-policy.md): a NOT_INTRODUCED flake records
@@ -337,8 +387,10 @@ def validate_attribution(occurrence: dict, entry: dict, root: Path, *, state: di
     # The attribution travels with the handoff: the dispatched /goal carries the /RCA gate and evidence.
     packet = {**packet, 'attribution': 'NOT_INTRODUCED', 'rca': entry['evidence'], 'occurrence': occurrence['id'],
               'unit': occurrence['unit'], 'gate': occurrence.get('gate'), 'marker': path}
+    # The recorded attribution keeps its case label: merge revalidates it with attribution_block().
     return {'attribution': attribution, 'evidence': entry['evidence'], 'marker': path, 'post_merge': packet,
-            **({'native_binding': binding} if binding else {})}
+            **({'native_binding': binding} if binding else {}),
+            **({'case': entry['case']} if entry.get('case') is not None else {})}
 
 
 _DOMAIN_SINGLE_FAILURE = re.compile(r'\(\d+ passed, 1 failed; 1 failed case\(s\): ([A-Za-z_]\w*); first error: ')

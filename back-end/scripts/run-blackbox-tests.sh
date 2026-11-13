@@ -162,6 +162,7 @@ fi
 # reach a live provider. Capture-only benchmark stacks deliberately fail this
 # contract; callers must relaunch them with the explicit replay opt-in.
 if [[ "$USE_EXISTING_BACKEND" == "1" ]]; then
+  node "$SCRIPT_DIR/verify-kernel-proxy-custody.cjs" "$TEST_BASE_URL"
   if [[ -z "${TEST_BASE_URL:-}" ]]; then
     echo "❌ TEST_BASE_URL must be set when BLACKBOX_TEST_USE_EXISTING_BACKEND=1 or CONTRACT_TEST_USE_EXISTING_BACKEND=1"
     exit 1
@@ -574,6 +575,8 @@ BACKEND_LOG="${BLACKBOX_TEST_BACKEND_LOG:-${CONTRACT_TEST_BACKEND_LOG:-$ARTIFACT
 # behavior is unchanged.
 export SURGE_API_KEY="${SURGE_API_KEY:-blackbox-surge-key}"
 export SURGE_ACCOUNT_ID="${SURGE_ACCOUNT_ID:-blackbox-surge-account}"
+# Provider fixtures must not inherit the production sender selected in .env.
+export SMS_PROVIDER="${BLACKBOX_TEST_SMS_PROVIDER:-surge}"
 export BLACKBOX_TEST_FAKE_SURGE="${BLACKBOX_TEST_FAKE_SURGE:-1}"
 export BLACKBOX_TEST_FAKE_WHATSAPP="${BLACKBOX_TEST_FAKE_WHATSAPP:-1}"
 export BLACKBOX_TEST_FAKE_TWILIO="${BLACKBOX_TEST_FAKE_TWILIO:-1}"
@@ -606,6 +609,7 @@ EOF
 
   PORT="$PORT" \
   DISABLE_GMAIL_SYNC=1 \
+  NODE_OPTIONS="${NODE_OPTIONS:+$NODE_OPTIONS }--require=$(node -p 'JSON.stringify(process.argv[1])' "$SCRIPT_DIR/blackbox-kernel-proxy-custody.cjs")" \
   ROSE_SANDBOX_STACK_ID="${SANDBOX_STACK_ID:-}" \
   npx tsx src/bootstrap.ts >"$BACKEND_LOG" 2>&1 &
   BACKEND_PID=$!

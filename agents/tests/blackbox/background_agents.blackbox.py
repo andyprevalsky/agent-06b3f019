@@ -1460,6 +1460,94 @@ def test_explore_list_agents_on_finished_browser_task_lists_it_completed():
     ], lines
 
 
+async def test_explore_list_agents_lists_project_agents_with_filters():
+    """project_id/owner_user_id/team_id list own + team-shared project agents (metadata, owner, project, paging)."""
+    from unittest.mock import patch
+
+    from domains.agent_messaging import service
+
+    shared = {
+        "total": 25,
+        "next_offset": 20,
+        "agents": [
+            {"id": "a-1", "title": "Launch review", "status": "COMPLETED", "project_id": "p-1",
+             "project_name": "Launch", "owner_user_id": "u-2", "owner_name": "Bea", "own": False},
+            {"id": "a-2", "title": "Own task", "status": "ACTIVE", "project_id": "p-1",
+             "project_name": "Launch", "owner_user_id": "u-1", "owner_name": "Al", "own": True},
+        ],
+    }
+    calls: dict = {"tree": [], "projects": []}
+
+    async def fake_tree(agent_id, user_id, params):
+        calls["tree"].append(params)
+        return {"root_agent_id": "id-root", "caller_path": [], "matches": [
+            {"agent_id": "a-2", "path": "/root/own", "goal": "Own task", "status": "ACTIVE", "depth": 1}
+        ]}
+
+    async def fake_projects(user_id, params):
+        calls["projects"].append(params)
+        return shared
+
+    async def no_event(**kwargs):
+        return None
+
+    async def run(tool_call):
+        with patch.object(service, "fetch_agent_tree", fake_tree), patch.object(
+            service, "fetch_project_agents", fake_projects
+        ), patch.object(service, "handle_tool_event", no_event):
+            return await service.explore_list_agents(
+                execute_activity=None, tool_call=tool_call, tool_call_id="t", owner_agent_id="id-root",
+                user_id="u-1", explore_task_id="bg_x", explore_task_name="x", explore_goal="find",
+            )
+
+    out = await run({"tool": "list_agents", "project_id": "p-1"})
+    assert calls == {"tree": [], "projects": [{"project_id": "p-1"}]}, calls
+    assert out["result"].splitlines() == [
+        "Project agents (2 of 25; title and status only):",
+        "- Launch review [COMPLETED] owner: Bea (u-2); project: Launch (p-1); id a-1",
+        "- Own task [ACTIVE] owner: you; project: Launch (p-1); id a-2",
+        'More: list_agents(project_id="p-1", cursor="projects:20")',
+    ], out
+    for key in ("goal", "trajectory", "env", "credential"):
+        assert key not in out["result"].lower()
+
+    calls.update(tree=[], projects=[])
+    await run({"tool": "list_agents", "team_id": "t-1", "owner_user_id": "u-2", "cursor": "projects:20"})
+    assert calls == {"tree": [], "projects": [{"owner_user_id": "u-2", "team_id": "t-1", "offset": "20"}]}, calls
+
+    # A plain query keeps the tree search and appends teammates' matches (own tree hits deduped).
+    calls.update(tree=[], projects=[])
+    out = await run({"tool": "list_agents", "query": "launch"})
+    assert calls == {"tree": [{"q": "launch"}], "projects": [{"q": "launch"}]}, calls
+    assert "- Launch review [COMPLETED] owner: Bea (u-2); project: Launch (p-1); id a-1" in out["result"]
+    assert "owner: you" not in out["result"]
+
+    # No filters and no query: unchanged tree view, no project listing.
+    calls.update(tree=[], projects=[])
+    await run({"tool": "list_agents"})
+    assert calls["projects"] == [] and len(calls["tree"]) == 1
+
+    # owner_user_id=<you> keeps the own tree view alongside own project agents.
+    calls.update(tree=[], projects=[])
+    await run({"tool": "list_agents", "owner_user_id": "u-1"})
+    assert len(calls["tree"]) == 1 and calls["projects"] == [{"owner_user_id": "u-1"}]
+
+    shared_empty = {"total": 0, "next_offset": None, "agents": []}
+
+    async def empty_projects(user_id, params):
+        return shared_empty
+
+    with patch.object(service, "fetch_project_agents", empty_projects), patch.object(
+        service, "handle_tool_event", no_event
+    ):
+        out = await service.explore_list_agents(
+            execute_activity=None, tool_call={"tool": "list_agents", "team_id": "gone"}, tool_call_id="t",
+            owner_agent_id="id-root", user_id="u-1", explore_task_id="bg_x", explore_task_name="x",
+            explore_goal="find",
+        )
+    assert out["result"] == "No project agents match."
+
+
 def test_task_paths_and_names():
     from helpers.agent_addressing import (
         TASK_NAME_PATTERN,
@@ -2917,6 +3005,9 @@ async def run_all_tests():
     r.record(
         "explore_list_agents_finished_browser_task",
         test_explore_list_agents_on_finished_browser_task_lists_it_completed,
+    )
+    await r.record_async(
+        "explore_list_agents_project_filters", test_explore_list_agents_lists_project_agents_with_filters
     )
     r.record("task_paths_and_names", test_task_paths_and_names)
     await r.record_async(

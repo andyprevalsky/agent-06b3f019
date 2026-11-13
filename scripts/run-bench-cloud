@@ -111,6 +111,7 @@ ROOT_DIR="${CLOUDBENCH_FLEET_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && p
 cd "$ROOT_DIR" || exit 1
 # shellcheck source=lib/cloudbench-env.sh
 source "${CLOUDBENCH_SCRIPT_SNAPSHOT:-$ROOT_DIR/scripts/lib}/cloudbench-env.sh"
+CLOUDBENCH_KERNEL_PROXY_CUSTODY="$(cloudbench_kernel_proxy_custody_policy)" || exit 1
 # Every guest refuses bench-app secrets lacking the committed guest namespace,
 # whichever launcher (or older checkout) staged them; a launcher may bind its own.
 CLOUDBENCH_EXPECTED_GUEST_TEMPORAL_NAMESPACE="${CLOUDBENCH_EXPECTED_GUEST_TEMPORAL_NAMESPACE:-$(cloudbench_expected_guest_temporal_namespace "$APP")}"
@@ -140,6 +141,7 @@ CLOUDBENCH_GUEST_EXECUTION_PROVENANCE_SCRIPT="$CLOUDBENCH_RUNTIME_SCRIPT_ROOT/cl
 CLOUDBENCH_GUEST_EXACT_SESSION_CLEANUP_SCRIPT="$CLOUDBENCH_RUNTIME_SCRIPT_ROOT/cloudbench-exact-session-cleanup.py"
 CLOUDBENCH_GUEST_RECOVERY_SCRIPT="$CLOUDBENCH_RUNTIME_SCRIPT_ROOT/cloudbench-guest-recovery.py"
 CLOUDBENCH_GUEST_ENV_HELPER="$CLOUDBENCH_RUNTIME_LIB_ROOT/cloudbench-env.sh"
+CLOUDBENCH_GUEST_SOURCE_ENV_HELPER="$CLOUDBENCH_RUNTIME_SCRIPT_ROOT/cloudbench-source-env.py"
 CLOUDBENCH_GUEST_SEED_BUDGET_LIB="$CLOUDBENCH_RUNTIME_LIB_ROOT/cloudbench-seed-budget.sh"
 MACHINE_READINESS_SCRIPT="$CLOUDBENCH_RUNTIME_SCRIPT_ROOT/cloudbench-machine-readiness.py"
 CLOUDBENCH_RESULT_SCRIPT="$CLOUDBENCH_RUNTIME_SCRIPT_ROOT/cloudbench_result.py"
@@ -2321,6 +2323,50 @@ start_machine() {  # start_machine <id>
     # optimistic and the run died later with a misleading error.
     echo "❌ Machine $id did not report 'started' after $attempts attempts (state=$st)" >&2
     return 1
+}
+
+# Submit the post-config start for a boot-launched guest. The config update is
+# `--skip-start`, so this is the only start request the guest will ever get;
+# the data-plane fallback after it only observes. Fly can still be replacing
+# the clone's previous VM when the update returns: start is then refused with
+# `failed_precondition: machine getting replaced` / `machine still active`
+# (PR #1927 smoke, 8d967d3f534068: four blind retries spent in 17s, Machine
+# settled `stopped` afterwards and never booted). Wait on Fly's own settled
+# condition for this exact Machine between attempts and keep retrying only that
+# precondition until a bounded settle window ends. Other errors keep the
+# original attempt budget. Starting an already-started Machine is idempotent.
+boot_launch_start_after_config() {  # boot_launch_start_after_config <id> <log>
+    local id="$1" log="$2" ordinary_failures=0 remaining wait_seconds response start_status
+    local attempts="${CLOUDBENCH_BOOT_START_ATTEMPTS:-4}"
+    local start_timeout="${CLOUDBENCH_BOOT_START_TIMEOUT:-60}"
+    local settle_deadline=$((SECONDS + ${CLOUDBENCH_BOOT_START_SETTLE_SECONDS:-180}))
+    local wait_cap="${CLOUDBENCH_BOOT_START_SETTLE_WAIT_SECONDS:-60}"
+    while :; do
+        # Classify only this attempt's own response, then keep it in the log.
+        start_status=0
+        response="$(_with_timeout "$start_timeout" \
+            flyctl machine start "$id" -a "$APP" 2>&1)" || start_status=$?
+        [ -z "$response" ] || printf '%s\n' "$response" >> "$log"
+        [ "$start_status" -eq 0 ] && return 0
+        remaining=$((settle_deadline - SECONDS))
+        if printf '%s' "$response" | grep -q 'failed_precondition'; then
+            [ "$remaining" -gt 0 ] || return 1
+            wait_seconds="$wait_cap"
+            [ "$remaining" -lt "$wait_seconds" ] && wait_seconds="$remaining"
+            printf 'boot-start: %s refused mid-transition; waiting up to %ss for settled state\n' \
+                "$id" "$wait_seconds" >> "$log"
+            _with_timeout "$((wait_seconds + 15))" \
+                flyctl machine wait "$id" -a "$APP" --state settled \
+                --wait-timeout "${wait_seconds}s" >> "$log" 2>&1 || true
+            # A wait that returns at once must not turn into a start-API spin.
+            sleep 2
+            continue
+        fi
+        # Settle-window refusals never consume the ordinary retry budget.
+        ordinary_failures=$((ordinary_failures + 1))
+        [ "$ordinary_failures" -lt "$attempts" ] || return 1
+        sleep $(( ordinary_failures * 2 ))
+    done
 }
 
 # Stop the machine (keep it + volume). Safe default on every per-run exit path.
@@ -5369,7 +5415,8 @@ if [ "${CLOUDBENCH_SKIP_LOCAL_PATCH:-0}" != "1" ]; then
         # The hash above verifies bytes, but never promotes a mutated child's
         # newly observed value to the expected checksum.
         LOCAL_PATCH_SHA256="$CLOUDBENCH_LOCAL_PATCH_SHA256"
-    elif cloudbench_worktree_has_changes "$ROOT_DIR"; then
+    elif [ "${CLOUDBENCH_REQUIRE_EXECUTION_PROVENANCE:-0}" != "1" ] \
+        && cloudbench_worktree_has_changes "$ROOT_DIR"; then
         _candidate_patch="$(mktemp)"
         STAGED_LOCAL_FILES+=("$_candidate_patch")
         _local_patch_rc=0
@@ -5418,6 +5465,37 @@ verify_execution_provenance_contract() {
 }
 verify_execution_provenance_contract || exit 1
 
+# A fleet's captured manifest is independent of mutable app-level secrets.
+# Validate this controller handoff before either boot transport can start a guest.
+verify_private_source_environment_contract() {
+    python3 - "${CLOUDBENCH_SOURCE_MANIFEST_FILE:-}" "${CLOUDBENCH_SOURCE_MANIFEST_SHA256:-none}" \
+        "${CLOUDBENCH_SOURCE_LEASE_PROTOCOL:-none}" "${CLOUDBENCH_EXECUTION_PROVENANCE_FILE:-}" \
+        "$CLOUDBENCH_RUNTIME_SCRIPT_ROOT/cloudbench-source.py" \
+        "${CLOUDBENCH_SOURCE_GUEST_ENV_MODE:-none}" "${CLOUDBENCH_SOURCE_GUEST_ENV_CAPSULE_SHA256:-none}" <<'PYSOURCEENV'
+import hashlib, json, pathlib, runpy, sys
+path, expected, protocol, provenance, helper, mode, capsule = sys.argv[1:]
+if provenance:
+    bound = json.loads(pathlib.Path(provenance).read_bytes())['config']['values'].get('base_source_manifest_sha256', 'none')
+    if bound != expected:
+        raise SystemExit('private source manifest differs from execution provenance')
+    values = json.loads(pathlib.Path(provenance).read_bytes())['config']['values']
+    if values.get('base_source_guest_env_mode', 'none') != mode or values.get('base_source_guest_env_capsule_sha256', 'none') != capsule:
+        raise SystemExit('private source capsule differs from execution provenance')
+if not path:
+    if expected not in ('', 'none') or protocol not in ('', 'none') or mode not in ('', 'none') or capsule not in ('', 'none'):
+        raise SystemExit('private source manifest handoff missing')
+    raise SystemExit(0)
+source = runpy.run_path(helper)
+raw = source['storage']['payload'](pathlib.Path(path))
+value = source['manifest'](raw)
+if hashlib.sha256(raw).hexdigest() != expected or protocol != value.get('lease_protocol', 'none'):
+    raise SystemExit('private source manifest handoff changed')
+if mode != value.get('guest_env_mode', 'none') or capsule != value.get('guest_env_capsule_sha256', 'none'):
+    raise SystemExit('private source capsule handoff changed')
+PYSOURCEENV
+}
+verify_private_source_environment_contract || exit 1
+
 # ── Launch the driver: BOOT-LAUNCH (no ssh) or the legacy ssh path ──────────
 # BOOT-LAUNCH removes the per-box launch-ssh burst (start + ssh-ready + clear-stale
 # + stage + launch + confirm ≈ 7 ssh × N) that saturated Fly's Machines-API rate
@@ -5459,6 +5537,7 @@ if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ]; then
     [ -n "$_ghb64" ] || { echo "❌ No controller GitHub token for boot-launch." >&2; exit 1; }
     _envargs=(
         --env CLOUDBENCH_BOOT=1
+        --env "CLOUDBENCH_KERNEL_PROXY_CUSTODY=$CLOUDBENCH_KERNEL_PROXY_CUSTODY"
         --env CODEX_AUTH_PATH=
         --env CLOUDBENCH_CODEX_AUTH_HELPER=/cloudbench-codex-auth.py
         --env "CLOUDBENCH_CODEX_AUTH_SHA256=$CODEX_AUTH_SHA256"
@@ -5476,6 +5555,9 @@ if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ]; then
         --env CLOUDBENCH_BENCHMARK_TARGET_SCRIPT=/cloudbench-benchmark-target.py
         --env CLOUDBENCH_CATALOG_SCRIPT=/cloudbench_catalog.py
         --env CLOUDBENCH_ENV_HELPER=/cloudbench-env.sh
+        --env CLOUDBENCH_SOURCE_ENV_HELPER=/cloudbench-source-env.py
+        --env "CLOUDBENCH_SOURCE_GUEST_ENV_MODE=${CLOUDBENCH_SOURCE_GUEST_ENV_MODE:-none}"
+        --env "CLOUDBENCH_SOURCE_GUEST_ENV_CAPSULE_SHA256=${CLOUDBENCH_SOURCE_GUEST_ENV_CAPSULE_SHA256:-none}"
         --env CLOUDBENCH_EXACT_SESSION_CLEANUP_SCRIPT=/cloudbench-exact-session-cleanup.py
         --env CLOUDBENCH_GUEST_RECOVERY_SCRIPT=/cloudbench-guest-recovery.py
         --env "LOCAL_PATCH_B64="
@@ -5551,6 +5633,7 @@ if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ]; then
         --file-local "/cloudbench-benchmark-target.py=$CLOUDBENCH_GUEST_BENCHMARK_TARGET_SCRIPT"
         --file-local "/cloudbench_catalog.py=$CLOUDBENCH_GUEST_CATALOG_SCRIPT"
         --file-local "/cloudbench-env.sh=$CLOUDBENCH_GUEST_ENV_HELPER"
+        --file-local "/cloudbench-source-env.py=$CLOUDBENCH_GUEST_SOURCE_ENV_HELPER"
         --file-local "/cloudbench-seed-budget.sh=$CLOUDBENCH_GUEST_SEED_BUDGET_LIB"
         --file-local "/cloudbench-exact-session-cleanup.py=$CLOUDBENCH_GUEST_EXACT_SESSION_CLEANUP_SCRIPT"
         --file-local "/cloudbench-guest-recovery.py=$CLOUDBENCH_GUEST_RECOVERY_SCRIPT"
@@ -5573,6 +5656,15 @@ if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ]; then
             --env CLOUDBENCH_EXECUTION_PROVENANCE_FILE=
             --env CLOUDBENCH_REQUIRE_EXECUTION_PROVENANCE=0
         )
+    fi
+    if [ "${CLOUDBENCH_SOURCE_LEASE_PROTOCOL:-none}" = cloudbench-source-lease-v1 ]; then
+        _envargs+=(--env CLOUDBENCH_SOURCE_MANIFEST_FILE=/cloudbench-source-manifest.json
+            --env "CLOUDBENCH_SOURCE_MANIFEST_SHA256=$CLOUDBENCH_SOURCE_MANIFEST_SHA256"
+            --env "CLOUDBENCH_SOURCE_LEASE_PROTOCOL=${CLOUDBENCH_SOURCE_LEASE_PROTOCOL:-none}")
+        _boot_file_args+=(--file-local "/cloudbench-source-manifest.json=$CLOUDBENCH_SOURCE_MANIFEST_FILE")
+    else
+        _envargs+=(--env CLOUDBENCH_SOURCE_MANIFEST_FILE= --env CLOUDBENCH_SOURCE_MANIFEST_SHA256=
+            --env CLOUDBENCH_SOURCE_LEASE_PROTOCOL=)
     fi
     if [ -n "$LOCAL_PATCH_FILE" ]; then
         # flyctl embeds every --file-local payload base64-encoded inside the
@@ -5803,14 +5895,9 @@ except Exception:
     _start_log="$OUT_DIR/cloudbench-boot-start.log"
     : > "$_start_log"
     _start_ok=0
-    for _s in $(seq 1 "${CLOUDBENCH_BOOT_START_ATTEMPTS:-4}"); do
-        if _with_timeout "${CLOUDBENCH_BOOT_START_TIMEOUT:-60}" \
-              flyctl machine start "$mid" -a "$APP" >> "$_start_log" 2>&1; then
-            _start_ok=1
-            break
-        fi
-        sleep $(( _s * 2 ))
-    done
+    if boot_launch_start_after_config "$mid" "$_start_log"; then
+        _start_ok=1
+    fi
     if [ "$_start_ok" = 1 ]; then
         printf '%s\n' "$mid" > "$POST_CONFIG_START_MARKER.tmp.$$"
         mv "$POST_CONFIG_START_MARKER.tmp.$$" "$POST_CONFIG_START_MARKER"
@@ -5914,6 +6001,7 @@ for helper_path in \
     "$CLOUDBENCH_GUEST_EXACT_SESSION_CLEANUP_SCRIPT" \
     "$CLOUDBENCH_GUEST_RECOVERY_SCRIPT" \
     "$CLOUDBENCH_GUEST_ENV_HELPER" \
+    "$CLOUDBENCH_GUEST_SOURCE_ENV_HELPER" \
     "$CLOUDBENCH_GUEST_SEED_BUDGET_LIB"; do
     [ -s "$helper_path" ] || { echo "❌ Missing controller-owned guest helper: $helper_path" >&2; exit 1; }
 done
@@ -5946,6 +6034,7 @@ STAGED_LOCAL_FILES+=("$WRAPPER_LOCAL")
     echo '}'
     echo "chmod +x /data/cloudbench-run.sh"
     echo "export REF=$(printf '%q' "$BENCH_REF")"
+    echo "export CLOUDBENCH_KERNEL_PROXY_CUSTODY=$CLOUDBENCH_KERNEL_PROXY_CUSTODY"
     echo "export CLOUDBENCH_GITHUB_TOKEN_B64=$(printf '%q' "$CONTROLLER_GITHUB_TOKEN_B64")"
     echo "export CLOUDBENCH_FETCH_REF_SCRIPT=/data/cloudbench-fetch-ref.sh"
     echo "export CLOUDBENCH_SYNC_DEPS_SCRIPT=/data/cloudbench-sync-deps.sh"
@@ -5958,6 +6047,12 @@ STAGED_LOCAL_FILES+=("$WRAPPER_LOCAL")
     echo "export CLOUDBENCH_BENCHMARK_TARGET_SCRIPT=/data/cloudbench-benchmark-target.py"
     echo "export CLOUDBENCH_CATALOG_SCRIPT=/data/cloudbench_catalog.py"
     echo "export CLOUDBENCH_ENV_HELPER=/data/cloudbench-env.sh"
+    echo "export CLOUDBENCH_SOURCE_ENV_HELPER=/data/cloudbench-source-env.py"
+    echo "export CLOUDBENCH_SOURCE_GUEST_ENV_MODE=$(printf '%q' "${CLOUDBENCH_SOURCE_GUEST_ENV_MODE:-none}")"
+    echo "export CLOUDBENCH_SOURCE_GUEST_ENV_CAPSULE_SHA256=$(printf '%q' "${CLOUDBENCH_SOURCE_GUEST_ENV_CAPSULE_SHA256:-none}")"
+    echo "export CLOUDBENCH_SOURCE_MANIFEST_FILE=$(printf '%q' "$([ "${CLOUDBENCH_SOURCE_LEASE_PROTOCOL:-none}" = cloudbench-source-lease-v1 ] && printf /data/cloudbench-source-manifest.json)")"
+    echo "export CLOUDBENCH_SOURCE_MANIFEST_SHA256=$(printf '%q' "$([ "${CLOUDBENCH_SOURCE_LEASE_PROTOCOL:-none}" = cloudbench-source-lease-v1 ] && printf '%s' "$CLOUDBENCH_SOURCE_MANIFEST_SHA256")")"
+    echo "export CLOUDBENCH_SOURCE_LEASE_PROTOCOL=$(printf '%q' "$([ "${CLOUDBENCH_SOURCE_LEASE_PROTOCOL:-none}" = cloudbench-source-lease-v1 ] && printf '%s' "$CLOUDBENCH_SOURCE_LEASE_PROTOCOL")")"
     echo "export CLOUDBENCH_EXACT_SESSION_CLEANUP_SCRIPT=/data/cloudbench-exact-session-cleanup.py"
     echo "export CLOUDBENCH_GUEST_RECOVERY_SCRIPT=/data/cloudbench-guest-recovery.py"
     if [ "${CLOUDBENCH_REQUIRE_EXECUTION_PROVENANCE:-0}" = "1" ]; then
@@ -6063,8 +6158,13 @@ STAGED_LOCAL_FILES+=("$stage_err")
 STAGE_ATTEMPTS="${CLOUDBENCH_STAGE_ATTEMPTS:-20}"
 for _ in $(seq 1 "$STAGE_ATTEMPTS"); do
     : > "$stage_err"
-    ssh_read "$mid" "rm -f /data/cloudbench-run.sh /data/process-identity.py /data/cloudbench-codex-auth.py /data/cloudbench-install-ngrok.sh /data/cloudbench-fetch-ref.sh /data/cloudbench-sync-deps.sh /data/cloudbench-sync-prisma-client.sh /data/cloudbench-current-run-artifact.py /data/cloudbench-prepare-patch.sh /data/cloudbench-status-server.py /data/cloudbench-benchmark-target.py /data/cloudbench_catalog.py /data/cloudbench-execution-provenance.py /data/cloudbench-execution-provenance.json /data/cloudbench-exact-session-cleanup.py /data/cloudbench-guest-recovery.py /data/cloudbench-env.sh /data/cloudbench-seed-budget.sh '$REMOTE_TMP_SCRIPT' /tmp/cloudbench-local.patch" >/dev/null 2>&1 || true
+    ssh_read "$mid" "rm -f /data/cloudbench-run.sh /data/process-identity.py /data/cloudbench-codex-auth.py /data/cloudbench-install-ngrok.sh /data/cloudbench-fetch-ref.sh /data/cloudbench-sync-deps.sh /data/cloudbench-sync-prisma-client.sh /data/cloudbench-current-run-artifact.py /data/cloudbench-prepare-patch.sh /data/cloudbench-status-server.py /data/cloudbench-benchmark-target.py /data/cloudbench_catalog.py /data/cloudbench-execution-provenance.py /data/cloudbench-execution-provenance.json /data/cloudbench-source-manifest.json /data/cloudbench-exact-session-cleanup.py /data/cloudbench-guest-recovery.py /data/cloudbench-env.sh /data/cloudbench-seed-budget.sh '$REMOTE_TMP_SCRIPT' /tmp/cloudbench-local.patch" >/dev/null 2>&1 || true
     provenance_stage_ok=1
+    if [ -n "${CLOUDBENCH_SOURCE_MANIFEST_FILE:-}" ]; then
+        FLY ssh sftp put -a "$APP" --machine "$mid" -q -m 0444 \
+            "$CLOUDBENCH_SOURCE_MANIFEST_FILE" /data/cloudbench-source-manifest.json >"$stage_err" 2>&1 \
+            || provenance_stage_ok=0
+    fi
     if [ "${CLOUDBENCH_REQUIRE_EXECUTION_PROVENANCE:-0}" = "1" ]; then
         FLY ssh sftp put -a "$APP" --machine "$mid" -q -m 0755 \
             "$CLOUDBENCH_GUEST_EXECUTION_PROVENANCE_SCRIPT" /data/cloudbench-execution-provenance.py >"$stage_err" 2>&1 \
@@ -6088,6 +6188,7 @@ for _ in $(seq 1 "$STAGE_ATTEMPTS"); do
         && FLY ssh sftp put -a "$APP" --machine "$mid" -q -m 0755 "$CLOUDBENCH_GUEST_EXACT_SESSION_CLEANUP_SCRIPT" /data/cloudbench-exact-session-cleanup.py >>"$stage_err" 2>&1 \
         && FLY ssh sftp put -a "$APP" --machine "$mid" -q -m 0755 "$CLOUDBENCH_GUEST_RECOVERY_SCRIPT" /data/cloudbench-guest-recovery.py >>"$stage_err" 2>&1 \
         && FLY ssh sftp put -a "$APP" --machine "$mid" -q -m 0755 "$CLOUDBENCH_GUEST_ENV_HELPER" /data/cloudbench-env.sh >>"$stage_err" 2>&1 \
+        && FLY ssh sftp put -a "$APP" --machine "$mid" -q -m 0755 "$CLOUDBENCH_GUEST_SOURCE_ENV_HELPER" /data/cloudbench-source-env.py >>"$stage_err" 2>&1 \
         && FLY ssh sftp put -a "$APP" --machine "$mid" -q -m 0755 "$CLOUDBENCH_GUEST_SEED_BUDGET_LIB" /data/cloudbench-seed-budget.sh >>"$stage_err" 2>&1 \
         && FLY ssh sftp put -a "$APP" --machine "$mid" -q -m 0755 "$WRAPPER_LOCAL" "$REMOTE_TMP_SCRIPT" >>"$stage_err" 2>&1; then
         if [ -n "$LOCAL_PATCH_FILE" ]; then
