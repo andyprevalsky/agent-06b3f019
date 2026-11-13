@@ -1,4 +1,5 @@
 import { forwardRef, useEffect, useRef } from 'react';
+import { isAppCovered, subscribeAppCover } from '@/lib/appCover';
 import { cn } from '@/lib/utils';
 import { liquidMetalFragmentShader, ShaderMount } from '@paper-design/shaders';
 
@@ -16,6 +17,8 @@ const CSS_VARS = {
   darkColor: '#b8b8b8',
   iconColor: '#ffffff',
 };
+
+const SHADER_SPEED = 0.5;
 
 const LiquidWhiteButton = forwardRef<HTMLButtonElement, LiquidWhiteButtonProps>(
   ({ onClick, disabled = false, className, children, size = 'md', ...props }, ref) => {
@@ -70,13 +73,19 @@ const LiquidWhiteButton = forwardRef<HTMLButtonElement, LiquidWhiteButtonProps>(
             u_offsetY: -0.1,
           },
           undefined,
-          0.5,
+          isAppCovered() ? 0 : SHADER_SPEED,
         );
       } catch (error) {
         console.warn('[LiquidWhiteButton] Shader disabled', error);
       }
+      // Hold the loop while an opaque overlay hides the app (lib/appCover), as
+      // ShaderMount already does for a hidden page; resume where it left off.
+      const unsubscribeCover = subscribeAppCover(() =>
+        shaderMountRef.current?.setSpeed(isAppCovered() ? 0 : SHADER_SPEED),
+      );
 
       return () => {
+        unsubscribeCover();
         if (shaderMountRef.current) {
           shaderMountRef.current.dispose();
           shaderMountRef.current = null;

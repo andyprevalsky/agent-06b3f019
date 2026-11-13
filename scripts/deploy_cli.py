@@ -207,11 +207,9 @@ def cmd_freeze(args: argparse.Namespace) -> int:
         if not args.message:
             print('DEPLOY_FREEZE BLOCKED: uncommitted changes need --message', file=sys.stderr)
             return 1
-        # An already-staged deletion is in neither the index nor the worktree, and naming it
-        # makes `git add` fail "pathspec did not match"; it needs no add to be committed.
-        indexed = set(git('ls-files', '--cached', '-z', '--', *pending).split('\0'))
-        if stage := [p for p in pending if p in indexed or os.path.lexists(ROOT / p)]:
-            git('add', '-A', '--', *stage)
+        # A deletion staged with `git rm` is in neither the worktree nor the
+        # index, so naming it to `git add` fails the pathspec; it is staged.
+        git('add', '-A', '--', *[p for p in pending if (ROOT / p).exists() or git('ls-files', '--', p)])
         git('commit', '-m', args.message)
     code = run([sys.executable, 'scripts/deploy_approval_batch.py', 'freeze', '--head', head(), '--base', args.base])
     print(f'DEPLOY_FREEZE head={head()} committed={len(pending)} approvals={"see above" if code == 0 else "error"}')

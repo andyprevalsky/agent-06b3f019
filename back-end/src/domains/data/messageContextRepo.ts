@@ -2,6 +2,7 @@ import { Prisma } from '@prisma/client';
 
 import { prisma } from '../../providers/database';
 import type { MessageGrepRow } from './grepRepo';
+import { messageAccessPredicate, type MessageAccess } from './teamAccessRepo';
 import { regexPredicate } from './sharedGrepRepo';
 
 export interface MessageContextRow extends MessageGrepRow {
@@ -11,11 +12,13 @@ export interface MessageContextRow extends MessageGrepRow {
 /** Select message matches in the same oldest-first order returned to callers. */
 export async function searchConversationMatchRows(params: {
   userId: string;
+  access: MessageAccess;
   pattern: string;
   caseInsensitive: boolean;
   limit: number;
   offset: number;
   personId?: string;
+  personIds?: string[];
   /** Set when `filters.path` addresses one message rather than a whole thread. */
   messageId?: string;
   since?: Date;
@@ -26,6 +29,12 @@ export async function searchConversationMatchRows(params: {
     params.personId === undefined
       ? Prisma.empty
       : Prisma.sql`AND m."personId" = ${params.personId}`;
+  const peopleFilter =
+    params.personIds === undefined
+      ? Prisma.empty
+      : params.personIds.length
+        ? Prisma.sql`AND m."personId" IN (${Prisma.join(params.personIds)})`
+        : Prisma.sql`AND FALSE`;
   const sinceFilter =
     params.since === undefined ? Prisma.empty : Prisma.sql`AND m.timestamp >= ${params.since}`;
   const channelFilter =
@@ -38,6 +47,8 @@ export async function searchConversationMatchRows(params: {
   return prisma.$queryRaw<MessageGrepRow[]>`
     SELECT
       m.id,
+      m."userId",
+      m."googleAccountEmail",
       m."personId",
       m.channel::text AS channel,
       m."from",
@@ -50,10 +61,11 @@ export async function searchConversationMatchRows(params: {
       p.email
     FROM "MessageRecord" m
     INNER JOIN "Person" p ON p.id = m."personId"
-    WHERE m."userId" = ${params.userId}
+    WHERE ${messageAccessPredicate(params.access)}
       AND ${predicate}
       ${messageFilter}
       ${personFilter}
+      ${peopleFilter}
       ${sinceFilter}
       ${channelFilter}
     ORDER BY m.timestamp ASC, m.id ASC
@@ -64,6 +76,7 @@ export async function searchConversationMatchRows(params: {
 /** Fetch adjacent message records for every matched anchor in one query. */
 export async function findMessageContextRows(params: {
   userId: string;
+  access: MessageAccess;
   anchorIds: string[];
   before: number;
   after: number;
@@ -82,12 +95,14 @@ export async function findMessageContextRows(params: {
     WITH anchors AS (
       SELECT m.*
       FROM "MessageRecord" m
-      WHERE m."userId" = ${params.userId}
+      WHERE ${messageAccessPredicate(params.access)}
         AND m.id IN (${Prisma.join(params.anchorIds)})
     )
     SELECT
       a.id AS "anchorId",
       c.id,
+      c."userId",
+      c."googleAccountEmail",
       c."personId",
       c.channel::text AS channel,
       c."from",
@@ -104,6 +119,7 @@ export async function findMessageContextRows(params: {
         SELECT m.*
         FROM "MessageRecord" m
         WHERE m."personId" = a."personId"
+          AND ${messageAccessPredicate(params.access)}
           AND (m.timestamp, m.id) < (a.timestamp, a.id)
           ${sinceFilter}
           ${channelFilter}
@@ -117,6 +133,7 @@ export async function findMessageContextRows(params: {
         SELECT m.*
         FROM "MessageRecord" m
         WHERE m."personId" = a."personId"
+          AND ${messageAccessPredicate(params.access)}
           AND (m.timestamp, m.id) > (a.timestamp, a.id)
           ${sinceFilter}
           ${channelFilter}

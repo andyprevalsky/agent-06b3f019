@@ -361,14 +361,20 @@ async function main(): Promise<void> {
     assert.equal(deCreate.region, 'de');
 
     // ── B1: CDP validation failure releases the paid session ────────────────
-    validationFails = 2;
+    // Every create in the bounded attempt budget fails validation.
+    const { TILION_TASK_CREATE_ATTEMPTS } =
+      await import('../../providers/browser/tilionCreateValidation');
+    const { BrowserSessionValidationError } = await import('../../providers/browser/types');
+    validationFails = TILION_TASK_CREATE_ATTEMPTS;
     const failed = await tilion
       .createTilionSessionWithContext('ctx-1', 'agent-1', { country: 'US' }, undefined, {
         taskId: 'task-f',
       })
       .catch((e) => e);
-    assert(failed instanceof Error);
+    assert(failed instanceof BrowserSessionValidationError);
     assert.match(failed.message, /failed CDP validation/);
+    assert.equal(failed.sessionIds.length, TILION_TASK_CREATE_ATTEMPTS);
+    assert.equal(validationFails, 0, 'every attempt in the budget was created and validated');
     assert.equal(rows.has('task-f'), false);
     assert.equal(live.size, 2, 'failed validation sessions must be released');
 

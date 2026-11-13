@@ -139,3 +139,143 @@ Preserve financial/provider facts and all missing-media negatives.
 ## Reusable lesson
 
 Recover recording provenance from the provider's immutable native session contract and require complete matching saved episodes before classifying deployment diagnostics.
+
+
+## 2026-11-11 recurrence — publisher requester configuration
+
+This is a recurrence of the **separate wrong-requester operator error** already
+noted in this case, not a recurrence of the repaired Tilion episode parser. The
+original episode-validation diagnosis and permanent regression remain unchanged.
+This appendix records a configuration repair using existing publisher inputs;
+it does not claim a new code fix, automated owner inference or regression test.
+
+### Problem and first bad boundary
+
+The round-8 `agent-payment-new-user-journey` task passed, but its first standard
+publication exited 1 with `has no correctly attached recording (need reachable
+recording_view_url or fetchable recording_file_pointer)`. Root agent was
+`7965e15f-af71-4426-9681-3a4e721435e0`; the rejected browser task was
+`507ea03b-e556-5c99-a2ac-5a03170b7ae6`. The original run contains two FINISHED
+recording parts with genuine file pointers. A missing-media message alone did
+not establish missing capture.
+
+The unchanged `scripts/publish_evidence_links.py` resolves `X-User-Id` from
+`BENCHMARK_HUB_USER_ID`, otherwise using its canonical default. This publication
+omitted the explicit requester. Its default was a different user from the
+original run owner authenticated by the run's final cleanup evidence. The
+recording-pointer probe collapses an attachment HTTP error to a false probe,
+which surfaces as the recording-validation error above.
+
+### Archive searches and causal proof
+
+Before drafting this appendix, the archive was searched with both vocabularies:
+
+- `has no correctly attached recording recording_file_pointer` — 42 matches of
+  1,686 cases; relevant relatives included this November 2 case, October 3's
+  code-task recording classification and August 31's recording validation.
+- `publisher attachment wrong owner X-User-Id 403 recording` — 156 matches of
+  1,686 cases. A subsequent literal-source search located July 8's benchmark
+  agent owner/RLS mismatch. That viewer boundary is related but distinct.
+
+The prior Solution and Human feedback were read. The November 2 case explicitly
+separated requester mistakes from its code defect and used an explicit owner
+for its successful publication; it did not add automatic owner selection. This
+operation repeated that omitted input. Archive matches were leads, not proof.
+
+Root authorized exactly one paired read of the **first original pointer**:
+canonical default requester, then the authenticated original owner on the same
+attachment URL, followed by at most one returned media GET. The retained result
+contains exactly three GETs, with no redirects, retry or mutation:
+
+- Default requester: attachment HTTP 403 (`HTTPError`).
+- Explicit original owner: same attachment URL HTTP 200, signed URL present.
+- Exact returned media: HTTP 200, 1,568,262 bytes, matching the original pointer
+  size; SHA256 `a58c5fb6435ab6c9b4c0ed3680d1de35782b60d30eb4c6cb6b6fa4420e2c3619`.
+
+The identical attachment-URL hash in both requests binds the requester change to
+this boundary. The canonical owner-context probe accepted the media. This proves
+wrong-requester configuration for that pointer, not a global media-availability
+claim. The original failed publisher had no per-request HTTP trace; its error
+and the later paired observations remain separate evidence.
+
+### Supported repair and actual outcome
+
+Root authorized one corrected standard publication of the same run and root,
+using the existing process-scoped `BENCHMARK_HUB_USER_ID` set to the authenticated
+original owner. No default-owner fallback or source modification was introduced.
+The selected existing API key came from exact decoded `BACKEND_ENV_B64` in the
+sealed approved capsule and matched the canonical publisher file's selected
+key. It was not taken from ambient environment fallback.
+
+The initial local continuation stopped before output creation, publisher launch
+or network effects because its wrapper incorrectly required the caller HEAD to
+remain the original task HEAD. The actual mismatch was **caller HEAD**, not the
+publisher hash. Root corrected that precondition explicitly: original task
+source remains `3b48f21a0379d93cba8937bc41f67aa2f97a1657`; publication caller was
+`94f96dd0d3c22905edba49726308699ce9ccba95`, stable before and after. The publisher,
+original run and capsule hashes matched throughout. This zero-effect refusal is
+preserved and is not counted as another publication.
+
+The corrected publication exited 0. Fresh FE validation reported **70 messages**
+and accepted both original recording parts under the unchanged all-parts and
+terminal-browser checks. The standard publisher also produced the durable last
+LLM artifact and HTTPS evidence manifest. The original first publication remains
+exit 1; the repair does not rewrite that receipt or retag original task source.
+No task, browser recording, financial action or Native lifecycle was rerun for
+this repair. No new source/test change or full benchmark rerun is claimed.
+
+### Evidence bindings and limits
+
+Private evidence is under
+`.context/preparation-recovery/round8-smoke-monitor/`:
+
+- Original `evidence-publications/7965e15f-af71-4426-9681-3a4e721435e0/`:
+  failed log SHA256 `9bc772bcac7b762a08fbdc1247ae09b7ffd637ecf35fc1f0e50dd2165ea72c25`.
+- `recording-paired-read-once/result.private.json`:
+  SHA256 `1d0ac91311d49c12d285b5c47621c978f484ed0ca02869088672dcb0688d076e`.
+- `corrected-owner-publication-once/` retains separate intent, status and log:
+  corrected log SHA256 `a604e4f6e6f645376342147003d1bb7e9442cfad8ed482b79bb510b34bb24501`.
+- Original run JSON SHA256
+  `af25a6d197a40fa37229d4fefa9a3de80eeb64a869cf21b6cf20791817efab44`;
+  unchanged publisher SHA256
+  `02ec0c0fe42204f72fd284230dadf50bb97598cd14516eaafc46d5168584247b`.
+- Approved private capsule SHA256
+  `446f2fb1c0b3a3dbc68425341e80d09b460ac63432f3a5dd262c7971316c6e62`.
+- `.context/rca_evidence/7965e15f-af71-4426-9681-3a4e721435e0/manifest.json`:
+  SHA256 `053dc4aed40c90e0ae84b1b0b331649fdeca8a403b227e423ebe6eea31f55141`.
+
+The current raw backend dotenv SHA256 was
+`9944b6d5422409e536816556d7df026a3cc932c26d8bddee74d476ce23d29150`;
+request runtime custody recorded
+`d533fed41e44a4a96c66e4bdfcae0e83c9a801bad622249a13af04900dc09bf2`.
+These raw-file and normalized/runtime digests are distinct. Approval was bound
+to the sealed capsule and exact selected-key equality, not an assertion that
+those whole-file hashes were equal. Credentials and signed URLs remain private.
+
+The scope's terminal proof is `terminal-proof.private.json`, SHA256
+`fddacd2a34d234ddb2739dab41709eca149106906979910d106581fc0f71f79a`.
+It records 14 PASS plus one distinct policy SKIP, all 16 fleet closures and all
+14 genuinely graded roots' durable publication, with 1,908 older bound files
+unchanged. It does not turn the skipped task, old CBC failures or retained
+quarantine/provider debts into passes. Current-assignment usage is UNMETERED
+where no counter baseline exists.
+
+### Coordinator constraints and recurrence lesson
+
+The coordinator required finite original-pointer reads, authenticated original
+owner binding, no silent fallback, no publisher loop, private raw evidence and
+an explicit task-source/caller-source distinction. The records-only follow-up
+permits this ignored appendix and schema validation, not another probe, task,
+publication, test run or deployment. These bounded operation counts were
+coordinator instructions, not a user requirement for a particular cohort size.
+The user's unchanged protected-resource, Kernel and financial restrictions
+remain in force.
+
+For future standard publication, supply each root's authenticated original
+owner through the existing per-publication `BENCHMARK_HUB_USER_ID` when available;
+do not assume a default requester owns new-user roots. Preserve a missing-owner
+or authorization failure rather than trying owners until one succeeds. There is
+no new automatic guard in this repair: the earlier explicit-owner procedure was
+not followed, and operator input remains required. Original recording validation
+and all privacy/ownership checks stay unchanged. Golden reference: not applicable
+(no approval-gated source or prompt hunk).

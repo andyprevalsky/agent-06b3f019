@@ -98,7 +98,8 @@ function assistiveQuery(args: Record<string, unknown>) {
 export const portraitRouteDigest = (events: PortraitRouteEvent[]) =>
   phoneCommandHash('portrait-causal-route-v1', events, 'agent');
 export type PortraitRouteBreak = { stage: string; cursor: number; operation: string; next: string };
-const RESTART = 'If an action did not take effect, restart from a new Settings launch at the root.';
+const RESTART =
+  'This setup.verify failed and is now part of the journal, so the route cannot be proven again without a new Settings launch: restart from a new Settings launch at the root and redo the whole route.';
 /** The next native step each stage expects; returned to the agent when a route breaks. */
 const NEXT_STEP: Record<string, string> = {
   launch: 'apps.launch Settings, then screen.text of the Settings root showing Search.',
@@ -127,7 +128,7 @@ const NEXT_STEP: Record<string, string> = {
   lock_tap: 'tap the returned portraitActionHint at its evidenceCursor.',
 };
 export function portraitRouteNext(stage: string) {
-  return `${NEXT_STEP[stage] ?? NEXT_STEP.launch} ${RESTART}`;
+  return `${RESTART} The route broke at: ${NEXT_STEP[stage] ?? NEXT_STEP.launch}`;
 }
 /**
  * The valid journal prefix decides first: an earlier semantic break wins over a later invalid row

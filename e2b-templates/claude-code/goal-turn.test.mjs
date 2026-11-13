@@ -59,7 +59,7 @@ async function until(predicate, what) {
   throw new Error(`timeout waiting for ${what}`);
 }
 
-async function sendUserTurn(log, text) {
+async function sendUserTurn(log, text, sender = "user") {
   const line = log
     .split("\n")
     .map((s) => {
@@ -91,6 +91,7 @@ async function sendUserTurn(log, text) {
           token: "test-token",
           id: "u-1",
           text,
+          sender,
         }),
       );
     });
@@ -103,8 +104,10 @@ async function runGoal({
   task,
   handoffOnTurn,
   steer = null,
+  steerSender = "user",
   staleHandoff = false,
   expectExit = true,
+  withSchema = true,
 }) {
   const dir = mkdtempSync(join(tmpdir(), "rose-goal-turn-"));
   mkdirSync(join(dir, "bin"));
@@ -120,7 +123,10 @@ async function runGoal({
     type: "object",
     required: ["rose_handoff"],
   });
-  const goal = `${task}\n\nResult JSON Schema for ${handoffFile}:\n${schema}`;
+  const withHandoff = (text) =>
+    `${text}\n\nResult JSON Schema for ${handoffFile}:\n${schema}`;
+  // A Mac (target "local") task carries no result schema (service.py).
+  const goal = withSchema ? withHandoff(task) : task;
   if (staleHandoff) {
     // A previous spawn's handoff that its close failed to consume.
     mkdirSync(dirname(handoffFile), { recursive: true });
@@ -158,7 +164,11 @@ async function runGoal({
   try {
     if (steer) {
       await until(() => existsSync(env.RECORD_FILE), `goal turn\n${log}`);
-      const ack = await sendUserTurn(log, steer);
+      const ack = await sendUserTurn(
+        log,
+        typeof steer === "function" ? steer(withHandoff) : steer,
+        steerSender,
+      );
       assert.equal(ack.status, "delivered", JSON.stringify(ack));
     }
     if (expectExit) {
@@ -231,6 +241,35 @@ test("a user's direct turn that writes the handoff hands the session back at onc
 test("a task already headed Task: is not headed twice", async () => {
   const { turns } = await runGoal({ task: "Task:\nDo it.", handoffOnTurn: 1 });
   assert.equal(turns[0], "/goal Task:\nDo it.");
+});
+
+// Bug A (2026-11-12): every launch path starts the code agent with `/goal
+// <goal>`, and a goal already written as `/goal ...` is not wrapped twice.
+test("a Mac / local-fallback task without a result schema still starts as /goal", async () => {
+  const { turns } = await runGoal({
+    task: "Do it.",
+    handoffOnTurn: 0,
+    withSchema: false,
+  });
+  assert.equal(turns[0], "/goal Task:\nDo it.");
+});
+
+test("a goal already written as /goal is not wrapped twice", async () => {
+  const { turns } = await runGoal({
+    task: "/goal Do it.",
+    handoffOnTurn: 1,
+  });
+  assert.equal(turns[0], "/goal Task:\nDo it.");
+});
+
+test("a new spawn's goal on a live CLI starts as /goal, never wrapped twice", async () => {
+  const { turns } = await runGoal({
+    task: "Do it.",
+    handoffOnTurn: 0,
+    steer: (withHandoff) => withHandoff("Task:\n/goal Then test it."),
+    steerSender: "agent",
+  });
+  assert.equal(turns[1], "/goal Task:\nThen test it.");
 });
 
 test("a handoff left before the goal started never hands a held session back", async () => {

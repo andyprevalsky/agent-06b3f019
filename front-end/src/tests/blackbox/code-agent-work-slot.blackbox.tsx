@@ -84,7 +84,7 @@ function renderSession(records: unknown[], untimed = false) {
 const workRows = () => screen.queryAllByTestId('trajectory-work-group');
 
 describe('code-agent running work row', () => {
-  it('an unknown start shows the latest activity and no invented clock', () => {
+  it('an unknown start shows the latest activity and an optimistic client clock', () => {
     signIn();
     const view = renderWithProviders(
       renderSession(
@@ -98,12 +98,8 @@ describe('code-agent running work row', () => {
     expect(row).toHaveAttribute('data-state', 'running');
     const fold = within(row).getAllByRole('button')[0];
     expect(within(fold).getByTestId('trajectory-activity-line')).toHaveTextContent('Edit chart.py');
-    // The root work row's own rule: an unknown start reads "Timing unavailable",
-    // never an invented duration.
-    expect(within(fold).getByTestId('trajectory-batch-elapsed')).toHaveTextContent(
-      'Timing unavailable',
-    );
-    expect(fold).not.toHaveTextContent(/\d+(\.\d)?s\b/);
+    // An unknown start counts from the client's first render instead of "Timing unavailable".
+    expect(within(fold).getByTestId('trajectory-batch-elapsed')).toHaveTextContent(/^\d+\.\ds$/);
     view.rerender(
       renderSession([{ id: 'th', seq: 1, type: 'thinking', partial: true, ts: 1000, text: 'Hmm' }]),
     );

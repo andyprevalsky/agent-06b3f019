@@ -24,6 +24,20 @@
 # ─────────────────────────────────────────────────────────────────────────────
 set -uo pipefail
 
+_source_env_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+_source_env_helper="${CLOUDBENCH_SOURCE_ENV_HELPER:-$_source_env_dir/cloudbench-source-env.py}"
+[ -f "$_source_env_helper" ] || { echo 'FATAL: missing source environment loader' >&2; exit 1; }
+_source_env_mode="$(python3 "$_source_env_helper" mode)" || exit 1
+case "$_source_env_mode" in
+    none) ;;
+    owned-capsule-v1)
+        if [ "${CLOUDBENCH_SOURCE_ENV_EXECUTED:-}" != owned-capsule-v1 ]; then
+            exec python3 "$_source_env_helper" exec -- /bin/bash "${BASH_SOURCE[0]}" "$@"
+        fi
+        python3 "$_source_env_helper" check-effective || exit 1 ;;
+    *) exit 1 ;;
+esac
+
 APP_DIR=/app
 APP_USER=rose
 CONTEXT_DIR="$APP_DIR/.context/cloudbench"
@@ -91,6 +105,7 @@ ENV_HELPER="$APP_DIR/scripts/lib/cloudbench-env.sh"
 [ -f "$ENV_HELPER" ] || { log "FATAL: missing $ENV_HELPER"; exit 1; }
 # shellcheck source=lib/cloudbench-env.sh
 source "$ENV_HELPER"
+cloudbench_verify_source_guest_env || exit 1
 umask 077
 if [ -n "${AGENTS_ENV_B64:-}" ]; then
     echo "$AGENTS_ENV_B64" | base64 -d > "$APP_DIR/agents/.env" || { log "FATAL: failed to decode AGENTS_ENV_B64"; exit 1; }

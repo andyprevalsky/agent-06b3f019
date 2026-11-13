@@ -1,8 +1,13 @@
-/** User-bubble collapse behavior, exercised by the normal frontend blackbox gate. */
-import { act, render, screen } from '@testing-library/react';
+/**
+ * User-bubble collapse and the agent message meta line (send time + hover copy),
+ * exercised by the normal frontend blackbox gate.
+ */
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import MessageBubble from '@/features/terminal-component-group/components/MessageBubble';
 import { UserBubble } from '@/features/terminal-component-group/components/message-bubble/UserBubble';
+import { formatMessageSentAt } from '@/lib/localDateTime';
 import { baseMessage } from './message-bubble.fixtures';
 
 describe('user message collapse', () => {
@@ -62,5 +67,50 @@ describe('user message collapse', () => {
       scrollHeight.mockRestore();
       globalThis.ResizeObserver = OriginalResizeObserver;
     }
+  });
+});
+
+describe('agent message meta line', () => {
+  const SENT_AT = '2026-11-12T19:51:00.000Z';
+  const reply = '**Done.** Booked the table\nfor two at 7pm.';
+  const agentMessage = (toolStatus: 'IN_PROGRESS' | 'FINISHED') =>
+    baseMessage({
+      role: 'TOOL',
+      text: reply,
+      timestamp: SENT_AT,
+      metadata: {
+        toolName: 'send_message_to_user',
+        toolStatus,
+        isUserAttentionMessage: true,
+        attentionMessage: reply,
+      },
+    });
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('records the send time under a settled agent message with a hover copy and no branch action', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    vi.stubGlobal('navigator', { ...navigator, clipboard: { writeText } });
+    render(<MessageBubble message={agentMessage('FINISHED')} />);
+    const meta = screen.getByTestId('agent-message-meta');
+    expect(meta.querySelector('time')).toHaveAttribute('dateTime', SENT_AT);
+    expect(meta.firstElementChild?.tagName).toBe('TIME');
+    expect(meta.textContent).toBe(formatMessageSentAt(SENT_AT));
+    const button = screen.getByRole('button', { name: 'Copy message' });
+    expect(meta).toContainElement(button);
+    expect(button.className).toContain('opacity-0');
+    expect(button.className).toContain('group-hover/message:opacity-100');
+    expect(button.closest('.group\\/message')).not.toBeNull();
+    expect(meta.querySelectorAll('button')).toHaveLength(1);
+    fireEvent.click(button);
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Copied' })).toBeInTheDocument());
+    expect(writeText).toHaveBeenCalledWith(reply);
+  });
+
+  it('keeps the record on a waiting question and omits it while the reply streams', () => {
+    const { rerender } = render(<MessageBubble message={agentMessage('IN_PROGRESS')} />);
+    expect(screen.getByTestId('agent-message-meta')).toBeInTheDocument();
+    rerender(<MessageBubble message={agentMessage('IN_PROGRESS')} isStreaming />);
+    expect(screen.queryByTestId('agent-message-meta')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Copy message' })).toBeNull();
   });
 });

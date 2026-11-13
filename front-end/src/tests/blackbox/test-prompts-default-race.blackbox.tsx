@@ -23,7 +23,10 @@ vi.mock('@/features/terminal-component-group/config', async (importOriginal) => 
 });
 
 import TestPromptsSelector from '@/features/terminal-component-group/components/TestPromptsSelector';
-import { resetTestPromptsCache } from '@/features/terminal-component-group/components/test-prompts-selector/fetchTestPrompts';
+import {
+  DEV_DEFAULT_PROMPT_TITLE,
+  resetTestPromptsCache,
+} from '@/features/terminal-component-group/components/test-prompts-selector/fetchTestPrompts';
 import { resetAutoLoadDefaultPromptForTests } from '@/features/terminal-component-group/components/test-prompts-selector/useAutoLoadDefaultPrompt';
 
 const DEFAULT_PROMPT = 'late benchmark default';
@@ -65,7 +68,7 @@ describe('TestPromptsSelector default prompt race', () => {
       JSON.stringify({
         prompts: [
           {
-            title: 'Test Mass Agent Run - 0',
+            title: DEV_DEFAULT_PROMPT_TITLE,
             description: 'Dev default',
             prompt: DEFAULT_PROMPT,
             attachmentUrls: [],
