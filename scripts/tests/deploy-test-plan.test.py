@@ -1214,7 +1214,7 @@ for line in sys.stdin:
                     self.scan()
                 self.reap(child)
 
-    @quarantine(since='2026-11-11', repair='pending-handoff:7a087289ad244447887849683a096b6e',
+    @quarantine(since='2026-11-11', repair='https://boxes.dev/thread/thr_246005fb0d8546518a40a6cd55d83a70',
                 error="AssertionError: [0.05] is not false : the service manager is skipped on evidence, not after the grace window",
                 evidence='PR #1928 deploy-command-structural FLAKY occurrence 7a087289ad244447887849683a096b6e (source 622d4e979)')
     def test_own_user_service_manager_is_skipped_only_on_cgroup_evidence(self):
