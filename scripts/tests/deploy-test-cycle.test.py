@@ -6736,6 +6736,31 @@ class Cycle(unittest.TestCase):
                 c.write(self.directory / 'cycle.json', state)
                 self.assertEqual(2, c.verify_saved(self.directory, self.root))
 
+    def test_failed_canary_with_probe_placeholders_reconciles_without_credit(self):
+        # PR #1865 round 75 (2026-11-13): a canary failed on an unresolved clone name before any guest;
+        # its run.json kept infra-probe placeholder rows (PASSED, 0 s, no agent, teardown stage).
+        rows=(dict(clone_name='cloudbench-c', machine_id='', volume_id='vol_c', disposition='destroyed-provider-retained'),)
+        state,occurrence,paths,proof,fleet=self.normal_failed_canary_state(machine_less=rows)
+        for n in ('execution-provenance.json','execution-task-matrix.json'): (fleet/n).unlink()
+        life=c.read(fleet/'_batch/lifecycle.json')
+        names=[v['name'] for v in json.loads((fleet/'_batch/benches.json').read_text())]
+        placeholder=[dict(name=n,status='PASSED',passed=True,agent_id=None,owned_roots=None,duration_seconds=0,
+                          lifecycle_stage='teardown',failure_reason=None) for n in names]
+        run=fleet/'_batch/run.json'
+        def write(tasks):
+            c.write(run,dict(run_id=fleet.name,status='failed',controller_exit_code=life['controller_exit_code'],tasks=tasks))
+            return {**proof,'files':{p:c.sha_file(p) for p in proof['files'] if Path(p).is_file()}}
+        accepted=copy.deepcopy(state)
+        c.reconcile(accepted,occurrence['id'],write(placeholder))
+        self.assertFalse(accepted['reconciled_owners'][proof['receipt_sha256']]['credit_granted'])
+        # A placeholder that ran (duration or agent) is not an unstarted canary task.
+        for field,value in (('duration_seconds',3),('agent_id','agent-1')):
+            with self.subTest(field=field):
+                candidate=write([{**t,field:value} for t in placeholder])
+                refused=copy.deepcopy(state)
+                with self.assertRaisesRegex(ValueError,'canary pre-task projection'):c.reconcile(refused,occurrence['id'],candidate)
+                self.assertEqual(state,refused)
+
     def test_normal_zero_failed_canary_requires_absence(self):
         state,occurrence,paths,proof,fleet=self.normal_failed_canary_state(zero=True)
         before=copy.deepcopy(state)

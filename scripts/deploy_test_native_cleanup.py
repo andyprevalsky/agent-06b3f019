@@ -575,6 +575,20 @@ def retired_clone_rows(ids, names, rows, owner, fleet, app, closure, disposition
     return machines
 
 
+def infra_probe_pre_task(task):
+    """A canary task that never started: the released INFRA_ERROR row, or the infra-probe placeholder
+    row (PASSED, zero duration, no agent/roots) a probe writes when its fleet fails before any guest.
+    Neither is execution or assertion credit; the failed run and provider release are checked apart."""
+    unstarted = not task.get('agent_id') and not task.get('owned_roots')
+    released = (task.get('status') == 'INFRA_ERROR' and task.get('passed') is False
+                and task.get('lifecycle_stage') == 'released'
+                and task.get('failure_reason') == 'no current run artifact produced')
+    placeholder = (task.get('status') == 'PASSED' and task.get('passed') is True
+                   and task.get('duration_seconds') == 0 and task.get('lifecycle_stage') == 'teardown'
+                   and task.get('failure_reason') is None)
+    return unstarted and (released or placeholder)
+
+
 def isolated_canary_release(fleet, life, benches, run, root, receipt, proof, link, bound, tree):
     """A linked infra-probe may fail before producing execution provenance, never task credit."""
     need(link and link['ref'] == receipt['source']['head']
@@ -582,9 +596,13 @@ def isolated_canary_release(fleet, life, benches, run, root, receipt, proof, lin
     owner = life['fleet_owner_token']
     local, canonical = fleet / 'teardown-ownership', fleet_audit_root(root) / owner
     seal = tree(local)
-    need(tree(canonical) == seal and life['audit_sha256'] == seal
-         and fields(bound(local / 'source-audit')) == {'path': str(canonical), 'sha256': seal}, 'canary audit seal')
     meta = fields(bound(canonical / 'meta'))
+    # A canary whose exact owner was later recovered (run-bench --recover-stale-owner) is sealed by
+    # that recovery; its failed lifecycle kept an empty seal. The recovered audit must still match.
+    need(tree(canonical) == seal
+         and audit_seal_accepted(life, seal, recovered=False,
+                                 recovery_sealed=meta.get('hub_disposition') == 'retired-exact-owner-verified-absent')
+         and fields(bound(local / 'source-audit')) == {'path': str(canonical), 'sha256': seal}, 'canary audit seal')
     need(meta.get('status') == 'provider-teardown-verified' and meta.get('version') == '1'
          and meta.get('fleet_owner_token') == owner and meta.get('run_id') == fleet.name
          and meta.get('workspace_root') == str(root), 'canary provider release')
@@ -608,9 +626,7 @@ def isolated_canary_release(fleet, life, benches, run, root, receipt, proof, lin
     need(run.get('run_id') == fleet.name and run.get('controller_exit_code') == life['controller_exit_code']
          and run.get('status') == 'failed' and isinstance(tasks, list) and len(tasks) == len(benches)
          and {t['name'] for t in tasks} == {b['name'] for b in benches}
-         and all(t.get('status') == 'INFRA_ERROR' and t.get('passed') is False and not t.get('agent_id')
-                 and not t.get('owned_roots') and t.get('lifecycle_stage') == 'released'
-                 and t.get('failure_reason') == 'no current run artifact produced' for t in tasks), 'canary pre-task projection')
+         and all(infra_probe_pre_task(t) for t in tasks), 'canary pre-task projection')
     return not machines  # Missing provenance is supported only before ANY native guest (Machine) allocation.
 
 
