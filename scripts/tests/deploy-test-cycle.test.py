@@ -12353,7 +12353,6 @@ class LocalCleanupQuietScan(unittest.TestCase):
         # PR #1865 stability (2026-11-13): an earlier test's exited but not yet reaped child is a
         # zombie whose environ reads EACCES even though it is dumpable; the settlement scan refused
         # it after the grace window ('current process ownership unverifiable'). It has exited.
-        import time
         import deploy_test_local_cleanup as local
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary).resolve()
@@ -12361,10 +12360,11 @@ class LocalCleanupQuietScan(unittest.TestCase):
             (root / '.context/native-worker-admission.lock').write_text('')
             child = subprocess.Popen([sys.executable, '-c', 'pass'], cwd=root)
             try:
-                for _ in range(500):
-                    if Path(f'/proc/{child.pid}/stat').read_text().rsplit(') ', 1)[1].split()[0] == 'Z':
-                        break
-                    time.sleep(0.01)
+                sys.path.insert(0, str(ROOT / 'scripts' / 'lib'))
+                from condition_wait import wait_until
+                wait_until(lambda: os.waitid(os.P_PID, child.pid, os.WEXITED | os.WNOWAIT | os.WNOHANG),
+                           timeout=10, description='child exited and left unreaped')
+                self.assertEqual('Z', Path(f'/proc/{child.pid}/stat').read_text().rsplit(') ', 1)[1].split()[0])
                 with self.assertRaises(PermissionError):
                     Path(f'/proc/{child.pid}/environ').read_bytes()
                 local.quiet(root)
