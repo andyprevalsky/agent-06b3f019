@@ -153,6 +153,13 @@ async function* benchmarkCardholderPages(
     }
     const fresh = page.filter(({ id }) => !seen.has(id));
     for (const { id } of page) seen.add(id);
+    // Validate before yielding: the resolver may return as soon as a page holds its target.
+    // Distinct ids, not raw rows: churn can legitimately re-deliver an already-seen cardholder.
+    if (total !== undefined && seen.size > total) {
+      throw new Error(
+        'AgentCard cardholder inventory exceeded its reported total (pagination metadata is inconsistent)'
+      );
+    }
     if (offset > 0 && page.length > 0 && fresh.length === 0) {
       throw new Error(
         'AgentCard cardholder inventory pagination did not advance (made no progress)'
