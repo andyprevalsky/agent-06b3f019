@@ -42,6 +42,11 @@ import type {
   BrowserProviderResumeSession,
   BrowserProviderSession,
 } from './types';
+import {
+  settleFailedTilionCreate,
+  TilionSessionValidationError,
+  type TilionValidationAttempt,
+} from './tilionCreateValidation';
 
 import {
   type StorageState,
@@ -129,8 +134,6 @@ interface RemoteTilionSession {
   browser: Browser;
   geoTargeting: TilionGeoTargeting;
 }
-
-class TilionSessionValidationError extends Error {}
 
 /** A live Tilion session would be replaced without the worker-captured browser state. */
 export class TilionUncarriedStateError extends Error {
@@ -249,6 +252,9 @@ async function createRemote(
   location: ProxyGeoLocation,
   proxyType: TilionProxyType
 ): Promise<RemoteTilionSession> {
+  // A dead worker refuses CDP *and* DELETE (ALB 503, 2026-11-13): an unconfirmed
+  // release must not stop the next create, which lands on another worker.
+  const failed: TilionValidationAttempt[] = [];
   for (let attempt = 1; ; attempt++) {
     const { record, geoTargeting } = await createPlacedSession(location, proxyType);
     const sessionId = record.session_id;
@@ -282,24 +288,14 @@ async function createRemote(
       };
     } catch (error) {
       await browser?.close().catch(() => {});
-      if (sessionId) {
-        try {
-          await releaseTilionRemoteSession(sessionId);
-        } catch (releaseError) {
-          throw new AggregateError(
-            [error, releaseError],
-            `Tilion session ${sessionId} failed validation and cleanup`
-          );
-        }
-      }
-      if (error instanceof TilionSessionValidationError && attempt < 2) {
-        log.warn('Tilion session failed validation; creating another', {
-          sessionId,
-          error: error.message,
-        });
-        continue;
-      }
-      throw error;
+      // Returns only when another create should run; otherwise throws the outcome.
+      await settleFailedTilionCreate(
+        error,
+        sessionId,
+        attempt < 2,
+        failed,
+        releaseTilionRemoteSession
+      );
     }
   }
 }
