@@ -6,8 +6,8 @@
     ".context/": "archived",
     ".devbox/": "managed (boxes.dev runtime state)",
     ".env.npm": "managed-env (boxes.dev project environment; secrets never archived)",
-    ".llm-dumps/": null,
-    "agents/.context/": null,
+    ".llm-dumps/": "archived",
+    "agents/.context/": "archived",
     "agents/.env": "managed-env (boxes.dev project environment; secrets never archived)",
     "agents/.env.benchmark-temporal": "managed-env (generated benchmark Temporal override; secrets never archived)",
     "agents/.env.cloudbench-upsert.lock": "reproducible (lock file)",
@@ -79,17 +79,26 @@
   },
   "live_processes": [
     {
-      "argv": "/home/boxes/.fly/bin/flyctl agent run /home/boxes/.fly/agent-logs/3554829111.log",
-      "cwd": "/home/boxes/rose/agents",
-      "pid": 4172555
+      "argv": "/bin/bash -c source /home/boxes/.claude/shell-snapshots/snapshot-bash-1794462026302-4n9lmv.sh 2>/dev/null || true && shopt -u extglob 2>/dev/null || true && { \\builtin unalias -- 'which'; \\builtin uns",
+      "cwd": "/home/boxes/rose",
+      "pid": 254483
+    },
+    {
+      "argv": "cut -c1-150",
+      "cwd": "/home/boxes/rose",
+      "pid": 254484
+    },
+    {
+      "argv": "ugrep -G --ignore-files --hidden -I --exclude-dir=.git --exclude-dir=.svn --exclude-dir=.hg --exclude-dir=.bzr --exclude-dir=.jj --exclude-dir=.sl -E DEPLOY_DELETION",
+      "cwd": "/home/boxes/rose",
+      "pid": 254485
     }
   ],
   "manifest": "docs/handoffs/pr-1972-closeout/closeout-manifest.json",
   "open_items": [
-    "uncommitted changes in /home/boxes/rose: agents/benchmarks/tasks.json, back-end/src/tests/blackbox/chat-router-failover.live.quarantine.ts, docs/handoffs/pr-1972-closeout/closeout-manifest.json, docs/handoffs/pr-1972-closeout/private-archive-receipt.json",
-    "live process 4172555 in this checkout: /home/boxes/.fly/bin/flyctl agent run /home/boxes/.fly/agent-logs/3554829111.log",
-    "ignored path without a disposition: .llm-dumps/",
-    "ignored path without a disposition: agents/.context/"
+    "live process 254483 in this checkout: /bin/bash -c source /home/boxes/.claude/shell-snapshots/snapshot-bash-1794462026302-4n9lmv.sh 2>/dev/null || true && shopt -u extglob 2>/dev/null || true && { \\builtin unalias -- 'which'; \\builtin uns",
+    "live process 254484 in this checkout: cut -c1-150",
+    "live process 254485 in this checkout: ugrep -G --ignore-files --hidden -I --exclude-dir=.git --exclude-dir=.svn --exclude-dir=.hg --exclude-dir=.bzr --exclude-dir=.jj --exclude-dir=.sl -E DEPLOY_DELETION"
   ],
   "pr": 1972,
   "preserved_refs": {
@@ -117,10 +126,7 @@
       "needs_integration": false,
       "path": "/home/boxes/rose",
       "uncommitted": [
-        "agents/benchmarks/tasks.json",
-        "back-end/src/tests/blackbox/chat-router-failover.live.quarantine.ts",
-        "docs/handoffs/pr-1972-closeout/closeout-manifest.json",
-        "docs/handoffs/pr-1972-closeout/private-archive-receipt.json"
+        "docs/handoffs/pr-1972-closeout/deletion-readiness.json"
       ],
       "unpushed_commits": 0
     }
