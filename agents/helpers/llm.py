@@ -13,7 +13,7 @@ import uuid
 from bisect import bisect_left
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Dict, Iterable, List, Literal, Optional, Tuple, Type, TypeVar
+from typing import Any, Awaitable, Callable, Dict, List, Literal, Optional, Tuple, Type, TypeVar
 
 import httpx  # Used with instructor
 import instructor  # Import at module level for Temporal workflow sandbox compatibility
@@ -3043,7 +3043,7 @@ async def call_llm_structured_streaming(
     deadline_s: Optional[float] = None,  # Override Rose top-level deadline; None uses Rose default
     ttft_timeout_s: Optional[float] = None,  # Override Rose TTFT timeout
     idle_timeout_s: Optional[float] = None,  # Override Rose idle/inter-chunk timeout (-1 disables)
-    reserved_tool_call_ids: Iterable[str] = (),  # Stored ids the request may omit; new tool calls never reuse them
+    reserved_tool_call_ids: frozenset[str] = frozenset(),  # Stored ids new tool calls must not reuse
     _exclude_anthropic_family: bool = False,  # Internal: refusal retry skips Anthropic direct/waterfall routes
     _is_escalation: bool = False,  # Internal: prevents infinite recursion on max_tokens escalation
     _parse_retry_attempt: int = 0,  # Internal: bounds re-generation on a malformed/schema-invalid structured output
@@ -3117,7 +3117,7 @@ async def call_llm_structured_streaming(
         hidden_stream_bytes = 0
         tool_use_blocks: List[Dict[str, Any]] = []
         # Ids this conversation already uses; each new native call claims a unique one.
-        taken_tool_call_ids = request_tool_call_ids(messages) | set(reserved_tool_call_ids)
+        taken_tool_call_ids = request_tool_call_ids(messages) | reserved_tool_call_ids
 
         # Tool detection tracking (for early IN_PROGRESS messages)
         detected_tools_ordered: List[tuple] = []  # (tool_name, tool_call_id, timestamp)
@@ -7027,7 +7027,7 @@ async def call_llm_activity(
                 skip_cache_write=skip_cache_write,
                 cache_sequence_id=cache_sequence_id,
                 tool_choice={"name": required_tool} if required_tool else None,
-                reserved_tool_call_ids=stored_tool_call_ids,
+                reserved_tool_call_ids=frozenset(stored_tool_call_ids),
                 # Without this the agent loop's refusal reroute dies at the activity boundary:
                 # every retry goes back to the model that just refused, so one refusal becomes a
                 # guaranteed 3-strikes kill instead of a provider switch.
