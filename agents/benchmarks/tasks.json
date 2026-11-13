@@ -949,12 +949,6 @@
   },
   {
     "name": "background-agent-message-smoke",
-    "quarantine": {
-      "since": "2026-11-10",
-      "repair": "pending-handoff:484cdec81d894f0899d8af1ec466e4d4",
-      "error": "Timeout after 182s (task timeout=180s) | Investigate: python agents/benchmarks/agent_latency.py e7d8ba91-c197-472a-9eea-1d7cf3a8877f | Cache/cost: python agents/benchmarks/run_benchmark.py --compare <run.json> | Agent status: ACTIVE (expected COMPLETED)",
-      "evidence": "docs/rca/cases/2026-11-10-background-message-completion-exceeded-deadline.md; original b865 native run e7d8ba91-c197-472a-9eea-1d7cf3a8877f, full private trace and source-exclusion review retained"
-    },
     "title": "Root Forwards A Mid-Run Message To A Background Agent",
     "prompt": "Use exactly one explore agent to inspect the official RFC Editor pages for RFC 9110 and RFC 9111. For each document, return its RFC number, exact title, publication month and year, official source URL, and a note. Have that single explore agent do all research: spawn it with run_in_background set to true, then wait for it to finish before you answer.",
     "timeout_seconds": 180,
@@ -6190,6 +6184,12 @@
   },
   {
     "name": "browser-auth-member-discount-purchase",
+    "quarantine": {
+      "since": "2026-11-13",
+      "repair": "pending-handoff:c7004e8fe8a24221b20b5e256c7a4bb8",
+      "error": "Tool 'spawn_browser_agent' exceeded its exact root call limit during execution: expected 1, got 2. Full counts: {'agent_init': 1, 'cloud_agent': 1, 'spawn_browser_agent': 2, 'spawn_agent': 2, 'wait_for': 2, 'request_payment_card': 1, 'request_user_approval': 1}",
+      "evidence": "PR #2014 deploy 16f0be6d3 smoke: first attempt (root 97d37ad0) browser died on 'Failed to resume session ... sess_993d7079* failed validation and cleanup' after request_payment_card, root spawned a replacement browser (count 2), same-source rerun PASSED (FLAKY c7004e8f); NOT_INTRODUCED, #2014 changes only deploy custody/renewal scripts; fix PR #2010 (c33ad2272) on main"
+    },
     "title": "Hosted Purchase: Account Chosen For The Member Price",
     "description": "The shop lets guests buy, but members pay 10% less; the browser agent creates an account with the minted identity instead of checking out as a guest, and pays the member price.",
     "prompt": "Buy me a Canvas Tote from {auth_test_site_url}",
@@ -8359,6 +8359,12 @@
   },
   {
     "name": "agent-payment-new-user-journey",
+    "quarantine": {
+      "since": "2026-11-13",
+      "repair": "pending-handoff:5856a13ab4b3426b876c46c168731d4b",
+      "error": "Timeout after 1201s (task timeout=1200s)",
+      "evidence": "PR #2014 deploy 16f0be6d3 smoke: first attempt (root e80a5c6e) timed out after browser c349b54f recorded 0 steps on Tilion dead east worker sess_993d704c* (create 201, validation/DELETE 503), same-source rerun PASSED (FLAKY 5856a13a); NOT_INTRODUCED, #2014 changes only deploy custody/renewal scripts; fix PR #2010 on main"
+    },
     "title": "New User Subscription To Confirmed Agent Payment",
     "description": "A dedicated non-admin account begins with exhausted free credit and no subscription or Stripe payment method. The harness completes hosted Stripe test Checkout, then the agent buys from the test portal with an approved payment card. The run requires ordered gates, a portal order ID, and settled backend funding.",
     "prompt": "Use a browser agent (spawn_agent with type=\"browser\") to go to {frontend_url}/test_payment and complete the visible Rose Labs Test Payment checkout. Buy exactly these 3 products and no others: Aurora Notebook, Ceramic Mug, and Canvas Tote. Use only the visible checkout UI. If subscription signup is required, wait for the user to finish it, then continue. Obtain a payment card through request_payment_card and wait for approval. Report the test portal confirmation order ID after the order is placed.",
@@ -9085,6 +9091,12 @@
   },
   {
     "name": "browser-biometrics-webdecoy",
+    "quarantine": {
+      "since": "2026-11-13",
+      "repair": "pending-handoff:2e42c9c8d6d442fc92fa0b6735969b7e",
+      "error": "Timeout after 425s (task timeout=420s)",
+      "evidence": "PR #2014 deploy 16f0be6d3 smoke: first attempt (root 332cd6e6) timed out after browser 7c73d66a recorded 0 steps on Tilion dead east worker sess_993d70* (create 201, validation/DELETE 503; 'Browser initialization failed before readiness'), same-source rerun PASSED (FLAKY 2e42c9c8); NOT_INTRODUCED, #2014 changes only deploy custody/renewal scripts; fix PR #2010 on main"
+    },
     "title": "Browser Biometrics WebDecoy",
     "prompt": "Use a browser agent to go to https://webdecoy.com/product/fcaptcha-demo/. This is a live third-party behavioral biometrics demo. Interact with it like a normal user: move to and click the checkbox mode verification control if present, then use the invisible mode form by entering benchmark-human@example.com as the email and a short message, and submit it. Do not use JavaScript evaluate to click or fill controls. Use visible browser actions only. Return the final visible FCaptcha risk score exactly as shown, whether the checkbox mode appeared to pass, whether the invisible form was submitted, and any visible bot/human verdict text.",
     "timeout_seconds": 420,

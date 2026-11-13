@@ -19,8 +19,6 @@ from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts" / "lib"))
-from test_quarantine import quarantine
 
 from benchmarks import code_bench as cb
 from benchmarks import code_bench_parity as parity
@@ -195,12 +193,6 @@ def test_commit_fixture_missing_origin_fails(tmp_path):
     assert _failed(_grade(tmp_path, COMMIT)) == ["git.origin_unchanged"]
 
 
-@quarantine(
-    since="2026-11-10",
-    repair="https://boxes.dev/thread/thr_d0600bd7048f45cc9763b229460e6026",
-    error="FileNotFoundError: [Errno 2] No such file or directory: '/tmp/pytest-of-runner/pytest-14/test_commit_fixture_rewritten_0/commit-locally-no-push/repo/.git/objects/maintenance.lock'",
-    evidence='.context/rca-playwright/benchmark-flake/findings.json',
-)
 def test_commit_fixture_rewritten_history_fails(tmp_path):
     repo = _solve(tmp_path, COMMIT)
     _git(repo, "checkout", "-q", "--orphan", "rewrite")

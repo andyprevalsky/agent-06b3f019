@@ -47,7 +47,7 @@ import { runBrowserInitDisconnectCases } from './browser-session-init-disconnect
 import { runBrowserPauseCheckpointCases } from './browser-session-pause-checkpoint.cases';
 import { runBrowserPrivateRestoreCases } from './browser-session-private-restore.cases';
 import { runBrowserApprovalE2ECases } from './browser-session-approval-e2e.cases';
-import { runQuarantinedProviderLifecycleCases } from './browser-session-provider-lifecycle.quarantine';
+import { runBrowserProviderLifecycleCases } from './browser-session-provider-lifecycle.cases';
 import {
   runBrowserRootTeardownSavesStateCases,
   runBrowserTerminalPauseCases,
@@ -571,7 +571,7 @@ async function testConcurrency_parallelAuthChecks() {
 async function runAll() {
   const focusedCases = [
     ['--cold-import-only', runBrowserColdImportCases],
-    ['--provider-lifecycle-only', runQuarantinedProviderLifecycleCases],
+    ['--provider-lifecycle-only', runBrowserProviderLifecycleCases],
     ['--approval-e2e-only', runBrowserApprovalE2ECases],
     ['--private-restore-only', runBrowserPrivateRestoreCases],
     ['--logical-browser-only', runLogicalBrowserCases],
@@ -601,7 +601,7 @@ async function runAll() {
   await runBrowserPrivateRestoreCases();
   await runBrowserApprovalE2ECases();
   await runBrowserTerminalPauseCases();
-  await runQuarantinedProviderLifecycleCases();
+  await runBrowserProviderLifecycleCases();
   await runBrowserRootTeardownSavesStateCases();
   await runBrowserResumeCustodyCases();
   await runLogicalBrowserCases();
