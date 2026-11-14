@@ -3572,10 +3572,11 @@ async def test_phone_setup_settings_actual_handler_observation():
         assert "Do not disable iCloud" in wire and "Historical download completion" in wire
         assert "Do not wait for configurationReady to sign in" in wire
         assert "latest successful operation is screen.text for the current interaction" in wire
+        assert "first dismiss them with an observed tap" in wire and "then observe and fill again" in wire
         assert "Preserve the original authorized phone task" in wire
         import hashlib
         from domains.spawn_browser_agent_v3.phone import PHONE_GUIDANCE
-        assert hashlib.sha256(PHONE_GUIDANCE.encode()).hexdigest() == "6a78e021c2d39d5705d64157531c0090244212a02d3020913120478d78ce941c", "Ordinary enabled guide must match the saved-credential binding contract"
+        assert hashlib.sha256(PHONE_GUIDANCE.encode()).hexdigest() == "4d303a3213c2a2f61a4e76e24e171fcf9f02f43f374432b4c30a297e237ab28b", "Ordinary enabled guide must match the saved-credential binding contract"
         for marker in (None, False, "true"):
             plain_setup = {key: value for key, value in setup.items() if key != "googlePasscodeExceptionAllowed"}
             if marker is not None:
