@@ -2,6 +2,7 @@
  * STATE MACHINE: IntegrationSections
  *
  * [MOUNTED] --> renders each section card delegating to domain hooks.
+ * Signed-in accounts also get CLI setup, with backend-verified connection state.
  *
  * Meeting note taker: shared Granola/Fireflies provider cards and hooks.
  * GitHub Repos (signed in, before the meeting note takers): GithubReposSection over useGithubRepos
@@ -34,6 +35,7 @@ import ComputeSection from './ComputeSection';
 import SocialsSection from './SocialsSection';
 import PlaidSection from './PlaidSection';
 import FileSystemSection from './FileSystemSection';
+import CliIntegrationsSection from './CliIntegrationsSection';
 import PebbleIndexSection from './PebbleIndexSection';
 
 interface IntegrationSectionsProps {
@@ -308,6 +310,11 @@ function SecondaryIntegrationSections({
         <FileSystemSection isAvailable={isFileSystemAvailable} />
       </SearchGroup>
 
+      {isFullySignedIn && (
+        <SearchGroup catalogKey="clis" search={search}>
+          <CliIntegrationsSection />
+        </SearchGroup>
+      )}
       {isFullySignedIn && (
         <SearchGroup catalogKey="githubRepos" search={search}>
           <GithubReposSection github={github} />

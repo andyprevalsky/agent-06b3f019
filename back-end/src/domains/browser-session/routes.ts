@@ -19,8 +19,7 @@ import { type RequestHandler, type Response, Router } from 'express';
 import { type AuthRequest, authenticateInternal } from '../../providers/auth';
 import { type HybridAuthRequest, hybridAuth } from '../../providers/hybridAuth';
 import { createLogger } from '../../providers/logger';
-// eslint-disable-next-line no-restricted-imports -- Express file upload middleware, configured per-route
-import multer from 'multer';
+import { upload } from './config';
 import { asyncHandler } from '../../utils/asyncHandler';
 import {
   closeBrowserSession,
@@ -46,11 +45,6 @@ import { registerBrowserNavigationRoutes } from './routes.navigation';
 import { registerBrowserControlRoutes } from './routes.control';
 import { registerBrowserResumeRoute } from './routes.resume';
 import { registerBrowserChallengeRecoveryRoutes } from './routes.challenge-recovery';
-
-const upload = multer({
-  storage: multer.memoryStorage(),
-  limits: { fileSize: 50 * 1024 * 1024 },
-});
 
 const log = createLogger('BrowserSession');
 
@@ -79,19 +73,35 @@ router.post(
   '/close',
   authenticateInternal,
   asyncHandler(async (req: AuthRequest, res: Response) => {
+    const caller = new AbortController();
+    const onClose = () => {
+      if (!res.writableFinished) caller.abort();
+    };
+    res.once('close', onClose);
+    if (res.destroyed && !res.writableFinished) caller.abort();
     try {
+      caller.signal.throwIfAborted();
       const { session_id, pause, current_url, signed_in_sites } = closeSessionSchema.parse(
         req.body
       );
 
-      const result = await closeBrowserSession(session_id, pause, current_url, signed_in_sites);
+      const result = await closeBrowserSession(
+        session_id,
+        pause,
+        current_url,
+        signed_in_sites,
+        caller.signal
+      );
 
-      res.json({ success: true, ...result });
+      if (!caller.signal.aborted) res.json({ success: true, ...result });
     } catch (error) {
+      if (caller.signal.aborted) return;
       log.error('Failed to close browser session', { error: String(error) });
       res.status(500).json({
         error: error instanceof Error ? error.message : 'Failed to close browser session',
       });
+    } finally {
+      res.off('close', onClose);
     }
   })
 );
