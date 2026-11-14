@@ -22,6 +22,7 @@ tags:
 sources:
   - PR #2009 deploy smoke campaign deploy-0ce0cd032f77a126ce8823177091880044136d1e8bf45f6461bd7ecc469ce958, job r001-j0010 (browser-biometrics-webdecoy), fleet owner d270c87e672c4b4f8f6e0fd4cdb38608, Machine 8175d6a900e418, run 20261114-124343-1193817, failing source 3e59de84956ea8756719a0814834b641957f8169
   - commit 442f4b18bb (introduced the "once sealed, transfers fail closed" contract)
+  - PR #2072 (merge commit a53c8d9e1950500a75261c9c9bcf764d47123824)
 repro: python3 scripts/tests/cloudbench-runtime-evidence-collector.test.py (cases transfer-stall, transfer-persistent-reset, transfer-corrupt on both the inline run-bench-cloud collector and the recovery collector; driver-log-stall on the recovery collector)
 status: fixed
 ---
@@ -142,6 +143,8 @@ noise, not a classification change.
 
 10k-agent behavior: per-guest, controller-local, at most 2 extra reads per sealed read and
 only on a transport fault. No shared state and no fan-in.
+
+Shipped in PR #2072 (merged a53c8d9e19, 2026-11-14): deploy gates 16/16 PASS including smoke 11/11 with browser-biometrics-webdecoy PASS, production semantics PASS.
 
 ## Human feedback
 
