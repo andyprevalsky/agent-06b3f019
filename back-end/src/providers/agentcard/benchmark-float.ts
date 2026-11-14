@@ -104,63 +104,80 @@ function preferredBenchmarkCardholderIds(
   return [...new Set(preferred)];
 }
 
-/** AgentCard's terminal, mint-capable verification states. */
-const KYC_READY_STATUSES = new Set(['verified', 'approved']);
-
-/** Read the complete org inventory before applying any cardholder preference. */
-async function listBenchmarkCardholders(
-  callWithinBudget: AgentCardOrgToolCaller,
+/**
+ * Follow the provider's declared offset contract under the resolver's original deadline.
+ *
+ * The org tool defaults to the newest 50 records, so a verified preferred identity may sit on a
+ * later page. Pages are refused rather than guessed when the provider's inventory metadata is
+ * malformed, changes its total mid-walk, or stops advancing before covering that total.
+ */
+async function* benchmarkCardholderPages(
+  callOrgTool: AgentCardOrgToolCaller,
   deadlineAtMs: number
-): Promise<AgentCardSandboxCardholder[]> {
-  const cardholders: AgentCardSandboxCardholder[] = [];
+): AsyncGenerator<AgentCardSandboxCardholder[]> {
+  const pageSize = 100; // Provider tools/list: documented maximum, not a total discovery cap.
   const seen = new Set<string>();
+  let offset = 0;
   let total: number | undefined;
   for (;;) {
-    if (Date.now() >= deadlineAtMs)
-      throw new Error('AgentCard cardholder inventory pagination exceeded its read deadline');
-    const response = await callWithinBudget('list_cardholders', {
-      limit: 100,
-      offset: cardholders.length,
-    });
-    const page = extractCardholders(response);
-    const outer = asRecord(response);
-    const pageRecord = asRecord(outer?.structuredContent) ?? outer;
-    const pageTotal = pageRecord?.total;
-    const rawPage = pageRecord?.cardholders;
-    // A page without a total cannot prove completeness: only a full page may defer it to the next read.
-    const untotaledFullPage = pageTotal === undefined && total === undefined && page.length === 100;
-    if (
-      !Array.isArray(rawPage) ||
-      rawPage.length !== page.length ||
-      page.length > 100 ||
-      (!untotaledFullPage && (!Number.isSafeInteger(pageTotal) || (pageTotal as number) < 0))
-    ) {
+    if (Date.now() >= deadlineAtMs) {
       throw new Error(
-        'AgentCard cardholder inventory pagination returned a malformed page or total'
+        'AgentCard cardholder inventory pagination exceeded its read deadline ' +
+          '(the original read deadline shared by every resolver read)'
       );
     }
-    if (total !== undefined && pageTotal !== total) {
-      throw new Error('AgentCard cardholder inventory changed during pagination');
+    const result = await callOrgTool('list_cardholders', { limit: pageSize, offset }, deadlineAtMs);
+    const outer = asRecord(result);
+    const record = asRecord(outer?.structuredContent) ?? outer;
+    const page = extractCardholders(result);
+    const raw = record?.cardholders;
+    if (!Array.isArray(raw) || page.length !== raw.length) {
+      throw new Error('AgentCard cardholder inventory contains a record without an id');
     }
-    if (
-      page.some((cardholder) => seen.has(cardholder.id)) ||
-      new Set(page.map((cardholder) => cardholder.id)).size !== page.length
-    ) {
-      throw new Error('AgentCard cardholder inventory pagination did not advance');
+    const reportedTotal = record?.total;
+    if (reportedTotal !== undefined) {
+      if (
+        typeof reportedTotal !== 'number' ||
+        !Number.isSafeInteger(reportedTotal) ||
+        reportedTotal < 0 ||
+        raw.length > pageSize
+      ) {
+        throw new Error(
+          'AgentCard cardholder inventory returned an invalid total (pagination metadata is malformed)'
+        );
+      }
+      if (total !== undefined && reportedTotal !== total) {
+        throw new Error('AgentCard cardholder inventory changed during pagination');
+      }
+      total = reportedTotal;
     }
-    for (const cardholder of page) {
-      seen.add(cardholder.id);
-      cardholders.push(cardholder);
+    const fresh = page.filter(({ id }) => !seen.has(id));
+    for (const { id } of page) seen.add(id);
+    // Validate before yielding: the resolver may return as soon as a page holds its target.
+    // Distinct ids, not raw rows: churn can legitimately re-deliver an already-seen cardholder.
+    if (total !== undefined && seen.size > total) {
+      throw new Error(
+        'AgentCard cardholder inventory exceeded its reported total (pagination metadata is inconsistent)'
+      );
     }
-    if (untotaledFullPage) continue;
-    total = pageTotal as number;
-    if (cardholders.length === total) break;
-    if (cardholders.length > total || page.length === 0) {
-      throw new Error('AgentCard cardholder inventory pagination did not cover its total');
+    if (offset > 0 && page.length > 0 && fresh.length === 0) {
+      throw new Error(
+        'AgentCard cardholder inventory pagination did not advance (made no progress)'
+      );
     }
+    if (raw.length === 0 && total !== undefined && offset < total) {
+      throw new Error(
+        'AgentCard cardholder inventory pagination did not cover its total (made no progress)'
+      );
+    }
+    yield page;
+    offset += raw.length;
+    if (total !== undefined ? offset >= total : raw.length < pageSize) return;
   }
-  return cardholders;
 }
+
+/** AgentCard's terminal, mint-capable verification states. */
+const KYC_READY_STATUSES = new Set(['verified', 'approved']);
 
 /**
  * Resolve a sandbox org cardholder that actually exists AND can mint.
@@ -188,7 +205,32 @@ export async function resolveBenchmarkCardholderId(
   const deadlineAtMs = orgRetryDeadlineAtMs();
   const callWithinBudget: AgentCardOrgToolCaller = (toolName, args) =>
     callOrgTool(toolName, args, deadlineAtMs);
-  const cardholders = await listBenchmarkCardholders(callWithinBudget, deadlineAtMs);
+  const statuses = new Map<string, string | undefined>();
+  const readStatus = async (id: string): Promise<string | undefined> => {
+    if (statuses.has(id)) return statuses.get(id);
+    const status = await getOrgCardholderVerificationStatus(id, {
+      callOrgTool: callWithinBudget,
+    }).catch((error: unknown) => {
+      if (isOrgBackpressureError(error)) throw error;
+      return undefined;
+    });
+    statuses.set(id, status);
+    return status;
+  };
+  const discovered = new Map<string, AgentCardSandboxCardholder>();
+  for await (const page of benchmarkCardholderPages(callWithinBudget, deadlineAtMs)) {
+    for (const cardholder of page) {
+      if (!discovered.has(cardholder.id)) discovered.set(cardholder.id, cardholder);
+    }
+    // The highest-priority explicit candidate needs only positive membership and KYC.
+    // Do not wait for unrelated org-wide discovery/churn once that exact target is ready.
+    if (preferredIds[0] && discovered.has(preferredIds[0])) {
+      const status = await readStatus(preferredIds[0]);
+      if (status !== undefined && KYC_READY_STATUSES.has(status.toLowerCase()))
+        return preferredIds[0];
+    }
+  }
+  const cardholders = [...discovered.values()];
   if (cardholders.length === 0) {
     throw new Error(
       'AgentCard sandbox org has no cardholders. Create one in sandbox mode at ' +
@@ -213,12 +255,7 @@ export async function resolveBenchmarkCardholderId(
     // whole resolution: another candidate may still be verified. Org-wide backpressure says
     // nothing about this cardholder: skipping it could seed a less-preferred, unverified one, and
     // reading the next candidate would only add load.
-    const status = await getOrgCardholderVerificationStatus(id, {
-      callOrgTool: callWithinBudget,
-    }).catch((error: unknown) => {
-      if (isOrgBackpressureError(error)) throw error;
-      return undefined;
-    });
+    const status = await readStatus(id);
     if (status !== undefined && KYC_READY_STATUSES.has(status.toLowerCase())) return id;
   }
   // Nothing verifiable: fall back to the highest-preference candidate so the caller's more

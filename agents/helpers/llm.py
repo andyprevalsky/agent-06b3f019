@@ -97,6 +97,8 @@ from providers.rose.schema import (
     build_openai_response_format,
 )
 from providers.rose.structured_output import StructuredOutputAccumulator
+from providers.rose.subscription_usage import cooldown_reason as subscription_cooldown_reason
+from providers.rose.subscription_usage import restore as restore_subscription_usage
 from providers.rose.subscription_usage import take as take_subscription_usage
 from providers.rose.subscription_usage import token_fingerprint
 from providers.rose.transforms import reconstruct_agent_response
@@ -608,6 +610,7 @@ def _build_claude_auth_context(
             rate_limited_until=rate_limited_until,
             failure_reason=failure_reason,
             credential=credential_fingerprint(ctx.token),
+            rate_limit_reason=subscription_cooldown_reason(ctx.token, failure_reason),
         )
 
     async def _fetch_fresh(fetch_user_id: str) -> Optional[ComputeAuthContext]:
@@ -630,11 +633,15 @@ def _build_claude_auth_context(
         )
 
     async def _heartbeat_lease(ctx: ComputeAuthContext) -> None:
-        await heartbeat_compute_token_lineage_activity(
+        usage = take_subscription_usage(ctx.token)
+        delivered = await heartbeat_compute_token_lineage_activity(
             ctx.lineage_key or "",
             integration_id=integration_id,
-            usage=take_subscription_usage(ctx.token),
+            usage=usage,
         )
+        if usage and not delivered:
+            # Not acknowledged: keep it for the next heartbeat (a newer observation wins).
+            restore_subscription_usage(ctx.token, usage)
 
     return ClaudeAuthContext(
         token=claude_token,
@@ -686,6 +693,7 @@ def _build_gpt_auth_context(
             rate_limited_until=rate_limited_until,
             failure_reason=failure_reason,
             credential=credential_fingerprint(ctx.token),
+            rate_limit_reason=subscription_cooldown_reason(ctx.token, failure_reason),
         )
 
     async def _fetch_fresh(fetch_user_id: str) -> Optional[ComputeAuthContext]:
@@ -708,11 +716,15 @@ def _build_gpt_auth_context(
         )
 
     async def _heartbeat_lease(ctx: ComputeAuthContext) -> None:
-        await heartbeat_compute_token_lineage_activity(
+        usage = take_subscription_usage(ctx.token)
+        delivered = await heartbeat_compute_token_lineage_activity(
             ctx.lineage_key or "",
             integration_id=integration_id,
-            usage=take_subscription_usage(ctx.token),
+            usage=usage,
         )
+        if usage and not delivered:
+            # Not acknowledged: keep it for the next heartbeat (a newer observation wins).
+            restore_subscription_usage(ctx.token, usage)
 
     return GptAuthContext(
         token=gpt_token,
@@ -7531,12 +7543,18 @@ async def mark_compute_token_rate_limited_activity(
     rate_limited_until: Optional[str] = None,
     failure_reason: Optional[str] = None,
     credential: Optional[str] = None,
+    rate_limit_reason: Optional[str] = None,
 ) -> bool:
     """Mark the selected provider-typed compute token rate-limited in backend.
 
     ``integration_id`` and ``credential`` (the held token's fingerprint) name the
     exact leased login: the backend disables a login only when the report names
     it and the stored token is still the live one held (T7).
+
+    ``rateLimitAuthoritative`` says whether the provider supplied the reset
+    (``rate_limited_until``) or it is Rose's own ``cooldown_seconds`` backoff, and
+    ``rateLimitReason`` (stall | auth | usage_window[_5h|_7d] | rate_limit) why,
+    so the usage bar never shows a Rose backoff as an exhausted quota.
     """
     config = load_config()
     effective_rate_limited_until = rate_limited_until or (
@@ -7547,9 +7565,12 @@ async def mark_compute_token_rate_limited_activity(
         "type": token_type,
         "source": source,
         "rateLimitedUntil": effective_rate_limited_until,
+        "rateLimitAuthoritative": bool(rate_limited_until),
     }
     if failure_reason:
         body["failureReason"] = failure_reason
+    if rate_limit_reason:
+        body["rateLimitReason"] = rate_limit_reason
     if source == "pool" and pool_token_id:
         body["poolTokenId"] = pool_token_id
     if source == "user":

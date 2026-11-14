@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import shlex
 import subprocess
 import sys
 import signal
@@ -90,7 +91,8 @@ class Fixture(unittest.TestCase):
         (self.root / 'a.txt').write_text('two')
         self.commit('second')
         self.head = sh(self.root, 'git', 'rev-parse', 'HEAD').strip()
-        self.environ = patch.dict(os.environ, {'DEPLOY_WORKER_ROOT': str(self.workers)})
+        self.environ = patch.dict(os.environ, {'DEPLOY_WORKER_ROOT': str(self.workers),
+                                               'CLOUDBENCH_KERNEL_PROXY_CUSTODY': '0', 'NODE_OPTIONS': ''})
         self.environ.start()
         os.environ.pop('DEPLOY_TEST_CYCLE_STATE_DIR', None)
         os.environ.pop('DEPLOY_RUN_ROOT', None)
@@ -234,6 +236,38 @@ class Inventory(Fixture):
             path = self.path('agentcard-lifecycle')
             self.assertEqual(str(self.root.resolve() / '.context/deploy-ledger-park'),
                              g.local_slot(self.root, 'agentcard-lifecycle', path, values)['env']['BENCHMARK_HISTORY_PARK_DIR'])
+
+    def test_selected_kernel_custody_is_remapped_and_loaded_by_actual_worker_child(self):
+        guard = self.root / 'back-end/scripts/blackbox-kernel-proxy-custody.cjs'
+        guard.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(Path(__file__).resolve().parents[2] / 'back-end/scripts/blackbox-kernel-proxy-custody.cjs', guard)
+        with patch.dict(os.environ, {'NODE_OPTIONS': '--max-old-space-size=128 --require=/controller-only/blackbox-kernel-proxy-custody.cjs',
+                                     'CLOUDBENCH_KERNEL_PROXY_CUSTODY': '1'}):
+            selected = g.kernel_custody_environment(self.root)
+            child = subprocess.run(['node', '-e', 'if(!globalThis[Symbol.for("rose.test.kernelProxyCustody")])process.exit(1);console.log("guard-loaded")'],
+                                   env={**os.environ, **selected}, capture_output=True, text=True, timeout=8)
+            self.assertEqual(child.returncode, 0, child.stderr)
+            self.assertIn('guard-loaded', child.stdout)
+            self.assertNotIn('/controller-only/', selected['NODE_OPTIONS'])
+            self.assertIn('--max-old-space-size=128', selected['NODE_OPTIONS'])
+            remote = g.remote_slot(self.root, 'agents-coverage-blackbox')['env']
+            self.assertIn(g.GITHUB_WORKER_ROOT, remote['NODE_OPTIONS'])
+            self.assertNotIn('/controller-only/', remote['NODE_OPTIONS'])
+        for preload in ('--import=/controller-only/blackbox-kernel-proxy-custody.cjs',
+                        '--import /controller-only/blackbox-kernel-proxy-custody.cjs',
+                        '-r /controller-only/blackbox-kernel-proxy-custody.cjs'):
+            with self.subTest(preload=preload), patch.dict(os.environ, {'NODE_OPTIONS': preload,
+                                                                        'CLOUDBENCH_KERNEL_PROXY_CUSTODY': '0'}):
+                selected = g.kernel_custody_environment(self.root)
+                self.assertNotIn('/controller-only/', selected['NODE_OPTIONS'])
+                self.assertEqual(shlex.split(selected['NODE_OPTIONS']), ['--require=' + str(guard)])
+                child = subprocess.run(['node', '-e', 'if(!globalThis[Symbol.for("rose.test.kernelProxyCustody")])process.exit(1)'],
+                                       env={**os.environ, **selected}, capture_output=True, text=True, timeout=8)
+                self.assertEqual(child.returncode, 0, child.stderr)
+        with patch.dict(os.environ, {'NODE_OPTIONS': '', 'CLOUDBENCH_KERNEL_PROXY_CUSTODY': '0'}):
+            self.assertEqual(g.kernel_custody_environment(self.root), {})
+        with patch.dict(os.environ, {'CLOUDBENCH_KERNEL_PROXY_CUSTODY': 'invalid'}):
+            with self.assertRaises(g.Blocked): g.kernel_custody_environment(self.root)
 
     def test_semantic_stack_gets_its_measured_deadline_on_every_transport(self):
         """2026-11-08: a semantic run blocked in its runner's hour-long waits held PR1784's round for 70+ min

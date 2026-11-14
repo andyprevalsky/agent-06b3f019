@@ -4,6 +4,7 @@
  * it through POST /api/data/grep).
  */
 
+import { formatSharedDataMap } from './teamContext';
 import type { SummaryResult } from './types.summary';
 
 const SUMMARY_MAX_THREADS = 15;
@@ -105,7 +106,7 @@ export function formatLocalDataSummary(summary: SummaryResult): string {
     (documents?.total_documents ?? 0) === 0 &&
     google.length === 0
   ) {
-    return 'No local data available.';
+    return (summary.teams && formatSharedDataMap(summary.teams)) || 'No local data available.';
   }
   const channels =
     Object.keys(messages.channels).length > 0
@@ -114,6 +115,12 @@ export function formatLocalDataSummary(summary: SummaryResult): string {
           .join(', ')
       : 'unknown';
   return [
+    ...(summary.teams && formatSharedDataMap(summary.teams)
+      ? [
+          formatSharedDataMap(summary.teams),
+          'The aggregate statistics below describe your own records only; grep email/messages for team totals.',
+        ]
+      : []),
     'LOCAL DATA SOURCES:',
     '',
     `${'messages/'.padEnd(COLUMN)}${messages.total_threads} threads, ${count(messages.total_messages)} messages`,

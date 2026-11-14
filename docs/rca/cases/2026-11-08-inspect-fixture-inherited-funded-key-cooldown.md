@@ -69,3 +69,48 @@ allocations is authorized.
 ## Reusable lesson
 
 Isolate shared funded-key state for an entire in-process fixture lifetime before asserting provider selection.
+
+## 2026-11-10 recurrence: subscription availability remained shared
+
+The earlier funded-key cooldown isolation did not isolate subscription
+availability. On source `5690b07270b16e82c1cf024207a915be9c2925cc`, the native
+`backend-coverage-blackbox` gate failed C15 at line 585: `the exhausted Claude
+key is backed off`, expected `true`, actual `false`. Seven other cases passed.
+This was a scripted-CLI fixture failure, not an external-provider outage.
+
+The complete original domain log shows the failed session
+`3a0dcd7f-442e-4f47-b166-1d267435e70b` making four Integration `findMany`
+queries, then starting only Codex at 05:29:46.549 UTC and answering at
+05:29:46.607. There was no Claude attempt or cooldown mark for that session.
+The unchanged C15 child control ran Claude, marked its cooldown and answered
+on Codex one second later. Subscription-first ordering explains this boundary:
+the fixture's new user has no own subscription, but pooled Codex availability
+can precede its preferred Claude funded key. The pool's availability is inferred
+from the executed order and exact selection code; the raw row and concurrent
+writer were not logged or queried.
+
+Gate: NOT_INTRODUCED against `8046dcbc3a67e7d4241d8eb6171b5c1652b85f71`.
+The ten relevant inspection, credential, cooldown and fixture bodies are
+byte-identical. A provider-free replay using the actual selection, inspection
+loop and cooldown functions fails the same assertion on both revisions when a
+private pooled Codex row is visible. The candidate's actual Kernel custody
+preload is installed in that replay; no fetch is called. Applying the exact
+fixture isolation helper restores Claude then Codex and the same assertion
+passes. Checkpoint, CLI outcome and integration adapters are modeled; this is
+causal boundary proof, not an unchanged native-suite pass.
+
+The reviewed TEST-only repair hides `claude_code` and `gpt_code` subscription
+enumeration for this funded-key fixture, delegates unrelated queries to the
+bound original and restores the exact original delegate in teardown. All eight
+original test bodies are byte-for-byte unchanged. One added permanent case
+checks both subscription names, unrelated delegation and restoration. The
+candidate helper passes that provider-free control and strict installed Prisma
+type checking. Production ordering, credentials, assertions, timeouts and
+Kernel custody remain unchanged; no shared credential or cooldown is mutated.
+
+The deployment coordinator applied the reviewed candidate after the active
+runs ended. Native C15/domain acceptance and normal release gates remain
+pending; this appendix records no waiver or completed repair. Evidence is in
+`.context/code-inspect-5690-rca/report.json` and its `candidate/` receipts.
+The complete original log is 29,806 bytes with SHA256
+`2781141e0c621eb809c7f87e75ea08e834adf34e601b031ffa303e5ab21e8e3c`.

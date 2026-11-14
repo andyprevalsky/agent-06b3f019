@@ -1,0 +1,7 @@
+{
+  "legacy_verify_transition.py": "93df33d0cfd9d65cc9272405ee4cf3bcd7f7e4807bbd95eef8b5f19f30bf96f2",
+  "native-intent.json": "bd77054e8722f14477e309fbc58a59c2cd4dafcf03b2e7d861b8c71a1d30f59e",
+  "native-result.json": "8d2a106efa694b8caf5512633d29a3df290d76d892f920c461b29162b0cd4d19",
+  "parent_source": "facf1f1f8613293a82f153a7688e36866b274ecd",
+  "purpose": "Forensic pure-boundary replay only; no native execution, qualification or cleanup authority"
+}

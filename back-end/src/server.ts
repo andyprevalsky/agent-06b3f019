@@ -80,6 +80,9 @@ import plannerMemoryRouter from './domains/planner-memory/routes';
 import userUiRouter, { usercontentRouter } from './domains/user-ui/routes';
 import agentToolsRouter, { agentQuestionsRouter } from './domains/agent-tools/routes';
 import projectsRouter from './domains/projects/routes';
+import teamsRouter from './domains/teams/routes';
+import * as teamsService from './domains/teams/service';
+import { registerTeamAccess } from './providers/teamAccess';
 import worldModelsRouter from './domains/world-models/routes';
 import slackAutoRcaRouter from './domains/slack-auto-rca/routes';
 import downloadTelemetryRouter from './domains/download-telemetry/routes';
@@ -127,6 +130,7 @@ if (!process.env.BACKEND_API_KEY) {
 // bridge so the SMS supervisor and web chat search user data without a
 // provider→domain import.
 registerUserDataGrep(userDataGrep);
+registerTeamAccess(teamsService);
 // SMS and chat have no connect gate: they report unconnected sources themselves.
 registerUserDataGrepTool(executeGatelessGrepTool);
 
@@ -292,6 +296,12 @@ if (process.env.BLACKBOX_TEST_CAPTURE_OUTBOUND === '1') {
 
 // Health check endpoint (no auth required)
 app.get('/health', (req, res) => {
+  if (Reflect.get(globalThis, Symbol.for('rose.test.kernelProxyCustody')) === true) {
+    res.setHeader('X-Rose-Kernel-Proxy-Custody', 'enforced-v1');
+  }
+  if (Reflect.get(globalThis, Symbol.for('rose.test.kernelResourceCustody')) === true) {
+    res.setHeader('X-Rose-Kernel-Resource-Custody', 'enforced-v1');
+  }
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
@@ -548,6 +558,7 @@ app.use('/api/planner-memory', plannerMemoryRouter); // Planner memory history t
 app.use('/api/user-ui', userUiRouter); // Per-user rose_user_ui versions (publish/activate/active)
 app.use('/api/agent-tools', agentToolsRouter); // display / messages / approvals for agents + code-agent sandboxes
 app.use('/api/projects', projectsRouter); // Owner-scoped Projects: settings, env files, codebase sync
+app.use('/api/teams', teamsRouter);
 app.use('/api/world-models', worldModelsRouter); // WMH-compatible simulation runtime shim
 // Anthropic tee-proxy for the code agent. Mounted OUTSIDE /api so the injected
 // ANTHROPIC_BASE_URL = <backend>/anthropic-proxy/<goalHash> resolves to /v1/messages.

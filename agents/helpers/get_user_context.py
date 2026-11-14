@@ -10,6 +10,7 @@ import structlog
 from temporalio import activity
 
 from config import load_config
+from helpers.team_context import fetch_team_context
 from helpers.user_profile import build_user_profile_sections
 
 logger = structlog.get_logger()
@@ -541,6 +542,8 @@ def _format_user_context(
                 or emails
                 or (status == "SYNC_FAILED" and name.lower() != "gmail")
             ):
+                if name.lower() in {"granola", "fireflies"}:
+                    name = f"Meeting note taker ({name.lower()}.ai)"
                 if google_sources:
                     integration_lines.append(
                         f"- {name}: {', '.join(emails)} (synced: Gmail, Google Calendar, Google Drive)"
@@ -757,6 +760,7 @@ async def fetch_user_context(user_id: str, context_gates: Optional[Dict[str, boo
         return ""
 
     try:
+        team_context = await fetch_team_context(user_id) if _gate_open("integrations") else ""
         # Only use cache when no gates are specified (full context)
         # Gated requests are cheap enough and shouldn't poison the full-context cache
         now = datetime.utcnow()
@@ -791,7 +795,7 @@ async def fetch_user_context(user_id: str, context_gates: Optional[Dict[str, boo
                 )
                 return _combine_profile_and_context(
                     profile_context,
-                    cached.get("base_context", ""),
+                    "\n\n".join(filter(None, [cached.get("base_context", ""), team_context])),
                 )
 
         # Cache miss or gated request - fetch data selectively
@@ -858,7 +862,7 @@ async def fetch_user_context(user_id: str, context_gates: Optional[Dict[str, boo
             user_snapshot=user_snapshot if _gate_open("user_snapshot") else None,
         )
         profile_context = _render_profile_context(user_settings) if _gate_open("user_profile") else ""
-        context = _combine_profile_and_context(profile_context, base_context)
+        context = _combine_profile_and_context(profile_context, "\n\n".join(filter(None, [base_context, team_context])))
 
         # Only cache full (ungated) context
         if not gates:

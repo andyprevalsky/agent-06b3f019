@@ -434,6 +434,9 @@ def test_exact_recovery_consumes_runtime_receipt_without_repeating_guest_shutdow
             "exact_owner_pool_claim_ids",
             "fleet_recovery_confirm_pool_claims",
             "fleet_publish_recovered_terminal_projection",
+            "release_registry_recovery_guard",
+            "release_registry_recovery_lock",
+            "fleet_close_recovered_source_consumer",
             "recover_exact_stale_fleet_owner",
         )
     )
