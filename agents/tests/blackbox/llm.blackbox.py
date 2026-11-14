@@ -709,6 +709,258 @@ def test_tool_call_declaration_dedup_ignores_argument_key_order():
         )
 
 
+_KIMI_REUSED_ID_FIXTURE = Path(__file__).parent / "fixtures" / "llm" / "kimi_k3_reused_tool_call_id.json"
+
+
+def _persisted_rows_from_request(history_messages: list) -> list:
+    """Agent context rows equivalent to an outgoing request's non-system turns.
+
+    The builder adds the "[timestamp] " header and declarations come back as
+    metadata.tool_calls, exactly as run_agent persists them.
+    """
+    import re
+
+    base = datetime(2026, 11, 13, 2, 48, tzinfo=timezone.utc)
+    names = {}
+    rows = []
+    for index, message in enumerate(history_messages):
+        text = re.sub(r"^\[[^\]]+\] ", "", message.get("content") or "")
+        row = {"role": message["role"].upper(), "text": text, "timestamp": (base + timedelta(seconds=5 * index)).isoformat()}
+        if message.get("tool_calls"):
+            calls = []
+            for call in message["tool_calls"]:
+                names[call["id"]] = call["function"]["name"]
+                calls.append({"tool": call["function"]["name"], "tool_call_id": call["id"], **json.loads(call["function"]["arguments"])})
+            row["metadata"] = {"tool_calls": calls}
+        elif message["role"] == "tool":
+            row["metadata"] = {
+                "toolCallId": message["tool_call_id"],
+                "toolName": names[message["tool_call_id"]],
+                "toolStatus": "ERROR" if "failed" in text else "FINISHED",
+            }
+        rows.append(row)
+    return rows
+
+
+def _kimi_sse(tool_calls: list, content: str = "") -> str:
+    events = [
+        {"choices": [{"delta": {"content": content}}]} if content else None,
+        {
+            "choices": [
+                {
+                    "delta": {
+                        "tool_calls": [
+                            {"index": index, "id": call["id"], "type": "function", "function": {"name": call["name"], "arguments": call["arguments"]}}
+                            for index, call in enumerate(tool_calls)
+                        ]
+                    },
+                    "finish_reason": "tool_calls",
+                }
+            ]
+        },
+        {"usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}},
+    ]
+    return "\n".join("data: " + json.dumps(event) for event in events if event) + "\ndata: [DONE]\n"
+
+
+async def _kimi_execute_turn(history, tool_calls: list, content: str = "", *, stored_context: str = ""):
+    """One real execute-loop activity on rose-1-oss/kimi-k3, served from a recorded response.
+
+    ``history`` is the request's non-system messages, or, with ``stored_context``
+    set, the agent's stored context rows handed over the production way:
+    "pending" (same-worker slot) or "backend" (cross-worker fetch).
+    """
+    import httpx
+    from helpers.llm import _pending_llm_context, call_llm_activity
+
+    agent_id = "3f6a83cd-164f-4e55-ab5d-39eb3923f92b"
+    requests = []
+
+    def handler(request):
+        if request.url.host != "openrouter.ai":
+            return httpx.Response(200, json={"ok": True})
+        body = json.loads(request.content)
+        assert body["model"] == "moonshotai/kimi-k3"
+        requests.append(body)
+        return httpx.Response(200, text=_kimi_sse(tool_calls, content), headers={"content-type": "text/event-stream"})
+
+    setup_mock_fn(handler)
+    early_in_progress = []
+
+    async def record_tool_event(**kwargs):
+        early_in_progress.append((kwargs["tool_name"], kwargs["tool_call_id"]))
+
+    backend = AsyncMock(return_value={"agent": {"id": agent_id}, "messages": history})
+    if stored_context == "pending":
+        _pending_llm_context[agent_id] = (history, "Rose execute phase.", None, None, "stream-kimi:1")
+    with (
+        patch.dict(os.environ, {"CEREBRAS_API_KEY": "", "GPT_API_KEY": "", "ANTHROPIC_API_KEY": "", "AZURE_FOUNDRY_API_KEY": ""}),
+        patch("temporalio.activity.heartbeat"),
+        patch("helpers.llm.stream_assistant_chunk", new_callable=AsyncMock),
+        patch("helpers.llm.stream_tool_event", side_effect=record_tool_event),
+        patch("helpers.fetch_config._fetch_agent_data_impl", new=backend),
+        patch("helpers.llm.asyncio.sleep", new=AsyncMock()),
+    ):
+        try:
+            result = await call_llm_activity(
+                messages_or_agent_id=agent_id if stored_context else [{"role": "system", "content": "Rose execute phase."}, *history],
+                model="rose-labs/rose-1-oss",
+                tool_names=["spawn_agent", "wait_for"],
+                agent_id=agent_id,
+                stream_id="stream-kimi-reused-id",
+                call_site="execute_loop",
+                system_prompt="Rose execute phase." if stored_context else None,
+                skip_cache_write=True,
+                pending_context_token="stream-kimi:1" if stored_context == "pending" else None,
+                force_backend_context=stored_context == "backend",
+            )
+        finally:
+            _pending_llm_context.pop(agent_id, None)
+    assert backend.await_count == (1 if stored_context == "backend" else 0)
+    result["_requests"] = requests
+    return result, early_in_progress
+
+
+def _turn_rows(result: dict, *, at: datetime, tool_text: str) -> list:
+    """Persist one turn the way run_agent does: the Nth call of a tool takes the Nth detected id."""
+    positions: dict = {}
+    calls = []
+    for call in result["tool_calls"]:
+        call = dict(call)
+        name = call.pop("tool")
+        detected = [tid for detected_name, tid, _ in result["detected_tools_ordered"] if detected_name == name]
+        calls.append({"tool": name, "tool_call_id": detected[positions.get(name, 0)], **call})
+        positions[name] = positions.get(name, 0) + 1
+    rows = [{"role": "ASSISTANT", "text": result["response"], "timestamp": at.isoformat(), "metadata": {"tool_calls": calls}}]
+    for offset, call in enumerate(calls, start=1):
+        rows.append(
+            {
+                "role": "TOOL",
+                "text": tool_text,
+                "timestamp": (at + timedelta(seconds=offset)).isoformat(),
+                "metadata": {"toolCallId": call["tool_call_id"], "toolName": call["tool"], "toolStatus": "FINISHED"},
+            }
+        )
+    return rows
+
+
+async def test_provider_reused_tool_call_id_keeps_later_llm_calls_buildable():
+    """kimi-k3 numbers tool_call ids per turn, so a retried spawn reused 'spawn_agent:3'.
+
+    Root agent 3f6a83cd (PR #1975 round-7 smoke): the first spawn_agent:3 was
+    rejected (task_name already used) and the corrected spawn came back with the
+    same provider id. Rose persisted that id verbatim as the second declaration's
+    tool_call_id, so every later build of the conversation raised "reuses
+    tool_call_id 'spawn_agent:3' for conflicting declarations" and the agent
+    could never make another LLM call. Replays the recorded request and kimi
+    response through the real activity, then builds the next request.
+    """
+    from helpers.llm import build_llm_messages, convert_context_to_messages
+
+    fixture = json.loads(_KIMI_REUSED_ID_FIXTURE.read_text())
+    history = fixture["history_messages"]
+    history_ids = {call["id"] for message in history for call in message.get("tool_calls") or []}
+    assert "spawn_agent:3" in history_ids
+    assert [call["id"] for call in fixture["response"]["tool_calls"]] == ["spawn_agent:3"]
+
+    result, early_in_progress = await _kimi_execute_turn(
+        history, fixture["response"]["tool_calls"], fixture["response"]["content"]
+    )
+    prior = _persisted_rows_from_request(history)
+    turn = _turn_rows(result, at=datetime(2026, 11, 13, 2, 50, tzinfo=timezone.utc), tool_text="Started browser agent in background.")
+    before = await build_llm_messages(prior, "Rose execute phase.")
+    # Production raised here on every later call_llm_activity.
+    after = await build_llm_messages(prior + turn, "Rose execute phase.")
+
+    [(name, new_id, _)] = result["detected_tools_ordered"]
+    assert name == "spawn_agent"
+    assert new_id not in history_ids, f"provider id {new_id!r} reused an id the conversation already declares"
+    assert new_id == "spawn_agent:3__2", "the rename must be deterministic so replays send identical bytes"
+    assert early_in_progress == [("spawn_agent", new_id)], "the early IN_PROGRESS row must use the same id"
+    assert result["tool_calls"][0]["task_name"] == "fcaptcha_run2"
+
+    # History is never rewritten, so the cached prefix stays byte-identical.
+    assert after[: len(before)] == before
+    declared = {}
+    for message in after:
+        for call in message.get("tool_calls") or []:
+            assert call["id"] not in declared, f"duplicate tool_call id {call['id']!r} sent to the provider"
+            declared[call["id"]] = json.loads(call["function"]["arguments"])
+    assert declared["spawn_agent:3"]["task_name"] == "fcaptcha_demo"
+    assert declared[new_id]["task_name"] == "fcaptcha_run2"
+    results = {message["tool_call_id"]: message["content"] for message in after if message["role"] == "tool"}
+    assert set(results) == set(declared)
+    assert "already used by another agent" in results["spawn_agent:3"]
+    assert "Started browser agent in background." in results[new_id]
+    verifier = convert_context_to_messages(prior + turn, include_assistant=True)
+    assert sum(1 for message in verifier if message["role"] == "tool") == len(declared)
+
+
+async def test_provider_tool_call_id_never_reuses_a_stored_unanswered_declaration():
+    """A stored declaration without a terminal result is stripped from the request but still registered.
+
+    When a tool's activity dies before its terminal row is written, the request
+    builder drops the orphan declaration, yet every later build still registers
+    it. kimi-k3 numbers ids by the calls it can see, so it is likely to emit that
+    stored id again. The claim must cover the stored context, not just the
+    request, on both the same-worker and the cross-worker activity paths.
+    """
+    from helpers.llm import build_llm_messages
+
+    fixture = json.loads(_KIMI_REUSED_ID_FIXTURE.read_text())
+    stored = [
+        {"role": "USER", "text": "Run the FCaptcha demo in a browser agent.", "timestamp": "2026-11-13T02:48:00+00:00"},
+        {
+            "role": "ASSISTANT",
+            "text": "",
+            "timestamp": "2026-11-13T02:49:00+00:00",
+            "metadata": {"tool_calls": [{"tool": "spawn_agent", "tool_call_id": "spawn_agent:3", "goal": "demo", "task_name": "fcaptcha_demo"}]},
+        },
+        {
+            "role": "TOOL",
+            "text": "Starting spawn_agent...",
+            "timestamp": "2026-11-13T02:49:01+00:00",
+            "metadata": {"toolCallId": "spawn_agent:3", "toolName": "spawn_agent", "toolStatus": "IN_PROGRESS"},
+        },
+        {"role": "USER", "text": "Continue.", "timestamp": "2026-11-13T02:49:30+00:00"},
+    ]
+    for stored_context in ("pending", "backend"):
+        result, early = await _kimi_execute_turn(
+            stored, fixture["response"]["tool_calls"], fixture["response"]["content"], stored_context=stored_context
+        )
+        sent_ids = {call["id"] for body in result["_requests"] for message in body["messages"] for call in message.get("tool_calls") or []}
+        assert "spawn_agent:3" not in sent_ids, "the unanswered declaration is stripped from the request"
+        [(_, new_id, _)] = result["detected_tools_ordered"]
+        assert new_id == "spawn_agent:3__2", f"{stored_context}: reused the stored id {new_id!r}"
+        assert early == [("spawn_agent", new_id)]
+        turn = _turn_rows(result, at=datetime(2026, 11, 13, 2, 50, tzinfo=timezone.utc), tool_text="Started.")
+        built = await build_llm_messages(stored + turn, "Rose execute phase.")
+        assert [call["id"] for message in built for call in message.get("tool_calls") or []] == [new_id]
+
+
+async def test_provider_tool_call_ids_stay_unique_within_one_response():
+    """A provider that repeats one id across a parallel batch gets one id per declaration;
+    unique provider ids pass through unchanged."""
+    from helpers.llm import build_llm_messages
+
+    def query(text: str) -> str:
+        return json.dumps({"agents": ["/root/x"], "description": text, "timeout_seconds": 30})
+
+    repeated = [{"id": "wait_for:0", "name": "wait_for", "arguments": query(text)} for text in ("first", "second")]
+    result, early = await _kimi_execute_turn([{"role": "user", "content": "wait twice"}], repeated)
+    ids = [tid for _, tid, _ in result["detected_tools_ordered"]]
+    assert ids == ["wait_for:0", "wait_for:0__2"]
+    assert early == [("wait_for", tid) for tid in ids]
+    rows = [{"role": "USER", "text": "wait twice", "timestamp": "2026-11-13T02:48:00+00:00"}]
+    rows += _turn_rows(result, at=datetime(2026, 11, 13, 2, 49, tzinfo=timezone.utc), tool_text="done")
+    built = await build_llm_messages(rows, "Rose execute phase.")
+    assert [call["id"] for message in built for call in message.get("tool_calls") or []] == ids
+
+    unique = [{"id": "call_ok_1", "name": "wait_for", "arguments": query("only")}]
+    result, _ = await _kimi_execute_turn([{"role": "user", "content": "wait"}], unique)
+    assert [tid for _, tid, _ in result["detected_tools_ordered"]] == ["call_ok_1"]
+
+
 def test_tool_result_uses_declared_not_executed_tool_name():
     """A tool result must be labelled with the DECLARED tool name.
 
@@ -11934,6 +12186,18 @@ async def run_all_tests():
     r.record(
         "tool_call_declaration_dedup_ignores_argument_key_order",
         test_tool_call_declaration_dedup_ignores_argument_key_order,
+    )
+    await r.record_async(
+        "provider_reused_tool_call_id_keeps_later_llm_calls_buildable",
+        test_provider_reused_tool_call_id_keeps_later_llm_calls_buildable,
+    )
+    await r.record_async(
+        "provider_tool_call_id_never_reuses_a_stored_unanswered_declaration",
+        test_provider_tool_call_id_never_reuses_a_stored_unanswered_declaration,
+    )
+    await r.record_async(
+        "provider_tool_call_ids_stay_unique_within_one_response",
+        test_provider_tool_call_ids_stay_unique_within_one_response,
     )
     await r.record_async(
         "heartbeat_compute_token_lineage_activity_posts_lineage_key",
