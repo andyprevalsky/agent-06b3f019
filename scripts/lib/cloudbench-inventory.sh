@@ -252,6 +252,7 @@ _refresh_inventory_snapshot_unlocked() {
         fly_with_timeout "$SNAPSHOT_REFRESH_TIMEOUT" machines list -a "$APP" --json > "$machines_tmp" || status=$?
     if [ "$status" -ne 0 ] || [ ! -s "$machines_tmp" ]; then
         [ "$status" -ne 0 ] || status=1
+        INVENTORY_REFRESH_READ_STATUS="$status"
         inventory_refresh_diagnostic machines-list "$status" "$machines_tmp" "$started" "$phase_tmp" || true
         rm -f "$machines_tmp" "$volumes_tmp"
         return 1
@@ -262,6 +263,7 @@ _refresh_inventory_snapshot_unlocked() {
         volumes list -a "$APP" --json > "$volumes_tmp" || status=$?
     if [ "$status" -ne 0 ] || [ ! -s "$volumes_tmp" ]; then
         [ "$status" -ne 0 ] || status=1
+        INVENTORY_REFRESH_READ_STATUS="$status"
         inventory_refresh_diagnostic volumes-list "$status" "$volumes_tmp" "$started" || true
         rm -f "$machines_tmp" "$volumes_tmp"
         return 1
@@ -469,10 +471,21 @@ start_machines_snapshot_loop() {
         return 1
     fi
     [ -p "$INVENTORY_WAIT_FIFO" ] || mkfifo "$INVENTORY_WAIT_FIFO" || return 1
-    if ! refresh_inventory_snapshot; then
-        echo "❌ shared inventory snapshot did not initialize" >&2
-        return 1
-    fi
+    # The first refresh is two read-only Fly lists that abort the launch. One
+    # slow read (fly_with_timeout 142) must not: retry only a timeout, at most
+    # 3 attempts with 2 s / 5 s pauses. Other failures still refuse at once.
+    local attempt pause
+    for attempt in 1 2 3; do
+        INVENTORY_REFRESH_READ_STATUS=0
+        refresh_inventory_snapshot && break
+        if [ "$INVENTORY_REFRESH_READ_STATUS" != 142 ] || [ "$attempt" -eq 3 ]; then
+            echo "❌ shared inventory snapshot did not initialize" >&2
+            return 1
+        fi
+        pause=$((attempt == 1 ? 2 : 5))
+        echo "⚠️ shared inventory read timed out (attempt $attempt/3); retrying in ${pause}s" >&2
+        sleep "$pause"
+    done
     machines_snapshot_loop & SNAPSHOT_LOOP_PID=$!
     SNAPSHOT_LOOP_PID_START="$(inventory_pid_start_time "$SNAPSHOT_LOOP_PID")"
     if [ -z "$SNAPSHOT_LOOP_PID_START" ]; then
