@@ -126,8 +126,9 @@ assertion (no sleep recorded) is kept; the "scanner shares the scope" subtest no
 `InterruptedProcessObservation.test_unrelated_unreadable_host_process_is_outside_the_fixture_scan`: a real re-parented non-dumpable process
 is in the production population, outside the suite's, and the fixture scan records no sleep; with the whole-host population it fails
 (`original namespace process <pid> is unverifiable`). Under the same churn the assigned test passes 5/5, and the full `deploy-test-plan`,
-`deploy-test-cycle`, `run-deploy-structural-gates`, `select-affected-tests` and `deploy-test-quarantine` suites pass. The quarantine marker
-is removed.
+`deploy-test-cycle`, `run-deploy-structural-gates`, `select-affected-tests` and `deploy-test-quarantine` suites pass. Main released the
+quarantine marker on its 5-pass streak (dab14eab09, 2026-11-13) without changing the scan; on main cae1182434 the unchanged test still
+fails 3/3 under the same churn, so this fix is what removes the cause.
 
 ## Human feedback
 
