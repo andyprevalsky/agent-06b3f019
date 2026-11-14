@@ -1936,6 +1936,18 @@ async def run_all_tests():
         "phone_provider_account_boundary_covers_the_broker_api_origin",
         test_phone_provider_account_boundary_covers_the_broker_api_origin,
     )
+    await runner.record_async(
+        "phone_provider_boundary_rechecks_the_live_page_and_target_frame_at_action_time",
+        test_phone_provider_boundary_rechecks_the_live_page_and_target_frame_at_action_time,
+    )
+    await runner.record_async(
+        "phone_provider_boundary_reads_urls_the_way_chrome_does",
+        test_phone_provider_boundary_reads_urls_the_way_chrome_does,
+    )
+    await runner.record_async(
+        "phone_provider_boundary_sees_real_chrome_out_of_process_realm_frames",
+        test_phone_provider_boundary_sees_real_chrome_out_of_process_realm_frames,
+    )
     runner.record(
         "steel_cdp_key_is_materialized_only_at_connection_boundary",
         test_steel_cdp_key_is_materialized_only_at_connection_boundary,
@@ -2508,3 +2520,381 @@ def test_phone_provider_account_boundary_covers_the_broker_api_origin() -> None:
     assert origins, "phone broker origin not found"
     for origin in origins:
         assert phone_provider_account_realm(origin) == "phone-harness.com", origin
+
+
+class _RecordingBrowserSession:
+    """browser-use session whose target registry is readable and whose CDP use is recorded."""
+
+    def __init__(self, touched: list[str], targets: dict) -> None:
+        self._touched = touched
+        # browser-use's registry, as observed in real Chromium: an out-of-process
+        # iframe's attach event overwrites its URL with "" (review of #2060).
+        registry = {tid: SimpleNamespace(target_id=tid, target_type=t.target_type,
+                                         url="" if t.target_type == "iframe" else t.url)
+                    for tid, t in targets.items()}
+        self.session_manager = SimpleNamespace(get_target=registry.get, get_all_targets=lambda: dict(registry))
+
+    def __getattr__(self, name: str):
+        self._touched.append(f"session.{name}")
+        raise AttributeError(name)
+
+
+class _LivePageDomService:
+    """A connected DOM service whose live page differs from the step-start observation.
+
+    ``targets`` is browser-use's target registry (main page plus out-of-process
+    iframes) and ``selector_map`` holds the last DOM snapshot's indexed nodes.
+    Every other attribute (coordinates, humanized input, CDP sessions) is the
+    browser being driven and is recorded in ``touched``.
+    """
+
+    def __init__(self, live_url: str, targets: dict, selector_map: dict, pending_url: str = "") -> None:
+        self.touched: list[str] = []
+        self.live_url = live_url
+        # Chrome's target list names a pending browser-initiated navigation's URL.
+        self.pending_url = pending_url
+        self.selector_map = selector_map
+        self._targets = targets
+        self.session = _RecordingBrowserSession(self.touched, targets)
+
+    def get_parked_page_identity(self) -> dict:
+        return {"url": self.live_url, "target_id": "main"}
+
+    async def live_frame_targets(self) -> dict:
+        """Chrome's own target list (Target.getTargets): the live URLs."""
+        return {tid: {"type": t.target_type, "url": (self.pending_url or self.live_url) if tid == "main" else t.url}
+                for tid, t in self._targets.items()}
+
+    async def ensure_browser_overlays_suppressed(self) -> None:
+        return None
+
+    def __getattr__(self, name: str):
+        self.touched.append(name)
+        raise AttributeError(name)
+
+
+def _dom_node(target_id: str, node_name: str = "BUTTON", parent=None, attributes=None):
+    return SimpleNamespace(
+        target_id=target_id, node_name=node_name, parent_node=parent, attributes=attributes or {},
+        content_document=None,
+    )
+
+
+_DRIVEN = {"register_secret_refs", "mark_secret_used"}
+
+
+async def test_phone_provider_boundary_rechecks_the_live_page_and_target_frame_at_action_time() -> None:
+    """Post-merge review of PR #2028 (agent af4f4bb3, 2026-11-14): the boundary judged
+    the URL observed at step start. A page that redirects or meta-refreshes to
+    accounts.phone-harness.com after observation, or a cross-origin phone-harness
+    iframe inside an ordinary page, was acted on with the owner's session. The
+    dispatcher must re-check the live main frame and the action's target frame."""
+    from domains.spawn_browser_agent_v3.service_actions import execute_action
+
+    def target(target_id: str, url: str, kind: str = "page") -> SimpleNamespace:
+        return SimpleNamespace(target_id=target_id, target_type=kind, url=url)
+
+    device = "https://accounts.phone-harness.com/device"
+
+    async def run(dom, action, current_url="https://example.com/start"):
+        history = SimpleNamespace(record_action=AsyncMock(), last_action_step=lambda: None)
+        return await execute_action(dom, history, action, current_url=current_url)
+
+    # 1) Stale observation: the step saw example.com; the page has since redirected.
+    redirected = {"main": target("main", device)}
+    main_button = _dom_node("main")
+    for action in (
+        {"action": "click", "index": 7, "params": {}},
+        {"action": "input_text", "index": 7, "params": {"text": "JLLQDKNZ"}},
+        {"action": "press_key", "params": {"key": "Enter"}},
+        {"action": "click", "params": {}, "coordinates": {"x": 10, "y": 10}},
+        {"action": "evaluate", "params": {"code": "document.querySelector('button').click()"}},
+    ):
+        dom = _LivePageDomService(device, redirected, {7: main_button})
+        result = await run(dom, action)
+        assert result.get("code") == "phone_provider_account_boundary", (action, result)
+        assert result.get("success") is False, result
+        assert set(dom.touched) <= _DRIVEN, (action, dom.touched)
+
+    # 1b) A slow goto away from the realm: Chrome already reports the pending URL while
+    # the phone-harness document is still the one on screen (second review of #2060).
+    for action in ({"action": "click", "index": 7, "params": {}}, {"action": "press_key", "params": {"key": "Enter"}}):
+        dom = _LivePageDomService(device, redirected, {7: main_button}, pending_url="https://hang.example.org/x")
+        result = await run(dom, action)
+        assert result.get("code") == "phone_provider_account_boundary", (action, result)
+        assert set(dom.touched) <= _DRIVEN, (action, dom.touched)
+
+    # 2) A cross-origin phone-harness iframe inside an ordinary page.
+    framed = {
+        "main": target("main", "https://example.com/start"),
+        "oopif": target("oopif", device, "iframe"),
+        "ordinary-frame": target("ordinary-frame", "https://ads.example.net/", "iframe"),
+    }
+    oopif_iframe = _dom_node("main", "IFRAME", attributes={"src": "https://example.com/frame-was-here"})
+    oopif_doc = _dom_node("oopif", "#document", parent=oopif_iframe)
+    oopif_iframe.content_document = oopif_doc
+    approve_in_oopif = _dom_node("oopif", parent=oopif_doc)
+    inproc_iframe = _dom_node("main", "IFRAME", attributes={"src": "https://ACCOUNTS.phone-harness.com./device"})
+    code_box_in_frame = _dom_node("main", "INPUT", parent=_dom_node("main", "#document", parent=inproc_iframe))
+    page_button = _dom_node("main", parent=_dom_node("main", "BODY"))
+    ad_button = _dom_node("ordinary-frame", parent=_dom_node("ordinary-frame", "#document"))
+    selector_map = {11: approve_in_oopif, 12: code_box_in_frame, 13: page_button, 14: ad_button, 15: oopif_iframe}
+    for action in (
+        {"action": "click", "index": 11, "params": {}},
+        {"action": "input_text", "index": 12, "params": {"text": "JLLQDKNZ"}},
+        {"action": "select_dropdown", "params": {"index": 11, "text": "Approve"}},
+        # The frame element itself: its src is stale, its document is in the realm.
+        {"action": "click", "index": 15, "params": {}},
+        {"action": "scroll", "index": 15, "params": {"direction": "down"}},
+        # Drag points and non-integer indices do not determine the target frame.
+        {"action": "drag", "params": {"source_index": 13, "target_index": 13,
+                                      "start_x": 400, "start_y": 300, "end_x": 401, "end_y": 300}},
+        {"action": "click", "params": {"index": "11"}},
+        # Keys go to browser focus, which may sit in the realm frame, whatever index is named.
+        {"action": "press_key", "index": 13, "params": {"key": "Enter"}},
+        # Pointer input lands at coordinates: a realm frame can cover a public element,
+        # and the password-field fallback's frame-relative point (CodeRabbit, #2060).
+        {"action": "click", "index": 13, "params": {}},
+        {"action": "input_text", "index": 14, "params": {"text": "{{secret:password}}"}},
+        # Coordinates and keys land in whichever frame is under the point or focused:
+        # undeterminable, so a page embedding the realm refuses them.
+        {"action": "click", "params": {}, "coordinates": {"x": 10, "y": 10}},
+        {"action": "press_key", "params": {"key": "Enter"}},
+    ):
+        dom = _LivePageDomService("https://example.com/start", framed, selector_map)
+        result = await run(dom, action)
+        assert result.get("code") == "phone_provider_account_boundary", (action, result)
+        assert set(dom.touched) <= _DRIVEN, (action, dom.touched)
+
+    # A realm frame the snapshot omitted (hidden, tiny, no interactive nodes) is still
+    # seen in the live target registry (CodeRabbit, #2060 cycle 3).
+    for action in (
+        {"action": "click", "index": 13, "params": {}},
+        {"action": "press_key", "params": {"key": "Enter"}},
+    ):
+        dom = _LivePageDomService("https://example.com/start", framed, {13: page_button})
+        result = await run(dom, action)
+        assert result.get("code") == "phone_provider_account_boundary", (action, result)
+        assert set(dom.touched) <= _DRIVEN, (action, dom.touched)
+
+    # The main-frame script, reads and leaving still run on a page embedding the realm.
+    for action in (
+        {"action": "evaluate", "params": {"code": "1"}},
+        {"action": "read_browser_state", "params": {}},
+        {"action": "goto", "params": {"url": "https://www.google.com/"}},
+    ):
+        dom = _LivePageDomService("https://example.com/start", framed, selector_map)
+        result = await run(dom, action)
+        assert result.get("code") != "phone_provider_account_boundary", (action, result)
+        assert set(dom.touched) - _DRIVEN, (action, "an allowed action must reach the browser")
+
+    # Frame-scanning fill helpers (password-field fallback, payment fills) never
+    # evaluate in a realm frame, whether Playwright or CDP exposes it (CodeRabbit, #2060).
+    from domains.spawn_browser_agent_v3.service_actions import _resolve_password_field_coordinates
+
+    realm_frame = SimpleNamespace(url=device, evaluate=AsyncMock(return_value={"x": 5, "y": 5}))
+    page_frame = SimpleNamespace(url="https://example.com/start", evaluate=AsyncMock(return_value=None))
+    realm_cdp = SimpleNamespace(cdp_client=SimpleNamespace(send=SimpleNamespace(Runtime=SimpleNamespace(
+        evaluate=AsyncMock(return_value={"result": {"value": {"x": 6, "y": 6}}})))), session_id="realm")
+    all_frames = {
+        "root": {"url": "https://example.com/start", "frameTargetId": "main", "parentFrameId": None},
+        "child": {"url": device, "frameTargetId": "oopif", "parentFrameId": "root"},
+    }
+    sessions = {"oopif": realm_cdp}
+    fill_session = SimpleNamespace(
+        agent_focus_target_id="main",
+        get_all_frames=AsyncMock(return_value=(all_frames, {})),
+        get_or_create_cdp_session=AsyncMock(side_effect=lambda target_id=None, focus=False: sessions.get(target_id)),
+    )
+    page = SimpleNamespace(frames=[page_frame, realm_frame])
+    assert await _resolve_password_field_coordinates(fill_session, input_page=page) is None
+    realm_frame.evaluate.assert_not_awaited()
+    realm_cdp.cdp_client.send.Runtime.evaluate.assert_not_awaited()
+    page_frame.evaluate.assert_awaited()
+    page_frame.evaluate.return_value = {"x": 7, "y": 8}
+    assert await _resolve_password_field_coordinates(fill_session, input_page=page) == (7, 8)
+
+    # A page with no realm frame (an ordinary cross-origin frame included) keeps
+    # indexed, coordinate and keyboard input.
+    plain = {"main": target("main", "https://example.com/start"),
+             "ordinary-frame": target("ordinary-frame", "https://ads.example.net/", "iframe")}
+    for action in (
+        {"action": "click", "index": 13, "params": {}},
+        {"action": "click", "index": 14, "params": {}},
+        {"action": "click", "params": {}, "coordinates": {"x": 10, "y": 10}},
+        {"action": "press_key", "params": {"key": "Enter"}},
+    ):
+        dom = _LivePageDomService("https://example.com/start", plain, {13: page_button, 14: ad_button})
+        result = await run(dom, action)
+        assert result.get("code") != "phone_provider_account_boundary", (action, result)
+        assert set(dom.touched) - _DRIVEN, (action, "an allowed action must reach the browser")
+
+
+async def test_phone_provider_boundary_sees_real_chrome_out_of_process_realm_frames() -> None:
+    """Review of #2060: in real Chromium, browser-use's target registry holds ``''`` for a
+    freshly attached out-of-process iframe. The boundary must read Chrome's own target list,
+    so a tiny phone-harness iframe the DOM snapshot omits still blocks acting on the page,
+    while an ordinary cross-site iframe does not. Hosts resolve to a local server only."""
+    import importlib.util
+    import socket
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    from pathlib import Path
+    from urllib.request import urlopen
+
+    from browser_tools.dom_service import DOMService
+    from domains.spawn_browser_agent_v3.service_actions import _live_phone_provider_account_refusal, execute_action
+    from playwright.async_api import async_playwright
+
+    class Pages(BaseHTTPRequestHandler):
+        def do_GET(self):
+            host = (self.headers.get("Host") or "").split(":")[0]
+            port = self.server.server_address[1]
+            frame = {"/realm": f"http://accounts.phone-harness.com:{port}/device",
+                     "/ordinary": f"http://ads.example.net:{port}/ad"}.get(self.path, "")
+            body = (f'<button style="width:200px;height:60px">Pay</button>'
+                    f'<iframe src="{frame}" width="2" height="2"></iframe>' if host == "shop.example.com"
+                    else "<button>Approve</button>")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.end_headers()
+            self.wfile.write(body.encode())
+
+        def log_message(self, *args):
+            return None
+
+    # The repo's canonical condition wait (scripts/lib/condition_wait.py; stdlib only).
+    spec = importlib.util.spec_from_file_location(
+        "condition_wait", Path(__file__).resolve().parents[3] / "scripts" / "lib" / "condition_wait.py")
+    condition_wait = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(condition_wait)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Pages)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    port = server.server_address[1]
+    with socket.socket() as reservation:
+        reservation.bind(("127.0.0.1", 0))
+        debug_port = reservation.getsockname()[1]
+    rules = "MAP accounts.phone-harness.com 127.0.0.1, MAP shop.example.com 127.0.0.1, MAP ads.example.net 127.0.0.1"
+    dom = None
+    try:
+        async with async_playwright() as playwright:
+            browser = await playwright.chromium.launch(headless=True, args=[
+                f"--remote-debugging-port={debug_port}", "--site-per-process", f"--host-resolver-rules={rules}"])
+            try:
+                page = await browser.new_page()
+                with urlopen(f"http://127.0.0.1:{debug_port}/json/version", timeout=10) as response:
+                    endpoint = json.load(response)["webSocketDebuggerUrl"]
+                dom = DOMService(cdp_url=endpoint)
+                await dom.connect()
+                oracle = await browser.new_browser_cdp_session()
+
+                async def load(path: str, frame_host: str) -> None:
+                    await page.goto(f"http://shop.example.com:{port}{path}")
+
+                    async def frame_attached() -> bool:  # Chrome itself reports the frame's out-of-process target
+                        targets = (await oracle.send("Target.getTargets"))["targetInfos"]
+                        return any(t["type"] == "iframe" and frame_host in t["url"] for t in targets)
+
+                    await condition_wait.async_wait_until(
+                        frame_attached, timeout=30.0, description=f"out-of-process {frame_host} frame")
+                    await dom.get_browser_state(include_screenshot=False)
+
+                await load("/realm", "accounts.phone-harness.com")
+                button = next(i for i, n in dom.selector_map.items() if str(n.node_name).upper() == "BUTTON")
+                result = await execute_action(dom, ActionHistory(), {"action": "click", "index": button, "params": {}},
+                                              current_url=f"http://shop.example.com:{port}/realm")
+                assert result.get("code") == "phone_provider_account_boundary", result
+                for action in ("press_key", "input_text", "scroll"):
+                    assert (await _live_phone_provider_account_refusal(dom, action) or {}).get("code") == (
+                        "phone_provider_account_boundary"), action
+                assert await _live_phone_provider_account_refusal(dom, "evaluate") is None
+
+                await load("/ordinary", "ads.example.net")
+                for action in ("click", "press_key", "input_text"):
+                    assert await _live_phone_provider_account_refusal(dom, action) is None, action
+            finally:
+                if dom is not None:
+                    await dom.disconnect()
+                await browser.close()
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+async def test_phone_provider_boundary_reads_urls_the_way_chrome_does() -> None:
+    """Post-merge review of PR #2028: the realm was decided with urlparse, which
+    disagrees with Chrome's WHATWG parser. Chrome treats a backslash as a path
+    slash, percent-decodes the host and applies IDNA mapping (fullwidth letters,
+    ideographic full stops, soft hyphens), so these all open phone-harness.com."""
+    from domains.spawn_browser_agent_v3.service_actions import execute_action, phone_provider_account_realm
+
+    chrome_realm_forms = (
+        "https://phone-harness.com\\@example.com/",
+        "https://phone-harness%2ecom/",
+        "https://accounts.phone-harness%2Ecom/device",
+        "phone-harness．com",
+        "https://accounts.phone-harness。com/device",
+        "https://ｐｈｏｎｅ－ｈａｒｎｅｓｓ.com/",
+        "https://phone-harn­ess.com/",
+        "https:phone-harness.com/device",
+        "https:\\\\accounts.phone-harness.com\\device",
+        "https://ACCOUNTS.PHONE-HARNESS.COM./device\n ",
+        "https://accounts.phone-\tharn\ness.com/device",
+        "https://user:pw@phone-harness.com:443/dashboard",
+        "blob:https://phone-harness.com/7d2b1b0e",
+        # UTS-46 (not IDNA2003) mappings and ignorables Chrome applies.
+        "https://\u209ahone-harness.com/",
+        "https://\U0001f13fhone-harness.com/",
+        "https://phone-harness.c\u1d52m/",
+        "https://phone\U000e0100-harness.com/",
+        "https://phone\U0001bca0-harness.com/",
+        "https://phone\u2064-harness.com/",
+    )
+    for url in chrome_realm_forms:
+        # Scheme-less targets are opened as https:// by goto/open_new_tab.
+        assert phone_provider_account_realm(url if ":" in url else f"https://{url}") == "phone-harness.com", url
+        for nav in ("goto", "open_new_tab"):
+            dom = _UntouchableDomService()
+            history = SimpleNamespace(record_action=AsyncMock(), last_action_step=lambda: None)
+            result = await execute_action(
+                dom, history, {"action": nav, "params": {"url": url}}, current_url="https://www.google.com/",
+            )
+            assert result.get("code") == "phone_provider_account_boundary", (nav, url, result)
+            assert dom.touched == [], (nav, url, dom.touched)
+
+    ordinary_forms = (
+        "https://phone-harness.com@example.com/",
+        "https://example.com/\\phone-harness.com",
+        "https://example.com/?next=https://phone-harness.com/",
+        "https://phone-harness.com.example.org/",
+        "https://notphone-harness.com/",
+        "https://phone-harness%2ecom.example.org/",
+        "about:blank",
+        "data:text/html,phone-harness.com",
+    )
+    for url in ordinary_forms:
+        assert phone_provider_account_realm(url) == "", url
+    assert phone_provider_account_realm("") == ""
+
+    # Ground truth: Chromium's own URL parser agrees on every form above.
+    from domains.spawn_browser_agent_v3.service_actions import _normalize_goto_url
+    from playwright.async_api import async_playwright
+
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch(headless=True)
+        try:
+            page = await browser.new_page()
+            hosts = await page.evaluate(
+                """urls => urls.map(u => { try { const p = new URL(u);
+                    return p.protocol === 'blob:' ? new URL(p.pathname).hostname : p.hostname; }
+                    catch (e) { return ''; } })""",
+                [_normalize_goto_url(url) for url in (*chrome_realm_forms, *ordinary_forms)],
+            )
+        finally:
+            await browser.close()
+    hosts = [host.rstrip(".") for host in hosts]
+    for url, host in zip(chrome_realm_forms, hosts):
+        assert host == "phone-harness.com" or host.endswith(".phone-harness.com"), (url, host)
+    for url, host in zip(ordinary_forms, hosts[len(chrome_realm_forms):]):
+        assert host != "phone-harness.com" and not host.endswith(".phone-harness.com"), (url, host)
