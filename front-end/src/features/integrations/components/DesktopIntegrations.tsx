@@ -18,6 +18,8 @@
  *     /integrations/:name --> full list refetch (the delta poll cannot see
  *     deletes) | error → alert
  *   Gmail / Plaid / compute chips keep their existing disconnect / reconnect flows.
+ *   Gmail addresses and iMessage carry their team-sharing caption beside the chip
+ *     (useAccountShares → AccountTeamShare); see TeamSharing for its states.
  *
  * System context:
  *   Integrations (flag) → DesktopIntegrations
@@ -27,6 +29,7 @@
  *   Connect / "+ Add account" call the same hooks/actions the stock sections use.
  */
 
+import { useAccountShares } from '@/hooks/useTeams';
 import { integrationMatchesSearch } from '../hooks/integrationSearch';
 import { Fragment, useMemo, type ReactNode } from 'react';
 
@@ -84,10 +87,12 @@ export default function DesktopIntegrations(props: DesktopIntegrationsProps) {
     () => mergeAccountsByProvider(data.connectedIntegrations, progress.accountsByProvider),
     [data.connectedIntegrations, progress.accountsByProvider],
   );
+  const { shareTarget } = useAccountShares();
   const removalPort = { request: removal.request, removingName: removal.removingName };
   const sections = desktopSectionViews(
     { ...props, data: { ...data, connectedIntegrations: integrations } },
     removalPort,
+    shareTarget,
   );
   const anySyncing = sections.some(({ rows }) => rows.some(rowIsSyncing));
   useSyncRefresh(anySyncing, DESKTOP_SYNC_REFRESH_MS, progress.poll);
