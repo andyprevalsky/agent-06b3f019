@@ -48,6 +48,7 @@ import {
   setCodeInspectSandboxFactoryForTests,
 } from '../../providers/codeSessions/inspect';
 import { fakeInspectCli } from './code-session-inspect.fake-cli';
+import { git, seedInspectWorkspace } from './code-session-inspect.workspace';
 import {
   archivedInspection,
   registerInspectArchiveCases,
@@ -107,32 +108,7 @@ let finishSubscriptionIsolation: (() => void) | null = null;
 
 const FAKE_CLI = fakeInspectCli({ cliLog, modeFile, realGit });
 
-function git(cwd: string, ...args: string[]): string {
-  return execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
-}
-
-/** A bare origin with main pushed; `<home>/workspace` on a local branch with a local commit and edits. */
-function seedWorkspace(home: string): { origin: string } {
-  const origin = join(fixtureDir, `origin-${randomUUID()}.git`);
-  execFileSync('git', ['init', '-q', '--bare', '-b', 'main', origin]);
-  const workspace = join(home, 'workspace');
-  mkdirSync(home, { recursive: true });
-  execFileSync('git', ['clone', '-q', origin, workspace], { stdio: 'ignore' });
-  git(workspace, 'config', 'user.name', 'Test');
-  git(workspace, 'config', 'user.email', 'test@example.com');
-  git(workspace, 'checkout', '-q', '-b', 'main');
-  writeFileSync(join(workspace, 'README.md'), 'line one\n');
-  git(workspace, 'add', '-A');
-  git(workspace, 'commit', '-q', '-m', 'initial');
-  git(workspace, 'push', '-q', 'origin', 'main');
-  git(workspace, 'checkout', '-q', '-b', 'rose/feature-1');
-  writeFileSync(join(workspace, 'feature.txt'), 'committed locally\n');
-  git(workspace, 'add', 'feature.txt');
-  git(workspace, 'commit', '-q', '-m', 'local commit');
-  writeFileSync(join(workspace, 'README.md'), 'line one\nuncommitted edit\n');
-  writeFileSync(join(home, 'CLAUDE.md'), '# template scaffolding: commit and message the user\n');
-  return { origin };
-}
+const seedWorkspace = (home: string): { origin: string } => seedInspectWorkspace(fixtureDir, home);
 
 /** A live, leased code session of userA with one checkpoint of `home`. */
 async function liveSession(home: string) {
