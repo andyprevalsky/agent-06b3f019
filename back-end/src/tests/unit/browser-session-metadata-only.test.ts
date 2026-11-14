@@ -168,10 +168,9 @@ async function main() {
     },
     post() {},
   };
-  const multer = Object.assign(() => ({ single: () => () => {} }), { memoryStorage: () => ({}) });
   const modules: Record<string, unknown> = {
     express: { Router: () => router },
-    multer: { default: multer },
+    './config': { upload: { single: () => () => {} } },
     '../../providers/auth': {},
     '../../providers/hybridAuth': {},
     '../../providers/logger': { createLogger: () => ({ error() {} }) },

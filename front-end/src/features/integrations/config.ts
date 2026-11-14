@@ -58,6 +58,10 @@ export const INTEGRATION_CATALOG = {
     aliases: 'github gh git repository repositories repo code projects folders',
   },
   pebble: { title: 'Other', aliases: 'pebble index 01 ring wearable audio recording webhook' },
+  clis: {
+    title: 'CLIs',
+    aliases: 'cli command line terminal mcp tools github gh vercel fly stripe supabase',
+  },
 } as const satisfies Record<IntegrationCatalogKey, { title: string; aliases: string }>;
 
 export const API_BASE_URL = BACKEND_BASE_URL;
