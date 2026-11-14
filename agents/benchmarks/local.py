@@ -435,6 +435,8 @@ class LocalBenchmarkOwner:
                 "version": 1,
                 "run_id": self.stack.run_id,
                 "state": state,
+                "controller_pid": os.getpid(),
+                "controller_start": _own_process_start_ticks(),
                 "pid": self.process.pid if self.process else None,
                 "native_identity": self.native_identity,
                 "token": self.token,

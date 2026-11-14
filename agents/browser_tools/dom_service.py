@@ -2541,6 +2541,23 @@ class DOMService:
         """Return private browser identity for navigation/auth mechanics only."""
         return self._runtime_current_url or fallback
 
+    async def live_frame_targets(self) -> Dict[str, Dict[str, str]]:
+        """Chrome's own page/iframe targets, ``{target_id: {"type", "url"}}``.
+
+        Asked of the browser process (no renderer round trip). browser-use's
+        registry is not used: a newly attached out-of-process iframe's attach
+        event carries ``url ''`` and can overwrite the URL targetInfoChanged
+        already stored, so it holds ``''`` until that frame navigates again.
+        """
+        if not self._session:
+            raise RuntimeError("Not connected. Call connect() first.")
+        result = await asyncio.wait_for(self._session.cdp_client.send.Target.getTargets(), timeout=5.0)
+        return {
+            str(info.get("targetId")): {"type": str(info.get("type") or ""), "url": str(info.get("url") or "")}
+            for info in (result or {}).get("targetInfos", [])
+            if isinstance(info, dict)
+        }
+
     def get_parked_page_identity(self) -> Dict[str, Any]:
         """One event-loop snapshot of the native selected target, not page text."""
         session = self._session

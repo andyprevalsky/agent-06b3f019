@@ -355,6 +355,59 @@ stack_owner_process_gone() {
     return 0
 }
 
+# A failed benchmark explicitly transfers this exact stack to recovery authority.
+# That journal outlives the controller. Neither a stale run record nor an ordinary
+# orphan grants retention; bind the controller incarnation and this stack token.
+stack_has_retained_recovery_authority() {
+    [ "$BENCHMARK_ISOLATED_RUN" = true ] || return 1
+    [ -n "${RUN_STACK_CLEANUP_TOKEN:-}" ] || return 1
+    python3 - "$RUN_CONTEXT_DIR" "${BENCHMARK_RUN_ID:-}" "$$" \
+        "$RUN_STACK_CLEANUP_TOKEN" "$RUN_SH_OWNER_PID" "${RUN_SH_OWNER_START:-}" <<'PYRETAIN'
+import json
+from pathlib import Path
+import re
+import sys
+
+def unique(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError('duplicate owner field')
+        result[key] = value
+    return result
+
+def record(path):
+    if path.is_symlink() or not path.is_file() or path.stat().st_size > 65536:
+        raise ValueError('unsafe recovery owner')
+    return json.loads(path.read_text(), object_pairs_hook=unique)
+
+try:
+    directory, run, stack_pid, stack_token, controller, start = sys.argv[1:]
+    context = Path(directory)
+    if context.resolve() != context:
+        raise ValueError('noncanonical recovery context')
+    owner = record(context / 'local-benchmark-owner.json')
+    stack = record(context / 'local-stack-owner.json')
+    token = owner.get('token', '')
+    valid = (run and owner.get('version') == stack.get('version') == 1
+             and owner.get('run_id') == stack.get('run_id') == run
+             and owner.get('state') == 'failed_retained'
+             and type(owner.get('controller_pid')) is int
+             and owner['controller_pid'] == int(controller) > 1
+             and bool(start) and owner.get('controller_start') == start
+             and type(stack.get('pid')) is int and stack['pid'] == int(stack_pid)
+             and stack.get('token') == stack_token
+             and isinstance(token, str) and re.fullmatch(r'[A-Za-z0-9_-]+', token)
+             and owner.get('receipt') == str(context / ('benchmark-cleanup-' + token + '.status')))
+    # The producer records failed_retained even when a receipt is missing or
+    # malformed. Its explicit, identity-bound decision is the recovery authority;
+    # do not reinterpret missing cleanup evidence as permission to destroy it.
+    sys.exit(0 if valid else 1)
+except (OSError, ValueError, TypeError, KeyError):
+    sys.exit(1)
+PYRETAIN
+}
+
 # Runs from the moment the service cleanup trap exists (service start, builds,
 # tunnels and steady state): TERM this script through its normal teardown once
 # the owner is gone. Bootstrap before that point is checked once at install.
@@ -364,7 +417,7 @@ start_stack_owner_watch() {
     (
         trap - EXIT HUP INT TERM
         while kill -0 "$stack_pid" 2>/dev/null; do
-            if stack_owner_process_gone; then
+            if stack_owner_process_gone && ! stack_has_retained_recovery_authority; then
                 echo ""
                 echo "⚠️  Stack owner PID $RUN_SH_OWNER_PID exited without stopping this stack — shutting down all services."
                 kill -TERM "$stack_pid" 2>/dev/null

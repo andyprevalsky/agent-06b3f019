@@ -19,3 +19,9 @@ export function workDirForGithubRepo(githubRepoUrl?: string): string {
     return '/home/user';
   }
 }
+
+/**
+ * The sandbox ws-server runs in the background with no command timeout
+ * (the 60 s default killed the process). Callers still set user, cwd and HOME.
+ */
+export const WS_SERVER_BACKGROUND = { background: true, timeoutMs: 0 } as const;
