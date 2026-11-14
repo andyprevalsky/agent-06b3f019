@@ -2,7 +2,7 @@
 FROM ubuntu:22.04
 
 # Opus 5.5 requires CLI >= 2.1.280; pin every template size reproducibly.
-ARG CLAUDE_CODE_VERSION=2.1.305
+ARG CLAUDE_CODE_VERSION=2.1.311
 ARG NODE_VERSION=22.23.4
 
 # gh (GitHub CLI) comes from GitHub's own signed apt repository so code agents can run
