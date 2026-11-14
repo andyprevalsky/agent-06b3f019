@@ -501,7 +501,7 @@ const treasuryUnit = 'treasury-rails';
 void quarantine(
   {
     since: '2026-11-13',
-    repair: 'https://boxes.dev/thread/thr_7ef29bd5e93d464eab3c02da1f9beb66',
+    repair: 'https://boxes.dev/thread/ph75k13xzhes1bcm32q38mqq3n8j6pmj',
     error:
       'treasury-rails blackbox FAILED: AgentCard Organization MCP rate limit exhausted for list_transfers after 5 attempts; upstream: AgentCard Organization MCP list_transfers is rate limited: list_transfers failed: Too many requests, please try again later',
     evidence: '.context/deploy-pipeline/rca/1dc793d7777246c785e8d24beb75499a.json',

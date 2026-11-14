@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Owning tests for sealed cohort tickets and constant-cost per-job allocation."""
 import fcntl
+import hashlib
+import copy
 import json
 import os
 from pathlib import Path
@@ -12,6 +14,8 @@ import time
 import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / 'scripts' / 'lib'))
+from condition_wait import wait_until
 MODULE = ROOT/'scripts/cloudbench-cleanup-tickets.py'
 MB = 1048576
 
@@ -142,6 +146,20 @@ def stop_owned(process):
 # All tests invoke the production CLI; there is no substitute allocator.
 
 
+SITE += r'''
+if os.environ.get('TICKET_DEAD_PIDS') or os.environ.get('TICKET_UNKNOWN_PIDS'):
+    native_kill=os.kill
+    dead=set(json.loads(os.environ.get('TICKET_DEAD_PIDS','[]')))
+    unknown=set(json.loads(os.environ.get('TICKET_UNKNOWN_PIDS','[]')))
+    def fixture_owner_presence(pid, signum):
+        if pid in dead or pid in unknown:
+            assert signum == 0, 'fixture never permits a signal to recorded owners'
+            if pid in unknown:raise PermissionError('fixture uncertain owner')
+            raise ProcessLookupError('fixture observed owner absent')
+        return native_kill(pid,signum)
+    os.kill=fixture_owner_presence
+'''
+
 class TicketFixture:
     def __init__(self, case, width):
         self.tmp = tempfile.TemporaryDirectory(prefix='cleanup-tickets-')
@@ -266,7 +284,11 @@ class CohortTickets(unittest.TestCase):
             state['inflight']['opaque-debit']=dict(group=key,job=groups[key]['members'][0],pid=record['pid'],birth=record['birth'],allocator_pid=record['pid'],allocator_birth=record['birth'],path=str(fixture.root/'unconfirmed-reserve'),identity=[1,1],amount=4096)
         path=legacy/'state.json';path.write_text(json.dumps(state,sort_keys=True));before=path.read_bytes()
         result=fixture.prepare(['--preferred',512,'--minimum',32,'--headroom',256])
-        self.assertEqual(path.read_bytes(),before,'capacity observation mutated historical ledger')
+        if mode in ('dead', 'legacy-date'):
+            self.assertEqual(json.loads(path.read_bytes()), {**state, 'groups': {}},
+                             'only positively retired standalone accounting may be removed')
+        else:
+            self.assertEqual(path.read_bytes(),before,'uncertain accounting must remain byte-identical')
         if mode in ('dead','legacy-date'):
             self.assert_ok(result)
             budget=json.loads((fixture.cohort/'cleanup-budget/budget.json').read_text())
@@ -399,6 +421,71 @@ class CohortTickets(unittest.TestCase):
         stdout,stderr=assignment.communicate(timeout=10)
         self.assertNotEqual(assignment.returncode,0,stdout+stderr)
 
+
+    def test_original_retired_legacy_rows_stop_consuming_future_headroom(self):
+        fixture=TicketFixture(self,8)
+        original=(ROOT/'scripts/tests/fixtures/cloudbench-cleanup-legacy-retired31.json').read_bytes()
+        self.assertEqual(hashlib.sha256(original).hexdigest(),
+                         '36cc00c2812fa6085003fac01f45be3fdc5ec53cdbe46db6de3812733fc22ed1')
+        state=json.loads(original)
+        self.assertEqual(len(state['groups']),31)
+        self.assertEqual(state['inflight'],{})
+        ledger=Path('/tmp')/('rose-cloudbench-cleanup-admission-'+str(os.getuid()))/str(fixture.device)
+        ledger.mkdir(parents=True,mode=0o700)
+        path=ledger/'state.json';path.write_bytes(original);path.chmod(0o600)
+        fixture.env['TICKET_DEAD_PIDS']=json.dumps([o['pid'] for g in state['groups'].values() for o in g['consumed'].values()])
+        (fixture.root/'free-kib').write_text(str(9593131008//1024))
+        # A canonical prepare waits for the existing global lock; it cannot prune outside it.
+        with (ledger/'admission.lock').open('w') as held:
+            fcntl.flock(held,fcntl.LOCK_EX)
+            command=[sys.executable,str(MODULE),'prepare',*fixture.base[2:],
+                     '--manifest',str(fixture.manifest),'--reserve-root',str(fixture.reserve_root),
+                     '--parent-pid',str(fixture.parent_pid),'--parent-start',fixture.parent_start,
+                     '--preferred','512','--minimum','32','--headroom','256']
+            process=subprocess.Popen(command,env=fixture.env,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+            fixture.children.append(process)
+            time.sleep(.1)
+            self.assertIsNone(process.poll())
+            self.assertEqual(path.read_bytes(),original)
+            fcntl.flock(held,fcntl.LOCK_UN)
+            stdout,stderr=process.communicate(timeout=10)
+        self.assertEqual(process.returncode,0,stdout+stderr)
+        updated=json.loads(path.read_bytes())
+        self.assertEqual(updated,{**state,'groups':{}})
+        self.assertEqual(json.loads(stdout)['job_count'],8)
+        self.assertEqual(json.loads(stdout)['amount'],512)
+        self.assertTrue((fixture.cohort/'cleanup-budget/ready.json').is_file())
+        self.assertEqual(list(fixture.reserve_root.iterdir()),[], 'metadata retirement must not allocate or delete reserve files')
+
+    def test_legacy_retirement_preserves_live_unknown_parent_and_debited_rows(self):
+        original=json.loads((ROOT/'scripts/tests/fixtures/cloudbench-cleanup-legacy-retired31.json').read_bytes())
+        identifier,template=next(iter(original['groups'].items()))
+        member=template['members'][0]
+        for kind in ('live','reused-pid','unknown','parent','unconsumed','debited','malformed-birth'):
+            with self.subTest(kind=kind):
+                fixture=TicketFixture(self,1)
+                group=copy.deepcopy(template);inflight={}
+                if kind in ('live','reused-pid'):
+                    group['consumed'][member]={'pid':os.getpid(),'birth':birth(os.getpid()) if kind=='live' else 'proc-start:00000000-0000-0000-0000-000000000000:1'}
+                elif kind=='unknown':fixture.env['TICKET_UNKNOWN_PIDS']=json.dumps([group['consumed'][member]['pid']])
+                else:fixture.env['TICKET_DEAD_PIDS']=json.dumps([group['consumed'][member]['pid']])
+                if kind=='parent':
+                    group['directory']=str(fixture.cohort);group['parent_lock_identity']=[1,2]
+                if kind=='unconsumed':group['consumed']={}
+                if kind=='malformed-birth':group['consumed'][member]['birth']=''
+                if kind=='debited':
+                    owner=group['consumed'][member]
+                    inflight={'a'*64:dict(group=identifier,job=member,pid=owner['pid'],birth=owner['birth'],allocator_pid=owner['pid'],allocator_birth=owner['birth'],path=str(fixture.reserve_root/'pending'),identity=[1,2],amount=512)}
+                state={'version':2,'groups':{identifier:group},'inflight':inflight,'failures':{'prior':{'preserved':True}}}
+                ledger=Path('/tmp')/('rose-cloudbench-cleanup-admission-'+str(os.getuid()))/str(fixture.device)
+                ledger.mkdir(parents=True,mode=0o700)
+                path=ledger/'state.json';path.write_text(json.dumps(state));path.chmod(0o600);before=path.read_bytes()
+                result = fixture.prepare()
+                if kind == 'malformed-birth':
+                    self.assertNotEqual(result.returncode, 0, 'malformed ownership cannot authorize admission')
+                else:
+                    self.assert_ok(result)
+                self.assertEqual(path.read_bytes(),before)
 
     def test_cross_cohort_budget_is_debited_once_including_nested_floor(self):
         fixture=TicketFixture(self,3)
@@ -547,10 +634,8 @@ sys.stdin.read()
         unrelated=fixture.owner();self.assert_ok(fixture.assign(1,unrelated))
         process=subprocess.Popen([sys.executable,str(canary),'--lock',str(lock),str(MODULE),str(fixture.cohort),str(fixture.reserve_root/'nested.reserve'),str(result_path)],env=fixture.env,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,start_new_session=True)
         fixture.owners.append(process)
-        end=time.monotonic()+5
-        while not result_path.exists() and time.monotonic()<end:
-            if process.poll()is not None:break
-            time.sleep(.01)
+        wait_until(lambda: result_path.exists() or process.poll() is not None,
+                   timeout=5, description="canonical canary results or early fixture exit")
         self.assertTrue(result_path.exists(),'actual canonical canary fixture failed to join its bounded CLI children')
         results=json.loads(result_path.read_bytes())
         self.assertNotEqual(results[0]['code'],0,results)

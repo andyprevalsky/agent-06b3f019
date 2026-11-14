@@ -204,6 +204,18 @@ BROWSER_SUPERVISOR_MAX_RECOVERIES = int(os.getenv("BROWSER_SUPERVISOR_MAX_RECOVE
 # provider releases it at its absolute lifetime even with CDP attached. Mirrors
 # back-end/src/providers/steel/sessionLifetime.ts BROWSER_SESSION_MIN_REMAINING_MS.
 BROWSER_SESSION_MIN_REMAINING_SECONDS = 420
+# The activity's own StartToClose is the same kind of hard deadline: a task that
+# is still stepping when it lands is killed mid-step with no result, and its
+# teardown races the next spawn. Checkpoint at a step boundary while one more
+# supervised step plus teardown still fits, and the manager restarts the same
+# task (same step count, so MAX_ITERATIONS still bounds it). Budgets shorter than
+# two margins (the 3m Fast Mode demo ceiling) stay hard ceilings.
+BROWSER_ACTIVITY_DEADLINE = "browser_activity_deadline"
+# After a StartToClose timeout the worker learns of it on its next heartbeat and
+# then joins teardown (recording finalize + disconnect) before it signals the
+# exact cleanup receipt. Wait that long for the receipt before refusing a
+# successor; without the receipt the fence still holds.
+BROWSER_CLEANUP_RECEIPT_WAIT_SECONDS = 300
 BROWSER_WARMUP_ACTION_TIMEOUT_SECONDS = float(os.getenv("BROWSER_WARMUP_ACTION_TIMEOUT_SECONDS", "5"))
 
 # Soft/optional get_browser_state budget (post-verifier reject screenshot, etc.).

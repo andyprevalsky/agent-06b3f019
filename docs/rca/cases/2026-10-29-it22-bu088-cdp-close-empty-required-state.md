@@ -1,0 +1,364 @@
+---
+id: 2026-10-29-it22-bu088-cdp-close-empty-required-state
+date: 2026-10-29
+title: BU088 loses required browser state after CDP close and failed reconnects
+surface: agents
+component: browser-state-lifecycle
+classification: unresolved
+problem_class: observability-trace-capture-gap
+first_bad_boundary: Page-target CDP waits precede an abnormal upstream socket close; failed reconnects leave required browser-state handlers without a result
+symptoms:
+  - "Provider closed the CDP socket"
+  - "Reconnection attempt 3 failed: TimeoutError"
+  - "No valid focus, skipping BrowserStateRequestEvent"
+  - "Expected at least one handler to return a non-None result"
+tags:
+  - polar
+  - it22
+  - bu088
+  - cdp
+  - lifecycle
+sources:
+  - commit 573847c1ea6ffbc28405d3ec29e39d8f86a5c2e8
+  - agent a9508a9c-ff15-406b-b9e3-0e6b8fd62a5e
+  - plan:.context/r88/proof.json
+repro: none-recorded
+status: open
+---
+
+## Problem
+
+It22 BU088r1/r001-j0008 asks which pill a younger deceased person took, using
+two deaths, a coroner, dates, ages and distance as identifying constraints.
+Original source573847, patch none, ends nativeFAILED1303.8s/progress1 and
+canonicalFAILED/infraFALSE. The failure is the native-status gate, not a
+recorded semantic judge decision. It is not the earlier BU088100-step pause.
+
+## Diagnosis
+
+All seven original normal files independently match manifest
+6c9c536a1ceb00d9a08e1da158b7ef92ffc6b03893366cdd6b8621d61e45d070.
+Archive2cadaa6948df9fd6419d2dadda489aa4a07a5988304168658622815c84d37480
+and runad1e4735d546f6128204c24f31fab3395fca49a96861fb270adc3406aee2c501
+bind this chronology. Supplemental driver/provenance/lifecycle remain distinct
+from the normal runtime manifest.
+
+The browser visits a MyLondon article. Before the final failure, original
+worker30265 reports page-target05ECF87CA829 sessions silent77s with pending
+Network.getResponseBody calls, while another session replied0.1s earlier.
+Some page sessions subsequently answer again (30288 onward). Later33015 again
+reports page-session silence while another session replied0.0s earlier.
+These observations distinguish a target/session stall from complete transport
+silence; they do not identify why the renderer or request handling stalled.
+
+At23:29:10.892351Z, worker33609 records the upstream CDP socket closing with
+code1006 and empty reason. The message-handler exit follows. The mux source
+records close_code/close_reason after its upstream reader ends and fans the
+closure out to clients; its log label alone does not prove the external vendor
+initiated the loss. Reconnect attempts1/2/3 fail TimeoutError at
+23:29:26.945008Z,43.582627Z and23:30:01.660091Z. Background target attachment
+also reports Root CDP client required. DownloadsWatchdog reports no valid focus.
+
+Eight browser_url_error recoveries run from23:30:33.669126Z through
+46.702016Z, all actions[] and URLabout:blank. At51.744673Z the unchanged shared
+recovery budget exhausts. Original fataltrace at34663 is handler10304 ->
+_observe_step_page3241 -> DOMService2552 -> BrowserUse get_browser_state_summary
+-> event_result(raise_if_none=True, raise_if_any=True). Neither registered
+DownloadsWatchdog nor DOMWatchdog returns a required state. The ValueError
+propagates through the browser activity and root manager; action_count20 and
+last actionread_browser_state are retained. Aggregate usage counters do not
+prove that no browser work occurred.
+
+The prior R49 case, 2026-10-29-it14-bu064-cdp-disconnect-empty-state, and the
+CDP latency evidence-gap case were read after this trace. R49's backend
+follow-up established a late provider-replacement/delete cause. This original
+backend log contains no recover-challenge, BrowserChallengeRecovery promotion,
+or DELETE-v1-session event establishing that same cause before the close.
+Therefore this is a related downstream symptom, not a proven recurrence of
+R49's fixed request-cancellation defect. No raw replacement response, exact
+close initiator, or safe replacement-session binding is established here.
+
+## Solution
+
+OPEN; no runtime candidate. A fabricated empty browser state, silently replaced
+session, higher timeout/retry budget, or inferred provider failure would not
+repair the demonstrated gap. The required-state exception is downstream of
+lost focus/connection. A causal repair requires the original close/reconnect
+ownership or protocol evidence; no new native query, model replay, browser
+operation or speculative regression test was performed.
+
+The normal final provider receipt remains positive: Tilion session
+sess_0351ec9ca5564c78938be070211f64bd DELETE204, root deleted and tree sealed.
+Original failure and producerinfraFALSE are unchanged. After independently
+verifying the socket loss and failed reconnects, the coordinator classified
+one operational transport failure out of20 originals (5%) and directed the
+owner to send one exact-process graceful stop. That operational stop decision
+is separate from the immutable producer flag and from still-unknown vendor
+versus local transport root cause. This worker performed no stop or native call.
+
+## Human feedback
+
+The coordinator required original fatal-stack inspection instead of assuming
+the previous100-step failure, and required target-level CDP silence to be
+separated from whole-socket loss. Transport code1006 and a log label alone do
+not identify the responsible provider or justify stopping healthy tasks.
+
+## Reusable lesson
+
+A missing browser-state result may follow a broken session lifecycle rather
+than an extraction or answer defect. Establish the earlier connection/target
+transition and replacement ownership before changing required-state semantics.
+
+## R93: It23 BU086r2 loses CDP before required state
+
+This is another observed close/reconnect/state-loss sequence, not proof of the
+same upstream cause. Executed sourcefc00b583e7df7b94d05fdb3442bddd23cd21be8b,
+patch none; root a5b50a02-f356-4929-aeae-7c23002c6076, r002-j0016,
+fleet20261030-002407-349164. The original asks for an actor identified through
+biographical and film clues. Archive
+ a9a0e8bed49f5aa5e994a912b91fa6d47ff5c4aba17abfa5903829da871e16bd,
+manifest012e1139cb28ceda5cc45805661f8055f77b0ed93ad761cdc0e61d99e43a5dd5,
+and run5ca86ad455dcfaa6b4e6afde36bdc59e90fcd891f547e9433626841121e828f3
+bind the original. All seven normal members were independently size/SHA checked.
+
+NativeFAILED1119.6s/progress1 precedes canonicalFAILED/producerinfraFALSE;
+no declared semantic evaluator result is recorded. Original worker15943 onward
+first records socket.send exceptions at00:46:47.834Z, then15956 records the
+upstream close at00:46:48.553211Z, code1006 and empty reason. The mux's
+`Provider closed` label describes its upstream reader ending; its source does
+not establish who initiated closure or whether provider, relay or local failure
+caused it. The worker remains alive and serves metrics during the sequence.
+
+At00:46:58.635320Z the CDP message handler exits; reconnect1 starts immediately.
+Some new upstream sockets attach, but this is not successful restoration of
+page/session state. Background target handlers subsequently report `Root CDP
+client required`; this symptom alone does not isolate the failing lifecycle
+operation. All three reconnect attempts end TimeoutError at00:47:34.157334Z,
+00:48:00.405871Z and00:48:17.443657Z. Worker17360 records exhaustion and17361
+records required BrowserStateRequest failure because CDP remains disconnected.
+Read-browser-state had already failed at00:47:30.531283Z; later no-result state
+events and actions[] recovery attempts cannot supply the missing page state.
+The final ValueError propagates through the browser activity and root manager.
+The later antibot classifier label is not independent evidence that antibot
+policy caused the socket loss.
+
+The bounded backend lookup found no BrowserChallengeRecovery/recover-challenge
+entry or earlier replacement/delete sequence proving R49's late-promotion
+cause. The same session's recorded DELETE204 occurs later at00:48:56.372Z,
+followed by another terminal DELETE204 at00:49:31.843Z. Final cleanup records
+root_deleted and tree_sealed with cleanup_failure null. Earlier cleanup metadata
+with unknown HTTP status does not supersede that terminal receipt.
+
+The full Solution/Human feedback of the R49 and R88 cases were read after the
+original trace. R88 supplies the matching downstream signature; R49 supplies a
+contrary known intentional-handoff cause that these originals do not establish.
+The exact upstream close cause and the particular reconnect phase timing out
+remain OPEN. No fabricated empty state, silent session replacement, additional
+retries, timeout increase or runtime candidate is justified by this packet.
+There was no model replay, provider query, capture or new regression test.
+
+The coordinator independently classified this original as one operational
+transport failure out of20 and directed the owner to issue one exact-process
+stop. That operational decision is separate from unchanged producerinfraFALSE,
+original native/canonical failure and any subsequent induced cancellations.
+This investigator performed no stop or recovery. Historical task improvement
+and vendor attribution remain unproven; tokens are UNMETERED.
+
+## R96: It24 BU088r1 original transport failure
+
+Executed8136eb6bb1d32d98553a70ca5f98278b590bee81/patch none;
+root b470e68c-a8d9-4c5d-9322-24589b705a31, r001-j0008,
+fleet20261030-013929-2182921. Archive SHA256
+939b10dd947355cfb45a381402eed0fc194f770e34fa94381c86a818661bc522
+(11905624 bytes), normal manifest
+c67dfb7807ef0a97b7e9eabc12bf21c9f4c6a3809e2aab2a9fabf955e148038d:
+all seven original members independently match size and hash. The unchanged
+question asks which pill the younger victim took, using two deaths, ages,
+dates, coroner and distance as identifying constraints.
+
+NativeFAILED919.8s/progress1 and canonicalFAILED/producerinfraFALSE are distinct
+from an answer rejection: no semantic evaluator result is recorded. The final
+root message reports native browser failure, not an accepted pill answer.
+The actual fatal stack is required observation: handler10304 ->
+_observe_step_page3241 -> DOMService2552 -> BrowserUse get_browser_state_summary
+-> event_result with raise_if_none and raise_if_any. Its missing handler result
+is downstream of an earlier connection failure.
+
+Original worker30989 onward records page-target95D6244B0C25 silence with pending
+Network.getResponseBody calls on a Yorkshire Evening Post article. At
+01:58:03.133345Z worker31050 records snapshot, dom_tree and device_pixel_ratio
+CDP request timeout. Other CDP sessions still reply during that earlier phase;
+this does not establish whole-transport loss then or identify the cause of
+the later close. No classifier invocation in that interval establishes an
+R84 attachment-timeout regression.
+
+Worker38910 records upstream code1006/empty reason at02:00:55.858581Z.
+Reconnects1/2/3 fail TimeoutError at02:01:21.850079Z,
+02:01:39.288543Z and02:01:56.297223Z. Worker39495 records all three failed;
+39498 records required-state CDP still disconnected. Eight subsequent recovery
+attempts have actions[]/about:blank. Fatal no-result state acquisition follows
+at02:02:02.415105Z. A mux log label saying provider closed is not proof of a
+vendor-initiated close or the particular failed reconnect phase.
+
+Unlike R49's captured late promotion, this original backend's earlier
+recover-challenge request ends503 at01:52:37.274Z after eight unsuccessful
+candidate probes. No promotion is recorded. The same original Tilion session
+sess_b28038a9c17449cf8011b21ba55727af is deleted204 only at02:02:04.263Z,
+after the fatal observation, and again during terminal cleanup. Final cleanup
+records DELETE204/root_deleted/tree_sealed and cleanup_failure null.
+
+Two archive searches used the exact non-None-handler/CDP error and the
+socket-close/reconnect/required-state behavior. The full R88/R93 and R49 cases
+were read: the downstream signature is related, but the original close cause
+and failed reconnect subphase remain OPEN. No fabricated empty state, session
+replacement, timeout/cap change, model replay or speculative regression test
+was introduced. Positive operational transport evidence was sent to the
+coordinator separately from immutable producerinfraFALSE; this investigator
+performed no stop or recovery. No original task grade or outcome changed.
+
+### R109: It26 BU097r1 upstream closure followed by failed reconnect (2026-10-30)
+
+This is another observation of the **unrecovered CDP transport → unavailable
+required browser state** boundary, not proof that the initiating cause matches
+any earlier incident in this case. The original root is
+`263284f4-9b1e-4f31-8734-1d6e51e66f5b`, job `r001-j0007`, task
+`polar-bu-097`, executed source
+`7e557a39083db505203e9e9bdf697e6c1a3f5a98` with no workspace patch.
+The original producer records **FAILED, 564.1 seconds, progress 1, no judge
+result, and infrastructure failure FALSE**. These original fields remain
+unchanged. The parent separately treated the positively observed transport loss
+as an operational infrastructure incident under the one-of-twenty stop rule;
+that decision is not a rewritten benchmark result.
+
+The sealed original archive has SHA256
+`2f1c3708dc9abd8df2dce8bb92ea218ba006c7f93a29c42b5c14d40f80953ab7`.
+All 16 supplied custody members were independently hash-checked, including the
+seven normal-runtime files. Worker log SHA256 is
+`caf6d96f11d399fe4a24b2ed21c65c4813691fea68fad24c0f9fabb5672fe2eb`;
+normal `run.json` SHA256 is
+`7842dc851a4fd7d563084ba653b3e21e7ae68f21b0d52b046143daaaba96387e`.
+References below are original worker-log line numbers; timestamps are UTC:
+
+| Line | Time | Recorded boundary |
+| --- | --- | --- |
+| 11640 | 05:36:51.547634 | CdpMux reports the upstream CDP socket closed, code `1000`, empty reason. |
+| 11723 / 11728 | 05:36:52.825888 / 52.984104 | `SwitchTabEvent` handler exceeds its own 10-second timeout; Rose surfaces `BrowserActionRaisedTimeout`. |
+| 11729 | 05:36:53.060304 | BrowserUse's downstream CDP message handler exits. |
+| 11735 / 11742 / 11752 | 05:36:53.873286 / 58.427305 / 05:37:01.306924 | All three native reconnect attempts fail with `ConnectionError: WebSocket connection closed`. |
+| 11753 | 05:37:01.307340 | Native reconnect exhaustion is recorded. |
+| 11825, 11839–11882 | 05:37:12.984059–22.429991 | Eight generic supervisor recovery records contain empty action lists; none proves restored transport. |
+| 11886 / 11887 | 05:37:22.988875 / 23.061529 | Recovery budget exhausts; required `BrowserStateRequestEvent` has no non-None handler result and the activity fails. |
+
+There is no successful reconnect recorded between upstream closure and the
+fatal state request. This is **not** the 330-second outer action-cap boundary:
+the action raised its own event-handler timeout. The backend's browser-session close/pause request
+at 05:37:23.384 and exact-session DELETE at 05:38:17.181 are later than the
+worker's upstream-close and fatal-state events; they do not explain the first
+closure. Code `1000` and an empty reason identify neither the initiator's motive
+nor a vendor defect. No wire-stage or provider-internal explanation is proved.
+
+Earlier telemetry is relevant but remains **measurement, not causal proof**:
+asyncio task count rose from 351 at 05:36:11.544931 (line 11122), to 1,831 at
+05:36:28.343504 (11152), 2,445 at 05:36:36.101334 (11252), and 3,800 at
+05:36:51.304622 (11608). Emulation-command no-reply errors accompanied the
+buildup. The log contains 3,721 HTTP-cache-store events. After the failed
+reconnect sequence, task count was 30 at 05:37:13.781828 (11830). These facts do
+not prove an event-task leak, renderer overload, an OOM, or that cache work caused
+the upstream closure. Worker logging and polling continued.
+
+The original user asked for the artist's birth year, constrained by scholarship
+and college history, a dated band/guitarist article, a 1990s movie, and marriage
+age/date facts. The actual persisted schema correctly represented that answer:
+`birth_year`, required, nonnullable, type `int`, with presentation version 1,
+mode `value`, field `birth_year`, encoding `text`. There is no schema rejection
+in the failing path and `latest_structured_response_keys` was null at failure.
+Bing searches mentioning Rahman and Roots are not proof that all factual
+criteria were satisfied; the answer and whole-task correctness remain OPEN.
+
+An independent offline check used the installed compatible BrowserUse 0.13.11,
+Bubus 1.5.6 and cdp-use 1.4.5. It registered the real BrowserStateRequest handler
+wrapper, set the session to disconnected and no longer reconnecting, and
+requested a required event result. The wrapper skipped the handler body and
+Bubus raised the same non-None-result ValueError. Network was blocked. This
+establishes that the final message can be a consequence of exhausted transport
+recovery **without missing handler registration**; it does not reproduce the
+upstream close or prove a repair. Those local dependency bytes were not claimed
+to be independently hash-identical to the original guest's dependencies.
+
+Source inspection used a clean supplied agents archive plus all differing
+original-7e paths, checked against their SHA256 and Git blob IDs. The untouched
+path equality was supplied by the parent's Git comparison. Exact 7e
+`service_actions.py` requires a successful target ACK before recording a tab
+switch, `handler.py` distinguishes action-raised timeout from the outer cap,
+and `cdp_multiplexer.py` clears owned mappings and closes downstream clients when
+its upstream reader ends. No runtime patch, timeout increase, state fallback,
+new capture, or live/model replay was performed or justified.
+
+Reviewer correction: an initial filtered read missed worker line 11640 and
+briefly reported no upstream-close marker. The full structured scan found it;
+the reviewer immediately corrected the parent. The sequence above supersedes
+that interim absence claim. Do not preserve the mistaken claim as evidence.
+
+Private independent receipt, hashed event projection, and portable offline
+replay are retained with R109's supplied original custody. Historical FE/last
+LLM publication was not independently revalidated in this read-only intake.
+The case remains **OPEN**: identify the initiating transport failure from
+original evidence or a causal owning control before proposing a runtime fix.
+
+
+## R121: It28 BU093r2 loses required state after failed reconnects
+
+Original rootef59df44-86ed-42f0-99c4-9b514494d6d4, r002-j0013, executed
+source d0663f361a1118ce6776d1ab8aaa0987dcf252a5/patchnone. Archive
+b71abd0cad23a97564e3a4c222b559f838f0ba557595150c7bbe40d82501d362 and
+normal manifest5cc8eb89c8a0559dbfd1b3802cfd7165b4f65d9ac1a9157ba7cb6b7f08e58c16
+bind all seven independently verified original member lengths/hashes. The
+local diagnostic records nativeFAILED706.9s/progress1 and benchmarkFAILED;
+the parent-reported containing campaign row was later CANCELLED after the
+operational stop. Do not replace that unscored cancellation with task credit.
+Original producerinfraFALSE and cleanup_failureNone remain unchanged.
+
+The user asks for the textbook containing the earliest citation of a quote,
+using newspaper/date clues. Actual required nonnullable
+`earliest_citation_textbook_name:str` plus value/text presentation matches that
+request without inserting an answer. Schema payloads53195ef9/a286b127 and all
+available compressed application payloads were size/SHA checked. No recorded
+completion-verifier call or rejected answer precedes failure. Progress1 is
+terminal lifecycle progress, not a verifier score.
+
+The first observed connection loss is worker22112 at19:16:03.051681Z:
+upstream code1011, reason `keepalive ping timeout`. The message handler exits
+at22115. Exact mux code reads the upstream close code/reason and clears its
+mappings; its `Provider closed` label does not identify the initiator or vendor
+cause. Reconnect1/2 fail TimeoutError at19:16:18.373129Z and19:16:34.380474Z;
+reconnect3 fails ConnectionError at19:16:46.106137Z. Worker22375 reports all
+three failed. This is actual transport evidence upstream of the later
+required-handler error, not a deduction from that error's wording.
+
+Successful model responses continue during recovery, while native calls
+return no focused target. An open_new_tab result is marked FINISHED but the
+next read still lacks focus; screenshot also lacks a tab, and switch_tab says
+available tabs are empty. That status does not prove usable browser recovery.
+The final model call browser_use_step_23 requests wait(time_ms1500), payload
+7b17996477b93f2985a9fc50c63c7060d3e76736320fd456e57b312f6ca37125.
+It is recorded FINISHED. The following step requires browser state; the wait
+is not itself the failed operation.
+
+Exact fatal stack: handler10409 -> _observe_step_page3272 -> DOMService2552 ->
+BrowserUse get_browser_state_summary -> event_result(raise_if_none=True,
+raise_if_any=True). Eight generic browser_url_error recoveries from22417 to
+22460 do not restore state. At22464 the existing budget is exhausted;
+22465/19:16:55.084163Z raises the non-None required-handler ValueError.
+Manager22506/19:17:13.265498Z propagates ActivityError. No recover-challenge or
+promotion event was found in this original backend log, unlike R119's
+intentional provider replacement.
+
+Two searches used the literal non-None BrowserStateRequest error and the
+keepalive/no-focus/failed-reconnect behavior. R88/R93/R96/R109 and the
+passkey-missing-focus case are related downstream evidence, not proof of the
+same upstream cause. The optional passkey re-arm mitigation does not authorize
+fabricating required DOM state. Exact initiating transport failure and failed
+reconnect subphase remain OPEN; no handshake/protocol response in this packet
+settles provider, relay, host or local lifecycle responsibility. No source
+patch, timeout/retry increase, silent replacement, empty-state fallback,
+model/native call or original-outcome rewrite was made.

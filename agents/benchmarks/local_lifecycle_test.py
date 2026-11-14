@@ -220,6 +220,8 @@ def driver(folder, outcome="interrupted"):
         bootstrap=False,
         max_concurrency=1,
         checkpoint_no_start=False,
+        owned_recording_preparation_seconds=None,
+        owned_recording_preparation_price_limit_cents=None,
     )
     backend = None
     local.parse_args = lambda _: args

@@ -294,8 +294,9 @@ Wide runs (sharded controllers):
   expiring before the deadline) is refreshed first via the normal producer.
   Supported options: -k K, --timeout S (default: longest selected task; at most 7200), --ref <HEAD>,
   --e2e-timeout S. Every routed launch runs --check first. A --concurrency below
-  the copy count but above the bound is refused: omit it for one sharded run,
-  or pass at most 32 for a rolling campaign on one controller.
+  the copy count but above the bound runs the one batch as bounded sharded waves
+  of at most that many copies (every copy of a task stays in one wave); omit it
+  for one sharded run, or pass at most 32 for a rolling campaign on one controller.
   --check             Dry run: local checks plus read-only provider preflight,
                       reporting the warm snapshot reuse/refresh decision.
   Wide runs admit every task the ordinary fleet runs, SIM/DEMO included.
@@ -319,8 +320,8 @@ Startup reuse:
                       Requires boot launch; cannot prepare a generic pool.
   --snapshot-volumes Force restored donor volumes for a provisioning diagnostic.
   --timeout SECONDS  Explicit hard task cap (at most 7200; longer is refused); warns if
-                     below a selected task's effective timeout. Default covers
-                     the longest selected task.
+                     below a selected task's effective timeout. Default covers the
+                     longest selected task.
   --wait             Wait for the detached fleet and return its exit status.
 
 Monitoring:
@@ -410,10 +411,11 @@ while [ "$#" -gt 0 ]; do
         --sim-on|--ref|--dash-base|--timeout|--autoscale-max)
             [ "$#" -ge 2 ] || { echo "❌ $1 requires a value" >&2; exit 2; }
             if [ "$1" = --timeout ]; then
-                # Cloud task execution windows are capped at 2 hours (sharded runner MAX_TASK_TIMEOUT).
-                case "$2" in ''|*[!0-9]*) timeout_ok=0 ;; *) timeout_ok=$(( 10#$2 >= 1 && 10#$2 <= 7200 )) ;; esac
+                # Cloud task execution windows are capped at 2 hours (sharded runner MAX_TASK_TIMEOUT);
+                # the sharded operator also refuses windows below 60 seconds.
+                case "$2" in ''|*[!0-9]*) timeout_ok=0 ;; *) timeout_ok=$(( ${#2} <= 6 && 10#$2 > 0 && 10#$2 <= 7200 )) ;; esac
                 [ "$timeout_ok" -eq 1 ] || {
-                    echo "❌ --timeout $2 refused: cloud execution timeouts must be 1..7200 seconds (at most 2 hours)." >&2
+                    echo "❌ --timeout $2 refused: cloud execution timeouts must be 1..7200 seconds (2 hours max)." >&2
                     echo "   Ask the user to choose a lower execution timeout or to change the CLI setting" >&2
                     echo "   (MAX_TASK_TIMEOUT in scripts/cloudbench-original600-runner.py and this check in scripts/run-bench)." >&2
                     exit 2
@@ -611,12 +613,14 @@ print(c["copy_bound"](p["vcpus"],p["memory_mib"]))' "$ROOT_DIR/scripts/cloudbenc
         exit 2
     fi
 fi
-# The operator admits every copy at once behind one barrier; it has no rolling
-# admission width. A rolling window wider than one controller's bound is not a
-# supported shape on any route, so refuse it instead of silently handing it to
-# campaign controllers with a different batch shape and source transport.
-if [ -n "$SHARDED_ROUTE_REASON" ] && [ "$CONCURRENCY_EXPLICIT" -eq 1 ] && [ "$CONCURRENCY" -lt "$sharded_copies" ]; then
-    echo "❌ --concurrency $CONCURRENCY: $SHARDED_ROUTE_REASON, and the sharded operator admits all $sharded_copies copies behind one barrier. Supported: omit --concurrency (or pass $sharded_copies) for one sharded run, or --concurrency $SHARDED_BOUND or less for a rolling campaign on one controller" >&2
+# Each sharded operator run admits its copies at once behind one barrier. A
+# rolling window wider than one controller's bound is never silently handed to
+# campaign controllers with a different batch shape and source transport: it
+# stays on the sharded route as one batch of bounded waves (below). A window
+# that cannot hold one task's copies has no supported shape and is refused.
+if [ -n "$SHARDED_ROUTE_REASON" ] && [ "$CONCURRENCY_EXPLICIT" -eq 1 ] && [ "$CONCURRENCY" -lt "$sharded_copies" ] &&
+    [ "$CONCURRENCY" -lt "$RUNS" ]; then
+    echo "❌ --concurrency $CONCURRENCY cannot hold one task's $RUNS copies; bounded waves keep every copy of a task together. $SHARDED_ROUTE_REASON, and the sharded operator admits all copies of a wave behind one barrier. Supported: omit --concurrency (or pass $sharded_copies) for one sharded run, --concurrency between $RUNS and $sharded_copies for bounded waves, or --concurrency $SHARDED_BOUND or less for a rolling campaign on one controller" >&2
     exit 2
 fi
 # Auto routing keeps an explicitly requested ordinary-fleet option working:
@@ -662,6 +666,17 @@ if [ -n "$SHARDED_ROUTE_REASON" ]; then
     if [ "$RETRY_INFRA_EXPLICIT" -eq 1 ] && [ "$RETRY_INFRA" != 1 ]; then
         echo "❌ the sharded operator retries each infrastructure failure exactly once; omit --retry-infra or pass 1" >&2
         exit 2
+    fi
+    # An explicit --concurrency below the batch's copies runs the one batch as
+    # sequential task-aligned sharded waves of at most that many copies.
+    SHARDED_WAVES=0
+    if [ "$CONCURRENCY_EXPLICIT" -eq 1 ] && [ "$CONCURRENCY" -lt "$sharded_copies" ]; then
+        [ "$CONCURRENCY" -ge "$RUNS" ] || {
+            echo "❌ --concurrency $CONCURRENCY cannot hold one task's $RUNS copies; bounded waves keep every copy of a task together" >&2
+            exit 2
+        }
+        SHARDED_WAVES=1
+        echo "🌊 bounded sharded waves: $sharded_copies copies, at most $CONCURRENCY at once ($(( CONCURRENCY / RUNS )) tasks x $RUNS per wave); infra stop uses all $sharded_copies scheduled copies"
     fi
     SHARDED_TIMEOUT="$SELECTED_MAX_TIMEOUT"
     if [ -z "$EXPLICIT_TIMEOUT" ]; then
@@ -726,7 +741,7 @@ with open(sys.argv[1],"x") as f: json.dump(sys.argv[2:],f)' "$SHARDED_MANIFEST" 
     [ -x "$SHARDED_HUB_PY" ] || SHARDED_HUB_PY="$(command -v python3)"
     SHARDED_ARGS=(
         --source-ref "$SHARDED_HEAD" --task-ref "$SHARDED_HEAD"
-        --state-dir "$SHARDED_STATE_DIR" --tasks "$SHARDED_MANIFEST"
+        --state-dir "$SHARDED_STATE_DIR"
         --agents-env "$(realpath "$ROOT_DIR/agents/.env")" --backend-env "$(realpath "$ROOT_DIR/back-end/.env")"
         --hub-python "$SHARDED_HUB_PY" --repetitions "$RUNS"
         --goal "${RUN_BENCH_GOAL:-$SHARDED_LABEL}" --label "$SHARDED_LABEL"
@@ -743,6 +758,17 @@ with open(sys.argv[1],"x") as f: json.dump(sys.argv[2:],f)' "$SHARDED_MANIFEST" 
     fi
     SHARDED_OPERATOR=("${RUN_BENCH_SHARDED_OPERATOR_UNDER_TEST:-python3}" "$SHARDED_ROOT/scripts/run-original600-controller.py")
     echo "🧾 manifest: $SHARDED_MANIFEST (${#RESOLVED_TASKS[@]} tasks x $RUNS)"
+    if [ "$SHARDED_WAVES" -eq 1 ]; then
+        # One logical batch: the driver checks and runs each wave in order, carries the
+        # original scheduled denominator and confirmed infra forward, starts a wave only
+        # after the previous one is verified released, and writes the aggregate batch.json.
+        SHARDED_WAVE_ARGS=(--state-dir "$SHARDED_STATE_DIR" --tasks "$SHARDED_MANIFEST" --runs "$RUNS" --concurrency "$CONCURRENCY")
+        [ "$SHARDED_CHECK" -eq 0 ] || SHARDED_WAVE_ARGS+=(--check)
+        echo "═══ bounded sharded waves $([ "$SHARDED_CHECK" -eq 1 ] && echo '--check (every wave; no allocation)' || echo '--run (check then run each wave)') ═══"
+        exec "$PY" -u "$SHARDED_ROOT/scripts/run-bench-sharded-waves.py" "${SHARDED_WAVE_ARGS[@]}" \
+            -- "${SHARDED_OPERATOR[@]}" -- "${SHARDED_ARGS[@]}"
+    fi
+    SHARDED_ARGS+=(--tasks "$SHARDED_MANIFEST")
     echo "═══ sharded operator --check (local checks + read-only provider preflight) ═══"
     "${SHARDED_OPERATOR[@]}" "${SHARDED_ARGS[@]}" || {
         echo "❌ sharded operator check refused the run; nothing was launched" >&2

@@ -176,11 +176,40 @@ def test_recover_from_challenge_normalizes_auth_cookies_are_preserved_flag():
         assert result["params"]["auth_cookies_are_preserved"] is expected, (raw, result)
 
 
+def test_practice_content_and_access_control_share_a_scoped_policy():
+    """Task content stays actionable without allowing manual access-gate solving."""
+    scope = "never solve captchas unless explicitly asked by the user"
+    task = "Read the displayed text in the public practice exercise and enter it in the field."
+    requested_actions = [
+        "read_browser_state", "screenshot", "input_text", "press_key",
+        "recover_from_challenge", "request_user_assistance_for_authentication",
+    ]
+    for recovery_disabled in ("0", "1"):
+        with patch.dict(os.environ, {"BROWSER_DISABLE_RECOVER_FROM_CHALLENGE": recovery_disabled}):
+            messages = build_browser_use_messages(
+                task=task, browser_state={}, action_history=[],
+                available_actions=requested_actions, turn_messages=[],
+            )
+            assert messages[1] == {"role": "user", "content": task}
+            assert scope in messages[0]["content"]
+            assert "Do not drag sliders" not in messages[0]["content"]
+            assert "do not drag sliders" not in messages[0]["content"]
+            tools = {tool["name"]: tool for tool in build_browser_use_tools(requested_actions)}
+            assert {"input_text", "press_key", "screenshot"} <= tools.keys()
+            for name in ("screenshot", "request_user_assistance_for_authentication"):
+                assert scope in tools[name]["description"], name
+            if recovery_disabled == "0":
+                assert scope in tools["recover_from_challenge"]["description"]
+                assert "otherwise try to solve the widget yourself" not in tools["recover_from_challenge"]["description"]
+            else:
+                assert "recover_from_challenge" not in tools
+
+
 def test_recovery_prompt_describes_solver_cookie_and_parallel_config_stages():
     description = BROWSER_USE_TOOLS["recover_from_challenge"]["description"]
     assert "Relatively expensive recovery to forcefully open" in description
     assert "Do not use when an alternate path can complete the goal" in description
-    assert "Do not drag sliders" in description
+    assert "never solve captchas unless explicitly asked by the user" in description
     assert "automatic CAPTCHA solver" in description
     assert "known challenge cookies" in description
     assert "parallel cookie-group reductions" in description
@@ -214,7 +243,9 @@ def test_build_browser_use_system_prompt_uses_native_tools_not_action_list():
     assert "# Available Actions" not in prompt
     assert "- click:" not in prompt
     assert "- goto:" not in prompt
-    assert "call exactly one available browser action tool" in prompt
+    assert "Return one or more browser action tool calls to execute sequentially." in prompt
+    assert "Stop at first failure." in prompt
+    assert "observation_ref" in prompt
     assert "# Screenshot Tool" not in prompt
     assert "Use the `screenshot` action" not in prompt
     assert "do not open cancellation, return, edit, or modification flows" in prompt
@@ -289,7 +320,8 @@ def test_screenshot_tool_desc_calls_out_misleading_captcha_dom():
     desc = tools[0]["description"]
     assert "misleading shell" in desc
     assert "Bot or Not" in desc
-    assert "drag" in desc
+    assert "never solve captchas unless explicitly asked by the user" in desc
+    assert "Use a screenshot only if you need to confirm the challenge type." in desc
     assert "recover_from_challenge" not in desc
 
 
@@ -425,7 +457,7 @@ def test_build_browser_use_system_prompt_auth_priority_is_numbered():
     )
     assert "relatively expensive way to force-open a blocked page or service" in prompt
     assert "do not use it when an alternate path can complete the goal" in prompt
-    assert "Do not drag sliders" in prompt
+    assert "never solve captchas unless explicitly asked by the user" in prompt
     assert "# OTP Rules" not in prompt
     assert "Do not classify final credential failures yourself" not in prompt
 
@@ -495,8 +527,20 @@ def test_build_browser_use_tools_preserves_catalog_descriptions():
     click = tools[1]
     assert click["description"] == BROWSER_USE_TOOLS["click"]["description"]
     assert click["input_schema"]["properties"]["index"]["type"] == "integer"
-    assert "Element index" in click["input_schema"]["properties"]["index"]["description"]
-    assert click["input_schema"]["required"] == ["index"]
+    assert "Current observed DOM element index" in click["input_schema"]["properties"]["index"]["description"]
+    assert "observation_ref" in click["input_schema"]["properties"]
+    from browser_tools.schemas import ClickTool
+    from pydantic import ValidationError
+    assert ClickTool(tool="click", index=3).index == 3
+    reference = {"observation_id": "checkout", "target": "pay"}
+    assert ClickTool(tool="click", observation_ref=reference).observation_ref.target == "pay"
+    for invalid in ({}, {"index": 3, "observation_ref": reference}):
+        try:
+            ClickTool(tool="click", **invalid)
+        except ValidationError:
+            pass
+        else:
+            raise AssertionError("click must require exactly one index or bound observation reference")
 
     auth_help = tools[2]
     assert auth_help["description"] == BROWSER_USE_TOOLS["request_user_assistance_for_authentication"]["description"]
@@ -1883,7 +1927,7 @@ async def test_complete_browser_use_waterfall_only_path():
     set_mock_handler(handler)
     client = RoseClient(openrouter_key="ork-x")
 
-    with patch.dict(os.environ, {"ANTHROPIC_API_KEY": ""}):
+    with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "", "CEREBRAS_API_KEY": ""}):
         result = await client.complete_browser_use(
             task="click submit",
             browser_state=_browser_state(),
@@ -2427,16 +2471,17 @@ async def test_complete_browser_use_auth_tokens_are_ignored():
     set_mock_handler(handler)
     client = RoseClient(openrouter_key="ork-x")
 
-    result = await client.complete_browser_use(
-        task="click submit",
-        browser_state=_browser_state(),
-        action_history=[],
-        available_actions=["click"],
-        include_screenshot=False,
-        claude_auth=claude_auth_from_token("expired-token"),
-        gpt_auth=gpt_auth_from_token("expired-gpt", "acct"),
-        call_site="test-bu-auth-ignored",
-    )
+    with patch.dict(os.environ, {"CEREBRAS_API_KEY": ""}):
+        result = await client.complete_browser_use(
+            task="click submit",
+            browser_state=_browser_state(),
+            action_history=[],
+            available_actions=["click"],
+            include_screenshot=False,
+            claude_auth=claude_auth_from_token("expired-token"),
+            gpt_auth=gpt_auth_from_token("expired-gpt", "acct"),
+            call_site="test-bu-auth-ignored",
+        )
 
     assert result["mode"] == "waterfall"
     assert result["claude_token_error"] is None
@@ -2582,6 +2627,7 @@ async def run_all_tests():
     await r.record_async("advertised coordinate-only action remains admissible", test_advertised_coordinate_only_action_is_admitted)
     await r.record_async("completed_browser_output_validation_is_not_transport_or_completion", test_completed_browser_output_validation_is_not_transport_or_completion)
 
+    r.record("practice_content_and_access_control_scoped_policy", test_practice_content_and_access_control_share_a_scoped_policy)
     r.record("browser_use_pool_registered", test_browser_use_pool_registered)
 
     r.record("tool_descriptions_filters_and_params", test_generate_tool_descriptions_filters_and_includes_params)
@@ -2691,6 +2737,10 @@ async def run_all_tests():
         "normalize_provider_input_text_batch_mixed_indexes",
         test_normalize_provider_input_text_batch_mixed_indexes_keeps_first_action,
     )
+    from benchmarks.browser_action_batch_test import form_chain, observe_chain, full_activity_batch
+    await r.record_async("ordered native batch uses one model decision", form_chain)
+    await r.record_async("same-turn observed target binds before click", observe_chain)
+    await r.record_async("actual browser activity consumes ordered batch", full_activity_batch)
     r.record("normalize_request_auth_assistance", test_normalize_request_user_assistance)
     await r.record_async("native_autofill_actual_enabled_request", test_native_autofill_preference_reaches_actual_enabled_request)
     r.record("native_autofill_fixture_current_dto", test_native_autofill_control_fixture_matches_current_backend_dto)
@@ -2987,25 +3037,30 @@ def test_phone_off_matches_prephone_bytes():
     Re-pinned at 042d82196 for exactly one deliberate, mode-independent change:
     a05e1beb7 (Q3b, approved) added the shared browser_auth_contract line "Sign in or
     sign up only with identities listed in Auth Options. ..." to both modes. The tools
-    hashes are unchanged; no Phone text entered the phone-off prompt. Re-pin only for
+    hashes were unchanged at Q3b; no Phone text entered the phone-off prompt.
+    R2c snapshot c957b155 adds the independently grounded static-text/arithmetic
+    practice exception to both modes; these hashes include exactly that shared
+    policy change. Re-pin only for
     reviewed text that also reaches phone-on mode, and record the commit here.
     Re-pinned for the approved read_tool_output browser action (Polar item 16, approved
     by Andy 2026-10-26): only the tools hash changed in both modes, and excluding that
     one action reproduces the previous tools hash exactly; system/messages are unchanged.
-    Re-pinned for the webdecoy pointer contract (2026-11-06 RCA
-    browser-pointer-move-intent-had-no-tool): the hover action plus truthful
-    click/click_coordinates/drag/evaluate descriptions changed only the tools hash
-    in both modes; system/messages hashes are unchanged.
+    Merge reconciliation: branch 50169458861b1e9b5461d723da99fec348d8198e
+    and main 5807c0edf19ab7fe7fda9b059701426872e18d0c. Both original
+    builders reproduced their recorded hashes exactly before this combined pin.
+    Main's hover action and four pointer descriptions change only the tools hash;
+    branch CAPTCHA/batch/observation contracts keep system/messages unchanged.
+    Full deterministic payloads and parent diffs are retained in the sync packet.
     """
     import hashlib
     from browser_tools.schemas import AVAILABLE_ACTIONS
-    expected = {'0': ('6ffbcc0f7fcbe140cb3e16f21bed939c2c90e036cc3f90c61af1c0569c5ddfbc', 'e8d1ee04f73c9a08380b8e4573109ffc9ce1bf757b2120fc556ee975657bbf89', '4c0d0eb65703bdae2065193f937bf2035e919102dc5e4652916cf771a0f5527c'), '1': ('acde06b7d166b911ac003b267c35c45e9666377be0fe8c29bec9a6d9db88c47d', '5661e2684efeaf877a48c64a6f240cd0889e30517342fb0a4de5baa9823d12fa', '1dc1c6088a8ab2bb8539271e93ce1f43af4ac7ed543ce1fb624b2b4a01d3d44a')}
+    expected = {'0': ('f92e8a403224b2f0b96ab6a7438a1314e9a647ed8f02bf1f216dc8b1405f4942', 'e46e91fd54170ef1cc5cb00bef0ebbf4e4446447005d9287d6f0d0f4ad455b1d', '62626a38cbbc18d38081798bb33fc33ba33960d7b0fa8a30b75e55e9c62d5d9d'), '1': ('c228748d6aeea6ef51c1b2812cb8cae52bb3599f6f06f721aa3e4b2514d58c54', 'f304359dd340ba5945d2430237f884708698f7add337fda59ea220453e54fa78', 'b6680960025afe45387e9a390eadff21206ff23e3d3ded2227326958ac0b2835')}
     actions = [a for a in AVAILABLE_ACTIONS if a != "phone"]
     for flag, hashes in expected.items():
         with patch.dict(os.environ, {"BROWSER_DISABLE_RECOVER_FROM_CHALLENGE": flag}):
             values = [build_browser_use_tools(actions), build_browser_use_system_prompt(actions), build_browser_use_messages(task="Preserve original task", browser_state={"timestamp": "2026-10-01T00:00:00Z", "url": "https://example.test", "title": "Page", "dom_tree": "[1] button", "viewport": {"width": 800, "height": 600}}, action_history=[], available_actions=actions, dynamic_system_context="Original context", turn_messages=[])]
         actual = tuple(hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest() for value in values)
-        assert actual == hashes, "Phone-off provider tools/system/messages changed from canonical c28f801be+a05e1beb7"
+        assert actual == hashes, "Phone-off provider tools/system/messages changed from reviewed c28f801be+a05e1beb7+R2c"
 
 
 async def test_phone_off_actual_rose_request():
