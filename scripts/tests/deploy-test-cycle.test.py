@@ -9176,8 +9176,9 @@ class Cycle(unittest.TestCase):
         c.reconcile(state, original['token'], renewed)
         self.assertEqual(state['source'], state['reconciled_owners'][proof['receipt_sha256']]['validation_source'])
         self.assertEqual(before['attempts'], state['attempts']); self.assertEqual(before['failures'], state['failures'])
-        # Any row with a request token, execution flag or non-UNVERIFIED case is still a successor.
-        for name, mutate in (('token', lambda r: r.update(token='launched')), ('executed', lambda r: r.update(executed=False)),
+        # Any row with a request token, an actual execution or a non-UNVERIFIED case is still a successor
+        # (main treats a token-less executed=False refusal as non-dispatched by design).
+        for name, mutate in (('token', lambda r: r.update(token='launched')), ('executed', lambda r: r.update(executed=True)),
                              ('pass', lambda r: r['cases'].update({gate['checks'][0]: 'PASS'}))):
             candidate = copy.deepcopy(before); mutate(candidate['attempts'][-1]['results'][0])
             snapshot = copy.deepcopy(candidate)

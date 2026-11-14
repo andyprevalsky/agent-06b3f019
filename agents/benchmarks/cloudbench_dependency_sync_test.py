@@ -29509,8 +29509,9 @@ def test_private_fleet_source_waits_for_exact_snapshot_listing(tmp_path: Path, e
 def test_private_fleet_source_missing_snapshot_exhausts_bounded_reads(tmp_path: Path) -> None:
     result, calls = _private_source_preflight_fixture(tmp_path, snapshot_empty_reads=12)
     assert result.returncode != 0 and "SELECTED=" not in result.stdout
-    assert "snapshot identity missing or duplicate" in result.stderr
-    assert calls.count("volume snapshots list vol_private") == 6
+    # Merged main: an exhausted empty inventory is reported as such, never as a found-but-wrong snapshot.
+    assert "snapshot inventory remained empty after 12 bounded reads" in result.stderr
+    assert calls.count("volume snapshots list vol_private") == 12
     assert "MAINTENANCE" not in calls and "machine update" not in calls and "machine stop" not in calls
 
 
