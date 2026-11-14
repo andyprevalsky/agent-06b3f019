@@ -5623,7 +5623,8 @@ class AgentWorkflow(BackgroundAgentsMixin, AgentControlMixin, EnvironmentContext
                         "cost_limit",
                         self.agent_id,
                         {
-                            "tree_cost_cents": int(self.subtree_cost_cents),
+                            # The cost that tripped the limit, persisted resume spend included.
+                            "tree_cost_cents": int(effective_cost),
                             "price_limit_cents": self.price_limit_cents,
                         },
                     ]

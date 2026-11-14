@@ -191,11 +191,14 @@ class SendMessageToUserManager(ToolManager):
                     )
                     sms_sent = True
                 except Exception as e:
-                    logger.error("Failed to send SMS question: %s", e)
-            elif agent_source not in MESSAGING_AGENT_SOURCES and not sms_sent:
+                    logger.error("Failed to send SMS question; arming the SMS fallback timer: %s", e)
+            # Web/Mac goals, and phone goals whose immediate send failed, wait for a
+            # reply and text the question once the fallback deadline passes.
+            if not sms_sent:
                 logger.info(
-                    "Non-SMS goal, waiting for response with SMS fallback timeout",
+                    "Waiting for response with SMS fallback timeout",
                     agent_id=workflow_instance.agent_id,
+                    agent_source=agent_source,
                     timeout_minutes=SMS_FALLBACK_TIMEOUT_MINUTES,
                 )
                 try:

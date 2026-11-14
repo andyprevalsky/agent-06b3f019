@@ -7579,14 +7579,17 @@ async def test_workflow_check_cost_limit_texts_messaging_created_roots():
     """The cost-limit text goes to roots started from the phone, WhatsApp the same as SMS.
 
     Andy, 2026-11-14: "whatsapp should operate under the same conditions" as SMS.
-    A web or Mac root never touched from the phone gets no cost-limit text.
+    A web or Mac root never touched from the phone gets no cost-limit text. The
+    text reports the cost that tripped the limit: persisted resume spend (150c)
+    above the live subtree cost (20c) must not be reported as 20c.
     """
     for source, expected_texts in (("SMS", 1), ("WHATSAPP", 1), ("WEB", 0), ("MAC_APP", 0)):
         wf = _bare_workflow_instance()
         wf.agent_id = f"root-{source.lower()}"
         wf.user_id = "u"
         wf.parent_workflow_id = None
-        wf.subtree_cost_cents = 150.0
+        wf.subtree_cost_cents = 20.0
+        wf._persisted_tree_cents = 150.0
         wf.price_limit_cents = 100
         wf.agent_source = source
         fake = _FakeWorkflowModule()
@@ -7602,6 +7605,8 @@ async def test_workflow_check_cost_limit_texts_messaging_created_roots():
             if fn_name == "notify_sms_event_activity" and args[1] == "cost_limit"
         ]
         assert len(texts) == expected_texts, (source, texts)
+        for args in texts:
+            assert args[3]["tree_cost_cents"] == 150, (source, args)
 
 
 async def test_workflow_update_tree_state_skips_without_bus():

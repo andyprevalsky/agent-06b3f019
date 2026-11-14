@@ -461,6 +461,62 @@ async def test_handler_non_sms_timeout_triggers_sms_fallback():
     assert "notify_sms_event_activity" in activity_names
 
 
+async def test_handler_messaging_immediate_send_failure_arms_fallback():
+    """A phone goal whose immediate question text fails retries at the fallback deadline.
+
+    Without this the agent waits for a reply to a question that never reached the
+    phone. SMS and WhatsApp behave the same.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    from domains.send_message_to_user.handler import SendMessageToUserManager
+    from tools.base import MessageStatus
+
+    for source in ("SMS", "WHATSAPP"):
+        wf = _FakeWorkflow(user_replied=False)
+        sends: list[str] = []
+
+        def notify(sends=sends):
+            sends.append("attempt")
+            if len(sends) == 1:
+                raise RuntimeError("notification outage")
+
+        class _WaitFake(_FakeWorkflowModule):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self._now = datetime(2026, 11, 14, tzinfo=timezone.utc)
+                self.waits = 0
+
+            def now(self):
+                return self._now
+
+            async def wait_condition(self, predicate, timeout=None, wf=wf):
+                self.waits += 1
+                if self.waits == 1:
+                    # No reply before the 15m fallback deadline.
+                    self._now = self._now + timedelta(minutes=16)
+                    raise TimeoutError("no response")
+                _user_replies(wf)
+                return
+
+        fake = _WaitFake(activity_results={"get_agent_source": source, "notify_sms_event_activity": notify})
+        restore = _patch_handler_workflow(fake)
+        try:
+            events = await _collect_events(
+                SendMessageToUserManager().execute_tool(
+                    workflow_instance=wf,
+                    tool_call={"message": "Which size?", "is_question": True},
+                    tool_call_id=f"tc-{source.lower()}-retry",
+                )
+            )
+        finally:
+            restore()
+
+        assert events[-1].status == MessageStatus.FINISHED, source
+        assert len(sends) == 2, (source, "failed immediate send was never retried", sends)
+        assert fake.waits >= 1, (source, "no fallback wait was armed")
+
+
 async def test_handler_non_sms_temporal_timeout_triggers_sms_fallback():
     """Temporal TimeoutError from wait_condition must still trigger SMS fallback."""
     from datetime import datetime, timedelta, timezone
@@ -939,6 +995,10 @@ async def run_all_tests():
         test_handler_question_reply_baseline_is_the_context_snapshot,
     )
     await r.record_async("handler_non_sms_timeout", test_handler_non_sms_timeout_triggers_sms_fallback)
+    await r.record_async(
+        "handler_messaging_send_failure_fallback",
+        test_handler_messaging_immediate_send_failure_arms_fallback,
+    )
     await r.record_async(
         "handler_non_sms_temporal_timeout",
         test_handler_non_sms_temporal_timeout_triggers_sms_fallback,
