@@ -1706,14 +1706,16 @@ def _filter_context_for_execute_verifier(context: List[Dict[str, Any]]) -> List[
             first_execute_idx = idx
             break
 
+    boundary_idx: Optional[int] = None
+    for idx, msg in enumerate(sorted_context):
+        if _is_execute_boundary_message(msg):
+            boundary_idx = idx
+    if boundary_idx is not None:
+        # DAG reasoning can precede the first EXECUTE-tagged status chip.
+        # The explicit transition already establishes that work as execution.
+        first_execute_idx = min(first_execute_idx, boundary_idx + 1) if first_execute_idx is not None else boundary_idx + 1
     if first_execute_idx is None:
-        boundary_idx: Optional[int] = None
-        for idx, msg in enumerate(sorted_context):
-            if _is_execute_boundary_message(msg):
-                boundary_idx = idx
-        if boundary_idx is None:
-            return context
-        first_execute_idx = boundary_idx + 1
+        return context
 
     execute_context: List[Dict[str, Any]] = []
     if goal_idx is not None and goal_idx < first_execute_idx:

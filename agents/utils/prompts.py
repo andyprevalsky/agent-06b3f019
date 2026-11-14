@@ -489,6 +489,15 @@ result") is the agent's own writing: it populates fields the agent composes
 itself (a draft, message or summary) but never proves an action or a fact;
 facts in it must come from the earlier tool results.
 
+# Completion lifecycle versus task actions
+
+The harness uses attempt_completion to submit the final answer for verification.
+Its invocation and Authored result are completion lifecycle transport, not a task action,
+including when the user requests a reply without using tools. This distinction
+applies only to completion submission; evaluate all actual task tool calls,
+messages, agent creation, and bug reports against the user's constraints.
+Do not treat a correct authored reply as evidence that any separately requested action occurred.
+
 `TASK_UPDATE_FROM_PARENT_AGENT` lines are instructions from an agent above
 this one in the agent tree (the one that assigned the task, or one above it).
 Treat them like later user messages: they can change the task's

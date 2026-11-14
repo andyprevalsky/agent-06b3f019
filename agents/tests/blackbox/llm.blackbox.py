@@ -5679,6 +5679,44 @@ async def test_check_progress_execute_filters_plan_context_before_llm():
     assert "set_plan" not in rendered
 
 
+async def test_check_progress_keeps_completed_reasoning_before_completion_chip():
+    """A late EXECUTE status chip must not erase work after the phase transition."""
+    from helpers.llm import check_progress
+    from utils.prompts import build_verifier_prompt
+
+    captured = []
+
+    async def judge(messages, *_args, **_kwargs):
+        captured.extend(messages)
+        # Retain the captured rejection; this check proves request construction,
+        # not a model verdict. The paired live replay proves verdict behavior.
+        return {"task_completed": False, "score": 1.0, "reasoning": "missing reply"}, {}
+
+    context = [
+        {"role": "USER", "text": "Reply with the single word OK and finish. Do not use any tools.",
+         "timestamp": "2026-11-14T19:55:00Z"},
+        {"role": "TOOL", "text": "planning evidence", "timestamp": "2026-11-14T19:56:00Z",
+         "metadata": {"toolName": "set_plan", "toolStatus": "FINISHED", "phase": "PLAN"}},
+        {"role": "TOOL", "text": "", "timestamp": "2026-11-14T19:56:17Z",
+         "metadata": {"toolName": "attempt_completion", "title": "Beginning Execute Phase", "phase": "PLAN"}},
+        {"role": "ASSISTANT", "text": "OK", "timestamp": "2026-11-14T19:56:21Z",
+         "metadata": {"plannedToolName": "reasoning", "dagTaskIndex": 0}},
+        {"role": "TOOL", "text": "", "timestamp": "2026-11-14T19:56:22Z",
+         "metadata": {"toolName": "attempt_completion", "toolStatus": "IN_PROGRESS", "phase": "EXECUTE"}},
+        {"role": "TOOL", "text": "late planning evidence", "timestamp": "2026-11-14T19:56:23Z",
+         "metadata": {"toolName": "spawn_agent", "toolStatus": "FINISHED", "phase": "PLAN"}},
+    ]
+    with patch("temporalio.activity.heartbeat"), patch("helpers.llm._call_llm_verifier", judge):
+        result = await check_progress(context, build_verifier_prompt(), call_site="verifier_execute")
+
+    assert result["score"] < 1.0, "Retaining evidence must not override an independent rejection"
+    evidence = "\n".join(m["content"] for m in captured if m["role"] != "system")
+    assert '"tool_name": "reasoning"' in evidence and '"result": "OK"' in evidence, evidence
+    assert "Do not use any tools" in evidence
+    assert "planning evidence" not in evidence
+    assert "Beginning Execute Phase" not in evidence
+
+
 async def test_check_progress_execute_verifier_keeps_original_goal():
     """The execute verifier extracts the final output against the user's goal.
 
@@ -11714,6 +11752,9 @@ async def run_all_tests():
     )
     r.record(
         "filter_context_for_execute_verifier_boundary", test_filter_context_for_execute_verifier_uses_execute_boundary
+    )
+    await r.record_async(
+        "execute_verifier_keeps_completed_reasoning", test_check_progress_keeps_completed_reasoning_before_completion_chip
     )
     await r.record_async(
         "check_progress_execute_filters_plan_context",
