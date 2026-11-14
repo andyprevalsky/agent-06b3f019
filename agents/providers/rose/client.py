@@ -2353,6 +2353,9 @@ class RoseClient:
                 dump_context=False,
                 cache_namespace=cache_namespace,
                 browser_use=True,
+                # One collected action: a tool call cut off at the output limit is
+                # retried like any other cut-off reply (providers/rose/truncation.py).
+                result_required=True,
             )
         except Exception as exc:
             try:

@@ -2024,6 +2024,54 @@ async def test_complete_browser_use_recovers_a_step_cut_off_before_its_action():
     assert result["actual_model"] == "google/gemini-3.8-flash", result["actual_model"]
 
 
+async def test_complete_browser_use_recovers_an_action_cut_off_mid_arguments():
+    """A tool call cut off at the output limit is not a model decision.
+
+    Repro of PR #2099's native AutoFill FLAKY f48b6ecc: the reply streamed a
+    phone call whose nested args stopped at the 2048-token limit
+    (`{"min_confidence": 0`, finish=length). Because a tool call had been seen,
+    the shared cut-off recovery skipped it and validation rejected the step.
+    A collected browser step discards the cut-off attempt and retries.
+    """
+    def tool_reply(arguments, finish, tokens):
+        return _openai_sse(
+            [
+                {"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "call_phone", "type": "function",
+                                                          "function": {"name": "phone", "arguments": arguments}}]},
+                              "finish_reason": finish}]},
+                {"usage": {"prompt_tokens": 12, "completion_tokens": tokens, "total_tokens": tokens + 12}},
+            ]
+        )
+    cut_off = tool_reply(json.dumps({"mode": "operation", "operation": "screen.text", "args": "{\"min_confidence\": 0"}), "length", 2048)
+    acted = tool_reply(json.dumps({"mode": "operation", "operation": "screen.text", "args": {"min_confidence": 0.3}}), "tool_calls", 40)
+    seen: list[tuple[str, int]] = []
+
+    def handler(req):
+        if "openrouter.ai" not in str(req.url):
+            return httpx.Response(500, text="unexpected route")
+        body = json.loads(req.content.decode())
+        seen.append((body["model"], body["max_tokens"]))
+        text = cut_off if len(seen) == 1 else acted
+        return httpx.Response(200, text=text, headers={"Content-Type": "text/event-stream"})
+
+    set_mock_handler(handler)
+    try:
+        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "", "CEREBRAS_API_KEY": ""}):
+            result = await RoseClient(openrouter_key="ork-x").complete_browser_use(
+                task="Continue my authorized Apple Account sign-in.",
+                browser_state={**_browser_state(), "phone": _native_autofill_control_state("Apple Account. Password field is masked.")},
+                action_history=[],
+                available_actions=["phone", "request_user_assistance_for_authentication"],
+                include_screenshot=False,
+                call_site="test-bu-cut-off-mid-arguments",
+            )
+    finally:
+        teardown_mock()
+    assert seen == [("qwen/qwen3.8-27b", 2048), ("qwen/qwen3.8-27b", 16000)], seen
+    assert result["action"]["action"] == "phone", result["action"]
+    assert result["action"]["params"]["args"] == {"min_confidence": 0.3}, result["action"]
+
+
 async def test_complete_browser_use_preserves_printable_native_tool_batch():
     """A provider turn that types several characters must not discard calls 2..N."""
     tool_calls = [
@@ -2811,6 +2859,10 @@ async def run_all_tests():
     await r.record_async(
         "complete_browser_use_recovers_cut_off_step",
         test_complete_browser_use_recovers_a_step_cut_off_before_its_action,
+    )
+    await r.record_async(
+        "complete_browser_use_recovers_cut_off_arguments",
+        test_complete_browser_use_recovers_an_action_cut_off_mid_arguments,
     )
     await r.record_async(
         "complete_browser_use_printable_native_tool_batch",
