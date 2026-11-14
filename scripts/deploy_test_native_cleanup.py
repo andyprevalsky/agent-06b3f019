@@ -1850,6 +1850,18 @@ def audit_seal_accepted(life, seal, *, recovered, recovery_sealed):
     return (recovered or recovery_sealed) and life.get('audit_sha256') == '' and life.get('status') == 'failed'
 
 
+def retired_hub_accepted(meta, runs):
+    """run-bench-fleet records retired-exact-owner-verified-absent only after proving the exact Hub birth
+    gone; re-check that absence now. Any other disposition takes the retained-Hub path."""
+    if meta.get('hub_disposition') != 'retired-exact-owner-verified-absent':
+        return False
+    need(Path(meta.get('hub_owner_file', '')).parent == runs / '_hub'
+         and re.fullmatch('[0-9a-f]{32}', meta.get('hub_owner_token', '')) is not None
+         and str(meta.get('hub_pid', '')).isdigit(), 'retired Hub identity')
+    retired_local_process(dict(pid=int(meta['hub_pid']), birth=meta.get('hub_pid_start')))
+    return True
+
+
 def relay_leases_retired(leases, document):
     """A breach after tasks started leaves the shared relay's lease records: each must be terminal
     (closed/abandoned) with its exact owner process gone. Nothing else may remain."""

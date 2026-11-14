@@ -81,8 +81,10 @@ mkdir -p "$CASE/out"
   r,v,_=self.run_case('provision_primary_machine bench "$CASE/out"');self.assertEqual(r.returncode,0,r.stderr);self.assertEqual(v['out/.cid'],'clone new123\n');self.assertEqual(v['claims'],'');self.assertEqual(v['creates'],'CREATE\n')
  def test_explicit_reuse_borrows_no_create(self):
   r,v,_=self.run_case('POOL_REUSE_ONLY=1;provision_primary_machine bench "$CASE/out"',disposable=False);self.assertEqual(r.returncode,0,r.stderr);self.assertEqual(v['out/.cid'],'pool existing\n');self.assertEqual(v['creates'],'')
- def test_failed_evidence_still_retires_exact_disposable(self):
-  r,v,records=self.run_case('reap_registry_clones "$FLEET_REGISTRY_DIR" current',missing=True);self.assertEqual(r.returncode,0,r.stderr);self.assertEqual(v['calls'].splitlines(),['machine destroy --force abcd1234 -a fixture','volumes destroy vol_owned -a fixture --yes']);self.assertEqual(records,[])
+ def test_failed_evidence_retains_exact_disposable(self):
+  # ca404d464a (RCA disposable-reaper-bypassed-runtime-evidence-latch): an unconfirmed runtime-evidence
+  # latch retains even disposable resources; nothing is destroyed until evidence is recovered.
+  r,v,records=self.run_case('reap_registry_clones "$FLEET_REGISTRY_DIR" current',missing=True);self.assertNotEqual(r.returncode,0);self.assertIn('runtime evidence is unconfirmed',r.stderr);self.assertEqual(v['calls'],'')
  def runtime_collection_branch(self):
   source=SOURCE.read_text();start=source.index('    if ! cloudbench_collect_remaining_runtime_evidence; then',source.index('cleanup() {'))
   return source[start:source.index('    if fleet_current_disposable_registry "$FLEET_REGISTRY_DIR"; then',start+9)]

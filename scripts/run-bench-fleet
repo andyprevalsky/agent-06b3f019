@@ -1112,6 +1112,7 @@ DISPOSABLE_LIFECYCLE=1  # explicit reuse opts back into retained borrowed IDs
 POOL_COLD_BOOTSTRAP="0"  # future empty-checkout intent, never historical warm evidence
 PROVISION_POOL=""       # --provision-pool N: pre-provision N stopped clones (current image) then exit
 FRESH_VOLUMES="${CLOUDBENCH_FRESH_VOLUMES:-1}"
+FRESH_PRIMARY_IMAGE=""
 FRESH_VOLUMES_REQUESTED=0
 SNAPSHOT_VOLUMES_REQUESTED=0
 INFRA_PROBE="${CLOUDBENCH_INFRA_PROBE:-0}"
@@ -1205,8 +1206,11 @@ PYCONFIG
 # retry budget inside that window and take the whole campaign down with its infra stop. Retry for minutes (about four
 # with jitter) before concluding that the donor has no usable snapshot.
 # Sets SNAPSHOTS_JSON (the last valid listing, empty when no read was valid) and SNAPSHOT_LIST_ATTEMPTS_USED.
+# Pinned and unpinned fleets share this read: a pinned fleet passes its snapshot ID and the read retries until that
+# exact snapshot is listed complete (a pinned fleet used to rely on one unretried epoch read in the preflight). If the
+# pin is never listed complete, SNAPSHOTS_JSON is cleared and the helper returns 1, because that proves nothing.
 list_donor_snapshots() {
-    local attempt candidate max_attempts=12 pause
+    local required="${1:-}" attempt candidate max_attempts=12 pause
     SNAPSHOTS_JSON=""
     SNAPSHOT_LIST_ATTEMPTS_USED=0
     for attempt in $(seq 1 "$max_attempts"); do
@@ -1217,7 +1221,17 @@ list_donor_snapshots() {
             # Fly can briefly return a valid but empty/still-hydrating list
             # while older completed snapshots exist. A valid JSON response is
             # not enough to conclude that the donor has no usable snapshot.
-            if [ -n "$(printf '%s' "$SNAPSHOTS_JSON" | python3 "$SNAPSHOT_SELECTOR_SCRIPT" 2>/dev/null || true)" ]; then
+            if [ -n "$required" ]; then
+                if printf '%s' "$SNAPSHOTS_JSON" | SID="$required" python3 -c '
+import json, os, sys
+valid = {"created", "complete", "completed", "ready"}
+match = next((s for s in json.load(sys.stdin) if isinstance(s, dict) and s.get("id") == os.environ["SID"]), None)
+raise SystemExit(0 if match and str(match.get("status") or "").lower() in valid
+                 and int(match.get("size") or 0) > 0 and match.get("created_at") else 1)
+' 2>/dev/null; then
+                    return 0
+                fi
+            elif [ -n "$(printf '%s' "$SNAPSHOTS_JSON" | python3 "$SNAPSHOT_SELECTOR_SCRIPT" 2>/dev/null || true)" ]; then
                 return 0
             fi
         fi
@@ -1227,6 +1241,12 @@ list_donor_snapshots() {
             sleep $(( pause + RANDOM % 4 ))
         fi
     done
+    # Unpinned: a valid listing without a usable snapshot means absence. Pinned:
+    # the exact snapshot was never listed complete, which proves nothing.
+    if [ -n "$required" ]; then
+        SNAPSHOTS_JSON=""
+        return 1
+    fi
     return 0
 }
 # ── Capture an explicit immutable fleet source ─────────────────────────────
@@ -2448,10 +2468,30 @@ print(state.strip().lower())
 ' "$vol" <<< "$volume"
 }
 
+volume_exact_created_detached() {  # <volume-id>; 0 only for the exact ID, state created, no attachment
+    local vol="$1" volume
+    volume="$(FLY volumes show "$vol" -a "$APP" --json 2>/dev/null)" || return 1
+    python3 -c '
+import json
+import sys
+
+try:
+    volume = json.load(sys.stdin)
+except (TypeError, ValueError, json.JSONDecodeError):
+    raise SystemExit(1)
+if not isinstance(volume, dict) or volume.get("id") != sys.argv[1]:
+    raise SystemExit(1)
+if str(volume.get("state") or "").strip().lower() != "created":
+    raise SystemExit(1)
+raise SystemExit(1 if volume.get("attached_machine_id") or volume.get("attached_alloc_id") else 0)
+' "$vol" <<< "$volume"
+}
+
 reap_volume() {  # reap_volume <volume_id> [diagnostic-log] — destroy a clone's forked volume
     local vol="$1" diagnostic_log="${2:-}" i lifecycle_rc state
     local destroy_capture destroy_rc destroy_bytes destroy_excerpt destroy_suffix
     local destroy_accepted=0 destroy_ambiguous=0 lifecycle_ambiguous=0 once_status=0 delete_sent
+    local redispatch_status=1 detach_observed=0
     [ -n "$vol" ] || return 0
     if [ "${POOL_REUSE_ONLY:-0}" = 1 ]; then
         echo "❌ reuse-only retains Volume identity; refusing destroy of $vol" >&2
@@ -2488,7 +2528,26 @@ reap_volume() {  # reap_volume <volume_id> [diagnostic-log] — destroy a clone'
             return 1
         }
         delete_sent=1
-        if [ "${DISPOSABLE_REAP:-0}" = 1 ] && { [ "$i" -gt 1 ] || [ "$once_status" = 2 ]; }; then
+        if [ "${DISPOSABLE_REAP:-0}" = 1 ] && [ "$once_status" = 2 ] && [ "$redispatch_status" = 1 ] \
+            && volume_exact_created_detached "$vol"; then
+            # Fly accepts a DELETE for a volume still waiting_for_detach and then
+            # drops it: the volume returns to created once its destroyed Machine
+            # detaches (descend batch-1 epoch 3: 12 volumes). An exact, detached,
+            # created volume whose recorded DELETE was later observed in
+            # waiting_for_detach, or is older than the provider's transient
+            # window, gets one more exact DELETE, recorded once-only.
+            fleet_disposable_redelete_intent volume "$vol" && redispatch_status=0 || redispatch_status=$?
+        fi
+        if [ "${DISPOSABLE_REAP:-0}" = 1 ] && [ "$redispatch_status" = 0 ]; then
+            redispatch_status=2 # this call's single re-dispatch is now spent
+            if FLY volumes destroy "$vol" -a "$APP" --yes >"$destroy_capture" 2>&1; then
+                destroy_rc=0
+                destroy_accepted=1
+            else
+                destroy_rc=$?
+                destroy_ambiguous=1
+            fi
+        elif [ "${DISPOSABLE_REAP:-0}" = 1 ] && { [ "$i" -gt 1 ] || [ "$once_status" = 2 ]; }; then
             destroy_rc=1 # keep reconciling exact GET; never repeat DELETE
             delete_sent=0
         elif FLY volumes destroy "$vol" -a "$APP" --yes >"$destroy_capture" 2>&1; then
@@ -2535,7 +2594,17 @@ reap_volume() {  # reap_volume <volume_id> [diagnostic-log] — destroy a clone'
                         return 74
                     fi
                     ;;
-                created|restoring|waiting_for_detach|scheduling_destroy|recovering) ;;
+                waiting_for_detach)
+                    # Fly's post-DELETE detach wait. Persist it once so a later
+                    # exact created/detached read proves Fly dropped this DELETE
+                    # and the next exact-owner reap re-dispatches it immediately.
+                    if [ "${DISPOSABLE_REAP:-0}" = 1 ] && [ "$detach_observed" = 0 ]; then
+                        detach_observed=1
+                        fleet_disposable_redelete_intent volume "$vol" detach-observed \
+                            || echo "  ⚠️ could not record waiting_for_detach evidence for volume $vol; a dropped DELETE is re-sent only after the aged-intent window" >&2
+                    fi
+                    ;;
+                created|restoring|scheduling_destroy|recovering) ;;
                 *) lifecycle_ambiguous=1 ;;
             esac
         else
@@ -6200,6 +6269,52 @@ finally:os.close(fd)
 PYONCE
 }
 
+fleet_disposable_redelete_intent() {  # volume <exact-id> [detach-observed]; 0=admit one re-dispatch (or evidence recorded), 2=already re-dispatched, 3=not yet admissible
+    # Only for an exact owned volume whose once-only DELETE intent already exists.
+    # Fly answers that DELETE by holding the volume in waiting_for_detach; when
+    # the host detach of the just-destroyed Machine does not complete, Fly drops
+    # the DELETE and the volume returns to created, unattached (descend b1e3,
+    # epoch 18 and proof-B: 20 volumes). An accepted DELETE still in flight can
+    # instead read created for a few reads before pending_destroy, so a created
+    # read alone never admits a duplicate. Admission therefore needs either the
+    # durable waiting_for_detach-after-DELETE observation recorded by the
+    # detach-observed mode (Fly finished processing that DELETE without
+    # deleting) or an intent older than the provider's transient window. The
+    # re-dispatch itself is recorded once-only.
+    local registry="${DISPOSABLE_DELETE_REGISTRY:-$FLEET_REGISTRY_DIR}"
+    [ "$1" = volume ] || return 1
+    case "${3:-}" in ''|detach-observed) ;; *) return 1 ;; esac
+    fleet_disposable_registry_policy "$registry" || return 1
+    python3 - "$registry" "${registry##*/}" "$APP" "$2" "${CLOUDBENCH_VOLUME_REDELETE_AFTER_SECONDS:-600}" "${3:-}" <<'PYREDELETE'
+import json,os,stat,sys,time
+from pathlib import Path
+registry=Path(sys.argv[1]);owner,app,identifier,after,mode=sys.argv[2],sys.argv[3],sys.argv[4],int(sys.argv[5]),sys.argv[6]
+assert registry.name==owner and registry.resolve(strict=True)==registry and not registry.is_symlink()
+assert (registry/'disposable-resources-v1').read_text().strip()==owner+'\n'+app
+first=registry/('disposable-delete-volume-'+identifier+'.json')
+raw=json.dumps(dict(owner=owner,app=app,kind='volume',identifier=identifier),sort_keys=True)+'\n'
+assert first.resolve(strict=True)==first and stat.S_ISREG(first.lstat().st_mode) and first.read_text()==raw
+evidence=registry/('disposable-delete-volume-'+identifier+'.detach-observed.json')
+observed=json.dumps(dict(owner=owner,app=app,kind='volume',identifier=identifier,observed='waiting_for_detach'),sort_keys=True)+'\n'
+def publish(path,value):
+    try: fd=os.open(path,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+    except FileExistsError:
+        assert path.resolve(strict=True)==path and stat.S_ISREG(path.lstat().st_mode) and path.read_text()==value
+        return False
+    with os.fdopen(fd,'w')as stream:stream.write(value);stream.flush();os.fsync(stream.fileno())
+    fd=os.open(registry,os.O_RDONLY|os.O_DIRECTORY)
+    try:os.fsync(fd)
+    finally:os.close(fd)
+    return True
+if mode=='detach-observed':
+    publish(evidence,observed);raise SystemExit(0)
+if os.path.lexists(evidence):
+    assert evidence.resolve(strict=True)==evidence and stat.S_ISREG(evidence.lstat().st_mode) and evidence.read_text()==observed
+elif time.time()-first.lstat().st_mtime<after:raise SystemExit(3)
+if not publish(registry/('disposable-redelete-volume-'+identifier+'.json'),raw):raise SystemExit(2)
+PYREDELETE
+}
+
 fleet_disposable_resources_terminal() {
     [ "${FLEET_REGISTRY_PUBLISHED:-0}" = 1 ] && [ "${KEEP_CLONES:-0}" != 1 ] \
         && fleet_current_disposable_registry "$FLEET_REGISTRY_DIR" || return 1
@@ -7595,8 +7710,10 @@ reap_orphaned_fleet_proxies() {
     echo "🧹 reaped $n orphaned data-plane proxy tunnel(s) leaked by a dead controller"
 }
 
-stale_registry_only_waits_for_provider_detach() {  # <dead-owner v2 registry>
+stale_registry_only_waits_for_provider_detach() {  # <dead-owner v2 registry> [after-reap]
     local registry="$1" record clone_name id vol details status state actual_name mounted_vol volume count=0 claims
+    local after_reap=0 allowed typed
+    case "${2:-}" in '') ;; after-reap) after_reap=1 ;; *) return 1 ;; esac
     [ "$(registry_meta_value "$registry/meta" version)" = "2" ] || return 1
     [ ! -e "$registry/guest-cleanup-unconfirmed" ] \
         && [ ! -e "$registry/runtime-evidence-unconfirmed" ] || return 1
@@ -7651,29 +7768,43 @@ PY
         # A fresh accepted destroy request and a second exact read prove that
         # only Fly's unattached, transitional Volume is left. Keep its record;
         # a later startup or exact-owner recovery will retry until terminal.
+        # After this startup's own exact reap, a typed owner's already
+        # dispatched DELETE may instead have been dropped (created, unattached,
+        # re-dispatch spent or dropped again). That Volume is not needed by a
+        # new fleet either: retain it for exact-owner recovery, never fail the
+        # unrelated controller. Before the reap, created still goes to the reap
+        # so its dropped DELETE can be re-dispatched.
+        allowed=waiting_for_detach typed=0
         if [ -e "$registry/disposable-resources-v1" ] || [ -L "$registry/disposable-resources-v1" ]; then
             fleet_disposable_registry_policy "$registry" || return 1
+            typed=1
             local DISPOSABLE_DELETE_REGISTRY="$registry" once_status=0
             fleet_disposable_delete_intent volume "$vol" || once_status=$?
             case "$once_status" in
                 0) FLY volumes destroy "$vol" -a "$APP" --yes >/dev/null 2>&1 || return 1 ;;
-                2) : ;; # Prior dispatch survives controller death: exact GET only.
+                2) [ "$after_reap" = 0 ] || allowed=waiting_for_detach,created ;; # Prior dispatch survives controller death: exact GET only.
                 *) return 1 ;;
             esac
         else
             FLY volumes destroy "$vol" -a "$APP" --yes >/dev/null 2>&1 || return 1
         fi
         volume="$(FLY volumes show "$vol" -a "$APP" --json)" || return 1
-        printf '%s' "$volume" | python3 -c '
+        state="$(printf '%s' "$volume" | python3 -c '
 import json, sys
 data = json.load(sys.stdin)
-if data.get("id") != sys.argv[1] or data.get("state") != "waiting_for_detach" or data.get("attached_machine_id", "missing") is not None:
+if data.get("id") != sys.argv[1] or data.get("state") not in sys.argv[2].split(",") or data.get("attached_machine_id", "missing") is not None:
     raise SystemExit(1)
-' "$vol" || return 1
+if data["state"] == "created" and data.get("attached_alloc_id"):
+    raise SystemExit(1)
+print(data["state"])
+' "$vol" "$allowed")" || return 1
+        if [ "$state" = waiting_for_detach ] && [ "$typed" = 1 ]; then
+            fleet_disposable_redelete_intent volume "$vol" detach-observed || true
+        fi
         count=$((count + 1))
     done
     [ "$count" -gt 0 ] || return 1
-    echo "⚠️  deferred $count exact orphan Volume(s) awaiting Fly detach; retained dead-owner registry $registry" >&2
+    echo "⚠️  deferred $count exact orphan Volume(s) awaiting Fly detach/deletion; retained dead-owner registry $registry" >&2
 }
 
 reconcile_stale_fleet_registries_full() {
@@ -7769,7 +7900,7 @@ reconcile_stale_fleet_registries_full() {
             continue
         fi
         if ! reap_registry_clones "$registry" stale; then
-            if stale_registry_only_waits_for_provider_detach "$registry"; then
+            if stale_registry_only_waits_for_provider_detach "$registry" after-reap; then
                 release_registry_recovery_lock "$registry"
                 continue
             fi
@@ -15908,7 +16039,7 @@ cleanup() {
             echo "❌ runtime evidence is incomplete; retaining original fleet volumes" >&2
         fi
         runtime_evidence_failed=1
-        fleet_current_disposable_registry "$FLEET_REGISTRY_DIR" || KEEP_CLONES=1
+        KEEP_CLONES=1
         ec=1
         teardown_failed=1
     fi
@@ -16803,6 +16934,12 @@ fi
 if [ -n "${CLOUDBENCH_SNAPSHOT_ID:-}" ]; then
     SNAP_ID="$CLOUDBENCH_SNAPSHOT_ID"
     echo "📌 pinned snapshot (CLOUDBENCH_SNAPSHOT_ID): $SNAP_ID"
+    if [ -z "${CLOUDBENCH_WARM_SNAPSHOT_INVENTORY_FILE:-}" ]; then
+        list_donor_snapshots "$SNAP_ID" || {
+            echo "❌ pinned snapshot $SNAP_ID was not listed complete for $VOL_ID after $SNAPSHOT_LIST_ATTEMPTS_USED reads (provider read failure or wrong pin)" >&2
+            exit 1
+        }
+    fi
     if [ -n "${CLOUDBENCH_WARM_SNAPSHOT_INVENTORY_FILE:-}" ]; then
         SNAPSHOTS_JSON="$(configured_warm_snapshot_inventory)" || exit 1
         _proof_node="$(cloudbench_node_dependency_fingerprint "$ROOT_DIR")" || exit 1
@@ -16972,7 +17109,8 @@ warm_deps_preflight() {
         # Hydration already bound this exact completed snapshot and epoch to
         # the donor, volume and manifests. Reuse that captured inventory: an
         # uncertain later provider read is not evidence that proof went stale.
-        if [ -n "${HYDRATED_WARM_DEPS_STATE:-}" ] && [ -n "${SNAPSHOTS_JSON:-}" ]; then
+        # Pinned fleets capture the same retried inventory before the preflight.
+        if [ -n "${SNAPSHOTS_JSON:-}" ]; then
             snap_epoch="$(snapshot_created_epoch "$SNAP_ID" "$SNAPSHOTS_JSON")" || {
                 echo "❌ warm snapshot freshness could not be verified; refusing maintenance" >&2
                 return 1
@@ -17045,7 +17183,45 @@ warm_deps_preflight() {
     echo "❌ central dep refresh failed; refusing to provision task machines" >&2
     return 1
 }
+# Fresh REAL primaries boot the donor's CURRENT image and take dependency trees
+# from its baked /app; warm_deps_preflight above proves only the snapshot. Keep
+# fresh volumes only when that exact image carries a dependency proof for this
+# checkout. Otherwise REAL primaries restore the snapshot just proven, or an
+# explicit fresh-only request is refused before allocation. Without this, every
+# guest of a fleet admitted against another owner's image FATALs in dep_sync.
+fresh_image_deps_admission() {
+    FRESH_PRIMARY_IMAGE=""
+    [ "${FRESH_VOLUMES:-0}" = 1 ] || return 0
+    [ -z "${PRIVATE_SOURCE_FILE:-}" ] || return 0
+    local image="unknown"
+    if [ -n "${CURRENT_NODE_FP:-}" ] && [ -n "${CURRENT_PY_FP:-}" ]; then
+        if image="$(printf '%s' "${warm_json:-[]}" \
+            | cloudbench_warm_image_deps_match "$WARM_ID" "$CURRENT_NODE_FP" "$CURRENT_PY_FP")"; then
+            [[ "$image" =~ ^[^[:space:]@]+@sha256:[0-9a-f]{64}$ ]] || {
+                echo "❌ fresh image dependency proof has no immutable image binding; refusing allocation" >&2
+                return 1
+            }
+            FRESH_PRIMARY_IMAGE="$image"
+            echo "✅ warm image dependency proof matches the current ref; REAL primaries keep fresh volumes"
+            return 0
+        elif [ "$?" -eq 2 ]; then
+            echo "❌ fresh image dependency proof has no immutable image binding; refusing allocation" >&2
+            return 1
+        fi
+    fi
+    if [ "${FRESH_VOLUMES_REQUESTED:-0}" = 1 ] \
+        || [ "${CLOUDBENCH_FRESH_TARGET_REGION+x}" = x ] \
+        || [ "${CLOUDBENCH_FRESH_VOLUME_UNIQUE_ZONE+x}" = x ]; then
+        echo "❌ fresh volumes were explicitly required, but warm image ${image:-unknown} has no dependency proof for this checkout's manifests; guests would FATAL in dep_sync. Refusing allocation." >&2
+        echo "   rebuild/activate the image from this checkout (bash scripts/run-bench-cloud --setup) or drop the fresh-only request" >&2
+        return 1
+    fi
+    FRESH_VOLUMES=0
+    export CLOUDBENCH_FRESH_VOLUMES=0
+    echo "🧊 warm image ${image:-unknown} has no dependency proof for this checkout's manifests; REAL primaries restore proven snapshot $SNAP_ID instead of fresh volumes"
+}
 warm_deps_preflight || exit 1
+fresh_image_deps_admission || exit 1
 fresh_target_region_bind_destination || exit 1
 echo "🧊 forking clones from complete snapshot: $SNAP_ID"
 
@@ -20020,6 +20196,7 @@ launch_fleet_bench_child() {  # <bench-index> <bench> [existing-child-slot]
     CLOUDBENCH_INFRA_PROBE="${INFRA_PROBE:-0}" \
     CLOUDBENCH_COLD_PRIMARY_BOOTSTRAP="$cold_primary" \
     CLOUDBENCH_FRESH_VOLUME="$([ "$src" != archived-reuse ] && { [ "$cold_primary" = 1 ] || { [ "$src" != pool ] && [ "$(primary_clone_storage_mode "$bench")" = fresh ]; }; } && printf 1 || printf 0)" \
+    CLOUDBENCH_FLEET_BOOT_IMAGE="$([ "$src" = clone ] && [ "$cold_primary" != 1 ] && [ -z "$PRIVATE_SOURCE_FILE" ] && [ "$(primary_clone_storage_mode "$bench")" = fresh ] && printf '%s' "${FRESH_PRIMARY_IMAGE:-}")" \
     CLOUDBENCH_POOL_BOOT_VM_SIZE="$pool_boot_vm_size" \
     CLOUDBENCH_POOL_BOOT_VM_MEMORY="$pool_boot_vm_memory" \
     CLOUDBENCH_SKIP_AUTOSCALER="${SKIP_AUTOSCALER:-0}" \
