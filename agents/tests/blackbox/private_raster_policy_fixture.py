@@ -25,7 +25,7 @@ async def run(config):
             result = await _call_browser_use_with_rotation(rose_client=RoseClient(),task="Inspect the current page",dynamic_system_context="",turn_messages=[],browser_state={},action_entries=[],config=config,user_id="u1",agent_id="a1",iteration=17,token_state=ClaudeTokenState(),gpt_token=None,gpt_account_id=None,gpt_token_source=None,gpt_token_pool_id=None,browser_use_mode=None,dom_service=dom)
         assert result["action"]["action"] == "wait"
         names=[tool["name"] for tool in captured[-1]["tools"]]
-        assert ("screenshot" in names) is (not private), "Advertised native request includes screenshot forbidden by the SAME DOM privacy owner"
+        assert "screenshot" in names, "Ordinary screenshot capture must remain available after private input"
         assert "read_browser_state" in names and "evaluate" in names
         assert captured[-1]["tool_choice"] == "auto"
         print("ACTUAL_DOM_HANDLER_CLIENT_RESPONSES_BODY",private,len(names))
@@ -72,15 +72,19 @@ async def check_neighbor_controls(config):
         for dom in (None,public,resumed): await call(dom)
         await call(private,{"enabled":True,"interaction":{}})
     assert requests[0]["tools"] == requests[1]["tools"] == build_browser_use_tools([action for action in AVAILABLE_ACTIONS if action != "phone"])
-    assert requests[2]["tools"] == [x for x in requests[1]["tools"] if x["name"] != "screenshot"]
-    assert requests[3]["tools"] == build_browser_use_tools([action for action in AVAILABLE_ACTIONS if action != "screenshot"])
+    assert requests[2]["tools"] == requests[1]["tools"]
+    assert requests[3]["tools"] == build_browser_use_tools(AVAILABLE_ACTIONS)
     assert resumed.secret_values_used is True and public.secret_values_used is False
-    private._session=SimpleNamespace()
-    capture=AsyncMock(side_effect=AssertionError("Private capture must never be invoked"))
-    with patch("domains.spawn_browser_agent_v3.repo.take_browser_computer_screenshot",capture):
-        denied=await service_actions.execute_action(private,ActionHistory(),{"action":"screenshot","params":{}},session_id="session-fixture",config=config)
-    assert denied["success"] is False and "Screenshot withheld" in denied["error"]
-    capture.assert_not_awaited()
+    private._session=SimpleNamespace(agent_focus_target_id=None)
+    from screenshot_revision_cases import png
+    raster = png()
+    capture = AsyncMock(return_value={"base64_image": raster, "provider": "kernel"})
+    with patch("domains.spawn_browser_agent_v3.repo.take_browser_computer_screenshot", capture), patch(
+        "domains.spawn_browser_agent_v3.repo.upload_file_to_session", AsyncMock(return_value={"path": "/tmp/screenshot.png"})
+    ):
+        captured = await service_actions.execute_action(private, ActionHistory(), {"action": "screenshot", "params": {}}, session_id="session-fixture", config=config)
+    assert captured["success"] is True and captured["screenshot"] == raster, captured
+    capture.assert_awaited_once()
     for error in (asyncio.CancelledError(),WorkflowGenerationSealed("replacement"),TimeoutError("transport-owned timeout")):
         async def fail(_self,**_kwargs): raise error
         with patch.object(RoseClient,"collect",new=fail),patch("helpers.observability.dump_llm_context"):
@@ -108,7 +112,7 @@ async def check_neighbor_controls(config):
         result=await handler._generate_write_lock_notification(rose_client=RoseClient(),task_prompt="Submit fixture",dynamic_system_context="",browser_turn_messages=turns,browser_state={"url":"https://fixture.test/form"},action_entries=[],config=config,user_id="u1",agent_id="a1",browser_task_id="task-1",iteration=1,token_state=ClaudeTokenState(),gpt_token=None,gpt_account_id=None,gpt_token_source=None,gpt_token_pool_id=None,browser_use_mode=None,approval_type="generic_write",current_url="https://fixture.test/form",trusted_page_urls=["https://fixture.test/form"],pending_action={"action":"click","params":{"index":1}},write_lock_result={"status":"needs_write_approval","approval_type":"generic_write","element_text":"Submit"},system_name="Rose",fallback_question="Approve?",dom_service=private)
     assert result["notification"]["trigger_type"] == "generic_write"
     assert turns == before and len(fork_requests) == 1
-    assert all(x["name"] != "screenshot" for x in fork_requests[0]["tools"])
+    assert "screenshot" in [x["name"] for x in fork_requests[0]["tools"]]
     assert fork_requests[0]["skip_cache_write"] is True and fork_requests[0]["tool_choice"] == "auto"
     print("PUBLIC_DEFAULT_RESTORED_PRIVATE_EXECUTOR_FORK_CANCEL_SEAL_TRANSPORT_TYPED_ARGS_CONTROLS_PASS")
 
@@ -129,8 +133,23 @@ async def check_printable_batch_contract():
     for native,declared,expected,arguments in [(True,"send_keys","press_key",{"key":"ENTER"}),(False,"navigate","goto",{"url":"https://fixture.test/"}),(True,"wait","wait",{"time_ms":1}),(False,"wait","wait",{"time_ms":1}),(True,"screenshot","screenshot",{}),(False,"screenshot","screenshot",{})]:
         async def same_contract(_self,**kwargs):
             first={"id":"first-real-id","name":declared,"arguments":json.dumps(arguments)}
-            return RoseResponse(tool_calls=[first,{"id":"ignored-second","name":"screenshot","arguments":"{}"}] if native else [],content="" if native else json.dumps({"action":[{declared:arguments},{"screenshot":{}}]}),actual_model="gpt-6-sol-gpt")
+            return RoseResponse(tool_calls=[first] if native else [],content="" if native else json.dumps({"action":[{declared:arguments}]}),actual_model="gpt-6-sol-gpt")
         with patch.object(RoseClient,"collect",new=same_contract),patch("helpers.observability.dump_llm_context"):
             result=await RoseClient().complete_browser_use(task="Use declared capability",browser_state={},action_history=[],available_actions=[expected],turn_messages=[])
         assert result["action"]["action"] == expected
-    print("PRINTABLE_BATCH_FIRST_CALL_MIXED_ALIASES_PUBLIC_CAPTURE_NORMALIZATION_PASS")
+    # Every member is validated: an unavailable trailing action must not disappear.
+    from providers.rose.errors import BrowserModelOutputValidationError
+    for native in (True, False):
+        async def unavailable_tail(_self, **kwargs):
+            first = {"id": "first", "name": "press_key", "arguments": '{"key":"ENTER"}'}
+            return RoseResponse(tool_calls=[first, {"id": "second", "name": "screenshot", "arguments": "{}"}] if native else [],
+                                content="" if native else json.dumps({"action": [{"press_key": {"key": "ENTER"}}, {"screenshot": {}}]}),
+                                actual_model="gpt-6-sol-gpt")
+        with patch.object(RoseClient, "collect", new=unavailable_tail), patch("helpers.observability.dump_llm_context"):
+            try:
+                await RoseClient().complete_browser_use(task="Use declared capability", browser_state={}, action_history=[], available_actions=["press_key"], turn_messages=[])
+            except BrowserModelOutputValidationError as error:
+                assert error.private_detail == "Browser action is not available in this request."
+            else:
+                raise AssertionError("Unavailable trailing action was silently dropped")
+    print("PRINTABLE_BATCH_ALIAS_AND_UNAVAILABLE_TAIL_CONTRACT_PASS")

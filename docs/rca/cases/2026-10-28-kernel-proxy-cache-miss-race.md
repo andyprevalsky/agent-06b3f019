@@ -109,3 +109,81 @@ Final review5748355636 finding4451807261 showed the45-second waiter could reject
 The same actual-module dependency-fake test failed before and passed after. Two independently loaded modules model separate workers: a55-second and full60-second holder each produce one remote allocation reused by four waiters. Boundary commit succeeds; absent cache stays a typed timeout. This is deterministic mechanism proof, not live provider or PostgreSQL scheduling evidence. Exact registered helper and receipts: `nov3-final-review-fixes/backend/manifest.json`. Integrated owners are recorded below when complete.
 
 Integrated verification: admin-health, code-sessions, cli-login and repo-onboarding all passed in the same four-domain command (artifact1793691277-2805897-17819). Existing six-process Kernel local-DB unit passed with one shared remote allocation. Backend typecheck and scoped lint passed. Full new deployment gates and production verification remain pending.
+
+
+## November 5 integration follow-up: unit fixture retained the pre-transaction write seam
+
+On frozen CLI source `ce2742ae023ceab86a34d39bde2754a356f1cc4e`,
+`kernel-proxy-reuse.test.ts:87` failed `0 !== 1` in the backend coverage worker.
+The original log records a real `$queryRaw`, transaction `findUnique`, and
+transaction `upsert` immediately before the assertion. The fixture still
+counted `prisma.browserProviderProxy.create`, whereas the integrated production
+path now publishes through the transaction client's `upsert`. The root-client
+mock did not intercept that transaction; zero counted writes did not mean zero
+actual writes. This is an introduced integration fixture mismatch, not evidence
+that the advisory-lock implementation failed to publish.
+
+Independent reproduction used a plain clone at
+`/home/boxes/cli-nov05-kernel-repair`, a private local PostgreSQL database, and
+the unchanged command `node --experimental-test-module-mocks --import tsx
+src/tests/unit/kernel-proxy-reuse.test.ts`, with the unchanged zero-allocation
+preloader in `NODE_OPTIONS`. The original file failed at the same line with
+`0 !== 1`. The identical original test passes with the actual pre-integration
+provider from `7deb1bb964b7796e4909423d24dfb5c4d6032311` substituted in that clone.
+No real Kernel calls are made: the provider client is the fixture's fake.
+
+The repair mocks the Prisma transaction boundary and counts its actual
+`upsert`, while executing the real transaction wrapper and provider code.
+It verifies lock-before-read/write, the existing transaction budgets, exact
+publication key/type, one shared transaction, a concurrent locked-cache winner,
+and transaction-failure slot release. Root `create` now fails explicitly.
+All 15 original assertions remain unchanged; there are 37 assertions total.
+The same command passes. Three production mutations independently fail:
+removing coalescing gives `20 !== 1`, bypassing the lock fails the locked-read
+assertion, and omitting publication gives `0 !== 1`. Every mutation was restored;
+no production file changes are part of this fix. Targeted ESLint and diff checks
+pass. Evidence and hashes are under the clone's `.context/kernel-rca/`.
+
+Archive searches: `kernel proxy reuse writes create upsert transaction` and
+`unit mock transaction scoped database bypass`. This is a fixture-isolation
+follow-up to the transaction integration, not a recurrence of duplicate live
+proxy creation. The parent retains full deployment validation and safe-boundary
+integration; no live provider success or full backend pass is claimed. User
+required root and leased workers to remain untouched, all assertions/timeouts
+and the guard preserved, no child, no push, no deployment, and no financial or
+provider operations. Those constraints were retained.
+
+
+### November 5: the blackbox stale-cache fixture had the same obsolete write seam
+
+The completed backend shard2 on `ce2742ae023ceab86a34d39bde2754a356f1cc4e`
+failed only the owning stale-cache callback with actual `undefined`, expected
+`existing-geo-proxy`, at `browser-provider.kernel-stale-cache.support.ts:84`.
+Its native log again showed transaction-local `upsert` before the assertion.
+The fixture's Map was updated only by its root-client `create` mock, so the
+actual transaction wrote the private database while the Map stayed empty.
+The earlier unit repair does not alter this independently registered callback.
+
+`Gate: INTRODUCED` by integration of transaction-local publication with the
+unchanged pre-transaction fixture. In the private clone, the original callback
+fails identically under the zero-allocation preloader. The same original
+callback passes when only the provider is substituted with the actual
+pre-integration `7deb1bb` version. The repair mocks the transaction boundary,
+routes its cache delegate to the fixture, and records `upsert` in the Map.
+All seven original assertions remain; five additional assertions require the
+unchanged transaction budget, advisory lock and one publication. The normal
+browser-provider registration is unchanged.
+
+The identical callback command passes after repair. Negative mutations of the
+actual provider still fail when remote reuse is bypassed, the advisory lock is
+omitted, or cache publication is omitted. Production source and guard bytes
+are unchanged; no Kernel requests were made. Prior unit regression passes.
+The unchanged `browser-user-pause-race.test.ts` also passes using the complete
+Python 3.11 environment and private PostgreSQL database, including the real
+Python consumer and both pause/completion lock orderings. Evidence:
+`/home/boxes/cli-nov05-kernel-repair/.context/kernel-stale/`.
+
+The original browser-session worker shutdown timeout remains a separate open
+RCA; this fixture repair makes no claim about it. Parent owns safe-boundary
+integration and the full backend/provider gate. No assertions, deadlines,
+production logic, or live-provider acceptance criteria were weakened.

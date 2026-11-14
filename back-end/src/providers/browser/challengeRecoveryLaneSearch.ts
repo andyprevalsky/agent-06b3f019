@@ -22,6 +22,8 @@ export interface ConfigSearchDependencies {
 }
 
 export interface LaneConfigSearchOptions {
+  /** Cancellation of this request, distinct from a winning lane stopping siblings. */
+  signal?: AbortSignal;
   /** Deprioritize this candidate key (tried last inside each lane). */
   avoidConfigKey?: string;
   /**
@@ -196,6 +198,7 @@ export async function runLaneConfigSearch(
   dependencies: ConfigSearchDependencies,
   options: LaneConfigSearchOptions = {}
 ): Promise<SuccessfulRecoveryCandidate> {
+  options.signal?.throwIfAborted();
   if (lanes.length === 0) {
     throw new Error('Challenge recovery requires at least one cookie storage lane');
   }
@@ -229,6 +232,10 @@ export async function runLaneConfigSearch(
     },
     { once: true }
   );
+
+  const abortForCaller = () => abort.abort();
+  options.signal?.addEventListener('abort', abortForCaller, { once: true });
+  if (options.signal?.aborted) abortForCaller();
 
   const throwIfAborted = () => {
     if (abort.signal.aborted || claimLock.claimed) {
@@ -442,6 +449,7 @@ export async function runLaneConfigSearch(
       }
     });
   } finally {
+    options.signal?.removeEventListener('abort', abortForCaller);
     liveSearchAborts.delete(abort);
   }
 }

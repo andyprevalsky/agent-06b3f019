@@ -1,0 +1,1137 @@
+{
+  "provenance": "campaign-20261027-191411-2591810 original no-retry cancellation receipts; only consumed fields retained; paths remapped by test",
+  "summary": {
+    "campaign_id": "campaign-20261027-191411-2591810",
+    "started_at": "2026-10-27T19:14:11.414926+00:00",
+    "finished_at": "2026-10-27T19:33:38.080084+00:00",
+    "status": "cancelled",
+    "runs": 2,
+    "total_jobs": 20,
+    "task_count": 10,
+    "e2e_started_at_epoch": 1793128451.4080727
+  },
+  "records": [
+    {
+      "job": {
+        "index": 1,
+        "job_id": "r001-j0001",
+        "task": "polar-bu-001",
+        "run": 1,
+        "status": "cancelled",
+        "controller_exit_code": 1,
+        "started_at": "2026-10-27T19:14:38.167502+00:00",
+        "finished_at": "2026-10-27T19:33:05.878505+00:00",
+        "wall_clock_seconds": 1107.711,
+        "controller_lock": "cloudbench-controller-campaign-68c72ebb0198-1.lock",
+        "log": "/home/boxes/rose/.context/benchmarks/campaigns/campaign-20261027-191411-2591810/r001-j0001.log",
+        "attempt": 1,
+        "attempts": [],
+        "controller_pid": 2597566,
+        "task_status": "INFRA_ERROR",
+        "infra_failure": true,
+        "terminal_task": false
+      },
+      "card": {
+        "run_id": "20261027-191441-2597566",
+        "code": "descend/polar-k3-recovery@34ff3f23e (clean)",
+        "per_task": [
+          {
+            "name": "polar-bu-001",
+            "status": "error",
+            "duration_s": null,
+            "cost_usd": null,
+            "agent_url": null,
+            "agent_id": null,
+            "failure_reason": "no current run artifact produced",
+            "lifecycle_stage": "teardown",
+            "tokens_in": 0,
+            "tokens_out": 0,
+            "world_model_mode": "real",
+            "fast_mode": null,
+            "infra_usd": null
+          }
+        ],
+        "execution_provenance": {
+          "base_sha": "34ff3f23e6efa9ced9ff75732357df973db14e86"
+        }
+      },
+      "lifecycle": {
+        "audit_sha256": "",
+        "controller_exit_code": 1,
+        "fleet_owner_token": "9a1ebebae15c443bbec8adda833c1312",
+        "hub_publication_failed": false,
+        "run_id": "20261027-191441-2597566",
+        "status": "failed",
+        "version": 1,
+        "workspace_root": "/home/boxes/rose"
+      },
+      "child_exit": "143\n"
+    },
+    {
+      "job": {
+        "index": 2,
+        "job_id": "r001-j0002",
+        "task": "polar-bu-002",
+        "run": 1,
+        "status": "cancelled",
+        "controller_exit_code": 1,
+        "started_at": "2026-10-27T19:14:38.168189+00:00",
+        "finished_at": "2026-10-27T19:33:05.879601+00:00",
+        "wall_clock_seconds": 1107.711,
+        "controller_lock": "cloudbench-controller-campaign-68c72ebb0198-2.lock",
+        "log": "/home/boxes/rose/.context/benchmarks/campaigns/campaign-20261027-191411-2591810/r001-j0002.log",
+        "attempt": 1,
+        "attempts": [],
+        "controller_pid": 2597567,
+        "task_status": "INFRA_ERROR",
+        "infra_failure": true,
+        "terminal_task": false
+      },
+      "card": {
+        "run_id": "20261027-191440-2597567",
+        "code": "descend/polar-k3-recovery@34ff3f23e (clean)",
+        "per_task": [
+          {
+            "name": "polar-bu-002",
+            "status": "error",
+            "duration_s": null,
+            "cost_usd": null,
+            "agent_url": null,
+            "agent_id": null,
+            "failure_reason": "no current run artifact produced",
+            "lifecycle_stage": "teardown",
+            "tokens_in": 0,
+            "tokens_out": 0,
+            "world_model_mode": "real",
+            "fast_mode": null,
+            "infra_usd": null
+          }
+        ],
+        "execution_provenance": {
+          "base_sha": "34ff3f23e6efa9ced9ff75732357df973db14e86"
+        }
+      },
+      "lifecycle": {
+        "audit_sha256": "",
+        "controller_exit_code": 1,
+        "fleet_owner_token": "49927b5b138945249cb5e040f87159c8",
+        "hub_publication_failed": false,
+        "run_id": "20261027-191440-2597567",
+        "status": "failed",
+        "version": 1,
+        "workspace_root": "/home/boxes/rose"
+      },
+      "child_exit": "143\n"
+    },
+    {
+      "job": {
+        "index": 3,
+        "job_id": "r001-j0003",
+        "task": "polar-bu-003",
+        "run": 1,
+        "status": "cancelled",
+        "controller_exit_code": 1,
+        "started_at": "2026-10-27T19:14:38.168768+00:00",
+        "finished_at": "2026-10-27T19:33:14.555402+00:00",
+        "wall_clock_seconds": 1116.387,
+        "controller_lock": "cloudbench-controller-campaign-68c72ebb0198-3.lock",
+        "log": "/home/boxes/rose/.context/benchmarks/campaigns/campaign-20261027-191411-2591810/r001-j0003.log",
+        "attempt": 1,
+        "attempts": [],
+        "controller_pid": 2597568,
+        "task_status": "INFRA_ERROR",
+        "infra_failure": true,
+        "terminal_task": false
+      },
+      "card": {
+        "run_id": "20261027-191440-2597568",
+        "code": "descend/polar-k3-recovery@34ff3f23e (clean)",
+        "per_task": [
+          {
+            "name": "polar-bu-003",
+            "status": "error",
+            "duration_s": null,
+            "cost_usd": null,
+            "agent_url": null,
+            "agent_id": null,
+            "failure_reason": "no current run artifact produced",
+            "lifecycle_stage": "teardown",
+            "tokens_in": 0,
+            "tokens_out": 0,
+            "world_model_mode": "real",
+            "fast_mode": null,
+            "infra_usd": null
+          }
+        ],
+        "execution_provenance": {
+          "base_sha": "34ff3f23e6efa9ced9ff75732357df973db14e86"
+        }
+      },
+      "lifecycle": {
+        "audit_sha256": "",
+        "controller_exit_code": 1,
+        "fleet_owner_token": "782abf5a83ed4a309443a39fdab5f276",
+        "hub_publication_failed": false,
+        "run_id": "20261027-191440-2597568",
+        "status": "failed",
+        "version": 1,
+        "workspace_root": "/home/boxes/rose"
+      },
+      "child_exit": "143\n"
+    },
+    {
+      "job": {
+        "index": 4,
+        "job_id": "r001-j0004",
+        "task": "polar-bu-004",
+        "run": 1,
+        "status": "cancelled",
+        "controller_exit_code": 1,
+        "started_at": "2026-10-27T19:14:38.169428+00:00",
+        "finished_at": "2026-10-27T19:33:05.880396+00:00",
+        "wall_clock_seconds": 1107.711,
+        "controller_lock": "cloudbench-controller-campaign-68c72ebb0198-4.lock",
+        "log": "/home/boxes/rose/.context/benchmarks/campaigns/campaign-20261027-191411-2591810/r001-j0004.log",
+        "attempt": 1,
+        "attempts": [],
+        "controller_pid": 2597570,
+        "task_status": "INFRA_ERROR",
+        "infra_failure": true,
+        "terminal_task": false
+      },
+      "card": {
+        "run_id": "20261027-191441-2597570",
+        "code": "descend/polar-k3-recovery@34ff3f23e (clean)",
+        "per_task": [
+          {
+            "name": "polar-bu-004",
+            "status": "error",
+            "duration_s": null,
+            "cost_usd": null,
+            "agent_url": null,
+            "agent_id": null,
+            "failure_reason": "no current run artifact produced",
+            "lifecycle_stage": "teardown",
+            "tokens_in": 0,
+            "tokens_out": 0,
+            "world_model_mode": "real",
+            "fast_mode": null,
+            "infra_usd": null
+          }
+        ],
+        "execution_provenance": {
+          "base_sha": "34ff3f23e6efa9ced9ff75732357df973db14e86"
+        }
+      },
+      "lifecycle": {
+        "audit_sha256": "",
+        "controller_exit_code": 1,
+        "fleet_owner_token": "0cfe54780a2a4ee98c845bb8be099030",
+        "hub_publication_failed": false,
+        "run_id": "20261027-191441-2597570",
+        "status": "failed",
+        "version": 1,
+        "workspace_root": "/home/boxes/rose"
+      },
+      "child_exit": "143\n"
+    },
+    {
+      "job": {
+        "index": 5,
+        "job_id": "r001-j0005",
+        "task": "polar-bu-005",
+        "run": 1,
+        "status": "cancelled",
+        "controller_exit_code": 1,
+        "started_at": "2026-10-27T19:14:38.170117+00:00",
+        "finished_at": "2026-10-27T19:33:05.881120+00:00",
+        "wall_clock_seconds": 1107.711,
+        "controller_lock": "cloudbench-controller-campaign-68c72ebb0198-5.lock",
+        "log": "/home/boxes/rose/.context/benchmarks/campaigns/campaign-20261027-191411-2591810/r001-j0005.log",
+        "attempt": 1,
+        "attempts": [],
+        "controller_pid": 2597572,
+        "task_status": "INFRA_ERROR",
+        "infra_failure": true,
+        "terminal_task": false
+      },
+      "card": {
+        "run_id": "20261027-191440-2597572",
+        "code": "descend/polar-k3-recovery@34ff3f23e (clean)",
+        "per_task": [
+          {
+            "name": "polar-bu-005",
+            "status": "error",
+            "duration_s": null,
+            "cost_usd": null,
+            "agent_url": null,
+            "agent_id": null,
+            "failure_reason": "no current run artifact produced",
+            "lifecycle_stage": "teardown",
+            "tokens_in": 0,
+            "tokens_out": 0,
+            "world_model_mode": "real",
+            "fast_mode": null,
+            "infra_usd": null
+          }
+        ],
+        "execution_provenance": {
+          "base_sha": "34ff3f23e6efa9ced9ff75732357df973db14e86"
+        }
+      },
+      "lifecycle": {
+        "audit_sha256": "",
+        "controller_exit_code": 1,
+        "fleet_owner_token": "99ad497593ed4c1d895146588cc32c4e",
+        "hub_publication_failed": false,
+        "run_id": "20261027-191440-2597572",
+        "status": "failed",
+        "version": 1,
+        "workspace_root": "/home/boxes/rose"
+      },
+      "child_exit": "143\n"
+    },
+    {
+      "job": {
+        "index": 6,
+        "job_id": "r001-j0006",
+        "task": "polar-bu-006",
+        "run": 1,
+        "status": "cancelled",
+        "controller_exit_code": 1,
+        "started_at": "2026-10-27T19:14:38.170810+00:00",
+        "finished_at": "2026-10-27T19:33:05.881866+00:00",
+        "wall_clock_seconds": 1107.711,
+        "controller_lock": "cloudbench-controller-campaign-68c72ebb0198-6.lock",
+        "log": "/home/boxes/rose/.context/benchmarks/campaigns/campaign-20261027-191411-2591810/r001-j0006.log",
+        "attempt": 1,
+        "attempts": [],
+        "controller_pid": 2597576,
+        "task_status": "INFRA_ERROR",
+        "infra_failure": true,
+        "terminal_task": false
+      },
+      "card": {
+        "run_id": "20261027-191441-2597576",
+        "code": "descend/polar-k3-recovery@34ff3f23e (clean)",
+        "per_task": [
+          {
+            "name": "polar-bu-006",
+            "status": "error",
+            "duration_s": null,
+            "cost_usd": null,
+            "agent_url": null,
+            "agent_id": null,
+            "failure_reason": "no current run artifact produced",
+            "lifecycle_stage": "teardown",
+            "tokens_in": 0,
+            "tokens_out": 0,
+            "world_model_mode": "real",
+            "fast_mode": null,
+            "infra_usd": null
+          }
+        ],
+        "execution_provenance": {
+          "base_sha": "34ff3f23e6efa9ced9ff75732357df973db14e86"
+        }
+      },
+      "lifecycle": {
+        "audit_sha256": "",
+        "controller_exit_code": 1,
+        "fleet_owner_token": "6eb585212a5140ca9893c140dcf3117f",
+        "hub_publication_failed": false,
+        "run_id": "20261027-191441-2597576",
+        "status": "failed",
+        "version": 1,
+        "workspace_root": "/home/boxes/rose"
+      },
+      "child_exit": "143\n"
+    },
+    {
+      "job": {
+        "index": 7,
+        "job_id": "r001-j0007",
+        "task": "polar-bu-007",
+        "run": 1,
+        "status": "cancelled",
+        "controller_exit_code": 1,
+        "started_at": "2026-10-27T19:14:38.171665+00:00",
+        "finished_at": "2026-10-27T19:33:23.228506+00:00",
+        "wall_clock_seconds": 1125.057,
+        "controller_lock": "cloudbench-controller-campaign-68c72ebb0198-7.lock",
+        "log": "/home/boxes/rose/.context/benchmarks/campaigns/campaign-20261027-191411-2591810/r001-j0007.log",
+        "attempt": 1,
+        "attempts": [],
+        "controller_pid": 2597578,
+        "task_status": "INFRA_ERROR",
+        "infra_failure": true,
+        "terminal_task": false
+      },
+      "card": {
+        "run_id": "20261027-191440-2597578",
+        "code": "descend/polar-k3-recovery@34ff3f23e (clean)",
+        "per_task": [
+          {
+            "name": "polar-bu-007",
+            "status": "error",
+            "duration_s": null,
+            "cost_usd": null,
+            "agent_url": null,
+            "agent_id": null,
+            "failure_reason": "no current run artifact produced",
+            "lifecycle_stage": "teardown",
+            "tokens_in": 0,
+            "tokens_out": 0,
+            "world_model_mode": "real",
+            "fast_mode": null,
+            "infra_usd": null
+          }
+        ],
+        "execution_provenance": {
+          "base_sha": "34ff3f23e6efa9ced9ff75732357df973db14e86"
+        }
+      },
+      "lifecycle": {
+        "audit_sha256": "",
+        "controller_exit_code": 1,
+        "fleet_owner_token": "ebefe07738aa4c6f97f41b0f15dec786",
+        "hub_publication_failed": false,
+        "run_id": "20261027-191440-2597578",
+        "status": "failed",
+        "version": 1,
+        "workspace_root": "/home/boxes/rose"
+      },
+      "child_exit": "143\n"
+    },
+    {
+      "job": {
+        "index": 8,
+        "job_id": "r001-j0008",
+        "task": "polar-bu-008",
+        "run": 1,
+        "status": "cancelled",
+        "controller_exit_code": 1,
+        "started_at": "2026-10-27T19:14:38.172884+00:00",
+        "finished_at": "2026-10-27T19:33:23.229664+00:00",
+        "wall_clock_seconds": 1125.057,
+        "controller_lock": "cloudbench-controller-campaign-68c72ebb0198-8.lock",
+        "log": "/home/boxes/rose/.context/benchmarks/campaigns/campaign-20261027-191411-2591810/r001-j0008.log",
+        "attempt": 1,
+        "attempts": [],
+        "controller_pid": 2597584,
+        "task_status": "INFRA_ERROR",
+        "infra_failure": true,
+        "terminal_task": false
+      },
+      "card": {
+        "run_id": "20261027-191441-2597584",
+        "code": "descend/polar-k3-recovery@34ff3f23e (clean)",
+        "per_task": [
+          {
+            "name": "polar-bu-008",
+            "status": "error",
+            "duration_s": null,
+            "cost_usd": null,
+            "agent_url": null,
+            "agent_id": null,
+            "failure_reason": "no current run artifact produced",
+            "lifecycle_stage": "teardown",
+            "tokens_in": 0,
+            "tokens_out": 0,
+            "world_model_mode": "real",
+            "fast_mode": null,
+            "infra_usd": null
+          }
+        ],
+        "execution_provenance": {
+          "base_sha": "34ff3f23e6efa9ced9ff75732357df973db14e86"
+        }
+      },
+      "lifecycle": {
+        "audit_sha256": "",
+        "controller_exit_code": 1,
+        "fleet_owner_token": "87a506f6d3b0494684508c638fd62456",
+        "hub_publication_failed": false,
+        "run_id": "20261027-191441-2597584",
+        "status": "failed",
+        "version": 1,
+        "workspace_root": "/home/boxes/rose"
+      },
+      "child_exit": "143\n"
+    },
+    {
+      "job": {
+        "index": 9,
+        "job_id": "r001-j0009",
+        "task": "polar-bu-009",
+        "run": 1,
+        "status": "cancelled",
+        "controller_exit_code": 1,
+        "started_at": "2026-10-27T19:14:38.183725+00:00",
+        "finished_at": "2026-10-27T19:33:14.556622+00:00",
+        "wall_clock_seconds": 1116.373,
+        "controller_lock": "cloudbench-controller-campaign-68c72ebb0198-9.lock",
+        "log": "/home/boxes/rose/.context/benchmarks/campaigns/campaign-20261027-191411-2591810/r001-j0009.log",
+        "attempt": 1,
+        "attempts": [],
+        "controller_pid": 2597588,
+        "task_status": "INFRA_ERROR",
+        "infra_failure": true,
+        "terminal_task": false
+      },
+      "card": {
+        "run_id": "20261027-191441-2597588",
+        "code": "descend/polar-k3-recovery@34ff3f23e (clean)",
+        "per_task": [
+          {
+            "name": "polar-bu-009",
+            "status": "error",
+            "duration_s": null,
+            "cost_usd": null,
+            "agent_url": null,
+            "agent_id": null,
+            "failure_reason": "no current run artifact produced",
+            "lifecycle_stage": "teardown",
+            "tokens_in": 0,
+            "tokens_out": 0,
+            "world_model_mode": "real",
+            "fast_mode": null,
+            "infra_usd": null
+          }
+        ],
+        "execution_provenance": {
+          "base_sha": "34ff3f23e6efa9ced9ff75732357df973db14e86"
+        }
+      },
+      "lifecycle": {
+        "audit_sha256": "",
+        "controller_exit_code": 1,
+        "fleet_owner_token": "06f949e5e2e642d890d295e54b430e17",
+        "hub_publication_failed": false,
+        "run_id": "20261027-191441-2597588",
+        "status": "failed",
+        "version": 1,
+        "workspace_root": "/home/boxes/rose"
+      },
+      "child_exit": "143\n"
+    },
+    {
+      "job": {
+        "index": 10,
+        "job_id": "r001-j0010",
+        "task": "polar-bu-010",
+        "run": 1,
+        "status": "cancelled",
+        "controller_exit_code": 1,
+        "started_at": "2026-10-27T19:14:38.197457+00:00",
+        "finished_at": "2026-10-27T19:33:36.865257+00:00",
+        "wall_clock_seconds": 1138.668,
+        "controller_lock": "cloudbench-controller-campaign-68c72ebb0198-10.lock",
+        "log": "/home/boxes/rose/.context/benchmarks/campaigns/campaign-20261027-191411-2591810/r001-j0010.log",
+        "attempt": 1,
+        "attempts": [],
+        "controller_pid": 2597603,
+        "task_status": "INFRA_ERROR",
+        "infra_failure": true,
+        "terminal_task": false
+      },
+      "card": {
+        "run_id": "20261027-191440-2597603",
+        "code": "descend/polar-k3-recovery@34ff3f23e (clean)",
+        "per_task": [
+          {
+            "name": "polar-bu-010",
+            "status": "error",
+            "duration_s": null,
+            "cost_usd": null,
+            "agent_url": null,
+            "agent_id": null,
+            "failure_reason": "no current run artifact produced",
+            "lifecycle_stage": "teardown",
+            "tokens_in": 0,
+            "tokens_out": 0,
+            "world_model_mode": "real",
+            "fast_mode": null,
+            "infra_usd": null
+          }
+        ],
+        "execution_provenance": {
+          "base_sha": "34ff3f23e6efa9ced9ff75732357df973db14e86"
+        }
+      },
+      "lifecycle": {
+        "audit_sha256": "",
+        "controller_exit_code": 1,
+        "fleet_owner_token": "157bdc71d73840988c2ed624745520c7",
+        "hub_publication_failed": false,
+        "run_id": "20261027-191440-2597603",
+        "status": "failed",
+        "version": 1,
+        "workspace_root": "/home/boxes/rose"
+      },
+      "child_exit": "143\n"
+    },
+    {
+      "job": {
+        "index": 11,
+        "job_id": "r002-j0011",
+        "task": "polar-bu-001",
+        "run": 2,
+        "status": "cancelled",
+        "controller_exit_code": 1,
+        "started_at": "2026-10-27T19:14:38.224220+00:00",
+        "finished_at": "2026-10-27T19:33:05.882578+00:00",
+        "wall_clock_seconds": 1107.658,
+        "controller_lock": "cloudbench-controller-campaign-68c72ebb0198-11.lock",
+        "log": "/home/boxes/rose/.context/benchmarks/campaigns/campaign-20261027-191411-2591810/r002-j0011.log",
+        "attempt": 1,
+        "attempts": [],
+        "controller_pid": 2597606,
+        "task_status": "INFRA_ERROR",
+        "infra_failure": true,
+        "terminal_task": false
+      },
+      "card": {
+        "run_id": "20261027-191440-2597606",
+        "code": "descend/polar-k3-recovery@34ff3f23e (clean)",
+        "per_task": [
+          {
+            "name": "polar-bu-001",
+            "status": "error",
+            "duration_s": null,
+            "cost_usd": null,
+            "agent_url": null,
+            "agent_id": null,
+            "failure_reason": "no current run artifact produced",
+            "lifecycle_stage": "teardown",
+            "tokens_in": 0,
+            "tokens_out": 0,
+            "world_model_mode": "real",
+            "fast_mode": null,
+            "infra_usd": null
+          }
+        ],
+        "execution_provenance": {
+          "base_sha": "34ff3f23e6efa9ced9ff75732357df973db14e86"
+        }
+      },
+      "lifecycle": {
+        "audit_sha256": "",
+        "controller_exit_code": 1,
+        "fleet_owner_token": "2f137275c52b44109147f038310efdee",
+        "hub_publication_failed": false,
+        "run_id": "20261027-191440-2597606",
+        "status": "failed",
+        "version": 1,
+        "workspace_root": "/home/boxes/rose"
+      },
+      "child_exit": "143\n"
+    },
+    {
+      "job": {
+        "index": 12,
+        "job_id": "r002-j0012",
+        "task": "polar-bu-002",
+        "run": 2,
+        "status": "cancelled",
+        "controller_exit_code": 1,
+        "started_at": "2026-10-27T19:14:38.233657+00:00",
+        "finished_at": "2026-10-27T19:33:14.557952+00:00",
+        "wall_clock_seconds": 1116.324,
+        "controller_lock": "cloudbench-controller-campaign-68c72ebb0198-12.lock",
+        "log": "/home/boxes/rose/.context/benchmarks/campaigns/campaign-20261027-191411-2591810/r002-j0012.log",
+        "attempt": 1,
+        "attempts": [],
+        "controller_pid": 2597610,
+        "task_status": "INFRA_ERROR",
+        "infra_failure": true,
+        "terminal_task": false
+      },
+      "card": {
+        "run_id": "20261027-191440-2597610",
+        "code": "descend/polar-k3-recovery@34ff3f23e (clean)",
+        "per_task": [
+          {
+            "name": "polar-bu-002",
+            "status": "error",
+            "duration_s": null,
+            "cost_usd": null,
+            "agent_url": null,
+            "agent_id": null,
+            "failure_reason": "no current run artifact produced",
+            "lifecycle_stage": "teardown",
+            "tokens_in": 0,
+            "tokens_out": 0,
+            "world_model_mode": "real",
+            "fast_mode": null,
+            "infra_usd": null
+          }
+        ],
+        "execution_provenance": {
+          "base_sha": "34ff3f23e6efa9ced9ff75732357df973db14e86"
+        }
+      },
+      "lifecycle": {
+        "audit_sha256": "",
+        "controller_exit_code": 1,
+        "fleet_owner_token": "fcd867750293490f9f243e9f13386cee",
+        "hub_publication_failed": false,
+        "run_id": "20261027-191440-2597610",
+        "status": "failed",
+        "version": 1,
+        "workspace_root": "/home/boxes/rose"
+      },
+      "child_exit": "143\n"
+    },
+    {
+      "job": {
+        "index": 13,
+        "job_id": "r002-j0013",
+        "task": "polar-bu-003",
+        "run": 2,
+        "status": "cancelled",
+        "controller_exit_code": 1,
+        "started_at": "2026-10-27T19:14:38.249677+00:00",
+        "finished_at": "2026-10-27T19:33:23.230481+00:00",
+        "wall_clock_seconds": 1124.981,
+        "controller_lock": "cloudbench-controller-campaign-68c72ebb0198-13.lock",
+        "log": "/home/boxes/rose/.context/benchmarks/campaigns/campaign-20261027-191411-2591810/r002-j0013.log",
+        "attempt": 1,
+        "attempts": [],
+        "controller_pid": 2597615,
+        "task_status": "INFRA_ERROR",
+        "infra_failure": true,
+        "terminal_task": false
+      },
+      "card": {
+        "run_id": "20261027-191440-2597615",
+        "code": "descend/polar-k3-recovery@34ff3f23e (clean)",
+        "per_task": [
+          {
+            "name": "polar-bu-003",
+            "status": "error",
+            "duration_s": null,
+            "cost_usd": null,
+            "agent_url": null,
+            "agent_id": null,
+            "failure_reason": "no current run artifact produced",
+            "lifecycle_stage": "teardown",
+            "tokens_in": 0,
+            "tokens_out": 0,
+            "world_model_mode": "real",
+            "fast_mode": null,
+            "infra_usd": null
+          }
+        ],
+        "execution_provenance": {
+          "base_sha": "34ff3f23e6efa9ced9ff75732357df973db14e86"
+        }
+      },
+      "lifecycle": {
+        "audit_sha256": "",
+        "controller_exit_code": 1,
+        "fleet_owner_token": "8621d5dec2674b9981b8d7796205279d",
+        "hub_publication_failed": false,
+        "run_id": "20261027-191440-2597615",
+        "status": "failed",
+        "version": 1,
+        "workspace_root": "/home/boxes/rose"
+      },
+      "child_exit": "143\n"
+    },
+    {
+      "job": {
+        "index": 14,
+        "job_id": "r002-j0014",
+        "task": "polar-bu-004",
+        "run": 2,
+        "status": "cancelled",
+        "controller_exit_code": 1,
+        "started_at": "2026-10-27T19:14:38.262090+00:00",
+        "finished_at": "2026-10-27T19:33:14.558938+00:00",
+        "wall_clock_seconds": 1116.297,
+        "controller_lock": "cloudbench-controller-campaign-68c72ebb0198-14.lock",
+        "log": "/home/boxes/rose/.context/benchmarks/campaigns/campaign-20261027-191411-2591810/r002-j0014.log",
+        "attempt": 1,
+        "attempts": [],
+        "controller_pid": 2597622,
+        "task_status": "INFRA_ERROR",
+        "infra_failure": true,
+        "terminal_task": false
+      },
+      "card": {
+        "run_id": "20261027-191440-2597622",
+        "code": "descend/polar-k3-recovery@34ff3f23e (clean)",
+        "per_task": [
+          {
+            "name": "polar-bu-004",
+            "status": "error",
+            "duration_s": null,
+            "cost_usd": null,
+            "agent_url": null,
+            "agent_id": null,
+            "failure_reason": "no current run artifact produced",
+            "lifecycle_stage": "teardown",
+            "tokens_in": 0,
+            "tokens_out": 0,
+            "world_model_mode": "real",
+            "fast_mode": null,
+            "infra_usd": null
+          }
+        ],
+        "execution_provenance": {
+          "base_sha": "34ff3f23e6efa9ced9ff75732357df973db14e86"
+        }
+      },
+      "lifecycle": {
+        "audit_sha256": "",
+        "controller_exit_code": 1,
+        "fleet_owner_token": "5d5745976e374193866e5420bc3b0824",
+        "hub_publication_failed": false,
+        "run_id": "20261027-191440-2597622",
+        "status": "failed",
+        "version": 1,
+        "workspace_root": "/home/boxes/rose"
+      },
+      "child_exit": "143\n"
+    },
+    {
+      "job": {
+        "index": 15,
+        "job_id": "r002-j0015",
+        "task": "polar-bu-005",
+        "run": 2,
+        "status": "cancelled",
+        "controller_exit_code": 143,
+        "started_at": "2026-10-27T19:14:38.282399+00:00",
+        "finished_at": "2026-10-27T19:33:29.850168+00:00",
+        "wall_clock_seconds": 1131.568,
+        "controller_lock": "cloudbench-controller-campaign-68c72ebb0198-15.lock",
+        "log": "/home/boxes/rose/.context/benchmarks/campaigns/campaign-20261027-191411-2591810/r002-j0015.log",
+        "attempt": 1,
+        "attempts": [],
+        "controller_pid": 2597625,
+        "task_status": "INFRA_ERROR",
+        "infra_failure": true,
+        "terminal_task": false
+      },
+      "card": {
+        "run_id": "20261027-191440-2597625",
+        "code": "descend/polar-k3-recovery@34ff3f23e (clean)",
+        "per_task": [
+          {
+            "name": "polar-bu-005",
+            "status": "error",
+            "duration_s": null,
+            "cost_usd": null,
+            "agent_url": null,
+            "agent_id": null,
+            "failure_reason": "no current run artifact produced",
+            "lifecycle_stage": "released",
+            "tokens_in": 0,
+            "tokens_out": 0,
+            "world_model_mode": "real",
+            "fast_mode": null,
+            "infra_usd": null
+          }
+        ],
+        "execution_provenance": {
+          "base_sha": "34ff3f23e6efa9ced9ff75732357df973db14e86"
+        }
+      },
+      "lifecycle": {
+        "audit_sha256": "cd99f8b6e783d9280e1cca420ba544e18808c22fad5a4708bde9aad41658efa8",
+        "controller_exit_code": 143,
+        "fleet_owner_token": "85e9628f86e64bafb947ab0081645e9a",
+        "hub_publication_failed": false,
+        "run_id": "20261027-191440-2597625",
+        "status": "failed",
+        "version": 1,
+        "workspace_root": "/home/boxes/rose"
+      },
+      "meta": "version=1\nfleet_owner_token=85e9628f86e64bafb947ab0081645e9a\nrun_id=20261027-191440-2597625\napp=navi-whisper-lux-bench\nworkspace_root=/home/boxes/rose\nstatus=provider-teardown-verified\nhub_disposition=retained-exact-owner-transfer-required\nhub_owner_file=/home/boxes/rose/.context/fleet/runs/_hub/agent-link-server.8765.a7acb8824c6eabd4d6ff0f6c7bebdf91.owner\nhub_owner_token=a7acb8824c6eabd4d6ff0f6c7bebdf91\nhub_pid=640582\nhub_pid_start=proc-start:6af9c450-c2c8-4647-a911-8ab19a296bbf:6748330\nhub_argv_sha256=46f64439b88bfe7bd91c6159a27b6f25faf9b83aea17b177db842688e3ab03bc\n",
+      "provider-teardown-verified.epoch": "1793129596\n",
+      "child_exit": "143\n"
+    },
+    {
+      "job": {
+        "index": 16,
+        "job_id": "r002-j0016",
+        "task": "polar-bu-006",
+        "run": 2,
+        "status": "cancelled",
+        "controller_exit_code": 1,
+        "started_at": "2026-10-27T19:14:38.296204+00:00",
+        "finished_at": "2026-10-27T19:33:05.883337+00:00",
+        "wall_clock_seconds": 1107.587,
+        "controller_lock": "cloudbench-controller-campaign-68c72ebb0198-16.lock",
+        "log": "/home/boxes/rose/.context/benchmarks/campaigns/campaign-20261027-191411-2591810/r002-j0016.log",
+        "attempt": 1,
+        "attempts": [],
+        "controller_pid": 2597631,
+        "task_status": "INFRA_ERROR",
+        "infra_failure": true,
+        "terminal_task": false
+      },
+      "card": {
+        "run_id": "20261027-191440-2597631",
+        "code": "descend/polar-k3-recovery@34ff3f23e (clean)",
+        "per_task": [
+          {
+            "name": "polar-bu-006",
+            "status": "error",
+            "duration_s": null,
+            "cost_usd": null,
+            "agent_url": null,
+            "agent_id": null,
+            "failure_reason": "no current run artifact produced",
+            "lifecycle_stage": "teardown",
+            "tokens_in": 0,
+            "tokens_out": 0,
+            "world_model_mode": "real",
+            "fast_mode": null,
+            "infra_usd": null
+          }
+        ],
+        "execution_provenance": {
+          "base_sha": "34ff3f23e6efa9ced9ff75732357df973db14e86"
+        }
+      },
+      "lifecycle": {
+        "audit_sha256": "",
+        "controller_exit_code": 1,
+        "fleet_owner_token": "a6b82b743f0941e098156bc206c55ad2",
+        "hub_publication_failed": false,
+        "run_id": "20261027-191440-2597631",
+        "status": "failed",
+        "version": 1,
+        "workspace_root": "/home/boxes/rose"
+      },
+      "child_exit": "143\n"
+    },
+    {
+      "job": {
+        "index": 17,
+        "job_id": "r002-j0017",
+        "task": "polar-bu-007",
+        "run": 2,
+        "status": "cancelled",
+        "controller_exit_code": 1,
+        "started_at": "2026-10-27T19:14:38.321694+00:00",
+        "finished_at": "2026-10-27T19:33:14.560056+00:00",
+        "wall_clock_seconds": 1116.238,
+        "controller_lock": "cloudbench-controller-campaign-68c72ebb0198-17.lock",
+        "log": "/home/boxes/rose/.context/benchmarks/campaigns/campaign-20261027-191411-2591810/r002-j0017.log",
+        "attempt": 1,
+        "attempts": [],
+        "controller_pid": 2597636,
+        "task_status": "INFRA_ERROR",
+        "infra_failure": true,
+        "terminal_task": false
+      },
+      "card": {
+        "run_id": "20261027-191440-2597636",
+        "code": "descend/polar-k3-recovery@34ff3f23e (clean)",
+        "per_task": [
+          {
+            "name": "polar-bu-007",
+            "status": "error",
+            "duration_s": null,
+            "cost_usd": null,
+            "agent_url": null,
+            "agent_id": null,
+            "failure_reason": "no current run artifact produced",
+            "lifecycle_stage": "teardown",
+            "tokens_in": 0,
+            "tokens_out": 0,
+            "world_model_mode": "real",
+            "fast_mode": null,
+            "infra_usd": null
+          }
+        ],
+        "execution_provenance": {
+          "base_sha": "34ff3f23e6efa9ced9ff75732357df973db14e86"
+        }
+      },
+      "lifecycle": {
+        "audit_sha256": "",
+        "controller_exit_code": 1,
+        "fleet_owner_token": "2674cbe1a90842d79a4955c4fe0bb5fd",
+        "hub_publication_failed": false,
+        "run_id": "20261027-191440-2597636",
+        "status": "failed",
+        "version": 1,
+        "workspace_root": "/home/boxes/rose"
+      },
+      "child_exit": "125\n"
+    },
+    {
+      "job": {
+        "index": 18,
+        "job_id": "r002-j0018",
+        "task": "polar-bu-008",
+        "run": 2,
+        "status": "cancelled",
+        "controller_exit_code": 1,
+        "started_at": "2026-10-27T19:14:38.345902+00:00",
+        "finished_at": "2026-10-27T19:33:14.560902+00:00",
+        "wall_clock_seconds": 1116.215,
+        "controller_lock": "cloudbench-controller-campaign-68c72ebb0198-18.lock",
+        "log": "/home/boxes/rose/.context/benchmarks/campaigns/campaign-20261027-191411-2591810/r002-j0018.log",
+        "attempt": 1,
+        "attempts": [],
+        "controller_pid": 2597644,
+        "task_status": "INFRA_ERROR",
+        "infra_failure": true,
+        "terminal_task": false
+      },
+      "card": {
+        "run_id": "20261027-191440-2597644",
+        "code": "descend/polar-k3-recovery@34ff3f23e (clean)",
+        "per_task": [
+          {
+            "name": "polar-bu-008",
+            "status": "error",
+            "duration_s": null,
+            "cost_usd": null,
+            "agent_url": null,
+            "agent_id": null,
+            "failure_reason": "no current run artifact produced",
+            "lifecycle_stage": "teardown",
+            "tokens_in": 0,
+            "tokens_out": 0,
+            "world_model_mode": "real",
+            "fast_mode": null,
+            "infra_usd": null
+          }
+        ],
+        "execution_provenance": {
+          "base_sha": "34ff3f23e6efa9ced9ff75732357df973db14e86"
+        }
+      },
+      "lifecycle": {
+        "audit_sha256": "",
+        "controller_exit_code": 1,
+        "fleet_owner_token": "45979c6ca18e4cb8b13e7407ca2d153a",
+        "hub_publication_failed": false,
+        "run_id": "20261027-191440-2597644",
+        "status": "failed",
+        "version": 1,
+        "workspace_root": "/home/boxes/rose"
+      },
+      "child_exit": "143\n"
+    },
+    {
+      "job": {
+        "index": 19,
+        "job_id": "r002-j0019",
+        "task": "polar-bu-009",
+        "run": 2,
+        "status": "cancelled",
+        "controller_exit_code": 1,
+        "started_at": "2026-10-27T19:14:38.369890+00:00",
+        "finished_at": "2026-10-27T19:33:05.884072+00:00",
+        "wall_clock_seconds": 1107.514,
+        "controller_lock": "cloudbench-controller-campaign-68c72ebb0198-19.lock",
+        "log": "/home/boxes/rose/.context/benchmarks/campaigns/campaign-20261027-191411-2591810/r002-j0019.log",
+        "attempt": 1,
+        "attempts": [],
+        "controller_pid": 2597650,
+        "task_status": "INFRA_ERROR",
+        "infra_failure": true,
+        "terminal_task": false
+      },
+      "card": {
+        "run_id": "20261027-191440-2597650",
+        "code": "descend/polar-k3-recovery@34ff3f23e (clean)",
+        "per_task": [
+          {
+            "name": "polar-bu-009",
+            "status": "error",
+            "duration_s": null,
+            "cost_usd": null,
+            "agent_url": null,
+            "agent_id": null,
+            "failure_reason": "no current run artifact produced",
+            "lifecycle_stage": "teardown",
+            "tokens_in": 0,
+            "tokens_out": 0,
+            "world_model_mode": "real",
+            "fast_mode": null,
+            "infra_usd": null
+          }
+        ],
+        "execution_provenance": {
+          "base_sha": "34ff3f23e6efa9ced9ff75732357df973db14e86"
+        }
+      },
+      "lifecycle": {
+        "audit_sha256": "",
+        "controller_exit_code": 1,
+        "fleet_owner_token": "1d5a2458e31c49d5b9bfb7623d766f5f",
+        "hub_publication_failed": false,
+        "run_id": "20261027-191440-2597650",
+        "status": "failed",
+        "version": 1,
+        "workspace_root": "/home/boxes/rose"
+      },
+      "child_exit": "143\n"
+    },
+    {
+      "job": {
+        "index": 20,
+        "job_id": "r002-j0020",
+        "task": "polar-bu-010",
+        "run": 2,
+        "status": "cancelled",
+        "controller_exit_code": 1,
+        "started_at": "2026-10-27T19:14:38.396131+00:00",
+        "finished_at": "2026-10-27T19:32:57.743358+00:00",
+        "wall_clock_seconds": 1099.347,
+        "controller_lock": "cloudbench-controller-campaign-68c72ebb0198-20.lock",
+        "log": "/home/boxes/rose/.context/benchmarks/campaigns/campaign-20261027-191411-2591810/r002-j0020.log",
+        "attempt": 1,
+        "attempts": [],
+        "controller_pid": 2597656,
+        "task_status": "INFRA_ERROR",
+        "infra_failure": true,
+        "terminal_task": false
+      },
+      "card": {
+        "run_id": "20261027-191441-2597656",
+        "code": "descend/polar-k3-recovery@34ff3f23e (clean)",
+        "per_task": [
+          {
+            "name": "polar-bu-010",
+            "status": "error",
+            "duration_s": null,
+            "cost_usd": null,
+            "agent_url": null,
+            "agent_id": null,
+            "failure_reason": "no current run artifact produced",
+            "lifecycle_stage": "teardown",
+            "tokens_in": 0,
+            "tokens_out": 0,
+            "world_model_mode": "real",
+            "fast_mode": null,
+            "infra_usd": null
+          }
+        ],
+        "execution_provenance": {
+          "base_sha": "34ff3f23e6efa9ced9ff75732357df973db14e86"
+        }
+      },
+      "lifecycle": {
+        "audit_sha256": "",
+        "controller_exit_code": 1,
+        "fleet_owner_token": "f4aeaad379684f8f821c0428cf1283e5",
+        "hub_publication_failed": false,
+        "run_id": "20261027-191441-2597656",
+        "status": "failed",
+        "version": 1,
+        "workspace_root": "/home/boxes/rose"
+      },
+      "child_exit": "143\n"
+    }
+  ]
+}

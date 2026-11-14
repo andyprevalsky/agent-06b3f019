@@ -46,6 +46,28 @@ The PR is merged, every applicable production lane is verified or has a recorded
 - Sync with main once, first (`scripts/deploy sync`), and never during the run; a merge conflict reported by `scripts/deploy merge` forces another sync, then rerun the affected gates.
 - Resolve sync conflicts keeping all of main's code and the branch's intent; never discard main's side.
 
+### Safe integration during an already active deploy
+
+- If an active deploy must integrate newer main under an explicit release, fetch and inspect first and merge only after that checkout's source consumers finish. Keep the compact CLI workflow; do not restart the deploy clock or reset the existing cycle.
+- Keep every originally selected check, native failure, qualified exception, pending repair, retained resource and financial obligation. A source change grants no new-source PASS. Reuse only the runner's verified unchanged-input contract; execute changed or unknown inputs on the merged source.
+- Refresh only changed dependency inputs after their consumers finish. A required local database refresh waits for every consumer of that exact existing database; `setup-db.sh` does not discover test consumers. Preserve private configuration and mark the refresh pending until it actually finishes.
+- Resource-only cleanup never grants execution credit: preserve empty/invalid/mismatched-hash evidence, private history backups, exact ownership and FD/maps plus post-scan rehash guards. Do not remove protected mounts, objects, refs, caches, configuration or financial debts as a sync shortcut.
+- An explicitly elected legacy AgentCard gate stays SKIPPED, never PASS or settled funds, across integration; the current CLI's ordinary smoke selection remains unchanged. Preserve historical no-retry custody rather than minting replacement cards.
+- Prepared worker bindings, temp-directory corrections and backend coverage collection are explicit guarded runner operations, not permission to mutate running workers or the cycle during source integration.
+
+### Mass-agent deploy quarantine
+
+`test-mass-agent-run-0` is indefinitely excluded from every deploy by its
+`deploy_quarantine` catalog marker (explicit user instruction, 2026-11-10).
+Both local and cloud deploy selection honor this marker before the smoke floor,
+path triggers and history eligibility. Do not add it back through a custom deploy
+selection or require cache repairs for it. The test remains available for explicit
+manual benchmark runs; historical failures remain failures and exclusion grants
+no PASS credit. A source refresh records catalog-approved omissions without deleting
+prior attempts; every other previously selected check remains required.
+Other required deploy checks remain enabled. Removing this
+quarantine requires an explicit user instruction.
+
 ### Execution
 
 - Keep going until **Done** or a **Stopping condition**; a blocking result is work to resolve, not a reason to pause.

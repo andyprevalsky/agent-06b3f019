@@ -1,0 +1,19 @@
+{
+  "source": "4016ffaf50aeee0eff1b242d9e348f54896fdc02",
+  "goal": "In the endnote found in the second-to-last paragraph of page 11 of the book with the doi 10.2307/j.ctv9b2xdv, what date in November was the Wikipedia article accessed? Just give the day of the month.",
+  "schema": {
+    "fields": [
+      {
+        "description": "The day of the month in November when the Wikipedia article was accessed, as stated in the endnote in the second-to-last paragraph of page 11 of the book with DOI 10.2307/j.ctv9b2xdv.",
+        "name": "wikipedia_access_day",
+        "nullable": false,
+        "required": true,
+        "type": "int"
+      }
+    ]
+  },
+  "output": {
+    "wikipedia_access_day": 4
+  },
+  "expected_text": "4"
+}

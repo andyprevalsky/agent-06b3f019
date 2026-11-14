@@ -283,4 +283,202 @@ fi
 grep -Fq 'CLOUDBENCH_SOURCE_SCOPE=worker-runtime' "$ROOT_DIR/scripts/cloudbench-worker.sh" \
   || fail "autoscaled worker does not request its runtime-only source scope"
 
+# A fresh REAL primary with no HEAD otherwise transfers its whole tree for a
+# depth-1 fetch (descend I11: ~330 MB / ~230 s per copy at b08532144). The warm
+# image's read-only seed (a depth-1 bare repository of its pushed build commit)
+# lets the fetch negotiate from that commit, so only newer objects transfer;
+# the exact requested SHA, tree and bytes are verified as before. Transfer is
+# measured from the packs the fetch itself wrote (unpackLimit=1 keeps them packed).
+git -C "$TMP_ROOT/origin.git" config uploadpack.allowAnySHA1InWant true
+mkdir -p "$TMP_ROOT/source/agents/benchmarks/history"
+# The seed payload avoids span_durations*.jsonl: fresh primaries omit those shards (primary_runtime_omitted).
+head -c 3000000 /dev/urandom | base64 > "$TMP_ROOT/source/agents/benchmarks/history/task_durations.20261013.jsonl"
+git -C "$TMP_ROOT/source" add agents
+git -C "$TMP_ROOT/source" commit -qm "seed-era history"
+git -C "$TMP_ROOT/source" push -q origin HEAD:main
+seed_base="$(git -C "$TMP_ROOT/source" rev-parse HEAD)"
+printf '{"span":"after-seed"}\n' >> "$TMP_ROOT/source/agents/benchmarks/history/span_durations.jsonl"
+printf 'print("new")\n' > "$TMP_ROOT/source/agents/new_runtime.py"
+git -C "$TMP_ROOT/source" add agents
+git -C "$TMP_ROOT/source" commit -qm "requested source"
+git -C "$TMP_ROOT/source" push -q origin HEAD:main
+seed_target="$(git -C "$TMP_ROOT/source" rev-parse HEAD)"
+make_seed() {  # <dir> <commit>: the image builder's seed layout
+  git init -q --bare "$1"
+  git -C "$1" fetch -q --depth=1 "file://$TMP_ROOT/origin.git" "$2"
+  git -C "$1" update-ref refs/cloudbench/seed "$2"
+  printf '{"schema": "cloudbench-git-seed-v1", "commit": "%s"}\n' "$2" > "$1/cloudbench-seed.json"
+  git -C "$1" repack -q -a -d
+}
+fetched_bytes() {  # <checkout> <seed-dir>: bytes of packs the fetch wrote (not copied from the seed)
+  local total=0 pack name
+  for pack in "$1"/.git/objects/pack/pack-*.pack; do
+    name="${pack##*/}"
+    [ -n "${2:-}" ] && [ -e "$2/objects/pack/$name" ] && continue
+    total=$((total + $(wc -c < "$pack")))
+  done
+  echo "$total"
+}
+seeded_fetch() {  # <checkout> <seed-dir> <log>
+  GIT_CONFIG_COUNT=2 \
+  GIT_CONFIG_KEY_0="url.file://$TMP_ROOT/origin.git.insteadOf" \
+  GIT_CONFIG_VALUE_0=https://github.com/Rose-Ai-Labs/rose.git \
+  GIT_CONFIG_KEY_1=fetch.unpackLimit GIT_CONFIG_VALUE_1=1 \
+  CLOUDBENCH_GITHUB_TOKEN_B64="$(printf local-fixture-only | base64)" \
+  CLOUDBENCH_GIT_SEED_DIR="$2" \
+  CLOUDBENCH_FRESH_VOLUME=1 CLOUDBENCH_GIT_MIN_FREE_KB=1 \
+    bash "$FETCH_SCRIPT" "$1" "$seed_target" > "$3" 2>&1
+}
+assert_exact_checkout() {  # <checkout> <label>
+  [ "$(git -C "$1" rev-parse HEAD)" = "$seed_target" ] \
+    && [ "$(git -C "$1" rev-parse HEAD^{tree})" = "$(git -C "$TMP_ROOT/source" rev-parse "$seed_target^{tree}")" ] \
+    && cmp -s "$TMP_ROOT/source/agents/benchmarks/history/task_durations.20261013.jsonl" \
+              "$1/agents/benchmarks/history/task_durations.20261013.jsonl" \
+    && cmp -s "$TMP_ROOT/source/agents/new_runtime.py" "$1/agents/new_runtime.py" \
+    && ! git -C "$1" rev-parse --verify -q refs/cloudbench/seed >/dev/null \
+    && git -C "$1" fsck --connectivity-only --no-progress "$seed_target" >/dev/null 2>&1 \
+    || fail "$2: fresh checkout is not the exact requested source"
+}
+make_seed "$TMP_ROOT/seed" "$seed_base"
+seeded_fetch "$TMP_ROOT/unseeded" "$TMP_ROOT/no-seed-here" "$TMP_ROOT/unseeded.log" \
+  || fail "unseeded fresh fetch failed: $(cat "$TMP_ROOT/unseeded.log")"
+assert_exact_checkout "$TMP_ROOT/unseeded" unseeded
+unseeded_bytes="$(fetched_bytes "$TMP_ROOT/unseeded")"
+seeded_fetch "$TMP_ROOT/seeded" "$TMP_ROOT/seed" "$TMP_ROOT/seeded.log" \
+  || fail "seeded fresh fetch failed: $(cat "$TMP_ROOT/seeded.log")"
+assert_exact_checkout "$TMP_ROOT/seeded" seeded
+seeded_bytes="$(fetched_bytes "$TMP_ROOT/seeded" "$TMP_ROOT/seed")"
+grep -Fq "[cloudbench] git-seed $seed_base" "$TMP_ROOT/seeded.log" \
+  || fail "fresh fetch did not use the intact image seed"
+echo "seeded fresh fetch transferred $seeded_bytes of $unseeded_bytes unseeded bytes"
+[ "$unseeded_bytes" -gt 3000000 ] && [ $((seeded_bytes * 20)) -lt "$unseeded_bytes" ] \
+  || fail "image seed did not cut the fresh-volume transfer ($seeded_bytes vs $unseeded_bytes bytes)"
+# Fail closed to the ordinary unseeded fetch: corrupt pack bytes, a manifest
+# that does not name the seed's shallow commit, or a seed commit the server
+# never had. Each still yields the exact verified source and no seed residue.
+cp -a "$TMP_ROOT/seed" "$TMP_ROOT/seed-corrupt"
+corrupt_pack="$(ls "$TMP_ROOT"/seed-corrupt/objects/pack/pack-*.pack)"
+chmod u+w "$corrupt_pack"
+python3 -c 'import sys
+p=sys.argv[1]; b=bytearray(open(p,"rb").read()); b[len(b)//2]^=0xff; open(p,"wb").write(bytes(b))' "$corrupt_pack"
+cp -a "$TMP_ROOT/seed" "$TMP_ROOT/seed-stale"
+printf '{"schema": "cloudbench-git-seed-v1", "commit": "%s"}\n' "$seed_target" > "$TMP_ROOT/seed-stale/cloudbench-seed.json"
+# A damaged index with an intact pack must not name wrong content: swap the
+# offsets of two blobs that the requested tree checks out (the large history
+# ledger and payload.txt). The seed is imported through Git, which re-hashes.
+cp -a "$TMP_ROOT/seed" "$TMP_ROOT/seed-index"
+swap_a="$(git -C "$TMP_ROOT/source" rev-parse "$seed_base:agents/benchmarks/history/task_durations.20261013.jsonl")"
+swap_b="$(git -C "$TMP_ROOT/source" rev-parse "$seed_base:payload.txt")"
+python3 - "$(ls "$TMP_ROOT"/seed-index/objects/pack/pack-*.idx)" "$swap_a" "$swap_b" <<'PYIDX'
+import os, struct, sys
+path, first, second = sys.argv[1], bytes.fromhex(sys.argv[2]), bytes.fromhex(sys.argv[3])
+os.chmod(path, 0o644)
+data = bytearray(open(path, "rb").read())
+assert data[:4] == b"\377tOc" and struct.unpack(">I", data[4:8])[0] == 2
+count = struct.unpack(">I", data[8 + 255 * 4:8 + 256 * 4])[0]
+names = [bytes(data[8 + 256 * 4 + i * 20:8 + 256 * 4 + (i + 1) * 20]) for i in range(count)]
+offsets = 8 + 256 * 4 + count * 20 + count * 4
+i, j = names.index(first), names.index(second)
+a, b = offsets + 4 * i, offsets + 4 * j
+data[a:a + 4], data[b:b + 4] = data[b:b + 4], data[a:a + 4]
+open(path, "wb").write(bytes(data))
+PYIDX
+# An intact pack and index can still omit a reachable blob. Keep every other
+# reachable object so the missing blob is the only invalid seed boundary.
+git init -q --bare "$TMP_ROOT/seed-incomplete"
+missing_blob="$(git -C "$TMP_ROOT/source" rev-parse "$seed_base:payload.txt")"
+git -C "$TMP_ROOT/seed" rev-list --objects --no-object-names "$seed_base" \
+  | grep -vx "$missing_blob" \
+  | git -C "$TMP_ROOT/seed" pack-objects --stdout > "$TMP_ROOT/incomplete.pack"
+git -C "$TMP_ROOT/seed-incomplete" index-pack --stdin < "$TMP_ROOT/incomplete.pack" >/dev/null
+cp "$TMP_ROOT/seed/shallow" "$TMP_ROOT/seed/cloudbench-seed.json" "$TMP_ROOT/seed-incomplete/"
+git -C "$TMP_ROOT/seed-incomplete" update-ref refs/cloudbench/seed "$seed_base"
+git -C "$TMP_ROOT/seed-incomplete" cat-file -e "$seed_base^{tree}" \
+  || fail "incomplete fixture must retain the commit and root tree"
+if git -C "$TMP_ROOT/seed-incomplete" cat-file -e "$missing_blob" 2>/dev/null; then
+  fail "incomplete fixture accidentally retained the missing reachable blob"
+fi
+cp -a "$TMP_ROOT/seed" "$TMP_ROOT/seed-damaged-index"
+damaged_index="$(ls "$TMP_ROOT"/seed-damaged-index/objects/pack/pack-*.idx)"
+chmod u+w "$damaged_index"
+python3 - "$damaged_index" <<'PY_BAD_INDEX'
+import pathlib,sys
+path=pathlib.Path(sys.argv[1]);data=bytearray(path.read_bytes());data[-1]^=0xff;path.write_bytes(data)
+PY_BAD_INDEX
+for control in corrupt stale index incomplete damaged-index; do
+  seeded_fetch "$TMP_ROOT/fallback-$control" "$TMP_ROOT/seed-$control" "$TMP_ROOT/fallback-$control.log" \
+    || fail "$control seed broke the fresh fetch: $(cat "$TMP_ROOT/fallback-$control.log")"
+  # Native transport may repair an index checksum with correct object mapping;
+  # its regenerated destination must still satisfy every exact-source check.
+  if [ "$control" != damaged-index ]; then
+    grep -Fq 'git-seed ignored' "$TMP_ROOT/fallback-$control.log" || fail "$control seed was not ignored"
+    [ "$(fetched_bytes "$TMP_ROOT/fallback-$control")" -gt 3000000 ] || fail "$control seed objects leaked into the checkout"
+  fi
+  assert_exact_checkout "$TMP_ROOT/fallback-$control" "$control seed"
+done
+# HEAD-less does not imply an empty object store: a previous attempt may have
+# populated unrelated objects. Skipping an optional seed must preserve them.
+preexisting_checkout="$TMP_ROOT/fallback-preexisting"
+git init -q "$preexisting_checkout"
+git -C "$preexisting_checkout" remote add origin https://github.com/Rose-Ai-Labs/rose.git
+printf '%s\n' "$first_blob" | git -C "$TMP_ROOT/source" pack-objects --stdout > "$TMP_ROOT/unrelated.pack"
+unrelated_pack_sha="$(git -C "$preexisting_checkout" index-pack --stdin < "$TMP_ROOT/unrelated.pack" | awk '{print $2}')"
+unrelated_pack="$preexisting_checkout/.git/objects/pack/pack-$unrelated_pack_sha.pack"
+[ -f "$unrelated_pack" ] || fail "unrelated pack control was not created"
+seeded_fetch "$preexisting_checkout" "$TMP_ROOT/seed-stale" "$TMP_ROOT/preexisting.log" \
+  || fail "an ignored seed broke the existing HEAD-less object store"
+[ -f "$unrelated_pack" ] || fail "seed rollback deleted a preexisting unrelated pack"
+assert_exact_checkout "$preexisting_checkout" "preexisting object store"
+
+# Inject an interrupted native import after Git has written objects. Its
+# rollback must make ordinary exact fetch succeed with no corrupt pack residue.
+partial_checkout="$TMP_ROOT/fallback-partial-import"
+mkdir "$TMP_ROOT/import-bin"
+real_git="$(command -v git)"
+cat > "$TMP_ROOT/import-bin/git" <<'PARTIAL_IMPORT'
+#!/usr/bin/env bash
+case " $* " in
+  *"fallback-retry fetch "*"--negotiation-tip=refs/cloudbench/seed"*" origin "*)
+    printf 'seeded\n' >> "$RETRY_OBSERVED"
+    exit 55 ;;
+  *"fallback-partial-import fetch "*"file://"*"+refs/cloudbench/seed:refs/cloudbench/seed"*)
+    "$REAL_GIT" "$@" || exit $?
+    pack="$(find "$PARTIAL_CHECKOUT/.git/objects/pack" -name '*.pack' -print -quit)"
+    [ -n "$pack" ] || exit 93
+    head -c 16 "$pack" > "$pack.partial"
+    mv "$pack.partial" "$pack"
+    : > "$PARTIAL_IMPORT_OBSERVED"
+    exit 1 ;;
+esac
+exec "$REAL_GIT" "$@"
+PARTIAL_IMPORT
+chmod +x "$TMP_ROOT/import-bin/git"
+PATH="$TMP_ROOT/import-bin:$PATH" REAL_GIT="$real_git" PARTIAL_CHECKOUT="$partial_checkout" \
+PARTIAL_IMPORT_OBSERVED="$TMP_ROOT/partial-import-observed" \
+  seeded_fetch "$partial_checkout" "$TMP_ROOT/seed" "$TMP_ROOT/partial-import.log" \
+  || fail "partial seed import broke ordinary fetch: $(cat "$TMP_ROOT/partial-import.log")"
+[ -f "$TMP_ROOT/partial-import-observed" ] || fail "partial import control did not execute"
+assert_exact_checkout "$partial_checkout" "partial import"
+PATH="$TMP_ROOT/import-bin:$PATH" REAL_GIT="$real_git" RETRY_OBSERVED="$TMP_ROOT/retry-observed" \
+  seeded_fetch "$TMP_ROOT/fallback-retry" "$TMP_ROOT/seed" "$TMP_ROOT/retry.log" \
+  || fail "seeded fetch failure did not retry ordinary exact fetch: $(cat "$TMP_ROOT/retry.log")"
+[ "$(wc -l < "$TMP_ROOT/retry-observed" | tr -d ' ')" = 1 ] || fail "seeded fetch was retried more than once"
+grep -Fq 'git-seed fetch failed; retrying without the seed' "$TMP_ROOT/retry.log" || fail "unseeded retry was not recorded"
+assert_exact_checkout "$TMP_ROOT/fallback-retry" "once-only unseeded retry"
+
+git init -q "$TMP_ROOT/foreign"
+printf 'unrelated\n' > "$TMP_ROOT/foreign/x"
+git -C "$TMP_ROOT/foreign" add x
+git -C "$TMP_ROOT/foreign" -c user.name=t -c user.email=t@t commit -qm foreign
+git init -q --bare "$TMP_ROOT/foreign.git"
+git -C "$TMP_ROOT/foreign" push -q "$TMP_ROOT/foreign.git" HEAD:main
+git -C "$TMP_ROOT/foreign.git" config uploadpack.allowAnySHA1InWant true
+foreign_commit="$(git -C "$TMP_ROOT/foreign" rev-parse HEAD)"
+git init -q --bare "$TMP_ROOT/seed-foreign"
+git -C "$TMP_ROOT/seed-foreign" fetch -q --depth=1 "file://$TMP_ROOT/foreign.git" "$foreign_commit"
+printf '{"schema": "cloudbench-git-seed-v1", "commit": "%s"}\n' "$foreign_commit" > "$TMP_ROOT/seed-foreign/cloudbench-seed.json"
+seeded_fetch "$TMP_ROOT/fallback-foreign" "$TMP_ROOT/seed-foreign" "$TMP_ROOT/fallback-foreign.log" \
+  || fail "a seed commit unknown to the server broke the fresh fetch: $(cat "$TMP_ROOT/fallback-foreign.log")"
+assert_exact_checkout "$TMP_ROOT/fallback-foreign" "foreign seed"
+
 echo "All cloud benchmark fetch checks passed."

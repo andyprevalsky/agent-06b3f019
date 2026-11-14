@@ -5,7 +5,8 @@ import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
-SECRET = "receipt-private-value"
+SECRET = "receipt/private value"
+RASTER = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aX1sAAAAASUVORK5CYII="
 URLS = [f"https://images.example.test/product-{i}.png" for i in range(3)]
 
 
@@ -29,7 +30,8 @@ def receipt():
             "total_cents": 3000,
         },
         "message": SECRET,
-        "screenshot": "PRIVATE_RASTER",
+        "screenshot": RASTER,
+        "caption": SECRET,
         "extra": {"image_url": "https://untrusted.example.test/nested.png"},
     }
 
@@ -46,7 +48,9 @@ def policy():
 def assert_receipt(value):
     assert [item.get("image_url") for item in value["payment_request"]["line_items"]] == URLS
     assert SECRET not in json.dumps(value)
-    assert "screenshot" not in value and "image_url" not in value["extra"]
+    assert value["screenshot"] == RASTER
+    assert value["extra"]["image_url"] == "https://untrusted.example.test/nested.png"
+    assert SECRET not in value["caption"]
 
 
 async def test_payment_history_storage_read_and_restore():
@@ -136,20 +140,29 @@ async def test_payment_history_verifier_projection():
 
 
 async def test_payment_history_rejects_media_and_evaluate_spoofs():
-    from browser_tools.dom_service import ActionHistory
+    from browser_tools.dom_service import ActionHistory, keep_receipt_image_urls
 
     dom = policy()
     history = ActionHistory()
-    for action in ["evaluate", "click"]:
-        entry = await history.record_action(dom, action, result={"value": receipt(), "action": "request_payment_card"})
-        assert "image_url" not in json.dumps(entry.result)
+    with patch("browser_tools.dom_service.keep_receipt_image_urls", wraps=keep_receipt_image_urls) as keep:
+        for action in ["evaluate", "click"]:
+            entry = await history.record_action(dom, action, result={"value": receipt(), "action": "request_payment_card"})
+            assert entry.action == action
+            assert "payment_request" not in entry.result
+            assert SECRET not in json.dumps(entry.result)
+        keep.assert_not_called()
     visible = dom.model_visible_value(receipt())
-    assert "image_url" not in json.dumps(visible)
-    for url in ["data:image/png;base64,PRIVATE", "file:///private/image", "javascript:secret"]:
-        value = receipt()
-        value["payment_request"]["line_items"][0]["image_url"] = url
-        entry = await history.record_action(dom, "request_payment_card", result=value)
-        assert "image_url" not in entry.result["payment_request"]["line_items"][0]
+    assert visible["screenshot"] == RASTER and SECRET not in json.dumps(visible)
+    for url in ["data:image/png;base64,PRIVATE", "file:///private/image", "javascript:secret", "https:///missing-host", "https://[malformed"]:
+        for items_key in ["line_items", "lineItems"]:
+            value = receipt()
+            items = value["payment_request"].pop("line_items")
+            items[0]["image_url"] = url
+            value["payment_request"][items_key] = items
+            entry = await history.record_action(dom, "request_payment_card", result=value)
+            assert "image_url" not in entry.result["payment_request"][items_key][0]
+            direct = dom.model_visible_action_result("request_payment_card", value)
+            assert "image_url" not in direct["payment_request"][items_key][0]
     value = receipt()
     value["payment_request"]["line_items"][0]["image_url"] = "https://images.example.test/" + SECRET
     entry = await history.record_action(dom, "request_payment_card", result=value)

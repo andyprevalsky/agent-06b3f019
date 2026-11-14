@@ -244,6 +244,41 @@ async def test_chromium_readiness_preserves_budget_and_reports_last_failure():
     assert calls == 100, "retain the original readiness attempt budget"
 
 
+async def test_chromium_fixture_waits_for_semantic_cdp_readiness():
+    replies = [httpx.Response(200, json={}), httpx.Response(503, json={}),
+               httpx.Response(200, text="not-json"), httpx.Response(200, json={"webSocketDebuggerUrl": ""}),
+               httpx.Response(200, json={"webSocketDebuggerUrl": "ws://127.0.0.1:1/devtools/browser/ready"})]
+    requests = []
+
+    def respond(request):
+        requests.append(request)
+        return replies.pop(0)
+
+    async def no_sleep(_seconds):
+        return None
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        with patch("asyncio.sleep", no_sleep):
+            result = await _chromium_endpoint(client, 1)
+    assert result.endswith("/ready")
+    assert len(requests) == 5, "fixture must not accept a listening but unready endpoint"
+    polls = []
+
+    def never_ready(request):
+        polls.append(request)
+        return httpx.Response(200, json={})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(never_ready)) as client:
+        with patch("asyncio.sleep", no_sleep):
+            try:
+                await _chromium_endpoint(client, 1)
+            except AssertionError:
+                pass
+            else:
+                raise AssertionError("an endpoint without a CDP socket must fail")
+    assert len(polls) == 100, "the existing readiness poll budget must stay bounded"
+
+
 @contextlib.asynccontextmanager
 async def _chromium(full: bool = False):
     """Local Chromium with a CDP endpoint.
@@ -2012,9 +2047,9 @@ async def test_multiplexer_arms_webauthn_so_unarmed_popups_reject_instead_of_han
     """D4: a page the worker never armed opened Chrome's native passkey chooser,
     which Tilion cannot dismiss. The multiplexer arms every new target first."""
     unarmed = await _popup_webauthn_outcome(arm_webauthn=False)
-    assert unarmed == "pending", f"control: unarmed chooser hangs; outcome={unarmed!r}"
+    assert unarmed == "pending", f"control: unarmed chooser hangs; observed {unarmed!r}"
     armed = await _popup_webauthn_outcome(arm_webauthn=True)
-    assert armed == "NotAllowedError", f"armed popup outcome={armed!r}"
+    assert armed == "NotAllowedError", f"armed popup WebAuthn outcome: {armed!r}"
 
 
 async def test_raw_chromium_keeps_its_endpoint_when_another_socket_claims_the_handoff():
@@ -2675,16 +2710,16 @@ async def test_multiplexer_holds_new_targets_until_emulation_lands():
                         )
                         assert popup["waitingForDebugger"] is False
                         facts = None
-                        for _ in range(100):
+                        async def emulation_settled():
+                            nonlocal facts
                             result = await client.send(
                                 "Runtime.evaluate",
                                 {"expression": "window.firstFacts || null", "returnByValue": True},
                                 popup["sessionId"],
                             )
                             facts = result["result"].get("value")
-                            if facts:
-                                break
-                            await asyncio.sleep(0.05)
+                            return bool(facts) and multiplexer.emulation_applied >= 2
+                        await _wait_until(emulation_settled, 5.0, "popup facts and emulation response accounting")
                         assert facts and facts[:2] == ["Asia/Tokyo", "de-DE"], facts
                         assert multiplexer.emulation_applied >= 2
                     finally:
@@ -3211,8 +3246,18 @@ async def test_tilion_live_view_token_is_redacted_before_persisting():
     assert '"browser_url": browser_url,' not in handler_source, "activity results must redact browser_url"
     # Serial Tilion keyboard (A1 RCA): the initial humanizer and every rebind after a
     # provider handoff (rotation, recovery, auth restart) carry the flag.
-    assert handler_source.count("serial_cdp_keyboard=is_single_cdp_client_provider(") == 4
-    assert handler_source.count("humanizer = await _replace_browser_humanizer(") == 3
+    import ast
+    humanizer_calls = [node for node in ast.walk(ast.parse(handler_source))
+                       if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                       and node.func.id in {"BrowserHumanizer", "_replace_browser_humanizer"}]
+    assert {node.func.id for node in humanizer_calls} == {"BrowserHumanizer", "_replace_browser_humanizer"}
+    for call in humanizer_calls:
+        serial = next((kw.value for kw in call.keywords if kw.arg == "serial_cdp_keyboard"), None)
+        assert isinstance(serial, ast.Call) and isinstance(serial.func, ast.Name)
+        assert serial.func.id == "is_single_cdp_client_provider", (
+            "every actual humanizer constructor and rebind must carry the provider's serial keyboard policy",
+            call.lineno,
+        )
     assert '"browser_url": redact_url_secrets(self.browser_url)' in (root / "recording.py").read_text()
 
 
@@ -4393,6 +4438,19 @@ async def test_held_gateway_starts_hold_at_transport_retirement():
                         await first.close()
 
 
+async def test_scroll_observation_contract():
+    from browser_scroll_observation_cases import test_scroll_result_observation_contract
+    await test_scroll_result_observation_contract()
+
+
+async def test_scroll_observation_validation():
+    from browser_scroll_observation_cases import test_document_scroll_measurement_validation
+    await test_document_scroll_measurement_validation()
+
+
+async def test_scroll_observation_native():
+    from browser_scroll_observation_cases import test_document_scroll_native
+    await test_document_scroll_native(_tilion_worker_stack)
 async def test_storage_writer_race_preserves_state_before_transport_release():
     """Real CDP persistence survives a reply consuming the first stop request."""
     from browser_tools.dom_service import DOMService
@@ -4499,6 +4557,10 @@ async def test_storage_writer_race_preserves_state_before_transport_release():
 async def run_all_tests():
     result = BlackboxResult()
     for name, test in [
+        ("chromium_fixture_waits_for_cdp", test_chromium_fixture_waits_for_semantic_cdp_readiness),
+        ("scroll_observation_contract", test_scroll_observation_contract),
+        ("scroll_observation_validation", test_scroll_observation_validation),
+        ("scroll_observation_native", test_scroll_observation_native),
         ("multiplexer_reports_dead_retry_exhaustion", test_multiplexer_reports_only_unrestored_confirmed_dead_retries),
         ("multiplexer_retires_all_dead_survivor_overrides", test_multiplexer_retires_all_overrides_of_a_dead_survivor),
         ("multiplexer_reapplies_past_detached_survivor", test_multiplexer_reapplies_past_a_confirmed_detached_survivor),

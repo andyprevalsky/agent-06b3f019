@@ -13,14 +13,18 @@ export async function closeBrowserSession(
   sessionId: string,
   pause: boolean,
   currentUrl?: string,
-  signedInSites?: string[]
+  signedInSites?: string[],
+  signal?: AbortSignal
 ) {
   log.info(`${pause ? 'Pausing' : 'Closing'} browser session`, {
     sessionId,
     currentUrl: currentUrl !== undefined && currentUrl !== '' ? currentUrl : 'NULL/EMPTY',
   });
 
-  const { worldState } = await closeSession(sessionId, pause, currentUrl, { signedInSites });
+  const { worldState } = await closeSession(sessionId, pause, currentUrl, {
+    signedInSites,
+    signal,
+  });
 
   return {
     status: pause ? ('PAUSED' as const) : ('CLOSED' as const),

@@ -32,6 +32,7 @@ import {
   markGptApiKeyOnCooldown,
   releaseComputeTokenLineage,
 } from '../../providers/computeCredentials';
+import { resolveUserLoginByCredential } from '../../providers/computeLoginFailure';
 import {
   getFoundryDeploymentCooldowns,
   markFoundryDeploymentCooldown,
@@ -770,6 +771,24 @@ async function unrevokedLoginReply(
   return { ok: true, source, disabled: false, rejection };
 }
 
+/**
+ * A user cooldown names its login by the held token's fingerprint even when it
+ * omits the lease's integration id (the agent loop's auth context has none).
+ * Resolve that login here, once, so the cooldown lands on exactly the spent
+ * subscription and never on its siblings. A login-disabling auth failure still
+ * has to name its login explicitly (S33/T7): this never widens a destructive
+ * write, only the reversible cooldown.
+ */
+async function namedUserReport<
+  T extends { integrationId?: string; credential?: string; failureReason?: string },
+>(type: 'claude' | 'gpt', userId: string, params: T): Promise<T> {
+  if (params.integrationId !== undefined && params.integrationId !== '') return params;
+  if (isIntegrationAuthFailureReason(params.failureReason)) return params;
+  if (params.credential === undefined || params.credential === '') return params;
+  const integrationId = await resolveUserLoginByCredential(type, userId, params.credential);
+  return integrationId === null ? params : { ...params, integrationId };
+}
+
 export async function markTokenRateLimited(
   source: string,
   params: {
@@ -807,12 +826,13 @@ export async function markTokenRateLimited(
     if (params.userId === undefined || params.userId === '') {
       throw new Error('Missing userId for source=user');
     }
-    const unrevoked = await unrevokedLoginReply('claude', source, params);
+    const named = await namedUserReport('claude', params.userId, params);
+    const unrevoked = await unrevokedLoginReply('claude', source, named);
     if (unrevoked !== null) return unrevoked;
     await markUserTokenRateLimited(params.userId, {
       rateLimitedUntil: params.rateLimitedUntil,
       failureReason: params.failureReason,
-      integrationId: params.integrationId,
+      integrationId: named.integrationId,
       rateLimitReason: params.rateLimitReason,
       rateLimitAuthoritative: params.rateLimitAuthoritative,
     });
@@ -955,12 +975,13 @@ export async function markGptTokenRateLimited(
     if (params.userId === undefined || params.userId === '') {
       throw new Error('Missing userId for source=user');
     }
-    const unrevoked = await unrevokedLoginReply('gpt', source, params);
+    const named = await namedUserReport('gpt', params.userId, params);
+    const unrevoked = await unrevokedLoginReply('gpt', source, named);
     if (unrevoked !== null) return unrevoked;
     await markGptUserTokenRateLimited(params.userId, {
       rateLimitedUntil: params.rateLimitedUntil,
       failureReason: params.failureReason,
-      integrationId: params.integrationId,
+      integrationId: named.integrationId,
       rateLimitReason: params.rateLimitReason,
       rateLimitAuthoritative: params.rateLimitAuthoritative,
     });

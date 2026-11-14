@@ -6,6 +6,7 @@ to rewrite them after an intentional presentation change.
 """
 
 import io
+import hashlib
 import json
 import os
 import re
@@ -192,6 +193,895 @@ class Scorecard(unittest.TestCase):
         self.assertEqual(CARD["validate_html"](document), [])
         return document
 
+    def operator_fixture(self):
+        run = self.f.campaign()
+        summary = json.loads((run / "summary.json").read_text())
+        summary["concurrency"] = 2
+        write(run / "summary.json", summary)
+        process = dict(source="1387ae608e7cfb8e3f0a876daae92093f503b465", pid=7, birth_ticks="100", boot="6af9c450-c2c8-4647-a911-8ab19a296bbf",
+                       argv=["scripts/run-bench", *[f"task-{i}" for i in range(1, 6)], "-k", "1", "--concurrency", "2"],
+                       original_jobs=5, concurrency=2, whole_cli_started_epoch=T0,
+                       whole_cli_started_utc="2026-10-18T19:28:52+00:00", exit_code=1, finished_at=T0 + 2000)
+        receipt = write(self.tmp / "process.json", process)
+        binding = dict(schema="campaign-operator-end-v1", run_dir=str(run), campaign_id=run.name,
+                       source_ref="1387ae608e7cfb8e3f0a876daae92093f503b465", process_receipt=str(receipt),
+                       summary_sha256=hashlib.sha256((run / "summary.json").read_bytes()).hexdigest(),
+                       process_sha256=hashlib.sha256(receipt.read_bytes()).hexdigest())
+        return run, receipt, write(self.tmp / "operator-end.json", binding)
+
+    def test_operator_end_preserves_unfinalized_summary_and_job_truth(self):
+        run, receipt, binding = self.operator_fixture()
+        original = (run / "summary.json").read_bytes()
+        before = render(run, self.f)
+        self.assertEqual(before["experiment"]["state"], "RUNNING")
+        after = render(run, self.f, operator_end_receipts=[binding])
+        exp = after["experiment"]
+        self.assertEqual(exp["state"], "FAILED")
+        self.assertFalse(exp["summary_finalized"])
+        self.assertEqual(exp["ended_at"], T0 + 2000)
+        self.assertIn("summary unfinalized", exp["state_reason"])
+        for key in ("progress", "outcomes", "released", "lifecycle_verified", "scored", "rows_source"):
+            self.assertEqual(exp[key], before["experiment"][key], key)
+        self.assertEqual((run / "summary.json").read_bytes(), original)
+        self.assertFalse(json.loads(original).get("finished_at"))
+        self.assertEqual(after["since"]["state"], "ENDED")
+        self.assertIn("summary unfinalized", self.valid(after))
+        self.assertIn("summary unfinalized", CARD["render_text"](after))
+        self.assertEqual(after["history"][0]["operator_end"]["process_sha256"], hashlib.sha256(receipt.read_bytes()).hexdigest())
+
+    def test_operator_end_history_uses_same_bound_source(self):
+        run, _, binding = self.operator_fixture()
+        current = self.f.fleet()
+        # Same recorded goal; the old campaign must not silently reload as RUNNING.
+        LEDGER["record"]("launch", current.name, ledger=self.f.ledger, goal="campaign-goal", kind="fleet",
+                         run_dir=str(current), triggered_at=T0 + 2100)
+        value = render(current, self.f, goal="campaign-goal", operator_end_receipts=[binding], iterations=2)
+        old = next(row for row in value["history"] if row["id"] == run.name)
+        self.assertEqual(old["state"], "FAILED")
+        self.assertFalse(old["summary_finalized"])
+        self.assertEqual(old["ended_at"], T0 + 2000)
+        self.assertIn("operator ended (exit 1); summary unfinalized", CARD["render_text"](value))
+
+    def test_operator_end_refuses_stale_or_conflicting_inputs(self):
+        for target, key, value, rehash in (
+            ("binding", "summary_sha256", "0" * 64, False),
+            ("binding", "process_sha256", "0" * 64, False),
+            ("binding", "campaign_id", "other", False),
+            ("binding", "source_ref", "b" * 40, False),
+            ("process", "pid", 8, True), ("process", "birth_ticks", "", True),
+            ("process", "boot", "other", True), ("process", "exit_code", True, True),
+            ("process", "finished_at", None, True), ("process", "finished_at", float("nan"), True),
+            ("process", "finished_at", NOW + 1, True), ("process", "finished_at", T0 - 1, True),
+            ("process", "original_jobs", 4, True), ("process", "whole_cli_started_epoch", T0 - 20, True),
+            ("process", "argv", ["scripts/run-bench", "other", "-k", "1", "--concurrency", "2"], True),
+            ("summary", "finished_at", "2026-10-18T20:00:00Z", True),
+        ):
+            with self.subTest(target=target, key=key, value=value):
+                run, receipt, binding_path = self.operator_fixture()
+                binding = json.loads(binding_path.read_text())
+                path = {"binding": binding_path, "process": receipt, "summary": run / "summary.json"}[target]
+                payload = json.loads(path.read_text()); payload[key] = value; write(path, payload)
+                if rehash:
+                    binding[target + "_sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+                    write(binding_path, binding)
+                with self.assertRaises(ValueError):
+                    render(run, self.f, operator_end_receipts=[binding_path])
+        run, _, binding = self.operator_fixture()
+        with self.assertRaises(ValueError):
+            render(run, self.f, operator_end_receipts=[binding, binding])
+        (run / "summary.json").write_text((run / "summary.json").read_text() + " ")
+        with self.assertRaises(ValueError):
+            render(run, self.f, operator_end_receipts=[binding])
+
+    def test_operator_end_zero_is_incomplete_and_finished_summary_unchanged(self):
+        run, receipt, binding_path = self.operator_fixture()
+        process = json.loads(receipt.read_text()); process["exit_code"] = 0; write(receipt, process)
+        binding = json.loads(binding_path.read_text()); binding["process_sha256"] = hashlib.sha256(receipt.read_bytes()).hexdigest()
+        write(binding_path, binding)
+        result = render(run, self.f, operator_end_receipts=[binding_path])
+        self.assertEqual(result["experiment"]["state"], "INCOMPLETE")
+        summary = json.loads((run / "summary.json").read_text())
+        summary.update(status="failed", finished_at="2026-10-18T20:00:00Z")
+        write(run / "summary.json", summary)
+        result = render(run, self.f)
+        self.assertEqual(result["experiment"]["state"], "FAILED")
+        self.assertEqual(result["experiment"]["end_evidence"], "summary.json finished_at")
+
+    def test_operator_end_cli_and_changed_snapshot_refuse(self):
+        run, _, binding = self.operator_fixture()
+        args = [sys.executable, str(ROOT / "scripts/cloudbench-scorecard.py"), str(run), "--ledger", str(self.f.ledger),
+                "--operator-end-receipt", str(binding), "--json", "--now", str(NOW)]
+        result = subprocess.run(args, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(json.loads(result.stdout)["experiment"]["summary_finalized"])
+        ends = CARD["operator_end_bindings"]([binding], now=NOW)
+        (run / "summary.json").write_text((run / "summary.json").read_text() + " ")
+        with self.assertRaisesRegex(ValueError, "summary changed"):
+            CARD["load_campaign"](run, ends)
+        result = subprocess.run(args, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("refused", result.stderr)
+
+    def test_descent_does_not_reload_history_for_unused_batch_trend(self):
+        paths = []
+        for index in range(4):
+            ident = f"history-perf-{index}"
+            path = self.tmp / ident
+            write(path / "_batch/report-card.json", card(ident, [task("same-task", "passed")]))
+            write(path / "teardown-ownership/provider-teardown-verified.epoch", str(T0 + 100 + index * 20))
+            LEDGER["record"]("launch", ident, ledger=self.f.ledger, goal="history-perf", kind="fleet",
+                             run_dir=str(path), triggered_at=T0 + index * 20)
+            paths.append(path)
+        load = CARD["build"].__globals__["load"]
+        with mock.patch.dict(CARD["build"].__globals__, {"load": mock.Mock(wraps=load)}) as scope:
+            traced = scope["load"]
+            descent = render(paths[-1], self.f, iterations=4)
+            self.assertEqual(traced.call_count, 4, "descent must read each of its four history runs once")
+            self.assertEqual([call.args[0] for call in traced.call_args_list].count(paths[0]), 1)
+        self.assertEqual(len(descent["history"]), 4)
+        self.assertEqual(descent["trend"], [])
+        self.assertIn('data-section="global-trend"', self.valid(descent))
+        with mock.patch.dict(CARD["build"].__globals__, {"load": mock.Mock(wraps=load)}) as scope:
+            generic = render(paths[-1], self.f)
+            self.assertEqual(scope["load"].call_count, 6)
+        self.assertEqual(len(generic["trend"]), 4)
+        self.assertEqual(len(generic["history"]), 3)
+        self.assertIn('data-section="trend"', self.valid(generic))
+
+    def test_descent_global_display_default_contract(self):
+        data = render(self.f.fleet(), self.f, iterations=2)
+        document = self.valid(data)
+        self.assertIn('data-section="global-progress"', document)
+        self.assertNotIn('data-section="lifecycle"', document)
+        self.assertNotIn('class="bar"', document)
+
+    def global_inputs(self, count=6, k=2):
+        import hashlib
+        names = [f"global-task-{i}" for i in range(count)]
+        selected = write(self.tmp / "selected.json", {"schema": "descend-selected-tasks-v1", "rows": [{"name": name} for name in names]})
+        digest = hashlib.sha256(selected.read_bytes()).hexdigest()
+        def receipt(i, verdict):
+            return {"campaign_id": "original-global", "job_id": f"job-{i}", "run": i + 1,
+                    "verdict": verdict, "source_commit": "a" * 40, "evidence_sha256": "b" * 64,
+                    "controller_terminal_at": T0 + 100 + i}
+        rows = []
+        for i, name in enumerate(names):
+            records = [receipt(i * k + j, "PASS") for j in range(k)]
+            rows.append({"task": name, "last_scored": records, "known_scored_count": len(records),
+                         "acceptance": "FINAL_SOURCE_REVERIFICATION_REQUIRED", "green": False})
+        ledger = {"schema": "descend-rolling-acceptance-v1", "task_count": count, "k": k, "rows": rows}
+        path = write(self.tmp / "acceptance.json", ledger)
+        args = {"global_acceptance": path, "selected_tasks": selected,
+                "selected_tasks_sha256": digest, "global_runs": k}
+        return ledger, args
+
+    def test_global_cake_uses_full_scope_historical_pairs_and_keeps_audits(self):
+        ledger, args = self.global_inputs()
+        rows = ledger["rows"]
+        rows[1]["last_scored"][0]["verdict"] = "FAIL"
+        rows[2]["last_scored"] = rows[2]["last_scored"][:1]; rows[2]["known_scored_count"] = 1
+        rows[3].update(last_scored=[], known_scored_count=0, acceptance="UNTESTED")
+        rows[4]["last_scored"][0]["verdict"] = "INFRA_ERROR"
+        rows.pop()
+        write(args["global_acceptance"], ledger)
+        before = {str(p): p.read_bytes() for p in (args["global_acceptance"], args["selected_tasks"])}
+        run = self.f.fleet()
+        old = render(run, self.f, iterations=5)
+        data = render(run, self.f, iterations=5, **args)
+        gp = data["global_progress"]
+        self.assertEqual(gp["counts"], {"PASS": 1, "FAIL": 1, "PARTIAL": 1, "UNKNOWN": 2, "UNRUN": 1})
+        self.assertEqual(gp["final_source_qualified"], 0)
+        self.assertEqual(data["experiment"]["outcomes"], old["experiment"]["outcomes"])
+        self.assertEqual(data["experiment"]["lifecycle"], old["experiment"]["lifecycle"])
+        html = self.valid(data)
+        self.assertEqual(html.count('data-task="global-task-'), 12)
+        self.assertEqual(gp["slot_counts"], {"PASS": 5, "FAIL": 1, "UNKNOWN": 3, "UNRUN": 3})
+        self.assertIn("5/12", html)
+        self.assertEqual(re.findall(r'data-status="([A-Z]+)"', html), ["PASS"] * 5 + ["FAIL"] + ["UNKNOWN"] * 3 + ["UNRUN"] * 3)
+        self.assertEqual(sorted(map(int, re.findall(r'data-selected-ordinal="(\d+)"', html))), sorted(list(range(1, 7)) * 2))
+        self.assertIn(".trend text{fill:var(--fg);font-size:15px}", html)
+        self.assertNotIn('data-section="lifecycle"', html)
+        self.assertNotIn('class="bar"', html)
+        self.assertIn('data-section="global-trend"', html)
+        self.assertNotIn('data-section="trend"', html)
+        self.assertIn("Historical outcomes are not final-source acceptance", html)
+        self.assertIn("GLOBAL", CARD["render_text"](data))
+        for p, raw in before.items(): self.assertEqual(Path(p).read_bytes(), raw)
+        generic = self.valid(render(run, self.f))
+        self.assertIn('data-section="lifecycle"', generic)
+        self.assertNotIn('data-section="global-progress"', generic)
+
+    def test_individual_slot_denominator_and_curve_do_not_collapse_task_pairs(self):
+        ledger, args = self.global_inputs(count=200)
+        for i, row in enumerate(ledger["rows"]):
+            if 17 <= i < 25:
+                row["last_scored"][1]["verdict"] = "FAIL"
+            elif 25 <= i < 35:
+                for receipt in row["last_scored"]: receipt["verdict"] = "FAIL"
+            elif i >= 35:
+                row.update(last_scored=[], known_scored_count=0, acceptance="UNTESTED")
+        write(args["global_acceptance"], ledger)
+        history = dict(schema="descend-global-history-v1", selected_tasks_sha256=args["selected_tasks_sha256"], task_count=200, k=2,
+                       snapshots=[dict(experiment_id="original-finish", finished_at=NOW - 1, acceptance_ledger=ledger)])
+        args["global_history"] = write(self.tmp / "slot-history.json", history)
+        data = render(self.f.fleet(), self.f, iterations=8, **args)
+        html = self.valid(data)
+        self.assertIn("42/400", html)
+        gp = data["global_progress"]
+        self.assertEqual(gp["slot_count"], 400)
+        self.assertEqual(gp["historical_pass_fraction"], 42 / 400)
+        self.assertEqual(gp["historical_task_pass_fraction"], 17 / 200)
+        self.assertEqual(gp["slot_counts"], dict(PASS=42, FAIL=28, UNKNOWN=0, UNRUN=330))
+        self.assertEqual(gp["history"][0]["rate"], 42 / 400)
+        self.assertEqual(gp["counts"]["PASS"], 17)  # separate task qualification, never cake denominator
+        html = self.valid(data)
+        self.assertIn("42/400", html)
+        self.assertIn("10.5%", html)
+        self.assertEqual(html.count('data-slot="'), 400)
+        self.assertIn("individual scored PASS", html)
+        self.assertNotIn("Tasks with all", html)
+        before = {p: Path(p).read_bytes() for p in (args["global_acceptance"], args["global_history"])}
+        # One verified pass with its expected companion receipt missing: green + amber.
+        ledger["rows"][0]["last_scored"].pop()
+        write(args["global_acceptance"], ledger)
+        gp = render(self.f.fleet(), self.f, iterations=8, **args)["global_progress"]
+        self.assertEqual(gp["slots"][0]["status"], "PASS")
+        self.assertEqual(gp["slots"][1]["status"], "UNKNOWN")
+        # Explicitly one known scored run: green + gray, not amber task collapse.
+        ledger["rows"][0]["known_scored_count"] = 1
+        write(args["global_acceptance"], ledger)
+        gp = render(self.f.fleet(), self.f, iterations=8, **args)["global_progress"]
+        self.assertEqual(gp["slots"][1]["status"], "UNRUN")
+        # An invalid actual receipt remains unknown even if its value is None.
+        ledger["rows"][0].update(last_scored=[None], known_scored_count=1)
+        write(args["global_acceptance"], ledger)
+        gp = render(self.f.fleet(), self.f, iterations=8, **args)["global_progress"]
+        self.assertEqual(gp["slots"][0]["status"], "UNKNOWN")
+        self.assertEqual(Path(args["global_history"]).read_bytes(), before[args["global_history"]])
+
+    def test_global_scope_hash_identity_and_generic_k_contract(self):
+        ledger, args = self.global_inputs()
+        run = self.f.fleet()
+        for bad in ("0" * 64, "", None):
+            with self.subTest(hash=bad), self.assertRaises(ValueError):
+                render(run, self.f, iterations=2, **dict(args, selected_tasks_sha256=bad))
+        for mutate in (lambda d: d.update(task_count=7), lambda d: d.update(k=True),
+                       lambda d: d["rows"].append(dict(d["rows"][0])),
+                       lambda d: d["rows"][0]["last_scored"].append(d["rows"][0]["last_scored"][0])):
+            altered = json.loads(json.dumps(ledger)); mutate(altered); write(args["global_acceptance"], altered)
+            with self.assertRaises(ValueError): render(run, self.f, iterations=2, **args)
+        missing = json.loads(json.dumps(ledger))
+        missing["rows"][0]["last_scored"] = missing["rows"][0]["last_scored"][:1]
+        write(args["global_acceptance"], missing)
+        self.assertEqual(render(run, self.f, iterations=2, **args)["global_progress"]["rows"][0]["status"], "UNKNOWN")
+        with self.assertRaises(ValueError):
+            render(run, self.f, global_runs=0)
+        failed = json.loads(json.dumps(ledger))
+        failed["rows"][0]["last_scored"][0]["verdict"] = "FAIL"
+        failed["rows"][0]["last_scored"][1].pop("evidence_sha256")
+        write(args["global_acceptance"], failed)
+        row = render(run, self.f, iterations=2, **args)["global_progress"]["rows"][0]
+        self.assertEqual(row["status"], "FAIL")
+        self.assertIn("incomplete", row["reason"])
+        failed["rows"][0]["last_scored"] = failed["rows"][0]["last_scored"][:1]
+        write(args["global_acceptance"], failed)
+        self.assertEqual(render(run, self.f, iterations=2, **args)["global_progress"]["rows"][0]["status"], "FAIL")
+        for k in (1, 3):
+            ledger, args = self.global_inputs(k=k)
+            data = render(run, self.f, iterations=2, **args)
+            self.assertEqual(data["global_progress"]["counts"]["PASS"], 6)
+            self.assertIn("individual scored PASS", self.valid(data))
+            self.assertNotIn("Tasks with all", self.valid(data))
+            self.assertEqual(data["global_progress"]["slot_count"], 6 * k)
+            self.assertIn(f"GLOBAL latest {k} scored runs", CARD["render_text"](data))
+
+    def test_global_history_never_bridges_missing_snapshots_or_uses_slice_rate(self):
+        ledger, args = self.global_inputs()
+        empty = json.loads(json.dumps(ledger))
+        for row in empty["rows"]: row.update(last_scored=[], known_scored_count=0, acceptance="UNTESTED")
+        history = {"schema": "descend-global-history-v1", "selected_tasks_sha256": args["selected_tasks_sha256"],
+                   "task_count": 6, "k": 2, "snapshots": [
+                    {"experiment_id": "one", "finished_at": T0 + 10, "acceptance_ledger": empty},
+                    {"experiment_id": "two", "finished_at": T0 + 500, "acceptance_ledger": None},
+                    {"experiment_id": "three", "finished_at": T0 + 1000, "acceptance_ledger": ledger}]}
+        args["global_history"] = write(self.tmp / "global-history.json", history)
+        data = render(self.f.fleet(), self.f, iterations=5, **args)
+        self.assertEqual([p["rate"] for p in data["global_progress"]["history"]], [0, None, 1])
+        html = self.valid(data)
+        self.assertEqual(html.count('<path class="path"'), 0)
+        self.assertIn("missing snapshots are not bridged", html)
+        history["snapshots"][2]["finished_at"] = T0 + 100
+        write(args["global_history"], history)
+        with self.assertRaises(ValueError): render(self.f.fleet(), self.f, iterations=5, **args)
+
+    def test_global_timeline_labels_both_rates_using_all_slots_and_breaks_gaps(self):
+        ledger, args = self.global_inputs(count=200)
+        for i, row in enumerate(ledger["rows"]):
+            if i < 24:
+                continue
+            if i == 24:
+                row["last_scored"][1]["verdict"] = "FAIL"
+            elif i < 40:
+                for receipt in row["last_scored"]:
+                    receipt["verdict"] = "FAIL"
+            else:
+                row.update(last_scored=[], known_scored_count=0, acceptance="UNTESTED")
+        snapshots = [
+            dict(experiment_id="it6", finished_at=T0 + 600, acceptance_ledger=ledger),
+            dict(experiment_id="it7", finished_at=T0 + 700, acceptance_ledger=None),
+            dict(experiment_id="it8", finished_at=T0 + 800, acceptance_ledger=ledger),
+            dict(experiment_id="it9", finished_at=T0 + 900, acceptance_ledger=ledger),
+        ]
+        write(args["global_acceptance"], ledger)
+        args["global_history"] = write(self.tmp / "timeline.json", dict(
+            schema="descend-global-history-v1", selected_tasks_sha256=args["selected_tasks_sha256"],
+            task_count=200, k=2, snapshots=snapshots))
+        data = render(self.f.fleet(), self.f, iterations=9, **args)
+        html = self.valid(data)
+        self.assertEqual(data["global_progress"]["slot_counts"], dict(PASS=49, FAIL=31, UNKNOWN=0, UNRUN=320))
+        self.assertEqual(html.count('data-label="PASS"'), 3)
+        self.assertEqual(html.count('data-label="FAIL"'), 3)
+        self.assertEqual(html.count('>12.2%</text>'), 3)
+        self.assertEqual(html.count('>7.8%</text>'), 3)
+        self.assertEqual(html.count('data-series="PASS"'), 1)  # it8 -> it9 only
+        self.assertEqual(html.count('data-series="FAIL"'), 1)
+        self.assertIn('full 400 slots', html)
+        self.assertIn('missing snapshot', html)
+        self.assertNotIn('61.3%', html)  # 49/80 is not global coverage
+        text = CARD["render_text"](data)
+        self.assertIn('it6: PASS 12.2% · FAIL 7.8% of 400 slots', text)
+        self.assertIn('it7: gap', text)
+
+    def test_descent_strict_color_boundaries_and_unknowns(self):
+        data = render(self.f.fleet(), self.f, iterations=2)
+        exp = data["experiment"]
+        for passed, expected in ((80, "bad"), (81, "warn"), (95, "warn"), (96, "ok")):
+            exp.update(scored=100, scheduled_total=100, infra_jobs=4)
+            exp["outcomes"].update(PASS=passed)
+            html = CARD["render_html"](data)
+            self.assertRegex(html, rf'✅ Pass</div><div class="v {expected}">')
+            self.assertRegex(html, r'🧯 Infra</div><div class="v ok">')
+        exp["infra_jobs"] = 5
+        self.assertRegex(CARD["render_html"](data), r'🧯 Infra</div><div class="v bad">')
+        exp["infra_unattributed_cancelled"] = 1
+        self.assertRegex(CARD["render_html"](data), r'🧯 Infra</div><div class="v warn">')
+
+    def test_observed_telemetry_is_bound_deduplicated_and_never_invented(self):
+        import copy
+        import hashlib
+        run = self.f.sharded()
+        result = json.loads((run / "result.json").read_text())
+        sources = self.tmp / "sources"
+        summary = {"campaign_id": "original-campaign", "jobs": []}
+        manifest = {"archive_sha256": "a" * 64, "files": {}}
+        index, members, costs = [], [], []
+        for i, row in enumerate(result["jobs"]):
+            job, name = row["job_id"], row["task"]
+            agent, fleet, digest = "agent-" + job, "fleet-" + job, str(i) * 64
+            row.update(agent_id=agent, cost_usd=.17 if i == 1 else 0)
+            summary["jobs"].append(dict(job_id=job, task=name, run_id=fleet, task_status=row["task_status"]))
+            entry = {"sha256": digest, "kind": "file", "bytes": 100}
+            manifest["files"]["context/" + fleet + "/" + name + "/run.json"] = entry
+            manifest["files"]["context/" + fleet + "/" + name + "/worker.log"] = entry
+            index.append(dict(job=job, task=name, fleet=fleet, root_agent=agent, file="context/" + fleet + "/" + name + "/worker.log", sha256=digest))
+            members.append(dict(job_id=job, task=name, shard="00", campaign_id=summary["campaign_id"],
+                fleet_run_id=fleet, original_task_status=row["task_status"], root_agent_id=agent,
+                allowed_agent_ids=[agent], run_json_sha256=digest, run_json_path="context/" + fleet + "/" + name + "/run.json",
+                manifest_run_entry=entry, allowed_source_sha256=[digest], binding_status="verified-scored-run",
+                source_log_entries=[dict(path="context/" + fleet + "/" + name + "/worker.log", sha256=digest, manifest_entry=entry)]))
+            costs.append(dict(job_id=job, task=name, cost_cents=17 if i == 1 else 0, run_json_sha256=digest))
+        write(run / "result.json", result)
+        for name, obj in (("export-manifest.json", manifest), ("summary.json", summary), ("native-log-index.json", index)):
+            write(sources / "00" / name, obj)
+        sha = lambda name: hashlib.sha256((sources / "00" / name).read_bytes()).hexdigest()
+        membership = dict(schema="descend-scorecard-membership-v1", experiment_id=run.name, scheduled_jobs=4,
+            proofs={"00": dict(export_manifest_sha256=sha("export-manifest.json"), campaign_summary_sha256=sha("summary.json"),
+                original_export_archive_sha256=manifest["archive_sha256"], campaign_id=summary["campaign_id"])}, rows=members)
+        member_path = write(self.tmp / "membership.json", membership)
+        first = members[0]
+        timing = dict(agent_id=first["root_agent_id"], job_id=first["job_id"], task=first["task"], request_id="one",
+            ttft_seconds=.1, total_seconds=1.2, source_sha256=first["run_json_sha256"], run_json_sha256=first["run_json_sha256"])
+        telemetry = dict(schema="descend-scorecard-telemetry-v1", experiment_id=run.name, scheduled_jobs=4,
+            covered_run_count=4, cost_rows=costs, latency_rows=[timing])
+        path = write(self.tmp / "telemetry.json", telemetry)
+        receipt_path = self.tmp / "producer-receipt.json"
+        def build(refresh_receipt=True, receipt_pin=None):
+            write(path, telemetry)
+            # Isolated consumer fixture; actual extraction is exercised separately.
+            if refresh_receipt:
+                write(receipt_path, dict(schema="descend-telemetry-producer-v1", experiment_id=run.name,
+                    telemetry_sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
+                    membership_sha256=hashlib.sha256(member_path.read_bytes()).hexdigest(),
+                    producer_sha256=hashlib.sha256((ROOT / "scripts/cloudbench_telemetry.py").read_bytes()).hexdigest(),
+                    replay_owner="fixture-custodian", replayed_at=T0, input_manifest_sha256={"00":sha("export-manifest.json")},
+                    inputs=[dict(shard=m["shard"], path=m["run_json_path"], sha256=m["run_json_sha256"]) for m in members]))
+            return render(run, self.f, iterations=2, telemetry=path, telemetry_membership=member_path, telemetry_sources=sources,
+                          telemetry_receipt=receipt_path, telemetry_receipt_sha256=receipt_pin or hashlib.sha256(receipt_path.read_bytes()).hexdigest())
+        data = build()
+        self.assertAlmostEqual(data["experiment"]["cost"]["metered_usd"], .17)
+        self.assertIn("p50 0.10s", self.valid(data))
+        receipt_pin = hashlib.sha256(receipt_path.read_bytes()).hexdigest()
+        changed_receipt = json.loads(receipt_path.read_text()); changed_receipt["replay_owner"] = "foreign"
+        write(receipt_path, changed_receipt)
+        with self.assertRaisesRegex(ValueError, "receipt SHA256"):
+            build(refresh_receipt=False, receipt_pin=receipt_pin)
+        build()
+        for key, val in (("request_id", "NEVER_OBSERVED_REQUEST"), ("ttft_seconds", 999999), ("total_seconds", 1000000)):
+            old = timing[key]; timing[key] = val
+            with self.assertRaisesRegex(ValueError, "producer receipt"):
+                build(refresh_receipt=False)
+            timing[key] = old
+        build()
+        self.assertNotIn("LLM latency UNMEASURED", CARD["render_text"](data))
+        for field, value in (("job_id", "FOREIGN_JOB"), ("task", "foreign-task"), ("agent_id", "FOREIGN_AGENT"),
+                             ("run_json_sha256", "f" * 64), ("source_sha256", "e" * 64), ("ttft_seconds", True),
+                             ("total_seconds", float("nan")), ("total_seconds", -1), ("agent_id", None)):
+            with self.subTest(field=field, value=value):
+                original = timing[field]; timing[field] = value
+                with self.assertRaises(ValueError): build()
+                timing[field] = original
+        for field, value in (("job_id", "FOREIGN_JOB"), ("task", "foreign-task"), ("run_json_sha256", "f" * 64), ("cost_cents", 123)):
+            original = costs[0][field]; costs[0][field] = value
+            with self.assertRaises(ValueError): build()
+            costs[0][field] = original
+        telemetry["latency_rows"].append(copy.deepcopy(timing))
+        with self.assertRaises(ValueError): build()
+        telemetry["latency_rows"].pop()
+        orphan = dict(timing, agent_id=None, request_id="orphan", ttft_seconds=None, total_seconds=None)
+        telemetry["latency_rows"].append(orphan)
+        data = build()
+        self.assertEqual(data["observed_telemetry"]["requests"], 2)
+        self.assertEqual(data["observed_telemetry"]["ttft"]["n"], 1)
+        # An internally consistent invented member cannot override canonical root identity.
+        members[0]["root_agent_id"] = "invented"
+        members[0]["allowed_agent_ids"] = ["invented"]
+        write(member_path, membership)
+        with self.assertRaises(ValueError): build()
+        members[0]["root_agent_id"] = timing["agent_id"]
+        members[0]["allowed_agent_ids"] = [timing["agent_id"]]
+        write(member_path, membership)
+        # Original source bytes and proof hashes are checked, not just metadata shape.
+        write(sources / "00/summary.json", dict(summary, campaign_id="foreign"))
+        with self.assertRaises(ValueError): build()
+
+    def test_native_telemetry_producer_uses_original_events_and_hashes(self):
+        import hashlib
+        producer = runpy.run_path(str(ROOT / "scripts/cloudbench_telemetry.py"))
+        raw_path = self.tmp / "original/run.json"
+        start = dict(event="rose.complete.start", agent_id="root", request_id="req", timestamp="2026-10-18T19:00:00Z")
+        first = dict(start, event="rose.complete.first_productive_chunk", timestamp="2026-10-18T19:00:02Z", elapsed_s=999)
+        end = dict(start, event="rose.complete.foundry.done", timestamp="2026-10-18T19:00:05Z")
+        write(raw_path, {"tasks": [{"cost_cents": 17, "logs": {"worker_logs": [json.dumps(start), first, end, end]}}]})
+        digest = hashlib.sha256(raw_path.read_bytes()).hexdigest()
+        member = dict(job_id="job", task="task", shard="00", run_json_path="original/run.json", run_json_sha256=digest,
+                      allowed_agent_ids=["root"], binding_status="verified-scored-run")
+        manifest_path = write(self.tmp / "export-manifest.json", {"files": {"original/run.json": {"sha256":digest}}})
+        membership_path = write(self.tmp / "native-membership.json", dict(proofs={"00": {"export_manifest_sha256":hashlib.sha256(manifest_path.read_bytes()).hexdigest()}}, schema="descend-scorecard-membership-v1", experiment_id="exp",
+                                scheduled_jobs=1, rows=[member]))
+        output, receipt = self.tmp / "native.json", self.tmp / "native-receipt.json"
+        data, proof = producer["produce"](membership_path, {"00": self.tmp}, output, receipt, "fixture-custodian")
+        row = data["latency_rows"][0]
+        self.assertEqual((row["ttft_seconds"], row["total_seconds"]), (2, 5))  # actual clocks, not elapsed_s=999
+        self.assertEqual(data["cost_rows"][0]["cost_cents"], 17)
+        self.assertEqual(proof["telemetry_sha256"], hashlib.sha256(output.read_bytes()).hexdigest())
+        self.assertEqual(proof["inputs"][0]["sha256"], digest)
+        observations = [(o, digest) for o in (start, first, end)]
+        for changed in (dict(first, request_id="foreign"), dict(first, agent_id="other"),
+                        dict(first, timestamp="invalid"), dict(first, timestamp="2026-10-18T18:59:00Z"),
+                        dict(first, timestamp="2026-10-18T19:00:02")):
+            projected = producer["project_events"](member, [(o, digest) for o in (start, changed, end)])
+            own = next(r for r in projected if r["request_id"] == "req")
+            self.assertIsNone(own["ttft_seconds"])
+        changed = producer["project_events"](member, [(o, digest) for o in (start, dict(first, timestamp="2026-10-18T19:00:03Z"), end)])
+        self.assertEqual(changed[0]["ttft_seconds"], 3)
+        conflicting = producer["project_events"](member, observations + [(dict(first, timestamp="2026-10-18T19:00:03Z"), digest)])
+        self.assertIsNone(conflicting[0]["ttft_seconds"])
+        self.assertEqual(conflicting[0]["total_seconds"], 5)
+        self.assertEqual(len(producer["project_events"](member, observations + observations)), 1)
+        raw_path.write_text(raw_path.read_text() + " ")
+        with self.assertRaisesRegex(ValueError, "SHA256"):
+            producer["produce"](membership_path, {"00": self.tmp}, output, receipt, "fixture-custodian")
+
+    def test_descent_last_ten_and_finish_speed_include_interexperiment_work(self):
+        ids = [f"history-{i:02d}" for i in range(1, 13)]
+        for i, ident in enumerate(ids, 1):
+            LEDGER["record"]("launch", ident, ledger=self.f.ledger, goal=f"cohort-{i % 2}",
+                             run_dir=str(self.tmp / ident), triggered_at=T0 + i * 1000)
+            if i < 12:
+                LEDGER["record"]("end", ident, ledger=self.f.ledger, ended_at=T0 + i * 1000 + 100,
+                                 state="ABORTED" if i == 10 else "COMPLETE")
+        directory = self.tmp / ids[-1]
+        write(directory / "summary.json", {"campaign_id": ids[-1], "status": "running",
+              "started_at": "2026-10-18T22:48:52Z", "jobs": [], "total_jobs": 1})
+        before = self.f.ledger.read_bytes()
+        data = CARD["build"](directory, ledger=self.f.ledger, history_ids=list(reversed(ids)),
+                             iterations=8, now=T0 + 13000)
+        self.assertEqual([r["id"] for r in data["history"]], list(reversed(ids[-10:])))
+        self.assertEqual(data["iteration_speed"]["per_hour"], 3.6)
+        self.assertEqual((data["iteration_speed"]["older_number"], data["iteration_speed"]["newer_number"]), (10, 11))
+        text = CARD["render_text"](data)
+        self.assertTrue(text.startswith("LIVE ≤1.89 iter/h"))
+        self.assertIn("Last completed finish-to-finish: #10 → #11", text)
+        self.assertIn("LAST 10 EXPERIMENTS", text)
+        self.assertIn("T-RUNNING", text)
+        self.assertIn("T-31m40s since finish", text)
+        document = self.valid(data)
+        self.assertLess(document.index('class="iteration-speed"'), document.index('data-section="header"'))
+        self.assertEqual(document.count('class="hist"'), 10)
+        self.assertIn('data-finished-at=', document)
+        generic = CARD["build"](directory, ledger=self.f.ledger, history_ids=ids, now=T0 + 13000)
+        self.assertEqual(len(generic["history"]), 3)
+        self.assertIsNone(generic["iteration_speed"])
+        self.assertNotIn("iter/h", CARD["render_text"](generic))
+        self.assertEqual(self.f.ledger.read_bytes(), before)
+        write(directory / "summary.json", {"campaign_id": ids[-1], "status": "failed",
+              "started_at": "2026-10-18T22:48:52Z", "finished_at": "2026-10-18T22:55:32Z",
+              "jobs": [], "total_jobs": 1})
+        finished = CARD["build"](directory, ledger=self.f.ledger, history_ids=ids,
+                                 iterations=8, now=T0 + 13000)
+        self.assertEqual((finished["iteration_speed"]["older_number"],
+                          finished["iteration_speed"]["newer_number"]), (11, 12))
+        self.assertAlmostEqual(finished["iteration_speed"]["per_hour"], 3600 / 1300)
+        self.assertEqual(self.f.ledger.read_bytes(), before)
+
+    def test_live_iteration_pace_updates_per_build_without_fabricating_finish(self):
+        ids = [f"live-{i}" for i in range(1, 7)]
+        for i, ident in enumerate(ids, 1):
+            LEDGER["record"]("launch", ident, ledger=self.f.ledger, goal="live-pace",
+                             run_dir=str(self.tmp / ident), triggered_at=T0 + i * 100)
+            if i < 6:
+                LEDGER["record"]("end", ident, ledger=self.f.ledger,
+                                 ended_at=T0 + i * 100 + 20, state="COMPLETE")
+        run = self.tmp / ids[-1]
+        write(run / "summary.json", {"campaign_id": ids[-1], "status": "running",
+                                    "started_at": T0 + 600, "jobs": [], "total_jobs": 1})
+        before = self.f.ledger.read_bytes()
+        early = CARD["build"](run, ledger=self.f.ledger, history_ids=ids, iterations=6, now=T0 + 700)
+        later = CARD["build"](run, ledger=self.f.ledger, history_ids=ids, iterations=6, now=T0 + 880)
+        self.assertEqual(early["live_iteration_speed"]["per_hour"], 20)
+        self.assertEqual(later["live_iteration_speed"]["per_hour"], 10)
+        self.assertEqual(early["iteration_speed"], later["iteration_speed"])
+        self.assertEqual(early["speed_change"], later["speed_change"])
+        self.assertEqual(later["iteration_speed"]["per_hour"], 36)
+        self.assertIsNone(later["experiment"]["ended_at"])
+        self.assertEqual(early["history"], later["history"])
+        for data, label in ((early, "LIVE ≤20.00 iter/h"), (later, "LIVE ≤10.00 iter/h")):
+            text = CARD["render_text"](data)
+            self.assertTrue(text.startswith(label))
+            self.assertIn(label, self.valid(data))
+            self.assertIn("Last completed finish-to-finish: #4 → #5", text)
+            self.assertIn("over last 5 completed runs", text)
+        self.assertEqual(self.f.ledger.read_bytes(), before)
+
+    def test_live_iteration_pace_rejects_unknown_or_nonconsecutive_clocks(self):
+        rows = [{"id":"live", "number":3, "state":"RUNNING", "ended_at":None, "triggered_at":200},
+                {"id":"last", "number":2, "state":"COMPLETE", "ended_at":100}]
+        self.assertEqual(CARD["live_iteration_speed"](rows, 300, "live")["per_hour"], 18)
+        for now in (0, float("nan"), float("inf"), True, 100):
+            self.assertIsNone(CARD["live_iteration_speed"](rows, now, "live"))
+        for field, value in (("number",1), ("number",True), ("triggered_at",None),
+                             ("triggered_at",99), ("triggered_at",301), ("ended_at",250),
+                             ("state","COMPLETE")):
+            changed=[dict(row) for row in rows];changed[0][field]=value
+            self.assertIsNone(CARD["live_iteration_speed"](changed,300,"live"))
+        for value in (None, 0, float("nan"), float("inf"), True, 301):
+            changed=[dict(row) for row in rows];changed[1]["ended_at"]=value
+            self.assertIsNone(CARD["live_iteration_speed"](changed,300,"live"))
+        self.assertIsNone(CARD["live_iteration_speed"](rows[:1],300,"live"))
+        self.assertIsNone(CARD["live_iteration_speed"](rows,300,"other"))
+
+    def test_descent_public_render_speed_and_finish_age(self):
+        run = self.f.fleet()
+        LEDGER["record"]("launch", "older", ledger=self.f.ledger, goal="fleet-goal",
+                         run_dir=str(self.tmp / "older"), triggered_at=T0 - 3600)
+        LEDGER["record"]("end", "older", ledger=self.f.ledger, ended_at=T0 - 1800, state="ABORTED")
+        card = render(run, self.f, iterations=1)
+        text = CARD["render_text"](card)
+        self.assertTrue(text.startswith("1.30 iter/h"))
+        self.assertIn("T-44m00s since finish", text)
+        self.assertIn("1.30 iter/h", self.valid(card))
+        newer = render(run, self.f, iterations=1)
+        newer["generated_at"] += 3600
+        self.assertIn("T-1h44m since finish", CARD["render_text"](newer))
+        self.assertEqual(card["experiment"]["ended_at"], newer["experiment"]["ended_at"])
+
+    def test_public_descent_render_rejects_missing_future_or_nonpositive_interval(self):
+        run = self.f.fleet()
+        LEDGER["record"]("launch", "older", ledger=self.f.ledger, goal="fleet-goal",
+                         run_dir=str(self.tmp / "older"), triggered_at=T0 - 3600)
+        LEDGER["record"]("end", "older", ledger=self.f.ledger, ended_at=T0 - 1800, state="COMPLETE")
+        entries = LEDGER["read"](self.f.ledger)
+        for end in (None, 0, NOW + 1, T0 + 960, T0 + 1000):
+            changed = [dict(e, ended_at=end) if e.get("id") == "older" and e.get("event") == "end" else e for e in entries]
+            self.f.ledger.write_text("".join(json.dumps(e) + "\n" for e in changed))
+            card = render(run, self.f, iterations=1)
+            self.assertIsNone(card["iteration_speed"])
+            self.assertTrue(CARD["render_text"](card).startswith("UNMEASURED iter/h"))
+            self.valid(card)
+            if end is None or end == 0 or end > NOW:
+                self.assertIn("T-UNRECORDED", CARD["render_text"](card))
+
+    def test_unrecorded_current_finish_cannot_supply_iteration_speed(self):
+        run = self.f.fleet()
+        other = self.tmp / "unrecorded"
+        write(other / "summary.json", {"campaign_id": "unrecorded", "status": "failed", "jobs": [],
+              "started_at": "2026-10-18T19:50:00Z", "finished_at": "2026-10-18T20:00:00Z"})
+        card = CARD["build"](other, ledger=self.f.ledger, goal="fleet-goal", iterations=1, now=NOW)
+        self.assertFalse(card["in_ledger"])
+        self.assertIsNone(card["iteration_speed"])
+        self.assertIsNone(card["speed_change"])
+        self.assertTrue(CARD["render_text"](card).startswith("UNMEASURED iter/h"))
+        self.valid(card)
+
+    def test_public_five_finish_speed_change(self):
+        for intervals, expected in (([800, 400, 200, 100], 100.0),
+                                    ([100, 200, 400, 800], -50.0),
+                                    ([400, 400, 400, 400], 0.0)):
+            with self.subTest(intervals=intervals):
+                self.f.ledger.unlink(missing_ok=True)
+                ends = [T0]
+                for delta in intervals:
+                    ends.append(ends[-1] + delta)
+                ids = [f"change-{i}" for i in range(1, 7)]
+                for i, ident in enumerate(ids):
+                    LEDGER["record"]("launch", ident, ledger=self.f.ledger, goal="change",
+                                     run_dir=str(self.tmp / ident), triggered_at=T0 - 10 + i)
+                    if i < 5:
+                        LEDGER["record"]("end", ident, ledger=self.f.ledger, ended_at=ends[i], state="ABORTED" if i == 2 else "COMPLETE")
+                run = self.tmp / ids[-1]
+                write(run / "summary.json", {"campaign_id": ids[-1], "status": "running", "jobs": [], "total_jobs": 1})
+                before = self.f.ledger.read_bytes()
+                card = CARD["build"](run, ledger=self.f.ledger, iterations=5, history_ids=ids, now=T0 + 10000)
+                text = CARD["render_text"](card)
+                label = f"{expected:+.1f}%" if expected else "0.0%"
+                self.assertIn(f"[avg Δ {label} over last 5 completed runs]", text)
+                self.assertAlmostEqual(card["speed_change"]["percent"], expected)
+                self.assertEqual(card["speed_change"]["runs"], 5)
+                html = self.valid(card)
+                self.assertIn('class="ok"' if expected > 0 else 'class="bad"' if expected < 0 else 'class="muted"', html)
+                self.assertIn("arithmetic mean of 3 successive", html)
+                self.assertEqual(self.f.ledger.read_bytes(), before)
+                entries = LEDGER["read"](self.f.ledger)
+                for invalid in (None, 0, T0 + 20000):
+                    changed = [dict(e, ended_at=invalid) if e.get("id") == ids[2] and e.get("event") == "end" else e for e in entries]
+                    self.f.ledger.write_text("".join(json.dumps(e) + "\n" for e in changed))
+                    invalid_card = CARD["build"](run, ledger=self.f.ledger, iterations=5, history_ids=ids, now=T0 + 10000)
+                    self.assertIsNone(invalid_card["speed_change"]["percent"])
+                    self.assertIn("avg Δ UNMEASURED", CARD["render_text"](invalid_card))
+                    self.valid(invalid_card)
+
+    def test_captured_eight_experiment_speed_change(self):
+        entries = LEDGER["read"](GOLDEN / "rotating-cohort-ledger.jsonl")
+        launch_ids = [e["id"] for e in LEDGER["experiments"](entries)[-6:]]
+        # Original final It6 receipt and original observer #6->#7 interval.
+        end6 = 1793149302.101414
+        end7 = end6 + 8028.104736804962
+        for e in entries:
+            if "run_dir" in e:
+                e["run_dir"] = str(self.tmp / e["id"])
+        self.f.ledger.write_text("".join(json.dumps(e) + "\n" for e in entries))
+        LEDGER["record"]("end", launch_ids[-1], ledger=self.f.ledger, ended_at=end6, state="COMPLETE")
+        for i, ident in enumerate(("original600-1793152917121861690", "original600-1793163509958414749"), 7):
+            launch_ids.append(ident)
+            LEDGER["record"]("launch", ident, ledger=self.f.ledger, goal="new-cohort",
+                             run_dir=str(self.tmp / ident), triggered_at=end7 + i)
+            if i == 7:
+                LEDGER["record"]("end", ident, ledger=self.f.ledger, ended_at=end7, state="INCOMPLETE")
+        run = self.tmp / launch_ids[-1]
+        write(run / "summary.json", {"campaign_id": launch_ids[-1], "status":"running", "jobs":[]})
+        before = self.f.ledger.read_bytes()
+        card = CARD["build"](run, ledger=self.f.ledger, history_ids=launch_ids, iterations=7, now=end7+10000)
+        self.assertAlmostEqual(card["iteration_speed"]["per_hour"], .448424642929202)
+        self.assertEqual(len(card["history"]), 8)
+        intervals = [5616.887976646423, 1161.9379551410675, 6614.532918691635, 8028.104736804962]
+        rates = [3600 / interval for interval in intervals]
+        expected = sum(100*(b/a-1) for a,b in zip(rates,rates[1:]))/3
+        self.assertAlmostEqual(card["speed_change"]["percent"], expected)
+        self.assertTrue(CARD["render_text"](card).startswith("LIVE UNMEASURED iter/h [avg Δ"))
+        self.assertIn("0.45 iter/h", CARD["render_text"](card))
+        self.assertIn("last 5 completed runs", self.valid(card))
+        self.assertEqual(self.f.ledger.read_bytes(), before)
+
+    def test_speed_change_requires_five_consecutive_valid_finishes(self):
+        rows = [{"id":str(i), "number":i, "state":"COMPLETE", "ended_at":1000*i} for i in range(5, 0, -1)]
+        self.assertEqual(CARD["average_speed_change"](rows, 10000)["percent"], 0)
+        self.assertIsNone(CARD["average_speed_change"](rows[:4], 10000)["percent"])
+        for value in (float("nan"), float("inf"), True, -1, 0, None, 6000):
+            broken = [dict(r) for r in rows];broken[2]["ended_at"] = value
+            self.assertIsNone(CARD["average_speed_change"](broken, 10000)["percent"])
+        broken = [dict(r) for r in rows];broken[2]["number"] = None
+        self.assertIsNone(CARD["average_speed_change"](broken, 10000)["percent"])
+        broken = [dict(r) for r in rows];broken[2]["state"] = "RUNNING"
+        self.assertIsNone(CARD["average_speed_change"](broken, 10000)["percent"])
+
+    def test_finish_speed_and_age_do_not_bridge_missing_or_invalid_clocks(self):
+        older = {"id": "a", "number": 6, "state": "COMPLETE", "ended_at": 1000}
+        newer = {"id": "b", "number": 7, "state": "FAILED", "ended_at": 4600}
+        running = {"id": "c", "number": 8, "state": "RUNNING", "ended_at": None}
+        speed = CARD["finish_to_finish_speed"]([running, newer, older], 10000, "c")
+        self.assertEqual(speed["per_hour"], 1)
+        for invalid in (None, 0, -1, True, float("nan"), float("inf"), 11000, 4600, 5000):
+            broken = dict(older, ended_at=invalid)
+            self.assertIsNone(CARD["finish_to_finish_speed"]([running, newer, broken], 10000, "c"))
+        # A missing intervening finish cannot be bridged to the prior good one.
+        self.assertIsNone(CARD["finish_to_finish_speed"]([newer, dict(running, number=6), older], 10000))
+        self.assertIsNone(CARD["finish_to_finish_speed"]([dict(newer, ended_at=None), older], 10000))
+        self.assertIsNone(CARD["finish_to_finish_speed"]([running], 10000))
+        self.assertEqual(CARD["finish_age"](older, 4600), "T-1h00m since finish")
+        self.assertEqual(CARD["finish_age"](older, 8200), "T-2h00m since finish")
+        self.assertEqual(CARD["finish_age"](running, 4600), "T-RUNNING")
+        self.assertEqual(CARD["finish_age"](dict(older, ended_at=None), 4600), "T-UNRECORDED")
+        self.assertEqual(CARD["finish_age"](dict(older, ended_at=5000), 4600), "T-UNRECORDED")
+
+    def test_finish_age_browser_clock_updates_only_age_text(self):
+        script = """const nodes = [{dataset:{finishedAt:'1000'}, textContent:''}];
+let clock=4600000, tick;
+global.Date={now:()=>clock};
+global.document={querySelectorAll:()=>nodes};
+global.setInterval=(f,ms)=>{tick=f;if(ms!==1000)throw Error('cadence');};
+""" + CARD["FINISH_AGE_SCRIPT"] + """
+if(nodes[0].textContent!=='T-1h00m since finish')throw Error('first age');
+clock=8200000;tick();
+if(nodes[0].textContent!=='T-2h00m since finish')throw Error('live age');
+if(nodes[0].dataset.finishedAt!=='1000')throw Error('finish changed');
+if(finishAgeLabel(9000,8200)!=='T-UNRECORDED')throw Error('future finish');
+"""
+        subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+
+    def test_explicit_history_scope_preserves_rotating_cohort_continuity(self):
+        entries = LEDGER["read"](GOLDEN / "rotating-cohort-ledger.jsonl")
+        launches = LEDGER["experiments"](entries)
+        ids = [entry["id"] for entry in launches[-6:]]
+        for entry in entries:
+            if "run_dir" in entry:
+                entry["run_dir"] = str(self.tmp / entry["id"])
+        self.f.ledger.write_text("".join(json.dumps(entry) + "\n" for entry in entries))
+        directory = self.tmp / ids[-1]
+        write(directory / "summary.json", {"campaign_id": ids[-1], "jobs": [], "total_jobs": 30,
+              "started_at": "2026-10-28T00:05:53Z", "status": "running"})
+        old = self.f.ledger.read_bytes()
+        default = CARD["build"](directory, ledger=self.f.ledger, iterations=5, now=1793147000)
+        self.assertEqual(default["number"], 1, "the original cohort-local scope remains available")
+        data = CARD["build"](directory, ledger=self.f.ledger, history_ids=list(reversed(ids)), iterations=5, now=1793147000)
+        self.assertEqual(data["number"], 6)
+        self.assertEqual(data["rate"]["launches"], 6)
+        self.assertEqual([r["id"] for r in data["history"]], list(reversed(ids)))
+        self.assertEqual([r["number"] for r in data["history"]], [6, 5, 4, 3, 2, 1])
+        self.assertEqual(data["trend"], [], "descent uses global history, not an unused batch trend")
+        self.assertEqual(data["rate"]["goal_started_at"], launches[-6]["triggered_at"])
+        self.assertEqual(self.f.ledger.read_bytes(), old, "scope selection never rewrites the original ledger")
+        for invalid in (ids + ["missing"], ids[:-1], ids + [ids[0]]):
+            with self.assertRaises(ValueError):
+                CARD["build"](directory, ledger=self.f.ledger, history_ids=invalid, now=1793147000)
+        command = [sys.executable, str(ROOT / "scripts/cloudbench-scorecard.py"), str(directory),
+                   "--ledger", str(self.f.ledger), "--json", "--iterations", "5", "--now", "1793147000"]
+        for ident in reversed(ids):
+            command += ["--history-id", ident]
+        result = subprocess.run(command, capture_output=True, text=True, check=True)
+        self.assertEqual(json.loads(result.stdout)["number"], 6)
+        self.assertEqual(self.f.ledger.read_bytes(), old)
+
+    def test_provider_prompt_cache_share_requires_complete_denominator(self):
+        capture = json.loads((GOLDEN / "provider-prompt-cache.json").read_text())
+        recorded = task("task-1", "passed")
+        recorded.update(prompt_cache_read_input_tokens=capture["legacy_read"],
+                        prompt_cache_creation_input_tokens=capture["legacy_write"],
+                        prompt_cache_uncached_input_tokens=capture["prompt_uncached"])
+        report = card("r1", [recorded])
+        report["cost"]["fast_cache_hit_rate"] = 1.0
+        row = CARD["compact_rows"]({"jobs": [job(1, "passed", "PASSED", False, run_id="r1")]}, {"r1": report})[0]
+        self.assertAlmostEqual(row["cache_hit"], 213760 / 231563)
+        for invalid in (None, -1, True, float("nan"), float("inf")):
+            recorded["prompt_cache_uncached_input_tokens"] = invalid
+            self.assertIsNone(CARD["compact_rows"]({"jobs": [job(1, "passed", "PASSED", False, run_id="r1")]},
+                                                   {"r1": report})[0]["cache_hit"])
+        for key in list(recorded):
+            if key.startswith("prompt_cache_"):
+                recorded.pop(key)
+        self.assertIsNone(CARD["compact_rows"]({"jobs": [job(1, "passed", "PASSED", False, run_id="r1")]},
+                                               {"r1": report})[0]["cache_hit"], "legacy ratio is not a complete denominator")
+
+    def test_preallocation_controller_cancellation_receipts(self):
+        capture = json.loads((GOLDEN / "preallocation-campaign-receipts.json").read_text())
+        root = self.tmp / "workspace"
+        directory = root / ".context/benchmarks/campaigns" / capture["summary"]["campaign_id"]
+        summary = dict(capture["summary"], jobs=[])
+        fleets = []
+        for record in capture["records"]:
+            job_record = dict(record["job"])
+            fleet = root / ".context/fleet/runs" / record["card"]["run_id"]
+            fleets.append(fleet)
+            job_record["fleet_dir"] = str(fleet)
+            summary["jobs"].append(job_record)
+            write(fleet / "_batch/report-card.json", record["card"])
+            write(fleet / "_batch/lifecycle.json", dict(record["lifecycle"], workspace_root=str(root)))
+            write(fleet / "teardown-ownership/meta", record["meta"].replace("/home/boxes/rose", str(root)))
+            write(fleet / "teardown-ownership/provider-teardown-verified.epoch", record["release_epoch"])
+        write(directory / "summary.json", summary)
+        exp = CARD["load"](directory)
+        self.assertEqual(exp["infra_unattributed_cancelled"], 1, "27 matching controller TERM receipts prove induced cancellations")
+        self.assertEqual(exp["infra_confirmed_jobs"], 2, "only the original latched breach certifies these infra jobs")
+        self.assertEqual(exp["outcomes"]["CANCELLED"], 28)
+        self.assertEqual(exp["scored"], 0)
+        self.assertIsNone(exp["infra_jobs"], "the third refusal has no typed pre-cancel failure receipt")
+        self.assertIsNone(exp["source_ref"], "prelaunch checkout is not executed-source provenance")
+        self.assertEqual(exp["released"], {"yes": 30, "of": 30})
+        self.assertEqual(exp["lifecycle_verified"], {"yes": 0, "of": 30}, "failed full lifecycle stays failed")
+        self.assertEqual(exp["ended_at"], CARD["epoch_of"](summary["finished_at"]))
+        # A foreign lifecycle cannot lend its exit status to the scheduled job.
+        lifecycle = dict(capture["records"][0]["lifecycle"], workspace_root=str(root), run_id="foreign")
+        write(fleets[0] / "_batch/lifecycle.json", lifecycle)
+        invalid = CARD["load"](directory)
+        self.assertEqual(invalid["infra_unattributed_cancelled"], 2)
+        self.assertEqual(invalid["released"], {"yes": 29, "of": 30})
+        # Matching failure exit 1 alone never proves a pre-cancellation cause.
+        lifecycle["run_id"] = fleets[0].name
+        lifecycle["controller_exit_code"] = 1
+        write(fleets[0] / "_batch/lifecycle.json", lifecycle)
+        self.assertEqual(CARD["load"](directory)["infra_unattributed_cancelled"], 2)
+
+    def test_cancelled_campaign_keeps_started_lifecycles_and_infra_uncertainty(self):
+        capture = json.loads((GOLDEN / "cancelled-campaign-receipts.json").read_text())
+        root = self.tmp / "workspace"
+        directory = root / ".context/benchmarks/campaigns" / capture["summary"]["campaign_id"]
+        summary = dict(capture["summary"], jobs=[])
+        for record in capture["records"]:
+            job_record = dict(record["job"])
+            fleet = root / ".context/fleet/runs" / record["card"]["run_id"]
+            job_record["log"] = str(directory / Path(job_record["log"]).name)
+            write(Path(job_record["log"]), f"{root}/scripts/run-bench monitor {fleet}\n")
+            summary["jobs"].append(job_record)
+            write(fleet / "_batch/report-card.json", record["card"])
+            write(fleet / "_batch/lifecycle.json", dict(record["lifecycle"], workspace_root=str(root)))
+            for name in ("meta", "provider-teardown-verified.epoch"):
+                if name in record:
+                    write(fleet / "teardown-ownership" / name, record[name].replace("/home/boxes/rose", str(root)))
+        write(directory / "summary.json", summary)
+        exp = CARD["load"](directory)
+        self.assertEqual(exp["terminal_attempts"], 20, "empty attempts does not mean an exited controller never started")
+        self.assertEqual((exp["scored"], exp["outcomes"]["CANCELLED"]), (0, 20))
+        self.assertEqual(exp["released"], {"yes": 1, "of": 20}, "one provider seal is independent of failed execution")
+        self.assertEqual(exp["lifecycle_verified"], {"yes": 0, "of": 20})
+        self.assertIsNone(exp["infra_jobs"], "post-cancel INFRA_ERROR is not qualified pre-cancel evidence")
+        self.assertIsNone(exp["infra_attempts"])
+        self.assertEqual(exp["infra_unattributed_cancelled"], 20)
+        self.assertEqual(CARD["_infra_text"](exp)[0], "UNCLASSIFIED")
+        self.assertEqual(exp["ended_at"], CARD["epoch_of"](summary["finished_at"]))
+        self.assertTrue(any("cancel" in i["text"].lower() for i in CARD["_issues"](exp)))
+        rendered = CARD["build"](directory, ledger=self.f.ledger,
+                                 now=CARD["epoch_of"](summary["finished_at"]) + 60)
+        self.assertIn("INFRA UNCLASSIFIED", CARD["render_text"](rendered))
+        self.assertIn("■ INFRA UNCLASSIFIED", self.valid(rendered))
+        for record in capture["records"]:
+            write(root / ".context/fleet/runs" / record["card"]["run_id"] / record["job"]["task"]
+                  / "benchmark-child.finished", record["child_exit"])
+        native = CARD["load"](directory)
+        self.assertEqual((native["infra_jobs"], native["infra_attempts"]), (1, 1))
+        self.assertEqual((native["outcomes"]["INFRA"], native["outcomes"]["CANCELLED"]), (1, 19))
+        self.assertEqual(native["terminal_attempts"], 20)
+        self.assertEqual(native["infra_unattributed_cancelled"], 0)
+        self.assertTrue(native["infra_breached"])
+        self.assertEqual(native["reasons"], [["INFRA", "Native child exit 125; no current run artifact produced", 1]])
+        for record in capture["records"]:
+            (root / ".context/fleet/runs" / record["card"]["run_id"] / record["job"]["task"]
+             / "benchmark-child.finished").unlink()
+        # A canonical pre-cancellation breach receipt retains the authentic job;
+        # a generic post-TERM INFRA_ERROR alone cannot provide this distinction.
+        summary["infra_stop"] = {"infra_jobs": 1, "scheduled_total": 20,
+                                 "infra_job_ids": ["r002-j0017"]}
+        write(directory / "summary.json", summary)
+        with_stop = CARD["load"](directory)
+        self.assertEqual(with_stop["infra_confirmed_jobs"], 1)
+        self.assertTrue(with_stop["infra_breached"])
+        self.assertEqual(with_stop["infra_unattributed_cancelled"], 19)
+        self.assertEqual(with_stop["outcomes"]["CANCELLED"], 19)
+        summary["infra_stop"]["scheduled_total"] = 600
+        write(directory / "summary.json", summary)
+        self.assertEqual(CARD["load"](directory)["infra_confirmed_jobs"], 0, "foreign cohort receipt cannot certify a failure")
+        # A never-dispatched queued cancellation still owns no resource/attempt.
+        pending = {"status": "cancelled", "attempts": 0, "started_at": None}
+        self.assertFalse(CARD["started_terminal"](pending))
+
     def test_history_infra_uses_scheduled_jobs_not_scored_attempts(self):
         cases = [(11, 1, 1, 0, 0, 0, False, "INFRA 0/11"),
                  (1, 1, 1, 0, 0, 0, False, "INFRA 0/1"),
@@ -234,6 +1124,68 @@ class Scorecard(unittest.TestCase):
         self.assertEqual(exp["reasons"][0][1], "Expected tool 'spawn_browser_agent' not found in messages")
         self.valid(data)
 
+    def test_campaign_monitor_receipts(self):
+        captured = json.loads((GOLDEN / "campaign-receipts.json").read_text())
+        root = self.tmp / "workspace"
+        directory = root / ".context/benchmarks/campaigns" / captured["summary"]["campaign_id"]
+        summary = dict(captured["summary"], total_jobs=2, task_count=2, runs=1, jobs=[])
+        fleets = []
+        for item in captured["jobs"]:
+            entry = dict(item["job"])
+            fleet = root / ".context/fleet/runs" / item["card"]["run_id"]
+            fleets.append(fleet)
+            entry["log"] = str(directory / Path(entry["log"]).name)
+            write(Path(entry["log"]), f"    {root}/scripts/run-bench monitor {fleet}\n"
+                  f"    {root}/scripts/run-bench monitor {root}/.context/fleet/runs/nested-canary\n")
+            write(fleet / "_batch/report-card.json", item["card"])
+            lifecycle = dict(item["lifecycle"], workspace_root=str(root))
+            write(fleet / "_batch/lifecycle.json", lifecycle)
+            write(fleet / "teardown-ownership/meta", item["meta"].replace("/home/boxes/rose", str(root)))
+            write(fleet / "teardown-ownership/provider-teardown-verified.epoch", item["released_epoch"])
+            summary["jobs"].append(entry)
+        write(directory / "summary.json", summary)
+        before = (directory / "summary.json").read_bytes()
+        exp = CARD["load"](directory)
+        self.assertEqual(exp["source_ref"], captured["provenance"]["source"])
+        self.assertEqual((exp["outcomes"]["PASS"], exp["outcomes"]["AGENT FAIL"], exp["outcomes"]["INFRA"]), (1, 1, 0))
+        self.assertEqual(exp["reasons"][0][1], CARD["reason_key"](captured["jobs"][0]["card"]["per_task"][0]["failure_reason"]))
+        self.assertEqual(exp["lifecycle_verified"], {"yes": 2, "of": 2})
+        self.assertEqual(exp["released"], {"yes": 2, "of": 2})
+        self.assertEqual(exp["ended_at"], CARD["epoch_of"](summary["finished_at"]))
+        self.assertEqual((directory / "summary.json").read_bytes(), before)
+        relocated = write(self.tmp / "custom-campaign-root/summary.json", summary).parent
+        self.assertEqual(CARD["load"](relocated)["lifecycle_verified"], {"yes": 2, "of": 2})
+        mixed = json.loads((fleets[1] / "_batch/report-card.json").read_text())
+        mixed["execution_provenance"]["base_sha"] = "a" * 40
+        write(fleets[1] / "_batch/report-card.json", mixed)
+        self.assertIsNone(CARD["load"](directory)["source_ref"], "mixed sources must remain explicit")
+        write(fleets[1] / "_batch/report-card.json", captured["jobs"][1]["card"])
+        for invalid in ("nan", "inf", "-1", "unrecorded"):
+            write(fleets[0] / "teardown-ownership/provider-teardown-verified.epoch", invalid)
+            self.assertEqual(CARD["load"](directory)["released"], {"yes": 1, "of": 2})
+        write(fleets[0] / "teardown-ownership/provider-teardown-verified.epoch", captured["jobs"][0]["released_epoch"])
+        # Retry-mode summaries carry the same handle explicitly; no log needed.
+        for entry, fleet in zip(summary["jobs"], fleets):
+            entry["fleet_dir"] = str(fleet)
+            entry["run_id"] = fleet.name
+            Path(entry["log"]).unlink()
+        write(directory / "summary.json", summary)
+        self.assertEqual(CARD["load"](directory)["lifecycle_verified"], {"yes": 2, "of": 2})
+        # A different run's seal and a missing seal cannot certify this job.
+        lifecycle["run_id"] = "different-run"
+        write(fleets[1] / "_batch/lifecycle.json", lifecycle)
+        (fleets[0] / "teardown-ownership/provider-teardown-verified.epoch").unlink()
+        exp = CARD["load"](directory)
+        self.assertEqual(exp["lifecycle_verified"], {"yes": 0, "of": 2})
+        self.assertEqual(exp["released"], {"yes": 0, "of": 2})
+        # Binding a log to a different task must not borrow its reason or source.
+        wrong = dict(captured["jobs"][0]["card"])
+        wrong["per_task"] = [task("unrelated", "failed", reason="unrelated failure")]
+        write(fleets[0] / "_batch/report-card.json", wrong)
+        exp = CARD["load"](directory)
+        self.assertIsNone(exp["source_ref"], "partial source coverage is not campaign provenance")
+        self.assertIn(["AGENT FAIL", "reason UNRECORDED", 1], exp["reasons"])
+
     def test_sharded_golden_audit_and_history(self):
         data = render(self.f.sharded(), self.f)
         self.golden("sharded", CARD["render_text"](data))
@@ -245,6 +1197,45 @@ class Scorecard(unittest.TestCase):
         self.assertEqual([h["label"] for h in data["history"]], ["polar4", "run600c"])
         self.assertEqual(data["history"][1]["outcomes"]["INFRA"], 14)
         self.valid(data)
+
+    def test_success_rate_trend_after_four_experiments(self):
+        data = render(self.f.sharded(), self.f)
+        data["trend"] = [
+            {"number": 1, "rate": .25, "running": False},
+            {"number": 2, "rate": None, "running": False},
+            {"number": 3, "rate": .75, "running": False},
+            {"number": 4, "rate": 1.0, "running": True},
+        ]
+        document = self.valid(data)
+        self.assertIn("SUCCESS RATE OVER TIME", document)
+        self.assertIn("Experiment #4: 100.0%", document)
+        self.assertIn('class="dot running"', document)
+        self.assertEqual(document.count('class="path"'), 1, "unscored experiment breaks the line")
+        fallback = CARD["render_text"](data)
+        self.assertIn("#2 gap", fallback)
+        self.assertIn("#4 100.0% (running)", fallback)
+        data["trend"] = data["trend"][:3]
+        self.assertNotIn("SUCCESS RATE OVER TIME", self.valid(data))
+
+    def test_descent_iteration_count_controls_trend_threshold(self):
+        run = self.f.fleet()
+        sparse = render(run, self.f, iterations=4)
+        self.assertEqual(sparse["trend"], [], "descent does not load an unused batch trend")
+        self.assertIn("SUCCESS RATE OVER TIME", self.valid(sparse))
+        self.assertIn("SUCCESS RATE OVER TIME", CARD["render_text"](sparse))
+        for number in range(2, 5):
+            run_id = f"historical-{number}"
+            LEDGER["record"]("launch", run_id, ledger=self.f.ledger, goal="fleet-goal",
+                             slice=run_id, kind="fleet", run_dir=str(self.tmp / run_id),
+                             triggered_at=T0 + number * 10, scheduled_total=2)
+            LEDGER["record"]("end", run_id, ledger=self.f.ledger, goal="fleet-goal",
+                             ended_at=T0 + number * 10 + 5, state="COMPLETE",
+                             outcome={"task_status": {"PASSED": number % 3, "FAILED": 2 - number % 3}})
+        self.assertEqual(render(run, self.f, iterations=3)["trend"], [], "two launches may share one iteration")
+        card = render(run, self.f, iterations=4)
+        self.assertEqual(card["trend"], [])
+        self.assertEqual(len(card["history"]), 4)
+        self.assertIn("SUCCESS RATE OVER TIME", self.valid(card))
 
     def test_native_audit_presence_and_absence(self):
         admission = self.f.sharded(audit=False)
@@ -470,6 +1461,89 @@ class Scorecard(unittest.TestCase):
         self.assertEqual(item["state"], "warn")
         self.assertEqual(item["detail"], "final group NOT published: " + reason[:160])
 
+    def mixed_shard_fixture(self):
+        admission = self.f.sharded(live=True)
+        coordination = json.loads((admission / "coordination.json").read_text())
+        coordination["scheduled_total"] = 40
+        write(admission / "coordination.json", coordination)
+        rows = [job(i, "passed" if i <= 18 else "failed", "PASSED" if i <= 18 else "FAILED", False)
+                for i in range(1, 21)]
+        export = admission / "shard-00/run/export"
+        write(export / "disposable-export.verified.json", {})
+        with tarfile.open(export / "originals.tar.gz", "w:gz") as stream:
+            raw = json.dumps({"jobs": rows}).encode()
+            info = tarfile.TarInfo("context/benchmarks/campaigns/campaign-it7-shard00/summary.json")
+            info.size = len(raw)
+            stream.addfile(info, io.BytesIO(raw))
+        # Stale counters for the exported shard must not be counted or supply reasons.
+        write(admission / "shard-00/run/shard-status.json", {"state": "LIVE", "infra": {"progress": {
+            "combos": [["failed", "INFRA_ERROR", True, 20]], "reasons": [["INFRA", "stale", 20]]}}})
+        write(admission / "shard-01/run/shard-status.json", {"state": "LIVE", "infra": {"progress": {
+            "combos": [["passed", "PASSED", False, 17], ["failed", "FAILED", False, 1],
+                       ["failed", "INFRA_ERROR", True, 1], ["running", None, None, 1]],
+            "jobs": 20, "terminal_attempts": 19, "infra_attempts": 1,
+            "reasons": [["INFRA", "seed failed", 1]]}}})
+        return admission, rows
+
+    def test_mixed_verified_export_and_live_shard_keep_all_scheduled_jobs(self):
+        admission, _ = self.mixed_shard_fixture()
+        data = render(admission, self.f)
+        exp = data["experiment"]
+        self.assertEqual(exp["progress"], {"queued": 0, "in_progress": 1, "completed": 39, "unobserved": 0})
+        self.assertEqual(exp["scheduled_total"], 40)
+        self.assertEqual((exp["outcomes"]["PASS"], exp["outcomes"]["AGENT FAIL"], exp["outcomes"]["INFRA"]), (35, 3, 1))
+        self.assertEqual((exp["infra_jobs"], exp["infra_threshold"], exp["infra_breached"]), (1, 2, False))
+        self.assertEqual((exp["terminal_attempts"], exp["infra_attempts"]), (39, 1))
+        self.assertEqual(exp["state"], "RUNNING")
+        self.assertEqual(exp["rows_source"], "verified controller exports + live shard-status counters")
+        self.assertIn(["INFRA", "seed failed", 1], exp["reasons"])
+        self.assertFalse(any("stale" in reason for _, reason, _ in exp["reasons"]))
+        self.assertEqual(exp["released"], {"yes": 20, "of": 39})
+        self.assertEqual(exp["lifecycle_verified"], {"yes": 20, "of": 39})
+        self.assertEqual(exp["wall"]["n"], 20)
+        self.assertIsNone(exp["cost"]["metered_usd"])
+        self.assertIn("COMPLETED 39/40", CARD["render_text"](data))
+        document = self.valid(data)
+        self.assertIn("35/38 scored", document)
+        self.assertIn("39/40", document)
+        self.assertIn("verified controller exports + live shard-status counters", document)
+
+    def test_mixed_shards_without_status_remain_unobserved(self):
+        admission, _ = self.mixed_shard_fixture()
+        (admission / "shard-01/run/shard-status.json").unlink()
+        exp = CARD["load"](admission)
+        self.assertEqual(exp["progress"], {"queued": 0, "in_progress": 0, "completed": 20, "unobserved": 20})
+        self.assertEqual(exp["outcomes"]["PASS"], 18)
+        self.assertEqual(exp["rows_source"], "verified controller exports")
+        self.assertEqual(exp["state"], "RUNNING")
+
+    def test_exported_empty_summary_does_not_revive_its_stale_counters(self):
+        admission, _ = self.mixed_shard_fixture()
+        (admission / "shard-01/run/shard-status.json").unlink()
+        archive = admission / "shard-00/run/export/originals.tar.gz"
+        with tarfile.open(archive, "w:gz") as stream:
+            raw = json.dumps({"jobs": []}).encode()
+            info = tarfile.TarInfo("context/benchmarks/campaigns/campaign-empty/summary.json")
+            info.size = len(raw)
+            stream.addfile(info, io.BytesIO(raw))
+        exp = CARD["load"](admission)
+        self.assertEqual(exp["scheduled_total"], 40)
+        self.assertIsNone(exp["outcomes"])
+        self.assertIsNone(exp["progress"])
+        self.assertEqual(exp["reasons"], [])
+        self.assertEqual(exp["state"], "RUNNING")
+
+    def test_result_rows_still_override_export_and_live_counters(self):
+        admission, exported = self.mixed_shard_fixture()
+        final = exported + [job(i, "passed", "PASSED", False) for i in range(21, 41)]
+        write(admission / "result.json", {"jobs": CARD["compact_rows"]({"jobs": final})})
+        exp = CARD["load"](admission)
+        self.assertEqual(exp["rows_source"], "result.json")
+        self.assertEqual(exp["progress"]["completed"], 40)
+        self.assertEqual(exp["outcomes"]["PASS"], 38)
+        self.assertEqual(exp["outcomes"]["INFRA"], 0)
+        self.assertEqual(exp["reasons"], [["AGENT FAIL", "reason UNRECORDED", 2]])
+
     def test_sharded_live_counters_render_running(self):
         data = render(self.f.sharded(live=True), self.f)
         exp = data["experiment"]
@@ -587,7 +1661,7 @@ class Scorecard(unittest.TestCase):
         exp = data["experiment"]
         self.assertEqual((exp["state"], exp["progress"]["completed"]), ("COMPLETE", 2))
         self.assertEqual((exp["outcomes"]["PASS"], exp["outcomes"]["AGENT FAIL"]), (1, 1))
-        self.assertEqual(exp["cache"]["avg"], 0.938)
+        self.assertIsNone(exp["cache"], "legacy summary percentage lacks uncached-input coverage")
         self.assertIn("Timeout after 300s", CARD["render_text"](data))
         self.valid(data)
         # The run ends when its last required cleanup receipt lands, including a
@@ -847,6 +1921,61 @@ class Scorecard(unittest.TestCase):
         self.assertTrue(text.stdout.startswith("🧪 EXPERIMENT #1"), text.stdout[:200])
 
 
+class WaveReleaseEvidence(unittest.TestCase):
+    def load(self, proofs):
+        with tempfile.TemporaryDirectory() as root:
+            directory = Path(root)
+            waves, subs = [], []
+            for index, proof in enumerate(proofs):
+                admission = directory / f"admission-{index}"
+                write(admission / "coordination.json", {})
+                waves.append({"index": index, "state": "RELEASED", "copies": 1,
+                              "admission_dir": str(admission), "tasks": [f"task-{index}"]})
+                sub = CARD["empty_experiment"]("sharded", admission)
+                sub.update(proof, source_ref="a" * 40)
+                sub["rows"] = [{"job_id": f"job-{index}", "status": "failed", "task_status": "FAILED",
+                                "infra_failure": False, "released": False, "lifecycle": False}]
+                sub["lifecycle"] = [{"state": "warn", "label": "Guests released", "detail": "missing historical release"}]
+                subs.append(sub)
+            write(directory / "batch.json", {"scheduled_total": len(waves), "tasks": ["task"],
+                  "runs": len(waves), "waves": waves})
+            with mock.patch.dict(CARD["load_waves"].__globals__,
+                                 {"load_sharded": mock.Mock(side_effect=subs)}):
+                return CARD["load_waves"](directory)
+
+    def test_every_launched_wave_must_have_native_release_audit(self):
+        complete = self.load([{"native_audit": True}, {"native_audit": True}])
+        self.assertTrue(complete.get("native_audit"))
+        self.assertFalse(any(i["text"].startswith("Release unverified") for i in CARD["_issues"](complete)))
+        incomplete = self.load([{"native_audit": True}, {}])
+        self.assertFalse(incomplete.get("native_audit"))
+        self.assertTrue(any(i["text"].startswith("Release unverified") for i in CARD["_issues"](incomplete)))
+
+    def test_physical_closure_preserves_original_wave_observations_only_when_complete(self):
+        first = {"observed_at": T0, "subjects": 1, "all_resources_absent": True}
+        second = {"observed_at": T0 + 20, "subjects": 1, "all_resources_absent": False}
+        complete = self.load([{"physical_closure_asof": first}, {"physical_closure_asof": second}])
+        self.assertEqual([w["evidence"] for w in complete["physical_closure_asof"]["waves"]], [first, second])
+        self.assertEqual(complete["physical_closure_asof"]["observed_at"], T0)
+        incomplete = self.load([{"physical_closure_asof": first}, {}])
+        self.assertFalse(incomplete.get("physical_closure_asof"))
+
+    def test_mixed_terminal_proofs_do_not_require_another_release_audit(self):
+        closure = {"observed_at": T0, "subjects": 1, "all_resources_absent": False}
+        complete = self.load([{"native_audit": True}, {"physical_closure_asof": closure}])
+        self.assertFalse(complete.get("native_audit"))
+        self.assertFalse(complete.get("physical_closure_asof"))
+        self.assertFalse(any(i["text"].startswith("Release unverified") for i in CARD["_issues"](complete)))
+        self.assertTrue(complete["unreleased_jobs"], "physical closure must not rewrite historical release")
+        self.assertEqual(complete["physical_closure_waves"], [{"index": 1, "evidence": closure}])
+        self.assertTrue(any(i["text"].startswith("Historical release/runtime") for i in CARD["_issues"](complete)))
+        incomplete = self.load([{"native_audit": True}, {"physical_closure_asof": closure}, {}])
+        self.assertTrue(any(i["text"].startswith("Release unverified") for i in CARD["_issues"](incomplete)))
+
+    def test_wave_prefix_does_not_duplicate_the_release_warning(self):
+        exp = self.load([{}, {}])
+        self.assertFalse(any("Wave 1: Guests released" in i["text"] for i in CARD["_issues"](exp)))
+
 class LocalWorldsScorecard(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix="local-worlds-card-"))
@@ -1065,12 +2194,18 @@ class LaunchInstructions(unittest.TestCase):
                        "hand-written cards are non-compliant", "every 15 minutes", "state change", "completion"):
             self.assertIn(needle, text)
         self.assertNotIn("every 10 minutes", text)
+        generic, descent = text.split("For /descend:", 1)
+        self.assertIn("every 15 minutes", generic)
+        self.assertIn("original +900-second anchors", descent)
 
     def test_report_cadence_is_fifteen_minutes_with_the_token_rate_window(self):
         result = subprocess.run([str(ROOT / "scripts/run-bench"), "report-format"], capture_output=True, text=True, timeout=10)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("every fixed 15-minute checkpoint", result.stdout)
         self.assertNotIn("10-minute checkpoint", result.stdout)
+        generic, descent = result.stdout.split("Descent presentation override (explicit user default)", 1)
+        self.assertIn("every fixed 15-minute checkpoint", descent)
+        self.assertIn("original +900-second anchors", descent)
         self.assertIn("rolling 15-minute tokens/min", result.stdout)
         self.assertIn("15-minute tokens/min", result.stdout)
 
@@ -1096,7 +2231,7 @@ class LaunchInstructions(unittest.TestCase):
         with tempfile.TemporaryDirectory() as name:
             base = Path(name)
             (base / "scripts").mkdir()
-            for script in ("cloudbench-scorecard.py", "cloudbench_experiments.py"):
+            for script in ("cloudbench-scorecard.py", "cloudbench_experiments.py", "cloudbench_global_progress.py"):
                 shutil.copy2(ROOT / "scripts" / script, base / "scripts" / script)
             harness = f'''set -euo pipefail
 ROOT_DIR={base}; FLEET_DIR={base}/run; RUN_ID=20261018-1-7; GIT_COMMON_DIR={base}; PROVISION_POOL=""
