@@ -28,7 +28,7 @@ gepa>=0.1.1
 stagehand==0.5.5
 browser-use>=0.13.10,<0.14  # Navigation forwards the event timeout to Page.navigate
 huggingface-hub>=0.36.2,<1  # Compatible with browser-use's pinned Click version
-playwright==1.63.0  # Owned Connection/PipeTransport lifecycle adapter (PlaywrightOwner private driver contract); CDP input + IndexedDB storage_state
+playwright==1.63.0  # PlaywrightOwner private driver contract; CDP input + IndexedDB storage_state
 
 # Utilities
 python-dotenv>=1.0.0
