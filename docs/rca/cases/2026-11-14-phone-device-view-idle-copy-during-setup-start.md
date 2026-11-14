@@ -17,7 +17,7 @@ tags:
   - setup
   - device-view
 sources:
-  - prod user 1f85ff25 2026-11-14 18:06-18:08Z
+  - commit b23ec55452
 repro: front-end/src/tests/blackbox/phone-device-view.blackbox.tsx
 status: fixed
 ---
