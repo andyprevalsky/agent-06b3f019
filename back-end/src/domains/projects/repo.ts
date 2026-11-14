@@ -149,13 +149,8 @@ export async function writeRoseProjectSetup(
   });
 }
 
-/** Idempotent GithubRepoAccess grant (skip duplicates). */
-export async function grantGithubRepoAccess(userId: string, repoUrl: string): Promise<void> {
-  await prisma.githubRepoAccess.createMany({
-    data: [{ userId, repoUrl }],
-    skipDuplicates: true,
-  });
-}
+/** Idempotent GithubRepoAccess grant (shared with the GitHub repo integration). */
+export { grantGithubRepoAccess } from '../../providers/githubRepos/store';
 
 /** Indexed one-level folder CRUD; service checks the owning project first. */
 export function listFolders(projectId: string) {

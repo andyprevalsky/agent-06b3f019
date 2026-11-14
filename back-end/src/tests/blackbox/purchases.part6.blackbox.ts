@@ -1,6 +1,7 @@
 #!/usr/bin/env tsx
 /** Durable cross-request AgentCard company-funding retry regressions. */
 
+import { assertIssuedLedgerCleanup } from './purchases-issued-ledger.cases';
 import { randomUUID } from 'node:crypto';
 import { config } from 'dotenv';
 import { PurchaseSpendStatus, PurchaseWalletFundingStatus } from '@prisma/client';
@@ -60,6 +61,7 @@ async function expectPurchaseError(fn: () => Promise<unknown>): Promise<Purchase
 }
 
 async function main(): Promise<void> {
+  assertIssuedLedgerCleanup(process.cwd());
   const userId = await createSubscribedUser();
   const fingerprint = `funding-resume-${randomUUID()}`;
   const input = mintInput(userId, fingerprint);
@@ -216,19 +218,22 @@ async function main(): Promise<void> {
       )
     );
     assert(
-      secondError.code === 'agentcard_org_wallet_funding_required',
-      `safe provider gate must not be rewrapped as funding pending, got ${secondError.code}`
+      secondError.code === 'agentcard_company_funding_in_progress',
+      `a later safe gate cannot resolve the earlier funding intent, got ${secondError.code}`
     );
     const purchase = await prisma.purchaseSpend.findFirstOrThrow({
       where: { userId: safeGateUserId, fingerprint: safeGateFingerprint },
       include: { walletFunding: true },
     });
     assert(
-      purchase.status === PurchaseSpendStatus.FAILED,
-      `safe gate should end the resumable purchase, got ${purchase.status}`
+      purchase.status === PurchaseSpendStatus.FUNDING_PENDING,
+      `unresolved prior funding must stay resumable, got ${purchase.status}`
     );
-    assert(purchase.walletFunding === null, 'pending wallet marker should be discarded');
-    assert(calls.cancels.length === 1, 'the preserved Stripe hold should be canceled');
+    assert(
+      purchase.walletFunding?.status === PurchaseWalletFundingStatus.PENDING,
+      'prior funding marker must remain until its exact outcome is known'
+    );
+    assert(calls.cancels.length === 0, 'an unresolved prior card must keep its backing hold');
   });
 
   // Live RCA: Org MCP "Cardholder not found" must fail closed (not rewrite into funding-in-progress).

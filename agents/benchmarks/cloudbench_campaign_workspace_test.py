@@ -189,7 +189,7 @@ def test_campaign_workspace_normal_cli_preserves_original600_shape(tmp_path):
     # refuses, naming it in one warning, with the original600 argv shape.
     result=subprocess.run(argv,env={**os.environ,'FIXTURE_CAPTURE':str(captured)},capture_output=True,text=True,timeout=FIXTURE_HOST_GUARD_SECONDS)
     assert result.returncode==0,result.stdout+result.stderr
-    assert result.stderr.count('--stress-defaults is not a sharded operator option; using the ordinary fleet path')==1,result.stderr
+    assert result.stderr.count('--stress-defaults is not a sharded operator option; using campaign controllers')==1,result.stderr
     args=json.loads(captured.read_text())
     assert [v.removeprefix('--task=') for v in args if v.startswith('--task=')]==tasks
     assert all(v in args for v in ('--stress-defaults','--concurrency=600','--runs=3','--retry-infra=1','--e2e-timeout=5400','--e2e-started-at=1791410000','--forward-arg=--strict-barrier','--forward-arg=--timeout','--forward-arg=1200','--forward-arg=--reuse-pool-only','--forward-arg=--cold-primary-bootstrap','--forward-arg=--ref','--forward-arg='+'5'*40))

@@ -130,7 +130,7 @@ require_text "$PIPELINE" '"--expected-hash", expected_hash, "--verify"' \
 # DOC GAP (reported, not edited): the executable Render old-instance drain wait
 # (RENDER_OLD_INSTANCE_DRAIN_SECONDS default/minimum 375 s measured from the exact
 # live producer deploy's finishedAt) existed only in the retired inline script
-# (DEPRECATED_deploy.md "First managed deployment"). No CLI code runs it; deploy.md
+# (the former /deploy skill "First managed deployment"). No CLI code runs it; deploy.md
 # keeps the rule, so assert the stated rule.
 require_text "$DEPLOY" 'old instances have drained for at least 375 s' "/deploy must wait through Render's maximum old-instance shutdown window plus margin"
 # Replacement matrix: executed by the production lane for the exact merge commit
