@@ -77,17 +77,9 @@
     "research/.env": "archived",
     "scripts/__pycache__/": "reproducible"
   },
-  "live_processes": [
-    {
-      "argv": "/opt/devbox-tools/codex/versions/0.166.0/lib/node_modules/@openai/codex/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin/codex-code-mode-host",
-      "cwd": "/home/boxes/rose",
-      "pid": 4182543
-    }
-  ],
+  "live_processes": [],
   "manifest": "docs/handoffs/pr-1795-closeout/deletion-manifest.json",
-  "open_items": [
-    "live process 4182543 in this checkout: /opt/devbox-tools/codex/versions/0.166.0/lib/node_modules/@openai/codex/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin/codex-code-mode-host"
-  ],
+  "open_items": [],
   "pr": 1795,
   "preserved_refs": {
     "branch:andyprevalsky/P3-message-person-hillclimb": {
@@ -602,7 +594,7 @@
       "tip": "0e2ffe95ba40a2d0c2b8ae9e884b4a85d96af3f2"
     }
   },
-  "ready": false,
+  "ready": true,
   "worktrees": [
     {
       "branch": "refs/heads/records/pr1795-closeout-20261108",
