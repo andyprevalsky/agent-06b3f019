@@ -83,8 +83,6 @@ Sections: Clocks · Agent rows · Placement · Freshness · Fields · Work versu
 - For a blocking provider or resource limit, name the exact limit, observed usage, numeric cap when actually known (app usage versus organization-wide quota) and the concrete action the owner or user can take.
 - Justify capacity from measured workload and reuse evidence; a symbolic planner maximum never justifies a quota increase, and owned idle resources and supported reuse are reconciled before recommending one.
 
-## Descent benchmark cards
-
 For `/descend` cards (`--iterations N`, including zero), the following overrides
 the generic three-row and launch-rate presentation: show up to the last **10**
 actual selected experiments, newest first. Put **Iterations/Hour** prominently

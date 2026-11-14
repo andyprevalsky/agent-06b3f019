@@ -3165,7 +3165,12 @@ for record in records:
     assert matches[0]["config"]["mounts"][0]["volume"] == volume
     assert volume != "vol_aaaa0001" and any(row["id"] == volume for row in state["volumes"])
     machines.add(machine); volumes.add(volume)
+# The journal joins raw argv with spaces, so multi-line arguments (the
+# billing-stop guest program passed to `machine exec`) span several physical
+# lines. Parse only the destroy calls this check is about.
 for line in (fake / "journal.log").read_text().splitlines():
+    if not line.startswith(("machine destroy ", "volumes destroy ")):
+        continue
     argv = shlex.split(line)
     if argv[:2] == ["machine", "destroy"]:
         assert not machines.intersection(argv[2:])
@@ -3190,7 +3195,7 @@ PY_RESET
 assert_and_reset_unsealed_failed_owner() {  # <registry> <controller-log> [task verdict]
     grep -qxF "❌ runtime evidence is incomplete; unsealed disposable resources remain retained pending evidence recovery" "$2" ||
         { echo "missing unsealed runtime-evidence retention record in $2" >&2; return 1; }
-    python3 - "$1" "${3:-failed}" <<'PY_UNSEALED'
+    python3 - "$1" "${3:-failed}" "$FAKE_DIR" <<'PY_UNSEALED'
 import json
 from pathlib import Path
 import sys
@@ -3206,6 +3211,15 @@ else:
 lifecycle = json.loads((run / "_batch/lifecycle.json").read_text())
 assert lifecycle["status"] == "failed" and lifecycle["controller_exit_code"] != 0, lifecycle
 assert lifecycle["fleet_owner_token"] == registry.name, lifecycle
+# Unsealed originals stay stopped (billing-only) with their volumes attached.
+state = json.loads((Path(sys.argv[3]) / "state.json").read_text())
+for path in (registry / "clones").iterdir():
+    record = dict(line.split("=", 1) for line in path.read_text().splitlines())
+    originals = [item for item in state["machines"] if item["id"] == record["id"]]
+    assert len(originals) == 1 and originals[0]["state"] == "stopped", [(i["id"], i["state"]) for i in originals]
+    assert originals[0]["config"]["mounts"][0]["volume"] == record["volume_id"], originals
+    volumes = [item for item in state["volumes"] if item["id"] == record["volume_id"]]
+    assert len(volumes) == 1 and volumes[0]["state"] not in ("pending_destroy", "destroyed"), volumes
 PY_UNSEALED
     [ "$?" -eq 0 ] || return 1
     assert_and_reset_retained_fake_owner "$1"

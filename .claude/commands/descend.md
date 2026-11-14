@@ -117,7 +117,7 @@ Time every state with `python3 scripts/descend_step_log.py transition --run-id $
 - Show `Overall slice: <passed>/<original total>` and `Latest run: <passed>/<batch total>` with producer-artifact times; never put a batch denominator in the Overall slice field.
 - List each open RCA in ISSUES / NEXT ACTION with its tasks, named defect, owner and fix state.
 - Show the wall-clock trend, the largest step regression and improvement, and the retro's chosen speedup.
-- Pass the completed iteration count from `state.json` as `--iterations N` (including 0) so the card uses the descent presentation; its success-rate graph appears only after iteration 3, and multiple CLI launches that form one logical batch do not advance that count.
+- Pass the completed iteration count so the card's success-rate graph appears after iteration 3 (gap: `--iterations` exists only on the unmerged `descend/polar-*` branches).
 
 AFTER EVERY ITERATION, REFLECT ON YOUR ITERATIONS/HOUR AND ENSURE THE NUMBER IS INCREASING OVER TIME.
 Include that reflection and the measured improvement or corrective action in
