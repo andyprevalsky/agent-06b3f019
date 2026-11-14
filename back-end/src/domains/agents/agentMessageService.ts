@@ -16,6 +16,8 @@ import { recordPersonMessage } from '../../providers/personMessageStamp';
 import { type FilePointer, validateTotalSize } from '../../providers/storage';
 import type { PostMessageBody } from './types';
 import { isAgentAuthoredRow, withCredentialProvenance } from './credentialContext';
+import { buildUserMessageSignalValue } from './agentMessageSignal';
+export { buildUserMessageSignalValue } from './agentMessageSignal';
 import * as repo from './repo';
 import { withActiveBrowserSessionShareLock } from './repoBrowserTargetedMessages';
 import { readTaskInboxMessages } from './agentToAgentService';
