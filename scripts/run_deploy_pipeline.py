@@ -287,6 +287,7 @@ import runpy
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -3809,11 +3810,35 @@ def _dotenv_values(path: Path) -> dict[str, str]:
     return values
 
 
-def surface_hash(root: Path) -> str:
-    completed = subprocess.run([sys.executable, str(root / SURFACE_HASH_SCRIPT)], cwd=root, stdout=subprocess.PIPE,
-                               stderr=subprocess.PIPE, text=True, timeout=300)
+def surface_hash(root: Path, commit: str) -> str:
+    """The surface hash deploy-agents.yml computed on its checkout of ``commit``:
+    that commit's own algorithm over that commit's own ``agents/`` Python sources
+    (the only files the walk reads), never the deployer's working tree. A
+    checkout still on its pre-merge branch head hashed a different surface and
+    the monitor refused a successful cutover (PR #2024)."""
+    def failed(detail: str) -> ProductionGateError:
+        return ProductionGateError(f"could not compute the agent workflow surface hash of {commit}: {detail}")
+
+    algorithm = subprocess.run(["git", "show", f"{commit}:{SURFACE_HASH_SCRIPT.as_posix()}"], cwd=root,
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=300)
+    if algorithm.returncode != 0:
+        raise failed(algorithm.stderr.strip())
+    # deploy-agents.yml's sparse checkout excludes agents/benchmarks/; so does this.
+    archive = subprocess.run(["git", "archive", "--format=tar", commit, "--", ":(glob)agents/**/*.py",
+                              ":(exclude)agents/benchmarks/"], cwd=root,
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=300)
+    if archive.returncode != 0:
+        raise failed(archive.stderr.decode(errors="replace").strip())
+    with tempfile.TemporaryDirectory(prefix="deploy-surface-hash-") as temporary:
+        extracted = subprocess.run(["tar", "-x", "-C", temporary], input=archive.stdout, stdout=subprocess.PIPE,
+                                   stderr=subprocess.PIPE, timeout=300)
+        if extracted.returncode != 0:
+            raise failed(extracted.stderr.decode(errors="replace").strip())
+        completed = subprocess.run([sys.executable, "-I", "-c", algorithm.stdout, "--agents-dir",
+                                    str(Path(temporary) / "agents")], cwd=temporary, stdout=subprocess.PIPE,
+                                   stderr=subprocess.PIPE, text=True, timeout=300)
     if completed.returncode != 0 or not completed.stdout.strip():
-        raise ProductionGateError(f"could not compute the agent workflow surface hash: {completed.stderr.strip()}")
+        raise failed(completed.stderr.strip())
     return completed.stdout.strip()
 
 
@@ -4012,7 +4037,7 @@ def production(merged_sha: str, state_dir: Path, dispatch: list[str] | None = No
             print(f"PIPELINE_PRODUCTION fly=completed run={fly['run_id']} attempt={fly['attempt']} "
                   f"conclusion={fly['conclusion']} job={fly['job_id']}", flush=True)
             _write_production_receipt(receipt_path, receipt)
-            expected = expected_hash or surface_hash(root)
+            expected = expected_hash or surface_hash(root, merged_sha)
             try:
                 receipt["cutover_verify"] = cutover_verify(fly, merged_sha, expected, root=root)
             except ProductionGateError:
@@ -4856,7 +4881,7 @@ def main(argv: list[str] | None = None) -> int:
                                    help="seconds to wait for the exact run to appear")
     production_parser.add_argument("--poll-seconds", type=float, default=DEFAULT_FLY_POLL_SECONDS)
     production_parser.add_argument("--expected-hash", default=None,
-                                   help="precomputed agent workflow surface hash (default: scripts/agent_workflow_surface_hash.py)")
+                                   help="precomputed agent workflow surface hash (default: the merged commit's own scripts/agent_workflow_surface_hash.py over its agents/ sources)")
     production_parser.add_argument("dispatch", nargs=argparse.REMAINDER,
                                    help="-- <command> run only once the gate is open (e.g. gh workflow run ...)")
     semantic_parser = sub.add_parser(

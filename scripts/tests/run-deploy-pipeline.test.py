@@ -2912,6 +2912,58 @@ def check_production_fly_wait(tmp: Path, env: dict[str, str]) -> None:
     assert "production was not rolled back" in ran.stdout and "worker_pool_cutover.py" not in ran.stdout, ran.stdout
     assert "dispatch" not in call_lines(), call_lines()
     assert "monitor-cooperative-cutover.ts" not in (fake / "node-calls.log").read_text()
+
+    # 9. No --expected-hash: the monitor is bound to the MERGED commit's surface
+    #    hash (what deploy-agents.yml computed on its checkout of that commit),
+    #    never the deployer's working tree. Here the checkout sits on a later
+    #    branch head with a different workflow plus an uncommitted edit, as a
+    #    deployer still on its pre-merge branch did (PR #2024: 1160939de2bc
+    #    working tree vs 533d313d5760 merged, a successful cutover refused).
+    hasher = (ROOT / "scripts" / "agent_workflow_surface_hash.py").read_text()
+    merged_surface = commit("merge agent workflow", {"scripts/agent_workflow_surface_hash.py": hasher,
+                                                     "agents/workflows/agent_workflow.py": "import helpers.loop\n",
+                                                     "agents/helpers/__init__.py": "",
+                                                     "agents/helpers/loop.py": "VALUE = 'merged'\n"})
+    commit("branch head behind main", {"agents/helpers/loop.py": "VALUE = 'branch'\n"})
+    (repo / "agents" / "workflows" / "agent_workflow.py").write_text("import helpers.loop\nDIRTY = True\n")
+    clean = tmp / "production-merged-checkout"
+    clean.mkdir()
+    subprocess.run(f'git -C "{repo}" archive {merged_surface} | tar -x -C "{clean}"', shell=True, check=True)
+
+    def fixture_hash(checkout: Path) -> str:
+        return subprocess.run([sys.executable, "scripts/agent_workflow_surface_hash.py"], cwd=checkout, check=True,
+                              stdout=subprocess.PIPE, text=True).stdout.strip()
+
+    merged_hash, working_hash = fixture_hash(clean), fixture_hash(repo)
+    assert merged_hash != working_hash, "the fixture must give the working tree a different surface"
+    merged_row = {**running, "headSha": merged_surface}
+    reset([merged_row], [done], log)
+    write_job("SUCCEEDED", merged_surface, "123-1")
+    ran = subprocess.run(
+        [sys.executable, str(driver), "production", "--merged-sha", merged_surface, "--state-dir",
+         str(tmp / "production-state-9"), "--poll-seconds", "0.05", "--", "bash", "-c", f'echo dispatch >> "{calls}"'],
+        env=prod_env, cwd=repo, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=120)
+    assert ran.returncode == 0 and call_lines()[-1] == "dispatch", ran.stdout
+    node_calls = (fake / "node-calls.log").read_text().splitlines()
+    assert node_calls[-1].endswith(f"--job-id {job_id} --expected-hash {merged_hash} --verify"), (merged_hash, node_calls)
+    receipt = json.loads((tmp / "production-state-9" / "production.json").read_text())
+    assert receipt["cutover_verify"]["expected_hash"] == merged_hash, receipt["cutover_verify"]
+    assert f"hash={merged_hash}" in ran.stdout, ran.stdout
+    assert (repo / "agents" / "workflows" / "agent_workflow.py").read_text().endswith("DIRTY = True\n"), \
+        "hashing the merged commit must leave the working tree untouched"
+    # A merged commit without the hash algorithm fails closed even though the
+    # working tree has one: no monitor, no dispatch.
+    subprocess.run([*git, "rm", "-q", "scripts/agent_workflow_surface_hash.py"], check=True)
+    missing = commit("runtime change without the hash script", {"agents/worker_patch.py": "changed\n"})
+    (repo / "scripts" / "agent_workflow_surface_hash.py").write_text(hasher)
+    reset([{**running, "headSha": missing}], [done], log)
+    write_job("SUCCEEDED", missing, "123-1")
+    ran = subprocess.run(
+        [sys.executable, str(driver), "production", "--merged-sha", missing, "--state-dir",
+         str(tmp / "production-state-9b"), "--poll-seconds", "0.05", "--", "bash", "-c", f'echo dispatch >> "{calls}"'],
+        env=prod_env, cwd=repo, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=120)
+    assert ran.returncode == 1 and f"could not compute the agent workflow surface hash of {missing}" in ran.stdout, ran.stdout
+    assert "dispatch" not in call_lines() and not (fake / "node-calls.log").exists(), call_lines()
     print("production fly wait: ok")
 
 
