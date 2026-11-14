@@ -14,14 +14,6 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import deploy_test_plan as p
-import importlib.util as _quarantine_util
-
-# scripts/test_quarantine.py (the CLI) already owns the `test_quarantine` module name here.
-_quarantine_spec = _quarantine_util.spec_from_file_location(
-    'lib_test_quarantine', Path(__file__).resolve().parents[1] / 'lib' / 'test_quarantine.py')
-_quarantine_module = _quarantine_util.module_from_spec(_quarantine_spec)
-_quarantine_spec.loader.exec_module(_quarantine_module)
-quarantine = _quarantine_module.quarantine
 
 
 class Selection(unittest.TestCase):
@@ -459,6 +451,81 @@ class AgentCardElection(unittest.TestCase):
         self.assertFalse(state['elected_omissions'][0]['test_credit'])
         self.assertFalse(state['elected_omissions'][0]['cleanup_credit'])
         self.assertEqual(state['elected_omissions'][0]['native_result'], 'UNEXECUTED')
+
+    def test_deferred_election_then_native_final_observation_preserves_peer(self):
+        old,new,_=self.card_plan()
+        probe=copy.deepcopy(old['gates'][1]);target=Path(self.workers.name)/'later';target.mkdir()
+        probe.update(name='later',worker='later-worker',checks=['later'],cwd=str(target),worker_root=str(target),
+                     env={'CONDUCTOR_WORKSPACE_NAME':'later','CONDUCTOR_PORT':'48000'})
+        old['gates'].append(probe);new['gates'].append(copy.deepcopy(probe))
+        command=[__import__('sys').executable,'-c',
+                 'from pathlib import Path;import sys;sys.exit(0 if Path('+repr(str(self.root/'code'))+').read_text()=="repaired" else 1)']
+        old['gates'][1]['command']=command;new['gates'][1]['command']=command
+        state=c.initialize(old,self.root)
+        c.run_phase(old,state,self.directory,self.root)
+        c.run_phase(old,state,self.directory,self.root,initial_observation={
+            'source':state['source'],'gates':{'agentcard-lifecycle':'operator prerequisites pending','ui':'peer still deferred','later':'later observation prerequisite'}})
+        self.assertEqual('triage',state['phase'])
+        original=copy.deepcopy(state)
+        c.refresh(state,old,new,self.root)
+        election=copy.deepcopy(state['elected_omissions'][-1])
+        self.assertEqual(original['pending'],state['pending'])
+        self.assertEqual(original['failures'],state['failures'])
+        self.assertEqual(original['attempts'],state['attempts'])
+        c.run_phase(new,state,self.directory,self.root)  # actual quick fixtures, then TRIAGE
+        entries=[cycle_fixture.Cycle.report(self,f)['failures'][0] for f in state['failures'] if f['id'] in state['pending']]
+        c.adjudicate(state,{'failures':entries})
+        (self.root/'code').write_text('repaired')
+        updated=copy.deepcopy(new);updated['source']=c.source(self.root)
+        c.refresh(state,new,updated,self.root)
+        c.run_phase(updated,state,self.directory,self.root)
+        c.focused_plan(state,updated,{'source':state['source'],'gates':{'api':{'command':command,'checks':['a','b']}}})
+        c.run_phase(updated,state,self.directory,self.root)
+        c.run_phase(updated,state,self.directory,self.root)
+        c.run_phase(updated,state,self.directory,self.root)
+        self.assertEqual('final',state['phase'])
+        c.run_phase(updated,state,self.directory,self.root,final_observation={
+            'source':state['source'],'gates':{'ui':'peer still deferred'}})
+        self.assertEqual('final',state['phase']);self.assertFalse(state['ready'])
+        self.assertEqual({'ui'},set(state['initial_pending']))
+        self.assertEqual(original['initial_pending']['ui'],state['initial_pending']['ui'])
+        self.assertEqual(original['initial_pending']['agentcard-lifecycle'],
+                         election['retired_deferrals']['initial_pending'])
+        self.assertFalse(election['test_credit']);self.assertFalse(election['cleanup_credit'])
+        self.assertEqual('UNEXECUTED',election['native_result'])
+        self.assertEqual(original['attempts'],state['attempts'][:len(original['attempts'])])
+        c.run_phase(updated,state,self.directory,self.root,final_observation={'source':state['source'],'gates':{}})
+        self.assertFalse(state['initial_pending']);self.assertFalse(state['final_pending'])
+        self.assertIsNone(c.pending_completion_block(state))
+        self.assertFalse(state['ready'])  # observation is not final validation credit
+
+    def test_election_retires_only_validated_gate_in_both_deferral_maps(self):
+        old,new,state=self.card_plan()
+        rows={'agentcard-lifecycle':{'status':'PENDING','reason':'original reason','source':state['source']},
+              'unknown-peer':{'status':'PENDING','reason':'never silently filter this'}}
+        state['initial_pending']=copy.deepcopy(rows);state['final_pending']=copy.deepcopy(rows)
+        before=copy.deepcopy(state)
+        c.refresh(state,old,new,self.root)
+        for key in ('initial_pending','final_pending'):
+            self.assertEqual({'unknown-peer':rows['unknown-peer']},state[key])
+            self.assertEqual(before[key]['agentcard-lifecycle'],state['elected_omissions'][-1]['retired_deferrals'][key])
+        self.assertEqual(before['failures'],state['failures'])
+        self.assertEqual(before['attempts'],state['attempts'])
+        self.assertFalse(state['ready'])
+
+    def test_no_election_or_wrong_gate_leaves_deferrals_untouched(self):
+        import deploy_test_election as election
+        old,new,state=self.card_plan()
+        state['initial_pending']={'agentcard-lifecycle':{'reason':'retained'},'ui':{'reason':'peer'}}
+        before=copy.deepcopy(state)
+        election.apply(state,None)
+        self.assertEqual(before,state)
+        with self.assertRaises(ValueError):election.apply(state,{'gate':'ui','proof':None})
+        self.assertEqual(before,state)
+        prepared=election.prepare(state,old,new,None);original=copy.deepcopy(prepared)
+        election.apply(state,prepared)
+        self.assertEqual(original,prepared)
+        self.assertEqual({'ui':{'reason':'peer'}},state['initial_pending'])
 
     def test_unexplained_optional_removal_still_rejects(self):
         old, new, state = self.card_plan()
@@ -1214,9 +1281,6 @@ for line in sys.stdin:
                     self.scan()
                 self.reap(child)
 
-    @quarantine(since='2026-11-11', repair='https://boxes.dev/thread/thr_246005fb0d8546518a40a6cd55d83a70',
-                error="AssertionError: [0.05] is not false : the service manager is skipped on evidence, not after the grace window",
-                evidence='PR #1928 deploy-command-structural FLAKY occurrence 7a087289ad244447887849683a096b6e (source 622d4e979)')
     def test_own_user_service_manager_is_skipped_only_on_cgroup_evidence(self):
         # The Blacksmith failure (SHA 7b243b4ec, InterruptedCardRecovery / StructuralSupervisorCleanup): the
         # runner's `systemd --user` and `(sd-pam)` share our uid but are permanently non-dumpable, so cwd/fd

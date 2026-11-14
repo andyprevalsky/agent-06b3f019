@@ -25,6 +25,12 @@ REVIEWED_SOURCE_SETS = (REVIEWED_SOURCES, {
     **REVIEWED_SOURCES,
     'run-bench-campaign.py': '8fc428d19f3052b54daf785741f66291e6ac42adef8320be6bb18e2c9900c6f9',
     'cloudbench-cleanup-tickets.py': 'b67ac4790306e542a06b2ad607d88b9582c8173f2eecc37cdcffc3df991b4734',
+}, {
+    # PR1682 452e70ce: R59 admission diagnostics and typed completion boundaries; prepare path unchanged.
+    'run-bench-campaign.py': '93adb28884d313ba4062d8297456daed96c3fbac1adb2240b1592db875b9319a',
+    'cloudbench-cleanup-tickets.py': '6a629fb01e68427bc7b8f2998547ead01683f2d92498354f801d916687fa2fa2',
+    'run-bench': 'e3b8c162354bfca92676b57a5317614c3d829f1611298026ec47f6f606a70f5b',
+    'deploy_test_cloud.py': 'ae3bda6d0d866c21ab834ef285619b60fdce1924e9c0a705f8cc8a566810fb6f',
 })
 
 
@@ -96,11 +102,14 @@ def validate_prepare(receipt, owner, proof, adapter, root, runs, cli_text, bound
     need(proof.get('campaign') == str(campaign) and str(campaign) in cli_text
          and owner['native_cleanup_reference']['native_directory'] == str(campaign)
          and adapter.get('fleet_directory') == str(campaign), 'prepare campaign root')
+    # A prepare failure leaves cleanup incomplete, so no automatic rerun may exist.
+    need('rerun' not in adapter and not (runs.parent / 'rerun').exists()
+         and not (runs.parent / 'rerun').is_symlink(), 'prepare rerun absent')
     request = document(Path(receipt['log']).parent / 'request.json')
     summary = document(campaign / 'summary.json')
     checks, jobs = request['checks'], summary.get('jobs')
     need(isinstance(checks, list) and all(isinstance(c, str) for c in checks), 'prepare unexecuted cases')
-    count = 12 if current else 14
+    count = 12 if current else (len(checks) if isinstance(checks, list) else 0)
     if source_bound:
         from deploy_test_historical_custody import guard, state_identity
         from deploy_test_cycle import current_deploy_omissions, digest
@@ -152,8 +161,17 @@ def validate_prepare(receipt, owner, proof, adapter, root, runs, cli_text, bound
             'prepare positive refusal')
         need(not any(proof.get(k) for k in ('credit_granted', 'financial_cleanup_credit', 'transfer_credit')),
              'prepare cleanup only')
+    else:
+        # Historical NO_RETRY_CUSTODY cases are request skips that never dispatch; every
+        # submitted check must stay UNVERIFIED with no execution credit.
+        skips = request.get('skips') or {}
+        custody = receipt.get('custody_skips') or {}
+        need(isinstance(skips, dict) and skips == custody
+             and all(isinstance(v, dict) and v.get('disposition') == 'NO_RETRY_CUSTODY' for v in skips.values())
+             and (receipt.get('current_execution') or {}) == dict.fromkeys(skips, 'UNVERIFIED'), 'prepare custody skips')
+        need(1 <= count <= 9999 and not set(checks) & set(skips), 'prepare unexecuted cases')
+        expected_cases = {**dict.fromkeys(skips, 'SKIP'), **expected_cases}
     need(isinstance(checks, list) and len(checks) == len(set(checks)) == count
-         and (current or source_bound or not request.get('skips'))
          and receipt['cases'] == expected_cases and adapter['cases'] == dict.fromkeys(checks, 'UNVERIFIED')
          and adapter.get('complete') is False and adapter.get('cleanup_complete') is False, 'prepare unexecuted cases')
     need(summary.get('campaign_id') == campaign.name and summary.get('status') == 'failed'

@@ -1,0 +1,1626 @@
+{
+ "archives": {
+  "final-delta-20261114T130628Z": {
+   "base": "/home/boxes/rose",
+   "created_utc": "20261114T130631Z",
+   "crosses_bind_mounts": true,
+   "exact_excludes": true,
+   "exclude_from": "/home/boxes/rose/.context/deploy-session/closeout-a52c/final-excludes-20261114T130628Z.txt",
+   "excludes": [],
+   "files": 474125,
+   "format": "TAR+GZIP",
+   "listing": "/home/boxes/rose/.context/deploy-session/closeout-a52c/listing-final-20261114T130628Z.private.txt",
+   "listing_sha256": "46f3b7dae21311e15826fc252b34d62e239b86c7f21c2beb2c5dd133f633badf",
+   "members_count": 3,
+   "members_head": [
+    ".context",
+    ".llm-dumps",
+    "agents/.context"
+   ],
+   "parts": [
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261114T130631Z-final-delta-20261114T130628Z.tar.gz.part000.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "d6ea8bd333828ee4e1ecabfb5e1fcb0f0cf5ac5f7925fb6e6479a70541149a4a"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261114T130631Z-final-delta-20261114T130628Z.tar.gz.part001.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "cf2ef6a9f3e7f52a2af1728069289930a2c11c7efc567e7265de5da6788b2f29"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261114T130631Z-final-delta-20261114T130628Z.tar.gz.part002.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "5a4c70936998d23ca60f434663834576d536ef6c4ef59c24dcf0ae5ffba1b73c"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261114T130631Z-final-delta-20261114T130628Z.tar.gz.part003.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "c8f08ca8c79cb919bef4a34f28a23961b640c28556188f04b84a35721219f2b7"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261114T130631Z-final-delta-20261114T130628Z.tar.gz.part004.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "5c7ef0788e394e1df7067b68af723547e50ba75eb5bfe4980b2163b5e4f07147"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261114T130631Z-final-delta-20261114T130628Z.tar.gz.part005.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "3ac23ed4d663cb534996162e9b6fa0315adccb23d6982a3427de752f4176df81"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261114T130631Z-final-delta-20261114T130628Z.tar.gz.part006.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "df77496f0dbc7c7d38ab39fe93364b9fec6563e33460aca4b83de17527b26460"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261114T130631Z-final-delta-20261114T130628Z.tar.gz.part007.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "3bff557bd67f88ad30cdff2836ce31acbf77e147448574c4f7455a13d97d98dd"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261114T130631Z-final-delta-20261114T130628Z.tar.gz.part008.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "deb2abda8bc70de84a22902e4dcfd553896b343aa79ca2966721df66305cfb21"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261114T130631Z-final-delta-20261114T130628Z.tar.gz.part009.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "a23d44c786e6342f177de0ee6ed5975d7eefd3824985cb98d60ac58bcb7b7d1c"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261114T130631Z-final-delta-20261114T130628Z.tar.gz.part010.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "7cbb009eaed10d9c9d7a3f324e000111c637eeb530798a48292ff238c9a4401b"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261114T130631Z-final-delta-20261114T130628Z.tar.gz.part011.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "d623437947f713271a3085f6d439cf52957a1d2231c8f8aa029d56ca65057728"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261114T130631Z-final-delta-20261114T130628Z.tar.gz.part012.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "0c96bb6eae3cc7129c5fa1ad9937706a223718892b9f26dc570e22b1bd1c5599"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261114T130631Z-final-delta-20261114T130628Z.tar.gz.part013.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "de2ec0c567e8951592bc723a75d931d968a2f6b1a61010c8696cebb08fc0c321"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261114T130631Z-final-delta-20261114T130628Z.tar.gz.part014.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "75264f7fb1b38658a89adacb2b5bb4d3c95bb8193269216f5cd01dce340da067"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261114T130631Z-final-delta-20261114T130628Z.tar.gz.part015.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "9e2a17b2bb0d7737d2fd7d5daeb5e664008aaceb703f32fe86d497f42a698d7a"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261114T130631Z-final-delta-20261114T130628Z.tar.gz.part016.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "180936ff24c66b54998148cc2c1d8ea15a3662cea56468c94b8519a784ef9845"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261114T130631Z-final-delta-20261114T130628Z.tar.gz.part017.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "e78ca99f5fc8bb2f7eede9ee0ddda1b3b0f897bbda8e9c5e79adaa084d4a47ca"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261114T130631Z-final-delta-20261114T130628Z.tar.gz.part018.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "2e9145190358924cd5c493e4fba818d287b023d722f999d8b3de80693025a7c7"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261114T130631Z-final-delta-20261114T130628Z.tar.gz.part019.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "ff6975a891ea1c57bd945acbde52d3e9879967b3e514dc9b2b28cdc33435b26e"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261114T130631Z-final-delta-20261114T130628Z.tar.gz.part020.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "6875e10bd80d3c3aead75abd94a6372218b7de6262d046ee20f6c18303d5b4a5"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261114T130631Z-final-delta-20261114T130628Z.tar.gz.part021.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "6184efc673eae583503920d8e29419a3ceb7aa9cff89b77c85302b2281e6ef50"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261114T130631Z-final-delta-20261114T130628Z.tar.gz.part022.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "b9e05369cb76846efc9a58e96d9439af1255b990332d2a102b291deea95d2efe"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261114T130631Z-final-delta-20261114T130628Z.tar.gz.part023.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "3475c3e05f07ed280039161a87fbe2c582f84f22223a70fbcd2a6fd04a095401"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261114T130631Z-final-delta-20261114T130628Z.tar.gz.part024.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "36dac43c7d3d0cd6aefe5c1abcdd4f1347299c99105db1b1f262a5870afadb53"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261114T130631Z-final-delta-20261114T130628Z.tar.gz.part025.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "f4da838c8cfba5f89d9b2e71f2e8af6dc824a2275d53407a6e3c2dd8f8c86648"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261114T130631Z-final-delta-20261114T130628Z.tar.gz.part026.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "a4ea039ea435623ab39b286dd1bc501f62a0953bf35e79c9aa5f54d0bd3bfc37"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261114T130631Z-final-delta-20261114T130628Z.tar.gz.part027.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "66b1217cc5f804162426d34521241c94f370813d02c5cbdbdb05c56389568d4d"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261114T130631Z-final-delta-20261114T130628Z.tar.gz.part028.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "10c64cacbdd9e780d944a95e6391f95af6975744585a795c63f6ff82065492c5"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261114T130631Z-final-delta-20261114T130628Z.tar.gz.part029.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "b5fc3651e32195b70bad789cfc5faa191c6fa9297eb0bbb0737116107b16c978"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261114T130631Z-final-delta-20261114T130628Z.tar.gz.part030.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "4f2273bbc3f9563491be4e36092f2ab0cb7258dbc5061507435aaa13fe563531"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261114T130631Z-final-delta-20261114T130628Z.tar.gz.part031.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "5fd4b210c5b927575c71a297934e47fe17b7912375a2f4cfced7f02f7c31466c"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261114T130631Z-final-delta-20261114T130628Z.tar.gz.part032.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "2747dcdda8043c6177508ca72992aba72227d41da62db9a6e0618d049ddc88f9"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261114T130631Z-final-delta-20261114T130628Z.tar.gz.part033.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "43dc96a8297e10ffba29a82e28925333ad770bf1e4792a4c92532349b46d0641"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261114T130631Z-final-delta-20261114T130628Z.tar.gz.part034.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "b3a2cee8fd21f0756c28ab435e93a3932dd6517788f48e345861eac89b86599a"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261114T130631Z-final-delta-20261114T130628Z.tar.gz.part035.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "cf448b4d481d295993e67630da068ca94d5ca2adc9950f910d6ade7f1cd3aecb"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261114T130631Z-final-delta-20261114T130628Z.tar.gz.part036.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "c809a583e116033ff45c3ac85d7f6e96b7ac823b1fa6293418c2196e3e2faa3d"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261114T130631Z-final-delta-20261114T130628Z.tar.gz.part037.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "d75c6e1f1d27f72d00310039e4656d41bb30a8815a81fee72047e82b84fb2399"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261114T130631Z-final-delta-20261114T130628Z.tar.gz.part038.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "58e038723aab54b6998d706cc5ad7638735b73a43e2d7b586c5e03bc7b7f23f3"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261114T130631Z-final-delta-20261114T130628Z.tar.gz.part039.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "18abf03a63b215d00275829c5bfebab822756c5f3f158a9bbb82bb9c1ba22ca1"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261114T130631Z-final-delta-20261114T130628Z.tar.gz.part040.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "577c52dad60329c7f268928eebf2fc4809bde33d7f7d835977f29a313d350c47"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261114T130631Z-final-delta-20261114T130628Z.tar.gz.part041.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "55c98ed58cb78211e022e6d67db1c3c422e3e8186b29a6f3cc316b47e9dbefef"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261114T130631Z-final-delta-20261114T130628Z.tar.gz.part042.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "e9cac06f4808a94f3ae2c945d9e06661efb93b4f5359e6fdf5a72bfaf485b11a"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261114T130631Z-final-delta-20261114T130628Z.tar.gz.part043.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "966f068e9b30bacae51e62b0ce0c4ba02cdbdd95fe7dee4323036cb254beb067"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261114T130631Z-final-delta-20261114T130628Z.tar.gz.part044.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "d882d4aee48b4b9c2e924e96d03a052911406461e01acfcd8610322acc9ed85a"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261114T130631Z-final-delta-20261114T130628Z.tar.gz.part045.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "041801d881c80acbe483ce3df4fe6575302ee69713807b0b7f52d77660926553"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261114T130631Z-final-delta-20261114T130628Z.tar.gz.part046.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "2a6cb15601090b41010850493a9679203022ef359f9e2e5355b76497706de4f7"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261114T130631Z-final-delta-20261114T130628Z.tar.gz.part047.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "e79369c96fd24c9fea467f56bab060c8cd26a4dcb74abbd948a5e048f6fa988f"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261114T130631Z-final-delta-20261114T130628Z.tar.gz.part048.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "4df63a6e4d00191b8499380d5e386a3522cc45f83297aede85864f6a9f219008"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261114T130631Z-final-delta-20261114T130628Z.tar.gz.part049.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "e20f29a2928dc081f2116b160aba1929bc9b7704594e6a7891d9291ea22eff13"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261114T130631Z-final-delta-20261114T130628Z.tar.gz.part050.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "6965abec3295cb97f8add256b76aa31fea07fd0bd6045fddc350fceee163973d"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261114T130631Z-final-delta-20261114T130628Z.tar.gz.part051.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "986b9a431fc9aa372a9dbfe147613242cd25242b97ddae9791eb48de0ebce4dd"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261114T130631Z-final-delta-20261114T130628Z.tar.gz.part052.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "c16ea097da96113d7a007d84589f896fc6f8ed13dbf302f51d263837daad4f94"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261114T130631Z-final-delta-20261114T130628Z.tar.gz.part053.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "a307c9d5753ba9a61b27df185ce05dcdb1943428212859ea4456e31dd607101c"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261114T130631Z-final-delta-20261114T130628Z.tar.gz.part054.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "e2154651e3b5413c9a15c39a6bd517970620713ae84bbaf2431fd977d7f88708"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261114T130631Z-final-delta-20261114T130628Z.tar.gz.part055.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "1f2fb3894a2af9d701b08ee2a7c3436c6562524ccf5c9d24648ca8a771f38029"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261114T130631Z-final-delta-20261114T130628Z.tar.gz.part056.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "43257292b424c19b2d8afb9e56c59143a824c4859d0d6ad6668de4b97e9d5e1f"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261114T130631Z-final-delta-20261114T130628Z.tar.gz.part057.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "3884f0ffa3e96d4965647cabd896e64480ba9f942efa1b65048a6a93849d6a8e"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261114T130631Z-final-delta-20261114T130628Z.tar.gz.part058.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "7153cfe5f8c31785dd24ab79185a573a09cfe65c82c15cb09da9813accaf4c80"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261114T130631Z-final-delta-20261114T130628Z.tar.gz.part059.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "3bec6530b7d558f788527f13f2e20deb861e067c08eb21654d6d7755dde21719"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261114T130631Z-final-delta-20261114T130628Z.tar.gz.part060.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "58987e46b2a2ae1c825601a6a0b682a1fefde9b0d8d0136d104d631948ce86c3"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261114T130631Z-final-delta-20261114T130628Z.tar.gz.part061.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "75e840f058005ad5668623dff95381fe2bfe324358ccb9f14d1907be55e5fa58"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261114T130631Z-final-delta-20261114T130628Z.tar.gz.part062.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "743e65a709f0ed5f374505c4c2ac134c01b2633cf2352ea2c78d87788b8b5824"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261114T130631Z-final-delta-20261114T130628Z.tar.gz.part063.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "2dbfd13ddb4db2f2d3d4abcff750dad5139cc4e675164af5899c8a8cc2740812"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261114T130631Z-final-delta-20261114T130628Z.tar.gz.part064.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "0580fd0c6840cf3ead00740a59bbcf7d8b5c2df91655d2ffab862965b9ed4503"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261114T130631Z-final-delta-20261114T130628Z.tar.gz.part065.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "36c21bbe953a1e7f7b919dc7bfae3b785eecb9a7da93f27bd71f0fd9279970b3"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261114T130631Z-final-delta-20261114T130628Z.tar.gz.part066.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "3a4f98015f670fb912e9223ccec6346eef48b9e7768c1ef4c32b76c7b5c9a359"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261114T130631Z-final-delta-20261114T130628Z.tar.gz.part067.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "b53d9ebab74d35e06ffd041154be73e7253256b386f70ecd79f2401978a0e12d"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261114T130631Z-final-delta-20261114T130628Z.tar.gz.part068.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "c62b97c4bd23a1cad797b9d4d06cc298b3d4dea5e551b8782e3a92f68f9c8a48"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261114T130631Z-final-delta-20261114T130628Z.tar.gz.part069.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "7e75053bedcbc9c0da365e8efc29b7e1b0f06aa301269a0c1c3d8bd25fae14dd"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261114T130631Z-final-delta-20261114T130628Z.tar.gz.part070.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "866006e4c95bd109a1ca382ccbd2b9233d6a197888a518d5b005bd4662de69d2"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261114T130631Z-final-delta-20261114T130628Z.tar.gz.part071.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "7a3d6772d701a683c4b475991fb2c87f8fb77962c6e3bf43fc2ec7c5a96d5cf8"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261114T130631Z-final-delta-20261114T130628Z.tar.gz.part072.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "15cb19f525546a0ae6d5c782db728cfeb73ed235c4e37ea3f170ebe2def7d3ff"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261114T130631Z-final-delta-20261114T130628Z.tar.gz.part073.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "f0fbd697ff6845f245d9d1acf9cc6feec9375f8fbda299050ff04e36cf6dc540"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261114T130631Z-final-delta-20261114T130628Z.tar.gz.part074.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "ce6524d3f5bccd7824aa2237768fdb80be7fc7a0d98a14c1796529a2212e2fd7"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261114T130631Z-final-delta-20261114T130628Z.tar.gz.part075.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "0b0daf6a8f29b76d612a94673a17cbbd96e03b69ca4e97f2854bf32be5a232a0"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261114T130631Z-final-delta-20261114T130628Z.tar.gz.part076.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "fa71c9e8b4e981ef3f3386d45fd9a3da412ab25b62115bdaae12164eb2f39539"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261114T130631Z-final-delta-20261114T130628Z.tar.gz.part077.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "12e2027e04eeeff49707f0385e706459eda0f185a2264c85f219ab541993be29"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261114T130631Z-final-delta-20261114T130628Z.tar.gz.part078.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "4fbd8fa49979a35d69e56a86c6e3af52db3d8392ff4f2d9d090510060371fa0f"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261114T130631Z-final-delta-20261114T130628Z.tar.gz.part079.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "52ade781bbebc13fffa441b149ed9b2ddac28273893da23621cd7aeaef1b2743"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261114T130631Z-final-delta-20261114T130628Z.tar.gz.part080.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "90b3a1e81ae45e5ff93c7a48ad32cb958f7926b562ae25d93ff7a1475f2ba748"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261114T130631Z-final-delta-20261114T130628Z.tar.gz.part081.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "42c3a17a19cb4c84f786cbbd0bced860b30df2f5286f46a6fa9f2ad30a672793"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261114T130631Z-final-delta-20261114T130628Z.tar.gz.part082.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "398eff2e31bfda627aeb32bdf0a59f415bae7602fa3678d9e83d11a85e8ef08f"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261114T130631Z-final-delta-20261114T130628Z.tar.gz.part083.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "86a526e03e5f86bf5c446c4bc274a3c81f2c78dc44f17078dd477e3477d0e8ae"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261114T130631Z-final-delta-20261114T130628Z.tar.gz.part084.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "b77684614787e6ab507d42c524a6af0dc1aa2a57d2f6c6124d405805f642516d"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261114T130631Z-final-delta-20261114T130628Z.tar.gz.part085.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "c88728d6bfad4c0f2ef4e2b4e71802f3aee2a330f11c2cb1b662881e835ec728"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261114T130631Z-final-delta-20261114T130628Z.tar.gz.part086.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "56fbbc793a317ec8e34586963019ecbca1a340afea167ba096de561d84a43ba5"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261114T130631Z-final-delta-20261114T130628Z.tar.gz.part087.aesgcm",
+     "plain_bytes": 17964021,
+     "sha256": "071fb0f430571c1b61e7a993ee69e39c405c00dede2aeaabc96d6c31f13efe22"
+    }
+   ],
+   "plain_bytes": 5856435189,
+   "sha256": "c15c1093a11cd2aa6fd4e1b03432165a83895d0c3ba64df48843dafb00259ffb",
+   "tar_exit": 1,
+   "tar_warnings": [
+    "tar: .context/deploy-session/closeout-a52c/listing-final-20261114T130628Z.private.txt: file changed as we read it"
+   ],
+   "upload_seconds": 1352,
+   "verification": "every part re-downloaded, ciphertext sha256 matched, decrypted; plaintext sha256 c15c1093a11cd2aa6fd4e1b03432165a83895d0c3ba64df48843dafb00259ffb; tar listing recount 474125 files vs 474125 packed",
+   "verified": true
+  },
+  "rose-context-static": {
+   "base": "/home/boxes/rose",
+   "created_utc": "20261112T191042Z",
+   "crosses_bind_mounts": true,
+   "excludes": [],
+   "files": 80402,
+   "format": "TAR+GZIP",
+   "listing": "/home/boxes/rose/.context/deploy-session/closeout-a52c/listing-rose-context-static.private.txt",
+   "listing_sha256": "05ad6734b244b6964cf997228a1f6a013102cc03cd328f24dd59ed84262462f8",
+   "members_count": 699,
+   "members_head": [
+    ".context/benchmark-hub",
+    ".context/benchmarks",
+    ".context/browser-agent-recordings",
+    ".context/campaign-grouping-control-1477673",
+    ".context/campaign-grouping-control-1821554",
+    ".context/campaign-grouping-control-2001145",
+    ".context/campaign-grouping-control-2044569",
+    ".context/campaign-grouping-control-2443882",
+    ".context/campaign-grouping-control-2968024",
+    ".context/campaign-grouping-control-3036073",
+    ".context/campaign-grouping-control-568231",
+    ".context/campaign-grouping-control-890951",
+    ".context/cleanup-seal-fixture.html",
+    ".context/cloudbench-controller-tests",
+    ".context/cloudbench-local",
+    ".context/coderabbit-rerequest-pr1682-c45165a20049107e97b482636e6cc1e09267fa5c.json",
+    ".context/coderabbit-rerequest-pr1682-c769e7c559fc76e8d29d722f767ab2694fa159a9.json",
+    ".context/deploy-changed-ts.txt",
+    ".context/deploy-durations",
+    ".context/deploy-lint-ts.txt",
+    ".context/deploy-pipeline-c769-attempt1-structural-timeout",
+    ".context/deploy-pipeline-c769-attempt2-eslint-timeout",
+    ".context/deploy-pipeline-c769-attempt6-mass-agent",
+    ".context/deploy-resume-format-files.txt",
+    ".context/deploy-smoke.log",
+    ".context/deploy-structural",
+    ".context/descend",
+    ".context/display-storage-shard1",
+    ".context/display-storage-shard2",
+    ".context/driver-context-runtime.patch",
+    ".context/driver-context-tests.patch",
+    ".context/factory-metadata.json",
+    ".context/fast-forward-cache",
+    ".context/fleet-infra-canary-preflight.transaction.lock",
+    ".context/fleet-infra-canary.last-pass",
+    ".context/hub-poller-run-1488e3d1-98ee-4969-9216-8acb139dc983.log",
+    ".context/hub-poller-run-15d371e2-30a3-4fa4-b185-2b53d6b5d67b.log",
+    ".context/hub-poller-run-1dd9f8c6-9bc6-422d-adf0-be88ca6f7c06.log",
+    ".context/hub-poller-run-201756ae-6acb-4abd-97b2-b0cf5afadf8f.log",
+    ".context/hub-poller-run-2568ae4f-10ae-4ba6-9489-578f898165d7.log"
+   ],
+   "parts": [
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T191042Z-rose-context-static.tar.gz.part000.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "5f4a2e6595fb41918bf68aab3c09c5b6de09893595455ec75644d3157929f19e"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T191042Z-rose-context-static.tar.gz.part001.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "fc11afe5ecbc57e479513cd47ffbeeff7be0e67b62907a6326c9563d091717cd"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T191042Z-rose-context-static.tar.gz.part002.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "9ad557f08db4495563f3483313e070ade204b6bd13386c360c5d61854e0eaf74"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T191042Z-rose-context-static.tar.gz.part003.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "b0bd768ff0c5faff86a5a41a0d0628a2b928922dbc5a9790a3246b7a3bd51189"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T191042Z-rose-context-static.tar.gz.part004.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "73bb1da23e00898f67319f29c0b79b7febf9085a28727d60a5da138b91ab4b33"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T191042Z-rose-context-static.tar.gz.part005.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "c48aee9f3a78c4b557b56857ff8fd74a058fca793a3943eb0387ab1a2d0fc99e"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T191042Z-rose-context-static.tar.gz.part006.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "c10f5154302f74b443b2d34811e2fda48b292b790852918a9cb5ba13587dc24e"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T191042Z-rose-context-static.tar.gz.part007.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "3d0e0ae79b49e32e6955f962fd357933c31f584e902b8076afbaf1a08834b622"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T191042Z-rose-context-static.tar.gz.part008.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "766e5a9cbe59530d533c644343a9651165d80202bf5648ae07f4dc376bec9132"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T191042Z-rose-context-static.tar.gz.part009.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "155540a30d29ee4562af0246b60b1326c0d84a6b613734c24c1c2398457afef8"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T191042Z-rose-context-static.tar.gz.part010.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "7640a65f3196ee46a76b94be28bf2a5b1dc179608d7269cc6ec7acf44395d396"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T191042Z-rose-context-static.tar.gz.part011.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "82e97aa4b308246a62f3ccaddb257bffca75ea04948d374dd3bd2b0ff3e90486"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T191042Z-rose-context-static.tar.gz.part012.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "fe8789069b7fc44bb8f040d40e7e9444b6ec481a1c3a105a324917d54ae38b88"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T191042Z-rose-context-static.tar.gz.part013.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "5a36c25d96f41fa9778b459ccaf2c6c498b030b4156832b4aa4a11ce4f7d82a0"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T191042Z-rose-context-static.tar.gz.part014.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "713f56d51b227689495769e2ea844425a8ae758275509f37f7c5a48c5f068ab5"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T191042Z-rose-context-static.tar.gz.part015.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "109bd4539f96a46a4f17cfddc7dc3551b361bf36a5c5dd1114337114cb8a7c69"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T191042Z-rose-context-static.tar.gz.part016.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "123aa0578ed730f7d8e136443c4e224229dcd648bf69c0d7d0d1ba3429de44dd"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T191042Z-rose-context-static.tar.gz.part017.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "4deca7b472391b4e401e6886750dd64b9b4a2aa3b77a0d4e94cf5652972f0694"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T191042Z-rose-context-static.tar.gz.part018.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "a71e666099efc96d359e805f7c237fc2b0971d632d6b9c301657744da623bdb1"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T191042Z-rose-context-static.tar.gz.part019.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "52e3b3bf63d863cea613d395763c00e07f1e96822325290113d4b068d8c64a9a"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T191042Z-rose-context-static.tar.gz.part020.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "a8a5565fae457f405d090a5dbbc6f8199a7c08f2fd93c9c2566388b27844e423"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T191042Z-rose-context-static.tar.gz.part021.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "de8f9866b6fbb3bd767f60fd20a4dda8fc3066875a6e4f8b214f976321ce2510"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T191042Z-rose-context-static.tar.gz.part022.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "098d384f320aa9357df89b8d51a2897a1dd6e990f8bd48a53670ab6715901075"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T191042Z-rose-context-static.tar.gz.part023.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "120c86da9597f216e10a5556835421cd72a3ec1c36c334730d5ce1ca3a594180"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T191042Z-rose-context-static.tar.gz.part024.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "e8e3b05b69bcdc0efb3d0b5cb7b2c9fa0b82f7b370bc95b3da8dd02f5384ec6a"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T191042Z-rose-context-static.tar.gz.part025.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "9051275a1a3946d0cca620dd2cdb8fffe2b9ac1079f0f206d0bf0ad75141c4f9"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T191042Z-rose-context-static.tar.gz.part026.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "f018770c2abf3c7eae56c57b1e91e21267c5bcb45605b1d6f16fa7d7cc49cb86"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T191042Z-rose-context-static.tar.gz.part027.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "46d79efff1c28c8eb86b766cb59c6471e7ff86379a60a30e49dae872ba0e75b6"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T191042Z-rose-context-static.tar.gz.part028.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "08dd85dadc4bbcad4e272a8d9a1ab868c084403559b18b790d2154def2f865bb"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T191042Z-rose-context-static.tar.gz.part029.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "e2dcae65ab6fce29af0a7f605c22e50862eef25c397ae8a32af817f0dd8bec74"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T191042Z-rose-context-static.tar.gz.part030.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "82ecee02015e0de3557ce3b4b4b710a3c60b22d4bccae22ce45b6cab58de6baa"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T191042Z-rose-context-static.tar.gz.part031.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "d3f2f2a7660d248ebb86183ff9683755f69014802c81823502757ce74bda89b5"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T191042Z-rose-context-static.tar.gz.part032.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "33883e30e34202d5e1b862c11a4da603be99508b5734c0be7ee3f41c8a5b7b71"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T191042Z-rose-context-static.tar.gz.part033.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "8fe87013e2f843834044f054a2358fc9e90ae43aef65f90f5980846a7dc74395"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T191042Z-rose-context-static.tar.gz.part034.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "a4ead381699d9d2f7e2e9e2d345f7011dbf50913033ad5012711467cb4e56462"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T191042Z-rose-context-static.tar.gz.part035.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "34cf80295dc0da7f7d5b6cbeb890b0b1b6dcb9d0e4e297ca219af3c7775041a3"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T191042Z-rose-context-static.tar.gz.part036.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "12fe7c51b290d9571f922ff2b986a222f0d0b4a71e5b60730db61974c7ba27e7"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T191042Z-rose-context-static.tar.gz.part037.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "1fa5ee7f81ebfbd3396b8ff446865ca3b51d0c7dd9753357d3e051c4586c2fbb"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T191042Z-rose-context-static.tar.gz.part038.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "d58bb42cfb36d13e21c82eb391ce3c165370dc93738f61c23e88fa942682c93b"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T191042Z-rose-context-static.tar.gz.part039.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "bf0995393a526db22b66d56f9298ab816f57ff2eeea8e63a898784a5fb289f19"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T191042Z-rose-context-static.tar.gz.part040.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "83c746d6ce71aee15b55498a8947d991d82207accabd6891f5e4fa56ec81a5a8"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T191042Z-rose-context-static.tar.gz.part041.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "1d61dd2dc55e45765b5cbefb0fdf52bc6656759c0842535f8378f3bdb147b6d7"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T191042Z-rose-context-static.tar.gz.part042.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "e3ebb7e0489195792b4279636a94c44b63c23a5445a17510940b5dd972faac53"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T191042Z-rose-context-static.tar.gz.part043.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "c4029b9e8b1ac05a733474b809707c3eb6184a35898ca65cb78954b7e97b3721"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T191042Z-rose-context-static.tar.gz.part044.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "6d76d027f4d7285156ca55b7bc2486fe704d665e4da8d6993e52cf4fe108b5f3"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T191042Z-rose-context-static.tar.gz.part045.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "01fac4a74fc0c09b738fb0a0e2d9e6dbe3de683de06e10ff57401b5711f79f4d"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T191042Z-rose-context-static.tar.gz.part046.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "ffca2fc13718df2c33d43b041c7eac8fecfa4a1c3ac15b9b4ab105b074f9a098"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T191042Z-rose-context-static.tar.gz.part047.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "7454891f9085c409a552f30d19d032cfe1d699066b0268c9827d79b3553b5fa8"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T191042Z-rose-context-static.tar.gz.part048.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "e8b50b63d23529a7269528b49ec8d1236c52b6613234b3eb63121a20c15a8b17"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T191042Z-rose-context-static.tar.gz.part049.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "8a23c177874dbae7f379de3324f8b8bd54e5284b71d1bc6ed5781a47e91cf490"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T191042Z-rose-context-static.tar.gz.part050.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "e366e44b0ee9b53970a7bb7c62d73427e10090a132886e07ade1329ca4200511"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T191042Z-rose-context-static.tar.gz.part051.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "9aa0698d7bba2bfa707ac0d1dbc9e3f89fbdcd0b06119570b9253ba4000d2d44"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T191042Z-rose-context-static.tar.gz.part052.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "a0528688a915412ad4a78633a9c44a8a947327502ae97f22b8ca67255a33a0a6"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T191042Z-rose-context-static.tar.gz.part053.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "443f19fa4dc10923e87fdec1a864309923be521f1745e5612ca0be32d0de19de"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T191042Z-rose-context-static.tar.gz.part054.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "66fb05cc2eac2a0a50bdda69839ff966e64223ef1039a555dc27e613a147c220"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T191042Z-rose-context-static.tar.gz.part055.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "20732866cec286e1f2eeba2d33987bf8d94619d9ff7ee93f6bd5ecc6271ef7a5"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T191042Z-rose-context-static.tar.gz.part056.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "311fdb1daa293c19f76d95b58809d38f0afc52b5a8c90537295c7c42436c345d"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T191042Z-rose-context-static.tar.gz.part057.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "eaf544bc996124f83d2557a7643251dacdf485f445beeb8587c1c538b822f5be"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T191042Z-rose-context-static.tar.gz.part058.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "7bbf0a7a353405b877ab7f9dc015587aedca2653ac55e5c9ae0d68b6acbe03dd"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T191042Z-rose-context-static.tar.gz.part059.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "ef8297936ae3c538b1892aaa014bd3d4b4bca29587cde3ba315fffd6a77680b9"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T191042Z-rose-context-static.tar.gz.part060.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "2bc6573a8735eaa625c8c3237e4f7713eba4ab75363afaedcfdfef8f7e75963a"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T191042Z-rose-context-static.tar.gz.part061.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "3c2d7f905ccf5edb90d5b5f3ed8da7ef70a49f5bc9fc8568be66d50780abd923"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T191042Z-rose-context-static.tar.gz.part062.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "c52fd63c657d9aaba14efea17fe48876e806cb9920f1274792d8bc7a02d55dd6"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T191042Z-rose-context-static.tar.gz.part063.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "161004d868a4f1e131dcd5f2c7bcd173f72dbc008be59f9b92e88948a341e1e8"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T191042Z-rose-context-static.tar.gz.part064.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "217b7ec5ea4f7359c3d6a9984a08091f8a68eb616f0022e6fa9901a86de766d0"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T191042Z-rose-context-static.tar.gz.part065.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "112efd75da9b7deb34d7f54c5730cec49bb2a20320e17a8032b5bd7ec3e82c67"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T191042Z-rose-context-static.tar.gz.part066.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "750425d129f65617f4e910e9e8a28665753cbdedceed5b8ddede04ec4c2d5662"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T191042Z-rose-context-static.tar.gz.part067.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "bc9684ed1365fc70ef4b2846e16e1ec78354febc34af38a54dc837fa29fe5c13"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T191042Z-rose-context-static.tar.gz.part068.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "a2e2b35a287156fb903cb116ddd2ad75fd90adfc98873e6403efe1f1e9f29617"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T191042Z-rose-context-static.tar.gz.part069.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "507e3dbb90425b5f79507dc95a2ae880cd7a4497a83403347c9beab0e8760e56"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T191042Z-rose-context-static.tar.gz.part070.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "6d5fa656ce0730cebdfe5bcc336edd553bf1f318e23cb576128a5eccaaff4368"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T191042Z-rose-context-static.tar.gz.part071.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "33d4f02a3f22ffeb1a07f5d8b7e7a7660cdd9aa7e78f427b8fcedeea201a3452"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T191042Z-rose-context-static.tar.gz.part072.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "d23626d6a5bfda76e12cd43bf64d1cc0b347e4a1779482083c046c0e0dac03f9"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T191042Z-rose-context-static.tar.gz.part073.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "11e6e93215c01c9f1b723b43aed59391cfd26cc522d2bdddbf04dac958b06c69"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T191042Z-rose-context-static.tar.gz.part074.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "6dcf6f30b8d3d18a654bb4d4fccd5934c70847dfb7eecd7580ffad66be15d072"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T191042Z-rose-context-static.tar.gz.part075.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "87c84820dd40ddfe49283a064e8b879086d092b5794c58334adf86b430009539"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T191042Z-rose-context-static.tar.gz.part076.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "561bcefbd3ac8fe07b91dd995e90fe461df7b87df9e03785c77b9cd5f73bc419"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T191042Z-rose-context-static.tar.gz.part077.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "1d76d654be3a76ce80c3f84b0a29baab2f38815123cdad0a0b5d1038248a371e"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T191042Z-rose-context-static.tar.gz.part078.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "1a45c557d96a28ef746e0ee01b8098526f14b8547a3cd63694988c5b3ad03404"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T191042Z-rose-context-static.tar.gz.part079.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "f8a7ab75090346391735bc2130bc09e3d23ac764500dd958f14cf13e06efcb60"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T191042Z-rose-context-static.tar.gz.part080.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "0ba6303975dadf49d905424e4513cbe282fce0187005cbc1cab6f3574a87baf8"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T191042Z-rose-context-static.tar.gz.part081.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "6c01f6aa7b7021ec4a07809e7a4ad667495ac0eab5af8061b9f8b456db8a9b21"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T191042Z-rose-context-static.tar.gz.part082.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "7717a150547396aac445c9a13e30a7e0139b9a82f6f1f01b999face6b83b5d62"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T191042Z-rose-context-static.tar.gz.part083.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "227c3d86cb23b4e3f5a299c76b990ff555ffeda85b737102911ac24c0289783e"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T191042Z-rose-context-static.tar.gz.part084.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "dc543e3c1bd012cd8adc7a9d181291ef181ec1c68c7867b409c7edf58f199538"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T191042Z-rose-context-static.tar.gz.part085.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "0d0f5a95767c403bf8ed0be6b36b95af072502316c37b688650cecc2dc9cc00a"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T191042Z-rose-context-static.tar.gz.part086.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "c194172b1a9702bf70440c60d45475c40488ba67a6dd55b4cc7be6605776f443"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T191042Z-rose-context-static.tar.gz.part087.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "d7d8ffb8a314844b5cae5df3602ad3a4c1e82c21de9b1fbefb30a123bc6cb228"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T191042Z-rose-context-static.tar.gz.part088.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "5c164bf01e5a9bf0e9207231337f5a2da58ddb6542875f00e9b347fdb7e49eac"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T191042Z-rose-context-static.tar.gz.part089.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "67536bca9f327ee3bd4876ea152c0435fbd8bea27dc83b357d8b80b8f422bdb3"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T191042Z-rose-context-static.tar.gz.part090.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "884f07b1666ea35b78430e24e306788f5b600bd836756fbdb4cac2690d507036"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T191042Z-rose-context-static.tar.gz.part091.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "7acdfb4d395b0d9f099c727381b52b646122d90c1a17616ed704729e7da62e5c"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T191042Z-rose-context-static.tar.gz.part092.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "253110e3964c0c80aa2e16d8b9fa9080b54368d12d944544898e4ad586543cc6"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T191042Z-rose-context-static.tar.gz.part093.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "aa3eed03e64b33cd965a395ad393f85920af03530449bb02108d2c5467d617d3"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T191042Z-rose-context-static.tar.gz.part094.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "f0d0ce0d63d6b6a508358749b64258293924ef2b8ddd2fb112e6415c1a26561b"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T191042Z-rose-context-static.tar.gz.part095.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "b70a13531ad77c7dad53442e445a328e852cfe5f804b54943f0d03e8d17d7619"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T191042Z-rose-context-static.tar.gz.part096.aesgcm",
+     "plain_bytes": 49964129,
+     "sha256": "ef513d143ce0d55ce951f38467dfa2cef271b7e1dffd25f41a5d2bc67b8af52f"
+    }
+   ],
+   "plain_bytes": 6492415073,
+   "sha256": "bce753c34f23944128ad0eb6d16baf479d7453e45e674c42a7cc2985ed08648c",
+   "tar_exit": 0,
+   "tar_warnings": [],
+   "upload_seconds": 1229,
+   "verification": "every part re-downloaded, ciphertext sha256 matched, decrypted; plaintext sha256 bce753c34f23944128ad0eb6d16baf479d7453e45e674c42a7cc2985ed08648c; tar listing recount 80402 files vs 80402 packed",
+   "verified": true
+  },
+  "rose-small-static": {
+   "base": "/home/boxes/rose",
+   "created_utc": "20261112T190218Z",
+   "crosses_bind_mounts": true,
+   "excludes": [],
+   "files": 393,
+   "format": "TAR+GZIP",
+   "listing": "/home/boxes/rose/.context/deploy-session/closeout-a52c/listing-rose-small-static.private.txt",
+   "listing_sha256": "9f431f304f2b729867233e1846ec4d491bf89afbae1496a2a0b4f53cbe230597",
+   "members_count": 20,
+   "members_head": [
+    ".llm-dumps",
+    "agents/.context",
+    "back-end/.context",
+    "agents/benchmarks/runs",
+    "agents/providers/fast_cache",
+    ".devbox",
+    "front-end/playwright-mobile-screenshots",
+    "package-lock.json",
+    "agents/navi-worker-log.txt",
+    "agents/navi-worker-log.1.txt",
+    "agents/navi-worker-log.2.txt",
+    "agents/navi-worker-log.3.txt",
+    "agents/navi-worker-log.4.txt",
+    "agents/navi-worker-log.5.txt",
+    "agents/navi-worker-log.6.txt",
+    "agents/navi-worker-log.7.txt",
+    "back-end/backend-logs.log",
+    "front-end/frontend-logs.log",
+    "hub-poller-logs.log",
+    "docs/rca/INDEX.md"
+   ],
+   "parts": [
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T190218Z-rose-small-static.tar.gz.part000.aesgcm",
+     "plain_bytes": 58821952,
+     "sha256": "ad70d7f8f2e41cb976be18ab6eb7b5155ccae7c2af495f171fc37b486652a610"
+    }
+   ],
+   "plain_bytes": 58821952,
+   "sha256": "bd6126e04c725fe8f5b7aac95a451ced3c3722d9b82fed00ff5b749d604b68b9",
+   "tar_exit": 0,
+   "tar_warnings": [],
+   "upload_seconds": 129,
+   "verification": "every part re-downloaded, ciphertext sha256 matched, decrypted; plaintext sha256 bd6126e04c725fe8f5b7aac95a451ced3c3722d9b82fed00ff5b749d604b68b9; tar listing recount 393 files vs 393 packed",
+   "verified": true
+  },
+  "sibling-delta-20261114T130628Z": {
+   "base": "/home/boxes/polar-deploy-recovery",
+   "created_utc": "20261114T133235Z",
+   "crosses_bind_mounts": true,
+   "exact_excludes": true,
+   "exclude_from": null,
+   "excludes": [
+    ".context/frontend-builds",
+    ".context/experiential-venv"
+   ],
+   "files": 100500,
+   "format": "TAR+GZIP",
+   "listing": "/home/boxes/rose/.context/deploy-session/closeout-a52c/listing-sibling-delta-20261114T130628Z.private.txt",
+   "listing_sha256": "986894b3d29125e186d948d4c5263394b0065e75dd9990a6086290b4b1c54485",
+   "members_count": 1,
+   "members_head": [
+    ".context"
+   ],
+   "parts": [
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261114T133235Z-sibling-delta-20261114T130628Z.tar.gz.part000.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "def712a12f4dad75ab8050a0432303a2372b01d20a7230ab34b19c830907c205"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261114T133235Z-sibling-delta-20261114T130628Z.tar.gz.part001.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "161d5982b1a36bc8852d0abe96e866e787394a3259af1e1b9140745abce12c04"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261114T133235Z-sibling-delta-20261114T130628Z.tar.gz.part002.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "78baa4242d56b3af5d4aef62959c08dfca10b7baf85f5c8703c5349963c059b6"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261114T133235Z-sibling-delta-20261114T130628Z.tar.gz.part003.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "0eac1c75b3ab8d7bff4bd307efbb1401363d1cffd476d2455629012bf151237b"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261114T133235Z-sibling-delta-20261114T130628Z.tar.gz.part004.aesgcm",
+     "plain_bytes": 3915368,
+     "sha256": "b4750dd5cd91ee3f5917334c78c868de7ab768fdf229f29472126739729d6df1"
+    }
+   ],
+   "plain_bytes": 272350824,
+   "sha256": "2abfaf888dd9098e84733d9a555d359b225526b39e9d78da61c94ae9eaaf4995",
+   "tar_exit": 0,
+   "tar_warnings": [],
+   "upload_seconds": 213,
+   "verification": "every part re-downloaded, ciphertext sha256 matched, decrypted; plaintext sha256 2abfaf888dd9098e84733d9a555d359b225526b39e9d78da61c94ae9eaaf4995; tar listing recount 100500 files vs 100500 packed",
+   "verified": true
+  },
+  "sibling-polar-deploy-recovery": {
+   "base": "/home/boxes/polar-deploy-recovery",
+   "created_utc": "20261112T190528Z",
+   "crosses_bind_mounts": true,
+   "excludes": [
+    ".context/frontend-builds",
+    ".context/experiential-venv"
+   ],
+   "files": 164031,
+   "format": "TAR+GZIP",
+   "listing": "/home/boxes/rose/.context/deploy-session/closeout-a52c/listing-sibling-polar-deploy-recovery.private.txt",
+   "listing_sha256": "1eae29ff5c3edafe69731c7ce01484722ce84d379955f6506fab66a59da926d0",
+   "members_count": 17,
+   "members_head": [
+    ".context",
+    ".llm-dumps",
+    "agents/.context",
+    "back-end/.context",
+    "agents/benchmarks/runs",
+    "front-end/playwright-mobile-screenshots",
+    "package-lock.json",
+    "agents/navi-worker-log.txt",
+    "agents/navi-worker-log.1.txt",
+    "agents/navi-worker-log.2.txt",
+    "agents/navi-worker-log.3.txt",
+    "agents/navi-worker-log.4.txt",
+    "agents/navi-worker-log.5.txt",
+    "agents/navi-worker-log.6.txt",
+    "agents/navi-worker-log.7.txt",
+    "back-end/backend-logs.log",
+    "front-end/frontend-logs.log"
+   ],
+   "parts": [
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T190528Z-sibling-polar-deploy-recovery.tar.gz.part000.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "1e3aa6a70d8c3c77cd66ccd899214da9dfd2c8c91e9fade44a55bb089f8a132d"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T190528Z-sibling-polar-deploy-recovery.tar.gz.part001.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "c5262f4b76379b69a068976f44ad7df3c0365d51d8a351b2fd7cf5d35370b115"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T190528Z-sibling-polar-deploy-recovery.tar.gz.part002.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "f4a15d4c950d3ae4a8b5d32d74d56bae12bf1e238de51e4ab5d63325e001ab58"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T190528Z-sibling-polar-deploy-recovery.tar.gz.part003.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "e9ebcf648e5b8743fb1b212519124ad257641ba95d7d2ab3aa22140f89eae3c6"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T190528Z-sibling-polar-deploy-recovery.tar.gz.part004.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "b60b6f71242c632c6cc93d785fdd2d2710bb23c554212c32abd117346e1e86d5"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T190528Z-sibling-polar-deploy-recovery.tar.gz.part005.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "0ad037f2d9f780ab0305beaaa6b957f4c0ab58d75a42d75ee6a292d9fb18aded"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T190528Z-sibling-polar-deploy-recovery.tar.gz.part006.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "484731eb0a5d630c4bec239b7e6f898a99e860bd097d41c4fc28d7e23ccbc5a7"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T190528Z-sibling-polar-deploy-recovery.tar.gz.part007.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "6f39ba2721b76e4b3837cedf2b85e4bb29f2679876a6aa11eb90b69ba43a6d25"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T190528Z-sibling-polar-deploy-recovery.tar.gz.part008.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "17827e230f151f833dab27245a74f82998a0a5ab2da00ab66660a395e674f772"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T190528Z-sibling-polar-deploy-recovery.tar.gz.part009.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "9e1cc7d99397a5afc13ac1c21f6f39e7ccfe7356abc005f5bfe52279328b9086"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T190528Z-sibling-polar-deploy-recovery.tar.gz.part010.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "e941fead482a0cae2d9adde2d846650ea3081dfca62de853d432e57af169600e"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T190528Z-sibling-polar-deploy-recovery.tar.gz.part011.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "42694ed16e8d725ee39f47b5d716e82c5d41c8d7630b8449dbe42b1170fabb34"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T190528Z-sibling-polar-deploy-recovery.tar.gz.part012.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "36ec31cd06d1d7d9f22cc874019455d522292ab59abecb0d9bcefd856ccfbd92"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T190528Z-sibling-polar-deploy-recovery.tar.gz.part013.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "5588f0a979db7ddbacf859e866ed441b7c9bf85f68dd1f50bf854cd63aef7add"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T190528Z-sibling-polar-deploy-recovery.tar.gz.part014.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "a26e156bf9ecf2801830a344ab9404eceeaa2b963f383197b14290aecefd5d2e"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T190528Z-sibling-polar-deploy-recovery.tar.gz.part015.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "42c538903d0eb8d4104d701da2aab4dd889d8359c0fc37d421117a607579d2ad"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T190528Z-sibling-polar-deploy-recovery.tar.gz.part016.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "708085fa07aab578388691e0c486b99de68cf27517f7d2267ea2c64abe12f8da"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T190528Z-sibling-polar-deploy-recovery.tar.gz.part017.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "9d87a6841db66e6484881befb4d8ddac33cf768a7e707f5c43f863e2e724c6fb"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T190528Z-sibling-polar-deploy-recovery.tar.gz.part018.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "f7e2e040a13f295414e8a31c00b80489e9dd09f0ff39109eebdf1af748d99d9b"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T190528Z-sibling-polar-deploy-recovery.tar.gz.part019.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "d22f4ef300dad99fdfe5e99031086b74c250423921b56b47b1a306db61950a2d"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T190528Z-sibling-polar-deploy-recovery.tar.gz.part020.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "bd9a0bebbb076149ca5495b2e68a570f8a06d31ac9c97fd50673955e00b478b1"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T190528Z-sibling-polar-deploy-recovery.tar.gz.part021.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "6ea304c281f0cedc1d40f1523bb1c046e50d745ce6e166a50709263ac63ea579"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T190528Z-sibling-polar-deploy-recovery.tar.gz.part022.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "9a63f57107a621813dde68e187a9e5d596ac9c7bdeabdbf84c92c7036c47448f"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T190528Z-sibling-polar-deploy-recovery.tar.gz.part023.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "454499377cf6cca371f4c3f81b2ff2d58a14b67fa56fad9d0b6caf82133dd08a"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T190528Z-sibling-polar-deploy-recovery.tar.gz.part024.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "410beccf16e5a7604efdc7fad0f0c6b160b101ad69cc4d0f0827842e7e13162a"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T190528Z-sibling-polar-deploy-recovery.tar.gz.part025.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "d3a7d4fe3981daecd85289682a896e71ba1324ee031968e48922c1ce5ef5d55f"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T190528Z-sibling-polar-deploy-recovery.tar.gz.part026.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "f7de045cc2312b910b1e407d178b21f8f679ac33c498fbe965eb79ed10302d16"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T190528Z-sibling-polar-deploy-recovery.tar.gz.part027.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "d8dbdc90235de1e9ff86ff711395303fef4da18c5f78815bba1b08a1771188c6"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T190528Z-sibling-polar-deploy-recovery.tar.gz.part028.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "cc1f6c8f13349340113a15a31e0c179f767ec284ef6550d10b13d9a2ded3580a"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T190528Z-sibling-polar-deploy-recovery.tar.gz.part029.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "930b7888300031290f46aed91c02167a195ac32ab84d1d7692da7da0f55b1ebc"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T190528Z-sibling-polar-deploy-recovery.tar.gz.part030.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "48be900d70cd4e3fd57623b857495bf561a1ff359c9c0ea154a96940e72a2a8a"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T190528Z-sibling-polar-deploy-recovery.tar.gz.part031.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "0cc6f9afc6a575864253f7f33716f49c0b305007f74d93522e0b76b8fea5854e"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T190528Z-sibling-polar-deploy-recovery.tar.gz.part032.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "9138a69a9f5daeaf1cf721401034bed31d89441761ddc5ab63a2e6ce09f032d7"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T190528Z-sibling-polar-deploy-recovery.tar.gz.part033.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "c09b9864c7569754eac2658ec509ddadebf126dbf459d375c1d83aed170a7411"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T190528Z-sibling-polar-deploy-recovery.tar.gz.part034.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "a786803546fe115458f5e66aafbef3678276d36c2ab99d880c72f4d77acb35df"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T190528Z-sibling-polar-deploy-recovery.tar.gz.part035.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "c4af8bad362f87f312e7f39d1c8482e8b84ea1a4430ec48a649878d9d004bd45"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T190528Z-sibling-polar-deploy-recovery.tar.gz.part036.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "c3bdeee588854afbeaa590ee831e6356d9d3e0628fe0bb1ce4d79ede6788dea1"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T190528Z-sibling-polar-deploy-recovery.tar.gz.part037.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "511c609500bf588f4bb9c05741e7d0a993624f27f45810678ba0fc64449e9d9e"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T190528Z-sibling-polar-deploy-recovery.tar.gz.part038.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "00fd5565f1679c56fe99a30292a5c5befc2392edc677ce63fd43e79f8bdac7ec"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T190528Z-sibling-polar-deploy-recovery.tar.gz.part039.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "a58ed6b4dd20c9ea35485a2e9b677111a33435da7b56f5bbc37a1b471eeb4ce8"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T190528Z-sibling-polar-deploy-recovery.tar.gz.part040.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "1deb460eddcc7e463fee22b8ea2a6d73e9ab2f775562d8e276e38f717c3838cc"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T190528Z-sibling-polar-deploy-recovery.tar.gz.part041.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "921afdff93ea7e61bc4f2c568197a8d74d4a515af4fb145ede9a279e9e18ab14"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T190528Z-sibling-polar-deploy-recovery.tar.gz.part042.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "777e1b378ebaf08d8d0f2857e49272cc61bcf04a9991cabcbe57b28c1b1a7d28"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T190528Z-sibling-polar-deploy-recovery.tar.gz.part043.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "70947439882c4420dc65f4c0236a618aabfa7d85cb08e8019990a2f16cd0e615"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T190528Z-sibling-polar-deploy-recovery.tar.gz.part044.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "433e061b0db034b5e69d9fa342cdddb36f9886e0879e3d90e1a261e47c005c44"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T190528Z-sibling-polar-deploy-recovery.tar.gz.part045.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "0dcadf55796cc1aa496a85d9f4b20cb0eb7005305c874d3d56ba5f1c71cc1b90"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T190528Z-sibling-polar-deploy-recovery.tar.gz.part046.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "428b9002a30ccfd4f83ddcd3431c61a969ed2de9813aab6d049b4c6638b1a282"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T190528Z-sibling-polar-deploy-recovery.tar.gz.part047.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "172c7aa6398d92783895caa917c6a14ba3fc60c7b5c3fd8404359d089ec31fcc"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T190528Z-sibling-polar-deploy-recovery.tar.gz.part048.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "8f7a09a3f33e9c9e51a3b37f46f7a58593285c93d564f17bab0c258149b620dc"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T190528Z-sibling-polar-deploy-recovery.tar.gz.part049.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "4f8142b61be227c3a1ab02bd128cbefdd152cc9dfadfa24b37441ae364bd7de1"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T190528Z-sibling-polar-deploy-recovery.tar.gz.part050.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "d64b7f78fa602866315058ba932c433d1b18a060d0cb37f61a5571706506c2d5"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T190528Z-sibling-polar-deploy-recovery.tar.gz.part051.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "172aebefbbbe344e5ba38cc1d779f5f8a6756320ca3037c7abf650bc7b93cfa2"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T190528Z-sibling-polar-deploy-recovery.tar.gz.part052.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "8eac8a3e13b4589e9120b41fe228f84af461e0258845ac78ee97a501f11e8658"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T190528Z-sibling-polar-deploy-recovery.tar.gz.part053.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "e68c4f13bf4d762ee1883bbb0b598dc71c93f45fecc57771659c6e23dd1b4f4a"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T190528Z-sibling-polar-deploy-recovery.tar.gz.part054.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "641bdf05876ea8b462ab75010b4aeebe28d9d9c211913550021c9aaf88cf1531"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T190528Z-sibling-polar-deploy-recovery.tar.gz.part055.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "b89a58a61151bb19db70b88a83ab3415b58ec20aa3510ad1edf1522ee3f7cadc"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T190528Z-sibling-polar-deploy-recovery.tar.gz.part056.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "1dc1fe91c1901a944023dbeb7183372984fd1d167c5820219b19b684d31e0707"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T190528Z-sibling-polar-deploy-recovery.tar.gz.part057.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "9a6652fa1d9fdd303b0f6f0d10f9dc1c5070a03944b201892136201c54a8dfb6"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T190528Z-sibling-polar-deploy-recovery.tar.gz.part058.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "6145e5ad2164b2e43a7aa7c0c52fb3a2a4217dcb8d4cea23d76bd55ce6249ebf"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T190528Z-sibling-polar-deploy-recovery.tar.gz.part059.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "831f505a25b352f72f3a8a941bf2a292a6b1a4bff52520ddd272b637da611453"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T190528Z-sibling-polar-deploy-recovery.tar.gz.part060.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "fd591a3e328e3e88bfff6fb6de71ccc7f19fd0ab8fc30636604c86b1760f2805"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T190528Z-sibling-polar-deploy-recovery.tar.gz.part061.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "0973598e237edb0045d2fc9df39c1b6e26e3b1a7910225407a2ced6ca1ebbfa1"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T190528Z-sibling-polar-deploy-recovery.tar.gz.part062.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "b601a13fef50d3b16e0a635f9baa66ff00d6e79d8282e41f8ae75365e190f099"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T190528Z-sibling-polar-deploy-recovery.tar.gz.part063.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "70e44dc7f466a4604b6108c62301043e478bffb39bf60aef04f124255ea3ffb5"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T190528Z-sibling-polar-deploy-recovery.tar.gz.part064.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "7b88ca6cb1c5f6706c3d5512851cb8879ca4e5ca14d090344c33452094fce45e"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T190528Z-sibling-polar-deploy-recovery.tar.gz.part065.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "79cb01cd2869751ca8d38abce3d762af4c65b24416e619596371e18b97d03d7c"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T190528Z-sibling-polar-deploy-recovery.tar.gz.part066.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "30b534d5213e950d59042bbd77b63de755d78eebbf59aacd9bec85983627d606"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T190528Z-sibling-polar-deploy-recovery.tar.gz.part067.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "63b07a5a227385fbf2721247fe2719c987795f4521d116289aaf1364717c8898"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T190528Z-sibling-polar-deploy-recovery.tar.gz.part068.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "651ea4b2f35f159ee1a935cfefcf10c639464d4d902389e292de1f6ed1b32eaa"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T190528Z-sibling-polar-deploy-recovery.tar.gz.part069.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "9d82cf8c8908c173fb6b13de7e1c09fcaae5f0f016b886c47f04c1da3763d56e"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T190528Z-sibling-polar-deploy-recovery.tar.gz.part070.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "232e2c8dd4e233433f04555cd5e792429f65c5d962fb1fabe47a8613aa8fef03"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T190528Z-sibling-polar-deploy-recovery.tar.gz.part071.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "a320d0a3e82bf04f0aa6efc0b2f54db65422e397a8fd190c87efeb32d044b949"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T190528Z-sibling-polar-deploy-recovery.tar.gz.part072.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "ed229665bb2c4f5dff2e767711917d61d59d1b32da0ba4a2246d3d0e6ae02016"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T190528Z-sibling-polar-deploy-recovery.tar.gz.part073.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "07676d9f42a9880bfdcdd156b3f426258be9bb992646b64f972f18699edd3162"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T190528Z-sibling-polar-deploy-recovery.tar.gz.part074.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "bef7f13afa5db186919cdc722767e1409245afbc65e607f0ffbe1dc4fb3c2d94"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T190528Z-sibling-polar-deploy-recovery.tar.gz.part075.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "4d720b78a3678d5fd3bbd81298587fb60a76c8f622ccc6cd365f49ae453746b8"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T190528Z-sibling-polar-deploy-recovery.tar.gz.part076.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "4703f3bd80840d0063a1ea1edd697f877d8642a411d1aa8b1319caf0fd4074a6"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T190528Z-sibling-polar-deploy-recovery.tar.gz.part077.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "3cf0273c56f4883eb3d6fa47e7739106c999b8210aa0357b9e7eddde45fa4f93"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T190528Z-sibling-polar-deploy-recovery.tar.gz.part078.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "f44fe9e0e4aaf729776db446bf8086c2e40dc87aa376101857cc1110821d77b2"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T190528Z-sibling-polar-deploy-recovery.tar.gz.part079.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "dc0869b40a75762cdeec4cbf4c956e56997f48fb444dec7a5d5f020f80b0a900"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T190528Z-sibling-polar-deploy-recovery.tar.gz.part080.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "f30a00ffdc7c1a66e8cd979cb9b9c6b84e75a0d8fa2b83ec4d8eb990f3d11166"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T190528Z-sibling-polar-deploy-recovery.tar.gz.part081.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "ce3bc9594d836862384af7e503782d0be72c764523778071bcc320a66bc113a1"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T190528Z-sibling-polar-deploy-recovery.tar.gz.part082.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "54dc6db8342a683cc4c24d71f67abc92bd5a9e5dced5775340a17a6346fdce32"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T190528Z-sibling-polar-deploy-recovery.tar.gz.part083.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "1879684484839449794e342bcc84f41a16280fd679cb68e82d2ac079530005b3"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T190528Z-sibling-polar-deploy-recovery.tar.gz.part084.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "9b737af42f3b9ab5d49736fbe6ef05079277969d808ab21e75fa584f3c030da1"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T190528Z-sibling-polar-deploy-recovery.tar.gz.part085.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "919fd3d0d9d052e234de28c475ca1e13172e636e39d1f6f2c09d4df1fd048232"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T190528Z-sibling-polar-deploy-recovery.tar.gz.part086.aesgcm",
+     "plain_bytes": 67108864,
+     "sha256": "af6cb0f6d335fb0902f05e2f41779560bff4bd640a701d5fe381c84d1daa1248"
+    },
+    {
+     "key": "devbox-closeout-private/pr1682-a52c/20261112T190528Z-sibling-polar-deploy-recovery.tar.gz.part087.aesgcm",
+     "plain_bytes": 4584293,
+     "sha256": "b99899c27ab1e8f126f653763189d7f3f71d3397accab19fba7b736a398b5869"
+    }
+   ],
+   "plain_bytes": 5843055461,
+   "sha256": "64ef2dc324def59b3e535701615716c595917dbc224413a0972d7bfa8e4bcb36",
+   "tar_exit": 0,
+   "tar_warnings": [],
+   "upload_seconds": 1324,
+   "verification": "every part re-downloaded, ciphertext sha256 matched, decrypted; plaintext sha256 64ef2dc324def59b3e535701615716c595917dbc224413a0972d7bfa8e4bcb36; tar listing recount 164031 files vs 164031 packed",
+   "verified": true
+  }
+ },
+ "bucket_env": "R2_BUCKET_TRACE_ARCHIVE",
+ "closeout_archive_receipts": {
+  "local-refs": {
+   "archive_sha256": "33e3372a68b20dd1938d3b96fe60abc3679d3316288846c896b6ca775313364c",
+   "archive_size_bytes": 1050101,
+   "bucket_env": "R2_BUCKET_TRACE_ARCHIVE",
+   "chunk_size": 67108864,
+   "cipher": "AES-256-GCM nonce(12)||ciphertext, aad=object key",
+   "files": 2,
+   "key_location": "TRACE_ARCHIVE_ENCRYPTION_KEY_B64 (back-end/.env; same key as the trace archive)",
+   "key_prefix": "devbox-closeout-private/pr1682-a52c-local-refs-20261112/",
+   "members": [
+    "/var/tmp/pr1682-closeout/refs-a52c/local-refs.bundle",
+    "/var/tmp/pr1682-closeout/refs-a52c/ref-identities.txt"
+   ],
+   "name": "pr1682-a52c-local-refs-20261112",
+   "parts": 1,
+   "restore": "closeout_archive.py restore --receipt <receipt> --destination <dir>",
+   "verified": "every part downloaded, decrypted and the reassembled sha256 matched after upload"
+  }
+ },
+ "format": "PR1929-PRIVATE-ARCHIVE-INDEX-V1",
+ "key_env": "TRACE_ARCHIVE_ENCRYPTION_KEY_B64",
+ "key_fingerprint_sha256": "e351c7cc5b01303e579fe6d1df833940fdaadf325ca47314414ba10735fc7730"
+}

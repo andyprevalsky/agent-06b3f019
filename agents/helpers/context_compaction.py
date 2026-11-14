@@ -26,7 +26,14 @@ def is_excluded_from_model(message: Dict[str, Any]) -> bool:
     Includes every row a background spawn's executor posts under its spawn's
     tool-call id (helpers.background_agents.background_execution_metadata).
     """
-    return bool(_metadata(message).get("excludeFromModel"))
+    metadata = _metadata(message)
+    if (str(message.get("role", "")).upper() == "TOOL"
+            and metadata.get("toolName") in {"screenshot", "historical_screenshot", "final_screenshot"}
+            and isinstance(metadata.get("screenshot_b64"), str) and metadata["screenshot_b64"]):
+        # Old screenshot exports carried a blanket model exclusion. Their
+        # original tool-result pixels are now ordinary conversation content.
+        return False
+    return bool(metadata.get("excludeFromModel"))
 
 
 def build_context_compaction_metadata(compressed_context: List[Dict[str, Any]]) -> Dict[str, Any]:

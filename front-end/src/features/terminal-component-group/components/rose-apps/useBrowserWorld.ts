@@ -15,6 +15,10 @@
  *     close --POST /root/close--> cache {root: null}; receipt text for 6 s;
  *            Root and sites re-read (the close merged sites into Root)
  *   useForgetRootSite  DELETE /sites/:site --> the site leaves both caches
+ *
+ * Every cache write above runs only while the signed-in user is the one the
+ * action started under (lib/queryClient scope), so a late response from the
+ * previous account never lands in the next account's cache.
  */
 
 import { useEffect, useState } from 'react';
@@ -29,6 +33,8 @@ import {
   type RootBrowserState,
   type RootSiteView,
 } from '@/lib/api/browser-world';
+import { captureQueryScope, inQueryScope } from '@/lib/queryClient';
+
 import { receiptText } from './browserWorldView';
 
 const WORLD_KEY = 'browser-world';
@@ -84,19 +90,27 @@ export function useRootBrowserActions() {
     }));
   const refreshWorld = () => queryClient.invalidateQueries({ queryKey: [WORLD_KEY] });
 
+  // A response that lands after the signed-in user changed never writes the new user's cache.
   const open = useMutation({
     mutationFn: (startUrl?: string) => openRootBrowser(startUrl),
-    onSuccess: (root) => setRoot(root),
+    onMutate: captureQueryScope,
+    onSuccess: (root, _startUrl, context) => {
+      if (inQueryScope(context)) setRoot(root);
+    },
   });
   const close = useMutation({
     mutationFn: closeRootBrowser,
-    onSuccess: (worldState) => {
+    onMutate: captureQueryScope,
+    onSuccess: (worldState, _vars, context) => {
+      if (!inQueryScope(context)) return;
       setRoot(null);
       showReceipt(receiptText(worldState));
       void refreshWorld();
     },
     // Already closed elsewhere (404) or failed: re-read what Root really is.
-    onError: () => void refreshWorld(),
+    onError: (_error, _vars, context) => {
+      if (inQueryScope(context)) void refreshWorld();
+    },
   });
   return { open, close, receipt };
 }
@@ -105,7 +119,9 @@ export function useForgetRootSite() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: forgetRootSite,
-    onSuccess: (_forgotten, site) => {
+    onMutate: captureQueryScope,
+    onSuccess: (_forgotten, site, context) => {
+      if (!inQueryScope(context)) return;
       const without = (sites: RootSiteView[]) => sites.filter((s) => s.site !== site);
       queryClient.setQueryData<RootSiteView[]>(ROOT_SITES_KEY, (prev) =>
         prev === undefined ? prev : without(prev),

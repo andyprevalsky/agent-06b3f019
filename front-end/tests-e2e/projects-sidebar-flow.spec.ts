@@ -220,6 +220,7 @@ for (const width of [1280, 390]) {
     const children = folderRow.getByTestId('rose-agent-children-project-agent');
     const finished = children.getByRole('button', { name: 'Finished agents (1)', exact: true });
     await expect(finished).toHaveAttribute('aria-expanded', 'false');
+    await expect(folderRow.getByText('Audit navigation', { exact: true })).toHaveCount(0);
     await finished.click();
     await expect(folderRow.getByText('Audit navigation', { exact: true })).toBeVisible();
     await expect(folderRow.getByTestId('rose-agent-children-project-agent')).toContainText(

@@ -12,16 +12,16 @@ import inspect
 import ipaddress
 import json
 import re
-import socket
 import time as time_module
 import uuid
 from contextlib import suppress
 from dataclasses import dataclass
 from io import BytesIO
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, List, Optional
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 import httpx
+import idna
 import structlog
 from PIL import Image
 
@@ -95,10 +95,6 @@ _API_SURFACE_PATHS = frozenset(
         "/status",
         "/ping",
     }
-)
-_NUMERIC_IPV4_HOST_RE = re.compile(
-    r"^(?:0x[0-9a-f]+|[0-9]+)(?:\.(?:0x[0-9a-f]+|[0-9]+)){0,3}$",
-    re.IGNORECASE,
 )
 _PROVIDER_INPUT_PRE_EXECUTION_REJECTION_STATUSES = frozenset({400, 401, 403, 404})
 
@@ -732,6 +728,7 @@ class _ActionContext:
     prepare_credentials_for_url: Optional[Callable[[str], Awaitable[Optional[Dict[str, Any]]]]]
     prefetched_browser_state: Optional[Dict[str, Any]] = None
     model_params: Optional[Dict[str, Any]] = None
+    navigation_admission: Optional[Callable[..., Awaitable[Optional[str]]]] = None
     # The session's own browser provider; None only for adapters that do not know it.
     provider: Optional[str] = None
 
@@ -761,16 +758,16 @@ def _non_public_navigation_reason(url: str) -> Optional[str]:
 
     try:
         parsed = urlparse(url)
-        host = parsed.hostname
-    except ValueError:
+        # The host Chrome will open, not urlparse's reading of it.
+        normalized_host = _browser_url_host(url)
+    except (UnicodeError, ValueError):
         return "the URL is malformed"
 
     if parsed.scheme not in {"http", "https"}:
         return "only public HTTP(S) pages may be opened"
-    if not host:
+    if not normalized_host:
         return "the URL has no hostname"
 
-    normalized_host = host.rstrip(".").lower()
     if normalized_host == "localhost" or normalized_host.endswith(".localhost"):
         return "localhost pages are not allowed"
 
@@ -778,13 +775,11 @@ def _non_public_navigation_reason(url: str) -> Optional[str]:
     try:
         address = ipaddress.ip_address(normalized_host)
     except ValueError:
-        # inet_aton recognizes legacy numeric IPv4 forms such as 127.1,
-        # 2130706433, and 0x7f000001 that urlparse leaves looking like names.
-        if _NUMERIC_IPV4_HOST_RE.fullmatch(normalized_host):
-            try:
-                address = ipaddress.ip_address(socket.inet_aton(normalized_host))
-            except (OSError, ValueError):
-                return "the numeric hostname is malformed"
+        # Legacy numeric IPv4 forms (127.1, 2130706433, 0x7f000001, 0x.0x.0x.0x).
+        try:
+            address = _whatwg_ipv4_host(normalized_host)
+        except ValueError:
+            return "the numeric hostname is malformed"
 
     if address is not None and not address.is_global:
         return f"the destination address {address} is not public"
@@ -895,14 +890,80 @@ _PHONE_PROVIDER_REALM_ALLOWED_ACTIONS = frozenset(
 )
 
 
+# Chrome parses navigations with the WHATWG URL parser, not urlparse: in a
+# special scheme a backslash is a slash, slashes after the scheme are skipped,
+# the host is percent-decoded and IDNA-mapped (fullwidth forms, ideographic
+# full stops, ignorable soft hyphens). The realm is decided on that host.
+_WHATWG_SPECIAL_SCHEMES = frozenset({"http", "https", "ws", "wss", "ftp"})
+_WHATWG_C0_AND_SPACE = "".join(chr(code) for code in range(0x21))
+_WHATWG_URL_SCHEME_RE = re.compile(r"([A-Za-z][A-Za-z0-9+.-]*):(.*)", re.S)
+_WHATWG_IPV4_PART_RE = re.compile(r"0[xX][0-9a-fA-F]*|0[0-7]*|[1-9][0-9]*")
+
+
+def _whatwg_ipv4_host(host: str) -> Optional[ipaddress.IPv4Address]:
+    """Parse ``host`` as Chrome's IPv4 parser does; None when it is a domain.
+
+    Raises ValueError for a host Chrome treats as a malformed IPv4 address.
+    """
+    parts = host.split(".")
+    last = parts[-1]
+    if not last or not (last.isascii() and last.isdigit() or re.fullmatch(r"0[xX][0-9a-fA-F]*", last)):
+        return None
+    if len(parts) > 4 or not all(_WHATWG_IPV4_PART_RE.fullmatch(part) for part in parts):
+        raise ValueError(f"malformed IPv4 host {host!r}")
+    numbers = [
+        int(part[2:] or "0", 16) if part[:2].lower() == "0x" else int(part, 8 if part.startswith("0") else 10)
+        for part in parts
+    ]
+    if any(number > 255 for number in numbers[:-1]) or numbers[-1] >= 256 ** (5 - len(numbers)):
+        raise ValueError(f"out-of-range IPv4 host {host!r}")
+    return ipaddress.IPv4Address(numbers[-1] + sum(n * 256 ** (3 - i) for i, n in enumerate(numbers[:-1])))
+
+
+def _browser_url_host(url: str) -> str:
+    """Return the host Chrome would navigate to for ``url``, or ``""`` for no host.
+
+    Raises UnicodeError for a host UTS-46 cannot map (Chrome refuses those).
+    """
+    text = re.sub(r"[\t\n\r]", "", (url or "").strip(_WHATWG_C0_AND_SPACE))
+    match = _WHATWG_URL_SCHEME_RE.fullmatch(text)
+    if not match:
+        return ""
+    scheme, rest = match.group(1).lower(), match.group(2)
+    if scheme == "blob":
+        # A blob URL carries its creator's origin.
+        return _browser_url_host(rest)
+    if scheme not in _WHATWG_SPECIAL_SCHEMES:
+        return ""
+    authority = re.split(r"[/?#]", rest.replace("\\", "/").lstrip("/"), maxsplit=1)[0]
+    host = authority.rpartition("@")[2]
+    if host.startswith("["):
+        return host[1:].partition("]")[0].lower()
+    host = unquote(host.partition(":")[0], errors="strict")
+    return idna.uts46_remap(host, std3_rules=False, transitional=False).rstrip(".")
+
+
 def phone_provider_account_realm(url: Optional[str]) -> str:
     """Return the broker-owned phone-provider realm ``url`` belongs to, or ``""``."""
     try:
-        host = (urlparse(url or "").hostname or "").rstrip(".").lower()
-    except ValueError:
+        host = _browser_url_host(url or "")
+    except (UnicodeError, ValueError):
         return ""
     realm = _get_base_domain(host) if host else ""
     return realm if realm in _PHONE_PROVIDER_ACCOUNT_REALMS else ""
+
+
+def _phone_provider_account_boundary_result(action_name: str, realm: str, current_url: str) -> Dict[str, Any]:
+    return {
+        "success": False,
+        "code": "phone_provider_account_boundary",
+        "error": (
+            f"Refused {action_name} on {realm}: that is the account of the cloud-phone provider "
+            "behind Rose's phone broker. Browser agents may read it or leave it, but cannot act "
+            "on it or obtain its credentials."
+        ),
+        "current_url": current_url,
+    }
 
 
 def _phone_provider_account_refusal(
@@ -917,16 +978,76 @@ def _phone_provider_account_refusal(
         realm = phone_provider_account_realm(current_url)
     if not realm:
         return None
-    return {
-        "success": False,
-        "code": "phone_provider_account_boundary",
-        "error": (
-            f"Refused {action_name} on {realm}: that is the account of the cloud-phone provider "
-            "behind Rose's phone broker. Browser agents may read it or leave it, but cannot act "
-            "on it or obtain its credentials."
-        ),
-        "current_url": current_url,
-    }
+    return _phone_provider_account_boundary_result(action_name, realm, current_url)
+
+
+def _frame_urls_of_node(node: Any, live_targets: Dict[str, Dict[str, str]]) -> List[str]:
+    """Live URLs of the frame documents enclosing ``node`` (its own frame first).
+
+    A node's ``target_id`` is its out-of-process frame (or the page), whose
+    URL is read from Chrome's live target list; an in-process frame is known
+    by its ``<iframe src>``.
+    """
+    urls: List[str] = []
+    seen: set[int] = set()
+    if str(getattr(node, "node_name", "")).upper() in {"IFRAME", "FRAME"}:
+        # Acting on the frame element lands inside the frame's own document.
+        node = getattr(node, "content_document", None) or node
+    while node is not None and id(node) not in seen:
+        seen.add(id(node))
+        target = live_targets.get(str(getattr(node, "target_id", "")))
+        if target is not None:
+            urls.append(target["url"])
+        if str(getattr(node, "node_name", "")).upper() in {"IFRAME", "FRAME"}:
+            urls.append(str((getattr(node, "attributes", None) or {}).get("src") or ""))
+        node = getattr(node, "parent_node", None)
+    return urls
+
+
+async def _live_phone_provider_account_refusal(dom_service: Any, action_name: str) -> Optional[Dict[str, Any]]:
+    """Re-decide the boundary against the browser as it is when the action runs.
+
+    The step-start URL can be stale (redirects, meta refresh) and never covers
+    frames, so the live main frame and every frame embedded in the page are
+    checked here, from Chrome's own target list, without Playwright request
+    routing (it breaks Stripe Elements).
+    """
+    if action_name in _PHONE_PROVIDER_REALM_ALLOWED_ACTIONS or (
+        action_name not in _INTERACTION_ACTIONS and action_name != "evaluate"
+    ):
+        # Only actions that act on page content run against a live frame.
+        return None
+    adapter = type(dom_service)
+    if not all(callable(inspect.getattr_static(adapter, name, None))
+               for name in ("get_parked_page_identity", "live_frame_targets")):
+        # Only adapters without a live browser (test doubles); DOMService
+        # raises below when no live focused page or target list can be read.
+        return None
+    focused = dom_service.get_parked_page_identity()
+    live_targets = await dom_service.live_frame_targets()
+    live_url = (live_targets.get(str(focused.get("target_id"))) or {}).get("url") or str(focused.get("url") or "")
+    # Chrome reports a pending browser-initiated navigation's URL while the
+    # committed document (which input still reaches) is the one the registry
+    # names: either one in the realm refuses.
+    for page_url in (live_url, str(focused.get("url") or "")):
+        if realm := phone_provider_account_realm(page_url):
+            return _phone_provider_account_boundary_result(action_name, realm, page_url)
+    if action_name == "evaluate":
+        # Scripts run in the main frame only.
+        return None
+    # Pointer input is delivered at coordinates (an indexed element's too, and
+    # the password-field fallback's), and keys go to focus, so a realm frame
+    # anywhere on the page could receive it: refuse while one is embedded.
+    # Chrome's target list has no tab ownership for iframes, so an
+    # out-of-process realm frame in any tab counts; the snapshot's nodes add
+    # in-process frames (by src) and the frames it represented.
+    frame_urls = [target["url"] for target in live_targets.values() if target["type"] == "iframe"]
+    for node in (dom_service.selector_map or {}).values():
+        frame_urls.extend(_frame_urls_of_node(node, live_targets))
+    for frame_url in frame_urls:
+        if realm := phone_provider_account_realm(frame_url):
+            return _phone_provider_account_boundary_result(action_name, realm, live_url)
+    return None
 
 
 _PAYMENT_APPROVAL_WAIT_MARKERS = (
@@ -1178,6 +1299,21 @@ async def _execute_read_network_requests_action(context: _ActionContext) -> Dict
     return {"success": True, "message": message, "requests": requests}
 
 
+async def _observe_document_scroll(dom_service: Any) -> Optional[Dict[str, Any]]:
+    from helpers.workflow_generation import WorkflowGenerationSealed
+    from temporalio.exceptions import CancelledError as TemporalCancelledError
+
+    observer = getattr(dom_service, "observe_document_scroll", None)
+    if not callable(observer):
+        return None
+    try:
+        return await asyncio.wait_for(observer(), timeout=0.5)
+    except (WorkflowGenerationSealed, TemporalCancelledError):
+        raise
+    except Exception:
+        return None
+
+
 async def _execute_interaction_action(context: _ActionContext) -> Dict[str, Any]:
     from browser_use.browser.events import (
         GetDropdownOptionsEvent,
@@ -1310,6 +1446,7 @@ async def _execute_interaction_action(context: _ActionContext) -> Dict[str, Any]
         direction = context.params.get("direction", "down")
         amount = context.params.get("amount", 300)
         delta_y = amount if direction == "down" else -amount
+        before = await _observe_document_scroll(context.dom_service)
         if context.humanizer:
             at_coords = None
             if context.index is not None:
@@ -1331,15 +1468,29 @@ async def _execute_interaction_action(context: _ActionContext) -> Dict[str, Any]
             )
             await event
             await event.event_result(raise_if_any=True, raise_if_none=False)
+        after = await _observe_document_scroll(context.dom_service)
+        observation: Dict[str, Any] = {
+            "scope": "document", "status": "unknown", "before": before, "after": after,
+        }
+        if before is not None and after is not None:
+            if (before["target_id"], before["time_origin_ms"]) == (after["target_id"], after["time_origin_ms"]):
+                observation.update(
+                    status="observed",
+                    delta_x=after["scroll_x"] - before["scroll_x"],
+                    delta_y=after["scroll_y"] - before["scroll_y"],
+                )
+            else:
+                observation["status"] = "incomparable"
+        result = {"success": True, "message": "", "document_scroll": observation}
         await context.action_history.record_action(
             dom_service=context.dom_service,
             action="scroll",
             thinking=context.thinking,
             index=context.index,
             params={"direction": direction, "amount": amount},
-            result={"success": True},
+            result=result,
         )
-        return {"success": True, "message": ""}
+        return result
     if context.action_name == "dropdown_options":
         if not context.element:
             return {"success": False, "error": "Dropdown requires an element index"}
@@ -1403,6 +1554,7 @@ async def _execute_navigation_action(context: _ActionContext) -> Dict[str, Any]:
             current_auth_realm=context.current_auth_realm,
             prepare_credentials_for_url=context.prepare_credentials_for_url,
             browser_network_recorder=context.browser_network_recorder,
+            navigation_admission=context.navigation_admission,
             provider=context.provider,
             user_id=context.user_id,
         )
@@ -1483,6 +1635,7 @@ async def _execute_navigation_action(context: _ActionContext) -> Dict[str, Any]:
             action_history=context.action_history,
             params=context.params,
             thinking=context.thinking,
+            navigation_admission=context.navigation_admission,
         )
     if context.action_name == "close_tab":
         guard = _navigation_guard_error(context, action="close_tab")
@@ -1511,6 +1664,13 @@ async def _execute_navigation_action(context: _ActionContext) -> Dict[str, Any]:
                 error=guard,
                 params={"url": url},
             )
+    await _prepare_navigation_credentials(
+        url, context.current_auth_realm, context.prepare_credentials_for_url,
+    )
+    if context.navigation_admission is not None:
+        error = await context.navigation_admission(url, None)
+        if error:
+            return await _refuse_navigation(context, action="open_new_tab", error=error, params={"url": url})
     event = context.session.event_bus.dispatch(NavigateToUrlEvent(url=url, new_tab=True))
     await event
     await event.event_result(raise_if_any=True, raise_if_none=False)
@@ -1541,79 +1701,46 @@ async def classify_evaluate_cdp_stall(
     input_page: Optional[Any] = None,
     playwright_browser: Optional[Any] = None,
     timeout_s: float = 2.0,
+    probe: Optional[Any] = None,
 ) -> Dict[str, Any]:
-    """Distinguish renderer-main-thread freeze from browser-process / CDP transport death.
+    """Compare fixed renderer/browser reads on existing owned CDP sessions.
 
-    Mirrors agents/tests/e2e/steel_cpu_diagnostic.py:
-    - renderer Runtime.evaluate("1+1") blocks when the page JS thread is pinned
-    - Browser.getVersion stays responsive on the browser process even then
+    The old Playwright attachment path could wait indefinitely for an abort
+    acknowledgement during timeout cancellation. No diagnostic session or SDK
+    task is created now. Missing binding is uncertainty, never renderer failure.
     """
+    from browser_tools.cdp_probe import ProbeBindingUnavailable, ProbeReadTimeout
+
     classification: Dict[str, Any] = {
-        "renderer": "skipped",
-        "browser": "skipped",
-        "verdict": "unknown",
+        "renderer": "skipped", "browser": "skipped", "verdict": "unknown",
     }
-
-    async def _renderer_ping() -> str:
-        if input_page is None:
-            return "skipped"
-        context = getattr(input_page, "context", None)
-        if context is None or not hasattr(context, "new_cdp_session"):
-            return "skipped"
-        t0 = time_module.monotonic()
-        page_cdp = None
+    if probe is None:
+        classification.update(renderer="error", browser="error",
+                              renderer_error="CDP probe binding unavailable",
+                              browser_error="CDP probe binding unavailable")
+        return classification
+    for kind in ("renderer", "browser"):
+        started = time_module.monotonic()
         try:
-            page_cdp = await context.new_cdp_session(input_page)
-            await asyncio.wait_for(
-                page_cdp.send(
-                    "Runtime.evaluate",
-                    {"expression": "1+1", "returnByValue": True},
-                ),
-                timeout=timeout_s,
-            )
-            classification["renderer_ms"] = round((time_module.monotonic() - t0) * 1000)
-            return "ok"
-        except asyncio.TimeoutError:
-            classification["renderer_ms"] = round((time_module.monotonic() - t0) * 1000)
-            return "frozen"
-        except Exception as exc:
-            classification["renderer_error"] = f"{type(exc).__name__}:{extract_error_message(exc)[:120]}"
-            return "error"
-        finally:
-            if page_cdp is not None:
-                with suppress(Exception):
-                    await asyncio.wait_for(page_cdp.detach(), timeout=0.5)
-
-    async def _browser_ping() -> str:
-        if playwright_browser is None or not hasattr(playwright_browser, "new_browser_cdp_session"):
-            return "skipped"
-        t0 = time_module.monotonic()
-        browser_cdp = None
-        try:
-            browser_cdp = await playwright_browser.new_browser_cdp_session()
-            await asyncio.wait_for(browser_cdp.send("Browser.getVersion"), timeout=timeout_s)
-            classification["browser_ms"] = round((time_module.monotonic() - t0) * 1000)
-            return "ok"
-        except asyncio.TimeoutError:
-            classification["browser_ms"] = round((time_module.monotonic() - t0) * 1000)
-            return "frozen"
-        except Exception as exc:
-            classification["browser_error"] = f"{type(exc).__name__}:{extract_error_message(exc)[:120]}"
-            return "error"
-        finally:
-            if browser_cdp is not None:
-                with suppress(Exception):
-                    await asyncio.wait_for(browser_cdp.detach(), timeout=0.5)
-
-    classification["renderer"] = await _renderer_ping()
-    classification["browser"] = await _browser_ping()
-    rend = classification["renderer"]
-    brow = classification["browser"]
-    if rend == "frozen" and brow == "ok":
+            await probe.read(kind, timeout_s)
+            classification[kind] = "ok"
+        except ProbeReadTimeout as error:
+            classification[kind] = "frozen" if error.sent else "error"
+            if not error.sent:
+                classification[kind + "_error"] = "CDP probe send unconfirmed"
+        except ProbeBindingUnavailable:
+            classification[kind] = "error"
+            classification[kind + "_error"] = "CDP probe binding unavailable or changed"
+        except Exception:
+            classification[kind] = "error"
+            classification[kind + "_error"] = "CDP probe request failed"
+        classification[kind + "_ms"] = round((time_module.monotonic() - started) * 1000)
+    renderer, browser = classification["renderer"], classification["browser"]
+    if renderer == "frozen" and browser == "ok":
         classification["verdict"] = "renderer_main_thread_blocked"
-    elif rend == "frozen" and brow == "frozen":
+    elif renderer == "frozen" and browser == "frozen":
         classification["verdict"] = "cdp_or_browser_process_unresponsive"
-    elif rend == "ok":
+    elif renderer == "ok":
         classification["verdict"] = "renderer_responsive_after_timeout"
     return classification
 
@@ -1805,6 +1932,7 @@ async def execute_action(
     prefetched_browser_state: Optional[Dict[str, Any]] = None,
     auth_context_for_url: Optional[Callable[[str], Awaitable[Dict[str, Any]]]] = None,
     successful_secret_refs: Optional[set[str]] = None,
+    navigation_admission: Optional[Callable[..., Awaitable[Optional[str]]]] = None,
     provider: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Resolve private values and report successful use privately to the caller."""
@@ -1843,6 +1971,9 @@ async def execute_action(
     for key in ("agent_id", "browser_task_id", "tool_call_id_decision", "phone_snapshot"):
         execution.pop(key)
     execution.pop("successful_secret_refs")
+    from helpers.workflow_generation import WorkflowGenerationSealed
+    from temporalio.exceptions import CancelledError as TemporalCancelledError
+
     previous_action_step = None
     action_execution_started = False
     if successful_secret_refs is not None:
@@ -1901,7 +2032,7 @@ async def execute_action(
             original_text = model_params.get("text")
             if isinstance(original_text, str):
                 used_credential = (credential_refs_by_secret_ref or {}).get(original_text)
-    except asyncio.TimeoutError:
+    except (asyncio.TimeoutError, WorkflowGenerationSealed, TemporalCancelledError):
         raise
     except Exception as error:
         error_text = visible(str(error))
@@ -1932,6 +2063,8 @@ async def execute_action(
         with secret_logging_context(refs):
             return await prepare_browser_result(action_name, safe_result, user_id=user_id,
                                                 agent_id=current_agent_id() or "", session_id=session_id or "")
+    except (WorkflowGenerationSealed, TemporalCancelledError):
+        raise
     except Exception as error:
         return {"success": False, "error": visible(f"Action result retention failed; action may have executed: {error}")}
 
@@ -1982,6 +2115,7 @@ async def _execute_resolved_action(
     prefetched_browser_state: Optional[Dict[str, Any]] = None,
     model_params: Optional[Dict[str, Any]] = None,
     auth_context_for_url: Optional[Callable[[str], Awaitable[Dict[str, Any]]]] = None,
+    navigation_admission: Optional[Callable[..., Awaitable[Optional[str]]]] = None,
     provider: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Execute a browser action using browser-use events.
@@ -1990,6 +2124,9 @@ async def _execute_resolved_action(
         Result dict with success, message, and any additional data.
         May return {"status": "needs_write_approval", ...} if write lock triggered.
     """
+    from helpers.workflow_generation import WorkflowGenerationSealed
+    from temporalio.exceptions import CancelledError as TemporalCancelledError
+
     session = dom_service.session
     if not session:
         return {"success": False, "error": "Browser not connected"}
@@ -2021,6 +2158,15 @@ async def _execute_resolved_action(
             element = dom_service.selector_map.get(index)
             if not element:
                 return {"success": False, "error": f"Element with index {index} not found"}
+        refusal = await _live_phone_provider_account_refusal(dom_service, action_name)
+        if refusal:
+            logger.warning(
+                "[BrowserAgent] Refused action on live phone-provider account realm",
+                action=action_name,
+                current_url=refusal["current_url"],
+                observed_url=current_url,
+            )
+            return refusal
 
         context = _ActionContext(
             dom_service=dom_service,
@@ -2050,6 +2196,7 @@ async def _execute_resolved_action(
             prepare_credentials_for_url=prepare_credentials_for_url,
             prefetched_browser_state=prefetched_browser_state,
             model_params=model_params,
+            navigation_admission=navigation_admission,
             provider=provider,
         )
         if action_name in _INTERACTION_ACTIONS:
@@ -2063,10 +2210,12 @@ async def _execute_resolved_action(
         else:
             return {"success": False, "error": f"Unknown action: {action_name}"}
 
-    except asyncio.TimeoutError:
+    except (asyncio.TimeoutError, WorkflowGenerationSealed, TemporalCancelledError):
         # Propagate so the browser supervisor can classify CDP stall and
         # hard-recover a frozen renderer instead of treating this as a soft
         # action error (which leaves the page wedged).
+        # Cancellation and sealed generations likewise must stop the caller,
+        # without recording another action for a retired workflow.
         raise
     except Exception as error:
         error_text = mask_secret_values(str(error), secret_refs)
@@ -2636,7 +2785,11 @@ async def _iter_payment_fill_targets(
     targets: List[tuple[str, Any]] = []
     seen_cdp_targets: set[str] = set()
 
+    # These helpers evaluate and act in every frame; the phone-provider account
+    # realm is never one of them (see _live_phone_provider_account_refusal).
     for index, frame in enumerate(_playwright_frames(input_page)):
+        if phone_provider_account_realm(str(getattr(frame, "url", "") or "")):
+            continue
         targets.append((f"playwright:{index}", frame))
 
     get_page = _explicit_session_callable(session, "get_page", "get_current_page")
@@ -2689,13 +2842,19 @@ async def _iter_payment_fill_targets(
             owned_frames.add(frame_id)
             focused_frames.extend(children.get(frame_id, []))
 
+        realm_targets = {
+            str(info.get("frameTargetId"))
+            for frame_id, info in all_frames.items()
+            if frame_id in owned_frames and isinstance(info, dict)
+            and phone_provider_account_realm(str(info.get("url") or ""))
+        }
         for frame_id, info in all_frames.items():
             if frame_id not in owned_frames:
                 continue
             if not isinstance(info, dict):
                 continue
             target_id = info.get("frameTargetId")
-            if not target_id or str(target_id) in seen_cdp_targets:
+            if not target_id or str(target_id) in seen_cdp_targets or str(target_id) in realm_targets:
                 continue
             seen_cdp_targets.add(str(target_id))
             try:
@@ -4188,34 +4347,12 @@ async def _execute_input_text(
     )
 
 
-async def _execute_goto(
-    *,
-    session: Any,
-    dom_service: DOMService,
-    action_history: ActionHistory,
-    params: Dict,
-    thinking: Any,
-    session_id: Optional[str],
-    config: Any,
-    current_auth_realm: str = "",
-    prepare_credentials_for_url: Optional[Callable[[str], Awaitable[Optional[Dict[str, Any]]]]] = None,
-    wait_for_navigation: Optional[Callable[..., Awaitable[None]]] = None,
-    browser_network_recorder: Optional[Any] = None,
-    provider: Optional[str] = None,
-    user_id: str = "",
-) -> Dict[str, Any]:
-    """Prepare a target realm's credentials, then execute navigation.
-
-    ``provider`` and ``user_id`` select the download's persistence path: the
-    session's own provider (never the ambient BROWSER_PROVIDER default) decides
-    between the session files API and Tilion's durable attachment copy.
-    """
-    from browser_use.browser.events import NavigateToUrlEvent
-
-    original_url = params.get("url", "")
-    url = _normalize_goto_url(original_url) or ""
-    if url != original_url:
-        logger.info(f"\U0001f517 Auto-added https:// to URL: {url}")
+async def _prepare_navigation_credentials(
+    url: str,
+    current_auth_realm: str,
+    prepare_credentials_for_url: Optional[Callable[[str], Awaitable[Optional[Dict[str, Any]]]]],
+) -> Optional[Dict[str, Any]]:
+    """Prepare the requested realm before either same-tab or new-tab navigation."""
     credential_summary = None
     target_auth_realm = auth_realm_from_url(url)
     if (
@@ -4251,6 +4388,44 @@ async def _execute_goto(
                 if key in prepared
             }
 
+    return credential_summary
+
+
+async def _execute_goto(
+    *,
+    session: Any,
+    dom_service: DOMService,
+    action_history: ActionHistory,
+    params: Dict,
+    thinking: Any,
+    session_id: Optional[str],
+    config: Any,
+    current_auth_realm: str = "",
+    prepare_credentials_for_url: Optional[Callable[[str], Awaitable[Optional[Dict[str, Any]]]]] = None,
+    wait_for_navigation: Optional[Callable[..., Awaitable[None]]] = None,
+    browser_network_recorder: Optional[Any] = None,
+    navigation_admission: Optional[Callable[..., Awaitable[Optional[str]]]] = None,
+    provider: Optional[str] = None,
+    user_id: str = "",
+) -> Dict[str, Any]:
+    """Prepare credentials/admission before navigation; persist downloads for this session's provider/user."""
+    from browser_use.browser.events import NavigateToUrlEvent
+
+    original_url = params.get("url", "")
+    url = _normalize_goto_url(original_url) or ""
+    if url != original_url:
+        logger.info(f"\U0001f517 Auto-added https:// to URL: {url}")
+    credential_summary = await _prepare_navigation_credentials(
+        url, current_auth_realm, prepare_credentials_for_url,
+    )
+
+    if navigation_admission is not None:
+        error = await navigation_admission(url, None)
+        if error:
+            result = {"success": False, "error": error}
+            await action_history.record_action(dom_service=dom_service, action="goto", thinking=thinking,
+                                              params={"url": url}, result=result)
+            return result
     network_clock = getattr(browser_network_recorder, "network_clock_ms", None)
     navigation_started_ms = network_clock() if callable(network_clock) else None
     try:
@@ -4330,7 +4505,7 @@ async def _execute_goto(
         # internally. Only its deliberately non-sensitive summary may enter
         # action history or the model-visible tool result.
         result["credentials_prepared"] = credential_summary
-        result["auth_realm"] = str(credential_summary.get("auth_realm") or target_auth_realm)
+        result["auth_realm"] = str(credential_summary.get("auth_realm") or auth_realm_from_url(url))
     await action_history.record_action(
         dom_service=dom_service,
         action="goto",
@@ -4434,6 +4609,7 @@ async def _execute_switch_tab(
     action_history: ActionHistory,
     params: Dict,
     thinking: Any,
+    navigation_admission: Optional[Callable[..., Awaitable[Optional[str]]]] = None,
 ) -> Dict[str, Any]:
     """Execute a tab switch action."""
     from browser_use.browser.events import SwitchTabEvent
@@ -4448,8 +4624,18 @@ async def _execute_switch_tab(
         available_tabs = [f"{t.target_id[-4:]} ({t.title or t.url})" for t in tabs]
         return {"success": False, "error": f"Tab '{tab_id}' not found. Available: {available_tabs}"}
 
+    if navigation_admission is not None:
+        error = await navigation_admission(target.url, target.target_id)
+        if error:
+            result = {"success": False, "error": error}
+            await action_history.record_action(dom_service=dom_service, action="switch_tab", thinking=thinking,
+                                              params={"tab_id": tab_id}, result=result)
+            return result
     event = session.event_bus.dispatch(SwitchTabEvent(target_id=target.target_id))
     await event
+    switched_target = await event.event_result(raise_if_any=True, raise_if_none=True)
+    if switched_target != target.target_id:
+        raise RuntimeError("Tab switch did not acknowledge the requested target")
 
     await action_history.record_action(
         dom_service=dom_service,
@@ -4513,12 +4699,6 @@ async def _execute_screenshot(
     config: Any,
 ) -> Dict[str, Any]:
     """Execute a screenshot action using the active provider's browser-window capture."""
-    if getattr(dom_service, "secret_values_used", False) is True:
-        return {
-            "success": False,
-            "error": "Screenshot withheld because this browser contains private credentials. Use read_browser_state or evaluate for redacted page details.",
-        }
-
     from domains.spawn_browser_agent_v3.repo import (
         take_browser_computer_screenshot,
         upload_file_to_session,
@@ -4526,6 +4706,15 @@ async def _execute_screenshot(
 
     if not session_id:
         raise RuntimeError("Browser session id is required for screenshot capture")
+
+    capture_started_at = time_module.time()
+    capture_identity = None
+    describe_identity = getattr(dom_service, "get_parked_page_identity", None)
+    if callable(describe_identity):
+        try:
+            capture_identity = describe_identity()
+        except RuntimeError:
+            pass  # An unavailable identity does not block capture.
 
     single_cdp_client = getattr(dom_service, "single_cdp_client", False) is True
     if single_cdp_client:
@@ -4566,13 +4755,28 @@ async def _execute_screenshot(
         action="screenshot",
         thinking=thinking,
         params={},
-        result={"success": True, "file_path": saved_path or "screenshot.png"},
+        result={"success": True, "file_path": saved_path or "screenshot.png",
+                "screenshot_context": {"captured_at": capture_started_at,
+                    "url": (capture_identity or {}).get("url") or getattr(dom_service, "_runtime_current_url", ""),
+                    "target_id": (capture_identity or {}).get("target_id")}},
     )
+    capture_evidence = getattr(action_history, "capture_screenshot_evidence", None)
+    if callable(capture_evidence):
+        after_identity = None
+        if callable(describe_identity):
+            try:
+                after_identity = describe_identity()
+            except RuntimeError:
+                pass
+        capture_evidence(dom_service, session_id, screenshot_b64, capture_identity, after_identity)
 
     return {
         "success": True,
         "message": f"Screenshot captured from browser viewport ({len(screenshot_bytes)} bytes)",
         "screenshot": screenshot_b64,
+        "screenshot_context": {"captured_at": capture_started_at,
+            "url": (capture_identity or {}).get("url") or getattr(dom_service, "_runtime_current_url", ""),
+            "target_id": (capture_identity or {}).get("target_id")},
         "file_path": saved_path or "screenshot.png",
     }
 

@@ -83,6 +83,121 @@ Sections: Clocks · Agent rows · Placement · Freshness · Fields · Work versu
 - For a blocking provider or resource limit, name the exact limit, observed usage, numeric cap when actually known (app usage versus organization-wide quota) and the concrete action the owner or user can take.
 - Justify capacity from measured workload and reuse evidence; a symbolic planner maximum never justifies a quota increase, and owned idle resources and supported reuse are reconciled before recommending one.
 
+For `/descend` cards (`--iterations N`, including zero), the following overrides
+the generic three-row and launch-rate presentation: show up to the last **10**
+actual selected experiments, newest first. Put **Iterations/Hour** prominently
+at the top, using 3600 / the latest consecutive completed finish interval.
+A currently running #8 uses #6 → #7; after #8 ends use #7 → #8. Include all work
+between finishes. Missing, invalid, reversed or nonpositive endpoints are
+UNMEASURED; do not bridge an intervening missing finish. Every finished row has
+**T-<age> since finish**, calculated from NOW and its immutable producer finish.
+Running rows use **T-RUNNING**; missing or future finish clocks use
+**T-UNRECORDED**. Live client updates may change age text only, never the finish.
+Generic experiments/day may remain secondary. Explicit history IDs, original
+sources, verdicts, costs and lifecycle remain unchanged; do not pad to ten.
+The existing >3 iteration success-graph threshold is unchanged.
+
+### Descent speed change (user clarification)
+
+Every scorecard build recomputes the running headline from its actual `generated_at`:
+`LIVE ≤<3600 / (generated_at - latest consecutive producer finish)> iter/h`.
+This is a provisional upper bound for one future completion, not an added
+completed iteration. Include inter-experiment work and current running time.
+Show the last measured completed finish-to-finish rate separately; a terminal
+current experiment uses that measured rate as its headline. Missing, invalid,
+future, nonpositive or nonconsecutive clocks remain UNMEASURED; never bridge a
+gap, invent a finish or reset producer clocks to a render timestamp.
+The compact headline retains `[avg Δ <signed percent> over last 5 completed runs]`.
+Avg Δ uses five consecutive finished recorded experiments (four finish-to-finish
+speeds), then takes the arithmetic mean of the three successive changes:
+100 * (next_speed / previous_speed - 1). It is neither mean speed nor endpoint
+change. Retain failed/cancelled finishes and all inter-experiment work. For
+completed-rate and Avg Δ calculations only, skip the latest current running
+experiment; never bridge missing/invalid finishes.
+Fewer than five consecutive valid finishes show UNMEASURED with n/5 coverage.
+Positive change is green with +, negative red with -, and stationary is 0.0%.
+Keep the full Iterations/Hour and finish-to-finish definition in a secondary
+line/title; the last ten rows and T- clocks are unchanged.
+
+### All /descend scorecards: full-suite outcomes and measured telemetry
+
+For every descent, render one segmented donut (cake) for the entire persisted
+selected task order, using X individual run slots per task: N selected tasks
+multiply by X gives the denominator (200 × 2 = 400 slots). Green means that
+individual scored run passed; red means that individual scored run failed.
+Gray means no scored result in an explicitly unfilled slot; unscored infra or
+cancelled attempts may exist. Amber means missing, invalid or unknown receipt/history. One PASS plus one
+FAIL contributes one green and one red slot, never a single task-level color.
+Missing task rows are unknown, never assumed unrun. Label these historical
+outcomes; keep X/X task qualification and final-source acceptance separate.
+
+Use a stacked-area global timeline at original experiment finish clocks.
+Its green PASS, red FAIL, gray no-scored-result and amber unknown layers each
+use the full N × X slot denominator. Put visible PASS% and FAIL% labels beside
+every valid recorded point; never use the scored-only KPI denominator here.
+Missing snapshots are gaps in every layer; do not interpolate across them,
+substitute slice percentages or invent earlier history. Preserve the existing greater-than-three-iterations
+threshold and last-ten experiment rows. Remove current-slice outcome bars and
+the lifecycle display section for descents; underlying lifecycle, custody,
+release checks and unresolved issues remain intact. Generic benchmark displays
+retain their existing contract.
+
+Color the descent pass KPI green only above95%, yellow above80%, red otherwise.
+Color infra green only below5%, red at or above5%; unknown is amber/unmeasured.
+Pass uses scored PASS+FAIL as its denominator; infra uses original scheduled jobs.
+Never turn unknown/infra outcomes into a scored PASS or FAIL.
+
+Supply full-scope inputs explicitly:
+`--iterations N --global-acceptance acceptance_ledger.json --selected-tasks selected_tasks.json --selected-tasks-sha256 <raw-file-SHA256> --global-runs X --global-history global_history.json`.
+The selection uses `descend-selected-tasks-v1` ordered `rows[].name`; acceptance
+uses `descend-rolling-acceptance-v1`, matching `task_count` and `k`, unique task
+identities and `last_scored` receipts (legacy `last_two_known_scored` is accepted
+only for X=2). Each scored receipt must carry its original campaign/job/run,
+verdict, source commit, evidence SHA256 and terminal clock. History uses
+`descend-global-history-v1`, matching selection hash/count/k and ordered
+`snapshots[{experiment_id, finished_at, acceptance_ledger}]`; null ledgers are
+gaps. Inputs are read-only and mismatched scope is refused.
+
+Optional `--telemetry telemetry.json --telemetry-membership membership.json --telemetry-sources original-source-packet/ --telemetry-receipt telemetry-receipt.json --telemetry-receipt-sha256 <custodian-receipt-SHA256>` uses `descend-scorecard-telemetry-v1`,
+matching `experiment_id`, `scheduled_jobs`, `covered_run_count`, unique
+`cost_rows[{job_id, cost_cents, run_json_sha256}]` and unique
+`latency_rows[{agent_id, request_id, ttft_seconds, total_seconds, source_sha256}]`.
+Durations come from matched native start/productive-chunk/completion observations;
+null means missing. Show quantiles with sample/run coverage. Cost is user-metered
+agent LLM cost, summed once per original job; it is not total provider expense.
+Azure/provider spend, infra and grounding stay UNMETERED without billing evidence.
+A partial job-cost input cannot replace a full experiment aggregate. Never infer
+latency from a timeout, configuration budget, canary, or unrelated run.
+
+Telemetry membership uses `descend-scorecard-membership-v1` with original
+experiment/job/task/fleet/root identities, raw run SHA256 and allowed source
+log SHA256 entries. The consumer joins every job to canonical result rows and
+checks the original export manifest, campaign summary, and native-log index
+bytes under each shard directory. Numeric charges must match canonical job
+costs. Native root identity must match the canonical agent and log index; no
+child identity is inferred. Missing-agent records may supply no numeric timing.
+The original source packet stays local; missing custody refuses telemetry.
+First-productive-chunk and total-request p50 use the median; p95 uses nearest
+rank, with separate sample coverage. Cake segments are grouped by outcome for
+readability; each retains its original selected-task ordinal and tooltip.
+
+Native timing values require a one-time offline producer replay with
+`scripts/cloudbench_telemetry.py --membership membership.json --source-root 00=<original-export-root> --output telemetry.json --receipt telemetry-receipt.json --replay-owner <artifact-custodian>`.
+Repeat `--source-root` for every recorded shard. The producer verifies full
+manifest and original run file hashes, extracts only embedded native events,
+joins root/request identities, subtracts original UTC timestamps and leaves
+missing or conflicting boundaries null. Selected excerpts alone are not full
+source proof. Its receipt binds input manifests/run hashes, producer code,
+output bytes, custodian and replay time. Obtain the receipt hash from that
+original replay custody handoff; never bless edited telemetry by recomputing
+a receipt in the renderer. Rendering checks the pinned receipt and costs
+without rereading large original run files every refresh. Captured embedded
+logs can be incomplete; timing coverage is per observed request, not all calls.
+
+For all /descend scorecards, publish the interactive HTML embedding only. Do
+not send, attach, or display raster images/screenshots. Private DOM inspection
+for counts, layout and overflow is permitted; do not emit screenshot output.
+
 ## Deploy scorecard: deploy-summary-v2
 
 - Every deploy progress and final report populates `.claude/shared/deploy-scorecard-template.html` (`deploy-summary-v2`), keeping the CSS and layout of the user-approved visual https://boxes.dev/visuals/vis_1997f1fd05813cc9be440f44d5700ffe, in this order:

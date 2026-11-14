@@ -630,7 +630,7 @@ def committed_dependency_fingerprints(root, ref):
 
 def warm_proof_paths(root, runner):
     common = git_common_dir(root)
-    proof = common / ('cloudbench-warm-deps.' + runner['WARM_MACHINE_NAME'] + '.fp')
+    proof = common / Path(runner['WARM_DEPS_RELATIVE']).name
     return proof, proof.with_name(proof.name + '.ref')
 
 
@@ -755,6 +755,30 @@ def counted_fly(fly):
     return Counted()
 
 
+def select_warm_donor(runner, machines, api, selection):
+    """Resolve the ordinary fleet producer's named donor from this native inventory."""
+    name, volume_name, region = selection
+    for value, pattern in ((name, r'[a-z0-9-]+'), (volume_name, r'[a-z0-9_]+'), (region, r'[a-z0-9]+')):
+        if not isinstance(value, str) or not re.fullmatch(pattern, value):
+            raise ValueError('invalid selected warm donor')
+    matches = [m for m in machines if isinstance(m, dict) and m.get('name') == name and m.get('region') == region]
+    if len(matches) != 1:
+        raise ValueError('selected warm donor missing or ambiguous')
+    donor = matches[0]
+    mounts = (donor.get('config') or {}).get('mounts') or []
+    if len(mounts) != 1 or not re.fullmatch(r'vol_[A-Za-z0-9]+', str(mounts[0].get('volume', ''))):
+        raise ValueError('selected warm donor requires one native volume')
+    volume_id = mounts[0]['volume']
+    volume = api.api('GET', '/volumes/' + volume_id, timeout=20)
+    if (volume.get('id'), volume.get('name'), volume.get('region'), volume.get('attached_machine_id')) != (volume_id, volume_name, region, donor.get('id')):
+        raise ValueError('selected donor volume identity differs')
+    binding = runner['donor_binding'](dict(machine_id=donor['id'], machine_name=name, volume_id=volume_id,
+                                        volume_name=volume_name, region=region, image_ref=(donor.get('config') or {}).get('image')))
+    runner.update(WARM_MACHINE_ID=binding['machine_id'], WARM_MACHINE_NAME=name, WARM_VOLUME_NAME=volume_name, WARM_REGION=region)
+    runner['WARM_DEPS_RELATIVE'], runner['WARM_INVENTORY_RELATIVE'] = runner['donor_metadata_paths'](binding)
+    return binding
+
+
 def discover_inputs(args, root, runner, token, run, fly=None):
     """Resolve facts, warm proof and snapshot inventory without private hand-made files.
 
@@ -762,15 +786,18 @@ def discover_inputs(args, root, runner, token, run, fly=None):
     through the normal producer when needed, then writes the discovered inputs privately."""
     fly = counted_fly(fly or runpy.run_path(str(root / 'scripts/cloudbench-original-volume-capture.py'))['Fly'])
     ref = bound_task_ref(args, runner)
-    decision = warm_decision(root, runner, ref)
-    report = dict(action=decision['action'], reasons=list(decision['reasons']), proof=decision['proof_path'],
-                  refresh_command=decision['refresh_command'], fingerprints=decision['fingerprints'])
     def native():
         with runner['bounded'](110):
             machines = fly(runner['APP'], token).api('GET', '/machines', timeout=60)
+        binding = None
+        if getattr(args, 'warm_donor_selection', None) is not None:
+            binding = select_warm_donor(runner, machines, fly(runner['APP'], token), args.warm_donor_selection)
         donor = next((m for m in machines if isinstance(m, dict) and m.get('id') == runner['WARM_MACHINE_ID']), None) \
             if isinstance(machines, list) else None
-        return derived_facts(machines, donor, runner)
+        facts = derived_facts(machines, donor, runner)
+        if binding is not None:
+            facts['warm_donor'] = binding
+        return facts
 
     def preflight(facts):
         warm = warm_snapshot_preflight(fly, token, runner, decision['proof_raw'], None,
@@ -780,6 +807,20 @@ def discover_inputs(args, root, runner, token, run, fly=None):
         return warm
 
     facts = native()
+    selected_binding = facts.get('warm_donor')
+    decision = warm_decision(root, runner, ref)
+    report = dict(action=decision['action'], reasons=list(decision['reasons']), proof=decision['proof_path'],
+                  refresh_command=decision['refresh_command'], fingerprints=decision['fingerprints'])
+    image_receipt = image_build_receipt_input(args, runner)
+    if selected_binding is not None and image_receipt is not None:
+        check = subprocess.run(['bash', '-c', 'source "$1"; shift; cloudbench_verify_image_dependency_receipt "$@"',
+                                'image-admission', str(root/'scripts/lib/cloudbench-env.sh'), image_receipt['path'],
+                                image_receipt['sha256'], selected_binding['machine_id'],
+                                decision['fingerprints']['node'], decision['fingerprints']['python']],
+                               input=json.dumps([dict(id=selected_binding['machine_id'], config=dict(image=selected_binding['image_ref']))]),
+                               text=True, capture_output=True, timeout=20)
+        if check.returncode:
+            raise ValueError(check.stderr.strip() or 'selected donor image receipt refused')
     warm = None
     if decision['action'] == 'reuse':
         try:
@@ -805,6 +846,8 @@ def discover_inputs(args, root, runner, token, run, fly=None):
         if decision['action'] != 'reuse':
             raise ValueError('the producer did not prove a snapshot for ' + ref + ': ' + '; '.join(decision['reasons']))
         facts = native()
+        if facts.get('warm_donor') != selected_binding:
+            raise ValueError('selected donor identity changed during refresh')
         warm = preflight(facts)  # a fresh snapshot that still fails is a hard error, not another refresh
         report.update(refreshed=True, refreshed_snapshot=warm['snapshot_id'])
     inventory, donor = warm.pop('inventory'), warm.pop('donor_machine')
@@ -899,12 +942,35 @@ def capacity_from_snapshot(proof, directory, reuse_runs, harness_ref, excluded,
     return proof
 
 
+def image_build_receipt_input(args, runner):
+    """Bind the explicit image proof; never forward its host-local path to a shard."""
+    path = getattr(args, 'image_build_receipt', None)
+    checksum = getattr(args, 'image_build_receipt_sha256', None)
+    if path is None and checksum is None:
+        return None
+    if path is None or not isinstance(checksum, str) or not re.fullmatch('[0-9a-f]{64}', checksum):
+        raise ValueError('image-build receipt path and SHA256 must be supplied together')
+    path = Path(path)
+    if not path.is_absolute():
+        raise ValueError('image-build receipt requires an absolute private path')
+    raw = runner['read'](path)
+    if digest(raw) != checksum:
+        raise ValueError('image-build receipt checksum differs')
+    value = json.loads(raw)
+    if not isinstance(value, dict) or value.get('schema') != 'cloudbench-image-build-v1':
+        raise ValueError('image-build receipt schema required')
+    return dict(path=str(path), sha256=checksum)
+
+
 def admission_binding(args, runner):
     names=('facts','agents_env','backend_env','tasks','snapshot_inventory','warm_deps')
     binding = dict(source_ref=args.source_ref, org=args.org, extra=args.extra_destroying_count,
                 inputs={name:dict(path=str(getattr(args,name)),sha256=digest(runner['read'](getattr(args,name)))) for name in names},
                 archive_runs=[str(path.absolute()) for path in (args.archive_run or [])],
                 excluded_machines=sorted(set(args.reuse_exclude_machine)))
+    image_receipt = image_build_receipt_input(args, runner)
+    if image_receipt is not None:
+        binding['inputs']['image_build_receipt'] = image_receipt
     policy = getattr(args, 'infra_early_stop', 'enabled')
     if policy not in ('enabled', 'disabled'):
         raise ValueError('invalid infrastructure early-stop policy')
@@ -1057,6 +1123,13 @@ def prepare(args, root, pins, runner, directory, cap, started_at=None, host_oper
         raise ValueError('capacity proof expired or insufficient')
     read, save = runner['read'], runner['save']
     facts = facts_from(read(args.facts))
+    if facts.get('warm_donor') is not None:
+        binding = runner['donor_binding'](facts['warm_donor'])
+        if (facts['image_ref'] != binding['image_ref'] or binding['machine_id'] not in facts['protected_machines']
+                or binding['volume_id'] not in facts['protected_volumes']):
+            raise ValueError('selected donor differs from launch facts')
+        runner = dict(runner)
+        runner['WARM_DEPS_RELATIVE'], runner['WARM_INVENTORY_RELATIVE'] = runner['donor_metadata_paths'](binding)
     tasks = json.loads(read(args.tasks))
     stamp = time.time() if started_at is None else started_at
     # A shard (and its retry) is bounded by its own e2e, as the runner's new-attempt clock is.
@@ -1087,6 +1160,14 @@ def prepare(args, root, pins, runner, directory, cap, started_at=None, host_oper
     for path, relative in [(args.snapshot_inventory, runner['WARM_INVENTORY_RELATIVE']),
                            (args.warm_deps, runner['WARM_DEPS_RELATIVE'])]:
         files.append(dict(source_path=str(path), relative_path=relative, sha256=digest(read(path))))
+    image_env = {}
+    image_receipt = image_build_receipt_input(args, runner)
+    if image_receipt is not None:
+        relative = runner['IMAGE_BUILD_RECEIPT_RELATIVE']
+        files.append(dict(source_path=image_receipt['path'], relative_path=relative,
+                          sha256=image_receipt['sha256']))
+        image_env = dict(CLOUDBENCH_IMAGE_BUILD_RECEIPT='/tmp/gate/repo/' + relative,
+                         CLOUDBENCH_IMAGE_BUILD_RECEIPT_SHA256=image_receipt['sha256'])
     reuse_env = {}
     if cap.get('qualified_reuse_count'):
         reuse_path=directory/'archived-reuse-request.private.json';reuse_raw=read(reuse_path);reuse_sha=digest(reuse_raw)
@@ -1111,9 +1192,11 @@ def prepare(args, root, pins, runner, directory, cap, started_at=None, host_oper
                   source_ref=args.source_ref, source_files=pins, tasks_path=str(args.tasks),
                   started_at_epoch=stamp, authority_template=str(directory/'authority-template.private.json'),
                   remote_files=files, remote_env=dict(CLOUDBENCH_CLONE_MAX_ATTEMPTS='5', PYTHONDONTWRITEBYTECODE='1', **reuse_env, **(runtime_env or {}),
-                                  **guest_namespace_env),
+                                  **guest_namespace_env, **image_env),
                   gate_env=dict(CLOUDBENCH_APP=facts['app'], CLOUDBENCH_REGION='iad', WARM_IMAGE_REF=facts['image_ref'],
                                 CLOUDBENCH_GATE_TIMEOUT_S=str(runner['gate_watchdog_seconds'](bound_timeouts(args, runner)[1])), PYTHONDONTWRITEBYTECODE='1'))
+    if facts.get('warm_donor') is not None:
+        config['warm_donor'] = runner['donor_binding'](facts['warm_donor'])
     if host_operator_provenance is not None:
         config['host_operator_provenance']=host_operator_provenance
     if guest_env['override']:
@@ -1350,6 +1433,18 @@ def experiment_fields(args, plan):
                 runs=plan['shards'][0]['runs'], scheduled_total=plan['copies'], controllers=plan['controllers'])
 
 
+def wave_denominator(args, copies):
+    """(scheduled_total, prior_infra) for the fixed infra stop: this launch alone, or one bounded wave of a larger run."""
+    total, prior = getattr(args, 'scheduled_total', None), getattr(args, 'prior_infra', 0)
+    if total is None and not prior:
+        return copies, 0
+    if total is None or type(total) is not int or total < copies or type(prior) is not int or prior < 0:
+        raise ValueError('--scheduled-total must cover this wave\'s %d copies and --prior-infra must be >= 0' % copies)
+    if getattr(args, 'infra_early_stop', 'enabled') == 'enabled' and 20 * prior >= total:
+        raise ValueError('earlier waves already reached the 5%% infra threshold (%d/%d); launch nothing' % (prior, total))
+    return total, prior
+
+
 def native_release_audit(root, directory, token):
     """Final read-only native audit of every owned guest/volume/controller identity (never mutates)."""
     capture = runpy.run_path(str(root / 'scripts/cloudbench-original-volume-capture.py'))
@@ -1458,6 +1553,9 @@ def sharded_run(args, root, pins, runner, github, plan, guest_env=None):
     binding['shards'] = dict(controllers=plan['controllers'], copies=plan['copies'],
                              tasks=[s['tasks'] for s in plan['shards']], runs=plan['shards'][0]['runs'],
                              **shard_bindings(args, runner))
+    wave_total, prior_infra = wave_denominator(args, plan['copies'])
+    if (wave_total, prior_infra) != (plan['copies'], 0):
+        binding['shards']['wave'] = dict(scheduled_total=wave_total, prior_infra=prior_infra)
     directory, started_at = open_admission(parent, None, binding, runner, False)
     task_timeout, e2e_timeout = bound_timeouts(args, runner)
     startup_deadline = runner['startup_deadline_epoch'](started_at, task_timeout, e2e_timeout)
@@ -1555,8 +1653,8 @@ def sharded_run(args, root, pins, runner, github, plan, guest_env=None):
         preallocation_abort(ledger, root, directory, runner, fields['goal'], error)
         raise
 
-    record = coordinator['coordinate'](shards, spawn, directory / 'coordination.json', scheduled_total=copies,
-                                       startup_deadline=startup_deadline,
+    record = coordinator['coordinate'](shards, spawn, directory / 'coordination.json', scheduled_total=wave_total,
+                                       prior_infra=prior_infra, startup_deadline=startup_deadline,
                                        infra_early_stop=args.infra_early_stop, respawn=respawn,
                                        stagger_seconds=coordinator['DEFAULT_SPAWN_STAGGER_SECONDS'])
     exports = [scorecard['export_records'](Path(s['out']) / 'export') for s in shards]
@@ -1567,6 +1665,8 @@ def sharded_run(args, root, pins, runner, github, plan, guest_env=None):
                       for row in scorecard['compact_rows'](record['summary'], record['cards'])]
     merged.update(shards_without_summary=[s['index'] for s, v in zip(shards, summaries) if v is None],
                   coordination=record, hub_group=group_id)
+    if 'wave' in binding['shards']:
+        merged['wave'] = binding['shards']['wave']
     merged.update(publish_final_shard_group(root, directory, args, runner, group_id, started_at, group_shards,
                                             summaries, merged, record))
     runner['save'](directory / 'result.json', merged)
@@ -2493,6 +2593,8 @@ def main():
     for name in ['facts', 'snapshot-inventory', 'warm-deps']:
         parser.add_argument('--'+name, type=Path)
     parser.add_argument('--task-ref', help='pushed guest task source commit (default: the historical original600 pin)')
+    parser.add_argument('--image-build-receipt', type=Path, default=os.environ.get('CLOUDBENCH_IMAGE_BUILD_RECEIPT') or None, help='verified private image-build receipt to stage on every controller (default: CLOUDBENCH_IMAGE_BUILD_RECEIPT)')
+    parser.add_argument('--image-build-receipt-sha256', default=os.environ.get('CLOUDBENCH_IMAGE_BUILD_RECEIPT_SHA256') or None, help='exact receipt byte SHA256 (default: CLOUDBENCH_IMAGE_BUILD_RECEIPT_SHA256)')
     parser.add_argument('--archive-run', action='append', type=Path, help='Verified predecessor run directory; preserve IDs/volume using a clean task generation before fresh creation')
     parser.add_argument('--unused-reservation-run', action='append', default=[], type=Path, help='Closed admission whose fully archived, never-assigned reservations may pass to this new cohort')
     parser.add_argument('--parked-reservation-run', action='append', default=[], type=Path, help='Closed admission: validate untouched and positively proven parked claims for a new cohort')
@@ -2518,9 +2620,16 @@ def main():
     parser.add_argument('--hub-python', type=Path, help='interpreter with the agents dependencies (httpx) for Hub group publication')
     parser.add_argument('--goal', help='experiments-ledger goal for numbering and experiments/day (default original600)')
     parser.add_argument('--label', help='operator slice label for the scorecard (default: tasks file name)')
+    parser.add_argument('--scheduled-total', type=int,
+                        help='bounded wave of a larger run: that run\'s original scheduled copies, the fixed 5%% infra denominator (default: this launch\'s copies)')
+    parser.add_argument('--prior-infra', type=int, default=0,
+                        help='bounded wave: confirmed infrastructure-failed jobs of its earlier waves (default 0)')
     parser.add_argument('--catalog-eligibility', choices=sorted(CATALOG_ELIGIBILITY), default='live',
                         help="'live' (default): LIVE acceptance refuses zero-spend/DEMO-replay tasks; "
                              "'ordinary': a user-requested wide run admits every cloud-runnable ready task, as the ordinary fleet does")
+    parser.add_argument('--warm-machine-name', help='ordinary fleet donor name (default CLOUDBENCH_WARM_MACHINE_NAME or cloudbench-warm)')
+    parser.add_argument('--warm-volume-name', help='ordinary fleet donor volume (default CLOUDBENCH_WARM_VOLUME_NAME or cloudbench_data)')
+    parser.add_argument('--warm-region', help='ordinary fleet donor region (default CLOUDBENCH_REGION or iad)')
     args = parser.parse_args()
     if args.controllers != 'auto' and not re.fullmatch('[1-9][0-9]{0,2}', args.controllers):
         raise ValueError("--controllers must be 'auto' or a positive integer")
@@ -2529,6 +2638,7 @@ def main():
     pins = source(root, args.source_ref)
     runner = runpy.run_path(str(root/'scripts/cloudbench-original600-runner.py'))
     runner['validate_source_members'](root, args.source_ref, pins)
+    image_receipt = image_build_receipt_input(args, runner)  # validate before any provider read
     preflight = runpy.run_path(str(root/'scripts/cloudbench-operator-preflight.py'))
     explicit = [name for name in ('facts', 'snapshot_inventory', 'warm_deps') if getattr(args, name) is not None]
     if explicit and len(explicit) != 3:
@@ -2539,6 +2649,13 @@ def main():
             raise ValueError('--task-ref must be a full 40-hex commit')
         if args.task_ref == runner['TASK_REF']:
             args.task_ref = None  # the historical pin is encoded by absence
+    requested_donor = (args.warm_machine_name, args.warm_volume_name, args.warm_region)
+    if any(requested_donor) and (not discover or args.task_ref is None):
+        raise ValueError('donor selection requires discovered ordinary task-ref inputs')
+    if discover and args.task_ref is not None:
+        args.warm_donor_selection = (args.warm_machine_name or os.environ.get('CLOUDBENCH_WARM_MACHINE_NAME', 'cloudbench-warm'),
+                                     args.warm_volume_name or os.environ.get('CLOUDBENCH_WARM_VOLUME_NAME', 'cloudbench_data'),
+                                     args.warm_region or os.environ.get('CLOUDBENCH_REGION', 'iad'))
     if discover and bound_task_ref(args, runner) != args.source_ref:
         raise ValueError('discovered inputs bind the warm snapshot to this checkout: --task-ref must equal --source-ref')
     for name in ['agents_env', 'backend_env', 'tasks'] + ([] if discover else ['facts', 'snapshot_inventory', 'warm_deps']):
@@ -2566,6 +2683,10 @@ def main():
     # refuse a width above the provider rate-limit cap before any credential,
     # Fly CLI or provider read.
     copies = simultaneous_copies(args, runner)
+    if args.scheduled_total is not None or args.prior_infra:
+        if args.archive_run or recovery or args.resume_bound_launch or args.resume_admission or manifest['original']:
+            raise ValueError('--scheduled-total/--prior-infra bind one fresh bounded wave of a non-original manifest only')
+        wave_denominator(args, copies)
     capacity = runpy.run_path(str(root/'scripts/cloudbench-provider-capacity.py'))
     # Provider-scoped limits (the Tilion pilot) bind only fleets on that provider;
     # the selected backend env names it. A missing or unknown value binds all rows:
@@ -2649,6 +2770,11 @@ def main():
             # --check never refreshes: it reports the path --run takes (reuse or refresh) and why.
             check['input_discovery'] = {k: v for k, v in discovery.items() if k not in ('warm_snapshot', 'provider_calls')}
         check.update(manifest=manifest)
+        if image_receipt is not None:
+            check['image_build_receipt'] = image_receipt
+        if args.scheduled_total is not None or args.prior_infra:
+            wave_total, prior_infra = wave_denominator(args, simultaneous_copies(args, runner))
+            check.update(wave=dict(scheduled_total=wave_total, prior_infra=prior_infra))
         plan = None if (args.archive_run or args.resume_admission) else shard_selection(args, runner)
         if plan is not None:
             first = bound_shard(plan['shards'][0], args, runner, 'original600-check', plan['copies'], time.time())

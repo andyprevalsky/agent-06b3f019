@@ -1,0 +1,9 @@
+{
+  "all_restored_members_verified": true,
+  "restored_file_count": 2,
+  "backend_configuration_bytes": 20873,
+  "source_unchanged_after_restore": true,
+  "archive_ciphertext_sha256": "1366a442c99e69ae221fe4292401f2131ddefa116417115a10c9c626fd622f40",
+  "manifest_sha256": "1d130f59b3e8eddf3e88bf7051eff14723e4527e35afeceff3972ed14b2c1038",
+  "private_manifest_sha256": "66426630edc2ac767fa4676f1c9e9c12608431148749dd7dc120a342569ee5be"
+}
