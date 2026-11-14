@@ -2209,9 +2209,11 @@ class _LivePageDomService:
     browser being driven and is recorded in ``touched``.
     """
 
-    def __init__(self, live_url: str, targets: dict, selector_map: dict) -> None:
+    def __init__(self, live_url: str, targets: dict, selector_map: dict, pending_url: str = "") -> None:
         self.touched: list[str] = []
         self.live_url = live_url
+        # Chrome's target list names a pending browser-initiated navigation's URL.
+        self.pending_url = pending_url
         self.selector_map = selector_map
         self._targets = targets
         self.session = _RecordingBrowserSession(self.touched, targets)
@@ -2221,7 +2223,7 @@ class _LivePageDomService:
 
     async def live_frame_targets(self) -> dict:
         """Chrome's own target list (Target.getTargets): the live URLs."""
-        return {tid: {"type": t.target_type, "url": self.live_url if tid == "main" else t.url}
+        return {tid: {"type": t.target_type, "url": (self.pending_url or self.live_url) if tid == "main" else t.url}
                 for tid, t in self._targets.items()}
 
     async def ensure_browser_overlays_suppressed(self) -> None:
@@ -2273,6 +2275,14 @@ async def test_phone_provider_boundary_rechecks_the_live_page_and_target_frame_a
         result = await run(dom, action)
         assert result.get("code") == "phone_provider_account_boundary", (action, result)
         assert result.get("success") is False, result
+        assert set(dom.touched) <= _DRIVEN, (action, dom.touched)
+
+    # 1b) A slow goto away from the realm: Chrome already reports the pending URL while
+    # the phone-harness document is still the one on screen (second review of #2060).
+    for action in ({"action": "click", "index": 7, "params": {}}, {"action": "press_key", "params": {"key": "Enter"}}):
+        dom = _LivePageDomService(device, redirected, {7: main_button}, pending_url="https://hang.example.org/x")
+        result = await run(dom, action)
+        assert result.get("code") == "phone_provider_account_boundary", (action, result)
         assert set(dom.touched) <= _DRIVEN, (action, dom.touched)
 
     # 2) A cross-origin phone-harness iframe inside an ordinary page.
@@ -2386,10 +2396,11 @@ async def test_phone_provider_boundary_sees_real_chrome_out_of_process_realm_fra
     freshly attached out-of-process iframe. The boundary must read Chrome's own target list,
     so a tiny phone-harness iframe the DOM snapshot omits still blocks acting on the page,
     while an ordinary cross-site iframe does not. Hosts resolve to a local server only."""
-    import asyncio
+    import importlib.util
     import socket
     import threading
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    from pathlib import Path
     from urllib.request import urlopen
 
     from browser_tools.dom_service import DOMService
@@ -2413,6 +2424,12 @@ async def test_phone_provider_boundary_sees_real_chrome_out_of_process_realm_fra
         def log_message(self, *args):
             return None
 
+    # The repo's canonical condition wait (scripts/lib/condition_wait.py; stdlib only).
+    spec = importlib.util.spec_from_file_location(
+        "condition_wait", Path(__file__).resolve().parents[3] / "scripts" / "lib" / "condition_wait.py")
+    condition_wait = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(condition_wait)
+
     server = ThreadingHTTPServer(("127.0.0.1", 0), Pages)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     port = server.server_address[1]
@@ -2435,13 +2452,13 @@ async def test_phone_provider_boundary_sees_real_chrome_out_of_process_realm_fra
 
                 async def load(path: str, frame_host: str) -> None:
                     await page.goto(f"http://shop.example.com:{port}{path}")
-                    for _ in range(100):  # Chrome itself reports the frame's out-of-process target
+
+                    async def frame_attached() -> bool:  # Chrome itself reports the frame's out-of-process target
                         targets = (await oracle.send("Target.getTargets"))["targetInfos"]
-                        if any(t["type"] == "iframe" and frame_host in t["url"] for t in targets):
-                            break
-                        await asyncio.sleep(0.1)
-                    else:
-                        raise AssertionError(f"no out-of-process {frame_host} frame: {targets}")
+                        return any(t["type"] == "iframe" and frame_host in t["url"] for t in targets)
+
+                    await condition_wait.async_wait_until(
+                        frame_attached, timeout=30.0, description=f"out-of-process {frame_host} frame")
                     await dom.get_browser_state(include_screenshot=False)
 
                 await load("/realm", "accounts.phone-harness.com")

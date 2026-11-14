@@ -111,7 +111,11 @@ All in `agents/domains/spawn_browser_agent_v3/service_actions.py`:
     bounded at 5 s). The live focused page is found by the target ID from
     `get_parked_page_identity()`. Either call raises, and so fails closed,
     when no live page or target list can be read.
-  - It deliberately ignores browser-use's own target registry. In real
+  - The page counts as in the realm if either Chrome's live URL or the
+    registry's focused URL is in it. During a slow `goto`, Chrome already
+    reports the pending URL while the realm document is still on screen
+    (second independent review).
+  - It deliberately ignores browser-use's own target registry for frames. In real
     Chromium, an out-of-process iframe attaches before its navigation
     commits, so the attach event carries `url ''`. browser-use's duplicate
     attach handler then overwrites the URL that `targetInfoChanged` had
@@ -172,6 +176,21 @@ Residual risk (reviewer-confirmed):
   data could still map differently.
 - Interactions now fail closed ("Focused browser target is unavailable") in
   the moments browser-use has no registered focused target.
+- `live_frame_targets` sends on browser-use's root connection without waiting
+  for a reconnect. If the socket drops between the step's page read and the
+  action, the interaction fails, or after 5 s is treated as a CDP stall and
+  recovered. Each interaction on a remote provider also pays one more
+  browser round trip.
+- Site isolation is decided by the provider's Chrome flags. If a provider
+  runs `--disable-site-isolation-trials`, a cross-site realm iframe has no
+  target and is seen only through the snapshot's `src`. That is still open
+  for Steel, Kernel and Tilion.
+- A realm frame in any tab blocks every tab, and the refusal names the
+  focused tab's URL, not the frame's. Naming the frame would change
+  LLM-visible text, which needs the approval gate. Follow-up.
+- The real-Chromium regression's failure on `9a4da63ac7` depends on the
+  Chrome build. On Playwright's headless shell the registry sometimes held
+  the right URL. It always guards the new behavior.
 
 Independent review (fresh sub-agent, RCA step 7): it reached the same first
 bad boundaries independently. It then found UTS-46 forms, IFRAME-element

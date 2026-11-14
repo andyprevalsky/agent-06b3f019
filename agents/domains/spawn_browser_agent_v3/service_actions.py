@@ -1025,8 +1025,12 @@ async def _live_phone_provider_account_refusal(dom_service: Any, action_name: st
     focused = dom_service.get_parked_page_identity()
     live_targets = await dom_service.live_frame_targets()
     live_url = (live_targets.get(str(focused.get("target_id"))) or {}).get("url") or str(focused.get("url") or "")
-    if realm := phone_provider_account_realm(live_url):
-        return _phone_provider_account_boundary_result(action_name, realm, live_url)
+    # Chrome reports a pending browser-initiated navigation's URL while the
+    # committed document (which input still reaches) is the one the registry
+    # names: either one in the realm refuses.
+    for page_url in (live_url, str(focused.get("url") or "")):
+        if realm := phone_provider_account_realm(page_url):
+            return _phone_provider_account_boundary_result(action_name, realm, page_url)
     if action_name == "evaluate":
         # Scripts run in the main frame only.
         return None
