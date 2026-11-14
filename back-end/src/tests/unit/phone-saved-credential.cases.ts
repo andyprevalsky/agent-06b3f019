@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import semanticFixture from './phone-saved-credential.semantic-fixture.json';
+import googleFixture from './phone-saved-credential.google-semantic-fixture.json';
 import { StructuredOutputAccumulator } from '../../providers/rose/structuredOutput';
 import type { CompletionOptions, CompletionChunk } from '../../providers/rose/types';
 test('saved phone credential binding uses fixed actual-evidence Rose purpose and actual usage', async (t) => {
@@ -39,7 +40,7 @@ test('saved phone credential binding uses fixed actual-evidence Rose purpose and
         model.endsWith('-foundry') ? null : { prompt: '0.000001', completion: '0.00001' },
     },
   });
-  const { verifyPhoneCredential, PHONE_CREDENTIAL_PURPOSE } =
+  const { verifyPhoneCredential, PHONE_CREDENTIAL_PURPOSE, PHONE_MULTI_CREDENTIAL_PURPOSE } =
     await import('../../providers/phoneCredentialVerifier');
   const input = {
     agentId: 'fixture-agent',
@@ -84,12 +85,36 @@ test('saved phone credential binding uses fixed actual-evidence Rose purpose and
       fixture.name
     );
     if (fixture.name === 'positive') {
-      assert.equal(replay.x, 375);
-      assert.equal(replay.y, 914);
+      assert.equal(replay.x, fixture.recorded.x);
+      assert.equal(replay.y, fixture.recorded.y);
     } else {
       assert.equal(replay.x, undefined);
       assert.equal(replay.y, undefined);
     }
+  }
+  // Prod 2026-11-14: account suggestions covering the Google password field must not bind;
+  // visible unfocused and focused (floated-label) fields bind to a point on that field.
+  assert.equal(PHONE_MULTI_CREDENTIAL_PURPOSE, googleFixture.recordedPurpose);
+  for (const fixture of googleFixture.cases) {
+    const recorded = fixture.recorded as { allowed: boolean; x?: number; y?: number };
+    response = {
+      allowed: recorded.allowed,
+      credentialRealm: recorded.allowed ? 'google' : 'unknown',
+      x: recorded.x ?? 0,
+      y: recorded.y ?? 0,
+    };
+    const replay = await verifyPhoneCredential(fixture.input);
+    assert.equal(captured?.messages[0].content, PHONE_MULTI_CREDENTIAL_PURPOSE);
+    assert.equal(replay.allowed, fixture.name !== 'occluded-by-suggestions', fixture.name);
+    if (!replay.allowed) continue;
+    assert.equal(replay.credentialRealm, 'google');
+    const items = fixture.input.evidence[0].result as { text: string; y: number; h: number }[];
+    const account = items.find((item) => item.text === 'google@example.invalid')!;
+    const show = items.find((item) => item.text === 'Show password')!;
+    assert.ok(
+      replay.y! > account.y + account.h / 2 && replay.y! < show.y - show.h / 2,
+      `${fixture.name} bound outside the password field`
+    );
   }
   response = { allowed: true, x: 50, y: 70, passcodeStage: 'create' };
   const passcodeInput = {
