@@ -11,6 +11,7 @@ export async function findExistingAgentsByIds(agentIds: string[], userId: string
       id: true,
       projectId: true,
       folderId: true,
+      githubRepoRef: true,
       status: true,
       statusMessage: true,
       progress: true,

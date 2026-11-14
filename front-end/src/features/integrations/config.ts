@@ -53,6 +53,10 @@ export const INTEGRATION_CATALOG = {
       .map(({ name, domain }) => `${name} ${domain}`)
       .join(' ')} meeting notes transcript transcripts summary summaries recording calls`,
   },
+  githubRepos: {
+    title: 'GitHub Repos',
+    aliases: 'github gh git repository repositories repo code projects folders',
+  },
   pebble: { title: 'Other', aliases: 'pebble index 01 ring wearable audio recording webhook' },
 } as const satisfies Record<IntegrationCatalogKey, { title: string; aliases: string }>;
 
