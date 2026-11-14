@@ -5,6 +5,8 @@ import { join } from 'node:path';
 import { runInNewContext } from 'node:vm';
 import { transpileModule, ModuleKind, ScriptTarget } from 'typescript';
 import type { KernelProxyCandidate } from '../../providers/browser/kernelProxy';
+import { assertKernelStaleCacheRecovery } from './browser-provider.kernel-stale-cache.support';
+import { assertLiveProxyReuseCustody } from './browser-provider.proxy-reuse-custody.support';
 
 type KernelModule = typeof import('../../providers/browser/kernelProxy');
 type CacheRow = { proxyId: string; proxyKey: string };
@@ -177,6 +179,17 @@ export async function assertKernelSlowHolderReuse(): Promise<void> {
 }
 
 export const kernelCoordinationCases: Array<[string, () => Promise<void>]> = [
-  ['Kernel slow holder reuse preserves one allocation and provider windows', assertKernelSlowHolderReuse],
-  ['Kernel proxy health errors preserve bounded geo fallback and cache custody', assertKernelProxyHealthFallback],
+  [
+    'Kernel slow holder reuse preserves one allocation and provider windows',
+    assertKernelSlowHolderReuse,
+  ],
+  [
+    'Kernel proxy health errors preserve bounded geo fallback and cache custody',
+    assertKernelProxyHealthFallback,
+  ],
+  [
+    'Kernel stale cache refreshes exact geo and reuses existing provider proxies first',
+    assertKernelStaleCacheRecovery,
+  ],
+  ['Live proxy parity never allocates or deletes shared proxies', assertLiveProxyReuseCustody],
 ];

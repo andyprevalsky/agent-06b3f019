@@ -4,6 +4,8 @@ import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { dirname, extname, join, normalize, relative, resolve } from 'node:path';
 import ts from 'typescript';
+import { ESLint } from 'eslint';
+import { lintInTypeOrder } from './lint-phase-order.mjs';
 
 const root = process.cwd();
 const sourceRoot = resolve(root, 'src');
@@ -63,7 +65,22 @@ if (printOnly) {
   process.exit(0);
 }
 
-const eslintArgs = ['eslint', ...(fix ? ['--fix'] : []), ...lintFiles];
-const result = spawnSync('npx', eslintArgs, { cwd: root, stdio: 'inherit' });
-if (result.error !== undefined) throw result.error;
-process.exit(result.status ?? 1);
+if (fix) {
+  const result = spawnSync('npx', ['eslint', '--fix', ...lintFiles], { cwd: root, stdio: 'inherit' });
+  if (result.error !== undefined) throw result.error;
+  process.exit(result.status ?? 1);
+}
+
+try {
+  const eslint = new ESLint({ cwd: root });
+  const results = await lintInTypeOrder(eslint, lintFiles);
+  results.sort((left, right) => left.filePath < right.filePath ? -1 : left.filePath > right.filePath ? 1 : 0);
+  const formatter = await eslint.loadFormatter();
+  const output = await formatter.format(results);
+  if (output) process.stdout.write(output);
+  process.exitCode = results.some((result) => result.errorCount > 0 || result.fatalErrorCount > 0) ? 1 : 0;
+} catch (error) {
+  // Match the CLI's configuration/engine failure status, distinct from lint errors.
+  process.stderr.write(`${error.stack ?? error}\n`);
+  process.exitCode = 2;
+}

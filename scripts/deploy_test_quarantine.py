@@ -733,6 +733,16 @@ def _marker_module():
     return module
 
 
+def _reject_duplicate_keys(pairs: list[tuple]) -> dict:
+    """A repeated key (two `quarantine` markers from a textual merge) refuses; never last-one-wins."""
+    out = {}
+    for key, value in pairs:
+        if key in out:
+            raise ValueError(f"{dict(pairs).get('name') or '<object>'}: duplicate JSON key {key!r} in {CATALOG}")
+        out[key] = value
+    return out
+
+
 def catalog_quarantines(root: Path, names: list[str] | None = None) -> dict[str, dict]:
     """{task name: validated marker} for catalog tasks carrying `quarantine` (only `names` when given).
 
@@ -741,7 +751,7 @@ def catalog_quarantines(root: Path, names: list[str] | None = None) -> dict[str,
     path = root / CATALOG
     if not path.is_file():
         return {}
-    tasks = json.loads(path.read_text())
+    tasks = json.loads(path.read_text(), object_pairs_hook=_reject_duplicate_keys)
     if not isinstance(tasks, list):
         raise ValueError(f'{CATALOG} must be a JSON array of tasks')
     wanted = None if names is None else set(names)
