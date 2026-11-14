@@ -13,6 +13,8 @@
  * user to connect), so its route does not report them here.
  */
 
+import { parseTeamSearchScope, includesPrivateSources } from './teamAccess';
+import { getSharedDataMap, formatSharedDataMap } from './teamContext';
 import { InvalidPatternError } from './errors';
 import { formatLocalDataSummary } from './format.summary';
 import { getSummary, grep } from './service';
@@ -61,8 +63,33 @@ function isSummaryRequest(params: Record<string, unknown>): boolean {
   return String(source ?? '').toLowerCase() === 'summary';
 }
 
-async function summaryResult(userId: string, pattern: string): Promise<GrepToolResult> {
-  const text = formatLocalDataSummary(await getSummary(userId));
+async function summaryResult(
+  userId: string,
+  pattern: string,
+  params: GrepParams
+): Promise<GrepToolResult> {
+  const scope = parseTeamSearchScope(params);
+  let text: string;
+  if (includesPrivateSources(userId, scope)) {
+    const summary = await getSummary(userId);
+    if (scope.ownerUserId === userId) delete summary.teams;
+    text = formatLocalDataSummary(summary);
+  } else {
+    const map = await getSharedDataMap(userId);
+    map.teams = map.teams.filter((team) => scope.teamId === undefined || team.id === scope.teamId);
+    map.accounts = map.accounts.filter(
+      (account) =>
+        (scope.teamId === undefined || account.teamId === scope.teamId) &&
+        (scope.ownerUserId === undefined || account.ownerUserId === scope.ownerUserId) &&
+        (scope.accountId === undefined || account.accountId === scope.accountId)
+    );
+    map.projects = map.projects.filter(
+      (project) =>
+        (scope.teamId === undefined || project.teamId === scope.teamId) &&
+        (scope.ownerUserId === undefined || project.ownerUserId === scope.ownerUserId)
+    );
+    text = formatSharedDataMap(map) || 'No shared data available for this scope.';
+  }
   const empty = text === 'No local data available.';
   const matches = empty
     ? []
@@ -135,7 +162,14 @@ async function unconnectedSources(
   requireSourceAccess: boolean
 ): Promise<SourceStatus[]> {
   const probes: string[] = namedSources(params).filter(
-    (source) => source !== 'documents' && isSourceName(source)
+    (source) =>
+      source !== 'documents' &&
+      isSourceName(source) &&
+      !(
+        (typeof params.team_id === 'string' ||
+          (typeof params.owner_user_id === 'string' && params.owner_user_id !== userId)) &&
+        ['email', 'gmail', 'imessage'].includes(source)
+      )
   );
   const provider = documentProvider(params);
   if (namedSources(params).includes('documents') && provider !== undefined && requireSourceAccess) {
@@ -228,7 +262,7 @@ export async function executeGrepTool(
   const requireSourceAccess = params.require_source_access === true;
   for (const key of AGENT_ONLY_KEYS) delete params[key];
   const pattern = typeof params.pattern === 'string' ? params.pattern : '';
-  if (isSummaryRequest(params)) return summaryResult(userId, pattern);
+  if (isSummaryRequest(params)) return summaryResult(userId, pattern, params as GrepParams);
   const unavailable =
     options.reportUnconnected === true
       ? await unconnectedSources(userId, params, requireSourceAccess)

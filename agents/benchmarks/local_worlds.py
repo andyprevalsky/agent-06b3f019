@@ -108,9 +108,10 @@ def _verify_child_cleanup(api: ModuleType, row: dict, *, keep_services: bool, al
         owner = json.loads((context / "local-stack-owner.json").read_text())
         if owner.get("version") != 1 or owner.get("run_id") != row["run_id"]:
             raise RuntimeError("child stack owner does not match its world")
-        receipt = api._read_cleanup_receipt(context / "local-stack-cleanup.status", owner["token"])
-        if receipt.get("stack_pid") != str(owner["pid"]) or receipt.get("stack_birth") != owner["birth"]:
-            raise RuntimeError("child stack cleanup receipt changed ownership")
+        receipt = api._read_cleanup_receipt(
+            context / "local-stack-cleanup.status", owner["token"], allowed_versions=("1", "2")
+        )
+        api._validate_stack_cleanup_receipt(receipt, owner)
         try:
             identity = api._process_identity_tools()["current_identity"](owner["pid"])
         except (OSError, ValueError, IndexError):

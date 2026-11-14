@@ -25,10 +25,12 @@ async function activeSetup(tx: Transaction, userId: string, id: string | undefin
     where: { id },
     select: { status: true, userId: true, deletedAt: true },
   });
-  if (agent && (agent.userId !== userId || agent.deletedAt !== null))
+  if (agent && agent.userId !== userId)
     throw new IPhoneError(409, 'iPhone setup agent is unavailable');
   // The encrypted reservation is committed before normal creation starts.
-  return agent === null || !inactive.includes(agent.status);
+  if (agent === null) return true;
+  // An owner-deleted setup agent is an ended setup: Connect starts a fresh one.
+  return agent.deletedAt === null && !inactive.includes(agent.status);
 }
 /** Connection screen projection: stored checks as ordered steps plus the setup browser task. */
 async function withProgress(

@@ -18,6 +18,7 @@ import unittest
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
+
 FIXTURE_PROCESS = runpy.run_path(str(ROOT / "scripts/tests/fixture_process.py"))
 NATIVE_COMPLETION = runpy.run_path(str(ROOT / "scripts/tests/native_completion_schedule.py"))
 BASH = shutil.which("bash") or "bash"

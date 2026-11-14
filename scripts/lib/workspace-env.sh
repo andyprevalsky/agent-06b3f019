@@ -167,7 +167,7 @@ normalize_conductor_workspace_env() {
   deploy_worktree_env="$pwd_physical/.context/deploy-worktree.env"
   if [ -f "$deploy_worktree_env" ] && [ "${BENCHMARK_ISOLATED_RUN:-false}" != "true" ] \
     && [ "${ROSE_STABILITY_UNIT_IDENTITY:-}" != "1" ]; then
-    # /descend-created deploy worktrees are not registered with Conductor and
+    # Prepared deploy worktrees are not registered with Conductor and
     # otherwise inherit their controller's identity and port range. Rehydrate
     # the durable child identity on every new shell before resolving resources.
     # A nested benchmark run already owns a separately reserved identity and
@@ -211,6 +211,23 @@ normalize_conductor_workspace_env() {
     export CONDUCTOR_WORKSPACE_NAME="$actual_name"
   fi
   export CONDUCTOR_WORKSPACE_PATH="$workspace_physical"
+}
+
+# Usage: benchmark_system_pg_db_name <native run id>
+# PostgreSQL truncates identifiers after63bytes. Hash long native identities
+# before creation so sibling worlds cannot share the truncated prefix.
+benchmark_system_pg_db_name() {
+  python3 - "${1:?benchmark run id required}" <<'PY_BENCHMARK_DATABASE'
+import hashlib
+import re
+import sys
+
+run_id = sys.argv[1]
+name = "victoria_bench_" + re.sub(r"[^A-Za-z0-9]", "_", run_id)
+if len(name) > 63:
+    name = name[:46] + "_" + hashlib.sha256(run_id.encode()).hexdigest()[:16]
+print(name)
+PY_BENCHMARK_DATABASE
 }
 
 # Usage: workspace_system_pg_db_name [root]
@@ -290,7 +307,7 @@ resolve_temporal_task_queue() {
 # DIFFERENT running container that already binds that host port (empty if none).
 #
 # This guards against a foreign CONDUCTOR_PORT (e.g. one leaked into a shell by
-# a /descend or benchmark run whose mismatched CONDUCTOR_WORKSPACE_NAME was
+# a benchmark run whose mismatched CONDUCTOR_WORKSPACE_NAME was
 # normalized away here) deriving the wrong LOCAL_DB_PORT and clobbering a
 # sibling workspace's database. Only running containers actually bind the host
 # port, so `docker ps` (not `-a`) is the correct input.

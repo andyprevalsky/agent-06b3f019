@@ -17,7 +17,7 @@
 import { createLogger } from '../../providers/logger';
 import type { EnvVariableMeta } from '../../providers/projects/envFile';
 import { nextNightlyRun } from '../../providers/projects/maintenanceSchedule';
-import { sandboxSizeColumn } from '../../providers/projects/store';
+import { canonicalGithubRepoRef, sandboxSizeColumn } from '../../providers/projects/store';
 import * as repo from './repo';
 import {
   DEFAULT_ROSE_SETUP,
@@ -44,6 +44,7 @@ export interface ProjectDto {
   repoUrl: string | null;
   /** Rose has verified clone access to repoUrl for this user (GithubRepoAccess grant). */
   githubConnected: boolean;
+  github_repo_ref: string | null; // connected repo's canonical ref (null: none granted)
   defaultBranch: string;
   startupScript: string | null;
   startupTimeoutS: number;
@@ -95,6 +96,7 @@ export function toProjectDto(
     name: project.name,
     repoUrl: project.repoUrl,
     githubConnected,
+    github_repo_ref: githubConnected ? canonicalGithubRepoRef(project.repoUrl) : null,
     defaultBranch: project.defaultBranch,
     startupScript: project.startupScript,
     startupTimeoutS: project.startupTimeoutS,

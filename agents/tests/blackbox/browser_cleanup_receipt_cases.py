@@ -20,6 +20,7 @@ async def _exercise_timeout_receipt(*, early=False, fail_cleanup=False):
     started = []
     release = asyncio.Event()
     signals = []
+    receipt_waits = []
     run_id = "original-run"
     activity_id = "browser-cleanup:attempt-1"
     env = ActivityEnvironment()
@@ -103,8 +104,15 @@ async def _exercise_timeout_receipt(*, early=False, fail_cleanup=False):
         started.append(call_id)
         return asyncio.create_task(native(call_id))
 
-    async def wait_condition(predicate, **_kwargs):
+    async def wait_condition(predicate, timeout=None, **_kwargs):
+        # A bounded park expires after a fixed number of loop ticks (fake timer).
+        ticks = 0
         while not predicate():
+            if timeout is not None:
+                receipt_waits.append(timeout)
+                ticks += 1
+                if ticks > 500:
+                    raise asyncio.TimeoutError()
             await asyncio.sleep(0)
 
     async def consume(call_id):
@@ -126,14 +134,25 @@ async def _exercise_timeout_receipt(*, early=False, fail_cleanup=False):
             await consume("first")
             if not early:
                 assert owner._browser_activity_cleanup_unknown
-                try:
-                    await consume("blocked")
-                except RuntimeError as error:
-                    assert "cleanup is unconfirmed" in str(error)
-                else:
-                    raise AssertionError("successor started while worker still owned teardown")
+                # Prod 0b54f65d: the successor arrived 155 ms after the timeout,
+                # before the worker even observed it; its receipt landed ~10 s later.
+                blocked = asyncio.create_task(consume("blocked"))
+                for _ in range(20):
+                    await asyncio.sleep(0)
+                assert "blocked" not in started, "successor started while worker still owned teardown"
                 release.set()
                 await cleanup_task
+                outcome = (await asyncio.gather(blocked, return_exceptions=True))[0]
+                bound = timedelta(seconds=handler.BROWSER_CLEANUP_RECEIPT_WAIT_SECONDS)
+                assert receipt_waits and all(wait <= bound for wait in receipt_waits), receipt_waits
+                if fail_cleanup:
+                    assert isinstance(outcome, RuntimeError) and "cleanup is unconfirmed" in str(outcome), outcome
+                    assert "blocked" not in started
+                else:
+                    assert not isinstance(outcome, BaseException), (
+                        f"successor refused although the exact receipt arrived within the wait: {outcome!r}"
+                    )
+                    assert started == ["first", "blocked"], started
             if fail_cleanup:
                 assert owner._browser_activity_cleanup_unknown
                 assert not signals, "failed local teardown acknowledged custody release"
@@ -151,7 +170,7 @@ async def _exercise_timeout_receipt(*, early=False, fail_cleanup=False):
                     )
                 ]
                 await consume("after-receipt")
-                assert started == ["first", "after-receipt"]
+                assert started[0] == "first" and started[-1] == "after-receipt", started
         finally:
             release.set()
             if cleanup_task is not None:

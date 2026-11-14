@@ -3,6 +3,7 @@
  * ReDoS safety, and normalization into ValidatedGrepInput.
  */
 
+import { parseTeamSearchScope } from './teamAccess';
 import { MAX_RESULTS } from './config';
 import { InvalidGrepParamError, InvalidPatternError, SourceNotFoundError } from './errors';
 import {
@@ -57,6 +58,9 @@ import {
 } from './types';
 
 const ALLOWED_GREP_KEYS = new Set([
+  'team_id',
+  'owner_user_id',
+  'account_id',
   'pattern',
   'source',
   'sources',
@@ -264,6 +268,7 @@ export async function validateGrepInput(rawParams: GrepParams): Promise<Validate
 
   return {
     pattern,
+    teamScope: parseTeamSearchScope(params),
     // JS → Postgres ARE: strip named captures (we only boolean-match) and map
     // word boundaries, which ARE spells \y / \Y.
     dbPattern: databaseRegexPattern(

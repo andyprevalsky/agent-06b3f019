@@ -6,7 +6,9 @@
  * Bug Report automation, titled from the description, to /rca the Rose agent.
  *
  * Screenshots dragged onto or pasted into the textarea upload immediately and
- * appear in the description as `![name](url)` image links.
+ * appear in the description as `![name](url)` image links. The "Attach
+ * screenshots" control (#bug-report-screenshot-input) picks several images at
+ * once; they show as removable thumbnails and are appended on submit.
  *
  * COMPOSER DROP STATE: [IDLE] --dragover with files--> [DRAG_OVER]
  *   --drop--> attachScreenshots (UPLOADING count > 0 disables Submit)
@@ -16,14 +18,15 @@
  * and never sends SMS.
  */
 
-import { useState, type ClipboardEvent, type DragEvent } from 'react';
-import { Bug, Check, Copy, ExternalLink, Loader2 } from 'lucide-react';
+import { useRef, useState, type ClipboardEvent, type DragEvent } from 'react';
+import { Bug, Check, Copy, ExternalLink, ImagePlus, Loader2, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
 import { Label } from '@/components/ui/label';
 import { cn } from '@/lib/utils';
 import type { UseReportBugResult } from './useReportBug';
 import { isScreenshotFile } from './useBugReportScreenshots';
+import { BUG_REPORT_SCREENSHOT_TYPES } from './useBugReportAttachments';
 
 interface ReportBugSectionProps {
   flow: UseReportBugResult;
@@ -60,6 +63,78 @@ function useScreenshotDropTarget(flow: UseReportBugResult) {
       flow.attachScreenshots(images, event.currentTarget.selectionStart);
     },
   };
+}
+
+function ScreenshotPicker({ flow }: ReportBugSectionProps) {
+  const inputRef = useRef<HTMLInputElement>(null);
+  return (
+    <div className="space-y-2">
+      <input
+        ref={inputRef}
+        id="bug-report-screenshot-input"
+        data-testid="bug-report-screenshot-input"
+        type="file"
+        accept={BUG_REPORT_SCREENSHOT_TYPES.join(',')}
+        multiple
+        className="sr-only"
+        tabIndex={-1}
+        aria-label="Attach screenshots"
+        disabled={flow.isSubmitting}
+        onChange={(event) => {
+          flow.addAttachments(Array.from(event.currentTarget.files ?? []));
+          // Allow re-picking the same file after removing it.
+          event.currentTarget.value = '';
+        }}
+      />
+      <Button
+        type="button"
+        variant="outline"
+        size="sm"
+        onClick={() => inputRef.current?.click()}
+        disabled={flow.isSubmitting}
+        data-testid="bug-report-screenshot-button"
+      >
+        <ImagePlus className="h-4 w-4 mr-2" />
+        Attach screenshots
+      </Button>
+      {flow.attachments.length > 0 && (
+        <ul className="flex flex-wrap gap-2" data-testid="bug-report-screenshot-list">
+          {flow.attachments.map((shot) => (
+            <li
+              key={shot.id}
+              className="relative h-16 w-16 overflow-hidden rounded-md border border-border bg-muted"
+              data-testid="bug-report-screenshot-thumbnail"
+              data-status={shot.status}
+              title={shot.name}
+            >
+              {(shot.previewUrl ?? shot.url) !== null && (
+                <img
+                  src={shot.previewUrl ?? shot.url ?? undefined}
+                  alt={shot.name}
+                  className="h-full w-full object-cover"
+                />
+              )}
+              {shot.status === 'uploading' && (
+                <div className="absolute inset-0 flex items-center justify-center bg-background/60">
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                </div>
+              )}
+              <button
+                type="button"
+                onClick={() => flow.removeAttachment(shot.id)}
+                disabled={flow.isSubmitting}
+                aria-label={`Remove ${shot.name}`}
+                className="absolute right-0.5 top-0.5 rounded-full bg-background/80 p-0.5 text-foreground hover:bg-background"
+                data-testid="bug-report-screenshot-remove"
+              >
+                <X className="h-3 w-3" />
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
 }
 
 export default function ReportBugSection({ flow }: ReportBugSectionProps) {
@@ -139,6 +214,7 @@ export default function ReportBugSection({ flow }: ReportBugSectionProps) {
           )}
           {...dropHandlers}
         />
+        <ScreenshotPicker flow={flow} />
         <p className="text-xs text-muted-foreground" data-testid="report-bug-screenshot-hint">
           {isUploading
             ? `Uploading ${flow.uploadingScreenshots} screenshot${flow.uploadingScreenshots === 1 ? '' : 's'}…`

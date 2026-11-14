@@ -4,6 +4,7 @@
  * on consumed/reclaimed mint rows, amount_cents is the funded amount.
  */
 import assert from 'node:assert/strict';
+import { assertV2LifecycleContract } from '../blackbox/test-payment-v2-lifecycle.cases';
 import { PurchaseSpendStatus } from '@prisma/client';
 import { TestPaymentError } from '../../domains/test-payment/errors';
 import { getTestPaymentLifecycle } from '../../domains/test-payment/lifecycle';
@@ -16,6 +17,7 @@ async function test(name: string, fn: () => Promise<void>): Promise<void> {
 }
 
 async function main(): Promise<void> {
+  await assertV2LifecycleContract();
   process.stdout.write('test-payment-lifecycle-transfer\n');
   await test('derives transferredCents from amount when provider leaves it at 0', async () => {
     const createdAt = new Date();
@@ -224,7 +226,12 @@ async function main(): Promise<void> {
     assert.throws(
       () =>
         mapOrgTransfer({ cardId: 'card-1' }, [
-          { structuredContent: { status: 'error', message: 'API key rate limit exceeded' } },
+          {
+            structuredContent: {
+              status: 'error',
+              message: 'API key rate limit exceeded',
+            },
+          },
         ]),
       (error: unknown) =>
         error instanceof TestPaymentError &&

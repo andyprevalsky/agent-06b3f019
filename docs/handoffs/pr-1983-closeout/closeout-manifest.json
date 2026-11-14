@@ -1,0 +1,70 @@
+{
+ "branch:backup/cerebras-chat-quota-prepush-20261002": {
+  "disposition": "archived",
+  "tip": "12d996f0d8e24b93c0e276d5b3f91887a0da9aca",
+  "archive": "devbox-closeout-private/pr1932/20261111T211955Z-records.tar.gz.aesgcm",
+  "sha256": "d7d80541e820a33628e3a1f83a6a971d2b7d5a36f9a85393ad553f4fb947e9f6",
+  "note": "template-inherited local-only branch (not this deploy); identical tip already preserved by the PR #1932 private archive; left in place"
+ },
+ "stash:0e2ffe95ba40a2d0c2b8ae9e884b4a85d96af3f2": {
+  "disposition": "archived",
+  "tip": "0e2ffe95ba40a2d0c2b8ae9e884b4a85d96af3f2",
+  "archive": "devbox-closeout-private/pr1932/20261111T211955Z-records.tar.gz.aesgcm",
+  "sha256": "d7d80541e820a33628e3a1f83a6a971d2b7d5a36f9a85393ad553f4fb947e9f6",
+  "note": "template-inherited stash (not this deploy); identical object preserved by the PR #1932 private archive"
+ },
+ ".context/pr1634-archive-recovery.env": "managed-env (boxes.dev managed secret; never archived)",
+ ".cloud-env": "managed-env (boxes.dev project environment; secrets never archived)",
+ ".env.npm": "managed-env (boxes.dev project environment; secrets never archived)",
+ "agents/.env": "managed-env (boxes.dev project environment; secrets never archived)",
+ "back-end/.env": "managed-env (boxes.dev project environment; secrets never archived)",
+ "front-end/.env": "managed-env (boxes.dev project environment; secrets never archived)",
+ "mac-app/.env": "managed-env (boxes.dev project environment; secrets never archived)",
+ "research/.env": "managed-env (boxes.dev project environment; secrets never archived)",
+ "agents/.env.benchmark-temporal": "managed-env (generated benchmark Temporal override; secrets never archived)",
+ "agents/.env.cloudbench-upsert.lock": "reproducible (lock file)",
+ "back-end/.env.cloudbench-upsert.lock": "reproducible (lock file)",
+ "agents/providers/fast_cache/": "reproducible (runtime cache)",
+ "package-lock.json": "reproducible (ignored root install lock)",
+ ".devbox/": "managed (boxes.dev runtime state)",
+ ".context/": {
+  "disposition": "archived",
+  "archive": "devbox-closeout-private/pr1983/20261113T005331Z-records.tar.gz.aesgcm",
+  "sha256": "53215b5f50763d77e2a964b42b240a852cae62dcec513e372fd90170b6299179",
+  "receipt": "docs/handoffs/pr-1983-closeout/private-archive-receipt.json",
+  "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-1983-closeout/private-archive-receipt.json --destination <empty dir>",
+  "note": "PR #1983 deploy evidence: gate rounds r1-r8 (incl. custody donor r2 and r8 custody-imported cycle), smoke campaigns, latched-owner evidence, production lanes, review ledger; every regular file except the managed secret env file"
+ },
+ "agents/navi-worker-log.txt": {
+  "disposition": "archived",
+  "archive": "devbox-closeout-private/pr1983/20261113T005331Z-records.tar.gz.aesgcm",
+  "sha256": "53215b5f50763d77e2a964b42b240a852cae62dcec513e372fd90170b6299179",
+  "receipt": "docs/handoffs/pr-1983-closeout/private-archive-receipt.json",
+  "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-1983-closeout/private-archive-receipt.json --destination <empty dir>",
+  "note": "local stack log from blackbox repro runs"
+ },
+ "back-end/backend-logs.log": {
+  "disposition": "archived",
+  "archive": "devbox-closeout-private/pr1983/20261113T005331Z-records.tar.gz.aesgcm",
+  "sha256": "53215b5f50763d77e2a964b42b240a852cae62dcec513e372fd90170b6299179",
+  "receipt": "docs/handoffs/pr-1983-closeout/private-archive-receipt.json",
+  "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-1983-closeout/private-archive-receipt.json --destination <empty dir>",
+  "note": "local stack log from blackbox repro runs"
+ },
+ "front-end/frontend-logs.log": {
+  "disposition": "archived",
+  "archive": "devbox-closeout-private/pr1983/20261113T005331Z-records.tar.gz.aesgcm",
+  "sha256": "53215b5f50763d77e2a964b42b240a852cae62dcec513e372fd90170b6299179",
+  "receipt": "docs/handoffs/pr-1983-closeout/private-archive-receipt.json",
+  "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-1983-closeout/private-archive-receipt.json --destination <empty dir>",
+  "note": "local stack log from blackbox repro runs"
+ },
+ "hub-poller-logs.log": {
+  "disposition": "archived",
+  "archive": "devbox-closeout-private/pr1983/20261113T005331Z-records.tar.gz.aesgcm",
+  "sha256": "53215b5f50763d77e2a964b42b240a852cae62dcec513e372fd90170b6299179",
+  "receipt": "docs/handoffs/pr-1983-closeout/private-archive-receipt.json",
+  "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-1983-closeout/private-archive-receipt.json --destination <empty dir>",
+  "note": "local stack log"
+ }
+}

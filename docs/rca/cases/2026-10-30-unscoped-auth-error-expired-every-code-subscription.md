@@ -8,11 +8,11 @@ classification: our-bug
 problem_class: logical-inconsistency-in-harness-contracts
 first_bad_boundary: agents/helpers/llm.py mark_compute_token_rate_limited_activity reported source=user auth_error with only userId; back-end markGptUserTokenRateLimited / markUserTokenRateLimited then ran updateMany over every claude_code / gpt_code row of that user
 symptoms:
-  - all of a user's claude_code / gpt_code rows EXPIRED with failureReason auth_error and an identical updatedAt
+  - all of a user's claude_code / gpt_code rows EXPIRED or rate-limited with one identical updatedAt (one updateMany)
   - "disabled after auth_error", updated > 1, accountId null, integrationId null in Render logs
-  - every Codex / Claude Code session falls through to paid Azure
-  - "Marked compute token rate-limited" with rate_limited_until "rate_limit" or "auth_error" and failure_reason null
-  - "User token auth failure for <userId> names no credential; not expiring"
+  - "claude_code cooldown for <userId> names no login and the user has several; dropped"
+  - claude_auth_present=false on every rose-1-ultra rose.complete.start; actual_model never ends in -claude
+  - every Codex / Claude Code session falls through to paid Azure; "Compute credentials not found for user"
 tags:
   - oauth
   - compute-token
@@ -23,7 +23,8 @@ sources:
   - task User Scale Bug Bash lane S33 (parent thread thr_1981ff79aa724ae59870f1829121c7e1)
   - PR #1644
   - task T7 recurrence 2026-11-04 (branch fix/compute-token-login-disable-writers)
-repro: back-end/src/tests/blackbox/integrations.scoped-auth-expiry.cases.ts; back-end/src/tests/blackbox/integrations.login-disable-writers.cases.ts (unscoped + chat rotation); agents/tests/blackbox/workflow.blackbox.py::test_workflow_auth_error_report_names_the_leased_login
+  - task recurrence 2026-11-13 rate-limit cooldowns (branch fix/rca-unnamed-user-cooldown-fingerprint, parent thread ph78393fcn3fqnvcdhq1f3jn0s8j3jyk)
+repro: back-end/src/tests/blackbox/compute-subscription-usage.cooldown.cases.ts (an unnamed claude/gpt 429 report cools exactly the login its fingerprint names); back-end/src/tests/blackbox/integrations.scoped-auth-expiry.cases.ts; back-end/src/tests/blackbox/integrations.login-disable-writers.cases.ts (unscoped + chat rotation); agents/tests/blackbox/workflow.blackbox.py::test_workflow_auth_error_report_names_the_leased_login
 status: fixed
 ---
 
@@ -145,11 +146,98 @@ activity with `inspect.signature`).
 10k agents: unchanged hot path; one indexed read + decrypt per auth-failure
 report, none on success.
 
+## Recurrence 2026-11-13: rate-limit cooldowns, and why naming by id did not hold
+
+Symptom: prod `Rose.complete` made zero subscription-authed calls for ~30h
+(2026-11-12 05:00Z to 2026-11-13 11:00Z). Every `rose-1-ultra`
+`rose.complete.start` logged `claude_auth_present=false`. Since 11-06 only 5
+agent leases returned a Claude token, and ~4.3k lease requests got
+`Compute credentials not found for user`. Over the window, paid routes served
+ultra: Foundry gpt-6.1-sol 361 calls (12.4M input tokens), gpt-6-luna 246
+(11.5M), gpt-5.6-luna 39, and OpenRouter sol 6. That is roughly $18 at list
+price, Azure-funded.
+
+Evidence (ClickHouse `observability.fly_logs`, Render request/app logs, a
+read-only prod DB, and one 1-token header probe per pooled Claude row):
+
+- Every `claude_code` and `gpt_code` row of Andy's was in a DB cooldown
+  through the window. Three GPT accounts that had been idle since 11-06/07 got
+  one account's 7d reset (`2026-11-17T21:28:44Z`, matching `de25c911`'s
+  `usage7dResetsAt`) from a single `/compute-code/token/rate-limited` POST.
+  All three rows carry `updatedAt` 2026-11-11 02:21:31.047 and the log line
+  `GPT user token for <user> rate-limited until 2026-11-17T21:28:44.000Z`.
+  One POST at 2026-11-10 21:48:54 (`User token ... until 2026-11-13T11:00`)
+  likewise left three Claude accounts at `11-13T11:00`. The probe shows that
+  `6aa8c17b`'s own 7d window reset 11-11 19:00, so it was usable through the
+  whole outage. These POSTs came through `delegateToAuthority` from non-prod
+  stacks (UA `node`, non-Fly IPs).
+- Before PR #1981 (merged 2026-11-13 ~10:43Z), the cooldown writers ran
+  `updateMany({userId, name})` when the report named no login.
+- After #1981, `scopeUnnamedUserCooldown` drops such a report. The spent login
+  then stays leasable, and every lease re-hits its 429.
+- Claude leases resumed at 11:00Z, when the cooldowns lapsed;
+  `claude_auth_present=true` appears at 11:14Z.
+
+Why the earlier "name the login" fix did not hold: the T7 fix threaded
+`integrationId` through specific callers. The workflow puts it in its
+compute-token payload, but the agent loop's LLM paths never read it.
+`helpers/llm.py` builds the auth contexts of `call_llm_structured_streaming`
+(the A1/A4 main loop), `call_llm` and `_call_llm_verifier` without
+`integration_id`, so their `source=user` 429 reports carry only
+`userId` + `credential`. Every new call path reopens the gap. Stale guests
+that delegate to prod reopen it too.
+
+Deepest owned cause: the backend identified a reported login only by an
+optional id that callers must plumb. It already receives the held token's
+fingerprint (`credential`, the same digest as `codeLoginRejection.ts`) on
+every report.
+
+Repro: `bash back-end/scripts/run-blackbox-tests.sh compute-subscription-usage`.
+Pre-fix (main 5d8e6d4d3), two cases fail:
+`FAIL an unnamed claude 429 report cools exactly the login its fingerprint
+names -- the held login must cool until 2026-11-17T11:25:56.423Z, got null`.
+The gpt case fails the same way. Post-fix, the identical command passes
+5/5 consecutive runs.
+
+Fix: `resolveUserLoginByCredential` (computeLoginFailure.ts, shared with the
+usage-heartbeat fix in `2026-11-13-agent-loop-usage-heartbeat-dropped-without-integration-id`) resolves an unnamed
+`source=user` cooldown report to the user's row whose stored access token has
+the reported fingerprint. `markTokenRateLimited` and `markGptTokenRateLimited`
+(domains/integrations/service.ts) apply it before writing the cooldown. A
+cooldown then lands on exactly the spent login, never on its siblings, and is
+no longer dropped. Reports with no fingerprint match keep #1981's drop.
+Auth-failure reports are deliberately excluded: they still must name the login
+explicitly, as S33/T7 requires, so the fingerprint never widens a destructive
+login expiry. The regression asserts that an unnamed `auth_error` carrying a
+matching fingerprint leaves the login CONNECTED.
+
+10k agents: this runs only on a failure report with no id. It does one
+indexed `findMany({userId, name})` and decrypts at most that user's logins of
+one kind. There is no work on the success path and no new shared state.
+
+Open follow-ups (not fixed here):
+
+- `spawn_browser_agent_v3/repo.py` `report_claude_token_rate_limited`
+  (route `/claude-code/token/rate-limited`) sends no id and no fingerprint.
+  Its user reports are still dropped.
+- Two Claude rows hold `rateLimitedUntil=2026-12-01T00:00Z`, written
+  2026-11-06 10:36/10:37 by a devbox agent (GCP IP, python-httpx). The live
+  probe on 11-13 shows `88a02cdc` allowed (7d utilization 0.0) and
+  `074bfdd5` resetting at 11-13T17:00. Root-caused on 2026-11-14 in
+  `2026-11-14-fast-mode-overage-reset-stored-as-subscription-cooldown`: a
+  fast-mode request's overage rejection carries the monthly overage reset.
+- Andy's device login `7e916787` expired 2026-11-11 13:00 and needs a device
+  re-sync. That is a credential action; nothing was changed here.
+
 ## Human feedback
 
 Andy (via parent, 2026-10-30): find why the subscriptions expired; never let a
 test or second instance rotate a prod token; do not modify prod credentials;
 he reconnects after the fix. Restoring the 5 collateral rows waits for his OK.
+
+2026-11-13 recurrence (Andy's rules, relayed by parent thread): do not mint,
+rotate or revoke credentials. Report what is needed. Fix only the gap that
+PR #1981 left. Do not take over #1981's usage-refresher 403 work.
 
 ## Reusable lesson
 

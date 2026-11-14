@@ -24,6 +24,7 @@ from domains.spawn_claude_code_agent.config import (
     CODE_AGENT_ERRORS_HEARTBEAT_KEY,
     CODE_AGENT_PAUSED_STATUS,
     CODE_AGENT_RESIZE_YIELD_REASON,
+    CODE_AGENT_SESSION_FAILED_CODE,
     CODE_AGENT_USAGE_LIMIT_STATUS,
     CODE_SESSION_HEARTBEAT_KEY,
     CODE_SESSION_IDLE_PAUSE_S,
@@ -48,6 +49,7 @@ from domains.spawn_claude_code_agent.repo import (
     fetch_code_credential_availability,
     keepalive_e2b_session,
     persist_terminal_output,
+    report_code_session_subscription_usage,
     report_code_usage_limit,
     report_undelivered_code_turns,
     resize_e2b_session,
@@ -59,7 +61,9 @@ from helpers.activity_heartbeat import heartbeat_resume_details, safe_heartbeat
 from helpers.claude_code_ws_client import ClaudeCodeWsClient, ws_endpoint_reachable
 from helpers.e2b_log_collector import SandboxLogCollector
 from helpers.file_resolution import resolve_file_pointers_from_extracted, transform_schema_for_remote_session
+from helpers.github_repo_ref import explicit_github_repo_ref
 from helpers.tracing import traced
+from providers.rose.subscription_usage import usage_from_rate_limit_event
 from tools.base import MessageStatus
 from utils.code_transcript import (
     CodeTranscriptBuilder,
@@ -1090,6 +1094,12 @@ async def _run_agentic_loop(
             # A new turn: the next SDK result belongs to it.
             user_turns_seen += 1
             sdk_result_at = None
+        elif event.get("type") == "turn_started" and sdk_result_at is not None:
+            # The CLI started a turn of its own after a caught-up result (a /goal
+            # continuation, a background-task notification): it is working again,
+            # so that result was not its last. The turn's own result re-arms the grace.
+            user_turns_seen += 1
+            sdk_result_at = None
         if event.get("type") in ("goal", "turn_started", "turn_ended", "user_turn", "direct_chat"):
             log_monitor_state()
         if is_codex_completed_turn_event(event):
@@ -1126,6 +1136,11 @@ async def _run_agentic_loop(
         logged_events = len(code_events)
         if code_session is not None:
             code_session["logged_events"] = logged_events
+        # Below the replay guard: a reconnect resends the whole history, and a
+        # replayed rate_limit_event must not be reported again as a fresh observation.
+        subscription_usage = None if history else subscription_usage_from_event(event)
+        if subscription_usage is not None:
+            report_code_session_usage_soon(task_id, subscription_usage)
         _log_code_agent_event(event, agent_id=agent_id, task_id=task_id, sandbox_id=sandbox_id)
         logger.debug(
             "[ClaudeCode] Received code-agent event",
@@ -1179,8 +1194,10 @@ async def _run_agentic_loop(
         on_events_replay=on_events_replay,
     )
 
-    if not await ws_client.connect():
-        raise Exception("Failed to connect to Claude Code WebSocket")
+    # A reattach after a long run must survive a brief blip: one failed
+    # handshake used to end the whole session (tar_2b02efd49fc2466497723b3e).
+    if not await ws_client.connect_with_retry():
+        raise Exception(f"Failed to connect to Claude Code WebSocket: {ws_client.last_error or 'unknown error'}")
 
     listen_task = asyncio.create_task(ws_client.listen())
     action_summary.append("Connected to Claude Code WebSocket")
@@ -1298,7 +1315,9 @@ async def _run_agentic_loop(
                 break
 
             if ws_client.reconnects_exhausted:
-                await _handle_reconnect_exhausted(sandbox_id, agent_id, task_id, action_summary, code_provider)
+                await _handle_reconnect_exhausted(
+                    sandbox_id, agent_id, task_id, action_summary, code_provider, last_error=ws_client.last_error
+                )
 
             silence_duration = safe_time() - last_output_time
 
@@ -1526,6 +1545,7 @@ async def _handle_reconnect_exhausted(
     task_id: str,
     action_summary: list[str],
     code_provider: str = "claude",
+    last_error: Optional[str] = None,
 ) -> None:
     """Handle WebSocket reconnection exhaustion by diagnosing sandbox state."""
     logger.error(
@@ -1575,7 +1595,8 @@ async def _handle_reconnect_exhausted(
     else:
         action_summary.append("DIAGNOSIS: Could not determine sandbox health")
 
-    raise Exception("WebSocket connection to Claude Code sandbox lost after all reconnect attempts")
+    detail = f": {last_error}" if last_error else ""
+    raise Exception(f"WebSocket connection to Claude Code sandbox lost after all reconnect attempts{detail}")
 
 
 # ---------------------------------------------------------------------------
@@ -2475,23 +2496,6 @@ async def _run_verifier(
 
         final_output = terminal.get_display()
         normalized_events = code_events or []
-        if evidence_structured and schema_complete and (exit_code is None or exit_code == 0):
-            v_reasoning = (
-                "The code agent completed successfully and the requested file outputs were extracted "
-                "from /home/user/output using normalized SDK event context."
-            )
-            await save_claude_code_message(
-                agent_id=agent_id,
-                title="⚖️ Progress: 100%",
-                task_id=task_id,
-                message=v_reasoning,
-                status=MessageStatus.FINISHED,
-                action_type="system",
-                tool_call_id=verifier_call_id,
-                code_provider=code_provider,
-            )
-            return 1.0, v_reasoning, evidence_structured, input_tokens, output_tokens
-
         event_context = _build_code_event_context(
             code_events=normalized_events,
             output_files=extracted_output_files,
@@ -2825,6 +2829,96 @@ def build_code_agent_metadata(
             summary["merged_into"] = facts.get("merge_target")
         block["summary"] = summary
     return block
+
+
+def subscription_usage_from_event(event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """The account usage a Claude Code ``rate_limit_event`` reports, for EVERY status.
+
+    ``allowed`` / ``allowed_warning`` carry the window's utilization and reset
+    just like ``rejected`` does; all of them feed the compute screen's usage bar
+    (only ``rejected`` is also a usage limit, see ``usage_limit_from_event``).
+    """
+    if event.get("type") != "cli_message" or event.get("raw_type") != "rate_limit_event":
+        return None
+    message = event.get("cli_message") if isinstance(event.get("cli_message"), dict) else {}
+    info = message.get("rate_limit_info")
+    return usage_from_rate_limit_event(info) if isinstance(info, dict) else None
+
+
+# Per task, one background drain sends the LATEST usage snapshot: a status change
+# at once, a same-status update once the interval since the last delivery ends
+# (deferred, never dropped), and a snapshot counts as delivered only when the
+# backend accepted it; a failed send is retried after the interval, bounded.
+_CODE_USAGE_REPORT_MIN_INTERVAL_S = 15.0
+_CODE_USAGE_REPORT_MAX_FAILURES = 3
+_CODE_USAGE_MAX_TRACKED_TASKS = 4096
+_code_usage_reporters: Dict[str, Dict[str, Any]] = {}
+_code_usage_tasks: set["asyncio.Task[Any]"] = set()
+
+
+def _code_usage_reporter(task_id: str) -> Dict[str, Any]:
+    state = _code_usage_reporters.get(task_id)
+    if state is None:
+        state = {"pending": None, "status": None, "next_at": 0.0, "retry_at": 0.0, "failures": 0, "draining": False}
+        _code_usage_reporters[task_id] = state
+        for stale in list(_code_usage_reporters)[: max(0, len(_code_usage_reporters) - _CODE_USAGE_MAX_TRACKED_TASKS)]:
+            if not _code_usage_reporters[stale]["draining"]:
+                _code_usage_reporters.pop(stale)
+    return state
+
+
+def _merge_code_usage(newer: Dict[str, Any], older: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """One CLI rate_limit_event carries one window: keep the latest observation of each window."""
+    if not older:
+        return newer
+    kept = {
+        key: older[key] for key in ("fiveHour", "sevenDay") if newer.get(key) is None and older.get(key) is not None
+    }
+    return {**newer, **kept}
+
+
+def report_code_session_usage_soon(task_id: str, usage: Dict[str, Any]) -> None:
+    """Fire-and-forget: hand the task's latest usage to its background drain; never blocks or raises."""
+    with contextlib.suppress(Exception):
+        state = _code_usage_reporter(task_id)
+        state["pending"] = _merge_code_usage(usage, state["pending"])
+        if state["draining"]:
+            return
+        state["draining"] = True
+        task = asyncio.get_running_loop().create_task(_drain_code_session_usage(task_id, state))
+        _code_usage_tasks.add(task)
+        task.add_done_callback(_code_usage_tasks.discard)
+
+
+async def _drain_code_session_usage(task_id: str, state: Dict[str, Any]) -> None:
+    try:
+        while state["pending"] is not None:
+            usage = state["pending"]
+            due = max(state["retry_at"], state["next_at"] if usage.get("status") == state["status"] else 0.0)
+            wait = due - time.monotonic()
+            if wait > 0:
+                await asyncio.sleep(wait)
+                continue  # send whatever is latest once the interval ends
+            state["pending"] = None
+            delivered = False
+            with contextlib.suppress(Exception):
+                delivered = await asyncio.wait_for(report_code_session_subscription_usage(task_id, usage), timeout=5.0)
+            if delivered:
+                state.update(
+                    status=usage.get("status"),
+                    next_at=time.monotonic() + _CODE_USAGE_REPORT_MIN_INTERVAL_S,
+                    retry_at=0.0,
+                    failures=0,
+                )
+                continue
+            state["failures"] += 1
+            state["retry_at"] = time.monotonic() + _CODE_USAGE_REPORT_MIN_INTERVAL_S
+            if state["pending"] is not None:
+                state["pending"] = _merge_code_usage(state["pending"], usage)
+            elif state["failures"] < _CODE_USAGE_REPORT_MAX_FAILURES:
+                state["pending"] = usage
+    finally:
+        state["draining"] = False
 
 
 def usage_limit_from_event(event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -3281,6 +3375,54 @@ def _error_ends_the_run(error: BaseException) -> bool:
     return not activity.in_activity() or (isinstance(error, ApplicationError) and error.non_retryable)
 
 
+def code_session_failure_error(
+    error: BaseException,
+    original: BaseException,
+    facts: Optional[Dict[str, Any]],
+    *,
+    local: bool = False,
+) -> BaseException:
+    """The final error of a run whose code session exists, carrying how to resume it.
+
+    A run that died on a dropped connection used to reach the parent as a bare
+    one-liner (tar_2b02efd49fc2466497723b3e): no code_session_id, so the saved
+    sandbox, commits and checkpoint could not be resumed. This error keeps the
+    exact exception and adds the session id, the failure checkpoint and the
+    exact retry call. Without a code session (or on a Mac, which resumes by
+    folder) ``error`` is returned unchanged.
+    """
+    code_session_id = (facts or {}).get("code_session_id")
+    if local or not isinstance(code_session_id, str) or not code_session_id:
+        return error
+    exact = extract_error_message(original)
+    error_type = type(original).__name__
+    checkpoint_seq = (facts or {}).get("checkpoint_seq")
+    saved = f"saved at checkpoint {checkpoint_seq}" if checkpoint_seq is not None else "kept"
+    lines = [
+        f"Code agent run ended abnormally: {error_type}: {exact}",
+        f"Code session {code_session_id} was not lost: its sandbox files, commits and conversation are {saved}.",
+    ]
+    if (facts or {}).get("branch"):
+        lines.append(f"Branch: {facts['branch']}")
+    lines.append(
+        f"Resume it with spawn_agent(type='code', code_session_id='{code_session_id}', goal=<the same goal>)."
+    )
+    final = ApplicationError(
+        "\n".join(lines),
+        {
+            "code_session_id": code_session_id,
+            "code_session": dict(facts or {}),
+            "error": exact,
+            "error_type": error_type,
+            "retry": {"tool": "spawn_agent", "type": "code", "code_session_id": code_session_id},
+        },
+        type=CODE_AGENT_SESSION_FAILED_CODE,
+        non_retryable=True,
+    )
+    final.__cause__ = original
+    return final
+
+
 # ---------------------------------------------------------------------------
 # Temporal activity
 # ---------------------------------------------------------------------------
@@ -3412,6 +3554,8 @@ async def spawn_claude_code_activity(
             persistent code session; omitted, the backend resumes the spawning
             agent's latest session for the repo (or creates one on a new branch).
             ``task_name`` (the spawn's) is stored on the task row as its title.
+            ``github_repo_ref`` (the spawn's explicit connected-repo selection) rides
+            here too, so the scheduled positional arguments stay unchanged.
 
     No runtime limit (C11): the activity runs while the CLI works and heartbeats.
     An idle CLI is paused (status ``paused``, resumable), never failed.
@@ -3450,6 +3594,7 @@ async def spawn_claude_code_activity(
     # The persistent session survives a paused/unreachable sandbox: a retry
     # resumes it by id even when its attached record must be discarded (C2).
     requested_code_session_id = (code_session_request or {}).get("code_session_id")
+    github_repo_ref = explicit_github_repo_ref((code_session_request or {}).get("github_repo_ref"))
     code_session_id: Optional[str] = (attached or {}).get("code_session_id") or (
         requested_code_session_id if isinstance(requested_code_session_id, str) else None
     )
@@ -3608,6 +3753,7 @@ async def spawn_claude_code_activity(
                 fast_mode_cache_enabled=fast_mode_cache_enabled,
                 code_session_id=code_session_id,
                 lease_owner=lease_owner,
+                github_repo_ref=github_repo_ref,
                 target=target,
                 local_device_id=local_device_id,
                 fresh_conversation=(code_session_request or {}).get("fresh_conversation") is True,
@@ -3618,6 +3764,7 @@ async def spawn_claude_code_activity(
                     "spawn_args": {
                         "type": "code", "goal": goal, "output_schema": output_schema,
                         "github_repo_link": github_repo_url, "target": target, "task_name": task_name,
+                        **({"github_repo_ref": github_repo_ref} if github_repo_ref else {}),
                         "attachments": [item.get("original_filename") for item in attachments or []],
                     },
                     "attachments": attachments or [],
@@ -4404,7 +4551,10 @@ async def spawn_claude_code_activity(
                     ),
                 )
 
-                await close_e2b_session(task_id=task_id, code_provider=code_provider, reason="failure")
+                # The failure close checkpoints the sandbox (repos, files, CLI log)
+                # and pauses it; its facts name the checkpoint the resume restores.
+                close_data = await close_e2b_session(task_id=task_id, code_provider=code_provider, reason="failure")
+                code_session_facts = _merge_close_code_session_facts(code_session_facts, close_data)
             except Exception as cleanup_error:
                 logger.warning(
                     "[ClaudeCode] Cleanup failed on error",
@@ -4413,7 +4563,9 @@ async def spawn_claude_code_activity(
                     error=str(cleanup_error),
                 )
 
-        raise error
+        raise code_session_failure_error(
+            error, e, code_session_facts, local=bool(local_workspace_place(code_agent_meta))
+        )
 
     finally:
         session_heartbeats.close()

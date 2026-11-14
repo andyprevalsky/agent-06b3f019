@@ -47,7 +47,7 @@ def test_polar_bench_group_and_tags_never_daily():
     assert all(t.group != "daily" for t in polar)
     assert all(t.bench == "rose-bench" for t in polar)
     assert all(t.status == "ready" for t in polar)
-    assert all(t.requires_browser_agent for t in polar)
+    assert all(not t.requires_browser_agent for t in polar)
     assert all(t.enforce_declared_evaluators for t in polar)
     assert all(t.approval_handling is None for t in polar)
     # Polar slice uses the isolated Odysseys-faithful evaluator only.
@@ -171,3 +171,27 @@ def test_polar_create_agent_defaults_write_lock_off(monkeypatch):
     assert rb._resolve_write_lock_enabled(polar) is True
     monkeypatch.setenv("BENCHMARK_WRITE_LOCK_ENABLED", "false")
     assert rb._resolve_write_lock_enabled(polar) is False
+
+
+def test_polar_loader_keeps_only_authored_minimum_steps():
+    import benchmarks.benchmark_tasks as tasks
+    raw = load_polar_tasks_file()
+    assert len(raw) == 300 and all("min_steps" not in row for row in raw)
+    loaded = {t.name: t for t in tasks._load_tasks()}
+    assert all(loaded[row['name']].min_steps == {} for row in raw), "Polar inherited an unauthored minimum"
+    assert all(loaded[row['name']].max_steps == row['max_steps'] for row in raw)
+    assert loaded['browser-agent-amazon-cookie-payment'].min_steps == {'browser': 5}
+    assert loaded['browser-smoke'].min_steps == {'browser': 1}
+
+
+def test_polar_loader_ignores_tool_minima_and_preserves_nonpolar_defaults(monkeypatch):
+    import copy
+    import benchmarks.benchmark_tasks as tasks
+    raw = copy.deepcopy(load_polar_tasks_file())
+    raw[0]['min_steps'] = {'browser': 7, 'explore': 2}
+    raw[1]['min_steps'] = {'explore': 3}
+    monkeypatch.setattr(tasks, 'load_polar_tasks_file', lambda: raw)
+    loaded = {t.name: t for t in tasks._load_tasks()}
+    assert loaded[raw[0]['name']].min_steps == {}
+    assert loaded[raw[1]['name']].min_steps == {}
+    assert loaded['browser-agent-amazon-cookie-payment'].min_steps == {'browser': 5}

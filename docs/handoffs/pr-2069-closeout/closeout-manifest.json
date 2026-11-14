@@ -1,0 +1,79 @@
+{
+  ".cloud-env": "managed-env (boxes.dev project environment; secrets never archived)",
+  ".context/": {
+    "archive": "devbox-closeout-private/pr2069/20261114T182514Z-records.tar.gz.aesgcm",
+    "disposition": "archived",
+    "receipt": "docs/handoffs/pr-2069-closeout/private-archive-receipt.json",
+    "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-2069-closeout/private-archive-receipt.json --destination <empty dir>",
+    "scope": "every regular file under .context on devbox 9ab17b26 (PR #2069 test repair c59d68b1/19847867: deploy cycle .context/deploy-pipeline (READY, merged ac669f2539) and the never-run cycle deploy-pipeline.unrun-9b20d95c-20261114, browser-smoke x3 proof campaign campaign-20261113-122039-4162732 with fleet runs 20261113-122112-*, Hub transcript pulls, east probe scripts, and .context/repair-c59d68b1-ops = out-of-checkout launchers/logs/recipes/stall proof copied from /var/tmp/repair-c59d68b1)",
+    "sha256": "9e2c2b52262263ab58bdece1bdfb4f63b8b4c450ceef638d276ce5f50bf07397"
+  },
+  ".devbox/": "managed (boxes.dev runtime state)",
+  ".env.npm": "managed-env (boxes.dev project environment; secrets never archived)",
+  "agents/.env": "managed-env (boxes.dev project environment; secrets never archived)",
+  "agents/.env.benchmark-temporal": "managed-env (generated benchmark Temporal override; secrets never archived)",
+  "agents/.env.cloudbench-upsert.lock": "reproducible (lock file)",
+  "agents/navi-worker-log.txt": {
+    "archive": "devbox-closeout-private/pr2069/20261114T182514Z-records.tar.gz.aesgcm",
+    "disposition": "archived",
+    "receipt": "docs/handoffs/pr-2069-closeout/private-archive-receipt.json",
+    "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-2069-closeout/private-archive-receipt.json --destination <empty dir>",
+    "scope": "local stack log on devbox 9ab17b26",
+    "sha256": "9e2c2b52262263ab58bdece1bdfb4f63b8b4c450ceef638d276ce5f50bf07397"
+  },
+  "agents/providers/fast_cache/": "reproducible (runtime cache)",
+  "back-end/.env": "managed-env (boxes.dev project environment; secrets never archived)",
+  "back-end/.env.cloudbench-upsert.lock": "reproducible (lock file)",
+  "back-end/backend-logs.log": {
+    "archive": "devbox-closeout-private/pr2069/20261114T182514Z-records.tar.gz.aesgcm",
+    "disposition": "archived",
+    "receipt": "docs/handoffs/pr-2069-closeout/private-archive-receipt.json",
+    "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-2069-closeout/private-archive-receipt.json --destination <empty dir>",
+    "scope": "local stack log on devbox 9ab17b26",
+    "sha256": "9e2c2b52262263ab58bdece1bdfb4f63b8b4c450ceef638d276ce5f50bf07397"
+  },
+  "branch:backup/cerebras-chat-quota-prepush-20261002": {
+    "archive": "devbox-closeout-private/pr1682-a52c-local-refs-20261112/",
+    "bundle_prerequisites": "thin bundle --not origin/main; all 7 prerequisites are origin/main ancestors",
+    "bundle_sha256": "f1b920d2878e6aa7b15ac6735f2e9b7cca789bfd36eaf0dfba5fcefc6253a50f",
+    "disposition": "archived",
+    "member": "/var/tmp/pr1682-closeout/refs-a52c/local-refs.bundle",
+    "note": "template-inherited local-only ref (not this deploy's work); identical tip already archived by the PR #1682 closeout (docs/handoffs/pr-1682-closeout/closeout-manifest.json)",
+    "receipt": ".context/deploy-session/closeout-a52c/archive-receipt-local-refs.json",
+    "ref_identity_member": "/var/tmp/pr1682-closeout/refs-a52c/ref-identities.txt",
+    "sha256": "33e3372a68b20dd1938d3b96fe60abc3679d3316288846c896b6ca775313364c",
+    "tip": "12d996f0d8e24b93c0e276d5b3f91887a0da9aca"
+  },
+  "front-end/.env": "managed-env (boxes.dev project environment; secrets never archived)",
+  "front-end/frontend-logs.log": {
+    "archive": "devbox-closeout-private/pr2069/20261114T182514Z-records.tar.gz.aesgcm",
+    "disposition": "archived",
+    "receipt": "docs/handoffs/pr-2069-closeout/private-archive-receipt.json",
+    "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-2069-closeout/private-archive-receipt.json --destination <empty dir>",
+    "scope": "local stack log on devbox 9ab17b26",
+    "sha256": "9e2c2b52262263ab58bdece1bdfb4f63b8b4c450ceef638d276ce5f50bf07397"
+  },
+  "hub-poller-logs.log": {
+    "archive": "devbox-closeout-private/pr2069/20261114T182514Z-records.tar.gz.aesgcm",
+    "disposition": "archived",
+    "receipt": "docs/handoffs/pr-2069-closeout/private-archive-receipt.json",
+    "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-2069-closeout/private-archive-receipt.json --destination <empty dir>",
+    "scope": "local stack log on devbox 9ab17b26",
+    "sha256": "9e2c2b52262263ab58bdece1bdfb4f63b8b4c450ceef638d276ce5f50bf07397"
+  },
+  "mac-app/.env": "managed-env (boxes.dev project environment; secrets never archived)",
+  "package-lock.json": "reproducible (ignored root install lock)",
+  "research/.env": "managed-env (boxes.dev project environment; secrets never archived)",
+  "stash:0e2ffe95ba40a2d0c2b8ae9e884b4a85d96af3f2": {
+    "archive": "devbox-closeout-private/pr1682-a52c-local-refs-20261112/",
+    "bundle_prerequisites": "thin bundle --not origin/main; all 7 prerequisites are origin/main ancestors",
+    "bundle_sha256": "f1b920d2878e6aa7b15ac6735f2e9b7cca789bfd36eaf0dfba5fcefc6253a50f",
+    "disposition": "archived",
+    "member": "/var/tmp/pr1682-closeout/refs-a52c/local-refs.bundle",
+    "note": "template-inherited local-only ref (not this deploy's work); identical tip already archived by the PR #1682 closeout (docs/handoffs/pr-1682-closeout/closeout-manifest.json)",
+    "receipt": ".context/deploy-session/closeout-a52c/archive-receipt-local-refs.json",
+    "ref_identity_member": "/var/tmp/pr1682-closeout/refs-a52c/ref-identities.txt",
+    "sha256": "33e3372a68b20dd1938d3b96fe60abc3679d3316288846c896b6ca775313364c",
+    "tip": "0e2ffe95ba40a2d0c2b8ae9e884b4a85d96af3f2"
+  }
+}
