@@ -867,6 +867,69 @@ _TERMINAL_ACTIONS = {
 }
 
 
+# Rose's phone broker (back-end/src/providers/phoneHarness.ts) is the only
+# principal that acts on the cloud-phone provider account: it holds the account's
+# API key and adds leases, owner attention and privacy brokering. The owner's
+# synced browser login for that provider reaches agent browsers like any other
+# site, so an agent browser on the provider's account pages could approve CLI
+# device grants, mint API keys or take over sessions outside the broker
+# (docs/rca/cases/2026-11-13-agent-browser-approved-phone-provider-cli-grant.md).
+# Agent browsers may observe that realm and leave it, never act on it.
+_PHONE_PROVIDER_ACCOUNT_REALMS = frozenset({"phone-harness.com"})
+_PHONE_PROVIDER_REALM_ALLOWED_ACTIONS = frozenset(
+    {
+        "read_browser_state",
+        "read_tool_output",
+        "read_logs",
+        "read_network_requests",
+        "screenshot",
+        "extract",
+        "wait",
+        "navback",
+        "switch_tab",
+        "close_tab",
+        "goto",
+        "open_new_tab",
+        "done",
+        "attempt_completion",
+    }
+)
+
+
+def phone_provider_account_realm(url: Optional[str]) -> str:
+    """Return the broker-owned phone-provider realm ``url`` belongs to, or ``""``."""
+    try:
+        host = (urlparse(url or "").hostname or "").rstrip(".").lower()
+    except ValueError:
+        return ""
+    realm = _get_base_domain(host) if host else ""
+    return realm if realm in _PHONE_PROVIDER_ACCOUNT_REALMS else ""
+
+
+def _phone_provider_account_refusal(
+    action_name: str, params: Dict[str, Any], current_url: str
+) -> Optional[Dict[str, Any]]:
+    if action_name in {"goto", "open_new_tab"}:
+        target = params.get("url") or ""
+        realm = phone_provider_account_realm(_normalize_goto_url(target) or target)
+    elif action_name in _PHONE_PROVIDER_REALM_ALLOWED_ACTIONS:
+        return None
+    else:
+        realm = phone_provider_account_realm(current_url)
+    if not realm:
+        return None
+    return {
+        "success": False,
+        "code": "phone_provider_account_boundary",
+        "error": (
+            f"Refused {action_name} on {realm}: that is the account of the cloud-phone provider "
+            "behind Rose's phone broker. Browser agents may read it or leave it, but cannot act "
+            "on it or obtain its credentials."
+        ),
+        "current_url": current_url,
+    }
+
+
 _PAYMENT_APPROVAL_WAIT_MARKERS = (
     "approval",
     "approve",
@@ -1775,6 +1838,15 @@ async def execute_action(
             # renderer stall. Do not log transport/input exception contents.
             result = {"success": False, "status": "UNKNOWN", "error": "Phone outcome unconfirmed; inspect owned receipt"}
         return mask_secret_values(result, refs)
+    if (refusal := _phone_provider_account_refusal(action.get("action", ""), action.get("params") or {}, current_url)):
+        logger.warning(
+            "[BrowserAgent] Refused action on phone-provider account realm",
+            action=action.get("action", ""),
+            current_url=current_url,
+            agent_id=agent_id,
+        )
+        return refusal
+    del refusal
     execution = locals().copy()
     for key in ("agent_id", "browser_task_id", "tool_call_id_decision", "phone_snapshot"):
         execution.pop(key)
