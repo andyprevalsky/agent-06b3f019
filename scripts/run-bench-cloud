@@ -2071,11 +2071,23 @@ verify_app_environment() {
     case "$read_timeout" in
         ''|*[!0-9]*) echo "❌ App environment read timeout must be positive whole seconds." >&2; return 1 ;;
     esac
-    listing="$(_with_timeout "$read_timeout" flyctl secrets list -a "$APP" --json)" || {
-        read_status=$?
+    # The listing is read-only and idempotent: one slow Fly API read (timeout,
+    # exit 124) must not abort a launch, so retry only that, at most 3 attempts
+    # with 2 s / 5 s pauses (worst case 3x timeout + 7 s). Any other exit (auth,
+    # missing app, interrupt) still fails at once.
+    local attempt pause
+    for attempt in 1 2 3; do
+        read_status=0
+        listing="$(_with_timeout "$read_timeout" flyctl secrets list -a "$APP" --json)" || read_status=$?
+        [ "$read_status" = 124 ] && [ "$attempt" -lt 3 ] || break
+        pause=$((attempt == 1 ? 2 : 5))
+        echo "⚠️ App secrets read for $APP timed out after ${read_timeout}s (attempt $attempt/3); retrying in ${pause}s." >&2
+        sleep "$pause"
+    done
+    if [ "$read_status" != 0 ]; then
         echo "❌ Could not read app secrets for $APP (read exit=$read_status)." >&2
         return 1
-    }
+    fi
     if ! missing="$(printf '%s' "$listing" | REQUIRED="$REQUIRED_APP_SECRETS" python3 -c '
 import json, os, sys
 try:

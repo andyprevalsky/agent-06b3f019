@@ -549,6 +549,8 @@ GATES = (
     Gate("cloudbench-source-lease-recovery", ("python3", "scripts/tests/cloudbench-source-lease-recovery.test.py")),
     Gate("cloudbench-source-guest-env", ("python3", "scripts/tests/cloudbench-source-guest-env.test.py")),
     Gate("cloudbench-source-env", ("python3", "scripts/tests/cloudbench-source-env.test.py")),
+    Gate("cloudbench-campaign-env", ("python3", "scripts/tests/cloudbench-campaign-env.test.py")),
+    Gate("cloudbench-inventory-site-startup", ("python3", "scripts/tests/cloudbench-inventory-site-startup.test.py")),
     Gate("cloudbench-source-env-handoff", ("python3", "scripts/tests/cloudbench-source-env-handoff.test.py")),
     Gate("cloudbench-kernel-custody", ("python3", "scripts/tests/cloudbench-kernel-custody.test.py")),
     Gate(
