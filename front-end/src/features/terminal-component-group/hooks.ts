@@ -56,6 +56,7 @@ export {
   signalSignupDismissed,
   getPeople,
   getTools,
+  fetchConnectedGithubRepos,
   generateLLMJudgePrompt,
   getAttachmentUrl,
   uploadAttachment,
@@ -83,6 +84,7 @@ export {
 export type {
   Agent,
   AgentDetail,
+  ConnectedGithubRepo,
   AttentionRequest,
   Message,
   FilePointer,

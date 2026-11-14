@@ -18,7 +18,12 @@ import {
   startOrgCardholderOnboarding,
 } from '../../providers/agentcard/org-onboarding';
 import { AgentCardOrgRuntime } from '../../providers/agentcard/org-runtime';
-import { saveUserToken } from '../../providers/agentcard/store';
+import {
+  saveUserToken,
+  getV2ConnectedUserId,
+  saveV2ConnectedUserId,
+  AgentCardV2BindingConflictError,
+} from '../../providers/agentcard/store';
 
 config();
 
@@ -105,6 +110,64 @@ async function runTest(name: string, fn: () => Promise<void>): Promise<TestResul
 }
 
 const tests: Array<[string, () => Promise<void>]> = [
+  [
+    'v2 connect rejects unsigned and forged browser links without sending a code',
+    async () => {
+      for (const suffix of ['', '?user=victim&session=unknown&t=forged']) {
+        const res = await request(`/api/agentcard/v2/connect${suffix}`);
+        assertStatus(res.status, 400, res.data);
+        assert(res.headers.get('cache-control') === 'no-store', 'setup pages must not be cached');
+      }
+      for (const step of ['start', 'verify']) {
+        const res = await request(`/api/agentcard/v2/connect/${step}`, {
+          method: 'POST',
+          body: JSON.stringify({ user: 'victim', user_id: 'usr_attacker' }),
+        });
+        assertStatus(res.status, 400, res.data);
+      }
+    },
+  ],
+  [
+    'v2 provider identity binding is exclusive under concurrent writes and never aliases legacy ids',
+    async () => {
+      const first = await createUser('v2-first');
+      const second = await createUser('v2-second');
+      const providerId = `usr_v2_${randomUUID()}`;
+      const results = await Promise.allSettled([
+        saveV2ConnectedUserId(first, providerId),
+        saveV2ConnectedUserId(second, providerId),
+      ]);
+      assert(
+        results.filter((result) => result.status === 'fulfilled').length === 1,
+        'exactly one binder must win'
+      );
+      const rejected = results.find((result) => result.status === 'rejected');
+      assert(
+        rejected?.status === 'rejected' &&
+          rejected.reason instanceof AgentCardV2BindingConflictError,
+        'second binder must get a binding conflict'
+      );
+      const ids = await Promise.all([getV2ConnectedUserId(first), getV2ConnectedUserId(second)]);
+      assert(ids.filter((id) => id === providerId).length === 1, 'only one persisted owner');
+      const owner = ids[0] ? first : second;
+      await saveV2ConnectedUserId(owner, providerId);
+      let replacementRejected = false;
+      try {
+        await saveV2ConnectedUserId(owner, `usr_new_${randomUUID()}`);
+      } catch (error) {
+        replacementRejected = error instanceof AgentCardV2BindingConflictError;
+      }
+      assert(replacementRejected, 'existing owner identity must not be silently replaced');
+      await prisma.integration.updateMany({
+        where: { userId: owner, name: 'agentcard' },
+        data: { config: { orgManaged: true, cardholderId: 'ch_legacy_only' } },
+      });
+      assert(
+        (await getV2ConnectedUserId(owner)) === undefined,
+        'legacy MCP cardholder is never a v2 user'
+      );
+    },
+  ],
   [
     'organization onboarding preserves AgentCard configuration errors',
     async () => {

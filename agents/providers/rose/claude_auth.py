@@ -94,6 +94,54 @@ _COOLDOWN_SECONDS = 5 * 60
 _USAGE_WINDOW_RESET_THRESHOLD_S = 60.0
 _MAX_CACHE_CONTROL_BLOCKS = 4
 
+# Fast mode on a subscription is billed as extra usage (overage). When the
+# account cannot pay for it, Anthropic answers the fast request 429 with
+# `anthropic-ratelimit-unified-overage-disabled-reason` and the MONTHLY overage
+# reset, while the account's own 5h/7d windows still serve standard requests.
+# Claude Code (services/api/withRetry.ts, handleFastModeOverageRejection) turns
+# fast mode off and retries at standard speed on the same credential; it never
+# cools the account. Per token fingerprint: fast mode stays off until that reset
+# (or _FAST_MODE_OFF_DEFAULT_S without one). Process-local and bounded: it only
+# saves the doomed fast request; correctness never depends on it.
+_OVERAGE_DISABLED_REASON_HEADER = "anthropic-ratelimit-unified-overage-disabled-reason"
+_FAST_MODE_OFF_DEFAULT_S = 60 * 60
+_FAST_MODE_OFF_MAX_TOKENS = 1_000
+_fast_mode_off_until: Dict[str, float] = {}
+
+
+def _token_key(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()[:16]
+
+
+def _fast_mode_off(token: str) -> bool:
+    key = _token_key(token)
+    until = _fast_mode_off_until.get(key)
+    if until is None:
+        return False
+    if until > datetime.now(timezone.utc).timestamp():
+        return True
+    _fast_mode_off_until.pop(key, None)
+    return False
+
+
+def _turn_fast_mode_off(token: str, rate_limited_until: Optional[str]) -> None:
+    until = datetime.now(timezone.utc).timestamp() + _FAST_MODE_OFF_DEFAULT_S
+    if rate_limited_until:
+        try:
+            until = datetime.fromisoformat(rate_limited_until.replace("Z", "+00:00")).timestamp()
+        except ValueError:
+            pass
+    key = _token_key(token)
+    _fast_mode_off_until.pop(key, None)
+    _fast_mode_off_until[key] = until
+    while len(_fast_mode_off_until) > _FAST_MODE_OFF_MAX_TOKENS:
+        _fast_mode_off_until.pop(next(iter(_fast_mode_off_until)))
+
+
+def _standard_speed(body: Dict[str, Any]) -> Dict[str, Any]:
+    """The same request without fast mode (the transport adds the beta only for speed=fast)."""
+    return {key: value for key, value in body.items() if key != "speed"}
+
 
 # Claude OAuth tokens require the first two system blocks to be a specific
 # identity pair — the token validator at Anthropic checks for these. Order
@@ -704,7 +752,10 @@ async def _attempt_with_token(
     idle_timeout_s: Optional[float],
 ) -> AsyncIterator[StreamChunk]:
     """One full try with a single token — up to 3 in-place retries on 429/5xx."""
+    if body.get("speed") == "fast" and _fast_mode_off(auth.token):
+        body = _standard_speed(body)
     last_error: Optional[Exception] = None
+    retry_at_standard_speed = False
     for attempt in range(_MAX_ATTEMPTS_PER_TOKEN):
         try:
             async with post_anthropic_stream(
@@ -790,6 +841,24 @@ async def _attempt_with_token(
 
                 if status == 429:
                     rate_limited_until = _extract_rate_limited_until(response, error_body)
+                    overage_disabled_reason = response.headers.get(_OVERAGE_DISABLED_REASON_HEADER)
+                    if body.get("speed") == "fast" and overage_disabled_reason is not None:
+                        # Fast mode needs extra usage this account cannot use; the
+                        # subscription itself is not limited. Never cool it: retry
+                        # the same token at standard speed (below, once this 429
+                        # response is closed) with a fresh attempt budget.
+                        _turn_fast_mode_off(auth.token, rate_limited_until)
+                        logger.warning(
+                            "rose.claude_auth.fast_mode_overage_rejected",
+                            request_id=request_id,
+                            agent_id=agent_id,
+                            call_site=call_site,
+                            overage_disabled_reason=overage_disabled_reason,
+                            fast_mode_off_until=rate_limited_until,
+                            provider_message=_anthropic_error_message(error_body),
+                        )
+                        retry_at_standard_speed = True
+                        break
                     if _should_rotate_429_without_retry(error_body, rate_limited_until):
                         raise _RotateToken(
                             "rate_limit",
@@ -864,6 +933,22 @@ async def _attempt_with_token(
             raise
         except RoseError:
             raise
+
+    if retry_at_standard_speed:
+        # The standard body has no speed, so this recurses at most once.
+        async for chunk in _attempt_with_token(
+            body=_standard_speed(body),
+            auth=auth,
+            pool_spec=pool_spec,
+            actual_model=actual_model,
+            request_id=request_id,
+            agent_id=agent_id,
+            call_site=call_site,
+            ttft_timeout_s=ttft_timeout_s,
+            idle_timeout_s=idle_timeout_s,
+        ):
+            yield chunk
+        return
 
     # Unreachable — loop body either yields, raises, or continues.
     if last_error:

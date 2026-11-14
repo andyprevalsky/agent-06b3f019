@@ -23,11 +23,20 @@ _PREFIX = "fast-mode-cache"
 
 def blob_path_for_key(key: str) -> str:
     digest = hashlib.sha256(key.encode("utf-8")).hexdigest()
-    return f"{_PREFIX}/{digest[:2]}/{digest}"
+    from .context import owned_recording_namespace
+
+    owner = owned_recording_namespace()
+    prefix = f"{_PREFIX}/owned-recording/{owner}" if owner else _PREFIX
+    return f"{prefix}/{digest[:2]}/{digest}"
 
 
 async def upload_blob(path: str, body: bytes, content_type: str = "application/octet-stream") -> bool:
     """Upload or replace a blob if possible."""
+    from .context import owned_recording_namespace
+
+    owner = owned_recording_namespace()
+    if owner and not path.startswith(f"{_PREFIX}/owned-recording/{owner}/"):
+        raise ValueError("Owned recording cannot replace a historical cache blob")
     config = load_config()
     supabase_url = config.supabase.url
     supabase_key = config.supabase.service_role_key

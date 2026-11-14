@@ -267,74 +267,71 @@ Format an LLM judge prompt using GPT-4.
 }
 ```
 
-## AgentCard "for companies" (OAuth 2.1 + PKCE + MCP)
+## AgentCard v2 Issuing and optional MCP tools
 
-Lets the app issue and manage AgentCard virtual cards **on behalf of each end
-user**. Every user authenticates once ("Connect with AgentCard"), and we then
-call the AgentCard MCP server with that user's bearer token. Cards are isolated
-per `(client, user)` — an empty `list_cards` on a freshly-connected user is
-correct, not a bug. Code lives in `src/domains/agentcard/`.
+New company-funded purchases use the current [v2 Issuing API](https://docs.agentcard.com/issuing/quickstart).
+MCP remains for optional user tools and legacy card cleanup.
 
-The purchases flow uses this same per-user MCP path through
-`src/providers/card-provider/`; there is no server-side AgentCard API fallback.
+```
+Rose approval -> Stripe authorization -> v2 card intent with Idempotency-Key
+  -> confirm collection if requested -> checkout credentials -> Stripe capture
+  -> merchant purchase -> exact transfer reconciliation
+```
 
-### Client modes
+`AGENTCARD_ORG_OAUTH_CLIENT_ID` and `AGENTCARD_ORG_OAUTH_CLIENT_SECRET` obtain a
+cached platform token from `POST /api/v2/oauth/token`. REST uses this token, not
+the raw client secret. `AGENTCARD_BASE_URL` defaults to `https://api.agentcard.sh`;
+credentials select sandbox/production, not a different host.
 
-- **Confidential** (this app): pinned `AGENTCARD_OAUTH_CLIENT_ID` +
-  `AGENTCARD_OAUTH_CLIENT_SECRET`. The secret is read from `process.env` and sent
-  on **both** the token exchange and the refresh. PKCE (S256) is always enforced.
-- **Public** (DCR, no secret): not used here; the client is pre-provisioned.
+The signed setup page uses `AGENTCARD_PUBLIC_URL` and the existing connect-signing
+secret. OTP verification and consent bind the provider's `user.id` exclusively
+as `Integration.config.v2UserId`. MCP `cardholderId` values are different identities
+and are never substituted. Live KYC uses the freshest hosted `iframe_url`;
+company-funded sandbox cards do not require approved KYC.
 
-### Env vars
+Company funding is an organization setting (`default_funds_source=company_flow`).
+v2 rejects per-card `funds_source`. Cards are explicitly single-use, have a
+100-cent minimum, and are capped at the approved total. A `202`, timeout or
+`deposit_confirming` preserves the purchase and key; respect `retry_after_seconds`.
+Credentials come from `/api/v2/cards/{id}/credentials` only at checkout and are
+excluded from durable traces. Missing `AGENTCARD_WEBHOOK_SECRET` rejects financial
+webhooks. The existing `AGENTCARD_MINT_ENABLED` rollout cutoff remains in force;
+updating the provider does not silently enable live issuing.
 
-| Var | Purpose |
-| --- | --- |
-| `AGENTCARD_OAUTH_CLIENT_ID` | OAuth client id (required) |
-| `AGENTCARD_OAUTH_CLIENT_SECRET` | Confidential client secret (sent on exchange + refresh) |
-| `AGENTCARD_PUBLIC_URL` | Public base URL of this backend (ngrok in dev). `redirect_uri = ${AGENTCARD_PUBLIC_URL}/api/agentcard/callback` and must match the client's registered redirect exactly |
-| `AGENTCARD_MCP_URL` | *(optional)* MCP resource, default `https://mcp.agentcard.sh/mcp` — the mandatory `resource` param on `/authorize` and `/token` |
-| `AGENTCARD_AUTH_SERVER_URL` | *(optional)* OAuth issuer base, default `https://mcp.agentcard.sh` |
+Setup uses signed `GET /api/agentcard/v2/connect`, form POSTs at
+`/api/agentcard/v2/connect/start` and `/api/agentcard/v2/connect/verify`, and the
+existing authenticated `/api/agentcard/status` for connection/KYC state. Optional
+MCP `/connect`, `/callback`, `/tools` and `/tools/call` remain separate. A user
+must resolve their own approvals; connected agents cannot use personal-only
+`approve_request` to manufacture consent.
 
-### Routes
-
-| Route | Auth | Purpose |
-| --- | --- | --- |
-| `GET /api/agentcard/connect?user=<id>` | public | Mints PKCE + state, 302 → AgentCard `/authorize` |
-| `GET /api/agentcard/callback` | public | Exchanges the code (with `resource` + `client_secret`), persists the per-user token |
-| `GET /api/agentcard/status` | API key / JWT | `{ connected, expiresAt }` |
-| `GET /api/agentcard/tools` | API key / JWT | The **full live toolset** (`tools/list`), or `{ connected:false, connectUrl }` |
-| `POST /api/agentcard/tools/call` | API key / JWT | Runs any advertised tool: `{ name, arguments }` |
-
-The toolset is **dynamic**: `tools/list` is called at runtime and every advertised
-tool is forwarded verbatim (name + description + `inputSchema`). Nothing is
-hardcoded or curated, so tools AgentCard adds later work with zero code change.
-Tokens refresh proactively on near-expiry and reactively on 401 (the rotated
-refresh token is persisted each time). Per-user tokens are stored in the existing
-`Integration` row (`name = "agentcard"`), keyed by the stable Supabase `userId`.
-
-### Wiring into the agent brain
-
-`GET /api/agentcard/tools` is the brain-facing seam: the agent looks up the user's
-token; if none, it hands the user the returned `connectUrl`; if present it receives
-the live toolset and calls tools via `POST /api/agentcard/tools/call` in a loop.
-`create_card` / `get_card_details` may return `approval_required` + `approval_id`;
-resolve by calling the advertised `approve_request` tool.
-
-### Verifying against sandbox
+From `back-end/`:
 
 ```bash
-# 1. Offline unit tests (PKCE, token exchange/refresh, dynamic toolset, approval path)
-npx tsx src/tests/unit/agentcard-oauth.test.ts
-npx tsx src/tests/unit/agentcard-mcp-runtime.test.ts
-
-# 2. User connects (magic-link sign-in happens in the browser):
-open "$AGENTCARD_PUBLIC_URL/api/agentcard/connect?user=<userId>"
-
-# 3. Independently verify via a direct MCP call (lists live tools + list_cards;
-#    add --create to issue ONE sandbox card, handling the approval gate). Never
-#    prints PAN/CVV.
-npx tsx scripts/agentcard-verify.ts <userId> --create
+npm run test:unit
+bash scripts/run-blackbox-tests.sh agentcard-v2,agentcard-org-runtime,agentcard,purchases
+# Read-only provider contract: no OTP, mint, payment or recovery.
+AGENTCARD_V2_LIVE_READ=1 node --import tsx src/tests/blackbox/agentcard-v2.blackbox.ts
 ```
+
+Sandbox lifecycle fixtures require an explicitly connected sandbox
+`BENCHMARK_AGENTCARD_V2_USER_ID` from the supported OTP flow (sandbox code
+`111111`), verified against the credential's org and mode. Old cardholder fixtures
+do not establish a v2 connection. See `scripts/setup-benchmark-payment.ts --help`.
+
+The five `agent-payment-*` browser tests for test-shop, new-user-journey,
+setup-resume, idempotent-abandonment and abandonment use Stripe test billing and
+AgentCard sandbox credentials. The two `agent-payment-production-*` tests use
+live credentials and a real $1 purchase or charge/refund cycle. The provider uses
+one API host; credentials select the mode, which the server verifies against
+the purchase's immutable billing mode.
+
+Live fixture provisioning requires an existing consented v2 connection for the
+dedicated Rose user under the current organization client. It verifies live
+company funding and approved KYC through REST before fixture or Stripe writes;
+it never creates that connection or replaces it with a legacy cardholder. Clear
+the sandbox-only `BENCHMARK_AGENTCARD_V2_USER_ID` in the live subprocess. Existing
+legacy cleanup credentials and purchase history remain available.
 
 ## WebSocket API
 

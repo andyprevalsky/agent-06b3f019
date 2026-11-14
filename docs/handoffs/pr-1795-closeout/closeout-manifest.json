@@ -1,0 +1,39 @@
+{
+  "format": "PR1795-CLOSEOUT-V1",
+  "primary_pr": 1795,
+  "validated_source": "63f16ee80fd8511c7d35e2525daf375060b71d20",
+  "deployed_merge": "8b90d7eb370545af418d4e0b02d36a0b0d27ab71",
+  "data_cutoff": "2026-11-08T09:19:28.046851+00:00",
+  "private_recovery": "RECOVERY.md",
+  "proof_index": "proof-index.json",
+  "archive_receipts": [
+    "archive-receipts/static.json",
+    "archive-receipts/first-sweep.json",
+    "archive-receipts/final.json",
+    "archive-receipts/backend-env-20261114.json"
+  ],
+  "deletion_manifest": "deletion-manifest.json",
+  "native_deletion_receipt": "deletion-readiness.json",
+  "original_automatic_transport_result": "FAIL retained; independently verified canonical direct deployment succeeded",
+  "native_production_checks": {
+    "exact_merge_cutover": "PASS",
+    "migration_matrix": "45/45 PASS including cleanup",
+    "semantic_workflow": "42465976023: five exact-source jobs PASS",
+    "backend_probes_and_schema": "PASS"
+  },
+  "additional_failure": {
+    "test": "agent-payment-production-abandonment",
+    "native_result": "FAIL",
+    "attribution": "NOT_INTRODUCED",
+    "disposition": "delegated / waived",
+    "repair_pr": 1667,
+    "live_allocation_unreleased_cents": 100
+  },
+  "terminal_publication_boundary": "Frozen private evidence and renderer/control inputs are encrypted. Sanitized final receipt, Git/PR links, elapsed/status fields derived from the committed readiness receipt, and permanent visual publication identifiers are terminal publication metadata; they do not create another private-evidence archive. Final publication must not change required private inputs.",
+  "resume_verification": "evidence/resume-verification-20261114.json",
+  "private_configuration_supplement": {
+    "date": "2026-11-14",
+    "scope": "Backend environment drift only; prior archive versions remain preserved",
+    "verification": "backend-env-verification-20261114.json"
+  }
+}

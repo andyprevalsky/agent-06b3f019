@@ -27,6 +27,7 @@ from domains.spawn_claude_code_agent.config import (
     LOCAL_TARGET_UNAVAILABLE_CODE,
 )
 from helpers.activity_heartbeat import safe_heartbeat
+from helpers.github_repo_ref import GITHUB_REPO_REF_DENIED_CODE, repo_ref_denied_message
 from helpers.http_client import get_http_client
 from helpers.workflow_generation import (
     WorkflowGenerationSealed,
@@ -329,6 +330,7 @@ async def create_e2b_session(
     fast_mode_cache_enabled: bool = False,
     code_session_id: Optional[str] = None,
     lease_owner: Optional[str] = None,
+    github_repo_ref: Optional[str] = None,
     target: str = "cloud",
     local_device_id: Optional[str] = None,
     fresh_conversation: bool = False,
@@ -341,6 +343,11 @@ async def create_e2b_session(
     ``code_session_id`` resumes that persistent code session; omitted, the
     backend resumes the spawning agent's latest session for the repo.
     ``lease_owner`` is stable per tool call so Temporal retries keep the lease.
+    ``github_repo_ref`` is the spawn's explicit connected-repo selection: it replaces
+    the project restore (backend resolveCodeSessionWorkspace). A resume by
+    ``code_session_id`` keeps that session's own repo, so the ref is not sent with it.
+    A ref the user has no connection for answers 403 ``GITHUB_ACCESS_DENIED``, raised
+    as a non-retryable ``GITHUB_REPO_REF_DENIED`` naming the ref (never a fallback).
 
     Returns the session data dict with task_id, sandbox_id, ws_url,
     code_session_id, branch, merge_target, resumed_from, etc.
@@ -377,6 +384,8 @@ async def create_e2b_session(
     else:
         if code_session_id:
             create_payload["code_session_id"] = code_session_id
+        elif github_repo_ref:
+            create_payload["github_repo_ref"] = github_repo_ref
         if lease_owner:
             create_payload["lease_owner"] = lease_owner[:200]
         if fresh_conversation:
@@ -407,6 +416,17 @@ async def create_e2b_session(
                     body["error"],
                     {"reason": body.get("reason"), "device_name": body.get("device_name")},
                     type=LOCAL_TARGET_UNAVAILABLE_CODE,
+                    non_retryable=True,
+                )
+
+        if response.status_code == 403 and "github_repo_ref" in create_payload:
+            body = _json_or_empty(response)
+            if body.get("code") == "GITHUB_ACCESS_DENIED":
+                # The explicit selection is not connected (or was disconnected): fail
+                # naming it; neither a retry nor the project's repo can stand in for it.
+                raise ApplicationError(
+                    repo_ref_denied_message(create_payload["github_repo_ref"], str(body.get("error") or "")),
+                    type=GITHUB_REPO_REF_DENIED_CODE,
                     non_retryable=True,
                 )
 

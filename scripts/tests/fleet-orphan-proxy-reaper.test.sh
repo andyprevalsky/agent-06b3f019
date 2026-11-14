@@ -31,7 +31,7 @@ fail() { echo "FAIL: $1" >&2; exit 1; }
 
 # 1) The reaper is defined AND wired into the startup path (before provisioning).
 grep -q 'reap_orphaned_fleet_proxies()' "$FLEET" || fail "reaper function is missing"
-grep -qE '^reap_orphaned_fleet_proxies$' "$FLEET" || fail "reaper is not called at fleet startup"
+grep -qE '^[[:space:]]*reap_orphaned_fleet_proxies$' "$FLEET" || fail "reaper is not called at fleet startup"
 
 # 2) Real-process behavior. A fake 'flyctl' whose ps line matches the reaper's
 #    selector (contains 'flyctl proxy' and '-a <APP>'). It must NOT exec — exec
@@ -55,14 +55,12 @@ sleep 1
 orphan_ppid="$(ps -o ppid= -p "$(pgrep -f "dead.vm.$APP.internal" | head -1)" 2>/dev/null | tr -d ' ')"
 [ "$orphan_ppid" = "1" ] || fail "test setup: planted orphan is not reparented to init (ppid=$orphan_ppid)"
 
-# Exact selection+kill the reaper uses.
-# This intentionally mirrors the production ps selector.
-# shellcheck disable=SC2009
-ps -o pid,ppid,command -ax 2>/dev/null | grep "flyctl proxy" | grep -F -- "-a $APP" \
-    | awk '$2==1{print $1}' | while read -r pid; do [ -n "$pid" ] && kill -TERM "$pid" 2>/dev/null; done
-sleep 1
+# Run the production reaper itself, extracted from run-bench-fleet, so the
+# test cannot drift from its selector.
+eval "$(awk '/^reap_orphaned_fleet_proxies\(\) \{/{f=1} f{print} f&&/^}/{exit}' "$FLEET")"
+reap_orphaned_fleet_proxies >/dev/null
 
 pgrep -f "dead.vm.$APP.internal" >/dev/null && fail "orphaned proxy was NOT reaped"
-kill -0 "$LIVE_PID" 2>/dev/null || fail "a LIVE run's proxy was wrongly reaped (rule 27 violation)"
+kill -0 "$LIVE_PID" 2>/dev/null || fail "a LIVE run's proxy was wrongly reaped (killed another run's process)"
 
 echo "PASS: orphaned data-plane proxies are reaped; live-run proxies are preserved"

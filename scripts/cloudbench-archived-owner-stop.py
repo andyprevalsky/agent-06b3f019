@@ -969,12 +969,18 @@ def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--run-dir',type=Path,required=True);p.add_argument('--inventory',type=Path,required=True)
     p.add_argument('--out-dir',type=Path,required=True);p.add_argument('--execute',action='store_true')
+    p.add_argument('--forensic-resource-closure',metavar='OWNER',help='Observe exact terminal resources; preserve claims, failed capture and original audit')
     p.add_argument('--agents-env',type=Path);p.add_argument('--timeout',type=int,default=300)
     p.add_argument('--acknowledged-create',action='append',default=[],metavar='MACHINE_ID',
                    help='STOP only these exact unsealed creations, requiring archived successful creation ACKs; never reuse authority')
     p.add_argument('--workers',type=int,default=16);a=p.parse_args();os.umask(0o077)
     output=a.out_dir.absolute();need(output.parent.resolve(strict=True)==output.parent,'physical output parent required')
-    plan=prepare(a.run_dir,a.inventory,acknowledged_creates=a.acknowledged_create)
+    forensic = runpy.run_path(str(HERE/'cloudbench-forensic-resource-closure.py')) if a.forensic_resource_closure else None
+    if forensic:
+        need(not a.acknowledged_create, 'forensic mode cannot stop acknowledged creates')
+        plan=forensic['prepare'](a.run_dir,a.inventory,a.forensic_resource_closure)
+    else:
+        plan=prepare(a.run_dir,a.inventory,acknowledged_creates=a.acknowledged_create)
     if output.exists():
         need(output.is_dir() and not output.is_symlink() and output.stat().st_uid==os.getuid()
              and not output.stat().st_mode&0o077,'private output directory required')
@@ -987,6 +993,10 @@ def main():
     helper=runpy.run_path(str(HERE/'cloudbench-original-volume-capture.py'))
     with until(time.monotonic()+a.timeout):
         api=helper['Fly'](plan['app'],operator['token_from_agents'](raw(a.agents_env)))
+        if forensic:
+            receipt=forensic['observe'](api,plan,output)
+            print(json.dumps(dict(status='FORENSIC_RESOURCE_TERMINAL_OBSERVED',receipt=str(receipt),claims_released=False,runtime_sealed=False,benchmark_success_inferred=False)))
+            return 0
         result=execute(api,plan,output,a.timeout,a.workers)
     print(json.dumps(dict(all_owned_stopped=result['all_owned_stopped'],targets=len(result['results']),
                          unrelated_native_machines_skipped=plan['unrelated_native_machines_skipped'],volumes_retained=True,claims_released=False)))

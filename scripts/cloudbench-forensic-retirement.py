@@ -155,6 +155,56 @@ def verify_stopped_provider_archive(
     assert helper["validate_provider_receipt"](receipt, provider, stopped_sha)
 
 
+def verify_capture_payload(capture: dict, raw: bytes, originals: dict[str, bytes]) -> None:
+    """Bind the unchanged nested archive to its declared original files."""
+    captured = {}
+    with tarfile.open(fileobj=io.BytesIO(raw), mode="r:gz") as archive:
+        for member in archive:
+            assert member.isfile() and safe_name(member.name) and member.name not in captured
+            assert member.size <= 64 * 1024 * 1024
+            stream = archive.extractfile(member)
+            assert stream is not None
+            data = stream.read(member.size + 1)
+            assert len(data) == member.size and originals[member.name] == data
+            captured[member.name] = {"bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()}
+    assert captured == capture["files"]
+
+
+def verify_original_volume_provenance(meta: dict, row: dict, originals: dict[str, bytes]) -> dict:
+    """Consume the inert collector's own receipt, without inventing legacy proof."""
+    proof = json.loads(originals["original-capture-provenance.json"])
+    expected = {
+        "schema": "cloudbench-original-volume-capture-v1", "version": 1,
+        "kind": "original-volume-inert-capture", "direct_original_volume": True,
+        "proof_credit": 0, "native_release_verified": False,
+        "fleet_owner_token": meta["fleet_owner_token"], "run_id": meta["run_id"],
+        "app": meta["app"], "bench": row["task"], "ordinal": row["ordinal"],
+        "allocation_kind": "clone", "guest_run_token": row["run_token"],
+        "machine_id": row["machine_id"], "source_machine_id": row["machine_id"],
+        "volume_id": row["volume_id"], "source_volume_id": row["volume_id"],
+        "archive_name": row["machine_id"] + ".tar.gz",
+        "native_final_volume_state": "created", "inert_command": ["sleep", "infinity"],
+        "guest_inert_sleepers": 1,
+        "provider_mutations": ["config-inert", "start", "stop", "config-restore"],
+    }
+    assert all(type(proof.get(key)) is type(value) and proof[key] == value
+               for key, value in expected.items())
+    assert proof["native_final_state"] in {"stopped", "created"}
+    raw = originals["original-volume-capture.tar.gz"]
+    assert type(proof["archive_bytes"]) is int and proof["archive_bytes"] == len(raw)
+    assert proof["archive_sha256"] == hashlib.sha256(raw).hexdigest()
+    config = json.loads(originals["original-native-config.json"])
+    # The collector hashes canonical JSON, while its saved file has a newline.
+    canonical = json.dumps(config, sort_keys=True, separators=(",", ":")).encode()
+    assert proof["native_original_config_sha256"] == hashlib.sha256(canonical).hexdigest()
+    missing = proof["missing"]
+    assert isinstance(missing, list) and len(missing) == len(set(missing))
+    assert all(isinstance(name, str) and safe_name(name) for name in missing)
+    assert missing == row["missing"] and set(missing).isdisjoint(proof["files"])
+    verify_capture_payload(proof, raw, originals)
+    return proof
+
+
 def verify_pre_service_archive(meta: dict, row: dict, originals: dict[str, bytes], *, config_preserved: bool = False) -> None:
     """Verify the original pre-service endpoint without inventing a runtime receipt."""
     token, machine, volume = (row[key] for key in ("run_token", "machine_id", "volume_id"))
@@ -171,37 +221,34 @@ def verify_pre_service_archive(meta: dict, row: dict, originals: dict[str, bytes
     assert originals["bench.log"].splitlines()[0] == ("RUNSTAMP-" + token).encode()
     config_bytes = originals["original-native-config.json"]
     config = json.loads(config_bytes)
-    capture = json.loads(originals["original-capture-manifest.json"])
-    receipt = json.loads(originals["original-capture-receipt.json"])
     raw = originals["original-volume-capture.tar.gz"]
-    assert capture["machine_id"] == capture["source_machine_id"] == machine
-    assert capture["source_volume_id"] == volume and capture["run_token"] == token
-    assert capture["proof_credit"] == 0
-    assert receipt["machine_id"] == machine and receipt["volume_id"] == volume
-    assert receipt["owner"] == meta["fleet_owner_token"] and receipt["proof_credit"] == 0
-    assert receipt["capture_complete"] is True
-    if config_preserved:
-        assert receipt["capture_mode"] == "authenticated-terminal-read"
-        assert receipt["original_config_unchanged"] is True
-        assert receipt["before_config_sha256"] == receipt["after_config_sha256"] == hashlib.sha256(config_bytes).hexdigest()
+    if "original-capture-provenance.json" in originals:
+        assert not config_preserved
+        assert {"original-capture-manifest.json", "original-capture-receipt.json"}.isdisjoint(originals)
+        capture = verify_original_volume_provenance(meta, row, originals)
     else:
-        assert receipt["restored_original_config"] is True
-    assert receipt["original_config_sha256"] == hashlib.sha256(config_bytes).hexdigest()
-    for proof in (capture, receipt):
-        assert proof["archive_bytes"] == len(raw)
-        assert proof["archive_sha256"] == hashlib.sha256(raw).hexdigest()
-    assert capture["missing"] == row["missing"]
-    captured = {}
-    with tarfile.open(fileobj=io.BytesIO(raw), mode="r:gz") as archive:
-        for member in archive:
-            assert member.isfile() and safe_name(member.name) and member.name not in captured
-            assert member.size <= 64 * 1024 * 1024
-            stream = archive.extractfile(member)
-            assert stream is not None
-            data = stream.read(member.size + 1)
-            assert len(data) == member.size and originals[member.name] == data
-            captured[member.name] = {"bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()}
-    assert captured == capture["files"] and absent.isdisjoint(captured)
+        capture = json.loads(originals["original-capture-manifest.json"])
+        receipt = json.loads(originals["original-capture-receipt.json"])
+        raw = originals["original-volume-capture.tar.gz"]
+        assert capture["machine_id"] == capture["source_machine_id"] == machine
+        assert capture["source_volume_id"] == volume and capture["run_token"] == token
+        assert capture["proof_credit"] == 0
+        assert receipt["machine_id"] == machine and receipt["volume_id"] == volume
+        assert receipt["owner"] == meta["fleet_owner_token"] and receipt["proof_credit"] == 0
+        assert receipt["capture_complete"] is True
+        if config_preserved:
+            assert receipt["capture_mode"] == "authenticated-terminal-read"
+            assert receipt["original_config_unchanged"] is True
+            assert receipt["before_config_sha256"] == receipt["after_config_sha256"] == hashlib.sha256(config_bytes).hexdigest()
+        else:
+            assert receipt["restored_original_config"] is True
+        assert receipt["original_config_sha256"] == hashlib.sha256(config_bytes).hexdigest()
+        for proof in (capture, receipt):
+            assert proof["archive_bytes"] == len(raw)
+            assert proof["archive_sha256"] == hashlib.sha256(raw).hexdigest()
+        assert capture["missing"] == row["missing"]
+    verify_capture_payload(capture, raw, originals)
+    assert absent.isdisjoint(capture["files"])
     assert config["env"]["CLOUDBENCH_RUN_TOKEN"] == token
     assert config["env"]["CLOUDBENCH_FRESH_VOLUME"] == "1"
     assert config["env"]["BENCH_TASKS_B64"] == base64.b64encode(row["task"].encode()).decode()

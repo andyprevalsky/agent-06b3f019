@@ -234,12 +234,31 @@ def token_from_env_file(path: Path) -> str:
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("admission", type=Path)
-    parser.add_argument("--agents-env", type=Path, required=True)
+    parser.add_argument("--agents-env", type=Path)
+    parser.add_argument("--forensic-closure", type=Path, help="Reconcile a separate exact-absence projection; never rewrite original audit")
     parser.add_argument("--app", default=DEFAULT_APP)
     args = parser.parse_args(argv)
     admission = args.admission.absolute()
     if not (admission / "coordination.json").exists():
         parser.error("a sharded admission directory with coordination.json is required")
+    if args.forensic_closure:
+        forensic = runpy.run_path(str(HERE / "cloudbench-forensic-resource-closure.py"))
+        if args.agents_env is None:
+            parser.error("--agents-env is required for fresh forensic re-observation")
+        publication = forensic["Publication"]()
+        try:
+            with forensic["S"]["until"](time.monotonic() + 300):
+                capture = runpy.run_path(str(HERE / "cloudbench-original-volume-capture.py"))
+                api = capture["Fly"](args.app, token_from_env_file(args.agents_env))
+                result = forensic["reconcile"](admission, args.forensic_closure, api, publication=publication)
+            forensic["commit_publication"](publication)
+        except BaseException:
+            forensic["rollback_publication"](publication)
+            raise
+        print(json.dumps(result))
+        return 0
+    if args.agents_env is None:
+        parser.error("--agents-env is required for a native audit")
     capture = runpy.run_path(str(HERE / "cloudbench-original-volume-capture.py"))
     api = capture["Fly"](args.app, token_from_env_file(args.agents_env))
     result = run(admission, api, args.app)

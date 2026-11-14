@@ -163,6 +163,40 @@ describe('Phone app device view', () => {
     expect(state.frames).toBe(idleFrames);
     expect(leaseOrQueueRequests()).toEqual([]);
   }, 20_000);
+
+  it('says the phone is starting, never idle, while setup runs before the phone session boots', async () => {
+    // Prod 2026-11-14: /connection setting_up for ~75 s while /device was still IDLE, holder null.
+    const state = device({ providerState: 'IDLE', holder: null, frame: 'IDLE' });
+    server.use(
+      http.get(`${API}/connection`, () =>
+        HttpResponse.json({
+          enabled: true,
+          configured: true,
+          status: 'setting_up',
+          setupAgentId: HOLDER,
+          connectionRevision: 1,
+        }),
+      ),
+    );
+    const view = await openPhone();
+    expect(
+      await within(view).findByTestId('iphone-setup-progress-floating', {}, { timeout: 4000 }),
+    ).toBeInTheDocument();
+    expect(
+      await within(view).findByText('Starting the phone for setup…', {}, { timeout: 4000 }),
+    ).toBeInTheDocument();
+    expect(view).not.toHaveTextContent(/idle/i);
+    state.providerState = 'READY';
+    state.holder = HOLDER;
+    state.frame = 'png';
+    expect(
+      await within(view).findByTestId('phone-device-frame', {}, { timeout: 8000 }),
+    ).toHaveAttribute('src', expect.stringMatching(/^blob:frame-\d+$/));
+    expect(within(view).getByTestId('phone-device-holder')).toHaveTextContent(
+      'In use by agent abcdef12',
+    );
+    expect(leaseOrQueueRequests()).toEqual([]);
+  }, 20_000);
 });
 
 describe('queued agent (WAITING lease)', () => {

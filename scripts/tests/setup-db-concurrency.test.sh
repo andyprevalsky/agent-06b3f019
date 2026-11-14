@@ -644,8 +644,10 @@ run_system_setup_db() { # run_system_setup_db <repo> <port> <workspace> [env...]
     cd "$repo"
     # An isolated deploy worktree exports its own identity and name trust;
     # inheriting them would let the passed name beat the repo's .cloud-env.
+    # Own the DB override too; cases can still pass an explicit value via "$@".
     env -u ROSE_TRUST_CONDUCTOR_WORKSPACE_NAME -u ROSE_DEPLOY_WORKTREE \
       -u ROSE_DEPLOY_WORKTREE_PATH -u ROSE_DEPLOY_SOURCE_WORKSPACE \
+      -u ROSE_SYSTEM_PG_DB_NAME \
       PATH="$SYS/bin:$PATH" CONDUCTOR_PORT="$port" CONDUCTOR_WORKSPACE_NAME="$ws" \
       CONDUCTOR_WORKSPACE_PATH="$repo" ROSE_USE_SYSTEM_PG=true \
       ROSE_WORKSPACE_DB_LOCK_DIR="$SYS/locks" "$@" \

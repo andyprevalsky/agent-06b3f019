@@ -20,6 +20,7 @@ export function optionalAgentCreateFields(params: {
   worldModelMode?: 'real' | 'simulate' | 'shadow';
   isBenchmark?: boolean;
   githubRepoUrl?: string;
+  githubRepoRef?: string;
   originDeviceId?: string;
   projectId?: string | null;
   folderId?: string | null;
@@ -61,6 +62,7 @@ export function optionalAgentCreateFields(params: {
     ...(params.worldModelMode !== undefined ? { worldModelMode: params.worldModelMode } : {}),
     ...(params.isBenchmark === true ? { isBenchmark: true } : {}),
     ...(params.githubRepoUrl !== undefined ? { githubRepoUrl: params.githubRepoUrl } : {}),
+    ...(params.githubRepoRef !== undefined ? { githubRepoRef: params.githubRepoRef } : {}),
     ...(params.originDeviceId !== undefined ? { originDeviceId: params.originDeviceId } : {}),
     ...(params.taskPath !== undefined && params.taskPath !== null
       ? { taskPath: params.taskPath }

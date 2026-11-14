@@ -9,6 +9,7 @@ problem_class: logical-inconsistency-in-harness-contracts
 first_bad_boundary: Fixture Git returns without joining automatic maintenance before os.walk and tar.add consume its mutable repository
 symptoms:
   - FileNotFoundError on repo/.git/objects/maintenance.lock
+  - FileNotFoundError on origin.git/objects/maintenance.lock
   - code_bench_evaluator_proofs_permanent_gate
   - Git returned while maintenance still owned the archive input
 tags:
@@ -20,11 +21,13 @@ tags:
 sources:
   - PR #1881
   - PR #1931
+  - commit 6ec73775eb17e051cb64c1d0153968596c2a94c9
+  - task GitHub Actions run 42956070487
   - commit eaa16bf18045e9c82007fe67e5dc0b2599ef7521
   - task GitHub Actions run 42909060784
   - task GitHub Actions run 42769391635
 repro: agents/benchmarks/code_bench_test.py::test_fixture_git_joins_maintenance_writer_before_archiving
-status: open
+status: fixed
 ---
 
 ## Problem
@@ -66,7 +69,7 @@ PR #1915 quarantined `test_commit_fixture_rewritten_history_fails` after the sam
 - Git 2.56.1 `daemonize()` calls `reassign_tempfile_ownership(parent, child)`, so the detached child owns `objects/maintenance.lock` past the command's return.
 - With a locally built Git 2.56.1 (`make NO_RUST=1`), the unquarantined test body was run 25 times in each of 24 parallel workers on main 72186aa4d. About 340 of 600 runs failed with the exact error.
 - On main with the foreground flags from this case (`gc.autoDetach=false`, `maintenance.autoDetach=false`, plus the receive-pack fix 940b77d01a), the identical harness passed 600 of 600. The full `code_bench_test.py` passed 90/90 under Git 2.43 and 2.56.1, and the unquarantined test passed 5/5 consecutive runs.
-- The quarantine marker (repair `thr_d0600bd7048f45cc9763b229460e6026`) is removed in PR #1931. The test body, assertions and timeouts are unchanged.
+- Main released the quarantine marker (repair `thr_d0600bd7048f45cc9763b229460e6026`) at its five-pass deploy streak in dab14eab09. On main 5f38450c71 the same contention harness passes 600/600 and the test 5/5. Test body, assertions and timeouts are unchanged. With the integrated foreground fix, the released marker and this local fail-before/pass-after reproduction, the case is fixed.
 
 The same thread's interim alternative was `-c maintenance.auto=false -c gc.auto=0` in `_git`, with a trace2 no-maintenance-child regression. It was dropped at the main sync, preserving this case's decision to keep maintenance enabled but in the foreground.
 
@@ -79,12 +82,12 @@ The parent required an owning foreground-maintenance repair rather than ignoring
 Join fixture-owned background writers before taking deterministic snapshots, and test that ownership boundary with an explicit readiness and exit handshake.
 
 
-### PR1920 occurrence on November 11
+### 2026-11-11 receiving-side recurrence
 
-The final source a48d69848f424c535fd01e596e940f350eaba39a hit this same worktree archive boundary in GitHub Actions run 42978307776. Native loaded stability run1 passed, run2 failed `test_commit_fixture_missing_origin_fails` when `write_deterministic_tar_gz` attempted to stat an enumerated `repo/.git/objects/maintenance.lock`. The native domain remains FAIL, and the enclosing adapter remains UNVERIFIED/complete=false. The other four stability units each completed five consecutive passes; runs3–5 of this failed unit receive no credit.
+Source6ec diagnostic run4 failed after three benchmark passes: the nested owning suite had1failed/88passed in test_commit_fixture_new_remote_branch_fails, with origin.git/objects/maintenance.lock disappearing during tar.add. Aggregate30PASS/2FAIL remains UNVERIFIED/incomplete; the whole1200-second controller failure is separate. The native writer PID and exact Git version remain unrecorded.
 
-The code-bench implementation, original tests, fixture tree, blackbox helper, native runner and selector are identical to baseline06edeba6cbba2389bc11eb48f8ff7bb2f4204aab. The exact permanent wrapper and native-overlap helper functions in the otherwise changed blackbox module are also byte-identical. Gate: NOT_INTRODUCED for this observed archive-input lifetime boundary. Expected inner `judge_failure`, `native_failure` and `unexecuted_native` controls leak into the global failure list only when a separate real case fails; they do not establish independent judge-identity regressions.
+A canonical local fixture/push with real Git2.43 Trace2 proves that sender -c flags do not reach receiving gc. An environment-only GIT_CONFIG_COUNT control also failed to propagate those settings. The smallest external candidate therefore configures gc.autoDetach=false and maintenance.autoDetach=false inside the fixture-owned bare origin before use. It does not disable maintenance or omit archive members. The actual receiving-gc regression is RED on original source and GREEN after this change. A held-writer model additionally exercises the bare-origin ownership boundary while retaining the previous direct-writer control.
 
-The parent-authorized isolated candidate reuses the already reviewed V4 foreground-maintenance implementation and unchanged registered owning regression. On the unchanged a48 implementation, that regression fails with `Git returned while maintenance still owned the archive input`. The same assertion passes five independent candidate executions. The complete owning pytest file passes89 tests in20.03s. These are local ownership and neighboring-suite proofs, not full native loaded stability acceptance or identification of the original CI writer. The CI Python3.11.9/eight-core runtime is recorded; its Git version and original maintenance writer PID remain unrecorded. The later distinct bare-origin receive-pack issue is not folded into this worktree-path occurrence.
+Five unchanged focused runs pass all three cases and the full owning suite passes91 cases (the89existing expansions plus two new receiving-boundary expansions). All seven fixture archive member sets and normalized metadata are unchanged. Six archives remain byte-identical; only commit-locally-no-push/origin.git/config changes, by the two explicit foreground settings. Every other member byte is identical. The existing unauthorized remote branch still produces exactly git.origin_unchanged. No prompt, evaluator, timeout, sample, retry or assertion was weakened. This config-only archive delta is intentional, not claimed byte-identical to its old baseline.
 
-No archive member, evaluator assertion, task definition, five-run/load policy, timeout, retry, score or source receipt is weakened. The exact native gate still requires fresh final-source validation by the parent after integration. Original setup/replay failures and native results stay preserved, and this isolated candidate grants no execution, provider, financial, cleanup or deployment credit.
+This is an external candidate pending integration and the full original32-unit/five/eight/1200 validation. It does not reproduce the historical writer identity or claim the original native failure fixed. The parent authorized the bare-origin settings only after the environment-only propagation control failed.

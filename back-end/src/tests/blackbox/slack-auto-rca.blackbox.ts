@@ -301,7 +301,6 @@ async function testSignedCardCreatesOneRcaAgent(): Promise<void> {
     REPO_URL,
     'code agent',
     '.claude/commands/rca.md',
-    'docs/root-cause-analysis.md',
     'local reproduction',
     ERROR_MESSAGE,
     `slack_ts="${ORIGIN_TS}"`,

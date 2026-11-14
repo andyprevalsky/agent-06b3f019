@@ -15,13 +15,14 @@ import {
 import { recordPersonMessage } from '../../providers/personMessageStamp';
 import { type FilePointer, validateTotalSize } from '../../providers/storage';
 import type { PostMessageBody } from './types';
+import { isAgentAuthoredRow, withCredentialProvenance } from './credentialContext';
+import { buildUserMessageSignalValue } from './agentMessageSignal';
+export { buildUserMessageSignalValue } from './agentMessageSignal';
 import * as repo from './repo';
 import { withActiveBrowserSessionShareLock } from './repoBrowserTargetedMessages';
 import { readTaskInboxMessages } from './agentToAgentService';
-import { buildUserMessageSignalValue } from './agentMessageSignal';
 import { ownedByExternalExecution } from './agentExternalExecution';
 import { createLogger } from '../../providers/logger';
-export { buildUserMessageSignalValue } from './agentMessageSignal';
 import { broadcastChatReactivation } from './agentMessageReactivation';
 import { resumeStoppedBrowser, stoppedAgentStatus } from './agentMessageResume';
 import { findGraphRootId } from './repoGraph';
@@ -58,15 +59,6 @@ function resolveRole(
     return { role: body.role };
   }
   return { role: 'USER' };
-}
-
-/** USER rows written by agents rather than people (metadata flags, never text). */
-function isAgentAuthoredRow(metadata: PostMessageBody['metadata']): boolean {
-  return (
-    metadata?.agentNotification === true ||
-    metadata?.agentMessage === true ||
-    metadata?.environmentContext === true
-  );
 }
 
 /** Handle user message routing — signal workflow or run chat handler. */
@@ -312,6 +304,7 @@ export async function postMessage(
   workflowGeneration?: string,
   options: { personAuthored?: boolean } = {}
 ) {
+  body = withCredentialProvenance(body, isInternal);
   // Determine role based on auth type
   const roleResult = resolveRole(body, isInternal);
   if ('error' in roleResult) {

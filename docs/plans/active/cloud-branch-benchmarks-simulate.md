@@ -51,7 +51,7 @@ standardized live report card and a finished, trustworthy validation path.
   mutation under concurrency, in-RAM O(n²) retriever `add`). **It's OK that it doesn't scale
   forever right now** — that is a founder-track conversation with the WMH authors, not this plan.
 - No new ephemeral prod-like environments beyond what the isolation layer + a served WMH give us.
-- No changes to task definitions, prompts, pass criteria, or timeouts (Critical Rule 24).
+- No changes to task definitions, prompts, pass criteria, or timeouts (CLAUDE.md rule 25).
 
 ## Architecture
 

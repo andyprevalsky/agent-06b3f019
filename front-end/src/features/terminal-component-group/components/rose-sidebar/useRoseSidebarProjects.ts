@@ -1,27 +1,31 @@
 /**
  * STATE MACHINE: useRoseSidebarProjects (project rows + panels beside the left bar)
  *
- * PROJECT SETTINGS PANEL (beside the left bar):
- *   [NONE] --⚙ / "Project settings" on project P--> [PROJECT(P)]
+ * Projects are shown as Folders (same rows and ids; lib/api/folders.ts).
+ *
+ * FOLDER SETTINGS PANEL (beside the left bar):
+ *   [NONE] --⚙ / "Folder settings" on folder P--> [PROJECT(P)]
  *   [PROJECT(P)] --⚙ on project Q--> [PROJECT(Q)]
  *   [PROJECT(P)] --same ⚙ again | close | Escape | P deleted--> [NONE]
  * (Account settings open in the right-panel slot, owned by RoseAppsProvider.)
  *
- * PROJECT MUTATIONS (useProjects): create (inline "+ New project"), rename
- * (inline, PUT { name }), delete (after the confirm dialog). Failures surface as
- * toasts, except a duplicate name on create (409), which the inline input shows.
+ * FOLDER MUTATIONS (useProjects, /api/folders): create (inline "+ New folder",
+ * POST { name } only, never a repo), rename (inline, PATCH { name }), delete
+ * (after the confirm dialog). Failures surface as toasts, except a duplicate
+ * name on create (409), which the inline input shows.
  */
 
 import { useCallback, useState } from 'react';
 
 import { useToast } from '@/hooks/use-toast';
-import { DuplicateProjectNameError, type Project } from '@/lib/api/projects';
+import { DuplicateFolderNameError } from '@/lib/api/folders';
+import type { Project } from '@/lib/api/projects';
 
 import {
   useCreateProject,
   useDeleteProject,
   useProjectsQuery,
-  useUpdateProject,
+  useRenameProject,
 } from './useProjects';
 import type { RoseProjectActions } from './RoseAgentGroups';
 
@@ -32,7 +36,7 @@ export function useRoseSidebarProjects(
   const projectQuery = useProjectsQuery();
   const projects = projectQuery.data ?? [];
   const createMutation = useCreateProject();
-  const updateMutation = useUpdateProject();
+  const renameMutation = useRenameProject();
   const deleteMutation = useDeleteProject();
   const [settingsProjectId, setSettingsProjectId] = useState<string | null>(null);
   const [renamingProjectId, setRenamingProjectId] = useState<string | null>(null);
@@ -52,7 +56,7 @@ export function useRoseSidebarProjects(
     setDeleteTarget(null);
     if (target === null) return;
     setSettingsProjectId((prev) => (prev === target.id ? null : prev));
-    deleteMutation.mutate(target.id, { onError: () => fail('Could not delete project') });
+    deleteMutation.mutate(target.id, { onError: () => fail('Could not delete folder') });
   }, [deleteMutation, deleteTarget, fail]);
 
   const projectActions: RoseProjectActions = {
@@ -63,9 +67,12 @@ export function useRoseSidebarProjects(
     onRename: (project, name) => {
       setRenamingProjectId(null);
       if (name === project.name) return;
-      updateMutation.mutate(
-        { id: project.id, updates: { name } },
-        { onError: () => fail('Could not rename project') },
+      renameMutation.mutate(
+        { id: project.id, name },
+        {
+          onError: (err) =>
+            fail(err instanceof DuplicateFolderNameError ? err.message : 'Could not rename folder'),
+        },
       );
     },
     onRequestDelete: setDeleteTarget,
@@ -74,9 +81,9 @@ export function useRoseSidebarProjects(
         await createMutation.mutateAsync(name);
         return null;
       } catch (err) {
-        if (err instanceof DuplicateProjectNameError) return err.message;
-        fail('Could not create project');
-        return 'Could not create project. Try again.';
+        if (err instanceof DuplicateFolderNameError) return err.message;
+        fail('Could not create folder');
+        return 'Could not create folder. Try again.';
       }
     },
   };

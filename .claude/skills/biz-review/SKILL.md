@@ -19,7 +19,7 @@ placeholder values.
 
 ## Prerequisites
 
-- `agents/.env` and `back-end/.env` (authoritative copies, see CLAUDE.md);
+- `agents/.env` and `back-end/.env` (authoritative copies, see `docs/setup-mac.md`);
   `back-end` dependencies installed (`npx tsx` works); `dvb-onbox` on PATH
   (boxes.dev box-hours) and `gh`.
 - `back-end/.env` points at the PROD database; the metrics script only reads.
