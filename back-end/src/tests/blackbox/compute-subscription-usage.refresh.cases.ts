@@ -16,7 +16,11 @@
  */
 
 import type { IntegrationType } from '@prisma/client';
-import { refreshClaudeUsage, USAGE_ENDPOINT_URL } from '../../providers/computeUsageRefresh';
+import {
+  refreshClaudeUsage,
+  USAGE_ENDPOINT_URL,
+  usageNeedsRefresh,
+} from '../../providers/computeUsageRefresh';
 import { prisma } from '../../providers/database';
 import { getPool } from '../../providers/rose/pools';
 import { ANTHROPIC_API_URL } from '../../providers/rose/transport';
@@ -291,6 +295,42 @@ export function registerUsageRefreshCases(ctx: UsageRefreshContext): void {
     );
     assert(account.nextResetAt === reset, `next reset must be ${reset}: ${account.nextResetAt}`);
   });
+
+  ctx.test(
+    'a provider cooldown beyond any subscription window is re-checked and lifted when allowed',
+    async () => {
+      // Prod 2026-11-14 01:41Z: a fast-mode request the account could not pay for
+      // got 429 with only the MONTHLY overage reset (2026-12-01), and that reset was
+      // stored as an authoritative rate_limit cooldown ~17 days out on accounts
+      // whose standard requests were allowed. No 5h/7d window resets that far out,
+      // so a standard-speed quota check that says allowed must lift it.
+      const token = `usage-reconcile-overage-${ctx.run}`;
+      const { userId, accountId, integrationId } = await seedLogin(token, ['user:inference']);
+      const until = await coolOnRoseBackoff(integrationId, {
+        reason: 'rate_limit',
+        authoritative: true,
+        untilMs: 17 * DAY_MS,
+      });
+      assert(
+        usageNeedsRefresh(
+          { usageObservedAt: new Date(), rateLimitedUntil: until, rateLimitAuthoritative: true },
+          new Date()
+        ),
+        'a provider cooldown beyond any subscription window must be re-checked even with fresh usage'
+      );
+      const refreshed = await refreshScripted(integrationId, token);
+      assert(refreshed.outcome === 'stored', `windows must be stored, got ${refreshed.outcome}`);
+      assert(
+        refreshed.quotaBodies.length === 1 && refreshed.quotaBodies[0].speed === undefined,
+        `the re-check is one standard-speed quota check, got ${JSON.stringify(refreshed.quotaBodies)}`
+      );
+      const account = await accountFor(userId, accountId);
+      assert(
+        account.cooldown === null && account.rateLimitedUntil === null,
+        `an allowed account must not stay cooled until the overage reset: ${JSON.stringify(account)}`
+      );
+    }
+  );
 
   ctx.test('a provider reset or an auth cooldown is never changed by a quota check', async () => {
     const providerToken = `usage-reconcile-provider-${ctx.run}`;

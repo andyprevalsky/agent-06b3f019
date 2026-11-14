@@ -1647,6 +1647,76 @@ async function testClaudeAuth_retryAfterWithinCapStillRetriesInPlace() {
   }
 }
 
+/**
+ * Regression (prod 2026-11-14 01:41Z): an ultrafast request's Opus fast mode got
+ * 429 "Usage credits are required for fast mode." with only the MONTHLY overage
+ * reset (unified-reset 2026-12-01) and overage-disabled-reason, no 5h/7d window
+ * rejected. Rose surfaced that reset as the account's rate limit and every Claude
+ * subscription cooled until 12-01 though each served standard requests. Like
+ * Claude Code (services/api/withRetry.ts handleFastModeOverageRejection), turn
+ * fast mode off and retry the same token at standard speed; never surface a
+ * rate limit; keep fast mode off for that token.
+ */
+async function testClaudeAuth_fastModeOverageRejectionRetriesStandardOnSameToken() {
+  process.env.OPENROUTER_API_KEY = 'or-test-key';
+  const requests: Array<{ speed: unknown; fastBeta: boolean; auth: string | null }> = [];
+  installFetchStub((url, init) => {
+    if (url !== ANTHROPIC_API_URL) throw new Error(`Unexpected URL: ${url}`);
+    const body = JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>;
+    const headers = new Headers(init?.headers);
+    requests.push({
+      speed: body.speed,
+      fastBeta: (headers.get('anthropic-beta') ?? '').split(',').includes('fast-mode-2026-02-01'),
+      auth: headers.get('authorization'),
+    });
+    if (body.speed === 'fast') {
+      // The captured prod response (2026-11-14, account 88a02cdc).
+      return new Response(
+        JSON.stringify({
+          type: 'error',
+          error: { type: 'rate_limit_error', message: 'Usage credits are required for fast mode.' },
+        }),
+        {
+          status: 429,
+          headers: {
+            'Content-Type': 'application/json',
+            'anthropic-ratelimit-unified-reset': '1796083200',
+            'anthropic-ratelimit-unified-overage-disabled-reason': 'org_level_disabled',
+          },
+        }
+      );
+    }
+    return sseResponse(ANTHROPIC_OK_SSE);
+  });
+
+  try {
+    for (const requestId of ['fast-overage-1', 'fast-overage-2']) {
+      const chunks = await collect(
+        claudeAuthComplete({
+          poolSpec: getPool('rose-1-ultra'),
+          messages: [{ role: 'user', content: 'hi' }],
+          auth: { mode: 'oauth', token: 'sk-ant-oat-fast-overage-ts' },
+          requestId,
+          speed: 'ultrafast',
+        })
+      );
+      assert(chunks.length > 0, `${requestId}: served at standard speed on the same token`);
+    }
+    assertEqual(
+      JSON.stringify(requests),
+      JSON.stringify([
+        { speed: 'fast', fastBeta: true, auth: 'Bearer sk-ant-oat-fast-overage-ts' },
+        { fastBeta: false, auth: 'Bearer sk-ant-oat-fast-overage-ts' },
+        // Fast mode stays off for this token: the next call goes straight to standard.
+        { fastBeta: false, auth: 'Bearer sk-ant-oat-fast-overage-ts' },
+      ]),
+      'fast rejected for overage → same token at standard speed, then fast stays off'
+    );
+  } finally {
+    restoreFetch();
+  }
+}
+
 /** Unit coverage for every extraction branch, mirroring claude_auth.py. */
 async function testRateLimitReset_extractionBranches() {
   const now = Date.now();
@@ -4804,6 +4874,10 @@ async function main(): Promise<void> {
     {
       name: 'claudeAuth / retry-after within cap retries in place',
       fn: testClaudeAuth_retryAfterWithinCapStillRetriesInPlace,
+    },
+    {
+      name: 'claudeAuth / fast-mode overage rejection retries standard on the same token',
+      fn: testClaudeAuth_fastModeOverageRejectionRetriesStandardOnSameToken,
     },
     {
       name: 'rateLimitReset / extraction branches',

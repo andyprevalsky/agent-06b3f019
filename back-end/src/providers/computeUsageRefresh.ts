@@ -32,8 +32,9 @@
  *
  * reconcile (computeSubscriptionUsage reconcileRoseCooldown): an allowed
  * observation lifts Rose's own non-authoritative backoff on the row; a rejected
- * one replaces it with the provider's reset (authoritative). Provider resets and
- * auth cooldowns are never changed.
+ * one replaces it with the provider's reset (authoritative). Auth cooldowns and
+ * provider resets within a subscription window are never changed; one beyond
+ * every window (a fast-mode overage reset) is.
  *
  * Triggers (never awaited by their callers): a non-authoritative cooldown
  * (429 without a provider reset, a stall) reported for a Claude row, and
@@ -53,6 +54,7 @@ import { randomUUID } from 'node:crypto';
 
 import { readClaudeUsageCredential } from './computeCredentials';
 import {
+  beyondEverySubscriptionWindow,
   parseUsagePayload,
   reconcileRoseCooldown,
   recordIntegrationUsage,
@@ -153,8 +155,9 @@ export function resetUsageRefreshStateForTests(): void {
 
 /**
  * Whether a Claude row's usage should be fetched: never measured, measured over
- * USAGE_STALE_AFTER_MS ago, or cooling down on Rose's own backoff (no provider
- * reset), so the bar can show the real windows instead.
+ * USAGE_STALE_AFTER_MS ago, cooling down on Rose's own backoff (no provider
+ * reset), or cooling past every subscription window (a fast-mode overage reset),
+ * so the bar can show the real windows and reconcile can lift a wrong cooldown.
  */
 export function usageNeedsRefresh(
   row: {
@@ -168,7 +171,10 @@ export function usageNeedsRefresh(
   if (row.usageObservedAt === null) return true;
   if (nowMs - row.usageObservedAt.getTime() > USAGE_STALE_AFTER_MS) return true;
   const cooling = row.rateLimitedUntil !== null && row.rateLimitedUntil.getTime() > nowMs;
-  return cooling && row.rateLimitAuthoritative !== true;
+  if (!cooling) return false;
+  // Past every 5h/7d window: not this account's usage limit, so ask again.
+  if (row.rateLimitedUntil!.getTime() > beyondEverySubscriptionWindow(now).getTime()) return true;
+  return row.rateLimitAuthoritative !== true;
 }
 
 function endpointWindow(value: unknown): { usedPct: number; resetsAt: Date | null } | undefined {
