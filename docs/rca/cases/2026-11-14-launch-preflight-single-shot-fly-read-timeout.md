@@ -23,6 +23,8 @@ sources:
   - fleet run 20261114-180643-303337 (devbox 2b4e64bd, main 60d5ca599f, 2026-11-14T18:06Z)
   - hub run 20261114-180643-303337 (found by repair thread thr_717118a13d76431a95869b1abba1577b, Gate NOT_INTRODUCED)
   - commit 525d655381
+  - PR #2080
+  - commit e0a3c84759
 repro: scripts/tests/cloudbench-campaign-env.test.py (test_actual_verifier_retries_one_slow_read_then_verifies, test_actual_verifier_persistent_timeout_fails_after_three_reads, test_actual_verifier_missing_secret_after_slow_read_fails_loud, test_actual_verifier_retains_native_failure_status_and_stderr); scripts/tests/cloudbench-inventory-site-startup.test.py (test_snapshot_init_retries_one_slow_read_then_publishes, test_snapshot_init_persistent_timeout_and_other_failures_refuse)
 status: fixed
 ---
@@ -73,6 +75,8 @@ the failing boundary is reproduced directly in the owning launcher suites. The
 original command was rerun on the cloud fleet with the fix.
 
 ## Solution
+
+Shipped in PR #2080 (merge e0a3c84759, 2026-11-14). It passed all 17 deploy gates, including smoke at 11/11, and production semantic. The original `scripts/run-bench browser-biometrics-webdecoy --wait` passed on the fleet with the fix (hub run 20261114-181853-368187).
 
 Both sites now retry only a timeout (`_with_timeout` 124, `fly_with_timeout`
 142), with at most 3 attempts and pauses of 2 s and 5 s, matching the
