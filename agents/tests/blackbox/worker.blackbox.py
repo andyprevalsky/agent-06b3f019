@@ -2743,7 +2743,12 @@ m.memory_group=memory_group
 def boundary(group,request):
     (group/'cgroup.procs').write_text(str(os.getpid()))
     resource.setrlimit(resource.RLIMIT_AS,(request['limits']['maxAddressBytes'],)*2)
-    pathlib.Path('/proc/self/oom_score_adj').write_text('1000')
+    oom_path=pathlib.Path('/proc/self/oom_score_adj')
+    oom_path.write_text('1000')
+    observed=oom_path.read_text().strip()
+    assert observed=='1000', 'child OOM boundary write/readback failed'
+    with (pathlib.Path(root)/'boundary-events').open('a') as output:
+        output.write(json.dumps({'pid':os.getpid(),'oom':observed})+'\n')
 m.child_boundary=boundary
 # The devbox externally rewrites live OOM scores; native kernel proof is separate.
 m.child_oom_score=lambda pid:1000
@@ -2818,7 +2823,10 @@ print(json.dumps(m.dispatch(request)),flush=True)
             observations = [json.loads(line) for line in (runtime / "observations").read_text().splitlines()]
             assert len(observations) == 3 and len({item["pid"] for item in observations}) == 3, observations
             assert all(item["limit"] == [1073741824, 1073741824] for item in observations), observations
-            assert all(item["oom"] == "1000" for item in observations), observations
+            boundary_events = [json.loads(line) for line in (root / "boundary-events").read_text().splitlines()]
+            assert len(boundary_events) == 3, boundary_events
+            assert {item["pid"] for item in boundary_events} == {item["pid"] for item in observations}
+            assert all(item["oom"] == "1000" for item in boundary_events), boundary_events
             assert all(item["broker"] == request["peopleCredentialBrokerOrigin"] for item in observations)
             assert all(item["activation"] == "1" and item["autoscale"] == "0" for item in observations)
             assert all(item["cwd"].endswith("/source/agents") for item in observations)

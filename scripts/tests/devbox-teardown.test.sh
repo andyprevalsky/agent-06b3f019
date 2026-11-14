@@ -46,6 +46,11 @@ mkdir -p "$FIXTURE_ROOT/scripts/lib" "$FIXTURE_ROOT/back-end/scripts"
 cp "$ROOT/scripts/devbox-teardown.sh" "$FIXTURE_ROOT/scripts/"
 cp "$ROOT/scripts/lib/workspace-env.sh" "$FIXTURE_ROOT/scripts/lib/"
 cp "$ROOT/back-end/scripts/local-db-container.sh" "$FIXTURE_ROOT/back-end/scripts/"
+# These route/forwarding cases use their own fake database and Docker identity;
+# an enclosing deploy's explicit database pin must not choose fixture outcomes.
+export CONDUCTOR_WORKSPACE_NAME="$(basename "$FIXTURE_ROOT")"
+export ROSE_SYSTEM_PG_DB_NAME=victoria
+export SYSTEM_PG_PORT=5432
 run() { : >"$FAKE_LOG"; PATH="$WORK/bin:$PATH" bash "$FIXTURE_ROOT/scripts/devbox-teardown.sh" "$@"; }
 
 # 1. the explicit stack id computed by the backend function reaches the killer
@@ -77,4 +82,14 @@ ROSE_USE_SYSTEM_PG=true FAKE_DOCKER_CONTAINER="victoria-db-$ws" FAKE_DOCKER_PORT
 grep -q "DB_URL_FOR_STACK=postgresql://postgres:postgres@localhost:5432/victoria" "$FAKE_LOG" || fail "ROSE_USE_SYSTEM_PG=true must ignore the container"
 # 7. the stack id comes from the repo's own code (real tsx, no E2B): ws part present
 grep -q -- '--print-stack' "$ROOT/scripts/devbox-teardown.sh" || fail "must use the backend function"
+# 8. Without an explicit database pin, real workspace isolation remains in force.
+for workspace in teardown-alpha teardown-beta; do
+  ROSE_SYSTEM_PG_DB_NAME="" CONDUCTOR_WORKSPACE_NAME="$workspace" run >/dev/null
+  expected="victoria_stack_${workspace//-/_}"
+  grep -q "DB_URL_FOR_STACK=postgresql://postgres:postgres@localhost:5432/$expected$" "$FAKE_LOG" || fail "workspace database isolation: $workspace"
+  grep -q "DB_URL_FOR_KILL=postgresql://postgres:postgres@localhost:5432/$expected$" "$FAKE_LOG" || fail "workspace kill database isolation: $workspace"
+done
+# Invalid explicit database names must stop before either backend invocation.
+ROSE_SYSTEM_PG_DB_NAME='invalid-database-name' run >/dev/null
+[ ! -s "$FAKE_LOG" ] || fail "invalid database name reached backend"
 echo "devbox-teardown: all cases passed"

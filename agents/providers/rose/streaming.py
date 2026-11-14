@@ -793,8 +793,16 @@ async def parse_responses_sse(
             if event_type == "response.incomplete":
                 response_obj = event.get("response") or {}
                 apply_usage(response_obj.get("usage") or {})
-                finish_reason = "length"
-                continue
+                details = response_obj.get("incomplete_details") or {}
+                reason = details.get("reason") if isinstance(details, dict) else None
+                if reason == "max_output_tokens":
+                    finish_reason = "length"
+                    continue
+                if reason == "content_filter":
+                    raise RoseRefusalError(f"Responses stream incomplete: content_filter (request_id={request_id})")
+                raise RoseServerError(
+                    f"Responses stream incomplete: {reason or 'unknown'} (request_id={request_id})"
+                )
 
             if event_type in ("error", "response.failed"):
                 error_payload = event.get("error")

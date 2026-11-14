@@ -159,6 +159,24 @@ router.post(
   })
 );
 
+/** POST /api/integrations/compute-code/code-session-usage
+ *  { taskId, usage: { observedAt, fiveHour?, sevenDay?, source, status } }: the
+ *  subscription usage a code session's CLI reported (Claude Code rate_limit_event,
+ *  every status), recorded on the credential row that task ran on. */
+router.post(
+  '/compute-code/code-session-usage',
+  authenticate,
+  asyncHandler(async (req: AuthRequest, res: Response) => {
+    if (req.isInternal !== true) {
+      return res.status(403).json({ error: 'Internal only' });
+    }
+    const body = (req.body as Record<string, unknown> | undefined) ?? {};
+    const taskId = typeof body.taskId === 'string' ? body.taskId.trim() : '';
+    if (taskId === '') return res.status(400).json({ error: 'taskId is required' });
+    return res.json(await service.recordCodeTaskSubscriptionUsage(taskId, body.usage));
+  })
+);
+
 /** POST /api/integrations/compute-code/token/lineage-release */
 router.post(
   '/compute-code/token/lineage-release',
@@ -295,6 +313,14 @@ router.post(
           deployment: typeof body.deployment === 'string' ? body.deployment : undefined,
           retryAfterSeconds:
             typeof body.retryAfterSeconds === 'number' ? body.retryAfterSeconds : undefined,
+          // Why the cooldown, and whether the provider supplied its reset (vs
+          // Rose's own default/stall backoff); unknown values are stored as null.
+          rateLimitReason:
+            typeof body.rateLimitReason === 'string' ? body.rateLimitReason : undefined,
+          rateLimitAuthoritative:
+            typeof body.rateLimitAuthoritative === 'boolean'
+              ? body.rateLimitAuthoritative
+              : undefined,
         }
       );
       return res.json(result);

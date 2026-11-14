@@ -53,6 +53,10 @@ import {
   registerInspectArchiveCases,
 } from './code-session-inspect-archive.cases';
 import { beginIsolatedFundedKeyCooldowns } from './funded-key-cooldown.support';
+import {
+  assertInspectionSubscriptionIsolation,
+  beginIsolatedInspectionSubscriptions,
+} from './code-session-inspect-subscriptions.support';
 
 config();
 
@@ -99,6 +103,7 @@ let liveConnects = 0;
 // The hermetic CLIs own private funded-key cooldowns for the whole fixture lifecycle.
 // Parallel suites continue reading and writing their real shared rows.
 let finishFundedCooldownIsolation: (() => Promise<void>) | null = null;
+let finishSubscriptionIsolation: (() => void) | null = null;
 
 const FAKE_CLI = fakeInspectCli({ cliLog, modeFile, realGit });
 
@@ -251,6 +256,7 @@ async function http(method: string, path: string, userId: string, body?: unknown
 }
 
 before(async () => {
+  finishSubscriptionIsolation = beginIsolatedInspectionSubscriptions(prisma.integration);
   finishFundedCooldownIsolation = await beginIsolatedFundedKeyCooldowns();
   process.env.CODE_SESSION_STORAGE_BACKEND = 'local';
   process.env.CODE_SESSION_STORAGE_LOCAL_DIR = storageDir;
@@ -309,6 +315,7 @@ after(async () => {
     try {
       await finishFundedCooldownIsolation?.();
     } finally {
+      finishSubscriptionIsolation?.();
       await prisma.$disconnect();
     }
   }
@@ -568,6 +575,11 @@ test('a caller that gives up (abort) gets its sandbox killed at once, not after 
   assert.ok(doneMs !== undefined && sandbox.killedAtMs !== null);
   assert.ok(sandbox.killedAtMs < doneMs, 'the kill happened while the CLI was still running');
 });
+
+test(
+  'funded inspection fixture isolates subscriptions and restores unrelated queries',
+  assertInspectionSubscriptionIsolation
+);
 
 test('C15: a Claude usage limit backs that credential off and the inspection answers on Codex', async () => {
   const liveHome = join(fixtureDir, 'live-home-c15');

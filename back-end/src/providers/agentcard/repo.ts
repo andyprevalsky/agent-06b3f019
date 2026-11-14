@@ -15,23 +15,38 @@ export async function saveTokenConfig(
   userId: string,
   tokenConfig: StoredTokenConfig
 ): Promise<void> {
-  const config = tokenConfig as Prisma.InputJsonObject;
-  await prisma.integration.upsert({
-    where: { userId_name_accountId: { userId, name: AGENTCARD_INTEGRATION_NAME, accountId: '' } },
-    create: {
-      userId,
-      name: AGENTCARD_INTEGRATION_NAME,
-      type: IntegrationType.TOOL_SETUP,
-      status: IntegrationStatus.CONNECTED,
-      isActive: true,
-      config,
-    },
-    update: {
-      status: IntegrationStatus.CONNECTED,
-      isActive: true,
-      config,
-      lastUsedAt: new Date(),
-    },
+  await runTransactionWithRetry(async (tx) => {
+    // Legacy MCP token refreshes may still run during cleanup after a v2 migration.
+    // Serialize with v2 binding and preserve its identity when updating the old token bundle.
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`agentcard:v2:rose:${userId}`}))`;
+    const previous = await tx.integration.findUnique({
+      where: { userId_name_accountId: { userId, name: AGENTCARD_INTEGRATION_NAME, accountId: '' } },
+      select: { config: true },
+    });
+    const existing = previous?.config;
+    const config = {
+      ...(typeof existing === 'object' && existing !== null && !Array.isArray(existing)
+        ? existing
+        : {}),
+      ...tokenConfig,
+    } as Prisma.InputJsonObject;
+    await tx.integration.upsert({
+      where: { userId_name_accountId: { userId, name: AGENTCARD_INTEGRATION_NAME, accountId: '' } },
+      create: {
+        userId,
+        name: AGENTCARD_INTEGRATION_NAME,
+        type: IntegrationType.TOOL_SETUP,
+        status: IntegrationStatus.CONNECTED,
+        isActive: true,
+        config,
+      },
+      update: {
+        status: IntegrationStatus.CONNECTED,
+        isActive: true,
+        config,
+        lastUsedAt: new Date(),
+      },
+    });
   });
 }
 
@@ -87,6 +102,7 @@ export async function bindCardholderExclusively(
   buildConfig: (existing: unknown | undefined) => Prisma.InputJsonObject
 ): Promise<{ conflictingUserId?: string }> {
   return runTransactionWithRetry(async (tx) => {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`agentcard:v2:rose:${userId}`}))`;
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`agentcard:cardholder:${cardholderId}`}))`;
 
     const owners = await tx.integration.findMany({
@@ -127,35 +143,119 @@ export async function bindCardholderExclusively(
 
 export async function saveIntegrationConfig(
   userId: string,
-  config: Prisma.InputJsonObject,
+  incoming: Prisma.InputJsonObject,
   connected: boolean
 ): Promise<void> {
-  await prisma.integration.upsert({
-    where: { userId_name_accountId: { userId, name: AGENTCARD_INTEGRATION_NAME, accountId: '' } },
-    create: {
-      userId,
-      name: AGENTCARD_INTEGRATION_NAME,
-      type: IntegrationType.TOOL_SETUP,
-      status: connected ? IntegrationStatus.CONNECTED : IntegrationStatus.NOT_CONNECTED,
-      isActive: true,
-      config,
-    },
-    update: {
-      status: connected ? IntegrationStatus.CONNECTED : IntegrationStatus.NOT_CONNECTED,
-      isActive: true,
-      config,
-      lastUsedAt: new Date(),
-    },
+  await runTransactionWithRetry(async (tx) => {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`agentcard:v2:rose:${userId}`}))`;
+    const previous = await tx.integration.findUnique({
+      where: { userId_name_accountId: { userId, name: AGENTCARD_INTEGRATION_NAME, accountId: '' } },
+      select: { config: true, status: true, isActive: true },
+    });
+    const existing =
+      typeof previous?.config === 'object' &&
+      previous.config !== null &&
+      !Array.isArray(previous.config)
+        ? previous.config
+        : {};
+    const config: Record<string, Prisma.InputJsonValue | null | undefined> = {
+      ...existing,
+      ...incoming,
+    };
+    // A stale legacy snapshot must never replace newer financial identity mappings.
+    for (const key of ['v2UserId', 'v2ClientId', 'v2Bindings']) {
+      if (existing[key] !== undefined) config[key] = existing[key] as Prisma.InputJsonValue;
+    }
+    const keepConnected =
+      previous?.status === IntegrationStatus.CONNECTED &&
+      previous.isActive &&
+      typeof existing.v2UserId === 'string';
+    const status =
+      connected || keepConnected ? IntegrationStatus.CONNECTED : IntegrationStatus.NOT_CONNECTED;
+    await tx.integration.upsert({
+      where: { userId_name_accountId: { userId, name: AGENTCARD_INTEGRATION_NAME, accountId: '' } },
+      create: {
+        userId,
+        name: AGENTCARD_INTEGRATION_NAME,
+        type: IntegrationType.TOOL_SETUP,
+        status,
+        isActive: true,
+        config,
+      },
+      update: {
+        status,
+        isActive: true,
+        config,
+        lastUsedAt: new Date(),
+      },
+    });
+  });
+}
+
+/** Serialize both Rose identity and provider identity before checking and writing ownership. */
+export async function bindV2UserExclusively(
+  userId: string,
+  v2UserId: string,
+  buildConfig: (existing: unknown | undefined) => Prisma.InputJsonObject,
+  clientId: string
+): Promise<{ conflictingUserId?: string }> {
+  return runTransactionWithRetry(async (tx) => {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`agentcard:v2:rose:${userId}`}))`;
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`agentcard:v2:provider:${clientId}:${v2UserId}`}))`;
+    const owners = await tx.integration.findMany({
+      where: {
+        name: AGENTCARD_INTEGRATION_NAME,
+        config: { path: ['v2Bindings', clientId], equals: v2UserId },
+      },
+      select: { userId: true },
+    });
+    const conflictingUserId = owners.find((owner) => owner.userId !== userId)?.userId;
+    if (conflictingUserId !== undefined) return { conflictingUserId };
+    const existing = await tx.integration.findUnique({
+      where: { userId_name_accountId: { userId, name: AGENTCARD_INTEGRATION_NAME, accountId: '' } },
+      select: { config: true },
+    });
+    const config = buildConfig(existing?.config);
+    await tx.integration.upsert({
+      where: { userId_name_accountId: { userId, name: AGENTCARD_INTEGRATION_NAME, accountId: '' } },
+      create: {
+        userId,
+        name: AGENTCARD_INTEGRATION_NAME,
+        type: IntegrationType.TOOL_SETUP,
+        status: IntegrationStatus.CONNECTED,
+        isActive: true,
+        config,
+      },
+      update: {
+        status: IntegrationStatus.CONNECTED,
+        isActive: true,
+        config,
+        lastUsedAt: new Date(),
+      },
+    });
+    return {};
   });
 }
 
 export async function clearToken(userId: string): Promise<void> {
-  await prisma.integration
-    .update({
+  await runTransactionWithRetry(async (tx) => {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`agentcard:v2:rose:${userId}`}))`;
+    const row = await tx.integration.findUnique({
       where: { userId_name_accountId: { userId, name: AGENTCARD_INTEGRATION_NAME, accountId: '' } },
-      data: { status: IntegrationStatus.NOT_CONNECTED, isActive: false, config: {} },
-    })
-    .catch(() => {
-      // No row to clear — nothing to do.
+      select: { config: true },
     });
+    if (row === null) return;
+    const existing =
+      typeof row.config === 'object' && row.config !== null && !Array.isArray(row.config)
+        ? row.config
+        : {};
+    const retained: Record<string, Prisma.InputJsonValue | null> = {};
+    for (const key of ['v2UserId', 'v2ClientId', 'v2Bindings']) {
+      if (existing[key] !== undefined) retained[key] = existing[key] as Prisma.InputJsonValue;
+    }
+    await tx.integration.update({
+      where: { userId_name_accountId: { userId, name: AGENTCARD_INTEGRATION_NAME, accountId: '' } },
+      data: { status: IntegrationStatus.NOT_CONNECTED, isActive: false, config: retained },
+    });
+  });
 }

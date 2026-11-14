@@ -44,7 +44,7 @@ The loop has **no epoch cap and no budget cap**. It runs until the verifier says
 bash scripts/loopx.sh > .context/loopx/run.out 2>&1 &
 ```
 
-Use `run_in_background=true`. Then follow CLAUDE.md rule 18 monitoring cadence:
+Use `run_in_background=true`. Then follow CLAUDE.md rule 19 monitoring cadence:
 - First 60s: poll `.context/loopx/log.jsonl` every 10s. Confirm an `epoch_start` event appears. If the script died at startup with an empty log, read `.context/loopx/run.out` for the error and fix.
 - After 60s: poll every 60s. Look for `epoch_end`, `verify`, `guardrail_check`, `end` events.
 - Exit immediately when you see an `end` event. Do not keep polling.

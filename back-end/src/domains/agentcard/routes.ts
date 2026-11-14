@@ -15,7 +15,7 @@
  * present it receives the FULL live toolset and may call any tool in a loop.
  */
 
-import { Router, type Request, type Response } from 'express';
+import { Router, urlencoded, type Request, type Response } from 'express';
 import { hybridAuth, type HybridAuthRequest } from '../../providers/hybridAuth';
 import { createLogger } from '../../providers/logger';
 import { asyncHandler } from '../../utils/asyncHandler';
@@ -30,9 +30,47 @@ import {
   listUserTools,
 } from '../../providers/agentcard/runtime';
 import * as service from './service';
+import { handleV2Request } from './v2-routes';
+import type { V2OnboardingDependencies } from '../../providers/agentcard/v2-onboarding';
+
+export function createV2Router(dependencies: Partial<V2OnboardingDependencies> = {}): Router {
+  const v2 = Router();
+  v2.use((_req, res, next) => {
+    res.set({
+      'Cache-Control': 'no-store',
+      'Referrer-Policy': 'no-referrer',
+      'X-Content-Type-Options': 'nosniff',
+      'Content-Security-Policy':
+        "default-src 'none'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+    });
+    next();
+  });
+  v2.use(urlencoded({ extended: false, limit: '4kb' }));
+  for (const [path, action] of [
+    ['/connect', 'show'],
+    ['/connect/start', 'start'],
+    ['/connect/verify', 'verify'],
+  ] as const) {
+    v2[action === 'show' ? 'get' : 'post'](
+      path,
+      asyncHandler(async (req, res) => {
+        const result = await handleV2Request(
+          action,
+          (action === 'show' ? req.query : (req.body ?? {})) as Record<string, unknown>,
+          dependencies
+        );
+        res.status(result.status);
+        if (result.html !== undefined) res.type('html').send(result.html);
+        else res.json({ error: result.error });
+      })
+    );
+  }
+  return v2;
+}
 
 const log = createLogger('AgentCard');
 const router = Router();
+router.use('/v2', createV2Router());
 
 function escapeHtml(str: string): string {
   return str

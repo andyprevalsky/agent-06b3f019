@@ -1,3 +1,4 @@
+import { completionAnswerText } from '../../providers/finalPresentation';
 import { sendSms, getUserPhone } from '../../providers/smsQueue';
 import { createLogger } from '../../providers/logger';
 import {
@@ -19,6 +20,7 @@ import {
   type SupervisorChannel,
 } from '../../providers/smsSupervisor/channelDelivery';
 import { getWhatsAppReachable } from '../../providers/whatsappReachability';
+import { hasMessagingAgentInteraction } from '../../providers/messagingAgentInteraction';
 
 const log = createLogger('SendSMS');
 const COMPLETION_SMS_OPERATION_TYPE = 'lifecycle-sms.completion';
@@ -147,6 +149,7 @@ export async function dispatchNotification(data: NotifyInput): Promise<NotifyRes
     return { success: true, skipped: true, reason: 'agent_deleted' };
   }
   const payload = data.payload ?? {};
+  const finalAnswer = data.event_type === 'completion' ? completionAnswerText(payload) : undefined;
 
   // Benchmark/eval runs create real root agents under the operator's own phone.
   // Lifecycle SMS (agent_started, write_lock, completion, …) fire on any source
@@ -163,7 +166,8 @@ export async function dispatchNotification(data: NotifyInput): Promise<NotifyRes
         ? buildCompletionSmsBody(
             data.agent_id,
             (payload.summary as string | undefined) ?? '',
-            payload.outputs
+            payload.outputs,
+            finalAnswer
           )
         : undefined;
     return { success: true, skipped: true, reason: 'benchmark_agent', messagePreview };
@@ -188,7 +192,7 @@ export async function dispatchNotification(data: NotifyInput): Promise<NotifyRes
   }
 
   if (data.event_type === 'completion') {
-    return dispatchCompletionOnce(data, payload, channels);
+    return dispatchCompletionOnce(data, payload, channels, agent.source, finalAnswer);
   }
 
   const startNotification =
@@ -209,8 +213,21 @@ export async function dispatchNotification(data: NotifyInput): Promise<NotifyRes
 async function dispatchCompletionOnce(
   data: NotifyInput,
   payload: Record<string, unknown>,
-  channels: SupervisorChannel[]
+  channels: SupervisorChannel[],
+  source: string,
+  finalAnswer?: string
 ): Promise<NotifyResult> {
+  // Completion notices belong to the messaging thread only when the SMS/WhatsApp
+  // agent created, messaged or relayed for this agent; a web-started agent the
+  // user never touched over SMS finishes silently there (the web UI shows it).
+  if (!(await hasMessagingAgentInteraction({ id: data.agent_id, source }))) {
+    log.info('Completion skipped: messaging agent never interacted with this agent', {
+      agentId: data.agent_id,
+      source,
+    });
+    return { success: true, skipped: true, reason: 'no_messaging_agent_interaction' };
+  }
+
   const operationKey = `${COMPLETION_SMS_OPERATION_TYPE}:${data.agent_id}`;
   const claim = await claimToolSideEffect({
     operationKey,
@@ -234,7 +251,8 @@ async function dispatchCompletionOnce(
     { id: data.agent_id },
     (payload.summary as string | undefined) ?? '',
     payload.outputs,
-    channels
+    channels,
+    finalAnswer
   );
   if (!delivery.success) {
     if (delivery.definitiveFailure === true) {

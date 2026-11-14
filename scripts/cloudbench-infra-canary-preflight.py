@@ -173,7 +173,7 @@ def _consume_receipt(args):
     print("infra canary preflight: source-bound cohort PASS receipt")
 
 
-def _run_owned_canary(argv, environment, lock_handle, blocked):
+def _run_owned_canary(argv, environment, lock_handle, blocked, *, custody=True):
     cancelled = []
     handlers = {
         sig: signal.signal(sig, lambda sig, _: cancelled.append(sig))
@@ -184,9 +184,16 @@ def _run_owned_canary(argv, environment, lock_handle, blocked):
         deadline = environment.get("RUN_BENCH_CAMPAIGN_E2E_DEADLINE_MONOTONIC")
         if cancelled or blocked() or deadline and time.monotonic() >= float(deadline):
             return 128 + cancelled[0] if cancelled else 1
-        child = subprocess.Popen(
-            argv, env=environment, pass_fds=(lock_handle.fileno(),)
-        )
+        if custody:
+            # A dedicated custody process survives this helper's death, but
+            # never donates the transaction lock to the canary's foreign execs.
+            child = subprocess.Popen(
+                [sys.executable, "-S", str(Path(__file__).resolve()),
+                 "--owned-canary", str(lock_handle.fileno()), json.dumps(argv)],
+                env=environment, pass_fds=(lock_handle.fileno(),),
+            )
+        else:
+            child = subprocess.Popen(argv, env=environment, close_fds=True)
         terminated = False
         while child.poll() is None:
             deadline = environment.get("RUN_BENCH_CAMPAIGN_E2E_DEADLINE_MONOTONIC")
@@ -343,4 +350,14 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    if len(sys.argv) == 4 and sys.argv[1] == "--owned-canary":
+        # Only the source-owned supervisor inherits custody. Closing on exec
+        # keeps it here through TERM forwarding and the native child's join.
+        descriptor = int(sys.argv[2])
+        os.set_inheritable(descriptor, False)
+        with os.fdopen(descriptor, "a+", encoding="utf-8") as custody_handle:
+            raise SystemExit(_run_owned_canary(
+                json.loads(sys.argv[3]), os.environ.copy(), custody_handle,
+                lambda: False, custody=False,
+            ))
     raise SystemExit(main())

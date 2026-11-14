@@ -47,7 +47,7 @@ function requests(method: string, path: string) {
 }
 
 async function openSettings(user: ReturnType<typeof userEvent.setup>) {
-  await user.click(await screen.findByRole('button', { name: 'Rose project settings' }));
+  await user.click(await screen.findByRole('button', { name: 'Rose folder settings' }));
   const panel = screen.getByTestId('rose-project-settings');
   return within(await within(panel).findByRole('region', { name: 'Template sync' }));
 }
@@ -255,7 +255,7 @@ describe('Rose project template sync settings', () => {
     expect(sync.getByRole('button', { name: 'Run now' })).toBeDisabled();
     expect(sync.getByRole('button', { name: 'Run now' })).toHaveAttribute(
       'title',
-      expect.stringContaining('Set a code repository first'),
+      expect.stringContaining('Connect a GitHub repo on the Integrations panel first'),
     );
   });
 

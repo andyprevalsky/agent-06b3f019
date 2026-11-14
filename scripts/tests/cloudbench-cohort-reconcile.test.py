@@ -170,7 +170,7 @@ class CohortReconciliation(unittest.TestCase):
                     "-C",
                     str(ROOT),
                     "show",
-                    "49b792dcc2ea983325c6a25801da6c982f29c206:scripts/cloudbench-cohort-reconcile.py",
+                    "25404879508f9026c720bb97526efc5479fcabcb:scripts/cloudbench-cohort-reconcile.py",
                 ]
             )
             (snapshot / MODULE.name).write_bytes(old)
@@ -190,6 +190,8 @@ class CohortReconciliation(unittest.TestCase):
                 (before.ticket.cohort / "stale-reconcile.completed.json").exists()
             )
             before.assert_records_preserved()
+            # The exact failed It15 source stays refused against the reviewed
+            # helper; only its consumer pin is repaired below.
             # Same canonical fleet shell and actual adjacent ticket module;
             # only the reviewed consumer pin changes, with no fake loader.
             (snapshot / MODULE.name).write_bytes(MODULE.read_bytes())

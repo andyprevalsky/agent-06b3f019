@@ -222,3 +222,23 @@ need rerunning; the 103 successful domain receipts remain intact.
 ## Reusable lesson
 
 Give concurrently mutated benchmark fixtures separate owned worlds and bind every result to its actual run identity.
+
+
+## 2026-11-09 child fixture and cleanup boundaries
+
+An independent new-user child still inherited its full cohort when deciding
+whether to seed regular payment billing. That could bind the configured v2
+provider user to the admin fixture before the synthetic new user attempted its
+exclusive binding. A native `local.main` regression consumes the coordinator
+handshake and intercepts the actual seeder subprocess: the old mixed child
+attempted one admin seed, while the selected-task decision attempts none.
+Cohort-wide service configuration remains intact.
+
+The first v2 browser cohort also stopped after its setup failure because the
+world coordinator's receipt reader accepted only version 1, while the native
+stack producer wrote a clean version-2 receipt. The supported version-2 read and
+canonical native-identity validator prove the actual receipt valid. Keep all
+ownership, live-process and result-hash checks; never infer cleanup from process
+absence alone. Canonical reconciliation confirmed the exact original resources
+clean. Preserve the original infrastructure failure and three tasks cancelled
+before start; reconciliation does not turn that failed experiment into PASS.

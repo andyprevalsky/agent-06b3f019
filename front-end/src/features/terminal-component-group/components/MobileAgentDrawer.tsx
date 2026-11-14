@@ -4,6 +4,7 @@
  * OPEN STATE:
  * [CLOSED] --tap hamburger--> [OPEN]
  * [OPEN] --select agent / create agent / overlay tap / Esc / close--> [CLOSED]
+ * [OPEN] --Teams | Biz health--> [CLOSED] --focus handoff--> [APP PANEL]
  *
  * TAB STATE (while OPEN):
  * [AGENTS] <--tap "Agents"--         --tap "Notifications"--> [NOTIFICATIONS]
@@ -45,7 +46,7 @@
  */
 
 import { useLayoutEffect, useRef, useState } from 'react';
-import { LogOut, Menu } from 'lucide-react';
+import { Activity, LogOut, Menu, Users } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
 import {
@@ -57,6 +58,9 @@ import {
 } from '@/components/ui/sheet';
 import { coverApp, uncoverApp } from '@/lib/appCover';
 import { cn } from '@/lib/utils';
+import { isAdminOperator } from '@/lib/adminAccounts';
+import { getSession } from '@/lib/supabase';
+import { useRoseApps, type RoseApp } from './rose-apps/roseAppsState';
 
 import SidebarAgentList from './SidebarAgentList';
 import { RoseMobileAgentList } from './rose-sidebar/RoseMobileAgentList';
@@ -154,6 +158,8 @@ export default function MobileAgentDrawer({
   const [searchQuery, setSearchQuery] = useState('');
   const search = useSidebarSearch(agents, searchQuery);
   const loginAfterCloseRef = useRef(false);
+  const panelAfterCloseRef = useRef<RoseApp | null>(null);
+  const apps = useRoseApps();
 
   // Shared app-wide subscription (see AttentionRequestsProvider) — the drawer
   // used to open its own channel + poll loop alongside the desktop bell's.
@@ -183,6 +189,13 @@ export default function MobileAgentDrawer({
   };
 
   const handleCloseAutoFocus = (event: Event) => {
+    const panel = panelAfterCloseRef.current;
+    if (panel !== null) {
+      event.preventDefault();
+      panelAfterCloseRef.current = null;
+      window.setTimeout(() => apps?.toggleApp(panel), 0);
+      return;
+    }
     if (!loginAfterCloseRef.current) return;
 
     // Radix restores focus to the Sheet trigger as it closes. Opening the auth
@@ -192,6 +205,10 @@ export default function MobileAgentDrawer({
     window.setTimeout(onLoginClick, 0);
   };
 
+  const openPanel = (panel: RoseApp) => {
+    panelAfterCloseRef.current = panel;
+    setOpen(false);
+  };
   // Uncover in a layout effect: the app is visible again in the same frame the
   // slide-out starts, never a frame later.
   useLayoutEffect(() => {
@@ -325,6 +342,28 @@ export default function MobileAgentDrawer({
         )}
 
         <div className="mt-auto border-t border-border p-3">
+          {isSignedIn && apps && (
+            <>
+              {isAdminOperator(getSession()?.user) && (
+                <Button
+                  variant="ghost"
+                  className="w-full justify-start"
+                  onClick={() => openPanel('health')}
+                >
+                  <Activity className="mr-2 h-4 w-4" />
+                  Biz health
+                </Button>
+              )}
+              <Button
+                variant="ghost"
+                className="w-full justify-start"
+                onClick={() => openPanel('teams')}
+              >
+                <Users className="mr-2 h-4 w-4" />
+                Teams
+              </Button>
+            </>
+          )}
           {isSignedIn ? (
             <Button variant="ghost" onClick={handleLogout} className="w-full justify-start">
               <LogOut className="mr-2 h-4 w-4" />

@@ -149,10 +149,11 @@ export async function findAgentWithVerifier(agentId: string, userId?: string) {
 }
 
 /** Fetch agent status only. */
-export async function findAgentStatus(agentId: string) {
+export async function findAgentStatus(agentId: string, userId?: string) {
   return prisma.agent.findFirst({
     where: {
       id: agentId,
+      ...(userId !== undefined ? { userId } : {}),
       deletedAt: null,
     },
     select: {

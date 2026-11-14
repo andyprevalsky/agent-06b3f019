@@ -734,6 +734,37 @@ def cleanup_ticket_command(root: Path, action: str, cohort: dict[str, object],
     return getattr(module, action)(args)
 
 
+def cleanup_ticket_failure_detail(error: BaseException) -> dict[str, object]:
+    """Keep bounded diagnostic identity without exception payloads or paths."""
+    reasons = {
+        "cleanup parent identity changed": "parent_identity_changed",
+        "invalid cleanup ticket policy": "invalid_policy",
+        "invalid cleanup cohort membership": "invalid_membership",
+        "invalid cleanup member": "invalid_member",
+        "cleanup parent lock not held": "parent_lock_not_held",
+        "changed incomplete cleanup grant": "incomplete_grant_changed",
+        "insufficient physical cleanup cohort floors": "insufficient_physical_floors",
+        "cleanup member ticket changed": "member_ticket_changed",
+    }
+    category = next((kind.__name__ for kind in (
+        subprocess.CalledProcessError, subprocess.TimeoutExpired,
+        subprocess.SubprocessError, OSError, ValueError,
+    ) if isinstance(error, kind)), "Exception")
+    message = error.args[0] if error.args and type(error.args[0]) is str else ""
+    if isinstance(error, OSError) and type(error.strerror) is str:
+        message = error.strerror
+    reason = reasons.get(message) if type(error) is ValueError else None
+    detail: dict[str, object] = {"error_class": category, "reason_code": reason or "unknown"}
+    number = getattr(error, "errno", None)
+    if isinstance(error, OSError) and type(number) is int and 0 < number < 4096:
+        detail["errno"] = number
+    if reason is None:
+        detail["message_prefix_sha256"] = hashlib.sha256(
+            message[:4096].encode("utf-8", errors="replace")
+        ).hexdigest()
+    return detail
+
+
 def stress_inventory_baseline(root: Path, authority: str) -> tuple[int, list[dict[str, object]] | None]:
     """Borrow the exact parent feed with existing checks; temporary absence never fans out."""
     expected = json.loads(authority)
@@ -898,6 +929,103 @@ def infra_stop_receipt(jobs: list[dict[str, object]], scheduled_total: int, poli
             "infra_job_ids": infra}
 
 
+FLEET_INFRA_STOP_SCHEMA = "fleet-infra-stop-v1"
+# run_fleet_child_supervised records a forwarded HUP/INT/TERM as the child's exit.
+FLEET_CANCELLED_EXIT_CODES = {"129", "130", "143"}
+
+
+def fleet_attempt(directory: Path, task: str) -> dict[str, object]:
+    """One physical fleet attempt's verdict, read from its own receipts without regrading.
+
+    Only a finished child is terminal. A forwarded signal is a cancellation. A
+    finished child without a run record is the fleet aggregate's INFRA_ERROR row
+    ("no current run artifact produced"); otherwise the recorded task row decides.
+    """
+    try:
+        code = (directory / "benchmark-child.finished").read_text().strip()
+    except FileNotFoundError:
+        return {"status": "running"}
+    if code in FLEET_CANCELLED_EXIT_CODES:
+        return {"status": "cancelled", "exit_code": code}
+    record = directory / "cloudbench-run.json"
+    if not record.is_file():
+        return {"status": "failed", "exit_code": code, "task_status": "INFRA_ERROR",
+                "infra_failure": True, "terminal_task": False}
+    try:
+        rows = [row for row in json.loads(record.read_text()).get("tasks") or []
+                if isinstance(row, dict) and row.get("name") == task]
+    except (OSError, ValueError, AttributeError):
+        rows = []
+    if len(rows) != 1:
+        return {"status": "unknown", "exit_code": code}
+    return {"status": "finished", "exit_code": code, **task_verdict(rows[0])}
+
+
+def fleet_infra_jobs(fleet_dir: Path, benches: list[str]) -> list[dict[str, object]]:
+    """One scheduled job per requested bench, with every physical attempt.
+
+    A host-replaced attempt (``host-replaced-*``) is retained but never counts:
+    it has no task row, and the job's verdict comes from its current attempt,
+    as the campaign and sharded paths read the same fleet's task row.
+    """
+    jobs = []
+    for bench in dict.fromkeys(benches):
+        out = fleet_dir / bench
+        attempts: list[dict[str, object]] = [
+            {"attempt_dir": str(path), "status": "replaced"}
+            for path in sorted(out.glob("host-replaced-*")) if path.is_dir()
+        ]
+        attempts.append({"attempt_dir": str(out), **fleet_attempt(out, bench)})
+        jobs.append({"job_id": bench, "task": bench, "attempts": attempts})
+    return jobs
+
+
+def fleet_infra_stop(fleet_dir: Path, benches: list[str], receipt: Path) -> dict[str, object] | None:
+    """The plain fleet's fixed-total infra breach, using the campaign's counting.
+
+    The frozen schedule is the fleet's requested benches. The first breach is
+    written once and returned unchanged on every later evaluation.
+    """
+    scheduled = list(dict.fromkeys(benches))
+    try:
+        return json.loads(receipt.read_text())
+    except FileNotFoundError:
+        pass
+    except ValueError as error:
+        # Only a breach writes the receipt, so an unreadable one still records a breach: keep
+        # stopping (never continue past it), with the current count when it still breaches.
+        current = infra_stop_receipt(fleet_infra_jobs(fleet_dir, scheduled), len(scheduled), infra_stop_policy())
+        return current or {"infra_jobs": "recorded", "scheduled_total": len(scheduled),
+                           "infra_job_ids": [f"unreadable breach receipt {receipt}: {error}"]}
+    jobs = fleet_infra_jobs(fleet_dir, scheduled)
+    breach = infra_stop_receipt(jobs, len(scheduled), infra_stop_policy())
+    if breach is None:
+        return None
+    breach.update(schema=FLEET_INFRA_STOP_SCHEMA, observed_at=utc_now(), breached_at_epoch=time.time(),
+                  fleet_dir=str(fleet_dir), jobs=jobs)
+    temporary = receipt.with_name(f".{receipt.name}.{os.getpid()}.tmp")
+    temporary.write_text(json.dumps(breach, indent=2, sort_keys=True) + "\n")
+    try:
+        os.link(temporary, receipt)  # never replaces an earlier breach
+    except FileExistsError:
+        breach = json.loads(receipt.read_text())
+    finally:
+        temporary.unlink(missing_ok=True)
+    return breach
+
+
+def fleet_infra_stop_main(argv: list[str]) -> int:
+    """``<fleet-dir> <receipt> <bench>...``: print one summary line on a breach, else nothing."""
+    if len(argv) < 3:
+        print("usage: fleet_infra_stop_main <fleet-dir> <receipt> <bench>...", file=sys.stderr)
+        return 2
+    breach = fleet_infra_stop(Path(argv[0]), argv[2:], Path(argv[1]))
+    if breach is not None:
+        print(f"{breach['infra_jobs']}/{breach['scheduled_total']} scheduled jobs confirmed INFRA "
+              f"({', '.join(map(str, breach['infra_job_ids']))})")
+    return 0
+
+
 def terminate_owned_children(active: dict[int, dict[str, object]]) -> None:
     """Send one cancellation TERM to each live controller's process group.
 
@@ -1015,8 +1143,9 @@ RELAY_METADATA_ATTEMPTS = 3
 
 
 def read_relay_app_metadata(app: str, workspace: Path, environment: dict,
-                            deadline: float | None) -> subprocess.CompletedProcess:
-    """Read-only `flyctl status`; a transient Fly API stall gets bounded retries within the deadline."""
+                            deadline: float | None, *, source_root: Path | None = None) -> subprocess.CompletedProcess:
+    """Read only the native App identity, with bounded retries within the campaign deadline."""
+    reader = (source_root or workspace) / "scripts/cloudbench-campaign-machines.py"
     for attempt in range(1, RELAY_METADATA_ATTEMPTS + 1):
         timeout = RELAY_METADATA_TIMEOUT
         if deadline is not None:
@@ -1024,17 +1153,17 @@ def read_relay_app_metadata(app: str, workspace: Path, environment: dict,
             if timeout <= 0:
                 raise ValueError('shared transport app metadata unavailable before the campaign deadline')
         try:
-            metadata = subprocess.run(['flyctl', 'status', '-a', app, '--json'], cwd=workspace,
-                                      env=environment, capture_output=True, timeout=timeout)
+            metadata = subprocess.run([sys.executable, '-S', str(reader), app, str(timeout), '--app-metadata'],
+                                      cwd=workspace, env=environment, capture_output=True, timeout=timeout)
         except subprocess.TimeoutExpired:
             if attempt == RELAY_METADATA_ATTEMPTS:
                 raise
-            print(f'[campaign] flyctl status timed out after {timeout:.0f}s; retry {attempt}/{RELAY_METADATA_ATTEMPTS - 1}',
+            print(f'[campaign] App metadata read timed out after {timeout:.0f}s; retry {attempt}/{RELAY_METADATA_ATTEMPTS - 1}',
                   file=sys.stderr)
             continue
         if metadata.returncode == 0 or attempt == RELAY_METADATA_ATTEMPTS:
             return metadata
-        print(f'[campaign] flyctl status exited {metadata.returncode}; retry {attempt}/{RELAY_METADATA_ATTEMPTS - 1}',
+        print(f'[campaign] App metadata read exited {metadata.returncode}; retry {attempt}/{RELAY_METADATA_ATTEMPTS - 1}',
               file=sys.stderr)
     raise AssertionError('unreachable')
 
@@ -1057,7 +1186,7 @@ def _start_shared_relay(root: Path, campaign_dir: Path, workspace: Path,
     """Start a request-owned relay only after provider preflight succeeds."""
     ref = subprocess.check_output(['git', '-C', str(root), 'rev-parse', 'HEAD'], text=True).strip()
     checked = {}
-    for relative in ['scripts/cloudbench-shared-relay.py', 'scripts/lib/cloudbench-inventory.sh', 'scripts/run-bench-cloud', 'scripts/run-bench-fleet']:
+    for relative in ['scripts/cloudbench-shared-relay.py', 'scripts/cloudbench-campaign-machines.py', 'scripts/lib/cloudbench-inventory.sh', 'scripts/run-bench-cloud', 'scripts/run-bench-fleet']:
         raw = subprocess.check_output(['git', '-C', str(root), 'show', ref + ':' + relative])
         if (root / relative).read_bytes() != raw:
             raise ValueError('shared relay source differs from reviewed controller')
@@ -1082,7 +1211,8 @@ def _start_shared_relay(root: Path, campaign_dir: Path, workspace: Path,
     agent_socket = directory / 'fly-agent.sock'
     environment['FLY_AGENT_SOCKET_PATH'] = str(agent_socket)
     environment['FLY_AGENT_ISOLATED'] = '1'
-    metadata = read_relay_app_metadata(app, workspace, environment, deadline)
+    environment['CLOUDBENCH_INVENTORY_PHASE_FILE'] = str(directory / 'app-metadata-phase.private')
+    metadata = read_relay_app_metadata(app, workspace, environment, deadline, source_root=root)
     metadata_path = directory / 'app-metadata.private.json'
     metadata_path.write_bytes(metadata.stdout); metadata_path.chmod(0o600)
     if metadata.returncode: raise ValueError('shared transport app metadata unavailable')
@@ -1184,6 +1314,9 @@ def _start_shared_relay(root: Path, campaign_dir: Path, workspace: Path,
         raise
 
 
+RELAY_AGENT_EXIT_SECONDS = 60  # the private agent exits on its bootstrap's EOF within seconds
+
+
 def stop_shared_relay(value: dict) -> bool:
     """Called only after all campaign task controllers have been joined."""
     process = value['process']
@@ -1202,17 +1335,28 @@ def stop_shared_relay(value: dict) -> bool:
     bootstrap.wait()
     # The private agent is the bootstrap's own isolated child. Keep the parent
     # alive through its EOF shutdown; never signal a shared/default daemon.
+    # The wait is bounded: an agent that outlives its bootstrap's EOF is reported as unverified
+    # cleanup (the caller marks shared transport cleanup pending), never awaited forever or signalled.
     identity = cleanup_ticket_module(Path(value['module']).parent.parent)
     agent = value['agent']
-    while identity.birth(agent['pid']) == agent['birth']:
+    agent_deadline = time.monotonic() + RELAY_AGENT_EXIT_SECONDS
+    agent_exited = False
+    while time.monotonic() < agent_deadline:
+        if identity.birth(agent['pid']) != agent['birth']:
+            agent_exited = True; break
         try: state = Path('/proc', str(agent['pid']), 'stat').read_text().rsplit(') ', 1)[1].split()[0]
-        except FileNotFoundError: break
-        if state in ('Z', 'X'): break
+        except FileNotFoundError:
+            agent_exited = True; break
+        if state in ('Z', 'X'):
+            agent_exited = True; break
         time.sleep(.1)
+    if not agent_exited:
+        print(f"[campaign] shared relay private agent pid={agent['pid']} still live "
+              f"{RELAY_AGENT_EXIT_SECONDS}s after bootstrap exit; cleanup unverified", file=sys.stderr)
     os.close(value['peer_claim'])
     value['log'].close(); value['bootstrap_log'].close()
     archive_shared_relay(value['directory'], value['archive'])
-    return acknowledged and process.returncode == 0
+    return acknowledged and process.returncode == 0 and agent_exited
 
 
 def mutation_inventory_authority(directory: Path, publisher: subprocess.Popen) -> str:
@@ -1643,7 +1787,7 @@ def main() -> int:
             "headroom; controller count does not prove task execution overlap."
         )
     print(
-        "   monitor every 30s: python3 -m json.tool " + shlex.quote(str(summary_path))
+        "   monitor: python3 -m json.tool " + shlex.quote(str(summary_path))
     )
     print(
         "   follow each job log's exact printed fleet-monitor command; "
@@ -2017,7 +2161,11 @@ def main() -> int:
             not stop_signal
             and not deadline_expired()
             and not startup_expired()
-            and args.concurrency > 1
+            # A width-1 campaign normally skips the shared feed. Without the relay, its lone
+            # controller's flyctl starts the unowned per-HOME `flyctl agent` daemon, which outlives
+            # the campaign. Owned callers (the /deploy smoke adapter, whose single same-source rerun
+            # has width 1) ask for the owned inventory, relay and private agent at any width.
+            and (args.concurrency > 1 or os.environ.get("CLOUDBENCH_CAMPAIGN_OWNED_TRANSPORT") == "1")
             and not all_production_only
             and os.environ.get("CLOUDBENCH_CAMPAIGN_SHARED_INVENTORY", "1") == "1"
         ):
@@ -2132,11 +2280,12 @@ def main() -> int:
                     if not current_cohort.get("_cleanup_tickets_prepared"):
                         try:
                             prepare_cleanup_tickets(current_cohort)
-                        except (OSError, ValueError, subprocess.SubprocessError):
+                        except (OSError, ValueError, subprocess.SubprocessError) as error:
                             # End through normal summary/Hub finalization, never a traceback.
                             first_failure = first_failure or 1
                             barrier_failure = True
                             state["cleanup_ticket_failure"] = "prepare"
+                            state["cleanup_ticket_failure_detail"] = cleanup_ticket_failure_detail(error)
                             abort_startup_cohort(current_cohort, "cleanup ticket preparation failed before child admission")
                             write_json_atomic(summary_path, state)
                             continue

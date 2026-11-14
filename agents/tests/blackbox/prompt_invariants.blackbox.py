@@ -869,6 +869,9 @@ def _iter_production_py_files():
         # Top-level agents/scripts/ holds offline maintenance tools (documented above).
         if rel.startswith("scripts/"):
             continue
+        # Pytest regression modules also live beside the benchmark producers.
+        if rel.startswith("benchmarks/") and (path.name.endswith("_test.py") or path.name.startswith("test_")):
+            continue
         yield path
 
 
@@ -1119,6 +1122,23 @@ def test_check_progress_is_canonical_verifier_entrypoint():
     )
 
 
+def test_production_scanner_excludes_only_registered_test_module_patterns():
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        for name in ("benchmarks/fixture_test.py", "benchmarks/test_fixture.py",
+                     "benchmarks/producer.py", "helpers/producer_test.py"):
+            path = root / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("_call_llm_verifier()\n")
+        previous = globals()["AGENTS_ROOT"]
+        try:
+            globals()["AGENTS_ROOT"] = root
+            found = {str(path.relative_to(root)) for path in _iter_production_py_files()}
+        finally:
+            globals()["AGENTS_ROOT"] = previous
+        assert found == {"benchmarks/producer.py", "helpers/producer_test.py"}
+
+
 # ============================================================================
 # 6. Browser-use catalog ↔ v3 prompt are in sync; envelope is {thinking, action}
 # ----------------------------------------------------------------------------
@@ -1184,8 +1204,9 @@ def test_browser_use_prompt_requires_native_tool_call():
     from providers.rose.browser_use import build_browser_use_system_prompt
 
     prompt = build_browser_use_system_prompt([])
-    assert "call exactly one available browser action tool" in prompt
-    assert "Do not write a JSON" in prompt
+    assert "Return one or more browser action tool calls to execute sequentially." in prompt
+    assert "Stop at first failure." in prompt
+    assert "Use observation_ref only for targets bound by read_browser_state in the same response." in prompt
     assert "<output>" not in prompt
     forbidden = ("evaluation_previous_goal", "memory", "next_goal")
     for legacy in forbidden:
@@ -2213,7 +2234,9 @@ def test_tool_prompts_open_with_declarative_sentence():
 # transactions so local-data benchmarks use the scoped DB search path instead
 # of public web tools or generic unfiltered searches.
 _TOOL_PROMPT_CHAR_CAP_OVERRIDES = {
-    "grep": 1600,
+    # +60 over the prior 1600: one Teams line (teammate-shared accounts and
+    # their owner/team/account narrowing).
+    "grep": 1660,
     # +50: explore's one-line code-inspection hint (a code_session_id → inspect_code).
     "spawn_agent": 3650,
 }
@@ -2574,6 +2597,7 @@ async def run_all_tests():
         "check_progress_is_canonical_verifier_entrypoint",
         test_check_progress_is_canonical_verifier_entrypoint,
     )
+    r.record("production_scanner_test_module_patterns", test_production_scanner_excludes_only_registered_test_module_patterns)
 
     # 6. Browser-use catalog ↔ v3 prompt
     r.record(

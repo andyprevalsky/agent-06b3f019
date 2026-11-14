@@ -3,6 +3,7 @@
  * Black-box tests for the DB-backed Grep contract.
  */
 
+import { testMeetingNotesSources } from './data-meeting-notes.cases';
 import { prisma } from '../../providers/database';
 import {
   requestGrep,
@@ -646,6 +647,7 @@ async function runAll(): Promise<void> {
       () => testGrepParameterContract(userId, agentId),
     ],
     ['per-source connectivity status', () => testSourceStatus(userId)],
+    ['meeting notes aliases and either-provider connection', testMeetingNotesSources],
     [
       'snapshot endpoint returns distilled snapshot + revisions',
       () => testSnapshotEndpoint(userId),

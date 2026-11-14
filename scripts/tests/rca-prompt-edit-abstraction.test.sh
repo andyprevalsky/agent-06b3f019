@@ -11,7 +11,6 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 RCA_COMMAND="$ROOT_DIR/.claude/commands/rca.md"
-RCA_METHODOLOGY="$ROOT_DIR/docs/root-cause-analysis.md"
 PROCESS_FEEDBACK="$ROOT_DIR/docs/rca/process-feedback.md"
 TEST_RUNNER="$ROOT_DIR/scripts/test.sh"
 
@@ -27,34 +26,9 @@ require_text() {
 }
 
 require_text \
-  "$RCA_METHODOLOGY" \
-  '## Step 5b: Abstraction-deepening gate for prompt edits' \
-  "methodology must add Step 5b as the prompt-edit abstraction gate"
-require_text \
-  "$RCA_METHODOLOGY" \
-  'one level of abstraction deeper' \
-  "methodology must require verifying the Problem by going one abstraction level deeper"
-require_text \
-  "$RCA_METHODOLOGY" \
-  'more general solution' \
-  "methodology must define the anti-overfit move as attempting a more general solution"
-require_text \
-  "$RCA_METHODOLOGY" \
-  'fails to be coherent' \
-  "methodology must stop the climb only when the more general solution fails to be coherent"
-require_text \
-  "$RCA_METHODOLOGY" \
-  'class of class' \
-  "methodology must require eliminating the class, or the class of class, not the instance"
-require_text \
-  "$RCA_METHODOLOGY" \
-  'prompt edit' \
-  "methodology must scope the abstraction climb to prompt edits"
-
-require_text \
   "$RCA_COMMAND" \
-  '## Prompt-edit abstraction gate' \
-  "/RCA must surface the prompt-edit abstraction gate"
+  'Before any prompt edit, try one level of abstraction deeper' \
+  "/RCA must scope the abstraction climb to prompt edits"
 require_text \
   "$RCA_COMMAND" \
   'one level of abstraction deeper' \

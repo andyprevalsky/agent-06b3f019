@@ -525,7 +525,7 @@ def test_cerebras_tools_keep_null_for_omittable_string_optionals():
     # Strict toolset (no open maps): the null branch is kept in the grammar.
     strict = sent({"list_agents": ListAgentsTool})["list_agents"]
     assert strict["strict"] is True
-    for name in ("node", "cursor", "query", "path_prefix"):
+    for name in ("node", "cursor", "query", "path_prefix", "project_id", "owner_user_id", "team_id"):
         keeps_null(strict["parameters"]["properties"][name], name)
         assert name not in strict["parameters"]["required"]
     depth = strict["parameters"]["properties"]["depth"]
@@ -2887,6 +2887,162 @@ async def test_claude_auth_429_usage_window_marks_reset_and_fetches_fresh_token(
     assert any(c.kind == "content" and c.data.get("text") == "ok" for c in chunks)
 
 
+async def test_claude_auth_fast_mode_overage_rejection_retries_standard_on_same_token():
+    """A fast-mode request the account cannot pay for falls back to standard speed.
+
+    Prod 2026-11-14 01:41Z: an ultrafast agent's Opus requests got 429 "Usage
+    credits are required for fast mode." whose only reset was the monthly
+    overage reset (unified-reset 2026-12-01), with
+    overage-disabled-reason=org_level_disabled and no 5h/7d window rejected.
+    Rose cooled every Claude subscription until 12-01 though each served
+    standard requests. Claude Code (services/api/withRetry.ts) turns fast mode
+    off and retries at standard speed on the same credential instead; the
+    account is never cooled, and fast mode stays off for that token.
+    """
+    token = "sk-ant-oat-fast-overage-test"
+    requests: list[dict] = []
+    marked: list[tuple] = []
+
+    async def mark(ctx, cooldown_seconds, rate_limited_until=None, failure_reason=None):
+        marked.append((ctx.token, rate_limited_until, failure_reason))
+        return True
+
+    sse_body = "\n".join(
+        _ev("message_start", {"type": "message_start", "message": {"usage": {"input_tokens": 3}}})
+        + _ev(
+            "content_block_start",
+            {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}},
+        )
+        + _ev(
+            "content_block_delta",
+            {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "ok"}},
+        )
+        + _ev("content_block_stop", {"type": "content_block_stop", "index": 0})
+        + _ev(
+            "message_delta",
+            {"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 1}},
+        )
+        + _ev("message_stop", {"type": "message_stop"})
+    )
+
+    def handler(req):
+        body = json.loads(req.content.decode())
+        requests.append(
+            {
+                "token": req.headers.get("authorization", ""),
+                "speed": body.get("speed"),
+                "fast_beta": ANTHROPIC_FAST_MODE_BETA in req.headers.get("anthropic-beta", "").split(","),
+            }
+        )
+        if body.get("speed") == "fast":
+            # The captured prod response (2026-11-14, account 88a02cdc).
+            return httpx.Response(
+                429,
+                json={
+                    "type": "error",
+                    "error": {"type": "rate_limit_error", "message": "Usage credits are required for fast mode."},
+                },
+                headers={
+                    "anthropic-ratelimit-unified-reset": "1796083200",
+                    "anthropic-ratelimit-unified-overage-disabled-reason": "org_level_disabled",
+                },
+            )
+        return httpx.Response(200, text=sse_body, headers={"Content-Type": "text/event-stream"})
+
+    set_mock_handler(handler)
+
+    def auth():
+        return ClaudeAuthContext(token=token, source="user", user_id="u-1", mark_rate_limited=mark, max_rotations=0)
+
+    pool = get_pool("rose-1-ultra")
+    for request_id in ("fast-overage-1", "fast-overage-2"):
+        chunks = await _drain(
+            claude_auth_complete(
+                pool_spec=pool,
+                messages=[{"role": "user", "content": "hi"}],
+                auth=auth(),
+                request_id=request_id,
+                max_tokens=16,
+                speed="ultrafast",
+            )
+        )
+        assert any(c.kind == "content" and c.data.get("text") == "ok" for c in chunks), request_id
+
+    assert marked == [], f"a fast-mode overage rejection must never cool the account: {marked}"
+    bearer = f"Bearer {token}"
+    assert requests == [
+        {"token": bearer, "speed": "fast", "fast_beta": True},
+        {"token": bearer, "speed": None, "fast_beta": False},
+        # Fast mode stays off for this token: the next call goes straight to standard speed.
+        {"token": bearer, "speed": None, "fast_beta": False},
+    ], requests
+
+
+async def test_claude_auth_fast_mode_overage_then_spent_window_still_cools_with_window_reset():
+    """A fast request on an account whose 7d window is really spent still cools it.
+
+    The overage-disabled-reason header rides on every response of these accounts,
+    so a fast 429 caused by an exhausted 7d window also falls back to standard
+    speed. That standard request's own 429 must still cool the account until the
+    7d reset (not the monthly overage reset) and rotate.
+    """
+    token = "sk-ant-oat-fast-overage-spent-test"
+    seven_day_reset = "2099-05-05T20:00:00Z"
+    requests: list[str | None] = []
+    marked: list[tuple] = []
+
+    async def mark(ctx, cooldown_seconds, rate_limited_until=None, failure_reason=None):
+        marked.append((ctx.token, rate_limited_until, failure_reason))
+        return True
+
+    def handler(req):
+        body = json.loads(req.content.decode())
+        requests.append(body.get("speed"))
+        if body.get("speed") == "fast":
+            return httpx.Response(
+                429,
+                json={"type": "error", "error": {"type": "rate_limit_error", "message": "rate limit"}},
+                headers={
+                    "anthropic-ratelimit-unified-reset": seven_day_reset,
+                    "anthropic-ratelimit-unified-overage-disabled-reason": "org_level_disabled",
+                },
+            )
+        return httpx.Response(
+            429,
+            json={
+                "type": "error",
+                "error": {"type": "rate_limit_error", "message": "This request would exceed your account's rate limit."},
+            },
+            headers={
+                "anthropic-ratelimit-unified-status": "rejected",
+                "anthropic-ratelimit-unified-representative-claim": "seven_day",
+                "anthropic-ratelimit-unified-7d-status": "rejected",
+                "anthropic-ratelimit-unified-7d-utilization": "1.0",
+                "anthropic-ratelimit-unified-reset": seven_day_reset,
+                "anthropic-ratelimit-unified-overage-disabled-reason": "org_level_disabled",
+            },
+        )
+
+    set_mock_handler(handler)
+    auth = ClaudeAuthContext(token=token, source="user", user_id="u-1", mark_rate_limited=mark, max_rotations=0)
+    try:
+        await _drain(
+            claude_auth_complete(
+                pool_spec=get_pool("rose-1-ultra"),
+                messages=[{"role": "user", "content": "hi"}],
+                auth=auth,
+                request_id="fast-overage-spent",
+                max_tokens=16,
+                speed="ultrafast",
+            )
+        )
+        raise AssertionError("an exhausted 7d window must surface a rate limit")
+    except RoseRateLimitError:
+        pass
+    assert requests == ["fast", None], requests
+    assert marked == [(token, seven_day_reset, "rate_limit")], marked
+
+
 async def test_claude_auth_429_transient_retries_before_rotating():
     """Transient 429s retry the same token before cooldown/rotation."""
     calls = {"n": 0}
@@ -3555,6 +3711,74 @@ async def test_parse_responses_sse_content_and_usage():
     assert usage["total_tokens"] == 10
     assert usage["cache_read_input_tokens"] == 2
     assert usage["cache_creation_input_tokens"] == 5
+
+
+async def test_responses_incomplete_preserves_reason_and_partial_evidence():
+    """Native fd031881 follow-up: two message items then content_filter, not length."""
+    for reason, expected in (("content_filter", RoseRefusalError),
+                             ("max_output_tokens", None),
+                             ("unrecognized_future_reason", RoseServerError),
+                             (None, RoseServerError)):
+        lines = [
+            "data: " + json.dumps({"type": "response.output_text.delta", "item_id": "partial", "delta": '{"score":1'}),
+            "data: " + json.dumps({"type": "response.output_text.delta", "item_id": "refusal", "delta": "Cannot provide this response."}),
+            "data: " + json.dumps({"type": "response.incomplete", "response": {
+                "status": "incomplete", "incomplete_details": {"reason": reason},
+                "usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}}}),
+            "data: [DONE]",
+        ]
+        stream = _FakeStream(lines)
+        closed = []
+        async def close():
+            closed.append(True)
+        stream.aclose = close
+        chunks = []
+        error = None
+        try:
+            async for chunk in parse_responses_sse(stream, actual_model="gpt-6.1-sol-foundry",
+                                                  pool_name="foundry", request_id="captured-content-filter"):
+                chunks.append(chunk)
+        except RoseError as exc:
+            error = exc
+        assert closed == [True]
+        assert [c.data["text"] for c in chunks if c.kind == "content"] == [
+            '{"score":1', "Cannot provide this response."]
+        if expected is None:
+            assert error is None
+            assert next(c.data["finish_reason"] for c in chunks if c.kind == "usage") == "length"
+        else:
+            assert isinstance(error, expected), (reason, error)
+            assert not any(c.kind in ("usage", "done") for c in chunks)
+            assert (reason or "unknown") in str(error)
+
+
+async def test_verifier_refusal_never_salvages_partial_success():
+    from helpers import llm
+    from providers.demo_cache.context import set_context, reset_context
+
+    calls = []
+    original = RoseRefusalError("Responses content_filter")
+    class RefusingClient:
+        async def complete(self, **kwargs):
+            calls.append(kwargs)
+            yield StreamChunk(kind="content", data={"text": json.dumps({
+                "reasoning": "partial response before provider refusal", "score": 1,
+                "task_completed": True})})
+            raise original
+    token = set_context(None)
+    try:
+        with patch.object(llm, "RoseClient", RefusingClient):
+            try:
+                await llm._call_llm_verifier([{"role": "user", "content": "verify"}],
+                                            "rose-labs/rose-1-ultra", None,
+                                            call_site="verifier_execute")
+            except RoseRefusalError as exc:
+                assert exc is original
+            else:
+                raise AssertionError("Verifier accepted partial success after explicit refusal")
+    finally:
+        reset_context(token)
+    assert len(calls) == 1, "Refusal must not cause another model request"
 
 
 async def test_parse_responses_sse_ignores_deprecated_idle_timeout_before_first_line():
@@ -7465,6 +7689,8 @@ def test_subscription_usage_parses_claude_unified_headers():
         "observedAt": "2026-11-06T12:00:00Z",
         "fiveHour": {"usedPct": 42.5, "resetsAt": "2025-11-06T16:00:00Z"},
         "sevenDay": {"usedPct": 100.0, "resetsAt": "2025-11-13T00:00:00Z"},
+        "source": "response",
+        "status": None,
     }
     # Only the weekly window reported: the 5h slot stays empty, not zero.
     weekly = parse_usage_headers("claude", {"anthropic-ratelimit-unified-7d-utilization": "0.1"}, now)
@@ -7472,6 +7698,8 @@ def test_subscription_usage_parses_claude_unified_headers():
         "observedAt": "2026-11-06T12:00:00Z",
         "fiveHour": None,
         "sevenDay": {"usedPct": 10.0, "resetsAt": None},
+        "source": "response",
+        "status": None,
     }
     # No usage headers (e.g. API-key traffic, an older proxy) record nothing.
     assert parse_usage_headers("claude", {"anthropic-ratelimit-unified-reset": "1762444800"}, now) is None
@@ -7497,6 +7725,8 @@ def test_subscription_usage_maps_codex_windows_by_length():
         "observedAt": "2026-11-06T12:00:00Z",
         "fiveHour": {"usedPct": 12.5, "resetsAt": "2025-11-06T16:00:00Z"},
         "sevenDay": {"usedPct": 87.0, "resetsAt": "2025-11-13T00:00:00Z"},
+        "source": "response",
+        "status": None,
     }
     # A weekly-only plan reports its 7-day window in the primary slot.
     weekly_primary = {
@@ -7508,6 +7738,8 @@ def test_subscription_usage_maps_codex_windows_by_length():
         "observedAt": "2026-11-06T12:00:00Z",
         "fiveHour": None,
         "sevenDay": {"usedPct": 40.0, "resetsAt": "2026-11-06T13:00:00Z"},
+        "source": "response",
+        "status": None,
     }
     # Without window lengths the slots keep Codex's convention: primary 5h, secondary 7d.
     unlabeled = {"x-codex-primary-used-percent": "5", "x-codex-secondary-used-percent": "150"}
@@ -7582,13 +7814,15 @@ async def test_claude_usage_limit_429_records_exhausted_window():
     assert snapshot["sevenDay"] == {"usedPct": 100.0, "resetsAt": "2025-11-13T00:00:00Z"}, snapshot
 
 
-async def test_lease_heartbeat_carries_subscription_usage_without_extra_requests():
-    """Usage from a subscription response rides the existing lease heartbeat.
+async def test_lease_heartbeat_flushes_subscription_usage_after_response():
+    """Usage from a subscription response rides the lease heartbeat right after it.
 
-    The real lease closures + RoseClient: the first call's heartbeat precedes any
-    response, so it carries only the lease and serving Integration; the second
-    call's heartbeat carries the usage the first response reported. No request
-    other than the provider call and the heartbeat is made.
+    The real lease closures + RoseClient: the first call's pre-attempt heartbeat
+    precedes any response, so it carries only the lease and serving Integration;
+    the response's usage is flushed on a background heartbeat as soon as its
+    headers arrive (the last call of a lease is no longer lost). A second success
+    within FLUSH_MIN_INTERVAL_S is not re-sent at once: it waits for the next
+    heartbeat. No provider request beyond the completion itself is made.
     """
     from helpers.llm import _build_compute_auth_context
     from providers.rose import subscription_usage as usage
@@ -7689,7 +7923,8 @@ async def test_lease_heartbeat_carries_subscription_usage_without_extra_requests
                 await asyncio.sleep(0)  # let the fire-and-forget heartbeat land
 
         assert not other_requests, f"{token_type}: usage must not add requests: {other_requests}"
-        assert len(heartbeats) == 2, f"{token_type}: one heartbeat per attempt: {heartbeats}"
+        # pre-attempt #1, flush after response #1, pre-attempt #2 (response #2 is throttled).
+        assert len(heartbeats) == 3, f"{token_type}: {heartbeats}"
         assert heartbeats[0] == {
             "lineageKey": f"lineage-usage-{token_type}",
             "integrationId": f"integration-{token_type}-usage",
@@ -7699,9 +7934,10 @@ async def test_lease_heartbeat_carries_subscription_usage_without_extra_requests
         assert second["integrationId"] == f"integration-{token_type}-usage", second
         sent = dict(second["usage"])
         assert sent.pop("observedAt").endswith("Z"), second
-        assert sent == expected_usage, f"{token_type}: {second}"
+        assert sent == {**expected_usage, "source": "response", "status": None}, f"{token_type}: {second}"
+        assert "usage" not in heartbeats[2], "the first response's usage was already flushed"
         pending = usage.take(f"{token_type}-usage-token")
-        assert pending is not None, "the second response's usage waits for the next heartbeat"
+        assert pending is not None, "the throttled second response's usage waits for the next heartbeat"
     usage.clear()
 
 
@@ -12997,6 +13233,543 @@ async def test_waterfall_logs_structured_exclusion_reason_separately_from_cut_of
     }, reasons
 
 
+# ---------------------------------------------------------------------------
+# Usage bars producer: failure metadata, flush timing, code sessions
+# ---------------------------------------------------------------------------
+
+
+def test_subscription_usage_429_rejected_window_is_100_used_with_reset():
+    """A rejected unified status marks the window it names 100% used at its reset."""
+    from datetime import datetime, timezone
+
+    from providers.rose import subscription_usage as usage
+
+    now = datetime(2026, 11, 6, 12, 0, tzinfo=timezone.utc)
+    headers = {
+        "anthropic-ratelimit-unified-status": "rejected",
+        "anthropic-ratelimit-unified-representative-claim": "seven_day",
+        "anthropic-ratelimit-unified-reset": "1762992000",
+        "anthropic-ratelimit-unified-5h-utilization": "0.4",
+        "anthropic-ratelimit-unified-5h-reset": "1762444800",
+        "anthropic-ratelimit-unified-7d-utilization": "0.97",
+        "anthropic-ratelimit-unified-7d-reset": "1762992000",
+    }
+    assert usage.parse_usage_headers("claude", headers, now, status_code=429) == {
+        "observedAt": "2026-11-06T12:00:00Z",
+        "fiveHour": {"usedPct": 40.0, "resetsAt": "2025-11-06T16:00:00Z"},
+        "sevenDay": {"usedPct": 100.0, "resetsAt": "2025-11-13T00:00:00Z"},
+        "source": "rate_limit",
+        "status": "rejected",
+    }
+    # Only the unified reset: the named window still gets the authoritative reset.
+    claim_only = {
+        "anthropic-ratelimit-unified-status": "rejected",
+        "anthropic-ratelimit-unified-representative-claim": "five_hour",
+        "anthropic-ratelimit-unified-reset": "1762444800",
+    }
+    snapshot = usage.parse_usage_headers("claude", claim_only, now, status_code=429)
+    assert snapshot is not None
+    assert snapshot["fiveHour"] == {"usedPct": 100.0, "resetsAt": "2025-11-06T16:00:00Z"}
+    assert snapshot["sevenDay"] is None, "an unreported window is not invented"
+    # The reason of the cooldown that follows names the rejected window.
+    usage.clear()
+    usage.observe("claude", "tok-7d", headers, status_code=429)
+    assert usage.cooldown_reason("tok-7d", "rate_limit") == "usage_window_7d"
+    usage.observe("claude", "tok-5h", claim_only, status_code=429)
+    assert usage.cooldown_reason("tok-5h", "rate_limit") == "usage_window_5h"
+    usage.clear()
+
+
+def test_subscription_usage_429_without_metadata_records_nothing():
+    """No usage headers / no reset: nothing is recorded and nothing is zeroed or invented."""
+    from providers.rose import subscription_usage as usage
+
+    usage.clear()
+    for token_type in ("claude", "gpt"):
+        assert usage.parse_usage_headers(token_type, {}, status_code=429) is None
+        assert usage.parse_usage_headers(token_type, {"retry-after": "30"}, status_code=429) is None
+        usage.observe(token_type, f"bare-{token_type}", {"retry-after": "30"}, status_code=429, body="slow down")
+        assert usage.take(f"bare-{token_type}") is None
+        assert usage.cooldown_reason(f"bare-{token_type}", "rate_limit") == "rate_limit"
+    assert usage.cooldown_reason("t", "stall") == "stall"
+    assert usage.cooldown_reason("t", "timeout_stall") == "stall"
+    assert usage.cooldown_reason("t", "auth_error") == "auth"
+    # A 429 status alone (no unified status header) never marks a window exhausted.
+    snapshot = usage.parse_usage_headers(
+        "claude", {"anthropic-ratelimit-unified-7d-utilization": "0.5"}, status_code=429
+    )
+    assert snapshot is not None and snapshot["sevenDay"]["usedPct"] == 50.0 and snapshot["status"] is None
+    usage.clear()
+
+
+def test_subscription_usage_codex_usage_limit_body_maps_to_window():
+    """Codex usage_limit_reached: resets_at lands on the window the x-codex headers say is spent."""
+    from datetime import datetime, timezone
+
+    from providers.rose import subscription_usage as usage
+
+    now = datetime(2026, 11, 6, 12, 0, tzinfo=timezone.utc)
+    body = json.dumps(
+        {"error": {"type": "usage_limit_reached", "plan_type": "pro", "resets_at": 1762992000, "resets_in_seconds": 1}}
+    )
+    headers = {
+        "x-codex-primary-used-percent": "30",
+        "x-codex-primary-window-minutes": "300",
+        "x-codex-secondary-used-percent": "100",
+        "x-codex-secondary-window-minutes": "10080",
+    }
+    snapshot = usage.parse_usage_headers("gpt", headers, now, status_code=429, body=body)
+    assert snapshot == {
+        "observedAt": "2026-11-06T12:00:00Z",
+        "fiveHour": {"usedPct": 30.0, "resetsAt": None},
+        "sevenDay": {"usedPct": 100.0, "resetsAt": "2025-11-13T00:00:00Z"},
+        "source": "rate_limit",
+        "status": "rejected",
+    }
+    # Body only: no window can be named, so no usage — but the cooldown says usage_window.
+    usage.clear()
+    usage.observe("gpt", "codex-body-only", {}, status_code=429, body=body)
+    assert usage.take("codex-body-only") is None
+    assert usage.cooldown_reason("codex-body-only", "rate_limit") == "usage_window"
+    usage.clear()
+
+
+def test_code_session_rate_limit_event_maps_every_status():
+    """Claude Code rate_limit_event → usage for allowed / allowed_warning / rejected alike."""
+    from datetime import datetime, timezone
+
+    from domains.spawn_claude_code_agent.service import subscription_usage_from_event, usage_limit_from_event
+    from providers.rose.subscription_usage import usage_from_rate_limit_event
+
+    now = datetime(2026, 11, 6, 12, 0, tzinfo=timezone.utc)
+
+    def event(info):
+        return {
+            "type": "cli_message",
+            "raw_type": "rate_limit_event",
+            "cli_message": {"type": "rate_limit_event", "rate_limit_info": info},
+        }
+
+    allowed = {"status": "allowed", "rateLimitType": "five_hour", "utilization": 0.31, "resetsAt": 1762444800}
+    assert usage_from_rate_limit_event(allowed, now) == {
+        "observedAt": "2026-11-06T12:00:00Z",
+        "fiveHour": {"usedPct": 31.0, "resetsAt": "2025-11-06T16:00:00Z"},
+        "sevenDay": None,
+        "source": "code_session",
+        "status": "allowed",
+    }
+    warning = {"status": "allowed_warning", "rateLimitType": "seven_day", "utilization": 0.8, "resetsAt": 1762992000}
+    snap = subscription_usage_from_event(event(warning))
+    assert snap is not None and snap["sevenDay"]["usedPct"] == 80.0 and snap["status"] == "allowed_warning"
+    assert usage_limit_from_event(event(warning)) is None, "only rejected is a usage limit"
+    rejected = {"status": "rejected", "rateLimitType": "seven_day", "resetsAt": 1762992000}
+    snap = subscription_usage_from_event(event(rejected))
+    assert snap is not None and snap["sevenDay"] == {"usedPct": 100.0, "resetsAt": "2025-11-13T00:00:00Z"}
+    assert snap["status"] == "rejected" and snap["source"] == "code_session"
+    assert usage_limit_from_event(event(rejected)) is not None
+    # Not an account window, or no utilization to report: nothing is invented.
+    assert (
+        subscription_usage_from_event(event({"status": "allowed", "rateLimitType": "overage", "utilization": 0.1}))
+        is None
+    )
+    assert subscription_usage_from_event(event({"status": "allowed", "rateLimitType": "five_hour"})) is None
+    assert subscription_usage_from_event({"type": "cli_message", "raw_type": "result"}) is None
+
+
+async def test_code_session_usage_report_is_fire_and_forget():
+    """The code-session usage POST runs in the background and sends the task's latest snapshot."""
+    import domains.spawn_claude_code_agent.service as service
+
+    posted: list[dict] = []
+    gate = asyncio.Event()
+
+    async def slow_report(task_id, usage):
+        posted.append({"taskId": task_id, "usage": usage})
+        await gate.wait()
+        return True
+
+    service._code_usage_reporters.clear()
+    snap = {
+        "observedAt": "2026-11-06T12:00:00Z",
+        "fiveHour": {"usedPct": 1.0, "resetsAt": None},
+        "sevenDay": None,
+        "source": "code_session",
+        "status": "allowed",
+    }
+    with patch.object(service, "report_code_session_subscription_usage", slow_report):
+        started = time.monotonic()
+        service.report_code_session_usage_soon("task-1", snap)
+        service.report_code_session_usage_soon("task-1", {**snap, "fiveHour": {"usedPct": 2.0, "resetsAt": None}})
+        service.report_code_session_usage_soon("task-1", {**snap, "status": "rejected"})
+        assert time.monotonic() - started < 0.05, "never awaits the report"
+        await _code_usage_wait(lambda: len(posted) == 1, "the background report")
+        gate.set()
+        await _code_usage_wait(lambda: not service._code_usage_reporters["task-1"]["draining"], "the drain to finish")
+    # Superseded snapshots are never sent stale: only the latest one goes out.
+    assert [p["usage"]["status"] for p in posted] == ["rejected"], posted
+    service._code_usage_reporters.clear()
+
+
+def _code_usage_condition_wait():
+    import importlib.util
+
+    path = Path(__file__).resolve().parents[3] / "scripts" / "lib" / "condition_wait.py"
+    spec = importlib.util.spec_from_file_location("condition_wait", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+async def _code_usage_wait(predicate, description: str):
+    return await _code_usage_condition_wait().async_wait_until(predicate, timeout=5.0, description=description)
+
+
+async def test_code_session_usage_same_status_update_is_deferred_not_dropped():
+    """A same-status update inside the interval is sent when the interval ends (the session's final utilization)."""
+    import domains.spawn_claude_code_agent.service as service
+
+    posted: list[float] = []
+
+    async def report(_task_id, usage):
+        posted.append(usage["fiveHour"]["usedPct"])
+        return True
+
+    service._code_usage_reporters.clear()
+    snap = {"observedAt": "2026-11-06T12:00:00Z", "fiveHour": {"usedPct": 20.0, "resetsAt": None},
+            "sevenDay": None, "source": "code_session", "status": "allowed"}
+    with (
+        patch.object(service, "report_code_session_subscription_usage", report),
+        patch.object(service, "_CODE_USAGE_REPORT_MIN_INTERVAL_S", 0.2),
+    ):
+        service.report_code_session_usage_soon("task-2", snap)
+        await _code_usage_wait(lambda: posted == [20.0], "the first report")
+        service.report_code_session_usage_soon("task-2", {**snap, "fiveHour": {"usedPct": 60.0, "resetsAt": None}})
+        assert service._code_usage_reporters["task-2"]["pending"] is not None, "held, not dropped"
+        await _code_usage_wait(lambda: posted == [20.0, 60.0], "the deferred same-status report")
+    service._code_usage_reporters.clear()
+
+
+async def test_code_session_usage_failed_report_is_retried_not_marked_delivered():
+    """A report the backend did not accept is retried after the interval, bounded."""
+    import domains.spawn_claude_code_agent.service as service
+
+    attempts: list[float] = []
+
+    async def flaky_report(_task_id, usage):
+        attempts.append(usage["fiveHour"]["usedPct"])
+        if len(attempts) == 1:
+            raise TimeoutError("backend timed out")
+        return True
+
+    async def down(_task_id, _usage):
+        attempts.append(-1.0)
+        return False
+
+    service._code_usage_reporters.clear()
+    snap = {"observedAt": "2026-11-06T12:00:00Z", "fiveHour": {"usedPct": 35.0, "resetsAt": None},
+            "sevenDay": None, "source": "code_session", "status": "allowed"}
+    with patch.object(service, "_CODE_USAGE_REPORT_MIN_INTERVAL_S", 0.05):
+        with patch.object(service, "report_code_session_subscription_usage", flaky_report):
+            service.report_code_session_usage_soon("task-3", snap)
+            await _code_usage_wait(lambda: attempts == [35.0, 35.0], "the retry of the failed report")
+            state = service._code_usage_reporters["task-3"]
+            await _code_usage_wait(lambda: not state["draining"], "the drain to finish")
+            assert state["status"] == "allowed" and state["failures"] == 0, state
+        attempts.clear()
+        with patch.object(service, "report_code_session_subscription_usage", down):
+            service.report_code_session_usage_soon("task-4", snap)
+            state = service._code_usage_reporters["task-4"]
+            await _code_usage_wait(lambda: not state["draining"], "the bounded retries to stop")
+            assert attempts == [-1.0] * service._CODE_USAGE_REPORT_MAX_FAILURES, attempts
+            assert state["status"] is None, "an unaccepted report is never recorded as delivered"
+    service._code_usage_reporters.clear()
+
+
+async def test_code_session_usage_keeps_each_window_while_deferred():
+    """One CLI event carries one window: a deferred report keeps the latest observation of each window."""
+    import domains.spawn_claude_code_agent.service as service
+
+    posted: list[dict] = []
+
+    async def report(_task_id, usage):
+        posted.append(usage)
+        return True
+
+    def event(five=None, seven=None):
+        return {"observedAt": "2026-11-06T12:00:00Z", "source": "code_session", "status": "allowed",
+                "fiveHour": None if five is None else {"usedPct": five, "resetsAt": None},
+                "sevenDay": None if seven is None else {"usedPct": seven, "resetsAt": None}}
+
+    service._code_usage_reporters.clear()
+    with (
+        patch.object(service, "report_code_session_subscription_usage", report),
+        patch.object(service, "_CODE_USAGE_REPORT_MIN_INTERVAL_S", 0.2),
+    ):
+        service.report_code_session_usage_soon("task-5", event(five=20.0))
+        await _code_usage_wait(lambda: len(posted) == 1, "the first report")
+        service.report_code_session_usage_soon("task-5", event(seven=30.0))
+        service.report_code_session_usage_soon("task-5", event(five=50.0))
+        await _code_usage_wait(lambda: len(posted) == 2, "the deferred report")
+    assert posted[1]["fiveHour"]["usedPct"] == 50.0 and posted[1]["sevenDay"]["usedPct"] == 30.0, posted[1]
+    service._code_usage_reporters.clear()
+
+
+async def test_lease_heartbeat_restores_usage_after_failed_delivery():
+    """A usage snapshot whose heartbeat POST failed rides the next heartbeat; a newer observation wins."""
+    from helpers.llm import _build_compute_auth_context
+    from providers.rose import subscription_usage as usage
+
+    usage.clear()
+    token = "claude-restore-token"
+    heartbeats: list[dict] = []
+    statuses = [503, 200]
+
+    def handler(req):
+        if "token/lineage-heartbeat" in str(req.url):
+            heartbeats.append(json.loads(req.content))
+            return httpx.Response(statuses[min(len(heartbeats), len(statuses)) - 1], json={"ok": True})
+        return httpx.Response(500, text="unexpected route")
+
+    set_mock_handler(handler)
+    auth = _build_compute_auth_context(
+        {"type": "claude", "accessToken": token, "source": "user", "integrationId": "integration-restore",
+         "lineageKey": "lineage-restore"},
+        "user-restore",
+    )
+    assert auth is not None and auth.heartbeat_lease is not None
+    snapshot = {"observedAt": "2026-11-06T12:00:00Z", "fiveHour": {"usedPct": 42.0, "resetsAt": None},
+                "sevenDay": None, "source": "response", "status": "allowed"}
+    usage.record(token, snapshot)
+    await auth.heartbeat_lease(auth)  # 503: not acknowledged
+    assert heartbeats[0]["usage"] == snapshot and usage.has_pending(token), "kept for the next heartbeat"
+    await auth.heartbeat_lease(auth)  # 200: delivered
+    assert heartbeats[1]["usage"] == snapshot and not usage.has_pending(token), heartbeats
+    newer = {**snapshot, "fiveHour": {"usedPct": 60.0, "resetsAt": None}}
+    usage.restore(token, newer)
+    usage.restore(token, snapshot)  # an older one never replaces a newer pending observation
+    assert usage.take(token) == newer
+    usage.clear()
+
+
+
+async def test_agent_loop_lease_usage_heartbeat_names_its_login():
+    """call_llm builds its lease contexts without an integration id; the usage heartbeat
+    must still name the login (credential fingerprint) or the backend drops the snapshot."""
+    from helpers.llm import _build_claude_auth_context, _build_gpt_auth_context, credential_fingerprint
+    from providers.rose import subscription_usage as usage
+
+    usage.clear()
+    heartbeats: list[dict] = []
+
+    def handler(req):
+        if "token/lineage-heartbeat" in str(req.url):
+            heartbeats.append(json.loads(req.content))
+            return httpx.Response(200, json={"ok": True, "updated": 1, "usageRecorded": True})
+        return httpx.Response(500, text="unexpected route")
+
+    set_mock_handler(handler)
+    # The exact construction call_llm uses (helpers/llm.py): no integration_id.
+    common = {"source": "user", "user_id": "user-loop", "pool_token_id": None, "lineage_key": "lineage-loop",
+              "agent_id": "agent-loop", "root_agent_id": "agent-loop", "demo_cache_affinity_key": None}
+    claude = _build_claude_auth_context("claude-loop-token", **common)
+    gpt = _build_gpt_auth_context("gpt-loop-token", account_id="acct-loop", **common)
+    snapshot = {"observedAt": "2026-11-13T11:27:15Z", "fiveHour": {"usedPct": 2.0, "resetsAt": "2026-11-13T14:10:00Z"},
+                "sevenDay": {"usedPct": 17.0, "resetsAt": "2026-11-18T19:00:00Z"}, "source": "response",
+                "status": "allowed"}
+    for ctx in (claude, gpt):
+        assert ctx is not None and ctx.heartbeat_lease is not None, ctx
+        usage.record(ctx.token, snapshot)
+        await ctx.heartbeat_lease(ctx)
+    assert [h.get("credential") for h in heartbeats] == [
+        credential_fingerprint("claude-loop-token"),
+        credential_fingerprint("gpt-loop-token"),
+    ], heartbeats
+    assert all(h["usage"] == snapshot and "integrationId" not in h for h in heartbeats), heartbeats
+    usage.clear()
+
+def _usage_backend_handler(captured: dict, provider_response):
+    def handler(req):
+        url = str(req.url)
+        if "token/lineage-heartbeat" in url:
+            captured.setdefault("heartbeats", []).append(json.loads(req.content))
+            return httpx.Response(200, json={"ok": True, "updated": 1})
+        if "token/rate-limited" in url:
+            captured.setdefault("marks", []).append(json.loads(req.content))
+            return httpx.Response(200, json={"ok": True})
+        if "credentials/token" in url:
+            return httpx.Response(404, json={"error": "none"})
+        if "api.anthropic.com" in url:
+            captured["provider_calls"] = captured.get("provider_calls", 0) + 1
+            return provider_response()
+        captured.setdefault("other", []).append(url)
+        return httpx.Response(500, text="unexpected route")
+
+    return handler
+
+
+async def _drive_claude_429(provider_response):
+    from helpers.llm import _build_compute_auth_context
+    from providers.rose import subscription_usage as usage
+
+    usage.clear()
+    captured: dict = {}
+    set_mock_handler(_usage_backend_handler(captured, provider_response))
+    auth = _build_compute_auth_context(
+        {
+            "type": "claude",
+            "accessToken": "claude-429-token",
+            "source": "user",
+            "integrationId": "integration-429",
+            "lineageKey": "lineage-429",
+        },
+        "user-429",
+    )
+    assert auth is not None
+    raised = None
+    with (
+        patch("providers.rose.claude_auth.random.uniform", return_value=0),
+        patch("providers.rose.claude_auth.asyncio.sleep", new=AsyncMock()),
+    ):
+        try:
+            await _drain(
+                claude_auth_complete(
+                    pool_spec=get_pool("rose-1-flash"),
+                    messages=[{"role": "user", "content": "hi"}],
+                    auth=auth,
+                    request_id="r-usage-429",
+                    max_tokens=16,
+                )
+            )
+        except RoseRateLimitError as exc:
+            raised = exc
+    for _ in range(10):
+        await asyncio.sleep(0)  # let the background flush land
+    return captured, raised
+
+
+async def test_claude_429_usage_flushed_before_rotation_with_authoritative_cooldown():
+    """429 + rejected 7d window: usage (100% used, its reset) is flushed, cooldown is authoritative."""
+    reset_epoch = 4_081_000_000  # April 2099 — far future, so the token rotates at once
+    headers = {
+        "anthropic-ratelimit-unified-status": "rejected",
+        "anthropic-ratelimit-unified-representative-claim": "seven_day",
+        "anthropic-ratelimit-unified-reset": str(reset_epoch),
+        "anthropic-ratelimit-unified-7d-utilization": "1.0",
+        "anthropic-ratelimit-unified-7d-reset": str(reset_epoch),
+    }
+    captured, raised = await _drive_claude_429(
+        lambda: httpx.Response(429, json={"error": {"type": "rate_limit_error", "message": "limit"}}, headers=headers)
+    )
+    assert isinstance(raised, RoseRateLimitError), raised
+    assert captured.get("provider_calls") == 1, "rotated at once; no extra provider request"
+    usage_heartbeats = [h for h in captured.get("heartbeats", []) if "usage" in h]
+    assert len(usage_heartbeats) == 1, captured
+    sent = usage_heartbeats[0]
+    assert sent["integrationId"] == "integration-429" and sent["lineageKey"] == "lineage-429", sent
+    assert sent["usage"]["status"] == "rejected" and sent["usage"]["source"] == "rate_limit", sent
+    from datetime import datetime, timezone
+
+    reset_iso = datetime.fromtimestamp(reset_epoch, tz=timezone.utc).isoformat().replace("+00:00", "Z")
+    assert sent["usage"]["sevenDay"] == {"usedPct": 100.0, "resetsAt": reset_iso}, sent
+    marks = captured.get("marks", [])
+    assert len(marks) == 1, captured
+    assert marks[0]["rateLimitAuthoritative"] is True, marks[0]
+    assert marks[0]["rateLimitReason"] == "usage_window_7d", marks[0]
+    assert marks[0]["rateLimitedUntil"].startswith(reset_iso[:19]), marks[0]
+    assert marks[0]["integrationId"] == "integration-429", marks[0]
+
+
+async def test_claude_429_without_metadata_marks_non_authoritative_cooldown():
+    """429 with no usage headers or reset: Rose's default backoff, flagged non-authoritative; no usage sent."""
+    captured, raised = await _drive_claude_429(
+        lambda: httpx.Response(429, json={"error": {"type": "rate_limit_error", "message": "too many requests"}})
+    )
+    assert isinstance(raised, RoseRateLimitError), raised
+    assert not [h for h in captured.get("heartbeats", []) if "usage" in h], "nothing observed, nothing sent"
+    marks = captured.get("marks", [])
+    assert len(marks) == 1, captured
+    assert marks[0]["rateLimitAuthoritative"] is False, marks[0]
+    assert marks[0]["rateLimitReason"] == "rate_limit", marks[0]
+
+
+async def test_usage_flush_never_blocks_or_alters_the_completion():
+    """A hung or failing heartbeat neither delays nor changes what Rose returns."""
+    from providers.rose import subscription_usage as usage
+
+    sse = "\n".join(
+        _ev("message_start", {"type": "message_start", "message": {"usage": {"input_tokens": 3}}})
+        + _ev(
+            "content_block_start",
+            {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}},
+        )
+        + _ev(
+            "content_block_delta",
+            {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "ok"}},
+        )
+        + _ev("content_block_stop", {"type": "content_block_stop", "index": 0})
+        + _ev(
+            "message_delta",
+            {"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 1}},
+        )
+        + _ev("message_stop", {"type": "message_stop"})
+    )
+    headers = {"Content-Type": "text/event-stream", "anthropic-ratelimit-unified-7d-utilization": "0.2"}
+    set_mock_handler(lambda req: httpx.Response(200, text=sse, headers=headers))
+
+    async def run(heartbeat):
+        usage.clear()
+        auth = ClaudeAuthContext(
+            token="flush-token", source="pool", user_id="u", lineage_key="lin", heartbeat_lease=heartbeat
+        )
+        started = time.monotonic()
+        chunks = await _drain(
+            claude_auth_complete(
+                pool_spec=get_pool("rose-1-flash"),
+                messages=[{"role": "user", "content": "hi"}],
+                auth=auth,
+                request_id="r-flush",
+                max_tokens=16,
+            )
+        )
+        return chunks, time.monotonic() - started
+
+    calls: list[str] = []
+
+    async def hung(ctx):
+        calls.append("hung")
+        usage.take(ctx.token)
+        await asyncio.Event().wait()  # never set: a heartbeat that never answers
+
+    async def broken(ctx):
+        calls.append("broken")
+        raise RuntimeError("backend down")
+
+    baseline, _ = await run(None)
+    for heartbeat in (hung, broken):
+        chunks, elapsed = await run(heartbeat)
+        assert elapsed < 2.0, f"{heartbeat.__name__}: completion waited {elapsed:.1f}s on the flush"
+        assert [(c.kind, c.data) for c in chunks] == [(c.kind, c.data) for c in baseline]
+        for _ in range(10):
+            await asyncio.sleep(0)
+    assert calls == ["hung", "broken"], calls
+    # Success flushes are throttled per token; failures (urgent) always flush.
+    usage.clear()
+    sent: list[str] = []
+
+    async def record(ctx):
+        sent.append("hb")
+        usage.take(ctx.token)
+
+    auth = ClaudeAuthContext(token="thr-token", source="pool", user_id="u", lineage_key="lin", heartbeat_lease=record)
+    for urgent in (False, False, True):
+        usage.observe("claude", "thr-token", {"anthropic-ratelimit-unified-7d-utilization": "0.2"})
+        usage.flush(auth, urgent=urgent)
+        for _ in range(10):
+            await asyncio.sleep(0)
+    assert sent == ["hb", "hb"], sent
+    usage.clear()
+
+
 async def run_all_tests():
     print("rose blackbox tests:")
     r = BlackboxResult()
@@ -13023,6 +13796,39 @@ async def run_all_tests():
     )
     await r.record_async("direct_auth_candidate_exclusions", test_direct_auth_honors_candidate_exclusions)
 
+    r.record("usage_429_rejected_window_100_used", test_subscription_usage_429_rejected_window_is_100_used_with_reset)
+    r.record("usage_429_without_metadata_records_nothing", test_subscription_usage_429_without_metadata_records_nothing)
+    r.record("usage_codex_limit_body_window", test_subscription_usage_codex_usage_limit_body_maps_to_window)
+    r.record("code_session_rate_limit_event_all_statuses", test_code_session_rate_limit_event_maps_every_status)
+    await r.record_async("code_session_usage_report_fire_and_forget", test_code_session_usage_report_is_fire_and_forget)
+    await r.record_async(
+        "code_session_usage_same_status_update_deferred",
+        test_code_session_usage_same_status_update_is_deferred_not_dropped,
+    )
+    await r.record_async(
+        "code_session_usage_failed_report_retried",
+        test_code_session_usage_failed_report_is_retried_not_marked_delivered,
+    )
+    await r.record_async(
+        "code_session_usage_keeps_each_window",
+        test_code_session_usage_keeps_each_window_while_deferred,
+    )
+    await r.record_async(
+        "lease_heartbeat_restores_usage_after_failed_delivery",
+        test_lease_heartbeat_restores_usage_after_failed_delivery,
+    )
+    await r.record_async(
+        "agent_loop_lease_usage_heartbeat_names_its_login",
+        test_agent_loop_lease_usage_heartbeat_names_its_login,
+    )
+    await r.record_async(
+        "claude_429_usage_flushed_authoritative_cooldown",
+        test_claude_429_usage_flushed_before_rotation_with_authoritative_cooldown,
+    )
+    await r.record_async(
+        "claude_429_no_metadata_non_authoritative", test_claude_429_without_metadata_marks_non_authoritative_cooldown
+    )
+    await r.record_async("usage_flush_never_blocks_completion", test_usage_flush_never_blocks_or_alters_the_completion)
     r.record("is_rose_model_variants", test_is_rose_model_variants)
     r.record("build_anthropic_body_no_input_mutation", test_build_anthropic_body_does_not_mutate_caller_messages)
     r.record("pool_for_model_fuzzy", test_pool_for_model_fuzzy)
@@ -13201,6 +14007,14 @@ async def run_all_tests():
         "claude_auth_429_transient_retries",
         test_claude_auth_429_transient_retries_before_rotating,
     )
+    await r.record_async(
+        "claude_auth_fast_mode_overage_rejection_retries_standard",
+        test_claude_auth_fast_mode_overage_rejection_retries_standard_on_same_token,
+    )
+    await r.record_async(
+        "claude_auth_fast_mode_overage_then_spent_window_still_cools",
+        test_claude_auth_fast_mode_overage_then_spent_window_still_cools_with_window_reset,
+    )
     await r.record_async("claude_auth_403_usage_limit_reset", test_claude_auth_403_usage_limit_marks_body_reset_time)
 
     await r.record_async("anth_sse_text_usage", test_parse_anthropic_sse_text_and_usage)
@@ -13226,6 +14040,8 @@ async def run_all_tests():
     await r.record_async("openai_sse_empty_stalls", test_parse_openai_sse_empty_stream_raises_stall)
     await r.record_async("openai_sse_refusal_raises", test_parse_openai_sse_refusal_raises_refusal)
     await r.record_async("responses_sse_content_usage", test_parse_responses_sse_content_and_usage)
+    await r.record_async("responses_incomplete_reason", test_responses_incomplete_preserves_reason_and_partial_evidence)
+    await r.record_async("verifier_refusal_terminal", test_verifier_refusal_never_salvages_partial_success)
     await r.record_async(
         "responses_sse_ignores_idle_before_first_line",
         test_parse_responses_sse_ignores_deprecated_idle_timeout_before_first_line,
@@ -13513,7 +14329,7 @@ async def run_all_tests():
     )
     await r.record_async(
         "lease_heartbeat_carries_subscription_usage_without_extra_requests",
-        test_lease_heartbeat_carries_subscription_usage_without_extra_requests,
+        test_lease_heartbeat_flushes_subscription_usage_after_response,
     )
     await r.record_async(
         "client_foundry_server_error_falls_through_to_openrouter",

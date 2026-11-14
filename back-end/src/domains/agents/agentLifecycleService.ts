@@ -4,7 +4,7 @@ import { assertExternalExecution, EXTERNAL_EXECUTION_START_PHASE } from './agent
  * Agent lifecycle service — create and delete agents.
  */
 
-import { resolveCreateAgentPlacement } from './agentProject';
+import { resolveCreateAgentPlacement, resolveCreateRepoFields } from './agentProject';
 import { randomUUID } from '../../providers/crypto';
 import { handleChatMessage } from '../../providers/chat';
 import { startDirectWorkflow } from './agentDirectStartService';
@@ -160,15 +160,16 @@ function graphSpawnFields(options: CreateAgentOptions) {
       };
 }
 
-/** Server-side create fields: the root repository and the Mac that started it. */
+/** Server-side create fields: the connected repo ref/URL and the Mac that started it. */
 async function serverCreateFields(
   body: CreateAgentBody,
   userId: string,
   isSubAgent: boolean,
-  options: CreateAgentOptions
-): Promise<{ githubRepoUrl?: string; originDeviceId?: string }> {
+  options: CreateAgentOptions,
+  placement: { projectId: string | null; explicitProject: boolean }
+): Promise<{ githubRepoUrl?: string; githubRepoRef?: string; originDeviceId?: string }> {
   return {
-    ...(options.githubRepoUrl !== undefined ? { githubRepoUrl: options.githubRepoUrl } : {}),
+    ...(await resolveCreateRepoFields(body, userId, placement, options.githubRepoUrl)),
     ...(await originDeviceFields(body, userId, isSubAgent, options.originDeviceHeader)),
   };
 }
@@ -211,7 +212,7 @@ export async function createAgent(
   await applyCreateBodyRules(body, userId, benchmarkFlag);
   const existingSubAgent = await resumeExistingSubAgent(body, userId, verifier);
   if (existingSubAgent !== null) return existingSubAgent;
-  const { projectId, folderId } = await resolveCreateAgentPlacement(body, userId);
+  const placement = await resolveCreateAgentPlacement(body, userId);
   const { tokenInPriceMicrodollars, tokenOutPriceMicrodollars, proxyGeo } =
     await resolveCreateMetadata(body.model, clientIP, body.parent_agent_id ?? null, userId);
   const agentId = body.agent_id ?? randomUUID();
@@ -255,9 +256,9 @@ export async function createAgent(
     workflowStartPhase:
       options.externalExecution === true ? EXTERNAL_EXECUTION_START_PHASE : body.start_phase,
     workflowTaskQueue: body.task_queue,
-    ...(await serverCreateFields(body, userId, isSubAgent, options)),
-    projectId,
-    folderId,
+    ...(await serverCreateFields(body, userId, isSubAgent, options, placement)),
+    projectId: placement.projectId,
+    folderId: placement.folderId,
     ...graphSpawnFields(options),
     ...(options.phoneSetupHash === undefined ? {} : { phoneSetupHash: options.phoneSetupHash }),
     taskPath,

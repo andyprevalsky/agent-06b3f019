@@ -215,7 +215,7 @@ def test_fleet_monitor_detached_launch_retains_actual_controller_exit(
         time.sleep(0.05)
     assert len(statuses) == 1, "detached launch lost its actual exit status"
     assert statuses[0].read_text().strip() == "7"
-    assert "monitor every 30s" in result.stdout
+    assert "the log prints the exact run-bench monitor command" in result.stdout
     terminal = observe(runs / "not-allocated", "--controller-status", str(statuses[0]))
     assert terminal["controller_exit_code"] == 7
     assert terminal["controller_terminal"] is True

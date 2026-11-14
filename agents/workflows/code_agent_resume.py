@@ -23,6 +23,12 @@ STATE MACHINE (this workflow is the spawn's ``workflow_instance``):
     [RUNNING] ── any failure (bad request, a fenced write, an activity error) ──▶
         UI-only "Code agent could not resume" ERROR row ──▶ non-retryable failure
 
+REPO: the resumed session keeps its own repo. A ``github_repo_ref`` saved on the
+spawn (or in ``execution``) rides along in the tool call, but whenever the run
+carries a ``code_session_id`` the code-session create sends that id and not the
+ref (domains/spawn_claude_code_agent/repo.py ``create_e2b_session``): an explicit
+ref never re-points or fails a resume, deterministically.
+
 Its activities write under the generation ``code-resume:<agent>:<turn row>``,
 which the backend attributes to the owner's live generation (codeResumeGeneration.ts).
 Rows are UI-only (``excludeFromModel``): nothing enters the owner's planner context.
@@ -61,7 +67,7 @@ def resume_tool_call(request: Dict[str, Any], saved: Dict[str, Any]) -> Dict[str
     tool_call = copy.deepcopy(original)
     execution = saved.get("execution")
     if isinstance(execution, dict):
-        for key in ("github_repo_link", "target", "code_session_id"):
+        for key in ("github_repo_link", "github_repo_ref", "target", "code_session_id"):
             if key in execution:
                 tool_call[key] = execution[key]
     # Like the owner's background wake, only the next conversation input changes.

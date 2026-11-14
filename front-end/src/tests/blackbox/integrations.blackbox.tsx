@@ -1,4 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
+import { registerCliIntegrationTests } from './integrations-cli.fixtures';
 import { screen, waitFor, within, renderHook, act } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
@@ -161,7 +162,9 @@ describe('Integrations page', () => {
       });
       // Let the page's initial status reads (e.g. Granola) land before the
       // capture window opens, so only requests caused by the click count.
-      await screen.findByText('Search your meeting notes, summaries and transcripts');
+      expect(
+        await screen.findAllByText('Search your meeting notes, summaries and transcripts'),
+      ).toHaveLength(2);
 
       clearCaptures();
       const fileSystemSection = sectionFor('File System');
@@ -801,3 +804,5 @@ describe('Integrations page', () => {
     });
   });
 });
+
+registerCliIntegrationTests();

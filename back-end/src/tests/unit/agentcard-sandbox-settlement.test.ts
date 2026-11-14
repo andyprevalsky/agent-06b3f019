@@ -1,6 +1,7 @@
 #!/usr/bin/env tsx
 
 import assert from 'node:assert/strict';
+import { assertV2SandboxSettlementContract } from '../blackbox/test-payment-v2-lifecycle.cases';
 import {
   AgentCardSandboxSettlementError,
   settleAgentCardSandboxPayment,
@@ -11,6 +12,7 @@ import { ADMIN_USER_IDS } from '../../utils/adminAccess';
 const ADMIN_USER_ID = [...ADMIN_USER_IDS][0];
 
 async function main(): Promise<void> {
+  await assertV2SandboxSettlementContract();
   const charges: Array<Record<string, unknown>> = [];
   const claims: string[] = [];
   const cleared: string[] = [];
@@ -177,7 +179,11 @@ async function main(): Promise<void> {
     stripePaymentIntentId: null,
   });
   assert.deepEqual(adminCharges, [
-    { cardId: 'card-admin', amountCents: 4396, merchant: 'Rose Labs Test Payment' },
+    {
+      cardId: 'card-admin',
+      amountCents: 4396,
+      merchant: 'Rose Labs Test Payment',
+    },
   ]);
   assert.deepEqual(adminCleared, ['purchase-admin']);
 
@@ -371,7 +377,11 @@ async function main(): Promise<void> {
   // card": keep scanning so an unrelated shopper's checkout is not failed by an abandoned purchase.
   const notFoundCleared: string[] = [];
   const notFoundResult = await settleAgentCardSandboxPayment(
-    { cardNumber: '4242424242420640', amountCents: 4396, merchant: 'Rose Labs Test Payment' },
+    {
+      cardNumber: '4242424242420640',
+      amountCents: 4396,
+      merchant: 'Rose Labs Test Payment',
+    },
     {
       findHeldPurchasesByTotal: async () => [
         {
@@ -416,7 +426,11 @@ async function main(): Promise<void> {
   // shares the same totalCents, so Pay never clears.
   const closedCleared: string[] = [];
   const closedResult = await settleAgentCardSandboxPayment(
-    { cardNumber: '4242424242421316', amountCents: 4396, merchant: 'Rose Labs Test Payment' },
+    {
+      cardNumber: '4242424242421316',
+      amountCents: 4396,
+      merchant: 'Rose Labs Test Payment',
+    },
     {
       findHeldPurchasesByTotal: async () => [
         {
@@ -466,7 +480,11 @@ async function main(): Promise<void> {
   await assert.rejects(
     () =>
       settleAgentCardSandboxPayment(
-        { cardNumber: '4242424242420887', amountCents: 4396, merchant: 'Rose Labs Test Payment' },
+        {
+          cardNumber: '4242424242420887',
+          amountCents: 4396,
+          merchant: 'Rose Labs Test Payment',
+        },
         {
           findHeldPurchasesByTotal: async () => [
             {
@@ -503,7 +521,11 @@ async function main(): Promise<void> {
 
   // Closed CLEARED purchase with matching last4 still replays (Pay re-submit after close).
   const closedClearedReplay = await settleAgentCardSandboxPayment(
-    { cardNumber: '4242424242420887', amountCents: 4396, merchant: 'Rose Labs Test Payment' },
+    {
+      cardNumber: '4242424242420887',
+      amountCents: 4396,
+      merchant: 'Rose Labs Test Payment',
+    },
     {
       findHeldPurchasesByTotal: async () => [],
       findClearedPurchasesByTotal: async () => [
@@ -572,7 +594,11 @@ async function main(): Promise<void> {
     // First attempt: the charge throws (the observed 500).
     await assert.rejects(
       settleAgentCardSandboxPayment(
-        { cardNumber: '4242424242420640', amountCents: 4396, merchant: 'Rose Labs Test Payment' },
+        {
+          cardNumber: '4242424242420640',
+          amountCents: 4396,
+          merchant: 'Rose Labs Test Payment',
+        },
         {
           ...deps(),
           testCharge: async () => {
@@ -585,7 +611,11 @@ async function main(): Promise<void> {
 
     // Second attempt on the same purchase must now find and settle it.
     const retry = await settleAgentCardSandboxPayment(
-      { cardNumber: '4242424242420640', amountCents: 4396, merchant: 'Rose Labs Test Payment' },
+      {
+        cardNumber: '4242424242420640',
+        amountCents: 4396,
+        merchant: 'Rose Labs Test Payment',
+      },
       { ...deps(), testCharge: async () => ({ isError: false }) }
     );
     assert.equal(retry.purchaseId, 'purchase-retry', 'retry after a failed charge must settle');
@@ -596,7 +626,11 @@ async function main(): Promise<void> {
     const released: string[] = [];
     await assert.rejects(
       settleAgentCardSandboxPayment(
-        { cardNumber: '4242424242420640', amountCents: 4396, merchant: 'Rose Labs Test Payment' },
+        {
+          cardNumber: '4242424242420640',
+          amountCents: 4396,
+          merchant: 'Rose Labs Test Payment',
+        },
         {
           findHeldPurchasesByTotal: async () => [
             {

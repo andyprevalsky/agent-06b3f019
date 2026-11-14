@@ -84,7 +84,9 @@ function ReportBugPanel({ agent, nub }: { agent: AgentDetail; nub: boolean }) {
         // A typed draft survives clicks elsewhere (e.g. copying from the chat);
         // Cancel, Esc or the trigger still close it.
         onInteractOutside={(event) => {
-          if (flow.description.trim() !== '' || flow.isSubmitting) event.preventDefault();
+          if (flow.description.trim() !== '' || flow.attachments.length > 0 || flow.isSubmitting) {
+            event.preventDefault();
+          }
         }}
         className="p-0 border border-gray-300 dark:border-white/[0.09] shadow-lg [&>button]:hidden overflow-hidden bg-[#EEEFF2] dark:bg-[#262624] md:bg-transparent md:dark:bg-transparent"
         style={{

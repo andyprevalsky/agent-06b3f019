@@ -288,6 +288,7 @@ async function main(): Promise<void> {
     // Preserve one isolated process per file without npm/tsx wrapper processes.
     const childEnv: NodeJS.ProcessEnv = {
       ...process.env,
+      SMS_PROVIDER: process.env.BACKEND_UNIT_SMS_PROVIDER ?? 'surge',
       ...localDatabaseEnv,
       ...(privateDatabase === undefined
         ? {}

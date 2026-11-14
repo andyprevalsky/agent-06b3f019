@@ -156,6 +156,7 @@ function TerminalLayout(props: TerminalLayoutProps) {
           selectedAgentId={props.agents.selectedAgentId}
           onSelectAgent={props.agents.handleSelectAgent}
           publishLayout={roseDesktop}
+          invitationReady={props.agents.isFullySignedIn}
           onLogout={onLogout}
           onCreateAgentInProject={props.agents.handleCreateNewAgentInProject}
           newAgentFolderId={props.agents.newAgentFolderId}

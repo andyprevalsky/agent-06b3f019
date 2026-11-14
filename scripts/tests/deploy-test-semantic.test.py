@@ -137,6 +137,56 @@ class SemanticReports(unittest.TestCase):
         self.assertEqual(adapter.summary_status(['FAIL', 'UNVERIFIED']), 'UNVERIFIED')
         self.assertEqual(adapter.summary_status([]), 'UNVERIFIED')
 
+    def test_actual_playwright_retry_keeps_final_failure_and_flaky_first_error(self):
+        import os
+        import deploy_test_quarantine as quarantine
+        with tempfile.TemporaryDirectory() as d:
+            folder = Path(d)
+            pkg = Path(subprocess.check_output(
+                ['node', '-p', "require.resolve('@playwright/test')"], cwd=ROOT / 'front-end', text=True
+            ).strip())
+            (folder / 'fixture.spec.cjs').write_text(
+                f"const {{test,expect}} = require({json.dumps(str(pkg))});\n"
+                "test('final assertion',()=>expect(1).toBe(2));\n"
+                "test('retried pass',({},info)=>expect(info.retry).toBe(1));\n"
+                "test.describe('setup',()=>{test.beforeEach(()=>{throw Error('setup failed')});"
+                "test('not executed',()=>{});});\n")
+            (folder / 'playwright.config.cjs').write_text(
+                "module.exports={testDir:'.',retries:1,workers:1,projects:[{name:'chromium'}]};")
+            progress = folder / 'progress.jsonl'
+            env = {**os.environ, 'DEPLOY_SEMANTIC_LIFECYCLE': str(folder / 'events.jsonl'),
+                   'PLAYWRIGHT_JSON_OUTPUT_FILE': str(folder / 'report.json'),
+                   'DEPLOY_GATE_PROGRESS': str(progress), 'DEPLOY_GATE_CASE': 'semantic-stack'}
+            reporters = ['json', str(ROOT / 'scripts/deploy-semantic-reporter.cjs'),
+                         str(ROOT / 'front-end/src/tests/gate-progress/playwrightReporter.ts')]
+            proc = subprocess.run([*adapter.playwright_command(ROOT), 'test',
+                                   '--reporter=' + ','.join(reporters)], cwd=folder, env=env,
+                                  capture_output=True, timeout=45)
+            self.assertEqual(proc.returncode, 1, proc.stderr.decode())
+            events = [json.loads(line) for line in (folder / 'events.jsonl').read_text().splitlines()]
+            report = json.loads((folder / 'report.json').read_text())
+            retried = []
+            cases = adapter.classify_lane('ui', events[0]['tests'], report, events, retried)
+            # The retried pass stays UNVERIFIED until its native FLAKY receipt exists.
+            self.assertEqual(sorted(cases.values()), ['FAIL', 'UNVERIFIED', 'UNVERIFIED'])
+            self.assertEqual(len(retried), 1)
+            flaky = quarantine.gate_outcomes(progress)['flaky']
+            self.assertEqual(len(flaky), 1)
+            self.assertEqual(flaky[0]['attempts'], 2)
+            self.assertIn('retried pass', flaky[0]['unit'])
+            self.assertIn('expect(received).toBe(expected)', flaky[0]['detail'])
+            raw_flaky = [json.loads(line) for line in progress.read_text().splitlines()
+                         if json.loads(line)['status'] == 'FLAKY']
+            self.assertEqual(len(raw_flaky), 1)
+            self.assertIn('Expected: 1', raw_flaky[0]['detail'])
+            final_flaky = adapter.native_flaky('ui', events[0]['tests'], report, retried)
+            self.assertEqual(len(final_flaky), 1)
+            self.assertEqual(final_flaky[0]['unit'], raw_flaky[0]['unit'])
+            self.assertEqual(final_flaky[0]['attempts'], 2)
+            self.assertIn('Expected: 1', final_flaky[0]['detail'])
+            progress.unlink()  # Final evidence survives loss of the advisory file.
+            self.assertEqual(adapter.native_flaky('ui', events[0]['tests'], report, retried), final_flaky)
+
     def run_worker(self, defect=None, malformed_event=None, malformed_report=None):
         import deploy_test_worker as worker
         import deploy_test_result as result_contract
@@ -293,6 +343,47 @@ class SemanticReports(unittest.TestCase):
                 for name in ('pg_isready', 'curl'):
                     path = folder / 'bin' / name
                     path.write_text('#!/bin/bash\nexit 0\n'); path.chmod(0o700)
+                # Run the actual inline callback validator; double only its external
+                # HTTP and tunnel-process boundaries, as this fixture owns teardown.
+                node = folder / 'bin/node'
+                node.write_text('#!' + shutil.which('node') + '\n' + r"""
+const fs = require('node:fs'), vm = require('node:vm'), assert = require('node:assert/strict');
+const [root, token, stackPid, port] = process.argv.slice(3);
+const origin = `https://rose-semantic-bench-${token}-bench.ngrok.app`;
+const queue = 'navi-agent-tasks-fixture-deploy-20261111000000-1';
+const services = {worktree:root, status:'running', benchmark_mode:true,
+    run_sh_pid:Number(stackPid), ports:{backend:Number(port), frontend:Number(port)+1},
+    urls:{backend:`http://localhost:${port}`, public:origin}, temporal_task_queue:queue,
+    services:[{name:'ngrok', pid:4321}]};
+const disk = {...fs, readFileSync(file, encoding) {
+    if (file === root+'/.context/services.json') return JSON.stringify(services);
+    if (file === '/proc/4321/stat') return `4321 (ngrok) S ${stackPid} 0 0`;
+    if (file === '/proc/4321/cmdline') return Buffer.from(['ngrok','http',String(Number(port)+1),
+        '--domain',new URL(origin).hostname,''].join('\0'));
+    if (file === root+'/back-end/.env') return 'BACKEND_API_KEY=offline-cleanup-fixture';
+    return fs.readFileSync(file, encoding);
+}};
+const child = {argv:['node','-',root,token,stackPid,port], env:{}, exitCode:0,
+    kill(pid, signal) {assert.equal(pid,4321); assert.equal(signal,0);}};
+const calls = [], output = [];
+const fetch = async (url, options) => {
+    assert([services.urls.backend,origin].some(base => url === base+'/api/agent-queue-pointer'));
+    assert.equal(options.headers['X-API-Key'],'offline-cleanup-fixture');
+    assert.equal(options.headers['X-Queue-Pointer-Observe'],'1');
+    assert.equal(options.redirect,'error'); calls.push(url);
+    return {status:200,json:async()=>({managedDeploymentProtocol:1,continuationAdmitted:false,
+        taskQueue:queue,managedQueue:false,surfaceHash:null,updatedBy:null,updatedAt:null})};
+};
+Promise.resolve(vm.runInNewContext(fs.readFileSync(0,'utf8'), {
+    require:id => id === 'node:fs' ? disk : id === root+'/node_modules/dotenv'
+        ? {parse:()=>({BACKEND_API_KEY:'offline-cleanup-fixture'})} : require(id),
+    process:child, Buffer, URL, AbortSignal, fetch, console:{log:v=>output.push(v),error:v=>output.push(v)}
+})).then(() => {
+    assert.equal(child.exitCode,0); assert.equal(calls.length,2);
+    assert(output.some(line=>line.startsWith('SEMANTIC_CALLBACK_READY')));
+}).catch(error => {console.error(error); process.exitCode=1;});
+""")
+                node.chmod(0o700)
                 (folder / 'scripts/run.sh').write_text('#!/bin/bash\nexec sleep 30\n')
                 (folder / 'scripts/kill-services.sh').write_text(
                     '#!/bin/bash\nif [ -f .context/swept ]; then exit "$FAKE_CLEANUP_RC"; fi\ntouch .context/swept\n')
@@ -304,7 +395,7 @@ class SemanticReports(unittest.TestCase):
                        'CONDUCTOR_PORT': '29080', 'CONDUCTOR_WORKSPACE_NAME': 'semantic_fixture',
                        'ROSE_TRUST_CONDUCTOR_WORKSPACE_NAME': '1', 'ROSE_USE_SYSTEM_PG': 'false',
                        'DEPLOY_SEMANTIC_ARTIFACT_DIR': str(folder / '.context'),
-                       'DEPLOY_SEMANTIC_TOKEN': 'request-token', 'DEPLOY_SEMANTIC_SOURCE': '{"digest":"frozen"}',
+                       'DEPLOY_SEMANTIC_TOKEN': 'a' * 32, 'DEPLOY_SEMANTIC_SOURCE': '{"digest":"frozen"}',
                        'FAKE_CLEANUP_RC': str(cleanup_exit)}
                 proc = subprocess.run(['bash', 'scripts/run-deploy-semantic-stack.sh'], cwd=folder,
                                       env=env, capture_output=True, timeout=20)
@@ -315,7 +406,7 @@ class SemanticReports(unittest.TestCase):
                 self.assertEqual(receipt['cleanup_exit'], cleanup_exit)
                 self.assertEqual((receipt['ui'], receipt['latency']), (1, 0))
                 self.assertTrue(receipt['ready'])
-                self.assertEqual(receipt['token'], 'request-token')
+                self.assertEqual(receipt['token'], 'a' * 32)
 
     def test_inventory_cli_matches_frontend_first_and_root_fallback(self):
         import os
