@@ -61,3 +61,10 @@ Verification scope is object-specific in the catalog. In particular, the old
 cycle has full authenticated readback, not an actual empty-directory full-restore
 claim. A receipt proves preserved bytes, never a passing test, financial
 settlement, provider cleanup or permission to delete this machine.
+
+The committed deletion manifest contains only the exact nonsecret branch
+locators needed by the unchanged native checker for local-only history, plus
+the stash commit locator. It omits530 unnecessary branch entries. The complete
+19532-ref inventory, config paths and recovery carrier map stay encrypted.
+These minimal locators are recovery/check metadata, not private trace payloads
+or permission to delete refs.
