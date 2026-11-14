@@ -2288,6 +2288,10 @@ async def test_phone_provider_boundary_rechecks_the_live_page_and_target_frame_a
         {"action": "click", "params": {"index": "11"}},
         # Keys go to browser focus, which may sit in the realm frame, whatever index is named.
         {"action": "press_key", "index": 13, "params": {"key": "Enter"}},
+        # Pointer input lands at coordinates: a realm frame can cover a public element,
+        # and the password-field fallback's frame-relative point (CodeRabbit, #2060).
+        {"action": "click", "index": 13, "params": {}},
+        {"action": "input_text", "index": 14, "params": {"text": "{{secret:password}}"}},
         # Coordinates and keys land in whichever frame is under the point or focused:
         # undeterminable, so a page embedding the realm refuses them.
         {"action": "click", "params": {}, "coordinates": {"x": 10, "y": 10}},
@@ -2298,10 +2302,8 @@ async def test_phone_provider_boundary_rechecks_the_live_page_and_target_frame_a
         assert result.get("code") == "phone_provider_account_boundary", (action, result)
         assert set(dom.touched) <= _DRIVEN, (action, dom.touched)
 
-    # Determinable targets outside the realm, the main-frame script, reads and leaving still run.
+    # The main-frame script, reads and leaving still run on a page embedding the realm.
     for action in (
-        {"action": "click", "index": 13, "params": {}},
-        {"action": "click", "index": 14, "params": {}},
         {"action": "evaluate", "params": {"code": "1"}},
         {"action": "read_browser_state", "params": {}},
         {"action": "goto", "params": {"url": "https://www.google.com/"}},
@@ -2337,13 +2339,17 @@ async def test_phone_provider_boundary_rechecks_the_live_page_and_target_frame_a
     page_frame.evaluate.return_value = {"x": 7, "y": 8}
     assert await _resolve_password_field_coordinates(fill_session, input_page=page) == (7, 8)
 
-    # A page with no realm frame keeps coordinate and keyboard input.
-    plain = {"main": target("main", "https://example.com/start")}
+    # A page with no realm frame (an ordinary cross-origin frame included) keeps
+    # indexed, coordinate and keyboard input.
+    plain = {"main": target("main", "https://example.com/start"),
+             "ordinary-frame": target("ordinary-frame", "https://ads.example.net/", "iframe")}
     for action in (
+        {"action": "click", "index": 13, "params": {}},
+        {"action": "click", "index": 14, "params": {}},
         {"action": "click", "params": {}, "coordinates": {"x": 10, "y": 10}},
         {"action": "press_key", "params": {"key": "Enter"}},
     ):
-        dom = _LivePageDomService("https://example.com/start", plain, {13: page_button})
+        dom = _LivePageDomService("https://example.com/start", plain, {13: page_button, 14: ad_button})
         result = await run(dom, action)
         assert result.get("code") != "phone_provider_account_boundary", (action, result)
         assert set(dom.touched) - _DRIVEN, (action, "an allowed action must reach the browser")

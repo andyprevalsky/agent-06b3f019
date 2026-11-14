@@ -110,17 +110,16 @@ All in `agents/domains/spawn_browser_agent_v3/service_actions.py`:
     This is the browser-side target registry, the same source as
     `get_current_page_url`, with no renderer round trip. It raises (fail
     closed) when no live focused page exists.
-  - For interactions it checks the frame chain of each indexed target: each
-    node's target URL (for an out-of-process frame, live) plus each enclosing
-    `<iframe src>`. An indexed IFRAME element is judged by its own
-    content document, not by the parent page.
-  - The target frame counts as undeterminable when coordinates are given
-    (`x`/`y`/`coordinates`/any `*_x`/`*_y`), when there is no index (keys,
-    `input_text` without an index), or when an index is not an integer. Then
-    the action is refused if the last snapshot shows any realm frame on the
-    page.
-  - `press_key` is always undeterminable: keys go to browser focus whatever
-    index is named.
+  - For interactions it refuses while any frame on the page is in the realm.
+    It walks every node of the last snapshot's selector map to its frame
+    chain: the node's target URL (for an out-of-process frame, live) plus
+    each enclosing `<iframe src>`. An IFRAME element is judged by its own
+    content document. A per-target-frame rule was tried first and rejected.
+    Pointer input is delivered at coordinates, including an indexed
+    element's and the password-field fallback's frame-relative point, and
+    keys go to browser focus. So a realm frame anywhere on the page can
+    receive an action aimed at a public element. CodeRabbit found this on
+    #2060 cycle 2.
   - `_iter_payment_fill_targets`, the frame scan behind the password-field
     coordinate fallback and the payment-fill helpers, skips realm frames
     (Playwright frames by live `frame.url`, CDP targets by their frames'
@@ -133,9 +132,9 @@ All in `agents/domains/spawn_browser_agent_v3/service_actions.py`:
   terminal actions are unchanged. `scroll`/`dropdown_options` stay refused
   in the realm.
 
-10k agents: per action, one in-memory target lookup. For index-less
-interactions, each node in that agent's own cached selector map is walked up
-its parent chain (nodes x DOM depth). There is no I/O, shared state or lock.
+10k agents: per action, one in-memory target lookup. For interactions, each
+node in that agent's own cached selector map is walked up its parent chain
+(nodes x DOM depth). There is no I/O, shared state or lock.
 
 Residual risk (reviewer-confirmed):
 - The re-check runs before the humanized mouse movement, dwell and
@@ -156,9 +155,10 @@ Residual risk (reviewer-confirmed):
 Independent review (fresh sub-agent, RCA step 7): it reached the same first
 bad boundaries independently. It then found UTS-46 forms, IFRAME-element
 indices, drag coordinates and `0x.0x.0x.0x` gaps in the first fix; each is now
-fixed and pinned in the regressions above. CodeRabbit (#2060 cycle 1) found
-two more: `press_key` with an index, and the frame-scanning password and
-payment fill helpers. Both are fixed and pinned in the same regression.
+fixed and pinned in the regressions above. CodeRabbit (#2060 cycles 1-2) found
+`press_key` with an index, the frame-scanning password and payment fill
+helpers, and realm frames overlaying a public element's click point. All
+three are fixed and pinned in the same regression.
 
 Repro, identical command before and after:
 `BLACKBOX_CASE_FUNCTIONS=test_phone_provider_boundary_rechecks_the_live_page_and_target_frame_at_action_time,test_phone_provider_boundary_reads_urls_the_way_chrome_does python scripts/run_blackbox_tests.py browser-credentials`

@@ -1003,14 +1003,12 @@ def _frame_urls_of_node(node: Any, session_manager: Any) -> List[str]:
     return urls
 
 
-def _live_phone_provider_account_refusal(
-    dom_service: Any, action_name: str, index: Any, params: Dict[str, Any], coords: Any,
-) -> Optional[Dict[str, Any]]:
+def _live_phone_provider_account_refusal(dom_service: Any, action_name: str) -> Optional[Dict[str, Any]]:
     """Re-decide the boundary against the browser as it is when the action runs.
 
     The step-start URL can be stale (redirects, meta refresh) and never covers
-    frames, so the live main frame and the action's target frame are checked
-    here, without Playwright request routing (it breaks Stripe Elements).
+    frames, so the live main frame and every frame embedded in the page are
+    checked here, without Playwright request routing (it breaks Stripe Elements).
     """
     if action_name in _PHONE_PROVIDER_REALM_ALLOWED_ACTIONS or (
         action_name not in _INTERACTION_ACTIONS and action_name != "evaluate"
@@ -1027,23 +1025,11 @@ def _live_phone_provider_account_refusal(
     if action_name == "evaluate":
         # Scripts run in the main frame only.
         return None
+    # Pointer input is delivered at coordinates (an indexed element's too, and
+    # the password-field fallback's), and keys go to focus, so a realm frame
+    # anywhere on the page could receive it: refuse while one is embedded.
     session_manager = getattr(dom_service.session, "session_manager", None)
-    selector_map = dom_service.selector_map or {}
-    indices = [
-        value for value in (index, *(v for k, v in params.items() if k == "index" or k.endswith("_index")))
-        if value is not None
-    ]
-    targets = [
-        selector_map.get(value) if isinstance(value, int) and not isinstance(value, bool) else None
-        for value in indices
-    ]
-    # Keys go to browser focus whatever index is supplied.
-    determinable = action_name != "press_key" and bool(targets) and None not in targets and coords is None and not any(
-        key in {"x", "y", "coordinates"} or key.endswith(("_x", "_y")) for key in params
-    )
-    # Coordinates and keys land in whichever frame is under the point or
-    # focused; without a determinable target, any embedded realm frame counts.
-    for node in targets if determinable else selector_map.values():
+    for node in (dom_service.selector_map or {}).values():
         for frame_url in _frame_urls_of_node(node, session_manager):
             if realm := phone_provider_account_realm(frame_url):
                 return _phone_provider_account_boundary_result(action_name, realm, live_url)
@@ -2142,7 +2128,7 @@ async def _execute_resolved_action(
             element = dom_service.selector_map.get(index)
             if not element:
                 return {"success": False, "error": f"Element with index {index} not found"}
-        refusal = _live_phone_provider_account_refusal(dom_service, action_name, index, params, coords)
+        refusal = _live_phone_provider_account_refusal(dom_service, action_name)
         if refusal:
             logger.warning(
                 "[BrowserAgent] Refused action on live phone-provider account realm",
