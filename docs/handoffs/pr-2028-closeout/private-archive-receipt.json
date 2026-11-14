@@ -1,0 +1,14 @@
+{
+  "format": "ROSE-PRIVATE-TAR-GCM-V1",
+  "bucket": "trace-archive",
+  "key": "devbox-closeout-private/pr2028-ccc17b03/20261114-records.tar.gz.aesgcm",
+  "encryption_key_id": "trace-archive-prod-2026-07-03",
+  "ciphertext_sha256": "a5bc5531fce3dba6a998fa9fbbb0ec8e6bc62086ed5e4487c63740714f2fd089",
+  "gzip_sha256": "1ce968956cf0af8d1b7f8feb41b3d234f3afd74f6deb9050eced9c2fd9910a4d",
+  "stored_bytes": 715702228,
+  "frames": 86,
+  "files": 28795,
+  "original_bytes": 2770264638,
+  "manifest_sha256": "c5b6a1689df8c2bf984eecfb93a6abcc0c4ae6b6e8952867aa44179b4146fbff",
+  "full_readback_verified": true
+}
