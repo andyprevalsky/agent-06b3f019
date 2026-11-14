@@ -114,6 +114,7 @@ from utils.response_schema_constraints import (
     value_satisfies_output_field_constraints,
 )
 from utils.rose_desktop import is_rose_desktop_user
+from utils.tool_call_ids import claim_tool_call_id, context_tool_call_ids, request_tool_call_ids
 from utils.tool_schemas import (
     ResponseSchemaBound,
     create_agent_action_model,
@@ -3112,6 +3113,7 @@ async def call_llm_structured_streaming(
     deadline_s: Optional[float] = None,  # Override Rose top-level deadline; None uses Rose default
     ttft_timeout_s: Optional[float] = None,  # Override Rose TTFT timeout
     idle_timeout_s: Optional[float] = None,  # Override Rose idle/inter-chunk timeout (-1 disables)
+    reserved_tool_call_ids: frozenset[str] = frozenset(),  # Stored ids new tool calls must not reuse
     _exclude_anthropic_family: bool = False,  # Internal: refusal retry skips Anthropic direct/waterfall routes
     _is_escalation: bool = False,  # Internal: prevents infinite recursion on max_tokens escalation
     _parse_retry_attempt: int = 0,  # Internal: bounds re-generation on a malformed/schema-invalid structured output
@@ -3184,6 +3186,8 @@ async def call_llm_structured_streaming(
         text_buffer = ""
         hidden_stream_bytes = 0
         tool_use_blocks: List[Dict[str, Any]] = []
+        # Ids this conversation already uses; each new native call claims a unique one.
+        taken_tool_call_ids = request_tool_call_ids(messages) | reserved_tool_call_ids
 
         # Tool detection tracking (for early IN_PROGRESS messages)
         detected_tools_ordered: List[tuple] = []  # (tool_name, tool_call_id, timestamp)
@@ -3427,12 +3431,20 @@ async def call_llm_structured_streaming(
                     if not isinstance(parsed_args, dict):
                         parsed_args = {}
                     tool_name = chunk.data.get("name", "") or ""
-                    # Keep the provider's tool_use id: a schema-invalid turn is
-                    # replayed on the parse retry, and a tool_use block can only
-                    # be paired with its tool_result by id.
+                    # The provider's id, made unique within the conversation: some
+                    # models (kimi-k3) reuse ids across turns, and two declarations
+                    # sharing one id poison every later request. The same id names
+                    # the parse-retry replay, the early IN_PROGRESS row and the
+                    # persisted declaration, so tool_use/tool_result pairing holds.
+                    provider_tool_call_id = chunk.data.get("id", "") or ""
+                    native_tool_call_id = (
+                        claim_tool_call_id(provider_tool_call_id, taken_tool_call_ids)
+                        if provider_tool_call_id
+                        else ""
+                    )
                     tool_use_blocks.append(
                         {
-                            "id": chunk.data.get("id", "") or "",
+                            "id": native_tool_call_id,
                             "name": tool_name,
                             "input": parsed_args,
                         }
@@ -3444,7 +3456,7 @@ async def call_llm_structured_streaming(
 
                     # Fire on_tool_detected for non-attention tools.
                     if on_tool_detected and tool_name and tool_name not in SKIP_EARLY_PROGRESS:
-                        tool_call_id = chunk.data.get("id") or str(uuid.uuid4())
+                        tool_call_id = native_tool_call_id or str(uuid.uuid4())
                         detected_tools_ordered.append((tool_name, tool_call_id, _safe_time()))
                         position = detected_tool_positions.get(tool_name, 0)
                         detected_tool_positions[tool_name] = position + 1
@@ -3459,7 +3471,7 @@ async def call_llm_structured_streaming(
                     # send_message_to_user on the native direct-token path arrives complete; emit
                     # the full message immediately rather than streaming partials.
                     if on_attention_stream and tool_name == "send_message_to_user":
-                        attention_tool_call_id = chunk.data.get("id") or str(uuid.uuid4())
+                        attention_tool_call_id = native_tool_call_id or str(uuid.uuid4())
                         detected_tools_ordered.append(("send_message_to_user", attention_tool_call_id, _safe_time()))
                         message_text = parsed_args.get("message", "") or ""
                         is_question = parsed_args.get("is_question", True)
@@ -3759,6 +3771,7 @@ async def call_llm_structured_streaming(
                 call_site=call_site,
                 tool_choice=tool_choice,
                 context_tools=context_tools,
+                reserved_tool_call_ids=reserved_tool_call_ids,
                 _exclude_anthropic_family=_exclude_anthropic_family,
                 _is_escalation=True,
                 _parse_retry_attempt=_parse_retry_attempt,
@@ -4056,6 +4069,7 @@ async def call_llm_structured_streaming(
                     deadline_s=deadline_s,
                     ttft_timeout_s=ttft_timeout_s,
                     idle_timeout_s=idle_timeout_s,
+                    reserved_tool_call_ids=reserved_tool_call_ids,
                     _exclude_anthropic_family=_exclude_anthropic_family,
                     _is_escalation=_is_escalation,
                     _parse_retry_attempt=_parse_retry_attempt + 1,
@@ -6916,6 +6930,10 @@ async def call_llm_activity(
 
         # Resolve messages: either pre-built or build from shared context
         _context_key = None
+        # Every tool-call id the stored context holds. The request below omits a
+        # declaration whose result was never written, but the next build still
+        # registers it, so a new provider tool call must not reuse its id.
+        stored_tool_call_ids: set[str] = set()
         if isinstance(messages_or_agent_id, str):
             _context_key = messages_or_agent_id
             pending = (
@@ -6930,6 +6948,7 @@ async def call_llm_activity(
                 else:
                     context, _sys_prompt, pre_resolved_ids = pending
                     pending_user_id = user_id
+                stored_tool_call_ids = context_tool_call_ids(context)
                 messages = await build_llm_messages(
                     context,
                     _sys_prompt,
@@ -6953,6 +6972,7 @@ async def call_llm_activity(
                 )
                 data = await _fetch_agent_data_impl(_context_key)
                 context = data.get("messages", [])
+                stored_tool_call_ids = context_tool_call_ids(context)
                 messages = await build_llm_messages(
                     context,
                     system_prompt,
@@ -7133,6 +7153,7 @@ async def call_llm_activity(
                 skip_cache_write=skip_cache_write,
                 cache_sequence_id=cache_sequence_id,
                 tool_choice={"name": required_tool} if required_tool else None,
+                reserved_tool_call_ids=frozenset(stored_tool_call_ids),
                 # Without this the agent loop's refusal reroute dies at the activity boundary:
                 # every retry goes back to the model that just refused, so one refusal becomes a
                 # guaranteed 3-strikes kill instead of a provider switch.
