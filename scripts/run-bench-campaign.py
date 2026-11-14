@@ -1184,6 +1184,9 @@ def _start_shared_relay(root: Path, campaign_dir: Path, workspace: Path,
         raise
 
 
+RELAY_AGENT_EXIT_SECONDS = 60  # the private agent exits on its bootstrap's EOF within seconds
+
+
 def stop_shared_relay(value: dict) -> bool:
     """Called only after all campaign task controllers have been joined."""
     process = value['process']
@@ -1202,17 +1205,28 @@ def stop_shared_relay(value: dict) -> bool:
     bootstrap.wait()
     # The private agent is the bootstrap's own isolated child. Keep the parent
     # alive through its EOF shutdown; never signal a shared/default daemon.
+    # The wait is bounded: an agent that outlives its bootstrap's EOF is reported as unverified
+    # cleanup (the caller marks shared transport cleanup pending), never awaited forever or signalled.
     identity = cleanup_ticket_module(Path(value['module']).parent.parent)
     agent = value['agent']
-    while identity.birth(agent['pid']) == agent['birth']:
+    agent_deadline = time.monotonic() + RELAY_AGENT_EXIT_SECONDS
+    agent_exited = False
+    while time.monotonic() < agent_deadline:
+        if identity.birth(agent['pid']) != agent['birth']:
+            agent_exited = True; break
         try: state = Path('/proc', str(agent['pid']), 'stat').read_text().rsplit(') ', 1)[1].split()[0]
-        except FileNotFoundError: break
-        if state in ('Z', 'X'): break
+        except FileNotFoundError:
+            agent_exited = True; break
+        if state in ('Z', 'X'):
+            agent_exited = True; break
         time.sleep(.1)
+    if not agent_exited:
+        print(f"[campaign] shared relay private agent pid={agent['pid']} still live "
+              f"{RELAY_AGENT_EXIT_SECONDS}s after bootstrap exit; cleanup unverified", file=sys.stderr)
     os.close(value['peer_claim'])
     value['log'].close(); value['bootstrap_log'].close()
     archive_shared_relay(value['directory'], value['archive'])
-    return acknowledged and process.returncode == 0
+    return acknowledged and process.returncode == 0 and agent_exited
 
 
 def mutation_inventory_authority(directory: Path, publisher: subprocess.Popen) -> str:

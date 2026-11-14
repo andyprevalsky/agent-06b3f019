@@ -801,4 +801,46 @@ with (root/'wireguard-calls').open('a')as stream:
             self.assertTrue(module['stop_shared_relay'](values.pop()))
 
 
+
+class RelayAgentExitBound(unittest.TestCase):
+    """stop_shared_relay waits a bounded time for the private agent (CodeRabbit 4570070993).
+
+    The private agent exits on its bootstrap's EOF. One that outlives that bound is reported as
+    unverified cleanup (False) instead of blocking the campaign forever, and it is never signalled.
+    """
+
+    def test_a_private_agent_that_outlives_its_bootstrap_is_unverified_not_awaited_forever(self):
+        import runpy
+        from unittest.mock import patch
+        module = runpy.run_path(str(ROOT / 'scripts/run-bench-campaign.py'))
+        namespace = module['stop_shared_relay'].__globals__
+        identity = namespace['cleanup_ticket_module'](ROOT)
+        agent = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])
+        self.addCleanup(lambda: (agent.kill(), agent.wait()))
+        finished = subprocess.Popen([sys.executable, '-c', 'pass']); finished.wait()
+        bootstrap = subprocess.Popen([sys.executable, '-c', 'pass']); bootstrap.wait()
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            directory = tmp / 'relay'; directory.mkdir()
+            def value(suffix, claim_flags):
+                return dict(process=finished, module=str(ROOT / 'scripts/cloudbench-shared-relay.py'),
+                            authority=str(directory / 'authority'), directory=directory, parent_start='x',
+                            log=open(tmp / ('log' + suffix), 'w'), bootstrap=bootstrap,
+                            bootstrap_log=open(tmp / ('bootstrap.log' + suffix), 'w'),
+                            agent={'pid': agent.pid, 'birth': identity.birth(agent.pid)},
+                            peer_claim=os.open(tmp / 'claim', claim_flags, 0o600), archive=tmp / ('archive' + suffix))
+            live = value('1', os.O_RDWR | os.O_CREAT)
+            with patch.dict(namespace, RELAY_AGENT_EXIT_SECONDS=0.5):
+                started = time.monotonic()
+                self.assertFalse(module['stop_shared_relay'](live))
+                self.assertLess(time.monotonic() - started, 10)
+            self.assertIsNone(agent.poll(), 'the private agent is reported, never signalled')
+            exited = value('2', os.O_RDWR)
+            agent.kill(); agent.wait()
+            with patch.dict(namespace, RELAY_AGENT_EXIT_SECONDS=30):
+                started = time.monotonic()
+                module['stop_shared_relay'](exited)
+                self.assertLess(time.monotonic() - started, 5, 'an exited agent is joined at once')
+
+
 if __name__=='__main__':unittest.main()

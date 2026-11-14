@@ -80,7 +80,11 @@ Any width-1 deploy campaign (the rerun, or a first attempt admitted at width 1 b
   - A width-1 deploy campaign now has the same startup dependencies as a wide one: the HOME WireGuard peer lock, the relay
     bootstrap and the inventory publisher. If any of them fails, `cleanup_complete` is false and the gate stays UNVERIFIED, as it already
     does at width > 1.
-  - An inherited `CLOUDBENCH_CAMPAIGN_SHARED_INVENTORY=0` or `CLOUDBENCH_CAMPAIGN_SHARED_RELAY=0` still disables the owned transport.
+  - `launch()` also pins `CLOUDBENCH_CAMPAIGN_SHARED_INVENTORY=1` and `CLOUDBENCH_CAMPAIGN_SHARED_RELAY=1`, so an inherited `0`
+    cannot drop the owned transport (review 4570070975).
+  - `stop_shared_relay` now waits at most `RELAY_AGENT_EXIT_SECONDS` (60 s) for the private agent after its bootstrap exits. An agent
+    that is still live is reported as unverified cleanup and never signalled. Before this, a stuck agent blocked the campaign (and
+    the supervisor-run smoke with `timeout=None`) indefinitely (review 4570070993).
   - Non-deploy width-1 campaigns still use the HOME agent. This is opt-in to keep the blast radius at deploy.
 - Observability gap: the supervisor receipt records an orphan's PID but not its command. `deploy_test_supervisor.py` is hash-pinned by
   `cloudbench-prestart-recovery.py`, and `deploy_test_backend_post_cleanup.py` pins the receipt key set, so the identity came from the

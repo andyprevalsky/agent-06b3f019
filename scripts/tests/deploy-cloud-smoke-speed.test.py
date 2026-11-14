@@ -356,10 +356,15 @@ class SingleWidthRerunOwnsFlyTransport(unittest.TestCase):
 
     def test_the_width_one_rerun_starts_the_campaign_owned_fly_transport(self):
         import runpy
+        # An inherited "0" must not drop the owned transport (CodeRabbit 4570070975).
+        os.environ.update(CLOUDBENCH_CAMPAIGN_SHARED_INVENTORY='0', CLOUDBENCH_CAMPAIGN_SHARED_RELAY='0')
         result, launches = self.run_first_failure_then_rerun((False, False, False))
         self.assertEqual(len(launches), 2)
         argv, env = launches[1]
         self.assertEqual(argv[argv.index('--concurrency') + 1], '1')
+        self.assertEqual({k: env[k] for k in ('CLOUDBENCH_CAMPAIGN_OWNED_TRANSPORT', 'CLOUDBENCH_CAMPAIGN_SHARED_INVENTORY',
+                                              'CLOUDBENCH_CAMPAIGN_SHARED_RELAY')}, dict.fromkeys(
+            ('CLOUDBENCH_CAMPAIGN_OWNED_TRANSPORT', 'CLOUDBENCH_CAMPAIGN_SHARED_INVENTORY', 'CLOUDBENCH_CAMPAIGN_SHARED_RELAY'), '1'))
         # Feed the rerun's exact env and width to the real native campaign entrypoint.
         module = runpy.run_path(str(Path(cloud.__file__).with_name('run-bench-campaign.py')))
         namespace = module['main'].__globals__
@@ -376,7 +381,6 @@ class SingleWidthRerunOwnsFlyTransport(unittest.TestCase):
 
         with tempfile.TemporaryDirectory(dir=os.environ.get('TMPDIR')) as tmp:
             root = Path(tmp)
-            env.pop('CLOUDBENCH_CAMPAIGN_SHARED_RELAY', None)  # the native default (relay on, Linux)
             arguments = ['campaign', '--root', str(root), '--runs', '1', '--concurrency', '1',
                          '--retry-infra', '0', '--task=agent-payment-idempotent-abandonment']
             replacements = dict(campaign_workspace=lambda r, _forward: (r, None),

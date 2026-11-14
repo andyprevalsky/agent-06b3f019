@@ -343,7 +343,9 @@ def launch(request, root, base, campaign_id, checks, env, guidance=''):
     campaign = base / 'campaigns' / campaign_id
     # Every attempt owns its Fly transport (inventory, relay, private agent), including the width-1
     # single rerun: an unowned per-HOME flyctl agent outlived PR #1981's reruns and voided the gate.
+    # The shared inventory/relay switches are pinned too, so an inherited "0" cannot drop that ownership.
     env = {**env, 'CLOUDBENCH_RUNS_ROOT': str(runs), 'CLOUDBENCH_CAMPAIGN_OWNED_TRANSPORT': '1',
+           'CLOUDBENCH_CAMPAIGN_SHARED_INVENTORY': '1', 'CLOUDBENCH_CAMPAIGN_SHARED_RELAY': '1',
            'RUN_BENCH_CAMPAIGN_ROOT': str(campaign.parent), 'RUN_BENCH_CAMPAIGN_ID': campaign.name}
     scheduling = ['--runs', '1', '--concurrency', str(width), '--retry-infra', '0']
     argv = ['bash', 'scripts/run-bench', *checks, *scheduling, '--ref', request['source']['head']]
