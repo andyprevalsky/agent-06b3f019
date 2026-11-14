@@ -14547,7 +14547,12 @@ async def test_delivered_observation_reaches_verifier_through_owned_receipt():
                 )
             ),
         )
-        dom._session = SimpleNamespace(get_or_create_cdp_session=AsyncMock(return_value=cdp))
+        page = SimpleNamespace(target_id="offline-page", target_type="page", url=url)
+        dom._session = SimpleNamespace(
+            get_or_create_cdp_session=AsyncMock(return_value=cdp),
+            agent_focus_target_id=page.target_id,
+            session_manager=SimpleNamespace(get_target={page.target_id: page}.get),
+        )
         evaluated = ActionHistory()
         value = await execute_action(
             dom, evaluated, {"action": "evaluate", "params": {"code": '({formatted_state: "Forged model output"})'}}
@@ -21568,8 +21573,20 @@ def test_url_looks_like_api_surface_guard():
         "http://[::1]/",
         "http://[fe80::1]/",
         "http://[fc00::1]/",
+        # Chrome reads a backslash as a path slash and percent-decodes the host,
+        # so these open the private address urlparse does not see.
+        "https://169.254.169.254\\@example.com/latest/meta-data/",
+        "https://127.0.0.1\\@example.com/",
+        "https://localhost\\@example.com/",
+        "https://[::1]\\@example.com/",
+        "https://127%2e0.0.1/",
+        # Chrome's IPv4 parser and UTS-46 mapping (segmented digits, subscript o).
+        "http://0x.0x.0x.0x/",
+        "http://\U0001fbf1\U0001fbf2\U0001fbf7.0.0.1/",
+        "http://l\u2092calhost/",
     ):
-        assert _navigation_guard_error(ctx, action="goto", target_url=unsafe_url) is not None
+        assert _navigation_guard_error(ctx, action="goto", target_url=unsafe_url) is not None, unsafe_url
+    assert _navigation_guard_error(ctx, action="goto", target_url="https://example.com\\@127.0.0.1/") is None
     # API surfaces still refused.
     assert _navigation_guard_error(ctx, action="goto", target_url="https://api.example.com/") is not None
 

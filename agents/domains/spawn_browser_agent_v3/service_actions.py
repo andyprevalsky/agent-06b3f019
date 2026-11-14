@@ -12,16 +12,16 @@ import inspect
 import ipaddress
 import json
 import re
-import socket
 import time as time_module
 import uuid
 from contextlib import suppress
 from dataclasses import dataclass
 from io import BytesIO
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, List, Optional
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 import httpx
+import idna
 import structlog
 from PIL import Image
 
@@ -95,10 +95,6 @@ _API_SURFACE_PATHS = frozenset(
         "/status",
         "/ping",
     }
-)
-_NUMERIC_IPV4_HOST_RE = re.compile(
-    r"^(?:0x[0-9a-f]+|[0-9]+)(?:\.(?:0x[0-9a-f]+|[0-9]+)){0,3}$",
-    re.IGNORECASE,
 )
 _PROVIDER_INPUT_PRE_EXECUTION_REJECTION_STATUSES = frozenset({400, 401, 403, 404})
 
@@ -761,16 +757,16 @@ def _non_public_navigation_reason(url: str) -> Optional[str]:
 
     try:
         parsed = urlparse(url)
-        host = parsed.hostname
-    except ValueError:
+        # The host Chrome will open, not urlparse's reading of it.
+        normalized_host = _browser_url_host(url)
+    except (UnicodeError, ValueError):
         return "the URL is malformed"
 
     if parsed.scheme not in {"http", "https"}:
         return "only public HTTP(S) pages may be opened"
-    if not host:
+    if not normalized_host:
         return "the URL has no hostname"
 
-    normalized_host = host.rstrip(".").lower()
     if normalized_host == "localhost" or normalized_host.endswith(".localhost"):
         return "localhost pages are not allowed"
 
@@ -778,13 +774,11 @@ def _non_public_navigation_reason(url: str) -> Optional[str]:
     try:
         address = ipaddress.ip_address(normalized_host)
     except ValueError:
-        # inet_aton recognizes legacy numeric IPv4 forms such as 127.1,
-        # 2130706433, and 0x7f000001 that urlparse leaves looking like names.
-        if _NUMERIC_IPV4_HOST_RE.fullmatch(normalized_host):
-            try:
-                address = ipaddress.ip_address(socket.inet_aton(normalized_host))
-            except (OSError, ValueError):
-                return "the numeric hostname is malformed"
+        # Legacy numeric IPv4 forms (127.1, 2130706433, 0x7f000001, 0x.0x.0x.0x).
+        try:
+            address = _whatwg_ipv4_host(normalized_host)
+        except ValueError:
+            return "the numeric hostname is malformed"
 
     if address is not None and not address.is_global:
         return f"the destination address {address} is not public"
@@ -895,14 +889,80 @@ _PHONE_PROVIDER_REALM_ALLOWED_ACTIONS = frozenset(
 )
 
 
+# Chrome parses navigations with the WHATWG URL parser, not urlparse: in a
+# special scheme a backslash is a slash, slashes after the scheme are skipped,
+# the host is percent-decoded and IDNA-mapped (fullwidth forms, ideographic
+# full stops, ignorable soft hyphens). The realm is decided on that host.
+_WHATWG_SPECIAL_SCHEMES = frozenset({"http", "https", "ws", "wss", "ftp"})
+_WHATWG_C0_AND_SPACE = "".join(chr(code) for code in range(0x21))
+_WHATWG_URL_SCHEME_RE = re.compile(r"([A-Za-z][A-Za-z0-9+.-]*):(.*)", re.S)
+_WHATWG_IPV4_PART_RE = re.compile(r"0[xX][0-9a-fA-F]*|0[0-7]*|[1-9][0-9]*")
+
+
+def _whatwg_ipv4_host(host: str) -> Optional[ipaddress.IPv4Address]:
+    """Parse ``host`` as Chrome's IPv4 parser does; None when it is a domain.
+
+    Raises ValueError for a host Chrome treats as a malformed IPv4 address.
+    """
+    parts = host.split(".")
+    last = parts[-1]
+    if not last or not (last.isascii() and last.isdigit() or re.fullmatch(r"0[xX][0-9a-fA-F]*", last)):
+        return None
+    if len(parts) > 4 or not all(_WHATWG_IPV4_PART_RE.fullmatch(part) for part in parts):
+        raise ValueError(f"malformed IPv4 host {host!r}")
+    numbers = [
+        int(part[2:] or "0", 16) if part[:2].lower() == "0x" else int(part, 8 if part.startswith("0") else 10)
+        for part in parts
+    ]
+    if any(number > 255 for number in numbers[:-1]) or numbers[-1] >= 256 ** (5 - len(numbers)):
+        raise ValueError(f"out-of-range IPv4 host {host!r}")
+    return ipaddress.IPv4Address(numbers[-1] + sum(n * 256 ** (3 - i) for i, n in enumerate(numbers[:-1])))
+
+
+def _browser_url_host(url: str) -> str:
+    """Return the host Chrome would navigate to for ``url``, or ``""`` for no host.
+
+    Raises UnicodeError for a host UTS-46 cannot map (Chrome refuses those).
+    """
+    text = re.sub(r"[\t\n\r]", "", (url or "").strip(_WHATWG_C0_AND_SPACE))
+    match = _WHATWG_URL_SCHEME_RE.fullmatch(text)
+    if not match:
+        return ""
+    scheme, rest = match.group(1).lower(), match.group(2)
+    if scheme == "blob":
+        # A blob URL carries its creator's origin.
+        return _browser_url_host(rest)
+    if scheme not in _WHATWG_SPECIAL_SCHEMES:
+        return ""
+    authority = re.split(r"[/?#]", rest.replace("\\", "/").lstrip("/"), maxsplit=1)[0]
+    host = authority.rpartition("@")[2]
+    if host.startswith("["):
+        return host[1:].partition("]")[0].lower()
+    host = unquote(host.partition(":")[0], errors="strict")
+    return idna.uts46_remap(host, std3_rules=False, transitional=False).rstrip(".")
+
+
 def phone_provider_account_realm(url: Optional[str]) -> str:
     """Return the broker-owned phone-provider realm ``url`` belongs to, or ``""``."""
     try:
-        host = (urlparse(url or "").hostname or "").rstrip(".").lower()
-    except ValueError:
+        host = _browser_url_host(url or "")
+    except (UnicodeError, ValueError):
         return ""
     realm = _get_base_domain(host) if host else ""
     return realm if realm in _PHONE_PROVIDER_ACCOUNT_REALMS else ""
+
+
+def _phone_provider_account_boundary_result(action_name: str, realm: str, current_url: str) -> Dict[str, Any]:
+    return {
+        "success": False,
+        "code": "phone_provider_account_boundary",
+        "error": (
+            f"Refused {action_name} on {realm}: that is the account of the cloud-phone provider "
+            "behind Rose's phone broker. Browser agents may read it or leave it, but cannot act "
+            "on it or obtain its credentials."
+        ),
+        "current_url": current_url,
+    }
 
 
 def _phone_provider_account_refusal(
@@ -917,16 +977,76 @@ def _phone_provider_account_refusal(
         realm = phone_provider_account_realm(current_url)
     if not realm:
         return None
-    return {
-        "success": False,
-        "code": "phone_provider_account_boundary",
-        "error": (
-            f"Refused {action_name} on {realm}: that is the account of the cloud-phone provider "
-            "behind Rose's phone broker. Browser agents may read it or leave it, but cannot act "
-            "on it or obtain its credentials."
-        ),
-        "current_url": current_url,
-    }
+    return _phone_provider_account_boundary_result(action_name, realm, current_url)
+
+
+def _frame_urls_of_node(node: Any, session_manager: Any) -> List[str]:
+    """Live URLs of the frame documents enclosing ``node`` (its own frame first).
+
+    A node's ``target_id`` is its out-of-process frame (or the page), whose URL
+    browser-use keeps current from Target.targetInfoChanged; an in-process
+    frame is known by its ``<iframe src>``.
+    """
+    urls: List[str] = []
+    seen: set[int] = set()
+    if str(getattr(node, "node_name", "")).upper() in {"IFRAME", "FRAME"}:
+        # Acting on the frame element lands inside the frame's own document.
+        node = getattr(node, "content_document", None) or node
+    while node is not None and id(node) not in seen:
+        seen.add(id(node))
+        target = session_manager.get_target(getattr(node, "target_id", None)) if session_manager else None
+        if target is not None:
+            urls.append(str(getattr(target, "url", "") or ""))
+        if str(getattr(node, "node_name", "")).upper() in {"IFRAME", "FRAME"}:
+            urls.append(str((getattr(node, "attributes", None) or {}).get("src") or ""))
+        node = getattr(node, "parent_node", None)
+    return urls
+
+
+def _live_phone_provider_account_refusal(
+    dom_service: Any, action_name: str, index: Any, params: Dict[str, Any], coords: Any,
+) -> Optional[Dict[str, Any]]:
+    """Re-decide the boundary against the browser as it is when the action runs.
+
+    The step-start URL can be stale (redirects, meta refresh) and never covers
+    frames, so the live main frame and the action's target frame are checked
+    here, without Playwright request routing (it breaks Stripe Elements).
+    """
+    if action_name in _PHONE_PROVIDER_REALM_ALLOWED_ACTIONS or (
+        action_name not in _INTERACTION_ACTIONS and action_name != "evaluate"
+    ):
+        # Only actions that act on page content run against a live frame.
+        return None
+    if not callable(inspect.getattr_static(type(dom_service), "get_parked_page_identity", None)):
+        # Only adapters without a browser-use target registry (test doubles);
+        # DOMService raises below when no live focused page can be read.
+        return None
+    live_url = str(dom_service.get_parked_page_identity().get("url") or "")
+    if realm := phone_provider_account_realm(live_url):
+        return _phone_provider_account_boundary_result(action_name, realm, live_url)
+    if action_name == "evaluate":
+        # Scripts run in the main frame only.
+        return None
+    session_manager = getattr(dom_service.session, "session_manager", None)
+    selector_map = dom_service.selector_map or {}
+    indices = [
+        value for value in (index, *(v for k, v in params.items() if k == "index" or k.endswith("_index")))
+        if value is not None
+    ]
+    targets = [
+        selector_map.get(value) if isinstance(value, int) and not isinstance(value, bool) else None
+        for value in indices
+    ]
+    determinable = bool(targets) and None not in targets and coords is None and not any(
+        key in {"x", "y", "coordinates"} or key.endswith(("_x", "_y")) for key in params
+    )
+    # Coordinates and keys land in whichever frame is under the point or
+    # focused; without a determinable target, any embedded realm frame counts.
+    for node in targets if determinable else selector_map.values():
+        for frame_url in _frame_urls_of_node(node, session_manager):
+            if realm := phone_provider_account_realm(frame_url):
+                return _phone_provider_account_boundary_result(action_name, realm, live_url)
+    return None
 
 
 _PAYMENT_APPROVAL_WAIT_MARKERS = (
@@ -2021,6 +2141,15 @@ async def _execute_resolved_action(
             element = dom_service.selector_map.get(index)
             if not element:
                 return {"success": False, "error": f"Element with index {index} not found"}
+        refusal = _live_phone_provider_account_refusal(dom_service, action_name, index, params, coords)
+        if refusal:
+            logger.warning(
+                "[BrowserAgent] Refused action on live phone-provider account realm",
+                action=action_name,
+                current_url=refusal["current_url"],
+                observed_url=current_url,
+            )
+            return refusal
 
         context = _ActionContext(
             dom_service=dom_service,
