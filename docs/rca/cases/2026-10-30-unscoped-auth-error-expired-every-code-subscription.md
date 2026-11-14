@@ -223,10 +223,9 @@ Open follow-ups (not fixed here):
 - Two Claude rows hold `rateLimitedUntil=2026-12-01T00:00Z`, written
   2026-11-06 10:36/10:37 by a devbox agent (GCP IP, python-httpx). The live
   probe on 11-13 shows `88a02cdc` allowed (7d utilization 0.0) and
-  `074bfdd5` resetting at 11-13T17:00. The 429 headers that produced
-  `12-01` were never captured, so their source (representative claim vs
-  window reset) is unproven. Nothing re-verifies a far-future cooldown. That
-  belongs to the PR #1981 usage refresher (1-token probe) owner.
+  `074bfdd5` resetting at 11-13T17:00. Root-caused on 2026-11-14 in
+  `2026-11-14-fast-mode-overage-reset-stored-as-subscription-cooldown`: a
+  fast-mode request's overage rejection carries the monthly overage reset.
 - Andy's device login `7e916787` expired 2026-11-11 13:00 and needs a device
   re-sync. That is a credential action; nothing was changed here.
 
