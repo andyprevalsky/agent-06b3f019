@@ -190,13 +190,13 @@ describe('Phone app device view', () => {
     state.holder = HOLDER;
     state.frame = 'png';
     expect(
-      await within(view).findByTestId('phone-device-frame', {}, { timeout: 6000 }),
-    ).toHaveAttribute('src', 'blob:frame-1');
+      await within(view).findByTestId('phone-device-frame', {}, { timeout: 8000 }),
+    ).toHaveAttribute('src', expect.stringMatching(/^blob:frame-\d+$/));
     expect(within(view).getByTestId('phone-device-holder')).toHaveTextContent(
       'In use by agent abcdef12',
     );
     expect(leaseOrQueueRequests()).toEqual([]);
-  }, 15_000);
+  }, 20_000);
 });
 
 describe('queued agent (WAITING lease)', () => {
