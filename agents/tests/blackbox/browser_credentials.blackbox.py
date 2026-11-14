@@ -1692,6 +1692,10 @@ async def run_all_tests():
         "phone_provider_boundary_reads_urls_the_way_chrome_does",
         test_phone_provider_boundary_reads_urls_the_way_chrome_does,
     )
+    await runner.record_async(
+        "phone_provider_boundary_sees_real_chrome_out_of_process_realm_frames",
+        test_phone_provider_boundary_sees_real_chrome_out_of_process_realm_frames,
+    )
     runner.record(
         "steel_cdp_key_is_materialized_only_at_connection_boundary",
         test_steel_cdp_key_is_materialized_only_at_connection_boundary,
@@ -2184,7 +2188,12 @@ class _RecordingBrowserSession:
 
     def __init__(self, touched: list[str], targets: dict) -> None:
         self._touched = touched
-        self.session_manager = SimpleNamespace(get_target=targets.get, get_all_targets=lambda: dict(targets))
+        # browser-use's registry, as observed in real Chromium: an out-of-process
+        # iframe's attach event overwrites its URL with "" (review of #2060).
+        registry = {tid: SimpleNamespace(target_id=tid, target_type=t.target_type,
+                                         url="" if t.target_type == "iframe" else t.url)
+                    for tid, t in targets.items()}
+        self.session_manager = SimpleNamespace(get_target=registry.get, get_all_targets=lambda: dict(registry))
 
     def __getattr__(self, name: str):
         self._touched.append(f"session.{name}")
@@ -2204,10 +2213,16 @@ class _LivePageDomService:
         self.touched: list[str] = []
         self.live_url = live_url
         self.selector_map = selector_map
+        self._targets = targets
         self.session = _RecordingBrowserSession(self.touched, targets)
 
     def get_parked_page_identity(self) -> dict:
         return {"url": self.live_url, "target_id": "main"}
+
+    async def live_frame_targets(self) -> dict:
+        """Chrome's own target list (Target.getTargets): the live URLs."""
+        return {tid: {"type": t.target_type, "url": self.live_url if tid == "main" else t.url}
+                for tid, t in self._targets.items()}
 
     async def ensure_browser_overlays_suppressed(self) -> None:
         return None
@@ -2364,6 +2379,91 @@ async def test_phone_provider_boundary_rechecks_the_live_page_and_target_frame_a
         result = await run(dom, action)
         assert result.get("code") != "phone_provider_account_boundary", (action, result)
         assert set(dom.touched) - _DRIVEN, (action, "an allowed action must reach the browser")
+
+
+async def test_phone_provider_boundary_sees_real_chrome_out_of_process_realm_frames() -> None:
+    """Review of #2060: in real Chromium, browser-use's target registry holds ``''`` for a
+    freshly attached out-of-process iframe. The boundary must read Chrome's own target list,
+    so a tiny phone-harness iframe the DOM snapshot omits still blocks acting on the page,
+    while an ordinary cross-site iframe does not. Hosts resolve to a local server only."""
+    import asyncio
+    import socket
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    from urllib.request import urlopen
+
+    from browser_tools.dom_service import DOMService
+    from domains.spawn_browser_agent_v3.service_actions import _live_phone_provider_account_refusal, execute_action
+    from playwright.async_api import async_playwright
+
+    class Pages(BaseHTTPRequestHandler):
+        def do_GET(self):
+            host = (self.headers.get("Host") or "").split(":")[0]
+            port = self.server.server_address[1]
+            frame = {"/realm": f"http://accounts.phone-harness.com:{port}/device",
+                     "/ordinary": f"http://ads.example.net:{port}/ad"}.get(self.path, "")
+            body = (f'<button style="width:200px;height:60px">Pay</button>'
+                    f'<iframe src="{frame}" width="2" height="2"></iframe>' if host == "shop.example.com"
+                    else "<button>Approve</button>")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.end_headers()
+            self.wfile.write(body.encode())
+
+        def log_message(self, *args):
+            return None
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Pages)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    port = server.server_address[1]
+    with socket.socket() as reservation:
+        reservation.bind(("127.0.0.1", 0))
+        debug_port = reservation.getsockname()[1]
+    rules = "MAP accounts.phone-harness.com 127.0.0.1, MAP shop.example.com 127.0.0.1, MAP ads.example.net 127.0.0.1"
+    dom = None
+    try:
+        async with async_playwright() as playwright:
+            browser = await playwright.chromium.launch(headless=True, args=[
+                f"--remote-debugging-port={debug_port}", "--site-per-process", f"--host-resolver-rules={rules}"])
+            try:
+                page = await browser.new_page()
+                with urlopen(f"http://127.0.0.1:{debug_port}/json/version", timeout=10) as response:
+                    endpoint = json.load(response)["webSocketDebuggerUrl"]
+                dom = DOMService(cdp_url=endpoint)
+                await dom.connect()
+                oracle = await browser.new_browser_cdp_session()
+
+                async def load(path: str, frame_host: str) -> None:
+                    await page.goto(f"http://shop.example.com:{port}{path}")
+                    for _ in range(100):  # Chrome itself reports the frame's out-of-process target
+                        targets = (await oracle.send("Target.getTargets"))["targetInfos"]
+                        if any(t["type"] == "iframe" and frame_host in t["url"] for t in targets):
+                            break
+                        await asyncio.sleep(0.1)
+                    else:
+                        raise AssertionError(f"no out-of-process {frame_host} frame: {targets}")
+                    await dom.get_browser_state(include_screenshot=False)
+
+                await load("/realm", "accounts.phone-harness.com")
+                button = next(i for i, n in dom.selector_map.items() if str(n.node_name).upper() == "BUTTON")
+                result = await execute_action(dom, ActionHistory(), {"action": "click", "index": button, "params": {}},
+                                              current_url=f"http://shop.example.com:{port}/realm")
+                assert result.get("code") == "phone_provider_account_boundary", result
+                for action in ("press_key", "input_text", "scroll"):
+                    assert (await _live_phone_provider_account_refusal(dom, action) or {}).get("code") == (
+                        "phone_provider_account_boundary"), action
+                assert await _live_phone_provider_account_refusal(dom, "evaluate") is None
+
+                await load("/ordinary", "ads.example.net")
+                for action in ("click", "press_key", "input_text"):
+                    assert await _live_phone_provider_account_refusal(dom, action) is None, action
+            finally:
+                if dom is not None:
+                    await dom.disconnect()
+                await browser.close()
+    finally:
+        server.shutdown()
+        server.server_close()
 
 
 async def test_phone_provider_boundary_reads_urls_the_way_chrome_does() -> None:

@@ -14552,6 +14552,8 @@ async def test_delivered_observation_reaches_verifier_through_owned_receipt():
             get_or_create_cdp_session=AsyncMock(return_value=cdp),
             agent_focus_target_id=page.target_id,
             session_manager=SimpleNamespace(get_target={page.target_id: page}.get),
+            cdp_client=SimpleNamespace(send=SimpleNamespace(Target=SimpleNamespace(getTargets=AsyncMock(
+                return_value={"targetInfos": [{"targetId": page.target_id, "type": "page", "url": url}]})))),
         )
         evaluated = ActionHistory()
         value = await execute_action(

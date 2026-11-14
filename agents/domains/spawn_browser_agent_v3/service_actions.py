@@ -980,12 +980,12 @@ def _phone_provider_account_refusal(
     return _phone_provider_account_boundary_result(action_name, realm, current_url)
 
 
-def _frame_urls_of_node(node: Any, session_manager: Any) -> List[str]:
+def _frame_urls_of_node(node: Any, live_targets: Dict[str, Dict[str, str]]) -> List[str]:
     """Live URLs of the frame documents enclosing ``node`` (its own frame first).
 
-    A node's ``target_id`` is its out-of-process frame (or the page), whose URL
-    browser-use keeps current from Target.targetInfoChanged; an in-process
-    frame is known by its ``<iframe src>``.
+    A node's ``target_id`` is its out-of-process frame (or the page), whose
+    URL is read from Chrome's live target list; an in-process frame is known
+    by its ``<iframe src>``.
     """
     urls: List[str] = []
     seen: set[int] = set()
@@ -994,32 +994,37 @@ def _frame_urls_of_node(node: Any, session_manager: Any) -> List[str]:
         node = getattr(node, "content_document", None) or node
     while node is not None and id(node) not in seen:
         seen.add(id(node))
-        target = session_manager.get_target(getattr(node, "target_id", None)) if session_manager else None
+        target = live_targets.get(str(getattr(node, "target_id", "")))
         if target is not None:
-            urls.append(str(getattr(target, "url", "") or ""))
+            urls.append(target["url"])
         if str(getattr(node, "node_name", "")).upper() in {"IFRAME", "FRAME"}:
             urls.append(str((getattr(node, "attributes", None) or {}).get("src") or ""))
         node = getattr(node, "parent_node", None)
     return urls
 
 
-def _live_phone_provider_account_refusal(dom_service: Any, action_name: str) -> Optional[Dict[str, Any]]:
+async def _live_phone_provider_account_refusal(dom_service: Any, action_name: str) -> Optional[Dict[str, Any]]:
     """Re-decide the boundary against the browser as it is when the action runs.
 
     The step-start URL can be stale (redirects, meta refresh) and never covers
     frames, so the live main frame and every frame embedded in the page are
-    checked here, without Playwright request routing (it breaks Stripe Elements).
+    checked here, from Chrome's own target list, without Playwright request
+    routing (it breaks Stripe Elements).
     """
     if action_name in _PHONE_PROVIDER_REALM_ALLOWED_ACTIONS or (
         action_name not in _INTERACTION_ACTIONS and action_name != "evaluate"
     ):
         # Only actions that act on page content run against a live frame.
         return None
-    if not callable(inspect.getattr_static(type(dom_service), "get_parked_page_identity", None)):
-        # Only adapters without a browser-use target registry (test doubles);
-        # DOMService raises below when no live focused page can be read.
+    adapter = type(dom_service)
+    if not all(callable(inspect.getattr_static(adapter, name, None))
+               for name in ("get_parked_page_identity", "live_frame_targets")):
+        # Only adapters without a live browser (test doubles); DOMService
+        # raises below when no live focused page or target list can be read.
         return None
-    live_url = str(dom_service.get_parked_page_identity().get("url") or "")
+    focused = dom_service.get_parked_page_identity()
+    live_targets = await dom_service.live_frame_targets()
+    live_url = (live_targets.get(str(focused.get("target_id"))) or {}).get("url") or str(focused.get("url") or "")
     if realm := phone_provider_account_realm(live_url):
         return _phone_provider_account_boundary_result(action_name, realm, live_url)
     if action_name == "evaluate":
@@ -1028,18 +1033,14 @@ def _live_phone_provider_account_refusal(dom_service: Any, action_name: str) -> 
     # Pointer input is delivered at coordinates (an indexed element's too, and
     # the password-field fallback's), and keys go to focus, so a realm frame
     # anywhere on the page could receive it: refuse while one is embedded.
-    session_manager = getattr(dom_service.session, "session_manager", None)
+    # Chrome's target list has no tab ownership for iframes, so an
+    # out-of-process realm frame in any tab counts; the snapshot's nodes add
+    # in-process frames (by src) and the frames it represented.
+    frame_urls = [target["url"] for target in live_targets.values() if target["type"] == "iframe"]
     for node in (dom_service.selector_map or {}).values():
-        for frame_url in _frame_urls_of_node(node, session_manager):
-            if realm := phone_provider_account_realm(frame_url):
-                return _phone_provider_account_boundary_result(action_name, realm, live_url)
-    # The snapshot omits small, hidden and node-less frames; the live target
-    # registry lists every out-of-process frame (it has no tab ownership, so a
-    # realm frame in any tab counts).
-    for target in (session_manager.get_all_targets() if session_manager is not None else {}).values():
-        if getattr(target, "target_type", "") == "iframe" and (
-            realm := phone_provider_account_realm(str(getattr(target, "url", "") or ""))
-        ):
+        frame_urls.extend(_frame_urls_of_node(node, live_targets))
+    for frame_url in frame_urls:
+        if realm := phone_provider_account_realm(frame_url):
             return _phone_provider_account_boundary_result(action_name, realm, live_url)
     return None
 
@@ -2136,7 +2137,7 @@ async def _execute_resolved_action(
             element = dom_service.selector_map.get(index)
             if not element:
                 return {"success": False, "error": f"Element with index {index} not found"}
-        refusal = _live_phone_provider_account_refusal(dom_service, action_name)
+        refusal = await _live_phone_provider_account_refusal(dom_service, action_name)
         if refusal:
             logger.warning(
                 "[BrowserAgent] Refused action on live phone-provider account realm",

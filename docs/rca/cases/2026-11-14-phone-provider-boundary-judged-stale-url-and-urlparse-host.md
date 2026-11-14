@@ -106,14 +106,21 @@ All in `agents/domains/spawn_browser_agent_v3/service_actions.py`:
   just before dispatch, after secrets are resolved and the element is
   looked up. It applies to every action that acts on page content
   (interactions and `evaluate`):
-  - It reads the live focused page with `DOMService.get_parked_page_identity()`.
-    This is the browser-side target registry, the same source as
-    `get_current_page_url`, with no renderer round trip. It raises (fail
-    closed) when no live focused page exists.
+  - It reads Chrome's own target list with `DOMService.live_frame_targets()`
+    (`Target.getTargets`, a browser-process call with no renderer round trip,
+    bounded at 5 s). The live focused page is found by the target ID from
+    `get_parked_page_identity()`. Either call raises, and so fails closed,
+    when no live page or target list can be read.
+  - It deliberately ignores browser-use's own target registry. In real
+    Chromium, an out-of-process iframe attaches before its navigation
+    commits, so the attach event carries `url ''`. browser-use's duplicate
+    attach handler then overwrites the URL that `targetInfoChanged` had
+    stored. The registry keeps `''` until the frame navigates again
+    (verified by the second independent review).
   - For interactions it refuses while any frame on the page is in the realm.
     It walks every node of the last snapshot's selector map to its frame
-    chain: the node's target URL (for an out-of-process frame, live) plus
-    each enclosing `<iframe src>`. An IFRAME element is judged by its own
+    chain: the node's target URL (from Chrome's live list) plus each
+    enclosing `<iframe src>`. An IFRAME element is judged by its own
     content document. A per-target-frame rule was tried first and rejected.
     Pointer input is delivered at coordinates, including an indexed
     element's and the password-field fallback's frame-relative point, and
@@ -121,11 +128,17 @@ All in `agents/domains/spawn_browser_agent_v3/service_actions.py`:
     receive an action aimed at a public element. CodeRabbit found this on
     #2060 cycle 2.
   - The snapshot omits small, hidden and node-less frames. So it also refuses
-    while browser-use's live target registry holds any out-of-process
-    `iframe` target in the realm (CodeRabbit, cycle 3). The registry has no
-    tab ownership, so a realm frame in another tab also counts. That is
+    while Chrome's target list holds any out-of-process `iframe` target in
+    the realm (CodeRabbit, cycle 3). That list gives iframes no tab
+    ownership, so a realm frame in another tab also counts. That is
     conservative, and a cross-site phone-harness frame is not a legitimate
-    embed.
+    embed. `test_phone_provider_boundary_sees_real_chrome_out_of_process_realm_frames`
+    proves this in real Chromium, with hosts mapped to a local server:
+    - On the browser-use-registry version (`9a4da63ac7`), a click on a page
+      with a 2x2 `accounts.phone-harness.com` iframe returned
+      `{'success': True}`.
+    - With the fix, it is refused.
+    - A page with an ordinary cross-site iframe still allows the click.
   - `_iter_payment_fill_targets`, the frame scan behind the password-field
     coordinate fallback and the payment-fill helpers, skips realm frames
     (Playwright frames by live `frame.url`, CDP targets by their frames'
@@ -138,9 +151,10 @@ All in `agents/domains/spawn_browser_agent_v3/service_actions.py`:
   terminal actions are unchanged. `scroll`/`dropdown_options` stay refused
   in the realm.
 
-10k agents: per action, one in-memory target lookup. For interactions, each
-node in that agent's own cached selector map is walked up its parent chain
-(nodes x DOM depth). There is no I/O, shared state or lock.
+10k agents: per acting action, one browser-process `Target.getTargets` call
+to that agent's own browser. For interactions, each node in that agent's own
+cached selector map is also walked up its parent chain (nodes x DOM depth).
+There is no shared state or lock across agents.
 
 Residual risk (reviewer-confirmed):
 - The re-check runs before the humanized mouse movement, dwell and
@@ -150,9 +164,10 @@ Residual risk (reviewer-confirmed):
   interception, which is ruled out by the Stripe Elements breakage.
 - In-process frames are known only by their snapshot `src`. This matters
   only when site isolation is off, because a cross-site phone-harness frame is
-  otherwise an out-of-process target, and those are read live from the
-  registry.
-- An out-of-process frame whose target has not yet registered is not seen.
+  otherwise an out-of-process target, and those are read live from
+  Chrome.
+- A frame Chrome has not yet created as a target when the action starts is
+  not seen.
 - If UTS-46 data in `idna` lags Chrome's ICU, characters assigned after that
   data could still map differently.
 - Interactions now fail closed ("Focused browser target is unavailable") in
@@ -165,7 +180,9 @@ fixed and pinned in the regressions above. CodeRabbit (#2060 cycles 1-2) found
 `press_key` with an index, the frame-scanning password and payment fill
 helpers, realm frames overlaying a public element's click point, and realm
 frames the snapshot omits. All four are fixed and pinned in the same
-regression.
+regression. A second fresh-sub-agent review of the cycle-3 fix found that
+browser-use's registry holds `''` for those frames. The boundary now reads
+Chrome's target list, and the real-Chromium regression pins this.
 
 Repro, identical command before and after:
 `BLACKBOX_CASE_FUNCTIONS=test_phone_provider_boundary_rechecks_the_live_page_and_target_frame_at_action_time,test_phone_provider_boundary_reads_urls_the_way_chrome_does python scripts/run_blackbox_tests.py browser-credentials`
