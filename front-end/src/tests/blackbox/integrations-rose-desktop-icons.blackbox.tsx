@@ -89,6 +89,11 @@ describe('Rose Desktop integrations: stock app-icon tiles', () => {
       expect(svg.closest('.text-\\[\\#111111\\]')).not.toBeNull();
     }
     expect(rowEl('plaid').querySelector('svg.text-\\[\\#111111\\]')).not.toBeNull();
+    // Fireflies' transparent mark is centered with padding, not cropped edge-to-edge.
+    const fireflies = iconTile('fireflies').getAttribute('style') ?? '';
+    expect(fireflies).toContain('--dropdown-icon-fit: contain');
+    expect(fireflies).toContain('--dropdown-icon-scale: 0.64');
+    expect(iconTile('granola').getAttribute('style')).toContain('--dropdown-icon-fit: cover');
   }
 
   it('light mode: every icon sits on its stock tile; connected tiles glow rose', async () => {

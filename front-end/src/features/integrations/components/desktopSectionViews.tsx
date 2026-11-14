@@ -381,7 +381,10 @@ function meetingNotesRow(
   return {
     key: provider,
     name,
-    icon: tile(DropdownIconPreset.granola, <MeetingNotesIcon provider={provider} />),
+    icon: tile(
+      provider === 'fireflies' ? DropdownIconPreset.fireflies : DropdownIconPreset.granola,
+      <MeetingNotesIcon provider={provider} />,
+    ),
     accounts,
     availability: 'ready',
     onConnect: () => void connection.connect(),
