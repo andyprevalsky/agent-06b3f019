@@ -41,6 +41,8 @@ def exercise(
     socket_fault: str | None = None,
     wmh_log: bool = False,
     guest_diagnostics: bool = False,
+    transfer_fault: str | None = None,
+    driver_log_stall: bool = False,
 ):
     token, machine = "test-run-1", "abcdef12345678"
     files = {
@@ -64,17 +66,60 @@ def exercise(
                   for name, data in files.items()},
     }
     manifest_calls = 0
+    transfer_calls = 0
+    # Holds a stalled transfer open until the collector has exited, so the
+    # client's own 6 s read timeout fires (never a server close) under load.
+    release_stall = threading.Event()
+    # Two ranges (262144-byte limit) so the stall hits a range at offset > 0;
+    # the anchor check below proves the retried range continues the held bytes.
+    driver_log = f"RUNSTAMP-{token}\n".encode() + b"".join(b"driver line %06d\n" % i for i in range(20000))
+    log_generation = "0123456789abcdef0123456789abcdef"
+    log_stalls = 0
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *_args):
             pass
 
         def do_GET(self):
-            nonlocal manifest_calls
+            nonlocal manifest_calls, transfer_calls, log_stalls
             assert self.headers.get("Authorization") == "Bearer test-secret"
             assert self.headers.get("X-Cloudbench-Run-Token") == token
             assert self.headers.get("X-Cloudbench-Machine-Id") == machine
             parts = urlsplit(self.path)
+            if parts.path == "/bench.log":
+                query = parse_qs(parts.query)
+                offset, limit = int(query["offset"][0]), int(query["limit"][0])
+                # Mirror the status server: continuity is the sha256 of the 4096
+                # bytes the collector already holds, else 409 (never retried).
+                anchor = hashlib.sha256(driver_log[max(0, offset - 4096):offset]).hexdigest()
+                if (self.headers.get("X-Cloudbench-Log-Anchor") != anchor
+                        or self.headers.get("X-Cloudbench-Log-Generation") not in ("", log_generation)):
+                    self.send_error(409, "bench log continuity changed")
+                    return
+                if offset == len(driver_log):
+                    self.send_response(204)
+                    self.send_header("X-Cloudbench-Log-Size", str(offset))
+                    self.send_header("X-Cloudbench-Log-Generation", log_generation)
+                    self.send_header("X-Cloudbench-Log-Continuity", "1")
+                    self.end_headers()
+                    return
+                end = min(len(driver_log), offset + limit)
+                body = driver_log[offset:end]
+                self.send_response(206)
+                self.send_header("Content-Range", f"bytes {offset}-{end - 1}/{len(driver_log)}")
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("X-Cloudbench-Log-Generation", log_generation)
+                self.send_header("X-Cloudbench-Log-Continuity", "1")
+                self.end_headers()
+                if driver_log_stall and offset > 0 and not log_stalls:
+                    log_stalls += 1
+                    self.wfile.write(body[:4])
+                    self.wfile.flush()
+                    self.close_connection = True
+                    release_stall.wait(deadline + 10)
+                    return
+                self.wfile.write(body)
+                return
             if parts.path == "/driver-health":
                 self.send_error(
                     410 if transport_fault and transport_fault[0] == "ack" else 202
@@ -128,6 +173,30 @@ def exercise(
                 name = parse_qs(parts.query)["file"][0]
                 data = files[name]
                 time.sleep(file_delay)
+                if transfer_fault and name == "logs/backend.log":
+                    transfer_calls += 1
+                    if transfer_fault == "corrupt":
+                        # Same length, wrong bytes: integrity, not transport.
+                        data = bytes(len(data))
+                    elif transfer_fault == "persistent-reset" or transfer_calls == 1:
+                        # Send the headers and part of the sealed body, then
+                        # stall past the collector's 6 s socket read timeout
+                        # (r001-j0010) or reset the connection mid-body.
+                        self.send_response(200)
+                        self.send_header("Content-Length", str(len(data)))
+                        self.end_headers()
+                        self.wfile.write(data[:4])
+                        self.wfile.flush()
+                        self.close_connection = True
+                        if transfer_fault == "stall":
+                            release_stall.wait(deadline + 10)
+                        else:
+                            assert transfer_fault == "persistent-reset"
+                            self.connection.setsockopt(
+                                socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0)
+                            )
+                            self.connection.close()
+                        return
             self.send_response(200)
             self.send_header("Content-Length", str(len(data)))
             self.end_headers()
@@ -150,7 +219,8 @@ def exercise(
             command = COLLECTOR + "\ncloudbench_collect_runtime_evidence \"$1\" \"$2\" \"$3\" \"$4\" \"$5\"\n"
             argv = (
                 [sys.executable, str(ROOT / "scripts/cloudbench-collect-runtime-evidence.py"),
-                 str(destination), str(server.server_port), token, machine, str(deadline)]
+                 str(destination), str(server.server_port), token, machine, str(deadline),
+                 *(["--driver-log"] if driver_log_stall else [])]
                 if recovery else
                 ["bash", "-c", command, "collector-test", str(destination),
                  str(server.server_port), token, machine, str(deadline)]
@@ -195,11 +265,24 @@ assert raised, "transport fault was never exercised"
                 capture_output=True, text=True, timeout=deadline + 5,
             )
             elapsed = time.monotonic() - started
+            release_stall.set()
             if forbidden_manifest:
                 assert result.returncode != 0 and "HTTP Error 403" in result.stderr
                 assert manifest_calls == 1
                 if elapsed >= 1.5:
                     print(f"WARNING: forbidden manifest observation took {elapsed:.3f}s")
+                assert not (destination / "runtime-evidence").exists()
+                assert (output / "runtime-evidence.pending").exists()
+                return
+            if transfer_fault in ("persistent-reset", "corrupt"):
+                assert result.returncode != 0
+                if transfer_fault == "corrupt":
+                    assert "runtime evidence hash mismatch" in result.stderr, result.stderr[-600:]
+                    assert transfer_calls == 1
+                else:
+                    assert "ConnectionResetError" in result.stderr, result.stderr[-600:]
+                    assert transfer_calls == 3
+                    assert elapsed < deadline, "persistent transport failure waited for the deadline"
                 assert not (destination / "runtime-evidence").exists()
                 assert (output / "runtime-evidence.pending").exists()
                 return
@@ -223,6 +306,14 @@ assert raised, "transport fault was never exercised"
                 for name, data in files.items():
                     assert (capture / name).read_bytes() == data
                 assert manifest_calls >= seal_after + 2
+                if driver_log_stall:
+                    assert log_stalls == 1
+                    assert (destination / "cloudbench-driver.log").read_bytes() == driver_log
+                    assert "cloudbench-driver.log attempt 1/3" in result.stderr, result.stderr[-600:]
+                if transfer_fault == "stall":
+                    # >= 2: a retry starved past 6 s under load may legitimately take a third read.
+                    assert transfer_calls >= 2
+                    assert "logs/backend.log attempt 1/3" in result.stderr, result.stderr[-600:]
             else:
                 assert result.returncode != 0
                 assert "terminal runtime evidence deadline expired" in result.stderr
@@ -231,6 +322,7 @@ assert raised, "transport fault was never exercised"
                 assert not (destination / "runtime-evidence").exists()
                 assert (output / "runtime-evidence.pending").exists()
     finally:
+        release_stall.set()
         server.shutdown()
         server.server_close()
         thread.join(timeout=10)
@@ -522,6 +614,23 @@ def exercise_read_transition(case: str):
                 recovery=recovery,
                 socket_fault=case.removeprefix("socket-"),
             )
+    elif case in ("transfer-stall", "transfer-persistent-reset", "transfer-corrupt"):
+        # A sealed file read that stalls past the socket timeout is retried
+        # from byte zero; a persistent transport failure stays bounded and a
+        # hash mismatch is never retried.
+        fault = case.removeprefix("transfer-")
+        for recovery in (False, True):
+            exercise(
+                seal_after=0,
+                deadline=20,
+                file_delay=0,
+                recovery=recovery,
+                transfer_fault=fault,
+            )
+    elif case == "driver-log-stall":
+        # The recovery collector's --driver-log range reads share the same
+        # sealed-read retry; the retried range must keep offset and anchor exact.
+        exercise(seal_after=0, deadline=20, file_delay=0, recovery=True, driver_log_stall=True)
     elif case == "terminal-failures":
         test_collectors_stop_on_clean_shutdown_without_run_result()
         test_recovery_collector_stops_on_terminal_cleanup_failure()
@@ -577,6 +686,10 @@ READ_TRANSITIONS = (
     "deadline-during-read",
     "http-rejection",
     "terminal-failures",
+    "transfer-stall",
+    "transfer-persistent-reset",
+    "transfer-corrupt",
+    "driver-log-stall",
 )
 
 
