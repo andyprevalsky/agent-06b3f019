@@ -17,6 +17,8 @@
  */
 
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
+import path from 'node:path';
 import { PurchaseSpendStatus } from '@prisma/client';
 import {
   settleRoseCardStripeCheckout,
@@ -86,10 +88,103 @@ function harness(status: PurchaseSpendStatus = PurchaseSpendStatus.HELD): Harnes
 }
 
 function paidCheckout(overrides: Partial<Parameters<typeof settleRoseCardStripeCheckout>[0]> = {}) {
-  return { purchaseId: 'purchase-1', last4: LAST4, amountCents: AMOUNT_CENTS, ...overrides };
+  return {
+    purchaseId: 'purchase-1',
+    last4: LAST4,
+    amountCents: AMOUNT_CENTS,
+    ...overrides,
+  };
 }
 
 async function main(): Promise<void> {
+  // Run the real default getter in a fresh process so the shared REST client captures
+  // the intercepted fetch before import. No provider method or last4 getter is replaced.
+  execFileSync(
+    process.execPath,
+    [
+      '--import',
+      'tsx',
+      '-e',
+      String.raw`
+    const assert = require('node:assert/strict');
+    const Module = require('node:module');
+    const path = require('node:path');
+    const put = (rel, exports) => { const id = require.resolve(path.join(process.cwd(), 'src', rel)); const m = new Module(id); m.loaded = true; m.exports = exports; require.cache[id] = m; };
+    require('node:net').Socket.prototype.connect = () => { throw new Error('UNEXPECTED_DATABASE_OR_NETWORK'); };
+    let provenance = 'v2', legacyReads = 0, orgCardholder = 'ch-owned';
+    put('providers/agentcard/store.ts', { getOrgManagedCardholderId: async () => orgCardholder, getV2ConnectedUserId: async () => 'usr-owned' });
+    put('providers/database.ts', { prisma: { purchaseSpend: { findFirst: async () => ({ ...row, walletFunding: { purchaseId: row.id, userId: row.userId, amountCents: row.totalCents, currency: 'usd', metadata: provenance === 'v2' ? { apiVersion: 2 } : provenance === 'legacy' ? { funding_model: 'company_flow' } : {} } }) } } });
+    put('providers/card-provider/index.ts', { createCardProviderForAgent: async () => ({ getDetails: async id => { assert.equal(id, row.cardId); legacyReads++; return { pan: '4242424242422679' }; } }) });
+    const reads = [];
+    let card = { object: 'card', id: 'card_closed_fixture', status: 'closed', closed_reason: 'used', last4: '2679', balance_cents: 0 };
+    let cardNotFound = false;
+    global.fetch = async (url, options = {}) => {
+      const pathname = new URL(String(url)).pathname;
+      reads.push(pathname);
+      if (pathname === '/api/v2/oauth/token') return Response.json({ access_token: 'fake_org_token', expires_in: 3600 });
+      assert.equal(options.method, 'GET', 'settlement must never move provider money');
+      if (pathname === '/api/v2/cards/card_closed_fixture') return cardNotFound
+        ? Response.json({ error: { code: 'card_not_found' } }, { status: 404 }) : Response.json(card);
+      throw new Error('Unexpected network/credential access: ' + pathname);
+    };
+    const { settleRoseCardStripeCheckout } = require(process.argv[1]);
+    const { PurchaseSpendStatus } = require('@prisma/client');
+    const row = { id: 'purchase-exact', userId: 'customer-exact', agentId: 'agent-exact', cardId: 'card_closed_fixture', stripePaymentIntentId: 'pi_billing_hold', totalCents: 100, status: PurchaseSpendStatus.HELD };
+    let claims = 0, clears = 0;
+    const deps = {
+      findPurchaseForCheckout: async id => id === row.id ? row : null,
+      claimHeldPurchaseForCharge: async id => { assert.equal(id, row.id); claims++; row.status = PurchaseSpendStatus.CHARGING; return true; },
+      markPurchaseCleared: async id => { assert.equal(id, row.id); clears++; row.status = PurchaseSpendStatus.CLEARED; },
+    };
+    const paid = { purchaseId: row.id, amountCents: 100, last4: '2679' };
+    (async () => {
+      const settled = await settleRoseCardStripeCheckout(paid, deps);
+      assert.equal(settled.cardId, row.cardId);
+      assert.equal(settled.stripePaymentIntentId, 'pi_billing_hold');
+      assert.equal(claims, 1); assert.equal(clears, 1);
+      await settleRoseCardStripeCheckout(paid, deps);
+      assert.equal(clears, 1, 'closed-card replay must not clear twice');
+      await assert.rejects(settleRoseCardStripeCheckout({ ...paid, purchaseId: 'other-purchase' }, deps), e => e.statusCode === 404);
+      await assert.rejects(settleRoseCardStripeCheckout({ ...paid, amountCents: 101 }, deps), e => e.statusCode === 409);
+      await assert.rejects(settleRoseCardStripeCheckout({ ...paid, last4: '9999' }, deps), e => e.statusCode === 409);
+      card = { ...card, id: 'card_other' };
+      await assert.rejects(settleRoseCardStripeCheckout(paid, deps), e => e.statusCode === 502);
+      card = { ...card, id: row.cardId, last4: 'invalid2679' };
+      await assert.rejects(settleRoseCardStripeCheckout(paid, deps), e => e.statusCode === 502);
+      cardNotFound = true;
+      await assert.rejects(settleRoseCardStripeCheckout(paid, deps), e => e.statusCode === 502);
+      assert.equal(clears, 1, 'failed identity proofs must not clear');
+      assert(!reads.some(p => p.endsWith('/credentials')), 'closed-card settlement must never request secrets');
+      cardNotFound = false; provenance = 'legacy';
+      const restCount = reads.length;
+      await settleRoseCardStripeCheckout(paid, deps);
+      assert.equal(legacyReads, 1, 'card_ legacy identity must use its existing provider');
+      assert.equal(reads.length, restCount, 'legacy settlement must never request REST card identity');
+      orgCardholder = undefined;
+      await assert.rejects(settleRoseCardStripeCheckout(paid, deps), e => e.statusCode === 502);
+      assert.equal(legacyReads, 1, 'known org card with missing org binding must not use user MCP');
+      assert.equal(reads.length, restCount);
+      orgCardholder = 'ch-owned';
+      provenance = 'unknown';
+      await assert.rejects(settleRoseCardStripeCheckout(paid, deps), e => e.statusCode === 502);
+      assert.equal(reads.length, restCount, 'unknown provenance must not guess REST');
+      assert.equal(legacyReads, 1, 'unknown provenance must not guess MCP');
+      process.stdout.write('PASS closed v2 card settlement through real default getter and REST client\n');
+    })().catch(error => { process.stderr.write(String(error) + '\n'); process.exitCode = 1; });
+  `,
+      path.resolve(__dirname, '../../providers/agentcard/checkout-settlement.ts'),
+    ],
+    {
+      env: {
+        ...process.env,
+        AGENTCARD_MINT_ENABLED: 'true',
+        AGENTCARD_BASE_URL: 'https://agentcard.invalid',
+        AGENTCARD_ORG_OAUTH_CLIENT_ID: 'fixture_client',
+        AGENTCARD_ORG_OAUTH_CLIENT_SECRET: 'fixture_secret',
+      },
+      stdio: 'pipe',
+    }
+  );
   // ── 1. Fault injection: the CLEARED write fails once, then the SAME paid Checkout is retried. ──
   {
     const state = harness();

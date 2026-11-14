@@ -12,7 +12,7 @@ import {
   summarizeResults,
 } from '../blackbox/claude-code-smoke-outcome.support';
 
-// Cements the Claude Code E2B smoke outcome contract (.claude/commands/DEPRECATED_deploy.md Step 6c). A credential
+// Cements the Claude Code E2B smoke outcome contract (the former /deploy skill Step 6c). A credential
 // or billing block only the user can fix used to print "[skip]" and return, so the
 // smoke read "PASS  smoke -- Claude Code answers 2+2 (real E2B sandbox)" and the
 // e2b-smoke gate passed without a sandbox. Such a block is now a loud SKIP with its

@@ -5,15 +5,14 @@
  * Signed-in accounts also get CLI setup, with backend-verified connection state.
  *
  * Meeting note taker: shared Granola/Fireflies provider cards and hooks.
+ * GitHub Repos (signed in, before the meeting note takers): GithubReposSection over useGithubRepos
+ * (list incl. auto-imported repos, connect with an optional folder, disconnect).
  * Pebble Index 01 (last) opens the guided setup modal owned by Integrations.
  *
  * File System is a FE-only stub: website shows Download for Mac; Mac app
  * shows the plus and stays [MOUNTED] on click (no hook, no backend).
  */
 
-import { integrationMatchesSearch } from '../hooks/integrationSearch';
-import type { IntegrationCatalogKey } from '../types';
-import type { ReactNode } from 'react';
 import type { useAccordion } from '../hooks/useAccordion';
 import type { useIntegrationData } from '../hooks/useIntegrationData';
 import type { useBrowserSync } from '../hooks/useBrowserSync';
@@ -24,6 +23,9 @@ import type { useGmailConnect } from '../hooks/useGmailConnect';
 import type { useIntegrationActions } from '../hooks/useIntegrationActions';
 import type { usePlaidIntegration } from '../hooks/usePlaidIntegration';
 import MeetingNotesSection from './MeetingNotesSection';
+import SearchGroup from './IntegrationSearchGroup';
+import GithubReposSection from './GithubReposSection';
+import type { useGithubRepos } from '../hooks/useGithubRepos';
 import type { MeetingNotesConnections } from '../types';
 
 import BrowserCookiesSection from './BrowserCookiesSection';
@@ -57,6 +59,7 @@ interface IntegrationSectionsProps {
   actions: ReturnType<typeof useIntegrationActions>;
   plaid: ReturnType<typeof usePlaidIntegration>;
   meetingNotes: MeetingNotesConnections;
+  github: ReturnType<typeof useGithubRepos>;
 }
 
 function PlaidIntegrationSection({ plaid }: Pick<IntegrationSectionsProps, 'plaid'>) {
@@ -198,18 +201,6 @@ function SocialsIntegrationSection({
   );
 }
 
-/** STATE MACHINE: mounted groups remain live while search changes visibility. */
-function SearchGroup({
-  catalogKey,
-  search,
-  children,
-}: {
-  catalogKey: IntegrationCatalogKey;
-  search: string;
-  children: ReactNode;
-}) {
-  return <div hidden={!integrationMatchesSearch(catalogKey, search)}>{children}</div>;
-}
 export default function IntegrationSections(props: IntegrationSectionsProps) {
   const {
     search,
@@ -302,6 +293,7 @@ function SecondaryIntegrationSections({
   messages,
   actions,
   meetingNotes,
+  github,
 }: IntegrationSectionsProps) {
   return (
     <>
@@ -323,7 +315,11 @@ function SecondaryIntegrationSections({
           <CliIntegrationsSection />
         </SearchGroup>
       )}
-
+      {isFullySignedIn && (
+        <SearchGroup catalogKey="githubRepos" search={search}>
+          <GithubReposSection github={github} />
+        </SearchGroup>
+      )}
       {isFullySignedIn && (
         <SearchGroup catalogKey="meetingNotes" search={search}>
           <MeetingNotesSection connections={meetingNotes} />

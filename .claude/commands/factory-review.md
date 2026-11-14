@@ -5,8 +5,8 @@ argument-hint: "[--deploy-since YYYY-MM-DD] [--limit N] [--descend-window N]"
 
 # Factory Review
 
-Generate the factory workflow review from local Conductor history and the
-checked-in `/descend` factory-event ledger:
+Generate the factory workflow review from the checked-in factory-event ledgers
+(and local Conductor history on a Mac that still has it):
 
 ```bash
 git fetch -q origin main || true
@@ -14,7 +14,7 @@ python3 scripts/factory_review.py --self-test
 python3 scripts/factory_review.py --open $ARGUMENTS
 ```
 
-Without a Conductor database (boxes.dev and other Linux machines), `--source auto`
+Without a Conductor database (boxes.dev and other Linux machines, the normal case), `--source auto`
 rebuilds /deploy and /RCA from the tracked
 `agents/benchmarks/history/factory_events.jsonl`, in both the working tree and
 `origin/main`, plus this machine's unpublished `.context` telemetry. Every

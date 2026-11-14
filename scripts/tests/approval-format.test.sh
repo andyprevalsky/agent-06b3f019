@@ -5,7 +5,6 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 FORMAT="$ROOT_DIR/.claude/shared/approval-format.md"
 DEPLOY="$ROOT_DIR/.claude/commands/deploy.md"
 RCA="$ROOT_DIR/.claude/commands/rca.md"
-RCA_GUIDE="$ROOT_DIR/docs/root-cause-analysis.md"
 DESCEND="$ROOT_DIR/.claude/commands/descend.md"
 DEPLOY_CLI="$ROOT_DIR/scripts/deploy_cli.py"
 APPROVAL_BATCH="$ROOT_DIR/scripts/deploy_approval_batch.py"
@@ -51,8 +50,8 @@ PY
 
 # The single shared approval template is one
 # fenced text block whose items lead with Before:/After:, followed by the
-# clickable Links list that the block itself cannot render. /descend routes to
-# that contract instead of maintaining competing copies of the template.
+# clickable Links list that the block itself cannot render. /descend's final
+# change review is /deploy's approval step, so it holds no copy of the template.
 python3 - "$FORMAT" "$DESCEND" <<'PY'
 import re
 import sys
@@ -184,7 +183,7 @@ for removed in ("UPD", "<ring>", "BENCHMARK PROGRESS", "ACTIVE RUN ·", "LAST SL
     assert removed not in template, removed
 assert "America/Los_Angeles" in expected
 for rule in ("20 * infra_failed_jobs >= scheduled_total", "10800", "Continuously",
-             "/RCA", "/deploy", "immutable", "No prose before or after", "30 seconds"):
+             "/RCA", "/deploy", "immutable", "No prose before or after", "background-task cadence"):
     assert rule in expected, rule
 assert "scripts/run-bench report-format" in (root / "CLAUDE.md").read_text()
 assert "scripts/run-bench report-format" in (root / ".claude/commands/benchmark.md").read_text()
@@ -197,12 +196,25 @@ require_text "$FORMAT" "reproduction command that failed before the change and n
   "Detail must name the unchanged failing-then-passing test"
 require_text "$FORMAT" "clickable file-and-line links" \
   "approval scope must include clickable file-and-line links"
-require_text "$FORMAT" "Prompt / LLM-visible text approvals MUST paste the exact diff inline" \
-  "prompt approvals must require the exact diff body inline, not only a file link"
+require_text "$FORMAT" "Approvals MUST show the key visible strings, never code diffs." \
+  "approvals must show the key user- and model-visible strings instead of code diffs"
+require_text "$FORMAT" "which it appears (trigger, phase, call site)" \
+  "each key string must state the conditions under which it appears"
+require_text "$FORMAT" "the new or changed fields in plain English" \
+  "schema and API changes must be listed as plain-English fields"
+require_text "$FORMAT" "  Key strings:" \
+  "the approval block's Detail must carry the key strings"
+require_text "$FORMAT" "  Schema/API fields:" \
+  "the approval block's Detail must carry the schema/API field list"
 require_text "$FORMAT" "Saying \"see the file\" or linking the path without the" \
-  "prompt approvals must forbid link-only presentation of LLM-visible text"
-require_text "$FORMAT" "exact diff body is omitted or replaced by a file link" \
-  "invalidation rules must reject prompt approvals that omit the inline diff"
+  "approvals must forbid link-only presentation of visible text"
+require_text "$FORMAT" "strings or schema/API fields are omitted, replaced by a code diff, or replaced" \
+  "invalidation rules must reject approvals that omit the key strings or show a code diff"
+for superseded in "paste the exact diff" "exact diff inline" "as +/- lines"; do
+  if grep -Fq -- "$superseded" "$FORMAT"; then
+    fail "approval format must not require code diffs (found: $superseded)"
+  fi
+done
 require_text "$FORMAT" '**What failed:** When <the agent doing the task goal>' \
   "approval requests must frame the failure inside the agent's task"
 require_text "$FORMAT" 'the LLM called `<tool>` to <attempt>' \
@@ -277,17 +289,17 @@ require_text "$FORMAT" "Never cite a" \
   "golden references must be opened, not recalled"
 require_text "$FORMAT" '**Golden reference:** citation, or Environment triple' \
   "an approval without a golden reference must be invalid"
-require_text "$DESCEND" 'golden reference' \
-  "descend must require the shared golden-reference evidence"
-require_text "$RCA" 'When the fix changes an approval-gated surface, the golden-reference check' \
+require_text "$DESCEND" 'golden-reference verdict and reviewer' \
+  "/descend must record each golden-reference verdict in its change ledger"
+require_text "$RCA" 'Run the golden-reference check only when the fix changes an approval-gated surface' \
   "RCA completion must record the golden-reference check for approval-gated fixes"
-require_text "$RCA_GUIDE" 'Run this step only when the fix changes an approval-gated surface' \
+require_text "$RCA" 'otherwise record `Golden reference: not applicable (no approval-gated hunk)`' \
   "RCA golden-reference grounding is scoped to approval-gated fixes, not all code"
 require_text "$FORMAT" 'Scope: only the hunks inside the mandatory user-approval section' \
   "golden-reference review covers only the hunks in the mandatory approval scope"
 require_text "$ROOT_DIR/CLAUDE.md" 'It reviews only the hunks inside the mandatory user-approval scope' \
   "CLAUDE.md rule 26a scopes grounding to the mandatory approval hunks"
-require_text "$RCA_GUIDE" "### Step 6b: Check the golden references before choosing the fix" \
+require_text "$RCA" "open each reference harness's analog" \
   "RCA methodology must check the reference harnesses before choosing a fix"
 require_text "$FORMAT" "## Golden-reference adversarial review" \
   "every approval request must pass the adversarial golden-reference review first"
@@ -313,8 +325,8 @@ require_text "$APPROVAL_BATCH" 'if decision in {"approved", "grounded"}:' \
   "a grounded decision must cover the approval batch like an approval"
 require_text "$RCA" "Golden-reference adversarial review" \
   "/rca must review approval-gated fixes before stopping"
-require_text "$DESCEND" "Fix approved (golden review)" \
-  "/descend must let a GROUNDED review clear the harness-fix decision"
+require_text "$DESCEND" 'a GROUNDED golden review clears them' \
+  "/descend must let a GROUNDED review clear its guarded changes at /deploy's approval step"
 require_text "$ROOT_DIR/CLAUDE.md" "Golden-reference review precedes every approval request" \
   "CLAUDE.md must state the golden-reference review rule"
 require_text "$FORMAT" "Never invent a failing test." \
@@ -326,38 +338,43 @@ for command in "$DEPLOY" "$RCA" "$DESCEND"; do
   require_text "$command" ".claude/shared/approval-format.md" \
     "$(basename "$command") must reference the shared approval format"
 done
-for command in "$RCA" "$DESCEND"; do
-  require_text "$command" "Read it completely immediately before" \
-    "$(basename "$command") must reload the shared format at approval time"
-done
+require_text "$RCA" "Read it completely immediately before" \
+  "rca.md must reload the shared format at approval time"
 # deploy.md points at the shared format; the reload-at-approval-time rule for
 # /deploy is carried by the shared format itself, which names /deploy.
 require_text "$FORMAT" '`/RCA`, `/deploy`, and `/descend`. Read it completely immediately before' \
   "the shared format must require /deploy to reload it at approval time"
-require_text "$DEPLOY" 'send one packet in `.claude/shared/approval-format.md` format, pasting the exact diff inline' \
-  "/deploy must send approval packets in the shared format with the exact diff inline"
+require_text "$DEPLOY" 'send one packet in `.claude/shared/approval-format.md` format, showing the key user- and model-visible strings that change' \
+  "/deploy must send approval packets in the shared format with the key visible strings"
+require_text "$DEPLOY" 'a plain list of schema or API fields; never code diffs or file pointers' \
+  "/deploy approval packets must list schema/API fields and never show code diffs"
+require_text "$DEPLOY" 'Collect every approval request into that one packet after `freeze` and send it once, at the start of the deploy' \
+  "/deploy must batch every approval request into one packet at the start of the deploy"
+if grep -Fq "pasting the exact diff" "$DEPLOY"; then
+  fail "/deploy must not ask for pasted code diffs in approval packets"
+fi
 
 require_text "$STRUCTURAL_GATES" 'Gate("approval-format", ("bash", "scripts/tests/approval-format.test.sh"))' \
   "the shared approval format must stay cemented in the deploy structural gate registry"
-require_text "$DESCEND" 'main thread using `.claude/shared/approval-format.md`' \
-  "/descend approvals must route through the parent and canonical contract"
-require_text "$DESCEND" 'its seven' \
-  "/descend must preserve the complete shared approval sections"
-require_text "$DESCEND" 'List each member' \
-  "/descend approvals must preserve member-specific evidence"
-require_text "$DESCEND" 'Causal proof; outcome pending' \
-  "/descend must disclose staged approval's outstanding outcome proof"
+require_text "$DESCEND" 'then start `/deploy`, whose approval step is the only review' \
+  "/descend's only change review must be /deploy's approval step"
+require_text "$DESCEND" "\`/deploy\`'s approval step covers the hunks its guards flag" \
+  "/descend guarded changes must route through /deploy's approval packet"
+require_text "$DESCEND" 'every task-definition edit goes to the user with its cross-review evidence' \
+  "/descend task-definition edits must reach the user with their evidence"
+require_text "$DESCEND" 'A rejected change is reverted, then its tasks and the full slice are rerun before the deploy freeze' \
+  "/descend must revert a rejected change and rerun the slice before deploying"
 require_text "$RCA" "task-framed \`What failed:\` sentence, the durable FE link" \
   "/rca approval output must require the Evidence pack"
-require_text "$RCA" "## Autonomous fix-and-deploy default" \
+require_text "$RCA" "Default: implement the fix, then immediately run \`/deploy\`" \
   "/rca must define the autonomous fix-and-deploy default"
 require_text "$RCA" 'immediately run `/deploy`; drive it fully autonomously' \
   "/rca must deploy approval-free fixes without an intermediate handoff"
 require_text "$RCA" "Never choose a weaker point fix" \
   "/rca must not trade correctness for an approval-free diff"
-require_text "$RCA_GUIDE" 'immediately run `/deploy`; drive it fully autonomously' \
+require_text "$RCA" 'drive it fully autonomously, with any approval-gated hunk' \
   "the canonical RCA methodology must match the autonomous deploy behavior"
-require_text "$RCA_GUIDE" "If the correct fix is approval-gated" \
+require_text "$RCA" "riding \`/deploy\`'s single start-of-deploy approval" \
   "the canonical RCA methodology must retain the narrow approval boundary"
 
 if grep -Fq "exact five-part RCA narrative" "$DESCEND"; then

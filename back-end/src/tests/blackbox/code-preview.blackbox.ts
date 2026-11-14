@@ -32,6 +32,7 @@ import { config } from 'dotenv';
 import { chromium, type Browser } from 'playwright';
 import { prisma } from '../../providers/database';
 import { retryWithBackoff } from '../../providers/retry';
+import { quarantinedHmrTest } from './flake-quarantines.support';
 import { localCodeSessionHome } from '../../providers/codeSessions/lifecycle';
 import { localSandboxFs } from '../../providers/codeSessions/sandboxFs';
 import { buildCodeAgentSystemPrompt } from '../../providers/codeAgentPrompt';
@@ -275,7 +276,7 @@ previewHandoffCases({
   taskRow,
 });
 
-test('Rose-in-Rose HMR: an agent write to the Rose front-end reaches the preview DOM in ≤ 3 s', async () => {
+quarantinedHmrTest(async () => {
   const agentId = await agentFor(DEV_USER);
   const session = await codeSessionRow(DEV_USER, agentId, {
     sandboxKind: 'local',

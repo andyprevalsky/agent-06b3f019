@@ -2150,7 +2150,7 @@ class LocalController(unittest.TestCase):
                             shutil.rmtree(case['fixture_tmp'])
 
     # The twelve cloud-benchmark controller suites the staged `cloudbench-controller` gate runs (the former
-    # deploy.md Step 4cb inventory, preserved in .claude/commands/DEPRECATED_deploy.md at L1408). The concise
+    # deploy.md Step 4cb inventory, preserved in the former /deploy skill). The concise
     # deploy.md no longer lists them: scripts/run-cloudbench-controller-local.py CASES is the executing
     # inventory, so it is pinned here and a change to it must be a deliberate edit of this test.
     CONTROLLER_PYTEST_KEYWORDS = (

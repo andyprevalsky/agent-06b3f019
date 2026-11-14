@@ -95,3 +95,13 @@ export function applyResolvedBenchmarkAgentCardIds(env: NodeJS.ProcessEnv = proc
 export const TEST_PAYMENT_CHECKOUT_RETURN_URL = (
   TEST_PAYMENT_PUBLIC_BASE_URL !== '' ? TEST_PAYMENT_PUBLIC_BASE_URL : 'https://roselabs.ai'
 ).replace(/\/+$/, '');
+
+/** Provider identity is configured server-side; browser user_id/cardholderId is never accepted. */
+export function getBenchmarkV2FixtureUserId(): string | undefined {
+  const value = process.env.BENCHMARK_AGENTCARD_V2_USER_ID?.trim();
+  return value === '' ? undefined : value;
+}
+
+export function getSandboxFixtureDatabaseUrl(): string | undefined {
+  return process.env.DATABASE_URL;
+}

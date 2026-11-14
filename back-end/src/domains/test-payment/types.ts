@@ -64,7 +64,24 @@ export interface TestPaymentConfirmation {
   };
 }
 
+export interface StripeIntentCustody {
+  purchaseId: string;
+  userId: string;
+  agentId: string;
+  purchaseStatus: string;
+  paymentIntentId: string;
+  customerId: string;
+  livemode: boolean;
+  status: string;
+  currency: string;
+  amountCents: number;
+  amountReceivedCents: number;
+  amountCapturableCents: number;
+  refundedCents: number;
+  outcome: 'paid' | 'unspent' | 'refunded';
+}
 export interface TestPaymentLifecycle {
+  stripeCustody?: StripeIntentCustody[];
   agentId: string;
   integrity: {
     purchaseCount: number;
