@@ -1,7 +1,7 @@
 /**
  * STATE MACHINE: RoseAppPanelDrawer (the right-panel slot for non-browser apps)
  *
- *   openApp ∈ {integrations, benchmarks, feedback, health, settings} --> [OPEN(app)]
+ *   openApp ∈ {integrations, benchmarks, feedback, health, teams, settings} --> [OPEN(app)]
  *   anything else --> [CLOSING] the shell keeps the last body while it slides
  *                     out, then --after DRAWER_DURATION_MS--> [CLOSED] body
  *                     unmounted, so a closed panel runs no polls or requests
@@ -36,13 +36,14 @@ import { useRoseApps, type RoseApp } from './roseAppsState';
 
 const IntegrationsPage = lazy(() => import('@/pages/Integrations'));
 const BenchmarksPage = lazy(() => import('@/pages/Benchmarks'));
+const TeamsPage = lazy(() => import('@/pages/Teams'));
 const SettingsPage = lazy(() => import('@/pages/Settings'));
 const AdminHealthPage = lazy(() => import('@/pages/AdminHealth'));
 const AccountSwitcherPage = lazy(() => import('@/pages/AccountSwitcher'));
 
 type PanelApp = Extract<
   RoseApp,
-  'integrations' | 'benchmarks' | 'feedback' | 'health' | 'settings'
+  'integrations' | 'benchmarks' | 'feedback' | 'health' | 'teams' | 'settings'
 >;
 
 const PANELS: Record<PanelApp, { title: string }> = {
@@ -50,6 +51,7 @@ const PANELS: Record<PanelApp, { title: string }> = {
   benchmarks: { title: 'Benchmarks' },
   feedback: { title: 'Feedback' },
   health: { title: 'Biz health' },
+  teams: { title: 'Teams' },
   settings: { title: 'Settings' },
 };
 
@@ -93,6 +95,7 @@ function PanelBody({ app }: { app: PanelApp }): ReactNode {
   if (app === 'integrations') return <IntegrationsPage />;
   if (app === 'benchmarks') return <BenchmarksPage onOpenAgent={apps?.openAgent} />;
   if (app === 'feedback') return <FeedbackAppPanel />;
+  if (app === 'teams') return <TeamsPage />;
   if (app === 'health') return <AdminHealthPage embedded />;
   return <SettingsBody onLogout={apps?.onLogout} />;
 }

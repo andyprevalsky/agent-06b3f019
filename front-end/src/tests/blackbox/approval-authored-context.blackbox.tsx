@@ -189,3 +189,15 @@ it('does not infer authored text in the shared protocol-only pending-request hel
   expect(await checkAndRespondToAttentionRequest('agent', 'YES')).toBe(true);
   expect(requests[0]).toEqual({ action: 'respond', body: { response: 'YES' } });
 });
+
+it.each(['approval', 'browser'] as const)(
+  '$surface context input stays 16px on phones so iOS Safari never zooms or pans while typing',
+  (surface) => {
+    renderApproval(surface);
+    const input = screen.getByPlaceholderText('Add context (optional)...');
+    // A bare text-sm would beat the Input's mobile text-base through tailwind-merge (14px → iOS focus zoom).
+    expect(input.className.split(/\s+/)).toContain('text-base');
+    expect(input.className.split(/\s+/)).toContain('md:text-sm');
+    expect(input.className.split(/\s+/)).not.toContain('text-sm');
+  },
+);

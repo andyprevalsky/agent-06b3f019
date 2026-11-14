@@ -345,14 +345,18 @@ export interface ListedMeeting {
   details: string;
 }
 
-const PAGINATION = /\s*<pagination\b((?:"[^"]*"|[^">])*)\/>\s*$/;
+const PAGINATION = /<pagination\b((?:"[^"]*"|[^">])*)\/>/;
 
 export function parseMeetingList(text: string): { meetings: ListedMeeting[]; next?: string } {
-  let value = text;
+  // The provider envelope also carries range/account metadata and upcoming
+  // calendar events. Only meetings_data contains recorded notes to synchronize;
+  // pagination can precede that section (observed 2026-11-11).
+  const sections = [...text.matchAll(/<meetings_data\b[^>]*(?:\/>|>[\s\S]*?<\/meetings_data>)/g)];
+  if (sections.length !== 1) throw new GranolaMcpError('Granola meeting list format changed');
+  const value = sections[0][0];
   let next: string | undefined;
-  const pagination = value.match(PAGINATION);
+  const pagination = text.match(PAGINATION);
   if (pagination) {
-    value = value.slice(0, pagination.index).trimEnd();
     if (/\bhas_more="true"/.test(pagination[1])) {
       next = decodeEntities(pagination[1].match(/\bnext_cursor="([^"]+)"/)?.[1] ?? '');
       if (next === '') throw new GranolaMcpError('Granola meeting list format changed (cursor)');

@@ -31,6 +31,7 @@ import { randomUUID } from 'node:crypto';
  * (and, on a usage limit or a blocked retry, one indexed read of the user's
  * accounts); no shared row is written except the exhausted credential itself.
  */
+import { cliUsageLimitCooldown } from '../computeSubscriptionUsage';
 import { prisma } from '../database';
 import type { CodeAgentTier } from '../codeAgentModels';
 import { createLogger } from '../logger';
@@ -117,7 +118,6 @@ export async function markCodeTaskUsageLimited(
   const macSession = isLocalDeviceSandboxId(task.sandboxId);
   const source = task.claudeTokenSource ?? '';
   const integrationId = task.claudeTokenIntegrationId ?? '';
-  const until = resetsAt ?? undefined;
   if (provider === 'codex') {
     // 'azure': the funded deployment serves the run (alone, or after an in-sandbox switch).
     if (source === 'azure' && !macSession) {
@@ -125,7 +125,7 @@ export async function markCodeTaskUsageLimited(
       return { marked: 'codex_funded' };
     }
     if (integrationId !== '') {
-      await markGptIntegrationRateLimited(integrationId, { rateLimitedUntil: until });
+      await markGptIntegrationRateLimited(integrationId, cliUsageLimitCooldown(resetsAt));
       return { marked: `gpt_integration:${integrationId}` };
     }
     if (macSession) return { marked: null };
@@ -135,7 +135,7 @@ export async function markCodeTaskUsageLimited(
     return { marked: 'codex_funded' };
   }
   if (source === 'pool' && integrationId !== '') {
-    await markPoolTokenRateLimited(integrationId, { rateLimitedUntil: until });
+    await markPoolTokenRateLimited(integrationId, cliUsageLimitCooldown(resetsAt));
     return { marked: `claude_pool:${integrationId}` };
   }
   if (source === 'user') {
@@ -145,7 +145,7 @@ export async function markCodeTaskUsageLimited(
     });
     if (agent !== null) {
       await markUserTokenRateLimited(agent.userId, {
-        rateLimitedUntil: until,
+        ...cliUsageLimitCooldown(resetsAt),
         ...(integrationId !== '' ? { integrationId } : {}),
       });
       return { marked: `claude_user:${agent.userId}` };

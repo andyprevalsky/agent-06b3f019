@@ -15,9 +15,6 @@ import threading
 import time
 import unittest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'lib'))
-from test_quarantine import quarantine
-
 ROOT=Path(__file__).resolve().parents[2]
 
 
@@ -332,12 +329,6 @@ class SharedRelay(unittest.TestCase):
             with self.assertRaises(OSError):socket.create_connection(('127.0.0.1',lease['local_port']),timeout=.2)
         print('shared broker: 64 listeners; descendant processes',len(baseline_children),'->',len(descendants(f.broker.pid)),flush=True)
 
-    @quarantine(
-        since='2026-11-11',
-        repair='pending-handoff:3b413cb2a8a142df96b47f59afbcb9ee',
-        error='TimeoutError: timed out',
-        evidence='PR #1931 deploy-command-structural FLAKY occurrence 3b413cb2a8a142df96b47f59afbcb9ee',
-    )
     def test_backpressure_bounds_memory_and_keeps_control_responsive(self):
         f=RelayFixture(self);owner=f.owner();lease=f.acquire(owner,'a'*32);f.agent.mode='backpressure'
         client=f.connect(lease);client.settimeout(8)

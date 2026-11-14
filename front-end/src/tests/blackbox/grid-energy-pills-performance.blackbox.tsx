@@ -104,6 +104,126 @@ const keyframeRules = (container: HTMLElement) =>
     ),
   );
 
+type Point = { along: number; line: number };
+
+/** translate3d(x, y, 0) -> {along, line} for a flow axis. */
+const parseTranslate = (transform: string, axis: 'x' | 'y'): Point => {
+  const [x, y] = transform
+    .match(/translate3d\(([-\d.]+)px, ([-\d.]+)px, 0\)/)!
+    .slice(1)
+    .map(Number);
+  return axis === 'x' ? { along: x, line: y } : { along: y, line: x };
+};
+
+type Frame = { offset: number; along: number; line: number; step: boolean };
+
+/** Parses `0% { transform: ...; } 12.5% { ...; animation-timing-function: step-end; }` (or from/to). */
+const parseKeyframes = (body: string, axis: 'x' | 'y'): Frame[] =>
+  Array.from(
+    body.matchAll(
+      /(from|to|[\d.]+%) \{ transform: ([^;]+);( animation-timing-function: step-end;)? \}/g,
+    ),
+  ).map(([, offset, transform, step]) => ({
+    offset: offset === 'from' ? 0 : offset === 'to' ? 1 : Number(offset.slice(0, -1)) / 100,
+    ...parseTranslate(transform, axis),
+    step: Boolean(step),
+  }));
+
+/** Position at cycle fraction f: linear segments, step-end segments hold their start. */
+const positionAt = (frames: Frame[], f: number): number => {
+  if (f <= frames[0].offset) return frames[0].along;
+  for (let i = 0; i < frames.length - 1; i += 1) {
+    const [a, b] = [frames[i], frames[i + 1]];
+    if (f > b.offset) continue;
+    if (a.step) return f < b.offset ? a.along : b.along;
+    return a.along + ((f - a.offset) / (b.offset - a.offset)) * (b.along - a.along);
+  }
+  return frames[frames.length - 1].along;
+};
+
+type Rect = [number, number, number, number];
+
+/** The even-odd mask rects from the layer's clip-path (x0, y0, x1, y1). */
+const maskRects = (layer: HTMLElement): Rect[] =>
+  Array.from(layer.style.clipPath.matchAll(/M([-\d.]+) ([-\d.]+)H([-\d.]+)V([-\d.]+)H/g)).map(
+    ([, x0, y0, x1, y1]) => [Number(x0), Number(y0), Number(x1), Number(y1)],
+  );
+
+/**
+ * Independent check: does any part of the box show through the mask inside the
+ * layer? The layer splits into cells along every mask-rect edge; parity is
+ * constant inside a cell, so the box shows iff it overlaps an odd cell.
+ * Exact and cheap (a few cells), so the 2000-step cycle sweep stays fast even
+ * under coverage instrumentation.
+ */
+const boxShows = (rects: Rect[], width: number, height: number, box: Rect, margin = 1) => {
+  const [bx0, by0, bx1, by1] = [box[0] - margin, box[1] - margin, box[2] + margin, box[3] + margin];
+  const cuts = (lo: number, hi: number, edges: number[]) =>
+    [...new Set([lo, hi, ...edges.filter((v) => v > lo && v < hi)])].sort((a, b) => a - b);
+  const xs = cuts(
+    0,
+    width,
+    rects.flatMap(([x0, , x1]) => [x0, x1]),
+  );
+  const ys = cuts(
+    0,
+    height,
+    rects.flatMap(([, y0, , y1]) => [y0, y1]),
+  );
+  for (let i = 0; i < xs.length - 1; i += 1) {
+    if (xs[i + 1] <= bx0 || xs[i] >= bx1) continue;
+    for (let j = 0; j < ys.length - 1; j += 1) {
+      if (ys[j + 1] <= by0 || ys[j] >= by1) continue;
+      const [x, y] = [(xs[i] + xs[i + 1]) / 2, (ys[j] + ys[j + 1]) / 2];
+      const cover = rects.filter(([x0, y0, x1, y1]) => x > x0 && x < x1 && y > y0 && y < y1);
+      if (cover.length % 2 === 1) return true;
+    }
+  }
+  return false;
+};
+
+/**
+ * Every flow must look exactly like the plain linear from -> to animation:
+ * wherever a mounted pill's keyframed position differs from the linear one,
+ * both positions are fully masked; an unmounted flow is masked all cycle long.
+ */
+const expectSameVisibleMotion = (
+  container: HTMLElement,
+  expected: Record<string, { axis: 'x' | 'y'; size: readonly number[]; from: string; to: string }>,
+) => {
+  const layer = energyLayer(container);
+  const [width, height] = [parseFloat(layer.style.width), parseFloat(layer.style.height)];
+  const rects = maskRects(layer);
+  const keyframes = keyframeRules(container);
+  const mounted = new Map(mobilePills(container).map((pill) => [pill.dataset.flowId!, pill]));
+  expect(layer).toHaveAttribute('data-flow-count', String(mounted.size));
+  for (const [id, flow] of Object.entries(expected)) {
+    const from = parseTranslate(flow.from, flow.axis);
+    const to = parseTranslate(flow.to, flow.axis);
+    const [length, thickness] = flow.axis === 'x' ? flow.size : [flow.size[1], flow.size[0]];
+    const box = (along: number): Rect =>
+      flow.axis === 'x'
+        ? [along, from.line, along + length, from.line + thickness]
+        : [from.line, along, from.line + thickness, along + length];
+    const pill = mounted.get(id);
+    const frames = pill
+      ? parseKeyframes(keyframes.get(pill.style.animation.split(' ')[0])!, flow.axis)
+      : null;
+    frames?.forEach((frame) => expect(frame.line).toBeCloseTo(from.line, 6));
+    for (let f = 0; f <= 1; f += 1 / 2000) {
+      const linear = from.along + f * (to.along - from.along);
+      if (!frames) {
+        expect(boxShows(rects, width, height, box(linear)), `${id} hidden at ${f}`).toBe(false);
+        continue;
+      }
+      const parked = positionAt(frames, f);
+      if (Math.abs(parked - linear) < 1e-3) continue;
+      expect(boxShows(rects, width, height, box(linear)), `${id} linear at ${f}`).toBe(false);
+      expect(boxShows(rects, width, height, box(parked)), `${id} parked at ${f}`).toBe(false);
+    }
+  }
+};
+
 const renderEnergyPills = () =>
   render(
     <svg>
@@ -164,8 +284,9 @@ describe('grid energy pill performance budget', () => {
     const layer = energyLayer(container);
     expect(layer.tagName).toBe('DIV');
     expect(layer).toHaveClass('absolute', 'inset-0', 'pointer-events-none', 'z-[4]');
-    expect(layer).toHaveAttribute('data-flow-count', '8');
-    expect(mobilePills(container)).toHaveLength(8);
+    // Only flows whose track ever shows through the mask at 390x844 are mounted.
+    expect(layer).toHaveAttribute('data-flow-count', '3');
+    expect(mobilePills(container)).toHaveLength(3);
     expect(container.querySelectorAll('canvas')).toHaveLength(0);
     expect(
       container.querySelector('[data-testid="terminal-grid-energy-layer"]'),
@@ -191,7 +312,7 @@ describe('grid energy pill performance budget', () => {
     );
   });
 
-  it('moves exactly 8 mobile pills with linear infinite CSS transform keyframes and no frame loop', () => {
+  it('moves the mobile pills that can show with CSS transform keyframes on their linear tracks and no frame loop', () => {
     setViewport(390, 844);
     const animationFrame = vi.spyOn(window, 'requestAnimationFrame');
     const getContext = vi.spyOn(HTMLCanvasElement.prototype, 'getContext');
@@ -202,16 +323,13 @@ describe('grid energy pill performance budget', () => {
     );
 
     const pills = mobilePills(container);
-    expect(pills.map((pill) => pill.dataset.flowId)).toEqual(Object.keys(EXPECTED_390X844));
-    const keyframes = keyframeRules(container);
+    // h-05 / h-13 sit under the tile / input cutouts, v-10 / v-14 lie past the
+    // right edge: never visible, so never mounted.
+    expect(pills.map((pill) => pill.dataset.flowId)).toEqual(['h-01', 'v-02', 'v-06']);
     for (const pill of pills) {
       const expected = EXPECTED_390X844[pill.dataset.flowId as keyof typeof EXPECTED_390X844];
-      const [name, ...timing] = pill.style.animation.split(' ');
+      const [, ...timing] = pill.style.animation.split(' ');
       expect(timing.join(' ')).toBe(`${expected.duration}s linear ${expected.delay}s infinite`);
-      // Only transform animates: one translate3d from the off-screen start to the off-screen end.
-      expect(keyframes.get(name)).toBe(
-        `from { transform: ${expected.from}; } to { transform: ${expected.to}; }`,
-      );
       expect(pill.style.width).toBe(`${expected.size[0]}px`);
       expect(pill.style.height).toBe(`${expected.size[1]}px`);
       expect(pill.style.left).toBe('');
@@ -221,7 +339,11 @@ describe('grid energy pill performance budget', () => {
         `rose-mobile-energy-pill-${expected.axis}`,
       );
     }
-    expect(keyframes.size).toBe(8);
+    expect(keyframeRules(container).size).toBe(3);
+    // Same on-screen motion as the plain from -> to animation, frame for frame.
+    expectSameVisibleMotion(container, EXPECTED_390X844);
+    // Masked stretches hold still (step-end) instead of moving under the mask.
+    expect(styleText(container)).toContain('animation-timing-function: step-end');
     expect(styleText(container)).toContain('border-radius: 2.5px');
 
     // No per-frame JS: no animation-frame loop, no canvas context, no visibility
@@ -239,7 +361,6 @@ describe('grid energy pill performance budget', () => {
       <MobileGridEnergyPills patternOffset={offset} selectedAgentId={null} />,
     );
     const layer = energyLayer(container);
-    const namesBefore = mobilePills(container).map((pill) => pill.style.animation);
 
     expect(layer.style.width).toBe('390px');
     expect(layer.style.height).toBe('844px');
@@ -254,8 +375,8 @@ describe('grid energy pill performance budget', () => {
     expect(layer.style.clipPath).toBe(
       "path(evenodd, 'M0 0H390V844H0Z M-18.4 124.2H408.4V551H-18.4Z M0 584H390V844H0Z')",
     );
-    // A mask change never restarts the pill animations.
-    expect(mobilePills(container).map((pill) => pill.style.animation)).toEqual(namesBefore);
+    // The parked stretches follow the new mask; on-screen motion is unchanged.
+    expectSameVisibleMotion(container, EXPECTED_390X844);
   });
 
   it('re-measures the mask and keyframes on resize and pins each animation phase once', () => {
@@ -295,26 +416,30 @@ describe('grid energy pill performance budget', () => {
         "path(evenodd, 'M0 0H390V300H0Z M-18.4 -93.4H408.4V333.4H-18.4Z M0 0H390V340H0Z')",
       );
       const namesAfter = [...keyframeRules(container).keys()];
-      expect(namesAfter).toHaveLength(8);
+      expect(namesAfter.length).toBe(mobilePills(container).length);
       // Vertical flows travel the new height; horizontal flows move to the new
       // grid lines (only h-01 stays on line 0, so its keyframes are reused).
       expect(namesAfter.filter((name) => namesBefore.includes(name))).toHaveLength(1);
-      const after = keyframeRules(container);
-      const rule = (flowId: string) =>
-        after.get(
-          mobilePills(container)
-            .find((pill) => pill.dataset.flowId === flowId)!
-            .style.animation.split(' ')[0],
-        );
-      expect(rule('h-01')).toBe(
-        'from { transform: translate3d(-209px, -2.5px, 0); } to { transform: translate3d(533px, -2.5px, 0); }',
-      );
-      expect(rule('h-05')).toBe(
-        'from { transform: translate3d(-213px, 140.5px, 0); } to { transform: translate3d(533px, 140.5px, 0); }',
-      );
-      expect(rule('v-02')).toBe(
-        'from { transform: translate3d(140.5px, 443px, 0); } to { transform: translate3d(140.5px, -227px, 0); }',
-      );
+      expectSameVisibleMotion(container, {
+        'h-01': {
+          axis: 'x',
+          size: [66, 5],
+          from: 'translate3d(-209px, -2.5px, 0)',
+          to: 'translate3d(533px, -2.5px, 0)',
+        },
+        'h-05': {
+          axis: 'x',
+          size: [70, 5],
+          from: 'translate3d(-213px, 140.5px, 0)',
+          to: 'translate3d(533px, 140.5px, 0)',
+        },
+        'v-02': {
+          axis: 'y',
+          size: [5, 84],
+          from: 'translate3d(140.5px, 443px, 0)',
+          to: 'translate3d(140.5px, -227px, 0)',
+        },
+      });
       expect(getAnimations).toHaveBeenCalledTimes(2);
       expect(pinned.map((animation) => animation.startTime)).toEqual(Array(16).fill(0));
     } finally {
@@ -340,7 +465,7 @@ describe('grid energy pill performance budget', () => {
 
     const { container } = renderBackgroundPattern();
 
-    expect(mobilePills(container)).toHaveLength(8);
+    expect(mobilePills(container)).toHaveLength(3);
     mobilePills(container).forEach((pill) => expect(pill.style.animation).toContain('infinite'));
     expect(styleText(container)).not.toContain('prefers-reduced-motion');
     expect(styleText(container)).not.toMatch(/display:\s*none/);

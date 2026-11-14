@@ -8,6 +8,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { runTilionDeadWorkerInitCases } from './browser-session-tilion-dead-worker.cases';
 import { prisma } from '../../providers/database';
 import { ensureLogicalBrowser, logicalBrowserTaskId } from '../../providers/browser/logicalSession';
 import {
@@ -170,6 +171,7 @@ export async function runLogicalBrowserCases() {
     );
     assert.match(stdout, /PASS logical first init/);
     console.log(stdout.split('\n').find((line) => line.startsWith('PASS logical first init')));
+    await runTilionDeadWorkerInitCases();
   } finally {
     await prisma.browserContext.deleteMany({
       where: { userId: { in: [userId, otherUser, createdUser] } },

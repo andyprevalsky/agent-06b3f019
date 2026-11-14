@@ -144,17 +144,28 @@ contact names or counts do not prove the iCloud Contacts setting is on.
 For receive_address use only the
 server's active expectedReceiveAddress and verify it is actually selected for
 receiving, not merely listed. For portrait_lock, open native Settings with
-apps.launch name Settings; use its observed Search to find AssistiveTouch and
-open the observed result. From its detail page return to the native Touch parent
-and read the explicit same-row AssistiveTouch On/Off value (only a trailing native
-chevron is ignorable). Preserve that original state; the detail label alone is
-not its switch state. If originally Off, open the row, enable it once and return
+apps.launch name Settings. Only the route since the latest Settings launch
+counts, and its first screen.text must show the Settings root with Search; if
+Settings resumed a subpage or hid Search, return to the root with Search
+visible and launch Settings again. Tap the observed Search, type AssistiveTouch
+with input.text keystrokes true and open the observed result. From its detail
+page return to the native Touch parent and read the explicit same-row AssistiveTouch On/Off value (only a
+trailing native chevron is ignorable). Preserve that original state; the
+detail label alone is
+not its switch state. If originally Off, open the row, tap its switch once (the
+right end of the AssistiveTouch row, not the label) and return
 to Touch to confirm the explicit value is now On, then reopen the detail page.
 Open the floating AssistiveTouch menu and tap the fresh observed Control Center
-label center. Keep this native route uninterrupted: no other apps/URLs, Home,
-unrelated input, private/user control or attention transitions. Submit setup.verify
-with fresh observations. The backend reports current portrait_lock status:
-confirmed is On, disabled is Off, and unknown is unproven. If the returned
+label center. Keep this native route uninterrupted: after the launch use only
+screen.text, screen.bounds, the observed taps, the AssistiveTouch typing and
+setup.verify; no other operation (including input.keys, apps.list, Home, drags,
+scrolls or presses), other apps/URLs, private/user control or attention
+transitions. Submit setup.verify with fresh observations.
+phone_portrait_route_unproven means that route broke; operation.result.portraitRoute
+names the cursor where it broke and the next expected step. Restart from a new
+Settings launch at the root. The
+backend reports current portrait_lock status: confirmed is On, disabled is
+Off, and unknown is unproven. If the returned
 operation.portraitActionHint exists, use its existing input.tap arguments only
 at that current evidenceCursor, then observe and verify again. Never reuse a hint
 after any intervening action. Verification never taps for you. Close Control

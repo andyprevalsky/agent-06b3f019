@@ -44,8 +44,10 @@ class SemanticReports(unittest.TestCase):
                 if shape == 'nested_suite': report['suites'][0]['suites'] = ['x']
                 if shape == 'spec': report['suites'][0]['specs'] = ['x']
                 if shape == 'test': report['suites'][0]['specs'][0]['tests'] = ['x']
-                self.assertEqual(adapter.classify_lane('ui', [item], report, events),
-                                 {adapter.case_key('ui', item): 'UNVERIFIED'})
+                # Typed rejection reaches the lane handler, which records the diagnostic and
+                # keeps the case UNVERIFIED (test_malformed_nested_native_report_* proves it).
+                with self.assertRaisesRegex(ValueError, 'native report'):
+                    adapter.classify_lane('ui', [item], report, events)
 
     def test_incomplete_never_gets_assertion_credit(self):
         item, events, report = self.fixture()
@@ -135,7 +137,7 @@ class SemanticReports(unittest.TestCase):
         self.assertEqual(adapter.summary_status(['FAIL', 'UNVERIFIED']), 'UNVERIFIED')
         self.assertEqual(adapter.summary_status([]), 'UNVERIFIED')
 
-    def run_worker(self, defect=None, malformed_event=None):
+    def run_worker(self, defect=None, malformed_event=None, malformed_report=None):
         import deploy_test_worker as worker
         import deploy_test_result as result_contract
         with tempfile.TemporaryDirectory() as d:
@@ -148,6 +150,7 @@ class SemanticReports(unittest.TestCase):
                        'phase': 'initial', 'worker_root': str(root), 'checks': ['semantic-stack'],
                        'skips': {}, 'worker_recipe': {'cases': {'semantic-stack': spec}}}
             calls = []
+            raw_reports = {}
             def produce(argv, **kwargs):
                 calls.append(argv)
                 self.assertEqual(argv, adapter.RUNNER)
@@ -165,8 +168,12 @@ class SemanticReports(unittest.TestCase):
                     if lane == 'ui' and defect == 'malformed_event':
                         e.append(malformed_event)
                     if lane == 'ui' and defect == 'malformed_report':
-                        r['suites'][0]['specs'][0]['tests'] = ['x']
-                    (folder / (lane + '.json')).write_text(json.dumps(r))
+                        path, value = malformed_report
+                        target = r
+                        for key in path[:-1]: target = target[key]
+                        target[path[-1]] = value
+                    raw_reports[lane] = json.dumps(r).encode()
+                    (folder / (lane + '.json')).write_bytes(raw_reports[lane])
                     (folder / (lane + '.jsonl')).write_text(''.join(json.dumps(x) + '\n' for x in e))
                 receipt = {'token': request['token'], 'source': freeze, 'ready': True,
                            'cleanup_complete': True, 'cleanup_exit': 0, 'ui': 1, 'latency': 0}
@@ -206,17 +213,50 @@ class SemanticReports(unittest.TestCase):
                 self.assertEqual(adapter.events_at(captured / 'ui.jsonl')[-1], malformed_event)
                 raw = json.loads((captured / 'ui.json').read_text())
                 self.assertEqual(raw['suites'][0]['specs'][0]['tests'][0]['results'][0]['status'], 'failed')
+
             if defect == 'malformed_report':
-                native = result['evidence']['semantic-stack']['native_cases']
-                self.assertEqual(native[adapter.case_key('ui', selected['ui'][0])], 'UNVERIFIED')
-                self.assertEqual(native[adapter.case_key('latency', selected['latency'][0])], 'PASS')
-                captured = Path(result['evidence']['semantic-stack']['artifact_directory'])
-                self.assertEqual(json.loads((captured / 'result.json').read_text())['cases'],
-                                 {'semantic-stack': 'UNVERIFIED'})
+                import hashlib
+                evidence = result['evidence']['semantic-stack']
+                self.assertEqual(evidence['errors'], ['ui: ValueError'])
                 self.assertTrue(result['cleanup_complete'])
+                self.assertEqual(result['native_exit'], 1)
+                self.assertTrue(result['source_unchanged'])
+                self.assertFalse(result['interrupted'])
+                self.assertEqual(evidence['native_cases'][adapter.case_key('ui', selected['ui'][0])],
+                                 'UNVERIFIED')
+                self.assertEqual(evidence['native_cases'][adapter.case_key('latency', selected['latency'][0])],
+                                 'PASS')
+                captured = Path(evidence['artifact_directory']) / 'ui.json'
+                self.assertEqual(captured.read_bytes(), raw_reports['ui'])
+                self.assertEqual(evidence['artifacts']['ui.json'],
+                                 hashlib.sha256(raw_reports['ui']).hexdigest())
+                result_json = Path(evidence['artifact_directory']) / 'result.json'
+                self.assertEqual(json.loads(result_json.read_text())['cases'],
+                                 {'semantic-stack': 'UNVERIFIED'})
+
+    def test_malformed_nested_native_report_is_unknown_with_lane_diagnostic(self):
+        mutations = [
+            (('suites',), [None]),
+            (('suites',), None),
+            (('suites',), {}),
+            (('suites', 0, 'suites'), [None]),
+            (('suites', 0, 'suites'), None),
+            (('suites', 0, 'specs'), None),
+            (('suites', 0, 'specs'), {}),
+            (('suites', 0, 'specs'), [None]),
+            (('suites', 0, 'specs'), ['x']),
+            (('suites', 0, 'specs', 0, 'tests'), None),
+            (('suites', 0, 'specs', 0, 'tests'), {}),
+            (('suites', 0, 'specs', 0, 'tests'), [None]),
+            (('suites', 0, 'specs', 0, 'tests'), ['x']),
+        ]
+        for path, value in mutations:
+            with self.subTest(path=path, value=value):
+                self.run_worker('malformed_report', malformed_report=(path, value))
 
     def test_malformed_report_preserves_other_lane_and_writes_result(self):
-        self.run_worker('malformed_report')
+        self.run_worker('malformed_report',
+                        malformed_report=(('suites', 0, 'specs', 0, 'tests'), ['x']))
 
     def test_malformed_final_native_event_is_unknown_with_lane_diagnostic(self):
         for value in (1, [], 'x', None):
@@ -253,6 +293,47 @@ class SemanticReports(unittest.TestCase):
                 for name in ('pg_isready', 'curl'):
                     path = folder / 'bin' / name
                     path.write_text('#!/bin/bash\nexit 0\n'); path.chmod(0o700)
+                # Run the actual inline callback validator; double only its external
+                # HTTP and tunnel-process boundaries, as this fixture owns teardown.
+                node = folder / 'bin/node'
+                node.write_text('#!' + shutil.which('node') + '\n' + r"""
+const fs = require('node:fs'), vm = require('node:vm'), assert = require('node:assert/strict');
+const [root, token, stackPid, port] = process.argv.slice(3);
+const origin = `https://rose-semantic-bench-${token}-bench.ngrok.app`;
+const queue = 'navi-agent-tasks-fixture-deploy-20261111000000-1';
+const services = {worktree:root, status:'running', benchmark_mode:true,
+    run_sh_pid:Number(stackPid), ports:{backend:Number(port), frontend:Number(port)+1},
+    urls:{backend:`http://localhost:${port}`, public:origin}, temporal_task_queue:queue,
+    services:[{name:'ngrok', pid:4321}]};
+const disk = {...fs, readFileSync(file, encoding) {
+    if (file === root+'/.context/services.json') return JSON.stringify(services);
+    if (file === '/proc/4321/stat') return `4321 (ngrok) S ${stackPid} 0 0`;
+    if (file === '/proc/4321/cmdline') return Buffer.from(['ngrok','http',String(Number(port)+1),
+        '--domain',new URL(origin).hostname,''].join('\0'));
+    if (file === root+'/back-end/.env') return 'BACKEND_API_KEY=offline-cleanup-fixture';
+    return fs.readFileSync(file, encoding);
+}};
+const child = {argv:['node','-',root,token,stackPid,port], env:{}, exitCode:0,
+    kill(pid, signal) {assert.equal(pid,4321); assert.equal(signal,0);}};
+const calls = [], output = [];
+const fetch = async (url, options) => {
+    assert([services.urls.backend,origin].some(base => url === base+'/api/agent-queue-pointer'));
+    assert.equal(options.headers['X-API-Key'],'offline-cleanup-fixture');
+    assert.equal(options.headers['X-Queue-Pointer-Observe'],'1');
+    assert.equal(options.redirect,'error'); calls.push(url);
+    return {status:200,json:async()=>({managedDeploymentProtocol:1,continuationAdmitted:false,
+        taskQueue:queue,managedQueue:false,surfaceHash:null,updatedBy:null,updatedAt:null})};
+};
+Promise.resolve(vm.runInNewContext(fs.readFileSync(0,'utf8'), {
+    require:id => id === 'node:fs' ? disk : id === root+'/node_modules/dotenv'
+        ? {parse:()=>({BACKEND_API_KEY:'offline-cleanup-fixture'})} : require(id),
+    process:child, Buffer, URL, AbortSignal, fetch, console:{log:v=>output.push(v),error:v=>output.push(v)}
+})).then(() => {
+    assert.equal(child.exitCode,0); assert.equal(calls.length,2);
+    assert(output.some(line=>line.startsWith('SEMANTIC_CALLBACK_READY')));
+}).catch(error => {console.error(error); process.exitCode=1;});
+""")
+                node.chmod(0o700)
                 (folder / 'scripts/run.sh').write_text('#!/bin/bash\nexec sleep 30\n')
                 (folder / 'scripts/kill-services.sh').write_text(
                     '#!/bin/bash\nif [ -f .context/swept ]; then exit "$FAKE_CLEANUP_RC"; fi\ntouch .context/swept\n')
@@ -264,7 +345,7 @@ class SemanticReports(unittest.TestCase):
                        'CONDUCTOR_PORT': '29080', 'CONDUCTOR_WORKSPACE_NAME': 'semantic_fixture',
                        'ROSE_TRUST_CONDUCTOR_WORKSPACE_NAME': '1', 'ROSE_USE_SYSTEM_PG': 'false',
                        'DEPLOY_SEMANTIC_ARTIFACT_DIR': str(folder / '.context'),
-                       'DEPLOY_SEMANTIC_TOKEN': 'request-token', 'DEPLOY_SEMANTIC_SOURCE': '{"digest":"frozen"}',
+                       'DEPLOY_SEMANTIC_TOKEN': 'a' * 32, 'DEPLOY_SEMANTIC_SOURCE': '{"digest":"frozen"}',
                        'FAKE_CLEANUP_RC': str(cleanup_exit)}
                 proc = subprocess.run(['bash', 'scripts/run-deploy-semantic-stack.sh'], cwd=folder,
                                       env=env, capture_output=True, timeout=20)
@@ -275,7 +356,7 @@ class SemanticReports(unittest.TestCase):
                 self.assertEqual(receipt['cleanup_exit'], cleanup_exit)
                 self.assertEqual((receipt['ui'], receipt['latency']), (1, 0))
                 self.assertTrue(receipt['ready'])
-                self.assertEqual(receipt['token'], 'request-token')
+                self.assertEqual(receipt['token'], 'a' * 32)
 
     def test_inventory_cli_matches_frontend_first_and_root_fallback(self):
         import os

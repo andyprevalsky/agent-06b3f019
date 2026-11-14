@@ -1,0 +1,16 @@
+{"i":2,"ms":1408,"model":"z-ai/glm-5.3-flash","action":"web_search"}
+{"i":1,"ms":1940,"model":"z-ai/glm-5.3-flash","action":"web_search"}
+{"i":0,"ms":8523,"model":"qwen/qwen3.8-27b","action":"web_search"}
+{"i":3,"ms":1235,"model":"z-ai/glm-5.3-flash","action":"web_search"}
+{"i":5,"ms":2036,"model":"z-ai/glm-5.3-flash","action":"web_search"}
+{"i":4,"ms":5373,"model":"qwen/qwen3.8-27b","action":"web_search"}
+{"i":7,"ms":1378,"model":"z-ai/glm-5.3-flash","action":"web_search"}
+{"i":6,"ms":1861,"model":"qwen/qwen3.8-27b","action":"web_search"}
+{"i":8,"ms":7649,"model":"qwen/qwen3.8-27b","action":"web_search"}
+{"i":11,"ms":1162,"model":"z-ai/glm-5.3-flash","action":"web_search"}
+{"i":10,"ms":1170,"model":"z-ai/glm-5.3-flash","action":"web_search"}
+{"i":9,"ms":1362,"model":"z-ai/glm-5.3-flash","action":"web_search"}
+{"i":12,"ms":1391,"model":"z-ai/glm-5.3-flash","action":"web_search"}
+{"i":13,"ms":5007,"model":"qwen/qwen3.8-27b","action":"web_search"}
+{"i":14,"ms":6222,"model":"qwen/qwen3.8-27b","action":"web_search"}
+{"n":15,"ok":15,"closed":15,"over13s":0,"p50":1861,"max":8523}

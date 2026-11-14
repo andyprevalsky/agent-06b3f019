@@ -27,6 +27,7 @@ export type TerminalView =
   | 'settings'
   | 'usage'
   | 'network'
+  | 'teams'
   | 'admin-health'
   | 'benchmarks';
 

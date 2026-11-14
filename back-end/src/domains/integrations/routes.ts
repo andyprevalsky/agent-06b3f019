@@ -20,6 +20,7 @@ import plaidRoutes from './routes.plaid';
 import documentRoutes from './routes.documents';
 import lanternRoutes from './routes.lantern';
 import granolaRoutes from './routes.granola';
+import firefliesRoutes from './routes.fireflies';
 import linkedinRoutes from './routes.linkedin';
 import accountRoutes from './routes.accounts';
 
@@ -36,6 +37,7 @@ router.use(plaidRoutes);
 router.use(documentRoutes);
 router.use(lanternRoutes);
 router.use(granolaRoutes);
+router.use(firefliesRoutes);
 router.use(linkedinRoutes);
 router.use(accountRoutes);
 

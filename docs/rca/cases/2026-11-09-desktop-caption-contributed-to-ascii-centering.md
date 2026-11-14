@@ -88,6 +88,42 @@ The user explicitly requested `/rca` then `/push`.
 Center the art independently of adjacent caption dimensions, using breakpoint-scoped containing blocks to preserve mobile positioning.
 
 
+## 2026-11-10 semantic fixture follow-up (full native gate pending)
+
+Source b8655088c4d90dd884e22786ca33f5c2bfb02cd7. Native round16 traces and the
+unchanged local desktop Playwright unit pass the first 1440x900 ASCII assertion,
+then fail at the second 768x813 navigation: `pre[data-ascii-layer="frame"]` is
+absent and Browse is selected. Recorded OTP request and response bodies establish
+successful real dev login as +15555550123. A local read-only storage/DOM probe
+confirms that login persists app-user and reload intentionally selects Browse.
+This is a related fixture-contract defect, not a recurrence of caption geometry.
+The first-bad owned boundary is the semantic test navigating a second time without
+establishing the empty-chat surface it asserts against.
+
+The generalized fixture uses the existing injected-session/dev-login helpers; move the pointer outside
+the sidebar, hover the existing rail at its established test position, then click
+Home's Create Super Agent button. All original assertions, viewports, 15s expect
+and poll budgets, 180s test timeout, one retry and four configured workers remain
+unchanged. Before: 1 failed including retry, 47.70s runner wall. After: 1 passed
+on first attempt, 8.4s test / 10.12s runner wall. Plain Home-row hover and rail
+hover without leaving first stalled; both candidates were interrupted and saved.
+The final fixture preserves all original source bytes except inserted setup.
+Agent count remained 0; a separate route probe recorded zero agent-creation POSTs
+and demonstrated another reload still opens Browse. No runtime route, storage,
+token, assertion, provider data, deadline or concurrency change was made.
+
+Repro: direct Playwright mobile-layout.spec.ts selection with --grep
+'desktop opening ASCII stays centered on the large grid tile$' --workers=4
+--retries=1 --trace=on, on the native scripts/run.sh --benchmark isolated stack.
+Evidence: .context/assigned-pr1885-failures/ascii-fixture-repro/REPORT.md.
+The generalized existing unit also passes in both real development-login and
+legitimate injected-session modes, with Agent count 0 before and after. Native
+stack cleanup is joined, owned ports are closed and the isolated database is
+removed. Independent review found no blocking source-contract issue; it does
+not claim fresh per-navigation auth-security coverage. Canonical full-gate
+acceptance and deployment remain pending. User feedback: preserve browser-review routing, original assertions,
+canonical source and all resource ownership; bounded clone-only investigation.
+
 ## Recurrence — November 10, signed-in horizontal alignment
 
 User: "its still off center, fix, validate, then /push", with a dark-mode

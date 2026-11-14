@@ -212,10 +212,32 @@ export interface ComputeUsageWindow {
   resetsAt: string | null;
 }
 
+/** Where the usage snapshot was read; absent on backends that predate it. */
+export type ComputeUsageSource = 'response' | 'rate_limit' | 'usage_endpoint' | 'code_session';
+
+/** Provider verdict on the request that produced the snapshot. */
+export type ComputeUsageStatus = 'allowed' | 'allowed_warning' | 'rejected';
+
 export interface ComputeAccountUsage {
   fiveHour: ComputeUsageWindow | null;
   sevenDay: ComputeUsageWindow | null;
   observedAt: string;
+  source?: ComputeUsageSource | null;
+  status?: ComputeUsageStatus | null;
+}
+
+export type ComputeCooldownReason =
+  'usage_window_5h' | 'usage_window_7d' | 'usage_window' | 'rate_limit' | 'stall' | 'auth';
+
+/**
+ * Why the account serves nothing until `until`. `authoritative` = the time is a
+ * provider-reported window reset; otherwise it is a Rose backoff (stall,
+ * default cooldown) and says nothing about the quota.
+ */
+export interface ComputeCooldown {
+  until: string;
+  reason: ComputeCooldownReason;
+  authoritative: boolean;
 }
 
 export interface ComputeAccount {
@@ -228,6 +250,46 @@ export interface ComputeAccount {
   connectedAt: string;
   /** Last subscription usage an agent observed on this account; null until one is used. */
   usage: ComputeAccountUsage | null;
-  /** Provider cooldown: the account serves nothing until this passes. */
+  /**
+   * Provider cooldown: the account serves nothing until this passes. Kept for
+   * older backends; `cooldown` says whether the time is authoritative.
+   */
   rateLimitedUntil: string | null;
+  /** Active cooldown (only while `until` > now at read time); absent on older backends. */
+  cooldown?: ComputeCooldown | null;
+  /** Earliest future reset among binding windows, else an authoritative cooldown's end. */
+  nextResetAt?: string | null;
 }
+
+/** Meeting note taker provider and connection contracts. */
+export type MeetingNotesProvider = 'granola' | 'fireflies';
+export interface MeetingNotesStatus {
+  connected: boolean;
+  status: 'NOT_CONNECTED' | 'PENDING' | 'CONNECTED' | 'SYNCING' | 'SYNC_FAILED' | 'EXPIRED';
+  accountEmail: string | null;
+  backfillDone: boolean;
+  lastSuccessfulSyncAt: string | null;
+  lastError: string | null;
+  documents: Partial<Record<string, number>>;
+}
+
+export interface MeetingNotesConnection {
+  status: MeetingNotesStatus | null;
+  busy: 'connect' | 'sync' | 'disconnect' | null;
+  error: string | null;
+  connect: () => Promise<void>;
+  sync: () => Promise<void>;
+  disconnect: () => Promise<void>;
+}
+export type MeetingNotesConnections = Record<MeetingNotesProvider, MeetingNotesConnection>;
+export type IntegrationCatalogKey =
+  | 'iphone'
+  | 'browsers'
+  | 'passwords'
+  | 'messages'
+  | 'compute'
+  | 'banks'
+  | 'socials'
+  | 'files'
+  | 'meetingNotes'
+  | 'pebble';

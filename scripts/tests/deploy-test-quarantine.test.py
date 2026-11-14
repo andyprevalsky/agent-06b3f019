@@ -435,7 +435,7 @@ class ReleaseReport(unittest.TestCase):
         recorded = q.validate_attribution(occurrence, {**entry, 'case': 'real_model_controls'}, self.root)
         self.assertEqual(('NOT_INTRODUCED', 'dom', occurrence_id),
                          tuple(recorded['post_merge'][k] for k in ('attribution', 'unit', 'occurrence')))
-        # The merge gate re-validates the recorded attribution itself (attribution_block).
+        # Merge revalidates the recorded attribution itself (attribution_block), so it must keep the case.
         self.assertIsNone(q.attribution_block([{**occurrence, 'attribution': recorded}], self.root))
         # An unmarked case, a case that did not fail, or several failed cases never bind.
         with self.assertRaisesRegex(ValueError, 'no quarantine marker'):
@@ -448,49 +448,6 @@ class ReleaseReport(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'single failed case'):
             q.validate_attribution({**occurrence, 'detail': several}, {**entry, 'case': 'real_model_controls'},
                                    self.root)
-
-    def test_structural_suite_flake_binds_the_marker_of_its_single_failed_unittest_case(self):
-        occurrence_id = 'd' * 32
-        suite = ("from test_quarantine import quarantine\n\n"
-                 "class Observation(unittest.TestCase):\n"
-                 "    @quarantine(since='2026-11-11', repair='pending-handoff:%s', error='AssertionError: boom', "
-                 "evidence='rca-3')\n"
-                 "    def test_scan(self):\n        pass\n\n"
-                 "    def test_other(self):\n        pass\n" % occurrence_id)
-        (self.root / 'tests' / 'suite.test.py').write_text(suite)
-        detail = ("passed on rerun: suite\n....F..\n" + "=" * 70 + "\n"
-                  "FAIL: test_scan (__main__.Observation.test_scan)\n" + "-" * 70 + "\n"
-                  "Traceback (most recent call last):\nAssertionError: boom\n\nRan 7 tests in 1.0s\n\n"
-                  "FAILED (failures=1)\n")
-        occurrence = {'id': occurrence_id, 'gate': 'structural', 'unit': 'suite', 'detail': detail,
-                      'source': {'head': 'a' * 40}}
-        packet = {k: 'x' for k in ('test', 'command', 'scope', 'error', 'source', 'evidence')}
-        entry = {'attribution': 'NOT_INTRODUCED', 'evidence': 'rca-3', 'marker': 'tests/suite.test.py',
-                 'post_merge': packet}
-        # A suite unit names its script, not a test: without the case label nothing binds.
-        with self.assertRaisesRegex(ValueError, 'no quarantine marker'):
-            q.validate_attribution(occurrence, entry, self.root)
-        recorded = q.validate_attribution(occurrence, {**entry, 'case': 'Observation.test_scan'}, self.root)
-        self.assertEqual(('NOT_INTRODUCED', 'suite', occurrence_id),
-                         tuple(recorded['post_merge'][k] for k in ('attribution', 'unit', 'occurrence')))
-        # The merge gate re-validates the recorded attribution itself (attribution_block).
-        self.assertIsNone(q.attribution_block([{**occurrence, 'attribution': recorded}], self.root))
-        # An unmarked case, a case that did not fail, several failures, another script or a bad label never bind.
-        with self.assertRaisesRegex(ValueError, 'no quarantine marker'):
-            q.validate_attribution({**occurrence, 'detail': detail.replace('test_scan', 'test_other')},
-                                   {**entry, 'case': 'Observation.test_other'}, self.root)
-        with self.assertRaisesRegex(ValueError, 'single failed case'):
-            q.validate_attribution(occurrence, {**entry, 'case': 'Observation.test_other'}, self.root)
-        several = detail.replace('FAILED (failures=1)', 'FAIL: test_other (__main__.Observation.test_other)\n'
-                                 'FAILED (failures=2)')
-        with self.assertRaisesRegex(ValueError, 'single failed case'):
-            q.validate_attribution({**occurrence, 'detail': several}, {**entry, 'case': 'Observation.test_scan'},
-                                   self.root)
-        with self.assertRaisesRegex(ValueError, 'suite script'):
-            q.validate_attribution({**occurrence, 'unit': 'other-suite'},
-                                   {**entry, 'case': 'Observation.test_scan'}, self.root)
-        with self.assertRaisesRegex(ValueError, 'TestCase class'):
-            q.validate_attribution(occurrence, {**entry, 'case': 'Observation.test_scan.extra'}, self.root)
 
     def test_catalog_marker_backs_a_not_introduced_smoke_flake_and_bad_markers_are_refused(self):
         self.write_catalog()
@@ -511,6 +468,47 @@ class ReleaseReport(unittest.TestCase):
                 self.write_catalog(bad)
                 with self.assertRaises(ValueError):
                     q.catalog_quarantines(self.root)
+
+    def test_suite_level_flaky_unit_matches_the_marker_named_by_its_own_failure_output(self):
+        # The structural runner reports a FLAKY unit as the suite job ("deploy-test-plan"); the marker
+        # sits on the one method unittest named in that job's failed first attempt (PR #1928).
+        packet = {k: 'x' for k in ('test', 'command', 'scope', 'error', 'source', 'evidence')}
+        entry = {'attribution': 'NOT_INTRODUCED', 'evidence': 'rca-1', 'marker': 'tests/test_unit.py',
+                 'post_merge': {**packet, 'repair_owner': REPAIR}}
+        base = {'id': 'c' * 32, 'gate': 'structural', 'unit': 'suite-job', 'source': {'head': 'a' * 40}}
+        failure = ('FAIL: test_flaky_unit (__main__.Suite.test_flaky_unit)\nTraceback (most recent call last):\n'
+                   '  File "/w/tests/test_unit.py", line 4, in test_flaky_unit\n')
+        recorded = q.validate_attribution({**base, 'detail': 'passed on rerun\n' + failure}, entry, self.root)
+        self.assertEqual('tests/test_unit.py', recorded['marker'])
+        dotted = 'FAIL: test_flaky_unit (tests.test_unit.Suite.test_flaky_unit)\n'
+        self.assertEqual('tests/test_unit.py',
+                         q.validate_attribution({**base, 'detail': dotted}, entry, self.root)['marker'])
+        # Same class + method in ANOTHER module, or a __main__ id with no tie to the marker file, is refused.
+        unmarked = 'FAIL: test_other (tests.test_unit.Suite.test_other)\n'  # a second failure with no marker
+        for detail in (None, 'no unittest header', failure.replace('Suite.', 'Other.'),
+                       dotted.replace('tests.test_unit.', 'tests.test_other.'), failure.split('Traceback')[0],
+                       dotted + unmarked):
+            with self.subTest(detail=detail), self.assertRaisesRegex(ValueError, 'no quarantine marker'):
+                q.validate_attribution({**base, 'detail': detail}, entry, self.root)
+
+    def test_suite_level_flake_with_truncated_header_binds_the_packet_test_by_its_traceback_frame(self):
+        # The recorded detail keeps only its tail; deploy-test-worker lost unittest's header (PR #1925).
+        entry = {'attribution': 'NOT_INTRODUCED', 'evidence': 'rca-1', 'marker': 'tests/test_unit.py',
+                 'post_merge': {**{k: 'x' for k in ('command', 'scope', 'error', 'source', 'evidence')},
+                                'test': 'Suite.test_flaky_unit', 'repair_owner': REPAIR}}
+        frame = '  File "/w/tests/test_unit.py", line 4, in test_flaky_unit\n    boom()\nValueError: boom\n'
+        base = {'id': 'c' * 32, 'gate': 'structural', 'unit': 'suite-job', 'source': {'head': 'a' * 40}}
+        self.assertEqual('tests/test_unit.py',
+                         q.validate_attribution({**base, 'detail': frame}, entry, self.root)['marker'])
+        refused = {'no frame': 'FAILED (errors=1)\n', 'frame in another file': frame.replace('tests/test_unit', 'tests/x'),
+                   'frame names another method': frame.replace('test_flaky_unit', 'test_other')}
+        for label, detail in refused.items():
+            with self.subTest(label), self.assertRaisesRegex(ValueError, 'no quarantine marker'):
+                q.validate_attribution({**base, 'detail': detail}, entry, self.root)
+        with self.assertRaisesRegex(ValueError, 'no quarantine marker'):  # the packet must name the marked test
+            q.validate_attribution({**base, 'detail': frame},
+                                   {**entry, 'post_merge': {**entry['post_merge'], 'test': 'Suite.test_other'}},
+                                   self.root)
 
     def test_cli_prints_the_table(self):
         self.write_ledger(['QUARANTINED_PASS'] * 5)

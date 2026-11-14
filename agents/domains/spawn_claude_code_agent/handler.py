@@ -23,6 +23,7 @@ from domains.spawn_claude_code_agent.config import (
     CODE_AGENT_ACTIVITY_NO_DEADLINE,
     CODE_AGENT_DRAIN_YIELD_STATUS,
     CODE_AGENT_PAUSED_STATUS,
+    CODE_AGENT_SESSION_FAILED_CODE,
     CODE_AGENT_USAGE_LIMIT_STATUS,
     CODE_SESSION_HEARTBEAT_KEY,
     CODE_TARGET_LOCAL,
@@ -232,6 +233,19 @@ def _e2b_capacity_exhausted(error: BaseException) -> Optional[ApplicationError]:
 def _github_rate_limited(error: BaseException) -> Optional[ApplicationError]:
     """GitHub's rate limit stopped session create: a hard failure carrying the reset time."""
     return _typed_application_error(error, GITHUB_RATE_LIMITED_CODE)
+
+
+def _code_session_failure(error: BaseException) -> Optional[Dict[str, Any]]:
+    """The resumable code session of a run that ended abnormally, if the activity attached one.
+
+    ``message`` keeps the exact exception and names the code_session_id and the
+    retry call; ``details`` carry the same facts for metadata.
+    """
+    failed = _typed_application_error(error, CODE_AGENT_SESSION_FAILED_CODE)
+    if failed is None:
+        return None
+    details = failed.details[0] if failed.details and isinstance(failed.details[0], dict) else {}
+    return {"message": failed.message, **details}
 
 
 def _failed_code_agent(target_info: Optional[Dict[str, Any]], message: str) -> Dict[str, Any]:
@@ -949,6 +963,36 @@ class SpawnClaudeCodeAgentManager(ToolManager):
                         "code_provider": code_provider,
                         "error_code": GITHUB_RATE_LIMITED_CODE,
                         "code_agent": _failed_code_agent(target_info, github_limited.message),
+                    },
+                )
+                return
+
+            session_failure = _code_session_failure(e)
+            if session_failure is not None:
+                # The run died after its code session existed (e.g. a dropped
+                # WebSocket): hand the parent the exact error plus the
+                # code_session_id to resume, never a bare one-liner.
+                logger.error(
+                    "[ClaudeCode] Code session run failed; surfacing its session for a resume",
+                    agent_id=agent_id,
+                    code_provider=code_provider,
+                    code_session_id=session_failure.get("code_session_id"),
+                    error=session_failure.get("error"),
+                    error_type=session_failure.get("error_type"),
+                )
+                yield ToolEvent(
+                    type=EventType.POST_MESSAGE,
+                    title="Code session failed",
+                    message=session_failure["message"],
+                    status=MessageStatus.ERROR,
+                    metadata={
+                        "toolName": "spawn_claude_code_agent",
+                        "code_provider": code_provider,
+                        "error_code": CODE_AGENT_SESSION_FAILED_CODE,
+                        "code_session_id": session_failure.get("code_session_id"),
+                        "code_session": session_failure.get("code_session"),
+                        "retry": session_failure.get("retry"),
+                        "code_agent": _failed_code_agent(target_info, session_failure["message"]),
                     },
                 )
                 return

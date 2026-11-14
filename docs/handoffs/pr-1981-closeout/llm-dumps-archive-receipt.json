@@ -1,0 +1,14 @@
+{
+  "format": "ROSE-PRIVATE-TAR-GCM-V1",
+  "bucket": "trace-archive",
+  "key": "devbox-closeout-private/pr1981/20261113T111028Z-llm-dumps.tar.gz.aesgcm",
+  "encryption_key_id": "trace-archive-prod-2026-07-03",
+  "ciphertext_sha256": "970a47bbd41e72e1700364ebd31d40e22b0b0d349a0945a5c9bb027ee07b9451",
+  "gzip_sha256": "e216426aa109a2506c6d712cb84fe151e8e6e40876360bf62d4c48f7110cd414",
+  "stored_bytes": 49565,
+  "frames": 1,
+  "files": 141,
+  "original_bytes": 301872,
+  "manifest_sha256": "0032c01285f84aa514b1ef66410192e5fc920ad4e534d99dc4b979fadec91556",
+  "full_readback_verified": true
+}

@@ -22,6 +22,7 @@ import {
   readArchivedArtifact,
 } from '../../providers/traceArchive';
 import {
+  assertDirectCaptureFinalizationOwnership,
   assertLateArchiveBatchConvergence,
   assertLateArchiveManifestConvergence,
 } from './archive-late-manifest.helper';
@@ -571,6 +572,10 @@ async function testEmailProviderBoundaryArchivedWithAgentCorrelation(): Promise<
 
 async function runAll(): Promise<void> {
   const tests = [
+    {
+      name: 'terminal archive joins owned root and child captures and rejects failed writers',
+      fn: () => withSeededRun(assertDirectCaptureFinalizationOwnership),
+    },
     {
       name: 'curation pool stops claims and joins in-flight work before rejecting',
       fn: runCurationPoolControls,

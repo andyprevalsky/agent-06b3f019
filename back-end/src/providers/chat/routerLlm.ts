@@ -29,7 +29,19 @@ import { delayedCacheStreamHedge } from './delayedCacheStreamHedge';
 import { isOpeningRouterTurn, readRouterDemoCache } from './routerDemoCache';
 import { isOaiDemoGoal } from '../demoCacheNormalizeOaiDemo';
 import type { ChatProviderRoute } from './phaseModels';
-import type { ChatCompletionParams } from './completionOptions';
+import {
+  applyChunkUsage,
+  accumulateChatLlmUsage,
+  emptyChatLlmUsage,
+  type ChatLlmUsage,
+  type ChatCompletionParams,
+} from './completionOptions';
+export {
+  applyChunkUsage,
+  accumulateChatLlmUsage,
+  emptyChatLlmUsage,
+  type ChatLlmUsage,
+} from './completionOptions';
 import { withCurrentTimeContext } from '../currentTimeContext';
 import { runCacheWriteInBackground } from './backgroundCacheWrite';
 import {
@@ -68,53 +80,6 @@ const ROUTER_TEMPERATURE = 0;
 // ============================================
 // Router Response with streaming metadata
 // ============================================
-export interface ChatLlmUsage {
-  prompt_tokens: number;
-  completion_tokens: number;
-  total_tokens: number;
-  cache_creation_input_tokens: number;
-  cache_read_input_tokens: number;
-  model: string;
-  from_fast_cache: boolean;
-}
-
-export function emptyChatLlmUsage(): ChatLlmUsage {
-  return {
-    prompt_tokens: 0,
-    completion_tokens: 0,
-    total_tokens: 0,
-    cache_creation_input_tokens: 0,
-    cache_read_input_tokens: 0,
-    model: '',
-    from_fast_cache: false,
-  };
-}
-
-export function applyChunkUsage(
-  target: ChatLlmUsage,
-  chunkUsage: {
-    prompt_tokens?: number;
-    completion_tokens?: number;
-    total_tokens?: number;
-    cache_creation_input_tokens?: number;
-    cache_read_input_tokens?: number;
-  }
-): void {
-  target.prompt_tokens = chunkUsage.prompt_tokens ?? 0;
-  target.completion_tokens = chunkUsage.completion_tokens ?? 0;
-  target.total_tokens = chunkUsage.total_tokens ?? 0;
-  target.cache_creation_input_tokens = chunkUsage.cache_creation_input_tokens ?? 0;
-  target.cache_read_input_tokens = chunkUsage.cache_read_input_tokens ?? 0;
-}
-
-export function accumulateChatLlmUsage(target: ChatLlmUsage, increment: ChatLlmUsage): void {
-  target.prompt_tokens += increment.prompt_tokens;
-  target.completion_tokens += increment.completion_tokens;
-  target.total_tokens += increment.total_tokens;
-  target.cache_creation_input_tokens += increment.cache_creation_input_tokens;
-  target.cache_read_input_tokens += increment.cache_read_input_tokens;
-}
-
 export interface RouterResponse {
   decision: RouterDecision;
   streamId: string;
@@ -152,6 +117,7 @@ function extractStreamableReasoning(
 // ============================================
 // Router LLM Call with Streaming
 // ============================================
+/** Bind router parameters and capture context to the owning chat tree. */
 export function buildRouterCompletionOptions(
   params: ChatCompletionParams & { stage?: RouterStage }
 ): CompletionOptions {
@@ -177,6 +143,7 @@ export function buildRouterCompletionOptions(
     },
     dump_context: {
       agent_id: params.agentId,
+      root_agent_id: params.rootAgentId,
       call_site: ROUTER_STAGES[params.stage ?? 'initial'].callSite,
     },
     speed: params.speed,
@@ -185,8 +152,10 @@ export function buildRouterCompletionOptions(
   };
 }
 
+/** Route the current chat context within its provider deadline and evidence ownership. */
 export async function callRouterLlm(params: {
   agentId: string;
+  rootAgentId?: string;
   messages: ChatMessage[];
   model: string;
   providerRoute?: ChatProviderRoute;
@@ -339,6 +308,7 @@ export async function callRouterLlm(params: {
           createStreamingCompletion(
             buildRouterCompletionOptions({
               agentId: params.agentId,
+              rootAgentId: params.rootAgentId,
               model: params.model,
               messages: openaiMessages,
               providerRoute: params.providerRoute,
@@ -620,6 +590,7 @@ export async function callRouterLlm(params: {
     log.info('llm.cache', {
       call_site: 'routerLlm',
       agent_id: params.agentId,
+      root_agent_id: params.rootAgentId,
       actual_model: actualModel,
       is_claude: isClaude,
       is_gpt: isGpt,
