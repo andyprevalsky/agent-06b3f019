@@ -636,7 +636,7 @@ function startCapture(opts: WrapOptions): LlmCapture {
     call_site: dumpContext.call_site,
     agent_id: dumpContext.agent_id,
     root_agent_id: dumpContext.root_agent_id,
-    on_record: dumpContext.on_record,
+    archive_scope: dumpContext.archive_scope,
     model: opts.options.model,
     message_count: opts.options.messages.length,
     messages: opts.options.messages,

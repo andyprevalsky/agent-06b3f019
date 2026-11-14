@@ -1,5 +1,4 @@
 /** Fixed negative-state verifier; native app identity routes evidence, never classifies text. */
-import { archiveBindingFor } from './archiveRootResolver';
 import { createStreamingCompletion, StructuredOutputAccumulator } from './rose';
 import { getModelPricing } from './modelPricing';
 import { phoneVerifierPricing } from './phoneVerifierPricing';
@@ -29,7 +28,7 @@ export const verifyImessageAuthLoss: ImessageAuthLossVerifier = async (input) =>
     abort_signal: AbortSignal.timeout(Math.min(60000, input.timeoutMs)),
     dump_context: {
       call_site: 'phone_imessage_auth_loss',
-      ...(await archiveBindingFor({ agentId: input.agentId })),
+      archive_scope: { agentId: input.agentId },
     },
     messages: [
       { role: 'system', content: IMESSAGE_AUTH_LOSS_PURPOSE },

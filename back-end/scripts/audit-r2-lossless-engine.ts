@@ -108,7 +108,7 @@ export const BACKEND_CALL_SITES: Array<{ site: string; match: RegExp }> = [
   { site: 'chat_router', match: /^chat_router$/ },
   { site: 'chat_generator', match: /^chat_generator$/ },
   { site: 'chat_compaction', match: /^chat_compaction$/ },
-  { site: 'response_schema (setResponseSchema)', match: /^response_schema$/ },
+  { site: 'response_schema_generation (setResponseSchema)', match: /^response_schema_generation$/ },
   { site: 'sms_supervisor', match: /^sms_supervisor/ },
   { site: 'sms_notification', match: /^sms_notification/ },
   { site: 'phone checks', match: /^phone_/ },

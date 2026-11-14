@@ -13,6 +13,15 @@
  *       stream end ──► llm-updates/<dump_id>-<ms>-<call_site>  (final record:
  *                      output, usage, reasoning blocks, losing race attempts)
  *
+ *   Root binding: an explicit root_agent_id is used as given. An archive_scope
+ *   (agent/user ids from memory) is resolved to its tree root INSIDE the
+ *   background archive task; nothing waits on that lookup before the model call:
+ *
+ *       startLlmCapture ─(sync)─► return          model call proceeds immediately
+ *            └─ background: archiveBindingFor(scope) ─► start record
+ *       finishLlmCapture ─(sync)─► return
+ *            └─ background: same resolution ─► final record
+ *
  * Dump/archive failures never affect the LLM call; an unbound root is refused
  * loudly (error log) instead of filed under a placeholder bundle.
  */
@@ -25,10 +34,12 @@ import { currentTraceContext } from './tracing';
 import { archiveEnabled, encryptArtifact } from './traceArchive';
 import { storeWorkerArtifact } from './traceArchiveLifecycle';
 import { ownLlmCapture } from './llmCaptureTasks';
+import { archiveBindingFor, archiveScopeOwners } from './archiveRootResolver';
 import {
   type ArchiveAttempt,
   type ArchiveIdentity,
   type ArchiveOutput,
+  type ArchiveScope,
   buildFinalRecord,
   buildStartRecord,
   finalRecordPath,
@@ -78,8 +89,8 @@ export interface LlmDumpPayload {
   response_format?: unknown;
   tools?: unknown[];
   extra?: Record<string, unknown>;
-  /** Called with each archive record path after it is durably stored. */
-  on_record?: (objectPath: string) => Promise<void> | void;
+  /** Deferred binding (used when root_agent_id is absent); never resolved on the call path. */
+  archive_scope?: ArchiveScope;
 }
 
 export function dumpLlmContext(payload: LlmDumpPayload): string | null {
@@ -198,9 +209,17 @@ export interface LlmCapture {
   agentId: string;
   /** Null when the caller supplied no bound root: nothing is archived (logged loudly). */
   identity: ArchiveIdentity | null;
+  /** archive_scope binding, resolved in the background (start and final records share it). */
+  deferred?: DeferredIdentity;
   startedAtMs: number;
   attempts: AttemptCollector;
-  onRecord?: (objectPath: string) => Promise<void> | void;
+}
+
+interface DeferredIdentity {
+  /** Synchronous capture owners, so drainLlmCaptures waits before the root is known. */
+  agentId: string;
+  ownerRoot: string;
+  identity: Promise<ArchiveIdentity>;
 }
 
 export interface LlmCaptureFinish {
@@ -216,14 +235,53 @@ function refuseUnbound(payload: LlmDumpPayload, agentId: string): void {
     call_site: payload.call_site,
     agent_id: agentId || null,
     root_agent_id: payload.root_agent_id ?? null,
+    archive_scope: payload.archive_scope ?? null,
     message: 'LLM archive record not written: caller passed no bound root_agent_id',
   });
+}
+
+type StartRecordFields = Parameters<typeof buildStartRecord>[1];
+
+/** archive_scope path: owners now, root + start record in the background task. */
+function startDeferredCapture(
+  payload: LlmDumpPayload,
+  scope: ArchiveScope,
+  ids: { spanId: string; dumpId: string },
+  fields: StartRecordFields
+): DeferredIdentity | null {
+  const owners = archiveScopeOwners(scope);
+  if (owners === null) return null;
+  const identity = archiveBindingFor(scope).then((binding) => {
+    if (binding === null) throw new Error('archive_scope lost its binding');
+    return {
+      call_site: payload.call_site,
+      agent_id: binding.agent_id,
+      root_agent_id: binding.root_agent_id,
+      span_id: ids.spanId,
+      dump_id: ids.dumpId,
+    };
+  });
+  const deferred: DeferredIdentity = { ...owners, identity };
+  ownDeferred(
+    deferred,
+    identity.then((bound) =>
+      persistRecord(
+        bound,
+        startRecordPath(bound.dump_id),
+        buildStartRecord(bound, fields),
+        fields.started_at_ms
+      )
+    )
+  );
+  return deferred;
 }
 
 /** Capture identities, the start clock and the crash-safe start record before streaming. */
 export function startLlmCapture(payload: LlmDumpPayload): LlmCapture {
   const trace = currentTraceContext();
-  const agentId = payload.agent_id || trace?.agent_id || '';
+  const scope = isBoundArchiveId(payload.root_agent_id) ? undefined : payload.archive_scope;
+  const scopeAgentId = scope === undefined ? undefined : archiveScopeOwners(scope)?.agentId;
+  const agentId = scopeAgentId || payload.agent_id || trace?.agent_id || '';
   const rootAgentId = payload.root_agent_id ?? null;
   const spanId = payload.span_id || trace?.span_id || randomUUID();
   const dumpId = randomUUID();
@@ -236,6 +294,28 @@ export function startLlmCapture(payload: LlmDumpPayload): LlmCapture {
     dump_id: dumpId,
   } as LlmDumpPayload);
   if (!archiveEnabled()) return { localPath, agentId, identity: null, startedAtMs, attempts };
+  const fields: StartRecordFields = {
+    started_at_ms: startedAtMs,
+    model: payload.model ?? null,
+    message_count: payload.message_count,
+    messages: payload.messages,
+    config: payload.config ?? {},
+    ...(payload.response_format !== undefined ? { response_format: payload.response_format } : {}),
+    ...(payload.tools !== undefined ? { tools: payload.tools } : {}),
+    ...(payload.extra !== undefined ? { extra: payload.extra } : {}),
+  };
+  if (scope !== undefined) {
+    const deferred = startDeferredCapture(payload, scope, { spanId, dumpId }, fields);
+    if (deferred === null) refuseUnbound(payload, agentId);
+    return {
+      localPath,
+      agentId,
+      identity: null,
+      ...(deferred !== null ? { deferred } : {}),
+      startedAtMs,
+      attempts,
+    };
+  }
   if (!isBoundArchiveId(rootAgentId) || !isBoundArchiveId(agentId)) {
     refuseUnbound(payload, agentId);
     return { localPath, agentId, identity: null, startedAtMs, attempts };
@@ -247,24 +327,23 @@ export function startLlmCapture(payload: LlmDumpPayload): LlmCapture {
     span_id: spanId,
     dump_id: dumpId,
   };
-  const record = buildStartRecord(identity, {
-    started_at_ms: startedAtMs,
-    model: payload.model ?? null,
-    message_count: payload.message_count,
-    messages: payload.messages,
-    config: payload.config ?? {},
-    ...(payload.response_format !== undefined ? { response_format: payload.response_format } : {}),
-    ...(payload.tools !== undefined ? { tools: payload.tools } : {}),
-    ...(payload.extra !== undefined ? { extra: payload.extra } : {}),
-  });
-  const startPath = startRecordPath(dumpId);
   own(
     identity,
-    persistRecord(identity, startPath, record, startedAtMs).then(() =>
-      payload.on_record?.(startPath)
+    persistRecord(
+      identity,
+      startRecordPath(dumpId),
+      buildStartRecord(identity, fields),
+      startedAtMs
     )
   );
-  return { localPath, agentId, identity, startedAtMs, attempts, onRecord: payload.on_record };
+  return { localPath, agentId, identity, startedAtMs, attempts };
+}
+
+/** The capture's archive root once bound (after the model call; null when unarchived). */
+export async function llmCaptureRoot(capture: LlmCapture): Promise<string | null> {
+  if (capture.identity !== null) return capture.identity.root_agent_id;
+  if (capture.deferred === undefined) return null;
+  return (await capture.deferred.identity).root_agent_id;
 }
 
 /** Register the final record with both owners without blocking stream return. */
@@ -278,9 +357,11 @@ export function finishLlmCapture(capture: LlmCapture, finish: LlmCaptureFinish):
     attempts: finish.attempts?.(capture.attempts.lost) ?? [],
     extra: finish.extra ?? {},
   });
-  const identity = capture.identity;
-  if (identity === null) return;
+  const { identity: explicit, deferred } = capture;
+  const binding = explicit !== null ? Promise.resolve(explicit) : deferred?.identity;
+  if (binding === undefined) return;
   const task = (async () => {
+    const identity = await binding;
     await waitForAttempts(capture.attempts);
     const attempts = finish.attempts?.(capture.attempts.lost) ?? [];
     const record = buildFinalRecord(identity, {
@@ -292,9 +373,9 @@ export function finishLlmCapture(capture: LlmCapture, finish: LlmCaptureFinish):
     });
     const finalPath = finalRecordPath(identity.dump_id, finishedAtMs, identity.call_site);
     await persistRecord(identity, finalPath, record, finishedAtMs);
-    await capture.onRecord?.(finalPath);
   })();
-  own(identity, task);
+  if (explicit !== null) own(explicit, task);
+  else if (deferred !== undefined) ownDeferred(deferred, task);
 }
 
 function own(identity: ArchiveIdentity, task: Promise<void>): void {
@@ -308,6 +389,18 @@ function own(identity: ArchiveIdentity, task: Promise<void>): void {
     throw error;
   });
   ownLlmCapture(identity.agent_id, logged, identity.root_agent_id);
+}
+
+function ownDeferred(deferred: DeferredIdentity, task: Promise<void>): void {
+  const logged = task.catch((error: unknown) => {
+    log.warn('llm.context.archive_failed', {
+      agent_id: deferred.agentId,
+      owner_root: deferred.ownerRoot,
+      error: error instanceof Error ? error.name : 'unknown',
+    });
+    throw error;
+  });
+  ownLlmCapture(deferred.agentId, logged, deferred.ownerRoot);
 }
 
 /** Encrypt one record under its explicit root, stamped with its captured clock. */

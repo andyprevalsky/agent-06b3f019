@@ -39,7 +39,6 @@ import {
   validateFieldConstraints,
   type FieldConstraints,
 } from './responseSchemaBounds';
-import { archiveBindingFor } from './archiveRootResolver';
 import { retryWithBackoff } from './retry';
 import { createStreamingCompletion, RoseAuthError, RoseInvalidRequest } from './rose';
 import { StructuredOutputAccumulator } from './rose/structuredOutput';
@@ -770,7 +769,7 @@ export async function setResponseSchema(agentId: string): Promise<void> {
 
         // Generate schema using Rose Flash
         const { schema, tokensIn, tokensOut } = await generateResponseSchema(agent.goal, {
-          archive: (await archiveBindingFor({ agentId })) ?? undefined,
+          archive: { archive_scope: { agentId } },
         });
 
         // Update agent with schema and token usage

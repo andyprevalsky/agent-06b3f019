@@ -4,9 +4,9 @@
  * call under a REAL root. A caller that omits dump_context is never archived;
  * one that omits the root is refused by the writer (llm.archive.unbound_root_refused).
  *
- *   createStreamingCompletion caller ─► dump_context { call_site, agent_id, root_agent_id }
- *                                        root = busId ?? id   (archiveBindingFor / rootOf)
- *                                             | user-<userId> (user-level calls)
+ *   createStreamingCompletion caller ─► dump_context { call_site, root_agent_id | archive_scope }
+ *                                        root = busId ?? id   (rootOf, or archive_scope resolved
+ *                                             | user-<userId>  by the writer off the call path)
  */
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -15,7 +15,7 @@ import path from 'node:path';
 const SRC = path.resolve(__dirname, '../..');
 const EXCLUDED_DIRS = [path.join(SRC, 'tests'), path.join(SRC, 'providers', 'rose')];
 /** Root binding forms accepted inside a dump_context block. */
-const ROOT_BINDINGS = [/root_agent_id\s*:/, /archiveBindingFor\(/, /\.\.\.opts\.archive\b/];
+const ROOT_BINDINGS = [/root_agent_id\s*:/, /archive_scope\s*:/, /\.\.\.opts\.archive\b/];
 
 function sourceFiles(directory: string): string[] {
   return fs.readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
@@ -97,6 +97,13 @@ for (const required of [
 ]) {
   if (!callers.some((file) => path.relative(SRC, file) === required)) {
     failures.push(`${required}: expected Rose completion caller not found (renamed? update guard)`);
+  }
+}
+
+// Root lookups never run before the model call: pass archive_scope instead.
+for (const file of sourceFiles(SRC)) {
+  if (/await\s+archiveBindingFor\(/.test(fs.readFileSync(file, 'utf8'))) {
+    failures.push(`${path.relative(SRC, file)}: awaits archiveBindingFor on the call path`);
   }
 }
 

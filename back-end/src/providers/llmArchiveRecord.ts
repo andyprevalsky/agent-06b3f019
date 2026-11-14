@@ -81,6 +81,18 @@ export interface ArchiveAttempt {
   branch?: string;
 }
 
+/**
+ * Deferred archive binding carried in memory with an LLM call. The writer
+ * resolves the tree root (archiveRootResolver.archiveBindingFor) in its
+ * background archive task, so no lookup ever runs before the model call.
+ */
+export interface ArchiveScope {
+  agentId?: string | null;
+  userId?: string | null;
+  /** Record agent_id for user-level calls (e.g. `sms-supervisor-<userId>`). */
+  userLevelAgentId?: string;
+}
+
 export interface ArchiveIdentity {
   call_site: string;
   agent_id: string;

@@ -28,8 +28,8 @@
  */
 import { createHash } from 'node:crypto';
 import { archiveBytes } from '../traceArchive';
-import { finishLlmCapture, startLlmCapture } from '../llmDump';
-import { simpleArchiveOutput } from '../llmArchiveRecord';
+import { finishLlmCapture, type LlmCapture, llmCaptureRoot, startLlmCapture } from '../llmDump';
+import { type ArchiveScope, simpleArchiveOutput } from '../llmArchiveRecord';
 import { createLogger } from '../logger';
 
 const log = createLogger('GeminiOmniVideo');
@@ -134,8 +134,11 @@ export interface OmniVideoRequest {
   aspectRatio: OmniAspectRatio;
   resolution: OmniResolution;
   seed?: number;
-  /** Agent tree binding: request + generated video are archived in the root bundle. */
-  archive?: { agent_id: string; root_agent_id: string } | null;
+  /**
+   * Agent tree binding: request + generated video are archived in the root
+   * bundle; the root resolves off the call path (llmDump archive_scope).
+   */
+  archive?: { archive_scope: ArchiveScope } | null;
 }
 
 export interface OmniVideoResult {
@@ -302,6 +305,25 @@ async function pollAndDownload(uri: string, key: string, deadline: number): Prom
   return Buffer.from(await download.arrayBuffer());
 }
 
+/** Store the generated video under the capture's archive root, resolved after the model call. */
+async function archiveVideoBytes(
+  capture: LlmCapture,
+  objectPath: string,
+  body: Buffer,
+  mimeType: string | undefined
+): Promise<void> {
+  const rootAgentId = await llmCaptureRoot(capture);
+  if (rootAgentId === null) return;
+  await archiveBytes({
+    rootAgentId,
+    objectPath,
+    body,
+    contentType: mimeType || 'video/mp4',
+    compress: false,
+    createOnly: true,
+  });
+}
+
 export async function generateOmniVideo(request: OmniVideoRequest): Promise<OmniVideoResult> {
   const key = apiKey();
   const model = omniVideoModel();
@@ -394,16 +416,9 @@ export async function generateOmniVideo(request: OmniVideoRequest): Promise<Omni
   }
   const latencyMs = Date.now() - started;
   const usage = readUsage(interaction);
-  if (capture !== null && request.archive) {
+  if (capture !== null) {
     const videoPath = `media/video/${createHash('sha256').update(bytes).digest('hex')}.mp4`;
-    await archiveBytes({
-      rootAgentId: request.archive.root_agent_id,
-      objectPath: videoPath,
-      body: bytes,
-      contentType: part.mime_type || 'video/mp4',
-      compress: false,
-      createOnly: true,
-    }).catch((error: unknown) =>
+    await archiveVideoBytes(capture, videoPath, bytes, part.mime_type).catch((error: unknown) =>
       log.warn('[GenerateVideo] video archive failed', {
         error: error instanceof Error ? error.message : String(error),
       })

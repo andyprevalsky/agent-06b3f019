@@ -9,6 +9,7 @@
  * the orchestration layer.
  */
 import type { AgentSpeed } from './speed';
+import type { ArchiveScope } from '../llmArchiveRecord';
 
 export type MessageRole = 'system' | 'user' | 'assistant' | 'tool';
 
@@ -113,16 +114,18 @@ export interface CompletionOptions {
   /**
    * Archive binding. `root_agent_id` is the agent tree's root (busId ?? id), or
    * the documented per-user root `user-<userId>` for user-level calls with no
-   * agent tree. The writer refuses an unbound root rather than filing loose records.
+   * agent tree. Without it, `archive_scope` (ids already in memory) is resolved
+   * to that root in the background archive task, never before the model call.
+   * The writer refuses an unbound root rather than filing loose records.
+   * `agent_id` is also the Foundry route key; archiving never changes it.
    */
   dump_context?: {
     call_site: string;
     root_agent_id?: string;
     agent_id?: string;
+    archive_scope?: ArchiveScope;
     config?: Record<string, unknown>;
     extra?: Record<string, unknown>;
-    /** Internal, never serialized: called with each record path once it is stored. */
-    on_record?: (objectPath: string) => Promise<void> | void;
   };
   /**
    * Internal, never serialized. Collects other legs that generated tokens for

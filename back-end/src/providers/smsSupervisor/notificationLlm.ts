@@ -1,4 +1,3 @@
-import { archiveBindingFor } from '../archiveRootResolver';
 import {
   createStreamingCompletion,
   StructuredOutputAccumulator,
@@ -53,7 +52,7 @@ export async function rewriteNotification(
       },
     },
     // Notifications act on an agent tree: archive under that tree's root.
-    dump_context: { call_site: 'sms_notification', ...(await archiveBindingFor({ agentId })) },
+    dump_context: { call_site: 'sms_notification', agent_id: agentId, archive_scope: { agentId } },
   });
   const output = new StructuredOutputAccumulator();
   for await (const chunk of stream) output.addCompletionChunk(chunk);

@@ -1,4 +1,3 @@
-import { archiveBindingFor } from '../../providers/archiveRootResolver';
 import { createLogger } from '../../providers/logger';
 import { computeSubscriptionLeases } from '../../providers/computeSubscriptionLeases';
 import { createStreamingCompletion } from '../../providers/rose/client';
@@ -239,7 +238,7 @@ export async function classifyFailureBestEffort(
       },
       dump_context: {
         call_site: 'credential_failure_classifier',
-        ...(await archiveBindingFor({ agentId: agent.id, userId: agent.userId })),
+        archive_scope: { agentId: agent.id, userId: agent.userId },
       },
     });
 

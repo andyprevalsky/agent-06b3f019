@@ -224,9 +224,6 @@ export const updateAgentSchema = z.object({
 
 export const generateSchemaRequestSchema = z.object({
   goal: z.string().min(1),
-  // Optional pre-allocated id (the same uuid later passed as create-agent `agent_id`) or an
-  // existing agent id; the schema-generation LLM call is archived under that agent's root.
-  agent_id: z.string().uuid().optional(),
 });
 
 // Archived (soft-deleted) agent listing. Bounded on purpose: the archive grows

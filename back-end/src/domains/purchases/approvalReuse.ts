@@ -1,4 +1,3 @@
-import { archiveBindingFor } from '../../providers/archiveRootResolver';
 import { createStreamingCompletion } from '../../providers/rose/client';
 import type { CompletionChunk } from '../../providers/rose/types';
 import { cartPriceSignature } from './agentCartReuse';
@@ -113,7 +112,8 @@ export function createApprovedPurchaseSelector(
       ],
       dump_context: {
         call_site: 'purchase_approval_reuse',
-        ...(await archiveBindingFor({ agentId: requested.agentId, userId: requested.userId })),
+        agent_id: requested.agentId,
+        archive_scope: { agentId: requested.agentId, userId: requested.userId },
       },
     });
     let text = '';

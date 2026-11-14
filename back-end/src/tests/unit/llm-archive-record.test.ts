@@ -283,7 +283,6 @@ async function testEndToEndRecordsAndRaceLosers(): Promise<void> {
     }) as typeof fetch;
     const rootId = randomUUID();
     const childId = randomUUID();
-    const storedPaths: string[] = [];
     localDumpAgents.push(childId);
     const stream = await createStreamingCompletion({
       model: 'rose-labs/rose-1-flash',
@@ -293,9 +292,6 @@ async function testEndToEndRecordsAndRaceLosers(): Promise<void> {
         call_site: 'archive_contract',
         agent_id: childId,
         root_agent_id: rootId,
-        on_record: (objectPath) => {
-          storedPaths.push(objectPath);
-        },
       },
     });
     const iterator = stream[Symbol.asyncIterator]();
@@ -316,11 +312,6 @@ async function testEndToEndRecordsAndRaceLosers(): Promise<void> {
     }
     await drainLlmCaptures([childId]);
     const records = await readRecords(rootId);
-    assert.deepEqual(
-      [...storedPaths].sort(),
-      records.map((item) => item.path).sort(),
-      'on_record reports each record path once it is stored'
-    );
     const start = records.find((item) => item.path.startsWith('llm/'));
     const final = records.find((item) => item.path.startsWith('llm-updates/'));
     assert(start && final, 'one start and one final record');

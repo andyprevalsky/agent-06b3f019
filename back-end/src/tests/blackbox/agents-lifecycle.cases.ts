@@ -135,16 +135,6 @@ test('POST /generate-response-schema — missing goal → 400', async () => {
   assertStatus(res.status, 400, res.data);
 });
 
-test('POST /generate-response-schema — non-uuid agent_id → 400', async () => {
-  const session = await createAnonymousSession('schema-bad-agent-id');
-  const res = await request(`${BASE_URL}/api/agents/generate-response-schema`, {
-    method: 'POST',
-    headers: authHeaders(session.session.access_token),
-    body: JSON.stringify({ goal: 'find the population of Tokyo', agent_id: 'not-a-uuid' }),
-  });
-  assertStatus(res.status, 400, res.data);
-});
-
 // ========================= GET /:id/phone-calls/:callId/recording ==========
 
 test('GET /:id/phone-calls/:callId/recording — no auth → 401', async () => {

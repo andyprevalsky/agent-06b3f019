@@ -230,7 +230,7 @@ router.post(
       const { schema, tokensIn, tokensOut } = await messageLookupService.generateSchema(
         body.goal,
         readResponseSchemaDirectAuth(req),
-        { agentId: body.agent_id, userId: req.userId, isInternal: req.isInternal === true }
+        req.userId
       );
       res.json({ schema, tokensIn, tokensOut });
     } catch (error) {

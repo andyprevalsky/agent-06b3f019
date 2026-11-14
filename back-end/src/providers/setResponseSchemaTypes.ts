@@ -2,6 +2,7 @@
  * Request/option types and the truncation sentinel for response-schema
  * generation (split from setResponseSchema.ts to keep it under max-lines).
  */
+import type { ArchiveScope } from './llmArchiveRecord';
 
 /**
  * Parameters for one streaming attempt against Rose Flash.
@@ -17,13 +18,12 @@ export interface StreamAttemptOptions {
   archive?: ResponseSchemaArchiveBinding;
 }
 
-/** Archive binding for the schema-generation LLM call (agent tree root or per-user root). */
+/**
+ * Archive binding for the schema-generation LLM call: the agent (tree root) or
+ * the caller's per-user root, resolved by the archive writer off the call path.
+ */
 export interface ResponseSchemaArchiveBinding {
-  agent_id: string;
-  root_agent_id: string;
-  extra?: Record<string, unknown>;
-  /** Records each stored record path (pre-allocated agent id link; schemaArchiveLinks.ts). */
-  on_record?: (objectPath: string) => Promise<void> | void;
+  archive_scope: ArchiveScope;
 }
 
 export interface ResponseSchemaDirectAuth {

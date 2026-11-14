@@ -13,7 +13,6 @@
  * (same path as web_fetch's rose-1-mini summarizer). dump_context.agent_id
  * ties LLM dumps to the owning agent.
  */
-import { archiveBindingFor } from '../archiveRootResolver';
 import { z } from 'zod';
 
 import type { Page, Response } from 'playwright';
@@ -496,7 +495,8 @@ export async function classifyChallengeWithLlm(
         : {}),
       dump_context: {
         call_site: 'challenge_llm_classifier',
-        ...(await archiveBindingFor({ agentId: billing.agentId, userId: billing.userId })),
+        agent_id: billing.agentId,
+        archive_scope: { agentId: billing.agentId, userId: billing.userId },
         config: {
           user_id: billing.userId ?? null,
           url: context.url.slice(0, 200),

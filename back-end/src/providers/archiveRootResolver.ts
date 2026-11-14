@@ -20,7 +20,12 @@
 
 import { prisma } from './database';
 import { createLogger } from './logger';
-import { assertBoundArchiveId, isBoundArchiveId, userArchiveRoot } from './llmArchiveRecord';
+import {
+  type ArchiveScope,
+  assertBoundArchiveId,
+  isBoundArchiveId,
+  userArchiveRoot,
+} from './llmArchiveRecord';
 
 const log = createLogger('ArchiveRoot');
 
@@ -93,12 +98,9 @@ export function __resetArchiveRootCache(): void {
  * root `user-<userId>` (agent_id defaults to that root). Null only when neither
  * is known; the archive writer then refuses the record loudly.
  */
-export async function archiveBindingFor(params: {
-  agentId?: string | null;
-  userId?: string | null;
-  /** Record agent_id for user-level calls (e.g. `sms-supervisor-<userId>`). */
-  userLevelAgentId?: string;
-}): Promise<{ agent_id: string; root_agent_id: string } | null> {
+export async function archiveBindingFor(
+  params: ArchiveScope
+): Promise<{ agent_id: string; root_agent_id: string } | null> {
   const { agentId, userId } = params;
   if (isBoundArchiveId(agentId)) {
     try {
@@ -114,6 +116,22 @@ export async function archiveBindingFor(params: {
   if (isBoundArchiveId(userId)) {
     const root = userArchiveRoot(userId);
     return { agent_id: params.userLevelAgentId ?? root, root_agent_id: root };
+  }
+  return null;
+}
+
+/**
+ * The capture owners archiveBindingFor will bind, computed without I/O: the
+ * record agent and the root known in memory (the agent itself until its tree
+ * root resolves, or the per-user root). Null when the scope binds nothing.
+ */
+export function archiveScopeOwners(
+  scope: ArchiveScope
+): { agentId: string; ownerRoot: string } | null {
+  if (isBoundArchiveId(scope.agentId)) return { agentId: scope.agentId, ownerRoot: scope.agentId };
+  if (isBoundArchiveId(scope.userId)) {
+    const root = userArchiveRoot(scope.userId);
+    return { agentId: scope.userLevelAgentId ?? root, ownerRoot: root };
   }
   return null;
 }
