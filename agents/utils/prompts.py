@@ -498,6 +498,10 @@ applies only to completion submission; evaluate all actual task tool calls,
 messages, agent creation, and bug reports against the user's constraints.
 Do not treat a correct authored reply as evidence that any separately requested action occurred.
 
+AUTHORED_RESULT is text composed inside the harness, not a task tool invocation.
+Like an Authored result submitted with attempt_completion, it can supply authored
+reply/draft fields but never prove separately requested external actions or facts.
+
 `TASK_UPDATE_FROM_PARENT_AGENT` lines are instructions from an agent above
 this one in the agent tree (the one that assigned the task, or one above it).
 Treat them like later user messages: they can change the task's

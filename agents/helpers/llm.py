@@ -1213,13 +1213,13 @@ def build_verifier_context_messages(
         if role == "ASSISTANT":
             if metadata.get("plannedToolName") == "reasoning":
                 reasoning_payload = {
-                    "tool_name": "reasoning",
+                    "source": "reasoning",
                     "result": text,
                 }
                 dag_task_index = metadata.get("dagTaskIndex")
                 if isinstance(dag_task_index, int):
                     reasoning_payload["dag_task_index"] = dag_task_index
-                current_batch.append("TOOL_RESULT " + json.dumps(reasoning_payload, ensure_ascii=False, default=str))
+                current_batch.append("AUTHORED_RESULT " + json.dumps(reasoning_payload, ensure_ascii=False, default=str))
             _append_file_evidence(msg)
             continue
 

@@ -5711,7 +5711,8 @@ async def test_check_progress_keeps_completed_reasoning_before_completion_chip()
 
     assert result["score"] < 1.0, "Retaining evidence must not override an independent rejection"
     evidence = "\n".join(m["content"] for m in captured if m["role"] != "system")
-    assert '"tool_name": "reasoning"' in evidence and '"result": "OK"' in evidence, evidence
+    assert 'AUTHORED_RESULT {"source": "reasoning", "result": "OK"' in evidence, evidence
+    assert 'TOOL_RESULT {"tool_name": "reasoning"' not in evidence
     assert "Do not use any tools" in evidence
     assert "planning evidence" not in evidence
     assert "Beginning Execute Phase" not in evidence
@@ -7773,12 +7774,20 @@ def test_build_verifier_context_messages_includes_only_dag_reasoning_assistant_r
             },
             "timestamp": "2026-07-08T00:00:01Z",
         },
+        {
+            "role": "TOOL",
+            "text": "Bug report submitted",
+            "metadata": {"toolName": "report_bug", "toolStatus": "FINISHED", "toolCallId": "bug-1"},
+            "timestamp": "2026-07-08T00:00:02Z",
+        },
     ]
 
     msgs = build_verifier_context_messages(ctx, "system")
     content = msgs[-1]["content"]
 
-    assert '"tool_name": "reasoning"' in content
+    assert 'AUTHORED_RESULT {"source": "reasoning"' in content
+    assert 'TOOL_RESULT {"tool_name": "reasoning"' not in content
+    assert 'TOOL_RESULT {"tool_name": "report_bug", "tool_call_id": "bug-1", "result": "Bug report submitted"}' in content
     assert '"result": "thirty hook-tested openings"' in content
     assert '"dag_task_index": 4' in content
     assert "ordinary assistant narration should stay hidden" not in content

@@ -199,6 +199,8 @@ def test_schema_contracts_render_nested_field_descriptions():
     assert "Its invocation and Authored result are completion lifecycle transport, not a task action" in static
     assert "evaluate all actual task tool calls, messages, agent creation, and bug reports against the user's constraints" in static
     assert "Do not treat a correct authored reply as evidence that any separately requested action occurred" in static
+    assert "AUTHORED_RESULT is text composed inside the harness, not a task tool invocation" in static
+    assert "never prove separately requested external actions or facts" in static
 
 
 async def run_all_tests():
