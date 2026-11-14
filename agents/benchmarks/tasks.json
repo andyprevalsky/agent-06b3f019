@@ -8718,12 +8718,6 @@
     }
   },
   {
-    "quarantine": {
-      "since": "2026-11-13",
-      "repair": "pending-handoff:9382c14b835042e0bb20df41502e5b46",
-      "error": "Tool 'spawn_browser_agent': expected 2 call(s), got 3. Full counts: {'agent_init': 1, 'cloud_agent': 1, 'spawn_browser_agent': 3, 'request_payment_card': 3, 'request_user_approval': 1, 'report_bug': 1, 'spawn_agent': 1, 'grep': 2, 'attempt_completion': 2, 'completion_summary': 1}",
-      "evidence": "PR #2022 deploy round 2 smoke .context/deploy-cloud/bc2c14e6174ec83048fba7237fb98e99c351b69e06a6fa2b41289f2bb09cc91f (head a434320a3d32, agent 964b4cb0-e7ff-4d83-a2f2-bd4c669594e2): browser agent #2 card-reuse liveness check got AgentCard org MCP get_card_details 429 x3 then 401 'Invalid or expired organization token' x4 (11:36:31-11:36:48Z), spawn returned ERROR, model retried with a 3rd browser agent after recovery; payment settled once (1 CLEARED purchase); same-source rerun passed; PR #2022 touches only a backend blackbox test string"
-    },
     "name": "agent-payment-idempotent-abandonment",
     "quarantine": {
       "since": "2026-11-13",
