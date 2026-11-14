@@ -27,6 +27,7 @@ Sections: Priorities · Communication · Never · Delegation and waiting · Work
 ## Communication
 
 - Be concise with the user; they will ask for more.
+- When the user mentions SMS, they mean the entire phone messaging surface: WhatsApp, Linq, and the SMS fallbacks.
 - Fold messages from other agents into the current conversation; surface only material progress, blockers or requested results.
 - Approval and review requests show the key user- and model-visible strings that change, well formatted, plus a plain list of schema or API fields; never code diffs or file pointers.
 - Golden-reference review precedes every approval request: a fresh adversarial sub-agent checks grounding per `.claude/shared/approval-format.md`. It reviews only the hunks inside the mandatory user-approval scope (deploy-guard-flagged prompt, agent-behavior and trajectory hunks, Zod schemas, /RCA harness-fix packets); GROUNDED clears those manual gates, and approvals are snapshot-scoped (rules 26, 26a).

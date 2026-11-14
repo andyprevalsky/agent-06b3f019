@@ -309,33 +309,41 @@ async def test_handler_sub_agent_auto_responds():
 
 
 async def test_handler_sms_source_sends_sms_and_waits():
-    """SMS-sourced agent sends SMS immediately then waits for response."""
+    """A question from a phone-started agent is texted at once, WhatsApp the same as SMS.
+
+    Andy, 2026-11-14: "whatsapp should operate under the same conditions" as SMS.
+    A web agent whose user answers on the web within the fallback window is not
+    texted at all.
+    """
     from domains.send_message_to_user.handler import SendMessageToUserManager
     from tools.base import MessageStatus
 
-    fake = _FakeWorkflowModule(
-        activity_results={
-            "get_agent_source": "SMS",
-            "notify_sms_event_activity": None,
-        }
-    )
-    restore = _patch_handler_workflow(fake)
-    try:
-        wf = _FakeWorkflow(user_replied=True)  # immediate response
-        events = await _collect_events(
-            SendMessageToUserManager().execute_tool(
-                workflow_instance=wf,
-                tool_call={"message": "Ready?", "is_question": True},
-                tool_call_id="tc-sms",
-            )
+    for source, expected_texts in (("SMS", 1), ("WHATSAPP", 1), ("WEB", 0)):
+        texts: list[str] = []
+        fake = _FakeWorkflowModule(
+            activity_results={
+                "get_agent_source": source,
+                "notify_sms_event_activity": lambda texts=texts: texts.append("planner_message"),
+            }
         )
-    finally:
-        restore()
+        restore = _patch_handler_workflow(fake)
+        try:
+            wf = _FakeWorkflow(user_replied=True)  # immediate response
+            events = await _collect_events(
+                SendMessageToUserManager().execute_tool(
+                    workflow_instance=wf,
+                    tool_call={"message": "Ready?", "is_question": True},
+                    tool_call_id=f"tc-{source.lower()}",
+                )
+            )
+        finally:
+            restore()
 
-    statuses = [e.status for e in events]
-    assert MessageStatus.FINISHED in statuses
-    # "User response received" is the last event title for non-sub-agent path
-    assert events[-1].title == "User response received"
+        statuses = [e.status for e in events]
+        assert MessageStatus.FINISHED in statuses, source
+        # "User response received" is the last event title for non-sub-agent path
+        assert events[-1].title == "User response received", source
+        assert len(texts) == expected_texts, (source, texts)
 
 
 async def test_handler_question_reply_baseline_is_the_context_snapshot():

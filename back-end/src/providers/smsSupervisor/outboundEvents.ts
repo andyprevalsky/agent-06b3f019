@@ -4,13 +4,13 @@
  * Template-based outbound SMS for agent lifecycle events, triggered directly
  * by the agent workflow. Rejected messages use a bounded model correction loop.
  *
- * Fires for ROOT agents of any source (SMS, web, mac-app, API). Benchmark/eval
- * runs are suppressed centrally in the send-sms dispatcher (Agent.isBenchmark).
- * Events with a run link use the per-agent deep link from getAgentUrl.
- * Completion is narrower: it is sent only for agents the SMS/WhatsApp agent
- * interacted with, so every delivered relay below (question, approval, sign-in,
- * AgentCard setup, budget limit) records that interaction. The kickoff receipt
- * does not (see providers/messagingAgentInteraction.ts).
+ * Relays (question, approval, sign-in, AgentCard setup, budget limit) fire for
+ * agents of any source (SMS, web, mac-app, API). Benchmark/eval runs are
+ * suppressed centrally in the send-sms dispatcher (Agent.isBenchmark). Events
+ * with a run link use the per-agent deep link from getAgentUrl. Kickoff and
+ * completion are narrower: they are sent only for agents the user touched from
+ * the phone. A delivered relay is not a touch; the user's reply to it is (see
+ * providers/messagingAgentInteraction.ts).
  */
 
 import { createLogger } from '../logger';
@@ -27,7 +27,6 @@ import { markWhatsAppReachable, markWhatsAppUnreachable } from '../whatsappReach
 import { ROSE_LABS_URL, SMS_TEMPLATES, getAgentUrl } from '../smsTemplates';
 import { rehostMmsAttachmentUrl } from './mmsAttachment';
 import { appendLifecycleSms } from './sessionStore';
-import { recordMessagingAgentInteraction } from '../messagingAgentInteraction';
 import {
   deliverNotificationMessage,
   MAX_NOTIFICATION_CORRECTIONS,
@@ -344,7 +343,6 @@ export async function notifyPlannerMessage(
     durationMs: Date.now() - startTime,
   });
   requireNotificationDelivery(result);
-  await recordMessagingAgentInteraction(agent.id, 'planner_message');
 }
 
 /**
@@ -435,7 +433,6 @@ export async function notifyWriteLock(
     durationMs: Date.now() - startTime,
   });
   requireNotificationDelivery(result);
-  await recordMessagingAgentInteraction(agent.id, 'write_lock');
 }
 
 /**
@@ -495,7 +492,6 @@ export async function notifyAuthAssistance(
     durationMs: Date.now() - startTime,
   });
   requireNotificationDelivery(result);
-  await recordMessagingAgentInteraction(agent.id, 'auth_assistance');
 }
 
 /**
@@ -548,7 +544,6 @@ export async function notifyAgentCardSetup(
     durationMs: Date.now() - startTime,
   });
   requireNotificationDelivery(result);
-  await recordMessagingAgentInteraction(agent.id, 'agentcard_setup');
 }
 
 /**
@@ -677,5 +672,4 @@ export async function notifyCostLimit(
     durationMs: Date.now() - startTime,
   });
   requireNotificationDelivery(result);
-  await recordMessagingAgentInteraction(agent.id, 'cost_limit');
 }

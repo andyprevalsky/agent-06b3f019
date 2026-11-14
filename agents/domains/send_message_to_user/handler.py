@@ -54,6 +54,7 @@ from utils.rose_desktop import is_rose_desktop_user
 # Import activities (executed via workflow.execute_activity)
 with workflow.unsafe.imports_passed_through():
     from helpers.sms_activities import (
+        MESSAGING_AGENT_SOURCES,
         get_agent_source,
         notify_sms_event_activity,
     )
@@ -165,7 +166,7 @@ class SendMessageToUserManager(ToolManager):
 
         try:
             # ── 4. SMS notification ──
-            if agent_source == "SMS" and not sms_sent:
+            if agent_source in MESSAGING_AGENT_SOURCES and not sms_sent:
                 logger.info(
                     "SMS-initiated goal, sending SMS question immediately",
                     agent_id=workflow_instance.agent_id,
@@ -191,7 +192,7 @@ class SendMessageToUserManager(ToolManager):
                     sms_sent = True
                 except Exception as e:
                     logger.error("Failed to send SMS question: %s", e)
-            elif agent_source != "SMS" and not sms_sent:
+            elif agent_source not in MESSAGING_AGENT_SOURCES and not sms_sent:
                 logger.info(
                     "Non-SMS goal, waiting for response with SMS fallback timeout",
                     agent_id=workflow_instance.agent_id,
