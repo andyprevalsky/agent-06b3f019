@@ -12,6 +12,7 @@ import { prisma } from '../../providers/database';
 import { retryWithBackoff } from '../../providers/retry';
 import { quarantine } from '../helpers/quarantine';
 import { assert, StubCardStateProvider } from './purchases.testkit';
+import { testReviewlessItemParity } from './purchases-fingerprint-parity.support';
 
 config();
 
@@ -373,46 +374,6 @@ async function testUnicodeParity(): Promise<void> {
 }
 
 /** Owner decisions 2026-11-08: product URL, rating and review count are optional and omitted when absent. */
-async function testReviewlessItemParity(): Promise<void> {
-  const cases: Array<[string, Record<string, unknown>, number, string]> = [
-    [
-      'King room, 1 night',
-      { productUrl: 'https://example.test/hotels/king-room' },
-      30800,
-      '489240d7ed3996a8db136ab77034810ec1652fa8349c05f9a91759e5a896d65c',
-    ],
-    ['Resort fee', {}, 4500, 'e7a65a3af733400db0f71a9724d03e278de9ebfb36d29d3e6f23ba7284963e2b'],
-  ];
-  for (const [name, extra, cents, expected] of cases) {
-    const image = `https://example.test/${name === 'Resort fee' ? 'fee' : 'room'}.png`;
-    const item = {
-      name,
-      imageUrl: image,
-      ...extra,
-      unitPriceCents: cents,
-      quantity: 1,
-      lineTotalCents: cents,
-    };
-    const receipt = {
-      currency: 'USD',
-      lineItems: [item],
-      fees: [],
-      subtotalCents: cents,
-      totalCents: cents,
-    };
-    const fingerprint = canonicalStoredPurchaseFingerprint({
-      userId: 'fixture-user',
-      merchant: 'Hotel Example',
-      lineItemsJson: receipt,
-      totalCents: cents,
-    });
-    assert(
-      fingerprint === expected,
-      `${name}: fingerprint must match Python normalize_payment_payload`
-    );
-  }
-}
-
 async function testBackfillBeyondTwenty(): Promise<void> {
   const userId = await createUser('over-twenty');
   const baseTime = new Date('2026-07-19T12:00:00.000Z');
