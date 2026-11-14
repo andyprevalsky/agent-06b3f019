@@ -6,4 +6,10 @@
 --
 -- Idempotent: production was already repaired with this exact statement on
 -- 2026-11-14 after the post-deploy drift check reported the exposure.
+-- ENABLE ROW LEVEL SECURITY takes an ACCESS EXCLUSIVE lock even when RLS is
+-- already on; bound the wait so a long transaction fails this migration fast
+-- instead of queueing every reader behind it. migrate deploy runs this file
+-- outside a transaction, so the limit is set for the session and reset.
+SET lock_timeout = '15s';
 ALTER TABLE IF EXISTS public."GithubRepoConnection" ENABLE ROW LEVEL SECURITY;
+RESET lock_timeout;
