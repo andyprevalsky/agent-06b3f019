@@ -72,6 +72,13 @@ def own_process_entries():
     return iter(owned)
 
 
+def only_processes(*pids):
+    """Scan exactly these processes (this test and the children it created), not leftovers from earlier
+    tests: a slow-exiting non-dumpable descendant of a previous case must not refuse this one."""
+    return patch.object(deploy_test_process, 'process_entries',
+                        lambda: iter([Path('/proc', str(pid)) for pid in (os.getpid(), *pids)]))
+
+
 def setUpModule():
     # Disposable fixtures own their custody; an enclosing deploy request belongs
     # to the runner. Tests for request ownership install their own explicit path.
@@ -138,6 +145,273 @@ class EnvironmentIdentity(unittest.TestCase):
 
 
 class Cycle(unittest.TestCase):
+    def recovered_fixture(self):
+        import gzip
+        import hashlib
+        import deploy_test_historical_custody as h
+        task = copy.deepcopy(next(t for t in json.loads((ROOT / 'agents/benchmarks/tasks.json').read_text())
+                                  if t['name'] == 'agent-payment-abandonment'))
+        task['expected_payment_lifecycle'].pop('integrity')
+        catalog = self.root / 'agents/benchmarks/tasks.json'
+        c.write(catalog, [task])
+        runner = self.root / 'agents/benchmarks/run_benchmark.py'
+        runner.write_bytes((ROOT / 'agents/benchmarks/run_benchmark.py').read_bytes())
+        subprocess.run(['git', '-C', str(self.root), 'add', '.'], check=True)
+        subprocess.run(['git', '-C', str(self.root), '-c', 'user.name=test', '-c',
+                        'user.email=test@example.com', 'commit', '-qm', 'original task'], check=True)
+        old_head = c.source(self.root)['head']
+        snapshot = copy.deepcopy(task['expected_payment_lifecycle'])
+        snapshot.update(agentId='root-owned', stripeRefund=None, integrity=dict(
+            agentCardProviderCardCount=3, agentCardProviderTransferCount=3,
+            agentCardProviderUnlinkedTransferCount=0, cardCount=1, purchaseCount=1,
+            stripePaymentIntentCount=1, stripeProviderPaymentIntentCount=1, walletFundingCount=1))
+        snapshot['agentCard'].update(id='card-owned', status='CLOSED', balanceCents=0)
+        snapshot['orgTransfer'].update(id='transfer-owned', cardId='card-owned', status='consumed',
+                                       transferredCents=4396, releasedCents=0, livemode=False)
+        snapshot['purchase'].update(id='purchase-owned', cardId='card-owned', status='HELD',
+                                    stripePaymentIntentId='pi-owned')
+        snapshot['walletFunding'].update(providerTransferId='transfer-owned', status='RECLAIMING')
+        snapshot['stripeHold'].update(id='pi-owned', livemode=False)
+        final = dict(root_deleted=True, tree_agent_ids=['root-owned'], unsealed_tree_agent_ids=[], browser_sessions=[],
+            purchase_cleanup=[dict(agent_id='root-owned', purchase_id='purchase-owned', card_id='card-owned',
+                provider_transfer_id='transfer-owned', stripe_payment_intent_id='pi-owned', total_cents=4396,
+                status='HELD', funding_status='RECLAIMING')])
+        row = dict(name=task['name'], agent_id='root-owned', passed=False, status='SKIPPED', benchmark_status='SKIPPED',
+            failure_reason=self.STALL_REASON, duration_seconds=590.9, cleanup_failure=None, context_violations=[],
+            execution_provenance={'base_sha': old_head}, logs=dict(agentcard_release_stall_lifecycle=snapshot,
+                cloud_cleanup_evidence=dict(errors=[], root_agent_id='root-owned', final=final,
+                    provider_receipts=[], agentcard_release_stall_lifecycles={'root-owned': copy.deepcopy(snapshot)})))
+        document = dict(run_id='original-run', timestamp='2026-11-09T16:46:15.442380+00:00',
+                        execution_provenance={'base_sha': old_head}, tasks=[row])
+        native = self.root / '.context/recovered/run.json.gz'
+        authority = dict(manifest='docs/handoffs/pr-1699-closeout/closeout-manifest.json',
+                         member='agentcard-release-stall/run.json.gz', source=old_head, task=task['name'], gate='smoke')
+        mocked = patch.object(h, 'RECOVERED_AUTHORITY', authority, create=True)
+        mocked.start(); self.addCleanup(mocked.stop)
+        def persist(doc):
+            raw = json.dumps(doc).encode(); native.parent.mkdir(parents=True, exist_ok=True)
+            native.write_bytes(gzip.compress(raw, mtime=0))
+            authority.update(gzip_sha256=hashlib.sha256(native.read_bytes()).hexdigest(),
+                             raw_sha256=hashlib.sha256(raw).hexdigest())
+            manifest = self.root / authority['manifest']
+            c.write(manifest, {'durable_evidence': {'files': {authority['member']: authority['gzip_sha256']}}})
+            authority['manifest_sha256'] = c.sha_file(manifest)
+        persist(document)
+        current = copy.deepcopy(task)
+        current['expected_payment_lifecycle']['integrity'] = dict(agentCardProviderCardCount=1, agentCardProviderTransferCount=1, agentCardProviderUnlinkedTransferCount=0)
+        c.write(catalog, [current])
+        self.plan['gates'][1].update(name='smoke', checks=[task['name'], 'peer'], case_protocol=True)
+        self.plan['source'] = c.source(self.root)
+        self.state = c.initialize(self.plan, self.root)
+        self.state.update(phase='needs-focused-plan', failures=[dict(id='current-' + str(i),
+            gate='smoke', check='smoke/' + (task['name'] if i == 0 else 'peer-' + str(i)),
+            native_result='FAIL', complete=False, source={'head': 'old-current-source'},
+            worker_evidence={'native_task': {'status': 'CANCELLED', 'benchmark_status': 'UNVERIFIED', 'passed': False}},
+            disposition='blocking') for i in range(17)])
+        return h, native, document, persist, old_head
+
+    def test_recovered_native_warning_preserves17_and_excludes_only_future_mint(self):
+        import contextlib
+        import io
+        import time
+        h, native, document, _, old_head = self.recovered_fixture()
+        before = copy.deepcopy(self.state)
+        c.write(self.directory / 'cycle.json', self.state)
+        plan = self.root / '.context/plan.json'; c.write(plan, self.plan)
+        flags = ['--plan', str(plan), '--state-dir', str(self.directory), '--root', str(self.root), '--input', str(native)]
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            try:
+                result = c.main(['prepare-recovered-stall', *flags])
+            except SystemExit as error:
+                result = error.code
+        self.assertEqual(0, result, output.getvalue())
+        proof = json.loads(output.getvalue()); proof_path = self.root / '.context/proof.json'; c.write(proof_path, proof)
+        started = time.time()
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(0, c.main(['record-recovered-stall', *flags, '--proof', str(proof_path)]))
+        finished = time.time()
+        self.state = c.read(self.directory / 'cycle.json')
+        self.assertEqual(before, {k: v for k, v in self.state.items() if k != h.RECOVERED_KEY})
+        row, = self.state[h.RECOVERED_KEY]
+        self.assertEqual(17, len(self.state['failures'])); self.assertFalse(self.state['ready'])
+        self.assertEqual(old_head, row['origin']['authority']['source'])
+        self.assertEqual('2026-11-09T16:46:15.442380+00:00', row['origin']['native_timestamp'])
+        self.assertLessEqual(started, row['recorded_at']); self.assertLessEqual(row['recorded_at'], finished)
+        self.assertEqual(3, row['origin']['original_integrity']['agentCardProviderCardCount'])
+        self.assertTrue(all(v is False for v in row['credit'].values()))
+        self.assertEqual(row['current_execution'], row['current_financial_state']); self.assertEqual('UNVERIFIED', row['current_execution'])
+        with self.assertRaisesRegex(ValueError, 'catalog task changed'):
+            h.task_contract(self.root, old_head, 'agent-payment-abandonment')
+        gate = self.plan['gates'][1]
+        def worker(_argv, **kw):
+            request = c.read(Path(kw['env']['DEPLOY_GATE_REQUEST']))
+            self.assertEqual(['peer'], request['checks'])
+            self.assertEqual(['agent-payment-abandonment'], list(request['skips']))
+            projected = request['skips']['agent-payment-abandonment']
+            self.assertEqual(h.KIND, projected['kind'])
+            self.assertEqual(h.RECOVERED_KIND, projected['recovered_origin_kind'])
+            self.assertEqual({'test_execution': False, 'assertions': False, 'financial_release': False}, projected['credit'])
+            self.assertEqual(c.digest(row), projected['recovered_record_sha256'])
+            with patch.dict(os.environ, kw['env'], clear=True):
+                h.admission(request, self.root)
+            c.write(Path(kw['env']['DEPLOY_GATE_RESULT']), dict(token=request['token'], source=request['source'],
+                gate=request['gate'], cases={'peer': 'PASS'}, complete=True, cleanup_complete=True, reused=False))
+            return 0, False, False, False
+        with patch.object(c, 'run_command', side_effect=worker):
+            result = c.execute(gate, self.state, self.directory, self.root)
+        self.assertEqual('SKIP', result['cases']['agent-payment-abandonment'])
+        self.assertFalse(result['case_complete']['agent-payment-abandonment'])
+        self.assertEqual('UNVERIFIED', result['current_execution']['agent-payment-abandonment'])
+        self.assertEqual(before['failures'], self.state['failures'])
+        text = io.StringIO()
+        with contextlib.redirect_stdout(text):
+            self.assertEqual(0, c.main(['report', *flags]))
+        self.assertIn('current financial state UNKNOWN', text.getvalue())
+        self.assertIn('Original SKIPPED', text.getvalue())
+        self.assertIn('4396 cents sandbox', text.getvalue())
+
+    def test_recovered_debt_coverage_requires_the_exact_recovered_check(self):
+        # PR #1864 review: an unrelated covered failure must not satisfy canonical recovered stall debt.
+        import deploy_test_historical_custody as h
+        check = h.RECOVERED_AUTHORITY['gate'] + '/' + h.RECOVERED_AUTHORITY['task']
+        unrelated = {'k1': {'id': 'k1', 'check': 'smoke/chat-mode'}}
+        exact = {**unrelated, 'k2': {'id': 'k2', 'check': check}}
+        self.assertFalse(h.recovered_debt_covered({}, set()))
+        self.assertFalse(h.recovered_debt_covered(unrelated, set()))
+        self.assertTrue(h.recovered_debt_covered(exact, set()))
+        self.assertTrue(h.recovered_debt_covered({}, {'origin-digest'}))
+
+    def test_recovered_native_warning_refuses_invalid_native_and_contract(self):
+        h, native, document, persist, old_head = self.recovered_fixture()
+        mutations = [lambda d: d['tasks'][0].update(passed=True),
+            lambda d: d['tasks'][0].update(context_violations=['foreign context']),
+            lambda d: d['tasks'][0].update(cleanup_failure='unknown'),
+            lambda d: d['tasks'][0]['execution_provenance'].update(base_sha='0' * 40),
+            lambda d: d['tasks'].append(copy.deepcopy(d['tasks'][0])),
+            lambda d: d['tasks'][0]['logs']['agentcard_release_stall_lifecycle']['orgTransfer'].update(livemode=True),
+            lambda d: d['tasks'][0]['logs']['agentcard_release_stall_lifecycle']['orgTransfer'].update(releasedCents=4396),
+            lambda d: d['tasks'][0]['logs']['agentcard_release_stall_lifecycle']['orgTransfer'].update(cardId='foreign'),
+            lambda d: d['tasks'][0]['logs']['agentcard_release_stall_lifecycle']['purchase'].update(stripePaymentIntentId='foreign'),
+            lambda d: d['tasks'][0]['logs']['cloud_cleanup_evidence']['final']['purchase_cleanup'][0].update(total_cents=True)]
+        def both(d, section, values):
+            logs = d['tasks'][0]['logs']
+            for snapshot in [logs['agentcard_release_stall_lifecycle'],
+                             logs['cloud_cleanup_evidence']['agentcard_release_stall_lifecycles']['root-owned']]:
+                snapshot[section].update(values)
+        mutations.extend([lambda d: both(d, 'orgTransfer', {'livemode': True}),
+            lambda d: both(d, 'orgTransfer', {'amountCents': True}),
+            lambda d: both(d, 'orgTransfer', {'releasedCents': False}),
+            lambda d: both(d, 'orgTransfer', {'transferredCents': 4395}),
+            lambda d: both(d, 'agentCard', {'balanceCents': False}),
+            lambda d: both(d, 'purchase', {'status': 'CLEARED'}),
+            lambda d: both(d, 'stripeHold', {'livemode': True}),
+            lambda d: both(d, 'stripeHold', {'id': 'pi-foreign'}),
+            lambda d: d['tasks'][0].update(duration_seconds=True)])
+        for mutate in mutations:
+            with self.subTest(mutate=mutate):
+                bad = copy.deepcopy(document); mutate(bad); persist(bad)
+                with self.assertRaises((ValueError, KeyError)): h.recovered_native(native, self.root)
+        persist(document)
+        catalog = self.root / 'agents/benchmarks/tasks.json'; raw = catalog.read_bytes()
+        mutations = [lambda t: t.update(prompt='different task'), lambda t: t.update(timeout=1),
+            lambda t: t['expected_payment_lifecycle']['purchase'].update(totalCents=1),
+            lambda t: t['expected_payment_lifecycle']['integrity'].update(agentCardProviderCardCount=True),
+            lambda t: t['expected_payment_lifecycle'].pop('stripeRefund')]
+        for mutate in mutations:
+            with self.subTest(contract=mutate):
+                tasks = json.loads(raw); mutate(tasks[0]); c.write(catalog, tasks)
+                with self.assertRaisesRegex(ValueError, 'migration differs'): h.recovered_native(native, self.root)
+        catalog.write_bytes(raw)
+        runner = self.root / 'agents/benchmarks/run_benchmark.py'; source = runner.read_bytes()
+        runner.write_bytes(source.replace(b'def _agentcard_release_stalled(', b'def _changed_release_stalled(', 1))
+        with self.assertRaisesRegex(ValueError, 'predicate'): h.recovered_native(native, self.root)
+        runner.write_bytes(source)
+        manifest = self.root / h.RECOVERED_AUTHORITY['manifest']; saved = manifest.read_bytes()
+        manifest.unlink()
+        with self.assertRaises(OSError): h.recovered_native(native, self.root)
+        manifest.write_bytes(saved)
+        native.write_bytes(native.read_bytes() + b'changed')
+        with self.assertRaisesRegex(ValueError, 'gzip changed'): h.recovered_native(native, self.root)
+
+    def test_recovered_native_warning_refuses_active_drift_mixed_and_forgotten_debt(self):
+        h, native, _, _, _ = self.recovered_fixture()
+        # Restore a frozen state after fixture construction.
+        self.plan['source'] = c.source(self.root); self.state = {**self.state, 'source': self.plan['source'],
+            'plan': self.plan, 'plan_digest': c.digest(self.plan), 'input_fingerprints': c.input_fingerprints(self.plan, self.root)}
+        proof = h.prepare_recovered(self.state, native, self.root)
+        original = copy.deepcopy(self.state)
+        for key, value in [('running', {'active': True}), ('pending', ['current-0']),
+                           ('resume_phase', 'final'), ('environment', 'foreign')]:
+            bad = copy.deepcopy(original); bad[key] = value
+            with self.assertRaises(ValueError): h.record_recovered(bad, proof, self.root)
+            self.assertEqual({**original, key: value}, bad)
+        h.record_recovered(self.state, proof, self.root)
+        gate = self.plan['gates'][1]
+        current = {k: self.state[k] for k in ('source', 'plan_digest', 'environment', 'input_fingerprints')}
+        with self.assertRaisesRegex(ValueError, 'mixed recovered'):
+            h.guard(self.state, gate, self.root, {'agent-payment-abandonment': {}}, current=current)
+        stale = copy.deepcopy(self.state); stale[h.RECOVERED_KEY][0]['current_binding']['source'] = {'head': 'stale'}
+        with self.assertRaisesRegex(ValueError, 'no current qualification'): h.guard(stale, gate, self.root, current=current)
+        forged = copy.deepcopy(self.state); forged[h.RECOVERED_KEY][0]['credit']['assertions'] = True
+        with self.assertRaises(ValueError): h.verify_recovered(forged, self.root)
+        canonical = self.root / '.context/deploy-pipeline/cycle.json'; c.write(canonical, self.state)
+        missing = copy.deepcopy(self.state); missing.pop(h.RECOVERED_KEY)
+        with self.assertRaisesRegex(h.AdmissionRefusal, 'not covered'): h.canonical_override(missing, canonical, self.root)
+        c.write(canonical, missing)
+        with self.assertRaisesRegex(h.AdmissionRefusal, 'not covered'): h.canonical_override(missing, canonical, self.root)
+        with patch.object(c, 'run_command') as launch:
+            for absent in (missing, {**missing, 'failures': []}):
+                with self.assertRaisesRegex(ValueError, 'no current qualification'):
+                    c.execute(gate, absent, self.directory / 'missing', self.root)
+            launch.assert_not_called()
+        with self.assertRaisesRegex(ValueError, 'custody ledger'):
+            h.admission({'checks': ['agent-payment-abandonment'], 'skips': {}}, self.root / '.context/standalone')
+        removed = copy.deepcopy(missing); removed['plan']['gates'][1]['checks'].remove('agent-payment-abandonment')
+        with self.assertRaisesRegex(ValueError, 'check removed'): h.guard(removed, removed['plan']['gates'][1], self.root)
+        before = copy.deepcopy(self.state)
+        with self.assertRaises(ValueError): h.record_recovered(self.state, proof, self.root)
+        self.assertEqual(before, self.state)
+
+    def test_recovered_recorder_rejects_same_legacy_custody_before_write_only(self):
+        import contextlib
+        import io
+        h, native, _, _, _ = self.recovered_fixture()
+        current17 = copy.deepcopy(self.state['failures'])
+        new = self.custody_fixture(gate_name='smoke')
+        legacy_proof = h.build(self.state, self.plan, new, self.root)
+        c.refresh(self.state, self.plan, new, self.root, historical_no_retry_proof=legacy_proof)
+        self.plan = new
+        self.state['failures'].extend(current17)
+        gate = self.plan['gates'][1]
+        self.assertIn('agent-payment-abandonment', h.qualifications(self.state, gate, self.root))
+        # A prepared envelope from the old recorder is still fully authenticated,
+        # but must not publish a conflicting exclusion into an already-valid ledger.
+        proof = dict(kind=h.RECOVERED_KIND, before_state_sha256=c.digest(self.state),
+            current_binding=h.binding(self.state['plan'], self.root), gate='smoke',
+            check='smoke/agent-payment-abandonment', origin=h.recovered_native(native, self.root))
+        c.write(self.directory / 'cycle.json', self.state)
+        plan = self.root / '.context/plan.json'; c.write(plan, self.plan)
+        proof_path = self.root / '.context/prepared.json'; c.write(proof_path, proof)
+        before = (self.directory / 'cycle.json').read_bytes()
+        flags = ['--plan', str(plan), '--state-dir', str(self.directory), '--root', str(self.root),
+                 '--input', str(native), '--proof', str(proof_path)]
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            result = c.main(['record-recovered-stall', *flags])
+        self.assertEqual(2, result)
+        self.assertEqual(before, (self.directory / 'cycle.json').read_bytes())
+        self.assertNotIn(h.RECOVERED_KEY, c.read(self.directory / 'cycle.json'))
+        # A separate valid debt for a different task must not prevent this warning.
+        unrelated = copy.deepcopy(self.state)
+        unrelated['failures'] = [f for f in unrelated['failures'] if f['id'] != 'failure-0']
+        for key in ('historical_no_retry_custody', 'historical_custody_history'):
+            unrelated[key] = [r for r in unrelated[key] if r['original_failure']['id'] != 'failure-0']
+        self.assertEqual(['agent-payment-idempotent-abandonment'], list(h.qualifications(unrelated, gate, self.root)))
+        other_before = copy.deepcopy(unrelated)
+        h.record_recovered(unrelated, h.prepare_recovered(unrelated, native, self.root), self.root)
+        self.assertEqual(other_before, {k: v for k, v in unrelated.items() if k != h.RECOVERED_KEY})
+        self.assertEqual(current17, unrelated['failures'][-17:])
+
     def custody_fixture(self, top_level=None, gate_name="api", purchase_owner=None, failed_status='FAILED'):
         import deploy_test_historical_custody as h
         mocked = patch.object(h, 'native_closure', return_value={'fixture': 'terminal native fleet'})
@@ -145,7 +419,7 @@ class Cycle(unittest.TestCase):
         names = ['agent-payment-abandonment', 'agent-payment-idempotent-abandonment']
         catalog = [t for t in json.loads((ROOT / 'agents/benchmarks/tasks.json').read_text()) if t['name'] in names]
         path = self.root / 'agents/benchmarks/tasks.json'
-        path.parent.mkdir(parents=True); c.write(path, catalog)
+        path.parent.mkdir(parents=True, exist_ok=True); c.write(path, catalog)
         subprocess.run(['git', '-C', str(self.root), 'add', '.'], check=True)
         subprocess.run(['git', '-C', str(self.root), '-c', 'user.name=test', '-c',
                         'user.email=test@example.com', 'commit', '-qm', 'catalog'], check=True)
@@ -235,6 +509,39 @@ class Cycle(unittest.TestCase):
                         'files': {str(self.root / '.context/deploy-pipeline/cycle.json'): c.sha_file(file)}})
         fresh = c.initialize(new, self.root)
         return fresh, file, index
+
+    def test_refresh_retains_explicit_deploy_exclusion_without_pass_credit(self):
+        gate = self.plan['gates'][1]
+        gate.update(category='smoke', native_cloud=True, checks=['mass', 'peer'])
+        self.state = c.initialize(self.plan, self.root)
+        self.state.update(phase='needs-focused-plan', repair_gates=['api'])
+        old = copy.deepcopy(self.plan)
+        original_state = copy.deepcopy(self.state)
+        catalog = self.root / 'agents/benchmarks/tasks.json'
+        catalog.parent.mkdir(parents=True)
+        catalog.write_text(json.dumps([{'name':'mass', 'deploy_quarantine':'User requested exclusion'}, {'name':'peer'}]))
+        new = copy.deepcopy(old)
+        new['source'] = c.source(self.root)
+        new['gates'][1]['checks'] = ['peer']
+        history = copy.deepcopy(self.state['attempts'])
+        c.refresh(self.state, old, new, self.root)
+        self.assertEqual(history, self.state['attempts'])
+        self.assertFalse(self.state['ready'])
+        self.assertEqual({}, self.state['carried_passes'])
+        omission, = self.state['deploy_selection_omissions']
+        self.assertEqual({'api/mass':'User requested exclusion'}, omission['checks'])
+        self.assertIs(omission['executed'], False)
+        self.assertIs(omission['credit_granted'], False)
+        self.assertEqual(old['source'], omission['from_source'])
+        self.assertEqual(new['source'], omission['source'])
+        self.assertEqual(['peer'], self.state['plan']['gates'][1]['checks'])
+        blocked = copy.deepcopy(original_state)
+        blocked.update(phase='triage', pending=['mass-fail'], failures=[{'id':'mass-fail', 'check':'api/mass', 'gate':'api'}])
+        untouched = copy.deepcopy(blocked)
+        with self.assertRaisesRegex(ValueError, 'adjudicate the original failure'):
+            c.refresh(blocked, old, new, self.root)
+        self.assertEqual(untouched, blocked)
+
 
     def test_historical_import_only_indexed_duties_not_lost_supervisor_history(self):
         import deploy_test_historical_custody as h
@@ -6885,6 +7192,50 @@ class Cycle(unittest.TestCase):
             c.isolated_request(state, extended, request, self.root, {'CLOUDBENCH_ARCHIVED_REUSE_REQUEST':'old'})
         self.assertEqual(before, state)
 
+    def test_isolated_next_inventory_allows_only_explicit_deploy_omission(self):
+        state, failure, paths, proof, gate, packet = self.isolated_campaign_state()
+        c.reconcile(state, failure['id'], proof)
+        state['source'] = proof['validation_source']
+        removed = gate['checks'][0]
+        catalog = self.root / 'agents/benchmarks/tasks.json'
+        catalog.parent.mkdir(parents=True, exist_ok=True)
+        rows = [{'name': removed, 'deploy_quarantine': 'Explicit user deploy exclusion'}]
+        c.write(catalog, rows)
+        before = copy.deepcopy(state)
+        narrowed = {**gate, 'category': 'smoke', 'checks': gate['checks'][1:]}
+        request = dict(token='fresh-explicit-omission', source=state['source'], checks=narrowed['checks'], skips={})
+        bindings = c.isolated_request(state, narrowed, request, self.root, {})
+        entry = next(iter(state['reconciled_owners'].values()))
+        self.assertEqual(1, len(bindings))
+        self.assertEqual(entry['excluded_resources'], bindings[0]['excluded_resources'])
+        self.assertFalse(bindings[0]['credit_granted'])
+        self.assertFalse(entry['cleanup_complete'])
+        self.assertEqual(before, state)
+        # A normal quarantine, malformed declaration, omitted peer, stale source,
+        # duplicate inventory, reused token or original-evidence mutation refuses.
+        for value in [None, '', False, {}, 1]:
+            c.write(catalog, [{'name': removed, 'quarantine': {'error':'still runs'}, 'deploy_quarantine': value}])
+            with self.assertRaises(ValueError):
+                c.isolated_request(state, narrowed, request, self.root, {})
+        c.write(catalog, rows)
+        for bad_gate, bad_request in [
+            ({**narrowed, 'checks': narrowed['checks'][1:]}, {**request, 'checks': narrowed['checks'][1:]}),
+            (narrowed, {**request, 'source': {'head':'f'*40, 'digest':'e'*64}}),
+            (narrowed, {**request, 'token': entry['token']}),
+            (narrowed, {**request, 'checks': narrowed['checks'] + [narrowed['checks'][0]]}),
+            ({**narrowed, 'category': 'backend'}, request),
+        ]:
+            with self.assertRaises(ValueError):
+                c.isolated_request(state, bad_gate, bad_request, self.root, {})
+        c.write(catalog, rows + rows)
+        with self.assertRaises(ValueError):
+            c.isolated_request(state, narrowed, request, self.root, {})
+        c.write(catalog, rows)
+        packet.write_text(packet.read_text() + ' ')
+        with self.assertRaisesRegex(ValueError, 'obligation changed'):
+            c.isolated_request(state, narrowed, request, self.root, {})
+        self.assertEqual(before, state)
+
     def test_isolated_native_validation_preserves_original_debt_and_requires_new_full_request(self):
         state, failure, paths, proof, gate, packet = self.isolated_campaign_state()
         before = copy.deepcopy(state['attempts'])
@@ -7333,7 +7684,7 @@ class Cycle(unittest.TestCase):
             phase='focused', state_sha256=c.sha_file(self.directory / 'cycle.json'),
             plan_digest=state['plan_digest'], native={gate['name']: native},
             files={str(p):c.sha_file(p) for p in (folder/'request.json', folder/'result.json')})
-        with patch.object(c, 'settlement_native', return_value=native):
+        with patch.object(c, 'settlement_native', return_value=native), only_processes():
             c.recover_round(state['plan'], self.directory, self.root, recovery)
         state = c.read(self.directory / 'cycle.json')
         state.update(source=c.source(self.root), phase='needs-focused-plan', ready=False)
@@ -7342,117 +7693,120 @@ class Cycle(unittest.TestCase):
 
     def test_negative_successor_renews_only_from_committed_journal_and_current_closure(self):
         state, original, proof, gate, folder, native = self.negative_successor_renewal_state()
-        incoming = dict(proof, validation_source=copy.deepcopy(state['source']))
-        before = copy.deepcopy(state)
-        with patch.object(c, 'settlement_native', return_value=native) as collector:
-            c.reconcile(state, original['token'], incoming)
-            collector.assert_called_once()
-            same = copy.deepcopy(state); c.reconcile(state, original['token'], incoming)
-            self.assertEqual(same, state)
-        for key in before:
-            if key not in ('reconciled_owners', 'reconciled_owner_history'):
-                self.assertEqual(before[key], state[key], key)
-        entry = state['reconciled_owners'][proof['receipt_sha256']]
-        self.assertEqual(state['source'], entry['validation_source'])
-        self.assertFalse(entry['credit_granted']); self.assertFalse(entry['cleanup_complete'])
-        recovered = state['attempts'][-1]['results'][0]
-        self.assertIsNone(recovered['native_exit']); self.assertFalse(recovered['positive_credit'])
-        self.assertNotIn('isolated_validation', recovered)
-        self.assertIsNone(c.full_pass_binding(state, gate))
-        request = dict(token='fresh-after-negative-recovery', source=state['source'], checks=gate['checks'], skips={})
-        self.assertEqual(1, len(c.isolated_request(state, gate, request, self.root, {})))
-        for closure in ({'tampered': 'closure'}, ValueError('live or unknown native owner')):
-            candidate = copy.deepcopy(before)
-            kwargs = {'side_effect':closure} if isinstance(closure, Exception) else {'return_value':closure}
-            with patch.object(c, 'settlement_native', **kwargs), self.assertRaises(ValueError):
-                c.reconcile(candidate, original['token'], incoming)
-            self.assertEqual(before, candidate)
-        journal = self.directory/'settlement-round20-journal.json'
-        marker = self.directory/'settlement-round20-committed.json'
-        for path in (journal, marker, folder/'request.json', folder/'result.json', folder/'receipt.json'):
-            raw = path.read_bytes(); path.unlink()
-            try:
+        with only_processes():
+            incoming = dict(proof, validation_source=copy.deepcopy(state['source']))
+            before = copy.deepcopy(state)
+            with patch.object(c, 'settlement_native', return_value=native) as collector:
+                c.reconcile(state, original['token'], incoming)
+                collector.assert_called_once()
+                same = copy.deepcopy(state); c.reconcile(state, original['token'], incoming)
+                self.assertEqual(same, state)
+            for key in before:
+                if key not in ('reconciled_owners', 'reconciled_owner_history'):
+                    self.assertEqual(before[key], state[key], key)
+            entry = state['reconciled_owners'][proof['receipt_sha256']]
+            self.assertEqual(state['source'], entry['validation_source'])
+            self.assertFalse(entry['credit_granted']); self.assertFalse(entry['cleanup_complete'])
+            recovered = state['attempts'][-1]['results'][0]
+            self.assertIsNone(recovered['native_exit']); self.assertFalse(recovered['positive_credit'])
+            self.assertNotIn('isolated_validation', recovered)
+            self.assertIsNone(c.full_pass_binding(state, gate))
+            request = dict(token='fresh-after-negative-recovery', source=state['source'], checks=gate['checks'], skips={})
+            self.assertEqual(1, len(c.isolated_request(state, gate, request, self.root, {})))
+            for closure in ({'tampered': 'closure'}, ValueError('live or unknown native owner')):
                 candidate = copy.deepcopy(before)
-                with patch.object(c, 'settlement_native', return_value=native), self.assertRaises(ValueError):
+                kwargs = {'side_effect':closure} if isinstance(closure, Exception) else {'return_value':closure}
+                with patch.object(c, 'settlement_native', **kwargs), self.assertRaises(ValueError):
                     c.reconcile(candidate, original['token'], incoming)
                 self.assertEqual(before, candidate)
-            finally: path.write_bytes(raw)
-        saved, saved_marker = journal.read_bytes(), marker.read_bytes()
-        for field in ('positive_credit', 'original_state_hex', 'proof_digest', 'after_state', 'receipts'):
-            altered = json.loads(saved)
-            altered[field] = True if field == 'positive_credit' else ('00' if field == 'original_state_hex' else {})
-            c.write(journal, altered); c.write(marker, {'journal_sha256':c.sha_file(journal)})
-            try:
-                candidate = copy.deepcopy(before)
-                with patch.object(c, 'settlement_native', return_value=native), self.assertRaises(ValueError):
-                    c.reconcile(candidate, original['token'], incoming)
-                self.assertEqual(before, candidate)
-            finally: journal.write_bytes(saved); marker.write_bytes(saved_marker)
+            journal = self.directory/'settlement-round20-journal.json'
+            marker = self.directory/'settlement-round20-committed.json'
+            for path in (journal, marker, folder/'request.json', folder/'result.json', folder/'receipt.json'):
+                raw = path.read_bytes(); path.unlink()
+                try:
+                    candidate = copy.deepcopy(before)
+                    with patch.object(c, 'settlement_native', return_value=native), self.assertRaises(ValueError):
+                        c.reconcile(candidate, original['token'], incoming)
+                    self.assertEqual(before, candidate)
+                finally: path.write_bytes(raw)
+            saved, saved_marker = journal.read_bytes(), marker.read_bytes()
+            for field in ('positive_credit', 'original_state_hex', 'proof_digest', 'after_state', 'receipts'):
+                altered = json.loads(saved)
+                altered[field] = True if field == 'positive_credit' else ('00' if field == 'original_state_hex' else {})
+                c.write(journal, altered); c.write(marker, {'journal_sha256':c.sha_file(journal)})
+                try:
+                    candidate = copy.deepcopy(before)
+                    with patch.object(c, 'settlement_native', return_value=native), self.assertRaises(ValueError):
+                        c.reconcile(candidate, original['token'], incoming)
+                    self.assertEqual(before, candidate)
+                finally: journal.write_bytes(saved); marker.write_bytes(saved_marker)
 
     def test_negative_successor_rejects_changed_history_admission_and_live_adapter_atomically(self):
         state, original, proof, gate, folder, native = self.negative_successor_renewal_state()
-        incoming = dict(proof, validation_source=copy.deepcopy(state['source']))
-        recovered = state['attempts'][-1]['results'][0]
-        for name, metadata in recovered['custody_skips'].items():
-            self.assertEqual(recovered['cases'][name], 'SKIP')
-            self.assertEqual(recovered['current_execution'][name], 'UNVERIFIED')
-            self.assertFalse(metadata['financial_cleanup_credit'])
-        target = copy.deepcopy(state)
-        target.update(environment=c.digest('changed target environment'))
-        target['input_fingerprints'][gate['name']] = c.digest('changed target input')
-        next(g for g in target['plan']['gates'] if g['name'] == gate['name'])['env'] = {'TARGET':'changed'}
-        target['plan_digest'] = c.digest(target['plan'])
-        with patch.object(c, 'settlement_native', return_value=native):
-            c.reconcile(target, original['token'], incoming)
-        self.assertEqual(state['attempts'], target['attempts'])
-        self.assertEqual(state['failures'], target['failures'])
-        mutations = [
-            lambda s:s['attempts'][0].update(source={'head':'changed', 'digest':'changed'}),
-            lambda s:s['attempts'][-1]['results'][0].update(native_exit=1),
-            lambda s:s['attempts'][-1]['results'][0].update(positive_credit=True),
-            lambda s:s['attempts'][-1]['results'][0].update(timed_out=False),
-            lambda s:s['attempts'][-1]['results'][0].update(started_at=1),
-        ]
-        for mutate in mutations:
-            candidate = copy.deepcopy(state); mutate(candidate); before = copy.deepcopy(candidate)
-            with patch.object(c, 'settlement_native', return_value=native), self.assertRaises(ValueError):
-                c.reconcile(candidate, original['token'], incoming)
-            self.assertEqual(before, candidate)
-        # A journal/hash update cannot replace the exact original isolation admission.
-        journal = self.directory/'settlement-round20-journal.json'
-        marker = self.directory/'settlement-round20-committed.json'
-        paths = (folder/'request.json', folder/'receipt.json', journal, marker)
-        saved = {p:p.read_bytes() for p in paths}
-        for field in ('original_receipt_sha256', 'source', 'excluded_resources', 'new_request_token'):
-            candidate = copy.deepcopy(state)
-            request = json.loads(saved[folder/'request.json'])
-            request['isolated_validation'][0][field] = 'foreign'
-            c.write(folder/'request.json', request)
-            row = candidate['attempts'][-1]['results'][0]
-            row['recovery_evidence']['files'][str(folder/'request.json')] = c.sha_file(folder/'request.json')
-            c.write(folder/'receipt.json', row)
-            j = json.loads(saved[journal]); j['after_state']['attempts'][-1] = copy.deepcopy(candidate['attempts'][-1])
-            j['receipts'][str(folder/'receipt.json')] = copy.deepcopy(row)
-            snapshot_raw = bytes.fromhex(j['original_state_hex']); snapshot = json.loads(snapshot_raw)
-            recovery = dict(kind='interrupted-round-settlement-v1', source=snapshot['source'], round=20,
-                phase='focused', state_sha256=__import__('hashlib').sha256(snapshot_raw).hexdigest(),
-                plan_digest=snapshot['plan_digest'], files=row['recovery_evidence']['files'], native={gate['name']:native})
-            j['proof_digest'] = c.digest(recovery)
-            c.write(journal, j); c.write(marker, {'journal_sha256':c.sha_file(journal)})
-            before = copy.deepcopy(candidate)
-            try:
-                with patch.object(c, 'settlement_native', return_value=native), self.assertRaisesRegex(ValueError, 'original isolation binding'):
+        with only_processes():
+            incoming = dict(proof, validation_source=copy.deepcopy(state['source']))
+            recovered = state['attempts'][-1]['results'][0]
+            for name, metadata in recovered['custody_skips'].items():
+                self.assertEqual(recovered['cases'][name], 'SKIP')
+                self.assertEqual(recovered['current_execution'][name], 'UNVERIFIED')
+                self.assertFalse(metadata['financial_cleanup_credit'])
+            target = copy.deepcopy(state)
+            target.update(environment=c.digest('changed target environment'))
+            target['input_fingerprints'][gate['name']] = c.digest('changed target input')
+            next(g for g in target['plan']['gates'] if g['name'] == gate['name'])['env'] = {'TARGET':'changed'}
+            target['plan_digest'] = c.digest(target['plan'])
+            with patch.object(c, 'settlement_native', return_value=native):
+                c.reconcile(target, original['token'], incoming)
+            self.assertEqual(state['attempts'], target['attempts'])
+            self.assertEqual(state['failures'], target['failures'])
+            mutations = [
+                lambda s:s['attempts'][0].update(source={'head':'changed', 'digest':'changed'}),
+                lambda s:s['attempts'][-1]['results'][0].update(native_exit=1),
+                lambda s:s['attempts'][-1]['results'][0].update(positive_credit=True),
+                lambda s:s['attempts'][-1]['results'][0].update(timed_out=False),
+                lambda s:s['attempts'][-1]['results'][0].update(started_at=1),
+            ]
+            for mutate in mutations:
+                candidate = copy.deepcopy(state); mutate(candidate); before = copy.deepcopy(candidate)
+                with patch.object(c, 'settlement_native', return_value=native), self.assertRaises(ValueError):
                     c.reconcile(candidate, original['token'], incoming)
                 self.assertEqual(before, candidate)
-            finally:
-                for path, raw in saved.items(): path.write_bytes(raw)
+            # A journal/hash update cannot replace the exact original isolation admission.
+            journal = self.directory/'settlement-round20-journal.json'
+            marker = self.directory/'settlement-round20-committed.json'
+            paths = (folder/'request.json', folder/'receipt.json', journal, marker)
+            saved = {p:p.read_bytes() for p in paths}
+            for field in ('original_receipt_sha256', 'source', 'excluded_resources', 'new_request_token'):
+                candidate = copy.deepcopy(state)
+                request = json.loads(saved[folder/'request.json'])
+                request['isolated_validation'][0][field] = 'foreign'
+                c.write(folder/'request.json', request)
+                row = candidate['attempts'][-1]['results'][0]
+                row['recovery_evidence']['files'][str(folder/'request.json')] = c.sha_file(folder/'request.json')
+                c.write(folder/'receipt.json', row)
+                j = json.loads(saved[journal]); j['after_state']['attempts'][-1] = copy.deepcopy(candidate['attempts'][-1])
+                j['receipts'][str(folder/'receipt.json')] = copy.deepcopy(row)
+                snapshot_raw = bytes.fromhex(j['original_state_hex']); snapshot = json.loads(snapshot_raw)
+                recovery = dict(kind='interrupted-round-settlement-v1', source=snapshot['source'], round=20,
+                    phase='focused', state_sha256=__import__('hashlib').sha256(snapshot_raw).hexdigest(),
+                    plan_digest=snapshot['plan_digest'], files=row['recovery_evidence']['files'], native={gate['name']:native})
+                j['proof_digest'] = c.digest(recovery)
+                c.write(journal, j); c.write(marker, {'journal_sha256':c.sha_file(journal)})
+                before = copy.deepcopy(candidate)
+                try:
+                    with patch.object(c, 'settlement_native', return_value=native), self.assertRaisesRegex(ValueError, 'original isolation binding'):
+                        c.reconcile(candidate, original['token'], incoming)
+                    self.assertEqual(before, candidate)
+                finally:
+                    for path, raw in saved.items(): path.write_bytes(raw)
         child = subprocess.Popen([sys.executable, '-c', 'import sys;print("ready",flush=True);sys.stdin.read()'],
             cwd='/tmp', env={**os.environ, 'DEPLOY_GATE_TOKEN':state['attempts'][-1]['results'][0]['token']},
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, start_new_session=True)
         try:
             self.assertEqual(child.stdout.readline().strip(), 'ready')
             candidate = copy.deepcopy(state)
-            with patch.object(c, 'settlement_native', return_value=native), self.assertRaisesRegex(ValueError, 'live adapter'):
+            with patch.object(c, 'settlement_native', return_value=native), only_processes(child.pid), \
+                    self.assertRaisesRegex(ValueError, 'live adapter'):
                 c.reconcile(candidate, original['token'], incoming)
             self.assertEqual(state, candidate)
         finally:
@@ -8770,6 +9124,129 @@ class Cycle(unittest.TestCase):
         (runtime / 'logs/worker.log').write_text('changed')
         self.assertEqual([occurrence['gate']], c.retained_owners(state, [occurrence['gate']]))
 
+    def reseal_recovered(self, fleet, proof, edit):
+        """Apply `edit(audit)` to a fleet's local audit, mirror it canonically, reseal and rebind proof files."""
+        import hashlib
+        import shutil
+        audit = fleet / 'teardown-ownership'
+        owner = c.read(fleet / '_batch/lifecycle.json')['fleet_owner_token']
+        canonical = self.root / '.git/cloudbench-fleet-audits' / owner
+        (audit / 'source-audit').unlink()
+        edit(audit)
+        shutil.rmtree(canonical); shutil.copytree(audit, canonical)
+        h = hashlib.sha256()
+        for path in sorted(audit.rglob('*'), key=lambda p: str(p.relative_to(audit))):
+            if path.is_file():
+                for raw in (str(path.relative_to(audit)).encode(), path.read_bytes()):
+                    h.update(len(raw).to_bytes(8, 'big')); h.update(raw)
+        (audit / 'source-audit').write_text(f'path={canonical}\nsha256={h.hexdigest()}\n')
+        proof['files'] = {k: v for k, v in proof['files'].items() if Path(k).exists()}
+        for path in [*fleet.rglob('*'), *canonical.rglob('*')]:
+            if path.is_file(): proof['files'][str(path)] = c.sha_file(path)
+        return canonical
+
+    def test_campaign_lost_runtime_evidence_release_needs_provider_terminal_receipt(self):
+        # PR #1864: `--recover-stale-owner TOKEN --accept-lost-runtime-evidence` released owners whose
+        # Machines were destroyed before evidence capture; deploy custody accepts only that exact receipt.
+        state, occurrence, paths, proof, fleet, runtime = self.recovered_campaign_state()
+        owner = c.read(fleet / '_batch/lifecycle.json')['fleet_owner_token']
+        def receipt(machine_state, volume_state='pending_destroy', **changes):
+            return {**dict(schema='cloudbench-runtime-evidence-lost-v1', fleet_owner_token=owner, run_id=fleet.name,
+                           app='fixture', observed_at='2026-11-03T00:00:00+00:00',
+                           operator_flag='--accept-lost-runtime-evidence', runtime_evidence='LOST', outcome_credit=False,
+                           observations=[dict(kind='machine', id='48e7553f5dd4e8', state=machine_state),
+                                         dict(kind='volume', id='vol_fixture', state=volume_state,
+                                              attached_machine_id=None)]), **changes}
+        proof.pop('recovered_runtime')
+        proof['lost_runtime_evidence'] = [str(fleet)]
+        import shutil
+        shutil.rmtree(runtime.parent)  # destroyed before capture: no remote logs exist
+        unread = {'.cid', 'guest-shutdown.confirmed', 'runtime-evidence.owner.json'}  # recovered_runtime-only inputs
+        original_reseal = self.reseal_recovered
+        def reseal(fleet_, proof_, edit):
+            canonical = original_reseal(fleet_, proof_, edit)
+            for name in [k for k in proof_['files'] if Path(k).name in unread]:
+                proof_['files'].pop(name)
+            return canonical
+        self.reseal_recovered = reseal
+        before = copy.deepcopy(state)
+        for bad in (receipt('stopped'), receipt('destroyed', 'created'), receipt('destroyed', outcome_credit=True),
+                    receipt('destroyed', observed_at='2026-11-04T00:00:00+00:00')):
+            variant = copy.deepcopy(proof)
+            self.reseal_recovered(fleet, variant, lambda a: c.write(a / 'runtime-evidence-lost.json', bad))
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                c.reconcile(state, occurrence['id'], variant)
+            self.assertEqual(before, state)
+        self.reseal_recovered(fleet, proof, lambda a: c.write(a / 'runtime-evidence-lost.json', receipt('destroyed')))
+        c.reconcile(state, occurrence['id'], proof)
+        entry = state['reconciled_owners'][proof['receipt_sha256']]
+        release = entry['recovered_release_evidence'][str(fleet)]
+        self.assertEqual('LOST', release['runtime_evidence'])
+        self.assertFalse(release['credit_granted']); self.assertFalse(entry['credit_granted'])
+
+    def test_campaign_recovered_unlaunched_worker_clone_is_covered(self):
+        # PR #1864: an autoscaler worker clone provisioned but never started has no stack evidence.
+        state, occurrence, paths, proof, fleet, runtime = self.recovered_campaign_state()
+        bench = json.loads((fleet / '_batch/benches.json').read_text())[0]['name']
+        out = fleet / bench
+        owner = c.read(fleet / '_batch/lifecycle.json')['fleet_owner_token']
+        worker = '8747515a9131e8'
+        identity = dict(machine_id=worker, primary_machine_id='48e7553f5dd4e8', run_token=owner + '-0', version=1)
+        (out / 'worker-clones.ids').write_text(worker + '\n')
+        c.write(out / 'worker-runtime-evidence' / worker / 'owner.json', identity)
+        def add_row(audit):
+            (audit / 'owned-clones.ids').write_text('48e7553f5dd4e8\n' + worker + '\n')
+            (audit / 'owned-clones.names').write_text('clone-j2\nclone-w1\n')
+            (audit / 'fresh/clone-w1').write_text(''.join(f'{k}={v}\n' for k, v in dict(
+                fleet_owner_token=owner, run_id=fleet.name, app='fixture', source='fresh-clone',
+                disposition='destroyed-provider-retained', machine_id=worker, clone_name='clone-w1',
+                volume_id='vol_worker').items()))
+        before = copy.deepcopy(state)
+        for started in (True, None):
+            c.write(out / 'worker-runtime-evidence' / worker / 'not-launched.json', {**identity, 'worker_started': started})
+            variant = copy.deepcopy(proof)
+            self.reseal_recovered(fleet, variant, add_row)
+            with self.subTest(started=started), self.assertRaises(ValueError):
+                c.reconcile(state, occurrence['id'], variant)
+            self.assertEqual(before, state)
+        c.write(out / 'worker-runtime-evidence' / worker / 'not-launched.json', {**identity, 'worker_started': False})
+        self.reseal_recovered(fleet, proof, add_row)
+        c.reconcile(state, occurrence['id'], proof)
+        self.assertIn(proof['receipt_sha256'], state['reconciled_owners'])
+
+    def test_campaign_retired_hub_needs_its_exact_terminal_record(self):
+        # PR #1864: exact-owner recovery records `retired-exact-owner-verified-absent` once the Hub is gone.
+        state, occurrence, paths, proof, fleet, runtime = self.recovered_campaign_state()
+        meta = (fleet / 'teardown-ownership/meta').read_text()
+        fields = dict(line.split('=', 1) for line in meta.splitlines() if '=' in line)
+        hub = Path(fields['hub_owner_file'])
+        terminal = Path(str(hub) + '.terminal')
+        def record(**changes):
+            value = {**dict(version='1', owner_file=str(hub), owner_sha256=c.sha_file(hub), pid=fields['hub_pid'],
+                            pid_start=fields['hub_pid_start'], pgid=fields['hub_pid'], owner_token=fields['hub_owner_token'],
+                            disposition='terminated-verified'), **changes}
+            terminal.write_text(''.join(f'{k}={v}\n' for k, v in value.items()))
+        birth = 'proc-start:00000000-0000-4000-8000-000000000000:1'
+        fields['hub_pid_start'] = birth
+        def retire(audit):
+            (audit / 'meta').write_text(meta.replace('hub_disposition=retained-exact-owner-transfer-required',
+                                                     'hub_disposition=retired-exact-owner-verified-absent')
+                                        .replace('hub_pid_start=' + meta.split('hub_pid_start=')[1].split('\n')[0],
+                                                 'hub_pid_start=' + birth))
+        before = copy.deepcopy(state)
+        for changes in (dict(disposition='retained'), dict(owner_token='other'), dict(owner_sha256='0' * 64)):
+            record(**changes)
+            variant = copy.deepcopy(proof)
+            self.reseal_recovered(fleet, variant, retire)
+            variant['files'][str(terminal)] = c.sha_file(terminal)
+            with self.subTest(changes=changes), self.assertRaises(ValueError):
+                c.reconcile(state, occurrence['id'], variant)
+            self.assertEqual(before, state)
+        record()
+        self.reseal_recovered(fleet, proof, retire)
+        proof['files'][str(terminal)] = c.sha_file(terminal)
+        c.reconcile(state, occurrence['id'], proof)
+        self.assertIn(proof['receipt_sha256'], state['reconciled_owners'])
     def test_campaign_recovered_v2_release_ignores_machine_less_clone_rows(self):
         # PR #1928 review: recovery must cover only rows that own a Machine; a clone cancelled before its
         # Machine existed (`not-allocated-verified`) is closed by the audit, not by runtime identity.
@@ -11604,6 +12081,31 @@ class RelayStartupEvidence(unittest.TestCase):
         self.save(Path(receipt['log']).parent/'receipt.json',receipt);proof['receipt_sha256']=c.sha_file(Path(receipt['log']).parent/'receipt.json')
         self.reseal();return receipt,owner,proof,fleets
 
+    def test_recovered_warning_projection_uses_existing_mixed_cleanup_contract(self):
+        import deploy_test_historical_custody as h
+        receipt, owner, proof, _ = self.mixed_preallocation_fixture()
+        folder = Path(receipt['log']).parent
+        request = json.loads((folder / 'request.json').read_text())
+        canonical = dict(kind=h.RECOVERED_KIND, current_binding={'source': receipt['source']},
+                         credit=copy.deepcopy(h.RECOVERED_CREDIT))
+        projected = h.recovered_projection(canonical, receipt['source'])
+        request['skips'].pop('old-one')
+        request['skips']['agent-payment-abandonment'] = projected
+        receipt['cases'].pop('old-one'); receipt['cases']['agent-payment-abandonment'] = 'SKIP'
+        receipt['case_complete'].pop('old-one'); receipt['case_complete']['agent-payment-abandonment'] = False
+        self.save(folder / 'request.json', request)
+        self.save(folder / 'receipt.json', receipt)
+        proof['receipt_sha256'] = c.sha_file(folder / 'receipt.json'); self.reseal()
+        result = self.validate_fixture(receipt, owner, proof)
+        self.assertFalse(result['credit_granted'])
+        self.assertFalse(receipt['case_complete']['agent-payment-abandonment'])
+        self.assertEqual(c.digest(canonical), projected['recovered_record_sha256'])
+        # Sending the canonical new kind/credit shape directly remains forbidden.
+        request['skips']['agent-payment-abandonment'].update(kind=h.RECOVERED_KIND, credit=h.RECOVERED_CREDIT)
+        self.save(folder / 'request.json', request); self.reseal()
+        with self.assertRaisesRegex(ValueError, 'mixed original exclusion inventory'):
+            self.validate_fixture(receipt, owner, proof)
+
     def test_mixed_preallocation_with_a_cancelled_infra_canary_reconciles(self):
         # PR #1928 smoke: 10 jobs were refused before allocation (warm source 429) while the infra canary
         # was TERMed mid-preflight; mixed preallocation must also admit that linked, released canary.
@@ -11951,6 +12453,8 @@ class CleanupPrepareEvidence(unittest.TestCase):
         def source(args,**kwargs):
             if args[0]=='ps': return original(args,**kwargs)
             if args[-1].endswith('cloudbench-shared-relay.py'): return b'original-broker'
+            if args[-1].endswith(':agents/benchmarks/tasks.json'):
+                return b'[]' if getattr(self, 'foreign_catalog', False) else (self.base/'agents/benchmarks/tasks.json').read_bytes()
             return (self.base/'scripts'/args[-1].rsplit('/',1)[-1]).read_bytes()
         with patch.dict(sys.modules,deploy_test_cloud=published), patch.object(self.native.runpy,'run_path',return_value={}), \
              patch.object(self.native.subprocess,'check_output',side_effect=source):
@@ -12067,6 +12571,410 @@ class CleanupPrepareEvidence(unittest.TestCase):
                     self.reseal()
 
 
+    def current_prepare_fixture(self):
+        import hashlib
+        receipt, owner, proof = self.prepare_fixture('7b68f4f7cde6a8cd1c4edfcbe119f1514b706045')
+        folder = Path(receipt['log']).parent
+        source = dict(head='7b68f4f7cde6a8cd1c4edfcbe119f1514b706045',
+                      digest='b4caeead07132658dcc875c1231be33a9ec9c916ec36830d5e0ab7e2b53418a9')
+        checks = ['test-mass-agent-run-0', 'chat-mode', 'spawn-sub-agents', 'parallel-tool-calls',
+                  'background-agent-message-smoke', 'claude-code-agent', 'browser-smoke',
+                  'agent-payment-test-shop', 'agent-payment-setup-resume', 'agent-payment-idempotent-abandonment',
+                  'browser-biometrics-webdecoy', 'agent-payment-new-user-journey']
+        request = json.loads((folder/'request.json').read_text())
+        certificate = dict(kind='historical-agentcard-no-retry-v1', disposition='NO_RETRY_CUSTODY',
+                           source=source, original_failure={'id':'original-native-failure', 'native_result':'FAIL'},
+                           original_amount_cents=4396, current_execution='UNVERIFIED',
+                           current_financial_state='UNVERIFIED',
+                           credit=dict(test_execution=False, assertions=False, financial_release=False))
+        # Like this fixture's producer/publication adapters, replace only the test
+        # certificate pin. The actual proof separately checks the full native certificate.
+        import deploy_test_native_prepare as prepare
+        certificate_pin=patch.object(prepare, 'CURRENT_PREPARE_CUSTODY_SHA256', hashlib.sha256(
+            json.dumps(certificate, sort_keys=True, separators=(',', ':'), allow_nan=False).encode()).hexdigest())
+        certificate_pin.start(); self.addCleanup(certificate_pin.stop)
+        request.update(source=source, checks=checks, skips={'agent-payment-abandonment':certificate})
+        self.save(folder/'request.json', request)
+        receipt.update(source=source, checks=checks, custody_skips=copy.deepcopy(request['skips']),
+                       cases={**dict.fromkeys(checks,'UNVERIFIED'),
+                                                        'agent-payment-abandonment':'SKIP'})
+        adapter_path = Path(receipt['worker_result']); adapter = json.loads(adapter_path.read_text())
+        adapter.update(source=source, checks=checks, cases=dict.fromkeys(checks,'UNVERIFIED'),
+                       native_command=['bash','scripts/run-bench',*checks,'--runs','1','--concurrency','12',
+                                       '--retry-infra','0','--ref',source['head']])
+        self.save(adapter_path,adapter)
+        summary=json.loads((self.campaign/'summary.json').read_text())
+        summary.update(concurrency=12,task_count=12,total_jobs=12,
+                       cleanup_ticket_error=dict(type='ValueError',message='insufficient physical cleanup cohort floors'))
+        summary['jobs']=summary['jobs'][:12]
+        for row, task in zip(summary['jobs'],checks):
+            row.update(task=task,controller_command=['bash',str(self.base/'scripts/run-bench'),task,
+                                                    '--ref',source['head'],'--foreground'])
+        summary['cleanup_cohorts'][0]['expected_count']=12
+        self.save(self.campaign/'summary.json',summary)
+        self.save(self.campaign/'cleanup-cohorts/c001/manifest.json',dict(cohort_id='c001',
+                  jobs=dict.fromkeys(row['job_id'] for row in summary['jobs'])))
+        for f in [self.campaign/'shared-inventory/publisher.private.log',
+                  self.campaign/'hub-group-publication.private.log']: f.write_bytes(b'')
+        reference=receipt['native_cleanup_reference']
+        reference['result_sha256']=hashlib.sha256(adapter_path.read_bytes()).hexdigest()
+        self.save(folder/'receipt.json',receipt)
+        proof.update(source=source,receipt_sha256=hashlib.sha256((folder/'receipt.json').read_bytes()).hexdigest(),
+                     worker_result_sha256=reference['result_sha256'])
+        self.reseal()
+        return receipt,owner,proof
+
+    def test_current_twelve_case_prepare_preserves_original_unknown_and_custody(self):
+        receipt,owner,proof=self.current_prepare_fixture()
+        originals={p:p.read_bytes()for p in self.base.rglob('*')if p.is_file()}
+        entry=self.validate_prepare_fixture(receipt,owner,proof)
+        self.assertFalse(entry['credit_granted'])
+        self.assertEqual([],entry['participants'])
+        self.assertEqual([],entry['retained_services'])
+        self.assertEqual(originals,{p:p.read_bytes()for p in self.base.rglob('*')if p.is_file()})
+        self.assertEqual(12,list(receipt['cases'].values()).count('UNVERIFIED'))
+        self.assertEqual('SKIP',receipt['cases']['agent-payment-abandonment'])
+
+    def test_current_prepare_rejects_wrong_inventory_refusal_credit_and_writer(self):
+        receipt,owner,proof=self.current_prepare_fixture()
+        for key,value in [('credit_granted',True),('financial_cleanup_credit',True),('transfer_credit',True)]:
+            with self.subTest(key=key),self.assertRaisesRegex(ValueError,'cleanup only'):
+                self.validate_prepare_fixture(receipt,owner,{**proof,key:value})
+        forged=copy.deepcopy(receipt);forged['cases']['invented']='PASS'
+        with self.assertRaises(ValueError):self.validate_prepare_fixture(forged,owner,proof)
+        changed=copy.deepcopy(proof);changed['source']={**proof['source'],'head':'f'*40}
+        with self.assertRaises(ValueError):self.validate_prepare_fixture(receipt,owner,changed)
+        producer=self.base/'scripts/run-bench';native=producer.read_bytes()
+        producer.write_bytes(native+b'\n# altered producer\n');self.reseal()
+        with self.assertRaisesRegex(ValueError,'producer changed'):
+            self.validate_prepare_fixture(receipt,owner,proof)
+        producer.write_bytes(native);self.reseal()
+        path=self.campaign/'summary.json';original=path.read_bytes()
+        for mutate in [lambda v:v.update(cleanup_ticket_error={'type':'ValueError','message':'other'}),
+                       lambda v:v['jobs'][0].update(controller_pid=os.getpid()),
+                       lambda v:v['jobs'].append(v['jobs'][0])]:
+            value=json.loads(original);mutate(value);self.save(path,value);self.reseal()
+            with self.assertRaises(ValueError):self.validate_prepare_fixture(receipt,owner,proof)
+            path.write_bytes(original);self.reseal()
+        for log in [self.campaign/'shared-inventory/publisher.private.log', path]:
+            with self.subTest(writer=log),log.open('a'):
+                with self.assertRaisesRegex(ValueError,'active writer'):
+                    self.validate_prepare_fixture(receipt,owner,proof)
+
+    def test_current_prepare_rejects_forged_custody(self):
+        import hashlib
+        receipt,owner,proof=self.current_prepare_fixture()
+        folder=Path(receipt['log']).parent
+        request=json.loads((folder/'request.json').read_text())
+        protected=request['skips']['agent-payment-abandonment']
+        protected['original_failure']={'id':'FORGED','native_result':'PASS'}
+        protected['credit']={'test_execution':True,'assertions':True,'financial_release':True}
+        protected['current_financial_state']='SETTLED'
+        self.save(folder/'request.json',request);self.reseal()
+        with self.assertRaises(ValueError):self.validate_prepare_fixture(receipt,owner,proof)
+        # Even rewriting both copies and resealing must not replace the pinned certificate.
+        receipt['custody_skips']=request['skips']
+        self.save(folder/'receipt.json',receipt)
+        proof['receipt_sha256']=hashlib.sha256((folder/'receipt.json').read_bytes()).hexdigest()
+        self.reseal()
+        with self.assertRaises(ValueError):self.validate_prepare_fixture(receipt,owner,proof)
+
+    def test_current_prepare_rejects_contradictory_native_width(self):
+        import hashlib
+        receipt,owner,proof=self.current_prepare_fixture()
+        path=Path(receipt['worker_result']);adapter=json.loads(path.read_text())
+        adapter['native_command'][adapter['native_command'].index('--concurrency')+1]='1'
+        self.save(path,adapter)
+        reference=receipt['native_cleanup_reference']
+        reference['result_sha256']=hashlib.sha256(path.read_bytes()).hexdigest()
+        self.save(Path(receipt['log']).parent/'receipt.json',receipt)
+        proof.update(worker_result_sha256=reference['result_sha256'],
+                     receipt_sha256=hashlib.sha256((Path(receipt['log']).parent/'receipt.json').read_bytes()).hexdigest())
+        self.reseal()
+        with self.assertRaises(ValueError):self.validate_prepare_fixture(receipt,owner,proof)
+
+    def test_prepare_grant_path_uses_actual_git_common_directory(self):
+        import deploy_test_native_prepare as prepare
+        common=self.base/'common';reserve=common/'cloudbench-fleet-ownership'
+        reserve.mkdir(parents=True,mode=0o700)
+        budget=self.base/'budget'
+        import deploy_test_native_cleanup as cleanup
+        with patch.object(cleanup,'fleet_git_common',return_value=common):
+            actual=prepare.grant_path(self.base,budget)
+        self.assertEqual(str(reserve.stat().st_dev),actual.parent.parent.name)
+
+
+    def source_bound_prepare_fixture(self):
+        import hashlib
+        import deploy_test_native_prepare as prepare
+        receipt, owner, proof = self.prepare_fixture('12b1ff359defa16996a3794b7b11043ea1567d8b')
+        proof['source_bound_prepare'] = True
+        folder = Path(receipt['log']).parent
+        request = json.loads((folder/'request.json').read_text())
+        checks = list(prepare.CURRENT_PREPARE_CHECKS) + ['browser-auth-guest-purchase', 'browser-auth-member-discount-purchase']
+        certificate = {'kind': 'historical-agentcard-no-retry-v1', 'disposition': 'NO_RETRY_CUSTODY',
+                       'source': receipt['source'], 'credit': {'test_execution': False}}
+        request.update(checks=checks, skips={'agent-payment-abandonment': certificate})
+        ledger = {'source': receipt['source'], 'plan': {'source': receipt['source'], 'gates': [
+            {'name': 'smoke', 'checks': ['agent-payment-abandonment', *checks]}]},
+            'historical_no_retry_custody': [certificate], 'environment': 'e'*64, 'input_fingerprints': {}}
+        ledger['plan_digest'] = c.digest(ledger['plan'])
+        request['custody_state_sha256'] = c.digest(ledger)
+        proof['custody_ledger'] = str(self.base/'custody-ledger.json')
+        self.save(Path(proof['custody_ledger']), ledger)
+        self.save(folder/'request.json',request)
+        receipt.update(checks=checks,cases={**dict.fromkeys(checks,'UNVERIFIED'),'agent-payment-abandonment':'SKIP'},
+                       custody_skips=request['skips'])
+        adapter=json.loads(Path(receipt['worker_result']).read_text())
+        adapter.update(checks=checks,cases=dict.fromkeys(checks,'UNVERIFIED'),native_command=[
+            'bash','scripts/run-bench',*checks,'--runs','1','--concurrency','14','--retry-infra','0','--ref',receipt['source']['head']])
+        self.save(Path(receipt['worker_result']),adapter)
+        summary=json.loads((self.campaign/'summary.json').read_text())
+        summary['cleanup_ticket_error']={'type':'ValueError','message':'insufficient physical cleanup cohort floors'}
+        for job,name in zip(summary['jobs'],checks):
+            job.update(task=name,controller_command=['bash',str(self.base/'scripts/run-bench'),name,'--ref',receipt['source']['head'],'--foreground'])
+        self.save(self.campaign/'summary.json',summary)
+        for path in [self.campaign/'shared-inventory/publisher.private.log',self.campaign/'hub-group-publication.private.log']:
+            path.write_bytes(b'')
+        reference=receipt['native_cleanup_reference'];reference['result_sha256']=hashlib.sha256(Path(receipt['worker_result']).read_bytes()).hexdigest()
+        self.save(folder/'receipt.json',receipt);proof.update(receipt_sha256=hashlib.sha256((folder/'receipt.json').read_bytes()).hexdigest(),worker_result_sha256=reference['result_sha256'])
+        self.reseal()
+        return receipt,owner,proof,request
+
+    def omitted_prepare_fixture(self):
+        import hashlib
+        receipt, owner, proof, request = self.source_bound_prepare_fixture()
+        omitted = 'test-mass-agent-run-0'
+        checks = [name for name in request['checks'] if name != omitted]
+        request['checks'] = checks
+        ledger_path = Path(proof['custody_ledger'])
+        ledger = json.loads(ledger_path.read_text())
+        gate = ledger['plan']['gates'][0]
+        gate.update(checks=[name for name in gate['checks'] if name != omitted],
+                    category='smoke', native_cloud=True)
+        ledger['deploy_selection_omissions'] = [dict(source=copy.deepcopy(ledger['source']),
+            checks={'smoke/' + omitted: 'Explicit user deploy exclusion'},
+            executed=False, credit_granted=False)]
+        ledger['plan_digest'] = c.digest(ledger['plan'])
+        self.save(ledger_path, ledger)
+        request['custody_state_sha256'] = c.digest(ledger)
+        folder = Path(receipt['log']).parent
+        self.save(folder/'request.json', request)
+        receipt.update(checks=checks, cases={**dict.fromkeys(checks, 'UNVERIFIED'),
+                                           'agent-payment-abandonment': 'SKIP'})
+        adapter = json.loads(Path(receipt['worker_result']).read_text())
+        adapter.update(checks=checks, cases=dict.fromkeys(checks, 'UNVERIFIED'),
+                       native_command=['bash', 'scripts/run-bench', *checks, '--runs', '1',
+                                       '--concurrency', '13', '--retry-infra', '0',
+                                       '--ref', receipt['source']['head']])
+        self.save(Path(receipt['worker_result']), adapter)
+        summary = json.loads((self.campaign/'summary.json').read_text())
+        summary.update(concurrency=13, task_count=13, total_jobs=13)
+        summary['cleanup_cohorts'][0]['expected_count'] = 13
+        summary['jobs'] = summary['jobs'][:13]
+        for job, name in zip(summary['jobs'], checks):
+            job.update(task=name, controller_command=['bash', str(self.base/'scripts/run-bench'),
+                                                      name, '--ref', receipt['source']['head'], '--foreground'])
+        self.save(self.campaign/'summary.json', summary)
+        self.save(self.campaign/'cleanup-cohorts/c001/manifest.json',
+                  dict(cohort_id='c001', jobs=dict.fromkeys(j['job_id'] for j in summary['jobs'])))
+        catalog = self.base/'agents/benchmarks/tasks.json'
+        catalog.parent.mkdir(parents=True)
+        self.save(catalog, [{'name': omitted, 'deploy_quarantine': 'Explicit user deploy exclusion'}])
+        receipt['native_cleanup_reference']['result_sha256'] = hashlib.sha256(Path(receipt['worker_result']).read_bytes()).hexdigest()
+        self.save(folder/'receipt.json', receipt)
+        proof.update(receipt_sha256=hashlib.sha256((folder/'receipt.json').read_bytes()).hexdigest(),
+                     worker_result_sha256=receipt['native_cleanup_reference']['result_sha256'])
+        self.reseal()
+        return receipt, owner, proof, request
+
+    def narrowed_prepare_fixture(self, dropped=('browser-auth-guest-purchase', 'browser-auth-member-discount-purchase')):
+        """The authenticated ledger plan selected fewer smoke checks than the historical 14."""
+        import hashlib
+        receipt, owner, proof, request = self.source_bound_prepare_fixture()
+        checks = [name for name in request['checks'] if name not in dropped]
+        width = len(checks)
+        request['checks'] = checks
+        ledger_path = Path(proof['custody_ledger'])
+        ledger = json.loads(ledger_path.read_text())
+        gate = ledger['plan']['gates'][0]
+        gate['checks'] = [name for name in gate['checks'] if name not in dropped]
+        ledger['plan_digest'] = c.digest(ledger['plan'])
+        self.save(ledger_path, ledger)
+        request['custody_state_sha256'] = c.digest(ledger)
+        folder = Path(receipt['log']).parent
+        self.save(folder/'request.json', request)
+        receipt.update(checks=checks, cases={**dict.fromkeys(checks, 'UNVERIFIED'),
+                                           'agent-payment-abandonment': 'SKIP'})
+        adapter = json.loads(Path(receipt['worker_result']).read_text())
+        adapter.update(checks=checks, cases=dict.fromkeys(checks, 'UNVERIFIED'),
+                       native_command=['bash', 'scripts/run-bench', *checks, '--runs', '1',
+                                       '--concurrency', str(width), '--retry-infra', '0',
+                                       '--ref', receipt['source']['head']])
+        self.save(Path(receipt['worker_result']), adapter)
+        summary = json.loads((self.campaign/'summary.json').read_text())
+        summary.update(concurrency=width, task_count=width, total_jobs=width)
+        summary['cleanup_cohorts'][0]['expected_count'] = width
+        summary['jobs'] = summary['jobs'][:width]
+        for job, name in zip(summary['jobs'], checks):
+            job.update(task=name, controller_command=['bash', str(self.base/'scripts/run-bench'),
+                                                      name, '--ref', receipt['source']['head'], '--foreground'])
+        self.save(self.campaign/'summary.json', summary)
+        self.save(self.campaign/'cleanup-cohorts/c001/manifest.json',
+                  dict(cohort_id='c001', jobs=dict.fromkeys(j['job_id'] for j in summary['jobs'])))
+        receipt['native_cleanup_reference']['result_sha256'] = hashlib.sha256(Path(receipt['worker_result']).read_bytes()).hexdigest()
+        self.save(folder/'receipt.json', receipt)
+        proof.update(receipt_sha256=hashlib.sha256((folder/'receipt.json').read_bytes()).hexdigest(),
+                     worker_result_sha256=receipt['native_cleanup_reference']['result_sha256'])
+        self.reseal()
+        return receipt, owner, proof, request
+
+    def test_source_bound_prepare_takes_inventory_from_authenticated_ledger_plan(self):
+        import deploy_test_native_prepare as prepare
+        import deploy_test_historical_custody as custody
+        receipt, owner, proof, request = self.narrowed_prepare_fixture()
+        before = {p: p.read_bytes() for p in self.base.rglob('*') if p.is_file()}
+        with patch.object(prepare, 'SOURCE_ROOT', self.base), \
+             patch.object(custody, 'state_identity', side_effect=c.digest), \
+             patch.object(custody, 'guard', return_value=request['skips']):
+            entry = self.validate_prepare_fixture(receipt, owner, proof)
+        self.assertFalse(entry['credit_granted'])
+        self.assertFalse(receipt['complete'])
+        self.assertEqual(12, list(receipt['cases'].values()).count('UNVERIFIED'))
+        self.assertEqual('SKIP', receipt['cases']['agent-payment-abandonment'])
+        self.assertEqual(before, {p: p.read_bytes() for p in self.base.rglob('*') if p.is_file()})
+
+    def test_source_bound_prepare_rejects_request_outside_ledger_plan(self):
+        import deploy_test_native_prepare as prepare
+        import deploy_test_historical_custody as custody
+        receipt, owner, proof, request = self.narrowed_prepare_fixture()
+        ledger_path = Path(proof['custody_ledger'])
+        ledger = json.loads(ledger_path.read_text())
+        ledger['plan']['gates'][0]['checks'].remove('chat-mode')  # request still names chat-mode
+        ledger['plan_digest'] = c.digest(ledger['plan'])
+        self.save(ledger_path, ledger)
+        request['custody_state_sha256'] = c.digest(ledger)
+        self.save(Path(receipt['log']).parent/'request.json', request)
+        self.reseal()
+        with patch.object(prepare, 'SOURCE_ROOT', self.base), \
+             patch.object(custody, 'state_identity', side_effect=c.digest), \
+             patch.object(custody, 'guard', return_value=request['skips']):
+            with self.assertRaisesRegex(ValueError, 'custody inventory'):
+                self.validate_prepare_fixture(receipt, owner, proof)
+
+    def test_source_bound_prepare_accepts_only_authenticated_current_omission(self):
+        import deploy_test_native_prepare as prepare
+        import deploy_test_historical_custody as custody
+        receipt, owner, proof, request = self.omitted_prepare_fixture()
+        before = {p: p.read_bytes() for p in self.base.rglob('*') if p.is_file()}
+        with patch.object(prepare, 'SOURCE_ROOT', self.base), \
+             patch.object(custody, 'state_identity', side_effect=c.digest), \
+             patch.object(custody, 'guard', return_value=request['skips']):
+            entry = self.validate_prepare_fixture(receipt, owner, proof)
+        self.assertFalse(entry['credit_granted'])
+        self.assertEqual(13, list(receipt['cases'].values()).count('UNVERIFIED'))
+        self.assertFalse(receipt['complete'])
+        self.assertEqual(before, {p: p.read_bytes() for p in self.base.rglob('*') if p.is_file()})
+        self.foreign_catalog = True
+        try:
+            with patch.object(prepare, 'SOURCE_ROOT', self.base), \
+                 patch.object(custody, 'state_identity', side_effect=c.digest), \
+                 patch.object(custody, 'guard', return_value=request['skips']):
+                with self.assertRaisesRegex(ValueError, 'catalog source'):
+                    self.validate_prepare_fixture(receipt, owner, proof)
+        finally:
+            self.foreign_catalog = False
+
+    def test_source_bound_prepare_rejects_unproved_omission(self):
+        import deploy_test_native_prepare as prepare
+        import deploy_test_historical_custody as custody
+        receipt, owner, proof, request = self.omitted_prepare_fixture()
+        ledger_path = Path(proof['custody_ledger'])
+        catalog = self.base/'agents/benchmarks/tasks.json'
+        original = ledger_path.read_bytes()
+        for fault in ('missing', 'stale', 'credit', 'executed', 'reason', 'foreign', 'ordinary', 'arbitrary'):
+            with self.subTest(fault=fault):
+                ledger = json.loads(original)
+                row = ledger['deploy_selection_omissions'][0]
+                self.save(catalog, [{'name': 'test-mass-agent-run-0', 'deploy_quarantine': 'Explicit user deploy exclusion'}])
+                if fault == 'missing': ledger.pop('deploy_selection_omissions')
+                elif fault == 'stale': row['source'] = {'head': 'f'*40, 'digest': 'f'*64}
+                elif fault == 'credit': row['credit_granted'] = True
+                elif fault == 'executed': row['executed'] = True
+                elif fault == 'reason': row['checks']['smoke/test-mass-agent-run-0'] = 'Other reason'
+                elif fault == 'foreign': ledger['source'] = {'head': 'f'*40, 'digest': 'f'*64}
+                elif fault == 'ordinary': self.save(catalog, [{'name': 'test-mass-agent-run-0', 'quarantine': {'error': 'still runs'}}])
+                elif fault == 'arbitrary': row['checks'] = {'smoke/arbitrary-task': 'Explicit user deploy exclusion'}
+                self.save(ledger_path, ledger)
+                request['custody_state_sha256'] = c.digest(ledger)
+                self.save(Path(receipt['log']).parent/'request.json', request)
+                self.reseal()
+                with patch.object(prepare, 'SOURCE_ROOT', self.base), \
+                     patch.object(custody, 'state_identity', side_effect=c.digest), \
+                     patch.object(custody, 'guard', return_value=request['skips']):
+                    with self.assertRaises(ValueError): self.validate_prepare_fixture(receipt, owner, proof)
+
+    def test_source_bound_prepare_preserves_unknown_and_authenticates_custody(self):
+        import deploy_test_native_prepare as prepare
+        import deploy_test_historical_custody as custody
+        receipt,owner,proof,request=self.source_bound_prepare_fixture()
+        before={p:p.read_bytes() for p in self.base.rglob('*') if p.is_file()}
+        with patch.object(prepare,'SOURCE_ROOT',self.base), patch.object(custody,'state_identity',side_effect=c.digest), \
+             patch.object(custody,'guard',return_value=request['skips']) as guard:
+            entry=self.validate_prepare_fixture(receipt,owner,proof)
+        self.assertTrue(guard.called)
+        self.assertFalse(entry['credit_granted']);self.assertFalse(receipt['complete'])
+        self.assertEqual(14,list(receipt['cases'].values()).count('UNVERIFIED'))
+        self.assertEqual('SKIP',receipt['cases']['agent-payment-abandonment'])
+        self.assertEqual(before,{p:p.read_bytes() for p in self.base.rglob('*') if p.is_file()})
+
+    def test_source_bound_prepare_rejects_false_ledger_and_nonzero_admission(self):
+        import deploy_test_native_prepare as prepare
+        import deploy_test_historical_custody as custody
+        receipt,owner,proof,request=self.source_bound_prepare_fixture()
+        with patch.object(prepare,'SOURCE_ROOT',self.base), patch.object(custody,'state_identity',side_effect=c.digest), \
+             patch.object(custody,'guard',return_value={}):
+            with self.assertRaisesRegex(ValueError,'custody'):
+                self.validate_prepare_fixture(receipt,owner,proof)
+        with patch.object(prepare,'SOURCE_ROOT',self.base), patch.object(custody,'state_identity',side_effect=c.digest), \
+             patch.object(custody,'guard',return_value=request['skips']):
+            ledger=Path(proof['custody_ledger']);raw=ledger.read_bytes();value=json.loads(raw);value['source']={'head':'f'*40,'digest':'f'*64};self.save(ledger,value);self.reseal()
+            with self.assertRaisesRegex(ValueError,'custody'):
+                self.validate_prepare_fixture(receipt,owner,proof)
+            ledger.write_bytes(raw);self.reseal()
+            path=self.campaign/'summary.json';old=path.read_bytes()
+            for change in [lambda v:v['jobs'][0].update(started_at=v['started_at']),
+                           lambda v:v.update(peak_concurrency=1),
+                           lambda v:v.update(cleanup_ticket_error={'type':'ValueError','message':'other'})]:
+                value=json.loads(old);change(value);self.save(path,value);self.reseal()
+                with self.assertRaises(ValueError):self.validate_prepare_fixture(receipt,owner,proof)
+            path.write_bytes(old);self.reseal()
+
+
+    def test_source_bound_prepare_rejects_changed_producer_or_resource_artifacts(self):
+        import deploy_test_native_prepare as prepare
+        import deploy_test_historical_custody as custody
+        receipt,owner,proof,request=self.source_bound_prepare_fixture()
+        installed=self.base/'installed';(installed/'scripts').mkdir(parents=True)
+        for name in prepare.REVIEWED_SOURCES:
+            (installed/'scripts'/name).write_bytes((self.base/'scripts'/name).read_bytes())
+        with patch.object(prepare,'SOURCE_ROOT',installed), patch.object(custody,'state_identity',side_effect=c.digest), \
+             patch.object(custody,'guard',return_value=request['skips']):
+            path=self.base/'scripts/run-bench-campaign.py';old=path.read_bytes();path.write_bytes(old+b'\n# changed producer\n');self.reseal()
+            with self.assertRaisesRegex(ValueError,'installed producer differs'):
+                self.validate_prepare_fixture(receipt,owner,proof)
+            path.write_bytes(old);self.reseal()
+            for path in [self.runs/'unexpected-fleet',self.campaign/'cleanup-cohorts/c001/cleanup-budget/budget.json',
+                         self.campaign/'cleanup-cohorts/c001/ready/member']:
+                path.write_text('{}');self.reseal()
+                try:
+                    with self.assertRaises(ValueError):self.validate_prepare_fixture(receipt,owner,proof)
+                finally:path.unlink();self.reseal()
+            grant=self.base/'unexpected-grant';grant.write_text('{}')
+            with patch.object(prepare,'grant_path',return_value=grant), self.assertRaisesRegex(ValueError,'grant remains'):
+                self.validate_prepare_fixture(receipt,owner,proof)
+
+
 class RecoveredNativeReceiptGuard(unittest.TestCase):
     """Exercise actual full-pass admission on real files; never launch a worker."""
     def setUp(self):
@@ -12098,6 +13006,14 @@ class RecoveredNativeReceiptGuard(unittest.TestCase):
 
     def test_known_native_pass_is_still_admitted(self):
         self.assertIsNotNone(self.admit(self.receipt))
+
+    def test_protected_abandonment_without_plan_still_refuses(self):
+        import deploy_test_historical_custody as h
+        protected = dict(self.gate, name='smoke', checks=['agent-payment-abandonment'])
+        with patch.object(c, 'run_command') as launch:
+            with self.assertRaisesRegex(ValueError, 'known recovered check removed'):
+                h.guard(self.state, protected, ROOT)
+            launch.assert_not_called()
 
     def test_unknown_lifecycle_is_never_false(self):
         for field in ('cancelled', 'timed_out', 'lingering_group'):
@@ -12411,6 +13327,29 @@ class LocalCleanupQuietScan(unittest.TestCase):
                         local.quiet(root)
                 finally:
                     child.kill(); child.wait(); child.stdout.close()
+
+    def test_unreaped_zombie_child_is_skipped_not_refused(self):
+        # PR #1864: an exited but unreaped same-user child reports EACCES on /proc/<pid>/environ, so the
+        # scan refused it as unverifiable for its 2 s grace and every later settlement scan failed.
+        import deploy_test_process
+        sys.path.insert(0, str(ROOT / 'scripts' / 'lib'))
+        from condition_wait import wait_until
+        child = subprocess.Popen([sys.executable, '-c', 'pass'])
+        state = Path('/proc') / str(child.pid) / 'stat'
+        wait_until(lambda: state.read_text().rsplit(') ', 1)[1].split()[0] == 'Z', timeout=10,
+                   description='child exited and is unreaped')
+        with self.assertRaises(PermissionError):
+            (Path('/proc') / str(child.pid) / 'environ').read_bytes()
+        inspected, refused = [], []
+        def inspect(process):
+            if process.name == str(child.pid):
+                inspected.append(process.name)
+                (process / 'environ').read_bytes()
+        try:
+            deploy_test_process.scan_same_user_processes(inspect, refused.append, grace=0.2)
+        finally:
+            child.wait()
+        self.assertEqual([], refused, 'a zombie cannot run code and must not be refused')
 
     @unittest.skipUnless(sys.platform.startswith('linux'), 'Linux /proc credential semantics')
     def test_setuid_process_first_seen_as_ours_is_skipped_not_refused(self):
@@ -13371,6 +14310,91 @@ class ExplicitAgentCardOverride(unittest.TestCase):
             self.assertEqual(set(seen['request']['skips']), {x.split('/')[1] for x in self.six[1:]})
             self.assertEqual(seen['argv'], ['python3', 'scripts/deploy_test_cloud.py'])
             self.assertFalse(any('agent-payment-' in arg for arg in seen['argv']))
+
+
+class GithubCleanupReconciliation(unittest.TestCase):
+    """Pure recorded-boundary tests: no Git, network, processes or real state writes."""
+    def fixture(self):
+        import base64, hashlib, io, zipfile
+        from deploy_test_github import tag_name
+        source = {'head': 'a' * 40, 'digest': 'b' * 64}
+        token, name, folder = 'f' * 32, 'semantic-stack', '/fixture'
+        owner = {'transport': 'github-actions', 'run_id': 123, 'url': 'https://github.com/org/repo/actions/runs/123'}
+        runner = 'blacksmith-8vcpu-ubuntu-2404'
+        tag = tag_name(runner, name, token)
+        request = dict(token=token, source=source, gate=name, checks=[name], skips={})
+        audit = dict(request, cases={name: 'PASS'}, complete=True, cleanup_complete=True,
+                     native_exit=0, reused=False)
+        raw = json.dumps(audit).encode()
+        archive = io.BytesIO()
+        with zipfile.ZipFile(archive, 'w') as z:
+            z.writestr('result.json', raw); z.writestr('request.json', json.dumps(request))
+        sha = hashlib.sha256(archive.getvalue()).hexdigest()
+        adapter = dict(request, cases={name: 'UNVERIFIED'}, complete=False, cleanup_complete=False,
+                       cleanup_owner=owner, remote=dict(tag=tag, run_attempt='1', runner_name='runner-original'))
+        receipt = dict(gate=name, token=token, source=source, complete=False, cases={name: 'UNVERIFIED'},
+                       log=folder+'/output.log', worker_result=folder+'/result.json', finished_at=100,
+                       lingering_group=True, cleanup_owner={'worker_cleanup_owner': owner})
+        run = dict(id=123, html_url=owner['url'], head_sha=source['head'], head_branch=tag,
+                   run_attempt=1, status='completed', updated_at='1970-01-01T00:01:40Z')
+        api = dict(run=run, jobs={'jobs':[dict(run_id=123, run_attempt=1, status='completed', runner_name='runner-original')]},
+                   artifacts={'artifacts':[dict(name='deploy-gate-result', digest='sha256:'+sha,
+                                                workflow_run={'id':123, 'head_sha':source['head']})]})
+        self.documents = {folder+'/receipt.json':receipt, folder+'/result.json':adapter,
+            folder+'/request.json':request, folder+'/audit.json':audit, folder+'/api.json':api,
+            folder+'/artifact.json':{'bytes':base64.b64encode(archive.getvalue()).decode()},
+            folder+'/output.log.process.json':dict(quiescent=True, orphaned_children=False, remaining=[], error=None,
+                                                  timed_out=True)}
+        self.raw = raw
+        def read(path, *args): return copy.deepcopy(self.documents[str(path)])
+        def digest(path): return hashlib.sha256(json.dumps(self.documents[str(path)],sort_keys=True).encode()).hexdigest()
+        self.patchers = [patch.object(c,'read',side_effect=read), patch.object(c,'bounded_read',side_effect=read),
+                         patch.object(c,'sha_file',side_effect=digest), patch.object(Path,'read_bytes',return_value=raw)]
+        for p in self.patchers:p.start();self.addCleanup(p.stop)
+        proof = dict(kind='github-actions-cleanup-v1', receipt_sha256=digest(folder+'/receipt.json'),
+            worker_result_sha256=digest(folder+'/result.json'),request_token=token,owner=owner,confirmed_at=101,observed_by='fixture')
+        for key, file in [('platform_result','api.json'),('native_audit','audit.json'),('artifact','artifact.json'),('process','output.log.process.json')]:
+            proof[key]={'path':folder+'/'+file,'sha256':digest(folder+'/'+file)}
+        failure=dict(id='f',gate=name,check=name+'/'+name,native_result='UNVERIFIED',complete=False)
+        state=dict(plan={'gates':[dict(name=name,command=['python','--runner',runner])]},
+                   attempts=[{'results':[receipt]}],failures=[failure],pending=['f'],phase='triage',repair_gates=[],ready=False)
+        return state,proof
+
+    def test_github_terminal_cleanup_preserves_original_failure_and_only_allows_retry(self):
+        state,proof=self.fixture();before=copy.deepcopy(state)
+        c.reconcile(state,'f',proof)
+        self.assertEqual([],c.retained_owners(state,['semantic-stack']))
+        self.assertEqual(before['attempts'],state['attempts']);self.assertEqual(before['failures'],state['failures'])
+        self.assertFalse(state['ready']);self.assertFalse(state['reconciled_owners'][proof['receipt_sha256']]['credit_granted'])
+        saved=copy.deepcopy(state);c.reconcile(state,'f',proof);self.assertEqual(saved,state)
+        c.reexecute(state,'f');self.assertEqual('UNVERIFIED',state['failures'][0]['native_result'])
+        self.assertEqual(['semantic-stack'],state['repair_gates'])
+
+    def test_github_cleanup_refuses_bad_identity_and_nonterminal_evidence_atomically(self):
+        state,proof=self.fixture()
+        variants=[dict(proof,request_token='wrong'),dict(proof,owner={**proof['owner'],'run_id':456}),
+                  dict(proof,receipt_sha256='wrong'),dict(proof,confirmed_at=0),dict(proof,observed_by=''),
+                  dict(proof,repair_agent='https://boxes.dev/thread/fake')]
+        for key in ('platform_result','artifact','native_audit','process'):
+            variants.append(dict(proof,**{key:{**proof[key],'sha256':'wrong'}}))
+        for variant in variants:
+            trial=copy.deepcopy(state)
+            with self.subTest(proof=variant),self.assertRaises(ValueError):c.reconcile(trial,'f',variant)
+            self.assertEqual(state,trial)
+        for key,change in [('platform_result',lambda d:d['run'].update(status='in_progress')),
+                           ('platform_result',lambda d:d['run'].update(run_attempt=2)),
+                           ('platform_result',lambda d:d['jobs']['jobs'][0].update(runner_name='foreign')),
+                           ('native_audit',lambda d:d.update(cleanup_complete=False)),
+                           ('process',lambda d:d.update(remaining=[99]))]:
+            path=proof[key]['path'];original=copy.deepcopy(self.documents[path]);change(self.documents[path])
+            variant=copy.deepcopy(proof);variant[key]['sha256']=c.sha_file(path);trial=copy.deepcopy(state)
+            with self.subTest(key=key),self.assertRaises(ValueError):c.reconcile(trial,'f',variant)
+            self.assertEqual(state,trial);self.documents[path]=original
+
+    def test_github_cleanup_certificate_rechecks_the_original_evidence(self):
+        state,proof=self.fixture();c.reconcile(state,'f',proof)
+        self.documents[proof['platform_result']['path']]['run']['status']='in_progress'
+        with self.assertRaises(ValueError):c.retained_owners(state,['semantic-stack'])
 
 
 class IsolatedRunlessWitnesses(unittest.TestCase):

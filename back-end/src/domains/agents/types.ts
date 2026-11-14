@@ -184,6 +184,13 @@ const createAgentBaseSchema = z.object({
   /** Owning Project (left-bar grouping); sub-agents inherit the parent's when omitted. */
   project_id: z.string().uuid().nullable().optional(),
   folder_id: z.string().uuid().nullable().optional(),
+  /**
+   * Connected GitHub repo for this agent's code sessions: a canonical ref
+   * (`gh:owner/repo`), repo URL or legacy project id, resolved against the
+   * caller's connections (404 when not connected). Null = explicitly none.
+   * Omitted: the parent's ref, else the project's connected repo.
+   */
+  github_repo_ref: z.string().trim().min(1).max(300).nullable().optional(),
   // Provider/environment execution mode. Defaults to real at the DB and
   // workflow boundaries; sub-agents inherit their parent's persisted mode.
   world_model_mode: z.enum(['real', 'simulate', 'shadow']).optional(),

@@ -60,6 +60,7 @@ export async function mintCompanyFlowCard(
     amountCents: input.totalCents,
     idempotencyKey: `purchase:${purchase.id}`,
     fundsSource: 'company_flow' as const,
+    expectedLivemode: purchase.stripeLivemode,
   };
   const deadline = Date.now() + AGENTCARD_COMPANY_FLOW_MAX_WAIT_MS;
   let confirmedTransferId = initialProviderTransferId;

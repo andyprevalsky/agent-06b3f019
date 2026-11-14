@@ -160,8 +160,9 @@ const PROVIDER_INTEGRATION: Record<string, string> = { claude: 'claude_code', co
  * cooldown (reason + whether the provider gave the reset) and nextResetAt.
  *
  * A Claude row with no usage, stale usage or a non-authoritative cooldown gets
- * a background usage-endpoint refresh (computeUsageRefresh): never awaited, so
- * this response is never delayed; its result shows on the next list.
+ * a background usage refresh (computeUsageRefresh: the usage endpoint, or a
+ * one-token quota check for inference-only logins): never awaited, so this
+ * response is never delayed; its result shows on the next list.
  */
 export async function listConnectedAccounts(
   userId: string,

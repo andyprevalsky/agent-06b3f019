@@ -8,6 +8,7 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { prisma } from '../../providers/database';
 import { configureBenchmarkAgentCardSetup } from '../../domains/test-payment/service';
+import { prepareBenchmarkAgentCardResidual } from '../../domains/test-payment/benchmarkResidual';
 
 const createdUserIds: string[] = [];
 let passed = 0;
@@ -32,90 +33,128 @@ async function seedUser(): Promise<string> {
 }
 
 async function main(): Promise<void> {
-  await test('configureBenchmarkAgentCardSetup toggles connect/reset state', async () => {
+  process.env.AGENTCARD_ORG_OAUTH_CLIENT_ID = 'unit_payment_fixture_client';
+  await test('v2 sandbox setup completes, resets and restores the exclusive connected user', async () => {
     const userId = await seedUser();
+    const providerId = `usr_fixture_${randomUUID()}`;
+    const requests: string[] = [];
+    const deps = {
+      getV2FixtureUserId: () => providerId,
+      v2Request: async (_method: string, resource: string) => {
+        requests.push(resource);
+        return resource.endsWith('company_wallet')
+          ? { livemode: false, default_funds_source: 'company_flow' }
+          : { status: 'pending' };
+      },
+    };
     await assert.rejects(
-      () => configureBenchmarkAgentCardSetup({ action: 'complete' }),
+      () => configureBenchmarkAgentCardSetup({ action: 'complete' }, deps),
       /userId is required/
     );
     await assert.rejects(
-      () => configureBenchmarkAgentCardSetup({ userId, action: 'nonsense' }),
+      () => configureBenchmarkAgentCardSetup({ userId, action: 'nonsense' }, deps),
       /action must be reset, complete, or prepare-residual/
     );
-    const connected = await configureBenchmarkAgentCardSetup(
-      { userId, action: 'complete' },
-      {
-        resolveCardholderId: async () => 'cardholder-live-fixture',
-        getCardholderVerificationStatus: async () => 'verified',
-      }
+    assert.equal(
+      (await configureBenchmarkAgentCardSetup({ userId, action: 'complete' }, deps)).status,
+      'connected'
     );
-    assert.equal(connected.status, 'connected');
-    const row = await prisma.integration.findUnique({
-      where: { userId_name_accountId: { userId, name: 'agentcard', accountId: '' } },
+    const key = { userId_name_accountId: { userId, name: 'agentcard', accountId: '' } };
+    const row = await prisma.integration.findUnique({ where: key });
+    assert.equal((row?.config as Record<string, unknown>).v2UserId, providerId);
+    assert.equal((row?.config as Record<string, unknown>).cardholderId, undefined);
+    await prisma.integration.update({
+      where: key,
+      data: {
+        config: {
+          ...(row?.config as Record<string, unknown>),
+          cardholderId: 'legacy_cleanup',
+          accessToken: 'legacy_cleanup_token',
+        },
+      },
     });
-    const config = row?.config as { orgManaged?: boolean; cardholderId?: string };
-    assert.equal(config?.orgManaged, true);
-    assert.equal(config?.cardholderId, 'cardholder-live-fixture');
-    const reset = await configureBenchmarkAgentCardSetup({ userId, action: 'reset' });
-    assert.equal(reset.status, 'connect_required');
-    const resetRow = await prisma.integration.findUnique({
-      where: { userId_name_accountId: { userId, name: 'agentcard', accountId: '' } },
+    assert.equal(
+      (await configureBenchmarkAgentCardSetup({ userId, action: 'reset' }, deps)).status,
+      'connect_required'
+    );
+    const reset = await prisma.integration.findUnique({ where: key });
+    assert.equal(reset?.status, 'NOT_CONNECTED');
+    assert.deepEqual(reset?.config, {
+      ...(row?.config as Record<string, unknown>),
+      cardholderId: 'legacy_cleanup',
+      accessToken: 'legacy_cleanup_token',
     });
-    const resetConfig = resetRow?.config as {
-      onboardingSessionId?: string;
-    };
-    assert.equal(resetRow?.status, 'NOT_CONNECTED');
-    assert.equal(resetConfig?.onboardingSessionId, `benchmark-agentcard-onboarding-${userId}`);
+    await configureBenchmarkAgentCardSetup({ userId, action: 'complete' }, deps);
+    assert.equal((await prisma.integration.findUnique({ where: key }))?.status, 'CONNECTED');
+    assert(
+      requests.every((path) => path.startsWith('/api/v2/')),
+      'setup toggles must never call MCP'
+    );
   });
 
-  await test('configureBenchmarkAgentCardSetup ignores stale BENCHMARK cardholder override', async () => {
+  await test('v2 fixture setup refuses live credentials, missing mapping and production toggles', async () => {
     const userId = await seedUser();
-    const previous = process.env.BENCHMARK_AGENTCARD_CARDHOLDER_ID;
-    process.env.BENCHMARK_AGENTCARD_CARDHOLDER_ID = 'cardholder-stale-missing';
-    try {
-      const connected = await configureBenchmarkAgentCardSetup(
+    await assert.rejects(
+      configureBenchmarkAgentCardSetup(
         { userId, action: 'complete' },
         {
-          resolveCardholderId: async () => 'cardholder-from-list',
-          getCardholderVerificationStatus: async () => 'verified',
+          getV2FixtureUserId: () => undefined,
+          v2Request: async () => {
+            throw new Error('missing mapping must not call provider');
+          },
         }
-      );
-      assert.equal(connected.status, 'connected');
-      const row = await prisma.integration.findUnique({
-        where: { userId_name_accountId: { userId, name: 'agentcard', accountId: '' } },
-      });
-      const config = row?.config as { cardholderId?: string };
-      assert.equal(config?.cardholderId, 'cardholder-from-list');
+      ),
+      /BENCHMARK_AGENTCARD_V2_USER_ID/
+    );
+    await assert.rejects(
+      configureBenchmarkAgentCardSetup(
+        { userId, action: 'complete' },
+        {
+          getV2FixtureUserId: () => 'usr_fixture_live',
+          v2Request: async () => ({ livemode: true, default_funds_source: 'company_flow' }),
+        }
+      ),
+      /sandbox credentials/
+    );
+    const before = process.env.NODE_ENV;
+    process.env.NODE_ENV = 'production';
+    try {
+      for (const action of ['complete', 'reset'])
+        await assert.rejects(
+          configureBenchmarkAgentCardSetup(
+            { userId, action },
+            {
+              v2Request: async () => {
+                throw new Error('production toggle must not call provider');
+              },
+            }
+          ),
+          /Sandbox AgentCard setup unavailable/
+        );
     } finally {
-      if (previous === undefined) delete process.env.BENCHMARK_AGENTCARD_CARDHOLDER_ID;
-      else process.env.BENCHMARK_AGENTCARD_CARDHOLDER_ID = previous;
+      if (before === undefined) delete process.env.NODE_ENV;
+      else process.env.NODE_ENV = before;
     }
+    assert.equal(await prisma.integration.count({ where: { userId } }), 0);
   });
 
   await test('sandbox payment setup sweeps only the resolved cardholder before a mint', async () => {
-    const userId = await seedUser();
     const recovered: string[] = [];
-    const ready = await configureBenchmarkAgentCardSetup(
-      { userId, action: 'prepare-residual' },
-      {
-        resolveCardholderId: async () => 'cardholder-resolved',
-        recoverCardholderResidual: async (cardholderId) => {
-          recovered.push(cardholderId);
-          return { status: 'completed', amountCents: 4396 };
-        },
-      }
-    );
+    const ready = await prepareBenchmarkAgentCardResidual({
+      resolveCardholderId: async () => 'cardholder-resolved',
+      recoverCardholderResidual: async (cardholderId) => {
+        recovered.push(cardholderId);
+        return { status: 'completed', amountCents: 4396 };
+      },
+    });
     assert.equal(ready.status, 'residual_ready');
     assert.deepEqual(recovered, ['cardholder-resolved']);
     await assert.rejects(
       () =>
-        configureBenchmarkAgentCardSetup(
-          { userId, action: 'prepare-residual' },
-          {
-            resolveCardholderId: async () => 'cardholder-resolved',
-            recoverCardholderResidual: async () => ({ status: 'requested', amountCents: 4396 }),
-          }
-        ),
+        prepareBenchmarkAgentCardResidual({
+          resolveCardholderId: async () => 'cardholder-resolved',
+          recoverCardholderResidual: async () => ({ status: 'requested', amountCents: 4396 }),
+        }),
       /not yet settled/
     );
     const previousNodeEnv = process.env.NODE_ENV;
@@ -123,15 +162,12 @@ async function main(): Promise<void> {
     try {
       await assert.rejects(
         () =>
-          configureBenchmarkAgentCardSetup(
-            { userId, action: 'prepare-residual' },
-            {
-              resolveCardholderId: async () => 'cardholder-resolved',
-              recoverCardholderResidual: async () => {
-                throw new Error('production recovery must never run');
-              },
-            }
-          ),
+          prepareBenchmarkAgentCardResidual({
+            resolveCardholderId: async () => 'cardholder-resolved',
+            recoverCardholderResidual: async () => {
+              throw new Error('production recovery must never run');
+            },
+          }),
         /Sandbox residual preparation unavailable/
       );
     } finally {

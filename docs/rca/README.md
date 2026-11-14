@@ -60,7 +60,7 @@ rules live in the validator: `scripts/rca_archive.py`.
 | `date`               | when the incident was root-caused                                                                                                     |
 | `surface`            | `back-end`, `front-end`, `agents`, `mac-app`, `infra`, `harness`, `cross`                                                             |
 | `component`          | narrowest owning module (`prisma-migrations`, `rose-client`, …)                                                                       |
-| `classification`     | Step 4 bucket of `docs/root-cause-analysis.md`; use `unresolved` only for an open case without enough proof to select a causal bucket |
+| `classification`     | Step 4 class from `/RCA` **Classify** (`.claude/commands/rca.md`); use `unresolved` only for an open case without enough proof to select a causal bucket |
 | `problem_class`      | Step 5a problem bucket — the generalizable class, not the instance                                                                    |
 | `first_bad_boundary` | where data first went wrong; for an open case, state the earliest observed candidate and that causality is unproven                   |
 | `symptoms`           | the literal strings a future engineer would grep for — **the primary search surface**                                                 |

@@ -68,7 +68,8 @@ The PR is merged, every applicable production lane is verified or has a recorded
 - `scripts/deploy fix` runs the same formatters and lint fixes without committing.
 - Classify every hunk `freeze` flags: code-only hunks pass without review; text an LLM reads, including text built at runtime, is a prompt.
 - Run one golden-reference review over the remaining hunks; a `GROUNDED` verdict clears them: `scripts/deploy approval decide --decision grounded --evidence "<reviewer id>"`.
-- Otherwise run `scripts/deploy approval request` and send one packet in `.claude/shared/approval-format.md` format, pasting the exact diff inline.
+- Otherwise run `scripts/deploy approval request` and send one packet in `.claude/shared/approval-format.md` format, showing the key user- and model-visible strings that change (well formatted, with the conditions under which each appears) and a plain list of schema or API fields; never code diffs or file pointers.
+- Collect every approval request into that one packet after `freeze` and send it once, at the start of the deploy; never pause the run to ask the user anything else. Only the snapshot re-requests below and the review-ledger decisions in **Stopping conditions** may come later.
 - Send the packet as the turn's last message only after gates run in the background, under a bounded keep-awake cancelled by its `holdId`.
 - Never infer approval from silence or earlier discussion; record the answer with `scripts/deploy approval decide --decision approved|rejected --evidence "<user message>"`.
 - A rejection stays blocked; a re-request from `approval decide` or `merge` means re-freeze and send a packet for only the changed files.

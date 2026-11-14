@@ -17,12 +17,19 @@
  *   POST   /api/projects/:id/maintenance/runs {mode} -> 202 MaintenanceRun
  *   GET    /api/projects/:id/maintenance/runs/:runId -> MaintenanceRun with its log
  *
+ * Projects are shown as Folders (lib/api/folders.ts): create / rename / delete
+ * go through /api/folders; this client keeps the settings, env files, template
+ * sync and subfolder endpoints, and GET /api/projects stays the sidebar's list.
+ *
  * Agents carry `project_id`; agents without one (or with an id that is not in
  * the list) belong to Home, the root project. POST /api/agents takes
  * `project_id` to start an agent inside a project.
  */
 
 import { API_BASE_WITH_PATH, getAuthHeaders } from './client';
+
+/** React Query key of GET /api/projects (sidebar rows, settings, integrations refresh). */
+export const PROJECTS_QUERY_KEY = ['projects'] as const;
 
 /** Template sync: the script run on the project's template sandbox (boxes.dev "Template maintenance"). */
 export interface ProjectMaintenance {
@@ -303,8 +310,8 @@ export async function saveProjectFolder(
     body: JSON.stringify({ name }),
   });
   if (response.status === 409)
-    throw new Error('A folder with this name already exists in this project.');
-  if (!response.ok) throw new Error('Could not save folder. Try again.');
+    throw new Error('A subfolder with this name already exists in this folder.');
+  if (!response.ok) throw new Error('Could not save subfolder. Try again.');
   return (await response.json()) as ProjectFolder;
 }
 
@@ -313,7 +320,7 @@ export async function deleteProjectFolder(projectId: string, folderId: string): 
     method: 'DELETE',
     headers: getAuthHeaders(),
   });
-  if (!response.ok) throw new Error('Could not delete folder. Try again.');
+  if (!response.ok) throw new Error('Could not delete subfolder. Try again.');
 }
 
 export async function moveProjectFolder(
@@ -329,7 +336,8 @@ export async function moveProjectFolder(
       body: JSON.stringify({ beforeId }),
     },
   );
-  if (response.status === 409) throw new Error('Folders changed. Try moving the folder again.');
-  if (!response.ok) throw new Error('Could not reorder folders. Try again.');
+  if (response.status === 409)
+    throw new Error('Subfolders changed. Try moving the subfolder again.');
+  if (!response.ok) throw new Error('Could not reorder subfolders. Try again.');
   return ((await response.json()) as { folders: ProjectFolder[] }).folders;
 }

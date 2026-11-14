@@ -58,6 +58,7 @@ import {
   useAuth,
 } from '../hooks';
 import { usePlaidIntegration } from '../hooks/usePlaidIntegration';
+import { useGithubRepos } from '../hooks/useGithubRepos';
 import { useMeetingNotes } from '../hooks/useMeetingNotes';
 
 import DesktopIntegrations from './DesktopIntegrations';
@@ -188,6 +189,7 @@ export default function Integrations({ initialSearch = '' }: { initialSearch?: s
             </div>
           ) : (
             <IntegrationSectionsSwitch
+              userId={user?.id ?? null}
               search={search}
               isBrowserCookiesAvailable={!!handlers.browserCookies?.isAvailable}
               isPasskeysAvailable={!!handlers.passkeys?.isAvailable}
@@ -221,11 +223,16 @@ export default function Integrations({ initialSearch = '' }: { initialSearch?: s
 /** Stock cards with the flag off; the Rose Desktop list with it on. */
 function IntegrationSectionsSwitch({
   accordion,
+  userId,
   ...rest
-}: Omit<React.ComponentProps<typeof IntegrationSections>, 'meetingNotes'>) {
+}: Omit<React.ComponentProps<typeof IntegrationSections>, 'meetingNotes' | 'github'> & {
+  /** Signed-in user: keys the GitHub repo and folder caches to this account. */
+  userId: string | null;
+}) {
   const granola = useMeetingNotes('granola', rest.isFullySignedIn, rest.data.fetchIntegrations);
   const fireflies = useMeetingNotes('fireflies', rest.isFullySignedIn, rest.data.fetchIntegrations);
-  const props = { ...rest, meetingNotes: { granola, fireflies } };
+  const github = useGithubRepos(rest.isFullySignedIn, userId);
+  const props = { ...rest, meetingNotes: { granola, fireflies }, github };
   if (useRoseDesktop()) return <DesktopIntegrations {...props} />;
   return <IntegrationSections accordion={accordion} {...props} />;
 }

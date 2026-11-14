@@ -1,12 +1,16 @@
 #!/usr/bin/env tsx
 
 import assert from 'node:assert/strict';
+import { assertV2WalletContract } from '../blackbox/agentcard-wallet-v2.cases';
 import {
   AgentCardOrgRuntime,
   AgentCardOrgRuntimeError,
   orgRetryDeadlineAtMs,
 } from '../../providers/agentcard/org-runtime';
-import { AgentCardCompanyWalletFundingProvider } from '../../providers/wallet-funding';
+import {
+  AgentCardCompanyWalletFundingProvider,
+  WalletFundingProviderError,
+} from '../../providers/wallet-funding';
 
 const ORG_RUNTIME_ENV_NAMES = [
   'AGENTCARD_ORG_MCP_ACCESS_TOKEN',
@@ -207,6 +211,41 @@ async function assertOrgAuthFlapLeavesReleasePending(): Promise<void> {
   const released = await recovering.reclaimUserWalletFunding(request);
   assert.equal(released.metadata?.status, 'release_confirmed');
 
+  // The exact REST reader (legacy transfers with no user) converts the same backpressure into
+  // WalletFundingProviderError; only its status/code pairs stay release-pending (PR #1864 review).
+  const restReader = (make: () => Error) =>
+    new (class extends AgentCardCompanyWalletFundingProvider {
+      protected async readTransfer(): Promise<Record<string, unknown>> {
+        throw make();
+      }
+    })(async () => consumed, { attempts: 20, delayMs: 0 });
+  for (const [status, code] of [
+    [401, 'unauthorized'],
+    [503, 'agentcard_v2_unavailable'],
+    [429, 'rate_limited'],
+  ] as const) {
+    await assert.rejects(
+      () =>
+        restReader(
+          () => new WalletFundingProviderError(`HTTP ${status}`, status, code)
+        ).reclaimUserWalletFunding(request),
+      releasePending,
+      `REST ${status} ${code} during release observation must leave the reclaim release-pending`
+    );
+  }
+  for (const [status, code] of [
+    [403, 'forbidden'],
+    [401, 'agentcard_wallet_funding_failed'],
+    [404, 'not_found'],
+  ] as const) {
+    const fatal = new WalletFundingProviderError(`HTTP ${status}`, status, code);
+    await assert.rejects(
+      () => restReader(() => fatal).reclaimUserWalletFunding(request),
+      (error: unknown) => error === fatal,
+      `REST ${status} ${code} must still fail the reclaim`
+    );
+  }
+
   // Strictness is unchanged for anything that is not provider backpressure.
   for (const fatal of [
     new AgentCardOrgRuntimeError('forbidden', 403, 'agentcard_org_mcp_unauthorized'),
@@ -228,6 +267,45 @@ async function assertOrgAuthFlapLeavesReleasePending(): Promise<void> {
 }
 
 async function main(): Promise<void> {
+  await assertV2WalletContract();
+  // A known transfer can fall behind 100 newer rows. An exact reader must be honored
+  // without changing the legacy constructor or replaying any funding mutation.
+  let exactReads = 0;
+  class ExactTransferProvider extends AgentCardCompanyWalletFundingProvider {
+    protected async readTransfer(transferId: string): Promise<Record<string, unknown>> {
+      exactReads += 1;
+      assert.equal(transferId, 'owt-old');
+      return { id: transferId, status: 'reclaimed', released_cents: 100 };
+    }
+  }
+  const oldTransferProvider = new ExactTransferProvider(
+    async () => ({
+      structuredContent: {
+        transfers: Array.from({ length: 100 }, (_, i) => ({
+          id: `owt-new-${i}`,
+          status: 'consumed',
+          released_cents: 0,
+        })),
+      },
+    }),
+    { attempts: 1, delayMs: 0 }
+  );
+  assert.equal(
+    (
+      await oldTransferProvider.reclaimUserWalletFunding({
+        userId: 'user-old',
+        purchaseId: 'purchase-old',
+        amountCents: 100,
+        currency: 'usd',
+        providerTransferId: 'owt-old',
+        idempotencyKey: 'purchase-wallet-reclaim:purchase-old',
+        reason: 'agent_cleanup_unspent_card',
+      })
+    ).metadata?.status,
+    'release_confirmed'
+  );
+  assert.equal(exactReads, 1);
+
   // A closed unspent card can leave its own fully funded company transfer consumed until
   // recover_funds pulls the cardholder's released residual. The observer must accelerate that
   // transition, while still requiring THIS transfer's terminal state before reporting success.
