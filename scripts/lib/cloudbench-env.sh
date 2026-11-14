@@ -1732,15 +1732,23 @@ cloudbench_controller_github_token() {
 # key with at least CLOUDBENCH_GUEST_GITHUB_TOKEN_MIN_TTL_SECONDS left; nothing
 # on the devbox revokes it. It is validated by a Contents read before use.
 cloudbench_guest_github_token_can_read_repo() {  # <token>
-  local repo_api="${CLOUDBENCH_GITHUB_REPO_API:-https://api.github.com/repos/Rose-Ai-Labs/rose}"
-  [ -n "${1:-}" ] || return 1
-  # GET /repos/OWNER/REPO needs only Metadata read; reading a Git ref needs the
-  # Contents permission a guest's git fetch uses.
-  # The header goes through stdin so the token never appears in argv.
-  printf 'Authorization: Bearer %s\n' "$1" \
-    | curl -fsS -o /dev/null --connect-timeout 5 --max-time 15 -H @- \
-        -H 'User-Agent: rose-cloudbench' -H 'Accept: application/vnd.github+json' \
-        "$repo_api/git/ref/heads/main" 2>/dev/null
+  # Validate the operation the guest performs: a bounded git ls-remote of the
+  # private remote (needs Contents read; spends no REST quota, so an exhausted
+  # App rate window cannot push guests back onto the rotating credential).
+  # The header lives in a mode-0600 config, never in argv or the ambient config.
+  local token="${1:-}" cfg rc bound=()
+  local url="${CLOUDBENCH_GITHUB_REPO_GIT_URL:-https://github.com/Rose-Ai-Labs/rose.git}"
+  [ -n "$token" ] || return 1
+  cfg="$(umask 077; mktemp)" || return 1
+  printf '[http]\n\textraheader = Authorization: Basic %s\n' \
+    "$(printf 'x-access-token:%s' "$token" | base64 | tr -d '\n')" >"$cfg"
+  command -v timeout >/dev/null 2>&1 && bound=(timeout 30)
+  env -u GIT_CONFIG_COUNT -u GIT_CONFIG_PARAMETERS GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=true \
+    GIT_CONFIG_GLOBAL="$cfg" GIT_CONFIG_NOSYSTEM=1 ${bound[@]+"${bound[@]}"} \
+    git -c credential.helper= ls-remote --exit-code "$url" refs/heads/main >/dev/null 2>&1
+  rc=$?
+  rm -f "$cfg"
+  return "$rc"
 }
 
 cloudbench_guest_durable_github_token() {  # [workspace-root]
@@ -1758,7 +1766,7 @@ cloudbench_guest_durable_github_token() {  # [workspace-root]
   command -v timeout >/dev/null 2>&1 && bound=(timeout 60)
   # The pool's stderr names a failure reason and never a token value.
   token="$(cd "$workspace_root" && ${bound[@]+"${bound[@]}"} python3 scripts/github_token_pool.py \
-    app-token --min-ttl "$min_ttl")" || return 1
+    app-token --min-ttl "$min_ttl" --read-repository rose)" || return 1
   cloudbench_guest_github_token_can_read_repo "$token" || {
     echo "guest GitHub App token failed the repository Contents read" >&2
     return 1

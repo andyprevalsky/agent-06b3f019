@@ -19120,6 +19120,15 @@ PY
     local wrapper worker_env; wrapper="$(mktemp)"; worker_env="$(mktemp)"
     chmod 600 "$worker_env" 2>/dev/null || true
     printf 'CLOUDBENCH_GITHUB_TOKEN_B64=%q\n' "$worker_github_token_b64" > "$worker_env"
+    # Each staging attempt rewrites this 0600 file with a freshly resolved guest
+    # token before uploading it: staging can retry for longer than a token lives.
+    # Writes only the file; never prints the token.
+    write_worker_github_env() {  # <env-file>
+        local token_b64
+        token_b64="$(controller_github_token_b64)" || return 1
+        [ -n "$token_b64" ] || return 1
+        ( umask 077; printf 'CLOUDBENCH_GITHUB_TOKEN_B64=%q\n' "$token_b64" > "$1" )
+    }
     {
         echo "set -e"
         echo 'if [ -f /tmp/rbw.env ]; then'
@@ -19295,6 +19304,8 @@ PY
                 fly_with_timeout 20 ssh sftp put -a "$APP" --machine "$wid" -q -m 0444 "$PRIVATE_SOURCE_FILE" /data/cloudbench-source-manifest.json; } \
              && run_worker_stage_cmd "upload execution provenance" \
                 fly_with_timeout 20 ssh sftp put -a "$APP" --machine "$wid" -q -m 0444 "$EXECUTION_PROVENANCE_FILE" /data/cloudbench-execution-provenance.json \
+             && run_worker_stage_cmd "refresh worker GitHub token" \
+                write_worker_github_env "$worker_env" \
              && run_worker_stage_cmd "upload worker environment" \
                 fly_with_timeout 20 ssh sftp put -a "$APP" --machine "$wid" -q -m 0600 "$worker_env" /tmp/rbw.env \
              && run_worker_stage_cmd "upload worker wrapper" \

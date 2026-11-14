@@ -37,6 +37,7 @@ SLOW_SECONDS = 2.0
 
 # GitHub App installation-token mints: installation id -> response status.
 APP_MINTS: list[dict[str, str]] = []
+APP_MINT_BODIES: list[bytes] = []
 APP_MINT_STATUS = {"777": 201}
 APP_PUBLIC_KEY: dict[str, str] = {}
 APP_EXPIRES_IN = {"seconds": 3600}
@@ -48,6 +49,7 @@ def _unb64url(text: str) -> bytes:
 
 class FakeGitHub(http.server.BaseHTTPRequestHandler):
     def do_POST(self) -> None:
+        APP_MINT_BODIES.append(self.rfile.read(int(self.headers.get("Content-Length") or 0)))
         installation = self.path.removeprefix("/app/installations/").removesuffix("/access_tokens")
         jwt = self.headers.get("Authorization", "").removeprefix("Bearer ")
         header, payload, signature = (jwt.split(".") + ["", "", ""])[:3]
@@ -329,6 +331,27 @@ class GithubTokenPoolTests(unittest.TestCase):
         missing = self.cli("app-token", environ={"GITHUB_TOKEN": "tok-primary"})
         self.assertEqual((missing.returncode, missing.stdout), (1, ""), "no App configured: fail, print nothing")
         APP_EXPIRES_IN["seconds"] = 3600
+
+    def test_guest_app_token_is_scoped_to_contents_read_and_cached_apart(self) -> None:
+        # Guests receive this token: it must carry only Contents read on the one
+        # repository they fetch, never the installation's full grant.
+        APP_MINTS.clear()
+        APP_MINT_BODIES.clear()
+        APP_MINT_STATUS["777"] = 201
+        APP_EXPIRES_IN["seconds"] = 3600
+        env = self.app_env()
+        env["GITHUB_APP_TOKEN_CACHE"] = os.environ["GITHUB_APP_TOKEN_CACHE"]
+        unscoped = self.cli("app-token", environ=env)
+        scoped = self.cli("app-token", "--read-repository", "rose", environ=env)
+        again = self.cli("app-token", "--read-repository", "rose", environ=env)
+        self.assertEqual([unscoped.stdout.strip(), scoped.stdout.strip(), again.stdout.strip()],
+                         ["app-token-1", "app-token-2", "app-token-2"], scoped.stderr)
+        self.assertEqual(APP_MINT_BODIES[0], b"", "the controller/pick token keeps the unrestricted mint")
+        self.assertEqual(json.loads(APP_MINT_BODIES[1]),
+                         {"repositories": ["rose"], "permissions": {"contents": "read"}})
+        self.assertEqual(len(APP_MINTS), 2, "the scoped token is cached apart and reused")
+        reuse = self.cli("app-token", environ=env)
+        self.assertEqual(reuse.stdout.strip(), "app-token-1", "the unrestricted cache is not overwritten")
 
     def tearDown(self) -> None:
         os.environ.pop("GITHUB_APP_TOKEN_CACHE", None)

@@ -201,13 +201,19 @@ def _write_cache(cache: Path, payload: Mapping[str, object]) -> None:
 def app_token(
     app_id: str, installation_id: str, private_key_pem: str, base_url: str | None = None,
     timeout: float = DEFAULT_TIMEOUT_SECONDS, min_ttl: float = APP_REFRESH_MARGIN_SECONDS,
-    enforce_min_ttl: bool = False,
+    enforce_min_ttl: bool = False, read_repository: str | None = None,
 ) -> str | None:
     """An installation token valid for more than `min_ttl` seconds: the private cache, else a
     fresh mint. None on failure, and with `enforce_min_ttl` also when even the fresh mint
-    expires within `min_ttl`."""
+    expires within `min_ttl`. `read_repository` mints a token limited to Contents read on
+    that one repository (guest fetches), cached separately from the unrestricted token."""
     cache = _app_cache_path()
     key = f"{app_id}:{installation_id}"
+    body = b""
+    if read_repository:
+        key += f":contents-read:{read_repository}"
+        cache = cache.with_name(f"{cache.stem}.contents-read-{read_repository}{cache.suffix}")
+        body = json.dumps({"repositories": [read_repository], "permissions": {"contents": "read"}}).encode()
     try:
         if not (_owned_private(cache.parent, directory=True) and _owned_private(cache, directory=False)):
             raise OSError("cache is absent or not private")
@@ -219,11 +225,12 @@ def app_token(
     base = (base_url or os.environ.get("GITHUB_API_BASE_URL") or DEFAULT_API_BASE).rstrip("/")
     try:
         request = urllib.request.Request(
-            f"{base}/app/installations/{installation_id}/access_tokens", method="POST", data=b"",
+            f"{base}/app/installations/{installation_id}/access_tokens", method="POST", data=body,
             headers={
                 "Authorization": f"Bearer {app_jwt(app_id, private_key_pem)}",
                 "Accept": "application/vnd.github+json",
                 "User-Agent": "rose-github-token-pool",
+                **({"Content-Type": "application/json"} if body else {}),
             },
         )
         with urllib.request.urlopen(request, timeout=timeout) as response:
@@ -244,6 +251,7 @@ def app_token(
 def configured_app_token(
     repo_root: Path | None = None, environ: Mapping[str, str] | None = None,
     base_url: str | None = None, min_ttl: float = APP_REFRESH_MARGIN_SECONDS,
+    read_repository: str | None = None,
 ) -> str | None:
     """The GitHub App installation token alone, valid for more than `min_ttl` seconds.
 
@@ -262,7 +270,8 @@ def configured_app_token(
     except ValueError:
         print("github_token_pool: GITHUB_APP_PRIVATE_KEY_B64 is not valid base64 text", file=sys.stderr)
         return None
-    return app_token(app_id, installation_id, pem, base_url, min_ttl=min_ttl, enforce_min_ttl=True)
+    return app_token(app_id, installation_id, pem, base_url, min_ttl=min_ttl, enforce_min_ttl=True,
+                     read_repository=read_repository)
 
 
 def members(
@@ -463,12 +472,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         "app-token", help="print the GitHub App installation token valid for at least --min-ttl seconds",
     )
     app_parser.add_argument("--min-ttl", type=_min_ttl, default=APP_REFRESH_MARGIN_SECONDS)
+    app_parser.add_argument(
+        "--read-repository", default=None, metavar="NAME",
+        help="limit the token to Contents read on this repository of the installation's owner",
+    )
     for sub in (pick_parser, status_parser, app_parser):
         sub.add_argument("--repo-root", type=Path, default=None)
     args = parser.parse_args(argv)
 
     if args.command == "app-token":
-        token = configured_app_token(args.repo_root, min_ttl=args.min_ttl)
+        token = configured_app_token(args.repo_root, min_ttl=args.min_ttl, read_repository=args.read_repository)
         if not token:
             print("github_token_pool: no GitHub App installation token available", file=sys.stderr)
             return 1

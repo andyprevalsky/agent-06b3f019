@@ -408,22 +408,34 @@ for envf in "$ROT/repo/back-end/.env" "$ROT/repo/agents/.env"; do
   printf 'GITHUB_TOKEN=%s\nGITHUB_DISPATCH_TOKEN=%s\n' "$DEVBOX_OLD" "$DEVBOX_OLD" >"$envf"
 done
 python3 - "$ROT" <<'PY2' &
-import http.server, sys
+import base64, http.server, sys
 from pathlib import Path
 root = Path(sys.argv[1])
 
 class H(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
+        # Dumb-HTTP Git remote (what guests fetch and the validator ls-remotes):
+        # Basic x-access-token:<token>; only live tokens may read refs. A
+        # metadata-only App token has no Contents read, so Git refuses it.
         live = {line.strip() for line in (root / "live-tokens").read_text().splitlines() if line.strip()}
         auth = self.headers.get("Authorization", "")
-        token = auth[len("Bearer "):] if auth.startswith("Bearer ") else ""
-        # A metadata-only token reads the repository object but not its Git refs.
-        ok = token in live or (token.startswith("ghs_metadata_only") and "/git/" not in self.path)
-        body, code = (b'{"ok":true}', 200) if ok else (b'{"message":"Bad credentials"}', 401)
-        self.send_response(code)
-        self.send_header("Content-Length", str(len(body)))
+        token = ""
+        if auth.startswith("Basic "):
+            token = base64.b64decode(auth[len("Basic "):]).decode().partition(":")[2]
+        if token not in live:
+            self.send_response(401)
+            self.send_header("WWW-Authenticate", 'Basic realm="github"')
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        refs = {"/rose.git/info/refs": b"1111111111111111111111111111111111111111\trefs/heads/main\n",
+                "/rose.git/HEAD": b"ref: refs/heads/main\n"}
+        body = refs.get(self.path.split("?")[0])
+        self.send_response(200 if body else 404)
+        self.send_header("Content-Type", "text/plain")
+        self.send_header("Content-Length", str(len(body or b"")))
         self.end_headers()
-        self.wfile.write(body)
+        self.wfile.write(body or b"")
 
     def log_message(self, *_args):
         pass
@@ -440,7 +452,7 @@ for _ in $(seq 1 50); do
   sleep 0.05
 done
 [ -f "$ROT/port" ] || fail "rotation mock GitHub API did not start"
-ROT_API="http://127.0.0.1:$(cat "$ROT/port")/repos/Rose-Ai-Labs/rose"
+ROT_GIT="http://127.0.0.1:$(cat "$ROT/port")/rose.git"
 # The devbox's repository-scoped Git credential helper hands out the rotating
 # token as a complete credential: Git >= 2.46 with credential.interactive=false
 # discards a password-only answer instead of prompting for the username.
@@ -452,8 +464,17 @@ printf 'import sys\nopen(%s, "a").write(" ".join(sys.argv[1:]) + "\\n")\nif sys.
   "'$ROT/pool-calls'" "'$ROT/app-token'" "'$DEVBOX_OLD'" >"$ROT/repo/scripts/github_token_pool.py"
 printf '%s' "$APP_TOKEN" >"$ROT/app-token"
 
-guest_fetch_authenticates() {  # <delivered-token>
-  [ "$(printf 'Authorization: Bearer %s\n' "$1" | curl -s --noproxy '*' -o /dev/null -w '%{http_code}' -H @- "$ROT_API")" = 200 ]
+guest_fetch_authenticates() {  # <delivered-token> — the guest's request-scoped Git auth
+  local cfg rc
+  cfg="$(umask 077; mktemp)"
+  printf '[http]\n\textraheader = Authorization: Basic %s\n' \
+    "$(printf 'x-access-token:%s' "$1" | base64 | tr -d '\n')" >"$cfg"
+  env -i PATH="$PATH" HOME="$ROT" GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=true GIT_CONFIG_GLOBAL="$cfg" \
+    GIT_CONFIG_NOSYSTEM=1 no_proxy='*' NO_PROXY='*' \
+    git -c credential.helper= ls-remote --exit-code "$ROT_GIT" refs/heads/main >/dev/null 2>&1
+  rc=$?
+  rm -f "$cfg"
+  return "$rc"
 }
 rotate_devbox_credential() {
   printf '%s' "$DEVBOX_NEW" >"$ROT/rotating"
@@ -478,7 +499,7 @@ deliver() {  # <site> — prints the token that site hands to a guest
   # A clean environment: CI runners inject Git config (GIT_CONFIG_COUNT/KEY/VALUE
   # insteadOf credentials) that would otherwise answer for the devbox helper.
   env -i GITHUB_TOKEN="$DEVBOX_OLD" HOME="$ROT" GIT_CONFIG_GLOBAL="$ROT/gitconfig" GIT_CONFIG_NOSYSTEM=1 \
-    CLOUDBENCH_GITHUB_REPO_API="$ROT_API" CLOUDBENCH_FLEET_ROOT="$ROT/repo" PATH="$PATH_NO_GH" \
+    CLOUDBENCH_GITHUB_REPO_GIT_URL="$ROT_GIT" no_proxy='*' NO_PROXY='*' CLOUDBENCH_FLEET_ROOT="$ROT/repo" PATH="$PATH_NO_GH" \
     SITE="$1" CLOUD_RESOLVER="$cloud_resolver" WRAPPER_RESOLVER="$wrapper_resolver" FLEET_FN="$fleet_fn" \
     WARM_FN="$warm_fn" LIVE_TOKENS="$ROT/live-tokens" \
     bash -c 'set -euo pipefail; . "$1"; cd "$2"; ROOT_DIR="$2"
@@ -503,6 +524,8 @@ for site in machine-env wrapper fleet-worker warm-sync; do
     || fail "$site: guest fetch after the devbox credential rotated was rejected (delivered the rotating devbox token)"
   ! grep -Fq -e "$DEVBOX_OLD" -e "$APP_TOKEN" "$ROT/deliver.err" || fail "$site: delivery printed a token"
   min_ttl="$(sed -n 's/^app-token .*--min-ttl \([0-9]*\).*/\1/p' "$ROT/pool-calls" | head -1)"
+  grep -q '^app-token .*--read-repository rose' "$ROT/pool-calls" \
+    || fail "$site: guest App token must be scoped to Contents read on the benchmark repository"
   [ "${min_ttl:-0}" -ge 1800 ] || fail "$site: guest App token must be requested with a min TTL covering guest boot (got '${min_ttl:-none}')"
 done
 pass "guest delivery sites hand guests a credential that survives devbox token rotation"
@@ -522,7 +545,7 @@ printf '%s' "ghs_metadata_only_app_token" >"$ROT/app-token"  # Metadata read, no
 delivered="$(deliver machine-env 2>/dev/null)" || fail "a metadata-only App token must fall back"
 [ "$delivered" = "$DEVBOX_NEW" ] || fail "an App token without Contents read must not be delivered"
 pinned="$(env -i HOME="$ROT" CLOUDBENCH_GITHUB_TOKEN_B64="$(printf '%s' 'pinned-request-token' | base64 | tr -d '\n')" \
-  CLOUDBENCH_GITHUB_REPO_API="$ROT_API" CLOUDBENCH_FLEET_ROOT="$ROT/repo" PATH="$PATH_NO_GH" \
+  CLOUDBENCH_GITHUB_REPO_GIT_URL="$ROT_GIT" CLOUDBENCH_FLEET_ROOT="$ROT/repo" PATH="$PATH_NO_GH" \
   bash -c '. "$1"; cloudbench_guest_github_token "$2"' _ "$ROOT_DIR/scripts/lib/cloudbench-env.sh" "$ROT/repo")"
 [ "$pinned" = pinned-request-token ] || fail "an explicit CLOUDBENCH_GITHUB_TOKEN_B64 pin must still win"
 # The fleet must not pin one resolved token into every later child via export.
@@ -541,6 +564,19 @@ for at in exports:
     if end < 0 or "\n    fi" in text[at:end]:
         raise SystemExit("export is not inside the refresh-deps pipeline group")
 PY2
+# Worker staging can retry for longer than a token lives: every attempt rewrites
+# the 0600 env file with a freshly resolved token immediately before uploading it.
+python3 - "$ROOT_DIR/scripts/run-bench-fleet" <<'PY3' \
+  || fail "run-bench-fleet must refresh the worker GitHub token before each worker env upload"
+from pathlib import Path
+import sys
+text = Path(sys.argv[1]).read_text()
+loop = text[text.index('for attempt in $(seq 1 "$stage_attempts"); do'):]
+upload = loop.index('"upload worker environment"')
+refresh = loop.rfind('"refresh worker GitHub token"', 0, upload)
+if refresh < 0 or 'write_worker_github_env "$worker_env"' not in loop[refresh:upload]:
+    raise SystemExit("worker env uploaded without a per-attempt token refresh")
+PY3
 pass "guest token falls back to the live controller chain without the App; explicit pins still win"
 python3 "$ROOT_DIR/scripts/tests/cloudbench-github-token-probes.test.py"
 pass "controller resolver validates each distinct candidate once per resolution"
