@@ -112,6 +112,34 @@ function maxArtifactBytes(): number {
   return Number.isFinite(raw) && raw > 0 ? raw : 200 * 1024 * 1024;
 }
 
+/** Default bound for one checkpoint shell step (scan, repo inspection, archive). */
+const STEP_TIMEOUT_MS = 300_000;
+/** Worktree download timeout: this floor plus the archive size at 2 MiB/s. */
+const ARCHIVE_READ_BASE_MS = 10_000;
+const ARCHIVE_READ_BYTES_PER_SEC = 2 * 1024 * 1024;
+
+export class CheckpointDeadlineError extends Error {
+  constructor(step: string) {
+    super(`Checkpoint deadline passed before ${step}`);
+    this.name = 'CheckpointDeadlineError';
+  }
+}
+
+/** A step's timeout: its own bound, never past the checkpoint deadline. */
+function stepTimeoutMs(deadlineAt: number | undefined, capMs: number, step: string): number {
+  if (deadlineAt === undefined) return capMs;
+  const remaining = deadlineAt - Date.now();
+  if (remaining <= 0) throw new CheckpointDeadlineError(step);
+  return Math.min(capMs, remaining);
+}
+
+/** Read options for a sandbox download: unbounded by us without a deadline (SDK default). */
+function readOpts(deadlineAt: number | undefined, step: string): { timeoutMs?: number } {
+  return deadlineAt === undefined
+    ? {}
+    : { timeoutMs: stepTimeoutMs(deadlineAt, STEP_TIMEOUT_MS, step) };
+}
+
 /** More deleted tracked files than this and the repo's whole working tree stays in the archive. */
 const MAX_DELETED_TRACKED_FILES = 2000;
 
@@ -198,7 +226,8 @@ async function inspectRepo(
   tmp: string,
   repoPath: string,
   index: number,
-  diffBase: string | null
+  diffBase: string | null,
+  deadlineAt: number | undefined
 ): Promise<{ repo: CheckpointRepo; bundleFile: string | null }> {
   const dir = repoPath === '' ? fs.home : `${fs.home}/${repoPath}`;
   const bundleFile = `${tmp}/repo-${index}.bundle`;
@@ -228,7 +257,8 @@ async function inspectRepo(
       'fi',
       `git status --porcelain=v1 -uall 2>/dev/null | head -500 > ${shellQuote(`${tmp}/dirty-${index}.txt`)}`,
       'exit 0',
-    ].join('\n')
+    ].join('\n'),
+    { timeoutMs: stepTimeoutMs(deadlineAt, 120_000, 'repo inspection') }
   );
   const values = parseKeyValues(result.stdout);
   const head = values.get('HEAD') || null;
@@ -236,7 +266,9 @@ async function inspectRepo(
   const hasRemoteRefs = (values.get('REMOTE_REFS') ?? '') !== '';
   let dirtyFiles: string[] = [];
   try {
-    dirtyFiles = (await fs.readFile(`${tmp}/dirty-${index}.txt`))
+    dirtyFiles = (
+      await fs.readFile(`${tmp}/dirty-${index}.txt`, readOpts(deadlineAt, 'dirty list'))
+    )
       .toString('utf8')
       .split('\n')
       .filter((line) => line.trim() !== '');
@@ -308,14 +340,20 @@ export interface CreateCheckpointParams {
   codeProvider: string;
   /** Merge target the per-file diff stats are measured against (null = default branch). */
   diffBase?: string | null;
+  /**
+   * Epoch ms the whole checkpoint must finish by (close: well inside the worker's
+   * close timeout). Every step is bounded by it; past it the checkpoint throws.
+   */
+  deadlineAt?: number;
 }
 
 /** Capture HOME into a new checkpoint and upload it. Returns the manifest. */
 export async function createCheckpoint(
   params: CreateCheckpointParams
 ): Promise<CheckpointManifest> {
-  const { fs, userId, codeSessionId, seq, reason, codeProvider } = params;
+  const { fs, userId, codeSessionId, seq, reason, codeProvider, deadlineAt } = params;
   const tmp = tmpDirFor(codeSessionId, seq, 'ckpt');
+  const capBytes = maxArtifactBytes();
   const home = fs.home;
   const capKb = Math.max(1, Math.floor(maxFileBytes() / 1024));
   const prune = EXCLUDED_DIR_NAMES.map((name) => `-name ${shellQuote(name)}`).join(' -o ');
@@ -343,7 +381,7 @@ export async function createCheckpoint(
       'echo "CLILOG=$L"',
       'exit 0',
     ].join('\n'),
-    { timeoutMs: 300_000 }
+    { timeoutMs: stepTimeoutMs(deadlineAt, STEP_TIMEOUT_MS, 'scan') }
   );
   if (scan.exitCode !== 0) {
     throw new Error(
@@ -368,10 +406,11 @@ export async function createCheckpoint(
         tmp,
         repoPath,
         index,
-        params.diffBase ?? null
+        params.diffBase ?? null,
+        deadlineAt
       );
       if (bundleFile !== null && repo.bundle !== null) {
-        artifacts.set(repo.bundle, await fs.readFile(bundleFile));
+        artifacts.set(repo.bundle, await fs.readFile(bundleFile, readOpts(deadlineAt, 'bundle')));
       }
       repos.push(repo);
     }
@@ -388,15 +427,25 @@ export async function createCheckpoint(
         `cd ${shellQuote(home)} || exit 3`,
         ': > "$T/tracked.txt"',
         ...gitRepos.map(({ repo, index }) => gitTrackedScan(repo.path, index)),
-        `tar -czf "$T/${WORKTREE_ARTIFACT}" ${excludes} -C ${shellQuote(home)} .`,
-        'TAR_RC=$?',
+        // The archive is never downloaded past the cap: head stops tar one byte
+        // over it, and the size is reported so an over-cap archive is refused here.
+        `tar -czf - ${excludes} -C ${shellQuote(home)} . | head -c ${capBytes + 1} > "$T/${WORKTREE_ARTIFACT}"`,
+        'TAR_RC=${PIPESTATUS[0]}',
+        `SIZE=$(wc -c < "$T/${WORKTREE_ARTIFACT}" | tr -d ' ')`,
+        'echo "WORKTREE_BYTES=$SIZE"',
+        `if [ "$SIZE" -gt ${capBytes} ]; then echo "WORKTREE_OVER_CAP=1"; exit 6; fi`,
         // GNU tar exits 1 when a file changed while it was read; still usable.
         'if [ "$TAR_RC" -gt 1 ]; then echo "TAR_FAILED=$TAR_RC"; exit 5; fi',
         'awk \'FILENAME==ARGV[1]{m[$0]=1;next} !($0 in m)\' "$T/tracked.txt" "$T/large.txt" > "$T/large-skipped.txt"',
         'exit 0',
       ].join('\n'),
-      { timeoutMs: 300_000 }
+      { timeoutMs: stepTimeoutMs(deadlineAt, STEP_TIMEOUT_MS, 'archive') }
     );
+    if (archive.stdout.includes('WORKTREE_OVER_CAP=1')) {
+      throw new Error(
+        `Checkpoint worktree is over ${capBytes} bytes (cap); refusing to download or store`
+      );
+    }
     if (archive.exitCode !== 0) {
       throw new Error(
         `Checkpoint archive failed (exit ${archive.exitCode}): ${archive.stderr.slice(0, 500) || archive.stdout.slice(0, 500)}`
@@ -408,7 +457,9 @@ export async function createCheckpoint(
       const repo = repos[Number(backed[1])];
       if (repo === undefined) continue;
       repo.worktreeFromGit = true;
-      repo.deletedFiles = (await fs.readFile(`${tmp}/del-${backed[1]}.txt`))
+      repo.deletedFiles = (
+        await fs.readFile(`${tmp}/del-${backed[1]}.txt`, readOpts(deadlineAt, 'deleted list'))
+      )
         .toString('utf8')
         .split('\n')
         .filter(Boolean);
@@ -419,24 +470,36 @@ export async function createCheckpoint(
       if (omitted !== null && repo !== undefined) repo.gitOmittedFiles = Number(omitted[2]);
     }
 
-    const worktree = await fs.readFile(`${tmp}/${WORKTREE_ARTIFACT}`);
-    if (worktree.length > maxArtifactBytes()) {
+    const sizeLine = archive.stdout.split('\n').find((line) => line.startsWith('WORKTREE_BYTES='));
+    const reportedBytes = Number(sizeLine?.slice('WORKTREE_BYTES='.length).trim() ?? NaN);
+    const sizeTimeoutMs =
+      ARCHIVE_READ_BASE_MS +
+      Math.ceil(
+        ((Number.isFinite(reportedBytes) ? reportedBytes : capBytes) / ARCHIVE_READ_BYTES_PER_SEC) *
+          1000
+      );
+    const worktree = await fs.readFile(`${tmp}/${WORKTREE_ARTIFACT}`, {
+      timeoutMs: stepTimeoutMs(deadlineAt, sizeTimeoutMs, 'worktree download'),
+    });
+    if (worktree.length > capBytes) {
       throw new Error(
-        `Checkpoint worktree is ${worktree.length} bytes (cap ${maxArtifactBytes()}); refusing to store`
+        `Checkpoint worktree is ${worktree.length} bytes (cap ${capBytes}); refusing to store`
       );
     }
     artifacts.set(WORKTREE_ARTIFACT, worktree);
 
     let cliSessionId: string | null = null;
     if (cliLogPath !== null) {
-      const content = await fs.readFile(`${home}/${cliLogPath}`);
+      const content = await fs.readFile(`${home}/${cliLogPath}`, readOpts(deadlineAt, 'CLI log'));
       artifacts.set(CLI_LOG_ARTIFACT, content);
       cliSessionId = cliSessionIdFromLog(codeProvider, cliLogPath, content);
     }
 
     let skippedLargeFiles: string[] = [];
     try {
-      skippedLargeFiles = (await fs.readFile(`${tmp}/large-skipped.txt`))
+      skippedLargeFiles = (
+        await fs.readFile(`${tmp}/large-skipped.txt`, readOpts(deadlineAt, 'skipped list'))
+      )
         .toString('utf8')
         .split('\n')
         .map((line) => line.replace(/^\.\//, ''))
@@ -460,6 +523,7 @@ export async function createCheckpoint(
       skippedLargeFiles,
     };
     for (const [name, data] of artifacts) {
+      stepTimeoutMs(deadlineAt, STEP_TIMEOUT_MS, `upload of ${name}`);
       await putCheckpointObject(checkpointKey(userId, codeSessionId, seq, name), data);
       manifest.artifacts[name] = { sha256: sha256(data), size: data.length };
     }
@@ -476,7 +540,12 @@ export async function createCheckpoint(
     });
     return manifest;
   } finally {
-    await fs.exec(`rm -rf ${shellQuote(tmp)}`).catch(() => undefined);
+    await fs
+      .exec(
+        `rm -rf ${shellQuote(tmp)}`,
+        deadlineAt === undefined ? undefined : { timeoutMs: 15_000 }
+      )
+      .catch(() => undefined);
   }
 }
 
@@ -618,6 +687,13 @@ export async function applyCheckpoint(
           // Mixed reset: index matches HEAD, the restored working files stay.
           'git reset -q',
           ...rebuildTracked,
+          // A sandbox that pushes carries the pushing account's identity
+          // (codeAgentGitIdentity.ts): record it, since an address GitHub cannot
+          // link makes Vercel block the commit. GIT_AUTHOR_* also beats repo
+          // config at commit time, so the local-only default below never
+          // reaches a push; it keeps git usable where nothing pushes (an
+          // inspection restores without credentials).
+          'if [ -n "${GIT_AUTHOR_NAME:-}" ] && [ -n "${GIT_AUTHOR_EMAIL:-}" ]; then git config user.name "$GIT_AUTHOR_NAME"; git config user.email "$GIT_AUTHOR_EMAIL"; fi',
           'git config user.name >/dev/null || git config user.name "Rose Agent"',
           'git config user.email >/dev/null || git config user.email "agent@roselabs.ai"',
         ].join('\n'),

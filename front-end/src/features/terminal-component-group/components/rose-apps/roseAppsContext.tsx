@@ -5,12 +5,19 @@
  *   [CLOSED] --click Browser icon | openAgentBrowser(agent, task)--> [BROWSER]
  *   Agent displays are not an app: they render inline in the chat (expandable).
  *   [CLOSED] --Phone icon--> [PHONE]   --Integrations icon--> [INTEGRATIONS]
+ *   [ANY] --openPhoneDevice() (iPhone row Connect/View)--> [PHONE + DEVICE VIEW]
+ *     (the device itself, whoever uses it; cleared by any toggleApp or a new
+ *     selected agent, after which the Phone app shows the selected agent again)
  *   [CLOSED] --left bar Feedback / Benchmarks / account row--> [FEEDBACK|BENCHMARKS|SETTINGS]
  *   [ANY] --click its trigger again | close button | Escape--> [CLOSED]
  *   [ANY] --another trigger--> that app
  *
  * BROWSER TAB (only meaningful while [BROWSER]):
  *   [ROOT] --click agent tab | openAgentBrowser--> [AGENT(id, taskId)]
+ *   [ANY] --openAgentBrowserTab(agent) (task id unknown)--> [AGENT(agent's first tab)],
+ *     else no selection + pending switch: the agent's tab takes over when it registers
+ *   [ANY] --openAgentBrowser(agent, task)--> [AGENT(agent, task)] and clears any pending
+ *     switch: a later-registering tab of that agent never replaces the explicit task
  *   [AGENT(id, taskId)] --click Root tab--> [ROOT]
  *   selectedAgentId changes | Browser opens --> [AGENT(selected)] if it has a
  *     browser tab, else [NO_SESSION] (an agent is selected) or [ROOT] (Home).
@@ -39,8 +46,11 @@
  * Research/Careers/Download links give way to the app icons) and
  * --rose-app-icons-inset (px the top-right icon row occupies, so the account
  * rail sits left of it). Panels overlay the content: there is no right bar and
- * no content inset (UI ledger row 66). Panels portal to <body>; they mount on
- * first open (lazy) and stay mounted afterwards so they can slide out.
+ * no content inset (UI ledger row 66). The drawer width clamp subtracts the
+ * live left-bar offset (--rose-bar-offset, re-read on ROSE_BAR_OFFSET_EVENT),
+ * so a pinned bar plus a right panel still leaves CHAT_MIN_WIDTH for the chat.
+ * Panels portal to <body>; they mount on first open (lazy) and stay mounted
+ * afterwards so they can slide out.
  */
 
 import {
@@ -52,9 +62,17 @@ import {
   useState,
   type ReactNode,
 } from 'react';
+import { captureTeamInviteLink, removeTeamInviteFromUrl } from '@/lib/teamInviteLink';
 import { createPortal } from 'react-dom';
+import { PhoneLauncherContext, type PhoneLauncher } from '@/hooks/phoneLauncherContext';
 import type { Agent } from '../../hooks';
-import { appIconsInset, clampDrawerWidth, defaultDrawerWidth } from './roseAppsLayout';
+import {
+  appIconsInset,
+  clampDrawerWidth,
+  defaultDrawerWidth,
+  readLeftBarOffset,
+} from './roseAppsLayout';
+import { ROSE_BAR_OFFSET_EVENT } from '../rose-sidebar/roseSidebarLayout';
 import { ROSE_APP_ICON_COUNT } from './roseAppCatalog';
 import { RoseAppDrawers } from './RoseAppDrawers';
 import {
@@ -73,6 +91,8 @@ interface ProviderProps {
   onSelectAgent?: (agentId: string) => void;
   /** Publish the layout CSS variables on <html> (only the app's terminal layout does). */
   publishLayout?: boolean;
+  /** Invitation auto-open waits for the existing signup/auth gate. */
+  invitationReady?: boolean;
   /** Sign out, offered at the bottom of the Settings panel. */
   onLogout?: () => void;
   onCreateAgentInProject?: (
@@ -150,22 +170,38 @@ function useDrawerWidthState() {
   const [viewport, setViewport] = useState(() =>
     typeof window === 'undefined' ? 1440 : window.innerWidth,
   );
+  // A pinned Rose bar pushes the chat right; the panel clamp keeps CHAT_MIN_WIDTH beside it.
+  const [leftOffset, setLeftOffset] = useState(readLeftBarOffset);
   useEffect(() => {
     const onResize = () => setViewport(window.innerWidth);
+    const onBarOffset = () => setLeftOffset(readLeftBarOffset());
     window.addEventListener('resize', onResize);
-    return () => window.removeEventListener('resize', onResize);
+    window.addEventListener(ROSE_BAR_OFFSET_EVENT, onBarOffset);
+    // The bar publishes its first offset in a layout effect that runs before this
+    // listener exists (a reload with the bar pinned): read it once now.
+    onBarOffset();
+    return () => {
+      window.removeEventListener('resize', onResize);
+      window.removeEventListener(ROSE_BAR_OFFSET_EVENT, onBarOffset);
+    };
   }, []);
-  const drawerWidth = clampDrawerWidth(width ?? defaultDrawerWidth(viewport), viewport);
+  const drawerWidth = clampDrawerWidth(
+    width ?? defaultDrawerWidth(viewport, leftOffset),
+    viewport,
+    leftOffset,
+  );
   const setDrawerWidth = useCallback((next: number) => setWidth(next), []);
   return { drawerWidth, setDrawerWidth };
 }
 
+/** Coordinate app drawers and deferred browser-tab selection for the selected agent. */
 export function RoseAppsProvider({
   children,
   agents = [],
   selectedAgentId = null,
   onSelectAgent,
   publishLayout = false,
+  invitationReady = publishLayout,
   onLogout,
   onCreateAgentInProject,
   newAgentFolderId,
@@ -176,9 +212,26 @@ export function RoseAppsProvider({
   const [browserMode, setBrowserMode] = useState<'local' | 'remote'>(
     localLink ? 'local' : 'remote',
   );
-  const [openApp, setOpenApp] = useState<RoseApp | null>(
-    publishLayout && localLink ? 'browser' : null,
+  const [openApp, setOpenApp] = useState<RoseApp | null>(() =>
+    publishLayout && invitationReady && captureTeamInviteLink().teamId
+      ? 'teams'
+      : publishLayout && localLink
+        ? 'browser'
+        : null,
   );
+  const openedInvite = useRef(false);
+  useEffect(() => {
+    if (!publishLayout || !invitationReady) return;
+    removeTeamInviteFromUrl();
+    // This provider may have mounted while signed out. Its state initializer
+    // does not rerun when phone sign-in later enables the app layout.
+    if (!openedInvite.current && captureTeamInviteLink().teamId) {
+      openedInvite.current = true;
+      setOpenApp('teams');
+    }
+  }, [publishLayout, invitationReady]);
+  /** Phone app pinned to the device view (opened from the iPhone integration row). */
+  const [phoneDeviceView, setPhoneDeviceView] = useState(false);
   const [browserSelection, setBrowserSelection] = useState<{
     agentId: string;
     taskId: string;
@@ -211,7 +264,7 @@ export function RoseAppsProvider({
   // may register after the selection, so a pending switch completes on register.
   const tabsRef = useRef(tabs);
   tabsRef.current = tabs;
-  const pendingSwitchRef = useRef<string | null>(null);
+  const pendingSwitchRef = useRef<string | null>(selectedAgentId);
   const isFirstSelectionRef = useRef(true);
   useEffect(() => {
     if (isFirstSelectionRef.current) {
@@ -247,6 +300,7 @@ export function RoseAppsProvider({
       if (app === 'browser' && openApp !== 'browser') {
         setBrowserRootChosen(false);
         const tab = tabsRef.current.find((t) => t.agentId === selectedAgentId);
+        pendingSwitchRef.current = tab ? null : selectedAgentId;
         setBrowserSelection((current) => {
           if (
             current &&
@@ -258,22 +312,43 @@ export function RoseAppsProvider({
           return tab ? { agentId: tab.agentId, taskId: tab.taskId } : null;
         });
       }
+      setPhoneDeviceView(false);
       setOpenApp((prev) => (prev === app ? null : app));
     },
     [openApp, selectedAgentId],
   );
   const closeApp = useCallback(() => setOpenApp(null), []);
+  const openPhoneDevice = useCallback(() => {
+    setPhoneDeviceView(true);
+    setOpenApp('phone');
+  }, []);
+  useEffect(() => setPhoneDeviceView(false), [selectedAgentId]);
+  const phoneLauncher = useMemo<PhoneLauncher>(() => ({ openPhoneDevice }), [openPhoneDevice]);
 
   const openAgentBrowser = useCallback(
     (agentId: string, taskId: string) => {
       setBrowserMode('remote');
       focusTask(agentId, taskId);
       setBrowserRootChosen(false);
+      // An explicit task beats a pending agent switch: another task of that agent
+      // registering later must not replace it.
+      pendingSwitchRef.current = null;
       setBrowserSelection({ agentId, taskId });
       setOpenApp('browser');
     },
     [focusTask],
   );
+
+  // Task id unknown (a dock row of another agent's browser task): never invent a
+  // tab for it; select the agent's real tab, or wait for it to register.
+  const openAgentBrowserTab = useCallback((agentId: string) => {
+    setBrowserMode('remote');
+    const tab = tabsRef.current.find((t) => t.agentId === agentId);
+    pendingSwitchRef.current = tab ? null : agentId;
+    setBrowserRootChosen(false);
+    setBrowserSelection(tab ? { agentId: tab.agentId, taskId: tab.taskId } : null);
+    setOpenApp('browser');
+  }, []);
 
   const selectBrowserTab = useCallback(
     (agentId: string | null, taskId?: string) => {
@@ -281,6 +356,7 @@ export function RoseAppsProvider({
         (t) => t.agentId === agentId && (taskId === undefined || t.taskId === taskId),
       );
       setBrowserSelection(tab ? { agentId: tab.agentId, taskId: tab.taskId } : null);
+      pendingSwitchRef.current = null;
       setBrowserRootChosen(agentId === null);
       if (agentId !== null && agentId !== selectedAgentId) onSelectAgent?.(agentId);
     },
@@ -329,7 +405,10 @@ export function RoseAppsProvider({
       reloadBrowser,
       toggleApp,
       closeApp,
+      phoneDeviceView,
+      openPhoneDevice,
       openAgentBrowser,
+      openAgentBrowserTab,
       selectBrowserTab,
       openAgent,
       onLogout,
@@ -360,7 +439,10 @@ export function RoseAppsProvider({
       reloadBrowser,
       toggleApp,
       closeApp,
+      phoneDeviceView,
+      openPhoneDevice,
       openAgentBrowser,
+      openAgentBrowserTab,
       selectBrowserTab,
       openAgent,
       onLogout,
@@ -377,8 +459,10 @@ export function RoseAppsProvider({
 
   return (
     <RoseAppsContext.Provider value={value}>
-      {children}
-      {typeof document !== 'undefined' && createPortal(<RoseAppDrawers />, document.body)}
+      <PhoneLauncherContext.Provider value={phoneLauncher}>
+        {children}
+        {typeof document !== 'undefined' && createPortal(<RoseAppDrawers />, document.body)}
+      </PhoneLauncherContext.Provider>
     </RoseAppsContext.Provider>
   );
 }

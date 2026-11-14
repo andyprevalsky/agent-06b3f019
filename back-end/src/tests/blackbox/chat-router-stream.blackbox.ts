@@ -37,6 +37,7 @@ import {
   requireRouterDecision,
 } from '../../providers/chat/routerDecision';
 import { recoverChatHandlerFailure } from '../../providers/chat/chatHandlerFailure';
+import { ROUTER_JSON_SCHEMA } from '../../providers/chat/routerDecisionJsonSchema';
 import {
   ChatLlmTransientMissError,
   MAX_CHAT_STRUCTURED_ATTEMPTS,
@@ -125,6 +126,42 @@ function testCompleteStreamParsesWithoutDeadline(): void {
     action: 'start_superintelligence',
     reasoning: 'this is a purchase',
     goal: 'buy nicotine patches and AirPods',
+    mode: 'plan',
+  });
+}
+
+/**
+ * The router serializes its fields in the schema's declared order. An
+ * escalation stream cut off inside `queries` (FLAKY 6a3ec2af: the GLM failover
+ * wrote search text there) must still carry a closed goal and mode, so the
+ * deadline recovers the escalation instead of regenerating the turn.
+ */
+function testDeadlineRecoversEscalationCutInsideQueries(): void {
+  const values: Record<string, unknown> = {
+    reasoning: 'The user corrected the address to 88 Harlow St.',
+    action: 'start_superintelligence',
+    goal: 'Find the best hot yoga class this weekend near 88 Harlow St, San Francisco.',
+    mode: 'plan',
+    queries: ['hot yoga studios near 88 Harlow St', 'hot yoga schedule San Francisco'],
+    grep: null,
+  };
+  const json = `{${Object.keys(ROUTER_JSON_SCHEMA.properties)
+    .map((field) => `${JSON.stringify(field)}: ${JSON.stringify(values[field])}`)
+    .join(', ')}}`;
+  const cut = json.slice(0, json.indexOf('San Francisco"]'));
+  assert.ok(cut.includes('"queries"'), 'precondition: the stream is cut inside queries');
+  const acc = new StructuredOutputAccumulator();
+  acc.addText(cut, { item_id: 'legacy:content:0', phase: 'unknown' });
+
+  const result = finalizeRouterDecisionFromStream({
+    structuredOutput: acc,
+    accumulatedJson: cut,
+    deadlineExpired: true,
+  });
+  assert.deepEqual(result.decision, {
+    action: 'start_superintelligence',
+    reasoning: values.reasoning,
+    goal: values.goal,
     mode: 'plan',
   });
 }
@@ -455,6 +492,7 @@ async function main(): Promise<void> {
   testReasoningOnlyDoesNotThrowCardinality();
   testDeadlineRecoversPartialDirectAnswer();
   testCompleteStreamParsesWithoutDeadline();
+  testDeadlineRecoversEscalationCutInsideQueries();
   testRequireRouterDecisionTypesEveryMiss();
   testRequireGeneratorParsedJsonTypesEveryMiss();
   await testFirstMissRegeneratesInsteadOfApologizing();
@@ -464,7 +502,7 @@ async function main(): Promise<void> {
   testCallSitesUseSharedRegenerate();
   testRetryResetsPerAttemptStreamState();
   testUsageAccumulatesAcrossAttempts();
-  process.stdout.write('PASS chat-router-stream (13 cases)\n');
+  process.stdout.write('PASS chat-router-stream (14 cases)\n');
 }
 
 void main().catch((error: unknown) => {

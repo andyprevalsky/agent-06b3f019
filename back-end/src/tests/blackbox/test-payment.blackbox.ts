@@ -127,110 +127,74 @@ async function withFakeStripe<T>(
 
 const tests: Array<[string, () => Promise<void>]> = [
   [
-    'benchmark AgentCard setup refuses an unverified production fixture',
+    'v2 benchmark AgentCard setup refuses live mode before any integration write',
     async () => {
       const userId = `benchmark-agentcard-unverified-${Date.now()}`;
-      let errorMessage = '';
+      let message = '';
       try {
         await configureBenchmarkAgentCardSetup(
           { userId, action: 'complete' },
           {
-            resolveCardholderId: async () => 'cardholder-unverified-fixture',
-            getCardholderVerificationStatus: async () => 'not_started',
+            getV2FixtureUserId: () => 'usr_fixture_live',
+            v2Request: async () => ({ livemode: true, default_funds_source: 'company_flow' }),
           }
         );
       } catch (error) {
-        errorMessage = error instanceof Error ? error.message : String(error);
+        message = error instanceof Error ? error.message : String(error);
       }
-      try {
-        assert(
-          errorMessage.includes('not ready') && errorMessage.includes('not_started'),
-          `expected readiness failure, got "${errorMessage}"`
-        );
-        const integration = await prisma.integration.findUnique({
-          where: { userId_name_accountId: { userId, name: 'agentcard', accountId: '' } },
-        });
-        assert(integration === null, 'unverified cardholder must not be marked CONNECTED');
-      } finally {
-        await prisma.integration.deleteMany({ where: { userId, name: 'agentcard' } });
-      }
+      assert(message.includes('sandbox credentials'), `expected sandbox-mode refusal: ${message}`);
+      assert(
+        (await prisma.integration.count({ where: { userId } })) === 0,
+        'live mode must not write a fixture'
+      );
     },
   ],
   [
-    'benchmark AgentCard setup endpoint persists connect and reset transitions',
+    'v2 benchmark setup persists exclusive complete/reset transitions without legacy aliases',
     async () => {
       const userId = `benchmark-agentcard-setup-${Date.now()}`;
+      const providerId = `usr_fixture_${Date.now()}`;
+      await prisma.user.create({ data: { userId, isAnonymous: true } });
+      const deps = {
+        getV2FixtureUserId: () => providerId,
+        v2Request: async (_method: string, resource: string) =>
+          resource.endsWith('company_wallet')
+            ? { livemode: false, default_funds_source: 'company_flow' }
+            : { status: 'pending' },
+      };
       try {
-        const connected = await request('/api/test-payment/lifecycle/agentcard-setup', {
+        const missing = await request('/api/test-payment/lifecycle/agentcard-setup', {
           method: 'POST',
-          body: JSON.stringify({ userId, action: 'complete' }),
+          body: JSON.stringify({ action: 'complete' }),
         });
-        // Infra precondition, not a code regression: the `complete` action
-        // correctly refuses (409) when the benchmark AgentCard cardholder has
-        // not been verified at the org (e.g. `not_started` — a KYC/provisioning
-        // state external to this repo). We cannot exercise the connect/reset
-        // transitions without a verified cardholder, so skip loudly rather than
-        // fail the deploy gate. When the cardholder IS verified (the normal
-        // state), every assertion below runs — this self-heals with no code
-        // change. Mirrors the codex/claude credential-skip precedent.
-        if (
-          connected.status === 409 &&
-          /cardholder is not ready/i.test(JSON.stringify(connected.data))
-        ) {
-          writeLine(
-            `⚠️  SKIP: benchmark AgentCard cardholder not verified at org ` +
-              `(${JSON.stringify(connected.data)}); AgentCard-infra precondition, ` +
-              `not a code regression — connect/reset assertions skipped.`
-          );
-          return;
-        }
-        if (
-          connected.status === 502 &&
-          /invalid or expired organization token|invalid client secret|Could not obtain an AgentCard Organization MCP access token|Timed out acquiring an AgentCard Organization MCP access token|Could not reach the AgentCard Organization MCP token endpoint/i.test(
-            JSON.stringify(connected.data)
-          )
-        ) {
-          writeLine(
-            `⚠️  SKIP: AgentCard sandbox org token unavailable from provider ` +
-              `(${JSON.stringify(connected.data)}); credential-infra precondition, ` +
-              `not a code regression — connect/reset assertions skipped.`
-          );
-          return;
-        }
-        if (
-          (connected.status === 502 || connected.status === 503) &&
-          /temporarily unavailable|service unavailable/i.test(JSON.stringify(connected.data))
-        ) {
-          writeLine(
-            `⚠️  SKIP: AgentCard sandbox organization MCP is temporarily unavailable ` +
-              `(${JSON.stringify(connected.data)}); provider-infra precondition, ` +
-              `not a code regression — connect/reset assertions skipped.`
-          );
-          return;
-        }
-        assertStatus(connected.status, 200, connected.data);
+        assertStatus(missing.status, 400, missing.data);
         assert(
-          (connected.data as { status?: string }).status === 'connected',
-          'expected connected setup state'
+          (await configureBenchmarkAgentCardSetup({ userId, action: 'complete' }, deps)).status ===
+            'connected',
+          'expected v2 connected setup'
         );
         const integration = await prisma.integration.findUnique({
           where: { userId_name_accountId: { userId, name: 'agentcard', accountId: '' } },
         });
-        assert(integration?.status === 'CONNECTED', 'expected persisted connected integration');
-        assert(integration?.isActive === true, 'expected active connected integration');
-
-        const reset = await request('/api/test-payment/lifecycle/agentcard-setup', {
-          method: 'POST',
-          body: JSON.stringify({ userId, action: 'reset' }),
-        });
-        assertStatus(reset.status, 200, reset.data);
+        assert(integration?.status === 'CONNECTED', 'expected persisted connection');
         assert(
-          (reset.data as { status?: string }).status === 'connect_required',
-          'expected reset setup state'
+          (integration?.config as Record<string, unknown>).v2UserId === providerId,
+          'expected provider user.id'
+        );
+        assert(
+          (await configureBenchmarkAgentCardSetup({ userId, action: 'reset' }, deps)).status ===
+            'connect_required',
+          'expected reset'
         );
         await assertBenchmarkAgentCardResetFixture(userId);
+        assert(
+          (await configureBenchmarkAgentCardSetup({ userId, action: 'complete' }, deps)).status ===
+            'connected',
+          'expected restored same identity'
+        );
       } finally {
         await prisma.integration.deleteMany({ where: { userId, name: 'agentcard' } });
+        await prisma.user.deleteMany({ where: { userId } });
       }
     },
   ],

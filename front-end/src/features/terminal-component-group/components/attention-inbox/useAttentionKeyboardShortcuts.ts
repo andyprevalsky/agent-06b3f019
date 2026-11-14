@@ -29,6 +29,7 @@ export function useAttentionKeyboardShortcuts({
 
       if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
         e.preventDefault();
+        if (getAuthAssistanceMetadata(firstUnanswered)?.target) return;
         onRespond(firstUnanswered.id);
       }
       if ((e.metaKey || e.ctrlKey) && e.key === 's') {

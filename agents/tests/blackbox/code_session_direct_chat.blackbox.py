@@ -12,7 +12,7 @@ Covered:
     (``deliver_user_turn_to_code_session`` + ws-server dedupe by turn id);
   * turns need the per-session token;
   * while the user holds the session, Rose's ``sender="agent"`` turns are
-    rejected with ``relay_paused`` until the hand back, and the monitoring
+    acked ``queued`` and delivered after the hand back, and the monitoring
     activity neither writes to the CLI nor ends the session;
   * typed turn → first streamed token stays far under the 3 s p50 bar;
   * ws-server output for the recordings matches the committed event fixtures
@@ -30,7 +30,7 @@ import statistics
 import time
 from pathlib import Path
 from typing import Any, Optional
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from _test_utils import BlackboxResult, teardown_mock
 
@@ -484,7 +484,10 @@ async def test_direct_turn_requires_the_session_token():
         sandbox.stop()
 
 
-async def test_agent_relay_paused_while_user_holds_session():
+async def test_agent_turns_queue_while_user_holds_session_and_follow_the_hand_back():
+    """A Rose agent's message to a code agent the user is chatting with directly is accepted, never refused:
+    acked ``queued`` (a retry stays queued), it does not reach the CLI during the hold, and after the hand
+    back it becomes the CLI's next turn exactly once, after the user's turn."""
     sandbox = LocalCodeSessionSandbox("claude", gate_first_turn=True)
     try:
         await sandbox.start()
@@ -493,34 +496,269 @@ async def test_agent_relay_paused_while_user_holds_session():
         user = await deliver_user_turn_to_code_session(
             sandbox.ws_url, task_id="t", text="use tabs not spaces", turn_id="u1", token=TEST_TURN_TOKEN
         )
-        relayed = await deliver_user_turn_to_code_session(
-            sandbox.ws_url,
-            task_id="t",
-            text="ROSE: also bump the version",
-            turn_id="a1",
-            sender="agent",
-            token=TEST_TURN_TOKEN,
-        )
-        assert user.status == "delivered" and (relayed.status, relayed.reason) == ("rejected", "relay_paused")
+        assert user.status == "delivered", user
+        relayed = await _send_turn(sandbox, "a1", "ROSE: also bump the version")
+        retry = await _send_turn(sandbox, "a1", "ROSE: also bump the version")
+        assert (relayed.status, retry.status) == ("queued", "queued"), (relayed, retry)
+        assert not relayed.reached_cli, "a held agent turn waits for the hand back"
+        await asyncio.sleep(0.2)
+        texts = [line["message"]["content"][0]["text"] for line in sandbox.cli_stdin_lines()]
+        assert "ROSE: also bump the version" not in texts, texts
+
         assert await hand_back_code_session(sandbox.ws_url, task_id="t", token=TEST_TURN_TOKEN) == "released"
-        # After the hand back the same relayed turn goes through (the turn is still running).
-        resumed = await deliver_user_turn_to_code_session(
-            sandbox.ws_url,
-            task_id="t",
-            text="ROSE: also bump the version",
-            turn_id="a1",
-            sender="agent",
-            token=TEST_TURN_TOKEN,
-        )
-        assert resumed.status == "delivered", resumed
+        await observer.wait_for(lambda: observer.count("user_turn") >= 2)
+        late = await _send_turn(sandbox, "a1", "ROSE: also bump the version")
+        assert late.status == "duplicate", late
         sandbox.finish_first_turn()
         await observer.wait_for(lambda: observer.exit_code is not None)
         texts = [line["message"]["content"][0]["text"] for line in sandbox.cli_stdin_lines()]
         assert texts[1:] == ["use tabs not spaces", "ROSE: also bump the version"], texts
         assert [e.get("sender") for e in observer.events if e.get("type") == "user_turn"] == ["user", "agent"]
+        queued = [e for e in observer.events if e.get("type") == "user_turn_queued"]
+        assert len(queued) == 1 and queued[0].get("reason") == "direct_hold", queued
+        assert observer.count("user_turn_undelivered") == 0
         await observer.close()
     finally:
         sandbox.stop()
+
+
+async def _send_raw_turn(ws_url: str, payload: dict[str, Any]) -> dict[str, Any]:
+    """One raw ``user_turn`` (fields the helper does not send, e.g. a spawn's ``attach``) → its ack."""
+    import aiohttp
+
+    async with aiohttp.ClientSession() as session:
+        async with session.ws_connect(control_ws_url(ws_url)) as ws:
+            await ws.send_json({"type": "user_turn", **payload})
+            async for message in ws:
+                data = json.loads(message.data)
+                if data.get("type") == "user_turn_ack" and data.get("id") == payload["id"]:
+                    return data
+    raise AssertionError("no user_turn_ack")
+
+
+async def test_spawn_attaching_while_user_holds_session_is_held_not_refused():
+    """A resumed spawn attaching to the live CLI while the user chats with it directly is held, never
+    refused (a refusal made the backend stop the ws-server and end the user's chat): acked ``queued`` +
+    ``attached`` at once with its token adopted, a retry does not queue it twice, and its goal is the
+    first turn written after the hand back."""
+    import hashlib
+
+    sandbox = LocalCodeSessionSandbox("claude", gate_first_turn=True)
+    try:
+        await sandbox.start()
+        observer = SessionObserver(sandbox.ws_url)
+        await observer.start()
+        user = await deliver_user_turn_to_code_session(
+            sandbox.ws_url, task_id="t", text="use tabs not spaces", turn_id="u1", token=TEST_TURN_TOKEN
+        )
+        assert user.status == "delivered", user
+        spawn_token = "spawn-two-token-" + "x" * 16
+        attach = {
+            "token": spawn_token,
+            "credential": {"keys": [], "digest": hashlib.sha256(b"[]").hexdigest()},
+            "config": {},
+        }
+        payload = {
+            "id": "spawn-2",
+            "token": TEST_TURN_TOKEN,
+            "text": "Task:\nsecond goal",
+            "sender": "agent",
+            "attach": attach,
+        }
+        ack = await _send_raw_turn(sandbox.ws_url, payload)
+        retry = await _send_raw_turn(sandbox.ws_url, payload)
+        assert (ack["status"], ack.get("reason"), ack.get("attached")) == ("queued", "direct_hold", True), ack
+        assert isinstance(ack.get("history_events"), int), ack
+        assert (retry["status"], retry.get("attached")) == ("queued", True), retry
+        texts = [line["message"]["content"][0]["text"] for line in sandbox.cli_stdin_lines()]
+        assert "Task:\nsecond goal" not in texts, "the goal waits for the hand back"
+        # The spawn's own token is adopted at once: it can hand the session back itself.
+        assert await hand_back_code_session(sandbox.ws_url, task_id="t2", token=spawn_token) == "released"
+        await observer.wait_for(lambda: observer.count("user_turn") >= 2)
+        # A Temporal retry of the attach after the release: one goal, the same history boundary.
+        again = await _send_raw_turn(sandbox.ws_url, payload)
+        assert (again["status"], again.get("attached")) == ("duplicate", True), again
+        assert again.get("history_events") == ack["history_events"], (again, ack)
+        sandbox.finish_first_turn()
+        await observer.wait_for(lambda: observer.exit_code is not None)
+        texts = [line["message"]["content"][0]["text"] for line in sandbox.cli_stdin_lines()]
+        assert texts[1:] == ["use tabs not spaces", "Task:\nsecond goal"], texts
+        assert observer.count("user_turn_queued") == 1, observer.events
+        assert observer.count("user_turn_undelivered") == 0
+        await observer.close()
+    finally:
+        sandbox.stop()
+
+
+async def test_held_agent_turn_lost_when_the_session_ends_reaches_its_sender():
+    """The session ends while an agent turn waits for the user's hand back: the ws-server reports it
+    (user_turn_undelivered) and the code-session monitor tells the backend, which notifies the sender."""
+    from domains.spawn_claude_code_agent import service
+
+    sandbox = LocalCodeSessionSandbox("claude", gate_first_turn=True)
+    sink = _TranscriptSink()
+    report = AsyncMock()
+    try:
+        await sandbox.start()
+        with (
+            patch.object(service, "SDK_POST_RESULT_EXIT_GRACE_S", 0.3),
+            patch.object(service, "CODE_SESSION_IDLE_PAUSE_S", 30),
+            patch.object(service, "TRANSCRIPT_FLUSH_INTERVAL_S", 0.0),
+            patch.object(service, "save_claude_code_message", AsyncMock()),
+            patch.object(service, "save_code_transcript_batch", side_effect=sink.save),
+            patch.object(service, "report_undelivered_code_turns", report),
+            patch.object(service, "_log_code_agent_event", lambda event, **kw: None),
+            patch.object(service, "activity_drain_reason", AsyncMock(return_value=None)),
+            patch("temporalio.activity.heartbeat"),
+        ):
+            loop = asyncio.create_task(_run_loop(service, sandbox.ws_url, sink))
+            await asyncio.sleep(0.3)
+            held = await deliver_user_turn_to_code_session(
+                sandbox.ws_url, task_id="task-1", text="rename add to plus", turn_id="u1", token=TEST_TURN_TOKEN
+            )
+            assert held.status == "delivered", held
+            relayed = await _send_turn(sandbox, "a-lost", "ROSE: also bump the version")
+            assert relayed.status == "queued", relayed
+            sandbox.end_session()
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(loop, timeout=15)
+            if not loop.done():
+                loop.cancel()
+        assert report.await_count == 1, report.await_args_list
+        agent_id, task_id, turn_ids, reason = report.await_args.args
+        assert (agent_id, task_id, turn_ids, reason) == ("agent-1", "task-1", ["a-lost"], "session_ended")
+    finally:
+        sandbox.stop()
+
+
+async def test_spawn_create_waits_out_a_direct_hold_then_attaches():
+    """An older ws-server cannot hold an attaching spawn, so while the user chats with the live CLI the
+    backend answers 409 CODE_SESSION_HELD (and never stops that CLI). The spawn waits, heartbeating with a
+    capped backoff, and reposts the same create until the hand back; the create then succeeds once."""
+    import httpx
+
+    from domains.spawn_claude_code_agent import repo
+
+    held = httpx.Response(409, json={"code": "CODE_SESSION_HELD", "error": "held"})
+    created = httpx.Response(201, json={"task_id": "task-2", "resumed_from": "live_cli"})
+    post = AsyncMock(side_effect=[held, held, created])
+    sleep = AsyncMock()
+    with patch.object(repo.asyncio, "sleep", sleep), patch.object(repo, "safe_heartbeat") as beat:
+        response = await repo._create_waiting_out_direct_hold(post, "agent-1")
+    assert response is created and post.await_count == 3, post.await_args_list
+    assert beat.called, "the activity heartbeats while it waits"
+    waits = [call.args[0] for call in sleep.await_args_list]
+    assert waits and max(waits) <= 5.0, waits
+
+
+async def test_held_spawn_backoff_is_jittered():
+    """Spawns held by the same direct chat must not repost in lockstep: each backoff is jittered
+    (+/-20% around the capped exponential delay), as the reference retry loops do."""
+    import httpx
+
+    from domains.spawn_claude_code_agent import repo
+    from domains.spawn_claude_code_agent.config import CODE_SESSION_HELD_BACKOFF_S
+
+    held = httpx.Response(409, json={"code": "CODE_SESSION_HELD", "error": "held"})
+    created = httpx.Response(201, json={"task_id": "task-2"})
+    base, _ = CODE_SESSION_HELD_BACKOFF_S
+    for factor in (0.8, 1.2):
+        post = AsyncMock(side_effect=[held, created])
+        sleep = AsyncMock()
+        uniform = MagicMock(return_value=factor)
+        with (
+            patch.object(repo.asyncio, "sleep", sleep),
+            patch.object(repo, "safe_heartbeat"),
+            patch.object(repo.random, "uniform", uniform),
+        ):
+            await repo._create_waiting_out_direct_hold(post, "agent-1")
+        uniform.assert_called_once_with(0.8, 1.2)
+        waited = sum(call.args[0] for call in sleep.await_args_list)
+        assert abs(waited - base * factor) < 1e-9, (factor, waited)
+
+
+async def test_spawn_create_fails_truthfully_when_the_direct_hold_outlasts_the_wait():
+    """Past the wait (which covers the ws-server's 10-minute idle release) the spawn fails non-retryably
+    with the true reason, instead of retrying a few times and claiming it would attach later."""
+    import httpx
+
+    from domains.spawn_claude_code_agent import repo
+    from domains.spawn_claude_code_agent.config import CODE_SESSION_HELD_WAIT_S
+    from temporalio.exceptions import ApplicationError
+
+    held = httpx.Response(409, json={"code": "CODE_SESSION_HELD", "error": "held"})
+    post = AsyncMock(return_value=held)
+    clock = {"now": 1000.0}
+
+    def monotonic() -> float:
+        clock["now"] += 90.0
+        return clock["now"]
+
+    with (
+        patch.object(repo.asyncio, "sleep", AsyncMock()),
+        patch.object(repo, "safe_heartbeat"),
+        patch.object(repo.time, "monotonic", monotonic),
+    ):
+        try:
+            await repo._create_waiting_out_direct_hold(post, "agent-1")
+            raise AssertionError("expected CODE_SESSION_HELD")
+        except ApplicationError as error:
+            assert error.type == "CODE_SESSION_HELD" and error.non_retryable is True, error
+            assert "still chatting with it directly; spawn it again after they hand it back" in error.message
+    assert post.await_count >= CODE_SESSION_HELD_WAIT_S // 90 - 1, post.await_count
+
+
+async def test_cancelling_the_spawn_during_a_held_wait_stops_the_wait_and_the_pending_create():
+    """The agent is cancelled while its spawn waits out a direct hold: the wait ends at once, an in-flight
+    repost of the create is cancelled with it (not left running), and no create is sent afterwards."""
+    import httpx
+
+    from domains.spawn_claude_code_agent import repo
+
+    held = httpx.Response(409, json={"code": "CODE_SESSION_HELD", "error": "held"})
+    for phase in ("sleeping", "reposting"):
+        posts: list[str] = []
+        repost_started = asyncio.Event()
+        repost_cancelled = asyncio.Event()
+
+        async def slow_create() -> httpx.Response:
+            repost_started.set()
+            try:
+                await asyncio.Event().wait()  # a create the backend never answers
+            except asyncio.CancelledError:
+                repost_cancelled.set()
+                raise
+            raise AssertionError("unreachable")
+
+        async def post() -> httpx.Response:
+            posts.append(phase)
+            if len(posts) == 1:
+                return held
+            return await repo._post_with_heartbeats(slow_create(), "Starting the code-agent sandbox")
+
+        real_sleep = asyncio.sleep
+        sleeping = asyncio.Event()
+
+        async def fake_sleep(seconds: float) -> None:
+            sleeping.set()
+            if phase == "sleeping":
+                await asyncio.Event().wait()  # cancelled here
+            await real_sleep(0)
+
+        with patch.object(repo.asyncio, "sleep", fake_sleep), patch.object(repo, "safe_heartbeat"):
+            task = asyncio.create_task(repo._create_waiting_out_direct_hold(post, "agent-1"))
+            await asyncio.wait_for((repost_started if phase == "reposting" else sleeping).wait(), 2)
+            task.cancel()
+            try:
+                await task
+                raise AssertionError("the wait must end with the cancellation")
+            except asyncio.CancelledError:
+                pass
+            if phase == "reposting":
+                await asyncio.wait_for(repost_cancelled.wait(), 2)
+            count = len(posts)
+            await real_sleep(0.05)
+        assert len(posts) == count == (1 if phase == "sleeping" else 2), (phase, posts)
 
 
 async def test_turn_merged_into_running_turn_still_ends_the_session():
@@ -637,7 +875,7 @@ async def test_monitor_keeps_held_session_open_and_never_writes_to_cli():
         ]
         # Only the goal and the user's turn ever reached the CLI: no relay.
         texts = [line["message"]["content"][0]["text"] for line in sandbox.cli_stdin_lines()]
-        assert texts == ["Task:\nFix the bug in calc.py so test_calc.py passes", "rename add to plus"], texts
+        assert texts == ["/goal Task:\nFix the bug in calc.py so test_calc.py passes", "rename add to plus"], texts
         revisions = sink.revisions()
         assert len(revisions) == len(set(revisions)), revisions  # each record revision persisted once
         persisted = {r["id"]: r for batch in sink.batches for r in batch["records"]}
@@ -675,6 +913,11 @@ class _ReplayWsClient:
 
     async def connect(self):
         return True
+
+    async def connect_with_retry(self):
+        # The service retries the handshake; stand-ins answer from connect().
+        self.last_error = None if await self.connect() else "connect refused"
+        return self.last_error is None
 
     async def disconnect(self):
         return None
@@ -872,7 +1115,29 @@ async def run_all_tests():
     )
     await r.record_async("direct_turn_requires_the_session_token", test_direct_turn_requires_the_session_token)
     await r.record_async(
-        "agent_relay_paused_while_user_holds_session", test_agent_relay_paused_while_user_holds_session
+        "agent_turns_queue_while_user_holds_session_and_follow_the_hand_back",
+        test_agent_turns_queue_while_user_holds_session_and_follow_the_hand_back,
+    )
+    await r.record_async(
+        "spawn_attaching_while_user_holds_session_is_held_not_refused",
+        test_spawn_attaching_while_user_holds_session_is_held_not_refused,
+    )
+    await r.record_async(
+        "held_agent_turn_lost_when_the_session_ends_reaches_its_sender",
+        test_held_agent_turn_lost_when_the_session_ends_reaches_its_sender,
+    )
+    await r.record_async(
+        "spawn_create_waits_out_a_direct_hold_then_attaches",
+        test_spawn_create_waits_out_a_direct_hold_then_attaches,
+    )
+    await r.record_async("held_spawn_backoff_is_jittered", test_held_spawn_backoff_is_jittered)
+    await r.record_async(
+        "spawn_create_fails_truthfully_when_the_direct_hold_outlasts_the_wait",
+        test_spawn_create_fails_truthfully_when_the_direct_hold_outlasts_the_wait,
+    )
+    await r.record_async(
+        "cancelling_the_spawn_during_a_held_wait_stops_the_wait_and_the_pending_create",
+        test_cancelling_the_spawn_during_a_held_wait_stops_the_wait_and_the_pending_create,
     )
     await r.record_async(
         "turn_merged_into_running_turn_still_ends_the_session",

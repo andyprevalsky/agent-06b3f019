@@ -34,6 +34,8 @@ sources:
   - agent 5b7dd06e-81d9-4bc0-88f7-e65355f75b7c
   - task agent-payment-production-abandonment
   - task agent-payment-abandonment
+  - PR #1699
+  - agent f4f41b8e-f431-4d16-b316-b832f72db9bd
 repro: bash scripts/run-bench --local agent-payment-abandonment (provider-dependent); AgentCard list_transfers / list_recoveries read in /opt/cursor/artifacts/rca_evidence/agentcard-abandonment-ledger.txt
 status: open
 ---
@@ -684,3 +686,67 @@ Gated results (main bf26a925f, which contains #1796):
 Concurrency is therefore **ruled out** as the cause: the sandbox does not release closed-card transfers even with no other consumer active. The remaining attempts were stopped. An operator cancellation of attempt 2 (run 20261108-104322-3997016, TERMed before any Machine was allocated) shows `INFRA_ERROR` in the Hub; it is a cancellation, not an infrastructure failure, and was left out of the ledger.
 
 A native PASS for `agent-payment-abandonment` depends on AgentCard restoring closed-card releases in the sandbox. The October 12 standing SKIP policy applies, and this case stays open.
+
+### Recurrence on 2026-11-09 (PR #1699 deploy smoke): provider-wide, across every close path
+
+The PR #1699 deploy smoke (source `9fa86f9ef`, merged as `8ed0be8b3`; that
+branch changed only `front-end/`) skipped `agent-payment-abandonment` under the
+standing policy. Agent `f4f41b8e-f431-4d16-b316-b832f72db9bd` ended with
+purchase HELD, wallet funding RECLAIMING, card `card_295479ed0131d999e76ab2e9`
+CLOSED with balance 0, and transfer `owt_dbc27a5e230e255a246ac61a` consumed
+with 4396 transferred and 0 released. The agent prepared checkout and was told
+not to pay, so the card was never charged. A read-only `list_transfers` at
+17:30:28Z still showed that transfer consumed/0, 43 minutes after its
+16:47:43Z mint.
+
+A read-only census of the sandbox org through the v2 REST API (3,100 transfers
+from 2026-10-22, plus the org's card transactions and 80 card reads) separates
+our code from the provider. Each row below counts never-charged mints:
+released in full versus still consumed with 0 released.
+
+| Population (close path) | Oct 26–31 | Nov 1–5 | Nov 6–9 |
+| --- | --- | --- | --- |
+| Benchmark cardholder `cmrfpz…`, 4396 (our purchase cleanup, MCP `close_card`) | 19 / 53 | 5 / 36 | 15 / 233 |
+| Treasury cardholder `cmt2he…`, 1300 (treasury-rails unused mints) | 136 / 413 | 6 / 35 | 3 / 111 |
+| v2 connected user `usr_0bf7…`, 1300 (PR #1864 REST v2 issuance and close) | — | 4 / 34 | 16 / 267 |
+| v2 connected user `usr_6384…`, 1300 (PR #1864) | — | — | 1 / 50 |
+
+- Charged cards release their remainder normally in every period (for
+  example 4396 − 675 = 3721 on the test-shop purchases).
+- The 45 stalled and 35 released cards sampled read the same:
+  `closed`, `closed_reason=canceled`, balance 0. Nothing in the card state
+  distinguishes them.
+- The stall spans two cardholders, two v2 connected users and both
+  integrations: our MCP purchase cleanup, the treasury fixture and the
+  separate REST v2 issuing/close path in PR #1864. The 2026-11-08 gated solo
+  run above already ruled out concurrency.
+
+**Gate: NOT_INTRODUCED. Classification: third-party failure (AgentCard
+sandbox).** AgentCard's documented contract says a closed card's unspent
+value sets `released_cents` and moves the transfer to `reclaimed`. For
+never-charged cards the sandbox now does that for about 3–6% of closes,
+down from about a third in late October and nearly all of them before
+2026-10-02. No change on our side reproduces or avoids it. The task's
+assertion `orgTransfer.status=reclaimed, releasedCents=4396` reads provider
+state directly, so no code change can make it pass without AgentCard
+releasing the funds. Switching to the v2 close does not help either.
+
+Local reproduction at the owned boundary: the 20 benchmark-blackbox replays of
+captured stalled and released provider snapshots pass on main `3eec5a455`
+(`-k "abandonment_timeout or release_stall or release_policy or
+release_skip"`). The stalled snapshot reproduces the original HELD/RECLAIMING
+mismatch and its exact classification, and an independent lifecycle failure
+stays a failure. All 389 backend unit files pass, including
+`agentcard-wallet-funding`, `agentcard-confirm-stall` and
+`purchase-wallet-funding`. No mint, close, recovery or refund was issued for
+this RCA.
+
+Under `.claude/shared/deploy-failure-policy.md` this is an external-provider
+exception (`outage`): the result stays SKIPPED and never PASS. Do not loop paid
+reruns. Before any rerun, check the census for fresh full reclaims of
+never-charged cards. Fixing it needs AgentCard to restore closed-card releases
+in the sandbox. Report it to them with `report_agentcard_issue`, which needs
+an org admin's `agent-cards engineer init`. This case stays open. The
+read-only census scripts and their receipts are in the private evidence
+directory `/project/agentcard-release-stall-rca-20261109/` (`SHA256SUMS`),
+outside Git.

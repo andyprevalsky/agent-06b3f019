@@ -1502,6 +1502,146 @@ fi
 [ "$(cat "$slow_exit_reads")" -gt 2 ] ||
   fail "zero-grace tree cleanup did not re-observe the SIGKILLed birth"
 
+# Exact native zombies must not consume TERM grace; live threads and unknown identities still do.
+python3 - "$HELPER_SRC" <<'PY_ZOMBIE_GRACE' || fail "zombie TERM grace controls failed"
+import ctypes,json,os,pathlib,signal,subprocess,sys,tempfile,time
+HELPER=pathlib.Path(sys.argv[1]).resolve()
+if sys.platform!='linux':
+ print('SKIP: Linux /proc/subreaper grace control; existing platform teardown tests remain active')
+ raise SystemExit(0)
+sys.path.insert(0,str(HELPER.parent))
+from condition_wait import wait_until
+assert ctypes.CDLL(None,use_errno=True).prctl(36,1,0,0,0)==0
+ROOT=r'''
+import ctypes,json,os,pathlib,platform,signal,sys,threading,time
+out=pathlib.Path(sys.argv[1]); mode=sys.argv[2]
+sys.path.insert(0,sys.argv[3])
+from condition_wait import wait_until
+HEARTBEAT_INTERVAL_SECONDS=.02  # Deliberate live-thread writer workload, not synchronization.
+if mode in ('thread','globignore'):
+ signal.signal(signal.SIGTERM,signal.SIG_IGN)
+ def run():
+  while True:out.with_suffix('.heartbeat').write_text(str(time.monotonic()));time.sleep(HEARTBEAT_INTERVAL_SECONDS)
+ threading.Thread(target=run).start();out.write_text(json.dumps({'root':os.getpid(),'children':[]}))
+ number={'x86_64':60,'aarch64':93}.get(platform.machine())
+ if number is None:raise RuntimeError('unsupported native thread-exit architecture')
+ ctypes.CDLL(None).syscall(number,0)
+p=os.fork()
+if p==0:os._exit(0)
+children=[p]
+if mode=='mixed':
+ p=os.fork()
+ if p==0:
+  signal.signal(signal.SIGTERM,signal.SIG_IGN)
+  while True:signal.pause()
+ children.append(p)
+def zombie_ready():
+ s=pathlib.Path('/proc',str(children[0]),'stat').read_text();f=s[s.rfind(')')+2:].split()
+ return f[0]=='Z'
+wait_until(zombie_ready,timeout=5,description='owned child native zombie')
+out.write_text(json.dumps({'root':os.getpid(),'children':children}))
+while True:signal.pause()
+'''
+DRIVER=r'''
+set -uo pipefail
+source "$1"
+base="$2"; mode="$3"
+python3 "$base/root.py" "$base/ready.json" "$mode" "$(dirname "$1")" &
+root=$!
+python3 "$base/wait-ready.py" "$base" "$root" "$mode" "$(dirname "$1")" || exit 91
+# Fault only the observation API used by the new grace decision and existing
+# final verification. Native birth matcher and signal calls are untouched.
+if [[ "$mode" = unknown || "$mode" = changed || "$mode" = race ]]; then
+ eval "$(declare -f cloudbench_pid_observation_like | sed '1s/cloudbench_pid_observation_like/actual_observation/')"
+ printf '0\n' > "$base/reads"
+ cloudbench_pid_observation_like() {
+  local n value
+  n=$(cat "$base/reads");n=$((n+1));printf '%s\n' "$n" > "$base/reads"
+  case "$mode" in
+   unknown) return 1 ;;
+   changed) value="$(actual_observation "$@")"; printf 'proc-start:changed:1\t%s\n' "${value##*$'\t'}" ;;
+   race)
+    if [ "$n" = 1 ]; then actual_observation "$@"
+    elif [ "$n" = 2 ]; then value="$(actual_observation "$@")"; printf '%s\tR\n' "${value%$'\t'*}"
+    else actual_observation "$@"; fi ;;
+  esac
+ }
+fi
+if [ "$mode" = globignore ]; then
+ GLOBIGNORE=""
+ for entry in /proc/"$root"/task/*; do
+  [ "$entry" = "/proc/$root/task/$root" ] || GLOBIGNORE="${GLOBIGNORE:+$GLOBIGNORE:}$entry"
+ done
+ export GLOBIGNORE
+fi
+if [ "$mode" = noglob ]; then set -f; shopt -s failglob; fi
+if [ "$mode" = enum_error ]; then
+ python3() {
+  if [ "$#" = 2 ] && [ "$1" = - ]; then
+   printf 'denied\n' >> "$base/enumeration-denied"
+   return 1
+  fi
+  command python3 "$@"
+ }
+fi
+sleep() { if [ "${1:-}" = 1 ]; then printf '1\n' >> "$base/real-grace-sleeps"; fi; command sleep "$@"; }
+cloudbench_terminate_tree_and_wait 2 "$root"
+'''
+READY="import json,pathlib,sys\nsys.path.insert(0,sys.argv[4])\nfrom condition_wait import wait_until\nbase=pathlib.Path(sys.argv[1]);pid=sys.argv[2];mode=sys.argv[3]\ndef ready():\n if not (base/'ready.json').is_file():return False\n if mode not in ('thread','globignore'):return True\n raw=pathlib.Path('/proc',pid,'stat').read_text();f=raw[raw.rfind(')')+2:].split()\n return f[0]=='Z'\nwait_until(ready,timeout=10,description='owned fixture process ready')\n"
+results=[]
+for mode in ['zombie','mixed','thread','unknown','changed','race','globignore','enum_error','noglob']:
+ with tempfile.TemporaryDirectory(prefix='zombie-grace-control-') as temporary:
+  base=pathlib.Path(temporary);(base/'root.py').write_text(ROOT);(base/'wait-ready.py').write_text(READY)
+  started=time.monotonic();p=subprocess.Popen(['bash','-c',DRIVER,'control',str(HELPER),str(base),mode],stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+  native=[];identity=None
+  try:
+   def observe():
+    global identity
+    ready=base/'ready.json'
+    if ready.exists():
+     try:identity=json.loads(ready.read_text())
+     except ValueError:pass
+    if identity:
+     for pid in [identity['root'],*identity['children']]:
+      try:
+       raw=pathlib.Path('/proc',str(pid),'stat').read_text();f=raw[raw.rfind(')')+2:].split()
+       row={'pid':pid,'birth':f[19],'state':f[0],'tasks':len(list(pathlib.Path('/proc',str(pid),'task').iterdir()))}
+       if row not in native:native.append(row)
+      except FileNotFoundError:pass
+    return p.poll() is not None
+   wait_until(observe,timeout=14,description='owned teardown command returned')
+   stdout,stderr=p.communicate(timeout=1);elapsed=time.monotonic()-started
+   assert identity
+   if mode=='unknown':assert p.returncode==1 and 'unknown after SIGKILL' in stderr,(p.returncode,stderr)
+   else:assert p.returncode==0,(mode,p.returncode,stderr)
+   sleeps=(base/'real-grace-sleeps').read_text().splitlines() if (base/'real-grace-sleeps').exists() else []
+   if mode in ('zombie','noglob'):assert not sleeps,('zombie grace not eliminated',len(sleeps))
+   if mode in ('mixed','thread','changed','race','globignore','enum_error'):assert sleeps,('live/changed prematurely accepted',mode)
+   if mode in ('thread','globignore'):assert any(r['pid']==identity['root'] and r['state']=='Z' and r['tasks']>1 for r in native),native
+   if mode=='enum_error':assert (base/'enumeration-denied').exists()
+   # Every descendant belongs to this isolated native subreaper. Join only the
+   # exact PIDs published by our own root; never discover/signal foreign work.
+   reaped=[]
+   for pid in [identity['root'],*identity['children']]:
+    try:
+     got,status=os.waitpid(pid,os.WNOHANG)
+     if got==0:
+      os.kill(pid,signal.SIGKILL);got,status=os.waitpid(pid,0)
+     reaped.append(got)
+    except ChildProcessError:pass
+    assert not pathlib.Path('/proc',str(pid)).exists(),('own PID remains',pid)
+   results.append({'mode':mode,'exit':p.returncode,'seconds':elapsed,'enumeration_denials':len((base/'enumeration-denied').read_text().splitlines()) if (base/'enumeration-denied').exists() else 0,'real_grace_sleeps':len(sleeps),'native_observations':native,'reaped':reaped,'remaining':[]})
+  finally:
+   if p.poll() is None:p.kill();p.wait()
+   if identity:
+    for owned_pid in [identity['root'],*identity['children']]:
+     try:
+      joined,_=os.waitpid(owned_pid,os.WNOHANG)
+      if joined==0:os.kill(owned_pid,signal.SIGKILL);os.waitpid(owned_pid,0)
+     except (ChildProcessError,ProcessLookupError):pass
+print(json.dumps({'helper':str(HELPER),'controls':results,'all_passed':True},sort_keys=True))
+PY_ZOMBIE_GRACE
+
 # A local bind collision is not a remote/DNS readiness failure. The proxy
 # launcher must classify it immediately so its caller can abandon the poisoned
 # lease and choose another port instead of retrying that port until the barrier
@@ -1523,10 +1663,17 @@ eval "$proxy_lifecycle_function_source"
 eval "$proxy_function_source"
 APP="cloudbench-proxy-regression"
 CLOUDBENCH_PROXY_POST_PROBE_SETTLE_SECONDS=0
-flyctl() {
-  echo "Error: listen tcp 127.0.0.1:61944: bind: address already in use" >&2
-  return 1
-}
+# The production proxy launch execs native Fly to preserve $! ownership.
+# Use an executable fixture so it crosses that same native exec boundary.
+proxy_fixture_old_path="$PATH"
+mkdir -p "$TMP_ROOT/proxy-bin"
+export PATH="$TMP_ROOT/proxy-bin:$PATH"
+cat > "$TMP_ROOT/proxy-bin/flyctl" <<'FAKE_PROXY_BIND'
+#!/usr/bin/env bash
+echo "Error: listen tcp 127.0.0.1:61944: bind: address already in use" >&2
+exit 1
+FAKE_PROXY_BIND
+chmod +x "$TMP_ROOT/proxy-bin/flyctl"
 curl() { return 1; }
 proxy_log="$TMP_ROOT/proxy-bind-collision.log"
 proxy_pid=""
@@ -1567,17 +1714,16 @@ PORT_LEASE_NONCE="proxy-regression-$$"
 PORT_LEASES=()
 OUT_DIR="$TMP_ROOT/proxy-output"
 mkdir -p "$OUT_DIR"
-flyctl() {
-  case "$2" in
-    61944:*)
-      echo "Error: listen tcp 127.0.0.1:61944: bind: address already in use" >&2
-      return 1
-      ;;
-    *)
-      while :; do command sleep 1; done
-      ;;
-  esac
-}
+cat > "$TMP_ROOT/proxy-bin/flyctl" <<'FAKE_PROXY_ROTATE'
+#!/usr/bin/env bash
+case "$2" in
+  61944:*)
+    echo "Error: listen tcp 127.0.0.1:61944: bind: address already in use" >&2
+    exit 1
+    ;;
+  *) exec sleep 3600 ;;
+esac
+FAKE_PROXY_ROTATE
 rotated_port=""
 rotated_pid=""
 # The replacement tunnel is a background child. On a shared CI host its shell
@@ -1705,6 +1851,7 @@ claim_local_port "$overflow_preferred" overflow_port ||
 release_local_port_leases
 [ ! -d "$PORT_LEASE_ROOT/$overflow_port" ] ||
   fail "overflow-regression dashboard lease survived cleanup"
+export PATH="$proxy_fixture_old_path"
 unset -f flyctl curl status_proxy_lifecycle_response_accepted \
   start_data_plane_proxy start_leased_data_plane_proxy \
   local_port_is_bindable claim_exact_local_port claim_local_port \
@@ -2166,6 +2313,100 @@ FAKEFLY
     [ ! -s "$TMP_ROOT/fleet-replace.events" ] || fail "host replacement ran past the boot-config deadline"
 ) || fail "fleet host-unresponsive replacement checks failed"
 
+# The mandatory autoscaler of a boot-launch child waits for the fleet's
+# boot-config release. When that child fails its boot update (for example three
+# Fly host 408s), the release never comes for it, while the barrier waits for
+# that same autoscaler to exit before cloning a replacement. The autoscaler's
+# real pre-release wait must notice the finished child and exit without
+# committing capacity (descend I4: polar-bu-007 r002-j0017, 2026-10-27).
+(
+  autoscaler_wait_source="$(awk '
+    /# Boot-launch intentionally configures the entire fleet while every primary/ { capture = 1 }
+    /# The keyed inventory already carries Fly/ { exit }
+    capture { print }
+  ' "$ROOT_DIR/scripts/run-bench-fleet")"
+  [ -n "$autoscaler_wait_source" ] || fail "missing the autoscaler boot-release wait"
+  eval "autoscaler_boot_release_wait() { $autoscaler_wait_source
+    return 0; }"
+  BOOT_CONFIG_BARRIER="$TMP_ROOT/autoscaler-release-barrier"
+  out="$TMP_ROOT/autoscaler-release/polar-bu-007"
+  mkdir -p "$BOOT_CONFIG_BARRIER/ready" "$out"
+  bench=polar-bu-007; cid=d8d99353a46378; CLOUDBENCH_BOOT_LAUNCH=1
+  ( sleep 0.5; printf '125\n' > "$out/benchmark-child.finished" ) &
+  started=$SECONDS
+  wait_rc=0
+  timeout 10 bash -c "$(declare -f autoscaler_boot_release_wait); $(declare -p BOOT_CONFIG_BARRIER out bench cid CLOUDBENCH_BOOT_LAUNCH); autoscaler_boot_release_wait" \
+    2>"$TMP_ROOT/autoscaler-release.err" || wait_rc=$?
+  wait
+  [ "$wait_rc" -ne 124 ] ||
+    fail "autoscaler kept waiting for a boot-config release after its child finished (fleet replacement deadlock)"
+  [ "$wait_rc" -ne 0 ] && [ $((SECONDS - started)) -lt 10 ] &&
+    grep -q 'child finished before the boot-config barrier released' "$out/autoscaler.failed" &&
+    [ ! -e "$out/autoscaler.completed-after-child" ] ||
+    fail "autoscaler did not exit fail-closed without capacity after an early child finish (rc=$wait_rc)"
+  # A released barrier with an accepted start still proceeds to attachment.
+  rm -f "$out/benchmark-child.finished" "$out/autoscaler.failed"
+  : > "$BOOT_CONFIG_BARRIER/release"
+  printf '%s\n' "$cid" > "$out/post-config-start.accepted"
+  timeout 10 bash -c "$(declare -f autoscaler_boot_release_wait); $(declare -p BOOT_CONFIG_BARRIER out bench cid CLOUDBENCH_BOOT_LAUNCH); autoscaler_boot_release_wait" ||
+    fail "a released, accepted primary did not reach autoscaler attachment"
+  # A child that finishes after release but before start acceptance also exits promptly.
+  rm -f "$out/post-config-start.accepted"
+  printf '125\n' > "$out/benchmark-child.finished"
+  wait_rc=0
+  timeout 10 bash -c "$(declare -f autoscaler_boot_release_wait); $(declare -p BOOT_CONFIG_BARRIER out bench cid CLOUDBENCH_BOOT_LAUNCH); autoscaler_boot_release_wait" \
+    2>/dev/null || wait_rc=$?
+  [ "$wait_rc" -ne 124 ] && [ "$wait_rc" -ne 0 ] ||
+    fail "autoscaler waited for start acceptance after its child finished (rc=$wait_rc)"
+) || fail "autoscaler boot-release wait checks failed"
+
+# The relaunched slot's new autoscaler cannot report ready before the fleet
+# writes the boot-config release, and that release follows this replacement.
+# Before release the replacement defers the readiness check to the normal
+# start barrier instead of waiting on a slot that cannot become ready
+# (descend I4 review finding).
+(
+  for fleet_fn in fleet_replace_host_unresponsive_child wait_for_mandatory_autoscaler_startup; do
+    fleet_fn_source="$(awk -v name="$fleet_fn" '
+      $0 ~ "^" name "\\(\\) *\\{" { capture = 1 }
+      capture { print }
+      capture && /^}$/ { exit }
+    ' "$ROOT_DIR/scripts/run-bench-fleet")"
+    [ -n "$fleet_fn_source" ] || fail "missing fleet function $fleet_fn"
+    eval "$fleet_fn_source"
+  done
+  fleet_job_running() { [ -n "${1:-}" ] && kill -0 "$1" 2>/dev/null; }
+  primary_vm_size_for_bench() { echo performance-2x; }
+  primary_vm_memory_for_bench() { echo 4096; }
+  primary_clone_storage_mode() { echo fresh; }
+  WARM_ID=warm00000000; SNAP_ID=snap0; CLOUDBENCH_BOOT_LAUNCH=1; AUTOSCALER_STARTUP_WAIT_SECONDS=3
+  clone_machine_target() { printf 'm200fresh0000c\n'; }
+  launch_fleet_bench_child() {
+    # Like the real relaunch: a fresh child plus a live mandatory autoscaler
+    # that waits for the boot-config release before it can publish readiness.
+    sleep 30 & CHILD_PIDS[$3]=$!
+    sleep 30 & AUTOSCALER_PIDS[$3]=$!
+    CHILD_MACHINE[$3]=m200fresh0000c
+  }
+  BOOT_CONFIG_BARRIER="$TMP_ROOT/replace-live-barrier"
+  fleet_out="$TMP_ROOT/replace-live/polar-bu-007"
+  mkdir -p "$BOOT_CONFIG_BARRIER/ready" "$fleet_out"
+  CHILD_OUT=("$fleet_out"); CHILD_BENCH=(polar-bu-007); CHILD_MACHINE=(d8d99353a46378)
+  CHILD_BENCH_INDEX=(16); CHILD_PIDS=(""); AUTOSCALER_PIDS=("")
+  printf 'clone d8d99353a46378\n' > "$fleet_out/.cid"
+  printf '125\n' > "$fleet_out/benchmark-child.finished"
+  printf 'd8d99353a46378\n' > "$fleet_out/boot-config-host-unresponsive"
+  : > "$fleet_out/worker-clones.ids"
+  started=$SECONDS
+  replace_rc=0
+  fleet_replace_host_unresponsive_child 0 $((SECONDS + 60)) 2>"$TMP_ROOT/replace-live.err" || replace_rc=$?
+  kill "${CHILD_PIDS[0]:-}" "${AUTOSCALER_PIDS[0]:-}" 2>/dev/null || true
+  wait 2>/dev/null || true
+  [ "$replace_rc" -eq 0 ] && [ "$(cat "$fleet_out/.cid")" = "clone m200fresh0000c" ] &&
+    [ $((SECONDS - started)) -lt 3 ] ||
+    fail "replacement waited before release for an autoscaler that cannot be ready (rc=$replace_rc): $(cat "$TMP_ROOT/replace-live.err")"
+) || fail "pre-release host replacement autoscaler checks failed"
+
 # A shared mutation lease is joined exactly when _with_timeout wrote its
 # join-native receipt for the latest attempt, whatever its exit status: a
 # signal-killed child (137) or an interruption after the child exists (143)
@@ -2314,10 +2555,11 @@ sys.path.insert(0, str(root / "scripts"))
 from cloudbench_catalog import get_task_metadata
 
 rows = get_task_metadata(
-    root / "agents/benchmarks/tasks.json", ["polar-bu-065", "image-handling"]
+    root / "agents/benchmarks/tasks.json", ["anti-bot-google-search", "image-handling", "polar-bu-065"]
 )
 assert rows[0]["requires_browser_agent"] is True
 assert rows[1]["requires_browser_agent"] is not True
+assert rows[2]["requires_browser_agent"] is False
 PY_BROWSER_METADATA
 for function_name in is_sim_on bench_needs_large_primary bench_declares_fanout primary_vm_size_for_bench \
   primary_vm_memory_for_bench bench_uses_default_pool_shape; do
@@ -2333,11 +2575,11 @@ FLEET_BUNDLED_FRONTEND_VM_SIZE="shared-cpu-4x"
 FLEET_BUNDLED_FRONTEND_VM_MEMORY="8192"
 INFRA_PROBE=0
 SIM_ON_CSV=""
-CATALOG_BROWSER_REQUIRED_TASKS=(polar-bu-065)
+CATALOG_BROWSER_REQUIRED_TASKS=(anti-bot-google-search)
 unset CLOUDBENCH_POOL_DYNAMIC_VM_SHAPE
 bench_uses_default_pool_shape parallel-tool-calls ||
   fail "ordinary tasks must retain default pool admission"
-if bench_uses_default_pool_shape polar-bu-065; then
+if bench_uses_default_pool_shape anti-bot-google-search; then
   fail "catalog browser tasks must request the large primary shape"
 fi
 if bench_uses_default_pool_shape agent-payment-abandonment; then
@@ -2348,10 +2590,10 @@ bench_uses_default_pool_shape agent-payment-abandonment ||
   fail "opted-in 8GB tasks must be able to claim a stopped pool Machine"
 [ "$(primary_vm_memory_for_bench agent-payment-abandonment)" = 8192 ] ||
   fail "pool resize admission must preserve the large task's requested memory"
-bench_uses_default_pool_shape polar-bu-065 ||
+bench_uses_default_pool_shape anti-bot-google-search ||
   fail "opted-in browser tasks must be able to resize a stopped pool Machine"
 INFRA_PROBE=1
-[ "$(primary_vm_memory_for_bench polar-bu-065)" = "${FLEET_PRIMARY_VM_MEMORY}" ] ||
+[ "$(primary_vm_memory_for_bench anti-bot-google-search)" = "${FLEET_PRIMARY_VM_MEMORY}" ] ||
   fail "task-free infra probes must retain the default primary shape"
 INFRA_PROBE=0
 unset CLOUDBENCH_POOL_DYNAMIC_VM_SHAPE
@@ -2368,7 +2610,7 @@ if bench_uses_default_pool_shape raise-5m-rose-labs-brex; then
 fi
 [ "$(primary_vm_size_for_bench parallel-tool-calls)/$(primary_vm_memory_for_bench parallel-tool-calls)" = "$FLEET_PRIMARY_VM_SIZE/$FLEET_PRIMARY_VM_MEMORY" ] ||
   fail "tasks outside --sim-on must keep the default primary shape"
-[ "$(primary_vm_size_for_bench polar-bu-065)/$(primary_vm_memory_for_bench polar-bu-065)" = "shared-cpu-4x/8192" ] ||
+[ "$(primary_vm_size_for_bench anti-bot-google-search)/$(primary_vm_memory_for_bench anti-bot-google-search)" = "shared-cpu-4x/8192" ] ||
   fail "browser tasks outside --sim-on must keep the large primary shape"
 bench_uses_default_pool_shape parallel-tool-calls ||
   fail "tasks outside --sim-on must retain default pool admission"
@@ -2386,12 +2628,12 @@ FLEET_FANOUT_MIN_AGENT_COUNT=20
 FLEET_FANOUT_VM_SIZE="performance-2x"
 FLEET_FANOUT_VM_MEMORY="4096"
 CATALOG_FANOUT_TASKS=(test-mass-agent-run-0)
-CATALOG_BROWSER_REQUIRED_TASKS=(polar-bu-065)
+CATALOG_BROWSER_REQUIRED_TASKS=(anti-bot-google-search)
 [ "$(primary_vm_size_for_bench test-mass-agent-run-0)/$(primary_vm_memory_for_bench test-mass-agent-run-0)" = "performance-2x/4096" ] ||
   fail "a catalog fan-out task must request dedicated vCPUs"
 [ "$(primary_vm_size_for_bench parallel-tool-calls)/$(primary_vm_memory_for_bench parallel-tool-calls)" = "$FLEET_PRIMARY_VM_SIZE/$FLEET_PRIMARY_VM_MEMORY" ] ||
   fail "tasks without a fan-out declaration must keep the default primary shape"
-[ "$(primary_vm_size_for_bench polar-bu-065)/$(primary_vm_memory_for_bench polar-bu-065)" = "shared-cpu-4x/8192" ] ||
+[ "$(primary_vm_size_for_bench anti-bot-google-search)/$(primary_vm_memory_for_bench anti-bot-google-search)" = "shared-cpu-4x/8192" ] ||
   fail "browser tasks must keep the large shared primary shape beside a fan-out task"
 if bench_uses_default_pool_shape test-mass-agent-run-0; then
   fail "a fan-out task must not claim a default shared-cpu pool Machine"
@@ -2608,7 +2850,7 @@ require_text "$ROOT_DIR/scripts/run-bench-cloud" \
   'verify_app_environment' \
   "run-bench-cloud must expose the read-only environment preflight"
 require_text "$ROOT_DIR/scripts/run-bench-cloud" \
-  'FLY secrets list -a "$APP" --json' \
+  '_with_timeout "$read_timeout" flyctl secrets list -a "$APP" --json' \
   "the environment preflight must be a read-only secrets listing"
 require_text "$ROOT_DIR/scripts/run-bench-cloud" \
   'REQUIRED_APP_SECRETS="AGENTS_ENV_B64 BACKEND_ENV_B64 AGENTS_ENV_SHA256 BACKEND_ENV_SHA256 CLOUDBENCH_BROWSER_PROVIDER CLOUDBENCH_WORKER_BROWSER_PROVIDER GITHUB_TOKEN"' \
@@ -3003,6 +3245,107 @@ readiness_failures=0
   [ ! -e "$remote_exec_marker" ] ||
     fail "maintenance work executed after readiness failure"
 ) || readiness_failures=$((readiness_failures + 1))
+
+# Boot-launch post-config start on a fresh clone (PR #1927 smoke, Machine
+# 8d967d3f534068): Fly refused four starts in 17s with failed_precondition
+# `machine getting replaced` then `machine still active`, settled `stopped`
+# afterwards, and nothing re-requested start. The provider fake replays those
+# exact refusals for five starts, then accepts. The start must wait on Fly's
+# settled condition for the exact Machine and keep retrying that precondition
+# within its bounded window; ordinary errors keep the 4-attempt budget.
+boot_start_fixture() {  # boot_start_fixture <case> <per-call plan: P=precondition O=other A=accept>
+  local dir="$TMP_ROOT/boot-start-$1"
+  mkdir -p "$dir"
+  printf '%s\n' 0 > "$dir/starts"
+  : > "$dir/waits"
+  printf '%s\n' "$2" > "$dir/plan"
+  printf '%s' "$dir"
+}
+boot_start_plan() {  # boot_start_plan <count> <kind>
+  local i out=""
+  for i in $(seq 1 "$1"); do out="$out$2 "; done
+  printf '%s' "$out"
+}
+boot_start_fake_provider='
+  _with_timeout() { shift; "$@"; }
+  sleep() { :; }
+  flyctl() {
+    case "$1 $2" in
+      "machine start")
+        local n kind; n=$(( $(cat "$BOOT_FIXTURE/starts") + 1 ))
+        printf "%s\n" "$n" > "$BOOT_FIXTURE/starts"
+        # Hard stop for a pre-fix spin: SECONDS does not advance under the stubbed sleep.
+        [ "$n" -le 60 ] || { echo "$3 has been started"; return 0; }
+        kind="$(cut -d" " -f"$n" "$BOOT_FIXTURE/plan")"
+        case "$kind" in
+          P)
+            if [ "$n" -eq 1 ]; then
+              echo "Error: could not start machine $3: failed to start VM $3: failed_precondition: machine getting replaced, refusing to start (Request ID: 01M75DF1AATXMBN3RKN2JCREV4-sjc)" >&2
+            else
+              echo "Error: could not start machine $3: failed to start VM $3: failed_precondition: machine still active, refusing to start (Request ID: 01M75DFJ4YBNMKGRDBP59HGZ1M-sjc)" >&2
+            fi
+            return 1 ;;
+          O) echo "Error: could not start machine $3: failed to start VM $3: unavailable: host busy" >&2; return 1 ;;
+        esac
+        echo "$3 has been started"
+        ;;
+      "machine wait") printf "%s\n" "$*" >> "$BOOT_FIXTURE/waits" ;;
+      *) echo "unexpected flyctl $*" >&2; return 99 ;;
+    esac
+  }
+'
+(
+  function_body="$(readiness_function boot_launch_start_after_config)"
+  [ -n "$function_body" ] || fail "could not load production boot_launch_start_after_config"
+  eval "$function_body"
+  eval "$boot_start_fake_provider"
+  APP=bench-app
+  BOOT_FIXTURE="$(boot_start_fixture replaced "$(boot_start_plan 5 P)A")"
+  boot_launch_start_after_config 8d967d3f534068 "$BOOT_FIXTURE/start.log" ||
+    fail "boot start must survive Fly replacing/still-active refusals after config update"
+  [ "$(cat "$BOOT_FIXTURE/starts")" -eq 6 ] ||
+    fail "boot start must re-request start once Fly settles (starts=$(cat "$BOOT_FIXTURE/starts"))"
+  [ "$(grep -c '^machine wait 8d967d3f534068 -a bench-app --state settled ' "$BOOT_FIXTURE/waits")" -eq 5 ] ||
+    fail "boot start must wait for the exact Machine's settled state after each refusal"
+  grep -q 'machine still active, refusing to start' "$BOOT_FIXTURE/start.log" ||
+    fail "boot start must retain the provider refusal diagnostics"
+
+  # Bounded: an exhausted settle window stops after the refusal in hand.
+  BOOT_FIXTURE="$(boot_start_fixture window "$(boot_start_plan 59 P)")"
+  rc=0
+  CLOUDBENCH_BOOT_START_SETTLE_SECONDS=0 \
+    boot_launch_start_after_config 8d967d3f534068 "$BOOT_FIXTURE/start.log" || rc=$?
+  [ "$rc" -ne 0 ] && [ "$(cat "$BOOT_FIXTURE/starts")" -eq 1 ] ||
+    fail "boot start settle retry must be bounded (rc=$rc starts=$(cat "$BOOT_FIXTURE/starts"))"
+
+  # Other provider errors keep the original 4-attempt budget and never wait.
+  BOOT_FIXTURE="$(boot_start_fixture other "$(boot_start_plan 59 O)")"
+  rc=0
+  boot_launch_start_after_config 8d967d3f534068 "$BOOT_FIXTURE/start.log" || rc=$?
+  [ "$rc" -ne 0 ] && [ "$(cat "$BOOT_FIXTURE/starts")" -eq 4 ] && [ ! -s "$BOOT_FIXTURE/waits" ] ||
+    fail "non-precondition start errors must keep the 4-attempt budget (rc=$rc starts=$(cat "$BOOT_FIXTURE/starts"))"
+
+  # Settle-window refusals never consume the ordinary budget: after five
+  # refusals, a transient ordinary failure still gets its own retries.
+  BOOT_FIXTURE="$(boot_start_fixture mixed-recovers "$(boot_start_plan 5 P)$(boot_start_plan 3 O)A")"
+  boot_launch_start_after_config 8d967d3f534068 "$BOOT_FIXTURE/start.log" ||
+    fail "an ordinary failure after settle-window refusals must keep its retry budget (starts=$(cat "$BOOT_FIXTURE/starts"))"
+  [ "$(cat "$BOOT_FIXTURE/starts")" -eq 9 ] ||
+    fail "mixed refusals must reach the accepting start (starts=$(cat "$BOOT_FIXTURE/starts"))"
+
+  # Classify each response alone: an earlier refusal still in the log must not
+  # turn later ordinary failures into unbounded settle-window retries.
+  BOOT_FIXTURE="$(boot_start_fixture current-response "P $(boot_start_plan 58 O)")"
+  rc=0
+  boot_launch_start_after_config 8d967d3f534068 "$BOOT_FIXTURE/start.log" || rc=$?
+  [ "$rc" -ne 0 ] && [ "$(cat "$BOOT_FIXTURE/starts")" -eq 5 ] &&
+    [ "$(wc -l < "$BOOT_FIXTURE/waits")" -eq 1 ] ||
+    fail "only the current start response may select a settle wait (rc=$rc starts=$(cat "$BOOT_FIXTURE/starts") waits=$(wc -l < "$BOOT_FIXTURE/waits"))"
+) || readiness_failures=$((readiness_failures + 1))
+boot_start_call_sites="$(grep -c '^[[:space:]]*if boot_launch_start_after_config "\$mid" "\$_start_log"; then$' \
+  "$ROOT_DIR/scripts/run-bench-cloud" || true)"
+[ "$boot_start_call_sites" = "1" ] ||
+  fail "boot-launch must submit its post-config start through boot_launch_start_after_config (found=$boot_start_call_sites)"
 
 # A readiness helper that fails closed is useless if a caller bypasses it. All
 # three maintenance paths must use the combined gate, leaving the component
@@ -4026,6 +4369,10 @@ PYWIRE
     || { echo "a missing agents/.env has no explicit Lantern credential" >&2; exit 1; }
 ) || fail "benchmark stacks must give workers the central people credential broker"
 
+# The same role-specific contract must survive staging and every guest boot path.
+python3 "$ROOT_DIR/scripts/tests/cloudbench-provider-contract.test.py"
+
+
 # Production replay (PR #1627 Group 4 cloud smoke, fleet 20261028-181310-2300577):
 # the devbox VM paused for 537 s (kernel audit seq 73645→73646, 18:33:12→18:42:09Z)
 # while six status proxies were still retrying through Fly GraphQL 503s. The
@@ -4041,6 +4388,17 @@ PYWIRE
 # tunnel served after the thaw (chat-mode). Fakes advance a file-backed clock
 # instead of sleeping, so the replay is offline and deterministic.
 (
+  # The production helper uses exec: an in-process function is not a native
+  # executable. Prove that distinction without allowing a real Fly fallback.
+  shell_only_rc=0
+  (
+    PATH="$TMP_ROOT/no-native-fly-fixture"
+    flyctl() { : > "$TMP_ROOT/shell-only-fly-called"; }
+    exec flyctl proxy
+  ) 2> "$TMP_ROOT/shell-only-fly-exec.log" || shell_only_rc=$?
+  [ "$shell_only_rc" -eq 127 ] && [ ! -e "$TMP_ROOT/shell-only-fly-called" ] ||
+    fail "exec must not resolve an in-process flyctl function"
+
   stall_replay() {  # <variant A|B> ; fakes share state through STALL_* files
     local variant="$1" stall_dir="$TMP_ROOT/proxy-host-stall-$1"
     mkdir -p "$stall_dir"
@@ -4069,17 +4427,24 @@ PYWIRE
       printf '%s\n' "$((now + secs))" > "$STALL_CLOCK"
       command sleep 0.02
     }
-    flyctl() {  # A: attempts 1-4 die on the Fly GraphQL 503 (pause after #4); B: always alive
-      local n
-      n=$(( $(cat "$STALL_COUNT" 2>/dev/null || echo 0) + 1 ))
-      if [ "$STALL_VARIANT" = A ] && [ "$n" -eq 4 ]; then : > "$STALL_MARKER"; fi
-      printf '%s\n' "$n" > "$STALL_COUNT"
-      if [ "$STALL_VARIANT" = A ] && [ "$n" -le 4 ]; then
-        echo 'Error: failed to run mutation($input: ValidateWireGuardPeersInput!) { validateWireGuardPeers(input: $input) { invalidPeerIps } }: server returned a non-200 status code: 503'
-        return 1
-      fi
-      exec sleep 60
-    }
+    mkdir -p "$stall_dir/bin"
+    local PATH="$stall_dir/bin:$PATH"
+    export PATH
+    cat > "$stall_dir/bin/flyctl" <<'FAKE_STALL_PROXY'
+#!/usr/bin/env bash
+# A: attempts 1-4 die on the Fly GraphQL 503; B: always alive.
+n=$(( $(cat "$STALL_COUNT" 2>/dev/null || echo 0) + 1 ))
+if [ "$STALL_VARIANT" = A ] && [ "$n" -eq 4 ]; then : > "$STALL_MARKER"; fi
+printf '%s\n' "$n" > "$STALL_COUNT"
+if [ "$STALL_VARIANT" = A ] && [ "$n" -le 4 ]; then
+  echo 'Error: failed to run mutation($input: ValidateWireGuardPeersInput!) { validateWireGuardPeers(input: $input) { invalidPeerIps } }: server returned a non-200 status code: 503'
+  exit 1
+fi
+exec sleep 60
+FAKE_STALL_PROXY
+    chmod +x "$stall_dir/bin/flyctl"
+    [ "$(command -v flyctl)" = "$stall_dir/bin/flyctl" ] ||
+      fail "host-stall replay must resolve its executable Fly fixture"
     curl() {
       case " $* " in
         *" -w %{http_code} "*)
@@ -4136,7 +4501,16 @@ PYWIRE
   retain_dir="$TMP_ROOT/proxy-log-retention"
   mkdir -p "$retain_dir"
   CLOUDBENCH_PROXY_POST_PROBE_SETTLE_SECONDS=0
-  flyctl() { exec sleep 60; }
+  mkdir -p "$retain_dir/bin"
+  PATH="$retain_dir/bin:$PATH"
+  export PATH
+  cat > "$retain_dir/bin/flyctl" <<'FAKE_RETAIN_PROXY'
+#!/usr/bin/env bash
+exec sleep 60
+FAKE_RETAIN_PROXY
+  chmod +x "$retain_dir/bin/flyctl"
+  [ "$(command -v flyctl)" = "$retain_dir/bin/flyctl" ] ||
+    fail "log-retention replay must resolve its executable Fly fixture"
   curl() {
     case " $* " in *" -w %{http_code} "*) printf 204 ;; esac
     return 0

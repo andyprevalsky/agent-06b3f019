@@ -32,6 +32,7 @@ import {
   extractRateLimitedUntil,
   providerRequiredWaitMs,
 } from './rateLimitReset';
+import { observeSubscriptionUsage } from './subscriptionUsage';
 import { parseResponsesSSE } from './streaming';
 import { responsesToolChoice, responsesTools } from './toolContract';
 import { postCodexStream, postOpenAIResponsesStream } from './transport';
@@ -461,6 +462,12 @@ export async function* gptAuthComplete(opts: GptAuthOptions): AsyncIterable<Rose
     }
 
     const status = response.status;
+    // The account's 5h/7d usage (x-codex-* headers, plus a usage-limit body's
+    // reset on failure), recorded in the background, never awaited.
+    observeSubscriptionUsage('gpt', opts.gptToken, response.headers, {
+      status,
+      body: response.errorBody,
+    });
 
     if (status === 200) {
       if (!response.body) {

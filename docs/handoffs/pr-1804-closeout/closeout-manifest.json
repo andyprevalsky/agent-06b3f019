@@ -4,7 +4,7 @@
  "merge_commit": "99e4d6c28dda3c62fdb2f1be4c5292ff5a5a3ed2",
  "gated_source": "04b4d4a5f4f4e1f7b19918ea0693fb2d2a5ca716",
  "source_digest": "a0f5a1177ae86ca5e2fc27ac519b1c4d0a635b081e327b2827bb6ab4d8589f18",
- "outcome": "completed (AgentCard production lane: recorded external-provider exception, credential or billing change only the user can make)",
+ "outcome": "completed (production PASS with the AgentCard lane SKIPPED-elected by the user; native FAIL retained)",
  "purpose": "reliability follow-up to the PR #1776 test repair /goal: the two sibling flakes that failed the same deploy-command-structural gate (PR #1787 attempt 2, Blacksmith run 42440778292)",
  "fixes": {
   "mirror_commit_graph": "deploy-gates.yml rebuilds a broken sticky-disk mirror commit-graph chain (verify --shallow before/after fetch) and runs gc in the foreground; regression WorkflowMirrorCheckout (deploy-test-github)",
@@ -175,7 +175,20 @@
    "parts": 1,
    "files": 6,
    "verified_note": "verified by closeout_archive.py verify (run interactively; the receipt's verified field is written only after full readback); no separate log file"
+  },
+  {
+   "name": "pr1804-closeout-addendum",
+   "key_prefix": "devbox-closeout-private/pr1804-closeout-addendum/",
+   "archive_sha256": "c3b8ac9112d99d253ac16dd74be230cd76892bf95d4614904a0a5920f192acc4",
+   "verified": "remote manifest decrypted and hash-matched; every part downloaded, decrypted and hash-checked; reassembled archive sha256 matches",
+   "parts": 1,
+   "files": 3058
   }
  ],
- "outcome_record": "factory outcome 'completed' for run 20261108-070509-1005569 was emitted by `scripts/deploy finish` (Process step 15) at 2026-11-08T09:00:35Z, before deletion readiness (step 16); the deletion check reached READY only after this records PR and its main-generated receipt (see the closeout's final receipt)."
+ "outcome_record": "factory outcome 'completed' for run 20261108-070509-1005569 was emitted by `scripts/deploy finish` (Process step 15) at 2026-11-08T09:00:35Z, before deletion readiness (step 16); the deletion check reached READY only after this records PR and its main-generated receipt (see the closeout's final receipt).",
+ "production_final": {
+  "result": "DEPLOY_PRODUCTION PASS sha=99e4d6c28dda lanes=agentcard:SKIPPED-elected,semantic:PASS",
+  "agentcard": "SKIPPED-elected by the user on 2026-11-09 (live KYC cardholder unavailable; prod payer fixture is Stripe test-mode). Never a PASS; the native FAIL of run 20261108_085928 and its unreleased 100 cents stay recorded (evidence/production-99e4d6c28d.json).",
+  "receipt": "evidence/production-99e4d6c28d-elected.json"
+ }
 }

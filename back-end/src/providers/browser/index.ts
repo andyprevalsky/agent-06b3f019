@@ -59,6 +59,7 @@ import {
 
 export {
   BrowserProviderRateLimitError,
+  BrowserSessionValidationError,
   type BrowserFileInfo,
   type BrowserProviderName,
   type BrowserSessionHealth,
@@ -160,13 +161,18 @@ export async function createSessionWithContextUsingDependencies(
   dependencies: BrowserSessionCreationDependencies
 ): Promise<BrowserProviderSession> {
   const requiredSteelProfileId = options?.requiredSteelProfileId;
-  const preferred =
+  const defaultProvider =
+    requiredSteelProfileId !== undefined ? 'steel' : dependencies.defaultProvider();
+  const learned =
     requiredSteelProfileId === undefined
       ? compatiblePreferredBrowserConfig(
           await dependencies.readPreferredConfig(contextId),
           proxyLocation
         )
       : null;
+  // Recovery preferences tune the selected provider; they never select a different
+  // provider for a fresh session. Resume dispatch follows the existing row.
+  const preferred = learned?.provider === defaultProvider ? learned : null;
   const createForProvider = async (
     provider: BrowserProviderName,
     usePreference: typeof preferred
@@ -230,9 +236,6 @@ export async function createSessionWithContextUsingDependencies(
   }
 
   let fallback: BrowserProviderSelection | undefined;
-  if (preferred !== null && preferred.provider === 'tilion' && !tilionEnabled()) {
-    fallback = { requestedProvider: 'tilion', fallbackReason: 'preferred_provider_kill_switch' };
-  }
   if (
     preferred !== null &&
     (preferred.provider !== 'browser-use' || browserUseEnabled()) &&
@@ -255,7 +258,6 @@ export async function createSessionWithContextUsingDependencies(
     }
   }
   // A failure of the default provider propagates (typed by the adapter); never swallowed.
-  const defaultProvider = dependencies.defaultProvider();
   if (fallback === undefined && defaultProvider === 'kernel' && tilionKillSwitchRedirect()) {
     fallback = { requestedProvider: 'tilion', fallbackReason: 'tilion_kill_switch' };
   }

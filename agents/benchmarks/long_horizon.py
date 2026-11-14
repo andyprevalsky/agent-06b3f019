@@ -25,7 +25,9 @@ renames orphan pass history and latency baselines.
 
 from __future__ import annotations
 
+import importlib.util
 import json
+import sys
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -43,6 +45,7 @@ from benchmarks.auth_test_site import (
 )
 from benchmarks.code_agent_checks import CHECK_TYPES as CODE_AGENT_CHECK_TYPES
 from benchmarks.live_fixtures import LIVE_FIXTURE_NAMES
+from benchmarks.select_predeploy_benches import require_deploy_category
 from benchmarks.tree_feedback_routing import validate_mid_run_feedback
 
 CATALOG_VERSION = "0.1"
@@ -148,6 +151,31 @@ IDEA_STATUSES = {"idea", "promoted", "rejected"}
 _HERE = Path(__file__).resolve().parent
 DEFAULT_CATALOG = _HERE / "tasks.json"
 DEFAULT_IDEA_BANK = _HERE / "long_horizon_ideas.json"
+# The in-definition quarantine marker shared with every Python test (stdlib only).
+_QUARANTINE_MARKER = _HERE.parents[1] / "scripts" / "lib" / "test_quarantine.py"
+
+
+def _quarantine_marker_module():
+    """scripts/lib/test_quarantine.py, the one validator for @quarantine and a task's `quarantine`."""
+    name = "test_quarantine"
+    module = sys.modules.get(name)
+    if module is not None and hasattr(module, "validate_mapping"):
+        return module
+    spec = importlib.util.spec_from_file_location(name, _QUARANTINE_MARKER)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"cannot load {_QUARANTINE_MARKER}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def validate_task_quarantine(raw: dict[str, Any], item_id: str) -> dict[str, str] | None:
+    """Optional `quarantine: {since, repair, error, evidence}`: the task still runs in deploy smoke,
+    its failure is non-blocking (QUARANTINED_FAIL). Same rules as the Python @quarantine marker."""
+    if "quarantine" not in raw:
+        return None
+    return _quarantine_marker_module().validate_mapping(raw["quarantine"], owner=item_id)
 
 
 @dataclass(frozen=True)
@@ -234,10 +262,13 @@ def _validate_environment(env: dict[str, Any], item_id: str) -> dict[str, Any]:
     # gap rather than an agent capability miss.
     if "auth_test_site" in env:
         try:
-            declared_auth_test_site_scenario(env)
+            auth_scenario = declared_auth_test_site_scenario(env)
         except ValueError as exc:
             raise ValueError(f"{item_id}: {exc}") from exc
-        if mode != "synthetic" or env.get("live_fixtures"):
+        if auth_scenario == "phone_sms_otp":
+            if mode != "live":
+                raise ValueError(f"{item_id}: phone_sms_otp requires mode=live for actual phone transport")
+        elif mode != "synthetic" or env.get("live_fixtures"):
             raise ValueError(
                 f"{item_id}: environment.auth_test_site is a fully seeded synthetic world; "
                 "declare mode=synthetic without live_fixtures"
@@ -382,6 +413,8 @@ def validate_task_contract(raw: dict[str, Any]) -> None:
     from benchmarks.process_bench import validate_task_process
 
     validate_task_process(raw)
+    if declared_auth_test_site_scenario(raw.get("environment")) == "phone_sms_otp" and "LIVE" not in (raw.get("tags") or []):
+        raise ValueError("phone_sms_otp requires the LIVE tag")
     item_id = _require_non_empty_string(raw, "name", "<task>")
     status = raw.get("status", "ready")
     if status not in TASK_STATUSES:
@@ -394,6 +427,7 @@ def validate_task_contract(raw: dict[str, Any]) -> None:
         raise ValueError(f"{item_id}: harness must be one of {sorted(TASK_HARNESSES)}")
     if raw.get("bench") not in TASK_BENCHES:
         raise ValueError(f"{item_id}: bench must be declared explicitly, one of {sorted(TASK_BENCHES)}")
+    validate_task_quarantine(raw, item_id)
     min_steps = raw.get("min_steps")
     if min_steps is not None:
         if not isinstance(min_steps, dict) or not min_steps:
@@ -534,10 +568,15 @@ def load_raw_catalog(path: Path = DEFAULT_CATALOG) -> list[dict[str, Any]]:
 
 
 def validate_catalog(path: Path = DEFAULT_CATALOG) -> list[dict[str, Any]]:
-    """Validate the full unified catalog; returns the raw entries on success."""
+    """Validate the full unified catalog; returns the raw entries on success.
+
+    Every ready entry must also resolve to a predeploy deploy category or opt
+    out explicitly, so /deploy's selector cannot silently ignore a new task.
+    """
     tasks = load_raw_catalog(path)
     for raw in tasks:
         validate_task_contract(raw)
+        require_deploy_category(raw)
     names = [t.get("name") for t in tasks]
     if len(names) != len(set(names)):
         raise ValueError(f"{path}: task names must be unique")

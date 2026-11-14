@@ -65,6 +65,29 @@ function isClearlyLinearPattern(source: string): boolean {
   return true;
 }
 
+/** A finite union of nonempty fixed literal strings has no repetition frontier. */
+function isFiniteLiteralAlternation(source: string, flags: string): boolean {
+  if (!/^[ims]*$/.test(flags)) return false;
+  let branchLength = 0;
+  let hasAlternation = false;
+  for (let index = 0; index < source.length; index += 1) {
+    const char = source[index];
+    if (char === '\\') {
+      index += 1;
+      if (index === source.length || !'\\^$.*+?()[]{}|'.includes(source[index])) return false;
+      branchLength += 1;
+    } else if (char === '|') {
+      if (branchLength === 0) return false;
+      hasAlternation = true;
+      branchLength = 0;
+    } else {
+      if ('^$.*+?()[]{}'.includes(char)) return false;
+      branchLength += 1;
+    }
+  }
+  return hasAlternation && branchLength > 0;
+}
+
 type PatternAnalyzer = (
   source: string,
   flags: string,
@@ -123,7 +146,9 @@ export async function checkPatternSafety(
   if (
     typeof control !== 'function' &&
     typeof flags === 'string' &&
-    (isClearlyLinearPattern(source) || isClearlyAtMostQuadraticPattern(source, flags))
+    (isClearlyLinearPattern(source) ||
+      isFiniteLiteralAlternation(source, flags) ||
+      isClearlyAtMostQuadraticPattern(source, flags))
   ) {
     return { ok: true };
   }

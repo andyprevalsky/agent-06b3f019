@@ -1,3 +1,4 @@
+import type { ImessageAuthLossVerifier } from '../../providers/phoneAuthLoss';
 import type { MessageVerifier } from '../../providers/phoneMessageVerifier';
 import type { CredentialVerifier } from '../../providers/phoneCredentialVerifier';
 import { profileBody, setupBody } from './routes.setup';
@@ -12,20 +13,13 @@ import { IPhoneError, type ActionInput, type LeaseAction } from './types';
 import * as operations from './service.operations';
 import type { PhoneClientFactory } from './types.operations';
 import { interaction } from './service.interactions';
+import * as connection from './service.connection';
+import { requestAccess, type AccessRequestSmsSender } from './service.accessRequest';
+import { errorBody, mountDeviceRoutes } from './routes.device';
+import { bodyRecord, text } from './routes.body';
 
 const log = createLogger('IPhone');
 
-function bodyRecord(body: unknown): Record<string, unknown> {
-  if (typeof body !== 'object' || body === null || Array.isArray(body))
-    throw new IPhoneError(400, 'Request body must be an object');
-  return body as Record<string, unknown>;
-}
-function text(body: Record<string, unknown>, key: string): string {
-  const value = body[key];
-  if (typeof value !== 'string' || value.trim() === '' || value.length > 512)
-    throw new IPhoneError(400, `${key} must be a nonempty string of at most 512 characters`);
-  return value;
-}
 function actionInput(action: LeaseAction, body: unknown): ActionInput {
   if (action === 'awaiting-auth')
     return { attentionRequestId: text(bodyRecord(body), 'attentionRequestId') };
@@ -52,7 +46,7 @@ function handle(handler: Handler, status = 200) {
       } else res.status(status).json(result);
     } catch (error) {
       if (error instanceof IPhoneError) {
-        res.status(error.status).json({ error: error.message });
+        res.status(error.status).json(errorBody(error));
         return;
       }
       if (
@@ -77,7 +71,8 @@ function executePhoneOperation(
   clientFactory: PhoneClientFactory,
   credentialVerifier?: CredentialVerifier,
   beforeSavedExecute?: () => Promise<void>,
-  messageVerifier?: MessageVerifier
+  messageVerifier?: MessageVerifier,
+  authLossVerifier?: ImessageAuthLossVerifier
 ) {
   const body = bodyRecord(req.body);
   const args = body.args === undefined ? {} : bodyRecord(body.args);
@@ -118,7 +113,8 @@ function executePhoneOperation(
     clientFactory,
     credentialVerifier,
     beforeSavedExecute,
-    messageVerifier
+    messageVerifier,
+    authLossVerifier
   );
 }
 
@@ -171,6 +167,9 @@ interface IPhoneRouterOptions {
   credentialVerifier?: CredentialVerifier;
   beforeSavedExecute?: () => Promise<void>;
   messageVerifier?: MessageVerifier;
+  setupAgentLauncher: connection.SetupAgentLauncher;
+  accessRequestSms?: AccessRequestSmsSender;
+  authLossVerifier?: ImessageAuthLossVerifier;
 }
 function phoneOperationHandler(
   clientFactory: PhoneClientFactory,
@@ -183,10 +182,50 @@ function phoneOperationHandler(
       clientFactory,
       options.credentialVerifier,
       options.beforeSavedExecute,
-      options.messageVerifier
+      options.messageVerifier,
+      options.authLossVerifier
     );
 }
-export function createIPhoneRouter(options: IPhoneRouterOptions = {}) {
+function mountConnectionRoutes(router: ReturnType<typeof Router>, options: IPhoneRouterOptions) {
+  router.post(
+    '/request-access',
+    handle((req, userId) => {
+      if (req.isInternal === true) throw new IPhoneError(403, 'User session required');
+      if (Object.keys(bodyRecord(req.body)).length !== 0)
+        throw new IPhoneError(400, 'Access requests use the authenticated account');
+      return requestAccess(userId, options.accessRequestSms);
+    })
+  );
+  router.get(
+    '/availability/:taskId',
+    handle((req, userId) => connection.availability(userId, req.params.taskId))
+  );
+  router.get(
+    '/connection',
+    handle((_req, userId) => connection.connection(userId))
+  );
+  router.post(
+    '/connect',
+    handle((req, userId) => {
+      const body = bodyRecord(req.body);
+      if (
+        Object.keys(body).sort().join(',') !== 'expectedRevision,requestKey' ||
+        typeof body.expectedRevision !== 'number' ||
+        !Number.isSafeInteger(body.expectedRevision) ||
+        body.expectedRevision < 0
+      )
+        throw new IPhoneError(400, 'Invalid iPhone connection request');
+      return connection.connect(
+        userId,
+        body.expectedRevision,
+        text(body, 'requestKey'),
+        options.setupAgentLauncher
+      );
+    })
+  );
+}
+
+export function createIPhoneRouter(options: IPhoneRouterOptions) {
   const router = Router();
   const clientFactory = options.phoneClient ?? operations.defaultPhoneClient;
   router.use(asyncHandler(hybridAuth));
@@ -217,10 +256,12 @@ export function createIPhoneRouter(options: IPhoneRouterOptions = {}) {
       );
     })
   );
+  mountConnectionRoutes(router, options);
   router.get(
     '/capability',
     handle((_req, userId) => service.capability(userId))
   );
+  mountDeviceRoutes(router, handle, clientFactory);
   router.put(
     '/device',
     handle(async (req, userId) => {
@@ -264,4 +305,3 @@ export function createIPhoneRouter(options: IPhoneRouterOptions = {}) {
   );
   return router;
 }
-export default createIPhoneRouter();

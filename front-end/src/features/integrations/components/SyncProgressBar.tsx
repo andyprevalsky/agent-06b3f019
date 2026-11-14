@@ -14,16 +14,14 @@
  * soft glow. Uses the existing `animate-shimmer` keyframes (tailwind config).
  */
 
+import { FLOWING_GRADIENT, GLOW, SHIMMER, SYNC_GRADIENT } from '@/components/ui/syncGradient';
+
 import { useSyncProgress } from '../hooks/useSyncProgress';
 import type { SyncProgress } from '../types';
 
 import { formatBytes, formatEta, phaseLabel } from './syncProgressFormat';
 
-export const SYNC_GRADIENT = 'linear-gradient(90deg,#ffb36b,#ff5f8f 45%,#e43f9a 70%,#9b4dff)';
-const FLOWING_GRADIENT =
-  'linear-gradient(90deg,#ffb36b,#ff5f8f,#e43f9a,#9b4dff,#e43f9a,#ff5f8f,#ffb36b)';
-const SHIMMER = 'linear-gradient(90deg,transparent,rgba(255,255,255,.7),transparent)';
-const GLOW = '0 0 8px rgba(255,95,143,.45)';
+export { SYNC_GRADIENT };
 
 const fmt = (n: number) => n.toLocaleString('en-US');
 

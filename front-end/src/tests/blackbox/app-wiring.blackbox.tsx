@@ -6,6 +6,8 @@ import { Routes, Route } from 'react-router-dom';
 import { renderWithProviders } from './test-wrapper';
 import { capturedRequests, clearCaptures } from './msw/capture';
 import { ROUTE_TABLE } from '@/features/app-wiring/config';
+import { http, HttpResponse } from 'msw';
+import { server } from './msw/server';
 import { supabase } from '@/lib/supabase';
 import { useAttentionRequests } from '@/features/terminal-component-group/components/attention-inbox/useAttentionRequests';
 
@@ -83,6 +85,133 @@ describe('App wiring', () => {
   // -----------------------------------------------------------------------
 
   describe('route mapping', () => {
+    it.each([false, true])(
+      '/connect/fireflies offers sign-in for anonymous=%s without starting provider OAuth',
+      async (anonymous) => {
+        if (anonymous) {
+          mockSession();
+          const stored = JSON.parse(localStorage.getItem('rose-session')!);
+          stored.user.is_anonymous = true;
+          localStorage.setItem('rose-session', JSON.stringify(stored));
+          localStorage.setItem('app-user', JSON.stringify(stored.user));
+        }
+        await renderAppRoutes('/connect/fireflies');
+        await userEvent
+          .setup()
+          .click(await screen.findByRole('button', { name: 'Sign in to Rose' }));
+        expect(await screen.findByRole('dialog')).toBeVisible();
+        expect(screen.queryByRole('button', { name: 'Connect Fireflies' })).not.toBeInTheDocument();
+        expect(
+          capturedRequests.filter((request) => request.url.includes('/oauth/start')),
+        ).toHaveLength(0);
+      },
+    );
+
+    it('/connect/fireflies returns from phone sign-in to the same provider chooser without provider OAuth', async () => {
+      const user = userEvent.setup();
+      await renderAppRoutes('/connect/fireflies');
+      await user.click(await screen.findByRole('button', { name: 'Sign in to Rose' }));
+      await user.type(screen.getByLabelText('Phone Number'), '9729777432');
+      await user.click(screen.getByRole('button', { name: /continue/i }));
+      await user.type(await screen.findByLabelText('Verification Code'), '181818');
+      await user.click(screen.getByRole('checkbox'));
+      await user.click(screen.getByRole('button', { name: /verify/i }));
+      expect(await screen.findByRole('searchbox', { name: 'Search integrations' })).toHaveValue(
+        'fireflies',
+      );
+      expect(screen.getByRole('button', { name: 'Connect Fireflies' })).toBeVisible();
+      expect(screen.getByRole('button', { name: 'Connect Granola' })).toBeVisible();
+      expect(
+        capturedRequests.filter((request) => request.url.includes('/oauth/start')),
+      ).toHaveLength(0);
+    });
+
+    it.each(['granola', 'fireflies', 'meeting_notes'])(
+      '/connect/%s opens shared provider choices without starting OAuth',
+      async (provider) => {
+        mockSession();
+        await renderAppRoutes(`/connect/${provider}`);
+        expect(await screen.findByRole('searchbox', { name: 'Search integrations' })).toHaveValue(
+          provider.replaceAll('_', ' '),
+        );
+        const group = await screen.findByRole('region', { name: 'Meeting note taker' });
+        expect(within(group).getByRole('button', { name: 'Connect Granola' })).toBeVisible();
+        expect(within(group).getByRole('button', { name: 'Connect Fireflies' })).toBeVisible();
+        expect(
+          capturedRequests.filter((request) => request.url.includes('/oauth/start')),
+        ).toHaveLength(0);
+      },
+    );
+
+    it('/connect/gmail keeps the existing connector in the shared catalog', async () => {
+      mockSession();
+      await renderAppRoutes('/connect/gmail');
+      expect(await screen.findByRole('searchbox', { name: 'Search integrations' })).toHaveValue(
+        'gmail',
+      );
+      expect(screen.getByRole('region', { name: 'Messages' })).toBeVisible();
+      expect(screen.queryByRole('region', { name: 'Meeting note taker' })).not.toBeInTheDocument();
+    });
+
+    it.each([
+      { provider: 'granola', name: 'Granola' },
+      { provider: 'fireflies', name: 'Fireflies' },
+    ])(
+      '/connect/$provider starts the existing OAuth flow and remembers this route',
+      async ({ provider, name }) => {
+        mockSession();
+        const originalLocation = window.location;
+        const location = {
+          ...originalLocation,
+          pathname: `/connect/${provider}`,
+          search: '',
+          href: originalLocation.href,
+        };
+        Object.defineProperty(window, 'location', { configurable: true, value: location });
+        const starts: unknown[] = [];
+        server.use(
+          http.post(
+            `http://localhost:3001/api/integrations/${provider}/oauth/start`,
+            async ({ request }) => {
+              starts.push(await request.json());
+              return HttpResponse.json({ authorizeUrl: 'https://provider.example/authorize' });
+            },
+          ),
+        );
+        try {
+          await renderAppRoutes(`/connect/${provider}`);
+          await userEvent
+            .setup()
+            .click(await screen.findByRole('button', { name: `Connect ${name}` }));
+          await waitFor(() => expect(location.href).toBe('https://provider.example/authorize'));
+          expect(starts).toEqual([
+            { redirectUri: `${originalLocation.origin}/integrations/${provider}/callback` },
+          ]);
+          expect(sessionStorage.getItem(`rose.${provider}.returnPath`)).toBe(
+            `/connect/${provider}`,
+          );
+        } finally {
+          Object.defineProperty(window, 'location', {
+            configurable: true,
+            value: originalLocation,
+          });
+          sessionStorage.clear();
+        }
+      },
+    );
+
+    it.each([
+      { provider: 'granola', name: 'Granola' },
+      { provider: 'fireflies', name: 'Fireflies' },
+    ])('routes $name OAuth returns to the shared callback page', async ({ provider, name }) => {
+      await renderAppRoutes(`/integrations/${provider}/callback`);
+      expect(
+        await screen.findByRole('heading', { name: `Couldn't connect ${name}` }),
+      ).toBeInTheDocument();
+      expect(screen.getByText(`${name} did not return a sign-in code.`)).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Back to Rose' })).toBeInTheDocument();
+    });
+
     it('"/" renders the Terminal page', async () => {
       mockSession();
       await renderAppRoutes('/');

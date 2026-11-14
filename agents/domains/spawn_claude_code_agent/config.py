@@ -116,6 +116,14 @@ CODE_ACTIVITY_HEARTBEAT_TIMEOUT_S: Final[int] = 300
 # gets the same task back (backend createWithCodeSession).
 CODE_SESSION_CREATE_TIMEOUT_S: Final[float] = 30 * 60.0
 CODE_SESSION_CREATE_HEARTBEAT_S: Final[float] = 30.0
+# A resumed spawn whose live CLI the user holds in direct chat, behind a
+# ws-server too old to hold an attaching spawn: the backend answers 409
+# CODE_SESSION_HELD and never stops that CLI. The spawn waits (heartbeating,
+# capped backoff) for the hand back; the ws-server releases an idle hold after
+# 10 minutes, so this covers it with a margin before failing truthfully.
+CODE_SESSION_HELD_CODE: Final[str] = "CODE_SESSION_HELD"
+CODE_SESSION_HELD_WAIT_S: Final[float] = 12 * 60.0
+CODE_SESSION_HELD_BACKOFF_S: Final[tuple[float, float]] = (5.0, 30.0)
 # A reattaching attempt closes the previous sandbox and starts over only after
 # this many failed handshakes, so one network blip does not discard a live run.
 REATTACH_PROBE_ATTEMPTS: Final[int] = 3
@@ -143,6 +151,10 @@ LOCAL_TARGET_UNAVAILABLE_CODE: Final[str] = "LOCAL_TARGET_UNAVAILABLE"
 E2B_CAPACITY_EXHAUSTED_CODE: Final[str] = "E2B_CAPACITY_EXHAUSTED"
 # The backend answers session create 429 with this code when GitHub's rate limit stopped the repo access check.
 GITHUB_RATE_LIMITED_CODE: Final[str] = "GITHUB_RATE_LIMITED"
+# Error type of a run that ended abnormally after its code session existed. Its
+# message and details carry the exact error plus the code_session_id (and the
+# failure checkpoint) so the parent can resume instead of losing the work.
+CODE_AGENT_SESSION_FAILED_CODE: Final[str] = "CODE_AGENT_SESSION_FAILED"
 # Reason codes shared with back-end/src/providers/localDevices/messages.ts.
 LOCAL_TARGET_NOT_MAC_ORIGIN: Final[str] = "not_mac_origin"
 LOCAL_TARGET_DEVICE_DISCONNECTED: Final[str] = "device_disconnected"

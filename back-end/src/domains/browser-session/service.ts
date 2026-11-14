@@ -1,11 +1,10 @@
-import { buildBrowserSessionMetadata } from './service.metadata';
+import { buildBrowserSessionMetadata, logicalHasPrivateState } from './service.metadata';
 export { buildBrowserSessionMetadata } from './service.metadata';
 import { initLegacySession } from './service.init-legacy';
 import { closeBrowserSession } from './service.close';
 import { resumeOwnedBrowserSession } from './service.control';
 import { getTaskInfo } from './service.task-info';
 import { ensureLogicalBrowser } from '../../providers/browser/logicalSession';
-import { EMPTY_BROWSER_BASELINE } from '../../providers/browser/checkpoint';
 import {
   initializeLogicalBrowser,
   waitForBrowserInitialization,
@@ -62,22 +61,12 @@ export { CdpInjectionError, SessionNoWsUrlError } from './types';
  * a non-empty Home baseline. Until then it is a new browser and follows the
  * normal init contract: provider profile, saved realm credentials, full metadata.
  */
-function logicalHasPrivateState(session: {
-  logicalOwnerKey: string | null;
-  checkpointRef: string | null;
-  baselineCheckpointRef: string | null;
-}): boolean {
-  return (
-    session.logicalOwnerKey !== null &&
-    (session.checkpointRef !== null || session.baselineCheckpointRef !== EMPTY_BROWSER_BASELINE)
-  );
-}
 
 export async function prepareSessionCredentials(
   sessionId: string,
   userId: string,
   targetUrl: string,
-  options: { browser?: Browser } = {}
+  options: { browser?: Browser; restoreBrowserState?: boolean } = {}
 ) {
   const session = await repo.findSessionBySessionId(sessionId);
   if (session === null || session.context.userId !== userId) {
@@ -89,18 +78,16 @@ export async function prepareSessionCredentials(
     throw new Error('Target URL must have an authentication realm');
   }
 
-  const [authOptions, storedPasswords, passkeys, onCookiesReady] = await Promise.all([
+  const [authOptions, storedPasswords, passkeys] = await Promise.all([
     getAuthOptions(userId, authRealm, {
       steelContextId: session.provider === 'steel' ? (session.providerProfileId ?? null) : null,
     }),
     repo.findPasswords(userId),
     repo.reservePasskeysForRealm(userId, authRealm),
-    // Browser-template fork (A6): recorded once injection has chosen the account.
-    prepareWorldStateFork(session, userId, targetUrl),
   ]);
 
   const creds = buildSessionCredentialPayload(authRealm, authOptions, storedPasswords, passkeys);
-  if (logicalHasPrivateState(session)) {
+  if (options.restoreBrowserState === false || logicalHasPrivateState(session)) {
     return {
       ...creds,
       auth_credential_ref: null,
@@ -122,6 +109,8 @@ export async function prepareSessionCredentials(
       },
     };
   }
+  // Inventory refresh must not replace an in-flight authentication transaction.
+  const onCookiesReady = prepareWorldStateFork(session, userId, targetUrl);
   if (session.provider === 'tilion' && options.browser === undefined) {
     // The agent worker holds Tilion's only CDP socket: hand it the state to apply.
     // The world-state fork needs a backend CDP context, so it is not recorded here.
@@ -151,12 +140,61 @@ export async function prepareSessionCredentials(
   };
 }
 
+/** A blank initial page has no authentication realm or origin storage. */
+async function prepareInitialSessionCredentials(
+  sessionId: string,
+  userId: string,
+  targetUrl: string,
+  options: { browser?: Browser }
+) {
+  if (targetUrl !== 'about:blank') {
+    return prepareSessionCredentials(sessionId, userId, targetUrl, options);
+  }
+  // Navigation prepares the real target realm through the existing JIT path.
+  // Do not query, reserve or inject a site's credentials into an opaque page.
+  return {
+    ...buildSessionCredentialPayload(
+      '',
+      {
+        realm: '',
+        steel_session: null,
+        cookie_bundles: [],
+        passwords: [],
+        passkeys: [],
+        email_otp: { available: false, connected_emails: [], match_for_site_account: null },
+        readable_identifiers: [],
+        minted: null,
+      },
+      [],
+      []
+    ),
+    auth_credential_ref: null,
+    cookies_injected: false,
+    cookies_count: 0,
+    auth_source: 'none' as const,
+    browser_state_injection: {
+      cookies: {
+        injected: false,
+        cookieCount: 0,
+        authSource: 'none' as const,
+        credentialRef: null,
+      },
+      fingerprint: { injected: false },
+      indexedDB: { injected: false, originCount: 0 },
+      localStorage: { injected: false, originCount: 0 },
+      permissions: { injected: false, grantCount: 0 },
+      cacheStorage: { injected: false, originCount: 0 },
+    },
+  };
+}
+
 /* c8 ignore start -- initSession, closeBrowserSession, resumeBrowserSession require Steel SDK */
 export async function initSession(userId: string, agentId: string, startUrl: string, id?: string) {
   let logical = await ensureLogicalBrowser(userId, agentId);
   if (id !== undefined && id !== logical.id) {
     const result = await initLegacySession(userId, agentId, startUrl, id, {
-      prepare: prepareSessionCredentials,
+      prepare: prepareInitialSessionCredentials,
+
       metadata: buildBrowserSessionMetadata,
     });
     return { ...result, releaseOnDisconnect: () => closeBrowserSession(result.session_id, false) };
@@ -170,7 +208,8 @@ export async function initSession(userId: string, agentId: string, startUrl: str
   if (logical.sessionId === null && !logicalHasPrivateState(logical)) {
     const initialized = await initializeLogicalBrowser(logical.id, userId, () =>
       initLegacySession(userId, agentId, startUrl, logical.id, {
-        prepare: prepareSessionCredentials,
+        prepare: prepareInitialSessionCredentials,
+
         metadata: buildBrowserSessionMetadata,
       })
     );

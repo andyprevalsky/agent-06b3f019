@@ -1,0 +1,27 @@
+{
+  "format": "PR1955-CLOSEOUT-V1",
+  "pr": 1955,
+  "merged_sha": "423c51b8c1f77dbc7e4b000796275440180a1d36",
+  "source_head": "82e0e9b51002728a04a4995ee5a64f29314476bd",
+  "source_digest": "1a2c608537642d11966b86b4bcebe544090b4f219e24f3da98841e45ad237533",
+  "assignment": "repair PR #1947 round-1 backend-coverage-blackbox/units (worker-deployment-queue.test.ts, workflow-restart-tools.test.ts) on Blacksmith; originating merge 66fdbee6d8470aaaaafb195dc338563990de7174",
+  "root_cause": "Blacksmith gate VM Postgres kept stock max_connections=100 below the backend coverage pool budget (300 on devboxes)",
+  "fix": "scripts/ci/deploy-gate-setup.sh max_connections=300 + restart + live verify (bytes identical to f76adfe108 / PR #1956)",
+  "regression": "scripts/tests/deploy-test-github.test.py GateSetupPostgres (deploy-command-structural)",
+  "rca_case": "docs/rca/cases/2026-11-11-gate-vm-postgres-stock-max-connections-below-coverage-pool-budget.md",
+  "target_tests": {
+    "local_cap100": "workflow-restart-tools FAIL (held 85/90/92); worker-deployment-queue FAIL at workerDeploymentQueue.ts:135 (mid-test surge)",
+    "local_cap300": "both PASS under the same loads (surge peak 106 clients)",
+    "blacksmith_backend_coverage_blackbox_with_fix": "run 43100083158: 261/261 PASS; unit pass 392/392 at concurrency 6 incl. both files; 0 too-many-clients"
+  },
+  "gates": {
+    "passed": ["format", "eslint", "typescript", "backend-structural", "deploy-command-structural", "seed-cache-decision",
+               "canonical-seed-whatsapp-content", "agents-coverage-blackbox", "live-probes", "semantic-stack", "e2b-smoke",
+               "cloudbench-controller", "seed-memory-ratchet", "new-test-stability"],
+    "smoke": "11 PASS, 1 resource warning (agent-payment-abandonment AgentCard release stall, never PASS)",
+    "omitted_by_planner": ["backend-coverage-blackbox (run manually above)", "frontend-coverage-blackbox", "mac-app-coverage-blackbox", "mac-app-static"]
+  },
+  "review": "CodeRabbit skipped: org usage spending cap (comment 6806937991); merged unreviewed",
+  "production": {"semantic": "PASS run 43108177241 on 423c51b8c1", "other_lanes": "not applicable (no back-end/front-end/agents/mac change)"},
+  "followups": ["AgentCard sandbox transfer owt_97a057db92ab833bc9f7f9dd: 4396 cents unreleased (standing release stall)"]
+}

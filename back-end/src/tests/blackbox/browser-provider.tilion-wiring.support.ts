@@ -35,6 +35,8 @@ import {
 import { storedBrowserProvider, type BrowserProviderSession } from '../../providers/browser/types';
 import { computeGrantBrowserProvider } from '../../domains/compute-grants/config';
 import { prisma } from '../../providers/database';
+import { isConfirmedBrowserEnd } from '../../providers/browser/sessionPersist';
+import { TilionApiError } from '../../providers/browser/tilionClient';
 
 type Env = Record<string, string | undefined>;
 
@@ -205,6 +207,30 @@ export async function assertStoredTilionRowDispatchesToTilion(): Promise<void> {
       nodeAssert.equal(health.status, 'ready');
     });
     nodeAssert.deepEqual(requested, ['GET /v1/session/sess_stored/status']);
+
+    // Agent 7a2ead9f repeatedly re-initialized a logical row whose native
+    // session had disappeared. Replay the provider response at the shared
+    // health boundary: confirmed absence must reach the lifecycle reconciler,
+    // while authentication, outage and routing errors must still throw.
+    for (const status of [404, 410, 401, 500]) {
+      globalThis.fetch = async () => Response.json({ detail: 'No such session' }, { status });
+      await withEnv(TILION_ENV, async () => {
+        if (status === 404 || status === 410) {
+          const health = await getBrowserSessionHealth('sess_stored');
+          nodeAssert.equal(health.sessionId, 'sess_stored');
+          nodeAssert.equal(health.provider, 'tilion');
+          nodeAssert.equal(isConfirmedBrowserEnd(health.status), true);
+          nodeAssert.equal(health.ttlMs, 0);
+          nodeAssert.equal(health.createdAt, null);
+          nodeAssert.equal(health.expiresAt, null);
+        } else {
+          await nodeAssert.rejects(
+            getBrowserSessionHealth('sess_stored'),
+            (error: unknown) => error instanceof TilionApiError && error.status === status
+          );
+        }
+      });
+    }
 
     const pressed: string[] = [];
     const result = await pressSessionKeysUsingDependencies('sess_stored', ['Escape'], {
@@ -416,7 +442,7 @@ export async function assertProviderFallbackIsVisibleAndDefaultFailureSurfaces()
   });
 
   await withEnv(TILION_ENV, async () => {
-    // Preferred Tilion create fails → existing fallback to the default, now recorded.
+    // A preference for another provider must not override the deployment selection.
     const calls: string[] = [];
     const session = await createSessionWithContextUsingDependencies(
       'context-1',
@@ -427,15 +453,12 @@ export async function assertProviderFallbackIsVisibleAndDefaultFailureSurfaces()
       create(calls, new Error('validation cleanup failed'), tilionPreference)
     );
     nodeAssert.equal(session.provider, 'kernel');
-    nodeAssert.equal(session.providerSelection?.requestedProvider, 'tilion');
-    nodeAssert.match(
-      session.providerSelection?.fallbackReason ?? '',
-      /^preferred_config_create_failed: validation cleanup failed/
-    );
+    nodeAssert.equal(session.providerSelection, undefined);
+    nodeAssert.ok(calls.every((call) => !call.startsWith('tilion')));
     const metadata = buildBrowserSessionMetadata(session, NO_INJECTION);
     nodeAssert.equal(metadata.provider, 'kernel');
-    nodeAssert.equal(metadata.requested_provider, 'tilion');
-    nodeAssert.match(String(metadata.provider_fallback_reason), /preferred_config_create_failed/);
+    nodeAssert.equal(metadata.requested_provider, 'kernel');
+    nodeAssert.equal(metadata.provider_fallback_reason, null);
 
     // A run that lands on what it asked for reports no fallback.
     const direct = await createSessionWithContextUsingDependencies(
@@ -444,7 +467,7 @@ export async function assertProviderFallbackIsVisibleAndDefaultFailureSurfaces()
       location,
       undefined,
       {},
-      create([], null, tilionPreference)
+      { ...create([], null, tilionPreference), defaultProvider: () => 'tilion' }
     );
     const directMetadata = buildBrowserSessionMetadata(direct, NO_INJECTION);
     nodeAssert.equal(directMetadata.provider, 'tilion');
@@ -464,7 +487,7 @@ export async function assertProviderFallbackIsVisibleAndDefaultFailureSurfaces()
     );
     nodeAssert.equal(session.provider, 'kernel');
     nodeAssert.equal(session.providerSelection?.requestedProvider, 'tilion');
-    nodeAssert.equal(session.providerSelection?.fallbackReason, 'preferred_provider_kill_switch');
+    nodeAssert.equal(session.providerSelection?.fallbackReason, 'tilion_kill_switch');
     const noPreference = await createSessionWithContextUsingDependencies(
       'context-1',
       'agent-1',

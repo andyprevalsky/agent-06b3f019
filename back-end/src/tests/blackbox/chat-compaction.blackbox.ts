@@ -31,6 +31,14 @@ import {
 } from '../fixtures/chat-subagent-leak-prod-3b5c2813';
 import { COMPACTION_SUMMARY_PREFIX } from '../../providers/chat/chatCompactionPrompts';
 import {
+  testCustomWindowToolCompaction,
+  testIgnoredSubagentToolCompaction,
+  testFailedToolSummaryContinues,
+  testFailedToolSummaryAllowsOrdinaryPass,
+  testOversizedRecentToolCompaction,
+  testPressureCompactionSavings,
+} from './chat-compaction-pressure.cases';
+import {
   filterInternalSubagentMessages,
   isInternalSubagentMessage,
 } from '../../providers/chat/contextScope';
@@ -99,6 +107,18 @@ function makeMessages(count: number, textSize = 2_000): ChatMessage[] {
 }
 
 const tests: Array<[string, () => Promise<void> | void]> = [
+  ['custom windows trigger tool compaction', testCustomWindowToolCompaction],
+  ['zero-weight subagent tools are not summarized', testIgnoredSubagentToolCompaction],
+  ['failed tool summaries preserve other reductions', testFailedToolSummaryContinues],
+  ['failed tool summaries allow ordinary compaction', testFailedToolSummaryAllowsOrdinaryPass],
+  [
+    'pressure-only savings below the guard still compact older history',
+    testPressureCompactionSavings,
+  ],
+  [
+    'oversized recent tool results can compact without changing raw history',
+    testOversizedRecentToolCompaction,
+  ],
   [
     'projection keeps checkpoint tail and hides raw pre-checkpoint rows',
     () => {

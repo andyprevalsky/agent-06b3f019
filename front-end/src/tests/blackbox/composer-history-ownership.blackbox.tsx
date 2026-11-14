@@ -19,6 +19,7 @@ vi.mock('@/features/terminal-component-group', () => ({
   useAppView: () => null,
   useOpenCodeAgent: () => null,
   PinnedQuestionMount: () => null,
+  TaskCompletedBar: () => null,
   BackgroundAgentsBanner: ({ selectedAgentId }: { selectedAgentId: string | null }) => (
     <span data-testid="banner-owner">{selectedAgentId ?? 'home'}</span>
   ),

@@ -1,0 +1,276 @@
+{
+ ".cloud-env": "reproducible (generated per instance by scripts/cloud-build.sh: CONDUCTOR_* port/workspace/root only; no record, no secrets)",
+ ".context/": {
+  "archive": "devbox-closeout-private/pr1682-a52c/20261114T130631Z-final-delta-20261114T130628Z.tar.gz",
+  "catalogs": [
+   "docs/handoffs/pr-1682-closeout/archive-index.json#rose-context-static",
+   "docs/handoffs/pr-1682-closeout/archive-index.json#final-delta-20261114T130628Z"
+  ],
+  "disposition": "archived",
+  "receipts": [
+   "/home/boxes/rose/.context/deploy-session/closeout-a52c/archive-rose-context-static.json",
+   "/home/boxes/rose/.context/deploy-session/closeout-a52c/archive-final-20261114T130628Z.json"
+  ],
+  "reproducible_excluded": [
+   ".context/frontend-builds",
+   ".context/experiential-venv",
+   ".context/tsbuildinfo"
+  ],
+  "sha256": "c15c1093a11cd2aa6fd4e1b03432165a83895d0c3ba64df48843dafb00259ffb",
+  "summary": "archived (private R2 devbox-closeout-private/pr1682-a52c/*: devbox-closeout-private/pr1682-a52c/20261112T191042Z-rose-context-static.tar.gz sha256 bce753c34f23944128ad0eb6d16baf479d7453e45e674c42a7cc2985ed08648c; devbox-closeout-private/pr1682-a52c/20261114T130631Z-final-delta-20261114T130628Z.tar.gz sha256 c15c1093a11cd2aa6fd4e1b03432165a83895d0c3ba64df48843dafb00259ffb)"
+ },
+ ".devbox/": {
+  "archive": "devbox-closeout-private/pr1682-a52c/20261112T190218Z-rose-small-static.tar.gz",
+  "catalog": "docs/handoffs/pr-1682-closeout/archive-index.json#rose-small-static",
+  "catalog_archive": "rose-small-static",
+  "disposition": "archived",
+  "post_merge_delta": {
+   "archive": "devbox-closeout-private/pr1682-a52c/20261114T130631Z-final-delta-20261114T130628Z.tar.gz",
+   "note": "members changed after the static archive were re-archived here",
+   "sha256": "c15c1093a11cd2aa6fd4e1b03432165a83895d0c3ba64df48843dafb00259ffb"
+  },
+  "receipt": "/home/boxes/rose/.context/deploy-session/closeout-a52c/archive-rose-small-static.json",
+  "recheck": "post-merge final_pack.py re-archives any member changed after 20261112T190218Z",
+  "sha256": "bd6126e04c725fe8f5b7aac95a451ced3c3722d9b82fed00ff5b749d604b68b9"
+ },
+ ".env.npm": "managed-env (boxes.dev project environment, `dvb-onbox env list` lists this file; secrets never archived)",
+ ".llm-dumps/": {
+  "archive": "devbox-closeout-private/pr1682-a52c/20261112T190218Z-rose-small-static.tar.gz",
+  "catalog": "docs/handoffs/pr-1682-closeout/archive-index.json#rose-small-static",
+  "catalog_archive": "rose-small-static",
+  "disposition": "archived",
+  "post_merge_delta": {
+   "archive": "devbox-closeout-private/pr1682-a52c/20261114T130631Z-final-delta-20261114T130628Z.tar.gz",
+   "note": "members changed after the static archive were re-archived here",
+   "sha256": "c15c1093a11cd2aa6fd4e1b03432165a83895d0c3ba64df48843dafb00259ffb"
+  },
+  "receipt": "/home/boxes/rose/.context/deploy-session/closeout-a52c/archive-rose-small-static.json",
+  "recheck": "post-merge final_pack.py re-archives any member changed after 20261112T190218Z",
+  "sha256": "bd6126e04c725fe8f5b7aac95a451ced3c3722d9b82fed00ff5b749d604b68b9"
+ },
+ "/home/boxes/polar-deploy-recovery/.context/": {
+  "archive": "devbox-closeout-private/pr1682-a52c/20261112T190528Z-sibling-polar-deploy-recovery.tar.gz",
+  "catalog": "docs/handoffs/pr-1682-closeout/archive-index.json#sibling-polar-deploy-recovery",
+  "catalog_archive": "sibling-polar-deploy-recovery",
+  "disposition": "archived",
+  "note": "sibling worktree (branch deploy/polar-stack-recovery-2, pushed); .context/frontend-builds and .context/experiential-venv excluded as reproducible",
+  "post_merge_delta": {
+   "archive": "devbox-closeout-private/pr1682-a52c/20261114T133235Z-sibling-delta-20261114T130628Z.tar.gz",
+   "catalog": "docs/handoffs/pr-1682-closeout/archive-index.json#sibling-delta-20261114T130628Z",
+   "sha256": "2abfaf888dd9098e84733d9a555d359b225526b39e9d78da61c94ae9eaaf4995"
+  },
+  "receipt": "/home/boxes/rose/.context/deploy-session/closeout-a52c/archive-sibling-polar-deploy-recovery.json",
+  "sha256": "64ef2dc324def59b3e535701615716c595917dbc224413a0972d7bfa8e4bcb36"
+ },
+ "/home/boxes/polar-deploy-recovery/.llm-dumps/": {
+  "archive": "devbox-closeout-private/pr1682-a52c/20261112T190528Z-sibling-polar-deploy-recovery.tar.gz",
+  "catalog": "docs/handoffs/pr-1682-closeout/archive-index.json#sibling-polar-deploy-recovery",
+  "catalog_archive": "sibling-polar-deploy-recovery",
+  "disposition": "archived",
+  "note": "sibling worktree (branch deploy/polar-stack-recovery-2, pushed); .context/frontend-builds and .context/experiential-venv excluded as reproducible",
+  "post_merge_delta": {
+   "archive": "devbox-closeout-private/pr1682-a52c/20261114T133235Z-sibling-delta-20261114T130628Z.tar.gz",
+   "catalog": "docs/handoffs/pr-1682-closeout/archive-index.json#sibling-delta-20261114T130628Z",
+   "sha256": "2abfaf888dd9098e84733d9a555d359b225526b39e9d78da61c94ae9eaaf4995"
+  },
+  "receipt": "/home/boxes/rose/.context/deploy-session/closeout-a52c/archive-sibling-polar-deploy-recovery.json",
+  "sha256": "64ef2dc324def59b3e535701615716c595917dbc224413a0972d7bfa8e4bcb36"
+ },
+ "/home/boxes/polar-deploy-recovery/agents/.context/": {
+  "archive": "devbox-closeout-private/pr1682-a52c/20261112T190528Z-sibling-polar-deploy-recovery.tar.gz",
+  "catalog": "docs/handoffs/pr-1682-closeout/archive-index.json#sibling-polar-deploy-recovery",
+  "catalog_archive": "sibling-polar-deploy-recovery",
+  "disposition": "archived",
+  "note": "sibling worktree (branch deploy/polar-stack-recovery-2, pushed); .context/frontend-builds and .context/experiential-venv excluded as reproducible",
+  "post_merge_delta": {
+   "archive": "devbox-closeout-private/pr1682-a52c/20261114T133235Z-sibling-delta-20261114T130628Z.tar.gz",
+   "catalog": "docs/handoffs/pr-1682-closeout/archive-index.json#sibling-delta-20261114T130628Z",
+   "sha256": "2abfaf888dd9098e84733d9a555d359b225526b39e9d78da61c94ae9eaaf4995"
+  },
+  "receipt": "/home/boxes/rose/.context/deploy-session/closeout-a52c/archive-sibling-polar-deploy-recovery.json",
+  "sha256": "64ef2dc324def59b3e535701615716c595917dbc224413a0972d7bfa8e4bcb36"
+ },
+ "/home/boxes/polar-deploy-recovery/agents/.env": "managed-env (boxes.dev project environment, `dvb-onbox env list` lists this file; secrets never archived)",
+ "/home/boxes/polar-deploy-recovery/agents/benchmarks/runs/*": {
+  "archive": "devbox-closeout-private/pr1682-a52c/20261112T190528Z-sibling-polar-deploy-recovery.tar.gz",
+  "catalog": "docs/handoffs/pr-1682-closeout/archive-index.json#sibling-polar-deploy-recovery",
+  "catalog_archive": "sibling-polar-deploy-recovery",
+  "disposition": "archived",
+  "note": "sibling worktree (branch deploy/polar-stack-recovery-2, pushed); .context/frontend-builds and .context/experiential-venv excluded as reproducible",
+  "post_merge_delta": {
+   "archive": "devbox-closeout-private/pr1682-a52c/20261114T133235Z-sibling-delta-20261114T130628Z.tar.gz",
+   "catalog": "docs/handoffs/pr-1682-closeout/archive-index.json#sibling-delta-20261114T130628Z",
+   "sha256": "2abfaf888dd9098e84733d9a555d359b225526b39e9d78da61c94ae9eaaf4995"
+  },
+  "receipt": "/home/boxes/rose/.context/deploy-session/closeout-a52c/archive-sibling-polar-deploy-recovery.json",
+  "sha256": "64ef2dc324def59b3e535701615716c595917dbc224413a0972d7bfa8e4bcb36"
+ },
+ "/home/boxes/polar-deploy-recovery/agents/navi-worker-log*.txt": "reproducible (local service log; copy also in private archive devbox-closeout-private/pr1682-a52c/20261112T190528Z-sibling-polar-deploy-recovery.tar.gz)",
+ "/home/boxes/polar-deploy-recovery/back-end/.context/": {
+  "archive": "devbox-closeout-private/pr1682-a52c/20261112T190528Z-sibling-polar-deploy-recovery.tar.gz",
+  "catalog": "docs/handoffs/pr-1682-closeout/archive-index.json#sibling-polar-deploy-recovery",
+  "catalog_archive": "sibling-polar-deploy-recovery",
+  "disposition": "archived",
+  "note": "sibling worktree (branch deploy/polar-stack-recovery-2, pushed); .context/frontend-builds and .context/experiential-venv excluded as reproducible",
+  "post_merge_delta": {
+   "archive": "devbox-closeout-private/pr1682-a52c/20261114T133235Z-sibling-delta-20261114T130628Z.tar.gz",
+   "catalog": "docs/handoffs/pr-1682-closeout/archive-index.json#sibling-delta-20261114T130628Z",
+   "sha256": "2abfaf888dd9098e84733d9a555d359b225526b39e9d78da61c94ae9eaaf4995"
+  },
+  "receipt": "/home/boxes/rose/.context/deploy-session/closeout-a52c/archive-sibling-polar-deploy-recovery.json",
+  "sha256": "64ef2dc324def59b3e535701615716c595917dbc224413a0972d7bfa8e4bcb36"
+ },
+ "/home/boxes/polar-deploy-recovery/back-end/.env": "managed-env (boxes.dev project environment, `dvb-onbox env list` lists this file; secrets never archived)",
+ "/home/boxes/polar-deploy-recovery/back-end/backend-logs.log": "reproducible (local service log; copy also in private archive devbox-closeout-private/pr1682-a52c/20261112T190528Z-sibling-polar-deploy-recovery.tar.gz)",
+ "/home/boxes/polar-deploy-recovery/front-end/.env": "managed-env (boxes.dev project environment, `dvb-onbox env list` lists this file; secrets never archived)",
+ "/home/boxes/polar-deploy-recovery/front-end/frontend-logs.log": "reproducible (local service log; copy also in private archive devbox-closeout-private/pr1682-a52c/20261112T190528Z-sibling-polar-deploy-recovery.tar.gz)",
+ "/home/boxes/polar-deploy-recovery/front-end/playwright-mobile-screenshots/": {
+  "archive": "devbox-closeout-private/pr1682-a52c/20261112T190528Z-sibling-polar-deploy-recovery.tar.gz",
+  "catalog": "docs/handoffs/pr-1682-closeout/archive-index.json#sibling-polar-deploy-recovery",
+  "catalog_archive": "sibling-polar-deploy-recovery",
+  "disposition": "archived",
+  "note": "sibling worktree (branch deploy/polar-stack-recovery-2, pushed); .context/frontend-builds and .context/experiential-venv excluded as reproducible",
+  "post_merge_delta": {
+   "archive": "devbox-closeout-private/pr1682-a52c/20261114T133235Z-sibling-delta-20261114T130628Z.tar.gz",
+   "catalog": "docs/handoffs/pr-1682-closeout/archive-index.json#sibling-delta-20261114T130628Z",
+   "sha256": "2abfaf888dd9098e84733d9a555d359b225526b39e9d78da61c94ae9eaaf4995"
+  },
+  "receipt": "/home/boxes/rose/.context/deploy-session/closeout-a52c/archive-sibling-polar-deploy-recovery.json",
+  "sha256": "64ef2dc324def59b3e535701615716c595917dbc224413a0972d7bfa8e4bcb36"
+ },
+ "/home/boxes/polar-deploy-recovery/mac-app/.env": "managed-env (boxes.dev project environment, `dvb-onbox env list` lists this file; secrets never archived)",
+ "/home/boxes/polar-deploy-recovery/package-lock.json": {
+  "archive": "devbox-closeout-private/pr1682-a52c/20261112T190528Z-sibling-polar-deploy-recovery.tar.gz",
+  "catalog": "docs/handoffs/pr-1682-closeout/archive-index.json#sibling-polar-deploy-recovery",
+  "catalog_archive": "sibling-polar-deploy-recovery",
+  "disposition": "archived",
+  "note": "sibling worktree (branch deploy/polar-stack-recovery-2, pushed); .context/frontend-builds and .context/experiential-venv excluded as reproducible",
+  "post_merge_delta": {
+   "archive": "devbox-closeout-private/pr1682-a52c/20261114T133235Z-sibling-delta-20261114T130628Z.tar.gz",
+   "catalog": "docs/handoffs/pr-1682-closeout/archive-index.json#sibling-delta-20261114T130628Z",
+   "sha256": "2abfaf888dd9098e84733d9a555d359b225526b39e9d78da61c94ae9eaaf4995"
+  },
+  "receipt": "/home/boxes/rose/.context/deploy-session/closeout-a52c/archive-sibling-polar-deploy-recovery.json",
+  "sha256": "64ef2dc324def59b3e535701615716c595917dbc224413a0972d7bfa8e4bcb36"
+ },
+ "agents/.context/": {
+  "archive": "devbox-closeout-private/pr1682-a52c/20261112T190218Z-rose-small-static.tar.gz",
+  "catalog": "docs/handoffs/pr-1682-closeout/archive-index.json#rose-small-static",
+  "catalog_archive": "rose-small-static",
+  "disposition": "archived",
+  "post_merge_delta": {
+   "archive": "devbox-closeout-private/pr1682-a52c/20261114T130631Z-final-delta-20261114T130628Z.tar.gz",
+   "note": "members changed after the static archive were re-archived here",
+   "sha256": "c15c1093a11cd2aa6fd4e1b03432165a83895d0c3ba64df48843dafb00259ffb"
+  },
+  "receipt": "/home/boxes/rose/.context/deploy-session/closeout-a52c/archive-rose-small-static.json",
+  "recheck": "post-merge final_pack.py re-archives any member changed after 20261112T190218Z",
+  "sha256": "bd6126e04c725fe8f5b7aac95a451ced3c3722d9b82fed00ff5b749d604b68b9"
+ },
+ "agents/.env": "managed-env (boxes.dev project environment, `dvb-onbox env list` lists this file; secrets never archived)",
+ "agents/.env.benchmark-temporal": "managed-env (boxes.dev project environment, `dvb-onbox env list` lists this file; secrets never archived)",
+ "agents/.env.cloudbench-upsert.lock": "reproducible (lock file)",
+ "agents/.ruff_cache/": "reproducible (ruff lint cache)",
+ "agents/benchmarks/runs/*": {
+  "archive": "devbox-closeout-private/pr1682-a52c/20261112T190218Z-rose-small-static.tar.gz",
+  "catalog": "docs/handoffs/pr-1682-closeout/archive-index.json#rose-small-static",
+  "catalog_archive": "rose-small-static",
+  "disposition": "archived",
+  "post_merge_delta": {
+   "archive": "devbox-closeout-private/pr1682-a52c/20261114T130631Z-final-delta-20261114T130628Z.tar.gz",
+   "note": "members changed after the static archive were re-archived here",
+   "sha256": "c15c1093a11cd2aa6fd4e1b03432165a83895d0c3ba64df48843dafb00259ffb"
+  },
+  "receipt": "/home/boxes/rose/.context/deploy-session/closeout-a52c/archive-rose-small-static.json",
+  "recheck": "post-merge final_pack.py re-archives any member changed after 20261112T190218Z",
+  "sha256": "bd6126e04c725fe8f5b7aac95a451ced3c3722d9b82fed00ff5b749d604b68b9"
+ },
+ "agents/navi-worker-log*.txt": "reproducible (local service log; copy also in private archive devbox-closeout-private/pr1682-a52c/20261112T190218Z-rose-small-static.tar.gz)",
+ "agents/providers/fast_cache/": {
+  "archive": "devbox-closeout-private/pr1682-a52c/20261112T190218Z-rose-small-static.tar.gz",
+  "catalog": "docs/handoffs/pr-1682-closeout/archive-index.json#rose-small-static",
+  "catalog_archive": "rose-small-static",
+  "disposition": "archived",
+  "post_merge_delta": {
+   "archive": "devbox-closeout-private/pr1682-a52c/20261114T130631Z-final-delta-20261114T130628Z.tar.gz",
+   "note": "members changed after the static archive were re-archived here",
+   "sha256": "c15c1093a11cd2aa6fd4e1b03432165a83895d0c3ba64df48843dafb00259ffb"
+  },
+  "receipt": "/home/boxes/rose/.context/deploy-session/closeout-a52c/archive-rose-small-static.json",
+  "recheck": "post-merge final_pack.py re-archives any member changed after 20261112T190218Z",
+  "sha256": "bd6126e04c725fe8f5b7aac95a451ced3c3722d9b82fed00ff5b749d604b68b9"
+ },
+ "back-end/.context/": {
+  "archive": "devbox-closeout-private/pr1682-a52c/20261112T190218Z-rose-small-static.tar.gz",
+  "catalog": "docs/handoffs/pr-1682-closeout/archive-index.json#rose-small-static",
+  "catalog_archive": "rose-small-static",
+  "disposition": "archived",
+  "post_merge_delta": {
+   "archive": "devbox-closeout-private/pr1682-a52c/20261114T130631Z-final-delta-20261114T130628Z.tar.gz",
+   "note": "members changed after the static archive were re-archived here",
+   "sha256": "c15c1093a11cd2aa6fd4e1b03432165a83895d0c3ba64df48843dafb00259ffb"
+  },
+  "receipt": "/home/boxes/rose/.context/deploy-session/closeout-a52c/archive-rose-small-static.json",
+  "recheck": "post-merge final_pack.py re-archives any member changed after 20261112T190218Z",
+  "sha256": "bd6126e04c725fe8f5b7aac95a451ced3c3722d9b82fed00ff5b749d604b68b9"
+ },
+ "back-end/.env": "managed-env (boxes.dev project environment, `dvb-onbox env list` lists this file; secrets never archived)",
+ "back-end/.env.cloudbench-upsert.lock": "reproducible (lock file)",
+ "back-end/backend-logs.log": "reproducible (local service log; copy also in private archive devbox-closeout-private/pr1682-a52c/20261112T190218Z-rose-small-static.tar.gz)",
+ "branch:backup/cerebras-chat-quota-prepush-20261002": {
+  "archive": "devbox-closeout-private/pr1682-a52c-local-refs-20261112/",
+  "bundle_prerequisites": "thin bundle --not origin/main; all 7 prerequisites are origin/main ancestors",
+  "bundle_sha256": "f1b920d2878e6aa7b15ac6735f2e9b7cca789bfd36eaf0dfba5fcefc6253a50f",
+  "disposition": "archived",
+  "member": "/var/tmp/pr1682-closeout/refs-a52c/local-refs.bundle",
+  "receipt": ".context/deploy-session/closeout-a52c/archive-receipt-local-refs.json",
+  "ref_identity_member": "/var/tmp/pr1682-closeout/refs-a52c/ref-identities.txt",
+  "sha256": "33e3372a68b20dd1938d3b96fe60abc3679d3316288846c896b6ca775313364c",
+  "tip": "12d996f0d8e24b93c0e276d5b3f91887a0da9aca"
+ },
+ "docs/rca/INDEX.md": "reproducible (generated RCA index)",
+ "front-end/.env": "managed-env (boxes.dev project environment, `dvb-onbox env list` lists this file; secrets never archived)",
+ "front-end/frontend-logs.log": "reproducible (local service log; copy also in private archive devbox-closeout-private/pr1682-a52c/20261112T190218Z-rose-small-static.tar.gz)",
+ "front-end/playwright-mobile-screenshots/": {
+  "archive": "devbox-closeout-private/pr1682-a52c/20261112T190218Z-rose-small-static.tar.gz",
+  "catalog": "docs/handoffs/pr-1682-closeout/archive-index.json#rose-small-static",
+  "catalog_archive": "rose-small-static",
+  "disposition": "archived",
+  "post_merge_delta": {
+   "archive": "devbox-closeout-private/pr1682-a52c/20261114T130631Z-final-delta-20261114T130628Z.tar.gz",
+   "note": "members changed after the static archive were re-archived here",
+   "sha256": "c15c1093a11cd2aa6fd4e1b03432165a83895d0c3ba64df48843dafb00259ffb"
+  },
+  "receipt": "/home/boxes/rose/.context/deploy-session/closeout-a52c/archive-rose-small-static.json",
+  "recheck": "post-merge final_pack.py re-archives any member changed after 20261112T190218Z",
+  "sha256": "bd6126e04c725fe8f5b7aac95a451ced3c3722d9b82fed00ff5b749d604b68b9"
+ },
+ "hub-poller-logs.log": "reproducible (local service log; copy also in private archive devbox-closeout-private/pr1682-a52c/20261112T190218Z-rose-small-static.tar.gz)",
+ "mac-app/.env": "managed-env (boxes.dev project environment, `dvb-onbox env list` lists this file; secrets never archived)",
+ "package-lock.json": {
+  "archive": "devbox-closeout-private/pr1682-a52c/20261112T190218Z-rose-small-static.tar.gz",
+  "catalog": "docs/handoffs/pr-1682-closeout/archive-index.json#rose-small-static",
+  "catalog_archive": "rose-small-static",
+  "disposition": "archived",
+  "post_merge_delta": {
+   "archive": "devbox-closeout-private/pr1682-a52c/20261114T130631Z-final-delta-20261114T130628Z.tar.gz",
+   "note": "members changed after the static archive were re-archived here",
+   "sha256": "c15c1093a11cd2aa6fd4e1b03432165a83895d0c3ba64df48843dafb00259ffb"
+  },
+  "receipt": "/home/boxes/rose/.context/deploy-session/closeout-a52c/archive-rose-small-static.json",
+  "recheck": "post-merge final_pack.py re-archives any member changed after 20261112T190218Z",
+  "sha256": "bd6126e04c725fe8f5b7aac95a451ced3c3722d9b82fed00ff5b749d604b68b9"
+ },
+ "research/.env": "managed-env (boxes.dev project environment, `dvb-onbox env list` lists this file; secrets never archived)",
+ "stash:0e2ffe95ba40a2d0c2b8ae9e884b4a85d96af3f2": {
+  "archive": "devbox-closeout-private/pr1682-a52c-local-refs-20261112/",
+  "bundle_prerequisites": "thin bundle --not origin/main; all 7 prerequisites are origin/main ancestors",
+  "bundle_sha256": "f1b920d2878e6aa7b15ac6735f2e9b7cca789bfd36eaf0dfba5fcefc6253a50f",
+  "disposition": "archived",
+  "member": "/var/tmp/pr1682-closeout/refs-a52c/local-refs.bundle",
+  "receipt": ".context/deploy-session/closeout-a52c/archive-receipt-local-refs.json",
+  "ref_identity_member": "/var/tmp/pr1682-closeout/refs-a52c/ref-identities.txt",
+  "sha256": "33e3372a68b20dd1938d3b96fe60abc3679d3316288846c896b6ca775313364c",
+  "tip": "0e2ffe95ba40a2d0c2b8ae9e884b4a85d96af3f2"
+ }
+}

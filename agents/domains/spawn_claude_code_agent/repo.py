@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import random
+import time
 import uuid as uuid_module
 from typing import Any, Optional
 
@@ -14,6 +16,9 @@ from config import load_config
 from domains.spawn_claude_code_agent.config import (
     CODE_SESSION_CREATE_HEARTBEAT_S,
     CODE_SESSION_CREATE_TIMEOUT_S,
+    CODE_SESSION_HELD_BACKOFF_S,
+    CODE_SESSION_HELD_CODE,
+    CODE_SESSION_HELD_WAIT_S,
     CODE_SESSION_RESIZE_ATTEMPTS,
     CODE_SESSION_RESIZE_RETRY_BACKOFF_S,
     CODE_SESSION_RESIZE_TIMEOUT_S,
@@ -22,6 +27,8 @@ from domains.spawn_claude_code_agent.config import (
     LOCAL_TARGET_UNAVAILABLE_CODE,
 )
 from helpers.activity_heartbeat import safe_heartbeat
+from helpers.github_repo_ref import GITHUB_REPO_REF_DENIED_CODE, repo_ref_denied_message
+from helpers.http_client import get_http_client
 from helpers.workflow_generation import (
     WorkflowGenerationSealed,
     raise_if_generation_sealed,
@@ -269,6 +276,50 @@ async def _post_with_heartbeats(request: Any, message: str) -> httpx.Response:
             pending.cancel()
 
 
+def _is_held_response(response: httpx.Response) -> bool:
+    return response.status_code == 409 and _json_or_empty(response).get("code") == CODE_SESSION_HELD_CODE
+
+
+async def _create_waiting_out_direct_hold(post: Any, agent_id: str) -> httpx.Response:
+    """POST the create; while the backend answers CODE_SESSION_HELD, wait for the hand back and repost.
+
+    The live CLI's user is chatting with it directly and its ws-server cannot hold an attaching spawn, so
+    the backend refuses without touching that CLI. No task row or session is created (the backend releases
+    the lease), so a repost is the same create and the tool call's lease keeps it one spawn; each attempt
+    only re-stages the sandbox's files idempotently. The wait heartbeats and backs off (capped, with
+    +/-20% jitter so spawns held at the same moment don't repost in lockstep) for up to
+    CODE_SESSION_HELD_WAIT_S, which covers the ws-server's 10-minute idle release; past it the spawn fails
+    non-retryably with the true reason.
+    """
+    started = time.monotonic()
+    delay, max_delay = CODE_SESSION_HELD_BACKOFF_S
+    response = await post()
+    while _is_held_response(response):
+        waited = time.monotonic() - started
+        if waited >= CODE_SESSION_HELD_WAIT_S:
+            raise ApplicationError(
+                "The code agent's session is still held: the user is still chatting with it directly; "
+                "spawn it again after they hand it back.",
+                type=CODE_SESSION_HELD_CODE,
+                non_retryable=True,
+            )
+        logger.info(
+            "[ClaudeCode] Code session held by the user's direct chat; waiting for the hand back",
+            agent_id=agent_id,
+            waited_s=round(waited, 1),
+            retry_in_s=delay,
+        )
+        remaining = delay * random.uniform(0.8, 1.2)
+        while remaining > 0:
+            safe_heartbeat("Waiting for the user to hand the code agent back")
+            step = min(remaining, 5.0)
+            await asyncio.sleep(step)
+            remaining -= step
+        delay = min(delay * 2, max_delay)
+        response = await post()
+    return response
+
+
 async def create_e2b_session(
     agent_id: str,
     goal: str,
@@ -279,15 +330,24 @@ async def create_e2b_session(
     fast_mode_cache_enabled: bool = False,
     code_session_id: Optional[str] = None,
     lease_owner: Optional[str] = None,
+    github_repo_ref: Optional[str] = None,
     target: str = "cloud",
     local_device_id: Optional[str] = None,
     fresh_conversation: bool = False,
+    task_name: Optional[str] = None,
+    cli_settings: Optional[dict[str, Any]] = None,
+    resume_config: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
     """Create an E2B sandbox session via back-end API.
 
     ``code_session_id`` resumes that persistent code session; omitted, the
     backend resumes the spawning agent's latest session for the repo.
     ``lease_owner`` is stable per tool call so Temporal retries keep the lease.
+    ``github_repo_ref`` is the spawn's explicit connected-repo selection: it replaces
+    the project restore (backend resolveCodeSessionWorkspace). A resume by
+    ``code_session_id`` keeps that session's own repo, so the ref is not sent with it.
+    A ref the user has no connection for answers 403 ``GITHUB_ACCESS_DENIED``, raised
+    as a non-retryable ``GITHUB_REPO_REF_DENIED`` naming the ref (never a fallback).
 
     Returns the session data dict with task_id, sandbox_id, ws_url,
     code_session_id, branch, merge_target, resumed_from, etc.
@@ -307,6 +367,14 @@ async def create_e2b_session(
     }
     if attachments:
         create_payload["attachments"] = attachments
+    if task_name:
+        # The agents list shows the spawn's task_name as the code agent's title.
+        create_payload["task_name"] = task_name[:200]
+    if cli_settings:
+        # A resuming turn's model / effort / speed (backend cliSettingsEnvOverrides).
+        create_payload["cli_settings"] = cli_settings
+    if resume_config is not None:
+        create_payload["resume_config"] = resume_config
     if github_repo_url and target != "local":
         create_payload["github_repo_url"] = github_repo_url
     if target == "local":
@@ -316,6 +384,8 @@ async def create_e2b_session(
     else:
         if code_session_id:
             create_payload["code_session_id"] = code_session_id
+        elif github_repo_ref:
+            create_payload["github_repo_ref"] = github_repo_ref
         if lease_owner:
             create_payload["lease_owner"] = lease_owner[:200]
         if fresh_conversation:
@@ -323,17 +393,21 @@ async def create_e2b_session(
             create_payload["fresh_conversation"] = True
 
     async with httpx.AsyncClient(timeout=httpx.Timeout(CODE_SESSION_CREATE_TIMEOUT_S, connect=10.0)) as client:
-        response = await _post_with_heartbeats(
-            client.post(
-                f"{config.backend.api_url}{_session_base_path(code_provider)}/create",
-                headers={
-                    "x-api-key": config.backend.api_key or "",
-                    "Content-Type": "application/json",
-                },
-                json=create_payload,
-            ),
-            "Starting the code-agent sandbox",
-        )
+
+        async def post_create() -> httpx.Response:
+            return await _post_with_heartbeats(
+                client.post(
+                    f"{config.backend.api_url}{_session_base_path(code_provider)}/create",
+                    headers={
+                        "x-api-key": config.backend.api_key or "",
+                        "Content-Type": "application/json",
+                    },
+                    json=create_payload,
+                ),
+                "Starting the code-agent sandbox",
+            )
+
+        response = await _create_waiting_out_direct_hold(post_create, agent_id)
 
         if response.status_code == 409 and target == "local":
             body = _json_or_empty(response)
@@ -342,6 +416,17 @@ async def create_e2b_session(
                     body["error"],
                     {"reason": body.get("reason"), "device_name": body.get("device_name")},
                     type=LOCAL_TARGET_UNAVAILABLE_CODE,
+                    non_retryable=True,
+                )
+
+        if response.status_code == 403 and "github_repo_ref" in create_payload:
+            body = _json_or_empty(response)
+            if body.get("code") == "GITHUB_ACCESS_DENIED":
+                # The explicit selection is not connected (or was disconnected): fail
+                # naming it; neither a retry nor the project's repo can stand in for it.
+                raise ApplicationError(
+                    repo_ref_denied_message(create_payload["github_repo_ref"], str(body.get("error") or "")),
+                    type=GITHUB_REPO_REF_DENIED_CODE,
                     non_retryable=True,
                 )
 
@@ -367,10 +452,7 @@ async def create_e2b_session(
                 response_text=response_text,
             )
             detail = f": {response_text}" if response_text else ""
-            message = (
-                f"Failed to create code session (provider={code_provider}): "
-                f"HTTP {response.status_code}{detail}"
-            )
+            message = f"Failed to create code session (provider={code_provider}): HTTP {response.status_code}{detail}"
             upper = f"{message} {response_text}".upper()
             billing_markers = (
                 "MISSING PAYMENT METHOD",
@@ -396,6 +478,68 @@ async def create_e2b_session(
             raise Exception(message)
 
         return response.json()
+
+
+async def report_undelivered_code_turns(agent_id: str, task_id: str, turn_ids: list[str], reason: str) -> None:
+    """Tell the senders of agent turns this code session accepted but lost (``user_turn_undelivered``).
+
+    The backend notifies each sending Rose agent once per turn (idempotent on the original message key),
+    so a retry or a replayed event is safe. Best effort: a failure is logged, never raised into the monitor.
+    """
+    if not turn_ids:
+        return
+    config = load_config()
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.post(
+                f"{config.backend.api_url}/api/agents/{agent_id}/code-turns-undelivered",
+                headers={"x-api-key": config.backend.api_key or ""},
+                json={"session_id": task_id, "turn_ids": turn_ids[:50], "reason": (reason or "rejected")[:100]},
+            )
+            response.raise_for_status()
+        logger.info(
+            "[ClaudeCode] Reported undelivered agent turns",
+            agent_id=agent_id,
+            task_id=task_id,
+            turns=len(turn_ids),
+            notified=_json_or_empty(response).get("notified"),
+        )
+    except Exception as e:
+        logger.warning(
+            "[ClaudeCode] Could not report undelivered agent turns",
+            agent_id=agent_id,
+            task_id=task_id,
+            error=extract_error_message(e),
+        )
+
+
+async def report_code_session_subscription_usage(task_id: str, usage: dict[str, Any]) -> bool:
+    """Record a code session's subscription usage (from the CLI's rate_limit_event).
+
+    Code sessions run the provider CLI in a sandbox, outside the lineage lease,
+    so their usage goes to the task's credential row by task id. Best-effort and
+    bounded (5 s); callers fire it in the background. Lives here, beside the
+    other code-session reports, so importing the code-session domain never pulls
+    in the LLM client stack (helpers.llm → openai).
+    """
+    if not task_id or not usage:
+        return False
+    config = load_config()
+    try:
+        client = get_http_client()
+        response = await client.post(
+            f"{config.backend.api_url}/api/integrations/compute-code/code-session-usage",
+            headers={
+                "X-API-Key": config.backend.api_key or "",
+                "Content-Type": "application/json",
+            },
+            json={"taskId": task_id, "usage": usage},
+            timeout=5.0,
+        )
+        return response.status_code == 200
+    except Exception as e:
+        logger.warning("[ClaudeCode] Code session usage report failed", task_id=task_id, error=extract_error_message(e))
+        return False
 
 
 async def persist_terminal_output(

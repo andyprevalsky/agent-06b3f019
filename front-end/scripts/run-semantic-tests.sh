@@ -309,7 +309,17 @@ else
   # the 5s ratchet. Wait before generating the session so it cannot expire.
   if [[ "${1:-}" == "chat-lifecycle-latency" ]]; then
     . "$REPO_DIR/scripts/lib/isolated-benchmarks.sh"
-    wait_for_isolated_benchmarks "$REPO_DIR" "${SEMANTIC_LATENCY_BENCH_WAIT_S:-3600}" 30
+    # Both waits stay inside the semantic gate's 30 min deadline (scripts/deploy_gates.py
+    # GATE_DEADLINES): an hour-long wait held PR1784's round for 70+ min (2026-11-08).
+    wait_for_isolated_benchmarks "$REPO_DIR" "${SEMANTIC_LATENCY_BENCH_WAIT_S:-900}" 30
+    # That wait sees only this checkout. Production and every other devbox's
+    # deploys spend the same Cerebras org quota, which only the provider's own
+    # rate-limit headers report: wait while a per-minute window is short. The wait
+    # is advisory: a quota still short or unreadable after it is measured anyway,
+    # so the ratchet reports its real result instead of failing on the wait.
+    python3 "$REPO_DIR/scripts/cloudbench_provider_headroom.py" cerebras-wait \
+      --timeout-seconds "${SEMANTIC_CEREBRAS_WAIT_S:-300}" \
+      || echo "⚠️  Cerebras shared quota still short or unmeasured after ${SEMANTIC_CEREBRAS_WAIT_S:-300}s; measuring the latency ratchet anyway" >&2
   fi
 
   if ! curl -sf "http://localhost:$BACKEND_PORT/health" > /dev/null 2>&1; then
@@ -430,16 +440,24 @@ run_playwright() {
   exec node "$PLAYWRIGHT_CLI" "$@"
 }
 
-# The CLI --reporter replaces playwright.config.ts's reporters, so append the live
-# deploy-gate progress reporter here too, only when the gate worker names a progress
-# file (DEPLOY_GATE_PROGRESS). Relative to this cwd (front-end/); list output is unchanged.
+# Optional native evidence output; the ordinary command and test policy stay intact.
 SEMANTIC_REPORTERS=list
+# Enable live progress before appending optional native evidence reporters.
 if [[ -n "${DEPLOY_GATE_PROGRESS:-}" ]]; then
   SEMANTIC_REPORTERS="list,./src/tests/gate-progress/playwrightReporter.ts"
 fi
+SEMANTIC_OUTPUT_ARGS=()
+if [[ -n "${SEMANTIC_NATIVE_REPORT_PREFIX:-}" ]]; then
+  [[ "$SEMANTIC_NATIVE_REPORT_PREFIX" = /* ]] || { echo "Native report prefix must be absolute" >&2; exit 2; }
+  export PLAYWRIGHT_JSON_OUTPUT_FILE="${SEMANTIC_NATIVE_REPORT_PREFIX}.json"
+  export DEPLOY_SEMANTIC_LIFECYCLE="${SEMANTIC_NATIVE_REPORT_PREFIX}.jsonl"
+  [[ ! -e "$PLAYWRIGHT_JSON_OUTPUT_FILE" && ! -e "$DEPLOY_SEMANTIC_LIFECYCLE" && ! -e "${SEMANTIC_NATIVE_REPORT_PREFIX}-artifacts" ]] || { echo "Native report already exists" >&2; exit 2; }
+  SEMANTIC_REPORTERS="$SEMANTIC_REPORTERS,json,$REPO_DIR/scripts/deploy-semantic-reporter.cjs"
+  SEMANTIC_OUTPUT_ARGS=("--output=${SEMANTIC_NATIVE_REPORT_PREFIX}-artifacts")
+fi
 
 if [[ $# -eq 0 ]]; then
-  PLAYWRIGHT_ARGS=(--reporter="$SEMANTIC_REPORTERS" --workers="$SEMANTIC_WORKERS")
+  PLAYWRIGHT_ARGS=(--reporter="$SEMANTIC_REPORTERS" --workers="$SEMANTIC_WORKERS" ${SEMANTIC_OUTPUT_ARGS[@]+"${SEMANTIC_OUTPUT_ARGS[@]}"})
   if [[ -n "${SEMANTIC_GREP_INVERT:-}" ]]; then
     PLAYWRIGHT_ARGS+=(--grep-invert="$SEMANTIC_GREP_INVERT")
   fi
@@ -458,4 +476,4 @@ if [[ ! -f "$TEST_FILE" ]]; then
   exit 1
 fi
 
-run_playwright test "$TEST_FILE" --reporter="$SEMANTIC_REPORTERS" --workers="$SEMANTIC_WORKERS"
+run_playwright test "$TEST_FILE" --reporter="$SEMANTIC_REPORTERS" --workers="$SEMANTIC_WORKERS" ${SEMANTIC_OUTPUT_ARGS[@]+"${SEMANTIC_OUTPUT_ARGS[@]}"}

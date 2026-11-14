@@ -11,6 +11,11 @@ Two versioned dispositions close an open cycle ``clean`` with evidence and a
 ``TEST_REPORT`` row (deploy.md Skippable tests: CodeRabbit): ``skip`` for confirmed CodeRabbit
 usage exhaustion and ``override`` for the standing three-round deferral. Both
 refuse without the evidence and append ``deploy-review-dispositions.jsonl``.
+
+``no-reviewable-paths`` records, instead of a CodeRabbit request, a HEAD whose
+changed paths are all excluded by ``.coderabbit.yaml`` ``reviews.path_filters``
+(CodeRabbit would review nothing and only spend shared quota). It consumes no
+review budget, carries only a clean predecessor and refuses a config change.
 """
 
 from __future__ import annotations
@@ -21,7 +26,7 @@ import json
 import os
 import re
 import subprocess
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 
@@ -31,6 +36,11 @@ RESULTS = {"clean", "findings", "unavailable"}
 UNAVAILABLE = "unavailable"
 KIND_BY_POSITION = {1: "initial", 2: "incremental", 3: "verification"}
 SYNC_KIND = "sync-inherited"
+NO_REVIEW_KIND = "no-reviewable-paths"
+POST_CAP_KIND = "post-cap-unreviewed"
+# Audited entries that carry or need no CodeRabbit review; never part of the cap.
+UNCOUNTED_KINDS = frozenset({SYNC_KIND, NO_REVIEW_KIND, POST_CAP_KIND})
+CODERABBIT_CONFIG = ".coderabbit.yaml"
 # Files regenerated from the merged tree after a main sync. Their content is
 # derived, so a sync may change them without new review.
 GENERATED_PATHS = frozenset({"docs/rca/INDEX.md"})
@@ -53,6 +63,15 @@ FINDINGS_COUNT = re.compile(r"actionable comments posted:\s*(\d+)", re.IGNORECAS
 # Only these words prove usage exhaustion; "Review rate limited" / "Action not
 # completed" alone do not (deploy.md Skippable tests: CodeRabbit).
 USAGE_EXHAUSTED = re.compile(r"review limit reached|usage spending cap|spending cap", re.IGNORECASE)
+# Native command replies omit the SHA; wording alone never binds them to HEAD.
+MODERN_QUOTA = re.compile(
+    r"Your included review limit is currently reached under our "
+    r"\[Fair Usage Limits Policy\]\(https://docs\.coderabbit\.ai/management/"
+    r"rate-limits#fair-usage-limits-policy\)", re.IGNORECASE
+)
+COMMAND_INVOCATION = re.compile(
+    r"<!-- CodeRabbit review command invocation: (v2:[0-9a-f]{64}) -->"
+)
 DEFERRED_REPLY = re.compile(r"^\s*\[(DEFERRED|FIXED)\]", re.IGNORECASE)
 ANSWERED_REPLY = re.compile(r"^\s*\[(DEFERRED|FIXED|IGNORED|NOTED)\]", re.IGNORECASE)
 SKIP_REASONS = {"usage-cap"}
@@ -99,11 +118,11 @@ def now() -> str:
 
 
 def review_cycles(entries: list[object]) -> list[dict[str, object]]:
-    """Real review cycles; audited sync inheritances never count toward the cap."""
+    """Real review cycles; audited sync inheritances and unreviewable HEADs never count toward the cap."""
     return [
         entry
         for entry in entries
-        if isinstance(entry, dict) and entry.get("kind") != SYNC_KIND
+        if isinstance(entry, dict) and entry.get("kind") not in UNCOUNTED_KINDS
     ]
 
 
@@ -128,6 +147,8 @@ def next_cycle(entries: list[object]) -> dict[str, object]:
     if cycles and cycles[-1].get("status") == "open":
         raise ReviewCycleError("the previous review cycle is still open")
     consumed = budget_cycles(entries)
+    if any(isinstance(e, dict) and e.get('one_final_review_approval') for e in entries):
+        raise ReviewCycleError('one final review was consumed; no replacement or fifth review')
     if len(consumed) >= MAX_REVIEW_CYCLES:
         raise ReviewCycleError(
             f"review cycle cap reached ({MAX_REVIEW_CYCLES}); defer the remaining non-security findings with "
@@ -140,21 +161,119 @@ def next_cycle(entries: list[object]) -> dict[str, object]:
     return {"number": position, "kind": KIND_BY_POSITION[position], "replaces": replaces}
 
 
+def one_final_review(entries, *, head, approved_head, approval, repo):
+    """Trusted operator approval-ID model; never infer approval from a deploy request."""
+    if any(isinstance(entry, dict) and entry.get('one_final_review_approval') for entry in entries):
+        raise ReviewCycleError('one final review was consumed; no replacement or fifth review')
+    cycles = budget_cycles(entries)
+    if (len(cycles) != 3
+            or any(e.get('status') != 'completed' or e.get('result') not in {'clean', 'findings'}
+                   or e.get('disposition') or e.get('skip_reason') or e.get('one_final_review_approval')
+                   for e in cycles)
+            or [(e.get('number'), e.get('kind')) for e in cycles] != [(1, 'initial'), (2, 'incremental'), (3, 'verification')]
+            or cycles[-1].get('result') != 'clean'
+            or not entries or not isinstance(entries[-1], dict)
+            or entries[-1].get('status') != 'completed' or entries[-1].get('result') != 'clean'):
+        raise ReviewCycleError('one final review requires exactly three completed substantive reviews, latest clean')
+    if (not isinstance(approval, str) or not approval or len(approval) > 128
+            or any(not (c.isalnum() or c in '-_.:') for c in approval)):
+        raise ReviewCycleError('explicit native user approval evidence ID required')
+    if (not re.fullmatch('[0-9a-f]{40}', head or '') or approved_head != head
+            or git(repo, 'rev-parse', 'HEAD').strip() != head
+            or git(repo, 'status', '--porcelain', '--untracked-files=normal').strip()):
+        raise ReviewCycleError('one final review requires clean current exact approved HEAD')
+    return {'number': 4, 'kind': 'verification', 'replaces': None}
+
+
+
+def post_findings_review(path, state, *, head, approved_head, approval, prior_ledger_sha256, repo):
+    """One explicit, snapshot-bound remediation review; never a budget fallback."""
+    entries = state['cycles']
+    if (type(state.get('schema_version')) is not int or state['schema_version'] != 1
+            or any(not isinstance(e, dict) or e.get('kind') not in KINDS | {SYNC_KIND}
+                   or e.get('status') != 'completed' for e in entries)):
+        raise ReviewCycleError('post-findings review requires an intact object ledger')
+    if any('post_findings_review_approval' in e for e in entries):
+        raise ReviewCycleError('post-findings review consumed; no replacement or sixth review')
+    cycles = budget_cycles(entries)
+    if (len(cycles) != 4
+            or [(e.get('number'), e.get('kind')) for e in cycles] !=
+               [(1, 'initial'), (2, 'incremental'), (3, 'verification'), (4, 'verification')]
+            or any(e.get('status') != 'completed' or e.get('result') not in {'clean', 'findings'}
+                   or 'disposition' in e or 'skip_reason' in e for e in cycles)
+            or entries[-1] is not cycles[-1] or cycles[-1].get('result') != 'findings'
+            or any('one_final_review_approval' in e for e in cycles[:-1])
+            or any(type(e.get('number')) is not int or not isinstance(e.get('head'), str)
+                   or not re.fullmatch('[0-9a-f]{40}', e['head']) for e in cycles)
+            or len({e['head'] for e in cycles}) != 4):
+        raise ReviewCycleError('post-findings review requires four completed substantive cycles, fourth findings')
+    fourth = cycles[-1]
+    prior = fourth.get('one_final_review_approval')
+    if (not isinstance(prior, dict) or not isinstance(prior.get('approval_id'), str)
+            or not re.fullmatch(r'[\w.:-]{1,128}', prior['approval_id'])
+            or prior.get('approved_head') != fourth.get('head')
+            or type(prior.get('review_position')) is not int or prior['review_position'] != 4
+            or type(prior.get('prior_entries')) is not int or prior['prior_entries'] != len(entries) - 1
+            or not isinstance(prior.get('prior_ledger_sha256'), str)
+            or not re.fullmatch('[0-9a-f]{64}', prior['prior_ledger_sha256'])):
+        raise ReviewCycleError('post-findings review requires intact fourth-review approval binding')
+    prior_approval_ids = set()
+    for entry in entries:
+        final_approval = entry.get('one_final_review_approval')
+        for value in (entry.get('verification_approval'),
+                      final_approval.get('approval_id') if isinstance(final_approval, dict) else None):
+            if isinstance(value, str):
+                prior_approval_ids.add(value)
+    if (not isinstance(approval, str) or not re.fullmatch(r'[\w.:-]{1,128}', approval)
+            or approval in prior_approval_ids):
+        raise ReviewCycleError('new explicit user approval evidence ID required for post-findings review')
+    raw = path.read_bytes()
+    if (not isinstance(prior_ledger_sha256, str)
+            or not re.fullmatch('[0-9a-f]{64}', prior_ledger_sha256)
+            or hashlib.sha256(raw).hexdigest() != prior_ledger_sha256
+            or json.loads(raw) != state):
+        raise ReviewCycleError('post-findings review prior ledger SHA-256 mismatch')
+    if (not re.fullmatch('[0-9a-f]{40}', head or '') or approved_head != head
+            or git(repo, 'rev-parse', 'HEAD').strip() != head
+            or git(repo, 'status', '--porcelain', '--untracked-files=normal').strip()):
+        raise ReviewCycleError('post-findings review requires clean current exact approved HEAD')
+    return {'number': 5, 'kind': 'verification', 'replaces': None}
+
+
 def start_cycle(
     path: Path, *, head: str, kind: str, reset: bool = False,
     verification_approval: str | None = None,
+    one_final_review_approval: str | None = None, approved_head: str | None = None,
+    repo: Path | None = None,
+    post_findings_review_approval: str | None = None, prior_ledger_sha256: str | None = None,
 ) -> dict[str, object]:
     if not head:
         raise ReviewCycleError("review HEAD must not be empty")
     if kind not in KINDS:
         raise ReviewCycleError(f"invalid review kind: {kind}")
+    remediation = post_findings_review_approval is not None or prior_ledger_sha256 is not None
+    if remediation and (reset or kind != 'verification' or verification_approval is not None
+                        or one_final_review_approval is not None):
+        raise ReviewCycleError('post-findings review cannot reset or combine approvals')
+    exceptional = not remediation and (one_final_review_approval is not None or approved_head is not None)
+    if exceptional and (reset or kind != 'verification' or verification_approval is not None):
+        raise ReviewCycleError('one final verification cannot reset or combine approvals')
+    if reset and path.exists() and any(e.get('one_final_review_approval') for e in review_cycles(read_state(path)['cycles'])):
+        raise ReviewCycleError('one final review ledger cannot be reset')
     if reset:
         state: dict[str, object] = {"schema_version": 1, "cycles": []}
     else:
         state = read_state(path)
     entries = state["cycles"]
     assert isinstance(entries, list)
-    expected = next_cycle(entries)
+    if remediation:
+        expected = post_findings_review(path, state, head=head, approved_head=approved_head,
+            approval=post_findings_review_approval, prior_ledger_sha256=prior_ledger_sha256,
+            repo=repo or Path.cwd())
+    else:
+        expected = (one_final_review(entries, head=head, approved_head=approved_head,
+                                    approval=one_final_review_approval, repo=repo or Path.cwd())
+                    if exceptional else next_cycle(entries))
     if any(entry.get("head") == head for entry in entries if isinstance(entry, dict)):
         raise ReviewCycleError("this exact HEAD already completed a review cycle")
     cycle_number = int(expected["number"])
@@ -192,6 +311,18 @@ def start_cycle(
         "status": "open",
         "started_at": now(),
     }
+    if exceptional:
+        cycle['one_final_review_approval'] = {
+            'approval_id': one_final_review_approval, 'approved_head': approved_head,
+            'prior_ledger_sha256': hashlib.sha256(path.read_bytes()).hexdigest(),
+            'prior_entries': len(entries), 'review_position': 4}
+    if remediation:
+        if hashlib.sha256(path.read_bytes()).hexdigest() != prior_ledger_sha256:
+            raise ReviewCycleError('post-findings review prior ledger changed before admission')
+        cycle['post_findings_review_approval'] = {
+            'approval_id': post_findings_review_approval, 'approved_head': approved_head,
+            'prior_ledger_sha256': prior_ledger_sha256, 'prior_entries': len(entries),
+            'review_position': 5, 'fourth_review_head': entries[-1]['head']}
     if verification_approval is not None:
         cycle["verification_approval"] = verification_approval
     if expected["replaces"]:
@@ -221,6 +352,8 @@ def finish_cycle(path: Path, *, head: str, result: str) -> dict[str, object]:
         raise ReviewCycleError(f"invalid review result: {result}")
     state = read_state(path)
     cycle = _open_cycle(state, head)
+    if (cycle.get('one_final_review_approval') or 'post_findings_review_approval' in cycle) and result == UNAVAILABLE:
+        raise ReviewCycleError('one final review cannot be replaced as unavailable')
     cycle.update({"status": "completed", "result": result, "finished_at": now()})
     write_state(path, state)
     return cycle
@@ -301,7 +434,8 @@ def inherit_sync(
     reviewed_diff = branch_diff(repo, source, base_sha)
     synced_diff = branch_diff(repo, head, base_sha)
     if reviewed_diff != synced_diff:
-        raise ReviewCycleError("branch diff differs from the reviewed diff; review the change")
+        raise ReviewCycleError("branch diff differs from the reviewed diff; review the change "
+                               f"(after the {MAX_REVIEW_CYCLES}-cycle cap: `{POST_CAP_KIND}`)")
     fork = git(repo, "merge-base", source, base_sha).strip()
     main_side = changed_files(repo, fork, base_sha)
     unexpected = sorted(changed_files(repo, source, head) - main_side - GENERATED_PATHS)
@@ -325,6 +459,234 @@ def inherit_sync(
     }
     entries.append(entry)
     write_state(path, state)
+    return entry
+
+
+def post_cap_unreviewed(path: Path, *, head: str, base: str, repo: Path, reason: str) -> dict[str, object]:
+    """Record changes after the three-cycle cap as merged unreviewed, never as reviewed.
+
+    The standing user pre-authorization (2026-10-18, reaffirmed 2026-10-27) allows merging without another
+    cycle after three review rounds. A conflicting main sync then changes the branch diff, which
+    ``inherit-sync`` rightly refuses, and the ledger refuses a fourth cycle. This entry needs three delivered
+    rounds (quota skips never count), the cap reached and a clean final cycle (defer its findings with
+    ``override`` first). It names every file changed since the reviewed HEAD.
+    """
+    if not reason.strip():
+        raise ReviewCycleError("--reason must name the user authorization and why review cannot run")
+    state = read_state(path)
+    entries = state["cycles"]
+    assert isinstance(entries, list)
+    cycles = review_cycles(entries)
+    if not cycles or cycles[-1].get("status") != "completed":
+        raise ReviewCycleError("post-cap recording needs a completed review cycle")
+    if cycles[-1].get("result") != "clean":
+        raise ReviewCycleError(
+            f"latest review result is {cycles[-1].get('result')}; defer its findings with `override` first"
+        )
+    budget = budget_cycles(entries)
+    delivered = sum(c.get("disposition") != "skipped" and not c.get("skip_reason") for c in budget)
+    if len(budget) < MAX_REVIEW_CYCLES or delivered < MIN_OVERRIDE_ROUNDS:
+        raise ReviewCycleError(
+            f"the review cap is not reached ({len(budget)} cycles, {delivered} delivered rounds); "
+            "request the next review cycle"
+        )
+    source = resolve(repo, str(entries[-1].get("head")))
+    head = resolve(repo, head)
+    if head == source:
+        raise ReviewCycleError("HEAD is already recorded")
+    if not is_ancestor(repo, source, head):
+        raise ReviewCycleError("recorded HEAD is not an ancestor of HEAD")
+    base_sha = resolve(repo, base)
+    fork = git(repo, "merge-base", source, base_sha).strip()
+    main_side, branch_side = changed_files(repo, fork, base_sha), changed_files(repo, fork, source)
+    # Files only main changed arrive reviewed on main; files both sides changed may carry a conflict resolution.
+    unreviewed = sorted(changed_files(repo, source, head) - (main_side - branch_side))
+    entry = {
+        "number": len(entries) + 1,
+        "kind": POST_CAP_KIND,
+        "head": head,
+        "status": "completed",
+        "result": "clean",
+        "disposition": "unreviewed",
+        "inherited_from": source,
+        "base": base_sha,
+        "reviewed_branch_diff_sha256": hashlib.sha256(branch_diff(repo, source, base_sha).encode()).hexdigest(),
+        "branch_diff_sha256": hashlib.sha256(branch_diff(repo, head, base_sha).encode()).hexdigest(),
+        "changed_files": unreviewed,
+        "reason": reason,
+        "started_at": now(),
+        "finished_at": now(),
+    }
+    entry["report_row"] = (
+        f"Code Review | \u26a0\ufe0f Overridden | merged unreviewed after the {MAX_REVIEW_CYCLES}-cycle cap: "
+        f"{len(entry['changed_files'])} file(s) changed since {source[:9]} ({reason})"
+    )
+    entries.append(entry)
+    write_state(path, state)
+    return entry
+
+
+# ---------------------------------------------------------------------------
+# CodeRabbit path filters: HEADs with nothing CodeRabbit would review
+# ---------------------------------------------------------------------------
+
+
+def _glob_segment(segment: str) -> str:
+    """One path segment of a minimatch glob (``*``, ``?``, ``!(a|b)``) as a regex; dotfiles stay unmatched."""
+    out = ""
+    index = 0
+    while index < len(segment):
+        char = segment[index]
+        if segment.startswith("!(", index):
+            close = segment.find(")", index)
+            if close < 0:
+                raise ReviewCycleError(f"unsupported CodeRabbit path filter segment: {segment!r}")
+            alternatives = "|".join(_glob_segment(alt) for alt in segment[index + 2:close].split("|"))
+            rest = _glob_segment(segment[close + 1:])
+            # The excluded values end at this segment's boundary (a "/" or the path's end), not the path's end.
+            return out + f"(?:(?!(?:{alternatives}){rest}(?![^/]))[^/]*?){rest}"
+        if char == "*":
+            out += "[^/]*"
+        elif char == "?":
+            out += "[^/]"
+        elif char in "[]{}()+@":
+            raise ReviewCycleError(f"unsupported CodeRabbit path filter segment: {segment!r}")
+        else:
+            out += re.escape(char)
+        index += 1
+    return out
+
+
+def glob_regex(pattern: str) -> re.Pattern[str]:
+    """Compile a CodeRabbit (minimatch, no dot, no matchBase) path glob.
+
+    Unsupported syntax raises, so the caller requests the review instead of
+    guessing; matching is deliberately no broader than minimatch's defaults.
+    """
+    segments = pattern.split("/")
+    if not pattern or any(not segment for segment in segments):
+        raise ReviewCycleError(f"unsupported CodeRabbit path filter: {pattern!r}")
+    parts: list[str] = []
+    for position, segment in enumerate(segments):
+        last = position == len(segments) - 1
+        if segment == "**":
+            parts.append(r"(?!\.)[^/]+(?:/(?!\.)[^/]+)*" if last else r"(?:(?!\.)[^/]+/)*")
+            continue
+        guard = r"(?!\.)" if segment[0] in "*?!" else ""
+        parts.append(guard + _glob_segment(segment) + ("" if last else "/"))
+    return re.compile("^" + "".join(parts) + "$")
+
+
+def path_filters(repo: Path, head: str) -> tuple[list[re.Pattern[str]], list[re.Pattern[str]], str]:
+    """(include, exclude, sha256) of ``reviews.path_filters`` in HEAD's committed ``.coderabbit.yaml``."""
+    import yaml
+
+    text = git(repo, "show", f"{head}:{CODERABBIT_CONFIG}")
+    try:
+        config = yaml.safe_load(text)
+    except yaml.YAMLError as error:
+        raise ReviewCycleError(f"could not parse {CODERABBIT_CONFIG}: {error}") from error
+    reviews = config.get("reviews") if isinstance(config, dict) else None
+    filters = reviews.get("path_filters") if isinstance(reviews, dict) else None
+    if not isinstance(filters, list) or not filters or not all(isinstance(item, str) for item in filters):
+        raise ReviewCycleError(f"{CODERABBIT_CONFIG} has no reviews.path_filters list")
+    include = [glob_regex(item) for item in filters if not item.startswith("!")]
+    exclude = [glob_regex(item[1:]) for item in filters if item.startswith("!")]
+    digest = hashlib.sha256(json.dumps(filters).encode()).hexdigest()
+    return include, exclude, digest
+
+
+def is_reviewable(path: str, include: list[re.Pattern[str]], exclude: list[re.Pattern[str]]) -> bool:
+    """CodeRabbit's case sensitivity for custom (extglob) filters is unverified, so either reading that reviews wins."""
+    def reviewable(flags: int) -> bool:
+        def hit(pattern: re.Pattern[str]) -> bool:
+            return re.match(pattern.pattern, path, flags) is not None
+        included = not include or any(hit(pattern) for pattern in include)
+        return included and not any(hit(pattern) for pattern in exclude)
+    return reviewable(0) or reviewable(re.IGNORECASE)
+
+
+def record_no_reviewable_paths(
+    path: Path, *, head: str, repo: Path, receipts_path: Path, base: str | None = None,
+    reset: bool = False, pr: str = "",
+) -> dict[str, object]:
+    """Record a HEAD whose every changed path CodeRabbit's path filters exclude.
+
+    ``reset`` (a new deploy's first cycle) compares the branch with
+    merge-base(HEAD, base). Otherwise HEAD must descend from the latest
+    completed clean entry, which it carries; findings, an open cycle, a
+    ``.coderabbit.yaml`` change or any reviewable path refuse, and the caller
+    requests the normal review.
+    """
+    head = resolve(repo, head)
+    prior: dict[str, object] | None = None
+    if reset:
+        if not base:
+            raise ReviewCycleError("a new deploy's first HEAD needs --base")
+        state: dict[str, object] = {"schema_version": 1, "cycles": []}
+        source = git(repo, "merge-base", head, resolve(repo, base)).strip()
+    else:
+        state = read_state(path)
+        entries = state["cycles"]
+        assert isinstance(entries, list)
+        cycles = review_cycles(entries)
+        if cycles and cycles[-1].get("status") == "open":
+            raise ReviewCycleError("the previous review cycle is still open")
+        completed = [entry for entry in entries if isinstance(entry, dict)
+                     and entry.get("status") == "completed" and entry.get("result") != UNAVAILABLE]
+        if not completed:
+            raise ReviewCycleError("no completed review to carry; request the review")
+        prior = completed[-1]
+        if prior.get("result") != "clean":
+            raise ReviewCycleError(
+                f"latest review result is {prior.get('result')}; its findings need a review cycle"
+            )
+        source = resolve(repo, str(prior.get("head")))
+        if head == source:
+            raise ReviewCycleError("HEAD is already the latest recorded HEAD")
+        if not is_ancestor(repo, source, head):
+            raise ReviewCycleError("the recorded HEAD is not an ancestor of HEAD; request the review")
+    changed = sorted(
+        line for line in git(repo, "diff", "--name-only", "--no-renames", source, head).splitlines() if line
+    )
+    if CODERABBIT_CONFIG in changed:
+        raise ReviewCycleError(f"{CODERABBIT_CONFIG} changed; request the review")
+    include, exclude, digest = path_filters(repo, head)
+    reviewable = [name for name in changed if is_reviewable(name, include, exclude)]
+    if reviewable:
+        shown = ", ".join(reviewable[:10]) + (" …" if len(reviewable) > 10 else "")
+        raise ReviewCycleError(f"{len(reviewable)} reviewable path(s): {shown}; request the review")
+    report_row = (
+        f"Code Review | ➖ No reviewable paths | {len(changed)} changed path(s) since {source[:9]} on "
+        f"{head[:9]} are all excluded by {CODERABBIT_CONFIG} path_filters; no CodeRabbit request spent"
+    )
+    if prior is not None:
+        carried = prior.get("disposition") or prior.get("kind")
+        report_row += f"; carries the {carried} clean result of {str(prior.get('head'))[:9]}"
+    entries = state["cycles"]
+    assert isinstance(entries, list)
+    entry: dict[str, object] = {
+        "number": len(entries) + 1,
+        "kind": NO_REVIEW_KIND,
+        "head": head,
+        "status": "completed",
+        "result": "clean",
+        "disposition": NO_REVIEW_KIND,
+        "compared_from": source,
+        "inherited_from": prior.get("head") if prior else None,
+        "changed_paths": changed,
+        "path_filters_sha256": digest,
+        "report_row": report_row,
+        "started_at": now(),
+        "finished_at": now(),
+    }
+    entries.append(entry)
+    write_state(path, state)
+    _append_receipt(receipts_path, {
+        "pr": pr, "head": head, "cycle_number": entry["number"], "kind": NO_REVIEW_KIND,
+        "disposition": NO_REVIEW_KIND, "report_row": report_row, "at": entry["finished_at"],
+        "compared_from": source, "changed_paths": changed,
+    })
     return entry
 
 
@@ -373,6 +735,8 @@ def normalize_evidence(data: object, *, source: str) -> dict[str, object]:
         "source": source,
         "captured_at": str(data.get("captured_at") or now()),
     }
+    if "prior_ledger_sha256" in data:
+        evidence["prior_ledger_sha256"] = data["prior_ledger_sha256"]
     return evidence
 
 
@@ -392,6 +756,7 @@ def _gh_json(args: list[str]) -> object:
 
 
 def _gh_pages(endpoint: str) -> list[object]:
+    """Read a complete endpoint inventory or reject pagination truncation."""
     items: list[object] = []
     for page in range(1, GH_MAX_PAGES + 1):
         payload = _gh_json(["api", f"{endpoint}?per_page={GH_PAGE_SIZE}&page={page}"])
@@ -399,8 +764,8 @@ def _gh_pages(endpoint: str) -> list[object]:
             raise ReviewCycleError(f"{endpoint} returned a non-list payload")
         items.extend(payload)
         if len(payload) < GH_PAGE_SIZE:
-            break
-    return items
+            return items
+    raise ReviewCycleError(f"{endpoint} pagination exceeded the existing page bound")
 
 
 def _gh_check_runs(slug: str, head: str) -> list[object]:
@@ -570,11 +935,152 @@ def _exhaustion_comment(
     return max(matches, key=lambda comment: str(comment.get("updated_at") or comment.get("created_at") or ""))
 
 
+
+
+def _review_source_links(body: str) -> tuple[set[tuple[str, str]], set[tuple[str, str]]]:
+    """Explicit GitHub commit/configuration targets; never scan opaque hashes."""
+    commits = set(re.findall(
+        r'https://github\.com/([\w.-]+/[\w.-]+)/commit/([^/\s<>?#)]+)',
+        body, re.IGNORECASE))
+    configurations = set(re.findall(
+        r'https://github\.com/([\w.-]+/[\w.-]+)/blob/([^/\s<>]+)/\.coderabbit\.yaml',
+        body, re.IGNORECASE))
+    return commits, configurations
+
+
+def _contradicts_review_head(body: str, head: str, repository: str) -> bool:
+    """Detect conflicting labelled source references while leaving opaque tokens alone."""
+    # Only labelled references and native links assert commit identity. The v2
+    # invocation and unrelated identifiers stay opaque, including 40-hex tokens.
+    plain = re.sub(r'[*`]', '', body)
+    references = re.findall(
+        r'\b(?:commit|head)\b(?:\s+(?:sha|id))?\s*[:=]?\s*\[?([0-9a-f]{7,40})(?![0-9a-f])',
+        plain, re.IGNORECASE)
+    commits, configurations = _review_source_links(body)
+    return (any(not head.lower().startswith(value.lower()) for value in references)
+            or any(repo.lower() != repository.lower()
+                   or re.fullmatch(r'[0-9a-f]{7,40}', value, re.IGNORECASE) is None
+                   or not head.lower().startswith(value.lower())
+                   for repo, value in commits | configurations))
+
+
+def _modern_exhaustion_binding(
+    evidence: dict[str, object], cycle: dict[str, object], head: str, pr: str,
+) -> tuple[dict[str, object], dict[str, object]] | None:
+    """Bind a SHA-less native quota reply, never a path-filter status by itself.
+
+    The invocation hash is opaque: do not invent a mapping to the request.
+    Instead require a unique unedited member command, a bot configuration
+    updated during its reply, the exact-HEAD check and a fresh authenticated PR
+    read. Ambiguous or incomplete captures fail closed.
+    """
+    comments = evidence['issue_comments']
+    runs = evidence['check_runs']
+    assert isinstance(comments, list) and isinstance(runs, list)
+    started = _publication_time(cycle.get('started_at'))
+    captured = _publication_time(evidence.get('captured_at'))
+    current = _publication_time(now())
+    if started is None or captured is None or current is None or not started <= captured <= current:
+        return None
+
+    def official(comment: dict[str, object]) -> bool:
+        """Require the native CodeRabbit bot and application identities."""
+        app, user = comment.get('performed_via_github_app'), comment.get('user')
+        return (_is_bot(comment) and isinstance(user, dict) and user.get('type') == 'Bot'
+                and isinstance(app, dict) and app.get('slug') == 'coderabbitai')
+
+    candidates = [c for c in comments if official(c) and MODERN_QUOTA.search(_body(c))
+                  and (stamp := _publication_time(c.get('created_at'))) is not None
+                  and started <= stamp <= captured]
+    if len(candidates) != 1:
+        return None
+    reply = candidates[0]
+    issue = re.fullmatch(r'https://api\.github\.com/repos/([\w.-]+/[\w.-]+)/issues/([0-9]+)',
+                         str(reply.get('issue_url') or ''))
+    invocations = COMMAND_INVOCATION.findall(_body(reply))
+    if issue is None or issue[2] != pr or len(invocations) != 1:
+        return None
+    invocation = invocations[0]
+    if sum(_body(c).count(invocation) for c in comments) != 1:
+        return None
+    # A different explicit commit in the reply cannot be rebound by a snapshot.
+    if _contradicts_review_head(_body(reply), head, issue[1]):
+        return None
+    created, updated = (_publication_time(reply.get(key)) for key in ('created_at', 'updated_at'))
+    allowance = re.search(r'Your next included review will be available in ([1-9][0-9]*) minutes\.',
+                          _body(reply))
+    if (created is None or updated is None or allowance is None
+            or not started <= created <= updated <= captured):
+        return None
+    # Do not reuse a denial after the bot's own included-review reset.
+    try:
+        expires = created + timedelta(minutes=int(allowance[1]))
+    except (ValueError, OverflowError):
+        return None
+    if current >= expires:
+        return None
+    requests = [c for c in comments if c.get('issue_url') == reply.get('issue_url')
+                and re.fullmatch(r'\s*@coderabbitai (?:full )?review\s*', _body(c), re.IGNORECASE)
+                and (when := _publication_time(c.get('created_at'))) is not None
+                and started <= when <= captured]
+    if len(requests) != 1:
+        return None
+    request = requests[0]
+    requested = _publication_time(request.get('created_at'))
+    if (request.get('created_at') != request.get('updated_at')
+            or request.get('author_association') not in {'OWNER', 'MEMBER', 'COLLABORATOR'}
+            or requested is None or requested > created):
+        return None
+    slug = issue[1]
+    snapshots = [c for c in comments if official(c)
+                 and '<!-- This is an auto-generated comment: skip review by coderabbit.ai -->' in _body(c)
+                 and 'Run configuration' in _body(c)
+                 and c.get('issue_url') == reply.get('issue_url')
+                 and _review_source_links(_body(c)) == ({(slug, head)}, {(slug, head)})
+                 and not _contradicts_review_head(_body(c), head, slug)
+                 and (stamp := _publication_time(c.get('updated_at'))) is not None
+                 and created <= stamp <= updated]
+    checks = coderabbit_check_runs(runs, head)
+    if len(snapshots) != 1 or not checks:
+        return None
+    identities = [c.get('id') for c in (reply, request, snapshots[0])]
+    if any(type(value) is not int or value <= 0 for value in identities) or len(set(identities)) != 3:
+        return None
+    check = checks[-1]
+    completed = _publication_time(check.get('completed_at'))
+    app = check.get('app')
+    if (check.get('head_sha') != head or check.get('status') != 'completed'
+            or check.get('conclusion') not in {'skipped', 'neutral', 'failure', 'cancelled', 'timed_out', 'action_required'}
+            or not isinstance(app, dict) or app.get('slug') != 'coderabbitai'
+            or completed is None or not started <= completed <= captured):
+        return None
+    live = _gh_json(['api', f'repos/{slug}/pulls/{pr}'])
+    live_head = live.get('head') if isinstance(live, dict) else None
+    live_base = live.get('base') if isinstance(live, dict) else None
+    live_repo = live_base.get('repo') if isinstance(live_base, dict) else None
+    if (not isinstance(live, dict) or live.get('number') != int(pr) or live.get('state') != 'open'
+            or not isinstance(live_head, dict) or live_head.get('sha') != head
+            or not isinstance(live_repo, dict) or live_repo.get('full_name') != slug):
+        raise ReviewCycleError('modern quota reply does not match the authenticated current PR head')
+    if (verified := _publication_time(now())) is None or verified >= expires:
+        raise ReviewCycleError('modern quota reply expired during current PR verification')
+    return reply, {
+        'method': 'current-pr-command-config', 'current_pr_head': head,
+        'pr': int(pr), 'repository': slug, 'verified_at': now(),
+        'request_comment_id': request.get('id'), 'request_created_at': request.get('created_at'),
+        'configuration_comment_id': snapshots[0].get('id'),
+        'configuration_updated_at': snapshots[0].get('updated_at'),
+        'invocation': invocation, 'quota_expires_at': expires.isoformat(),
+        'reply_body_sha256': hashlib.sha256(_body(reply).encode()).hexdigest(),
+        'configuration_body_sha256': hashlib.sha256(_body(snapshots[0]).encode()).hexdigest(),
+    }
+
+
 def _quote(body: str) -> str:
     """Every line of the comment that carries exhaustion wording, tags stripped."""
     lines: list[str] = []
     for raw in body.splitlines():
-        if not USAGE_EXHAUSTED.search(raw):
+        if not (USAGE_EXHAUSTED.search(raw) or MODERN_QUOTA.search(raw)):
             continue
         text = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", "", raw)).strip(" #>*-\t")
         if text and text not in lines:
@@ -599,6 +1105,11 @@ def _close_with_disposition(
     report_row: str,
     fields: dict[str, object],
 ) -> dict[str, object]:
+    if ('post_findings_review_approval' in cycle
+            and (disposition != 'skipped' or fields.get('skip_reason') != 'usage-cap')):
+        raise ReviewCycleError('post-findings review cannot override findings; exact usage-cap evidence remains required')
+    if cycle.get('one_final_review_approval') and disposition != 'skipped':
+        raise ReviewCycleError('one final review cannot override findings; exact usage-cap evidence remains required')
     cycle.update(
         {
             "status": "completed",
@@ -619,7 +1130,7 @@ def _close_with_disposition(
             "kind": cycle.get("kind"),
             "disposition": disposition,
             "report_row": report_row,
-            "at": cycle["finished_at"],
+            "at": fields.get("disposition_at", cycle["finished_at"]),
             **fields,
         },
     )
@@ -637,9 +1148,9 @@ def skip_cycle(
 ) -> dict[str, object]:
     """Close the open cycle clean under confirmed CodeRabbit usage exhaustion.
 
-    Requires the bot comment naming HEAD with the exhaustion wording and the
-    non-success CodeRabbit check run on HEAD; refuses when any substantive
-    review of HEAD exists (a review that ran is never skipped).
+    Requires a bot quota comment naming HEAD, or a native command reply bound
+    to the current PR, cycle and configuration; also requires the non-success
+    exact-HEAD check. A substantive review of HEAD always refuses the skip.
     """
     if reason not in SKIP_REASONS:
         raise ReviewCycleError(f"invalid skip reason: {reason}")
@@ -660,6 +1171,11 @@ def skip_cycle(
     issue_comments = evidence["issue_comments"]
     assert isinstance(issue_comments, list)
     comment = _exhaustion_comment(issue_comments, head)
+    binding = None
+    if comment is None:
+        modern = _modern_exhaustion_binding(evidence, cycle, head, pr)
+        if modern is not None:
+            comment, binding = modern
     if comment is None:
         raise ReviewCycleError(
             f"no CodeRabbit comment names {head[:12]} with 'Review limit reached'/'usage spending cap'; "
@@ -679,10 +1195,13 @@ def skip_cycle(
         )
     quote = _quote(_body(comment))
     wrapper_ids = [review.get("id") for review in coderabbit_reviews(reviews, head)]
+    head_proof = (f"bound to current PR {pr} commit {head[:9]} by request "
+                  f"{binding['request_comment_id']} and configuration {binding['configuration_comment_id']}"
+                  if binding else f"naming commit {head[:9]}")
     report_row = (
         "Code Review | ⚠️ Skipped | reviewers usage-exhausted (CodeRabbit: "
         f"'{quote}', issue comment {comment.get('id')} updated {comment.get('updated_at')} "
-        f"naming commit {head[:9]}; check run {check.get('id')} {conclusion} '{title}'; "
+        f"{head_proof}; check run {check.get('id')} {conclusion} '{title}'; "
         "Claude fallback disabled)"
     )
     fields: dict[str, object] = {
@@ -699,6 +1218,8 @@ def skip_cycle(
             "non_substantive_review_ids": wrapper_ids,
         },
     }
+    if binding is not None:
+        fields['evidence']['head_binding'] = binding
     return _close_with_disposition(
         path, receipts_path, state, cycle, pr=pr, disposition="skipped", report_row=report_row, fields=fields
     )
@@ -715,6 +1236,75 @@ def _parse_ids(raw: str) -> list[int]:
     if not ids:
         raise ReviewCycleError("--finding-ids must name at least one review comment id")
     return ids
+
+
+def _completed_findings_cycle(state, head, evidence, original_bytes):
+    """Admit only a snapshot-bound final third findings cycle; never reopen it."""
+    entries = state["cycles"]
+    if (type(state.get("schema_version")) is not int or state["schema_version"] != 1
+            or not re.fullmatch(r"[0-9a-f]{40}", head)
+            or any(not isinstance(entry, dict) for entry in entries)
+            or evidence.get("prior_ledger_sha256") != hashlib.sha256(original_bytes).hexdigest()):
+        raise ReviewCycleError("completed findings require intact schema and exact prior ledger SHA-256")
+    for entry in entries:
+        started, finished = (_publication_time(entry.get(key)) for key in ("started_at", "finished_at"))
+        if (type(entry.get("number")) is not int or entry["number"] < 1
+                or entry.get("result") not in RESULTS
+                or entry.get("status") != "completed" or entry.get("kind") not in KINDS | {SYNC_KIND}
+                or not isinstance(entry.get("head"), str)
+                or not re.fullmatch(r"[0-9a-f]{40}", entry["head"])
+                or started is None or finished is None or started > finished):
+            raise ReviewCycleError("completed findings require intact completed prefix entries")
+    cycles = budget_cycles(entries)
+    if (len(cycles) != 3 or entries[-1] is not cycles[-1]
+            or [(entry.get("number"), entry.get("kind")) for entry in cycles]
+               != [(1, "initial"), (2, "incremental"), (3, "verification")]
+            or any(type(entry.get("number")) is not int or entry.get("result") not in {"clean", "findings"}
+                   or "disposition" in entry or "skip_reason" in entry
+                   or "one_final_review_approval" in entry or "post_findings_review_approval" in entry
+                   for entry in cycles)
+            or len({entry["head"] for entry in cycles}) != 3
+            or cycles[-1].get("head") != head or cycles[-1].get("result") != "findings"):
+        raise ReviewCycleError("completed override requires same exact final third findings cycle")
+    if (not isinstance(evidence.get("source"), str) or not evidence["source"].strip()
+            or _publication_time(evidence.get("captured_at")) is None
+            or _publication_time(evidence["captured_at"]) < _publication_time(cycles[-1]["finished_at"])
+            or any(not isinstance(evidence.get(key), list)
+                   or any(not isinstance(item, dict) for item in evidence[key])
+                   for key in ("reviews", "review_comments", "check_runs"))):
+        raise ReviewCycleError("completed findings require well-formed captured review evidence")
+    approval = cycles[-1].get("verification_approval")
+    if cycles[-2]["result"] == "clean" and (not isinstance(approval, str)
+            or not re.fullmatch(r"[\w.:-]{1,128}", approval)):
+        raise ReviewCycleError("completed verification requires original explicit approval binding")
+    return cycles[-1]
+
+
+def _validate_completed_review(cycle, review, evidence):
+    """Keep exact-HEAD review/check publication and original finding identity bound."""
+    head = cycle["head"]
+    started, finished = (_publication_time(cycle[key]) for key in ("started_at", "finished_at"))
+    submitted = _publication_time(review.get("submitted_at"))
+    if (type(review.get("id")) is not int or review["id"] <= 0
+            or review.get("state") not in {"COMMENTED", "APPROVED", "CHANGES_REQUESTED"}
+            or submitted is None or not started <= submitted <= finished):
+        raise ReviewCycleError("completed findings require review within original cycle interval")
+    checks = [run for run in coderabbit_check_runs(evidence["check_runs"], head)
+              if type(run.get("id")) is int and run["id"] > 0
+              and run.get("head_sha") == head and run.get("status") == "completed"
+              and run.get("conclusion") == "success" and _check_title(run) == "Finished"
+              and _publication_time(run.get("started_at")) is not None
+              and _publication_time(run.get("completed_at")) is not None
+              and started <= _publication_time(run["started_at"]) <= submitted
+                  <= _publication_time(run["completed_at"]) <= finished]
+    findings = [comment for comment in evidence["review_comments"]
+                if _is_bot(comment) and not comment.get("in_reply_to_id")
+                and comment.get("original_commit_id", comment.get("commit_id")) == head]
+    count = review_findings(review)
+    if (not checks or not findings
+            or any(comment.get("pull_request_review_id") != review.get("id") for comment in findings)
+            or (count is not None and count != len(findings))):
+        raise ReviewCycleError("completed findings require finished exact-HEAD check and review-bound findings")
 
 
 def override_cycle(
@@ -739,8 +1329,15 @@ def override_cycle(
         raise ReviewCycleError("--deferred-to must name the follow-up PR, branch or RCA")
     if prior_rounds < 0:
         raise ReviewCycleError("--prior-rounds must not be negative")
+    original_bytes = path.read_bytes()
     state = read_state(path)
-    cycle = _open_cycle(state, head)
+    entries = state["cycles"]
+    completed = bool(entries and isinstance(entries[-1], dict)
+                     and entries[-1].get("status") == "completed")
+    if completed:
+        cycle = _completed_findings_cycle(state, head, evidence, original_bytes)
+    else:
+        cycle = _open_cycle(state, head)
     entries = state["cycles"]
     assert isinstance(entries, list)
     # Only cycles that delivered a review count: an `unavailable` cycle consumed no review budget.
@@ -762,6 +1359,14 @@ def override_cycle(
             "(use skip for usage exhaustion; wait for the review otherwise)"
         )
     review = substantive[-1]
+    if completed:
+        _validate_completed_review(cycle, review, evidence)
+        bound_ids = {comment.get("id") for comment in evidence["review_comments"]
+                     if _is_bot(comment) and not comment.get("in_reply_to_id")
+                     and comment.get("pull_request_review_id") == review.get("id")
+                     and comment.get("original_commit_id", comment.get("commit_id")) == head}
+        if not finding_ids or any(type(value) is not int or value not in bound_ids for value in finding_ids):
+            raise ReviewCycleError("completed override must name findings from the exact final review")
     comments = evidence["review_comments"]
     assert isinstance(comments, list)
     on_head = [
@@ -823,9 +1428,181 @@ def override_cycle(
     publication = publication_evidence(review, head, evidence)
     if publication is not None and not SUBSTANTIVE_REVIEW.search(_body(review)):
         fields["evidence"]["review_publication"] = publication
+    if completed:
+        if path.read_bytes() != original_bytes:
+            raise ReviewCycleError("review ledger changed during disposition validation")
+        fields.update({"original_result": "findings", "original_finished_at": cycle["finished_at"],
+                       "finished_at": cycle["finished_at"], "disposition_at": now(),
+                       "prior_ledger_sha256": hashlib.sha256(original_bytes).hexdigest()})
     return _close_with_disposition(
         path, receipts_path, state, cycle, pr=pr, disposition="overridden", report_row=report_row, fields=fields
     )
+
+def retarget_unexecuted(path, *, head, approved_head, approval, prior_ledger_sha256,
+                        pr, request_comment_id, repo, github_repo=None, evidence_path=None):
+    """Retarget one never-executed fifth slot; preserve the original entry atomically."""
+    from copy import deepcopy
+    def refuse(message):
+        raise ReviewCycleError('retarget-unexecuted: ' + message)
+    raw = path.read_bytes()
+    if hashlib.sha256(raw).hexdigest() != prior_ledger_sha256:
+        refuse('prior ledger SHA-256 mismatch')
+    state = read_state(path)
+    entries = state['cycles']
+    if (type(state.get('schema_version')) is not int or state['schema_version'] != 1 or len(entries) != 19
+            or any(not isinstance(e, dict) for e in entries)):
+        refuse('requires intact 19-entry ledger')
+    cycle, prefix = entries[-1], entries[:-1]
+    marker = cycle.get('post_findings_review_approval')
+    if (cycle.get('number') != 5 or cycle.get('kind') != 'verification'
+            or cycle.get('status') != 'open' or 'result' in cycle or 'unexecuted_retargets' in cycle
+            or not isinstance(marker, dict) or marker.get('approval_id') != approval or not approval
+            or marker.get('approved_head') != cycle.get('head') or marker.get('prior_entries') != 18
+            or marker.get('review_position') != 5
+            or not re.fullmatch('[0-9a-f]{64}', str(marker.get('prior_ledger_sha256', '')))
+            or any(e.get('status') != 'completed' or 'post_findings_review_approval' in e for e in prefix)
+            or [(e.get('number'), e.get('kind')) for e in budget_cycles(prefix)] !=
+               [(1, 'initial'), (2, 'incremental'), (3, 'verification'), (4, 'verification')]
+            or prefix[-1].get('result') != 'findings'
+            or any(type(e.get('number')) is not int for e in budget_cycles(prefix))):
+        refuse('slot is not the original unretargeted open fifth approval')
+    old = cycle.get('head')
+    if (not isinstance(old, str) or not re.fullmatch('[0-9a-f]{40}', old)):
+        refuse('malformed original slot HEAD')
+    if (not re.fullmatch('[0-9a-f]{40}', head or '') or approved_head != head or old == head
+            or any(e.get('head') == head for e in entries)
+            or git(repo, 'rev-parse', 'HEAD').strip() != head
+            or git(repo, 'status', '--porcelain', '--untracked-files=normal').strip()
+            or not is_ancestor(repo, old, head)):
+        refuse('requires new clean exact approved descendant HEAD')
+    capture_start = now()
+    slug = github_repo
+    if evidence_path is None:
+        if not slug:
+            info = _gh_json(['repo', 'view', '--json', 'nameWithOwner'])
+            slug = info.get('nameWithOwner') if isinstance(info, dict) else None
+        if not isinstance(slug, str) or not re.fullmatch(r'[\w.-]+/[\w.-]+', slug):
+            refuse('invalid repository')
+        data = {'issue_comments': _gh_pages(f'repos/{slug}/issues/{pr}/comments'),
+                'reviews': _gh_pages(f'repos/{slug}/pulls/{pr}/reviews'),
+                'review_comments': _gh_pages(f'repos/{slug}/pulls/{pr}/comments'),
+                'check_runs': _gh_check_runs(slug, old),
+                'pull_request': _gh_json(['api', f'repos/{slug}/pulls/{pr}']),
+                'capture_started_at': capture_start, 'captured_at': now(), 'complete': True}
+    else:
+        # Same explicit trusted-operator evidence-file boundary as skip/override.
+        try:
+            data = json.loads(evidence_path.read_text())
+        except (OSError, ValueError) as error:
+            raise ReviewCycleError('retarget-unexecuted: invalid evidence JSON') from error
+    if (not isinstance(data, dict) or data.get('complete') is not True
+            or any(not isinstance(data.get(k), list) or any(not isinstance(x, dict) for x in data[k])
+                   for k in ('issue_comments', 'reviews', 'review_comments', 'check_runs'))):
+        refuse('incomplete or malformed evidence')
+    for key in ('issue_comments', 'reviews', 'review_comments', 'check_runs'):
+        rows = data[key]
+        if (any(type(x.get('id')) is not int or x['id'] <= 0 for x in rows)
+                or len({x['id'] for x in rows}) != len(rows)
+                or any(not isinstance(x.get('app' if key == 'check_runs' else 'user'), dict)
+                       for x in rows)
+                or key == 'check_runs' and any(not isinstance(x.get('output'), dict) for x in rows)):
+            refuse('malformed or duplicate native evidence identities')
+    begun = _publication_time(data.get('capture_started_at'))
+    captured = _publication_time(data.get('captured_at'))
+    current = _publication_time(now())
+    opened = _publication_time(cycle.get('started_at'))
+    if (None in (begun, captured, current, opened) or not opened <= begun <= captured <= current
+            or (current - begun).total_seconds() > 120):
+        refuse('evidence is stale or capture exceeded 120 seconds')
+    live = data.get('pull_request')
+    if (not isinstance(live, dict) or live.get('number') != int(pr) or live.get('state') != 'open'
+            or not isinstance(live.get('head'), dict) or live['head'].get('sha') != old
+            or not isinstance(live.get('base'), dict) or not isinstance(live['base'].get('repo'), dict)
+            or not isinstance(live.get('user'), dict)):
+        refuse('current PR does not match old slot HEAD')
+    slug = live['base']['repo'].get('full_name')
+    if (not isinstance(slug, str) or not re.fullmatch(r'[\w.-]+/[\w.-]+', slug)
+            or (github_repo is not None and github_repo != slug)):
+        refuse('PR repository mismatch')
+    evidence = normalize_evidence(data, source=f'gh:{slug}' if evidence_path is None else str(evidence_path))
+    issue_url = f'https://api.github.com/repos/{slug}/issues/{pr}'
+    comments = evidence['issue_comments']
+    commands = [c for c in comments if re.search(r'@coderabbitai\s+(?:full\s+)?review\b', _body(c), re.I)
+                and (stamp := _publication_time(c.get('created_at'))) is not None and stamp >= opened]
+    if len(commands) != 1:
+        refuse('ambiguous or intervening review request')
+    request = commands[0]
+    requested = _publication_time(request.get('created_at'))
+    if (request.get('id') != request_comment_id or _body(request).strip() != '@coderabbitai review'
+            or request.get('created_at') != request.get('updated_at') or request.get('issue_url') != issue_url
+            or request.get('author_association') not in {'OWNER', 'MEMBER', 'COLLABORATOR'}
+            or request.get('user', {}).get('type') != 'User'
+            or request.get('user', {}).get('login') != live.get('user', {}).get('login')
+            or requested is None or not opened <= requested <= captured):
+        refuse('request identity or actor mismatch')
+    replies = [c for c in comments if _is_bot(c)
+               and (stamp := _publication_time(c.get('created_at'))) is not None and stamp >= requested]
+    if len(replies) != 1:
+        refuse('ambiguous bot feedback after request')
+    reply = replies[0]
+    created, updated = (_publication_time(reply.get(k)) for k in ('created_at', 'updated_at'))
+    if (reply.get('issue_url') != issue_url or reply.get('user', {}).get('type') != 'Bot'
+            or not isinstance(reply.get('performed_via_github_app'), dict)
+            or reply['performed_via_github_app'].get('slug') != 'coderabbitai'
+            or len(COMMAND_INVOCATION.findall(_body(reply))) != 1
+            or '<summary>Action not completed</summary>' not in _body(reply)
+            or 'Review rate limited.' not in _body(reply)
+            or _contradicts_review_head(_body(reply), old, slug)
+            or created is None or updated is None or not requested <= created <= updated <= captured):
+        refuse('missing authoritative not-executed reply')
+    if (substantive_reviews(evidence['reviews'], old, evidence)
+            or any(_is_bot(r) and r.get('commit_id') == old for r in evidence['reviews'])
+            # GitHub re-points an earlier review's unresolved comment `commit_id` at the newest
+            # PR head; only a comment that originated on the slot HEAD is feedback on it.
+            or any(_is_bot(c) and c.get('original_commit_id') == old
+                   for c in evidence['review_comments'])):
+        refuse('review or inline feedback already exists')
+    runs = coderabbit_check_runs(evidence['check_runs'], old)
+    relevant = []
+    for run in runs:
+        started, completed = (_publication_time(run.get(k)) for k in ('started_at', 'completed_at'))
+        if run.get('head_sha') != old or started is None or completed is None:
+            refuse('malformed check identity or timing')
+        if run.get('status') != 'completed' or run.get('conclusion') == 'success':
+            refuse('queued, active or successful CodeRabbit check')
+        summary = str(run.get('output', {}).get('summary') or '')
+        phases = ('Prepare review scope', 'Prepare repository workspace', 'Run analysis checks',
+                  'Generate review feedback', 'Publish review results')
+        if (run.get('conclusion') not in {'neutral', 'skipped'}
+                or run.get('app', {}).get('slug') != 'coderabbitai'
+                or any([value.strip() for value in re.findall(
+                    r'\|\s*' + phase + r'\s*\|([^|]+)\|', summary)] != ['Skipped'] for phase in phases)
+                or not started <= completed <= captured):
+            refuse('analysis/publication not proven skipped')
+        relevant.append(run)
+    if not relevant:
+        refuse('no authoritative skipped check')
+    check = relevant[-1]
+    if (_check_title(check) != 'Review rate limited'
+            or not requested <= created <= _publication_time(check['completed_at']) <= updated):
+        refuse('check is not bound to not-executed request reply')
+    if hashlib.sha256(path.read_bytes()).hexdigest() != prior_ledger_sha256:
+        refuse('ledger changed during evidence capture')
+    if (git(repo, 'rev-parse', 'HEAD').strip() != head
+            or git(repo, 'status', '--porcelain', '--untracked-files=normal').strip()
+            or (_publication_time(now()) - begun).total_seconds() > 120):
+        refuse('source or evidence changed before commit')
+    original = deepcopy(cycle)
+    cycle['unexecuted_retargets'] = [{'kind': 'unexecuted-fifth-retarget-v1', 'at': now(),
+        'original_entry': original, 'prior_ledger_sha256': prior_ledger_sha256,
+        'prefix18_sha256': hashlib.sha256(json.dumps(prefix, sort_keys=True, separators=(',', ':')).encode()).hexdigest(),
+        'approval_id': approval, 'new_head': head, 'request_comment_id': request_comment_id,
+        'check_run_id': check.get('id'), 'reply_comment_id': reply.get('id'), 'evidence': data}]
+    cycle['head'] = head
+    cycle['post_findings_review_approval']['approved_head'] = head
+    write_state(path, state)
+    return cycle
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -853,6 +1630,12 @@ def parse_args() -> argparse.Namespace:
         )
         sub.add_argument("--receipt", type=Path, help=f"receipt ledger (default: <state dir>/{RECEIPTS_NAME})")
 
+    start.add_argument('--post-findings-review-approval', help='New explicit user decision for one fifth remediation review')
+    start.add_argument('--prior-ledger-sha256', help='Exact ledger snapshot named in that decision')
+    start.add_argument('--one-final-review-approval', help='Explicit user evidence ID for one fourth verification')
+    start.add_argument('--approved-head', help='Exact40 source authorized by that user decision')
+    start.add_argument('--repo', type=Path, default=Path.cwd())
+
     skip = subparsers.add_parser("skip", help="close clean under confirmed CodeRabbit usage exhaustion")
     add_evidence_arguments(skip)
     skip.add_argument("--reason", choices=sorted(SKIP_REASONS), required=True)
@@ -868,8 +1651,37 @@ def parse_args() -> argparse.Namespace:
     inherit.add_argument("--base", default="origin/main")
     inherit.add_argument("--repo", type=Path, default=Path.cwd())
 
+    post_cap = subparsers.add_parser(
+        POST_CAP_KIND, help="after the 3-cycle cap, record later changes (e.g. a conflicting main sync) as merged unreviewed"
+    )
+    post_cap.add_argument("--head", required=True)
+    post_cap.add_argument("--base", default="origin/main")
+    post_cap.add_argument("--repo", type=Path, default=Path.cwd())
+    post_cap.add_argument("--reason", required=True, help="the user authorization and why review cannot run")
+
+    unreviewable = subparsers.add_parser(
+        NO_REVIEW_KIND, help="record a HEAD whose changed paths CodeRabbit's path filters all exclude"
+    )
+    unreviewable.add_argument("--head", required=True)
+    unreviewable.add_argument("--base", help="with --reset: compare the branch from merge-base(HEAD, BASE)")
+    unreviewable.add_argument("--reset", action="store_true", help="a new deploy's first HEAD")
+    unreviewable.add_argument("--pr", default="", help="pull-request number for the receipt")
+    unreviewable.add_argument("--repo", type=Path, default=Path.cwd())
+    unreviewable.add_argument("--receipt", type=Path, help=f"receipt ledger (default: <state dir>/{RECEIPTS_NAME})")
+
     merge = subparsers.add_parser("require-mergeable")
     merge.add_argument("--head", required=True)
+
+    retarget = subparsers.add_parser('retarget-unexecuted', help='Retarget the same never-executed fifth slot once')
+    retarget.add_argument('--head', required=True)
+    retarget.add_argument('--approved-head', required=True)
+    retarget.add_argument('--approval', required=True)
+    retarget.add_argument('--prior-ledger-sha256', required=True)
+    retarget.add_argument('--pr', required=True, type=int)
+    retarget.add_argument('--request-comment-id', required=True, type=int)
+    retarget.add_argument('--repo', type=Path, default=Path.cwd())
+    retarget.add_argument('--github-repo')
+    retarget.add_argument('--evidence-json', type=Path)
 
     subparsers.add_parser("next", help="the cycle the ledger accepts next")
     subparsers.add_parser("status")
@@ -883,7 +1695,16 @@ def main() -> int:
             payload = start_cycle(
                 args.state, head=args.head, kind=args.kind, reset=args.reset,
                 verification_approval=args.verification_approval,
+                one_final_review_approval=args.one_final_review_approval,
+                approved_head=args.approved_head, repo=args.repo,
+                post_findings_review_approval=args.post_findings_review_approval,
+                prior_ledger_sha256=args.prior_ledger_sha256,
             )
+        elif args.command == 'retarget-unexecuted':
+            payload = retarget_unexecuted(args.state, head=args.head, approved_head=args.approved_head,
+                approval=args.approval, prior_ledger_sha256=args.prior_ledger_sha256,
+                pr=args.pr, request_comment_id=args.request_comment_id, repo=args.repo,
+                github_repo=args.github_repo, evidence_path=args.evidence_json)
         elif args.command == "finish":
             payload = finish_cycle(args.state, head=args.head, result=args.result)
         elif args.command in {"skip", "override"}:
@@ -905,6 +1726,17 @@ def main() -> int:
             payload = inherit_sync(
                 args.state, head=args.head, base=args.base, repo=args.repo
             )
+        elif args.command == POST_CAP_KIND:
+            payload = post_cap_unreviewed(
+                args.state, head=args.head, base=args.base, repo=args.repo, reason=args.reason
+            )
+            print(payload["report_row"])
+        elif args.command == NO_REVIEW_KIND:
+            payload = record_no_reviewable_paths(
+                args.state, head=args.head, repo=args.repo, base=args.base, reset=args.reset, pr=args.pr,
+                receipts_path=args.receipt or default_receipts_path(args.state),
+            )
+            print(payload["report_row"])
         elif args.command == "require-mergeable":
             payload = require_mergeable(args.state, head=args.head)
         elif args.command == "next":

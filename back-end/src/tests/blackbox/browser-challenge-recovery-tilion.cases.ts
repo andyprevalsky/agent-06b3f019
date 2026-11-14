@@ -423,7 +423,7 @@ export function registerTilionSwitchCases(test: RegisterTest): void {
               select: { preferredBrowserConfig: true },
             })
           )?.preferredBrowserConfig,
-        defaultProvider: () => 'kernel' as const,
+        defaultProvider: () => 'tilion' as const,
         createKernel: async () => {
           throw new Error('deployment default must not run before the promoted Tilion winner');
         },

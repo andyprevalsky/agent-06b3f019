@@ -12,6 +12,13 @@
  * card's mint transfer reaching a terminal release state is race-free money identity.
  */
 
+import {
+  AgentCardRecoveryError,
+  nudgeCardholderRecovery,
+  type CardholderRecoveryNudge,
+} from './fund-recovery';
+import { AgentCardOrgRuntimeError, type AgentCardOrgToolCaller } from './org-runtime';
+
 export type MintTransferObservation = {
   status: string;
   releasedCents: number;
@@ -175,4 +182,123 @@ export function deferredUnusedMintVerdict(
     ageMs,
     reason: `${status}; the reclaimed list no longer reaches back to this mint`,
   };
+}
+
+export const UNUSED_MINT_SETTLE_POLL_MS = 8_000;
+export const UNUSED_MINT_SETTLE_WAIT_MS = 240_000;
+/**
+ * The org MCP throttle is one fixed 60 s window shared by every caller of the org (concurrent
+ * deploys, smoke payment tasks, production). A poll that still gets 429 after the runtime's own
+ * bounded retry waits out a whole window before polling again instead of adding to the backlog.
+ */
+export const UNUSED_MINT_SETTLE_THROTTLE_BACKOFF_MS = 60_000;
+
+/** The runtime's typed outcome for org-wide throttling that its bounded retry did not outlast. */
+function isOrgThrottle(error: unknown): boolean {
+  return (
+    error instanceof AgentCardOrgRuntimeError && error.code === 'agentcard_org_mcp_rate_limited'
+  );
+}
+
+export interface UnusedMintSettleWait<T extends MintTransferObservation> {
+  /** The closed card's own cardholder: the only residual that can release its mint. */
+  cardholderId: string;
+  minReleasedCents: number;
+  callOrgTool: AgentCardOrgToolCaller;
+  /** THIS card's org-wallet mint transfer; the only success signal. */
+  readTransfer: () => Promise<T | undefined>;
+  isTransientError: (error: unknown) => boolean;
+  report: (line: string) => void;
+  /** Provider row for the timeout diagnostic. */
+  describe?: (transfer: T | undefined) => string;
+  timeoutMs?: number;
+  sleep?: (ms: number) => Promise<void>;
+  now?: () => number;
+}
+
+function nudgeNote(attempt: number, nudge: CardholderRecoveryNudge): string | undefined {
+  if (nudge.kind === 'coalesced')
+    return `#${attempt} coalesced on in-flight ${nudge.inFlightCents}c`;
+  if (nudge.kind === 'requested' && nudge.recovery.amountCents > 0) {
+    return `#${attempt} ${nudge.recovery.status} ${nudge.recovery.amountCents}c`;
+  }
+  return undefined;
+}
+
+/**
+ * Wait until THIS card's unused mint transfer reaches a terminal release state.
+ *
+ * Each poll nudges only the card's own cardholder (nudgeCardholderRecovery: read open recoveries
+ * first, coalesce on one in flight), then reads THIS card's transfer. A recovery yield is never
+ * success. When the in-run wait runs out this returns the latest observation instead of failing:
+ * a reclaim can legitimately take up to a day (UNUSED_MINT_RECLAIM_DEADLINE_MS). An org throttle
+ * the runtime could not outlast is paced (UNUSED_MINT_SETTLE_THROTTLE_BACKOFF_MS) within the same
+ * window and fails only if it is still in force at the deadline.
+ */
+export async function waitForUnusedMintSettled<T extends MintTransferObservation>(
+  wait: UnusedMintSettleWait<T>
+): Promise<T | undefined> {
+  const now = wait.now ?? Date.now;
+  const sleep =
+    wait.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  const deadline = now() + (wait.timeoutMs ?? UNUSED_MINT_SETTLE_WAIT_MS);
+  let attempt = 0;
+  let last: T | undefined;
+  // Keep every attempt's recovery note so a timeout shows which side stalled.
+  const notes: string[] = [];
+  for (;;) {
+    attempt += 1;
+    try {
+      try {
+        const note = nudgeNote(
+          attempt,
+          await nudgeCardholderRecovery(wait.cardholderId, wait.callOrgTool)
+        );
+        if (note !== undefined) notes.push(note);
+      } catch (error) {
+        // The nudge only accelerates; a refused recovery is evidence, not a settle failure.
+        if (!(error instanceof AgentCardRecoveryError)) throw error;
+        notes.push(`#${attempt} recover_funds refused: ${error.message}`);
+      }
+      const transfer = await wait.readTransfer();
+      if (transfer !== undefined) last = transfer;
+      const outcome = unusedMintSettleOutcome(transfer, wait.minReleasedCents);
+      if (outcome.done) {
+        wait.report(
+          `  (transfer ${outcome.status} with ${outcome.settledCents}c on attempt ${attempt}; ` +
+            `own-cardholder recovery: ${notes.join(', ') || 'not needed'})`
+        );
+        return transfer;
+      }
+      if (now() >= deadline) {
+        wait.report(
+          `  unused mint not reclaimed within the in-run wait (${attempt} attempts); provider row: ` +
+            `${wait.describe?.(last) ?? JSON.stringify(last ?? null)}; own-cardholder recovery: ` +
+            `${notes.join(', ') || 'none'}`
+        );
+        return last;
+      }
+    } catch (error) {
+      // Org-wide backpressure says nothing about THIS transfer: keep polling inside the same
+      // settle window, one poll per throttle window. A throttle that outlasts it still fails.
+      if (isOrgThrottle(error)) {
+        if (now() >= deadline) throw error;
+        wait.report(
+          `  (org MCP throttled on attempt ${attempt}; waiting one throttle window before polling again)`
+        );
+        await sleep(Math.min(UNUSED_MINT_SETTLE_THROTTLE_BACKOFF_MS, deadline - now()));
+        continue;
+      }
+      if (!wait.isTransientError(error)) throw error;
+      if (now() >= deadline) throw error;
+      if (attempt % 3 === 0) {
+        wait.report(`  (MCP poll timed out, retrying settle wait, attempt ${attempt})`);
+      }
+      await sleep(UNUSED_MINT_SETTLE_POLL_MS);
+      continue;
+    }
+    if (attempt % 3 === 0)
+      wait.report(`  (still waiting for release to settle, attempt ${attempt})`);
+    await sleep(UNUSED_MINT_SETTLE_POLL_MS);
+  }
 }

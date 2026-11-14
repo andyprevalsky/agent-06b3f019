@@ -9,6 +9,8 @@ const ContextMenu = ContextMenuPrimitive.Root;
 const LONG_PRESS_MS = 700;
 /** Inset of a touch-opened menu from the trigger's left edge. */
 const TOUCH_ANCHOR_INSET_PX = 8;
+/** Finger travel a pending long-press tolerates before it counts as a drag. */
+const LONG_PRESS_SLOP_PX = 10;
 
 /** Pointer travel below which a release counts as the opening press itself. */
 const OPENING_RELEASE_SLOP_PX = 4;
@@ -56,6 +58,13 @@ function isOpeningRelease(event: React.PointerEvent) {
  * click that follows the finger lifting is swallowed so the long-press never
  * also activates the trigger (opening the pressed row). Mouse right-click opens
  * at the pointer; releasing that press never selects an item (armOpeningPress).
+ *
+ * The trigger is unselectable and has no touch callout: iOS WebKit ignores the
+ * pointerdown preventDefault below for its own long-press, so without them the
+ * same press that opens the menu also starts a text selection that spreads over
+ * the sidebar (and shows the link/copy callout). Finger jitter under
+ * LONG_PRESS_SLOP_PX no longer cancels the press either; a scroll still does
+ * (the browser sends pointercancel).
  */
 const ContextMenuTrigger = React.forwardRef<
   React.ElementRef<typeof ContextMenuPrimitive.Trigger>,
@@ -63,6 +72,7 @@ const ContextMenuTrigger = React.forwardRef<
 >(
   (
     {
+      className,
       onPointerDown,
       onPointerMove,
       onPointerUp,
@@ -75,9 +85,13 @@ const ContextMenuTrigger = React.forwardRef<
   ) => {
     const timer = React.useRef<number | undefined>(undefined);
     /** The pending touch press's edge anchor; null when no long-press is pending. */
-    const pending = React.useRef<{ target: HTMLElement; clientX: number; clientY: number } | null>(
-      null,
-    );
+    const pending = React.useRef<{
+      target: HTMLElement;
+      clientX: number;
+      clientY: number;
+      startX: number;
+      startY: number;
+    } | null>(null);
     const dispatching = React.useRef(false);
     const longPressOpened = React.useRef(false);
     const cancel = () => {
@@ -88,6 +102,8 @@ const ContextMenuTrigger = React.forwardRef<
       const press = pending.current;
       cancel();
       if (!press) return;
+      // Drop any selection a previous press managed to start before the menu opens.
+      window.getSelection()?.removeAllRanges();
       longPressOpened.current = true;
       dispatching.current = true;
       try {
@@ -108,6 +124,7 @@ const ContextMenuTrigger = React.forwardRef<
       <ContextMenuPrimitive.Trigger
         ref={ref}
         {...props}
+        className={cn('select-none [-webkit-touch-callout:none]', className)}
         onContextMenu={(event) => {
           if (!dispatching.current && pending.current) {
             // The browser's own long-press menu (at the finger): open at the edge now.
@@ -139,11 +156,20 @@ const ContextMenuTrigger = React.forwardRef<
             target,
             clientX: target.getBoundingClientRect().left + TOUCH_ANCHOR_INSET_PX,
             clientY: event.clientY,
+            startX: event.clientX,
+            startY: event.clientY,
           };
           timer.current = window.setTimeout(openAtEdge, LONG_PRESS_MS);
         }}
         onPointerMove={(event) => {
           onPointerMove?.(event);
+          const press = pending.current;
+          if (
+            press &&
+            Math.hypot(event.clientX - press.startX, event.clientY - press.startY) <
+              LONG_PRESS_SLOP_PX
+          )
+            return;
           cancel();
         }}
         onPointerUp={(event) => {

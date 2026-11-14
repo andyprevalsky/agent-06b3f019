@@ -104,8 +104,8 @@ describe('code-agent app entry (the devbox usage popover\'s "Open app" link)', (
     // The code-agent view reads nothing for the app either, until "Open app".
     expect(handoff.calls()).toBe(0);
     expect(requests('GET', `/claude-code-session/${TASK_ID}/preview`)).toHaveLength(0);
-    // No floating "Open app" in the view's header / top area: only the devbox usage
-    // indicator is there, and its popover (closed) holds the link.
+    // No floating "Open app" in the view's header / top area: the devbox usage
+    // indicator sits in the query box's corner, and its popover (closed) holds the link.
     expect(within(codeView).queryByRole('button', { name: 'Open app' })).not.toBeInTheDocument();
     expect(codeView.textContent).not.toMatch(/Open app/);
     expect(screen.queryByTestId('code-resources-popover')).not.toBeInTheDocument();
@@ -140,7 +140,7 @@ describe('code-agent app entry (the devbox usage popover\'s "Open app" link)', (
     const chip = await openAgentWithChip();
     expect(within(chip).queryByRole('button', { name: 'Open app' })).not.toBeInTheDocument();
     const codeView = await openCodeAgentViewFromRow(chip);
-    // Nothing to measure and nothing to open: no usage indicator at all.
+    // Nothing to open: no link anywhere; the usage bars sit only in the query box corner.
     expect(within(codeView).queryByTestId('code-resources')).not.toBeInTheDocument();
     expect(within(codeView).queryByRole('button', { name: 'Open app' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Open app' })).not.toBeInTheDocument();

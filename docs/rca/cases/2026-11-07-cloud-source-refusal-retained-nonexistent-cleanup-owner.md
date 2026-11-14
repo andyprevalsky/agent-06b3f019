@@ -87,6 +87,42 @@ refresh and passes after allowing this narrow state. Pending/running/resuming
 phases and an already-started final phase still refuse; history and full-gate
 requirements remain intact.
 
+## November 8 recurrence: custody-locator refusal
+
+While validating PR1859 at source
+`9915ee3ca962bb051f58e57efafca933d7823932`, the cloud adapter exited 2 with
+`DEPLOY_CLOUD BLOCKED: historical custody: missing canonical custody locator`.
+The request correctly named its owning alternate cycle; historical admission
+then independently required the default cycle's locator because that file also
+existed. The identical read-only admission reproduction fails on main
+`89e2c804ad35d9bd5ec05ad2ccfd22d261a481e3`. All 13 smoke cases remained
+UNVERIFIED, with no adapter result or request namespace. The original owner
+label correctly prevented an unexplained retry, but no existing reconciliation
+accepted this distinct pre-allocation refusal.
+
+Full original-assignment and code reads matched existing PR1851, rather than
+starting a second future-admission repair. PR1859 integrates its exact guarded
+request-owned locator and typed negative-admission commits. The guard still
+refuses canonical custody debt and same-source competing cycles. A new source
+and the ordinary native refresh are required; changing an environment variable
+or deleting the default ledger is not a repair.
+
+The additional historical recovery is limited to the captured old incident. It
+audits the six-file original producer closure and binds the original source,
+request, receipt and immutable parent snapshot. The refusal occurs before
+mkdir, capacity checks or provider execution. Original evidence remains intact;
+real file-holder and namespace-consumer observations still run. Reconciliation
+only retires the launch latch and grants no execution or financial credit.
+The old gate remains bound through later source/selection-metadata refresh;
+command, inventory, timeout and native-route changes cannot reuse that proof.
+Every unexecuted smoke check still requires a fresh current-source run.
+
+Independent review rejected earlier candidates because mutable current-plan
+metadata could revive the old owner, the archived request lacked an independent
+capture anchor, and malformed timestamps could satisfy an ordering comparison.
+Those findings require unchanged regression coverage before this recovery is
+used; a focused proof is not a passing deployment gate.
+
 ## Human feedback
 
 None recorded.

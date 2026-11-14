@@ -59,6 +59,8 @@ const DEFAULT_BUDGETS = Object.freeze({
 const STANDARD_REFRESH_HZ = [24, 30, 48, 50, 60, 72, 75, 90, 100, 120, 144, 165, 240];
 /** 1-minute load average per CPU above which fps cannot be judged fairly. */
 const HOST_BUSY_LOAD_PER_CORE = 1.25;
+/** Share of the host's CPU time other processes used during an fps window above which it is not judged. */
+const HOST_BUSY_OTHER_SHARE = 0.5;
 /** `screenshot --current` captures: CSS viewport x device scale = PNG pixels. */
 const CURRENT_VIEWPORTS = [
   { name: 'desktop', width: 1280, height: 800, scale: 2 },
@@ -346,7 +348,16 @@ function evaluateBudgets(result, budgets = DEFAULT_BUDGETS) {
     for (const message of normal.errors || []) violations.push({ rule: 'page-error', message });
     const fpsSources = [{ label: 'main thread', stats: normal.fps }, ...(normal.workers || []).map((w, i) => ({ label: `worker ${i + 1}`, stats: w.fps }))];
     const host = result.host || {};
-    const busy = typeof host.loadPerCore === 'number' && host.loadPerCore > HOST_BUSY_LOAD_PER_CORE;
+    // Contention measured inside the fps windows themselves: every window the verdict could use
+    // ran while other processes held over HOST_BUSY_OTHER_SHARE of the host's CPU. The 1-minute
+    // load average lags a host that just became busy, so it alone cannot tell.
+    const windows = Array.isArray(normal.hostCpu) ? normal.hostCpu : [];
+    const contended = windows.length > 0 && windows.every((w) => w && typeof w.other === 'number' && w.other > HOST_BUSY_OTHER_SHARE);
+    const loaded = typeof host.loadPerCore === 'number' && host.loadPerCore > HOST_BUSY_LOAD_PER_CORE;
+    const busy = loaded || contended;
+    const busyWhy = contended && !loaded
+      ? `other processes used ${windows.map((w) => `${round(w.other * 100, 0)}%`).join(' and ')} of the host's CPU while fps was measured`
+      : `load ${host.loadPerCore} per core`;
     for (const { label, stats } of fpsSources) {
       if (!stats || stats.frames < 10 || stats.p50 === null) continue;
       const missed = stats.p50 < budgets.fpsP50Min || stats.p5 < budgets.fpsP5Min;
@@ -355,7 +366,7 @@ function evaluateBudgets(result, budgets = DEFAULT_BUDGETS) {
         continue;
       }
       if (missed && busy) {
-        warnings.push({ rule: 'fps-inconclusive', message: `${label} ${stats.p50}/${stats.p5} fps not judged: host oversubscribed (load ${host.loadPerCore} per core); re-run check on a quiet host` });
+        warnings.push({ rule: 'fps-inconclusive', message: `${label} ${stats.p50}/${stats.p5} fps not judged: host oversubscribed (${busyWhy}); re-run check on a quiet host` });
         continue;
       }
       if (stats.p50 < budgets.fpsP50Min) violations.push({ rule: 'fps-p50', message: `${label} p50 ${stats.p50} fps (min ${budgets.fpsP50Min})`, value: stats.p50, limit: budgets.fpsP50Min });
@@ -829,7 +840,8 @@ async function measureWindow(page, preview, workers, ms) {
   await sleep(ms);
   const snaps = await Promise.all(frames.map((f) => f.evaluate(() => (window.__roseProbe ? window.__roseProbe.snapshot() : null)).catch(() => null)));
   const workerSnaps = await workerCall(workers, () => (self.__roseWorkerProbe ? { raf: self.__roseWorkerProbe.raf, timers: self.__roseWorkerProbe.timers, frames: self.__roseWorkerProbe.frames.slice() } : null));
-  return { frames, snaps, workerSnaps: workerSnaps.filter(Boolean) };
+  // openHost only appends workers; preserve the registry index before filtering.
+  return { frames, snaps, workerSnaps: workerSnaps.map((snapshot, workerIndex) => snapshot && ({ ...snapshot, workerIndex })).filter(Boolean) };
 }
 
 async function hostBaseline(browser, preview, viewport) {
@@ -841,6 +853,75 @@ async function hostBaseline(browser, preview, viewport) {
   } finally {
     await context.close();
   }
+}
+
+/**
+ * Host CPU counters in clock ticks (Linux /proc): `busy` and `total` over every CPU from
+ * /proc/stat, and `own`, the CPU time of rootPid and every descendant (this CLI, the preview
+ * server, Playwright and every Chromium process). Reaped children are counted through their
+ * parent's cutime/cstime, so a process exiting mid-window keeps its time in the tree.
+ * Returns null where /proc is unavailable.
+ */
+function hostCpuSample(rootPid = process.pid, proc = '/proc') {
+  let line;
+  try {
+    line = fs.readFileSync(`${proc}/stat`, 'utf8').split('\n').find((l) => l.startsWith('cpu '));
+  } catch {
+    return null;
+  }
+  if (!line) return null;
+  const [user, nice, system, idle, iowait = 0, irq = 0, softirq = 0, steal = 0] = line.trim().split(/\s+/).slice(1).map(Number);
+  const busy = user + nice + system + irq + softirq + steal;
+  const parents = new Map();
+  const times = new Map();
+  let names;
+  try {
+    names = fs.readdirSync(proc).filter((n) => /^\d+$/.test(n));
+  } catch {
+    return null;
+  }
+  for (const name of names) {
+    try {
+      const stat = fs.readFileSync(`${proc}/${name}/stat`, 'utf8');
+      // Fields after the parenthesized command: state ppid ... utime(14) stime cutime cstime.
+      const f = stat.slice(stat.lastIndexOf(')') + 2).split(' ');
+      parents.set(Number(name), Number(f[1]));
+      times.set(Number(name), Number(f[11]) + Number(f[12]) + Number(f[13]) + Number(f[14]));
+    } catch { /* exited */ }
+  }
+  // Without this process's own counters (a /proc from another PID namespace) every CPU tick of
+  // the check would read as another process's: no share rather than one that excuses the page.
+  if (!times.has(rootPid)) return null;
+  const tree = new Set([rootPid]);
+  for (let grew = true; grew;) {
+    grew = false;
+    for (const [pid, ppid] of parents) if (!tree.has(pid) && tree.has(ppid)) { tree.add(pid); grew = true; }
+  }
+  let own = 0;
+  for (const pid of tree) own += times.get(pid) || 0;
+  return { busy, total: busy + idle + iowait, own };
+}
+
+/**
+ * Shares of the host's CPU time between two hostCpuSample()s: `other` is CPU used by processes
+ * outside this check (other jobs, CPU steal), `own` this check's tree, `idle` the rest.
+ */
+function hostCpuShare(before, after) {
+  if (!before || !after) return null;
+  const total = after.total - before.total;
+  // A tree process reaped outside the tree takes its lifetime CPU out of `own`; a share built on
+  // that would count the page's own work as other load, so there is none.
+  if (!(total > 0) || after.own < before.own) return null;
+  const own = Math.min(after.own - before.own, total);
+  const other = Math.min(Math.max(after.busy - before.busy - own, 0), total - own);
+  return { other: round(other / total, 3), own: round(own / total, 3), idle: round(1 - (other + own) / total, 3) };
+}
+
+/** Runs window() between two host CPU samples; returns [result, share]. */
+async function withHostCpu(window) {
+  const before = hostCpuSample();
+  const result = await window();
+  return [result, hostCpuShare(before, hostCpuSample())];
 }
 
 /** Trace events that run page script on the main thread, including promise continuations. */
@@ -965,7 +1046,8 @@ async function measureRoute(browser, preview, route, opts) {
   const run = await openHost(browser, preview, route, { viewport, probe: true });
   try {
     await sleep(opts.settleMs);
-    const normal = await tracedWindow(browser, run.page, preview, run.workers, opts.seconds * 1000);
+    const [normal, normalCpu] = await withHostCpu(() => tracedWindow(browser, run.page, preview, run.workers, opts.seconds * 1000));
+    const hostCpu = [normalCpu];
     const snap = normal.snaps.find(Boolean);
     if (!snap) throw new Error(`no user frame measured on ${route}`);
     let longTaskRecheck;
@@ -975,27 +1057,42 @@ async function measureRoute(browser, preview, route, opts) {
       longTaskRecheck = (await tracedWindow(browser, run.page, preview, run.workers, opts.seconds * 1000)).tasks;
     }
     let fps = frameStats(snap.frames);
-    let workers = normal.workerSnaps.map((w) => ({ fps: frameStats(w.frames), callbacks: w.raf + w.timers }));
+    const workerMeasurement = (w) => ({ workerIndex: w.workerIndex, fps: frameStats(w.frames), callbacks: w.raf + w.timers });
+    let workers = normal.workerSnaps.map(workerMeasurement);
     const missesFps = (s) => s.frames >= 10 && s.p50 !== null && (s.p50 < DEFAULT_BUDGETS.fpsP50Min || s.p5 < DEFAULT_BUDGETS.fpsP5Min);
+    const eligibleFps = (s) => s.frames >= 10 && Number.isFinite(s.p50) && Number.isFinite(s.p5);
+    // A window that meets the fps budget beats one that misses it; among windows with the
+    // same verdict, higher p5 then higher p50 wins.
+    const betterFps = (next, first) => {
+      if (!eligibleFps(next)) return false;
+      if (!eligibleFps(first)) return true;
+      if (missesFps(next) !== missesFps(first)) return !missesFps(next);
+      return next.p5 > first.p5 || (next.p5 === first.p5 && next.p50 > first.p50);
+    };
     let fpsWindows = 1;
     if (opts.retryFps && [fps, ...workers.map((w) => w.fps)].some(missesFps)) {
       // Host noise (other processes, a software GPU) can cost a window; judge fps on
       // the better of two windows. Other rules keep the first window's evidence.
-      const again = await measureWindow(run.page, preview, run.workers, opts.seconds * 1000);
+      const [again, againCpu] = await withHostCpu(() => measureWindow(run.page, preview, run.workers, opts.seconds * 1000));
+      hostCpu.push(againCpu);
       const snap2 = again.snaps.find(Boolean);
       fpsWindows = 2;
       if (snap2) {
         const fps2 = frameStats(snap2.frames);
         result.firstWindowFps = fps;
-        if ((fps2.p5 || 0) > (fps.p5 || 0)) fps = fps2;
-        const workers2 = again.workerSnaps.map((w) => ({ fps: frameStats(w.frames), callbacks: w.raf + w.timers }));
-        workers = workers.map((w, i) => (workers2[i] && (workers2[i].fps.p5 || 0) > (w.fps.p5 || 0) ? workers2[i] : w));
+        if (betterFps(fps2, fps)) fps = fps2;
+        const workers2 = new Map(again.workerSnaps.filter((w) => Number.isInteger(w.workerIndex)).map((w) => [w.workerIndex, workerMeasurement(w)]));
+        workers = workers.map((w) => {
+          const next = Number.isInteger(w.workerIndex) ? workers2.get(w.workerIndex) : undefined;
+          return next && betterFps(next.fps, w.fps) ? next : w;
+        });
       }
     }
     result.normal = {
       fps,
       fpsWindows,
-      workers,
+      hostCpu,
+      workers: workers.map((w) => ({ fps: w.fps, callbacks: w.callbacks })),
       longTasks: [...snap.longTasks.filter((t) => t.phase === 'load').map((t) => ({ phase: t.phase, duration: round(t.duration) })), ...normal.tasks],
       ...(longTaskRecheck ? { longTaskRecheck } : {}),
       cls: round(cumulativeLayoutShift(snap.shifts), 4),
@@ -1481,5 +1578,5 @@ if (require.main === module) {
 module.exports = {
   CLI_VERSION, USERCONTENT_CSP, DEFAULT_BUDGETS, CURRENT_VIEWPORTS, CURRENT_ROUTES, LOCAL_ONLY_DIRS, USAGE,
   parseArgs, parseViewport, routeSlug, isPublishablePath, listFiles, manifestEntries, lintTheme,
-  auditEntryFiles, frameStats, cumulativeLayoutShift, evaluateBudgets, traceMainThreadTasks, rendererPids, decodePng, pngStats, diffFraction, startPreview, launchBrowser, main,
+  auditEntryFiles, frameStats, cumulativeLayoutShift, evaluateBudgets, traceMainThreadTasks, rendererPids, hostCpuSample, hostCpuShare, decodePng, pngStats, diffFraction, startPreview, launchBrowser, main,
 };

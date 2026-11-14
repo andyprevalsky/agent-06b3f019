@@ -15,12 +15,19 @@ import {
 import { recordPersonMessage } from '../../providers/personMessageStamp';
 import { type FilePointer, validateTotalSize } from '../../providers/storage';
 import type { PostMessageBody } from './types';
+import { isAgentAuthoredRow, withCredentialProvenance } from './credentialContext';
 import * as repo from './repo';
 import { withActiveBrowserSessionShareLock } from './repoBrowserTargetedMessages';
 import { readTaskInboxMessages } from './agentToAgentService';
 import { buildUserMessageSignalValue } from './agentMessageSignal';
+import { ownedByExternalExecution } from './agentExternalExecution';
+import { createLogger } from '../../providers/logger';
 export { buildUserMessageSignalValue } from './agentMessageSignal';
 import { broadcastChatReactivation } from './agentMessageReactivation';
+import { resumeStoppedBrowser, stoppedAgentStatus } from './agentMessageResume';
+import { findGraphRootId } from './repoGraph';
+
+const log = createLogger('AgentMessages');
 
 /**
  * Agent statuses whose Temporal workflow has already ended. A follow-up message
@@ -52,15 +59,6 @@ function resolveRole(
     return { role: body.role };
   }
   return { role: 'USER' };
-}
-
-/** USER rows written by agents rather than people (metadata flags, never text). */
-function isAgentAuthoredRow(metadata: PostMessageBody['metadata']): boolean {
-  return (
-    metadata?.agentNotification === true ||
-    metadata?.agentMessage === true ||
-    metadata?.environmentContext === true
-  );
 }
 
 /** Handle user message routing — signal workflow or run chat handler. */
@@ -102,6 +100,14 @@ async function routeUserMessage(
     }
   }
 
+  if (agentForChat !== null && ownedByExternalExecution(agentForChat)) {
+    // The stored row stays in the executor's trace; an external root never dispatches chat or Temporal.
+    log.info('[AgentMessages] External executor owns this root; message stored without dispatch', {
+      agentId,
+    });
+    return;
+  }
+
   if (agentForChat?.temporalWorkflowId !== undefined && agentForChat?.temporalWorkflowId !== null) {
     // A failed signal never fails the request: the row is durable and the
     // workflow polls for it.
@@ -109,8 +115,14 @@ async function routeUserMessage(
     if (authoredByWorkflow) await signalUserResponse(agentId, workflowId, messageText);
     else await deliverUserMessageToWorkflow(agentId, workflowId, messageText);
   } else if (agentForChat !== null && agentForChat !== undefined) {
+    const rootAgentId =
+      agentForChat.parentAgentId === null
+        ? agentId
+        : await findGraphRootId(agentId, agentForChat.userId);
+    if (rootAgentId === null) throw new Error(`Chat archive root unavailable for ${agentId}`);
     handleChatMessage({
       agentId,
+      rootAgentId,
       userId: agentForChat.userId,
       model: agentForChat.model,
     }).catch((err: unknown) => {
@@ -205,6 +217,20 @@ async function resolveBrowserTarget(
   return { browserTaskId };
 }
 
+/** A Browser-composer row: the live session's, else a paused browser's resume (agentMessageResume.ts). */
+async function targetedBrowserRow(
+  agentId: string,
+  body: PostMessageBody,
+  browserTarget: { browserTaskId: string } | null
+) {
+  if (browserTarget === null) return null;
+  const { browserTaskId } = browserTarget;
+  return (
+    (await createBrowserTargetedMessage(agentId, body, browserTaskId)) ??
+    resumeStoppedBrowser(agentId, browserTaskId, body.message, body.metadata)
+  );
+}
+
 /**
  * Store a Browser-composer message only while its session is ACTIVE, under a
  * FOR SHARE lock on that BrowserSession row. The browser's pause-close UPDATE
@@ -278,6 +304,7 @@ export async function postMessage(
   workflowGeneration?: string,
   options: { personAuthored?: boolean } = {}
 ) {
+  body = withCredentialProvenance(body, isInternal);
   // Determine role based on auth type
   const roleResult = resolveRole(body, isInternal);
   if ('error' in roleResult) {
@@ -290,16 +317,16 @@ export async function postMessage(
 
   const browserTarget = await resolveBrowserTarget(agentId, body, role, isInternal);
   if (browserTarget !== null && 'error' in browserTarget) return browserTarget;
-  const targeted =
-    browserTarget === null
-      ? null
-      : await createBrowserTargetedMessage(agentId, body, browserTarget.browserTaskId);
+  const targeted = await targetedBrowserRow(agentId, body, browserTarget);
+  // A person's message to a stopped agent resumes it: the row says from what.
+  const resumedFrom =
+    role === 'USER' && !isInternal && targeted === null ? await stoppedAgentStatus(agentId) : null;
 
   const messageParams = {
     agentId,
     text: body.message,
     role,
-    metadata: body.metadata,
+    metadata: resumedFrom === null ? body.metadata : { ...(body.metadata ?? {}), resumedFrom },
     filePointer: body.file_pointer as Record<string, unknown> | undefined,
   };
   let message;

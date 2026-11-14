@@ -1,0 +1,14 @@
+{
+  "format": "ROSE-PRIVATE-TAR-GCM-V1",
+  "bucket": "trace-archive",
+  "key": "devbox-closeout-private/pr1854-b1c419e7/20261110T025017Z-terminal-controls.tar.gz.aesgcm",
+  "encryption_key_id": "trace-archive-prod-2026-07-03",
+  "ciphertext_sha256": "074bd4cdae89c99f93f0dd449858cb7ff2033631d9fb1c63bf70bcf9fc567174",
+  "gzip_sha256": "c6c5a07145789f993128ee0a0d4c62a40234f67b58bc27437f24ccf8cdcc9b9f",
+  "stored_bytes": 49325,
+  "frames": 1,
+  "files": 21,
+  "original_bytes": 127171,
+  "manifest_sha256": "7a2e4c247677a68be57e48bc914076e7557a71432f573749f6f967ab6e0272da",
+  "full_readback_verified": true
+}

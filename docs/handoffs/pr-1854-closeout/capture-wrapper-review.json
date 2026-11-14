@@ -1,0 +1,64 @@
+{
+  "format": "PR1854-LINK-SNAPSHOT-REPAIR-V1",
+  "at": "2026-11-10T00:55:24.049419+00:00",
+  "outcome": "R1_R2_R3_ADDRESSED",
+  "wrapper_sha256": "ca1a6f64776fbb3f7391ed8787570eb49d7a92110f8ed0567bb51296ae7da192",
+  "source_head": "fb8711c91bd24788e722d255a0e7ab13fad1fe69",
+  "source_clean": true,
+  "unchanged_inputs": {
+    "original": {
+      "path": "/var/tmp/pr1854-preservation/archive_after_stop.original.py",
+      "sha256": "36348f62b1ab9b5ffd60a9844e5bea04943a887e41c8cba8b4e08d8ebd7b187b",
+      "unchanged": true
+    },
+    "inventory": {
+      "path": "/var/tmp/pr1854-preservation/inventory.py",
+      "sha256": "88dd2e417742872072b6e509b3bc062f989ad978b98712f3eb884b40a04ee35a",
+      "unchanged": true
+    },
+    "helper": {
+      "path": "/home/boxes/rose/docs/handoffs/whm-b07d9037-preservation/private_archive.py",
+      "sha256": "2e35e736660660bb6118a939d51b0dd008abe5efaa6387cf252d5d0536b75cf4",
+      "unchanged": true
+    }
+  },
+  "artifacts": {
+    "archive_after_stop.py": {
+      "sha256": "ca1a6f64776fbb3f7391ed8787570eb49d7a92110f8ed0567bb51296ae7da192",
+      "bytes": 19001
+    },
+    "link-repair-applied.diff": {
+      "sha256": "a469e72d881be6859c34e90fba995fde5e59b7a573b239bf8c0ad200a52b5d75",
+      "bytes": 17009
+    },
+    "link-repair-controls.py": {
+      "sha256": "5ea912cee2465d7fff134b547751d76e2bd4cb0523f4aad5bc6f5063b8b17e69",
+      "bytes": 8539
+    },
+    "link-repair-controls.json": {
+      "sha256": "273fb2d2081e387c8ebecc57f522b201fee918c5a20523a02caaa02df5c25dd4",
+      "bytes": 2632
+    },
+    "link-repair-commands.txt": {
+      "sha256": "cfde1304119085ee09523fea2df1e87b806f07a87db7e8a98dad8a527fdbfd89",
+      "bytes": 549
+    },
+    "commands.txt": {
+      "sha256": "39731434a39f33b886c7d50d647c4cd0e845e4842dfbaaf58641b3f2d31127f8",
+      "bytes": 6713
+    }
+  },
+  "controls": {
+    "passed": 19,
+    "failed_current": 0,
+    "file": "link-repair-controls.json",
+    "initial_control_failure_preserved": true
+  },
+  "exact_diff": "link-repair-applied.diff",
+  "review": "link-repair-review.txt",
+  "canonical_tests_run": false,
+  "archive_executed": false,
+  "provider_queries": false,
+  "ready_for_deletion": false,
+  "allowed_mutations": "scratch wrapper plus scratch controls/review/commands only"
+}

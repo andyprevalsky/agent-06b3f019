@@ -1,0 +1,35 @@
+{
+  "format": "PR1837-NATIVE-ORIGINAL-COMMAND-PASS-V1",
+  "status": "PASS",
+  "command": "cd back-end && npm run test:coverage:sharded",
+  "native_source": {
+    "digest": "83e8e46db6843f154be93497d347e6324a594e644363002231e2384b4fa5e91d",
+    "head": "06b65bc6c7339277a76719a5a2560dccf293db9e"
+  },
+  "native_exit": 0,
+  "case_count": 255,
+  "domain_count": 251,
+  "report_bug": "PASS",
+  "supplementary": {
+    "units": "PASS",
+    "fps": "PASS",
+    "coverage-threshold": "PASS",
+    "teardown": "PASS"
+  },
+  "complete": true,
+  "cleanup_complete": true,
+  "source_unchanged": true,
+  "native_actions_runs": [
+    "https://github.com/Rose-Ai-Labs/rose/actions/runs/42533535530"
+  ],
+  "artifact_sha256": {
+    "request.json": "05807de19476e7789925baa4665583dc48ad3eb3fce1970257f0996f766fc1f8",
+    "result.json": "00e69f6d09c83b230dd204cbb518276866e2ca412a1b3c9883801ea8732f455c",
+    "receipt.json": "88504b6cb6931bbbbc3f4643b4ef2fbad80a5f8e853a786fe4044a1d6a916034",
+    "output.log.process.json": "823becdbefdd185eb5e615acfcd48069157b68c89929b5ff9a662898cf5aa191",
+    "remote-artifact/result.json": "2203642be96fab609dd792c77f317862df4efcf53e8681492b9b0afba3b7eeaf",
+    "remote-artifact/bundle.json": "92055c28d82e09de7b85f50e3a3d1153e46fce4f018295032e7e52aaeb9212c7"
+  },
+  "artifact_access": "Private encrypted final preservation catalog; these are hashes of retained native bytes, not reconstructed results. Final archive publication remains pending.",
+  "earlier_browser_failures": "Retained separately and still require post-merge handoff; this recovery does not claim their cause or repair."
+}

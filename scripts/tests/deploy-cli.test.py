@@ -136,6 +136,20 @@ class Freeze(Repo):
         self.assertEqual(calls[-1][4], d.head())
         self.assertIn('committed=1', out)
 
+    def test_commits_a_deletion_already_staged_with_git_rm(self):
+        (self.root / 'gone.py').write_text('y = 1\n')
+        sh('git', 'add', 'gone.py', cwd=self.root)
+        sh('git', 'commit', '-qm', 'add gone', cwd=self.root)
+        sh('git', 'rm', '-q', 'gone.py', cwd=self.root)
+        (self.root / 'app.py').write_text('x = 2\n')
+        with patch.object(d, 'cmd_fix', return_value=0), patch.object(d, 'run', return_value=0):
+            code, out, _ = self.call(d.cmd_freeze, base='origin/main', message='drop gone')
+        self.assertEqual(code, 0)
+        self.assertEqual(sh('git', 'status', '--porcelain', cwd=self.root), '')
+        changed = sh('git', 'show', '--name-status', '--format=', 'HEAD', cwd=self.root).split()
+        self.assertEqual(changed, ['M', 'app.py', 'D', 'gone.py'])
+        self.assertIn('committed=2', out)
+
     def test_stops_when_fix_fails(self):
         with patch.object(d, 'cmd_fix', return_value=1), patch.object(d, 'run') as runner:
             code, _, err = self.call(d.cmd_freeze, base='origin/main', message='x')
@@ -272,11 +286,15 @@ class Sync(Repo):
 
 
 class ReviewWait(Repo):
-    def wait(self, wait_code, check):
+    def wait(self, wait_code, check, *, max_wait=3600):
+        """``wait_code``/``check`` may be lists: one entry per waiter run / check read, in order."""
         d.write_json(d.PR_FILE, {'pr': 7, 'branch': 'feature', 'head': 'a' * 40})
+        codes = wait_code if isinstance(wait_code, list) else None
+        checks = check if isinstance(check, list) else None
         with patch.object(d, 'review_state', return_value={'cycles': [{'head': 'b' * 40}]}), \
-             patch.object(d, 'run', return_value=wait_code) as runner, patch.object(d, 'coderabbit_check', return_value=check):
-            return (*self.call(d.cmd_review_wait, timeout=600), runner)
+             patch.object(d, 'run', side_effect=codes, return_value=wait_code) as runner, \
+             patch.object(d, 'coderabbit_check', side_effect=checks, return_value=check):
+            return (*self.call(d.cmd_review_wait, timeout=600, rate_limit_max_wait=max_wait), runner)
 
     def test_a_delivered_review_passes(self):
         code, out, _, runner = self.wait(0, ('success', 'Review completed'))
@@ -312,6 +330,62 @@ class ReviewWait(Repo):
         none = subprocess.CompletedProcess([], 0, stdout='\t\n', stderr='')
         with patch.object(d.subprocess, 'run', return_value=none):
             self.assertEqual(('', ''), d.coderabbit_check('c' * 40))
+
+    def test_a_rate_limited_check_waits_out_the_window_and_rerequests_once(self):
+        code, out, _, runner = self.wait([0, 0], [('neutral', 'Review rate limited'), ('success', 'Finished')])
+        self.assertEqual(code, 0)
+        self.assertIn('DEPLOY_REVIEW_WAIT delivered head=bbbbbbbbbbbb', out)
+        self.assertEqual(runner.call_count, 2)
+        first, second = (call.args[0] for call in runner.call_args_list)
+        self.assertNotIn('--after-rate-limit', first)
+        self.assertEqual(second[:len(first)], first, 'the re-request waits on the same PR and exact HEAD')
+        self.assertEqual(second[len(first):], ['--after-rate-limit', '--rate-limit-max-wait', '3600',
+                                               '--receipt-dir', str(d.CONTEXT)])
+
+    def test_review_limit_reached_is_a_quota_window_too(self):
+        code, _, _, runner = self.wait([0, 0], [('neutral', 'Review limit reached'), ('success', 'Finished')])
+        self.assertEqual((code, runner.call_count), (0, 2))
+
+    def test_no_parseable_window_keeps_the_exit_3_message_and_posts_nothing(self):
+        code, _, err, runner = self.wait([0, 3], ('neutral', 'Review rate limited'))
+        self.assertEqual((code, runner.call_count), (3, 2))
+        self.assertIn('NOT-A-REVIEW: CodeRabbit check is "neutral" (Review rate limited)', err)
+        self.assertIn('deploy_review_cycle.py skip', err)
+
+    def test_a_second_rate_limit_after_the_one_rerequest_is_not_rerequested_again(self):
+        code, _, err, runner = self.wait([0, 0], [('neutral', 'Review rate limited')] * 2)
+        self.assertEqual((code, runner.call_count), (3, 2))
+        self.assertIn('NOT-A-REVIEW', err)
+
+    def test_a_non_rate_limited_neutral_is_never_rerequested(self):
+        for check in (('neutral', 'Review skipped'), ('', ''), ('error', 'gh failed: API rate limited'),
+                      ('failure', 'Failed')):
+            with self.subTest(check=check):
+                code, _, _, runner = self.wait(0, check)
+                self.assertEqual((code, runner.call_count), (3, 1))
+
+    def test_a_zero_max_wait_disables_the_rerequest(self):
+        code, _, _, runner = self.wait(0, ('neutral', 'Review rate limited'), max_wait=0)
+        self.assertEqual((code, runner.call_count), (3, 1))
+
+    def test_an_unsuccessful_wait_is_returned_unless_it_was_the_quota(self):
+        code, _, _, runner = self.wait(1, ('failure', 'Failed'))
+        self.assertEqual((code, runner.call_count), (1, 1))
+
+    def test_review_wait_parser_defaults_to_a_bounded_window(self):
+        args = d.parser().parse_args(['review-wait'])
+        self.assertEqual((args.timeout, args.rate_limit_max_wait), (600, 3600))
+
+    def test_a_no_reviewable_paths_head_neither_waits_nor_rerequests(self):
+        d.write_json(d.PR_FILE, {'pr': 7, 'branch': 'feature', 'head': 'b' * 40})
+        latest = {'head': 'b' * 40, 'kind': 'no-reviewable-paths', 'status': 'completed', 'result': 'clean'}
+        with patch.object(d, 'review_state', return_value={'cycles': [latest]}), \
+             patch.object(d, 'run') as runner, patch.object(d, 'coderabbit_check') as check:
+            code, out, _ = self.call(d.cmd_review_wait, timeout=600, rate_limit_max_wait=3600)
+        self.assertEqual(code, 0)
+        self.assertIn('DEPLOY_REVIEW_WAIT no-reviewable-paths head=bbbbbbbbbbbb', out)
+        runner.assert_not_called()
+        check.assert_not_called()
 
     def test_a_failed_wait_propagates_without_reading_the_check(self):
         with patch.object(d, 'coderabbit_check') as check:
@@ -356,14 +430,106 @@ class ReviewApprovalLedger(Repo):
         real = subprocess.run
         only_next = lambda argv, **kw: nxt if 'next' in argv else real(argv, **kw)
         with patch.object(d.subprocess, 'run', side_effect=only_next), patch.object(d, 'factory') as event, \
+             patch.object(d, 'no_reviewable_paths', return_value=None) as unreviewable, \
              patch.object(d, 'run', side_effect=lambda argv, **_: calls.append(argv) or 0):
             code, out, _ = self.call(d.cmd_review_next, verification_approval='appr-1')
         self.assertEqual(code, 0, out)
+        unreviewable.assert_called_once_with(d.head(), pr=7)
         self.assertEqual(calls[0][1:], ['scripts/deploy_review_cycle.py', 'start', '--kind', 'verification',
                                         '--head', d.head(), '--verification-approval', 'appr-1'])
         self.assertEqual(calls[1], ['git', 'push', 'origin', 'HEAD'])
         self.assertEqual(calls[2], ['gh', 'pr', 'comment', '7', '--body', '@coderabbitai review'])
         event.assert_called_once_with('stage-start', 'code-review')
+
+    def test_review_next_records_an_excluded_only_batch_instead_of_requesting_a_review(self):
+        self.opened()
+        (self.root / 'notes.md').write_text('n\n')
+        sh('git', 'add', '.', cwd=self.root)
+        sh('git', 'commit', '-qm', 'docs', cwd=self.root)
+        calls = []
+        entry = {'kind': 'no-reviewable-paths', 'head': d.head(), 'report_row': 'Code Review | ➖ No reviewable paths'}
+        with patch.object(d, 'no_reviewable_paths', return_value=entry), patch.object(d, 'factory') as event, \
+             patch.object(d, 'run', side_effect=lambda argv, **_: calls.append(argv) or 0):
+            code, out, _ = self.call(d.cmd_review_next, verification_approval=None)
+        self.assertEqual(code, 0, out)
+        self.assertEqual(calls, [['git', 'push', 'origin', 'HEAD']], 'no ledger start and no @coderabbitai request')
+        self.assertIn('review=no-reviewable-paths', out)
+        self.assertEqual(json.loads(d.PR_FILE.read_text())['head'], d.head())
+        event.assert_not_called()
+
+    def test_review_next_resumes_at_the_push_when_head_is_already_recorded_no_review(self):
+        self.opened()
+        calls = []
+        latest = {'kind': 'no-reviewable-paths', 'head': d.head(), 'status': 'completed'}
+        status = subprocess.CompletedProcess([], 0, stdout=json.dumps({'cycles': [latest]}), stderr='')
+        real = subprocess.run
+        only_status = lambda argv, **kw: (status if argv[1:] == ['scripts/deploy_review_cycle.py', 'status']
+                                          else real(argv, **kw))
+        with patch.object(d.subprocess, 'run', side_effect=only_status), patch.object(d, 'factory') as event, \
+             patch.object(d, 'no_reviewable_paths') as unreviewable, \
+             patch.object(d, 'run', side_effect=lambda argv, **_: calls.append(argv) or 0):
+            code, out, _ = self.call(d.cmd_review_next, verification_approval=None)
+        self.assertEqual(code, 0, out)
+        unreviewable.assert_not_called()
+        self.assertEqual(calls, [['git', 'push', 'origin', 'HEAD']], 'no re-record, no ledger start, no request')
+        self.assertIn('review=no-reviewable-paths', out)
+        self.assertEqual(json.loads(d.PR_FILE.read_text())['head'], d.head())
+        event.assert_not_called()
+
+    def test_open_pr_on_an_existing_pr_skips_the_request_when_no_path_is_reviewable(self):
+        sh('git', 'checkout', '-qb', 'feature', cwd=self.root)
+        viewed = subprocess.CompletedProcess([], 0, stdout='7\n', stderr='')
+        real = subprocess.run
+        only_view = lambda argv, **kw: viewed if argv[:3] == ['gh', 'pr', 'view'] else real(argv, **kw)
+        calls = []
+        entry = {'kind': 'no-reviewable-paths', 'head': d.head(), 'report_row': 'row'}
+        with patch.object(d.subprocess, 'run', side_effect=only_view), patch.object(d, 'factory') as event, \
+             patch.object(d, 'no_reviewable_paths', return_value=entry) as unreviewable, \
+             patch.object(d, 'run', side_effect=lambda argv, **_: calls.append(argv) or 0):
+            code, out, _ = self.call(d.cmd_open_pr, title='t', body_file=None, restart=False)
+        self.assertEqual(code, 0, out)
+        unreviewable.assert_called_once_with(d.head(), pr='7', initial=True)
+        self.assertEqual(calls, [['git', 'push', '-u', 'origin', 'feature']])
+        self.assertIn('DEPLOY_OPEN_PR pr=7 head=', out)
+        self.assertIn('review=no-reviewable-paths', out)
+        event.assert_not_called()
+
+    def test_review_finish_on_a_no_reviewable_paths_head_is_already_closed(self):
+        latest = {'head': 'b' * 40, 'kind': 'no-reviewable-paths', 'status': 'completed'}
+        with patch.object(d, 'review_state', return_value={'cycles': [latest]}), \
+             patch.object(d, 'factory') as event, patch.object(d, 'run') as runner:
+            code, out, _ = self.call(d.cmd_review_finish, result='clean')
+        self.assertEqual(code, 0)
+        self.assertIn('result=no-reviewable-paths', out)
+        event.assert_not_called()
+        runner.assert_not_called()
+
+    def test_the_path_filter_decision_uses_the_real_ledger_against_origin_main(self):
+        source = Path(__file__).resolve().parents[2]
+        (self.root / 'scripts').mkdir()
+        (self.root / 'scripts' / 'deploy_review_cycle.py').write_text(
+            (source / 'scripts' / 'deploy_review_cycle.py').read_text())
+        (self.root / '.coderabbit.yaml').write_text((source / '.coderabbit.yaml').read_text())
+        sh('git', 'add', '.', cwd=self.root)
+        sh('git', 'commit', '-qm', 'tooling', cwd=self.root)
+        sh('git', 'push', '-q', 'origin', 'main', cwd=self.root)
+        sh('git', 'checkout', '-qb', 'feature', cwd=self.root)
+        (self.root / 'docs').mkdir()
+        (self.root / 'docs' / 'note.md').write_text('n\n')
+        sh('git', 'add', '.', cwd=self.root)
+        sh('git', 'commit', '-qm', 'docs only', cwd=self.root)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            entry = d.no_reviewable_paths(d.head(), pr=7, initial=True)
+        self.assertEqual((entry['kind'], entry['head'], entry['changed_paths']),
+                         ('no-reviewable-paths', d.head(), ['docs/note.md']))
+        self.assertIn('Code Review | ➖ No reviewable paths', out.getvalue())
+        (self.root / 'app.py').write_text('x = 2\n')
+        sh('git', 'commit', '-qam', 'code', cwd=self.root)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertIsNone(d.no_reviewable_paths(d.head(), pr=7))
+        self.assertIn('DEPLOY_REVIEW reviewable: 1 reviewable path(s): app.py', out.getvalue())
 
     def test_review_next_refusal_points_to_deferral_not_a_stop(self):
         self.opened()
@@ -439,57 +605,145 @@ class HarnessProcesses(unittest.TestCase):
             self.assertFalse(d.is_harness_process(exe, argv), (exe, argv))
 
 
-class IdleDaemonCodexServer(unittest.TestCase):
-    """2026-11-08 (PR #1778 closeout): the daemon's idle codex app-server kept every devbox NOT_READY."""
-    EXE = '/opt/devbox-tools/codex/versions/0.166.0/lib/node_modules/@openai/codex/bin/codex'
+class CurrentCodeModeHost(unittest.TestCase):
+    EXE = '/opt/devbox-tools/codex/versions/test/vendor/bin/codex-code-mode-host'
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.proc = Path(self.tmp.name) / 'proc'
+        self.root = Path(self.tmp.name) / 'checkout'
+        self.root.mkdir()
+        self.add(900, 1, str(Path(self.EXE).with_name('codex')))
+        self.add(123, 900, self.EXE)
+
+    def add(self, pid, ppid, exe):
+        folder = self.proc / str(pid)
+        (folder / 'task' / str(pid)).mkdir(parents=True)
+        (folder / 'task' / str(pid) / 'children').write_text('')
+        (folder / 'stat').write_text(f'{pid} (x) S {ppid} ' + ' '.join(['0'] * 17) + ' 100 0\n')
+        (folder / 'cmdline').write_bytes(exe.encode() + b'\0')
+        (folder / 'cwd').symlink_to(self.root)
+        (folder / 'exe').symlink_to(exe)
+
+    def live(self):
+        with patch.object(d, 'own_pids', return_value={900}), \
+             patch.object(d, 'Path', side_effect=lambda path: self.proc if path == '/proc' else Path(path)):
+            return {row['pid'] for row in d.live_processes(self.root)}
+
+    def test_current_managed_code_host_is_harness_but_foreign_host_is_live(self):
+        self.assertNotIn(123, self.live())
+        with patch.object(d, 'own_pids', return_value=set()), \
+             patch.object(d, 'Path', side_effect=lambda path: self.proc if path == '/proc' else Path(path)):
+            self.assertIn(123, {row['pid'] for row in d.live_processes(self.root)})
+
+    def test_full_agents_unmanaged_hosts_and_non_sibling_parents_stay_live(self):
+        for exe in ('/usr/bin/node', '/tmp/codex-code-mode-host', self.EXE.replace('-code-mode-host', ''),
+                    '/opt/devbox-tools/codex-evil/bin/codex-code-mode-host'):
+            with self.subTest(exe=exe):
+                link = self.proc / '123' / 'exe'
+                link.unlink()
+                link.symlink_to(exe)
+                self.assertIn(123, self.live())
+        link.unlink()
+        link.symlink_to(self.EXE)
+        parent = self.proc / '900' / 'exe'
+        parent.unlink()
+        parent.symlink_to('/opt/devbox-tools/codex/versions/other/bin/codex')
+        self.assertIn(123, self.live())
+
+    def test_child_of_nonleader_thread_or_unknown_task_blocks(self):
+        thread = self.proc / '123' / 'task' / '124'
+        thread.mkdir()
+        (thread / 'children').write_text('456')
+        self.assertIn(123, self.live())
+        (thread / 'children').unlink()
+        self.assertIn(123, self.live())
+
+    def test_pid_reuse_or_changing_parent_identity_refuses_exemption(self):
+        original = d.stat_fields
+        for changed_pid in (123, 900):
+            calls = 0
+            def changing(proc, pid):
+                nonlocal calls
+                row = original(proc, pid)
+                if pid == changed_pid:
+                    calls += 1
+                    if calls > 1:
+                        row[19] = str(100 + calls)
+                return row
+            with self.subTest(pid=changed_pid), patch.object(d, 'stat_fields', side_effect=changing):
+                self.assertIn(123, self.live())
+
+
+class SharedCodexServer(unittest.TestCase):
+    """2026-11-09 (PR #1866 closeout): the daemon's shared codex app-server kept the devbox NOT_READY whenever a Codex
+    thread had used it, and after a daemon restart orphaned it to PID 1. Its tool host is harness too; the tools that
+    host runs stay live work."""
+    BIN = '/opt/devbox-tools/codex/versions/0.166.0/lib/node_modules/@openai/codex/vendor/bin'
+    EXE = f'{BIN}/codex'
+    HOST = f'{BIN}/codex-code-mode-host'
     ARGV = f'{EXE} app-server --listen ws://127.0.0.1:33351 --enable goals'
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
         self.proc = Path(self.tmp.name) / 'proc'
-        self.sessions = Path(self.tmp.name) / 'sessions'
-        self.sessions.mkdir(parents=True)
-        (self.proc).mkdir()
-        (self.proc / 'stat').write_text(f'cpu 1 2 3\nbtime {int(time.time()) - 1000}\n')
-        tick = os.sysconf('SC_CLK_TCK')
-        self.add(10, 1, f'/opt/devbox-runtime/node/current/bin/node {d.DAEMON_DIR}/bundle/sprite-daemon.mjs', 1)
-        self.add(20, 10, self.ARGV, 500 * tick)  # started 500 s ago
-        self.old = self.sessions / '2026' / 'old.jsonl'
-        self.old.parent.mkdir()
-        self.old.write_text('{}')
-        os.utime(self.old, (time.time() - 900, time.time() - 900))
+        self.root = Path(self.tmp.name) / 'checkout'
+        self.root.mkdir()
+        self.proc.mkdir()
+        self.add(10, 1, f'/opt/devbox-runtime/node/current/bin/node {d.DAEMON_DIR}/bundle/sprite-daemon.mjs',
+                 '/opt/devbox-runtime/node/current/bin/node', cwd=Path('/'))
+        self.add(20, 10, self.ARGV, self.EXE)
+        self.add(30, 20, self.HOST, self.HOST)
 
-    def tearDown(self):
-        self.tmp.cleanup()
-
-    def add(self, pid, ppid, argv, start):
+    def add(self, pid, ppid, argv, exe, cwd=None):
         folder = self.proc / str(pid)
         folder.mkdir()
-        (folder / 'stat').write_text(f'{pid} (x) S {ppid} ' + ' '.join(['0'] * 17) + f' {start} 0\n')
+        (folder / 'stat').write_text(f'{pid} (x) S {ppid} ' + ' '.join(['0'] * 17) + ' 100 0\n')
         (folder / 'cmdline').write_bytes(argv.replace(' ', '\0').encode())
+        (folder / 'cwd').symlink_to(cwd or self.root)
+        (folder / 'exe').symlink_to(exe)
 
-    def idle(self, exe=EXE, argv=ARGV):
-        return d.idle_daemon_codex_server(20, exe, argv, self.proc, self.sessions)
+    def reparent(self, pid, ppid):
+        stat = self.proc / str(pid) / 'stat'
+        fields = stat.read_text().split(' ')
+        fields[3] = str(ppid)
+        stat.write_text(' '.join(fields))
 
-    def test_idle_daemon_server_is_not_live_work(self):
-        self.assertTrue(self.idle())
+    def live(self):
+        with patch.object(d, 'own_pids', return_value=set()), \
+             patch.object(d, 'Path', side_effect=lambda path: self.proc if path == '/proc' else Path(path)):
+            return {row['pid'] for row in d.live_processes(self.root)}
 
-    def test_running_child_blocks(self):
-        self.add(30, 20, 'bash -lc npm test', 1)
-        self.assertFalse(self.idle())
+    def test_busy_shared_server_and_its_host_are_harness_but_their_tools_are_live(self):
+        self.add(40, 30, 'bash -lc npm test', '/usr/bin/bash')
+        self.add(41, 20, 'python3 -m pytest', '/usr/bin/python3')
+        self.assertEqual({40, 41}, self.live())
 
-    def test_session_rollout_since_start_blocks(self):
-        (self.sessions / '2026' / 'new.jsonl').write_text('{}')
-        self.assertFalse(self.idle())
+    def test_server_orphaned_by_a_daemon_restart_stays_harness(self):
+        self.reparent(20, 1)
+        self.assertEqual(set(), self.live())
 
-    def test_not_parented_by_the_daemon_blocks(self):
-        (self.proc / '10' / 'cmdline').write_bytes(b'bash\0-l')
-        self.assertFalse(self.idle())
+    def test_server_not_started_by_the_daemon_is_live_with_its_host(self):
+        self.add(5, 1, 'bash -l', '/usr/bin/bash', cwd=Path('/'))
+        self.reparent(20, 5)
+        self.assertEqual({20, 30}, self.live())
 
-    def test_other_codex_commands_and_lookalikes_block(self):
-        self.assertFalse(self.idle(argv=f'{self.EXE} exec --cd /home/boxes/rose'))
-        self.assertFalse(self.idle(exe='/home/boxes/bin/codex'))
-        self.assertFalse(self.idle(exe=None))
+    def test_other_codex_commands_lookalikes_and_foreign_hosts_are_live(self):
+        cases = ((self.EXE, f'{self.EXE} exec --cd /home/boxes/rose app-server --listen x'),
+                 (self.EXE, f'{self.EXE} app-server'),
+                 ('/home/boxes/bin/codex', f'/home/boxes/bin/codex app-server --listen x'),
+                 (f'{self.BIN}/codex-evil', f'{self.BIN}/codex-evil app-server --listen x'))
+        for exe, argv in cases:
+            with self.subTest(exe=exe, argv=argv):
+                self.assertFalse(d.shared_codex_server(20, exe, argv, self.proc))
+        self.assertFalse(d.shared_codex_server(20, None, self.ARGV, self.proc))
+        self.assertFalse(d.shared_code_mode_host(30, '/tmp/codex-code-mode-host', self.proc))
+        other = self.HOST.replace('0.166.0', 'other')
+        self.assertFalse(d.shared_code_mode_host(30, other, self.proc))
+        (self.proc / '20' / 'cmdline').write_bytes(f'{self.EXE}\0exec'.encode())
+        self.assertEqual({20, 30}, self.live())
 
 
 class DeletionCheck(Repo):
@@ -639,6 +893,138 @@ class Dispatch(unittest.TestCase):
         names = set(d.COMMANDS) | {'gates', 'production'}
         for name in names:
             self.assertTrue(f'scripts/deploy {name}' in doc, f'deploy.md does not document {name}')
+
+
+class ReviewNextInputValidation(unittest.TestCase):
+    def invoke(self, options, stop_at_start=False):
+        import deploy_review_cycle as cycle
+
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            ledger = root / 'ledger.json'
+            ledger.write_text(json.dumps({'schema_version': 1, 'cycles': [
+                dict(number=i, kind=kind, head=str(i)*40, status='completed', result='clean')
+                for i, kind in enumerate(('initial', 'incremental', 'verification'), 1)
+            ]}))
+            before = ledger.read_bytes()
+            pr = root / 'pr.json'
+            pr.write_text(json.dumps({'pr': 1708}))
+            calls = []
+
+            def boundary(argv, **kwargs):
+                calls.append(argv)
+                self.assertEqual(argv[1:3], ['scripts/deploy_review_cycle.py', 'start'])
+                if stop_at_start:
+                    return 1
+                with patch.object(sys, 'argv', [argv[1], '--state', str(ledger), *argv[2:]]):
+                    try:
+                        return cycle.main()
+                    except SystemExit as error:
+                        if not isinstance(error.code, int):
+                            print(str(error.code), file=sys.stderr)
+                            return 1
+                        return error.code or 0
+
+            out, err = io.StringIO(), io.StringIO()
+            with patch.object(d, 'ROOT', root), patch.object(d, 'PR_FILE', pr), \
+                    patch.object(d, 'uncommitted', return_value=[]), \
+                    patch.object(d, 'unapplied_ledger_rows', return_value=False), \
+                    patch.object(d, 'head', return_value='d'*40) as read_head, \
+                    patch.object(d, 'git', side_effect=AssertionError('unexpected git')) as git, \
+                    patch.object(cycle, 'git', side_effect=AssertionError('unexpected ledger git')) as ledger_git, \
+                    patch.object(d, 'write_json', side_effect=AssertionError('unexpected PR write')) as write_pr, \
+                    patch.object(cycle, 'write_state', side_effect=AssertionError('unexpected ledger write')) as write_ledger, \
+                    patch.object(d, 'factory', side_effect=AssertionError('unexpected review event')) as event, \
+                    patch.object(d, 'run', side_effect=boundary), \
+                    patch.object(d.subprocess, 'run', side_effect=AssertionError('unexpected subprocess')) as process, \
+                    contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                code = d.main(['review-next', *options])
+            self.assertEqual(before, ledger.read_bytes())
+            for blocked in (git, ledger_git, write_pr, write_ledger, event, process):
+                blocked.assert_not_called()
+            return {'code': code, 'stderr': err.getvalue(), 'calls': calls, 'head_reads': read_head.call_count}
+
+    def test_partial_or_empty_final_pair_is_rejected_before_delegation(self):
+        for options in (
+            ['--one-final-review-approval', 'user:decision'],
+            ['--approved-head', 'd'*40],
+            ['--one-final-review-approval', '', '--approved-head', 'd'*40],
+            ['--one-final-review-approval', 'user:decision', '--approved-head', ''],
+            ['--one-final-review-approval', '', '--approved-head', ''],
+        ):
+            with self.subTest(options=options):
+                result = self.invoke(options)
+                self.assertEqual(result['code'], 1, result)
+                self.assertEqual(result['calls'], [], result)
+                self.assertEqual(result['head_reads'], 0, result)
+                self.assertIn('both required', result['stderr'], result)
+
+    def test_final_pair_cannot_be_combined_with_verification_approval(self):
+        for approval in ('other', ''):
+            with self.subTest(approval=approval):
+                result = self.invoke(['--one-final-review-approval', 'user:decision',
+                                      '--approved-head', 'd'*40, '--verification-approval', approval])
+                self.assertEqual(result['code'], 1, result)
+                self.assertEqual(result['calls'], [], result)
+                self.assertEqual(result['head_reads'], 0, result)
+                self.assertIn('cannot combine', result['stderr'], result)
+
+    def test_complete_final_pair_preserves_the_exact_native_arguments(self):
+        result = self.invoke(['--one-final-review-approval', 'user:decision',
+                              '--approved-head', 'd'*40], stop_at_start=True)
+        self.assertEqual(result['code'], 1, result)
+        self.assertEqual(result['calls'], [[sys.executable, 'scripts/deploy_review_cycle.py',
+            'start', '--kind', 'verification', '--head', 'd'*40,
+            '--one-final-review-approval', 'user:decision', '--approved-head', 'd'*40,
+            '--repo', result['calls'][0][-1]]])
+
+
+
+class PostFindingsCLIProposalTest(unittest.TestCase):
+    def options(self):
+        return ['--post-findings-review-approval', 'fixture:NEW', '--approved-head', 'e'*40,
+                '--prior-ledger-sha256', 'b'*64]
+
+    def test_missing_pair_or_combined_flags_fail_before_state_or_subprocess(self):
+        cases = [['--post-findings-review-approval', 'fixture:NEW'],
+                 self.options()[:-2], ['--prior-ledger-sha256', 'b'*64],
+                 self.options() + ['--verification-approval', ''],
+                 self.options() + ['--one-final-review-approval', '']]
+        for options in cases:
+            with self.subTest(options=options), \
+                    patch.object(d, 'read_json', side_effect=AssertionError('state read forbidden')), \
+                    patch.object(d, 'run', side_effect=AssertionError('subprocess forbidden')), \
+                    contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(d.main(['review-next', *options]), 1)
+
+    def dispatch(self, admission):
+        calls = []
+        def run(argv):
+            calls.append(argv)
+            return admission if len(calls) == 1 else 0
+        with patch.object(d, 'read_json', return_value={'pr': 1708}), \
+                patch.object(d, 'uncommitted', return_value=[]), \
+                patch.object(d, 'unapplied_ledger_rows', return_value=False), \
+                patch.object(d, 'head', return_value='e'*40), patch.object(d, 'run', side_effect=run), \
+                patch.object(d, 'factory') as event, patch.object(d, 'write_json') as write, \
+                patch.object(d.subprocess, 'run', side_effect=AssertionError('real subprocess forbidden')), \
+                contextlib.redirect_stdout(io.StringIO()):
+            result = d.main(['review-next', *self.options()])
+        return result, calls, event.call_count, write.call_count
+
+    def test_admission_refusal_prevents_push_request_event_and_write(self):
+        result, calls, events, writes = self.dispatch(1)
+        self.assertEqual((result, len(calls), events, writes), (1, 1, 0, 0))
+        self.assertEqual(calls[0][1:3], ['scripts/deploy_review_cycle.py', 'start'])
+        self.assertIn('--post-findings-review-approval', calls[0])
+        self.assertIn('--prior-ledger-sha256', calls[0])
+
+    def test_normal_full_request_follows_admission_only(self):
+        result, calls, events, writes = self.dispatch(0)
+        self.assertEqual((result, len(calls), events, writes), (0, 3, 1, 1))
+        self.assertEqual(calls[0][1:3], ['scripts/deploy_review_cycle.py', 'start'])
+        self.assertEqual(calls[1], ['git', 'push', 'origin', 'HEAD'])
+        self.assertEqual(calls[2], ['gh', 'pr', 'comment', '1708', '--body', '@coderabbitai review'])
 
 
 if __name__ == '__main__':

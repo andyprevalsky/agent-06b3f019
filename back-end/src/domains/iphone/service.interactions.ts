@@ -12,7 +12,14 @@ import type { PhoneClientFactory } from './types.operations';
 async function presentInteraction(result: Awaited<ReturnType<typeof repo.readInteraction>>) {
   if (result instanceof IPhoneError) throw result;
   if (result === null)
-    return { lease: null, cursor: 0, lastOperation: null, pendingOperation: null };
+    return {
+      lease: null,
+      holder: null,
+      queuePosition: null,
+      cursor: 0,
+      lastOperation: null,
+      pendingOperation: null,
+    };
   return {
     ...present(result),
     cursor: result.lease.actionCursor,

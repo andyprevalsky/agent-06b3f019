@@ -1,0 +1,23 @@
+{
+ "name": "pr1783-4c673849-cloud",
+ "key_prefix": "devbox-closeout-private/pr1783-4c673849-cloud/",
+ "bucket_env": "R2_BUCKET_TRACE_ARCHIVE",
+ "archive_sha256": "7800bf0442ac634abca5c26ade9f9080311911708467c086fb354d6c1e6d7db0",
+ "archive_size_bytes": 1955683979,
+ "parts": 30,
+ "chunk_size": 67108864,
+ "members": [
+  "/home/boxes/rose/.context/deploy-cloud/faea4e1dbdc642749f02a273bfaf51e7bb695b3c6a37cf49e7ce6349801dfa1a",
+  "/home/boxes/rose/.context/deploy-cloud/09a959b2dff69ef2b18b186ddf8f646149782e8e925067dc2329588b02a99369",
+  "/home/boxes/rose/.context/deploy-cloud/efb6ed8b8fd5945ccec4b05291a2b16aa7bd4b717581370bae783db341799205",
+  "/home/boxes/rose/.context/deploy-cloud/7417967e0aefca33953a7f627f3623774f812a353be1f41fcd86175fea866b9f",
+  "/home/boxes/rose/.context/deploy-cloud/23e04a2c9db247e9460904873367660feecc55acd2b474299542091867e58fad",
+  "/home/boxes/rose/.context/deploy-cloud/9b3c5ceef839acc357b8ceb6633d85a6d5b343b95c6fc935f30901e1d48462f7",
+  "/home/boxes/rose/.context/deploy-cloud/4d092184aaeb27413bca940e904b4d16d5e9447a52c07b4b15e82f2d1910bd94"
+ ],
+ "files": 10954,
+ "cipher": "AES-256-GCM nonce(12)||ciphertext, aad=object key",
+ "key_location": "TRACE_ARCHIVE_ENCRYPTION_KEY_B64 (back-end/.env; same key as the trace archive)",
+ "restore": "closeout_archive.py restore --receipt <receipt> --destination <dir>",
+ "verified": "every part downloaded, decrypted and the reassembled sha256 matched after upload"
+}

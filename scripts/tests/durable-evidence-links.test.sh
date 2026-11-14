@@ -118,7 +118,11 @@ spec.loader.exec_module(mod)
 calls = []
 def fake_run(cmd, **kwargs):
     calls.append(cmd)
-    Path(cmd[cmd.index("-o") + 1]).write_text("<html></html>")
+    rendered = Path(cmd[cmd.index("-o") + 1])
+    rendered.parent.mkdir(parents=True, exist_ok=True)
+    rendered.write_text("<html></html>")
+    artifacts = Path(cmd[cmd.index("--artifacts-dir") + 1])
+    (artifacts / rendered.name).write_text("<html></html>")
     return subprocess.CompletedProcess(cmd, 0, stdout="https://example.r2.dev/dump.html?sig=1\n", stderr="")
 mod.subprocess.run = fake_run
 
@@ -127,6 +131,7 @@ with tempfile.TemporaryDirectory() as tmp:
     dump = Path(tmp) / "dump.json"
     dump.write_text("{}")
     html, url = mod.publish_llm_dump(dump, "agent-1")
+    assert html.is_file(), "canonical published HTML must exist"
     assert url == "https://example.r2.dev/dump.html?sig=1", url
     if mod.AGENTS_VENV_PYTHON.is_file():
         assert calls[0][0] == str(mod.AGENTS_VENV_PYTHON), calls[0][0]

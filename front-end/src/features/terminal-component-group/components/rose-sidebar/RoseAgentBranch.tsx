@@ -2,6 +2,10 @@
  * Each disclosure opens direct children only; off-screen roots do not subscribe.
  * Children (sub-agents and code agents together) sort like every sidebar list:
  * running first, then the most recent user message (or creation).
+ * STATE MACHINE: tree/session status -> running children + Finished agents.
+ * Paused/terminal children -> collapsed drawer -> click -> existing child rows.
+ * Resume -> main list. An ancestor of running work stays outside the drawer.
+ * Browser/explore tasks join the same list from the existing tree subscription.
  */
 import { useEffect, useMemo, useState } from 'react';
 import type { CodeAgentListItem } from '@/lib/api/tree';
@@ -13,6 +17,10 @@ import { agentRunStatus, type AgentRunStatus } from '../agentRunState';
 import RoseAgentRow from './RoseAgentRow';
 import RoseCodeAgentRow from './RoseCodeAgentRow';
 import type { RoseAgentGroupsProps } from './RoseAgentGroups';
+import RoseFinishedAgentsDrawer from './RoseFinishedAgentsDrawer';
+import RoseTaskAgentRow from './RoseTaskAgentRow';
+import { fromTreeTask } from '../background-agents/agentsPanelGroups';
+import { isCodeAgentRunning } from './codeAgentRunState';
 
 export type RoseAgentBranchSidebar = Pick<
   RoseAgentGroupsProps,
@@ -81,7 +89,7 @@ function orderedChildren(
     entries.push({
       kind: 'code',
       code,
-      rank: runStateRank(code.status === 'ACTIVE' ? 'active' : 'done'),
+      rank: runStateRank(isCodeAgentRunning(code) ? 'active' : 'done'),
       at: lastUserMessageTime(null, code.created_at),
     });
   }
@@ -109,7 +117,7 @@ export default function RoseAgentBranch({
   const tree = liveTree.size ? liveTree : cachedTree;
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set());
   const codes = s.codeAgentsFor(agent.agent_id);
-  const { agents, children, counts } = useMemo(() => {
+  const { agents, children, counts, codesByOwner, tasks } = useMemo(() => {
     const rootNode = tree.get(agent.agent_id);
     const progress =
       rootNode?.workflowGeneration === agent.temporal_workflow_id
@@ -124,19 +132,37 @@ export default function RoseAgentBranch({
       progress === agent.progress_estimate ? agent : { ...agent, progress_estimate: progress };
     const agents = new Map<string, Agent>([[agent.agent_id, root]]);
     const children = new Map<string, string[]>();
+    const tasks = new Map<string, { node: TreeNode; ownerId: string; type: string }>();
+    const addChild = (parent: string, child: string) => {
+      const siblings = children.get(parent);
+      if (siblings) siblings.push(child);
+      else children.set(parent, [child]);
+    };
     for (const node of tree.values()) {
-      if (node.agentId === agent.agent_id) continue;
-      agents.set(node.agentId, childAgent(agent, node));
-      if (node.parentAgentId)
-        children.set(node.parentAgentId, [
-          ...(children.get(node.parentAgentId) ?? []),
-          node.agentId,
-        ]);
+      if (node.agentId !== agent.agent_id) {
+        agents.set(node.agentId, childAgent(agent, node));
+        if (node.parentAgentId) addChild(node.parentAgentId, node.agentId);
+      }
+      for (const task of node.backgroundTasks ?? []) {
+        // Code tasks already have canonical provider/session rows. A task
+        // represented by a real Agent node must not appear twice either.
+        if (task.type === 'code' || tree.has(task.address)) continue;
+        const taskNode = fromTreeTask(task, node.agentId);
+        if (tasks.has(taskNode.agentId)) continue;
+        tasks.set(taskNode.agentId, { node: taskNode, ownerId: node.agentId, type: task.type });
+        agents.set(taskNode.agentId, childAgent(agent, taskNode));
+        addChild(node.agentId, taskNode.agentId);
+      }
     }
     const codeCounts = new Map<string, number>();
-    for (const code of codes)
-      if (code.status === 'ACTIVE')
+    const codesByOwner = new Map<string, CodeAgentListItem[]>();
+    for (const code of codes) {
+      const owned = codesByOwner.get(code.owner_agent_id);
+      if (owned) owned.push(code);
+      else codesByOwner.set(code.owner_agent_id, [code]);
+      if (isCodeAgentRunning(code))
         codeCounts.set(code.owner_agent_id, (codeCounts.get(code.owner_agent_id) ?? 0) + 1);
+    }
     const counts = new Map<string, number>();
     const seen = new Set<string>();
     const pending = [{ id: agent.agent_id, exit: false }];
@@ -158,7 +184,7 @@ export default function RoseAgentBranch({
           (children.get(id) ?? []).reduce((sum, child) => sum + (counts.get(child) ?? 0), 0),
       );
     }
-    return { agents, children, counts };
+    return { agents, children, counts, codesByOwner, tasks };
   }, [agent, tree, codes, s.attentionAgentIds]);
   function toggle(id: string) {
     setExpanded((previous) => {
@@ -181,9 +207,55 @@ export default function RoseAgentBranch({
   function render(id: string, depth: number, path: ReadonlySet<string>): React.ReactNode {
     const row = agents.get(id);
     if (!row || path.has(id)) return null;
+    const task = tasks.get(id);
+    if (task)
+      return (
+        <RoseTaskAgentRow
+          key={id}
+          node={task.node}
+          type={task.type}
+          ownerId={task.ownerId}
+          depth={depth}
+          indented={indented}
+          status={childStatus(row)}
+          mobile={mobile}
+          onSelectAgent={s.onSelectAgent}
+        />
+      );
     const childIds = children.get(id) ?? [];
-    const ownedCodes = codes.filter((code) => code.owner_agent_id === id);
+    const ownedCodes = codesByOwner.get(id) ?? [];
     const open = s.isExpanded && expanded.has(id);
+    const ongoing: ChildEntry[] = [];
+    const finished: ChildEntry[] = [];
+    if (open) {
+      for (const entry of orderedChildren(childIds, ownedCodes, agents, s.attentionAgentIds)) {
+        const child = entry.kind === 'agent' ? agents.get(entry.id) : undefined;
+        const status = child && childStatus(child);
+        const inactive =
+          entry.kind === 'code'
+            ? !isCodeAgentRunning(entry.code)
+            : (counts.get(entry.id) ?? 0) === 0 &&
+              !s.attentionAgentIds.has(entry.id) &&
+              (status?.state === 'done' || status?.reason === 'paused');
+        (inactive ? finished : ongoing).push(entry);
+      }
+    }
+    const renderEntry = (entry: ChildEntry) =>
+      entry.kind === 'agent' ? (
+        render(entry.id, depth + 1, new Set(path).add(id))
+      ) : (
+        <RoseCodeAgentRow
+          key={entry.code.code_agent_id}
+          codeAgent={entry.code}
+          mobile={mobile}
+          isExpanded
+          parentIndented={indented}
+          depth={depth + 1}
+          isSelected={s.selectedCodeAgentId === entry.code.code_agent_id}
+          onOpen={() => s.onOpenCodeAgent(entry.code)}
+          onMenuOpenChange={s.onMenuOpenChange}
+        />
+      );
     return (
       <div key={id}>
         <RoseAgentRow
@@ -206,21 +278,13 @@ export default function RoseAgentBranch({
         />
         {open && (
           <div data-testid={`rose-agent-children-${id}`}>
-            {orderedChildren(childIds, ownedCodes, agents, s.attentionAgentIds).map((entry) =>
-              entry.kind === 'agent' ? (
-                render(entry.id, depth + 1, new Set(path).add(id))
-              ) : (
-                <RoseCodeAgentRow
-                  key={entry.code.code_agent_id}
-                  codeAgent={entry.code}
-                  isExpanded
-                  parentIndented={indented}
-                  depth={depth + 1}
-                  isSelected={s.selectedCodeAgentId === entry.code.code_agent_id}
-                  onOpen={() => s.onOpenCodeAgent(entry.code)}
-                />
-              ),
-            )}
+            {ongoing.map(renderEntry)}
+            <RoseFinishedAgentsDrawer
+              count={finished.length}
+              depth={depth + 1}
+              indented={indented}
+              renderChildren={() => finished.map(renderEntry)}
+            />
           </div>
         )}
       </div>

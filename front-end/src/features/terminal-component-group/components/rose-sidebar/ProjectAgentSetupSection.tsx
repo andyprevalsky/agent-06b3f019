@@ -130,7 +130,7 @@ export function ProjectAgentSetupSection({ projectId }: { projectId: string }) {
         </button>
       </div>
       <p className={MUTED}>
-        Paste this into Claude Code, Codex or another coding agent in this project&apos;s folder.
+        Paste this into Claude Code, Codex or another coding agent in this folder&apos;s directory.
       </p>
       {prompt !== null ? (
         <p data-testid="agent-setup-prompt" className={PROMPT_BOX}>

@@ -23,6 +23,8 @@ import {
 } from '@/features/terminal-component-group/components/waitForPhrase';
 import { markdownPreview } from '@/features/terminal-component-group/components/browser-agent-chip/resultPreview';
 import { buildAgentToolData } from '@/features/terminal-component-group/components/message-bubble/agentToolData';
+import { ToolMessageHeader } from '@/features/terminal-component-group/components/message-bubble/ToolMessageHeader';
+import { waitAgentKindNeedsTranscript } from '@/features/terminal-component-group/components/waitAgentKinds';
 import { RoseDesktopContext } from '@/hooks/roseDesktopContext';
 import { isRoseDesktopSession } from '@/lib/roseDesktopSession';
 import type { Message } from '@/lib/api';
@@ -184,10 +186,10 @@ describe('wait_for row label', () => {
   });
 
   it.each([
-    // The model's description differs from the agent: the row names the agent's task.
-    [{ agents: ['/root/pull_bank_data'] }, 'Waiting for pull_bank_data'],
-    [{ agents: ['/root/a', '/root/b'] }, 'Waiting for a, b'],
-    [{ agents: ['/root/x'], targetNames: ['pull_bank_data'] }, 'Waiting for pull_bank_data'],
+    // The model's description differs from the agent: the row names the agent's task title.
+    [{ agents: ['/root/pull_bank_data'] }, 'Waiting for Pull Bank Data'],
+    [{ agents: ['/root/a', '/root/b'] }, 'Waiting for A, B'],
+    [{ agents: ['/root/x'], targetNames: ['pull_bank_data'] }, 'Waiting for Pull Bank Data'],
     // No resolvable name (agent id / "any"): the stripped description.
     [{ agents: ['3f1c9a2e-agent-id'] }, 'Waiting for Chase balances'],
     [{ agents: 'any' }, 'Waiting for Chase balances'],
@@ -224,10 +226,205 @@ describe('wait_for row label', () => {
           { message_id: `w-${toolStatus}`, text },
         ),
       );
-    expect(card('IN_PROGRESS')?.title).toBe('Waiting for pull_bank_data');
+    expect(card('IN_PROGRESS')?.title).toBe('Waiting for Pull Bank Data');
     expect(card('FINISHED', 'Woken by a sub-agent finishing.')?.title).toBe(
-      'Waited for pull_bank_data · woken by a sub-agent finishing',
+      'Waited for Pull Bank Data · woken by a sub-agent finishing',
     );
+  });
+
+  const agentWait = (extra: Record<string, unknown>) =>
+    msg(
+      {
+        toolName: 'wait_for',
+        toolCallId: 'w',
+        toolStatus: 'IN_PROGRESS',
+        waitForMode: 'agents',
+        title: 'Waiting for find_update_card',
+        ...extra,
+      },
+      { message_id: 'w', timestamp: at(5) },
+    );
+  const iconKinds = () =>
+    screen.getAllByTestId('wait-agent-icon').map((icon) => icon.getAttribute('data-agent-kind'));
+
+  it.each([
+    ['code', 'claude', 'Claude Code'],
+    ['code:claude', 'claude', 'Claude Code'],
+    ['code:codex', 'codex', 'Codex'],
+    ['browser', 'browser', null],
+    ['explore', 'explore', null],
+    ['general_purpose', 'agent', null],
+  ])('a wait on a %s agent shows its task title with the %s icon', (type, kind, alt) => {
+    const row = agentWait({
+      agents: ['/root/find_update_card'],
+      targetNames: ['find_update_card'],
+      targetTypes: [type],
+    });
+    renderWithProviders(
+      createElement(TrajectoryWorkGroup, { group: runningGroup([row]), renderMessage: () => null }),
+    );
+    const line = screen.getByTestId('trajectory-activity-line');
+    expect(line).toHaveTextContent(/^Waiting for Find Update Card$/);
+    expect(within(line).getByTestId('wait-agent-target')).toHaveTextContent('Find Update Card');
+    expect(iconKinds()).toEqual([kind]);
+    if (alt) expect(within(line).getByAltText(alt)).toBeInTheDocument();
+  });
+
+  it("derives each icon from the transcript's spawns when the row has no targetTypes (Codex code agent)", () => {
+    const started = (callId: string, type: string, path: string) =>
+      msg(
+        {
+          toolCallId: callId,
+          toolName: 'spawn_agent',
+          toolStatus: 'FINISHED',
+          hidden: true,
+          runInBackground: true,
+          backgroundPath: path,
+          backgroundAgentType: type,
+        },
+        { message_id: `started-${callId}`, timestamp: at(1) },
+      );
+    const codexRow = msg(
+      {
+        toolCallId: 'call_code',
+        toolName: 'spawn_claude_code_agent',
+        toolStatus: 'IN_PROGRESS',
+        action_type: 'claude_code_started',
+        code_provider: 'codex',
+      },
+      { message_id: 'code-start', timestamp: at(2) },
+    );
+    const transcript = [
+      started('call_code', 'code', '/root/find_update_card'),
+      codexRow,
+      started('call_br', 'browser', '/root/order_lunch'),
+    ];
+    const row = agentWait({ agents: ['/root/find_update_card', '/root/order_lunch'] });
+    renderWithProviders(
+      createElement(
+        WithAgent,
+        { messages: [...transcript, row] },
+        createElement(TrajectoryWorkGroup, {
+          group: runningGroup([row]),
+          renderMessage: () => null,
+        }),
+      ),
+    );
+    const line = screen.getByTestId('trajectory-activity-line');
+    expect(line).toHaveTextContent(/^Waiting for Find Update Card, Order Lunch$/);
+    expect(iconKinds()).toEqual(['codex', 'browser']);
+    expect(within(line).getByAltText('Codex')).toBeInTheDocument();
+  });
+
+  it('a finished "Wait ended" row as the latest activity keeps its own label', () => {
+    const ended = msg(
+      {
+        toolName: 'wait_for',
+        toolCallId: 'w',
+        toolStatus: 'FINISHED',
+        waitForMode: 'agents',
+        title: 'Wait ended',
+        agents: ['/root/find_update_card'],
+        targetNames: ['find_update_card'],
+        targetTypes: ['code:claude'],
+        wokenBy: 'agent_notification',
+      },
+      { message_id: 'w-ended', timestamp: at(6) },
+    );
+    renderWithProviders(
+      createElement(TrajectoryWorkGroup, {
+        group: runningGroup([agentWait({ targetNames: ['find_update_card'] }), ended]),
+        renderMessage: () => null,
+      }),
+    );
+    const line = screen.getByTestId('trajectory-activity-line');
+    expect(line).toHaveTextContent(/^Wait ended$/);
+    expect(screen.queryByTestId('wait-agent-targets')).toBeNull();
+  });
+
+  it('a null or missing worker type derives the icon from the transcript', () => {
+    const transcript = [
+      msg(
+        {
+          toolCallId: 'call_code',
+          toolName: 'spawn_agent',
+          toolStatus: 'FINISHED',
+          hidden: true,
+          runInBackground: true,
+          backgroundPath: '/root/find_update_card',
+          backgroundAgentType: 'code',
+        },
+        { message_id: 'started-code', timestamp: at(1) },
+      ),
+      msg(
+        { toolCallId: 'call_code', toolName: 'spawn_claude_code_agent', code_provider: 'codex' },
+        { message_id: 'code-row', timestamp: at(2) },
+      ),
+      msg(
+        {
+          toolCallId: 'call_br',
+          toolName: 'spawn_agent',
+          toolStatus: 'FINISHED',
+          hidden: true,
+          runInBackground: true,
+          backgroundPath: '/root/order_lunch',
+          backgroundAgentType: 'browser',
+        },
+        { message_id: 'started-br', timestamp: at(3) },
+      ),
+    ];
+    // Unknown first target (null), missing second entry: both come from the transcript.
+    const row = agentWait({
+      agents: ['/root/find_update_card', '/root/order_lunch'],
+      targetNames: ['find_update_card', 'order_lunch'],
+      targetTypes: [null],
+    });
+    renderWithProviders(
+      createElement(
+        WithAgent,
+        { messages: [...transcript, row] },
+        createElement(TrajectoryWorkGroup, {
+          group: runningGroup([row]),
+          renderMessage: () => null,
+        }),
+      ),
+    );
+    expect(iconKinds()).toEqual(['codex', 'browser']);
+  });
+
+  it('scans the transcript only when a worker type cannot pick the icon alone', () => {
+    const target = (type: string | null) => ({ name: 'x', title: 'X', address: null, type });
+    for (const type of ['code:claude', 'code:codex', 'browser', 'explore', 'general_purpose'])
+      expect(waitAgentKindNeedsTranscript(target(type))).toBe(false);
+    for (const type of [null, 'code', 'something_new'])
+      expect(waitAgentKindNeedsTranscript(target(type))).toBe(true);
+  });
+
+  it('the expanded wait card shows the same task title and agent icon', () => {
+    const card = buildAgentToolData(
+      agentWait({
+        agents: ['/root/find_update_card'],
+        targetNames: ['find_update_card'],
+        targetTypes: ['explore'],
+      }),
+    );
+    expect(card?.waitAgents).toMatchObject({ prefix: 'Waiting for', suffix: '' });
+    renderWithProviders(
+      createElement(ToolMessageHeader, {
+        data: card!,
+        titleText: card!.title,
+        isThought: false,
+        hasMessage: false,
+        isExpandable: false,
+        showChevron: false,
+        shouldBeExpanded: false,
+        onToggle: () => {},
+      }),
+    );
+    expect(screen.getByTestId('wait-agent-targets')).toHaveTextContent(
+      /^Waiting for Find Update Card$/,
+    );
+    expect(iconKinds()).toEqual(['explore']);
   });
 
   it('normalizes a model-written description to the waited-on target', () => {

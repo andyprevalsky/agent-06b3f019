@@ -44,6 +44,7 @@ const ctxState = {
   stagePendingAgentCreation: vi.fn(),
   reconcilePendingAgentCreation: vi.fn(async () => {}),
   rollbackPendingAgentCreation: vi.fn(() => true),
+  stageUserMessage: vi.fn(() => ({ confirm: vi.fn(), drop: vi.fn() })),
   registerMessageHandler: vi.fn(() => () => {}),
   sendMessage: vi.fn(async () => {}),
   isLoadingAgent: false,
@@ -323,6 +324,7 @@ describe('useMessageSending', () => {
       stagePendingAgentCreation: vi.fn(),
       reconcilePendingAgentCreation: vi.fn(async () => {}),
       rollbackPendingAgentCreation: vi.fn(() => true),
+      stageUserMessage: vi.fn(() => ({ confirm: vi.fn(), drop: vi.fn() })),
       ...overrides,
     };
   }

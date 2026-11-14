@@ -1,0 +1,17 @@
+{
+  "format": "PR1857-RENDER-BOOTSTRAP-RESTORE-V1",
+  "verified_at": "2026-11-08T22:21:06.486728+00:00",
+  "source": "https://api.render.com/v1/services/srv-d3jga77diees73cgrvk0/env-vars",
+  "http_method": "GET",
+  "pages_read": 2,
+  "native_helper_sha256": "2e35e736660660bb6118a939d51b0dd008abe5efaa6387cf252d5d0536b75cf4",
+  "archive_key": "devbox-closeout-private/pr1857-rca784d/20261108T222036Z-config.tar.gz.aesgcm",
+  "files": 9,
+  "key_decoded_sha256": "e351c7cc5b01303e579fe6d1df833940fdaadf325ca47314414ba10735fc7730",
+  "r2_credentials_source": "same existing Render service environment",
+  "used_archived_key_for_bootstrap": false,
+  "raw_provider_response_saved": false,
+  "secret_values_printed_or_logged": false,
+  "native_authenticated_restore_succeeded": true,
+  "destination": ".context/rca-784d/closeout-prep/config-render-restore"
+}

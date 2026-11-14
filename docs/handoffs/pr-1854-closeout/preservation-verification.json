@@ -1,0 +1,32 @@
+{
+  "format": "PR1854-PRESERVATION-VERIFICATION-V1",
+  "observed_at": "2026-11-10T02:39:15.575644+00:00",
+  "capture_started_at": "2026-11-10T01:16:49.825598Z",
+  "source_head_at_capture": "782ebbde854060034ec4eac7fe53dfd1f590e300",
+  "archive_receipt": "archive-receipt.json",
+  "deletion_manifest": "deletion-manifest.json",
+  "two_authenticated_full_readbacks_passed": true,
+  "post_readback_inventory_content_metadata_refs_checks_passed": true,
+  "independent_full_restore_performed": false,
+  "independent_key_source": "Existing Render service key/R2-field readback matched existing authority fingerprint; no secrets saved or printed",
+  "key_proof": "key-recovery-verification.json",
+  "git_bundles_empty_repository_verified": true,
+  "bundle_count": 3,
+  "bundles_sha256": {
+    "/home/boxes/.cache/pr1854-preservation/20261110T011649825598Z/refs-09f6fb17e6ad.bundle": "02c2d3fcd8eedc3951bd3682978b7c061150101eb51630aacfaad0b683be70be",
+    "/home/boxes/.cache/pr1854-preservation/20261110T011649825598Z/refs-92b837a6aab5.bundle": "0ae4990aa37b469cc743a620ae1ff0df6e1b13ebf41251c7ce3897b4f26eb646",
+    "/home/boxes/.cache/pr1854-preservation/20261110T011649825598Z/refs-f6d765176b5a.bundle": "3a375c150bad2fe4ce933fa1246d7173ef7258f04a282bdb26d9f35dee9565be"
+  },
+  "private_files": 267007,
+  "private_bytes": 42690062741,
+  "archive_members": 267031,
+  "archive_original_bytes": 46997594892,
+  "archive_stored_bytes": 13867880174,
+  "capture_mode": "disk-bounded hardlink/copy staging, protected inode aliases copied; local staging is not independent recovery",
+  "independent_preservation_copy": "authenticated encrypted remote object",
+  "source_content_modes_ownership_and_refs_mutated": false,
+  "ordinary_source_link_metadata_changed": true,
+  "needed_inputs": "Private complete environment/config, original native evidence, sister exports, peer inputs, all needed refs/reflogs plus Git runtime custody; reproducible dependencies excluded with private per-file inventory",
+  "raw_paths_env_traces_not_committed": true,
+  "deletion_ready": "pending canonical check and reviewed records-only PR"
+}

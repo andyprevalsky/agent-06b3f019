@@ -52,6 +52,10 @@
 #                      exact recovery, handing proven stopped primaries to this pool
 #   --recover-stale-owner <32-hex-token>
 #                      internal exact-owner recovery after forced cancellation
+#   --accept-lost-runtime-evidence
+#                      with --recover-stale-owner only: when every owned Machine is
+#                      destroyed and every volume pending_destroy/destroyed, record
+#                      the runtime evidence as LOST and finish ordinary recovery
 #   --timeout <s>      task execution window (default 7200): the controller ceiling
 #                      passed to run-bench-cloud and, unless BENCHMARK_WALL_CLOCK_
 #                      BACKSTOP_SECONDS is set, the guest backstop that stops agents;
@@ -786,16 +790,26 @@ if [ -z "${CLOUDBENCH_SCRIPT_SNAPSHOT:-}" ]; then
        "$ROOT_DIR/scripts/cloudbench-select-snapshot.py" \
        "$ROOT_DIR/scripts/cloudbench-worker-snapshot.py" \
        "$ROOT_DIR/scripts/cloudbench-source.py" \
+       "$ROOT_DIR/scripts/cloudbench-source-env.py" \
+       "$ROOT_DIR/scripts/cloudbench-source-lease.py" \
+       "$ROOT_DIR/scripts/deploy_test_native_cleanup.py" \
+       "$ROOT_DIR/scripts/cloudbench-prepare-source-create.py" \
+       "$ROOT_DIR/scripts/cloudbench-disposable-controller.py" \
+       "$ROOT_DIR/scripts/cloudbench-warm-pool.py" \
+       "$ROOT_DIR/scripts/cloudbench-warm-source.py" \
        "$ROOT_DIR/scripts/cloudbench-aggregate-runs.py" \
        "$ROOT_DIR/scripts/cloudbench_execution_provenance.py" \
        "$ROOT_DIR/scripts/cloudbench_result.py" \
        "$ROOT_DIR/scripts/cloudbench-exact-session-cleanup.py" \
        "$ROOT_DIR/scripts/cloudbench-guest-recovery.py" \
        "$ROOT_DIR/scripts/cloudbench-prestart-recovery.py" \
+       "$ROOT_DIR/scripts/cloudbench-lost-evidence-release.py" \
        "$ROOT_DIR/scripts/cloudbench-prestack-recovery.py" \
        "$ROOT_DIR/scripts/cloudbench-prestack-source-reviews.json" \
        "$ROOT_DIR/scripts/cloudbench-volume-migration.py" \
        "$ROOT_DIR/scripts/cloudbench-campaign-barrier.py" \
+       "$ROOT_DIR/scripts/run-bench-campaign.py" \
+       "$ROOT_DIR/scripts/cloudbench-shard-coordinator.py" \
        "$ROOT_DIR/scripts/cloudbench-campaign-machines.py" \
        "$ROOT_DIR/scripts/cloudbench-clone-volume.py" \
        "$ROOT_DIR/scripts/cloudbench-campaign-mutation.py" \
@@ -803,6 +817,7 @@ if [ -z "${CLOUDBENCH_SCRIPT_SNAPSHOT:-}" ]; then
        "$ROOT_DIR/scripts/cloudbench-campaign-env.py" \
        "$ROOT_DIR/scripts/cloudbench-seed-get.sh" \
        "$ROOT_DIR/scripts/cloudbench-forensic-retirement.py" \
+       "$ROOT_DIR/scripts/cloudbench-retired-diagnostic-custody.py" \
        "$ROOT_DIR/scripts/cloudbench-sealed-machine-retirement.py" \
        "$ROOT_DIR/scripts/lib/cloudbench-env.sh" \
        "$ROOT_DIR/scripts/lib/cloudbench-inventory.sh" \
@@ -855,6 +870,8 @@ MACHINE_READINESS_SCRIPT="$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-machine-readine
 SNAPSHOT_SELECTOR_SCRIPT="$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-select-snapshot.py"
 WORKER_SNAPSHOT_HELPER="$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-worker-snapshot.py"
 SOURCE_HELPER="$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-source.py"
+SOURCE_LEASE_HELPER="$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-source-lease.py"
+WARM_SOURCE_HELPER="$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-warm-source.py"
 AGGREGATE_RUNS_SCRIPT="$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-aggregate-runs.py"
 EXECUTION_PROVENANCE_SCRIPT="$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench_execution_provenance.py"
 CONTROLLER_SNAPSHOT_MANIFEST="$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-controller-snapshot-manifest.json"
@@ -1097,6 +1114,7 @@ POOL_COLD_BOOTSTRAP="0"  # future empty-checkout intent, never historical warm e
 PROVISION_POOL=""       # --provision-pool N: pre-provision N stopped clones (current image) then exit
 FRESH_VOLUMES="${CLOUDBENCH_FRESH_VOLUMES:-1}"
 FRESH_VOLUMES_REQUESTED=0
+SNAPSHOT_VOLUMES_REQUESTED=0
 INFRA_PROBE="${CLOUDBENCH_INFRA_PROBE:-0}"
 SKIP_AUTOSCALER="${CLOUDBENCH_SKIP_AUTOSCALER:-0}"
 QUALIFY_WORKER=0
@@ -1189,18 +1207,42 @@ PYCONFIG
 # with jitter) before concluding that the donor has no usable snapshot.
 # Sets SNAPSHOTS_JSON (the last valid listing, empty when no read was valid) and SNAPSHOT_LIST_ATTEMPTS_USED.
 list_donor_snapshots() {
-    local attempt candidate max_attempts=12 pause
+    local attempt candidate max_attempts=12 pause exact_snapshot="${1:-}"
     SNAPSHOTS_JSON=""
     SNAPSHOT_LIST_ATTEMPTS_USED=0
     for attempt in $(seq 1 "$max_attempts"); do
         SNAPSHOT_LIST_ATTEMPTS_USED="$attempt"
-        candidate="$(FLY volume snapshots list "$VOL_ID" -a "$APP" --json 2>/dev/null || true)"
+        if [ -n "$exact_snapshot" ]; then
+            candidate="$(FLY volume snapshots list "$VOL_ID" -a "$APP" --json)" || return 1
+            if ! printf '%s' "$candidate" | python3 -c '
+import json,sys
+rows=json.load(sys.stdin)
+assert isinstance(rows,list) and all(isinstance(row,dict) for row in rows)
+ids=[row.get("id") for row in rows]
+assert all(isinstance(value,str) and value for value in ids) and len(set(ids))==len(ids)
+' 2>/dev/null; then
+                echo "private fleet snapshot inventory invalid" >&2
+                return 1
+            fi
+        else
+            candidate="$(FLY volume snapshots list "$VOL_ID" -a "$APP" --json 2>/dev/null || true)"
+        fi
         if printf '%s' "$candidate" | python3 -c 'import json,sys; sys.exit(0 if isinstance(json.load(sys.stdin), list) else 1)' 2>/dev/null; then
             SNAPSHOTS_JSON="$candidate"
             # Fly can briefly return a valid but empty/still-hydrating list
             # while older completed snapshots exist. A valid JSON response is
             # not enough to conclude that the donor has no usable snapshot.
-            if [ -n "$(printf '%s' "$SNAPSHOTS_JSON" | python3 "$SNAPSHOT_SELECTOR_SCRIPT" 2>/dev/null || true)" ]; then
+            if [ -n "$exact_snapshot" ]; then
+                # Existence alone ends the read wait; the source verifier below
+                # still rejects duplicates, incomplete snapshots and stale identity.
+                if printf '%s' "$SNAPSHOTS_JSON" | python3 -c '
+import json,sys
+rows=json.load(sys.stdin)
+raise SystemExit(0 if any(isinstance(row,dict) and row.get("id")==sys.argv[1] for row in rows) else 1)
+' "$exact_snapshot"; then
+                    return 0
+                fi
+            elif [ -n "$(printf '%s' "$SNAPSHOTS_JSON" | python3 "$SNAPSHOT_SELECTOR_SCRIPT" 2>/dev/null || true)" ]; then
                 return 0
             fi
         fi
@@ -1215,6 +1257,12 @@ list_donor_snapshots() {
 # ── Capture an explicit immutable fleet source ─────────────────────────────
 PRIVATE_SOURCE_FILE=""
 PRIVATE_SOURCE_SHA256="none"
+PRIVATE_SOURCE_LEASE_PROTOCOL="none"
+PRIVATE_SOURCE_GUEST_ENV_MODE="none"
+PRIVATE_SOURCE_GUEST_ENV_CAPSULE_SHA256="none"
+PRIVATE_SOURCE_LEASE_PID=""
+PRIVATE_SOURCE_LEASE_READY=""
+PRIVATE_SOURCE_LEASE_RELEASE=""
 PRIVATE_SOURCE_ID=""
 PRIVATE_SOURCE_VOLUME_ID=""
 SHARED_WARM_ID=""
@@ -1227,6 +1275,14 @@ if [ -n "${CLOUDBENCH_SOURCE_MANIFEST:-}" ]; then
         PRIVATE_SOURCE_REGION PRIVATE_SOURCE_NODE_FP PRIVATE_SOURCE_PY_FP \
         SHARED_WARM_ID SHARED_WARM_VOLUME_ID PRIVATE_SOURCE_INSTANCE_ID < <(python3 "$SOURCE_HELPER" fields "$PRIVATE_SOURCE_FILE")
     [ -n "$PRIVATE_SOURCE_ID" ] && [ -n "$SHARED_WARM_VOLUME_ID" ] || exit 1
+    PRIVATE_SOURCE_LEASE_PROTOCOL="$(python3 "$SOURCE_HELPER" protocol "$PRIVATE_SOURCE_FILE")" || exit 1
+    read -r PRIVATE_SOURCE_GUEST_ENV_MODE PRIVATE_SOURCE_GUEST_ENV_CAPSULE_SHA256 < <(
+        python3 - "$PRIVATE_SOURCE_FILE" <<'PY_CAPSULE_CAPTURE'
+import json, sys
+value = json.load(open(sys.argv[1]))
+print(value.get('guest_env_mode', 'none'), value.get('guest_env_capsule_sha256', 'none'))
+PY_CAPSULE_CAPTURE
+    )
     # Re-exec children consume the same captured bytes, never the caller's path.
     export CLOUDBENCH_SOURCE_MANIFEST="$PRIVATE_SOURCE_FILE"
 fi
@@ -1331,6 +1387,8 @@ while [ $# -gt 0 ]; do
             RECOVER_STALE_ONLY="1"; RECOVER_PRIMARY_TO_POOL="1"; DETACH="0"; WAIT_FOR_DETACHED="0"
             RECOVER_OWNER_TOKEN="${2:-}"; shift 2
             ;;
+        --accept-lost-runtime-evidence)
+            RECOVER_ACCEPT_LOST_EVIDENCE="1"; shift ;;
         --sim-on)         SIM_ON_CSV="${2:-}"; shift 2 ;;
         --ref)            BENCH_REF="${2:-}"; shift 2 ;;
         --dash-base)      DASH_BASE="${2:-}"; shift 2 ;;
@@ -1343,8 +1401,8 @@ while [ $# -gt 0 ]; do
             if [ "$#" -ge 2 ]; then shift 2; else shift; fi
             ;;
         --provision-pool) PROVISION_POOL="${2:-}"; shift 2 ;;   # one-time: create N stopped clones, then exit
-        --fresh-volumes) FRESH_VOLUMES=1; FRESH_VOLUMES_REQUESTED=1; shift ;;
-        --snapshot-volumes) FRESH_VOLUMES=0; FRESH_VOLUMES_REQUESTED=0; shift ;;
+        --fresh-volumes) FRESH_VOLUMES=1; FRESH_VOLUMES_REQUESTED=1; SNAPSHOT_VOLUMES_REQUESTED=0; shift ;;
+        --snapshot-volumes) FRESH_VOLUMES=0; FRESH_VOLUMES_REQUESTED=0; SNAPSHOT_VOLUMES_REQUESTED=1; shift ;;
         --qualify-worker) QUALIFY_WORKER=1; shift ;;
         --infra-probe)    INFRA_PROBE="1"; STRICT_BARRIER="1"; shift ;;
         --skip-autoscaler) SKIP_AUTOSCALER="1"; shift ;;
@@ -1365,6 +1423,24 @@ done
 # Maintenance reconciles its original ownership; never converts old borrowed resources.
 [ "$RECOVER_STALE_ONLY" != 1 ] || DISPOSABLE_LIFECYCLE=0
 case "$FRESH_VOLUMES" in 0|1) ;; *) echo "❌ invalid fresh-volume mode" >&2; exit 2 ;; esac
+owned_capsule_storage_admission() {
+    [ "${PRIVATE_SOURCE_GUEST_ENV_MODE:-none}" = owned-capsule-v1 ] || return 0
+    [ "${RECOVER_STALE_ONLY:-0}" != 1 ] || return 0
+    # This typed source stores its private capsule outside the checkout on its
+    # immutable Volume snapshot. Empty storage cannot execute its environment.
+    if [ "${FRESH_VOLUMES_REQUESTED:-0}" != 0 ] \
+        || { [ "${CLOUDBENCH_FRESH_VOLUMES:-0}" = 1 ] && [ "${SNAPSHOT_VOLUMES_REQUESTED:-0}" != 1 ]; } \
+        || [ "${POOL_COLD_BOOTSTRAP:-0}" = 1 ]; then
+        echo "❌ owned-capsule source requires its captured snapshot; explicit fresh-empty or cold bootstrap policy conflicts" >&2
+        return 1
+    fi
+    [ -n "${PRIVATE_SOURCE_FILE:-}" ] && [ -n "${PRIVATE_SOURCE_SNAPSHOT:-}" ] \
+        && [ "${PRIVATE_SOURCE_LEASE_PROTOCOL:-none}" = cloudbench-source-lease-v1 ]
+}
+owned_capsule_storage_admission || exit 2
+if [ "${PRIVATE_SOURCE_GUEST_ENV_MODE:-none}" = owned-capsule-v1 ]; then
+    FRESH_VOLUMES=0
+fi
 reuse_pool_only_admission() {
     [ "${POOL_REUSE_ONLY:-0}" = 1 ] || return 0
     # Recovery maintenance allocates no new Machine and must remain available.
@@ -1415,6 +1491,12 @@ if [ "${CLOUDBENCH_TEST_FLEET_OWNER_TOKEN+x}" != "x" ]; then
         [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;;
         *) echo "❌ fleet owner token must be exactly 32 lowercase hex characters" >&2; exit 2 ;;
     esac
+fi
+if [ "${RECOVER_ACCEPT_LOST_EVIDENCE:-0}" = "1" ] && { [ "$RECOVER_STALE_ONLY" != "1" ] \
+    || [ "${RECOVER_PRIMARY_TO_POOL:-0}" = "1" ] || [ "${RECOVER_UNSTAGED_WORKER:-0}" = "1" ] \
+    || [ -n "$COLD_HANDOFF_REQUEST" ] || [ "${#EXPLICIT_IDLE_ARGS[@]}" -ne 0 ]; }; then
+    echo "❌ --accept-lost-runtime-evidence is valid only with --recover-stale-owner TOKEN" >&2
+    exit 2
 fi
 if [ "$RECOVER_STALE_ONLY" = "1" ] && [ -z "$COLD_HANDOFF_REQUEST" ] && [ "${#EXPLICIT_IDLE_ARGS[@]}" -eq 0 ]; then
     case "$RECOVER_OWNER_TOKEN" in
@@ -1801,7 +1883,7 @@ exit "$status"
     fi
     echo "🛰️  fleet controller detached (own session; survives launcher exit)"
     echo "    log: tail -f $DETACH_LOG"
-    echo "    monitor every 30s; the log prints the exact run-bench monitor command."
+    echo "    monitor it; the log prints the exact run-bench monitor command."
     echo "    check terminal lifecycle on every poll; task PASS/FAIL precedes cleanup."
     echo "    stale observations require read-only reconciliation, never an automatic restart."
     printf '    controller exit marker: %q (check on every poll, even if logs stop growing)\n' "$DETACH_STATUS"
@@ -1890,6 +1972,15 @@ if ! command -v flyctl >/dev/null 2>&1; then
     if [ -x "$HOME/.fly/bin/flyctl" ]; then export PATH="$HOME/.fly/bin:$PATH"; else
         echo "❌ flyctl not found on PATH." >&2; exit 1; fi
 fi
+# Exclude recovery custody from foreground native Fly calls. Bash restores
+# this temporary redirection in the controller after the command returns.
+flyctl() {
+    if [ -n "${REGISTRY_RECOVERY_GUARD_FD:-}" ]; then
+        command flyctl "$@" {REGISTRY_RECOVERY_GUARD_FD}<&-
+    else
+        command flyctl "$@"
+    fi
+}
 # shellcheck source=lib/cloudbench-inventory.sh
 source "${CLOUDBENCH_SCRIPT_SNAPSHOT:-$ROOT_DIR/scripts/lib}/cloudbench-inventory.sh"
 source "${CLOUDBENCH_SCRIPT_SNAPSHOT:-$ROOT_DIR/scripts/lib}/cloudbench-archived-reuse.sh"
@@ -1897,9 +1988,134 @@ source "${CLOUDBENCH_SCRIPT_SNAPSHOT:-$ROOT_DIR/scripts/lib}/cloudbench-archived
 FLY_API_TOKEN="$(resolve_fly_token)"
 [ -n "${FLY_API_TOKEN:-}" ] || { echo "❌ No Fly auth token found." >&2; exit 1; }
 export FLY_API_TOKEN
+private_source_holder_identity() {
+    python3 "${CLOUDBENCH_SCRIPT_SNAPSHOT:-$ROOT_DIR/scripts}/process-identity.py" "$PRIVATE_SOURCE_LEASE_PID"
+}
+
+private_source_lease_guard() {
+    [ "${PRIVATE_SOURCE_LEASE_PROTOCOL:-none}" != none ] || return 0
+    [ "$PRIVATE_SOURCE_LEASE_PROTOCOL" = cloudbench-source-lease-v1 ] || return 1
+    python3 "$SOURCE_LEASE_HELPER" check --ready "$PRIVATE_SOURCE_LEASE_READY" --manifest "$PRIVATE_SOURCE_FILE" \
+        --consumer-owner "$FLEET_OWNER_TOKEN" --run-id "$RUN_ID" \
+        --source-id "$PRIVATE_SOURCE_ID" --manifest-sha256 "$PRIVATE_SOURCE_SHA256" \
+        --parent-pid "$PRIVATE_SOURCE_LEASE_PARENT_PID"
+}
+
+start_private_source_lease() {
+    [ "${PRIVATE_SOURCE_LEASE_PROTOCOL:-none}" != none ] || return 0
+    PRIVATE_SOURCE_LEASE_PARENT_PID="$$"
+    PRIVATE_SOURCE_LEASE_READY="$FLEET_DIR/source-lease/ready.json"
+    PRIVATE_SOURCE_LEASE_RELEASE="$FLEET_DIR/source-lease/release.json"
+    python3 "$SOURCE_LEASE_HELPER" hold --manifest "$PRIVATE_SOURCE_FILE" \
+        --consumer-owner "$FLEET_OWNER_TOKEN" --run-id "$RUN_ID" --workspace "$ROOT_DIR" \
+        --journal "$FLEET_DIR/source-lease" --ready "$PRIVATE_SOURCE_LEASE_READY" \
+        --release-proof "$PRIVATE_SOURCE_LEASE_RELEASE" --parent-pid "$$" \
+        >"$FLEET_DIR/source-lease.log" 2>&1 &
+    PRIVATE_SOURCE_LEASE_PID=$!
+    PRIVATE_SOURCE_LEASE_BIRTH="$(private_source_holder_identity)" || return 1
+    local deadline=$((SECONDS + 60))
+    while [ ! -f "$PRIVATE_SOURCE_LEASE_READY" ]; do
+        if ! kill -0 "$PRIVATE_SOURCE_LEASE_PID" 2>/dev/null || [ "$SECONDS" -ge "$deadline" ]; then
+            echo "❌ private source lease was not admitted; no clone allocation authorized" >&2
+            return 1
+        fi
+        sleep 1
+    done
+    export PRIVATE_SOURCE_LEASE_PROTOCOL PRIVATE_SOURCE_LEASE_READY PRIVATE_SOURCE_LEASE_PARENT_PID \
+        PRIVATE_SOURCE_ID PRIVATE_SOURCE_SHA256 PRIVATE_SOURCE_FILE SOURCE_LEASE_HELPER FLEET_OWNER_TOKEN RUN_ID
+    private_source_lease_guard
+}
+
+finish_private_source_lease() {
+    [ -n "${PRIVATE_SOURCE_LEASE_PID:-}" ] || return 0
+    local status=0 deadline=$((SECONDS + ${CLOUDBENCH_CHILD_TERM_SECONDS:-30}))
+    if [ -z "${PRIVATE_SOURCE_LEASE_BIRTH:-}" ] || \
+        [ "$(private_source_holder_identity 2>/dev/null || true)" != "$PRIVATE_SOURCE_LEASE_BIRTH" ]; then
+        # A recycled PID or unreadable birth is never authority to signal or wait.
+        echo "❌ source holder identity unavailable; durable claim retained" >&2
+        return 1
+    fi
+    if [ -f "$FLEET_DIR/_batch/lifecycle.json" ] && [ -d "${FLEET_TEARDOWN_OWNERSHIP_DIR:-}" ]; then
+        python3 - "$PRIVATE_SOURCE_LEASE_RELEASE" "$FLEET_TEARDOWN_OWNERSHIP_DIR" "$FLEET_DIR/_batch/lifecycle.json" \
+            "$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-volume-migration.py" <<'PY_SOURCE_RELEASE' || status=1
+import json, runpy, sys
+from pathlib import Path
+path, audit, lifecycle, helper = sys.argv[1:]
+storage = runpy.run_path(helper)
+payload = (json.dumps({'audit_dir': audit, 'lifecycle': lifecycle}, sort_keys=True) + '\n').encode()
+storage['publish'](Path(path), payload, immutable=True)
+PY_SOURCE_RELEASE
+    else
+        status=1
+    fi
+    while kill -0 "$PRIVATE_SOURCE_LEASE_PID" 2>/dev/null && [ "$SECONDS" -lt "$deadline" ] && [ "$status" = 0 ]; do
+        # A completed child must be reaped even when kill -0 still sees a zombie.
+        case "$(ps -p "$PRIVATE_SOURCE_LEASE_PID" -o stat= 2>/dev/null)" in ''|Z*) break ;; esac
+        sleep 1
+    done
+    if kill -0 "$PRIVATE_SOURCE_LEASE_PID" 2>/dev/null; then
+        case "$(ps -p "$PRIVATE_SOURCE_LEASE_PID" -o stat= 2>/dev/null)" in
+            ''|Z*) ;;
+            *)
+                status=1
+                # The normal close budget is spent. Reuse the existing exact-job,
+                # birth-fenced tree join with no additional TERM grace.
+                if ! cloudbench_terminate_tree_and_wait 0 "$PRIVATE_SOURCE_LEASE_PID"; then
+                    echo "❌ source lease holder did not join; durable claim retained" >&2
+                    return 1
+                fi ;;
+        esac
+    fi
+    wait "$PRIVATE_SOURCE_LEASE_PID" || status=1
+    PRIVATE_SOURCE_LEASE_PID=""
+    [ "$status" = 0 ] || echo "❌ source consumer closure unresolved; durable claim retained" >&2
+    return "$status"
+}
+
+fleet_seal_source_claim_unresolved() {  # <lifecycle.json>: holder exited without closing its durable claim
+    # The holder's close needs the sealed lifecycle as its proof, so the claim
+    # result is known only afterward. Reseal the run verdict as failed while
+    # preserving the physical teardown facts (cleanup_verified, audit_sha256)
+    # that exact-owner claim recovery still requires.
+    [ -f "$1" ] && [ ! -L "$1" ] || return 0
+    python3 - "$1" <<'PY_SOURCE_CLAIM_VERDICT'
+import json
+import os
+import sys
+from pathlib import Path
+
+target = Path(sys.argv[1])
+payload = json.loads(target.read_text())
+if not isinstance(payload, dict) or payload.get("version") != 1:
+    raise SystemExit(1)
+payload.update(status="failed", controller_exit_code=1, source_claim_closed=False)
+temporary = target.with_name(f".lifecycle.{os.getpid()}.tmp")
+try:
+    with temporary.open("x") as handle:
+        json.dump(payload, handle, sort_keys=True)
+        handle.write("\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temporary, target)
+    descriptor = os.open(target.parent, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+finally:
+    temporary.unlink(missing_ok=True)
+PY_SOURCE_CLAIM_VERDICT
+}
+
 private_source_allows_provider_call() {
     [ -n "${PRIVATE_SOURCE_ID:-}" ] || return 0
     local verb="${1:-} ${2:-}" arg
+    case "$verb" in
+        "machine clone"|"machines clone"|"machine run"|"machines run")
+            if [ "${PRIVATE_SOURCE_LEASE_PROTOCOL:-none}" != none ]; then
+                private_source_lease_guard || return 1
+            fi ;;
+    esac
     case "$verb" in
         "machine update"|"machines update"|"machine start"|"machines start"|"machine stop"|"machines stop"|"machine destroy"|"machines destroy"|"machine restart"|"machines restart"|"volumes destroy"|"volume destroy"|"volumes update"|"volume update"|"ssh console"|"ssh sftp")
             for arg in "$@"; do
@@ -1955,6 +2171,7 @@ bench_simulates() {  # <task>; --sim-on or a catalog simulate task (the guest se
 }
 primary_clone_storage_mode() {
     local bench="$1" index
+    [ "${PRIVATE_SOURCE_GUEST_ENV_MODE:-none}" != owned-capsule-v1 ] || { printf snapshot; return; }
     [ "$FRESH_VOLUMES" = 1 ] || { printf snapshot; return; }
     is_sim_on "$bench" && { printf snapshot; return; }
     for index in "${!BENCHES[@]}"; do
@@ -2111,21 +2328,20 @@ print(volume_ids[0])
 }
 
 machine_status_exact_read() {  # <machine-id> [timeout-seconds]; 0=exact status, 1=exactly absent, 2=unsafe read
-    local id="$1" timeout="${2:-}" output status
+    local id="$1" timeout="${2:-30}" output status
     case "$id" in ''|*[!0-9a-f]*) return 2 ;; esac
     case "$timeout" in *[!0-9]*) return 2 ;; esac
-    # A caller with a wall-clock budget bounds this exact read; a timed-out
-    # read is an unsafe read, never an absence.
-    if [ -n "$timeout" ]; then
-        if output="$(fly_with_timeout "$timeout" machine status "$id" -a "$APP")"; then
-            status=0
-        else
-            status=$?
-        fi
-    elif output="$(FLY machine status "$id" -a "$APP" 2>&1)"; then
+    # Exact native reads are bounded even without an outer caller budget.
+    # Callers with a shorter wall-clock allowance keep their explicit limit.
+    if output="$(fly_with_timeout "$timeout" machine status "$id" -a "$APP")"; then
         status=0
     else
         status=$?
+    fi
+    # Partial output from an expired or signalled call cannot prove absence.
+    if [ "$status" -ge 128 ]; then
+        printf '%s\n' "${output:0:200}" >&2
+        return 2
     fi
     if [ "$status" -eq 0 ]; then
         printf '%s\n' "$output"
@@ -2141,16 +2357,13 @@ machine_status_exact_read() {  # <machine-id> [timeout-seconds]; 0=exact status,
 }
 
 machine_config_exact_read() {  # <machine-id> [timeout-seconds]; exact config JSON or non-zero
-    local id="$1" timeout="${2:-}"
+    local id="$1" timeout="${2:-30}"
     case "$id" in ''|*[!0-9a-f]*) return 1 ;; esac
     case "$timeout" in *[!0-9]*) return 1 ;; esac
-    if [ -n "$timeout" ]; then
-        # Explicit status: cleanup calls this from an EXIT trap, where a bare
-        # `return` reports the status from before the trap.
-        fly_with_timeout "$timeout" machine status "$id" -a "$APP" -d
-        return "$?"
-    fi
-    FLY machine status "$id" -a "$APP" -d 2>/dev/null
+    # Explicit status: cleanup calls this from an EXIT trap, where a bare
+    # `return` reports the status from before the trap.
+    fly_with_timeout "$timeout" machine status "$id" -a "$APP" -d
+    return "$?"
 }
 
 machine_volume_id() {  # machine_volume_id <machine_id> [timeout-seconds] → its mounted volume id (or empty)
@@ -2681,7 +2894,8 @@ path = sys.argv[1]
 if not os.path.isfile(path) or os.path.islink(path):
     raise SystemExit(1)
 with open(path, 'rb') as manifest:
-    raise SystemExit(0 if json.loads(manifest.read(1048577)).get('prelaunch') is True else 1)
+    value = json.loads(manifest.read(1048577))
+    raise SystemExit(0 if value.get('prelaunch') is True or value.get('prestack') is True else 1)
 PY
 }
 
@@ -2717,11 +2931,17 @@ assert re.fullmatch(r'[0-9a-f]+', owner['machine_id'])
 assert re.fullmatch(r'[A-Za-z0-9._-]+', owner['run_token'])
 assert all(owner[k] == manifest[k] for k in ('run_token', 'machine_id'))
 prelaunch = manifest.get('prelaunch') is True
-if prelaunch:
-    # The guest stopped before launching any driver or stack: its exact
-    # bench.log is the complete runtime evidence.
-    assert set(manifest) == {'version', 'run_token', 'machine_id', 'files', 'prelaunch'}
-    assert set(manifest['files']) == {'bench.log'}
+prestack = manifest.get('prestack') is True
+no_stack = prelaunch or prestack
+if no_stack:
+    # Prelaunch means no driver; prestack means the driver cleaned up before
+    # attempting run.sh. Neither phase has a benchmark result.
+    phase = 'prelaunch' if prelaunch else 'prestack'
+    assert set(manifest) == {'version', 'run_token', 'machine_id', 'files', phase}
+    expected = {'bench.log'} if prelaunch else {'bench.log', 'cloudbench-prestack-' + owner['run_token'] + '.sealed'}
+    assert set(manifest['files']) == expected
+    if prestack:
+        assert read(root / ('cloudbench-prestack-' + owner['run_token'] + '.sealed')) == (owner['run_token'] + '\n').encode()
     stamp = ('RUNSTAMP-' + owner['run_token'] + '\n').encode()
     with open(root / 'bench.log', 'rb') as log:
         assert log.read(len(stamp)) == stamp
@@ -2757,7 +2977,7 @@ for name, row in manifest['files'].items():
         assert (before.st_ino, before.st_size, before.st_mtime_ns) == (after.st_ino, after.st_size, after.st_mtime_ns)
         assert digest.hexdigest() == row['sha256']
         os.fsync(f.fileno())
-for directory in ((root, root.parent, out) if prelaunch else (root / 'logs', root, root.parent, out)):
+for directory in ((root, root.parent, out) if no_stack else (root / 'logs', root, root.parent, out)):
     fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
         os.fsync(fd)
@@ -2805,6 +3025,13 @@ PY
 }
 
 cloudbench_collect_remaining_runtime_evidence() {
+    # A rejected configuration has no guest runtime to manifest. Reverify its
+    # existing zero-credit whole-owner archive before accepting that phase.
+    if [ -e "$FLEET_REGISTRY_DIR/preconfig-evidence-consumed" ] \
+        || [ -L "$FLEET_REGISTRY_DIR/preconfig-evidence-consumed" ]; then
+        fleet_recovery_confirm_preconfig_cohort "$FLEET_REGISTRY_DIR"
+        return $?
+    fi
     local out owner wid pid j failed=0
     local -a capture_pids=()
     for j in "${!CHILD_OUT[@]}"; do
@@ -2870,6 +3097,9 @@ cloudbench_collect_remaining_runtime_evidence() {
         return 1
     fi
     if [ "${FLEET_REGISTRY_PUBLISHED:-0}" = "1" ]; then
+        if fleet_has_replaced_preconfig_phase "$FLEET_REGISTRY_DIR"; then
+            fleet_recovery_verify_replaced_preconfig "$FLEET_REGISTRY_DIR" || return 1
+        fi
         rm -f "$FLEET_REGISTRY_DIR/runtime-evidence-unconfirmed" \
             && cloudbench_fsync_directory "$FLEET_REGISTRY_DIR"
     fi
@@ -6051,7 +6281,7 @@ fleet_disable_disposable_volume_snapshots() (  # <name> <Machine> <Volume> [snap
     [ "${DISPOSABLE_LIFECYCLE:-0}" = 1 ] || return 0
     fleet_current_disposable_registry "$FLEET_REGISTRY_DIR" || return 1
     # Pass the exact source-owned mutation guards to bounded child shells.
-    export -f FLY private_source_allows_provider_call \
+    export -f FLY private_source_allows_provider_call private_source_lease_guard \
         archived_reuse_helper archived_reuse_sftp_get archived_reuse_transport_args \
         archived_reuse_fenced_effect cloudbench_mutation_admission cloudbench_mutation_launch_code
     export APP GIT_COMMON_DIR PRIVATE_SOURCE_ID PRIVATE_SOURCE_VOLUME_ID SHARED_WARM_ID SHARED_WARM_VOLUME_ID \
@@ -6280,6 +6510,7 @@ fleet_reap_registry_record_native() {  # <registry> <mode> <version> <legacy-sta
                 unresolved=1
                 continue
             fi
+            fleet_replaced_preconfig_verify_before_reap "$registry" "$id" "$volume_id" absent || return 1
             if [ -e "$registry/preconfig-evidence-consumed" ] || [ -L "$registry/preconfig-evidence-consumed" ]; then
                 fleet_preconfig_verify_before_reap "$registry" "$id" "$volume_id" absent || return 1
             fi
@@ -6303,6 +6534,11 @@ fleet_reap_registry_record_native() {  # <registry> <mode> <version> <legacy-sta
         if [ "$actual_name" != "$clone_name" ]; then
             echo "❌ machine identity mismatch for $id ($actual_name != $clone_name); refusing cleanup" >&2
             return 1
+        fi
+        local fresh_prestart_proof
+        fresh_prestart_proof="$(registry_meta_value "$registry/meta" runs_root)/$(registry_meta_value "$registry/meta" run_id)/_batch/fresh-prestart-recovery.json"
+        if [ "$state" != destroyed ] && { [ -e "$fresh_prestart_proof" ] || [ -L "$fresh_prestart_proof" ]; }; then
+            fleet_fresh_prestart_reap_guard "$registry" "$id" || return 1
         fi
         if [ -z "$volume_id" ]; then
             volume_id="$(machine_volume_id "$id")"
@@ -6329,6 +6565,7 @@ fleet_reap_registry_record_native() {  # <registry> <mode> <version> <legacy-sta
             volume_id="$(fleet_registry_reconcile_mounted_volume \
                 "$registry" "$clone_name" "$id")" || return 1
         fi
+        fleet_replaced_preconfig_verify_before_reap "$registry" "$id" "$volume_id" "$state" || return 1
         if [ -e "$registry/preconfig-evidence-consumed" ] || [ -L "$registry/preconfig-evidence-consumed" ]; then
             fleet_preconfig_verify_before_reap "$registry" "$id" "$volume_id" "$state" || return 1
         fi
@@ -6410,7 +6647,7 @@ reap_registry_clones() {  # reap_registry_clones <registry-dir> <current|stale|f
         echo "❌ refusing to destroy fleet machines whose guest cleanup is unconfirmed: $registry" >&2
         return 1
     fi
-    if [ "${DISPOSABLE_REAP:-0}" != 1 ] && { [ -e "$registry/runtime-evidence-unconfirmed" ] \
+    if { [ -e "$registry/runtime-evidence-unconfirmed" ] \
         || [ -L "$registry/runtime-evidence-unconfirmed" ]; }; then
         echo "❌ refusing to destroy fleet machines whose runtime evidence is unconfirmed: $registry" >&2
         return 1
@@ -6515,8 +6752,12 @@ fleet_registry_release_verified() {
         --fleet "$FLEET_DIR" --owner "$FLEET_OWNER_TOKEN" --run "$RUN_ID"
 }
 
-acquire_registry_recovery_lock() {  # acquire_registry_recovery_lock <registry-dir>
-    local registry="$1" lock="$1/recovery-lock" tmp
+acquire_registry_recovery_lock() {  # acquire_registry_recovery_lock <registry-dir> [skip-busy]
+    # Returns 0 when acquired, 2 when the registry vanished, and 1 on refusal or
+    # timeout. With skip-busy, a recovery held by a live process returns 3 at
+    # once: that peer owns the registry exactly as a live controller would, so
+    # an unrelated startup scan must not queue behind its provider teardown.
+    local registry="$1" lock="$1/recovery-lock" tmp busy_policy="${2:-wait}"
     local guard="${registry%/*/*}/cloudbench-fleet-recovery-locks/${registry##*/}"
     # The capture helper uses this same persistent inode. Never unlink it:
     # removing the registry metadata must not split concurrent recoverers.
@@ -6552,6 +6793,8 @@ except BlockingIOError:
     raise SystemExit(1)
 PYGUARD
         if [ "$guard_status" -eq 1 ]; then
+            # The kernel releases flock on exit: contention proves a live holder.
+            if [ "$busy_policy" = skip-busy ]; then release_registry_recovery_guard; return 3; fi
             sleep 1
             continue
         fi
@@ -6575,7 +6818,9 @@ PYGUARD
         if [ -f "$lock/meta" ]; then
             registry_owner_alive "$lock/meta"
             case $? in
-                0) sleep 1; continue ;;
+                0)
+                    if [ "$busy_policy" = skip-busy ]; then release_registry_recovery_guard; return 3; fi
+                    sleep 1; continue ;;
                 1) rm -rf "$lock"; continue ;;
                 *) echo "❌ cannot prove stale recovery lock ownership for $registry" >&2; release_registry_recovery_guard; return 1 ;;
             esac
@@ -7372,7 +7617,7 @@ reap_orphaned_fleet_proxies() {
     # descendants orphaned inside a cloud workspace are adopted by that runtime
     # instead of PID 1. Treat only those two known adopter boundaries as orphan
     # proof; a concurrently running fleet's proxy has a run-bench-cloud parent
-    # and is never touched (rule 27).
+    # and is never touched (never kill another session's benchmark processes).
     local pids pid ppid command parent_command
     pids="$(
         ps -o pid=,ppid=,command= -ax 2>/dev/null \
@@ -7539,9 +7784,17 @@ reconcile_stale_fleet_registries_full() {
             unresolved=1
             continue
         }
-        acquire_registry_recovery_lock "$registry"
+        acquire_registry_recovery_lock "$registry" skip-busy
         recovery_lock_status=$?
         [ "$recovery_lock_status" -eq 2 ] && continue
+        if [ "$recovery_lock_status" -eq 3 ]; then
+            # Concurrent jobs share this host-wide scan. The live recoverer
+            # finishes (or fails closed for) this registry; its clones remain
+            # visible to the provider capacity snapshot, refreshed below.
+            echo "↪️  stale fleet registry $(basename "$registry") is being recovered by a live peer; leaving it to that owner"
+            FLEET_STALE_RECONCILIATION_MAY_HAVE_MUTATED=1
+            continue
+        fi
         if [ "$recovery_lock_status" -ne 0 ]; then
             unresolved=1
             continue
@@ -8267,7 +8520,7 @@ recover_exact_pool_claims() {  # <dead-owner-meta> [exact]
 
 fleet_registry_build_guest_recovery_plan() {  # <registry-dir> <output-plan>
     local registry="${1%/}" plan="$2"
-    python3 - "$registry" "$plan" "$APP" "${FLEET_AUDIT_ROOT:-}" "${SOURCE_HELPER:-}" "${POOL_CLAIMS_DIR:-}" <<'PY'
+    python3 - "$registry" "$plan" "$APP" "${FLEET_AUDIT_ROOT:-}" "${SOURCE_HELPER:-}" "${POOL_CLAIMS_DIR:-}" "${STARTUP_FAILURE_ARCHIVE_HELPER:-}" <<'PY'
 import hashlib
 import json
 import os
@@ -8518,6 +8771,25 @@ if pool_dir is not None and pool_dir.exists():
         pool_ids.add(machine_id)
         volume_ids.add(volume_id)
 
+replaced_outputs = {}
+replaced_helper = sys.argv[7] if len(sys.argv) > 7 else ""
+for task in run_dir.iterdir():
+    if plain_directory(task) and ((task / "boot-config-host-replaced").exists()
+                                  or (task / "boot-config-host-replaced").is_symlink()
+                                  or any(task.glob("host-replaced-*"))):
+        if not replaced_helper:
+            raise ValueError("replaced pre-config recovery helper missing")
+        for bench, machine, token, output in runpy.run_path(replaced_helper)["replaced_preconfig_members"](registry):
+            if machine in replaced_outputs:
+                raise ValueError("duplicate replaced pre-config output")
+            replaced_outputs[machine] = (bench, Path(output), 0)
+        break
+if any(machine not in machine_records for machine in replaced_outputs):
+    # Retired replacements are checked by their durable per-member receipt;
+    # they are no longer a live guest obligation.
+    replaced_outputs = {machine: row for machine, row in replaced_outputs.items()
+                        if machine in machine_records}
+
 retired_sources: dict[str, str] = {}
 
 
@@ -8652,6 +8924,11 @@ for candidate in run_dir.iterdir():
         if not port_value.isdigit() or not 1024 <= int(port_value) <= 65_535:
             raise ValueError("invalid stale-owner status proxy port")
     output_by_machine[machine_id] = (candidate.name, candidate, int(port_value))
+
+for machine_id, row in replaced_outputs.items():
+    if machine_id in output_by_machine or machine_id in retired_outputs:
+        raise ValueError("replaced pre-config machine duplicates live output")
+    output_by_machine[machine_id] = row
 
 if retired_outputs:
     root_sources = {retired_sources[machine_id] for machine_id in retired_outputs}
@@ -8804,7 +9081,7 @@ for machine_id, (clone_name, volume_id) in machine_records.items():
         continue
     bench, output, preferred_port = output_by_machine[machine_id]
     values = (
-        "pool-guest" if machine_id in pool_ids else "guest",
+        "replaced-preconfig" if machine_id in replaced_outputs else "pool-guest" if machine_id in pool_ids else "guest",
         bench,
         clone_name,
         machine_id,
@@ -9792,8 +10069,9 @@ PY
     return "$status"
 }
 
-cloudbench_recover_guest_cleanup_receipts() {  # <registry-dir>
+cloudbench_recover_guest_cleanup_receipts() {  # <registry-dir> [failed-runtime-output]
     local registry="${1%/}" owner="${1%/}" recovered=0 failed=0 recovery_index
+    local failed_runtime_output="${2:-}" runtime_recovery=0
     local bench clone_name machine_id machine_state guest_run_token proxy_port output
     local runner_status_code
     local receipt runner_evidence quiescence_evidence run_evidence backend_evidence
@@ -9827,6 +10105,37 @@ cloudbench_recover_guest_cleanup_receipts() {  # <registry-dir>
         guest_run_token="${recovery_guest_tokens[$recovery_index]}"
         proxy_port="${recovery_proxy_ports[$recovery_index]}"
         output="${recovery_outputs[$recovery_index]}"
+        runtime_recovery=0
+        if [ -n "$failed_runtime_output" ]; then
+            [ "$output" = "$failed_runtime_output" ] || continue
+            # This mode is reached only after the normal sealed transfer failed.
+            # The normal owner/plan/config checks remain upstream; bind this
+            # unfinished transfer before entering existing exact session cleanup.
+            if ! python3 - "$output" "$machine_id" "$guest_run_token" <<'PYRUNTIME'
+import json, os, stat, sys
+from pathlib import Path
+out, machine, token = Path(sys.argv[1]), sys.argv[2], sys.argv[3]
+def read(name):
+    path = out / name
+    with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), "rb") as stream:
+        info = os.fstat(stream.fileno())
+        assert stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and info.st_size <= 65536
+        value = stream.read(65537)
+    assert len(value) <= 65536
+    return value
+identity = {"version": 1, "machine_id": machine, "run_token": token}
+assert json.loads(read("runtime-evidence.owner.json")) == identity
+assert json.loads(read("runtime-evidence.pending")) == identity
+assert read("post-config-start.accepted") == (machine + "\n").encode()
+assert not (out / "remote-logs/runtime-evidence").exists()
+assert not (out / "remote-logs/runtime-evidence").is_symlink()
+PYRUNTIME
+            then
+                echo "❌ [$bench] failed runtime transfer identity is unsafe" >&2
+                return 1
+            fi
+            runtime_recovery=1
+        fi
         receipt="$output/guest-cleanup.recovery-receipt.json"
         runner_evidence="$output/guest-cleanup.runner.status"
         quiescence_evidence="$output/guest-cleanup.quiescence.json"
@@ -9876,10 +10185,11 @@ cloudbench_recover_guest_cleanup_receipts() {  # <registry-dir>
             if [ -f "$output/guest-shutdown.confirmed" ] \
                 && [ ! -L "$output/guest-shutdown.confirmed" ] \
                 && [ "$(cat "$output/guest-shutdown.confirmed" 2>/dev/null)" = "$RUN_ID" ]; then
-                recovered=$((recovered + 1))
-                continue
-            fi
-            if ! cloudbench_archive_bound_child_shutdown_confirmation \
+                if [ "$runtime_recovery" -eq 0 ]; then
+                    recovered=$((recovered + 1))
+                    continue
+                fi
+            elif ! cloudbench_archive_bound_child_shutdown_confirmation \
                     "$registry" "$bench" "$machine_id" "$output" "$guest_run_token"; then
                 echo "❌ [$bench] existing guest cleanup confirmation is unsafe" >&2
                 failed=1
@@ -9905,7 +10215,7 @@ PY
                 continue
             }
             if [ "$receipt_kind" = runner-cleanup ] \
-                && { [ "$machine_state" != started ] \
+                && { [ "$runtime_recovery" -eq 1 ] || [ "$machine_state" != started ] \
                     || [ "$(cloudbench_guest_shutdown_status "$proxy_port")" != 204 ]; }; then
                 # A clean benchmark root receipt does not prove that run.sh
                 # stopped its workers or sealed browser recordings. Retain the
@@ -9954,7 +10264,7 @@ PY
                 }
                 case "$runner_lifecycle" in
                     clean)
-                        if [ "$machine_state" = started ] \
+                        if [ "$runtime_recovery" -eq 0 ] && [ "$machine_state" = started ] \
                             && [ "$(cloudbench_guest_shutdown_status "$proxy_port")" = 204 ]; then
                             if python3 "$EXACT_SESSION_CLEANUP_HELPER" \
                                     recover-runner-receipt "${identity_args[@]}" \
@@ -10089,10 +10399,11 @@ PY
         }
         IFS=$'\t' read -r state_kind state_driver state_descendants state_reason \
             <<< "$state_summary"
-        if [ "$quiescence_status" -ne 0 ]; then
+        if [ "$quiescence_status" -ne 0 ] || [ "$runtime_recovery" -eq 1 ]; then
             if [ "$state_kind" = "active" ] \
                 || [ "$state_kind" = "exited-no-run" ] \
-                || [ "$state_kind" = "exited" ]; then
+                || [ "$state_kind" = "exited" ] \
+                || { [ "$runtime_recovery" -eq 1 ] && [ "$state_kind" = "quiesced" ]; }; then
                 cloudbench_fetch_guest_evidence status_code \
                     "$proxy_port" "$CLOUDBENCH_BARRIER_TOKEN" \
                     "/repo/.context/cloudbench/logs/backend.log" \
@@ -10237,7 +10548,132 @@ PY
         failed=1
     done
 
-    [ "$failed" -eq 0 ] && [ "$recovered" -eq "${#recovery_benches[@]}" ]
+    if [ -n "$failed_runtime_output" ]; then
+        [ "$failed" -eq 0 ] && [ "$recovered" -eq 1 ]
+    else
+        [ "$failed" -eq 0 ] && [ "$recovered" -eq "${#recovery_benches[@]}" ]
+    fi
+}
+
+fleet_has_replaced_preconfig() {
+    local run output
+    [ -e "$1/replaced-preconfig-phase.json" ] || [ -L "$1/replaced-preconfig-phase.json" ] || {
+        run="$(registry_meta_value "$1/meta" runs_root)/$(registry_meta_value "$1/meta" run_id)"
+        for output in "$run"/*/boot-config-host-replaced "$run"/*/host-replaced-*; do
+            [ ! -e "$output" ] && [ ! -L "$output" ] || return 0
+        done
+        return 1
+    }
+}
+
+fleet_has_replaced_preconfig_phase() {  # ordinary live replacements have no recovery phase
+    local run receipt
+    [ -e "$1/replaced-preconfig-phase.json" ] || [ -L "$1/replaced-preconfig-phase.json" ] || {
+        run="$(registry_meta_value "$1/meta" runs_root)/$(registry_meta_value "$1/meta" run_id)"
+        for receipt in "$run"/*/host-replaced-*/failed-preconfig-runtime-archive/consumed.json; do
+            [ ! -e "$receipt" ] && [ ! -L "$receipt" ] || return 0
+        done
+        return 1
+    }
+}
+
+fleet_recovery_verify_replaced_preconfig() {  # whole mapping + per-member phase revalidation
+    fleet_has_replaced_preconfig "$1" || return 0
+    local plan status=0
+    plan="$(mktemp "${TMPDIR:-/tmp}/cloudbench-replaced-plan.XXXXXX")" || return 1
+    fleet_registry_build_guest_recovery_plan "$1" "$plan" || status=1
+    rm -f "$plan"
+    [ "$status" -eq 0 ] || return 1
+    python3 - "$STARTUP_FAILURE_ARCHIVE_HELPER" "$1" <<'PYREPLACED'
+import runpy, sys
+runpy.run_path(sys.argv[1])["replaced_preconfig_members"](sys.argv[2], verified=True)
+PYREPLACED
+}
+
+fleet_recovery_confirm_replaced_preconfig() {  # <registry> <complete canonical plan>
+    local registry="$1" plan="$2" kind bench clone machine volume output port token base attempt
+    while IFS=$'\t' read -r kind bench clone machine volume output port; do
+        [ "$kind" = replaced-preconfig ] || continue
+        token="$(python3 - "$STARTUP_FAILURE_ARCHIVE_HELPER" "$registry" "$machine" "$output" <<'PYTOKEN'
+import runpy, sys
+rows = runpy.run_path(sys.argv[1])["replaced_preconfig_members"](sys.argv[2])
+found = [row[2] for row in rows if row[1] == sys.argv[3] and row[3] == sys.argv[4]]
+assert len(found) == 1
+print(found[0])
+PYTOKEN
+)" || return 1
+        base="$output/failed-preconfig-runtime-archive"
+        [ ! -L "$base" ] && mkdir -p "$base" && chmod 700 "$base" || return 1
+        attempt="$(mktemp -d "$base/attempt.XXXXXX")" || return 1
+        # Local rejection markers alone never establish a no-guest phase.
+        # Both exact native reads must still prove the original inert config.
+        fleet_preconfig_native_read "$machine" "$attempt/native-before.json" || return 1
+        if [ ! -e "$base/originals.tar.gz" ] && [ ! -L "$base/originals.tar.gz" ]; then
+            python3 "$STARTUP_FAILURE_ARCHIVE_HELPER" capture-preconfig --registry "$registry" \
+                --output "$output" --machine "$machine" --run-token "$token" \
+                --archive "$base/originals.tar.gz" || return 1
+        fi
+        fleet_preconfig_native_read "$machine" "$attempt/native-after.json" || return 1
+        python3 - "$STARTUP_FAILURE_ARCHIVE_HELPER" "$registry" "$output" "$machine" "$token" \
+            "$base/originals.tar.gz" "$attempt/native-before.json" "$attempt/native-after.json" "$base/consumed.json" <<'PYCONSUME'
+import runpy, sys
+module = runpy.run_path(sys.argv[1])
+module["commit_preconfig"](*sys.argv[2:])
+module["consume_replaced_preconfig"](*sys.argv[2:6], sys.argv[9])
+PYCONSUME
+        [ "$?" -eq 0 ] || return 1
+    done < "$plan"
+    fleet_recovery_verify_replaced_preconfig "$registry"
+}
+
+fleet_recovery_prepare_replaced_preconfig() {  # explicit stale recovery, including already-ACKed current guest
+    local registry="$1" plan status=0
+    fleet_has_replaced_preconfig "$registry" || return 0
+    if fleet_recovery_verify_replaced_preconfig "$registry" >/dev/null 2>&1; then
+        return 0
+    fi
+    plan="$(mktemp "${TMPDIR:-/tmp}/cloudbench-replaced-prepare.XXXXXX")" || return 1
+    if ! fleet_registry_build_guest_recovery_plan "$registry" "$plan" \
+        || ! fleet_recovery_confirm_replaced_preconfig "$registry" "$plan"; then
+        status=1
+    fi
+    rm -f "$plan"
+    return "$status"
+}
+
+fleet_replaced_preconfig_verify_before_reap() {  # exact per-member fresh native proof
+    local registry="$1" machine="$2" volume="$3" state="$4" binding output token base attempt
+    fleet_has_replaced_preconfig_phase "$registry" || return 0
+    fleet_recovery_verify_replaced_preconfig "$registry" || return 1
+    binding="$(python3 - "$STARTUP_FAILURE_ARCHIVE_HELPER" "$registry" "$machine" <<'PYBIND'
+import runpy, sys
+rows = runpy.run_path(sys.argv[1])["replaced_preconfig_members"](sys.argv[2], verified=True)
+found = [row for row in rows if row[1] == sys.argv[3]]
+assert len(found) <= 1
+if found:
+    print(found[0][3], found[0][2], sep="\t")
+PYBIND
+)" || return 1
+    [ -n "$binding" ] || return 0
+    IFS=$'\t' read -r output token <<< "$binding"
+    base="$output/failed-preconfig-runtime-archive"
+    if [ "$state" = absent ] || [ "$state" = destroyed ]; then
+        python3 - "$STARTUP_FAILURE_ARCHIVE_HELPER" "$registry" "$output" "$machine" "$token" "$base/consumed.json" "$volume" <<'PYABSENT'
+import runpy, sys
+proof = runpy.run_path(sys.argv[1])["verify_preconfig_receipt"](*sys.argv[2:7])
+assert proof["volume_id"] == sys.argv[7]
+PYABSENT
+        return $?
+    fi
+    attempt="$(mktemp -d "$base/reap.XXXXXX")" || return 1
+    fleet_preconfig_native_read "$machine" "$attempt/native-before.json" || return 1
+    fleet_preconfig_native_read "$machine" "$attempt/native-after.json" || return 1
+    python3 - "$STARTUP_FAILURE_ARCHIVE_HELPER" "$registry" "$output" "$machine" "$token" \
+        "$base/consumed.json" "$attempt/native-before.json" "$attempt/native-after.json" "$volume" <<'PYREAP'
+import runpy, sys
+proof = runpy.run_path(sys.argv[1])["verify_preconfig_receipt"](*sys.argv[2:9])
+assert proof["volume_id"] == sys.argv[9]
+PYREAP
 }
 
 fleet_preconfig_recovery_plan() {  # exact whole-owner fresh/no-admission cohort, local only
@@ -10557,6 +10993,78 @@ PY
     echo "✅ rejected startup originals preserved for exact zero-credit cleanup"
 }
 
+fleet_prestart_machine_exact_read() {  # <machine-id>; full native identity, not CLI config-only
+    python3 - "$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-original-volume-capture.py" "$APP" "$1" <<'PY'
+import json, os, re, runpy, sys
+assert re.fullmatch(r'[0-9a-f]{14}', sys.argv[3])
+module = runpy.run_path(sys.argv[1])
+client = module['Fly'](sys.argv[2], os.environ['FLY_API_TOKEN'])
+native = client.api('GET', '/machines/' + sys.argv[3], timeout=30)
+assert isinstance(native, dict) and native.get('id') == sys.argv[3]
+print(json.dumps(native))
+PY
+}
+
+fleet_prestart_events_exact_read() {  # <machine-id>; independent complete history
+    python3 - "$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-original-volume-capture.py" "$APP" "$1" <<'PY'
+import json, os, re, runpy, sys
+assert re.fullmatch(r'[0-9a-f]{14}', sys.argv[3])
+module = runpy.run_path(sys.argv[1])
+client = module['Fly'](sys.argv[2], os.environ['FLY_API_TOKEN'])
+print(json.dumps(client.api('GET', '/machines/' + sys.argv[3] + '/events', timeout=30)))
+PY
+}
+
+fleet_recovery_confirm_fresh_prestart() {  # <registry-dir>; exact reads, no guest start
+    local registry="$1" native_dir canonical_dir machine phase status=1
+    native_dir="$(mktemp -d "${TMPDIR:-/tmp}/cloudbench-fresh-prestart.XXXXXX")" || return 1
+    canonical_dir="$(cd "$native_dir" && pwd -P)" || { rm -rf "$native_dir"; return 1; }
+    native_dir="$canonical_dir"
+    chmod 700 "$native_dir" || { rm -rf "$native_dir"; return 1; }
+    if python3 "$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-prestart-recovery.py" \
+        --registry "$registry" --audit-root "$FLEET_AUDIT_ROOT" --fresh-plan \
+        > "$native_dir/ids"; then
+        status=0
+        while IFS= read -r machine; do
+            for phase in before after; do
+                if ! fleet_prestart_machine_exact_read "$machine" > "$native_dir/$machine.$phase.json" \
+                    || ! fleet_prestart_events_exact_read "$machine" > "$native_dir/$machine.$phase.events.json"; then
+                    status=1; break
+                fi
+            done
+            [ "$status" = 0 ] || break
+        done < "$native_dir/ids"
+        if [ "$status" = 0 ]; then
+            python3 "$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-prestart-recovery.py" \
+                --registry "$registry" --audit-root "$FLEET_AUDIT_ROOT" \
+                --fresh-native-dir "$native_dir" || status=1
+        fi
+    fi
+    rm -rf "$native_dir"
+    [ "$status" = 0 ]
+}
+
+fleet_fresh_prestart_reap_guard() {  # <registry> <machine>; no-op for other phases
+    local registry="$1" machine="$2" proof native_dir canonical_dir phase status=0
+    proof="$(registry_meta_value "$registry/meta" runs_root)/$(registry_meta_value "$registry/meta" run_id)/_batch/fresh-prestart-recovery.json"
+    [ -e "$proof" ] || [ -L "$proof" ] || return 0
+    native_dir="$(mktemp -d "${TMPDIR:-/tmp}/cloudbench-prestart-reap.XXXXXX")" || return 1
+    canonical_dir="$(cd "$native_dir" && pwd -P)" || { rm -rf "$native_dir"; return 1; }
+    native_dir="$canonical_dir"
+    for phase in before after; do
+        fleet_prestart_machine_exact_read "$machine" > "$native_dir/$machine.$phase.json" \
+            && fleet_prestart_events_exact_read "$machine" > "$native_dir/$machine.$phase.events.json" \
+            || { status=1; break; }
+    done
+    if [ "$status" = 0 ]; then
+        python3 "$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-prestart-recovery.py" \
+            --registry "$registry" --audit-root "$FLEET_AUDIT_ROOT" \
+            --verify-fresh-machine "$machine" --native-dir "$native_dir" || status=1
+    fi
+    rm -rf "$native_dir"
+    [ "$status" = 0 ]
+}
+
 fleet_recovery_reconnect_guest_shutdowns() {  # <registry-dir>
     local _capture_details=""
     local registry="${1%/}" meta="$1/meta" barrier_token="" kind bench clone_name
@@ -10576,6 +11084,21 @@ fleet_recovery_reconnect_guest_shutdowns() {  # <registry-dir>
     if [ -e "$FLEET_AUDIT_ROOT/${registry##*/}/volume-migrations" ] \
         || [ -L "$FLEET_AUDIT_ROOT/${registry##*/}/volume-migrations" ]; then
         fleet_registry_resume_volume_migrations "$registry" || return 1
+    fi
+
+    # Fresh configured primaries can be cancelled before the local start
+    # barrier, before a proxy or runtime-owner file exists. Validate the whole
+    # exact cohort and seal a typed no-start proof; never manufacture an ACK.
+    if fleet_recovery_confirm_fresh_prestart "$registry"; then
+        FLEET_REGISTRY_DIR="$registry"
+        FLEET_REGISTRY_PUBLISHED=1
+        KEEP_CLONES=0
+        if ! fleet_registry_confirm_guest_teardown; then
+            FLEET_REGISTRY_DIR="$save_registry"; FLEET_REGISTRY_PUBLISHED="$save_published"; KEEP_CLONES="$save_keep"
+            return 1
+        fi
+        FLEET_REGISTRY_DIR="$save_registry"; FLEET_REGISTRY_PUBLISHED="$save_published"; KEEP_CLONES="$save_keep"
+        return 0
     fi
 
     # A canceled boot-config barrier can own stopped pool Machines without
@@ -10620,9 +11143,14 @@ fleet_recovery_reconnect_guest_shutdowns() {  # <registry-dir>
         cleanup_stale_owner_recovery_proxies || true
         return 1
     fi
+    if ! fleet_recovery_confirm_replaced_preconfig "$registry" "$STALE_OWNER_RECOVERY_PLAN_FILE"; then
+        cleanup_stale_owner_recovery_proxies || true
+        return 1
+    fi
     while IFS=$'\t' read -r kind bench clone_name machine_id volume_id output \
         preferred_port; do
         case "$kind" in
+            replaced-preconfig) continue ;;
             guest|pool-guest)
                 if [ "$kind" = guest ] \
                     && { [ -e "$registry/sealed-machine-retirements/$machine_id.json" ] \
@@ -10881,6 +11409,9 @@ PY
     # discharge the cleanup latch before attempting runtime recapture. A guest
     # stopped by exact recovery cannot serve that capture; preserving its
     # runtime latch lets the interrupted-volume forensic archive handle it.
+    if [ "$shutdown_status" -eq 0 ] && ! fleet_recovery_verify_replaced_preconfig "$registry"; then
+        shutdown_status=1
+    fi
     if [ "$shutdown_status" -eq 0 ] \
         && [ -e "$registry/guest-cleanup-unconfirmed" ]; then
         FLEET_REGISTRY_DIR="$registry"
@@ -10922,8 +11453,12 @@ PY
             proxy_port="${recovery_proxy_ports[$recovery_index]}"
             if [ -z "$proxy_port" ] \
                 || [ ! -f "$RUNTIME_EVIDENCE_RECOVERY_HELPER" ] \
-                || ! mkdir -p "$output/remote-logs" \
-                || ! python3 "$RUNTIME_EVIDENCE_RECOVERY_HELPER" \
+                || ! mkdir -p "$output/remote-logs"; then
+                echo "❌ [${recovery_benches[$recovery_index]}] runtime capture prerequisites unavailable; retaining ownership" >&2
+                shutdown_status=1
+                continue
+            fi
+            if ! python3 "$RUNTIME_EVIDENCE_RECOVERY_HELPER" \
                     "$output/remote-logs" "$proxy_port" \
                     "${recovery_guest_tokens[$recovery_index]}" \
                     "${recovery_machine_ids[$recovery_index]}" \
@@ -10944,6 +11479,13 @@ PY
                         mv "$output/failed-startup-runtime-archive" \
                             "$output/failed-startup-runtime-archive.rejected.$(date +%s).$$" || shutdown_status=1
                     fi
+                fi
+                # An ACK proves guest cleanup, not a sealable runtime bundle.
+                # Reuse authenticated exact session cleanup for this failed
+                # transfer only. It may stop the owned guest, but cannot clear
+                # the runtime latch or grant archive/teardown credit.
+                if cloudbench_recover_guest_cleanup_receipts "$registry" "$output"; then
+                    echo "🧭 [${recovery_benches[$recovery_index]}] exact cleanup completed; original-volume runtime archive remains required"
                 fi
                 echo "❌ [${recovery_benches[$recovery_index]}] sealed runtime evidence could not be recaptured" >&2
                 shutdown_status=1
@@ -11652,11 +12194,40 @@ PY
 }
 
 fleet_recovery_confirm_runtime_evidence() {  # <exact dead-owner registry>; verified copies only
+    fleet_recovery_prepare_replaced_preconfig "$1" || return 1
+    fleet_recovery_verify_replaced_preconfig "$1" || return 1
     local registry="$1" mapping index out machine bench mode manifest_schema status=0
     local FLEET_REGISTRY_DIR="$1" FLEET_REGISTRY_PUBLISHED=1
     local FLEET_OWNER_TOKEN="${1##*/}" FLEET_TEARDOWN_OWNERSHIP_DIR
     local -a CHILD_OUT=() CHILD_MACHINE=()
     FLEET_TEARDOWN_OWNERSHIP_DIR="$(registry_meta_value "$registry/meta" audit_dir)"
+    local fresh_proof
+    fresh_proof="$(registry_meta_value "$registry/meta" runs_root)/$(registry_meta_value "$registry/meta" run_id)/_batch/fresh-prestart-recovery.json"
+    if [ -e "$fresh_proof" ] || [ -L "$fresh_proof" ]; then
+        [ ! -e "$registry/guest-cleanup-unconfirmed" ] && [ ! -L "$registry/guest-cleanup-unconfirmed" ] || return 1
+        fleet_recovery_confirm_fresh_prestart "$registry" || return 1
+        python3 "$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-prestart-recovery.py" \
+            --registry "$registry" --audit-root "$FLEET_AUDIT_ROOT" --verify-fresh || return 1
+        # No guest ever received a start. The typed producer/consumer proof is
+        # evidence, not a fabricated runtime bundle or benchmark outcome.
+        rm -f "$registry/runtime-evidence-unconfirmed" && cloudbench_fsync_directory "$registry"
+        return $?
+    fi
+    # Only a positively validated fresh-prestart proof dispatches above.
+    # Otherwise preserve strict retired-diagnostic custody before ordinary recovery.
+    local retired_diagnostic_status=0
+    if [ -f "$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-retired-diagnostic-custody.py" ]; then
+        python3 "$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-retired-diagnostic-custody.py" \
+            --registry "$registry" --common "$GIT_COMMON_DIR" \
+            --guard-fd "${REGISTRY_RECOVERY_GUARD_FD:--1}" --recovery-pid "$$" \
+            --recovery-birth "$FLEET_OWNER_PID_START" || retired_diagnostic_status=$?
+        case "$retired_diagnostic_status" in
+            0) return 0 ;;
+            2) ;; # Not this retired-primary case; retain ordinary validation.
+            *) return 1 ;;
+        esac
+    fi
+
     if [ -e "$(registry_meta_value "$registry/meta" runs_root)/$(registry_meta_value "$registry/meta" run_id)/_forensic/manifest.json" ]; then
         manifest_schema="$(python3 - "$(registry_meta_value "$registry/meta" runs_root)/$(registry_meta_value "$registry/meta" run_id)/_forensic/manifest.json" <<'PY'
 import json, sys
@@ -12562,6 +13133,22 @@ recover_registry_primaries_to_pool() {  # exact recovery lock + canonical eviden
     done <<< "$proof_plan"
 }
 
+fleet_close_recovered_source_consumer() {  # <original owner>; canonical audit, never caller run paths
+    local owner="$1" audit="$FLEET_AUDIT_ROOT/$1" manifest digest protocol workspace
+    manifest="$audit/source-manifest.json"
+    digest="$(registry_meta_value "$audit/meta" source_manifest_sha256)"
+    if [ -z "$digest" ]; then
+        [ ! -e "$manifest" ] && [ ! -L "$manifest" ]
+        return $?
+    fi
+    protocol="$(python3 "$SOURCE_HELPER" protocol "$manifest" --sha256 "$digest")" || return 1
+    [ "$protocol" != none ] || return 0
+    [ "$protocol" = cloudbench-source-lease-v1 ] || return 1
+    workspace="$(registry_meta_value "$audit/meta" workspace_root)"
+    [ -n "$workspace" ] || return 1
+    python3 "$SOURCE_LEASE_HELPER" recover-close --workspace "$workspace" --consumer-owner "$owner"
+}
+
 recover_exact_stale_fleet_owner() {  # <32-hex-owner-token>
     local token="$1" registry="$FLEET_OWNERSHIP_ROOT/$1" meta orphan_audit
     local version app policy cleanup_state host owner_status recovery_lock_status
@@ -12582,6 +13169,7 @@ recover_exact_stale_fleet_owner() {  # <32-hex-owner-token>
             && [ "$(registry_meta_value "$orphan_audit/meta" fleet_owner_token)" = "$token" ] \
             && [ "$(registry_meta_value "$orphan_audit/meta" status)" \
                 = "provider-teardown-verified" ]; then
+            fleet_close_recovered_source_consumer "$token" || return 1
             fleet_publish_recovered_terminal_projection "$orphan_audit"
             return $?
         fi
@@ -12612,8 +13200,19 @@ recover_exact_stale_fleet_owner() {  # <32-hex-owner-token>
             fi
             ;;
         retain)
-            echo "❌ exact stale-owner cleanup policy retains durable ownership: $registry" >&2
-            return 1
+            # Resume an interrupted lost-guest release: the receipt is recorded and both latches are
+            # gone, but quarantine retain was not yet returned to reap. The helper re-reads every owned
+            # resource as provider-terminal before flipping the policy.
+            if [ "${RECOVER_ACCEPT_LOST_EVIDENCE:-0}" = 1 ] && [ "${RECOVER_PRIMARY_TO_POOL:-0}" != 1 ] \
+                && [ -f "$FLEET_AUDIT_ROOT/$token/runtime-evidence-lost.json" ] \
+                && python3 "$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-lost-evidence-release.py" \
+                    --registry "$registry" --audit-root "$FLEET_AUDIT_ROOT" \
+                    --app "$(registry_meta_value "$meta" app)" --root "$ROOT_DIR"; then
+                policy="$(registry_meta_value "$meta" cleanup_policy)"
+            else
+                echo "❌ exact stale-owner cleanup policy retains durable ownership: $registry" >&2
+                return 1
+            fi
             ;;
         *)
             echo "❌ exact stale-owner cleanup authorization state is unsafe: $registry" >&2
@@ -12730,7 +13329,11 @@ PY
     fi
     if [ "$needs_guest_recovery" = "1" ]; then
         echo "🧭 reconnecting exact owned guests for authenticated cleanup acknowledgement"
-        if ! fleet_recovery_reconnect_guest_shutdowns "$registry"; then
+        if ! fleet_recovery_reconnect_guest_shutdowns "$registry" \
+            && ! { [ "${RECOVER_ACCEPT_LOST_EVIDENCE:-0}" = 1 ] && [ "${RECOVER_PRIMARY_TO_POOL:-0}" != 1 ] \
+                   && python3 "$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-lost-evidence-release.py" \
+                       --registry "$registry" --audit-root "$FLEET_AUDIT_ROOT" --app "$(registry_meta_value "$meta" app)" \
+                       --root "$ROOT_DIR"; }; then
             # Runtime transfer may fail after every exact guest acknowledged
             # cleanup. Free one independently sealed own Machine slot while
             # retaining its volume, full ledger, failed exit and runtime latch.
@@ -12748,7 +13351,11 @@ PY
     if [ "$preconfig_verified" != 1 ] && { [ "${RECOVER_PRIMARY_TO_POOL:-0}" = 1 ] \
         || [ -e "$registry/runtime-evidence-unconfirmed" ] \
         || [ -L "$registry/runtime-evidence-unconfirmed" ]; } \
-        && ! fleet_recovery_confirm_runtime_evidence "$registry"; then
+        && ! fleet_recovery_confirm_runtime_evidence "$registry" \
+        && ! { [ "${RECOVER_ACCEPT_LOST_EVIDENCE:-0}" = 1 ] && [ "${RECOVER_PRIMARY_TO_POOL:-0}" != 1 ] \
+               && python3 "$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-lost-evidence-release.py" \
+                   --registry "$registry" --audit-root "$FLEET_AUDIT_ROOT" --app "$(registry_meta_value "$meta" app)" \
+                   --root "$ROOT_DIR"; }; then
         local sealed_retirement_status=0
         if [ "${RECOVER_PRIMARY_TO_POOL:-0}" != 1 ]; then
             fleet_recovery_retire_one_sealed_machine "$registry" || sealed_retirement_status=$?
@@ -12792,6 +13399,7 @@ PY
     fi
     release_registry_recovery_lock "$registry"
     fleet_registry_remove_if_empty "$registry" || return 1
+    fleet_close_recovered_source_consumer "$token" || return 1
     fleet_publish_recovered_terminal_projection "$FLEET_AUDIT_ROOT/$token"
 }
 
@@ -12963,6 +13571,9 @@ fleet_clone_with_queue_admission() {  # <native-seconds> <ledger> <clone-args...
 fleet_clone_volume_request() {  # <seconds> create|find <helper args...>; one JSON receipt on stdout
     local seconds="$1"
     shift
+    if [ "${1:-}" = create ] && [ "${PRIVATE_SOURCE_LEASE_PROTOCOL:-none}" != none ]; then
+        private_source_lease_guard || return 1
+    fi
     case "$seconds" in ''|*[!0-9]*|0) return 2 ;; esac
     python3 "${CLOUDBENCH_SCRIPT_SNAPSHOT:-$ROOT_DIR/scripts}/cloudbench-clone-volume.py" "$@" \
         --app "$APP" --timeout "$seconds"
@@ -13033,6 +13644,24 @@ clone_create_owned_volume() {  # <ledger> <clone> <source> <region> <vm-size> <v
         --inventory "${INVENTORY_INDEX:-}/current/admission-machines.json")
     CLONE_VOLUME_ID=""
     CLONE_VOLUME_OUT=""
+    if [ "${PRIVATE_SOURCE_GUEST_ENV_MODE:-none}" = owned-capsule-v1 ]; then
+        # Recheck the captured authority and the live consumer guard at the
+        # last boundary before the native Volume POST, including worker clones.
+        local captured_fields captured_id captured_volume captured_snapshot
+        captured_fields="$(python3 "$SOURCE_HELPER" fields "$PRIVATE_SOURCE_FILE" --sha256 "$PRIVATE_SOURCE_SHA256")" || return 3
+        read -r captured_id captured_volume captured_snapshot _ <<< "$captured_fields"
+        [ "$captured_id" = "$PRIVATE_SOURCE_ID" ] && [ "$captured_volume" = "$PRIVATE_SOURCE_VOLUME_ID" ] \
+            && [ "$captured_snapshot" = "$PRIVATE_SOURCE_SNAPSHOT" ] \
+            && [ "$storage_mode" = snapshot ] && [ "$snapshot_id" = "$captured_snapshot" ] \
+            && [ -n "$snapshot_id" ] && private_fleet_source_admission || return 3
+        python3 - "${INVENTORY_INDEX:-}/current/admission-machines.json" "$source_id" <<'PY_CAPSULE_ENCRYPTED' || return 3
+import json, sys
+rows=[row for row in json.load(open(sys.argv[1])) if row.get('id')==sys.argv[2]]
+assert len(rows)==1
+mounts=rows[0]['config']['mounts']
+assert len(mounts)==1 and mounts[0]['encrypted'] is True
+PY_CAPSULE_ENCRYPTED
+    fi
     # Shared donor mount names keep the native same-name host anti-affinity.
     # The explicit no-anti-affinity policy names each Volume after its durable
     # clone name instead, so even an unanswered create is exactly attributable.
@@ -14090,9 +14719,16 @@ campaign_inventory_wait() {
     # budget. Healthy reads do not start it; first pending or admission does.
     local status remaining interval="${CLOUDBENCH_CAPACITY_ADMISSION_RETRY_SECONDS:-10}"
     local wait_seconds="${CLOUDBENCH_CAPACITY_ADMISSION_WAIT_SECONDS:-300}"
-    case "$wait_seconds:$interval:${CAPACITY_ADMISSION_DEADLINE:-0}" in
+    # A caller with its own gate deadline (the deploy cloud adapter) passes it as
+    # an absolute epoch; the shared admission clock then ends there instead.
+    local caller_deadline="${CLOUDBENCH_CAPACITY_ADMISSION_DEADLINE_EPOCH:-}"
+    case "$wait_seconds:$interval:${CAPACITY_ADMISSION_DEADLINE:-0}:$caller_deadline" in
         *[!0-9:]*) echo "❌ invalid inventory admission wait clock" >&2; return 2 ;;
     esac
+    if [ -n "$caller_deadline" ]; then
+        wait_seconds=$((caller_deadline - $(date +%s)))
+        [ "$wait_seconds" -gt 0 ] || wait_seconds=1
+    fi
     [ "$wait_seconds" -gt 0 ] && [ "$interval" -gt 0 ] || return 2
     while :; do
         status=0
@@ -14469,6 +15105,9 @@ finally:
 ' "$POOL_IDS_FILE" "$hints"
 }
 claim_pool_machine() {  # echo a claimed stopped pool machine id (or '' if none free)
+    if [ "${PRIVATE_SOURCE_LEASE_PROTOCOL:-none}" != none ]; then
+        private_source_lease_guard || return 1
+    fi
     [ -f "$POOL_IDS_FILE" ] || return 0
     local id volume_id claim_path owner_status claim_host claim_pid claim_start claim_token cleanup_status
     local claim_digest desired_size="${1:-}" desired_memory="${2:-}" desired_cpus desired_kind
@@ -14795,10 +15434,24 @@ fi
 if [ "$RECOVER_STALE_ONLY" = "1" ]; then
     recovery_status=0
     recovery_registry="$FLEET_OWNERSHIP_ROOT/$RECOVER_OWNER_TOKEN"
+    # A prior physical recovery may have retired the registry before closing
+    # its v2 source claim. The original native claim is the journal locator.
+    if [ ! -d "$recovery_registry" ] \
+        && [ -f "$FLEET_AUDIT_ROOT/$RECOVER_OWNER_TOKEN/source-manifest.json" ]; then
+        recovered_source_protocol="$(python3 "$SOURCE_HELPER" protocol \
+            "$FLEET_AUDIT_ROOT/$RECOVER_OWNER_TOKEN/source-manifest.json" \
+            --sha256 "$(registry_meta_value "$FLEET_AUDIT_ROOT/$RECOVER_OWNER_TOKEN/meta" source_manifest_sha256)")" || exit 1
+        if [ "$recovered_source_protocol" = cloudbench-source-lease-v1 ]; then
+            recover_exact_stale_fleet_owner "$RECOVER_OWNER_TOKEN" || recovery_status=1
+            cloudbench_controller_lock_release "$LOCK_DIR"
+            exit "$recovery_status"
+        fi
+    fi
     private_recovery_digest="$(registry_meta_value "$recovery_registry/meta" source_manifest_sha256)"
     if [ -n "$private_recovery_digest" ] || [ -e "$recovery_registry/source-manifest.json" ] || [ -L "$recovery_registry/source-manifest.json" ]; then
         [ -n "$private_recovery_digest" ] || exit 1
         PRIVATE_SOURCE_FILE="$recovery_registry/source-manifest.json"
+        PRIVATE_SOURCE_LEASE_PROTOCOL="$(python3 "$SOURCE_HELPER" protocol "$PRIVATE_SOURCE_FILE")" || exit 1
         PRIVATE_SOURCE_SHA256="$private_recovery_digest"
         private_recovery_fields="$(python3 "$SOURCE_HELPER" fields "$PRIVATE_SOURCE_FILE" --sha256 "$private_recovery_digest")" || exit 1
         read -r PRIVATE_SOURCE_ID PRIVATE_SOURCE_VOLUME_ID PRIVATE_SOURCE_SNAPSHOT \
@@ -15187,6 +15840,7 @@ FLEET_EXECUTION_COMPLETED=0
 AUTOSCALER_PIDS=()
 PROVISION_PIDS=()
 CHILD_PIDS=()
+CHILD_STARTS=()
 CHILD_EXIT_CODES=()
 CHILD_OUT=()
 CHILD_BENCH=()
@@ -15462,18 +16116,40 @@ cleanup() {
         fleet_native_reap_close && fleet_native_reap_open \
             || { KEEP_CLONES=1; ec=1; teardown_failed=1; billing_owned_joins=0; }
     fi
+    # Rejected boot configuration cannot produce a guest runtime manifest.
+    # Preserve its original failed projection and prove the complete inert
+    # cohort before disposable retirement removes the native evidence source.
+    if [ "$billing_owned_joins" = "1" ] && [ "$guest_shutdown_failed" = "0" ] \
+        && [ "$KEEP_CLONES" != "1" ] && [ "$FLEET_REGISTRY_PUBLISHED" = "1" ]; then
+        local preconfig_output preconfig_candidate=0
+        for preconfig_output in "${CHILD_OUT[@]}"; do
+            if [ -e "$preconfig_output/boot-config-unapplied" ] \
+                || [ -L "$preconfig_output/boot-config-unapplied" ]; then
+                preconfig_candidate=1
+            fi
+        done
+        if [ "$preconfig_candidate" = "1" ]; then
+            if ! finalize_terminal_projection "$ec" \
+                || ! fleet_recovery_confirm_preconfig_cohort "$FLEET_REGISTRY_DIR"; then
+                echo "❌ rejected boot configuration evidence is unverified; retaining exact ownership and resources" >&2
+                KEEP_CLONES=1
+                ec=1
+                teardown_failed=1
+            fi
+        fi
+    fi
     # Guest ACK and copied runtime evidence are independent receipts. Keep the
     # durable evidence latch through every crash window until all primary and
     # historical worker captures are verified, including workers scaled down
     # before the benchmark finished.
     if ! cloudbench_collect_remaining_runtime_evidence; then
         if fleet_current_disposable_registry "$FLEET_REGISTRY_DIR" && [ "${KEEP_CLONES:-0}" != 1 ]; then
-            echo "❌ runtime evidence is incomplete; failed result retained while disposable resources are retired" >&2
+            echo "❌ runtime evidence is incomplete; unsealed disposable resources remain retained pending evidence recovery" >&2
         else
             echo "❌ runtime evidence is incomplete; retaining original fleet volumes" >&2
         fi
         runtime_evidence_failed=1
-        fleet_current_disposable_registry "$FLEET_REGISTRY_DIR" || KEEP_CLONES=1
+        KEEP_CLONES=1
         ec=1
         teardown_failed=1
     fi
@@ -15850,6 +16526,21 @@ PY
     if [ "$publication_failed" = "1" ]; then
         finalize_terminal_projection "$ec" || ec=1
     fi
+    if ! finish_private_source_lease; then
+        ec=1
+        # The terminal verdict was sealed and published before the holder could
+        # close; record the retained claim there too, never only in the exit code.
+        if [ -f "$FLEET_DIR/_batch/lifecycle.json" ]; then
+            if ! fleet_seal_source_claim_unresolved "$FLEET_DIR/_batch/lifecycle.json" \
+                || ! finalize_terminal_projection "$ec"; then
+                echo "❌ could not record the retained source claim in the terminal verdict" >&2
+            elif [ "${SELF_MANAGED_HUB_RUN:-0}" = "1" ] && [ -n "${hub_final_action:-}" ] \
+                && ! python3 "$HUB_UPLOAD_HELPER" "$hub_final_action" "$FLEET_DIR/_batch/run.json" \
+                    --run-id "$BENCHMARK_HUB_PARENT_RUN_ID" --source direct-cloud-fleet; then
+                echo "❌ Hub republication of the retained source claim failed" >&2
+            fi
+        fi
+    fi
     # Teardown and final publication both need the snapshotted helpers.
     cleanup_owned_script_snapshot || ec=1
     exit "$ec"
@@ -15894,7 +16585,7 @@ fleet_registry_init || {
     echo "❌ could not atomically publish durable fleet ownership under $FLEET_OWNERSHIP_ROOT; refusing provider mutation" >&2
     exit 1
 }
-echo "📡 Monitor this exact fleet every 30s, through terminal status AND resource release:"
+echo "📡 Monitor this exact fleet through terminal status AND resource release:"
 printf '    %q monitor %q' "$ROOT_DIR/scripts/run-bench" "$FLEET_DIR"
 if [ -n "${CLOUDBENCH_DETACHED_STATUS_FILE:-}" ]; then
     printf ' --controller-status %q' "$CLOUDBENCH_DETACHED_STATUS_FILE"
@@ -15954,7 +16645,6 @@ verify_fleet_environment() {
 }
 if ! verify_fleet_environment; then
     echo "❌ Cloud benchmark environment is not ready; no benchmark machine was started." >&2
-    echo "   Refresh it explicitly (maintenance op): bash scripts/run-bench-cloud --refresh-secrets" >&2
     exit 1
 fi
 
@@ -16014,6 +16704,9 @@ echo "✅ Canonical seed dump present for guest pg${CLOUDBENCH_GUEST_PG_MAJOR}: 
 
 # ── Resolve the warm machine (clone source) + its volume ────────────────────
 private_fleet_source_admission() {
+    if [ "${PRIVATE_SOURCE_LEASE_PROTOCOL:-none}" != none ]; then
+        private_source_lease_guard || return 1
+    fi
     # The existing publisher reads provider inventory once per poll. Clone
     # admission checks only the selected immutable base's fresh native record.
     [ "$(inventory_machine_field "$PRIVATE_SOURCE_ID" instance_id)" = "$PRIVATE_SOURCE_INSTANCE_ID" ] \
@@ -16024,17 +16717,176 @@ private_fleet_source_admission() {
     }
 }
 validate_private_fleet_source() {
-    local machines volumes snapshots
-    machines="$(FLY machines list -a "$APP" --json)" || return 1
-    volumes="$(FLY volumes list -a "$APP" --json)" || return 1
-    snapshots="$(FLY volume snapshots list "$PRIVATE_SOURCE_VOLUME_ID" -a "$APP" --json)" || return 1
+    local machines volumes snapshots capture deadline attempt pause remaining status
+    local read_index=0 validation_raw snapshot_raw machines_raw volumes_raw
+    capture="$GIT_COMMON_DIR/cloudbench-source-validation/$FLEET_OWNER_TOKEN/$RUN_ID"
+    deadline="$(python3 - "$FLEET_CONTROLLER_STARTED_EPOCH" "$START_BARRIER_WAIT_SECONDS" <<'PY_SOURCE_DEADLINE'
+import math, os, sys, time
+value = int(sys.argv[1]) + int(sys.argv[2])
+if os.environ.get('RUN_BENCH_CAMPAIGN_E2E_DEADLINE_MONOTONIC'):
+    earlier = float(os.environ['RUN_BENCH_CAMPAIGN_E2E_DEADLINE_MONOTONIC'])
+    assert math.isfinite(earlier)
+    value = min(value, int(time.time() + earlier - time.monotonic()))
+print(value)
+PY_SOURCE_DEADLINE
+)" || return 1
+    python3 - "$capture" "$SOURCE_HELPER" "$PRIVATE_SOURCE_FILE" "$PRIVATE_SOURCE_SHA256" "$deadline" "$GIT_COMMON_DIR" "$FLEET_OWNER_TOKEN" "$RUN_ID" <<'PY_SOURCE_INTENT' || return 1
+import hashlib, json, os, pathlib, re, runpy, shutil, stat, sys
+path, helper, manifest, expected, deadline, git, owner, run = sys.argv[1:]
+path = pathlib.Path(path)
+git=pathlib.Path(git)
+assert git.resolve(strict=True)==git and git.stat().st_uid==os.geteuid() and not git.stat().st_mode & 0o022
+assert re.fullmatch('[a-f0-9]{32}',owner) and re.fullmatch('[A-Za-z0-9][A-Za-z0-9_.-]*',run)
+base=git/'cloudbench-source-validation'
+try:os.mkdir(base,0o700)
+except FileExistsError:pass
+info=base.lstat();assert stat.S_ISDIR(info.st_mode) and info.st_uid==os.geteuid() and stat.S_IMODE(info.st_mode)==0o700
+assert base.resolve(strict=True)==base
+os.mkdir(base/owner,0o700)
+raw = pathlib.Path(manifest).read_bytes()
+assert hashlib.sha256(raw).hexdigest() == expected
+source = runpy.run_path(helper)['manifest'](raw)
+os.mkdir(path, 0o700)
+binary = pathlib.Path(shutil.which('flyctl')).resolve(strict=True)
+value = dict(schema='private-source-validation-reads-v1', manifest_sha256=expected,
+    machine_id=source['machine_id'], volume_id=source['volume_id'], snapshot_id=source['snapshot_id'],
+    owner_token=owner,run_id=run,controller_deadline_epoch=int(deadline), max_snapshot_reads=12, max_read_seconds=20,
+    selected_token_sha256=hashlib.sha256(os.environ.get('FLY_API_TOKEN','').encode()).hexdigest(),
+    binary_sha256=hashlib.sha256(binary.read_bytes()).hexdigest(), binary=str(binary),
+    channel='fly_with_timeout combined CLI stdout/stderr; separate wrapper stderr')
+with os.fdopen(os.open(path/'intent.json', os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW, 0o600), 'w') as stream:
+    json.dump(value,stream,sort_keys=True);stream.write('\n');stream.flush();os.fsync(stream.fileno())
+PY_SOURCE_INTENT
+    # The existing timeout wrapper owns/reaps its exact CLI children. Its raw
+    # channel combines CLI stdout/stderr; never label it a native HTTP capture.
+    private_source_validation_read() {
+        local kind="$1" record began rc; shift
+        if [ "${PRIVATE_SOURCE_LEASE_PROTOCOL:-none}" != none ]; then
+            private_source_lease_guard || return 1
+        fi
+        remaining=$((deadline - $(date +%s)))
+        [ "$remaining" -gt 0 ] || return 1
+        [ "$remaining" -le 20 ] || remaining=20
+        read_index=$((read_index + 1))
+        printf -v record '%s/%02d-%s' "$capture" "$read_index" "$kind"
+        began="$(date +%s)"
+        if (umask 077; set -C; { set +C; fly_with_timeout "$remaining" "$@"; } >"$record.raw" 2>"$record.stderr"); then rc=0; else rc=$?; fi
+        python3 - "$record" "$kind" "$rc" "$began" "$deadline" "$@" <<'PY_SOURCE_READ' || return 1
+import hashlib, json, os, pathlib, stat, sys, time
+name, kind, rc, began, deadline, *argv = sys.argv[1:]
+value = dict(kind=kind, argv=argv, exit_code=int(rc), began_at=int(began), ended_at=time.time(), controller_deadline_epoch=int(deadline))
+for suffix in ('raw','stderr'):
+    path=pathlib.Path(name+'.'+suffix);info=path.lstat()
+    assert stat.S_ISREG(info.st_mode) and info.st_uid==os.geteuid() and stat.S_IMODE(info.st_mode)==0o600 and info.st_nlink==1
+    value[suffix+'_sha256']=hashlib.sha256(path.read_bytes()).hexdigest()
+with os.fdopen(os.open(name+'.json', os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW, 0o600),'w') as stream:
+    json.dump(value,stream,sort_keys=True);stream.write('\n');stream.flush();os.fsync(stream.fileno())
+PY_SOURCE_READ
+        [ "$(date +%s)" -lt "$deadline" ] || return 1
+        # A journaled nonzero CLI exit (for example an HTTP/2 stream
+        # INTERNAL_ERROR under a 14-job cohort) is a transient failed read:
+        # 75 lets the bounded loop re-observe. A wrapper timeout (142) and any
+        # guard/journal failure above stay fail-closed.
+        if [ "$rc" != 0 ]; then
+            [ "$rc" != 142 ] || return 1
+            echo "⚠️  provider inventory read failed: $kind exit $rc (read $attempt/12)" >&2
+            return 75
+        fi
+        validation_raw="$record.raw"
+    }
+    private_source_validation_pause() {
+        # Same consistency envelope as list_donor_snapshots, never a new task
+        # deadline. A valid [] or failed read is unavailable observation, not
+        # absence proof.
+        pause=$((attempt * 5)); [ "$pause" -le 30 ] || pause=30
+        pause=$((pause + RANDOM % 4))
+        remaining=$((deadline - $(date +%s)))
+        [ "$remaining" -gt 0 ] || return 1
+        [ "$pause" -le "$remaining" ] || pause="$remaining"
+        sleep "$pause"
+    }
+    for attempt in $(seq 1 12); do
+        status=0
+        private_source_validation_read snapshots volume snapshots list "$PRIVATE_SOURCE_VOLUME_ID" -a "$APP" --json || status=$?
+        if [ "$status" = 0 ]; then
+            python3 - "$SOURCE_HELPER" "$PRIVATE_SOURCE_FILE" "$PRIVATE_SOURCE_SHA256" "$validation_raw" <<'PY_SOURCE_SNAPSHOTS' || status=$?
+import hashlib, json, pathlib, runpy, sys
+try:
+    helper=runpy.run_path(sys.argv[1]);raw=pathlib.Path(sys.argv[2]).read_bytes()
+    assert hashlib.sha256(raw).hexdigest()==sys.argv[3]
+    manifest=helper['manifest'](raw)
+    rows=json.loads(pathlib.Path(sys.argv[4]).read_bytes(),object_pairs_hook=helper['storage']['unique_object'])
+    if isinstance(rows,list) and not rows:raise SystemExit(75)
+    helper['exact'](rows,manifest['snapshot_id'],'snapshot')
+except (ValueError, TypeError, KeyError, OSError, AssertionError):
+    print('private fleet source validation failed: snapshot inventory refused',file=sys.stderr);raise SystemExit(1)
+PY_SOURCE_SNAPSHOTS
+            [ "$status" != 75 ] || [ "$attempt" != 12 ] \
+                || echo 'private fleet source validation failed: snapshot inventory remained empty after 12 bounded reads' >&2
+        fi
+        if [ "$status" = 0 ]; then
+            snapshot_raw="$validation_raw"
+            # Refresh identity/storage AFTER the successful snapshot observation.
+            private_source_validation_read machines machines list -a "$APP" --json || status=$?
+            [ "$status" != 0 ] || machines_raw="$validation_raw"
+        fi
+        if [ "$status" = 0 ]; then
+            private_source_validation_read volumes volumes list -a "$APP" --json || status=$?
+            [ "$status" != 0 ] || volumes_raw="$validation_raw"
+        fi
+        [ "$status" != 0 ] || break
+        [ "$status" = 75 ] && [ "$attempt" != 12 ] || return 1
+        private_source_validation_pause || return 1
+    done
+    if [ "${PRIVATE_SOURCE_LEASE_PROTOCOL:-none}" != none ]; then
+        private_source_lease_guard || return 1
+    fi
+    [ "$(date +%s)" -lt "$deadline" ] || return 1
+    machines="$(cat "$machines_raw")"; volumes="$(cat "$volumes_raw")"; snapshots="$(cat "$snapshot_raw")"
+    status=0
     printf '{"machines":%s,"volumes":%s,"snapshots":%s}' "$machines" "$volumes" "$snapshots" \
-        | python3 "$SOURCE_HELPER" verify "$PRIVATE_SOURCE_FILE" --parked-memory "$WARM_PARKED_VM_MEMORY" --sha256 "$PRIVATE_SOURCE_SHA256"
+        | python3 "$SOURCE_HELPER" verify "$PRIVATE_SOURCE_FILE" --parked-memory "$WARM_PARKED_VM_MEMORY" --sha256 "$PRIVATE_SOURCE_SHA256" || status=$?
+    [ "$(date +%s)" -lt "$deadline" ] || status=1
+    (umask 077; set -C; printf '%s\n' "$status" >"$capture/verify.status") || return 1
+    return "$status"
 }
 if [ -n "${CLOUDBENCH_CAMPAIGN_INVENTORY_DIR:-}" ]; then
     campaign_inventory_wait start_machines_snapshot_loop || exit $?
 fi
+# One warm source per dependency set (opt-in until proven on Fly). The single
+# shared `cloudbench-warm` donor is rebuilt whenever a fleet's dependency set
+# differs, so every other devbox waits for it to stop and two sets keep
+# flipping it. With CLOUDBENCH_WARM_SOURCE_PER_DEPS=1 the fleet selects
+# `cloudbench-warm-<set>` (created once from the base donor's snapshot under
+# the cross-devbox claim, scripts/cloudbench-warm-source.py); a fleet whose
+# set already has a warm source never waits on another set's maintenance, and
+# its run-bench-cloud children inherit the same names. An explicit
+# CLOUDBENCH_WARM_MACHINE_NAME or a private fleet source keeps its selection.
+select_dependency_set_warm_source() {
+    local node_fp py_fp selected set_id
+    [ "${CLOUDBENCH_WARM_SOURCE_PER_DEPS:-0}" = 1 ] || return 0
+    { [ -z "${PRIVATE_SOURCE_FILE:-}" ] && [ -z "${CLOUDBENCH_WARM_MACHINE_NAME:-}" ]; } || return 0
+    node_fp="$(cloudbench_node_dependency_fingerprint "$ROOT_DIR")" || return 1
+    py_fp="$(cloudbench_manifest_fingerprint "$ROOT_DIR" "${CLOUDBENCH_PYTHON_MANIFESTS[@]}")" || return 1
+    selected="$(python3 "$WARM_SOURCE_HELPER" --app "$APP" ensure --node-fp "$node_fp" --py-fp "$py_fp" \
+        --owner "fleet-$FLEET_OWNER_TOKEN")" || {
+        echo "❌ could not select this dependency set's warm source" >&2
+        return 1
+    }
+    read -r set_id MACHINE_NAME VOLUME_NAME <<< "$selected"
+    if [ "$MACHINE_NAME" != "cloudbench-warm-$set_id" ] || [ "$VOLUME_NAME" != "cloudbench_data_$set_id" ]; then
+        echo "❌ warm source helper returned an unexpected selection" >&2
+        return 1
+    fi
+    export CLOUDBENCH_WARM_MACHINE_NAME="$MACHINE_NAME" CLOUDBENCH_WARM_VOLUME_NAME="$VOLUME_NAME"
+    WARM_DEPS_STATE_FILE="$GIT_COMMON_DIR/cloudbench-warm-deps.$MACHINE_NAME.fp"
+    echo "🏷️  dependency set $set_id uses warm source $MACHINE_NAME"
+}
+select_dependency_set_warm_source || exit 1
 if [ -n "${PRIVATE_SOURCE_FILE:-}" ]; then
+    if [ "${PRIVATE_SOURCE_LEASE_PROTOCOL:-none}" != none ]; then
+        start_private_source_lease || exit 1
+    fi
     validate_private_fleet_source || exit 1
     WARM_ID="$PRIVATE_SOURCE_ID"
     WARM_VOLUME_ID="$PRIVATE_SOURCE_VOLUME_ID"
@@ -16064,6 +16916,15 @@ WARM_VOLUME_ID="$(printf '%s' "$warm_pair" | awk '{print $3}')"
 [ -n "$WARM_ID" ] || { echo "❌ No warm machine '$MACHINE_NAME' in $APP — run: bash scripts/run-bench-cloud --setup" >&2; exit 1; }
 # Volume snapshots are region-scoped, so clones MUST land in the warm box's region.
 [ -n "$warm_region" ] && REGION="$warm_region"
+# An explicitly admitted ordinary-wide donor must still be the native source.
+if [ -n "${CLOUDBENCH_EXPECTED_WARM_MACHINE_ID:-}${CLOUDBENCH_EXPECTED_WARM_VOLUME_ID:-}${CLOUDBENCH_EXPECTED_WARM_REGION:-}" ]; then
+    if [ "$WARM_ID" != "${CLOUDBENCH_EXPECTED_WARM_MACHINE_ID:-}" ] \
+        || [ "$WARM_VOLUME_ID" != "${CLOUDBENCH_EXPECTED_WARM_VOLUME_ID:-}" ] \
+        || [ "$warm_region" != "${CLOUDBENCH_EXPECTED_WARM_REGION:-}" ]; then
+        echo "❌ selected warm donor identity changed after admission" >&2
+        exit 1
+    fi
+fi
 echo "🏭 warm source machine: $WARM_ID (region $REGION)"
 
 # A stopped-machine config update briefly reserves both old and new CPU shapes.
@@ -16344,12 +17205,33 @@ warm_deps_preflight() {
         fi
         return 0
     fi
+    local admitted_node_fp="${CURRENT_NODE_FP:-}" admitted_py_fp="${CURRENT_PY_FP:-}"
     local state="$WARM_DEPS_STATE_FILE"
     local node_fp py_fp snap_epoch s_node s_py s_epoch _rest new_snap recorded_state
     node_fp="$(cloudbench_node_dependency_fingerprint "$ROOT_DIR" 2>/dev/null || true)"
     py_fp="$(cloudbench_manifest_fingerprint "$ROOT_DIR" "${CLOUDBENCH_PYTHON_MANIFESTS[@]}" 2>/dev/null || true)"
     CURRENT_NODE_FP="$node_fp"
     CURRENT_PY_FP="$py_fp"
+    # Disposable fresh primaries and their fresh workers consume the admitted
+    # image, not snapshot dependency trees. Retain volume proof for every
+    # snapshot, private-source, or retained-pool path.
+    if [ "${FRESH_VOLUMES:-0}" = 1 ] && [ "${DISPOSABLE_LIFECYCLE:-0}" = 1 ] \
+        && [ ! -s "${POOL_IDS_FILE:-}" ] && [ "${#BENCHES[@]}" -gt 0 ]; then
+        local bench storage_mode all_fresh=1
+        for bench in "${BENCHES[@]}"; do
+            storage_mode="$(primary_clone_storage_mode "$bench")" || return 1
+            [ "$storage_mode" = fresh ] || all_fresh=0
+        done
+        if [ "$all_fresh" = 1 ]; then
+            if [ -z "$node_fp" ] || [ -z "$py_fp" ] \
+                || [ "$node_fp" != "$admitted_node_fp" ] || [ "$py_fp" != "$admitted_py_fp" ]; then
+                echo "❌ fresh dependency identity differs from the admitted image; refusing volume maintenance" >&2
+                return 1
+            fi
+            echo "✅ fresh-only disposable guests use admitted image dependencies; no volume dependency refresh"
+            return 0
+        fi
+    fi
     if [ -z "$node_fp" ] || [ -z "$py_fp" ]; then
         echo "⚠️  could not fingerprint dep manifests — skipping warm-deps preflight" >&2
         return 0
@@ -16357,10 +17239,10 @@ warm_deps_preflight() {
     recorded_state="$(warm_deps_recorded_state 2>/dev/null || true)"
     if [ -n "$recorded_state" ]; then
         read -r s_node s_py s_epoch _rest <<< "$recorded_state" || true
-        # Hydration already bound this exact completed snapshot and epoch to
-        # the donor, volume and manifests. Reuse that captured inventory: an
-        # uncertain later provider read is not evidence that proof went stale.
-        if [ -n "${HYDRATED_WARM_DEPS_STATE:-}" ] && [ -n "${SNAPSHOTS_JSON:-}" ]; then
+        # Selection already checked this exact completed snapshot in the
+        # donor volume inventory. Reuse those bytes for its epoch even when
+        # the dependency receipt was local; a later partial list is not age.
+        if [ -n "${SNAPSHOTS_JSON:-}" ]; then
             snap_epoch="$(snapshot_created_epoch "$SNAP_ID" "$SNAPSHOTS_JSON")" || {
                 echo "❌ warm snapshot freshness could not be verified; refusing maintenance" >&2
                 return 1
@@ -16433,6 +17315,45 @@ warm_deps_preflight() {
     echo "❌ central dep refresh failed; refusing to provision task machines" >&2
     return 1
 }
+fresh_image_deps_preflight() {
+    [ "$FRESH_VOLUMES" = 1 ] || return 0
+    { [ "${DISPOSABLE_LIFECYCLE:-0}" = 1 ] || [ "${POOL_COLD_BOOTSTRAP:-0}" = 1 ]; } || return 0
+    local bench storage_mode needs_image=0 image_inventory node_fp py_fp
+    for bench in "${BENCHES[@]}"; do
+        storage_mode="$(primary_clone_storage_mode "$bench")" || return 1
+        case "$storage_mode" in
+            fresh) needs_image=1 ;;
+            snapshot) ;;
+            *) return 1 ;;
+        esac
+    done
+    [ "$needs_image" = 1 ] || return 0
+    node_fp="$(cloudbench_node_dependency_fingerprint "$ROOT_DIR")" || return 1
+    py_fp="$(cloudbench_manifest_fingerprint "$ROOT_DIR" "${CLOUDBENCH_PYTHON_MANIFESTS[@]}")" || return 1
+    # Early image admission needs a pinned receipt, which ordinary runs (including /deploy smoke) do not
+    # carry. Without one, fresh guests still refuse mismatched baked dependencies at their own dep_sync.
+    if [ -z "${CLOUDBENCH_IMAGE_BUILD_RECEIPT:-}${CLOUDBENCH_IMAGE_BUILD_RECEIPT_SHA256:-}" ] \
+        && [ "${CLOUDBENCH_REQUIRE_IMAGE_RECEIPT:-0}" != 1 ]; then
+        echo "⚠️  no pinned image-build receipt: fresh REAL guests verify their baked dependencies at dep_sync."
+        echo "   Pin CLOUDBENCH_IMAGE_BUILD_RECEIPT(+_SHA256) for early image admission; CLOUDBENCH_REQUIRE_IMAGE_RECEIPT=1 requires it."
+        CURRENT_NODE_FP="$node_fp"
+        CURRENT_PY_FP="$py_fp"
+        return 0
+    fi
+    campaign_inventory_capture image_inventory fleet_admission_machines_json || return 1
+    if ! printf '%s' "$image_inventory" | cloudbench_verify_image_dependency_receipt \
+        "${CLOUDBENCH_IMAGE_BUILD_RECEIPT:-}" "${CLOUDBENCH_IMAGE_BUILD_RECEIPT_SHA256:-}" \
+        "$WARM_ID" "$node_fp" "$py_fp"; then
+        echo "❌ fresh REAL storage requires a matching published image, not a volume snapshot proof." >&2
+        echo "   Build with scripts/run-bench image-build, then scripts/run-bench image-activate <exact receipt image>," >&2
+        echo "   then pin its receipt via CLOUDBENCH_IMAGE_BUILD_RECEIPT and CLOUDBENCH_IMAGE_BUILD_RECEIPT_SHA256." >&2
+        return 1
+    fi
+    CURRENT_NODE_FP="$node_fp"
+    CURRENT_PY_FP="$py_fp"
+    echo "✅ fresh-storage baked image dependencies match the current ref"
+}
+fresh_image_deps_preflight || exit 1
 warm_deps_preflight || exit 1
 fresh_target_region_bind_destination || exit 1
 echo "🧊 forking clones from complete snapshot: $SNAP_ID"
@@ -16769,14 +17690,29 @@ admit_app_capacity_with_wait() {
     local deadline interval remaining inventory_status phase="during admission wait"
     local refresh_inventory="${1:-0}"
     local wait_seconds="${CLOUDBENCH_CAPACITY_ADMISSION_WAIT_SECONDS:-300}"
+    # Every devbox shares the app's ceilings, so a shortfall is normally another
+    # devbox's fleet that will release. A caller with its own gate deadline (the
+    # deploy cloud adapter) passes it explicitly as an absolute epoch and
+    # admission keeps polling at the same cadence until then; the ceilings and
+    # the 300 s default for other callers are unchanged.
+    local caller_deadline="${CLOUDBENCH_CAPACITY_ADMISSION_DEADLINE_EPOCH:-}" budget_label
     interval="${CLOUDBENCH_CAPACITY_ADMISSION_RETRY_SECONDS:-10}"
-    case "$wait_seconds:$interval" in
-        *[!0-9:]*) echo "❌ capacity admission wait and retry seconds must be integers" >&2; return 2 ;;
+    case "$wait_seconds:$interval:$caller_deadline" in
+        *[!0-9:]*) echo "❌ capacity admission wait, retry seconds and caller deadline must be integers" >&2; return 2 ;;
     esac
+    if [ -n "$caller_deadline" ] && [ -z "${CAPACITY_ADMISSION_DEADLINE:-}" ]; then
+        wait_seconds=$((caller_deadline - $(date +%s)))
+        if [ "$wait_seconds" -lt 1 ]; then
+            echo "❌ caller's capacity admission deadline already passed (epoch $caller_deadline)" >&2
+            return 1
+        fi
+    fi
     if [ "$wait_seconds" -lt 1 ] || [ "$interval" -lt 1 ]; then
         echo "❌ capacity admission wait and retry seconds must be positive" >&2
         return 2
     fi
+    budget_label="admission wait"
+    [ -z "$caller_deadline" ] || budget_label="caller's deadline"
     [ "$refresh_inventory" != 1 ] || phase="after infra canary"
     deadline="${CAPACITY_ADMISSION_DEADLINE:-$((SECONDS + wait_seconds))}"
     case "$deadline" in ''|*[!0-9]*) echo "❌ invalid original capacity admission deadline" >&2; return 2 ;; esac
@@ -16797,11 +17733,11 @@ admit_app_capacity_with_wait() {
         fi
         remaining=$((deadline - SECONDS))
         if [ "$remaining" -le 0 ]; then
-            echo "❌ capacity admission remained blocked for ${wait_seconds}s" >&2
+            echo "❌ capacity admission remained blocked for ${wait_seconds}s (${budget_label})" >&2
             return 1
         fi
         [ "$interval" -gt "$remaining" ] && interval="$remaining"
-        echo "⏳ capacity admission pending; retrying provider observation in ${interval}s" >&2
+        echo "⏳ capacity admission pending; retrying provider observation in ${interval}s (${remaining}s left before the ${budget_label})" >&2
         sleep "$interval"
         refresh_inventory=1
         phase="during admission wait"
@@ -17074,6 +18010,9 @@ PROVENANCE_CONFIG_ARGS=(
     --config-value "seed_cache_identity=$_SEED_GUEST_TOKEN"
     --config-value "volume_snapshot_id=$SNAP_ID"
     --config-value "base_source_manifest_sha256=${PRIVATE_SOURCE_SHA256:-none}"
+    --config-value "base_source_lease_protocol=${PRIVATE_SOURCE_LEASE_PROTOCOL:-none}"
+    --config-value "base_source_guest_env_mode=${PRIVATE_SOURCE_GUEST_ENV_MODE:-none}"
+    --config-value "base_source_guest_env_capsule_sha256=${PRIVATE_SOURCE_GUEST_ENV_CAPSULE_SHA256:-none}"
     --config-value "node_dependency_fingerprint=$CURRENT_NODE_FP"
     --config-value "python_dependency_fingerprint=$CURRENT_PY_FP"
     --config-value "per_child_max_concurrency=5"
@@ -17415,6 +18354,23 @@ PY
     done < "$POOL_IDS_FILE"
 }
 
+owned_capsule_worker_source_admission() {  # <validated worker proof custody>
+    [ "${PRIVATE_SOURCE_GUEST_ENV_MODE:-none}" = owned-capsule-v1 ] || return 0
+    # Imported worker pools predate the private-source namespace. Require their
+    # original captured provenance to name this exact source before claiming;
+    # the existing worker validator still verifies the full import afterwards.
+    python3 - "${CLOUDBENCH_SCRIPT_SNAPSHOT:-$ROOT_DIR/scripts}/cloudbench-worker-reuse.py" \
+        "$1" "$PRIVATE_SOURCE_SHA256" "$PRIVATE_SOURCE_GUEST_ENV_CAPSULE_SHA256" <<'PY_WORKER_CAPSULE_SOURCE'
+import json, runpy, sys
+h=runpy.run_path(sys.argv[1])
+packet=json.loads(h['read'](sys.argv[2]))
+values=json.loads(h['originals'](packet)['run/execution-provenance.json'])['config']['values']
+assert values['base_source_manifest_sha256']==sys.argv[3]
+assert values['base_source_guest_env_mode']=='owned-capsule-v1'
+assert values['base_source_guest_env_capsule_sha256']==sys.argv[4]
+PY_WORKER_CAPSULE_SOURCE
+}
+
 claim_reusable_worker() {  # <out> <primary> <workspace> <run-token> <primary-6pn>
     local out="$1" primary="$2" workspace="$3" token="$4" pip="$5" ledger id proof volume digest attempt
     local current_owner="${FLEET_OWNER_TOKEN:-}" claim_owner explicit_id
@@ -17436,6 +18392,7 @@ claim_reusable_worker() {  # <out> <primary> <workspace> <run-token> <primary-6p
             [ ! -e "$POOL_CLAIMS_DIR/$id" ] && [ ! -L "$POOL_CLAIMS_DIR/$id" ] || continue
             proof="$GIT_COMMON_DIR/cloudbench-worker-reuse/proofs/$id.json"
             [ -f "$proof" ] || continue
+            owned_capsule_worker_source_admission "$proof" || continue
             volume="$(python3 - "$proof" <<'PY'
 import json,sys
 print(json.load(open(sys.argv[1]))['volume_id'])
@@ -17820,7 +18777,7 @@ cleanup_failed_worker() {  # cleanup_failed_worker <output-dir> <worker-id>
         && ! cloudbench_capture_worker_runtime_evidence "$cleanup_out" "$cleanup_wid"; then
         echo "❌ worker $cleanup_wid runtime evidence was not preserved" >&2
         runtime_missing=1
-        [ "$DISPOSABLE_REAP" = 1 ] || rc=1
+        rc=1  # Unsealed worker originals are retained for every lifecycle policy.
         # Every cleanup path (cancelled provisioner, scale-down or controller)
         # publishes the same stable run-failure reason for the final verdict.
         local failure_reason="worker $cleanup_wid runtime evidence was not preserved"
@@ -17923,9 +18880,9 @@ cleanup_failed_worker() {  # cleanup_failed_worker <output-dir> <worker-id>
     return "$rc"
 }
 
-# Provisioners publish only unique per-worker outcomes. Readiness reconciliation and cleanup share
-# the worker-ledger lock, eliminating append-vs-rewrite loss and keeping desired-capacity state
-# authoritative over stale child outcomes.
+# Readiness publication, reconciliation and cleanup share the worker-ledger lock,
+# eliminating append-vs-rewrite loss and keeping desired-capacity state authoritative
+# over stale child outcomes.
 reconcile_worker_ready_outcomes() {  # <bench-output-dir>
     local out="$1" marker name wid rc=0
     worker_ledger_lock_acquire "$out" || return $?
@@ -18018,14 +18975,16 @@ provision_worker() {  # provision_worker <bench> <workspace> <primary_id> <prima
     local worker_storage
     worker_storage=snapshot
     if [ "$borrowed_worker" = 0 ]; then
-    [ "${FRESH_VOLUMES:-0}" = 1 ] && [ "$sim" = 0 ] && worker_storage=fresh
+    [ "${PRIVATE_SOURCE_GUEST_ENV_MODE:-none}" = owned-capsule-v1 ] \
+        || { [ "${FRESH_VOLUMES:-0}" = 1 ] && [ "$sim" = 0 ] && worker_storage=fresh; }
     if [ "$worker_storage" = fresh ]; then
         worker_snapshot="$SNAP_ID"  # unused: fresh workers retain no donor storage
     else
     primary_volume_size="$(machine_volume_size_gb "$primary_id")" || primary_volume_size=""
     if [ "$primary_volume_size" = "$WARM_SOURCE_SIZE_GB" ]; then
         worker_snapshot="$SNAP_ID"
-    elif [ -n "${WORKER_POOL_SNAPSHOT_ID:-}" ] \
+    elif [ "${PRIVATE_SOURCE_GUEST_ENV_MODE:-none}" != owned-capsule-v1 ] \
+        && [ -n "${WORKER_POOL_SNAPSHOT_ID:-}" ] \
         && [ "$primary_volume_size" = "$WORKER_POOL_SNAPSHOT_SIZE_GB" ]; then
         worker_snapshot="$WORKER_POOL_SNAPSHOT_ID"
     else
@@ -18172,8 +19131,16 @@ PY
         echo "export CLOUDBENCH_SYNC_DEPS_SCRIPT=/data/cloudbench-sync-deps.sh"
         echo "export CLOUDBENCH_SYNC_PRISMA_SCRIPT=/data/cloudbench-sync-prisma-client.sh"
         echo "export CLOUDBENCH_ENV_HELPER=/data/cloudbench-env.sh"
+        echo "export CLOUDBENCH_SOURCE_ENV_HELPER=/data/cloudbench-source-env.py"
+        echo "export CLOUDBENCH_SOURCE_GUEST_ENV_MODE=$(printf '%q' "$PRIVATE_SOURCE_GUEST_ENV_MODE")"
+        echo "export CLOUDBENCH_SOURCE_GUEST_ENV_CAPSULE_SHA256=$(printf '%q' "$PRIVATE_SOURCE_GUEST_ENV_CAPSULE_SHA256")"
+        echo "export CLOUDBENCH_EXECUTION_PROVENANCE_FILE=/data/cloudbench-execution-provenance.json"
+        echo "export CLOUDBENCH_SOURCE_MANIFEST_FILE=$(printf '%q' "$([ "$PRIVATE_SOURCE_LEASE_PROTOCOL" != none ] && printf /data/cloudbench-source-manifest.json)")"
+        echo "export CLOUDBENCH_SOURCE_MANIFEST_SHA256=$(printf '%q' "$([ "$PRIVATE_SOURCE_LEASE_PROTOCOL" != none ] && printf '%s' "$PRIVATE_SOURCE_SHA256")")"
+        echo "export CLOUDBENCH_SOURCE_LEASE_PROTOCOL=$(printf '%q' "$([ "$PRIVATE_SOURCE_LEASE_PROTOCOL" != none ] && printf '%s' "$PRIVATE_SOURCE_LEASE_PROTOCOL")")"
         echo "export CLOUDBENCH_WORKER_EVIDENCE_HELPER=/data/cloudbench-worker-evidence.py"
         echo "export CLOUDBENCH_WORKER_RUN_TOKEN=$(printf '%q' "$runtime_run_token")"
+        echo "export CLOUDBENCH_RUN_TOKEN=$(printf '%q' "$runtime_run_token")"
         [ "$borrowed_worker" = 0 ] || echo "export CLOUDBENCH_WORKER_EVIDENCE_SCOPE=run"
         echo "export CLOUDBENCH_WORKER_MACHINE_ID=$(printf '%q' "$wid")"
         echo "export WORKSPACE_NAME=$(printf '%q' "$ws")"
@@ -18250,6 +19217,11 @@ PY
               printf '%s|%s|%s\n' "$wid" "$runtime_run_token" "$primary_id" > "$ready_tmp" \
                   && mv "$ready_tmp" "$out/worker-$wid.qualification-ready" || return 1
           fi
+          # A bounded readiness consumer must not wait for the next metrics
+          # scrape to see an already queue-ready worker. Reuse the same locked
+          # reconciler as cleanup and the autoscaler, including its cancellation
+          # and exact tracked-worker checks.
+          reconcile_worker_ready_outcomes "$out"
       }
       log_worker_stage() {
           printf '[%s] %s\n' \
@@ -18314,6 +19286,12 @@ PY
                 }; } \
              && run_worker_stage_cmd "upload cloudbench-env.sh" \
                 fly_with_timeout 20 ssh sftp put -a "$APP" --machine "$wid" -q -m 0755 "$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-env.sh" /data/cloudbench-env.sh \
+             && run_worker_stage_cmd "upload owned capsule loader" \
+                fly_with_timeout 20 ssh sftp put -a "$APP" --machine "$wid" -q -m 0755 "$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-source-env.py" /data/cloudbench-source-env.py \
+             && { [ -z "$PRIVATE_SOURCE_FILE" ] || run_worker_stage_cmd "upload captured source manifest" \
+                fly_with_timeout 20 ssh sftp put -a "$APP" --machine "$wid" -q -m 0444 "$PRIVATE_SOURCE_FILE" /data/cloudbench-source-manifest.json; } \
+             && run_worker_stage_cmd "upload execution provenance" \
+                fly_with_timeout 20 ssh sftp put -a "$APP" --machine "$wid" -q -m 0444 "$EXECUTION_PROVENANCE_FILE" /data/cloudbench-execution-provenance.json \
              && run_worker_stage_cmd "upload worker environment" \
                 fly_with_timeout 20 ssh sftp put -a "$APP" --machine "$wid" -q -m 0600 "$worker_env" /tmp/rbw.env \
              && run_worker_stage_cmd "upload worker wrapper" \
@@ -18349,7 +19327,11 @@ PY
       while [ "$SECONDS" -lt "$ready_deadline" ]; do
           worker_provision_cancelled && finish_cancelled_worker_provision
           if worker_operational "$wid" "$out"; then
-              publish_worker_ready
+              if ! publish_worker_ready; then
+                  worker_provision_cancelled && finish_cancelled_worker_provision
+                  discard_replaceable_worker \
+                      "worker $wid could not publish queue readiness; see worker-$wid.stage.log"
+              fi
               worker_provision_cancelled && finish_cancelled_worker_provision
               rm -f "$out/worker-$wid.pending"
               echo "  ✅ [$bench] worker $wid joined queue navi-agent-tasks-$ws"
@@ -18371,13 +19353,40 @@ PY
     return 0
 }
 
+cloudbench_wait_for_autoscaler_terminal() {  # <exact-child-finished-marker> <poll-seconds>
+    # Replace only the idle sleep child. This observes no provider or capacity
+    # state; the original finalizer remains the sole completion authority.
+    python3 - "$1" "$2" <<'PY_TERMINAL_WAIT'
+import math
+import os
+import sys
+import time
+
+marker, value = sys.argv[1:]
+seconds = float(value)
+if not math.isfinite(seconds) or seconds < 0:
+    raise SystemExit(1)
+deadline = time.monotonic() + seconds
+while True:
+    try:
+        if os.path.exists(marker):
+            raise SystemExit(10)
+    except OSError:
+        pass  # An unreadable observation cannot advance the normal poll.
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise SystemExit(0)
+    time.sleep(min(0.2, remaining))
+PY_TERMINAL_WAIT
+}
+
 bench_autoscaler() {  # <bench> <primary_cid> <workspace> <sim01> <out> <local-port-base> [exact-run-token]
     local bench="$1" cid="$2" ws="$3" sim="$4" out="$5" port_base="$6"
     local runtime_run_token="${7:-}"
     local pip="" metrics_proxy_pid="" metrics_proxy_pid_LEASE="" metrics_proxy_pid_TOKEN="" metrics_proxy_pid_LIVE="" metrics_port="" metrics_url=""
     local metrics_started_at scrape_failures=0 metrics_lease_owner_pid metrics_lease_token
     local ready_reconcile_rc=0 inventory_status=0
-    local scale_down_target="" scale_down_since="" scale_down_now=""
+    local scale_down_target="" scale_down_since="" scale_down_now="" terminal_poll_status=0
     # Bash 3.2 preserves $$ from the controller in async function subshells.
     # Controller ownership is intentional: per-autoscaler EXIT releases the
     # exact token, while controller cleanup sweeps the run prefix after SIGKILL.
@@ -18418,6 +19427,8 @@ bench_autoscaler() {  # <bench> <primary_cid> <workspace> <sim01> <out> <local-p
     complete_autoscaler_after_child() {
         local completed_tmp="$out/autoscaler.completed-after-child.tmp.$$"
         local desired_workers tracked_workers ready_workers terminal_deadline ready_reconcile_rc
+        local desired_read_rc desired_ready
+        local -a desired_check_rcs
         [ -e "$out/benchmark-child.finished" ] || [ "${1:-}" = "verified-runtime" ] || return 1
         # Child completion stops new metrics decisions; it does not revoke
         # capacity already committed by a prior desired-count observation. Keep
@@ -18449,8 +19460,17 @@ bench_autoscaler() {  # <bench> <primary_cid> <workspace> <sim01> <out> <local-p
                 return 1
             fi
             [ ! -s "$out/autoscaler.failed" ] || return 1
-            desired_workers="$(cat "$out/desired-worker-count" 2>/dev/null || true)"
-            if ! printf '%s' "$desired_workers" | grep -Eq '^[0-9]+$'; then
+            desired_read_rc=0
+            desired_workers="$(cat "$out/desired-worker-count" 2>/dev/null)" || desired_read_rc=$?
+            if printf '%s' "$desired_workers" | grep -Eq '^[0-9]+$'; then
+                :
+            else
+                desired_check_rcs=("${PIPESTATUS[@]}")
+                desired_ready=0
+                [ ! -e "$out/autoscaler.ready" ] || desired_ready=1
+                printf '  ❌ [%s] desired capacity check failed: read_exit=%s validation_exit=%s printf_exit=%s readiness=%s\n' \
+                    "$bench" "$desired_read_rc" "${desired_check_rcs[1]:-unknown}" \
+                    "${desired_check_rcs[0]:-unknown}" "$desired_ready" >&2
                 printf '%s\n' "autoscaler never observed valid desired capacity" \
                     > "$out/autoscaler.failed"
                 echo "  ❌ [$bench] mandatory autoscaler: no valid desired capacity before child completion" >&2
@@ -18541,10 +19561,26 @@ bench_autoscaler() {  # <bench> <primary_cid> <workspace> <sim01> <out> <local-p
     # can still say `started` after the config mutation has committed `stopped`,
     # so it is not an ordering proof. Wait for run-bench-cloud to publish the exact
     # post-config start acceptance before spending the finite proxy attach budget.
+    # A child whose boot update failed (for example consecutive Fly host 408s)
+    # never gets that release, and the barrier waits for this autoscaler to exit
+    # before cloning its one replacement. Exit fail-closed, with no capacity
+    # committed, as soon as the child has finished.
     if [ "${CLOUDBENCH_BOOT_LAUNCH:-1}" = "1" ]; then
-        while [ ! -f "$BOOT_CONFIG_BARRIER/release" ]; do sleep 0.2; done
+        while [ ! -f "$BOOT_CONFIG_BARRIER/release" ]; do
+            if [ -e "$out/benchmark-child.finished" ]; then
+                printf '%s\n' "child finished before the boot-config barrier released; no worker capacity was committed" > "$out/autoscaler.failed"
+                echo "  ℹ️ [$bench] mandatory autoscaler: child finished before boot-config release; exiting without workers" >&2
+                return 1
+            fi
+            sleep 0.2
+        done
         primary_start_deadline=$((SECONDS + ${CLOUDBENCH_READY_TIMEOUT:-600}))
         while [ ! -f "$out/post-config-start.accepted" ]; do
+            if [ -e "$out/benchmark-child.finished" ]; then
+                printf '%s\n' "child finished before its post-config start was accepted; no worker capacity was committed" > "$out/autoscaler.failed"
+                echo "  ℹ️ [$bench] mandatory autoscaler: child finished before start acceptance; exiting without workers" >&2
+                return 1
+            fi
             if [ "$SECONDS" -ge "$primary_start_deadline" ]; then
                 printf '%s\n' "primary post-config start was not accepted before autoscaler attachment" > "$out/autoscaler.failed"
                 echo "  ❌ [$bench] mandatory autoscaler: primary post-config start was not accepted" >&2
@@ -18593,9 +19629,13 @@ bench_autoscaler() {  # <bench> <primary_cid> <workspace> <sim01> <out> <local-p
                 metrics_url="http://127.0.0.1:$metrics_port"
                 return 0
             fi
-            flyctl proxy "$metrics_port:$BOX_HEALTH_PORT" "$pip" \
-                -a "$APP" --bind-addr 127.0.0.1 -q \
-                >> "$out/autoscaler-metrics-proxy.log" 2>&1 &
+            (
+                if [ -n "${REGISTRY_RECOVERY_GUARD_FD:-}" ]; then
+                    exec {REGISTRY_RECOVERY_GUARD_FD}<&- || exit 1
+                fi
+                exec flyctl proxy "$metrics_port:$BOX_HEALTH_PORT" "$pip" \
+                    -a "$APP" --bind-addr 127.0.0.1 -q
+            ) >> "$out/autoscaler-metrics-proxy.log" 2>&1 &
             metrics_proxy_pid=$!
             # Force flyctl's lazy DNS resolution, then accept the tunnel only if
             # the process survives that first real data-plane connection.
@@ -18857,7 +19897,22 @@ bench_autoscaler() {  # <bench> <primary_cid> <workspace> <sim01> <out> <local-p
                 done
             fi
         fi
-        sleep "$AUTOSCALE_POLL"
+        terminal_poll_status=0
+        cloudbench_wait_for_autoscaler_terminal "$out/benchmark-child.finished" "$AUTOSCALE_POLL" \
+            || terminal_poll_status=$?
+        case "$terminal_poll_status" in
+            0) ;;  # The full original poll deadline elapsed.
+            10)
+                # Recheck the original marker and run the complete unchanged
+                # finalizer. A disappearing observation fails closed here.
+                complete_autoscaler_after_child
+                return $?
+                ;;
+            *)
+                fail_autoscaler "could not wait for benchmark child completion"
+                return 1
+                ;;
+        esac
     done
 }
 
@@ -19310,6 +20365,11 @@ launch_fleet_bench_child() {  # <bench-index> <bench> [existing-child-slot]
     CLOUDBENCH_SKIP_AUTOSCALER="${SKIP_AUTOSCALER:-0}" \
     CLOUDBENCH_REQUIRE_EXECUTION_PROVENANCE=1 \
     CLOUDBENCH_EXECUTION_PROVENANCE_FILE="$EXECUTION_PROVENANCE_FILE" \
+    CLOUDBENCH_SOURCE_MANIFEST_FILE="$PRIVATE_SOURCE_FILE" \
+    CLOUDBENCH_SOURCE_MANIFEST_SHA256="$PRIVATE_SOURCE_SHA256" \
+    CLOUDBENCH_SOURCE_LEASE_PROTOCOL="$PRIVATE_SOURCE_LEASE_PROTOCOL" \
+    CLOUDBENCH_SOURCE_GUEST_ENV_MODE="$PRIVATE_SOURCE_GUEST_ENV_MODE" \
+    CLOUDBENCH_SOURCE_GUEST_ENV_CAPSULE_SHA256="$PRIVATE_SOURCE_GUEST_ENV_CAPSULE_SHA256" \
     NO_OPEN=1 \
         run_fleet_child_supervised "$out/benchmark-child.finished" \
             bash "$RUN_BENCH_CLOUD_BIN" "$bench" \
@@ -19322,8 +20382,11 @@ launch_fleet_bench_child() {  # <bench-index> <bench> [existing-child-slot]
             --ref "$BENCH_REF" \
             --timeout "$bench_child_timeout" \
         > "$out/fleet-child.log" 2>&1 &
+    child_pid=$!
+    child_start="$(fleet_pid_start_time "$child_pid" || true)"
     if [ -z "$slot" ]; then
-    CHILD_PIDS+=("$!")
+    CHILD_PIDS+=("$child_pid")
+    CHILD_STARTS+=("$child_start")
     CHILD_OUT+=("$out")
     CHILD_BENCH+=("$bench")
     CHILD_MODE+=("$mode_label")
@@ -19332,8 +20395,15 @@ launch_fleet_bench_child() {  # <bench-index> <bench> [existing-child-slot]
     CHILD_RUN_TOKEN+=("$FLEET_OWNER_TOKEN-$i")
     CHILD_BENCH_INDEX+=("$i")
     else
-    CHILD_PIDS[$slot]="$!"
+    CHILD_PIDS[$slot]="$child_pid"
+    CHILD_STARTS[$slot]="$child_start"
     CHILD_MACHINE[$slot]="$cid"
+    fi
+    # Register first so EXIT cleanup retains ownership if the launch cannot be
+    # tracked. A supervisor that already published completion needs no watch.
+    if [ -z "$child_start" ] && [ ! -e "$out/benchmark-child.finished" ]; then
+        echo "❌ [$bench] could not capture launched child $child_pid start identity; stopping fleet" >&2
+        exit 1
     fi
     # Boot-launch is one bounded update/start pair and has exponential retry; it
     # no longer performs the old seven-SSH launch sequence. Feed pooled Machines
@@ -19521,6 +20591,13 @@ fleet_replace_host_unresponsive_child() {  # <child-slot> <barrier-deadline>
     fi
     printf '%s\n' "$mid" > "$out/boot-config-host-replaced" || return 1
     launch_fleet_bench_child "${CHILD_BENCH_INDEX[$j]}" "$bench" "$j" || return 1
+    # Before the boot-config release the new autoscaler cannot publish
+    # readiness (it waits for that release), and the release follows this
+    # replacement. The start barrier checks every ready slot's autoscaler
+    # after release, exactly as for the original launch.
+    if [ "${CLOUDBENCH_BOOT_LAUNCH:-1}" = "1" ] && [ ! -f "$BOOT_CONFIG_BARRIER/release" ]; then
+        return 0
+    fi
     if [ -n "${AUTOSCALER_PIDS[$j]:-}" ] && [ "${INFRA_PROBE:-0}" != 1 ] \
         && [ "${SKIP_AUTOSCALER:-0}" != 1 ]; then
         wait_for_mandatory_autoscaler_startup "$j" || return 1
@@ -19557,6 +20634,74 @@ echo "⏳ ${#CHILD_PIDS[@]} isolated bench machine(s) running."
 echo "   this run: $RUN_URL"
 echo "   per-bench viewers: $(for j in "${!CHILD_PORT[@]}"; do printf '%s→:%s ' "${CHILD_BENCH[$j]}" "${CHILD_PORT[$j]}"; done)"
 echo ""
+
+# Fixed-total infrastructure stop for every plain fleet launch. Campaigns and the
+# sharded operator already stop at `20 * infra_jobs >= scheduled_total`; this
+# applies the same predicate and job counting (run-bench-campaign.py
+# fleet_infra_stop -> infra_stop_receipt -> cloudbench-shard-coordinator.py
+# infra_stop_reached) to the requested benches. A campaign child leaves the
+# decision to its campaign, which owns the whole schedule; a task-free infra
+# probe already fails closed on any exclusion. The first breach receipt is kept
+# and the controller stops through its own TERM trap and EXIT cleanup.
+FLEET_INFRA_STOP_SENT=0
+fleet_infra_stop_check() {
+    local breach helper receipt
+    [ -z "${RUN_BENCH_CAMPAIGN_CHILD:-}" ] && [ "${INFRA_PROBE:-0}" != 1 ] \
+        && [ -n "${FLEET_DIR:-}" ] && [ "$FLEET_INFRA_STOP_SENT" = 0 ] || return 0
+    helper="${CLOUDBENCH_SCRIPT_SNAPSHOT:-$ROOT_DIR/scripts}/run-bench-campaign.py"
+    receipt="$FLEET_DIR/infra-stop.json"
+    if ! breach="$(python3 -c 'import runpy, sys
+sys.exit(runpy.run_path(sys.argv[1])["fleet_infra_stop_main"](sys.argv[2:]))' \
+        "$helper" "$FLEET_DIR" "$receipt" "${BENCHES[@]}")"; then
+        echo "⚠️  infra stop evaluation failed; unknown verdicts never count, continuing" >&2
+        return 0
+    fi
+    [ -n "$breach" ] || return 0
+    FLEET_INFRA_STOP_SENT=1
+    echo "🛑 INFRA STOP: $breach >= 5% of the original schedule; stopping this exact fleet through its TERM cleanup (receipt: $receipt)" >&2
+    kill -TERM "${BASHPID:-$$}"
+}
+
+# Only a recorded launch identity can identify a child; jobs/PPID membership
+# cannot distinguish a PID reused by another child of this controller. A failed
+# later observation is unknown, not exit: keep the infra-stop watch active until
+# the identity differs or both ps and kill confirm the PID is absent.
+fleet_child_pid_is_ours() {  # fleet_child_pid_is_ours <pid> <start>
+    local pid="${1:-}" start="${2:-}"
+    case "$pid" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    [ -n "$start" ] || return 1
+    # The shared birth-state reader normalizes legacy ps whitespace, whereas
+    # fleet_pid_start_time preserves internal spacing for older owner records.
+    case "$start" in
+        proc-start:*) ;;
+        *) start="$(printf '%s\n' "$start" | awk '{$1=$1; print}')" ;;
+    esac
+    [ "$(cloudbench_pid_birth_state "$pid" "$start")" != absent ]
+}
+
+# Watch the children until each has finished, re-evaluating the infra stop
+# whenever another child finishes. Exit codes are still reaped by `wait` after.
+fleet_wait_children_for_infra_stop() {
+    local j live finished seen=-1
+    while :; do
+        live=0; finished=0
+        for j in "${!CHILD_PIDS[@]}"; do
+            if [ -e "${CHILD_OUT[$j]}/benchmark-child.finished" ]; then
+                finished=$((finished + 1))
+            elif fleet_child_pid_is_ours "${CHILD_PIDS[$j]}" "${CHILD_STARTS[$j]:-}"; then
+                live=$((live + 1))
+            fi
+        done
+        [ "$live" -gt 0 ] || return 0
+        if [ "$finished" != "$seen" ]; then
+            seen="$finished"
+            fleet_infra_stop_check
+        fi
+        sleep "${FLEET_INFRA_STOP_POLL_SECONDS:-2}"
+    done
+}
 
 # A fleet run means simultaneous benchmark execution, not merely concurrent
 # provisioning. Each on-box driver announces after its isolated stack is
@@ -19673,6 +20818,8 @@ release_start_barrier() {
         python3 "$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-campaign-barrier.py" \
             --deadline "$deadline" --controller-pid "$$" || return 1
     fi
+    # Stacks that failed before the barrier may already disqualify the run.
+    fleet_infra_stop_check
     echo "🚦 releasing synchronized start barrier on the ready machines..."
     local release_pids=() release_failed=0 release_port_file
     for j in "${!CHILD_MACHINE[@]}"; do
@@ -19706,6 +20853,7 @@ if ! release_start_barrier; then
 fi
 
 # ── Wait for all children, then aggregate ────────────────────────────────────
+fleet_wait_children_for_infra_stop
 for j in "${!CHILD_PIDS[@]}"; do
     p="${CHILD_PIDS[$j]}"
     if wait "$p" 2>/dev/null; then
@@ -19776,6 +20924,7 @@ done
 # Normal completion has already reaped every child. Clear the ownership list so
 # EXIT cleanup cannot signal a stale PID that the OS may have since reused.
 CHILD_PIDS=()
+CHILD_STARTS=()
 # Autoscalers that already published causal completion are finished work, not
 # live ownership. Reap them before the fleet summary / EXIT path so guest
 # shutdown cannot race a vanishing jobs(1) entry into "survived local teardown".

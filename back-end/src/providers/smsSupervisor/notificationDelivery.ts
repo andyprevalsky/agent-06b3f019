@@ -2,6 +2,7 @@ import type { CompletionMessage } from '../rose';
 import { createLogger } from '../logger';
 import { SMS_MAX_BODY_CHARACTERS } from '../smsDeliveryContract';
 import type { SupervisorChannel } from './channelDelivery';
+import type { LinqNotificationCard } from '../linqCards';
 import { rewriteNotification, SMS_NOTIFICATION_SYSTEM_PROMPT } from './notificationLlm';
 
 const log = createLogger('SmsNotification');
@@ -20,6 +21,9 @@ interface DeliveryResult {
 export interface NotificationContent {
   message: string;
   requiredLinks: readonly string[];
+  /** An accepted final answer is immutable, even after a provider rejection. */
+  preserveText?: boolean;
+  card?: LinqNotificationCard;
 }
 
 export class NotificationDeliveryError extends Error {
@@ -68,7 +72,7 @@ export async function deliverNotificationMessage(
     const result: DeliveryResult = error
       ? { success: false, definitiveFailure: true, error }
       : await config.send(message);
-    if (result.success) return { ...result, message };
+    if (result.success || config.preserveText) return { ...result, message };
     log.warn('Notification delivery failed', {
       agentId: config.agentId,
       channel: config.channel,

@@ -1,0 +1,16 @@
+{
+  "failures": [
+    {
+      "id": "agentcard-production-abandonment-livemode-95d5350e1",
+      "description": "AgentCard production lifecycle (agent-payment-production-abandonment) refused at preflight on merge 95d5350e1: 'Production payment identity 00000000-0000-4000-8000-000000000107 is not provisioned: Stripe billing mode must be live (stripeLivemode=False).' The production payer fixture is Stripe test mode; a live-mode lifecycle needs a KYC cardholder only the user can provide (same cause as PR #1744/#1825). The run stopped before minting a card or placing a hold, so no live AgentCard or Stripe resource was created.",
+      "evidence": "/var/tmp/srf/production-r1.log [agentcard] RuntimeError + 'FAIL: run-bench agent-payment-production-abandonment exited 1'; .context/deploy-pipeline/production-lanes.json (archived in devbox-closeout-private/pr1826-95d5350e/final)",
+      "native_result": "FAIL",
+      "attribution": "NOT_INTRODUCED",
+      "external_provider": {
+        "name": "AgentCard/Stripe",
+        "reason": "credential or billing change"
+      },
+      "disposition": "external / waived"
+    }
+  ]
+}

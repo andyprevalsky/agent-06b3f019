@@ -259,10 +259,15 @@ def test_every_tracked_history_ledger_is_union_merged():
     import benchmarks.span_history as history
     import benchmarks.timeout_history as timeouts
 
+    from benchmarks import history_ledger
+
     ledger_names = {
         Path(history.HISTORY_FILE).name,
         Path(timeouts.HISTORY_FILE).name,
         Path(timeouts.ATTEMPTS_FILE).name,
+        # Per-writer shards of the attempts/durations ledgers (history_ledger.py).
+        Path(history_ledger.shard_path(timeouts.HISTORY_FILE, writer="feature-a")).name,
+        Path(history_ledger.shard_path(timeouts.ATTEMPTS_FILE, writer="feature-a")).name,
     }
     with tempfile.TemporaryDirectory() as tmp:
         original_dir = history.HISTORY_DIR
@@ -306,7 +311,7 @@ def test_every_tracked_history_ledger_is_union_merged():
         text=True,
     ).stdout.splitlines()
 
-    assert len(paths) == 5, paths
+    assert len(paths) == 7, paths
     not_union = [line for line in attrs if not line.endswith(": merge: union")]
     assert not not_union, f"history ledgers without merge=union in .gitattributes: {not_union}"
 

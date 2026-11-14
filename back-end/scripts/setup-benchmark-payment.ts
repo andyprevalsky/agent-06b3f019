@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { IntegrationStatus, IntegrationType, PrismaClient } from '@prisma/client';
+import { PrismaClient } from '@prisma/client';
 import Stripe from 'stripe';
 import {
   BENCHMARK_PAYMENT_LIFECYCLE_ADMIN_RUN_USER_ID,
@@ -12,12 +12,8 @@ import { BENCHMARK_PAYMENT_LIFECYCLE_PROD_USER_ID } from '../src/providers/bench
 import { applyResolvedBenchmarkAgentCardIds } from '../src/domains/test-payment/config';
 import { loadDotenvWithCallerOverrides } from '../src/providers/loadDotenvWithCallerOverrides';
 import { isAdminUser } from '../src/utils/adminAccess';
-import {
-  ensureAgentCardSandboxFloat,
-  ensureBenchmarkOrgCardholder,
-  resolveBenchmarkCardholderId,
-} from '../src/providers/agentcard/benchmark-float';
-import { getOrgCardholderVerificationStatus } from '../src/providers/agentcard/org-onboarding';
+import { validateV2SandboxFixtureUser } from '../src/providers/agentcard/v2-onboarding';
+import { saveV2ConnectedUserId } from '../src/providers/agentcard/store';
 import {
   callOrgTool as defaultCallOrgTool,
   type AgentCardOrgToolCaller,
@@ -28,13 +24,13 @@ import {
 } from '../src/providers/agentcard/org-wallet-monitor';
 import {
   configureLiveFixtureEnvironment,
-  assertLiveCardholderReady,
   assertSandboxDatabaseIsLocal,
   assertUserMatchesMode,
   isStripeResourceMissing,
-  requireLiveCardholderId,
   requireStripeLiveKey,
   requireOwnedLiveFixtureCustomer,
+  assertOwnedLiveFixtureCustomer,
+  requireLiveV2FixtureReady,
   type FixtureMode,
 } from './setup-benchmark-payment-guards';
 
@@ -60,65 +56,6 @@ const LIVE_CARD_SETUP_RETURN_URL = 'https://roselabs.ai/?benchmark-payment-card-
  * much headroom above recorded usage instead of deleting ledger rows.
  */
 const BENCHMARK_CREDIT_HEADROOM_CENTS = 100_000;
-
-/**
- * The org-managed AgentCard integration the mint path reads (`getOrgManagedCardholderId`). Without
- * it a `company_flow` mint throws 409 `agentcard_setup_required` instead of issuing a card. The
- * cardholder is passed in because sandbox and production must never share one.
- */
-async function seedAgentCardConnection(
-  prisma: PrismaClient,
-  userId: string,
-  cardholderId: string
-): Promise<void> {
-  const configured = process.env.BENCHMARK_AGENTCARD_CARDHOLDER_ID?.trim();
-  if (configured !== undefined && configured !== '' && configured !== cardholderId) {
-    console.warn(
-      `BENCHMARK_AGENTCARD_CARDHOLDER_ID=${configured} is not present in the sandbox org; ` +
-        `seeding live cardholder ${cardholderId} instead`
-    );
-  }
-
-  // A cardholder owns ONE funding wallet. Seeding a benchmark fixture onto a cardholder that
-  // already belongs to a real user makes benchmark mints spend that user's live float — which is
-  // exactly what happened in prod when BENCHMARK_AGENTCARD_CARDHOLDER_ID was pointed at a live
-  // cardholder. Fail loudly instead of silently commingling funds.
-  const existing = await prisma.integration.findMany({
-    where: { name: 'agentcard', config: { path: ['cardholderId'], equals: cardholderId } },
-    select: { userId: true },
-  });
-  const foreignOwner = existing.map((row) => row.userId).find((owner) => owner !== userId);
-  if (foreignOwner !== undefined) {
-    throw new Error(
-      `Refusing to seed benchmark user ${userId} onto cardholder ${cardholderId}: it is already ` +
-        `bound to user ${foreignOwner}. Point BENCHMARK_AGENTCARD_CARDHOLDER_ID at a dedicated ` +
-        `sandbox cardholder.`
-    );
-  }
-
-  const config = { orgManaged: true, cardholderId };
-  await prisma.integration.upsert({
-    where: { userId_name_accountId: { userId, name: 'agentcard', accountId: '' } },
-    create: {
-      userId,
-      name: 'agentcard',
-      type: IntegrationType.TOOL_SETUP,
-      status: IntegrationStatus.CONNECTED,
-      isActive: true,
-      config,
-    },
-    update: {
-      type: IntegrationType.TOOL_SETUP,
-      status: IntegrationStatus.CONNECTED,
-      isActive: true,
-      config,
-      lastUsedAt: new Date(),
-    },
-  });
-  console.log(
-    `Seeded AgentCard org cardholder fixture ${cardholderId} for benchmark user ${userId}`
-  );
-}
 
 /**
  * Keep the fixture user solvent without destroying its ledger. `getUserUsage` computes
@@ -273,23 +210,15 @@ export async function requireLiveOrgWallet(
   return wallet;
 }
 
-/**
- * The benchmark organization and its cardholder are two halves of one wallet
- * fixture. Overriding only one (e.g. funding a custom org while the integration
- * keeps the default cardholder) prepares the wrong wallet and silently breaks
- * the lifecycle fixture. Require the pair to move together.
- */
-function assertBenchmarkOrgCardholderPair(): void {
-  const orgId = process.env.BENCHMARK_AGENTCARD_ORG_ID?.trim();
-  const cardholderId = process.env.BENCHMARK_AGENTCARD_CARDHOLDER_ID?.trim();
-  const orgSet = orgId !== undefined && orgId !== '';
-  const cardholderSet = cardholderId !== undefined && cardholderId !== '';
-  if (orgSet !== cardholderSet) {
+/** New company-funded routing requires a real v2 connection, never an MCP identity alias. */
+export function requireSandboxV2FixtureUserId(value: string | undefined): string {
+  const id = value?.trim() ?? '';
+  if (!/^usr_[A-Za-z0-9_-]+$/.test(id)) {
     throw new Error(
-      'BENCHMARK_AGENTCARD_ORG_ID and BENCHMARK_AGENTCARD_CARDHOLDER_ID must be set together ' +
-        '(a custom organization with the default cardholder funds the wrong wallet).'
+      'BENCHMARK_AGENTCARD_V2_USER_ID is required: complete the normal signed sandbox AgentCard setup (OTP 111111), then supply its connected user.id (usr_...). A legacy cardholderId cannot be used. No fixture changes were made.'
     );
   }
+  return id;
 }
 
 function requireStripeTestKey(): string {
@@ -384,7 +313,8 @@ async function ensureLiveBillingCustomer(
   if (existingId !== undefined && existingId !== null && existingId.trim() !== '') {
     try {
       const existing = await stripe.customers.retrieve(existingId);
-      if (existing.deleted !== true) return existing.id;
+      if (existing.deleted !== true)
+        return assertOwnedLiveFixtureCustomer(existing, existingId, userId);
       console.log('Stored live Stripe customer was deleted; provisioning a replacement');
     } catch (error) {
       if (!isStripeResourceMissing(error)) throw error;
@@ -396,7 +326,7 @@ async function ensureLiveBillingCustomer(
     metadata: { userId, fixture: 'agent-payment-production-lifecycle' },
   });
   console.log(`Created live Stripe customer ${customer.id} for ${userId}`);
-  return customer.id;
+  return assertOwnedLiveFixtureCustomer(customer, customer.id, userId);
 }
 
 /**
@@ -436,6 +366,8 @@ async function ensureLiveDefaultPaymentMethod(stripe: Stripe, customerId: string
 
 async function seedSandboxFixture(prisma: PrismaClient, userId: string): Promise<void> {
   assertSandboxDatabaseIsLocal();
+  const v2UserId = requireSandboxV2FixtureUserId(process.env.BENCHMARK_AGENTCARD_V2_USER_ID);
+  await validateV2SandboxFixtureUser(v2UserId);
   const stripe = new Stripe(requireStripeTestKey(), { apiVersion: STRIPE_API_VERSION });
   await upsertBenchmarkUser(prisma, userId);
   await ensureBenchmarkCredits(prisma, userId);
@@ -447,29 +379,9 @@ async function seedSandboxFixture(prisma: PrismaClient, userId: string): Promise
   await prisma.purchaseSpend.deleteMany({
     where: { userId, merchant: 'Rose Labs Test Payment' },
   });
-
-  // Verify cardholder against list_cardholders so a stale BENCHMARK_* override cannot
-  // seed Integration with an id the org MCP will reject as "Cardholder not found".
-  const cardholderId = await resolveBenchmarkCardholderId();
-  await seedAgentCardConnection(prisma, userId, cardholderId);
-
-  // The org identity now travels in the client-credential token itself
-  // (AGENTCARD_ORG_OAUTH_CLIENT_ID/SECRET), so no explicit orgId is needed.
-  const sandboxFloat = await ensureAgentCardSandboxFloat();
+  await saveV2ConnectedUserId(userId, v2UserId);
   console.log(
-    `AgentCard sandbox pool ready at $${(sandboxFloat.availableCents / 100).toFixed(2)} available ` +
-      `($${(sandboxFloat.balanceCents / 100).toFixed(2)} balance)`
-  );
-
-  // A funded pool still cannot mint if the cardholder itself is not KYC-ready, and that failure
-  // only surfaces mid-benchmark as a mint error. Assert it here instead.
-  const cardholder = await ensureBenchmarkOrgCardholder(cardholderId);
-  console.log(
-    `AgentCard benchmark cardholder ${cardholderId} is KYC-ready (${cardholder.verificationStatus})`
-  );
-
-  console.log(
-    `Seeded Stripe, Rose credit, and AgentCard payment fixtures for benchmark user ${userId}`
+    'Seeded Stripe, Rose credit, and verified sandbox v2 AgentCard user mapping; legacy cardholder ids were not used'
   );
 }
 
@@ -484,34 +396,23 @@ async function provisionLiveFixture(
   userId: string,
   selectedCustomerId?: string
 ): Promise<void> {
-  const stripe = new Stripe(requireStripeLiveKey(), { apiVersion: STRIPE_API_VERSION });
-  const selectedCustomer =
+  const stripeKey = requireStripeLiveKey();
+  await requireLiveV2FixtureReady(userId);
+  const stripe = new Stripe(stripeKey, { apiVersion: STRIPE_API_VERSION });
+  const customerId =
     selectedCustomerId === undefined
-      ? undefined
+      ? await ensureLiveBillingCustomer(stripe, prisma, userId)
       : await requireOwnedLiveFixtureCustomer(stripe, selectedCustomerId, userId);
-  const cardholderId = requireLiveCardholderId();
-  // This call uses the production org credential flow. A sandbox-only or foreign id cannot
-  // resolve to a terminal KYC state here, so validate it before touching any shared DB row.
-  const cardholderStatus = await getOrgCardholderVerificationStatus(cardholderId);
-  assertLiveCardholderReady(cardholderStatus);
-  // KYC proves the cardholder resolves; the company wallet proves WHICH mode resolved it. Checked
-  // before the first production write so sandbox credentials can never seed the live fixture.
-  const orgWallet = await requireLiveOrgWallet();
-  console.log(
-    `AgentCard org wallet confirmed LIVE at $${(orgWallet.availableCents / 100).toFixed(2)} ` +
-      `available ($${(orgWallet.balanceCents / 100).toFixed(2)} balance)`
-  );
+  console.log('AgentCard live v2 connection, company funding and approved KYC verified');
   await upsertBenchmarkUser(prisma, userId);
   await ensureBenchmarkCredits(prisma, userId);
-  const customerId = selectedCustomer ?? (await ensureLiveBillingCustomer(stripe, prisma, userId));
   // Persist the customer before asking for a card. The first cardless run intentionally throws a
   // hosted setup URL; saving first makes the next run reuse the customer that URL attached to.
   await upsertBenchmarkSubscription(prisma, userId, customerId, true);
   const paymentMethodId = await ensureLiveDefaultPaymentMethod(stripe, customerId);
-  await seedAgentCardConnection(prisma, userId, cardholderId);
   console.log(
     `Provisioned the production payment-lifecycle identity ${userId}: live customer ${customerId} ` +
-      `(default payment method ${paymentMethodId}), AgentCard cardholder ${cardholderId}`
+      `(default payment method ${paymentMethodId}); existing v2 connection retained`
   );
 }
 
@@ -523,9 +424,21 @@ async function main(): Promise<void> {
   [--stripe-customer-id OWNED_LIVE_CUSTOMER] [--agentcard-cardholder-id DEDICATED_ID]
 --live uses the complete AGENTCARD_ORG_OAUTH_*_LIVE pair when supplied,
 otherwise the generic production pair. Incomplete LIVE pairs are rejected.
-The cardholder must already exist, be dedicated to this fixture, and pass KYC;
-no cardholder is created or selected automatically. Ownership and live-wallet
-checks remain mandatory. Existing purchase history is preserved.
+Live readiness requires an existing current-client v2 connection for this Rose
+user, created through the normal signed live connection with consent. The REST
+company wallet must report livemode=true/company_flow and KYC must be approved
+before any fixture or Stripe write. No OTP, consent or KYC is initiated here.
+--agentcard-cardholder-id is accepted for legacy compatibility only; it does not
+establish v2 readiness or change existing AgentCard integrations. Dedicated user,
+live Stripe key/customer ownership and saved-card setup checks remain mandatory.
+Existing purchase history and legacy cleanup credentials are preserved.
+Sandbox v2 requires BENCHMARK_AGENTCARD_V2_USER_ID set to the provider user.id from an
+explicit sandbox connect/verify flow (sandbox OTP 111111). The command reads
+company_wallet to require livemode=false and company_flow, reads that user's
+KYC to verify connection scope, then binds it exclusively in the local database.
+It sends no OTP and never treats BENCHMARK_AGENTCARD_CARDHOLDER_ID as a v2 user.
+--live rejects BENCHMARK_AGENTCARD_V2_USER_ID; connect live users through Rose.
+A legacy cardholder is never a substitute for the current-client v2 connection.
 --help performs no database or provider calls.\n`);
     return;
   }
@@ -544,8 +457,13 @@ checks remain mandatory. Existing purchase history is preserved.
   if (mode === 'sandbox' && selectedCardholderId !== undefined) {
     throw new Error('--agentcard-cardholder-id requires --live');
   }
+  if (mode === 'live' && process.env.BENCHMARK_AGENTCARD_V2_USER_ID?.trim()) {
+    throw new Error(
+      '--live refuses BENCHMARK_AGENTCARD_V2_USER_ID: this mapping is sandbox-only; connect the live user through Rose'
+    );
+  }
   if (mode === 'live') configureLiveFixtureEnvironment(selectedCardholderId);
-  if (mode === 'sandbox') assertBenchmarkOrgCardholderPair();
+  if (mode === 'sandbox') requireSandboxV2FixtureUserId(process.env.BENCHMARK_AGENTCARD_V2_USER_ID);
   const defaultUserId =
     mode === 'live' ? BENCHMARK_PAYMENT_LIFECYCLE_PROD_USER_ID : DEFAULT_BENCHMARK_USER_ID;
   const userId = resolveBenchmarkUserId([

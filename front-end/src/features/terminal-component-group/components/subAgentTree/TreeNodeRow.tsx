@@ -16,6 +16,8 @@ interface TreeNodeRowProps {
    * the trajectory SubAgentTree, which renders exactly as before.
    */
   renderAfterNode?: (node: TreeNode, childPrefix: string) => ReactNode;
+  /** Rows it rejects render without a click target (unset: every row navigates). */
+  canNavigate?: (node: TreeNode) => boolean;
 }
 
 /**
@@ -28,6 +30,7 @@ export function TreeNodeRow({
   getChildren,
   onNavigate,
   renderAfterNode,
+  canNavigate,
 }: TreeNodeRowProps) {
   const [isHovered, setIsHovered] = useState(false);
   const children = getChildren(node.agentId);
@@ -48,7 +51,7 @@ export function TreeNodeRow({
           </span>
         }
         goalFlex
-        onClick={() => onNavigate(node.agentId)}
+        onClick={!canNavigate || canNavigate(node) ? () => onNavigate(node.agentId) : undefined}
         onMouseEnter={() => setIsHovered(true)}
         onMouseLeave={() => setIsHovered(false)}
       />
@@ -73,6 +76,7 @@ export function TreeNodeRow({
           getChildren={getChildren}
           onNavigate={onNavigate}
           renderAfterNode={renderAfterNode}
+          canNavigate={canNavigate}
         />
       ))}
     </div>

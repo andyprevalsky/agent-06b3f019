@@ -20,6 +20,7 @@ unset ROSE_TRUST_CONDUCTOR_WORKSPACE_NAME \
   CONDUCTOR_WORKSPACE_PATH \
   CONDUCTOR_PORT \
   BENCHMARK_ISOLATED_RUN \
+  ROSE_STABILITY_UNIT_IDENTITY \
   ROSE_DEPLOY_WORKTREE \
   ROSE_DEPLOY_WORKTREE_PATH \
   ROSE_DEPLOY_SOURCE_WORKSPACE \
@@ -103,6 +104,24 @@ isolated_benchmark_name=$(printf '%s\n' "$isolated_benchmark_env" | sed -n '1p')
 isolated_benchmark_port=$(printf '%s\n' "$isolated_benchmark_env" | sed -n '2p')
 expect_eq "$isolated_benchmark_name" "deploy-child-bench-run-123" "isolated benchmark preserves its child identity"
 expect_eq "$isolated_benchmark_port" "56220" "isolated benchmark preserves its reserved port range"
+
+stability_unit_name="$(
+  cd "$deploy_child"
+  ROSE_STABILITY_UNIT_IDENTITY=1 \
+  ROSE_TRUST_CONDUCTOR_WORKSPACE_NAME=1 \
+  CONDUCTOR_WORKSPACE_NAME=stab-123-0-abcdef \
+  CONDUCTOR_WORKSPACE_PATH="$deploy_child" \
+  bash -c ". '$HELPER_SRC'; normalize_conductor_workspace_env >/dev/null; printf '%s' \"\$CONDUCTOR_WORKSPACE_NAME\""
+)"
+expect_eq "$stability_unit_name" "stab-123-0-abcdef" "a stability unit keeps its own identity inside a deploy worktree"
+deploy_shell_name="$(
+  cd "$deploy_child"
+  ROSE_TRUST_CONDUCTOR_WORKSPACE_NAME=1 \
+  CONDUCTOR_WORKSPACE_NAME=stab-123-0-abcdef \
+  CONDUCTOR_WORKSPACE_PATH="$deploy_child" \
+  bash -c ". '$HELPER_SRC'; normalize_conductor_workspace_env >/dev/null; printf '%s' \"\$CONDUCTOR_WORKSPACE_NAME\""
+)"
+expect_eq "$deploy_shell_name" "deploy-child" "without the stability flag a deploy worktree still rehydrates its identity"
 
 cloud_workspace="$TMP_ROOT/cloud-checkout"
 mkdir -p "$cloud_workspace"
@@ -682,7 +701,7 @@ sandbox_base() {
     # shellcheck source=/dev/null
     . "$HELPER_SRC"
     export BACKEND_URL="http://localhost:24740" "$@"
-    export_sandbox_backend_base_url
+    export_sandbox_backend_base_url || return $?
     printf '%s|%s' "${ROSE_UI_PUBLISH_BASE_URL:-}" "${USERCONTENT_BASE_URL:-}"
   )
 }
@@ -694,6 +713,16 @@ expect_eq "$(sandbox_base PUBLIC_BASE_URL=https://t.example ROSE_UI_PUBLISH_BASE
   "https://explicit.example|" "an explicit ROSE_UI_PUBLISH_BASE_URL wins"
 grep -qx 'export_sandbox_backend_base_url' "$ROOT_DIR/scripts/run.sh" \
   || { echo "FAIL: run.sh does not export the sandbox backend base after the tunnel" >&2; exit 1; }
+for inherited in http://localhost:24740 https://foreign.example https://owned.example/foreign \
+ 'https://owned.example?query=x' 'https://owned.example/#fragment' 'https://user:password@owned.example' https://owned.example:0; do
+ if sandbox_base BENCHMARK_PUBLIC_TUNNEL_RUN_ID=fixture PUBLIC_BASE_URL=https://owned.example ROSE_UI_PUBLISH_BASE_URL="$inherited" >/dev/null 2>&1; then
+  echo 'FAIL: scoped mismatching callback origin was accepted' >&2; exit 1
+ fi
+done
+expect_eq "$(sandbox_base BENCHMARK_PUBLIC_TUNNEL_RUN_ID=fixture PUBLIC_BASE_URL=https://owned.example/ ROSE_UI_PUBLISH_BASE_URL=https://owned.example/)" \
+ 'https://owned.example/|http://localhost:24740' 'matching scoped override preserves trailing slash and local usercontent'
+expect_eq "$(sandbox_base BENCHMARK_PUBLIC_TUNNEL_RUN_ID=fixture PUBLIC_BASE_URL=https://owned.example ROSE_UI_PUBLISH_BASE_URL=https://OWNED.example:443)" \
+ 'https://OWNED.example:443|http://localhost:24740' 'matching normalized origin is accepted unchanged'
 echo "PASS: run.sh exports the sandbox backend base"
 
 # cloud-init.sh's injected-secret -> .env sync has no /deploy gate of its own;

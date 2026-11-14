@@ -5,6 +5,7 @@
     post_agent_message_to_address  ──▶ POST /api/agents/<self>/send-agent-message
     post_agent_message             ──▶ POST /api/agents/<target>/agent-messages (same-tree auth, idempotent)
     post_kill_agent                ──▶ POST /api/agents/<self>/kill-agent         (descendants only)
+    fetch_project_agents           ──▶ GET  /api/data/project-agents             (own + team-shared projects)
 
 Ownership and same-tree checks live in the backend.
 """
@@ -55,6 +56,22 @@ async def fetch_agent_tree(agent_id: str, user_id: Optional[str], params: Dict[s
         timeout=AGENT_MESSAGING_TIMEOUT_SECONDS,
     )
     logger.info("[AgentMessaging] tree listed", agent_id=agent_id, params=params, status=response.status_code)
+    if 400 <= response.status_code < 500:
+        return {"error": _error_text(response), "status": response.status_code}
+    response.raise_for_status()
+    body = response.json() or {}
+    return body if isinstance(body, dict) else {}
+
+
+async def fetch_project_agents(user_id: Optional[str], params: Dict[str, str]) -> Dict[str, Any]:
+    """Metadata-only agents in own and team-shared projects; 4xx answers return ``{"error", "status"}``."""
+    response = await get_http_client().get(
+        _api_url("/api/data/project-agents"),
+        params=params,
+        headers=_headers(user_id),
+        timeout=AGENT_MESSAGING_TIMEOUT_SECONDS,
+    )
+    logger.info("[AgentMessaging] project agents listed", params=params, status=response.status_code)
     if 400 <= response.status_code < 500:
         return {"error": _error_text(response), "status": response.status_code}
     response.raise_for_status()
@@ -130,6 +147,8 @@ def _delivery(body: Dict[str, Any]) -> Dict[str, Any]:
     }
     if body.get("queued") is True:
         result["queued"] = True
+        if body.get("queued_reason") == "direct_hold":
+            result["queued_reason"] = "direct_hold"
     if isinstance(body.get("woke"), bool):
         result["woke"] = body["woke"]
     if isinstance(body.get("wake_error"), str):

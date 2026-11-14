@@ -120,6 +120,10 @@ def background_tree_entries(
             "started_at": record.get("started_at"),
             "task_name": record.get("task_name"),
             "path": record.get("path"),
+            # The owner can start this finished task's next run only from its wake record
+            # (never a foreground spawn or an older record): a person's resume of any
+            # other runs under a supervising workflow instead.
+            **({"wakeable": True} if isinstance(record.get("wake"), dict) and not record.get("foreground") else {}),
         }
 
     entries = [

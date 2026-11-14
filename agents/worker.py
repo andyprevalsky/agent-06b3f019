@@ -45,7 +45,6 @@ from domains.agent_messaging.service import (
     send_agent_message_activity,
     send_agent_message_to_address_activity,
 )
-from domains.report_bug.service import report_bug_activity
 from domains.api_request.repo import api_request_activity
 from domains.call_phone_number.handler import call_phone_number_activity
 from domains.display.repo import display_media_activity
@@ -56,17 +55,20 @@ from domains.gate.repo import (
     mint_subscription_checkout_activity,
     source_status_activity,
 )
+from domains.github_repo_inventory.service import fetch_github_repo_inventory_activity
 from domains.grep.repo import fetch_local_data_summary, grep_activity
 from domains.knowledge_base.handler import query_blueprints_activity, save_blueprint_activity
 from domains.message_person.repo import (
     fetch_recent_messages_activity,
     generate_message_activity,
     queue_imessage_activity,
+    read_phone_message_activity,
     send_agent_sms_activity,
     send_email_activity,
 )
 from domains.read_message_history.handler import read_message_history_activity
 from domains.reasoning.handler import execute_reasoning_activity
+from domains.report_bug.service import report_bug_activity
 from domains.request_payment_card.repo import (
     agentcard_status_activity,
     lookup_purchase_activity,
@@ -108,8 +110,6 @@ from health_server import (
     set_queue_observation,
     set_worker_status,
 )
-
-# Helper activities (workflow orchestration, not exposed to LLM)
 from helpers import (
     acknowledge_workflow_replacement_bootstrap,
     call_llm,
@@ -139,6 +139,9 @@ from helpers import (
 from helpers.activity_dispatch import ActivityDispatchLagInterceptor
 from helpers.agent_graph import send_agent_graph_message_activity
 from helpers.attachments import fetch_parent_attachments_activity, resolve_attachments_activity
+
+# Helper activities (workflow orchestration, not exposed to LLM)
+from helpers.code_agent_resume_context import fetch_code_agent_resume_context
 from helpers.error_alert import report_failure_activity
 from helpers.generation_handoff import parse_shutdown_grace_seconds
 from helpers.jev_progress import predict_jev_progress
@@ -165,11 +168,12 @@ from helpers.sms_activities import (
     send_direct_sms_activity,
 )
 from helpers.summarize import summarize_and_filter_links
-from helpers.update_tokens import update_agent_tree_cost_activity
+from helpers.update_tokens import apply_resume_cost_activity, update_agent_tree_cost_activity
 from helpers.user_ui_activities import resolve_user_ui_inline_view_activity
 from helpers.worker_activation import wait_for_worker_build_activation
 from helpers.worker_event_loop import run_worker_event_loop
 from helpers.worker_generation import resolve_production_task_queue
+from helpers.worker_queue_capabilities import record_worker_queue_capabilities
 from helpers.workflow_sandbox import production_workflow_runner
 from helpers.world_model_runtime import (
     world_clock_activity,
@@ -181,6 +185,7 @@ from tools.people_search import people_search_activity  # not yet refactored int
 from tools.read_tool_output import preview_tool_output_activity, read_tool_output_activity
 from tools.web_search import web_search_activity  # not yet refactored into domains/
 from workflows import AgentWorkflow
+from workflows.agent_workflow import COMPANION_WORKFLOWS
 
 # Configure unified structured logging
 # All log output (structlog + stdlib including Temporal's workflow.logger)
@@ -1575,6 +1580,7 @@ async def main():
 
     registered_activities = [
         list_agent_tree_activity,
+        fetch_github_repo_inventory_activity,
         resolve_agent_address_activity,
         send_agent_message_activity,
         send_agent_message_to_address_activity,
@@ -1612,6 +1618,7 @@ async def main():
         generate_message_activity,
         fetch_recent_messages_activity,
         queue_imessage_activity,
+        read_phone_message_activity,
         send_agent_sms_activity,
         send_email_activity,
         call_phone_number_activity,
@@ -1655,6 +1662,7 @@ async def main():
         mark_finished,
         materialize_oai_demo_report_files_activity,
         fetch_agent_config,
+        fetch_code_agent_resume_context,
         fetch_agent_queue_pointer,
         fetch_child_terminal_result_activity,
         fetch_model_pricing,
@@ -1663,6 +1671,7 @@ async def main():
         get_user_system_name,
         get_user_custom_system_prompt,
         update_agent_tree_cost_activity,
+        apply_resume_cost_activity,
         update_agent_tree_state,
         resolve_fast_cache_goal_activity,
         resolve_fast_cache_context_activity,
@@ -1692,7 +1701,7 @@ async def main():
         validation_worker = Worker(
             client,
             task_queue=validation_task_queue,
-            workflows=[AgentWorkflow],
+            workflows=[AgentWorkflow, *COMPANION_WORKFLOWS],
             activities=registered_activities,
             workflow_runner=production_workflow_runner(),
         )
@@ -1733,6 +1742,12 @@ async def main():
         surface_hash=os.getenv("TEMPORAL_WORKER_SURFACE_HASH") or None,
         production_task_queue=production_task_queue,
     )
+    # The backend starts newer workflow types (code/browser resume runs) only on a
+    # queue whose workers recorded them: background, best-effort, idempotent.
+    # Held in this frame for the worker's lifetime (never garbage-collected mid-flight).
+    _capabilities_task = asyncio.create_task(
+        record_worker_queue_capabilities(production_task_queue, [AgentWorkflow, *COMPANION_WORKFLOWS])
+    )
 
     # Warm the planner-RAG index (one encrypted object from the archive
     # backend) so the first set_plan on this worker does not pay the cold
@@ -1746,7 +1761,7 @@ async def main():
     worker = Worker(
         client,
         task_queue=production_task_queue,
-        workflows=[AgentWorkflow],
+        workflows=[AgentWorkflow, *COMPANION_WORKFLOWS],
         activities=registered_activities,
         tuner=tuner,
         max_cached_workflows=config.temporal.max_cached_workflows,

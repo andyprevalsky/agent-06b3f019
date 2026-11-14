@@ -13,24 +13,52 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 pass() { echo "PASS: $*"; }
 
 TMP="$(mktemp -d)"
-# Reap the mock server before exiting: a TERM without a wait let it outlive the
-# test under load, and the controller-gate supervisor then had to reap an orphan.
-trap 'kill "${SERVER_PID:-}" 2>/dev/null || true; wait "${SERVER_PID:-}" 2>/dev/null || true; rm -rf "$TMP"' EXIT
+SERVER_PID=""
+cleanup_mock_server() {
+  local original_status=$? child wait_status=0 cleanup_failed=0
+  trap - EXIT
+  if [ -n "$SERVER_PID" ]; then
+    # Only signal a still-running child owned by this shell, never a reused PID.
+    for child in $(jobs -pr); do
+      if [ "$child" = "$SERVER_PID" ]; then
+        kill -TERM "$SERVER_PID" 2>/dev/null || cleanup_failed=1
+        break
+      fi
+    done
+    wait "$SERVER_PID" 2>/dev/null || wait_status=$?
+    if [ "$wait_status" -ne 0 ] && [ "$wait_status" -ne 143 ]; then
+      cleanup_failed=1
+    fi
+  fi
+  if [ "$cleanup_failed" -ne 0 ]; then
+    echo "FAIL: mock server cleanup unconfirmed; retained $TMP" >&2
+    [ "$original_status" -ne 0 ] || exit 1
+  else
+    rm -rf "$TMP" || { [ "$original_status" -ne 0 ] || exit 1; }
+  fi
+  # Return rather than exit so a terminating signal keeps its original status.
+  return "$original_status"
+}
+trap cleanup_mock_server EXIT
 
 LIVE_DISPATCH="${GITHUB_DISPATCH_TOKEN:-}"
 GOOD_TOKEN="gho_test_dispatch_token_good_for_repo_read"
 BAD_TOKEN="github_pat_stale_token_that_must_not_win"
+POOL_TOKEN="ghs_test_pool_member_with_most_quota"
+POOL_NO_ACCESS_TOKEN="ghs_test_pool_member_without_repo_access"
 
-python3 - "$TMP" "$GOOD_TOKEN" <<'PY' &
+python3 - "$TMP" "$GOOD_TOKEN" "$POOL_TOKEN" "$POOL_NO_ACCESS_TOKEN" <<'PY' &
 import http.server, sys
 from pathlib import Path
-root, good = Path(sys.argv[1]), sys.argv[2]
+root, good, pool, no_access = Path(sys.argv[1]), sys.argv[2], sys.argv[3], sys.argv[4]
 
 class H(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         auth = self.headers.get("Authorization", "")
-        if auth == f"Bearer {good}":
+        if auth in (f"Bearer {good}", f"Bearer {pool}"):
             body, code = b'{"ok":true}', 200
+        elif auth == f"Bearer {no_access}":
+            body, code = b'{"message":"Not Found"}', 404
         else:
             body, code = b'{"message":"Bad credentials"}', 401
         self.send_response(code)
@@ -102,6 +130,56 @@ rm -f "$TMP/repo/scripts/github_token_pool.py"
 grep -Fq 'scripts/github_token_pool.py pick' "$ROOT_DIR/scripts/run-bench-cloud" \
   || fail "run-bench-cloud resolve_github_token must fall back to the token pool pick"
 pass "resolver falls back to a validated token-pool pick when the user identity is drained"
+
+# ── 2c. Read-only resolver spends the pool member with the most quota ────────
+# Reads (fetch / ls-remote / REST GET) prefer the pool pick over Andy's user
+# token; the identity chain keeps its order for identity-bound callers. A pool
+# member that cannot read the repo (404) is not authoritative: the identity
+# chain still answers. The pool is probed once per resolution.
+pool_fake() {  # <token to print>
+  printf 'import sys\nopen(%s, "a").write(" ".join(sys.argv[1:]) + "\\n")\nprint("%s", end="")\n' \
+    "'$TMP/pool-calls'" "$1" >"$TMP/repo/scripts/github_token_pool.py"
+  : >"$TMP/pool-calls"
+}
+export GITHUB_DISPATCH_TOKEN="$GOOD_TOKEN"
+pool_fake "$POOL_TOKEN"
+RESOLVED="$(PATH="$PATH_NO_GH" cloudbench_resolve_github_read_token "$TMP/repo")" \
+  || fail "read resolver returned no token with a usable pool member"
+[ "$RESOLVED" = "$POOL_TOKEN" ] || fail "read resolver must prefer the pool member with the most quota"
+grep -qx 'pick --resource core' "$TMP/pool-calls" || fail "read resolver must pick by core (REST) quota"
+RESOLVED="$(PATH="$PATH_NO_GH" cloudbench_resolve_github_token "$TMP/repo")" \
+  || fail "identity resolver lost its usable DISPATCH token"
+[ "$RESOLVED" = "$GOOD_TOKEN" ] || fail "identity resolver must keep the user identity ahead of the pool"
+pool_fake "$POOL_NO_ACCESS_TOKEN"
+RESOLVED="$(PATH="$PATH_NO_GH" cloudbench_resolve_github_read_token "$TMP/repo")" \
+  || fail "a pool 404 must fall back to the identity chain, not fail the read"
+[ "$RESOLVED" = "$GOOD_TOKEN" ] || fail "a pool member without repo access must not be returned"
+[ "$(wc -l <"$TMP/pool-calls")" -eq 1 ] || fail "read resolver probed the pool more than once"
+export CLOUDBENCH_GITHUB_TOKEN="$GOOD_TOKEN"
+pool_fake "$POOL_TOKEN"
+RESOLVED="$(PATH="$PATH_NO_GH" cloudbench_resolve_github_read_token "$TMP/repo")"
+[ "$RESOLVED" = "$GOOD_TOKEN" ] || fail "a usable request-scoped controller injection must still win"
+unset CLOUDBENCH_GITHUB_TOKEN
+RESOLVED="$(CLOUDBENCH_GITHUB_TOKEN_POOL=0 PATH="$PATH_NO_GH" cloudbench_resolve_github_read_token "$TMP/repo")"
+[ "$RESOLVED" = "$GOOD_TOKEN" ] && [ ! -s "$TMP/pool-calls" ] \
+  || fail "CLOUDBENCH_GITHUB_TOKEN_POOL=0 must keep reads on the identity chain without probing the pool"
+# A disabled or absent pool is empty output, never a failure: an errexit caller reaches the identity chain.
+for disabled in CLOUDBENCH_GITHUB_TOKEN_POOL=0 absent; do
+  [ "$disabled" = absent ] && mv "$TMP/repo/scripts/github_token_pool.py" "$TMP/pool.py.aside"
+  RESOLVED="$(env $([ "$disabled" = absent ] || echo "$disabled") PATH="$PATH_NO_GH" bash -c \
+    'set -euo pipefail; shopt -s inherit_errexit; . "$1"; cloudbench_resolve_github_read_token "$2"; echo " ok"' \
+    _ "$ROOT_DIR/scripts/lib/cloudbench-github-token.sh" "$TMP/repo")" || true
+  [ "$RESOLVED" = "$GOOD_TOKEN ok" ] || fail "an errexit caller with the pool $disabled did not reach the identity chain"
+  [ "$disabled" = absent ] && mv "$TMP/pool.py.aside" "$TMP/repo/scripts/github_token_pool.py"
+done
+unset GITHUB_DISPATCH_TOKEN
+pool_fake "$POOL_NO_ACCESS_TOKEN"
+if PATH="$PATH_NO_GH" cloudbench_resolve_github_read_token "$TMP/repo" >/dev/null 2>&1; then
+  fail "read resolver must fail closed when neither the pool nor the identity chain can read"
+fi
+[ "$(wc -l <"$TMP/pool-calls")" -eq 1 ] || fail "identity fallback re-probed the pool after the read resolver did"
+rm -f "$TMP/repo/scripts/github_token_pool.py" "$TMP/pool-calls"
+pass "read resolver prefers the validated pool pick; 404 falls back to the identity chain"
 
 # ── 3. refresh-deps injects controller token (static contract) ───────────────
 grep -Fq 'resolve_github_token' "$ROOT_DIR/scripts/run-bench-cloud" \
@@ -309,6 +387,9 @@ finally:
 assert not failures, "; ".join(failures)
 PY
 pass "concurrent controller exports preserve complete dotenvs, sibling updates, token handoff, mode and cancellation"
+
+python3 "$ROOT_DIR/scripts/tests/cloudbench-github-token-probes.test.py"
+pass "controller resolver validates each distinct candidate once per resolution"
 
 # ── 4. Live resolver when the Cloud Agent supplies DISPATCH ──────────────────
 unset CLOUDBENCH_GITHUB_REPO_API

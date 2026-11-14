@@ -128,6 +128,25 @@ export interface MockProjectsApi {
   maintenance: Map<string, MockMaintenance>;
   /** The (lazily created) template-sync state of a project, for seeding runs. */
   maintenanceOf(projectId: string): MockMaintenance;
+  /** Every /api/folders write as sent (method, folder id, body). */
+  folderWrites: { method: string; id: string | null; body: Record<string, unknown> | null }[];
+}
+
+/** GET /api/folders shape of a project row (folders are project aliases). */
+export function folderOf(p: Project) {
+  const repo = /github\.com\/([^/]+)\/([^/.]+)/i.exec(p.repoUrl ?? '');
+  return {
+    id: p.id,
+    name: p.name,
+    legacy_project_id: p.id,
+    subfolders: (p.folders ?? []).map((f) => ({ id: f.id, name: f.name })),
+    github_repo:
+      repo !== null && p.repoUrl !== null
+        ? { canonical_ref: `gh:${repo[1]}/${repo[2]}`.toLowerCase(), repo_url: p.repoUrl }
+        : null,
+    created_at: p.createdAt,
+    updated_at: p.updatedAt,
+  };
 }
 
 function makeRun(overrides: Partial<MaintenanceRun> = {}): MaintenanceRun {
@@ -235,7 +254,51 @@ export function mockProjectsApi(
       return HttpResponse.json({ ...run, log: m.logs.get(run.id) ?? '' });
     }),
   );
+  const folderWrites: MockProjectsApi['folderWrites'] = [];
+  const folderName = (body: Record<string, unknown>) =>
+    Object.keys(body).every((key) => key === 'name') && typeof body.name === 'string'
+      ? body.name.trim()
+      : null;
   server.use(
+    http.get(`${API_BASE}/folders`, () => HttpResponse.json({ folders: projects.map(folderOf) })),
+    http.post(`${API_BASE}/folders`, async ({ request }) => {
+      const body = (await request.json()) as Record<string, unknown>;
+      folderWrites.push({ method: 'POST', id: null, body });
+      const name = folderName(body);
+      // A folder takes only {name}: a repo (or any other field) is a 400, like the server.
+      if (name === null) return HttpResponse.json({ error: 'Invalid body' }, { status: 400 });
+      if (projects.some((p) => p.name === name))
+        return HttpResponse.json({ error: 'A folder with this name exists' }, { status: 409 });
+      const created = makeProject({
+        id: `p-${projects.length + 1}`,
+        name,
+        repoUrl: null,
+        githubConnected: false,
+        startupScript: null,
+        sync: { revision: 0, lastSyncedAt: null },
+      });
+      projects.push(created);
+      files.set(created.id, []);
+      return HttpResponse.json(folderOf(created), { status: 201 });
+    }),
+    http.patch(`${API_BASE}/folders/:id`, async ({ request, params }) => {
+      const body = (await request.json()) as Record<string, unknown>;
+      folderWrites.push({ method: 'PATCH', id: String(params.id), body });
+      const name = folderName(body);
+      if (name === null) return HttpResponse.json({ error: 'Invalid body' }, { status: 400 });
+      const index = projects.findIndex((p) => p.id === params.id);
+      if (index < 0) return HttpResponse.json({ error: 'Folder not found' }, { status: 404 });
+      if (projects.some((p) => p.name === name && p.id !== params.id))
+        return HttpResponse.json({ error: 'A folder with this name exists' }, { status: 409 });
+      projects[index] = { ...projects[index], name };
+      return HttpResponse.json(folderOf(projects[index]));
+    }),
+    http.delete(`${API_BASE}/folders/:id`, ({ params }) => {
+      folderWrites.push({ method: 'DELETE', id: String(params.id), body: null });
+      const index = projects.findIndex((p) => p.id === params.id);
+      if (index >= 0) projects.splice(index, 1);
+      return new HttpResponse(null, { status: 204 });
+    }),
     http.get(`${API_BASE}/projects`, () => HttpResponse.json({ projects: projects.map(dto) })),
     http.post(`${API_BASE}/projects`, async ({ request }) => {
       const body = (await request.json()) as Record<string, unknown>;
@@ -344,7 +407,7 @@ export function mockProjectsApi(
       return new HttpResponse(null, { status: 204 });
     }),
   );
-  return { projects, envFiles: files, maintenance, maintenanceOf };
+  return { projects, envFiles: files, maintenance, maintenanceOf, folderWrites };
 }
 
 export function signedInUser(name = 'Andy Prevalsky'): User {
@@ -429,4 +492,15 @@ export function expectAgentMenuEntries(menu: HTMLElement, { move = false } = {})
   for (const label of REMOVED_AGENT_MENU_LABELS) {
     expect(within(menu).queryByText(label)).toBeNull();
   }
+}
+
+/**
+ * An element's inline `left`, with a `var(--x, fallback)` resolved against the
+ * root the way the browser would: the published value, else the fallback.
+ * Full-width drawers sit at `var(--rose-bar-offset, 64px)`.
+ */
+export function resolvedLeft(el: HTMLElement): string {
+  const match = /^var\((--[\w-]+),\s*([^)]+)\)$/.exec(el.style.left);
+  if (!match) return el.style.left;
+  return document.documentElement.style.getPropertyValue(match[1]) || match[2].trim();
 }

@@ -145,17 +145,21 @@ def test_workflow_sandbox_keeps_worker_logging_configuration():
     previous = structlog.get_config()
     was_configured = structlog.is_configured()
     activity_events, records = [], []
+
     class Capture(logging.Handler):
         def emit(self, record):
             records.append(record)
+
     handler = Capture()
     base = workflow.logger.base_logger
     old_level = base.level
     base.addHandler(handler)
     base.setLevel(logging.DEBUG)
+
     def collect(logger, method, event):
         activity_events.append(event.copy())
         return event
+
     try:
         structlog.configure(processors=[collect], logger_factory=structlog.ReturnLoggerFactory())
         log = context_logger()
@@ -394,11 +398,26 @@ async def test_user_pause_refresh_keeps_original_result_order_and_error():
     from helpers.llm import collapse_duplicate_tool_results
     from unittest.mock import AsyncMock
     import copy
-    original = {"message_id": "result", "role": "TOOL", "timestamp": "2026-01-01T00:00:00+00:00",
-                "text": "Original error", "metadata": {"toolCallId": "call", "toolStatus": "ERROR",
-                    "error": True, "errorCode": "ORIGINAL", "workflowGeneration": "generation"}}
-    following = {"message_id": "next", "role": "ASSISTANT", "text": "Next turn",
-                 "timestamp": "2026-01-01T00:00:03+00:00"}
+
+    original = {
+        "message_id": "result",
+        "role": "TOOL",
+        "timestamp": "2026-01-01T00:00:00+00:00",
+        "text": "Original error",
+        "metadata": {
+            "toolCallId": "call",
+            "toolStatus": "ERROR",
+            "error": True,
+            "errorCode": "ORIGINAL",
+            "workflowGeneration": "generation",
+        },
+    }
+    following = {
+        "message_id": "next",
+        "role": "ASSISTANT",
+        "text": "Next turn",
+        "timestamp": "2026-01-01T00:00:03+00:00",
+    }
     context = [copy.deepcopy(original), following]
     paused = copy.deepcopy(original)
     paused["text"] += "\n\n[User paused the browser agent.]"
@@ -411,8 +430,13 @@ async def test_user_pause_refresh_keeps_original_result_order_and_error():
     assert context[0]["metadata"]["errorCode"] == "ORIGINAL"
     assert len(collapse_duplicate_tool_results(context)) == 2
     from helpers.llm import build_llm_messages
-    declaration = {"role": "ASSISTANT", "text": "Browse", "timestamp": "2025-12-31T23:59:59+00:00",
-                   "metadata": {"tool_calls": [{"tool": "spawn_browser_agent", "tool_call_id": "call", "goal": "Browse"}]}}
+
+    declaration = {
+        "role": "ASSISTANT",
+        "text": "Browse",
+        "timestamp": "2025-12-31T23:59:59+00:00",
+        "metadata": {"tool_calls": [{"tool": "spawn_browser_agent", "tool_call_id": "call", "goal": "Browse"}]},
+    }
     projected = await build_llm_messages([declaration, *context], "system")
     tool_results = [m for m in projected if m.get("role") == "tool"]
     assert len(tool_results) == 1, projected
@@ -424,6 +448,7 @@ async def test_user_pause_refresh_keeps_original_result_order_and_error():
     # The workflow maintains its own context as well as run_agent's list.
     from workflows.agent_workflow import AgentWorkflow
     from unittest.mock import MagicMock, patch
+
     wf = AgentWorkflow.__new__(AgentWorkflow)
     wf.agent_id = "fixture"
     wf.context = [copy.deepcopy(original), following]
@@ -675,7 +700,11 @@ async def mock_release_compute_token_lineage_activity(lineage_key: str) -> bool:
 @activity.defn(name="fetch_agent_config")
 async def mock_fetch_agent_config(agent_id: str) -> Dict:
     if agent_id in CUTOVER_RESPONSE_SCHEMAS:
-        return {"context_gates": {}, "response_schema": CUTOVER_GENERATED_SCHEMAS.get(agent_id), "write_lock_enabled": True}
+        return {
+            "context_gates": {},
+            "response_schema": CUTOVER_GENERATED_SCHEMAS.get(agent_id),
+            "write_lock_enabled": True,
+        }
     return {"context_gates": {}, "response_schema": None, "write_lock_enabled": True}
 
 
@@ -989,10 +1018,7 @@ async def mock_check_progress(
         VERIFIER_SCHEMA_CAPTURE[agent_id].append(response_schema)
     # These scripted cutover scenarios require the new generation to make
     # its own completion request after the delegated tool resumes.
-    completion_requested = (
-        agent_id not in CUTOVER_RESPONSE_SCHEMAS
-        or CUTOVER_COMPLETION_REQUESTED.get(agent_id, False)
-    )
+    completion_requested = agent_id not in CUTOVER_RESPONSE_SCHEMAS or CUTOVER_COMPLETION_REQUESTED.get(agent_id, False)
     return {
         "score": 1.0 if completion_requested else 0.0,
         "reasoning": "Complete" if completion_requested else "Awaiting the scripted completion request",
@@ -1180,6 +1206,7 @@ async def mock_spawn_browser_agent_activity_v3(
     agent_model: Optional[str] = None,
     inbox_address: Optional[str] = None,
     await_owner_cleanup: bool = False,
+    approved_message_intent: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Browser task that checkpoints once (drain yield or write approval), then completes.
 
@@ -1627,6 +1654,170 @@ async def _test_poll_exhaustion_ends_agent_failed(env) -> None:
     assert (result or {}).get("reason") == "workflow_error", f"unexpected terminal result: {result}"
 
 
+# A real wall-clock interval in which an unanswered question must stay open. The
+# time-skipping server does not advance workflow timers while the client only
+# signals/queries, so the 15-minute SMS fallback cannot end the wait here.
+QUESTION_SETTLE_SECONDS = 1.0
+
+
+async def _run_question_wait_scenario(env, agent_id: str, *, start_signal: Optional[str], before_reply) -> Dict:
+    """Root asks one send_message_to_user question; observe when its wait ends.
+
+    ``start_signal`` (a receive_user_response value) is delivered with the start,
+    before the first poll, so the model has read it when it asks. ``before_reply``
+    runs while the question is open; the user's reply follows.
+    """
+    question = "What discount should the Boxing and Muay Thai code apply, and should it cover the first month?"
+    reply = "Please do not ask me anymore questions. Use 10% off the first month."
+    CUTOVER_MESSAGES[agent_id] = []
+    CUTOVER_LLM_SCRIPTS[agent_id] = [[{"tool": "send_message_to_user", "message": question, "is_question": True}]]
+    WORKFLOW_ENV_ACTIVITY_COUNTS.pop(agent_id, None)
+
+    def question_rows(status: str) -> List[Dict[str, Any]]:
+        return [
+            row
+            for row in CUTOVER_MESSAGES[agent_id]
+            if row["metadata"].get("toolName") == "send_message_to_user" and row["metadata"].get("toolStatus") == status
+        ]
+
+    async def until(predicate, timeout: float) -> bool:
+        deadline = asyncio.get_running_loop().time() + timeout
+        while asyncio.get_running_loop().time() < deadline:
+            if predicate():
+                return True
+            await asyncio.sleep(0.02)
+        return predicate()
+
+    async def settle(handle) -> None:
+        # Each query completes after a workflow task, then real time passes.
+        await handle.query(AgentWorkflow.get_status)
+        await asyncio.sleep(QUESTION_SETTLE_SECONDS)
+        await handle.query(AgentWorkflow.get_status)
+
+    start_kwargs: Dict[str, Any] = {}
+    if start_signal is not None:
+        start_kwargs = {"start_signal": "receive_user_response", "start_signal_args": [start_signal]}
+    handle = await env.client.start_workflow(
+        AgentWorkflow.run,
+        args=[
+            agent_id,
+            "user-test-1",
+            "Build the boxing gym client signup site",
+            "rose-labs/rose-1-flash",
+            256,
+            {"type": "FLOAT_LLM_JUDGE"},
+        ],
+        id=_next_wf_id("question-wait"),
+        task_queue=TASK_QUEUE,
+        **start_kwargs,
+    )
+    try:
+        asked = await until(lambda: bool(question_rows("IN_PROGRESS")), 30)
+        assert asked, f"the scripted question was never asked: {CUTOVER_MESSAGES[agent_id]}"
+        polls_before_question = WORKFLOW_ENV_ACTIVITY_COUNTS.get(agent_id, {}).get("poll_new_messages", 0)
+        assert polls_before_question >= 1, "the question's LLM turn must follow a poll"
+        await settle(handle)
+        observed = {"finished_before_reply": [dict(row) for row in question_rows("FINISHED")]}
+        if before_reply is not None:
+            await before_reply(handle)
+            await settle(handle)
+        observed["finished_after_other_signals"] = [dict(row) for row in question_rows("FINISHED")]
+        await handle.signal(AgentWorkflow.receive_user_response, reply)
+        await until(lambda: bool(question_rows("FINISHED")), 30)
+        observed["finished_after_reply"] = [dict(row) for row in question_rows("FINISHED")]
+        return observed
+    finally:
+        await _cancel_workflow(handle)
+        CUTOVER_MESSAGES.pop(agent_id, None)
+        CUTOVER_LLM_SCRIPTS.pop(agent_id, None)
+        CUTOVER_LLM_QUEUES.pop(agent_id, None)
+
+
+def _assert_question_answered_only_by_reply(observed: Dict, cause: str) -> None:
+    assert observed["finished_before_reply"] == [], (
+        f"send_message_to_user returned {[row['metadata'].get('title') for row in observed['finished_before_reply']]} "
+        f"with no reply: {cause} satisfied the question's wait"
+    )
+    assert observed["finished_after_other_signals"] == [], (
+        f"send_message_to_user returned {[row['metadata'].get('title') for row in observed['finished_after_other_signals']]} "
+        f"with no reply: {cause} satisfied the question's wait"
+    )
+    finished = observed["finished_after_reply"]
+    assert len(finished) == 1, f"the user's reply must complete the question exactly once: {finished}"
+    assert finished[0]["metadata"].get("title") == "User response received", finished[0]["metadata"]
+
+
+async def _test_question_ignores_user_message_read_before_it(env) -> None:
+    """A user message the model already read never answers a later question (H-72).
+
+    Epoch22 build-boxing-payment r3 (agent 1ead79ec): the attachment post's empty
+    receive_user_response at 02:14:12 set _has_new_messages and nothing cleared
+    it. The root's first question at 02:21:55 returned "User response received"
+    after 213 ms with no reply, so the agent asked again.
+    """
+    observed = await _run_question_wait_scenario(
+        env, "agent-question-stale-user-signal-h72", start_signal="", before_reply=None
+    )
+    _assert_question_answered_only_by_reply(observed, "the pre-question user-message signal")
+
+
+async def _test_question_ignores_agent_message_while_open(env) -> None:
+    """Another agent's message is not the user's reply (H-72 sibling); the reply still is."""
+
+    async def agent_message(handle) -> None:
+        await handle.signal(
+            AgentWorkflow.receive_agent_message,
+            {"message_id": "agent-msg-h72", "from_agent_id": "child-h72", "from_agent_path": "/root/research"},
+        )
+
+    observed = await _run_question_wait_scenario(
+        env, "agent-question-agent-message-h72", start_signal=None, before_reply=agent_message
+    )
+    _assert_question_answered_only_by_reply(observed, "an agent message")
+
+
+async def _test_question_cutover_rewaits_same_call_before_llm(env) -> None:
+    """A real continue_as_new preserves an unanswered published question's identity."""
+    from helpers.wait_condition_or_handoff import GENERATION_HANDOFF_SIGNAL
+    from temporalio.worker import Worker
+
+    agent_id = "agent-question-cutover-same-call"
+    workflow_ids = []
+
+    async def cutover(handle) -> None:
+        workflow_ids.append(handle.id)
+        CUTOVER_POINTER[handle.id] = CUTOVER_NEW_QUEUE
+        await handle.signal(GENERATION_HANDOFF_SIGNAL, CUTOVER_NEW_QUEUE)
+        for _ in range(400):
+            if (await handle.describe()).task_queue == CUTOVER_NEW_QUEUE:
+                break
+            await asyncio.sleep(0.05)
+        assert (await handle.describe()).task_queue == CUTOVER_NEW_QUEUE, "question did not migrate"
+        await handle.query(AgentWorkflow.get_status)
+        await asyncio.sleep(QUESTION_SETTLE_SECONDS)
+        rows = [row for row in CUTOVER_MESSAGES[agent_id] if row["metadata"].get("toolName") == "send_message_to_user"]
+        assert len(rows) == 1 and rows[0]["metadata"]["toolStatus"] == "IN_PROGRESS", rows
+        assert len(CUTOVER_LLM_QUEUES[agent_id]) == 1, "new generation re-entered LLM before the reply"
+
+    try:
+        async with Worker(
+            env.client,
+            task_queue=CUTOVER_NEW_QUEUE,
+            workflows=[AgentWorkflow],
+            activities=MOCK_ACTIVITIES,
+            workflow_runner=_WORKFLOW_RUNNER,
+            max_cached_workflows=0,
+        ):
+            observed = await _run_question_wait_scenario(env, agent_id, start_signal="", before_reply=cutover)
+        _assert_question_answered_only_by_reply(observed, "a cooperative deploy")
+        finished = observed["finished_after_reply"][0]
+        assert finished["task_queue"] == CUTOVER_NEW_QUEUE, finished
+    finally:
+        for workflow_id in workflow_ids:
+            CUTOVER_POINTER.pop(workflow_id, None)
+            CUTOVER_POINTER_FETCHES.pop(workflow_id, None)
+
+
 async def _run_all_workflow_tests() -> List[tuple]:
     """Run all workflow tests inside one WorkflowEnvironment.
 
@@ -1744,6 +1935,21 @@ async def _run_all_workflow_tests() -> List[tuple]:
                 results.append((name, None))
             except Exception as e:
                 results.append((name, e))
+
+            # --- tests: a question's wait ends only on a user reply the model has not read (H-72) ---
+            for name, question_test in (
+                ("wf_question_ignores_user_message_read_before_it", _test_question_ignores_user_message_read_before_it),
+                ("wf_question_ignores_agent_message_while_open", _test_question_ignores_agent_message_while_open),
+                (
+                    "wf_question_cutover_rewaits_same_call_before_llm",
+                    _test_question_cutover_rewaits_same_call_before_llm,
+                ),
+            ):
+                try:
+                    await question_test(env)
+                    results.append((name, None))
+                except Exception as e:
+                    results.append((name, e))
 
             # --- test: pause/resume ---
             name = "wf_pause_resume"
@@ -2274,11 +2480,20 @@ def _assert_single_browser_chip_completed(agent_id: str, tool_call_id: str) -> N
 
 def _clear_cutover_test_state(agent_id: str, workflow_id: str) -> None:
     for capture in (
-        CUTOVER_MESSAGES, CUTOVER_LLM_SCRIPTS, CUTOVER_LLM_QUEUES,
-        CUTOVER_VERIFIER_CONTEXTS, CUTOVER_SMS, CUTOVER_USAGE,
-        CUTOVER_APPROVAL_REQUESTS, CUTOVER_BROWSER, CUTOVER_CODE,
-        CUTOVER_RESPONSE_SCHEMAS, CUTOVER_GENERATED_SCHEMAS, CUTOVER_COMPLETION_REQUESTED,
-        SCHEMA_GENERATION_CAPTURE, VERIFIER_SCHEMA_CAPTURE,
+        CUTOVER_MESSAGES,
+        CUTOVER_LLM_SCRIPTS,
+        CUTOVER_LLM_QUEUES,
+        CUTOVER_VERIFIER_CONTEXTS,
+        CUTOVER_SMS,
+        CUTOVER_USAGE,
+        CUTOVER_APPROVAL_REQUESTS,
+        CUTOVER_BROWSER,
+        CUTOVER_CODE,
+        CUTOVER_RESPONSE_SCHEMAS,
+        CUTOVER_GENERATED_SCHEMAS,
+        CUTOVER_COMPLETION_REQUESTED,
+        SCHEMA_GENERATION_CAPTURE,
+        VERIFIER_SCHEMA_CAPTURE,
     ):
         capture.pop(agent_id, None)
     CUTOVER_POINTER.pop(workflow_id, None)
@@ -2376,18 +2591,40 @@ async def _capture_cutover_failure(client, handle, name: str, agent_id: str, err
                 receipt["losses"]["byte_cap_events_trimmed"] = low
                 raw = json.dumps(receipt, ensure_ascii=True, allow_nan=False).encode("utf-8")
             if len(raw) > cap:
-                raw = json.dumps({
-                    "capture_gap": "byte_cap", "projected_bytes": len(raw), "byte_cap": cap,
-                    "name": bounded_text(name), "failure_observed_at": observed_at,
-                    "failure_observed_monotonic": observed_monotonic,
-                    "native_outcome": "failed", "error_type": type(error).__name__[:128],
-                    "losses": dict(losses), "details_omitted": True,
-                    "remote_summary": {key: receipt[key] for key in (
-                        "workflow_id", "run_id", "status", "history_length", "events_scanned",
-                        "events_dropped", "missing_tail", "history_complete", "history_scan_complete",
-                        "capture_gap", "close_events", "pending_activities", "pending_activities_dropped", "pending_workflow_task",
-                    ) if key in receipt},
-                }).encode("utf-8")
+                raw = json.dumps(
+                    {
+                        "capture_gap": "byte_cap",
+                        "projected_bytes": len(raw),
+                        "byte_cap": cap,
+                        "name": bounded_text(name),
+                        "failure_observed_at": observed_at,
+                        "failure_observed_monotonic": observed_monotonic,
+                        "native_outcome": "failed",
+                        "error_type": type(error).__name__[:128],
+                        "losses": dict(losses),
+                        "details_omitted": True,
+                        "remote_summary": {
+                            key: receipt[key]
+                            for key in (
+                                "workflow_id",
+                                "run_id",
+                                "status",
+                                "history_length",
+                                "events_scanned",
+                                "events_dropped",
+                                "missing_tail",
+                                "history_complete",
+                                "history_scan_complete",
+                                "capture_gap",
+                                "close_events",
+                                "pending_activities",
+                                "pending_activities_dropped",
+                                "pending_workflow_task",
+                            )
+                            if key in receipt
+                        },
+                    }
+                ).encode("utf-8")
             if len(raw) > cap:
                 raw = b'{"capture_gap":"metadata_byte_cap","details_omitted":true}'
             descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -2400,38 +2637,61 @@ async def _capture_cutover_failure(client, handle, name: str, agent_id: str, err
         # mkdtemp creates a unique directory with mode 0700.
         trace, walked, cursor = deque(maxlen=32), 0, error.__traceback__
         while cursor is not None and walked < 128:
-            trace.append({"file": project(cursor.tb_frame.f_code.co_filename),
-                          "function": project(cursor.tb_frame.f_code.co_name), "line": cursor.tb_lineno})
+            trace.append(
+                {
+                    "file": project(cursor.tb_frame.f_code.co_filename),
+                    "function": project(cursor.tb_frame.f_code.co_name),
+                    "line": cursor.tb_lineno,
+                }
+            )
             walked += 1
             cursor = cursor.tb_next
-        state = project({
-            "declared_schema": CUTOVER_RESPONSE_SCHEMAS.get(agent_id),
-            "persisted_schema": CUTOVER_GENERATED_SCHEMAS.get(agent_id),
-            "schema_generation": SCHEMA_GENERATION_CAPTURE.get(agent_id),
-            "verifier_schemas": VERIFIER_SCHEMA_CAPTURE.get(agent_id),
-            "completion_requested": CUTOVER_COMPLETION_REQUESTED.get(agent_id),
-            "remaining_script": CUTOVER_LLM_SCRIPTS.get(agent_id),
-            "llm_queues": CUTOVER_LLM_QUEUES.get(agent_id),
-            "browser": CUTOVER_BROWSER.get(agent_id), "code": CUTOVER_CODE.get(agent_id),
-            "messages": CUTOVER_MESSAGES.get(agent_id),
-            "verifier_contexts": (CUTOVER_VERIFIER_CONTEXTS.get(agent_id) or [])[-1:],
-            "verifier_context_count": len(CUTOVER_VERIFIER_CONTEXTS.get(agent_id) or []),
-            "verifier_contexts_dropped": max(0, len(CUTOVER_VERIFIER_CONTEXTS.get(agent_id) or []) - 1),
-            "usage": CUTOVER_USAGE.get(agent_id), "sms": CUTOVER_SMS.get(agent_id),
-        })
-        initial = {"name": bounded_text(name), "agent_id": bounded_text(agent_id), "native_outcome": "failed",
-                   "workflow_id": bounded_text(getattr(handle, "id", "")),
-                   "requested_run_id": bounded_text(getattr(handle, "run_id", None) or ""),
-                   "first_execution_run_id": bounded_text(getattr(handle, "first_execution_run_id", None) or ""),
-                   "failure_observed_at": observed_at, "failure_observed_monotonic": observed_monotonic,
-                   "error_type": type(error).__name__[:128], "error_args": project(error.args),
-                   "traceback": list(trace), "traceback_frames_dropped": max(0, walked - 32),
-                   "traceback_tail_unknown": cursor is not None, "state": state, "losses": dict(losses)}
+        state = project(
+            {
+                "declared_schema": CUTOVER_RESPONSE_SCHEMAS.get(agent_id),
+                "persisted_schema": CUTOVER_GENERATED_SCHEMAS.get(agent_id),
+                "schema_generation": SCHEMA_GENERATION_CAPTURE.get(agent_id),
+                "verifier_schemas": VERIFIER_SCHEMA_CAPTURE.get(agent_id),
+                "completion_requested": CUTOVER_COMPLETION_REQUESTED.get(agent_id),
+                "remaining_script": CUTOVER_LLM_SCRIPTS.get(agent_id),
+                "llm_queues": CUTOVER_LLM_QUEUES.get(agent_id),
+                "browser": CUTOVER_BROWSER.get(agent_id),
+                "code": CUTOVER_CODE.get(agent_id),
+                "messages": CUTOVER_MESSAGES.get(agent_id),
+                "verifier_contexts": (CUTOVER_VERIFIER_CONTEXTS.get(agent_id) or [])[-1:],
+                "verifier_context_count": len(CUTOVER_VERIFIER_CONTEXTS.get(agent_id) or []),
+                "verifier_contexts_dropped": max(0, len(CUTOVER_VERIFIER_CONTEXTS.get(agent_id) or []) - 1),
+                "usage": CUTOVER_USAGE.get(agent_id),
+                "sms": CUTOVER_SMS.get(agent_id),
+            }
+        )
+        initial = {
+            "name": bounded_text(name),
+            "agent_id": bounded_text(agent_id),
+            "native_outcome": "failed",
+            "workflow_id": bounded_text(getattr(handle, "id", "")),
+            "requested_run_id": bounded_text(getattr(handle, "run_id", None) or ""),
+            "first_execution_run_id": bounded_text(getattr(handle, "first_execution_run_id", None) or ""),
+            "failure_observed_at": observed_at,
+            "failure_observed_monotonic": observed_monotonic,
+            "error_type": type(error).__name__[:128],
+            "error_args": project(error.args),
+            "traceback": list(trace),
+            "traceback_frames_dropped": max(0, walked - 32),
+            "traceback_tail_unknown": cursor is not None,
+            "state": state,
+            "losses": dict(losses),
+        }
         # New primitives only; write ONCE before any await. Later state cannot overwrite it.
         stage = "initial_write"
         write_once(owned / "failure.json", initial, 65536)
-        remote = {"rpc_budget_seconds": 5, "rpc_started_at": datetime.now(timezone.utc).isoformat(),
-                  "failure_observed_at": observed_at, "history_complete": False, "missing_tail": True}
+        remote = {
+            "rpc_budget_seconds": 5,
+            "rpc_started_at": datetime.now(timezone.utc).isoformat(),
+            "failure_observed_at": observed_at,
+            "history_complete": False,
+            "missing_tail": True,
+        }
         rpc_started_monotonic = asyncio.get_running_loop().time()
         events, scanned = deque(maxlen=256), 0
 
@@ -2439,13 +2699,22 @@ async def _capture_cutover_failure(client, handle, name: str, agent_id: str, err
             return value.ToJsonString()[:64] if hasattr(value, "ToJsonString") else None
 
         def event_metadata(event):
-            row = {"event_id": event.event_id, "event_type": int(event.event_type),
-                   "timestamp": timestamp(event.event_time)}
+            row = {
+                "event_id": event.event_id,
+                "event_type": int(event.event_type),
+                "timestamp": timestamp(event.event_time),
+            }
             attribute = event.WhichOneof("attributes")
             row["event_type_name"] = attribute
             if attribute:
                 value = getattr(event, attribute)
-                for key in ("activity_id", "scheduled_event_id", "started_event_id", "timer_id", "new_execution_run_id"):
+                for key in (
+                    "activity_id",
+                    "scheduled_event_id",
+                    "started_event_id",
+                    "timer_id",
+                    "new_execution_run_id",
+                ):
                     field = getattr(value, key, None)
                     if field is not None:
                         row[key] = bounded_text(field) if isinstance(field, str) else field
@@ -2462,29 +2731,47 @@ async def _capture_cutover_failure(client, handle, name: str, agent_id: str, err
                 return
             remote["rpc_phase"] = "describe"
             description = await handle.describe(rpc_timeout=timedelta(seconds=5))
-            remote.update({"workflow_id": bounded_text(description.id), "run_id": bounded_text(description.run_id),
-                           "status": int(description.status), "history_length": description.history_length})
+            remote.update(
+                {
+                    "workflow_id": bounded_text(description.id),
+                    "run_id": bounded_text(description.run_id),
+                    "status": int(description.status),
+                    "history_length": description.history_length,
+                }
+            )
             if description.id != handle.id or not isinstance(description.run_id, str) or not description.run_id:
                 remote["capture_gap"] = "unresolved_execution_identity"
                 return
             raw = description.raw_description
             pending = raw.pending_activities
-            remote["pending_activities"] = [{"activity_id": bounded_text(item.activity_id),
-                "activity_type": bounded_text(item.activity_type.name), "state": int(item.state)} for item in pending[:16]]
+            remote["pending_activities"] = [
+                {
+                    "activity_id": bounded_text(item.activity_id),
+                    "activity_type": bounded_text(item.activity_type.name),
+                    "state": int(item.state),
+                }
+                for item in pending[:16]
+            ]
             remote["pending_activities_dropped"] = max(0, len(pending) - 16)
             task = raw.pending_workflow_task
-            remote["pending_workflow_task"] = {"present": raw.HasField("pending_workflow_task"),
-                "state": int(task.state), "attempt": task.attempt,
-                "scheduled_time": timestamp(task.scheduled_time), "started_time": timestamp(task.started_time)}
+            remote["pending_workflow_task"] = {
+                "present": raw.HasField("pending_workflow_task"),
+                "state": int(task.state),
+                "attempt": task.attempt,
+                "scheduled_time": timestamp(task.scheduled_time),
+                "started_time": timestamp(task.started_time),
+            }
             pinned = client.get_workflow_handle(description.id, run_id=description.run_id)
             remote["rpc_phase"] = "close_event"
-            close = await pinned.fetch_history(event_filter_type=WorkflowHistoryEventFilterType.CLOSE_EVENT,
-                                               rpc_timeout=timedelta(seconds=5))
+            close = await pinned.fetch_history(
+                event_filter_type=WorkflowHistoryEventFilterType.CLOSE_EVENT, rpc_timeout=timedelta(seconds=5)
+            )
             remote["close_events"] = [event_metadata(event) for event in close.events[:4]]
             remote["close_events_dropped"] = max(0, len(close.events) - 4)
             remote["rpc_phase"] = "history"
-            async for event in pinned.fetch_history_events(page_size=64, wait_new_event=False,
-                                                          rpc_timeout=timedelta(seconds=5)):
+            async for event in pinned.fetch_history_events(
+                page_size=64, wait_new_event=False, rpc_timeout=timedelta(seconds=5)
+            ):
                 events.append(event_metadata(event))
                 scanned += 1
                 if scanned == 1024:
@@ -2500,10 +2787,16 @@ async def _capture_cutover_failure(client, handle, name: str, agent_id: str, err
             await asyncio.wait_for(observe(), timeout=5)
         except (Exception, asyncio.CancelledError) as capture_error:
             remote["capture_gap"] = type(capture_error).__name__[:128]
-        remote.update({"rpc_finished_at": datetime.now(timezone.utc).isoformat(),
-                       "rpc_elapsed_seconds": asyncio.get_running_loop().time() - rpc_started_monotonic,
-                       "events_scanned": scanned, "events_dropped": max(0, scanned - len(events)),
-                       "events": list(events), "losses": dict(losses)})
+        remote.update(
+            {
+                "rpc_finished_at": datetime.now(timezone.utc).isoformat(),
+                "rpc_elapsed_seconds": asyncio.get_running_loop().time() - rpc_started_monotonic,
+                "events_scanned": scanned,
+                "events_dropped": max(0, scanned - len(events)),
+                "events": list(events),
+                "losses": dict(losses),
+            }
+        )
         stage = "remote_write"
         write_once(owned / "remote.json", remote, 32768)
     except (Exception, asyncio.CancelledError) as capture_error:
@@ -2959,6 +3252,12 @@ def test_workflow_continuation_state_round_trips_complete_runtime():
     wf._pending_approval_resume = {"request_id": "approval-1", "reminder_sent": True}
     wf._last_signal_response = "continue"
     wf._has_new_messages = True
+    from helpers.wait_wake import first_wake, has_user_message_since, note_context_snapshot, record_wake, wake_mark
+
+    record_wake(wf, "user_message")
+    note_context_snapshot(wf, wake_mark(wf))
+    record_wake(wf, "agent_message")
+    record_wake(wf, "user_message")
     wf._response_schema_feedback = ["add total"]
     wf._response_schema_revision = 3
     wf._response_schema_applied_revision = 2
@@ -2993,7 +3292,7 @@ def test_workflow_continuation_state_round_trips_complete_runtime():
     wf.custom_system_prompt = "Be concise"
     wf.agent_source = "SMS"
     wf.user_context_section = "cached user context"
-    wf.project_context_section = "## Project\nYou are working in the user's project \"Rose\"."
+    wf.project_context_section = '## Project\nYou are working in the user\'s project "Rose".'
     wf.demo_cache_goal = "stable persisted goal"
     # A simulated agent's clock reads world time (two weeks before today here).
     wf.simulated_clock_offset_seconds = -1_209_600
@@ -3015,6 +3314,15 @@ def test_workflow_continuation_state_round_trips_complete_runtime():
     assert restored.max_iterations is None
     assert (restored.token_count, restored.tokens_in, restored.tokens_out) == (950, 680, 270)
     assert (restored.tree_tokens_in, restored.tree_tokens_out) == (900, 350)
+    assert restored._wait_wake_seq == 3, "continuation reset the reply sequence"
+    assert restored._context_wake_mark == 1
+    assert restored._wait_wake_events == wf._wait_wake_events
+    assert has_user_message_since(restored, 1), "continuation lost durable user progress"
+    assert first_wake(restored, 1, {"user_message"})["seq"] == 3, "continuation lost an unread reply"
+    next_generation = _bare_workflow_instance()
+    next_generation._restore_deployment_state(state)
+    record_wake(next_generation, "user_message")
+    assert wake_mark(next_generation) == 4, "new-generation reply reused an old sequence"
     assert restored._signal_responses == {"approval-1": "APPROVED"}
     assert restored._pending_approval_resume == {
         "request_id": "approval-1",
@@ -4364,22 +4672,31 @@ class _FakeWorkflowModule:
 
 
 def _patch_workflow(fake: _FakeWorkflowModule):
-    """Swap workflows.agent_workflow.workflow with a fake; returns original."""
+    """Swap the ``workflow`` module AgentWorkflow's code uses with a fake; returns original.
+
+    Its billing path lives in workflows.usage_tracking (UsageTrackingMixin), so that
+    module's ``workflow`` is swapped with agent_workflow's.
+    """
     import workflows.agent_workflow as m
+    import workflows.usage_tracking as usage
 
     original = m.workflow
     m.workflow = fake
+    usage.workflow = fake
     return original
 
 
 def _restore_workflow(original):
     import workflows.agent_workflow as m
+    import workflows.usage_tracking as usage
 
     m.workflow = original
+    usage.workflow = original
 
 
 async def test_pause_episode_preserves_user_intent_across_automatic_signals():
     from pause_control_provenance import prove_pause_episode_ordering
+
     await prove_pause_episode_ordering()
 
 
@@ -4403,6 +4720,7 @@ async def test_pause_provenance_fixture_restores_network_after_its_proof():
 
 async def test_pause_intent_ends_with_recovered_episode():
     from unittest.mock import AsyncMock
+
     wf = _bare_workflow_instance()
     wf.agent_id = "pause-episode"
     wf._update_tree_state = AsyncMock()
@@ -4443,6 +4761,7 @@ async def test_pause_intent_ends_with_recovered_episode():
             assert not wf.is_paused and not wf._user_pause_active
         # The transient-parent orphan exit and one-shot budget wrap-up also unpause.
         import workflows.agent_workflow as module
+
         wf._orphaned = False
         wf._paused_by_parent = True
         wf.is_paused = True
@@ -4457,8 +4776,9 @@ async def test_pause_intent_ends_with_recovered_episode():
         wf._user_pause_active = True
         wf.price_limit_cents = 10
         wf.subtree_cost_cents = 11
-        wf._maybe_arm_cost_limit_wrapup_after_browser(tool_name="spawn_browser_agent", result={"success": True},
-            paused_before=False, cost_limit_before=False)
+        wf._maybe_arm_cost_limit_wrapup_after_browser(
+            tool_name="spawn_browser_agent", result={"success": True}, paused_before=False, cost_limit_before=False
+        )
         assert not wf.is_paused and not wf._user_pause_active
     finally:
         _restore_workflow(original)
@@ -5894,6 +6214,16 @@ async def test_workflow_schema_refresh_coalesces_rapid_feedback():
         _restore_workflow(original)
 
 
+class _SchemaVerificationContinued(BaseException):
+    def __init__(self, args):
+        self.continuation_args = args
+
+
+class _SchemaContinuationWorkflow(_FakeWorkflowModule):
+    def continue_as_new(self, *, args):
+        raise _SchemaVerificationContinued(args)
+
+
 async def _exercise_schema_refresh_persistence(
     *,
     latest_fails: bool,
@@ -5948,7 +6278,7 @@ async def _exercise_schema_refresh_persistence(
             return httpx.Response(200, json={"success": True})
         return httpx.Response(404, json={"error": "unexpected schema fixture request"})
 
-    class SchemaActivityWorkflow(_FakeWorkflowModule):
+    class SchemaActivityWorkflow(_SchemaContinuationWorkflow):
         async def execute_activity(self, fn, args=None, **kwargs):
             name = getattr(fn, "__name__", str(fn))
             if name in {"set_response_schema_activity", "persist_response_schema_activity"}:
@@ -6004,12 +6334,6 @@ async def _exercise_schema_refresh_persistence(
             )
             workflow_module.run_agent = resumed_agent
             restored = _bare_workflow_instance()
-            if completion_calls is not None:
-
-                async def observe_complete(*args, **kwargs):
-                    completion_calls.append((args, kwargs))
-
-                restored._mark_complete = observe_complete
             try:
                 terminal_result = await restored.run(
                     wf.agent_id,
@@ -6023,6 +6347,15 @@ async def _exercise_schema_refresh_persistence(
                     resume_state=state,
                 )
                 assert not (latest_fails or feedback_during_persist), "unaccepted schema produced a terminal result"
+            except _SchemaVerificationContinued as continued:
+                assert latest_fails or feedback_during_persist
+                assert continued.continuation_args[11] == "execute_continued"
+                assert not restored._is_finished
+                assert restored._response_schema_accepted_revision < restored._response_schema_revision
+                assert not any(
+                    name in ("mark_finished", "generate_completion_summary")
+                    for name, _ in fake.activity_calls
+                )
             except RuntimeError as error:
                 if not (latest_fails or feedback_during_persist):
                     raise
@@ -6030,6 +6363,11 @@ async def _exercise_schema_refresh_persistence(
                 # later generation failure; their fake loop cannot certify it.
                 assert "latest schema generation failed" in str(error)
                 assert not restored._is_finished, "schema generation failure invented durable FAILED"
+            if completion_calls is not None:
+                completion_calls.extend(
+                    call for call in fake.activity_calls
+                    if call[0] in ("mark_finished", "generate_completion_summary")
+                )
         return initial_schema, latest_schema, accepted_schema, database["schema"], writes, observed_resume_schema
     finally:
         release_first.set()
@@ -9649,7 +9987,7 @@ async def _exercise_fresh_start_schema_acceptance(
     import workflows.agent_workflow as module
 
     wf = _bare_workflow_instance()
-    fake = _FakeWorkflowModule()
+    fake = _SchemaContinuationWorkflow()
     followup = "get a refund, the doordasher delivered to the wrong location"
     stale_schema = {"fields": [{"name": "order_confirmation_id", "type": "str", "required": True}]}
     replacement = {"fields": [{"name": "refund_status", "type": "str", "required": True}]}
@@ -9703,10 +10041,13 @@ async def _exercise_fresh_start_schema_acceptance(
                 250,
                 {},
             )
+        except _SchemaVerificationContinued as exc:
+            error = exc
+            assert exc.continuation_args[11] == "execute_continued"
         except RuntimeError as exc:
             error = exc
         if generation_fails or invalid_schema:
-            assert isinstance(error, RuntimeError), "fake completion accepted ungenerated requirements"
+            assert isinstance(error, _SchemaVerificationContinued), "fake completion accepted ungenerated requirements"
             assert result is None
             assert wf.output_schema is None, "completion restored a schema from the completed prior task"
             assert not wf._is_finished, "schema prerequisite invented a new terminal-failure policy"
@@ -11076,6 +11417,528 @@ async def test_workflow_check_parent_state_transient_failure_backstop_orphans():
         _restore_workflow(original)
 
 
+async def test_workflow_final_value_presentation():
+    """The actual publisher delivers the selected value, not summary narration."""
+    from pathlib import Path
+    original_data = json.loads(Path(__file__).with_name("final_presentation_original.json").read_text())
+    wf = _bare_workflow_instance()
+    wf.agent_id = "final-value-root"
+    wf.user_id = "u"
+    wf.goal = original_data["goal"]
+    wf.model = "rose-1-flash"
+    wf.parent_workflow_id = None
+    wf.output_schema = {**original_data["schema"], "presentation": {"version": 1, "mode": "value", "field": "wikipedia_access_day", "encoding": "text"}}
+    fake = _FakeWorkflowModule()
+    fake.activity_returns["generate_completion_summary"] = {"summary": "This must not replace the value"}
+    original = _patch_workflow(fake)
+    try:
+        await wf._mark_complete(context=[{"role": "USER", "text": wf.goal}], structured_response=original_data["output"])
+        assert "generate_completion_summary" not in [name for name, _ in fake.activity_calls]
+        final = [(i, args) for i, (name, args) in enumerate(fake.activity_calls)
+                 if name == "post_agent_message" and len(args or []) >= 4
+                 and args[3].get("isFinalSummary")]
+        assert len(final) == 1
+        index, args = final[0]
+        assert args[1] == "4", args
+        assert args[3]["completionSummary"]["answerText"] == "4"
+        assert args[3]["completionSummary"]["outputs"][0]["value"] == 4
+        notifications = [args for name, args in fake.activity_calls if name == "notify_sms_event_activity"]
+        assert len(notifications) == 1
+        assert notifications[0][3]["answerText"] == "4"
+        assert notifications[0][3]["presentation"] == wf.output_schema["presentation"]
+        assert index < next(i for i, (name, _) in enumerate(fake.activity_calls) if name == "mark_finished")
+    finally:
+        _restore_workflow(original)
+
+
+async def test_completion_caller_routes_late_revision_and_invalid_presentation():
+    """Actual completion admission continues on late input and fails invalid values."""
+    from unittest.mock import AsyncMock, patch
+
+    class Continued(BaseException):
+        pass
+
+    for mode, path in ([(mode, path) for mode in ("late_revision", "invalid_value") for path in ("execute", "fast_cap")]
+                       + [("unaccepted_entry", path) for path in ("execute", "direct")]):
+        wf = _bare_workflow_instance()
+        wf.agent_id, wf.user_id, wf.goal, wf.model = "completion-route", "user", "Only the day", "rose-1-flash"
+        wf.max_iterations = 25
+        wf.context_gates = {}
+        wf.fast_mode_cache_enabled = path == "fast_cap"
+        if mode == "unaccepted_entry":
+            wf._response_schema_revision = 1
+            wf._response_schema_accepted_revision = 0
+            wf._response_schema_refresh_failure_reason = "schema refresh unavailable"
+        wf.output_schema = {"fields": [{"name": "day", "type": "int", "required": True}],
+                            "presentation": {"version": 1, "mode": "value", "field": "day", "encoding": "text"}}
+        wf._track_tokens_and_cost = AsyncMock()
+        wf._await_deferred_startup = AsyncMock()
+        wf._drain_fast_mode_explores = AsyncMock()
+        wf._prepare_response_schema_continuation = AsyncMock()
+        wf._flush_pending_messages = AsyncMock()
+        failed = AsyncMock(wraps=wf._mark_failed)
+        wf._mark_failed = failed
+        async def load(**kwargs):
+            if mode == "late_revision":
+                wf._response_schema_revision += 1
+                wf._response_schema_accepted_revision = wf._response_schema_revision
+        wf._load_output_schema = load
+        fake = _FakeWorkflowModule()
+        continuations = []
+        def continue_as_new(**kwargs):
+            continuations.append(kwargs)
+            raise Continued()
+        fake.continue_as_new = continue_as_new
+        original = _patch_workflow(fake)
+        try:
+            try:
+                payload = {"status": "completed" if path == "execute" else "max_iterations", "context": [],
+                           "structured_response": {} if mode == "invalid_value" else {"day": 4},
+                           "verifier_progress": 1.0}
+                with patch("workflows.agent_workflow.is_oai_demo_mass_agent_task", return_value=True):
+                    result = (await wf._finish_execute_result(payload) if path == "execute"
+                              else await wf._finish_verified_completion([], payload["structured_response"]) if path == "direct"
+                              else await wf._handle_incomplete(payload, "EXECUTE"))
+            except Continued:
+                assert mode in ("late_revision", "unaccepted_entry")
+            else:
+                assert mode == "invalid_value" and result["status"] == "failed", result
+            assert bool(continuations) is (mode in ("late_revision", "unaccepted_entry"))
+            if continuations:
+                args = continuations[0]["args"]
+                assert args[11] == "execute_continued"
+                assert args[16]["runtime_state"]["response_schema_revision"] == 1
+            assert failed.await_count == (mode == "invalid_value")
+            if mode == "invalid_value":
+                assert any(name == "update_agent_status" and args[1] == "FAILED" for name, args in fake.activity_calls)
+            assert not any(name == "mark_finished" for name, args in fake.activity_calls)
+        finally:
+            _restore_workflow(original)
+
+
+async def test_completion_feedback_during_mark_finished_continues_current_requirement():
+    from unittest.mock import AsyncMock
+    class Continued(BaseException): pass
+    for child in (False, True):
+        for accepted in (False, True):
+            wf = _bare_workflow_instance()
+            wf.agent_id, wf.user_id, wf.goal, wf.model = 'terminal-feedback', 'user', 'Only the day', 'rose-1-flash'
+            wf.max_iterations, wf.context_gates = 25, {}
+            wf.parent_workflow_id = 'parent' if child else None
+            wf.output_schema = {'fields': [{'name': 'day', 'type': 'int', 'required': True}],
+                                'presentation': {'version': 1, 'mode': 'value', 'field': 'day', 'encoding': 'text'}}
+            wf._start_response_schema_refresh = lambda: None
+            wf._wake_background_waiters = lambda: None
+            wf._note_wait_wake = lambda *args: None
+            wf._flush_pending_messages = AsyncMock()
+            fake = _FakeWorkflowModule()
+            execute = fake.execute_activity
+            async def inject(fn, args=None, **kwargs):
+                result = await execute(fn, args=args, **kwargs)
+                if getattr(fn, '__name__', '') == 'mark_finished':
+                    await wf.receive_user_response('Instead give the month')
+                    if accepted:
+                        wf._response_schema_accepted_revision = wf._response_schema_revision
+                return result
+            fake.execute_activity = inject
+            continuations = []
+            def continue_as_new(**kwargs):
+                continuations.append(kwargs)
+                raise Continued()
+            fake.continue_as_new = continue_as_new
+            original = _patch_workflow(fake)
+            try:
+                try:
+                    await wf._finish_verified_completion([], {'day': 4})
+                except Continued:
+                    pass
+                else:
+                    raise AssertionError('feedback during terminal write was completed without re-verification')
+                assert not wf._is_finished and wf._response_schema_revision == 1
+                assert 'Instead give the month' in wf._response_schema_feedback
+                assert len(continuations) == 1 and continuations[0]['args'][11] == 'execute_continued'
+                assert continuations[0]['args'][16]['runtime_state']['response_schema_revision'] == 1
+                statuses = [args[3]['status'] for name, args in fake.activity_calls
+                            if name == 'update_agent_tree_state' and 'status' in args[3]]
+                assert statuses and statuses[-1] == 'ACTIVE' and 'COMPLETED' not in statuses, statuses
+                assert not any(name == 'notify_sms_event_activity' for name, _ in fake.activity_calls)
+                assert not any(call[1] == 'child_completed' for call in fake.signal_calls)
+            finally:
+                _restore_workflow(original)
+
+
+async def test_completion_routing_preserves_unrelated_failures():
+    from unittest.mock import AsyncMock
+    for error in (RuntimeError("publication transport failed"), ValueError("unrelated validation"), asyncio.CancelledError()):
+        wf = _bare_workflow_instance()
+        wf._mark_complete = AsyncMock(side_effect=error)
+        wf._mark_failed = AsyncMock()
+        wf._track_tokens_and_cost = AsyncMock()
+        wf._await_deferred_startup = AsyncMock()
+        wf._drain_fast_mode_explores = AsyncMock()
+        wf._prepare_response_schema_continuation = AsyncMock()
+        try:
+            await wf._finish_execute_result({"status": "completed", "context": []})
+        except BaseException as actual:
+            assert actual is error
+        else:
+            raise AssertionError("unrelated completion exception was swallowed")
+        wf._mark_failed.assert_not_awaited()
+
+
+async def test_workflow_final_value_rejects_stale_or_invalid():
+    for kind in ("stale", "missing", "cancel"):
+        wf = _bare_workflow_instance()
+        wf.agent_id = "final-invalid"
+        wf.parent_workflow_id = None
+        wf.output_schema = {"fields": [{"name": "day", "type": "int", "required": True}],
+                            "presentation": {"version": 1, "mode": "value", "field": "day", "encoding": "text"}}
+        async def drain():
+            if kind == "stale":
+                wf._response_schema_revision = wf._response_schema_accepted_revision + 1
+            if kind == "cancel":
+                raise asyncio.CancelledError()
+        wf._drain_fast_mode_explores = drain
+        fake = _FakeWorkflowModule()
+        original = _patch_workflow(fake)
+        try:
+            try:
+                await wf._mark_complete([], {} if kind == "missing" else {"day": 4})
+            except (ValueError, RuntimeError, asyncio.CancelledError):
+                pass
+            else:
+                raise AssertionError(kind)
+            assert not wf._is_finished
+            assert not fake.activity_calls
+        finally:
+            _restore_workflow(original)
+
+
+async def test_workflow_final_value_late_feedback():
+    for accepted in (False, True):
+        wf = _bare_workflow_instance()
+        wf.agent_id = "late-value"
+        wf.user_id = "u"
+        wf.goal = "Only the requested result"
+        wf.model = "rose-1-flash"
+        wf.parent_workflow_id = None
+        wf.output_schema = {"fields": [{"name": "day", "type": "int", "required": True}],
+                            "presentation": {"version": 1, "mode": "value", "field": "day", "encoding": "text"}}
+        wf._start_response_schema_refresh = lambda: None
+        wf._wake_background_waiters = lambda: None
+        wf._note_wait_wake = lambda *args: None
+        async def delayed():
+            await wf.receive_user_response("Instead provide a full report")
+            if accepted:
+                # Even a new accepted schema cannot reuse the old verification.
+                wf._response_schema_accepted_revision = wf._response_schema_revision
+        wf._stop_pending_background_agents = delayed
+        fake = _FakeWorkflowModule()
+        original = _patch_workflow(fake)
+        try:
+            try:
+                await wf._mark_complete([], {"day": 4})
+            except RuntimeError:
+                pass
+            else:
+                raise AssertionError("late feedback published a stale final answer")
+            assert wf._response_schema_revision == 1
+            assert "Instead provide a full report" in wf._response_schema_feedback
+            assert wf._is_finished is False
+            assert not any(name == "mark_finished" for name, args in fake.activity_calls)
+            assert not any(name == "post_agent_message" and len(args or []) >= 4
+                           and args[3].get("isFinalSummary") for name, args in fake.activity_calls)
+        finally:
+            _restore_workflow(original)
+
+
+async def test_workflow_final_value_late_schema_matrix():
+    failures = []
+    for stage in ("transcript", "final_post"):
+        for accepted in (False, True):
+            wf = _bare_workflow_instance()
+            wf.agent_id = "late-field-change"
+            wf.user_id = "u"
+            wf.goal = "Only the day"
+            wf.model = "rose-1-flash"
+            wf.parent_workflow_id = None
+            wf.output_schema = {"fields": [{"name": "day", "type": "int", "required": True}],
+                                "presentation": {"version": 1, "mode": "value", "field": "day", "encoding": "text"}}
+            wf._start_response_schema_refresh = lambda: None
+            wf._wake_background_waiters = lambda: None
+            wf._note_wait_wake = lambda *args: None
+            async def feedback():
+                await wf.receive_user_response("Instead give the month")
+                if accepted:
+                    wf._response_schema_accepted_revision = wf._response_schema_revision
+                    wf.output_schema = {"fields": [{"name": "month", "type": "str", "required": True}],
+                                        "presentation": {"version": 1, "mode": "value", "field": "month", "encoding": "text"}}
+            if stage == "transcript":
+                async def transcript(context):
+                    await feedback()
+                    return context
+                wf._completion_transcript = transcript
+            else:
+                original_post = wf._post_message
+                async def post(*args, **kwargs):
+                    result = await original_post(*args, **kwargs)
+                    if len(args) > 2 and args[2].get("isFinalSummary"):
+                        await feedback()
+                    return result
+                wf._post_message = post
+            fake = _FakeWorkflowModule()
+            original = _patch_workflow(fake)
+            error = None
+            try:
+                try:
+                    await wf._mark_complete([], {"day": 4})
+                except Exception as caught:
+                    error = caught
+                finals = [args for name, args in fake.activity_calls
+                          if name == "post_agent_message" and len(args or []) >= 4
+                          and args[3].get("isFinalSummary")]
+                if not isinstance(error, RuntimeError) or wf._is_finished:
+                    failures.append(f"{stage}/{accepted}: {type(error).__name__}, finished={wf._is_finished}")
+                if any(name == "mark_finished" for name, _ in fake.activity_calls):
+                    failures.append(f"{stage}/{accepted}: persisted stale completion")
+                assert wf._response_schema_revision == 1
+                assert "Instead give the month" in wf._response_schema_feedback
+                assert len(finals) == (1 if stage == "final_post" else 0)
+                if finals:
+                    assert finals[0][1] == "4", "already written history must not be rewritten"
+            finally:
+                _restore_workflow(original)
+    assert not failures, "; ".join(failures)
+
+
+async def test_workflow_final_value_loaded_schema():
+    for value_mode in (True, False):
+        wf = _bare_workflow_instance()
+        wf.agent_id = "late-load"
+        wf.user_id = "u"
+        wf.goal = "Only the requested result"
+        wf.model = "rose-1-flash"
+        wf.parent_workflow_id = None
+        wf.output_schema = None
+        schema = {"fields": [{"name": "day", "type": "int", "required": True}]}
+        if value_mode:
+            schema["presentation"] = {"version": 1, "mode": "value", "field": "day", "encoding": "text"}
+        fake = _FakeWorkflowModule()
+        fake.activity_returns["fetch_agent_config"] = {"response_schema": schema}
+        fake.activity_returns["generate_completion_summary"] = {"summary": "Legacy report"}
+        original = _patch_workflow(fake)
+        try:
+            await wf._mark_complete([], {"day": 4})
+            assert wf.output_schema == schema
+            final = next(args for name, args in fake.activity_calls if name == "post_agent_message"
+                         and len(args or []) >= 4 and args[3].get("isFinalSummary"))
+            calls = [name for name, _ in fake.activity_calls]
+            if value_mode:
+                assert "generate_completion_summary" not in calls
+                assert final[1] == "4"
+                assert final[3]["completionSummary"]["answerText"] == "4"
+            else:
+                assert "generate_completion_summary" in calls
+                assert final[1] == ""
+                assert "answerText" not in final[3]["completionSummary"]
+        finally:
+            _restore_workflow(original)
+
+
+async def test_workflow_final_value_feedback_during_schema_load():
+    wf = _bare_workflow_instance()
+    wf.agent_id = "load-feedback"
+    wf.user_id = "u"
+    wf.goal = "Only the day"
+    wf.model = "rose-1-flash"
+    wf.parent_workflow_id = None
+    wf.output_schema = None
+    wf._start_response_schema_refresh = lambda: None
+    wf._wake_background_waiters = lambda: None
+    wf._note_wait_wake = lambda *args: None
+    fake = _FakeWorkflowModule()
+    execute = fake.execute_activity
+    async def with_feedback(fn, args=None, **kwargs):
+        if getattr(fn, "__name__", "") == "fetch_agent_config":
+            await wf.receive_user_response("Instead give the month")
+            return {"response_schema": {"fields": [{"name": "day", "type": "int", "required": True}],
+                    "presentation": {"version": 1, "mode": "value", "field": "day", "encoding": "text"}}}
+        return await execute(fn, args=args, **kwargs)
+    fake.execute_activity = with_feedback
+    original = _patch_workflow(fake)
+    try:
+        try:
+            await wf._mark_complete([], {"day": 4})
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("unaccepted loaded schema finalized")
+        assert not wf._is_finished
+        assert wf._response_schema_revision == 1
+        assert "Instead give the month" in wf._response_schema_feedback
+        assert not any(name == "mark_finished" for name, _ in fake.activity_calls)
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_final_verification_entry_revision_matrix():
+    # Same-shaped accepted schemas are deliberately included: schema acceptance
+    # must never be mistaken for re-verification of the old result.
+    for stage in ("initial", "deferred", "drain", "load", "stop", "transcript", "post"):
+        for accepted in (False, True):
+            for changed_shape in (False, True):
+                wf = _bare_workflow_instance()
+                wf.agent_id = "entry-revision"
+                wf.user_id = "u"
+                wf.goal = "Only the day"
+                wf.model = "rose-1-flash"
+                wf.parent_workflow_id = None
+                schema = {"fields": [{"name": "day", "type": "int", "required": True}],
+                          "presentation": {"version": 1, "mode": "value", "field": "day", "encoding": "text"}}
+                wf.output_schema = None if stage == "load" else schema
+                wf._start_response_schema_refresh = lambda: None
+                wf._wake_background_waiters = lambda: None
+                wf._note_wait_wake = lambda *args: None
+                async def feedback():
+                    await wf.receive_user_response("Instead give the next result")
+                    if accepted:
+                        wf._response_schema_accepted_revision = wf._response_schema_revision
+                        if changed_shape:
+                            wf.output_schema = {"fields": [{"name": "month", "type": "str", "required": True}],
+                                "presentation": {"version": 1, "mode": "value", "field": "month", "encoding": "text"}}
+                fake = _FakeWorkflowModule()
+                if stage == "initial":
+                    # An accepted entry revision is legitimate; its next change
+                    # must still be caught at the first suspended phase.
+                    if accepted:
+                        wf._await_deferred_startup = feedback
+                elif stage in ("deferred", "drain", "stop"):
+                    setattr(wf, {"deferred": "_await_deferred_startup", "drain": "_drain_fast_mode_explores",
+                                 "stop": "_stop_pending_background_agents"}[stage], feedback)
+                elif stage == "load":
+                    execute = fake.execute_activity
+                    async def load(fn, args=None, **kwargs):
+                        if getattr(fn, "__name__", "") == "fetch_agent_config":
+                            await feedback()
+                            return {"response_schema": schema}
+                        return await execute(fn, args=args, **kwargs)
+                    fake.execute_activity = load
+                elif stage == "transcript":
+                    async def transcript(context):
+                        await feedback()
+                        return context
+                    wf._completion_transcript = transcript
+                else:
+                    original_post = wf._post_message
+                    async def post(*args, **kwargs):
+                        result = await original_post(*args, **kwargs)
+                        if len(args) > 2 and args[2].get("isFinalSummary"):
+                            await feedback()
+                        return result
+                    wf._post_message = post
+                original = _patch_workflow(fake)
+                try:
+                    if stage == "initial":
+                        await feedback()
+                    try:
+                        await wf._mark_complete([], {"day": 4})
+                    except RuntimeError:
+                        pass
+                    else:
+                        raise AssertionError(f"stale completion: {stage}/{accepted}/{changed_shape}")
+                    assert not wf._is_finished, (stage, accepted, changed_shape)
+                    assert "Instead give the next result" in wf._response_schema_feedback
+                    assert not any(name == "mark_finished" for name, _ in fake.activity_calls)
+                    finals = [args for name, args in fake.activity_calls if name == "post_agent_message"
+                              and len(args or []) >= 4 and args[3].get("isFinalSummary")]
+                    assert len(finals) == (1 if stage == "post" else 0)
+                    if finals:
+                        assert finals[0][1] == "4"  # Retain the real prior write.
+                finally:
+                    _restore_workflow(original)
+
+
+def test_workflow_final_presentation_resume():
+    wf = _bare_workflow_instance()
+    wf.agent_id = "final-resume"
+    wf.context_gates = {}
+    wf.max_iterations = None
+    wf.user_id = "u"
+    wf.goal = "Only the requested number"
+    wf.output_schema = {"fields": [{"name": "day", "type": "int", "required": True}],
+                        "presentation": {"version": 1, "mode": "value", "field": "day", "encoding": "text"}}
+    wf._response_schema_revision = 3
+    wf._response_schema_accepted_revision = 3
+    wf._response_schema_applied_revision = 3
+    fake = _FakeWorkflowModule()
+    original = _patch_workflow(fake)
+    try:
+        state = wf._continuation_resume_state()
+        restored = _bare_workflow_instance()
+        restored._restore_deployment_state(state)
+        assert restored.output_schema == wf.output_schema
+        assert restored._response_schema_accepted_revision == 3
+        restored._require_current_response_schema_acceptance()
+    finally:
+        _restore_workflow(original)
+
+
+def test_final_presentation_contract():
+    from utils.final_presentation import render_final_answer, validate_presentation
+    from utils.tool_schemas import ResponseSchemaConfig
+    from helpers.llm import _GeneratedResponseSchema, _schema_from_generated_model
+    field = {"name": "answer", "type": "int", "required": True}
+    policy = {"version": 1, "mode": "value", "field": "answer", "encoding": "text"}
+    schema = {"fields": [field], "presentation": policy}
+    assert render_final_answer(schema, {"answer": 0}) == "0"
+    assert render_final_answer({"fields": [field]}, {"answer": 4}) is None
+    assert ResponseSchemaConfig.model_validate(schema).presentation.field == "answer"
+    from utils.response_schema_wire import decode_wire
+    legacy = ResponseSchemaConfig.model_validate({"fields": [field]}).model_dump()
+    assert "presentation" not in legacy
+    report = ResponseSchemaConfig.model_validate({"fields": [field], "presentation": {"version": 1, "mode": "report"}}).model_dump()
+    assert report["presentation"] == {"version": 1, "mode": "report"}
+    native = {"nodes": [{"id": "answer", "parent_id": None, "position": 0,
+                         "name": "answer", "type": "int", "required": True,
+                         "nullable": False, "description": "Number", "constraints": []}],
+              "presentation": policy, "reasoning": "Number"}
+    decoded = decode_wire(native, internal=True, reasoning=True)
+    assert decoded["presentation"] == policy
+    assert _schema_from_generated_model(_GeneratedResponseSchema.model_validate(native))["presentation"] == policy
+
+    generated = _GeneratedResponseSchema.model_validate({**schema, "reasoning": "A number"})
+    assert _schema_from_generated_model(generated)["presentation"] == policy
+    for bad in [
+        {**schema, "presentation": {**policy, "field": "missing"}},
+        {**schema, "fields": [{**field, "nullable": True}]},
+        {**schema, "fields": [{**field, "required": False}]},
+        {**schema, "fields": [field, {"name": "notice", "type": "str", "required": True}]},
+        {**schema, "fields": [{**field, "type": "file_pointer"}]},
+        {**schema, "presentation": {**policy, "version": 2}},
+    ]:
+        try:
+            validate_presentation(bad)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(bad)
+    for value in [True, None, "4"]:
+        try:
+            render_final_answer(schema, {"answer": value})
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(value)
+    text_schema = {**schema, "fields": [{**field, "type": "str"}]}
+    assert render_final_answer(text_schema, {"answer": "<script>4</script>"}) == "<script>4</script>"
+    assert render_final_answer(text_schema, {"answer": ""}) == ""
+    bool_schema = {**schema, "fields": [{**field, "type": "bool"}]}
+    assert render_final_answer(bool_schema, {"answer": False}) == "false"
+    json_schema = {**schema, "fields": [{**field, "type": "list[str]"}],
+                   "presentation": {**policy, "encoding": "json"}}
+    assert render_final_answer(json_schema, {"answer": ["a", "b"]}) == '["a","b"]'
+
+
 async def test_workflow_mark_complete_happy_path():
     """_mark_complete posts summary, updates tree, signals parent."""
     wf = _bare_workflow_instance()
@@ -12178,8 +13041,12 @@ async def test_workflow_retained_output_dispatch_and_error_pairing():
     from tools.read_tool_output import preview_tool_output_activity
 
     registry_tree = ast.parse((Path(__file__).resolve().parents[2] / "worker.py").read_text())
-    registry = next(node.value for node in ast.walk(registry_tree) if isinstance(node, ast.Assign)
-                    and any(isinstance(target, ast.Name) and target.id == "registered_activities" for target in node.targets))
+    registry = next(
+        node.value
+        for node in ast.walk(registry_tree)
+        if isinstance(node, ast.Assign)
+        and any(isinstance(target, ast.Name) and target.id == "registered_activities" for target in node.targets)
+    )
     registered_names = {node.id for node in registry.elts if isinstance(node, ast.Name)}
     for fn in (read_tool_output_activity, preview_tool_output_activity):
         assert fn.__temporal_activity_definition.name in registered_names
@@ -12190,8 +13057,14 @@ async def test_workflow_retained_output_dispatch_and_error_pairing():
     receipts = []
 
     async def handle(event, call_id, name):
-        receipts.append({"role": "TOOL", "text": event.message, "metadata": {
-            "toolCallId": call_id, "toolName": name, "toolStatus": event.status.value}})
+        receipts.append(
+            {
+                "role": "TOOL",
+                "text": event.message,
+                "metadata": {"toolCallId": call_id, "toolName": name, "toolStatus": event.status.value},
+            }
+        )
+
     wf._handle_tool_event = handle
 
     async def execute_activity(fn, *, args, **kwargs):
@@ -12204,10 +13077,22 @@ async def test_workflow_retained_output_dispatch_and_error_pairing():
         with retained_tool_output_fixture(), patch.object(reader.workflow, "execute_activity", execute_activity):
             preview = await preview_tool_text("body " * 25000 + "MAIN_TAIL", user_id="user", agent_id="agent")
             output_id = re.search(r'output_id="([a-f0-9]{32})"', preview)[1]
-            result = await wf._execute_tool("read_tool_output", {"output_id": output_id, "query": "MAIN_TAIL", "user_id": "attacker"}, "read-main")
+            result = await wf._execute_tool(
+                "read_tool_output", {"output_id": output_id, "query": "MAIN_TAIL", "user_id": "attacker"}, "read-main"
+            )
             assert not result.get("error"), result
-            context = [{"role": "ASSISTANT", "text": "", "metadata": {"tool_calls": [
-                {"tool": "read_tool_output", "tool_call_id": "read-main", "output_id": output_id}]}}, receipts[-1]]
+            context = [
+                {
+                    "role": "ASSISTANT",
+                    "text": "",
+                    "metadata": {
+                        "tool_calls": [
+                            {"tool": "read_tool_output", "tool_call_id": "read-main", "output_id": output_id}
+                        ]
+                    },
+                },
+                receipts[-1],
+            ]
             messages = await build_llm_messages(context, "system", user_id="user", agent_id="agent")
             assert "MAIN_TAIL" in messages[-1]["content"]
             for args in ({"output_id": "invalid"}, {"output_id": "f" * 32}):
@@ -13825,19 +14710,71 @@ async def test_workflow_post_message_does_not_throttle_tree_outside_demo():
 async def run_all_tests():
     print("workflow blackbox tests:")
     r = BlackboxResult()
-    await r.record_async("wf_generic_browser_budget_wrapup", test_workflow_generic_browser_result_gets_existing_budget_wrapup)
-    await r.record_async("wf_background_browser_budget_notification", test_workflow_background_browser_budget_keeps_native_notification_and_result)
-    await r.record_async("browser_usage_child_cost_interleaving", test_workflow_browser_usage_arms_before_child_cost_interleaving)
-    await r.record_async("browser_pricing_preserves_intervening_cost_stop", test_workflow_browser_pricing_cannot_reopen_an_intervening_cost_stop)
-    await r.record_async("inflight_refusal_preserves_unadmitted_browser_wrapup", test_workflow_inflight_refusal_preserves_unadmitted_browser_wrapup)
-    await r.record_async("browser_pricing_preserves_intervening_credit_pause", test_workflow_browser_pricing_preserves_intervening_credit_pause)
-    await r.record_async("browser_pricing_preserves_pause_after_credit_refresh", test_workflow_browser_pricing_preserves_credit_pause_after_refresh)
-    await r.record_async("browser_wrapup_restore_preserves_cached_credit_pause", test_workflow_browser_wrapup_restore_preserves_cached_credit_pause)
-    await r.record_async("armed_wrapup_keeps_refreshed_credit_pause_through_continuation", test_workflow_armed_browser_wrapup_keeps_refreshed_credit_pause_across_continuation)
-    await r.record_async("browser_wrapup_restore_requires_unpaused_provenance", test_workflow_browser_wrapup_restore_requires_unpaused_continuation_provenance)
-    await r.record_async("wf_unverified_browser_budget_stop", test_workflow_unverified_browser_and_other_usage_do_not_get_wrapup)
-    await r.record_async("wf_browser_budget_wrapup_pause_controls", test_workflow_browser_budget_wrapup_stops_after_one_turn_and_keeps_pauses)
-    await r.record_async("wf_browser_budget_wrapup_work_and_restore", test_workflow_browser_wrapup_cannot_start_productive_work_or_renew_after_restore)
+    r.record("final_presentation_contract", test_final_presentation_contract)
+    r.record("workflow_final_presentation_resume", test_workflow_final_presentation_resume)
+    await r.record_async("workflow_final_value_presentation", test_workflow_final_value_presentation)
+    await r.record_async("completion_caller_routes_late_revision_and_invalid_presentation", test_completion_caller_routes_late_revision_and_invalid_presentation)
+    await r.record_async("completion_feedback_during_mark_finished_continues_current_requirement", test_completion_feedback_during_mark_finished_continues_current_requirement)
+    await r.record_async("completion_supersession_settles_schema_after_flush", test_completion_supersession_settles_schema_after_flush)
+    await r.record_async("completion_routing_preserves_unrelated_failures", test_completion_routing_preserves_unrelated_failures)
+    await r.record_async("workflow_final_value_rejects_stale_or_invalid", test_workflow_final_value_rejects_stale_or_invalid)
+    await r.record_async("workflow_final_value_late_feedback", test_workflow_final_value_late_feedback)
+    await r.record_async("workflow_final_value_late_schema_matrix", test_workflow_final_value_late_schema_matrix)
+    await r.record_async("workflow_final_value_loaded_schema", test_workflow_final_value_loaded_schema)
+    await r.record_async("workflow_final_value_feedback_during_schema_load", test_workflow_final_value_feedback_during_schema_load)
+    await r.record_async("workflow_final_verification_entry_revision_matrix", test_workflow_final_verification_entry_revision_matrix)
+
+
+
+    await r.record_async(
+        "wf_generic_browser_budget_wrapup", test_workflow_generic_browser_result_gets_existing_budget_wrapup
+    )
+    await r.record_async(
+        "wf_background_browser_budget_notification",
+        test_workflow_background_browser_budget_keeps_native_notification_and_result,
+    )
+    await r.record_async(
+        "browser_usage_child_cost_interleaving", test_workflow_browser_usage_arms_before_child_cost_interleaving
+    )
+    await r.record_async(
+        "browser_pricing_preserves_intervening_cost_stop",
+        test_workflow_browser_pricing_cannot_reopen_an_intervening_cost_stop,
+    )
+    await r.record_async(
+        "inflight_refusal_preserves_unadmitted_browser_wrapup",
+        test_workflow_inflight_refusal_preserves_unadmitted_browser_wrapup,
+    )
+    await r.record_async(
+        "browser_pricing_preserves_intervening_credit_pause",
+        test_workflow_browser_pricing_preserves_intervening_credit_pause,
+    )
+    await r.record_async(
+        "browser_pricing_preserves_pause_after_credit_refresh",
+        test_workflow_browser_pricing_preserves_credit_pause_after_refresh,
+    )
+    await r.record_async(
+        "browser_wrapup_restore_preserves_cached_credit_pause",
+        test_workflow_browser_wrapup_restore_preserves_cached_credit_pause,
+    )
+    await r.record_async(
+        "armed_wrapup_keeps_refreshed_credit_pause_through_continuation",
+        test_workflow_armed_browser_wrapup_keeps_refreshed_credit_pause_across_continuation,
+    )
+    await r.record_async(
+        "browser_wrapup_restore_requires_unpaused_provenance",
+        test_workflow_browser_wrapup_restore_requires_unpaused_continuation_provenance,
+    )
+    await r.record_async(
+        "wf_unverified_browser_budget_stop", test_workflow_unverified_browser_and_other_usage_do_not_get_wrapup
+    )
+    await r.record_async(
+        "wf_browser_budget_wrapup_pause_controls",
+        test_workflow_browser_budget_wrapup_stops_after_one_turn_and_keeps_pauses,
+    )
+    await r.record_async(
+        "wf_browser_budget_wrapup_work_and_restore",
+        test_workflow_browser_wrapup_cannot_start_productive_work_or_renew_after_restore,
+    )
     await r.record_async("wf_retained_output_dispatch", test_workflow_retained_output_dispatch_and_error_pairing)
 
     await r.record_async(
@@ -13993,7 +14930,9 @@ async def run_all_tests():
     await r.record_async("wf_signal_pause", test_workflow_signal_pause_sets_paused_flag)
     await r.record_async("pause_intent_ends_with_recovered_episode", test_pause_intent_ends_with_recovered_episode)
     await r.record_async("pause_episode_ordering", test_pause_episode_preserves_user_intent_across_automatic_signals)
-    await r.record_async("pause_provenance_fixture_restores_network", test_pause_provenance_fixture_restores_network_after_its_proof)
+    await r.record_async(
+        "pause_provenance_fixture_restores_network", test_pause_provenance_fixture_restores_network_after_its_proof
+    )
     await r.record_async("wf_signal_pause_cascade", test_workflow_signal_pause_cascades_to_children)
     await r.record_async("wf_signal_resume", test_workflow_signal_resume_clears_paused_flag)
     await r.record_async(
@@ -14679,6 +15618,61 @@ async def run_all_tests():
 
     teardown_mock()
     return r.all_passed
+
+
+async def test_completion_supersession_settles_schema_after_flush():
+    from unittest.mock import AsyncMock
+    from workflows.agent_workflow import CompletionSupersededError
+
+    class Continued(Exception):
+        pass
+
+    wf = _bare_workflow_instance()
+    wf.agent_id, wf.user_id, wf.goal, wf.model = "schema-continuation", "user", "Day", "rose-1-flash"
+    wf.max_iterations, wf.context_gates = 25, {}
+    wf.output_schema = {"fields": [{"name": "day", "type": "int", "required": True}]}
+    wf._mark_complete = AsyncMock(side_effect=CompletionSupersededError("new feedback"))
+    wf._start_response_schema_refresh = lambda: None
+    wf._wake_background_waiters = lambda: None
+    wf._note_wait_wake = lambda *args: None
+    flushed, release = asyncio.Event(), asyncio.Event()
+    async def flush():
+        await wf.receive_user_response("Instead give the month")
+        flushed.set()
+    async def settle():
+        await release.wait()
+        wf.output_schema = {"fields": [{"name": "month", "type": "int", "required": True}]}
+        wf._response_schema_accepted_revision = wf._response_schema_revision
+        wf._response_schema_applied_revision = wf._response_schema_revision
+    wf._flush_pending_messages = flush
+    wf._wait_for_response_schema_refresh = settle
+    fake = _FakeWorkflowModule()
+    continuations = []
+    def continue_as_new(**kwargs):
+        continuations.append(kwargs)
+        raise Continued()
+    fake.continue_as_new = continue_as_new
+    original = _patch_workflow(fake)
+    task = asyncio.create_task(wf._finish_verified_completion([], {"day": 4}))
+    try:
+        await asyncio.wait_for(flushed.wait(), 5)
+        await asyncio.sleep(0)
+        assert not task.done(), "continuation raced ahead of the schema refresh accepted after flush"
+        release.set()
+        try:
+            await task
+        except Continued:
+            pass
+        else:
+            raise AssertionError("completion did not continue")
+        assert len(continuations) == 1
+        runtime = continuations[0]["args"][16]["runtime_state"]
+        assert runtime["response_schema_revision"] == runtime["response_schema_accepted_revision"] == 1
+        assert wf.output_schema["fields"][0]["name"] == "month"
+    finally:
+        release.set()
+        await asyncio.gather(task, return_exceptions=True)
+        _restore_workflow(original)
 
 
 if __name__ == "__main__":

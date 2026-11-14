@@ -99,9 +99,18 @@ async def open_browser_cdp_connection(
     applied by the multiplexer to every page/iframe target before it runs.
     Other providers connect directly, as before.
     """
+    from domains.spawn_browser_agent_v3.service_activity_queue import get_browser_cleanup_owners
+
+    owners = get_browser_cleanup_owners()
+    if owners is not None:
+        owners.ensure_acquisition_open()
     if not is_tilion_cdp_url(cdp_url):
         return steel_cdp_connection_url(cdp_url), None
     from browser_tools.cdp_multiplexer import SingleCdpConnectionMultiplexer
 
     multiplexer = SingleCdpConnectionMultiplexer(cdp_url, label=label, refresh_url=refresh_url, emulation=emulation)
+    # Retain custody before start can await or fail, including setup that never
+    # returns a DOMService to its activity's outer finally.
+    if owners is not None:
+        owners.multiplexers[id(multiplexer)] = multiplexer
     return await multiplexer.start(), multiplexer

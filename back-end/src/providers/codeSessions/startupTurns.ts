@@ -27,7 +27,8 @@
 import type { Prisma } from '@prisma/client';
 import { prisma } from '../database';
 import { createLogger } from '../logger';
-import { deliverUserTurnToCodeSession } from '../codeSessionTurns';
+import { deliverUserTurnToCodeSession, type CodeTurnSettings } from '../codeSessionTurns';
+import { prepareDirectTurnAttachments, type DirectAttachment } from './directTurnAttachments';
 import { deleteEphemeral, getEphemeral, putEphemeral, withSerializedLock } from '../sharedState';
 import {
   agentMessageRowFields,
@@ -56,6 +57,17 @@ export interface StartupTurn {
   original: string;
   sender: { id: string; label: string };
   toolCallId: string;
+  /**
+   * The owner typed it while the code agent was resuming (directChatResume.ts):
+   * its CLI turn id is the client message id (the person's row already exists),
+   * with the turn's attachments and model / effort / speed.
+   */
+  user?: {
+    clientMessageId: string;
+    userId: string;
+    attachments?: Array<Record<string, unknown>>;
+    settings?: CodeTurnSettings;
+  };
 }
 
 interface StartupRow {
@@ -159,14 +171,30 @@ export async function drainStartupTurns(key: string, taskId: string): Promise<vo
           ? session.codeProvider
           : null;
       for (const turn of row.turns) {
-        const turnId = codeTurnId(turn.key);
-        const delivery = await deliverUserTurnToCodeSession({
-          wsUrl: session.streamUrl,
-          taskId,
-          turnId,
-          text: turn.text,
-          sender: 'agent',
-        });
+        const turnId = turn.user?.clientMessageId ?? codeTurnId(turn.key);
+        // The ws-server holds only `agent` turns until the CLI has its task prompt,
+        // so a person's queued turn rides that path with its own id and settings.
+        const extras = turn.user ? await personTurnExtras(turn.user) : {};
+        const deliver = (withSettings: boolean) =>
+          deliverUserTurnToCodeSession({
+            wsUrl: session.streamUrl as string,
+            taskId,
+            turnId,
+            text: turn.text,
+            sender: 'agent',
+            ...extras,
+            ...(withSettings ? {} : { settings: undefined }),
+          });
+        let delivery = await deliver(true);
+        if (delivery.status === 'rejected' && delivery.reason === 'unsupported_settings') {
+          // The resumed session's catalog lacks the model/speed picked while it was
+          // stopped: the person's words still reach it, on the session's settings.
+          log.warn('A queued turn asked for settings the resumed session lacks', {
+            taskId,
+            turnId,
+          });
+          delivery = await deliver(false);
+        }
         if (
           delivery.status !== 'delivered' &&
           delivery.status !== 'duplicate' &&
@@ -180,6 +208,7 @@ export async function drainStartupTurns(key: string, taskId: string): Promise<vo
           });
           continue;
         }
+        if (turn.user) continue; // the person's own row was persisted when it queued
         const fields = agentMessageRowFields({
           key: turn.key,
           sender: turn.sender,
@@ -206,6 +235,40 @@ export async function drainStartupTurns(key: string, taskId: string): Promise<vo
           delivered: String(row.turns.length),
         });
       }
+    },
+    { waitMs: LOCK_WAIT_MS }
+  );
+}
+
+/** A person's queued turn: its attachments staged for the CLI and its per-turn settings. */
+async function personTurnExtras(user: NonNullable<StartupTurn['user']>) {
+  const attachments = await prepareDirectTurnAttachments(
+    user.attachments as unknown as DirectAttachment[] | undefined,
+    user.userId
+  ).catch((error: unknown) => {
+    log.error('A queued turn lost its attachments', {
+      clientMessageId: user.clientMessageId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return [];
+  });
+  return {
+    ...(attachments.length > 0 ? { attachments } : {}),
+    ...(user.settings ? { settings: user.settings } : {}),
+  };
+}
+
+/**
+ * A new run of the spawn is starting (a person resumed a stopped code agent):
+ * its earlier run's published session must not read as this run's, but turns
+ * still queued (an earlier resume that failed) stay and reach this run.
+ */
+export async function clearPublishedStartupTask(key: string): Promise<void> {
+  await withSerializedLock(
+    lockName(key),
+    async () => {
+      const row = await readRow(key);
+      if (row.published !== null) await writeRow(key, { ...row, published: null });
     },
     { waitMs: LOCK_WAIT_MS }
   );

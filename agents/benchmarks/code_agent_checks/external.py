@@ -48,7 +48,8 @@ PLAYWRIGHT_CMD = ("npx", "playwright", "test")
 HYDRATE = "hydrate_code_agent_run"
 NOT_CONFIG = {"type", "timeout_s"}
 SESSION_SCRIPT = "scripts/generate-test-session.ts"
-# back-end/src/providers/inviteGate.ts WAITLIST_BYPASS_INVITE_CODE: the documented test master invite (CLAUDE.md "Test OTP").
+# back-end/src/providers/inviteGate.ts WAITLIST_BYPASS_INVITE_CODE: the documented test master invite
+# (the dev OTP in CLAUDE.md "Credentials and environment").
 MASTER_INVITE_CODE = 181818
 LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1"}
 

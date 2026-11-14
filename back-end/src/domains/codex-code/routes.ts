@@ -16,6 +16,7 @@ import * as service from './service';
 import { resizeSession } from './resizeService';
 import { codeSessionHttpError, keepAliveCodeTask } from '../../providers/codeSessions/spawn';
 import { parseResetsAt, reportCodeTaskUsageLimit } from '../../providers/codeSessions/usageLimit';
+import { GithubRepoRefNotFoundError } from '../../providers/githubRepos/resolve';
 import { GitHubAccessDeniedError, MissingUserIdError } from './service';
 import { ProjectNotFoundForSessionError } from '../../providers/projects/session';
 import {
@@ -117,6 +118,9 @@ function createErrorResponse(error: unknown): { status: number; body: object } |
   if (error instanceof GitHubAccessDeniedError) {
     return { status: 403, body: { error: error.detail, code: 'GITHUB_ACCESS_DENIED' } };
   }
+  if (error instanceof GithubRepoRefNotFoundError) {
+    return { status: 403, body: { error: error.message, code: 'GITHUB_ACCESS_DENIED' } };
+  }
   if (error instanceof ProjectNotFoundForSessionError) {
     return { status: 404, body: { error: error.message, code: 'PROJECT_NOT_FOUND' } };
   }
@@ -128,49 +132,26 @@ router.post(
   authenticateInternal,
   asyncHandler(async (req: AuthRequest, res: Response) => {
     try {
-      const {
-        agent_id,
-        goal,
-        attachments,
-        github_repo_url,
-        user_id,
-        fast_mode_cache_enabled,
-        memory_enabled,
-        harness_mode,
-        rose_api_base_url,
-        code_session_id,
-        fresh_conversation,
-        lease_owner,
-        base_branch,
-        target,
-        device_id,
-      } = createSessionSchema.parse(req.body);
+      const body = createSessionSchema.parse(req.body);
 
       // C14: a local session runs on the agent tree's Mac with the user's own
       // login (no persistent code session: the work stays in the granted folder).
       const result =
-        target === 'local'
+        body.target === 'local'
           ? await createLocalCodeSessionResponse({
-              agentId: agent_id,
-              goal,
+              agentId: body.agent_id,
+              goal: body.goal,
               provider: 'codex',
-              expectedUserId: user_id,
-              deviceId: device_id,
+              expectedUserId: body.user_id,
+              deviceId: body.device_id,
+              taskName: body.task_name ?? null,
+              cliSettings: body.cli_settings,
+              resumeConfig: body.resume_config,
+              leaseOwner: body.lease_owner,
             })
           : await service.createSession({
-              agent_id,
-              goal,
-              attachments: attachments as FilePointer[] | undefined,
-              github_repo_url,
-              user_id,
-              fast_mode_cache_enabled,
-              memory_enabled,
-              harness_mode,
-              rose_api_base_url,
-              code_session_id,
-              fresh_conversation,
-              lease_owner,
-              base_branch,
+              ...body,
+              attachments: body.attachments as FilePointer[] | undefined,
             });
 
       res.json({ success: true, ...result });

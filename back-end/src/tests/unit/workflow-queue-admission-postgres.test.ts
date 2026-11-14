@@ -34,6 +34,8 @@ async function main() {
   db.$on('query', (event) => {
     if (captureMembership) capturedQuery = { query: event.query, params: event.params };
   });
+  // The engine's one-time TLS setenv must finish before another client reads process.env.
+  await db.$connect();
   const { claimWorkflowStart, acknowledgeWorkflowStart, beginQueueRetirement, queueAdmissionKey } =
     await import('../../providers/workflowQueueAdmission');
   const { lockAgentWorkflowGeneration } = await import('../../providers/workflowGeneration');

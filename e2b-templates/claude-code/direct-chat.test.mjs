@@ -532,3 +532,231 @@ test("Claude cold start: the first turn waits for a slow CLI initialize instead 
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// A Rose agent's message to a code agent the user is chatting with directly is
+// held (`queued`, never refused) and written once after the hand back, even when
+// the user retakes the hold while that released turn waits in the delivery chain
+// behind the user's own turn (a settings change awaiting the CLI).
+test("agent turns held during a direct chat survive a hold retaken mid-release and are written once", async () => {
+  const source = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), "ws-server.mjs"),
+    "utf8",
+  );
+  const slice = (from, to) =>
+    source.slice(source.indexOf(from), source.indexOf(to));
+  const code = [
+    slice(
+      "function clearDirectHoldTimer()",
+      "function onCliTurnResult(message)",
+    ),
+    slice(
+      "async function deliverTurnOnce(id, msg)",
+      "function handleHandBack(msg)",
+    ),
+  ].join("\n");
+  const result = await vm.runInNewContext(
+    `(async()=>{
+    let activeTurn=null,pendingTurns=0,directHold=false,directHoldTimer=null;
+    let exitAnnounced=false,cliStdinOpen=true,controlSerial=Promise.resolve(),turnSeq=0;
+    const deliveredTurnIds=new Map(),pendingDeliveries=new Map(),queuedTurnAcks=new Map();
+    const heldAgentTurns=[],startupTurnQueue=[],events=[],written=[],eventBuffer=[];
+    const MAX_TURN_ID_CHARS=128,MAX_TURN_TEXT_CHARS=100000,MAX_STARTUP_TURNS=20,MAX_HELD_AGENT_TURNS=50;
+    const tokenMatches=()=>true,turnAck=(id,status,reason)=>({type:"user_turn_ack",id,status,...(reason?{reason}:{})});
+    const agentTurnText=(text)=>text,markGoalDelivered=()=>{},goalHandoffWritten=()=>false;
+    const nativeInitialization=null,taskPromptReady=Promise.resolve(),effectiveSettings={model:"test"};
+    const cliChild={stdin:{write(line,cb){written.push(line);cb();},end(){}}};
+    let releaseSettings;const settingsGate=new Promise(r=>{releaseSettings=r;});
+    const applyTurnSettings=async(settings)=>{if(settings)await settingsGate;};
+    const stageTurnAttachments=()=>[],userMessageLine=text=>text;
+    const startNativeTurn=()=>(activeTurn={id:"turn-"+(++turnSeq)}),endNativeTurn=()=>{activeTurn=null;};
+    const appendEvent=e=>events.push(e),appendOutput=()=>{},log=()=>{};
+    ${code}
+    const turn=(id,sender,extra={})=>deliverTurnOnce(id,{id,token:"ok",text:id,sender,...extra});
+    const tick=()=>new Promise(r=>setTimeout(r,0));
+    const u1=await turn("u1","user");
+    const a1=await turn("a1","agent");
+    const a1retry=await turn("a1","agent");
+    // The user's next turn changes settings and waits on the CLI; the user hands back meanwhile.
+    const u2=turn("u2","user",{settings:{model:"other"}});
+    await tick();
+    releaseDirectHold("handed_back");
+    await tick();
+    releaseSettings();
+    const u2ack=await u2;
+    for(let i=0;i<5;i++)await tick();
+    const duringSecondHold={written:[...written],held:heldAgentTurns.map(t=>t.id),directHold,
+      retry:await turn("a1","agent")};
+    releaseDirectHold("handed_back");
+    for(let i=0;i<5;i++)await tick();
+    const late=await turn("a1","agent");
+    return JSON.stringify({u1,a1,a1retry,u2ack,duringSecondHold,written,late,
+      undelivered:events.filter(e=>e.type==="user_turn_undelivered"),
+      queuedEvents:events.filter(e=>e.type==="user_turn_queued").length});
+  })()`,
+    { setTimeout },
+  );
+  const outcome = JSON.parse(result);
+  assert.equal(outcome.u1.status, "delivered");
+  assert.deepEqual(
+    [outcome.a1.status, outcome.a1.reason],
+    ["queued", "direct_hold"],
+  );
+  assert.equal(outcome.a1retry.status, "queued");
+  assert.equal(outcome.u2ack.status, "delivered");
+  // u2 retook the hold, so a1 is held again: not written, not reported lost.
+  assert.deepEqual(outcome.duringSecondHold.written, ["u1", "u2"]);
+  assert.deepEqual(outcome.duringSecondHold.held, ["a1"]);
+  assert.equal(outcome.duringSecondHold.directHold, true);
+  assert.equal(outcome.duringSecondHold.retry.status, "queued");
+  // After the second hand back it is written exactly once, after both user turns.
+  assert.deepEqual(outcome.written, ["u1", "u2", "a1"]);
+  assert.equal(outcome.late.status, "duplicate");
+  assert.deepEqual(outcome.undelivered, []);
+});
+
+// When the hand back releases held agent turns and every one of them is refused
+// (none reaches the CLI, so no `result` will ever close stdin), stdin is closed
+// as a finished autonomous turn would close it, instead of leaving the session open.
+test("a release whose held agent turns are all refused still closes stdin", async () => {
+  const source = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), "ws-server.mjs"),
+    "utf8",
+  );
+  const slice = (from, to) =>
+    source.slice(source.indexOf(from), source.indexOf(to));
+  const code = [
+    slice(
+      "function clearDirectHoldTimer()",
+      "function onCliTurnResult(message)",
+    ),
+    slice(
+      "async function deliverTurnOnce(id, msg)",
+      "function handleHandBack(msg)",
+    ),
+  ].join("\n");
+  const result = await vm.runInNewContext(
+    `(async()=>{
+    let activeTurn=null,pendingTurns=0,directHold=false,directHoldTimer=null;
+    let exitAnnounced=false,cliStdinOpen=true,controlSerial=Promise.resolve(),turnSeq=0,ended=null;
+    const deliveredTurnIds=new Map(),pendingDeliveries=new Map(),queuedTurnAcks=new Map();
+    const heldAgentTurns=[],startupTurnQueue=[],events=[],written=[],eventBuffer=[];
+    const MAX_TURN_ID_CHARS=128,MAX_TURN_TEXT_CHARS=100000,MAX_STARTUP_TURNS=20,MAX_HELD_AGENT_TURNS=50;
+    const tokenMatches=()=>true,turnAck=(id,status,reason)=>({type:"user_turn_ack",id,status,...(reason?{reason}:{})});
+    const agentTurnText=(text)=>text,markGoalDelivered=()=>{},goalHandoffWritten=()=>false;
+    const nativeInitialization=null,taskPromptReady=Promise.resolve(),effectiveSettings={model:"test"};
+    const cliChild={stdin:{write(line,cb){written.push(line);cb();},end(){ended=true;}}};
+    const applyTurnSettings=async(settings)=>{if(settings&&settings.reject)throw new Error("unsupported_settings");};
+    const stageTurnAttachments=()=>[],userMessageLine=text=>text;
+    const startNativeTurn=()=>(activeTurn={id:"turn-"+(++turnSeq)}),endNativeTurn=()=>{activeTurn=null;};
+    const appendEvent=e=>events.push(e),appendOutput=()=>{},log=()=>{};
+    ${code}
+    const turn=(id,sender,extra={})=>deliverTurnOnce(id,{id,token:"ok",text:id,sender,...extra});
+    const tick=()=>new Promise(r=>setTimeout(r,0));
+    await turn("u1","user");
+    pendingTurns=0; // the user's turn produced its result; the hold keeps stdin open
+    const held=await turn("a1","agent",{settings:{reject:true}});
+    releaseDirectHold("handed_back");
+    for(let i=0;i<5;i++)await tick();
+    return JSON.stringify({held,ended,cliStdinOpen,written,
+      undelivered:events.filter(e=>e.type==="user_turn_undelivered")});
+  })()`,
+    { setTimeout },
+  );
+  const outcome = JSON.parse(result);
+  assert.equal(outcome.held.status, "queued");
+  assert.deepEqual(outcome.written, ["u1"]);
+  assert.equal(outcome.undelivered.length, 1);
+  assert.deepEqual(outcome.undelivered[0].turn_ids, ["a1"]);
+  assert.equal(outcome.ended, true, "stdin is closed");
+  assert.equal(outcome.cliStdinOpen, false);
+});
+
+// A `result` for the user's turn that arrives while a released held agent turn
+// still waits in the delivery chain (an attaching spawn's goal changes settings
+// and waits on a CLI control round-trip) must not close stdin: the released turn
+// is written, and its own result closes stdin. If that waiting turn is refused
+// instead, stdin is still closed once nothing else waits.
+test("a result arriving before a released held agent turn is written keeps stdin open for it", async () => {
+  const source = readFileSync(serverPath, "utf8");
+  const slice = (from, to) =>
+    source.slice(source.indexOf(from), source.indexOf(to));
+  const code = [
+    slice(
+      "function clearDirectHoldTimer()",
+      "function turnAck(id, status, reason)",
+    ),
+    slice(
+      "async function deliverTurnOnce(id, msg)",
+      "function handleHandBack(msg)",
+    ),
+  ].join("\n");
+  const scenario = (refuse) =>
+    vm.runInNewContext(
+      `(async()=>{
+    let activeTurn=null,pendingTurns=0,directHold=false,directHoldTimer=null;
+    let exitAnnounced=false,cliStdinOpen=true,controlSerial=Promise.resolve(),turnSeq=0,ended=null;
+    const deliveredTurnIds=new Map(),pendingDeliveries=new Map(),queuedTurnAcks=new Map();
+    const heldAgentTurns=[],startupTurnQueue=[],events=[],written=[],eventBuffer=[];
+    const MAX_TURN_ID_CHARS=128,MAX_TURN_TEXT_CHARS=100000,MAX_STARTUP_TURNS=20,MAX_HELD_AGENT_TURNS=50,DIRECT_HOLD_IDLE_MS=60000;
+    const tokenMatches=()=>true,turnAck=(id,status,reason)=>({type:"user_turn_ack",id,status,...(reason?{reason}:{})});
+    const agentTurnText=(text)=>text,markGoalDelivered=()=>{},goalHandoffWritten=()=>false;
+    const nativeInitialization=null,taskPromptReady=Promise.resolve(),effectiveSettings={model:"test"};
+    const cliChild={stdin:{write(line,cb){written.push(line);cb();},end(){ended=true;}}};
+    // The spawn's goal changes settings: it waits on the CLI's control response.
+    let answerControl;const control=new Promise(r=>{answerControl=r;});
+    const applyTurnSettings=async(settings)=>{if(!settings)return;await control;if(${refuse})throw new Error("unsupported_settings");};
+    const stageTurnAttachments=()=>[],userMessageLine=text=>text;
+    const startNativeTurn=()=>(activeTurn={id:"turn-"+(++turnSeq)}),endNativeTurn=()=>{activeTurn=null;};
+    const appendEvent=e=>events.push(e),appendOutput=()=>{},log=()=>{};
+    ${code}
+    const turn=(id,sender,extra={})=>deliverTurnOnce(id,{id,token:"ok",text:id,sender,...extra});
+    const tick=()=>new Promise(r=>setTimeout(r,0));
+    await turn("u1","user"); // 1) the user's turn is still running
+    const held=await turn("a1","agent",{settings:{model:"other",effort:"high",speed:"fast"}});
+    releaseDirectHold("handed_back"); // 2) hand back: a1 waits on the CLI control
+    await tick();
+    onCliTurnResult({type:"result"}); // 3) u1's result arrives
+    const afterResult={ended,cliStdinOpen};
+    answerControl();
+    for(let i=0;i<5;i++)await tick();
+    const afterDelivery={ended,cliStdinOpen,written:[...written],pendingTurns};
+    if(pendingTurns>0)onCliTurnResult({type:"result"}); // a1's result
+    return JSON.stringify({held,afterResult,afterDelivery,ended,cliStdinOpen,
+      undelivered:events.filter(e=>e.type==="user_turn_undelivered")});
+  })()`,
+      { setTimeout, clearTimeout },
+    );
+  const delivered = JSON.parse(await scenario(false));
+  assert.deepEqual(
+    [delivered.held.status, delivered.held.reason],
+    ["queued", "direct_hold"],
+  );
+  assert.equal(
+    delivered.afterResult.ended,
+    null,
+    "u1's result must not close stdin while a1 waits",
+  );
+  assert.equal(delivered.afterResult.cliStdinOpen, true);
+  assert.deepEqual(
+    delivered.undelivered,
+    [],
+    "the released turn is not dropped",
+  );
+  assert.deepEqual(delivered.afterDelivery.written, ["u1", "a1"]);
+  assert.equal(delivered.afterDelivery.pendingTurns, 1);
+  assert.equal(delivered.afterDelivery.ended, null);
+  assert.equal(delivered.ended, true, "a1's own result closes stdin");
+  assert.equal(delivered.cliStdinOpen, false);
+
+  const refused = JSON.parse(await scenario(true));
+  assert.equal(refused.afterResult.ended, null);
+  assert.deepEqual(refused.afterDelivery.written, ["u1"]);
+  assert.equal(refused.undelivered.length, 1);
+  assert.deepEqual(refused.undelivered[0].turn_ids, ["a1"]);
+  assert.equal(
+    refused.ended,
+    true,
+    "stdin closes once the refused turn leaves nothing waiting",
+  );
+  assert.equal(refused.cliStdinOpen, false);
+});

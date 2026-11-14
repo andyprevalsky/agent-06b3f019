@@ -80,13 +80,21 @@ export function present({
   lease,
   queuePosition,
   setup,
+  holder,
 }: {
   lease: IPhoneLease;
   queuePosition: number | null;
   setup?: unknown;
+  holder?: { id: string; agentId: string; controlOwner: string } | null;
 }) {
   return {
     ...(setup === undefined ? {} : { setup }),
+    // Queue context for a waiting lease: who holds the phone and where this lease stands.
+    holder:
+      lease.status === 'WAITING' && holder
+        ? { agentId: holder.agentId, leaseId: holder.id, controlOwner: holder.controlOwner }
+        : null,
+    queuePosition: lease.status === 'WAITING' ? queuePosition : null,
     lease: {
       id: lease.id,
       agentId: lease.agentId,

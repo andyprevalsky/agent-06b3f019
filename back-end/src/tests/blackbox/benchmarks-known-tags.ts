@@ -22,6 +22,8 @@ export const KNOWN_TAGS = [
   'cache',
   'DEMO',
   'DAILY',
+  'daily',
+  'LIVE',
   'fleet-concurrency',
   'load-test',
   'mass-agent',
@@ -47,6 +49,7 @@ export const KNOWN_TAGS = [
   'payment',
   'new-user',
   'phone',
+  'phone-daily',
   'ivr',
   'plaid',
   'transactions',
@@ -138,4 +141,6 @@ export const KNOWN_TAGS = [
   'agent-graph',
   // Harness plumbing; matches the predeploy deploy_category of the same name.
   'harness',
+  // Explicit team account sharing (team-daily-* access-boundary benches).
+  'teams',
 ];

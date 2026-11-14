@@ -177,6 +177,7 @@ export interface WireRequest {
   timeoutMs?: number;
   png?: boolean;
   allowNotFound?: boolean;
+  allowEmptySuccess?: boolean;
 }
 /** One bounded HTTP exchange. No retry, redirect, recovery or command replay. */
 export async function exchange(
@@ -212,6 +213,7 @@ export async function exchange(
       response,
       options.png === true && response.ok ? FRAME_LIMIT : JSON_LIMIT
     );
+    if (options.allowEmptySuccess === true && response.ok && bytes.length === 0) return {};
     if (options.png === true && response.ok) {
       if (response.headers.get('content-type')?.split(';')[0].trim() !== 'image/png')
         invalid('invalid_png');

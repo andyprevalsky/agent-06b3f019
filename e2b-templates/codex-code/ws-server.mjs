@@ -857,6 +857,7 @@ const CODEX_RESUME_SESSION_ID = /^[A-Za-z0-9-]{1,128}$/.test(
 // home is /home/user in the E2B template.
 let workDir = projectMode ? PROJECT_WORKDIR : home;
 const REPO_WORKDIR = join(home, "workspace");
+if (projectMode) configureGitIdentity(workDir);
 // A resumed persistent code session already holds the repo (local branches,
 // commits, uncommitted edits): refresh the credentialed remote, never re-clone.
 if (GITHUB_REPO_URL && !projectMode && existsSync(join(REPO_WORKDIR, ".git"))) {
@@ -876,6 +877,7 @@ if (GITHUB_REPO_URL && !projectMode && existsSync(join(REPO_WORKDIR, ".git"))) {
         cwd: workDir,
       });
     }
+    configureGitIdentity(workDir);
     writeFileSync(join(workDir, "AGENTS.md"), CODE_AGENT_SYSTEM_PROMPT);
     log("info", "Resuming existing repository", { workDir });
   } catch (err) {
@@ -898,12 +900,7 @@ if (GITHUB_REPO_URL && !projectMode && existsSync(join(REPO_WORKDIR, ".git"))) {
       stdio: "pipe",
       env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
     });
-    execFileSync("git", ["config", "user.name", "Rose Agent"], {
-      cwd: workDir,
-    });
-    execFileSync("git", ["config", "user.email", "agent@roselabs.ai"], {
-      cwd: workDir,
-    });
+    configureGitIdentity(workDir);
     writeFileSync(join(workDir, "AGENTS.md"), CODE_AGENT_SYSTEM_PROMPT);
     log("info", "Repository cloned", { workDir });
   } catch (err) {
@@ -925,6 +922,33 @@ if (!GITHUB_REPO_URL && !projectMode && CODE_AGENT_SYSTEM_PROMPT) {
 
 // Persistent code sessions work on their own branch (code-agent-persistent-
 // sessions.md §1b); same contract as the Claude Code ws-server.
+// Commits are authored by the GitHub account whose token pushes: the backend
+// passes it as GIT_AUTHOR_* / GIT_COMMITTER_* (codeAgentGitIdentity.ts), which
+// git already prefers over any repo config. Mirror it into the repo so a shell
+// without those envs commits the same way, and so a workspace an older server
+// configured with an identity GitHub cannot link (Vercel then blocks the
+// deploy) is corrected on resume. No envs: leave the repo's own config alone.
+function configureGitIdentity(dir) {
+  const name = process.env.GIT_AUTHOR_NAME;
+  const email = process.env.GIT_AUTHOR_EMAIL;
+  if (!name || !email) return;
+  try {
+    execFileSync("git", ["config", "user.name", name], {
+      cwd: dir,
+      stdio: "pipe",
+    });
+    execFileSync("git", ["config", "user.email", email], {
+      cwd: dir,
+      stdio: "pipe",
+    });
+  } catch (err) {
+    log("warn", "Could not configure the git commit identity", {
+      workDir: dir,
+      error: redactCredentials(err.message),
+    });
+  }
+}
+
 // Credentials never leave the server in text: a URL's userinfo and the token
 // itself are masked in every error that reaches a log, an event or the output.
 function redactCredentials(text) {
@@ -1069,6 +1093,18 @@ appendEvent({
     )?.[1] || null,
 });
 
+function projectStartupPaths() {
+  try {
+    const cfg = JSON.parse(readFileSync(PROJECT_STARTUP_CONFIG, "utf8"));
+    return {
+      reportPath: typeof cfg.reportPath === "string" ? cfg.reportPath : null,
+      logPath: typeof cfg.logPath === "string" ? cfg.logPath : null,
+    };
+  } catch {
+    return { reportPath: null, logPath: null };
+  }
+}
+
 function startupBudgetMs() {
   try {
     const cfg = JSON.parse(readFileSync(PROJECT_STARTUP_CONFIG, "utf8"));
@@ -1111,6 +1147,10 @@ function runProjectStartup() {
   if (!projectMode || !PROJECT_STARTUP || !existsSync(PROJECT_STARTUP)) {
     return Promise.resolve(null);
   }
+  // The report means "this boot's startup finished": a previous boot's report
+  // must not tell the agent (or the preview) that dependencies are ready.
+  const { reportPath } = projectStartupPaths();
+  if (reportPath) rmSync(reportPath, { force: true });
   appendEvent({
     type: "project_startup",
     status: "running",
@@ -1208,6 +1248,13 @@ function runProjectStartup() {
 function projectStartupNote(report) {
   if (!report || report.status === "skipped") return "";
   const name = PROJECT_NAME ? ` for project ${PROJECT_NAME}` : "";
+  if (report.status === "running") {
+    const logRef = report.logPath ? ` Log: ${report.logPath}.` : "";
+    const wait = report.reportPath
+      ? ` Before builds, tests or dev servers, wait until ${report.reportPath} exists, then read its status.`
+      : "";
+    return `Project startup${name} is still running in the background (it may be installing dependencies).${logRef}${wait}\n\n`;
+  }
   const secs = ((report.durationMs || 0) / 1000).toFixed(1);
   const logRef = report.logPath ? ` Log: ${report.logPath}.` : "";
   if (report.status === "ok") {
@@ -1221,7 +1268,30 @@ function projectStartupNote(report) {
   return `Project startup${name} ${what}${logRef}\nLast output:\n${tail}\n\n`;
 }
 
-const projectStartupReport = await runProjectStartup();
+// A slow project startup (a cold dependency install) does not hold the agent:
+// past the grace window it starts, told that startup is still running and
+// where its report appears (same rule as the Claude ws-server, 2026-11-08).
+const PROJECT_STARTUP_GRACE_MS = (() => {
+  const raw = Number.parseInt(
+    process.env.CODE_SESSION_PROJECT_STARTUP_GRACE_MS || "",
+    10,
+  );
+  return Number.isInteger(raw) && raw >= 0 ? raw : 30_000;
+})();
+const projectStartup = runProjectStartup();
+let projectStartupGrace = null;
+const projectStartupReport = await Promise.race([
+  projectStartup,
+  new Promise((resolve) => {
+    projectStartupGrace = setTimeout(() => {
+      const { reportPath, logPath } = projectStartupPaths();
+      log("info", "Project startup still running; starting the agent", {
+        graceMs: PROJECT_STARTUP_GRACE_MS,
+      });
+      resolve({ status: "running", reportPath, logPath });
+    }, PROJECT_STARTUP_GRACE_MS);
+  }),
+]).finally(() => clearTimeout(projectStartupGrace));
 
 const sanitizedGoal = [
   CODE_AGENT_SYSTEM_PROMPT
@@ -1440,6 +1510,17 @@ class CodexAppServer {
           ),
         ),
       };
+    } else if (message.method === "thread/goal/updated") {
+      // The native thread goal's lifecycle: the monitor ends the attachment
+      // only once no goal is active (an active goal starts continuation turns).
+      this.emit({
+        ...common,
+        type: "goal",
+        status: p.goal?.status || null,
+        tokens_used: p.goal?.tokensUsed ?? null,
+      });
+    } else if (message.method === "thread/goal/cleared") {
+      this.emit({ ...common, type: "goal", status: "cleared" });
     } else if (message.method === "thread/settings/updated") {
       const settings = p.threadSettings;
       this.settings = {
@@ -1727,7 +1808,7 @@ class CodexAppServer {
     if (turnStart.outputSchema) this.handoffTurnId = turnId;
     this.ready = true;
   }
-  async initialize(resumeId, goal) {
+  async initialize(resumeId, goal, goalTask = goal) {
     await this.connect();
     // Catalog -> supported defaults -> native ACK -> first turn.
     const model = this.catalogModel(this.settings.model);
@@ -1775,6 +1856,7 @@ class CodexAppServer {
       this.handoffSchema,
     );
     if (this.handoffSchema) this.handoffTurnId = goalTurnId;
+    await this.setGoal(goalTask);
     this.ready = true;
     this.emit({
       type: "session",
@@ -1782,6 +1864,23 @@ class CodexAppServer {
       status: "ready",
       effective_settings: this.settings,
     });
+  }
+  // Every code-agent task is also the thread's native goal (Andy, 2026-11-08):
+  // Codex's app-server has no slash commands, so this is `/goal <task>` there.
+  // Codex continues the thread until the model marks the goal complete.
+  async setGoal(text) {
+    const objective = goalObjective(text);
+    if (!objective) return;
+    try {
+      await this.request("thread/goal/set", {
+        threadId: this.threadId,
+        objective,
+        status: "active",
+      });
+    } catch (error) {
+      log("warn", "Could not set the thread goal", { error: error.message });
+      this.emit({ type: "goal", status: "unavailable", error: error.message });
+    }
   }
   validateSettings(requested = {}) {
     const next = { ...this.settings, ...requested };
@@ -1846,6 +1945,9 @@ class CodexAppServer {
         turn_id = await this.start(input, settings, msg.id);
         delivery_mode = "start";
       }
+      // A new spawn's task delivered to this live session is its new goal.
+      if (msg.sender === "agent" && typeof msg.text === "string")
+        await this.setGoal(msg.text);
       return {
         delivery_mode,
         turn_id,
@@ -1861,6 +1963,42 @@ class CodexAppServer {
 // service.py:handoff_task_text); back-end CODE_AGENT_HANDOFF_PATH names the file.
 const CODE_AGENT_HANDOFF_PATH = "/home/user/.rose/handoff.json";
 const HANDOFF_SCHEMA_MARKER = `\n\nResult JSON Schema for ${CODE_AGENT_HANDOFF_PATH}:\n`;
+// The task's end condition names this file (service.py CODE_AGENT_HANDOFF_SCHEMA_PATH).
+const CODE_AGENT_HANDOFF_SCHEMA_PATH = "/home/user/.rose/handoff.schema.json";
+// codex-rs protocol MAX_THREAD_GOAL_OBJECTIVE_CHARS.
+const GOAL_OBJECTIVE_MAX_CHARS = 4000;
+// A task too long for the objective is written here and named by it.
+const CODE_AGENT_TASK_PATH = "/home/user/.rose/task.md";
+
+/**
+ * The thread-goal objective for a worker task (null: not a code-agent task).
+ * The result schema goes to its file; a task over the cap goes to a task file.
+ */
+function goalObjective(text) {
+  const at =
+    typeof text === "string" ? text.lastIndexOf(HANDOFF_SCHEMA_MARKER) : -1;
+  if (at < 0) return null;
+  const schema = text.slice(at + HANDOFF_SCHEMA_MARKER.length);
+  // `text` is the raw task (the worker's goal, or a new spawn's goal turn,
+  // which the backend heads "Task:"), never the composed first prompt.
+  const head = text.slice(0, at);
+  const task = head.startsWith("Task:\n") ? head.slice("Task:\n".length) : head;
+  try {
+    mkdirSync("/home/user/.rose", { recursive: true });
+    writeFileSync(CODE_AGENT_HANDOFF_SCHEMA_PATH, schema);
+  } catch (error) {
+    log("warn", "Could not write the handoff schema", { error: error.message });
+  }
+  const objective = `Task:\n${task}`;
+  if (objective.length <= GOAL_OBJECTIVE_MAX_CHARS) return objective;
+  const taskPath = CODE_AGENT_TASK_PATH;
+  try {
+    writeFileSync(taskPath, task);
+  } catch (error) {
+    log("warn", "Could not write the task file", { error: error.message });
+  }
+  return `Task: read ${taskPath} and do exactly what it says. Its final paragraph is your end condition.`;
+}
 
 function handoffSchemaFromGoal(goal) {
   const at =
@@ -2113,6 +2251,7 @@ async function runCodexAppServer() {
     nativeCodex.initialization = nativeCodex.initialize(
       CODEX_RESUME_SESSION_ID,
       sanitizedGoal,
+      GOAL.replace(/\0/g, ""),
     );
     await nativeCodex.initialization;
   } catch (error) {

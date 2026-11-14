@@ -1,0 +1,9 @@
+# PR1859 deployment closeout
+
+[PR1859](https://github.com/Rose-Ai-Labs/rose/pull/1859) merged the duplicate-question repair as `4e28dab648a66e70f513979cb11b59e614866424`. A worker cutover had completed an unanswered question with a retry result, causing a second send. The repair retains its original call and reply baseline through continuation.
+
+The exact merged worker deployment and production semantic checks passed. The production workflow-migration matrix retains42PASS/3FAIL out of 45, with fixture cleanupPASS. Retained logs prove the unchanged liveness reconciler sealed a reserved replacement before its eventual start. This additional failure was attributed NOT_INTRODUCED and delivered as a full autonomous repair goal to a separate Bugs devbox. Native FAIL remains visible; it is Delegated/waived for this release. The repair goal is active on its independent Bugs devbox.
+
+Premerge selected gates retain 14 PASS / 1 FAIL. The one direct Tilion DNS failure was also independently attributed and handed to its existing PR1860 owner. All 13 selected smoke tasks passed, and native resource closure was independently verified. CodeRabbit review was skipped for its confirmed spending cap; this release merged unreviewed by that provider. The runtime change received its separate exact-snapshot GROUNDED review.
+
+The manifest and encrypted archive receipts preserve private evidence and local-only source identities. Raw agent transcripts, credentials, browser profiles and inventories are excluded from Git. Recovery uses the existing managed key escrow and the pinned PR1634 recovery adapter. The final native deletion-readiness receipt is authoritative only with the committed manifest and reviewed publication. No branch, machine, protected instruction or Freedom installation is deleted or disabled.

@@ -1,0 +1,46 @@
+{
+  "format": "PR1857-RENDER-RECOVERY-SOURCE-V1",
+  "observed_at": "2026-11-08T22:20:48.481104+00:00",
+  "source": "existing Render service environment API",
+  "service_id": "srv-d3jga77diees73cgrvk0",
+  "method": "GET",
+  "endpoint": "https://api.render.com/v1/services/srv-d3jga77diees73cgrvk0/env-vars",
+  "status_codes": [
+    200,
+    200
+  ],
+  "pages_read": 2,
+  "rows_examined_in_memory": 154,
+  "all_requested_keys_found": true,
+  "pagination_complete_or_requested_keys_found": true,
+  "raw_response_saved": false,
+  "values_printed_or_saved": false,
+  "env_mutations": false,
+  "fields": {
+    "R2_ACCESS_KEY_ID": {
+      "present": true,
+      "matches_current_archive_configuration": true
+    },
+    "R2_ACCOUNT_ID": {
+      "present": true,
+      "matches_current_archive_configuration": true
+    },
+    "R2_BUCKET_TRACE_ARCHIVE": {
+      "present": true,
+      "matches_current_archive_configuration": true
+    },
+    "R2_SECRET_ACCESS_KEY": {
+      "present": true,
+      "matches_current_archive_configuration": true
+    },
+    "TRACE_ARCHIVE_ENCRYPTION_KEY_B64": {
+      "present": true,
+      "matches_current_archive_configuration": true,
+      "decoded_bytes": 32,
+      "decoded_sha256": "e351c7cc5b01303e579fe6d1df833940fdaadf325ca47314414ba10735fc7730",
+      "matches_prior_recovery_fingerprint": true
+    }
+  },
+  "independent_of_new_config_archive": true,
+  "remaining_bootstrap": "An authorized owner must retain access to the Render account/API and its existing service; no account credentials are added to public receipts."
+}

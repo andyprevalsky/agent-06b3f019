@@ -128,6 +128,11 @@ class BenchmarkTask:
     # dataclass so catalog load does not reject the fields.
     deploy_category: Optional[str] = None
     deploy_canary: bool = False
+    # Explicit exclusion from deploy selection; manual benchmark execution remains available.
+    deploy_quarantine: Optional[str] = None
+    # Deploy quarantine marker {since, repair, error, evidence} (long_horizon.validate_task_quarantine):
+    # the task still runs; deploy smoke reports its failure as non-blocking QUARANTINED_FAIL.
+    quarantine: Optional[dict] = None
 
     def __post_init__(self) -> None:
         # The catalog may list several files under "attachment"; keep the
@@ -268,9 +273,19 @@ def _load_tasks() -> List[BenchmarkTask]:
                 raise ValueError(f"Benchmark task '{t.name}' requests fresh browser state without a browser agent")
             if not t.browser_auth_realm:
                 raise ValueError(f"Benchmark task '{t.name}' requests fresh browser state without browser_auth_realm")
+        if is_polar_bench_task(t):
+            # Polar grades the requested outcome, independent of retrieval tools.
+            t.expected_tools = []
+            t.requires_browser_agent = False
+            t.min_tool_counts = None
+            t.expected_tool_counts = None
+            t.forbidden_tools = []
+            t.min_steps = {}
+            if t.start_phase == "browser":
+                t.start_phase = "execute"
         t.min_steps = dict(t.min_steps)
         t.max_steps = dict(t.max_steps)
-        if t.requires_browser_agent and "browser" not in t.min_steps:
+        if t.requires_browser_agent and not is_polar_bench_task(t) and "browser" not in t.min_steps:
             t.min_steps["browser"] = DEFAULT_MIN_STEPS_BY_AGENT_CLASS["browser"]
         if t.environment is None:
             t.environment = _default_environment()

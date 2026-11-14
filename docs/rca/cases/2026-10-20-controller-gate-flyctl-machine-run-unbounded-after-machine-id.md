@@ -8,6 +8,7 @@ classification: our-bug
 problem_class: logical-inconsistency-in-harness-contracts
 first_bad_boundary: scripts/run-cloudbench-controller-gate — `flyctl machine run --detach ... 2>&1 | tee "$RUN_LOG"` ran in the foreground with no deadline, so the gate waited for flyctl to exit even after the Machine ID was in the log
 symptoms:
+  - flyctl secrets list hangs before allocation
   - "Machine started, you can connect via the following private ip"
   - flyctl machine run --detach in futex_wait for ~17 min after printing Machine started
   - gate silent between machine-create.intent.json (00:35:57Z) and create.private.log (00:53:18Z)
@@ -21,7 +22,7 @@ tags:
 sources:
   - fleet run original600-1792456540111088404 shard-00 (gate pid 2560533, flyctl pid 2567131, Machine 8d99dd7be69478)
 repro: CLOUDBENCH_TEST_GATE_SOURCE=<pre-fix gate> python3 scripts/tests/cloudbench-controller-gate-flyctl-bounds.test.py (fails: "gate launch block still blocked after 30s"); the same command on the fixed gate passes
-status: fixed
+status: open
 ---
 
 ## Problem
@@ -113,3 +114,212 @@ no Machine ID appears.
 When a provider CLI call is needed only for a value it prints, start its
 deadline once that value appears, stop only that exact child, and never put a
 deadline before the point where the resource becomes recoverable.
+
+## Recurrence — early app-environment verification lacked a native deadline (2026-10-27)
+
+Polar k2 iteration4 at `56ad8146f3decdca1d3ff427eda9327cac4f52c0`
+blocked before allocation in a read-only canary. The launch owner reported the
+`run-bench-cloud --verify-secrets` child (1456644) waiting for `flyctl secrets
+list -a navi-whisper-lux-bench --json` (1456787), alive for13m41s at22:46UTC
+with an established API socket. Thirty scheduled members had no terminal
+result or allocated Machine at that observation. These are parent/owner
+observations; native socket cause is unknown. No task PASS or infrastructure
+terminal classification is invented from this stall.
+
+The owning boundary is `verify_app_environment`: its native command had no
+deadline. The existing `_with_timeout` function was defined only after the
+`--verify-secrets` early-exit branch. Thus that early verifier could not use it
+without moving the shared definition. This is a recurrence of the same missed
+native-call deadline class, at a different CLI entrypoint; the prior gate repair
+did not cover this verifier.
+
+The repair moves the existing native-child helper before the verifier,
+keeps identical auth/app/JSON arguments and required-secret parsing, and applies
+a default20-second read limit. That default matches this source's existing
+native inventory-read limit. `CLOUDBENCH_APP_ENV_READ_TIMEOUT_SECONDS` can choose
+another positive whole-second limit; zero/all-zero or malformed values are
+refused before native dispatch. Native failure/timeout retains the original
+read exit in the diagnostic. No setup, secret mutation, success fallback,
+canary bypass, retry or task change is added.
+
+Actual CLI fixtures reproduce a hung native read that ignores TERM. Baseline
+fails the read budget and invalid-budget no-dispatch assertions (2FAIL/4PASS,
+7.86s). The first bounded draft additionally exposed cancellation: the existing
+helper handled signals only for guarded mutations, so TERM of the read wrapper
+left an ignoring native child retaining stdout. That draft fails the new actual
+CLI cancellation fixture. The shared handler now covers unguarded reads too,
+retaining exact-child TERM, one-second grace, KILL and wait; guarded native
+receipts are unchanged. The final nine fixtures pass in6.02s, including actual
+CLI success, missing required names, malformed JSON, native exit17, timeout,
+cancellation and invalid/zero/all-zero no-dispatch controls. The PID marker is
+written only after the fake native installs TERM-ignore, so cancellation does
+not accidentally test an ordinary terminating child. No provider is contacted.
+
+Opened references: current Rose native timeout helper and inventory read budget;
+OpenClaw `76ddbf697fc263cc1bf89fe3f4d08d96ed4a43af`
+`src/infra/ocm-update-client.ts:189-195` bounds its JSON metadata CLI read, and
+`src/process/exec.ts:46-90` supplies execution deadline and forced cleanup while
+preserving rejection. Fly CLI `a1cf49a52b36fba66a2bf0907617bd5aadb8a727`
+`internal/command/secrets/list.go:76-88,121-145` performs secret/machine/release
+metadata reads before JSON output. Those facts support bounding the native
+operation; they do not identify the server/socket cause.
+
+Independent reviewer ph74rex3pescaywbxyjn3njr158h3pp9 returned GROUNDED for
+exact full patch SHA256054614a02556e027340f08fd515aa99f7ad8a197b54db23476f24e82a021b7cc.
+Applied verification: 11 owning CLI/helper cases passed in4.73s; campaign
+environment10 in4.068s; staged boot29 in0.328s (6 unavailable-environment skips);
+parallel mutation13 in7.062s; full cloudbench-env shell gate passed. Bash syntax
+and RCA archive validation passed. An extra broad selector produced38 passes
+and one unrelated nested-system-Python missing-httpx failure; the identical
+case passed in0.41s with the existing venv first on PATH, no code change.
+The case remains open for original native API
+causality and unchanged cohort outcome evidence. The original
+campaign's cleanup and next unchanged cohort remain parent/launch-owner work.
+No provider mutation, paid run or deployment was performed by this RCA worker.
+
+### Original I16 receipts received after the source repair
+
+Launch-owner immutable receipts confirm campaign
+`campaign-20261027-221425-742460`, canary fleet
+`20261027-223307-1448491`, under `r002-j0019`/`polar-bu-004`.
+At `2026-10-27T22:46:58.106Z`, native PID1456787 had elapsed13:41,
+parent1456644, stateSl, wait channel`futex_wait_queue`, 12threads and
+59,988KiBRSS. The captured argv is exactly
+`flyctl secrets list -a navi-whisper-lux-bench --json`. The last saved canary
+log reached the read-only app-environment verifier with no subsequent native
+response. No response payload exists to diagnose the remote wait itself.
+The original native observation digest is
+`738e88c056dc3cffaedbeb3b7d2d4adc79f8a83e096c8c315b04922f0d47ffc9`.
+
+The parent-authorized TERM targeted campaign PID742460 with birth7923571 at
+`2026-10-27T22:48:31.701Z`. The terminal summary reports cancelled at
+`2026-10-27T22:52:05.629925+00:00`, with30 cancelled members retaining their
+producer `INFRA_ERROR`/true/143 classification, no new allocations, no lock
+flocks remaining and ownership removed. This is cancellation/cleanup evidence,
+not repaired-task outcome proof. The summary digest is
+`191441eff599b057be2a5630f207f4178d1b63e8713e585ab15dd70224c06132`.
+The four recorded processes were gone by22:52 according to the launch owner.
+The supported cleanup was performed by that owner, not this RCA worker.
+
+## Iteration-5 follow-up — timed-out read incorrectly advised configuration writes
+
+The I16 bound worked in live campaign `campaign-20261027-225938-1983302`,
+source `d6ad54228cec845c3dc5708e08bcced54be65e61`. Copy `r002-j0020`,
+`polar-bu-005` run2, finished `INFRA_ERROR`/true/exit1 at
+`2026-10-27T23:00:56.462199+00:00`, after60.52s total controller time.
+Its exact log records native `read exit=124` and no Machine started. The other
+29 copy logs record successful verification (one includes a second canary
+verification). This proves a bounded failure in one read; it does not prove
+provider overload, authentication failure or a particular network cause.
+There are no individual read timestamps or response bytes. The copy failed
+before its own source-provenance receipt; campaign source is launcher-bound.
+
+The separately reproduced error-contract defect is operational advice:
+`verify_app_environment` printed `--setup` on any native read failure, and the
+fleet wrapper unconditionally recommended `--refresh-secrets` for every
+verifier failure. A timeout does not establish missing configuration, and
+those maintenance operations change shared state. The repair removes
+both blanket hints. The original failure/classification text, native exit,
+20-second default/override, authentication, required names and parser remain.
+A successful parsed response missing `GITHUB_TOKEN` still prints the existing
+explicit refresh advice exactly once. No retry, provider call or cache
+extension is introduced.
+
+The same actual-CLI and extracted production fleet-block tests fail5cases
+before the repair and pass all13afterward, including missing-name/success
+controls, native timeout/error and cancellation. Codex
+`14ff9c3a43ebf9bf543cf5f7c45cff2bfea2e512`,
+`codex-rs/login/src/auth/storage.rs:191-211` treats NotFound as absent while
+propagating other read errors, and `gateway_auth_storage.rs:64-68` preserves a
+load error separately from an absent credential. These provide the closest
+same-domain distinction. OpenClaw's capability-read updater sometimes suggests
+upgrading on generic errors; that contrary pattern was examined and is not
+used as authority for overwriting potentially valid secrets.
+
+Bounded retries and coalescing were considered but not inferred as repairs.
+The October19 operator case has an existing110-second admission budget around
+3attempts; this read has a20-second bound and no captured evidence a retry
+would succeed. The existing campaign env proof requires a live strict-cohort
+barrier plus inventory authority. Extending that proof to an ordinary fallback
+without a bound identity would change its trust scope. The underlying provider
+observation gap therefore remains open. No task outcome was repaired or
+reclassified by this diagnostic change.
+
+Independent review by ph74rex3pescaywbxyjn3njr158h3pp9 returned GROUNDED
+for exact patch SHA25666d8bfd07ce846e865e2a8fe24074b7c9ddcff60aebea0be91a9b4092429f28b.
+Applied gates passed:15 owning verifier/helper cases in4.88s; original600
+status parser13 cases in0.595s; campaign environment10 cases in4.249s; full
+cloudbench-env shell gate; both Bash syntax checks and RCA archive validation. No production
+change, deployment, paid run or live-campaign mutation was performed.
+
+## R125 / It29 recurrence — bounded read failure, original native phase OPEN
+
+On source `691b9059a9ca3b41552be9679d712b50edcf24d5`, the It29 N2
+preflight for fleet `20261030-211322-98463` and owner
+`22096d8b2d4b49b191af4dc79f2269b0` failed with the same
+`Could not read app secrets ... (read exit=124)` boundary. The original
+custody archive SHA256 is
+`4cdfdd0a9c41a89aa19288ce2cb5dc33f9ddf71066050e008d3ec9a90afc13e8`.
+Its campaign summary has20 cancelled jobs and peak concurrency0; the canary
+controller exited1 and its owned-clones ledger is empty. No task Machine
+started. This remains an original pre-admission failure, not repaired-task
+credit.
+
+### Diagnosis and contrary evidence
+
+Two prior-case searches and the earlier Solution/feedback were read before
+forming a new hypothesis. The exact verifier invokes the existing bounded
+native read before parsing required names. The default20-second bound and
+failure refusal are intact; no faulty name parsing, ignored timeout or
+secret-gate bypass was demonstrated. The earlier standalone verification
+succeeded, but the failing invocation has no captured native PID/executable
+binding, effective credential fingerprint, request phase or goroutine stack.
+Separate relay/inventory phase logs do not fill that gap. Provider load,
+authentication failure, transport cause and specific metadata stalls remain
+unproved.
+
+The subsequently inspected installed binary SHA256
+`5041b9a563fff170fda4238b47048e9a5e714fc7ed2304668fd44bcdcd3bef83`
+embeds flyctl `v0.4.115`, revision
+`a1cf49a52b36fba66a2bf0907617bd5aadb8a727`. This identifies the later binary,
+not the missing historical child. Personally opened pinned primary source
+`internal/command/secrets/list.go` obtains secret names and then Machines and
+release metadata before emitting JSON. This is a possible unnecessary
+consumer dependency, not evidence that the original124 stalled there.
+`internal/appsecrets/secrets.go` and `minvers.go` also preserve a per-app minimum
+version when listing secrets; a future names-only replacement must not discard
+that consistency/authentication contract.
+
+### One diagnostic, no runtime repair
+
+The coordinator separately authorized one ordinary canonical
+`--verify-secrets` invocation with private `GOTRACEBACK=all` observation.
+The reviewed optional observer would send one exact-child pidfd SIGQUIT only
+near native age17seconds after identity/private-stderr checks. Actual source
+remained691b; the command instead exited0 in2.24493seconds. The observer
+captured the later child's exact argv, birth and binary identity, then exited1
+with `NATIVE_EXITED_OR_IDENTITY_LOST_NO_SIGNAL`, zero signals and no stack.
+Its prepared-mode `interrupted_diagnostic` flag does not mean this successful
+invocation was actually interrupted. No signal was sent to the native child,
+parent or process group.
+
+The diagnostic archive SHA256 is
+`f1da018fc38828d16e687ba952ae9864b8f4bfc5662504a258026af4db0077d8`;
+all17 member hashes were independently checked. The reviewed observer SHA256
+is `d04f6d00356053d4de9737813d6ae1e75850a8c897b1d6aa329854694a2ceaea`.
+Its eight local dummy controls covered exact one-shot signalling, parent
+survival, early success and identity/privacy/deadline refusal; they were not
+provider or real-Go stack tests. Both independent reviews confirmed the
+actual later success, zero signals and missing original-phase evidence.
+Before/after supplied seven-closed/five-held custody differs only by observation
+time; original grades and resources remain unchanged.
+
+No runtime patch, timeout increase, retry, cache fallback or configuration
+write was justified by this recurrence. R125 stays OPEN for the original
+native/client phase. A fresh independent qualification may proceed through all
+unchanged source/environment/capacity/retained-owner/canary gates if chosen;
+this diagnostic is neither that qualification nor GO authority. Its success
+must not relabel the original failure or discharge the five retained owners.
+A future failed secret gate still refuses admission. The reusable lesson is
+to separate a bounded failure, a later successful observation and a proven
+repair instead of manufacturing a code change to close an observability gap.

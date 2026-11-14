@@ -1,0 +1,389 @@
+{
+  "format": "FINITE_IGNORED_SCOPE_DISPOSITION_CANDIDATES_V1",
+  "status": "26_BOUNDED_SCOPE_EVIDENCE_CANDIDATES_NOT_DELETION_READY",
+  "created_at": "2026-11-09T20:41:21.798211+00:00",
+  "original_candidate_sha256": "6c5ff2d60a39e7bce76317a8b0729a8d33a99b2ff25db3a1e43d42981f78642c",
+  "scopes": [
+    {
+      "ignored_scope": ".cloud-env",
+      "bounded_observed_counts": {
+        "regular": 1,
+        "existing_exact_authenticated_carrier": 1
+      },
+      "regular_byte_totals": {
+        "existing_exact_authenticated_carrier": 351
+      },
+      "candidate_disposition_after_tail_verified": "archived bounded observed records; root finalizes native operational manifest after later finite nonsecret receipt/Git closure",
+      "proof_basis": "Every actual path/type/SHA/fullstat/carrier or exclusive93copy join in encrypted whole-scope inventory/exclusions/delta/metadata; no folder-only waiver",
+      "managed_byte_policy": "PRIVATE forensic only; never overlay/reuse/rotate/unlock; protected originals untouched",
+      "future_output_limit": "Only the actual frozen per-path observed cut; later new/changed unknown files not claimed"
+    },
+    {
+      "ignored_scope": ".context/",
+      "bounded_observed_counts": {
+        "regular": 772122,
+        "existing_exact_authenticated_carrier": 772029,
+        "symlink": 5,
+        "tail_new_changed": 93
+      },
+      "regular_byte_totals": {
+        "existing_exact_authenticated_carrier": 78117228063,
+        "tail_new_changed": 63137011
+      },
+      "candidate_disposition_after_tail_verified": "archived bounded observed records; root finalizes native operational manifest after later finite nonsecret receipt/Git closure",
+      "proof_basis": "Every actual path/type/SHA/fullstat/carrier or exclusive93copy join in encrypted whole-scope inventory/exclusions/delta/metadata; no folder-only waiver",
+      "managed_byte_policy": "No deletion/provider/database/financial authorization",
+      "future_output_limit": "Main/tail archive-operation future receipts require finite reviewed Git/GitHub/visual closure; no blanket future .context archived"
+    },
+    {
+      "ignored_scope": ".devbox/",
+      "bounded_observed_counts": {
+        "regular": 10,
+        "existing_exact_authenticated_carrier": 10
+      },
+      "regular_byte_totals": {
+        "existing_exact_authenticated_carrier": 21346
+      },
+      "candidate_disposition_after_tail_verified": "archived bounded observed records; root finalizes native operational manifest after later finite nonsecret receipt/Git closure",
+      "proof_basis": "Every actual path/type/SHA/fullstat/carrier or exclusive93copy join in encrypted whole-scope inventory/exclusions/delta/metadata; no folder-only waiver",
+      "managed_byte_policy": "PRIVATE forensic only; never overlay/reuse/rotate/unlock; protected originals untouched",
+      "future_output_limit": "Only the actual frozen per-path observed cut; later new/changed unknown files not claimed"
+    },
+    {
+      "ignored_scope": ".env.npm",
+      "bounded_observed_counts": {
+        "regular": 1,
+        "existing_exact_authenticated_carrier": 1
+      },
+      "regular_byte_totals": {
+        "existing_exact_authenticated_carrier": 170
+      },
+      "candidate_disposition_after_tail_verified": "archived bounded observed records; root finalizes native operational manifest after later finite nonsecret receipt/Git closure",
+      "proof_basis": "Every actual path/type/SHA/fullstat/carrier or exclusive93copy join in encrypted whole-scope inventory/exclusions/delta/metadata; no folder-only waiver",
+      "managed_byte_policy": "PRIVATE forensic only; never overlay/reuse/rotate/unlock; protected originals untouched",
+      "future_output_limit": "Only the actual frozen per-path observed cut; later new/changed unknown files not claimed"
+    },
+    {
+      "ignored_scope": ".llm-dumps/",
+      "bounded_observed_counts": {
+        "regular": 1298,
+        "existing_exact_authenticated_carrier": 1298
+      },
+      "regular_byte_totals": {
+        "existing_exact_authenticated_carrier": 124339688
+      },
+      "candidate_disposition_after_tail_verified": "archived bounded observed records; root finalizes native operational manifest after later finite nonsecret receipt/Git closure",
+      "proof_basis": "Every actual path/type/SHA/fullstat/carrier or exclusive93copy join in encrypted whole-scope inventory/exclusions/delta/metadata; no folder-only waiver",
+      "managed_byte_policy": "No deletion/provider/database/financial authorization",
+      "future_output_limit": "Only the actual frozen per-path observed cut; later new/changed unknown files not claimed"
+    },
+    {
+      "ignored_scope": "agents/.context/",
+      "bounded_observed_counts": {
+        "regular": 22,
+        "existing_exact_authenticated_carrier": 22
+      },
+      "regular_byte_totals": {
+        "existing_exact_authenticated_carrier": 10776
+      },
+      "candidate_disposition_after_tail_verified": "archived bounded observed records; root finalizes native operational manifest after later finite nonsecret receipt/Git closure",
+      "proof_basis": "Every actual path/type/SHA/fullstat/carrier or exclusive93copy join in encrypted whole-scope inventory/exclusions/delta/metadata; no folder-only waiver",
+      "managed_byte_policy": "No deletion/provider/database/financial authorization",
+      "future_output_limit": "Only the actual frozen per-path observed cut; later new/changed unknown files not claimed"
+    },
+    {
+      "ignored_scope": "agents/.env",
+      "bounded_observed_counts": {
+        "regular": 1,
+        "existing_exact_authenticated_carrier": 1
+      },
+      "regular_byte_totals": {
+        "existing_exact_authenticated_carrier": 13856
+      },
+      "candidate_disposition_after_tail_verified": "archived bounded observed records; root finalizes native operational manifest after later finite nonsecret receipt/Git closure",
+      "proof_basis": "Every actual path/type/SHA/fullstat/carrier or exclusive93copy join in encrypted whole-scope inventory/exclusions/delta/metadata; no folder-only waiver",
+      "managed_byte_policy": "PRIVATE forensic only; never overlay/reuse/rotate/unlock; protected originals untouched",
+      "future_output_limit": "Only the actual frozen per-path observed cut; later new/changed unknown files not claimed"
+    },
+    {
+      "ignored_scope": "agents/.env.benchmark-temporal",
+      "bounded_observed_counts": {
+        "regular": 1,
+        "existing_exact_authenticated_carrier": 1
+      },
+      "regular_byte_totals": {
+        "existing_exact_authenticated_carrier": 695
+      },
+      "candidate_disposition_after_tail_verified": "archived bounded observed records; root finalizes native operational manifest after later finite nonsecret receipt/Git closure",
+      "proof_basis": "Every actual path/type/SHA/fullstat/carrier or exclusive93copy join in encrypted whole-scope inventory/exclusions/delta/metadata; no folder-only waiver",
+      "managed_byte_policy": "PRIVATE forensic only; never overlay/reuse/rotate/unlock; protected originals untouched",
+      "future_output_limit": "Only the actual frozen per-path observed cut; later new/changed unknown files not claimed"
+    },
+    {
+      "ignored_scope": "agents/.env.cloudbench-upsert.lock",
+      "bounded_observed_counts": {
+        "regular": 1,
+        "existing_exact_authenticated_carrier": 1
+      },
+      "regular_byte_totals": {
+        "existing_exact_authenticated_carrier": 0
+      },
+      "candidate_disposition_after_tail_verified": "archived bounded observed records; root finalizes native operational manifest after later finite nonsecret receipt/Git closure",
+      "proof_basis": "Every actual path/type/SHA/fullstat/carrier or exclusive93copy join in encrypted whole-scope inventory/exclusions/delta/metadata; no folder-only waiver",
+      "managed_byte_policy": "PRIVATE forensic only; never overlay/reuse/rotate/unlock; protected originals untouched",
+      "future_output_limit": "Only the actual frozen per-path observed cut; later new/changed unknown files not claimed"
+    },
+    {
+      "ignored_scope": "agents/navi-worker-log.txt",
+      "bounded_observed_counts": {
+        "regular": 1,
+        "existing_exact_authenticated_carrier": 1
+      },
+      "regular_byte_totals": {
+        "existing_exact_authenticated_carrier": 3672
+      },
+      "candidate_disposition_after_tail_verified": "archived bounded observed records; root finalizes native operational manifest after later finite nonsecret receipt/Git closure",
+      "proof_basis": "Every actual path/type/SHA/fullstat/carrier or exclusive93copy join in encrypted whole-scope inventory/exclusions/delta/metadata; no folder-only waiver",
+      "managed_byte_policy": "No deletion/provider/database/financial authorization",
+      "future_output_limit": "Only the actual frozen per-path observed cut; later new/changed unknown files not claimed"
+    },
+    {
+      "ignored_scope": "back-end/.context/",
+      "bounded_observed_counts": {
+        "regular": 48,
+        "existing_exact_authenticated_carrier": 48
+      },
+      "regular_byte_totals": {
+        "existing_exact_authenticated_carrier": 821456
+      },
+      "candidate_disposition_after_tail_verified": "archived bounded observed records; root finalizes native operational manifest after later finite nonsecret receipt/Git closure",
+      "proof_basis": "Every actual path/type/SHA/fullstat/carrier or exclusive93copy join in encrypted whole-scope inventory/exclusions/delta/metadata; no folder-only waiver",
+      "managed_byte_policy": "No deletion/provider/database/financial authorization",
+      "future_output_limit": "Only the actual frozen per-path observed cut; later new/changed unknown files not claimed"
+    },
+    {
+      "ignored_scope": "back-end/.env",
+      "bounded_observed_counts": {
+        "regular": 1,
+        "existing_exact_authenticated_carrier": 1
+      },
+      "regular_byte_totals": {
+        "existing_exact_authenticated_carrier": 20697
+      },
+      "candidate_disposition_after_tail_verified": "archived bounded observed records; root finalizes native operational manifest after later finite nonsecret receipt/Git closure",
+      "proof_basis": "Every actual path/type/SHA/fullstat/carrier or exclusive93copy join in encrypted whole-scope inventory/exclusions/delta/metadata; no folder-only waiver",
+      "managed_byte_policy": "PRIVATE forensic only; never overlay/reuse/rotate/unlock; protected originals untouched",
+      "future_output_limit": "Only the actual frozen per-path observed cut; later new/changed unknown files not claimed"
+    },
+    {
+      "ignored_scope": "back-end/.env.cloudbench-upsert.lock",
+      "bounded_observed_counts": {
+        "regular": 1,
+        "existing_exact_authenticated_carrier": 1
+      },
+      "regular_byte_totals": {
+        "existing_exact_authenticated_carrier": 0
+      },
+      "candidate_disposition_after_tail_verified": "archived bounded observed records; root finalizes native operational manifest after later finite nonsecret receipt/Git closure",
+      "proof_basis": "Every actual path/type/SHA/fullstat/carrier or exclusive93copy join in encrypted whole-scope inventory/exclusions/delta/metadata; no folder-only waiver",
+      "managed_byte_policy": "PRIVATE forensic only; never overlay/reuse/rotate/unlock; protected originals untouched",
+      "future_output_limit": "Only the actual frozen per-path observed cut; later new/changed unknown files not claimed"
+    },
+    {
+      "ignored_scope": "back-end/backend-logs.log",
+      "bounded_observed_counts": {
+        "regular": 1,
+        "existing_exact_authenticated_carrier": 1
+      },
+      "regular_byte_totals": {
+        "existing_exact_authenticated_carrier": 90996
+      },
+      "candidate_disposition_after_tail_verified": "archived bounded observed records; root finalizes native operational manifest after later finite nonsecret receipt/Git closure",
+      "proof_basis": "Every actual path/type/SHA/fullstat/carrier or exclusive93copy join in encrypted whole-scope inventory/exclusions/delta/metadata; no folder-only waiver",
+      "managed_byte_policy": "No deletion/provider/database/financial authorization",
+      "future_output_limit": "Only the actual frozen per-path observed cut; later new/changed unknown files not claimed"
+    },
+    {
+      "ignored_scope": "back-end/coverage/",
+      "bounded_observed_counts": {
+        "regular": 648,
+        "existing_exact_authenticated_carrier": 648
+      },
+      "regular_byte_totals": {
+        "existing_exact_authenticated_carrier": 47329620
+      },
+      "candidate_disposition_after_tail_verified": "archived bounded observed records; root finalizes native operational manifest after later finite nonsecret receipt/Git closure",
+      "proof_basis": "Every actual path/type/SHA/fullstat/carrier or exclusive93copy join in encrypted whole-scope inventory/exclusions/delta/metadata; no folder-only waiver",
+      "managed_byte_policy": "No deletion/provider/database/financial authorization",
+      "future_output_limit": "Only the actual frozen per-path observed cut; later new/changed unknown files not claimed"
+    },
+    {
+      "ignored_scope": "codex/",
+      "bounded_observed_counts": {
+        "regular": 9063,
+        "existing_exact_authenticated_carrier": 9063,
+        "symlink": 1
+      },
+      "regular_byte_totals": {
+        "existing_exact_authenticated_carrier": 89764409
+      },
+      "candidate_disposition_after_tail_verified": "archived bounded observed records; root finalizes native operational manifest after later finite nonsecret receipt/Git closure",
+      "proof_basis": "Every actual path/type/SHA/fullstat/carrier or exclusive93copy join in encrypted whole-scope inventory/exclusions/delta/metadata; no folder-only waiver",
+      "managed_byte_policy": "No deletion/provider/database/financial authorization",
+      "future_output_limit": "Only the actual frozen per-path observed cut; later new/changed unknown files not claimed"
+    },
+    {
+      "ignored_scope": "front-end/.env",
+      "bounded_observed_counts": {
+        "regular": 1,
+        "existing_exact_authenticated_carrier": 1
+      },
+      "regular_byte_totals": {
+        "existing_exact_authenticated_carrier": 556
+      },
+      "candidate_disposition_after_tail_verified": "archived bounded observed records; root finalizes native operational manifest after later finite nonsecret receipt/Git closure",
+      "proof_basis": "Every actual path/type/SHA/fullstat/carrier or exclusive93copy join in encrypted whole-scope inventory/exclusions/delta/metadata; no folder-only waiver",
+      "managed_byte_policy": "PRIVATE forensic only; never overlay/reuse/rotate/unlock; protected originals untouched",
+      "future_output_limit": "Only the actual frozen per-path observed cut; later new/changed unknown files not claimed"
+    },
+    {
+      "ignored_scope": "front-end/frontend-logs.log",
+      "bounded_observed_counts": {
+        "regular": 1,
+        "existing_exact_authenticated_carrier": 1
+      },
+      "regular_byte_totals": {
+        "existing_exact_authenticated_carrier": 22825
+      },
+      "candidate_disposition_after_tail_verified": "archived bounded observed records; root finalizes native operational manifest after later finite nonsecret receipt/Git closure",
+      "proof_basis": "Every actual path/type/SHA/fullstat/carrier or exclusive93copy join in encrypted whole-scope inventory/exclusions/delta/metadata; no folder-only waiver",
+      "managed_byte_policy": "No deletion/provider/database/financial authorization",
+      "future_output_limit": "Only the actual frozen per-path observed cut; later new/changed unknown files not claimed"
+    },
+    {
+      "ignored_scope": "hermes-agent/",
+      "bounded_observed_counts": {
+        "regular": 17948,
+        "existing_exact_authenticated_carrier": 17948
+      },
+      "regular_byte_totals": {
+        "existing_exact_authenticated_carrier": 210527796
+      },
+      "candidate_disposition_after_tail_verified": "archived bounded observed records; root finalizes native operational manifest after later finite nonsecret receipt/Git closure",
+      "proof_basis": "Every actual path/type/SHA/fullstat/carrier or exclusive93copy join in encrypted whole-scope inventory/exclusions/delta/metadata; no folder-only waiver",
+      "managed_byte_policy": "No deletion/provider/database/financial authorization",
+      "future_output_limit": "Only the actual frozen per-path observed cut; later new/changed unknown files not claimed"
+    },
+    {
+      "ignored_scope": "hub-poller-logs.log",
+      "bounded_observed_counts": {
+        "regular": 1,
+        "existing_exact_authenticated_carrier": 1
+      },
+      "regular_byte_totals": {
+        "existing_exact_authenticated_carrier": 100
+      },
+      "candidate_disposition_after_tail_verified": "archived bounded observed records; root finalizes native operational manifest after later finite nonsecret receipt/Git closure",
+      "proof_basis": "Every actual path/type/SHA/fullstat/carrier or exclusive93copy join in encrypted whole-scope inventory/exclusions/delta/metadata; no folder-only waiver",
+      "managed_byte_policy": "No deletion/provider/database/financial authorization",
+      "future_output_limit": "Only the actual frozen per-path observed cut; later new/changed unknown files not claimed"
+    },
+    {
+      "ignored_scope": "kimi-code/",
+      "bounded_observed_counts": {
+        "regular": 4408,
+        "existing_exact_authenticated_carrier": 4408,
+        "symlink": 1
+      },
+      "regular_byte_totals": {
+        "existing_exact_authenticated_carrier": 62383314
+      },
+      "candidate_disposition_after_tail_verified": "archived bounded observed records; root finalizes native operational manifest after later finite nonsecret receipt/Git closure",
+      "proof_basis": "Every actual path/type/SHA/fullstat/carrier or exclusive93copy join in encrypted whole-scope inventory/exclusions/delta/metadata; no folder-only waiver",
+      "managed_byte_policy": "No deletion/provider/database/financial authorization",
+      "future_output_limit": "Only the actual frozen per-path observed cut; later new/changed unknown files not claimed"
+    },
+    {
+      "ignored_scope": "mac-app/.env",
+      "bounded_observed_counts": {
+        "regular": 1,
+        "existing_exact_authenticated_carrier": 1
+      },
+      "regular_byte_totals": {
+        "existing_exact_authenticated_carrier": 840
+      },
+      "candidate_disposition_after_tail_verified": "archived bounded observed records; root finalizes native operational manifest after later finite nonsecret receipt/Git closure",
+      "proof_basis": "Every actual path/type/SHA/fullstat/carrier or exclusive93copy join in encrypted whole-scope inventory/exclusions/delta/metadata; no folder-only waiver",
+      "managed_byte_policy": "PRIVATE forensic only; never overlay/reuse/rotate/unlock; protected originals untouched",
+      "future_output_limit": "Only the actual frozen per-path observed cut; later new/changed unknown files not claimed"
+    },
+    {
+      "ignored_scope": "node_modules/",
+      "bounded_observed_counts": {
+        "symlink": 104,
+        "regular": 151481,
+        "existing_exact_authenticated_carrier": 151481
+      },
+      "regular_byte_totals": {
+        "existing_exact_authenticated_carrier": 1432588177
+      },
+      "candidate_disposition_after_tail_verified": "archived bounded observed records; root finalizes native operational manifest after later finite nonsecret receipt/Git closure",
+      "proof_basis": "Every actual path/type/SHA/fullstat/carrier or exclusive93copy join in encrypted whole-scope inventory/exclusions/delta/metadata; no folder-only waiver",
+      "managed_byte_policy": "No deletion/provider/database/financial authorization",
+      "future_output_limit": "Only the actual frozen per-path observed cut; later new/changed unknown files not claimed"
+    },
+    {
+      "ignored_scope": "openclaw/",
+      "bounded_observed_counts": {
+        "regular": 52544,
+        "existing_exact_authenticated_carrier": 52544,
+        "symlink": 6
+      },
+      "regular_byte_totals": {
+        "existing_exact_authenticated_carrier": 648954285
+      },
+      "candidate_disposition_after_tail_verified": "archived bounded observed records; root finalizes native operational manifest after later finite nonsecret receipt/Git closure",
+      "proof_basis": "Every actual path/type/SHA/fullstat/carrier or exclusive93copy join in encrypted whole-scope inventory/exclusions/delta/metadata; no folder-only waiver",
+      "managed_byte_policy": "No deletion/provider/database/financial authorization",
+      "future_output_limit": "Only the actual frozen per-path observed cut; later new/changed unknown files not claimed"
+    },
+    {
+      "ignored_scope": "prime-agent/",
+      "bounded_observed_counts": {
+        "regular": 1484,
+        "existing_exact_authenticated_carrier": 1484
+      },
+      "regular_byte_totals": {
+        "existing_exact_authenticated_carrier": 28336455
+      },
+      "candidate_disposition_after_tail_verified": "archived bounded observed records; root finalizes native operational manifest after later finite nonsecret receipt/Git closure",
+      "proof_basis": "Every actual path/type/SHA/fullstat/carrier or exclusive93copy join in encrypted whole-scope inventory/exclusions/delta/metadata; no folder-only waiver",
+      "managed_byte_policy": "No deletion/provider/database/financial authorization",
+      "future_output_limit": "Only the actual frozen per-path observed cut; later new/changed unknown files not claimed"
+    },
+    {
+      "ignored_scope": "research/.env",
+      "bounded_observed_counts": {
+        "regular": 1,
+        "existing_exact_authenticated_carrier": 1
+      },
+      "regular_byte_totals": {
+        "existing_exact_authenticated_carrier": 1632
+      },
+      "candidate_disposition_after_tail_verified": "archived bounded observed records; root finalizes native operational manifest after later finite nonsecret receipt/Git closure",
+      "proof_basis": "Every actual path/type/SHA/fullstat/carrier or exclusive93copy join in encrypted whole-scope inventory/exclusions/delta/metadata; no folder-only waiver",
+      "managed_byte_policy": "PRIVATE forensic only; never overlay/reuse/rotate/unlock; protected originals untouched",
+      "future_output_limit": "Only the actual frozen per-path observed cut; later new/changed unknown files not claimed"
+    }
+  ],
+  "scope_count": 26,
+  "main_verified_archive_key": "devbox-closeouts/report-bug-fetch-944bdbf4/final-closeout-de4612dc859c4accaaa535294722cbfd.enc",
+  "tail_archive_key": "devbox-closeouts/report-bug-fetch-944bdbf4/receipt-tail-9b82e8e4993c411c9ca216fb7f45ab53.enc",
+  "per_path_private_evidence": "Tail authenticated inventory.jsonl.gz/exclusions.jsonl.gz/delta-files.jsonl.gz/metadata-only.jsonl.gz/atime-only-differences.jsonl.gz/tombstones.jsonl.gz and original main logical/carrier/restore maps",
+  "no_full_million_path_public_list": true,
+  "empty_operational_topology": "Eight roots, five file-bearing/three empty top roots and59empty nested dirs, exact file joins; directory stats actual postcapture metadata retained, never backdated",
+  "original_native_clock_limits": "Bounded root prefix plus actual closeout suffix; growing future messages outside cuts",
+  "source_preservation": "Runtime code/native results keep original source; frozen public records/review filters and later PR/merge/card become root-owned reviewed remote Git/visual closure",
+  "remaining": "Native deletion-check CLIexit0+committedclean readiness, reviewed records merge/latestpointer/final card are separate root-owned actual receipts; this summary is neither READY nor a deletion grant",
+  "financial_duties": "Two historical sandbox4396c each plus historicalLIVE100c currentUNVERIFIED/no credit/no remint"
+}

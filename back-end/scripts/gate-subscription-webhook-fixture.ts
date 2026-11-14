@@ -11,6 +11,7 @@ import dotenv from 'dotenv';
 import {
   ensureBenchmarkOrgCardholder,
   resolveBenchmarkCardholderId,
+  waitOutBenchmarkOrgBackpressure,
 } from '../src/providers/agentcard/benchmark-float';
 import { seedOrgManagedAgentCardForUser } from './gate-benchmark-fixture';
 
@@ -53,8 +54,11 @@ async function main(): Promise<void> {
 
   try {
     const stripeCustomerId = await createSandboxBillingCustomer(stripe, userId);
-    const cardholderId = await resolveBenchmarkCardholderId();
-    await ensureBenchmarkOrgCardholder(cardholderId);
+    const cardholderId = await waitOutBenchmarkOrgBackpressure(async () => {
+      const resolvedId = await resolveBenchmarkCardholderId();
+      await ensureBenchmarkOrgCardholder(resolvedId);
+      return resolvedId;
+    });
     await seedOrgManagedAgentCardForUser(userId, cardholderId, prisma);
 
     console.log(

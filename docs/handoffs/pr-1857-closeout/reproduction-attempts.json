@@ -1,0 +1,76 @@
+{
+  "recorded_at": "2026-11-08T22:54:57.525893+00:00",
+  "note": "Chronological native logs are authoritative; early factory repro_attempt labels counted selected primary runs and omitted intermediary corrections. They remain unmodified. This manifest enumerates every actual command result.",
+  "attempts": [
+    {
+      "attempt": 1,
+      "log": ".context/rca-784d/repro-before.log",
+      "failed": true,
+      "result_line": "Tests  1 failed | 2 passed (3)",
+      "timing_line": "Duration  10.16s (transform 3.27s, setup 667ms, import 5.36s, tests 3.27s, environment 522ms)"
+    },
+    {
+      "attempt": 2,
+      "log": ".context/rca-784d/repro-after.log",
+      "failed": true,
+      "result_line": "Tests  1 failed | 2 passed (3)",
+      "timing_line": "Duration  8.12s (transform 2.96s, setup 400ms, import 4.17s, tests 2.86s, environment 505ms)"
+    },
+    {
+      "attempt": 3,
+      "log": ".context/rca-784d/repro-before-final.log",
+      "failed": true,
+      "result_line": "Tests  1 failed | 2 passed (3)",
+      "timing_line": "Duration  8.13s (transform 2.68s, setup 396ms, import 3.84s, tests 3.26s, environment 481ms)"
+    },
+    {
+      "attempt": 4,
+      "log": ".context/rca-784d/repro-before-complete.log",
+      "failed": true,
+      "result_line": "Tests  1 failed | 6 passed (7)",
+      "timing_line": "Duration  11.98s (transform 2.88s, setup 342ms, import 4.07s, tests 6.91s, environment 471ms)"
+    },
+    {
+      "attempt": 5,
+      "log": ".context/rca-784d/repro-after-complete.log",
+      "failed": false,
+      "result_line": "Tests  7 passed (7)",
+      "timing_line": "Duration  11.68s (transform 2.84s, setup 331ms, import 4.06s, tests 6.57s, environment 542ms)"
+    },
+    {
+      "attempt": 6,
+      "log": ".context/rca-784d/repro-green-2.log",
+      "failed": false,
+      "result_line": "Tests  7 passed (7)",
+      "timing_line": "Duration  12.55s (transform 3.30s, setup 607ms, import 4.48s, tests 6.48s, environment 736ms)"
+    },
+    {
+      "attempt": 7,
+      "log": ".context/rca-784d/repro-green-3.log",
+      "failed": false,
+      "result_line": "Tests  7 passed (7)",
+      "timing_line": "Duration  11.50s (transform 2.75s, setup 335ms, import 3.95s, tests 6.51s, environment 501ms)"
+    },
+    {
+      "attempt": 8,
+      "log": ".context/rca-784d/repro-green-4.log",
+      "failed": false,
+      "result_line": "Tests  7 passed (7)",
+      "timing_line": "Duration  11.37s (transform 2.80s, setup 313ms, import 3.90s, tests 6.50s, environment 513ms)"
+    },
+    {
+      "attempt": 9,
+      "log": ".context/rca-784d/repro-green-5.log",
+      "failed": false,
+      "result_line": "Tests  7 passed (7)",
+      "timing_line": "Duration  11.10s (transform 2.52s, setup 349ms, import 3.57s, tests 6.52s, environment 523ms)"
+    },
+    {
+      "attempt": 10,
+      "log": ".context/rca-784d/repro-green-6.log",
+      "failed": false,
+      "result_line": "Tests  7 passed (7)",
+      "timing_line": "Duration  10.61s (transform 2.27s, setup 358ms, import 3.18s, tests 6.47s, environment 463ms)"
+    }
+  ]
+}
