@@ -257,6 +257,17 @@ export async function recordIntegrationUsage(
 }
 
 /**
+ * The longest subscription usage window (Claude 7d, Codex weekly), plus slack for
+ * resets rounded to the hour. A cooldown that ends later than this from now is
+ * not a usage-window reset, whoever wrote it.
+ */
+export const SUBSCRIPTION_WINDOW_MAX_MS = 7 * 24 * 60 * 60_000 + 60 * 60_000;
+
+export function beyondEverySubscriptionWindow(now: Date): Date {
+  return new Date(now.getTime() + SUBSCRIPTION_WINDOW_MAX_MS);
+}
+
+/**
  * Reconcile a row's Rose backoff with what the provider just said about it.
  * Only Rose's own non-authoritative cooldown (a 429 without a reset, a stall,
  * or an older row with no metadata) is ever changed; a provider reset and an
@@ -266,6 +277,10 @@ export async function recordIntegrationUsage(
  *     authoritative, so the account returns exactly when the provider says
  * Production on 2026-11-13: rows cooled to 2026-12-01 on Rose's backoff while
  * the provider reported 7d utilization 0 (allowed) or a 7d reset that day.
+ * A cooldown further out than SUBSCRIPTION_WINDOW_MAX_MS is reconciled too, even
+ * when it is a provider reset: no 5h/7d window resets that far out, so it is
+ * not this account's subscription limit (2026-11-14: a fast-mode request's
+ * monthly overage reset, 2026-12-01, stored as an authoritative rate_limit).
  *
  * 10k agents: one conditional UPDATE per usage refresh (at most one per row
  * per refresh interval), never on the completion path.
@@ -285,7 +300,13 @@ export async function reconcileRoseCooldown(
     name,
     rateLimitedUntil: { gt: now },
     AND: [
-      { OR: [{ rateLimitAuthoritative: null }, { rateLimitAuthoritative: false }] },
+      {
+        OR: [
+          { rateLimitAuthoritative: null },
+          { rateLimitAuthoritative: false },
+          { rateLimitedUntil: { gt: beyondEverySubscriptionWindow(now) } },
+        ],
+      },
       { OR: [{ rateLimitReason: null }, { rateLimitReason: { not: 'auth' } }] },
     ],
   };
