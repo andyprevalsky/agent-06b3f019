@@ -28,11 +28,7 @@ import type { useMessagesSync } from '../hooks/useMessagesSync';
 import type { usePasswordSync } from '../hooks/usePasswordSync';
 import type { usePlaidIntegration } from '../hooks/usePlaidIntegration';
 import type { MeetingNotesConnections } from '../types';
-import {
-  MEETING_NOTES_PROVIDERS,
-  MEETING_NOTES_DESCRIPTION,
-  meetingNotesProviders,
-} from '../config';
+import { MEETING_NOTES_PROVIDERS, meetingNotesProviders } from '../config';
 import BrowserIcon from './BrowserIcon';
 import { BrowserCookiesIcon } from './BrowserCookiesSection';
 import type {
@@ -385,7 +381,10 @@ function meetingNotesRow(
   return {
     key: provider,
     name,
-    icon: tile(DropdownIconPreset.granola, <MeetingNotesIcon provider={provider} />),
+    icon: tile(
+      provider === 'fireflies' ? DropdownIconPreset.fireflies : DropdownIconPreset.granola,
+      <MeetingNotesIcon provider={provider} />,
+    ),
     accounts,
     availability: 'ready',
     onConnect: () => void connection.connect(),
@@ -476,7 +475,6 @@ export function desktopSectionViews(
     sections.push({
       catalogKey: 'meetingNotes',
       title: INTEGRATION_CATALOG.meetingNotes.title,
-      description: MEETING_NOTES_DESCRIPTION,
       rows: MEETING_NOTES_PROVIDERS.map((provider) => meetingNotesRow(p, removal, provider)),
     });
   }

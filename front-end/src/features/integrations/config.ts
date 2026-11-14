@@ -5,7 +5,6 @@ import { BACKEND_BASE_URL } from '@/lib/backendUrl';
 /** Shared provider metadata for the meeting note taker category. */
 
 export const MEETING_NOTES_TITLE = 'Meeting note taker';
-export const MEETING_NOTES_DESCRIPTION = 'granola.ai, fireflies.ai, etc.';
 export const MEETING_NOTES_PUBLIC_ORIGIN = 'https://www.roselabs.ai';
 export const MEETING_NOTES_PROVIDERS = ['granola', 'fireflies'] as const;
 
