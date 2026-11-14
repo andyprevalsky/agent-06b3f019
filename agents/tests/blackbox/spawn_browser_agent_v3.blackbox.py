@@ -30373,6 +30373,9 @@ async def _resume_drained_browser_task_on_reused_session(ttl_ms, on_step, *, act
     native_start = await native_browser_start_source("1970-01-01T00:00:00+00:00")
     resume_mock = AsyncMock()
     close_mock = AsyncMock()
+    # A step may end the provider session: drop the CDP client and the backend's offer.
+    fake_playwright = _FakePlaywright(fake_browser)
+    env.fake_browser, env.fake_playwright, env.session_info = fake_browser, fake_playwright, session_info
     async def fixture_queue_pointer(**_kwargs):
         return {"task_queue": activity.info().task_queue, "surface_hash": None}
 
@@ -30405,7 +30408,7 @@ async def _resume_drained_browser_task_on_reused_session(ttl_ms, on_step, *, act
         patch("browser_tools.dom_service.DOMService", _FakeDomService),
         patch("browser_tools.humanizer.BrowserHumanizer", _FakeHumanizer),
         patch(
-            "playwright.async_api.async_playwright", return_value=_FakeAsyncPlaywright(_FakePlaywright(fake_browser))
+            "playwright.async_api.async_playwright", return_value=_FakeAsyncPlaywright(fake_playwright)
         ),
         patch("domains.spawn_browser_agent_v3.handler.live_tab_looks_challenged", AsyncMock(return_value=False)),
     ]
@@ -30482,6 +30485,64 @@ async def test_browser_task_on_reused_session_yields_before_the_provider_release
     assert result["current_url"] == "https://example.com/cart", result
     resume_mock.assert_not_awaited()
     close_mock.assert_not_awaited()
+
+
+async def test_browser_task_yields_for_a_replacement_when_the_provider_ends_its_session():
+    """A provider-ended session must restart the same browser task, not fail the tool call.
+
+    Smoke browser-auth-account-locked (agent ebc611d7, 2026-11-11): Tilion closed
+    the CDP socket (code 1012, connect 410 shutdown) during a wait action. The
+    next step reattached to the dead native, raised TargetClosedError, and the
+    ERROR result made the planner spawn a second browser agent. The step loop
+    must instead yield at the boundary so the manager resumes the same task on
+    a replacement session. A disconnected client whose session the backend still
+    offers keeps stepping (negative control).
+    """
+    from domains.spawn_browser_agent_v3.config import (
+        BROWSER_DRAIN_YIELD_STATUS,
+        BROWSER_PROVIDER_SESSION_LOST,
+        BROWSER_SESSION_MIN_REMAINING_SECONDS,
+    )
+    from helpers.activity_generation_drain import WORKER_SHUTDOWN
+
+    ttl_ms = (BROWSER_SESSION_MIN_REMAINING_SECONDS + 600) * 1000
+
+    async def provider_ends_the_session(env):
+        env.fake_browser.is_connected = lambda: False
+        env.session_info["same_session_available"] = False
+        env.session_info["same_session_unavailable_reason"] = "db_status_paused"
+
+    result, llm_step, resume_mock, close_mock = await _resume_drained_browser_task_on_reused_session(
+        ttl_ms, provider_ends_the_session
+    )
+    assert llm_step.await_count == 1, f"stepped on an ended provider session: {llm_step.await_count}"
+    assert result["status"] == BROWSER_DRAIN_YIELD_STATUS, result
+    assert result["yield_reason"] == BROWSER_PROVIDER_SESSION_LOST, result
+    assert result["step_count"] == 4 and result["task_id"] == "task-1", result
+    assert result["session_id"] == "session-1", result
+    resume_mock.assert_not_awaited()
+    close_mock.assert_not_awaited()
+
+    steps = []
+
+    async def client_drops_but_session_stays_live(env):
+        steps.append(1)
+        if len(steps) == 1:
+            env.fake_browser.is_connected = lambda: False
+
+            async def reattach(*_args, **_kwargs):
+                env.fake_browser.is_connected = lambda: True
+                return env.fake_browser
+
+            env.fake_playwright.chromium.connect_over_cdp.side_effect = reattach
+        if len(steps) == 2:
+            env.worker_shutdown()
+
+    result, llm_step, _resume, _close = await _resume_drained_browser_task_on_reused_session(
+        ttl_ms, client_drops_but_session_stays_live
+    )
+    assert llm_step.await_count == 2, "a live offered session must keep serving steps"
+    assert result["yield_reason"] == WORKER_SHUTDOWN, result
 
 
 async def test_browser_task_keeps_stepping_on_a_reused_session_with_time_left():

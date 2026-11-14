@@ -127,6 +127,7 @@ from .config import (
     BROWSER_DRAIN_YIELD_STATUS,
     BROWSER_RECORDING_FINALIZE_TIMEOUT_SECONDS,
     BROWSER_SESSION_EXPIRING,
+    BROWSER_PROVIDER_SESSION_LOST,
     BROWSER_SESSION_MIN_REMAINING_SECONDS,
     BROWSER_STATE_SOFT_ATTEMPTS,
     BROWSER_STATE_SOFT_TIMEOUT_SECONDS,
@@ -7078,6 +7079,30 @@ def _session_expiring(deadline: Optional[Tuple[str, float]], session_id: Optiona
     return deadline[1] - time.monotonic() < BROWSER_SESSION_MIN_REMAINING_SECONDS
 
 
+async def _provider_lost_browser_session(
+    config: Any, task_id: Optional[str], session_id: Optional[str], playwright_browser: Any
+) -> bool:
+    """The step's CDP client is gone and the backend no longer offers this exact native.
+
+    Reattaching to an ended provider session can only fail, and an ERROR result
+    makes the planner spawn a second browser agent. Yielding at the step boundary
+    lets the manager restart this task on a replacement session instead.
+    """
+    is_connected = getattr(playwright_browser, "is_connected", None)
+    if not task_id or not session_id or not callable(is_connected) or is_connected() is not False:
+        return False
+    info = await fetch_session_info(config, task_id, validate_live=True, include_credentials=False)
+    lost = info.get("session_id") == session_id and info.get("same_session_available") is False
+    logger.warning(
+        "Browser CDP client disconnected; checked provider session",
+        task_id=task_id,
+        session_id=session_id,
+        provider_session_lost=lost,
+        reason=info.get("same_session_unavailable_reason"),
+    )
+    return lost
+
+
 def _activity_deadline_near() -> bool:
     """This attempt's StartToClose leaves less than one supervised step plus teardown."""
     if not activity.in_activity():
@@ -10603,6 +10628,10 @@ async def _spawn_browser_agent_activity_v3_real(
                     drain_reason = BROWSER_SESSION_EXPIRING
                 if not drain_reason and _activity_deadline_near():
                     drain_reason = BROWSER_ACTIVITY_DEADLINE
+                if not drain_reason and await _provider_lost_browser_session(
+                    config, task_id, session_id, playwright_browser
+                ):
+                    drain_reason = BROWSER_PROVIDER_SESSION_LOST
                 if drain_reason:
                     try:
                         drain_continuity = await persist_resume_context(

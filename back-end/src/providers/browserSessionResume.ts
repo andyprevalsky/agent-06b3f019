@@ -157,9 +157,27 @@ export async function resumeBrowserSession(
           checkpointLogicalBrowser(current.sessionId!, mutate)
         );
       else throw new Error('Browser resume liveness is unknown');
+    } else if (current.logicalOwnerKey && current.sessionId && current.status === 'PAUSED') {
+      // A pause publishes a checkpoint; without one, the provider ended this
+      // source. Re-confirm that end before accepting its state loss.
+      const health = current.checkpointRef
+        ? null
+        : await getBrowserSessionHealth(current.sessionId);
+      if (health && health.sessionId !== current.sessionId)
+        throw new Error('Browser resume health binding changed');
+      sourceEnded = health !== null && isConfirmedBrowserEnd(health.status);
     }
     if (current.logicalOwnerKey) {
-      await loadLogicalBrowserCheckpoint(taskId, current.sessionId !== null);
+      // A provider-ended source cannot be captured: resume restores its last
+      // durable checkpoint (or the baseline) and logs the loss. An unknown or
+      // live source still requires its saved checkpoint.
+      if (sourceEnded)
+        log.warn('Restoring provider-ended logical browser from its last durable checkpoint', {
+          taskId,
+          sessionId: current.sessionId,
+          checkpointRevision: current.checkpointRevision,
+        });
+      await loadLogicalBrowserCheckpoint(taskId, current.sessionId !== null && !sourceEnded);
       await withBrowserResumeClaim(taskId, (_assert, _native, mutate) =>
         mutate(async (tx) => {
           const changed = await tx.browserSession.updateMany({
