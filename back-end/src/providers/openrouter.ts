@@ -1,5 +1,6 @@
 import { finishLlmCapture, startLlmCapture } from './llmDump';
-import { simpleArchiveOutput } from './llmArchiveRecord';
+import { simpleArchiveOutput, type ArchiveUsage } from './llmArchiveRecord';
+import { createLogger } from './logger';
 import OpenAI from 'openai';
 import dotenv from 'dotenv';
 
@@ -62,31 +63,47 @@ Return ONLY the judge prompt text, nothing else.`;
     },
   ];
   const startedAtMs = Date.now();
-  const capture = startLlmCapture({
-    call_site: 'llm_judge_prompt_generation',
-    agent_id: archive?.agent_id,
-    root_agent_id: archive?.root_agent_id,
-    model: 'gpt-4.1',
-    message_count: messages.length,
-    messages,
-    config: { provider: 'openai', model: 'gpt-4.1', temperature: 0.3 },
-  });
-  const finish = (content: string, response: unknown, error?: unknown, returnedFallback = false) =>
-    finishLlmCapture(capture, {
+  // Archiving is observer-only: a capture failure is logged and never fails the call.
+  let capture: ReturnType<typeof startLlmCapture> | null = null;
+  try {
+    capture = startLlmCapture({
+      call_site: 'llm_judge_prompt_generation',
+      agent_id: archive?.agent_id,
+      root_agent_id: archive?.root_agent_id,
       model: 'gpt-4.1',
-      output: simpleArchiveOutput({
-        content,
-        actualModel:
-          typeof (response as { model?: unknown } | null)?.model === 'string'
-            ? (response as { model: string }).model
-            : 'gpt-4.1',
-        provider: 'openai',
-        startedAtMs,
-        structured: response ?? undefined,
-        error,
-      }),
-      ...(returnedFallback ? { extra: { returned_fallback: true } } : {}),
+      message_count: messages.length,
+      messages,
+      config: { provider: 'openai', model: 'gpt-4.1', temperature: 0.3 },
     });
+  } catch (captureError) {
+    log.warn('llm_judge_prompt.archive_start_failed', { error: String(captureError) });
+  }
+  const finish = (
+    content: string,
+    response: OpenAI.Chat.Completions.ChatCompletion | null,
+    error?: unknown,
+    returnedFallback = false
+  ): void => {
+    if (capture === null) return;
+    try {
+      finishLlmCapture(capture, {
+        model: 'gpt-4.1',
+        output: simpleArchiveOutput({
+          content,
+          actualModel: response?.model ?? 'gpt-4.1',
+          provider: 'openai',
+          startedAtMs,
+          usage: judgePromptUsage(response),
+          requestId: response?.id ?? null,
+          structured: response ?? undefined,
+          error,
+        }),
+        ...(returnedFallback ? { extra: { returned_fallback: true } } : {}),
+      });
+    } catch (captureError) {
+      log.warn('llm_judge_prompt.archive_finish_failed', { error: String(captureError) });
+    }
+  };
   try {
     const completion = await openai.chat.completions.create({
       model: 'gpt-4.1',
@@ -112,4 +129,21 @@ Return ONLY the judge prompt text, nothing else.`;
     finish('', null, error);
     throw error;
   }
+}
+
+const log = createLogger('LlmJudgePrompt');
+
+/** OpenAI chat usage in the archive's normalized keys (reasoning tokens when reported). */
+function judgePromptUsage(
+  response: OpenAI.Chat.Completions.ChatCompletion | null
+): Partial<ArchiveUsage> | undefined {
+  const usage = response?.usage;
+  if (usage === undefined) return undefined;
+  return {
+    prompt: usage.prompt_tokens,
+    completion: usage.completion_tokens,
+    total: usage.total_tokens,
+    reasoning: usage.completion_tokens_details?.reasoning_tokens ?? null,
+    finish_reason: response?.choices[0]?.finish_reason ?? null,
+  };
 }

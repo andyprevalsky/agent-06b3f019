@@ -93,6 +93,7 @@ async function main(): Promise<void> {
           choices: [
             { index: 0, message: { role: 'assistant', content: '' }, finish_reason: 'stop' },
           ],
+          usage: { prompt_tokens: 21, completion_tokens: 3, total_tokens: 24 },
         }),
         { status: 200, headers: { 'content-type': 'application/json' } }
       )) as typeof fetch;
@@ -112,6 +113,10 @@ async function main(): Promise<void> {
       (emptyFinal.record.extra as { returned_fallback?: boolean }).returned_fallback,
       true
     );
+    const usage = (emptyFinal.record.output as { usage: Record<string, unknown> }).usage;
+    assert.equal(usage.prompt, 21, 'provider usage is recorded in the normalized keys');
+    assert.equal(usage.completion, 3);
+    assert.equal(usage.total, 24);
   } finally {
     globalThis.fetch = originalFetch;
     for (const key of Object.keys(process.env)) if (!(key in originalEnv)) delete process.env[key];
