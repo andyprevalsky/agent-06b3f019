@@ -9,9 +9,10 @@
  * Invariants:
  *   - absent data stays absent: no usage → null (unknown), a Rose backoff is a
  *     non-authoritative cooldown and never a nextResetAt
- *   - the Claude usage endpoint fills stale/unmeasured rows in the background:
- *     PERCENT utilization, source usage_endpoint, at most once per 5 min per row;
- *     401/403 = unavailable (60 min backoff), never an auth failure / expiry
+ *   - stale/unmeasured Claude rows are refreshed in the background, at most once
+ *     per 5 min per row; a user:profile token reads the usage endpoint (PERCENT
+ *     utilization, source usage_endpoint). Inference-only and refused tokens get a
+ *     quota check instead: compute-usage-quota-check.test.ts
  *   - a user cooldown without integrationId never lands on sibling rows
  *   - a rejection skips the 15 s write throttle; a lease's last flush is accepted
  *     shortly after its release
@@ -193,22 +194,30 @@ function fakeDeps(
   overrides: Partial<RefreshDeps> = {}
 ): RefreshDeps & {
   calls: Array<{ url: string; init: RequestInit }>;
+  quotaChecks: string[];
   stored: SubscriptionUsageReport[];
 } {
   const calls: Array<{ url: string; init: RequestInit }> = [];
+  const quotaChecks: string[] = [];
   const stored: SubscriptionUsageReport[] = [];
   return {
     calls,
+    quotaChecks,
     stored,
     fetch: async (url, init) => {
       calls.push({ url, init });
       return respond();
     },
-    readToken: async () => 'oauth-token',
+    readToken: async () => ({ accessToken: 'oauth-token', profileScope: true }),
+    quotaCheck: async (accessToken) => {
+      quotaChecks.push(accessToken);
+      return { status: 200, headers: new Headers() };
+    },
     store: async (report) => {
       stored.push(report);
       return true;
     },
+    reconcile: async () => 'unchanged',
     now: () => NOW,
     ...overrides,
   };
@@ -224,6 +233,7 @@ async function testUsageEndpointRefresh(): Promise<void> {
   const deps = fakeDeps(() => Response.json(body));
   assert.equal(await refreshClaudeUsage('row-ok', deps), 'stored');
   assert.equal(deps.calls.length, 1);
+  assert.equal(deps.quotaChecks.length, 0, 'a user:profile token reads the usage endpoint only');
   assert.equal(deps.calls[0].url, USAGE_ENDPOINT_URL);
   const headers = deps.calls[0].init.headers as Record<string, string>;
   assert.equal(headers.Authorization, 'Bearer oauth-token');
@@ -245,27 +255,10 @@ async function testUsageEndpointRefresh(): Promise<void> {
     'due again after the interval'
   );
 
-  // 401/403: unavailable — nothing stored, no state change, backed off 60 min.
-  for (const status of [401, 403]) {
-    resetUsageRefreshStateForTests();
-    const denied = fakeDeps(() => new Response('{"error":"scope"}', { status }));
-    assert.equal(await refreshClaudeUsage('row-denied', denied), 'unavailable');
-    assert.equal(denied.stored.length, 0);
-    assert.equal(
-      await refreshClaudeUsage('row-denied', { ...denied, now: () => at(10 * MIN) }),
-      'throttled'
-    );
-    assert.equal(
-      await refreshClaudeUsage('row-denied', { ...denied, now: () => at(61 * MIN) }),
-      'unavailable'
-    );
-    assert.equal(denied.calls.length, 2);
-  }
-
   resetUsageRefreshStateForTests();
   const noToken = fakeDeps(() => Response.json(body), { readToken: async () => null });
   assert.equal(await refreshClaudeUsage('row-expired', noToken), 'no_token');
-  assert.equal(noToken.calls.length, 0, 'no token, no request');
+  assert.equal(noToken.calls.length + noToken.quotaChecks.length, 0, 'no token, no request');
 
   resetUsageRefreshStateForTests();
   const empty = fakeDeps(() => Response.json({ seven_day_opus: { utilization: 1 } }));

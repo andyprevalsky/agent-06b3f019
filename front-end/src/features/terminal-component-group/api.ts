@@ -241,6 +241,26 @@ export async function submitFeedback(feedback: string): Promise<void> {
   }
 }
 
+/** One repo from the user's connected GitHub repo inventory (GET /api/integrations/github/repos). */
+export interface ConnectedGithubRepo {
+  canonical_ref: string; // gh:<owner>/<repo>, lowercased
+  repo_name: string;
+  repo_url: string;
+  owner: string;
+  default_branch: string | null;
+  connected_rose_project_ref: string | null;
+}
+
+/** The user's connected GitHub repos, the options a new code agent can select. Throws on non-OK. */
+export async function fetchConnectedGithubRepos(): Promise<ConnectedGithubRepo[]> {
+  const response = await fetch(`${API_BASE_WITH_PATH}/integrations/github/repos`, {
+    headers: getAuthHeaders(),
+  });
+  if (!response.ok) throw new Error('Failed to load connected GitHub repos');
+  const data = (await response.json()) as { repos?: ConnectedGithubRepo[] };
+  return data.repos ?? [];
+}
+
 export {
   respondToAttentionRequest,
   completeAuthAssistanceRequest,

@@ -19,8 +19,6 @@ from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts" / "lib"))
-from test_quarantine import quarantine
 
 from benchmarks import code_bench as cb
 from benchmarks import code_bench_parity as parity
@@ -195,12 +193,6 @@ def test_commit_fixture_missing_origin_fails(tmp_path):
     assert _failed(_grade(tmp_path, COMMIT)) == ["git.origin_unchanged"]
 
 
-@quarantine(
-    since="2026-11-10",
-    repair="https://boxes.dev/thread/thr_d0600bd7048f45cc9763b229460e6026",
-    error="FileNotFoundError: [Errno 2] No such file or directory: '/tmp/pytest-of-runner/pytest-14/test_commit_fixture_rewritten_0/commit-locally-no-push/repo/.git/objects/maintenance.lock'",
-    evidence='.context/rca-playwright/benchmark-flake/findings.json',
-)
 def test_commit_fixture_rewritten_history_fails(tmp_path):
     repo = _solve(tmp_path, COMMIT)
     _git(repo, "checkout", "-q", "--orphan", "rewrite")
@@ -958,7 +950,21 @@ def test_parity_cli_effort_matches_flash_and_explicit_tier(tmp_path):
     assert f"effort: '{parity.DEFAULT_EFFORT}'" in models[models.index("  flash: {"):]
 
 
-def test_fixture_git_joins_maintenance_writer_before_archiving(tmp_path):
+def test_git_wrapper_never_starts_background_maintenance(tmp_path):
+    """A commit must not spawn detached `git maintenance` that mutates .git while it is archived."""
+    repo = _workspace(tmp_path, COMMIT)
+    (repo / "maintenance-probe.txt").write_text("probe\n")
+    trace = tmp_path / "git-trace.log"
+    env = {**cb._git_env(repo.parent.parent), "GIT_TRACE": str(trace)}
+    cb._git(["add", "-A"], repo, env)
+    cb._git(["commit", "-q", "-m", "probe"], repo, env)
+    log = trace.read_text()
+    assert "built-in: git commit" in log
+    assert "maintenance run" not in log and "gc --auto" not in log
+
+
+@pytest.mark.parametrize("writer_target", ["direct", "bare-receiver"])
+def test_fixture_git_joins_maintenance_writer_before_archiving(tmp_path, writer_target):
     """A successful Git return must not leave its transient writer behind."""
     import concurrent.futures
     import os
@@ -969,6 +975,15 @@ def test_fixture_git_joins_maintenance_writer_before_archiving(tmp_path):
     import sys
     import textwrap
 
+    if writer_target == "bare-receiver":
+        repo = _solve(tmp_path, COMMIT)
+        writer_git_dir = repo.parent / "origin.git"
+        archive_top = COMMIT
+    else:
+        writer_git_dir = tmp_path / "fixture" / ".git"
+        archive_top = "fixture"
+    real_git = shutil.which("git")
+    assert real_git
     nonce = secrets.token_hex(32)
     binary = tmp_path / "bin"
     binary.mkdir()
@@ -981,7 +996,7 @@ def test_fixture_git_joins_maintenance_writer_before_archiving(tmp_path):
         import os, socket, sys
         from pathlib import Path
         root, address, ready_fd, foreground, nonce = sys.argv[1:]
-        lock = Path(root) / 'fixture' / '.git' / 'objects' / 'maintenance.lock'
+        lock = Path(root) / 'objects' / 'maintenance.lock'
         lock.parent.mkdir(parents=True, exist_ok=True)
         lock.write_text('transient maintenance writer')
         channel = socket.socket(socket.AF_INET)
@@ -999,6 +1014,13 @@ def test_fixture_git_joins_maintenance_writer_before_archiving(tmp_path):
         import os, subprocess, sys
         args = sys.argv[1:]
         foreground = all(value in args for value in ['gc.autoDetach=false', 'maintenance.autoDetach=false'])
+        if os.environ['WRITER_TARGET'] == 'bare-receiver':
+            # Model the receiving writer using the actual bare repository policy,
+            # not the sender's command-line arguments.
+            values = [subprocess.run([os.environ['REAL_GIT'], '--git-dir', os.environ['WRITER_ROOT'],
+                                      'config', '--get', key], capture_output=True, text=True)
+                      for key in ['gc.autoDetach', 'maintenance.autoDetach']]
+            foreground = all(v.returncode == 0 and v.stdout.strip() == 'false' for v in values)
         reader, writer = os.pipe()
         child = subprocess.Popen([sys.executable, '-c', CHILD_CODE, os.environ['WRITER_ROOT'],
                                   os.environ['WRITER_SOCKET'], str(writer), str(int(foreground)), os.environ['WRITER_NONCE']],
@@ -1014,7 +1036,8 @@ def test_fixture_git_joins_maintenance_writer_before_archiving(tmp_path):
     executable.write_text(f"#!{sys.executable}\n" + program)
     executable.chmod(0o700)
     env = {**cb._git_env(tmp_path), "PATH": str(binary),
-           "WRITER_ROOT": str(tmp_path), "WRITER_SOCKET": address, "WRITER_NONCE": nonce}
+           "WRITER_ROOT": str(writer_git_dir), "WRITER_SOCKET": address, "WRITER_NONCE": nonce,
+           "WRITER_TARGET": writer_target, "REAL_GIT": real_git}
     connection = None
     future = None
     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
@@ -1084,7 +1107,7 @@ def test_fixture_git_joins_maintenance_writer_before_archiving(tmp_path):
             result = future.result(timeout=10)
             assert result == 'joined', 'Git returned while maintenance still owned the archive input'
             assert not (tmp_path / 'fixture/.git/objects/maintenance.lock').exists()
-            archive = cb.write_deterministic_tar_gz(tmp_path, 'fixture', tmp_path / 'fixture.tar.gz')
+            archive = cb.write_deterministic_tar_gz(tmp_path, archive_top, tmp_path / 'fixture.tar.gz')
             with tarfile.open(archive) as tar:
                 assert not any(name.endswith('maintenance.lock') for name in tar.getnames())
         finally:

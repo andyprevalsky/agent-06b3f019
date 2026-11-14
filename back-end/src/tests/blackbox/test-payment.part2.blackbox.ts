@@ -10,6 +10,11 @@
 
 import 'dotenv/config';
 import {
+  assertV2LifecycleContract,
+  assertV2SandboxSettlementContract,
+  assertV2SandboxLedgerDatabaseContract,
+} from './test-payment-v2-lifecycle.cases';
+import {
   confirmPhoneBenchmarkPayment,
   getTestPaymentLifecycle,
 } from '../../domains/test-payment/service';
@@ -57,7 +62,10 @@ async function withStubbedStripe<T>(
   };
   const originalPaymentMethodCreate = paymentMethods.create;
   const originalPaymentIntentCreate = paymentIntents.create;
-  const calls = { paymentMethods: [] as unknown[], paymentIntents: [] as unknown[] };
+  const calls = {
+    paymentMethods: [] as unknown[],
+    paymentIntents: [] as unknown[],
+  };
 
   paymentMethods.create = async (params: unknown) => {
     calls.paymentMethods.push(params);
@@ -65,7 +73,10 @@ async function withStubbedStripe<T>(
   };
   paymentIntents.create = async (params: unknown) => {
     calls.paymentIntents.push(params);
-    return { id: 'pi_test_payment_part2', status: options.paymentIntentStatus ?? 'succeeded' };
+    return {
+      id: 'pi_test_payment_part2',
+      status: options.paymentIntentStatus ?? 'succeeded',
+    };
   };
 
   try {
@@ -77,6 +88,18 @@ async function withStubbedStripe<T>(
 }
 
 const tests: Array<[string, () => Promise<void>]> = [
+  [
+    'v2 exact cleared ledger atomically consumes funding; unknown or reclaiming obligations stay pending',
+    assertV2SandboxLedgerDatabaseContract,
+  ],
+  [
+    'v2 lifecycle observes exact transfer and cursor integrity without legacy identity',
+    assertV2LifecycleContract,
+  ],
+  [
+    'v2 sandbox settlement requires exact cleared REST transaction in test mode',
+    assertV2SandboxSettlementContract,
+  ],
   [
     'lifecycle maps a purchase with no card or hold to empty cross-references',
     async () => {

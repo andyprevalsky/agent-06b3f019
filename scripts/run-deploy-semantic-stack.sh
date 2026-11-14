@@ -207,6 +207,14 @@ cleanup() {
 }
 trap cleanup EXIT
 mkdir -p .context
+# Native deploy gates use the reviewed canonical base fixture via run.sh's
+# existing schema/PG/revision-checked restore path. An unconfigured dump path
+# otherwise selects a fresh production cold-sync on every ephemeral runner.
+if [ -n "${DEPLOY_SEMANTIC_TOKEN:-}" ]; then
+    export BENCHMARK_SEED_DUMP="${BENCHMARK_SEED_DUMP:-$ROOT_DIR/.context/seed-cache/semantic-base.dump}"
+    export BENCHMARK_REQUIRE_SEED_DUMP=1
+fi
+
 # The UI stays local, but real code agents need a public backend callback.
 # Bind a run-scoped tunnel without reserving or falling back to the shared workspace name.
 # Skip trycloudflare and take run.sh's run-scoped ngrok endpoint directly: on Blacksmith

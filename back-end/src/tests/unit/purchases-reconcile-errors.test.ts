@@ -13,6 +13,9 @@
 
 import assert from 'node:assert/strict';
 import crypto, { randomUUID } from 'node:crypto';
+import { execFileSync } from 'node:child_process';
+import express from 'express';
+import { once } from 'node:events';
 import { PurchaseSpendStatus, PurchaseWalletFundingStatus } from '@prisma/client';
 import { prisma } from '../../providers/database';
 import { AgentCardProviderError } from '../../providers/card-provider';
@@ -32,6 +35,7 @@ import {
   FakeWalletFundingProvider,
   withFakeStripe,
 } from '../blackbox/purchases.testkit';
+import { ROSE_AGENT_CARD_ID } from '../../providers/card-provider/static-card';
 
 const WEBHOOK_SECRET = `whsec_${randomUUID()}`;
 process.env.AGENTCARD_WEBHOOK_SECRET = WEBHOOK_SECRET;
@@ -89,6 +93,45 @@ function signPayload(payload: unknown, timestamp = Math.floor(Date.now() / 1000)
     .update(`${timestamp}.${raw}`)
     .digest('hex');
   return `t=${timestamp},v1=${signature}`;
+}
+
+async function withCloseRoute(
+  run: (closeAs: (userId: string) => Promise<Response>) => Promise<void>
+) {
+  const names = [
+    'BACKEND_API_KEY',
+    'AGENTCARD_MINT_ENABLED',
+    'BENCHMARK_MODE',
+    'BENCHMARK_ISOLATED_RUN',
+  ] as const;
+  const original = Object.fromEntries(names.map((name) => [name, process.env[name]]));
+  const apiKey = `close-test-${randomUUID()}`;
+  process.env.BACKEND_API_KEY = apiKey;
+  for (const name of names.slice(1)) process.env[name] = '0';
+  const { default: purchasesRouter } = await import('../../domains/purchases/routes');
+  const app = express();
+  app.use(express.json());
+  app.use('/api/purchases', purchasesRouter);
+  const server = app.listen(0, '127.0.0.1');
+  try {
+    if (!server.listening) await once(server, 'listening');
+    const address = server.address();
+    assert.ok(address && typeof address !== 'string');
+    await run((userId) =>
+      fetch(`http://127.0.0.1:${address.port}/api/purchases/${ROSE_AGENT_CARD_ID}/close`, {
+        method: 'POST',
+        headers: { 'X-API-Key': apiKey, 'X-User-Id': userId },
+      })
+    );
+  } finally {
+    for (const name of names) {
+      if (original[name] === undefined) delete process.env[name];
+      else process.env[name] = original[name];
+    }
+    await new Promise<void>((resolve, reject) =>
+      server.close((error) => (error ? reject(error) : resolve()))
+    );
+  }
 }
 
 async function main(): Promise<void> {
@@ -186,6 +229,24 @@ async function main(): Promise<void> {
   });
 
   // ── reconcile.ts: webhook signature ──
+  await test('webhook signature verification fails closed without a configured secret', () => {
+    execFileSync(
+      process.execPath,
+      [
+        '--import',
+        'tsx',
+        '-e',
+        [
+          "const assert = require('node:assert/strict');",
+          "const { verifyAgentCardWebhookSignature } = require('./src/domains/purchases/reconcile.ts');",
+          "assert.throws(() => verifyAgentCardWebhookSignature('{}'),",
+          "error => error.statusCode === 503 && error.code === 'agentcard_webhook_unconfigured');",
+        ].join('\n'),
+      ],
+      { env: { ...process.env, AGENTCARD_WEBHOOK_SECRET: '' }, stdio: 'pipe' }
+    );
+  });
+
   await test('verifyAgentCardWebhookSignature accepts a valid signature', () => {
     const payload = { type: 'transaction.cleared', cardId: 'card-1' };
     reconcile.verifyAgentCardWebhookSignature(JSON.stringify(payload), signPayload(payload));
@@ -211,6 +272,46 @@ async function main(): Promise<void> {
   });
 
   // ── reconcile.ts: closePurchaseCard ──
+  await test('close route cannot refund another user through a shared static card id', async () => {
+    const owner = await seedUser();
+    const stranger = await seedUser();
+    const purchaseId = await seedPurchase(owner, ROSE_AGENT_CARD_ID, PurchaseSpendStatus.HELD);
+    await withCloseRoute(async (closeAs) =>
+      withFakeStripe(async (calls) => {
+        const response = await closeAs(stranger);
+        assert.equal(response.status, 404, 'foreign purchase must not be exposed or closed');
+        assert.equal(calls.refunds.length, 0);
+        assert.equal(await statusOf(purchaseId), PurchaseSpendStatus.HELD);
+      })
+    );
+  });
+
+  await test('close route selects the callers purchase before ordering shared card rows', async () => {
+    const owner = await seedUser();
+    const other = await seedUser();
+    const ownId = await seedPurchase(owner, ROSE_AGENT_CARD_ID, PurchaseSpendStatus.HELD);
+    await prisma.purchaseSpend.update({
+      where: { id: ownId },
+      data: { createdAt: new Date(Date.now() - 60_000) },
+    });
+    const otherId = await seedPurchase(other, ROSE_AGENT_CARD_ID, PurchaseSpendStatus.HELD);
+    await withCloseRoute(async (closeAs) =>
+      withFakeStripe(async (calls) => {
+        for (let attempt = 0; attempt < 2; attempt += 1) {
+          assert.equal((await closeAs(owner)).status, 200);
+        }
+        assert.equal(await statusOf(ownId), PurchaseSpendStatus.VOIDED);
+        assert.equal(await statusOf(otherId), PurchaseSpendStatus.HELD);
+        assert.equal(calls.refunds.length, 1, 'repeated close refunds only the caller once');
+        assert.equal(
+          JSON.parse(calls.refunds[0]).payment_intent,
+          (await prisma.purchaseSpend.findUniqueOrThrow({ where: { id: ownId } }))
+            .stripePaymentIntentId
+        );
+      })
+    );
+  });
+
   await test('closePurchaseCard validates card id and missing purchase', async () => {
     await assert.rejects(() => reconcile.closePurchaseCard(''), /cardId is required/);
     await assert.rejects(

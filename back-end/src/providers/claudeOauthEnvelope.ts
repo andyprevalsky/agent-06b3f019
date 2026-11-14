@@ -10,6 +10,8 @@ export type ClaudeEnvelope = {
   /** Epoch ms of the access token's own expiry; null when the envelope omits it. */
   expiresAt: number | null;
   inferenceScope: boolean;
+  /** `user:profile`: required by the usage endpoint (Claude Code hasProfileScope). */
+  profileScope: boolean;
 };
 
 export function parseClaudeEnvelope(credentialsJson: string): ClaudeEnvelope | null {
@@ -34,6 +36,7 @@ export function parseClaudeEnvelope(credentialsJson: string): ClaudeEnvelope | n
       refreshable: refreshToken.length > 0,
       expiresAt,
       inferenceScope: scopes.some((scope) => scope === 'user:inference'),
+      profileScope: scopes.some((scope) => scope === 'user:profile'),
     };
   } catch {
     return null;

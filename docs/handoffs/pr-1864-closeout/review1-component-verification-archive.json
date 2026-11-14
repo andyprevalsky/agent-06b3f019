@@ -1,0 +1,14 @@
+{
+  "format": "ROSE-PRIVATE-TAR-GCM-V1",
+  "bucket": "trace-archive",
+  "key": "devbox-closeout-private/pr1864-agentcard-v2/review1-components/20261111T045622Z-5ce8c31b.tar.gz.aesgcm",
+  "encryption_key_id": "trace-archive-prod-2026-07-03",
+  "ciphertext_sha256": "d3a3e013fb83a73a982e3533604d9b5a5779c413c72efb35b69cef591d1d421b",
+  "gzip_sha256": "3daecba1d37e3d4bb52724ad363d0685b75e92e7890539c875e17a04363045c0",
+  "stored_bytes": 4530484,
+  "frames": 1,
+  "files": 365,
+  "original_bytes": 16081164,
+  "manifest_sha256": "6556cf114dfa0093eff21bbf966766e7594ea08f57d6e9a4c13486e184defc49",
+  "full_readback_verified": true
+}

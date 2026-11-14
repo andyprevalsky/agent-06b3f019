@@ -142,7 +142,7 @@ workspace's shipped SHA from a later global `origin/main`.
 
 ## Step 4: New branch
 
-Run `/new_branch_with_context` to sync with main and create a fresh branch for the next task.
+Run `/sync`, then create a fresh branch for the next task.
 
 ## Step 5: Done
 

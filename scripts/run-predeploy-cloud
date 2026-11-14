@@ -73,7 +73,9 @@ run_predeploy_stage() {
     shift
     stage_mark "$label"
     started="$(date +%s)"
-    "$@" || rc=$?
+    # These stages run offline fixtures with their own temporary sources. Keep
+    # the real deployment binding in the parent for the later Hub dispatch.
+    env -u CLOUDBENCH_SOURCE_MANIFEST "$@" || rc=$?
     printf '⏱ %s stage %s done exit=%s in %ss\n' "$(date -u +%FT%TZ)" "$label" "$rc" "$(( $(date +%s) - started ))"
     return "$rc"
 }

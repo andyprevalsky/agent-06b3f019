@@ -61,6 +61,7 @@ from helpers.activity_heartbeat import heartbeat_resume_details, safe_heartbeat
 from helpers.claude_code_ws_client import ClaudeCodeWsClient, ws_endpoint_reachable
 from helpers.e2b_log_collector import SandboxLogCollector
 from helpers.file_resolution import resolve_file_pointers_from_extracted, transform_schema_for_remote_session
+from helpers.github_repo_ref import explicit_github_repo_ref
 from helpers.tracing import traced
 from providers.rose.subscription_usage import usage_from_rate_limit_event
 from tools.base import MessageStatus
@@ -2495,23 +2496,6 @@ async def _run_verifier(
 
         final_output = terminal.get_display()
         normalized_events = code_events or []
-        if evidence_structured and schema_complete and (exit_code is None or exit_code == 0):
-            v_reasoning = (
-                "The code agent completed successfully and the requested file outputs were extracted "
-                "from /home/user/output using normalized SDK event context."
-            )
-            await save_claude_code_message(
-                agent_id=agent_id,
-                title="⚖️ Progress: 100%",
-                task_id=task_id,
-                message=v_reasoning,
-                status=MessageStatus.FINISHED,
-                action_type="system",
-                tool_call_id=verifier_call_id,
-                code_provider=code_provider,
-            )
-            return 1.0, v_reasoning, evidence_structured, input_tokens, output_tokens
-
         event_context = _build_code_event_context(
             code_events=normalized_events,
             output_files=extracted_output_files,
@@ -3570,6 +3554,8 @@ async def spawn_claude_code_activity(
             persistent code session; omitted, the backend resumes the spawning
             agent's latest session for the repo (or creates one on a new branch).
             ``task_name`` (the spawn's) is stored on the task row as its title.
+            ``github_repo_ref`` (the spawn's explicit connected-repo selection) rides
+            here too, so the scheduled positional arguments stay unchanged.
 
     No runtime limit (C11): the activity runs while the CLI works and heartbeats.
     An idle CLI is paused (status ``paused``, resumable), never failed.
@@ -3608,6 +3594,7 @@ async def spawn_claude_code_activity(
     # The persistent session survives a paused/unreachable sandbox: a retry
     # resumes it by id even when its attached record must be discarded (C2).
     requested_code_session_id = (code_session_request or {}).get("code_session_id")
+    github_repo_ref = explicit_github_repo_ref((code_session_request or {}).get("github_repo_ref"))
     code_session_id: Optional[str] = (attached or {}).get("code_session_id") or (
         requested_code_session_id if isinstance(requested_code_session_id, str) else None
     )
@@ -3766,6 +3753,7 @@ async def spawn_claude_code_activity(
                 fast_mode_cache_enabled=fast_mode_cache_enabled,
                 code_session_id=code_session_id,
                 lease_owner=lease_owner,
+                github_repo_ref=github_repo_ref,
                 target=target,
                 local_device_id=local_device_id,
                 fresh_conversation=(code_session_request or {}).get("fresh_conversation") is True,
@@ -3776,6 +3764,7 @@ async def spawn_claude_code_activity(
                     "spawn_args": {
                         "type": "code", "goal": goal, "output_schema": output_schema,
                         "github_repo_link": github_repo_url, "target": target, "task_name": task_name,
+                        **({"github_repo_ref": github_repo_ref} if github_repo_ref else {}),
                         "attachments": [item.get("original_filename") for item in attachments or []],
                     },
                     "attachments": attachments or [],
