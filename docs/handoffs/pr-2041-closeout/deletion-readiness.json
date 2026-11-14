@@ -6,7 +6,7 @@
     ".context/": "archived",
     ".devbox/": "managed (boxes.dev runtime state)",
     ".env.npm": "managed-env (boxes.dev project environment; secrets never archived)",
-    "agents/.context/": null,
+    "agents/.context/": "remote (report-card.json of AgentCard production lane run d7437d5b-73f3-4fc8-b178-ce977f7fd61e, uploaded to and verified in the in-app Benchmark Hub; failed pre-start on the unprovisioned live payment identity)",
     "agents/.env": "managed-env (boxes.dev project environment; secrets never archived)",
     "agents/.env.benchmark-temporal": "managed-env (generated benchmark Temporal override; secrets never archived)",
     "agents/.env.cloudbench-upsert.lock": "reproducible (lock file)",
@@ -76,37 +76,9 @@
     "scripts/__pycache__/": "reproducible",
     "scripts/lib/__pycache__/": "reproducible"
   },
-  "live_processes": [
-    {
-      "argv": "/home/boxes/.fly/bin/flyctl agent run /home/boxes/.fly/agent-logs/2948678158.log",
-      "cwd": "/home/boxes/rose/agents",
-      "pid": 2740765
-    },
-    {
-      "argv": "/bin/bash -c source /home/boxes/.claude/shell-snapshots/snapshot-bash-1794631820088-389bv6.sh 2>/dev/null || true && shopt -u extglob 2>/dev/null || true && { \\builtin unalias -- 'which'; \\builtin uns",
-      "cwd": "/home/boxes/rose",
-      "pid": 2910200
-    },
-    {
-      "argv": "cut -c1-200",
-      "cwd": "/home/boxes/rose",
-      "pid": 2910201
-    },
-    {
-      "argv": "ugrep -G --ignore-files --hidden -I --exclude-dir=.git --exclude-dir=.svn --exclude-dir=.hg --exclude-dir=.bzr --exclude-dir=.jj --exclude-dir=.sl OPEN",
-      "cwd": "/home/boxes/rose",
-      "pid": 2910202
-    }
-  ],
+  "live_processes": [],
   "manifest": "docs/handoffs/pr-2041-closeout/closeout-manifest.json",
-  "open_items": [
-    "uncommitted changes in /home/boxes/rose: docs/handoffs/pr-2041-closeout/closeout-manifest.json, docs/handoffs/pr-2041-closeout/private-archive-receipt.json, docs/rca/cases/2026-11-14-treasury-settle-poll-died-on-shared-org-throttle.md, front-end/tests-e2e/chat-lifecycle-latency.spec.ts",
-    "live process 2740765 in this checkout: /home/boxes/.fly/bin/flyctl agent run /home/boxes/.fly/agent-logs/2948678158.log",
-    "live process 2910200 in this checkout: /bin/bash -c source /home/boxes/.claude/shell-snapshots/snapshot-bash-1794631820088-389bv6.sh 2>/dev/null || true && shopt -u extglob 2>/dev/null || true && { \\builtin unalias -- 'which'; \\builtin uns",
-    "live process 2910201 in this checkout: cut -c1-200",
-    "live process 2910202 in this checkout: ugrep -G --ignore-files --hidden -I --exclude-dir=.git --exclude-dir=.svn --exclude-dir=.hg --exclude-dir=.bzr --exclude-dir=.jj --exclude-dir=.sl OPEN",
-    "ignored path without a disposition: agents/.context/"
-  ],
+  "open_items": [],
   "pr": 2041,
   "preserved_refs": {
     "branch:andyprevalsky/P3-message-person-hillclimb": {
@@ -558,7 +530,7 @@
       "tip": "0e2ffe95ba40a2d0c2b8ae9e884b4a85d96af3f2"
     }
   },
-  "ready": false,
+  "ready": true,
   "worktrees": [
     {
       "branch": "refs/heads/records/pr-2041-closeout",
@@ -567,11 +539,7 @@
       "needs_integration": false,
       "path": "/home/boxes/rose",
       "uncommitted": [
-        "docs/handoffs/pr-2041-closeout/closeout-manifest.json",
-        "docs/handoffs/pr-2041-closeout/deletion-readiness.json",
-        "docs/handoffs/pr-2041-closeout/private-archive-receipt.json",
-        "docs/rca/cases/2026-11-14-treasury-settle-poll-died-on-shared-org-throttle.md",
-        "front-end/tests-e2e/chat-lifecycle-latency.spec.ts"
+        "docs/handoffs/pr-2041-closeout/deletion-readiness.json"
       ],
       "unpushed_commits": 0
     }
