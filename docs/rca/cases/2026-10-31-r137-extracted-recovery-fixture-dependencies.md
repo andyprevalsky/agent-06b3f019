@@ -1,0 +1,131 @@
+---
+id: 2026-10-31-r137-extracted-recovery-fixture-dependencies
+date: 2026-10-31
+title: Extracted recovery fixtures omitted current production helper dependencies
+surface: harness
+component: cloudbench-dependency-sync-tests
+classification: test-bug
+problem_class: logical-inconsistency-in-harness-contracts
+first_bad_boundary: Test shells invoked recovery and reaper callers without extracting their required current helper functions
+symptoms:
+  - The registered gate failed with command not found in unchanged recovery fixtures
+  - The first startup archive case could not reach its intended evidence checks
+  - Retirement and guest cleanup latch cases failed on the same omitted dependencies
+tags:
+  - r137
+  - test-fixture
+  - recovery
+sources:
+  - commit 618430e2a32e619406cb24fb537e2f6e2fe291e7
+  - task R137 registered benchmark-live-results gate after R134 integration
+repro: Run the unchanged startup archive and representative retirement fixtures against their exact production fleet source
+status: open
+---
+
+## Problem
+
+After R134 integration, the registered benchmark-live-results gate was stopped
+with 27 failures, 247 passes and 1269 deselected tests. It did not pass. All 27
+reported failures were in the unchanged dependency-sync test module. A separate
+pytest cache contained historical failures and was excluded from this diagnosis.
+No benchmark result or resource-release status is changed by this case.
+
+## Diagnosis
+
+The exact production fleet source contained the R122 replacement-member guards,
+but the tests assembled shell fragments without those required functions. Six
+representative cases independently failed on missing phase/reaper helpers;
+the bounded-retirement case also omitted the current-disposable predicate.
+The original startup archive case reproduced the reported environment line747
+failure: fleet_recovery_confirm_replaced_preconfig was not defined.
+
+Once those real dependencies were present, the startup fixture also lacked the
+common directory and process-birth inputs required by the existing diagnostic
+dispatcher. Its old ownership directory did not match the canonical namespace.
+This fixture has 50 tasks, so with correct inputs the real dispatcher declines
+the single-primary diagnostic branch and retains ordinary archive validation.
+It must not be replaced with a successful guard stub.
+
+Archive searches found the earlier helper-extraction and native-inventory fixture
+cases (2026-07-21 and 2026-10-02). Their solutions require actual helper bodies
+and complete caller inputs, rather than no-op admission or timeout changes.
+R137 is another occurrence at the newer replacement-member and dispatcher seam.
+
+## Solution
+
+Frozen test-only patch
+3eb742e7244691e6d06a4503173cc505c913e8f1d8a29b3f163b8f8ef5acab0f
+adds the specific actual helper dependencies to the existing extraction utility.
+It supplies the startup fixture's canonical ownership path, common directory and
+actual shell process birth. Three additional adjacent cases also failed on
+baseline. Their fixtures now include actual bounded native-read and lock-release
+helpers, the canonical forensic namespace, and current snapshot/identity inputs.
+The reconnect fixture supplies the existing prestart inventory read while
+retaining exact-Machine, neighbor-exclusion and authenticated-shutdown assertions.
+Its former blanket no-list assertion is replaced by exactly one read, matching
+the current controller contract. No production helper, ownership rule, native check, unsafe-owner refusal,
+timeout, benchmark criterion or cleanup behavior changes.
+Independent review qualified the exact test-only patch after 69 controls passed
+in 59.89 seconds. Root integrated it in `6da3e47c7` after its own 69 controls
+passed in 68.78 seconds.
+
+## Validation
+
+The same original startup case fails before the correction. All eight startup
+variants pass afterward, including wrong-owner, accepted-executor, unconfirmed
+cleanup, missing-worker, changed-config, changed-source and guest-run-record
+refusals. The retirement/reaper/latch selection passes 49 cases, and the existing
+extraction identity control passes. The final combined run passes 69 distinct cases in 56.99 seconds: the requested
+58 and adjacent 16 have five overlaps. Collection verifies that every one of
+the 27 interrupted-gate failures is included, with related adverse cases.
+All three additional adjacent cases also failed on the unchanged baseline.
+Diff checking and Python compilation pass. This is not a full registered-gate
+pass; that gate still requires a completed rerun after qualification.
+
+The first full registered rerun passed 268 tests, then exposed one missed caller
+of the shared forensic setup. The setup used `cloudbench-fleet-ownership`, while
+the builder fixture still addressed `registries`, producing `FileNotFoundError`
+before its assertions. A one-line caller-path correction preserves all original
+assertions. Independent review reproduced the failure and checked all callers;
+root's full forensic family then passed 97 cases in 52.91 seconds. The complete
+registered gate remains pending a new rerun; these controls do not establish a
+whole-gate pass.
+
+A later complete gate passed 376 tests before the dependency-sync receipt fixture
+failed through its alternate extractor. That sole call now uses the shared real
+helper extractor and supplies the actual script snapshot. All 22 related cases
+passed independently; production ownership checks and negative assertions remain
+unchanged.
+
+Remaining-case triage then exposed the action-identity fixture extracting the
+current action wrapper without its navigation-policy helpers. The fixture now
+compiles those real helpers and provides the real inactive policy and empty batch.
+An added active-policy test verifies denial cannot mint a receipt. All five cases
+passed independently and in the root checkout (6.15 seconds). No runtime behavior
+or benchmark grade changed. A complete registered-gate pass remains unverified.
+
+A separate remaining-case run exposed a proxy fixture boundary: production now
+uses `exec flyctl`, which cannot invoke the fixtures' shell functions. The first
+loop was stopped after its captured log repeatedly reported the missing executable;
+that run is interrupted evidence, not an assertion failure. A qualification sibling
+hit its unchanged 20-second timeout. The fixtures now install an exact-argv local
+executable proxy double, retaining process lifetimes, cleanup and negative guards.
+Independent review passed all 56 related controls and verified all 41 recorded
+fixture owners were absent afterward. No production runtime or time limit changed.
+The complete registered gate is still required.
+
+The source-bound bootstrap fixture used a disposable local Git repository built
+from supplied source bytes, because its normal test machinery reads committed
+blobs. Those local commits are not historical 618430 ancestry. Initial attempts
+missing package source operands were excluded from the causal RED evidence.
+No native or provider operation was performed.
+
+## Human feedback
+
+None specific to this test-harness correction was recorded.
+
+## Reusable lesson
+
+Tests that extract production functions must carry the current dependency closure
+and real identity inputs. Otherwise a negative may pass for an unintended missing
+command, while positive controls never reach the behavior they are meant to test.

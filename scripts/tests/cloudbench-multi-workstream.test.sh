@@ -978,7 +978,28 @@ BASE_REF="$(git -C "$SANDBOX" rev-parse HEAD)"
     node_fp="$(cloudbench_node_dependency_fingerprint "$SANDBOX")"
     py_fp="$(cloudbench_manifest_fingerprint "$SANDBOX" "${CLOUDBENCH_PYTHON_MANIFESTS[@]}")"
     printf '%s %s 0 snap_0001\n' "$node_fp" "$py_fp" > "$SANDBOX/.git/cloudbench-warm-deps.fp"
+    # This fake donor models a published image as well as its volume snapshot.
+    # Keep its proof pinned to the original manifests so later drift still fails.
+    python3 - "$TMP_ROOT/image-build.fixture.json" "$node_fp" "$py_fp" <<'PY_IMAGE_PROOF'
+import json, sys
+from pathlib import Path
+image = "registry.fly.io/navi-whisper-lux-bench@sha256:" + "a" * 64
+Path(sys.argv[1]).write_text(json.dumps({
+    "schema": "cloudbench-image-build-v1", "publication_verified": True,
+    "published_image_ref": image, "image_ref": image,
+    "published_digest": "sha256:" + "a" * 64,
+    "node_dependency_fingerprint": sys.argv[2],
+    "python_dependency_fingerprint": sys.argv[3],
+}) + "\n")
+PY_IMAGE_PROOF
 )
+FIXTURE_IMAGE_BUILD_RECEIPT="$TMP_ROOT/image-build.fixture.json"
+FIXTURE_IMAGE_BUILD_RECEIPT_SHA256="$(python3 - "$FIXTURE_IMAGE_BUILD_RECEIPT" <<'PY_IMAGE_HASH'
+import hashlib, sys
+from pathlib import Path
+print(hashlib.sha256(Path(sys.argv[1]).read_bytes()).hexdigest())
+PY_IMAGE_HASH
+)"
 WS_A="$TMP_ROOT/ws-a"
 WS_B="$TMP_ROOT/ws-b"
 git -C "$SANDBOX" worktree add -q -b ws-a "$WS_A" >/dev/null
@@ -1091,7 +1112,8 @@ reset_fake_state() {
   "machines": [
     {"id": "aaaa0000000001", "name": "cloudbench-warm", "state": "stopped",
      "region": "iad", "private_ip": "",
-     "config": {"mounts": [{"volume": "vol_aaaa0001", "path": "/data", "size_gb": 40}]}}
+     "config": {"image": "registry.fly.io/navi-whisper-lux-bench@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "mounts": [{"volume": "vol_aaaa0001", "path": "/data", "size_gb": 40}]}}
   ],
   "volumes": [
     {"id": "vol_aaaa0001", "name": "cloudbench_data", "state": "created", "size_gb": 40,
@@ -1770,6 +1792,11 @@ def native_destroy(target):
 def machine_api_row(machine):
     """Native Machines API row; each config generation is a new instance."""
     row = json.loads(json.dumps(machine))
+    # Native provider rows include inherited image/lifecycle/mount identity.
+    row.setdefault("image_ref", {"digest": "sha256:" + "f" * 64})
+    row.setdefault("config", {}).setdefault("restart", {"policy": "no"})
+    for mount in row["config"].get("mounts", []):
+        mount.setdefault("path", "/data")
     if not row.get("instance_id"):
         digest = hashlib.sha256(
             json.dumps([row["id"], row.get("config") or {}], sort_keys=True).encode()
@@ -1831,6 +1858,11 @@ def serve_machines_api(port_file):
                 with open(os.path.join(FAKE_DIR, "volume-creates.log"), "a") as fh:
                     fh.write(json.dumps(request, sort_keys=True) + "\n")
                 return self.reply(200, volume)
+            if (segments[:2] == ["v1", "apps"] and len(segments) == 5
+                    and segments[2] == BENCH_APP and segments[3] == "volumes" and self.command == "GET"):
+                with locked_state() as state:
+                    volume = next((v for v in state["volumes"] if v["id"] == segments[4]), None)
+                    return self.reply(404, {"error": "volume not found"}) if volume is None else self.reply(200, volume)
             if segments[:2] != ["v1", "apps"] or len(segments) < 4 or segments[3] != "machines":
                 return self.reply(501, {"error": "route not modeled by fixture"})
             app, rest = segments[2], segments[4:]
@@ -1919,6 +1951,12 @@ if args[:1] == ["__machines_api__"]:
     serve_machines_api(args[1])
     sys.exit(0)
 if args[:1] == ["__fake_driver__"]:
+    mdir = args[1]
+    rb = open(os.path.join(mdir, "tmp", "rb.sh")).read()
+    Path(mdir, "driver-owner.json").write_text(json.dumps({
+        "pid": os.getpid(), "birth": Path(f"/proc/{os.getpid()}/stat").read_text().rsplit(") ", 1)[1].split()[19],
+        "run_token": rb_export(rb, "CLOUDBENCH_RUN_TOKEN"),
+    }))
     run_fake_driver(args[1])
     sys.exit(0)
 if args[:1] == ["__release_worker_after_child__"]:
@@ -2097,6 +2135,47 @@ elif args[:2] == ["machine", "clone"]:
             os.unlink(pool_ledger)
         os.mkdir(pool_ledger)
     print(f"cloned machine {machine_id}")
+elif args[:2] == ["machine", "exec"]:
+    # Model only the existing source/nonce-bound idle billing probe. No ACK is
+    # produced for a running/reused driver or an unrecognized guest program.
+    import runpy
+    mid, command = args[2:4]
+    parts = shlex.split(command)
+    assert parts[:5] == ["python3", "-I", "-S", "-B", "-c"] and len(parts) == 6
+    code = parts[5]
+    nonce = re.search(r"'nonce':(['\"])([0-9a-f]{32})\1", code)
+    assert nonce is not None
+    helper = runpy.run_path(os.path.join(FAKE_DIR, "..", "repo", "scripts", "cloudbench-original-volume-capture.py"))
+    assert code == helper["BILLING_GUEST"].replace("TARGET", repr(mid)).replace("NONCE", repr(nonce[2]))
+    mdir = machine_dir(mid)
+    owner_path = Path(mdir, "driver-owner.json")
+    if owner_path.exists():
+        owner = json.loads(owner_path.read_text())
+        rb = open(os.path.join(mdir, "tmp", "rb.sh")).read()
+        assert owner["run_token"] == rb_export(rb, "CLOUDBENCH_RUN_TOKEN")
+        stat_path = Path(f"/proc/{owner['pid']}/stat")
+        if stat_path.exists():
+            current = stat_path.read_text().rsplit(") ", 1)[1].split()
+            assert current[19] != owner["birth"] or current[0] == "Z", "driver is still live"
+    else:
+        # A rejected worker launch never spawned a driver or supervisor.
+        # Positive exact rejection + inert init is required; absence alone
+        # cannot acknowledge an unknown or potentially running guest.
+        assert Path(MARKERS, "worker-launch-rejected-" + mid).is_file()
+        assert not Path(MARKERS, "worker-launch-succeeded-" + mid).exists()
+        assert not Path(mdir, "driver.started").exists()
+        with locked_state() as state:
+            inert_worker = find_machine(state, mid)
+            assert inert_worker is not None
+            assert inert_worker["config"]["init"] == {"cmd": ["sleep", "infinity"]}
+        assert not list(Path(mdir).glob("**/cloudbench-worker-evidence/owner.json"))
+    with locked_state() as state:
+        machine = find_machine(state, mid)
+        assert machine is not None and machine["state"] == "started" and mid != "aaaa0000000001"
+    ack = {"kind": "exact-inert-quiescence-v1", "machine": mid, "nonce": nonce[2],
+           "boot": str(uuid.uuid5(uuid.NAMESPACE_URL, "fixture-boot:" + mid)), "unknown": [],
+           "inert_sleepers": [{"pid": 1, "role": "fixture-native-init-sleep"}]}
+    print(json.dumps({"stdout": json.dumps(ack), "stderr": "", "exit_code": 0}))
 elif args[:2] == ["machine", "status"]:
     with locked_state() as state:
         found = find_machine(state, args[2])
@@ -2894,7 +2973,7 @@ os.execvp(sys.argv[1], sys.argv[1:])')
     env -u CLOUDBENCH_SNAPSHOT_ID -u CLOUDBENCH_FLEET_ROOT \
         -u GIT_DIR -u GIT_COMMON_DIR -u GIT_WORK_TREE \
         -u BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS \
-        -u FLY_API_TOKEN -u FLY_ACCESS_TOKEN \
+        -u FLY_API_TOKEN -u FLY_ACCESS_TOKEN -u GITHUB_TOKEN \
         PATH="$FIXTURE_STORAGE:$FAKE_BIN:$PATH" \
         PYTHONPATH="$FIXTURE_STORAGE${PYTHONPATH:+:$PYTHONPATH}" \
         CLOUDBENCH_TEST_STORAGE_SCOPE="$TMP_ROOT" \
@@ -2908,6 +2987,8 @@ os.execvp(sys.argv[1], sys.argv[1:])')
         CI=1 \
         CLOUDBENCH_FAKE_DIR="$FAKE_DIR" \
         CLOUDBENCH_FAKE_CONTROLLER_WS="$ws" \
+        CLOUDBENCH_IMAGE_BUILD_RECEIPT="$FIXTURE_IMAGE_BUILD_RECEIPT" \
+        CLOUDBENCH_IMAGE_BUILD_RECEIPT_SHA256="$FIXTURE_IMAGE_BUILD_RECEIPT_SHA256" \
         CLOUDBENCH_FAKE_BREAK_REGISTRY_ROOT="${CLOUDBENCH_FAKE_BREAK_REGISTRY_ROOT:-}" \
         CLOUDBENCH_FAKE_BREAK_POOL_LEDGER="${CLOUDBENCH_FAKE_BREAK_POOL_LEDGER:-}" \
         CLOUDBENCH_FAKE_FAIL_METRICS_PROXY="${CLOUDBENCH_FAKE_FAIL_METRICS_PROXY:-0}" \
@@ -3084,7 +3165,12 @@ for record in records:
     assert matches[0]["config"]["mounts"][0]["volume"] == volume
     assert volume != "vol_aaaa0001" and any(row["id"] == volume for row in state["volumes"])
     machines.add(machine); volumes.add(volume)
+# The journal joins raw argv with spaces, so multi-line arguments (the
+# billing-stop guest program passed to `machine exec`) span several physical
+# lines. Parse only the destroy calls this check is about.
 for line in (fake / "journal.log").read_text().splitlines():
+    if not line.startswith(("machine destroy ", "volumes destroy ")):
+        continue
     argv = shlex.split(line)
     if argv[:2] == ["machine", "destroy"]:
         assert not machines.intersection(argv[2:])
@@ -3109,7 +3195,7 @@ PY_RESET
 assert_and_reset_unsealed_failed_owner() {  # <registry> <controller-log> [task verdict]
     grep -qxF "❌ runtime evidence is incomplete; unsealed disposable resources remain retained pending evidence recovery" "$2" ||
         { echo "missing unsealed runtime-evidence retention record in $2" >&2; return 1; }
-    python3 - "$1" "${3:-failed}" <<'PY_UNSEALED'
+    python3 - "$1" "${3:-failed}" "$FAKE_DIR" <<'PY_UNSEALED'
 import json
 from pathlib import Path
 import sys
@@ -3125,6 +3211,15 @@ else:
 lifecycle = json.loads((run / "_batch/lifecycle.json").read_text())
 assert lifecycle["status"] == "failed" and lifecycle["controller_exit_code"] != 0, lifecycle
 assert lifecycle["fleet_owner_token"] == registry.name, lifecycle
+# Unsealed originals stay stopped (billing-only) with their volumes attached.
+state = json.loads((Path(sys.argv[3]) / "state.json").read_text())
+for path in (registry / "clones").iterdir():
+    record = dict(line.split("=", 1) for line in path.read_text().splitlines())
+    originals = [item for item in state["machines"] if item["id"] == record["id"]]
+    assert len(originals) == 1 and originals[0]["state"] == "stopped", [(i["id"], i["state"]) for i in originals]
+    assert originals[0]["config"]["mounts"][0]["volume"] == record["volume_id"], originals
+    volumes = [item for item in state["volumes"] if item["id"] == record["volume_id"]]
+    assert len(volumes) == 1 and volumes[0]["state"] not in ("pending_destroy", "destroyed"), volumes
 PY_UNSEALED
     [ "$?" -eq 0 ] || return 1
     assert_and_reset_retained_fake_owner "$1"
@@ -5253,9 +5348,25 @@ PY
     else
         [ -s "$output/guest-shutdown.confirmed" ] ||
             fail "$bench: the delivered guest shutdown was not acknowledged"
-        if grep -qE "^machine stop " "$FAKE_DIR/journal.log"; then
-            fail "$bench: a guest that acknowledged its delivered shutdown was also stopped natively"
-        fi
+        # The guest completed its delivered shutdown before the billing-only
+        # stop. Unsealed runtime still requires retaining the exact native pair.
+        [ ! -e "$output/guest-native-stop.json" ] ||
+            fail "$bench: acknowledged guest cleanup was replaced by native guest-stop authority"
+        python3 - "$output" "$machine" "$FAKE_DIR/journal.log" <<'PY_BILLING' ||
+import json
+from pathlib import Path
+import shlex
+import sys
+output, machine, journal = Path(sys.argv[1]), sys.argv[2], Path(sys.argv[3])
+receipt = json.loads((output.parent / "_batch/billing-stop-retain" / machine / "result.private.json").read_text())
+assert receipt["machine"] == machine and receipt["status"] == "STOPPED_RETAINED", receipt
+assert receipt["stop_issued"] is True and receipt["all_config_and_volume_retained"] is True, receipt
+assert receipt["native_release"] is False and receipt["evidence_or_task_credit"] is False, receipt
+assert receipt["quiescence_sha256"] and receipt["configured_source_sha256"], receipt
+stops = [shlex.split(line)[2] for line in journal.read_text().splitlines() if line.startswith("machine stop ")]
+assert stops == [machine], stops
+PY_BILLING
+            fail "$bench: retained acknowledged guest lacks its exact zero-credit billing-stop receipt"
         # The runner's own EXIT cleanup delivered the stop: its run-scoped
         # delivery receipt exists. A runner that ignored the forwarded signal
         # leaves delivery entirely to the controller and never writes one.

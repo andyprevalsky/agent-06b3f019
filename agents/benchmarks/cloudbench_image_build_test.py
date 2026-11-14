@@ -25,7 +25,11 @@ from pathlib import Path
 
 import pytest
 
+from benchmarks.cloudbench_image_cli_test import _image_dependency_inputs
+
 ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / 'scripts' / 'lib'))
+from condition_wait import WaitTimeout, wait_until
 IMAGES = ("Dockerfile.cloudbench-warm", "Dockerfile.cloudbench")
 
 
@@ -247,6 +251,8 @@ def test_cloudbench_image_build_actual_context_excludes_nested_generated_state(t
         "agents/benchmarks/history/task_attempts.jsonl": b'{"task":"fixture","attempt":1}\n',
         "agents/benchmarks/history/span_durations.jsonl": b'{"span":"fixture","seconds":1}\n',
         "agents/benchmarks/history/task_durations.jsonl": b'{"task":"fixture","seconds":1}\n',
+        # The staged image git seed must reach /app for fresh-volume fetches (descend I11).
+        ".cloudbench-git-seed/cloudbench-seed.json": b'{"schema": "cloudbench-git-seed-v1"}\n',
     }
     generated = {
         f"{prefix}{directory}/generated-marker": b"generated-state-must-stay-local\n"
@@ -336,6 +342,130 @@ def test_cloudbench_image_build_actual_context_excludes_nested_generated_state(t
     assert not generated.keys() & files.keys(), "generated state entered Docker's build archive"
 
 
+@pytest.mark.parametrize("contender", ["none", "concurrent", "early-failure"])
+def test_cloudbench_image_build_stages_an_exact_git_seed_and_removes_it(tmp_path: Path, contender: str) -> None:
+    """Real CLI image-build: the publisher sees a verified depth-1 seed of HEAD; none remains after."""
+    context = tmp_path / "checkout"
+    libraries = context / "scripts/lib"
+    libraries.mkdir(parents=True)
+    _image_dependency_inputs(context)
+    registry = context / "agents/providers/rose/pools.py"
+    registry.parent.mkdir(parents=True)
+    shutil.copyfile(ROOT / "agents/providers/rose/pools.py", registry)
+    (context / "Dockerfile.cloudbench-warm").write_text("FROM fixture-only\n")
+    (context / "fly.cloudbench-warm.toml").write_text('app = "fixture-only"\n')
+    (context / ".gitignore").write_bytes((ROOT / ".gitignore").read_bytes())
+    (libraries / "cloudbench-env.sh").write_text(f"source {shlex.quote(str(ROOT / 'scripts/lib/cloudbench-env.sh'))}\n")
+    for name in ("cloudbench-github-token.sh", "cloudbench-app-env-lock.sh"):
+        (libraries / name).write_text("")
+    git = ["git", "-C", str(context), "-c", "user.name=fixture", "-c", "user.email=fixture@example.com"]
+    subprocess.run(["git", "init", "-q", str(context)], check=True)
+    subprocess.run([*git, "add", "-A"], check=True)
+    subprocess.run([*git, "commit", "-qm", "first"], check=True)
+    (context / "agents/history.jsonl").write_text("ledger\n" * 1000)
+    subprocess.run([*git, "add", "-A"], check=True)
+    subprocess.run([*git, "commit", "-qm", "build commit"], check=True)
+    head = subprocess.check_output([*git, "rev-parse", "HEAD"], text=True).strip()
+    provider = tmp_path / "publisher"
+    observed = tmp_path / "publisher-observed.json"
+    provider.write_text(
+        f"#!{sys.executable}\n"
+        "import json,os,subprocess,sys,time\n"
+        "from pathlib import Path\n"
+        "if sys.argv[1] != 'deploy': sys.exit(91)\n"
+        "seed=Path(sys.argv[2])/'.cloudbench-git-seed'\n"
+        "def git(*a): return subprocess.run(['git','--git-dir',str(seed),*a],capture_output=True,text=True)\n"
+        "manifest=json.loads((seed/'cloudbench-seed.json').read_text())\n"
+        "status=subprocess.check_output(['git','-C',sys.argv[2],'status','--porcelain'],text=True)\n"
+        "record={'manifest':manifest,'shallow':(seed/'shallow').read_text().strip(),"
+        "'tree':git('cat-file','-e',manifest['commit']+'^{tree}').returncode,"
+        "'parent':git('cat-file','-e',manifest['commit']+'^').returncode,'status':status}\n"
+        "target=Path(os.environ['IMAGE_TEST_OBSERVED']); temporary=target.with_suffix('.tmp')\n"
+        "temporary.write_text(json.dumps(record)); temporary.replace(target)\n"
+        "time.sleep(120)\n"
+    )
+    provider.chmod(0o700)
+    (libraries / "cloudbench-image-publisher.sh").write_text(
+        f"source {shlex.quote(str(ROOT / 'scripts/lib/cloudbench-image-publisher.sh'))}\n"
+        f"cloudbench_image_publisher_client() {{ if [ \"${{IMAGE_TEST_CLIENT_FAILURE:-0}}\" = 1 ]; then : > \"$IMAGE_TEST_EARLY_READY\"; sleep 120; return 79; fi; printf '%s\\n' {shlex.quote(str(provider))}; }}\n"
+    )
+    subprocess.run([*git, "add", "-A"], check=True)
+    subprocess.run([*git, "commit", "-qm", "publisher fixture"], check=True)
+    head = subprocess.check_output([*git, "rev-parse", "HEAD"], text=True).strip()
+    binaries = tmp_path / "bin"
+    binaries.mkdir()
+    (binaries / "flyctl").write_text("#!/usr/bin/env bash\nexit 92\n")
+    (binaries / "flyctl").chmod(0o700)
+    env = {
+        **os.environ,
+        "PATH": str(binaries) + os.pathsep + os.environ["PATH"],
+        "CLOUDBENCH_FLEET_ROOT": str(context),
+        "CLOUDBENCH_SCRIPT_SNAPSHOT": str(libraries),
+        "FLY_BENCH_API_TOKEN": "fixture-only-token-long-enough",
+        "WARM_IMAGE_REF": "",
+        "IMAGE_TEST_OBSERVED": str(observed),
+        "RUN_BENCH_CLOUD_BIN_UNDER_TEST": str(ROOT / "scripts/run-bench-cloud"),
+    }
+    arguments = [shutil.which("bash"), str(ROOT / "scripts/run-bench"), "image-build", "--no-cache",
+                 "--build-context", str(context), "--out-dir", str(tmp_path / "private-output")]
+    with (tmp_path / "private-cli.log").open("wb") as log:
+        controller = subprocess.Popen(arguments, env=env, stdout=log, stderr=log, process_group=0)
+        try:
+            wait_until(lambda: observed.exists() or controller.poll() is not None,
+                       timeout=60, description="publisher observation or early CLI exit")
+            assert observed.is_file(), (tmp_path / "private-cli.log").read_text()
+            record = json.loads(observed.read_text())
+            seed = context / ".cloudbench-git-seed"
+            seed_inode = seed.stat().st_ino
+            packs = {p.name: hashlib.sha256(p.read_bytes()).hexdigest()
+                     for p in (seed / "objects/pack").iterdir()}
+            if contender != "none":
+                competing_observed = tmp_path / "competing-observed.json"
+                early_ready = tmp_path / "early-client-ready"
+                competing_env = dict(env, IMAGE_TEST_OBSERVED=str(competing_observed),
+                                     IMAGE_TEST_EARLY_READY=str(early_ready),
+                                     IMAGE_TEST_CLIENT_FAILURE="1" if contender == "early-failure" else "0")
+                competing_arguments = arguments[:-1] + [str(tmp_path / "competing-output")]
+                with (tmp_path / "competing.log").open("wb") as competing_log:
+                    competing = subprocess.Popen(competing_arguments, env=competing_env,
+                                                 stdout=competing_log, stderr=competing_log,
+                                                 process_group=0)
+                    try:
+                        try:
+                            wait_until(lambda: competing.poll() is not None or competing_observed.exists() or early_ready.exists(),
+                                       timeout=15, description="contender refusal or controlled client readiness")
+                        except WaitTimeout:
+                            # The original test cancels a still-blocked contender at this deadline.
+                            pass
+                        if competing.poll() is None:
+                            competing.send_signal(signal.SIGTERM)
+                        competing.wait(timeout=30)
+                        assert competing.returncode != 0, "a second build entered the occupied seed context"
+                        assert controller.poll() is None, "contender disturbed the original publisher owner"
+                        assert seed.is_dir(), "another invocation deleted the active builder's seed"
+                        assert seed.stat().st_ino == seed_inode, "another invocation replaced the active builder's seed"
+                        assert {p.name: hashlib.sha256(p.read_bytes()).hexdigest()
+                                for p in (seed / "objects/pack").iterdir()} == packs
+                        assert not competing_observed.exists(), "a second publisher entered the occupied context"
+                    finally:
+                        if competing.poll() is None:
+                            competing.send_signal(signal.SIGTERM)
+                            competing.wait(timeout=30)
+            controller.send_signal(signal.SIGTERM)
+            controller.wait(timeout=60)
+        finally:
+            if controller.poll() is None:
+                controller.send_signal(signal.SIGTERM)
+                controller.wait(timeout=60)
+    # The image carries exactly the pushed build commit, depth 1 (no history),
+    # and staging it does not make the build context's provenance dirty.
+    assert record["manifest"] == {"schema": "cloudbench-git-seed-v1", "commit": head}
+    assert record["shallow"] == head
+    assert record["tree"] == 0 and record["parent"] != 0
+    assert record["status"] == ""
+    assert not (context / ".cloudbench-git-seed").exists(), "image git seed outlived the build"
+
+
 def _image_build_process_state(pid: int, birth: str) -> str:
     """Observe exact native execution state; lookup failures remain unknown."""
     try:
@@ -371,6 +501,7 @@ def test_cloudbench_image_build_cli_cancellation_joins_only_owned_publishers(
     context = tmp_path / "checkout"
     libraries = context / "scripts/lib"
     libraries.mkdir(parents=True)
+    _image_dependency_inputs(context)
     registry = context / "agents/providers/rose/pools.py"
     registry.parent.mkdir(parents=True)
     shutil.copyfile(ROOT / "agents/providers/rose/pools.py", registry)
@@ -433,8 +564,9 @@ def test_cloudbench_image_build_cli_cancellation_joins_only_owned_publishers(
         controller = subprocess.Popen(arguments, env=env, stdout=log, stderr=log, process_group=0)
         try:
             deadline = time.monotonic() + 60
-            while not ownership.exists() and controller.poll() is None and time.monotonic() < deadline:
-                time.sleep(0.05)
+            wait_until(lambda: ownership.exists() or controller.poll() is not None,
+                       timeout=max(0, deadline - time.monotonic()),
+                       description="publisher ownership or early CLI exit")
             assert ownership.is_file(), "controlled publisher did not start"
             record = json.loads(ownership.read_text())
             processes = record["processes"]
@@ -451,10 +583,15 @@ def test_cloudbench_image_build_cli_cancellation_joins_only_owned_publishers(
             )
             controller.send_signal(signal.SIGTERM)
             controller.wait(timeout=60)
-            states = [_image_build_process_state(pid, birth) for pid, birth in processes]
-            while "unknown" in states and time.monotonic() < deadline:
-                time.sleep(0.1)
+            states = []
+            def publisher_states_known():
+                nonlocal states
                 states = [_image_build_process_state(pid, birth) for pid, birth in processes]
+                return "unknown" not in states
+
+            # Retain the original shared deadline; controller.wait does not reset it.
+            wait_until(publisher_states_known, timeout=max(0, deadline - time.monotonic()),
+                       description="owned publisher process identities known")
             assert all(state in {"absent", "terminal", "replaced"} for state in states), (
                 f"owned publisher states after CLI exit: {states}"
             )

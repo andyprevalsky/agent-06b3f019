@@ -408,6 +408,7 @@ if [ "$installed_node" != "$repo_node" ]; then
             rebuild_node_dependencies "$repo_node"
         else
             echo "[cloudbench] FATAL: warm image/volume JavaScript dependencies do not match the checked-out ref" >&2
+            printf '[cloudbench] JS dependency identity: repo=%s donor=%s installed=%s donor-dir=%s repo-dir=%s\n' "$repo_node" "$donor_node" "${installed_node:-absent}" "$DEPS_DIR" "$REPO_DIR" >&2
             echo "[cloudbench]        rebuild the image or refresh the warm volume before running benchmarks" >&2
             exit 1
         fi
@@ -444,6 +445,7 @@ if [ "$installed_python" != "$repo_python" ]; then
             rebuild_python_dependencies "$repo_python"
         else
             echo "[cloudbench] FATAL: warm image/volume Python dependencies do not match the checked-out ref" >&2
+            printf '[cloudbench] Python dependency identity: repo=%s donor=%s installed=%s donor-dir=%s repo-dir=%s\n' "$repo_python" "$donor_python" "${installed_python:-absent}" "$DEPS_DIR" "$REPO_DIR" >&2
             echo "[cloudbench]        rebuild the image or refresh the warm volume before running benchmarks" >&2
             exit 1
         fi

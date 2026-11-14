@@ -104,6 +104,8 @@ Sections: Priorities · Communication · Never · Delegation and waiting · Work
 - After agent-harness changes, measure with `scripts/run-bench eval`.
 - WMH model: restore with `python -m benchmarks.wmh_build_cache pull` from `agents/`, rebuild only on user request, and publish with `bash scripts/run-bench-cloud --build-wmh` (`.claude/skills/instantiate-whm/SKILL.md` §6).
 
+**`test-mass-agent-run-0` is indefinitely quarantined from all future deploys (explicit user instruction, 2026-11-10), via its `deploy_quarantine` catalog marker. Never repair its cache or re-record it to unblock `/deploy`; retain its implementation and historical failures. For explicitly requested manual DEMO-cached benchmarks, cache repairs remain restricted to keys main never reads:** find each failing `cache_key` in `.llm-dumps/<agent_id>/` from a strict `scripts/run-bench --local <task>` replay and `POST /api/fast-cache/set` a branch-key row (backing up anything it replaces); never rewrite rows main replays (lookup can be positional), and never map outputs by goal text, because `for_each` children share one goal (PR1682 broke main's smoke this way on 2026-11-09).
+
 ## Database
 
 - Every `schema.prisma` change ships `back-end/prisma/migrations/<timestamp>_<name>/migration.sql`; local `db push` hides a missing migration and prod `migrate deploy` then fails (recipe: `back-end/CLAUDE.md`).

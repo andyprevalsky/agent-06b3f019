@@ -3713,6 +3713,74 @@ async def test_parse_responses_sse_content_and_usage():
     assert usage["cache_creation_input_tokens"] == 5
 
 
+async def test_responses_incomplete_preserves_reason_and_partial_evidence():
+    """Native fd031881 follow-up: two message items then content_filter, not length."""
+    for reason, expected in (("content_filter", RoseRefusalError),
+                             ("max_output_tokens", None),
+                             ("unrecognized_future_reason", RoseServerError),
+                             (None, RoseServerError)):
+        lines = [
+            "data: " + json.dumps({"type": "response.output_text.delta", "item_id": "partial", "delta": '{"score":1'}),
+            "data: " + json.dumps({"type": "response.output_text.delta", "item_id": "refusal", "delta": "Cannot provide this response."}),
+            "data: " + json.dumps({"type": "response.incomplete", "response": {
+                "status": "incomplete", "incomplete_details": {"reason": reason},
+                "usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}}}),
+            "data: [DONE]",
+        ]
+        stream = _FakeStream(lines)
+        closed = []
+        async def close():
+            closed.append(True)
+        stream.aclose = close
+        chunks = []
+        error = None
+        try:
+            async for chunk in parse_responses_sse(stream, actual_model="gpt-6.1-sol-foundry",
+                                                  pool_name="foundry", request_id="captured-content-filter"):
+                chunks.append(chunk)
+        except RoseError as exc:
+            error = exc
+        assert closed == [True]
+        assert [c.data["text"] for c in chunks if c.kind == "content"] == [
+            '{"score":1', "Cannot provide this response."]
+        if expected is None:
+            assert error is None
+            assert next(c.data["finish_reason"] for c in chunks if c.kind == "usage") == "length"
+        else:
+            assert isinstance(error, expected), (reason, error)
+            assert not any(c.kind in ("usage", "done") for c in chunks)
+            assert (reason or "unknown") in str(error)
+
+
+async def test_verifier_refusal_never_salvages_partial_success():
+    from helpers import llm
+    from providers.demo_cache.context import set_context, reset_context
+
+    calls = []
+    original = RoseRefusalError("Responses content_filter")
+    class RefusingClient:
+        async def complete(self, **kwargs):
+            calls.append(kwargs)
+            yield StreamChunk(kind="content", data={"text": json.dumps({
+                "reasoning": "partial response before provider refusal", "score": 1,
+                "task_completed": True})})
+            raise original
+    token = set_context(None)
+    try:
+        with patch.object(llm, "RoseClient", RefusingClient):
+            try:
+                await llm._call_llm_verifier([{"role": "user", "content": "verify"}],
+                                            "rose-labs/rose-1-ultra", None,
+                                            call_site="verifier_execute")
+            except RoseRefusalError as exc:
+                assert exc is original
+            else:
+                raise AssertionError("Verifier accepted partial success after explicit refusal")
+    finally:
+        reset_context(token)
+    assert len(calls) == 1, "Refusal must not cause another model request"
+
+
 async def test_parse_responses_sse_ignores_deprecated_idle_timeout_before_first_line():
     lines = [
         "event: response.output_text.delta",
@@ -13972,6 +14040,8 @@ async def run_all_tests():
     await r.record_async("openai_sse_empty_stalls", test_parse_openai_sse_empty_stream_raises_stall)
     await r.record_async("openai_sse_refusal_raises", test_parse_openai_sse_refusal_raises_refusal)
     await r.record_async("responses_sse_content_usage", test_parse_responses_sse_content_and_usage)
+    await r.record_async("responses_incomplete_reason", test_responses_incomplete_preserves_reason_and_partial_evidence)
+    await r.record_async("verifier_refusal_terminal", test_verifier_refusal_never_salvages_partial_success)
     await r.record_async(
         "responses_sse_ignores_idle_before_first_line",
         test_parse_responses_sse_ignores_deprecated_idle_timeout_before_first_line,

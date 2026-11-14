@@ -31,9 +31,95 @@ import deploy_test_cycle as cycle
 import deploy_test_worker as worker
 
 
+def isolate_fixture_temp(test):
+    """Own temporary environment, without borrowing the enclosing worker's lease."""
+    original_tmp = os.environ.get('TMPDIR')
+    had_tmp = 'TMPDIR' in os.environ
+    original_cache = tempfile.tempdir
+    owner = tempfile.TemporaryDirectory(prefix='deploy-worker-fixture-', dir=Path('/tmp').resolve())
+    test.addCleanup(owner.cleanup)
+    def restore():
+        tempfile.tempdir = original_cache
+        if had_tmp:
+            os.environ['TMPDIR'] = original_tmp
+        else:
+            os.environ.pop('TMPDIR', None)
+    test.addCleanup(restore)
+    temporary = Path(owner.name) / 'tmp'
+    temporary.mkdir(mode=0o700)
+    os.environ['TMPDIR'] = str(temporary)
+    tempfile.tempdir = str(temporary)
+    return Path(owner.name), temporary
+
+
+class FixtureTempIsolation(unittest.TestCase):
+    def test_parent_environment_cache_and_marker_are_restored(self):
+        before = dict(os.environ); cache = tempfile.tempdir
+        marker = Path(before['TMPDIR']) / '.deploy-tmpdir-owner.json' if before.get('TMPDIR') else None
+        original_marker = marker.read_bytes() if marker and marker.is_file() else None
+        observed = {}
+        class Case(unittest.TestCase):
+            def setUp(inner):
+                owner, tmp = isolate_fixture_temp(inner)
+                observed.update(owner=owner, tmp=tmp)
+            def runTest(inner):
+                tmp = observed['tmp']
+                inner.assertEqual(str(tmp), os.environ['TMPDIR'])
+                inner.assertEqual(str(tmp), tempfile.tempdir)
+                inner.assertEqual(tmp, tmp.resolve())
+                inner.assertEqual(0o700, tmp.stat().st_mode & 0o777)
+                inner.assertFalse((tmp / '.deploy-tmpdir-owner.json').exists())
+                with tempfile.TemporaryDirectory() as a, tempfile.TemporaryDirectory() as b:
+                    inner.assertNotIn(Path(a), Path(b).parents)
+                    inner.assertNotIn(Path(b), Path(a).parents)
+        result = unittest.TestResult(); Case().run(result)
+        self.assertEqual([], result.errors); self.assertEqual([], result.failures)
+        self.assertEqual(before, dict(os.environ)); self.assertEqual(cache, tempfile.tempdir)
+        self.assertFalse(observed['owner'].exists())
+        if original_marker is not None:self.assertEqual(original_marker, marker.read_bytes())
+
+    def test_failed_setup_joins_owned_child_before_temp_cleanup(self):
+        before = dict(os.environ); cache = tempfile.tempdir; observed = {}
+        class Case(unittest.TestCase):
+            def setUp(inner):
+                owner, tmp = isolate_fixture_temp(inner); observed['owner'] = owner
+                child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'], cwd=tmp)
+                observed['child'] = child
+                def finish():
+                    child.terminate(); child.wait(timeout=5)
+                    observed['joined_before_removal'] = owner.exists() and child.poll() is not None
+                inner.addCleanup(finish)
+                raise RuntimeError('intentional setup failure')
+            def runTest(inner):
+                raise AssertionError('failed setup cannot execute its test')
+        result = unittest.TestResult(); Case().run(result)
+        self.assertEqual(1, len(result.errors)); self.assertEqual([], result.failures)
+        self.assertTrue(observed['joined_before_removal']); self.assertFalse(observed['owner'].exists())
+        self.assertIsNotNone(observed['child'].returncode)
+        self.assertEqual(before, dict(os.environ)); self.assertEqual(cache, tempfile.tempdir)
+        print('FIXTURE_OWNED_CHILD_JOINED', observed['child'].pid)
+
+    def test_restoration_does_not_replace_unrelated_environment(self):
+        key = 'DEPLOY_FIXTURE_UNRELATED_CONTROL'; old = os.environ.get(key); observed = {}
+        class Case(unittest.TestCase):
+            def setUp(inner):
+                isolate_fixture_temp(inner)
+            def runTest(inner):
+                os.environ[key] = 'changed-by-test'
+        try:
+            result = unittest.TestResult(); Case().run(result)
+            self.assertEqual([], result.errors); self.assertEqual([], result.failures)
+            self.assertEqual('changed-by-test', os.environ[key])
+        finally:
+            if old is None:os.environ.pop(key, None)
+            else:os.environ[key] = old
+
+
 class Worker(unittest.TestCase):
     def setUp(self):
+        isolate_fixture_temp(self)
         self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
         subprocess.run(['git', 'init', '-q', str(self.root)], check=True)
         (self.root/'code').write_text('fixture')
@@ -47,6 +133,7 @@ class Worker(unittest.TestCase):
                         'checks': ['first','second'], 'skips': {}, 'phase': 'initial',
                         'worker_recipe': self.recipe}
         self.coordinator_temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.coordinator_temp.cleanup)
         self.coordinator = Path(self.coordinator_temp.name)
         subprocess.run(['git','clone','-q','--shared',str(self.root),str(self.coordinator)],check=True)
         (self.coordinator/'.git/info/exclude').write_text('.context/\n')
@@ -60,6 +147,31 @@ class Worker(unittest.TestCase):
         cycle.CANCEL.clear()
         self.coordinator_temp.cleanup()
         self.temp.cleanup()
+
+    def test_owned_external_tmpdir_native_worker_contract(self):
+        with tempfile.TemporaryDirectory(prefix='dpt-') as value:
+            path=Path(value);path.chmod(0o700)
+            lease=dict(schema='deploy-external-tmpdir-v1',coordinator_root=str(self.coordinator),
+                       worker_root=str(self.root),gate='gate',
+                       uid=os.geteuid(),device=path.stat().st_dev,inode=path.stat().st_ino)
+            marker=path/'.deploy-tmpdir-owner.json'
+            marker.write_text(json.dumps(lease));marker.chmod(0o600)
+            request=copy.deepcopy(self.request)
+            request.update(external_tmpdir=lease,external_tmpdir_path=value)
+            # A valid lease reaches real native cases, preserving both their outcomes.
+            with patch.dict(os.environ,{'TMPDIR':value}):
+                result=worker.execute(request,self.root)
+            self.assertEqual({'first':'FAIL','second':'PASS'},result['cases'])
+            for failure in ('env','marker','recipe'):
+                bad=copy.deepcopy(request);bad['token']='rejected-'+failure
+                env=value
+                if failure=='env':env=str(self.root)
+                if failure=='marker':marker.chmod(0o644)
+                if failure=='recipe':bad['worker_recipe']['cases']['first']['env']={'TMPDIR':str(self.root)}
+                with patch.dict(os.environ,{'TMPDIR':env}),self.assertRaises(ValueError):
+                    worker.execute(bad,self.root)
+                marker.chmod(0o600)
+                self.assertFalse((self.root/'.context/deploy-worker'/worker.hashlib.sha256(bad['token'].encode()).hexdigest()).exists())
 
     def test_remote_cleanup_owner_in_an_otherwise_passing_result_is_unverified_and_blocks_resume(self):
         # CodeRabbit 4449994487: a boxes-thread (native-backend) gate is not a native producer; the adapter's
@@ -116,10 +228,10 @@ class Worker(unittest.TestCase):
         self.assertNotIn('cleanup_owner', result)
 
     def test_native_producer_and_generic_use_their_declared_cleanup_authority(self):
-        # 'agentcard' is a stale plan's retired AgentCard lane: its tasks run in cloud smoke now, so the
-        # category earns no native-producer cleanup authority and is owned like any generic gate.
+        # Existing explicitly bound legacy AgentCard owners retain native cleanup custody;
+        # this compatibility does not select a new lane in the current cloud-smoke planner.
         for kind in ('generic', 'cloud', 'agentcard'):
-            native = kind == 'cloud'
+            native = kind in {'cloud', 'agentcard'}
             with self.subTest(kind=kind):
                 gate = {'name': kind, 'checks': ['first'], 'command': ['fixture'],
                         'case_protocol': True, 'native_cloud': kind == 'cloud',
@@ -1095,9 +1207,10 @@ raise SystemExit(reply.get('rc', 0))
 class Boxes(unittest.TestCase):
     """Fake dvb-onbox on PATH; nothing here contacts boxes.dev or runs services."""
     def setUp(self):
+        isolate_fixture_temp(self)
         import deploy_test_boxes as boxes
         self.boxes = boxes
-        self.temp = tempfile.TemporaryDirectory(); self.root = Path(self.temp.name) / 'worker'
+        self.temp = tempfile.TemporaryDirectory(); self.addCleanup(self.temp.cleanup); self.root = Path(self.temp.name) / 'worker'
         self.root.mkdir()
         subprocess.run(['git', 'init', '-q', str(self.root)], check=True)
         (self.root / 'code').write_text('fixture'); (self.root / '.git/info/exclude').write_text('.context/\n')
@@ -1120,6 +1233,7 @@ class Boxes(unittest.TestCase):
                                            'FAKE_DVB_CONFIG': str(self.config), 'DEPLOY_BOXES_POLL_SECONDS': '0.01',
                                            'DEPLOY_BOXES_ATTACHMENTS_ROOT': str(self.attachments.parents[1])})
         self.env.start()
+        self.addCleanup(self.env.stop)
         native = worker.execute(self.request, self.root)  # the real native worker document
         self.native_bytes = json.dumps(native, indent=2, allow_nan=False) + '\n'
         self.native = native
@@ -2393,6 +2507,13 @@ FAKE_NPM = """#!/usr/bin/env python3
 import json, os, signal, sys, time
 from pathlib import Path
 cfg = json.load(open(os.environ['FAKE_RUNNER_CONFIG'])); be = Path.cwd()
+if cfg.get('native_filter_js'):
+    import subprocess
+    requested = [r['domain'] for r in cfg['results']]
+    done = subprocess.run(['node', cfg['native_filter_js'], json.dumps(requested)], capture_output=True, text=True, check=True)
+    executed = json.loads(done.stdout.splitlines()[-1])
+    print('FAKE_NATIVE_EXECUTION ' + json.dumps(executed))
+    cfg['results'] = [r for r in cfg['results'] if r['domain'] in executed]
 if cfg.get('cancel_parent'): os.kill(os.getppid(), signal.SIGTERM)
 time.sleep(cfg.get('sleep', 0))
 (be / 'coverage/blackbox-run-shard1').mkdir(parents=True, exist_ok=True)
@@ -2426,9 +2547,10 @@ raise SystemExit(cfg.get('c8_rc', 0))
 class Backend(unittest.TestCase):
     """Case-aware backend coverage adapter over a fake sharded runner; no services, no real c8."""
     def setUp(self):
+        isolate_fixture_temp(self)
         import deploy_test_backend as backend
         self.backend = backend
-        self.temp = tempfile.TemporaryDirectory(); self.root = Path(self.temp.name) / 'root'
+        self.temp = tempfile.TemporaryDirectory(); self.addCleanup(self.temp.cleanup); self.root = Path(self.temp.name) / 'root'
         (self.root / 'back-end/scripts').mkdir(parents=True); (self.root / 'scripts/tests').mkdir(parents=True)
         (self.root / 'back-end/src/tests/blackbox').mkdir(parents=True)
         for d in ('alpha', 'beta', 'gamma'):
@@ -2451,6 +2573,7 @@ class Backend(unittest.TestCase):
                                            'ROSE_TRUST_CONDUCTOR_WORKSPACE_NAME': '0',
                                            'FAKE_RUNNER_CONFIG': str(self.config), 'FAKE_NPX_CALLS': str(self.npx_calls)})
         self.env.start()
+        self.addCleanup(self.env.stop)
         self.request = {'token': 'be-1', 'source': cycle.source(self.root), 'gate': 'backend-coverage-blackbox',
                         'checks': backend.checks_for(['alpha', 'beta', 'gamma']), 'skips': {}, 'phase': 'initial'}
 
@@ -2504,8 +2627,133 @@ class Backend(unittest.TestCase):
         self.request['source'] = cycle.source(self.root)
         return state, calls, env
 
+    def test_backend_rejects_external_tmpdir_before_effects(self):
+        self.request.update(external_tmpdir={'invalid':True},external_tmpdir_path='/not-owned')
+        with patch.object(self.backend,'restore_workspace_postgres',side_effect=AssertionError('effect reached')) as restore:
+            with self.assertRaises(ValueError):
+                self.backend.execute(self.request,self.root)
+        restore.assert_not_called()
+        self.assertFalse((self.root/'.context/deploy-backend').exists())
+
+    def test_backend_external_tmpdir_valid_and_denials(self):
+        with tempfile.TemporaryDirectory(prefix='dpt-') as value:
+            path=Path(value);path.chmod(0o700)
+            lease=dict(schema='deploy-external-tmpdir-v1',coordinator_root=str(Path(self.temp.name)/'coordinator'),
+                       worker_root=str(self.root),gate=self.request['gate'],uid=os.geteuid(),
+                       device=path.stat().st_dev,inode=path.stat().st_ino)
+            marker=path/'.deploy-tmpdir-owner.json';marker.write_text(json.dumps(lease));marker.chmod(0o600)
+            base=copy.deepcopy(self.request);base.update(external_tmpdir=lease,external_tmpdir_path=value)
+            for mode in ('missing-lease','missing-path','both-missing','wrong-lease','env','setup','cleanup','case'):
+                request=copy.deepcopy(base);env=value
+                if mode=='missing-lease':request.pop('external_tmpdir')
+                elif mode=='missing-path':request.pop('external_tmpdir_path')
+                elif mode=='both-missing':request.pop('external_tmpdir');request.pop('external_tmpdir_path')
+                elif mode=='wrong-lease':request['external_tmpdir']={**lease,'inode':lease['inode']+1}
+                elif mode=='env':env=str(self.root)
+                else:
+                    spec={'command':['true'],'env':{'TMPDIR':str(self.root)}}
+                    request['worker_recipe']={mode:spec} if mode!='case' else {'cases':{'x':spec}}
+                with patch.dict(os.environ,{'TMPDIR':env}),patch.object(self.backend,'restore_workspace_postgres') as restore:
+                    with self.assertRaises(ValueError):self.backend._execute(request,self.root)
+                    restore.assert_not_called()
+                self.assertFalse((self.root/'.context/deploy-backend').exists())
+            self.configure(0,self.rows(alpha=True,beta=True,gamma=True))
+            with patch.dict(os.environ,{'TMPDIR':value}):
+                result=self.backend.execute(base,self.root)
+            self.assertEqual('PASS',result['cases']['blackbox:alpha'])
+            self.assertTrue(result['cleanup_complete'])
+
+    def native_qualified_filter(self):
+        # Execute the actual existing run.ts filter block without importing its live runner.
+        text=(ROOT/'back-end/src/tests/blackbox/run.ts').read_text()
+        start=text.index('const skipDomains = new Set(')
+        end=text.index('if (requested.length === 0)',start)
+        script=Path(self.temp.name)/'native-filter.js'
+        script.write_text("const requestedRaw=JSON.parse(process.argv[2]);\n"
+            "const readEnv=(...names)=>names.map(n=>process.env[n]).find(v=>v!==undefined);\n"
+            +text[start:end]+"\nconsole.log(JSON.stringify(requested));\n")
+        config=cycle.read(self.config);config['native_filter_js']=str(script);cycle.write(self.config,config)
+
+    def qualified_filter_request(self):
+        self.configure(0,self.rows(alpha=True,beta=True,gamma=True))
+        self.native_qualified_filter()
+        entry={'source':self.request['source'],'disposition':'external / waived',
+            'rca':{'id':'native-credit-failure','description':'provider credits exhausted',
+                   'evidence':'retained-native.log','native_result':'FAIL','attribution':'NOT_INTRODUCED',
+                   'check':'backend-coverage-blackbox/blackbox:beta',
+                   'external_provider':{'name':'fixture-provider','reason':'credits exhausted'}}}
+        self.request['checks'].remove('blackbox:beta')
+        self.request['skips']={'blackbox:beta':entry}
+        return entry
+
+    def test_qualified_execution_uses_native_filter_without_running_excluded_domain(self):
+        entry=self.qualified_filter_request();before=copy.deepcopy(self.request)
+        with patch.dict(os.environ,{'CONTRACT_TEST_SKIP_DOMAINS':'integration-health'}):
+            result=self.backend.execute(self.request,self.root)
+        text=Path(result['runner_log']).read_text()
+        executed=json.loads(next(line.split('FAKE_NATIVE_EXECUTION ',1)[1] for line in text.splitlines() if line.startswith('FAKE_NATIVE_EXECUTION ')))
+        self.assertEqual(['alpha','gamma'],executed)
+        self.assertNotIn('blackbox:beta',result['cases'])
+        self.assertTrue(all(value=='PASS' for value in result['cases'].values()))
+        proof=result['evidence']['execution_exclusions']
+        self.assertEqual(['beta'],proof['qualified_domains'])
+        self.assertEqual(['integration-health'],proof['producer_fixed_domains'])
+        self.assertEqual(self.backend.qualified_exclusions(self.request,['alpha','beta','gamma']),proof['qualification_sha256'])
+        self.assertEqual(before,self.request)
+
+    def test_qualified_execution_rejects_caller_recipe_extras_before_launch(self):
+        self.qualified_filter_request()
+        recipe={'cases':{name:{'command':['npm','run','test:coverage:sharded'],'cwd':'back-end','sweep':'backend'}
+                         for name in self.backend.checks_for(['alpha','beta','gamma'])}}
+        for scope in ('caller','setup','cleanup','case'):
+            request=copy.deepcopy(self.request);request['worker_recipe']=copy.deepcopy(recipe)
+            extra={'BLACKBOX_TEST_SKIP_DOMAINS':'alpha'}
+            if scope in ('setup','cleanup'):request['worker_recipe'][scope]={'command':['true'],'env':extra}
+            if scope=='case':
+                for case in request['worker_recipe']['cases'].values():case['env']=extra
+            with patch.dict(os.environ,extra if scope=='caller' else {}),patch.object(self.backend,'run_command') as launch:
+                with self.assertRaisesRegex(ValueError,'skip_env_not_allowed'):self.backend.execute(request,self.root)
+                launch.assert_not_called()
+            shutil.rmtree(self.root/'.context',ignore_errors=True)
+
+    def test_qualified_execution_changes_only_sweep_environment(self):
+        self.qualified_filter_request()
+        self.request['worker_recipe']={'cases':{
+            k:{'command':['npm','run','test:coverage:sharded'],'cwd':'back-end','sweep':'backend','env':{'CASE_ONLY':'kept'}}
+            for k in self.backend.checks_for(['alpha','beta','gamma'])},
+            'setup':{'command':['true'],'env':{'SETUP_ONLY':'kept'}},
+            'cleanup':{'command':['true'],'env':{'CLEANUP_ONLY':'kept'}}}
+        before=copy.deepcopy(self.request);calls=[];native=self.backend.run_command
+        def run(argv,**kwargs):
+            calls.append((list(argv),dict(kwargs['env'])))
+            return native(argv,**kwargs)
+        with patch.dict(os.environ,{'BLACKBOX_TEST_SKIP_DOMAINS':'integration-health','CONTRACT_TEST_SKIP_DOMAINS':'integration-health','OTHER_VALUE':'kept'}), \
+             patch.object(self.backend,'run_command',side_effect=run):
+            result=self.backend.execute(self.request,self.root)
+        self.assertEqual(before,self.request)
+        self.assertTrue(result['complete'])
+        self.assertEqual(1,sum(argv==['npm','run','test:coverage:sharded'] for argv,env in calls))
+        for argv,env in calls:
+            expected='beta,integration-health' if argv==['npm','run','test:coverage:sharded'] else 'integration-health'
+            self.assertEqual(expected,env['BLACKBOX_TEST_SKIP_DOMAINS'])
+            self.assertEqual(expected,env['CONTRACT_TEST_SKIP_DOMAINS'])
+            self.assertEqual('kept',env['OTHER_VALUE']);self.assertEqual('kept',env['CASE_ONLY'])
+        self.assertTrue(all(result['cases'][k]=='PASS' for k in ('units','fps','coverage-threshold','teardown')))
+
+    def test_qualified_execution_missing_active_or_unexpected_rows_are_unverified(self):
+        self.qualified_filter_request()
+        config=cycle.read(self.config);config['results']=self.rows(alpha=True,beta=True);cycle.write(self.config,config)
+        result=self.backend.execute(self.request,self.root)
+        self.assertEqual('UNVERIFIED',result['cases']['blackbox:gamma'])
+        self.assertFalse(result['complete'])
+        shutil.rmtree(self.root/'.context')
+        self.configure(0,self.rows(alpha=True,beta=True,gamma=True))  # A child ignoring native filtering is not credited.
+        result=self.backend.execute(self.request,self.root)
+        self.assertTrue(all(v=='UNVERIFIED' for k,v in result['cases'].items() if k.startswith('blackbox:')))
+        self.assertFalse(result['complete'])
+
     def test_qualified_treasury_exclusion_keeps_full_native_peer_outcomes(self):
-        # Actual43: the unchanged full shards include an already-qualified treasury FAIL.
+        # Preserve the prior native treasury FAIL in its qualification; do not execute it again.
         (self.root / 'back-end/src/tests/blackbox/treasury-rails.blackbox.ts').write_text('export {}\n')
         self.request['source'] = cycle.source(self.root)
         qualification = {'source': self.request['source'], 'disposition': 'treasury / skipped with warning',
@@ -2522,6 +2770,7 @@ class Backend(unittest.TestCase):
         config = cycle.read(self.config)
         config['extra_summaries'] = {'blackbox-run-shard2': json.dumps({'results': self.rows(gamma=True)})}
         cycle.write(self.config, config)
+        self.native_qualified_filter()
         result = self.backend.execute(self.request, self.root)
         self.assertEqual('PASS', result['cases']['blackbox:alpha'])
         self.assertEqual('FAIL', result['cases']['blackbox:beta'])
@@ -2531,10 +2780,12 @@ class Backend(unittest.TestCase):
         self.assertEqual('PASS', result['cases']['teardown'])
         self.assertNotIn('blackbox:treasury-rails', result['cases'])
         self.assertEqual([], result['evidence']['unknown_domains'])
-        excluded = result['evidence']['qualified_excluded_rows']['blackbox:treasury-rails']
-        self.assertIs(excluded['passed'], False); self.assertIs(excluded['aborted'], False)
+        self.assertNotIn('qualified_excluded_rows',result['evidence'])
+        excluded = result['evidence']['execution_exclusions']
+        self.assertEqual(['treasury-rails'],excluded['qualified_domains'])
         self.assertEqual(__import__('hashlib').sha256(json.dumps(qualification, sort_keys=True).encode()).hexdigest(),
-                         excluded['qualification_sha256'])
+                         excluded['qualification_sha256']['blackbox:treasury-rails'])
+        self.assertEqual('FAIL',qualification['rca']['native_result'])
         self.assertEqual(2, len(result['evidence']['artifacts']['summaries']))
         self.assertEqual(1, result['native_exit']); self.assertFalse(result['complete'])
         self.assertTrue(result['cleanup_complete']); self.assertEqual(before, self.request)
@@ -2703,6 +2954,187 @@ class Backend(unittest.TestCase):
         self.configure(0, self.rows(alpha=True, beta=True, gamma=True))
         self.request['checks'] = ['blackbox:delta', 'units']
         with self.assertRaisesRegex(ValueError, 'frozen domain list'): self.backend.execute(self.request, self.root)
+
+    def collection_fixture(self):
+        self.configure(1, self.rows(alpha=True, beta=False, gamma=True))
+        result = self.backend.execute(self.request, self.root)
+        native = Path(result['runner_log']).parent
+        (native/'teardown.log').unlink()
+        for name in ('units.log','units-probe.log'):
+            (self.root/'back-end/coverage'/name).write_text('native fake complete\n')
+        folder = self.root/'.context/original';folder.mkdir()
+        finished=time.time()
+        receipt={'token':self.request['token'],'source':self.request['source'],'gate':self.request['gate'],
+                 'executed':True,'complete':False,'cancelled':True,'native_exit':-9,
+                 'cases':dict.fromkeys(self.request['checks'],'UNVERIFIED'),
+                 'started_at':result['started_at'],'finished_at':finished,
+                 'host_admission':{'original_budget_seconds':14400,'deadline_monotonic':time.monotonic()+14400,'started':True}}
+        original={**self.request,'worker_root':str(self.root),'worker_recipe':{
+            'cases':{c:{'command':['npm','run','test:coverage:sharded'],'cwd':'back-end','sweep':'backend'} for c in self.request['checks']}}}
+        cycle.write(folder/'request.json',original);cycle.write(folder/'receipt.json',receipt)
+        cycle.write(folder/'output.log.process.json',{'native_exit':-9,'quiescent':True,'remaining':[],'error':None})
+        text=Path(result['runner_log']).read_text()
+        children=self.backend.current_shard_logs(self.root,text,receipt['started_at'])
+        joined=text+'\n'+'\n'.join(t for _,t in children)
+        files=[folder/n for n in ('request.json','receipt.json','output.log.process.json')]+[
+            native/'runner.log',native/'threshold.log',self.root/'back-end/coverage/units.log',
+            self.root/'back-end/coverage/units-probe.log']+[p for p,_ in children]+list((self.root/'back-end/coverage').glob('blackbox-run-shard*/summary.json'))
+        archives=[self.backend.owned_archive(self.root,self.backend.ARCHIVE_LINE.search(joined).group(1))]+[
+            self.backend.owned_archive(self.root,n) for n in self.backend.FAILED_SHARD_LINE.findall(joined)]
+        sourcefiles={}
+        for raw in subprocess.check_output(['git','ls-files','-z'],cwd=self.root).split(b'\0'):
+            if raw:
+                name=os.fsdecode(raw);sourcefiles[name]={'sha256':self.backend.sha_file(self.root/name),'mode':cycle.source_mode(self.root/name)}
+        seal={'kind':'backend-collection-seal-v1','sealed_at':time.time(),'original_folder':str(folder),'worker_root':str(self.root),
+              'token':original['token'],'producer_source':original['source'],'source_files':sourcefiles,
+              'request_sha256':self.backend.sha_file(folder/'request.json'),'receipt_sha256':self.backend.sha_file(folder/'receipt.json'),
+              'files':{str(p):{'sha256':self.backend.sha_file(p),'size':p.stat().st_size,'mtime_ns':p.stat().st_mtime_ns} for p in files},
+              'archives':{str(a):{'sha256':self.backend.archive_manifest(a)[0],'files':self.backend.archive_manifest(a)[1]} for a in archives}}
+        path=self.root/'.context/seal.json';cycle.write(path,seal)
+        request={**original,'token':'new-collection','collection':{'seal':str(path),'seal_sha256':self.backend.sha_file(path),'report_timeout_seconds':30}}
+        return request,seal,path
+
+    def test_collection_only_never_launches_producer_or_teardown(self):
+        request,seal,path=self.collection_fixture()
+        runner=self.backend.run_command
+        def only_report(argv,**kwargs):
+            self.assertIn('c8 report',' '.join(argv),'collection launched a producer or teardown')
+            return runner(argv,**kwargs)
+        with patch.object(self.backend,'run_command',side_effect=only_report):
+            result=self.backend.execute(request,self.root)
+        self.assertEqual('FAIL',result['cases']['blackbox:beta'])
+        self.assertEqual('PASS',result['cases']['blackbox:alpha'])
+        self.assertEqual('UNVERIFIED',result['cases']['teardown'])
+        self.assertFalse(result['complete'])
+        self.assertEqual(seal['producer_source'],result['collection']['producer_source'])
+        self.assertEqual(seal['receipt_sha256'],self.backend.sha_file(Path(seal['original_folder'])/'receipt.json'))
+        self.backend.validate_collection_result(result,request,self.root)
+        with self.assertRaises(ValueError):self.backend.execute(request,self.root)
+
+    def test_collection_seal_tamper_source_and_late_writer_refuse(self):
+        request,seal,path=self.collection_fixture()
+        with patch.object(self.backend,'run_command',side_effect=AssertionError('must not execute')):
+            bad=copy.deepcopy(request);bad['collection']['seal_sha256']='0'*64
+            with self.assertRaises(ValueError):self.backend.execute(bad,self.root)
+            (self.root/'back-end/src/tests/blackbox/alpha.blackbox.ts').write_text('changed')
+            with self.assertRaises(ValueError):self.backend.execute(request,self.root)
+        self.assertFalse((self.root/'.context/deploy-backend/collection-new-collection').exists())
+
+    def test_collection_missing_partial_duplicate_and_clock_refuse(self):
+        request,seal,path=self.collection_fixture()
+        for mutate in [lambda d:d.update(archives={}),lambda d:d['files'].pop(next(iter(d['files']))),lambda d:d.update(sealed_at=0)]:
+            bad=copy.deepcopy(seal);mutate(bad);cycle.write(path,bad)
+            req=copy.deepcopy(request);req['collection']['seal_sha256']=self.backend.sha_file(path)
+            with self.assertRaises(ValueError):self.backend.execute(req,self.root)
+        cycle.write(path,seal)
+        summary=next((self.root/'back-end/coverage').glob('blackbox-run-shard*/summary.json'))
+        summary.unlink()
+        with self.assertRaises(ValueError):self.backend.execute(request,self.root)
+
+    def test_collection_post_report_change_is_not_accepted(self):
+        request,seal,path=self.collection_fixture()
+        runner=self.backend.run_command
+        def late(argv,**kwargs):
+            result=runner(argv,**kwargs)
+            next((self.root/'back-end/coverage').glob('blackbox-run-shard*/summary.json')).write_text('{}')
+            return result
+        with patch.object(self.backend,'run_command',side_effect=late),self.assertRaises(ValueError):
+            self.backend.execute(request,self.root)
+
+    def test_collection_report_failure_cannot_be_promoted(self):
+        request,seal,path=self.collection_fixture()
+        config=cycle.read(self.config);config['c8_rc']=1;cycle.write(self.config,config)
+        result=self.backend.execute(request,self.root)
+        self.assertEqual('UNVERIFIED',result['cases']['coverage-threshold'])
+        result['cases']['coverage-threshold']='PASS'
+        with self.assertRaises(ValueError):self.backend.validate_collection_result(result,request,self.root)
+
+    def test_collection_duplicate_shard_is_not_recoverable(self):
+        request,seal,path=self.collection_fixture()
+        summary=next((self.root/'back-end/coverage').glob('blackbox-run-shard*/summary.json'))
+        duplicate=summary.parent.parent/'blackbox-run-shard99/summary.json'
+        duplicate.parent.mkdir();duplicate.write_bytes(summary.read_bytes())
+        row={'sha256':self.backend.sha_file(duplicate),'size':duplicate.stat().st_size,'mtime_ns':duplicate.stat().st_mtime_ns}
+        seal['files'][str(duplicate)]=row;cycle.write(path,seal)
+        request['collection']['seal_sha256']=self.backend.sha_file(path)
+        with self.assertRaises(ValueError):self.backend.execute(request,self.root)
+
+    def test_collection_bounds_foreign_root_and_forged_result_refuse(self):
+        request,seal,path=self.collection_fixture()
+        for timeout in (True,0,-1,601,float('inf')):
+            bad=copy.deepcopy(request);bad['collection']['report_timeout_seconds']=timeout
+            with self.assertRaises(ValueError):self.backend.execute(bad,self.root)
+        bad=copy.deepcopy(request);bad['token']='../escape'
+        with self.assertRaises(ValueError):self.backend.execute(bad,self.root)
+        bad=copy.deepcopy(seal);bad['worker_root']=str(self.root.parent);cycle.write(path,bad)
+        changed=copy.deepcopy(request);changed['collection']['seal_sha256']=self.backend.sha_file(path)
+        with self.assertRaises(ValueError):self.backend.execute(changed,self.root)
+        cycle.write(path,seal)
+        result=self.backend.execute(request,self.root)
+        result['cases']['blackbox:beta']='PASS'
+        with self.assertRaises(ValueError):self.backend.validate_collection_result(result,request,self.root)
+
+    def test_collection_harness_delta_keeps_producer_source_explicit(self):
+        path=self.root/'scripts/deploy_test_backend.py';path.write_text('# original harness\n')
+        subprocess.run(['git','-C',str(self.root),'add','.'],check=True)
+        subprocess.run(['git','-C',str(self.root),'-c','user.name=t','-c','user.email=t@x','commit','-qm','harness'],check=True)
+        self.request['source']=cycle.source(self.root)
+        request,seal,pinpath=self.collection_fixture()
+        old=request['source'];path.write_text('# collection-only harness repair\n')
+        request['source']=cycle.source(self.root)
+        result=self.backend.execute(request,self.root)
+        self.assertNotEqual(old,request['source'])
+        self.assertEqual(old,result['collection']['producer_source'])
+        self.assertEqual(request['source'],result['collection']['collector_source'])
+        self.assertEqual({'scripts/deploy_test_backend.py'},set(result['collection']['harness_delta']))
+        self.backend.validate_collection_result(result,request,self.root)
+
+    def test_collection_union_and_native_case_tampering_refuse(self):
+        request,seal,path=self.collection_fixture()
+        result=self.backend.execute(request,self.root)
+        identity=result['evidence']['coverage-threshold']['identity']
+        union=Path(identity['union']);next(union.iterdir()).write_text('forged')
+        identity['union_manifest_sha256']=self.backend.archive_manifest(union)[0]
+        with self.assertRaises(ValueError):self.backend.validate_collection_result(result,request,self.root)
+
+    def test_collection_failed_cases_preserves_prefixed_native_evidence(self):
+        request,seal,path=self.collection_fixture()
+        result=self.backend.execute(request,self.root)
+        receipt={**result,'worker_evidence':result['evidence']}
+        failures=cycle.failed_cases({'phase':'collection','source':request['source']},[receipt])
+        failed=next(f for f in failures if f['check']=='backend-coverage-blackbox/blackbox:beta')
+        shard=next((self.root/'back-end/coverage').glob('blackbox-run-shard*/summary.json'))
+        self.assertEqual({'shard':str(shard),'passed':False,'aborted':False},failed['worker_evidence'])
+        self.assertNotIn('blackbox:blackbox:beta',result['evidence'])
+
+    def test_collection_claim_parent_is_synced_before_report(self):
+        request,seal,path=self.collection_fixture()
+        parent=self.root/'.context/deploy-backend'
+        claim=parent/'collection-claim-be-1.json'
+        events=[];fsync=os.fsync;report=self.backend.threshold_over_archive
+        def sync(fd):
+            target=Path(os.readlink('/proc/self/fd/'+str(fd)))
+            if target==claim:events.append('file')
+            if target==parent:events.append('directory')
+            return fsync(fd)
+        def tail(*args,**kwargs):
+            self.assertEqual(['file','directory'],events)
+            return report(*args,**kwargs)
+        with patch.object(os,'fsync',side_effect=sync),patch.object(self.backend,'threshold_over_archive',side_effect=tail):
+            self.backend.execute(request,self.root)
+
+    def test_collection_failed_claim_parent_sync_stops_report_and_retains_claim(self):
+        request,seal,path=self.collection_fixture()
+        parent=self.root/'.context/deploy-backend'
+        claim=parent/'collection-claim-be-1.json';fsync=os.fsync
+        def sync(fd):
+            if Path(os.readlink('/proc/self/fd/'+str(fd)))==parent:raise OSError('directory sync failed')
+            return fsync(fd)
+        with patch.object(os,'fsync',side_effect=sync),patch.object(self.backend,'threshold_over_archive',wraps=self.backend.threshold_over_archive) as report:
+            with self.assertRaisesRegex(OSError,'directory sync failed'):self.backend.execute(request,self.root)
+            report.assert_not_called()
+        self.assertEqual({'seal':request['collection']['seal_sha256'],'token':request['token']},cycle.read(claim))
+        with self.assertRaisesRegex(ValueError,'collection claim'):self.backend.execute(request,self.root)
 
     def test_one_failed_domain_keeps_its_peers_and_threshold_runs_over_the_archive(self):
         self.configure(1, self.rows(alpha=True, beta=False, gamma=True))
@@ -3524,12 +3956,12 @@ class StoppedPreStackIsolation(unittest.TestCase):
         self.addCleanup(fixture.doCleanups)
         self.addCleanup(fixture.tearDown)
         self.root = fixture.root
-        # The fixture uses the actual reviewed versioned driver, not a mock of its SHA.
-        # Receipts are historical: admission binds the driver at the receipt's head,
-        # so read the reviewed bytes from Git rather than the current checkout.
-        # Accepting a later driver requires a newly reviewed before-stack contract.
-        self.driver = subprocess.run(['git', '-C', str(ROOT), 'show', self.DRIVER_COMMIT + ':scripts/cloudbench-run.sh'],
-                                     check=True, capture_output=True).stdout
+        # The fixture uses the actual versioned driver, not a mock of its SHA.
+        # Receipts are historical: these are the reviewed driver bytes at DRIVER_COMMIT, pinned by SHA256.
+        # Driver changes require a newly reviewed before-stack contract.
+        fixture_record = json.loads((ROOT / 'scripts/tests/fixtures/stopped-pre-stack-driver.fixture.json').read_text())
+        self.assertEqual(self.DRIVER_SHA256, fixture_record['sha256'])
+        self.driver = gzip.decompress(base64.b64decode(fixture_record['gzip_base64']))
         self.assertEqual(self.DRIVER_SHA256, hashlib.sha256(self.driver).hexdigest())
         target = self.root / 'scripts/cloudbench-run.sh'
         target.parent.mkdir(exist_ok=True)

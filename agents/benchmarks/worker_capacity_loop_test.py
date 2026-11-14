@@ -10,6 +10,7 @@ import time
 from pathlib import Path
 
 from benchmarks.fixture_host_guard import FIXTURE_HOST_GUARD_SECONDS
+from benchmarks.fixture_proxy_cli import install_proxy_cli
 
 
 def native(pid):
@@ -118,6 +119,7 @@ def test_autoscaler_runtime_handoff_capacity_loop(tmp_path, monkeypatch):
         case.mkdir()
         out = case / "bench"
         out.mkdir()
+        proxy_bin = install_proxy_cli(case, ["proxy", "62345:3003", "fdaa::1", "-a", "fixture-app", "--bind-addr", "127.0.0.1", "-q"], 120)
         q = shlex.quote
         script = r"""set -uo pipefail
     source "$1"
@@ -173,11 +175,6 @@ def test_autoscaler_runtime_handoff_capacity_loop(tmp_path, monkeypatch):
         else
             command date "$@"
         fi
-    }
-    flyctl() {
-        printf '%s\n' "$BASHPID" > "$CASE/proxy.pid"
-        printf '%s\n' "$BASHPID" >> "$CASE/proxy.pids"
-        exec sleep 120
     }
     curl() {
         case " $* " in *' -o /dev/null '*)
@@ -254,7 +251,7 @@ def test_autoscaler_runtime_handoff_capacity_loop(tmp_path, monkeypatch):
     exit 1
     """)
         env = {k: os.environ[k] for k in ["PATH", "LANG"] if k in os.environ}
-        env["PATH"] = str(Path(os.sys.executable).parent) + os.pathsep + env.get("PATH", "")
+        env["PATH"] = str(proxy_bin) + os.pathsep + str(Path(os.sys.executable).parent) + os.pathsep + env.get("PATH", "")
         processes = []
         owners = []
         started = time.monotonic()
@@ -350,6 +347,9 @@ def test_autoscaler_runtime_handoff_capacity_loop(tmp_path, monkeypatch):
                 (case / "release-child").touch()
                 assert child.wait(timeout=FIXTURE_HOST_GUARD_SECONDS) == 1, "independent-child-return-code"
                 scaler_rc = scaler.wait(timeout=FIXTURE_HOST_GUARD_SECONDS)
+                proxy_commands = (case / "proxy.commands").read_text().splitlines()
+                assert proxy_commands and all(command == "proxy 62345:3003 fdaa::1 -a fixture-app --bind-addr 127.0.0.1 -q" for command in proxy_commands)
+                assert len(proxy_commands) == len((case / "proxy.pids").read_text().splitlines())
                 calls = [list(map(int, line.split())) for line in (case / "calls").read_text().splitlines()] if (case / "calls").exists() else []
                 tracked = (out / "worker-clones.ids").read_text().splitlines()
                 ready = (out / "worker-ready.ids").read_text().splitlines()
@@ -585,3 +585,12 @@ printf '%s\n' "$rc" > "$CASE/rc"
         log = (case / "bench/worker-827446c7710178.health.log").read_text()
         if mode == "transport-persistent":
             assert log.count("tunnel unavailable") == 3, log
+
+
+def test_autoscaler_runtime_handoff_capacity_proxy_cli_refuses_unlisted_native_commands(tmp_path):
+    proxy_bin = install_proxy_cli(tmp_path, ["proxy", "62345:3003", "fdaa::1", "-a", "fixture-app", "--bind-addr", "127.0.0.1", "-q"], 120)
+    for arguments in (["machine", "destroy", "foreign"], ["proxy", "62345:3003", "fdaa::1", "-a", "foreign", "--bind-addr", "127.0.0.1", "-q"]):
+        result = subprocess.run([str(proxy_bin / "flyctl"), *arguments], capture_output=True, text=True, timeout=5)
+        assert result.returncode == 97
+    assert not (tmp_path / "proxy.pid").exists()
+    assert not (tmp_path / "proxy.commands").exists()

@@ -132,7 +132,10 @@ async function* benchmarkCardholderPages(
     const page = extractCardholders(result);
     const raw = record?.cardholders;
     if (!Array.isArray(raw) || page.length !== raw.length) {
-      throw new Error('AgentCard cardholder inventory contains a record without an id');
+      throw new Error('AgentCard cardholder inventory pagination contains a record without an id');
+    }
+    if (page.length > pageSize) {
+      throw new Error('AgentCard cardholder inventory pagination page exceeds requested limit');
     }
     const reportedTotal = record?.total;
     if (reportedTotal !== undefined) {
@@ -170,9 +173,13 @@ async function* benchmarkCardholderPages(
         'AgentCard cardholder inventory pagination did not cover its total (made no progress)'
       );
     }
+    if (total === undefined && raw.length < pageSize) {
+      // A short page without a declared total cannot prove complete org membership.
+      throw new Error('AgentCard cardholder inventory pagination requires a declared total');
+    }
     yield page;
     offset += raw.length;
-    if (total !== undefined ? offset >= total : raw.length < pageSize) return;
+    if (total !== undefined && offset >= total) return;
   }
 }
 

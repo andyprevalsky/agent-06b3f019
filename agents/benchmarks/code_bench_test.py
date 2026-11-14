@@ -958,6 +958,19 @@ def test_parity_cli_effort_matches_flash_and_explicit_tier(tmp_path):
     assert f"effort: '{parity.DEFAULT_EFFORT}'" in models[models.index("  flash: {"):]
 
 
+def test_git_wrapper_never_starts_background_maintenance(tmp_path):
+    """A commit must not spawn detached `git maintenance` that mutates .git while it is archived."""
+    repo = _workspace(tmp_path, COMMIT)
+    (repo / "maintenance-probe.txt").write_text("probe\n")
+    trace = tmp_path / "git-trace.log"
+    env = {**cb._git_env(repo.parent.parent), "GIT_TRACE": str(trace)}
+    cb._git(["add", "-A"], repo, env)
+    cb._git(["commit", "-q", "-m", "probe"], repo, env)
+    log = trace.read_text()
+    assert "built-in: git commit" in log
+    assert "maintenance run" not in log and "gc --auto" not in log
+
+
 @pytest.mark.parametrize("writer_target", ["direct", "bare-receiver"])
 def test_fixture_git_joins_maintenance_writer_before_archiving(tmp_path, writer_target):
     """A successful Git return must not leave its transient writer behind."""
