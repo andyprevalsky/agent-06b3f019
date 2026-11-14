@@ -1443,6 +1443,76 @@ class OtherLanesTest(Base):
         self.assertEqual(str(caught.exception), "gh api repos/{owner}/{repo}/deployments failed with the token pool's "
                                                 "member (HTTP 404: Not Found ***) and with GH_TOKEN: HTTP 404: Not Found ***")
 
+    def graphql_node(self, ident: int, sha: str, created: str, state: str | None) -> dict:
+        return {'databaseId': ident, 'environment': 'Production', 'createdAt': created, 'commitOid': sha,
+                'creator': {'__typename': 'Bot', 'login': 'vercel'},
+                'latestStatus': {'state': state} if state else None}
+
+    def test_vercel_reads_deployments_through_graphql_when_rest_is_rate_limited(self) -> None:
+        # 2026-11-14 PR2094 observer: GITHUB_TOKEN core 0 and the App member cannot read Deployments (403
+        # integration), so every REST poll failed for 90x10s while the merge was live (GraphQL SUCCESS 21:49Z).
+        calls = []
+
+        def gh(args, env):
+            calls.append((args[1], env.get('GH_TOKEN')))
+            if args[1] == 'graphql':
+                self.assertIn(f'sha={SHA}', args)
+                self.assertEqual(env.get('GH_TOKEN'), self.POOL_TOKEN)
+                return 0, json.dumps({'data': {'repository': {'object': {'deployments': {'nodes': [
+                    self.graphql_node(7794378974, SHA, '2026-11-14T21:49:13Z', 'SUCCESS')]}}}}}), ''
+            if env.get('GH_TOKEN') == self.POOL_TOKEN:
+                return 1, '', 'gh: Resource not accessible by integration (HTTP 403)'
+            return 1, '', self.RATE_LIMITED
+        fake = Fake(self.root, [], gh_env=gh, pool=lambda argv: (0, self.POOL_TOKEN, ''))
+        ctx = self.ctx(fake, gh='gh', gh_env={'GH_TOKEN': SECRETS['GITHUB_TOKEN']})
+        self.assertEqual(dp.lane_vercel(ctx, attempts=1), (True, 'Vercel deployment 7794378974 success', 0))
+        self.assertEqual([path for path, _token in calls],
+                         [f'repos/{{owner}}/{{repo}}/deployments?sha={SHA}'] * 2 + ['graphql'])
+        self.assertTrue(any('reading them through GraphQL' in line for line in fake.lines), fake.lines)
+        self.assertFalse(any(self.POOL_TOKEN in line for line in fake.lines))
+
+    def test_vercel_graphql_superseded_check_keeps_the_descendant_rule(self) -> None:
+        newer, other = 'c' * 40, 'e' * 40
+
+        def gh(args, env):
+            if args[1] != 'graphql':
+                return 1, '', self.RATE_LIMITED
+            if f'sha={SHA}' in args:
+                return 0, json.dumps({'data': {'repository': {'object': {'deployments': {'nodes': [
+                    self.graphql_node(9, SHA, '2026-11-05T18:00:00Z', 'INACTIVE')]}}}}}), ''
+            self.assertIn('env=Production', args)
+            return 0, json.dumps({'data': {'repository': {'deployments': {'nodes': [
+                self.graphql_node(12, other, '2026-11-05T18:09:00Z', 'IN_PROGRESS'),
+                self.graphql_node(11, newer, '2026-11-05T18:05:00Z', 'SUCCESS'),
+                self.graphql_node(9, SHA, '2026-11-05T18:00:00Z', 'INACTIVE')]}}}}), ''
+        fake = Fake(self.root, [], gh_env=gh, descendants={newer, other})
+        passed, reason, code = dp.lane_vercel(self.ctx(fake, gh='gh'), attempts=1)
+        self.assertEqual((passed, code), (True, 0))
+        self.assertIsInstance(reason, dp.Descendant)
+        self.assertIn(f'deployment 11 for {newer[:12]}', reason)
+        unrelated = Fake(self.root, [], gh_env=gh, descendants=set())
+        passed, reason, code = dp.lane_vercel(self.ctx(unrelated, gh='gh'), attempts=1)
+        self.assertEqual((passed, code), (False, 1), reason)
+
+    def test_vercel_non_rate_limit_errors_stay_missed_polls(self) -> None:
+        def gh(args, env):
+            self.assertNotEqual(args[1], 'graphql', 'only a rate limit switches the read to GraphQL')
+            return 1, '', 'HTTP 502: Bad Gateway'
+        fake = Fake(self.root, [], gh_env=gh)
+        passed, reason, code = dp.lane_vercel(self.ctx(fake, gh='gh'), attempts=2)
+        self.assertEqual((passed, code), (False, 1))
+        self.assertEqual(reason, f'Vercel did not bring {SHA[:12]} live within 2x10s')
+
+    def test_mac_watch_streams_with_the_pool_token_never_displayed(self) -> None:
+        seen = []
+        fake = Fake(self.root, [], pool=lambda argv: (0, self.POOL_TOKEN, ''),
+                    handler=lambda argv, cwd, env, on_line: seen.append(env.get('GH_TOKEN')) or 0)
+        ctx = self.ctx(fake, gh='gh', gh_env={'GH_TOKEN': SECRETS['GITHUB_TOKEN']})
+        self.assertEqual(dp.mac_watch(ctx, 'mac-release', '42'), (0, 'success'))
+        self.assertEqual(seen, [self.POOL_TOKEN])
+        self.assertNotIn(self.POOL_TOKEN, json.dumps(ctx.records))
+        self.assertFalse(any(self.POOL_TOKEN in line for line in fake.lines))
+
     def test_no_pool_member_reads_with_gh_token(self) -> None:
         fake = Fake(self.root, [], gh_env=lambda args, env: (0, '[]', ''))
         ctx = self.ctx(fake, gh='gh', gh_env={'GH_TOKEN': SECRETS['GITHUB_TOKEN']})
