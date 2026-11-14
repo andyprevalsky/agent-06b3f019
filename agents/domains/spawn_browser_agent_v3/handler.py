@@ -128,6 +128,7 @@ from .config import (
     BROWSER_RECORDING_FINALIZE_TIMEOUT_SECONDS,
     BROWSER_SESSION_EXPIRING,
     BROWSER_PROVIDER_SESSION_LOST,
+    BROWSER_PROVIDER_SESSION_MAX_RECOVERIES,
     BROWSER_SESSION_MIN_REMAINING_SECONDS,
     BROWSER_STATE_SOFT_ATTEMPTS,
     BROWSER_STATE_SOFT_TIMEOUT_SECONDS,
@@ -7092,7 +7093,11 @@ async def _provider_lost_browser_session(
     if not task_id or not session_id or not callable(is_connected) or is_connected() is not False:
         return False
     info = await fetch_session_info(config, task_id, validate_live=True, include_credentials=False)
-    lost = info.get("session_id") == session_id and info.get("same_session_available") is False
+    # Only a provider-confirmed end (or the row it paused) counts; unknown health,
+    # an expiring session or a missing URL keep the ordinary reattach path.
+    lost = info.get("session_id") == session_id and (
+        info.get("provider_session_ended") is True or info.get("same_session_unavailable_reason") == "db_status_paused"
+    )
     logger.warning(
         "Browser CDP client disconnected; checked provider session",
         task_id=task_id,
@@ -7132,6 +7137,7 @@ def _drain_resume_state(result: Dict[str, Any], prior_resume: Optional[Dict[str,
         "task_id": result.get("task_id"),
         "auth_realm": result.get("auth_realm"),
         "recorded_passkey_credential_ids": result.get("recorded_passkey_credential_ids", []),
+        "provider_session_recoveries": result.get("provider_session_recoveries", 0),
         **_payment_resume_fields(prior),
     }
     if prior.get("generation_yield") is False or result.get("yield_reason") == GENERATION_SUPERSEDED:
@@ -9255,6 +9261,35 @@ async def _spawn_browser_agent_activity_v3_real(
                         await asyncio.sleep(SESSION_RETRY_INTERVAL_SECONDS)
                     session_info["resume_mode"] = "new_steel_session_after_unavailable"
                     session_info["same_session_unavailable_reason"] = unavailable_reason
+            provider_session_lost = session_info.get("provider_session_lost")
+            if provider_session_lost:
+                # The backend restored the last durable state after the provider ended
+                # the previous session; say so instead of implying continuity.
+                logger.warning(
+                    "Browser task resumed on a replacement after the provider ended its session",
+                    agent_id=agent_id,
+                    task_id=task_id,
+                    session_id=session_info.get("session_id"),
+                    provider_session_lost=provider_session_lost,
+                )
+                await _save_browser_action_message(
+                    agent_id=agent_id,
+                    title="Browser session replaced",
+                    task_id=task_id,
+                    message=(
+                        "The browser provider ended the previous session. Rose restored the last saved "
+                        "browser state on a new session; anything after that save was lost."
+                    ),
+                    status=MessageStatus.FINISHED,
+                    browser_url=session_info.get("debug_url") or "",
+                    action_type="supervisor_recovery",
+                    tool_call_id=str(uuid_module.uuid4()),
+                    extra_metadata={
+                        "supervisor_reason": BROWSER_PROVIDER_SESSION_LOST,
+                        "parent_tool_call_id": tool_call_id,
+                        **provider_session_lost,
+                    },
+                )
             session_id = session_info.get("session_id")
             reused_session_deadline = _reused_session_deadline(session_info)
             browser_url = session_info.get("debug_url")
@@ -10606,6 +10641,7 @@ async def _spawn_browser_agent_activity_v3_real(
         consecutive_budget_free = 0
         consecutive_keystroke_free = 0
         allow_generation_yield = (write_lock_resume_state or {}).get("generation_yield") is not False
+        provider_session_recoveries = int((write_lock_resume_state or {}).get("provider_session_recoveries") or 0)
         drain_checkpoint_failed = False
         step_timer = StepPhaseTimer(agent_id=agent_id, task_id=task_id)
         tab_focus_cache = TabFocusCache()
@@ -10628,8 +10664,10 @@ async def _spawn_browser_agent_activity_v3_real(
                     drain_reason = BROWSER_SESSION_EXPIRING
                 if not drain_reason and _activity_deadline_near():
                     drain_reason = BROWSER_ACTIVITY_DEADLINE
-                if not drain_reason and await _provider_lost_browser_session(
-                    config, task_id, session_id, playwright_browser
+                if (
+                    not drain_reason
+                    and provider_session_recoveries < BROWSER_PROVIDER_SESSION_MAX_RECOVERIES
+                    and await _provider_lost_browser_session(config, task_id, session_id, playwright_browser)
                 ):
                     drain_reason = BROWSER_PROVIDER_SESSION_LOST
                 if drain_reason:
@@ -10671,6 +10709,8 @@ async def _spawn_browser_agent_activity_v3_real(
                             {
                                 "status": BROWSER_DRAIN_YIELD_STATUS,
                                 "yield_reason": drain_reason,
+                                "provider_session_recoveries": provider_session_recoveries
+                                + int(drain_reason == BROWSER_PROVIDER_SESSION_LOST),
                                 "current_url": current_url,
                                 "write_lock_approvals": write_lock_approvals,
                                 "step_count": iteration,

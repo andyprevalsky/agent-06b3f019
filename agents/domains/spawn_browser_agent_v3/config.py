@@ -104,6 +104,9 @@ BROWSER_SESSION_EXPIRING = "browser_session_expiring"
 # native. The manager restarts the task from the same step, and its resume
 # restores the last durable browser checkpoint on a replacement session.
 BROWSER_PROVIDER_SESSION_LOST = "browser_provider_session_lost"
+# Replacements one browser task may take for provider-ended sessions; past this
+# the provider is unhealthy and the task fails loudly instead of re-allocating.
+BROWSER_PROVIDER_SESSION_MAX_RECOVERIES = 2
 BROWSER_RECORDING_FINALIZE_TIMEOUT_SECONDS = int(os.getenv("BROWSER_RECORDING_FINALIZE_TIMEOUT_SECONDS", "45"))
 # Terminal disconnect before payment/write-lock return must not block the
 # workflow forever when CDP/session.stop() hangs after a dead Kernel session.

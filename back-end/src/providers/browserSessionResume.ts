@@ -12,6 +12,7 @@ import {
   restoreLogicalBrowserCheckpoint,
 } from './browser/checkpoint';
 import { isConfirmedBrowserEnd, recordEndedLogicalBrowser } from './browser/sessionPersist';
+import { pausedSourceEnded } from './browser/providerEndedSource';
 import { BROWSER_SESSION_MIN_REMAINING_MS } from './steel/sessionLifetime';
 import { connectValidatedBrowser } from './steel/sessionConnection';
 import { assertBrowserInitializationReady } from './browser/initialization';
@@ -157,26 +158,18 @@ export async function resumeBrowserSession(
           checkpointLogicalBrowser(current.sessionId!, mutate)
         );
       else throw new Error('Browser resume liveness is unknown');
-    } else if (current.logicalOwnerKey && current.sessionId && current.status === 'PAUSED') {
-      // A pause publishes a checkpoint; without one, the provider ended this
-      // source. Re-confirm that end before accepting its state loss.
-      const health = current.checkpointRef
-        ? null
-        : await getBrowserSessionHealth(current.sessionId);
-      if (health && health.sessionId !== current.sessionId)
-        throw new Error('Browser resume health binding changed');
-      sourceEnded = health !== null && isConfirmedBrowserEnd(health.status);
-    }
+    } else if (await pausedSourceEnded(current, getBrowserSessionHealth)) sourceEnded = true;
+    // Returned to the caller so a provider-ended restore is never silent.
+    const providerSessionLost =
+      current.logicalOwnerKey && sourceEnded
+        ? { restored_checkpoint_revision: current.checkpointRevision }
+        : undefined;
     if (current.logicalOwnerKey) {
-      // A provider-ended source cannot be captured: resume restores its last
-      // durable checkpoint (or the baseline) and logs the loss. An unknown or
-      // live source still requires its saved checkpoint.
-      if (sourceEnded)
-        log.warn('Restoring provider-ended logical browser from its last durable checkpoint', {
-          taskId,
-          sessionId: current.sessionId,
-          checkpointRevision: current.checkpointRevision,
-        });
+      // A provider-ended source cannot be captured: restore its last durable
+      // checkpoint (or the baseline) and report the loss. An unknown or live
+      // source still requires its saved checkpoint.
+      if (providerSessionLost)
+        log.warn('Restoring provider-ended logical browser', { taskId, ...providerSessionLost });
       await loadLogicalBrowserCheckpoint(taskId, current.sessionId !== null && !sourceEnded);
       await withBrowserResumeClaim(taskId, (_assert, _native, mutate) =>
         mutate(async (tx) => {
@@ -201,7 +194,15 @@ export async function resumeBrowserSession(
         ...replacementOptions(carry),
         ...(forceFreshProfile !== undefined ? { forceFreshProfile } : {}),
       });
-      return assembleResumeResponse(taskId, result, dependencies, carry.carriedState);
+      const response = await assembleResumeResponse(
+        taskId,
+        result,
+        dependencies,
+        carry.carriedState
+      );
+      return providerSessionLost
+        ? { ...response, provider_session_lost: providerSessionLost }
+        : response;
     };
     // Tilion kill switch off: the row resumes on Kernel, carrying its state like a rotation.
     return current.provider === 'tilion' && !tilionRotationAvailable()
