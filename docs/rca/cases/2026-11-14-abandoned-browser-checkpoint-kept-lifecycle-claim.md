@@ -9,8 +9,8 @@ problem_class: logical-inconsistency-in-harness-contracts
 first_bad_boundary: Close route did not propagate caller disconnect to pending checkpoint capture under withLogicalBrowserPause
 symptoms:
   - 'Browser session init failed after 5 transient-proxy retries: {"error":"Browser resume is still in progress"}'
-  - 'Browser resume is still in progress'
-  - 'steel_browser_task_lifecycle'
+  - "Browser resume is still in progress"
+  - "steel_browser_task_lifecycle"
 tags:
   - browser
   - checkpoint
@@ -142,7 +142,6 @@ request revokes the standing instruction to preserve Freedom.
 Propagate caller cancellation to owned capture resources and join exact cleanup
 before releasing lifecycle custody, while retaining custody for unknown work.
 
-
 ### Final local proof and introduced verification repair
 
 At `6da67bf6bb36e05891d97d53c224318842178465`, the final owning command
@@ -183,3 +182,35 @@ cycle was preserved intact for audit. A fresh final-source cycle reruns the
 complete selected inventory with no stale-source credit. The deploy clock is
 unchanged. PR #2085 retains the original failures and the subsequent repair
 proof; final full-gate and production results are recorded at closeout.
+
+### Shipped mitigation and production proof
+
+PR [#2085](https://github.com/Rose-Ai-Labs/rose/pull/2085) merged as
+`620d1f6049969d292dea8c60af9cbdcc134f29b6` on November 14. The exact
+merge became live on Render at 21:26:23Z; all 15 backend endpoint probes passed.
+Production semantic run [43643526394](https://github.com/Rose-Ai-Labs/rose/actions/runs/43643526394)
+used that exact source input and passed all five jobs at attempt 1. GitHub quota
+errors interrupted dispatch metadata lookup and later observation; the same
+already-dispatched run was resumed read-only, without reexecuting tests.
+The older aggregate FAIL receipt remains preserved alongside the final native
+semantic PASS, rather than being rewritten.
+
+The final selected deploy cycle satisfied all 17 gates under their native
+qualification rules. This does not mean every underlying test passed: actual
+smoke had 10 passing tasks and one existing quarantined payment assertion failure.
+The historical payment-abandonment task remained NO_RETRY_CUSTODY/SKIP with no
+current execution or financial-cleanup credit. CodeRabbit's organization spending
+cap prevented a review; the native allowed skip was recorded and the PR was
+merged unreviewed by CodeRabbit. Independent code and test-flakiness reviews passed.
+
+Two failures independently reproduced on both the original parent and candidate
+were handed to separate repair goals after merge: common wrapper fixture contracts
+and the payment lifecycle transfer-counter assertion. Their original failures
+remain failures. Private native records, attribution proofs and all earlier
+failed attempts are recoverable through the closeout archive catalog.
+
+RCA outcome recorded once: **diagnosis-ready**. The demonstrated caller-abandonment
+mechanism is repaired and deployed. The original pending capture subcall and
+production disconnect delivery remain unobserved, so the case stays **mitigated**.
+No manual production browser-row repair or claim of recovered historical quotes
+was made.
