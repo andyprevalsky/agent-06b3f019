@@ -21,9 +21,10 @@ tags:
 sources:
   - PR #2024 deploy gate backend-coverage-blackbox (Actions run 43414430212, artifact 14031253731, FLAKY occurrence 1dc793d7777246c785e8d24beb75499a)
   - commit be7284063a (quarantine marker)
+  - PR #2041 (merged fb728c702287, 2026-11-14)
   - task treasury-rails repair thread https://boxes.dev/thread/thr_7ef29bd5e93d464eab3c02da1f9beb66
 repro: back-end/src/tests/unit/agentcard-settle-coalesce.test.ts
-status: open
+status: fixed
 ---
 
 ## Problem
@@ -90,6 +91,14 @@ fails after 5 polls without sleeping past the deadline; 401 → immediate failur
 
 10k behaviour: a throttled poller now issues one org request per 60 s instead of one per 8 s,
 so many concurrent settle waits shed load during a throttle instead of amplifying it.
+
+Shipped in PR #2041 (merge `fb728c702287`, 2026-11-14). Verification:
+- the repro `npx tsx src/tests/unit/agentcard-settle-coalesce.test.ts` failed (exit 1) on the unfixed code with the exact gate error and passed (exit 0) afterwards, 5/5 runs;
+- `cd back-end && bash scripts/run-blackbox-tests.sh treasury-rails` passed live twice locally (`all checks passed`);
+- in the PR's own deploy gates, rounds 1 and 2 soft-skipped mid-run on the separate AgentCard org 401 flap (`Invalid or expired organization token`, the existing credential-precondition SKIP). That is not this defect. Round 3 (`8f8c33e6`) fully passed in the gate: 92 org calls, `recover_funds` 28, no throttle;
+- production lanes Render, Vercel, backend probes and semantic PASS. The AgentCard production lane is waived because the live payment identity is unprovisioned (human-only prerequisite).
+
+Observation for the release streak: the in-gate 401 SKIP exits 0 and is counted as QUARANTINED_PASS, so the marker's 5-pass streak can advance without a full run.
 
 ## Human feedback
 
