@@ -176,3 +176,58 @@ def close_exact_root_sessions(base_url: str, root_id: str, before: dict, *, evid
     if failures:
         raise RuntimeError("; ".join(failures))
     return {"root_agent_id": root_id, "tree_sealed": True, "root_deleted": True, "provider_receipts": receipts}
+
+
+def verified_root_stripe_custody(snapshot: dict, lifecycles: dict[str, dict]) -> list[dict]:
+    """Join read-only native evidence to every persisted PI in the exact sealed tree."""
+    rows = [row for row in snapshot["purchase_cleanup"] if row["stripe_payment_intent_id"] is not None]
+    expected = {row["purchase_id"]: row for row in rows}
+    if len(expected) != len(rows):
+        raise RuntimeError("Stripe custody has duplicate purchase identity")
+    observations = []
+    for agent_id, lifecycle in lifecycles.items():
+        if not isinstance(lifecycle, dict) or lifecycle.get("agentId") != agent_id or not isinstance(lifecycle.get("stripeCustody"), list):
+            raise RuntimeError("Stripe custody response identity or evidence missing")
+        for observed in lifecycle["stripeCustody"]:
+            if not isinstance(observed, dict) or observed.get("agentId") != agent_id:
+                raise RuntimeError("Stripe custody agent identity mismatch")
+            observations.append(observed)
+    seen = set()
+    intents = set()
+    for observed in observations:
+        purchase_id = observed.get("purchaseId")
+        if purchase_id in seen or purchase_id not in expected:
+            raise RuntimeError("Stripe custody purchase coverage mismatch")
+        row = expected[purchase_id]
+        seen.add(purchase_id)
+        intent_id = observed.get("paymentIntentId")
+        if intent_id in intents:
+            raise RuntimeError("Stripe custody reused PaymentIntent identity")
+        intents.add(intent_id)
+        exact = {"agentId": row["agent_id"], "userId": row.get("user_id"),
+                 "purchaseStatus": row["status"], "paymentIntentId": row["stripe_payment_intent_id"],
+                 "customerId": row.get("stripe_customer_id"), "amountCents": row["total_cents"], "currency": "usd"}
+        if (not row.get("user_id") or row["user_id"] != snapshot.get("root_user_id") or
+                not row.get("stripe_customer_id") or type(row.get("stripe_livemode")) is not bool or
+                type(observed.get("livemode")) is not bool or observed["livemode"] != row["stripe_livemode"] or
+                any(observed.get(key) != value for key, value in exact.items())):
+            raise RuntimeError("Stripe custody immutable billing identity mismatch")
+        for key in ("amountCents", "amountReceivedCents", "amountCapturableCents", "refundedCents"):
+            if type(observed.get(key)) is not int or observed[key] < 0:
+                raise RuntimeError("Stripe custody amount evidence missing")
+        received = observed["amountReceivedCents"]
+        refunded = observed["refundedCents"]
+        if observed["amountCapturableCents"] != 0 or received > row["total_cents"]:
+            raise RuntimeError("Stripe custody retains capturable or inconsistent funds")
+        paid = (row["status"] == "CLEARED" and observed.get("outcome") == "paid" and
+                observed.get("status") == "succeeded" and received == row["total_cents"] and refunded == 0)
+        compensated = (row["status"] in {"FAILED", "VOIDED", "REFUNDED"} and (
+            (observed.get("outcome") == "unspent" and observed.get("status") in {"canceled", "requires_payment_method"}
+             and received == 0 and refunded == 0) or
+            (observed.get("outcome") == "refunded" and observed.get("status") == "succeeded"
+             and received > 0 and refunded == received)))
+        if not (paid or compensated):
+            raise RuntimeError("Stripe custody terminal economic outcome unverified")
+    if seen != set(expected):
+        raise RuntimeError("Stripe custody does not cover every persisted PaymentIntent")
+    return observations

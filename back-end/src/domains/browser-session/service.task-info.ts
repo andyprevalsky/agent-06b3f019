@@ -87,7 +87,8 @@ export async function getTaskOwnerUserId(taskId: string): Promise<string | undef
 async function collectUserInjectionData(
   userId: string | null | undefined,
   authRealm: string,
-  taskId: string
+  taskId: string,
+  includeCredentials: boolean
 ) {
   let fingerprintInjection = null;
   let passwords: ReturnType<typeof serializePasswords> = [];
@@ -111,8 +112,8 @@ async function collectUserInjectionData(
      */
     const [user, storedPasswords, storedPasskeys] = await Promise.all([
       repo.findUserSettings(userId),
-      repo.findPasswords(userId),
-      authRealm !== '' ? repo.reservePasskeysForRealm(userId, authRealm) : [],
+      includeCredentials ? repo.findPasswords(userId) : [],
+      includeCredentials && authRealm !== '' ? repo.reservePasskeysForRealm(userId, authRealm) : [],
     ]);
     userSettings = toUserSettings(user);
     passwords = serializePasswords(storedPasswords);
@@ -262,7 +263,10 @@ async function freshTilionConnectUrl(sessionId: string, stored: string): Promise
   }
 }
 
-export async function getTaskInfo(taskId: string, options: { validateLive?: boolean } = {}) {
+export async function getTaskInfo(
+  taskId: string,
+  options: { validateLive?: boolean; includeCredentials?: boolean } = {}
+) {
   const session = await repo.findSessionByTaskId(taskId);
 
   if (session === null) {
@@ -272,7 +276,13 @@ export async function getTaskInfo(taskId: string, options: { validateLive?: bool
   const currentUrl = session.currentUrl ?? null;
   const startUrl = session.startUrl ?? null;
   const authRealm = canonicalAuthRealm(currentUrl ?? startUrl ?? '');
-  const injection = await collectUserInjectionData(session.context?.userId, authRealm, taskId);
+  // Resume can obtain identity/profile metadata before background credential preparation.
+  const injection = await collectUserInjectionData(
+    session.context?.userId,
+    authRealm,
+    taskId,
+    options.includeCredentials !== false
+  );
   const response = buildTaskInfoResponse(session, currentUrl, startUrl, authRealm, injection);
   if (
     session.provider === 'tilion' &&

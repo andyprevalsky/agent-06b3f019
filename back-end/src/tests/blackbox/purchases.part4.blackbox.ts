@@ -113,6 +113,20 @@ function assertSchema<T>(schema: z.ZodType<T>, data: unknown, label: string): T 
   return result.data;
 }
 
+function assertWebhookResult(response: { status: number; data: unknown }, label: string): void {
+  if (!process.env.AGENTCARD_WEBHOOK_SECRET) {
+    assertStatus(response.status, 503, response.data);
+    const body = assertSchema(ErrorResponse, response.data, label);
+    assert(
+      body.error === 'AgentCard webhook signing secret is not configured',
+      'missing signing configuration must reject every webhook'
+    );
+    return;
+  }
+  assertStatus(response.status, 200, response.data);
+  assertSchema(OkResponse, response.data, label);
+}
+
 async function createUser(label: string): Promise<string> {
   const userId = `purchase-test-${RUN_ID}-${label}-${randomUUID()}`;
   await prisma.user.create({ data: { userId, isAnonymous: true } });
@@ -527,8 +541,7 @@ const tests: Array<[string, () => Promise<void>]> = [
         headers: webhookHeaders(payload),
         body: JSON.stringify(payload),
       });
-      assertStatus(response.status, 200, response.data);
-      assertSchema(OkResponse, response.data, 'webhook unknown card');
+      assertWebhookResult(response, 'webhook unknown card');
     },
   ],
   [
@@ -543,8 +556,7 @@ const tests: Array<[string, () => Promise<void>]> = [
         headers: webhookHeaders(payload),
         body: JSON.stringify(payload),
       });
-      assertStatus(response.status, 200, response.data);
-      assertSchema(OkResponse, response.data, 'legacy webhook unknown card');
+      assertWebhookResult(response, 'legacy webhook unknown card');
     },
   ],
   [
@@ -556,8 +568,7 @@ const tests: Array<[string, () => Promise<void>]> = [
         headers: webhookHeaders(payload),
         body: JSON.stringify(payload),
       });
-      assertStatus(response.status, 200, response.data);
-      assertSchema(OkResponse, response.data, 'webhook no card id');
+      assertWebhookResult(response, 'webhook no card id');
     },
   ],
 ];

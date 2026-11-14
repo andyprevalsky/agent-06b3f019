@@ -160,6 +160,27 @@ def recovered_roots(path, bench, bound):
         need(not pending, 'pending native payment obligation')
 
 
+def lost_runtime_release(path, owner_token, fleet, meta, rows, release, document):
+    """Accept a recorded runtime-evidence loss only for provider-terminal owned resources."""
+    receipt = document(path)
+    need(receipt.get('schema') == 'cloudbench-runtime-evidence-lost-v1'
+         and receipt.get('fleet_owner_token') == owner_token and receipt.get('run_id') == fleet.name
+         and receipt.get('app') == meta['app'] and receipt.get('runtime_evidence') == 'LOST'
+         and receipt.get('outcome_credit') is False
+         and receipt.get('operator_flag') == '--accept-lost-runtime-evidence', 'lost runtime receipt identity')
+    from datetime import datetime
+    observed = datetime.fromisoformat(receipt['observed_at']).timestamp()
+    need(finite(observed) and int(observed) <= release, 'lost runtime observed before release')  # epoch is whole seconds
+    seen = {(r.get('kind'), r.get('id')): r for r in receipt.get('observations', [])}
+    for row in rows:
+        machine = seen.get(('machine', row['machine_id']))
+        volume = seen.get(('volume', row['volume_id']))
+        need(machine and machine.get('state') in {'destroyed', 'absent'}
+             and volume and volume.get('state') in {'pending_destroy', 'destroyed', 'absent'}
+             and not volume.get('attached_machine_id'), 'lost runtime resources not provider-terminal')
+    return {'path': str(path), 'observed_at': receipt['observed_at'], 'observations': len(seen)}
+
+
 def recovered_runtime(fleet, owner_token, benches, rows, identities, bound, document):
     """Consume the native guest ACK and its complete captured V2 stack evidence."""
     need(len(benches) == 1 and set(identities) == {benches[0]['name']}, 'recovered task closure')
@@ -196,8 +217,9 @@ def recovered_runtime(fleet, owner_token, benches, rows, identities, bound, docu
             need(set(info) == {'bytes', 'sha256'} and type(info['bytes']) is int and info['bytes'] >= 0,
                  'runtime file metadata')
             total += info['bytes']
-            need(total <= 512 * 1024 * 1024, 'runtime evidence size')
-            raw = bound(runtime / path)
+            need(total <= RUN_RECORD_MAX_BYTES, 'runtime evidence size')
+            # Runtime logs share the 512 MiB evidence budget above; the receipt cap is for JSON receipts.
+            raw = bound(runtime / path, RUN_RECORD_MAX_BYTES)
             need(len(raw) == info['bytes'] and hashlib.sha256(raw).hexdigest() == info['sha256'], 'runtime file seal')
         status = fields(bound(runtime / cleanup_name))
         identity = identities[name]
@@ -207,6 +229,19 @@ def recovered_runtime(fleet, owner_token, benches, rows, identities, bound, docu
              and type(services.get('run_sh_pid')) is int and services['run_sh_pid'] > 1
              and status.get('stack_pid') == str(services['run_sh_pid']), 'native V2 stack cleanup')
         recovered_roots(runtime / 'run.json', name, bound)
+        # Autoscaler worker clones that were provisioned but never started carry no stack
+        # evidence; each must be proven not launched for this exact primary and run token.
+        workers_file = out / 'worker-clones.ids'
+        workers = bound(workers_file).decode().split() if workers_file.is_file() else []
+        for worker in workers:
+            evidence = out / 'worker-runtime-evidence' / worker
+            identity = {'machine_id': worker, 'primary_machine_id': machine, 'run_token': token, 'version': 1}
+            owner = document(evidence / 'owner.json')
+            unlaunched = document(evidence / 'not-launched.json')
+            need(re.fullmatch('[0-9a-f]{14}', worker) and {k: owner.get(k) for k in identity} == identity
+                 and {k: unlaunched.get(k) for k in identity} == identity
+                 and unlaunched.get('worker_started') is False, 'recovered worker never launched')
+            machines.add(worker)
     need(machines == {row['machine_id'] for row in rows}, 'recovered resource coverage')
 
 
@@ -847,7 +882,9 @@ def stopped_inert_execution(fleet, root, receipt, proof, row, token, evidence, p
     helper = bound(root / 'scripts/cloudbench-original-volume-capture.py')
     # Reviewed 2026-11-11 (PR #1927): BILLING_GUEST is byte-identical to the ddde11af producer; the helper
     # changed only in host-side capture validation (regular_bytes, verify_capture, cross_check_receipts).
-    need(hashlib.sha256(helper).hexdigest() == '7622b415d3b300219a2f17bb1dad1ea723fac037220fcab0d89519461018eb06',
+    # Re-pinned at the PR1682 merge of main 269dd94: BILLING_GUEST still byte-identical; host-side
+    # cross_check_receipts gained the stopped-owner backend extension proof beside main's prefix proof.
+    need(hashlib.sha256(helper).hexdigest() == '16f38b41b7460567705e437ce23cae06b225eea3261a178caed33c62fa0e9680',
          'stopped inert guest producer changed')
     source = next(ast.literal_eval(node.value) for node in ast.parse(helper).body
                   if isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == 'BILLING_GUEST'
@@ -2346,6 +2383,12 @@ def validate(receipt, owner, proof, *, quarantine_archive=None):
     zero_parents, graded_parents = set(), set()
     recovery = proof.get('recovered_runtime', {})
     need(isinstance(recovery, dict) and (not recovery or layout == 'campaign-v1'), 'recovery scope')
+    # Fleets released by `--recover-stale-owner TOKEN --accept-lost-runtime-evidence`: their
+    # sealed audit carries runtime-evidence-lost.json instead of captured runtime evidence.
+    lost_runtime = proof.get('lost_runtime_evidence', [])
+    need(isinstance(lost_runtime, list) and all(isinstance(v, str) for v in lost_runtime)
+         and len(set(lost_runtime)) == len(lost_runtime) and not set(lost_runtime) & set(recovery)
+         and (not lost_runtime or layout == 'campaign-v1' and not isolated), 'lost runtime scope')
     run_admission = native_run_admission(proof, participants, bindings)
     admission_parents = frozenset()
     if layout == 'campaign-admission-rejected-v1':
@@ -2468,7 +2511,7 @@ def validate(receipt, owner, proof, *, quarantine_archive=None):
         seal = tree(audit)
         need(binding == {'path': str(canonical), 'sha256': seal}
              and tree(canonical) == seal
-             and (life['audit_sha256'] == seal or str(fleet) in recovery
+             and (life['audit_sha256'] == seal or (str(fleet) in recovery or str(fleet) in lost_runtime)
                   and life['audit_sha256'] == '' and life['status'] == 'failed'), 'native audit seal')
         meta = fields(bound(audit / 'meta'))
         need(meta.get('status') == 'provider-teardown-verified' and meta.get('version') == '1'
@@ -2497,13 +2540,33 @@ def validate(receipt, owner, proof, *, quarantine_archive=None):
             recovered_runtime(fleet, owner_token, benches, machines, recovery[str(fleet)], bound, document)
             recovered[str(fleet)] = {'original_lifecycle': life, 'original_disposable_cleanup': disposable,
                                      'release_epoch': release, 'native_audit_sha256': seal, 'credit_granted': False}
+        elif str(fleet) in lost_runtime:
+            need(fleet in parents and life['status'] == 'failed' and life['audit_sha256'] == ''
+                 and disposable.get('runtime_evidence_missing') is True, 'lost runtime facts')
+            lost = lost_runtime_release(canonical / 'runtime-evidence-lost.json', owner_token, fleet, meta, machines,
+                                        release, document)
+            recovered[str(fleet)] = {'original_lifecycle': life, 'original_disposable_cleanup': disposable,
+                                     'release_epoch': release, 'native_audit_sha256': seal,
+                                     'runtime_evidence': 'LOST', 'lost_receipt': lost, 'credit_granted': False}
         else:
             need(disposable.get('guest_cleanup_missing') is False
                  and disposable.get('runtime_evidence_missing') is False, 'guest cleanup')
-        need(meta['hub_disposition'] == 'retained-exact-owner-transfer-required', 'unsupported Hub disposition')
+        need(meta['hub_disposition'] in {'retained-exact-owner-transfer-required', 'retired-exact-owner-verified-absent'},
+             'unsupported Hub disposition')
         hub = Path(meta['hub_owner_file'])
         need(hub.parent == runs / '_hub', 'Hub root')
         hub_owner = fields(bound(hub))
+        if meta['hub_disposition'] == 'retired-exact-owner-verified-absent':
+            # Exact-owner recovery found the original Hub process gone: bind its owner record and
+            # the native terminal record for that same owner, and prove it is still not running.
+            terminal = fields(bound(Path(str(hub) + '.terminal')))
+            need(terminal.get('version') == '1' and terminal.get('disposition') == 'terminated-verified'
+                 and terminal.get('owner_file') == str(hub) and terminal.get('owner_sha256') == bindings[str(hub)]
+                 and all(terminal.get(k) == meta['hub_' + k] for k in ('pid', 'pid_start'))
+                 and terminal.get('owner_token') == meta['hub_owner_token'], 'retired Hub identity')
+            retired_local_process(dict(pid=int(meta['hub_pid']), birth=meta['hub_pid_start']))
+            audit_seals[str(audit)] = seal
+            continue
         need(hub_owner.get('status') == 'live-transfer-required' and hub_owner.get('version') == '1'
              and all(hub_owner.get(k) == str(runs) for k in ('root', 'runs_root'))
              and hub_owner.get('repo_root') == str(root) and hub_owner.get('context_dir') == str(runs / '_hub')
@@ -2522,7 +2585,7 @@ def validate(receipt, owner, proof, *, quarantine_archive=None):
              'preallocation unexpected supervised termination')
         for value in retained.values():
             retired_local_process(dict(pid=int(value['owner']['pid']),birth=value['owner']['pid_start']))
-    need(isolated or set(recovered) == set(recovery), 'recovered fleet closure')
+    need(isolated or set(recovered) == set(recovery) | set(lost_runtime), 'recovered fleet closure')
     if isolated:
         need(set(proof['execution_quiescence']) == set(excluded), 'execution observation closure')
         for path in bindings:
@@ -2757,6 +2820,17 @@ def clean_isolated_successor(state, prior, original, successor, renewal_witness=
              'successor historical inventory must preserve original debt')
         admitted_gate = copy.deepcopy(gate)
         admitted_gate['checks'] = [name for name in gate['checks'] if name in historical_checks]
+        # Selection evidence records why the planner chose the gate, not how it executes (local and
+        # backend cleanup already exclude it). A later diff can only add reasons, so accept an
+        # in-order subset of the current reasons only when it hashes to the immutable contract.
+        evidence = admitted_gate.get('selection_evidence')
+        if (binding.get('contract_digest') != digest(admitted_gate) and isinstance(evidence, list)
+                and len(evidence) <= 12 and all(isinstance(v, str) for v in evidence)):
+            for mask in range(1 << len(evidence)):
+                candidate = dict(admitted_gate, selection_evidence=[v for i, v in enumerate(evidence) if mask >> i & 1])
+                if digest(candidate) == binding.get('contract_digest'):
+                    admitted_gate = candidate
+                    break
     need(binding.get('contract_digest') == digest(admitted_gate)
          and (renewal_witness is not None or binding.get('environment') == execution_environment)
          and isinstance(binding.get('input_fingerprint'), str) and binding['input_fingerprint'], 'successor contract')
@@ -2839,6 +2913,14 @@ def clean_isolated_successor(state, prior, original, successor, renewal_witness=
     need(successor.get('worker_result') == str(result_path), 'successor result locator')
     result = bounded_read(result_path, 'successor native result')
     cases, complete = validate_result(result, request, successor['native_exit'], invalid_process=False)
+    # Historical no-retry custody cases never execute, so execute() records them incomplete and
+    # UNVERIFIED; every other case must still be complete.
+    successor_custody = successor.get('custody_skips') or {}
+    need(isinstance(successor_custody, dict) and set(successor_custody) <= set(skips)
+         and all(isinstance(skips[c], dict) and skips[c].get('disposition') == 'NO_RETRY_CUSTODY'
+                 and successor_custody[c] == skips[c] for c in successor_custody)
+         and (successor.get('current_execution') or {}) == dict.fromkeys(successor_custody, 'UNVERIFIED'),
+         'successor custody cases')
     expected_complete = dict.fromkeys(admitted_gate['checks'], True)
     historical = {name: value for name, value in skips.items()
                   if value.get('disposition') == 'NO_RETRY_CUSTODY'}
@@ -2978,6 +3060,38 @@ def reconciled_failed_isolated_successor_v1(state, prior, original, successor):
          and finite(successor.get('finished_at'))
          and original['finished_at'] <= successor['started_at'] <= successor['finished_at'],
          'failed successor clocks')
+
+
+def prelaunch_refusal(row):
+    """run_phase's record for a gate whose admission raised before any worker launched."""
+    return (isinstance(row, dict) and 'token' not in row and 'executed' not in row
+            and set(row) == {'gate', 'status', 'complete', 'cases', 'source', 'reason'}
+            and row['status'] == 'FAIL' and row['complete'] is False
+            and isinstance(row['cases'], dict) and row['cases']
+            and all(v == 'UNVERIFIED' for v in row['cases'].values()))
+
+
+def prepare_refusal_reconciled(state, row):
+    """A campaign refused at cleanup-ticket prepare dispatched no controller; once its strict
+    campaign-cleanup-prepare-v1 proof is recorded it is not a successor execution."""
+    if not isinstance(row, dict) or row.get('complete') is not False or not row.get('token'):
+        return False
+    entries = [e for e in state.get('reconciled_owners', {}).values() if e.get('token') == row['token']]
+    return (len(entries) == 1 and entries[0].get('kind') == KIND and entries[0].get('purpose') is None
+            and entries[0].get('credit_granted') is False
+            and entries[0].get('proof', {}).get('layout') == 'campaign-cleanup-prepare-v1'
+            and entries[0].get('proof', {}).get('purpose') is None
+            and all(v in {'UNVERIFIED', 'SKIP'} for v in (row.get('cases') or {'': 'PASS'}).values()))
+
+
+def skipped_isolated_refusal(state, attempt, row):
+    """A strictly reconciled cleanup-ticket prepare refusal launched no controller.
+
+    Pre-launch refusal rows (prelaunch_refusal) are never skipped here: the typed
+    branches below authenticate them by their sealed request namespace, and unknown
+    or stale refusals stay blocking (merged main contract).
+    """
+    return prepare_refusal_reconciled(state, row)
 
 
 def recovered_isolated_successor_v1(state, prior, original, successor):
@@ -3165,7 +3279,8 @@ def isolated_successor(state, prior, renewal_witness=None):
     and authenticated sibling receipts; neither path creates execution credit.
     """
     rows = [(attempt, row) for attempt in state.get('attempts', [])
-            for row in attempt.get('results', []) if row.get('gate') == prior['gate']]
+            for row in attempt.get('results', []) if row.get('gate') == prior['gate']
+            and not skipped_isolated_refusal(state, attempt, row)]
     # A stale attempt (source changed mid-run) is superseded and never earns credit. Once its
     # exact native owner is released by a normal no-credit reconciliation, renewal looks past it.
     while rows and rows[-1][0].get('stale') is True and stale_successor_released(state, prior, rows[-1][1]):
@@ -3288,7 +3403,7 @@ def isolated_refusal_successor(state, prior, latest):
     """A proved pre-command refusal adds no native operation to renew or retire."""
     from deploy_test_cycle import bounded_read, sha_file
     rows = [(a, r) for a in state['attempts'] for r in a.get('results', [])
-            if r.get('gate') == prior['gate']]
+            if r.get('gate') == prior['gate'] and not skipped_isolated_refusal(state, a, r)]
     need(latest.get('pre_command_refusal') is None or isinstance(latest['pre_command_refusal'], dict),
          'malformed pre-command refusal witness')
     if ((latest.get('pre_command_refusal') or {}).get('kind') != ISOLATED_REFUSAL_KIND

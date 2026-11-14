@@ -64,7 +64,9 @@ def is_agent_authored_user_metadata(metadata: Any) -> bool:
     """USER rows written by agents (notifications / agent messages), not by the user."""
     if not isinstance(metadata, dict):
         return False
-    return metadata.get("agentNotification") is True or metadata.get("agentMessage") is True
+    return (metadata.get("agentNotification") is True
+            or metadata.get("agentMessage") is True
+            or metadata.get("browserCredentialContext") is True)
 
 
 def is_agent_authored_user_row(message: Dict[str, Any]) -> bool:

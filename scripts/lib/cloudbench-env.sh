@@ -865,7 +865,8 @@ cloudbench_validate_browser_provider_contract() {
     echo "FATAL: production worker BROWSER_PROVIDER is invalid: ${prod_worker:-<unset>}" >&2
     return 1
   esac
-  # Backend session selection and worker fallback are separate production surfaces.
+  # Backend selects new sessions; workers consume their recorded provider.
+  # Mirror each production role independently, not one role into the other.
   if [ "$backend_provider" != "$prod_backend" ]; then
     echo "FATAL: benchmark backend env does not match production: local=${backend_provider:-<unset>} prod=$prod_backend" >&2
     return 1
@@ -2076,8 +2077,13 @@ cloudbench_start_data_plane_proxy() {  # <local-port> <remote-port> <host> <log>
     printf '[%s] %s proxy attempt %s: localhost:%s -> %s:%s\n' \
       "$(date -u +%H:%M:%S)" "$label" "$attempt" "$local_port" "$host" "$remote_port" \
       >> "$log_file"
-    flyctl proxy "$local_port:$remote_port" "$host" -a "$APP" --bind-addr 127.0.0.1 -q \
-      >> "$log_file" 2>&1 &
+    # Exec in this background child so $! still identifies native Fly.
+    (
+      if [ -n "${REGISTRY_RECOVERY_GUARD_FD:-}" ]; then
+        exec {REGISTRY_RECOVERY_GUARD_FD}<&- || exit 1
+      fi
+      exec flyctl proxy "$local_port:$remote_port" "$host" -a "$APP" --bind-addr 127.0.0.1 -q
+    ) >> "$log_file" 2>&1 &
     pid=$!
     # flyctl resolves the remote host lazily on the first client connection.
     # Trigger lazy DNS, but classify a local bind collision before waiting.
@@ -2264,9 +2270,27 @@ cloudbench_pid_birth_state() {  # <pid> <expected-start> -> live|absent|unknown
 }
 
 cloudbench_pid_matches_start() {
+  # The match runs as a pipeline child (cloudbench_tristate_into): a forwarded
+  # cancellation signal can interrupt a $(...) parse in this trapped caller.
   local birth_state
-  cloudbench_tristate_into birth_state cloudbench_pid_birth_state "$1" "$2"
+  cloudbench_tristate_into birth_state cloudbench_pid_start_match_state "$1" "$2"
   [ "$birth_state" = "live" ]
+}
+
+cloudbench_pid_start_match_state() {  # <pid> <expected-start> -> live only on an exact birth match
+  local observation
+  case "$2" in
+    proc-start:*)
+      # A boolean birth match needs one native observation, not the nested
+      # command substitutions used to classify absent versus unknown owners.
+      # Both classifications are non-matches here; keep their richer API intact.
+      case "$1" in ''|*[!0-9]*) echo unknown; return 0 ;; esac
+      { [ "$1" -gt 1 ] && [ -r /proc/self/stat ]; } || { echo unknown; return 0; }
+      observation="$(cloudbench_proc_pid_observation "$1")" || { echo unknown; return 0; }
+      if [ "${observation%%$'\t'*}" = "$2" ]; then echo live; else echo absent; fi
+      ;;
+    *) cloudbench_pid_birth_state "$1" "$2" ;;
+  esac
 }
 
 # Teardown calls these from EXIT traps, where a bare `return` reports the
@@ -2469,6 +2493,37 @@ for pid, start in ordered:
     live=0
     for ((i = 0; i < ${#targets[@]}; i++)); do
       if cloudbench_pid_matches_start "${targets[$i]}" "${target_starts[$i]}"; then
+        # An exact single-thread Linux zombie cannot execute during TERM grace.
+        # Keep the shared birth matcher unchanged: ownership is not liveness.
+        observation="$(cloudbench_pid_observation_like "${targets[$i]}" "${target_starts[$i]}")" || observation=""
+        actual_start="${observation%$'\t'*}"
+        process_stat="${observation##*$'\t'}"
+        if [ "$actual_start" = "${target_starts[$i]}" ] && [[ "$process_stat" = Z* ]] \
+            && [ -d "/proc/${targets[$i]}/task" ]; then
+          # Read the kernel directory directly; caller glob options cannot
+          # hide a live peer. Failed enumeration remains nonterminal here.
+          if python3 - "${targets[$i]}" <<'PY_SINGLETON_ZOMBIE'
+import os
+import sys
+try:
+    directory = os.open('/proc/' + sys.argv[1] + '/task',
+                        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        singleton = os.listdir(directory) == [sys.argv[1]]
+    finally:
+        os.close(directory)
+except OSError:
+    raise SystemExit(1)
+raise SystemExit(0 if singleton else 1)
+PY_SINGLETON_ZOMBIE
+          then
+            observation="$(cloudbench_pid_observation_like "${targets[$i]}" "${target_starts[$i]}")" || observation=""
+            if [ "${observation%$'\t'*}" = "${target_starts[$i]}" ] \
+                && [[ "${observation##*$'\t'}" = Z* ]]; then
+              continue
+            fi
+          fi
+        fi
         live=1
         break
       fi
@@ -3132,6 +3187,40 @@ if values["TEMPORAL_NAMESPACE"] == production:
 for name in ("TEMPORAL_ADDRESS", "TEMPORAL_NAMESPACE", "TEMPORAL_API_KEY"):
     print("export %s=%s" % (name, shlex.quote(values[name])))
 PY
+}
+
+# A volume snapshot proof cannot establish the baked /app inputs used by fresh
+# storage. Consume only an explicitly pinned, verified image-build receipt.
+cloudbench_verify_image_dependency_receipt() {  # <receipt> <sha256> <source-id> <node> <python>
+    python3 -c '
+import hashlib, json, re, sys
+from pathlib import Path
+try:
+    path, expected, source, node, python = sys.argv[1:]
+    if not re.fullmatch("[0-9a-f]{64}", expected):
+        raise ValueError("missing pinned image-build receipt SHA256")
+    raw = Path(path).read_bytes()
+    if hashlib.sha256(raw).hexdigest() != expected:
+        raise ValueError("image-build receipt checksum differs")
+    proof = json.loads(raw)
+    rows = [row for row in json.load(sys.stdin) if row.get("id") == source]
+    if len(rows) != 1:
+        raise ValueError("image source missing or ambiguous")
+    row = rows[0]
+    digest = (row.get("image_ref") or {}).get("digest") or row["config"]["image"].rpartition("@")[2]
+    if not re.fullmatch("sha256:[0-9a-f]{64}", digest):
+        raise ValueError("source image has no immutable digest")
+    if proof.get("schema") != "cloudbench-image-build-v1" or proof.get("publication_verified") is not True:
+        raise ValueError("image publication is unverified")
+    image = proof.get("published_image_ref", "")
+    if image.rpartition("@")[2] != digest or proof.get("image_ref") != image or proof.get("published_digest") != digest:
+        raise ValueError("image receipt does not cover actual source image")
+    if proof.get("node_dependency_fingerprint") != node or proof.get("python_dependency_fingerprint") != python:
+        raise ValueError("baked image dependency identity differs from requested ref")
+except (OSError, ValueError, TypeError, KeyError, AttributeError) as error:
+    print("Fresh-storage image dependency admission refused: " + str(error), file=sys.stderr)
+    raise SystemExit(1)
+' "$@"
 }
 
 # Guest-only Node launch policy; never rewrite production or staged dotenv blobs.

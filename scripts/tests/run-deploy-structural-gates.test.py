@@ -23,7 +23,7 @@ ROOT = Path(__file__).resolve().parents[2]
 RUNNER = ROOT / "scripts" / "run-deploy-structural-gates.py"
 # Gate registry floor: deleting a registration lowers the count. Raise it when gates
 # are added; lowering it is the deliberate, reviewable act of retiring a gate.
-MIN_REGISTERED_GATES = 96
+MIN_REGISTERED_GATES = 99
 
 
 def _registry_commands() -> set[str]:
@@ -160,6 +160,9 @@ class StructuralGateDocumentationTests(unittest.TestCase):
         gates = _load_registry().GATES
         owners = {
             "deploy-structural-runner": ("python3", "scripts/tests/run-deploy-structural-gates.test.py"),
+            "cloudbench-provider-contract": ("python3", "scripts/tests/cloudbench-provider-contract.test.py"),
+            "worker-pool-cutover": ("python3", "scripts/tests/worker-pool-cutover.test.py"),
+            "retained-agent-machine": ("python3", "scripts/tests/retained-agent-machine.test.py"),
             "cooperative-cutover-monitor": ("bash", "scripts/tests/cooperative-cutover-monitor.test.sh"),
             "workflow-deployment-migration": ("bash", "scripts/tests/workflow-deployment-migration.test.sh"),
             "durable-evidence-links": ("bash", "scripts/tests/durable-evidence-links.test.sh"),

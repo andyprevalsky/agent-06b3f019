@@ -11,7 +11,7 @@ Infra attempts 0/2
 Stop at 1/2 unique infra-failed jobs (5%)
      1 AGENT FAIL: Timeout after 480s (wall-clock backstop=480s)
 Cost $0.50 metered (2/2) · infra/wmh_grounding UNMETERED
-Cache agent demo-cache avg 80% (2/2) · LLM latency UNMEASURED
+Cache UNMEASURED · LLM latency UNMEASURED
 Lifecycle
   ✅ Owned resources released · lifecycle.json verified
   ✅ Final Hub publication

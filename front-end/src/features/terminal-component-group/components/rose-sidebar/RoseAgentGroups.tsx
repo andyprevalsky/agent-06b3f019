@@ -3,7 +3,7 @@
  *
  * Project/Home collapse preferences persist locally; folder order is server-owned.
  *
- * EXPANDED (bar hovered) — "+ New project" first, right under Back | Search,
+ * EXPANDED (bar hovered) — "+ New folder" first, right under Back | Search,
  * then the created projects, the Home project last (Andy, 2026-10-28); a thin
  * divider line separates consecutive groups:
  *   + New project  (inline: Enter creates, Escape cancels)
@@ -20,7 +20,7 @@
  *       Home agents
  *
  * COLLAPSED (64px rail): per group the project icon, then its agent icons, then
- * an 18×3px neutral line pill before the next group; Home last. "New project"
+ * an 18×3px neutral line pill before the next group; Home last. "New folder"
  * keeps its folder-plus icon in the same top slot (label faded), so expanding
  * never shifts the rows below.
  *
@@ -77,7 +77,7 @@ export interface RoseProjectActions {
   onRename: (project: Project, name: string) => void;
   onCancelRename: () => void;
   onRequestDelete: (project: Project) => void;
-  /** Resolves to an inline error for the "+ New project" input (409), else null. */
+  /** Resolves to an inline error for the "+ New folder" input (409), else null. */
   onCreateProject: (name: string) => Promise<string | null>;
 }
 
@@ -337,14 +337,14 @@ export default function RoseAgentGroups(props: RoseAgentGroupsProps) {
       )}
       {isExpanded && props.projectLoading && (
         <p role="status" className="px-5 py-2 text-xs text-muted-foreground">
-          Loading projects…
+          Loading folders…
         </p>
       )}
       {isExpanded && props.projectError && (
         <div role="alert" className="px-5 py-2 text-xs text-destructive">
-          Could not load projects.{' '}
+          Could not load folders.{' '}
           <button type="button" onClick={props.onRetryProjects} className="font-semibold underline">
-            Retry projects
+            Retry folders
           </button>
         </div>
       )}

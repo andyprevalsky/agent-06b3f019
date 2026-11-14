@@ -73,3 +73,118 @@ rewrite the incomplete registry, manufacture historical volume ownership,
 authorize reuse, release claims or certify guest cleanup. The default command
 continues to skip incomplete records. Keep these IDs excluded from subsequent
 reuse unless a separate supported protocol establishes that authority.
+
+## Forensic current resource reconciliation after a deleted controller
+
+An immutable exported owner can retain failed runtime evidence after its exact
+resources have reached a native terminal disposition. The original audit and
+missing historical epoch remain unchanged. The following separate forensic mode
+requires a complete normal export, original joined/deleted controller receipts,
+complete fresh disposable ownership and original delete authority. It never
+restores a local registry, changes host identity, repeats DELETE or releases
+historical evidence claims.
+
+First obtain the normal fresh inventory required by the existing archived-owner
+planner, and use the original shard run directory on the operator host. Inventory
+must be a private regular file in a physical private directory and include the
+protected warm cohort; do not restore archived registries into .git. All final
+shards must retain their complete original archives and authority receipts:
+
+```bash
+umask 077
+python3 scripts/cloudbench-archived-owner-stop.py \
+  --run-dir "$ORIGINAL_SHARD_RUN" --inventory "$NATIVE_INVENTORY" \
+  --out-dir "$PRIVATE_RECOVERY_DIR" \
+  --forensic-resource-closure "$EXACT_OWNER"
+python3 scripts/cloudbench-archived-owner-stop.py \
+  --run-dir "$ORIGINAL_SHARD_RUN" --inventory "$NATIVE_INVENTORY" \
+  --out-dir "$PRIVATE_RECOVERY_DIR" \
+  --forensic-resource-closure "$EXACT_OWNER" \
+  --agents-env "$AGENTS_ENV" --execute
+```
+
+In this explicit mode, `--execute` performs GET only. It first requires a
+successful exact app identity, then exact terminal observations of the selected
+controller and once-owned guest/volume IDs. Machines may return exact absence
+or destroyed with the original creation/incarnation fields and config digest.
+Volumes may instead have canonical pending_destroy/destroyed state when their
+identity and original delete authority match. Live, foreign or unknown resources
+refuse. The printed receipt path is content-bound
+and append-only. This preliminary selected-owner receipt alone does not close
+the admission.
+
+Pass that exact receipt to the ordinary release-audit command's forensic
+reconciliation mode:
+
+```bash
+python3 scripts/cloudbench-native-release-audit.py "$ORIGINAL_ADMISSION" \
+  --forensic-closure "$EXACT_RECEIPT" --agents-env "$AGENTS_ENV"
+```
+
+The consumer verifies every final shard's complete export and joined/deleted
+writer, derives all once-owned guest and controller workspace subjects, and
+makes new native reads. It uses the ordinary full-scope inventory predicate to
+catch active or newly unrecorded owned resources, then exact-GETs every known ID;
+list omission is never proof. It preserves the original
+`native-release-audit.json` bytes, inode and modification time. Its separate
+`forensic-release-projection-*.json` can set
+`current_physical_resource_release_verified: true` only after the complete fresh
+scope is terminal. Exact 404 absence and an identity-matching Volume in canonical
+`pending_destroy`/`destroyed` state remain distinct; soft deletion never becomes
+an absence claim. The projection names its checked subjects and observation
+clock and binds the raw observation receipt.
+
+Original task results, INFRA, failed runtime capture, retained evidence claims
+and missing historical provider epoch remain unchanged. Current resource
+closure is not runtime sealing or historical task/lifecycle credit. Another
+retained owner, incomplete/unallocated/borrowed cohort, foreign source, missing
+original authority, active/unknown native state or the existing overall cleanup
+deadline causes refusal. No automatic fallback or native mutation follows.
+
+Both commands use the existing 300-second operation deadline, including receipt
+publication. Timeout or interruption leaves no new success projection; partial
+observation receipts may remain. Monitor the one exact command PID and its private
+log. Observations are sequential facts as of the recorded clock, not an atomic
+provider freeze or a guarantee against future resource creation.
+
+If a prior plan refused, retain its directory and raw diagnostic wires. A newly
+qualified terminal predicate changes the plan: obtain the normal fresh inventory
+and choose a new private output directory, then run plan/execute/reconcile with
+those exact inputs. Never edit an old plan to make it reusable. A native body
+validation refusal retains a bounded raw response in a private 0600
+`forensic-native-refusal-*.json`; its error exposes only subject, HTTP status and
+an allowlisted state. Raw configs remain private.
+
+### Scorecard reporting of recorded physical closure
+
+A sharded admission card can display a separate **Physical resources terminal
+(as of)** row from the canonical forensic projection. The reader makes no native
+requests: it verifies content-bound projection/observation bytes, original audit,
+complete canonical input set, original joined-writer/export relationships and
+full subject identity using the same prepare/full-scope/terminal validators.
+Missing, modified, foreign or incomplete proof keeps the original recovery action.
+
+An authenticated as-of row suppresses only the obsolete physical recovery action.
+Historical guest-release evidence, counts, runtime gaps, INFRA and the original
+observation/end clocks remain unchanged. INCOMPLETE may remain the correct card
+state. Terminal provider-retained objects are not labelled absent, and an as-of
+observation does not certify future provider state.
+
+Revalidation streams pinned local files and parses the original archives; its
+local cost grows with archive bytes and subjects. Keep original private inputs
+reachable. This introduces no render-time provider fanout. Validate a new reader
+from an isolated source snapshot and write its card only to a new private output
+directory; do not replace an active campaign checkout or original artifacts.
+
+The GET-only forensic closure path can also observe an original disposable owner
+whose cleanup policy remains `retain` and whose guest cleanup acknowledgement is
+missing. This does not authorize the reaper or any STOP/DELETE. The original
+marker and the exact boolean in the authenticated `disposable-cleanup.json` must
+agree; the plan records `historical_cleanup_policy` and
+`historical_guest_cleanup_missing` for these nondefault histories. Original
+terminal fresh WAL, exclusive delete intents, native incarnation acknowledgement,
+complete export/writer join and all current exact-ID terminal observations remain
+required. A live or unknown current response refuses closure. Historical runtime,
+cleanup acknowledgement, provider epoch and task grades receive no new credit.
+The normal commands and private input requirements above are unchanged. Always
+use a new private output directory and retain any previous refused plan/wires.

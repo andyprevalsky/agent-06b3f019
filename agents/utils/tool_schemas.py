@@ -220,6 +220,8 @@ ResponseSchemaPrimitiveType = Literal[
     "bool",
     "list[str]",
     "list[int]",
+    "object",
+    "list[object]",
     "file_pointer",
     "list[file_pointer]",
 ]
@@ -237,6 +239,7 @@ class ResponseSchemaNestedFieldConfig(BaseModel):
 
     name: str = Field(description="Field name in snake_case.")
     type: ResponseSchemaPrimitiveType = Field(description="Nested field type.")
+    properties: List["ResponseSchemaNestedFieldConfig"] = Field(default_factory=list)
     description: str = Field(default="", description="Optional semantic description; not used for object shape.")
     required: bool = Field(default=True, description="False when this property may be omitted entirely.")
     constraints: List[ResponseSchemaBound] = Field(
@@ -251,12 +254,16 @@ class ResponseSchemaNestedFieldConfig(BaseModel):
 
     @model_validator(mode="after")
     def _validate_constraints(self):
+        if self.type in ("object", "list[object]") and not self.properties:
+            raise ValueError("object schema fields require explicit properties")
         bounds_from_entries(self.type, self.constraints)
         return self
 
     @model_serializer(mode="wrap")
     def _serialize(self, handler):
         data = handler(self)
+        if not data.get("properties"):
+            data.pop("properties", None)
         data.pop("constraints", None)
         data.update(bounds_from_entries(self.type, self.constraints))
         return data
@@ -284,7 +291,7 @@ class ResponseSchemaFieldConfig(BaseModel):
     )
     required: bool = Field(description="Whether this field is required in the output.")
     description: str = Field(default="", description="Optional semantic description; not used for object shape.")
-    properties: List[ResponseSchemaNestedFieldConfig] = Field(
+    properties: List["ResponseSchemaNestedFieldConfig"] = Field(
         default_factory=list,
         description="Explicit subfields for object/list[object] outputs. Required when type is object or list[object].",
     )
@@ -318,8 +325,25 @@ class ResponseSchemaFieldConfig(BaseModel):
         return data
 
 
+from utils.final_presentation import FinalPresentation, validate_presentation
+
+
 class ResponseSchemaConfig(BaseModel):
     """Structured output schema defining what data the agent must return when complete."""
+
+    presentation: FinalPresentation | None = None
+
+    @model_serializer(mode="wrap")
+    def _serialize_presentation(self, handler):
+        data = handler(self)
+        if self.presentation is None:
+            data.pop("presentation", None)
+        return data
+
+    @model_validator(mode="after")
+    def _validate_presentation(self):
+        validate_presentation(self.model_dump(exclude_none=True))
+        return self
 
     fields: List[ResponseSchemaFieldConfig] = Field(
         description=(
@@ -328,9 +352,17 @@ class ResponseSchemaConfig(BaseModel):
         )
     )
 
+    @classmethod
+    def __get_pydantic_json_schema__(cls, core_schema, handler):
+        if handler.mode == "serialization":
+            return handler(core_schema)
+        from utils.response_schema_wire import wire_json_schema
+        return wire_json_schema()
+
     @model_validator(mode="before")
     @classmethod
     def _coerce_malformed_input(cls, value: Any) -> Any:
+        from utils.response_schema_wire import decode_wire
         # Models reliably emit output_schema in three malformed shapes that the
         # canonical {"fields": [...]} form does not match. Coerce each into the
         # structured form rather than failing validation -  failure forces a costly
@@ -357,7 +389,7 @@ class ResponseSchemaConfig(BaseModel):
                 return {
                     "fields": [{"name": k, "description": v, "type": "str", "required": True} for k, v in value.items()]
                 }
-        return value
+        return decode_wire(value)
 
 
 class WaitForTool(BaseModel):
@@ -1190,7 +1222,11 @@ SPAWN_AGENT_TYPE_DESCRIPTION_ROSE_DESKTOP = _SPAWN_TYPE_BROWSER + _SPAWN_TYPE_CO
 BROWSER_GOAL_PROFILE_NOTE = (
     "Exception: a browser agent also receives the user's profile (name, email, phone, delivery "
     "address) and the target site's sign-in options itself; do not restate the user's profile in "
-    "its goal."
+    "its goal. Keep the goal and required output fields limited to the requested outcome and "
+    "evidence needed to establish it. Make supplementary observations conditional in the goal "
+    "and optional in output_schema; do not turn possible site details or background facts into "
+    "mandatory completion evidence. Preserve explicit and standing user constraints and all "
+    "steps and evidence necessary for correct execution."
 )
 
 
@@ -1198,6 +1234,16 @@ def _require_spawn_output_schema_key(schema: Dict[str, Any]) -> None:
     required = schema.setdefault("required", [])
     if "output_schema" not in required:
         required.append("output_schema")
+
+
+_GITHUB_REPO_REF_DESCRIPTION = (
+    "A GitHub repo the user connected to Rose: 'gh:owner/repo', its GitHub URL, 'owner/repo' "
+    "or a Rose project id. Code agents check it out; spawned agents keep it as their repo. "
+    "Explicit selection wins over inherited references (your repo, the project's repo) and "
+    "over github_repo_link. Omit it to inherit. A repo that is not connected fails with an "
+    "error naming it; it never falls back to another repo. Not allowed with target='local'. "
+    "Ignored when code_session_id resumes a session, which keeps its own repo."
+)
 
 
 class SpawnAgentTool(BaseModel):
@@ -1264,9 +1310,14 @@ class SpawnAgentTool(BaseModel):
             "Optional when type='code'. GitHub repository URL to clone and sync to. "
             "Ignored for every other type. Only provide this when the user supplied a real, "
             "accessible repository URL; do not invent placeholder repositories. If omitted, "
-            "uses the current project's repo when the agent is in a project, otherwise a repo "
-            "created for this agent tree."
+            "uses github_repo_ref, else your own connected repo, else the current project's repo "
+            "when the agent is in a project, otherwise a repo created for this agent tree."
         ),
+    )
+    github_repo_ref: Optional[str] = Field(
+        default=None,
+        description="Optional when type='code', 'general_purpose' or 'for_each'; ignored for every other type. "
+        + _GITHUB_REPO_REF_DESCRIPTION,
     )
     code_session_id: Optional[str] = Field(
         default=None,
@@ -1462,6 +1513,10 @@ class SpawnAgentToolNoGP(BaseModel):
         description=(
             "Optional when type='code'. GitHub repository URL to clone and sync to. Ignored for every other type."
         ),
+    )
+    github_repo_ref: Optional[str] = Field(
+        default=None,
+        description="Optional when type='code'; ignored for every other type. " + _GITHUB_REPO_REF_DESCRIPTION,
     )
     code_session_id: Optional[str] = Field(
         default=None,

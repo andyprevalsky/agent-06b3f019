@@ -987,6 +987,39 @@ async def test_execute_dag_alias_resolution_spawn_explore():
     assert early["metadata"]["fullGoal"] == "Explore stuff"
 
 
+async def test_execute_dag_code_alias_forwards_github_repo_ref_and_explore_strips_it():
+    """A planned code spawn keeps its explicit github_repo_ref; a planned explore drops it."""
+    schema = {"fields": [{"name": "result", "type": "str", "required": True, "properties": []}]}
+    plan_data = {
+        "tasks": [
+            {"goal": "Fix the bug", "tool_name": "spawn_code_agent"},
+            {"goal": "Explore stuff", "tool_name": "spawn_explore_agent"},
+        ],
+        "dependencies": {},
+    }
+
+    recorded = []
+
+    async def execute_tool(name, params, tool_call_id):
+        recorded.append((name, dict(params)))
+        return {"message": "done"}
+
+    def param_tool_calls(args):
+        common = {"tool": "spawn_agent", "github_repo_ref": "gh:rose-ai-labs/rose"}
+        if "Fix the bug" in str(args[10]):
+            return [{**common, "type": "code", "task_name": "fix_bug", "goal": "Fix the bug", "output_schema": schema}]
+        return [{**common, "type": "explore", "goal": "Explore stuff", "depth": "quick"}]
+
+    result, _events, _dag = await _run_execute_dag(
+        plan_data, execute_tool_impl=execute_tool, param_tool_calls=param_tool_calls
+    )
+
+    assert result["status"] == "completed"
+    by_type = {params["type"]: params for _name, params in recorded}
+    assert by_type["code"]["github_repo_ref"] == "gh:rose-ai-labs/rose", by_type
+    assert "github_repo_ref" not in by_type["explore"], by_type
+
+
 async def test_execute_dag_repairs_stale_cached_explore_alias_without_live_retry():
     """A stale cached for_each slot cannot force an explore node into a live call."""
     plan_data = {
@@ -2204,6 +2237,10 @@ async def run_all_tests():
     await r.record_async(
         "execute_dag_interrupts_without_messages_keep_behavior_identical",
         test_execute_dag_interrupts_without_messages_keep_behavior_identical,
+    )
+    await r.record_async(
+        "execute_dag_code_alias_forwards_github_repo_ref",
+        test_execute_dag_code_alias_forwards_github_repo_ref_and_explore_strips_it,
     )
     teardown_mock()
     return r.summary()

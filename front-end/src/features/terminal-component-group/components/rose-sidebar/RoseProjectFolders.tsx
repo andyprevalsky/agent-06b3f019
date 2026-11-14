@@ -92,7 +92,7 @@ function FolderNameEditor({
     try {
       await onSave(value.trim());
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Could not save folder.');
+      setError(err instanceof Error ? err.message : 'Could not save subfolder.');
     } finally {
       setSaving(false);
     }
@@ -109,9 +109,9 @@ function FolderNameEditor({
         <Folder className="h-4 w-4 shrink-0 text-muted-foreground" />
         <input
           ref={input}
-          aria-label={initial ? 'Rename folder' : 'New folder name'}
+          aria-label={initial ? 'Rename subfolder' : 'New subfolder name'}
           maxLength={100}
-          placeholder="Folder name"
+          placeholder="Subfolder name"
           value={value}
           disabled={saving}
           aria-invalid={Boolean(error)}
@@ -136,7 +136,7 @@ function FolderNameEditor({
         </button>
         <button
           type="button"
-          aria-label="Cancel folder editing"
+          aria-label="Cancel subfolder editing"
           disabled={saving}
           onClick={onCancel}
         >
@@ -247,7 +247,7 @@ function FolderGroup({
       >
         <button
           type="button"
-          aria-label={`${shown ? 'Collapse' : 'Expand'} folder ${folder.name}`}
+          aria-label={`${shown ? 'Collapse' : 'Expand'} subfolder ${folder.name}`}
           aria-expanded={shown}
           onClick={() => setOpen(!shown)}
           title={folder.name}
@@ -283,7 +283,7 @@ function FolderGroup({
               <PopoverTrigger asChild>
                 <button
                   type="button"
-                  aria-label={`${folder.name} folder options`}
+                  aria-label={`${folder.name} subfolder options`}
                   className="rounded p-1 text-muted-foreground hover:text-foreground"
                 >
                   <MoreHorizontal size={14} />
@@ -334,7 +334,7 @@ function FolderGroup({
                     setRenaming(true);
                   }}
                 >
-                  Rename folder
+                  Rename subfolder
                 </button>
                 <button
                   type="button"
@@ -346,7 +346,7 @@ function FolderGroup({
                     setDeleting(true);
                   }}
                 >
-                  Delete folder
+                  Delete subfolder
                 </button>
               </PopoverContent>
             </Popover>
@@ -370,7 +370,7 @@ function FolderGroup({
       >
         <DialogContent className="sm:max-w-md">
           <DialogHeader>
-            <DialogTitle>Delete folder “{folder.name}”?</DialogTitle>
+            <DialogTitle>Delete subfolder “{folder.name}”?</DialogTitle>
             <DialogDescription>
               Its agents stay in {project.name}, outside any folder.
             </DialogDescription>
@@ -395,13 +395,13 @@ function FolderGroup({
                   await refresh();
                   setDeleting(false);
                 } catch (err) {
-                  setError(err instanceof Error ? err.message : 'Could not delete folder.');
+                  setError(err instanceof Error ? err.message : 'Could not delete subfolder.');
                 } finally {
                   setBusy(false);
                 }
               }}
             >
-              {busy ? 'Deleting…' : 'Delete folder'}
+              {busy ? 'Deleting…' : 'Delete subfolder'}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -474,7 +474,7 @@ export default function RoseProjectFolders({
       );
       void cache.invalidateQueries({ queryKey: PROJECTS_QUERY_KEY, exact: true });
     } catch (err) {
-      setOrderError(err instanceof Error ? err.message : 'Could not reorder folders.');
+      setOrderError(err instanceof Error ? err.message : 'Could not reorder subfolders.');
       void cache.invalidateQueries({ queryKey: PROJECTS_QUERY_KEY, exact: true });
     } finally {
       setOptimisticOrder(null);

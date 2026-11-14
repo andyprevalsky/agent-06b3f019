@@ -50,3 +50,6 @@ assert.deepEqual(
   RESPONSE_SCHEMA_JSON_SCHEMA.properties.fields.items.properties.properties.items.required,
   ['name', 'type', 'constraints', 'required']
 );
+assert.deepEqual(RESPONSE_SCHEMA_JSON_SCHEMA.required, ['reasoning', 'fields', 'presentation']);
+const valuePresentation = RESPONSE_SCHEMA_JSON_SCHEMA.properties.presentation.anyOf[2];
+assert.equal(valuePresentation.properties?.field.minLength, 1);

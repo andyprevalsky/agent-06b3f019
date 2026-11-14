@@ -11,7 +11,16 @@ class AllocationBoundary(BaseException):
     """Stop at the first attempted write without allocating a root or payment."""
 
 
-async def admission(usage, *, status=200, task_name="agent-payment-production-abandonment"):
+LIVE_V2_READY = {
+    "apiVersion": 2,
+    "connected": True,
+    "status": "approved",
+    "livemode": True,
+    "fundsSource": "company_flow",
+}
+
+
+async def admission(usage, *, status=200, task_name="agent-payment-production-abandonment", readiness=None):
     from benchmarks import run_benchmark as bench
 
     requests = []
@@ -22,6 +31,9 @@ async def admission(usage, *, status=200, task_name="agent-payment-production-ab
             return httpx.Response(200, json={"success": True})
         if request.method != "GET":
             raise AllocationBoundary()
+        if request.url.path == "/api/agentcard/status":
+            assert request.headers["x-user-id"] == bench.AGENT_PAYMENT_LIFECYCLE_PROD_USER_ID
+            return httpx.Response(200, json=LIVE_V2_READY if readiness is None else readiness)
         assert request.url.path == "/api/credits/usage", request.url
         assert request.url.params["userId"] == bench.AGENT_PAYMENT_LIFECYCLE_PROD_USER_ID
         return httpx.Response(status, json=usage)
@@ -63,6 +75,21 @@ async def test_live_identity_remains_admissible():
     assert requests[-1].method == "POST" and requests[-1].url.path == "/api/agents"
 
 
+async def test_live_identity_requires_scoped_v2_readiness_before_allocation():
+    for readiness in (
+        {"connected": True, "status": "approved"},
+        {**LIVE_V2_READY, "connected": False},
+        {**LIVE_V2_READY, "status": "pending"},
+        {**LIVE_V2_READY, "livemode": False},
+        {**LIVE_V2_READY, "fundsSource": "onramp"},
+    ):
+        outcome, requests = await admission(
+            {"tier": 30, "remaining": 100, "stripeLivemode": True}, readiness=readiness
+        )
+        assert "scoped live v2" in outcome, outcome
+        assert [r.method for r in requests] == ["GET", "GET"], "unready identity reached a write"
+
+
 async def test_generic_sandbox_task_does_not_require_live_billing():
     outcome, requests = await admission({"tier": 30, "remaining": 100, "stripeLivemode": False}, task_name="chat-mode")
     assert outcome == "allocated", outcome
@@ -84,6 +111,7 @@ async def run_all_tests():
         test_test_mode_refused_before_any_write,
         test_unknown_mode_refused_before_any_write,
         test_live_identity_remains_admissible,
+        test_live_identity_requires_scoped_v2_readiness_before_allocation,
         test_generic_sandbox_task_does_not_require_live_billing,
         test_sandbox_payment_retains_test_mode_setup,
     ):

@@ -43,6 +43,7 @@ export async function probeBrowserCookieVariant(input: {
 }
 
 export async function recoverBrowserChallenge(input: {
+  signal?: AbortSignal;
   taskId: string;
   userId?: string;
   currentUrl: string;
@@ -57,6 +58,7 @@ export async function recoverBrowserChallenge(input: {
 }) {
   await requireOwnedTask(input.taskId, input.userId);
   return searchAndPromoteBrowserConfig({
+    signal: input.signal,
     taskId: input.taskId,
     userId: input.userId,
     targetUrl: input.currentUrl,
