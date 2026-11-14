@@ -7,7 +7,7 @@
  *   [COLLAPSED] --(click header)--> [EXPANDED] --(click header)--> [COLLAPSED]
  *     - COLLAPSED: shows only the final result summary as plain text, markdown
  *       markup stripped (+ status dot, step count).
- *     - EXPANDED:  shows a 3-tab view.
+ *     - EXPANDED: result includes this tool call’s output files; recording stays separate.
  *
  * STATUS (derived from the result text, which leads with the task goal):
  *   **Status** line present => [FAILED] iff that line has ❌/FAILED, else [DONE]
@@ -67,6 +67,8 @@ import {
   type SyntheticEvent,
 } from 'react';
 import { createPortal } from 'react-dom';
+import { useToolArtifacts } from './toolArtifactContext';
+import { AttachmentDisplay } from './message-bubble/AttachmentDisplay';
 import { useMediaElementResource } from '@/hooks/useMediaElementResource';
 import { ChevronDown, Clapperboard, FileText, Globe } from 'lucide-react';
 import { useAgentContext } from '../hooks';
@@ -97,6 +99,7 @@ interface BrowserAgentChipProps {
 }
 
 export default function BrowserAgentChip({ message }: BrowserAgentChipProps) {
+  const artifacts = useToolArtifacts();
   const { messages, selectedAgentId } = useAgentContext();
   const [expanded, setExpanded] = useState(false);
   const [tab, setTab] = useState<Tab>('result');
@@ -349,9 +352,17 @@ export default function BrowserAgentChip({ message }: BrowserAgentChipProps) {
 
           <div className="p-3">
             {tab === 'result' && (
-              <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-words font-sans text-xs">
-                {resultText}
-              </pre>
+              <div>
+                <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-words font-sans text-xs">
+                  {resultText}
+                </pre>
+                <AttachmentDisplay
+                  attachments={artifacts.flatMap((row) =>
+                    row.file_pointer ? [row.file_pointer] : [],
+                  )}
+                  agentId={selectedAgentId || undefined}
+                />
+              </div>
             )}
 
             {tab === 'recording' && (
