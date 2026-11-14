@@ -6828,6 +6828,9 @@ async def test_owned_cleanup_abandon_retries_until_the_cleanup_deadline():
         "stripe_payment_intent_id": "pi_cleanup",
         "provider_transfer_id": "owt_cleanup",
         "reclaim_provider_transfer_id": None,
+        "user_id": root,
+        "stripe_customer_id": "cus_cleanup",
+        "stripe_livemode": False,
     }
     throttled = Exception(
         'Failed to abandon test payment: 401 {"error":"AgentCard Organization MCP list_transfers failed: '
@@ -6842,13 +6845,20 @@ async def test_owned_cleanup_abandon_retries_until_the_cleanup_deadline():
             raise throttled
         return {"purchase": {"status": "VOIDED"}}
 
-    async def lifecycle(_base_url, _agent_id):
+    async def lifecycle(_base_url, agent_id, **options):
+        if options == {"stripe_custody": True}:
+            # The drained purchase's read-only Stripe custody: an unspent, cancelled PaymentIntent.
+            return {"agentId": agent_id, "stripeCustody": [{
+                "purchaseId": purchase, "userId": root, "agentId": root, "purchaseStatus": "VOIDED",
+                "paymentIntentId": "pi_cleanup", "customerId": "cus_cleanup", "livemode": False,
+                "status": "canceled", "currency": "usd", "amountCents": 4396, "amountReceivedCents": 0,
+                "amountCapturableCents": 0, "refundedCents": 0, "outcome": "unspent"}]}
         return {"purchase": {"status": "HELD"}, "walletFunding": {"status": "FUNDED"}}
 
     def sessions(_base_url, _root, require_deleted=False):
         released = len(posts) > refusals
         current = dict(row, status="VOIDED", funding_status="RECLAIMED") if released else dict(row)
-        return {"tree_agent_ids": [root], "purchase_cleanup": [current]}
+        return {"tree_agent_ids": [root], "root_user_id": root, "purchase_cleanup": [current]}
 
     sleeps = []
 
