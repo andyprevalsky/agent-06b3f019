@@ -33,6 +33,7 @@ import {
 import { AgentContext } from '@/features/agent-context';
 import type { AgentContextValue } from '@/features/agent-context/types';
 import type { Message } from '@/lib/api';
+import { openAgentInCurrentClient } from '@/lib/openAgent';
 
 const API_BASE = 'http://localhost:3001/api';
 
@@ -169,6 +170,16 @@ describe('query toolbar nub', () => {
 const WRAPPER_CLASS = /\b(border|bg-|rounded|ring|shadow)/;
 
 describe('top-right app icons', () => {
+  it('opening a setup agent closes the integrations drawer and reveals its conversation', async () => {
+    renderWithProviders(<RoseAppIcons />);
+    const user = userEvent.setup();
+    await user.click(screen.getByTestId('rose-app-integrations'));
+    expect(screen.getByTestId('rose-app-panel')).toHaveAttribute('data-state', 'open');
+    act(() => openAgentInCurrentClient('cli-setup-agent'));
+    expect(screen.getByTestId('rose-app-panel')).toHaveAttribute('data-state', 'closed');
+    expect(new URL(window.location.href).searchParams.get('agent-id')).toBe('cli-setup-agent');
+  });
+
   it('renders Browser, Phone, Integrations and Dark mode bare; no right bar or removed apps', async () => {
     const user = userEvent.setup();
     renderWithProviders(<RoseAppIcons />);
