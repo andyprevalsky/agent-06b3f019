@@ -6,7 +6,7 @@ and rose-1-ultra (see `pools.py:rose-1-browser-use`). What's specific:
   - The user message bundles a full browser snapshot (URL, viewport,
     DOM tree, action history, optional screenshot).
   - Available browser actions are passed as provider tools generated from the
-    Pydantic models in `BROWSER_TOOL_MODELS`, then the first native tool call
+    Pydantic models in `BROWSER_TOOL_MODELS`, then every native tool call
     is validated and normalized into the `UnifiedAction` shape the browser
     handler expects.
   - Legacy JSON text replies are still normalized defensively for old dumps
@@ -25,7 +25,7 @@ import structlog
 
 from providers.rose.schema import build_anthropic_tools_from_response_model
 from tools.prompts import attempt_completion_prompt
-from utils.browser_auth_contract import build_authentication_contract
+from utils.browser_auth_contract import CHALLENGE_RECOVERY_SCOPE, build_authentication_contract
 
 # Single source of truth for verifier rules. The browser prompt embeds the
 # same grading block as the main agent so attempt_completion semantics do not
@@ -255,18 +255,19 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
             "complete it without navigating. "
             "Never use this for CAPTCHA, bot challenges, 'Bot or Not' walls, access-denied interstitials, or "
             "unusual-traffic pages - those are not authentication blockers. Use recover_from_challenge for "
-            "those instead of trying to solve them yourself."
+            "those when appropriate. "
+            f"{CHALLENGE_RECOVERY_SCOPE}"
         ),
         "params": {},
     },
     "recover_from_challenge": {
         "description": (
+            f"{CHALLENGE_RECOVERY_SCOPE} "
             "Relatively expensive recovery to forcefully open a page or service blocked by a CAPTCHA, bot "
             "challenge, access-denied interstitial, unusual-traffic page, or repeated 429. Recovery replaces "
             "this browser's machine in place: you stay the same browser agent on the same task, with no new "
             "browser agent and no second session. Do not use when "
-            "an alternate path can complete the goal without clearing this blocker. Do not drag sliders, "
-            "click verify buttons, or otherwise try to solve the widget yourself. Never use for bad "
+            "an alternate path can complete the goal without clearing this blocker. Never use for bad "
             "credentials, a 404, out-of-stock, form validation, or an ordinary load failure. When invoked, "
             "the tool waits for Kernel or Steel's native automatic CAPTCHA solver, then tests isolated "
             "copies of browser state: known challenge cookies, all target-site cookies, then parallel "
@@ -512,10 +513,10 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
             "(repeated clicks/waits with no state change), take a screenshot to view components that may be "
             "hidden from the DOM, e.g. a CAPTCHA, Cloudflare 'verify you are human' challenge, or other "
             "content rendered inside a cross-origin iframe that the DOM tree cannot see. "
+            f"{CHALLENGE_RECOVERY_SCOPE} "
             "For CAPTCHA / bot-challenge / 'Bot or Not' pages, the DOM is often a misleading shell "
             "(#app-captcha-pwa with only div/a/span indexes) while the real widget is visual-only. "
-            "Use a screenshot only if you need to confirm the challenge type. Do not drag sliders, click "
-            "verify buttons, or otherwise try to solve the widget yourself."
+            "Use a screenshot only if you need to confirm the challenge type."
         ),
         "params": {},
     },
@@ -772,7 +773,8 @@ def build_browser_use_tools(available_actions: List[str]) -> List[Dict[str, Any]
                 "Never use this for CAPTCHA, bot challenges, 'Bot or Not' walls, "
                 "access-denied interstitials, or unusual-traffic pages - those are not "
                 "authentication blockers. Wait briefly or try an alternate URL/path instead "
-                "of trying to solve them yourself."
+                "of using challenge recovery. "
+                f"{CHALLENGE_RECOVERY_SCOPE}"
             )
         input_schema = _collapse_nullable_schema(generated_tool["input_schema"])
         if action_name == "request_user_assistance_for_authentication":
@@ -861,8 +863,10 @@ Use `screenshot` when you need a viewport image. Re-read state after navigation,
 
 # Output Format
 
-You must call exactly one available browser action tool. Do not write a JSON
-action envelope in text; use the provided tool call.
+Return one or more browser action tool calls to execute sequentially.
+Stop at first failure.
+Use observation_ref only for targets bound by read_browser_state in the same response.
+Same-document DOM changes can also invalidate ordinal refs; on 'Unknown ref' or unexpected failures, re-observe.
 
 {VERIFICATION_RULES.strip()}
 
@@ -1218,15 +1222,9 @@ def normalize_browser_use_tool_calls(
     *,
     thinking: Optional[str] = None,
     validation_context: Optional[Dict[str, Any]] = None,
+    available_actions: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
-    """Normalize one provider turn without discarding a printable key batch.
-
-    Browser execution consumes one unified action per turn. Providers can still
-    emit several native calls in one response, though. A sequence made entirely
-    of single printable ``press_key`` calls is one text-entry operation against
-    the already-focused element, so preserve it as focused ``input_text``. Mixed
-    or stateful batches retain the historical first-call-only behavior.
-    """
+    """Validate the entire ordered turn; keep printable typing coalescing."""
     if not tool_calls:
         raise ValueError("normalize_browser_use_tool_calls: no tool calls")
 
@@ -1237,11 +1235,12 @@ def normalize_browser_use_tool_calls(
                     tool_call,
                     thinking=thinking,
                     validation_context=validation_context,
+                    available_actions=available_actions,
                 )
                 for tool_call in tool_calls
             ]
         except ValueError:
-            normalized_calls = []
+            raise
 
         keys = [call.get("params", {}).get("key") for call in normalized_calls]
         if normalized_calls and all(
@@ -1280,10 +1279,11 @@ def normalize_browser_use_tool_calls(
                 },
             }
 
+    if len(tool_calls) > 1:
+        return {**normalized_calls[0], "batch_actions": normalized_calls}
     return normalize_browser_use_tool_call(
-        tool_calls[0],
-        thinking=thinking,
-        validation_context=validation_context,
+        tool_calls[0], thinking=thinking, validation_context=validation_context,
+        available_actions=available_actions,
     )
 
 
@@ -1369,6 +1369,13 @@ def normalize_browser_use_response(
     if not actions:
         raise ValueError("normalize_browser_use_response: No actions returned in completion")
 
+    if not isinstance(actions, list):
+        raise ValueError("Browser action envelope must contain a list")
+    if len(actions) > 1:
+        normalized = [normalize_browser_use_response(
+            {**completion, "action": [action]}, available_actions=available_actions,
+        ) for action in actions]
+        return {**normalized[0], "batch_actions": normalized}
     first_action = actions[0]
     if not isinstance(first_action, dict):
         raise ValueError(
@@ -1443,7 +1450,7 @@ def normalize_browser_use_response(
             "params": hover_params,
         }
 
-    if normalized_action == "click" and index is None:
+    if normalized_action == "click" and index is None and not params.get("observation_ref"):
         raise ValueError(
             f"normalize_browser_use_response: click action requires element index, got none. Raw action: {first_action}"
         )
@@ -1526,6 +1533,12 @@ def _normalize_action_params(
         return network_params
 
     out: Dict[str, Any] = {}
+    if normalized_action == "read_browser_state" and (params.get("observation_id") or params.get("targets")):
+        from browser_tools.schemas import validate_browser_tool_args
+        out.update(validate_browser_tool_args("read_browser_state", params))
+    if normalized_action == "click" and params.get("observation_ref"):
+        from browser_tools.schemas import validate_browser_tool_args
+        out.update(validate_browser_tool_args("click", params))
 
     if params.get("url"):
         out["url"] = params["url"]

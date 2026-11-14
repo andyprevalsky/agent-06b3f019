@@ -1770,10 +1770,13 @@ async def run_agent(
 
             processed_tools.append((tool_name, tool_args, tool_call_id))
 
+        # This branch removed the completed-child handoff path, so the model authored every tool call.
+        completed_child_output = None
         # 10. Persist assistant message (including tool-only declaration turns)
         assistant_metadata = {}
         if assistant_tool_calls:
             assistant_metadata["tool_calls"] = assistant_tool_calls
+            assistant_metadata["tool_call_origin"] = "model" if completed_child_output is None else "completed_child_handoff"
         codex_reasoning_items = getattr(result, "codex_reasoning_items", [])
         if codex_reasoning_items:
             assistant_metadata["codex_reasoning_items"] = codex_reasoning_items

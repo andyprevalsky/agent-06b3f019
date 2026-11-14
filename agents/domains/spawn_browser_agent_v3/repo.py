@@ -852,14 +852,18 @@ async def create_user_auth_assistance_request(
     raise RuntimeError(f"Failed to create auth assistance request: HTTP {response.status_code} {response.text[:200]}")
 
 
-async def fetch_session_info(config: Any, task_id: str, validate_live: bool = False) -> Dict[str, Any]:
-    """Fetch session info for a resumed task."""
-    params = {"validateLive": "true"} if validate_live else None
+async def fetch_session_info(
+    config: Any, task_id: str, validate_live: bool = False, *, include_credentials: bool = True
+) -> Dict[str, Any]:
+    """Fetch resume metadata, optionally deferring credentials to background preparation."""
+    params = {"validateLive": "true"} if validate_live else {}
+    if not include_credentials:
+        params["includeCredentials"] = "false"
     async with httpx.AsyncClient(timeout=10.0) as client:
         response = await client.get(
             f"{config.backend.api_url}/api/browser-session/task/{task_id}",
             headers={"x-api-key": config.backend.api_key or ""},
-            params=params,
+            params=params or None,
         )
         if response.status_code == 200:
             return response.json()

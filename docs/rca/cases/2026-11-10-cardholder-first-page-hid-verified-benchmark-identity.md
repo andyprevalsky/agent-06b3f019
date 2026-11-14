@@ -17,6 +17,8 @@ tags:
   - pagination
   - deploy-smoke
 sources:
+  - PR #1682 recurrence, 2026-11-11
+  - commit b4cfdc9d11219ba2ae9a76e5d8459670fd36ef1e
   - PR #1865 native smoke attempt42
   - commit 431b7c4cb2aff2af425c95d0f2aedd658e843b9c
   - commit f8c8255003d70ac639facf623b30397d62baf38a (upstream)
@@ -103,3 +105,13 @@ coordinator; they are not additional direct user feedback.
 A first page is not a complete membership proof. Enumerate the native provider
 contract before treating a missing configured identity as unverified or asking
 for an account change.
+
+## PR1682 recurrence on 2026-11-11
+
+The frozen b4cfdc9 smoke campaign first failed payment-idempotent-abandonment setup at 04:57:12 UTC. It read one cardholder page and made 51 KYC reads, then rejected not_started; the whole campaign ended with one failure and 15 cancellations. All16 adapter outcomes remain UNVERIFIED, incomplete and cleanup-false. These are not passing payment tests.
+
+The inherited benchmark-float bytes match the earlier failure in this case. Root-owned read-only inspection of the current configured organization found123 unique cardholders: the default page contained50, an explicit limit100 page contained100, and offset100 supplied23. All50 default-page KYC responses were not_started. The configured existing verified cardholder was absent from that default page. No credentials, KYC, cardholder or financial state were changed. These captures occurred after the failure; they do not reconstruct missing historical raw provider responses.
+
+The original compiled selector and readiness check replayed the captured responses and failed with the same not_started error after52 recorded calls. The exact previously reviewed pagination candidate passed the identical readiness assertion in4 calls, including two complete membership pages. The replay performed zero network calls and throws on unobserved input. The complete candidate owning unit passed under a native supervisor with exit0, quiescence and no orphans. Runtime candidate SHA25623e776a06335270b2a014078c56dd508915ba1c8341e5cdcc893fa86160c9b2d; test SHA256ef6eb2812a709e092ec12f003cc50eea58976432678b910654c3d1128b9e947a. Root proof references are retained in .context/deploy-session/round12-payment-setup-rca/our-instance-proof.json. Private raw provider data must remain private.
+
+Applied-source native smoke validation is still required. The separate unsealed runtime capture and destroyed-originals failure is not fixed by pagination, and its failure/debt records must remain unchanged.

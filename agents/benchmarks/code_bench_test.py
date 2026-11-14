@@ -19,8 +19,6 @@ from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts" / "lib"))
-from test_quarantine import quarantine
 
 from benchmarks import code_bench as cb
 from benchmarks import code_bench_parity as parity
@@ -195,12 +193,6 @@ def test_commit_fixture_missing_origin_fails(tmp_path):
     assert _failed(_grade(tmp_path, COMMIT)) == ["git.origin_unchanged"]
 
 
-@quarantine(
-    since="2026-11-10",
-    repair="https://boxes.dev/thread/thr_d0600bd7048f45cc9763b229460e6026",
-    error="FileNotFoundError: [Errno 2] No such file or directory: '/tmp/pytest-of-runner/pytest-14/test_commit_fixture_rewritten_0/commit-locally-no-push/repo/.git/objects/maintenance.lock'",
-    evidence='.context/rca-playwright/benchmark-flake/findings.json',
-)
 def test_commit_fixture_rewritten_history_fails(tmp_path):
     repo = _solve(tmp_path, COMMIT)
     _git(repo, "checkout", "-q", "--orphan", "rewrite")
@@ -956,6 +948,19 @@ def test_parity_cli_effort_matches_flash_and_explicit_tier(tmp_path):
         assert f'model_reasoning_effort="{effort}"' in codex.argv
     models = (parity.REPO_ROOT / "back-end/src/providers/codeAgentModels.ts").read_text()
     assert f"effort: '{parity.DEFAULT_EFFORT}'" in models[models.index("  flash: {"):]
+
+
+def test_git_wrapper_never_starts_background_maintenance(tmp_path):
+    """A commit must not spawn detached `git maintenance` that mutates .git while it is archived."""
+    repo = _workspace(tmp_path, COMMIT)
+    (repo / "maintenance-probe.txt").write_text("probe\n")
+    trace = tmp_path / "git-trace.log"
+    env = {**cb._git_env(repo.parent.parent), "GIT_TRACE": str(trace)}
+    cb._git(["add", "-A"], repo, env)
+    cb._git(["commit", "-q", "-m", "probe"], repo, env)
+    log = trace.read_text()
+    assert "built-in: git commit" in log
+    assert "maintenance run" not in log and "gc --auto" not in log
 
 
 @pytest.mark.parametrize("writer_target", ["direct", "bare-receiver"])

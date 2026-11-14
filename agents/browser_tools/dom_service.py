@@ -646,8 +646,16 @@ def keep_receipt_image_urls(receipt: Any, visible: Any, project: Any) -> None:
     for original, visible_item in zip(original_items, visible_items):
         if not isinstance(original, dict) or not isinstance(visible_item, dict):
             continue
+        visible_item.pop("image_url", None)
         url = original.get("image_url")
-        if isinstance(url, str) and url.startswith(("https://", "http://")):
+        if not isinstance(url, str):
+            continue
+        try:
+            parsed = urlparse(url)
+            valid_url = parsed.scheme in ("http", "https") and bool(parsed.hostname)
+        except ValueError:
+            valid_url = False
+        if valid_url:
             visible_item["image_url"] = project(url)
 
 
@@ -698,9 +706,11 @@ class ActionHistory:
         entries = history.get_entries()
     """
 
-    def __init__(self):
+    def __init__(self, *, visual_task_id: str = ""):
+        self._visual_task_id = visual_task_id
         self._entries: List[ActionHistoryEntry] = []
         self._next_step = 1
+        self._screenshot_evidence: List[Dict[str, Any]] = []
         self._dom_service: Optional["DOMService"] = None
 
     def bind_dom_service(self, dom_service: "DOMService") -> None:
@@ -853,6 +863,47 @@ class ActionHistory:
 
         return entry
 
+    def capture_screenshot_evidence(self, dom_service: "DOMService", session_id: str, screenshot: str, before: Any = None, after: Any = None) -> None:
+        """Attach the actual capture to its existing screenshot tool result.
+
+        Identity and URL describe the capture; they are not an admission rule.
+        No other session files are read and no screenshot bytes are generated.
+        """
+        if not self._entries or not isinstance(screenshot, str) or not screenshot:
+            return
+        entry = self._entries[-1]
+        identity = before if isinstance(before, dict) else after if isinstance(after, dict) else {}
+        context = dict(entry.result.get("screenshot_context") or {})
+        context.setdefault("captured_at", time.time())
+        context.setdefault("url", identity.get("url") or getattr(dom_service, "_runtime_current_url", ""))
+        context.setdefault("target_id", identity.get("target_id"))
+        context.setdefault("step", entry.step)
+        context.setdefault("session_id", session_id)
+        entry.screenshot = screenshot
+        entry.result["screenshot_context"] = self.model_visible_value(context)
+
+    def screenshot_evidence(self, session_id: str = "", task_id: str = "") -> List[Dict[str, Any]]:
+        """Return captured tool results already in this history, without task-proof gating."""
+        rows = []
+        for entry in self.get_entries():
+            screenshot = entry.get("screenshot")
+            if not isinstance(screenshot, str) or not screenshot:
+                continue
+            context = dict(entry.get("result", {}).get("screenshot_context") or {})
+            rows.append({**context, "step": entry["step"], "screenshot_b64": screenshot,
+                         "task_id": self._visual_task_id, "session_id": context.get("session_id", session_id)})
+        return rows
+
+    def describe_screenshot_call(self, step: int, tool_call_id: str) -> None:
+        """Add the original call ID to an already recorded capture's description."""
+        for entry in reversed(self._entries):
+            if entry.step == step:
+                context = entry.result.get("screenshot_context")
+                if isinstance(context, dict):
+                    context["tool_call_id"] = tool_call_id
+                    entry.result["tool_call_id"] = tool_call_id
+                return
+
     def last_action_step(self) -> Optional[int]:
         """Return the latest recorded receipt ID without copying DOM history."""
         return self._entries[-1].step if self._entries else None
@@ -899,6 +950,7 @@ class ActionHistory:
         that happened before the pause instead of treating the resumed page as
         a brand-new session.
         """
+        self._screenshot_evidence = []  # Captures are restored with their ordinary action entries.
         restored: List[ActionHistoryEntry] = []
         allowed_fields = {entry_field.name for entry_field in fields(ActionHistoryEntry)}
         for raw_entry in entries or []:
@@ -914,6 +966,7 @@ class ActionHistory:
     def clear(self) -> None:
         """Clear the action history."""
         self._entries = []
+        self._screenshot_evidence = []
         self._next_step = 1
 
     def __len__(self) -> int:
@@ -1066,34 +1119,9 @@ class DOMService:
             self.mark_secret_used()
 
     def model_visible_value(self, value: Any) -> Any:
-        """Redact registered values and omit media after private entry.
-
-        Raster pixels, canvas output and arbitrary remote images cannot be
-        validated with string redaction. Once a secret has been entered, use
-        redacted DOM observations for this session, including durable resumes.
-        """
-        def omit_media(item: Any) -> Any:
-            if isinstance(item, dict):
-                if isinstance(item.get("type"), str) and item["type"] in {"image_url", "image", "input_image"}:
-                    return {"type": "text", "text": "[image withheld after private credential entry]"}
-                return {
-                    key: omit_media(nested)
-                    for key, nested in item.items()
-                    if key not in {
-                        "screenshot", "screenshot_b64", "media_candidates", "frame", "website_frame",
-                        "image_url", "media",
-                    }
-                }
-            if isinstance(item, list):
-                return [omit_media(nested) for nested in item]
-            if isinstance(item, tuple):
-                return tuple(omit_media(nested) for nested in item)
-            if isinstance(item, str) and item.lstrip().startswith("data:image/"):
-                return "[image withheld after private credential entry]"
-            return item
-
-        safe_value = omit_media(value) if self.secret_values_used else value
-        return mask_secret_values(safe_value, self._secret_redaction_refs)
+        """Redact registered textual secrets while preserving original image transport."""
+        from helpers.screenshot_history import redact_with_screenshots
+        return redact_with_screenshots(value, lambda item: mask_secret_values(item, self._secret_redaction_refs))
 
     def model_visible_action_result(self, action_name: str, result: Any) -> Any:
         """Redact page payloads while preserving trusted action bookkeeping."""
@@ -1109,7 +1137,7 @@ class DOMService:
             # Typed operational receipt text must survive every action projection,
             # before the activity's final return. Raster/media policy stays generic.
             keep_receipt_image_urls(result.get("payment_request"), safe.get("payment_request"), self.model_visible_value)
-        if action_name in {"screenshot", "read_browser_state"} and not self.secret_values_used:
+        if action_name in {"screenshot", "read_browser_state"}:
             # Only these action outputs contain trusted raster transport.
             # A coincidental CVV in PNG base64 is not a page-text readback.
             for key in ("screenshot", "screenshot_b64"):
@@ -2253,7 +2281,8 @@ class DOMService:
         # re-probes (agent c1ebd389: disabled "Sign in with a passkey" burned
         # the write_lock budget on password → WAF CAPTCHA).
         if (
-            target_id in self._passkey_pending_auth_reload_targets
+            getattr(self, "allow_credential_reload", True)
+            and target_id in self._passkey_pending_auth_reload_targets
             and self._held_passkeys_by_credential_id
             and (rebuilt_environment or seeded)
         ):
@@ -2487,26 +2516,8 @@ class DOMService:
             return state.screenshot
 
     @staticmethod
-    def _blank_screenshot(viewport_width: int, viewport_height: int) -> Optional[str]:
-        try:
-            import base64
-            from io import BytesIO
-
-            from PIL import Image
-
-            blank_image = Image.new("RGB", (viewport_width, viewport_height), color="white")
-            buffer = BytesIO()
-            blank_image.save(buffer, format="PNG")
-            return base64.b64encode(buffer.getvalue()).decode("utf-8")
-        except Exception as error:
-            logger.warning(f"📸 Failed to generate blank screenshot: {error}")
-            return None
-
-    @staticmethod
     def _analyze_screenshot(screenshot: str, viewport_width: int, viewport_height: int) -> None:
         import base64
-        import os
-        import time as time_module
         from io import BytesIO
 
         try:
@@ -2529,13 +2540,6 @@ class DOMService:
             except ImportError:
                 logger.warning("📸 PIL not available for dimension check")
 
-            if os.getenv("ENVIRONMENT") != "production":
-                debug_dir = "/tmp/browser_screenshots"
-                os.makedirs(debug_dir, exist_ok=True)
-                filename = f"{debug_dir}/screenshot_{int(time_module.time() * 1000)}.png"
-                with open(filename, "wb") as screenshot_file:
-                    screenshot_file.write(screenshot_bytes)
-                logger.info(f"📸 [DEBUG] Saved to {filename}")
         except Exception as error:
             logger.error(f"📸 Failed to analyze screenshot: {error}")
 
@@ -2564,6 +2568,23 @@ class DOMService:
     def runtime_current_url(self, *, fallback: str = "") -> str:
         """Return private browser identity for navigation/auth mechanics only."""
         return self._runtime_current_url or fallback
+
+    async def live_frame_targets(self) -> Dict[str, Dict[str, str]]:
+        """Chrome's own page/iframe targets, ``{target_id: {"type", "url"}}``.
+
+        Asked of the browser process (no renderer round trip). browser-use's
+        registry is not used: a newly attached out-of-process iframe's attach
+        event carries ``url ''`` and can overwrite the URL targetInfoChanged
+        already stored, so it holds ``''`` until that frame navigates again.
+        """
+        if not self._session:
+            raise RuntimeError("Not connected. Call connect() first.")
+        result = await asyncio.wait_for(self._session.cdp_client.send.Target.getTargets(), timeout=5.0)
+        return {
+            str(info.get("targetId")): {"type": str(info.get("type") or ""), "url": str(info.get("url") or "")}
+            for info in (result or {}).get("targetInfos", [])
+            if isinstance(info, dict)
+        }
 
     def get_parked_page_identity(self) -> Dict[str, Any]:
         """One event-loop snapshot of the native selected target, not page text."""
@@ -2697,7 +2718,8 @@ class DOMService:
         if not self._session:
             raise RuntimeError("Not connected. Call connect() first.")
 
-        capture_screenshot = include_screenshot and not self.secret_values_used
+        capture_screenshot = include_screenshot
+        capture_started_at = time.time() if capture_screenshot else None
         state = await self._browser_state_summary(include_screenshot=capture_screenshot)
         self._runtime_current_url = str(state.url or "")
         if state.dom_state and state.dom_state.selector_map:
@@ -2738,23 +2760,14 @@ class DOMService:
         if getattr(state, "closed_popup_messages", None):
             result["closed_popups"] = state.closed_popup_messages
         screenshot_to_use = await self._capture_surface_screenshot(state) if capture_screenshot else None
-        if self.secret_values_used:
-            capture_screenshot = False
-            screenshot_to_use = None
-        if include_screenshot and self.secret_values_used:
-            result["screenshot_placeholder"] = True
-            result["screenshot_suppressed_reason"] = "Private credentials were entered; use redacted DOM observations."
         if capture_screenshot and not screenshot_to_use:
-            logger.info(f"📸 No screenshot available, generating blank for {result.get('url', 'unknown')}")
-            screenshot_to_use = self._blank_screenshot(viewport_width, viewport_height)
-            # A synthetic white frame is not page evidence; evidence consumers
-            # (the browser verifier) must not present it as the rendered page.
-            result["screenshot_placeholder"] = True
+            result["screenshot_unavailable"] = True
         if include_screenshot and screenshot_to_use:
             result["screenshot"] = screenshot_to_use
+            result["screenshot_context"] = {"captured_at": capture_started_at, "url": result["url"]}
             self._analyze_screenshot(screenshot_to_use, viewport_width, viewport_height)
         safe_result = self.model_visible_value(result)
-        if not self.secret_values_used and screenshot_to_use:
+        if screenshot_to_use:
             # PNG base64 is binary transport, not page text. A short CVV can
             # coincidentally occur in it; textual substitution corrupts pixels.
             safe_result["screenshot"] = screenshot_to_use
@@ -2766,6 +2779,59 @@ class DOMService:
             if "id" in original:
                 visible["id"] = original["id"]
         return safe_result
+
+    async def observe_document_scroll(self) -> Optional[Dict[str, Any]]:
+        """Measure only the focused document, without building DOM/state or guessing defaults."""
+        from helpers.workflow_generation import WorkflowGenerationSealed
+        from temporalio.exceptions import CancelledError as TemporalCancelledError
+
+        session = self._session
+        target_id = getattr(session, "agent_focus_target_id", None)
+        if not target_id:
+            return None
+        expression = """(async () => {
+            await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+            const root = document.scrollingElement;
+            if (!root) return null;
+            return {time_origin_ms: performance.timeOrigin,
+                scroll_x: root.scrollLeft, scroll_y: root.scrollTop,
+                viewport_width: window.innerWidth, viewport_height: window.innerHeight,
+                scroll_width: root.scrollWidth, scroll_height: root.scrollHeight};
+        })()"""
+        try:
+            # One total budget for both obtaining the native session and evaluating.
+            async with asyncio.timeout(0.5):
+                cdp = await session.get_or_create_cdp_session(target_id=target_id, focus=False)
+                if cdp.target_id != target_id:
+                    return None
+                evaluated = await cdp.cdp_client.send.Runtime.evaluate(
+                    params={"expression": expression, "returnByValue": True, "awaitPromise": True},
+                    session_id=cdp.session_id,
+                )
+        except (WorkflowGenerationSealed, TemporalCancelledError):
+            raise
+        except Exception:
+            # Observation is supplementary; never log page values or overwrite the action.
+            return None
+        value = ((evaluated or {}).get("result") or {}).get("value") if isinstance(evaluated, dict) else None
+        keys = ("time_origin_ms", "scroll_x", "scroll_y", "viewport_width", "viewport_height", "scroll_width", "scroll_height")
+        if not isinstance(value, dict) or any(
+            type(value.get(key)) not in (int, float) or not math.isfinite(value[key]) for key in keys
+        ):
+            return None
+        if any(value[key] <= 0 for key in ("time_origin_ms", "viewport_width", "viewport_height")) or any(
+            value[key] < 0 for key in ("scroll_width", "scroll_height")
+        ):
+            return None
+        if self._session is not session or session.agent_focus_target_id != target_id:
+            return None
+        return {
+            "scope": "document",
+            "target_id": str(target_id),
+            **{key: value[key] for key in keys},
+            "captured_epoch_ms": time.time() * 1000,
+            "captured_monotonic_s": time.monotonic(),
+        }
 
     async def _remember_document_images(self) -> List[str]:
         """Record ``document.images`` (src, currentSrc, srcset) of the focused page.

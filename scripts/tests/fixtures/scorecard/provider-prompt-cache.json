@@ -1,0 +1,10 @@
+{
+  "task": "polar-bu-016",
+  "agent": "e18ac986-5985-4670-98a1-75725c829575",
+  "raw_sha256": "1c564f00626654d3b21456b4715566bd7729ff8e2f05b59f0f19a8c40df8b85e",
+  "source": "4c6861dcd2a9aacf22e3937cea27fae904727349",
+  "legacy_cache_hit_pct": 100.0,
+  "legacy_read": 213760,
+  "legacy_write": 0,
+  "prompt_uncached": 17803
+}

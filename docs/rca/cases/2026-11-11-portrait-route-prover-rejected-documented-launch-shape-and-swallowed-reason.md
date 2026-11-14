@@ -19,8 +19,14 @@ tags:
   - swallowed-error
 sources:
   - agent 09b554a3-7577-5ac0-9670-0f58dd668fa1 (lease d5337207, setup.verify cursors 25, 27, 69)
+  - PR #1935
+  - PR #1947
+  - PR #1962
+  - PR #1972
+  - PR #2024
+  - agent 6f72aa8d-0a18-5e9c-830e-0fbc60e6c7fd (lease 65f9bf99, setup.verify portrait_lock cursor 42 SUCCEEDED 2026-11-14T06:23:13.320Z)
 repro: back-end/src/tests/blackbox/iphone-control.portrait-route.cases.ts (production-shaped route cases + Photos/Safari errorCode assertion)
-status: mitigated
+status: fixed
 ---
 
 ## Problem
@@ -120,6 +126,16 @@ Other causes found in the same run. They are outside this prover fix, so they ar
 
 - Both phone browser agents were hard-killed by the browser activity's 30-minute StartToClose (08:50:48→09:20:49 and 09:40:19→10:10:20), in the middle of setup. The next spawn then failed with "Previous browser activity cleanup is unconfirmed".
 - After those failures, the root used code agents to find and run the official Phone Harness CLI outside Rose. It got CLI credentials through an OAuth device approval that a browser agent completed. The native Google sign-in (Settings > Apps > Mail > Add Account) ran on that off-Rose session. That is why it is not in the Rose lease journal, and why `request_user_assistance_for_authentication` (which covers only the Rose phone and browser boundaries) was never reached. Inside Rose, the setup never reached a password screen: the Gmail launch returned HTTP 422 and the agent blocked.
+
+## Verification (2026-11-14, after PR #2024)
+
+A live portrait verify passed in production. This closes the case: status `fixed`.
+
+- Owning fixes, all on main: #1935 (9dc14961), #1947 (66fdbee6), #1962 (2fa292af), #1972 (5fecafd337) and #2024 (c728aea7b8).
+- Prod setup agent 6f72aa8d (user 1f85ff25, lease 65f9bf99, lease created 2026-11-14T06:17:06Z). The `setup.verify` with `verificationTarget=portrait_lock` at journal cursor 42 ended `SUCCEEDED` with result `{"success":true}`. It was created at 06:23:08.309Z and completed at 06:23:13.320Z. This is the first live portrait verify to pass.
+- One earlier attempt in the same lease (cursor 23, 06:20:19Z) failed as designed with `phone_portrait_route_unproven` and `portraitRoute` stage `menu_tap`. The typed `next` told the agent to start again from a new Settings launch, and it did, which led to the cursor 42 pass. The typed-reason path from PR #1935 and the break detail from PR #1962 therefore worked live.
+- The remaining setup verifies on the lease then passed: `apple_account` (cursor 51, 06:24:33Z), `icloud_messages`, `icloud_keychain`, `icloud_contacts`, `receive_address`, `imessage` and `device_passcode` (cursor 104, 06:32:35Z). `GET /api/iphone/connection` showed `portrait_lock` and then `apple_account` as done in the same window.
+- Evidence: a read-only prod query of `IPhoneOperation` rows for the lease. Only `verificationTarget` and the result status were decrypted.
 
 ## Human feedback
 

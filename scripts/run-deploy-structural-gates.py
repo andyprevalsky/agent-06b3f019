@@ -432,6 +432,7 @@ PROC_OBSERVATION = "proc-observation"
 
 GATES = (
     Gate("deploy-test-cycle", ("python3", "scripts/tests/deploy-test-cycle.test.py"), exclusive=PROC_OBSERVATION),
+    Gate("deploy-focused10-settlement", ("python3", "scripts/tests/deploy-focused10-settlement.test.py"), exclusive=PROC_OBSERVATION),
     Gate("deploy-test-user-omission", ("python3", "scripts/tests/deploy-test-user-omission.test.py")),
     Gate("deploy-test-plan", ("python3", "scripts/tests/deploy-test-plan.test.py"), exclusive=PROC_OBSERVATION),
     Gate("deploy-test-worker", ("python3", "scripts/tests/deploy-test-worker.test.py")),
@@ -469,6 +470,10 @@ GATES = (
     ),
     Gate("deploy-gate-release-tool", ("bash", "scripts/tests/deploy-gate-release-tool.test.sh")),
     Gate("seed-cache-decision", ("bash", "scripts/tests/seed-cache-decision.test.sh")),
+    # Its live scratch-database Prisma push checks need a local Postgres and ~45 s, which pushed the quick
+    # backend-structural chain (npm run test:structural) past its 120 s budget; that chain skips them and
+    # this direct run on the gate VM executes every live check.
+    Gate("prisma-local-push", ("bash", "back-end/scripts/prisma-local-push.test.sh"), expected_seconds=60),
     Gate("canonical-seed-migration-readiness", ("python3", "scripts/tests/migrate-canonical-seed.test.py")),
     Gate(
         "canonical-seed-whatsapp-content",
@@ -516,6 +521,9 @@ GATES = (
         ("python3", "-m", "unittest", "discover", "-s", "scripts/live_display", "-p", "test_*.py"),
     ),
     Gate("benchmark-scorecard", ("python3", "scripts/tests/cloudbench-scorecard.test.py")),
+    Gate("sharded-waves", ("python3", "scripts/tests/run-bench-sharded-waves.test.py")),
+
+
     # Linux pidfd fixtures select a capable runtime or the offline controller image.
     Gate(
         "cloudbench-export-recovery",
@@ -554,6 +562,8 @@ GATES = (
     Gate("cloudbench-source-lease-recovery", ("python3", "scripts/tests/cloudbench-source-lease-recovery.test.py")),
     Gate("cloudbench-source-guest-env", ("python3", "scripts/tests/cloudbench-source-guest-env.test.py")),
     Gate("cloudbench-source-env", ("python3", "scripts/tests/cloudbench-source-env.test.py")),
+    Gate("cloudbench-campaign-env", ("python3", "scripts/tests/cloudbench-campaign-env.test.py")),
+    Gate("cloudbench-inventory-site-startup", ("python3", "scripts/tests/cloudbench-inventory-site-startup.test.py")),
     Gate("cloudbench-source-env-handoff", ("python3", "scripts/tests/cloudbench-source-env-handoff.test.py")),
     Gate("cloudbench-kernel-custody", ("python3", "scripts/tests/cloudbench-kernel-custody.test.py")),
     Gate(
@@ -673,6 +683,11 @@ GATES = (
         ("python3", "scripts/tests/cloudbench-controller-relay-retire.test.py"),
     ),
     Gate("cloudbench-staged-boot", ("python3", "scripts/tests/cloudbench-staged-boot.test.py")),
+    Gate("local-stack-retention", ("python3", "scripts/tests/local-stack-retention.test.py")),
+    Gate(
+        "cloudbench-runtime-evidence-collector",
+        ("python3", "scripts/tests/cloudbench-runtime-evidence-collector.test.py"),
+    ),
     Gate(
         "cloudbench-prelaunch-cancel",
         ("python3", "scripts/tests/cloudbench-prelaunch-cancel.test.py"),
@@ -688,6 +703,10 @@ GATES = (
     Gate(
         "cloudbench-disposable-volume-cli",
         ("python3", "scripts/tests/cloudbench-disposable-volume-cli.test.py"),
+    ),
+    Gate(
+        "cloudbench-recovery-fd",
+        ("python3", "scripts/tests/cloudbench-recovery-fd.test.py"),
     ),
     Gate(
         "cloudbench-shared-transport-integration",

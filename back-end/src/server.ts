@@ -36,6 +36,9 @@ import browserSessionRouter from './domains/browser-session/routes';
 import browserWorldRouter from './domains/browser-world/routes';
 import peopleRouter from './domains/people/routes';
 import integrationsRouter from './domains/integrations/routes';
+import { createCliIntegrationRoutes } from './domains/integrations/routes.cli';
+import { createAgent as createCliSetupAgent } from './domains/agents/agentLifecycleService';
+import { createAgentSchema as cliSetupAgentSchema } from './domains/agents/types';
 import authRouter from './domains/auth/routes';
 import authOptionsRouter from './domains/auth-options/routes';
 import authAssistanceRouter from './domains/auth-assistance/routes';
@@ -537,6 +540,17 @@ app.use('/api/claude-code-session', claudeCodeRouter);
 app.use('/api/local-devices', localDevicesRouter);
 app.use('/api/codex-code-session', codexCodeRouter);
 app.use('/api/people', peopleRouter);
+app.use(
+  '/api/integrations/cli',
+  createCliIntegrationRoutes(async ({ userId, agentId, goal }) => {
+    await createCliSetupAgent(
+      cliSetupAgentSchema.parse({ agent_id: agentId, goal, start_phase: 'execute' }),
+      userId,
+      false,
+      null
+    );
+  })
+);
 app.use('/api/integrations', integrationsRouter);
 app.use('/api/compute-accounts', computeGrantsRouter);
 app.use('/api/billing', billingRouter);

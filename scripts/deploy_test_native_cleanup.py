@@ -882,7 +882,9 @@ def stopped_inert_execution(fleet, root, receipt, proof, row, token, evidence, p
     helper = bound(root / 'scripts/cloudbench-original-volume-capture.py')
     # Reviewed 2026-11-11 (PR #1927): BILLING_GUEST is byte-identical to the ddde11af producer; the helper
     # changed only in host-side capture validation (regular_bytes, verify_capture, cross_check_receipts).
-    need(hashlib.sha256(helper).hexdigest() == '7622b415d3b300219a2f17bb1dad1ea723fac037220fcab0d89519461018eb06',
+    # Re-pinned at the PR1682 merge of main 269dd94: BILLING_GUEST still byte-identical; host-side
+    # cross_check_receipts gained the stopped-owner backend extension proof beside main's prefix proof.
+    need(hashlib.sha256(helper).hexdigest() == '16f38b41b7460567705e437ce23cae06b225eea3261a178caed33c62fa0e9680',
          'stopped inert guest producer changed')
     source = next(ast.literal_eval(node.value) for node in ast.parse(helper).body
                   if isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == 'BILLING_GUEST'
@@ -3275,6 +3277,17 @@ def clean_isolated_successor(state, prior, original, successor, renewal_witness=
              'successor historical inventory must preserve original debt')
         admitted_gate = copy.deepcopy(gate)
         admitted_gate['checks'] = [name for name in gate['checks'] if name in historical_checks]
+        # Selection evidence records why the planner chose the gate, not how it executes (local and
+        # backend cleanup already exclude it). A later diff can only add reasons, so accept an
+        # in-order subset of the current reasons only when it hashes to the immutable contract.
+        evidence = admitted_gate.get('selection_evidence')
+        if (binding.get('contract_digest') != digest(admitted_gate) and isinstance(evidence, list)
+                and len(evidence) <= 12 and all(isinstance(v, str) for v in evidence)):
+            for mask in range(1 << len(evidence)):
+                candidate = dict(admitted_gate, selection_evidence=[v for i, v in enumerate(evidence) if mask >> i & 1])
+                if digest(candidate) == binding.get('contract_digest'):
+                    admitted_gate = candidate
+                    break
     need(binding.get('contract_digest') == digest(admitted_gate)
          and (renewal_witness is not None or binding.get('environment') == execution_environment)
          and isinstance(binding.get('input_fingerprint'), str) and binding['input_fingerprint'], 'successor contract')
@@ -3376,6 +3389,14 @@ def clean_isolated_successor(state, prior, original, successor, renewal_witness=
     custody = isolated_successor_custody(state, gate, successor, request, root)
     from deploy_test_quarantine import validate_user_deploy_receipt
     user_policy = validate_user_deploy_receipt(root, gate, successor, request)
+    # Historical no-retry custody cases never execute, so execute() records them incomplete and
+    # UNVERIFIED; every other case must still be complete.
+    successor_custody = successor.get('custody_skips') or {}
+    need(isinstance(successor_custody, dict) and set(successor_custody) <= set(skips)
+         and all(isinstance(skips[c], dict) and skips[c].get('disposition') == 'NO_RETRY_CUSTODY'
+                 and successor_custody[c] == skips[c] for c in successor_custody)
+         and (successor.get('current_execution') or {}) == dict.fromkeys(successor_custody, 'UNVERIFIED'),
+         'successor custody cases')
     expected_complete = dict.fromkeys(admitted_gate['checks'], True)
     historical = {name: value for name, value in skips.items()
                   if value.get('disposition') == 'NO_RETRY_CUSTODY'}
@@ -3611,6 +3632,38 @@ def reconciled_failed_isolated_successor_v1(state, prior, original, successor):
          'failed successor clocks')
 
 
+def prelaunch_refusal(row):
+    """run_phase's record for a gate whose admission raised before any worker launched."""
+    return (isinstance(row, dict) and 'token' not in row and 'executed' not in row
+            and set(row) == {'gate', 'status', 'complete', 'cases', 'source', 'reason'}
+            and row['status'] == 'FAIL' and row['complete'] is False
+            and isinstance(row['cases'], dict) and row['cases']
+            and all(v == 'UNVERIFIED' for v in row['cases'].values()))
+
+
+def prepare_refusal_reconciled(state, row):
+    """A campaign refused at cleanup-ticket prepare dispatched no controller; once its strict
+    campaign-cleanup-prepare-v1 proof is recorded it is not a successor execution."""
+    if not isinstance(row, dict) or row.get('complete') is not False or not row.get('token'):
+        return False
+    entries = [e for e in state.get('reconciled_owners', {}).values() if e.get('token') == row['token']]
+    return (len(entries) == 1 and entries[0].get('kind') == KIND and entries[0].get('purpose') is None
+            and entries[0].get('credit_granted') is False
+            and entries[0].get('proof', {}).get('layout') == 'campaign-cleanup-prepare-v1'
+            and entries[0].get('proof', {}).get('purpose') is None
+            and all(v in {'UNVERIFIED', 'SKIP'} for v in (row.get('cases') or {'': 'PASS'}).values()))
+
+
+def skipped_isolated_refusal(state, attempt, row):
+    """A strictly reconciled cleanup-ticket prepare refusal launched no controller.
+
+    Pre-launch refusal rows (prelaunch_refusal) are never skipped here: the typed
+    branches below authenticate them by their sealed request namespace, and unknown
+    or stale refusals stay blocking (merged main contract).
+    """
+    return prepare_refusal_reconciled(state, row)
+
+
 def recovered_isolated_successor_v1(state, prior, original, successor):
     """Committed negative recovery grants source renewal only, never outer execution credit."""
     import stat
@@ -3796,7 +3849,8 @@ def isolated_successor(state, prior, renewal_witness=None):
     and authenticated sibling receipts; neither path creates execution credit.
     """
     rows = [(attempt, row) for attempt in state.get('attempts', [])
-            for row in attempt.get('results', []) if row.get('gate') == prior['gate']]
+            for row in attempt.get('results', []) if row.get('gate') == prior['gate']
+            and not skipped_isolated_refusal(state, attempt, row)]
     # A stale attempt (source changed mid-run) is superseded and never earns credit. Once its
     # exact native owner is released by a normal no-credit reconciliation, renewal looks past it.
     while rows and rows[-1][0].get('stale') is True and stale_successor_released(state, prior, rows[-1][1]):
@@ -3919,7 +3973,7 @@ def isolated_refusal_successor(state, prior, latest):
     """A proved pre-command refusal adds no native operation to renew or retire."""
     from deploy_test_cycle import bounded_read, sha_file
     rows = [(a, r) for a in state['attempts'] for r in a.get('results', [])
-            if r.get('gate') == prior['gate']]
+            if r.get('gate') == prior['gate'] and not skipped_isolated_refusal(state, a, r)]
     need(latest.get('pre_command_refusal') is None or isinstance(latest['pre_command_refusal'], dict),
          'malformed pre-command refusal witness')
     if ((latest.get('pre_command_refusal') or {}).get('kind') != ISOLATED_REFUSAL_KIND

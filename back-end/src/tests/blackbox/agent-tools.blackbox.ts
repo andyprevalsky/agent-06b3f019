@@ -24,6 +24,7 @@
  * Usage: bash scripts/run-blackbox-tests.sh agent-tools
  */
 import { createHash } from 'crypto';
+import { cliIntegrationCases } from './agent-tools-cli.cases';
 import { putDisplayObject } from '../../providers/agentTools/media';
 import { mintAgentToolsToken } from '../../providers/agentTools/token';
 import { generatedVideoStoragePath } from '../../domains/agent-tools/videoService';
@@ -412,7 +413,7 @@ const tests: BlackboxTest[] = [
   ...displayScriptAllCases(),
 ];
 
-runSuite(tests).catch((err) => {
+runSuite([...tests, ...cliIntegrationCases]).catch((err) => {
   console.error('\nCrashed:', err);
   process.exit(1);
 });

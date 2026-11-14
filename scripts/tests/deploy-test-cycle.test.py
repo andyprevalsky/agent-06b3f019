@@ -15,6 +15,9 @@ import unittest
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / 'scripts' / 'lib'))
+from condition_wait import wait_until
+from test_quarantine import quarantine
 # Source of the original round-37 inventory-init failure whose exact producer bytes the native validator pins.
 INVENTORY_INIT_PRODUCER_SOURCE = 'ce016428eeb484b19b503a6f65884eb92f1e3fde'
 # Native campaign fixture controller PIDs: above any pid_max, so no real process can collide.
@@ -105,6 +108,18 @@ class FixtureEnvironment(unittest.TestCase):
                 env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
             self.assertEqual(result.returncode, 0, result.stdout)
             self.assertIn('Ran 3 tests', result.stdout)
+
+    def test_module_process_scope_is_active(self):
+        self.assertIs(deploy_test_process.process_entries, own_process_entries)
+
+    def test_earlier_fixture_cleanup_keeps_module_process_scope(self):
+        # Module order runs BackendPrismaPreflightCleanup first; its cleanup once called patch.stopall(),
+        # so later recover-round fixtures scanned the whole host and refused a sibling suite's process.
+        result = subprocess.run([sys.executable, '-B', str(Path(__file__).resolve()), 'BackendPrismaPreflightCleanup',
+            'FixtureEnvironment.test_module_process_scope_is_active'],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn('Ran 4 tests', result.stdout)
 
     def test_explicit_request_owner_still_requires_matching_custody(self):
         import deploy_test_historical_custody as h
@@ -412,7 +427,7 @@ class Cycle(unittest.TestCase):
         self.assertEqual(other_before, {k: v for k, v in unrelated.items() if k != h.RECOVERED_KEY})
         self.assertEqual(current17, unrelated['failures'][-17:])
 
-    def custody_fixture(self, top_level=None, gate_name='api'):
+    def custody_fixture(self, top_level=None, gate_name="api", purchase_owner=None, failed_status='FAILED'):
         import deploy_test_historical_custody as h
         mocked = patch.object(h, 'native_closure', return_value={'fixture': 'terminal native fleet'})
         mocked.start(); self.addCleanup(mocked.stop)
@@ -445,15 +460,21 @@ class Cycle(unittest.TestCase):
                                      agentCardProviderUnlinkedTransferCount=0, cardCount=1, purchaseCount=1,
                                      stripePaymentIntentCount=1, stripeProviderPaymentIntentCount=1,
                                      walletFundingCount=1)
-            final = dict(root_deleted=True, tree_agent_ids=[snap['agentId']], unsealed_tree_agent_ids=[], browser_sessions=[],
+            root_id = snap['agentId']
+            if i and purchase_owner:
+                # The timed-out task's browser sub-agent requested the card, so the runner keyed
+                # the stall lifecycle by that child, not the root (PR #1972 r7 native evidence).
+                snap['agentId'] = purchase_owner
+            final = dict(root_deleted=True, tree_agent_ids=sorted({root_id, snap['agentId']}), unsealed_tree_agent_ids=[],
+                         browser_sessions=[],
                          purchase_cleanup=[dict(agent_id=snap['agentId'], purchase_id=snap['purchase']['id'],
                           card_id=snap['agentCard']['id'], provider_transfer_id=snap['orgTransfer']['id'],
                           total_cents=4396, status='HELD', funding_status='RECLAIMING')])
-            row = dict(name=name, agent_id=snap['agentId'], passed=False, status='ACTIVE' if i else 'SKIPPED',
-                       benchmark_status='FAILED' if i else 'SKIPPED', failure_reason='auth then timeout' if i else self.STALL_REASON)
+            row = dict(name=name, agent_id=root_id, passed=False, status=('ERROR' if failed_status == 'ERROR' else 'ACTIVE') if i else 'SKIPPED',
+                       benchmark_status=failed_status if i else 'SKIPPED', failure_reason='auth then timeout' if i else self.STALL_REASON)
             native = dict(**row, cleanup_failure=None, context_violations=[],
                           execution_provenance={'base_sha': self.state['source']['head']},
-                          logs={'cloud_cleanup_evidence': dict(errors=[], root_agent_id=snap['agentId'], final=final,
+                          logs={'cloud_cleanup_evidence': dict(errors=[], root_agent_id=root_id, final=final,
                                 provider_receipts=[], agentcard_release_stall_lifecycles={snap['agentId']: snap})})
             if not i:
                 native['logs']['agentcard_release_stall_lifecycle'] = top_level(copy.deepcopy(snap)) if top_level else snap
@@ -1859,6 +1880,111 @@ class Cycle(unittest.TestCase):
                     launch.assert_not_called()
             (self.root / 'code').write_text(code)
 
+    def test_historical_custody_binds_subagent_owned_stall_and_refuses_unprovable_owner(self):
+        # PR #1972 r7: the protected timed-out idempotent-abandonment row's stall lifecycle was keyed
+        # by its browser sub-agent, and prepare-historical-no-retry crashed with KeyError(root id).
+        import deploy_test_historical_custody as h
+        new = self.custody_fixture(purchase_owner='browser-1')
+        proof = h.build(self.state, self.plan, new, self.root)
+        case = next(r for r in proof['cases'] if r['original_failure']['id'] == 'failure-1')
+        self.assertEqual(('root-1', 'purchase-1', 'card-1', 'transfer-1', 4396),
+                         tuple(case[k] for k in ('root_id', 'purchase_id', 'card_id', 'transfer_id', 'original_amount_cents')))
+        self.assertEqual('canonical_pending_repair', case['authority']['kind'])
+        f = self.state['failures'][1]; file = Path(f['worker_evidence']['path']); raw = file.read_bytes()
+        adapter_path = Path(f['worker_result']); adapter_raw = adapter_path.read_bytes()
+
+        def evidence(t):
+            return t['logs']['cloud_cleanup_evidence']
+
+        def lifecycles(t):
+            return evidence(t)['agentcard_release_stall_lifecycles']
+        refusals = {
+            'ambiguous release-stall': lambda t: lifecycles(t).update({'browser-2': dict(lifecycles(t)['browser-1'], agentId='browser-2')}),
+            # A root snapshot beside the child's would leave the second stalled purchase unbound.
+            'ambiguous release-stall lifecycles': lambda t: lifecycles(t).update({'root-1': dict(lifecycles(t)['browser-1'], agentId='root-1')}),
+            'malformed release-stall': lambda t: lifecycles(t)['browser-1'].update(agentCard=None),
+            'owner mismatch': lambda t: lifecycles(t)['browser-1'].update(agentId='browser-2'),
+            'root not sealed': lambda t: evidence(t)['final'].update(tree_agent_ids=['root-1']),
+            'final purchase join': lambda t: evidence(t)['final']['purchase_cleanup'][0].update(agent_id='root-1'),
+            'confirmed sandbox release stall': lambda t: lifecycles(t)['browser-1']['orgTransfer'].update(releasedCents=1),
+        }
+        for message, change in refusals.items():
+            candidate = copy.deepcopy(self.state)
+            doc = json.loads(raw); change(doc['tasks'][0]); c.write(file, doc)
+            candidate['failures'][1]['worker_evidence']['sha256'] = c.sha_file(file)
+            adapter = json.loads(adapter_raw)
+            adapter['evidence'][doc['tasks'][0]['name']] = candidate['failures'][1]['worker_evidence']
+            c.write(adapter_path, adapter)
+            with self.assertRaisesRegex(ValueError, 'historical custody: .*' + message, msg=message):
+                h.build(candidate, self.plan, new, self.root)
+            file.write_bytes(raw); adapter_path.write_bytes(adapter_raw)
+        # No recorded lifecycle at all is not a discovered custody obligation; only the stall stays protected.
+        candidate = copy.deepcopy(self.state)
+        doc = json.loads(raw); evidence(doc['tasks'][0]).update(agentcard_release_stall_lifecycles={}); c.write(file, doc)
+        candidate['failures'][1]['worker_evidence']['sha256'] = c.sha_file(file)
+        self.assertEqual(['failure-0'], list(h.known(candidate, self.root)))
+        file.write_bytes(raw)
+        before = copy.deepcopy(self.state)
+        c.refresh(self.state, self.plan, new, self.root, historical_no_retry_proof=proof)
+        self.assertEqual(new, self.state['plan'])
+        rows = {r['original_failure']['id']: r for r in self.state['historical_no_retry_custody']}
+        self.assertEqual({'failure-0', 'failure-1'}, set(rows))
+        self.assertTrue(all(r['disposition'] == h.DISPOSITION and r['current_execution'] == 'UNVERIFIED'
+                            and not any(r['credit'].values()) for r in rows.values()))
+        self.assertEqual(before['failures'], self.state['failures'])
+        self.assertEqual([p['id'] for p in before['pending_post_merge']], [p['id'] for p in self.state['pending_post_merge']])
+        h.verify(self.state, self.root)
+        self.assertEqual({'agent-payment-abandonment', 'agent-payment-idempotent-abandonment'},
+                         set(c.reuse_qualifications(self.state, new['gates'][1], root=self.root)))
+
+    def test_historical_custody_keeps_no_retry_for_stall_row_that_ended_error(self):
+        # PR #2014 smoke: agent-payment-abandonment hit the exact sandbox stall, but an AgentCard org-token
+        # 401/429 storm failed its final lifecycle read, so the native row ended ERROR, not FAILED. Its
+        # canonical pending repair must still carry no-retry custody; a refusal forces a re-minting rerun.
+        import deploy_test_historical_custody as h
+        new = self.custody_fixture(failed_status='ERROR')
+        proof = h.build(self.state, self.plan, new, self.root)
+        case = next(r for r in proof['cases'] if r['original_failure']['id'] == 'failure-1')
+        self.assertEqual('canonical_pending_repair', case['authority']['kind'])
+        c.refresh(self.state, self.plan, new, self.root, historical_no_retry_proof=proof)
+        self.assertEqual({'failure-0', 'failure-1'}, {r['original_failure']['id'] for r in self.state['historical_no_retry_custody']})
+        h.verify(self.state, self.root)
+        # Only complete non-passing native outcomes qualify; a PASSED row is never custody.
+        state = copy.deepcopy(self.state)
+        f = state['failures'][1]; file = Path(f['worker_evidence']['path']); doc = json.loads(file.read_bytes())
+        doc['tasks'][0]['benchmark_status'] = 'PASSED'; c.write(file, doc)
+        f['worker_evidence']['sha256'] = c.sha_file(file); f['worker_evidence']['native_task']['benchmark_status'] = 'PASSED'
+        adapter_path = Path(f['worker_result']); adapter = c.read(adapter_path)
+        adapter['evidence'][doc['tasks'][0]['name']] = f['worker_evidence']; c.write(adapter_path, adapter)
+        state.pop('historical_custody_history', None); state.pop('historical_no_retry_custody', None)
+        with self.assertRaisesRegex(ValueError, 'independent failure lacks canonical pending repair'):
+            h.historical(state, f, self.root)
+
+    def test_historical_custody_ignores_warning_context_violations_only(self):
+        # PR #2014 smoke: agent-payment-test-shop's confirmed-stall row carried one warning-severity
+        # context violation (whitespace-only assistant message); run_benchmark fails rows only on
+        # error severity, so custody must not refuse and force a re-minting rerun.
+        import deploy_test_historical_custody as h
+        new = self.custody_fixture()
+        f = self.state['failures'][1]; file = Path(f['worker_evidence']['path']); raw = file.read_bytes()
+        adapter_path = Path(f['worker_result']); adapter_raw = adapter_path.read_bytes()
+        warning = {'message': 'Assistant message 23 has only whitespace text content.', 'message_index': 23,
+                   'rule': 'non_empty_content', 'severity': 'warning'}
+        for violations, ok in (([warning], True), ([dict(warning, severity='error')], False),
+                               ([warning, 'malformed'], False), (None, False)):
+            state = copy.deepcopy(self.state)
+            doc = json.loads(raw); doc['tasks'][0]['context_violations'] = violations; c.write(file, doc)
+            failure = state['failures'][1]; failure['worker_evidence']['sha256'] = c.sha_file(file)
+            adapter = json.loads(adapter_raw); adapter['evidence'][doc['tasks'][0]['name']] = failure['worker_evidence']
+            c.write(adapter_path, adapter)
+            if ok:
+                row = h.historical(state, failure, self.root)
+                self.assertEqual('canonical_pending_repair', row['authority']['kind'])
+            else:
+                with self.assertRaisesRegex(ValueError, 'native task/cleanup unknown'):
+                    h.historical(state, failure, self.root)
+            file.write_bytes(raw); adapter_path.write_bytes(adapter_raw)
+
     def test_historical_custody_rejects_tampering_and_missing_admission_proof(self):
         import deploy_test_historical_custody as h
         new = self.custody_fixture(); proof = h.build(self.state, self.plan, new, self.root)
@@ -1965,7 +2091,11 @@ class Cycle(unittest.TestCase):
         new = copy.deepcopy(self.plan)
         new['source'] = c.source(self.root)
         before = copy.deepcopy(state)
-        c.refresh(state, self.plan, new, self.root)
+        # FINAL refresh must read the exact persisted cycle and prove no unfinished request.
+        with self.assertRaisesRegex(ValueError, 'exact saved native cycle'):
+            c.refresh(copy.deepcopy(state), self.plan, new, self.root)
+        c.write(self.directory / 'cycle.json', state)
+        c.refresh(state, self.plan, new, self.root, directory=self.directory)
         self.assertEqual(state['attempts'], before['attempts'])
         self.assertEqual(state['phase'], 'quick')
         self.assertFalse(state['ready'])
@@ -1973,13 +2103,19 @@ class Cycle(unittest.TestCase):
                       {'resume_phase': 'final'}, {'pending': ['unresolved']}):
             candidate = {**copy.deepcopy(before), **extra}
             original = copy.deepcopy(candidate)
+            c.write(self.directory / 'cycle.json', candidate)
             with self.assertRaises(ValueError):
-                c.refresh(candidate, self.plan, new, self.root)
+                c.refresh(candidate, self.plan, new, self.root, directory=self.directory)
             self.assertEqual(candidate, original)
         candidate = copy.deepcopy(before)
         candidate['attempts'].append({'phase': 'final', 'source': candidate['source'], 'results': []})
-        with self.assertRaises(ValueError):
-            c.refresh(candidate, self.plan, new, self.root)
+        c.write(self.directory / 'cycle.json', candidate)
+        unfinished = self.directory / 'attempts/1/final/api/request.json'
+        c.write(unfinished, {'gate': 'api', 'source': candidate['source']})
+        original = copy.deepcopy(candidate)
+        with self.assertRaisesRegex(ValueError, 'unknown terminal ownership'):
+            c.refresh(candidate, self.plan, new, self.root, directory=self.directory)
+        self.assertEqual(candidate, original)
 
     def source_refusal_fixture(self):
         import hashlib, time
@@ -2463,6 +2599,648 @@ class Cycle(unittest.TestCase):
             c.refresh(pending, old, split(), self.root)
         self.assertEqual(unchanged, pending)
 
+    def prepared_bindings_fixture(self, changed_source=False):
+        old = copy.deepcopy(self.plan)
+        # Real prepared private repositories, not mocked source equality.
+        for gate in old['gates']:
+            if gate.get('quick'):
+                continue
+            path = Path(gate['cwd'])
+            subprocess.run(['git', 'clone', '-q', str(self.root), str(path)], check=True)
+            (path / '.git/info/exclude').write_text('.context/\n')
+            gate['worker_root'] = str(path)
+        state = c.initialize(old, self.root)
+        state['attempts'] = [{'phase': 'quick', 'source': old['source'], 'results': [
+            {'gate': g['name'], 'status': 'PASS', 'source': old['source']}
+            for g in old['gates'] if g.get('quick')]}]
+        state['phase'] = 'initial'
+        new = copy.deepcopy(old)
+        if changed_source:
+            (self.root / 'code').write_text('tooling repair')
+            subprocess.run(['git', '-C', str(self.root), 'add', 'code'], check=True)
+            subprocess.run(['git', '-C', str(self.root), '-c', 'user.name=test', '-c',
+                            'user.email=test@example.com', 'commit', '-qm', 'repair'], check=True)
+            for gate in new['gates']:
+                if not gate.get('quick'):
+                    subprocess.run(['git', '-C', gate['cwd'], 'fetch', '-q', 'origin'], check=True)
+                    subprocess.run(['git', '-C', gate['cwd'], 'checkout', '-q', '--detach', 'FETCH_HEAD'], check=True)
+            new['source'] = c.source(self.root)
+        for gate in new['gates']:
+            if gate.get('quick'):
+                continue
+            for key, leaf in [('TMPDIR', 'tmp'), ('XDG_CACHE_HOME', 'cache'), ('npm_config_cache', 'npm-cache')]:
+                path = Path(gate['worker_root']) / '.context' / leaf
+                path.mkdir(parents=True)
+                gate['env'][key] = str(path)
+        return old, new, state
+
+    def collection_coordinator_fixture(self):
+        plan, _, state = self.prepared_bindings_fixture()
+        gate=plan['gates'][1]
+        gate.update(name='backend-coverage-blackbox', native_backend=True, case_protocol=True,
+            result_transport='file', command=[sys.executable,str(c.ROOT/'scripts/deploy_test_backend.py'),'--root',gate['worker_root']],
+            checks=['blackbox:alpha','teardown'], worker_recipe={'cases':{
+                k:{'command':['npm','run','test:coverage:sharded'],'cwd':'back-end','sweep':'backend'} for k in ['blackbox:alpha','teardown']}})
+        state=c.initialize(plan,self.root);state['phase']='initial'
+        folder=self.directory/'original';folder.mkdir(parents=True)
+        original={'token':'old','gate':gate['name'],'source':state['source'],'cases':dict.fromkeys(gate['checks'],'UNVERIFIED'),
+                  'complete':False,'execution_binding':{'environment':state['environment']}}
+        c.write(folder/'receipt.json',original)
+        state['attempts']=[{'phase':'focused','results':[original]}]
+        state['reconciled_owners']={c.sha_file(folder/'receipt.json'):{'execution_gate':copy.deepcopy(gate)}}
+        spec={'seal':'not-read-by-coordinator-fixture','seal_sha256':'a'*64,'report_timeout_seconds':30}
+        request={'token':'old','checks':gate['checks'],'worker_recipe':gate['worker_recipe'],'source':state['source']}
+        result={'token':'new','gate':gate['name'],'source':state['source'],'complete':False,
+                'cases':{'blackbox:alpha':'PASS','teardown':'UNVERIFIED'},
+                'case_complete':{'blackbox:alpha':True,'teardown':False},'log':'native'}
+        return plan,state,gate,original,spec,request,result,folder
+
+    def test_collection_cli_preserves_original_and_refuses_repeat(self):
+        import deploy_test_backend as backend
+        import contextlib,io
+        plan,state,gate,original,spec,request,result,folder=self.collection_coordinator_fixture()
+        plan_path=self.root/'.context/plan.json';input_path=self.root/'.context/collection.json'
+        c.write(plan_path,plan);c.write(input_path,spec);c.write(self.directory/'cycle.json',state)
+        seal={'original_folder':str(folder)};old=(folder/'receipt.json').read_bytes()
+        args=['collect-backend','--plan',str(plan_path),'--state-dir',str(self.directory),'--root',str(self.root),'--input',str(input_path)]
+        with patch.object(backend,'validate_collection',return_value=(seal,request,original)), \
+             patch.object(c,'local_reconciliation_bound',return_value=True), \
+             patch('deploy_test_process_scan.prepared_workers_idle',return_value={'quiescent':True}), \
+             patch.object(c,'execute',return_value=result) as launch,contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(0,c.main(args))
+            saved=c.read(self.directory/'cycle.json')
+            self.assertEqual(original,saved['attempts'][0]['results'][0])
+            self.assertEqual('collection',saved['attempts'][-1]['phase'])
+            self.assertEqual('triage',saved['phase']);self.assertFalse(saved['ready'])
+            self.assertEqual('teardown',saved['failures'][-1]['check'].split('/')[-1])
+            self.assertEqual(spec,launch.call_args.kwargs['collection'])
+            self.assertEqual(2,c.main(args));self.assertEqual(1,launch.call_count)
+        self.assertEqual(old,(folder/'receipt.json').read_bytes())
+
+    def test_collection_unreconciled_or_changed_source_never_launches(self):
+        import deploy_test_backend as backend
+        plan,state,gate,original,spec,request,result,folder=self.collection_coordinator_fixture()
+        before=copy.deepcopy(state)
+        with patch.object(backend,'validate_collection',return_value=({'original_folder':str(folder)},request,original)), \
+             patch.object(c,'local_reconciliation_bound',return_value=False), patch.object(c,'execute') as launch:
+            with self.assertRaises(ValueError):c.collect_backend(state,spec,self.directory,self.root)
+            launch.assert_not_called()
+        self.assertEqual(before,state)
+        (self.root/'code').write_text('changed')
+        with patch.object(c,'execute') as launch,self.assertRaises(ValueError):
+            c.collect_backend(state,spec,self.directory,self.root)
+        launch.assert_not_called()
+
+    def test_collection_cycle_claim_publication_synced_before_execute(self):
+        import deploy_test_backend as backend
+        plan,state,gate,original,spec,request,result,folder=self.collection_coordinator_fixture()
+        target=self.directory/'cycle.json';events=[];fsync=os.fsync;replace=os.replace
+        def sync(fd):
+            name=Path(os.readlink('/proc/self/fd/'+str(fd)))
+            if name==self.directory:events.append('directory')
+            elif name.parent==self.directory:events.append('file')
+            return fsync(fd)
+        def publish(src,dst):
+            answer=replace(src,dst)
+            if Path(dst)==target:events.append('publish')
+            return answer
+        def execute(*args,**kwargs):
+            self.assertEqual(['file','publish','directory'],events)
+            self.assertEqual('started',c.read(target)['backend_collections']['old']['state'])
+            return result
+        with patch.object(backend,'validate_collection',return_value=({'original_folder':str(folder)},request,original)), \
+             patch.object(c,'local_reconciliation_bound',return_value=True), \
+             patch('deploy_test_process_scan.prepared_workers_idle',return_value={'quiescent':True}), \
+             patch.object(os,'fsync',side_effect=sync),patch.object(os,'replace',side_effect=publish), \
+             patch.object(c,'execute',side_effect=execute):
+            c.collect_backend(state,spec,self.directory,self.root)
+
+    def test_collection_failed_cycle_parent_sync_stops_execute_and_retains_claim(self):
+        import deploy_test_backend as backend
+        plan,state,gate,original,spec,request,result,folder=self.collection_coordinator_fixture()
+        fsync=os.fsync
+        def sync(fd):
+            if Path(os.readlink('/proc/self/fd/'+str(fd)))==self.directory:raise OSError('directory sync failed')
+            return fsync(fd)
+        with patch.object(backend,'validate_collection',return_value=({'original_folder':str(folder)},request,original)), \
+             patch.object(c,'local_reconciliation_bound',return_value=True), \
+             patch('deploy_test_process_scan.prepared_workers_idle',return_value={'quiescent':True}), \
+             patch.object(os,'fsync',side_effect=sync),patch.object(c,'execute') as launch:
+            with self.assertRaisesRegex(OSError,'directory sync failed'):c.collect_backend(state,spec,self.directory,self.root)
+            launch.assert_not_called()
+            retained=c.read(self.directory/'cycle.json')
+            self.assertEqual('started',retained['backend_collections']['old']['state'])
+            with self.assertRaisesRegex(ValueError,'already has a collection'):c.collect_backend(retained,spec,self.directory,self.root)
+            launch.assert_not_called()
+
+    def test_prepare_bindings_before_full_preserves_history_and_restarts_quick(self):
+        old, new, state = self.prepared_bindings_fixture(changed_source=True)
+        with self.assertRaisesRegex(ValueError, 'repair boundary'):
+            c.refresh(copy.deepcopy(state), old, new, self.root)
+        historical = copy.deepcopy(state['attempts'])
+        with patch.object(c, '_prepared_workers_idle') as idle:
+            c.prepare_bindings(state, old, new, self.root, self.directory)
+        idle.assert_called_once()
+        self.assertEqual(historical, state['attempts'])
+        self.assertEqual(new['source'], state['source'])
+        self.assertEqual('quick', state['phase'])
+        self.assertEqual('initial', state['next_after_quick'])
+        self.assertFalse(state['ready'])
+        self.assertEqual(old, state['prepared_binding_history'][0]['from_plan'])
+        self.assertFalse(state['prepared_binding_history'][0]['credit_granted'])
+        unchanged = copy.deepcopy(state)
+        with self.assertRaises(ValueError):
+            c.prepare_bindings(state, new, new, self.root, self.directory)
+        self.assertEqual(unchanged, state)
+
+    def test_prepared_worker_process_ownership_fails_closed(self):
+        proc = self.root / 'fake-proc'; proc.mkdir()
+        entry = proc / '99999999'; entry.mkdir(); (entry / 'fd').mkdir(); (entry / 'maps').write_text('')
+        worker = Path(self.workers.name) / 'api'
+        (entry / 'cwd').symlink_to(worker)
+        with self.assertRaisesRegex(ValueError, 'active local consumer'):
+            c._prepared_workers_idle([worker], proc)
+        (entry / 'cwd').unlink(); (entry / 'cwd').symlink_to(self.root)
+        (entry / 'fd' / '7').symlink_to(worker / 'file')
+        with self.assertRaisesRegex(ValueError, 'active local consumer'):
+            c._prepared_workers_idle([worker], proc)
+        (entry / 'fd' / '7').unlink()
+        c._prepared_workers_idle([worker], proc)
+        (entry / 'maps').write_text('1-2 r--p 0 00:01 7 ' + str(worker / 'loaded.so'))
+        with self.assertRaisesRegex(ValueError, 'active local consumer'):
+            c._prepared_workers_idle([worker], proc)
+        (entry / 'maps').write_text('')
+        # A descriptor can close during enumeration. It must not hide a
+        # still-live process's later mapping into the worker checkout.
+        closed = entry / 'fd' / '8'
+        closed.symlink_to(self.root / 'gone')
+        (entry / 'maps').write_text('1-2 r--p 0 00:01 7 ' + str(worker / 'loaded.so'))
+        real_readlink = c.os.readlink
+        def racing_readlink(path):
+            if Path(path) == closed:
+                raise FileNotFoundError('descriptor closed during scan')
+            return real_readlink(path)
+        with patch.object(c.os, 'readlink', side_effect=racing_readlink):
+            with self.assertRaisesRegex(ValueError, 'active local consumer'):
+                c._prepared_workers_idle([worker], proc)
+        closed.unlink()
+        (entry / 'maps').write_text('')
+        with patch.object(c.os, 'readlink', side_effect=PermissionError('unreadable')):
+            with self.assertRaisesRegex(ValueError, 'unreadable'):
+                c._prepared_workers_idle([worker], proc)
+
+    def test_prepare_bindings_backend_database_and_native_lease(self):
+        old, new, state = self.prepared_bindings_fixture()
+        for plan in (old, new):
+            gate = plan['gates'][1]
+            gate.update(name='backend-coverage-blackbox', native_backend=True)
+            gate['env']['ROSE_USE_SYSTEM_PG']='true'
+        state['plan']=old; state['plan_digest']=c.digest(old)
+        state['input_fingerprints']=c.input_fingerprints(old,self.root)
+        # This fixture tests transition admission, not the backend adapter recipe.
+        new['gates'][1]['env']['BACKEND_COVERAGE_DATABASE_URL']='postgresql://user:p%40ss@localhost:5432/victoria_api'
+        for url in ('postgresql://u:p@remote:5432/victoria_api',
+                    'postgresql://u:p@localhost:5432/victoria',
+                    'postgresql://u:p@localhost:5432/victoria_wmh_recording_old',
+                    'postgresql://u:p@localhost:5432/victoria_ui',
+                    'postgresql://u:p@localhost:5432/victoria_api?options=-cwhatever'):
+            bad=copy.deepcopy(new); bad['gates'][1]['env']['BACKEND_COVERAGE_DATABASE_URL']=url
+            with self.assertRaises(ValueError), patch.object(c, '_prepared_workers_idle'):
+                c.prepare_bindings(copy.deepcopy(state),old,bad,self.root,self.directory)
+        lock_path=Path(new['gates'][1]['worker_root'])/'.context/native-worker-admission.lock'
+        with lock_path.open('a') as held:
+            c.fcntl.flock(held,c.fcntl.LOCK_EX|c.fcntl.LOCK_NB)
+            with self.assertRaises(BlockingIOError), patch.object(c, '_prepared_workers_idle'):
+                c.prepare_bindings(copy.deepcopy(state),old,new,self.root,self.directory)
+        with patch.object(c, '_prepared_workers_idle'):
+            c.prepare_bindings(state,old,new,self.root,self.directory)
+        self.assertEqual('quick',state['phase'])
+
+    def test_prepare_bindings_cli_preserves_existing_quick_receipts(self):
+        import contextlib, io
+        old, new, state = self.prepared_bindings_fixture()
+        previous=self.directory/'previous.json'; updated=self.directory/'updated.json'
+        c.write(previous,old);c.write(updated,new);c.write(self.directory/'cycle.json',state)
+        with patch.object(c, '_prepared_workers_idle'), contextlib.redirect_stdout(io.StringIO()):
+            code=c.main(['prepare-bindings','--plan',str(updated),'--input',str(previous),
+                         '--state-dir',str(self.directory),'--root',str(self.root)])
+        self.assertEqual(0,code)
+        after=c.read(self.directory/'cycle.json')
+        self.assertEqual(state['attempts'],after['attempts'])
+        self.assertEqual('quick',after['phase'])
+        self.assertEqual(new,after['plan'])
+        # A request with no terminal receipt is unknown ownership, even without results.
+        other=copy.deepcopy(state)
+        request=self.directory/'attempts/0/initial/api/request.json'
+        c.write(request,{'gate':'api'})
+        with patch.object(c, '_prepared_workers_idle'), self.assertRaisesRegex(ValueError,'full worker request'):
+            c.prepare_bindings(other,old,new,self.root,self.directory)
+        self.assertEqual(state,other)
+
+    def test_prepare_bindings_rejects_unsafe_changes_atomically(self):
+        old, new, base = self.prepared_bindings_fixture()
+        mutations = [
+            lambda p, s: p['gates'][1]['env'].update(CONDUCTOR_PORT='7777'),
+            lambda p, s: p['gates'][1]['env'].update(UNKNOWN='x'),
+            lambda p, s: p['gates'][1]['env'].update(TMPDIR=str(self.root)),
+            lambda p, s: p['gates'][1]['env'].update(TMPDIR=p['gates'][1]['worker_root']),
+            lambda p, s: p['gates'][1]['env'].update(TMPDIR=p['gates'][2]['env']['TMPDIR']),
+            lambda p, s: p['gates'][1]['command'].append('changed'),
+            lambda p, s: p['gates'][1]['checks'].pop(),
+            lambda p, s: p['gates'][1].update(timeout_seconds=1),
+            lambda p, s: p['gates'].pop(),
+            lambda p, s: s.update(phase='triage'),
+            lambda p, s: s.update(running=['api']),
+            lambda p, s: s.update(resume_phase='initial'),
+            lambda p, s: s.update(pending=['unresolved']),
+            lambda p, s: s.update(skips={'api/a': {'unreviewed': True}}),
+            lambda p, s: s['attempts'].append({'phase':'initial','results':[]}),
+        ]
+        for mutate in mutations:
+            candidate, state = copy.deepcopy(new), copy.deepcopy(base)
+            mutate(candidate, state)
+            before = copy.deepcopy(state)
+            with self.assertRaises(ValueError):
+                c.prepare_bindings(state, old, candidate, self.root, self.directory)
+            self.assertEqual(before, state)
+        path = Path(new['gates'][1]['env']['TMPDIR'])
+        path.rmdir();path.symlink_to(Path(new['gates'][2]['env']['TMPDIR']))
+        with self.assertRaises(ValueError):
+            c.prepare_bindings(copy.deepcopy(base), old, new, self.root, self.directory)
+
+    def external_tmpdir_fixture(self):
+        _, old, _ = self.prepared_bindings_fixture()
+        old['gates'][1]['command'] = ['false']
+        state = c.initialize(old, self.root)
+        c.run_phase(old, state, self.directory, self.root)
+        c.run_phase(old, state, self.directory, self.root)
+        self.assertEqual('triage', state['phase'])
+        new = copy.deepcopy(old)
+        outside = tempfile.TemporaryDirectory(prefix='dpt-')
+        self.addCleanup(outside.cleanup)
+        for gate in new['gates']:
+            if gate.get('quick'):
+                continue
+            path = Path(outside.name) / gate['name']
+            path.mkdir(mode=0o700)
+            owner = dict(schema='deploy-external-tmpdir-v1', coordinator_root=str(self.root),
+                         worker_root=gate['worker_root'], gate=gate['name'],
+                         uid=os.geteuid(), device=path.stat().st_dev, inode=path.stat().st_ino)
+            marker = path / '.deploy-tmpdir-owner.json'
+            marker.write_text(json.dumps(owner)); marker.chmod(0o600)
+            gate['env']['TMPDIR'] = str(path)
+        proof = dict(kind='replace-owned-tmpdir-v1', source=old['source'],
+                     from_plan_digest=c.digest(old),
+                     paths={g['name']:g['env']['TMPDIR'] for g in new['gates'] if not g.get('quick')})
+        return old, new, state, proof
+
+    def reconciled_tmpdir_fixture(self):
+        old, _, _ = self.prepared_bindings_fixture()
+        fixtures = [StructuralSupervisorCleanup(), InterruptedLocalRecovery()]
+        for fixture in fixtures:
+            fixture.setUp(); self.addCleanup(fixture.doCleanups)
+        structural, backend = fixtures
+        structural.file_adapter()
+        backend.gate.update(name='backend-coverage-blackbox', native_backend=True,
+            result_transport='file', command=[sys.executable,str(ROOT/'scripts/deploy_test_backend.py'),
+                                             '--root',str(backend.worker)])
+        backend.token='interrupted-backend'
+        backend.request.update(token=backend.token,gate=backend.gate['name'], phase='final')
+        backend.receipt['token']=backend.token
+        backend.receipt.update(gate=backend.gate['name'],command=backend.gate['command'])
+        for index, fixture in enumerate(fixtures):
+            subprocess.run(['git','init','-q',str(fixture.worker)],check=True)
+            subprocess.run(['git','-C',str(fixture.worker),'fetch','-q',str(self.root),'HEAD'],check=True)
+            subprocess.run(['git','-C',str(fixture.worker),'checkout','-q','--detach','FETCH_HEAD'],check=True)
+            (fixture.worker/'.git/info/exclude').write_text('.context/\n')
+            tmp=fixture.worker/'.context/tmp';tmp.mkdir()
+            fixture.gate.update(worker='fixture-'+str(index),timeout_seconds=14400,
+                env={'TMPDIR':str(tmp),'CONDUCTOR_WORKSPACE_NAME':'fixture-'+str(index),
+                     'CONDUCTOR_PORT':str(39000-index*24000)})
+            fixture.request.update(source=old['source'],phase='final')
+            fixture.receipt['source']=old['source']
+            fixture.result['source']=old['source']
+            fixture.receipt['execution_binding']['contract_digest']=c.digest(fixture.gate)
+            if fixture is structural: fixture.write_native()
+            else: fixture.seal()
+        # Two separately sealed structural invocations: only the latter is
+        # latest, but both historical request proofs must remain admissible.
+        second=copy.copy(structural)
+        for key in ('request','result','receipt','process','failure'):
+            setattr(second,key,copy.deepcopy(getattr(structural,key)))
+        second.token='second-structural'
+        second.folder=structural.root/'cycle/attempts/36/final'/structural.gate['name']
+        second.folder.mkdir(parents=True)
+        import hashlib
+        native=second.worker/'.context/deploy-worker'/hashlib.sha256(second.token.encode()).hexdigest()
+        native.mkdir(parents=True)
+        case=second.result['evidence'][second.gate['name']]
+        log=native/Path(case['log']).name;log.write_bytes(Path(case['log']).read_bytes())
+        case['log']=str(log);case['sha256']=c.sha_file(log)
+        second.request['token']=second.result['token']=second.receipt['token']=second.token
+        second.receipt.update(log=str(second.folder/'output.log'),worker_result=str(second.folder/'result.json'))
+        second.paths={name:second.folder/name for name in structural.paths}
+        second.write_native()
+        fixtures.insert(1,second)
+        old['gates']=[g for g in old['gates'] if g.get('quick')]+[structural.gate,backend.gate]
+        state=c.initialize(old,self.root)
+        state.update(phase='triage',ready=False,pending=[])
+        for i, fixture in enumerate(fixtures):
+            failure=copy.deepcopy(fixture.failure)
+            failure.update(id='native-'+str(i),gate=fixture.gate['name'],source=old['source'],
+                check=fixture.gate['name']+'/'+fixture.gate['checks'][0],evidence=fixture.receipt['log'],
+                worker_result=fixture.receipt['worker_result'])
+            state['failures'].append(failure);state['pending'].append(failure['id'])
+            state['attempts'].append({'phase':'final','results':[fixture.receipt]})
+            c.reconcile(state,failure['id'],fixture.proof)
+            folder=self.directory/'attempts'/str(i)/'final'/fixture.gate['name']
+            for name,path in fixture.paths.items():
+                c.write(folder/name,c.read(path))
+        new=copy.deepcopy(old)
+        outside=Path(tempfile.mkdtemp(prefix='dpt-'));self.addCleanup(__import__('shutil').rmtree,outside)
+        for index,gate in enumerate(g for g in new['gates'] if not g.get('quick')):
+            path=outside/f'g{index}';path.mkdir(mode=0o700)
+            info=path.stat()
+            marker=dict(schema='deploy-external-tmpdir-v1',coordinator_root=str(self.root),
+                worker_root=gate['worker_root'],gate=gate['name'],uid=os.geteuid(),device=info.st_dev,inode=info.st_ino)
+            c.write(path/'.deploy-tmpdir-owner.json',marker);(path/'.deploy-tmpdir-owner.json').chmod(0o600)
+            gate['env']['TMPDIR']=str(path)
+        proof=dict(kind='replace-owned-tmpdir-v1',source=old['source'],from_plan_digest=c.digest(old),
+            paths={g['name']:g['env']['TMPDIR'] for g in new['gates'] if not g.get('quick')})
+        return old,new,state,proof,fixtures
+
+    def test_reconciled_native_history_tmpdir_cli_and_revalidation(self):
+        import contextlib,io
+        old,new,state,proof,fixtures=self.reconciled_tmpdir_fixture()
+        before=copy.deepcopy(state)
+        for name,value in [('old',old),('new',new),('proof',proof),('cycle',state)]:
+            c.write(self.directory/(name+'.json'),value)
+        with contextlib.redirect_stdout(io.StringIO()),patch.object(c,'_prepared_workers_idle'):
+            code=c.main(['prepare-bindings','--input',str(self.directory/'old.json'),'--plan',
+                str(self.directory/'new.json'),'--proof',str(self.directory/'proof.json'),
+                '--state-dir',str(self.directory),'--root',str(self.root)])
+        self.assertEqual(0,code)
+        after=c.read(self.directory/'cycle.json')
+        self.assertEqual('quick',after['phase']);self.assertFalse(after['ready'])
+        for key in ('attempts','failures','pending','reconciled_owners'):
+            self.assertEqual(before[key],after[key])
+        self.assertEqual([],c.retained_owners(after,[f.gate['name'] for f in fixtures]))
+        for fixture in fixtures:
+            self.assertTrue(c.local_reconciliation_bound(after,fixture.receipt))
+            self.assertEqual(fixture.proof['files'],{n:c.sha_file(p) for n,p in fixture.paths.items()})
+        for mutate in [lambda x:x.pop('prepared_binding_history'),
+                       lambda x:x['plan']['gates'][-1]['env'].update(OTHER='changed'),
+                       lambda x:x['prepared_binding_history'][-1]['leases'].clear()]:
+            bad=copy.deepcopy(after);mutate(bad)
+            with self.assertRaises(ValueError):c.retained_owners(bad,[fixtures[-1].gate['name']])
+
+    def test_older_binding_history_is_not_new_transition_authority(self):
+        old,new,state,proof,fixtures=self.reconciled_tmpdir_fixture()
+        prior=copy.deepcopy(old)
+        prior['gates'][-2]['env']['TMPDIR']='/retired/original/tmp'
+        legacy=dict(kind='replace-owned-tmpdir-v1',from_plan=prior,
+            from_source=old['source'],to_source=old['source'],
+            gates=[fixtures[0].gate['name']],leases={},credit_granted=False)
+        state['prepared_binding_history']=[legacy]
+        self.assertEqual([],c.retained_owners(state,[f.gate['name'] for f in fixtures]))
+        with patch.object(c,'_prepared_workers_idle'):
+            c.prepare_bindings(state,old,new,self.root,self.directory,tmpdir_replacement=proof)
+        self.assertEqual([],c.retained_owners(state,[f.gate['name'] for f in fixtures]))
+        self.assertEqual(legacy,state['prepared_binding_history'][0])
+
+    def test_cleanup_proof_after_recorded_tmpdir_transition(self):
+        from deploy_test_isolation import external_tmpdir
+        old,new,state,proof,fixtures=self.reconciled_tmpdir_fixture()
+        state['prepared_binding_history']=[dict(kind='replace-owned-tmpdir-v1',
+            from_plan=old,to_plan=new,from_source=old['source'],to_source=new['source'],
+            gates=list(proof['paths']),credit_granted=False,
+            leases={g['name']:external_tmpdir(g['env']['TMPDIR'],Path(g['worker_root']),
+                self.root,g['name'],new['source']) for g in new['gates'] if not g.get('quick')})]
+        state['plan']=new
+        for fixture in fixtures:self.assertTrue(c.local_reconciliation_bound(state,fixture.receipt))
+        for alter in [lambda h:h['to_plan']['gates'][-1]['env'].update(OTHER='bad'),
+                      lambda h:h.update(to_source={'head':'bad','digest':'bad'}),
+                      lambda h:h['leases'][fixtures[-1].gate['name']].update(inode=0),
+                      lambda h:h['to_plan']['gates'][-1].update(command=['false'])]:
+            bad=copy.deepcopy(state);alter(bad['prepared_binding_history'][0])
+            with self.assertRaises(ValueError):c.local_reconciliation_bound(bad,fixtures[-1].receipt)
+
+    def test_reconciled_native_history_rejects_invalid_proofs_atomically(self):
+        old,new,state,proof,fixtures=self.reconciled_tmpdir_fixture()
+        key=fixtures[0].proof['files']['receipt.json']
+        changes=[lambda x:x['reconciled_owners'].pop(key),
+                 lambda x:x['reconciled_owners'][key]['proof']['files'].update({'receipt.json':'0'*64}),
+                 lambda x:x['reconciled_owners'][key].update(token='foreign'),
+                 lambda x:x['reconciled_owners'].update(duplicate=copy.deepcopy(x['reconciled_owners'][key])),
+                 lambda x:x['reconciled_owners'].update(wrong=x['reconciled_owners'].pop(key))]
+        for mutate in changes:
+            bad=copy.deepcopy(state);mutate(bad);before=copy.deepcopy(bad)
+            with self.assertRaises(ValueError),patch.object(c,'_prepared_workers_idle'):
+                c.prepare_bindings(bad,old,new,self.root,self.directory,tmpdir_replacement=proof)
+            self.assertEqual(before,bad)
+
+    def test_replace_external_tmpdir_cli_after_native_failure(self):
+        import contextlib, io
+        old, new, state, proof = self.external_tmpdir_fixture()
+        historical = copy.deepcopy(state)
+        for name, value in [('old',old),('new',new),('proof',proof),('cycle',state)]:
+            c.write(self.directory / (name+'.json'),value)
+        with contextlib.redirect_stdout(io.StringIO()), patch.object(c, '_prepared_workers_idle'):
+            code=c.main(['prepare-bindings','--input',str(self.directory/'old.json'),
+                         '--plan',str(self.directory/'new.json'),'--proof',str(self.directory/'proof.json'),
+                         '--state-dir',str(self.directory),'--root',str(self.root)])
+        self.assertEqual(0,code)
+        after=c.read(self.directory/'cycle.json')
+        self.assertEqual('quick',after['phase']); self.assertFalse(after['ready'])
+        for key in ('attempts','failures','pending'):
+            self.assertEqual(historical[key],after[key])
+        self.assertEqual(new,after['plan'])
+        self.assertEqual('triage',after['next_after_quick'])
+        self.assertFalse(after['prepared_binding_history'][-1]['credit_granted'])
+        self.assertNotEqual(historical['input_fingerprints']['api'],after['input_fingerprints']['api'])
+        with self.assertRaises(ValueError):
+            c.prepare_bindings(after,new,new,self.root,self.directory,tmpdir_replacement=proof)
+
+    def test_replace_external_tmpdir_rejects_unsafe_admission_atomically(self):
+        old, new, base, proof = self.external_tmpdir_fixture()
+        mutations = [
+            lambda n,s,p: n['gates'][1]['env'].update(XDG_CACHE_HOME='/different'),
+            lambda n,s,p: n['gates'][1]['command'].append('different'),
+            lambda n,s,p: n['gates'][1]['checks'].pop(),
+            lambda n,s,p: n['gates'][1]['env'].update(TMPDIR=n['gates'][2]['env']['TMPDIR']),
+            lambda n,s,p: p.update(unknown=True),
+            lambda n,s,p: p.update(source={'changed':True}),
+            lambda n,s,p: s.update(running=['api']),
+            lambda n,s,p: s.update(phase='initial'),
+            lambda n,s,p: s.update(pending=[]),
+        ]
+        for mutate in mutations:
+            candidate,state,attest=copy.deepcopy(new),copy.deepcopy(base),copy.deepcopy(proof)
+            mutate(candidate,state,attest); before=copy.deepcopy(state)
+            with patch.object(c,'_prepared_workers_idle'), self.assertRaises(ValueError):
+                c.prepare_bindings(state,old,candidate,self.root,self.directory,tmpdir_replacement=attest)
+            self.assertEqual(before,state)
+        path=Path(new['gates'][1]['env']['TMPDIR']); marker=path/'.deploy-tmpdir-owner.json'
+        original=marker.read_text()
+        for mode in ('public','wrong-owner','wrong-source','symlink'):
+            if mode=='public':path.chmod(0o755)
+            if mode in ('wrong-owner','wrong-source'):
+                value=json.loads(original)
+                value['uid' if mode=='wrong-owner' else 'source']=999999 if mode=='wrong-owner' else {}
+                marker.write_text(json.dumps(value))
+            if mode=='symlink':
+                marker.rename(path/'saved');marker.symlink_to(path/'saved')
+            state=copy.deepcopy(base)
+            with patch.object(c,'_prepared_workers_idle'),self.assertRaises(ValueError):
+                c.prepare_bindings(state,old,new,self.root,self.directory,tmpdir_replacement=proof)
+            self.assertEqual(base,state)
+            if mode=='symlink':marker.unlink();(path/'saved').rename(marker)
+            path.chmod(0o700);marker.write_text(original)
+        request=self.directory/'attempts/unknown/final/api/request.json'
+        c.write(request,{'token':'unknown','gate':'api'})
+        with patch.object(c,'_prepared_workers_idle'),self.assertRaisesRegex(ValueError,'unknown request'):
+            c.prepare_bindings(copy.deepcopy(base),old,new,self.root,self.directory,tmpdir_replacement=proof)
+
+    def test_replace_external_tmpdir_active_process_and_birth_guards(self):
+        old,new,state,proof=self.external_tmpdir_fixture()
+        before=copy.deepcopy(state)
+        with patch.object(c,'_prepared_workers_idle',side_effect=ValueError('active local consumer')):
+            with self.assertRaisesRegex(ValueError,'active local consumer'):
+                c.prepare_bindings(state,old,new,self.root,self.directory,tmpdir_replacement=proof)
+        self.assertEqual(before,state)
+        proc=self.root/'proc';proc.mkdir();entry=proc/'99999999';entry.mkdir()
+        (entry/'fd').mkdir();(entry/'maps').write_text('')
+        (entry/'cwd').symlink_to(Path(new['gates'][1]['worker_root']))
+        (entry/'stat').write_text('99999999 (fixture) S '+'0 '*18+'123 0')
+        with self.assertRaisesRegex(ValueError,'active local consumer'):
+            c._prepared_workers_idle([Path(new['gates'][1]['worker_root'])],proc,birth_guard=True)
+        (entry/'cwd').unlink();(entry/'cwd').symlink_to(self.root)
+        original=Path.read_text; calls=[]
+        def replaced_birth(path,*args,**kwargs):
+            value=original(path,*args,**kwargs)
+            if path==entry/'stat':
+                calls.append(1)
+                if len(calls)>1:return value.replace('123','124')
+            return value
+        with patch.object(Path,'read_text',replaced_birth),self.assertRaisesRegex(ValueError,'birth identity changed'):
+            c._prepared_workers_idle([Path(new['gates'][1]['worker_root'])],proc,birth_guard=True)
+
+    def test_replace_external_tmpdir_rejects_source_and_directory_changes(self):
+        old,new,state,proof=self.external_tmpdir_fixture()
+        target=Path(new['gates'][1]['env']['TMPDIR']);before=copy.deepcopy(state)
+        # A path alias is not an inode-bound lease, even when its target is valid.
+        alias=target.parent/'alias';alias.symlink_to(target,target_is_directory=True)
+        candidate=copy.deepcopy(new);candidate['gates'][1]['env']['TMPDIR']=str(alias)
+        with self.assertRaises(ValueError),patch.object(c,'_prepared_workers_idle'):
+            c.prepare_bindings(state,old,candidate,self.root,self.directory,tmpdir_replacement=proof)
+        self.assertEqual(before,state)
+        # Exact source comparison catches an uncommitted producer change.
+        (self.root/'code').write_text('changed')
+        with self.assertRaisesRegex(ValueError,'source/plan/environment'),patch.object(c,'_prepared_workers_idle'):
+            c.prepare_bindings(state,old,new,self.root,self.directory,tmpdir_replacement=proof)
+        self.assertEqual(before,state)
+
+    def test_external_tmpdir_custody_survives_normal_source_refresh(self):
+        old,new,state,proof=self.external_tmpdir_fixture()
+        with patch.object(c,'_prepared_workers_idle'):
+            c.prepare_bindings(state,old,new,self.root,self.directory,tmpdir_replacement=proof)
+        state['phase']='triage'  # pending original failure, no invented execution
+        markers={g['name']:(Path(g['env']['TMPDIR'])/'.deploy-tmpdir-owner.json').read_bytes()
+                 for g in new['gates'] if not g.get('quick')}
+        (self.root/'code').write_text('later legitimate repair')
+        subprocess.run(['git','-C',str(self.root),'add','code'],check=True)
+        subprocess.run(['git','-C',str(self.root),'-c','user.name=test','-c',
+                        'user.email=test@example.com','commit','-qm','later repair'],check=True)
+        updated=copy.deepcopy(new);updated['source']=c.source(self.root)
+        for gate in updated['gates']:
+            if not gate.get('quick'):
+                subprocess.run(['git','-C',gate['worker_root'],'fetch','-q','origin'],check=True)
+                subprocess.run(['git','-C',gate['worker_root'],'checkout','-q','--detach','FETCH_HEAD'],check=True)
+        failures=copy.deepcopy(state['failures'])
+        c.refresh(state,new,updated,self.root,directory=self.directory)
+        self.assertEqual(failures,state['failures'])
+        self.assertEqual(updated['source'],state['source'])
+        self.assertEqual({},state['carried_passes'])
+        for gate in updated['gates']:
+            if not gate.get('quick'):
+                self.assertEqual(markers[gate['name']],(Path(gate['env']['TMPDIR'])/'.deploy-tmpdir-owner.json').read_bytes())
+
+    def test_external_tmpdir_real_child_ownership_and_shared_parent(self):
+        old,new,state,proof=self.external_tmpdir_fixture()
+        worker=Path(new['gates'][1]['worker_root'])
+        proc=self.root/'real-proc-view';proc.mkdir()
+        child=subprocess.Popen([sys.executable,'-c','import time;time.sleep(30)'],cwd=worker)
+        try:
+            (proc/str(child.pid)).symlink_to(Path('/proc')/str(child.pid),target_is_directory=True)
+            with self.assertRaisesRegex(ValueError,'active local consumer'):
+                c._prepared_workers_idle([worker],proc,birth_guard=True)
+        finally:
+            child.terminate();child.wait(timeout=5)
+        value=Path(new['gates'][1]['env']['TMPDIR'])
+        parent=value.parent;parent.chmod(0o777)
+        try:
+            with self.assertRaisesRegex(ValueError,'mutable shared parent'):
+                c.external_tmpdir(str(value),worker,self.root,'api',state['source'])
+        finally:
+            parent.chmod(0o700)
+
+    def test_external_tmpdir_pending_state_requires_actual_failure_receipt(self):
+        old,new,state,proof=self.external_tmpdir_fixture()
+        for path in (self.directory/'attempts').glob('**/request.json'):
+            path.unlink()  # isolated fixture simulates missing native provenance
+        original=copy.deepcopy(state)
+        with patch.object(c,'_prepared_workers_idle'),self.assertRaisesRegex(ValueError,'actual full failure receipt'):
+            c.prepare_bindings(state,old,new,self.root,self.directory,tmpdir_replacement=proof)
+        self.assertEqual(original,state)
+
+    def test_privileged_scan_preserves_nonroot_lease(self):
+        self.assertNotEqual(0, os.geteuid())
+        old,new,state,proof=self.external_tmpdir_fixture()
+        roots=[Path(g['worker_root']) for g in new['gates'] if not g.get('quick')]
+        roots += [Path(g['env']['TMPDIR']) for g in new['gates'] if not g.get('quick')]
+        # Real host /proc: inaccessible processes must be inspected, never omitted.
+        import deploy_test_process_scan as scan
+        with patch.object(scan,'privileged_scan',wraps=scan.privileged_scan) as actual_scan:
+            c._prepared_workers_idle(roots,birth_guard=True)
+            c.prepare_bindings(state,old,new,self.root,self.directory,tmpdir_replacement=proof)
+        self.assertGreaterEqual(actual_scan.call_count,1)
+        self.assertEqual('quick',state['phase'])
+        print('ACTUAL_NONROOT_PRIVILEGED_SCAN',json.dumps(scan.privileged_scan(roots),sort_keys=True))
+        for gate in new['gates']:
+            if not gate.get('quick'):
+                lease=c.external_tmpdir(gate['env']['TMPDIR'],Path(gate['worker_root']),self.root,
+                                        gate['name'],state['source'])
+                self.assertEqual(os.geteuid(),lease['uid'])
+
+    def test_privileged_scan_rejects_active_and_unbound_input(self):
+        import deploy_test_process_scan as scan
+        old,new,state,proof=self.external_tmpdir_fixture()
+        root=Path(new['gates'][1]['worker_root'])
+        child=subprocess.Popen([sys.executable,'-c','import time;time.sleep(30)'],cwd=root)
+        try:
+            with self.assertRaisesRegex(ValueError,'refused or unavailable'):
+                scan.privileged_scan([root])
+        finally:
+            child.terminate();child.wait(timeout=5)
+        for roots in ([Path('/')],[Path('/proc')],[root]*65):
+            with self.assertRaises(ValueError):
+                scan.privileged_scan(roots)
+        # The root helper itself rejects a forged uid/pid/birth and unknown fields.
+        calls=[]; native=scan.subprocess.run
+        def capture(*args,**kwargs):
+            calls.append((args,kwargs));return native(*args,**kwargs)
+        with patch.object(scan.subprocess,'run',side_effect=capture):
+            scan.privileged_scan([root])
+        args,kwargs=calls[0]
+        self.assertFalse(kwargs.get('shell',False))
+        self.assertEqual(['/usr/bin/sudo','-n','/usr/bin/python3','-I','-S','-B','-c'],args[0][:7])
+        for field,value in [('uid',os.geteuid()+1),('pid',1),('birth','wrong'),('unknown','field')]:
+            request=json.loads(kwargs['input']);request[field]=value
+            result=native(args[0],input=json.dumps(request).encode(),capture_output=True,
+                          timeout=30,env=kwargs['env'],close_fds=True)
+            self.assertNotEqual(0,result.returncode)
+            self.assertEqual({'kind':'deploy-process-scan-v1','quiescent':False},json.loads(result.stdout))
+
     def test_refresh_retains_explicit_deploy_exclusion_without_pass_credit(self):
         gate = self.plan['gates'][1]
         gate.update(category='smoke', native_cloud=True, checks=['mass', 'peer'])
@@ -2650,6 +3428,49 @@ class Cycle(unittest.TestCase):
                 self.assertFalse(result['lingering_group']); self.assertNotIn('cleanup_owner', result)
                 launch.assert_not_called()
 
+    def test_local_slot_holds_through_native_cleanup_validation_without_cancelling_cloud(self):
+        import time
+        started = self.root / '.context/first-native-started'
+        forbidden = self.root / '.context/queued-native-started'
+        script = ("import json,os,time;from pathlib import Path;"
+                  "r=json.loads(Path(os.environ['DEPLOY_GATE_REQUEST']).read_text());"
+                  f"Path({str(started)!r}).touch();time.sleep(.15);"
+                  "r.update(cases={c:'PASS' for c in r['checks']},complete=True,cleanup_complete=False,reused=False);"
+                  "Path(os.environ['DEPLOY_GATE_RESULT']).write_text(json.dumps(r))")
+        first = dict(name='card', category='agentcard-lifecycle', worker_transport='local-isolated',
+                     case_protocol=True, checks=['card'], timeout_seconds=2, command=[sys.executable, '-c', script])
+        second = dict(name='queued', category='generic', worker_transport='local-isolated',
+                      case_protocol=True, checks=['queued'], timeout_seconds=2,
+                      command=[sys.executable, '-c', f'from pathlib import Path;Path({str(forbidden)!r}).touch()'])
+        self.state['phase'] = 'initial'; failed = threading.Event()
+        with ThreadPoolExecutor(2) as pool:
+            one = pool.submit(c.execute, first, self.state, self.directory, self.root, local_failure=failed)
+            end = time.monotonic() + 1
+            while not started.exists() and time.monotonic() < end:
+                time.sleep(.005)
+            self.assertTrue(started.exists())
+            two = pool.submit(c.execute, second, self.state, self.directory, self.root, local_failure=failed)
+            a, b = one.result(), two.result()
+        self.assertEqual(0, a['native_exit']); self.assertTrue(a['lingering_group'])
+        self.assertIn('cleanup_owner', a); self.assertTrue(failed.is_set())
+        self.assertEqual({'queued': 'UNVERIFIED'}, b['cases'])
+        self.assertFalse(b['executed']); self.assertFalse(b['complete']); self.assertFalse(forbidden.exists())
+        cloud_script = ("import json,os;from pathlib import Path;"
+                        "r=json.loads(Path(os.environ['DEPLOY_GATE_REQUEST']).read_text());"
+                        "r.update(cases={c:'PASS' for c in r['checks']},complete=True,cleanup_complete=True,reused=False);"
+                        "Path(os.environ['DEPLOY_GATE_RESULT']).write_text(json.dumps(r))")
+        cloud = dict(name='cloud', native_cloud=True, case_protocol=True, checks=['cloud'], timeout_seconds=2,
+                     worker_transport='benchmark-cloud-cli', command=[sys.executable, '-c', cloud_script])
+        result = c.execute(cloud, self.state, self.directory, self.root, local_failure=failed)
+        self.assertEqual('PASS', result['status']); self.assertTrue(result['executed'])
+        self.assertFalse(result['cancelled']); self.assertFalse(c.CANCEL.is_set())
+        # Preparation/receipt bookkeeping consumes the same deadline too, without a late child launch.
+        delayed = dict(second, name='delayed', checks=['delayed'], timeout_seconds=.04)
+        with patch.object(c, 'revalidate_standing_skips', side_effect=lambda _: time.sleep(.08)), \
+                patch.object(c, 'run_command') as launch:
+            late = c.execute(delayed, self.state, self.directory, self.root)
+        self.assertFalse(late['executed']); self.assertTrue(late['timed_out']); launch.assert_not_called()
+
     def test_refused_local_admission_keeps_its_reason_when_receipt_preparation_exhausts_deadline(self):
         clock = [1000.0]
         lock = self.root / '.context/native-worker-admission.lock'
@@ -2773,6 +3594,438 @@ class Cycle(unittest.TestCase):
         for root, (_, admission) in zip(roots, rows):
             self.assertEqual(str(root / '.context/native-worker-admission.lock'), admission['lock'])
 
+    def initial_independent_fixture(self, phase="initial"):
+        import contextlib, io
+        plan = copy.deepcopy(self.plan)
+        state = c.initialize(plan, self.root)
+        c.run_phase(plan, state, self.directory, self.root)  # native quick receipts
+        self.assertEqual('initial', state['phase'])
+        state['phase'] = phase
+        plan_path = self.directory/'plan.json'; c.write(plan_path, plan)
+        c.write(self.directory/'cycle.json', state)
+        payload = self.directory/'defer.json'
+        c.write(payload, {'source': state['source'], 'gates': {'ui': 'fixture prerequisite unavailable'}})
+        def call():
+            error = io.StringIO()
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(error):
+                code = c.main([phase + '-independent', '--plan', str(plan_path), '--state-dir', str(self.directory),
+                               '--root', str(self.root), '--input', str(payload)])
+            self.last_initial_error = error.getvalue()
+            return code
+        return plan, state, payload, call
+
+    def test_final_independent_preserves_pending_and_reuses_exact_full_receipts(self):
+        plan,before,payload,call=self.initial_independent_fixture('final')
+        before['initial_pending']={'ui':{'status':'PENDING','reason':'original initial deferral'}}
+        c.write(self.directory/'cycle.json',before)
+        self.assertEqual(0,call())
+        after=c.read(self.directory/'cycle.json')
+        self.assertEqual('final',after['phase']);self.assertFalse(after['ready'])
+        self.assertEqual(before['attempts'],after['attempts'][:-1])
+        self.assertEqual('final',after['attempts'][-1]['phase'])
+        self.assertEqual({'ui'},set(after['final_pending']))
+        self.assertEqual(before['initial_pending'],after['initial_pending'])
+        self.assertTrue(c.reusable_full_pass(after,plan['gates'][1]))
+        self.assertNotEqual(0,c.verify_saved(self.directory,self.root))
+        self.assertEqual(0,call())
+        self.assertEqual(after['attempts'],c.read(self.directory/'cycle.json')['attempts'])
+        c.write(payload,{'source':after['source'],'gates':{}})
+        self.assertEqual(0,call())
+        completed=c.read(self.directory/'cycle.json')
+        self.assertEqual(['ui'],[r['gate'] for r in completed['attempts'][-1]['results']])
+        self.assertFalse(completed['ready']);self.assertFalse(completed['final_pending'])
+        self.assertFalse(completed['initial_pending'])
+        c.run_phase(plan,completed,self.directory,self.root)
+        self.assertTrue(completed['ready'])
+        self.assertFalse(completed['attempts'][-1]['results'])
+
+    def final_cancelled_observation(self, failing):
+        plan,state,payload,call=self.initial_independent_fixture('final')
+        if failing:
+            plan['gates'][1]['command']=['false']
+            state.update(plan=plan,plan_digest=c.digest(plan),input_fingerprints=c.input_fingerprints(plan,self.root))
+        actual=c.execute
+        def stop_after_result(*args,**kwargs):
+            result=actual(*args,**kwargs);c.CANCEL.set();return result
+        try:
+            with patch.object(c,'execute',side_effect=stop_after_result):
+                c.run_phase(plan,state,self.directory,self.root,final_observation=c.read(payload))
+        finally:
+            c.CANCEL.clear()
+        return plan,state,payload,call
+
+    def assert_final_observation_resume(self, failing):
+        import contextlib,io
+        plan,state,payload,call=self.final_cancelled_observation(failing)
+        self.assertEqual('interrupted',state['phase'])
+        self.assertEqual('triage' if failing else 'final',state['resume_phase'])
+        self.assertTrue(state['resume_independent'])
+        c.write(self.directory/'plan.json',plan)
+        original=copy.deepcopy(state)
+        def resume(value):
+            c.write(self.directory/'cycle.json',value)
+            with contextlib.redirect_stdout(io.StringIO()),contextlib.redirect_stderr(io.StringIO()), \
+                    patch.object(c,'execute',side_effect=AssertionError('resume must not launch')):
+                code=c.main(['resume','--plan',str(self.directory/'plan.json'),
+                    '--state-dir',str(self.directory),'--root',str(self.root)])
+            return code,c.read(self.directory/'cycle.json')
+        held=copy.deepcopy(state)
+        held['attempts'][-1]['results'][0]['cleanup_owner']={'worker':'held exact owner'}
+        code,saved=resume(held);self.assertEqual(2,code);self.assertEqual(held,saved)
+        (self.root/'code').write_text('changed')
+        code,saved=resume(original);self.assertEqual(2,code);self.assertEqual(original,saved)
+        (self.root/'code').write_text('original')
+        code,saved=resume(original)
+        self.assertEqual(1,code)  # resuming observation is never validation readiness
+        self.assertEqual('triage' if failing else 'final',saved['phase'])
+        self.assertNotIn('resume_independent',saved);self.assertNotIn('resume_phase',saved)
+        for key in ('source','attempts','failures','pending','final_pending','round'):
+            self.assertEqual(original.get(key),saved.get(key),key)
+        self.assertFalse(saved['ready'])
+
+    def test_final_independent_cancel_resume_preserves_failed_rca(self):
+        self.assert_final_observation_resume(True)
+
+    def test_final_independent_cancel_resume_never_launches_deferred_work(self):
+        self.assert_final_observation_resume(False)
+
+    def interrupted_triage_refresh_fixture(self):
+        plan,state,_,_=self.final_cancelled_observation(True)
+        for gate in plan['gates']:
+            if not gate.get('quick'):gate['worker_root']=gate['cwd']
+        state.update(plan=plan,plan_digest=c.digest(plan),input_fingerprints=c.input_fingerprints(plan,self.root))
+        (self.root/'code').write_text('reviewed cleanup repair')
+        subprocess.run(['git','-C',str(self.root),'add','code'],check=True)
+        subprocess.run(['git','-C',str(self.root),'-c','user.name=test','-c','user.email=test@example.com','commit','-qm','repair'],check=True)
+        new=copy.deepcopy(plan);new['source']=c.source(self.root)
+        for gate in plan['gates']:
+            if gate.get('quick'):continue
+            worker=Path(gate['worker_root'])
+            subprocess.run(['git','init','-q',str(worker)],check=True)
+            subprocess.run(['git','-C',str(worker),'fetch','-q',str(self.root),'HEAD'],check=True)
+            subprocess.run(['git','-C',str(worker),'checkout','-q','--detach','FETCH_HEAD'],check=True)
+            (worker/'.git/info/exclude').write_text('.context/\n')
+        old_path=self.directory/'old.json';new_path=self.directory/'new.json'
+        c.write(old_path,plan);c.write(new_path,new);c.write(self.directory/'cycle.json',state)
+        def invoke(action='refresh',flag=True,owners=(),scan=None):
+            import contextlib,io
+            argv=[action,'--plan',str(new_path),'--state-dir',str(self.directory),'--root',str(self.root),'--input',str(old_path)]
+            if flag:argv.append('--recover-interrupted-triage')
+            with contextlib.redirect_stdout(io.StringIO()),contextlib.redirect_stderr(io.StringIO()), \
+                 patch.object(c,'retained_owners',return_value=list(owners)), \
+                 patch('deploy_test_process_scan.prepared_workers_idle',side_effect=scan), \
+                 patch.object(c,'run_phase',side_effect=AssertionError('refresh must not launch')):
+                try:return c.main(argv)
+                except SystemExit as error:return error.code
+        return plan,state,new,old_path,new_path,invoke
+
+    def test_explicit_interrupted_triage_refresh_cli_preserves_pending(self):
+        old,before,new,old_path,new_path,invoke=self.interrupted_triage_refresh_fixture()
+        raw=(self.directory/'cycle.json').read_bytes()
+        self.assertEqual(2,invoke(flag=False))
+        self.assertEqual(raw,(self.directory/'cycle.json').read_bytes())
+        self.assertEqual(2,invoke(action='resume',flag=False))
+        self.assertEqual(raw,(self.directory/'cycle.json').read_bytes())
+        self.assertEqual(0,invoke())
+        after=c.read(self.directory/'cycle.json')
+        for key in ('pending','failures','attempts','reconciled_owners'):
+            self.assertEqual(before.get(key),after.get(key),key)
+        self.assertEqual(('quick','triage',False),(after['phase'],after['next_after_quick'],after['ready']))
+        self.assertNotIn('resume_phase',after);self.assertNotIn('resume_independent',after)
+        self.assertEqual(new['source'],after['source'])
+        self.assertEqual(before['source'],after['interrupted_triage_refresh_history'][-1]['from_source'])
+        self.assertFalse(c.reusable_full_pass(after,new['gates'][1]))
+        c.run_phase(new,after,self.directory,self.root)
+        self.assertEqual('triage',after['phase']);self.assertEqual(before['pending'],after['pending'])
+        self.assertEqual(2,invoke())
+
+    def test_interrupted_triage_refresh_rejections_leave_saved_state_identical(self):
+        old,before,new,old_path,new_path,invoke=self.interrupted_triage_refresh_fixture()
+        for field,value in [('resume_phase','focused'),('pending',[]),('running',True),('live_failures',[]),('environment','changed')]:
+            bad=copy.deepcopy(before);bad[field]=value;c.write(self.directory/'cycle.json',bad)
+            raw=(self.directory/'cycle.json').read_bytes()
+            with self.subTest(field=field):self.assertEqual(2,invoke());self.assertEqual(raw,(self.directory/'cycle.json').read_bytes())
+        c.write(self.directory/'cycle.json',before)
+        for field,value in [('command',['other']),('checks',['removed']),('cwd',str(self.root)),('timeout_seconds',1)]:
+            bad=copy.deepcopy(new);bad['gates'][1][field]=value;c.write(new_path,bad)
+            raw=(self.directory/'cycle.json').read_bytes()
+            with self.subTest(field=field):self.assertEqual(2,invoke());self.assertEqual(raw,(self.directory/'cycle.json').read_bytes())
+        c.write(new_path,new)
+        bad=copy.deepcopy(before);bad['failures'][0]['source']={'head':'0'*40,'digest':'0'*64};c.write(self.directory/'cycle.json',bad)
+        raw=(self.directory/'cycle.json').read_bytes();self.assertEqual(2,invoke());self.assertEqual(raw,(self.directory/'cycle.json').read_bytes())
+        c.write(self.directory/'cycle.json',before)
+        worker=Path(new['gates'][1]['worker_root']);(worker/'code').write_text('not prepared')
+        raw=(self.directory/'cycle.json').read_bytes();self.assertEqual(2,invoke());self.assertEqual(raw,(self.directory/'cycle.json').read_bytes())
+
+    def test_interrupted_triage_refresh_owners_unknown_requests_and_late_cancel(self):
+        old,before,new,old_path,new_path,invoke=self.interrupted_triage_refresh_fixture()
+        raw=(self.directory/'cycle.json').read_bytes()
+        self.assertEqual(2,invoke(owners=['api']))
+        self.assertEqual(raw,(self.directory/'cycle.json').read_bytes())
+        unknown=self.directory/'attempts/99/final/api/request.json'
+        c.write(unknown,dict(token='unknown',gate='api',source=before['source']))
+        self.assertEqual(2,invoke());self.assertEqual(raw,(self.directory/'cycle.json').read_bytes())
+        c.write(unknown.parent/'receipt.json',c.read(unknown))
+        self.assertEqual(2,invoke());self.assertEqual(raw,(self.directory/'cycle.json').read_bytes())
+        unknown.unlink();(unknown.parent/'receipt.json').unlink()
+        calls=[]
+        def cancel_on_second_scan(*args,**kwargs):
+            calls.append(1)
+            if len(calls)==2:c.CANCEL.set()
+        try:
+            self.assertEqual(2,invoke(scan=cancel_on_second_scan))
+            self.assertEqual(raw,(self.directory/'cycle.json').read_bytes())
+        finally:c.CANCEL.clear()
+        self.assertEqual(2,invoke(action='status'))
+        self.assertEqual(raw,(self.directory/'cycle.json').read_bytes())
+        c.write(new_path,old)
+        self.assertEqual(2,invoke());self.assertEqual(raw,(self.directory/'cycle.json').read_bytes())
+
+    def test_final_independent_interrupted_refresh_invalidates_old_credit(self):
+        plan,state,_,_=self.final_cancelled_observation(False)
+        original=copy.deepcopy(state['attempts'])
+        (self.root/'code').write_text('new source')
+        new=copy.deepcopy(plan);new['source']=c.source(self.root)
+        c.refresh(state,plan,new,self.root)
+        self.assertEqual('quick',state['phase']);self.assertFalse(state['ready'])
+        self.assertNotIn('resume_independent',state);self.assertNotIn('resume_phase',state)
+        self.assertEqual(original,state['attempts'])
+        self.assertFalse(c.reusable_full_pass(state,new['gates'][1]))
+
+    def test_final_independent_refresh_preserves_unaffected_receipts(self):
+        import contextlib,io
+        plan,state,payload,call=self.initial_independent_fixture('final')
+        plan['gates'][1]['input_paths']=['unrelated-input']
+        state.update(plan=plan,plan_digest=c.digest(plan),input_fingerprints=c.input_fingerprints(plan,self.root))
+        plan_path=self.directory/'plan.json';c.write(plan_path,plan)
+        c.write(self.directory/'cycle.json',state)
+        self.assertEqual(0,call())
+        original=c.read(self.directory/'cycle.json')
+        previous=self.directory/'previous.json';c.write(previous,plan)
+        (self.root/'code').write_text('new source')
+        new=copy.deepcopy(plan);new['source']=c.source(self.root);c.write(plan_path,new)
+        def refresh(value):
+            c.write(self.directory/'cycle.json',value)
+            with contextlib.redirect_stdout(io.StringIO()),contextlib.redirect_stderr(io.StringIO()):
+                result=c.main(['refresh','--input',str(previous),'--plan',str(plan_path),
+                    '--state-dir',str(self.directory),'--root',str(self.root)])
+            return result,c.read(self.directory/'cycle.json')
+        held=copy.deepcopy(original)
+        held['attempts'][-1]['results'][0]['cleanup_owner']={'worker':'held exact owner'}
+        code,saved=refresh(held);self.assertEqual(2,code);self.assertEqual(held,saved)
+        unknown=self.directory/'attempts/unknown/final/ui/request.json'
+        c.write(unknown,{'gate':'ui','source':original['source']})
+        code,saved=refresh(original);self.assertEqual(2,code);self.assertEqual(original,saved)
+        unknown.unlink()
+        code,saved=refresh(original)
+        self.assertEqual(0,code)
+        self.assertEqual('quick',saved['phase']);self.assertFalse(saved['ready'])
+        self.assertEqual(original['attempts'],saved['attempts'])
+        self.assertTrue(c.carried_pass(saved,new['gates'][1]))
+        self.assertFalse(c.reusable_full_pass(saved,new['gates'][2]))
+        c.run_phase(new,saved,self.directory,self.root)
+        self.assertEqual('final',saved['phase'])
+        before=copy.deepcopy(saved['attempts'])
+        with patch.object(c,'execute',side_effect=AssertionError('unchanged gate must reuse proof')):
+            c.run_phase(new,saved,self.directory,self.root,
+                final_observation={'source':saved['source'],'gates':{'ui':'still unready'}})
+        self.assertEqual(before,saved['attempts']);self.assertFalse(saved['ready'])
+
+    def test_final_independent_concurrent_failure_keeps_healthy_receipt(self):
+        plan,state,payload,_=self.initial_independent_fixture('final')
+        worker=Path(self.workers.name)/'pending';worker.mkdir()
+        plan['gates'].append(dict(plan['gates'][2],name='pending',worker='pending',cwd=str(worker),
+            env={'CONDUCTOR_WORKSPACE_NAME':'pending','CONDUCTOR_PORT':'37000'}))
+        plan['gates'][1].update(case_protocol=True,command=[sys.executable,'-c',
+            "import json,os;from pathlib import Path;"
+            "r=json.loads(Path(os.environ['DEPLOY_GATE_REQUEST']).read_text());"
+            "r.update(cases={c:'FAIL' for c in r['checks']},complete=True,cleanup_complete=True,reused=False);"
+            "Path(os.environ['DEPLOY_GATE_RESULT']).write_text(json.dumps(r));raise SystemExit(1)"])
+        state.update(plan=plan,plan_digest=c.digest(plan),input_fingerprints=c.input_fingerprints(plan,self.root))
+        actual=c.execute;barrier=threading.Barrier(2);entered=[]
+        def execute(*args,**kwargs):
+            entered.append(args[0]['name']);barrier.wait(timeout=3);return actual(*args,**kwargs)
+        with patch.object(c,'execute',side_effect=execute):
+            c.run_phase(plan,state,self.directory,self.root,
+                final_observation={'source':state['source'],'gates':{'pending':'not ready'}})
+        self.assertCountEqual(['api','ui'],entered)
+        self.assertEqual('triage',state['phase']);self.assertEqual('final',state['failure_phase'])
+        self.assertTrue(c.reusable_full_pass(state,plan['gates'][2]))
+        report={'failures':[self.report(f,'NOT_INTRODUCED',external_provider={'name':'fixture','reason':'outage'})['failures'][0]
+            for f in state['failures'] if f['id'] in state['pending']]}
+        c.adjudicate(state,report)
+        self.assertEqual('final',state['phase']);self.assertFalse(state['ready'])
+        self.assertEqual({'pending'},set(state['final_pending']))
+
+    def test_final_independent_rejects_stale_binding_and_unknown_owner(self):
+        plan,state,payload,call=self.initial_independent_fixture('final')
+        saved=(self.directory/'cycle.json').read_bytes()
+        for changes in ({'phase':'initial'},{'running':True},{'pending':['unresolved']},
+                        {'resume_independent':True}):
+            c.write(self.directory/'cycle.json',{**state,**changes})
+            before=(self.directory/'cycle.json').read_bytes()
+            self.assertEqual(2,call());self.assertEqual(before,(self.directory/'cycle.json').read_bytes())
+        (self.directory/'cycle.json').write_bytes(saved)
+        bad=copy.deepcopy(plan);bad['gates'][1]['env']['CONDUCTOR_PORT']='9999'
+        c.write(self.directory/'plan.json',bad)
+        self.assertEqual(2,call());self.assertEqual(saved,(self.directory/'cycle.json').read_bytes())
+        c.write(self.directory/'plan.json',plan)
+        orphan=self.directory/'attempts/unknown/final/api/request.json'
+        c.write(orphan,{'gate':'api','source':state['source']})
+        self.assertEqual(2,call());self.assertEqual(saved,(self.directory/'cycle.json').read_bytes())
+
+    def test_final_independent_never_reuses_a_tampered_native_receipt(self):
+        plan,state,payload,call=self.initial_independent_fixture('final')
+        self.assertEqual(0,call())
+        saved=c.read(self.directory/'cycle.json')
+        receipt=Path(saved['attempts'][-1]['results'][0]['log']).parent/'receipt.json'
+        value=c.read(receipt);value['execution_binding']['contract_digest']='tampered';c.write(receipt,value)
+        self.assertFalse(c.reusable_full_pass(saved,plan['gates'][1]))
+        self.assertEqual(0,call())
+        after=c.read(self.directory/'cycle.json')
+        self.assertEqual(len(saved['attempts'])+1,len(after['attempts']))
+        self.assertEqual(['api'],[r['gate'] for r in after['attempts'][-1]['results']])
+        self.assertFalse(after['ready'])
+
+    def test_initial_independent_retains_pending_and_reuses_native_pass(self):
+        plan, before, payload, call = self.initial_independent_fixture()
+        self.assertEqual(0, call())
+        after = c.read(self.directory/'cycle.json')
+        self.assertEqual('initial', after['phase']); self.assertFalse(after['ready'])
+        self.assertEqual(before['attempts'], after['attempts'][:-1])
+        self.assertEqual(['api'], [r['gate'] for r in after['attempts'][-1]['results']])
+        self.assertEqual('fixture prerequisite unavailable', after['initial_pending']['ui']['reason'])
+        self.assertEqual('PENDING', after['initial_pending']['ui']['status'])
+        self.assertTrue(c.reusable_full_pass(after, plan['gates'][1]))
+        self.assertNotEqual(0,c.verify_saved(self.directory,self.root))
+        self.assertEqual(0,call())
+        self.assertEqual(after['attempts'],c.read(self.directory/'cycle.json')['attempts'])
+        # Normal run only executes the still-missing full gate and reaches actual full coverage.
+        c.run_phase(plan,after,self.directory,self.root)
+        self.assertEqual(['ui'],[r['gate'] for r in after['attempts'][-1]['results']])
+        self.assertEqual('ready',after['phase']);self.assertTrue(after['ready'])
+        self.assertFalse(after.get('initial_pending'))
+
+    def test_initial_independent_refuses_invalid_selection_and_active_state(self):
+        plan, state, payload, call = self.initial_independent_fixture()
+        for change in ({'gates': {'no-such-gate':'why'}}, {'gates': {'ui':''}},
+                       {'gates': {'format':'not allowed'}}, {'gates': {'ui':'why'}, 'skip':True},
+                       {'source':{'head':'other'},'gates':{'ui':'why'}}):
+            c.write(payload, {'source':state['source'], **change})
+            original=(self.directory/'cycle.json').read_bytes()
+            self.assertEqual(2,call());self.assertEqual(original,(self.directory/'cycle.json').read_bytes())
+        c.write(payload, {'source':state['source'],'gates':{'ui':'why'}})
+        for changes in ({'running':True},{'phase':'ready'},{'pending':['real-failure']}):
+            c.write(self.directory/'cycle.json',{**state,**changes})
+            original=(self.directory/'cycle.json').read_bytes()
+            self.assertEqual(2,call());self.assertEqual(original,(self.directory/'cycle.json').read_bytes())
+
+    def test_initial_independent_root_exclusion_and_failure_are_native(self):
+        plan, state, payload, call = self.initial_independent_fixture()
+        # Root deferral has the same required explicit reason and leaves coverage pending.
+        c.write(payload, {'source':state['source'],'roots':{plan['gates'][2]['cwd']:'owned prerequisite'}})
+        plan['gates'][1].update(case_protocol=True,command=[sys.executable,'-c',
+            "import json,os;from pathlib import Path;"
+            "r=json.loads(Path(os.environ['DEPLOY_GATE_REQUEST']).read_text());"
+            "r.update(cases={c:'FAIL' for c in r['checks']},complete=True,cleanup_complete=True,reused=False);"
+            "Path(os.environ['DEPLOY_GATE_RESULT']).write_text(json.dumps(r));raise SystemExit(1)"])
+        state.update(plan=plan,plan_digest=c.digest(plan),input_fingerprints=c.input_fingerprints(plan,self.root))
+        c.write(self.directory/'plan.json',plan);c.write(self.directory/'cycle.json',state)
+        self.assertEqual(0,call(), self.last_initial_error)
+        after=c.read(self.directory/'cycle.json')
+        self.assertEqual('triage',after['phase']);self.assertTrue(after['pending'])
+        self.assertEqual('FAIL',after['attempts'][-1]['results'][0]['status'])
+        self.assertEqual('PENDING',after['initial_pending']['ui']['status'])
+        self.assertEqual('initial',after['failure_phase'])
+        report={'failures': [self.report(f,'NOT_INTRODUCED',
+            external_provider={'name':'fixture','reason':'outage'})['failures'][0]
+            for f in after['failures'] if f['id'] in after['pending']]}
+        c.adjudicate(after,report)
+        self.assertEqual('initial',after['phase']);self.assertFalse(after['ready'])
+        self.assertEqual({'ui'},set(after['initial_pending']))
+
+    def test_initial_independent_cancellation_preserves_failure_triage(self):
+        plan,state,payload,_=self.initial_independent_fixture()
+        plan['gates'][1]['command']=['false']
+        state.update(plan=plan,plan_digest=c.digest(plan),input_fingerprints=c.input_fingerprints(plan,self.root))
+        actual=c.execute
+        def execute(*args,**kwargs):
+            result=actual(*args,**kwargs)
+            c.CANCEL.set()
+            return result
+        try:
+            with patch.object(c,'execute',side_effect=execute):
+                c.run_phase(plan,state,self.directory,self.root,
+                    initial_observation=c.read(payload))
+            self.assertEqual('interrupted',state['phase'])
+            self.assertEqual('triage',state['resume_phase'])
+            self.assertEqual('initial',state['failure_phase'])
+            self.assertTrue(state['pending']);self.assertFalse(state['ready'])
+            self.assertEqual('FAIL',state['attempts'][-1]['results'][0]['status'])
+            self.assertEqual({'ui'},set(state['initial_pending']))
+        finally:
+            c.CANCEL.clear()
+        import contextlib, io
+        plan_path=self.directory/'resume-plan.json';c.write(plan_path,plan)
+        state_path=self.directory/'cycle.json'
+        original=copy.deepcopy(state)
+        def resume(value):
+            c.write(state_path,value)
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()), \
+                    patch.object(c,'execute',side_effect=AssertionError('resume must not execute')):
+                result=c.main(['resume','--plan',str(plan_path),'--state-dir',str(self.directory),
+                               '--root',str(self.root)])
+            return result,c.read(state_path)
+        held=copy.deepcopy(original)
+        held['attempts'][-1]['results'][0]['cleanup_owner']={'worker':'unreconciled fixture owner'}
+        rc,saved=resume(held)
+        self.assertEqual(2,rc);self.assertEqual(held,saved)
+        for key,value in (('failure_phase','final'),('pending',[])):
+            invalid=copy.deepcopy(original);invalid[key]=value
+            rc,saved=resume(invalid)
+            self.assertEqual(2,rc);self.assertEqual(invalid,saved)
+        (self.root/'code').write_text('changed')
+        rc,saved=resume(original)
+        self.assertEqual(2,rc);self.assertEqual(original,saved)
+        (self.root/'code').write_text('original')
+        rc,saved=resume(original)
+        self.assertEqual(1,rc)  # pending RCA, not validation success
+        self.assertEqual('triage',saved['phase']);self.assertNotIn('resume_phase',saved)
+        self.assertFalse(saved['ready'])
+        for key in ('pending','failures','attempts','initial_pending','initial_deferral_history',
+                    'source','plan_digest','input_fingerprints','round'):
+            self.assertEqual(original[key],saved[key],key)
+
+    def test_initial_independent_executes_ready_gates_concurrently(self):
+        plan, state, payload, _ = self.initial_independent_fixture()
+        worker=Path(self.workers.name)/'pending';worker.mkdir()
+        gate=dict(plan['gates'][2],name='pending',worker='pending',cwd=str(worker),
+                  env={'CONDUCTOR_WORKSPACE_NAME':'pending','CONDUCTOR_PORT':'37000'})
+        plan['gates'].append(gate)
+        state.update(plan=plan,plan_digest=c.digest(plan),input_fingerprints=c.input_fingerprints(plan,self.root))
+        barrier=threading.Barrier(2); actual=c.execute; entered=[]
+        def execute(*args,**kwargs):
+            entered.append(args[0]['name'])
+            barrier.wait(timeout=3)
+            return actual(*args,**kwargs)
+        with patch.object(c,'execute',side_effect=execute):
+            c.run_phase(plan,state,self.directory,self.root,initial_observation={
+                'source':state['source'],'gates':{'pending':'fixture prerequisite'}})
+        self.assertCountEqual(['api','ui'],entered)
+        self.assertTrue(all(r['status']=='PASS' for r in state['attempts'][-1]['results']))
+        self.assertEqual({'pending'},set(state['initial_pending']))
+        self.assertFalse(state['ready'])
+
+    def test_initial_independent_refuses_stale_and_unknown_owner(self):
+        plan, state, payload, call = self.initial_independent_fixture()
+        original=(self.directory/'cycle.json').read_bytes()
+        (self.root/'code').write_text('changed')
+        self.assertEqual(2,call());self.assertEqual(original,(self.directory/'cycle.json').read_bytes())
+        (self.root/'code').write_text('original')
+        orphan=self.directory/'attempts/unknown/initial/api/request.json'
+        c.write(orphan,{'gate':'api','phase':'initial'})
+        self.assertEqual(2,call());self.assertEqual(original,(self.directory/'cycle.json').read_bytes())
+
     def independent_triage_fixture(self, failing=False):
         import contextlib, io
         plan = copy.deepcopy(self.plan)
@@ -2868,6 +4121,103 @@ class Cycle(unittest.TestCase):
         self.assertEqual(('triage', False), (after['phase'], after['ready']))
         self.assertEqual(1, c.verify_saved(self.directory, self.root))
 
+    def stale_quick_runtime_fixture(self):
+        with (self.root / '.git/info/exclude').open('a') as stream:
+            stream.write('agents/.env\n')
+        self.failure()
+        self.state.update(phase='quick', next_after_quick='triage')
+        original_execute = c.execute
+        changed = threading.Event()
+
+        def execute(*args, **kwargs):
+            result = original_execute(*args, **kwargs)
+            if not changed.is_set():
+                changed.set()
+                (self.root / 'agents').mkdir(exist_ok=True)
+                (self.root / 'agents/.env').write_text('BROWSER_PROVIDER=fixture\n')
+            return result
+
+        with patch.object(c, 'execute', side_effect=execute):
+            c.run_phase(self.plan, self.state, self.directory, self.root)
+        self.assertEqual('stale', self.state['phase'])
+        return copy.deepcopy(self.state)
+
+    def test_runtime_change_during_quick_can_refresh_without_losing_pending_failure(self):
+        self.stale_quick_runtime_fixture()
+        before = copy.deepcopy(self.state)
+        c.write(self.directory / 'cycle.json', self.state)
+        c.refresh(self.state, self.plan, copy.deepcopy(self.plan), self.root,
+                  directory=self.directory)
+        self.assertEqual('quick', self.state['phase'])
+        self.assertEqual(before['pending'], self.state['pending'])
+        self.assertEqual(before['failures'], self.state['failures'])
+        self.assertEqual(before['attempts'], self.state['attempts'])
+        self.assertFalse(self.state['ready'])
+
+    def test_stale_quick_refresh_rejects_incomplete_or_mismatched_receipts(self):
+        baseline = self.stale_quick_runtime_fixture()
+        changes = [('status', 'FAIL'), ('complete', False), ('executed', False),
+                   ('native_exit', False), ('command', ['false']), ('cases', {}),
+                   ('timed_out', True), ('cancelled', True), ('lingering_group', True),
+                   ('cleanup_owner', {'pending': True}), ('source', {})]
+        for key, value in changes:
+            with self.subTest(key=key):
+                state = copy.deepcopy(baseline)
+                state['attempts'][-1]['results'][0][key] = value
+                before = copy.deepcopy(state)
+                c.write(self.directory / 'cycle.json', state)
+                with self.assertRaises(ValueError):
+                    c.refresh(state, self.plan, copy.deepcopy(self.plan), self.root,
+                              directory=self.directory)
+                self.assertEqual(before, state)
+
+    def test_stale_quick_refresh_requires_saved_state_and_idle_workers(self):
+        baseline = self.stale_quick_runtime_fixture()
+        c.write(self.directory / 'cycle.json', baseline)
+        for mode in ('unsaved', 'wrong-phase', 'partial', 'busy'):
+            with self.subTest(mode=mode):
+                state = copy.deepcopy(baseline)
+                if mode == 'unsaved':
+                    state['ready'] = True
+                elif mode == 'wrong-phase':
+                    state['attempts'][-1]['phase'] = 'final'
+                elif mode == 'partial':
+                    state['attempts'][-1]['results'].pop()
+                if mode != 'unsaved':
+                    c.write(self.directory / 'cycle.json', state)
+                before = copy.deepcopy(state)
+                with patch.object(c, '_prepared_workers_idle', side_effect=ValueError('busy')):
+                    with self.assertRaises(ValueError):
+                        c.refresh(state, self.plan, copy.deepcopy(self.plan), self.root,
+                                  directory=self.directory)
+                self.assertEqual(before, state)
+
+    def test_stale_quick_refresh_rejects_saved_results_with_changed_native_provenance(self):
+        baseline = self.stale_quick_runtime_fixture()
+        for field in ('token', 'binding', 'request', 'receipt'):
+            with self.subTest(field=field):
+                state = copy.deepcopy(baseline)
+                result = state['attempts'][-1]['results'][0]
+                folder = Path(result['log']).parent
+                request = c.read(folder / 'request.json')
+                receipt = c.read(folder / 'receipt.json')
+                if field == 'token':
+                    result['token'] = 'invented-token'
+                elif field == 'binding':
+                    result['execution_binding']['input_fingerprint'] = 'invented-input'
+                    c.write(folder / 'receipt.json', result)
+                elif field == 'request':
+                    c.write(folder / 'request.json', {**request, 'checks': ['invented-check']})
+                else:
+                    c.write(folder / 'receipt.json', {**receipt, 'native_exit': 1})
+                c.write(self.directory / 'cycle.json', state)
+                before = copy.deepcopy(state)
+                with self.assertRaises(ValueError):
+                    c.refresh(state, self.plan, copy.deepcopy(self.plan), self.root,
+                              directory=self.directory)
+                self.assertEqual(before, state)
+                c.write(folder / 'request.json', request)
+                c.write(folder / 'receipt.json', receipt)
     def repair_independent_fixture(self, failing=False):
         import contextlib, io
         state, plan, path, plan_path, _ = self.independent_triage_fixture(failing=failing)
@@ -4716,13 +6066,13 @@ class Cycle(unittest.TestCase):
             with self.assertRaises(ValueError): renewal.contract(self.root, head, 'fixture')
             path.write_text(original)
 
-    def renewal_fixture(self):
+    def renewal_fixture(self, purchase_owner='root-fixture'):
         import deploy_test_agentcard_renewal as renewal
         import time
         task = next(t for t in json.loads((ROOT / 'agents/benchmarks/tasks.json').read_text())
                     if t['name'] == 'agent-payment-abandonment')
         lifecycle = copy.deepcopy(task['expected_payment_lifecycle'])
-        lifecycle.update(agentId='root-fixture', stripeRefund=None)
+        lifecycle.update(agentId=purchase_owner, stripeRefund=None)
         lifecycle['purchase'].update(status='HELD', cardId='card_fixture')
         lifecycle['walletFunding'].update(status='RECLAIMING', providerTransferId='owt_fixture')
         lifecycle['agentCard'].update(id='card_fixture', status='CLOSED')
@@ -4736,8 +6086,10 @@ class Cycle(unittest.TestCase):
         row['logs']['agentcard_release_stall_lifecycle'] = lifecycle
         row['logs']['cloud_cleanup_evidence'] = {
             'errors': [], 'root_agent_id': 'root-fixture',
-            'agentcard_release_stall_lifecycles': {'root-fixture': lifecycle},
+            'agentcard_release_stall_lifecycles': {purchase_owner: lifecycle},
             'final': {'root_deleted': True, 'unsealed_tree_agent_ids': [], 'browser_sessions': []}}
+        if purchase_owner != 'root-fixture':
+            row['logs']['cloud_cleanup_evidence']['final']['tree_agent_ids'] = ['root-fixture', purchase_owner]
         c.write(path, doc)
         sha = c.sha_file(path)
         failure = self.resource_failure(reason=self.STALL_REASON, name='agent-payment-abandonment', sha=sha)
@@ -4758,6 +6110,26 @@ class Cycle(unittest.TestCase):
                  'observations': {'card': {'id': 'card_fixture', 'status': 'CLOSED', 'balanceCents': 0, 'livemode': False},
                                   'transfer': copy.deepcopy(lifecycle['orgTransfer'])}}
         return renewal, task, proof, original, path
+
+    def test_renewal_binds_subagent_owned_stall_and_refuses_unsealed_owner(self):
+        # Same root-owner assumption as the PR #1972 custody KeyError, in the warning renewal path.
+        renewal, task, proof, original, path = self.renewal_fixture(purchase_owner='browser-fixture')
+        self.assertEqual(('card_fixture', 'owt_fixture'), (proof['binding']['card_id'], proof['binding']['transfer_id']))
+        occurrence = proof['binding']['occurrence']; raw = path.read_bytes()
+        for message, change in (('lifecycle join mismatch', lambda e: e['final'].update(tree_agent_ids=['root-fixture'])),
+                                ('ambiguous release-stall', lambda e: e['agentcard_release_stall_lifecycles'].update(
+                                    {'root-fixture': dict(e['agentcard_release_stall_lifecycles']['browser-fixture'], agentId='root-fixture')}))):
+            doc = json.loads(raw); change(doc['tasks'][0]['logs']['cloud_cleanup_evidence']); c.write(path, doc)
+            state = copy.deepcopy(self.state)
+            failure = next(f for f in state['failures'] if f['id'] == occurrence)
+            failure['worker_evidence']['sha256'] = failure['rca']['resource_skip']['receipt_sha256'] = c.sha_file(path)
+            for warning in state['superseded_resource_warnings']:
+                if warning['id'] == occurrence:
+                    warning['receipt_sha256'] = warning['confirmation']['receipt_sha256'] = c.sha_file(path)
+            with patch.object(renewal, 'contract', return_value=(task, 'contract-sha')):
+                with self.assertRaisesRegex(ValueError, message):
+                    renewal.original(state, occurrence, self.root)
+        path.write_bytes(raw)
 
     def test_changed_source_agentcard_renewal_cli_keeps_failure_and_runs_peers(self):
         renewal, task, proof, original, path = self.renewal_fixture()
@@ -8246,6 +9618,30 @@ class Cycle(unittest.TestCase):
         c.reconcile(state, original['token'], {**proof, 'validation_source':copy.deepcopy(state['source'])})
         self.assertEqual(same, state)
 
+    def test_clean_historical_successor_renews_after_added_selection_reason_only(self):
+        # PR1682: a later diff added a run_all reason; execution contract and inventory unchanged.
+        state, paths, proof, gate, packet, original, folder, successor = self.clean_successor_renewal_state()
+        state['attempts'][-1]['source'] = copy.deepcopy(successor['source'])
+        gate['selection_evidence'] = ['run_all trigger: a', 'runtime/contract path trigger']
+        successor['execution_binding']['contract_digest'] = c.digest(gate)
+        c.write(folder/'receipt.json', successor)
+        renewed = {**proof, 'validation_source':copy.deepcopy(state['source'])}
+        for name, current in (('replaced', ['run_all trigger: b', 'runtime/contract path trigger']),
+                              ('reordered', ['runtime/contract path trigger', 'run_all trigger: a']),
+                              ('removed', ['run_all trigger: a']),
+                              ('not-a-list', {'run_all trigger: a': True})):
+            candidate = copy.deepcopy(state)
+            next(g for g in candidate['plan']['gates'] if g['name']==gate['name'])['selection_evidence'] = current
+            before = copy.deepcopy(candidate)
+            with self.subTest(name=name), self.assertRaises(ValueError):
+                c.reconcile(candidate, original['token'], renewed)
+            self.assertEqual(before, candidate)
+        gate['selection_evidence'] = ['run_all trigger: a', 'run_all trigger: b', 'runtime/contract path trigger']
+        before = copy.deepcopy(state)
+        c.reconcile(state, original['token'], renewed)
+        self.assertEqual(state['source'], state['reconciled_owners'][proof['receipt_sha256']]['validation_source'])
+        self.assertEqual(before['attempts'], state['attempts']); self.assertIsNone(c.full_pass_binding(state, gate))
+
     def test_clean_historical_successor_honors_catalog_deploy_omission_of_original_debt(self):
         # Merged main: the successor ran without an original case that the catalog omits from
         # all future deploys (user-directed). Only that authenticated omission may be absent.
@@ -8387,6 +9783,83 @@ class Cycle(unittest.TestCase):
         self.assertIsNone(c.full_pass_binding(state, gate))  # Native FAIL has not become coverage credit.
         same = copy.deepcopy(state); c.reconcile(state, original['token'], renewed)
         self.assertEqual(same, state)  # Historical successor binding survives repeated source renewals.
+
+    def test_isolated_renewal_ignores_later_prelaunch_admission_refusals(self):
+        # PR1682 rounds 19/21: admission raised before launch; run_phase recorded a token-less row.
+        state, paths, proof, gate, packet, original, folder, successor = self.clean_successor_renewal_state()
+        renewed = {**proof, 'validation_source':copy.deepcopy(state['source'])}
+        refusal = dict(gate=gate['name'], status='FAIL', complete=False, source=copy.deepcopy(state['source']),
+                       cases=dict.fromkeys(gate['checks'], 'UNVERIFIED'), reason='native cleanup: next source/inventory binding')
+        # The refusal is authenticated by the request namespace run_phase sealed before
+        # isolated_request raised (merged main contract; stale refusals stay blocking there).
+        state['attempts'].append(dict(phase='focused', source=copy.deepcopy(state['source']),
+                                      results=[copy.deepcopy(refusal)]))
+        c.write(self.directory / 'attempts/91/focused' / gate['name'] / 'request.json',
+                dict(token='refused-admission', source=copy.deepcopy(state['source']), gate=gate['name'],
+                     phase='focused', checks=list(gate['checks']), skips={}))
+        before = copy.deepcopy(state)
+        c.reconcile(state, original['token'], renewed)
+        self.assertEqual(state['source'], state['reconciled_owners'][proof['receipt_sha256']]['validation_source'])
+        self.assertEqual(before['attempts'], state['attempts']); self.assertEqual(before['failures'], state['failures'])
+        # Any row with a request token, an actual execution or a non-UNVERIFIED case is still a successor
+        # (main treats a token-less executed=False refusal as non-dispatched by design).
+        for name, mutate in (('token', lambda r: r.update(token='launched')), ('executed', lambda r: r.update(executed=True)),
+                             ('pass', lambda r: r['cases'].update({gate['checks'][0]: 'PASS'}))):
+            candidate = copy.deepcopy(before); mutate(candidate['attempts'][-1]['results'][0])
+            snapshot = copy.deepcopy(candidate)
+            with self.subTest(name=name), self.assertRaises(ValueError):
+                c.reconcile(candidate, original['token'], renewed)
+            self.assertEqual(snapshot, candidate)
+
+    def test_isolated_renewal_accepts_successor_with_historical_no_retry_custody_case(self):
+        # PR1682: a full smoke run whose payment case stayed under NO_RETRY_CUSTODY (never executed).
+        # Merged main authenticates custody from the canonical ledger, so compose its qualified fixture.
+        state, original, proof, gate, folder, successor = self.custody_clean_successor_state()
+        request = c.read(folder/'request.json'); skip = next(iter(successor['custody_skips']))
+        held = copy.deepcopy(successor['custody_skips'][skip])
+        renewed = {**proof, 'validation_source':copy.deepcopy(state['source'])}
+        bad = [('not-custody', lambda r, q: q['skips'][skip].update(disposition='resource_skip')),
+               ('unverified-missing', lambda r, q: r.update(current_execution={})),
+               ('other-case-incomplete', lambda r, q: r['case_complete'].update({next(k for k in r['case_complete'] if k not in r['custody_skips']): False})),
+               ('custody-not-skipped', lambda r, q: r['custody_skips'].update({'foreign-case': held}))]
+        for name, mutate in bad:
+            candidate = copy.deepcopy(state); row = candidate['attempts'][-1]['results'][0]; q = copy.deepcopy(request)
+            mutate(row, q); c.write(folder/'receipt.json', row); c.write(folder/'request.json', q)
+            before = copy.deepcopy(candidate)
+            with self.subTest(name=name), self.assertRaises(ValueError):
+                c.reconcile(candidate, original['token'], renewed)
+            self.assertEqual(before, candidate)
+        c.write(folder/'receipt.json', successor); c.write(folder/'request.json', request)
+        c.reconcile(state, original['token'], renewed)
+        entry = state['reconciled_owners'][proof['receipt_sha256']]
+        self.assertEqual(state['source'], entry['validation_source']); self.assertFalse(entry['credit_granted'])
+
+    def test_isolated_renewal_skips_strictly_reconciled_prepare_refusal(self):
+        # PR1682 round 29: a later campaign refused at cleanup-ticket prepare dispatched nothing.
+        state, paths, proof, gate, packet, original, folder, successor = self.clean_successor_renewal_state()
+        renewed = {**proof, 'validation_source':copy.deepcopy(state['source'])}
+        refused = dict(gate=gate['name'], token='prepare-refused', status='FAIL', complete=False, executed=True,
+                       cases=dict.fromkeys(gate['checks'], 'UNVERIFIED'), source=copy.deepcopy(state['source']))
+        state['attempts'].append(dict(phase='focused', results=[refused]))
+        import deploy_test_native_cleanup as native
+        entry = dict(kind=native.KIND, gate=gate['name'], token='prepare-refused', credit_granted=False,
+                     proof=dict(layout='campaign-cleanup-prepare-v1', receipt_sha256='f'*64))
+        state['reconciled_owners']['f'*64] = entry
+        for name, mutate in (('normal-layout', lambda e, r: e['proof'].update(layout='campaign-v1')),
+                             ('credited', lambda e, r: e.update(credit_granted=True)),
+                             ('executed-pass', lambda e, r: r['cases'].update({gate['checks'][0]: 'PASS'})),
+                             ('unreconciled', lambda e, r: e.update(token='other'))):
+            candidate = copy.deepcopy(state)
+            mutate(candidate['reconciled_owners']['f'*64], candidate['attempts'][-1]['results'][0])
+            before = copy.deepcopy(candidate)
+            with self.subTest(name=name), self.assertRaises(ValueError):
+                c.reconcile(candidate, original['token'], renewed)
+            self.assertEqual(before, candidate)
+        before = copy.deepcopy(state)
+        c.reconcile(state, original['token'], renewed)
+        self.assertEqual(state['source'], state['reconciled_owners'][proof['receipt_sha256']]['validation_source'])
+        self.assertEqual(before['attempts'], state['attempts'])
+        self.assertFalse(state['reconciled_owners'][proof['receipt_sha256']]['credit_granted'])
 
     def test_isolated_renewal_ignores_an_unexecuted_prelaunch_refusal(self):
         """PR1910 round 22: smoke refused before launch because renewal had not run yet.
@@ -8872,6 +10345,9 @@ class Cycle(unittest.TestCase):
         state['plan_digest'] = c.digest(state['plan'])
         return state, original, proof, successor, native_proof
 
+    @quarantine(since="2026-11-11", repair="https://boxes.dev/thread/thr_3767d8b2fa4d42d79d6d403f7ae46f76",
+                error="ValueError: native cleanup: old controller still active",
+                evidence="docs/rca/cases/2026-11-11-synthetic-controller-pids-collide-with-host.md")
     def test_reconciled_failed_successor_renews_at_repair_boundary_without_credit(self):
         state, original, proof, successor, native_proof = self.reconciled_failed_successor_renewal_state()
         before = copy.deepcopy(state)
@@ -8965,6 +10441,9 @@ class Cycle(unittest.TestCase):
         self.assertFalse(state['reconciled_owners'][proof['receipt_sha256']]['credit_granted'])
         self.assertEqual(state['source'], state['reconciled_owners'][proof['receipt_sha256']]['validation_source'])
 
+    @quarantine(since="2026-11-11", repair="https://boxes.dev/thread/thr_3767d8b2fa4d42d79d6d403f7ae46f76",
+                error="ValueError: native cleanup: old controller still active",
+                evidence="docs/rca/cases/2026-11-11-synthetic-controller-pids-collide-with-host.md")
     def test_reconciled_failed_successor_rejects_untrusted_authority_atomically(self):
         state, original, proof, successor, native_proof = self.reconciled_failed_successor_renewal_state()
         incoming = dict(proof, validation_source=state['source'])
@@ -10864,6 +12343,58 @@ class StructuralSupervisorCleanup(unittest.TestCase):
 
     reconcile = LocalCleanup.reconcile
 
+    def file_adapter(self):
+        name=self.gate['name']
+        command=[sys.executable,str(ROOT/'scripts/deploy_test_worker.py'),'--root',str(self.worker)]
+        self.recipe={'cases':{name:{'command':['python3','scripts/run-deploy-structural-gates.py',
+                      '--max-workers','5'],'cwd':'.','env':{},'aggregate':True}}}
+        self.gate.update(command=command,result_transport='file',worker_recipe=self.recipe)
+        self.request['worker_recipe']=self.recipe
+        self.result['recipe_digest']=c.digest(self.recipe)
+        self.result['evidence'][name]['command']=self.recipe['cases'][name]['command']
+        self.receipt.update(command=command,execution_binding={
+            'contract_digest':c.digest(self.gate),'environment':'env','input_fingerprint':'fp'})
+        self.process['reaped']=[{'pid':124,'status':256},{'pid':125,'status':15}]+[
+            {'pid':pid,'status':0} for pid in range(126,248)]
+        self.write_native()
+
+    def test_native_file_structural_cleanup_keeps_failure_and_history(self):
+        self.file_adapter()
+        self.assertEqual(124,len(self.process['reaped']))
+        self.test_reaped_structural_orphans_allow_launch_only_and_keep_all_failure_facts()
+
+    def test_native_file_structural_rejects_foreign_command_and_downgraded_recipe(self):
+        import copy
+        self.file_adapter()
+        base=(copy.deepcopy(self.gate),copy.deepcopy(self.request),copy.deepcopy(self.result),copy.deepcopy(self.receipt))
+        variants=[('worker-script',lambda:self.gate['command'].__setitem__(1,str(self.worker/'scripts/deploy_test_worker.py'))),
+                  ('foreign-script',lambda:self.gate['command'].__setitem__(1,str(ROOT/'scripts/other.py'))),
+                  ('foreign-interpreter',lambda:self.gate['command'].__setitem__(0,'/bin/sh')),
+                  ('foreign-root',lambda:self.gate['command'].__setitem__(3,str(self.root))),
+                  ('stdio-on-file',lambda:self.gate['command'].append('--stdio')),
+                  ('services-without-cleanup',lambda:self.recipe.update(services=True)),
+                  ('extra-setup',lambda:self.recipe.update(setup={'command':['true']})),
+                  ('partial-case',lambda:self.recipe['cases'][self.gate['name']]['command'].append('--only')),
+                  ('case-cwd',lambda:self.recipe['cases'][self.gate['name']].update(cwd='..')),
+                  ('case-env',lambda:self.recipe['cases'][self.gate['name']].update(env={'TMPDIR':'/tmp'})),
+                  ('nonaggregate',lambda:self.recipe['cases'][self.gate['name']].update(aggregate=False))]
+        for name,mutate in variants:
+            with self.subTest(name=name):
+                self.gate,self.request,self.result,self.receipt=copy.deepcopy(base)
+                self.recipe=self.gate['worker_recipe'];mutate()
+                self.request['worker_recipe']=self.recipe
+                self.result['recipe_digest']=c.digest(self.recipe)
+                self.result['evidence'][self.gate['name']]['command']=self.recipe['cases'][self.gate['name']]['command']
+                self.receipt['command']=copy.deepcopy(self.gate['command'])
+                self.receipt['execution_binding']['contract_digest']=c.digest(self.gate)
+                self.state['plan']={'gates':[self.gate]};self.state['attempts']=[{'results':[self.receipt]}]
+                self.write_native();before=copy.deepcopy(self.state)
+                with self.assertRaises(ValueError):self.reconcile()
+                self.assertEqual(before,self.state)
+
+    def test_native_file_structural_preserves_all_supervisor_and_evidence_rejections(self):
+        self.file_adapter()
+        self.test_unreaped_unknown_signalled_or_foreign_supervisor_closure_refuses_atomically()
     def metadata_drift_fixture(self):
         self.set_cases_only_recipe()
         self.gate['selection_evidence'] = ['dependency graph: 98 affected units']
@@ -11529,6 +13060,176 @@ class InterruptedLocalRecovery(unittest.TestCase):
         with self.assertRaises(ValueError):c.interrupted_boundary(self.state)
 
 
+    def file_interruption(self, returned=False):
+        self.gate.update(result_transport='file', command=[sys.executable,
+            str(ROOT/'scripts/deploy_test_worker.py'),'--root',str(self.worker)])
+        self.recipe.clear();self.recipe.update(cases={self.gate['name']:{
+            'command':['python3','scripts/run-deploy-structural-gates.py','--max-workers','5'],
+            'cwd':'.','env':{},'aggregate':True}})
+        self.receipt.update(command=self.gate['command'])
+        self.receipt['execution_binding']['contract_digest']=c.digest(self.gate)
+        if returned:
+            self.receipt.update(native_exit=1,worker_result=str(self.folder/'result.json'))
+            self.process.update(native_exit=1,orphaned_children=True,
+                reaped=[{'pid':124,'status':256},{'pid':125,'status':9}],
+                term_sent=[124,125],kill_sent=[125])
+            self.result.update(source=self.source,recipe_digest=c.digest(self.recipe),
+                cleanup_complete=True,complete=False,cases={self.gate['name']:'UNVERIFIED'})
+            self.result['evidence'][self.gate['name']].update(
+                command=self.recipe['cases'][self.gate['name']]['command'],
+                native_exit=143,cancelled=True)
+            c.write(self.folder/'result.json',self.result)
+        self.seal()
+        if returned:
+            self.paths['result.json']=self.folder/'result.json'
+            self.proof['files']['result.json']=c.sha_file(self.paths['result.json'])
+
+    def test_file_interrupted_killed_adapter_keeps_original_receipts(self):
+        self.file_interruption()
+        original=copy.deepcopy(self.state['attempts'])
+        self.reconcile()
+        self.assertEqual([],c.retained_owners(self.state,[self.gate['name']]))
+        self.assertEqual(original,self.state['attempts'])
+        self.assertFalse(next(iter(self.state['reconciled_owners'].values()))['credit_granted'])
+
+    def test_file_interrupted_returned_structural_keeps_original_receipts(self):
+        self.file_interruption(returned=True)
+        original=copy.deepcopy(self.state['attempts'])
+        self.reconcile()
+        self.assertEqual([],c.retained_owners(self.state,[self.gate['name']]))
+        self.assertEqual(original,self.state['attempts'])
+        self.assertFalse(next(iter(self.state['reconciled_owners'].values()))['credit_granted'])
+
+    def _returned_coverage_cancellation(self, name, spec):
+        self.file_interruption(returned=True)
+        old=self.gate['name']
+        self.recipe['cases']={name:spec}
+        self.gate.update(name=name,category=name,checks=[name])
+        self.request.update(gate=name,checks=[name])
+        self.receipt.update(gate=name,cases={name:'UNVERIFIED'},lingering_group=False)
+        self.process.update(orphaned_children=False,reaped=[{'pid':124,'status':256},{'pid':125,'status':15}],term_sent=[124,125],kill_sent=[])
+        self.receipt['execution_binding']['contract_digest']=c.digest(self.gate)
+        case=self.result['evidence'].pop(old)
+        log=self.worker/'.context/deploy-worker'/__import__('hashlib').sha256(self.token.encode()).hexdigest()/(__import__('hashlib').sha256(name.encode()).hexdigest()+'.log')
+        log.write_bytes(self.case_log.read_bytes())
+        case.update(native_exit=-15,command=spec['command'],log=str(log),sha256=c.sha_file(log),lingering_group=True)
+        self.result.update(gate=name,cases={name:'UNVERIFIED'},evidence={name:case},recipe_digest=c.digest(self.recipe))
+        c.write(self.paths['result.json'],self.result);self.seal()
+        self.proof['files']['result.json']=c.sha_file(self.paths['result.json'])
+        original=copy.deepcopy(self.state['attempts'])
+        self.reconcile()
+        self.assertEqual([],c.retained_owners(self.state,[name]))
+        self.assertEqual(original,self.state['attempts'])
+        self.assertFalse(next(iter(self.state['reconciled_owners'].values()))['credit_granted'])
+        case['cancelled']=False;c.write(self.paths['result.json'],self.result)
+        self.proof['files']['result.json']=c.sha_file(self.paths['result.json'])
+        with self.assertRaises(ValueError):c.retained_owners(self.state,[name])
+
+    def test_file_returned_coverage_cancellation_keeps_original_receipts(self):
+        self._returned_coverage_cancellation('frontend-coverage-blackbox',
+            {'command':['npm','run','test:coverage','--','--maxWorkers=1'],
+             'cwd':'front-end','env':{},'aggregate':True})
+
+    def test_file_returned_agents_cancellation_keeps_original_receipts(self):
+        self._returned_coverage_cancellation('agents-coverage-blackbox',
+            {'command':['bash','scripts/run-coverage.sh'], 'cwd':'agents',
+             'env':{'AGENTS_COVERAGE_CONCURRENCY':'2'},'aggregate':True})
+
+    def _late_agents_log(self):
+        self._returned_coverage_cancellation('agents-coverage-blackbox',
+            {'command':['bash','scripts/run-coverage.sh'], 'cwd':'agents',
+             'env':{'AGENTS_COVERAGE_CONCURRENCY':'2'},'aggregate':True})
+        self.state.pop('reconciled_owners',None)
+        case=self.result['evidence']['agents-coverage-blackbox']
+        case.update(cancelled=True,sha256=__import__('hashlib').sha256(b'').hexdigest())
+        log=Path(case['log']);log.write_text('late cancelled child output\n')
+        os.utime(log,ns=(191000000000,191000000000))
+        c.write(self.paths['result.json'],self.result);self.seal()
+        self.proof.update(kind='local-cancelled-log-supplement-v1',final_log={
+            'path':str(log),'sha256':c.sha_file(log),'size':log.stat().st_size,
+            'mtime_ns':log.stat().st_mtime_ns,'recorded_sha256':case['sha256']})
+        return log
+
+    def test_cancelled_log_supplement_preserves_mismatch_and_never_grants_credit(self):
+        log=self._late_agents_log()
+        original=copy.deepcopy(self.state['attempts']);raw={n:p.read_bytes() for n,p in self.paths.items()}
+        strict={k:v for k,v in self.proof.items() if k!='final_log'};strict['kind']=KIND
+        with self.assertRaises(ValueError):c.reconcile(self.state,self.token,strict)
+        self.reconcile()
+        self.assertEqual([],c.retained_owners(self.state,[self.gate['name']]))
+        self.assertEqual(original,self.state['attempts']);self.assertEqual(raw,{n:p.read_bytes() for n,p in self.paths.items()})
+        self.assertFalse(next(iter(self.state['reconciled_owners'].values()))['credit_granted'])
+        self.assertIsNone(c.full_pass_binding(self.state,self.gate))
+        log.write_text('changed again')
+        with self.assertRaises(ValueError):c.retained_owners(self.state,[self.gate['name']])
+
+    def test_cancelled_log_supplement_refuses_foreign_or_live_custody(self):
+        log=self._late_agents_log();proof=copy.deepcopy(self.proof)
+        for key,value in [('path',str(self.case_log)),('sha256','f'*64),('size',0),('mtime_ns',0),('recorded_sha256','f'*64)]:
+            self.proof=copy.deepcopy(proof);self.proof['final_log'][key]=value
+            with self.subTest(key=key),self.assertRaises(ValueError):self.reconcile()
+            self.assertNotIn('reconciled_owners',self.state)
+        self.proof=proof
+        original=copy.deepcopy(self.process)
+        self.process['reaped']=self.process['reaped'][:1];c.write(self.paths['output.log.process.json'],self.process)
+        self.proof['files']['output.log.process.json']=c.sha_file(self.paths['output.log.process.json'])
+        with self.assertRaises(ValueError):self.reconcile()
+        self.process=original;c.write(self.paths['output.log.process.json'],self.process)
+        self.proof['files']['output.log.process.json']=c.sha_file(self.paths['output.log.process.json'])
+        for key,value in [('token','foreign'),('source',{})]:
+            old=self.result[key];self.result[key]=value;c.write(self.paths['result.json'],self.result)
+            self.proof['files']['result.json']=c.sha_file(self.paths['result.json'])
+            with self.subTest(key=key),self.assertRaises(ValueError):self.reconcile()
+            self.result[key]=old
+        c.write(self.paths['result.json'],self.result);self.proof['files']['result.json']=c.sha_file(self.paths['result.json'])
+        import fcntl
+        with (self.worker/'.context/native-worker-admission.lock').open('r') as lock:
+            fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
+            with self.assertRaises(ValueError):self.reconcile()
+        proc=subprocess.Popen([sys.executable,'-c','import time;time.sleep(10)'],cwd=self.worker)
+        try:
+            with self.assertRaises(ValueError):self.reconcile()
+        finally:proc.terminate();proc.wait(timeout=2)
+
+    def test_cancelled_log_supplement_refuses_fd_only_and_mapped_holders(self):
+        log=self._late_agents_log()
+        for mapped in (False,True):
+            code=("import sys,time,mmap; p=sys.stdin.readline().strip(); f=open(p,'r+b'); "
+                  +( "m=mmap.mmap(f.fileno(),0); f.close(); " if mapped else "")
+                  +"print('ready',flush=True); time.sleep(10)")
+            proc=subprocess.Popen([sys.executable,'-c',code],cwd=self.root,
+                stdin=subprocess.PIPE,stdout=subprocess.PIPE,text=True)
+            try:
+                proc.stdin.write(str(log)+'\n');proc.stdin.flush()
+                self.assertEqual('ready',proc.stdout.readline().strip())
+                with self.subTest(mapped=mapped),self.assertRaises(ValueError):self.reconcile()
+                self.assertNotIn('reconciled_owners',self.state)
+            finally:
+                proc.terminate();proc.wait(timeout=2);proc.stdin.close();proc.stdout.close()
+
+    def test_cancelled_log_supplement_rechecks_after_native_custody_scan(self):
+        log=self._late_agents_log()
+        def changed(*args,**kwargs):log.write_text('changed during custody check')
+        with patch('deploy_test_process_scan.prepared_workers_idle',side_effect=changed),self.assertRaises(ValueError):
+            self.reconcile()
+        self.assertNotIn('reconciled_owners',self.state)
+
+    def test_file_returned_structural_rejects_incomplete_or_foreign_evidence(self):
+        self.file_interruption(returned=True)
+        original=copy.deepcopy(self.result)
+        for key,value in [('cleanup_complete',False),('token','foreign'),('recipe_digest','foreign')]:
+            self.result={**original,key:value};c.write(self.paths['result.json'],self.result)
+            self.proof['files']['result.json']=c.sha_file(self.paths['result.json'])
+            before=copy.deepcopy(self.state)
+            with self.subTest(key=key),self.assertRaises(ValueError):self.reconcile()
+            self.assertEqual(before,self.state)
+        self.result=original;c.write(self.paths['result.json'],self.result)
+        self.proof['files']['result.json']=c.sha_file(self.paths['result.json'])
+        self.process['reaped']=[{'pid':124,'status':256}];self.seal()
+        self.proof['files']['result.json']=c.sha_file(self.paths['result.json'])
+        with self.assertRaises(ValueError):self.reconcile()
+
+
 class InterruptedCardRecovery(unittest.TestCase):
     write_native = CardPreflightCleanup.write_native
 
@@ -11589,6 +13290,376 @@ class InterruptedCardRecovery(unittest.TestCase):
         with self.assertRaises(ValueError):c.reconcile(self.state,self.token,self.proof)
 
 
+
+class PremanifestCardRecovery(unittest.TestCase):
+    write_native = CardPreflightCleanup.write_native
+    """Captured FILE/cancelled/missing-receipt boundary; no real DB or providers."""
+    def setUp(self):
+        CardPreflightCleanup.setUp(self)
+        self.run.rename(self.run.with_name('1794032988-1971531-70259'))
+        old=self.run; self.run=old.with_name('1794032988-1971531-70259')
+        for key in ('local-stack-cleanup.status','services.json'):
+            self.paths[key]=self.run/self.paths[key].name
+            self.paths[key].unlink(); self.paths.pop(key)
+        for key in ('local-stack-owner.json','local-benchmark-owner.json'):
+            self.paths[key]=self.run/key
+        self.stack['run_id']=self.run.name
+        self.benchmark.update(run_id=self.run.name,receipt=str(self.run/'benchmark-cleanup.status'))
+        self.recipe.clear(); self.recipe.update(cases={'agentcard-lifecycle':dict(
+            command=['bash','scripts/run-bench','--local','agent-payment-test-shop','agent-payment-setup-resume',
+                     'agent-payment-idempotent-abandonment','agent-payment-abandonment','--bootstrap',
+                     '--max-concurrency','1','--no-dashboard'],cwd='.',env={},aggregate=True)})
+        self.gate.update(result_transport='file',command=[sys.executable,str(ROOT/'scripts/deploy_test_worker.py'),
+                        '--root',str(self.worker)],env={'CONDUCTOR_PORT':'13514','ROSE_USE_SYSTEM_PG':'true','CONDUCTOR_WORKSPACE_NAME':'deploy_agentcard_lifecycle'})
+        self.receipt.update(command=self.gate['command'],cancelled=True)
+        self.receipt['execution_binding']['contract_digest']=c.digest(self.gate)
+        self.result.update(recipe_digest=c.digest(self.recipe))
+        self.result['evidence']['agentcard-lifecycle'].update(command=self.recipe['cases']['agentcard-lifecycle']['command'],cancelled=True)
+        self.paths['case.log'].write_text('Received signal 15; draining owned benchmark before services...\n'
+            f'RuntimeError: cleanup receipt is missing or unsafe: {self.run}/local-stack-cleanup.status\n')
+        self.paths['services.log']=self.run/'services.log'
+        self.paths['services.log'].write_text('🔌 Ports: backend=13714 frontend=13715 health=13716 mac-app=13717 metrics=13718 db=13719 wmh=13720 ngrok_api=13723 queue=navi-agent-tasks-deploy_agentcard_lifecycle-bench-'+self.run.name+' temporal_namespace=rose-labs-bench.tch2n benchmark_mode=true worker_processes=1\n'
+            '🐘 System Postgres already running on port 5432\n'
+            '🐘 Created isolated system database victoria_bench_1794032988_1971531_70259\n'
+            'Python and Node Playwright Chromium assets are ready\n')
+        self.result['evidence']['agentcard-lifecycle']['sha256']=c.sha_file(self.paths['case.log'])
+        self.seal()
+        import deploy_test_local_cleanup as local
+        self.physical=self.enterContext(patch.object(local,'premanifest_card_absent',return_value=None,create=True))
+
+    def seal(self):
+        for key,value in [('request.json',self.request),('result.json',self.result),('native-result.json',self.result),
+                          ('local-stack-owner.json',self.stack),('local-benchmark-owner.json',self.benchmark)]:
+            c.write(self.paths[key],value)
+        reference=dict(result=str(self.paths['result.json']),native_directory=None,cleanup_complete=True,
+            result_sha256=c.sha_file(self.paths['result.json']),native_evidence=self.result['evidence'])
+        self.receipt.update(native_cleanup_reference=reference,cleanup_owner=dict(request_token=self.token,
+                            worker_root=str(self.worker),native_cleanup_reference=reference))
+        c.write(self.paths['receipt.json'],self.receipt)
+        self.proof=dict(kind=KIND,files={k:c.sha_file(p) for k,p in self.paths.items()},confirmed_at=201,observed_by='native-review')
+
+    def reconcile(self): c.reconcile(self.state,'occurrence',self.proof)
+
+    def test_file_missing_receipt_reconciles_only_resource_custody(self):
+        before={k:p.read_bytes() for k,p in self.paths.items()}
+        self.reconcile()
+        self.assertFalse(next(iter(self.state['reconciled_owners'].values()))['credit_granted'])
+        self.assertEqual('UNVERIFIED',self.failure['native_result'])
+        self.assertEqual(before,{k:p.read_bytes() for k,p in self.paths.items()})
+        self.assertFalse((self.run/'local-stack-cleanup.status').exists())
+        self.assertEqual([],c.retained_owners(self.state,['agentcard-lifecycle']))
+        self.assertEqual('victoria_bench_1794032988_1971531_70259',self.physical.call_args.args[3]['name'])
+
+    def test_physical_failure_and_late_database_refuse(self):
+        self.physical.side_effect=ValueError('database present')
+        before=copy.deepcopy(self.state)
+        with self.assertRaises(ValueError):self.reconcile()
+        self.assertEqual(before,self.state)
+        self.physical.side_effect=None;self.reconcile()
+        self.physical.side_effect=ValueError('database appeared')
+        with self.assertRaises(ValueError):c.retained_owners(self.state,['agentcard-lifecycle'])
+
+    def test_conflicting_artifacts_and_admission_refuse(self):
+        for name in ['services.json','local-stack-cleanup.status','run.json','benchmark-cleanup.status']:
+            path=self.run/name;path.write_text('{}')
+            with self.subTest(name=name),self.assertRaises(ValueError):self.reconcile()
+            path.unlink()
+            path.symlink_to(self.paths['services.log'])
+            with self.subTest(symlink=name),self.assertRaises(ValueError):self.reconcile()
+            path.unlink()
+        self.benchmark['state']='running';self.seal()
+        with self.assertRaises(ValueError):self.reconcile()
+
+    def test_resigned_wrong_launch_contract_refuses_before_physical_probe(self):
+        for key, replacement in [('services.log','victoria_bench_other'),('case.log','other-run')]:
+            original=self.paths[key].read_text()
+            altered=(original.replace('victoria_bench_1794032988_1971531_70259',replacement)
+                     if key=='services.log' else original.replace(self.run.name,replacement))
+            self.paths[key].write_text(altered)
+            self.result['evidence']['agentcard-lifecycle']['sha256']=c.sha_file(self.paths['case.log'])
+            self.seal()
+            with self.subTest(key=key),self.assertRaises(ValueError):self.reconcile()
+            self.paths[key].write_text(original)
+        self.result['evidence']['agentcard-lifecycle']['sha256']=c.sha_file(self.paths['case.log'])
+        for target,key,value in [(self.request,'token','wrong'),(self.stack,'native_identity','linux:wrong:1'),
+                                 (self.recipe['cases']['agentcard-lifecycle'],'env',{'CONDUCTOR_PORT':'1'}),
+                                 (self.benchmark,'pid',42)]:
+            old=target.get(key);target[key]=value;self.seal()
+            with self.subTest(key=key),self.assertRaises(ValueError):self.reconcile()
+            target[key]=old
+        self.physical.assert_not_called()
+
+    def test_tampering_and_replay_refuse(self):
+        for key in self.paths:
+            raw=self.paths[key].read_bytes();self.paths[key].write_bytes(raw+b' ')
+            with self.subTest(key=key),self.assertRaises(ValueError):self.reconcile()
+            self.paths[key].write_bytes(raw)
+        for target,key,value in [(self.stack,'run_id','other'),(self.stack,'pid',os.getpid()),
+                                 (self.result,'source',{}),(self.gate,'command',['other']),
+                                 (self.gate,'env',{'CONDUCTOR_PORT':'12000'})]:
+            old=target[key];target[key]=value;self.seal()
+            with self.subTest(key=key),self.assertRaises(ValueError):self.reconcile()
+            target[key]=old
+        self.seal();self.reconcile()
+        with self.assertRaises(ValueError):self.reconcile()
+
+
+class PremanifestPhysicalChecks(unittest.TestCase):
+    def test_database_query_failure_present_and_late_resource_are_not_absence(self):
+        import deploy_test_local_cleanup as local
+        owner={'pid':2000000000,'token':'a'*32}
+        with patch.object(local,'premanifest_card_scan') as scan, \
+             patch.object(local,'premanifest_card_database') as db, \
+             patch.object(local.Path,'read_text',return_value='header\n'):
+            for effect in ['present',RuntimeError('query failed')]:
+                db.side_effect=effect if isinstance(effect,Exception) else None
+                db.return_value=effect
+                with self.assertRaises((ValueError,RuntimeError)):
+                    local.premanifest_card_absent(Path('/unused'),Path('/unused/run'),owner,{'name':'exact'}, {'backend':12345})
+            db.side_effect=None;db.return_value=None;scan.side_effect=[None,ValueError('late owner')]
+            with self.assertRaises(ValueError):
+                local.premanifest_card_absent(Path('/unused'),Path('/unused/run'),owner,{'name':'exact'},{'backend':12345})
+            scan.side_effect=None
+            local.premanifest_card_absent(Path('/unused'),Path('/unused/run'),owner,{'name':'exact'},{'backend':12345})
+            with patch.object(local.Path,'read_text',return_value='header\n0: 00000000:3039 00:0 0A x\n'):
+                with self.assertRaises(ValueError):
+                    local.premanifest_card_absent(Path('/unused'),Path('/unused/run'),owner,{'name':'exact'},{'backend':12345})
+
+    def test_fixed_privileged_scanner_checks_real_fixture_fd_maps_root_and_token(self):
+        import io
+        import deploy_test_local_cleanup as local
+        import deploy_test_process_scan as scan
+        real_path=Path
+        with tempfile.TemporaryDirectory() as tmp:
+            base=Path(tmp);worker=base/'worker';worker.mkdir();proc=base/'proc';proc.mkdir()
+            caller=10;other=30;uid=os.getuid();token='b'*32
+            entry=proc/str(other);entry.mkdir();(entry/'fd').mkdir()
+            (entry/'stat').write_text('30 (fixture) S '+' '.join(['0']*18+['123']))
+            (entry/'cmdline').write_bytes(b'fixture\0');(entry/'environ').write_bytes(b'')
+            (entry/'maps').write_text('');(entry/'cwd').symlink_to(base);(entry/'root').symlink_to('/')
+            request=dict(uid=uid,pid=caller,birth='1',root=str(worker),token=token,owner_pid=20)
+            def path(value,*args):
+                v=str(value)
+                if v=='/proc' or v.startswith('/proc/'):return real_path(str(proc)+v[5:],*args)
+                return real_path(value,*args)
+            def invoke():
+                stdout=io.StringIO()
+                with patch.object(local,'Path',side_effect=path),patch.object(local,'os') as fake_os, \
+                     patch.object(local,'identity',create=True,side_effect=lambda pid:(uid,uid,'1',caller)), \
+                     patch.object(local,'scan_roots',create=True,side_effect=lambda roots,**kw:scan.scan_roots(roots,proc,birth_guard=True,excluded=(caller,))), \
+                     patch.object(local,'json',create=True,new=json),patch.object(local,'hashlib',create=True,new=__import__('hashlib')), \
+                     patch.object(local,'signal',create=True) as sig,patch.object(local,'sys',create=True) as fake_sys:
+                    fake_os.geteuid.return_value=0;fake_os.getppid.return_value=caller;fake_os.getpid.return_value=999
+                    fake_os.environ={'SUDO_UID':str(uid)};fake_os.readlink=os.readlink;fake_os.fsencode=os.fsencode
+                    fake_sys.stdin=io.TextIOWrapper(io.BytesIO(json.dumps(request).encode()))
+                    with patch('sys.stdout',stdout):
+                        try:local._premanifest_scan_main()
+                        except SystemExit:pass
+                return json.loads(stdout.getvalue())['quiescent']
+            self.assertTrue(invoke())
+            (proc/'20').mkdir()
+            self.assertFalse(invoke())  # live or reused original PID is never accepted
+            (proc/'20').rmdir()
+            for field in ('token','root','fd','maps','cwd','unreadable'):
+                with self.subTest(field=field):
+                    if field=='token':(entry/'environ').write_bytes(('RUN_STACK_CLEANUP_TOKEN='+token).encode())
+                    if field=='root':(entry/'root').unlink();(entry/'root').symlink_to(worker)
+                    if field=='fd':(entry/'fd/4').symlink_to(worker/'data')
+                    if field=='maps':(entry/'maps').write_text('00-ff r--p 0 00:00 1 '+str(worker/'data'))
+                    if field=='cwd':(entry/'cwd').unlink();(entry/'cwd').symlink_to(worker)
+                    if field=='unreadable':(entry/'environ').unlink()
+                    self.assertFalse(invoke())
+                    (entry/'environ').write_bytes(b'');(entry/'maps').write_text('')
+                    for link,target in [('root',Path('/')),('cwd',base)]:
+                        (entry/link).unlink();(entry/link).symlink_to(target)
+                    if (entry/'fd/4').is_symlink():(entry/'fd/4').unlink()
+
+
+class PremanifestCensusArrival(unittest.TestCase):
+    def run_census(self, mode):
+        import io
+        import shutil
+        import deploy_test_local_cleanup as local
+        import deploy_test_process_scan as scan
+        real_path=Path
+        with tempfile.TemporaryDirectory() as tmp:
+            base=Path(tmp);worker=base/'worker';worker.mkdir();proc=base/'proc';proc.mkdir()
+            uid=os.getuid();caller=10;token='b'*32;rounds=[0];scanned=[]
+            def create(pid):
+                entry=proc/str(pid);entry.mkdir();(entry/'fd').mkdir()
+                (entry/'stat').write_text(str(pid)+' (fixture) S '+' '.join(['0']*18+['123']))
+                (entry/'cmdline').write_bytes(b'fixture\0');(entry/'environ').write_bytes(b'')
+                (entry/'maps').write_text('');(entry/'cwd').symlink_to(base);(entry/'root').symlink_to('/')
+                return entry
+            create(30)
+            class CensusPath:
+                def glob(self, pattern):
+                    rounds[0]+=1
+                    if rounds[0]==2:
+                        if mode=='vanished':shutil.rmtree(proc/'30')
+                        elif mode not in ('identity','caller'):
+                            new=create(40)
+                            if mode=='owned':(new/'fd/5').symlink_to(worker/'active')
+                            if mode=='unreadable':(new/'environ').unlink()
+                    if mode=='reuse' and rounds[0]==2:shutil.rmtree(proc/'30')
+                    if mode=='reuse' and rounds[0]==3:create(30)
+                    if mode=='churn' and rounds[0]>2:create(40+rounds[0])
+                    return proc.glob(pattern)
+            def path(value,*args):
+                if str(value)=='/proc' and not args:return CensusPath()
+                if str(value)=='/proc' or str(value).startswith('/proc/'):
+                    return real_path(str(proc)+str(value)[5:],*args)
+                return real_path(value,*args)
+            def ident(pid):
+                if pid!=caller and not (proc/str(pid)).exists():raise FileNotFoundError()
+                changed=(rounds[0]>=2 and ((mode=='identity' and pid==30) or (mode=='caller' and pid==caller))) or (mode=='reuse' and rounds[0]>=3 and pid==30)
+                return (uid,uid,'2' if changed else '1',caller)
+            def inspect_roots(roots,**kw):
+                scanned.extend(p.name for p in proc.glob('[0-9]*'))
+                return scan.scan_roots(roots,proc,birth_guard=True,excluded=(caller,))
+            request=dict(uid=uid,pid=caller,birth='1',root=str(worker),token=token,owner_pid=20)
+            stdout=io.StringIO()
+            with patch.object(local,'Path',side_effect=path),patch.object(local,'os') as fake_os, \
+                 patch.object(local,'identity',create=True,side_effect=ident), \
+                 patch.object(local,'scan_roots',create=True,side_effect=inspect_roots), \
+                 patch.object(local,'json',create=True,new=json),patch.object(local,'hashlib',create=True,new=__import__('hashlib')), \
+                 patch.object(local,'signal',create=True),patch.object(local,'sys',create=True) as fake_sys:
+                fake_os.geteuid.return_value=0;fake_os.getppid.return_value=caller;fake_os.getpid.return_value=999
+                fake_os.environ={'SUDO_UID':str(uid)};fake_os.readlink=os.readlink;fake_os.fsencode=os.fsencode
+                fake_sys.stdin=io.TextIOWrapper(io.BytesIO(json.dumps(request).encode()))
+                with patch('sys.stdout',stdout):
+                    try:local._premanifest_scan_main()
+                    except SystemExit:pass
+            return json.loads(stdout.getvalue())['quiescent'],rounds[0],scanned
+
+    def test_new_safe_process_is_fully_scanned_and_unsafe_arrivals_refuse(self):
+        ok,rounds,scanned=self.run_census('safe')
+        self.assertTrue(ok)
+        self.assertIn('40',scanned)
+        self.assertGreaterEqual(rounds,3)
+        for mode in ('owned','unreadable','identity','caller','churn','reuse'):
+            with self.subTest(mode=mode):
+                ok,rounds,scanned=self.run_census(mode)
+                self.assertFalse(ok)
+                if mode in ('owned','unreadable'):self.assertIn('40',scanned)
+                self.assertLessEqual(rounds,8)
+        self.assertTrue(self.run_census('vanished')[0])
+
+
+class CleanFileCardRecovery(unittest.TestCase):
+    write_native = CardPreflightCleanup.write_native
+    seal_base = PremanifestCardRecovery.seal
+    reconcile = PremanifestCardRecovery.reconcile
+
+    def seal(self):
+        if hasattr(self,'manifest'):
+            c.write(self.paths['services.json'],self.manifest)
+            self.paths['local-stack-cleanup.status'].write_text(''.join(k+'='+v+'\n' for k,v in self.clean.items()))
+        self.seal_base()
+
+    def setUp(self):
+        PremanifestCardRecovery.setUp(self)
+        old=self.run;self.run=old.with_name('1794036647-2674647-70562');old.rename(self.run)
+        for key in ['services.log','local-stack-owner.json','local-benchmark-owner.json']:
+            self.paths[key]=self.run/key
+        self.stack['run_id']=self.run.name
+        self.benchmark.update(run_id=self.run.name,receipt=str(self.run/'benchmark-cleanup.status'))
+        self.paths['services.log'].write_text(self.paths['services.log'].read_text().replace(old.name,self.run.name).replace(old.name.replace('-','_'),self.run.name.replace('-','_'))+
+                                             '🧭 Service manifest: .context/benchmarks/'+self.run.name+'/services.json\n')
+        self.paths['case.log'].write_text('Isolated benchmark stack: run_id='+self.run.name+
+            ' context=.context/benchmarks/'+self.run.name+' backend=13714 frontend=13715 db=5432 db_name=victo' +
+            'ria_bench_'+self.run.name.replace('-','_')+' queue=navi-agent-tasks-deploy_agentcard_lifecycle-bench-'+self.run.name+'\n'
+            'Received signal 15; draining owned benchmark before services...\n')
+        case=self.result['evidence']['agentcard-lifecycle'];case.update(native_exit=143,sha256=c.sha_file(self.paths['case.log']))
+        self.paths['services.json']=self.run/'services.json';self.paths['local-stack-cleanup.status']=self.run/'local-stack-cleanup.status'
+        self.manifest=dict(schema_version=1,benchmark_mode=True,status='stopped',worktree=str(self.worker),run_sh_pid=self.stack['pid'],
+            ports=dict(backend=13714,frontend=13715,health=13716,local_db=13719,mac_app=13717,sdk_metrics=13718,ngrok_api=13723,wmh=0),
+            database=dict(name='victoria_bench_'+self.run.name.replace('-','_'),use_system_postgres=True,port=5432,runtime_port=5432,
+                          owned_by_run_sh=True,container='',volume=''),
+            temporal_task_queue='navi-agent-tasks-deploy_agentcard_lifecycle-bench-'+self.run.name,
+            services=[dict(name=n,pid=2000000001+i) for i,n in enumerate(['cloudflared','back-end','front-end','agents'])])
+        self.clean=dict(version='2',state='clean',token=self.stack['token'],stack_pid=str(self.stack['pid']),
+                        stack_birth=self.stack['birth'],stack_native_identity=self.stack['native_identity'])
+        self.seal()
+
+    def test_clean_file_cancellation_reconciles_resource_only(self):
+        original={k:p.read_bytes() for k,p in self.paths.items()};before=copy.deepcopy(self.state['attempts'])
+        self.reconcile()
+        self.assertEqual([],c.retained_owners(self.state,['agentcard-lifecycle']))
+        self.assertEqual(before,self.state['attempts']);self.assertEqual('UNVERIFIED',self.failure['native_result'])
+        self.assertFalse(next(iter(self.state['reconciled_owners'].values()))['credit_granted'])
+        self.assertEqual(original,{k:p.read_bytes() for k,p in self.paths.items()})
+        self.assertEqual('victoria_bench_'+self.run.name.replace('-','_'),self.physical.call_args.args[3]['name'])
+        with self.assertRaises(ValueError):self.reconcile()
+        self.physical.side_effect=ValueError('late database')
+        with self.assertRaises(ValueError):c.retained_owners(self.state,['agentcard-lifecycle'])
+
+    def test_clean_file_manifest_receipt_and_admission_guards(self):
+        cases=[(self.clean,'state','failed'),(self.clean,'token','foreign'),(self.clean,'version','1'),
+               (self.manifest,'status','running'),(self.manifest,'run_sh_pid',123),
+               (self.manifest['database'],'name','victoria'),(self.manifest['database'],'port',1),
+               (self.manifest['ports'],'backend',1),(self.manifest,'worktree',str(self.root)),
+               (self.benchmark,'state','running'),(self.stack,'pid',os.getpid()),
+               (self.result,'source',{}),(self.manifest,'temporal_task_queue','foreign')]
+        for target,key,value in cases:
+            old=target[key];target[key]=value;self.seal();before=copy.deepcopy(self.state)
+            with self.subTest(key=key),self.assertRaises(ValueError):self.reconcile()
+            self.assertEqual(before,self.state);target[key]=old
+        self.seal()
+        for key in ['services.json','local-stack-cleanup.status']:
+            p=self.paths[key];raw=p.read_bytes();p.unlink();p.symlink_to(self.paths['services.log'])
+            with self.subTest(symlink=key),self.assertRaises(ValueError):self.reconcile()
+            p.unlink();p.write_bytes(raw)
+        for key,p in self.paths.items():
+            raw=p.read_bytes();p.write_bytes(raw+b' ')
+            with self.subTest(hash=key),self.assertRaises(ValueError):self.reconcile()
+            p.write_bytes(raw)
+        self.manifest['services'][0]['pid']=os.getpid();self.seal()
+        with self.assertRaises(ValueError):self.reconcile()
+
+    def test_clean_file_resigned_malformed_conflicting_or_foreign_evidence_refuses(self):
+        for key in ['local-stack-cleanup.status','services.json','case.log','services.log']:
+            p=self.paths[key];original=p.read_bytes()
+            if key=='local-stack-cleanup.status':p.write_bytes(original+b'state=clean\n')
+            elif key=='services.json':p.write_bytes(b'{invalid-json')
+            elif key=='case.log':p.write_text(p.read_text().replace('db_name=victoria_bench_', 'db_name=foreign_'))
+            else:p.write_text(p.read_text().replace('Created isolated system database victoria_bench_', 'Created isolated system database foreign_'))
+            if key=='case.log':
+                self.result['evidence']['agentcard-lifecycle']['sha256']=c.sha_file(p);self.seal()
+            self.proof['files'][key]=c.sha_file(p)
+            with self.subTest(key=key),self.assertRaises(ValueError):self.reconcile()
+            p.write_bytes(original)
+            self.result['evidence']['agentcard-lifecycle']['sha256']=c.sha_file(self.paths['case.log']);self.seal()
+        for name in ['run.json','report-card.json','local-benchmark-results.json','services.json.tmp','benchmark-cleanup.status']:
+            p=self.run/name;p.write_text('{}')
+            with self.subTest(name=name),self.assertRaises(ValueError):self.reconcile()
+            p.unlink()
+
+    def test_clean_file_numeric_types_are_not_coerced(self):
+        for target,key,value in [(self.manifest,'schema_version',True),(self.manifest['ports'],'backend',13714.0),
+                                 (self.manifest['database'],'use_system_postgres',1),
+                                 (self.manifest['database'],'port',5432.0)]:
+            old=target[key];target[key]=value;self.seal()
+            with self.subTest(key=key),self.assertRaises(ValueError):self.reconcile()
+            target[key]=old
+
+    def test_clean_file_late_service_pid_reuse_refuses(self):
+        import deploy_test_local_cleanup as local
+        original=Path.exists;late=[False];pid=self.manifest['services'][0]['pid']
+        def exists(path):
+            if str(path)=='/proc/'+str(pid):return late[0]
+            return original(path)
+        def observed(*args):late[0]=True
+        self.physical.side_effect=observed
+        before=copy.deepcopy(self.state)
+        with patch.object(local.Path,'exists',exists),self.assertRaises(ValueError):self.reconcile()
+        self.assertEqual(before,self.state)
+
+    def test_clean_receipt_never_substitutes_for_physical_absence(self):
+        for reason in ['database present','query failed','unknown process','live token','listener busy']:
+            self.physical.side_effect=ValueError(reason);before=copy.deepcopy(self.state)
+            with self.subTest(reason=reason),self.assertRaises(ValueError):self.reconcile()
+            self.assertEqual(before,self.state)
 class NativeJsonEvidence(unittest.TestCase):
     def test_json_chunk_boundaries_and_original_scalar_forms(self):
         import hashlib
@@ -12614,7 +14685,7 @@ class CleanupPrepareEvidence(unittest.TestCase):
     setUp = RelayStartupEvidence.setUp
     fixture = RelayStartupEvidence.fixture
 
-    def prepare_fixture(self, producer_head='abd6e81ee0f0c5cbcd88a4a7f11b4a8920740077'):
+    def prepare_fixture(self, producer_head='abd6e81ee0f0c5cbcd88a4a7f11b4a8920740077', count=14, custody=False):
         import hashlib
         receipt, owner, proof = self.fixture()
         (self.relay / 'startup-cleanup.json').unlink()
@@ -12627,15 +14698,19 @@ class CleanupPrepareEvidence(unittest.TestCase):
         (self.relay/'broker.private.log').write_text('{"stopped": true}\n')
         folder = Path(receipt['log']).parent
         request = json.loads((folder/'request.json').read_text())
-        tasks = ['fixture-task-%02d' % i for i in range(14)]
+        tasks = ['fixture-task-%02d' % i for i in range(count)]
         request['checks'] = tasks
+        held = {'fixture-custody': dict(disposition='NO_RETRY_CUSTODY', kind='historical-agentcard-no-retry-v1')} if custody else {}
+        request['skips'] = held
         self.save(folder/'request.json', request)
         cases = dict.fromkeys(tasks, 'UNVERIFIED')
-        receipt.update(checks=tasks, cases=cases)
+        receipt.update(checks=tasks, cases={**dict.fromkeys(held, 'SKIP'), **cases})
+        if custody:
+            receipt.update(custody_skips=copy.deepcopy(held), current_execution=dict.fromkeys(held, 'UNVERIFIED'))
         adapter = json.loads(Path(receipt['worker_result']).read_text())
         adapter.update(checks=tasks, cases=cases, complete=False, cleanup_complete=False,
                        fleet_directory=str(self.campaign), native_command=['bash', 'scripts/run-bench', *tasks,
-                       '--runs', '1', '--concurrency', '14', '--retry-infra', '0', '--ref', receipt['source']['head']])
+                       '--runs', '1', '--concurrency', str(count), '--retry-infra', '0', '--ref', receipt['source']['head']])
         self.save(Path(receipt['worker_result']), adapter)
         reference = receipt['native_cleanup_reference']
         reference['result_sha256'] = hashlib.sha256(Path(receipt['worker_result']).read_bytes()).hexdigest()
@@ -12644,8 +14719,8 @@ class CleanupPrepareEvidence(unittest.TestCase):
                      worker_result_sha256=reference['result_sha256'], layout='campaign-cleanup-prepare-v1')
         summary = json.loads((self.campaign/'summary.json').read_text())
         summary.pop('shared_inventory_failed')
-        summary.update(concurrency=14, task_count=14, total_jobs=14, cleanup_ticket_failure='prepare',
-                       cleanup_cohorts=[dict(cohort_id='c001',status='queued',ready_count=0,expected_count=14,
+        summary.update(concurrency=count, task_count=count, total_jobs=count, cleanup_ticket_failure='prepare',
+                       cleanup_cohorts=[dict(cohort_id='c001',status='queued',ready_count=0,expected_count=count,
                                             failed_count=0,released_count=0,released_at=None)],
                        jobs=[dict(job_id='r001-j%04d' % (i+1), task=task, run=1, attempt=1, attempts=[],
                            status='cancelled', controller_pid=None, controller_exit_code=None, started_at=None,
@@ -12756,6 +14831,30 @@ class CleanupPrepareEvidence(unittest.TestCase):
         self.published=False
         with self.assertRaisesRegex(ValueError,'terminal publication'):self.validate_prepare_fixture(receipt,owner,proof)
 
+
+    def test_prepare_accepts_full_width_with_no_retry_custody_and_current_producers(self):
+        # PR1682 round 29: 15 submitted smoke checks plus one NO_RETRY_CUSTODY case, refused at
+        # 'insufficient physical cleanup cohort floors' before any controller dispatch.
+        receipt,owner,proof=self.prepare_fixture('452e70ce9843c97b9587ed3125f6666cf10c7dfb',count=15,custody=True)
+        entry=self.validate_prepare_fixture(receipt,owner,proof)
+        self.assertEqual([],entry['participants']);self.assertFalse(entry['credit_granted'])
+        folder=Path(receipt['log']).parent
+        def reseal_receipt(row):
+            self.save(folder/'receipt.json',row)
+            proof['receipt_sha256']=hashlib.sha256((folder/'receipt.json').read_bytes()).hexdigest();self.reseal()
+        import hashlib
+        for name,mutate in [('custody-credited',lambda r:r['cases'].update({'fixture-custody':'PASS'})),
+                            ('custody-not-held',lambda r:r.update(custody_skips={})),
+                            ('custody-executed',lambda r:r.update(current_execution={})),
+                            ('check-credited',lambda r:r['cases'].update({'fixture-task-00':'PASS'}))]:
+            with self.subTest(name=name):
+                row=copy.deepcopy(receipt);mutate(row);reseal_receipt(row)
+                try:
+                    with self.assertRaises(ValueError):self.validate_prepare_fixture(row,owner,proof)
+                finally:reseal_receipt(receipt)
+        request=json.loads((folder/'request.json').read_text())
+        request['skips']['fixture-custody']['disposition']='resource_skip';self.save(folder/'request.json',request);self.reseal()
+        with self.assertRaises(ValueError):self.validate_prepare_fixture(receipt,owner,proof)
 
     def test_prepare_current_reviewed_pair_never_grants_credit(self):
         receipt,owner,proof=self.prepare_fixture('436576b7b05aa7421c597733c3df4f71f6f40eb7')
@@ -13620,10 +15719,11 @@ class LocalCleanupQuietScan(unittest.TestCase):
                 children = (proc_dir / 'task' / str(child.pid) / 'children').read_text().split()
                 return uids == [str(os.getuid()), '0'] and bool(children)
             try:
-                deadline = time.monotonic() + 10
-                while not steady():
-                    self.assertLess(time.monotonic(), deadline, 'sudo never ran its command as root')
-                    time.sleep(0.05)
+                def sudo_command_ready():
+                    self.assertIsNone(child.poll(), "sudo fixture exited before root command readiness")
+                    return steady()
+                wait_until(sudo_command_ready, timeout=10,
+                           description="sudo runs its owned command as root")
                 with self.assertRaises(PermissionError):
                     (proc_dir / 'cwd').resolve(strict=True)
                 real_stat, seen = Path.stat, []
@@ -13638,13 +15738,16 @@ class LocalCleanupQuietScan(unittest.TestCase):
                     local.quiet(root)
                 self.assertEqual(seen, [proc_dir])
             finally:
-                deadline = time.monotonic() + 10
-                while child.poll() is None:
+                def owned_sudo_reaped():
+                    if child.poll() is not None:
+                        return True
                     try:
                         child.terminate()  # refused only while sudo briefly holds a root real uid
                     except PermissionError:
-                        self.assertLess(time.monotonic(), deadline, 'sudo fixture could not be stopped')
-                    time.sleep(0.05)
+                        pass  # pending, never terminal evidence
+                    return child.poll() is not None
+                wait_until(owned_sudo_reaped, timeout=10,
+                           description="owned sudo fixture stopped and reaped")
 
 
 class BackendPrismaPreflightCleanup(unittest.TestCase):
@@ -13725,10 +15828,12 @@ class BackendPrismaPreflightCleanup(unittest.TestCase):
         # Historical source bytes are real; synthetic root has no Git repository.
         blobs = {name: subprocess.check_output(['git','--no-replace-objects','-C',str(ROOT),'show',
                     'abd6e81ee0f0c5cbcd88a4a7f11b4a8920740077:'+name]) for name in b.PINS}
-        self.addCleanup(patch.stopall)
-        patch.object(b.subprocess, 'check_output', side_effect=lambda argv: blobs[argv[-1].split(':',1)[1]]).start()
-        patch.object(b, 'docker_snapshot', side_effect=lambda machine: copy.deepcopy(self.pg)).start()
-        patch.object(b, 'listeners', return_value={12005}).start()
+        # Stop only these patches: patch.stopall() also retired setUpModule's own-tree process scope,
+        # so every later fixture's /proc scan refused on a sibling suite's non-dumpable process.
+        for patcher in (patch.object(b.subprocess, 'check_output', side_effect=lambda argv: blobs[argv[-1].split(':',1)[1]]),
+                        patch.object(b, 'docker_snapshot', side_effect=lambda machine: copy.deepcopy(self.pg)),
+                        patch.object(b, 'listeners', return_value={12005})):
+            patcher.start(); self.addCleanup(patcher.stop)
 
     def sync(self):
         for name, value in zip(self.paths, [self.request,self.result,self.receipt,self.process]):
@@ -14018,7 +16123,11 @@ class Round49RetirementCertificates(unittest.TestCase):
             # The observer executes while the one exact admission fd remains locked.
             if inspect is not None:
                 import fcntl
-                lock = self.active_root / '.context/native-worker-admission.lock'
+                # Recognition can re-audit any committed gate, not only the last issued certificate.
+                closure = dict(zip(inspect.__code__.co_freevars,
+                                   (cell.cell_contents for cell in (inspect.__closure__ or ()))))
+                audited_root = closure.get('root', self.active_root)
+                lock = audited_root / '.context/native-worker-admission.lock'
                 with lock.open('r') as other:
                     with self.assertRaises(BlockingIOError):
                         fcntl.flock(other, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -14294,6 +16403,84 @@ class Round49RetirementCertificates(unittest.TestCase):
         persisted = json.loads(path.read_text())
         self.assertTrue(c.settled_round49_missing_request(persisted, self.directory, self.gate, Path(self.proof['old_request'])))
         self.assertEqual(persisted['attempts'], self.state['attempts'])
+
+    def _final_retirement_boundary(self):
+        # Issue real certificates from the committed journal, not a mocked verifier.
+        for proof in self.proofs.values():
+            self.issue(proof)
+        self.state.update(phase='final', pending=[], running=False)
+        self.state['plan']['source'] = copy.deepcopy(self.state['source'])
+        self.state['plan_digest'] = c.digest(self.state['plan'])
+        self.state['environment'] = 'e' * 64
+        self.state['input_fingerprints'] = {g['name']: 'd' * 64 for g in self.gates}
+        self.put(self.directory / 'cycle.json', self.state)
+
+    def _assert_final_retirement_boundary(self, refresh, *, refused=False):
+        class BeforeNativeWork(Exception):
+            pass
+        original = copy.deepcopy(self.state)
+        before = {p: p.read_bytes() for p in self.directory.rglob('*') if p.is_file()}
+        plan = self.state['plan']
+        with patch.object(c, 'validate_plan'), patch.object(c, 'initial_deferrals', return_value={}), \
+             patch.object(c, 'retained_owners', return_value=[]), \
+             patch.object(c, 'environment_digest', return_value=self.state['environment']), \
+             patch.object(c, 'input_fingerprints', return_value=self.state['input_fingerprints']), \
+             patch.object(c, 'records', return_value=self.gates), \
+             patch.object(c, 'cloud_smoke_prerequisite', side_effect=BeforeNativeWork) as launch_boundary, \
+             patch.object(c, 'source', side_effect=BeforeNativeWork if refresh else None,
+                          return_value=self.state['source']) as source_boundary:
+            expected = ValueError if refused else BeforeNativeWork
+            with self.assertRaises(expected):
+                if refresh:
+                    # _refresh reaches source(root) only after the saved-FINAL guards;
+                    # stop there, before any rebind, carry, write or native launch.
+                    c._refresh(self.state, plan, copy.deepcopy(plan), self.repo,
+                               directory=self.directory)
+                else:
+                    c.run_phase(plan, self.state, self.directory, self.repo)
+            if refresh:
+                self.assertEqual(source_boundary.call_count, 0 if refused else 1)
+                launch_boundary.assert_not_called()
+            else:
+                self.assertEqual(launch_boundary.call_count, 0 if refused else 1)
+        self.assertEqual(self.state, original)
+        self.assertEqual(before, {p: p.read_bytes() for p in self.directory.rglob('*') if p.is_file()})
+        self.assertTrue(all(not Path(p).exists() for p in self.proposal['original_missing_outer_paths']))
+        self.assertTrue(all(row['status'] == 'FAIL' and row['complete'] is False
+                            for row in self.state['attempts'][0]['results']))
+
+    def test_final_run_phase_accepts_committed_retirement_before_native_launch(self):
+        self._final_retirement_boundary()
+        self._assert_final_retirement_boundary(False)
+
+    def test_saved_final_refresh_accepts_committed_old_plan_retirement_before_rebind(self):
+        self._final_retirement_boundary()
+        self._assert_final_retirement_boundary(True)
+
+    def test_final_guards_refuse_invalid_committed_certificate(self):
+        self._final_retirement_boundary()
+        self.state['historical_launch_retirements'][self.proof['old_request']]['credit_granted'] = True
+        self.put(self.directory / 'cycle.json', self.state)
+        for refresh in (False, True):
+            with self.subTest(refresh=refresh):
+                self._assert_final_retirement_boundary(refresh, refused=True)
+
+    def test_final_guards_refuse_unknown_missing_outer_request(self):
+        self._final_retirement_boundary()
+        # Same selected gate, but outside the one exact retired request path.
+        folder = self.directory / 'attempts/99/final' / self.gate['name']
+        folder.mkdir(parents=True)
+        self.put(folder / 'request.json', {'gate': self.gate['name'], 'token': 'unretired'})
+        for refresh in (False, True):
+            with self.subTest(refresh=refresh):
+                self._assert_final_retirement_boundary(refresh, refused=True)
+
+    def test_saved_final_refresh_refuses_missing_request_for_unknown_old_gate(self):
+        self._final_retirement_boundary()
+        folder = self.directory / 'attempts/99/final/unknown-gate'
+        folder.mkdir(parents=True)
+        self.put(folder / 'request.json', {'gate': 'unknown-gate', 'token': 'unknown'})
+        self._assert_final_retirement_boundary(True, refused=True)
 
     def test_current_source_guard_still_refuses_with_retirement(self):
         self.issue()
@@ -15494,6 +17681,144 @@ class UserDeployQuarantine(unittest.TestCase):
         with patch.object(q,'validate_user_deploy_receipt',side_effect=ValueError('policy absent')):
             with self.assertRaisesRegex(ValueError,'policy absent'):native.clean_isolated_successor(state,prior,original,successor)
         self.assertFalse(prior['cleanup_complete']);self.assertFalse(prior['credit_granted'])
+
+
+
+class ProcessScanExitedChildren(unittest.TestCase):
+    def test_privileged_scan_reobserves_transient_refusals_only_boundedly(self):
+        # PR1682 stability run 4: one loaded refusal must not fail the owning observation, but a
+        # refusal is never converted into quiescence and other errors are not retried.
+        import deploy_test_process_scan as scan
+        good = {'quiescent': True}
+        refused = ValueError('privileged read-only process scan refused or unavailable')
+        for outcomes, expect in (([refused, refused, good], good), ([refused] * 3, refused),
+                                 ([ValueError('privileged process scan response identity differs'), good], 'identity')):
+            calls = []
+            def once(roots, outcomes=list(outcomes)):
+                calls.append(roots); value = outcomes.pop(0)
+                if isinstance(value, Exception): raise value
+                return value
+            with self.subTest(expect=str(expect)), patch.object(scan, '_privileged_scan_once', side_effect=once), \
+                 patch.object(scan.time, 'sleep'):
+                if expect is good:
+                    self.assertEqual(good, scan.privileged_scan(['/x'])); self.assertEqual(3, len(calls))
+                elif expect is refused:
+                    with self.assertRaisesRegex(ValueError, 'refused'): scan.privileged_scan(['/x'])
+                    self.assertEqual(3, len(calls))
+                else:
+                    with self.assertRaisesRegex(ValueError, 'identity differs'): scan.privileged_scan(['/x'])
+                    self.assertEqual(1, len(calls))
+
+    def test_privileged_scan_preserves_positive_unreaped_child_absence(self):
+        import deploy_test_process_scan as scan
+        self.assertNotEqual(os.geteuid(), 0)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.assertTrue(scan.privileged_scan([root])['quiescent'])
+            pid = os.fork()
+            if pid == 0:
+                os.chdir(root)
+                os._exit(0)
+            try:
+                wait_until(lambda: Path(f'/proc/{pid}/stat').read_text().rsplit(')', 1)[1].split()[0] == 'Z',
+                           timeout=3, description='owned child exited before scan')
+                self.assertTrue(scan.privileged_scan([root])['quiescent'])
+            finally:
+                os.waitpid(pid, 0)
+            self.assertTrue(scan.privileged_scan([root])['quiescent'])
+
+    def test_privileged_scan_rejects_exited_leader_with_live_thread(self):
+        import select
+        import deploy_test_process_scan as scan
+        program = ("import ctypes,os,sys,threading\n"
+                   "def worker():\n"
+                   "    fd=os.open(sys.argv[1]+'/held',os.O_CREAT|os.O_RDWR,0o600)\n"
+                   "    print('READY',flush=True)\n"
+                   "    os.read(0,1)\n"
+                   "    os.close(fd)\n"
+                   "threading.Thread(target=worker).start()\n"
+                   "ctypes.CDLL(None).pthread_exit(None)\n")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            child = subprocess.Popen([sys.executable, '-c', program, str(root)], cwd=root,
+                                     stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                     text=True)
+            try:
+                wait_until(lambda: bool(select.select([child.stdout], [], [], 0)[0]),
+                           timeout=5, description='owned live thread ready')
+                self.assertEqual(child.stdout.readline().strip(), 'READY')
+                def leader_exited():
+                    fields = Path(f'/proc/{child.pid}/stat').read_text().rsplit(')', 1)[1].split()
+                    return fields[0] == 'Z' and int(fields[17]) > 1
+                wait_until(leader_exited, timeout=3, description='leader exited with live worker')
+                with self.assertRaises(ValueError):
+                    scan.privileged_scan([root])
+            finally:
+                child.stdin.close()
+                try:
+                    child.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    child.kill()
+                    child.wait(timeout=5)
+                    raise
+                child.stdout.close()
+                child.stderr.close()
+            self.assertEqual(child.returncode, 0)
+            self.assertTrue(scan.privileged_scan([root])['quiescent'])
+
+    def test_zombie_scan_requires_empty_references_and_stable_identity(self):
+        import deploy_test_process_scan as scan
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            proc = root / 'proc'
+            entry = proc / '2000000000'
+            entry.mkdir(parents=True)
+            (entry / 'fd').mkdir()
+            (entry / 'maps').write_bytes(b'')
+            fields = ['Z'] + ['0'] * 18 + ['10']
+            fields[17] = '1'
+            body = '2000000000 (fixture) ' + ' '.join(fields)
+            (entry / 'stat').write_text(body)
+            scan.scan_roots([root], proc, birth_guard=True)
+            for artifact in ('cwd', 'fd/3', 'maps'):
+                with self.subTest(artifact=artifact):
+                    if artifact == 'cwd':
+                        (entry / artifact).symlink_to(root)
+                    else:
+                        (entry / artifact).write_text(str(root))
+                    with self.assertRaises(ValueError):
+                        scan.scan_roots([root], proc, birth_guard=True)
+                    if artifact == 'maps':
+                        (entry / artifact).write_bytes(b'')
+                    else:
+                        (entry / artifact).unlink()
+            (entry / 'maps').unlink()
+            with self.assertRaises(ValueError):
+                scan.scan_roots([root], proc, birth_guard=True)
+            (entry / 'maps').write_bytes(b'')
+            (entry / 'fd').rmdir()
+            with self.assertRaises(ValueError):
+                scan.scan_roots([root], proc, birth_guard=True)
+            (entry / 'fd').mkdir()
+            threaded = fields.copy()
+            threaded[17] = '2'
+            (entry / 'stat').write_text('2000000000 (fixture) ' + ' '.join(threaded))
+            with self.assertRaises(ValueError):
+                scan.scan_roots([root], proc, birth_guard=True)
+            (entry / 'stat').write_text(body)
+            original = Path.read_text
+            reads = 0
+            def changed(path, *args, **kwargs):
+                nonlocal reads
+                if path == entry / 'stat':
+                    reads += 1
+                    return body if reads == 1 else body.rsplit(' ', 1)[0] + ' 11'
+                return original(path, *args, **kwargs)
+            with patch.object(Path, 'read_text', changed), self.assertRaises(ValueError):
+                scan.scan_roots([root], proc, birth_guard=True)
+            (entry / 'stat').write_text(body.replace(') Z ', ') S '))
+            with self.assertRaises(ValueError):
+                scan.scan_roots([root], proc, birth_guard=True)
 
 
 class GithubCleanupReconciliation(unittest.TestCase):

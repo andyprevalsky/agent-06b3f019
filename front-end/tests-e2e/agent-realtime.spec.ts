@@ -42,11 +42,11 @@ test.describe('agent-realtime', () => {
       },
       async () => {
         const rec = attachRecorder(page);
-        // Reuse the `claude-code-agent` smoke prompt so semantic stays in lockstep
+        // Reuse the `chat-mode` smoke prompt so semantic stays in lockstep
         // with the benchmark suite. Start in chat mode (omit start_phase) — the
         // agent's chat-mode reply streams enough bubbles to exercise the dedup
         // invariant without needing the full Temporal workflow to complete.
-        const task = await loadBenchmarkTask('claude-code-agent');
+        const task = await loadBenchmarkTask('chat-mode');
         const agentId = await createAgent(task.prompt);
 
         try {

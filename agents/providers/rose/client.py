@@ -2352,8 +2352,10 @@ class RoseClient:
         )
         # Bind failed dumps to the same request that the client attempts.
         request_id = request_id or uuid.uuid4().hex[:12]
+        from helpers.image_count_retry import collect_with_image_count_retry
         try:
-            response = await self.collect(
+            response = await collect_with_image_count_retry(
+                self.collect,
                 pool=pool,
                 messages=messages,
                 tools=tools,
@@ -2446,6 +2448,7 @@ class RoseClient:
                 action = normalize_browser_use_tool_calls(
                     response.tool_calls,
                     thinking=(response.reasoning or response.content or None),
+                    available_actions=available_tool_names,
                 )
             else:
                 action = normalize_browser_use_response(
@@ -2514,8 +2517,51 @@ class RoseClient:
         if output_validation_error is not None:
             raise output_validation_error
 
+        batch_actions = []
+        if action is not None:
+            action = dict(action)
+            normalized = action.pop("batch_actions", None)
+            if normalized:
+                batch_actions = [{"action": item, "tool_call_ids": [str(
+                    (response.tool_calls[index].get("id") if response.tool_calls else None)
+                    or f"{response.request_id or request_id}:browser:{index}"
+                )]} for index, item in enumerate(normalized)]
+            elif response.tool_calls:
+                ids = [str(call.get("id") or f"{response.request_id or request_id}:browser:{index}")
+                       for index, call in enumerate(response.tool_calls)]
+                batch_actions = [{"action": action, "tool_call_ids": ids}]
+                if len(ids) > 1:
+                    coalesced = dict(action)
+                    coalesced["coalesced_calls"] = [normalize_browser_use_tool_call(
+                        call, available_actions=available_tool_names,
+                    ) for call in response.tool_calls]
+                    coalesced["coalesced_tool_call_ids"] = ids
+                    batch_actions[0]["action"] = coalesced
+            else:
+                batch_actions = [{"action": action, "tool_call_ids": [f"{response.request_id or request_id}:browser:0"]}]
+            observed = {}
+            for item in batch_actions:
+                params = item["action"].get("params") or {}
+                ref = params.get("observation_ref")
+                if ref and ref.get("target") not in observed.get(ref.get("observation_id"), set()):
+                    raise BrowserModelOutputValidationError("Unbound browser observation reference", response=response)
+                if item["action"]["action"] == "read_browser_state" and params.get("observation_id"):
+                    key = params["observation_id"]
+                    if key in observed:
+                        raise BrowserModelOutputValidationError("Duplicate browser observation ID", response=response)
+                    observed[key] = {target["key"] for target in params.get("targets", [])}
+            if batch_actions:
+                ids = [call_id for item in batch_actions for call_id in item["tool_call_ids"]]
+                if len(set(ids)) != len(ids):
+                    raise BrowserModelOutputValidationError("Duplicate browser tool call IDs", response=response)
+            if len(batch_actions) > 1 and any(item["action"]["action"] in {
+                "attempt_completion", "request_user_assistance_for_authentication",
+                "request_payment_card", "recover_from_challenge", "phone",
+            } for item in batch_actions):
+                raise BrowserModelOutputValidationError("This browser action requires a separate turn", response=response)
         return {
             "action": action,
+            "batch_actions": batch_actions,
             "actual_model": actual_model,
             "pool_name": response.pool_name or pool,
             "request_id": response.request_id,

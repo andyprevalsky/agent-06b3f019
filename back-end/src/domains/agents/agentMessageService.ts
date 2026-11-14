@@ -16,13 +16,17 @@ import {
 import { recordPersonMessage } from '../../providers/personMessageStamp';
 import { type FilePointer, validateTotalSize } from '../../providers/storage';
 import type { PostMessageBody } from './types';
+import {
+  isAgentAuthoredRow as isAgentAuthoredMetadata,
+  withCredentialProvenance,
+} from './credentialContext';
+import { buildUserMessageSignalValue } from './agentMessageSignal';
+export { buildUserMessageSignalValue } from './agentMessageSignal';
 import * as repo from './repo';
 import { withActiveBrowserSessionShareLock } from './repoBrowserTargetedMessages';
 import { readTaskInboxMessages } from './agentToAgentService';
-import { buildUserMessageSignalValue } from './agentMessageSignal';
 import { ownedByExternalExecution } from './agentExternalExecution';
 import { createLogger } from '../../providers/logger';
-export { buildUserMessageSignalValue } from './agentMessageSignal';
 import { broadcastChatReactivation } from './agentMessageReactivation';
 import { resumeStoppedBrowser, stoppedAgentStatus } from './agentMessageResume';
 import { findGraphRootId } from './repoGraph';
@@ -63,18 +67,16 @@ function resolveRole(
 
 /**
  * Internal USER rows that are not the user's input to this agent's own loop
- * (metadata only, never text): agent notifications, agent-to-agent messages,
- * environment context, and rows scoped to one child's work stream. A browser
- * task writes each OTP it reads from the user's inboxes onto its owner as a
- * USER row tagged with its own subAgentId; the owner's model never reads such a
- * row (contextScope), so signalling it woke the owner's waits for nothing and
- * fed the code to its response-schema feedback.
+ * (metadata only, never text): agent-authored rows (credentialContext) plus
+ * rows scoped to one child's work stream. A browser task writes each OTP it
+ * reads from the user's inboxes onto its owner as a USER row tagged with its
+ * own subAgentId; the owner's model never reads such a row (contextScope), so
+ * signalling it woke the owner's waits for nothing and fed the code to its
+ * response-schema feedback.
  */
 function isAgentAuthoredRow(metadata: PostMessageBody['metadata']): boolean {
   return (
-    metadata?.agentNotification === true ||
-    metadata?.agentMessage === true ||
-    metadata?.environmentContext === true ||
+    isAgentAuthoredMetadata(metadata) ||
     isInternalSubagentMessage({ role: 'USER', text: '', metadata })
   );
 }
@@ -322,6 +324,7 @@ export async function postMessage(
   workflowGeneration?: string,
   options: { personAuthored?: boolean } = {}
 ) {
+  body = withCredentialProvenance(body, isInternal);
   // Determine role based on auth type
   const roleResult = resolveRole(body, isInternal);
   if ('error' in roleResult) {

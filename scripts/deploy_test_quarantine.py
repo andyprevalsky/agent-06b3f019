@@ -268,6 +268,108 @@ def _git_ancestor(root: Path, ancestor: str, descendant: str) -> bool:
                           capture_output=True).returncode == 0
 
 
+def _suite_attribution_markers(occurrence: dict, entry: dict, root: Path, path: str) -> tuple[list[dict], dict]:
+    """Attribution-only: recover all original unittest failures from a sealed native aggregate.
+
+    Never used by unit_matches/streak. No suite-level execution or cleanup credit.
+    """
+    import hashlib
+
+    def require(ok, message):
+        if not ok:
+            raise ValueError('suite attribution: ' + message)
+
+    def pinned(rel, expected):
+        require(isinstance(rel, str) and not Path(rel).is_absolute() and '..' not in Path(rel).parts,
+                'unsafe proof path')
+        target = root / rel
+        require(target.resolve().is_relative_to(root.resolve()), 'proof escapes root')
+        raw = target.read_bytes()
+        require(isinstance(expected, str) and hashlib.sha256(raw).hexdigest() == expected, 'proof hash changed')
+        return raw
+
+    binding = entry.get('suite_binding')
+    require(isinstance(binding, dict), 'native suite binding required')
+    require(occurrence.get('gate') == 'deploy-command-structural' and occurrence.get('native_result') == 'FLAKY'
+            and occurrence.get('attempts') == 2, 'not a structural single-rerun occurrence')
+    unit = occurrence['unit']
+    require(re.fullmatch(r'[a-z0-9-]+', unit) is not None, 'invalid suite name')
+    require(path == f'scripts/tests/{unit}.test.py', 'not the exact canonical suite path')
+    receipt_rel = binding.get('receipt')
+    expected_suffix = f"/attempts/{occurrence['round']}/{occurrence['phase']}/deploy-command-structural/receipt.json"
+    require(isinstance(receipt_rel, str) and receipt_rel.startswith('.context/')
+            and receipt_rel.endswith(expected_suffix), 'wrong original receipt location')
+    receipt = json.loads(pinned(receipt_rel, binding.get('receipt_sha256')))
+    require(receipt.get('source') == occurrence.get('source') and receipt.get('gate') == occurrence['gate']
+            and receipt.get('executed') is True and receipt.get('complete') is True
+            and type(receipt.get('native_exit')) is int and receipt['native_exit'] == 0
+            and all(receipt.get(k) is False for k in ('timed_out', 'cancelled', 'lingering_group')),
+            'original native receipt/source not complete')
+    rows = [r for r in receipt.get('flaky', []) if r.get('unit') == unit]
+    require(len(rows) == 1 and rows[0].get('status') == 'FLAKY' and rows[0].get('attempts') == 2
+            and rows[0].get('scope') == 'suite' and rows[0].get('log') == occurrence.get('evidence')
+            and rows[0].get('at') == occurrence.get('unit_finished_at'), 'original occurrence not in receipt')
+    worker = receipt.get('worker_evidence', {}).get('deploy-command-structural', {})
+    require(worker.get('command', [])[:2] == ['python3', 'scripts/run-deploy-structural-gates.py']
+            and worker.get('native_exit') == 0 and type(worker.get('native_exit')) is int
+            and worker.get('status') == 'PASS'
+            and all(worker.get(k) is False for k in ('timed_out', 'cancelled', 'lingering_group'))
+            and worker.get('flaky') == receipt.get('flaky'), 'worker provenance mismatch')
+    log_path = Path(worker.get('log', ''))
+    require(log_path.is_absolute() and log_path.is_relative_to((root / Path(receipt_rel).parent / 'remote-artifact').resolve()),
+            'worker log outside original artifact')
+    require(log_path.resolve().is_relative_to((root / Path(receipt_rel).parent / 'remote-artifact').resolve()),
+            'resolved worker log outside original artifact')
+    log_rel = str(log_path.relative_to(root.resolve()))
+    text = pinned(log_rel, worker.get('sha256')).decode()
+    require(binding.get('log_sha256') == worker.get('sha256'), 'unreviewed worker log')
+    head = (occurrence.get('source') or {}).get('head', '')
+    require(re.fullmatch(r'[0-9a-f]{40}', head) is not None, 'invalid original source')
+    registry = subprocess.run(['git', '--no-replace-objects', 'show', f'{head}:scripts/run-deploy-structural-gates.py'], cwd=root,
+                              check=True, capture_output=True, text=True).stdout
+    tree = ast.parse(registry)
+    gates = [node for node in tree.body if isinstance(node, ast.Assign)
+             and any(isinstance(t, ast.Name) and t.id == 'GATES' for t in node.targets)]
+    require(len(gates) == 1 and isinstance(gates[0].value, (ast.Tuple, ast.List)), 'canonical registry missing')
+    commands = []
+    for node in gates[0].value.elts:
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == 'Gate' and node.args:
+            if isinstance(node.args[0], ast.Constant) and node.args[0].value == unit:
+                commands.append(ast.literal_eval(node.args[1]))
+    require(commands == [('python3', path)], 'original canonical command mismatch')
+    starts = list(re.finditer(r'^== ' + re.escape(unit) + r': exit=0 duration=[0-9.]+s ==$', text, re.M))
+    require(len(starts) == 1, 'ambiguous aggregate suite block')
+    block = text[starts[0].end():]
+    block = re.split(r'^== ', block, maxsplit=1, flags=re.M)[0]
+    reruns = list(re.finditer(r'^--- rerun of ' + re.escape(unit)
+                             + r' \(attempt 2 of 2: ([A-Za-z0-9_. ]+)\) ---$', block, re.M))
+    require(len(reruns) == 1, 'missing exact case rerun boundary')
+    first, second = block[:reruns[0].start()], block[reruns[0].end():]
+    headers = re.findall(r'^(?:ERROR|FAIL): (test\w+) \(__main__\.([A-Za-z_]\w*)\.(test\w+)\)$', first, re.M)
+    all_headers = re.findall(r'^(?:ERROR|FAIL):.*$', first, re.M)
+    summaries = re.findall(r'^FAILED \(([^)]*)\)$', first, re.M)
+    require(len(summaries) == 1 and len(headers) == len(all_headers) and headers, 'ambiguous failure headers')
+    counts = {}
+    for part in summaries[0].split(','):
+        key, sep, value = part.strip().partition('=')
+        require(sep and key in ('errors', 'failures') and key not in counts and value.isdigit(), 'unknown failure summary')
+        counts[key] = int(value)
+    ids = [f'{owner}.{name}' for name, owner, method in headers if name == method]
+    require(len(ids) == len(headers) == sum(counts.values()) and len(set(ids)) == len(ids), 'incomplete failure coverage')
+    require(reruns[0].group(1).split() == ids, 'rerun does not cover all original failures')
+    require(re.fullmatch(r'\s*[.]+\s*\n-+\nRan ' + str(len(ids))
+                         + r' tests? in [0-9.]+s\n\nOK\s*', second) is not None, 'rerun not clean/exact')
+    available = markers(root, [path])
+    found = []
+    for case in ids:
+        owner, name = case.split('.')
+        matches = [m for m in available if m.get('owner') == owner and m['name'] == name]
+        require(len(matches) == 1, 'every original failed case needs exactly one marker: ' + case)
+        require(matches[0].get('evidence') == entry['evidence'], 'case marker evidence differs from attribution')
+        found.extend(matches)
+    return found, {**binding, 'cases': ids, 'command': ['python3', path], 'source': occurrence['source']}
+
+
 # unittest's own failure header (3.11): "FAIL: test_x (module.Class.test_x)".
 _UNITTEST_FAILURE = re.compile(r'^(?:FAIL|ERROR): \S+ \(([^()\s]+)\)', re.M)
 
@@ -463,7 +565,10 @@ def validate_attribution(occurrence: dict, entry: dict, root: Path, *, state: di
     if not isinstance(path, str) or not path.strip() or Path(path).is_absolute() or '..' in Path(path).parts:
         raise ValueError('NOT_INTRODUCED requires marker: the repo-relative test file carrying the quarantine marker')
     binding = None
+    suite_binding = None
     if entry.get('native_case') is not None or entry.get('native_binding') is not None:
+        if 'suite_binding' in entry:
+            raise ValueError('native case binding and suite binding are exclusive')
         binding, _receipt, _request = native_case_binding(occurrence, entry, root)
         _native_lineage(state, occurrence, _receipt, _request, retained=bool(entry.get('native_binding')))
         parts = binding['definition'].split('::')
@@ -472,16 +577,16 @@ def validate_attribution(occurrence: dict, entry: dict, root: Path, *, state: di
                  and m['error'] == binding['error'] and m['evidence'] == entry['evidence']]
     else:
         found = [m for m in markers(root, [path]) if unit_matches(m, occurrence['unit'])]
-        if not found and entry.get('case') is not None:
+        if not found and entry.get('case') is not None and 'suite_binding' not in entry:
             found = _domain_case_markers(occurrence, entry['case'], root, path)
         named = failed_unittest_names(occurrence)
-        if not found and named:
+        if not found and named and 'suite_binding' not in entry:
             # A suite-level unit is attributed only when EVERY failed test it names carries a marker here.
             candidates = markers(root, [path])
             matched = [[m for m in candidates if named_test_matches(m, test_id, path, occurrence)] for test_id in named]
             found = [m for group in matched for m in group] if all(matched) else []
         packet_test = str((entry.get('post_merge') or {}).get('test') or '') if isinstance(entry.get('post_merge'), dict) else ''
-        if not found and not named and packet_test:
+        if not found and not named and packet_test and 'suite_binding' not in entry:
             # The recorded detail keeps only the failure's tail, so unittest's header can be cut off
             # (PR #1925). Bind the packet's test only when the surviving traceback frame is that method
             # in this marker file.
@@ -490,8 +595,12 @@ def validate_attribution(occurrence: dict, entry: dict, root: Path, *, state: di
                               str(occurrence.get('detail') or ''))
             found = [m for m in markers(root, [path]) if frame is not None
                      and named_test_matches(m, '__main__.' + packet_test, path, occurrence)]
-    if not found:
+    if not found and 'suite_binding' not in entry:
         raise ValueError(f"no quarantine marker for {occurrence['unit']} in {path}")
+    if not found:
+        found, suite_binding = _suite_attribution_markers(occurrence, entry, root, path)
+    elif entry.get('suite_binding'):
+        raise ValueError('direct-case attribution must not carry suite binding')
     # Repairs are dispatched only after merge (deploy-failure-policy.md): a NOT_INTRODUCED flake records
     # its post-merge packet, never a pre-merge repair thread.
     if entry.get('repair_agent'):
@@ -504,14 +613,17 @@ def validate_attribution(occurrence: dict, entry: dict, root: Path, *, state: di
     expected = owner if owner else f"pending-handoff:{occurrence['id']}"
     if owner and not BOXES_THREAD.fullmatch(owner):
         raise ValueError('repair_owner must be the existing boxes.dev repair thread that receives the goal after merge')
-    if found[0]['repair'] not in (expected, f"pending-handoff:{occurrence['id']}"):
+    if any(m['repair'] not in (expected, f"pending-handoff:{occurrence['id']}") for m in found):
         raise ValueError(f"the marker's repair must be {expected} until the post-merge dispatch is linked")
     # The attribution travels with the handoff: the dispatched /goal carries the /RCA gate and evidence.
     packet = {**packet, 'attribution': 'NOT_INTRODUCED', 'rca': entry['evidence'], 'occurrence': occurrence['id'],
               'unit': occurrence['unit'], 'gate': occurrence.get('gate'), 'marker': path}
+    if suite_binding is not None:
+        packet['suite_binding'] = suite_binding
     # The recorded attribution keeps its case label: merge revalidates it with attribution_block().
     return {'attribution': attribution, 'evidence': entry['evidence'], 'marker': path, 'post_merge': packet,
             **({'native_binding': binding} if binding else {}),
+            **({'suite_binding': suite_binding} if suite_binding is not None else {}),
             **({'case': entry['case']} if entry.get('case') is not None else {})}
 
 
@@ -745,6 +857,16 @@ def _marker_module():
     return module
 
 
+def _reject_duplicate_keys(pairs: list[tuple]) -> dict:
+    """A repeated key (two `quarantine` markers from a textual merge) refuses; never last-one-wins."""
+    out = {}
+    for key, value in pairs:
+        if key in out:
+            raise ValueError(f"{dict(pairs).get('name') or '<object>'}: duplicate JSON key {key!r} in {CATALOG}")
+        out[key] = value
+    return out
+
+
 def catalog_quarantines(root: Path, names: list[str] | None = None) -> dict[str, dict]:
     """{task name: validated marker} for catalog tasks carrying `quarantine` (only `names` when given).
 
@@ -753,7 +875,7 @@ def catalog_quarantines(root: Path, names: list[str] | None = None) -> dict[str,
     path = root / CATALOG
     if not path.is_file():
         return {}
-    tasks = json.loads(path.read_text())
+    tasks = json.loads(path.read_text(), object_pairs_hook=_reject_duplicate_keys)
     if not isinstance(tasks, list):
         raise ValueError(f'{CATALOG} must be a JSON array of tasks')
     wanted = None if names is None else set(names)

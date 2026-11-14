@@ -1058,6 +1058,13 @@ STABILITY_RUNS = 5
 # keep the structural runner's rule (never overlap each other, run beside everything else).
 STABILITY_SOLO_GROUPS = frozenset({"proc-observation"})
 STABILITY_RUN_TIMEOUT_SECONDS = 1200
+# Explicit whole-suite budget; inner scenario deadlines and five loaded runs remain unchanged.
+# Effective-budget approval: PR1682-STABILITY-COMPOSITE-BUDGET.
+STABILITY_UNIT_BUDGETS = {
+    "cloudbench-controller:bash scripts/tests/cloudbench-multi-workstream.test.sh": (
+        ("bash", "scripts/tests/cloudbench-multi-workstream.test.sh"), 2400,
+    ),
+}
 STABILITY_LOAD_LOOP = (
     "import os, sys\n"
     "parent = int(sys.argv[1])\n"
@@ -1721,7 +1728,18 @@ def urlsplit_host_port(server: str) -> str:
     return f"{host}:{parts.port or 5432}"
 
 
-def _run_plan(index: int, plan: StabilityPlan, runs: int, timeout: float, log_root: Path, load: CpuLoad) -> dict:
+def stability_timeout(plan: StabilityPlan, default: float | None) -> float:
+    """Apply only the explicit budget for the exact whole-suite command."""
+    budget = STABILITY_UNIT_BUDGETS.get(plan.key)
+    if (default is None and budget
+            and tuple(plan.command) == budget[0] and plan.cases == [WHOLE_UNIT]):
+        return float(budget[1])
+    return STABILITY_RUN_TIMEOUT_SECONDS if default is None else default
+
+
+def _run_plan(index: int, plan: StabilityPlan, runs: int, timeout: float | None, log_root: Path, load: CpuLoad) -> dict:
+    requested_timeout = timeout
+    timeout = stability_timeout(plan, timeout)
     attempts = []
     status = "PASS"
     gone = ""
@@ -1748,7 +1766,7 @@ def _run_plan(index: int, plan: StabilityPlan, runs: int, timeout: float, log_ro
                 env[BLACKBOX_CASE_RECEIPT_ENV] = str(receipt)
             code, seconds = _run_once(plan.command, plan.cwd, log, timeout, env, plan.unset)
             loaded = load.alive()
-            attempt = {"run": run, "exit": code, "seconds": seconds, "log": str(log), "loaded": loaded}
+            attempt = {"run": run, "exit": code, "seconds": seconds, "log": str(log), "loaded": loaded, "timeout_seconds": timeout}
             if plan.receipt and code == 0:
                 ran = set(receipt.read_text().split()) if receipt.exists() else set()
                 missing = sorted(set(plan.cases) - ran)
@@ -1768,7 +1786,8 @@ def _run_plan(index: int, plan: StabilityPlan, runs: int, timeout: float, log_ro
             dropped = _drop_databases(plan.server, created)
         load.give()
     row = {"status": status, "command": plan.command, "cwd": str(plan.cwd), "cases": plan.cases,
-           "selection": plan.reason, "attempts": attempts,
+           "selection": plan.reason, "attempts": attempts, "timeout_seconds": timeout,
+           "timeout_approval": ("PR1682-STABILITY-COMPOSITE-BUDGET" if requested_timeout is None and timeout != STABILITY_RUN_TIMEOUT_SECONDS else None),
            "consecutive_passes": sum(1 for a in attempts if a["exit"] == 0),
            "wall_seconds": round(time.monotonic() - started, 2)}
     if plan.databases:
@@ -1804,7 +1823,7 @@ def isolate_plan(plan: StabilityPlan, unit: Unit, index: int, server: str | None
 
 
 def run_stability(units: list[Unit], runs: int = STABILITY_RUNS, load_workers: int | None = None,
-                  timeout: float = STABILITY_RUN_TIMEOUT_SECONDS, log_root: Path | None = None,
+                  timeout: float | None = None, log_root: Path | None = None,
                   changed: list[str] | None = None, diff: Callable[[str], LineChanges | None] | None = None,
                   lanes: int | None = None) -> dict:
     """Run each unit `runs` consecutive times; units run concurrently, every CPU slot loaded.
@@ -1843,7 +1862,7 @@ def run_stability(units: list[Unit], runs: int = STABILITY_RUNS, load_workers: i
         pending.append((len(pending), plan))
     # Whole units first: they are the long poles of the wall clock.
     pending.sort(key=lambda item: (item[1].cases != [WHOLE_UNIT], item[0]))
-    bound = int(timeout * runs * max(1, len(pending)) + 60)
+    bound = int(runs * (sum(stability_timeout(plan, timeout) for _, plan in pending) or STABILITY_RUN_TIMEOUT_SECONDS) + 60)
     done = threading.Condition()
     running: dict[str, str] = {}  # key -> exclusive group
     threads: list[threading.Thread] = []
@@ -2026,8 +2045,8 @@ def main(argv: list[str] | None = None) -> int:
                         help="load slots kept busy during the runs: concurrent units plus busy CPU workers (default: nproc)")
     parser.add_argument("--stability-lanes", type=int,
                         help="units run concurrently (default and maximum: the load slots)")
-    parser.add_argument("--stability-timeout", type=float, default=STABILITY_RUN_TIMEOUT_SECONDS,
-                        help="per-run seconds (the suite's own deadline still applies inside)")
+    parser.add_argument("--stability-timeout", type=float, default=None,
+                        help="explicit per-run seconds (the suite's own deadline still applies inside)")
     args = parser.parse_args(argv)
     if args.stability:
         if args.stability_runs < STABILITY_RUNS:

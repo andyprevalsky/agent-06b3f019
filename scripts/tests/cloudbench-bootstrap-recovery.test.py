@@ -1492,7 +1492,7 @@ class PreconfigStartupArchiveTests(PreconfigStartupArchiveFixture, unittest.Test
         self.capture()
         base = self.out / "failed-preconfig-runtime-archive"
         base.mkdir(mode=0o700)
-        receipt = base / "verified.json"
+        receipt = base / "consumed.json"
         commit = self.helper.get("commit_preconfig")
         if commit is None:
             self.verify()  # Prior component verifies, but cannot retain this proof across consumption.
@@ -1524,7 +1524,7 @@ class PreconfigStartupArchiveTests(PreconfigStartupArchiveFixture, unittest.Test
         self.capture()
         base = self.out / "failed-preconfig-runtime-archive"
         base.mkdir(mode=0o700)
-        receipt = base / "verified.json"
+        receipt = base / "consumed.json"
         commit = self.helper["commit_preconfig"]
         with self.assertRaises(ValueError):
             commit(self.registry, self.out, MACHINE, TOKEN, self.archive, None, None, receipt)
@@ -2840,7 +2840,7 @@ class CrossControllerColdHandoffTests(PreconfigStartupArchiveFixture, unittest.T
         write(self.before, json.dumps(self.native)); write(self.after, json.dumps(self.native))
         self.capture()
         self.receipt = self.out / 'failed-preconfig-runtime-archive/consumed.json'
-        self.receipt.parent.mkdir()
+        self.receipt.parent.mkdir(mode=0o700)
         self.helper['commit_preconfig'](self.registry,self.out,MACHINE,TOKEN,self.archive,self.before,self.after,self.receipt)
         (self.out/'runtime-evidence.pending').unlink()
         (self.registry/'runtime-evidence-unconfirmed').unlink()

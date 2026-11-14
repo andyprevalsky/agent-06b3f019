@@ -50,6 +50,62 @@ def digest(data):
     return hashlib.sha256(data).hexdigest()
 
 
+def preconfig_output_context(meta, output, machine):
+    """Resolve only the producer's one-level, marker-bound replaced primary."""
+    output = Path(output)
+    run = Path(meta["runs_root"]) / meta["run_id"]
+    if output == run / output.name:
+        return output, False
+    task = output.parent
+    if (task.parent != run or output.name != "host-replaced-" + machine
+            or output.resolve(strict=True) != output or task.resolve(strict=True) != task
+            or read(task / "boot-config-host-replaced", 256).strip() != machine.encode()
+            or read(output / "boot-config-host-unresponsive", 256).strip() != machine.encode()):
+        raise ValueError("unbound replaced pre-config output")
+    for path in output.iterdir():
+        if path.is_symlink() or (path.is_dir() and path.name != "failed-preconfig-runtime-archive"):
+            raise ValueError("unexpected nested replaced pre-config path")
+    for path in output.glob("worker-*"):
+        if path.name != "worker-clones.ids" or read(path, 65536):
+            raise ValueError("replaced pre-config output has worker allocation evidence")
+    current = read(task / ".cid", 256).decode().split()
+    if (len(current) != 2 or current[0] != "clone" or current[1] == machine
+            or not re.fullmatch(r"[0-9a-f]{14}", current[1])
+            or read(task / "worker-clones.ids", 65536)):
+        raise ValueError("replaced pre-config primary/worker mapping differs")
+    tasks = json.loads(read(run / "_batch/benches.json", 1048576))
+    names = [row["name"] for row in tasks]
+    if len(names) != len(set(names)) or task.name not in names:
+        raise ValueError("replaced pre-config task is not unique")
+    current_owner = json.loads(read(task / "runtime-evidence.owner.json", 65536))
+    if (type(current_owner.get("version")) is not int or current_owner != {
+            "version": 1, "machine_id": current[1],
+            "run_token": meta["fleet_owner_token"] + "-" + str(names.index(task.name))}):
+        raise ValueError("replaced pre-config current runtime owner differs")
+    audit = Path(meta["audit_dir"])
+    values = [fields(path) for path in (audit / "fresh").iterdir()]
+    records = {row["machine_id"]: row for row in values}
+    if len(records) != len(values):
+        raise ValueError("duplicate replaced pre-config allocation")
+    if machine not in records or current[1] not in records:
+        raise ValueError("replaced pre-config primary allocation missing")
+    old, new = records[machine], records[current[1]]
+    for record in (old, new):
+        if (set(record) != {"version", "fleet_owner_token", "run_id", "app", "clone_name", "source", "source_machine_id", "machine_id", "volume_id", "disposition"}
+                or record["version"] != "1"
+                or record["disposition"] not in ("owned", "destroyed-verified-absent", "destroyed-provider-retained")
+                or any(record.get(key) != meta[key] for key in ("fleet_owner_token", "run_id", "app"))
+                or record.get("source") != "fresh-clone"
+                or read(audit / "by-machine-id" / record["machine_id"], 4096).decode().strip() != record["clone_name"]
+                or fields(audit / "expected-fresh" / record["clone_name"]) != {
+                    "clone_name": record["clone_name"], "source_machine_id": record["source_machine_id"]}):
+            raise ValueError("replaced pre-config audit identity differs")
+    if (old["source_machine_id"] != new["source_machine_id"]
+            or old["source_machine_id"] in records or old["volume_id"] == new["volume_id"]):
+        raise ValueError("replaced pre-config source or volume differs")
+    return task, True
+
+
 def identity(registry, output, machine, token, *, preconfig=False):
     registry, output = Path(registry), Path(output)
     owner = registry.name
@@ -58,9 +114,10 @@ def identity(registry, output, machine, token, *, preconfig=False):
     meta = fields(registry / "meta")
     run = Path(meta["runs_root"]) / meta["run_id"]
     tasks = json.loads(read(run / "_batch/benches.json", 1048576))
-    ordinal = next(i for i, row in enumerate(tasks) if row["name"] == output.name)
-    if (meta["fleet_owner_token"] != owner or run.resolve() != run or output != run / output.name
-        or token != f"{owner}-{ordinal}" or meta["cleanup_policy"] != "reap"):
+    task, replaced = preconfig_output_context(meta, output, machine) if preconfig else (output, False)
+    ordinal = next(i for i, row in enumerate(tasks) if row["name"] == task.name)
+    if (meta["fleet_owner_token"] != owner or run.resolve() != run or task != run / task.name
+        or token != f"{owner}-{ordinal}" or meta["cleanup_policy"] not in (("retain", "reap") if replaced else ("reap",))):
         raise ValueError("startup archive is not the exact original output")
     lifecycle = json.loads(read(run / ("_batch/run.json" if preconfig else "_batch/lifecycle.json"), 1048576))
     if (lifecycle["status"] != "failed" or type(lifecycle["controller_exit_code"]) is not int
@@ -73,7 +130,7 @@ def identity(registry, output, machine, token, *, preconfig=False):
         for name in ("status-proxy.port", "cloudbench-boot-start.log", "guest-shutdown.confirmed"):
             if (output / name).exists() or (output / name).is_symlink():
                 raise ValueError("pre-config rejection conflicts with guest admission evidence")
-        if read(output / "worker-clones.ids", 65536):
+        if read(task / "worker-clones.ids", 65536):
             raise ValueError("pre-config rejection has allocated workers")
         if (run / "_batch/lifecycle.json").exists() or (run / "_batch/lifecycle.json").is_symlink():
             previous = json.loads(read(run / "_batch/lifecycle.json", 1048576))
@@ -96,7 +153,7 @@ def identity(registry, output, machine, token, *, preconfig=False):
         raise ValueError("startup archive lost original runtime ownership")
     if read(output / ".cid", 256).decode().split() != ["clone", machine]:
         raise ValueError("startup archive requires an exact fresh original")
-    if ((registry / "guest-cleanup-unconfirmed").exists() or (registry / "guest-cleanup-unconfirmed").is_symlink()
+    if ((not replaced and ((registry / "guest-cleanup-unconfirmed").exists() or (registry / "guest-cleanup-unconfirmed").is_symlink()))
         or (not preconfig and read(output / "guest-shutdown.confirmed", 256).decode().strip() != meta["run_id"])):
         raise ValueError("startup archive has unconfirmed guest cleanup")
     audit = Path(meta["audit_dir"])
@@ -128,11 +185,20 @@ def preconfig_files(registry, output, machine, token):
     registry, output, audit = Path(registry), Path(output), Path(meta["audit_dir"])
     if read(output / "boot-config-unapplied", 256).strip() != machine.encode():
         raise ValueError("missing original pre-config rejection")
-    run = output.parent
+    task, replaced = preconfig_output_context(meta, output, machine)
+    run = Path(meta["runs_root"]) / meta["run_id"]
     paths = {"capture-helper.py": Path(__file__).resolve(), "registry/meta": registry / "meta", "audit/meta": audit / "meta",
              "registry/runtime-evidence-unconfirmed": registry / "runtime-evidence-unconfirmed",
              "registry/clone": registry / "clones" / original["clone_name"],
              "audit/fresh": audit / "fresh" / original["clone_name"]}
+    if replaced:
+        for name in (".cid", "boot-config-host-replaced", "worker-clones.ids", "runtime-evidence.owner.json"):
+            paths["replaced-parent/" + name] = task / name
+        for name in ("expected-fresh", "by-machine-id"):
+            for path in (audit / name).iterdir():
+                paths["audit/" + name + "/" + path.name] = path
+        # The producer archives no worker ledger: its empty parent ledger is
+        # bound above, not invented inside the immutable archived output.
     for path in (audit / "fresh").iterdir():
         paths["audit/fresh-records/" + path.name] = path
     for label, directory in (("output", output), ("batch", run / "_batch")):
@@ -295,7 +361,7 @@ def verify_preconfig(registry, output, machine, token, archive_path, native_befo
     if preconfig_files(registry, output, machine, token)[2] != expected:
         raise ValueError("pre-config originals changed during verification")
     return {"schema": PRECONFIG_SCHEMA, "phase": "pre-config", "owner": meta["fleet_owner_token"],
-            "run_id": meta["run_id"], "bench": Path(output).name, "machine_id": machine,
+            "run_id": meta["run_id"], "bench": preconfig_output_context(meta, output, machine)[0].name, "machine_id": machine,
             "volume_id": original["volume_id"], "run_token": token, "proof_credit": 0,
             "archive_path": str(archive_path), "archive_sha256": digest(raw), "archive_bytes": len(raw),
             "original_file_count": len(expected), "original_bytes": sum(map(len, expected.values())),
@@ -316,18 +382,37 @@ def archived_preconfig_identity(files, registry, output, machine, token):
     owner = Path(registry).name
     expected = {"version": 1, "machine_id": machine, "run_token": token}
     batch, source = json.loads(files["batch/run.json"]), json.loads(files["run/execution-provenance.json"])
+    output = Path(output)
+    run = Path(meta["runs_root"]) / meta["run_id"]
+    replaced = "replaced-parent/.cid" in files
+    task = output.parent if replaced else output
+    if replaced:
+        for key, data in files.items():
+            if key.startswith("output/worker-") and (key != "output/worker-clones.ids" or data):
+                raise ValueError("archived replaced output has worker allocation evidence")
+        current = files["replaced-parent/.cid"].decode().split()
+        current_owner = json.loads(files["replaced-parent/runtime-evidence.owner.json"])
+        if (type(current_owner.get("version")) is not int or current_owner != {
+                "version": 1, "machine_id": current[1], "run_token": token}):
+            raise ValueError("archived current runtime owner differs")
+        if (output != task / ("host-replaced-" + machine)
+                or files["replaced-parent/boot-config-host-replaced"].strip() != machine.encode()
+                or files["output/boot-config-host-unresponsive"].strip() != machine.encode()
+                or files["replaced-parent/worker-clones.ids"]
+                or len(current) != 2 or current[0] != "clone" or current[1] == machine):
+            raise ValueError("archived replaced pre-config binding differs")
     if (not re.fullmatch(r"[0-9a-f]{32}", owner) or meta.get("version") != "2"
             or len(files["registry/runtime-evidence-unconfirmed"]) > 65536
-            or meta.get("fleet_owner_token") != owner or meta.get("cleanup_policy") != "reap"
-            or len(set(names)) != len(names) or Path(output).name not in names
-            or Path(output) != Path(meta["runs_root"]) / meta["run_id"] / Path(output).name
-            or token != f"{owner}-{names.index(Path(output).name)}"
+            or meta.get("fleet_owner_token") != owner or meta.get("cleanup_policy") not in (("retain", "reap") if replaced else ("reap",))
+            or len(set(names)) != len(names) or task.name not in names
+            or task != run / task.name
+            or token != f"{owner}-{names.index(task.name)}"
             or batch.get("run_id") != meta["run_id"] or batch.get("status") != "failed"
             or type(batch.get("controller_exit_code")) is not int or not batch["controller_exit_code"]
             or files["output/benchmark-child.finished"].strip() != b"125"
             or files["output/boot-config-unapplied"].strip() != machine.encode()
             or files["output/.cid"].decode().split() != ["clone", machine]
-            or files["output/worker-clones.ids"]
+            or (files["replaced-parent/worker-clones.ids"] if replaced else files["output/worker-clones.ids"])
             or files["output/runtime-evidence.owner.json"] != files["output/runtime-evidence.pending"]
             or json.loads(files["output/runtime-evidence.owner.json"]) != expected
             or type(json.loads(files["output/runtime-evidence.owner.json"])["version"]) is not int
@@ -342,6 +427,22 @@ def archived_preconfig_identity(files, registry, output, machine, token):
     audit = fields_bytes(files["audit/meta"])
     clone = fields_bytes(files["registry/clone"])
     records = [fields_bytes(data) for name, data in files.items() if name.startswith("audit/fresh-records/")]
+    if replaced:
+        by_id = {row["machine_id"]: row for row in records}
+        if len(by_id) != len(records) or machine not in by_id or current[1] not in by_id:
+            raise ValueError("archived replaced allocation set differs")
+        for row in (by_id[machine], by_id[current[1]]):
+            name = row["clone_name"]
+            if (any(row.get(key) != meta[key] for key in ("app", "run_id", "fleet_owner_token"))
+                    or row.get("source") != "fresh-clone"
+                    or fields_bytes(files["audit/expected-fresh/" + name]) != {
+                        "clone_name": name, "source_machine_id": row["source_machine_id"]}
+                    or files["audit/by-machine-id/" + row["machine_id"]].decode().strip() != name):
+                raise ValueError("archived replaced allocation binding differs")
+        if (by_id[machine]["source_machine_id"] != by_id[current[1]]["source_machine_id"]
+                or by_id[machine]["source_machine_id"] in by_id
+                or by_id[machine]["volume_id"] == by_id[current[1]]["volume_id"]):
+            raise ValueError("archived replaced allocation topology differs")
     if (any(audit.get(key) != meta[key] or original.get(key) != meta[key]
             for key in ("app", "run_id", "fleet_owner_token"))
             or original.get("disposition") != "owned" or original.get("machine_id") != machine
@@ -355,7 +456,7 @@ def archived_preconfig_identity(files, registry, output, machine, token):
 def commit_preconfig(registry, output, machine, token, archive_path, native_before, native_after, receipt_path):
     """Fsync proof BEFORE the fleet consumer may change pending or its ledger."""
     receipt_path = Path(receipt_path)
-    if (receipt_path.parent != Path(output) / "failed-preconfig-runtime-archive"
+    if (receipt_path != Path(output) / "failed-preconfig-runtime-archive/consumed.json"
             or receipt_path.parent.resolve(strict=True) != receipt_path.parent
             or receipt_path.parent.stat().st_uid != Path(output).stat().st_uid
             or receipt_path.parent.stat().st_mode & 0o077):
@@ -398,7 +499,7 @@ def verify_preconfig_receipt(registry, output, machine, token, receipt_path, nat
     raw, files, manifest = read_preconfig_archive(proof["archive_path"], reader)
     meta, original, source = archived_preconfig_identity(files, registry, output, machine, token)
     native = preconfig_native_proof(machine, original, proof["native_before_path"], proof["native_after_path"], reader)
-    expected = {"owner": meta["fleet_owner_token"], "run_id": meta["run_id"], "bench": Path(output).name,
+    expected = {"owner": meta["fleet_owner_token"], "run_id": meta["run_id"], "bench": (Path(output).parent.name if "replaced-parent/.cid" in files else Path(output).name),
                 "machine_id": machine, "volume_id": original["volume_id"], "run_token": token,
                 "archive_sha256": digest(raw), "archive_bytes": len(raw), "source_ref": source["base_sha"],
                 "helper_sha256": digest(files["capture-helper.py"]), "original_file_count": len(files),
@@ -411,6 +512,146 @@ def verify_preconfig_receipt(registry, output, machine, token, receipt_path, nat
         if any(current[key] != proof[key] for key in ("instance_id", "config_sha256")):
             raise ValueError("current pre-config native identity changed after phase commitment")
     return proof
+
+
+def replaced_preconfig_members(registry, *, verified=False):
+    """Enumerate producer-bound members, retaining each independent obligation."""
+    registry = Path(registry)
+    meta = fields(registry / "meta")
+    if (registry.resolve(strict=True) != registry
+            or meta.get("fleet_owner_token") != registry.name
+            or not re.fullmatch(r"[0-9a-f]{32}", registry.name)):
+        raise ValueError("unsafe replaced pre-config registry")
+    run = Path(meta["runs_root"]) / meta["run_id"]
+    if run.resolve(strict=True) != run:
+        raise ValueError("unsafe replaced pre-config run")
+    tasks = json.loads(read(run / "_batch/benches.json", 1048576))
+    names = [row["name"] for row in tasks]
+    if len(names) != len(set(names)):
+        raise ValueError("duplicate replaced pre-config task")
+    result, machines = [], set()
+    for ordinal, task in enumerate(names):
+        if not re.fullmatch(r"[A-Za-z0-9._-]+", task) or task in (".", ".."):
+            raise ValueError("unsafe replaced pre-config task")
+        parent = run / task
+        marker = parent / "boot-config-host-replaced"
+        nested = list(parent.glob("host-replaced-*"))
+        if not os.path.lexists(marker) and not nested:
+            continue
+        machine = read(marker, 256).decode().strip()
+        if not re.fullmatch(r"[0-9a-f]{14}", machine) or machine in machines:
+            raise ValueError("duplicate or invalid replaced pre-config machine")
+        machines.add(machine)
+        output = parent / ("host-replaced-" + machine)
+        if nested != [output]:
+            raise ValueError("ambiguous replaced pre-config output")
+        preconfig_output_context(meta, output, machine)
+        token = registry.name + "-" + str(ordinal)
+        receipt = output / "failed-preconfig-runtime-archive/consumed.json"
+        if os.path.lexists(receipt):
+            verify_preconfig_receipt(registry, output, machine, token, receipt)
+            # Revalidate originals without reconstructing or rewriting them.
+            proof = json.loads(read(receipt, 1048576))
+            _, archived, _ = read_preconfig_archive(proof["archive_path"])
+            archived_meta = fields_bytes(archived["registry/meta"])
+            for key, value in archived_meta.items():
+                if key != "cleanup_policy" and meta.get(key) != value:
+                    raise ValueError("replaced pre-config owner metadata changed")
+            if meta.get("cleanup_policy") not in ("retain", "reap"):
+                raise ValueError("replaced pre-config policy changed")
+            audit = Path(meta["audit_dir"])
+            for directory in ("expected-fresh", "by-machine-id", "fresh"):
+                prefix = "audit/fresh-records/" if directory == "fresh" else "audit/" + directory + "/"
+                original_names = {key[len(prefix):] for key in archived if key.startswith(prefix)}
+                if {path.name for path in (audit / directory).iterdir()} != original_names:
+                    raise ValueError("replaced pre-config allocation set changed")
+                for name in original_names:
+                    now = read(audit / directory / name, 65536)
+                    before = archived[prefix + name]
+                    if directory == "fresh":
+                        first, last = fields_bytes(before), fields_bytes(now)
+                        if (set(first) != set(last)
+                                or any(last[key] != value for key, value in first.items() if key != "disposition")
+                                or last["disposition"] not in ("owned", "destroyed-verified-absent", "destroyed-provider-retained")):
+                            raise ValueError("replaced pre-config allocation identity changed")
+                    elif now != before:
+                        raise ValueError("replaced pre-config allocation index changed")
+            actual_names = set()
+            for directory, dirs, files in os.walk(output, followlinks=False):
+                if Path(directory) == output:
+                    dirs[:] = [name for name in dirs if name != "failed-preconfig-runtime-archive"]
+                if any((Path(directory) / name).is_symlink() for name in dirs):
+                    raise ValueError("linked replaced pre-config originals")
+                for name in files:
+                    path = Path(directory) / name
+                    key = "output/" + str(path.relative_to(output))
+                    actual_names.add(key)
+                    if key not in archived or read(path) != archived[key]:
+                        raise ValueError("replaced pre-config original changed")
+            expected_names = {key for key in archived if key.startswith("output/")}
+            if expected_names - actual_names not in (set(), {"output/runtime-evidence.pending"}):
+                raise ValueError("replaced pre-config original disappeared")
+            for name in (".cid", "boot-config-host-replaced", "worker-clones.ids", "runtime-evidence.owner.json"):
+                if read(parent / name, 65536) != archived["replaced-parent/" + name]:
+                    raise ValueError("replaced pre-config parent changed")
+            if verified and os.path.lexists(output / "runtime-evidence.pending"):
+                raise ValueError("replaced pre-config pending not consumed")
+        else:
+            if verified:
+                raise ValueError("replaced pre-config receipt missing")
+            preconfig_identity(registry, output, machine, token)
+        result.append((task, machine, token, str(output)))
+    anchor = registry / "replaced-preconfig-phase.json"
+    expected_anchor = {"version": 1, "owner": registry.name, "run_id": meta["run_id"],
+                       "members": [list(row) for row in result]}
+    if os.path.lexists(anchor):
+        value = json.loads(read(anchor, 65536))
+        if type(value.get("version")) is not int or value != expected_anchor:
+            raise ValueError("replaced pre-config phase membership changed")
+    elif verified and result:
+        raise ValueError("replaced pre-config phase anchor missing")
+    return result
+
+
+def consume_replaced_preconfig(registry, output, machine, token, receipt):
+    if Path(receipt) != Path(output) / "failed-preconfig-runtime-archive/consumed.json":
+        raise ValueError("pre-config consumption receipt is outside exact output")
+    members = replaced_preconfig_members(registry)
+    if not any(row[1:] == (machine, token, str(output)) for row in members):
+        raise ValueError("replaced pre-config consumption is outside exact members")
+    verify_preconfig_receipt(registry, output, machine, token, receipt)
+    registry = Path(registry)
+    anchor = registry / "replaced-preconfig-phase.json"
+    value = {"version": 1, "owner": registry.name, "run_id": fields(registry / "meta")["run_id"],
+             "members": [list(row) for row in members]}
+    if not os.path.lexists(anchor):
+        with os.fdopen(os.open(anchor, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600), "wb") as stream:
+            stream.write(json.dumps(value, sort_keys=True).encode() + b"\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        fd = os.open(registry, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    else:
+        existing = json.loads(read(anchor, 65536))
+        if type(existing.get("version")) is not int or existing != value:
+            raise ValueError("replaced pre-config phase anchor differs")
+    pending = Path(output) / "runtime-evidence.pending"
+    if os.path.lexists(pending):
+        if json.loads(read(pending, 65536)) != {"version": 1, "machine_id": machine, "run_token": token}:
+            raise ValueError("replaced pre-config pending changed")
+        pending.unlink()
+        fd = os.open(output, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    replaced_preconfig_members(registry)
+    if os.path.lexists(pending):
+        raise ValueError("replaced pre-config member pending was not consumed")
+
 
 
 HANDOFF_SCHEMA = "cloudbench-cold-controller-handoff-v1"
