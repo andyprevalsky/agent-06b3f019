@@ -53,6 +53,24 @@ def manifest():
         data = response.read(1048577)
         assert len(data) <= 1048576 and response.status == 200
         return json.loads(data)
+# The sealed bundle is immutable and each file is proven by its manifest hash
+# and the final manifest re-read, not by the transport. A transient transport
+# read of sealed bytes (one 6 s socket stall or an early EOF through the status
+# proxy) is retried from the start of that read a bounded number of times;
+# HTTP statuses, oversized bodies and hash mismatches still fail closed at once.
+SEALED_READ_ATTEMPTS = 3
+def sealed_read(label, read):
+    for attempt in range(1, SEALED_READ_ATTEMPTS + 1):
+        try:
+            return read()
+        except urllib.error.HTTPError:
+            raise
+        except (urllib.error.URLError, TimeoutError, ConnectionError) as error:
+            if attempt == SEALED_READ_ATTEMPTS:
+                raise
+            print(f"⚠️  sealed runtime evidence read {label} attempt {attempt}/{SEALED_READ_ATTEMPTS} "
+                  f"failed: {error!r}; retrying", file=sys.stderr)
+        time.sleep(attempt)
 def collect_driver_log():
     """Preserve the exact original log through the existing bounded protocol."""
     target = parent / "cloudbench-driver.log"
@@ -68,7 +86,10 @@ def collect_driver_log():
     try:
         offset, size, generation, tail = 0, None, "", b""
         with os.fdopen(descriptor, "wb") as output:
-            while True:
+            def read_range():
+                """Read one range. A retry resumes at the bytes already held:
+                the anchor and generation prove continuity on the guest."""
+                nonlocal offset, size, generation, tail
                 query = urllib.parse.urlencode({"offset": offset, "limit": 262144})
                 log_headers = {**headers, "X-Cloudbench-Log-Anchor": hashlib.sha256(tail).hexdigest(),
                                "X-Cloudbench-Log-Generation": generation}
@@ -81,7 +102,7 @@ def collect_driver_log():
                     if response.status == 204:
                         assert offset > 0 and response.headers.get("X-Cloudbench-Log-Size") == str(offset) and size == offset
                         assert not response.read(1)
-                        break
+                        return True
                     assert response.status == 206
                     span = re.fullmatch(r"bytes ([0-9]+)-([0-9]+)/([0-9]+)", response.headers.get("Content-Range", ""))
                     assert span
@@ -93,7 +114,8 @@ def collect_driver_log():
                     assert remaining <= 262144 and response.headers.get("Content-Length") == str(remaining)
                     while remaining:
                         chunk = response.read(min(65536, remaining))
-                        assert chunk, "driver log response ended early"
+                        if not chunk:
+                            raise ConnectionError("driver log response ended early")
                         if offset == 0:
                             assert chunk.startswith(stamp), "driver log belongs to another run"
                         output.write(chunk)
@@ -101,6 +123,9 @@ def collect_driver_log():
                         offset += len(chunk)
                         remaining -= len(chunk)
                     assert not response.read(1)
+                return False
+            while not sealed_read("cloudbench-driver.log", read_range):
+                pass
             output.flush()
             os.fsync(output.fileno())
         def identity(status):
@@ -228,16 +253,17 @@ assert total <= maximum
 final = parent / "runtime-evidence"
 assert not final.exists() and not final.is_symlink()
 pending = Path(tempfile.mkdtemp(prefix=".runtime-evidence-", dir=parent))
-for name, metadata in files.items():
+def download(name, metadata):
     target = pending / name
-    target.parent.mkdir(parents=True, exist_ok=True)
+    target.unlink(missing_ok=True)
     digest = hashlib.sha256()
     remaining = metadata["bytes"]
     with request("?" + urllib.parse.urlencode({"file": name})) as response, target.open("xb") as output:
         assert response.status == 200 and response.headers.get("Content-Length") == str(remaining)
         while remaining:
             chunk = response.read(min(65536, remaining))
-            assert chunk, "runtime evidence response ended early"
+            if not chunk:
+                raise ConnectionError("runtime evidence response ended early")
             output.write(chunk)
             digest.update(chunk)
             remaining -= len(chunk)
@@ -245,6 +271,9 @@ for name, metadata in files.items():
         output.flush()
         os.fsync(output.fileno())
     assert digest.hexdigest() == metadata["sha256"], "runtime evidence hash mismatch"
+for name, metadata in files.items():
+    (pending / name).parent.mkdir(parents=True, exist_ok=True)
+    sealed_read(name, lambda: download(name, metadata))
 if no_stack:
     if prestack:
         assert (pending / f"cloudbench-prestack-{run_token}.sealed").read_bytes() == (run_token + "\n").encode()
@@ -258,7 +287,7 @@ else:
     assert set(files) - OPTIONAL == required | {"logs/worker.log", *(f"logs/worker.{i}.log" for i in range(1, count))}
 if options:
     collect_driver_log()
-assert manifest() == expected, "runtime evidence changed across collection"
+assert sealed_read("manifest", manifest) == expected, "runtime evidence changed across collection"
 with (pending / "manifest.json").open("x") as output:
     json.dump(expected, output, sort_keys=True)
     output.write("\n")
