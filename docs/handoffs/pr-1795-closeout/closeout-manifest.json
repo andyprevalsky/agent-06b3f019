@@ -9,7 +9,8 @@
   "archive_receipts": [
     "archive-receipts/static.json",
     "archive-receipts/first-sweep.json",
-    "archive-receipts/final.json"
+    "archive-receipts/final.json",
+    "archive-receipts/backend-env-20261114.json"
   ],
   "deletion_manifest": "deletion-manifest.json",
   "native_deletion_receipt": "deletion-readiness.json",
@@ -28,5 +29,11 @@
     "repair_pr": 1667,
     "live_allocation_unreleased_cents": 100
   },
-  "terminal_publication_boundary": "Frozen private evidence and renderer/control inputs are encrypted. Sanitized final receipt, Git/PR links, elapsed/status fields derived from the committed readiness receipt, and permanent visual publication identifiers are terminal publication metadata; they do not create another private-evidence archive. Final publication must not change required private inputs."
+  "terminal_publication_boundary": "Frozen private evidence and renderer/control inputs are encrypted. Sanitized final receipt, Git/PR links, elapsed/status fields derived from the committed readiness receipt, and permanent visual publication identifiers are terminal publication metadata; they do not create another private-evidence archive. Final publication must not change required private inputs.",
+  "resume_verification": "evidence/resume-verification-20261114.json",
+  "private_configuration_supplement": {
+    "date": "2026-11-14",
+    "scope": "Backend environment drift only; prior archive versions remain preserved",
+    "verification": "backend-env-verification-20261114.json"
+  }
 }

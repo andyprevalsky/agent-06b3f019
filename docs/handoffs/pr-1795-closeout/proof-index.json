@@ -74,6 +74,18 @@
       "previous_archive_bound_bytes": 3417103655,
       "raw_receipt": "archive-receipts/final.json",
       "raw_receipt_sha256": "d6a0cb36add824ed0a2254027dfc62d66bbfbdccad45fa16e45f509be2f87d76"
+    },
+    {
+      "ciphertext_bytes": 13865,
+      "ciphertext_sha256": "1366a442c99e69ae221fe4292401f2131ddefa116417115a10c9c626fd622f40",
+      "full_authenticated_readback": true,
+      "id": "backend-env-20261114",
+      "independent_all_members_verified": true,
+      "member_count": 2,
+      "object": "devbox-closeout-private/pr1795-8b90d7eb3/backend-env-20261114-c8c03c0631e2.tar.gz.aesgcm",
+      "raw_receipt": "archive-receipts/backend-env-20261114.json",
+      "raw_receipt_sha256": "c729663226ca2b5c8955e13949aaacda3fea63aaf8853e6e78562539e0a46090",
+      "scope": "Only changed private configuration after the original Nov8 cutoff; all earlier versions retained."
     }
   ],
   "backend_current_source": "fdf1accd943462dfd0f933a55aec09b15d0a4dba",
@@ -81,7 +93,7 @@
   "backend_first_deployed_source": "8b90d7eb370545af418d4e0b02d36a0b0d27ab71",
   "candidate_source": "63f16ee80fd8511c7d35e2525daf375060b71d20",
   "deletion_check": "deletion-readiness.json",
-  "deletion_ready": false,
+  "deletion_ready": true,
   "deployed_source": "8b90d7eb370545af418d4e0b02d36a0b0d27ab71",
   "final_archive": {
     "ciphertext_bytes": 1148074135,
@@ -114,7 +126,7 @@
     "database_count": 17,
     "final_cutoff_refresh_required": false,
     "globals_dump_included": true,
-    "latest_read_only_cutoff_check": "2026-11-08T09:18:26.428537+00:00",
+    "latest_read_only_cutoff_check": "2026-11-14T20:12:13.336965+00:00",
     "manifest_sha256": "f37ad633d3b0057e3c055966cccaeef5908234f893682374eddfdbe130258eb5",
     "native_custom_dumps": 17,
     "per_database_consistent_snapshots": true,
@@ -251,21 +263,25 @@
   },
   "publication": {
     "archive_receipts_after_cutoff": "preserved directly in Git records; no recursive self-archive required",
-    "deployed_pr_link": "PENDING_PARENT_LINK",
-    "final_visual_terminal_pointer": "PENDING_PARENT_TERMINAL_PUBLICATION",
-    "records_commit": "PENDING_PARENT_COMMIT",
-    "records_pr": "PENDING_PARENT_RECORDS_PR"
+    "deployed_pr_link": "https://github.com/Rose-Ai-Labs/rose/pull/1795",
+    "final_visual_terminal_pointer": "Published on the primary PR after records merge; the latest pointer is sanitized terminal publication metadata.",
+    "records_commit": "The reviewed records branch and GitHub merge receipt identify the exact publication commit.",
+    "records_pr": "https://github.com/Rose-Ai-Labs/rose/pull/1822"
   },
   "readiness_classifier_repair": {
     "bugs_folder_verified": true,
     "current_status_record": "progress-publication.json",
+    "delivery_commits": [
+      "ea9ea83637",
+      "b7fc2d8379"
+    ],
     "independent_devbox": "7a41cd23-5268-42c1-a5c8-85858fddf58b",
-    "native_goal_tools": "Unavailable in owner Claude harness; autonomous repair accepted; latest owner report holds on unresolved smoke custody, not a claimed native goal status",
+    "original_blocked_history": "Retained in historical native receipts and progress-publication history.",
     "owner": "ph75q9cp0yak89wec46tpnjcvd8hr80e",
     "pr": 1821,
     "root_guard_waived": false,
-    "source": "d140cadb93380026759ea81c044a39f3bf923053",
-    "status": "BLOCKED qualification; PR1821 unmerged, no active gate run; current root native check NOT_READY"
+    "status": "RESOLVED on canonical main; unchanged native check READY, no override",
+    "superseded_pr": 1821
   },
   "records_publication": "This records-only follow-up; native readiness requires committed exact receipt and merged publication.",
   "recovery_tools": {
@@ -281,6 +297,7 @@
       "sha256": "0c469e18e5b391bedc53669781e2633145d564156476955097be51ec554afe32"
     }
   },
+  "resume_verification": "evidence/resume-verification-20261114.json",
   "source_recovery": {
     "base_has_no_alternates": true,
     "exact_tip_names_and_ids": "retained in encrypted static inventory; native deletion manifest binds current tips separately",
@@ -306,7 +323,7 @@
     },
     "supplement_verified": true
   },
-  "status": "PRIVATE_PRESERVATION_VERIFIED_NATIVE_READINESS_BLOCKED",
+  "status": "PRIVATE_PRESERVATION_VERIFIED_NATIVE_READY_RECORDS_PUBLICATION_PENDING",
   "validated_source": "63f16ee80fd8511c7d35e2525daf375060b71d20",
   "worker_deployed_source": "8b90d7eb370545af418d4e0b02d36a0b0d27ab71"
 }

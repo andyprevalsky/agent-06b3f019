@@ -1,43 +1,66 @@
 {
   "primary_merge": "8b90d7eb370545af418d4e0b02d36a0b0d27ab71",
   "status": "NOT_SHIPPED",
-  "as_of": 1794139905.2704346,
-  "visual": {
-    "schemaVersion": 1,
-    "ok": true,
-    "artifactId": "vis_9de047c546e8fc937ed752fdd999af37",
-    "title": "Code-session deploy progress",
-    "url": "https://boxes.dev/visuals/vis_9de047c546e8fc937ed752fdd999af37",
-    "markdown": "[Code-session deploy progress](https://boxes.dev/visuals/vis_9de047c546e8fc937ed752fdd999af37)",
-    "sizeBytes": 60057
-  },
-  "native_ready": false,
+  "as_of": 1794687468.2074006,
+  "native_ready": true,
   "records_pr": 1822,
-  "classifier_fix_pr": 1821,
-  "classifier_fix_source": "d140cadb93380026759ea81c044a39f3bf923053",
-  "qualification": {
-    "source": "d140cadb93380026759ea81c044a39f3bf923053",
-    "pr_state": "OPEN; unmerged at native11:47check",
-    "non_smoke_gates": "PASS",
-    "smoke": "infra stopped11:19:47UTC on setup401;1of13 failed,12UNVERIFIED",
-    "gate_processes": "stopped per existing owner; fresh state retry aborted before smoke and original cycle restored",
-    "custody_last_native_receipt": "2026-11-08T11:36:00Z:5retained owners,1started Machine; not a new inventory observation",
-    "financial_record": "interrupted task,4396c pending; actual mode and exact stall fields missing in original record; ERROR/130 retained",
-    "pure_original_stall_predicates": false,
-    "root_provider_calls": 0,
-    "override_granted": false,
-    "owner_disposition": "holding for user direction; no further actions reported",
-    "root_resolution": "existing scope clarified for bounded reads; no duplicate lookup, payment action, synthetic ACK, or guard bypass",
-    "next_action": "await material owner recovery or canonical merge notification; no further timer or duplicate run"
+  "records_publication": "Review and merge pending; no further runtime deploy needed.",
+  "canonical_readiness_resolution": {
+    "commits": [
+      "ea9ea83637",
+      "b7fc2d8379"
+    ],
+    "main": "6ecbd4aa97",
+    "native_check": "READY, open0, unchanged canonical command",
+    "override": false,
+    "pr1821": "Closed as superseded per its owner; no smoke PASS or financial release inferred."
   },
-  "terminal_publication_metadata": true,
-  "goal_status": "blocked",
-  "last_recovery_check": {
-    "check_id": "wd8ex1zp6hevx2a23df2eggwqd8hvqtq",
-    "checked_at": "2026-11-08T12:10:20Z",
-    "result": "BLOCKED_UNCHANGED",
-    "canonical_pr": "OPEN, d140cadb, unmerged",
-    "owner_status": "idle awaiting direction",
-    "rescheduled": false
-  }
+  "preservation": "Original three archives plus verified backend configuration supplement; full current hash/path drift audit passed.",
+  "resume_verification": "evidence/resume-verification-20261114.json",
+  "historical_progress": [
+    {
+      "primary_merge": "8b90d7eb370545af418d4e0b02d36a0b0d27ab71",
+      "status": "NOT_SHIPPED",
+      "as_of": 1794139905.2704346,
+      "visual": {
+        "schemaVersion": 1,
+        "ok": true,
+        "artifactId": "vis_9de047c546e8fc937ed752fdd999af37",
+        "title": "Code-session deploy progress",
+        "url": "https://boxes.dev/visuals/vis_9de047c546e8fc937ed752fdd999af37",
+        "markdown": "[Code-session deploy progress](https://boxes.dev/visuals/vis_9de047c546e8fc937ed752fdd999af37)",
+        "sizeBytes": 60057
+      },
+      "native_ready": false,
+      "records_pr": 1822,
+      "classifier_fix_pr": 1821,
+      "classifier_fix_source": "d140cadb93380026759ea81c044a39f3bf923053",
+      "qualification": {
+        "source": "d140cadb93380026759ea81c044a39f3bf923053",
+        "pr_state": "OPEN; unmerged at native11:47check",
+        "non_smoke_gates": "PASS",
+        "smoke": "infra stopped11:19:47UTC on setup401;1of13 failed,12UNVERIFIED",
+        "gate_processes": "stopped per existing owner; fresh state retry aborted before smoke and original cycle restored",
+        "custody_last_native_receipt": "2026-11-08T11:36:00Z:5retained owners,1started Machine; not a new inventory observation",
+        "financial_record": "interrupted task,4396c pending; actual mode and exact stall fields missing in original record; ERROR/130 retained",
+        "pure_original_stall_predicates": false,
+        "root_provider_calls": 0,
+        "override_granted": false,
+        "owner_disposition": "holding for user direction; no further actions reported",
+        "root_resolution": "existing scope clarified for bounded reads; no duplicate lookup, payment action, synthetic ACK, or guard bypass",
+        "next_action": "await material owner recovery or canonical merge notification; no further timer or duplicate run"
+      },
+      "terminal_publication_metadata": true,
+      "goal_status": "blocked",
+      "last_recovery_check": {
+        "check_id": "wd8ex1zp6hevx2a23df2eggwqd8hvqtq",
+        "checked_at": "2026-11-08T12:10:20Z",
+        "result": "BLOCKED_UNCHANGED",
+        "canonical_pr": "OPEN, d140cadb, unmerged",
+        "owner_status": "idle awaiting direction",
+        "rescheduled": false
+      }
+    }
+  ],
+  "terminal_publication_metadata": true
 }

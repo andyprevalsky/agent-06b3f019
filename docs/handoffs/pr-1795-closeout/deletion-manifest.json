@@ -1452,24 +1452,12 @@
     "evidence": "CLAUDE.md setup + setup-recovery.json/pip-freeze-private.txt"
   },
   "back-end/.env": {
-    "archive": "devbox-closeout-private/pr1795-8b90d7eb3/final-20261108T0920Z-a7c21f5e.tar.gz.aesgcm",
-    "catalog": [
-      {
-        "object": "devbox-closeout-private/pr1795-06bd0d1/static-20261108T050445Z-a5b098c1.tar.gz.aesgcm",
-        "sha256": "497d490033d0f447ef7fa6119fa16ccdde423e641bee1780d2745b25abede2eb"
-      },
-      {
-        "object": "devbox-closeout-private/pr1795-06bd0d1/first-sweep-20261108T055115Z-10208b95.tar.gz.aesgcm",
-        "sha256": "742d0d20532b5641b697e1df9f2baa31e62d73c1549b030a337de8309b534be4"
-      },
-      {
-        "object": "devbox-closeout-private/pr1795-8b90d7eb3/final-20261108T0920Z-a7c21f5e.tar.gz.aesgcm",
-        "sha256": "8541f5beeb54fc08357373e5a6e6bf756a476e4f99f32ad27316cd3985a80bfb"
-      }
-    ],
-    "closure_manifest_sha256": "4cb3cbf25f23eeb50d7d963de57c859da189e49c4863a8c7d05e3650d214ca60",
+    "archive": "devbox-closeout-private/pr1795-8b90d7eb3/backend-env-20261114-c8c03c0631e2.tar.gz.aesgcm",
     "disposition": "archived",
-    "sha256": "8541f5beeb54fc08357373e5a6e6bf756a476e4f99f32ad27316cd3985a80bfb"
+    "raw_receipt": "archive-receipts/backend-env-20261114.json",
+    "recovery": "Restore backend-env.private over the historical environment only in a new isolated recovery directory.",
+    "sha256": "1366a442c99e69ae221fe4292401f2131ddefa116417115a10c9c626fd622f40",
+    "verification": "backend-env-verification-20261114.json"
   },
   "back-end/.env.cloudbench-upsert.lock": {
     "archive": "devbox-closeout-private/pr1795-8b90d7eb3/final-20261108T0920Z-a7c21f5e.tar.gz.aesgcm",

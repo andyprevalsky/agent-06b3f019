@@ -10,10 +10,18 @@ The actual production AgentCard test remains FAIL, NOT_INTRODUCED, delegated / w
 
 [deletion-readiness.json](deletion-readiness.json) is the exact native result using [deletion-manifest.json](deletion-manifest.json). Publication is complete only after the reviewed records-only PR is merged, linked from PR1795, and that check reports READY again. Final Git/PR/visual identifiers and status/time fields derived from these committed records are sanitized terminal publication metadata. They do not reopen the frozen private evidence or require an archive of the archive receipt itself.
 
-## Readiness follow-up in progress
+## Historical readiness blocker — November 8
 
 The first native check correctly found the owned Fly helper, which was stopped with its documented command, and also reported the current caller’s Codex code-mode host as independent work. The latter is a confirmed classifier false positive under the same app-server ancestor; the existing PR1792 owner is repairing that boundary in PR1821 from its independent Bugs devbox. No active host was killed and no receipt was rewritten to PASS. Native readiness remains NOT_READY until the corrected canonical checker passes here. Raw initial evidence is retained under `evidence/`.
 
 The PR1667 repair goal later became BLOCKED on independently revalidated legitimate funding/KYC prerequisites; it is retained for prerequisite-change resume. Its production task remains FAIL and its current-source full qualification is open. The originating release used the successful prior post-merge handoff, never an asserted production PASS or a resource-stall skip.
 
 The readiness repair later cleared every non-smoke gate, but its smoke suite infra-stopped on a setup 401. Its owner retained incomplete native cleanup custody and stopped further test runs. PR1821 remains unmerged, so this originating closeout remains BLOCKED with the existing native NOT_READY result. No smoke override, financial settlement or synthetic cleanup acknowledgement was granted. See [progress-publication.json](progress-publication.json) for the dated status and completed finite check.
+
+## November 14 closeout verification
+
+Current main contains the canonical caller-host fixes (`ea9ea83637`, `b7fc2d8379`), so the unchanged native checker now reports READY with zero open items; PR1821 itself is superseded. No host was killed and no check was waived. The original failure receipts above remain unchanged.
+
+A full current-path comparison found zero new or missing paths. Independent hashing checked 120,491 regular files (7,983,188,026 bytes): only the terminal scorecard pointer and backend environment contents changed. The environment is preserved in a fourth, small encrypted supplement with complete authenticated readback and independent restored-member verification. The local database recheck found no writes, membership/global-count change or active writer requiring a refreshed dump. See [resume verification](evidence/resume-verification-20261114.json) and the supplement recovery instructions. The exact historical production failure row moved byte-for-byte to the current canonical branch shard; no outcome changed.
+
+The remaining publication condition is review and merge of this records-only PR, its link from PR1795, and a stable native READY rerun. Production verification remains the dated Nov8 evidence; this records update did not launch another production deployment or financial operation.
