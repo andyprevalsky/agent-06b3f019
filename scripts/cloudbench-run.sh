@@ -1445,18 +1445,13 @@ GUEST_DIAGNOSTICS_PID=$!
 if [ "$BENCH_NEEDS_PAYMENT_FIXTURE" = "1" ]; then
     PAYMENT_USER_ID="${BENCHMARK_AGENT_PAYMENT_USER_ID:-1f85ff25-6e29-4c1b-8739-f917bd101a30}"
     log "seeding isolated payment fixture for $PAYMENT_USER_ID"
-    payment_fixture_rc=0
-    gosu "$APP_USER" env \
+    if ! gosu "$APP_USER" env \
         DATABASE_URL="$STACK_DB_URL" \
         DIRECT_URL="$STACK_DB_URL" \
         BENCHMARK_FORCE_CUSTOMER_PURCHASE_PATH=1 \
         sh -c 'cd "$1" && exec npx tsx scripts/setup-benchmark-payment.ts --user-id "$2"' \
-          sh "$REPO_DIR/back-end" "$PAYMENT_USER_ID" || payment_fixture_rc=$?
-    if [ "$payment_fixture_rc" -ne 0 ]; then
-        # A signal death (139 = SIGSEGV) prints nothing of its own; record how the fixture ended.
-        payment_fixture_signal=""
-        [ "$payment_fixture_rc" -gt 128 ] && payment_fixture_signal=", signal $((payment_fixture_rc - 128))"
-        log "FATAL: setup-benchmark-payment.ts failed for $PAYMENT_USER_ID (exit $payment_fixture_rc$payment_fixture_signal)"
+          sh "$REPO_DIR/back-end" "$PAYMENT_USER_ID"; then
+        log "FATAL: setup-benchmark-payment.ts failed for $PAYMENT_USER_ID"
         finish 1
     fi
 fi

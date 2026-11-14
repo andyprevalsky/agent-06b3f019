@@ -95,8 +95,11 @@ fixture line about 2 s after seeding starts, so this guest died in the first-con
 `setup-benchmark-payment.ts` has the same two-client shape as the seed: its AgentCard org imports
 construct `src/providers/database.ts`'s module client, and `main()` then constructed a second
 client before either had connected. Fix: `main()` opens its client with
-`connectThenOpen(sharedPrisma, () => new PrismaClient())` and releases both. The driver now logs
-the fixture's exit code and signal, so the next occurrence is classified rather than inferred.
+`connectThenOpen(sharedPrisma, () => new PrismaClient())` and releases both. Logging the
+fixture's exit code and signal in `cloudbench-run.sh` was tried and reverted: that driver's bytes are
+pinned as a reviewed startup protocol (`cloudbench-prestart-recovery.py` FRESH_SOURCE_PROTOCOL,
+`deploy_test_native_cleanup.py`, `deploy-test-worker.test.py`). Changing them needs a protocol re-review,
+which is an open follow-up, so a signal death still prints only `FATAL`.
 Regression: `testPaymentFixtureOpensItsClientAfterTheModuleClient` in
 `seed-local-user.blackbox.ts`; it fails on the old script. The crash itself (about 1 in 1,000
 starts) was not reproduced natively for this script, so this instance's signal is unconfirmed.
