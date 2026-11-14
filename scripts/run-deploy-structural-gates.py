@@ -664,6 +664,7 @@ GATES = (
         ("python3", "scripts/tests/cloudbench-controller-orphan-drain.test.py"),
     ),
     Gate("cloudbench-staged-boot", ("python3", "scripts/tests/cloudbench-staged-boot.test.py")),
+    Gate("local-stack-retention", ("python3", "scripts/tests/local-stack-retention.test.py")),
     Gate(
         "cloudbench-runtime-evidence-collector",
         ("python3", "scripts/tests/cloudbench-runtime-evidence-collector.test.py"),

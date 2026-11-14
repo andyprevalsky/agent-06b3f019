@@ -1,3 +1,4 @@
+/** The durable response-schema signal envelope shared by message delivery paths. */
 export function buildUserMessageSignalValue(
   messageText: string,
   metadata: Record<string, unknown> | undefined
