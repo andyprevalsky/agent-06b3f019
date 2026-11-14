@@ -3,7 +3,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { withBrowserProviderServer } from './browser-provider.fixture-server.support';
 import { chmod, mkdir, mkdtemp, rename, writeFile } from 'node:fs/promises';
 import { resolve, join } from 'node:path';
-import { chromium } from 'playwright';
+import { chromium, type BrowserContext } from 'playwright';
 import { prisma } from '../../providers/database';
 import { benchmarkSavedBrowserAuthDisabled } from '../../providers/benchmarkBrowserAuth';
 import { CHROME_EPOCH_OFFSET_MICROSECONDS } from '../../domains/integrations/config';
@@ -12,12 +12,13 @@ import { releaseKernelRemoteSession } from '../../providers/browser/kernel';
 import { releaseTilionRemoteSession } from '../../providers/browser/tilion';
 import { releaseSteelRemoteSession } from '../../providers/steel/session';
 import { steelCdpConnectionUrl } from '../../providers/steel/urls';
+import { createOriginPayloadWriter } from '../../providers/steel/injectionOriginPage';
 import {
   completeCloudBrowserSignIn,
   deleteCloudBrowserSignInEvidence,
 } from '../helpers/browser-sign-in-evidence';
 import { deleteKernelProfile } from './browser-provider-rotation.support';
-import { assert, navigateKernelPage, retryBackendFetch } from './browser-provider.helpers';
+import { assert, retryBackendFetch } from './browser-provider.helpers';
 import {
   cleanupAuthPersistFixture,
   readAuthPersistInitOnce,
@@ -25,23 +26,62 @@ import {
 } from './browser-provider.auth-persist.cleanup';
 
 const LOCATION = { country: 'US', state: 'CA', city: 'San Francisco' } as const;
+const TARGET_ORIGIN = 'https://example.com';
 
 function asRecord(value: unknown): Record<string, unknown> {
   assert(typeof value === 'object' && value !== null, 'Expected JSON object');
   return value as Record<string, unknown>;
 }
 
-async function readSignedIn(wsUrl: string): Promise<{ cookie: string; storage: string | null }> {
+export interface TargetOriginState {
+  cookie: string;
+  storage: string | null;
+}
+
+/**
+ * Sign-in state lives in the browser's cookie jar and origin storage, so the
+ * fixture reaches it the way production restores and harvests origin storage:
+ * in a synthetic exact-origin document that never opens a proxy tunnel. A
+ * residential exit can refuse CONNECT to example.com for its whole session
+ * (net::ERR_TUNNEL_CONNECTION_FAILED) while it still reaches other sites.
+ * The example.com tab stays open, like a user's signed-in tab, so a later
+ * /close harvests it from the open page; releasing the session closes it.
+ */
+async function evaluateOnTargetOrigin(context: BrowserContext, script: string): Promise<unknown> {
+  return createOriginPayloadWriter(context).writeOriginScript(TARGET_ORIGIN, script);
+}
+
+/** Reads the example.com cookie and localStorage the fixture signs in with. */
+export async function readTargetOriginState(context: BrowserContext): Promise<TargetOriginState> {
+  const state = asRecord(
+    await evaluateOnTargetOrigin(
+      context,
+      "({ cookie: document.cookie, storage: localStorage.getItem('rose_handoff') })"
+    )
+  );
+  assert(typeof state.cookie === 'string', 'example.com cookie read returned no string');
+  assert(
+    state.storage === null || typeof state.storage === 'string',
+    'example.com localStorage read returned a non-string'
+  );
+  return { cookie: state.cookie, storage: state.storage };
+}
+
+/** Signs in on example.com: the session cookie and localStorage a later call must restore. */
+export async function signInOnTargetOrigin(context: BrowserContext): Promise<void> {
+  await evaluateOnTargetOrigin(
+    context,
+    "document.cookie = 'session=signed-in; path=/; max-age=600; SameSite=Lax'; " +
+      "localStorage.setItem('rose_handoff', 'signed-in');"
+  );
+}
+
+async function readSignedIn(wsUrl: string): Promise<TargetOriginState> {
   const browser = await chromium.connectOverCDP(steelCdpConnectionUrl(wsUrl));
   try {
     const context = browser.contexts()[0];
     assert(context !== undefined, 'resumed browser has no context');
-    const page = context.pages()[0] ?? (await context.newPage());
-    await navigateKernelPage(page, 'https://example.com');
-    return {
-      cookie: await page.evaluate(() => document.cookie),
-      storage: await page.evaluate(() => localStorage.getItem('rose_handoff')),
-    };
+    return await readTargetOriginState(context);
   } finally {
     await browser.close();
   }
@@ -278,27 +318,21 @@ async function runConfiguredAuthPersist(middle: AuthPersistMiddleProvider): Prom
 
     const remote = await chromium.connectOverCDP(String(initial.ws_url));
     try {
-      const page = remote.contexts()[0]?.pages()[0] ?? (await remote.contexts()[0]!.newPage());
-      await navigateKernelPage(page, 'https://example.com');
-      const beforeSignIn = await page.evaluate(() => ({
-        cookies: document.cookie,
-        storage: localStorage.getItem('rose_handoff'),
-      }));
+      const remoteContext = remote.contexts()[0];
+      assert(remoteContext !== undefined, 'Kernel browser has no context');
+      const beforeSignIn = await readTargetOriginState(remoteContext);
       assert(
-        beforeSignIn.cookies
+        beforeSignIn.cookie
           .split(';')
           .some((cookie) => cookie.trim() === 'rose_fixture_auth_guard=independent-fixture'),
         'the independent fixture cookie was not actually injected'
       );
       assert(
-        !beforeSignIn.cookies.split(';').some((cookie) => cookie.trim() === 'session=signed-in'),
+        !beforeSignIn.cookie.split(';').some((cookie) => cookie.trim() === 'session=signed-in'),
         'target sign-in cookie was already present'
       );
       assert(beforeSignIn.storage === null, 'target localStorage was already present');
-      await page.evaluate(() => {
-        document.cookie = 'session=signed-in; path=/; max-age=600; SameSite=Lax';
-        localStorage.setItem('rose_handoff', 'signed-in');
-      });
+      await signInOnTargetOrigin(remoteContext);
     } finally {
       await remote.close();
     }

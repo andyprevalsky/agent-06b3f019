@@ -35,7 +35,6 @@ import {
   isSteelProvisioningOutage,
   isSteelSessionValidationFailure,
 } from './browser-provider-rotation.support';
-import { assertAuthPersistFailedInitCustody } from './browser-provider.auth-persist.cleanup.support';
 import { runLiveProviderParity } from './browser-provider.live.support';
 import {
   gateOverridden,
@@ -49,6 +48,7 @@ import { assertStaleProxyCreateFailureIsLabeled } from './browser-provider-proxy
 import { runOptionalLiveBrowserUseProvider } from './browser-provider.browser-use-live.support';
 import { tilionWiringCases } from './browser-provider.tilion-wiring.support';
 import { tilionDnsWorkerCases } from './browser-provider.tilion-dns-worker.support';
+import { authPersistFixtureCases } from './browser-provider.auth-persist-origin.support';
 import { steelAuthShareCases } from './browser-provider.steel-auth-share.support';
 import {
   createBrowserUseRecoverySession,
@@ -85,10 +85,7 @@ const tests: Array<[string, () => void | Promise<void>]> = [
     'Steel PAUSED replacement failure recovers through release404',
     () => assertSteelSameProfileReplacement(true),
   ],
-  [
-    'auth-persist failed-init cleanup discovers owned allocations and retains recovery custody',
-    assertAuthPersistFailedInitCustody,
-  ],
+  ...authPersistFixtureCases,
   // Tilion became the default for new sessions (docs/plans/completed/tilion-browser-provider.md).
   ...tilionWiringCases,
   ...steelAuthShareCases,
