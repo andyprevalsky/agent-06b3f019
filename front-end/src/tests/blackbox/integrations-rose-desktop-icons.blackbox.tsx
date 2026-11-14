@@ -28,6 +28,8 @@ import {
   serveList,
   type Row,
 } from './integrations-accounts.fixtures';
+import { MeetingNotesIcon } from '@/features/integrations/components/MeetingNotesProviderCard';
+import firefliesLogo from '@/assets/fireflies-logo.svg';
 import { server } from './msw/server';
 import { renderWithProviders } from './test-wrapper';
 import { mockTerminalHookSession as mockSession } from './terminal-hooks.fixtures';
@@ -183,4 +185,11 @@ describe('Integrations panel: no polling once closed', () => {
     });
     expect(progressCalls()).toHaveLength(after);
   }, 20_000);
+});
+
+describe('meeting note taker logos', () => {
+  it('Fireflies uses the official fireflies.ai mark asset', () => {
+    const { container } = renderWithProviders(<MeetingNotesIcon provider="fireflies" />);
+    expect(container.querySelector('img')?.getAttribute('src')).toBe(firefliesLogo);
+  });
 });

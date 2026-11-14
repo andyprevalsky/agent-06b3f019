@@ -137,6 +137,56 @@ class SemanticReports(unittest.TestCase):
         self.assertEqual(adapter.summary_status(['FAIL', 'UNVERIFIED']), 'UNVERIFIED')
         self.assertEqual(adapter.summary_status([]), 'UNVERIFIED')
 
+    def test_actual_playwright_retry_keeps_final_failure_and_flaky_first_error(self):
+        import os
+        import deploy_test_quarantine as quarantine
+        with tempfile.TemporaryDirectory() as d:
+            folder = Path(d)
+            pkg = Path(subprocess.check_output(
+                ['node', '-p', "require.resolve('@playwright/test')"], cwd=ROOT / 'front-end', text=True
+            ).strip())
+            (folder / 'fixture.spec.cjs').write_text(
+                f"const {{test,expect}} = require({json.dumps(str(pkg))});\n"
+                "test('final assertion',()=>expect(1).toBe(2));\n"
+                "test('retried pass',({},info)=>expect(info.retry).toBe(1));\n"
+                "test.describe('setup',()=>{test.beforeEach(()=>{throw Error('setup failed')});"
+                "test('not executed',()=>{});});\n")
+            (folder / 'playwright.config.cjs').write_text(
+                "module.exports={testDir:'.',retries:1,workers:1,projects:[{name:'chromium'}]};")
+            progress = folder / 'progress.jsonl'
+            env = {**os.environ, 'DEPLOY_SEMANTIC_LIFECYCLE': str(folder / 'events.jsonl'),
+                   'PLAYWRIGHT_JSON_OUTPUT_FILE': str(folder / 'report.json'),
+                   'DEPLOY_GATE_PROGRESS': str(progress), 'DEPLOY_GATE_CASE': 'semantic-stack'}
+            reporters = ['json', str(ROOT / 'scripts/deploy-semantic-reporter.cjs'),
+                         str(ROOT / 'front-end/src/tests/gate-progress/playwrightReporter.ts')]
+            proc = subprocess.run([*adapter.playwright_command(ROOT), 'test',
+                                   '--reporter=' + ','.join(reporters)], cwd=folder, env=env,
+                                  capture_output=True, timeout=45)
+            self.assertEqual(proc.returncode, 1, proc.stderr.decode())
+            events = [json.loads(line) for line in (folder / 'events.jsonl').read_text().splitlines()]
+            report = json.loads((folder / 'report.json').read_text())
+            retried = []
+            cases = adapter.classify_lane('ui', events[0]['tests'], report, events, retried)
+            # The retried pass stays UNVERIFIED until its native FLAKY receipt exists.
+            self.assertEqual(sorted(cases.values()), ['FAIL', 'UNVERIFIED', 'UNVERIFIED'])
+            self.assertEqual(len(retried), 1)
+            flaky = quarantine.gate_outcomes(progress)['flaky']
+            self.assertEqual(len(flaky), 1)
+            self.assertEqual(flaky[0]['attempts'], 2)
+            self.assertIn('retried pass', flaky[0]['unit'])
+            self.assertIn('expect(received).toBe(expected)', flaky[0]['detail'])
+            raw_flaky = [json.loads(line) for line in progress.read_text().splitlines()
+                         if json.loads(line)['status'] == 'FLAKY']
+            self.assertEqual(len(raw_flaky), 1)
+            self.assertIn('Expected: 1', raw_flaky[0]['detail'])
+            final_flaky = adapter.native_flaky('ui', events[0]['tests'], report, retried)
+            self.assertEqual(len(final_flaky), 1)
+            self.assertEqual(final_flaky[0]['unit'], raw_flaky[0]['unit'])
+            self.assertEqual(final_flaky[0]['attempts'], 2)
+            self.assertIn('Expected: 1', final_flaky[0]['detail'])
+            progress.unlink()  # Final evidence survives loss of the advisory file.
+            self.assertEqual(adapter.native_flaky('ui', events[0]['tests'], report, retried), final_flaky)
+
     def run_worker(self, defect=None, malformed_event=None, malformed_report=None):
         import deploy_test_worker as worker
         import deploy_test_result as result_contract

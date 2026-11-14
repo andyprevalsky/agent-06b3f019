@@ -808,6 +808,8 @@ if [ -z "${CLOUDBENCH_SCRIPT_SNAPSHOT:-}" ]; then
        "$ROOT_DIR/scripts/cloudbench-prestack-source-reviews.json" \
        "$ROOT_DIR/scripts/cloudbench-volume-migration.py" \
        "$ROOT_DIR/scripts/cloudbench-campaign-barrier.py" \
+       "$ROOT_DIR/scripts/run-bench-campaign.py" \
+       "$ROOT_DIR/scripts/cloudbench-shard-coordinator.py" \
        "$ROOT_DIR/scripts/cloudbench-campaign-machines.py" \
        "$ROOT_DIR/scripts/cloudbench-clone-volume.py" \
        "$ROOT_DIR/scripts/cloudbench-campaign-mutation.py" \
@@ -1856,7 +1858,7 @@ exit "$status"
     fi
     echo "🛰️  fleet controller detached (own session; survives launcher exit)"
     echo "    log: tail -f $DETACH_LOG"
-    echo "    monitor every 30s; the log prints the exact run-bench monitor command."
+    echo "    monitor it; the log prints the exact run-bench monitor command."
     echo "    check terminal lifecycle on every poll; task PASS/FAIL precedes cleanup."
     echo "    stale observations require read-only reconciliation, never an automatic restart."
     printf '    controller exit marker: %q (check on every poll, even if logs stop growing)\n' "$DETACH_STATUS"
@@ -6596,7 +6598,7 @@ reap_registry_clones() {  # reap_registry_clones <registry-dir> <current|stale|f
         echo "❌ refusing to destroy fleet machines whose guest cleanup is unconfirmed: $registry" >&2
         return 1
     fi
-    if [ "${DISPOSABLE_REAP:-0}" != 1 ] && { [ -e "$registry/runtime-evidence-unconfirmed" ] \
+    if { [ -e "$registry/runtime-evidence-unconfirmed" ] \
         || [ -L "$registry/runtime-evidence-unconfirmed" ]; }; then
         echo "❌ refusing to destroy fleet machines whose runtime evidence is unconfirmed: $registry" >&2
         return 1
@@ -7566,7 +7568,7 @@ reap_orphaned_fleet_proxies() {
     # descendants orphaned inside a cloud workspace are adopted by that runtime
     # instead of PID 1. Treat only those two known adopter boundaries as orphan
     # proof; a concurrently running fleet's proxy has a run-bench-cloud parent
-    # and is never touched (rule 27).
+    # and is never touched (never kill another session's benchmark processes).
     local pids pid ppid command parent_command
     pids="$(
         ps -o pid=,ppid=,command= -ax 2>/dev/null \
@@ -9994,8 +9996,9 @@ PY
     return "$status"
 }
 
-cloudbench_recover_guest_cleanup_receipts() {  # <registry-dir>
+cloudbench_recover_guest_cleanup_receipts() {  # <registry-dir> [failed-runtime-output]
     local registry="${1%/}" owner="${1%/}" recovered=0 failed=0 recovery_index
+    local failed_runtime_output="${2:-}" runtime_recovery=0
     local bench clone_name machine_id machine_state guest_run_token proxy_port output
     local runner_status_code
     local receipt runner_evidence quiescence_evidence run_evidence backend_evidence
@@ -10029,6 +10032,37 @@ cloudbench_recover_guest_cleanup_receipts() {  # <registry-dir>
         guest_run_token="${recovery_guest_tokens[$recovery_index]}"
         proxy_port="${recovery_proxy_ports[$recovery_index]}"
         output="${recovery_outputs[$recovery_index]}"
+        runtime_recovery=0
+        if [ -n "$failed_runtime_output" ]; then
+            [ "$output" = "$failed_runtime_output" ] || continue
+            # This mode is reached only after the normal sealed transfer failed.
+            # The normal owner/plan/config checks remain upstream; bind this
+            # unfinished transfer before entering existing exact session cleanup.
+            if ! python3 - "$output" "$machine_id" "$guest_run_token" <<'PYRUNTIME'
+import json, os, stat, sys
+from pathlib import Path
+out, machine, token = Path(sys.argv[1]), sys.argv[2], sys.argv[3]
+def read(name):
+    path = out / name
+    with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), "rb") as stream:
+        info = os.fstat(stream.fileno())
+        assert stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and info.st_size <= 65536
+        value = stream.read(65537)
+    assert len(value) <= 65536
+    return value
+identity = {"version": 1, "machine_id": machine, "run_token": token}
+assert json.loads(read("runtime-evidence.owner.json")) == identity
+assert json.loads(read("runtime-evidence.pending")) == identity
+assert read("post-config-start.accepted") == (machine + "\n").encode()
+assert not (out / "remote-logs/runtime-evidence").exists()
+assert not (out / "remote-logs/runtime-evidence").is_symlink()
+PYRUNTIME
+            then
+                echo "❌ [$bench] failed runtime transfer identity is unsafe" >&2
+                return 1
+            fi
+            runtime_recovery=1
+        fi
         receipt="$output/guest-cleanup.recovery-receipt.json"
         runner_evidence="$output/guest-cleanup.runner.status"
         quiescence_evidence="$output/guest-cleanup.quiescence.json"
@@ -10078,10 +10112,11 @@ cloudbench_recover_guest_cleanup_receipts() {  # <registry-dir>
             if [ -f "$output/guest-shutdown.confirmed" ] \
                 && [ ! -L "$output/guest-shutdown.confirmed" ] \
                 && [ "$(cat "$output/guest-shutdown.confirmed" 2>/dev/null)" = "$RUN_ID" ]; then
-                recovered=$((recovered + 1))
-                continue
-            fi
-            if ! cloudbench_archive_bound_child_shutdown_confirmation \
+                if [ "$runtime_recovery" -eq 0 ]; then
+                    recovered=$((recovered + 1))
+                    continue
+                fi
+            elif ! cloudbench_archive_bound_child_shutdown_confirmation \
                     "$registry" "$bench" "$machine_id" "$output" "$guest_run_token"; then
                 echo "❌ [$bench] existing guest cleanup confirmation is unsafe" >&2
                 failed=1
@@ -10107,7 +10142,7 @@ PY
                 continue
             }
             if [ "$receipt_kind" = runner-cleanup ] \
-                && { [ "$machine_state" != started ] \
+                && { [ "$runtime_recovery" -eq 1 ] || [ "$machine_state" != started ] \
                     || [ "$(cloudbench_guest_shutdown_status "$proxy_port")" != 204 ]; }; then
                 # A clean benchmark root receipt does not prove that run.sh
                 # stopped its workers or sealed browser recordings. Retain the
@@ -10156,7 +10191,7 @@ PY
                 }
                 case "$runner_lifecycle" in
                     clean)
-                        if [ "$machine_state" = started ] \
+                        if [ "$runtime_recovery" -eq 0 ] && [ "$machine_state" = started ] \
                             && [ "$(cloudbench_guest_shutdown_status "$proxy_port")" = 204 ]; then
                             if python3 "$EXACT_SESSION_CLEANUP_HELPER" \
                                     recover-runner-receipt "${identity_args[@]}" \
@@ -10291,10 +10326,11 @@ PY
         }
         IFS=$'\t' read -r state_kind state_driver state_descendants state_reason \
             <<< "$state_summary"
-        if [ "$quiescence_status" -ne 0 ]; then
+        if [ "$quiescence_status" -ne 0 ] || [ "$runtime_recovery" -eq 1 ]; then
             if [ "$state_kind" = "active" ] \
                 || [ "$state_kind" = "exited-no-run" ] \
-                || [ "$state_kind" = "exited" ]; then
+                || [ "$state_kind" = "exited" ] \
+                || { [ "$runtime_recovery" -eq 1 ] && [ "$state_kind" = "quiesced" ]; }; then
                 cloudbench_fetch_guest_evidence status_code \
                     "$proxy_port" "$CLOUDBENCH_BARRIER_TOKEN" \
                     "/repo/.context/cloudbench/logs/backend.log" \
@@ -10439,7 +10475,11 @@ PY
         failed=1
     done
 
-    [ "$failed" -eq 0 ] && [ "$recovered" -eq "${#recovery_benches[@]}" ]
+    if [ -n "$failed_runtime_output" ]; then
+        [ "$failed" -eq 0 ] && [ "$recovered" -eq 1 ]
+    else
+        [ "$failed" -eq 0 ] && [ "$recovered" -eq "${#recovery_benches[@]}" ]
+    fi
 }
 
 fleet_preconfig_recovery_plan() {  # exact whole-owner fresh/no-admission cohort, local only
@@ -11211,8 +11251,12 @@ PY
             proxy_port="${recovery_proxy_ports[$recovery_index]}"
             if [ -z "$proxy_port" ] \
                 || [ ! -f "$RUNTIME_EVIDENCE_RECOVERY_HELPER" ] \
-                || ! mkdir -p "$output/remote-logs" \
-                || ! python3 "$RUNTIME_EVIDENCE_RECOVERY_HELPER" \
+                || ! mkdir -p "$output/remote-logs"; then
+                echo "❌ [${recovery_benches[$recovery_index]}] runtime capture prerequisites unavailable; retaining ownership" >&2
+                shutdown_status=1
+                continue
+            fi
+            if ! python3 "$RUNTIME_EVIDENCE_RECOVERY_HELPER" \
                     "$output/remote-logs" "$proxy_port" \
                     "${recovery_guest_tokens[$recovery_index]}" \
                     "${recovery_machine_ids[$recovery_index]}" \
@@ -11233,6 +11277,13 @@ PY
                         mv "$output/failed-startup-runtime-archive" \
                             "$output/failed-startup-runtime-archive.rejected.$(date +%s).$$" || shutdown_status=1
                     fi
+                fi
+                # An ACK proves guest cleanup, not a sealable runtime bundle.
+                # Reuse authenticated exact session cleanup for this failed
+                # transfer only. It may stop the owned guest, but cannot clear
+                # the runtime latch or grant archive/teardown credit.
+                if cloudbench_recover_guest_cleanup_receipts "$registry" "$output"; then
+                    echo "🧭 [${recovery_benches[$recovery_index]}] exact cleanup completed; original-volume runtime archive remains required"
                 fi
                 echo "❌ [${recovery_benches[$recovery_index]}] sealed runtime evidence could not be recaptured" >&2
                 shutdown_status=1
@@ -15570,6 +15621,7 @@ FLEET_EXECUTION_COMPLETED=0
 AUTOSCALER_PIDS=()
 PROVISION_PIDS=()
 CHILD_PIDS=()
+CHILD_STARTS=()
 CHILD_EXIT_CODES=()
 CHILD_OUT=()
 CHILD_BENCH=()
@@ -15851,7 +15903,7 @@ cleanup() {
     # before the benchmark finished.
     if ! cloudbench_collect_remaining_runtime_evidence; then
         if fleet_current_disposable_registry "$FLEET_REGISTRY_DIR" && [ "${KEEP_CLONES:-0}" != 1 ]; then
-            echo "❌ runtime evidence is incomplete; failed result retained while disposable resources are retired" >&2
+            echo "❌ runtime evidence is incomplete; unsealed disposable resources remain retained pending evidence recovery" >&2
         else
             echo "❌ runtime evidence is incomplete; retaining original fleet volumes" >&2
         fi
@@ -16292,7 +16344,7 @@ fleet_registry_init || {
     echo "❌ could not atomically publish durable fleet ownership under $FLEET_OWNERSHIP_ROOT; refusing provider mutation" >&2
     exit 1
 }
-echo "📡 Monitor this exact fleet every 30s, through terminal status AND resource release:"
+echo "📡 Monitor this exact fleet through terminal status AND resource release:"
 printf '    %q monitor %q' "$ROOT_DIR/scripts/run-bench" "$FLEET_DIR"
 if [ -n "${CLOUDBENCH_DETACHED_STATUS_FILE:-}" ]; then
     printf ' --controller-status %q' "$CLOUDBENCH_DETACHED_STATUS_FILE"
@@ -18416,7 +18468,7 @@ cleanup_failed_worker() {  # cleanup_failed_worker <output-dir> <worker-id>
         && ! cloudbench_capture_worker_runtime_evidence "$cleanup_out" "$cleanup_wid"; then
         echo "❌ worker $cleanup_wid runtime evidence was not preserved" >&2
         runtime_missing=1
-        [ "$DISPOSABLE_REAP" = 1 ] || rc=1
+        rc=1
         # Every cleanup path (cancelled provisioner, scale-down or controller)
         # publishes the same stable run-failure reason for the final verdict.
         local failure_reason="worker $cleanup_wid runtime evidence was not preserved"
@@ -18992,13 +19044,40 @@ PY
     return 0
 }
 
+cloudbench_wait_for_autoscaler_terminal() {  # <exact-child-finished-marker> <poll-seconds>
+    # Replace only the idle sleep child. This observes no provider or capacity
+    # state; the original finalizer remains the sole completion authority.
+    python3 - "$1" "$2" <<'PY_TERMINAL_WAIT'
+import math
+import os
+import sys
+import time
+
+marker, value = sys.argv[1:]
+seconds = float(value)
+if not math.isfinite(seconds) or seconds < 0:
+    raise SystemExit(1)
+deadline = time.monotonic() + seconds
+while True:
+    try:
+        if os.path.exists(marker):
+            raise SystemExit(10)
+    except OSError:
+        pass  # An unreadable observation cannot advance the normal poll.
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise SystemExit(0)
+    time.sleep(min(0.2, remaining))
+PY_TERMINAL_WAIT
+}
+
 bench_autoscaler() {  # <bench> <primary_cid> <workspace> <sim01> <out> <local-port-base> [exact-run-token]
     local bench="$1" cid="$2" ws="$3" sim="$4" out="$5" port_base="$6"
     local runtime_run_token="${7:-}"
     local pip="" metrics_proxy_pid="" metrics_proxy_pid_LEASE="" metrics_proxy_pid_TOKEN="" metrics_proxy_pid_LIVE="" metrics_port="" metrics_url=""
     local metrics_started_at scrape_failures=0 metrics_lease_owner_pid metrics_lease_token
     local ready_reconcile_rc=0 inventory_status=0
-    local scale_down_target="" scale_down_since="" scale_down_now=""
+    local scale_down_target="" scale_down_since="" scale_down_now="" terminal_poll_status=0
     # Bash 3.2 preserves $$ from the controller in async function subshells.
     # Controller ownership is intentional: per-autoscaler EXIT releases the
     # exact token, while controller cleanup sweeps the run prefix after SIGKILL.
@@ -19478,7 +19557,22 @@ bench_autoscaler() {  # <bench> <primary_cid> <workspace> <sim01> <out> <local-p
                 done
             fi
         fi
-        sleep "$AUTOSCALE_POLL"
+        terminal_poll_status=0
+        cloudbench_wait_for_autoscaler_terminal "$out/benchmark-child.finished" "$AUTOSCALE_POLL" \
+            || terminal_poll_status=$?
+        case "$terminal_poll_status" in
+            0) ;;  # The full original poll deadline elapsed.
+            10)
+                # Recheck the original marker and run the complete unchanged
+                # finalizer. A disappearing observation fails closed here.
+                complete_autoscaler_after_child
+                return $?
+                ;;
+            *)
+                fail_autoscaler "could not wait for benchmark child completion"
+                return 1
+                ;;
+        esac
     done
 }
 
@@ -19948,8 +20042,11 @@ launch_fleet_bench_child() {  # <bench-index> <bench> [existing-child-slot]
             --ref "$BENCH_REF" \
             --timeout "$bench_child_timeout" \
         > "$out/fleet-child.log" 2>&1 &
+    child_pid=$!
+    child_start="$(fleet_pid_start_time "$child_pid" || true)"
     if [ -z "$slot" ]; then
-    CHILD_PIDS+=("$!")
+    CHILD_PIDS+=("$child_pid")
+    CHILD_STARTS+=("$child_start")
     CHILD_OUT+=("$out")
     CHILD_BENCH+=("$bench")
     CHILD_MODE+=("$mode_label")
@@ -19958,8 +20055,15 @@ launch_fleet_bench_child() {  # <bench-index> <bench> [existing-child-slot]
     CHILD_RUN_TOKEN+=("$FLEET_OWNER_TOKEN-$i")
     CHILD_BENCH_INDEX+=("$i")
     else
-    CHILD_PIDS[$slot]="$!"
+    CHILD_PIDS[$slot]="$child_pid"
+    CHILD_STARTS[$slot]="$child_start"
     CHILD_MACHINE[$slot]="$cid"
+    fi
+    # Register first so EXIT cleanup retains ownership if the launch cannot be
+    # tracked. A supervisor that already published completion needs no watch.
+    if [ -z "$child_start" ] && [ ! -e "$out/benchmark-child.finished" ]; then
+        echo "❌ [$bench] could not capture launched child $child_pid start identity; stopping fleet" >&2
+        exit 1
     fi
     # Boot-launch is one bounded update/start pair and has exponential retry; it
     # no longer performs the old seven-SSH launch sequence. Feed pooled Machines
@@ -20184,6 +20288,74 @@ echo "   this run: $RUN_URL"
 echo "   per-bench viewers: $(for j in "${!CHILD_PORT[@]}"; do printf '%s→:%s ' "${CHILD_BENCH[$j]}" "${CHILD_PORT[$j]}"; done)"
 echo ""
 
+# Fixed-total infrastructure stop for every plain fleet launch. Campaigns and the
+# sharded operator already stop at `20 * infra_jobs >= scheduled_total`; this
+# applies the same predicate and job counting (run-bench-campaign.py
+# fleet_infra_stop -> infra_stop_receipt -> cloudbench-shard-coordinator.py
+# infra_stop_reached) to the requested benches. A campaign child leaves the
+# decision to its campaign, which owns the whole schedule; a task-free infra
+# probe already fails closed on any exclusion. The first breach receipt is kept
+# and the controller stops through its own TERM trap and EXIT cleanup.
+FLEET_INFRA_STOP_SENT=0
+fleet_infra_stop_check() {
+    local breach helper receipt
+    [ -z "${RUN_BENCH_CAMPAIGN_CHILD:-}" ] && [ "${INFRA_PROBE:-0}" != 1 ] \
+        && [ -n "${FLEET_DIR:-}" ] && [ "$FLEET_INFRA_STOP_SENT" = 0 ] || return 0
+    helper="${CLOUDBENCH_SCRIPT_SNAPSHOT:-$ROOT_DIR/scripts}/run-bench-campaign.py"
+    receipt="$FLEET_DIR/infra-stop.json"
+    if ! breach="$(python3 -c 'import runpy, sys
+sys.exit(runpy.run_path(sys.argv[1])["fleet_infra_stop_main"](sys.argv[2:]))' \
+        "$helper" "$FLEET_DIR" "$receipt" "${BENCHES[@]}")"; then
+        echo "⚠️  infra stop evaluation failed; unknown verdicts never count, continuing" >&2
+        return 0
+    fi
+    [ -n "$breach" ] || return 0
+    FLEET_INFRA_STOP_SENT=1
+    echo "🛑 INFRA STOP: $breach >= 5% of the original schedule; stopping this exact fleet through its TERM cleanup (receipt: $receipt)" >&2
+    kill -TERM "${BASHPID:-$$}"
+}
+
+# Only a recorded launch identity can identify a child; jobs/PPID membership
+# cannot distinguish a PID reused by another child of this controller. A failed
+# later observation is unknown, not exit: keep the infra-stop watch active until
+# the identity differs or both ps and kill confirm the PID is absent.
+fleet_child_pid_is_ours() {  # fleet_child_pid_is_ours <pid> <start>
+    local pid="${1:-}" start="${2:-}"
+    case "$pid" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    [ -n "$start" ] || return 1
+    # The shared birth-state reader normalizes legacy ps whitespace, whereas
+    # fleet_pid_start_time preserves internal spacing for older owner records.
+    case "$start" in
+        proc-start:*) ;;
+        *) start="$(printf '%s\n' "$start" | awk '{$1=$1; print}')" ;;
+    esac
+    [ "$(cloudbench_pid_birth_state "$pid" "$start")" != absent ]
+}
+
+# Watch the children until each has finished, re-evaluating the infra stop
+# whenever another child finishes. Exit codes are still reaped by `wait` after.
+fleet_wait_children_for_infra_stop() {
+    local j live finished seen=-1
+    while :; do
+        live=0; finished=0
+        for j in "${!CHILD_PIDS[@]}"; do
+            if [ -e "${CHILD_OUT[$j]}/benchmark-child.finished" ]; then
+                finished=$((finished + 1))
+            elif fleet_child_pid_is_ours "${CHILD_PIDS[$j]}" "${CHILD_STARTS[$j]:-}"; then
+                live=$((live + 1))
+            fi
+        done
+        [ "$live" -gt 0 ] || return 0
+        if [ "$finished" != "$seen" ]; then
+            seen="$finished"
+            fleet_infra_stop_check
+        fi
+        sleep "${FLEET_INFRA_STOP_POLL_SECONDS:-2}"
+    done
+}
+
 # A fleet run means simultaneous benchmark execution, not merely concurrent
 # provisioning. Each on-box driver announces after its isolated stack is
 # healthy; only then do we touch every machine's release file in parallel.
@@ -20299,6 +20471,8 @@ release_start_barrier() {
         python3 "$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-campaign-barrier.py" \
             --deadline "$deadline" --controller-pid "$$" || return 1
     fi
+    # Stacks that failed before the barrier may already disqualify the run.
+    fleet_infra_stop_check
     echo "🚦 releasing synchronized start barrier on the ready machines..."
     local release_pids=() release_failed=0 release_port_file
     for j in "${!CHILD_MACHINE[@]}"; do
@@ -20332,6 +20506,7 @@ if ! release_start_barrier; then
 fi
 
 # ── Wait for all children, then aggregate ────────────────────────────────────
+fleet_wait_children_for_infra_stop
 for j in "${!CHILD_PIDS[@]}"; do
     p="${CHILD_PIDS[$j]}"
     if wait "$p" 2>/dev/null; then
@@ -20402,6 +20577,7 @@ done
 # Normal completion has already reaped every child. Clear the ownership list so
 # EXIT cleanup cannot signal a stale PID that the OS may have since reused.
 CHILD_PIDS=()
+CHILD_STARTS=()
 # Autoscalers that already published causal completion are finished work, not
 # live ownership. Reap them before the fleet summary / EXIT path so guest
 # shutdown cannot race a vanishing jobs(1) entry into "survived local teardown".

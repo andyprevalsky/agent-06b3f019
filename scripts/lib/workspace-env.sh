@@ -167,7 +167,7 @@ normalize_conductor_workspace_env() {
   deploy_worktree_env="$pwd_physical/.context/deploy-worktree.env"
   if [ -f "$deploy_worktree_env" ] && [ "${BENCHMARK_ISOLATED_RUN:-false}" != "true" ] \
     && [ "${ROSE_STABILITY_UNIT_IDENTITY:-}" != "1" ]; then
-    # /descend-created deploy worktrees are not registered with Conductor and
+    # Prepared deploy worktrees are not registered with Conductor and
     # otherwise inherit their controller's identity and port range. Rehydrate
     # the durable child identity on every new shell before resolving resources.
     # A nested benchmark run already owns a separately reserved identity and
@@ -307,7 +307,7 @@ resolve_temporal_task_queue() {
 # DIFFERENT running container that already binds that host port (empty if none).
 #
 # This guards against a foreign CONDUCTOR_PORT (e.g. one leaked into a shell by
-# a /descend or benchmark run whose mismatched CONDUCTOR_WORKSPACE_NAME was
+# a benchmark run whose mismatched CONDUCTOR_WORKSPACE_NAME was
 # normalized away here) deriving the wrong LOCAL_DB_PORT and clobbering a
 # sibling workspace's database. Only running containers actually bind the host
 # port, so `docker ps` (not `-a`) is the correct input.

@@ -1,0 +1,591 @@
+{
+  ".cloud-env": {
+    "archive": "devbox-closeout-private/pr1928/20261111T235127Z-records.tar.gz",
+    "catalog": "docs/handoffs/pr-1928-closeout/archive-index.json#records",
+    "disposition": "archived",
+    "sha256": "6b9667a937d8351101a994ea55b64cd30c24f835af5495540057b678ac66d66f"
+  },
+  ".context/": {
+    "archive": "devbox-closeout-private/pr1928/20261111T235127Z-records.tar.gz",
+    "catalog": "docs/handoffs/pr-1928-closeout/archive-index.json#records",
+    "disposition": "archived",
+    "sha256": "6b9667a937d8351101a994ea55b64cd30c24f835af5495540057b678ac66d66f"
+  },
+  ".devbox/": {
+    "archive": "devbox-closeout-private/pr1928/20261111T235127Z-records.tar.gz",
+    "catalog": "docs/handoffs/pr-1928-closeout/archive-index.json#records",
+    "disposition": "archived",
+    "sha256": "6b9667a937d8351101a994ea55b64cd30c24f835af5495540057b678ac66d66f"
+  },
+  ".env.npm": {
+    "archive": "devbox-closeout-private/pr1928/20261111T235127Z-records.tar.gz",
+    "catalog": "docs/handoffs/pr-1928-closeout/archive-index.json#records",
+    "disposition": "archived",
+    "sha256": "6b9667a937d8351101a994ea55b64cd30c24f835af5495540057b678ac66d66f"
+  },
+  ".llm-dumps/": {
+    "archive": "devbox-closeout-private/pr1928/20261111T235127Z-records.tar.gz",
+    "catalog": "docs/handoffs/pr-1928-closeout/archive-index.json#records",
+    "disposition": "archived",
+    "sha256": "6b9667a937d8351101a994ea55b64cd30c24f835af5495540057b678ac66d66f"
+  },
+  "agents/.env": {
+    "archive": "devbox-closeout-private/pr1928/20261111T235127Z-records.tar.gz",
+    "catalog": "docs/handoffs/pr-1928-closeout/archive-index.json#records",
+    "disposition": "archived",
+    "sha256": "6b9667a937d8351101a994ea55b64cd30c24f835af5495540057b678ac66d66f"
+  },
+  "agents/.env.benchmark-temporal": {
+    "archive": "devbox-closeout-private/pr1928/20261111T235127Z-records.tar.gz",
+    "catalog": "docs/handoffs/pr-1928-closeout/archive-index.json#records",
+    "disposition": "archived",
+    "sha256": "6b9667a937d8351101a994ea55b64cd30c24f835af5495540057b678ac66d66f"
+  },
+  "agents/.env.cloudbench-upsert.lock": {
+    "archive": "devbox-closeout-private/pr1928/20261111T235127Z-records.tar.gz",
+    "catalog": "docs/handoffs/pr-1928-closeout/archive-index.json#records",
+    "disposition": "archived",
+    "sha256": "6b9667a937d8351101a994ea55b64cd30c24f835af5495540057b678ac66d66f"
+  },
+  "agents/navi-worker-log.1.txt": {
+    "archive": "devbox-closeout-private/pr1928/20261111T235127Z-records.tar.gz",
+    "catalog": "docs/handoffs/pr-1928-closeout/archive-index.json#records",
+    "disposition": "archived",
+    "sha256": "6b9667a937d8351101a994ea55b64cd30c24f835af5495540057b678ac66d66f"
+  },
+  "agents/navi-worker-log.2.txt": {
+    "archive": "devbox-closeout-private/pr1928/20261111T235127Z-records.tar.gz",
+    "catalog": "docs/handoffs/pr-1928-closeout/archive-index.json#records",
+    "disposition": "archived",
+    "sha256": "6b9667a937d8351101a994ea55b64cd30c24f835af5495540057b678ac66d66f"
+  },
+  "agents/navi-worker-log.3.txt": {
+    "archive": "devbox-closeout-private/pr1928/20261111T235127Z-records.tar.gz",
+    "catalog": "docs/handoffs/pr-1928-closeout/archive-index.json#records",
+    "disposition": "archived",
+    "sha256": "6b9667a937d8351101a994ea55b64cd30c24f835af5495540057b678ac66d66f"
+  },
+  "agents/navi-worker-log.txt": {
+    "archive": "devbox-closeout-private/pr1928/20261111T235127Z-records.tar.gz",
+    "catalog": "docs/handoffs/pr-1928-closeout/archive-index.json#records",
+    "disposition": "archived",
+    "sha256": "6b9667a937d8351101a994ea55b64cd30c24f835af5495540057b678ac66d66f"
+  },
+  "agents/providers/fast_cache/": {
+    "archive": "devbox-closeout-private/pr1928/20261111T235127Z-records.tar.gz",
+    "catalog": "docs/handoffs/pr-1928-closeout/archive-index.json#records",
+    "disposition": "archived",
+    "sha256": "6b9667a937d8351101a994ea55b64cd30c24f835af5495540057b678ac66d66f"
+  },
+  "back-end/.context/": {
+    "archive": "devbox-closeout-private/pr1928/20261111T235127Z-records.tar.gz",
+    "catalog": "docs/handoffs/pr-1928-closeout/archive-index.json#records",
+    "disposition": "archived",
+    "sha256": "6b9667a937d8351101a994ea55b64cd30c24f835af5495540057b678ac66d66f"
+  },
+  "back-end/.env": {
+    "archive": "devbox-closeout-private/pr1928/20261111T235127Z-records.tar.gz",
+    "catalog": "docs/handoffs/pr-1928-closeout/archive-index.json#records",
+    "disposition": "archived",
+    "sha256": "6b9667a937d8351101a994ea55b64cd30c24f835af5495540057b678ac66d66f"
+  },
+  "back-end/.env.cloudbench-upsert.lock": {
+    "archive": "devbox-closeout-private/pr1928/20261111T235127Z-records.tar.gz",
+    "catalog": "docs/handoffs/pr-1928-closeout/archive-index.json#records",
+    "disposition": "archived",
+    "sha256": "6b9667a937d8351101a994ea55b64cd30c24f835af5495540057b678ac66d66f"
+  },
+  "back-end/backend-logs.log": {
+    "archive": "devbox-closeout-private/pr1928/20261111T235127Z-records.tar.gz",
+    "catalog": "docs/handoffs/pr-1928-closeout/archive-index.json#records",
+    "disposition": "archived",
+    "sha256": "6b9667a937d8351101a994ea55b64cd30c24f835af5495540057b678ac66d66f"
+  },
+  "branch:andyprevalsky/P3-message-person-hillclimb": {
+    "archive": "devbox-closeout-private/pr1928/20261111T235127Z-branches.bundle",
+    "catalog": "docs/handoffs/pr-1928-closeout/archive-index.json#branches",
+    "disposition": "archived",
+    "sha256": "fa04186b990865b7ecb95f42c7990ec2835846fb6f5a7f3c8c25e8580ea3a5c1"
+  },
+  "branch:andyprevalsky/archive-domain-render-hotfix-2": {
+    "archive": "devbox-closeout-private/pr1928/20261111T235127Z-branches.bundle",
+    "catalog": "docs/handoffs/pr-1928-closeout/archive-index.json#branches",
+    "disposition": "archived",
+    "sha256": "fa04186b990865b7ecb95f42c7990ec2835846fb6f5a7f3c8c25e8580ea3a5c1"
+  },
+  "branch:andyprevalsky/audit-prod-temporal-queue": {
+    "archive": "devbox-closeout-private/pr1928/20261111T235127Z-branches.bundle",
+    "catalog": "docs/handoffs/pr-1928-closeout/archive-index.json#branches",
+    "disposition": "archived",
+    "sha256": "fa04186b990865b7ecb95f42c7990ec2835846fb6f5a7f3c8c25e8580ea3a5c1"
+  },
+  "branch:andyprevalsky/browser-js-state": {
+    "archive": "devbox-closeout-private/pr1928/20261111T235127Z-branches.bundle",
+    "catalog": "docs/handoffs/pr-1928-closeout/archive-index.json#branches",
+    "disposition": "archived",
+    "sha256": "fa04186b990865b7ecb95f42c7990ec2835846fb6f5a7f3c8c25e8580ea3a5c1"
+  },
+  "branch:andyprevalsky/check-mac-app": {
+    "archive": "devbox-closeout-private/pr1928/20261111T235127Z-branches.bundle",
+    "catalog": "docs/handoffs/pr-1928-closeout/archive-index.json#branches",
+    "disposition": "archived",
+    "sha256": "fa04186b990865b7ecb95f42c7990ec2835846fb6f5a7f3c8c25e8580ea3a5c1"
+  },
+  "branch:andyprevalsky/descend-antibot-harness-infra": {
+    "archive": "devbox-closeout-private/pr1928/20261111T235127Z-branches.bundle",
+    "catalog": "docs/handoffs/pr-1928-closeout/archive-index.json#branches",
+    "disposition": "archived",
+    "sha256": "fa04186b990865b7ecb95f42c7990ec2835846fb6f5a7f3c8c25e8580ea3a5c1"
+  },
+  "branch:andyprevalsky/descend-daily-h01": {
+    "archive": "devbox-closeout-private/pr1928/20261111T235127Z-branches.bundle",
+    "catalog": "docs/handoffs/pr-1928-closeout/archive-index.json#branches",
+    "disposition": "archived",
+    "sha256": "fa04186b990865b7ecb95f42c7990ec2835846fb6f5a7f3c8c25e8580ea3a5c1"
+  },
+  "branch:andyprevalsky/descend-daily-h04": {
+    "archive": "devbox-closeout-private/pr1928/20261111T235127Z-branches.bundle",
+    "catalog": "docs/handoffs/pr-1928-closeout/archive-index.json#branches",
+    "disposition": "archived",
+    "sha256": "fa04186b990865b7ecb95f42c7990ec2835846fb6f5a7f3c8c25e8580ea3a5c1"
+  },
+  "branch:andyprevalsky/descend-daily-h06-h08": {
+    "archive": "devbox-closeout-private/pr1928/20261111T235127Z-branches.bundle",
+    "catalog": "docs/handoffs/pr-1928-closeout/archive-index.json#branches",
+    "disposition": "archived",
+    "sha256": "fa04186b990865b7ecb95f42c7990ec2835846fb6f5a7f3c8c25e8580ea3a5c1"
+  },
+  "branch:andyprevalsky/descend-daily-h08-proposed": {
+    "archive": "devbox-closeout-private/pr1928/20261111T235127Z-branches.bundle",
+    "catalog": "docs/handoffs/pr-1928-closeout/archive-index.json#branches",
+    "disposition": "archived",
+    "sha256": "fa04186b990865b7ecb95f42c7990ec2835846fb6f5a7f3c8c25e8580ea3a5c1"
+  },
+  "branch:andyprevalsky/descend-i05-google-evaluator": {
+    "archive": "devbox-closeout-private/pr1928/20261111T235127Z-branches.bundle",
+    "catalog": "docs/handoffs/pr-1928-closeout/archive-index.json#branches",
+    "disposition": "archived",
+    "sha256": "fa04186b990865b7ecb95f42c7990ec2835846fb6f5a7f3c8c25e8580ea3a5c1"
+  },
+  "branch:andyprevalsky/descend-i08-cleanup-ownership": {
+    "archive": "devbox-closeout-private/pr1928/20261111T235127Z-branches.bundle",
+    "catalog": "docs/handoffs/pr-1928-closeout/archive-index.json#branches",
+    "disposition": "archived",
+    "sha256": "fa04186b990865b7ecb95f42c7990ec2835846fb6f5a7f3c8c25e8580ea3a5c1"
+  },
+  "branch:andyprevalsky/fe-refactor-5": {
+    "archive": "devbox-closeout-private/pr1928/20261111T235127Z-branches.bundle",
+    "catalog": "docs/handoffs/pr-1928-closeout/archive-index.json#branches",
+    "disposition": "archived",
+    "sha256": "fa04186b990865b7ecb95f42c7990ec2835846fb6f5a7f3c8c25e8580ea3a5c1"
+  },
+  "branch:andyprevalsky/fe-refactor-6": {
+    "archive": "devbox-closeout-private/pr1928/20261111T235127Z-branches.bundle",
+    "catalog": "docs/handoffs/pr-1928-closeout/archive-index.json#branches",
+    "disposition": "archived",
+    "sha256": "fa04186b990865b7ecb95f42c7990ec2835846fb6f5a7f3c8c25e8580ea3a5c1"
+  },
+  "branch:andyprevalsky/fe-refactor-u01-v2": {
+    "archive": "devbox-closeout-private/pr1928/20261111T235127Z-branches.bundle",
+    "catalog": "docs/handoffs/pr-1928-closeout/archive-index.json#branches",
+    "disposition": "archived",
+    "sha256": "fa04186b990865b7ecb95f42c7990ec2835846fb6f5a7f3c8c25e8580ea3a5c1"
+  },
+  "branch:andyprevalsky/fe-refactor-u02-v2": {
+    "archive": "devbox-closeout-private/pr1928/20261111T235127Z-branches.bundle",
+    "catalog": "docs/handoffs/pr-1928-closeout/archive-index.json#branches",
+    "disposition": "archived",
+    "sha256": "fa04186b990865b7ecb95f42c7990ec2835846fb6f5a7f3c8c25e8580ea3a5c1"
+  },
+  "branch:andyprevalsky/fe-refactor-u04": {
+    "archive": "devbox-closeout-private/pr1928/20261111T235127Z-branches.bundle",
+    "catalog": "docs/handoffs/pr-1928-closeout/archive-index.json#branches",
+    "disposition": "archived",
+    "sha256": "fa04186b990865b7ecb95f42c7990ec2835846fb6f5a7f3c8c25e8580ea3a5c1"
+  },
+  "branch:andyprevalsky/fe-refactor-u09": {
+    "archive": "devbox-closeout-private/pr1928/20261111T235127Z-branches.bundle",
+    "catalog": "docs/handoffs/pr-1928-closeout/archive-index.json#branches",
+    "disposition": "archived",
+    "sha256": "fa04186b990865b7ecb95f42c7990ec2835846fb6f5a7f3c8c25e8580ea3a5c1"
+  },
+  "branch:andyprevalsky/fe-refactor-u10": {
+    "archive": "devbox-closeout-private/pr1928/20261111T235127Z-branches.bundle",
+    "catalog": "docs/handoffs/pr-1928-closeout/archive-index.json#branches",
+    "disposition": "archived",
+    "sha256": "fa04186b990865b7ecb95f42c7990ec2835846fb6f5a7f3c8c25e8580ea3a5c1"
+  },
+  "branch:andyprevalsky/fe-refactor-u12-v2": {
+    "archive": "devbox-closeout-private/pr1928/20261111T235127Z-branches.bundle",
+    "catalog": "docs/handoffs/pr-1928-closeout/archive-index.json#branches",
+    "disposition": "archived",
+    "sha256": "fa04186b990865b7ecb95f42c7990ec2835846fb6f5a7f3c8c25e8580ea3a5c1"
+  },
+  "branch:andyprevalsky/fe-refactor-u14-v2": {
+    "archive": "devbox-closeout-private/pr1928/20261111T235127Z-branches.bundle",
+    "catalog": "docs/handoffs/pr-1928-closeout/archive-index.json#branches",
+    "disposition": "archived",
+    "sha256": "fa04186b990865b7ecb95f42c7990ec2835846fb6f5a7f3c8c25e8580ea3a5c1"
+  },
+  "branch:andyprevalsky/fix-mac-app-updates": {
+    "archive": "devbox-closeout-private/pr1928/20261111T235127Z-branches.bundle",
+    "catalog": "docs/handoffs/pr-1928-closeout/archive-index.json#branches",
+    "disposition": "archived",
+    "sha256": "fa04186b990865b7ecb95f42c7990ec2835846fb6f5a7f3c8c25e8580ea3a5c1"
+  },
+  "branch:andyprevalsky/fix-mac-release-node-gyp": {
+    "archive": "devbox-closeout-private/pr1928/20261111T235127Z-branches.bundle",
+    "catalog": "docs/handoffs/pr-1928-closeout/archive-index.json#branches",
+    "disposition": "archived",
+    "sha256": "fa04186b990865b7ecb95f42c7990ec2835846fb6f5a7f3c8c25e8580ea3a5c1"
+  },
+  "branch:andyprevalsky/fmt-auth": {
+    "archive": "devbox-closeout-private/pr1928/20261111T235127Z-branches.bundle",
+    "catalog": "docs/handoffs/pr-1928-closeout/archive-index.json#branches",
+    "disposition": "archived",
+    "sha256": "fa04186b990865b7ecb95f42c7990ec2835846fb6f5a7f3c8c25e8580ea3a5c1"
+  },
+  "branch:andyprevalsky/fmt-browser-state-sync": {
+    "archive": "devbox-closeout-private/pr1928/20261111T235127Z-branches.bundle",
+    "catalog": "docs/handoffs/pr-1928-closeout/archive-index.json#branches",
+    "disposition": "archived",
+    "sha256": "fa04186b990865b7ecb95f42c7990ec2835846fb6f5a7f3c8c25e8580ea3a5c1"
+  },
+  "branch:andyprevalsky/fmt-claude-credential-sync": {
+    "archive": "devbox-closeout-private/pr1928/20261111T235127Z-branches.bundle",
+    "catalog": "docs/handoffs/pr-1928-closeout/archive-index.json#branches",
+    "disposition": "archived",
+    "sha256": "fa04186b990865b7ecb95f42c7990ec2835846fb6f5a7f3c8c25e8580ea3a5c1"
+  },
+  "branch:andyprevalsky/fmt-cookie-reader": {
+    "archive": "devbox-closeout-private/pr1928/20261111T235127Z-branches.bundle",
+    "catalog": "docs/handoffs/pr-1928-closeout/archive-index.json#branches",
+    "disposition": "archived",
+    "sha256": "fa04186b990865b7ecb95f42c7990ec2835846fb6f5a7f3c8c25e8580ea3a5c1"
+  },
+  "branch:andyprevalsky/fmt-electron-app": {
+    "archive": "devbox-closeout-private/pr1928/20261111T235127Z-branches.bundle",
+    "catalog": "docs/handoffs/pr-1928-closeout/archive-index.json#branches",
+    "disposition": "archived",
+    "sha256": "fa04186b990865b7ecb95f42c7990ec2835846fb6f5a7f3c8c25e8580ea3a5c1"
+  },
+  "branch:andyprevalsky/fmt-electron-main": {
+    "archive": "devbox-closeout-private/pr1928/20261111T235127Z-branches.bundle",
+    "catalog": "docs/handoffs/pr-1928-closeout/archive-index.json#branches",
+    "disposition": "archived",
+    "sha256": "fa04186b990865b7ecb95f42c7990ec2835846fb6f5a7f3c8c25e8580ea3a5c1"
+  },
+  "branch:andyprevalsky/fmt-i-message-queue-service": {
+    "archive": "devbox-closeout-private/pr1928/20261111T235127Z-branches.bundle",
+    "catalog": "docs/handoffs/pr-1928-closeout/archive-index.json#branches",
+    "disposition": "archived",
+    "sha256": "fa04186b990865b7ecb95f42c7990ec2835846fb6f5a7f3c8c25e8580ea3a5c1"
+  },
+  "branch:andyprevalsky/fmt-i-message-reader": {
+    "archive": "devbox-closeout-private/pr1928/20261111T235127Z-branches.bundle",
+    "catalog": "docs/handoffs/pr-1928-closeout/archive-index.json#branches",
+    "disposition": "archived",
+    "sha256": "fa04186b990865b7ecb95f42c7990ec2835846fb6f5a7f3c8c25e8580ea3a5c1"
+  },
+  "branch:andyprevalsky/fmt-i-message-sync": {
+    "archive": "devbox-closeout-private/pr1928/20261111T235127Z-branches.bundle",
+    "catalog": "docs/handoffs/pr-1928-closeout/archive-index.json#branches",
+    "disposition": "archived",
+    "sha256": "fa04186b990865b7ecb95f42c7990ec2835846fb6f5a7f3c8c25e8580ea3a5c1"
+  },
+  "branch:andyprevalsky/fmt-ipc-registry": {
+    "archive": "devbox-closeout-private/pr1928/20261111T235127Z-branches.bundle",
+    "catalog": "docs/handoffs/pr-1928-closeout/archive-index.json#branches",
+    "disposition": "archived",
+    "sha256": "fa04186b990865b7ecb95f42c7990ec2835846fb6f5a7f3c8c25e8580ea3a5c1"
+  },
+  "branch:andyprevalsky/fmt-messaging-core": {
+    "archive": "devbox-closeout-private/pr1928/20261111T235127Z-branches.bundle",
+    "catalog": "docs/handoffs/pr-1928-closeout/archive-index.json#branches",
+    "disposition": "archived",
+    "sha256": "fa04186b990865b7ecb95f42c7990ec2835846fb6f5a7f3c8c25e8580ea3a5c1"
+  },
+  "branch:andyprevalsky/fmt-messaging-imessage": {
+    "archive": "devbox-closeout-private/pr1928/20261111T235127Z-branches.bundle",
+    "catalog": "docs/handoffs/pr-1928-closeout/archive-index.json#branches",
+    "disposition": "archived",
+    "sha256": "fa04186b990865b7ecb95f42c7990ec2835846fb6f5a7f3c8c25e8580ea3a5c1"
+  },
+  "branch:andyprevalsky/fmt-messaging-telegram": {
+    "archive": "devbox-closeout-private/pr1928/20261111T235127Z-branches.bundle",
+    "catalog": "docs/handoffs/pr-1928-closeout/archive-index.json#branches",
+    "disposition": "archived",
+    "sha256": "fa04186b990865b7ecb95f42c7990ec2835846fb6f5a7f3c8c25e8580ea3a5c1"
+  },
+  "branch:andyprevalsky/fmt-messaging-whatsapp": {
+    "archive": "devbox-closeout-private/pr1928/20261111T235127Z-branches.bundle",
+    "catalog": "docs/handoffs/pr-1928-closeout/archive-index.json#branches",
+    "disposition": "archived",
+    "sha256": "fa04186b990865b7ecb95f42c7990ec2835846fb6f5a7f3c8c25e8580ea3a5c1"
+  },
+  "branch:andyprevalsky/fmt-onboarding": {
+    "archive": "devbox-closeout-private/pr1928/20261111T235127Z-branches.bundle",
+    "catalog": "docs/handoffs/pr-1928-closeout/archive-index.json#branches",
+    "disposition": "archived",
+    "sha256": "fa04186b990865b7ecb95f42c7990ec2835846fb6f5a7f3c8c25e8580ea3a5c1"
+  },
+  "branch:andyprevalsky/fmt-renderer-main": {
+    "archive": "devbox-closeout-private/pr1928/20261111T235127Z-branches.bundle",
+    "catalog": "docs/handoffs/pr-1928-closeout/archive-index.json#branches",
+    "disposition": "archived",
+    "sha256": "fa04186b990865b7ecb95f42c7990ec2835846fb6f5a7f3c8c25e8580ea3a5c1"
+  },
+  "branch:andyprevalsky/fmt-sync-manager": {
+    "archive": "devbox-closeout-private/pr1928/20261111T235127Z-branches.bundle",
+    "catalog": "docs/handoffs/pr-1928-closeout/archive-index.json#branches",
+    "disposition": "archived",
+    "sha256": "fa04186b990865b7ecb95f42c7990ec2835846fb6f5a7f3c8c25e8580ea3a5c1"
+  },
+  "branch:andyprevalsky/fmt-uploader": {
+    "archive": "devbox-closeout-private/pr1928/20261111T235127Z-branches.bundle",
+    "catalog": "docs/handoffs/pr-1928-closeout/archive-index.json#branches",
+    "disposition": "archived",
+    "sha256": "fa04186b990865b7ecb95f42c7990ec2835846fb6f5a7f3c8c25e8580ea3a5c1"
+  },
+  "branch:andyprevalsky/map-mac-app": {
+    "archive": "devbox-closeout-private/pr1928/20261111T235127Z-branches.bundle",
+    "catalog": "docs/handoffs/pr-1928-closeout/archive-index.json#branches",
+    "disposition": "archived",
+    "sha256": "fa04186b990865b7ecb95f42c7990ec2835846fb6f5a7f3c8c25e8580ea3a5c1"
+  },
+  "branch:andyprevalsky/nightly-temporal-migration": {
+    "archive": "devbox-closeout-private/pr1928/20261111T235127Z-branches.bundle",
+    "catalog": "docs/handoffs/pr-1928-closeout/archive-index.json#branches",
+    "disposition": "archived",
+    "sha256": "fa04186b990865b7ecb95f42c7990ec2835846fb6f5a7f3c8c25e8580ea3a5c1"
+  },
+  "branch:andyprevalsky/purchase-auth-hold-capture-2": {
+    "archive": "devbox-closeout-private/pr1928/20261111T235127Z-branches.bundle",
+    "catalog": "docs/handoffs/pr-1928-closeout/archive-index.json#branches",
+    "disposition": "archived",
+    "sha256": "fa04186b990865b7ecb95f42c7990ec2835846fb6f5a7f3c8c25e8580ea3a5c1"
+  },
+  "branch:andyprevalsky/rca-agentcard-prod-transfer-id": {
+    "archive": "devbox-closeout-private/pr1928/20261111T235127Z-branches.bundle",
+    "catalog": "docs/handoffs/pr-1928-closeout/archive-index.json#branches",
+    "disposition": "archived",
+    "sha256": "fa04186b990865b7ecb95f42c7990ec2835846fb6f5a7f3c8c25e8580ea3a5c1"
+  },
+  "branch:andyprevalsky/rca-deploy-dependency-capacity": {
+    "archive": "devbox-closeout-private/pr1928/20261111T235127Z-branches.bundle",
+    "catalog": "docs/handoffs/pr-1928-closeout/archive-index.json#branches",
+    "disposition": "archived",
+    "sha256": "fa04186b990865b7ecb95f42c7990ec2835846fb6f5a7f3c8c25e8580ea3a5c1"
+  },
+  "branch:andyprevalsky/rca-ecommerce-fixtures": {
+    "archive": "devbox-closeout-private/pr1928/20261111T235127Z-branches.bundle",
+    "catalog": "docs/handoffs/pr-1928-closeout/archive-index.json#branches",
+    "disposition": "archived",
+    "sha256": "fa04186b990865b7ecb95f42c7990ec2835846fb6f5a7f3c8c25e8580ea3a5c1"
+  },
+  "branch:andyprevalsky/rca-ecommerce-payment": {
+    "archive": "devbox-closeout-private/pr1928/20261111T235127Z-branches.bundle",
+    "catalog": "docs/handoffs/pr-1928-closeout/archive-index.json#branches",
+    "disposition": "archived",
+    "sha256": "fa04186b990865b7ecb95f42c7990ec2835846fb6f5a7f3c8c25e8580ea3a5c1"
+  },
+  "branch:andyprevalsky/rca-ecommerce-terminal": {
+    "archive": "devbox-closeout-private/pr1928/20261111T235127Z-branches.bundle",
+    "catalog": "docs/handoffs/pr-1928-closeout/archive-index.json#branches",
+    "disposition": "archived",
+    "sha256": "fa04186b990865b7ecb95f42c7990ec2835846fb6f5a7f3c8c25e8580ea3a5c1"
+  },
+  "branch:andyprevalsky/rca-i16-integration": {
+    "archive": "devbox-closeout-private/pr1928/20261111T235127Z-branches.bundle",
+    "catalog": "docs/handoffs/pr-1928-closeout/archive-index.json#branches",
+    "disposition": "archived",
+    "sha256": "fa04186b990865b7ecb95f42c7990ec2835846fb6f5a7f3c8c25e8580ea3a5c1"
+  },
+  "branch:andyprevalsky/rca-workspace-env-hermetic": {
+    "archive": "devbox-closeout-private/pr1928/20261111T235127Z-branches.bundle",
+    "catalog": "docs/handoffs/pr-1928-closeout/archive-index.json#branches",
+    "disposition": "archived",
+    "sha256": "fa04186b990865b7ecb95f42c7990ec2835846fb6f5a7f3c8c25e8580ea3a5c1"
+  },
+  "branch:andyprevalsky/refactor-benchmark-production": {
+    "archive": "devbox-closeout-private/pr1928/20261111T235127Z-branches.bundle",
+    "catalog": "docs/handoffs/pr-1928-closeout/archive-index.json#branches",
+    "disposition": "archived",
+    "sha256": "fa04186b990865b7ecb95f42c7990ec2835846fb6f5a7f3c8c25e8580ea3a5c1"
+  },
+  "branch:andyprevalsky/refactor-benchmark-runner": {
+    "archive": "devbox-closeout-private/pr1928/20261111T235127Z-branches.bundle",
+    "catalog": "docs/handoffs/pr-1928-closeout/archive-index.json#branches",
+    "disposition": "archived",
+    "sha256": "fa04186b990865b7ecb95f42c7990ec2835846fb6f5a7f3c8c25e8580ea3a5c1"
+  },
+  "branch:andyprevalsky/research-benchmark-production-unit-tests": {
+    "archive": "devbox-closeout-private/pr1928/20261111T235127Z-branches.bundle",
+    "catalog": "docs/handoffs/pr-1928-closeout/archive-index.json#branches",
+    "disposition": "archived",
+    "sha256": "fa04186b990865b7ecb95f42c7990ec2835846fb6f5a7f3c8c25e8580ea3a5c1"
+  },
+  "branch:andyprevalsky/revert-plateau": {
+    "archive": "devbox-closeout-private/pr1928/20261111T235127Z-branches.bundle",
+    "catalog": "docs/handoffs/pr-1928-closeout/archive-index.json#branches",
+    "disposition": "archived",
+    "sha256": "fa04186b990865b7ecb95f42c7990ec2835846fb6f5a7f3c8c25e8580ea3a5c1"
+  },
+  "branch:andyprevalsky/semantic-gate-temporal-poll-robustness": {
+    "archive": "devbox-closeout-private/pr1928/20261111T235127Z-branches.bundle",
+    "catalog": "docs/handoffs/pr-1928-closeout/archive-index.json#branches",
+    "disposition": "archived",
+    "sha256": "fa04186b990865b7ecb95f42c7990ec2835846fb6f5a7f3c8c25e8580ea3a5c1"
+  },
+  "branch:andyprevalsky/sms-agent-fail-debug-2": {
+    "archive": "devbox-closeout-private/pr1928/20261111T235127Z-branches.bundle",
+    "catalog": "docs/handoffs/pr-1928-closeout/archive-index.json#branches",
+    "disposition": "archived",
+    "sha256": "fa04186b990865b7ecb95f42c7990ec2835846fb6f5a7f3c8c25e8580ea3a5c1"
+  },
+  "branch:andyprevalsky/sync-agent-data": {
+    "archive": "devbox-closeout-private/pr1928/20261111T235127Z-branches.bundle",
+    "catalog": "docs/handoffs/pr-1928-closeout/archive-index.json#branches",
+    "disposition": "archived",
+    "sha256": "fa04186b990865b7ecb95f42c7990ec2835846fb6f5a7f3c8c25e8580ea3a5c1"
+  },
+  "branch:andyprevalsky/whatsapp-sync": {
+    "archive": "devbox-closeout-private/pr1928/20261111T235127Z-branches.bundle",
+    "catalog": "docs/handoffs/pr-1928-closeout/archive-index.json#branches",
+    "disposition": "archived",
+    "sha256": "fa04186b990865b7ecb95f42c7990ec2835846fb6f5a7f3c8c25e8580ea3a5c1"
+  },
+  "branch:andyprevalsky/zero-downtime-agent-cutover": {
+    "archive": "devbox-closeout-private/pr1928/20261111T235127Z-branches.bundle",
+    "catalog": "docs/handoffs/pr-1928-closeout/archive-index.json#branches",
+    "disposition": "archived",
+    "sha256": "fa04186b990865b7ecb95f42c7990ec2835846fb6f5a7f3c8c25e8580ea3a5c1"
+  },
+  "branch:backup-pre-rebase-H01": {
+    "archive": "devbox-closeout-private/pr1928/20261111T235127Z-branches.bundle",
+    "catalog": "docs/handoffs/pr-1928-closeout/archive-index.json#branches",
+    "disposition": "archived",
+    "sha256": "fa04186b990865b7ecb95f42c7990ec2835846fb6f5a7f3c8c25e8580ea3a5c1"
+  },
+  "branch:backup/cerebras-chat-quota-prepush-20261002": {
+    "archive": "devbox-closeout-private/pr1928/20261111T235127Z-branches.bundle",
+    "catalog": "docs/handoffs/pr-1928-closeout/archive-index.json#branches",
+    "disposition": "archived",
+    "sha256": "fa04186b990865b7ecb95f42c7990ec2835846fb6f5a7f3c8c25e8580ea3a5c1"
+  },
+  "branch:research-completions-finish": {
+    "archive": "devbox-closeout-private/pr1928/20261111T235127Z-branches.bundle",
+    "catalog": "docs/handoffs/pr-1928-closeout/archive-index.json#branches",
+    "disposition": "archived",
+    "sha256": "fa04186b990865b7ecb95f42c7990ec2835846fb6f5a7f3c8c25e8580ea3a5c1"
+  },
+  "branch:worktree-agent-a2ce06f7": {
+    "archive": "devbox-closeout-private/pr1928/20261111T235127Z-branches.bundle",
+    "catalog": "docs/handoffs/pr-1928-closeout/archive-index.json#branches",
+    "disposition": "archived",
+    "sha256": "fa04186b990865b7ecb95f42c7990ec2835846fb6f5a7f3c8c25e8580ea3a5c1"
+  },
+  "branch:worktree-agent-a4865381": {
+    "archive": "devbox-closeout-private/pr1928/20261111T235127Z-branches.bundle",
+    "catalog": "docs/handoffs/pr-1928-closeout/archive-index.json#branches",
+    "disposition": "archived",
+    "sha256": "fa04186b990865b7ecb95f42c7990ec2835846fb6f5a7f3c8c25e8580ea3a5c1"
+  },
+  "branch:worktree-agent-a53b33a4": {
+    "archive": "devbox-closeout-private/pr1928/20261111T235127Z-branches.bundle",
+    "catalog": "docs/handoffs/pr-1928-closeout/archive-index.json#branches",
+    "disposition": "archived",
+    "sha256": "fa04186b990865b7ecb95f42c7990ec2835846fb6f5a7f3c8c25e8580ea3a5c1"
+  },
+  "branch:worktree-agent-a8ac3824": {
+    "archive": "devbox-closeout-private/pr1928/20261111T235127Z-branches.bundle",
+    "catalog": "docs/handoffs/pr-1928-closeout/archive-index.json#branches",
+    "disposition": "archived",
+    "sha256": "fa04186b990865b7ecb95f42c7990ec2835846fb6f5a7f3c8c25e8580ea3a5c1"
+  },
+  "branch:worktree-agent-a9fd05de": {
+    "archive": "devbox-closeout-private/pr1928/20261111T235127Z-branches.bundle",
+    "catalog": "docs/handoffs/pr-1928-closeout/archive-index.json#branches",
+    "disposition": "archived",
+    "sha256": "fa04186b990865b7ecb95f42c7990ec2835846fb6f5a7f3c8c25e8580ea3a5c1"
+  },
+  "branch:worktree-agent-aa597117": {
+    "archive": "devbox-closeout-private/pr1928/20261111T235127Z-branches.bundle",
+    "catalog": "docs/handoffs/pr-1928-closeout/archive-index.json#branches",
+    "disposition": "archived",
+    "sha256": "fa04186b990865b7ecb95f42c7990ec2835846fb6f5a7f3c8c25e8580ea3a5c1"
+  },
+  "branch:worktree-agent-ab7ea04b": {
+    "archive": "devbox-closeout-private/pr1928/20261111T235127Z-branches.bundle",
+    "catalog": "docs/handoffs/pr-1928-closeout/archive-index.json#branches",
+    "disposition": "archived",
+    "sha256": "fa04186b990865b7ecb95f42c7990ec2835846fb6f5a7f3c8c25e8580ea3a5c1"
+  },
+  "branch:worktree-agent-ad6481e8": {
+    "archive": "devbox-closeout-private/pr1928/20261111T235127Z-branches.bundle",
+    "catalog": "docs/handoffs/pr-1928-closeout/archive-index.json#branches",
+    "disposition": "archived",
+    "sha256": "fa04186b990865b7ecb95f42c7990ec2835846fb6f5a7f3c8c25e8580ea3a5c1"
+  },
+  "branch:worktree-agent-aebec228": {
+    "archive": "devbox-closeout-private/pr1928/20261111T235127Z-branches.bundle",
+    "catalog": "docs/handoffs/pr-1928-closeout/archive-index.json#branches",
+    "disposition": "archived",
+    "sha256": "fa04186b990865b7ecb95f42c7990ec2835846fb6f5a7f3c8c25e8580ea3a5c1"
+  },
+  "docs/rca/INDEX.md": {
+    "archive": "devbox-closeout-private/pr1928/20261111T235127Z-records.tar.gz",
+    "catalog": "docs/handoffs/pr-1928-closeout/archive-index.json#records",
+    "disposition": "archived",
+    "sha256": "6b9667a937d8351101a994ea55b64cd30c24f835af5495540057b678ac66d66f"
+  },
+  "front-end/.env": {
+    "archive": "devbox-closeout-private/pr1928/20261111T235127Z-records.tar.gz",
+    "catalog": "docs/handoffs/pr-1928-closeout/archive-index.json#records",
+    "disposition": "archived",
+    "sha256": "6b9667a937d8351101a994ea55b64cd30c24f835af5495540057b678ac66d66f"
+  },
+  "front-end/frontend-logs.log": {
+    "archive": "devbox-closeout-private/pr1928/20261111T235127Z-records.tar.gz",
+    "catalog": "docs/handoffs/pr-1928-closeout/archive-index.json#records",
+    "disposition": "archived",
+    "sha256": "6b9667a937d8351101a994ea55b64cd30c24f835af5495540057b678ac66d66f"
+  },
+  "front-end/playwright-mobile-screenshots/": {
+    "archive": "devbox-closeout-private/pr1928/20261111T235127Z-records.tar.gz",
+    "catalog": "docs/handoffs/pr-1928-closeout/archive-index.json#records",
+    "disposition": "archived",
+    "sha256": "6b9667a937d8351101a994ea55b64cd30c24f835af5495540057b678ac66d66f"
+  },
+  "hub-poller-logs.log": {
+    "archive": "devbox-closeout-private/pr1928/20261111T235127Z-records.tar.gz",
+    "catalog": "docs/handoffs/pr-1928-closeout/archive-index.json#records",
+    "disposition": "archived",
+    "sha256": "6b9667a937d8351101a994ea55b64cd30c24f835af5495540057b678ac66d66f"
+  },
+  "mac-app/.env": {
+    "archive": "devbox-closeout-private/pr1928/20261111T235127Z-records.tar.gz",
+    "catalog": "docs/handoffs/pr-1928-closeout/archive-index.json#records",
+    "disposition": "archived",
+    "sha256": "6b9667a937d8351101a994ea55b64cd30c24f835af5495540057b678ac66d66f"
+  },
+  "package-lock.json": {
+    "archive": "devbox-closeout-private/pr1928/20261111T235127Z-records.tar.gz",
+    "catalog": "docs/handoffs/pr-1928-closeout/archive-index.json#records",
+    "disposition": "archived",
+    "sha256": "6b9667a937d8351101a994ea55b64cd30c24f835af5495540057b678ac66d66f"
+  },
+  "research/.env": {
+    "archive": "devbox-closeout-private/pr1928/20261111T235127Z-records.tar.gz",
+    "catalog": "docs/handoffs/pr-1928-closeout/archive-index.json#records",
+    "disposition": "archived",
+    "sha256": "6b9667a937d8351101a994ea55b64cd30c24f835af5495540057b678ac66d66f"
+  },
+  "stash:0e2ffe95ba40a2d0c2b8ae9e884b4a85d96af3f2": {
+    "archive": "devbox-closeout-private/pr1928/20261111T235127Z-branches.bundle",
+    "catalog": "docs/handoffs/pr-1928-closeout/archive-index.json#branches",
+    "disposition": "archived",
+    "ref": "refs/closeout/pr1928-stash",
+    "sha256": "fa04186b990865b7ecb95f42c7990ec2835846fb6f5a7f3c8c25e8580ea3a5c1"
+  }
+}

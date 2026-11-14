@@ -1,5 +1,5 @@
 ---
-description: "Set up code coverage enforcement for a service. Installs tooling, configures thresholds, updates deploy/push skills and CLAUDE.md."
+description: "Set up code coverage enforcement for a service. Installs tooling, configures thresholds, updates deploy/push skills and the service's own CLAUDE.md."
 argument-hint: "<service-dir> (e.g., back-end, front-end, agents)"
 ---
 
@@ -9,7 +9,7 @@ Set up code coverage measurement and enforcement for a service directory. Instal
 
 If `$ARGUMENTS` is empty, ask the user which service directory to target and stop.
 
-**This is a loop. Do NOT stop until coverage tooling is installed, thresholds are configured, the coverage report runs green, and deploy/push/CLAUDE.md are updated.**
+**This is a loop. Do NOT stop until coverage tooling is installed, thresholds are configured, the coverage report runs green, and deploy/push and the service's CLAUDE.md are updated.**
 
 ---
 
@@ -18,7 +18,7 @@ If `$ARGUMENTS` is empty, ask the user which service directory to target and sto
 Read the service directory to determine:
 
 1. **Language**: TypeScript (Node), Python, or other
-2. **Test runner**: What command runs the tests today? Check `package.json` scripts, `pyproject.toml`, or the test instructions in `CLAUDE.md`.
+2. **Test runner**: What command runs the tests today? Check `package.json` scripts, `pyproject.toml`, the service's own `$ARGUMENTS/CLAUDE.md`, or `docs/testing.md`.
 3. **Existing coverage tooling**: Is any coverage library already installed? Check `package.json` devDependencies, `requirements.txt`, `pyproject.toml`.
 4. **Test command baseline**: Run the existing test command once to confirm tests pass BEFORE adding coverage. If tests fail, stop and tell the user — coverage enforcement on a broken test suite is pointless.
 
@@ -304,19 +304,15 @@ cd $ARGUMENTS && npm run test:coverage
 
 ---
 
-## Step 8: Update CLAUDE.md
+## Step 8: Update the service's CLAUDE.md
 
-Read the root `CLAUDE.md`. Add a section under **Tests** (or update the existing one) documenting:
+Document coverage where the service's other test commands live: `$ARGUMENTS/CLAUDE.md` (its `AGENTS.md` is a symlink to it). For a service without its own CLAUDE.md, use that service's entry in `docs/testing.md` instead. Add, in the file's existing one-line-per-rule bullet style:
 
-1. **How to run coverage** for the service:
-   ```bash
-   cd $ARGUMENTS && npm run test:coverage          # Check coverage meets thresholds
-   cd $ARGUMENTS && npm run test:coverage:report    # Detailed coverage report
-   ```
-2. **Current threshold**: e.g., "80% line/branch/function/statement coverage required"
-3. **How the ratchet works**: "Threshold should only go up, never down. Bump it after adding tests."
+1. **How to run coverage** for the service: `cd $ARGUMENTS && npm run test:coverage` (check thresholds) and `npm run test:coverage:report` (detailed report)
+2. **Current threshold**: e.g., "80% line/branch/function/statement coverage required (`<config file>`)"
+3. **How the ratchet works**: "Thresholds only go up, never down. Bump them after adding tests."
 
-Keep the addition concise — 3-5 lines max. Match the formatting of existing CLAUDE.md test entries.
+Keep the addition concise — 3 bullets at most. Never add a **Tests** or coverage block, commands or threshold numbers to the root `CLAUDE.md`: its Testing section keeps a single bullet naming the threshold config files that only ratchet up. Only add the new service's config path to that existing bullet, keeping it one line.
 
 ---
 
@@ -346,7 +342,7 @@ Output:
 - **Baseline coverage**: the numbers before any threshold was set
 - **Configured threshold**: the threshold set in the config
 - **Scripts added**: the npm/pip commands available
-- **Files modified**: list of files changed (config, package.json, CLAUDE.md, deploy.md, push.md, .gitignore)
+- **Files modified**: list of files changed (config, package.json, `$ARGUMENTS/CLAUDE.md` or `docs/testing.md`, the root CLAUDE.md coverage bullet if extended, deploy.md, push.md, .gitignore)
 - **Coverage report**: final coverage numbers
 
 Only say **`Code coverage enforcement complete`** if ALL of:
@@ -356,5 +352,5 @@ Only say **`Code coverage enforcement complete`** if ALL of:
 - [ ] coverage/ directory is gitignored
 - [ ] deploy.md updated with coverage step
 - [ ] push.md updated with coverage step
-- [ ] CLAUDE.md updated with coverage instructions
+- [ ] Service CLAUDE.md (or `docs/testing.md`) updated with coverage instructions; root CLAUDE.md only gained the config path in its existing coverage bullet
 - [ ] Full test suite still passes

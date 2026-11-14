@@ -203,7 +203,7 @@ class Selection(unittest.TestCase):
         self.assertTrue(gates['smoke']['native_cloud'])
 
     def test_mac_app_static_is_a_conditional_quick_check_never_a_platform_pass(self):
-        # Original /deploy Step 4m-lint (DEPRECATED_deploy.md L1380-1388): run when mac-app/ changed.
+        # Original /deploy Step 4m-lint (the former /deploy skill): run when mac-app/ changed.
         gate = p.MAC_APP_STATIC
         self.assertEqual(['bash','-c','npm run format:check && npm run lint && npm run type-check'],gate['command'])
         self.assertEqual(('mac-app','darwin','mac-app-static'),(gate['cwd'],gate['platform'],gate['category']))
@@ -1214,7 +1214,7 @@ for line in sys.stdin:
                     self.scan()
                 self.reap(child)
 
-    @quarantine(since='2026-11-11', repair='pending-handoff:7a087289ad244447887849683a096b6e',
+    @quarantine(since='2026-11-11', repair='https://boxes.dev/thread/thr_246005fb0d8546518a40a6cd55d83a70',
                 error="AssertionError: [0.05] is not false : the service manager is skipped on evidence, not after the grace window",
                 evidence='PR #1928 deploy-command-structural FLAKY occurrence 7a087289ad244447887849683a096b6e (source 622d4e979)')
     def test_own_user_service_manager_is_skipped_only_on_cgroup_evidence(self):

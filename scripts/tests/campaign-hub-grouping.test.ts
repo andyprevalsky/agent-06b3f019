@@ -7,6 +7,11 @@ import {
   symlinkSync,
   chmodSync,
   createWriteStream,
+  renameSync,
+  openSync,
+  writeSync,
+  closeSync,
+  constants,
 } from "node:fs";
 import path from "node:path";
 import vm from "node:vm";
@@ -23,6 +28,9 @@ const project =
 const require = createRequire(path.join(project, "back-end/package.json"));
 const ts: typeof TypeScript = require("typescript");
 const express = require("express");
+const { waitFor: waitForCondition } = require(
+  path.join(project, "back-end/src/tests/helpers/waitFor.ts"),
+);
 const { coalesceHubRunPuts } = require(
   path.join(project, "back-end/src/providers/benchmarkHubInFlight.ts"),
 );
@@ -453,16 +461,19 @@ function fixtureRoot(name: string) {
 }
 
 async function waitFor(check: () => boolean, child: ReturnType<typeof spawn>) {
-  const deadline = Date.now() + 60_000;
-  while (!check()) {
-    assert.equal(
-      child.exitCode,
-      null,
-      "owning campaign exited before the fixture boundary",
-    );
-    assert.ok(Date.now() < deadline, "fixture boundary was not reached");
-    await new Promise((resolve) => setTimeout(resolve, 20));
-  }
+  await waitForCondition(
+    "campaign fixture boundary",
+    () => {
+      if (check()) return true;
+      assert.equal(
+        child.exitCode,
+        null,
+        "owning campaign exited before the fixture boundary",
+      );
+      return false;
+    },
+    { timeoutMs: 60_000 },
+  );
 }
 
 function metadata(group: string, member: string, run = 1, total = 2) {
@@ -780,19 +791,14 @@ test(
     });
     const healthy = ["r001-j0001", "r002-j0004", "r001-j0002", "r002-j0005"];
     try {
-      const deadline = Date.now() + 60_000;
-      while (
-        !healthy.every((job) =>
-          existsSync(path.join(receipts, `evaluated-${job}`)),
-        ) ||
-        shardRuns[2].child.exitCode === null
-      ) {
-        assert.ok(
-          Date.now() < deadline,
-          "sharded fixture boundary was not reached",
-        );
-        await new Promise((resolve) => setTimeout(resolve, 20));
-      }
+      await waitForCondition(
+        "healthy shards evaluated and invalid shard exited",
+        () =>
+          healthy.every((job) =>
+            existsSync(path.join(receipts, `evaluated-${job}`)),
+          ) && shardRuns[2].child.exitCode !== null,
+        { timeoutMs: 60_000 },
+      );
       assert.notEqual(
         shardRuns[2].child.exitCode,
         0,
@@ -2087,3 +2093,622 @@ print(json.dumps([receipt(jobs(29, noise), 600, "enabled"), (receipt(jobs(30, no
     assert.deepEqual(JSON.parse(output), [null, 30, null, null]);
   });
 });
+
+test("the plain fleet infra stop counts each scheduled bench once and keeps its first breach", () => {
+  const fleetDir = path.join(workRoot, "fleet-infra-count");
+  const probe = spawn(
+    path.join(project, "agents/venv/bin/python"),
+    [
+      "-c",
+      `import json, os, runpy, sys
+from pathlib import Path
+campaign = runpy.run_path(sys.argv[1])
+root = Path(sys.argv[2])
+def finish(fleet, bench, code, status=None, name=None):
+    out = fleet / bench
+    out.mkdir(parents=True, exist_ok=True)
+    if status is not None:
+        (out / "cloudbench-run.json").write_text(json.dumps({"tasks": [
+            {"name": name or bench, "status": status, "passed": status == "PASSED"}]}))
+    (out / "benchmark-child.finished").write_text(code + "\\n")
+fleet = root / "fleet"
+benches = ["b%03d" % i for i in range(600)]
+for i in range(15):
+    finish(fleet, benches[i], "1", "INFRA_ERROR")
+for i in range(15, 29):
+    finish(fleet, benches[i], "1")  # finished without a run record: the aggregate's INFRA_ERROR row
+finish(fleet, benches[100], "0", "PASSED")
+finish(fleet, benches[101], "1", "FAILED")       # genuine failure
+finish(fleet, benches[102], "143")               # cancelled without infra evidence
+finish(fleet, benches[103], "1", "PASSED", name="other-task")  # unknown: no row for this bench
+(fleet / benches[104] / "host-replaced-m1").mkdir(parents=True)
+(fleet / benches[104] / "host-replaced-m1" / "benchmark-child.finished").write_text("1\\n")
+finish(fleet, benches[104], "0", "PASSED")       # a replaced physical attempt never adds a job
+(fleet / benches[105]).mkdir()                   # still running
+receipt = fleet / "infra-stop.json"
+stop = campaign["fleet_infra_stop"]
+results = [stop(fleet, benches + benches[:5], receipt), receipt.exists()]
+finish(fleet, benches[29], "1", "ERROR")
+first = stop(fleet, benches, receipt)
+attempts = {job["job_id"]: job["attempts"] for job in first["jobs"]}
+finish(fleet, benches[30], "1", "INFRA_ERROR")
+results += [first["infra_jobs"], first["scheduled_total"], first["infra_job_ids"] == benches[:30],
+            first["schema"], [a["status"] for a in attempts[benches[104]]], attempts[benches[102]][0]["status"],
+            stop(fleet, benches, receipt) == first]
+# An unreadable receipt still records a breach: it keeps stopping (with the current count while the
+# fleet still breaches) and is never overwritten.
+corrupt = fleet / "corrupt.json"
+corrupt.write_text("{")
+empty = root / "empty"
+empty.mkdir()
+(empty / "corrupt.json").write_text("")
+results += [stop(fleet, benches, corrupt)["infra_jobs"], stop(empty, benches, empty / "corrupt.json")["infra_jobs"],
+            corrupt.read_text()]
+os.environ["CLOUDBENCH_ORIGINAL600_INFRA_EARLY_STOP"] = "disabled"
+results.append(stop(fleet, benches, fleet / "disabled.json"))
+print(json.dumps(results))`,
+      path.join(sourceRoot, "scripts/run-bench-campaign.py"),
+      fleetDir,
+    ],
+    {
+      stdio: ["ignore", "pipe", "inherit"],
+      env: { ...process.env, CLOUDBENCH_ORIGINAL600_INFRA_EARLY_STOP: "" },
+    },
+  );
+  let output = "";
+  probe.stdout!.on("data", (chunk) => (output += chunk));
+  return once(probe, "close").then(() => {
+    assert.equal(probe.exitCode, 0);
+    assert.deepEqual(JSON.parse(output), [
+      null,
+      false,
+      30,
+      600,
+      true,
+      "fleet-infra-stop-v1",
+      ["replaced", "finished"],
+      "cancelled",
+      true,
+      31,
+      "recorded",
+      "{",
+      null,
+    ]);
+  });
+});
+
+test("the fleet child watch ignores a live PID that is no longer its own child", () => {
+  const work = path.join(workRoot, "fleet-watch-reused-pid");
+  mkdirSync(work, { recursive: true, mode: 0o700 });
+  const driver = path.join(work, "driver.sh");
+  // The real wait loop around one own child that exits without its marker and a
+  // PID owned by an unrelated live process (as after PID reuse). The old
+  // kill -0 fallback kept this deadline-free watch open until that process exited.
+  writeFileSync(
+    driver,
+    `#!/usr/bin/env bash
+set -uo pipefail
+FLEET_SOURCE="$1"; FLEET_DIR="$2/fleet"; FOREIGN="$3"
+source "$(dirname "$FLEET_SOURCE")/lib/cloudbench-env.sh"
+for name in fleet_pid_start_time fleet_job_running fleet_child_pid_is_ours fleet_infra_stop_check fleet_wait_children_for_infra_stop; do
+    body="$(sed -n "/^$name() {/,/^}/p" "$FLEET_SOURCE")"
+    [ -n "$body" ] || { echo "missing $name" >&2; exit 90; }
+    eval "$body"
+done
+FLEET_INFRA_STOP_SENT=0; INFRA_PROBE=0; RUN_BENCH_CAMPAIGN_CHILD=1
+mkdir -p "$FLEET_DIR/own" "$FLEET_DIR/reused"
+( sleep 0.3 ) &
+CHILD_PIDS=("$!" "$FOREIGN"); CHILD_OUT=("$FLEET_DIR/own" "$FLEET_DIR/reused")
+CHILD_STARTS=("$(fleet_pid_start_time "\${CHILD_PIDS[0]}")" "")
+fleet_wait_children_for_infra_stop
+echo "RETURNED"
+`,
+  );
+  const foreign = spawn("sleep", ["60"], { stdio: "ignore" });
+  try {
+    const result = spawnSync(
+      "bash",
+      [
+        driver,
+        path.join(sourceRoot, "scripts/run-bench-fleet"),
+        work,
+        String(foreign.pid),
+      ],
+      {
+        env: { ...process.env, FLEET_INFRA_STOP_POLL_SECONDS: "0.1" },
+        encoding: "utf8",
+        timeout: 20_000,
+      },
+    );
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /RETURNED/);
+  } finally {
+    foreign.kill("SIGTERM");
+  }
+});
+
+test("the fleet child watch follows each child's recorded start identity, not its PID", () => {
+  const work = path.join(workRoot, "fleet-watch-start-identity");
+  mkdirSync(work, { recursive: true, mode: 0o700 });
+  const driver = path.join(work, "driver.sh");
+  // A live child of this controller whose recorded start identity no longer
+  // matches stands in for a PID reused by a later child: it is listed by
+  // jobs -pr and its parent is the controller, yet the watch must not wait on
+  // it. The child whose identity matches is still waited for.
+  writeFileSync(
+    driver,
+    `#!/usr/bin/env bash
+set -uo pipefail
+FLEET_SOURCE="$1"; ROOT_DIR="$2"; FLEET_DIR="$3/fleet"
+source "$ROOT_DIR/scripts/lib/cloudbench-env.sh"
+for name in fleet_job_running fleet_pid_start_time fleet_pid_matches_start fleet_child_pid_is_ours fleet_infra_stop_check fleet_wait_children_for_infra_stop; do
+    body="$(sed -n "/^$name() {/,/^}/p" "$FLEET_SOURCE")"
+    [ -n "$body" ] || { echo "missing $name" >&2; exit 90; }
+    eval "$body"
+done
+FLEET_INFRA_STOP_SENT=0; INFRA_PROBE=0; RUN_BENCH_CAMPAIGN_CHILD=1
+mkdir -p "$FLEET_DIR/reused" "$FLEET_DIR/live"
+sleep 60 &
+reused=$!
+( sleep 1 ) &
+live=$!
+CHILD_PIDS=("$reused" "$live"); CHILD_OUT=("$FLEET_DIR/reused" "$FLEET_DIR/live")
+CHILD_STARTS=("$(fleet_pid_start_time "$reused")-earlier-process" "$(fleet_pid_start_time "$live")")
+fleet_wait_children_for_infra_stop
+kill -0 "$live" 2>/dev/null && echo "LIVE_STILL_RUNNING" || echo "LIVE_FINISHED"
+kill -0 "$reused" 2>/dev/null && echo "RETURNED_WHILE_REUSED_PID_LIVE"
+kill "$reused" 2>/dev/null
+`,
+  );
+  const result = spawnSync(
+    "bash",
+    [
+      driver,
+      path.join(sourceRoot, "scripts/run-bench-fleet"),
+      sourceRoot,
+      work,
+    ],
+    {
+      env: { ...process.env, FLEET_INFRA_STOP_POLL_SECONDS: "0.1" },
+      encoding: "utf8",
+      timeout: 20_000,
+    },
+  );
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /LIVE_FINISHED/);
+  assert.match(result.stdout, /RETURNED_WHILE_REUSED_PID_LIVE/);
+});
+
+for (const capture of ["failed", "finished", "captured"]) {
+  test(`the fleet launch handles ${capture} identity capture with child ownership intact`, () => {
+    const work = path.join(workRoot, `fleet-launch-identity-${capture}`);
+    mkdirSync(work, { recursive: true, mode: 0o700 });
+    const driver = path.join(work, "driver.sh");
+    writeFileSync(
+      driver,
+      `#!/usr/bin/env bash
+set -uo pipefail
+FLEET_SOURCE="$1"; FLEET_DIR="$2"; CAPTURE="$3"
+source "$(dirname "$FLEET_SOURCE")/lib/cloudbench-env.sh"
+for name in fleet_pid_start_time launch_fleet_bench_child; do
+    eval "$(sed -n "/^$name() {/,/^}/p" "$FLEET_SOURCE")"
+done
+eval "$(declare -f fleet_pid_start_time | sed '1s/fleet_pid_start_time/native_fleet_start/')"
+fleet_pid_start_time() {
+    trap - EXIT
+    case "$CAPTURE" in
+        captured) native_fleet_start "$1" ;;
+        finished) : > "$FLEET_DIR/bench/benchmark-child.finished" ;;
+        failed) return 1 ;;
+    esac
+}
+CATALOG_MODES=(real); CATALOG_TIMEOUTS=(60)
+CHILD_PIDS=(); CHILD_STARTS=(); CHILD_OUT=(); CHILD_BENCH=(); CHILD_MODE=(); CHILD_PORT=()
+CHILD_MACHINE=(); CHILD_RUN_TOKEN=(); CHILD_BENCH_INDEX=()
+DASH_BASE=10000; RUN_TIMEOUT=60; RUN_TIMEOUT_OPERATOR_SET=0
+BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS=60; BACKSTOP_OPERATOR_SET=0
+SYNCHRONIZED_START=0; FLEET_OWNER_TOKEN=fixture; RUN_ID=fixture
+INVENTORY_INDEX="$FLEET_DIR"; SNAPSHOT_LOOP_PID=$$; SNAPSHOT_LOOP_TOKEN=fixture
+BARRIER_RELEASE_TOKEN=fixture; START_BARRIER_WAIT_SECONDS=60
+FIRST_RUN_STACK_WAIT_SECONDS=60; BOOT_CONFIG_BARRIER="$FLEET_DIR/barrier"
+BOOT_UPDATE_CAPACITY_WAIT_SECONDS=60; BOOT_CONFIG_BARRIER_WAIT_SECONDS=60
+FLEET_PATCH_FILE=""; FLEET_PATCH_SHA256=""; EXECUTION_PROVENANCE_FILE=""
+RUN_BENCH_CLOUD_BIN=unused; BENCH_REF=fixture; SKIP_AUTOSCALER=1; CLOUDBENCH_LAUNCH_STAGGER_SECONDS=0
+is_sim_on() { return 1; }
+cloudbench_fleet_workspace_name() { echo fixture; }
+bench_execution_budget() { echo 60; }
+primary_clone_storage_mode() { echo fresh; }
+run_fleet_child_supervised() {
+    trap - EXIT
+    while [ ! -e "$1" ]; do command sleep 0.01; done
+}
+controller_pid=$BASHPID
+cleanup() {
+    status=$?
+    [ "$BASHPID" = "$controller_pid" ] || return 0
+    trap - EXIT
+    printf '%s\\n' "\${#CHILD_PIDS[@]}" > "$FLEET_DIR/registered"
+    for pid in "\${CHILD_PIDS[@]}"; do kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; done
+    exit "$status"
+}
+trap cleanup EXIT
+mkdir -p "$FLEET_DIR/bench"
+printf 'fresh fixture-machine\\n' > "$FLEET_DIR/bench/.cid"
+launch_fleet_bench_child 0 bench
+echo "LAUNCH_RETURNED"
+`,
+    );
+    const result = spawnSync(
+      "bash",
+      [driver, path.join(sourceRoot, "scripts/run-bench-fleet"), work, capture],
+      {
+        encoding: "utf8",
+        timeout: 20_000,
+      },
+    );
+    assert.equal(
+      result.status,
+      capture === "failed" ? 1 : 0,
+      result.stdout + result.stderr,
+    );
+    assert.equal(
+      readFileSync(path.join(work, "registered"), "utf8").trim(),
+      "1",
+      "EXIT cleanup retains the launched child",
+    );
+    if (capture === "failed") {
+      assert.match(
+        result.stderr,
+        /could not capture launched child .* start identity/,
+      );
+      assert.doesNotMatch(result.stdout, /LAUNCH_RETURNED/);
+    } else {
+      assert.match(result.stdout, /LAUNCH_RETURNED/);
+      assert.doesNotMatch(result.stderr, /could not capture/);
+    }
+  });
+}
+
+test("the fleet child watch rejects an uncaptured identity even for a reused controller child", () => {
+  const work = path.join(workRoot, "fleet-watch-missing-identity");
+  mkdirSync(work, { recursive: true, mode: 0o700 });
+  const driver = path.join(work, "driver.sh");
+  writeFileSync(
+    driver,
+    `#!/usr/bin/env bash
+set -uo pipefail
+for name in fleet_job_running fleet_child_pid_is_ours; do
+    eval "$(sed -n "/^$name() {/,/^}/p" "$1")"
+done
+sleep 60 &
+reused=$!
+trap 'kill "$reused" 2>/dev/null; wait "$reused" 2>/dev/null' EXIT
+# Same parent and jobs-table membership cannot identify the original launch.
+fleet_job_running "$reused" || exit 90
+if fleet_child_pid_is_ours "$reused" ""; then
+    echo "UNCAPTURED_REUSED_PID_COUNTED"
+    exit 1
+fi
+echo "UNCAPTURED_REUSED_PID_REJECTED"
+`,
+  );
+  const result = spawnSync(
+    "bash",
+    [driver, path.join(sourceRoot, "scripts/run-bench-fleet")],
+    {
+      encoding: "utf8",
+      timeout: 20_000,
+    },
+  );
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.match(result.stdout, /UNCAPTURED_REUSED_PID_REJECTED/);
+});
+
+test("the fleet child watch preserves legacy start identity whitespace compatibility", () => {
+  const result = spawnSync(
+    "bash",
+    [
+      "-c",
+      `
+set -uo pipefail
+source "$1/scripts/lib/cloudbench-env.sh"
+eval "$(sed -n '/^fleet_child_pid_is_ours() {/,/^}/p' "$1/scripts/run-bench-fleet")"
+cloudbench_pid_start_time_like() { printf 'Mon Nov 9 12:30:00 2026\\n'; }
+fleet_child_pid_is_ours "$$" 'Mon Nov  9 12:30:00 2026' || exit 1
+if fleet_child_pid_is_ours "$$" 'Mon Nov  9 12:29:59 2026'; then exit 2; fi
+`,
+      "bash",
+      sourceRoot,
+    ],
+    { encoding: "utf8", timeout: 20_000 },
+  );
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+});
+
+test("the fleet child watch keeps evaluating infra stop after an unknown identity observation", () => {
+  const work = path.join(workRoot, "fleet-watch-unknown-identity");
+  mkdirSync(work, { recursive: true, mode: 0o700 });
+  const driver = path.join(work, "driver.sh");
+  writeFileSync(
+    driver,
+    `#!/usr/bin/env bash
+set -uo pipefail
+FLEET_SOURCE="$1"; ROOT_DIR="$2"; FLEET_DIR="$3"
+source "$ROOT_DIR/scripts/lib/cloudbench-env.sh"
+for name in fleet_job_running fleet_pid_start_time fleet_pid_matches_start fleet_child_pid_is_ours fleet_wait_children_for_infra_stop; do
+    eval "$(sed -n "/^$name() {/,/^}/p" "$FLEET_SOURCE")"
+done
+mkdir -p "$FLEET_DIR/known" "$FLEET_DIR/unknown"
+command sleep 60 &
+known=$!
+command sleep 60 &
+unknown=$!
+trap 'kill "$known" "$unknown" 2>/dev/null; wait "$known" "$unknown" 2>/dev/null' EXIT
+CHILD_PIDS=("$known" "$unknown"); CHILD_OUT=("$FLEET_DIR/known" "$FLEET_DIR/unknown")
+CHILD_STARTS=("$(fleet_pid_start_time "$known")" "$(fleet_pid_start_time "$unknown")")
+# Replay an unreadable /proc observation for the last unmarked live child.
+eval "$(declare -f cloudbench_proc_pid_observation | sed '1s/cloudbench_proc_pid_observation/native_proc_observation/')"
+cloudbench_proc_pid_observation() {
+    [ "$1" != "$unknown" ] || return 1
+    native_proc_observation "$1"
+}
+eval "$(declare -f fleet_pid_start_time | sed '1s/fleet_pid_start_time/native_fleet_start/')"
+fleet_pid_start_time() {
+    [ "$1" != "$unknown" ] || return 0
+    native_fleet_start "$1"
+}
+checks=0
+fleet_infra_stop_check() {
+    checks=$((checks + 1))
+    if [ -e "$FLEET_DIR/known/benchmark-child.finished" ]; then
+        echo "INFRA_REEVALUATED_WITH_UNKNOWN_CHILD"
+        : > "$FLEET_DIR/unknown/benchmark-child.finished"
+    fi
+}
+sleep() {
+    : > "$FLEET_DIR/known/benchmark-child.finished"
+}
+fleet_wait_children_for_infra_stop
+[ "$checks" -eq 2 ] || { echo "PREMATURE_WATCH_EXIT checks=$checks"; exit 1; }
+# Once a later read gives a different birth, the reused PID must not count.
+CHILD_STARTS[1]="\${CHILD_STARTS[1]}-replaced"
+fleet_pid_start_time() { native_fleet_start "$1"; }
+cloudbench_proc_pid_observation() { native_proc_observation "$1"; }
+if fleet_child_pid_is_ours "$unknown" "\${CHILD_STARTS[1]}"; then exit 91; fi
+`,
+  );
+  const result = spawnSync(
+    "bash",
+    [
+      driver,
+      path.join(sourceRoot, "scripts/run-bench-fleet"),
+      sourceRoot,
+      work,
+    ],
+    {
+      encoding: "utf8",
+      timeout: 20_000,
+    },
+  );
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.match(result.stdout, /INFRA_REEVALUATED_WITH_UNKNOWN_CHILD/);
+});
+
+test(
+  "a plain fleet continues at 1/40 infra jobs and stops itself through its TERM trap at 2/40",
+  { timeout: 120_000 },
+  async () => {
+    const work = path.join(workRoot, "fleet-infra-stop");
+    mkdirSync(work, { recursive: true, mode: 0o700 });
+    const fleetDir = path.join(work, "fleet");
+    const driver = path.join(work, "driver.sh");
+    // The real run-bench-fleet wait loop and stop check, extracted so they cannot
+    // drift, around fake children that speak the fleet's finished-marker protocol.
+    writeFileSync(
+      driver,
+      `#!/usr/bin/env bash
+set -uo pipefail
+FLEET_SOURCE="$1"; WORK="$2"; ROOT_DIR="$3"; FLEET_DIR="$WORK/fleet"
+source "$ROOT_DIR/scripts/lib/cloudbench-env.sh"
+for name in fleet_pid_start_time fleet_job_running fleet_child_pid_is_ours fleet_infra_stop_check fleet_wait_children_for_infra_stop; do
+    body="$(sed -n "/^$name() {/,/^}/p" "$FLEET_SOURCE")"
+    [ -n "$body" ] || { echo "missing $name" >&2; exit 90; }
+    eval "$body"
+done
+FLEET_INFRA_STOP_SENT=0
+INFRA_PROBE=0
+unset RUN_BENCH_CAMPAIGN_CHILD CLOUDBENCH_SCRIPT_SNAPSHOT
+BENCHES=(); CHILD_PIDS=(); CHILD_STARTS=(); CHILD_OUT=()
+for i in $(seq -w 0 39); do BENCHES+=("b$i"); done
+cleanup() {
+    local status=$? pid
+    trap - EXIT; trap '' TERM
+    for pid in "\${CHILD_PIDS[@]}"; do kill -TERM "$pid" 2>/dev/null || true; done
+    for pid in "\${CHILD_PIDS[@]}"; do wait "$pid" 2>/dev/null || true; done
+    exit "$status"
+}
+trap cleanup EXIT
+trap 'echo "⚰️  controller received TERM ($(date -u +%H:%M:%S))"; exit 143' TERM
+for bench in "\${BENCHES[@]}"; do
+    out="$FLEET_DIR/$bench"; mkdir -p "$out"
+    (
+        trap 'printf "143\\n" > "$out/benchmark-child.finished"; : > "$WORK/terminated-$bench"; exit 143' TERM
+        while [ ! -e "$out/benchmark-child.finished" ]; do sleep 0.05; done
+    ) &
+    CHILD_PIDS+=("$!"); CHILD_OUT+=("$out")
+    CHILD_STARTS+=("$(fleet_pid_start_time "\${CHILD_PIDS[\${#CHILD_PIDS[@]}-1]}")")
+done
+mkfifo "$WORK/poll-permit"
+poll_count=0
+sleep() {
+    poll_count=$((poll_count + 1))
+    printf '%s\n' "$poll_count" > "$WORK/poll-count.tmp"
+    mv "$WORK/poll-count.tmp" "$WORK/poll-count"
+    IFS= read -r permit < "$WORK/poll-permit"
+}
+: > "$WORK/driver.ready"
+fleet_wait_children_for_infra_stop
+for pid in "\${CHILD_PIDS[@]}"; do wait "$pid" 2>/dev/null || true; done
+echo "COMPLETED"
+`,
+    );
+    const run = spawn(
+      "bash",
+      [
+        driver,
+        path.join(sourceRoot, "scripts/run-bench-fleet"),
+        work,
+        sourceRoot,
+      ],
+      {
+        env: {
+          ...process.env,
+          FLEET_INFRA_STOP_POLL_SECONDS: "0.2",
+          CLOUDBENCH_ORIGINAL600_INFRA_EARLY_STOP: "",
+        },
+        stdio: ["ignore", "pipe", "pipe"],
+      },
+    );
+    let stdout = "";
+    let stderr = "";
+    run.stdout!.on("data", (chunk) => (stdout += chunk.toString()));
+    run.stderr!.on("data", (chunk) => (stderr += chunk.toString()));
+    const closed = once(run, "close");
+    const pollCount = () =>
+      existsSync(path.join(work, "poll-count"))
+        ? Number(readFileSync(path.join(work, "poll-count"), "utf8"))
+        : 0;
+    const permitPoll = () =>
+      waitForCondition(
+        "watcher is reading its poll permit",
+        () => {
+          assert.equal(
+            run.exitCode,
+            null,
+            "controller exited before poll permit",
+          );
+          let fd: number;
+          try {
+            fd = openSync(
+              path.join(work, "poll-permit"),
+              constants.O_WRONLY | constants.O_NONBLOCK,
+            );
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code === "ENXIO") return false;
+            throw error;
+          }
+          try {
+            writeSync(fd, "next\n");
+          } finally {
+            closeSync(fd);
+          }
+          return true;
+        },
+        { timeoutMs: 15_000 },
+      );
+    try {
+      await waitForCondition(
+        "driver entered first watcher poll",
+        () => pollCount() >= 1,
+        { timeoutMs: 15_000 },
+      );
+      assert.ok(existsSync(path.join(work, "driver.ready")), stderr);
+      const finish = (bench: string, code: string, status?: string) => {
+        const out = path.join(fleetDir, bench);
+        if (status) {
+          writeFileSync(
+            path.join(out, "cloudbench-run.json"),
+            JSON.stringify({
+              tasks: [{ name: bench, status, passed: status === "PASSED" }],
+            }),
+          );
+        }
+        writeFileSync(
+          path.join(out, "benchmark-child.finished.tmp"),
+          `${code}\n`,
+        );
+        // Publish atomically, as run_fleet_child_supervised does.
+        renameSync(
+          path.join(out, "benchmark-child.finished.tmp"),
+          path.join(out, "benchmark-child.finished"),
+        );
+      };
+      finish("b00", "1", "INFRA_ERROR");
+      finish("b01", "0", "PASSED");
+      finish("b02", "1", "FAILED");
+      finish("b03", "143");
+      mkdirSync(path.join(fleetDir, "b04", "host-replaced-m1"));
+      writeFileSync(
+        path.join(
+          fleetDir,
+          "b04",
+          "host-replaced-m1",
+          "benchmark-child.finished",
+        ),
+        "1\n",
+      );
+      await permitPoll();
+      await waitForCondition(
+        "watcher completed below-threshold scan",
+        () => pollCount() >= 2,
+        { timeoutMs: 15_000 },
+      );
+      assert.equal(
+        run.exitCode,
+        null,
+        `1/40 infra must not stop the fleet:\n${stderr}`,
+      );
+      assert.ok(
+        !existsSync(path.join(fleetDir, "infra-stop.json")),
+        "no breach receipt at 1/40",
+      );
+      assert.ok(
+        !existsSync(path.join(work, "terminated-b05")),
+        "no child cancelled at 1/40",
+      );
+      finish("b05", "1");
+      await permitPoll();
+      await waitForCondition(
+        "fleet exits through threshold TERM",
+        () => run.exitCode !== null,
+        { timeoutMs: 60_000 },
+      );
+      await closed;
+      assert.equal(run.exitCode, 143, stdout + stderr);
+      assert.doesNotMatch(stdout, /COMPLETED/);
+      assert.match(
+        stderr,
+        /INFRA STOP: 2\/40 scheduled jobs confirmed INFRA \(b00, b05\)/,
+      );
+      assert.match(stdout + stderr, /controller received TERM/);
+      const receipt = JSON.parse(
+        readFileSync(path.join(fleetDir, "infra-stop.json"), "utf8"),
+      );
+      assert.equal(receipt.schema, "fleet-infra-stop-v1");
+      assert.equal(receipt.infra_jobs, 2);
+      assert.equal(receipt.scheduled_total, 40);
+      assert.deepEqual(receipt.infra_job_ids, ["b00", "b05"]);
+      const b04 = receipt.jobs.find(
+        (job: { job_id: string }) => job.job_id === "b04",
+      );
+      assert.deepEqual(
+        b04.attempts.map((attempt: { status: string }) => attempt.status),
+        ["replaced", "running"],
+      );
+      for (let i = 0; i < 40; i++) {
+        const bench = `b${String(i).padStart(2, "0")}`;
+        const finished = ["b00", "b01", "b02", "b03", "b05"].includes(bench);
+        assert.equal(
+          existsSync(path.join(work, `terminated-${bench}`)),
+          !finished,
+          `${bench} must ${finished ? "keep its own outcome" : "be cancelled by the controller's cleanup"}`,
+        );
+      }
+    } finally {
+      if (run.exitCode === null) {
+        run.kill("SIGTERM");
+        await closed;
+      }
+    }
+  },
+);

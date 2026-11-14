@@ -1315,7 +1315,7 @@ def render_html(card: dict) -> str:
     else:
         lis = '<li class="ok">✅ No open issues recorded.</li>'
     out.append(f'<section data-section="issues"><h2>ISSUES / NEXT ACTION</h2><ul>{lis}</ul></section>')
-    reason = exp.get("state_reason") or {"RUNNING": "observe every 30s; card every 10 min", "COMPLETE": "results final, resources released"}.get(state, "")
+    reason = exp.get("state_reason") or {"RUNNING": "observing; card every 15 min", "COMPLETE": "results final, resources released"}.get(state, "")
     out.append(f'<footer data-section="footer"><span class="{STATE_CLASS[state]}">{STATE_ICON[state]} {e(state)}</span>'
                + (f" · {e(reason)}" if reason else "") +
                f'<div class="gen">Rendered by scripts/run-bench scorecard ({FORMAT}) at {e(pacific(card["generated_at"]))} from recorded artifacts.</div></footer>')
@@ -1539,7 +1539,7 @@ def instruction_lines(run_dir) -> list[str]:
         "📊 Report progress ONLY with the CLI scorecard (FORMAT v8); hand-written cards are non-compliant:",
         f"    scripts/run-bench scorecard {run_dir} --html {card}",
         f'    dvb-onbox visuals publish --file {card} --title "<run label> scorecard"',
-        "    Publish at start, every 10 minutes, on each state change and at completion.",
+        "    Publish at start, every 15 minutes, on each state change and at completion.",
         "    Off boxes.dev or when HTML is unavailable, post: scripts/run-bench scorecard " + run_dir + " --text",
     ]
 
