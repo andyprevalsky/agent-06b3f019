@@ -33973,12 +33973,6 @@ reserve_cleanup_disk_space
         )
 
 
-@quarantine(
-    since="2026-11-13",
-    repair="pending-handoff:b719330d9b8b470a931b1cc8dee72144",
-    error="subprocess.TimeoutExpired: cloudbench_cleanup_reserve_cohort.py (600s) 'cohort ready handoff absent'",
-    evidence="PR #1864 new-test-stability occurrence b719330d9b8b470a931b1cc8dee72144 (source b4dbb7d67): benchmark-live-results 1/5 under owned load; unchanged by this branch",
-)
 @pytest.mark.parametrize("handoff", ["admission", "cancel-before-admission"])
 def test_fleet_cleanup_releases_emergency_disk_reserve_for_cohort_budget(tmp_path: Path, handoff: str) -> None:
     """Fifty default owners retain cleanup and per-owner working floors together."""

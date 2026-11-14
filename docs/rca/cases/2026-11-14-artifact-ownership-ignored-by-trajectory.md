@@ -23,7 +23,8 @@ sources:
   - commit e0a3c84759e5b5c3ac33f525253a7dcfc4afa727
   - commit d7103ba60990932d0641966d82b375bd14e561ba
 repro: front-end/src/tests/blackbox/tool-artifact-ownership.blackbox.tsx
-status: open
+status: fixed
+shipped_pr: https://github.com/Rose-Ai-Labs/rose/pull/2094
 ---
 
 ## Problem
@@ -96,16 +97,23 @@ Golden reference: not applicable (no prompt, schema or harness behavior change).
 maps and per-owner path sets; no global fan-in, polling, services or backend calls
 added. Collapsed file content does not mount or sign URLs.
 
-Local implementation and regression are ready for parent review; deployment,
-independent final review and final fixed outcome remain parent-owned. This case
-stays open until that review/verification completes.
+Independent final review found no blocking issue on the frozen source. The final
+10 regression cases, 82 neighboring checks, TypeScript and lint passed. Five
+unchanged runs under the default eight load slots passed locally and in the
+selected Blacksmith stability gate. The captured full-list replay groups all
+318 internal artifacts under the four exact owners, preserving explicit displays.
+PR #2094 merged as 2ac670e4d6e960aec7d23f7baa68c2af0b3ad177 after all 13
+selected premerge gates passed. Production verification is recorded in the
+associated closeout; no unrelated browser-session repair is claimed here.
 
 ## Human feedback
 
-The user required files under their actual browser/code tool result, collapsed
-by default, not suppressed or attached to an unrelated tool. Preserve explicit
-displays, uploads and attention controls. The parent required accessible pending
-and unmatched files, progress owners, and reuse of the actual result expansion.
+The user required browser screenshots and files to be folded into the browser
+tool result instead of appearing by default in the main view. Production evidence
+showed the same ownership defect affected code output files, so the repair covers
+both. Review required accessible pending and unmatched files, progress owners,
+and reuse of the actual browser result expansion while retaining explicit displays,
+uploads and attention controls.
 
 ## Reusable lesson
 
