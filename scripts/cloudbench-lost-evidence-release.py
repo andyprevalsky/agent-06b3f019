@@ -82,6 +82,20 @@ def owned_resources(registry: Path, audit: Path) -> tuple[set[str], set[str]]:
             value = fields(row)
             machines.add(value.get("machine_id", ""))
             volumes.add(value.get("volume_id", ""))
+    pool = audit / "pool"
+    if pool.is_dir():
+        # A pool Machine still `claimed` (or recorded destroyed) is owned until a terminal read proves
+        # otherwise; only one returned to the pool (claim released) belongs to the pool again.
+        for row in pool.iterdir():
+            if ".tmp." in row.name:
+                continue
+            value = fields(row)
+            if value.get("disposition") == "returned-stopped-claim-released":
+                continue
+            need(value.get("disposition") in ("claimed", "destroyed-removed-from-pool"),
+                 f"pool record {row.name} has unknown disposition")
+            machines.add(row.name)
+            volumes.add(value.get("volume_id", ""))
     owned = audit / "owned-clones.ids"
     if owned.is_file():
         machines |= {line.strip() for line in owned.read_text().splitlines() if line.strip()}

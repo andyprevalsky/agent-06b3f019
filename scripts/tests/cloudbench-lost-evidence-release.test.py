@@ -122,6 +122,21 @@ class LostEvidenceRelease(unittest.TestCase):
         receipt, _ = self.release({MACHINE: {"state": "destroyed"}, VOLUME: {"state": "destroyed"}})
         self.assertEqual("LOST", receipt["guest_cleanup"])
 
+    def test_claimed_pool_machine_must_be_terminal_before_release(self):
+        pool = self.audit_root / TOKEN / "pool"
+        pool.mkdir()
+        claimed, claimed_volume = "aaaa1111bbbb22", "vol_cccc3333dddd4444"
+        (pool / claimed).write_text(f"volume_id={claimed_volume}\ndisposition=claimed\n")
+        (pool / "eeee5555ffff66").write_text("volume_id=vol_gggg7777hhhh8888\n"
+                                             "disposition=returned-stopped-claim-released\n")
+        terminal = {MACHINE: {"state": "destroyed"}, VOLUME: {"state": "destroyed"}}
+        self.refused({**terminal, claimed: {"state": "started"}}, "not destroyed")
+        receipt, client = self.release({**terminal, claimed: {"state": "destroyed"},
+                                        claimed_volume: {"state": "destroyed"}})
+        self.assertIn(("GET", f"/machines/{claimed}"), client.calls)
+        self.assertNotIn(("GET", "/machines/eeee5555ffff66"), client.calls, "returned pool Machine is not owned")
+        self.assertEqual("LOST", receipt["runtime_evidence"])
+
     def test_absent_resources_are_terminal(self):
         receipt, _ = self.release({})
         self.assertEqual({"absent"}, {r["state"] for r in receipt["observations"]})

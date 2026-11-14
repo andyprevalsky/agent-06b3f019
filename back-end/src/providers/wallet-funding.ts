@@ -32,6 +32,16 @@ function isOrgReleaseObservationBackpressure(error: unknown): boolean {
   ) {
     return true;
   }
+  // The exact REST reader converts the same backpressure (AgentCardV2Request's final 401
+  // `unauthorized`, 429 and default-code 503) into WalletFundingProviderError.
+  if (
+    error instanceof WalletFundingProviderError &&
+    (error.status === 429 ||
+      (error.status === 401 && error.code === 'unauthorized') ||
+      (error.status === 503 && error.code === 'agentcard_v2_unavailable'))
+  ) {
+    return true;
+  }
   const message = error instanceof Error ? error.message : String(error);
   return /too many requests|rate.?limit|\b429\b/i.test(message);
 }

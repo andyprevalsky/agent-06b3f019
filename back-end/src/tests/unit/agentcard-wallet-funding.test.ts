@@ -7,7 +7,10 @@ import {
   AgentCardOrgRuntimeError,
   orgRetryDeadlineAtMs,
 } from '../../providers/agentcard/org-runtime';
-import { AgentCardCompanyWalletFundingProvider } from '../../providers/wallet-funding';
+import {
+  AgentCardCompanyWalletFundingProvider,
+  WalletFundingProviderError,
+} from '../../providers/wallet-funding';
 
 const ORG_RUNTIME_ENV_NAMES = [
   'AGENTCARD_ORG_MCP_ACCESS_TOKEN',
@@ -207,6 +210,41 @@ async function assertOrgAuthFlapLeavesReleasePending(): Promise<void> {
   );
   const released = await recovering.reclaimUserWalletFunding(request);
   assert.equal(released.metadata?.status, 'release_confirmed');
+
+  // The exact REST reader (legacy transfers with no user) converts the same backpressure into
+  // WalletFundingProviderError; only its status/code pairs stay release-pending (PR #1864 review).
+  const restReader = (make: () => Error) =>
+    new (class extends AgentCardCompanyWalletFundingProvider {
+      protected async readTransfer(): Promise<Record<string, unknown>> {
+        throw make();
+      }
+    })(async () => consumed, { attempts: 20, delayMs: 0 });
+  for (const [status, code] of [
+    [401, 'unauthorized'],
+    [503, 'agentcard_v2_unavailable'],
+    [429, 'rate_limited'],
+  ] as const) {
+    await assert.rejects(
+      () =>
+        restReader(
+          () => new WalletFundingProviderError(`HTTP ${status}`, status, code)
+        ).reclaimUserWalletFunding(request),
+      releasePending,
+      `REST ${status} ${code} during release observation must leave the reclaim release-pending`
+    );
+  }
+  for (const [status, code] of [
+    [403, 'forbidden'],
+    [401, 'agentcard_wallet_funding_failed'],
+    [404, 'not_found'],
+  ] as const) {
+    const fatal = new WalletFundingProviderError(`HTTP ${status}`, status, code);
+    await assert.rejects(
+      () => restReader(() => fatal).reclaimUserWalletFunding(request),
+      (error: unknown) => error === fatal,
+      `REST ${status} ${code} must still fail the reclaim`
+    );
+  }
 
   // Strictness is unchanged for anything that is not provider backpressure.
   for (const fatal of [
