@@ -919,6 +919,7 @@ async def _owned_payment_cleanup_case(*, refund_fails):
         "status": "CHARGING",
         "card_id": None,
         "stripe_payment_intent_id": "pi_owned",
+        "user_id": ROOT, "stripe_livemode": False, "stripe_customer_id": "cus_owned",
         "total_cents": 4396,
         "funding_status": "PENDING",
         "provider_transfer_id": None,
@@ -958,8 +959,17 @@ async def _owned_payment_cleanup_case(*, refund_fails):
         payment.update(status="VOIDED", funding_status="RECLAIMED", reclaim_provider_transfer_id="owned-transfer")
         return {}
 
+    async def custody(_url, aid, **kwargs):
+        assert aid == ROOT and kwargs == {"stripe_custody": True}
+        return {"agentId": ROOT, "stripeCustody": [{
+            "purchaseId": payment["purchase_id"], "userId": ROOT, "agentId": ROOT,
+            "purchaseStatus": payment["status"], "paymentIntentId": "pi_owned", "customerId": "cus_owned",
+            "livemode": False, "status": "canceled", "currency": "usd", "amountCents": 4396,
+            "amountReceivedCents": 0, "amountCapturableCents": 0, "refundedCents": 0, "outcome": "unspent"}]}
+
     row = result(ROOT)
     with (
+        patch.object(bench, "get_test_payment_lifecycle", custody),
         patch.object(cleanup, "exact_root_sessions", query),
         patch.object(cleanup.runpy, "run_path", return_value={"provider_request": lambda *_args: (204, "receipt")}),
         patch.object(bench, "pause_agent", AsyncMock(return_value=True)),
@@ -1443,7 +1453,8 @@ def test_exact_tree_query_excludes_unmaterialized_logical_browsers_on_real_postg
                   "agentId" TEXT NOT NULL, "sessionId" TEXT NOT NULL UNIQUE,
                   status "BrowserSessionStatus" NOT NULL DEFAULT 'ACTIVE', provider TEXT NOT NULL DEFAULT 'steel');
                 CREATE TABLE "PurchaseSpend" (id TEXT PRIMARY KEY, "agentId" TEXT, status TEXT, "cardId" TEXT,
-                  "stripePaymentIntentId" TEXT, "totalCents" INTEGER);
+                  "stripePaymentIntentId" TEXT, "totalCents" INTEGER, "userId" TEXT NOT NULL,
+                  "stripeLivemode" BOOLEAN NOT NULL, "stripeCustomerId" TEXT);
                 CREATE TABLE "PurchaseWalletFunding" ("purchaseId" TEXT, status TEXT, "providerTransferId" TEXT,
                   "reclaimProviderTransferId" TEXT);
                 """ + logical_identity_ddl,
@@ -1463,6 +1474,13 @@ def test_exact_tree_query_excludes_unmaterialized_logical_browsers_on_real_postg
             "owned_fixture",
         )
         assert inserted.returncode == 0, inserted.stderr
+        purchase_id = "00000000-0000-4000-8000-000000000003"
+        billing = sql(
+            f"""INSERT INTO "PurchaseSpend" (id, "agentId", status, "stripePaymentIntentId", "totalCents",
+                 "userId", "stripeLivemode", "stripeCustomerId")
+                VALUES ('{purchase_id}', '{ROOT}', 'FAILED', 'pi_initial_fixture', 4396,
+                        '{ROOT}', false, 'cus_owned_fixture')""", "owned_fixture")
+        assert billing.returncode == 0, billing.stderr
         # The schema itself guarantees a NULL-session row is only an unmaterialized logical identity.
         orphan = sql(
             f"""INSERT INTO "BrowserSession" (id, "contextId", "agentId", "sessionId", status, provider)
@@ -1490,6 +1508,12 @@ def test_exact_tree_query_excludes_unmaterialized_logical_browsers_on_real_postg
             snapshot = cleanup.exact_root_sessions("http://localhost:31001", ROOT)
             assert snapshot["tree_agent_ids"] == sorted([ROOT, CHILD])
             assert snapshot["browser_sessions"] == []
+            assert snapshot["purchase_cleanup"] == [{
+                "purchase_id": purchase_id, "agent_id": ROOT, "status": "FAILED", "card_id": None,
+                "stripe_payment_intent_id": "pi_initial_fixture", "user_id": ROOT,
+                "stripe_livemode": False, "stripe_customer_id": "cus_owned_fixture", "total_cents": 4396,
+                "funding_status": None, "provider_transfer_id": None, "reclaim_provider_transfer_id": None,
+            }]
             # A materialized Kernel session is still returned and owned exactly.
             materialized = sql(
                 """UPDATE "BrowserSession" SET "sessionId" = 'kernel_session_0001', status = 'ACTIVE'
@@ -3112,3 +3136,386 @@ async def test_archive_timeout_retains_only_completed_snapshots():
         assert observation["ready"] is False
         assert logs["messages"] == [{"text": "pre-pause snapshot"}]
         assert "tree" not in logs
+
+
+def test_exact_database_proof_preserves_native_long_run_identity_without_aliases():
+    """Replay the native74-character manifest failure through its real DB guard."""
+    import subprocess
+    import runpy
+
+    source = (Path(__file__).resolve().parents[2] / "scripts/run.sh").read_text()
+    marker = '    if [ "$BENCHMARK_ISOLATED_RUN" = "true" ] && [ -n "${BENCHMARK_RUN_ID:-}" ]; then'
+    start = source.index(marker)
+    stop = source.index('\n    if pg_isready', start)
+    fragment = source[start:stop]
+    run_id = "agentcard-v2-stability-20261109-partial11-round-01-worlds-1"
+    def native_name(value):
+        completed = subprocess.run(
+            ["bash", "-e", "-c", '. "$1"\n' + fragment + '\nexport LOCAL_DB_NAME LOCAL_DB_URL\npython3 -c \'import json,os; print(json.dumps({"name":os.environ["LOCAL_DB_NAME"],"url":os.environ["LOCAL_DB_URL"]}))\'', "native-name", str(Path(__file__).resolve().parents[2] / "scripts/lib/workspace-env.sh")],
+            env={"PATH": os.environ["PATH"], "BENCHMARK_ISOLATED_RUN": "true",
+                 "BENCHMARK_RUN_ID": value, "SYSTEM_PG_PORT": "5432"},
+            capture_output=True, text=True, check=True, timeout=5,
+        )
+        row = json.loads(completed.stdout)
+        assert row["url"] == f"postgresql://postgres:postgres@localhost:5432/{row['name']}"
+        return row["name"]
+
+    names = [native_name(run_id), native_name(run_id[:-1] + "2")]
+    recovery = runpy.run_path(str(cleanup.REPO_ROOT / "scripts/cloudbench-guest-recovery.py"))
+    payload = {"root_exists": True, "root_user_id": ROOT, "root_deleted": True,
+               "unsealed_tree_agent_ids": [], "tree_agent_ids": [ROOT],
+               "browser_sessions": [], "purchase_cleanup": []}
+    queries = []
+    def query(_command, **kwargs):
+        queries.append(kwargs)
+        return json.dumps(payload)
+    recovery["run_exact_psql"] = query
+    with tempfile.TemporaryDirectory() as directory:
+        context = Path(directory)
+        manifest = {"worktree": str(cleanup.REPO_ROOT), "benchmark_mode": True, "status": "running",
+                    "temporal_task_queue": "owned-queue", "ports": {"backend": 3201},
+                    "database": {"name": names[0], "port": 5432, "use_system_postgres": True}}
+        manifest_path = context / "services.json"
+        manifest_path.write_text(json.dumps(manifest))
+        environment = {"BENCHMARK_CLOUD_BATCH_CLEANUP": "true", "BENCHMARK_ISOLATED_RUN": "true",
+                       "BENCHMARK_INTERRUPT_CLEANUP_TOKEN": "owned-token",
+                       "BENCHMARK_INTERRUPT_CLEANUP_STATUS_FILE": str(context / "status"),
+                       "BENCHMARK_CONTEXT_DIR": directory, "TEMPORAL_TASK_QUEUE": "owned-queue"}
+        with patch.dict(os.environ, environment), patch.object(cleanup.runpy, "run_path", return_value=recovery):
+            assert cleanup.exact_root_sessions("http://localhost:3201", ROOT, require_deleted=True) == payload
+            assert queries[-1]["database"] == names[0] and queries[-1]["port"] == 5432
+            assert all(len(name.encode("ascii")) <= 63 for name in names)
+            assert names[0] != names[1], "world siblings must never alias one system database"
+            assert native_name(run_id) == names[0], "same world must retain the same identity"
+            assert native_name("short-fixture") == "victoria_bench_short_fixture"
+            exact_boundary = "x" * (63 - len("victoria_bench_"))
+            assert native_name(exact_boundary) == "victoria_bench_" + exact_boundary
+            assert len(native_name(exact_boundary + "x")) == 63
+            assert native_name(exact_boundary + "x") != native_name(exact_boundary + "y")
+            for foreign_url in ("https://production.example", "http://localhost:3202", "http://localhost:3201/foreign", "http://user@localhost:3201", "http://localhost:3201?database=foreign", "http://127.0.0.1:3201"):
+                count = len(queries)
+                with pytest.raises(RuntimeError, match="not the owned local stack"):
+                    cleanup.exact_root_sessions(foreign_url, ROOT)
+                assert len(queries) == count, "foreign URL must be refused before SQL"
+            for patch_value in ({"worktree": str(context / "foreign")}, {"temporal_task_queue": "foreign-queue"},
+                                {"database": {"name": "unsafe;DROP DATABASE foreign", "port": 5432}},
+                                {"database": {"name": names[0], "port": 65536}},
+                                {"database": {"name": names[0], "port": "5432"}}):
+                manifest_path.write_text(json.dumps({**manifest, **patch_value}))
+                count = len(queries)
+                with pytest.raises(RuntimeError, match="not the owned local stack"):
+                    cleanup.exact_root_sessions("http://localhost:3201", ROOT)
+                assert len(queries) == count, "foreign/unsafe stack must be refused before SQL"
+
+
+def test_native_system_database_identity_agrees_for_create_restore_runtime_and_manifest():
+    """Run native startup fragments with database commands replaced by exact captures."""
+    import subprocess
+    from urllib.parse import urlsplit
+
+    repo = Path(__file__).resolve().parents[2]
+    source = (repo / "scripts/run.sh").read_text()
+    marker = '    if [ "$BENCHMARK_ISOLATED_RUN" = "true" ] && [ -n "${BENCHMARK_RUN_ID:-}" ]; then'
+    name_start = source.index(marker)
+    names = source[name_start:source.index('\n    if pg_isready', name_start)]
+    create_start = source.index('    if [ "$BENCHMARK_ISOLATED_RUN" = "true" ]; then\n        PGPASSWORD=postgres dropdb')
+    creates = source[create_start:source.index('\nfi\n\n# DEMO cache', create_start)]
+    config_start = source.index('configure_local_db_url() {')
+    config = source[config_start:source.index('\nconfigure_local_db_url', config_start)]
+    restore_start = source.index('    if PGPASSWORD=postgres bash scripts/restore-seed-dump.sh')
+    restores = source[restore_start:source.index('; then', restore_start)].removeprefix('    if ')
+    writer_start = source.index('write_services_manifest() {')
+    python_start = source.index("python3 - <<'PY'\n", writer_start) + len("python3 - <<'PY'\n")
+    manifest_python = source[python_start:source.index('\nPY\n', python_start)]
+    import importlib.util
+    import sys
+    spec = importlib.util.spec_from_file_location("owned_db_local", repo / "agents/benchmarks/local.py")
+    local = importlib.util.module_from_spec(spec)
+    with patch.dict(sys.modules, {spec.name: local}):
+        spec.loader.exec_module(local)
+    run_ids = ["agentcard-v2-stability-20261109-partial11-round-01-worlds-1",
+               "agentcard-v2-stability-20261109-partial11-round-01-worlds-2",
+               "same.prefix-" + "a" * 70, "same_prefix-" + "a" * 70]
+    observed = []
+    for run_id in run_ids:
+        with tempfile.TemporaryDirectory() as directory:
+            context = Path(directory)
+            script = (
+                '. "$1"\n' + names + "\n"
+                'dropdb() { DROPPED_DB="${@: -1}"; }\n'
+                'createdb() { CREATED_DB="${@: -1}"; }\n'
+                '{\n' + creates + '\n} >/dev/null\n' + config + '\nconfigure_local_db_url\n'
+                'bash() { [ "$1" = scripts/restore-seed-dump.sh ] || return 99; RESTORED_DB="$6"; }\n'
+                '_SEED_DUMP=offline.dump; _SEED_RESTORE_CONTAINER=""\n' + restores + '\n'
+                'export LOCAL_DB_NAME LOCAL_DB_ACTUAL_PORT DB_OWNED_BY_US DROPPED_DB CREATED_DB RESTORED_DB\n'
+                "python3 - <<'PY_NATIVE_MANIFEST'\n" + manifest_python + "\nPY_NATIVE_MANIFEST\n"
+                "python3 - <<'PY_NATIVE_CAPTURE'\n"
+                'import json,os,pathlib\n'
+                'row={k:os.environ[k] for k in ["LOCAL_DB_NAME","DATABASE_URL","DIRECT_URL","DROPPED_DB","CREATED_DB","RESTORED_DB"]}\n'
+                'row["manifest"]=json.loads((pathlib.Path(os.environ["RUN_CONTEXT_DIR"])/"services.json").read_text())\n'
+                'print(json.dumps(row))\nPY_NATIVE_CAPTURE\n'
+            )
+            result = subprocess.run(
+                ["bash", "-e", "-c", script, "native-db-identity", str(repo / "scripts/lib/workspace-env.sh")],
+                cwd=cleanup.REPO_ROOT,
+                env={"PATH": os.environ["PATH"], "BENCHMARK_ISOLATED_RUN":"true", "BENCHMARK_MODE":"true",
+                     "BENCHMARK_RUN_ID":run_id, "SYSTEM_PG_PORT":"5432", "LOCAL_DB_ACTUAL_PORT":"5432",
+                     "USE_SYSTEM_PG":"true", "IS_CLOUD":"true", "RUN_CONTEXT_DIR":directory,
+                     "SERVICE_STATUS":"running", "BACKEND_PORT":"3201", "TEMPORAL_TASK_QUEUE":"owned-queue"},
+                capture_output=True, text=True, check=True, timeout=5,
+            )
+            row = json.loads(result.stdout)
+            name = row["LOCAL_DB_NAME"]
+            assert name.isascii() and len(name) <= 63
+            for field in ["DROPPED_DB", "CREATED_DB", "RESTORED_DB"]:
+                assert row[field] == name
+            assert urlsplit(row["DATABASE_URL"]).path == urlsplit(row["DIRECT_URL"]).path == "/" + name
+            assert row["manifest"]["database"]["name"] == name
+            assert row["manifest"]["database"]["port"] == row["manifest"]["database"]["runtime_port"] == 5432
+            assert local.benchmark_system_pg_db_name(run_id) == name
+            observed.append(name)
+    assert len(set(observed)) == len(run_ids), "hash must include original punctuation and sibling suffix"
+
+
+async def _assert_terminal_report_final_grade(scenarios):
+    """Real main finalizer must project canonical post-cleanup outcomes to the native card."""
+    from benchmarks import results as result_types
+    from benchmarks import report_card as native_card
+    import runpy
+
+    source = Path(__file__).with_name("run_benchmark.py")
+    module = ast.parse(source.read_text()).body
+    save_helper = next(node for node in module if isinstance(node, ast.AsyncFunctionDef) and node.name == "_finalize_owned_batch_and_save_run")
+    private_emitter = runpy.run_path(str(source.with_name("report_card.py")))["ReportCardEmitter"]
+    main = next(node for node in module if isinstance(node, ast.AsyncFunctionDef) and node.name == "main_async")
+    start = next(i for i, node in enumerate(main.body) if isinstance(node, ast.Assign) and any(
+        isinstance(target, ast.Name) and target.id == "initial_credential_skips" for target in node.targets))
+    stop = next(i for i, node in enumerate(main.body) if isinstance(node, ast.Assign) and any(
+        isinstance(target, ast.Name) and target.id == "owned_batch_cleanup" for target in node.targets))
+    owner = next(node for node in main.body if isinstance(node, ast.Try) and any(
+        isinstance(child, ast.Name) and child.id == "_report_ticker_task"
+        for statement in node.finalbody for child in ast.walk(statement)))
+    finish = ast.AsyncFunctionDef(name="_finish_native_report", args=ast.arguments(
+        posonlyargs=[], args=[], kwonlyargs=[], kw_defaults=[], defaults=[]), body=owner.finalbody, decorator_list=[])
+    task = SimpleNamespace(name="agent-payment-setup-resume", world_model_mode=None)
+    for scenario in scenarios:
+        grade = scenario.removesuffix("-closed")
+        closed = [False]
+        def sink(*args, **kwargs):
+            if closed[0]:
+                raise BrokenPipeError("stdout closed")
+        error = asyncio.CancelledError("owned cleanup cancelled") if grade == "cleanup-cancelled" else RuntimeError("provider verification database is not the owned local stack")
+        with tempfile.TemporaryDirectory() as directory:
+            context = Path(directory)
+            passed = grade in {"cleanup-error", "cleanup-cancelled", "passed"}
+            status = "COMPLETED" if passed else grade.upper()
+            result = bench.TaskResult(name=task.name, passed=passed, agent_id=ROOT, status=status,
+                benchmark_status="PASSED" if passed else status, progress_score=1 if passed else 0,
+                duration_seconds=241.5, cost_cents=2.0, message_count=3, tokens_in=194195, tokens_out=1679)
+            run = result_types.BenchmarkRun(run_id="native-final-report", task_results=[result])
+            real_save = run.save
+            run.save = lambda: real_save(directory=str(context / "canonical"))
+            async def stop_collector():
+                return 0
+            async def finalize(_url, results, _roots, **_kwargs):
+                assert results == [result]
+                if scenario.endswith("-closed"):
+                    closed[0] = True
+                if grade.startswith("cleanup-"):
+                    bench._record_owned_cleanup_failure(result,
+                        {"errors":["provider: exact provider ownership was not established", "payment: exact payment ownership was not established"]}, error)
+                    raise error
+            namespace = dict(vars(bench))
+            namespace.update(tasks=[task], skipped_claude_tasks=[], run=run, base_url="http://localhost:3201",
+                stop_fly_log_collector=stop_collector, realtime_started=False, memory_gate_enabled=False,
+                print=sink, _finalize_owned_cloud_batch=finalize, _complete_interrupt_cleanup=lambda:None,
+                owned_batch_cleanup=True, _live_task_agent_ids={task.name:[ROOT]}, _never_admitted_results=[],
+                _WMHEvidenceSnapshot=lambda: SimpleNamespace(refresh=lambda:None, finalize=lambda:None),
+                _infra_usd_for_elapsed=lambda _elapsed:None)
+            with patch.dict(os.environ, {"BENCHMARK_CONTEXT_DIR":directory}), \
+                 patch.object(bench, "_finalize_owned_cloud_batch", finalize), \
+                 patch.object(bench, "_complete_interrupt_cleanup"), \
+                 patch.object(run, "_record_history") as history, \
+                 patch.object(run, "_upload_to_hub") as hub, \
+                 patch("socket.create_connection", side_effect=AssertionError("real network forbidden")) as dial, \
+                 patch("socket.socket.connect", side_effect=AssertionError("real network forbidden")) as connect, \
+                 patch("socket.socket.connect_ex", side_effect=AssertionError("real network forbidden")) as connect_ex, \
+                 patch.object(native_card, "ReportCardEmitter", private_emitter), \
+                 patch("benchmarks.report_card.clean_source_sha", return_value="a"*40):
+                exec(compile(ast.fix_missing_locations(ast.Module(body=[save_helper, *main.body[start:stop], finish], type_ignores=[])),
+                    str(source), "exec"), namespace)
+                namespace["_report_emitter"]._emit = sink
+                namespace["_emit_report"](force=True)
+                before = json.loads((context / "report-card.json").read_text())
+                ticker = asyncio.create_task(asyncio.Event().wait())
+                namespace["_report_ticker_task"] = ticker
+                try:
+                    if grade.startswith("cleanup-"):
+                        with pytest.raises(type(error)) as caught:
+                            await namespace["_finish_native_report"]()
+                        assert caught.value is error, "output failure replaced the original cleanup exception"
+                    else:
+                        await namespace["_finish_native_report"]()
+                finally:
+                    ticker.cancel()
+                    await asyncio.gather(ticker, return_exceptions=True)
+            history.assert_called_once()
+            hub.assert_called_once()
+            dial.assert_not_called()
+            connect.assert_not_called()
+            connect_ex.assert_not_called()
+            card = json.loads((context / "report-card.json").read_text())
+            canonical = json.loads((context / "run.json").read_text())
+            expected = "failed" if grade.startswith("cleanup-") else grade
+            assert card["per_task"][0]["status"] == expected, "terminal report retained pre-cleanup PASS after canonical ERROR"
+            assert card["results"]["passed"] == int(expected == "passed")
+            assert card["results"]["failed"] == int(expected == "failed")
+            assert card["results"]["cancelled"] == int(expected == "cancelled")
+            assert canonical["tasks"][0]["passed"] is (expected == "passed")
+            assert card["per_task"][0]["agent_id"] == ROOT
+            assert card["source_sha"] == before["source_sha"] == "a"*40
+            assert card["started_at"] == before["started_at"] and card["finished_at"] == before["finished_at"]
+            assert card["per_task"][0]["tokens_in"] == 194195 and card["per_task"][0]["cost_usd"] == .02
+
+
+@async_case
+async def test_terminal_report_refreshes_after_owned_cleanup_final_grade():
+    await _assert_terminal_report_final_grade(("cleanup-error", "passed", "failed", "cancelled", "passed-closed"))
+
+
+@async_case
+async def test_terminal_report_closed_sink_preserves_cleanup_runtime_error():
+    await _assert_terminal_report_final_grade(("cleanup-error-closed",))
+
+
+@async_case
+async def test_terminal_report_closed_sink_preserves_real_cleanup_cancellation():
+    await _assert_terminal_report_final_grade(("cleanup-cancelled-closed",))
+
+
+@async_case
+async def test_terminal_failed_setup_intent_requires_external_custody():
+    failed = {"purchase_id": "00000000-0000-4000-8000-000000000003", "agent_id": ROOT,
+              "user_id": ROOT, "stripe_livemode": False, "stripe_customer_id": "cus_owned",
+              "status": "FAILED", "card_id": None, "stripe_payment_intent_id": "pi_initial",
+              "total_cents": 4396, "funding_status": None, "provider_transfer_id": None,
+              "reclaim_provider_transfer_id": None}
+    paid = {**failed, "purchase_id": "00000000-0000-4000-8000-000000000004", "status": "CLEARED",
+            "card_id": "card_owned", "stripe_payment_intent_id": "pi_paid", "funding_status": "CONSUMED"}
+    def proof(row, outcome):
+        return {"purchaseId": row["purchase_id"], "userId": ROOT, "agentId": ROOT,
+                "purchaseStatus": row["status"], "paymentIntentId": row["stripe_payment_intent_id"],
+                "customerId": "cus_owned", "livemode": False, "status": "canceled" if outcome == "unspent" else "succeeded",
+                "currency": "usd", "amountCents": 4396, "amountReceivedCents": 0 if outcome == "unspent" else 4396,
+                "amountCapturableCents": 0, "refundedCents": 0, "outcome": outcome}
+    snapshot = {"root_user_id": ROOT, "tree_agent_ids": [ROOT], "purchase_cleanup": [failed, paid]}
+    observations = [proof(failed, "unspent"), proof(paid, "paid")]
+    fetch = AsyncMock(return_value={"agentId": ROOT, "stripeCustody": observations})
+    with patch.object(cleanup, "exact_root_sessions", return_value=snapshot), patch.object(bench, "get_test_payment_lifecycle", fetch):
+        result = await bench._finalize_owned_root_payments("http://localhost:1", ROOT, {})
+        fetch.assert_awaited_once_with("http://localhost:1", ROOT, stripe_custody=True)
+        assert result["stripe_custody"] == observations
+        for field, value in [("livemode", True), ("customerId", "cus_foreign"), ("userId", CHILD),
+                             ("status", "requires_capture"), ("amountCapturableCents", 4396),
+                             ("paymentIntentId", "pi_foreign"), ("amountReceivedCents", 4396)]:
+            broken = copy.deepcopy(observations); broken[0][field] = value
+            fetch.return_value = {"agentId": ROOT, "stripeCustody": broken}
+            with pytest.raises(RuntimeError, match="custody"):
+                await bench._finalize_owned_root_payments("http://localhost:1", ROOT, {})
+        refunded = copy.deepcopy(observations)
+        refunded[0].update(status="succeeded", outcome="refunded", amountReceivedCents=4396, refundedCents=4396)
+        fetch.return_value = {"agentId": ROOT, "stripeCustody": refunded}
+        assert (await bench._finalize_owned_root_payments("http://localhost:1", ROOT, {}))["stripe_custody"] == refunded
+        refunded[0]["refundedCents"] = 4395
+        with pytest.raises(RuntimeError, match="custody"):
+            await bench._finalize_owned_root_payments("http://localhost:1", ROOT, {})
+        fetch.return_value = {"agentId": ROOT, "stripeCustody": observations[1:]}
+        with pytest.raises(RuntimeError, match="custody"):
+            await bench._finalize_owned_root_payments("http://localhost:1", ROOT, {})
+
+
+def _native_world_receipt_fixture(scenario):
+    """Execute native provisioning, validation, manifest writer and EXIT cleanup; vendors are fake."""
+    import subprocess
+    source = (Path(__file__).resolve().parents[2] / "scripts/run.sh").read_text()
+    writer_start = source.index("write_services_manifest() {")
+    writer = source[writer_start:source.index("\n# ── World Model Harness", writer_start)]
+    cleanup_start = source.index("\ncleanup() {", writer_start) + 1
+    cleanup_end = source.index("\nrun_install_teardown_signal_traps", cleanup_start)
+    native_cleanup_and_trap = source[cleanup_start:cleanup_end]
+    provision_start = source.index('if [ "${BENCHMARK_AGENTCARD_WORLD_IDENTITY:-}" = "true" ]; then')
+    provision = source[provision_start:source.index('\nBACKEND_PID=""', provision_start)]
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        (root / "back-end").mkdir()
+        context = root / "context"
+        context.mkdir()
+        manifest = context / "services.json"
+        manifest.write_text(json.dumps({"status": "starting", "retained": "must-be-replaced"}))
+        # An inherited receipt must never publish a previous world's identity on a failed setup.
+        old_receipt = context / "old-world.json"
+        old_receipt.write_text(json.dumps({"version": 1, "worldId": "foreign-world", "providerUserId": "usr_old", "livemode": False, "fundsSource": "company_flow"}))
+        stubs = r'''
+NAMES=(); PIDS=()
+SHUTTING_DOWN=false
+SERVICE_STATUS=starting
+DB_CONTAINER=''; DB_VOLUME=''; DB_OWNED_BY_US=false; USE_SYSTEM_PG=false
+SYSTEM_DB_OWNED_BY_US=false; LOCAL_DB_NAME=owned_fixture; LOCAL_DB_ACTUAL_PORT=5432
+BENCHMARK_ISOLATED_RUN=true; BENCHMARK_MODE=true
+NGROK_CONFIG_FILE=''; FAIL_DIR=''
+run_ignore_repeated_teardown_signals() { :; }
+stop_stack_owner_watch() { :; }
+run_publish_stack_cleanup_status() { printf '%s\n' "$1" >> "$RUN_CONTEXT_DIR/cleanup-status.txt"; }
+run_drain_owned_agents() { return 0; }
+release_seed_lock_if_held() { :; }
+remove_isolated_frontend_build() { :; }
+node() {
+    printf '%s\n' "${BENCHMARK_AGENTCARD_WORLD_RECEIPT-unpublished}" > "$RUN_CONTEXT_DIR/receipt-during-provision.txt"
+    [ "$FIXTURE_SCENARIO" != setup-missing ] || return 17
+    python3 - "${@: -1}" "$FIXTURE_SCENARIO" <<'PY_FIXTURE_RECEIPT'
+import json,sys
+from pathlib import Path
+path,scenario=Path(sys.argv[1]),sys.argv[2]
+row={"version":1,"worldId":"owned-world","providerUserId":"usr_owned","livemode":False,"fundsSource":"company_flow"}
+if scenario=="wrong-world": row["worldId"]="foreign-world"
+if scenario=="wrong-mode": row["livemode"]=True
+if scenario=="legacy-alias": row["providerUserId"]="cm_legacy"
+path.write_text("{" if scenario=="malformed" else json.dumps(row))
+PY_FIXTURE_RECEIPT
+    [ "$FIXTURE_SCENARIO" != setup-written ] || return 17
+}
+'''
+        script = "set -eu\n" + stubs + writer + native_cleanup_and_trap + "\n" + provision + "\nSERVICE_STATUS=running\nwrite_services_manifest\n"
+        env = {"PATH": os.environ["PATH"], "RUN_CONTEXT_DIR": str(context),
+               "BENCHMARK_AGENTCARD_WORLD_IDENTITY": "true", "BENCHMARK_RUN_ID": "owned-world",
+               "BENCHMARK_AGENTCARD_WORLD_RECEIPT": str(old_receipt),
+               "BENCHMARK_AGENTCARD_V2_USER_ID": "usr_old", "FIXTURE_SCENARIO": scenario}
+        result = subprocess.run(["bash", "-c", script], cwd=root, env=env, capture_output=True, text=True, timeout=5)
+        return result, json.loads(manifest.read_text()), (context / "cleanup-status.txt").read_text().splitlines(), (context / "receipt-during-provision.txt").read_text().strip()
+
+
+def test_native_world_receipt_failure_still_publishes_stopped_manifest():
+    result, manifest, statuses, _ = _native_world_receipt_fixture("setup-missing")
+    assert result.returncode != 0
+    assert manifest["status"] == "stopped", result.stderr
+    assert "agentcard_world_identity" not in manifest
+    assert statuses == ["pending", "clean"]
+
+
+def test_native_world_receipt_validation_rejects_before_publication():
+    for scenario in ("setup-written", "malformed", "wrong-world", "wrong-mode", "legacy-alias"):
+        result, manifest, statuses, during = _native_world_receipt_fixture(scenario)
+        assert result.returncode != 0, scenario
+        assert manifest["status"] == "stopped", (scenario, result.stderr)
+        assert "agentcard_world_identity" not in manifest, scenario
+        assert statuses == ["pending", "clean"], scenario
+        assert during == "unpublished", scenario
+
+
+def test_native_world_receipt_success_publishes_only_validated_exact_identity():
+    result, manifest, statuses, during = _native_world_receipt_fixture("valid")
+    assert result.returncode == 0, result.stderr
+    assert during == "unpublished"
+    assert manifest["status"] == "stopped"
+    assert manifest["agentcard_world_identity"] == {"version":1,"worldId":"owned-world","providerUserId":"usr_owned","livemode":False,"fundsSource":"company_flow"}
+    assert statuses == ["pending", "clean"]

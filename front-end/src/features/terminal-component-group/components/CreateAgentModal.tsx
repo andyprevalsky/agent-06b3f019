@@ -12,6 +12,7 @@
  *     |       +--> selectedModel: string
  *     |       +--> reasoningEffort: 'off'|'low'|'medium'|'high'
  *     |       +--> selectedTools: string[]
+ *     |       +--> githubRepoRef: '' (inherit) | connected canonical ref
  *     |       |
  *     |       | (submit, goal non-empty)
  *     |       v
@@ -19,12 +20,14 @@
  *     |       |
  *     |       +--> (success) --> close modal (onClose)
  *     |       +--> (error)   --> toast error --> [EDITING]
+ *     |       +--> (repo not connected) --> inline repo error --> [EDITING]
  *
  * All state transitions, side effects, and validation live in
  * ./create-agent-modal/useCreateAgentForm.ts. This component is a thin view.
  */
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { FormActions } from './create-agent-modal/FormActions';
+import { GithubRepoSelect } from './create-agent-modal/GithubRepoSelect';
 import { GoalInput } from './create-agent-modal/GoalInput';
 import { JudgePromptInput } from './create-agent-modal/JudgePromptInput';
 import { ModelSelect } from './create-agent-modal/ModelSelect';
@@ -75,6 +78,14 @@ export default function CreateAgentModal({ open, onClose, onSubmit }: CreateAgen
             models={models}
             selectedModel={form.selectedModel}
             onChange={form.setSelectedModel}
+          />
+
+          <GithubRepoSelect
+            repos={form.githubRepo.githubRepos}
+            value={form.githubRepo.githubRepoRef}
+            onChange={form.githubRepo.setGithubRepoRef}
+            loadError={form.githubRepo.githubReposError}
+            error={form.githubRepo.githubRepoRefError}
           />
 
           <ToolPicker

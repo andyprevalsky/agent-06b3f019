@@ -8,7 +8,9 @@
  *   [SAVING] --PUT fails--> [DIRTY] + error message
  *   project prop changes (another project opened) --> [PRISTINE] for that project
  *
- * Holds a local draft of the editable Project fields; `save()` PUTs only the
+ * Holds a local draft of the editable Project fields (the repo is not one: it is
+ * connected or changed on the Integrations panel; a new name saves through
+ * PATCH /api/folders/:id, the rest through PUT /api/projects/:id); `save()` PUTs only the
  * fields that differ from the loaded project (the server is strict: no unknown
  * or unchanged fields). A cleared startup script is sent as '' (clears it).
  * The template sync settings (script, timeout, nightly, GitHub watch) are part of
@@ -35,7 +37,6 @@ import { useUpdateProject } from './useProjects';
 
 export interface ProjectDraft {
   name: string;
-  repoUrl: string | null;
   defaultBranch: string;
   startupScript: string;
   startupTimeoutS: number;
@@ -49,7 +50,6 @@ export interface ProjectDraft {
 function draftOf(project: Project): ProjectDraft {
   return {
     name: project.name,
-    repoUrl: project.repoUrl,
     defaultBranch: project.defaultBranch,
     startupScript: project.startupScript ?? '',
     startupTimeoutS: project.startupTimeoutS,
@@ -64,7 +64,6 @@ function draftOf(project: Project): ProjectDraft {
 function diff(project: Project, draft: ProjectDraft): ProjectUpdate {
   const updates: ProjectUpdate = {};
   if (draft.name !== project.name) updates.name = draft.name;
-  if (draft.repoUrl !== project.repoUrl) updates.repoUrl = draft.repoUrl;
   if (draft.defaultBranch !== project.defaultBranch) updates.defaultBranch = draft.defaultBranch;
   if (draft.startupScript !== (project.startupScript ?? ''))
     updates.startupScript = draft.startupScript;
@@ -135,12 +134,12 @@ export function useProjectSettingsForm(project: Project) {
     if (!isDirty || !isTimeoutValid || !isSyncTimeoutValid) return;
     setError(null);
     try {
-      const saved = await mutation.mutateAsync({ id: project.id, updates });
+      const saved = await mutation.mutateAsync({ project, updates });
       setDraft(draftOf(saved));
     } catch {
-      setError('Could not save project settings');
+      setError('Could not save folder settings');
     }
-  }, [isDirty, isTimeoutValid, isSyncTimeoutValid, mutation, project.id, updates]);
+  }, [isDirty, isTimeoutValid, isSyncTimeoutValid, mutation, project, updates]);
 
   return {
     draft,

@@ -4,14 +4,20 @@ import { agentSpeedFromRow, type AgentSpeed } from '../../providers/rose/speed';
 export async function findAgentGithubInfo(agentId: string) {
   return prisma.agent.findUnique({
     where: { id: agentId },
-    select: { githubRepoUrl: true, userId: true, busId: true, projectId: true },
+    select: {
+      githubRepoUrl: true,
+      githubRepoRef: true,
+      userId: true,
+      busId: true,
+      projectId: true,
+    },
   });
 }
 
 export async function findRootAgentGithubInfo(busId: string) {
   return prisma.agent.findUnique({
     where: { id: busId },
-    select: { githubRepoUrl: true, userId: true, projectId: true },
+    select: { githubRepoUrl: true, githubRepoRef: true, userId: true, projectId: true },
   });
 }
 

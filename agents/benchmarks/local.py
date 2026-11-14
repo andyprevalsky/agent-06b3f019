@@ -52,6 +52,16 @@ from benchmarks.benchmark_tasks import (
 from benchmarks.polar_catalog import is_polar_bench_task
 
 
+def benchmark_system_pg_db_name(run_id: str) -> str:
+    """Use the native shell producer for retained recording's fixture identity."""
+    result = subprocess.run(
+        ["bash", "-c", '. "$1"; benchmark_system_pg_db_name "$2"', "benchmark-db-name",
+         str(REPO_ROOT / "scripts/lib/workspace-env.sh"), run_id],
+        check=True, capture_output=True, text=True,
+    )
+    return result.stdout.strip()
+
+
 def apply_owned_wmh_recording(
     env: dict[str, str],
     *,
@@ -59,7 +69,7 @@ def apply_owned_wmh_recording(
     simulate: bool,
     tasks: Sequence[object],
     workspace: str | None,
-    fixture_database: str,
+    fixture_database: str | Callable[[], str],
 ) -> bool:
     """Admit explicitly selected recording only into its retained owned cache."""
     if isolated and (env.get("WMH_OWNED_RECORDING_CACHE_MANIFEST") or env.get("WMH_OWNED_RECORDING_CACHE_DATABASE_URL")):
@@ -79,6 +89,7 @@ def apply_owned_wmh_recording(
         raise ValueError("Selected isolated WMH recording requires a retained owned cache manifest")
     from providers.demo_cache.context import validate_owned_recording
 
+    fixture_database = fixture_database() if callable(fixture_database) else fixture_database
     validate_owned_recording(env, checkout=str(REPO_ROOT.resolve()), workspace=workspace, fixture_database=fixture_database)
     mode = "simulate" if simulate else "real"
     if env.get("BENCHMARK_WORLD_MODEL_MODE", mode) != mode:
@@ -1409,13 +1420,11 @@ def validate_agentcard_org_credentials(
     configured.update(os.environ if env is None else env)
     client_id = configured.get("AGENTCARD_ORG_OAUTH_CLIENT_ID", "").strip()
     client_secret = configured.get("AGENTCARD_ORG_OAUTH_CLIENT_SECRET", "").strip()
-    direct = configured.get("AGENTCARD_ORG_MCP_ACCESS_TOKEN", "").strip()
-    if direct.startswith("sk_"):
-        direct = ""
-    if direct or (client_id and client_secret):
+    if client_id and client_secret:
         return
     raise RuntimeError(
-        "AgentCard Organization MCP credentials are missing. API keys (sk_*) are retired; "
+        "AgentCard REST v2 requires organization client credentials. An MCP access token "
+        "cannot authenticate the Issuing API. API keys (sk_*) are retired; "
         "run `agentcard companies credentials create`, then set "
         "AGENTCARD_ORG_OAUTH_CLIENT_ID and AGENTCARD_ORG_OAUTH_CLIENT_SECRET."
     )
@@ -1517,6 +1526,20 @@ def configure_task_environment(tasks: Sequence[str], *, isolated: bool = False) 
             os.environ[key] = value
 
 
+def _manifest_agentcard_world_user_id(manifest: dict, expected_world: str | None = None) -> str:
+    identity = manifest.get("agentcard_world_identity")
+    if not isinstance(identity, dict) or identity.get("version") != 1 or identity.get("livemode") is not False or identity.get("fundsSource") != "company_flow":
+        raise RuntimeError("Native payment world has no verified sandbox AgentCard identity")
+    if not isinstance(identity.get("worldId"), str) or not identity["worldId"] or (expected_world is not None and identity["worldId"] != expected_world):
+        raise RuntimeError("Native payment world has no verified sandbox AgentCard identity")
+    if not isinstance(identity.get("scope"), str) or not re.fullmatch(r"[a-f0-9]{64}", identity["scope"]):
+        raise RuntimeError("Native payment world has invalid credential/database scope")
+    provider_user_id = identity.get("providerUserId")
+    if not isinstance(provider_user_id, str) or not re.fullmatch(r"usr_[A-Za-z0-9_-]+", provider_user_id):
+        raise RuntimeError("Native payment world provider identity is invalid")
+    return provider_user_id
+
+
 def seed_payment_fixture(manifest: dict) -> None:
     database_url = manifest_database_url(manifest)
     # A backend script: like the stack services, it reads back-end/.env itself.
@@ -1525,6 +1548,12 @@ def seed_payment_fixture(manifest: dict) -> None:
         "DATABASE_URL": database_url,
         "DIRECT_URL": database_url,
     }
+    opted_in = os.environ.get("BENCHMARK_AGENTCARD_WORLD_IDENTITY") == "true"
+    if opted_in or manifest.get("agentcard_world_identity") is not None:
+        provider_user_id = _manifest_agentcard_world_user_id(manifest, os.environ.get("BENCHMARK_RUN_ID") if opted_in else None)
+        if not opted_in and env.get("BENCHMARK_AGENTCARD_V2_USER_ID") != provider_user_id:
+            raise RuntimeError("Existing stack has a scoped AgentCard identity; supply its exact mapping explicitly or start a new isolated benchmark")
+        env["BENCHMARK_AGENTCARD_V2_USER_ID"] = provider_user_id
     # `configure_task_environment` publishes the payment identity on
     # AGENT_PAYMENT_BENCHMARK_USER_ID_ENV. Prefer that, else the dedicated
     # synthetic lifecycle id — never BENCHMARK_USER_ID / the admin operator,
@@ -1907,8 +1936,8 @@ def start_services(
             simulate=resolve_simulate_mode(simulate, tasks),
             tasks=[get_task_by_name(name) for name in tasks],
             workspace=stack.workspace_name,
-            fixture_database=(
-                f"victoria_bench_{re.sub(r'[^a-zA-Z0-9]', '_', stack.run_id)}"
+            fixture_database=lambda: (
+                benchmark_system_pg_db_name(stack.run_id)
                 if stack.use_system_postgres
                 else f"victoria_{stack.workspace_name}"
             ),
@@ -2165,6 +2194,11 @@ BENCHMARK_DB_CONNECTION_LIMIT = 80
 
 
 def apply_manifest_environment(manifest: dict) -> None:
+    if os.environ.get("BENCHMARK_AGENTCARD_WORLD_IDENTITY") == "true":
+        if os.environ.get("BENCHMARK_ISOLATED_RUN") != "true":
+            raise RuntimeError("AgentCard world identity requires an isolated native run")
+        # The same validated server identity must reach regular AND fresh-user writers.
+        os.environ["BENCHMARK_AGENTCARD_V2_USER_ID"] = _manifest_agentcard_world_user_id(manifest, os.environ.get("BENCHMARK_RUN_ID"))
     urls = manifest.get("urls") if isinstance(manifest, dict) else {}
     ports = manifest.get("ports") if isinstance(manifest, dict) else {}
     database = manifest.get("database") if isinstance(manifest, dict) else {}
@@ -3212,13 +3246,18 @@ def main(argv: Sequence[str] | None = None) -> int:
             return run_task_worlds(sys.modules[__name__], args, selected_tasks)
     stack = build_service_stack(args)
     configure_task_environment(cohort_tasks, isolated=stack.isolated)
+    # Provider identity belongs to this selected world, not other cohort members.
+    if stack.isolated and not args.simulate and (AGENT_PAYMENT_TASK_NAMES | NEW_USER_PAYMENT_TASK_NAMES) & set(selected_tasks):
+        os.environ["BENCHMARK_AGENTCARD_WORLD_IDENTITY"] = "true"
+    else:
+        os.environ.pop("BENCHMARK_AGENTCARD_WORLD_IDENTITY", None)
     if args.owned_recording_preparation_seconds is not None:
         recording_env = service_base_environ()
         if not apply_owned_wmh_recording(
             recording_env, isolated=stack.isolated, simulate=False,
             tasks=[get_task_by_name(name) for name in selected_tasks], workspace=stack.workspace_name,
-            fixture_database=(f"victoria_bench_{re.sub(r'[^a-zA-Z0-9]', '_', stack.run_id)}"
-                              if stack.use_system_postgres else f"victoria_{stack.workspace_name}"),
+            fixture_database=lambda: (benchmark_system_pg_db_name(stack.run_id)
+                                      if stack.use_system_postgres else f"victoria_{stack.workspace_name}"),
         ):
             raise ValueError("Preparation requires a validated explicit owned recording manifest")
 
@@ -3345,7 +3384,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         if dashboard_enabled(ci=args.no_dashboard):
             dashboard = maybe_launch_dashboard(_dashboard_context_dir(stack), enabled=True)
         print_scorecard_instruction(_dashboard_context_dir(stack))
-        if needs_payment_fixture(cohort_tasks):
+        # Service/worker policy is shared by the cohort, but identity-binding
+        # fixtures belong only to the tasks selected in this child world.
+        if needs_payment_fixture(selected_tasks):
             seed_payment_fixture(manifest)
         if needs_frontend_tunnel(selected_tasks):
             # Prefer the stable public URL run.sh assigned at startup (reserved ngrok domain →

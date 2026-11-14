@@ -1337,6 +1337,9 @@ fi
 if [ "$BENCH_NEEDS_AGENTCARD_ONBOARDING" = "1" ]; then
     STACK_ENV+=("AGENTCARD_ONBOARDING_RETURN_URL=$AGENTCARD_BENCHMARK_ONBOARDING_RETURN_URL")
 fi
+if [ "$BENCH_SIMULATE" != "1" ] && { [ "$BENCH_NEEDS_PAYMENT_FIXTURE" = "1" ] || [ "$BENCH_NEEDS_NEW_USER_CHECKOUT" = "1" ]; }; then
+    STACK_ENV+=("BENCHMARK_AGENTCARD_WORLD_IDENTITY=true")
+fi
 if [ "$BENCH_NEEDS_PAYMENT_FIXTURE" = "1" ]; then
     STACK_ENV+=(
         "BENCHMARK_FORCE_CUSTOMER_PURCHASE_PATH=1"
@@ -1564,6 +1567,18 @@ PY
 python3 "$REPO_DIR/scripts/cloudbench-guest-diagnostics.py" "$CONTEXT_DIR/guest-diagnostics.jsonl" \
     "$STACK_DB_URL" "${DB_CONNECTION_LIMIT:-30}" 15 2880 >/dev/null 2>&1 &
 GUEST_DIAGNOSTICS_PID=$!
+if [ "$BENCH_SIMULATE" != "1" ] && { [ "$BENCH_NEEDS_PAYMENT_FIXTURE" = "1" ] || [ "$BENCH_NEEDS_NEW_USER_CHECKOUT" = "1" ]; }; then
+    BENCHMARK_AGENTCARD_V2_USER_ID="$(python3 - "$MANIFEST" "$WORKSPACE_NAME" <<'PY_WORLD_ID'
+import json, re, sys
+row=json.load(open(sys.argv[1])).get('agentcard_world_identity',{})
+assert row.get('version')==1 and row.get('worldId')==sys.argv[2]
+assert row.get('livemode') is False and row.get('fundsSource')=='company_flow'
+assert re.fullmatch(r'usr_[A-Za-z0-9_-]+',row.get('providerUserId',''))
+print(row['providerUserId'])
+PY_WORLD_ID
+)" || { log "FATAL: no verified native AgentCard world identity"; finish 1; }
+    export BENCHMARK_AGENTCARD_V2_USER_ID
+fi
 if [ "$BENCH_NEEDS_PAYMENT_FIXTURE" = "1" ]; then
     PAYMENT_USER_ID="${BENCHMARK_AGENT_PAYMENT_USER_ID:-1f85ff25-6e29-4c1b-8739-f917bd101a30}"
     log "seeding isolated payment fixture for $PAYMENT_USER_ID"
@@ -1571,6 +1586,7 @@ if [ "$BENCH_NEEDS_PAYMENT_FIXTURE" = "1" ]; then
         DATABASE_URL="$STACK_DB_URL" \
         DIRECT_URL="$STACK_DB_URL" \
         BENCHMARK_FORCE_CUSTOMER_PURCHASE_PATH=1 \
+        BENCHMARK_AGENTCARD_V2_USER_ID="${BENCHMARK_AGENTCARD_V2_USER_ID:-}" \
         sh -c 'cd "$1" && exec npx tsx scripts/setup-benchmark-payment.ts --user-id "$2"' \
           sh "$REPO_DIR/back-end" "$PAYMENT_USER_ID"; then
         log "FATAL: setup-benchmark-payment.ts failed for $PAYMENT_USER_ID"
@@ -1784,6 +1800,9 @@ if [ -n '$BENCHMARK_REPORT_FRONTEND_URL' ]; then
   export BENCHMARK_REPORT_FRONTEND_URL='$BENCHMARK_REPORT_FRONTEND_URL'
 else
   unset BENCHMARK_REPORT_FRONTEND_URL
+fi
+if [ '$BENCH_SIMULATE' != '1' ] && { [ '$BENCH_NEEDS_PAYMENT_FIXTURE' = '1' ] || [ '$BENCH_NEEDS_NEW_USER_CHECKOUT' = '1' ]; }; then
+  export BENCHMARK_AGENTCARD_V2_USER_ID='${BENCHMARK_AGENTCARD_V2_USER_ID:-}'
 fi
 if [ '$BENCH_NEEDS_AGENTCARD_ONBOARDING' = '1' ]; then
   export AGENTCARD_ONBOARDING_RETURN_URL='$AGENTCARD_BENCHMARK_ONBOARDING_RETURN_URL'

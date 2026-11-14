@@ -32769,6 +32769,10 @@ async def _drive_payment_card_gate(
     checkout_error=None,
     lookup_result=None,
     approval_calls=None,
+    task_queue="navi-agent-tasks@funding-test",
+    workflow_state=None,
+    clock_read=None,
+    waiter=None,
 ):
     """Drive execute_tool through the payment-card gate branch.
 
@@ -32821,7 +32825,7 @@ async def _drive_payment_card_gate(
     )
     resume = _FakePaymentGateHandle({"success": True, "message": "done", "output_files": []})
 
-    workflow_instance = SimpleNamespace(
+    workflow_instance = workflow_state or SimpleNamespace(
         user_id="user-1",
         agent_id="agent-1",
         is_paused=False,
@@ -32882,9 +32886,11 @@ async def _drive_payment_card_gate(
     manager = SpawnBrowserAgentManagerV3()
     with (
         patch("domains.spawn_browser_agent_v3.handler.workflow.start_activity", side_effect=fake_start_activity),
-        patch("domains.spawn_browser_agent_v3.handler.workflow.wait_condition", AsyncMock(return_value=None)),
+        patch("domains.spawn_browser_agent_v3.handler.workflow.info", return_value=SimpleNamespace(task_queue=task_queue)),
+        patch("domains.spawn_browser_agent_v3.handler.workflow.time", side_effect=lambda: (clock_read or fake_now)().timestamp()),
+        patch("domains.spawn_browser_agent_v3.handler.workflow.wait_condition", side_effect=waiter or AsyncMock(return_value=None)),
         patch("domains.spawn_browser_agent_v3.handler.workflow.execute_activity", side_effect=fake_execute_activity),
-        patch("domains.spawn_browser_agent_v3.handler.workflow.now", side_effect=fake_now),
+        patch("domains.spawn_browser_agent_v3.handler.workflow.now", side_effect=clock_read or fake_now),
         patch("domains.spawn_browser_agent_v3.handler.workflow.sleep", AsyncMock(return_value=None)),
         patch(
             "tools.request_user_approval.request_user_approval_direct", side_effect=fake_request_user_approval_direct
@@ -33095,6 +33101,90 @@ async def test_manager_payment_gate_kyc_still_incomplete_after_retry_blocks():
     assert activity_calls.count("mint_purchase_card_activity") == 2
 
 
+async def _drive_funding_wait_review(*, task_queue, retry_seconds, interruption=None):
+    from helpers.generation_handoff import GenerationHandoffRequested
+
+    state = SimpleNamespace(user_id="user-1", agent_id="agent-1", is_paused=False,
+                            write_lock_enabled=True, system_name="Rose", _pause_signal_sequence=0)
+    clock = [datetime(2026, 11, 11, tzinfo=timezone.utc)]
+    timers, wake_results = [], []
+
+    async def wait(predicate, timeout=None):
+        # Only the funding park has a timeout; approval's companion is unbounded.
+        if timeout is None:
+            return
+        timers.append(timeout.total_seconds())
+        if interruption in ("pause", "pause-resume"):
+            state.is_paused = interruption == "pause"
+            state._user_pause_active = interruption == "pause"
+            state._pause_signal_sequence += 1
+            wake_results.append(predicate())
+            assert predicate(), "PAUSE did not wake the actual funding wait predicate"
+            return
+        if interruption == "handoff":
+            state._generation_handoff_hint = "navi-agent-tasks@next"
+            state._generation_handoff_hint_seq = 1
+            state._check_generation_handoff = AsyncMock(return_value="navi-agent-tasks@next")
+            assert predicate(), "generation signal did not wake funding park"
+            return
+        clock[0] += timeout
+        raise asyncio.TimeoutError()
+
+    pending = {"status": "agentcard_company_funding_in_progress", "retryAfterSeconds": retry_seconds}
+    held = {"status": "HELD", "purchaseId": "purchase-1", "cardId": "card-1",
+            "pan": "4242424242424242", "cvv": "123", "expiry": "12/30", "last4": "4242"}
+    try:
+        outcome = await _drive_payment_card_gate(
+            mint_results=[pending, held], task_queue=task_queue, workflow_state=state,
+            clock_read=lambda: clock[0], waiter=wait)
+    except GenerationHandoffRequested as exc:
+        outcome = exc
+    return outcome, timers, wake_results
+
+
+async def test_manager_funding_wait_wakes_on_pause_and_pause_resume():
+    for interruption in ("pause", "pause-resume"):
+        outcome, timers, wakes = await _drive_funding_wait_review(
+            task_queue="navi-agent-tasks@new", retry_seconds=599, interruption=interruption)
+        events, calls, _, _ = outcome
+        assert timers == [599.0] and wakes == [True], (timers, wakes)
+        assert calls.count("mint_purchase_card_activity") == 1, calls
+        terminals = [e for e in events if (getattr(e, "metadata", None) or {}).get("action_type") == "task_complete"]
+        assert len(terminals) == 1 and terminals[0].metadata["task_id"] == "task-1"
+        assert any((getattr(e, "metadata", None) or {}).get("userPauseRequested") for e in events) == (interruption == "pause")
+        assert not any(getattr(e, "title", "") == "Payment card ready" for e in events)
+
+
+async def test_manager_funding_plain_queue_preserves_legacy_retry_timer():
+    observations = []
+    expected = []
+    for queue in ("navi-agent-tasks", "benchmark-plain"):
+        for hint in (120, 600, 1e308):
+            outcome, timers, _ = await _drive_funding_wait_review(task_queue=queue, retry_seconds=hint)
+            events, calls, _, _ = outcome
+            ready = any(getattr(e, "title", "") == "Payment card ready" for e in events)
+            observations.append((queue, hint, timers, calls.count("mint_purchase_card_activity"), ready))
+            expected.append((queue, hint, [60.0], 2, True))
+    assert observations == expected, observations
+
+
+async def test_manager_funding_generation_queue_honors_hint_and_handoff():
+    from helpers.generation_handoff import GenerationHandoffRequested
+    for hint in (1, 5, 120, 599):
+        outcome, timers, _ = await _drive_funding_wait_review(task_queue="navi-agent-tasks@new", retry_seconds=hint)
+        _, calls, _, _ = outcome
+        assert timers == [float(hint)] and calls.count("mint_purchase_card_activity") == 2
+    for hint in (600, 1e308):
+        outcome, timers, _ = await _drive_funding_wait_review(task_queue="navi-agent-tasks@new", retry_seconds=hint)
+        events, calls, _, _ = outcome
+        assert timers == [] and calls.count("mint_purchase_card_activity") == 1
+        assert any(getattr(e, "title", "") == "Payment funding is delayed" for e in events)
+    outcome, timers, _ = await _drive_funding_wait_review(
+        task_queue="navi-agent-tasks@new", retry_seconds=599, interruption="handoff")
+    assert isinstance(outcome, GenerationHandoffRequested) and outcome.task_queue == "navi-agent-tasks@next"
+    assert timers == [599.0]
+
+
 async def test_manager_payment_gate_retries_company_funding_and_mints():
     events, activity_calls, _, _ = await _drive_payment_card_gate(
         mint_results=[
@@ -33124,7 +33214,20 @@ def test_manager_payment_gate_normalizes_company_funding_retry_delay():
         assert _normalize_funding_retry_seconds(invalid) == 5.0
     assert _normalize_funding_retry_seconds(0.001) == 1.0
     assert _normalize_funding_retry_seconds(5) == 5.0
-    assert _normalize_funding_retry_seconds(600) == 60.0
+    assert _normalize_funding_retry_seconds(120) == 120.0
+    assert _normalize_funding_retry_seconds(600) == 600.0
+
+
+async def test_manager_payment_gate_does_not_retry_before_a_hint_beyond_its_deadline():
+    for retry_seconds in (600, 1e308):
+        events, activity_calls, _, _ = await _drive_payment_card_gate(
+            mint_results=[{
+                "status": "agentcard_company_funding_in_progress",
+                "retryAfterSeconds": retry_seconds,
+            }]
+        )
+        assert activity_calls.count("mint_purchase_card_activity") == 1
+        assert any(getattr(event, "title", "") == "Payment funding is delayed" for event in events)
 
 
 async def test_manager_payment_gate_reports_company_funding_deadline():
@@ -40761,6 +40864,9 @@ async def run_all_tests():
         "manager_payment_gate_kyc_still_incomplete",
         test_manager_payment_gate_kyc_still_incomplete_after_retry_blocks,
     )
+    await r.record_async("manager_funding_wait_pause", test_manager_funding_wait_wakes_on_pause_and_pause_resume)
+    await r.record_async("manager_funding_plain_replay", test_manager_funding_plain_queue_preserves_legacy_retry_timer)
+    await r.record_async("manager_funding_generation_wait", test_manager_funding_generation_queue_honors_hint_and_handoff)
     await r.record_async(
         "manager_payment_gate_company_funding_retry",
         test_manager_payment_gate_retries_company_funding_and_mints,
@@ -40772,6 +40878,10 @@ async def run_all_tests():
     await r.record_async(
         "manager_payment_gate_company_funding_deadline",
         test_manager_payment_gate_reports_company_funding_deadline,
+    )
+    await r.record_async(
+        "manager_payment_gate_honors_long_provider_delay",
+        test_manager_payment_gate_does_not_retry_before_a_hint_beyond_its_deadline,
     )
     r.record(
         "transient_session_init_failure_classification",

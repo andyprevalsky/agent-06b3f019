@@ -167,6 +167,14 @@ def local_driver(folder, argv):
             "ports": {"backend": ready["port"], "frontend": ready["port"], "health": ready["port"]},
             "database": {"name": "fixture-" + stack.run_id},
             "temporal_task_queue": "fixture-" + stack.run_id,
+            "agentcard_world_identity": {
+                "version": 1,
+                "worldId": stack.run_id,
+                "scope": hashlib.sha256(("fixture:" + stack.run_id).encode()).hexdigest(),
+                "providerUserId": "usr_fixture_" + hashlib.sha256(stack.run_id.encode()).hexdigest()[:16],
+                "livemode": False,
+                "fundsSource": "company_flow",
+            },
         }
         atomic(stack.manifest_path, manifest)
         event(

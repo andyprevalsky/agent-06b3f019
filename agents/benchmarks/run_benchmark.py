@@ -2652,12 +2652,12 @@ PRODUCTION_PAYMENT_IDENTITY_PROVISION_HINT = (
     "back-end/.env; do not ask the user for any of them. Run (DIRECT_URL: the 6543 pooler fails "
     "with \"Can't reach database server\"):\n"
     "  cd back-end && set -a && . ./.env && set +a && \\\n"
-    "    DATABASE_URL=\"$DIRECT_URL\" STRIPE_SECRET_KEY=\"$STRIPE_SECRET_KEY_LIVE\" \\\n"
+    "    BENCHMARK_AGENTCARD_V2_USER_ID= DATABASE_URL=\"$DIRECT_URL\" STRIPE_SECRET_KEY=\"$STRIPE_SECRET_KEY_LIVE\" \\\n"
     "    BENCHMARK_ALLOW_LIVE_STRIPE=true BENCHMARK_PAYMENT_ALLOW_REMOTE_DB=true \\\n"
-    f"    npx tsx scripts/setup-benchmark-payment.ts --live --user-id {AGENT_PAYMENT_LIFECYCLE_PROD_USER_ID} \\\n"
-    "    --agentcard-cardholder-id \"$DEDICATED_AGENTCARD_CARDHOLDER_ID\"\n"
-    "Guardrails: bind an EXISTING dedicated benchmark cardholder only (never Andy's or another "
-    "actor's); never create an identity automatically or bypass pending KYC; never enter a card "
+    f"    npx tsx scripts/setup-benchmark-payment.ts --live --user-id {AGENT_PAYMENT_LIFECYCLE_PROD_USER_ID}\n"
+    "Guardrails: require the dedicated benchmark user's normal signed live v2 connection, consent "
+    "and approved KYC first (never Andy's or another actor's identity). A legacy cardholder is not "
+    "a v2 connected user; never create an identity automatically or bypass pending KYC; never enter a card "
     "number. When the live customer has no saved card the script prints a one-time hosted Stripe "
     "Checkout link: a human saves the live card there once, then re-run the command."
 )
@@ -2698,6 +2698,27 @@ async def _preflight_production_payment_identity(base_url: str) -> None:
         )
     gap = _production_payment_identity_gap(response.json())
     if gap is None:
+        async with httpx.AsyncClient(timeout=15) as client:
+            status = await client.get(
+                f"{base_url}/api/agentcard/status",
+                headers={**headers, "x-user-id": user_id},
+            )
+        if status.status_code != 200:
+            raise RuntimeError(f"Could not verify live v2 AgentCard readiness ({status.status_code})")
+        readiness = status.json()
+        if not (
+            readiness.get("apiVersion") == 2
+            and readiness.get("connected") is True
+            and readiness.get("status") == "approved"
+            and readiness.get("livemode") is True
+            and readiness.get("fundsSource") == "company_flow"
+        ):
+            raise RuntimeError(
+                "Production payment identity needs a scoped live v2 AgentCard connection, "
+                "approved KYC and a live company-funded wallet before running paid probes. "
+                "Complete the normal signed live connection for the dedicated benchmark user; "
+                "a legacy cardholder or sandbox fixture cannot satisfy this requirement."
+            )
         return
     message = (
         f"Production payment identity {user_id} is not provisioned: {gap}.\n"
@@ -3535,14 +3556,14 @@ async def get_llm_usage_details(base_url: str, root_agent_id: str, tree_stats: d
     return aggregate_usage_items(items), aggregate_prompt_cache_share(items)
 
 
-async def get_test_payment_lifecycle(base_url: str, agent_id: str) -> dict:
+async def get_test_payment_lifecycle(base_url: str, agent_id: str, *, stripe_custody: bool = False) -> dict:
     """Read the sanitized cross-provider lifecycle snapshot for a benchmark agent."""
     headers = await _api_headers()
     async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.get(
             f"{base_url}/api/test-payment/lifecycle",
             headers=headers,
-            params={"agentId": agent_id},
+            params={"agentId": agent_id, **({"stripeCustody": "1"} if stripe_custody else {})},
         )
         if resp.status_code != 200:
             raise Exception(f"Failed to get payment lifecycle: {resp.status_code} {resp.text[:300]}")
@@ -7132,7 +7153,13 @@ async def _finalize_owned_root_payments(
             evidence["payment_snapshot"] = snapshot
             pending = cloud_batch_cleanup.pending_root_payments(snapshot)
             if not pending:
-                return {"root_agent_id": root_id, "purchases": snapshot["purchase_cleanup"]}
+                agents_with_intents = {row["agent_id"] for row in snapshot["purchase_cleanup"]
+                                       if row["stripe_payment_intent_id"] is not None}
+                lifecycles = {aid: await get_test_payment_lifecycle(base_url, aid, stripe_custody=True)
+                              for aid in sorted(agents_with_intents)}
+                stripe_custody = cloud_batch_cleanup.verified_root_stripe_custody(snapshot, lifecycles)
+                return {"root_agent_id": root_id, "purchases": snapshot["purchase_cleanup"],
+                        "stripe_custody": stripe_custody}
             # An accepted mint remains visible before its remote side effects
             # finish. Do not classify its early empty card/transfer as cleanup.
             actionable = [row for row in pending if row["status"] not in {"PENDING_APPROVAL", "CHARGING"}]
@@ -7654,13 +7681,19 @@ async def _finalize_owned_batch_and_save_run(
     if run.task_results:
         run.world_model_retrieval_audit = retrieval_audit()
         path = run.save()
-        print(f"\n  Results saved: {path}")
+        try:
+            print(f"\n  Results saved: {path}")
+        except (OSError, ValueError):
+            pass
         try:
             context_dir = Path(os.environ.get("BENCHMARK_CONTEXT_DIR", ".context"))
             context_dir.mkdir(parents=True, exist_ok=True)
             (context_dir / "run.json").write_text(Path(path).read_text(), encoding="utf-8")
         except Exception as exc:
-            print(f"  ⚠ run.json archive write failed (non-fatal): {exc}")
+            try:
+                print(f"  ⚠ run.json archive write failed (non-fatal): {exc}")
+            except (OSError, ValueError):
+                pass
 
     if batch_cleanup_error is not None:
         raise batch_cleanup_error
@@ -8444,6 +8477,9 @@ def _free_credit_subscription_fixture_env(user_id: Optional[str] = None) -> dict
         raise RuntimeError("Local Victoria DB connection not found for free-credit subscription fixture")
     env = os.environ.copy()
     env["DATABASE_URL"] = database_url
+    # The fixture CLIs load back-end/.env, whose DIRECT_URL is the production pooler; an inherited
+    # DIRECT_URL must never survive beside the local DATABASE_URL (PR #1864 cloud smoke refusal).
+    env["DIRECT_URL"] = database_url
     env["BENCHMARK_USER_ID"] = user_id or _free_credit_subscription_gate_user_id()
     return env
 
@@ -18449,7 +18485,10 @@ async def main_async(args):
                 force=force,
             )
         except Exception as exc:  # [REDACTED] must never fail the run
-            print(f"  ⚠ report card emit failed: {exc}")
+            try:
+                print(f"  ⚠ report card emit failed: {exc}")
+            except (OSError, ValueError):
+                pass
 
     # Live report card: a background ticker emits on a timer so the dashboard updates
     # DURING the run. The drain loop only emits on task-completion events, so a single
@@ -18744,14 +18783,18 @@ async def main_async(args):
             else:
                 print(f"  ⚠ Worker memory sampling unavailable after smoke: {memory_after.get('reason')}")
 
-        await _finalize_owned_batch_and_save_run(
-            base_url,
-            run,
-            _live_task_agent_ids,
-            owned_batch_cleanup=owned_batch_cleanup,
-            retrieval_audit=_wmh_evidence.finalize,
-            never_admitted_results=tuple(_never_admitted_results),
-        )
+        try:
+            await _finalize_owned_batch_and_save_run(
+                base_url,
+                run,
+                _live_task_agent_ids,
+                owned_batch_cleanup=owned_batch_cleanup,
+                retrieval_audit=_wmh_evidence.finalize,
+                never_admitted_results=tuple(_never_admitted_results),
+            )
+        finally:
+            # Cleanup can change the canonical grade even when it raises.
+            _emit_report(force=True)
 
     # Print summary
     s = run.summary

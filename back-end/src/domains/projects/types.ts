@@ -4,6 +4,7 @@
  * before persistence; no response schema carries them.
  */
 import { z } from 'zod';
+import { githubBranchSchema } from '../../providers/githubRepos/branch';
 /** Limits shared with config.ts (types may not import other layers). */
 export const DEFAULT_STARTUP_TIMEOUT_S = 120;
 export const MIN_STARTUP_TIMEOUT_S = 1;
@@ -15,12 +16,7 @@ export const MAX_MAINTENANCE_TIMEOUT_S = 480;
 /** Plaintext size cap for one env/config file. */
 export const MAX_ENV_FILE_BYTES = 256 * 1024;
 
-const branchSchema = z
-  .string()
-  .trim()
-  .min(1)
-  .max(200)
-  .regex(/^(?!-)(?!.*\.\.)(?!.*\/\/)[A-Za-z0-9._/-]+(?<![./])$/, 'invalid branch name');
+const branchSchema = githubBranchSchema;
 
 const repoUrlSchema = z.string().trim().min(1).max(500).nullable();
 

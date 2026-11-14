@@ -525,6 +525,9 @@ GATES = (
         "benchmark-provider-capacity",
         ("python3", "scripts/tests/cloudbench-provider-capacity.test.py"),
     ),
+    Gate("cloudbench-provider-contract", ("python3", "scripts/tests/cloudbench-provider-contract.test.py")),
+    Gate("worker-pool-cutover", ("python3", "scripts/tests/worker-pool-cutover.test.py")),
+    Gate("retained-agent-machine", ("python3", "scripts/tests/retained-agent-machine.test.py")),
     Gate("benchmark-campaign-grouping", ("bash", "scripts/tests/campaign-hub-grouping.test.sh")),
     Gate(
         "claude-md-replay-cli",
@@ -560,6 +563,7 @@ GATES = (
         "cloudbench-quiesced-forensic-retirement",
         ("python3", "scripts/tests/cloudbench-forensic-quiesced.test.py"), expected_seconds=83
     ),
+    Gate("cloudbench-lost-evidence-release", ("python3", "scripts/tests/cloudbench-lost-evidence-release.test.py")),
     Gate("seed-memory-ratchet", ("bash", "scripts/tests/seed-memory-ratchet.test.sh")),
     Gate("test-sleep-ratchet", ("python3", "scripts/tests/condition-waits.test.py")),
     Gate("semantic-deploy", ("bash", "scripts/tests/semantic-deploy-gate.test.sh")),

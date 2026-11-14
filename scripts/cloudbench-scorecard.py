@@ -1147,8 +1147,100 @@ def load_waves(run_dir: Path, deep: bool = True) -> dict:
     return finish
 
 
+def load_local_worlds(run_dir: Path) -> dict:
+    """Read native world custody and canonical grades; child cards never supply verdicts."""
+    exp = empty_experiment("local-worlds", run_dir)
+    exp["surface"] = "local"
+    journal = read_json(run_dir / "local-worlds.json")
+    if not isinstance(journal, dict) or type(journal.get("version")) is not int or journal.get("version") != 1 or journal.get("run_id") != run_dir.name or not isinstance(journal.get("tasks"), list):
+        exp["state"], exp["state_reason"] = "UNRECORDED", "invalid native local-worlds journal identity"
+        return finish_experiment(exp)
+    children = journal["tasks"]
+    exp["scheduled_total"], exp["rows_source"] = len(children), "local-worlds.json + exact child canonical result/index"
+    exp["notes"].append("Parent producer clocks are unrecorded; no child-card or file-mtime clock is substituted.")
+    sources = []
+    for ordinal, child in enumerate(children):
+        row = {"job_id": str(ordinal), "task": child.get("task") if isinstance(child, dict) else None,
+               "status": "failed", "task_status": "ERROR", "infra_failure": None, "attempts": 1,
+               "released": None, "lifecycle": None}
+        try:
+            expected = f"{run_dir.name}-{ordinal}"
+            if not isinstance(child, dict) or type(child.get("ordinal")) is not int or child.get("ordinal") != ordinal or child.get("run_id") != expected:
+                raise ValueError("child ordinal/run identity differs from native journal")
+            context = run_dir.parent / expected
+            if context.is_symlink() or Path(child.get("context_dir", "")).absolute() != context:
+                raise ValueError("child context belongs to a foreign world")
+            phase = child.get("status")
+            if phase in {"queued", "launching", "running", "cancelled-before-start"}:
+                row.update(status={"launching":"running", "cancelled-before-start":"cancelled"}.get(phase, phase),
+                           task_status=None, attempts=0 if phase in {"queued", "cancelled-before-start"} else 1)
+                exp["rows"].append(row)
+                continue
+            if phase not in {"passed", "failed", "failed-retained", "interrupted"}:
+                raise ValueError("unknown native child state")
+            payload = (context / "run.json").read_bytes()
+            index = read_json(context / "local-benchmark-results.json")
+            indexed = isinstance(index, dict)
+            if indexed:
+                entries = index.get("results")
+                if type(index.get("version")) is not int or index.get("version") != 1 or index.get("run_id") != expected or not isinstance(entries, list) or len(entries) != 1:
+                    raise ValueError("child result index has foreign or malformed identity")
+                entry = entries[0]
+                result_path = Path(entry["path"])
+                exact = result_path.read_bytes()
+                if hashlib.sha256(exact).hexdigest() != entry.get("sha256") or payload != exact:
+                    raise ValueError("canonical result changed after publication or context copy differs")
+                if child.get("results") is not None and child["results"] != [str(result_path)]:
+                    raise ValueError("journal result pointer differs from child index")
+            result = json.loads(payload)
+            tasks = result.get("tasks")
+            if not isinstance(tasks, list) or len(tasks) != 1 or tasks[0].get("name") != child.get("task"):
+                raise ValueError("canonical task differs from selected child occurrence")
+            task = tasks[0]
+            verdict = str(task.get("benchmark_status") or task.get("status") or "").upper()
+            positive_verdict = verdict in {"PASSED", "PASS", "COMPLETED"}
+            if positive_verdict and task.get("passed") is not True:
+                raise ValueError("positive canonical verdict contradicts the strict pass flag")
+            passed = task.get("passed") is True and positive_verdict
+            if passed and (not indexed or phase != "passed" or child.get("exit_code") != 0):
+                raise ValueError("PASS has no verified native child publication")
+            if phase == "passed" and not passed:
+                raise ValueError("journal PASS contradicts canonical result")
+            row.update(status="cancelled" if verdict == "CANCELLED" else "passed" if passed else "failed",
+                       task_status="PASSED" if passed else verdict, agent_id=task.get("agent_id"),
+                       infra_failure=task.get("infra_failure") if isinstance(task.get("infra_failure"), bool) else None,
+                       harness_failure=task.get("harness_failure") if isinstance(task.get("harness_failure"), bool) else None,
+                       agent_url=f"https://roselabs.ai/?agent-id={task['agent_id']}" if task.get("agent_id") else None,
+                       exec_s=task.get("duration_seconds"), reason=reason_key(task.get("failure_reason") or child.get("error")))
+            if isinstance(task.get("cost_cents"), (int, float)):
+                row["cost_usd"] = task["cost_cents"] / 100
+            detail = load_fleet(context) if (context / "report-card.json").is_file() else {}
+            release = detail.get("released") or {}
+            row["released"] = row["lifecycle"] = release.get("yes") == release.get("of") == 1
+            sources.append(detail.get("source_ref"))
+        except (OSError, ValueError, TypeError, KeyError, AttributeError) as error:
+            row.update(status="failed", task_status="ERROR", reason=str(error))
+        exp["rows"].append(row)
+    if sources and len(sources) == len(children) and None not in sources and len(set(sources)) == 1:
+        exp["source_ref"] = sources[0]
+    exp["task_links"] = [{"task": r["task"], "outcome": classify(r), "agent_id": r.get("agent_id"),
+                          "agent_url": r.get("agent_url")} for r in exp["rows"]]
+    phase = journal.get("status")
+    complete = bool(children) and all(classify(r) == "PASS" and r.get("released") for r in exp["rows"])
+    exp["state"] = "RUNNING" if phase == "running" else "COMPLETE" if phase == "passed" and complete else "FAILED" if phase == "failed" else "INCOMPLETE"
+    if phase == "passed" and not complete:
+        exp["state_reason"] = "native child result or cleanup custody incomplete"
+    terminal = [r for r in exp["rows"] if started_terminal(r)]
+    clean = sum(r.get("released") is True for r in terminal)
+    lifecycle_item(exp, "ok" if terminal and clean == len(terminal) else "warn", "Owned resources released",
+                   f"{clean}/{len(terminal)} terminal native child receipts clean")
+    return finish_experiment(exp)
+
+
 def load(run_dir: Path, deep: bool = True, operator_ends=None) -> dict:
     run_dir = Path(run_dir).absolute()
+    if (run_dir / "local-worlds.json").exists():
+        return load_local_worlds(run_dir)
     if (run_dir / "batch.json").exists() and (read_json(run_dir / "batch.json") or {}).get("schema") == "run-bench-sharded-waves-v1":
         return load_waves(run_dir, deep)
     if (run_dir / "coordination.json").exists():
@@ -1891,11 +1983,9 @@ def _history_html(card) -> str:
         o, total = h.get("outcomes"), h.get("scheduled_total")
         if o:
             scored = h.get("scored") or 0
-            attempts = h.get("terminal_attempts") or 0
             pass_text = f'PASS {o["PASS"]}/{scored} ({pct(o["PASS"], scored)})' if scored else "NO SCORED TASKS"
             infra_text = ("INFRA UNCLASSIFIED" if h.get("infra_unattributed_cancelled") else
-                          "INFRA UNRECONCILED" if h.get("infra_unreconciled") else
-                          f'INFRA {h.get("infra_attempts") or 0}/{attempts}' if attempts else "NO TERMINAL ATTEMPTS")
+                          "INFRA UNRECONCILED" if h.get("infra_unreconciled") else "NO TERMINAL ATTEMPTS" if not h.get("terminal_attempts") else f'INFRA {h["infra_jobs"]}/{total}' if isinstance(h.get("infra_jobs"), int) and total else "INFRA UNMEASURED")
             harness = "HARNESS " + (str(o["HARNESS"]) if o["HARNESS"] or h.get("harness_classified") else "UNCLASSIFIED")
             extra = [f"{c.lower()} {o[c]}" for c in ("AGENT FAIL", "UNKNOWN", "CANCELLED", "SKIPPED") if o.get(c)]
             if h.get("cancelled_before_release"):
@@ -2030,8 +2120,7 @@ def render_text(card: dict) -> str:
                      + ("RUNNING" if h["state"] == "RUNNING" and not h.get("ended_at") else pacific(h["ended_at"], date=False) if h.get("ended_at") else "END UNRECORDED")
                      + ((f' · PASS {ho.get("PASS")}/{h.get("scored")}' if h.get("scored") else " · NO SCORED TASKS")
                         + (" · INFRA UNCLASSIFIED" if h.get("infra_unattributed_cancelled") else
-                           ' · INFRA UNRECONCILED' if h.get('infra_unreconciled') else
-                           f' · INFRA {h.get("infra_attempts")}/{h.get("terminal_attempts")}' if h.get("terminal_attempts") else " · NO TERMINAL ATTEMPTS")
+                           " · INFRA UNRECONCILED" if h.get("infra_unreconciled") else " · NO TERMINAL ATTEMPTS" if not h.get("terminal_attempts") else f' · INFRA {h["infra_jobs"]}/{h["scheduled_total"]}' if isinstance(h.get("infra_jobs"), int) and h.get("scheduled_total") else " · INFRA UNMEASURED")
                         + (f' · {ho["CANCELLED"]} cancelled' if ho.get("CANCELLED") else "")
                         + (f' · {h["scheduled_total"]} never started' if h.get("never_started") else "") if ho else " · UNMEASURED")
                      + (f' · {h["state_reason"]}' if h.get("operator_end") else ""))

@@ -28,8 +28,15 @@ function mockSession() {
   localStorage.setItem('app-user', JSON.stringify({ id: 'test-user', is_anonymous: false }));
 }
 
+const scrollIntoView = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'scrollIntoView');
+
 describe('CreateAgentModal', () => {
   beforeEach(() => {
+    // cmdk (the repo picker's list) scrolls the active item; jsdom has no layout.
+    Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', {
+      configurable: true,
+      value: vi.fn(),
+    });
     mockSession();
     clearCaptures();
     // Provide tools response (the component useEffect fetches on open)
@@ -42,11 +49,28 @@ describe('CreateAgentModal', () => {
           ],
         }),
       ),
+      http.get(`${API_BASE}/integrations/github/repos`, () =>
+        HttpResponse.json({
+          repos: [
+            {
+              canonical_ref: 'gh:rose-ai-labs/rose',
+              repo_name: 'rose',
+              repo_url: 'https://github.com/Rose-Ai-Labs/rose',
+              owner: 'rose-ai-labs',
+              default_branch: 'main',
+              connected_rose_project_ref: null,
+            },
+          ],
+        }),
+      ),
     );
   });
 
   afterEach(() => {
     localStorage.clear();
+    if (scrollIntoView)
+      Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', scrollIntoView);
+    else delete (HTMLElement.prototype as { scrollIntoView?: unknown }).scrollIntoView;
   });
 
   it('does not render dialog content when closed', () => {
@@ -96,6 +120,53 @@ describe('CreateAgentModal', () => {
     await u.click(screen.getByRole('button', { name: /Create Agent/i }));
     await waitFor(() => expect(onSubmit).toHaveBeenCalled());
     // onClose NOT called on failure
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it('inherits the project repo by default (no github_repo_ref sent)', async () => {
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    const u = userEvent.setup();
+    renderWithProviders(<CreateAgentModal open onClose={() => {}} onSubmit={onSubmit} />);
+    expect(screen.getByRole('combobox', { name: /GitHub Repo/i })).toHaveTextContent(
+      'Project default (inherited)',
+    );
+    await u.type(screen.getByLabelText('Goal'), 'Fix the bug');
+    await u.click(screen.getByRole('button', { name: /Create Agent/i }));
+    await waitFor(() => expect(onSubmit).toHaveBeenCalled());
+    expect(onSubmit.mock.calls[0][0]).not.toHaveProperty('github_repo_ref');
+  });
+
+  it('submits the selected connected repo as github_repo_ref', async () => {
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    const u = userEvent.setup();
+    renderWithProviders(<CreateAgentModal open onClose={() => {}} onSubmit={onSubmit} />);
+    await u.type(screen.getByLabelText('Goal'), 'Fix the bug');
+    await u.click(screen.getByRole('combobox', { name: /GitHub Repo/i }));
+    await u.click(await screen.findByText('gh:rose-ai-labs/rose'));
+    await u.click(screen.getByRole('button', { name: /Create Agent/i }));
+    await waitFor(() =>
+      expect(onSubmit).toHaveBeenCalledWith(
+        expect.objectContaining({ goal: 'Fix the bug', github_repo_ref: 'gh:rose-ai-labs/rose' }),
+      ),
+    );
+  });
+
+  it('shows an inline error naming a repo the backend reports as not connected', async () => {
+    const onSubmit = vi.fn().mockRejectedValue(new Error('GitHub repo not connected'));
+    const onClose = vi.fn();
+    const u = userEvent.setup();
+    renderWithProviders(<CreateAgentModal open onClose={onClose} onSubmit={onSubmit} />);
+    await u.type(screen.getByLabelText('Goal'), 'Fix the bug');
+    await u.click(screen.getByRole('combobox', { name: /GitHub Repo/i }));
+    await u.click(await screen.findByText('gh:rose-ai-labs/rose'));
+    await u.click(screen.getByRole('button', { name: /Create Agent/i }));
+    expect(
+      (await screen.findAllByText(/GitHub repo gh:rose-ai-labs\/rose is not connected/)).length,
+    ).toBeGreaterThan(0);
+    expect(screen.getByRole('combobox', { name: /GitHub Repo/i })).toHaveAttribute(
+      'aria-invalid',
+      'true',
+    );
     expect(onClose).not.toHaveBeenCalled();
   });
 

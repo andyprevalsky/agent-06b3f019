@@ -1573,3 +1573,129 @@ def test_kept_stack_does_not_arm_owner_watch():
     for (args, expect_watch), env in zip(cases, launched_envs):
         assert ("RUN_SH_OWNER_PID" in env) is expect_watch, (vars(args), sorted(k for k in env if k.startswith("RUN_SH")))
         assert ("RUN_SH_OWNER_START" in env) is expect_watch, vars(args)
+
+
+def _assert_agentcard_world_identity_is_exported_before_backend_worker_startup(tmp_path):
+    source_root = Path(os.environ.get("PROBE_SOURCE_ROOT", str(REPO)))
+    source = (source_root / "scripts/run.sh").read_text()
+    marker = "# Provision native sandbox world identity before backend/worker setup routes can run."
+    start = source.find(marker)
+    stop = source.find('\nBACKEND_PID=""\n', max(0, start))
+    hook = source[start:stop] if start >= 0 and stop >= start else ""
+    fakebin = tmp_path / "bin"
+    fakebin.mkdir()
+    context = tmp_path / "owned-context"
+    context.mkdir()
+    (tmp_path / "back-end").mkdir()
+    node = fakebin / "node"
+    node.write_text("#!/usr/bin/env python3\nimport json,os,sys\nfrom pathlib import Path\nout=Path(sys.argv[sys.argv.index('--out')+1])\nassert os.environ['BENCHMARK_MODE']=='true'\nassert os.environ['BENCHMARK_ISOLATED_RUN']=='true'\nout.write_text(json.dumps({'version':1,'worldId':os.environ['BENCHMARK_RUN_ID'],'scope':'a'*64,'providerUserId':'usr_native_world','livemode':False,'fundsSource':'company_flow'}))\n")
+    node.chmod(0o700)
+    script = hook + "\npython3 -c 'import json,os; print(json.dumps({\"backend\":os.environ.get(\"BENCHMARK_AGENTCARD_V2_USER_ID\"),\"worker\":os.environ.get(\"BENCHMARK_AGENTCARD_V2_USER_ID\")}))'\n"
+    completed = subprocess.run(
+        ["bash", "-e", "-c", script], cwd=tmp_path, capture_output=True, text=True,
+        env={"PATH": str(fakebin) + os.pathsep + os.environ["PATH"],
+             "BENCHMARK_MODE":"true", "BENCHMARK_ISOLATED_RUN":"true",
+             "BENCHMARK_AGENTCARD_WORLD_IDENTITY":"true", "BENCHMARK_RUN_ID":"world-a",
+             "RUN_CONTEXT_DIR":str(context), "BENCHMARK_AGENTCARD_V2_USER_ID":"usr_shared"},
+        timeout=10,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert json.loads(completed.stdout) == {"backend":"usr_native_world", "worker":"usr_native_world"}
+    assert source.index(marker) < source.index("launch_backend_service()")
+
+
+def _assert_agentcard_world_identity_reaches_existing_explicit_seed_writer(monkeypatch):
+    import importlib.util
+    source_root = Path(os.environ.get("PROBE_SOURCE_ROOT", str(REPO)))
+    spec = importlib.util.spec_from_file_location("private_world_local", source_root / "agents/benchmarks/local.py")
+    local = importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, spec.name, local)
+    spec.loader.exec_module(local)
+    calls = []
+    monkeypatch.setattr(local, "service_base_environ", lambda: {"BENCHMARK_AGENTCARD_V2_USER_ID":"usr_shared"})
+    monkeypatch.setattr(local, "manifest_database_url", lambda _manifest: "postgresql://ignored@localhost/owned")
+    monkeypatch.setattr(local.subprocess, "run", lambda command, **options: calls.append((command,options)))
+    monkeypatch.setenv("BENCHMARK_RUN_ID", "world-a")
+    monkeypatch.setenv("BENCHMARK_AGENTCARD_WORLD_IDENTITY", "true")
+    identity = {"version":1,"scope":"a"*64,"worldId":"world-a", "providerUserId":"usr_native_world", "livemode":False, "fundsSource":"company_flow"}
+    local.seed_payment_fixture({"agentcard_world_identity":identity})
+    assert calls[0][1]["env"]["BENCHMARK_AGENTCARD_V2_USER_ID"] == "usr_native_world"
+    assert calls[0][0][2] == "scripts/setup-benchmark-payment.ts"
+    assert "--user-id" in calls[0][0]
+    import pytest
+    with pytest.raises(RuntimeError, match="verified sandbox AgentCard identity"):
+        local.seed_payment_fixture({"agentcard_world_identity":{**identity,"worldId":"foreign-world"}})
+    assert len(calls) == 1, "foreign receipt must not invoke the seed writer"
+    monkeypatch.delenv("BENCHMARK_AGENTCARD_WORLD_IDENTITY")
+    monkeypatch.setattr(local, "service_base_environ", lambda: {"BENCHMARK_AGENTCARD_V2_USER_ID":"usr_explicit_manual"})
+    local.seed_payment_fixture({})
+    assert calls[1][1]["env"]["BENCHMARK_AGENTCARD_V2_USER_ID"] == "usr_explicit_manual"
+    with pytest.raises(RuntimeError, match="supply its exact mapping explicitly"):
+        local.seed_payment_fixture({"agentcard_world_identity":identity})
+    assert len(calls) == 2
+
+
+def _assert_cloud_agentcard_world_identity_reaches_native_seed_writer(tmp_path):
+    source_root = Path(os.environ.get("PROBE_SOURCE_ROOT", str(REPO)))
+    source = (source_root / "scripts/cloudbench-run.sh").read_text()
+    seed = source.index('if [ "$BENCH_NEEDS_PAYMENT_FIXTURE" = "1" ]; then\n    PAYMENT_USER_ID=')
+    receipt = source.find('    BENCHMARK_AGENTCARD_V2_USER_ID="$(python3 - "$MANIFEST" "$WORKSPACE_NAME"')
+    start = source.rfind('\nif ', 0, receipt) + 1 if receipt >= 0 else seed
+    stop = source.index('\nwait_for_benchmark_frontend_url', seed)
+    fragment = source[start:stop]
+    fakebin = tmp_path / "bin"
+    fakebin.mkdir()
+    gosu = fakebin / "gosu"
+    gosu.write_text("#!/usr/bin/env python3\nimport json,os,sys\nfrom pathlib import Path\nuid=os.environ.get('BENCHMARK_AGENTCARD_V2_USER_ID')\nfor arg in sys.argv:\n if arg.startswith('BENCHMARK_AGENTCARD_V2_USER_ID='): uid=arg.split('=',1)[1]\nPath(os.environ['CAPTURE']).write_text(json.dumps({'provider':uid,'args':sys.argv[1:]}))\n")
+    gosu.chmod(0o700)
+    manifest = tmp_path / "services.json"
+    manifest.write_text(json.dumps({"agentcard_world_identity":{"version":1,"worldId":"world-a","providerUserId":"usr_native_world","livemode":False,"fundsSource":"company_flow"}}))
+    capture = tmp_path / "capture.json"
+    completed = subprocess.run(["bash","-e","-c", 'log() { :; }; finish() { exit "$1"; };\n'+fragment], cwd=tmp_path, capture_output=True, text=True,
+        env={"PATH":str(fakebin)+os.pathsep+os.environ['PATH'],"CAPTURE":str(capture),"MANIFEST":str(manifest),"WORKSPACE_NAME":"world-a","BENCH_NEEDS_PAYMENT_FIXTURE":"1","BENCH_NEEDS_NEW_USER_CHECKOUT":"0","BENCH_SIMULATE":"0","BENCHMARK_AGENTCARD_V2_USER_ID":"usr_shared","STACK_DB_URL":"postgresql://ignored@localhost/owned","APP_USER":"fixture","REPO_DIR":str(tmp_path)}, timeout=10)
+    assert completed.returncode == 0, completed.stderr
+    observed = json.loads(capture.read_text())
+    assert observed['provider'] == 'usr_native_world'
+    assert 'BENCHMARK_AGENTCARD_V2_USER_ID=usr_native_world' in observed['args']
+
+
+
+def test_agentcard_world_identity_is_exported_before_backend_worker_startup():
+    with tempfile.TemporaryDirectory() as folder:
+        _assert_agentcard_world_identity_is_exported_before_backend_worker_startup(Path(folder))
+
+
+def test_agentcard_world_identity_reaches_existing_explicit_seed_writer():
+    from pytest import MonkeyPatch
+    with MonkeyPatch.context() as patch:
+        _assert_agentcard_world_identity_reaches_existing_explicit_seed_writer(patch)
+
+
+def test_cloud_agentcard_world_identity_reaches_native_seed_writer():
+    with tempfile.TemporaryDirectory() as folder:
+        _assert_cloud_agentcard_world_identity_reaches_native_seed_writer(Path(folder))
+
+
+def test_agentcard_world_identity_bootstrap_uses_selected_world_not_whole_cohort():
+    import ast
+    from pytest import MonkeyPatch
+    from benchmarks import local
+    source_root = Path(os.environ.get("PROBE_SOURCE_ROOT", str(REPO)))
+    tree = ast.parse((source_root / "agents/benchmarks/local.py").read_text())
+    candidates = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.If):
+            continue
+        for statement in node.body:
+            if isinstance(statement, ast.Assign) and any(
+                isinstance(target, ast.Subscript) and isinstance(target.slice, ast.Constant)
+                and target.slice.value == "BENCHMARK_AGENTCARD_WORLD_IDENTITY"
+                for target in statement.targets
+            ):
+                candidates.append(node)
+    statement = compile(ast.fix_missing_locations(ast.Module(body=candidates, type_ignores=[])), "native-selected-world", "exec")
+    for names, isolated, expected in [(["agent-payment-test-shop"],True,"true"),(["agent-payment-new-user-journey"],True,"true"),(["chat-mode"],True,None),(["agent-payment-test-shop"],False,None),(["agent-payment-production-abandonment"],True,None)]:
+        with MonkeyPatch.context() as patch:
+            patch.setenv("BENCHMARK_AGENTCARD_WORLD_IDENTITY", "true")
+            exec(statement, {"os":os,"stack":SimpleNamespace(isolated=isolated),"selected_tasks":names,"cohort_tasks":["agent-payment-setup-resume","chat-mode"],"args":SimpleNamespace(simulate=False),"AGENT_PAYMENT_TASK_NAMES":local.AGENT_PAYMENT_TASK_NAMES,"NEW_USER_PAYMENT_TASK_NAMES":local.NEW_USER_PAYMENT_TASK_NAMES})
+            assert os.environ.get("BENCHMARK_AGENTCARD_WORLD_IDENTITY") == expected
