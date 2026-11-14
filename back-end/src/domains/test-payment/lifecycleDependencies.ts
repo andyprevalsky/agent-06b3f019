@@ -1,4 +1,6 @@
+import type { StripeCustodyDependencies } from './lifecycleStripeCustody';
 import type * as testPaymentRepo from './repo';
+import type { AgentCardV2Request } from '../../providers/agentcard/api-v2';
 
 export type LifecyclePurchase = Awaited<
   ReturnType<typeof testPaymentRepo.findLatestPurchaseLifecycleByAgentId>
@@ -32,7 +34,9 @@ export type StripeHoldSearch = {
 };
 export type OrgTransferStatus = 'pending' | 'funded' | 'consumed' | 'reclaimed' | 'failed';
 
-export interface TestPaymentLifecycleDependencies {
+export interface TestPaymentLifecycleDependencies extends StripeCustodyDependencies {
+  v2Request?: AgentCardV2Request;
+  getV2OwnerId?: (userId: string) => Promise<string | undefined>;
   findPurchase?: (agentId: string) => Promise<LifecyclePurchase>;
   findAttentionRequests?: (agentId: string) => Promise<LifecycleAttention>;
   findPurchaseLifecycleIntegrity?: (agentId: string) => Promise<LifecycleIntegrity>;

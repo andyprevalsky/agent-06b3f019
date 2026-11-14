@@ -128,8 +128,9 @@ export default tseslint.config(
   },
 
   // ── Domain files: ban direct npm/Node imports that bypass canonical providers ──
-  // CLAUDE.md rule: "Domain code must never directly use infrastructure … npm clients".
-  // Providers are the ONE place that imports these packages; domains import from providers.
+  // Layering rule (enforced here): domain code never imports infrastructure npm
+  // clients directly. Providers are the ONE place that imports these packages;
+  // domains import from providers.
   {
     files: ['src/domains/**/*.ts'],
     rules: {

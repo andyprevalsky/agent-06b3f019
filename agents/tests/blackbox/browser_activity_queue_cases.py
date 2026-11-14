@@ -23,6 +23,7 @@ async def run_browser_activity_queue_case(*, cancel=False, timedout=False):
     owner = SimpleNamespace(user_id="queue-user", agent_id="queue-gp", is_paused=False)
     other = SimpleNamespace(user_id="queue-user", agent_id="other-gp", is_paused=False)
     started, completed, calls = [], [], []
+    receipt_waits = []
     work, cleanup = asyncio.Event(), asyncio.Event()
     cleaning = asyncio.Event()
 
@@ -56,8 +57,15 @@ async def run_browser_activity_queue_case(*, cancel=False, timedout=False):
         started.append(call_id)
         return asyncio.create_task(native(call_id))
 
-    async def wait_condition(predicate, **_kwargs):
+    async def wait_condition(predicate, timeout=None, **_kwargs):
+        # A bounded park expires after a fixed number of loop ticks (fake timer).
+        ticks = 0
         while not predicate():
+            if timeout is not None:
+                receipt_waits.append(timeout)
+                ticks += 1
+                if ticks > 500:
+                    raise asyncio.TimeoutError()
             await asyncio.sleep(0)
 
     async def consume(wf, call_id):
@@ -92,6 +100,7 @@ async def run_browser_activity_queue_case(*, cancel=False, timedout=False):
                 assert "second" not in started
                 assert isinstance(results[1], RuntimeError)
                 assert "cleanup is unconfirmed" in str(results[1])
+                assert receipt_waits, "successor refused without waiting for the cleanup receipt"
                 return
             assert "second" in completed
             assert completed.index("first") < completed.index("second")

@@ -31,6 +31,8 @@ def run_campaign(
     source = (ROOT / "scripts/run-bench-fleet").read_text()
     start = source.index("release_start_barrier() {")
     release = source[start : source.index("\n}\n", start) + 3]
+    infra_start = source.index("fleet_infra_stop_check() {")
+    infra_stop = source[infra_start : source.index("\n}\n", infra_start) + 3]
     (binary / "event").write_text(
         f"#!{sys.executable}\n"
         "import json, os, sys, time\n"
@@ -75,6 +77,8 @@ def run_campaign(
         "CHILD_BENCH=(fixture)\nCHILD_MACHINE=(fixture)\n"
         "wait_for_mandatory_autoscaler_startup() { event ready; }\n"
         f"CLOUDBENCH_SCRIPT_SNAPSHOT={shlex.quote(str(ROOT / 'scripts'))}\n"
+        "FLEET_INFRA_STOP_SENT=0\n"
+        f"{infra_stop}\n"
         f"{release}\n"
         "release_start_barrier\n"
     )

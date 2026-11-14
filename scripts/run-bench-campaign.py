@@ -898,6 +898,103 @@ def infra_stop_receipt(jobs: list[dict[str, object]], scheduled_total: int, poli
             "infra_job_ids": infra}
 
 
+FLEET_INFRA_STOP_SCHEMA = "fleet-infra-stop-v1"
+# run_fleet_child_supervised records a forwarded HUP/INT/TERM as the child's exit.
+FLEET_CANCELLED_EXIT_CODES = {"129", "130", "143"}
+
+
+def fleet_attempt(directory: Path, task: str) -> dict[str, object]:
+    """One physical fleet attempt's verdict, read from its own receipts without regrading.
+
+    Only a finished child is terminal. A forwarded signal is a cancellation. A
+    finished child without a run record is the fleet aggregate's INFRA_ERROR row
+    ("no current run artifact produced"); otherwise the recorded task row decides.
+    """
+    try:
+        code = (directory / "benchmark-child.finished").read_text().strip()
+    except FileNotFoundError:
+        return {"status": "running"}
+    if code in FLEET_CANCELLED_EXIT_CODES:
+        return {"status": "cancelled", "exit_code": code}
+    record = directory / "cloudbench-run.json"
+    if not record.is_file():
+        return {"status": "failed", "exit_code": code, "task_status": "INFRA_ERROR",
+                "infra_failure": True, "terminal_task": False}
+    try:
+        rows = [row for row in json.loads(record.read_text()).get("tasks") or []
+                if isinstance(row, dict) and row.get("name") == task]
+    except (OSError, ValueError, AttributeError):
+        rows = []
+    if len(rows) != 1:
+        return {"status": "unknown", "exit_code": code}
+    return {"status": "finished", "exit_code": code, **task_verdict(rows[0])}
+
+
+def fleet_infra_jobs(fleet_dir: Path, benches: list[str]) -> list[dict[str, object]]:
+    """One scheduled job per requested bench, with every physical attempt.
+
+    A host-replaced attempt (``host-replaced-*``) is retained but never counts:
+    it has no task row, and the job's verdict comes from its current attempt,
+    as the campaign and sharded paths read the same fleet's task row.
+    """
+    jobs = []
+    for bench in dict.fromkeys(benches):
+        out = fleet_dir / bench
+        attempts: list[dict[str, object]] = [
+            {"attempt_dir": str(path), "status": "replaced"}
+            for path in sorted(out.glob("host-replaced-*")) if path.is_dir()
+        ]
+        attempts.append({"attempt_dir": str(out), **fleet_attempt(out, bench)})
+        jobs.append({"job_id": bench, "task": bench, "attempts": attempts})
+    return jobs
+
+
+def fleet_infra_stop(fleet_dir: Path, benches: list[str], receipt: Path) -> dict[str, object] | None:
+    """The plain fleet's fixed-total infra breach, using the campaign's counting.
+
+    The frozen schedule is the fleet's requested benches. The first breach is
+    written once and returned unchanged on every later evaluation.
+    """
+    scheduled = list(dict.fromkeys(benches))
+    try:
+        return json.loads(receipt.read_text())
+    except FileNotFoundError:
+        pass
+    except ValueError as error:
+        # Only a breach writes the receipt, so an unreadable one still records a breach: keep
+        # stopping (never continue past it), with the current count when it still breaches.
+        current = infra_stop_receipt(fleet_infra_jobs(fleet_dir, scheduled), len(scheduled), infra_stop_policy())
+        return current or {"infra_jobs": "recorded", "scheduled_total": len(scheduled),
+                           "infra_job_ids": [f"unreadable breach receipt {receipt}: {error}"]}
+    jobs = fleet_infra_jobs(fleet_dir, scheduled)
+    breach = infra_stop_receipt(jobs, len(scheduled), infra_stop_policy())
+    if breach is None:
+        return None
+    breach.update(schema=FLEET_INFRA_STOP_SCHEMA, observed_at=utc_now(), breached_at_epoch=time.time(),
+                  fleet_dir=str(fleet_dir), jobs=jobs)
+    temporary = receipt.with_name(f".{receipt.name}.{os.getpid()}.tmp")
+    temporary.write_text(json.dumps(breach, indent=2, sort_keys=True) + "\n")
+    try:
+        os.link(temporary, receipt)  # never replaces an earlier breach
+    except FileExistsError:
+        breach = json.loads(receipt.read_text())
+    finally:
+        temporary.unlink(missing_ok=True)
+    return breach
+
+
+def fleet_infra_stop_main(argv: list[str]) -> int:
+    """``<fleet-dir> <receipt> <bench>...``: print one summary line on a breach, else nothing."""
+    if len(argv) < 3:
+        print("usage: fleet_infra_stop_main <fleet-dir> <receipt> <bench>...", file=sys.stderr)
+        return 2
+    breach = fleet_infra_stop(Path(argv[0]), argv[2:], Path(argv[1]))
+    if breach is not None:
+        print(f"{breach['infra_jobs']}/{breach['scheduled_total']} scheduled jobs confirmed INFRA "
+              f"({', '.join(map(str, breach['infra_job_ids']))})")
+    return 0
+
+
 def terminate_owned_children(active: dict[int, dict[str, object]]) -> None:
     """Send one cancellation TERM to each live controller's process group.
 
@@ -1657,7 +1754,7 @@ def main() -> int:
             "headroom; controller count does not prove task execution overlap."
         )
     print(
-        "   monitor every 30s: python3 -m json.tool " + shlex.quote(str(summary_path))
+        "   monitor: python3 -m json.tool " + shlex.quote(str(summary_path))
     )
     print(
         "   follow each job log's exact printed fleet-monitor command; "

@@ -28,6 +28,8 @@ import {
   serveList,
   type Row,
 } from './integrations-accounts.fixtures';
+import { MeetingNotesIcon } from '@/features/integrations/components/MeetingNotesProviderCard';
+import firefliesLogo from '@/assets/fireflies-logo.svg';
 import { server } from './msw/server';
 import { renderWithProviders } from './test-wrapper';
 import { mockTerminalHookSession as mockSession } from './terminal-hooks.fixtures';
@@ -87,6 +89,11 @@ describe('Rose Desktop integrations: stock app-icon tiles', () => {
       expect(svg.closest('.text-\\[\\#111111\\]')).not.toBeNull();
     }
     expect(rowEl('plaid').querySelector('svg.text-\\[\\#111111\\]')).not.toBeNull();
+    // Fireflies' transparent mark is centered with padding, not cropped edge-to-edge.
+    const fireflies = iconTile('fireflies').getAttribute('style') ?? '';
+    expect(fireflies).toContain('--dropdown-icon-fit: contain');
+    expect(fireflies).toContain('--dropdown-icon-scale: 0.64');
+    expect(iconTile('granola').getAttribute('style')).toContain('--dropdown-icon-fit: cover');
   }
 
   it('light mode: every icon sits on its stock tile; connected tiles glow rose', async () => {
@@ -183,4 +190,11 @@ describe('Integrations panel: no polling once closed', () => {
     });
     expect(progressCalls()).toHaveLength(after);
   }, 20_000);
+});
+
+describe('meeting note taker logos', () => {
+  it('Fireflies uses the official fireflies.ai mark asset', () => {
+    const { container } = renderWithProviders(<MeetingNotesIcon provider="fireflies" />);
+    expect(container.querySelector('img')?.getAttribute('src')).toBe(firefliesLogo);
+  });
 });

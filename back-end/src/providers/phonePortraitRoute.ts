@@ -48,6 +48,17 @@ function tap(args: Record<string, unknown>, row: ObservedTarget | null) {
       (row.alternate !== undefined && args.x === row.alternate.x && args.y === row.alternate.y))
   );
 }
+/** Inside the observed row's own box: re-focusing the same field, not a new target. */
+function withinRow(args: Record<string, unknown>, row: TextRow | null) {
+  return (
+    row !== null &&
+    Object.keys(args).length === 2 &&
+    typeof args.x === 'number' &&
+    typeof args.y === 'number' &&
+    Math.abs(args.x - row.x) <= row.w / 2 &&
+    Math.abs(args.y - row.y) <= row.h / 2
+  );
+}
 function regionTap(args: Record<string, unknown>, x1: number, y1: number, x2: number, y2: number) {
   return (
     Object.keys(args).length === 2 &&
@@ -120,7 +131,8 @@ const NEXT_STEP: Record<string, string> = {
   touch_enabled: 'screen.text of Touch showing AssistiveTouch On.',
   touch_tap_enabled: 'tap the observed AssistiveTouch row on Touch.',
   detail_final: 'screen.text of the AssistiveTouch detail page.',
-  float: 'tap the floating AssistiveTouch button at the right edge (x 625-750).',
+  float:
+    'tap the floating AssistiveTouch button. screen.text does not report this textless button; it normally rests against the right edge (x 625-750, y 400-1250). Tap that band away from observed row labels, then screen.text: the AssistiveTouch menu means it opened; an unchanged AssistiveTouch detail page means it missed, so try another band point, at most three in all, then keep portrait lock unconfirmed and report that blocker.',
   menu: 'screen.text of the AssistiveTouch menu.',
   menu_tap: 'tap the observed Control Center label.',
   cc: 'screen.text of Control Center, then setup.verify.',
@@ -203,6 +215,7 @@ export function portraitRouteVerdict(
   let revision = first.revision;
   stage = 'root';
   let pending: ObservedTarget | null = null;
+  let search: TextRow | null = null;
   let original: AssistiveOriginal | null = null;
   let body: TextRow | null = null;
   for (let i = 0; i < route.length; i++) {
@@ -253,8 +266,12 @@ export function portraitRouteVerdict(
       continue;
     }
     if (e.operation === 'input.tap') {
-      if (stage === 'root_tap' && tap(e.args, pending)) stage = 'query';
-      else if (stage === 'result_tap' && tap(e.args, pending)) stage = 'detail';
+      if (stage === 'root_tap' && tap(e.args, pending)) {
+        search = pending;
+        stage = 'query';
+      } else if (stage === 'query' && withinRow(e.args, search)) {
+        // Re-focusing the same observed Search field before typing.
+      } else if (stage === 'result_tap' && tap(e.args, pending)) stage = 'detail';
       else if (
         (stage === 'back' || stage === 'back_enabled') &&
         regionTap(e.args, 30, 40, 120, 130)
@@ -280,7 +297,9 @@ export function portraitRouteVerdict(
     if (
       e.operation !== 'screen.text' ||
       Object.keys(e.args).some((k) => k !== 'min_confidence') ||
-      (e.args.min_confidence !== undefined && e.args.min_confidence !== 0.3)
+      (e.args.min_confidence !== undefined &&
+        (typeof e.args.min_confidence !== 'number' ||
+          !(e.args.min_confidence >= 0 && e.args.min_confidence <= 1)))
     )
       return reject(e);
     const rows = portraitTextRows(e.result);
@@ -324,7 +343,7 @@ export function portraitRouteVerdict(
         (r) =>
           r.x > 500 &&
           Math.abs(r.y - pending!.y) <= 20 &&
-          /^(On|Off)(?:\s*›)?$/.test(normal(r.text))
+          /^(On|Off)(?:\s*[›>])?$/.test(normal(r.text))
       );
       if (values.length !== 1) return reject(e);
       const value = normal(values[0].text).startsWith('On') ? 'on' : 'off';
@@ -337,13 +356,19 @@ export function portraitRouteVerdict(
         stage = 'touch_tap_enabled';
       }
     } else if (stage === 'menu' || stage === 'menu_tap') {
-      if (
-        !named(rows, 'Device') ||
-        !named(rows, 'Home') ||
-        !named(rows, 'Custom') ||
-        !named(rows, 'Gestures')
-      )
-        return reject(e);
+      const menu =
+        named(rows, 'Device') &&
+        named(rows, 'Home') &&
+        named(rows, 'Custom') &&
+        named(rows, 'Gestures');
+      if (!menu && stage === 'menu' && detail(rows)) {
+        // The right-edge probe missed the textless floating button and left the detail page.
+        body = named(rows, 'AssistiveTouch', (r) => r.y > 150 && r.y < 400);
+        if (!body) return reject(e);
+        stage = 'float';
+        continue;
+      }
+      if (!menu) return reject(e);
       pending = controlCenter(rows);
       if (!pending) return reject(e);
       stage = 'menu_tap';

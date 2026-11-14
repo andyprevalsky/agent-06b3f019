@@ -1,9 +1,12 @@
 import { PurchaseSpendStatus, PurchaseWalletFundingStatus } from '@prisma/client';
-import { prisma } from '../database';
+import { prisma, runTransactionWithRetry } from '../database';
 import { isAdminUser } from '../../utils/adminAccess';
 import { AgentCardProviderError, createCardProviderForAgent } from '../card-provider';
 import { createLogger } from '../logger';
 import { callOrgTool } from './org-runtime';
+import { agentCardV2Request, AgentCardV2Error, type AgentCardV2Request } from './api-v2';
+import { getV2WalletOwnerId } from './wallet-v2';
+import { lockPurchaseWalletTransition } from '../purchase-wallet-funding-repo';
 
 const log = createLogger('AgentCardSandboxSettlement');
 
@@ -24,6 +27,12 @@ export interface AgentCardSandboxSettlementResult {
 }
 
 export interface HeldPurchase {
+  status?: PurchaseSpendStatus;
+  stripeLivemode?: boolean;
+  walletFunding?: {
+    providerTransferId: string | null;
+    metadata: unknown;
+  } | null;
   id: string;
   userId: string;
   agentId: string | null;
@@ -32,6 +41,8 @@ export interface HeldPurchase {
 }
 
 interface AgentCardSandboxSettlementDependencies {
+  v2Request?: AgentCardV2Request;
+  getV2OwnerId?: (userId: string) => Promise<string | undefined>;
   findHeldPurchasesByTotal?: (amountCents: number) => Promise<HeldPurchase[]>;
   /** Optional override for already-CLEARED replay (unit tests / offline fixtures). */
   findClearedPurchasesByTotal?: (amountCents: number) => Promise<HeldPurchase[]>;
@@ -55,7 +66,8 @@ interface AgentCardSandboxSettlementDependencies {
 export class AgentCardSandboxSettlementError extends Error {
   constructor(
     message: string,
-    readonly statusCode: number
+    readonly statusCode: number,
+    readonly chargeMayHaveSucceeded = false
   ) {
     super(message);
   }
@@ -63,15 +75,22 @@ export class AgentCardSandboxSettlementError extends Error {
 
 export async function findHeldPurchasesByTotal(amountCents: number): Promise<HeldPurchase[]> {
   return prisma.purchaseSpend.findMany({
-    where: { totalCents: amountCents, status: PurchaseSpendStatus.HELD, cardId: { not: null } },
+    where: {
+      totalCents: amountCents,
+      status: { in: [PurchaseSpendStatus.HELD, PurchaseSpendStatus.CHARGING] },
+      cardId: { not: null },
+    },
     orderBy: { createdAt: 'desc' },
     take: 10,
     select: {
       id: true,
+      status: true,
       userId: true,
       agentId: true,
       cardId: true,
       stripePaymentIntentId: true,
+      stripeLivemode: true,
+      walletFunding: { select: { providerTransferId: true, metadata: true } },
     },
   });
 }
@@ -86,7 +105,11 @@ export async function findHeldPurchasesByTotal(amountCents: number): Promise<Hel
  */
 export async function findClearedPurchasesByTotal(amountCents: number): Promise<HeldPurchase[]> {
   return prisma.purchaseSpend.findMany({
-    where: { totalCents: amountCents, status: PurchaseSpendStatus.CLEARED, cardId: { not: null } },
+    where: {
+      totalCents: amountCents,
+      status: PurchaseSpendStatus.CLEARED,
+      cardId: { not: null },
+    },
     orderBy: { createdAt: 'desc' },
     take: 10,
     select: {
@@ -95,6 +118,8 @@ export async function findClearedPurchasesByTotal(amountCents: number): Promise<
       agentId: true,
       cardId: true,
       stripePaymentIntentId: true,
+      stripeLivemode: true,
+      walletFunding: { select: { providerTransferId: true, metadata: true } },
     },
   });
 }
@@ -172,16 +197,139 @@ export async function getPurchaseCardLast4Hint(purchaseId: string): Promise<stri
   return normalizeCardLast4((metadata as Record<string, unknown>).last4);
 }
 
-async function testCharge(input: {
-  cardId: string;
-  amountCents: number;
-  merchant: string;
-}): Promise<{ isError?: boolean; message?: string }> {
+async function testCharge(
+  input: {
+    cardId: string;
+    amountCents: number;
+    merchant: string;
+  },
+  purchase: HeldPurchase,
+  dependencies: AgentCardSandboxSettlementDependencies
+): Promise<{ isError?: boolean; message?: string }> {
+  const metadata = purchase.walletFunding?.metadata;
+  const record =
+    typeof metadata === 'object' && metadata !== null ? (metadata as Record<string, unknown>) : {};
+  if (record.apiVersion === 2 || record.api_version === 'v2') {
+    const api = dependencies.v2Request ?? agentCardV2Request;
+    const owner = await (dependencies.getV2OwnerId ?? getV2WalletOwnerId)(purchase.userId);
+    const transferId = purchase.walletFunding?.providerTransferId;
+    if (!owner || !transferId || purchase.stripeLivemode !== false) {
+      throw new AgentCardSandboxSettlementError(
+        'AgentCard sandbox settlement requires known ownership and test billing mode',
+        409
+      );
+    }
+    let transaction: Record<string, unknown>;
+    const cardPath = `/api/v2/cards/${encodeURIComponent(input.cardId)}`;
+    try {
+      const [wallet, transfer, card] = await Promise.all([
+        api('GET', '/api/v2/company_wallet'),
+        api('GET', `/api/v2/company_wallet/transfers/${encodeURIComponent(transferId)}`),
+        api('GET', cardPath),
+      ]);
+      if (
+        wallet.livemode !== false ||
+        transfer.livemode !== false ||
+        transfer.id !== transferId ||
+        transfer.card_id !== input.cardId ||
+        transfer.user_id !== owner ||
+        transfer.amount_cents !== input.amountCents ||
+        card.id !== input.cardId ||
+        card.user_id !== owner ||
+        !['open', 'in_use'].includes(String(card.status)) ||
+        typeof card.balance_cents !== 'number' ||
+        !Number.isSafeInteger(card.balance_cents) ||
+        card.balance_cents < input.amountCents
+      ) {
+        throw new AgentCardSandboxSettlementError(
+          'AgentCard sandbox card, transfer, owner or credential mode does not match checkout',
+          409
+        );
+      }
+    } catch (error) {
+      if (error instanceof AgentCardV2Error) {
+        throw new AgentCardSandboxSettlementError(
+          error.message,
+          error.status === 404 ? 502 : error.status
+        );
+      }
+      throw error;
+    }
+    try {
+      // The test-charge endpoint has no idempotency contract. Never opt this POST into replay.
+      transaction = await api('POST', `${cardPath}/test_charge`, {
+        amount_cents: input.amountCents,
+        merchant: input.merchant,
+      });
+    } catch (error) {
+      if (error instanceof AgentCardV2Error && error.status >= 400 && error.status < 500) {
+        throw new AgentCardSandboxSettlementError(
+          error.message,
+          error.status === 404 ? 502 : error.status
+        );
+      }
+      throw new AgentCardSandboxSettlementError(
+        'AgentCard sandbox charge outcome is unknown; refusing to replay it',
+        502,
+        true
+      );
+    }
+    const chargedCard =
+      typeof transaction.card === 'object' && transaction.card !== null
+        ? (transaction.card as Record<string, unknown>)
+        : {};
+    if (transaction.status === 'declined' && transaction.card_id === input.cardId) {
+      return {
+        isError: true,
+        message: 'AgentCard sandbox transaction was declined',
+      };
+    }
+    const mismatches = [
+      ['object', transaction.object === 'test_transaction'],
+      ['id', typeof transaction.id === 'string' && Boolean(transaction.id)],
+      ['card_id', transaction.card_id === input.cardId],
+      ['amount_cents', transaction.amount_cents === input.amountCents],
+      ['simulated', transaction.simulated === true],
+      ['status', transaction.status === 'cleared'],
+      ['card.id', chargedCard.id === input.cardId],
+      // The embedded Card schema makes user_id optional/nullable. The authoritative
+      // card + transfer GETs above already proved ownership before this one-shot charge.
+      [
+        'card.user_id',
+        chargedCard.user_id === undefined ||
+          chargedCard.user_id === null ||
+          chargedCard.user_id === owner,
+      ],
+    ]
+      .filter(([, matches]) => !matches)
+      .map(([field]) => field);
+    if (mismatches.length > 0) {
+      log.warn('AgentCard sandbox cleared response mismatch', {
+        purchaseId: purchase.id,
+        cardId: input.cardId,
+        mismatches,
+        fieldTypes: Object.fromEntries(
+          ['object', 'id', 'card_id', 'amount_cents', 'simulated', 'status', 'card'].map(
+            (field) => [field, typeof transaction[field]]
+          )
+        ),
+      });
+      throw new AgentCardSandboxSettlementError(
+        `AgentCard sandbox charge did not return a matching cleared transaction: ${mismatches.join(', ')}`,
+        502,
+        true
+      );
+    }
+    return { isError: false };
+  }
   const result = (await callOrgTool('test_charge', {
     card_id: input.cardId,
     amount_cents: input.amountCents,
     merchant: input.merchant,
-  })) as { isError?: boolean; content?: Array<{ type?: string; text?: string }> };
+  })) as {
+    isError?: boolean;
+    content?: Array<{ type?: string; text?: string }>;
+  };
   return {
     isError: result?.isError,
     message: (result.content ?? [])
@@ -238,8 +386,9 @@ const CONSUMABLE_FUNDING_SOURCE_STATUSES = [
   PurchaseWalletFundingStatus.RECLAIM_FAILED,
 ];
 
-export async function markPurchaseCleared(purchaseId: string): Promise<void> {
-  await prisma.$transaction(async (tx) => {
+export async function markPurchaseCleared(purchaseId: string, recovering = false): Promise<void> {
+  await runTransactionWithRetry(async (tx) => {
+    await lockPurchaseWalletTransition(tx, purchaseId);
     const updated = await tx.purchaseSpend.updateMany({
       where: { id: purchaseId, status: PurchaseSpendStatus.CHARGING },
       data: { status: PurchaseSpendStatus.CLEARED },
@@ -253,7 +402,11 @@ export async function markPurchaseCleared(purchaseId: string): Promise<void> {
     const consumed = await tx.purchaseWalletFunding.updateMany({
       where: {
         purchaseId,
-        status: { in: CONSUMABLE_FUNDING_SOURCE_STATUSES },
+        status: {
+          in: recovering
+            ? [PurchaseWalletFundingStatus.FUNDED, PurchaseWalletFundingStatus.CONSUMED]
+            : CONSUMABLE_FUNDING_SOURCE_STATUSES,
+        },
       },
       data: {
         status: PurchaseWalletFundingStatus.CONSUMED,
@@ -327,6 +480,84 @@ async function resolveClosedCardCandidate(
   return 'closed_held_match';
 }
 
+/** Read the exact charge ledger after a lost/malformed charge response; never replay test_charge. */
+async function recoverV2ClearedCharge(
+  purchase: HeldPurchase,
+  input: AgentCardSandboxSettlementInput,
+  dependencies: AgentCardSandboxSettlementDependencies
+): Promise<boolean> {
+  const metadata = purchase.walletFunding?.metadata;
+  if (typeof metadata !== 'object' || metadata === null) return false;
+  const record = metadata as Record<string, unknown>;
+  if (record.apiVersion !== 2 && record.api_version !== 'v2') return false;
+  const api = dependencies.v2Request ?? agentCardV2Request;
+  const owner = await (dependencies.getV2OwnerId ?? getV2WalletOwnerId)(purchase.userId);
+  const transferId = purchase.walletFunding?.providerTransferId;
+  const pending = () =>
+    new AgentCardSandboxSettlementError(
+      'Rose sandbox charge is unconfirmed; keeping this purchase pending without replaying it',
+      409,
+      true
+    );
+  if (!owner || !transferId || !purchase.cardId || purchase.stripeLivemode !== false)
+    throw pending();
+  const wallet = await api('GET', '/api/v2/company_wallet');
+  if (wallet.livemode !== false) throw pending();
+  const [transfer, card] = await Promise.all([
+    api('GET', `/api/v2/company_wallet/transfers/${encodeURIComponent(transferId)}`),
+    api('GET', `/api/v2/cards/${encodeURIComponent(purchase.cardId)}`),
+  ]);
+  if (
+    transfer.id !== transferId ||
+    transfer.card_id !== purchase.cardId ||
+    transfer.user_id !== owner ||
+    transfer.livemode !== false ||
+    transfer.amount_cents !== input.amountCents ||
+    transfer.status !== 'consumed' ||
+    card.id !== purchase.cardId ||
+    card.user_id !== owner ||
+    card.status !== 'closed' ||
+    card.balance_cents !== 0
+  )
+    throw pending();
+  const query = new URLSearchParams({
+    card_id: purchase.cardId,
+    user_id: owner,
+    status: 'cleared',
+    limit: '100',
+  });
+  const ledger = await api('GET', `/api/v2/transactions?${query}`);
+  if (
+    ledger.object !== 'list' ||
+    ledger.has_more !== false ||
+    !Array.isArray(ledger.data) ||
+    ledger.data.length !== 1
+  )
+    throw pending();
+  const charge = ledger.data[0] as Record<string, unknown> | null;
+  if (
+    !charge ||
+    charge.object !== 'transaction' ||
+    typeof charge.id !== 'string' ||
+    !charge.id ||
+    charge.source !== 'issued' ||
+    charge.status !== 'cleared' ||
+    charge.card_id !== purchase.cardId ||
+    charge.user_id !== owner ||
+    charge.amount !== input.amountCents ||
+    charge.merchant !== input.merchant ||
+    (charge.currency !== null && charge.currency !== 'usd')
+  )
+    throw pending();
+  if (
+    purchase.status !== PurchaseSpendStatus.CHARGING &&
+    !(await (dependencies.claimHeldPurchaseForCharge ?? claimHeldPurchaseForCharge)(purchase.id))
+  )
+    throw pending();
+  await (dependencies.markPurchaseCleared ?? ((id) => markPurchaseCleared(id, true)))(purchase.id);
+  return true;
+}
+
 export async function settleAgentCardSandboxPayment(
   input: AgentCardSandboxSettlementInput,
   dependencies: AgentCardSandboxSettlementDependencies = {}
@@ -338,7 +569,6 @@ export async function settleAgentCardSandboxPayment(
   const readLast4Hint = dependencies.getPurchaseCardLast4Hint ?? getPurchaseCardLast4Hint;
   const claimForCharge = dependencies.claimHeldPurchaseForCharge ?? claimHeldPurchaseForCharge;
   const releaseClaim = dependencies.releaseHeldPurchaseClaim ?? releaseHeldPurchaseClaim;
-  const charge = dependencies.testCharge ?? testCharge;
   const markCleared = dependencies.markPurchaseCleared ?? markPurchaseCleared;
   const candidates = await findPurchases(input.amountCents);
 
@@ -354,9 +584,31 @@ export async function settleAgentCardSandboxPayment(
         'held'
       );
       if (closed === 'not_this_card') continue;
+      if (await recoverV2ClearedCharge(purchase, input, dependencies)) {
+        return {
+          purchaseId: purchase.id,
+          cardId: purchase.cardId,
+          stripePaymentIntentId: purchase.stripePaymentIntentId,
+        };
+      }
       throw new AgentCardSandboxSettlementError(
         'Rose card for this purchase is closed; credentials are unavailable. Issue a new card.',
         409
+      );
+    }
+
+    if (purchase.status === PurchaseSpendStatus.CHARGING) {
+      if (await recoverV2ClearedCharge(purchase, input, dependencies)) {
+        return {
+          purchaseId: purchase.id,
+          cardId: purchase.cardId,
+          stripePaymentIntentId: purchase.stripePaymentIntentId,
+        };
+      }
+      throw new AgentCardSandboxSettlementError(
+        'Rose card charge is already in progress',
+        409,
+        true
       );
     }
 
@@ -379,7 +631,12 @@ export async function settleAgentCardSandboxPayment(
     // of HELD. Release the claim on every failure path — a declined charge and a
     // thrown charge/markCleared are both retryable, and leaving the row CHARGING
     // makes the retry unable to find it at all.
+    let chargeConfirmed = false;
     try {
+      const charge =
+        dependencies.testCharge ??
+        ((chargeInput: { cardId: string; amountCents: number; merchant: string }) =>
+          testCharge(chargeInput, purchase, dependencies));
       const result = await charge({
         cardId: purchase.cardId,
         amountCents: input.amountCents,
@@ -391,9 +648,22 @@ export async function settleAgentCardSandboxPayment(
           402
         );
       }
+      chargeConfirmed = true;
       await markCleared(purchase.id);
     } catch (error) {
-      await releaseClaim(purchase.id);
+      const fundingMetadata = purchase.walletFunding?.metadata;
+      const metadata =
+        typeof fundingMetadata === 'object' && fundingMetadata !== null
+          ? (fundingMetadata as Record<string, unknown>)
+          : {};
+      const v2Charged =
+        chargeConfirmed && (metadata.apiVersion === 2 || metadata.api_version === 'v2');
+      if (
+        !v2Charged &&
+        !(error instanceof AgentCardSandboxSettlementError && error.chargeMayHaveSucceeded)
+      ) {
+        await releaseClaim(purchase.id);
+      }
       throw error;
     }
     return {

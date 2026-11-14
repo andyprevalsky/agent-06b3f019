@@ -53,7 +53,7 @@ WMH_REQUIRE_CONFORMANCE=1 \
   ./venv/bin/python -c 'from benchmarks.world_model_harness import update_world_model_for_simulation as build; print(build())'
 ```
 
-The build needs the R2 credentials configured per `CLAUDE.md`. A cloud-bench
+The build needs the R2 credentials in `agents/.env`. A cloud-bench
 refresh can instead use `bash scripts/run-bench-cloud --refresh-wmh --ref
 <pushed-commit>`; that path fetches only committed code. After building, serve
 the matching model and run `benchmarks.run_world_model_conformance` as directed

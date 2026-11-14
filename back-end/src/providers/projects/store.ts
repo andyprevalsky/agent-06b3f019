@@ -10,6 +10,10 @@
 import { Prisma } from '@prisma/client';
 import { prisma, runTransactionWithRetry } from '../database';
 import { normalizeGithubUrl } from '../github';
+import { findGrantedRepoUrls } from '../githubRepos/store';
+
+/** Projects expose their connected repo's canonical ref (GitHub repo integration). */
+export { canonicalGithubRepoRef } from '../githubRepos/refs';
 import { randomBytes } from '../crypto';
 import { decryptProjectBinary, decryptProjectSecret } from './secrets';
 import { redactableSecretValues, type EnvVariableMeta } from './envFile';
@@ -125,11 +129,8 @@ export async function findGithubConnectedRepoUrls(
     if (url) normalized.set(url, [...(normalized.get(url) ?? []), raw]);
   }
   if (normalized.size === 0) return new Set();
-  const grants = await prisma.githubRepoAccess.findMany({
-    where: { userId, repoUrl: { in: [...normalized.keys()] } },
-    select: { repoUrl: true },
-  });
-  return new Set(grants.flatMap((grant) => normalized.get(grant.repoUrl) ?? []));
+  const granted = await findGrantedRepoUrls(userId, [...normalized.keys()]);
+  return new Set([...granted].flatMap((url) => normalized.get(url) ?? []));
 }
 
 export async function findProject(userId: string, id: string): Promise<ProjectRecord | null> {
