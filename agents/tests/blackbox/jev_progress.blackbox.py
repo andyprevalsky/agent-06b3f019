@@ -136,6 +136,55 @@ async def test_http_contract():
         client.assert_not_called()
 
 
+async def test_typesafe_call_archived_in_root_bundle():
+    """Every TypeSafe JEV request/response is a v2 record in the tree root's bundle, never in logs."""
+    import tempfile
+
+    import structlog
+
+    import helpers.observability as observability
+    import helpers.trace_archive as trace_archive
+    from helpers.trace_archive import decrypt_and_validate_artifact, read_local_artifact
+
+    client = AsyncMock()
+    response = client.post.return_value
+    response.raise_for_status = lambda: None
+    response.json = lambda: answer()
+    logged = []
+
+    class _Logger:
+        def __getattr__(self, level):
+            return lambda event, **kw: logged.append(event)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        old = (trace_archive._LOCAL_ROOT, observability._IS_PRODUCTION, observability.logger)
+        trace_archive._LOCAL_ROOT, observability._IS_PRODUCTION, observability.logger = Path(tmp), True, _Logger()
+        tokens = structlog.contextvars.bind_contextvars(root_agent_id="tree-root")
+        try:
+            with patch.dict(os.environ, {"TYPESAFE_API_KEY": "test", "TRACE_ARCHIVE_ENABLED": "1",
+                                         "TRACE_ARCHIVE_BACKEND": "local"}), \
+                    patch.object(jev, "get_http_client", return_value=client), \
+                    patch.object(jev, "publish_progress_estimate", new_callable=AsyncMock):
+                os.environ.pop("LLM_CONTEXT_DUMP_PROD", None)
+                await jev.predict_jev_progress(snapshot())
+
+            def records(folder):
+                bundle = Path(tmp) / "tree-root" / folder
+                return [json.loads(decrypt_and_validate_artifact(*read_local_artifact(
+                    root_agent_id="tree-root", path=f"{folder}/{item.name}"))) for item in bundle.glob("*.json.gz.enc")]
+
+            start, final = records("llm"), records("llm-updates")
+        finally:
+            structlog.contextvars.reset_contextvars(**tokens)
+            trace_archive._LOCAL_ROOT, observability._IS_PRODUCTION, observability.logger = old
+    assert len(start) == 1 and len(final) == 1, (start, final)
+    sent = client.post.await_args.kwargs["json"]
+    assert start[0]["config"]["request_body"] == sent and start[0]["agent_id"] == "root"
+    assert final[0]["call_site"] == "jev_progress" and final[0]["output"]["structured"] == answer()
+    assert final[0]["output"]["estimate"]["model"] == jev.MODEL
+    assert "llm.context.dumped" not in logged and "llm.context.dump_updated" not in logged, logged
+
+
 async def test_freeze_queue_and_cancel_http():
     received = []
     gate = asyncio.Event()
@@ -250,6 +299,7 @@ async def run_all_tests():
     await r.record_async("global HTTP concurrency bound", test_http_concurrency_bound)
     await r.record_async("nonblocking bounded lifecycle", test_background_lifecycle)
     await r.record_async("HTTP and pinned prompt", test_http_contract)
+    await r.record_async("TypeSafe call archived in root bundle", test_typesafe_call_archived_in_root_bundle)
     await r.record_async("DEMO replay runs without JEV", test_demo_replay_runs_without_jev)
     return r.all_passed
 

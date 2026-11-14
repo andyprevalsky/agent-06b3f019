@@ -21,6 +21,9 @@ class _CaptureLogger:
     def warning(self, event, **kwargs):
         self.events.append((event, kwargs))
 
+    def error(self, event, **kwargs):
+        self.events.append((event, kwargs))
+
 
 def _decode_event_payload(event):
     payload_bytes = gzip.decompress(base64.b64decode(event["payload_gzip_b64"]))
@@ -28,96 +31,88 @@ def _decode_event_payload(event):
     return json.loads(payload_bytes.decode("utf-8"))
 
 
-def test_prod_llm_context_dump_emits_clickhouse_payload_and_update():
+def _prod_archive_env(tmp, **env):
+    """Production observability with a private local archive; returns restore()."""
     import helpers.observability as observability
+    import helpers.trace_archive as trace_archive
 
-    old_logger = observability.logger
-    old_is_prod = observability._IS_PRODUCTION
-    old_env = {
-        "LLM_CONTEXT_DUMP_PROD": os.environ.get("LLM_CONTEXT_DUMP_PROD"),
-        "LLM_CONTEXT_DUMP_MAX_BYTES": os.environ.get("LLM_CONTEXT_DUMP_MAX_BYTES"),
-    }
+    keys = ("LLM_CONTEXT_DUMP_PROD", "LLM_CONTEXT_DUMP_MAX_BYTES", "TRACE_ARCHIVE_ENABLED", "TRACE_ARCHIVE_BACKEND")
+    old_env = {key: os.environ.get(key) for key in keys}
+    old = (observability.logger, observability._IS_PRODUCTION, trace_archive._LOCAL_ROOT)
     capture = _CaptureLogger()
-    try:
-        observability.logger = capture
-        observability._IS_PRODUCTION = True
-        os.environ.pop("LLM_CONTEXT_DUMP_PROD", None)
-        os.environ["LLM_CONTEXT_DUMP_MAX_BYTES"] = "100000"
+    observability.logger = capture
+    observability._IS_PRODUCTION = True
+    trace_archive._LOCAL_ROOT = Path(tmp)
+    os.environ.pop("LLM_CONTEXT_DUMP_PROD", None)
+    os.environ.pop("LLM_CONTEXT_DUMP_MAX_BYTES", None)
+    os.environ.update({"TRACE_ARCHIVE_ENABLED": "1", "TRACE_ARCHIVE_BACKEND": "local", **env})
 
-        path = observability.dump_llm_context(
-            "explore_agent",
-            [{"role": "user", "content": "full repro prompt"}],
-            agent_id="agent-1",
-            model="rose-labs/rose-1-flash",
-            config={"deadline_s": 170},
-            tools=[{"name": "web_search"}],
-        )
-
-        assert path is not None
-        assert path.startswith("clickhouse://llm-context/agent-1/")
-        dumped = next(payload for event, payload in capture.events if event == "llm.context.dumped")
-        decoded = _decode_event_payload(dumped)
-        assert decoded["agent_id"] == "agent-1"
-        assert decoded["call_site"] == "explore_agent"
-        assert decoded["messages"][0]["content"] == "full repro prompt"
-        assert decoded["config"]["deadline_s"] == 170
-
-        observability.update_llm_dump(path, model="gpt-5.4-gpt", output={"error": {"type": "RoseDeadlineError"}})
-        updated = next(payload for event, payload in capture.events if event == "llm.context.dump_updated")
-        update_payload = _decode_event_payload(updated)
-        assert update_payload["dump_id"] == decoded["dump_id"]
-        assert update_payload["output"]["error"]["type"] == "RoseDeadlineError"
-    finally:
-        observability.logger = old_logger
-        observability._IS_PRODUCTION = old_is_prod
+    def restore():
+        observability.logger, observability._IS_PRODUCTION, trace_archive._LOCAL_ROOT = old
         for key, value in old_env.items():
             if value is None:
                 os.environ.pop(key, None)
             else:
                 os.environ[key] = value
 
+    return capture, restore
+
+
+def test_prod_llm_context_dump_emits_clickhouse_payload_and_update():
+    """The size-capped ClickHouse copy mirrors the archived v2 start/final records."""
+    import helpers.observability as observability
+
+    with tempfile.TemporaryDirectory() as tmp:
+        capture, restore = _prod_archive_env(tmp, LLM_CONTEXT_DUMP_MAX_BYTES="100000")
+        try:
+            path = observability.dump_llm_context(
+                "explore_agent",
+                [{"role": "user", "content": "full repro prompt"}],
+                agent_id="agent-1",
+                model="rose-labs/rose-1-flash",
+                config={"deadline_s": 170},
+                tools=[{"name": "web_search"}],
+            )
+
+            assert path is not None
+            assert path.startswith("llm-archive://agent-1/agent-1/"), path
+            dumped = next(payload for event, payload in capture.events if event == "llm.context.dumped")
+            decoded = _decode_event_payload(dumped)
+            assert decoded["agent_id"] == "agent-1" and decoded["record"] == "start"
+            assert decoded["call_site"] == "explore_agent"
+            assert decoded["messages"][0]["content"] == "full repro prompt"
+            assert decoded["config"]["deadline_s"] == 170
+
+            observability.update_llm_dump(path, model="gpt-5.4-gpt", output={"error": {"type": "RoseDeadlineError"}})
+            updated = next(payload for event, payload in capture.events if event == "llm.context.dump_updated")
+            update_payload = _decode_event_payload(updated)
+            assert update_payload["dump_id"] == decoded["dump_id"] and update_payload["record"] == "final"
+            assert update_payload["output"]["error"]["type"] == "RoseDeadlineError"
+            assert len(list((Path(tmp) / "agent-1" / "llm-updates").glob("*.enc"))) == 1
+        finally:
+            restore()
+
 
 def test_prod_llm_context_dump_kill_switch():
+    """LLM_CONTEXT_DUMP_PROD=0 silences the ClickHouse copy; the archive still records both sides."""
     import helpers.observability as observability
-    import helpers.trace_archive as trace_archive
 
-    old_logger = observability.logger
-    old_is_prod = observability._IS_PRODUCTION
-    old_archive_root = trace_archive._LOCAL_ROOT
-    old_env = {
-        "LLM_CONTEXT_DUMP_PROD": os.environ.get("LLM_CONTEXT_DUMP_PROD"),
-        "TRACE_ARCHIVE_ENABLED": os.environ.get("TRACE_ARCHIVE_ENABLED"),
-        "TRACE_ARCHIVE_BACKEND": os.environ.get("TRACE_ARCHIVE_BACKEND"),
-    }
-    capture = _CaptureLogger()
     with tempfile.TemporaryDirectory() as tmp:
+        capture, restore = _prod_archive_env(tmp, LLM_CONTEXT_DUMP_PROD="0")
         try:
-            observability.logger = capture
-            observability._IS_PRODUCTION = True
-            trace_archive._LOCAL_ROOT = Path(tmp)
-            os.environ["LLM_CONTEXT_DUMP_PROD"] = "0"
-            os.environ["TRACE_ARCHIVE_ENABLED"] = "1"
-            os.environ["TRACE_ARCHIVE_BACKEND"] = "local"
-
             path = observability.dump_llm_context(
                 "explore_agent",
                 [{"role": "user", "content": "sensitive prompt"}],
                 agent_id="agent-1",
                 model="rose-labs/rose-1-flash",
             )
-
-            assert path is not None
-            assert Path(path).exists()
-            assert capture.events == []
+            assert path is not None and path.startswith("llm-archive://"), path
+            observability.update_llm_dump(path, output={"content": "done"})
+            assert not [event for event, _ in capture.events if event.startswith("llm.context.dump")]
+            assert len(list((Path(tmp) / "agent-1" / "llm").glob("*.enc"))) == 1
+            assert len(list((Path(tmp) / "agent-1" / "llm-updates").glob("*.enc"))) == 1
         finally:
-            observability.logger = old_logger
-            observability._IS_PRODUCTION = old_is_prod
-            trace_archive._LOCAL_ROOT = old_archive_root
-            for key, value in old_env.items():
-                if value is None:
-                    os.environ.pop(key, None)
-                else:
-                    os.environ[key] = value
+            restore()
 
 
 def test_agent_context_materializes_clickhouse_dump_events():
@@ -173,43 +168,28 @@ def test_agent_context_materializes_clickhouse_dump_events():
 
 
 def test_prod_llm_context_dump_skips_oversize_payload():
+    """An oversize payload skips only the ClickHouse log copy, never the archive handle."""
     import helpers.observability as observability
 
-    old_logger = observability.logger
-    old_is_prod = observability._IS_PRODUCTION
-    old_env = {
-        "LLM_CONTEXT_DUMP_PROD": os.environ.get("LLM_CONTEXT_DUMP_PROD"),
-        "LLM_CONTEXT_DUMP_MAX_BYTES": os.environ.get("LLM_CONTEXT_DUMP_MAX_BYTES"),
-    }
-    capture = _CaptureLogger()
-    try:
-        observability.logger = capture
-        observability._IS_PRODUCTION = True
-        os.environ.pop("LLM_CONTEXT_DUMP_PROD", None)
+    with tempfile.TemporaryDirectory() as tmp:
         # Floor is clamped to 10_000, so exceed that with a large message body.
-        os.environ["LLM_CONTEXT_DUMP_MAX_BYTES"] = "10000"
+        capture, restore = _prod_archive_env(tmp, LLM_CONTEXT_DUMP_MAX_BYTES="10000")
+        try:
+            path = observability.dump_llm_context(
+                "explore_agent",
+                [{"role": "user", "content": "x" * 20_000}],
+                agent_id="agent-1",
+                model="rose-labs/rose-1-flash",
+            )
 
-        path = observability.dump_llm_context(
-            "explore_agent",
-            [{"role": "user", "content": "x" * 20_000}],
-            agent_id="agent-1",
-            model="rose-labs/rose-1-flash",
-        )
-
-        # Oversize payloads are skipped, not dumped.
-        assert path is None
-        skipped = next(payload for event, payload in capture.events if event == "llm.context.dump_skipped")
-        assert skipped["reason"] == "payload_too_large"
-        assert skipped["agent_id"] == "agent-1"
-        assert skipped["payload_bytes"] > skipped["max_bytes"]
-    finally:
-        observability.logger = old_logger
-        observability._IS_PRODUCTION = old_is_prod
-        for key, value in old_env.items():
-            if value is None:
-                os.environ.pop(key, None)
-            else:
-                os.environ[key] = value
+            assert path is not None and path.startswith("llm-archive://"), path
+            skipped = next(payload for event, payload in capture.events if event == "llm.context.dump_skipped")
+            assert skipped["reason"] == "payload_too_large"
+            assert skipped["agent_id"] == "agent-1"
+            assert skipped["payload_bytes"] > skipped["max_bytes"]
+            assert len(list((Path(tmp) / "agent-1" / "llm").glob("*.enc"))) == 1
+        finally:
+            restore()
 
 
 def test_update_llm_dump_merges_local_file_and_handles_edge_paths():

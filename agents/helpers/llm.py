@@ -4149,6 +4149,19 @@ async def call_llm_structured_streaming(
     final_response = None
     chunk_count = 0
 
+    direct_dump = _archive_direct_openrouter_start(
+        call_site,
+        messages,
+        model=model,
+        agent_id=agent_id,
+        config={
+            "mode": "instructor_json_partial",
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "response_model": response_model.__name__ if response_model else None,
+            **extra_args,
+        },
+    )
     # Use create_partial for streaming
     try:
         async for partial in client.chat.completions.create_partial(
@@ -4218,8 +4231,53 @@ async def call_llm_structured_streaming(
         "total_tokens": estimated_tokens,
         "cancelled": False,
     }
+    _archive_direct_openrouter_final(
+        direct_dump,
+        model=model,
+        output={
+            "content": final_response.model_dump_json() if hasattr(final_response, "model_dump_json") else str(final_response),
+            "structured": final_response.model_dump() if hasattr(final_response, "model_dump") else None,
+            "usage": {**usage, "estimated": True},
+            "actual_model": model,
+        },
+    )
 
     return final_response, usage, []  # No tool detection in OpenRouter path
+
+
+def _archive_direct_openrouter_start(
+    call_site: str,
+    messages: List[Dict[str, Any]],
+    *,
+    model: str,
+    agent_id: Optional[str],
+    config: Dict[str, Any],
+) -> Optional[str]:
+    """Start record for a non-Rose (direct OpenRouter SDK) call; never raises."""
+    try:
+        from helpers.observability import dump_llm_context
+
+        return dump_llm_context(
+            call_site,
+            messages,
+            agent_id=agent_id,
+            model=model,
+            config={"provider": "openrouter_direct", **config},
+        )
+    except Exception:
+        logger.debug("llm.direct_openrouter.dump_start_failed", call_site=call_site, exc_info=True)
+        return None
+
+
+def _archive_direct_openrouter_final(handle: Optional[str], *, model: Optional[str], output: Dict[str, Any]) -> None:
+    if not handle:
+        return
+    try:
+        from helpers.observability import update_llm_dump
+
+        update_llm_dump(handle, model=model, output={"provider": "openrouter_direct", **output})
+    except Exception:
+        logger.debug("llm.direct_openrouter.dump_final_failed", exc_info=True)
 
 
 def _extract_completed_tool_calls(accumulated_json: str) -> List[Dict[str, Any]]:
@@ -4643,6 +4701,18 @@ async def call_llm(
         # Use OpenRouter for all other models
         client = AsyncOpenAI(api_key=config.openrouter.api_key, base_url=config.openrouter.base_url)
 
+        direct_dump = _archive_direct_openrouter_start(
+            call_site,
+            messages,
+            model=model,
+            agent_id=agent_id,
+            config={
+                "mode": "chat_completions",
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+                "response_format": effective_response_format,
+            },
+        )
         # Call OpenRouter
         response = await client.chat.completions.create(
             model=model,
@@ -4650,6 +4720,26 @@ async def call_llm(
             temperature=temperature,
             max_tokens=max_tokens,
             response_format=effective_response_format,
+        )
+        direct_message = response.choices[0].message.model_dump() if response.choices else {}
+        _archive_direct_openrouter_final(
+            direct_dump,
+            model=response.model,
+            output={
+                "content": direct_message.get("content") or "",
+                "reasoning": direct_message.get("reasoning") or "",
+                "reasoning_blocks": [
+                    {"type": "openrouter_reasoning_detail", "raw": detail}
+                    for detail in direct_message.get("reasoning_details") or []
+                ],
+                "tool_calls": direct_message.get("tool_calls") or [],
+                "message": direct_message,
+                "usage": {
+                    **(response.usage.model_dump() if response.usage else {}),
+                    "finish_reason": response.choices[0].finish_reason if response.choices else None,
+                },
+                "actual_model": response.model,
+            },
         )
 
         # Log full response to debug

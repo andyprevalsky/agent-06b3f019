@@ -377,16 +377,22 @@ async def test_late_activity_body_start_is_logged_with_its_dispatch_lag():
 
 
 def test_worker_registers_activity_dispatch_lag_interceptor():
-    """The production Worker(...) installs the dispatch-lag interceptor."""
+    """Every production Worker(...) installs the dispatch-lag and archive-identity interceptors."""
+    from helpers.activity_dispatch import ActivityDispatchLagInterceptor
+    from helpers.archive_identity import ArchiveIdentityInterceptor, production_worker_interceptors
+
     tree = _worker_tree()
+    workers = 0
     for node in ast.walk(tree):
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "Worker":
+            workers += 1
             kw = next((k for k in node.keywords if k.arg == "interceptors"), None)
             assert kw is not None, "Worker(...) must pass interceptors="
             names = {n.func.id for n in ast.walk(kw.value) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
-            assert "ActivityDispatchLagInterceptor" in names, names
-            return
-    raise AssertionError("Worker(...) call not found")
+            assert "production_worker_interceptors" in names, names
+    assert workers >= 2, "production and validation Worker(...) calls not found"
+    kinds = {type(interceptor) for interceptor in production_worker_interceptors()}
+    assert {ActivityDispatchLagInterceptor, ArchiveIdentityInterceptor} <= kinds, kinds
 
 
 def test_activity_admission_closes_on_cpu_pressure():

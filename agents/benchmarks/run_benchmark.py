@@ -2417,6 +2417,20 @@ _owned_cleanup_user_id: contextvars.ContextVar[str | None] = contextvars.Context
 
 
 _task_root_custody: contextvars.ContextVar[Optional[dict]] = contextvars.ContextVar("benchmark_task_root_custody", default=None)
+# Root id pre-assigned before creation (cache warmup archives under it first);
+# task-local so concurrent copies of one task never share it.
+_preassigned_root_agent_id: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
+    "benchmark_preassigned_root_agent_id", default=None
+)
+
+
+@contextmanager
+def _preassigned_root(root_agent_id: Optional[str]) -> Iterator[None]:
+    token = _preassigned_root_agent_id.set(root_agent_id)
+    try:
+        yield
+    finally:
+        _preassigned_root_agent_id.reset(token)
 
 
 def _register_task_root(task_name: str, root_id: str, role: str) -> Optional[dict]:
@@ -3143,8 +3157,14 @@ async def _resolve_benchmark_project_id(base_url: str, name: str) -> str:
 async def create_agent(
     base_url: str,
     task: BenchmarkTask,
+    *,
+    agent_id: Optional[str] = None,
 ) -> str:
-    """Create a benchmark agent. Returns agent_id."""
+    """Create a benchmark agent. Returns agent_id.
+
+    `agent_id` pre-assigns the root id when harness work (the prompt-cache
+    warmup) already archived records under it before the root exists.
+    """
     # A lost create response can still have allocated a root, so custody must stop
     # proving zero allocation before the POST is issued.
     _mark_task_root_creation_attempted()
@@ -3192,7 +3212,7 @@ async def create_agent(
     # The root's first simulated boundary is often the deferred startup SMS.
     # Establish the benchmark world before creating the agent so that boundary
     # cannot win the session-creation race with its generic runtime seed.
-    expected_agent_id: str | None = None
+    expected_agent_id: str | None = agent_id or _preassigned_root_agent_id.get()
     if task.wmh_initial_state is not None:
         if world_model_mode != "simulate":
             raise ValueError(f"{task.name}: wmh_initial_state requires simulate mode")
@@ -3203,7 +3223,7 @@ async def create_agent(
         if not base or not model_name:
             raise ValueError(f"{task.name}: WMH_BASE_URL and WMH_MODEL_NAME are required to seed the world")
         validate_wmh_initial_state(task.wmh_initial_state, task.name)
-        expected_agent_id = str(uuid.uuid4())
+        expected_agent_id = expected_agent_id or str(uuid.uuid4())
         seed_state = {
             "structured": {
                 **task.wmh_initial_state["structured"],
@@ -3228,6 +3248,8 @@ async def create_agent(
             "engine": os.environ.get("WMH_ENGINE", "legacy"),
         }
         print(f"    🌍 WHM initial state seeded before agent start: {session_id[:12]}...")
+    if expected_agent_id is not None:
+        body["agent_id"] = expected_agent_id
 
     # A task may run its root agent inside one of the user's Projects: its code
     # agents then start in that project's repo checkout (code-agent-rose-repo).
@@ -3266,7 +3288,7 @@ async def create_agent(
         agent_id = data["agent_id"]
         if expected_agent_id is not None and agent_id != expected_agent_id:
             raise RuntimeError(f"{task.name}: backend returned agent_id {agent_id}, expected {expected_agent_id}")
-        if expected_agent_id is not None:
+        if expected_agent_id is not None and task.wmh_initial_state is not None:
             task._wmh_agent_admission = {"root_agent_id": agent_id, "creation_confirmed": True}
         if source_override == "SMS":
             if not _is_local_base_url(base_url):
@@ -12564,14 +12586,17 @@ async def _hydrate_display_artifacts(data: dict, base_url: str) -> None:
 
     async def transcribe_image(raw: bytes, mime: str) -> str:
         from helpers.llm import call_llm
+        from helpers.tracing import archive_scope
 
-        result = await call_llm(
-            messages=display_check.transcription_messages(raw, mime),
-            model=DISPLAY_TRANSCRIBE_MODEL,
-            temperature=0.0,
-            max_tokens=1200,
-            call_site="benchmark_display_transcribe",
-        )
+        # The transcription is part of grading this run: archive it in its root bundle.
+        with archive_scope(root_id or None):
+            result = await call_llm(
+                messages=display_check.transcription_messages(raw, mime),
+                model=DISPLAY_TRANSCRIBE_MODEL,
+                temperature=0.0,
+                max_tokens=1200,
+                call_site="benchmark_display_transcribe",
+            )
         content = result.get("content") if isinstance(result, dict) else None
         return content if isinstance(content, str) else str(content or "")
 
@@ -15292,7 +15317,12 @@ def _run_user_id_override_for_task(task: BenchmarkTask, base_url: str) -> Option
     return run_user_id_override
 
 
-async def _warm_cache_gated_root(base_url: str, task: BenchmarkTask) -> Optional[dict]:
+def _cache_warmup_root_id(task: BenchmarkTask) -> Optional[str]:
+    """Pre-assigned root id for a cache-gated task, so its warmup call is archived in that root's bundle."""
+    return str(uuid.uuid4()) if PER_TASK_CACHE_HIT_RATCHET.get(task.name, 0) > 0 else None
+
+
+async def _warm_cache_gated_root(base_url: str, task: BenchmarkTask, root_agent_id: Optional[str] = None) -> Optional[dict]:
     """Prime the root's static prompt prefix for a cache-gated task (benchmarks.cache_warmup).
 
     Recorded on the result only; the measured prompt-cache share never includes it.
@@ -15300,18 +15330,20 @@ async def _warm_cache_gated_root(base_url: str, task: BenchmarkTask) -> Optional
     if PER_TASK_CACHE_HIT_RATCHET.get(task.name, 0) <= 0:
         return None
     from benchmarks.cache_warmup import warm_root_static_prefix
+    from helpers.tracing import archive_scope
 
     user_id = _current_benchmark_user_id()
     model_override = (os.environ.get("BENCHMARK_MODEL") or "").strip()
     model = model_override if model_override and task.demo_cache != "on" else task.model
-    warmup = await warm_root_static_prefix(
-        base_url=base_url,
-        headers={"X-API-Key": API_KEY or "", "X-User-Id": user_id},
-        user_id=user_id,
-        goal=_benchmark_goal_for_task(task, base_url),
-        start_phase=task.start_phase,
-        model=model or None,
-    )
+    with archive_scope(root_agent_id):
+        warmup = await warm_root_static_prefix(
+            base_url=base_url,
+            headers={"X-API-Key": API_KEY or "", "X-User-Id": user_id},
+            user_id=user_id,
+            goal=_benchmark_goal_for_task(task, base_url),
+            start_phase=task.start_phase,
+            model=model or None,
+        )
     print(f"    🔥 prompt-cache warmup for {task.name}: {json.dumps(warmup, sort_keys=True)[:400]}")
     return warmup
 
@@ -15667,8 +15699,11 @@ async def _run_single_task_as_run_user(
         if custody is not None:
             custody["graded_creation"] = "unknown"
         _mark_task_root_creation_attempted()
-        prompt_cache_warmup = await _warm_cache_gated_root(base_url, task)
-        agent_id = await create_agent(base_url, task)
+        warmup_root_id = _cache_warmup_root_id(task)
+        prompt_cache_warmup = await _warm_cache_gated_root(base_url, task, warmup_root_id)
+        # Cache-gated tasks create the root id their warmup archived under.
+        with _preassigned_root(warmup_root_id):
+            agent_id = await create_agent(base_url, task)
         _register_task_root(task.name, agent_id, "graded")
         execution_started_at = asyncio.get_running_loop().time()
         kill_fixture = None

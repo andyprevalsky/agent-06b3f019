@@ -135,8 +135,8 @@ from helpers import (
     summarize_tool_result,
     update_agent_status,
 )
-from helpers.activity_dispatch import ActivityDispatchLagInterceptor
 from helpers.agent_graph import send_agent_graph_message_activity
+from helpers.archive_identity import production_worker_interceptors
 from helpers.attachments import fetch_parent_attachments_activity, resolve_attachments_activity
 
 # Helper activities (workflow orchestration, not exposed to LLM)
@@ -1702,6 +1702,7 @@ async def main():
             workflows=[AgentWorkflow, *COMPANION_WORKFLOWS],
             activities=registered_activities,
             workflow_runner=production_workflow_runner(),
+            interceptors=production_worker_interceptors(),
         )
         set_worker_status(True, phase="standby", build_id=build_id)
         logger.info(
@@ -1775,8 +1776,9 @@ async def main():
         workflow_runner=production_workflow_runner(),
         # Stop polling on shutdown; let in-flight activities (incl. 30m browser) finish.
         graceful_shutdown_timeout=timedelta(seconds=shutdown_grace_seconds),
-        # Attribute a timed-out attempt whose body never ran to the worker.
-        interceptors=[ActivityDispatchLagInterceptor()],
+        # Bind each activity to its workflow's agent/root for archive records,
+        # and attribute a timed-out attempt whose body never ran to the worker.
+        interceptors=production_worker_interceptors(),
     )
 
     logger.info(
