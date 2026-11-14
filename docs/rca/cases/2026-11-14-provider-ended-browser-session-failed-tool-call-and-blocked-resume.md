@@ -68,9 +68,16 @@ Tilion shutdown cause: provider-side and unobservable from Rose. CDP close code 
 - Backend resume (`browserSessionResume.ts`, `browser/providerEndedSource.ts`): a provider-confirmed ended source restores its last durable checkpoint, or the baseline. That covers an ACTIVE row whose health is ended, and a PAUSED row without a checkpoint whose end is re-confirmed through health. The response carries `provider_session_lost: {restored_checkpoint_revision}` and a warning is logged. Unknown health and live sources still refuse before any allocation.
 - Agents resume: when the response carries `provider_session_lost`, the activity posts a FINISHED `supervisor_recovery` action, "Browser session replaced", so the loss is visible and never silent. This answers the 2026-11-05 note that a baseline restore must never be silent or claim continuity.
 
-Same-class sites: initSession re-init, auth-assistance resume and the root browser all go through `resumeBrowserSession`, so all are covered. Deliberately not covered:
-- A provider end that raises inside an action or observation. That action may have partly executed, and a write could be repeated on replay, so it still fails the tool call loudly.
-- An end before an invocation's first step. The existing drain gate (`iteration > resume_step_count`) prevents yield loops there.
+CodeRabbit (PR #2065) follow-ups:
+- The provider-loss check now runs at every step boundary, including an invocation's first. The recovery budget bounds it, not the drain step gate.
+- The spent budget is part of the shared pause snapshot (`_pause_continuity_state`), so a user pause and continue cannot reset it.
+- After this task's own provider-lost yield, the resumed activity reports the replacement even when an older checkpoint was restored, a case the backend cannot prove once task-info paused the row.
+
+Regression `test_browser_provider_session_recovery_covers_first_step_snapshot_and_checkpointed_restore` fails on the earlier handler ("an ended provider session must not be stepped").
+
+Deferred: another caller (for example a planner re-spawn) resuming a row that task-info already recorded ended while it held a checkpoint still restores that checkpoint without `provider_session_lost`. That predates this fix. Reporting it needs persisted provider-end provenance, which means a schema column, a migration and a republished seed fixture.
+
+Same-class sites: initSession re-init, auth-assistance resume and the root browser all go through `resumeBrowserSession`, so all are covered. Deliberately not covered: a provider end that raises inside an action or observation. That action may have partly executed, and a write could be repeated on replay, so it still fails the tool call loudly.
 
 Evidence that the incident's end was confirmed: base resume reaches the missing-checkpoint throw only on a PAUSED or reconciled row, and only `recordEndedLogicalBrowser` (confirmed end) sets that state without a checkpoint. A probe of Tilion today returns 404 (mapped to `deleted`) for the session.
 

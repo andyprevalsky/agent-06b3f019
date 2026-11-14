@@ -30325,7 +30325,7 @@ async def test_private_browser_pause_urls_use_protected_continuity(_lifecycle_pr
     assert not failures, f"credential-bearing URL escaped activity pause boundary: {failures}"
 
 
-async def _resume_drained_browser_task_on_reused_session(ttl_ms, on_step, *, activity_budget=None, activity_elapsed=None, resume_state=None, replacement=None):
+async def _resume_drained_browser_task_on_reused_session(ttl_ms, on_step, *, activity_budget=None, activity_elapsed=None, resume_state=None, replacement=None, extra_patches=()):
     """Run a drained task resumed at step 3 on the live Steel session the backend let it reuse."""
     import dataclasses
     from contextlib import ExitStack
@@ -30417,6 +30417,7 @@ async def _resume_drained_browser_task_on_reused_session(ttl_ms, on_step, *, act
             "playwright.async_api.async_playwright", return_value=_FakeAsyncPlaywright(fake_playwright)
         ),
         patch("domains.spawn_browser_agent_v3.handler.live_tab_looks_challenged", AsyncMock(return_value=False)),
+        *extra_patches,
     ]
 
     with ExitStack() as stack:
@@ -30628,6 +30629,78 @@ async def test_browser_task_recovers_only_confirmed_provider_ends_within_budget(
     assert notices[0]["title"] == "Browser session replaced", notices[0]
     assert notices[0]["extra_metadata"]["restored_checkpoint_revision"] == 0, notices[0]
     assert result["session_id"] == "session-2", result
+
+
+async def test_browser_provider_session_recovery_covers_first_step_snapshot_and_checkpointed_restore():
+    """CodeRabbit PR #2065 follow-ups on the provider-ended recovery.
+
+    The provider can end the session before an invocation's first step; the
+    spent budget must live in the shared pause snapshot so no pause path resets
+    it; and a restore from an older checkpoint (which the backend cannot prove
+    lost once task-info paused the row) is still reported after this task's own
+    provider-lost yield, while an ordinary drain resume reports nothing.
+    """
+    from domains.spawn_browser_agent_v3 import handler
+    from domains.spawn_browser_agent_v3.config import (
+        BROWSER_DRAIN_YIELD_STATUS,
+        BROWSER_PROVIDER_SESSION_LOST,
+        BROWSER_SESSION_MIN_REMAINING_SECONDS,
+    )
+
+    ttl_ms = (BROWSER_SESSION_MIN_REMAINING_SECONDS + 600) * 1000
+    snapshots = []
+    real_persist = handler.persist_resume_context
+
+    async def capture_snapshot(**kwargs):
+        snapshots.append(kwargs["state"])
+        return await real_persist(**kwargs)
+
+    async def never_steps(env):
+        raise AssertionError("an ended provider session must not be stepped")
+
+    result, llm_step, resume_mock, _close = await _resume_drained_browser_task_on_reused_session(
+        ttl_ms,
+        never_steps,
+        resume_state={"provider_session_recoveries": 1},
+        extra_patches=(
+            patch.object(handler, "_provider_lost_browser_session", AsyncMock(return_value=True)),
+            patch.object(handler, "persist_resume_context", capture_snapshot),
+        ),
+    )
+    assert llm_step.await_count == 0, "the first boundary of an invocation is checked too"
+    assert result["status"] == BROWSER_DRAIN_YIELD_STATUS, result
+    assert result["yield_reason"] == BROWSER_PROVIDER_SESSION_LOST, result
+    assert result["step_count"] == 3 and result["provider_session_recoveries"] == 2, result
+    assert snapshots and snapshots[-1]["provider_session_recoveries"] == 2, "every pause snapshot keeps the budget"
+    resumed = handler._drain_resume_state(result, None)
+    assert resumed["provider_session_recoveries"] == 2, resumed
+    assert resumed["resumed_after_provider_session_lost"] is True, resumed
+    resume_mock.assert_not_awaited()
+
+    async def stop(env):
+        env.worker_shutdown()
+
+    for resume_state, expected_notices in (
+        ({"resumed_after_provider_session_lost": True, "provider_session_recoveries": 1}, 1),
+        ({}, 0),
+    ):
+        holder = {}
+
+        async def capture(env):
+            holder["env"] = env
+            await stop(env)
+
+        result, _llm, resume_mock, _close = await _resume_drained_browser_task_on_reused_session(
+            ttl_ms, capture, resume_state=resume_state, replacement={"session_id": "session-2"}
+        )
+        resume_mock.assert_awaited_once()
+        notices = [
+            call.kwargs
+            for call in holder["env"].save_action_mock.await_args_list
+            if (call.kwargs.get("extra_metadata") or {}).get("supervisor_reason") == BROWSER_PROVIDER_SESSION_LOST
+        ]
+        assert len(notices) == expected_notices, (resume_state, notices)
+        assert result["session_id"] == "session-2", result
 
 
 async def test_browser_task_keeps_stepping_on_a_reused_session_with_time_left():

@@ -7037,6 +7037,7 @@ _BROWSER_RESUME_CONTINUITY_FIELDS = (
     "schema_user_instruction_count",
     "browser_output_schema",
     "agent_inbox_state",
+    "provider_session_recoveries",
 )
 
 
@@ -7140,6 +7141,10 @@ def _drain_resume_state(result: Dict[str, Any], prior_resume: Optional[Dict[str,
         "provider_session_recoveries": result.get("provider_session_recoveries", 0),
         **_payment_resume_fields(prior),
     }
+    if result.get("yield_reason") == BROWSER_PROVIDER_SESSION_LOST:
+        # The next invocation reports the replacement even when the restored
+        # checkpoint left the backend unable to prove the loss itself.
+        resume_state["resumed_after_provider_session_lost"] = True
     if prior.get("generation_yield") is False or result.get("yield_reason") == GENERATION_SUPERSEDED:
         resume_state["generation_yield"] = False
     _copy_browser_resume_continuity_fields(result, resume_state)
@@ -8529,6 +8534,7 @@ async def _spawn_browser_agent_activity_v3_real(
         state = _pause_continuity_state_without_inbox(approval_result)
         if agent_inbox is not None:
             state["agent_inbox_state"] = agent_inbox.state()
+        state["provider_session_recoveries"] = provider_session_recoveries
         return state
 
     def _pause_continuity_state_without_inbox(approval_result: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -8703,6 +8709,8 @@ async def _spawn_browser_agent_activity_v3_real(
     browser_url = None
     current_url = ""
     current_model = None
+    # Replacements already taken for provider-ended sessions (this task, every resume path).
+    provider_session_recoveries = int((write_lock_resume_state or {}).get("provider_session_recoveries") or 0)
     latest_structured_response: Optional[Dict[str, Any]] = None
     config = load_config()
     start_time = safe_time()
@@ -9262,7 +9270,7 @@ async def _spawn_browser_agent_activity_v3_real(
                     session_info["resume_mode"] = "new_steel_session_after_unavailable"
                     session_info["same_session_unavailable_reason"] = unavailable_reason
             provider_session_lost = session_info.get("provider_session_lost")
-            if provider_session_lost:
+            if provider_session_lost or (write_lock_resume_state or {}).get("resumed_after_provider_session_lost"):
                 # The backend restored the last durable state after the provider ended
                 # the previous session; say so instead of implying continuity.
                 logger.warning(
@@ -9287,7 +9295,7 @@ async def _spawn_browser_agent_activity_v3_real(
                     extra_metadata={
                         "supervisor_reason": BROWSER_PROVIDER_SESSION_LOST,
                         "parent_tool_call_id": tool_call_id,
-                        **provider_session_lost,
+                        **(provider_session_lost or {}),
                     },
                 )
             session_id = session_info.get("session_id")
@@ -10641,7 +10649,6 @@ async def _spawn_browser_agent_activity_v3_real(
         consecutive_budget_free = 0
         consecutive_keystroke_free = 0
         allow_generation_yield = (write_lock_resume_state or {}).get("generation_yield") is not False
-        provider_session_recoveries = int((write_lock_resume_state or {}).get("provider_session_recoveries") or 0)
         drain_checkpoint_failed = False
         step_timer = StepPhaseTimer(agent_id=agent_id, task_id=task_id)
         tab_focus_cache = TabFocusCache()
@@ -10658,82 +10665,90 @@ async def _spawn_browser_agent_activity_v3_real(
             # replacement session (the reused one is about to be released)
             # instead of dying mid-step. Every invocation runs at least one
             # step before it may yield again.
+            drain_reason = None
             if iteration > resume_step_count and not drain_checkpoint_failed:
                 drain_reason = await activity_drain_reason(allow_generation_handoff=allow_generation_yield)
                 if not drain_reason and _session_expiring(reused_session_deadline, session_id):
                     drain_reason = BROWSER_SESSION_EXPIRING
                 if not drain_reason and _activity_deadline_near():
                     drain_reason = BROWSER_ACTIVITY_DEADLINE
-                if (
-                    not drain_reason
-                    and provider_session_recoveries < BROWSER_PROVIDER_SESSION_MAX_RECOVERIES
-                    and await _provider_lost_browser_session(config, task_id, session_id, playwright_browser)
-                ):
-                    drain_reason = BROWSER_PROVIDER_SESSION_LOST
-                if drain_reason:
-                    try:
-                        drain_continuity = await persist_resume_context(
-                            agent_id=agent_id,
-                            task_id=task_id,
-                            force_private=bool(action_history.secret_redaction_state().get("secret_redaction_refs")),
-                            state=_pause_continuity_state(),
-                        )
-                    except Exception as checkpoint_error:
-                        drain_checkpoint_failed = True
-                        logger.warning(
-                            "Browser drain checkpoint failed; continuing on this worker",
-                            agent_id=agent_id,
-                            task_id=task_id,
-                            drain_reason=drain_reason,
-                            error=extract_error_message(checkpoint_error),
-                        )
-                    else:
-                        logger.info(
-                            "Browser task yielding at step boundary",
-                            agent_id=agent_id,
-                            task_id=task_id,
-                            session_id=session_id,
-                            drain_reason=drain_reason,
-                            step_count=iteration,
-                        )
-                        if dom_service:
-                            try:
-                                await disconnect_browser_after_passkey_capture(dom_service, record_passkey_usage_once)
-                            except Exception as e:
-                                logger.warning(f"Failed to disconnect browser before drain yield: {e}")
-                            _tilion_leave_session()
-                            dom_service = None
-                        browser_task_paused_for_resume = True
-                        step_timer.finish()
-                        return _visible_activity_result(
-                            {
-                                "status": BROWSER_DRAIN_YIELD_STATUS,
-                                "yield_reason": drain_reason,
-                                "provider_session_recoveries": provider_session_recoveries
-                                + int(drain_reason == BROWSER_PROVIDER_SESSION_LOST),
-                                "current_url": current_url,
-                                "write_lock_approvals": write_lock_approvals,
-                                "step_count": iteration,
-                                "session_id": session_id,
-                                "cdp_url": cdp_url,
-                                "task_id": task_id,
-                                "browser_url": redact_url_secrets(browser_url),
-                                "auth_realm": auth_realm,
-                                "recorded_passkey_credential_ids": sorted(recorded_passkey_credential_ids),
-                                "usage_items": build_usage_items(
-                                    total_input_tokens,
-                                    total_output_tokens,
-                                    model_pricing,
-                                    (safe_time() - start_time) * 1000,
-                                    usage_by_model,
-                                    pricing_pool=browser_pool,
-                                    fast_mode_cache_enabled=bool(fast_mode_cache_enabled),
-                                    provider=browser_session_metadata.get("provider"),
-                                    **_tilion_usage_kwargs(),
-                                ),
-                                **drain_continuity,
-                            }
-                        )
+            # A provider-ended session is checked at every boundary, including an
+            # invocation's first: the recovery budget, not the step gate, bounds it.
+            if (
+                not drain_reason
+                and not drain_checkpoint_failed
+                and provider_session_recoveries < BROWSER_PROVIDER_SESSION_MAX_RECOVERIES
+                and await _provider_lost_browser_session(config, task_id, session_id, playwright_browser)
+            ):
+                drain_reason = BROWSER_PROVIDER_SESSION_LOST
+            if drain_reason:
+                if drain_reason == BROWSER_PROVIDER_SESSION_LOST:
+                    # Counted before the snapshot so every resume path restores the spent budget.
+                    provider_session_recoveries += 1
+                try:
+                    drain_continuity = await persist_resume_context(
+                        agent_id=agent_id,
+                        task_id=task_id,
+                        force_private=bool(action_history.secret_redaction_state().get("secret_redaction_refs")),
+                        state=_pause_continuity_state(),
+                    )
+                except Exception as checkpoint_error:
+                    drain_checkpoint_failed = True
+                    if drain_reason == BROWSER_PROVIDER_SESSION_LOST:
+                        provider_session_recoveries -= 1
+                    logger.warning(
+                        "Browser drain checkpoint failed; continuing on this worker",
+                        agent_id=agent_id,
+                        task_id=task_id,
+                        drain_reason=drain_reason,
+                        error=extract_error_message(checkpoint_error),
+                    )
+                else:
+                    logger.info(
+                        "Browser task yielding at step boundary",
+                        agent_id=agent_id,
+                        task_id=task_id,
+                        session_id=session_id,
+                        drain_reason=drain_reason,
+                        step_count=iteration,
+                    )
+                    if dom_service:
+                        try:
+                            await disconnect_browser_after_passkey_capture(dom_service, record_passkey_usage_once)
+                        except Exception as e:
+                            logger.warning(f"Failed to disconnect browser before drain yield: {e}")
+                        _tilion_leave_session()
+                        dom_service = None
+                    browser_task_paused_for_resume = True
+                    step_timer.finish()
+                    return _visible_activity_result(
+                        {
+                            "status": BROWSER_DRAIN_YIELD_STATUS,
+                            "yield_reason": drain_reason,
+                            "provider_session_recoveries": provider_session_recoveries,
+                            "current_url": current_url,
+                            "write_lock_approvals": write_lock_approvals,
+                            "step_count": iteration,
+                            "session_id": session_id,
+                            "cdp_url": cdp_url,
+                            "task_id": task_id,
+                            "browser_url": redact_url_secrets(browser_url),
+                            "auth_realm": auth_realm,
+                            "recorded_passkey_credential_ids": sorted(recorded_passkey_credential_ids),
+                            "usage_items": build_usage_items(
+                                total_input_tokens,
+                                total_output_tokens,
+                                model_pricing,
+                                (safe_time() - start_time) * 1000,
+                                usage_by_model,
+                                pricing_pool=browser_pool,
+                                fast_mode_cache_enabled=bool(fast_mode_cache_enabled),
+                                provider=browser_session_metadata.get("provider"),
+                                **_tilion_usage_kwargs(),
+                            ),
+                            **drain_continuity,
+                        }
+                    )
             iteration += 1
             step_timer.start_step(iteration)
             browser_activity_checkpoint(f"Step {iteration}")
