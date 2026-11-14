@@ -37,5 +37,5 @@ Steps:
    - After resolving, stage and commit the merge
 5. At the database's safe boundary, resync it from production by running `bash scripts/setup-db.sh`
    - This refreshes the workspace Postgres schema and synced production data, including credentials that local smoke/deploy tests read from the DB.
-   - If `CONDUCTOR_PORT` or `CONDUCTOR_WORKSPACE_NAME` is missing, stop and tell the user `/sync` must be run from a Conductor workspace.
+   - If `CONDUCTOR_PORT` or `CONDUCTOR_WORKSPACE_NAME` is missing, `source .cloud-env` (Linux devboxes) or export them as `docs/setup-mac.md` describes, then rerun.
 6. Confirm the result to the user (current branch name, number of new commits pulled in, any conflicts resolved, whether local main was updated, whether the DB resync completed). During a deploy, also state which validation remained valid, which inputs changed and which checks actually require execution on the merged source. A pending database refresh is a pending step, not a reason to idle unrelated work.

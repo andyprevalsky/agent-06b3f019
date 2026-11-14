@@ -1502,6 +1502,146 @@ fi
 [ "$(cat "$slow_exit_reads")" -gt 2 ] ||
   fail "zero-grace tree cleanup did not re-observe the SIGKILLed birth"
 
+# Exact native zombies must not consume TERM grace; live threads and unknown identities still do.
+python3 - "$HELPER_SRC" <<'PY_ZOMBIE_GRACE' || fail "zombie TERM grace controls failed"
+import ctypes,json,os,pathlib,signal,subprocess,sys,tempfile,time
+HELPER=pathlib.Path(sys.argv[1]).resolve()
+if sys.platform!='linux':
+ print('SKIP: Linux /proc/subreaper grace control; existing platform teardown tests remain active')
+ raise SystemExit(0)
+sys.path.insert(0,str(HELPER.parent))
+from condition_wait import wait_until
+assert ctypes.CDLL(None,use_errno=True).prctl(36,1,0,0,0)==0
+ROOT=r'''
+import ctypes,json,os,pathlib,platform,signal,sys,threading,time
+out=pathlib.Path(sys.argv[1]); mode=sys.argv[2]
+sys.path.insert(0,sys.argv[3])
+from condition_wait import wait_until
+HEARTBEAT_INTERVAL_SECONDS=.02  # Deliberate live-thread writer workload, not synchronization.
+if mode in ('thread','globignore'):
+ signal.signal(signal.SIGTERM,signal.SIG_IGN)
+ def run():
+  while True:out.with_suffix('.heartbeat').write_text(str(time.monotonic()));time.sleep(HEARTBEAT_INTERVAL_SECONDS)
+ threading.Thread(target=run).start();out.write_text(json.dumps({'root':os.getpid(),'children':[]}))
+ number={'x86_64':60,'aarch64':93}.get(platform.machine())
+ if number is None:raise RuntimeError('unsupported native thread-exit architecture')
+ ctypes.CDLL(None).syscall(number,0)
+p=os.fork()
+if p==0:os._exit(0)
+children=[p]
+if mode=='mixed':
+ p=os.fork()
+ if p==0:
+  signal.signal(signal.SIGTERM,signal.SIG_IGN)
+  while True:signal.pause()
+ children.append(p)
+def zombie_ready():
+ s=pathlib.Path('/proc',str(children[0]),'stat').read_text();f=s[s.rfind(')')+2:].split()
+ return f[0]=='Z'
+wait_until(zombie_ready,timeout=5,description='owned child native zombie')
+out.write_text(json.dumps({'root':os.getpid(),'children':children}))
+while True:signal.pause()
+'''
+DRIVER=r'''
+set -uo pipefail
+source "$1"
+base="$2"; mode="$3"
+python3 "$base/root.py" "$base/ready.json" "$mode" "$(dirname "$1")" &
+root=$!
+python3 "$base/wait-ready.py" "$base" "$root" "$mode" "$(dirname "$1")" || exit 91
+# Fault only the observation API used by the new grace decision and existing
+# final verification. Native birth matcher and signal calls are untouched.
+if [[ "$mode" = unknown || "$mode" = changed || "$mode" = race ]]; then
+ eval "$(declare -f cloudbench_pid_observation_like | sed '1s/cloudbench_pid_observation_like/actual_observation/')"
+ printf '0\n' > "$base/reads"
+ cloudbench_pid_observation_like() {
+  local n value
+  n=$(cat "$base/reads");n=$((n+1));printf '%s\n' "$n" > "$base/reads"
+  case "$mode" in
+   unknown) return 1 ;;
+   changed) value="$(actual_observation "$@")"; printf 'proc-start:changed:1\t%s\n' "${value##*$'\t'}" ;;
+   race)
+    if [ "$n" = 1 ]; then actual_observation "$@"
+    elif [ "$n" = 2 ]; then value="$(actual_observation "$@")"; printf '%s\tR\n' "${value%$'\t'*}"
+    else actual_observation "$@"; fi ;;
+  esac
+ }
+fi
+if [ "$mode" = globignore ]; then
+ GLOBIGNORE=""
+ for entry in /proc/"$root"/task/*; do
+  [ "$entry" = "/proc/$root/task/$root" ] || GLOBIGNORE="${GLOBIGNORE:+$GLOBIGNORE:}$entry"
+ done
+ export GLOBIGNORE
+fi
+if [ "$mode" = noglob ]; then set -f; shopt -s failglob; fi
+if [ "$mode" = enum_error ]; then
+ python3() {
+  if [ "$#" = 2 ] && [ "$1" = - ]; then
+   printf 'denied\n' >> "$base/enumeration-denied"
+   return 1
+  fi
+  command python3 "$@"
+ }
+fi
+sleep() { if [ "${1:-}" = 1 ]; then printf '1\n' >> "$base/real-grace-sleeps"; fi; command sleep "$@"; }
+cloudbench_terminate_tree_and_wait 2 "$root"
+'''
+READY="import json,pathlib,sys\nsys.path.insert(0,sys.argv[4])\nfrom condition_wait import wait_until\nbase=pathlib.Path(sys.argv[1]);pid=sys.argv[2];mode=sys.argv[3]\ndef ready():\n if not (base/'ready.json').is_file():return False\n if mode not in ('thread','globignore'):return True\n raw=pathlib.Path('/proc',pid,'stat').read_text();f=raw[raw.rfind(')')+2:].split()\n return f[0]=='Z'\nwait_until(ready,timeout=10,description='owned fixture process ready')\n"
+results=[]
+for mode in ['zombie','mixed','thread','unknown','changed','race','globignore','enum_error','noglob']:
+ with tempfile.TemporaryDirectory(prefix='zombie-grace-control-') as temporary:
+  base=pathlib.Path(temporary);(base/'root.py').write_text(ROOT);(base/'wait-ready.py').write_text(READY)
+  started=time.monotonic();p=subprocess.Popen(['bash','-c',DRIVER,'control',str(HELPER),str(base),mode],stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+  native=[];identity=None
+  try:
+   def observe():
+    global identity
+    ready=base/'ready.json'
+    if ready.exists():
+     try:identity=json.loads(ready.read_text())
+     except ValueError:pass
+    if identity:
+     for pid in [identity['root'],*identity['children']]:
+      try:
+       raw=pathlib.Path('/proc',str(pid),'stat').read_text();f=raw[raw.rfind(')')+2:].split()
+       row={'pid':pid,'birth':f[19],'state':f[0],'tasks':len(list(pathlib.Path('/proc',str(pid),'task').iterdir()))}
+       if row not in native:native.append(row)
+      except FileNotFoundError:pass
+    return p.poll() is not None
+   wait_until(observe,timeout=14,description='owned teardown command returned')
+   stdout,stderr=p.communicate(timeout=1);elapsed=time.monotonic()-started
+   assert identity
+   if mode=='unknown':assert p.returncode==1 and 'unknown after SIGKILL' in stderr,(p.returncode,stderr)
+   else:assert p.returncode==0,(mode,p.returncode,stderr)
+   sleeps=(base/'real-grace-sleeps').read_text().splitlines() if (base/'real-grace-sleeps').exists() else []
+   if mode in ('zombie','noglob'):assert not sleeps,('zombie grace not eliminated',len(sleeps))
+   if mode in ('mixed','thread','changed','race','globignore','enum_error'):assert sleeps,('live/changed prematurely accepted',mode)
+   if mode in ('thread','globignore'):assert any(r['pid']==identity['root'] and r['state']=='Z' and r['tasks']>1 for r in native),native
+   if mode=='enum_error':assert (base/'enumeration-denied').exists()
+   # Every descendant belongs to this isolated native subreaper. Join only the
+   # exact PIDs published by our own root; never discover/signal foreign work.
+   reaped=[]
+   for pid in [identity['root'],*identity['children']]:
+    try:
+     got,status=os.waitpid(pid,os.WNOHANG)
+     if got==0:
+      os.kill(pid,signal.SIGKILL);got,status=os.waitpid(pid,0)
+     reaped.append(got)
+    except ChildProcessError:pass
+    assert not pathlib.Path('/proc',str(pid)).exists(),('own PID remains',pid)
+   results.append({'mode':mode,'exit':p.returncode,'seconds':elapsed,'enumeration_denials':len((base/'enumeration-denied').read_text().splitlines()) if (base/'enumeration-denied').exists() else 0,'real_grace_sleeps':len(sleeps),'native_observations':native,'reaped':reaped,'remaining':[]})
+  finally:
+   if p.poll() is None:p.kill();p.wait()
+   if identity:
+    for owned_pid in [identity['root'],*identity['children']]:
+     try:
+      joined,_=os.waitpid(owned_pid,os.WNOHANG)
+      if joined==0:os.kill(owned_pid,signal.SIGKILL);os.waitpid(owned_pid,0)
+     except (ChildProcessError,ProcessLookupError):pass
+print(json.dumps({'helper':str(HELPER),'controls':results,'all_passed':True},sort_keys=True))
+PY_ZOMBIE_GRACE
+
 # A local bind collision is not a remote/DNS readiness failure. The proxy
 # launcher must classify it immediately so its caller can abandon the poisoned
 # lease and choose another port instead of retrying that port until the barrier

@@ -847,6 +847,47 @@ class RestQuota(unittest.TestCase):
         with self.assertRaises(gh.urllib.error.HTTPError):
             self.run_request(client, [self.limited(reset)], now=1_000_100.0)
 
+    def test_rate_limited_liveness_keeps_polling_the_r2_result(self):
+        # PR1881: the worker finished while a synchronous REST quota wait consumed
+        # the remaining gate deadline, hiding its already-published R2 result.
+        clock, pauses, calls = [1_000_000.0], [], []
+        start = clock[0]
+        done = {'run_id': 42, 'objects': {}, 'at': start + 700}
+        owner = {'run_id': 42, 'url': 'https://github.com/org/repo/actions/runs/42'}
+        outer = self
+
+        class Channel:
+            def get(self, name, leaf):
+                if leaf == 'started.json':
+                    return json.dumps(owner).encode()
+                if leaf == 'done.json' and clock[0] >= start + 700:
+                    return json.dumps(done).encode()
+                return None
+
+        class Opener:
+            def open(self, request, timeout):
+                calls.append(request.full_url)
+                if len(calls) == 1:
+                    raise outer.limited({'X-RateLimit-Reset': str(start + 1606)})
+                raise outer.limited({}, b'{"message": "Forbidden"}')
+
+        def wait(seconds):
+            pauses.append(seconds)
+            clock[0] += seconds
+
+        client = gh.GitHub('unused', 'org/repo', deadline=start + 1620)
+        with patch.object(gh.time, 'time', side_effect=lambda: clock[0]), \
+             patch.object(gh.STOP, 'wait', side_effect=wait), \
+             patch.object(gh.urllib.request, 'build_opener', return_value=Opener()), \
+             redirect_stdout(io.StringIO()):
+            result = gh.watch_channel(client, Channel(), 'head', 'tag', start + 1620, start)
+        self.assertTrue(calls, 'exercise the actual REST liveness failure boundary')
+        self.assertEqual('channel', result['kind'])
+        self.assertEqual(done, result['done'])
+        self.assertLess(clock[0], start + 1620)
+        self.assertLessEqual(max(pauses), gh.CHANNEL_POLL_SECONDS)
+        self.assertEqual(0, client.rate_limited_seconds)
+
     def test_the_cancel_poll_is_conditional(self):
         polled = []
 

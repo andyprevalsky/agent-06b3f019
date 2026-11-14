@@ -123,36 +123,90 @@ def test_daily_membership_uses_normal_resolver():
     assert set(TASK_KINDS) <= selected
 
 
-def test_existing_catalog_rows_unchanged():
-    import json
-    import subprocess
-    from pathlib import Path
-    root = Path(__file__).resolve().parents[2]
-    old = json.loads(subprocess.check_output(['git', 'show', '06416c4f9f50ecec4f5d2678620e20dc3c0fd3d0:agents/benchmarks/tasks.json'], cwd=root, text=True))
-    current = json.loads((root / 'agents/benchmarks/tasks.json').read_text())
-    # Quarantine and user-directed deploy omission are validated deploy metadata,
-    # not executable task changes.
+_MASS_DEPLOY_QUARANTINE_REASON = (
+    "User-directed indefinite exclusion from all deploys (2026-11-10, PR1682): "
+    "flaky mass-agent test. Keep explicit benchmark execution and historical failures; "
+    "do not count this omission as PASS."
+)
+
+
+def _assert_existing_catalog_rows_unchanged(old, current):
+    old, current = copy.deepcopy(old), copy.deepcopy(current)
+    # Keep the previously reviewed quarantine normalization and validate it first.
     from benchmarks.long_horizon import validate_task_quarantine
     for rows in (old, current):
         for row in rows:
             validate_task_quarantine(row, row['name'])
             row.pop('quarantine', None)
-            reason = row.pop('deploy_quarantine', None)
-            assert reason is None or (isinstance(reason, str) and reason.strip()), row['name']
-            if row['name'] == 'test-mass-agent-run-0' and reason is not None:
-                assert reason == (
-                    'User-directed indefinite exclusion from all deploys (2026-11-10, PR1682): '
-                    'flaky mass-agent test. Keep explicit benchmark execution and historical '
-                    'failures; do not count this omission as PASS.'
-                )
+    # Only this exact user-directed deploy metadata differs from the golden rows.
+    for row in current:
+        if row['name'] == 'test-mass-agent-run-0':
+            assert row.pop('deploy_quarantine', None) == _MASS_DEPLOY_QUARANTINE_REASON
+        else:
+            assert 'deploy_quarantine' not in row
     # User-directed retirement (status -> "retired") is the only allowed status
     # change to a reviewed row; every other field must stay byte-identical.
     retired_by_user = {'test-mass-agent-run-0'}
     for before, after in zip(old, current):
         if after['name'] in retired_by_user and after.get('status') == 'retired':
             after['status'] = before.get('status')
-    # Sync retains every row from the reviewed main snapshot; phone tasks append only.
     assert current[:len(old)] == old
+
+
+def test_existing_catalog_rows_unchanged():
+    import json
+    import subprocess
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[2]
+    # Reviewed snapshot: main's rows plus explicit deploy_category none opt-outs.
+    old = json.loads(subprocess.check_output(['git', 'show', '5f9a8d94a9f584a8b16ead9be263827f84feac48:agents/benchmarks/tasks.json'], cwd=root, text=True))
+    current = json.loads((root / 'agents/benchmarks/tasks.json').read_text())
+    _assert_existing_catalog_rows_unchanged(old, current)
+
+
+@pytest.mark.parametrize('change', [
+    'missing_marker', 'changed_reason', 'other_task_marker', 'appended_task_marker',
+    'prompt', 'timeout', 'evaluator', 'extra_field', 'missing_field', 'reordered_rows',
+])
+def test_existing_catalog_rows_guard_rejects_unapproved_changes(change):
+    old = [
+        {'name': 'test-mass-agent-run-0', 'prompt': 'original', 'timeout_seconds': 60,
+         'success_criteria': ['original evaluator']},
+        {'name': 'other-task', 'prompt': 'other'},
+    ]
+    current = copy.deepcopy(old)
+    current[0]['deploy_quarantine'] = _MASS_DEPLOY_QUARANTINE_REASON
+    if change == 'missing_marker':
+        del current[0]['deploy_quarantine']
+    elif change == 'changed_reason':
+        current[0]['deploy_quarantine'] = 'different authorization'
+    elif change == 'other_task_marker':
+        current[1]['deploy_quarantine'] = _MASS_DEPLOY_QUARANTINE_REASON
+    elif change == 'appended_task_marker':
+        current.append({'name': 'new-task', 'deploy_quarantine': _MASS_DEPLOY_QUARANTINE_REASON})
+    elif change == 'prompt':
+        current[0]['prompt'] = 'changed'
+    elif change == 'timeout':
+        current[0]['timeout_seconds'] += 1
+    elif change == 'evaluator':
+        current[0]['success_criteria'] = ['different evaluator']
+    elif change == 'extra_field':
+        current[0]['unexpected'] = True
+    elif change == 'missing_field':
+        del current[0]['prompt']
+    elif change == 'reordered_rows':
+        current.reverse()
+    with pytest.raises(AssertionError):
+        _assert_existing_catalog_rows_unchanged(old, current)
+
+
+def test_existing_catalog_rows_guard_retains_input_and_allows_new_unmarked_tasks():
+    old = [{'name': 'test-mass-agent-run-0', 'prompt': 'unchanged'}]
+    current = [dict(old[0], deploy_quarantine=_MASS_DEPLOY_QUARANTINE_REASON),
+               {'name': 'new-task', 'prompt': 'new'}]
+    before = copy.deepcopy(current)
+    _assert_existing_catalog_rows_unchanged(old, current)
+    assert current == before
 
 
 def test_private_boot_collector_rejects_production_before_subprocess(monkeypatch):

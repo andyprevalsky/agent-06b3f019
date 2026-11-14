@@ -292,9 +292,11 @@ Wide runs (sharded controllers):
   the clean pushed HEAD. Launch facts, the warm dependency proof and snapshot
   inventory are discovered; a snapshot not produced for this exact HEAD (or
   expiring before the deadline) is refreshed first via the normal producer.
-  Supported options: -k K, --timeout S (default: longest selected task, max 7200),
-  --ref <HEAD>,
-  --e2e-timeout S. Every routed launch runs --check first.
+  Supported options: -k K, --timeout S (default: longest selected task; at most 7200), --ref <HEAD>,
+  --e2e-timeout S. Every routed launch runs --check first. A --concurrency below
+  the copy count but above the bound runs the one batch as bounded sharded waves
+  of at most that many copies (every copy of a task stays in one wave); omit it
+  for one sharded run, or pass at most 32 for a rolling campaign on one controller.
   --check             Dry run: local checks plus read-only provider preflight,
                       reporting the warm snapshot reuse/refresh decision.
   Wide runs admit every task the ordinary fleet runs, SIM/DEMO included.
@@ -327,8 +329,9 @@ Monitoring:
   report-format retrieves that same contract without starting services or tasks.
   Every launch also prints its exact `scripts/run-bench scorecard <run-dir> --html <file>`
   command. Publish that CLI-rendered card; hand-written cards are non-compliant.
-  Every launch prints its exact monitoring handle. Poll every 30 seconds,
-  checking terminal lifecycle on every observation, including stale cards.
+  Every launch prints its exact monitoring handle. Poll it on CLAUDE.md's
+  background-task cadence, checking terminal lifecycle on every observation,
+  including stale cards.
   Controller status is separate from task PASS/FAIL; retain genuine task FAIL.
   Retry transient observations with the original owner; preserve actual fatal
   status. Observe required terminal publication and exact browser/provider/local
@@ -607,9 +610,20 @@ print(c["copy_bound"](p["vcpus"],p["memory_mib"]))' "$ROOT_DIR/scripts/cloudbenc
         exit 2
     fi
 fi
+# Each sharded operator run admits its copies at once behind one barrier. A
+# rolling window wider than one controller's bound is never silently handed to
+# campaign controllers with a different batch shape and source transport: it
+# stays on the sharded route as one batch of bounded waves (below). A window
+# that cannot hold one task's copies has no supported shape and is refused.
+if [ -n "$SHARDED_ROUTE_REASON" ] && [ "$CONCURRENCY_EXPLICIT" -eq 1 ] && [ "$CONCURRENCY" -lt "$sharded_copies" ] &&
+    [ "$CONCURRENCY" -lt "$RUNS" ]; then
+    echo "❌ --concurrency $CONCURRENCY cannot hold one task's $RUNS copies; bounded waves keep every copy of a task together. $SHARDED_ROUTE_REASON, and the sharded operator admits all copies of a wave behind one barrier. Supported: omit --concurrency (or pass $sharded_copies) for one sharded run, --concurrency between $RUNS and $sharded_copies for bounded waves, or --concurrency $SHARDED_BOUND or less for a rolling campaign on one controller" >&2
+    exit 2
+fi
 # Auto routing keeps an explicitly requested ordinary-fleet option working:
 # a request the operator would refuse falls back to the ordinary fleet path
-# with one warning. RUN_BENCH_SHARDED_ROUTE=always keeps the strict refusal.
+# (campaign controllers for campaign flags) with one warning.
+# RUN_BENCH_SHARDED_ROUTE=always keeps the strict refusal.
 sharded_refused_option() {
     [ "$DEMO_CACHE_PROBE" -eq 0 ] || { echo --demo-cache; return; }
     [ "$STRESS_DEFAULTS" -eq 0 ] || { echo --stress-defaults; return; }
@@ -634,7 +648,9 @@ if [ -n "$SHARDED_ROUTE_REASON" ] && [ "$SHARDED_CHECK" -eq 0 ] &&
     [ "${RUN_BENCH_SHARDED_ROUTE:-auto}" = auto ]; then
     SHARDED_REFUSED_OPTION="$(sharded_refused_option)"
     if [ -n "$SHARDED_REFUSED_OPTION" ]; then
-        echo "⚠️  $SHARDED_ROUTE_REASON, but $SHARDED_REFUSED_OPTION is not a sharded operator option; using the ordinary fleet path (RUN_BENCH_SHARDED_ROUTE=always refuses instead)" >&2
+        fallback_route="the ordinary fleet path"
+        [ "$CAMPAIGN_REQUESTED" -eq 0 ] || fallback_route="campaign controllers"
+        echo "⚠️  $SHARDED_ROUTE_REASON, but $SHARDED_REFUSED_OPTION is not a sharded operator option; using $fallback_route (RUN_BENCH_SHARDED_ROUTE=always refuses instead)" >&2
         SHARDED_ROUTE_REASON=""
     fi
 fi

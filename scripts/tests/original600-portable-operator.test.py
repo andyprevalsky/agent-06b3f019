@@ -3925,6 +3925,24 @@ class RunBenchShardedRouting(unittest.TestCase):
             result, ops, fleets = fx.run(*names, '--sim-on', names[0])
             self.assertEqual((result.returncode, ops, len(fleets)), (0, [], 1), result.stderr)
             self.assertEqual(result.stderr.count('--sim-on is not a sharded operator option; using the ordinary fleet path'), 1)
+            # A rolling window wider than one controller's bound is never silently handed to campaign
+            # controllers: auto routing keeps it on the sharded route as one batch of bounded waves.
+            for extra in (('--concurrency', '39'), ('-k', '2', '--concurrency', '79')):
+                with self.subTest(extra=extra):
+                    result, ops, fleets = fx.run(*names, *extra, '--check')
+                    self.assertEqual((result.returncode, len(ops), fleets), (0, 2, []), result.stderr)
+                    self.assertIn('bounded sharded waves:', result.stdout)
+                    self.assertNotIn('using campaign controllers', result.stderr)
+                    self.assertFalse((fx.root/'.context/benchmarks/campaigns').exists())
+            # A window that cannot hold one task's copies has no supported route: auto routing refuses it,
+            # naming the supported shapes, instead of handing it to campaign controllers.
+            result, ops, fleets = fx.run(*names, '-k', '40', '--concurrency', '39')
+            self.assertEqual((result.returncode, ops, fleets), (2, [], []), result.stderr)
+            self.assertIn("cannot hold one task's 40 copies", result.stderr)
+            self.assertIn('the sharded operator admits all', result.stderr)
+            self.assertIn('--concurrency 32 or less for a rolling campaign', result.stderr)
+            self.assertNotIn('using campaign controllers', result.stderr)
+            self.assertFalse((fx.root/'.context/benchmarks/campaigns').exists())
             (fx.root/'agents/benchmarks/tasks.json').write_bytes((fx.root/'agents/benchmarks/tasks.json').read_bytes() + b' ')
             result, ops, fleets = fx.run(*names)
             self.assertEqual((result.returncode, ops), (2, []))

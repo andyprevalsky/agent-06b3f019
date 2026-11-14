@@ -1,239 +1,89 @@
 # Shared skill display format
 
-Apply this format to this agent and all current and future agents, including
-every user-facing scorecard, progress report, status panel and approval card. Keep
-each workflow's required evidence, fields and approval boundaries.
+Every agent's user-facing scorecard, progress report, status panel and approval card follows this file, keeping each workflow's required evidence, fields and approval boundaries. Benchmark cards: `.claude/shared/benchmark-report-format.txt` (`scripts/run-bench report-format`). Approval packets: `.claude/shared/approval-format.md`. Deploy failure ownership: `.claude/shared/deploy-failure-policy.md`.
 
-## Display clocks
+Sections: Clocks · Agent rows · Placement · Freshness · Fields · Work versus waiting · Colors and publication · Resources and blockers · Deploy scorecard: deploy-summary-v2.
 
-- Display human-facing timestamps in **America/Los_Angeles**, respecting daylight
-  saving time, using a 12-hour clock
-  and `AM`/`PM`, for example `October 15, 11:45:00 AM PDT`. Include the date
-  when needed to distinguish days. Use PDT (UTC−07:00) during daylight saving
-  time and PST (UTC−08:00) in winter; never use a fixed PST offset year-round.
-  Never use military time in display labels.
-- Convert from the recorded instant; do not reset clocks or reinterpret an
-  unzoned timestamp. Keep elapsed durations such as `14m18s` unchanged.
-- Preserve machine timestamps and exact quoted evidence: UTC/ISO timestamps
-  in stored telemetry, JSON, raw logs, commands, task prompts and diffs remain
-  byte-for-byte intact. This rule changes presentation, not those artifacts.
+## Clocks
 
-## Sub-agent usage and work
+- Show human-facing times in America/Los_Angeles on a 12-hour clock with `AM`/`PM`, e.g. `October 15, 11:45:00 AM PDT`: PDT (UTC−07:00) in daylight saving time, PST (UTC−08:00) in winter, never a fixed year-round offset or military time.
+- Add the date when it distinguishes days.
+- Convert from the recorded instant; never reset a clock or reinterpret an unzoned timestamp, and keep elapsed durations such as `14m18s` as they are.
+- This is presentation only: stored telemetry, JSON, raw logs, commands, task prompts, diffs and quoted evidence keep their UTC/ISO timestamps byte for byte.
 
-Show every active worker and parent on one compact row with one status emoji,
-**tokens spent on the current assignment**, rolling **15-minute tokens/min**,
-and LIFE at the far right. This replaces percentage and pp/min columns.
+## Agent rows
 
 ```text
  AGENT / WORK                    TOKENS    15m tok/min     LIFE
  <status> <name>/<work>          <tokens>  <tokens/min>    <life>
 ```
 
-Use `⛔` for a blocking dependency, `🔄` for active independent work, `🚀` for
-deployment, `✅` for completed work and `🚨` for a verified advancing stall.
-Keep actual milestones, gate results and batch item counts as separate facts.
-Tokens measure usage; they do not certify completion, success or billing cost.
+- One compact row per active worker and parent: one status emoji, tokens spent on the current assignment, rolling 15-minute tokens/min, then LIFE; these replace PCT/percentage, pp/min, UPD and progress-wheel columns.
+- Status emoji: `⛔` blocking dependency, `🔄` active independent work, `🚀` deployment, `✅` completed, `🚨` verified advancing stall.
+- LIFE is the fixed, right-aligned last column (no status, description, SHA or rate after it): time since the original recorded agent/thread start, kept across retries, stages, substeps and restarts, and frozen at the actual end.
+- When only a later assignment or observation start is known, LIFE shows a lower bound (`≥1h12m`) and telemetry keeps its basis.
+- Tokens are timestamped harness counters of recorded input + output including cached input; reasoning output is already part of output and is never added again; never estimate tokens from text length, elapsed time or milestone percentages.
+- Record the assignment and its counter baseline (source/session identity, capture time) at or just before dispatch; for an already-running agent recover it from timestamped harness usage; a request crossing that boundary uses its recorded accounting timestamp under the same baseline method.
+- Keep the original scope and lifetime across retries, freeze usage at the actual completion receipt, and give each later assignment its own baseline; keep prior scopes separate, never charge old RCA usage to unrelated work, and never reset history to hide usage.
+- `15m tokens/min = (current scoped tokens - scoped tokens 15 minutes ago) / 15`, recomputed every render (never cached) from persisted same-scope observations with documented sample-and-hold: agent/session ID, scope ID, original start, baseline and current counters, state and source ref, retained at least 15 minutes with earlier assignment histories.
+- Show `warming <age>` until 15 minutes of comparable history exist, and `UNMETERED` for a missing counter, scope baseline or continuity, never an invented zero; never divide a shorter window by 15, infer missing tokens, mix scopes or treat a counter reset as zero usage.
+- Format totals and rates compactly (`2.31M`, `154K/min`), keeping exact counters and the input/cache/output breakdown in telemetry or expandable details; a completed row may show `complete` as its rate.
+- Tokens measure usage, never completion, success or billed cost; keep milestones, gate results, batch item and qualified-task counts as separate facts, and never manufacture milestones from tokens.
+- High usage is not success and low or zero usage alone is not a stall; a verified lack of outcome or milestone gain may get `🚨` and a concrete corrective action, while healthy monitoring, completed, queued and expected waits get no false alarm.
 
-Use timestamped harness counters for recorded input + output, including cached
-input. Reasoning output is already a subtype of output and must not be added
-again. Retain source/session identity, capture time and the counter baseline at
-or immediately before the assignment start. A request crossing that boundary
-uses its recorded accounting timestamp; preserve the baseline method. Never
-estimate tokens from text length, elapsed time or milestone percentages.
-Show `UNMETERED` for an unavailable counter or scope baseline, never an invented
-zero. Keep original scope and lifetime across retries. Freeze completed usage
-at its actual completion receipt; later assignments get their own baseline.
+## Placement
 
-### Lifetime: always the far-right column
+- If any sub-agent blocks the report's next action, the whole ACTIVE SUB-AGENTS section goes above `LAST 3 EXPERIMENTS` (on other cards, above the first progress section or gate list); otherwise it goes after that history; it appears once, reading `No active agents` when required and empty.
+- Only real blockers move it: an independent RCA, deploy, pending approval or incomplete metric never becomes a scheduling gate.
+- An approval card without a progress section puts blocking rows in its framed header and independent rows near the end, keeping approval-format.md's seven required sections in order.
 
-- End every agent row with a fixed, right-aligned `LIFE` column. Put no status,
-  task description, SHA or rate after it. Remove the visible `UPD` column.
-- `LIFE` is time since the original recorded agent/thread start. Retain that
-  instant across retries, task stages and restarts. If only an earlier assignment
-  or observation is known, show a lower bound (`≥1h12m`) and retain its basis in
-  telemetry. Freeze a completed agent's lifetime at its actual end.
-- Keep actual evidence timestamps and freshness checks internally; removing a
-  column does not make message receipt or rendering a new evidence observation.
-  Use one capture instant for every row. Read active owners' existing reports or
-  monitors; reuse immutable completion receipts. Do not add provider probes or
-  wake idle agents solely to freshen a label. Mark overdue evidence `STALE` with
-  its actual age without delaying safety notifications.
-- Never present a saved or hand-kept summary as current. Every status line,
-  parent/worker row and issue is rebuilt from current evidence at render time
-  and carries the instant it was checked. A claim made before the latest run
-  ended, or more than 15 minutes ago, is re-observed or left out; the scorecard
-  renderer refuses such overlay rows.
+## Freshness
 
-### Rolling token usage and stalled work
+- Never present a saved or hand-kept summary as current: rebuild every status line, parent/worker row and issue from current evidence at render time, stamped with the instant it was checked.
+- Re-observe or omit any claim made before the latest run ended or more than 15 minutes ago; the scorecard renderer refuses such overlay rows.
+- Use one capture instant for every row; read active owners' existing reports and monitors and reuse immutable completion receipts, never probing providers or waking idle agents just to freshen a label.
+- Keep evidence timestamps and freshness checks internal; receiving a message or rendering is not a new observation; mark overdue evidence `STALE` with its actual age, never delaying safety notifications.
+- After publishing, atomically update the existing latest-card URL and fixed checkpoint fields together, never creating competing URL aliases.
+- Refresh lifecycle labels from verified receipts (a completed export never stays pending); long batches keep fixed-cohort receipt counts and original clocks, and a new rendering or reread of old evidence never creates a usage or outcome delta.
 
-- Persist timestamped usage observations with agent/session ID, scope ID,
-  original start, baseline counters, current counters, state and source ref.
-  Retain at least 15 minutes and preserve earlier assignment histories.
-- `15m tokens/min = (current scoped tokens - scoped tokens 15 minutes ago) / 15`.
-  Use actual same-scope counter observations with documented sample-and-hold.
-  Do not divide a shorter window by 15, infer missing tokens, mix scopes or
-  treat a counter reset as zero usage. Show `warming <age>` until a complete
-  comparable window exists; show `UNMETERED` for missing continuity.
-- Format large totals and rates compactly (for example `2.31M`, `154K/min`),
-  retaining exact counters and input/cache/output breakdown in telemetry or
-  expandable details. A completed row may show `complete` for its rate.
-- Keep actual text colors for work status. High token use is not a verified
-  success, and low or zero use alone is not a stall. A verified lack of outcome
-  or milestone gain may still need `🚨` and a concrete corrective action.
-  Healthy monitoring, completed, queued and expected waits get no false alarm.
-- Beneath every red row, state the real blocker and corrective owner/action.
-  Preserve qualified-task counts separately from token usage. Exact prompt,
-  diff and approval payloads retain their required format and bytes.
+## Fields
 
-## Conditional placement
+- Never display `null`, `—`, `N/A`, blank numeric fields or empty sentinels: fetch evidence through existing owners and monitors, otherwise show a concrete state (`warming <age>`, `UNMETERED`, `UNMEASURED`, `NOT SCORED`) or omit the numeric row and state the coverage gap; a missing measurement never becomes zero.
+- No explanatory legend paragraphs (LIFE, rate, color, monitoring) below rows; keep aligned headers and meaningful row states.
+- Beneath every red row, state the real blocker and its corrective owner/action.
+- Genuine task failures and confirmed infrastructure failures keep their original classifications and denominators; unscored cancellations, skips and unknown classifications go in one coverage note, never converted into agent or infra failures.
+- Exact prompt, diff, approval and evidence payloads keep their required format and bytes.
 
-- If **any sub-agent blocks** the report's next action, move the **whole ACTIVE
-  SUB-AGENTS section** above the experiment history (LAST 10 for descent; LAST 3 otherwise). Do this if and only if a
-  sub-agent is blocking; show the section once, never duplicate it.
-- With no blocking sub-agent, place it after the experiment history. Show `No active agents`
-  when the scorecard requires the section and no sub-agents are active.
-- For other scorecards, use the same rule relative to their first progress
-  section or gate list. For an approval card with no progress section, blocking
-  sub-agent rows belong in the framed header; independent rows belong near the
-  end. Preserve the six required approval sections and their order.
+## Work versus waiting
 
-Report real blockers. An independent RCA, deploy, pending approval or incomplete
-metric does not become a scheduling gate merely to move its section upward.
+- Every scorecard and timeline separates **active agent work**, **running automation** and **waiting**, never lumping them as "fixes / other".
+- Active work needs recorded implementation, diagnosis, coordination or reporting intervals; a running test or unattended job is automation, and token use or an open process proves neither.
+- Record each wait's start, end and specific reason (user answer/approval, credits/quota, provider response or rollout, queue, dependency, other inactivity) on the original clock, as mode changes happen.
+- Close an agent's work interval when it stops working; independent work that continues gets its own lane.
+- Never hide a wait inside a repair bar or count overlapping work twice; a wait overlapping productive work on another lane stays visible but is not fully stalled wall time.
+- Unrecorded time goes only under waiting as **Wait — reason unrecorded**, an accounting convention (historical records included), not proof that an external system caused the gap; never invent retrospective activity, credit shortages, user delays or start/end timestamps.
+- Factory workflows record intervals with `scripts/record_factory_event.py` `work-start`/`work-finish` and `wait-start`/`wait-finish`, passing the same `--detail request_id=<interval-id>` and `--detail run_id=<original-run-id>` on both ends plus a short nonsecret `--detail reason=<reason>`: work `implementation`, `diagnosis`, `coordination`, `reporting`; wait `user`, `credits`, `provider`, `queue`, `dependency`, `inactive`.
+- Native stage receipts supply automation intervals; `scripts/deploy_timeline.py` pairs native activity records into interval unions, keeping parallel waits, and unmatched records have unknown duration.
+- Show wall-clock work and wait totals, with automation separate from human/agent effort.
 
-## Complete fields and result categories
+## Colors and publication
 
-- Do not display `null`, `—`, `N/A`, blank numeric fields or empty sentinels.
-  Fetch available evidence through existing owners/monitors; when a metric
-  cannot safely be measured, use a concrete state (`warming <age>`,
-  `UNMETERED`, `UNMEASURED`, `NOT SCORED`) or omit its numeric row and state
-  the coverage gap. A missing measurement never becomes an invented zero.
-- Do not print explanatory LIFE/rate/color/monitoring legend paragraphs
-  below agent rows. Keep the aligned headers and meaningful row states.
-- Within each benchmark experiment, show `PASS`, `HARNESS FAILURE` and
-  `INFRA FAILURE` counts, with genuine `AGENT FAILURE` preserved separately. Do not add a scheduled `PENDING` result row. Queued,
-  running and terminal counts belong to that experiment's subrows. Genuine task
-  failure and confirmed infrastructure failure keep
-  their original classifications and denominators. Describe unscored
-  cancellations/skips or unknown classifications in one coverage note;
-  never convert them into agent/infra failures to fill the three rows.
+- Color the text itself, not just emoji or diff prefixes: green verified successes and healthy checks, red failures and blockers, blue active work and headings, amber warnings and unmeasured coverage.
+- Keep status markers, signed rate colors and one status emoji per agent; never rely on color alone or color an unknown result as pass or failure; active work is not a verified outcome.
+- Color never alters classifications, measurements, original clocks or sections.
+- Publish every scorecard as HTML by default: on boxes.dev, a self-contained CSS-colored visual through the `boxes-inline-visualizations` skill, previewed in light, dark and 360px layouts first; this overrides diff-fence progress cards but never exact approval packets or evidence payloads.
+- Put the Markdown visual link alone in a final-answer paragraph so boxes.dev embeds the live card, with readable text and a compact first view; keep QA screenshots private and never send image previews.
+- Only when embedding or rendered HTML is unavailable, use text or diff-highlighted code blocks and say so, never claiming emoji or prefixes colored the text.
 
-Before dispatch, record the assignment and its actual token-counter baseline.
-For running agents, recover that baseline from timestamped harness usage when
-available; otherwise show UNMETERED. Starting a substep never resets LIFE.
-Recompute usage rates from the same-scope history on every render. Warming
-ends after 15 minutes of comparable history; never reuse cached rates.
-After publishing, atomically update the existing latest-card URL and fixed
-checkpoint fields together; do not create competing URL aliases.
+## Resources and blockers
 
-## Work versus waiting — all current and future agents
+- Show timestamped Machine started/stopped counts and separately verified idle and warm counts; preserve designated warm Machines.
+- Charge idle started VMs at the running rate and separate stopped rootfs from allocated-volume storage; identify estimate coverage, rates and unknown billed usage, never inventing an invoice total or billing provisioned maximum rootfs.
+- Close each run's idle compute through the normal exact-owner stop guards (retained evidence or warm storage needs no running controller), and report confirmed STOPPED apart from requests and pending transitions.
+- For a blocking provider or resource limit, name the exact limit, observed usage, numeric cap when actually known (app usage versus organization-wide quota) and the concrete action the owner or user can take.
+- Justify capacity from measured workload and reuse evidence; a symbolic planner maximum never justifies a quota increase, and owned idle resources and supported reuse are reconciled before recommending one.
 
-Every scorecard and timeline must distinguish **active agent work**, **running
-automation**, and **waiting**. Do not combine these as "fixes / other". Active
-work requires actual recorded implementation, diagnosis, coordination or
-reporting intervals. A running test or unattended job is automation, not proof
-that an agent is actively working. Token use or an open process proves neither.
-
-Record each wait's start, end and specific reason: user answer/approval,
-credits/quota, provider response or rollout, queue, dependency, or other
-inactivity. Keep the original clock. Close an agent's active-work interval when
-it stops working; if independent work continues, record that on its own lane.
-Never hide a wait inside a repair bar or count overlapping work twice.
-
-Unrecorded time belongs **only under waiting**, labeled **Wait — reason
-unrecorded**, never under active work. This is an accounting convention, not
-proof that a particular external system caused the gap. Preserve that limit
-for historical records. Future agents must record mode changes as they happen
-so unexplained gaps do not accumulate. Do not invent retrospective activity,
-credit shortages, user delays or start/end timestamps to fill missing history.
-
-For factory workflows, use the existing `scripts/record_factory_event.py`
-`work-start`/`work-finish` and `wait-start`/`wait-finish` events. Supply the same
-`--detail request_id=<interval-id>` and `--detail run_id=<original-run-id>` on
-both ends, plus a short nonsecret `--detail reason=<reason>`. Work values are
-`implementation`, `diagnosis`, `coordination`, `reporting`; wait values are
-`user`, `credits`, `provider`, `queue`, `dependency`, `inactive`. Native stage
-receipts supply automation intervals. `scripts/deploy_timeline.py` pairs native
-activity records and accounts for interval unions, retaining parallel waits;
-unmatched records have unknown duration. Show wall-clock work/wait totals,
-with automation separate from human/agent effort. A wait overlapping productive
-work on another lane is visible but does not count as fully stalled wall time.
-
-## Stable deploy scorecard template: deploy-summary-v2
-
-For every current and future deploy update/final report, populate the stable
-`.claude/shared/deploy-scorecard-template.html` template (`deploy-summary-v2`).
-Preserve its CSS/layout from the exact user-approved visual
-https://boxes.dev/visuals/vis_1997f1fd05813cc9be440f44d5700ffe:
-
-1. Title with actual colored **SHIPPED / NOT SHIPPED** status.
-2. Elapsed time immediately below.
-3. One **WHAT DEPLOYED** box.
-4. One cumulative **DELEGATED** box.
-5. One **EXTERNAL PROVIDER FAILURES** box.
-6. One **FOLLOWUPS** box only if any follow-ups exist.
-7. Lastly, concise colored per-stage bars on **one shared elapsed-time axis**.
-
-Do not replace these boxes with a lane table or add production/validation
-hashes, observed/producer noise or a secondary deploy-owner-complete line.
-Keep the required provenance in underlying evidence. This deploy-specific
-layout supersedes older section/alert placement rules. Evidence-backed values,
-applicable stage rows and attempt intervals may update; no ad hoc redesign.
-A layout change requires an explicit user request and a new documented version.
-
-The timeline's origin is the original durable deploy start. Plot every stage
-and attempt from actual start/end instants using the same labeled ticks and
-scale for all rows, so concurrency, retries and gaps remain visible. Do not
-normalize rows separately, reset clocks at retries or replace bars with duration
-totals alone. Keep live intervals and unknown/missing boundaries explicit
-without inventing timestamps. Retain this visible timeline in progress and
-final cards.
-
-Version 2 preserves the version-1 boxes and shared-axis layout. Its only layout
-addition is the work/automation/wait breakdown inside the final timeline box.
-Use blue for recorded work/automation and amber for waits; historical waits
-whose reason was not recorded use a muted amber pattern. Distinguish the work
-and wait rows by labels as well as color. Keep wait reasons visible.
-
-An explicit user/operator AgentCard election shows **SKIPPED — <reason>** for
-the elected production gate (or the legacy local lane). Preserve original failures,
-cleanup obligations and unsettled funds; SKIPPED supplies no PASS, cleanup or
-financial settlement and skips no other gate. Keep the elected gate visible even
-when `scripts/deploy production --skip-agentcard "<reason>"` elects it (legacy
-planner: omit `--agentcard`). The sandbox lifecycle tasks are smoke rows.
-
-A benchmark scorecard may be linked as supporting evidence, but must never
-replace this deploy card or its timeline. The benchmark template below
-continues to apply to benchmark reports only.
-
-## Standard CLI benchmark scorecard
-
-This is the default for every future CLI benchmark run (cloud, local, eval,
-campaign and production-only), its progress updates and final report.
-Render it only with `scripts/run-bench scorecard <run-dir> --html <file>` and
-publish that file unchanged; the CLI applies every rule in this section from
-recorded artifacts. Hand-written or edited benchmark cards are non-compliant.
-
-- Lead with **QUEUED**, **IN_PROGRESS** and **COMPLETED** logical task counts.
-  Keep `QUEUED + IN_PROGRESS + COMPLETED = scheduled total`. COMPLETED means a
-  recorded terminal outcome, not a pass; retries remain IN_PROGRESS until final.
-- Directly below, always show **PASS**, **HARNESS FAILURE** and **INFRA FAILURE**.
-  HARNESS FAILURE requires evidence of an orchestration/runner failure; never
-  relabel a genuine task/agent failure as a harness failure. Preserve genuine
-  **AGENT FAILURE**, cancelled, skipped, unscored and unknown outcomes separately.
-  Do not infer zero from missing classification or add overlapping categories.
-- A prepared run is explicitly **NOT LAUNCHED**. Planned queued tasks may be
-  shown only with `planned`; they are not dispatched work or an actual experiment.
-- Put the infra stop rule in a small note, using the original scheduled total
-  (for example `Stop at 30/600 unique infra-failed jobs`). It is not a headline
-  metric. Machine admission and qualification counts belong in supporting details.
-- Retain the inline CSS-colored card, last-run age, latest three generic experiments (ten for descent),
-  original clocks, current-assignment tokens, rolling 15-minute tokens/min,
-  rightmost LIFE, lifecycle/resource evidence and explicit coverage gaps.
-- Publish a fresh card when an agent starts or completes, every fixed 15-minute
-  checkpoint, and whenever benchmark state changes. Events never postpone the
-  existing checkpoint. Keep underlying 30-second operational monitoring active.
-
-## Benchmark experiment history
+## Descent benchmark cards
 
 For `/descend` cards (`--iterations N`, including zero), the following overrides
 the generic three-row and launch-rate presentation: show up to the last **10**
@@ -248,78 +98,6 @@ Running rows use **T-RUNNING**; missing or future finish clocks use
 Generic experiments/day may remain secondary. Explicit history IDs, original
 sources, verdicts, costs and lifecycle remain unchanged; do not pad to ten.
 The existing >3 iteration success-graph threshold is unchanged.
-
-- At the top, show **Since last benchmark ended** with the run label and elapsed
-  time from its actual producer terminal timestamp. Keep this clock across
-  diagnostics, cleanup and card refreshes. For a live benchmark show RUNNING;
-  a missing end reads END UNRECORDED, never a guessed duration.
-- First row: current **Experiment #<number>** and state. Beneath it show the
-  average experiments/day for this goal: distinct actually launched original
-  experiments divided by elapsed goal days. Preserve the original goal start;
-  exclude diagnostics, prepared drafts and local tests. A sequence label is not
-  a launch count. If receipts cover only part of history, label the numeric rate
-  as a lower bound and state the verified launch count and elapsed days.
-- Replace LAST SLICE TRIGGERED, WHY NO NEW SLICE, BENCHMARK PROGRESS, ACTIVE RUN
-  and the standalone cost/cache/LLM section with **LAST 3 EXPERIMENTS**
-  (**LAST 10 EXPERIMENTS** for descent), newest
-  first. Each main row gives experiment, state, trigger, end and elapsed; use
-  aligned concise subrows for QUEUED/IN_PROGRESS/COMPLETED counts, PASS/HARNESS FAILURE/
-  INFRA FAILURE, genuine agent failures, unknown outcomes, cost, cache and LLM metrics, and lifecycle.
-- Ends come from the actual producer terminal artifact; do not substitute an
-  observer capture or export completion. Live rows use `RUNNING` and elapsed
-  since their original trigger. Missing historical end evidence reads
-  `END UNRECORDED`, with duration `UNMEASURED`; do not invent a timestamp.
-- Metrics stay scoped to each experiment and all its attempts. Show actual
-  cost/cache/latency coverage; use `UNMETERED` or `UNMEASURED` when absent,
-  never invented zeroes. Keep cache categories and LLM populations separate
-  when measured. Show unscored cancellations and unknown infra explicitly.
-- For a blocking provider/resource limit, name the exact limit, observed usage,
-  numeric cap when actually known, and the concrete action the owner or user can
-  take. Distinguish app usage from organization-wide quota. Do not recommend a
-  quota increase before reconciling owned idle resources and supported reuse.
-- Put the stop threshold in a small supporting note using the original scheduled denominator: for 600
-  jobs, `STOP AT 30/600 INFRA (5%)`. Explain an earlier wrong 1/1 stop as an
-  erroneous early abort, not as a valid threshold breach or a retroactive pass.
-- Preserve a concise ISSUES / NEXT ACTION section. Put the actual reason and
-  corrective owner/action immediately beneath every red progress row. Do not
-  reintroduce removed global sections or append explanatory legends.
-
-## Resource costs and current work
-
-- Show timestamped started/stopped counts and separately verified idle/warm
-  counts. Preserve designated warm Machines. Charge idle started VMs at the
-  running rate; distinguish stopped rootfs and allocated-volume storage.
-  Identify estimate coverage, rates and unknown billed usage; never invent an
-  invoice total or treat provisioned maximum rootfs as billed usage.
-- Close each run's idle compute through the normal exact-owner stop guards;
-  retained evidence or warm storage does not require a controller to keep running.
-  Report confirmed STOPPED separately from requests and pending transitions.
-- Explain why capacity is needed from measured workload/reuse evidence. A
-  symbolic planner maximum does not justify a quota increase. Give a concrete
-  unblock action in the report.
-- Bind worker token totals/rates to the current assignment. Retain prior scopes
-  separately; do not charge old RCA usage to unrelated work, reset history to
-  hide usage, or manufacture milestones from tokens spent.
-
-## Card colors
-
-- Color-code the actual text, not just emoji or diff prefixes. On boxes.dev,
-  use the `boxes-inline-visualizations` skill to publish a self-contained HTML
-  scorecard with CSS text colors: green verified successes/healthy checks,
-  red failures/blockers, blue active work/headings and amber warnings/unmeasured
-  coverage. Preview light, dark and 360px layouts, then publish the standalone
-  visual link. This overrides the diff-fence presentation for progress cards;
-  it does not change exact approval packets or evidence payloads.
-- Diff highlighting is only a fallback when rendered HTML is unavailable;
-  explain that limitation instead of claiming emoji or prefixes colored text.
-  Keep status markers for accessibility. Do not color an unknown result as
-  a pass or failure, and do not rely on color alone.
-- Retain the signed rate colors and one status emoji per agent. Active work
-  is not a verified outcome. Color changes must not alter classifications,
-  measurements, original clocks or the existing sections.
-- Show the latest three generic original experiments or ten for descent; retain
-  complete history internally and use all verified launches for secondary experiments/day.
-
 
 ### Descent speed change (user clarification)
 
@@ -422,14 +200,21 @@ For all /descend scorecards, publish the interactive HTML embedding only. Do
 not send, attach, or display raster images/screenshots. Private DOM inspection
 for counts, layout and overflow is permitted; do not emit screenshot output.
 
-## Deploy-specific exceptions
+## Deploy scorecard: deploy-summary-v2
 
-Every deploy scorecard follows `.claude/shared/deploy-failure-policy.md`.
-Keep a cumulative DELEGATED list of failure descriptions and repair-agent links;
-no attribution column or acknowledgement state. These repairs do not block
-the originating deploy. Preserve entries across refreshes and resume.
-In the fixed **EXTERNAL PROVIDER FAILURES** box, show each
-unresolved **🚨🚨 EXTERNAL PROVIDER FAILURE — <provider>: <reason> — NEEDS FIXING**
-with affected checks and evidence. Keep the shared-axis stage timeline last.
-Outages, exhausted credits and credential or billing changes only the user can make are non-blocking and create no repair agent. Waived or failed checks never become
-PASS; preserve original measurements and native outcomes.
+- Every deploy progress and final report populates `.claude/shared/deploy-scorecard-template.html` (`deploy-summary-v2`), keeping the CSS and layout of the user-approved visual https://boxes.dev/visuals/vis_1997f1fd05813cc9be440f44d5700ffe, in this order:
+  1. Title with actual colored **SHIPPED / NOT SHIPPED** status.
+  2. Elapsed time immediately below.
+  3. One **WHAT DEPLOYED** box.
+  4. One cumulative **DELEGATED** box: each handed-off failure's description and repair-agent link, with no attribution column or acknowledgement state, kept across refreshes and resume.
+  5. One **EXTERNAL PROVIDER FAILURES** box: each unresolved **🚨🚨 EXTERNAL PROVIDER FAILURE — <provider>: <reason> — NEEDS FIXING** with its affected checks and evidence.
+  6. One **FOLLOWUPS** box, only if follow-ups exist.
+  7. Last, concise colored per-stage bars on **one shared elapsed-time axis**.
+- This layout supersedes the general placement rules and older section/alert placement; only evidence-backed values, applicable stage rows and attempt intervals change, and a layout change needs an explicit user request and a new documented version.
+- Never replace the boxes with a lane table or add production/validation hashes, observed/producer noise or a secondary deploy-owner-complete line; provenance stays in the underlying evidence.
+- The timeline starts at the original durable deploy start and plots every stage and attempt from actual start/end instants on the same labeled ticks and scale, so concurrency, retries and gaps stay visible, in progress and final cards.
+- Never normalize rows separately, reset clocks at retries or replace bars with duration totals; keep live intervals and unknown boundaries explicit without inventing timestamps.
+- v2's only change from v1 is the work/automation/wait breakdown inside the timeline box: blue for recorded work and automation, amber for waits, a muted amber pattern for historical waits with no recorded reason, rows labeled as well as colored, and wait reasons visible.
+- Failure ownership and provider exceptions follow `.claude/shared/deploy-failure-policy.md`; waived or failed checks never become PASS, and original measurements and native outcomes stay visible.
+- An AgentCard production lane elected with `scripts/deploy production --skip-agentcard "<reason>"` stays visible as **SKIPPED — <reason>**: no PASS, cleanup or financial settlement, no other gate skipped, and original failures, cleanup obligations and unsettled funds preserved; sandbox lifecycle tasks are smoke rows.
+- A benchmark scorecard may be linked as supporting evidence but never replaces this card or its timeline.

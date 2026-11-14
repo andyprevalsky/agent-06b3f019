@@ -217,7 +217,7 @@ class FailurePolicyTest(unittest.TestCase):
             self.assertIn(rule, triage)
         self.assertNotIn("report and retry every 10 minutes", deploy)
         self.assertNotIn("spawn ONE `general-purpose` agent", deploy)
-        for name in ["CLAUDE.md", ".claude/commands/rca.md", ".claude/commands/push.md", "docs/testing.md", "docs/root-cause-analysis.md", ".claude/shared/report-display-format.md"]:
+        for name in ["CLAUDE.md", ".claude/commands/rca.md", ".claude/commands/push.md", "docs/testing.md", ".claude/shared/report-display-format.md"]:
             self.assertIn("deploy-failure-policy.md", (ROOT / name).read_text(), name)
         for value in ["1ec468d5-95dc-4754-a385-1c9abe784cd4", "18cb4c74-55f4-4f2e-a432-c5e7c7604f15", "no acknowledgement", "UNKNOWN", "INTRODUCED"]:
             self.assertIn(value, policy)

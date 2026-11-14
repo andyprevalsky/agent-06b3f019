@@ -239,6 +239,10 @@ def build_workspace(fixture: Fixture, parent: Path, files_from: Optional[Path] =
     if fixture.remote:
         origin = top / "origin.git"
         _git(["clone", "-q", "--bare", "--no-hardlinks", str(repo), str(origin)], parent, env)
+        # A local push starts receive-pack in the bare repository without the
+        # sender's command-scope -c options. Join its writers before archiving.
+        _git(["--git-dir", str(origin), "config", "gc.autoDetach", "false"], parent, env)
+        _git(["--git-dir", str(origin), "config", "maintenance.autoDetach", "false"], parent, env)
         # The bare clone records the build directory as its own origin; drop it so
         # the archive carries no host path and stays byte-identical across builds.
         _git(["--git-dir", str(origin), "remote", "remove", "origin"], parent, env)

@@ -311,3 +311,49 @@ for pending_status in 0 3; do
 done
 
 echo "PASS: cloudbench PID birth identities survive a wall-clock step"
+
+# The boolean proc-start matcher must not fork a classification pipeline for
+# every target; its absent/unknown callers still use the unchanged richer API.
+pid_match_single_observation_contract() (
+    local trace="$TMP_ROOT/proc-match-depth" birth initial_depth="$BASH_SUBSHELL"
+    birth="$(cloudbench_pid_start_time "$$")"
+    [ -n "$birth" ] || fail "could not obtain the current native birth"
+    eval "$(declare -f cloudbench_proc_pid_observation | sed '1s/cloudbench_proc_pid_observation/native_match_observation/')"
+    cloudbench_proc_pid_observation() {
+        printf '%s\n' "$BASH_SUBSHELL" >> "$trace"
+        native_match_observation "$@"
+    }
+    cloudbench_pid_matches_start "$$" "$birth" || fail "live native birth did not match"
+    [ "$(wc -l < "$trace" | tr -d ' ')" = 1 ] || fail "boolean match repeated native observation"
+    [ "$(cat "$trace")" = "$((initial_depth + 1))" ] || fail "boolean match forked nested classification shells: observed $(cat "$trace"), expected $((initial_depth + 1))"
+    ! cloudbench_pid_matches_start "$$" "${birth}-foreign" || fail "foreign birth matched"
+    ! cloudbench_pid_matches_start 1 "$birth" || fail "PID1 matched"
+    ! cloudbench_pid_matches_start invalid "$birth" || fail "invalid PID matched"
+    ! cloudbench_pid_matches_start 999999999 "$birth" || fail "absent PID matched"
+    cloudbench_proc_pid_observation() { return 1; }
+    ! cloudbench_pid_matches_start "$$" "$birth" || fail "unreadable native birth matched"
+    cloudbench_proc_pid_observation() { return 0; }
+    ! cloudbench_pid_matches_start "$$" "$birth" || fail "empty native birth matched"
+    cloudbench_proc_pid_observation() { printf '%s\tZ\n' "$birth"; }
+    cloudbench_pid_matches_start "$$" "$birth" || fail "native birth predicate changed zombie classification"
+    # Legacy records retain the classifier; no Linux shortcut may accept them.
+    cloudbench_pid_birth_state() { printf '%s\n' "$legacy_state"; }
+    local legacy_state=live
+    cloudbench_pid_matches_start "$$" legacy-record || fail "legacy live dispatch changed"
+    legacy_state=absent
+    ! cloudbench_pid_matches_start "$$" legacy-record || fail "legacy absent matched"
+    legacy_state=unknown
+    ! cloudbench_pid_matches_start "$$" legacy-record || fail "legacy unknown matched"
+)
+pid_match_single_observation_contract
+echo "PASS: boolean native birth match observes once without nested classification forks"
+
+python3 - "$ROOT_DIR/scripts/run-deploy-structural-gates.py" <<'PID_GATE'
+import ast,sys
+from pathlib import Path
+commands=[]
+for node in ast.walk(ast.parse(Path(sys.argv[1]).read_text())):
+    if isinstance(node,ast.Call) and isinstance(node.func,ast.Name) and node.func.id=='Gate' and len(node.args)>=2 and isinstance(node.args[0],ast.Constant) and node.args[0].value=='cloudbench-pid-identity':
+        commands.append(ast.literal_eval(node.args[1]))
+assert commands==[('bash','scripts/tests/cloudbench-pid-identity.test.sh')],commands
+PID_GATE

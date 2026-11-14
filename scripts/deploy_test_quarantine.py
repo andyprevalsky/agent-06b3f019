@@ -515,6 +515,8 @@ def _domain_case_markers(occurrence: dict, case: object, root: Path, path: str) 
     only when the flaky first attempt failed exactly that one case and the marker file records that
     label with exactly one function that carries the quarantine marker.
     """
+    if path.endswith(('.ts', '.tsx')):
+        return _ts_domain_case_markers(occurrence, case, root, path)
     if not isinstance(case, str) or not re.fullmatch(r'[A-Za-z_]\w*', case):
         raise ValueError('case must be the recorded blackbox case label')
     failed = _DOMAIN_SINGLE_FAILURE.findall(str(occurrence.get('detail') or ''))
@@ -530,6 +532,52 @@ def _domain_case_markers(occurrence: dict, case: object, root: Path, path: str) 
     if len(names) != 1:
         raise ValueError(f'{path} must record case {case} with exactly one test function')
     return [m for m in markers(root, [path]) if m['name'] in names and m.get('owner') is None]
+
+
+_ANSI = re.compile(r'\x1b\[[0-?]*[ -/]*[@-~]')
+# node:test TAP top-level failures and the custom blackbox runners' `FAIL  <case> (<ms>ms)` / `FAIL <case>` lines.
+_TS_FAILED_CASE = (re.compile(r'^not ok \d+ - (.+?)\s*$', re.M), re.compile(r'^FAIL  (.+?) \(\d+ms\)$', re.M),
+                   re.compile(r'^FAIL (?! )(.+?)\s*$', re.M))
+
+
+def _ts_first_attempt_texts(occurrence: dict, root: Path) -> list[str]:
+    """The flaky occurrence's own detail plus its gate's native per-domain log, first attempt only."""
+    texts = [str(occurrence.get('detail') or '')]
+    round_, phase, gate, unit = (occurrence.get(k) for k in ('round', 'phase', 'gate', 'unit'))
+    if (type(round_) is int and all(isinstance(v, str) and re.fullmatch(r'[A-Za-z0-9_.-]+', v)
+                                    for v in (phase, gate, unit))):
+        folder = state_dir(root) / 'attempts' / str(round_) / phase / gate
+        if folder.resolve().is_relative_to(root.resolve()):
+            for log in sorted(folder.glob('remote-artifact/**/' + unit + '.log')):
+                texts.append(log.read_text(errors='replace').split('\n=== attempt 2', 1)[0])
+    return [_ANSI.sub('', text) for text in texts]
+
+
+def _ts_domain_case_markers(occurrence: dict, case: object, root: Path, path: str) -> list[dict]:
+    """A TypeScript blackbox domain's FLAKY unit names no test; bind its single failed native case.
+
+    The case is the test title (node:test) or the runner's case label, as printed in the first attempt.
+    It binds only when that attempt failed exactly this one case and the marker file carries exactly
+    one quarantine marker whose name is that case.
+    """
+    if not isinstance(case, str) or not case.strip() or '\n' in case:
+        raise ValueError('case must be the recorded blackbox case label')
+    failed = set()
+    for text in _ts_first_attempt_texts(occurrence, root):
+        for pattern in _TS_FAILED_CASE:
+            failed.update(name.strip() for name in pattern.findall(text))
+    if failed != {case}:
+        raise ValueError(f"case {case} is not the single failed case of FLAKY unit {occurrence['unit']}")
+    try:
+        text = (root / path).read_text(errors='replace')
+    except OSError:
+        return []
+    # Bind the quoted case label written directly before its marker, independent of earlier literals.
+    lines = {text.count('\n', 0, hit.end() - len(hit.group(2))) + 1 for hit in re.finditer(
+        r'([\'"`])' + re.escape(case) + r'\1\s*,\s*(?:fn\s*:\s*)?(quarantine\(\s*\{)', text)}
+    if len(lines) > 1:
+        raise ValueError(f'{path} must mark case {case} exactly once')
+    return [m for m in markers(root, [path]) if m['line'] in lines and m.get('owner') is None]
 
 
 def link_repair(root: Path, occurrence_id: str, repair: str, paths: list[str] | None = None) -> list[str]:

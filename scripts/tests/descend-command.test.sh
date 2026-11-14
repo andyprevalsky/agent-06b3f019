@@ -38,45 +38,215 @@ if git -C "$ROOT_DIR" check-ignore -q "$DESCEND_STEP_HISTORY"; then
   fail "/descend step history must not be gitignored"
 fi
 
-require_text 'Every failed task gets its own read-only triage card' "triage every failure"
-require_text 'every cluster — a singleton included — enters its own `/RCA` cycle' "RCA each cluster"
-require_text 'Require the unchanged owning-boundary repro red then green' "causal red/green proof"
-require_text 'Every required run must pass.' "complete outcome proof"
-require_text 'Do not rerun a failed proof to look for a pass' "no pass shopping"
-require_text 'Split the failing siblings out' "split over-wide clusters"
-require_text '**Default substrate: cloud fleet.**' "default cloud fleet"
-require_text '20 * infra_failed_jobs >= scheduled_total' "original-denominator infra stop"
-require_text '## One benchmark command' "one benchmark entrypoint"
-require_text 'scripts/descend_step_log.py report' "iteration timing report"
-require_text 'FINAL_CHANGE_REVIEW' "one final change review"
-require_text '**Default authorization: auto-fix now; user review at the end.**' "default autonomous branch fixes"
-require_text 'A missing historical FE link, recording, or publication receipt does not block' "historical media does not block grounded repair"
-require_text 'This automatic loop does not authorize a full `/deploy` or production changes.' "no default full deploy or production changes"
-require_text 'TASK_DEFINITION_DEFECT' "independent task-definition gate"
-require_text 'GROUNDED' "strong grounding gate"
-require_text 'at most 8' "eight fixes per iteration"
-require_text 'counts individual scheduled benchmark runs in one CLI launch' "batch counts runs independent of k"
-require_text 'size 20 at `-k 2` means 10 distinct tasks run twice each' "k2 first batch arithmetic"
-require_text 'Increase the next batch size by 10 **runs** up to 70' "size ramp"
-require_text 'iteration with fewer than 5% confirmed infra errors' "infra failures govern ramp"
-require_text 'Sort **all** tasks before the first launch' "sort complete task catalog"
-require_text 'Within a five-iteration rotation window, retain' "retain current cohort while size grows"
-require_text 'After the fifth iteration, switch to the next unvisited cohort' "rotation schedule"
-require_text 'shortest effective timeout first' "shortest timeout first"
-require_text 'cap `--concurrency` to the verified provider limit' "provider-safe queued copies"
-require_text 'Read `/benchmark` before **every** benchmark launch' "benchmark skill before each launch"
-require_text 'Start `/goal` yourself' "agent starts goal"
-require_text "each task's two most recent terminal, scored benchmark copies" "rolling Polar k2 acceptance"
-require_text 'a rolling-history goal does not require one simultaneous full-slice' "rolling acceptance across batches"
-require_text 'Run `/deploy` only if a change directly affects production' "no routine deploy"
-require_text 'At `ITERATION_RETRO` after every run' "iteration speed reflection"
-require_text 'Bench run times come from producer artifacts' "producer benchmark times"
-require_text 'Overall slice: <passed_original>/<total_original> passed' "fixed original denominator"
-require_text 'Latest run: <passed_run>/<total_run> passed' "separate subset denominator"
-require_text 'agents/benchmarks/history/descend_steps.jsonl' "tracked timing history"
-if grep -Fq 'while the latest run contains any INFRA result:' "$DESCEND_COMMAND"; then
-  fail "obsolete global zero-infra gate"
+# /descend runs one loop: cloud-fleet batches, one self-deduplicating /RCA per
+# failed task, a 95% full-slice goal and /deploy's approval step as the only
+# review. Each pin is an exact phrase of the command's key decisions.
+section_text() {
+  local start="$1" stop="$2"
+  grep -Fxq -- "$start" "$DESCEND_COMMAND" || fail "/descend must keep its '$start' section"
+  grep -Fxq -- "$stop" "$DESCEND_COMMAND" || fail "/descend must keep its '$stop' section"
+  awk -v start="$start" -v stop="$stop" '
+    $0 == start { inside = 1 }
+    inside && $0 == stop { exit }
+    inside { print }
+  ' "$DESCEND_COMMAND" | tr -s '[:space:]' ' '
+}
+
+require_section_text() {
+  local section="$1" text="$2" description="$3"
+  [[ "$section" == *"$text"* ]] || fail "$description"
+}
+
+# Done, process and state machine.
+require_text 'One full-slice run reaches a 95% pass rate' "/descend must finish when one full-slice run reaches 95%"
+require_text 'then start `/deploy`, whose approval step is the only review' "/descend must make /deploy's approval step its only review"
+require_text 'never add another gate' "/descend must not add gates beyond the user's acceptance rule"
+require_text 'Start the descent with `/goal` on the slice reaching 95%.' "/descend must run as a /goal on the 95% slice target"
+require_text 'Read `/benchmark`, `/rca` and `/deploy` first' "/descend must load the commands it orchestrates"
+require_text 'python3 scripts/cloudbench_catalog.py resolve agents/benchmarks/tasks.json <slice>' "/descend must resolve its slice through the catalog"
+require_text 'freeze its names, count and goal in state' "/descend must freeze the resolved slice"
+for state in RESOLVE_SLICE SYNC_CHECKPOINT PLAN_BATCH RUN_BATCH OBSERVE INFRA_REPAIR RCA_FAILURES \
+  ITERATION_RETRO NEXT_BATCH_OR_ROTATION RERUN_FULL_SLICE FINAL_CHANGE_REVIEW; do
+  require_text "| \`$state\` |" "/descend state machine must include $state"
+done
+require_text '| `DONE` / `BLOCKED` |' "/descend state machine must end in DONE or BLOCKED"
+require_text 'Once the batches have covered every task and pass at 95% or more, run the whole slice as one launch; below 95% returns to 7' \
+  "/descend must rerun the whole slice once batches cover it at 95%"
+require_text 'Name the slowest step and apply one speedup, or record why none exists' "/descend must retro every iteration for one speedup"
+require_text 'an explicit user hold or go-gate overrides automatic batch advance' "/descend must honor user holds over automatic batches"
+require_text "never import another run's profile" "/descend must persist the user's own run profile"
+require_text 'an unreproduced cause stays open' "/descend must keep unreproduced causes open"
+
+# Running benchmarks: cloud fleet by default, one launch per batch, no proof reruns.
+require_text 'scripts/run-bench <tasks...> -k K --concurrency N' "/descend must launch batches through run-bench with -k and --concurrency"
+require_text 'Run every batch and rerun on the cloud fleet' "/descend must default benchmark runs to the cloud fleet"
+require_text 'use `--local` only when the user asks' "/descend must require an explicit user request before using --local"
+if grep -Fq 'scripts/run-bench --local <task>' "$DESCEND_COMMAND"; then
+  fail "/descend must not hardcode --local for benchmark reruns"
 fi
+require_text 'Never split a batch across launches and never launch proof reruns; the next batch run is the outcome proof' \
+  "/descend must launch each batch once and use the next batch as outcome proof"
+require_text 'A sharded (>32-copy) run needs a clean pushed commit' "/descend must pin sharded runs to a clean pushed commit"
+require_text 'copy its evidence, TERM its exact owner, and wait for its resources to be released before relaunching' \
+  "/descend must supersede a live run only through its exact owner"
+require_text 'scripts/run-bench monitor <run-dir>' "/descend must observe runs through run-bench monitor"
+require_text 'diagnose errors with sub-agents as they arrive' "/descend must diagnose errors while the batch runs"
+require_text 'publish the card at start, every 15 minutes, when nothing is left queued and at end' "/descend must publish its card on the fixed cadence"
+
+BATCH_SCHEDULE="$(section_text '## Batch schedule' '## Stopping conditions')"
+require_section_text "$BATCH_SCHEDULE" '`-k` sets how many copies of each run (20 tasks at `-k 3` schedule 60 copies)' \
+  "/descend must count batch size in tasks and copies with -k"
+require_section_text "$BATCH_SCHEDULE" 'Start at 20 tasks; after a batch with at least a 70% pass rate grow by 10 (at most 70), and after one below 70% shrink by 10 (at least 20).' \
+  "/descend must start at 20 tasks and grow or shrink by 10 around a 70% pass rate within 20-70"
+require_section_text "$BATCH_SCHEDULE" 'Order unvisited tasks by shortest effective timeout first' "/descend must order batches by shortest effective timeout"
+require_section_text "$BATCH_SCHEDULE" 'keep a cohort for 5 iterations' "/descend must rotate cohorts every 5 iterations"
+require_section_text "$BATCH_SCHEDULE" 'after the last cohort, loop back to the first' "/descend must loop back to the first cohort"
+require_section_text "$BATCH_SCHEDULE" 'A batch stopped at 5% infra is rerun after its infra repair and never counts as an iteration' \
+  "/descend must not count infra-stopped batches as iterations"
+require_section_text "$BATCH_SCHEDULE" 'and the rotation cursor in state' "/descend must persist the batch rotation cursor"
+
+STOPPING="$(section_text '## Stopping conditions' '## RCA per failure')"
+require_section_text "$STOPPING" '`scheduled_total > 0 && 20 * infra_failed_jobs >= scheduled_total` (30 of 600; exactly 5% stops)' \
+  "/descend must stop at >=5% infra of the fixed scheduled total, equality included"
+require_section_text "$STOPPING" 'count each scheduled job once, retries never change either count' "/descend must keep the infra denominator fixed"
+require_section_text "$STOPPING" "unknown or cancelled jobs without infra evidence don't count" "/descend must not count unknown jobs as infra"
+require_section_text "$STOPPING" 'Fix those infra blockers immediately (ship with `/push` if production needs them), then rerun the same batch until it completes under 5%' \
+  "/descend must repair infra autonomously and rerun the same batch"
+require_section_text "$STOPPING" 'never auto-launch after NO TERMINAL ATTEMPTS' "/descend must not auto-launch after a run with no terminal attempts"
+require_section_text "$STOPPING" 'Preserve the first breach, original clocks and every physical attempt.' "/descend must preserve infra-stop evidence"
+
+RCA_PER_FAILURE="$(section_text '## RCA per failure' '## Fixes')"
+require_section_text "$RCA_PER_FAILURE" 'INFRA means the environment failed before a trustworthy verdict; HARNESS means a trustworthy verdict failed real criteria' \
+  "/descend must define INFRA and HARNESS"
+require_section_text "$RCA_PER_FAILURE" 'As each task fails, start one muted `/RCA` thread for it' "/descend must start one /RCA per failed task"
+require_section_text "$RCA_PER_FAILURE" 'a 100-minute time box' "/descend must time-box each RCA at 100 minutes"
+require_section_text "$RCA_PER_FAILURE" 'fixing starts while the batch still runs' "/descend must start RCAs before the batch ends"
+require_section_text "$RCA_PER_FAILURE" 'RCAs dedupe themselves' "/descend RCAs must deduplicate themselves"
+require_section_text "$RCA_PER_FAILURE" 'hands its task to that owner with its evidence (run, attempt and agent IDs, FE link, the matching boundary) and stops' \
+  "a duplicate RCA must hand over its evidence to the owner"
+require_section_text "$RCA_PER_FAILURE" 'the later of two RCAs naming the same site hands over the same way' "/descend must resolve concurrent RCAs of one defect"
+require_section_text "$RCA_PER_FAILURE" 'Never treat a shared symptom (failure string, evaluator, status, timeout, website or issue class) as the same defect.' \
+  "/descend must not dedupe RCAs on a shared symptom"
+require_section_text "$RCA_PER_FAILURE" 'prove evaluator defects with judge-only replays and count the verdicts they change' "/descend must prove evaluator defects"
+require_section_text "$RCA_PER_FAILURE" 'Every RCA names a concrete defect at a code site (does X, should do Y, observed Z); a measurement is not a cause.' \
+  "every RCA must name a concrete defect"
+
+FIXES="$(section_text '## Fixes' '## Final change review')"
+require_section_text "$FIXES" 'At 90 minutes tell the owner: "10 minutes left: commit what works and hand back your evidence now, or it is lost." At 100 minutes take what it handed back.' \
+  "/descend must warn RCA owners at 90 minutes and collect at 100"
+require_section_text "$FIXES" 'the RCA asks the parent for a check slot (diagnosis uses the batch'"'"'s existing evidence, never a new run); the parent grants it only when the task' \
+  "an RCA's end-to-end check must be admitted by the parent"
+require_section_text "$FIXES" 'the RCA runs only its own task once on the cloud fleet with `scripts/run-bench <task> --wait` in the background, never `--local`, with `CLOUDBENCH_CAMPAIGN_GLOBAL_BENCHES` set to' \
+  "an RCA's end-to-end check must be one cloud run counted against the batch's provider budget"
+require_section_text "$FIXES" 'if it is still running at minute 95 the RCA TERMs its exact controller and confirms release before handing back' \
+  "an RCA's end-to-end check must be released inside the time box"
+require_section_text "$FIXES" "The next batch launches once every RCA's fix is applied or its time box expires" "/descend must not wait past the RCA time box"
+require_section_text "$FIXES" 'an expired RCA keeps its evidence, carries over, and never ships a guessed repair' "an expired RCA must carry over without a guessed fix"
+require_section_text "$FIXES" 'it never uses a full end-to-end benchmark rerun as proof' "RCA fixes must be proven by isolated repros, not benchmark reruns"
+require_section_text "$FIXES" 'lands that regression in the owning suite' "RCA fixes must land a regression"
+require_section_text "$FIXES" 'Never run `scripts/setup-db.sh` from a child worktree' "RCA worktrees must not reset shared databases"
+require_section_text "$FIXES" 'RCA workers never contact the user, change the active benchmark snapshot, launch batches or deploy' \
+  "/descend workers must leave users, runs and deploys to the parent"
+require_section_text "$FIXES" 'its own row-tagged commit on the descent branch so it can be ablated' "/descend must apply each fix as an ablatable commit"
+require_section_text "$FIXES" 'Never `/deploy` to test a change; infra blockers that production needs ship with `/push`, everything else waits for the end.' \
+  "/descend must not deploy to test a change and must ship infra blockers with /push"
+require_section_text "$FIXES" 'a task that passes confirms its fix; a task that still fails gets a fresh RCA from its newest run' \
+  "/descend must confirm fixes in the next batch run"
+
+require_text 'changes only when a fresh read-only cross-reviewer, independent of the RCA and fix authors' "/descend must cross-review every task-definition change"
+require_text 'never loosens criteria, raises a timeout or renames a task' "/descend task edits must not loosen benchmarks"
+require_text 'Never weaken a repro, relabel a runtime or product defect as INFRA' "/descend must not relabel defects as INFRA"
+require_text 'A missing compute token is not a skip' "/descend must treat compute-token fallback failures as bugs"
+
+FINAL_REVIEW="$(section_text '## Final change review' '## State and timing')"
+require_section_text "$FINAL_REVIEW" "\`/deploy\`'s approval step covers the hunks its guards flag (a GROUNDED golden review clears them)" \
+  "/descend's final change review must be /deploy's approval step for guarded changes"
+require_section_text "$FINAL_REVIEW" 'every task-definition edit goes to the user with its cross-review evidence' "task-definition edits must reach the user"
+require_section_text "$FINAL_REVIEW" 'A rejected change is reverted, then its tasks and the full slice are rerun before the deploy freeze' \
+  "a rejected change must be reverted and the slice rerun"
+require_section_text "$FINAL_REVIEW" 'Quarantined tasks are listed in the same packet with their provider evidence.' "quarantines must be reported in the review"
+
+STATE_TIMING="$(section_text '## State and timing' '## Response contract')"
+require_section_text "$STATE_TIMING" '.context/descend/<run-id>/state.json' "/descend must keep durable state"
+require_section_text "$STATE_TIMING" 'original slice, task list, count and goal' "/descend state must preserve the original slice denominator"
+require_section_text "$STATE_TIMING" "latest subset; each task's latest accepted status" "/descend state must track the latest subset and every task's status"
+require_section_text "$STATE_TIMING" 'frozen scheduled total, terminal attempts and infra counts' "/descend state must freeze the scheduled total"
+require_section_text "$STATE_TIMING" 'the RCA ledger (task, owner thread, named defect, state, handed-to)' "/descend state must hold the RCA ledger"
+require_section_text "$STATE_TIMING" 'the change ledger: row tag to commit SHA, which hunks are guarded, golden-reference verdict and reviewer' \
+  "/descend state must hold the change ledger"
+require_section_text "$STATE_TIMING" 'After compaction reload state, never rebuild it from memory' "/descend must reload state after compaction"
+require_section_text "$STATE_TIMING" 'agents/benchmarks/history/descend_steps.jsonl' "/descend must write step timings to tracked history"
+require_section_text "$STATE_TIMING" 'give each RCA lane its own `--lane rca-<ID>` pair' "/descend must time RCA lanes separately"
+require_section_text "$STATE_TIMING" 'pass only verified counts with `--detail`' "/descend timing details must be verified counts"
+require_section_text "$STATE_TIMING" 'Commit new timing rows alone before every `/sync` and before the final response.' "/descend must commit timing rows alone before syncing"
+require_section_text "$STATE_TIMING" '`/sync` before the first batch, before each fix worktree and before every batch' "/descend must define its /sync checkpoints"
+require_section_text "$STATE_TIMING" 'before syncing a dirty controller save state and keep in-progress work recoverable' "/descend must preserve dirty work across syncs"
+require_section_text "$STATE_TIMING" 'let a failed sync block only its own action' "a failed sync must block only its own action"
+require_section_text "$STATE_TIMING" 'Export `FACTORY_METADATA_FILE` per `docs/factory-telemetry.md` before the first timed step' \
+  "/descend must export factory metadata before timing"
+require_section_text "$STATE_TIMING" 'report model, effort, tier and collection gaps in the final card' "/descend must report factory metadata gaps"
+require_text 'python3 scripts/descend_step_log.py start --run-id $RUN_ID --slice $SLICE --lane main --step RESOLVE_SLICE --epoch 1' \
+  "/descend must start its first timed step"
+require_text 'python3 scripts/descend_step_log.py transition --run-id $RUN_ID --lane main --step <STATE> --epoch $EPOCH' \
+  "/descend must time every state transition"
+require_text 'finish --status completed --run-terminal --detail scheduled_total=N --detail infra_failed=N' "/descend must close its clock with verified counts"
+require_text 'python3 scripts/descend_step_log.py report --slice $SLICE --task-count $N --lane main --window 5' \
+  "/descend must analyze iteration-speed trends"
+
+# The documented clock commands must run as written through every process state.
+python3 - "$DESCEND_COMMAND" "$DESCEND_STEP_LOGGER" <<'PY'
+import re
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+command, logger = sys.argv[1], sys.argv[2]
+states = re.findall(r"^\| \d+ \| `([A-Z_]+)`", Path(command).read_text(), flags=re.M)
+assert states[0] == "RESOLVE_SLICE" and states[-2:] == ["FINAL_CHANGE_REVIEW", "DONE"], states
+with tempfile.TemporaryDirectory() as temporary:
+    storage = ["--history", f"{temporary}/descend_steps.jsonl", "--state-root", f"{temporary}/state"]
+
+    def run(*args):
+        completed = subprocess.run(
+            [sys.executable, logger, *args, *storage], capture_output=True, text=True, timeout=30
+        )
+        assert completed.returncode == 0, (args, completed.stdout, completed.stderr)
+        return completed.stdout
+
+    run("start", "--run-id", "descend-fixture", "--slice", "polar-20", "--lane", "main",
+        "--step", states[0], "--epoch", "1")
+    for state in states[1:]:
+        run("transition", "--run-id", "descend-fixture", "--lane", "main", "--step", state, "--epoch", "1")
+    run("finish", "--run-id", "descend-fixture", "--lane", "main", "--status", "completed",
+        "--run-terminal", "--detail", "scheduled_total=60", "--detail", "infra_failed=0")
+    report = run("report", "--slice", "polar-20", "--task-count", "0", "--lane", "main", "--window", "5")
+    assert "FINAL_CHANGE_REVIEW" in report, report
+PY
+
+RESPONSE_CONTRACT="$(section_text '## Response contract' '## References')"
+require_section_text "$RESPONSE_CONTRACT" 'Render every card with `scripts/run-bench scorecard <run-dir> --html <file>` per `scripts/run-bench report-format` and publish it' \
+  "/descend must render cards with the shared scorecard command"
+require_section_text "$RESPONSE_CONTRACT" 'never a proof or recovery run' "/descend cards must show real batch or slice runs"
+require_section_text "$RESPONSE_CONTRACT" 'Show `Overall slice: <passed>/<original total>` and `Latest run: <passed>/<batch total>` with producer-artifact times' \
+  "/descend cards must separate Overall slice from Latest run with producer times"
+require_section_text "$RESPONSE_CONTRACT" 'never put a batch denominator in the Overall slice field' "/descend must not present a batch as the full slice"
+require_section_text "$RESPONSE_CONTRACT" 'List each open RCA in ISSUES / NEXT ACTION with its tasks, named defect, owner and fix state.' \
+  "/descend cards must list open RCAs"
+require_section_text "$RESPONSE_CONTRACT" "the largest step regression and improvement, and the retro's chosen speedup" "/descend cards must report timing trends"
+for forbidden in '~~~text' '| Andy decision |' '| Admin approval |' '| Benchmark |'; do
+  [[ "$RESPONSE_CONTRACT" != *"$forbidden"* ]] || fail "/descend response contract must not contain '$forbidden'"
+done
+require_text '.claude/shared/benchmark-report-format.txt' "/descend must use the shared benchmark scorecard"
+
+# Removed gates and formats must not return.
+for removed in 'HARNESS_FIX_DECISION' 'DEPLOY_ADMIN_APPROVAL' 'Exactly two planned user-input gates' \
+  'Every /descend response uses real rendered Markdown' 'Only after an infra-clean run.' \
+  'while the latest run contains any INFRA result:'; do
+  if grep -Fq -- "$removed" "$DESCEND_COMMAND"; then
+    fail "/descend retained removed gate or format: $removed"
+  fi
+done
 
 python3 "$ROOT_DIR/scripts/tests/descend-step-log.test.py"
 bash "$ROOT_DIR/scripts/tests/fleet-infra-stability-proof.test.sh"
