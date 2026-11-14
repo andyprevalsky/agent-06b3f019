@@ -141,6 +141,10 @@ export interface MessageMetadata {
    * the published version it was sent with; rendered in a sandboxed frame.
    */
   inlineView?: InlineViewMessageMetadata;
+  /** Empty assistant file row emitted by a tool, displayed under its result. */
+  artifactOnly?: boolean;
+  /** Exact originating tool call identity, not a browser/code task id. */
+  sourceToolCallId?: string;
   /** Allow additional fields for extensibility */
   [key: string]: unknown;
 }
