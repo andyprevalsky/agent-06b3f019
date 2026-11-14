@@ -20,13 +20,14 @@ tags:
   - race
 sources:
   - PR #1881
+  - PR #1931
   - commit 6ec73775eb17e051cb64c1d0153968596c2a94c9
   - task GitHub Actions run 42956070487
   - commit eaa16bf18045e9c82007fe67e5dc0b2599ef7521
   - task GitHub Actions run 42909060784
   - task GitHub Actions run 42769391635
 repro: agents/benchmarks/code_bench_test.py::test_fixture_git_joins_maintenance_writer_before_archiving
-status: open
+status: fixed
 ---
 
 ## Problem
@@ -60,6 +61,17 @@ V3 retains the ephemeral loopback transport but authenticates readiness with a f
 ### Unauthenticated peer reset correction
 
 The independent reset-first control then found a V3 transport error: ConnectionResetError from an unauthenticated peer aborted the receive loop. V4 closes only that unauthenticated connection and continues under the same original deadline; an aborted accept is handled equivalently. Errors on the authenticated child's release/EOF path still fail. The exact reset-first control, earlier foreign-peer controls, normal/long-path repetitions and complete owning suite are rerun. No production Git behavior or deadline is changed by this transport correction.
+
+### 2026-11-11 repair handoff (FLAKY occurrence be7609ba9f2a48879ca405c3ba6a49a3): local Git 2.56 reproduction and unquarantine
+
+PR #1915 quarantined `test_commit_fixture_rewritten_history_fails` after the same `maintenance.lock` FileNotFoundError at source 9905809a4. The repair thread reproduced it locally; the stock devbox Git 2.43 never fails.
+- Git 2.51 daemonizes `maintenance run --auto --quiet --detach`, but its exiting parent still removes the lock before `git commit` returns (strace: parent unlink 0, daemon unlink ENOENT).
+- Git 2.56.1 `daemonize()` calls `reassign_tempfile_ownership(parent, child)`, so the detached child owns `objects/maintenance.lock` past the command's return.
+- With a locally built Git 2.56.1 (`make NO_RUST=1`), the unquarantined test body was run 25 times in each of 24 parallel workers on main 72186aa4d. About 340 of 600 runs failed with the exact error.
+- On main with the foreground flags from this case (`gc.autoDetach=false`, `maintenance.autoDetach=false`, plus the receive-pack fix 940b77d01a), the identical harness passed 600 of 600. The full `code_bench_test.py` passed 90/90 under Git 2.43 and 2.56.1, and the unquarantined test passed 5/5 consecutive runs.
+- Main released the quarantine marker (repair `thr_d0600bd7048f45cc9763b229460e6026`) at its five-pass deploy streak in dab14eab09. On main 5f38450c71 the same contention harness passes 600/600 and the test 5/5. Test body, assertions and timeouts are unchanged. With the integrated foreground fix, the released marker and this local fail-before/pass-after reproduction, the case is fixed.
+
+The same thread's interim alternative was `-c maintenance.auto=false -c gc.auto=0` in `_git`, with a trace2 no-maintenance-child regression. It was dropped at the main sync, preserving this case's decision to keep maintenance enabled but in the foreground.
 
 ## Human feedback
 
