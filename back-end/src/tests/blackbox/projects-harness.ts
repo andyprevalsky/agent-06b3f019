@@ -39,13 +39,31 @@ export interface Session {
   userId: string;
 }
 
+/** Idempotent reads can reconnect once after an idle keepalive socket closes. */
+async function fetchProjectResponse(url: string, init: RequestInit): Promise<Response> {
+  try {
+    return await fetch(url, init);
+  } catch (error) {
+    const method = init.method?.toUpperCase() ?? 'GET';
+    const cause = error instanceof Error ? error.cause : undefined;
+    const code =
+      cause !== null && typeof cause === 'object' && 'code' in cause ? cause.code : undefined;
+    if (
+      (method !== 'GET' && method !== 'HEAD') ||
+      (code !== 'UND_ERR_SOCKET' && code !== 'ECONNRESET')
+    )
+      throw error;
+    return fetch(url, init);
+  }
+}
+
 export async function call(
   path: string,
   init: { method?: string; body?: unknown; auth?: string; headers?: Record<string, string> } = {}
 ): Promise<Res> {
   const headers: Record<string, string> = { 'Content-Type': 'application/json', ...init.headers };
   if (init.auth !== undefined) headers.Authorization = `Bearer ${init.auth}`;
-  const response = await fetch(`${BASE_URL}${path}`, {
+  const response = await fetchProjectResponse(`${BASE_URL}${path}`, {
     method: init.method ?? 'GET',
     headers,
     ...(init.body === undefined ? {} : { body: JSON.stringify(init.body) }),
