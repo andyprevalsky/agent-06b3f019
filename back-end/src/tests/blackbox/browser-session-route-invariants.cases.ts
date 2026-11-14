@@ -45,3 +45,13 @@ export async function testNavigationRouteGuards(
     404
   );
 }
+
+export async function testConcurrency_parallelAuthChecks(baseUrl: string) {
+  const results = await Promise.all(
+    Array.from({ length: 10 }, () => request(`${baseUrl}/api/browser-session/task/nonexistent`))
+  );
+  const statuses = new Set(results.map((r) => r.status));
+  if (statuses.size !== 1) {
+    throw new Error(`Expected uniform status, got: ${[...statuses].join(', ')}`);
+  }
+}

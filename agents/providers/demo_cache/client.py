@@ -22,7 +22,7 @@ from helpers.trace_archive import archive_json_deferred
 from helpers.tracing import backend_api_headers, current_root_agent_id, current_span_id, span
 
 from . import normalize
-from .context import demo_recording_enabled
+from .context import demo_recording_enabled, owned_recording_namespace
 from .env import demo_cache_env
 from providers.rose.speed import normalize_agent_speed
 
@@ -122,6 +122,8 @@ async def cache_get_record(key: str) -> CacheRecord:
     This exposes `blobPath` for binary cache entries while keeping `cache_get`
     as the simple value-only API used by LLM/search/fetch JSON callers.
     """
+    if owned_recording_namespace() is not None:
+        return {"hit": False, "value": None, "blobPath": None}
     prefetched = _pop_valid_prefetched_record(key)
     if prefetched is not None:
         _queue_archive_cache_read(
@@ -182,6 +184,8 @@ async def cache_get_record(key: str) -> CacheRecord:
 
 
 async def _cache_get_record_direct(key: str) -> tuple[CacheRecord, Optional[int]]:
+    if owned_recording_namespace() is not None:
+        return ({"hit": False, "value": None, "blobPath": None}, 200)
     api_url, api_key = _backend()
     resp = await _shared_client().post(
         f"{api_url}/api/fast-cache/get",
@@ -200,6 +204,8 @@ async def _cache_get_record_direct(key: str) -> tuple[CacheRecord, Optional[int]
 
 
 async def _cache_get_record_batched(key: str) -> CacheRecord:
+    if owned_recording_namespace() is not None:
+        return {"hit": False, "value": None, "blobPath": None}
     global _pending_gets_flush_task
 
     loop = asyncio.get_running_loop()
@@ -299,6 +305,8 @@ async def _deliver_pending_get_batch(
 
 
 async def _fetch_cache_records_many(keys: list[str]) -> dict[str, CacheRecord]:
+    if owned_recording_namespace() is not None:
+        return {key: {"hit": False, "value": None, "blobPath": None} for key in keys}
     api_url, api_key = _backend()
     resp = await _shared_client().post(
         f"{api_url}/api/fast-cache/get-many",
@@ -345,6 +353,8 @@ async def prefetch_cache_records(keys: list[str], *, reason: str = "") -> None:
     This is intentionally one-shot and short-lived: it is not a durable Python LRU,
     so purge/write semantics still belong to the backend demo-cache store.
     """
+    if owned_recording_namespace() is not None:
+        return
     unique_keys = []
     seen = set()
     now = time.monotonic()
@@ -399,6 +409,8 @@ async def cache_get(key: str) -> Optional[Any]:
 
 async def cache_get_first(keys: list[str]) -> tuple[Optional[Any], Optional[str]]:
     """Return `(value, hit_key)` for the first hitting key in `keys`, else `(None, None)`."""
+    if owned_recording_namespace() is not None:
+        return None, None
     ordered: list[str] = []
     seen: set[str] = set()
     for key in keys:
@@ -485,6 +497,8 @@ def clear_position_memo() -> None:
 
 def _schedule_position_prefetch(goal_hash: str, call_site: str, step: int) -> None:
     """Fill the next few durable slots without blocking the current lookup."""
+    if owned_recording_namespace() is not None:
+        return
     ahead = [
         current
         for current in range(int(step) + 1, int(step) + 1 + _POSITION_PREFETCH_AHEAD)
@@ -526,6 +540,8 @@ async def _fetch_position_http(
     2026-10-02, test-mass-agent-run-0). Conversely a cancelled owner used to
     leave its waiters on a future nobody would ever resolve.
     """
+    if owned_recording_namespace() is not None:
+        return None, None
     memo_key = _position_memo_key(goal_hash, call_site, step)
     cached = _position_memo_get(goal_hash, call_site, step)
     if cached is not None:
@@ -553,6 +569,8 @@ async def _fetch_position_http_once(
     step: int,
 ) -> tuple[Optional[Any], Optional[str]]:
     """The single shared get-position round-trip behind ``_fetch_position_http``."""
+    if owned_recording_namespace() is not None:
+        return None, None
     api_url, api_key = _backend()
     body: dict[str, Any] = {"goalHash": goal_hash, "callSite": call_site, "step": int(step)}
     last_error: Optional[Exception] = None
@@ -629,6 +647,8 @@ async def cache_get_position_fallback(
     prefetched in the background so the sequential explore/execute loop
     does not serialize on HTTP.
     """
+    if owned_recording_namespace() is not None:
+        return None, None
     if step is None:
         return None, None
     current = int(step)
@@ -652,6 +672,8 @@ async def trajectory_prior_exists(
     out of rows). Cold namespaces (no prior slot) must not soft-complete —
     that fakes hits and diverges from July replay.
     """
+    if owned_recording_namespace() is not None:
+        return False
     if not goal_hash or step is None or int(step) <= 0:
         return False
     try:
@@ -691,7 +713,8 @@ async def resolve_agent_fast_mode(
         _AGENT_FASTMODE.pop(agent_id, None)
         _AGENT_SPEED.pop(agent_id, None)
     elif agent_id in _AGENT_FASTMODE:
-        return _AGENT_FASTMODE[agent_id]
+        cached = _AGENT_FASTMODE[agent_id]
+        return (False, *cached[1:]) if owned_recording_namespace() is not None else cached
     enabled, goal, write_enabled, root_agent_id, root_goal = False, None, False, None, None
     provider_fast_mode = True
     try:
@@ -745,7 +768,7 @@ async def resolve_agent_fast_mode(
             root_goal,
             provider_fast_mode,
         )
-    return enabled, goal, write_enabled, root_agent_id, root_goal, provider_fast_mode
+    return (False if owned_recording_namespace() is not None else enabled), goal, write_enabled, root_agent_id, root_goal, provider_fast_mode
 
 
 async def soft_complete_allowed_for_agent(
@@ -757,6 +780,8 @@ async def soft_complete_allowed_for_agent(
     Resolves the tree root goal when needed so for_each children under
     ``test-mass-agent-run-0`` inherit stub eligibility.
     """
+    if owned_recording_namespace() is not None:
+        return False
     if normalize.soft_complete_allowed(goal):
         return True
     if not agent_id:
@@ -889,6 +914,7 @@ def cache_write_allowed(goal_hash: str, *, goal: Optional[str] = None, root_goal
     simulation miss writes through to that isolated namespace without touching
     the frozen real-run recording.
     """
+    owned_recording_namespace()  # Validate an explicit owner even on direct write-only calls.
     frozen_demo_hash = not normalize.world_model_cache_scope() and goal_hash in normalize.demo_cache_goal_hashes()
     demo_namespace = frozen_demo_hash or normalize.soft_complete_allowed(goal, root_goal=root_goal)
     return not demo_namespace or demo_recording_enabled()

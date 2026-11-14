@@ -157,7 +157,7 @@ def _call(read: int, write: int, uncached: int, sequence: str | None = "agent:ro
 
 def _assert_ratchet_fails(result) -> None:
     """The floor miss is always detected. claude-code-agent's miss is a built-in warn-only risk
-    (.claude/commands/DEPRECATED_deploy.md L1831); every other task's miss fails the
+    (the former /deploy skill); every other task's miss fails the
     benchmark."""
     from benchmarks.run_benchmark import (
         CLAUDE_CODE_CACHE_RATCHET_WARN_ONLY_TASKS,
@@ -398,7 +398,7 @@ def test_missing_route_telemetry_fails_closed():
 
 def test_claude_code_cache_floor_miss_is_built_in_warn_only_risk():
     """Claude Code's prompt-cache floor miss is warn-only and reported as a risk by the test itself
-    wherever it runs (.claude/commands/DEPRECATED_deploy.md L1831), with no environment opt-in;
+    wherever it runs (the former /deploy skill), with no environment opt-in;
     every other floor stays hard."""
     from benchmarks.run_benchmark import enforce_cache_ratchets
 

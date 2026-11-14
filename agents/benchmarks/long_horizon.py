@@ -45,6 +45,7 @@ from benchmarks.auth_test_site import (
 )
 from benchmarks.code_agent_checks import CHECK_TYPES as CODE_AGENT_CHECK_TYPES
 from benchmarks.live_fixtures import LIVE_FIXTURE_NAMES
+from benchmarks.select_predeploy_benches import require_deploy_category
 from benchmarks.tree_feedback_routing import validate_mid_run_feedback
 
 CATALOG_VERSION = "0.1"
@@ -549,9 +550,21 @@ def validate_task_contract(raw: dict[str, Any]) -> None:
             )
 
 
+def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    """json object_pairs_hook: a repeated key (e.g. two `quarantine` markers left by a textual
+    merge) is an error, never a silent last-one-wins drop."""
+    out: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in out:
+            owner = out.get("name") or dict(pairs).get("name") or "<object>"
+            raise ValueError(f"{owner}: duplicate JSON key {key!r}")
+        out[key] = value
+    return out
+
+
 def load_raw_catalog(path: Path = DEFAULT_CATALOG) -> list[dict[str, Any]]:
     with path.open() as f:
-        data = json.load(f)
+        data = json.load(f, object_pairs_hook=_reject_duplicate_keys)
     if not isinstance(data, list) or not data:
         raise ValueError(f"{path} must contain a non-empty JSON array of tasks")
     # Merge Polar Odysseys + BU Bench V1 (group/tag = polar-bench) so validation
@@ -567,10 +580,15 @@ def load_raw_catalog(path: Path = DEFAULT_CATALOG) -> list[dict[str, Any]]:
 
 
 def validate_catalog(path: Path = DEFAULT_CATALOG) -> list[dict[str, Any]]:
-    """Validate the full unified catalog; returns the raw entries on success."""
+    """Validate the full unified catalog; returns the raw entries on success.
+
+    Every ready entry must also resolve to a predeploy deploy category or opt
+    out explicitly, so /deploy's selector cannot silently ignore a new task.
+    """
     tasks = load_raw_catalog(path)
     for raw in tasks:
         validate_task_contract(raw)
+        require_deploy_category(raw)
     names = [t.get("name") for t in tasks]
     if len(names) != len(set(names)):
         raise ValueError(f"{path}: task names must be unique")

@@ -380,8 +380,8 @@ export async function getAncestors(agentId: string, allowBenchmarkArchive = fals
 // ---------------------------------------------------------------------------
 
 /** Get agent status only (for browser agent pause check). */
-export async function getAgentStatus(agentId: string) {
-  const agent = await repo.findAgentStatus(agentId);
+export async function getAgentStatus(agentId: string, userId?: string) {
+  const agent = await repo.findAgentStatus(agentId, userId);
 
   if (!agent) {
     return null;

@@ -36,11 +36,9 @@ class BrowserStreamingRoseClient(RoseClient):
             if chunk.kind == "restart":
                 forwarded_tool = False
                 self._selected_tool_call_id = None
-            if chunk.kind == "tool_call":
-                should_forward = not forwarded_tool
-                if should_forward:
-                    forwarded_tool = True
-                    self._selected_tool_call_id = str(chunk.data.get("id") or "") or None
+            if chunk.kind == "tool_call" and not forwarded_tool:
+                forwarded_tool = True
+                self._selected_tool_call_id = str(chunk.data.get("id") or "") or None
             if should_forward and self._thinking_stream is not None:
                 await self._thinking_stream.on_chunk(chunk)
             yield chunk
@@ -73,6 +71,7 @@ class BrowserThinkingStream:
         self._finished = False
         self._tool_calls: dict[str, str] = {}
         self._pending_text = ""
+        self._selected_ids: Optional[set[str]] = None
 
     def _redact_delta(self, delta: str, *, ending: bool) -> str:
         # The registry is an activity ContextVar, never a worker-wide snapshot.
@@ -164,11 +163,12 @@ class BrowserThinkingStream:
             # published and give the retry its own stream, so the displayed
             # decision never mixes the two.
             self._pending_text = ""
+            self._selected_ids = None
             if self._started:
                 await self._publish_assistant(delta="", done=True)
             # Tool calls the abandoned attempt announced never get a result from
             # the retry, so close them under the stream that opened them.
-            await self.finish_tools(status="FAILED")
+            await self.finish_tools(status="FAILED", all_tools=True)
             self.stream_id = f"{self.stream_id.rsplit('-', 1)[0]}-{uuid.uuid4().hex[:8]}"
             self._started = False
             return
@@ -218,10 +218,15 @@ class BrowserThinkingStream:
         self._finished = True
         await self._publish_assistant(delta="", done=True)
 
-    async def finish_tools(self, *, status: str) -> None:
+    def select_tools(self, call_ids: list[str]) -> None:
+        self._selected_ids = set(call_ids)
+
+    async def finish_tools(self, *, status: str, all_tools: bool = False) -> None:
         """Resolve detected tools when the corresponding browser action resolves."""
-        tool_calls = list(self._tool_calls.items())
-        self._tool_calls.clear()
+        tool_calls = [(key, name) for key, name in self._tool_calls.items()
+                      if all_tools or self._selected_ids is None or key in self._selected_ids]
+        for key, _ in tool_calls:
+            self._tool_calls.pop(key, None)
         for tool_call_id, tool_name in tool_calls:
             title_prefix = "Finished" if status == "FINISHED" else "Failed"
             await stream_tool_event(

@@ -3,6 +3,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
+import { testBenchmarkPagination } from './agentcard-benchmark-pagination.fixture';
 import {
   DEFAULT_MIN_SANDBOX_FLOAT_CENTS,
   ensureAgentCardSandboxFloat,
@@ -294,6 +295,8 @@ async function main(): Promise<void> {
     );
     assert.equal(resolved, 'ch-live');
   }
+
+  await testBenchmarkPagination(cardholdersResult);
 
   // REGRESSION: a preferred id that exists but is stuck at KYC `pending` must NOT be selected when
   // a verified cardholder is available. Real failure (2026-08-21): the sandbox org held exactly

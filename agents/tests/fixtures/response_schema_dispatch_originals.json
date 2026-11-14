@@ -1,0 +1,151 @@
+[
+  {
+    "task": "polar-bu-055",
+    "root": "5c3fc176-2810-4fa9-a8a5-4b171e1175ed",
+    "run_sha256": "04993cc048b10d6d10ba367821c1c441e2756d57bca774f5e8ce14cd69205f42",
+    "schema": {
+      "fields": [
+        {
+          "description": "One entry per Tesla Supercharger found in Evansville, IN and Bloomington, IN.",
+          "name": "superchargers",
+          "nullable": false,
+          "properties": [
+            {
+              "description": "City the Supercharger is located in (Evansville, IN or Bloomington, IN).",
+              "name": "city",
+              "nullable": false,
+              "required": true,
+              "type": "str"
+            },
+            {
+              "description": "Exact street address of the Tesla Supercharger.",
+              "name": "supercharger_address",
+              "nullable": false,
+              "required": true,
+              "type": "str"
+            },
+            {
+              "description": "Exactly three restaurants within a mile driving distance of this Supercharger.",
+              "maxItems": 3,
+              "minItems": 3,
+              "name": "restaurants",
+              "nullable": false,
+              "required": true,
+              "type": "list[session_file_pointer]"
+            }
+          ],
+          "required": true,
+          "type": "list[object]"
+        }
+      ]
+    }
+  },
+  {
+    "task": "polar-bu-056",
+    "root": "d97ff025-f9aa-4567-985f-c656daeb3d88",
+    "run_sha256": "d255468fe9f4832562a656f8c47d07d97dde9cd47577e12008137b0aaff3127e",
+    "schema": {
+      "fields": [
+        {
+          "description": "Direct URL to NASA's main page listing all upcoming launch events.",
+          "name": "nasa_launches_page_url",
+          "nullable": false,
+          "required": true,
+          "type": "str"
+        },
+        {
+          "description": "All upcoming launch events with their details and crew information.",
+          "name": "launch_events",
+          "nullable": false,
+          "properties": [
+            {
+              "description": "Name of the launch event/mission.",
+              "name": "event_name",
+              "nullable": false,
+              "required": true,
+              "type": "str"
+            },
+            {
+              "description": "Scheduled date of the launch event.",
+              "name": "event_date",
+              "nullable": false,
+              "required": true,
+              "type": "str"
+            },
+            {
+              "description": "Direct link to the official NASA event page for this launch.",
+              "name": "nasa_event_page_url",
+              "nullable": false,
+              "required": true,
+              "type": "str"
+            },
+            {
+              "description": "Whether the mission carries human crew.",
+              "name": "crewed",
+              "nullable": false,
+              "required": true,
+              "type": "bool"
+            },
+            {
+              "description": "For crewed missions: whether crew members have been officially announced. False if not yet announced.",
+              "name": "crew_announced",
+              "nullable": false,
+              "required": true,
+              "type": "bool"
+            },
+            {
+              "description": "List of crew member details for crewed missions with announced crews; empty list if not crewed or crew not yet announced.",
+              "name": "crew_members",
+              "nullable": false,
+              "required": true,
+              "type": "list[session_file_pointer]"
+            }
+          ],
+          "required": true,
+          "type": "list[object]"
+        }
+      ]
+    }
+  },
+  {
+    "task": "polar-bu-058",
+    "root": "ab69d609-22b8-4901-86dc-6f5982da14d9",
+    "run_sha256": "289edca45a3c9ac8e8471fae5f16a7c05aff11a87f2117a41f4c44659ce31295",
+    "schema": {
+      "fields": [
+        {
+          "description": "The 15 sponsors meeting the criteria.",
+          "maxItems": 15,
+          "minItems": 15,
+          "name": "sponsors",
+          "properties": [
+            {
+              "description": "Sponsor name.",
+              "name": "name",
+              "required": true,
+              "type": "str"
+            },
+            {
+              "description": "Years (within the past five CVPR conferences) the sponsor participated.",
+              "maxItems": 5,
+              "minItems": 4,
+              "name": "years_sponsored",
+              "required": true,
+              "type": "list[str]"
+            },
+            {
+              "description": "Per-year sponsorship tier records.",
+              "maxItems": 5,
+              "minItems": 4,
+              "name": "sponsorship_tiers",
+              "required": true,
+              "type": "list[session_file_pointer]"
+            }
+          ],
+          "required": true,
+          "type": "list[object]"
+        }
+      ]
+    }
+  }
+]

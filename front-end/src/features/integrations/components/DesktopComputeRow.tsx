@@ -11,7 +11,9 @@
  *                 line disconnected through the confirmed row DELETE; no usage
  *
  * Usage is whatever agents last reported on the account's token (they carry it
- * on the lease heartbeat they already send); it refreshes when the list loads.
+ * on the lease heartbeat they already send); useComputeAccounts refetches it in
+ * the background and ticks `now` so cooldowns expire on screen. The meter shows
+ * the next reset as visible text (no hover on iOS); a long email truncates first.
  * Compute accounts carry no sync progress; lines are synced or warning only.
  */
 
@@ -78,7 +80,7 @@ export default function DesktopComputeRow({
       onResync: isAvailable ? () => void state.connect() : undefined,
       resyncLabel: 'Re-authenticate',
       resyncing: state.isConnecting,
-      trailing: <SubscriptionUsageMeter account={account} />,
+      trailing: <SubscriptionUsageMeter account={account} now={state.now} />,
     };
   });
   const accounts =

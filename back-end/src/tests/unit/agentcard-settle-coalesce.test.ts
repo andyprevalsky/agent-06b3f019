@@ -13,8 +13,10 @@
 
 import assert from 'node:assert/strict';
 import { nudgeCardholderRecovery } from '../../providers/agentcard/fund-recovery';
+import { AgentCardOrgRuntimeError } from '../../providers/agentcard/org-runtime';
 import {
   UNUSED_MINT_SETTLE_POLL_MS,
+  UNUSED_MINT_SETTLE_THROTTLE_BACKOFF_MS,
   waitForUnusedMintSettled,
   type MintTransferObservation,
 } from '../../providers/agentcard/unused-mint-settle';
@@ -264,6 +266,108 @@ async function main(): Promise<void> {
     });
     assert.equal(transfer?.status, 'reclaimed');
     assert.deepEqual(time.state.sleeps, [UNUSED_MINT_SETTLE_POLL_MS]);
+  });
+
+  // treasury-rails 2026-11-13 (occurrence 1dc793d7): the shared sandbox org throttled
+  // list_transfers for five attempts 28 s into the 240 s settle wait, and the exhausted 429 failed
+  // the deploy gate even though the window refills within a minute.
+  const throttled = (tool: string) =>
+    new AgentCardOrgRuntimeError(
+      `AgentCard Organization MCP rate limit exhausted for ${tool} after 5 attempts; upstream: ` +
+        `AgentCard Organization MCP ${tool} is rate limited: ${tool} failed: Too many requests, ` +
+        'please try again later',
+      429,
+      'agentcard_org_mcp_rate_limited',
+      { tool }
+    );
+
+  await check(
+    'an exhausted org throttle waits out one window, then keeps polling THIS transfer',
+    async () => {
+      const org = fakeOrg();
+      const time = clock();
+      let reads = 0;
+      const transfer = await waitForUnusedMintSettled({
+        cardholderId: OWN,
+        minReleasedCents: MINT,
+        callOrgTool: org.callOrgTool,
+        readTransfer: async () => {
+          reads += 1;
+          if (reads === 2) throw throttled('list_transfers');
+          return reads >= 3
+            ? { status: 'reclaimed', releasedCents: MINT }
+            : { status: 'consumed', releasedCents: 0 };
+        },
+        // The caller's classifier knows nothing about throttles: the wait owns its own pacing.
+        isTransientError: () => false,
+        report: () => undefined,
+        now: time.now,
+        sleep: time.sleep,
+      });
+      assert.equal(transfer?.status, 'reclaimed');
+      assert.equal(reads, 3);
+      assert.deepEqual(
+        time.state.sleeps,
+        [UNUSED_MINT_SETTLE_POLL_MS, UNUSED_MINT_SETTLE_THROTTLE_BACKOFF_MS],
+        'a throttled poll backs off a full org window, not the 8 s poll cadence'
+      );
+    }
+  );
+
+  await check(
+    'a throttle that outlasts the settle window still fails, after a bounded number of polls',
+    async () => {
+      const time = clock();
+      let polls = 0;
+      await assert.rejects(
+        waitForUnusedMintSettled({
+          cardholderId: OWN,
+          minReleasedCents: MINT,
+          callOrgTool: async (tool) => {
+            polls += 1;
+            throw throttled(tool);
+          },
+          readTransfer: transferAfter(0),
+          isTransientError: () => false,
+          report: () => undefined,
+          timeoutMs: 240_000,
+          now: time.now,
+          sleep: time.sleep,
+        }),
+        (error: unknown) =>
+          error instanceof AgentCardOrgRuntimeError &&
+          error.code === 'agentcard_org_mcp_rate_limited'
+      );
+      assert.equal(polls, 5, 'one poll per throttle window across 240 s, then the final one');
+      assert.ok(
+        time.state.sleeps.every((ms) => ms <= UNUSED_MINT_SETTLE_THROTTLE_BACKOFF_MS),
+        'never sleeps past the deadline'
+      );
+    }
+  );
+
+  await check('a non-throttle org error is not mistaken for backpressure', async () => {
+    const time = clock();
+    await assert.rejects(
+      waitForUnusedMintSettled({
+        cardholderId: OWN,
+        minReleasedCents: MINT,
+        callOrgTool: fakeOrg().callOrgTool,
+        readTransfer: async () => {
+          throw new AgentCardOrgRuntimeError(
+            'AgentCard Organization MCP list_transfers failed: Invalid or expired organization token',
+            401,
+            'agentcard_org_mcp_unauthorized'
+          );
+        },
+        isTransientError: () => false,
+        report: () => undefined,
+        now: time.now,
+        sleep: time.sleep,
+      }),
+      /Invalid or expired organization token/
+    );
+    assert.deepEqual(time.state.sleeps, [], 'fails on the first poll without waiting');
   });
 
   await check('an unattributed open recovery does not suppress this cardholder', async () => {

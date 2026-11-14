@@ -1,0 +1,214 @@
+---
+id: 2026-10-28-it13-bu061-calendar-list-and-reference-answer-disagree
+date: 2026-10-28
+title: It13 BU061 returns three from calendar lists while C4 requires six
+surface: agents
+component: polar-list-basis-and-reference-answer
+classification: unresolved
+problem_class: observability-trace-capture-gap
+first_bad_boundary: captured domestic Calendar grosses view yields three overlaps while declared C4 requires six; intended alternative list basis remains unproved
+symptoms:
+  - polar perfect-score failed (3/4 rubrics)
+  - Ground truth is satisfied exactly when applicable: 6
+  - Calendar grosses
+  - top10_overlap_count 3
+tags:
+  - polar
+  - it13
+  - r32
+  - list-basis
+sources:
+  - agent ea21b86b-c081-4992-a1f6-7f0a5227d0c1
+  - plan: R32 run2 control archive 558476e3722793af600c8887029c61f6cb90ce8b985a63bb961cf5ed4508afd4
+  - commit 765caac00ce085dd0359b8342161a8717be7446d
+  - agent 9ab57116-b82e-42c3-a2ae-bab21d4c79ff
+  - fleet run 20261028-230246-3988127
+  - plan: archive 584ca7a9e8ea6a2e17fe4a77ea1f07e68ada5a719bb01dae465ee298db49db1e
+  - plan: normal manifest aad4f5a7589c046d8a264fa4e98732ebe43368bcedaad0acd3e6de68f358cc2e
+repro: none-recorded
+status: open
+---
+
+## Problem
+
+Original BU061 r1, job r001-j0011, completed its root in85.3seconds but failed
+one of four declared rubrics. C1, C2 and C3 each passed; C4 requires exactly6
+while the submitted integer is3. Original taskFAILED/infraFALSE is preserved.
+The assignment began2026-10-28T23:14:06.655977Z; this is bounded offline intake,
+not a completed benchmark repair. Investigator usage is UNMETERED.
+
+All seven normal runtime members and separately labelled supplemental receipts
+match SHA256SUMS. Normal run.json SHA256 is
+244004c03661ea5b334618dfc310989d8f31ba39565adcf7a840b16b06b07348.
+Its provenance records executed765caac, patchnone. The exact qualified source
+ref was fetched once and verified equal765caac; no main sync, environment or
+live campaign change occurred.
+
+## Diagnosis
+
+Original messages16 and20 record successful evaluate results at23:08:39.720Z
+and23:08:49.337Z (browser steps2 and4). The first extracts ten worldwide rows
+from `/year/world/2020/`; the second extracts ten domestic rows from
+`/year/2020/`. The latter final DOM explicitly displays **Calendar grosses**.
+Both extraction scripts select table rows and return their titles and numbers.
+The shared titles are Bad Boys for Life, Sonic the Hedgehog and Dolittle.
+Domestic rows also contain1917, Jumanji, Star Wars and Little Women. These are
+captured observations; their presence alone does not prove the task intended a
+release-year view or that its imported answer is stale.
+
+The actual five-message native verifier request a6f565e52215 has SHA256
+ ebfbe21a0894da32fe99f9f16a05405db59d0dde37ec3144ce60a62c08ad0e89.
+Its final DOM retains the Calendar grosses heading and its TOOL_RESULT entries
+retain both full ten-row lists. The response at23:09:13.950207Z has SHA256
+04d2834265f47b0a6051162b619048a247ab3d72732848c482280f46fa1cf2cd;
+it returns top10_overlap_count=3, task_completed=true, score1.0, explicitly
+calling the domestic view default calendar grosses. No table omission was
+identified at this captured actor-to-verifier boundary.
+
+At exact source765caac, `agents/benchmarks/polar/bu_bench_v1.json` imports
+answer6 for task5a0c2db3-a687-4dfe-b7e7-22d01eae23f6. The catalog producer
+`polar_catalog.py:_bu_entry` adds C4 from that supplied answer. The independent
+`polar_evaluator.py:run_polar_evaluator` judges each rubric and requires all to
+pass. Its original recorded C4 reasoning explicitly acknowledges the same three
+shared titles but fails the answer against6. This is an observed disagreement
+between captured list basis and reference answer, not proof the evaluator code
+miscomputed the intersection or that a task-definition change is warranted.
+
+The offline `.context/rca-r32/inspect_original.py` verifies all packet checksums,
+computes the original list intersection, checks all20 source titles survive the
+native request, and invokes the actual765caac Polar trajectory/user-text builder.
+It passes with intersection3 and C4=6 retained in the reconstructed projection.
+This is custody/arithmetic/projection verification, **not** a failing-bug/repair
+RED-GREEN pair, model replay, or byte parity with an independently retained final
+judge HTTP request. Original structured judge results are retained; no separate
+final judge wire body is established here.
+
+There is no captured navigation to an alternative domestic release-year view:
+recorded URLs are about:blank and the two paths above. Whether another intended
+list yields6, or historical page contents differed, is unproved by this packet.
+No current website queries were made. Thus a deterministic general runtime
+repair cannot be justified from this intake.
+
+Archive searches used `Box Office Mojo`, `calendar release year ground truth`,
+and the earlier exact-answer/list mismatch terms. No same-boundary recurrence
+was established. The fresh-clock case was opened including Solution and Human
+feedback: it addresses missing current-date injection, unlike this explicit2020
+request. Search vocabulary overlap is not recurrence evidence.
+
+## Solution
+
+No runtime candidate, prompt/schema/rubric change, forced answer6, provider
+change or speculative regression test. Keep this OPEN. The next useful evidence
+would identify the task-authoritative domestic list basis and its original
+reference provenance, or existing captured alternative-view observations. Do not
+replace the original grade with a claim that3 is accepted; do not manufacture a
+new browser request to settle the ambiguity during the live campaign.
+
+No provider/model/API/browser/DB/image/publication calls occurred. No original
+source, clocks, task definition or cleanup receipt changed. Exact source and
+packet inspection suffice to exclude a missing-table transport claim at the
+captured native verifier input; they do not prove the task would pass unchanged.
+
+## Later original PASS control (2026-10-29)
+
+The existing BU061r2/j0026 control arrived at01:06:26.500301Z. This is new
+available original evidence, not a reset of the R32 investigation clock.
+Rootea21b86b-c081-4992-a1f6-7f0a5227d0c1 also executed source765caac with no patch.
+Its archive558476e3722793af600c8887029c61f6cb90ce8b985a63bb961cf5ed4508afd4
+and all seven normal members were verified against manifest
+ebaa844951c8b8782483a502d50d0790ecae8931ba90cc355d7ee6389a8e889b.
+Native status is COMPLETED in161.5seconds, and the original declared judge
+passes4/4. Original run1 FAIL and run2 PASS remain unchanged.
+
+The two runs captured exactly the same ordered worldwide top10 and the same
+ordered domestic calendar top10. Independent set intersection of those rows
+is still3: Bad Boys for Life, Dolittle and Sonic the Hedgehog. The new control
+does not invalidate run1's arithmetic or retroactively supply its missing view.
+
+Run2 additionally captured these distinct selectors and complete top10 rows:
+
+- Step5: `/year/2020/`, domestic calendar grosses. Intersection with worldwide:3.
+- Step8: `/year/2020/?grossesOption=totalGrosses`, in-year releases. Intersection:5,
+  adding Tenet and The Croods: A New Age to those three.
+- Step10: `/year/world/2020/?sort=domesticGrossToDate`, the worldwide year list
+  ordered by its Domestic column. Intersection:6, also adding Demon Slayer.
+
+The last table's numeric domestic grosses are descending; its displayed
+worldwide ranks remain3,6,11,7,15,19,16,10,5,1, as expected for a differently
+sorted view. The six-title intersection is independently recomputed from the
+captured rows, not inferred from PASS or from the model's answer. The exact
+same worldwide top10 is used for all three calculations.
+
+The original run2 native verifier request retains the worldwide and domestic
+column-sorted titles; its response returns movies_in_both_top10=6. Request
+SHA256d4d19e461f30b5560c3c0a8d3e2908f5079f8ceee97dcdc911a355c6f16e38fa; response
+SHA256697b08685387ddce40210062e3174334bfd56162b21b54a9130e5b73489e5ff1. Its reasoning explicitly discusses
+all three interpretations and selects the same worldwide list's Domestic
+column because the question anchors to that list. The declared judge accepts
+that choice and the six value. This is an observed difference in selected
+view, not a newly proved universal interpretation rule or a task regrade.
+
+Thus the new control explains why the original outputs differ: the input
+selection differs while arithmetic over each selected pair is consistent.
+No runtime defect, current-site mutation or stale-ground-truth verdict is
+established. No task, rubric, prompt, model, provider or budget change is
+proposed; no paid replay or new web/API/browser capture was performed.
+The original case remains OPEN for any stronger causal claim. Tokens UNMETERED.
+
+## Human feedback
+
+The parent required original evidence before family classification, prohibited
+rubric/answer hardcoding and web research, and clarified that calendar versus
+release-year interpretation is a lead rather than proof of stale ground truth.
+The parent kept the active765caac campaign frozen and authorized only a fetch of
+the exact qualified source ref when it was missing locally.
+
+## Reusable lesson
+
+Pin the captured list basis and reference-answer provenance before treating a numerical disagreement as either a transport bug or a stale benchmark answer.
+
+## R45: It14 original BU061 r1 recurrence (2026-10-29)
+
+The new phase was assigned at02:34UTC; original R32 clock
+2026-10-28T23:14:06.655977Z is retained. Original root
+59772c4a-aa48-46fc-ad22-45ed9248e476 executed
+85d37fc8ab8e284459977debdef34348d825ef84, patchnone. Native COMPLETED in59.5s,
+original taskFAILED at02:29:04.916948Z, infraFALSE. Declared C1–C3 pass and C4
+fails because output3 differs from the unchanged supplied answer6. No outcome,
+source, mode, criterion or original clock was changed.
+
+Archive f14c5b987b255b458afb39337da68b63c505d5410244b9732eb22b9906355491
+and all seven normal member sizes/SHA256 were independently verified. Normal
+manifest a760d7b1f0cc3784759198fb836f2e8953ec4d5f2a75e698db1e658a26473aa4;
+run833176e777a2d4a1e88f71bcc90472b546cda530b39f1bc4b2cfb4fa56000078.
+Supplemental provenance/driver/lifecycle remain separately labelled evidence.
+
+Messages16 and20 retain successful native evaluate results for
+`/year/world/2020/` and `/year/2020/`. Their ordered worldwide and domestic
+calendar top-ten titles match the preceding R32 observations. Independent
+intersection is exactly Bad Boys for Life, Dolittle and Sonic the Hedgehog.
+The only recorded current URLs are these two paths. No release-year or
+`sort=domesticGrossToDate` observation is present in this new run.
+
+The original five-message native verifier dump5a19172f7c97 at02:25:56.329583Z
+has payload SHA256
+22b6c741e4c77625d75ca4b69c4c59dfabf9799cdc7f18fc9f8766588a8d980e.
+It retains all20 table titles and the final DOM's Calendar grosses heading.
+Its response at02:26:04.460314Z, SHA256
+f63056adfa549b46374caa1d865a51a5eeda011c2df3444fa5a6852932786707,
+returns overlap_count3, task_completedtrue, score1.0. Both compressed payloads
+were decoded and checked against their recorded SHA; no image was opened.
+There is no evidence of table loss at this boundary. A separately retained
+final declared-judge HTTP body is not established; the normal run does retain
+all four actual judge decisions, including the C4 failure.
+
+This is a list-selection recurrence, supported by actual inputs rather than
+the shared task ID. The earlier same-source PASS control's domestic-column
+sort yielded6, but does not prove a universal interpretation rule or authorize
+forcing that selector/value. The new source catalog still imports answer6.
+No deterministic general runtime repair is grounded here; the original task
+outcome remains OPEN with respect to stronger causal claims. No duplicate
+fix/test lane, prompt nudge, rubric change, live web/model/API/browser/DB call
+or main synchronization was performed. Next useful evidence would establish
+the task-authoritative list basis rather than regrade this original failure.
+Investigator tokens remain UNMETERED.

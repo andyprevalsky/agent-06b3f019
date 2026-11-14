@@ -709,6 +709,258 @@ def test_tool_call_declaration_dedup_ignores_argument_key_order():
         )
 
 
+_KIMI_REUSED_ID_FIXTURE = Path(__file__).parent / "fixtures" / "llm" / "kimi_k3_reused_tool_call_id.json"
+
+
+def _persisted_rows_from_request(history_messages: list) -> list:
+    """Agent context rows equivalent to an outgoing request's non-system turns.
+
+    The builder adds the "[timestamp] " header and declarations come back as
+    metadata.tool_calls, exactly as run_agent persists them.
+    """
+    import re
+
+    base = datetime(2026, 11, 13, 2, 48, tzinfo=timezone.utc)
+    names = {}
+    rows = []
+    for index, message in enumerate(history_messages):
+        text = re.sub(r"^\[[^\]]+\] ", "", message.get("content") or "")
+        row = {"role": message["role"].upper(), "text": text, "timestamp": (base + timedelta(seconds=5 * index)).isoformat()}
+        if message.get("tool_calls"):
+            calls = []
+            for call in message["tool_calls"]:
+                names[call["id"]] = call["function"]["name"]
+                calls.append({"tool": call["function"]["name"], "tool_call_id": call["id"], **json.loads(call["function"]["arguments"])})
+            row["metadata"] = {"tool_calls": calls}
+        elif message["role"] == "tool":
+            row["metadata"] = {
+                "toolCallId": message["tool_call_id"],
+                "toolName": names[message["tool_call_id"]],
+                "toolStatus": "ERROR" if "failed" in text else "FINISHED",
+            }
+        rows.append(row)
+    return rows
+
+
+def _kimi_sse(tool_calls: list, content: str = "") -> str:
+    events = [
+        {"choices": [{"delta": {"content": content}}]} if content else None,
+        {
+            "choices": [
+                {
+                    "delta": {
+                        "tool_calls": [
+                            {"index": index, "id": call["id"], "type": "function", "function": {"name": call["name"], "arguments": call["arguments"]}}
+                            for index, call in enumerate(tool_calls)
+                        ]
+                    },
+                    "finish_reason": "tool_calls",
+                }
+            ]
+        },
+        {"usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}},
+    ]
+    return "\n".join("data: " + json.dumps(event) for event in events if event) + "\ndata: [DONE]\n"
+
+
+async def _kimi_execute_turn(history, tool_calls: list, content: str = "", *, stored_context: str = ""):
+    """One real execute-loop activity on rose-1-oss/kimi-k3, served from a recorded response.
+
+    ``history`` is the request's non-system messages, or, with ``stored_context``
+    set, the agent's stored context rows handed over the production way:
+    "pending" (same-worker slot) or "backend" (cross-worker fetch).
+    """
+    import httpx
+    from helpers.llm import _pending_llm_context, call_llm_activity
+
+    agent_id = "3f6a83cd-164f-4e55-ab5d-39eb3923f92b"
+    requests = []
+
+    def handler(request):
+        if request.url.host != "openrouter.ai":
+            return httpx.Response(200, json={"ok": True})
+        body = json.loads(request.content)
+        assert body["model"] == "moonshotai/kimi-k3"
+        requests.append(body)
+        return httpx.Response(200, text=_kimi_sse(tool_calls, content), headers={"content-type": "text/event-stream"})
+
+    setup_mock_fn(handler)
+    early_in_progress = []
+
+    async def record_tool_event(**kwargs):
+        early_in_progress.append((kwargs["tool_name"], kwargs["tool_call_id"]))
+
+    backend = AsyncMock(return_value={"agent": {"id": agent_id}, "messages": history})
+    if stored_context == "pending":
+        _pending_llm_context[agent_id] = (history, "Rose execute phase.", None, None, "stream-kimi:1")
+    with (
+        patch.dict(os.environ, {"CEREBRAS_API_KEY": "", "GPT_API_KEY": "", "ANTHROPIC_API_KEY": "", "AZURE_FOUNDRY_API_KEY": ""}),
+        patch("temporalio.activity.heartbeat"),
+        patch("helpers.llm.stream_assistant_chunk", new_callable=AsyncMock),
+        patch("helpers.llm.stream_tool_event", side_effect=record_tool_event),
+        patch("helpers.fetch_config._fetch_agent_data_impl", new=backend),
+        patch("helpers.llm.asyncio.sleep", new=AsyncMock()),
+    ):
+        try:
+            result = await call_llm_activity(
+                messages_or_agent_id=agent_id if stored_context else [{"role": "system", "content": "Rose execute phase."}, *history],
+                model="rose-labs/rose-1-oss",
+                tool_names=["spawn_agent", "wait_for"],
+                agent_id=agent_id,
+                stream_id="stream-kimi-reused-id",
+                call_site="execute_loop",
+                system_prompt="Rose execute phase." if stored_context else None,
+                skip_cache_write=True,
+                pending_context_token="stream-kimi:1" if stored_context == "pending" else None,
+                force_backend_context=stored_context == "backend",
+            )
+        finally:
+            _pending_llm_context.pop(agent_id, None)
+    assert backend.await_count == (1 if stored_context == "backend" else 0)
+    result["_requests"] = requests
+    return result, early_in_progress
+
+
+def _turn_rows(result: dict, *, at: datetime, tool_text: str) -> list:
+    """Persist one turn the way run_agent does: the Nth call of a tool takes the Nth detected id."""
+    positions: dict = {}
+    calls = []
+    for call in result["tool_calls"]:
+        call = dict(call)
+        name = call.pop("tool")
+        detected = [tid for detected_name, tid, _ in result["detected_tools_ordered"] if detected_name == name]
+        calls.append({"tool": name, "tool_call_id": detected[positions.get(name, 0)], **call})
+        positions[name] = positions.get(name, 0) + 1
+    rows = [{"role": "ASSISTANT", "text": result["response"], "timestamp": at.isoformat(), "metadata": {"tool_calls": calls}}]
+    for offset, call in enumerate(calls, start=1):
+        rows.append(
+            {
+                "role": "TOOL",
+                "text": tool_text,
+                "timestamp": (at + timedelta(seconds=offset)).isoformat(),
+                "metadata": {"toolCallId": call["tool_call_id"], "toolName": call["tool"], "toolStatus": "FINISHED"},
+            }
+        )
+    return rows
+
+
+async def test_provider_reused_tool_call_id_keeps_later_llm_calls_buildable():
+    """kimi-k3 numbers tool_call ids per turn, so a retried spawn reused 'spawn_agent:3'.
+
+    Root agent 3f6a83cd (PR #1975 round-7 smoke): the first spawn_agent:3 was
+    rejected (task_name already used) and the corrected spawn came back with the
+    same provider id. Rose persisted that id verbatim as the second declaration's
+    tool_call_id, so every later build of the conversation raised "reuses
+    tool_call_id 'spawn_agent:3' for conflicting declarations" and the agent
+    could never make another LLM call. Replays the recorded request and kimi
+    response through the real activity, then builds the next request.
+    """
+    from helpers.llm import build_llm_messages, convert_context_to_messages
+
+    fixture = json.loads(_KIMI_REUSED_ID_FIXTURE.read_text())
+    history = fixture["history_messages"]
+    history_ids = {call["id"] for message in history for call in message.get("tool_calls") or []}
+    assert "spawn_agent:3" in history_ids
+    assert [call["id"] for call in fixture["response"]["tool_calls"]] == ["spawn_agent:3"]
+
+    result, early_in_progress = await _kimi_execute_turn(
+        history, fixture["response"]["tool_calls"], fixture["response"]["content"]
+    )
+    prior = _persisted_rows_from_request(history)
+    turn = _turn_rows(result, at=datetime(2026, 11, 13, 2, 50, tzinfo=timezone.utc), tool_text="Started browser agent in background.")
+    before = await build_llm_messages(prior, "Rose execute phase.")
+    # Production raised here on every later call_llm_activity.
+    after = await build_llm_messages(prior + turn, "Rose execute phase.")
+
+    [(name, new_id, _)] = result["detected_tools_ordered"]
+    assert name == "spawn_agent"
+    assert new_id not in history_ids, f"provider id {new_id!r} reused an id the conversation already declares"
+    assert new_id == "spawn_agent:3__2", "the rename must be deterministic so replays send identical bytes"
+    assert early_in_progress == [("spawn_agent", new_id)], "the early IN_PROGRESS row must use the same id"
+    assert result["tool_calls"][0]["task_name"] == "fcaptcha_run2"
+
+    # History is never rewritten, so the cached prefix stays byte-identical.
+    assert after[: len(before)] == before
+    declared = {}
+    for message in after:
+        for call in message.get("tool_calls") or []:
+            assert call["id"] not in declared, f"duplicate tool_call id {call['id']!r} sent to the provider"
+            declared[call["id"]] = json.loads(call["function"]["arguments"])
+    assert declared["spawn_agent:3"]["task_name"] == "fcaptcha_demo"
+    assert declared[new_id]["task_name"] == "fcaptcha_run2"
+    results = {message["tool_call_id"]: message["content"] for message in after if message["role"] == "tool"}
+    assert set(results) == set(declared)
+    assert "already used by another agent" in results["spawn_agent:3"]
+    assert "Started browser agent in background." in results[new_id]
+    verifier = convert_context_to_messages(prior + turn, include_assistant=True)
+    assert sum(1 for message in verifier if message["role"] == "tool") == len(declared)
+
+
+async def test_provider_tool_call_id_never_reuses_a_stored_unanswered_declaration():
+    """A stored declaration without a terminal result is stripped from the request but still registered.
+
+    When a tool's activity dies before its terminal row is written, the request
+    builder drops the orphan declaration, yet every later build still registers
+    it. kimi-k3 numbers ids by the calls it can see, so it is likely to emit that
+    stored id again. The claim must cover the stored context, not just the
+    request, on both the same-worker and the cross-worker activity paths.
+    """
+    from helpers.llm import build_llm_messages
+
+    fixture = json.loads(_KIMI_REUSED_ID_FIXTURE.read_text())
+    stored = [
+        {"role": "USER", "text": "Run the FCaptcha demo in a browser agent.", "timestamp": "2026-11-13T02:48:00+00:00"},
+        {
+            "role": "ASSISTANT",
+            "text": "",
+            "timestamp": "2026-11-13T02:49:00+00:00",
+            "metadata": {"tool_calls": [{"tool": "spawn_agent", "tool_call_id": "spawn_agent:3", "goal": "demo", "task_name": "fcaptcha_demo"}]},
+        },
+        {
+            "role": "TOOL",
+            "text": "Starting spawn_agent...",
+            "timestamp": "2026-11-13T02:49:01+00:00",
+            "metadata": {"toolCallId": "spawn_agent:3", "toolName": "spawn_agent", "toolStatus": "IN_PROGRESS"},
+        },
+        {"role": "USER", "text": "Continue.", "timestamp": "2026-11-13T02:49:30+00:00"},
+    ]
+    for stored_context in ("pending", "backend"):
+        result, early = await _kimi_execute_turn(
+            stored, fixture["response"]["tool_calls"], fixture["response"]["content"], stored_context=stored_context
+        )
+        sent_ids = {call["id"] for body in result["_requests"] for message in body["messages"] for call in message.get("tool_calls") or []}
+        assert "spawn_agent:3" not in sent_ids, "the unanswered declaration is stripped from the request"
+        [(_, new_id, _)] = result["detected_tools_ordered"]
+        assert new_id == "spawn_agent:3__2", f"{stored_context}: reused the stored id {new_id!r}"
+        assert early == [("spawn_agent", new_id)]
+        turn = _turn_rows(result, at=datetime(2026, 11, 13, 2, 50, tzinfo=timezone.utc), tool_text="Started.")
+        built = await build_llm_messages(stored + turn, "Rose execute phase.")
+        assert [call["id"] for message in built for call in message.get("tool_calls") or []] == [new_id]
+
+
+async def test_provider_tool_call_ids_stay_unique_within_one_response():
+    """A provider that repeats one id across a parallel batch gets one id per declaration;
+    unique provider ids pass through unchanged."""
+    from helpers.llm import build_llm_messages
+
+    def query(text: str) -> str:
+        return json.dumps({"agents": ["/root/x"], "description": text, "timeout_seconds": 30})
+
+    repeated = [{"id": "wait_for:0", "name": "wait_for", "arguments": query(text)} for text in ("first", "second")]
+    result, early = await _kimi_execute_turn([{"role": "user", "content": "wait twice"}], repeated)
+    ids = [tid for _, tid, _ in result["detected_tools_ordered"]]
+    assert ids == ["wait_for:0", "wait_for:0__2"]
+    assert early == [("wait_for", tid) for tid in ids]
+    rows = [{"role": "USER", "text": "wait twice", "timestamp": "2026-11-13T02:48:00+00:00"}]
+    rows += _turn_rows(result, at=datetime(2026, 11, 13, 2, 49, tzinfo=timezone.utc), tool_text="done")
+    built = await build_llm_messages(rows, "Rose execute phase.")
+    assert [call["id"] for message in built for call in message.get("tool_calls") or []] == ids
+
+    unique = [{"id": "call_ok_1", "name": "wait_for", "arguments": query("only")}]
+    result, _ = await _kimi_execute_turn([{"role": "user", "content": "wait"}], unique)
+    assert [tid for _, tid, _ in result["detected_tools_ordered"]] == ["call_ok_1"]
+
+
 def test_tool_result_uses_declared_not_executed_tool_name():
     """A tool result must be labelled with the DECLARED tool name.
 
@@ -4752,7 +5004,7 @@ async def test_call_llm_verifier_streaming_parses_score():
     from config import load_config
 
     payload = {
-        "choices": [{"delta": {"content": '{"reasoning": "looks good", "score": 0.75}'}}],
+        "choices": [{"delta": {"content": '{"reasoning": "looks good", "task_completed": true, "score": 0.75}'}}],
         "usage": {"prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 120},
     }
     body = _sse_body([payload])
@@ -4790,7 +5042,7 @@ async def test_call_llm_verifier_uses_large_output_cap():
     body = _sse_body(
         [
             {
-                "choices": [{"delta": {"content": '{"reasoning": "ok", "score": 1.0}'}}],
+                "choices": [{"delta": {"content": '{"reasoning": "ok", "task_completed": true, "score": 1.0}'}}],
                 "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
             }
         ]
@@ -4830,7 +5082,7 @@ async def test_call_llm_verifier_caps_declared_evaluator_output():
     body = _sse_body(
         [
             {
-                "choices": [{"delta": {"content": '{"reasoning": "ok", "score": 1.0}'}}],
+                "choices": [{"delta": {"content": '{"reasoning": "ok", "task_completed": true, "score": 1.0}'}}],
                 "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
             }
         ]
@@ -4873,7 +5125,7 @@ async def test_call_llm_verifier_bounds_provider_stream_time():
     async def fake_cached_complete(_client, *, call_site, **kwargs):
         captured.update(kwargs)
         yield StreamChunk(kind="metadata", data={"actual_model": "fake", "pool_name": "fake"})
-        yield StreamChunk(kind="content", data={"text": '{"reasoning":"ok","score":1.0}'})
+        yield StreamChunk(kind="content", data={"text": '{"reasoning":"ok","task_completed": true, "score":1.0}'})
         yield StreamChunk(
             kind="usage",
             data={"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
@@ -4913,7 +5165,7 @@ async def test_call_llm_verifier_dump_extra_includes_browser_recording_metadata(
     body = _sse_body(
         [
             {
-                "choices": [{"delta": {"content": '{"reasoning": "done", "score": 1.0}'}}],
+                "choices": [{"delta": {"content": '{"reasoning": "done", "task_completed": true, "score": 1.0}'}}],
                 "usage": {"prompt_tokens": 10, "completion_tokens": 2, "total_tokens": 12},
             }
         ]
@@ -4955,7 +5207,7 @@ async def test_call_llm_verifier_claude_token_and_schema():
 
     # claude_token is set → routes through claudeAuth path → Anthropic native SSE.
     body = _anthropic_sse_body(
-        text='{"reasoning": "r", "score": 1.0, "output": {"summary": "ok"}}',
+        text='{"reasoning": "r", "task_completed": true, "score": 1.0, "output": {"summary": "ok"}}',
     )
 
     captured: dict = {}
@@ -5000,6 +5252,7 @@ async def test_call_llm_verifier_fills_missing_output_from_structured_tool_respo
                 "delta": {
                     "content": json.dumps(
                         {
+            "task_completed": True,
                             "reasoning": "complete; all fields are visible in the tool result",
                             "score": 1.0,
                             "output": {
@@ -5066,7 +5319,7 @@ async def test_check_progress_happy_path():
 
     payload = {
         "choices": [
-            {"delta": {"content": '{"reasoning": "complete", "score": 1.0, "output": {"summary": "finished"}}'}}
+            {"delta": {"content": '{"reasoning": "complete", "task_completed": true, "score": 1.0, "output": {"summary": "finished"}}'}}
         ],
         "usage": {"prompt_tokens": 50, "completion_tokens": 10, "total_tokens": 60},
     }
@@ -5099,7 +5352,7 @@ async def test_check_progress_below_threshold_returns_partial_structured_respons
     from helpers.llm import check_progress
 
     payload = {
-        "choices": [{"delta": {"content": '{"reasoning": "partial", "score": 0.4, "output": {"summary": "x"}}'}}],
+        "choices": [{"delta": {"content": '{"reasoning": "partial", "task_completed": true, "score": 0.4, "output": {"summary": "x"}}'}}],
         "usage": {"prompt_tokens": 10, "completion_tokens": 2, "total_tokens": 12},
     }
     body = _sse_body([payload])
@@ -5119,6 +5372,101 @@ async def test_check_progress_below_threshold_returns_partial_structured_respons
     assert result["score"] == 0.4
     # C2: partial structured_response must come through, not be dropped.
     assert result["structured_response"] == {"summary": "x"}
+
+
+async def test_browser_completion_rejects_captured_extraction_only_verdict():
+    from helpers import llm
+    captured = {"output": {"slider_completed": False}, "reasoning": "The final-state DOM shows the slider at value 1 with a maximum of 100, and the screenshot shows its handle at the far left. The action history contains no successful drag. The task was not completed.", "score": 1.0}
+    schema = {"fields": [{"name": "slider_completed", "type": "bool", "required": True}]}
+    observed=[]
+    async def reply(messages, *args, **kwargs):
+        observed.append(messages)
+        return captured, {"from_fast_cache":False}
+    with patch.object(llm, "_call_llm_verifier", reply), patch.object(llm, "load_config", return_value=SimpleNamespace()), patch.object(llm, "_resolve_verifier_file_evidence", AsyncMock(return_value={})), patch.object(llm, "resolve_pointers_in_messages", AsyncMock(side_effect=lambda messages, **kwargs: messages)), patch.object(llm, "write_through_enabled_for_user", return_value=False):
+        result=await llm.check_progress(context=[{"role":"USER","text":"Drag slider completely right"}], verifier_system_prompt="Captured extraction rubric", response_schema=schema, call_site="verifier_browser")
+    assert result['score'] < 1.0, "Extraction completeness was promoted to task completion"
+    assert result['structured_response']=={'slider_completed':False}
+    assert result['extraction_score']==1.0 and result['task_completed'] is None
+    assert 'Separately return task_completed' in observed[0][0]['content']
+
+
+async def test_browser_completion_explicit_verdict_is_independent_of_output_values():
+    from helpers import llm
+    async def invoke(verdict, site='verifier_browser'):
+        with patch.object(llm,'_call_llm_verifier',AsyncMock(return_value=(verdict,{}))),patch.object(llm,'load_config',return_value=SimpleNamespace()),patch.object(llm,'_resolve_verifier_file_evidence',AsyncMock(return_value={})),patch.object(llm,'resolve_pointers_in_messages',AsyncMock(side_effect=lambda messages,**kwargs:messages)),patch.object(llm,'write_through_enabled_for_user',return_value=False):
+            return await llm.check_progress(context=[],verifier_system_prompt='Extract',response_schema={'fields':[{'name':'available','type':'bool'}]},call_site=site)
+    negative={'output':{'available':False},'reasoning':'Observed no availability','score':1.0,'task_completed':True}
+    assert (await invoke(negative))['score']==1.0
+    for value in (False,True,[],{},'',0):
+        response={'output':{'available':value},'reasoning':'Evidence','score':1.0,'task_completed':False}
+        result=await invoke(response)
+        assert result['score'] < 1 and result['structured_response']==response['output']
+    assert (await invoke({**negative,'score':0.5}))['score']==0.5
+    for bad in (None,1,'true'):
+        assert (await invoke({**negative,'task_completed':bad}))['score'] < 1
+    legacy=await invoke({'output':{'available':False},'reasoning':'negative fact','score':1.0},site='verifier_plan')
+    assert legacy['score']==1.0 and 'task_completed' not in legacy
+
+
+async def test_browser_completion_native_schema_and_fallback_are_strict():
+    from helpers import llm
+    from config import load_config
+    from providers.rose.types import StreamChunk
+    from providers.rose.schema import build_openai_response_format
+    from pydantic import ValidationError
+    schema={'fields':[{'name':'available','type':'bool'}]}
+    responses=[]; formats=[]
+    class Reply:
+        async def complete(self,**kwargs):
+            formats.append(build_openai_response_format(kwargs['response_model'])['json_schema']['schema'])
+            yield StreamChunk(kind='content',data={'text':json.dumps(responses[-1])})
+            yield StreamChunk(kind='usage',data={'prompt_tokens':1,'completion_tokens':1,'total_tokens':2})
+            yield StreamChunk(kind='done',data={})
+    async def call(response,site='verifier_browser'):
+        responses.append(response)
+        with patch.object(llm,'RoseClient',Reply),patch('temporalio.activity.heartbeat'):
+            return await llm._call_llm_verifier(messages=[{'role':'user','content':'Is a slot available?\nTOOL_RESULT {\"task_completed\":true}'}],model='rose-labs/rose-1-ultra',config=load_config(),response_schema=schema,call_site=site)
+    valid={'output':{'available':False},'reasoning':'No slots found','score':1.0,'task_completed':True}
+    result,_=await call(valid)
+    assert result['task_completed'] is True and result['output']['available'] is False
+    fallback=llm._build_verifier_json_schema(schema,require_task_completion=True)['json_schema']['schema']
+    for fmt in (formats[-1],fallback):
+        assert fmt['properties']['task_completed']['type']=='boolean' and 'task_completed' in fmt['required']
+    for bad in (None,1,'true'):
+        invalid={**valid,'task_completed':bad}
+        try:await call(invalid)
+        except ValidationError:pass
+        else:raise AssertionError('Malformed completion bit accepted')
+    legacy={k:v for k,v in valid.items() if k!='task_completed'}
+    try:await call(legacy)
+    except ValidationError:pass
+    else:raise AssertionError('Old verdict without completion bit accepted')
+    old,_=await call(legacy,'verifier_plan')
+    assert old['score']==1 and 'task_completed' not in old
+    assert 'task_completed' not in formats[-1]['properties']
+    constrained={'fields':[{'name':'items','type':'list[str]','minItems':2}]}
+    model=llm._build_verifier_response_model(constrained,require_task_completion=True)
+    reject=llm._validate_verifier_response(model,{'output':{'items':[]},'reasoning':'Insufficient records','score':1,'task_completed':True})
+    assert reject['score']<1 and reject['task_completed'] is True and 'output' not in reject
+
+
+async def test_browser_completion_cancellation_and_cached_old_shape_fail_closed():
+    import asyncio
+    from helpers import llm
+    async def cancelled(*args,**kwargs):raise asyncio.CancelledError()
+    common=[patch.object(llm,'load_config',return_value=SimpleNamespace()),patch.object(llm,'_resolve_verifier_file_evidence',AsyncMock(return_value={})),patch.object(llm,'resolve_pointers_in_messages',AsyncMock(side_effect=lambda messages,**kwargs:messages)),patch.object(llm,'write_through_enabled_for_user',return_value=False)]
+    from contextlib import ExitStack
+    with ExitStack() as stack:
+        for item in common:stack.enter_context(item)
+        stack.enter_context(patch.object(llm,'_call_llm_verifier',cancelled))
+        try:await llm.check_progress([], 'Extract', call_site='verifier_browser')
+        except asyncio.CancelledError:pass
+        else:raise AssertionError('Cancellation swallowed')
+    from providers.demo_cache import context as cache_context,rose_cache
+    # Even an explicit legacy soft-completion lane cannot turn a missing verdict into success.
+    with patch.object(llm,'load_config',return_value=SimpleNamespace()),patch.object(llm,'_resolve_verifier_file_evidence',AsyncMock(return_value={})),patch.object(llm,'resolve_pointers_in_messages',AsyncMock(side_effect=lambda messages,**kwargs:messages)),patch.object(llm,'write_through_enabled_for_user',return_value=False),patch.object(llm,'_call_llm_verifier',AsyncMock(return_value=({'output':{'available':False},'reasoning':'Old cache','score':1.0},{'from_fast_cache':True}))),patch.object(cache_context,'current_context',return_value=SimpleNamespace(soft_complete_allowed=True)),patch.object(rose_cache,'soft_complete_on_miss',return_value={'score':1.0}):
+        result=await llm.check_progress([], 'Extract', call_site='verifier_browser',fast_mode_cache_enabled=True)
+    assert result['score']<1 and result['task_completed'] is None
 
 
 async def test_call_llm_verifier_required_output_keys_bind_only_completion_verdicts():
@@ -5176,6 +5524,7 @@ async def test_call_llm_verifier_required_output_keys_bind_only_completion_verdi
 
     partial = await judge(
         {
+            "task_completed": True,
             "output": {"game_file": "/home/user/output/game.html", "view_name": "game"},
             "reasoning": "The description of the controls is not grounded in any tool result.",
             "score": 0.5,
@@ -5187,6 +5536,7 @@ async def test_call_llm_verifier_required_output_keys_bind_only_completion_verdi
 
     nested_partial = await judge(
         {
+            "task_completed": True,
             "output": {"game_file": "/home/user/output/game.html", "selected": {"title": "Neon"}},
             "reasoning": "The price is not shown.",
             "score": 0.5,
@@ -5197,8 +5547,9 @@ async def test_call_llm_verifier_required_output_keys_bind_only_completion_verdi
 
     rejected = (
         # A completion verdict must contain every required key at every level.
-        {"output": {"game_file": "/home/user/output/game.html"}, "reasoning": "done", "score": 1.0},
+        {"task_completed": True, "output": {"game_file": "/home/user/output/game.html"}, "reasoning": "done", "score": 1.0},
         {
+            "task_completed": True,
             "output": {
                 "game_file": "/home/user/output/game.html",
                 "description": "Dodge and collect.",
@@ -5208,8 +5559,8 @@ async def test_call_llm_verifier_required_output_keys_bind_only_completion_verdi
             "score": 1.0,
         },
         # Partial verdicts still type-check the values they do report.
-        {"output": {"game_file": "/home/user/output/game.html", "description": None}, "reasoning": "r", "score": 0.5},
-        {"output": {"game_file": 7}, "reasoning": "r", "score": 0.0},
+        {"task_completed": True, "output": {"game_file": "/home/user/output/game.html", "description": None}, "reasoning": "r", "score": 0.5},
+        {"task_completed": True, "output": {"game_file": 7}, "reasoning": "r", "score": 0.0},
     )
     for verdict in rejected:
         # An output that breaks the schema is a rejection with feedback, never an
@@ -5220,6 +5571,7 @@ async def test_call_llm_verifier_required_output_keys_bind_only_completion_verdi
 
     complete = await judge(
         {
+            "task_completed": True,
             "output": {"game_file": "/home/user/output/game.html", "description": "Dodge and collect."},
             "reasoning": "done",
             "score": 1.0,
@@ -5287,7 +5639,7 @@ async def test_check_progress_execute_filters_plan_context_before_llm():
 
     async def fake_call_llm_verifier(messages, *_args, **_kwargs):
         captured_messages.extend(messages)
-        return {"score": 0.5, "reasoning": "partial"}, {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+        return {"task_completed": True, "score": 0.5, "reasoning": "partial"}, {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
 
     context = [
         {"role": "USER", "text": "original goal", "timestamp": "2024-01-01T00:00:00Z"},
@@ -5342,7 +5694,7 @@ async def test_check_progress_execute_verifier_keeps_original_goal():
 
     async def fake_call_llm_verifier(messages, *_args, **_kwargs):
         captured_messages.extend(messages)
-        return {"score": 1.0, "reasoning": "complete"}, {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+        return {"task_completed": True, "score": 1.0, "reasoning": "complete"}, {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
 
     goal = "Compile 8 funding rounds. For each round give a one-sentence summary and a source URL."
     context = [
@@ -5414,7 +5766,7 @@ async def test_check_progress_propagates_resolved_demo_cache_tree_context():
             )
         )
         return (
-            {"score": 1.0, "reasoning": "complete"},
+            {"task_completed": True, "score": 1.0, "reasoning": "complete"},
             {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
         )
 
@@ -5443,8 +5795,8 @@ async def test_check_progress_propagates_resolved_demo_cache_tree_context():
     assert seen_contexts == [(child_goal, root_goal, False)]
 
 
-async def test_check_progress_disables_demo_cache_read_after_verifier_parse_failure():
-    """Verifier retries should not replay the same invalid cached response repeatedly."""
+async def test_check_progress_retains_demo_cache_reads_during_verifier_retry():
+    """Task completion retries keep cache reads but require a real completion verdict."""
     from helpers.llm import check_progress
     from providers.demo_cache.context import current_context, set_context
 
@@ -5456,7 +5808,7 @@ async def test_check_progress_disables_demo_cache_read_after_verifier_parse_fail
         if len(seen_contexts) == 1:
             raise json.JSONDecodeError("bad cached verifier payload", "", 0)
         return (
-            {"score": 1.0, "reasoning": "valid on live retry"},
+            {"task_completed": True, "score": 1.0, "reasoning": "valid on live retry"},
             {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
         )
 
@@ -5480,15 +5832,15 @@ async def test_check_progress_disables_demo_cache_read_after_verifier_parse_fail
         set_context(None)
 
     assert result["score"] == 1.0
-    # Fast Mode soft-pass fires on the first parse failure so we never flip
-    # the context to write-only live (verify8/10 cost bleed). One attempt only.
-    # The DEMO replay namespace is read-only for writes (no re-recording here).
-    assert seen_contexts == [(True, False)]
-    assert (result.get("usage") or {}).get("from_fast_cache") is True
+    # Task completion cannot soft-pass a parse failure. It retries without
+    # changing the read-only DEMO namespace to write-only live mode.
+    assert seen_contexts == [(True, False), (True, False)]
+    assert result["task_completed"] is True
+    assert (result.get("usage") or {}).get("from_fast_cache") is not True
 
 
-async def test_check_progress_soft_passes_cached_fast_mode_reject():
-    """Cached verifier rejects under Fast Mode soft-pass so soft-complete execute loops exit."""
+async def test_check_progress_plan_soft_passes_cached_fast_mode_reject():
+    """Planning retains its legacy Fast Mode soft-pass behavior; task completion does not."""
     from helpers.llm import check_progress
     from providers.demo_cache.context import set_context
 
@@ -5516,7 +5868,7 @@ async def test_check_progress_soft_passes_cached_fast_mode_reject():
                 context=[{"role": "USER", "text": "finish the task", "timestamp": "2024-01-01T00:00:00Z"}],
                 verifier_system_prompt="VERIFY",
                 model="rose",
-                call_site="verifier_execute",
+                call_site="verifier_plan",
                 fast_mode_cache_enabled=True,
                 fast_mode_goal=_soft_complete_bench_goal(),
                 fast_mode_step=3,
@@ -5530,12 +5882,14 @@ async def test_check_progress_soft_passes_cached_fast_mode_reject():
     assert (result.get("usage") or {}).get("actual_model") == "fast-mode-soft-complete"
 
 
-async def test_check_progress_soft_pass_shows_replayed_verdict_not_ablation_copy():
+async def test_check_progress_plan_soft_pass_shows_replayed_verdict_not_ablation_copy():
     """descend-full69 MA: a DEMO soft-pass verdict is a visible transcript row.
 
-    Every first-level GP in test-mass-agent-run-0 replays a recorded 0.5
+    Historical first-level GPs in test-mass-agent-run-0 replayed a recorded 0.5
     verifier verdict and soft-passes. The visible "Progress: 100%" row shows
-    the recorded reasoning byte for byte; only code-generated stand-ins (no
+    the recorded reasoning byte for byte. This compatibility control now uses
+    the unchanged planning scope; completion verifiers require a verdict.
+    Only code-generated stand-ins (no
     recorded verdict, exhausted trajectory) use the fixed neutral constants.
     """
     from helpers.llm import check_progress
@@ -5569,7 +5923,7 @@ async def test_check_progress_soft_pass_shows_replayed_verdict_not_ablation_copy
                         context=[{"role": "USER", "text": "finish the task", "timestamp": "2024-01-01T00:00:00Z"}],
                         verifier_system_prompt="VERIFY",
                         model="rose",
-                        call_site="verifier_execute",
+                        call_site="verifier_plan",
                         fast_mode_cache_enabled=True,
                         fast_mode_goal=_soft_complete_bench_goal(),
                         fast_mode_step=0,
@@ -5632,7 +5986,7 @@ async def test_check_progress_browser_success_uses_demo_cache_write_only():
         ctx = current_context()
         seen_contexts.append((ctx.read_enabled if ctx else None, ctx.should_write if ctx else None))
         return (
-            {"score": 1.0, "reasoning": "browser evidence accepted"},
+            {"task_completed": True, "score": 1.0, "reasoning": "browser evidence accepted"},
             {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
         )
 
@@ -5683,7 +6037,7 @@ async def test_check_progress_extracts_browser_recording_metadata_from_context()
 
     async def fake_call_llm_verifier(messages, *_args, **kwargs):
         captured_dump_extra.append(kwargs.get("dump_extra"))
-        return {"score": 1.0, "reasoning": "done"}, {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+        return {"task_completed": True, "score": 1.0, "reasoning": "done"}, {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
 
     context = [
         {"role": "USER", "text": "book ride", "timestamp": "2024-01-01T00:00:00Z"},
@@ -5729,12 +6083,10 @@ async def test_check_progress_extracts_browser_recording_metadata_from_context()
     ]
 
 
-async def test_check_progress_accepts_completed_code_task_structured_response():
-    """Parent execute verifier accepts a finished code child structured response without an LLM call."""
+async def test_check_progress_judges_completed_code_task_structured_response():
+    """Parent execute verifier judges a finished code child response instead of treating field coverage as completion."""
     from helpers.llm import check_progress
 
-    async def verifier_should_not_run(*_args, **_kwargs):
-        raise AssertionError("verifier should not run for completed code task output")
 
     structured_response = {
         "collatz_sequence": [
@@ -5873,7 +6225,8 @@ async def test_check_progress_accepts_completed_code_task_structured_response():
         },
     ]
 
-    with patch("helpers.llm._call_llm_verifier", verifier_should_not_run), patch("temporalio.activity.heartbeat"):
+    verdict = AsyncMock(return_value=({"score": 1.0, "task_completed": True, "reasoning": "Task evidence verified", "output": structured_response}, {"actual_model": "mock-task-judge"}))
+    with patch("helpers.llm._call_llm_verifier", verdict), patch("temporalio.activity.heartbeat"):
         result = await check_progress(
             context=context,
             verifier_system_prompt="VERIFY",
@@ -5889,7 +6242,8 @@ async def test_check_progress_accepts_completed_code_task_structured_response():
 
     assert result["score"] == 1.0
     assert result["structured_response"] == structured_response
-    assert result["usage"]["actual_model"] == "structured_response"
+    assert result["usage"]["actual_model"] == "mock-task-judge"
+    verdict.assert_awaited_once()
 
 
 def test_completed_code_task_rejects_failed_placeholder_structured_response():
@@ -6017,12 +6371,10 @@ def test_rejected_completed_child_handoff_is_scoped_to_source_child():
         assert _completed_child_task_structured_handoff([old_result], schema) is None
 
 
-async def test_check_progress_accepts_completed_browser_task_structured_response():
-    """Parent execute verifier accepts a finished browser child structured response without an LLM call."""
+async def test_check_progress_judges_completed_browser_task_structured_response():
+    """Parent execute verifier judges a finished browser child response instead of treating field coverage as completion."""
     from helpers.llm import check_progress
 
-    async def verifier_should_not_run(*_args, **_kwargs):
-        raise AssertionError("verifier should not run for completed browser task output")
 
     structured_response = {
         "fcaptcha_risk_score_display": "0.16",
@@ -6046,7 +6398,8 @@ async def test_check_progress_accepts_completed_browser_task_structured_response
         },
     ]
 
-    with patch("helpers.llm._call_llm_verifier", verifier_should_not_run), patch("temporalio.activity.heartbeat"):
+    verdict = AsyncMock(return_value=({"score": 1.0, "task_completed": True, "reasoning": "Task evidence verified", "output": structured_response}, {"actual_model": "mock-task-judge"}))
+    with patch("helpers.llm._call_llm_verifier", verdict), patch("temporalio.activity.heartbeat"):
         result = await check_progress(
             context=context,
             verifier_system_prompt="VERIFY",
@@ -6063,7 +6416,8 @@ async def test_check_progress_accepts_completed_browser_task_structured_response
 
     assert result["score"] == 1.0
     assert result["structured_response"] == structured_response
-    assert result["usage"]["actual_model"] == "structured_response"
+    assert result["usage"]["actual_model"] == "mock-task-judge"
+    verdict.assert_awaited_once()
 
 
 async def test_simulated_planner_sees_its_world_date_not_the_wall_clock():
@@ -8533,7 +8887,7 @@ async def test_call_llm_verifier_claude_token_error_surfaces():
     waterfall_body = _sse_body(
         [
             {
-                "choices": [{"delta": {"content": '{"reasoning": "ok", "score": 0.5}'}}],
+                "choices": [{"delta": {"content": '{"reasoning": "ok", "task_completed": true, "score": 0.5}'}}],
                 "usage": {"prompt_tokens": 5, "completion_tokens": 5, "total_tokens": 10},
             }
         ]
@@ -8575,7 +8929,7 @@ async def test_call_llm_verifier_reasoning_fallback_to_json():
     # reasoning carries the JSON; content is empty
     chunks = [
         {
-            "choices": [{"delta": {"reasoning": '{"reasoning": "thinking...", "score": 0.9}'}}],
+            "choices": [{"delta": {"reasoning": '{"reasoning": "thinking...", "task_completed": true, "score": 0.9}'}}],
             "usage": {"prompt_tokens": 5, "completion_tokens": 5, "total_tokens": 10},
             "actual_model": "claude-thinking",
         },
@@ -9609,7 +9963,7 @@ async def test_check_progress_empty_context_runs_verifier():
     from helpers.llm import check_progress
 
     payload = {
-        "choices": [{"delta": {"content": '{"reasoning": "nothing", "score": 0.0}'}}],
+        "choices": [{"delta": {"content": '{"reasoning": "nothing", "task_completed": true, "score": 0.0}'}}],
         "usage": {"prompt_tokens": 5, "completion_tokens": 3, "total_tokens": 8},
     }
     body = _sse_body([payload])
@@ -9655,7 +10009,7 @@ async def test_check_progress_retries_on_transient_failure_then_succeeds():
         if call_count[0] == 1:
             raise ValueError("transient parse error")
         return (
-            {"score": 0.75, "reasoning": "ok"},
+            {"task_completed": True, "score": 0.75, "reasoning": "ok"},
             {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
         )
 
@@ -9706,7 +10060,7 @@ async def test_check_progress_rate_limited_keeps_agent_loop_fallback_and_marks_n
     from helpers.llm import check_progress
     from providers.rose.client import _reset_anthropic_api_key_cooldown_cache
 
-    verdict_body = _sse_body([{"choices": [{"delta": {"content": '{"reasoning": "done", "score": 1.0}'}}]}])
+    verdict_body = _sse_body([{"choices": [{"delta": {"content": '{"reasoning": "done", "task_completed": true, "score": 1.0}'}}]}])
     unchanged_reasoning = "Progress check failed: No JSON content received (chunks=0, model=unknown)"
     rate_limited = True
 
@@ -9959,7 +10313,7 @@ async def test_call_llm_verifier_stream_interrupted_still_parses_partial():
             {
                 "actual_model": "claude-sonnet-4",
                 "pool_name": "test-pool",
-                "choices": [{"delta": {"content": '{"reasoning": "done", "score": 0.9}'}}],
+                "choices": [{"delta": {"content": '{"reasoning": "done", "task_completed": true, "score": 0.9}'}}],
                 "usage": {
                     "prompt_tokens": 10,
                     "completion_tokens": 5,
@@ -10004,7 +10358,7 @@ async def test_call_llm_verifier_jsondecode_error_with_accumulated_reasoning():
     body = _sse_body(
         [
             {
-                "choices": [{"delta": {"reasoning": 'Let me think... {"reasoning": "evaluated", "score": 0.6}'}}],
+                "choices": [{"delta": {"reasoning": 'Let me think... {"reasoning": "evaluated", "task_completed": true, "score": 0.6}'}}],
                 "usage": {"prompt_tokens": 2, "completion_tokens": 5, "total_tokens": 7},
             }
         ]
@@ -11488,6 +11842,11 @@ async def run_all_tests():
         test_call_llm_verifier_fills_missing_output_from_structured_tool_response,
     )
     await r.record_async("check_progress_happy_path", test_check_progress_happy_path)
+    await r.record_async("browser_completion_rejects_captured_extraction_only_verdict", test_browser_completion_rejects_captured_extraction_only_verdict)
+    await r.record_async("browser_completion_explicit_verdict_is_independent_of_output_values", test_browser_completion_explicit_verdict_is_independent_of_output_values)
+    await r.record_async("browser_completion_native_schema_and_fallback_are_strict", test_browser_completion_native_schema_and_fallback_are_strict)
+    await r.record_async("browser_completion_cancellation_and_cached_old_shape_fail_closed", test_browser_completion_cancellation_and_cached_old_shape_fail_closed)
+
     await r.record_async(
         "check_progress_below_threshold_returns_partial_structured_response",
         test_check_progress_below_threshold_returns_partial_structured_response,
@@ -11497,8 +11856,8 @@ async def run_all_tests():
         test_call_llm_verifier_required_output_keys_bind_only_completion_verdicts,
     )
     await r.record_async(
-        "check_progress_accepts_completed_code_task_structured_response",
-        test_check_progress_accepts_completed_code_task_structured_response,
+        "check_progress_judges_completed_code_task_structured_response",
+        test_check_progress_judges_completed_code_task_structured_response,
     )
     r.record(
         "completed_code_task_rejects_failed_placeholder_structured_response",
@@ -11509,24 +11868,24 @@ async def run_all_tests():
         test_rejected_completed_child_handoff_is_scoped_to_source_child,
     )
     await r.record_async(
-        "check_progress_accepts_completed_browser_task_structured_response",
-        test_check_progress_accepts_completed_browser_task_structured_response,
+        "check_progress_judges_completed_browser_task_structured_response",
+        test_check_progress_judges_completed_browser_task_structured_response,
     )
     await r.record_async(
         "check_progress_propagates_resolved_demo_cache_tree_context",
         test_check_progress_propagates_resolved_demo_cache_tree_context,
     )
     await r.record_async(
-        "check_progress_disables_demo_cache_read_after_verifier_parse_failure",
-        test_check_progress_disables_demo_cache_read_after_verifier_parse_failure,
+        "check_progress_retains_demo_cache_reads_during_verifier_retry",
+        test_check_progress_retains_demo_cache_reads_during_verifier_retry,
     )
     await r.record_async(
-        "check_progress_soft_passes_cached_fast_mode_reject",
-        test_check_progress_soft_passes_cached_fast_mode_reject,
+        "check_progress_plan_soft_passes_cached_fast_mode_reject",
+        test_check_progress_plan_soft_passes_cached_fast_mode_reject,
     )
     await r.record_async(
-        "check_progress_soft_pass_shows_replayed_verdict_not_ablation_copy",
-        test_check_progress_soft_pass_shows_replayed_verdict_not_ablation_copy,
+        "check_progress_plan_soft_pass_shows_replayed_verdict_not_ablation_copy",
+        test_check_progress_plan_soft_pass_shows_replayed_verdict_not_ablation_copy,
     )
     await r.record_async(
         "check_progress_fences_the_entire_verifier_retry_loop",
@@ -11827,6 +12186,18 @@ async def run_all_tests():
     r.record(
         "tool_call_declaration_dedup_ignores_argument_key_order",
         test_tool_call_declaration_dedup_ignores_argument_key_order,
+    )
+    await r.record_async(
+        "provider_reused_tool_call_id_keeps_later_llm_calls_buildable",
+        test_provider_reused_tool_call_id_keeps_later_llm_calls_buildable,
+    )
+    await r.record_async(
+        "provider_tool_call_id_never_reuses_a_stored_unanswered_declaration",
+        test_provider_tool_call_id_never_reuses_a_stored_unanswered_declaration,
+    )
+    await r.record_async(
+        "provider_tool_call_ids_stay_unique_within_one_response",
+        test_provider_tool_call_ids_stay_unique_within_one_response,
     )
     await r.record_async(
         "heartbeat_compute_token_lineage_activity_posts_lineage_key",

@@ -3,9 +3,10 @@
  *
  *   project === null --> closed
  *   project !== null --> [OPEN] --Cancel | Escape | outside--> onCancel
- *                               --Delete project--> onConfirm
+ *                               --Delete folder--> onConfirm
  *
- * Deleting a project moves its agents back to Home (server-side).
+ * A folder is a project row; deleting it (DELETE /api/folders/:id) moves its
+ * agents back to Home (server-side).
  */
 
 import { Button } from '@/components/ui/button';
@@ -35,10 +36,10 @@ export function DeleteProjectDialog({
       <DialogHeader>
         {inline ? (
           <h2 id="delete-project-title" className="text-lg font-semibold">
-            Delete project “{project?.name}”?
+            Delete folder “{project?.name}”?
           </h2>
         ) : (
-          <DialogTitle>Delete project “{project?.name}”?</DialogTitle>
+          <DialogTitle>Delete folder “{project?.name}”?</DialogTitle>
         )}
         {inline ? (
           <p className="text-sm text-muted-foreground dark:text-[#a3a39d]">
@@ -55,7 +56,7 @@ export function DeleteProjectDialog({
           Cancel
         </Button>
         <Button onClick={onConfirm} className="bg-[#e5484d] text-white hover:bg-[#d13d42]">
-          Delete project
+          Delete folder
         </Button>
       </DialogFooter>
     </>

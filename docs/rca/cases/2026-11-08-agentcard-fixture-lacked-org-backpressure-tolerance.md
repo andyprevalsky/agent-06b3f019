@@ -145,3 +145,47 @@ None recorded.
 ## Reusable lesson
 
 Give read-only setup that can cancel a whole campaign its own bounded wait across the provider's real recovery window, and retry only typed transient states so real fixture defects still fail immediately.
+
+## November 10 recurrence: first-page discovery hid the approved verified fixture
+
+CBC smoke `9d373a660a891eee6feb6f3ddbdc36b4a2157f6d4ee391ed113b5f0badb1b8ca`
+failed before its task barrier: the stack was healthy at 07:51:51Z, then
+`setup-benchmark-payment.ts` refused `not_started` at 07:52:03Z. Two other payment
+lanes recorded the same refusal before the campaign stopped. The summary has
+one failed trigger and twelve cancellations; cancellations are not task verdicts.
+The rejecting payment source and driver call were unchanged from origin/main8046.
+That attribution does not waive the owning discovery defect.
+
+Current read-only evidence used the original approved capsule446f OAuth pair.
+The first list returned 50 of 92. Primary MCP `tools/list` defines newest-first
+`list_cardholders`, limit default50/max100, offset default0 and a `total` field.
+The authorized offset50 read returned43/total93, so the two pages are explicitly
+not an atomic inventory. The canonically resolved AGENT identity (hashbd4aed)
+was present and currently pending. A distinct original explicit BENCHMARK input
+(hash4054bc), positively matched to the canonical benchmark email and retained
+membership, was currently verified. No identity was created, rebound or mutated.
+The historical selected ID/raw KYC response/effective direct OAuth hashes remain
+unrecorded; current reads do not reconstruct that old payload.
+
+The resolver queried `{}` once, discarded total, checked only the newest50 and
+fell back to the first unready candidate. The ignored repair follows declared
+limit/offset pages beyond100 under its original shared deadline, deduplicates
+observed IDs and preserves preference order plus verified/approved readiness.
+An exact highest-priority candidate already present and ready returns before an
+unrelated later-page failure. Discovery does not require a stable org-wide count;
+malformed/no-progress responses refuse rather than extend budgets or loop.
+
+The same permanent provider-free blackbox runs the actual resolver and validator:
+92 synthetic rows place the preferred AGENT candidate pending and the original
+approved benchmark candidate verified beyond the default page. Original source
+fails with the native `not KYC-ready (not_started)` message; the ignored candidate
+passes all11 controls, including >100 pages, unrelated membership overlap,
+preference/early-ready, typed backpressure, pending refusal and shared deadline.
+The unchanged sandbox-float unit suite also passes. Network and DB calls are zero.
+No KYC bypass, extra payment retry, source/financial mutation or native smoke pass
+is claimed. The original campaign remains failed pending a normal reviewed rerun.
+
+Evidence: `.context/preparation-recovery/cbc-smoke-payment-firstbad/` retains
+original driver/source comparisons, private current reads and primary schema;
+`pagination-candidate/` retains exact normal-runner RED/GREEN logs and frozen
+source patch. Raw provider bodies and credentials remain private, outside Git.

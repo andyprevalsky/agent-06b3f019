@@ -352,7 +352,11 @@ def launch(request, root, base, campaign_id, checks, env, guidance=''):
     runs = base / 'runs'
     runs.mkdir(parents=True, exist_ok=False)
     campaign = base / 'campaigns' / campaign_id
-    env = {**env, 'CLOUDBENCH_RUNS_ROOT': str(runs),
+    # Every attempt owns its Fly transport (inventory, relay, private agent), including the width-1
+    # single rerun: an unowned per-HOME flyctl agent outlived PR #1981's reruns and voided the gate.
+    # The shared inventory/relay switches are pinned too, so an inherited "0" cannot drop that ownership.
+    env = {**env, 'CLOUDBENCH_RUNS_ROOT': str(runs), 'CLOUDBENCH_CAMPAIGN_OWNED_TRANSPORT': '1',
+           'CLOUDBENCH_CAMPAIGN_SHARED_INVENTORY': '1', 'CLOUDBENCH_CAMPAIGN_SHARED_RELAY': '1',
            'RUN_BENCH_CAMPAIGN_ROOT': str(campaign.parent), 'RUN_BENCH_CAMPAIGN_ID': campaign.name}
     scheduling = ['--runs', '1', '--concurrency', str(width), '--retry-infra', '0']
     argv = ['bash', 'scripts/run-bench', *checks, *scheduling, '--ref', request['source']['head']]
@@ -365,8 +369,13 @@ def launch(request, root, base, campaign_id, checks, env, guidance=''):
         code, timed_out, cancelled, lingering = run_command(argv, cwd=root, env=env, output=log, timeout=None, owned_lifecycle=True)
     reason = None
     try:
-        if timed_out or cancelled or lingering or source(root) != request['source']:
-            raise ValueError('cloud command interrupted or source changed')
+        causes = [text for flag, text in ((timed_out, 'timed out'), (cancelled, 'was cancelled'),
+                                          (lingering, 'left a lingering process (see cli.log.process.json)'))
+                  if flag]
+        if source(root) != request['source']:
+            causes.append('ran while the source changed')
+        if causes:
+            raise ValueError('cloud command ' + '; '.join(causes))
         cases, details, cleaned, fleet = collect_campaign(
             {**request, 'checks': checks}, root, runs, campaign, started, code, width)
     except (OSError, ValueError, KeyError, TypeError, IndexError) as error:

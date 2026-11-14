@@ -48,11 +48,12 @@ import tempfile
 import time
 import unicodedata
 import uuid
+import math
 from contextlib import asynccontextmanager, contextmanager
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, AsyncIterator, Awaitable, Callable, Dict, Iterator, List, Optional, Sequence, Tuple
+from typing import Any, AsyncIterator, Awaitable, Callable, Dict, Iterator, List, Literal, Optional, Sequence, Tuple
 from urllib.parse import parse_qsl, quote, unquote, urlencode, urlparse, urlunparse
 
 import httpx
@@ -548,7 +549,7 @@ def route_cache_floor(task_name: str, routes: list[str]) -> Optional[float]:
     )
 
 
-# DEPRECATED_deploy.md L1831: Claude Code task correctness stays hard-gated, but its repeatable prompt-cache
+# the former /deploy skill: Claude Code task correctness stays hard-gated, but its repeatable prompt-cache
 # telemetry floor is warn-only wherever the benchmark runs (local or cloud) and every miss is a risk.
 CLAUDE_CODE_CACHE_RATCHET_WARN_ONLY_TASKS = {"claude-code-agent"}
 GATE_FIXTURE_TASK_MODES = {
@@ -2651,12 +2652,12 @@ PRODUCTION_PAYMENT_IDENTITY_PROVISION_HINT = (
     "back-end/.env; do not ask the user for any of them. Run (DIRECT_URL: the 6543 pooler fails "
     "with \"Can't reach database server\"):\n"
     "  cd back-end && set -a && . ./.env && set +a && \\\n"
-    "    DATABASE_URL=\"$DIRECT_URL\" STRIPE_SECRET_KEY=\"$STRIPE_SECRET_KEY_LIVE\" \\\n"
+    "    BENCHMARK_AGENTCARD_V2_USER_ID= DATABASE_URL=\"$DIRECT_URL\" STRIPE_SECRET_KEY=\"$STRIPE_SECRET_KEY_LIVE\" \\\n"
     "    BENCHMARK_ALLOW_LIVE_STRIPE=true BENCHMARK_PAYMENT_ALLOW_REMOTE_DB=true \\\n"
-    f"    npx tsx scripts/setup-benchmark-payment.ts --live --user-id {AGENT_PAYMENT_LIFECYCLE_PROD_USER_ID} \\\n"
-    "    --agentcard-cardholder-id \"$DEDICATED_AGENTCARD_CARDHOLDER_ID\"\n"
-    "Guardrails: bind an EXISTING dedicated benchmark cardholder only (never Andy's or another "
-    "actor's); never create an identity automatically or bypass pending KYC; never enter a card "
+    f"    npx tsx scripts/setup-benchmark-payment.ts --live --user-id {AGENT_PAYMENT_LIFECYCLE_PROD_USER_ID}\n"
+    "Guardrails: require the dedicated benchmark user's normal signed live v2 connection, consent "
+    "and approved KYC first (never Andy's or another actor's identity). A legacy cardholder is not "
+    "a v2 connected user; never create an identity automatically or bypass pending KYC; never enter a card "
     "number. When the live customer has no saved card the script prints a one-time hosted Stripe "
     "Checkout link: a human saves the live card there once, then re-run the command."
 )
@@ -2697,6 +2698,27 @@ async def _preflight_production_payment_identity(base_url: str) -> None:
         )
     gap = _production_payment_identity_gap(response.json())
     if gap is None:
+        async with httpx.AsyncClient(timeout=15) as client:
+            status = await client.get(
+                f"{base_url}/api/agentcard/status",
+                headers={**headers, "x-user-id": user_id},
+            )
+        if status.status_code != 200:
+            raise RuntimeError(f"Could not verify live v2 AgentCard readiness ({status.status_code})")
+        readiness = status.json()
+        if not (
+            readiness.get("apiVersion") == 2
+            and readiness.get("connected") is True
+            and readiness.get("status") == "approved"
+            and readiness.get("livemode") is True
+            and readiness.get("fundsSource") == "company_flow"
+        ):
+            raise RuntimeError(
+                "Production payment identity needs a scoped live v2 AgentCard connection, "
+                "approved KYC and a live company-funded wallet before running paid probes. "
+                "Complete the normal signed live connection for the dedicated benchmark user; "
+                "a legacy cardholder or sandbox fixture cannot satisfy this requirement."
+            )
         return
     message = (
         f"Production payment identity {user_id} is not provisioned: {gap}.\n"
@@ -3375,11 +3397,15 @@ async def finalize_archive_and_score_world_model(
     benchmark_passed: Optional[bool] = None,
     benchmark_status: Optional[str] = None,
     failure_reason: Optional[str] = None,
+    unscored_preparation: bool = False,
 ) -> tuple[Optional[str], dict]:
     """Finalize durable trace storage and score WMH prediction fidelity for the run."""
 
     if cloud_batch_cleanup.contract() is not None and not owned_batch_final:
         return None, {"status": "deferred", "reason": "owned cloud batch cleanup precedes archive"}
+    if unscored_preparation:
+        benchmark_passed = None
+        benchmark_status = "UNSCORED"
     archive_manifest_ref = await archive_agent_finalize(
         base_url,
         agent_id,
@@ -3391,7 +3417,10 @@ async def finalize_archive_and_score_world_model(
     )
     if archive_manifest_ref:
         print(f"    🧊 Trace archive manifest: {archive_manifest_ref}")
-    world_model_fidelity = await evaluate_world_model_fidelity(agent_id)
+    world_model_fidelity = (
+        {"status": "not_applicable", "reason": "unscored recording preparation"}
+        if unscored_preparation else await evaluate_world_model_fidelity(agent_id)
+    )
     if world_model_fidelity.get("status") == "scored":
         print(
             "    🧠 WMH prediction accuracy: "
@@ -3527,14 +3556,14 @@ async def get_llm_usage_details(base_url: str, root_agent_id: str, tree_stats: d
     return aggregate_usage_items(items), aggregate_prompt_cache_share(items)
 
 
-async def get_test_payment_lifecycle(base_url: str, agent_id: str) -> dict:
+async def get_test_payment_lifecycle(base_url: str, agent_id: str, *, stripe_custody: bool = False) -> dict:
     """Read the sanitized cross-provider lifecycle snapshot for a benchmark agent."""
     headers = await _api_headers()
     async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.get(
             f"{base_url}/api/test-payment/lifecycle",
             headers=headers,
-            params={"agentId": agent_id},
+            params={"agentId": agent_id, **({"stripeCustody": "1"} if stripe_custody else {})},
         )
         if resp.status_code != 200:
             raise Exception(f"Failed to get payment lifecycle: {resp.status_code} {resp.text[:300]}")
@@ -4255,7 +4284,20 @@ def _logical_tool_count_key(meta: dict) -> Optional[Tuple[str, str]]:
         return "request_payment_card", str(tool_call_id)
 
     if tool_name == "spawn_agent":
-        if meta.get("agentType") == "browser" and tool_call_id:
+        agent_type = meta.get("agentType")
+        if meta.get("runInBackground") is True:
+            background_type = meta.get("backgroundAgentType")
+            if agent_type is not None and background_type is not None and agent_type != background_type:
+                return None
+            if background_type == "browser":
+                # The workflow's hidden start receipt owns the same logical call
+                # as the later browser progress/completion and model request.
+                if (not isinstance(tool_call_id, str) or not tool_call_id
+                        or meta.get("backgroundTaskId") != tool_call_id
+                        or meta.get("subAgentId")):
+                    return None
+                agent_type = background_type
+        if agent_type == "browser" and tool_call_id:
             return "spawn_browser_agent", str(tool_call_id)
         if meta.get("subAgentId"):
             return None
@@ -4334,6 +4376,8 @@ def _root_exact_tool_count_exceeded(task: BenchmarkTask, messages: List[dict]) -
     Waiting for the task timeout only hides the first bad boundary and can repeat
     external side effects, so exact root-count benchmarks stop immediately.
     """
+    if is_polar_bench_task(task):
+        return None
     if task.tool_count_scope != "root" or not task.expected_tool_counts:
         return None
     actual_counts = _count_logical_tool_calls_from_messages(messages)
@@ -4684,6 +4728,8 @@ async def post_world_model_update_events(base_url: str, agent_id: str) -> None:
             return
 
 
+
+
 async def pause_agent(base_url: str, agent_id: str) -> bool:
     """POST /api/agents/:id/pause — pause root agent (children discover via polling)."""
     headers = await _api_headers()
@@ -5013,9 +5059,26 @@ def benchmark_wall_clock_backstop_seconds() -> int:
     return int(value)
 
 
+def _validated_preparation_price(seconds: int | None, price: int | None) -> int | None:
+    if price is not None and (seconds is None or type(price) is not int or not 1 <= price <= 1000):
+        raise ValueError("Preparation price requires explicit preparation mode and an integer 1..1000 cents")
+    return price
+
+
+def _execution_timeout_seconds(task: BenchmarkTask):
+    preparation = getattr(task, "_owned_preparation_seconds", None)
+    if preparation is not None:
+        if isinstance(preparation, bool) or not isinstance(preparation, int) or not 1 <= preparation <= 3600:
+            raise ValueError("Preparation budget must be 1..3600 seconds")
+        return preparation
+    return getattr(task, "_resolved_timeout_seconds", task.timeout_seconds)
+
+
 def agent_execution_backstop_seconds(task: Optional[BenchmarkTask] = None) -> int:
     """An operator-set backstop is a hard cap; only the default yields to a longer task timeout."""
     seconds = benchmark_wall_clock_backstop_seconds()
+    if task is not None and getattr(task, "_owned_preparation_seconds", None) is not None:
+        return min(seconds, _execution_timeout_seconds(task)) if "BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS" in os.environ else _execution_timeout_seconds(task)
     if task is None or "BENCHMARK_WALL_CLOCK_BACKSTOP_SECONDS" in os.environ:
         return seconds
     resolved = getattr(task, "_resolved_timeout_seconds", None)
@@ -5187,7 +5250,7 @@ async def _poll_agent(
     task._mid_run_feedback_initial_schema = None
     task._mid_run_feedback_evidence = None
 
-    resolved_timeout = getattr(task, "_resolved_timeout_seconds", task.timeout_seconds)
+    resolved_timeout = _execution_timeout_seconds(task)
     wall_clock_disabled = polar_wall_clock_disabled(task) or resolved_timeout in (None, 0)
     step_budget = polar_browser_step_budget(task)
 
@@ -5306,12 +5369,9 @@ async def _poll_agent(
                 return data, approvals_triggered, approvals_resolved, None
 
         if step_budget and status not in TERMINAL_STATUSES:
-            browser_steps = _agent_class_step_counts(data).get("browser", {})
+            browser_steps = _browser_iteration_budget_counts(data)
             used_steps = max(browser_steps.values()) if browser_steps else 0
             if used_steps >= step_budget:
-                data["_benchmark"]["step_budget_reached"] = True
-                data["_benchmark"]["browser_steps"] = used_steps
-                data["_benchmark"]["browser_step_budget"] = step_budget
                 print(f"    🧭 Browser step budget reached: {used_steps}/{step_budget} — pausing for polar judge")
                 try:
                     await pause_agent(base_url, agent_id)
@@ -6511,7 +6571,7 @@ def evaluate_task(
     # Check expected tools were called
     all_metadata = " ".join(json.dumps(m.get("metadata", {})) for m in messages if m.get("metadata")).lower()
 
-    for tool in task.expected_tools:
+    for tool in ([] if is_polar_bench_task(task) else task.expected_tools):
         if tool.lower() not in all_metadata:
             return False, f"Expected tool '{tool}' not found in messages"
 
@@ -6563,8 +6623,17 @@ def evaluate_task(
             f"Expected exactly {task.expected_approval_count} approval request(s), observed {approvals_triggered}",
         )
 
-    # Progress score check (verifier gave a score)
-    if progress < 0.5:
+    # Budget-paused Polar trajectories are graded by their declared evaluator;
+    # lifecycle progress may still be its startup value without a verifier call.
+    polar_budget_pause = (
+        status == "PAUSED"
+        and data.get("_benchmark", {}).get("step_budget_reached") is True
+        and is_polar_bench_task(task)
+        and task.enforce_declared_evaluators
+        and any(evaluator.get("method") == "polar" for evaluator in task.evaluators)
+    )
+    # Other runs still require a successful native progress check.
+    if progress < 0.5 and not polar_budget_pause and not is_polar_bench_task(task):
         return False, f"Low progress score: {progress:.2f}"
 
     return True, None
@@ -7146,7 +7215,13 @@ async def _finalize_owned_root_payments(
             evidence["payment_snapshot"] = snapshot
             pending = cloud_batch_cleanup.pending_root_payments(snapshot)
             if not pending:
-                return {"root_agent_id": root_id, "purchases": snapshot["purchase_cleanup"]}
+                agents_with_intents = {row["agent_id"] for row in snapshot["purchase_cleanup"]
+                                       if row["stripe_payment_intent_id"] is not None}
+                lifecycles = {aid: await get_test_payment_lifecycle(base_url, aid, stripe_custody=True)
+                              for aid in sorted(agents_with_intents)}
+                stripe_custody = cloud_batch_cleanup.verified_root_stripe_custody(snapshot, lifecycles)
+                return {"root_agent_id": root_id, "purchases": snapshot["purchase_cleanup"],
+                        "stripe_custody": stripe_custody}
             # An accepted mint remains visible before its remote side effects
             # finish. Do not classify its early empty card/transfer as cleanup.
             actionable = [row for row in pending if row["status"] not in {"PENDING_APPROVAL", "CHARGING"}]
@@ -7502,6 +7577,7 @@ async def _finalize_owned_cloud_batch(base_url: str, results: list, live_ids: di
                         owned_batch_final=True,
                         benchmark_passed=result.passed,
                         benchmark_status=result.benchmark_status,
+                        unscored_preparation=(result.stop_metadata or {}).get("purpose") == "owned_recording_preparation",
                         failure_reason=result.failure_reason,
                     )
                 logs["cloud_archive_manifest_ref"] = archive_ref
@@ -7671,13 +7747,19 @@ async def _finalize_owned_batch_and_save_run(
     if run.task_results:
         run.world_model_retrieval_audit = retrieval_audit()
         path = run.save()
-        print(f"\n  Results saved: {path}")
+        try:
+            print(f"\n  Results saved: {path}")
+        except (OSError, ValueError):
+            pass
         try:
             context_dir = Path(os.environ.get("BENCHMARK_CONTEXT_DIR", ".context"))
             context_dir.mkdir(parents=True, exist_ok=True)
             (context_dir / "run.json").write_text(Path(path).read_text(), encoding="utf-8")
         except Exception as exc:
-            print(f"  ⚠ run.json archive write failed (non-fatal): {exc}")
+            try:
+                print(f"  ⚠ run.json archive write failed (non-fatal): {exc}")
+            except (OSError, ValueError):
+                pass
 
     if batch_cleanup_error is not None:
         raise batch_cleanup_error
@@ -8461,6 +8543,9 @@ def _free_credit_subscription_fixture_env(user_id: Optional[str] = None) -> dict
         raise RuntimeError("Local Victoria DB connection not found for free-credit subscription fixture")
     env = os.environ.copy()
     env["DATABASE_URL"] = database_url
+    # The fixture CLIs load back-end/.env, whose DIRECT_URL is the production pooler; an inherited
+    # DIRECT_URL must never survive beside the local DATABASE_URL (PR #1864 cloud smoke refusal).
+    env["DIRECT_URL"] = database_url
     env["BENCHMARK_USER_ID"] = user_id or _free_credit_subscription_gate_user_id()
     return env
 
@@ -8738,7 +8823,7 @@ def _sync_compute_tokens(
         print(f"    ⚠ Compute-token sync error: {exc}")
         return False
     if result.returncode != 0:
-        print(f"    ⚠ Compute-token sync failed: {_seed_sync_error_detail(result)}")
+        print(f"    ⚠ Compute-token sync failed (exit={result.returncode}): {_seed_sync_error_detail(result)}")
         return False
     print(f"    🔑 Refreshed compute tokens from {source_label}")
     if explicit_codex_auth and not _refresh_local_gpt_token_from_codex_auth(database_url):
@@ -13265,7 +13350,9 @@ _AGENT_ORCHESTRATION_TOOLS = {
 }
 
 
-def _agent_class_step_counts(data: dict) -> dict[str, dict[str, int]]:
+def _agent_class_step_counts(
+    data: dict, *, _browser_iteration_budget: bool = False
+) -> dict[str, dict[str, int]]:
     """Count grounded trajectory steps for each spawned agent instance.
 
     Browser steps are deliberately strict: only explicit, non-negative
@@ -13384,7 +13471,15 @@ def _agent_class_step_counts(data: dict) -> dict[str, dict[str, int]]:
         if root != node:
             continue
         agent_class, instance_id = root
-        explicit_count = len(grouped_explicit.get(root, set()))
+        counters = grouped_explicit.get(root, set())
+        # Trajectory evidence includes the initial navigation numbered zero.
+        # Native MAX_ITERATIONS is a counter, so that navigation must not make
+        # the driver stop iteration 99 as though iteration 100 had been reached.
+        explicit_count = (
+            max(counters, default=0)
+            if agent_class == "browser" and _browser_iteration_budget
+            else len(counters)
+        )
         leaf_count = len(grouped_leaf.get(root, set()))
         counts.setdefault(agent_class, {})[instance_id] = explicit_count if explicit_count else leaf_count
 
@@ -13448,6 +13543,11 @@ def _browser_session_reached_ids(messages: list) -> set[str]:
                 if value:
                     reached.add(str(value))
     return reached
+
+
+def _browser_iteration_budget_counts(data: dict) -> dict[str, int]:
+    """Read native browser iteration counters without changing trajectory scoring."""
+    return _agent_class_step_counts(data, _browser_iteration_budget=True).get("browser", {})
 
 
 def _validate_agent_class_min_steps(
@@ -15324,12 +15424,22 @@ async def run_single_task(
     on_agent_created: Optional[Callable[[str, str], None]] = None,
     on_task_evaluated: Optional[Callable[[TaskResult], None | Awaitable[None]]] = None,
     other_task_roots: Callable[[], set[str]] | None = None,
+    preparation_seconds: int | None = None,
+    preparation_price_limit_cents: int | None = None,
 ) -> TaskResult:
     """Run a single benchmark task. Returns TaskResult."""
     _validate_task_target(task, base_url)
     # Repeated catalog selections share a template. Keep native lifecycle
     # ownership on this execution while preserving caller configuration/provenance.
+    preparation_price = _validated_preparation_price(preparation_seconds, preparation_price_limit_cents)
+    if preparation_price is not None:
+        _claim_preparation_price_admission(base_url, task, preparation_seconds, preparation_price)
     task = copy.copy(task)
+    if preparation_price is not None:
+        task.price_limit_cents = preparation_price
+    if preparation_seconds is not None:
+        task._owned_preparation_seconds = preparation_seconds
+        _execution_timeout_seconds(task)
     task._wmh_seeded_session_id = None
     task._wmh_owned_session = None
     task._wmh_retirement_receipt = None
@@ -15905,6 +16015,23 @@ async def _run_single_task_as_run_user(
         if isinstance(execution_result, TaskResult):
             return execution_result
         data, approvals_triggered, approvals_resolved, early_fail_reason = execution_result
+        if getattr(task, "_owned_preparation_seconds", None) is not None:
+            data, logs = await _capture_task_failure_evidence(base_url, agent_id, task, data, start_time)
+            logs["preparation"] = {
+                "qualification": "NOT_VALIDATION", "snapshot": data,
+                "execution_error": early_fail_reason,
+                "budget_seconds": task._owned_preparation_seconds,
+                "cost_evidence": _preparation_cost_evidence(data),
+            }
+            agent = data.get("agent") or {}
+            return TaskResult(
+                name=task.name, passed=False, agent_id=agent_id,
+                status=agent.get("status", "UNKNOWN"), benchmark_status="UNSCORED",
+                progress_score=agent.get("progress", 0), duration_seconds=round(time.time() - start, 1),
+                cost_cents=_preparation_cost_evidence(data)["cents"],
+                message_count=len(data.get("messages", [])), logs=logs,
+                failure_reason=early_fail_reason, world_model_mode="real",
+            )
         if kill_evidence is not None:
             data["kill_agent_benchmark"] = kill_evidence
         if task.mid_run_feedback:
@@ -16119,7 +16246,7 @@ async def _run_single_task_as_run_user(
             and not task.simulate_gate_webhook
             and not task.complete_subscription_checkout
         )
-        if not expected_gate_terminal:
+        if not expected_gate_terminal and not is_polar_bench_task(task):
             min_steps_error = _validate_agent_class_min_steps(
                 task.min_steps,
                 agent_class_step_counts,
@@ -16146,7 +16273,7 @@ async def _run_single_task_as_run_user(
 
         # Tool count checks — tree-wide by default, with root scope available
         # for benchmarks that validate top-level orchestration paths only.
-        if (task.expected_tool_counts or task.min_tool_counts or task.forbidden_tools) and passed:
+        if not is_polar_bench_task(task) and (task.expected_tool_counts or task.min_tool_counts or task.forbidden_tools) and passed:
             try:
                 if task.tool_count_scope == "root":
                     actual_counts = _count_logical_tool_calls_from_messages(data.get("messages", []))
@@ -16529,6 +16656,7 @@ async def _run_single_task_as_run_user(
                     force=True,
                     benchmark_passed=False,
                     benchmark_status="CANCELLED",
+                    unscored_preparation=getattr(task, "_owned_preparation_seconds", None) is not None,
                     failure_reason="Benchmark interrupted; prod logs were collected before shutdown",
                 )
             except Exception as archive_error:
@@ -16562,6 +16690,8 @@ async def _run_single_task_as_run_user(
             f"    Interrupt cleanup evidence: root_target_known={bool(agent_id)} delete_confirmed={cancelled_agent_deleted}"
         )
         logs = _native_world_retirement_diagnostics(task, logs, e)
+        if getattr(task, "_owned_preparation_seconds", None) is not None:
+            logs.setdefault("preparation", {})["execution_error"] = f"{type(e).__name__}: {e}"
         retirement_failed = getattr(task, "_wmh_retirement_error", None) is not None
         return TaskResult(
             name=task.name,
@@ -16571,7 +16701,7 @@ async def _run_single_task_as_run_user(
             benchmark_status="ERROR" if retirement_failed else "CANCELLED",
             progress_score=progress_score,
             duration_seconds=round(duration, 1),
-            cost_cents=0,
+            cost_cents=_preparation_cost_evidence(data)["cents"] if getattr(task, "_owned_preparation_seconds", None) is not None else 0,
             message_count=len(messages),
             failure_reason=(
                 "Benchmark interrupted; prod logs were collected before shutdown"
@@ -16631,6 +16761,7 @@ async def _run_single_task_as_run_user(
                     force=True,
                     benchmark_passed=False,
                     benchmark_status=error_status,
+                    unscored_preparation=getattr(task, "_owned_preparation_seconds", None) is not None,
                     failure_reason=str(e),
                 )
             except Exception as archive_error:
@@ -16639,6 +16770,8 @@ async def _run_single_task_as_run_user(
         if release_skip and logs and logs.get("failure_evidence", {}).get("errors"):
             error_status = "ERROR"
         logs = _native_world_retirement_diagnostics(task, logs, e)
+        if getattr(task, "_owned_preparation_seconds", None) is not None:
+            logs.setdefault("preparation", {})["execution_error"] = f"{type(e).__name__}: {e}"
         result = TaskResult(
             name=task.name,
             passed=False,
@@ -16647,7 +16780,7 @@ async def _run_single_task_as_run_user(
             benchmark_status=error_status,
             progress_score=0,
             duration_seconds=round(duration, 1),
-            cost_cents=0,
+            cost_cents=_preparation_cost_evidence(data)["cents"] if getattr(task, "_owned_preparation_seconds", None) is not None else 0,
             message_count=len(data.get("messages", [])),
             failure_reason=(
                 (f"{AGENTCARD_RELEASE_SKIP_REASON}: " if release_skip else "")
@@ -17806,6 +17939,224 @@ def _parallel_task_phases(
     return [("exclusive", exclusive), ("parallel", parallel)]
 
 
+def _preparation_cost_evidence(data: dict) -> dict:
+    agent = data.get("agent") or {}
+    for key in ("tree_cost_cents", "tool_cost_cents"):
+        value = agent.get(key)
+        if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and value >= 0:
+            return {"cents": value, "source": f"agent.{key}", "coverage": "reported_snapshot"}
+    return {"cents": None, "source": "unavailable", "coverage": "unknown"}
+
+
+def _recording_cache_row_count(url: str) -> int:
+    # PGDATABASE is a database name, not a connection URI. Decode explicit
+    # libpq fields; never forward URI options that could override read-only.
+    try:
+        parsed = urlparse(url)
+        if (parsed.scheme not in {"postgres", "postgresql"}
+                or parsed.hostname not in {"localhost", "127.0.0.1", "::1"}
+                or parsed.query or parsed.fragment or not parsed.username
+                or not parsed.path.startswith("/") or parsed.path == "/"):
+            raise ValueError
+        port = parsed.port if parsed.port is not None else 5432
+        if not 1 <= port <= 65535:
+            raise ValueError
+        fields = {
+            "PGHOST": parsed.hostname,
+            "PGPORT": str(port),
+            "PGUSER": unquote(parsed.username, errors="strict"),
+            "PGPASSWORD": unquote(parsed.password or "", errors="strict"),
+            "PGDATABASE": unquote(parsed.path[1:], errors="strict"),
+        }
+        if any("\0" in value for value in fields.values()):
+            raise ValueError
+    except (ValueError, UnicodeError):
+        raise ValueError("Unsupported owned recording cache connection URI") from None
+    # Ignore inherited libpq routing/service settings. All connection material
+    # stays in the child environment and never appears in argv or diagnostics.
+    env = {key: value for key, value in os.environ.items() if not key.startswith("PG")}
+    result = subprocess.run(
+        ["psql", "-X", "-A", "-t", "-v", "ON_ERROR_STOP=1", "-c",
+         'SELECT COUNT(*) FROM "FastModeCacheEntry"'],
+        env={**env, **fields, "PGCONNECT_TIMEOUT": "5",
+             "PGOPTIONS": "-c default_transaction_read_only=on -c statement_timeout=5000"},
+        capture_output=True, text=True, timeout=15,
+    )
+    if result.returncode or not result.stdout.strip().isdigit():
+        raise ValueError("Could not verify empty owned recording cache (read-only query)")
+    return int(result.stdout.strip())
+
+
+def _admit_owned_preparation(
+    base_url: str, tasks: list, seconds: int, out: Path, *, price_limit_cents: int | None = None,
+) -> dict:
+    from providers.demo_cache.context import owned_recording_namespace, cache_writes_disabled
+    preparation_price = _validated_preparation_price(seconds, price_limit_cents)
+    if isinstance(seconds, bool) or not isinstance(seconds, int) or not 1 <= seconds <= 3600:
+        raise ValueError("Preparation budget must be 1..3600 seconds")
+    owner = cloud_batch_cleanup.contract()
+    if not _is_local_base_url(base_url) or owner is None:
+        raise ValueError("Preparation requires local native owned cleanup")
+    if len(tasks) != 1 or tasks[0].demo_cache != "on" or tasks[0].runner != "agent":
+        raise ValueError("Preparation requires one existing demo-cache agent task")
+    if os.environ.get("BENCHMARK_WORLD_MODEL_MODE") != "real":
+        raise ValueError("Preparation requires explicit REAL mode")
+    context_dir = Path(os.environ.get("BENCHMARK_CONTEXT_DIR", str(out.parent))).resolve()
+    if out.parent.resolve() != context_dir or out.is_symlink():
+        raise ValueError("Preparation output must belong to its native owner context")
+    namespace = owned_recording_namespace()
+    if not namespace or cache_writes_disabled():
+        raise ValueError("Preparation requires writable explicit owned recording")
+    count = _recording_cache_row_count(os.environ["WMH_OWNED_RECORDING_CACHE_DATABASE_URL"])
+    if count:
+        raise ValueError("Preparation requires a new empty owned cache")
+    receipt = {"mode": "UNSCORED_RECORDING_PREPARATION", "qualification": "NOT_VALIDATION",
+               "state": "ADMITTED", "cache_rows_before": count, "owner_namespace": namespace,
+               "task": tasks[0].name, "budget_seconds": seconds,
+               "backend_url": base_url.rstrip("/"),
+               "native_owner": {"context": str(context_dir), "status_file": str(owner[0].resolve()), "token": owner[1]},
+               "price_limit_cents": preparation_price if preparation_price is not None else tasks[0].effective_price_limit_cents(),
+               "original_catalog_price_limit_cents": tasks[0].effective_price_limit_cents(),
+               "effective_preparation_price_limit_cents": preparation_price if preparation_price is not None else tasks[0].effective_price_limit_cents(),
+               "task_definition_sha256": hashlib.sha256(json.dumps(asdict(tasks[0]), sort_keys=True, default=str).encode()).hexdigest(),
+               "manifest_sha256": hashlib.sha256(Path(os.environ["WMH_OWNED_RECORDING_CACHE_MANIFEST"]).read_bytes()).hexdigest()}
+    out.parent.mkdir(parents=True, exist_ok=True)
+    # Never replace a prior preparation receipt or silently reuse its run identity.
+    admission = Path(os.environ["WMH_OWNED_RECORDING_CACHE_MANIFEST"] + ".preparation-admission.json")
+    if out.exists():
+        raise ValueError("Preparation output already exists")
+    with admission.open("x") as stream:
+        json.dump({**receipt, "output": str(out.resolve())}, stream, indent=2)
+    with out.open("x") as stream:
+        json.dump(receipt, stream, indent=2)
+    return receipt
+
+
+def _claim_preparation_price_admission(base_url: str, task: BenchmarkTask, seconds: int, price: int) -> None:
+    """Consume the existing native admission before raising a copied task's price."""
+    from providers.demo_cache.context import owned_recording_namespace, cache_writes_disabled
+    try:
+        owner = cloud_batch_cleanup.contract()
+        if not _is_local_base_url(base_url) or owner is None or os.environ.get("BENCHMARK_WORLD_MODEL_MODE") != "real":
+            raise ValueError
+        namespace = owned_recording_namespace()
+        if not namespace or cache_writes_disabled():
+            raise ValueError
+        context = Path(os.environ["BENCHMARK_CONTEXT_DIR"]).resolve()
+        manifest = Path(os.environ["WMH_OWNED_RECORDING_CACHE_MANIFEST"])
+        admission_path = Path(str(manifest) + ".preparation-admission.json")
+        if admission_path.is_symlink() or admission_path.stat().st_size > 16384:
+            raise ValueError
+        admission = json.loads(admission_path.read_text())
+        expected = {
+            "mode": "UNSCORED_RECORDING_PREPARATION", "qualification": "NOT_VALIDATION", "state": "ADMITTED",
+            "backend_url": base_url.rstrip("/"), "owner_namespace": namespace, "task": task.name,
+            "budget_seconds": seconds, "original_catalog_price_limit_cents": task.effective_price_limit_cents(),
+            "effective_preparation_price_limit_cents": price, "price_limit_cents": price,
+            "native_owner": {"context": str(context), "status_file": str(owner[0].resolve()), "token": owner[1]},
+            "task_definition_sha256": hashlib.sha256(json.dumps(asdict(task), sort_keys=True, default=str).encode()).hexdigest(),
+            "manifest_sha256": hashlib.sha256(manifest.read_bytes()).hexdigest(),
+        }
+        if any(admission.get(key) != value for key, value in expected.items()):
+            raise ValueError
+        if type(admission.get("cache_rows_before")) is not int or admission["cache_rows_before"] != 0:
+            raise ValueError
+        # A terminal owner is stale even if an abandoned output still says ADMITTED.
+        status = dict(line.split("=", 1) for line in owner[0].read_text().splitlines() if "=" in line)
+        if status.get("state") != "pending" or status.get("token") != owner[1]:
+            raise ValueError
+        out = Path(admission["output"])
+        if out.parent.resolve() != context or out.is_symlink() or out.stat().st_size > 16384:
+            raise ValueError
+        # Existing output is the mutable execution receipt; the admission remains immutable.
+        # Lock + ADMITTED transition prevents concurrent or later reuse of one admission.
+        with out.open("r+") as stream:
+            fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            active = json.load(stream)
+            if active != {key: value for key, value in admission.items() if key != "output"}:
+                raise ValueError
+            active["state"] = "EXECUTING"
+            stream.seek(0)
+            json.dump(active, stream, indent=2)
+            stream.truncate()
+            stream.flush()
+            os.fsync(stream.fileno())
+    except (OSError, ValueError, KeyError, TypeError):
+        raise ValueError("Preparation price requires a matching current native owned admission") from None
+
+
+async def _run_owned_preparation(base_url: str, task: BenchmarkTask, args) -> None:
+    out = Path(args.owned_recording_preparation_out)
+    receipt = json.loads(out.read_text())
+    preparation_price = _validated_preparation_price(
+        args.owned_recording_preparation_seconds,
+        getattr(args, "owned_recording_preparation_price_limit_cents", None),
+    )
+    effective_price = preparation_price if preparation_price is not None else task.effective_price_limit_cents()
+    if (receipt.get("original_catalog_price_limit_cents") != task.effective_price_limit_cents()
+            or receipt.get("effective_preparation_price_limit_cents") != effective_price):
+        raise ValueError("Preparation price differs from its admission receipt")
+    live_ids: dict[str, list[str]] = {}
+    results = []
+    original_error = None
+    cleanup_error = None
+
+    def remember(name, aid):
+        if aid and aid not in live_ids.setdefault(name, []):
+            live_ids[name].append(aid)
+
+    _begin_interrupt_cleanup()
+    try:
+        result = await run_single_task(
+            base_url, task, keep_failed_agents=True, on_agent_created=remember,
+            preparation_seconds=args.owned_recording_preparation_seconds,
+            preparation_price_limit_cents=preparation_price,
+        )
+        # Exceptions returned as native error outcomes retain their actual status/error.
+        # None of these outcomes can be a benchmark pass or enter result history.
+        result.passed = False
+        result.benchmark_status = "UNSCORED"
+        result.stop_metadata = {**(result.stop_metadata or {}), "purpose": "owned_recording_preparation"}
+        result.logs = result.logs or {}
+        result.logs.setdefault("preparation", {}).setdefault("cost_evidence", {
+            "cents": result.cost_cents, "source": "native_snapshot" if result.cost_cents is not None else "unavailable",
+            "coverage": "reported_snapshot" if result.cost_cents is not None else "unknown",
+        })
+        results.append(result)
+    except BaseException as error:
+        original_error = error
+        raise
+    finally:
+        try:
+            await _finalize_owned_cloud_batch(base_url, results, live_ids)
+            _complete_interrupt_cleanup()
+        except BaseException as error:
+            cleanup_error = error
+            if original_error is not None:
+                original_error.add_note(f"Preparation cleanup failed: {type(error).__name__}: {error}")
+        receipt.update({"mode": "UNSCORED_RECORDING_PREPARATION", "qualification": "NOT_VALIDATION",
+                        "state": "FINISHED_UNQUALIFIED", "roots": live_ids,
+                        "result": asdict(results[0]) if results else None,
+                        "error": f"{type(original_error).__name__}: {original_error}" if original_error else None,
+                        "cleanup_error": f"{type(cleanup_error).__name__}: {cleanup_error}" if cleanup_error else None})
+        if results and (results[0].status != "COMPLETED" or results[0].failure_reason):
+            receipt["state"] = "INCOMPLETE"
+        if original_error or cleanup_error:
+            receipt["state"] = "INCOMPLETE"
+        temporary = out.with_suffix(out.suffix + ".pending")
+        try:
+            with temporary.open("x") as stream:
+                json.dump(receipt, stream, indent=2, default=str)
+            temporary.replace(out)
+            print(f"Preparation evidence saved: {out}")
+        except BaseException as publication_error:
+            if original_error is None:
+                raise
+            original_error.add_note(f"Preparation evidence publication failed: {type(publication_error).__name__}")
+        if cleanup_error is not None and original_error is None:
+            raise cleanup_error
+    if receipt["state"] == "INCOMPLETE":
+        raise RuntimeError("Unscored recording preparation incomplete; original outcome retained in receipt")
 def _refuse_queued_after_interrupt(
     queued: list[BenchmarkTask], start: int, results: list[TaskResult], never_admitted: list[TaskResult]
 ) -> None:
@@ -17880,6 +18231,19 @@ async def main_async(args):
     if not tasks:
         print("No tasks matched. Use --list to see available tasks.")
         sys.exit(1)
+    preparation = getattr(args, "owned_recording_preparation_seconds", None)
+    preparation_price = _validated_preparation_price(
+        preparation, getattr(args, "owned_recording_preparation_price_limit_cents", None),
+    )
+    if preparation is not None:
+        forbidden = (args.prod or args.parallel or args.timeout_seconds is not None
+                     or args.checkpoint_source_index is not None or args.row_start is not None
+                     or args.row_end is not None or args.sub_agent_count is not None
+                     or args.wmh_initial_state_file or args.harness or args.anon)
+        if forbidden or not getattr(args, "owned_recording_preparation_out", None):
+            raise ValueError("Preparation cannot alter task/route or use checkpoint/validation options")
+        _admit_owned_preparation(base_url, tasks, preparation, Path(args.owned_recording_preparation_out),
+                                price_limit_cents=preparation_price)
     if args.wmh_initial_state_file:
         if len(tasks) != 1 or len(task_names_from_args(args)) != 1:
             raise ValueError("--wmh-initial-state-file requires exactly one explicit --task")
@@ -18000,6 +18364,10 @@ async def main_async(args):
             continue
         t._resolved_timeout_seconds, note = resolve_task_execution_timeout(t, bootstrap=args.bootstrap)
         print(f"  ⏱  {t.name} → {t._resolved_timeout_seconds}s ({note})")
+
+    if preparation is not None:
+        await _run_owned_preparation(base_url, tasks[0], args)
+        return
 
     # Start Fly.io log streaming
     fly_status = await start_fly_log_collector(backend_url=base_url)
@@ -18183,7 +18551,10 @@ async def main_async(args):
                 force=force,
             )
         except Exception as exc:  # [REDACTED] must never fail the run
-            print(f"  ⚠ report card emit failed: {exc}")
+            try:
+                print(f"  ⚠ report card emit failed: {exc}")
+            except (OSError, ValueError):
+                pass
 
     # Live report card: a background ticker emits on a timer so the dashboard updates
     # DURING the run. The drain loop only emits on task-completion events, so a single
@@ -18478,14 +18849,18 @@ async def main_async(args):
             else:
                 print(f"  ⚠ Worker memory sampling unavailable after smoke: {memory_after.get('reason')}")
 
-        await _finalize_owned_batch_and_save_run(
-            base_url,
-            run,
-            _live_task_agent_ids,
-            owned_batch_cleanup=owned_batch_cleanup,
-            retrieval_audit=_wmh_evidence.finalize,
-            never_admitted_results=tuple(_never_admitted_results),
-        )
+        try:
+            await _finalize_owned_batch_and_save_run(
+                base_url,
+                run,
+                _live_task_agent_ids,
+                owned_batch_cleanup=owned_batch_cleanup,
+                retrieval_audit=_wmh_evidence.finalize,
+                never_admitted_results=tuple(_never_admitted_results),
+            )
+        finally:
+            # Cleanup can change the canonical grade even when it raises.
+            _emit_report(force=True)
 
     # Print summary
     s = run.summary
@@ -18529,6 +18904,11 @@ async def main_async(args):
 
 def main():
     parser = argparse.ArgumentParser(description="Agent Benchmark Harness")
+    parser.add_argument("--owned-recording-preparation-seconds", type=int, default=None,
+                        help="Local owned REAL recording only; UNSCORED, bounded 1..3600s")
+    parser.add_argument("--owned-recording-preparation-out", default=None)
+    parser.add_argument("--owned-recording-preparation-price-limit-cents", type=int, default=None,
+                        help="Optional owned-preparation user-charge threshold, 1..1000 cents; never validation")
     parser.add_argument("--list", action="store_true", help="List all benchmark tasks")
     parser.add_argument(
         "--task",

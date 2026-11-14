@@ -35,8 +35,94 @@ import {
   type UserUiWorkspace,
 } from './userUi/workspace';
 import { isRoseDesktopUser } from '../utils/roseDesktop';
+import { prisma } from './database';
+import { basename } from 'node:path';
 
 const log = createLogger('CodeSessionWorkspace');
+
+/** Install only broker wrappers; actual binaries arrive in the user's native template. */
+export function withNativeCliWrappers(
+  workspace: UserUiWorkspace | null,
+  rows: Array<{ id: string; config: unknown }>
+): UserUiWorkspace | null {
+  if (!workspace) return workspace;
+  const files = [...workspace.files];
+  const reserved = new Set([
+    'rose',
+    'rose-ui',
+    'rose-agents',
+    'rose-preview',
+    'node',
+    'sh',
+    'bash',
+  ]);
+  for (const row of rows) {
+    const config = row.config;
+    if (
+      !config ||
+      typeof config !== 'object' ||
+      !('native_template' in config) ||
+      config.native_template !== true ||
+      !('command' in config) ||
+      typeof config.command !== 'string' ||
+      !config.command.startsWith('/')
+    )
+      continue;
+    if (
+      'credential_files' in config &&
+      Array.isArray(config.credential_files) &&
+      config.credential_files.length === 0
+    )
+      continue;
+    const name = basename(config.command);
+    if (
+      !/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(name) ||
+      reserved.has(name) ||
+      !/^[a-zA-Z0-9-]+$/.test(row.id)
+    )
+      continue;
+    const path = `.rose/bin/${name}`;
+    if (files.some((file) => file.path === path)) continue;
+    files.push({
+      path,
+      content: Buffer.from(
+        `#!/bin/sh\nexec node "$HOME/.rose/bin/rose" cli native '${row.id}' -- "$@"\n`
+      ),
+    });
+  }
+  if (files.some((file) => file.path.startsWith('.rose/bin/') && !workspace.files.includes(file))) {
+    files.push({
+      path: '.rose/native-cli-env.sh',
+      content: Buffer.from(
+        '# Keep connected CLI wrappers ahead of installer-added login-shell paths.\nexport PATH="/home/user/.rose/bin:$PATH"\n'
+      ),
+    });
+  }
+  return { ...workspace, files };
+}
+
+async function withUserNativeClis(
+  workspace: UserUiWorkspace | null,
+  userId: string | undefined,
+  taskId: string
+) {
+  if (!userId || !workspace) return workspace;
+  workspace = { ...workspace, envs: { ...workspace.envs, ROSE_CLI_TASK_ID: taskId } };
+  try {
+    const rows = await prisma.integration.findMany({
+      where: { userId, name: 'cli', type: 'TOOL_SETUP', status: 'CONNECTED' },
+      select: { id: true, config: true },
+      orderBy: { createdAt: 'asc' },
+      take: 200,
+    });
+    return withNativeCliWrappers(workspace, rows);
+  } catch (error) {
+    log.error('Failed to install native CLI wrappers', {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return workspace;
+  }
+}
 
 /**
  * Add the live-preview CLI and its env for Rose Desktop accounts (Rose-in-Rose, A1).
@@ -118,12 +204,16 @@ export async function prepareCodeSessionWorkspace(
       provider,
     }
   );
-  return withRoseSkills(
-    withCodePreview(
-      withAgentTools(graph, { userId, agentId, taskId, provider, roseDesktop }),
-      userId,
+  return withUserNativeClis(
+    withRoseSkills(
+      withCodePreview(
+        withAgentTools(graph, { userId, agentId, taskId, provider, roseDesktop }),
+        userId,
+        roseDesktop
+      ),
       roseDesktop
     ),
-    roseDesktop
+    userId,
+    taskId
   );
 }

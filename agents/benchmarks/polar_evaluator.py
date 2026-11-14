@@ -31,7 +31,7 @@ import json
 import re
 from typing import Any, Awaitable, Callable, Optional
 
-from benchmarks.completion_evidence import completion_card, completion_card_text as _completion_card_text, completion_messages
+from benchmarks.completion_evidence import completion_card
 
 # ---------------------------------------------------------------------------
 # Odysseys-exact judge contract (do not paraphrase).
@@ -205,6 +205,107 @@ def _iter_trajectory_messages(data: dict[str, Any]) -> list[dict[str, Any]]:
     return rows
 
 
+def _displayed_completion_text(message: dict[str, Any]) -> str:
+    """Project completion text shown by CompletionBubble/Card, excluding private metadata."""
+    metadata = _message_metadata(message)
+    completion = metadata.get("completionSummary")
+    if (message.get("role") != "TOOL"
+            or any(_js_truthy(metadata.get(flag)) for flag in ("artifactOnly", "hidden", "agentNotification"))
+            or metadata.get("environmentContext") is True
+            or metadata.get("messageType") in {"FINAL_ANSWER", "FAILED"}
+            or metadata.get("isFinalSummary") is not True
+            or metadata.get("toolName") != "completion_summary"
+            or str(metadata.get("toolStatus") or "").upper() != "FINISHED"
+            or not isinstance(completion, dict)
+            or ("error" in completion and type(completion["error"]) is not bool)):
+        return ""
+    presentation = completion.get("presentation")
+    if (not completion.get("error") and isinstance(presentation, dict)
+            and type(presentation.get("version")) is int and presentation["version"] == 1
+            and presentation.get("mode") == "value"
+            and isinstance(completion.get("answerText"), str)):
+        return completion["answerText"]
+
+    def file_pointer(value):
+        return isinstance(value, dict) and all(
+            isinstance(value.get(key), str) for key in ("id", "storage_path", "original_filename"))
+
+    def scalar(value):
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            return value
+        if type(value) is bool:
+            return "true" if value else "false"
+        if type(value) in (int, float):
+            return json.dumps(value, allow_nan=False)
+        raise ValueError("non-JSON completion value")
+
+    def block(value, ordinal=None):
+        if file_pointer(value):
+            return value["original_filename"]
+        if isinstance(value, list):
+            return "\n".join(block(item) for item in value)
+        if not isinstance(value, dict):
+            return scalar(value)
+        title_key = next((key for key in ("section_label", "title", "name", "label", "heading")
+                          if isinstance(value.get(key), str) and value[key].strip()), None)
+        lines = ([f"{ordinal}. {value[title_key]}" if ordinal is not None else value[title_key]] if title_key
+                 else [f"Item {ordinal}"] if ordinal is not None else [])
+        for key, item in value.items():
+            if key == title_key:
+                continue
+            if not isinstance(key, str):
+                raise ValueError("non-string completion key")
+            label = re.sub(r"\b\w", lambda match: match[0].upper(), key.replace("_", " "), flags=re.ASCII)
+            if isinstance(item, list) and not item:
+                continue  # StructuredField renders no empty array field.
+            text = block(item)
+            if isinstance(item, (list, dict)):
+                lines.append(label + ("\n" + text if text else ""))
+            elif text:
+                lines.append(label + ": " + text)
+        return "\n".join(lines)
+
+    def output_text(output):
+        value = output["value"]
+        if file_pointer(value):
+            return value["original_filename"]  # File widgets do not show the output label.
+        if isinstance(value, list) and value and file_pointer(value[0]):
+            if not all(file_pointer(item) for item in value):
+                raise ValueError("mixed file widget values")
+            return "\n".join(item["original_filename"] for item in value)
+        if isinstance(value, list):
+            if not value:
+                text = "No output"
+            elif all(not isinstance(item, (dict, list)) for item in value):
+                text = "\n\n".join(scalar(item) for item in value)
+            else:
+                text = "\n".join(block(item, i + 1) for i, item in enumerate(value))
+        else:
+            text = block(value)
+        return output["label"] + ("\n" + text if text else "")
+
+    summary, outputs = completion.get("summary"), completion.get("outputs", [])
+    if not isinstance(summary, str) or not isinstance(outputs, list):
+        return ""
+    if any(not isinstance(item, dict) or not isinstance(item.get("label"), str)
+           or "value" not in item for item in outputs):
+        return ""
+    try:
+        lines = (["Task Failed"] if completion.get("error") else []) + [summary]
+        lines.extend(output_text(item) for item in outputs)
+        return "\n".join(line for line in lines if line)
+    except (TypeError, ValueError, RecursionError):
+        return ""
+
+
+def _js_truthy(value: Any) -> bool:
+    """Visibility flags follow JavaScript, where empty objects/arrays are truthy."""
+    return not (value is None or value is False or type(value) in (int, float) and value == 0
+                or isinstance(value, str) and value == "")
+
+
 def build_polar_trajectory(
     data: dict[str, Any],
     *,
@@ -220,7 +321,26 @@ def build_polar_trajectory(
     step_number = 0
 
     trajectory = _iter_trajectory_messages(data)
-    final_ids = {id(message) for message in completion_messages(trajectory)}
+    final_ids: set[int] = set()
+    seen_final: set[tuple[str, str, str]] = set()
+    for message in trajectory:
+        displayed = _displayed_completion_text(message)
+        if not displayed:
+            continue
+        metadata = _message_metadata(message)
+        text = _message_text(message)
+        summary = (completion_card(metadata) or {}).get("summary")
+        distinct_text = text if text not in (displayed, summary) else ""
+        identity = message.get("message_id") or message.get("id")
+        # The same durable message may be updated in value/report/error mode.
+        # Only identical visible content is a duplicate; typed metadata alone
+        # does not describe what CompletionBubble/Card actually displayed.
+        key = (str(identity), displayed, distinct_text)
+        if identity and key in seen_final:
+            continue
+        if identity:
+            seen_final.add(key)
+        final_ids.add(id(message))
     for message in trajectory:
         role = str(message.get("role") or "").upper()
         text = _message_text(message)
@@ -245,7 +365,7 @@ def build_polar_trajectory(
             screenshots.append({"b64": shot[0], "mime": shot[1]})
 
         parts: list[str] = []
-        final_answer = _completion_card_text(metadata) if id(message) in final_ids else ""
+        final_answer = _displayed_completion_text(message) if id(message) in final_ids else ""
         if final_answer:
             final_ids.discard(id(message))
             parts.append(f"Response: {final_answer}")
@@ -260,9 +380,38 @@ def build_polar_trajectory(
                 action_bits.append(tool_name)
             if tool_status:
                 action_bits.append(f"status={tool_status}")
-            if text and text not in (final_answer, metadata.get("completionSummary", {}).get("summary") if isinstance(metadata.get("completionSummary"), dict) else None):
-                clipped = text if len(text) <= 4000 else text[:4000] + "…"
-                action_bits.append(clipped)
+            source_step = metadata.get("browser_action_step")
+            source_task = metadata.get("task_id")
+            if type(source_step) is int and source_step > 0 and isinstance(source_task, str) and source_task:
+                action_bits.append(f"Recorded browser task {source_task}: action-history step {source_step}")
+            params = metadata.get("browser_action_params")
+            if isinstance(params, dict) and params:
+                action_bits.append("Recorded action parameters: " + json.dumps(params, ensure_ascii=False, sort_keys=True))
+            if text and text not in (final_answer, (completion_card(metadata) or {}).get("summary")):
+                action_bits.append(text)
+            # Non-browser tools may return typed data without a display string.
+            # Retain their actual output for the same semantic judge; tool choice
+            # itself is not an acceptance requirement.
+            if tool_name != "spawn_browser_agent" and isinstance(metadata.get("structured_response"), (dict, list)):
+                action_bits.append("Recorded tool output: " + json.dumps(
+                    metadata["structured_response"], ensure_ascii=False, sort_keys=True,
+                ))
+            completion_text = _displayed_completion_text(message)
+            if completion_text and completion_text.strip() not in {text.strip(), final_answer.strip()}:
+                action_bits.append("Displayed final answer: " + completion_text)
+            observation = metadata.get("browser_observation")
+            if isinstance(observation, str) and observation:
+                action_bits.append("Recorded browser observation: " + observation)
+            verifier_input = metadata.get("browser_verifier_input")
+            if (isinstance(verifier_input, dict)
+                    and verifier_input.get("call_site") in {"verifier_browser", "verifier_browser_max_steps"}
+                    and isinstance(verifier_input.get("texts"), list)
+                    and all(isinstance(item, str) for item in verifier_input["texts"])
+                    and isinstance(source_task, str) and source_task
+                    and isinstance(metadata.get("toolCallId"), str) and metadata["toolCallId"]):
+                action_bits.append("Recorded verifier input (text only) for browser task " + source_task
+                                   + ", verification call " + metadata["toolCallId"] + ":\n"
+                                   + "\n".join(verifier_input["texts"]))
             if action_bits:
                 parts.append("Action: " + " | ".join(action_bits))
         elif role == "USER" and text:

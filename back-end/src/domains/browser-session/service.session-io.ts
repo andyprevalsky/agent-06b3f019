@@ -13,7 +13,6 @@ import {
 } from '../../providers/browser';
 import * as repo from './repo';
 import { validateBrowserKeySymbols } from './service.browser-input';
-import { validateSessionFilePath } from './service.file-path';
 import { SessionNotFoundError } from './service.local-storage';
 
 const log = createLogger('BrowserSession');
@@ -78,7 +77,7 @@ export async function listFiles(sessionId: string) {
 
 export async function downloadFile(sessionId: string, filePath: string, userId?: string) {
   await requireSessionOwner(sessionId, userId);
-  validateSessionFilePath(filePath);
+  // Provider-bound validation uses the same stored provider as dispatch (R23).
   const content = await readSessionFile(sessionId, filePath);
   const filename = filePath.split('/').pop();
   return {

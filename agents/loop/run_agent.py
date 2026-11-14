@@ -1902,6 +1902,7 @@ async def run_agent(
         assistant_metadata = {}
         if assistant_tool_calls:
             assistant_metadata["tool_calls"] = assistant_tool_calls
+            assistant_metadata["tool_call_origin"] = "model" if completed_child_output is None else "completed_child_handoff"
         codex_reasoning_items = getattr(result, "codex_reasoning_items", [])
         if codex_reasoning_items:
             assistant_metadata["codex_reasoning_items"] = codex_reasoning_items
