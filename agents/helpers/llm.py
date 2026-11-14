@@ -638,6 +638,7 @@ def _build_claude_auth_context(
             ctx.lineage_key or "",
             integration_id=integration_id,
             usage=usage,
+            credential=credential_fingerprint(ctx.token),
         )
         if usage and not delivered:
             # Not acknowledged: keep it for the next heartbeat (a newer observation wins).
@@ -721,6 +722,7 @@ def _build_gpt_auth_context(
             ctx.lineage_key or "",
             integration_id=integration_id,
             usage=usage,
+            credential=credential_fingerprint(ctx.token),
         )
         if usage and not delivered:
             # Not acknowledged: keep it for the next heartbeat (a newer observation wins).
@@ -7566,12 +7568,15 @@ async def heartbeat_compute_token_lineage_activity(
     lineage_key: str,
     integration_id: Optional[str] = None,
     usage: Optional[Dict[str, Any]] = None,
+    credential: Optional[str] = None,
 ) -> bool:
     """Refresh a compute-token lineage lease. Best-effort; callers should not block on it.
 
     Also carries the token's latest provider usage-window snapshot (see
     `providers.rose.subscription_usage`) and the Integration row that served it,
-    so per-account usage reaches the backend without a separate request.
+    so per-account usage reaches the backend without a separate request. A lease
+    built without its integration id (the agent loop's) names the token by
+    ``credential`` fingerprint instead; without either the backend drops the usage.
     """
     if not lineage_key:
         return False
@@ -7581,6 +7586,8 @@ async def heartbeat_compute_token_lineage_activity(
         body["integrationId"] = integration_id
     if usage:
         body["usage"] = usage
+        if credential and not integration_id:
+            body["credential"] = credential
     try:
         client = get_http_client()
         response = await client.post(

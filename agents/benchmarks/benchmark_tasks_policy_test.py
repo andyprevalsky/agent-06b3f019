@@ -473,3 +473,56 @@ def test_raise_5m_brex_long_horizon_runs_simulated_on_tamy_account_snapshot():
 
     # The catalog declaration alone must switch the local runner into simulate.
     assert resolve_simulate_mode(False, ["raise-5m-rose-labs-brex"]) is True
+
+
+AGENTCARD_WORLD_INVENTORY_TASKS = (
+    "browser-auth-guest-purchase",
+    "browser-auth-member-discount-purchase",
+    "browser-auth-member-discount-signup-fails-purchase",
+    "browser-auth-paid-membership-purchase",
+    "browser-auth-signup-purchase",
+    "browser-auth-signup-purchase-no-subscription",
+    "browser-auth-session-expires-at-checkout",
+    "agent-payment-test-shop",
+    "agent-payment-new-user-journey",
+    "agent-payment-setup-resume",
+    "agent-payment-idempotent-abandonment",
+    "agent-payment-abandonment",
+    "agent-payment-production-abandonment",
+    "agent-payment-production-purchase",
+)
+
+
+def test_agentcard_world_inventory_contract_rejects_duplicate_and_unlinked_provider_objects():
+    import copy
+    from benchmarks.run_benchmark import _validate_payment_lifecycle
+
+    for name in AGENTCARD_WORLD_INVENTORY_TASKS:
+        task = get_task_by_name(name)
+        contract = task.expected_payment_lifecycle["integrity"]
+        for field in ("agentCardProviderCardCount", "agentCardProviderTransferCount"):
+            assert contract[field] == 1, (name, field, contract)
+        assert contract["agentCardProviderUnlinkedTransferCount"] == 0
+        actual = copy.deepcopy(task.expected_payment_lifecycle)
+        if task.production_only:
+            actual["stripeHold"]["livemode"] = True
+            if isinstance(actual.get("stripeRefund"), dict):
+                actual["stripeRefund"]["paymentIntentLivemode"] = True
+        assert _validate_payment_lifecycle(task, {"_benchmark": {"payment_lifecycle": actual}}) is None
+        for field, bad in (("agentCardProviderCardCount", 2), ("agentCardProviderTransferCount", 2), ("agentCardProviderUnlinkedTransferCount", 1)):
+            changed = copy.deepcopy(actual)
+            changed["integrity"][field] = bad
+            error = _validate_payment_lifecycle(task, {"_benchmark": {"payment_lifecycle": changed}})
+            assert error == f"payment_lifecycle.integrity.{field} mismatch: expected {contract[field]}, got {bad}"
+
+
+def test_agentcard_world_inventory_setup_accepts_compensated_initial_stripe_intent():
+    import copy
+    from benchmarks.run_benchmark import _validate_payment_lifecycle
+
+    task = get_task_by_name("agent-payment-setup-resume")
+    actual = copy.deepcopy(task.expected_payment_lifecycle)
+    # purchases-05 setup legitimately had one canceled/refunded initial intent,
+    # then the successful resumed intent, with only one provider card/transfer.
+    actual["integrity"].update(stripePaymentIntentCount=2, stripeProviderPaymentIntentCount=2)
+    assert _validate_payment_lifecycle(task, {"_benchmark": {"payment_lifecycle": actual}}) is None

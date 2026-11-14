@@ -1,0 +1,211 @@
+{
+  "format": "PR1928-PRIVATE-ARCHIVE-INDEX-V1",
+  "bucket_env": "R2_BUCKET_TRACE_ARCHIVE",
+  "key_env": "TRACE_ARCHIVE_ENCRYPTION_KEY_B64",
+  "key_fingerprint_sha256": "e351c7cc5b01303e579fe6d1df833940fdaadf325ca47314414ba10735fc7730",
+  "archives": {
+    "records": {
+      "format": "TAR+GZIP",
+      "sha256": "6b9667a937d8351101a994ea55b64cd30c24f835af5495540057b678ac66d66f",
+      "plain_bytes": 3280573264,
+      "parts": [
+        {
+          "key": "devbox-closeout-private/pr1928/20261111T235127Z-records.tar.gz.part000.aesgcm",
+          "sha256": "1232c8a230560a23cf0aef3812b5628831bd552697a6c5149fdb7d7729c1c57c",
+          "plain_bytes": 268435456
+        },
+        {
+          "key": "devbox-closeout-private/pr1928/20261111T235127Z-records.tar.gz.part001.aesgcm",
+          "sha256": "ee2cf87c8902dad6b05116fb13043f5ab0198d75836e0206897aa62f1a4523c7",
+          "plain_bytes": 268435456
+        },
+        {
+          "key": "devbox-closeout-private/pr1928/20261111T235127Z-records.tar.gz.part002.aesgcm",
+          "sha256": "ee3c263f29689a647d77dc65407b9301d30856aa11bb2e91e16db3fcb505b9eb",
+          "plain_bytes": 268435456
+        },
+        {
+          "key": "devbox-closeout-private/pr1928/20261111T235127Z-records.tar.gz.part003.aesgcm",
+          "sha256": "2c62ff8e3c3a72899e75c2a06e75c1dceabf83a0f728ca39e668097042064a9a",
+          "plain_bytes": 268435456
+        },
+        {
+          "key": "devbox-closeout-private/pr1928/20261111T235127Z-records.tar.gz.part004.aesgcm",
+          "sha256": "5999419038f85cf5b6d9e5ade398777d31a57241d3b301db98a14f753d5d8fd3",
+          "plain_bytes": 268435456
+        },
+        {
+          "key": "devbox-closeout-private/pr1928/20261111T235127Z-records.tar.gz.part005.aesgcm",
+          "sha256": "eb05b2def544206cc1cc43eae57026c9488d7793958bd55a3dfa0874c374c5c3",
+          "plain_bytes": 268435456
+        },
+        {
+          "key": "devbox-closeout-private/pr1928/20261111T235127Z-records.tar.gz.part006.aesgcm",
+          "sha256": "4317f2a7267718d24927dcf237c081ac73fc00ff1e47fb2609e8fd737b9fe9bd",
+          "plain_bytes": 268435456
+        },
+        {
+          "key": "devbox-closeout-private/pr1928/20261111T235127Z-records.tar.gz.part007.aesgcm",
+          "sha256": "a58b49bd4cfa3611b9170c7ec40e42bb349ea82692d79124157dea0db311babe",
+          "plain_bytes": 268435456
+        },
+        {
+          "key": "devbox-closeout-private/pr1928/20261111T235127Z-records.tar.gz.part008.aesgcm",
+          "sha256": "0e4dbef6642a79f56cb151680691a13cc99c4d166cbd7bdbb5feb215f9f7702c",
+          "plain_bytes": 268435456
+        },
+        {
+          "key": "devbox-closeout-private/pr1928/20261111T235127Z-records.tar.gz.part009.aesgcm",
+          "sha256": "a6ca7acd52316f73164a9981869b66d50e72a17bf8352d86da07c7bf790c35e2",
+          "plain_bytes": 268435456
+        },
+        {
+          "key": "devbox-closeout-private/pr1928/20261111T235127Z-records.tar.gz.part010.aesgcm",
+          "sha256": "d7c6950aa03cacf7f4341d0826543de6cb623d50c472418ce71d0658823fd297",
+          "plain_bytes": 268435456
+        },
+        {
+          "key": "devbox-closeout-private/pr1928/20261111T235127Z-records.tar.gz.part011.aesgcm",
+          "sha256": "f4eea79e4b64667f4c891fb1ab065b73682ca2e6dcf2009a8567cb7877d3a9bf",
+          "plain_bytes": 268435456
+        },
+        {
+          "key": "devbox-closeout-private/pr1928/20261111T235127Z-records.tar.gz.part012.aesgcm",
+          "sha256": "541212bfaa40d629e501c8016b950381e8a7508d0cfe923f40cedc73cc7c8b68",
+          "plain_bytes": 59347792
+        }
+      ],
+      "members": [
+        ".cloud-env",
+        ".context/",
+        ".devbox/",
+        ".env.npm",
+        ".llm-dumps/",
+        "agents/.env",
+        "agents/.env.benchmark-temporal",
+        "agents/.env.cloudbench-upsert.lock",
+        "agents/navi-worker-log.1.txt",
+        "agents/navi-worker-log.2.txt",
+        "agents/navi-worker-log.3.txt",
+        "agents/navi-worker-log.txt",
+        "agents/providers/fast_cache/",
+        "back-end/.context/",
+        "back-end/.env",
+        "back-end/.env.cloudbench-upsert.lock",
+        "back-end/backend-logs.log",
+        "docs/rca/INDEX.md",
+        "front-end/.env",
+        "front-end/frontend-logs.log",
+        "front-end/playwright-mobile-screenshots/",
+        "hub-poller-logs.log",
+        "mac-app/.env",
+        "package-lock.json",
+        "research/.env"
+      ],
+      "extra": "var-tmp-pr1928 (deploy wrapper, triage inputs, cleanup proofs, killed attempt dirs, repair handoffs)"
+    },
+    "branches": {
+      "format": "GIT-BUNDLE",
+      "sha256": "fa04186b990865b7ecb95f42c7990ec2835846fb6f5a7f3c8c25e8580ea3a5c1",
+      "plain_bytes": 1007455400,
+      "parts": [
+        {
+          "key": "devbox-closeout-private/pr1928/20261111T235127Z-branches.bundle.part000.aesgcm",
+          "sha256": "13b187a50fe2b249635fb2bea397e70d203e6234ec2de08fce229318a26121ce",
+          "plain_bytes": 268435456
+        },
+        {
+          "key": "devbox-closeout-private/pr1928/20261111T235127Z-branches.bundle.part001.aesgcm",
+          "sha256": "28eb1695928ad559f45ddeea1fe6a940e83518c1cfa74e202a9511a02a5e93f7",
+          "plain_bytes": 268435456
+        },
+        {
+          "key": "devbox-closeout-private/pr1928/20261111T235127Z-branches.bundle.part002.aesgcm",
+          "sha256": "58c807a226035c47b23fb74b9bc9147d7b007a09126e70dac0777297cf1af90c",
+          "plain_bytes": 268435456
+        },
+        {
+          "key": "devbox-closeout-private/pr1928/20261111T235127Z-branches.bundle.part003.aesgcm",
+          "sha256": "3050e5b99058969941d99469bec562f7b61dbee315955325881b134180482692",
+          "plain_bytes": 202149032
+        }
+      ],
+      "refs": [
+        "refs/heads/andyprevalsky/P3-message-person-hillclimb",
+        "refs/heads/andyprevalsky/archive-domain-render-hotfix-2",
+        "refs/heads/andyprevalsky/audit-prod-temporal-queue",
+        "refs/heads/andyprevalsky/browser-js-state",
+        "refs/heads/andyprevalsky/check-mac-app",
+        "refs/heads/andyprevalsky/descend-antibot-harness-infra",
+        "refs/heads/andyprevalsky/descend-daily-h01",
+        "refs/heads/andyprevalsky/descend-daily-h04",
+        "refs/heads/andyprevalsky/descend-daily-h06-h08",
+        "refs/heads/andyprevalsky/descend-daily-h08-proposed",
+        "refs/heads/andyprevalsky/descend-i05-google-evaluator",
+        "refs/heads/andyprevalsky/descend-i08-cleanup-ownership",
+        "refs/heads/andyprevalsky/fe-refactor-5",
+        "refs/heads/andyprevalsky/fe-refactor-6",
+        "refs/heads/andyprevalsky/fe-refactor-u01-v2",
+        "refs/heads/andyprevalsky/fe-refactor-u02-v2",
+        "refs/heads/andyprevalsky/fe-refactor-u04",
+        "refs/heads/andyprevalsky/fe-refactor-u09",
+        "refs/heads/andyprevalsky/fe-refactor-u10",
+        "refs/heads/andyprevalsky/fe-refactor-u12-v2",
+        "refs/heads/andyprevalsky/fe-refactor-u14-v2",
+        "refs/heads/andyprevalsky/fix-mac-app-updates",
+        "refs/heads/andyprevalsky/fix-mac-release-node-gyp",
+        "refs/heads/andyprevalsky/fmt-auth",
+        "refs/heads/andyprevalsky/fmt-browser-state-sync",
+        "refs/heads/andyprevalsky/fmt-claude-credential-sync",
+        "refs/heads/andyprevalsky/fmt-cookie-reader",
+        "refs/heads/andyprevalsky/fmt-electron-app",
+        "refs/heads/andyprevalsky/fmt-electron-main",
+        "refs/heads/andyprevalsky/fmt-i-message-queue-service",
+        "refs/heads/andyprevalsky/fmt-i-message-reader",
+        "refs/heads/andyprevalsky/fmt-i-message-sync",
+        "refs/heads/andyprevalsky/fmt-ipc-registry",
+        "refs/heads/andyprevalsky/fmt-messaging-core",
+        "refs/heads/andyprevalsky/fmt-messaging-imessage",
+        "refs/heads/andyprevalsky/fmt-messaging-telegram",
+        "refs/heads/andyprevalsky/fmt-messaging-whatsapp",
+        "refs/heads/andyprevalsky/fmt-onboarding",
+        "refs/heads/andyprevalsky/fmt-renderer-main",
+        "refs/heads/andyprevalsky/fmt-sync-manager",
+        "refs/heads/andyprevalsky/fmt-uploader",
+        "refs/heads/andyprevalsky/map-mac-app",
+        "refs/heads/andyprevalsky/nightly-temporal-migration",
+        "refs/heads/andyprevalsky/purchase-auth-hold-capture-2",
+        "refs/heads/andyprevalsky/rca-agentcard-prod-transfer-id",
+        "refs/heads/andyprevalsky/rca-deploy-dependency-capacity",
+        "refs/heads/andyprevalsky/rca-ecommerce-fixtures",
+        "refs/heads/andyprevalsky/rca-ecommerce-payment",
+        "refs/heads/andyprevalsky/rca-ecommerce-terminal",
+        "refs/heads/andyprevalsky/rca-i16-integration",
+        "refs/heads/andyprevalsky/rca-workspace-env-hermetic",
+        "refs/heads/andyprevalsky/refactor-benchmark-production",
+        "refs/heads/andyprevalsky/refactor-benchmark-runner",
+        "refs/heads/andyprevalsky/research-benchmark-production-unit-tests",
+        "refs/heads/andyprevalsky/revert-plateau",
+        "refs/heads/andyprevalsky/semantic-gate-temporal-poll-robustness",
+        "refs/heads/andyprevalsky/sms-agent-fail-debug-2",
+        "refs/heads/andyprevalsky/sync-agent-data",
+        "refs/heads/andyprevalsky/whatsapp-sync",
+        "refs/heads/andyprevalsky/zero-downtime-agent-cutover",
+        "refs/heads/backup-pre-rebase-H01",
+        "refs/heads/backup/cerebras-chat-quota-prepush-20261002",
+        "refs/heads/research-completions-finish",
+        "refs/heads/worktree-agent-a2ce06f7",
+        "refs/heads/worktree-agent-a4865381",
+        "refs/heads/worktree-agent-a53b33a4",
+        "refs/heads/worktree-agent-a8ac3824",
+        "refs/heads/worktree-agent-a9fd05de",
+        "refs/heads/worktree-agent-aa597117",
+        "refs/heads/worktree-agent-ab7ea04b",
+        "refs/heads/worktree-agent-ad6481e8",
+        "refs/heads/worktree-agent-aebec228",
+        "refs/closeout/pr1928-stash"
+      ],
+      "stash": "0e2ffe95ba40a2d0c2b8ae9e884b4a85d96af3f2"
+    }
+  }
+}

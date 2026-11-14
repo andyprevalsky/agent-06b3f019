@@ -252,7 +252,45 @@ cloudbench_image_publish_child() {
         # The shared native builder's HTTPS endpoint cannot upgrade embedded
         # BuildKit gRPC. Use its supported classic Docker API without changing
         # the builder configuration or the caller's runtime environment.
-        DOCKER_BUILDKIT=0 "$client" "$@" --wg=false
+        # Docker's nonterminal renderer drops transfer progress. Only stderr
+        # needs a terminal; closed stdin and inherited stdout keep SDK prompts off.
+        DOCKER_BUILDKIT=0 python3 - "$client" "$@" --wg=false <<'PY_NATIVE_PROGRESS'
+import errno
+import os
+import pty
+import signal
+import subprocess
+import sys
+
+master, slave = pty.openpty()
+try:
+    child = subprocess.Popen(sys.argv[1:], stdin=subprocess.DEVNULL, stderr=slave)
+finally:
+    os.close(slave)
+
+def forward_signal(signum, _frame):
+    if child.poll() is None:
+        child.send_signal(signum)
+
+for signum in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM):
+    signal.signal(signum, forward_signal)
+try:
+    while True:
+        try:
+            data = os.read(master, 65536)
+        except OSError as error:
+            if error.errno == errno.EIO:
+                break  # A closed PTY slave reports EIO on Linux.
+            raise
+        if not data:
+            break
+        sys.stderr.buffer.write(data)
+        sys.stderr.buffer.flush()
+finally:
+    os.close(master)
+    status = child.wait()
+raise SystemExit(status if status >= 0 else 128 - status)
+PY_NATIVE_PROGRESS
     else
         "$client" "$@" --wg=false
     fi

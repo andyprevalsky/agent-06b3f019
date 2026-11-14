@@ -215,7 +215,7 @@ class Fly:
         self.path = f"/apps/{quote(app, safe='')}/machines/{quote(machine_id, safe='')}"
         self.nonce = None
 
-    def request(self, method, suffix="", data=None):
+    def request(self, method, suffix="", data=None, *, timeout=30):
         headers = {
             "Authorization": f"Bearer {os.environ['FLY_API_TOKEN']}",
             "Content-Type": "application/json",
@@ -225,7 +225,7 @@ class Fly:
         body = None if data is None else json.dumps(data).encode()
         with urlopen(
             Request(API + self.path + suffix, data=body, headers=headers, method=method),
-            timeout=30,
+            timeout=timeout,
         ) as response:
             raw = response.read()
             return json.loads(raw) if raw else None
