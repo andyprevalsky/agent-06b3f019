@@ -8,10 +8,11 @@ classification: our-bug
 problem_class: concurrency-inefficiency
 first_bad_boundary: mac-app/main/domains/indexed-db-reader/service.ts readIndexedDB — `await Promise.resolve()` then a fully synchronous readIndexedDbDatabases + JSON.stringify hash per origin on the main process
 symptoms:
-  - "app freezing"
-  - "little mac spinner"
-  - "synchronous CPU/IO work"
-  - "readIndexedDbDatabases"
+  - app freezing; Mac app freezes with the spinning beachball
+  - little mac spinner
+  - periodic browser-state sync blocks the Electron main process
+  - synchronous CPU/IO work; synchronous IndexedDB scan stalls the event loop
+  - readIndexedDbDatabases
 tags:
   - mac-app
   - electron-main
@@ -20,7 +21,8 @@ tags:
   - browser-state-sync
 sources:
   - commit 9966aa4036eaac792379e949d0e1ad6ed3dbe764
-  - task .context/beachball-rca
+  - memory: user report 2026-11-06
+  - task local repro .context/beachball-rca (headless Chromium profile, 20,000 Gmail-like IndexedDB records)
 repro: mac-app/tests/blackbox/indexed-db-reader.blackbox.ts › main-process responsiveness
 status: mitigated
 ---
@@ -90,6 +92,8 @@ the mac-app vitest suite used by `/deploy`.
 
 ## Open / Mac-only
 
+The measured main-process fix is recorded above; archive status remains mitigated pending Mac-side confirmation.
+
 - This repro runs on Linux Node 22, not Electron on Andy's Mac, and his IndexedDB
   size is unknown. The console log line
   `[IndexedDBReader] Read N origins, D databases, R records` in
@@ -110,8 +114,8 @@ the mac-app vitest suite used by `/deploy`.
 
 ## Human feedback
 
-The original source records Andy's November 6, 2026 report: "on the mac-app, i get stutters sometimes, it feels like the CPU gets throttled, I get the little mac spinner thing with the app freezing". Its local reproduction used a headless Chromium profile with 20,000 Gmail-like IndexedDB records under `.context/beachball-rca`. The Mac-side confirmation caveat remains open above.
+The original source records Andy's November 6, 2026 report: "on the mac-app, i get stutters sometimes, it feels like the CPU gets throttled, I get the little mac spinner thing with the app freezing". Its local reproduction used a headless Chromium profile with 20,000 Gmail-like IndexedDB records under `.context/beachball-rca`. The Mac-side confirmation caveat remains open above. Preserve the distinction between the measured local reproduction and the still-pending Mac-side confirmation.
 
 ## Reusable lesson
 
-A microtask yield does not make a long synchronous scan responsive. Bound work with event-loop yields while checking byte parity, and retain platform-specific validation limits.
+A microtask yield does not make a long synchronous scan responsive. Bound synchronous decoding and serialization with event-loop yields on a UI-owning event loop, and test responsiveness alongside byte and hash equivalence. A local regression result does not replace platform-specific acceptance.

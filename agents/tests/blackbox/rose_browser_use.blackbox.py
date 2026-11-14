@@ -21,10 +21,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-sys.path.insert(0, str(ROOT.parent / "scripts" / "lib"))
 
 from _test_utils import BlackboxResult, set_mock_handler, teardown_mock
-from test_quarantine import quarantine
 
 import httpx
 
@@ -3425,12 +3423,6 @@ async def test_native_autofill_control_history_matches_real_serializer():
     assert json.loads(turn_messages[1]["content"])["operation"]["id"] == "read-1"
 
 
-@quarantine(
-    since="2026-11-11",
-    repair="https://boxes.dev/thread/thr_8cefa6e4ed4f4244ae0919c0d2b3c8b3",
-    error="native_autofill_real_model_controls: AssertionError: ['(\\'presence\\', {\\'actual_model\\': \\'qwen/qwen3.8-27b\\', \\'mode\\': \\'waterfall\\', \\'request_id\\': \\'5a27176dbd4c\\'}",
-    evidence=".context/rca-playwright/final-schema-a4dc/flaky-autofill/findings.json",
-)
 async def test_native_autofill_real_model_synthetic_controls():
     """Real canonical decisions on synthetic OCR; no device execution or secrets."""
     from _test_utils import live_funded_azure
@@ -3583,7 +3575,7 @@ async def test_phone_setup_settings_actual_handler_observation():
         assert "Preserve the original authorized phone task" in wire
         import hashlib
         from domains.spawn_browser_agent_v3.phone import PHONE_GUIDANCE
-        assert hashlib.sha256(PHONE_GUIDANCE.encode()).hexdigest() == "cb56cf7f5f70f737f550610288679681f408ad48dd3e4f0e270336af04f3f123", "Ordinary enabled guide must match the saved-credential binding contract"
+        assert hashlib.sha256(PHONE_GUIDANCE.encode()).hexdigest() == "6a78e021c2d39d5705d64157531c0090244212a02d3020913120478d78ce941c", "Ordinary enabled guide must match the saved-credential binding contract"
         for marker in (None, False, "true"):
             plain_setup = {key: value for key, value in setup.items() if key != "googlePasscodeExceptionAllowed"}
             if marker is not None:

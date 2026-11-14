@@ -1,3 +1,4 @@
+/** Browser session provenance and injection metadata, without provider I/O. */
 import { EMPTY_BROWSER_BASELINE } from '../../providers/browser/checkpoint';
 import type { ProxyGeoLocation } from '../../providers/geoip';
 import type { BrowserGeoTargeting } from '../../providers/browser/types';

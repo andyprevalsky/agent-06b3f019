@@ -1,4 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
+import { registerCliIntegrationTests } from './integrations-cli.fixtures';
 import { screen, waitFor, within, renderHook, act } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
@@ -803,3 +804,5 @@ describe('Integrations page', () => {
     });
   });
 });
+
+registerCliIntegrationTests();

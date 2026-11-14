@@ -167,11 +167,16 @@ export function kernelProxyCandidates(
   const country = location.country.trim().toUpperCase();
   if (country === '') throw new Error('Kernel proxy country is required');
 
+  // Kernel ISP proxies only support country. Sending city/state silently drops
+  // those fields, so subsequent exact-config lookup used to allocate duplicates.
   const state =
-    country === 'US' && location.state !== undefined && location.state.trim() !== ''
+    proxyType !== 'isp' &&
+    country === 'US' &&
+    location.state !== undefined &&
+    location.state.trim() !== ''
       ? location.state.trim().toUpperCase().slice(0, 2)
       : undefined;
-  const city = normalizeCity(location.city);
+  const city = proxyType === 'isp' ? undefined : normalizeCity(location.city);
   const candidates: KernelProxyCandidate[] = [];
 
   if (city !== undefined) {
@@ -217,7 +222,10 @@ export function selectReusableKernelProxy(
   candidate: KernelProxyCandidate
 ): string | undefined {
   return proxies.find((proxy) => {
-    if (!proxy.id || proxy.name !== candidate.name || proxy.type !== candidate.type) return false;
+    const sameName =
+      proxy.name === candidate.name ||
+      (candidate.type === 'isp' && proxy.name?.startsWith(`${candidate.name}-`));
+    if (!proxy.id || !sameName || proxy.type !== candidate.type) return false;
     if (proxy.status !== 'available') return false;
     if (proxy.bypass_hosts?.length) return false;
     const config = proxy.config as Record<string, unknown> | undefined;
@@ -230,7 +238,7 @@ export function selectReusableKernelProxy(
   })?.id;
 }
 
-const inFlightProxyConfigs = new Map<string, Promise<ResolvedKernelProxy>>();
+const pendingProxies = new WeakMap<Kernel, Map<string, Promise<ResolvedKernelProxy>>>();
 const PROXY_FILL_TRANSACTION_MS = 10_000 + KERNEL_CREATE_REQUEST_OPTIONS.timeout + 5_000;
 const PROXY_FILL_ACQUIRE_MS = 2_000;
 // A valid list+create+commit can outlive the create request alone. Wait for the
@@ -241,6 +249,11 @@ export async function getOrCreateKernelProxy(
   client: Kernel,
   candidate: KernelProxyCandidate
 ): Promise<ResolvedKernelProxy> {
+  let inFlightProxyConfigs = pendingProxies.get(client);
+  if (!inFlightProxyConfigs) {
+    inFlightProxyConfigs = new Map();
+    pendingProxies.set(client, inFlightProxyConfigs);
+  }
   const pending = inFlightProxyConfigs.get(candidate.proxyKey);
   if (pending !== undefined) {
     const resolved = await pending;
