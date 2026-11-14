@@ -120,6 +120,17 @@ Golden reference:
   `claude-code-src/src/utils/fastMode.ts` (`handleFastModeOverageRejection`):
   the fix converges on these.
 
+Open follow-ups (from the GROUNDED review, not fixed here):
+
+- A fast 429 without `overage-disabled-reason` (an account with extra usage
+  on, hitting a fast-mode-specific limit) still cools the account. Claude Code
+  falls back to standard speed there too, via a fast-mode cooldown
+  (`withRetry.ts:284-301`).
+- The Anthropic API-key leg still sends `speed: fast` and backs the key off
+  on a fast-mode 429. hermes-agent
+  (`agent/turn_recovery.py:252-258`, `agent/fast_mode.py:92-115`) drops
+  `speed` for that model before any credential is benched.
+
 ## Human feedback
 
 The parent thread relayed Andy's rules: do not mint, rotate or revoke

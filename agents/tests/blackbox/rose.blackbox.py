@@ -2978,6 +2978,71 @@ async def test_claude_auth_fast_mode_overage_rejection_retries_standard_on_same_
     ], requests
 
 
+async def test_claude_auth_fast_mode_overage_then_spent_window_still_cools_with_window_reset():
+    """A fast request on an account whose 7d window is really spent still cools it.
+
+    The overage-disabled-reason header rides on every response of these accounts,
+    so a fast 429 caused by an exhausted 7d window also falls back to standard
+    speed. That standard request's own 429 must still cool the account until the
+    7d reset (not the monthly overage reset) and rotate.
+    """
+    token = "sk-ant-oat-fast-overage-spent-test"
+    seven_day_reset = "2099-05-05T20:00:00Z"
+    requests: list[str | None] = []
+    marked: list[tuple] = []
+
+    async def mark(ctx, cooldown_seconds, rate_limited_until=None, failure_reason=None):
+        marked.append((ctx.token, rate_limited_until, failure_reason))
+        return True
+
+    def handler(req):
+        body = json.loads(req.content.decode())
+        requests.append(body.get("speed"))
+        if body.get("speed") == "fast":
+            return httpx.Response(
+                429,
+                json={"type": "error", "error": {"type": "rate_limit_error", "message": "rate limit"}},
+                headers={
+                    "anthropic-ratelimit-unified-reset": seven_day_reset,
+                    "anthropic-ratelimit-unified-overage-disabled-reason": "org_level_disabled",
+                },
+            )
+        return httpx.Response(
+            429,
+            json={
+                "type": "error",
+                "error": {"type": "rate_limit_error", "message": "This request would exceed your account's rate limit."},
+            },
+            headers={
+                "anthropic-ratelimit-unified-status": "rejected",
+                "anthropic-ratelimit-unified-representative-claim": "seven_day",
+                "anthropic-ratelimit-unified-7d-status": "rejected",
+                "anthropic-ratelimit-unified-7d-utilization": "1.0",
+                "anthropic-ratelimit-unified-reset": seven_day_reset,
+                "anthropic-ratelimit-unified-overage-disabled-reason": "org_level_disabled",
+            },
+        )
+
+    set_mock_handler(handler)
+    auth = ClaudeAuthContext(token=token, source="user", user_id="u-1", mark_rate_limited=mark, max_rotations=0)
+    try:
+        await _drain(
+            claude_auth_complete(
+                pool_spec=get_pool("rose-1-ultra"),
+                messages=[{"role": "user", "content": "hi"}],
+                auth=auth,
+                request_id="fast-overage-spent",
+                max_tokens=16,
+                speed="ultrafast",
+            )
+        )
+        raise AssertionError("an exhausted 7d window must surface a rate limit")
+    except RoseRateLimitError:
+        pass
+    assert requests == ["fast", None], requests
+    assert marked == [(token, seven_day_reset, "rate_limit")], marked
+
+
 async def test_claude_auth_429_transient_retries_before_rotating():
     """Transient 429s retry the same token before cooldown/rotation."""
     calls = {"n": 0}
@@ -13877,6 +13942,10 @@ async def run_all_tests():
     await r.record_async(
         "claude_auth_fast_mode_overage_rejection_retries_standard",
         test_claude_auth_fast_mode_overage_rejection_retries_standard_on_same_token,
+    )
+    await r.record_async(
+        "claude_auth_fast_mode_overage_then_spent_window_still_cools",
+        test_claude_auth_fast_mode_overage_then_spent_window_still_cools_with_window_reset,
     )
     await r.record_async("claude_auth_403_usage_limit_reset", test_claude_auth_403_usage_limit_marks_body_reset_time)
 

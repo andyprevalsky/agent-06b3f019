@@ -755,6 +755,7 @@ async def _attempt_with_token(
     if body.get("speed") == "fast" and _fast_mode_off(auth.token):
         body = _standard_speed(body)
     last_error: Optional[Exception] = None
+    retry_at_standard_speed = False
     for attempt in range(_MAX_ATTEMPTS_PER_TOKEN):
         try:
             async with post_anthropic_stream(
@@ -844,8 +845,8 @@ async def _attempt_with_token(
                     if body.get("speed") == "fast" and overage_disabled_reason is not None:
                         # Fast mode needs extra usage this account cannot use; the
                         # subscription itself is not limited. Never cool it: retry
-                        # the same token at standard speed with a fresh attempt
-                        # budget (the standard body has no speed, so this recurses once).
+                        # the same token at standard speed (below, once this 429
+                        # response is closed) with a fresh attempt budget.
                         _turn_fast_mode_off(auth.token, rate_limited_until)
                         logger.warning(
                             "rose.claude_auth.fast_mode_overage_rejected",
@@ -856,19 +857,8 @@ async def _attempt_with_token(
                             fast_mode_off_until=rate_limited_until,
                             provider_message=_anthropic_error_message(error_body),
                         )
-                        async for chunk in _attempt_with_token(
-                            body=_standard_speed(body),
-                            auth=auth,
-                            pool_spec=pool_spec,
-                            actual_model=actual_model,
-                            request_id=request_id,
-                            agent_id=agent_id,
-                            call_site=call_site,
-                            ttft_timeout_s=ttft_timeout_s,
-                            idle_timeout_s=idle_timeout_s,
-                        ):
-                            yield chunk
-                        return
+                        retry_at_standard_speed = True
+                        break
                     if _should_rotate_429_without_retry(error_body, rate_limited_until):
                         raise _RotateToken(
                             "rate_limit",
@@ -943,6 +933,22 @@ async def _attempt_with_token(
             raise
         except RoseError:
             raise
+
+    if retry_at_standard_speed:
+        # The standard body has no speed, so this recurses at most once.
+        async for chunk in _attempt_with_token(
+            body=_standard_speed(body),
+            auth=auth,
+            pool_spec=pool_spec,
+            actual_model=actual_model,
+            request_id=request_id,
+            agent_id=agent_id,
+            call_site=call_site,
+            ttft_timeout_s=ttft_timeout_s,
+            idle_timeout_s=idle_timeout_s,
+        ):
+            yield chunk
+        return
 
     # Unreachable — loop body either yields, raises, or continues.
     if last_error:

@@ -332,6 +332,29 @@ export function registerUsageRefreshCases(ctx: UsageRefreshContext): void {
     }
   );
 
+  ctx.test(
+    "a rejected re-check replaces a cooldown beyond any window with the spent window's reset",
+    async () => {
+      const token = `usage-reconcile-overage-rejected-${ctx.run}`;
+      const { userId, accountId, integrationId } = await seedLogin(token, ['user:inference']);
+      await coolOnRoseBackoff(integrationId, {
+        reason: 'rate_limit',
+        authoritative: true,
+        untilMs: 17 * DAY_MS,
+      });
+      const refreshed = await refreshScripted(integrationId, token, 'rejected7d');
+      assert(refreshed.outcome === 'stored', `windows must be stored, got ${refreshed.outcome}`);
+      const reset = isoFromEpoch(refreshed.sevenDayReset);
+      const account = await accountFor(userId, accountId);
+      assert(
+        account.cooldown?.until === reset &&
+          account.cooldown.reason === 'usage_window_7d' &&
+          account.cooldown.authoritative,
+        `the cooldown must be the spent 7d window's reset: ${JSON.stringify(account.cooldown)}`
+      );
+    }
+  );
+
   ctx.test('a provider reset or an auth cooldown is never changed by a quota check', async () => {
     const providerToken = `usage-reconcile-provider-${ctx.run}`;
     const provider = await seedLogin(providerToken, ['user:inference']);

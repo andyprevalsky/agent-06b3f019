@@ -1717,6 +1717,71 @@ async function testClaudeAuth_fastModeOverageRejectionRetriesStandardOnSameToken
   }
 }
 
+/**
+ * The overage-disabled-reason header rides on every response of these accounts,
+ * so a fast 429 caused by a really spent 7d window also falls back to standard
+ * speed; that standard 429 must still surface the 7d reset (the account cools
+ * until then), never the monthly overage reset.
+ */
+async function testClaudeAuth_fastModeOverageThenSpentWindowStillRateLimited() {
+  process.env.OPENROUTER_API_KEY = 'or-test-key';
+  const sevenDayReset = '2099-05-05T20:00:00.000Z';
+  const speeds: unknown[] = [];
+  installFetchStub((url, init) => {
+    if (url !== ANTHROPIC_API_URL) throw new Error(`Unexpected URL: ${url}`);
+    const body = JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>;
+    speeds.push(body.speed ?? null);
+    const windowSpent = body.speed !== 'fast';
+    return new Response(
+      JSON.stringify({ type: 'error', error: { type: 'rate_limit_error', message: 'limit' } }),
+      {
+        status: 429,
+        headers: {
+          'Content-Type': 'application/json',
+          'anthropic-ratelimit-unified-reset': sevenDayReset,
+          'anthropic-ratelimit-unified-overage-disabled-reason': 'org_level_disabled',
+          ...(windowSpent
+            ? {
+                'anthropic-ratelimit-unified-status': 'rejected',
+                'anthropic-ratelimit-unified-7d-status': 'rejected',
+                'anthropic-ratelimit-unified-7d-utilization': '1.0',
+              }
+            : {}),
+        },
+      }
+    );
+  });
+
+  try {
+    let captured: unknown = null;
+    try {
+      await collect(
+        claudeAuthComplete({
+          poolSpec: getPool('rose-1-ultra'),
+          messages: [{ role: 'user', content: 'hi' }],
+          auth: { mode: 'oauth', token: 'sk-ant-oat-fast-overage-spent-ts' },
+          requestId: 'fast-overage-spent',
+          speed: 'ultrafast',
+        })
+      );
+    } catch (err) {
+      captured = err;
+    }
+    assert(
+      captured instanceof RoseRateLimitError,
+      `expected RoseRateLimitError, got ${String(captured)}`
+    );
+    assertEqual(
+      (captured as RoseRateLimitError).rateLimitedUntil,
+      sevenDayReset,
+      "the spent window's own reset cools the account"
+    );
+    assertEqual(JSON.stringify(speeds), JSON.stringify(['fast', null]), 'fast once, then standard');
+  } finally {
+    restoreFetch();
+  }
+}
+
 /** Unit coverage for every extraction branch, mirroring claude_auth.py. */
 async function testRateLimitReset_extractionBranches() {
   const now = Date.now();
@@ -4878,6 +4943,10 @@ async function main(): Promise<void> {
     {
       name: 'claudeAuth / fast-mode overage rejection retries standard on the same token',
       fn: testClaudeAuth_fastModeOverageRejectionRetriesStandardOnSameToken,
+    },
+    {
+      name: 'claudeAuth / fast-mode overage then a spent window still rate-limits with its reset',
+      fn: testClaudeAuth_fastModeOverageThenSpentWindowStillRateLimited,
     },
     {
       name: 'rateLimitReset / extraction branches',
