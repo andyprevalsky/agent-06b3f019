@@ -246,7 +246,7 @@ const liveUnit = 'browser-provider';
 const steelAuthPersist = quarantine(
   {
     since: '2026-11-12',
-    repair: 'pending-handoff:d8dda0b4f50146c8b81e9df5c1e965eb',
+    repair: 'https://boxes.dev/thread/thr_825d565448b04195abc146b228ecdba5',
     error:
       'FAIL live Kernel/Steel auth persist: page.goto: net::ERR_TUNNEL_CONNECTION_FAILED at https://example.com/',
     evidence:
