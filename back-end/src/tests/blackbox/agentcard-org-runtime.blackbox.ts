@@ -6,6 +6,7 @@ import {
   AgentCardOrgRuntimeError,
 } from '../../providers/agentcard/org-runtime';
 import { resolveBenchmarkCardholderId } from '../../providers/agentcard/benchmark-float';
+import { assertTransportRecoveryContract } from './agentcard-org-runtime-transport.cases';
 
 const CREDENTIAL_ENV = [
   'AGENTCARD_ORG_MCP_ACCESS_TOKEN',
@@ -23,6 +24,8 @@ async function main(): Promise<void> {
     for (const name of CREDENTIAL_ENV) delete process.env[name];
     process.env.AGENTCARD_ORG_OAUTH_CLIENT_ID = 'blackbox-client';
     process.env.AGENTCARD_ORG_OAUTH_CLIENT_SECRET = 'blackbox-secret';
+
+    await assertTransportRecoveryContract();
 
     let tokenRequests = 0;
     const seenTokens: string[] = [];

@@ -76,8 +76,10 @@ from helpers.user_profile import build_user_profile_sections
 from helpers.wait_condition_or_handoff import (
     live_handoff_queue,
     sleep_or_generation_handoff,
+    sleep_until_woken_or_generation_handoff,
     wait_condition_or_generation_handoff,
 )
+from helpers.worker_generation import generation_of_queue
 from helpers.workflow_generation import WorkflowGenerationSealed
 from helpers.world_model_runtime import WorldModelToolExecutionAdapter
 from loop.activity_helper import call_temporal_activity_from_activity
@@ -118,6 +120,8 @@ from .challenge_recovery import (
     verify_live_page_cleared_challenge,
 )
 from .config import (
+    BROWSER_ACTIVITY_DEADLINE,
+    BROWSER_CLEANUP_RECEIPT_WAIT_SECONDS,
     BROWSER_DISCONNECT_TIMEOUT_SECONDS,
     BROWSER_DRAIN_YIELD_STATUS,
     BROWSER_RECORDING_FINALIZE_TIMEOUT_SECONDS,
@@ -364,7 +368,7 @@ def _normalize_funding_retry_seconds(value: Any) -> float:
         return 5.0
     if not math.isfinite(retry_seconds) or retry_seconds <= 0:
         return 5.0
-    return min(max(retry_seconds, 1.0), 60.0)
+    return max(retry_seconds, 1.0)
 
 
 def _build_payment_card_verifier_evidence(last4: Any) -> Optional[Dict[str, Any]]:
@@ -6962,6 +6966,20 @@ def _session_expiring(deadline: Optional[Tuple[str, float]], session_id: Optiona
     return deadline[1] - time.monotonic() < BROWSER_SESSION_MIN_REMAINING_SECONDS
 
 
+def _activity_deadline_near() -> bool:
+    """This attempt's StartToClose leaves less than one supervised step plus teardown."""
+    if not activity.in_activity():
+        return False
+    info = activity.info()
+    budget, started = info.start_to_close_timeout, info.started_time
+    if budget is None or started is None or budget.total_seconds() < 2 * BROWSER_SESSION_MIN_REMAINING_SECONDS:
+        return False
+    if started.tzinfo is None:
+        started = started.replace(tzinfo=timezone.utc)
+    remaining = (started + budget - datetime.now(timezone.utc)).total_seconds()
+    return remaining < BROWSER_SESSION_MIN_REMAINING_SECONDS
+
+
 def _drain_resume_state(result: Dict[str, Any], prior_resume: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     """Resume state that restarts a drained browser task at its next step."""
     prior = prior_resume or {}
@@ -10398,6 +10416,8 @@ async def _spawn_browser_agent_activity_v3_real(
                 drain_reason = await activity_drain_reason(allow_generation_handoff=allow_generation_yield)
                 if not drain_reason and _session_expiring(reused_session_deadline, session_id):
                     drain_reason = BROWSER_SESSION_EXPIRING
+                if not drain_reason and _activity_deadline_near():
+                    drain_reason = BROWSER_ACTIVITY_DEADLINE
                 if drain_reason:
                     try:
                         drain_continuity = await persist_resume_context(
@@ -13767,6 +13787,15 @@ class SpawnBrowserAgentManagerV3(ToolManager):
         self, workflow_instance: Any, tool_call: Dict[str, Any], tool_call_id: str
     ) -> AsyncGenerator[ToolEvent, None]:
         async with browser_activity_turn(workflow_instance):
+            if getattr(workflow_instance, "_browser_activity_cleanup_unknown", False) and workflow.in_workflow():
+                # A timed-out predecessor's worker signals its exact teardown
+                # receipt only after it observes the timeout and joins cleanup.
+                with contextlib.suppress(asyncio.TimeoutError):
+                    await wait_condition_or_generation_handoff(
+                        lambda: not getattr(workflow_instance, "_browser_activity_cleanup_unknown", False),
+                        workflow_instance,
+                        timeout=timedelta(seconds=BROWSER_CLEANUP_RECEIPT_WAIT_SECONDS),
+                    )
             if getattr(workflow_instance, "_browser_activity_cleanup_unknown", False):
                 raise RuntimeError("Previous browser activity cleanup is unconfirmed")
             async with contextlib.aclosing(self._execute_tool(
@@ -14369,7 +14398,14 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                             if funding_retry_deadline is None:
                                 funding_retry_deadline = workflow.now() + timedelta(minutes=10)
                             retry_seconds = _normalize_funding_retry_seconds(minted_card.get("retryAfterSeconds", 5))
-                            if workflow.now() + timedelta(seconds=retry_seconds) >= funding_retry_deadline:
+                            # Queue generations version the workflow replay surface. Plain
+                            # histories retain their original capped timer and wake predicate.
+                            generation_scoped = generation_of_queue(getattr(workflow.info(), "task_queue", "")) is not None
+                            if not generation_scoped:
+                                retry_seconds = min(retry_seconds, 60.0)
+                                if workflow.now() + timedelta(seconds=retry_seconds) >= funding_retry_deadline:
+                                    return minted_card
+                            elif retry_seconds >= (funding_retry_deadline - workflow.now()).total_seconds():
                                 return minted_card
                             logger.info(
                                 "AgentCard company funding pending; resuming same purchase",
@@ -14377,7 +14413,15 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                                 task_id=result.get("task_id"),
                                 retry_seconds=retry_seconds,
                             )
-                            await sleep_or_generation_handoff(workflow_instance, retry_seconds, workflow_mod=workflow)
+                            if generation_scoped:
+                                await sleep_until_woken_or_generation_handoff(
+                                    workflow_instance,
+                                    retry_seconds,
+                                    lambda: _browser_resume_was_paused(workflow_instance, payment_pause_sequence),
+                                    workflow_mod=workflow,
+                                )
+                            else:
+                                await sleep_or_generation_handoff(workflow_instance, retry_seconds, workflow_mod=workflow)
 
                     async def create_agentcard_setup_attention(
                         setup_card: Dict[str, Any],

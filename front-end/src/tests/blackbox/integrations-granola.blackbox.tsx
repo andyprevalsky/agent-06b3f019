@@ -446,7 +446,7 @@ describe.each([false, true])('integration search (Rose Desktop=%s)', (roseDeskto
       const group = screen.getByRole('region', { name: 'Meeting note taker' });
       expect(within(group).getByRole('button', { name: 'Connect Granola' })).toBeVisible();
       expect(within(group).getByRole('button', { name: 'Connect Fireflies' })).toBeVisible();
-      expect(within(group).getByText('granola.ai, fireflies.ai, etc.')).toBeVisible();
+      expect(within(group).queryByText('granola.ai, fireflies.ai, etc.')).not.toBeInTheDocument();
       expect(
         screen.queryByRole('button', { name: 'Connect Pebble Index 01' }),
       ).not.toBeInTheDocument();

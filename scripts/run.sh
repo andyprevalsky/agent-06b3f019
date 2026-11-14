@@ -1083,8 +1083,7 @@ else
     SYSTEM_PG_PORT=5432
     LOCAL_DB_ACTUAL_PORT="$SYSTEM_PG_PORT"
     if [ "$BENCHMARK_ISOLATED_RUN" = "true" ] && [ -n "${BENCHMARK_RUN_ID:-}" ]; then
-        SAFE_BENCHMARK_RUN_ID=$(printf '%s' "$BENCHMARK_RUN_ID" | tr -c '[:alnum:]' '_')
-        LOCAL_DB_NAME="victoria_bench_${SAFE_BENCHMARK_RUN_ID}"
+        LOCAL_DB_NAME="$(benchmark_system_pg_db_name "$BENCHMARK_RUN_ID")" || exit 1
     else
         # One server serves every workspace on this host; never default a named
         # workspace onto the shared `victoria` (same resolver as setup-db.sh).
@@ -2469,6 +2468,16 @@ data = {
     },
     "services": services,
 }
+identity_receipt = os.environ.get("BENCHMARK_AGENTCARD_WORLD_RECEIPT")
+if identity_receipt:
+    with open(identity_receipt) as identity_file:
+        identity = json.load(identity_file)
+    if (identity.get("worldId") != os.environ.get("BENCHMARK_RUN_ID")
+            or identity.get("providerUserId") != os.environ.get("BENCHMARK_AGENTCARD_V2_USER_ID")
+            or identity.get("livemode") is not False
+            or identity.get("fundsSource") != "company_flow"):
+        raise RuntimeError("AgentCard world receipt does not match native runtime")
+    data["agentcard_world_identity"] = identity
 tmp_path = os.path.join(root, context_dir, "services.json.tmp")
 path = os.path.join(root, context_dir, "services.json")
 with open(tmp_path, "w") as f:
@@ -2884,6 +2893,30 @@ mkdir -p "$(dirname "$FRONTEND_DIST_DIR")"
 BACKEND_INDEX=${#PIDS[@]}
 PIDS+=("")
 NAMES+=("back-end")
+# Provision native sandbox world identity before backend/worker setup routes can run.
+if [ "${BENCHMARK_AGENTCARD_WORLD_IDENTITY:-}" = "true" ]; then
+    agentcard_world_context="$(python3 - "$RUN_CONTEXT_DIR" <<'PY_WORLD_CONTEXT'
+import os, sys
+print(os.path.abspath(sys.argv[1]))
+PY_WORLD_CONTEXT
+)"
+    mkdir -p "$agentcard_world_context"
+    unset BENCHMARK_AGENTCARD_WORLD_RECEIPT
+    agentcard_world_receipt="$agentcard_world_context/agentcard-world.json"
+    (cd back-end && BENCHMARK_CONTEXT_DIR="$agentcard_world_context" node --import tsx scripts/setup-benchmark-agentcard-world.ts --out "$agentcard_world_receipt") || exit 1
+    BENCHMARK_AGENTCARD_V2_USER_ID="$(python3 - "$agentcard_world_receipt" "${BENCHMARK_RUN_ID:-}" <<'PY_WORLD_ID'
+import json, re, sys
+row=json.load(open(sys.argv[1]))
+assert row.get('version')==1 and row.get('worldId')==sys.argv[2]
+assert row.get('livemode') is False and row.get('fundsSource')=='company_flow'
+assert re.fullmatch(r'usr_[A-Za-z0-9_-]+',row.get('providerUserId',''))
+print(row['providerUserId'])
+PY_WORLD_ID
+)" || exit 1
+    export BENCHMARK_AGENTCARD_V2_USER_ID
+    export BENCHMARK_AGENTCARD_WORLD_RECEIPT="$agentcard_world_receipt"
+fi
+
 BACKEND_PID=""
 BACKEND_PGID=""
 launch_backend_service() {

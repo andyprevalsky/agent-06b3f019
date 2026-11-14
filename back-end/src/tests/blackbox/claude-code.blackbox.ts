@@ -893,6 +893,81 @@ async function testCreate_githubAccessDenied() {
   );
 }
 
+/**
+ * PR #1975: the Claude create route parsed `github_repo_ref` but dropped it before the service, so an
+ * explicit repo selection silently fell back to the caller's project or a throwaway `agent-<id>` repo.
+ * An unconnected ref must be refused with the typed 403 naming it, before any sandbox starts.
+ */
+async function testCreate_unconnectedGithubRepoRefIs403NotFallback() {
+  const ref = 'gh:pr1975-not-connected-owner/not-connected-repo';
+  const res = await request(`${BASE_URL}/api/claude-code-session/create`, {
+    method: 'POST',
+    headers: apiKeyHeaders(),
+    body: JSON.stringify({
+      agent_id: FAKE_UUID,
+      goal: 'test',
+      user_id: FAKE_UUID,
+      github_repo_ref: ref,
+    }),
+  });
+  assertStatus(res.status, 403, res.data);
+  const body = res.data as { error: string; code?: string };
+  assert(
+    body.code === 'GITHUB_ACCESS_DENIED',
+    `Expected code GITHUB_ACCESS_DENIED, got ${body.code}`
+  );
+  assert(body.error.includes(ref), `Expected the error to name ${ref}, got ${body.error}`);
+}
+
+/**
+ * PR #1975 production: a code spawn with github_repo_ref sends the same ref inside
+ * resume_config.spawn_args (agents/domains/spawn_claude_code_agent/service.py), and the strict
+ * resume schema rejected the key, so every explicit-repo code agent failed with 400
+ * INVALID_REQUEST on both providers. The exact agents payload must reach the repo check instead.
+ */
+async function testCreate_resumeConfigCarriesGithubRepoRef() {
+  const ref = 'gh:pr1975-not-connected-owner/not-connected-repo';
+  for (const route of ['claude-code-session', 'codex-code-session']) {
+    const res = await request(`${BASE_URL}/api/${route}/create`, {
+      method: 'POST',
+      headers: apiKeyHeaders(),
+      body: JSON.stringify({
+        agent_id: FAKE_UUID,
+        goal: 'test',
+        user_id: FAKE_UUID,
+        github_repo_ref: ref,
+        lease_owner: `tool:${FAKE_UUID}:call_pr1975_resume_ref`,
+        resume_config: {
+          source_code_provider: 'claude',
+          spawn_args: {
+            type: 'code',
+            goal: 'test',
+            output_schema: { fields: [{ name: 'result', type: 'string' }] },
+            github_repo_link: null,
+            target: 'cloud',
+            task_name: null,
+            github_repo_ref: ref,
+            attachments: [],
+          },
+          attachments: [],
+          model: 'claude-opus-5-5',
+          fast_mode_cache_enabled: false,
+        },
+      }),
+    });
+    assertStatus(res.status, 403, res.data);
+    const body = res.data as { error: string; code?: string };
+    assert(
+      body.code === 'GITHUB_ACCESS_DENIED',
+      `${route}: expected GITHUB_ACCESS_DENIED, got ${body.code}`
+    );
+    assert(
+      body.error.includes(ref),
+      `${route}: expected the error to name ${ref}, got ${body.error}`
+    );
+  }
+}
+
 async function testCreate_nonUuidCodeSessionIdIs400() {
   // RCA 942d8562: code_session_id "null" (a string a model sent for an omitted
   // optional) failed the uuid schema and returned 500, which the agent tool
@@ -1802,6 +1877,14 @@ async function runAll() {
     { name: 'POST /create -- non-uuid agent_id -> 500', fn: testCreate_nonUuidAgentId },
     { name: 'POST /create -- github without user_id -> 400', fn: testCreate_githubWithoutUserId },
     { name: 'POST /create -- github access denied -> 403', fn: testCreate_githubAccessDenied },
+    {
+      name: 'POST /create -- unconnected github_repo_ref -> 403, never a fallback repo',
+      fn: testCreate_unconnectedGithubRepoRefIs403NotFallback,
+    },
+    {
+      name: 'POST /create -- resume_config.spawn_args carries github_repo_ref (claude + codex) -> 403, not 400',
+      fn: testCreate_resumeConfigCarriesGithubRepoRef,
+    },
     { name: 'POST /create -- invalid github URL -> 403', fn: testCreate_invalidGithubUrl },
     {
       name: 'POST /create -- non-uuid code_session_id -> 400',

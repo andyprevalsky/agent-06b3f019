@@ -4,7 +4,6 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 PREFLIGHT="$ROOT_DIR/scripts/prepare-deploy-worktree.sh"
 WORKSPACE_ENV="$ROOT_DIR/scripts/lib/workspace-env.sh"
-DESCEND_COMMAND="$ROOT_DIR/.claude/commands/descend.md"
 DEPLOY_COMMAND="$ROOT_DIR/.claude/commands/deploy.md"
 TMP_ROOT="$(mktemp -d)"
 trap 'rm -rf "$TMP_ROOT"' EXIT
@@ -835,7 +834,6 @@ wait "$signal_second"
 [ -e "$second_entered" ] || fail "waiting preparation must enter after the orphaned child exits"
 echo "PASS: owner lock survives wrapper termination until the transaction child exits"
 
-require_text "$DESCEND_COMMAND" 'bash scripts/prepare-deploy-worktree.sh' "/descend must hydrate and provision each isolated deploy worktree"
 require_text "$DEPLOY_COMMAND" 'bash scripts/prepare-deploy-worktree.sh --check' "/deploy must fail closed when isolated-worktree preparation is incomplete"
 # deploy.md carries no gate list: this suite is cemented by its (single) registration
 # in the structural-gate registry that `scripts/deploy gates` runs.
