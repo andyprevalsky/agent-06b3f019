@@ -2,7 +2,8 @@
  * Background retrieval of a Claude or Codex subscription's usage windows (and
  * their reset times) for accounts the response-header path has not measured.
  *
- *   Codex (gpt_code): no usage endpoint; always one minimal Codex request
+ *   Codex (gpt_code): Rose does not call Codex's usage endpoint (/wham/usage);
+ *   always one minimal Codex request
  *   (codexQuotaCheck) whose x-codex-* headers (200 or 429) and a 429's
  *   usage_limit_reached body carry the windows. Prod 2026-11-14: Codex rows sat
  *   on a sibling's copied cooldown days past their own weekly reset.
@@ -42,11 +43,11 @@
  * every window (a fast-mode overage reset) is.
  *
  * Triggers (never awaited by their callers): a non-authoritative cooldown
- * (429 without a provider reset, a stall) reported for a Claude row, and
- * GET /api/compute-accounts for a Claude row with no usage, usage older than
+ * (429 without a provider reset, a stall) reported for a Claude or Codex row,
+ * and GET /api/compute-accounts for such a row with no usage, usage older than
  * USAGE_STALE_AFTER_MS, or a non-authoritative cooldown. The result appears on
- * the next list. Codex has no usage endpoint; its windows come only from
- * response headers and usage_limit_reached bodies.
+ * the next list. Codex windows come from the quota check's response headers
+ * and usage_limit_reached bodies.
  *
  * 10k agents: per account row, not per agent. At most one refresh per row per
  * REFRESH_MIN_INTERVAL_MS per backend process, each at most one GET plus one
@@ -126,7 +127,7 @@ const defaultDeps: RefreshDeps = {
 };
 
 /**
- * Codex has no usage endpoint: its windows come from the `x-codex-*` headers of
+ * Codex: Rose reads the windows from the `x-codex-*` headers of
  * any ChatGPT-backend response, so the refresh is always one quota check.
  */
 const codexDeps: RefreshDeps = {
@@ -315,7 +316,15 @@ async function readQuotaHeaders(
     now,
   });
   const report = snapshot === null ? null : parseUsagePayload(snapshot, integrationId, now);
-  if (report !== null) return storeAndReconcile(report, reason, now, deps);
+  if (report !== null) {
+    // Only an answer that served (2xx) or a recognized usage-limit rejection says
+    // anything about the cooldown; another failure (a short-term 429) may still
+    // carry windows under 100%, which must never lift Rose's backoff.
+    if (response.status < 400 || report.status === 'rejected') {
+      return storeAndReconcile(report, reason, now, deps);
+    }
+    return (await deps.store(report)) ? 'stored' : 'not_newer';
+  }
   if (response.status === 401 || response.status === 403) {
     // A refused token. Never an auth failure here: the lease path owns that
     // classification; the account keeps its state and we stop asking a while.

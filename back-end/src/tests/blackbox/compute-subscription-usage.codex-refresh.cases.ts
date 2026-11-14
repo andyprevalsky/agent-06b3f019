@@ -216,6 +216,57 @@ export function registerCodexUsageRefreshCases(ctx: CodexRefreshContext): void {
     assert(row.usage7dUsedPct === 12, `the weekly bar must show 12%, got ${row.usage7dUsedPct}`);
   });
 
+  ctx.test("a Codex 429 that is not a usage limit never lifts Rose's backoff", async () => {
+    // A short-term rate limit can still carry windows under 100%; only a served
+    // answer or a usage_limit_reached rejection may change the cooldown.
+    const { userId, integrationId, token } = await seedCodexLogin('burst', 4 * DAY_MS);
+    const before = await cooldownOf(integrationId);
+    const { requests } = await listWithCodexScripted(
+      userId,
+      integrationId,
+      token,
+      () =>
+        new Response(
+          JSON.stringify({ error: { type: 'rate_limit_exceeded', message: 'Rate limit reached' } }),
+          {
+            status: 429,
+            headers: {
+              'content-type': 'application/json',
+              'x-codex-primary-used-percent': '20',
+              'x-codex-primary-window-minutes': '10080',
+              'x-codex-primary-reset-at': String(Math.floor((Date.now() + 5 * DAY_MS) / 1000)),
+            },
+          }
+        )
+    );
+    assert(requests.length === 1, `one Codex quota check, got ${requests.length}`);
+    const after = await cooldownOf(integrationId);
+    assert(
+      after.rateLimitedUntil?.getTime() === before.rateLimitedUntil?.getTime(),
+      `a non-usage 429 must leave the cooldown unchanged, got ${after.rateLimitedUntil?.toISOString()}`
+    );
+  });
+
+  ctx.test('a served Codex answer without window headers lifts nothing', async () => {
+    const { userId, integrationId, token } = await seedCodexLogin('bare', 4 * DAY_MS);
+    const before = await cooldownOf(integrationId);
+    await listWithCodexScripted(
+      userId,
+      integrationId,
+      token,
+      () =>
+        new Response('event: response.completed\ndata: {"type":"response.completed"}\n\n', {
+          status: 200,
+          headers: { 'content-type': 'text/event-stream' },
+        })
+    );
+    const after = await cooldownOf(integrationId);
+    assert(
+      after.rateLimitedUntil?.getTime() === before.rateLimitedUntil?.getTime(),
+      'an answer that names no window says nothing about the cooldown'
+    );
+  });
+
   ctx.test('a Codex login the provider refuses is never expired by a quota check', async () => {
     const { userId, integrationId, token } = await seedCodexLogin('expired', 4 * DAY_MS);
     const before = await cooldownOf(integrationId);
