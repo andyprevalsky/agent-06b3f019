@@ -4200,7 +4200,7 @@ def test_production_payment_lifecycle_tasks_run_as_the_owner_identity():
 
     The admin branch of `resolveAndIssuePurchaseCard` never creates a payment intent. The owner is
     an admin, so the back-end routes ONLY the owner's benchmark agents onto the charged path against
-    a dedicated live customer (purchases/ownerLifecycleBilling.ts). This guard pins that the harness
+    a dedicated live customer (providers/ownerLifecycleBilling.ts). This guard pins that the harness
     identity and the back-end override key on the same id and stay scoped to benchmark agents.
     """
     import re
@@ -4216,17 +4216,17 @@ def test_production_payment_lifecycle_tasks_run_as_the_owner_identity():
     repo_root = Path(__file__).resolve().parents[3]
     # 2026-11-14 (user directive): the live production probe runs as the OWNER account. The hold is
     # satisfiable because the back-end scopes the owner's benchmark agents onto the charged path
-    # against a dedicated live customer (purchases/ownerLifecycleBilling.ts), keyed on the same id.
-    config_ts = (repo_root / "back-end" / "src" / "domains" / "purchases" / "config.ts").read_text()
-    match = re.search(r"export const BENCHMARK_PAYMENT_LIFECYCLE_ADMIN_RUN_USER_ID = '([^']+)'", config_ts)
-    assert match, "purchases/config.ts must export BENCHMARK_PAYMENT_LIFECYCLE_ADMIN_RUN_USER_ID"
+    # against a dedicated live customer (providers/ownerLifecycleBilling.ts), keyed on the same id.
+    identity_ts = (repo_root / "back-end" / "src" / "providers" / "benchmarkPaymentIdentity.ts").read_text()
+    match = re.search(r"export const BENCHMARK_PAYMENT_LIFECYCLE_OWNER_USER_ID = '([^']+)'", identity_ts)
+    assert match, "providers/benchmarkPaymentIdentity.ts must export BENCHMARK_PAYMENT_LIFECYCLE_OWNER_USER_ID"
     assert match.group(1) == AGENT_PAYMENT_LIFECYCLE_PROD_USER_ID == USER_ID, (
         "owner lifecycle probe identity drifted between the harness and the back-end"
     )
     owner_billing_ts = (
-        repo_root / "back-end" / "src" / "domains" / "purchases" / "ownerLifecycleBilling.ts"
+        repo_root / "back-end" / "src" / "providers" / "ownerLifecycleBilling.ts"
     ).read_text()
-    assert "BENCHMARK_PAYMENT_LIFECYCLE_ADMIN_RUN_USER_ID" in owner_billing_ts
+    assert "BENCHMARK_PAYMENT_LIFECYCLE_OWNER_USER_ID" in owner_billing_ts
     assert "isBenchmarkAgent" in owner_billing_ts, "the override must stay scoped to benchmark agents"
 
     for name in sorted(AGENT_PAYMENT_PRODUCTION_LIFECYCLE_TASK_NAMES):
@@ -5745,6 +5745,10 @@ async def _exercise_owned_payment_reconciliation_caller(
             clock += 70
             # Provider release is already visible; GET cannot run Rose's compensator.
             return httpx.Response(200, json=deepcopy(pending))
+        if request.method == "POST" and request.url.path == "/api/test-payment/lifecycle/purge":
+            # The owner production probe purges only after its lifecycle verified terminal.
+            assert json.loads(request.content) == {"agentId": agent_id}
+            return httpx.Response(200, json={"agentId": agent_id, "purged": 1})
         raise AssertionError("reconciliation must not create, fund, or issue another payment")
 
     def client(*args, **kwargs):
@@ -5805,7 +5809,14 @@ async def _exercise_owned_payment_reconciliation_caller(
         assert snapshot["messages"] == ready["messages"]
         assert snapshot["_benchmark"]["payment_lifecycle"]["purchase"]["id"] == purchase_id
     assert all(
-        path in {"/api/test-payment/lifecycle", "/api/test-payment/lifecycle/abandon"} for _, path, _ in requests
+        path
+        in {
+            "/api/test-payment/lifecycle",
+            "/api/test-payment/lifecycle/abandon",
+            # The owner production probe purges its settled records after a verified cleanup.
+            "/api/test-payment/lifecycle/purge",
+        }
+        for _, path, _ in requests
     )
     assert terminal["integrity"]["cardCount"] == 1
     assert terminal["integrity"]["purchaseCount"] == 1
@@ -13672,6 +13683,11 @@ async def test_parallel_tasks_keep_their_own_run_user():
     base_url = "https://bench-run-user.invalid"
     sibling = bench.get_task_by_name("chat-mode")
     payer = bench.get_task_by_name(bench.AGENT_PAYMENT_PRODUCTION_TASK_NAME)
+    # The production payer now runs as the owner (the default user); pin a distinct synthetic
+    # identity so this regression still exercises a non-default run user beside a default sibling.
+    distinct_payer = "00000000-0000-4000-8000-0000000000aa"
+    identity_patch = patch.object(bench, "AGENT_PAYMENT_LIFECYCLE_PROD_USER_ID", distinct_payer)
+    identity_patch.start()
     payer_user = bench.benchmark_run_user_id_for_task(payer.name)
     assert payer_user and payer_user != bench.USER_ID
     assert bench.benchmark_run_user_id_for_task(sibling.name) is None
@@ -13719,6 +13735,7 @@ async def test_parallel_tasks_keep_their_own_run_user():
 
     assert sibling_result.status == "ERROR", sibling_result
     assert isinstance(payer_result, RuntimeError), payer_result
+    identity_patch.stop()
     assert seen == {"sibling": bench.USER_ID, "payer": payer_user}, seen
     assert leaked_user is None
     assert user_after_run == bench.USER_ID
