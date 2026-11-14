@@ -1,0 +1,11 @@
+{"task": "agent-payment-setup-resume", "duration_seconds": 272.7, "cost_cents": 1.0, "timestamp": "2026-11-11T00:52:30.382702+00:00", "agent_id": "ffa4d2a1-f6fc-4405-9f60-0cbbe570005b"}
+{"task": "agent-payment-test-shop", "duration_seconds": 286.8, "cost_cents": 3.0, "timestamp": "2026-11-11T00:58:44.672067+00:00", "agent_id": "afe32734-5041-4134-84ae-0e5e044cb61b"}
+{"task": "agent-payment-idempotent-abandonment", "duration_seconds": 367.1, "cost_cents": 3.0, "timestamp": "2026-11-11T01:05:33.847652+00:00", "agent_id": "34d0a2b8-ca41-4fca-8807-2ef26f84648e"}
+{"task": "agent-payment-new-user-journey", "duration_seconds": 179.4, "cost_cents": 2.0, "timestamp": "2026-11-11T01:13:13.268393+00:00", "agent_id": "ab3e4021-0f9b-4636-975d-b83d3e8a6f88"}
+{"task": "browser-auth-guest-purchase", "duration_seconds": 184.2, "cost_cents": 1.0, "timestamp": "2026-11-11T01:18:03.973773+00:00", "agent_id": "c5ebc5cf-afff-4248-9c04-c694f0330ea1"}
+{"task": "browser-auth-member-discount-purchase", "duration_seconds": 271.2, "cost_cents": 1.0, "timestamp": "2026-11-11T01:22:41.718470+00:00", "agent_id": "1724e692-c70f-4268-8072-1bb7d6be3357"}
+{"task": "browser-auth-member-discount-signup-fails-purchase", "duration_seconds": 265.9, "cost_cents": 1.0, "timestamp": "2026-11-11T01:28:50.441221+00:00", "agent_id": "47fb81a4-dc94-463c-990c-81507ffff258"}
+{"task": "browser-auth-paid-membership-purchase", "duration_seconds": 231.0, "cost_cents": 1.0, "timestamp": "2026-11-11T01:35:12.791732+00:00", "agent_id": "1b1c2f26-09e2-47a6-80e3-d4180eea8e0a"}
+{"task": "browser-auth-signup-purchase", "duration_seconds": 255.9, "cost_cents": 1.0, "timestamp": "2026-11-11T01:40:40.060449+00:00", "agent_id": "d5b43c3d-a7ec-48c9-86b1-1bc2f4a4bfb0"}
+{"task": "browser-auth-signup-purchase-no-subscription", "duration_seconds": 263.8, "cost_cents": 1.0, "timestamp": "2026-11-11T01:46:30.731110+00:00", "agent_id": "2faccda9-6adf-4775-897d-b7bf5f4a68fe"}
+{"task": "browser-auth-session-expires-at-checkout", "duration_seconds": 281.0, "cost_cents": 2.0, "timestamp": "2026-11-11T01:52:37.931953+00:00", "agent_id": "9d5a9bde-2017-4b3d-b6c9-c312cf1a5e32"}

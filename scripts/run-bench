@@ -339,6 +339,9 @@ Monitoring:
   or catastrophe, verify birth and stop only the exact owner through cleanup.
   For a dead original owner with retained resources, use:
     scripts/run-bench --recover-stale-owner <exact-token>
+  If recovery refuses only because runtime evidence is incomplete and every owned
+  Machine is already destroyed and every volume pending_destroy/destroyed, add
+  --accept-lost-runtime-evidence to record the evidence as LOST and finish release.
   Keep original receipts; interruption/recovery never grants acceptance credit.
   The documented cached 50-copy diagnostic alone uses execution 300s and hard 1200s
   allocation-to-full-release per copy; retain its original native/claim clock,
@@ -429,7 +432,7 @@ while [ "$#" -gt 0 ]; do
             INTERNAL_OPERATION=1
             FLEET_ARGS+=("$1" "$2"); shift 2
             ;;
-        --qualify-worker|--keep-clones|--reuse-pool-only|--cold-primary-bootstrap|--foreground|--wait|--detach|--infra-probe|--skip-autoscaler|--strict-barrier|--fresh-volumes|--snapshot-volumes)
+        --accept-lost-runtime-evidence|--qualify-worker|--keep-clones|--reuse-pool-only|--cold-primary-bootstrap|--foreground|--wait|--detach|--infra-probe|--skip-autoscaler|--strict-barrier|--fresh-volumes|--snapshot-volumes)
             FLEET_ARGS+=("$1"); shift
             ;;
         -h|--help)
