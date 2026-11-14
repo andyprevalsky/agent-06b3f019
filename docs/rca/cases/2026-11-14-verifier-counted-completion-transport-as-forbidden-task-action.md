@@ -47,7 +47,7 @@ Path: USER goal and schema → PLAN → reasoning DAG task → persisted reasoni
 answer → post-DAG completion chip → `check_progress` → execute-phase filter →
 verifier messages → independent completion verdict → rejection → next actor turn.
 
-Three boundaries contributed to this incident:
+Four boundaries contributed to this incident:
 
 1. `_filter_context_for_execute_verifier` preferred the first EXECUTE-tagged
    message over the earlier explicit transition. DAG reasoning has no phase;
@@ -67,6 +67,15 @@ Three boundaries contributed to this incident:
    live replay still failed for prohibited reasoning-tool use, while extracting
    OK correctly. AUTHORED_RESULT now preserves its source and exact text without
    inventing a task tool invocation. Actual tool receipts remain TOOL_RESULT.
+
+4. The structured LLM parser prepended provider reasoning to the separate
+   authored response field. Once task-tool attribution was fixed, a current-code
+   live replay correctly rejected the explanatory preamble for exact-word
+   noncompliance. The reasoning service now opts out of that presentation merge;
+   ordinary loop callers retain it by default, and both retry paths forward
+   the option. The same provider stream yields exact OK in the DAG and the
+   existing thought-plus-answer presentation in ordinary callers. No text is
+   stripped or inferred after generation.
 
 The deeper class is a mismatch between execution lifecycle and task evidence,
 not a special OK classifier or a request to suppress actual tool actions.
@@ -98,7 +107,8 @@ confirmed their actual work does not own this verifier failure.
 ## Solution
 
 Pending deployment. Preserve execution starting at the earlier of its explicit
-transition and first EXECUTE-tagged row, while continuing to discard tagged
+Beginning Execute Phase transition and first EXECUTE-tagged row; set_plan remains
+the legacy fallback only when neither is present, while continuing to discard tagged
 PLAN/RESEARCH rows. Explain in the static verifier rubric that completion
 submission is lifecycle transport, while actual task tools, messages, agent
 creation and bug reports remain subject to the user's constraints. Preserve all
