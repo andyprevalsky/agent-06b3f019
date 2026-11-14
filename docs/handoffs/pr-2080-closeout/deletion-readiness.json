@@ -71,24 +71,9 @@
     "scripts/lib/__pycache__/": "reproducible",
     "scripts/tests/__pycache__/": "reproducible"
   },
-  "live_processes": [
-    {
-      "argv": "tail -15",
-      "cwd": "/home/boxes/rose",
-      "pid": 1789677
-    },
-    {
-      "argv": "cut -c1-260",
-      "cwd": "/home/boxes/rose",
-      "pid": 1789678
-    }
-  ],
+  "live_processes": [],
   "manifest": "docs/handoffs/pr-2080-closeout/closeout-manifest.json",
-  "open_items": [
-    "uncommitted changes in /home/boxes/rose: docs/handoffs/pr-2080-closeout/closeout-manifest.json, docs/handoffs/pr-2080-closeout/private-archive-receipt.json, docs/rca/cases/2026-11-14-launch-preflight-single-shot-fly-read-timeout.md",
-    "live process 1789677 in this checkout: tail -15",
-    "live process 1789678 in this checkout: cut -c1-260"
-  ],
+  "open_items": [],
   "pr": 2080,
   "preserved_refs": {
     "branch:andyprevalsky/P3-message-person-hillclimb": {
@@ -745,7 +730,7 @@
       "tip": "0e2ffe95ba40a2d0c2b8ae9e884b4a85d96af3f2"
     }
   },
-  "ready": false,
+  "ready": true,
   "worktrees": [
     {
       "branch": "refs/heads/records/pr-2080-closeout",
@@ -754,9 +739,7 @@
       "needs_integration": false,
       "path": "/home/boxes/rose",
       "uncommitted": [
-        "docs/handoffs/pr-2080-closeout/closeout-manifest.json",
-        "docs/handoffs/pr-2080-closeout/private-archive-receipt.json",
-        "docs/rca/cases/2026-11-14-launch-preflight-single-shot-fly-read-timeout.md"
+        "docs/handoffs/pr-2080-closeout/deletion-readiness.json"
       ],
       "unpushed_commits": 0
     }
