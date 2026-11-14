@@ -82,29 +82,9 @@
     "scripts/__pycache__/": "reproducible",
     "scripts/lib/__pycache__/": "reproducible"
   },
-  "live_processes": [
-    {
-      "argv": "/bin/bash -c source /home/boxes/.claude/shell-snapshots/snapshot-bash-1794619370340-3m4cwl.sh 2>/dev/null || true && shopt -u extglob 2>/dev/null || true && { \\builtin unalias -- 'which'; \\builtin uns",
-      "cwd": "/home/boxes/rose-pr1975",
-      "pid": 792150
-    },
-    {
-      "argv": "cut -c1-160",
-      "cwd": "/home/boxes/rose-pr1975",
-      "pid": 792151
-    },
-    {
-      "argv": "ugrep -G --ignore-files --hidden -I --exclude-dir=.git --exclude-dir=.svn --exclude-dir=.hg --exclude-dir=.bzr --exclude-dir=.jj --exclude-dir=.sl -E ^OPEN|DEPLOY_DELETION",
-      "cwd": "/home/boxes/rose-pr1975",
-      "pid": 792153
-    }
-  ],
+  "live_processes": [],
   "manifest": "docs/handoffs/pr-2038-closeout/closeout-manifest.json",
-  "open_items": [
-    "live process 792150 in this checkout: /bin/bash -c source /home/boxes/.claude/shell-snapshots/snapshot-bash-1794619370340-3m4cwl.sh 2>/dev/null || true && shopt -u extglob 2>/dev/null || true && { \\builtin unalias -- 'which'; \\builtin uns",
-    "live process 792151 in this checkout: cut -c1-160",
-    "live process 792153 in this checkout: ugrep -G --ignore-files --hidden -I --exclude-dir=.git --exclude-dir=.svn --exclude-dir=.hg --exclude-dir=.bzr --exclude-dir=.jj --exclude-dir=.sl -E ^OPEN|DEPLOY_DELETION"
-  ],
+  "open_items": [],
   "pr": 2038,
   "preserved_refs": {
     "branch:backup/cerebras-chat-quota-prepush-20261002": {
@@ -122,7 +102,7 @@
       "tip": "0e2ffe95ba40a2d0c2b8ae9e884b4a85d96af3f2"
     }
   },
-  "ready": false,
+  "ready": true,
   "worktrees": [
     {
       "branch": "refs/heads/main",
