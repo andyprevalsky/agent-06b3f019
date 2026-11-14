@@ -1,0 +1,57 @@
+{
+  "format": "PR1795-RESUME-VERIFICATION-V1",
+  "observed_at": "2026-11-14T20:17:17.089724+00:00",
+  "canonical_main": "6ecbd4aa97",
+  "canonical_classifier_fixes": [
+    "ea9ea83637",
+    "b7fc2d8379"
+  ],
+  "classifier_fix_delivery": "Canonical main contains the repair independently of superseded PR1821; no candidate patch or override applied.",
+  "native_prepublication_check": {
+    "ready": true,
+    "open_items": 0,
+    "checker_matches_current_main": true,
+    "receipt_sha256": "2e7e4cb9c492c7a4241c1567c9a0eb0ed290666f50a14faf6076681c4fe737d3"
+  },
+  "private_closure": {
+    "original_closure_manifest_sha256": "4cb3cbf25f23eeb50d7d963de57c859da189e49c4863a8c7d05e3650d214ca60",
+    "paths_checked": 135604,
+    "new_paths": 0,
+    "missing_paths": 0,
+    "independent_regular_file_hashes_checked": 120491,
+    "independent_bytes_hashed": 7983188026,
+    "changed_during_hash": 0,
+    "unreadable": 0,
+    "content_changes": 2,
+    "changed_required_configuration": "Preserved in the verified encrypted backend environment supplement.",
+    "other_content_change": "Existing latest-scorecard publication pointer; sanitized terminal metadata retained in Git and permanent visual publication.",
+    "root_scan_report_sha256": "b85ddd7b184d02b33b797eb8ac80cade590317648624ad9b0f8c2af88368b52f",
+    "independent_hash_report_sha256": "a8427d6ad725b245e7c7462d9430810262a48a247f17e3e1b79ec017c4ef9d6d",
+    "current_metadata_note": "Directory and unchanged agent environment mtimes differ; original content/mode preserved. No private content is omitted."
+  },
+  "local_database_recheck": {
+    "observed_at": 1794687133.3369648,
+    "changed_databases": 0,
+    "changed_global_counts": false,
+    "other_nonidle_clients": 0,
+    "refresh_required": false,
+    "atomic_cluster_snapshot_claimed": false
+  },
+  "configuration_supplement": {
+    "raw_receipt": "archive-receipts/backend-env-20261114.json",
+    "raw_receipt_sha256": "c729663226ca2b5c8955e13949aaacda3fea63aaf8853e6e78562539e0a46090",
+    "verification": "backend-env-verification-20261114.json",
+    "verification_sha256": "bfaa86a13f72fe7f21bc4badec6aa3464b7b9668ac634a9c6a83b3774dd9cfcd",
+    "full_authenticated_readback": true,
+    "independent_restored_members_verified": 2,
+    "configuration_bytes": 20873
+  },
+  "historical_failure_row": {
+    "canonical_branch_shard": "agents/benchmarks/history/task_attempts.20261114.records-pr1795-closeout-20261108.jsonl",
+    "sha256": "e0cc3c722f57337b1eed64359893f3638077291cc8ba46a8f6625ada7587fc31",
+    "original_bytes_preserved": true,
+    "shared_base_ledger_unchanged": true
+  },
+  "runtime_or_financial_mutation": false,
+  "lost_evidence_or_financial_release_credit": false
+}

@@ -1,3 +1,4 @@
+import { NATIVE_CLI_PATH } from '../codeSessions/sandboxPaths';
 /**
  * The `rose-ui` CLI (+ its publish env) for a code-agent session home. There is
  * no pre-materialized UI folder: the rose-ui skill (assets/rose-skills/rose-ui)
@@ -149,7 +150,10 @@ function cliBinPaths(workspace: UserUiWorkspace): string[] {
 
 interface SandboxFiles {
   files: {
-    write(entries: { path: string; data: ArrayBuffer }[]): Promise<unknown>;
+    write(
+      entries: { path: string; data: ArrayBuffer }[],
+      opts?: { user: string }
+    ): Promise<unknown>;
   };
   commands: { run(cmd: string, opts?: { timeoutMs?: number }): Promise<{ exitCode: number }> };
 }
@@ -169,7 +173,8 @@ export async function writeUserUiWorkspaceToSandbox(
     workspaceFilesWithCliPackage(workspace).map((file) => ({
       path: `${home}/${file.path}`,
       data: toArrayBuffer(file.content),
-    }))
+    })),
+    { user: 'user' }
   );
   const bins = cliBinPaths(workspace).map((bin) => `${home}/${bin}`);
   if (bins.length === 0) return;
@@ -179,7 +184,7 @@ export async function writeUserUiWorkspaceToSandbox(
 }
 
 const SANDBOX_HOME = '/home/user';
-const SANDBOX_DEFAULT_PATH = '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin';
+const SANDBOX_DEFAULT_PATH = NATIVE_CLI_PATH;
 
 /** Inject the session env (rose-ui, tools, graph) and put `~/.rose/bin` on the E2B sandbox PATH. */
 export function applyUserUiSandboxEnvs(
@@ -188,6 +193,8 @@ export function applyUserUiSandboxEnvs(
 ): void {
   if (!workspace) return;
   Object.assign(envs, workspace.envs);
+  if (workspace.files.some((file) => file.path === '.rose/native-cli-env.sh'))
+    envs.BASH_ENV = '/home/user/.rose/native-cli-env.sh';
   envs.PATH = `${SANDBOX_HOME}/${USER_UI_CLI_BIN_DIR}:${SANDBOX_HOME}/.local/bin:${SANDBOX_DEFAULT_PATH}`;
 }
 

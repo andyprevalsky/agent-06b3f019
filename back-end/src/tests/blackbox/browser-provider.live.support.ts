@@ -32,6 +32,7 @@ import {
   deleteKernelProfile,
   runCrossProviderRotationLadderOrSkipOnSteelOutage,
 } from './browser-provider-rotation.support';
+import { assertResumeReusesExistingProxy } from './browser-provider-proxy-reuse.support';
 
 const AGENT_LOCATION = { country: 'US', state: 'CA', city: 'San Francisco' } as const;
 
@@ -509,9 +510,15 @@ async function runConfiguredProviderParity(): Promise<void> {
     const secondRemote = await kernel.browsers.retrieve(liveSessionId, { include_deleted: true });
     assert(secondRemote.proxy_id === mobileProxyId, 'resume did not reuse the rotated proxy ID');
 
-    // Live parity exercises reuse of the shared proxy configuration. Deleting
-    // and re-provisioning proxies belongs in the isolated stale-cache tests.
-    console.log('[proxy reuse] resume retained the existing Kernel mobile proxy ID');
+    const resumedWithExistingProxy = await assertResumeReusesExistingProxy({
+      kernel,
+      taskId: String(init.task_id),
+      sessionId: liveSessionId,
+      proxySource: mobileMetadata.proxy_source,
+      proxyLocation: mobileMetadata.proxy_location,
+      post: postWithKernelConnectionRetry,
+    });
+    liveSessionId = resumedWithExistingProxy;
 
     // A Steel infra outage returns null (skips the Steel legs) while Kernel is
     // healthy; real rotation defects still throw. See the wrapper's doc comment.

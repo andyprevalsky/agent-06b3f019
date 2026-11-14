@@ -6,9 +6,11 @@ export async function withLogicalBrowserPause<T>(
   logical: { id: string; logicalOwnerKey: string | null } | null,
   sessionId: string,
   pause: boolean,
-  perform: (providerPause: boolean) => Promise<T>
+  perform: (providerPause: boolean) => Promise<T>,
+  signal?: AbortSignal
 ): Promise<T> {
   if (!pause || !logical?.logicalOwnerKey) return perform(pause);
+  signal?.throwIfAborted();
   return withSteelLifecycleClaim(logical.id, async (assertOwned, _native, mutate) => {
     await assertOwned();
     await mutate(async (tx) => {
@@ -24,7 +26,8 @@ export async function withLogicalBrowserPause<T>(
       if (changed.count !== 1) throw new Error('Logical browser pause ownership changed');
     });
     try {
-      await checkpointLogicalBrowser(sessionId, mutate);
+      await checkpointLogicalBrowser(sessionId, mutate, signal);
+      signal?.throwIfAborted();
     } catch (error) {
       await mutate((tx) =>
         tx.browserSession.updateMany({
