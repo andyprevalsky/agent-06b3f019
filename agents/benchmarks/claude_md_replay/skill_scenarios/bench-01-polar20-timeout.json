@@ -1,0 +1,566 @@
+{
+ "scenario": "bench-01-polar20-timeout",
+ "provenance": {
+  "source": "Andy's /benchmark invocation in boxes.dev thread thr_52266c65da8b45598e450991df9af4a0 (ph73d8qcv76fr2s04nvfjnyhp18gjp3x, 'Benchmark 20 random polar tasks', 2026-10-19 08:10:08Z, full read). The agent launched fleet 20261019-081035-2711908 (detached log detached-20261019-081034-2711643.log, owner 5afa950a3eb642428cd1bbf17ceaf0f6) on devbox c2fe16bb; the run dir is retained in /project/pr1525-evidence/runs-20261019-c2fe16bb.tar.gz and its launch/end rows in /project/pr1525-evidence/polar70-postdeploy/cloudbench-experiments.snapshot.jsonl.",
+  "recorded": "Detached controller log (infra canary preflight on run 20261019-081050-2715514, 20-bench provisioning, barrier, FLEET SUMMARY 3/20 passed, teardown), the exit status 1, _batch/report-card.json (3 passed / 17 failed: 15 'Timeout after 300s (wall-clock backstop=300s)', 2 'Expected tool spawn_browser_agent not found'; real agent IDs, durations, costs, tokens, elapsed 3267 s) and _batch/lifecycle.json: verbatim from the retained run, with /home/boxes/rose rewritten to the sandbox repo, the code-under-test ref rewritten to the replay HEAD and the 20 task names replaced positionally by the names the replayed launch chose. The 5 min timeout: the run's execution provenance records run_timeout_seconds=300 and benchmark_wall_clock_backstop_seconds=300, i.e. an explicit --timeout 300 (run-bench-fleet apply_operator_timeout_backstop); the original agent reported the cutoff as task FAILs, not infra. Monitor progression: the 4/11/18-of-20 ready, all-20-executing, 1/2 then 2/12 pass/fail and 14..20-in-teardown states the original agent reported between 08:13Z and 08:50Z. The --timeout refusal text is scripts/run-bench's own.",
+  "synthesized": "The launcher's own stdout (the original launch command and its output are hidden tool logs; the lines are scripts/run-bench-fleet's detach strings); the monitor JSON envelope (real schema; the per-sample occupancy follows the agent's reported progress); task names are whatever 20 polar tasks the replayed agent picks, mapped in order onto the recorded per-task results; the 55-minute run is compressed (controller exits on the 7th monitor sample or after 1800 s).",
+  "prompt": "Verbatim user message: '/benchmark 20 random polar tasks, with a 5 min execution timeout' (thr_52266c65da8b45598e450991df9af4a0, 2026-10-19 08:10:08Z). Replaces the earlier bench-01-default-launch, whose prompt was synthesized and whose recorded run (agentcard-proof-1 r001-j0001) was a campaign child also used by bench-02/05/06/08; this scenario keeps its rule focus (default cloud fleet launch, seed-cache check, exact-handle monitoring, CLI card, FE links) on a fully recorded detached fleet."
+ },
+ "vars": {
+  "RUN_ID": "20261019-081035-2711908",
+  "RUN_DIR": "{REPO}/.context/fleet/runs/{RUN_ID}",
+  "DETACH_LOG": "{REPO}/.context/fleet/runs/detached-20261019-081034-2711643.log",
+  "DETACH_STATUS": "{REPO}/.context/fleet/runs/detached-20261019-081034-2711643.status"
+ },
+ "controller": {
+  "token": "5afa950a3eb642428cd1bbf17ceaf0f6",
+  "app": "navi-whisper-lux-bench",
+  "run_id": "20261019-081035-2711908",
+  "argv0": "run-bench-fleet",
+  "start": "rule",
+  "children": 1,
+  "exit_after_seconds": 1800,
+  "max_lifetime_seconds": 3000,
+  "on_exit_files": {
+   "{DETACH_LOG}": "controller GITHUB_TOKEN exported (len=40)\n🖥️  local benchmark diagnostics: http://localhost:8765/ — run visible as STARTING\n📡 Monitor this exact fleet every 30s, through terminal status AND resource release:\n    {REPO}/scripts/run-bench monitor {REPO}/.context/fleet/runs/20261019-081035-2711908 --controller-status {REPO}/.context/fleet/runs/detached-20261019-081034-2711643.status\n    owner: 5afa950a3eb642428cd1bbf17ceaf0f6; private controller diagnostics stay in this run directory.\n    PASS/FAIL is the evaluated task result; lifecycle.json records final cleanup.\n    On stale/missing observations, inspect exact owner liveness and private logs; do not restart.\n📊 Report progress ONLY with the CLI scorecard (FORMAT v8); hand-written cards are non-compliant:\n    scripts/run-bench scorecard {REPO}/.context/fleet/runs/20261019-081035-2711908 --html {REPO}/.context/fleet/runs/20261019-081035-2711908/scorecard.html\n    dvb-onbox visuals publish --file {REPO}/.context/fleet/runs/20261019-081035-2711908/scorecard.html --title \"<run label> scorecard\"\n    Publish at start, every 15 minutes, on each state change and at completion.\n    Off boxes.dev or when HTML is unavailable, post: scripts/run-bench scorecard {REPO}/.context/fleet/runs/20261019-081035-2711908 --text\n✅ central hub registration verified: run=20261019-081035-2711908\n📤 uploaded run bundle to hub: 20261019-081035-2711908\n📊 Mac app Benchmark Hub: run=20261019-081035-2711908\n🔎 Verifying the shared benchmark app environment (read-only)...\ncontroller GITHUB_TOKEN exported (len=40)\n✅ Shared benchmark app environment verified (read-only): AGENTS_ENV_B64 BACKEND_ENV_B64 AGENTS_ENV_SHA256 BACKEND_ENV_SHA256 CLOUDBENCH_BROWSER_PROVIDER GITHUB_TOKEN\n🔎 Verifying canonical seed dump for cloud-guest Postgres 15...\n✅ Canonical seed dump present for guest pg15: cf8b24718feab7a3393947731505cff0f49ddec6-pg15-victoria-prod-sync-v1-whatsapp-v2\n🏭 warm source machine: 683e47df5094d8 (region iad)\n🧾 restored proven donor dependency snapshot for this checkout\n🧾 using recorded proven snapshot: vs_ZPnK9baJYXkfpK036YB\n✅ warm snapshot dep trees match the current ref (fast bring-up)\n🧊 forking clones from complete snapshot: vs_ZPnK9baJYXkfpK036YB\n════════════════════ CODE UNDER TEST ════════════════════\n  branch : main\n  ref    : {HEAD_SHA}  ({HEAD_SHORT})\n  pushed : on origin ✓\n  diff   : clean working tree (running committed 7441b41f4 exactly)\n══════════════════════════════════════════════════════════\n🛰️  guest autoscaler observation every 10s (Temporal visibility budget 20/s)\n🔏 execution provenance: {REPO}/.context/fleet/runs/20261019-081035-2711908/execution-provenance.json\n🛡  fleet infra canary: N=2 benches (browser-auth-code-never-arrives browser-event-ticket)\n   mode: --infra-probe (strict barrier, no LLM / run_benchmark)\n   sample: seed=20260908 slice=0 (unified catalog)\ncontroller GITHUB_TOKEN exported (len=40)\n📊 reusing the exact-owned central hub already open on :8765 (no new window)\n🖥️  local benchmark diagnostics: http://localhost:8765/ — run visible as STARTING\n📡 Monitor this exact fleet every 30s, through terminal status AND resource release:\n    {REPO}/scripts/run-bench monitor {REPO}/.context/fleet/runs/20261019-081050-2715514 --controller-status {REPO}/.context/fleet/runs/detached-20261019-081034-2711643.status\n    owner: bb7866845cde43e28a23cfd1a7ce838e; private controller diagnostics stay in this run directory.\n    PASS/FAIL is the evaluated task result; lifecycle.json records final cleanup.\n    On stale/missing observations, inspect exact owner liveness and private logs; do not restart.\n📊 Report progress ONLY with the CLI scorecard (FORMAT v8); hand-written cards are non-compliant:\n    scripts/run-bench scorecard {REPO}/.context/fleet/runs/20261019-081050-2715514 --html {REPO}/.context/fleet/runs/20261019-081050-2715514/scorecard.html\n    dvb-onbox visuals publish --file {REPO}/.context/fleet/runs/20261019-081050-2715514/scorecard.html --title \"<run label> scorecard\"\n    Publish at start, every 15 minutes, on each state change and at completion.\n    Off boxes.dev or when HTML is unavailable, post: scripts/run-bench scorecard {REPO}/.context/fleet/runs/20261019-081050-2715514 --text\n✅ central hub registration verified: run=20261019-081050-2715514\n📤 uploaded run bundle to hub: 20261019-081050-2715514\n📊 Mac app Benchmark Hub: run=20261019-081050-2715514\n🔎 Verifying the shared benchmark app environment (read-only)...\ncontroller GITHUB_TOKEN exported (len=40)\n✅ Shared benchmark app environment verified (read-only): AGENTS_ENV_B64 BACKEND_ENV_B64 AGENTS_ENV_SHA256 BACKEND_ENV_SHA256 CLOUDBENCH_BROWSER_PROVIDER GITHUB_TOKEN\n🔎 Verifying canonical seed dump for cloud-guest Postgres 15...\n✅ Canonical seed dump present for guest pg15: cf8b24718feab7a3393947731505cff0f49ddec6-pg15-victoria-prod-sync-v1-whatsapp-v2\n🏭 warm source machine: 683e47df5094d8 (region iad)\n🧾 restored proven donor dependency snapshot for this checkout\n🧾 using recorded proven snapshot: vs_ZPnK9baJYXkfpK036YB\n✅ warm snapshot dep trees match the current ref (fast bring-up)\n🧊 forking clones from complete snapshot: vs_ZPnK9baJYXkfpK036YB\n════════════════════ CODE UNDER TEST ════════════════════\n  branch : fix/scorecard-starting-card-task-list\n  ref    : {HEAD_SHA}  ({HEAD_SHORT})\n  pushed : on origin ✓\n  diff   : DIRTY — shipped as a patch on top of 7441b41f4c56a24f350303fa31bfcf698e2519ff: 1 file changed, 3 insertions(+), 1 deletion(-), 0 untracked\n            scripts/cloudbench-scorecard.py | 4 +++-\n            1 file changed, 3 insertions(+), 1 deletion(-)\n══════════════════════════════════════════════════════════\n🛰️  guest autoscaler observation every 10s (Temporal visibility budget 20/s)\n🔏 execution provenance: {REPO}/.context/fleet/runs/20261019-081050-2715514/execution-provenance.json\n\n═══ run-bench-fleet — 2 bench(es), one isolated machine each ═══\n📊 reusing the exact-owned central hub already open on :8765 (no new window)\n🖥️  local benchmark diagnostics: http://localhost:8765/ — run visible as STARTING\n✅ central hub registration verified: run=20261019-081050-2715514\n\n⏳ provisioning 2 isolated machine(s) concurrently (claim-or-clone) ...\n📤 uploaded run bundle to hub: 20261019-081050-2715514\n\n▶️  [browser-auth-code-never-arrives] cloned isolated machine 8ee324f7ed6948 (mode=REAL, dash=8785)\n   ✅ machine=8ee324f7ed6948 allocated → launching run-bench-cloud (isolated) ...\n   ⚖️  [browser-auth-code-never-arrives] per-bench autoscaler SKIPPED (infra-probe; no worker scaling)\n\n▶️  [browser-event-ticket] cloned isolated machine 845037f2d56418 (mode=REAL, dash=8805)\n   ✅ machine=845037f2d56418 allocated → launching run-bench-cloud (isolated) ...\n   ⚖️  [browser-event-ticket] per-bench autoscaler SKIPPED (infra-probe; no worker scaling)\n📤 uploaded run bundle to hub: 20261019-081050-2715514\n⚙️  2/2 boot configs applied while stopped; releasing concurrent starts\n🧵 released startup capacity reservation after all primary starts became provider-visible\n\n⏳ 2 isolated bench machine(s) running.\n   this run: http://localhost:8765/run/20261019-081050-2715514/dashboard.html\n   per-bench viewers: browser-auth-code-never-arrives→:8785 browser-event-ticket→:8805 \n\n⏸️  waiting for 2 isolated stacks at synchronized start barrier...\n📤 uploaded run bundle to hub: 20261019-081050-2715514\n📤 uploaded run bundle to hub: 20261019-081050-2715514\n📤 uploaded run bundle to hub: 20261019-081050-2715514\n📤 uploaded run bundle to hub: 20261019-081050-2715514\n📤 uploaded run bundle to hub: 20261019-081050-2715514\n[warn] FLY_COMPLETION_TIMEOUT shell_pid=2801047 shell_start_ticks=24469465 fly_return_status=unknown fifo_read_status=142\n📤 uploaded run bundle to hub: 20261019-081050-2715514\n📤 uploaded run bundle to hub: 20261019-081050-2715514\n📤 uploaded run bundle to hub: 20261019-081050-2715514\n📤 uploaded run bundle to hub: 20261019-081050-2715514\n📤 uploaded run bundle to hub: 20261019-081050-2715514\n📤 uploaded run bundle to hub: 20261019-081050-2715514\n[warn] FLY_COMPLETION_TIMEOUT shell_pid=2905938 shell_start_ticks=24504550 fly_return_status=unknown fifo_read_status=142\n📤 uploaded run bundle to hub: 20261019-081050-2715514\n✅ 2/2 isolated stacks reached the barrier (0 excluded as infra failures)\n⚖️  infra-probe: skipping mandatory autoscaler startup wait (2 ready stacks)\n🚦 releasing synchronized start barrier on the ready machines...\n📤 uploaded run bundle to hub: 20261019-081050-2715514\n📤 uploaded run bundle to hub: 20261019-081050-2715514\n📤 uploaded run bundle to hub: 20261019-081050-2715514\n\n════════════════════ FLEET SUMMARY ════════════════════\n  ✅ browser-auth-code-never-arrives        REAL PASS       agent=0.0\n  ✅ browser-event-ticket                   REAL PASS       agent=0.0\n  ────────────────────────────────────────────────────\n  2/2 passed\n════════════════════════════════════════════════════════\n✅ every guest acknowledged browser/session cleanup before fleet machine teardown\n🧹 destroying fleet-owned clone 845037f2d56418 (name=cloudbench-5278f6b250c8499b89478f79)\n🧹 destroying fleet-owned clone 8ee324f7ed6948 (name=cloudbench-260d1ba026c04b64ba597c6a)\n  ⚠️ volume destroy attempt 2/6 id=vol_r7ymkg6xzl5px73r rc=1 response=<empty>\n  ⚠️ volume destroy attempt 3/6 id=vol_r7ymkg6xzl5px73r rc=1 response=<empty>\n  ⚠️ volume destroy attempt 2/6 id=vol_vjyl03njd2m0k9ov rc=1 response=<empty>\n  ⚠️ volume destroy attempt 4/6 id=vol_r7ymkg6xzl5px73r rc=1 response=<empty>\n  ⚠️ volume destroy attempt 3/6 id=vol_vjyl03njd2m0k9ov rc=1 response=<empty>\n  ⚠️ volume destroy attempt 4/6 id=vol_vjyl03njd2m0k9ov rc=1 response=<empty>\n📤 uploaded run bundle to hub: 20261019-081050-2715514\n📊 Report progress ONLY with the CLI scorecard (FORMAT v8); hand-written cards are non-compliant:\n    scripts/run-bench scorecard {REPO}/.context/fleet/runs/20261019-081050-2715514 --html {REPO}/.context/fleet/runs/20261019-081050-2715514/scorecard.html\n    dvb-onbox visuals publish --file {REPO}/.context/fleet/runs/20261019-081050-2715514/scorecard.html --title \"<run label> scorecard\"\n    Publish at start, every 15 minutes, on each state change and at completion.\n    Off boxes.dev or when HTML is unavailable, post: scripts/run-bench scorecard {REPO}/.context/fleet/runs/20261019-081050-2715514 --text\n🛡  infra canary preflight: stamp missing/stale — running N=2 before capability fleet\n🛡  infra canary preflight PASS — stamped {REPO}/.context/fleet-infra-canary.last-pass\n\n═══ run-bench-fleet — 20 bench(es), one isolated machine each ═══\n📊 reusing the exact-owned central hub already open on :8765 (no new window)\n🖥️  local benchmark diagnostics: http://localhost:8765/ — run visible as STARTING\n✅ central hub registration verified: run=20261019-081035-2711908\n\n⏳ provisioning 20 isolated machine(s) concurrently (claim-or-clone) ...\n📤 uploaded run bundle to hub: 20261019-081035-2711908\n❌ unresolved clone name 'cloudbench-7cb307e96f0e4fbea714c9a8'; inspect with: flyctl machines list -a navi-whisper-lux-bench --json\n⚠️  ambiguous clone 'cloudbench-7cb307e96f0e4fbea714c9a8' is not provider-visible; retaining exact name ownership for teardown reconciliation\n⏳ transient clone failure (attempt 1, 1/5 charged, status=1); retrying in 10s ...\n📤 uploaded run bundle to hub: 20261019-081035-2711908\n❌ unresolved clone name 'cloudbench-f4bcd7b10b6c46b3a4826fc7'; inspect with: flyctl machines list -a navi-whisper-lux-bench --json\n⚠️  ambiguous clone 'cloudbench-f4bcd7b10b6c46b3a4826fc7' is not provider-visible; retaining exact name ownership for teardown reconciliation\n⏳ transient clone failure (attempt 2, 2/5 charged, status=1); retrying in 20s ...\n📤 uploaded run bundle to hub: 20261019-081035-2711908\n\n▶️  [{T01}] cloned isolated machine 8d96522a3edd08 (mode=REAL, dash=8785)\n   ✅ machine=8d96522a3edd08 allocated → launching run-bench-cloud (isolated) ...\n   ⚖️  [{T01}] per-bench autoscaler ON (mandatory prod params, max=15, queue=navi-agent-tasks-flt-{T01}-f509152ab837-0)\n\n▶️  [{T02}] cloned isolated machine 83d16e3c5e6398 (mode=REAL, dash=8805)\n   ✅ machine=83d16e3c5e6398 allocated → launching run-bench-cloud (isolated) ...\n   ⚖️  [{T02}] per-bench autoscaler ON (mandatory prod params, max=15, queue=navi-agent-tasks-flt-{T02}-f509152ab837-1)\n\n▶️  [{T03}] cloned isolated machine 80ee651b194d28 (mode=REAL, dash=8825)\n   ✅ machine=80ee651b194d28 allocated → launching run-bench-cloud (isolated) ...\n   ⚖️  [{T03}] per-bench autoscaler ON (mandatory prod params, max=15, queue=navi-agent-tasks-flt-{T03}-f509152ab837-2)\n\n▶️  [{T04}] cloned isolated machine 84ee339b209e68 (mode=REAL, dash=8845)\n   ✅ machine=84ee339b209e68 allocated → launching run-bench-cloud (isolated) ...\n   ⚖️  [{T04}] per-bench autoscaler ON (mandatory prod params, max=15, queue=navi-agent-tasks-flt-{T04}-f509152ab837-3)\n\n▶️  [{T05}] cloned isolated machine 865991be005298 (mode=REAL, dash=8865)\n   ✅ machine=865991be005298 allocated → launching run-bench-cloud (isolated) ...\n   ⚖️  [{T05}] per-bench autoscaler ON (mandatory prod params, max=15, queue=navi-agent-tasks-flt-{T05}-f509152ab837-4)\n\n▶️  [{T06}] cloned isolated machine 80e9639a2321e8 (mode=REAL, dash=8885)\n   ✅ machine=80e9639a2321e8 allocated → launching run-bench-cloud (isolated) ...\n   ⚖️  [{T06}] per-bench autoscaler ON (mandatory prod params, max=15, queue=navi-agent-tasks-flt-{T06}-f509152ab837-5)\n\n▶️  [{T07}] cloned isolated machine 8747431fd92218 (mode=REAL, dash=8905)\n   ✅ machine=8747431fd92218 allocated → launching run-bench-cloud (isolated) ...\n   ⚖️  [{T07}] per-bench autoscaler ON (mandatory prod params, max=15, queue=navi-agent-tasks-flt-{T07}-f509152ab837-6)\n\n▶️  [{T08}] cloned isolated machine 817669c9991068 (mode=REAL, dash=8925)\n   ✅ machine=817669c9991068 allocated → launching run-bench-cloud (isolated) ...\n   ⚖️  [{T08}] per-bench autoscaler ON (mandatory prod params, max=15, queue=navi-agent-tasks-flt-{T08}-f509152ab837-7)\n\n▶️  [{T09}] cloned isolated machine 8ed0d3b7463418 (mode=REAL, dash=8945)\n   ✅ machine=8ed0d3b7463418 allocated → launching run-bench-cloud (isolated) ...\n   ⚖️  [{T09}] per-bench autoscaler ON (mandatory prod params, max=15, queue=navi-agent-tasks-flt-{T09}-f509152ab837-8)\n\n▶️  [{T10}] cloned isolated machine 825420c7e97328 (mode=REAL, dash=8965)\n   ✅ machine=825420c7e97328 allocated → launching run-bench-cloud (isolated) ...\n   ⚖️  [{T10}] per-bench autoscaler ON (mandatory prod params, max=15, queue=navi-agent-tasks-flt-{T10}-f509152ab837-9)\n\n▶️  [{T11}] cloned isolated machine 830376c7590278 (mode=REAL, dash=8985)\n   ✅ machine=830376c7590278 allocated → launching run-bench-cloud (isolated) ...\n   ⚖️  [{T11}] per-bench autoscaler ON (mandatory prod params, max=15, queue=navi-agent-tasks-flt-{T11}-f509152ab837-10)\n\n▶️  [{T12}] cloned isolated machine 85777d7a224d68 (mode=REAL, dash=9005)\n   ✅ machine=85777d7a224d68 allocated → launching run-bench-cloud (isolated) ...\n   ⚖️  [{T12}] per-bench autoscaler ON (mandatory prod params, max=15, queue=navi-agent-tasks-flt-{T12}-f509152ab837-11)\n\n▶️  [{T13}] cloned isolated machine 83dd32efd01548 (mode=REAL, dash=9025)\n   ✅ machine=83dd32efd01548 allocated → launching run-bench-cloud (isolated) ...\n   ⚖️  [{T13}] per-bench autoscaler ON (mandatory prod params, max=15, queue=navi-agent-tasks-flt-{T13}-f509152ab837-12)\n\n▶️  [{T14}] cloned isolated machine 82939da7935138 (mode=REAL, dash=9045)\n   ✅ machine=82939da7935138 allocated → launching run-bench-cloud (isolated) ...\n   ⚖️  [{T14}] per-bench autoscaler ON (mandatory prod params, max=15, queue=navi-agent-tasks-flt-{T14}-f509152ab837-13)\n\n▶️  [{T15}] cloned isolated machine 80ee6edb1e4048 (mode=REAL, dash=9065)\n   ✅ machine=80ee6edb1e4048 allocated → launching run-bench-cloud (isolated) ...\n   ⚖️  [{T15}] per-bench autoscaler ON (mandatory prod params, max=15, queue=navi-agent-tasks-flt-{T15}-f509152ab837-14)\n\n▶️  [{T16}] cloned isolated machine 08001d9cd07258 (mode=REAL, dash=9085)\n   ✅ machine=08001d9cd07258 allocated → launching run-bench-cloud (isolated) ...\n   ⚖️  [{T16}] per-bench autoscaler ON (mandatory prod params, max=15, queue=navi-agent-tasks-flt-{T16}-f509152ab837-15)\n\n▶️  [{T17}] cloned isolated machine 0807664be23508 (mode=REAL, dash=9105)\n   ✅ machine=0807664be23508 allocated → launching run-bench-cloud (isolated) ...\n   ⚖️  [{T17}] per-bench autoscaler ON (mandatory prod params, max=15, queue=navi-agent-tasks-flt-{T17}-f509152ab837-16)\n\n▶️  [{T18}] cloned isolated machine 8362dec7755778 (mode=REAL, dash=9125)\n   ✅ machine=8362dec7755778 allocated → launching run-bench-cloud (isolated) ...\n   ⚖️  [{T18}] per-bench autoscaler ON (mandatory prod params, max=15, queue=navi-agent-tasks-flt-{T18}-f509152ab837-17)\n\n▶️  [{T19}] cloned isolated machine 8d1772be2ded68 (mode=REAL, dash=9145)\n   ✅ machine=8d1772be2ded68 allocated → launching run-bench-cloud (isolated) ...\n   ⚖️  [{T19}] per-bench autoscaler ON (mandatory prod params, max=15, queue=navi-agent-tasks-flt-{T19}-f509152ab837-18)\n\n▶️  [{T20}] cloned isolated machine 8e2544c7d72498 (mode=REAL, dash=9165)\n   ✅ machine=8e2544c7d72498 allocated → launching run-bench-cloud (isolated) ...\n   ⚖️  [{T20}] per-bench autoscaler ON (mandatory prod params, max=15, queue=navi-agent-tasks-flt-{T20}-f509152ab837-19)\n📤 uploaded run bundle to hub: 20261019-081035-2711908\n📤 uploaded run bundle to hub: 20261019-081035-2711908\n📤 uploaded run bundle to hub: 20261019-081035-2711908\n⚙️  20/20 boot configs applied while stopped; releasing concurrent starts\n📤 uploaded run bundle to hub: 20261019-081035-2711908\n📤 uploaded run bundle to hub: 20261019-081035-2711908\n📤 uploaded run bundle to hub: 20261019-081035-2711908\n📤 uploaded run bundle to hub: 20261019-081035-2711908\n📤 uploaded run bundle to hub: 20261019-081035-2711908\n🧵 released startup capacity reservation after all primary starts became provider-visible\n\n⏳ 20 isolated bench machine(s) running.\n   this run: http://localhost:8765/run/20261019-081035-2711908/dashboard.html\n   per-bench viewers: {T01}→:8785 {T02}→:8805 {T03}→:8825 {T04}→:8845 {T05}→:8865 {T06}→:8885 {T07}→:8905 {T08}→:8925 {T09}→:8945 {T10}→:8965 {T11}→:8985 {T12}→:9005 {T13}→:9025 {T14}→:9045 {T15}→:9065 {T16}→:9085 {T17}→:9105 {T18}→:9125 {T19}→:9145 {T20}→:9165 \n\n⏸️  waiting for 20 isolated stacks at synchronized start barrier...\n📤 uploaded run bundle to hub: 20261019-081035-2711908\n📤 uploaded run bundle to hub: 20261019-081035-2711908\n📤 uploaded run bundle to hub: 20261019-081035-2711908\n📤 uploaded run bundle to hub: 20261019-081035-2711908\n📤 uploaded run bundle to hub: 20261019-081035-2711908\n📤 uploaded run bundle to hub: 20261019-081035-2711908\n📤 uploaded run bundle to hub: 20261019-081035-2711908\n📤 uploaded run bundle to hub: 20261019-081035-2711908\n📤 uploaded run bundle to hub: 20261019-081035-2711908\n📤 uploaded run bundle to hub: 20261019-081035-2711908\n📤 uploaded run bundle to hub: 20261019-081035-2711908\n📤 uploaded run bundle to hub: 20261019-081035-2711908\n📤 uploaded run bundle to hub: 20261019-081035-2711908\n📤 uploaded run bundle to hub: 20261019-081035-2711908\n📤 uploaded run bundle to hub: 20261019-081035-2711908\n✅ 20/20 isolated stacks reached the barrier (0 excluded as infra failures)\n⚖️  20/20 mandatory per-bench autoscalers ready\n🚦 releasing synchronized start barrier on the ready machines...\n📤 uploaded run bundle to hub: 20261019-081035-2711908\n📤 uploaded run bundle to hub: 20261019-081035-2711908\n📤 uploaded run bundle to hub: 20261019-081035-2711908\n📤 uploaded run bundle to hub: 20261019-081035-2711908\n📤 uploaded run bundle to hub: 20261019-081035-2711908\n📤 uploaded run bundle to hub: 20261019-081035-2711908\n📤 uploaded run bundle to hub: 20261019-081035-2711908\n📤 uploaded run bundle to hub: 20261019-081035-2711908\n📤 uploaded run bundle to hub: 20261019-081035-2711908\n📤 uploaded run bundle to hub: 20261019-081035-2711908\n📤 uploaded run bundle to hub: 20261019-081035-2711908\n📤 uploaded run bundle to hub: 20261019-081035-2711908\n📤 uploaded run bundle to hub: 20261019-081035-2711908\n📤 uploaded run bundle to hub: 20261019-081035-2711908\n📤 uploaded run bundle to hub: 20261019-081035-2711908\n[warn] FLY_COMPLETION_TIMEOUT shell_pid=3771225 shell_start_ticks=24644289 fly_return_status=unknown fifo_read_status=142\n📤 uploaded run bundle to hub: 20261019-081035-2711908\n📤 uploaded run bundle to hub: 20261019-081035-2711908\n📤 uploaded run bundle to hub: 20261019-081035-2711908\n📤 uploaded run bundle to hub: 20261019-081035-2711908\n📤 uploaded run bundle to hub: 20261019-081035-2711908\n📤 uploaded run bundle to hub: 20261019-081035-2711908\n📤 uploaded run bundle to hub: 20261019-081035-2711908\n📤 uploaded run bundle to hub: 20261019-081035-2711908\n📤 uploaded run bundle to hub: 20261019-081035-2711908\n📤 uploaded run bundle to hub: 20261019-081035-2711908\n📤 uploaded run bundle to hub: 20261019-081035-2711908\n📤 uploaded run bundle to hub: 20261019-081035-2711908\n📤 uploaded run bundle to hub: 20261019-081035-2711908\n📤 uploaded run bundle to hub: 20261019-081035-2711908\n📤 uploaded run bundle to hub: 20261019-081035-2711908\n📤 uploaded run bundle to hub: 20261019-081035-2711908\n📤 uploaded run bundle to hub: 20261019-081035-2711908\n📤 uploaded run bundle to hub: 20261019-081035-2711908\n📤 uploaded run bundle to hub: 20261019-081035-2711908\n📤 uploaded run bundle to hub: 20261019-081035-2711908\n📤 uploaded run bundle to hub: 20261019-081035-2711908\n📤 uploaded run bundle to hub: 20261019-081035-2711908\n📤 uploaded run bundle to hub: 20261019-081035-2711908\n📤 uploaded run bundle to hub: 20261019-081035-2711908\n📤 uploaded run bundle to hub: 20261019-081035-2711908\n📤 uploaded run bundle to hub: 20261019-081035-2711908\n📤 uploaded run bundle to hub: 20261019-081035-2711908\n📤 uploaded run bundle to hub: 20261019-081035-2711908\n📤 uploaded run bundle to hub: 20261019-081035-2711908\n📤 uploaded run bundle to hub: 20261019-081035-2711908\n📤 uploaded run bundle to hub: 20261019-081035-2711908\n[warn] FLY_COMPLETION_TIMEOUT shell_pid=3459 shell_start_ticks=24742492 fly_return_status=unknown fifo_read_status=142\n📤 uploaded run bundle to hub: 20261019-081035-2711908\n📤 uploaded run bundle to hub: 20261019-081035-2711908\n📤 uploaded run bundle to hub: 20261019-081035-2711908\n📤 uploaded run bundle to hub: 20261019-081035-2711908\n\n════════════════════ FLEET SUMMARY ════════════════════\n  ❌ {T01}            REAL CHILDFAIL  agent=fe1f6236-5db9-443e-be6c-f1688ae3894e\n  ❌ {T02}            REAL CHILDFAIL  agent=ca2b40cb-b2bb-4615-ab5d-468d58ec637b\n  ❌ {T03}            REAL CHILDFAIL  agent=17e614fb-892d-43c4-b1e0-c49fc58d7b5d\n  ❌ {T04}                           REAL CHILDFAIL  agent=a43642ee-c6d0-432e-9946-9690f3f62ccf\n  ❌ {T05}            REAL CHILDFAIL  agent=d081edc8-4db8-4abe-80f8-075b786e68f6\n  ❌ {T06}            REAL CHILDFAIL  agent=151ea816-5fbf-444a-ab75-a57ac1bb4ec2\n  ❌ {T07}                           REAL CHILDFAIL  agent=018d96a9-890d-426c-a3e9-87cc00ad0818\n  ❌ {T08}            REAL CHILDFAIL  agent=1d06f205-a523-4158-9a10-6634010a8f8c\n  ✅ {T09}                           REAL PASS       agent=cacbdca0-6082-4414-8417-c1968d5388b5\n  ✅ {T10}                           REAL PASS       agent=8ffb2c26-ff28-433e-8969-4c5670e48342\n  ❌ {T11}            REAL CHILDFAIL  agent=2ce37433-815e-421e-b8a2-5f729bc33b0b\n  ❌ {T12}                           REAL CHILDFAIL  agent=ae2cffb7-8b2e-4a6f-b893-03b9e9ca89d4\n  ❌ {T13}            REAL CHILDFAIL  agent=698e05ca-b6c9-4ab5-a34b-11ffa663c74b\n  ✅ {T14}                           REAL PASS       agent=df9b550c-3a11-4e82-ab71-49d5650c19cd\n  ❌ {T15}            REAL CHILDFAIL  agent=9f7bce3a-d01e-4a2b-8f1d-b1a33157d9fa\n  ❌ {T16}            REAL CHILDFAIL  agent=431c50f4-4aff-42cb-b9d4-aeecfef82767\n  ❌ {T17}            REAL CHILDFAIL  agent=33e22d97-4de5-4f79-b570-72949b59a7b6\n  ❌ {T18}            REAL CHILDFAIL  agent=73ff6b45-88f8-4916-aa03-689c153cc2e9\n  ❌ {T19}                           REAL CHILDFAIL  agent=54f7d648-e0fe-4182-8078-8db75f5a6bb7\n  ❌ {T20}            REAL CHILDFAIL  agent=56b39708-7b6c-45eb-a9bd-5e1ccad0ea82\n  ────────────────────────────────────────────────────\n  3/20 passed\n════════════════════════════════════════════════════════\n✅ every guest acknowledged browser/session cleanup before fleet machine teardown\n🧹 destroying fleet-owned clone 80e9639a2321e8 (name=cloudbench-341c66ce46bf407a8fcbd179)\n🧹 reaping fleet-owned volume vol_vz8z939yn1dxw3xv (name=cloudbench-7cb307e96f0e4fbea714c9a8; no machine allocated)\n🧹 reaping fleet-owned volume vol_v8e09x56e222ex1v (name=cloudbench-f4bcd7b10b6c46b3a4826fc7; no machine allocated)\n  ⚠️ volume destroy attempt 2/6 id=vol_vz8z939yn1dxw3xv rc=1 response=<empty>\n  ⚠️ volume destroy attempt 2/6 id=vol_v8e09x56e222ex1v rc=1 response=<empty>\n  ⚠️ volume destroy attempt 2/6 id=vol_r68qjyj16wy31xd4 rc=1 response=<empty>\n  ⚠️ volume destroy attempt 3/6 id=vol_vz8z939yn1dxw3xv rc=1 response=<empty>\n  ⚠️ volume destroy attempt 3/6 id=vol_v8e09x56e222ex1v rc=1 response=<empty>\n  ⚠️ volume destroy attempt 3/6 id=vol_r68qjyj16wy31xd4 rc=1 response=<empty>\n  ⚠️ volume destroy attempt 4/6 id=vol_vz8z939yn1dxw3xv rc=1 response=<empty>\n  ⚠️ volume destroy attempt 4/6 id=vol_v8e09x56e222ex1v rc=1 response=<empty>\n  ⚠️ volume destroy attempt 4/6 id=vol_r68qjyj16wy31xd4 rc=1 response=<empty>\n📤 uploaded run bundle to hub: 20261019-081035-2711908\n📊 Report progress ONLY with the CLI scorecard (FORMAT v8); hand-written cards are non-compliant:\n    scripts/run-bench scorecard {REPO}/.context/fleet/runs/20261019-081035-2711908 --html {REPO}/.context/fleet/runs/20261019-081035-2711908/scorecard.html\n    dvb-onbox visuals publish --file {REPO}/.context/fleet/runs/20261019-081035-2711908/scorecard.html --title \"<run label> scorecard\"\n    Publish at start, every 15 minutes, on each state change and at completion.\n    Off boxes.dev or when HTML is unavailable, post: scripts/run-bench scorecard {REPO}/.context/fleet/runs/20261019-081035-2711908 --text\n",
+   "{DETACH_STATUS}": "1\n",
+   "{RUN_DIR}/_batch/report-card.json": {
+    "run_id": "20261019-081035-2711908",
+    "timestamp": "2026-10-19T08:10:35+00:00",
+    "status": "failed",
+    "controller_exit_code": 1,
+    "code": "main@{HEAD_SHORT} (clean)",
+    "elapsed_s": 3267.0,
+    "world_model_mode": "real",
+    "tasks": {
+     "total": 20,
+     "running": 0,
+     "completed": 20,
+     "queued": 0
+    },
+    "results": {
+     "passed": 3,
+     "failed": 17,
+     "transient": 0,
+     "success_rate": 0.15
+    },
+    "cost": {
+     "agents_llm_usd": 1.48,
+     "wmh_grounding_usd": null,
+     "infra_usd": null,
+     "total_usd": 1.48,
+     "fast_cache_hit_rate": 0.771
+    },
+    "infra": null,
+    "metadata": {
+     "tokens_in": 8580176,
+     "tokens_out": 242917,
+     "agent_tokens_in": 8580176,
+     "agent_tokens_out": 242917,
+     "wmh_tokens_in": 0,
+     "wmh_tokens_out": 0
+    },
+    "per_task": [
+     {
+      "name": "{T01}",
+      "status": "failed",
+      "duration_s": 314.7,
+      "cost_usd": 0.32,
+      "agent_url": null,
+      "agent_id": "fe1f6236-5db9-443e-be6c-f1688ae3894e",
+      "failure_reason": "Timeout after 300s (wall-clock backstop=300s) | Agent status: PAUSED (expected COMPLETED) | No browser agent trajectory was recorded; expected at least 5 steps per browser agent",
+      "lifecycle_stage": "released",
+      "tokens_in": 959965,
+      "tokens_out": 56024,
+      "world_model_mode": "real",
+      "fast_mode": true,
+      "infra_usd": null
+     },
+     {
+      "name": "{T02}",
+      "status": "failed",
+      "duration_s": 317.2,
+      "cost_usd": 0.07,
+      "agent_url": null,
+      "agent_id": "ca2b40cb-b2bb-4615-ab5d-468d58ec637b",
+      "failure_reason": "Timeout after 300s (wall-clock backstop=300s) | Agent status: PAUSED (expected COMPLETED)",
+      "lifecycle_stage": "released",
+      "tokens_in": 118925,
+      "tokens_out": 9042,
+      "world_model_mode": "real",
+      "fast_mode": true,
+      "infra_usd": null
+     },
+     {
+      "name": "{T03}",
+      "status": "failed",
+      "duration_s": 359.0,
+      "cost_usd": 0.09,
+      "agent_url": null,
+      "agent_id": "17e614fb-892d-43c4-b1e0-c49fc58d7b5d",
+      "failure_reason": "Timeout after 300s (wall-clock backstop=300s) | Agent status: PAUSED (expected COMPLETED)",
+      "lifecycle_stage": "released",
+      "tokens_in": 143386,
+      "tokens_out": 13654,
+      "world_model_mode": "real",
+      "fast_mode": true,
+      "infra_usd": null
+     },
+     {
+      "name": "{T04}",
+      "status": "failed",
+      "duration_s": 56.7,
+      "cost_usd": 0.03,
+      "agent_url": null,
+      "agent_id": "a43642ee-c6d0-432e-9946-9690f3f62ccf",
+      "failure_reason": "Expected tool 'spawn_browser_agent' not found in messages | No browser agent trajectory was recorded; expected at least 5 steps per browser agent",
+      "lifecycle_stage": "released",
+      "tokens_in": 47792,
+      "tokens_out": 3584,
+      "world_model_mode": "real",
+      "fast_mode": true,
+      "infra_usd": null
+     },
+     {
+      "name": "{T05}",
+      "status": "failed",
+      "duration_s": 360.7,
+      "cost_usd": 0.0,
+      "agent_url": null,
+      "agent_id": "d081edc8-4db8-4abe-80f8-075b786e68f6",
+      "failure_reason": "Timeout after 300s (wall-clock backstop=300s) | Agent status: PAUSED (expected COMPLETED)",
+      "lifecycle_stage": "released",
+      "tokens_in": 80853,
+      "tokens_out": 1671,
+      "world_model_mode": "real",
+      "fast_mode": true,
+      "infra_usd": null
+     },
+     {
+      "name": "{T06}",
+      "status": "failed",
+      "duration_s": 310.8,
+      "cost_usd": 0.0,
+      "agent_url": null,
+      "agent_id": "151ea816-5fbf-444a-ab75-a57ac1bb4ec2",
+      "failure_reason": "Timeout after 300s (wall-clock backstop=300s) | Agent status: PAUSED (expected COMPLETED)",
+      "lifecycle_stage": "released",
+      "tokens_in": 8950,
+      "tokens_out": 722,
+      "world_model_mode": "real",
+      "fast_mode": true,
+      "infra_usd": null
+     },
+     {
+      "name": "{T07}",
+      "status": "failed",
+      "duration_s": 61.1,
+      "cost_usd": 0.03,
+      "agent_url": null,
+      "agent_id": "018d96a9-890d-426c-a3e9-87cc00ad0818",
+      "failure_reason": "Expected tool 'spawn_browser_agent' not found in messages | No browser agent trajectory was recorded; expected at least 5 steps per browser agent",
+      "lifecycle_stage": "released",
+      "tokens_in": 61566,
+      "tokens_out": 3169,
+      "world_model_mode": "real",
+      "fast_mode": true,
+      "infra_usd": null
+     },
+     {
+      "name": "{T08}",
+      "status": "failed",
+      "duration_s": 312.8,
+      "cost_usd": 0.01,
+      "agent_url": null,
+      "agent_id": "1d06f205-a523-4158-9a10-6634010a8f8c",
+      "failure_reason": "Timeout after 300s (wall-clock backstop=300s) | Agent status: PAUSED (expected COMPLETED)",
+      "lifecycle_stage": "released",
+      "tokens_in": 51799,
+      "tokens_out": 2235,
+      "world_model_mode": "real",
+      "fast_mode": true,
+      "infra_usd": null
+     },
+     {
+      "name": "{T09}",
+      "status": "passed",
+      "duration_s": 122.1,
+      "cost_usd": 0.01,
+      "agent_url": null,
+      "agent_id": "cacbdca0-6082-4414-8417-c1968d5388b5",
+      "failure_reason": null,
+      "lifecycle_stage": "released",
+      "tokens_in": 291143,
+      "tokens_out": 2140,
+      "world_model_mode": "real",
+      "fast_mode": true,
+      "infra_usd": null
+     },
+     {
+      "name": "{T10}",
+      "status": "passed",
+      "duration_s": 274.2,
+      "cost_usd": 0.06,
+      "agent_url": null,
+      "agent_id": "8ffb2c26-ff28-433e-8969-4c5670e48342",
+      "failure_reason": null,
+      "lifecycle_stage": "released",
+      "tokens_in": 4021286,
+      "tokens_out": 5233,
+      "world_model_mode": "real",
+      "fast_mode": true,
+      "infra_usd": null
+     },
+     {
+      "name": "{T11}",
+      "status": "failed",
+      "duration_s": 317.6,
+      "cost_usd": 0.22,
+      "agent_url": null,
+      "agent_id": "2ce37433-815e-421e-b8a2-5f729bc33b0b",
+      "failure_reason": "Timeout after 300s (wall-clock backstop=300s) | Agent status: PAUSED (expected COMPLETED)",
+      "lifecycle_stage": "released",
+      "tokens_in": 438351,
+      "tokens_out": 36440,
+      "world_model_mode": "real",
+      "fast_mode": true,
+      "infra_usd": null
+     },
+     {
+      "name": "{T12}",
+      "status": "failed",
+      "duration_s": 311.3,
+      "cost_usd": 0.0,
+      "agent_url": null,
+      "agent_id": "ae2cffb7-8b2e-4a6f-b893-03b9e9ca89d4",
+      "failure_reason": "Timeout after 300s (wall-clock backstop=300s) | Agent status: PAUSED (expected COMPLETED) | No browser agent trajectory was recorded; expected at least 5 steps per browser agent",
+      "lifecycle_stage": "released",
+      "tokens_in": 8620,
+      "tokens_out": 915,
+      "world_model_mode": "real",
+      "fast_mode": true,
+      "infra_usd": null
+     },
+     {
+      "name": "{T13}",
+      "status": "failed",
+      "duration_s": 315.1,
+      "cost_usd": 0.0,
+      "agent_url": null,
+      "agent_id": "698e05ca-b6c9-4ab5-a34b-11ffa663c74b",
+      "failure_reason": "Timeout after 300s (wall-clock backstop=300s) | Agent status: PAUSED (expected COMPLETED)",
+      "lifecycle_stage": "released",
+      "tokens_in": 8872,
+      "tokens_out": 584,
+      "world_model_mode": "real",
+      "fast_mode": true,
+      "infra_usd": null
+     },
+     {
+      "name": "{T14}",
+      "status": "passed",
+      "duration_s": 206.1,
+      "cost_usd": 0.02,
+      "agent_url": null,
+      "agent_id": "df9b550c-3a11-4e82-ab71-49d5650c19cd",
+      "failure_reason": null,
+      "lifecycle_stage": "released",
+      "tokens_in": 265654,
+      "tokens_out": 7481,
+      "world_model_mode": "real",
+      "fast_mode": true,
+      "infra_usd": null
+     },
+     {
+      "name": "{T15}",
+      "status": "failed",
+      "duration_s": 328.3,
+      "cost_usd": 0.01,
+      "agent_url": null,
+      "agent_id": "9f7bce3a-d01e-4a2b-8f1d-b1a33157d9fa",
+      "failure_reason": "Timeout after 300s (wall-clock backstop=300s) | Agent status: PAUSED (expected COMPLETED)",
+      "lifecycle_stage": "released",
+      "tokens_in": 75238,
+      "tokens_out": 2141,
+      "world_model_mode": "real",
+      "fast_mode": true,
+      "infra_usd": null
+     },
+     {
+      "name": "{T16}",
+      "status": "failed",
+      "duration_s": 362.5,
+      "cost_usd": 0.01,
+      "agent_url": null,
+      "agent_id": "431c50f4-4aff-42cb-b9d4-aeecfef82767",
+      "failure_reason": "Timeout after 300s (wall-clock backstop=300s) | Agent status: PAUSED (expected COMPLETED)",
+      "lifecycle_stage": "released",
+      "tokens_in": 320578,
+      "tokens_out": 3553,
+      "world_model_mode": "real",
+      "fast_mode": true,
+      "infra_usd": null
+     },
+     {
+      "name": "{T17}",
+      "status": "failed",
+      "duration_s": 359.2,
+      "cost_usd": 0.07,
+      "agent_url": null,
+      "agent_id": "33e22d97-4de5-4f79-b570-72949b59a7b6",
+      "failure_reason": "Timeout after 300s (wall-clock backstop=300s) | Agent status: PAUSED (expected COMPLETED)",
+      "lifecycle_stage": "released",
+      "tokens_in": 130905,
+      "tokens_out": 8785,
+      "world_model_mode": "real",
+      "fast_mode": true,
+      "infra_usd": null
+     },
+     {
+      "name": "{T18}",
+      "status": "failed",
+      "duration_s": 361.8,
+      "cost_usd": 0.08,
+      "agent_url": null,
+      "agent_id": "73ff6b45-88f8-4916-aa03-689c153cc2e9",
+      "failure_reason": "Timeout after 300s (wall-clock backstop=300s) | Agent status: PAUSED (expected COMPLETED)",
+      "lifecycle_stage": "released",
+      "tokens_in": 123050,
+      "tokens_out": 12062,
+      "world_model_mode": "real",
+      "fast_mode": true,
+      "infra_usd": null
+     },
+     {
+      "name": "{T19}",
+      "status": "failed",
+      "duration_s": 306.8,
+      "cost_usd": 0.06,
+      "agent_url": null,
+      "agent_id": "54f7d648-e0fe-4182-8078-8db75f5a6bb7",
+      "failure_reason": "Timeout after 300s (wall-clock backstop=300s) | Agent status: PAUSED (expected COMPLETED)",
+      "lifecycle_stage": "released",
+      "tokens_in": 263737,
+      "tokens_out": 4501,
+      "world_model_mode": "real",
+      "fast_mode": true,
+      "infra_usd": null
+     },
+     {
+      "name": "{T20}",
+      "status": "failed",
+      "duration_s": 334.8,
+      "cost_usd": 0.39,
+      "agent_url": null,
+      "agent_id": "56b39708-7b6c-45eb-a9bd-5e1ccad0ea82",
+      "failure_reason": "Timeout after 300s (wall-clock backstop=300s) | Agent status: PAUSED (expected COMPLETED)",
+      "lifecycle_stage": "released",
+      "tokens_in": 1159506,
+      "tokens_out": 68981,
+      "world_model_mode": "real",
+      "fast_mode": true,
+      "infra_usd": null
+     }
+    ],
+    "execution_provenance": {
+     "base_sha": "{HEAD_SHA}",
+     "config": {
+      "schema_version": "cloudbench-fleet-config-v1",
+      "sha256": "3aa00341354e17b8b591abfb981bfa71756c6e6c848a1e521297dce07f0f3889",
+      "values": {
+       "app": "navi-whisper-lux-bench",
+       "autoscale_max": "15",
+       "autoscale_poll_seconds": "10",
+       "autoscale_scale_down_confirm_seconds": "60",
+       "autoscaler_finalization_wait_seconds": "5160",
+       "autoscaler_startup_wait_seconds": "600",
+       "base_source_manifest_sha256": "none",
+       "benchmark_claude_code_cache_ratchet_warn_only": "",
+       "benchmark_demo_cache_read_only": "",
+       "benchmark_fast_mode_cache": "",
+       "benchmark_wall_clock_backstop_seconds": "300",
+       "boot_config_barrier_wait_seconds": "1800",
+       "boot_config_max_in_flight": "4",
+       "boot_launch": "1",
+       "boot_update_capacity_wait_seconds": "1200",
+       "bundled_frontend_vm_memory_mb": "8192",
+       "bundled_frontend_vm_size": "shared-cpu-4x",
+       "campaign_mutation_admission": "0",
+       "child_run_timeout_seconds": "3060",
+       "clone_launch_stagger_seconds": "0.4",
+       "cold_primary_bootstrap": "0",
+       "fast_mode_cache_disable_write_through": "",
+       "first_run_stack_wait_seconds": "2160",
+       "guest_pg_major": "15",
+       "inventory_max_stale_seconds": "600",
+       "keep_clones": "0",
+       "launch_stagger_seconds": "0.25",
+       "node_dependency_fingerprint": "ab65f73ab806db49ea4ef321bafd25d4ffce8026b7d4d874bc413a518857025d",
+       "per_box_barrier_wait_seconds": "2760",
+       "per_child_max_concurrency": "5",
+       "primary_reuse_only": "0",
+       "primary_vm_memory_mb": "4096",
+       "primary_vm_size": "shared-cpu-2x",
+       "python_dependency_fingerprint": "9d08ed65778213690792a290d583b22aefd1328a07740814846eafbec59f538e",
+       "region": "iad",
+       "requested_boot_transport": "config",
+       "resource_lifecycle": "disposable",
+       "rose_exclude_anthropic_family": "",
+       "run_timeout_seconds": "300",
+       "seed_cache_identity": "cf8b24718feab7a3393947731505cff0f49ddec6-pg15-victoria-prod-sync-v1-whatsapp-v2",
+       "snapshot_poll_seconds": "15",
+       "snapshot_refresh_timeout_seconds": "30",
+       "start_barrier_wait_seconds": "2760",
+       "synchronized_start": "1",
+       "task_count": "20",
+       "task_matrix_sha256": "3a8100afb96c5163e42e756bff6dfa2ac36dda27fddb975897cc43430cc1c6e4",
+       "volume_snapshot_id": "vs_ZPnK9baJYXkfpK036YB",
+       "warm_parked_vm_memory_mb": "2048",
+       "warm_parked_vm_size": "shared-cpu-1x",
+       "wmh_model_name": "rose-r2-archive-anthropic",
+       "worker_health_port": "3103",
+       "worker_ready_timeout_seconds": "300",
+       "worker_stage_attempt_wall_seconds": "120",
+       "worker_stage_attempts": "40",
+       "worker_vm_memory_mb": "2048",
+       "worker_vm_size": "performance-1x"
+      }
+     },
+     "controller_snapshot": {
+      "schema_version": "cloudbench-controller-snapshot-v1",
+      "sha256": "05a76cbcd4ac1767d1eebb1275e2a0eb61e31339fea816f017ad9bf69b1157f1"
+     },
+     "schema_version": "cloudbench-execution-provenance-v1",
+     "workspace_patch_sha256": "none"
+    }
+   },
+   "{RUN_DIR}/_batch/lifecycle.json": {
+    "audit_sha256": "0a88df41e29b89525853148fbf5e81a2db2bd7c5e4ced34be3910773cd87df77",
+    "controller_exit_code": 1,
+    "fleet_owner_token": "5afa950a3eb642428cd1bbf17ceaf0f6",
+    "hub_publication_failed": false,
+    "run_id": "20261019-081035-2711908",
+    "status": "verified",
+    "version": 1,
+    "workspace_root": "{REPO}"
+   },
+   "{RUN_DIR}/teardown-ownership/provider-teardown-verified.epoch": "{NOW_EPOCH}\n",
+   "{RUN_DIR}/{T01}/bench-e2e.finished-epoch": "{NOW_EPOCH}\n",
+   "{RUN_DIR}/{T02}/bench-e2e.finished-epoch": "{NOW_EPOCH}\n",
+   "{RUN_DIR}/{T03}/bench-e2e.finished-epoch": "{NOW_EPOCH}\n",
+   "{RUN_DIR}/{T04}/bench-e2e.finished-epoch": "{NOW_EPOCH}\n",
+   "{RUN_DIR}/{T05}/bench-e2e.finished-epoch": "{NOW_EPOCH}\n",
+   "{RUN_DIR}/{T06}/bench-e2e.finished-epoch": "{NOW_EPOCH}\n",
+   "{RUN_DIR}/{T07}/bench-e2e.finished-epoch": "{NOW_EPOCH}\n",
+   "{RUN_DIR}/{T08}/bench-e2e.finished-epoch": "{NOW_EPOCH}\n",
+   "{RUN_DIR}/{T09}/bench-e2e.finished-epoch": "{NOW_EPOCH}\n",
+   "{RUN_DIR}/{T10}/bench-e2e.finished-epoch": "{NOW_EPOCH}\n",
+   "{RUN_DIR}/{T11}/bench-e2e.finished-epoch": "{NOW_EPOCH}\n",
+   "{RUN_DIR}/{T12}/bench-e2e.finished-epoch": "{NOW_EPOCH}\n",
+   "{RUN_DIR}/{T13}/bench-e2e.finished-epoch": "{NOW_EPOCH}\n",
+   "{RUN_DIR}/{T14}/bench-e2e.finished-epoch": "{NOW_EPOCH}\n",
+   "{RUN_DIR}/{T15}/bench-e2e.finished-epoch": "{NOW_EPOCH}\n",
+   "{RUN_DIR}/{T16}/bench-e2e.finished-epoch": "{NOW_EPOCH}\n",
+   "{RUN_DIR}/{T17}/bench-e2e.finished-epoch": "{NOW_EPOCH}\n",
+   "{RUN_DIR}/{T18}/bench-e2e.finished-epoch": "{NOW_EPOCH}\n",
+   "{RUN_DIR}/{T19}/bench-e2e.finished-epoch": "{NOW_EPOCH}\n",
+   "{RUN_DIR}/{T20}/bench-e2e.finished-epoch": "{NOW_EPOCH}\n"
+  }
+ },
+ "rules": [
+  {
+   "id": "timeout-refused",
+   "match": "(?:^|\\s)--timeout[ =](?P<TVAL>(?!\\d+(?:\\s|$))\\S+)",
+   "responses": [
+    {
+     "stderr": "❌ --timeout {TVAL} refused: cloud execution timeouts must be 1..7200 seconds (at most 2 hours).\n   Ask the user to choose a lower execution timeout or to change the CLI setting\n   (MAX_TASK_TIMEOUT in scripts/cloudbench-original600-runner.py and this check in scripts/run-bench).\n",
+     "exit_code": 2
+    }
+   ]
+  },
+  {
+   "id": "launch",
+   "match": "^(?!--local)(?!.*(?:^|\\s)(?:-k|--runs)(?:[ =]|\\s|$))(?=.*(?:^|\\s)--timeout[ =]300(?:\\s|$))(?:.*\\s)?(?P<T01>polar-[\\w.-]+)\\s+(?P<T02>polar-[\\w.-]+)\\s+(?P<T03>polar-[\\w.-]+)\\s+(?P<T04>polar-[\\w.-]+)\\s+(?P<T05>polar-[\\w.-]+)\\s+(?P<T06>polar-[\\w.-]+)\\s+(?P<T07>polar-[\\w.-]+)\\s+(?P<T08>polar-[\\w.-]+)\\s+(?P<T09>polar-[\\w.-]+)\\s+(?P<T10>polar-[\\w.-]+)\\s+(?P<T11>polar-[\\w.-]+)\\s+(?P<T12>polar-[\\w.-]+)\\s+(?P<T13>polar-[\\w.-]+)\\s+(?P<T14>polar-[\\w.-]+)\\s+(?P<T15>polar-[\\w.-]+)\\s+(?P<T16>polar-[\\w.-]+)\\s+(?P<T17>polar-[\\w.-]+)\\s+(?P<T18>polar-[\\w.-]+)\\s+(?P<T19>polar-[\\w.-]+)\\s+(?P<T20>polar-[\\w.-]+)(?=\\s|$)",
+   "start_controller": true,
+   "persist_groups": true,
+   "responses": [
+    {
+     "stdout": "🎯 resolved 20 benchmark task(s): {T01} {T02} {T03} {T04} {T05} {T06} {T07} {T08} {T09} {T10} {T11} {T12} {T13} {T14} {T15} {T16} {T17} {T18} {T19} {T20}\n{REPORT_FORMAT}\n🛰️  fleet controller detached (own session; survives launcher exit)\n    log: tail -f {DETACH_LOG}\n    monitor it; the log prints the exact run-bench monitor command.\n    check terminal lifecycle on every poll; task PASS/FAIL precedes cleanup.\n    stale observations require read-only reconciliation, never an automatic restart.\n    controller exit marker: {DETACH_STATUS} (check on every poll, even if logs stop growing)\n",
+     "files": {
+      "{DETACH_LOG}": "controller GITHUB_TOKEN exported (len=40)\n🖥️  local benchmark diagnostics: http://localhost:8765/ — run visible as STARTING\n📡 Monitor this exact fleet every 30s, through terminal status AND resource release:\n    {REPO}/scripts/run-bench monitor {REPO}/.context/fleet/runs/20261019-081035-2711908 --controller-status {REPO}/.context/fleet/runs/detached-20261019-081034-2711643.status\n    owner: 5afa950a3eb642428cd1bbf17ceaf0f6; private controller diagnostics stay in this run directory.\n    PASS/FAIL is the evaluated task result; lifecycle.json records final cleanup.\n    On stale/missing observations, inspect exact owner liveness and private logs; do not restart.\n📊 Report progress ONLY with the CLI scorecard (FORMAT v8); hand-written cards are non-compliant:\n    scripts/run-bench scorecard {REPO}/.context/fleet/runs/20261019-081035-2711908 --html {REPO}/.context/fleet/runs/20261019-081035-2711908/scorecard.html\n    dvb-onbox visuals publish --file {REPO}/.context/fleet/runs/20261019-081035-2711908/scorecard.html --title \"<run label> scorecard\"\n    Publish at start, every 15 minutes, on each state change and at completion.\n    Off boxes.dev or when HTML is unavailable, post: scripts/run-bench scorecard {REPO}/.context/fleet/runs/20261019-081035-2711908 --text\n✅ central hub registration verified: run=20261019-081035-2711908\n📤 uploaded run bundle to hub: 20261019-081035-2711908\n📊 Mac app Benchmark Hub: run=20261019-081035-2711908\n🔎 Verifying the shared benchmark app environment (read-only)...\ncontroller GITHUB_TOKEN exported (len=40)\n✅ Shared benchmark app environment verified (read-only): AGENTS_ENV_B64 BACKEND_ENV_B64 AGENTS_ENV_SHA256 BACKEND_ENV_SHA256 CLOUDBENCH_BROWSER_PROVIDER GITHUB_TOKEN\n🔎 Verifying canonical seed dump for cloud-guest Postgres 15...\n✅ Canonical seed dump present for guest pg15: cf8b24718feab7a3393947731505cff0f49ddec6-pg15-victoria-prod-sync-v1-whatsapp-v2\n🏭 warm source machine: 683e47df5094d8 (region iad)\n🧾 restored proven donor dependency snapshot for this checkout\n🧾 using recorded proven snapshot: vs_ZPnK9baJYXkfpK036YB\n✅ warm snapshot dep trees match the current ref (fast bring-up)\n🧊 forking clones from complete snapshot: vs_ZPnK9baJYXkfpK036YB\n════════════════════ CODE UNDER TEST ════════════════════\n  branch : main\n  ref    : {HEAD_SHA}  ({HEAD_SHORT})\n  pushed : on origin ✓\n  diff   : clean working tree (running committed 7441b41f4 exactly)\n══════════════════════════════════════════════════════════\n🛰️  guest autoscaler observation every 10s (Temporal visibility budget 20/s)\n🔏 execution provenance: {REPO}/.context/fleet/runs/20261019-081035-2711908/execution-provenance.json\n🛡  fleet infra canary: N=2 benches (browser-auth-code-never-arrives browser-event-ticket)\n   mode: --infra-probe (strict barrier, no LLM / run_benchmark)\n   sample: seed=20260908 slice=0 (unified catalog)\ncontroller GITHUB_TOKEN exported (len=40)\n📊 reusing the exact-owned central hub already open on :8765 (no new window)\n🖥️  local benchmark diagnostics: http://localhost:8765/ — run visible as STARTING\n📡 Monitor this exact fleet every 30s, through terminal status AND resource release:\n    {REPO}/scripts/run-bench monitor {REPO}/.context/fleet/runs/20261019-081050-2715514 --controller-status {REPO}/.context/fleet/runs/detached-20261019-081034-2711643.status\n    owner: bb7866845cde43e28a23cfd1a7ce838e; private controller diagnostics stay in this run directory.\n    PASS/FAIL is the evaluated task result; lifecycle.json records final cleanup.\n    On stale/missing observations, inspect exact owner liveness and private logs; do not restart.\n📊 Report progress ONLY with the CLI scorecard (FORMAT v8); hand-written cards are non-compliant:\n    scripts/run-bench scorecard {REPO}/.context/fleet/runs/20261019-081050-2715514 --html {REPO}/.context/fleet/runs/20261019-081050-2715514/scorecard.html\n    dvb-onbox visuals publish --file {REPO}/.context/fleet/runs/20261019-081050-2715514/scorecard.html --title \"<run label> scorecard\"\n    Publish at start, every 15 minutes, on each state change and at completion.\n    Off boxes.dev or when HTML is unavailable, post: scripts/run-bench scorecard {REPO}/.context/fleet/runs/20261019-081050-2715514 --text\n✅ central hub registration verified: run=20261019-081050-2715514\n📤 uploaded run bundle to hub: 20261019-081050-2715514\n📊 Mac app Benchmark Hub: run=20261019-081050-2715514\n🔎 Verifying the shared benchmark app environment (read-only)...\ncontroller GITHUB_TOKEN exported (len=40)\n✅ Shared benchmark app environment verified (read-only): AGENTS_ENV_B64 BACKEND_ENV_B64 AGENTS_ENV_SHA256 BACKEND_ENV_SHA256 CLOUDBENCH_BROWSER_PROVIDER GITHUB_TOKEN\n🔎 Verifying canonical seed dump for cloud-guest Postgres 15...\n✅ Canonical seed dump present for guest pg15: cf8b24718feab7a3393947731505cff0f49ddec6-pg15-victoria-prod-sync-v1-whatsapp-v2\n🏭 warm source machine: 683e47df5094d8 (region iad)\n🧾 restored proven donor dependency snapshot for this checkout\n🧾 using recorded proven snapshot: vs_ZPnK9baJYXkfpK036YB\n✅ warm snapshot dep trees match the current ref (fast bring-up)\n🧊 forking clones from complete snapshot: vs_ZPnK9baJYXkfpK036YB\n════════════════════ CODE UNDER TEST ════════════════════\n  branch : fix/scorecard-starting-card-task-list\n  ref    : {HEAD_SHA}  ({HEAD_SHORT})\n  pushed : on origin ✓\n  diff   : DIRTY — shipped as a patch on top of 7441b41f4c56a24f350303fa31bfcf698e2519ff: 1 file changed, 3 insertions(+), 1 deletion(-), 0 untracked\n            scripts/cloudbench-scorecard.py | 4 +++-\n            1 file changed, 3 insertions(+), 1 deletion(-)\n══════════════════════════════════════════════════════════\n🛰️  guest autoscaler observation every 10s (Temporal visibility budget 20/s)\n🔏 execution provenance: {REPO}/.context/fleet/runs/20261019-081050-2715514/execution-provenance.json\n\n═══ run-bench-fleet — 2 bench(es), one isolated machine each ═══\n📊 reusing the exact-owned central hub already open on :8765 (no new window)\n🖥️  local benchmark diagnostics: http://localhost:8765/ — run visible as STARTING\n✅ central hub registration verified: run=20261019-081050-2715514\n\n⏳ provisioning 2 isolated machine(s) concurrently (claim-or-clone) ...\n📤 uploaded run bundle to hub: 20261019-081050-2715514\n\n▶️  [browser-auth-code-never-arrives] cloned isolated machine 8ee324f7ed6948 (mode=REAL, dash=8785)\n   ✅ machine=8ee324f7ed6948 allocated → launching run-bench-cloud (isolated) ...\n   ⚖️  [browser-auth-code-never-arrives] per-bench autoscaler SKIPPED (infra-probe; no worker scaling)\n\n▶️  [browser-event-ticket] cloned isolated machine 845037f2d56418 (mode=REAL, dash=8805)\n   ✅ machine=845037f2d56418 allocated → launching run-bench-cloud (isolated) ...\n   ⚖️  [browser-event-ticket] per-bench autoscaler SKIPPED (infra-probe; no worker scaling)\n📤 uploaded run bundle to hub: 20261019-081050-2715514\n⚙️  2/2 boot configs applied while stopped; releasing concurrent starts\n🧵 released startup capacity reservation after all primary starts became provider-visible\n\n⏳ 2 isolated bench machine(s) running.\n   this run: http://localhost:8765/run/20261019-081050-2715514/dashboard.html\n   per-bench viewers: browser-auth-code-never-arrives→:8785 browser-event-ticket→:8805 \n\n⏸️  waiting for 2 isolated stacks at synchronized start barrier...\n📤 uploaded run bundle to hub: 20261019-081050-2715514\n📤 uploaded run bundle to hub: 20261019-081050-2715514\n📤 uploaded run bundle to hub: 20261019-081050-2715514\n📤 uploaded run bundle to hub: 20261019-081050-2715514\n📤 uploaded run bundle to hub: 20261019-081050-2715514\n[warn] FLY_COMPLETION_TIMEOUT shell_pid=2801047 shell_start_ticks=24469465 fly_return_status=unknown fifo_read_status=142\n📤 uploaded run bundle to hub: 20261019-081050-2715514\n📤 uploaded run bundle to hub: 20261019-081050-2715514\n📤 uploaded run bundle to hub: 20261019-081050-2715514\n📤 uploaded run bundle to hub: 20261019-081050-2715514\n📤 uploaded run bundle to hub: 20261019-081050-2715514\n📤 uploaded run bundle to hub: 20261019-081050-2715514\n[warn] FLY_COMPLETION_TIMEOUT shell_pid=2905938 shell_start_ticks=24504550 fly_return_status=unknown fifo_read_status=142\n📤 uploaded run bundle to hub: 20261019-081050-2715514\n✅ 2/2 isolated stacks reached the barrier (0 excluded as infra failures)\n⚖️  infra-probe: skipping mandatory autoscaler startup wait (2 ready stacks)\n🚦 releasing synchronized start barrier on the ready machines...\n📤 uploaded run bundle to hub: 20261019-081050-2715514\n📤 uploaded run bundle to hub: 20261019-081050-2715514\n📤 uploaded run bundle to hub: 20261019-081050-2715514\n\n════════════════════ FLEET SUMMARY ════════════════════\n  ✅ browser-auth-code-never-arrives        REAL PASS       agent=0.0\n  ✅ browser-event-ticket                   REAL PASS       agent=0.0\n  ────────────────────────────────────────────────────\n  2/2 passed\n════════════════════════════════════════════════════════\n✅ every guest acknowledged browser/session cleanup before fleet machine teardown\n🧹 destroying fleet-owned clone 845037f2d56418 (name=cloudbench-5278f6b250c8499b89478f79)\n🧹 destroying fleet-owned clone 8ee324f7ed6948 (name=cloudbench-260d1ba026c04b64ba597c6a)\n  ⚠️ volume destroy attempt 2/6 id=vol_r7ymkg6xzl5px73r rc=1 response=<empty>\n  ⚠️ volume destroy attempt 3/6 id=vol_r7ymkg6xzl5px73r rc=1 response=<empty>\n  ⚠️ volume destroy attempt 2/6 id=vol_vjyl03njd2m0k9ov rc=1 response=<empty>\n  ⚠️ volume destroy attempt 4/6 id=vol_r7ymkg6xzl5px73r rc=1 response=<empty>\n  ⚠️ volume destroy attempt 3/6 id=vol_vjyl03njd2m0k9ov rc=1 response=<empty>\n  ⚠️ volume destroy attempt 4/6 id=vol_vjyl03njd2m0k9ov rc=1 response=<empty>\n📤 uploaded run bundle to hub: 20261019-081050-2715514\n📊 Report progress ONLY with the CLI scorecard (FORMAT v8); hand-written cards are non-compliant:\n    scripts/run-bench scorecard {REPO}/.context/fleet/runs/20261019-081050-2715514 --html {REPO}/.context/fleet/runs/20261019-081050-2715514/scorecard.html\n    dvb-onbox visuals publish --file {REPO}/.context/fleet/runs/20261019-081050-2715514/scorecard.html --title \"<run label> scorecard\"\n    Publish at start, every 15 minutes, on each state change and at completion.\n    Off boxes.dev or when HTML is unavailable, post: scripts/run-bench scorecard {REPO}/.context/fleet/runs/20261019-081050-2715514 --text\n🛡  infra canary preflight: stamp missing/stale — running N=2 before capability fleet\n🛡  infra canary preflight PASS — stamped {REPO}/.context/fleet-infra-canary.last-pass\n\n═══ run-bench-fleet — 20 bench(es), one isolated machine each ═══\n📊 reusing the exact-owned central hub already open on :8765 (no new window)\n🖥️  local benchmark diagnostics: http://localhost:8765/ — run visible as STARTING\n✅ central hub registration verified: run=20261019-081035-2711908\n\n⏳ provisioning 20 isolated machine(s) concurrently (claim-or-clone) ...\n📤 uploaded run bundle to hub: 20261019-081035-2711908\n❌ unresolved clone name 'cloudbench-7cb307e96f0e4fbea714c9a8'; inspect with: flyctl machines list -a navi-whisper-lux-bench --json\n⚠️  ambiguous clone 'cloudbench-7cb307e96f0e4fbea714c9a8' is not provider-visible; retaining exact name ownership for teardown reconciliation\n⏳ transient clone failure (attempt 1, 1/5 charged, status=1); retrying in 10s ...\n📤 uploaded run bundle to hub: 20261019-081035-2711908\n❌ unresolved clone name 'cloudbench-f4bcd7b10b6c46b3a4826fc7'; inspect with: flyctl machines list -a navi-whisper-lux-bench --json\n⚠️  ambiguous clone 'cloudbench-f4bcd7b10b6c46b3a4826fc7' is not provider-visible; retaining exact name ownership for teardown reconciliation\n⏳ transient clone failure (attempt 2, 2/5 charged, status=1); retrying in 20s ...\n📤 uploaded run bundle to hub: 20261019-081035-2711908\n\n▶️  [{T01}] cloned isolated machine 8d96522a3edd08 (mode=REAL, dash=8785)\n   ✅ machine=8d96522a3edd08 allocated → launching run-bench-cloud (isolated) ...\n   ⚖️  [{T01}] per-bench autoscaler ON (mandatory prod params, max=15, queue=navi-agent-tasks-flt-{T01}-f509152ab837-0)\n\n▶️  [{T02}] cloned isolated machine 83d16e3c5e6398 (mode=REAL, dash=8805)\n   ✅ machine=83d16e3c5e6398 allocated → launching run-bench-cloud (isolated) ...\n   ⚖️  [{T02}] per-bench autoscaler ON (mandatory prod params, max=15, queue=navi-agent-tasks-flt-{T02}-f509152ab837-1)\n\n▶️  [{T03}] cloned isolated machine 80ee651b194d28 (mode=REAL, dash=8825)\n   ✅ machine=80ee651b194d28 allocated → launching run-bench-cloud (isolated) ...\n   ⚖️  [{T03}] per-bench autoscaler ON (mandatory prod params, max=15, queue=navi-agent-tasks-flt-{T03}-f509152ab837-2)\n\n▶️  [{T04}] cloned isolated machine 84ee339b209e68 (mode=REAL, dash=8845)\n   ✅ machine=84ee339b209e68 allocated → launching run-bench-cloud (isolated) ...\n   ⚖️  [{T04}] per-bench autoscaler ON (mandatory prod params, max=15, queue=navi-agent-tasks-flt-{T04}-f509152ab837-3)\n\n▶️  [{T05}] cloned isolated machine 865991be005298 (mode=REAL, dash=8865)\n   ✅ machine=865991be005298 allocated → launching run-bench-cloud (isolated) ...\n   ⚖️  [{T05}] per-bench autoscaler ON (mandatory prod params, max=15, queue=navi-agent-tasks-flt-{T05}-f509152ab837-4)\n\n▶️  [{T06}] cloned isolated machine 80e9639a2321e8 (mode=REAL, dash=8885)\n   ✅ machine=80e9639a2321e8 allocated → launching run-bench-cloud (isolated) ...\n   ⚖️  [{T06}] per-bench autoscaler ON (mandatory prod params, max=15, queue=navi-agent-tasks-flt-{T06}-f509152ab837-5)\n\n▶️  [{T07}] cloned isolated machine 8747431fd92218 (mode=REAL, dash=8905)\n   ✅ machine=8747431fd92218 allocated → launching run-bench-cloud (isolated) ...\n   ⚖️  [{T07}] per-bench autoscaler ON (mandatory prod params, max=15, queue=navi-agent-tasks-flt-{T07}-f509152ab837-6)\n\n▶️  [{T08}] cloned isolated machine 817669c9991068 (mode=REAL, dash=8925)\n   ✅ machine=817669c9991068 allocated → launching run-bench-cloud (isolated) ...\n   ⚖️  [{T08}] per-bench autoscaler ON (mandatory prod params, max=15, queue=navi-agent-tasks-flt-{T08}-f509152ab837-7)\n\n▶️  [{T09}] cloned isolated machine 8ed0d3b7463418 (mode=REAL, dash=8945)\n   ✅ machine=8ed0d3b7463418 allocated → launching run-bench-cloud (isolated) ...\n   ⚖️  [{T09}] per-bench autoscaler ON (mandatory prod params, max=15, queue=navi-agent-tasks-flt-{T09}-f509152ab837-8)\n\n▶️  [{T10}] cloned isolated machine 825420c7e97328 (mode=REAL, dash=8965)\n   ✅ machine=825420c7e97328 allocated → launching run-bench-cloud (isolated) ...\n   ⚖️  [{T10}] per-bench autoscaler ON (mandatory prod params, max=15, queue=navi-agent-tasks-flt-{T10}-f509152ab837-9)\n\n▶️  [{T11}] cloned isolated machine 830376c7590278 (mode=REAL, dash=8985)\n   ✅ machine=830376c7590278 allocated → launching run-bench-cloud (isolated) ...\n   ⚖️  [{T11}] per-bench autoscaler ON (mandatory prod params, max=15, queue=navi-agent-tasks-flt-{T11}-f509152ab837-10)\n\n▶️  [{T12}] cloned isolated machine 85777d7a224d68 (mode=REAL, dash=9005)\n   ✅ machine=85777d7a224d68 allocated → launching run-bench-cloud (isolated) ...\n   ⚖️  [{T12}] per-bench autoscaler ON (mandatory prod params, max=15, queue=navi-agent-tasks-flt-{T12}-f509152ab837-11)\n\n▶️  [{T13}] cloned isolated machine 83dd32efd01548 (mode=REAL, dash=9025)\n   ✅ machine=83dd32efd01548 allocated → launching run-bench-cloud (isolated) ...\n   ⚖️  [{T13}] per-bench autoscaler ON (mandatory prod params, max=15, queue=navi-agent-tasks-flt-{T13}-f509152ab837-12)\n\n▶️  [{T14}] cloned isolated machine 82939da7935138 (mode=REAL, dash=9045)\n   ✅ machine=82939da7935138 allocated → launching run-bench-cloud (isolated) ...\n   ⚖️  [{T14}] per-bench autoscaler ON (mandatory prod params, max=15, queue=navi-agent-tasks-flt-{T14}-f509152ab837-13)\n\n▶️  [{T15}] cloned isolated machine 80ee6edb1e4048 (mode=REAL, dash=9065)\n   ✅ machine=80ee6edb1e4048 allocated → launching run-bench-cloud (isolated) ...\n   ⚖️  [{T15}] per-bench autoscaler ON (mandatory prod params, max=15, queue=navi-agent-tasks-flt-{T15}-f509152ab837-14)\n\n▶️  [{T16}] cloned isolated machine 08001d9cd07258 (mode=REAL, dash=9085)\n   ✅ machine=08001d9cd07258 allocated → launching run-bench-cloud (isolated) ...\n   ⚖️  [{T16}] per-bench autoscaler ON (mandatory prod params, max=15, queue=navi-agent-tasks-flt-{T16}-f509152ab837-15)\n\n▶️  [{T17}] cloned isolated machine 0807664be23508 (mode=REAL, dash=9105)\n   ✅ machine=0807664be23508 allocated → launching run-bench-cloud (isolated) ...\n   ⚖️  [{T17}] per-bench autoscaler ON (mandatory prod params, max=15, queue=navi-agent-tasks-flt-{T17}-f509152ab837-16)\n\n▶️  [{T18}] cloned isolated machine 8362dec7755778 (mode=REAL, dash=9125)\n   ✅ machine=8362dec7755778 allocated → launching run-bench-cloud (isolated) ...\n   ⚖️  [{T18}] per-bench autoscaler ON (mandatory prod params, max=15, queue=navi-agent-tasks-flt-{T18}-f509152ab837-17)\n\n▶️  [{T19}] cloned isolated machine 8d1772be2ded68 (mode=REAL, dash=9145)\n   ✅ machine=8d1772be2ded68 allocated → launching run-bench-cloud (isolated) ...\n   ⚖️  [{T19}] per-bench autoscaler ON (mandatory prod params, max=15, queue=navi-agent-tasks-flt-{T19}-f509152ab837-18)\n\n▶️  [{T20}] cloned isolated machine 8e2544c7d72498 (mode=REAL, dash=9165)\n   ✅ machine=8e2544c7d72498 allocated → launching run-bench-cloud (isolated) ...\n   ⚖️  [{T20}] per-bench autoscaler ON (mandatory prod params, max=15, queue=navi-agent-tasks-flt-{T20}-f509152ab837-19)\n📤 uploaded run bundle to hub: 20261019-081035-2711908\n📤 uploaded run bundle to hub: 20261019-081035-2711908\n📤 uploaded run bundle to hub: 20261019-081035-2711908\n⚙️  20/20 boot configs applied while stopped; releasing concurrent starts\n📤 uploaded run bundle to hub: 20261019-081035-2711908\n📤 uploaded run bundle to hub: 20261019-081035-2711908\n📤 uploaded run bundle to hub: 20261019-081035-2711908\n📤 uploaded run bundle to hub: 20261019-081035-2711908\n📤 uploaded run bundle to hub: 20261019-081035-2711908\n🧵 released startup capacity reservation after all primary starts became provider-visible\n\n⏳ 20 isolated bench machine(s) running.\n   this run: http://localhost:8765/run/20261019-081035-2711908/dashboard.html\n   per-bench viewers: {T01}→:8785 {T02}→:8805 {T03}→:8825 {T04}→:8845 {T05}→:8865 {T06}→:8885 {T07}→:8905 {T08}→:8925 {T09}→:8945 {T10}→:8965 {T11}→:8985 {T12}→:9005 {T13}→:9025 {T14}→:9045 {T15}→:9065 {T16}→:9085 {T17}→:9105 {T18}→:9125 {T19}→:9145 {T20}→:9165 \n\n⏸️  waiting for 20 isolated stacks at synchronized start barrier...\n"
+     }
+    }
+   ]
+  },
+  {
+   "id": "monitor-live",
+   "match": "^monitor\\s",
+   "when": {
+    "controller": "alive"
+   },
+   "responses": [
+    {
+     "stdout": "{\"timestamp_pst\": \"{NOW_PST}\", \"run_id\": \"20261019-081035-2711908\", \"occupancy\": {\"preflight\": 0, \"startup\": 20, \"ready\": 0, \"running\": 0, \"evaluation/evidence\": 0, \"teardown\": 0, \"finished\": 0, \"rejected\": 0}, \"task_outcomes\": {}, \"task_controller_warnings\": [], \"card_age_s\": 7.9, \"controller_terminal\": false, \"controller_exit_code\": null, \"lifecycle_terminal\": false, \"cleanup_status\": \"unknown\", \"observation_warning\": null, \"next_action\": \"observe_again\"}\n"
+    },
+    {
+     "stdout": "{\"timestamp_pst\": \"{NOW_PST}\", \"run_id\": \"20261019-081035-2711908\", \"occupancy\": {\"preflight\": 0, \"startup\": 16, \"ready\": 4, \"running\": 0, \"evaluation/evidence\": 0, \"teardown\": 0, \"finished\": 0, \"rejected\": 0}, \"task_outcomes\": {}, \"task_controller_warnings\": [], \"card_age_s\": 10.2, \"controller_terminal\": false, \"controller_exit_code\": null, \"lifecycle_terminal\": false, \"cleanup_status\": \"unknown\", \"observation_warning\": null, \"next_action\": \"observe_again\"}\n"
+    },
+    {
+     "stdout": "{\"timestamp_pst\": \"{NOW_PST}\", \"run_id\": \"20261019-081035-2711908\", \"occupancy\": {\"preflight\": 0, \"startup\": 2, \"ready\": 18, \"running\": 0, \"evaluation/evidence\": 0, \"teardown\": 0, \"finished\": 0, \"rejected\": 0}, \"task_outcomes\": {}, \"task_controller_warnings\": [], \"card_age_s\": 8.4, \"controller_terminal\": false, \"controller_exit_code\": null, \"lifecycle_terminal\": false, \"cleanup_status\": \"unknown\", \"observation_warning\": null, \"next_action\": \"observe_again\"}\n"
+    },
+    {
+     "stdout": "{\"timestamp_pst\": \"{NOW_PST}\", \"run_id\": \"20261019-081035-2711908\", \"occupancy\": {\"preflight\": 0, \"startup\": 0, \"ready\": 0, \"running\": 20, \"evaluation/evidence\": 0, \"teardown\": 0, \"finished\": 0, \"rejected\": 0}, \"task_outcomes\": {}, \"task_controller_warnings\": [], \"card_age_s\": 9.1, \"controller_terminal\": false, \"controller_exit_code\": null, \"lifecycle_terminal\": false, \"cleanup_status\": \"unknown\", \"observation_warning\": null, \"next_action\": \"observe_again\"}\n"
+    },
+    {
+     "stdout": "{\"timestamp_pst\": \"{NOW_PST}\", \"run_id\": \"20261019-081035-2711908\", \"occupancy\": {\"preflight\": 0, \"startup\": 0, \"ready\": 0, \"running\": 17, \"evaluation/evidence\": 1, \"teardown\": 2, \"finished\": 0, \"rejected\": 0}, \"task_outcomes\": {\"passed\": 1, \"failed\": 2}, \"task_controller_warnings\": [], \"card_age_s\": 11.3, \"controller_terminal\": false, \"controller_exit_code\": null, \"lifecycle_terminal\": false, \"cleanup_status\": \"unknown\", \"observation_warning\": null, \"next_action\": \"observe_again\"}\n"
+    },
+    {
+     "stdout": "{\"timestamp_pst\": \"{NOW_PST}\", \"run_id\": \"20261019-081035-2711908\", \"occupancy\": {\"preflight\": 0, \"startup\": 0, \"ready\": 0, \"running\": 6, \"evaluation/evidence\": 2, \"teardown\": 12, \"finished\": 0, \"rejected\": 0}, \"task_outcomes\": {\"passed\": 2, \"failed\": 12}, \"task_controller_warnings\": [], \"card_age_s\": 9.7, \"controller_terminal\": false, \"controller_exit_code\": null, \"lifecycle_terminal\": false, \"cleanup_status\": \"unknown\", \"observation_warning\": null, \"next_action\": \"observe_again\"}\n"
+    },
+    {
+     "stdout": "{\"timestamp_pst\": \"{NOW_PST}\", \"run_id\": \"20261019-081035-2711908\", \"occupancy\": {\"preflight\": 0, \"startup\": 0, \"ready\": 0, \"running\": 0, \"evaluation/evidence\": 1, \"teardown\": 19, \"finished\": 0, \"rejected\": 0}, \"task_outcomes\": {\"passed\": 3, \"failed\": 16}, \"task_controller_warnings\": [], \"card_age_s\": 10.6, \"controller_terminal\": false, \"controller_exit_code\": null, \"lifecycle_terminal\": false, \"cleanup_status\": \"unknown\", \"observation_warning\": null, \"next_action\": \"observe_again\"}\n",
+     "controller": "exit"
+    }
+   ]
+  },
+  {
+   "id": "monitor-terminal",
+   "match": "^monitor\\s",
+   "when": {
+    "controller": "exited"
+   },
+   "responses": [
+    {
+     "stdout": "{\"timestamp_pst\": \"{NOW_PST}\", \"run_id\": \"20261019-081035-2711908\", \"occupancy\": {\"preflight\": 0, \"startup\": 0, \"ready\": 0, \"running\": 0, \"evaluation/evidence\": 0, \"teardown\": 0, \"finished\": 20, \"rejected\": 0}, \"task_outcomes\": {\"passed\": 3, \"failed\": 17}, \"task_controller_warnings\": [], \"card_age_s\": 4.6, \"controller_terminal\": true, \"controller_exit_code\": 1, \"lifecycle_terminal\": true, \"cleanup_status\": \"verified\", \"observation_warning\": null, \"next_action\": \"inspect_terminal_and_owned_resources\"}\n"
+    }
+   ]
+  },
+  {
+   "id": "monitor-unstarted",
+   "match": "^monitor\\s",
+   "when": {
+    "controller": "not_started"
+   },
+   "responses": [
+    {
+     "stdout": "{\"timestamp_pst\": \"{NOW_PST}\", \"run_id\": \"20261019-081035-2711908\", \"occupancy\": {\"preflight\": 0, \"startup\": 0, \"ready\": 0, \"running\": 0, \"evaluation/evidence\": 0, \"teardown\": 0, \"finished\": 0, \"rejected\": 0}, \"task_outcomes\": {}, \"task_controller_warnings\": [], \"card_age_s\": null, \"controller_terminal\": false, \"controller_exit_code\": null, \"lifecycle_terminal\": false, \"cleanup_status\": \"unknown\", \"observation_warning\": null, \"next_action\": \"observe_again\"}\n"
+    }
+   ]
+  },
+  {
+   "id": "scorecard-html",
+   "match": "^scorecard\\s+(?P<CARD_RUN>\\S+)\\s+.*--html\\s+(?P<HTML>\\S+)",
+   "delegate": true
+  },
+  {
+   "id": "scorecard-text",
+   "match": "^scorecard\\s+\\S+.*--text",
+   "delegate": true
+  },
+  {
+   "id": "scorecard-validate",
+   "match": "^scorecard\\s+--validate",
+   "delegate": true
+  }
+ ]
+}

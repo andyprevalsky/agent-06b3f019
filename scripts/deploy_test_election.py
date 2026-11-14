@@ -285,6 +285,8 @@ def prepare(state, old, new, proof):
 def apply(state, election):
     if election is None:
         return
+    need(election.get('gate') == GATE, 'only the validated elected gate can be retired')
+    election = copy.deepcopy(election)
     proof = election['proof']
     pending_ids = {x['id'] for x in proof.get('rca', [])} if proof else set()
     for failure in state['failures']:
@@ -296,6 +298,9 @@ def apply(state, election):
         state.pop('pending')
     state['repair_gates'] = [x for x in state['repair_gates'] if x != GATE]
     state['triage_repair_gates'] = [x for x in state.get('triage_repair_gates', []) if x != GATE]
+    for key in ('initial_pending', 'final_pending'):
+        if GATE in state.get(key, {}):
+            election.setdefault('retired_deferrals', {})[key] = copy.deepcopy(state[key].pop(GATE))
     state.setdefault('elected_omissions', []).append(election)
 
 

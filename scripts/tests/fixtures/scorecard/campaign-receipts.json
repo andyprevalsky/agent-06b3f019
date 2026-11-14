@@ -1,0 +1,133 @@
+{
+  "provenance": {
+    "campaign": "campaign-20261027-060019-631588",
+    "source": "35ae7f4a7e15dda8a41d093f3d778a5722c0e5c1",
+    "description": "Two original jobs and reporting/release receipt fields, copied without changing verdicts or clocks; paths relocated only by the test."
+  },
+  "summary": {
+    "campaign_id": "campaign-20261027-060019-631588",
+    "started_at": "2026-10-27T06:00:19.518273+00:00",
+    "finished_at": "2026-10-27T18:33:50.864443+00:00",
+    "e2e_started_at_epoch": 1793080819.4384704,
+    "status": "failed",
+    "retry_infra": 0
+  },
+  "jobs": [
+    {
+      "job": {
+        "index": 1,
+        "job_id": "r001-j0001",
+        "task": "polar-bu-095",
+        "run": 1,
+        "status": "failed",
+        "controller_exit_code": 1,
+        "started_at": "2026-10-27T06:00:38.386319+00:00",
+        "finished_at": "2026-10-27T06:23:49.288480+00:00",
+        "wall_clock_seconds": 1390.902,
+        "controller_lock": "cloudbench-controller-campaign-d964f0efd068-1.lock",
+        "log": "/home/boxes/rose/.context/benchmarks/campaigns/campaign-20261027-060019-631588/r001-j0001.log",
+        "attempt": 1,
+        "attempts": [],
+        "controller_pid": 635571,
+        "task_status": "FAILED",
+        "infra_failure": false,
+        "terminal_task": true
+      },
+      "monitor": "/home/boxes/rose/scripts/run-bench monitor /home/boxes/rose/.context/fleet/runs/20261027-060041-635571",
+      "card": {
+        "run_id": "20261027-060041-635571",
+        "code": "descend/polar-k3-20261027@35ae7f4a7 (clean)",
+        "per_task": [
+          {
+            "name": "polar-bu-095",
+            "status": "failed",
+            "duration_s": 155.0,
+            "cost_usd": 0.06,
+            "agent_url": null,
+            "agent_id": "f37bb05b-de05-4131-8483-5fdc7082b374",
+            "failure_reason": "Expected tool 'spawn_browser_agent' not found in messages | No browser agent trajectory was recorded; expected at least 5 steps per browser agent",
+            "lifecycle_stage": "released",
+            "tokens_in": 285061,
+            "tokens_out": 15512,
+            "world_model_mode": "real",
+            "fast_mode": true,
+            "infra_usd": null
+          }
+        ],
+        "execution_provenance": {
+          "base_sha": "35ae7f4a7e15dda8a41d093f3d778a5722c0e5c1"
+        }
+      },
+      "lifecycle": {
+        "audit_sha256": "4ad26b149458bab51c41c839ee967f40a579086dfc595bb3ca991fda9771f57a",
+        "controller_exit_code": 1,
+        "fleet_owner_token": "ecf3bfb9d651445489470dc2848230e6",
+        "hub_publication_failed": false,
+        "run_id": "20261027-060041-635571",
+        "status": "verified",
+        "version": 1,
+        "workspace_root": "/home/boxes/rose"
+      },
+      "meta": "version=1\nfleet_owner_token=ecf3bfb9d651445489470dc2848230e6\nrun_id=20261027-060041-635571\napp=navi-whisper-lux-bench\nworkspace_root=/home/boxes/rose\nstatus=provider-teardown-verified\nhub_disposition=retained-exact-owner-transfer-required\nhub_owner_file=/home/boxes/rose/.context/fleet/runs/_hub/agent-link-server.8765.a7acb8824c6eabd4d6ff0f6c7bebdf91.owner\nhub_owner_token=a7acb8824c6eabd4d6ff0f6c7bebdf91\nhub_pid=640582\nhub_pid_start=proc-start:6af9c450-c2c8-4647-a911-8ab19a296bbf:6748330\nhub_argv_sha256=46f64439b88bfe7bd91c6159a27b6f25faf9b83aea17b177db842688e3ab03bc\n",
+      "released_epoch": "1793082218\n"
+    },
+    {
+      "job": {
+        "index": 4,
+        "job_id": "r001-j0004",
+        "task": "polar-bu-074",
+        "run": 1,
+        "status": "passed",
+        "controller_exit_code": 0,
+        "started_at": "2026-10-27T06:00:38.388829+00:00",
+        "finished_at": "2026-10-27T06:29:45.270629+00:00",
+        "wall_clock_seconds": 1746.882,
+        "controller_lock": "cloudbench-controller-campaign-d964f0efd068-4.lock",
+        "log": "/home/boxes/rose/.context/benchmarks/campaigns/campaign-20261027-060019-631588/r001-j0004.log",
+        "attempt": 1,
+        "attempts": [],
+        "controller_pid": 635575,
+        "task_status": "PASSED",
+        "infra_failure": false,
+        "terminal_task": true
+      },
+      "monitor": "/home/boxes/rose/scripts/run-bench monitor /home/boxes/rose/.context/fleet/runs/20261027-060041-635575",
+      "card": {
+        "run_id": "20261027-060041-635575",
+        "code": "descend/polar-k3-20261027@35ae7f4a7 (clean)",
+        "per_task": [
+          {
+            "name": "polar-bu-074",
+            "status": "passed",
+            "duration_s": 335.1,
+            "cost_usd": 0.05,
+            "agent_url": null,
+            "agent_id": "1d252f2f-855b-477f-90c2-9603bcd7765f",
+            "failure_reason": null,
+            "lifecycle_stage": "released",
+            "tokens_in": 1801887,
+            "tokens_out": 23012,
+            "world_model_mode": "real",
+            "fast_mode": true,
+            "infra_usd": null
+          }
+        ],
+        "execution_provenance": {
+          "base_sha": "35ae7f4a7e15dda8a41d093f3d778a5722c0e5c1"
+        }
+      },
+      "lifecycle": {
+        "audit_sha256": "ba095f5c3664fe2683b395885284123a2b02f8131763a182b5484f9de8388708",
+        "controller_exit_code": 0,
+        "fleet_owner_token": "11aa295717184508a8b0928643ceed03",
+        "hub_publication_failed": false,
+        "run_id": "20261027-060041-635575",
+        "status": "verified",
+        "version": 1,
+        "workspace_root": "/home/boxes/rose"
+      },
+      "meta": "version=1\nfleet_owner_token=11aa295717184508a8b0928643ceed03\nrun_id=20261027-060041-635575\napp=navi-whisper-lux-bench\nworkspace_root=/home/boxes/rose\nstatus=provider-teardown-verified\nhub_disposition=retained-exact-owner-transfer-required\nhub_owner_file=/home/boxes/rose/.context/fleet/runs/_hub/agent-link-server.8765.a7acb8824c6eabd4d6ff0f6c7bebdf91.owner\nhub_owner_token=a7acb8824c6eabd4d6ff0f6c7bebdf91\nhub_pid=640582\nhub_pid_start=proc-start:6af9c450-c2c8-4647-a911-8ab19a296bbf:6748330\nhub_argv_sha256=46f64439b88bfe7bd91c6159a27b6f25faf9b83aea17b177db842688e3ab03bc\n",
+      "released_epoch": "1793082575\n"
+    }
+  ]
+}

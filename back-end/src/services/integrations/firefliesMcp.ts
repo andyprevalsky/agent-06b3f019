@@ -299,16 +299,16 @@ export async function listMeetingsBetween(
   const notes = new Map<string, MeetingNotes>();
   const meetings = new Map<string, MeetingRecord>();
   for (let page = 0; page < MAX_PAGES; page++) {
-    const result = unwrap(
-      await session.call('fireflies_get_transcripts', {
-        fromDate: new Date(startMs).toISOString().slice(0, 10),
-        toDate: new Date(endMs).toISOString().slice(0, 10),
-        limit: PAGE_SIZE,
-        skip: page * PAGE_SIZE,
-        format: 'json',
-      }),
-      'transcripts'
-    );
+    const raw = await session.call('fireflies_get_transcripts', {
+      fromDate: new Date(startMs).toISOString().slice(0, 10),
+      toDate: new Date(endMs).toISOString().slice(0, 10),
+      limit: PAGE_SIZE,
+      skip: page * PAGE_SIZE,
+      format: 'json',
+    });
+    // The live MCP replies {data: [...], warning?}; older shapes nest {transcripts: [...]}.
+    const envelope = record(raw).data;
+    const result = Array.isArray(envelope) ? envelope : unwrap(raw, 'transcripts');
     if (!Array.isArray(result))
       throw new FirefliesMcpError(
         'Fireflies listing is not a JSON transcript array; refusing reconciliation'
@@ -332,7 +332,10 @@ export async function listMeetingsBetween(
         title: m.title,
         meetingAt: new Date(ms).toISOString(),
         url: typeof m.transcript_url === 'string' ? m.transcript_url : null,
-        details: render({ participants: m.participants ?? [], organizer: m.organizer_email ?? '' }),
+        details: render({
+          participants: m.participants ?? [],
+          organizer: m.organizer_email ?? m.organizerEmail ?? '',
+        }),
       });
     }
     if (result.length < PAGE_SIZE) {

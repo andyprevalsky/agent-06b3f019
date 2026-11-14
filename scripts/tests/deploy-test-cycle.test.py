@@ -15,6 +15,9 @@ import unittest
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / 'scripts' / 'lib'))
+from condition_wait import wait_until
+from test_quarantine import quarantine
 # Source of the original round-37 inventory-init failure whose exact producer bytes the native validator pins.
 INVENTORY_INIT_PRODUCER_SOURCE = 'ce016428eeb484b19b503a6f65884eb92f1e3fde'
 # Native campaign fixture controller PIDs: above any pid_max, so no real process can collide.
@@ -72,6 +75,13 @@ def own_process_entries():
     return iter(owned)
 
 
+def only_processes(*pids):
+    """Scan exactly these processes (this test and the children it created), not leftovers from earlier
+    tests: a slow-exiting non-dumpable descendant of a previous case must not refuse this one."""
+    return patch.object(deploy_test_process, 'process_entries',
+                        lambda: iter([Path('/proc', str(pid)) for pid in (os.getpid(), *pids)]))
+
+
 def setUpModule():
     # Disposable fixtures own their custody; an enclosing deploy request belongs
     # to the runner. Tests for request ownership install their own explicit path.
@@ -98,6 +108,18 @@ class FixtureEnvironment(unittest.TestCase):
                 env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
             self.assertEqual(result.returncode, 0, result.stdout)
             self.assertIn('Ran 3 tests', result.stdout)
+
+    def test_module_process_scope_is_active(self):
+        self.assertIs(deploy_test_process.process_entries, own_process_entries)
+
+    def test_earlier_fixture_cleanup_keeps_module_process_scope(self):
+        # Module order runs BackendPrismaPreflightCleanup first; its cleanup once called patch.stopall(),
+        # so later recover-round fixtures scanned the whole host and refused a sibling suite's process.
+        result = subprocess.run([sys.executable, '-B', str(Path(__file__).resolve()), 'BackendPrismaPreflightCleanup',
+            'FixtureEnvironment.test_module_process_scope_is_active'],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn('Ran 4 tests', result.stdout)
 
     def test_explicit_request_owner_still_requires_matching_custody(self):
         import deploy_test_historical_custody as h
@@ -138,14 +160,281 @@ class EnvironmentIdentity(unittest.TestCase):
 
 
 class Cycle(unittest.TestCase):
-    def custody_fixture(self, top_level=None, gate_name="api"):
+    def recovered_fixture(self):
+        import gzip
+        import hashlib
+        import deploy_test_historical_custody as h
+        task = copy.deepcopy(next(t for t in json.loads((ROOT / 'agents/benchmarks/tasks.json').read_text())
+                                  if t['name'] == 'agent-payment-abandonment'))
+        task['expected_payment_lifecycle'].pop('integrity')
+        catalog = self.root / 'agents/benchmarks/tasks.json'
+        c.write(catalog, [task])
+        runner = self.root / 'agents/benchmarks/run_benchmark.py'
+        runner.write_bytes((ROOT / 'agents/benchmarks/run_benchmark.py').read_bytes())
+        subprocess.run(['git', '-C', str(self.root), 'add', '.'], check=True)
+        subprocess.run(['git', '-C', str(self.root), '-c', 'user.name=test', '-c',
+                        'user.email=test@example.com', 'commit', '-qm', 'original task'], check=True)
+        old_head = c.source(self.root)['head']
+        snapshot = copy.deepcopy(task['expected_payment_lifecycle'])
+        snapshot.update(agentId='root-owned', stripeRefund=None, integrity=dict(
+            agentCardProviderCardCount=3, agentCardProviderTransferCount=3,
+            agentCardProviderUnlinkedTransferCount=0, cardCount=1, purchaseCount=1,
+            stripePaymentIntentCount=1, stripeProviderPaymentIntentCount=1, walletFundingCount=1))
+        snapshot['agentCard'].update(id='card-owned', status='CLOSED', balanceCents=0)
+        snapshot['orgTransfer'].update(id='transfer-owned', cardId='card-owned', status='consumed',
+                                       transferredCents=4396, releasedCents=0, livemode=False)
+        snapshot['purchase'].update(id='purchase-owned', cardId='card-owned', status='HELD',
+                                    stripePaymentIntentId='pi-owned')
+        snapshot['walletFunding'].update(providerTransferId='transfer-owned', status='RECLAIMING')
+        snapshot['stripeHold'].update(id='pi-owned', livemode=False)
+        final = dict(root_deleted=True, tree_agent_ids=['root-owned'], unsealed_tree_agent_ids=[], browser_sessions=[],
+            purchase_cleanup=[dict(agent_id='root-owned', purchase_id='purchase-owned', card_id='card-owned',
+                provider_transfer_id='transfer-owned', stripe_payment_intent_id='pi-owned', total_cents=4396,
+                status='HELD', funding_status='RECLAIMING')])
+        row = dict(name=task['name'], agent_id='root-owned', passed=False, status='SKIPPED', benchmark_status='SKIPPED',
+            failure_reason=self.STALL_REASON, duration_seconds=590.9, cleanup_failure=None, context_violations=[],
+            execution_provenance={'base_sha': old_head}, logs=dict(agentcard_release_stall_lifecycle=snapshot,
+                cloud_cleanup_evidence=dict(errors=[], root_agent_id='root-owned', final=final,
+                    provider_receipts=[], agentcard_release_stall_lifecycles={'root-owned': copy.deepcopy(snapshot)})))
+        document = dict(run_id='original-run', timestamp='2026-11-09T16:46:15.442380+00:00',
+                        execution_provenance={'base_sha': old_head}, tasks=[row])
+        native = self.root / '.context/recovered/run.json.gz'
+        authority = dict(manifest='docs/handoffs/pr-1699-closeout/closeout-manifest.json',
+                         member='agentcard-release-stall/run.json.gz', source=old_head, task=task['name'], gate='smoke')
+        mocked = patch.object(h, 'RECOVERED_AUTHORITY', authority, create=True)
+        mocked.start(); self.addCleanup(mocked.stop)
+        def persist(doc):
+            raw = json.dumps(doc).encode(); native.parent.mkdir(parents=True, exist_ok=True)
+            native.write_bytes(gzip.compress(raw, mtime=0))
+            authority.update(gzip_sha256=hashlib.sha256(native.read_bytes()).hexdigest(),
+                             raw_sha256=hashlib.sha256(raw).hexdigest())
+            manifest = self.root / authority['manifest']
+            c.write(manifest, {'durable_evidence': {'files': {authority['member']: authority['gzip_sha256']}}})
+            authority['manifest_sha256'] = c.sha_file(manifest)
+        persist(document)
+        current = copy.deepcopy(task)
+        current['expected_payment_lifecycle']['integrity'] = dict(agentCardProviderCardCount=1, agentCardProviderTransferCount=1, agentCardProviderUnlinkedTransferCount=0)
+        c.write(catalog, [current])
+        self.plan['gates'][1].update(name='smoke', checks=[task['name'], 'peer'], case_protocol=True)
+        self.plan['source'] = c.source(self.root)
+        self.state = c.initialize(self.plan, self.root)
+        self.state.update(phase='needs-focused-plan', failures=[dict(id='current-' + str(i),
+            gate='smoke', check='smoke/' + (task['name'] if i == 0 else 'peer-' + str(i)),
+            native_result='FAIL', complete=False, source={'head': 'old-current-source'},
+            worker_evidence={'native_task': {'status': 'CANCELLED', 'benchmark_status': 'UNVERIFIED', 'passed': False}},
+            disposition='blocking') for i in range(17)])
+        return h, native, document, persist, old_head
+
+    def test_recovered_native_warning_preserves17_and_excludes_only_future_mint(self):
+        import contextlib
+        import io
+        import time
+        h, native, document, _, old_head = self.recovered_fixture()
+        before = copy.deepcopy(self.state)
+        c.write(self.directory / 'cycle.json', self.state)
+        plan = self.root / '.context/plan.json'; c.write(plan, self.plan)
+        flags = ['--plan', str(plan), '--state-dir', str(self.directory), '--root', str(self.root), '--input', str(native)]
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            try:
+                result = c.main(['prepare-recovered-stall', *flags])
+            except SystemExit as error:
+                result = error.code
+        self.assertEqual(0, result, output.getvalue())
+        proof = json.loads(output.getvalue()); proof_path = self.root / '.context/proof.json'; c.write(proof_path, proof)
+        started = time.time()
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(0, c.main(['record-recovered-stall', *flags, '--proof', str(proof_path)]))
+        finished = time.time()
+        self.state = c.read(self.directory / 'cycle.json')
+        self.assertEqual(before, {k: v for k, v in self.state.items() if k != h.RECOVERED_KEY})
+        row, = self.state[h.RECOVERED_KEY]
+        self.assertEqual(17, len(self.state['failures'])); self.assertFalse(self.state['ready'])
+        self.assertEqual(old_head, row['origin']['authority']['source'])
+        self.assertEqual('2026-11-09T16:46:15.442380+00:00', row['origin']['native_timestamp'])
+        self.assertLessEqual(started, row['recorded_at']); self.assertLessEqual(row['recorded_at'], finished)
+        self.assertEqual(3, row['origin']['original_integrity']['agentCardProviderCardCount'])
+        self.assertTrue(all(v is False for v in row['credit'].values()))
+        self.assertEqual(row['current_execution'], row['current_financial_state']); self.assertEqual('UNVERIFIED', row['current_execution'])
+        with self.assertRaisesRegex(ValueError, 'catalog task changed'):
+            h.task_contract(self.root, old_head, 'agent-payment-abandonment')
+        gate = self.plan['gates'][1]
+        def worker(_argv, **kw):
+            request = c.read(Path(kw['env']['DEPLOY_GATE_REQUEST']))
+            self.assertEqual(['peer'], request['checks'])
+            self.assertEqual(['agent-payment-abandonment'], list(request['skips']))
+            projected = request['skips']['agent-payment-abandonment']
+            self.assertEqual(h.KIND, projected['kind'])
+            self.assertEqual(h.RECOVERED_KIND, projected['recovered_origin_kind'])
+            self.assertEqual({'test_execution': False, 'assertions': False, 'financial_release': False}, projected['credit'])
+            self.assertEqual(c.digest(row), projected['recovered_record_sha256'])
+            with patch.dict(os.environ, kw['env'], clear=True):
+                h.admission(request, self.root)
+            c.write(Path(kw['env']['DEPLOY_GATE_RESULT']), dict(token=request['token'], source=request['source'],
+                gate=request['gate'], cases={'peer': 'PASS'}, complete=True, cleanup_complete=True, reused=False))
+            return 0, False, False, False
+        with patch.object(c, 'run_command', side_effect=worker):
+            result = c.execute(gate, self.state, self.directory, self.root)
+        self.assertEqual('SKIP', result['cases']['agent-payment-abandonment'])
+        self.assertFalse(result['case_complete']['agent-payment-abandonment'])
+        self.assertEqual('UNVERIFIED', result['current_execution']['agent-payment-abandonment'])
+        self.assertEqual(before['failures'], self.state['failures'])
+        text = io.StringIO()
+        with contextlib.redirect_stdout(text):
+            self.assertEqual(0, c.main(['report', *flags]))
+        self.assertIn('current financial state UNKNOWN', text.getvalue())
+        self.assertIn('Original SKIPPED', text.getvalue())
+        self.assertIn('4396 cents sandbox', text.getvalue())
+
+    def test_recovered_debt_coverage_requires_the_exact_recovered_check(self):
+        # PR #1864 review: an unrelated covered failure must not satisfy canonical recovered stall debt.
+        import deploy_test_historical_custody as h
+        check = h.RECOVERED_AUTHORITY['gate'] + '/' + h.RECOVERED_AUTHORITY['task']
+        unrelated = {'k1': {'id': 'k1', 'check': 'smoke/chat-mode'}}
+        exact = {**unrelated, 'k2': {'id': 'k2', 'check': check}}
+        self.assertFalse(h.recovered_debt_covered({}, set()))
+        self.assertFalse(h.recovered_debt_covered(unrelated, set()))
+        self.assertTrue(h.recovered_debt_covered(exact, set()))
+        self.assertTrue(h.recovered_debt_covered({}, {'origin-digest'}))
+
+    def test_recovered_native_warning_refuses_invalid_native_and_contract(self):
+        h, native, document, persist, old_head = self.recovered_fixture()
+        mutations = [lambda d: d['tasks'][0].update(passed=True),
+            lambda d: d['tasks'][0].update(context_violations=['foreign context']),
+            lambda d: d['tasks'][0].update(cleanup_failure='unknown'),
+            lambda d: d['tasks'][0]['execution_provenance'].update(base_sha='0' * 40),
+            lambda d: d['tasks'].append(copy.deepcopy(d['tasks'][0])),
+            lambda d: d['tasks'][0]['logs']['agentcard_release_stall_lifecycle']['orgTransfer'].update(livemode=True),
+            lambda d: d['tasks'][0]['logs']['agentcard_release_stall_lifecycle']['orgTransfer'].update(releasedCents=4396),
+            lambda d: d['tasks'][0]['logs']['agentcard_release_stall_lifecycle']['orgTransfer'].update(cardId='foreign'),
+            lambda d: d['tasks'][0]['logs']['agentcard_release_stall_lifecycle']['purchase'].update(stripePaymentIntentId='foreign'),
+            lambda d: d['tasks'][0]['logs']['cloud_cleanup_evidence']['final']['purchase_cleanup'][0].update(total_cents=True)]
+        def both(d, section, values):
+            logs = d['tasks'][0]['logs']
+            for snapshot in [logs['agentcard_release_stall_lifecycle'],
+                             logs['cloud_cleanup_evidence']['agentcard_release_stall_lifecycles']['root-owned']]:
+                snapshot[section].update(values)
+        mutations.extend([lambda d: both(d, 'orgTransfer', {'livemode': True}),
+            lambda d: both(d, 'orgTransfer', {'amountCents': True}),
+            lambda d: both(d, 'orgTransfer', {'releasedCents': False}),
+            lambda d: both(d, 'orgTransfer', {'transferredCents': 4395}),
+            lambda d: both(d, 'agentCard', {'balanceCents': False}),
+            lambda d: both(d, 'purchase', {'status': 'CLEARED'}),
+            lambda d: both(d, 'stripeHold', {'livemode': True}),
+            lambda d: both(d, 'stripeHold', {'id': 'pi-foreign'}),
+            lambda d: d['tasks'][0].update(duration_seconds=True)])
+        for mutate in mutations:
+            with self.subTest(mutate=mutate):
+                bad = copy.deepcopy(document); mutate(bad); persist(bad)
+                with self.assertRaises((ValueError, KeyError)): h.recovered_native(native, self.root)
+        persist(document)
+        catalog = self.root / 'agents/benchmarks/tasks.json'; raw = catalog.read_bytes()
+        mutations = [lambda t: t.update(prompt='different task'), lambda t: t.update(timeout=1),
+            lambda t: t['expected_payment_lifecycle']['purchase'].update(totalCents=1),
+            lambda t: t['expected_payment_lifecycle']['integrity'].update(agentCardProviderCardCount=True),
+            lambda t: t['expected_payment_lifecycle'].pop('stripeRefund')]
+        for mutate in mutations:
+            with self.subTest(contract=mutate):
+                tasks = json.loads(raw); mutate(tasks[0]); c.write(catalog, tasks)
+                with self.assertRaisesRegex(ValueError, 'migration differs'): h.recovered_native(native, self.root)
+        catalog.write_bytes(raw)
+        runner = self.root / 'agents/benchmarks/run_benchmark.py'; source = runner.read_bytes()
+        runner.write_bytes(source.replace(b'def _agentcard_release_stalled(', b'def _changed_release_stalled(', 1))
+        with self.assertRaisesRegex(ValueError, 'predicate'): h.recovered_native(native, self.root)
+        runner.write_bytes(source)
+        manifest = self.root / h.RECOVERED_AUTHORITY['manifest']; saved = manifest.read_bytes()
+        manifest.unlink()
+        with self.assertRaises(OSError): h.recovered_native(native, self.root)
+        manifest.write_bytes(saved)
+        native.write_bytes(native.read_bytes() + b'changed')
+        with self.assertRaisesRegex(ValueError, 'gzip changed'): h.recovered_native(native, self.root)
+
+    def test_recovered_native_warning_refuses_active_drift_mixed_and_forgotten_debt(self):
+        h, native, _, _, _ = self.recovered_fixture()
+        # Restore a frozen state after fixture construction.
+        self.plan['source'] = c.source(self.root); self.state = {**self.state, 'source': self.plan['source'],
+            'plan': self.plan, 'plan_digest': c.digest(self.plan), 'input_fingerprints': c.input_fingerprints(self.plan, self.root)}
+        proof = h.prepare_recovered(self.state, native, self.root)
+        original = copy.deepcopy(self.state)
+        for key, value in [('running', {'active': True}), ('pending', ['current-0']),
+                           ('resume_phase', 'final'), ('environment', 'foreign')]:
+            bad = copy.deepcopy(original); bad[key] = value
+            with self.assertRaises(ValueError): h.record_recovered(bad, proof, self.root)
+            self.assertEqual({**original, key: value}, bad)
+        h.record_recovered(self.state, proof, self.root)
+        gate = self.plan['gates'][1]
+        current = {k: self.state[k] for k in ('source', 'plan_digest', 'environment', 'input_fingerprints')}
+        with self.assertRaisesRegex(ValueError, 'mixed recovered'):
+            h.guard(self.state, gate, self.root, {'agent-payment-abandonment': {}}, current=current)
+        stale = copy.deepcopy(self.state); stale[h.RECOVERED_KEY][0]['current_binding']['source'] = {'head': 'stale'}
+        with self.assertRaisesRegex(ValueError, 'no current qualification'): h.guard(stale, gate, self.root, current=current)
+        forged = copy.deepcopy(self.state); forged[h.RECOVERED_KEY][0]['credit']['assertions'] = True
+        with self.assertRaises(ValueError): h.verify_recovered(forged, self.root)
+        canonical = self.root / '.context/deploy-pipeline/cycle.json'; c.write(canonical, self.state)
+        missing = copy.deepcopy(self.state); missing.pop(h.RECOVERED_KEY)
+        with self.assertRaisesRegex(h.AdmissionRefusal, 'not covered'): h.canonical_override(missing, canonical, self.root)
+        c.write(canonical, missing)
+        with self.assertRaisesRegex(h.AdmissionRefusal, 'not covered'): h.canonical_override(missing, canonical, self.root)
+        with patch.object(c, 'run_command') as launch:
+            for absent in (missing, {**missing, 'failures': []}):
+                with self.assertRaisesRegex(ValueError, 'no current qualification'):
+                    c.execute(gate, absent, self.directory / 'missing', self.root)
+            launch.assert_not_called()
+        with self.assertRaisesRegex(ValueError, 'custody ledger'):
+            h.admission({'checks': ['agent-payment-abandonment'], 'skips': {}}, self.root / '.context/standalone')
+        removed = copy.deepcopy(missing); removed['plan']['gates'][1]['checks'].remove('agent-payment-abandonment')
+        with self.assertRaisesRegex(ValueError, 'check removed'): h.guard(removed, removed['plan']['gates'][1], self.root)
+        before = copy.deepcopy(self.state)
+        with self.assertRaises(ValueError): h.record_recovered(self.state, proof, self.root)
+        self.assertEqual(before, self.state)
+
+    def test_recovered_recorder_rejects_same_legacy_custody_before_write_only(self):
+        import contextlib
+        import io
+        h, native, _, _, _ = self.recovered_fixture()
+        current17 = copy.deepcopy(self.state['failures'])
+        new = self.custody_fixture(gate_name='smoke')
+        legacy_proof = h.build(self.state, self.plan, new, self.root)
+        c.refresh(self.state, self.plan, new, self.root, historical_no_retry_proof=legacy_proof)
+        self.plan = new
+        self.state['failures'].extend(current17)
+        gate = self.plan['gates'][1]
+        self.assertIn('agent-payment-abandonment', h.qualifications(self.state, gate, self.root))
+        # A prepared envelope from the old recorder is still fully authenticated,
+        # but must not publish a conflicting exclusion into an already-valid ledger.
+        proof = dict(kind=h.RECOVERED_KIND, before_state_sha256=c.digest(self.state),
+            current_binding=h.binding(self.state['plan'], self.root), gate='smoke',
+            check='smoke/agent-payment-abandonment', origin=h.recovered_native(native, self.root))
+        c.write(self.directory / 'cycle.json', self.state)
+        plan = self.root / '.context/plan.json'; c.write(plan, self.plan)
+        proof_path = self.root / '.context/prepared.json'; c.write(proof_path, proof)
+        before = (self.directory / 'cycle.json').read_bytes()
+        flags = ['--plan', str(plan), '--state-dir', str(self.directory), '--root', str(self.root),
+                 '--input', str(native), '--proof', str(proof_path)]
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            result = c.main(['record-recovered-stall', *flags])
+        self.assertEqual(2, result)
+        self.assertEqual(before, (self.directory / 'cycle.json').read_bytes())
+        self.assertNotIn(h.RECOVERED_KEY, c.read(self.directory / 'cycle.json'))
+        # A separate valid debt for a different task must not prevent this warning.
+        unrelated = copy.deepcopy(self.state)
+        unrelated['failures'] = [f for f in unrelated['failures'] if f['id'] != 'failure-0']
+        for key in ('historical_no_retry_custody', 'historical_custody_history'):
+            unrelated[key] = [r for r in unrelated[key] if r['original_failure']['id'] != 'failure-0']
+        self.assertEqual(['agent-payment-idempotent-abandonment'], list(h.qualifications(unrelated, gate, self.root)))
+        other_before = copy.deepcopy(unrelated)
+        h.record_recovered(unrelated, h.prepare_recovered(unrelated, native, self.root), self.root)
+        self.assertEqual(other_before, {k: v for k, v in unrelated.items() if k != h.RECOVERED_KEY})
+        self.assertEqual(current17, unrelated['failures'][-17:])
+
+    def custody_fixture(self, top_level=None, gate_name="api", purchase_owner=None, failed_status='FAILED'):
         import deploy_test_historical_custody as h
         mocked = patch.object(h, 'native_closure', return_value={'fixture': 'terminal native fleet'})
         mocked.start(); self.addCleanup(mocked.stop)
         names = ['agent-payment-abandonment', 'agent-payment-idempotent-abandonment']
         catalog = [t for t in json.loads((ROOT / 'agents/benchmarks/tasks.json').read_text()) if t['name'] in names]
         path = self.root / 'agents/benchmarks/tasks.json'
-        path.parent.mkdir(parents=True); c.write(path, catalog)
+        path.parent.mkdir(parents=True, exist_ok=True); c.write(path, catalog)
         subprocess.run(['git', '-C', str(self.root), 'add', '.'], check=True)
         subprocess.run(['git', '-C', str(self.root), '-c', 'user.name=test', '-c',
                         'user.email=test@example.com', 'commit', '-qm', 'catalog'], check=True)
@@ -171,15 +460,21 @@ class Cycle(unittest.TestCase):
                                      agentCardProviderUnlinkedTransferCount=0, cardCount=1, purchaseCount=1,
                                      stripePaymentIntentCount=1, stripeProviderPaymentIntentCount=1,
                                      walletFundingCount=1)
-            final = dict(root_deleted=True, tree_agent_ids=[snap['agentId']], unsealed_tree_agent_ids=[], browser_sessions=[],
+            root_id = snap['agentId']
+            if i and purchase_owner:
+                # The timed-out task's browser sub-agent requested the card, so the runner keyed
+                # the stall lifecycle by that child, not the root (PR #1972 r7 native evidence).
+                snap['agentId'] = purchase_owner
+            final = dict(root_deleted=True, tree_agent_ids=sorted({root_id, snap['agentId']}), unsealed_tree_agent_ids=[],
+                         browser_sessions=[],
                          purchase_cleanup=[dict(agent_id=snap['agentId'], purchase_id=snap['purchase']['id'],
                           card_id=snap['agentCard']['id'], provider_transfer_id=snap['orgTransfer']['id'],
                           total_cents=4396, status='HELD', funding_status='RECLAIMING')])
-            row = dict(name=name, agent_id=snap['agentId'], passed=False, status='ACTIVE' if i else 'SKIPPED',
-                       benchmark_status='FAILED' if i else 'SKIPPED', failure_reason='auth then timeout' if i else self.STALL_REASON)
+            row = dict(name=name, agent_id=root_id, passed=False, status=('ERROR' if failed_status == 'ERROR' else 'ACTIVE') if i else 'SKIPPED',
+                       benchmark_status=failed_status if i else 'SKIPPED', failure_reason='auth then timeout' if i else self.STALL_REASON)
             native = dict(**row, cleanup_failure=None, context_violations=[],
                           execution_provenance={'base_sha': self.state['source']['head']},
-                          logs={'cloud_cleanup_evidence': dict(errors=[], root_agent_id=snap['agentId'], final=final,
+                          logs={'cloud_cleanup_evidence': dict(errors=[], root_agent_id=root_id, final=final,
                                 provider_receipts=[], agentcard_release_stall_lifecycles={snap['agentId']: snap})})
             if not i:
                 native['logs']['agentcard_release_stall_lifecycle'] = top_level(copy.deepcopy(snap)) if top_level else snap
@@ -229,6 +524,39 @@ class Cycle(unittest.TestCase):
                         'files': {str(self.root / '.context/deploy-pipeline/cycle.json'): c.sha_file(file)}})
         fresh = c.initialize(new, self.root)
         return fresh, file, index
+
+    def test_refresh_retains_explicit_deploy_exclusion_without_pass_credit(self):
+        gate = self.plan['gates'][1]
+        gate.update(category='smoke', native_cloud=True, checks=['mass', 'peer'])
+        self.state = c.initialize(self.plan, self.root)
+        self.state.update(phase='needs-focused-plan', repair_gates=['api'])
+        old = copy.deepcopy(self.plan)
+        original_state = copy.deepcopy(self.state)
+        catalog = self.root / 'agents/benchmarks/tasks.json'
+        catalog.parent.mkdir(parents=True)
+        catalog.write_text(json.dumps([{'name':'mass', 'deploy_quarantine':'User requested exclusion'}, {'name':'peer'}]))
+        new = copy.deepcopy(old)
+        new['source'] = c.source(self.root)
+        new['gates'][1]['checks'] = ['peer']
+        history = copy.deepcopy(self.state['attempts'])
+        c.refresh(self.state, old, new, self.root)
+        self.assertEqual(history, self.state['attempts'])
+        self.assertFalse(self.state['ready'])
+        self.assertEqual({}, self.state['carried_passes'])
+        omission, = self.state['deploy_selection_omissions']
+        self.assertEqual({'api/mass':'User requested exclusion'}, omission['checks'])
+        self.assertIs(omission['executed'], False)
+        self.assertIs(omission['credit_granted'], False)
+        self.assertEqual(old['source'], omission['from_source'])
+        self.assertEqual(new['source'], omission['source'])
+        self.assertEqual(['peer'], self.state['plan']['gates'][1]['checks'])
+        blocked = copy.deepcopy(original_state)
+        blocked.update(phase='triage', pending=['mass-fail'], failures=[{'id':'mass-fail', 'check':'api/mass', 'gate':'api'}])
+        untouched = copy.deepcopy(blocked)
+        with self.assertRaisesRegex(ValueError, 'adjudicate the original failure'):
+            c.refresh(blocked, old, new, self.root)
+        self.assertEqual(untouched, blocked)
+
 
     def test_historical_import_only_indexed_duties_not_lost_supervisor_history(self):
         import deploy_test_historical_custody as h
@@ -1540,6 +1868,111 @@ class Cycle(unittest.TestCase):
                     launch.assert_not_called()
             (self.root / 'code').write_text(code)
 
+    def test_historical_custody_binds_subagent_owned_stall_and_refuses_unprovable_owner(self):
+        # PR #1972 r7: the protected timed-out idempotent-abandonment row's stall lifecycle was keyed
+        # by its browser sub-agent, and prepare-historical-no-retry crashed with KeyError(root id).
+        import deploy_test_historical_custody as h
+        new = self.custody_fixture(purchase_owner='browser-1')
+        proof = h.build(self.state, self.plan, new, self.root)
+        case = next(r for r in proof['cases'] if r['original_failure']['id'] == 'failure-1')
+        self.assertEqual(('root-1', 'purchase-1', 'card-1', 'transfer-1', 4396),
+                         tuple(case[k] for k in ('root_id', 'purchase_id', 'card_id', 'transfer_id', 'original_amount_cents')))
+        self.assertEqual('canonical_pending_repair', case['authority']['kind'])
+        f = self.state['failures'][1]; file = Path(f['worker_evidence']['path']); raw = file.read_bytes()
+        adapter_path = Path(f['worker_result']); adapter_raw = adapter_path.read_bytes()
+
+        def evidence(t):
+            return t['logs']['cloud_cleanup_evidence']
+
+        def lifecycles(t):
+            return evidence(t)['agentcard_release_stall_lifecycles']
+        refusals = {
+            'ambiguous release-stall': lambda t: lifecycles(t).update({'browser-2': dict(lifecycles(t)['browser-1'], agentId='browser-2')}),
+            # A root snapshot beside the child's would leave the second stalled purchase unbound.
+            'ambiguous release-stall lifecycles': lambda t: lifecycles(t).update({'root-1': dict(lifecycles(t)['browser-1'], agentId='root-1')}),
+            'malformed release-stall': lambda t: lifecycles(t)['browser-1'].update(agentCard=None),
+            'owner mismatch': lambda t: lifecycles(t)['browser-1'].update(agentId='browser-2'),
+            'root not sealed': lambda t: evidence(t)['final'].update(tree_agent_ids=['root-1']),
+            'final purchase join': lambda t: evidence(t)['final']['purchase_cleanup'][0].update(agent_id='root-1'),
+            'confirmed sandbox release stall': lambda t: lifecycles(t)['browser-1']['orgTransfer'].update(releasedCents=1),
+        }
+        for message, change in refusals.items():
+            candidate = copy.deepcopy(self.state)
+            doc = json.loads(raw); change(doc['tasks'][0]); c.write(file, doc)
+            candidate['failures'][1]['worker_evidence']['sha256'] = c.sha_file(file)
+            adapter = json.loads(adapter_raw)
+            adapter['evidence'][doc['tasks'][0]['name']] = candidate['failures'][1]['worker_evidence']
+            c.write(adapter_path, adapter)
+            with self.assertRaisesRegex(ValueError, 'historical custody: .*' + message, msg=message):
+                h.build(candidate, self.plan, new, self.root)
+            file.write_bytes(raw); adapter_path.write_bytes(adapter_raw)
+        # No recorded lifecycle at all is not a discovered custody obligation; only the stall stays protected.
+        candidate = copy.deepcopy(self.state)
+        doc = json.loads(raw); evidence(doc['tasks'][0]).update(agentcard_release_stall_lifecycles={}); c.write(file, doc)
+        candidate['failures'][1]['worker_evidence']['sha256'] = c.sha_file(file)
+        self.assertEqual(['failure-0'], list(h.known(candidate, self.root)))
+        file.write_bytes(raw)
+        before = copy.deepcopy(self.state)
+        c.refresh(self.state, self.plan, new, self.root, historical_no_retry_proof=proof)
+        self.assertEqual(new, self.state['plan'])
+        rows = {r['original_failure']['id']: r for r in self.state['historical_no_retry_custody']}
+        self.assertEqual({'failure-0', 'failure-1'}, set(rows))
+        self.assertTrue(all(r['disposition'] == h.DISPOSITION and r['current_execution'] == 'UNVERIFIED'
+                            and not any(r['credit'].values()) for r in rows.values()))
+        self.assertEqual(before['failures'], self.state['failures'])
+        self.assertEqual([p['id'] for p in before['pending_post_merge']], [p['id'] for p in self.state['pending_post_merge']])
+        h.verify(self.state, self.root)
+        self.assertEqual({'agent-payment-abandonment', 'agent-payment-idempotent-abandonment'},
+                         set(c.reuse_qualifications(self.state, new['gates'][1], root=self.root)))
+
+    def test_historical_custody_keeps_no_retry_for_stall_row_that_ended_error(self):
+        # PR #2014 smoke: agent-payment-abandonment hit the exact sandbox stall, but an AgentCard org-token
+        # 401/429 storm failed its final lifecycle read, so the native row ended ERROR, not FAILED. Its
+        # canonical pending repair must still carry no-retry custody; a refusal forces a re-minting rerun.
+        import deploy_test_historical_custody as h
+        new = self.custody_fixture(failed_status='ERROR')
+        proof = h.build(self.state, self.plan, new, self.root)
+        case = next(r for r in proof['cases'] if r['original_failure']['id'] == 'failure-1')
+        self.assertEqual('canonical_pending_repair', case['authority']['kind'])
+        c.refresh(self.state, self.plan, new, self.root, historical_no_retry_proof=proof)
+        self.assertEqual({'failure-0', 'failure-1'}, {r['original_failure']['id'] for r in self.state['historical_no_retry_custody']})
+        h.verify(self.state, self.root)
+        # Only complete non-passing native outcomes qualify; a PASSED row is never custody.
+        state = copy.deepcopy(self.state)
+        f = state['failures'][1]; file = Path(f['worker_evidence']['path']); doc = json.loads(file.read_bytes())
+        doc['tasks'][0]['benchmark_status'] = 'PASSED'; c.write(file, doc)
+        f['worker_evidence']['sha256'] = c.sha_file(file); f['worker_evidence']['native_task']['benchmark_status'] = 'PASSED'
+        adapter_path = Path(f['worker_result']); adapter = c.read(adapter_path)
+        adapter['evidence'][doc['tasks'][0]['name']] = f['worker_evidence']; c.write(adapter_path, adapter)
+        state.pop('historical_custody_history', None); state.pop('historical_no_retry_custody', None)
+        with self.assertRaisesRegex(ValueError, 'independent failure lacks canonical pending repair'):
+            h.historical(state, f, self.root)
+
+    def test_historical_custody_ignores_warning_context_violations_only(self):
+        # PR #2014 smoke: agent-payment-test-shop's confirmed-stall row carried one warning-severity
+        # context violation (whitespace-only assistant message); run_benchmark fails rows only on
+        # error severity, so custody must not refuse and force a re-minting rerun.
+        import deploy_test_historical_custody as h
+        new = self.custody_fixture()
+        f = self.state['failures'][1]; file = Path(f['worker_evidence']['path']); raw = file.read_bytes()
+        adapter_path = Path(f['worker_result']); adapter_raw = adapter_path.read_bytes()
+        warning = {'message': 'Assistant message 23 has only whitespace text content.', 'message_index': 23,
+                   'rule': 'non_empty_content', 'severity': 'warning'}
+        for violations, ok in (([warning], True), ([dict(warning, severity='error')], False),
+                               ([warning, 'malformed'], False), (None, False)):
+            state = copy.deepcopy(self.state)
+            doc = json.loads(raw); doc['tasks'][0]['context_violations'] = violations; c.write(file, doc)
+            failure = state['failures'][1]; failure['worker_evidence']['sha256'] = c.sha_file(file)
+            adapter = json.loads(adapter_raw); adapter['evidence'][doc['tasks'][0]['name']] = failure['worker_evidence']
+            c.write(adapter_path, adapter)
+            if ok:
+                row = h.historical(state, failure, self.root)
+                self.assertEqual('canonical_pending_repair', row['authority']['kind'])
+            else:
+                with self.assertRaisesRegex(ValueError, 'native task/cleanup unknown'):
+                    h.historical(state, failure, self.root)
+            file.write_bytes(raw); adapter_path.write_bytes(adapter_raw)
+
     def test_historical_custody_rejects_tampering_and_missing_admission_proof(self):
         import deploy_test_historical_custody as h
         new = self.custody_fixture(); proof = h.build(self.state, self.plan, new, self.root)
@@ -1646,7 +2079,11 @@ class Cycle(unittest.TestCase):
         new = copy.deepcopy(self.plan)
         new['source'] = c.source(self.root)
         before = copy.deepcopy(state)
-        c.refresh(state, self.plan, new, self.root)
+        # FINAL refresh must read the exact persisted cycle and prove no unfinished request.
+        with self.assertRaisesRegex(ValueError, 'exact saved native cycle'):
+            c.refresh(copy.deepcopy(state), self.plan, new, self.root)
+        c.write(self.directory / 'cycle.json', state)
+        c.refresh(state, self.plan, new, self.root, directory=self.directory)
         self.assertEqual(state['attempts'], before['attempts'])
         self.assertEqual(state['phase'], 'quick')
         self.assertFalse(state['ready'])
@@ -1654,13 +2091,19 @@ class Cycle(unittest.TestCase):
                       {'resume_phase': 'final'}, {'pending': ['unresolved']}):
             candidate = {**copy.deepcopy(before), **extra}
             original = copy.deepcopy(candidate)
+            c.write(self.directory / 'cycle.json', candidate)
             with self.assertRaises(ValueError):
-                c.refresh(candidate, self.plan, new, self.root)
+                c.refresh(candidate, self.plan, new, self.root, directory=self.directory)
             self.assertEqual(candidate, original)
         candidate = copy.deepcopy(before)
         candidate['attempts'].append({'phase': 'final', 'source': candidate['source'], 'results': []})
-        with self.assertRaises(ValueError):
-            c.refresh(candidate, self.plan, new, self.root)
+        c.write(self.directory / 'cycle.json', candidate)
+        unfinished = self.directory / 'attempts/1/final/api/request.json'
+        c.write(unfinished, {'gate': 'api', 'source': candidate['source']})
+        original = copy.deepcopy(candidate)
+        with self.assertRaisesRegex(ValueError, 'unknown terminal ownership'):
+            c.refresh(candidate, self.plan, new, self.root, directory=self.directory)
+        self.assertEqual(candidate, original)
 
     def source_refusal_fixture(self):
         import hashlib, time
@@ -2101,6 +2544,648 @@ class Cycle(unittest.TestCase):
         self.workers.cleanup()
         self.temp.cleanup()
 
+    def prepared_bindings_fixture(self, changed_source=False):
+        old = copy.deepcopy(self.plan)
+        # Real prepared private repositories, not mocked source equality.
+        for gate in old['gates']:
+            if gate.get('quick'):
+                continue
+            path = Path(gate['cwd'])
+            subprocess.run(['git', 'clone', '-q', str(self.root), str(path)], check=True)
+            (path / '.git/info/exclude').write_text('.context/\n')
+            gate['worker_root'] = str(path)
+        state = c.initialize(old, self.root)
+        state['attempts'] = [{'phase': 'quick', 'source': old['source'], 'results': [
+            {'gate': g['name'], 'status': 'PASS', 'source': old['source']}
+            for g in old['gates'] if g.get('quick')]}]
+        state['phase'] = 'initial'
+        new = copy.deepcopy(old)
+        if changed_source:
+            (self.root / 'code').write_text('tooling repair')
+            subprocess.run(['git', '-C', str(self.root), 'add', 'code'], check=True)
+            subprocess.run(['git', '-C', str(self.root), '-c', 'user.name=test', '-c',
+                            'user.email=test@example.com', 'commit', '-qm', 'repair'], check=True)
+            for gate in new['gates']:
+                if not gate.get('quick'):
+                    subprocess.run(['git', '-C', gate['cwd'], 'fetch', '-q', 'origin'], check=True)
+                    subprocess.run(['git', '-C', gate['cwd'], 'checkout', '-q', '--detach', 'FETCH_HEAD'], check=True)
+            new['source'] = c.source(self.root)
+        for gate in new['gates']:
+            if gate.get('quick'):
+                continue
+            for key, leaf in [('TMPDIR', 'tmp'), ('XDG_CACHE_HOME', 'cache'), ('npm_config_cache', 'npm-cache')]:
+                path = Path(gate['worker_root']) / '.context' / leaf
+                path.mkdir(parents=True)
+                gate['env'][key] = str(path)
+        return old, new, state
+
+    def collection_coordinator_fixture(self):
+        plan, _, state = self.prepared_bindings_fixture()
+        gate=plan['gates'][1]
+        gate.update(name='backend-coverage-blackbox', native_backend=True, case_protocol=True,
+            result_transport='file', command=[sys.executable,str(c.ROOT/'scripts/deploy_test_backend.py'),'--root',gate['worker_root']],
+            checks=['blackbox:alpha','teardown'], worker_recipe={'cases':{
+                k:{'command':['npm','run','test:coverage:sharded'],'cwd':'back-end','sweep':'backend'} for k in ['blackbox:alpha','teardown']}})
+        state=c.initialize(plan,self.root);state['phase']='initial'
+        folder=self.directory/'original';folder.mkdir(parents=True)
+        original={'token':'old','gate':gate['name'],'source':state['source'],'cases':dict.fromkeys(gate['checks'],'UNVERIFIED'),
+                  'complete':False,'execution_binding':{'environment':state['environment']}}
+        c.write(folder/'receipt.json',original)
+        state['attempts']=[{'phase':'focused','results':[original]}]
+        state['reconciled_owners']={c.sha_file(folder/'receipt.json'):{'execution_gate':copy.deepcopy(gate)}}
+        spec={'seal':'not-read-by-coordinator-fixture','seal_sha256':'a'*64,'report_timeout_seconds':30}
+        request={'token':'old','checks':gate['checks'],'worker_recipe':gate['worker_recipe'],'source':state['source']}
+        result={'token':'new','gate':gate['name'],'source':state['source'],'complete':False,
+                'cases':{'blackbox:alpha':'PASS','teardown':'UNVERIFIED'},
+                'case_complete':{'blackbox:alpha':True,'teardown':False},'log':'native'}
+        return plan,state,gate,original,spec,request,result,folder
+
+    def test_collection_cli_preserves_original_and_refuses_repeat(self):
+        import deploy_test_backend as backend
+        import contextlib,io
+        plan,state,gate,original,spec,request,result,folder=self.collection_coordinator_fixture()
+        plan_path=self.root/'.context/plan.json';input_path=self.root/'.context/collection.json'
+        c.write(plan_path,plan);c.write(input_path,spec);c.write(self.directory/'cycle.json',state)
+        seal={'original_folder':str(folder)};old=(folder/'receipt.json').read_bytes()
+        args=['collect-backend','--plan',str(plan_path),'--state-dir',str(self.directory),'--root',str(self.root),'--input',str(input_path)]
+        with patch.object(backend,'validate_collection',return_value=(seal,request,original)), \
+             patch.object(c,'local_reconciliation_bound',return_value=True), \
+             patch('deploy_test_process_scan.prepared_workers_idle',return_value={'quiescent':True}), \
+             patch.object(c,'execute',return_value=result) as launch,contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(0,c.main(args))
+            saved=c.read(self.directory/'cycle.json')
+            self.assertEqual(original,saved['attempts'][0]['results'][0])
+            self.assertEqual('collection',saved['attempts'][-1]['phase'])
+            self.assertEqual('triage',saved['phase']);self.assertFalse(saved['ready'])
+            self.assertEqual('teardown',saved['failures'][-1]['check'].split('/')[-1])
+            self.assertEqual(spec,launch.call_args.kwargs['collection'])
+            self.assertEqual(2,c.main(args));self.assertEqual(1,launch.call_count)
+        self.assertEqual(old,(folder/'receipt.json').read_bytes())
+
+    def test_collection_unreconciled_or_changed_source_never_launches(self):
+        import deploy_test_backend as backend
+        plan,state,gate,original,spec,request,result,folder=self.collection_coordinator_fixture()
+        before=copy.deepcopy(state)
+        with patch.object(backend,'validate_collection',return_value=({'original_folder':str(folder)},request,original)), \
+             patch.object(c,'local_reconciliation_bound',return_value=False), patch.object(c,'execute') as launch:
+            with self.assertRaises(ValueError):c.collect_backend(state,spec,self.directory,self.root)
+            launch.assert_not_called()
+        self.assertEqual(before,state)
+        (self.root/'code').write_text('changed')
+        with patch.object(c,'execute') as launch,self.assertRaises(ValueError):
+            c.collect_backend(state,spec,self.directory,self.root)
+        launch.assert_not_called()
+
+    def test_collection_cycle_claim_publication_synced_before_execute(self):
+        import deploy_test_backend as backend
+        plan,state,gate,original,spec,request,result,folder=self.collection_coordinator_fixture()
+        target=self.directory/'cycle.json';events=[];fsync=os.fsync;replace=os.replace
+        def sync(fd):
+            name=Path(os.readlink('/proc/self/fd/'+str(fd)))
+            if name==self.directory:events.append('directory')
+            elif name.parent==self.directory:events.append('file')
+            return fsync(fd)
+        def publish(src,dst):
+            answer=replace(src,dst)
+            if Path(dst)==target:events.append('publish')
+            return answer
+        def execute(*args,**kwargs):
+            self.assertEqual(['file','publish','directory'],events)
+            self.assertEqual('started',c.read(target)['backend_collections']['old']['state'])
+            return result
+        with patch.object(backend,'validate_collection',return_value=({'original_folder':str(folder)},request,original)), \
+             patch.object(c,'local_reconciliation_bound',return_value=True), \
+             patch('deploy_test_process_scan.prepared_workers_idle',return_value={'quiescent':True}), \
+             patch.object(os,'fsync',side_effect=sync),patch.object(os,'replace',side_effect=publish), \
+             patch.object(c,'execute',side_effect=execute):
+            c.collect_backend(state,spec,self.directory,self.root)
+
+    def test_collection_failed_cycle_parent_sync_stops_execute_and_retains_claim(self):
+        import deploy_test_backend as backend
+        plan,state,gate,original,spec,request,result,folder=self.collection_coordinator_fixture()
+        fsync=os.fsync
+        def sync(fd):
+            if Path(os.readlink('/proc/self/fd/'+str(fd)))==self.directory:raise OSError('directory sync failed')
+            return fsync(fd)
+        with patch.object(backend,'validate_collection',return_value=({'original_folder':str(folder)},request,original)), \
+             patch.object(c,'local_reconciliation_bound',return_value=True), \
+             patch('deploy_test_process_scan.prepared_workers_idle',return_value={'quiescent':True}), \
+             patch.object(os,'fsync',side_effect=sync),patch.object(c,'execute') as launch:
+            with self.assertRaisesRegex(OSError,'directory sync failed'):c.collect_backend(state,spec,self.directory,self.root)
+            launch.assert_not_called()
+            retained=c.read(self.directory/'cycle.json')
+            self.assertEqual('started',retained['backend_collections']['old']['state'])
+            with self.assertRaisesRegex(ValueError,'already has a collection'):c.collect_backend(retained,spec,self.directory,self.root)
+            launch.assert_not_called()
+
+    def test_prepare_bindings_before_full_preserves_history_and_restarts_quick(self):
+        old, new, state = self.prepared_bindings_fixture(changed_source=True)
+        with self.assertRaisesRegex(ValueError, 'repair boundary'):
+            c.refresh(copy.deepcopy(state), old, new, self.root)
+        historical = copy.deepcopy(state['attempts'])
+        with patch.object(c, '_prepared_workers_idle') as idle:
+            c.prepare_bindings(state, old, new, self.root, self.directory)
+        idle.assert_called_once()
+        self.assertEqual(historical, state['attempts'])
+        self.assertEqual(new['source'], state['source'])
+        self.assertEqual('quick', state['phase'])
+        self.assertEqual('initial', state['next_after_quick'])
+        self.assertFalse(state['ready'])
+        self.assertEqual(old, state['prepared_binding_history'][0]['from_plan'])
+        self.assertFalse(state['prepared_binding_history'][0]['credit_granted'])
+        unchanged = copy.deepcopy(state)
+        with self.assertRaises(ValueError):
+            c.prepare_bindings(state, new, new, self.root, self.directory)
+        self.assertEqual(unchanged, state)
+
+    def test_prepared_worker_process_ownership_fails_closed(self):
+        proc = self.root / 'fake-proc'; proc.mkdir()
+        entry = proc / '99999999'; entry.mkdir(); (entry / 'fd').mkdir(); (entry / 'maps').write_text('')
+        worker = Path(self.workers.name) / 'api'
+        (entry / 'cwd').symlink_to(worker)
+        with self.assertRaisesRegex(ValueError, 'active local consumer'):
+            c._prepared_workers_idle([worker], proc)
+        (entry / 'cwd').unlink(); (entry / 'cwd').symlink_to(self.root)
+        (entry / 'fd' / '7').symlink_to(worker / 'file')
+        with self.assertRaisesRegex(ValueError, 'active local consumer'):
+            c._prepared_workers_idle([worker], proc)
+        (entry / 'fd' / '7').unlink()
+        c._prepared_workers_idle([worker], proc)
+        (entry / 'maps').write_text('1-2 r--p 0 00:01 7 ' + str(worker / 'loaded.so'))
+        with self.assertRaisesRegex(ValueError, 'active local consumer'):
+            c._prepared_workers_idle([worker], proc)
+        (entry / 'maps').write_text('')
+        # A descriptor can close during enumeration. It must not hide a
+        # still-live process's later mapping into the worker checkout.
+        closed = entry / 'fd' / '8'
+        closed.symlink_to(self.root / 'gone')
+        (entry / 'maps').write_text('1-2 r--p 0 00:01 7 ' + str(worker / 'loaded.so'))
+        real_readlink = c.os.readlink
+        def racing_readlink(path):
+            if Path(path) == closed:
+                raise FileNotFoundError('descriptor closed during scan')
+            return real_readlink(path)
+        with patch.object(c.os, 'readlink', side_effect=racing_readlink):
+            with self.assertRaisesRegex(ValueError, 'active local consumer'):
+                c._prepared_workers_idle([worker], proc)
+        closed.unlink()
+        (entry / 'maps').write_text('')
+        with patch.object(c.os, 'readlink', side_effect=PermissionError('unreadable')):
+            with self.assertRaisesRegex(ValueError, 'unreadable'):
+                c._prepared_workers_idle([worker], proc)
+
+    def test_prepare_bindings_backend_database_and_native_lease(self):
+        old, new, state = self.prepared_bindings_fixture()
+        for plan in (old, new):
+            gate = plan['gates'][1]
+            gate.update(name='backend-coverage-blackbox', native_backend=True)
+            gate['env']['ROSE_USE_SYSTEM_PG']='true'
+        state['plan']=old; state['plan_digest']=c.digest(old)
+        state['input_fingerprints']=c.input_fingerprints(old,self.root)
+        # This fixture tests transition admission, not the backend adapter recipe.
+        new['gates'][1]['env']['BACKEND_COVERAGE_DATABASE_URL']='postgresql://user:p%40ss@localhost:5432/victoria_api'
+        for url in ('postgresql://u:p@remote:5432/victoria_api',
+                    'postgresql://u:p@localhost:5432/victoria',
+                    'postgresql://u:p@localhost:5432/victoria_wmh_recording_old',
+                    'postgresql://u:p@localhost:5432/victoria_ui',
+                    'postgresql://u:p@localhost:5432/victoria_api?options=-cwhatever'):
+            bad=copy.deepcopy(new); bad['gates'][1]['env']['BACKEND_COVERAGE_DATABASE_URL']=url
+            with self.assertRaises(ValueError), patch.object(c, '_prepared_workers_idle'):
+                c.prepare_bindings(copy.deepcopy(state),old,bad,self.root,self.directory)
+        lock_path=Path(new['gates'][1]['worker_root'])/'.context/native-worker-admission.lock'
+        with lock_path.open('a') as held:
+            c.fcntl.flock(held,c.fcntl.LOCK_EX|c.fcntl.LOCK_NB)
+            with self.assertRaises(BlockingIOError), patch.object(c, '_prepared_workers_idle'):
+                c.prepare_bindings(copy.deepcopy(state),old,new,self.root,self.directory)
+        with patch.object(c, '_prepared_workers_idle'):
+            c.prepare_bindings(state,old,new,self.root,self.directory)
+        self.assertEqual('quick',state['phase'])
+
+    def test_prepare_bindings_cli_preserves_existing_quick_receipts(self):
+        import contextlib, io
+        old, new, state = self.prepared_bindings_fixture()
+        previous=self.directory/'previous.json'; updated=self.directory/'updated.json'
+        c.write(previous,old);c.write(updated,new);c.write(self.directory/'cycle.json',state)
+        with patch.object(c, '_prepared_workers_idle'), contextlib.redirect_stdout(io.StringIO()):
+            code=c.main(['prepare-bindings','--plan',str(updated),'--input',str(previous),
+                         '--state-dir',str(self.directory),'--root',str(self.root)])
+        self.assertEqual(0,code)
+        after=c.read(self.directory/'cycle.json')
+        self.assertEqual(state['attempts'],after['attempts'])
+        self.assertEqual('quick',after['phase'])
+        self.assertEqual(new,after['plan'])
+        # A request with no terminal receipt is unknown ownership, even without results.
+        other=copy.deepcopy(state)
+        request=self.directory/'attempts/0/initial/api/request.json'
+        c.write(request,{'gate':'api'})
+        with patch.object(c, '_prepared_workers_idle'), self.assertRaisesRegex(ValueError,'full worker request'):
+            c.prepare_bindings(other,old,new,self.root,self.directory)
+        self.assertEqual(state,other)
+
+    def test_prepare_bindings_rejects_unsafe_changes_atomically(self):
+        old, new, base = self.prepared_bindings_fixture()
+        mutations = [
+            lambda p, s: p['gates'][1]['env'].update(CONDUCTOR_PORT='7777'),
+            lambda p, s: p['gates'][1]['env'].update(UNKNOWN='x'),
+            lambda p, s: p['gates'][1]['env'].update(TMPDIR=str(self.root)),
+            lambda p, s: p['gates'][1]['env'].update(TMPDIR=p['gates'][1]['worker_root']),
+            lambda p, s: p['gates'][1]['env'].update(TMPDIR=p['gates'][2]['env']['TMPDIR']),
+            lambda p, s: p['gates'][1]['command'].append('changed'),
+            lambda p, s: p['gates'][1]['checks'].pop(),
+            lambda p, s: p['gates'][1].update(timeout_seconds=1),
+            lambda p, s: p['gates'].pop(),
+            lambda p, s: s.update(phase='triage'),
+            lambda p, s: s.update(running=['api']),
+            lambda p, s: s.update(resume_phase='initial'),
+            lambda p, s: s.update(pending=['unresolved']),
+            lambda p, s: s.update(skips={'api/a': {'unreviewed': True}}),
+            lambda p, s: s['attempts'].append({'phase':'initial','results':[]}),
+        ]
+        for mutate in mutations:
+            candidate, state = copy.deepcopy(new), copy.deepcopy(base)
+            mutate(candidate, state)
+            before = copy.deepcopy(state)
+            with self.assertRaises(ValueError):
+                c.prepare_bindings(state, old, candidate, self.root, self.directory)
+            self.assertEqual(before, state)
+        path = Path(new['gates'][1]['env']['TMPDIR'])
+        path.rmdir();path.symlink_to(Path(new['gates'][2]['env']['TMPDIR']))
+        with self.assertRaises(ValueError):
+            c.prepare_bindings(copy.deepcopy(base), old, new, self.root, self.directory)
+
+    def external_tmpdir_fixture(self):
+        _, old, _ = self.prepared_bindings_fixture()
+        old['gates'][1]['command'] = ['false']
+        state = c.initialize(old, self.root)
+        c.run_phase(old, state, self.directory, self.root)
+        c.run_phase(old, state, self.directory, self.root)
+        self.assertEqual('triage', state['phase'])
+        new = copy.deepcopy(old)
+        outside = tempfile.TemporaryDirectory(prefix='dpt-')
+        self.addCleanup(outside.cleanup)
+        for gate in new['gates']:
+            if gate.get('quick'):
+                continue
+            path = Path(outside.name) / gate['name']
+            path.mkdir(mode=0o700)
+            owner = dict(schema='deploy-external-tmpdir-v1', coordinator_root=str(self.root),
+                         worker_root=gate['worker_root'], gate=gate['name'],
+                         uid=os.geteuid(), device=path.stat().st_dev, inode=path.stat().st_ino)
+            marker = path / '.deploy-tmpdir-owner.json'
+            marker.write_text(json.dumps(owner)); marker.chmod(0o600)
+            gate['env']['TMPDIR'] = str(path)
+        proof = dict(kind='replace-owned-tmpdir-v1', source=old['source'],
+                     from_plan_digest=c.digest(old),
+                     paths={g['name']:g['env']['TMPDIR'] for g in new['gates'] if not g.get('quick')})
+        return old, new, state, proof
+
+    def reconciled_tmpdir_fixture(self):
+        old, _, _ = self.prepared_bindings_fixture()
+        fixtures = [StructuralSupervisorCleanup(), InterruptedLocalRecovery()]
+        for fixture in fixtures:
+            fixture.setUp(); self.addCleanup(fixture.doCleanups)
+        structural, backend = fixtures
+        structural.file_adapter()
+        backend.gate.update(name='backend-coverage-blackbox', native_backend=True,
+            result_transport='file', command=[sys.executable,str(ROOT/'scripts/deploy_test_backend.py'),
+                                             '--root',str(backend.worker)])
+        backend.token='interrupted-backend'
+        backend.request.update(token=backend.token,gate=backend.gate['name'], phase='final')
+        backend.receipt['token']=backend.token
+        backend.receipt.update(gate=backend.gate['name'],command=backend.gate['command'])
+        for index, fixture in enumerate(fixtures):
+            subprocess.run(['git','init','-q',str(fixture.worker)],check=True)
+            subprocess.run(['git','-C',str(fixture.worker),'fetch','-q',str(self.root),'HEAD'],check=True)
+            subprocess.run(['git','-C',str(fixture.worker),'checkout','-q','--detach','FETCH_HEAD'],check=True)
+            (fixture.worker/'.git/info/exclude').write_text('.context/\n')
+            tmp=fixture.worker/'.context/tmp';tmp.mkdir()
+            fixture.gate.update(worker='fixture-'+str(index),timeout_seconds=14400,
+                env={'TMPDIR':str(tmp),'CONDUCTOR_WORKSPACE_NAME':'fixture-'+str(index),
+                     'CONDUCTOR_PORT':str(39000-index*24000)})
+            fixture.request.update(source=old['source'],phase='final')
+            fixture.receipt['source']=old['source']
+            fixture.result['source']=old['source']
+            fixture.receipt['execution_binding']['contract_digest']=c.digest(fixture.gate)
+            if fixture is structural: fixture.write_native()
+            else: fixture.seal()
+        # Two separately sealed structural invocations: only the latter is
+        # latest, but both historical request proofs must remain admissible.
+        second=copy.copy(structural)
+        for key in ('request','result','receipt','process','failure'):
+            setattr(second,key,copy.deepcopy(getattr(structural,key)))
+        second.token='second-structural'
+        second.folder=structural.root/'cycle/attempts/36/final'/structural.gate['name']
+        second.folder.mkdir(parents=True)
+        import hashlib
+        native=second.worker/'.context/deploy-worker'/hashlib.sha256(second.token.encode()).hexdigest()
+        native.mkdir(parents=True)
+        case=second.result['evidence'][second.gate['name']]
+        log=native/Path(case['log']).name;log.write_bytes(Path(case['log']).read_bytes())
+        case['log']=str(log);case['sha256']=c.sha_file(log)
+        second.request['token']=second.result['token']=second.receipt['token']=second.token
+        second.receipt.update(log=str(second.folder/'output.log'),worker_result=str(second.folder/'result.json'))
+        second.paths={name:second.folder/name for name in structural.paths}
+        second.write_native()
+        fixtures.insert(1,second)
+        old['gates']=[g for g in old['gates'] if g.get('quick')]+[structural.gate,backend.gate]
+        state=c.initialize(old,self.root)
+        state.update(phase='triage',ready=False,pending=[])
+        for i, fixture in enumerate(fixtures):
+            failure=copy.deepcopy(fixture.failure)
+            failure.update(id='native-'+str(i),gate=fixture.gate['name'],source=old['source'],
+                check=fixture.gate['name']+'/'+fixture.gate['checks'][0],evidence=fixture.receipt['log'],
+                worker_result=fixture.receipt['worker_result'])
+            state['failures'].append(failure);state['pending'].append(failure['id'])
+            state['attempts'].append({'phase':'final','results':[fixture.receipt]})
+            c.reconcile(state,failure['id'],fixture.proof)
+            folder=self.directory/'attempts'/str(i)/'final'/fixture.gate['name']
+            for name,path in fixture.paths.items():
+                c.write(folder/name,c.read(path))
+        new=copy.deepcopy(old)
+        outside=Path(tempfile.mkdtemp(prefix='dpt-'));self.addCleanup(__import__('shutil').rmtree,outside)
+        for index,gate in enumerate(g for g in new['gates'] if not g.get('quick')):
+            path=outside/f'g{index}';path.mkdir(mode=0o700)
+            info=path.stat()
+            marker=dict(schema='deploy-external-tmpdir-v1',coordinator_root=str(self.root),
+                worker_root=gate['worker_root'],gate=gate['name'],uid=os.geteuid(),device=info.st_dev,inode=info.st_ino)
+            c.write(path/'.deploy-tmpdir-owner.json',marker);(path/'.deploy-tmpdir-owner.json').chmod(0o600)
+            gate['env']['TMPDIR']=str(path)
+        proof=dict(kind='replace-owned-tmpdir-v1',source=old['source'],from_plan_digest=c.digest(old),
+            paths={g['name']:g['env']['TMPDIR'] for g in new['gates'] if not g.get('quick')})
+        return old,new,state,proof,fixtures
+
+    def test_reconciled_native_history_tmpdir_cli_and_revalidation(self):
+        import contextlib,io
+        old,new,state,proof,fixtures=self.reconciled_tmpdir_fixture()
+        before=copy.deepcopy(state)
+        for name,value in [('old',old),('new',new),('proof',proof),('cycle',state)]:
+            c.write(self.directory/(name+'.json'),value)
+        with contextlib.redirect_stdout(io.StringIO()),patch.object(c,'_prepared_workers_idle'):
+            code=c.main(['prepare-bindings','--input',str(self.directory/'old.json'),'--plan',
+                str(self.directory/'new.json'),'--proof',str(self.directory/'proof.json'),
+                '--state-dir',str(self.directory),'--root',str(self.root)])
+        self.assertEqual(0,code)
+        after=c.read(self.directory/'cycle.json')
+        self.assertEqual('quick',after['phase']);self.assertFalse(after['ready'])
+        for key in ('attempts','failures','pending','reconciled_owners'):
+            self.assertEqual(before[key],after[key])
+        self.assertEqual([],c.retained_owners(after,[f.gate['name'] for f in fixtures]))
+        for fixture in fixtures:
+            self.assertTrue(c.local_reconciliation_bound(after,fixture.receipt))
+            self.assertEqual(fixture.proof['files'],{n:c.sha_file(p) for n,p in fixture.paths.items()})
+        for mutate in [lambda x:x.pop('prepared_binding_history'),
+                       lambda x:x['plan']['gates'][-1]['env'].update(OTHER='changed'),
+                       lambda x:x['prepared_binding_history'][-1]['leases'].clear()]:
+            bad=copy.deepcopy(after);mutate(bad)
+            with self.assertRaises(ValueError):c.retained_owners(bad,[fixtures[-1].gate['name']])
+
+    def test_older_binding_history_is_not_new_transition_authority(self):
+        old,new,state,proof,fixtures=self.reconciled_tmpdir_fixture()
+        prior=copy.deepcopy(old)
+        prior['gates'][-2]['env']['TMPDIR']='/retired/original/tmp'
+        legacy=dict(kind='replace-owned-tmpdir-v1',from_plan=prior,
+            from_source=old['source'],to_source=old['source'],
+            gates=[fixtures[0].gate['name']],leases={},credit_granted=False)
+        state['prepared_binding_history']=[legacy]
+        self.assertEqual([],c.retained_owners(state,[f.gate['name'] for f in fixtures]))
+        with patch.object(c,'_prepared_workers_idle'):
+            c.prepare_bindings(state,old,new,self.root,self.directory,tmpdir_replacement=proof)
+        self.assertEqual([],c.retained_owners(state,[f.gate['name'] for f in fixtures]))
+        self.assertEqual(legacy,state['prepared_binding_history'][0])
+
+    def test_cleanup_proof_after_recorded_tmpdir_transition(self):
+        from deploy_test_isolation import external_tmpdir
+        old,new,state,proof,fixtures=self.reconciled_tmpdir_fixture()
+        state['prepared_binding_history']=[dict(kind='replace-owned-tmpdir-v1',
+            from_plan=old,to_plan=new,from_source=old['source'],to_source=new['source'],
+            gates=list(proof['paths']),credit_granted=False,
+            leases={g['name']:external_tmpdir(g['env']['TMPDIR'],Path(g['worker_root']),
+                self.root,g['name'],new['source']) for g in new['gates'] if not g.get('quick')})]
+        state['plan']=new
+        for fixture in fixtures:self.assertTrue(c.local_reconciliation_bound(state,fixture.receipt))
+        for alter in [lambda h:h['to_plan']['gates'][-1]['env'].update(OTHER='bad'),
+                      lambda h:h.update(to_source={'head':'bad','digest':'bad'}),
+                      lambda h:h['leases'][fixtures[-1].gate['name']].update(inode=0),
+                      lambda h:h['to_plan']['gates'][-1].update(command=['false'])]:
+            bad=copy.deepcopy(state);alter(bad['prepared_binding_history'][0])
+            with self.assertRaises(ValueError):c.local_reconciliation_bound(bad,fixtures[-1].receipt)
+
+    def test_reconciled_native_history_rejects_invalid_proofs_atomically(self):
+        old,new,state,proof,fixtures=self.reconciled_tmpdir_fixture()
+        key=fixtures[0].proof['files']['receipt.json']
+        changes=[lambda x:x['reconciled_owners'].pop(key),
+                 lambda x:x['reconciled_owners'][key]['proof']['files'].update({'receipt.json':'0'*64}),
+                 lambda x:x['reconciled_owners'][key].update(token='foreign'),
+                 lambda x:x['reconciled_owners'].update(duplicate=copy.deepcopy(x['reconciled_owners'][key])),
+                 lambda x:x['reconciled_owners'].update(wrong=x['reconciled_owners'].pop(key))]
+        for mutate in changes:
+            bad=copy.deepcopy(state);mutate(bad);before=copy.deepcopy(bad)
+            with self.assertRaises(ValueError),patch.object(c,'_prepared_workers_idle'):
+                c.prepare_bindings(bad,old,new,self.root,self.directory,tmpdir_replacement=proof)
+            self.assertEqual(before,bad)
+
+    def test_replace_external_tmpdir_cli_after_native_failure(self):
+        import contextlib, io
+        old, new, state, proof = self.external_tmpdir_fixture()
+        historical = copy.deepcopy(state)
+        for name, value in [('old',old),('new',new),('proof',proof),('cycle',state)]:
+            c.write(self.directory / (name+'.json'),value)
+        with contextlib.redirect_stdout(io.StringIO()), patch.object(c, '_prepared_workers_idle'):
+            code=c.main(['prepare-bindings','--input',str(self.directory/'old.json'),
+                         '--plan',str(self.directory/'new.json'),'--proof',str(self.directory/'proof.json'),
+                         '--state-dir',str(self.directory),'--root',str(self.root)])
+        self.assertEqual(0,code)
+        after=c.read(self.directory/'cycle.json')
+        self.assertEqual('quick',after['phase']); self.assertFalse(after['ready'])
+        for key in ('attempts','failures','pending'):
+            self.assertEqual(historical[key],after[key])
+        self.assertEqual(new,after['plan'])
+        self.assertEqual('triage',after['next_after_quick'])
+        self.assertFalse(after['prepared_binding_history'][-1]['credit_granted'])
+        self.assertNotEqual(historical['input_fingerprints']['api'],after['input_fingerprints']['api'])
+        with self.assertRaises(ValueError):
+            c.prepare_bindings(after,new,new,self.root,self.directory,tmpdir_replacement=proof)
+
+    def test_replace_external_tmpdir_rejects_unsafe_admission_atomically(self):
+        old, new, base, proof = self.external_tmpdir_fixture()
+        mutations = [
+            lambda n,s,p: n['gates'][1]['env'].update(XDG_CACHE_HOME='/different'),
+            lambda n,s,p: n['gates'][1]['command'].append('different'),
+            lambda n,s,p: n['gates'][1]['checks'].pop(),
+            lambda n,s,p: n['gates'][1]['env'].update(TMPDIR=n['gates'][2]['env']['TMPDIR']),
+            lambda n,s,p: p.update(unknown=True),
+            lambda n,s,p: p.update(source={'changed':True}),
+            lambda n,s,p: s.update(running=['api']),
+            lambda n,s,p: s.update(phase='initial'),
+            lambda n,s,p: s.update(pending=[]),
+        ]
+        for mutate in mutations:
+            candidate,state,attest=copy.deepcopy(new),copy.deepcopy(base),copy.deepcopy(proof)
+            mutate(candidate,state,attest); before=copy.deepcopy(state)
+            with patch.object(c,'_prepared_workers_idle'), self.assertRaises(ValueError):
+                c.prepare_bindings(state,old,candidate,self.root,self.directory,tmpdir_replacement=attest)
+            self.assertEqual(before,state)
+        path=Path(new['gates'][1]['env']['TMPDIR']); marker=path/'.deploy-tmpdir-owner.json'
+        original=marker.read_text()
+        for mode in ('public','wrong-owner','wrong-source','symlink'):
+            if mode=='public':path.chmod(0o755)
+            if mode in ('wrong-owner','wrong-source'):
+                value=json.loads(original)
+                value['uid' if mode=='wrong-owner' else 'source']=999999 if mode=='wrong-owner' else {}
+                marker.write_text(json.dumps(value))
+            if mode=='symlink':
+                marker.rename(path/'saved');marker.symlink_to(path/'saved')
+            state=copy.deepcopy(base)
+            with patch.object(c,'_prepared_workers_idle'),self.assertRaises(ValueError):
+                c.prepare_bindings(state,old,new,self.root,self.directory,tmpdir_replacement=proof)
+            self.assertEqual(base,state)
+            if mode=='symlink':marker.unlink();(path/'saved').rename(marker)
+            path.chmod(0o700);marker.write_text(original)
+        request=self.directory/'attempts/unknown/final/api/request.json'
+        c.write(request,{'token':'unknown','gate':'api'})
+        with patch.object(c,'_prepared_workers_idle'),self.assertRaisesRegex(ValueError,'unknown request'):
+            c.prepare_bindings(copy.deepcopy(base),old,new,self.root,self.directory,tmpdir_replacement=proof)
+
+    def test_replace_external_tmpdir_active_process_and_birth_guards(self):
+        old,new,state,proof=self.external_tmpdir_fixture()
+        before=copy.deepcopy(state)
+        with patch.object(c,'_prepared_workers_idle',side_effect=ValueError('active local consumer')):
+            with self.assertRaisesRegex(ValueError,'active local consumer'):
+                c.prepare_bindings(state,old,new,self.root,self.directory,tmpdir_replacement=proof)
+        self.assertEqual(before,state)
+        proc=self.root/'proc';proc.mkdir();entry=proc/'99999999';entry.mkdir()
+        (entry/'fd').mkdir();(entry/'maps').write_text('')
+        (entry/'cwd').symlink_to(Path(new['gates'][1]['worker_root']))
+        (entry/'stat').write_text('99999999 (fixture) S '+'0 '*18+'123 0')
+        with self.assertRaisesRegex(ValueError,'active local consumer'):
+            c._prepared_workers_idle([Path(new['gates'][1]['worker_root'])],proc,birth_guard=True)
+        (entry/'cwd').unlink();(entry/'cwd').symlink_to(self.root)
+        original=Path.read_text; calls=[]
+        def replaced_birth(path,*args,**kwargs):
+            value=original(path,*args,**kwargs)
+            if path==entry/'stat':
+                calls.append(1)
+                if len(calls)>1:return value.replace('123','124')
+            return value
+        with patch.object(Path,'read_text',replaced_birth),self.assertRaisesRegex(ValueError,'birth identity changed'):
+            c._prepared_workers_idle([Path(new['gates'][1]['worker_root'])],proc,birth_guard=True)
+
+    def test_replace_external_tmpdir_rejects_source_and_directory_changes(self):
+        old,new,state,proof=self.external_tmpdir_fixture()
+        target=Path(new['gates'][1]['env']['TMPDIR']);before=copy.deepcopy(state)
+        # A path alias is not an inode-bound lease, even when its target is valid.
+        alias=target.parent/'alias';alias.symlink_to(target,target_is_directory=True)
+        candidate=copy.deepcopy(new);candidate['gates'][1]['env']['TMPDIR']=str(alias)
+        with self.assertRaises(ValueError),patch.object(c,'_prepared_workers_idle'):
+            c.prepare_bindings(state,old,candidate,self.root,self.directory,tmpdir_replacement=proof)
+        self.assertEqual(before,state)
+        # Exact source comparison catches an uncommitted producer change.
+        (self.root/'code').write_text('changed')
+        with self.assertRaisesRegex(ValueError,'source/plan/environment'),patch.object(c,'_prepared_workers_idle'):
+            c.prepare_bindings(state,old,new,self.root,self.directory,tmpdir_replacement=proof)
+        self.assertEqual(before,state)
+
+    def test_external_tmpdir_custody_survives_normal_source_refresh(self):
+        old,new,state,proof=self.external_tmpdir_fixture()
+        with patch.object(c,'_prepared_workers_idle'):
+            c.prepare_bindings(state,old,new,self.root,self.directory,tmpdir_replacement=proof)
+        state['phase']='triage'  # pending original failure, no invented execution
+        markers={g['name']:(Path(g['env']['TMPDIR'])/'.deploy-tmpdir-owner.json').read_bytes()
+                 for g in new['gates'] if not g.get('quick')}
+        (self.root/'code').write_text('later legitimate repair')
+        subprocess.run(['git','-C',str(self.root),'add','code'],check=True)
+        subprocess.run(['git','-C',str(self.root),'-c','user.name=test','-c',
+                        'user.email=test@example.com','commit','-qm','later repair'],check=True)
+        updated=copy.deepcopy(new);updated['source']=c.source(self.root)
+        for gate in updated['gates']:
+            if not gate.get('quick'):
+                subprocess.run(['git','-C',gate['worker_root'],'fetch','-q','origin'],check=True)
+                subprocess.run(['git','-C',gate['worker_root'],'checkout','-q','--detach','FETCH_HEAD'],check=True)
+        failures=copy.deepcopy(state['failures'])
+        c.refresh(state,new,updated,self.root,directory=self.directory)
+        self.assertEqual(failures,state['failures'])
+        self.assertEqual(updated['source'],state['source'])
+        self.assertEqual({},state['carried_passes'])
+        for gate in updated['gates']:
+            if not gate.get('quick'):
+                self.assertEqual(markers[gate['name']],(Path(gate['env']['TMPDIR'])/'.deploy-tmpdir-owner.json').read_bytes())
+
+    def test_external_tmpdir_real_child_ownership_and_shared_parent(self):
+        old,new,state,proof=self.external_tmpdir_fixture()
+        worker=Path(new['gates'][1]['worker_root'])
+        proc=self.root/'real-proc-view';proc.mkdir()
+        child=subprocess.Popen([sys.executable,'-c','import time;time.sleep(30)'],cwd=worker)
+        try:
+            (proc/str(child.pid)).symlink_to(Path('/proc')/str(child.pid),target_is_directory=True)
+            with self.assertRaisesRegex(ValueError,'active local consumer'):
+                c._prepared_workers_idle([worker],proc,birth_guard=True)
+        finally:
+            child.terminate();child.wait(timeout=5)
+        value=Path(new['gates'][1]['env']['TMPDIR'])
+        parent=value.parent;parent.chmod(0o777)
+        try:
+            with self.assertRaisesRegex(ValueError,'mutable shared parent'):
+                c.external_tmpdir(str(value),worker,self.root,'api',state['source'])
+        finally:
+            parent.chmod(0o700)
+
+    def test_external_tmpdir_pending_state_requires_actual_failure_receipt(self):
+        old,new,state,proof=self.external_tmpdir_fixture()
+        for path in (self.directory/'attempts').glob('**/request.json'):
+            path.unlink()  # isolated fixture simulates missing native provenance
+        original=copy.deepcopy(state)
+        with patch.object(c,'_prepared_workers_idle'),self.assertRaisesRegex(ValueError,'actual full failure receipt'):
+            c.prepare_bindings(state,old,new,self.root,self.directory,tmpdir_replacement=proof)
+        self.assertEqual(original,state)
+
+    def test_privileged_scan_preserves_nonroot_lease(self):
+        self.assertNotEqual(0, os.geteuid())
+        old,new,state,proof=self.external_tmpdir_fixture()
+        roots=[Path(g['worker_root']) for g in new['gates'] if not g.get('quick')]
+        roots += [Path(g['env']['TMPDIR']) for g in new['gates'] if not g.get('quick')]
+        # Real host /proc: inaccessible processes must be inspected, never omitted.
+        import deploy_test_process_scan as scan
+        with patch.object(scan,'privileged_scan',wraps=scan.privileged_scan) as actual_scan:
+            c._prepared_workers_idle(roots,birth_guard=True)
+            c.prepare_bindings(state,old,new,self.root,self.directory,tmpdir_replacement=proof)
+        self.assertGreaterEqual(actual_scan.call_count,1)
+        self.assertEqual('quick',state['phase'])
+        print('ACTUAL_NONROOT_PRIVILEGED_SCAN',json.dumps(scan.privileged_scan(roots),sort_keys=True))
+        for gate in new['gates']:
+            if not gate.get('quick'):
+                lease=c.external_tmpdir(gate['env']['TMPDIR'],Path(gate['worker_root']),self.root,
+                                        gate['name'],state['source'])
+                self.assertEqual(os.geteuid(),lease['uid'])
+
+    def test_privileged_scan_rejects_active_and_unbound_input(self):
+        import deploy_test_process_scan as scan
+        old,new,state,proof=self.external_tmpdir_fixture()
+        root=Path(new['gates'][1]['worker_root'])
+        child=subprocess.Popen([sys.executable,'-c','import time;time.sleep(30)'],cwd=root)
+        try:
+            with self.assertRaisesRegex(ValueError,'refused or unavailable'):
+                scan.privileged_scan([root])
+        finally:
+            child.terminate();child.wait(timeout=5)
+        for roots in ([Path('/')],[Path('/proc')],[root]*65):
+            with self.assertRaises(ValueError):
+                scan.privileged_scan(roots)
+        # The root helper itself rejects a forged uid/pid/birth and unknown fields.
+        calls=[]; native=scan.subprocess.run
+        def capture(*args,**kwargs):
+            calls.append((args,kwargs));return native(*args,**kwargs)
+        with patch.object(scan.subprocess,'run',side_effect=capture):
+            scan.privileged_scan([root])
+        args,kwargs=calls[0]
+        self.assertFalse(kwargs.get('shell',False))
+        self.assertEqual(['/usr/bin/sudo','-n','/usr/bin/python3','-I','-S','-B','-c'],args[0][:7])
+        for field,value in [('uid',os.geteuid()+1),('pid',1),('birth','wrong'),('unknown','field')]:
+            request=json.loads(kwargs['input']);request[field]=value
+            result=native(args[0],input=json.dumps(request).encode(),capture_output=True,
+                          timeout=30,env=kwargs['env'],close_fds=True)
+            self.assertNotEqual(0,result.returncode)
+            self.assertEqual({'kind':'deploy-process-scan-v1','quiescent':False},json.loads(result.stdout))
+
     def test_refresh_retains_explicit_deploy_exclusion_without_pass_credit(self):
         gate = self.plan['gates'][1]
         gate.update(category='smoke', native_cloud=True, checks=['mass', 'peer'])
@@ -2288,6 +3373,49 @@ class Cycle(unittest.TestCase):
                 self.assertFalse(result['lingering_group']); self.assertNotIn('cleanup_owner', result)
                 launch.assert_not_called()
 
+    def test_local_slot_holds_through_native_cleanup_validation_without_cancelling_cloud(self):
+        import time
+        started = self.root / '.context/first-native-started'
+        forbidden = self.root / '.context/queued-native-started'
+        script = ("import json,os,time;from pathlib import Path;"
+                  "r=json.loads(Path(os.environ['DEPLOY_GATE_REQUEST']).read_text());"
+                  f"Path({str(started)!r}).touch();time.sleep(.15);"
+                  "r.update(cases={c:'PASS' for c in r['checks']},complete=True,cleanup_complete=False,reused=False);"
+                  "Path(os.environ['DEPLOY_GATE_RESULT']).write_text(json.dumps(r))")
+        first = dict(name='card', category='agentcard-lifecycle', worker_transport='local-isolated',
+                     case_protocol=True, checks=['card'], timeout_seconds=2, command=[sys.executable, '-c', script])
+        second = dict(name='queued', category='generic', worker_transport='local-isolated',
+                      case_protocol=True, checks=['queued'], timeout_seconds=2,
+                      command=[sys.executable, '-c', f'from pathlib import Path;Path({str(forbidden)!r}).touch()'])
+        self.state['phase'] = 'initial'; failed = threading.Event()
+        with ThreadPoolExecutor(2) as pool:
+            one = pool.submit(c.execute, first, self.state, self.directory, self.root, local_failure=failed)
+            end = time.monotonic() + 1
+            while not started.exists() and time.monotonic() < end:
+                time.sleep(.005)
+            self.assertTrue(started.exists())
+            two = pool.submit(c.execute, second, self.state, self.directory, self.root, local_failure=failed)
+            a, b = one.result(), two.result()
+        self.assertEqual(0, a['native_exit']); self.assertTrue(a['lingering_group'])
+        self.assertIn('cleanup_owner', a); self.assertTrue(failed.is_set())
+        self.assertEqual({'queued': 'UNVERIFIED'}, b['cases'])
+        self.assertFalse(b['executed']); self.assertFalse(b['complete']); self.assertFalse(forbidden.exists())
+        cloud_script = ("import json,os;from pathlib import Path;"
+                        "r=json.loads(Path(os.environ['DEPLOY_GATE_REQUEST']).read_text());"
+                        "r.update(cases={c:'PASS' for c in r['checks']},complete=True,cleanup_complete=True,reused=False);"
+                        "Path(os.environ['DEPLOY_GATE_RESULT']).write_text(json.dumps(r))")
+        cloud = dict(name='cloud', native_cloud=True, case_protocol=True, checks=['cloud'], timeout_seconds=2,
+                     worker_transport='benchmark-cloud-cli', command=[sys.executable, '-c', cloud_script])
+        result = c.execute(cloud, self.state, self.directory, self.root, local_failure=failed)
+        self.assertEqual('PASS', result['status']); self.assertTrue(result['executed'])
+        self.assertFalse(result['cancelled']); self.assertFalse(c.CANCEL.is_set())
+        # Preparation/receipt bookkeeping consumes the same deadline too, without a late child launch.
+        delayed = dict(second, name='delayed', checks=['delayed'], timeout_seconds=.04)
+        with patch.object(c, 'revalidate_standing_skips', side_effect=lambda _: time.sleep(.08)), \
+                patch.object(c, 'run_command') as launch:
+            late = c.execute(delayed, self.state, self.directory, self.root)
+        self.assertFalse(late['executed']); self.assertTrue(late['timed_out']); launch.assert_not_called()
+
     def test_refused_local_admission_keeps_its_reason_when_receipt_preparation_exhausts_deadline(self):
         clock = [1000.0]
         lock = self.root / '.context/native-worker-admission.lock'
@@ -2411,6 +3539,438 @@ class Cycle(unittest.TestCase):
         for root, (_, admission) in zip(roots, rows):
             self.assertEqual(str(root / '.context/native-worker-admission.lock'), admission['lock'])
 
+    def initial_independent_fixture(self, phase="initial"):
+        import contextlib, io
+        plan = copy.deepcopy(self.plan)
+        state = c.initialize(plan, self.root)
+        c.run_phase(plan, state, self.directory, self.root)  # native quick receipts
+        self.assertEqual('initial', state['phase'])
+        state['phase'] = phase
+        plan_path = self.directory/'plan.json'; c.write(plan_path, plan)
+        c.write(self.directory/'cycle.json', state)
+        payload = self.directory/'defer.json'
+        c.write(payload, {'source': state['source'], 'gates': {'ui': 'fixture prerequisite unavailable'}})
+        def call():
+            error = io.StringIO()
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(error):
+                code = c.main([phase + '-independent', '--plan', str(plan_path), '--state-dir', str(self.directory),
+                               '--root', str(self.root), '--input', str(payload)])
+            self.last_initial_error = error.getvalue()
+            return code
+        return plan, state, payload, call
+
+    def test_final_independent_preserves_pending_and_reuses_exact_full_receipts(self):
+        plan,before,payload,call=self.initial_independent_fixture('final')
+        before['initial_pending']={'ui':{'status':'PENDING','reason':'original initial deferral'}}
+        c.write(self.directory/'cycle.json',before)
+        self.assertEqual(0,call())
+        after=c.read(self.directory/'cycle.json')
+        self.assertEqual('final',after['phase']);self.assertFalse(after['ready'])
+        self.assertEqual(before['attempts'],after['attempts'][:-1])
+        self.assertEqual('final',after['attempts'][-1]['phase'])
+        self.assertEqual({'ui'},set(after['final_pending']))
+        self.assertEqual(before['initial_pending'],after['initial_pending'])
+        self.assertTrue(c.reusable_full_pass(after,plan['gates'][1]))
+        self.assertNotEqual(0,c.verify_saved(self.directory,self.root))
+        self.assertEqual(0,call())
+        self.assertEqual(after['attempts'],c.read(self.directory/'cycle.json')['attempts'])
+        c.write(payload,{'source':after['source'],'gates':{}})
+        self.assertEqual(0,call())
+        completed=c.read(self.directory/'cycle.json')
+        self.assertEqual(['ui'],[r['gate'] for r in completed['attempts'][-1]['results']])
+        self.assertFalse(completed['ready']);self.assertFalse(completed['final_pending'])
+        self.assertFalse(completed['initial_pending'])
+        c.run_phase(plan,completed,self.directory,self.root)
+        self.assertTrue(completed['ready'])
+        self.assertFalse(completed['attempts'][-1]['results'])
+
+    def final_cancelled_observation(self, failing):
+        plan,state,payload,call=self.initial_independent_fixture('final')
+        if failing:
+            plan['gates'][1]['command']=['false']
+            state.update(plan=plan,plan_digest=c.digest(plan),input_fingerprints=c.input_fingerprints(plan,self.root))
+        actual=c.execute
+        def stop_after_result(*args,**kwargs):
+            result=actual(*args,**kwargs);c.CANCEL.set();return result
+        try:
+            with patch.object(c,'execute',side_effect=stop_after_result):
+                c.run_phase(plan,state,self.directory,self.root,final_observation=c.read(payload))
+        finally:
+            c.CANCEL.clear()
+        return plan,state,payload,call
+
+    def assert_final_observation_resume(self, failing):
+        import contextlib,io
+        plan,state,payload,call=self.final_cancelled_observation(failing)
+        self.assertEqual('interrupted',state['phase'])
+        self.assertEqual('triage' if failing else 'final',state['resume_phase'])
+        self.assertTrue(state['resume_independent'])
+        c.write(self.directory/'plan.json',plan)
+        original=copy.deepcopy(state)
+        def resume(value):
+            c.write(self.directory/'cycle.json',value)
+            with contextlib.redirect_stdout(io.StringIO()),contextlib.redirect_stderr(io.StringIO()), \
+                    patch.object(c,'execute',side_effect=AssertionError('resume must not launch')):
+                code=c.main(['resume','--plan',str(self.directory/'plan.json'),
+                    '--state-dir',str(self.directory),'--root',str(self.root)])
+            return code,c.read(self.directory/'cycle.json')
+        held=copy.deepcopy(state)
+        held['attempts'][-1]['results'][0]['cleanup_owner']={'worker':'held exact owner'}
+        code,saved=resume(held);self.assertEqual(2,code);self.assertEqual(held,saved)
+        (self.root/'code').write_text('changed')
+        code,saved=resume(original);self.assertEqual(2,code);self.assertEqual(original,saved)
+        (self.root/'code').write_text('original')
+        code,saved=resume(original)
+        self.assertEqual(1,code)  # resuming observation is never validation readiness
+        self.assertEqual('triage' if failing else 'final',saved['phase'])
+        self.assertNotIn('resume_independent',saved);self.assertNotIn('resume_phase',saved)
+        for key in ('source','attempts','failures','pending','final_pending','round'):
+            self.assertEqual(original.get(key),saved.get(key),key)
+        self.assertFalse(saved['ready'])
+
+    def test_final_independent_cancel_resume_preserves_failed_rca(self):
+        self.assert_final_observation_resume(True)
+
+    def test_final_independent_cancel_resume_never_launches_deferred_work(self):
+        self.assert_final_observation_resume(False)
+
+    def interrupted_triage_refresh_fixture(self):
+        plan,state,_,_=self.final_cancelled_observation(True)
+        for gate in plan['gates']:
+            if not gate.get('quick'):gate['worker_root']=gate['cwd']
+        state.update(plan=plan,plan_digest=c.digest(plan),input_fingerprints=c.input_fingerprints(plan,self.root))
+        (self.root/'code').write_text('reviewed cleanup repair')
+        subprocess.run(['git','-C',str(self.root),'add','code'],check=True)
+        subprocess.run(['git','-C',str(self.root),'-c','user.name=test','-c','user.email=test@example.com','commit','-qm','repair'],check=True)
+        new=copy.deepcopy(plan);new['source']=c.source(self.root)
+        for gate in plan['gates']:
+            if gate.get('quick'):continue
+            worker=Path(gate['worker_root'])
+            subprocess.run(['git','init','-q',str(worker)],check=True)
+            subprocess.run(['git','-C',str(worker),'fetch','-q',str(self.root),'HEAD'],check=True)
+            subprocess.run(['git','-C',str(worker),'checkout','-q','--detach','FETCH_HEAD'],check=True)
+            (worker/'.git/info/exclude').write_text('.context/\n')
+        old_path=self.directory/'old.json';new_path=self.directory/'new.json'
+        c.write(old_path,plan);c.write(new_path,new);c.write(self.directory/'cycle.json',state)
+        def invoke(action='refresh',flag=True,owners=(),scan=None):
+            import contextlib,io
+            argv=[action,'--plan',str(new_path),'--state-dir',str(self.directory),'--root',str(self.root),'--input',str(old_path)]
+            if flag:argv.append('--recover-interrupted-triage')
+            with contextlib.redirect_stdout(io.StringIO()),contextlib.redirect_stderr(io.StringIO()), \
+                 patch.object(c,'retained_owners',return_value=list(owners)), \
+                 patch('deploy_test_process_scan.prepared_workers_idle',side_effect=scan), \
+                 patch.object(c,'run_phase',side_effect=AssertionError('refresh must not launch')):
+                try:return c.main(argv)
+                except SystemExit as error:return error.code
+        return plan,state,new,old_path,new_path,invoke
+
+    def test_explicit_interrupted_triage_refresh_cli_preserves_pending(self):
+        old,before,new,old_path,new_path,invoke=self.interrupted_triage_refresh_fixture()
+        raw=(self.directory/'cycle.json').read_bytes()
+        self.assertEqual(2,invoke(flag=False))
+        self.assertEqual(raw,(self.directory/'cycle.json').read_bytes())
+        self.assertEqual(2,invoke(action='resume',flag=False))
+        self.assertEqual(raw,(self.directory/'cycle.json').read_bytes())
+        self.assertEqual(0,invoke())
+        after=c.read(self.directory/'cycle.json')
+        for key in ('pending','failures','attempts','reconciled_owners'):
+            self.assertEqual(before.get(key),after.get(key),key)
+        self.assertEqual(('quick','triage',False),(after['phase'],after['next_after_quick'],after['ready']))
+        self.assertNotIn('resume_phase',after);self.assertNotIn('resume_independent',after)
+        self.assertEqual(new['source'],after['source'])
+        self.assertEqual(before['source'],after['interrupted_triage_refresh_history'][-1]['from_source'])
+        self.assertFalse(c.reusable_full_pass(after,new['gates'][1]))
+        c.run_phase(new,after,self.directory,self.root)
+        self.assertEqual('triage',after['phase']);self.assertEqual(before['pending'],after['pending'])
+        self.assertEqual(2,invoke())
+
+    def test_interrupted_triage_refresh_rejections_leave_saved_state_identical(self):
+        old,before,new,old_path,new_path,invoke=self.interrupted_triage_refresh_fixture()
+        for field,value in [('resume_phase','focused'),('pending',[]),('running',True),('live_failures',[]),('environment','changed')]:
+            bad=copy.deepcopy(before);bad[field]=value;c.write(self.directory/'cycle.json',bad)
+            raw=(self.directory/'cycle.json').read_bytes()
+            with self.subTest(field=field):self.assertEqual(2,invoke());self.assertEqual(raw,(self.directory/'cycle.json').read_bytes())
+        c.write(self.directory/'cycle.json',before)
+        for field,value in [('command',['other']),('checks',['removed']),('cwd',str(self.root)),('timeout_seconds',1)]:
+            bad=copy.deepcopy(new);bad['gates'][1][field]=value;c.write(new_path,bad)
+            raw=(self.directory/'cycle.json').read_bytes()
+            with self.subTest(field=field):self.assertEqual(2,invoke());self.assertEqual(raw,(self.directory/'cycle.json').read_bytes())
+        c.write(new_path,new)
+        bad=copy.deepcopy(before);bad['failures'][0]['source']={'head':'0'*40,'digest':'0'*64};c.write(self.directory/'cycle.json',bad)
+        raw=(self.directory/'cycle.json').read_bytes();self.assertEqual(2,invoke());self.assertEqual(raw,(self.directory/'cycle.json').read_bytes())
+        c.write(self.directory/'cycle.json',before)
+        worker=Path(new['gates'][1]['worker_root']);(worker/'code').write_text('not prepared')
+        raw=(self.directory/'cycle.json').read_bytes();self.assertEqual(2,invoke());self.assertEqual(raw,(self.directory/'cycle.json').read_bytes())
+
+    def test_interrupted_triage_refresh_owners_unknown_requests_and_late_cancel(self):
+        old,before,new,old_path,new_path,invoke=self.interrupted_triage_refresh_fixture()
+        raw=(self.directory/'cycle.json').read_bytes()
+        self.assertEqual(2,invoke(owners=['api']))
+        self.assertEqual(raw,(self.directory/'cycle.json').read_bytes())
+        unknown=self.directory/'attempts/99/final/api/request.json'
+        c.write(unknown,dict(token='unknown',gate='api',source=before['source']))
+        self.assertEqual(2,invoke());self.assertEqual(raw,(self.directory/'cycle.json').read_bytes())
+        c.write(unknown.parent/'receipt.json',c.read(unknown))
+        self.assertEqual(2,invoke());self.assertEqual(raw,(self.directory/'cycle.json').read_bytes())
+        unknown.unlink();(unknown.parent/'receipt.json').unlink()
+        calls=[]
+        def cancel_on_second_scan(*args,**kwargs):
+            calls.append(1)
+            if len(calls)==2:c.CANCEL.set()
+        try:
+            self.assertEqual(2,invoke(scan=cancel_on_second_scan))
+            self.assertEqual(raw,(self.directory/'cycle.json').read_bytes())
+        finally:c.CANCEL.clear()
+        self.assertEqual(2,invoke(action='status'))
+        self.assertEqual(raw,(self.directory/'cycle.json').read_bytes())
+        c.write(new_path,old)
+        self.assertEqual(2,invoke());self.assertEqual(raw,(self.directory/'cycle.json').read_bytes())
+
+    def test_final_independent_interrupted_refresh_invalidates_old_credit(self):
+        plan,state,_,_=self.final_cancelled_observation(False)
+        original=copy.deepcopy(state['attempts'])
+        (self.root/'code').write_text('new source')
+        new=copy.deepcopy(plan);new['source']=c.source(self.root)
+        c.refresh(state,plan,new,self.root)
+        self.assertEqual('quick',state['phase']);self.assertFalse(state['ready'])
+        self.assertNotIn('resume_independent',state);self.assertNotIn('resume_phase',state)
+        self.assertEqual(original,state['attempts'])
+        self.assertFalse(c.reusable_full_pass(state,new['gates'][1]))
+
+    def test_final_independent_refresh_preserves_unaffected_receipts(self):
+        import contextlib,io
+        plan,state,payload,call=self.initial_independent_fixture('final')
+        plan['gates'][1]['input_paths']=['unrelated-input']
+        state.update(plan=plan,plan_digest=c.digest(plan),input_fingerprints=c.input_fingerprints(plan,self.root))
+        plan_path=self.directory/'plan.json';c.write(plan_path,plan)
+        c.write(self.directory/'cycle.json',state)
+        self.assertEqual(0,call())
+        original=c.read(self.directory/'cycle.json')
+        previous=self.directory/'previous.json';c.write(previous,plan)
+        (self.root/'code').write_text('new source')
+        new=copy.deepcopy(plan);new['source']=c.source(self.root);c.write(plan_path,new)
+        def refresh(value):
+            c.write(self.directory/'cycle.json',value)
+            with contextlib.redirect_stdout(io.StringIO()),contextlib.redirect_stderr(io.StringIO()):
+                result=c.main(['refresh','--input',str(previous),'--plan',str(plan_path),
+                    '--state-dir',str(self.directory),'--root',str(self.root)])
+            return result,c.read(self.directory/'cycle.json')
+        held=copy.deepcopy(original)
+        held['attempts'][-1]['results'][0]['cleanup_owner']={'worker':'held exact owner'}
+        code,saved=refresh(held);self.assertEqual(2,code);self.assertEqual(held,saved)
+        unknown=self.directory/'attempts/unknown/final/ui/request.json'
+        c.write(unknown,{'gate':'ui','source':original['source']})
+        code,saved=refresh(original);self.assertEqual(2,code);self.assertEqual(original,saved)
+        unknown.unlink()
+        code,saved=refresh(original)
+        self.assertEqual(0,code)
+        self.assertEqual('quick',saved['phase']);self.assertFalse(saved['ready'])
+        self.assertEqual(original['attempts'],saved['attempts'])
+        self.assertTrue(c.carried_pass(saved,new['gates'][1]))
+        self.assertFalse(c.reusable_full_pass(saved,new['gates'][2]))
+        c.run_phase(new,saved,self.directory,self.root)
+        self.assertEqual('final',saved['phase'])
+        before=copy.deepcopy(saved['attempts'])
+        with patch.object(c,'execute',side_effect=AssertionError('unchanged gate must reuse proof')):
+            c.run_phase(new,saved,self.directory,self.root,
+                final_observation={'source':saved['source'],'gates':{'ui':'still unready'}})
+        self.assertEqual(before,saved['attempts']);self.assertFalse(saved['ready'])
+
+    def test_final_independent_concurrent_failure_keeps_healthy_receipt(self):
+        plan,state,payload,_=self.initial_independent_fixture('final')
+        worker=Path(self.workers.name)/'pending';worker.mkdir()
+        plan['gates'].append(dict(plan['gates'][2],name='pending',worker='pending',cwd=str(worker),
+            env={'CONDUCTOR_WORKSPACE_NAME':'pending','CONDUCTOR_PORT':'37000'}))
+        plan['gates'][1].update(case_protocol=True,command=[sys.executable,'-c',
+            "import json,os;from pathlib import Path;"
+            "r=json.loads(Path(os.environ['DEPLOY_GATE_REQUEST']).read_text());"
+            "r.update(cases={c:'FAIL' for c in r['checks']},complete=True,cleanup_complete=True,reused=False);"
+            "Path(os.environ['DEPLOY_GATE_RESULT']).write_text(json.dumps(r));raise SystemExit(1)"])
+        state.update(plan=plan,plan_digest=c.digest(plan),input_fingerprints=c.input_fingerprints(plan,self.root))
+        actual=c.execute;barrier=threading.Barrier(2);entered=[]
+        def execute(*args,**kwargs):
+            entered.append(args[0]['name']);barrier.wait(timeout=3);return actual(*args,**kwargs)
+        with patch.object(c,'execute',side_effect=execute):
+            c.run_phase(plan,state,self.directory,self.root,
+                final_observation={'source':state['source'],'gates':{'pending':'not ready'}})
+        self.assertCountEqual(['api','ui'],entered)
+        self.assertEqual('triage',state['phase']);self.assertEqual('final',state['failure_phase'])
+        self.assertTrue(c.reusable_full_pass(state,plan['gates'][2]))
+        report={'failures':[self.report(f,'NOT_INTRODUCED',external_provider={'name':'fixture','reason':'outage'})['failures'][0]
+            for f in state['failures'] if f['id'] in state['pending']]}
+        c.adjudicate(state,report)
+        self.assertEqual('final',state['phase']);self.assertFalse(state['ready'])
+        self.assertEqual({'pending'},set(state['final_pending']))
+
+    def test_final_independent_rejects_stale_binding_and_unknown_owner(self):
+        plan,state,payload,call=self.initial_independent_fixture('final')
+        saved=(self.directory/'cycle.json').read_bytes()
+        for changes in ({'phase':'initial'},{'running':True},{'pending':['unresolved']},
+                        {'resume_independent':True}):
+            c.write(self.directory/'cycle.json',{**state,**changes})
+            before=(self.directory/'cycle.json').read_bytes()
+            self.assertEqual(2,call());self.assertEqual(before,(self.directory/'cycle.json').read_bytes())
+        (self.directory/'cycle.json').write_bytes(saved)
+        bad=copy.deepcopy(plan);bad['gates'][1]['env']['CONDUCTOR_PORT']='9999'
+        c.write(self.directory/'plan.json',bad)
+        self.assertEqual(2,call());self.assertEqual(saved,(self.directory/'cycle.json').read_bytes())
+        c.write(self.directory/'plan.json',plan)
+        orphan=self.directory/'attempts/unknown/final/api/request.json'
+        c.write(orphan,{'gate':'api','source':state['source']})
+        self.assertEqual(2,call());self.assertEqual(saved,(self.directory/'cycle.json').read_bytes())
+
+    def test_final_independent_never_reuses_a_tampered_native_receipt(self):
+        plan,state,payload,call=self.initial_independent_fixture('final')
+        self.assertEqual(0,call())
+        saved=c.read(self.directory/'cycle.json')
+        receipt=Path(saved['attempts'][-1]['results'][0]['log']).parent/'receipt.json'
+        value=c.read(receipt);value['execution_binding']['contract_digest']='tampered';c.write(receipt,value)
+        self.assertFalse(c.reusable_full_pass(saved,plan['gates'][1]))
+        self.assertEqual(0,call())
+        after=c.read(self.directory/'cycle.json')
+        self.assertEqual(len(saved['attempts'])+1,len(after['attempts']))
+        self.assertEqual(['api'],[r['gate'] for r in after['attempts'][-1]['results']])
+        self.assertFalse(after['ready'])
+
+    def test_initial_independent_retains_pending_and_reuses_native_pass(self):
+        plan, before, payload, call = self.initial_independent_fixture()
+        self.assertEqual(0, call())
+        after = c.read(self.directory/'cycle.json')
+        self.assertEqual('initial', after['phase']); self.assertFalse(after['ready'])
+        self.assertEqual(before['attempts'], after['attempts'][:-1])
+        self.assertEqual(['api'], [r['gate'] for r in after['attempts'][-1]['results']])
+        self.assertEqual('fixture prerequisite unavailable', after['initial_pending']['ui']['reason'])
+        self.assertEqual('PENDING', after['initial_pending']['ui']['status'])
+        self.assertTrue(c.reusable_full_pass(after, plan['gates'][1]))
+        self.assertNotEqual(0,c.verify_saved(self.directory,self.root))
+        self.assertEqual(0,call())
+        self.assertEqual(after['attempts'],c.read(self.directory/'cycle.json')['attempts'])
+        # Normal run only executes the still-missing full gate and reaches actual full coverage.
+        c.run_phase(plan,after,self.directory,self.root)
+        self.assertEqual(['ui'],[r['gate'] for r in after['attempts'][-1]['results']])
+        self.assertEqual('ready',after['phase']);self.assertTrue(after['ready'])
+        self.assertFalse(after.get('initial_pending'))
+
+    def test_initial_independent_refuses_invalid_selection_and_active_state(self):
+        plan, state, payload, call = self.initial_independent_fixture()
+        for change in ({'gates': {'no-such-gate':'why'}}, {'gates': {'ui':''}},
+                       {'gates': {'format':'not allowed'}}, {'gates': {'ui':'why'}, 'skip':True},
+                       {'source':{'head':'other'},'gates':{'ui':'why'}}):
+            c.write(payload, {'source':state['source'], **change})
+            original=(self.directory/'cycle.json').read_bytes()
+            self.assertEqual(2,call());self.assertEqual(original,(self.directory/'cycle.json').read_bytes())
+        c.write(payload, {'source':state['source'],'gates':{'ui':'why'}})
+        for changes in ({'running':True},{'phase':'ready'},{'pending':['real-failure']}):
+            c.write(self.directory/'cycle.json',{**state,**changes})
+            original=(self.directory/'cycle.json').read_bytes()
+            self.assertEqual(2,call());self.assertEqual(original,(self.directory/'cycle.json').read_bytes())
+
+    def test_initial_independent_root_exclusion_and_failure_are_native(self):
+        plan, state, payload, call = self.initial_independent_fixture()
+        # Root deferral has the same required explicit reason and leaves coverage pending.
+        c.write(payload, {'source':state['source'],'roots':{plan['gates'][2]['cwd']:'owned prerequisite'}})
+        plan['gates'][1].update(case_protocol=True,command=[sys.executable,'-c',
+            "import json,os;from pathlib import Path;"
+            "r=json.loads(Path(os.environ['DEPLOY_GATE_REQUEST']).read_text());"
+            "r.update(cases={c:'FAIL' for c in r['checks']},complete=True,cleanup_complete=True,reused=False);"
+            "Path(os.environ['DEPLOY_GATE_RESULT']).write_text(json.dumps(r));raise SystemExit(1)"])
+        state.update(plan=plan,plan_digest=c.digest(plan),input_fingerprints=c.input_fingerprints(plan,self.root))
+        c.write(self.directory/'plan.json',plan);c.write(self.directory/'cycle.json',state)
+        self.assertEqual(0,call(), self.last_initial_error)
+        after=c.read(self.directory/'cycle.json')
+        self.assertEqual('triage',after['phase']);self.assertTrue(after['pending'])
+        self.assertEqual('FAIL',after['attempts'][-1]['results'][0]['status'])
+        self.assertEqual('PENDING',after['initial_pending']['ui']['status'])
+        self.assertEqual('initial',after['failure_phase'])
+        report={'failures': [self.report(f,'NOT_INTRODUCED',
+            external_provider={'name':'fixture','reason':'outage'})['failures'][0]
+            for f in after['failures'] if f['id'] in after['pending']]}
+        c.adjudicate(after,report)
+        self.assertEqual('initial',after['phase']);self.assertFalse(after['ready'])
+        self.assertEqual({'ui'},set(after['initial_pending']))
+
+    def test_initial_independent_cancellation_preserves_failure_triage(self):
+        plan,state,payload,_=self.initial_independent_fixture()
+        plan['gates'][1]['command']=['false']
+        state.update(plan=plan,plan_digest=c.digest(plan),input_fingerprints=c.input_fingerprints(plan,self.root))
+        actual=c.execute
+        def execute(*args,**kwargs):
+            result=actual(*args,**kwargs)
+            c.CANCEL.set()
+            return result
+        try:
+            with patch.object(c,'execute',side_effect=execute):
+                c.run_phase(plan,state,self.directory,self.root,
+                    initial_observation=c.read(payload))
+            self.assertEqual('interrupted',state['phase'])
+            self.assertEqual('triage',state['resume_phase'])
+            self.assertEqual('initial',state['failure_phase'])
+            self.assertTrue(state['pending']);self.assertFalse(state['ready'])
+            self.assertEqual('FAIL',state['attempts'][-1]['results'][0]['status'])
+            self.assertEqual({'ui'},set(state['initial_pending']))
+        finally:
+            c.CANCEL.clear()
+        import contextlib, io
+        plan_path=self.directory/'resume-plan.json';c.write(plan_path,plan)
+        state_path=self.directory/'cycle.json'
+        original=copy.deepcopy(state)
+        def resume(value):
+            c.write(state_path,value)
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()), \
+                    patch.object(c,'execute',side_effect=AssertionError('resume must not execute')):
+                result=c.main(['resume','--plan',str(plan_path),'--state-dir',str(self.directory),
+                               '--root',str(self.root)])
+            return result,c.read(state_path)
+        held=copy.deepcopy(original)
+        held['attempts'][-1]['results'][0]['cleanup_owner']={'worker':'unreconciled fixture owner'}
+        rc,saved=resume(held)
+        self.assertEqual(2,rc);self.assertEqual(held,saved)
+        for key,value in (('failure_phase','final'),('pending',[])):
+            invalid=copy.deepcopy(original);invalid[key]=value
+            rc,saved=resume(invalid)
+            self.assertEqual(2,rc);self.assertEqual(invalid,saved)
+        (self.root/'code').write_text('changed')
+        rc,saved=resume(original)
+        self.assertEqual(2,rc);self.assertEqual(original,saved)
+        (self.root/'code').write_text('original')
+        rc,saved=resume(original)
+        self.assertEqual(1,rc)  # pending RCA, not validation success
+        self.assertEqual('triage',saved['phase']);self.assertNotIn('resume_phase',saved)
+        self.assertFalse(saved['ready'])
+        for key in ('pending','failures','attempts','initial_pending','initial_deferral_history',
+                    'source','plan_digest','input_fingerprints','round'):
+            self.assertEqual(original[key],saved[key],key)
+
+    def test_initial_independent_executes_ready_gates_concurrently(self):
+        plan, state, payload, _ = self.initial_independent_fixture()
+        worker=Path(self.workers.name)/'pending';worker.mkdir()
+        gate=dict(plan['gates'][2],name='pending',worker='pending',cwd=str(worker),
+                  env={'CONDUCTOR_WORKSPACE_NAME':'pending','CONDUCTOR_PORT':'37000'})
+        plan['gates'].append(gate)
+        state.update(plan=plan,plan_digest=c.digest(plan),input_fingerprints=c.input_fingerprints(plan,self.root))
+        barrier=threading.Barrier(2); actual=c.execute; entered=[]
+        def execute(*args,**kwargs):
+            entered.append(args[0]['name'])
+            barrier.wait(timeout=3)
+            return actual(*args,**kwargs)
+        with patch.object(c,'execute',side_effect=execute):
+            c.run_phase(plan,state,self.directory,self.root,initial_observation={
+                'source':state['source'],'gates':{'pending':'fixture prerequisite'}})
+        self.assertCountEqual(['api','ui'],entered)
+        self.assertTrue(all(r['status']=='PASS' for r in state['attempts'][-1]['results']))
+        self.assertEqual({'pending'},set(state['initial_pending']))
+        self.assertFalse(state['ready'])
+
+    def test_initial_independent_refuses_stale_and_unknown_owner(self):
+        plan, state, payload, call = self.initial_independent_fixture()
+        original=(self.directory/'cycle.json').read_bytes()
+        (self.root/'code').write_text('changed')
+        self.assertEqual(2,call());self.assertEqual(original,(self.directory/'cycle.json').read_bytes())
+        (self.root/'code').write_text('original')
+        orphan=self.directory/'attempts/unknown/initial/api/request.json'
+        c.write(orphan,{'gate':'api','phase':'initial'})
+        self.assertEqual(2,call());self.assertEqual(original,(self.directory/'cycle.json').read_bytes())
+
     def independent_triage_fixture(self, failing=False):
         import contextlib, io
         plan = copy.deepcopy(self.plan)
@@ -2506,6 +4066,103 @@ class Cycle(unittest.TestCase):
         self.assertEqual(('triage', False), (after['phase'], after['ready']))
         self.assertEqual(1, c.verify_saved(self.directory, self.root))
 
+    def stale_quick_runtime_fixture(self):
+        with (self.root / '.git/info/exclude').open('a') as stream:
+            stream.write('agents/.env\n')
+        self.failure()
+        self.state.update(phase='quick', next_after_quick='triage')
+        original_execute = c.execute
+        changed = threading.Event()
+
+        def execute(*args, **kwargs):
+            result = original_execute(*args, **kwargs)
+            if not changed.is_set():
+                changed.set()
+                (self.root / 'agents').mkdir(exist_ok=True)
+                (self.root / 'agents/.env').write_text('BROWSER_PROVIDER=fixture\n')
+            return result
+
+        with patch.object(c, 'execute', side_effect=execute):
+            c.run_phase(self.plan, self.state, self.directory, self.root)
+        self.assertEqual('stale', self.state['phase'])
+        return copy.deepcopy(self.state)
+
+    def test_runtime_change_during_quick_can_refresh_without_losing_pending_failure(self):
+        self.stale_quick_runtime_fixture()
+        before = copy.deepcopy(self.state)
+        c.write(self.directory / 'cycle.json', self.state)
+        c.refresh(self.state, self.plan, copy.deepcopy(self.plan), self.root,
+                  directory=self.directory)
+        self.assertEqual('quick', self.state['phase'])
+        self.assertEqual(before['pending'], self.state['pending'])
+        self.assertEqual(before['failures'], self.state['failures'])
+        self.assertEqual(before['attempts'], self.state['attempts'])
+        self.assertFalse(self.state['ready'])
+
+    def test_stale_quick_refresh_rejects_incomplete_or_mismatched_receipts(self):
+        baseline = self.stale_quick_runtime_fixture()
+        changes = [('status', 'FAIL'), ('complete', False), ('executed', False),
+                   ('native_exit', False), ('command', ['false']), ('cases', {}),
+                   ('timed_out', True), ('cancelled', True), ('lingering_group', True),
+                   ('cleanup_owner', {'pending': True}), ('source', {})]
+        for key, value in changes:
+            with self.subTest(key=key):
+                state = copy.deepcopy(baseline)
+                state['attempts'][-1]['results'][0][key] = value
+                before = copy.deepcopy(state)
+                c.write(self.directory / 'cycle.json', state)
+                with self.assertRaises(ValueError):
+                    c.refresh(state, self.plan, copy.deepcopy(self.plan), self.root,
+                              directory=self.directory)
+                self.assertEqual(before, state)
+
+    def test_stale_quick_refresh_requires_saved_state_and_idle_workers(self):
+        baseline = self.stale_quick_runtime_fixture()
+        c.write(self.directory / 'cycle.json', baseline)
+        for mode in ('unsaved', 'wrong-phase', 'partial', 'busy'):
+            with self.subTest(mode=mode):
+                state = copy.deepcopy(baseline)
+                if mode == 'unsaved':
+                    state['ready'] = True
+                elif mode == 'wrong-phase':
+                    state['attempts'][-1]['phase'] = 'final'
+                elif mode == 'partial':
+                    state['attempts'][-1]['results'].pop()
+                if mode != 'unsaved':
+                    c.write(self.directory / 'cycle.json', state)
+                before = copy.deepcopy(state)
+                with patch.object(c, '_prepared_workers_idle', side_effect=ValueError('busy')):
+                    with self.assertRaises(ValueError):
+                        c.refresh(state, self.plan, copy.deepcopy(self.plan), self.root,
+                                  directory=self.directory)
+                self.assertEqual(before, state)
+
+    def test_stale_quick_refresh_rejects_saved_results_with_changed_native_provenance(self):
+        baseline = self.stale_quick_runtime_fixture()
+        for field in ('token', 'binding', 'request', 'receipt'):
+            with self.subTest(field=field):
+                state = copy.deepcopy(baseline)
+                result = state['attempts'][-1]['results'][0]
+                folder = Path(result['log']).parent
+                request = c.read(folder / 'request.json')
+                receipt = c.read(folder / 'receipt.json')
+                if field == 'token':
+                    result['token'] = 'invented-token'
+                elif field == 'binding':
+                    result['execution_binding']['input_fingerprint'] = 'invented-input'
+                    c.write(folder / 'receipt.json', result)
+                elif field == 'request':
+                    c.write(folder / 'request.json', {**request, 'checks': ['invented-check']})
+                else:
+                    c.write(folder / 'receipt.json', {**receipt, 'native_exit': 1})
+                c.write(self.directory / 'cycle.json', state)
+                before = copy.deepcopy(state)
+                with self.assertRaises(ValueError):
+                    c.refresh(state, self.plan, copy.deepcopy(self.plan), self.root,
+                              directory=self.directory)
+                self.assertEqual(before, state)
+                c.write(folder / 'request.json', request)
+                c.write(folder / 'receipt.json', receipt)
     def repair_independent_fixture(self, failing=False):
         import contextlib, io
         state, plan, path, plan_path, _ = self.independent_triage_fixture(failing=failing)
@@ -4354,13 +6011,13 @@ class Cycle(unittest.TestCase):
             with self.assertRaises(ValueError): renewal.contract(self.root, head, 'fixture')
             path.write_text(original)
 
-    def renewal_fixture(self):
+    def renewal_fixture(self, purchase_owner='root-fixture'):
         import deploy_test_agentcard_renewal as renewal
         import time
         task = next(t for t in json.loads((ROOT / 'agents/benchmarks/tasks.json').read_text())
                     if t['name'] == 'agent-payment-abandonment')
         lifecycle = copy.deepcopy(task['expected_payment_lifecycle'])
-        lifecycle.update(agentId='root-fixture', stripeRefund=None)
+        lifecycle.update(agentId=purchase_owner, stripeRefund=None)
         lifecycle['purchase'].update(status='HELD', cardId='card_fixture')
         lifecycle['walletFunding'].update(status='RECLAIMING', providerTransferId='owt_fixture')
         lifecycle['agentCard'].update(id='card_fixture', status='CLOSED')
@@ -4374,8 +6031,10 @@ class Cycle(unittest.TestCase):
         row['logs']['agentcard_release_stall_lifecycle'] = lifecycle
         row['logs']['cloud_cleanup_evidence'] = {
             'errors': [], 'root_agent_id': 'root-fixture',
-            'agentcard_release_stall_lifecycles': {'root-fixture': lifecycle},
+            'agentcard_release_stall_lifecycles': {purchase_owner: lifecycle},
             'final': {'root_deleted': True, 'unsealed_tree_agent_ids': [], 'browser_sessions': []}}
+        if purchase_owner != 'root-fixture':
+            row['logs']['cloud_cleanup_evidence']['final']['tree_agent_ids'] = ['root-fixture', purchase_owner]
         c.write(path, doc)
         sha = c.sha_file(path)
         failure = self.resource_failure(reason=self.STALL_REASON, name='agent-payment-abandonment', sha=sha)
@@ -4396,6 +6055,26 @@ class Cycle(unittest.TestCase):
                  'observations': {'card': {'id': 'card_fixture', 'status': 'CLOSED', 'balanceCents': 0, 'livemode': False},
                                   'transfer': copy.deepcopy(lifecycle['orgTransfer'])}}
         return renewal, task, proof, original, path
+
+    def test_renewal_binds_subagent_owned_stall_and_refuses_unsealed_owner(self):
+        # Same root-owner assumption as the PR #1972 custody KeyError, in the warning renewal path.
+        renewal, task, proof, original, path = self.renewal_fixture(purchase_owner='browser-fixture')
+        self.assertEqual(('card_fixture', 'owt_fixture'), (proof['binding']['card_id'], proof['binding']['transfer_id']))
+        occurrence = proof['binding']['occurrence']; raw = path.read_bytes()
+        for message, change in (('lifecycle join mismatch', lambda e: e['final'].update(tree_agent_ids=['root-fixture'])),
+                                ('ambiguous release-stall', lambda e: e['agentcard_release_stall_lifecycles'].update(
+                                    {'root-fixture': dict(e['agentcard_release_stall_lifecycles']['browser-fixture'], agentId='root-fixture')}))):
+            doc = json.loads(raw); change(doc['tasks'][0]['logs']['cloud_cleanup_evidence']); c.write(path, doc)
+            state = copy.deepcopy(self.state)
+            failure = next(f for f in state['failures'] if f['id'] == occurrence)
+            failure['worker_evidence']['sha256'] = failure['rca']['resource_skip']['receipt_sha256'] = c.sha_file(path)
+            for warning in state['superseded_resource_warnings']:
+                if warning['id'] == occurrence:
+                    warning['receipt_sha256'] = warning['confirmation']['receipt_sha256'] = c.sha_file(path)
+            with patch.object(renewal, 'contract', return_value=(task, 'contract-sha')):
+                with self.assertRaisesRegex(ValueError, message):
+                    renewal.original(state, occurrence, self.root)
+        path.write_bytes(raw)
 
     def test_changed_source_agentcard_renewal_cli_keeps_failure_and_runs_peers(self):
         renewal, task, proof, original, path = self.renewal_fixture()
@@ -6752,6 +8431,50 @@ class Cycle(unittest.TestCase):
             c.isolated_request(state, extended, request, self.root, {'CLOUDBENCH_ARCHIVED_REUSE_REQUEST':'old'})
         self.assertEqual(before, state)
 
+    def test_isolated_next_inventory_allows_only_explicit_deploy_omission(self):
+        state, failure, paths, proof, gate, packet = self.isolated_campaign_state()
+        c.reconcile(state, failure['id'], proof)
+        state['source'] = proof['validation_source']
+        removed = gate['checks'][0]
+        catalog = self.root / 'agents/benchmarks/tasks.json'
+        catalog.parent.mkdir(parents=True, exist_ok=True)
+        rows = [{'name': removed, 'deploy_quarantine': 'Explicit user deploy exclusion'}]
+        c.write(catalog, rows)
+        before = copy.deepcopy(state)
+        narrowed = {**gate, 'category': 'smoke', 'checks': gate['checks'][1:]}
+        request = dict(token='fresh-explicit-omission', source=state['source'], checks=narrowed['checks'], skips={})
+        bindings = c.isolated_request(state, narrowed, request, self.root, {})
+        entry = next(iter(state['reconciled_owners'].values()))
+        self.assertEqual(1, len(bindings))
+        self.assertEqual(entry['excluded_resources'], bindings[0]['excluded_resources'])
+        self.assertFalse(bindings[0]['credit_granted'])
+        self.assertFalse(entry['cleanup_complete'])
+        self.assertEqual(before, state)
+        # A normal quarantine, malformed declaration, omitted peer, stale source,
+        # duplicate inventory, reused token or original-evidence mutation refuses.
+        for value in [None, '', False, {}, 1]:
+            c.write(catalog, [{'name': removed, 'quarantine': {'error':'still runs'}, 'deploy_quarantine': value}])
+            with self.assertRaises(ValueError):
+                c.isolated_request(state, narrowed, request, self.root, {})
+        c.write(catalog, rows)
+        for bad_gate, bad_request in [
+            ({**narrowed, 'checks': narrowed['checks'][1:]}, {**request, 'checks': narrowed['checks'][1:]}),
+            (narrowed, {**request, 'source': {'head':'f'*40, 'digest':'e'*64}}),
+            (narrowed, {**request, 'token': entry['token']}),
+            (narrowed, {**request, 'checks': narrowed['checks'] + [narrowed['checks'][0]]}),
+            ({**narrowed, 'category': 'backend'}, request),
+        ]:
+            with self.assertRaises(ValueError):
+                c.isolated_request(state, bad_gate, bad_request, self.root, {})
+        c.write(catalog, rows + rows)
+        with self.assertRaises(ValueError):
+            c.isolated_request(state, narrowed, request, self.root, {})
+        c.write(catalog, rows)
+        packet.write_text(packet.read_text() + ' ')
+        with self.assertRaisesRegex(ValueError, 'obligation changed'):
+            c.isolated_request(state, narrowed, request, self.root, {})
+        self.assertEqual(before, state)
+
     def test_isolated_native_validation_preserves_original_debt_and_requires_new_full_request(self):
         state, failure, paths, proof, gate, packet = self.isolated_campaign_state()
         before = copy.deepcopy(state['attempts'])
@@ -7200,7 +8923,7 @@ class Cycle(unittest.TestCase):
             phase='focused', state_sha256=c.sha_file(self.directory / 'cycle.json'),
             plan_digest=state['plan_digest'], native={gate['name']: native},
             files={str(p):c.sha_file(p) for p in (folder/'request.json', folder/'result.json')})
-        with patch.object(c, 'settlement_native', return_value=native):
+        with patch.object(c, 'settlement_native', return_value=native), only_processes():
             c.recover_round(state['plan'], self.directory, self.root, recovery)
         state = c.read(self.directory / 'cycle.json')
         state.update(source=c.source(self.root), phase='needs-focused-plan', ready=False)
@@ -7209,117 +8932,120 @@ class Cycle(unittest.TestCase):
 
     def test_negative_successor_renews_only_from_committed_journal_and_current_closure(self):
         state, original, proof, gate, folder, native = self.negative_successor_renewal_state()
-        incoming = dict(proof, validation_source=copy.deepcopy(state['source']))
-        before = copy.deepcopy(state)
-        with patch.object(c, 'settlement_native', return_value=native) as collector:
-            c.reconcile(state, original['token'], incoming)
-            collector.assert_called_once()
-            same = copy.deepcopy(state); c.reconcile(state, original['token'], incoming)
-            self.assertEqual(same, state)
-        for key in before:
-            if key not in ('reconciled_owners', 'reconciled_owner_history'):
-                self.assertEqual(before[key], state[key], key)
-        entry = state['reconciled_owners'][proof['receipt_sha256']]
-        self.assertEqual(state['source'], entry['validation_source'])
-        self.assertFalse(entry['credit_granted']); self.assertFalse(entry['cleanup_complete'])
-        recovered = state['attempts'][-1]['results'][0]
-        self.assertIsNone(recovered['native_exit']); self.assertFalse(recovered['positive_credit'])
-        self.assertNotIn('isolated_validation', recovered)
-        self.assertIsNone(c.full_pass_binding(state, gate))
-        request = dict(token='fresh-after-negative-recovery', source=state['source'], checks=gate['checks'], skips={})
-        self.assertEqual(1, len(c.isolated_request(state, gate, request, self.root, {})))
-        for closure in ({'tampered': 'closure'}, ValueError('live or unknown native owner')):
-            candidate = copy.deepcopy(before)
-            kwargs = {'side_effect':closure} if isinstance(closure, Exception) else {'return_value':closure}
-            with patch.object(c, 'settlement_native', **kwargs), self.assertRaises(ValueError):
-                c.reconcile(candidate, original['token'], incoming)
-            self.assertEqual(before, candidate)
-        journal = self.directory/'settlement-round20-journal.json'
-        marker = self.directory/'settlement-round20-committed.json'
-        for path in (journal, marker, folder/'request.json', folder/'result.json', folder/'receipt.json'):
-            raw = path.read_bytes(); path.unlink()
-            try:
+        with only_processes():
+            incoming = dict(proof, validation_source=copy.deepcopy(state['source']))
+            before = copy.deepcopy(state)
+            with patch.object(c, 'settlement_native', return_value=native) as collector:
+                c.reconcile(state, original['token'], incoming)
+                collector.assert_called_once()
+                same = copy.deepcopy(state); c.reconcile(state, original['token'], incoming)
+                self.assertEqual(same, state)
+            for key in before:
+                if key not in ('reconciled_owners', 'reconciled_owner_history'):
+                    self.assertEqual(before[key], state[key], key)
+            entry = state['reconciled_owners'][proof['receipt_sha256']]
+            self.assertEqual(state['source'], entry['validation_source'])
+            self.assertFalse(entry['credit_granted']); self.assertFalse(entry['cleanup_complete'])
+            recovered = state['attempts'][-1]['results'][0]
+            self.assertIsNone(recovered['native_exit']); self.assertFalse(recovered['positive_credit'])
+            self.assertNotIn('isolated_validation', recovered)
+            self.assertIsNone(c.full_pass_binding(state, gate))
+            request = dict(token='fresh-after-negative-recovery', source=state['source'], checks=gate['checks'], skips={})
+            self.assertEqual(1, len(c.isolated_request(state, gate, request, self.root, {})))
+            for closure in ({'tampered': 'closure'}, ValueError('live or unknown native owner')):
                 candidate = copy.deepcopy(before)
-                with patch.object(c, 'settlement_native', return_value=native), self.assertRaises(ValueError):
+                kwargs = {'side_effect':closure} if isinstance(closure, Exception) else {'return_value':closure}
+                with patch.object(c, 'settlement_native', **kwargs), self.assertRaises(ValueError):
                     c.reconcile(candidate, original['token'], incoming)
                 self.assertEqual(before, candidate)
-            finally: path.write_bytes(raw)
-        saved, saved_marker = journal.read_bytes(), marker.read_bytes()
-        for field in ('positive_credit', 'original_state_hex', 'proof_digest', 'after_state', 'receipts'):
-            altered = json.loads(saved)
-            altered[field] = True if field == 'positive_credit' else ('00' if field == 'original_state_hex' else {})
-            c.write(journal, altered); c.write(marker, {'journal_sha256':c.sha_file(journal)})
-            try:
-                candidate = copy.deepcopy(before)
-                with patch.object(c, 'settlement_native', return_value=native), self.assertRaises(ValueError):
-                    c.reconcile(candidate, original['token'], incoming)
-                self.assertEqual(before, candidate)
-            finally: journal.write_bytes(saved); marker.write_bytes(saved_marker)
+            journal = self.directory/'settlement-round20-journal.json'
+            marker = self.directory/'settlement-round20-committed.json'
+            for path in (journal, marker, folder/'request.json', folder/'result.json', folder/'receipt.json'):
+                raw = path.read_bytes(); path.unlink()
+                try:
+                    candidate = copy.deepcopy(before)
+                    with patch.object(c, 'settlement_native', return_value=native), self.assertRaises(ValueError):
+                        c.reconcile(candidate, original['token'], incoming)
+                    self.assertEqual(before, candidate)
+                finally: path.write_bytes(raw)
+            saved, saved_marker = journal.read_bytes(), marker.read_bytes()
+            for field in ('positive_credit', 'original_state_hex', 'proof_digest', 'after_state', 'receipts'):
+                altered = json.loads(saved)
+                altered[field] = True if field == 'positive_credit' else ('00' if field == 'original_state_hex' else {})
+                c.write(journal, altered); c.write(marker, {'journal_sha256':c.sha_file(journal)})
+                try:
+                    candidate = copy.deepcopy(before)
+                    with patch.object(c, 'settlement_native', return_value=native), self.assertRaises(ValueError):
+                        c.reconcile(candidate, original['token'], incoming)
+                    self.assertEqual(before, candidate)
+                finally: journal.write_bytes(saved); marker.write_bytes(saved_marker)
 
     def test_negative_successor_rejects_changed_history_admission_and_live_adapter_atomically(self):
         state, original, proof, gate, folder, native = self.negative_successor_renewal_state()
-        incoming = dict(proof, validation_source=copy.deepcopy(state['source']))
-        recovered = state['attempts'][-1]['results'][0]
-        for name, metadata in recovered['custody_skips'].items():
-            self.assertEqual(recovered['cases'][name], 'SKIP')
-            self.assertEqual(recovered['current_execution'][name], 'UNVERIFIED')
-            self.assertFalse(metadata['financial_cleanup_credit'])
-        target = copy.deepcopy(state)
-        target.update(environment=c.digest('changed target environment'))
-        target['input_fingerprints'][gate['name']] = c.digest('changed target input')
-        next(g for g in target['plan']['gates'] if g['name'] == gate['name'])['env'] = {'TARGET':'changed'}
-        target['plan_digest'] = c.digest(target['plan'])
-        with patch.object(c, 'settlement_native', return_value=native):
-            c.reconcile(target, original['token'], incoming)
-        self.assertEqual(state['attempts'], target['attempts'])
-        self.assertEqual(state['failures'], target['failures'])
-        mutations = [
-            lambda s:s['attempts'][0].update(source={'head':'changed', 'digest':'changed'}),
-            lambda s:s['attempts'][-1]['results'][0].update(native_exit=1),
-            lambda s:s['attempts'][-1]['results'][0].update(positive_credit=True),
-            lambda s:s['attempts'][-1]['results'][0].update(timed_out=False),
-            lambda s:s['attempts'][-1]['results'][0].update(started_at=1),
-        ]
-        for mutate in mutations:
-            candidate = copy.deepcopy(state); mutate(candidate); before = copy.deepcopy(candidate)
-            with patch.object(c, 'settlement_native', return_value=native), self.assertRaises(ValueError):
-                c.reconcile(candidate, original['token'], incoming)
-            self.assertEqual(before, candidate)
-        # A journal/hash update cannot replace the exact original isolation admission.
-        journal = self.directory/'settlement-round20-journal.json'
-        marker = self.directory/'settlement-round20-committed.json'
-        paths = (folder/'request.json', folder/'receipt.json', journal, marker)
-        saved = {p:p.read_bytes() for p in paths}
-        for field in ('original_receipt_sha256', 'source', 'excluded_resources', 'new_request_token'):
-            candidate = copy.deepcopy(state)
-            request = json.loads(saved[folder/'request.json'])
-            request['isolated_validation'][0][field] = 'foreign'
-            c.write(folder/'request.json', request)
-            row = candidate['attempts'][-1]['results'][0]
-            row['recovery_evidence']['files'][str(folder/'request.json')] = c.sha_file(folder/'request.json')
-            c.write(folder/'receipt.json', row)
-            j = json.loads(saved[journal]); j['after_state']['attempts'][-1] = copy.deepcopy(candidate['attempts'][-1])
-            j['receipts'][str(folder/'receipt.json')] = copy.deepcopy(row)
-            snapshot_raw = bytes.fromhex(j['original_state_hex']); snapshot = json.loads(snapshot_raw)
-            recovery = dict(kind='interrupted-round-settlement-v1', source=snapshot['source'], round=20,
-                phase='focused', state_sha256=__import__('hashlib').sha256(snapshot_raw).hexdigest(),
-                plan_digest=snapshot['plan_digest'], files=row['recovery_evidence']['files'], native={gate['name']:native})
-            j['proof_digest'] = c.digest(recovery)
-            c.write(journal, j); c.write(marker, {'journal_sha256':c.sha_file(journal)})
-            before = copy.deepcopy(candidate)
-            try:
-                with patch.object(c, 'settlement_native', return_value=native), self.assertRaisesRegex(ValueError, 'original isolation binding'):
+        with only_processes():
+            incoming = dict(proof, validation_source=copy.deepcopy(state['source']))
+            recovered = state['attempts'][-1]['results'][0]
+            for name, metadata in recovered['custody_skips'].items():
+                self.assertEqual(recovered['cases'][name], 'SKIP')
+                self.assertEqual(recovered['current_execution'][name], 'UNVERIFIED')
+                self.assertFalse(metadata['financial_cleanup_credit'])
+            target = copy.deepcopy(state)
+            target.update(environment=c.digest('changed target environment'))
+            target['input_fingerprints'][gate['name']] = c.digest('changed target input')
+            next(g for g in target['plan']['gates'] if g['name'] == gate['name'])['env'] = {'TARGET':'changed'}
+            target['plan_digest'] = c.digest(target['plan'])
+            with patch.object(c, 'settlement_native', return_value=native):
+                c.reconcile(target, original['token'], incoming)
+            self.assertEqual(state['attempts'], target['attempts'])
+            self.assertEqual(state['failures'], target['failures'])
+            mutations = [
+                lambda s:s['attempts'][0].update(source={'head':'changed', 'digest':'changed'}),
+                lambda s:s['attempts'][-1]['results'][0].update(native_exit=1),
+                lambda s:s['attempts'][-1]['results'][0].update(positive_credit=True),
+                lambda s:s['attempts'][-1]['results'][0].update(timed_out=False),
+                lambda s:s['attempts'][-1]['results'][0].update(started_at=1),
+            ]
+            for mutate in mutations:
+                candidate = copy.deepcopy(state); mutate(candidate); before = copy.deepcopy(candidate)
+                with patch.object(c, 'settlement_native', return_value=native), self.assertRaises(ValueError):
                     c.reconcile(candidate, original['token'], incoming)
                 self.assertEqual(before, candidate)
-            finally:
-                for path, raw in saved.items(): path.write_bytes(raw)
+            # A journal/hash update cannot replace the exact original isolation admission.
+            journal = self.directory/'settlement-round20-journal.json'
+            marker = self.directory/'settlement-round20-committed.json'
+            paths = (folder/'request.json', folder/'receipt.json', journal, marker)
+            saved = {p:p.read_bytes() for p in paths}
+            for field in ('original_receipt_sha256', 'source', 'excluded_resources', 'new_request_token'):
+                candidate = copy.deepcopy(state)
+                request = json.loads(saved[folder/'request.json'])
+                request['isolated_validation'][0][field] = 'foreign'
+                c.write(folder/'request.json', request)
+                row = candidate['attempts'][-1]['results'][0]
+                row['recovery_evidence']['files'][str(folder/'request.json')] = c.sha_file(folder/'request.json')
+                c.write(folder/'receipt.json', row)
+                j = json.loads(saved[journal]); j['after_state']['attempts'][-1] = copy.deepcopy(candidate['attempts'][-1])
+                j['receipts'][str(folder/'receipt.json')] = copy.deepcopy(row)
+                snapshot_raw = bytes.fromhex(j['original_state_hex']); snapshot = json.loads(snapshot_raw)
+                recovery = dict(kind='interrupted-round-settlement-v1', source=snapshot['source'], round=20,
+                    phase='focused', state_sha256=__import__('hashlib').sha256(snapshot_raw).hexdigest(),
+                    plan_digest=snapshot['plan_digest'], files=row['recovery_evidence']['files'], native={gate['name']:native})
+                j['proof_digest'] = c.digest(recovery)
+                c.write(journal, j); c.write(marker, {'journal_sha256':c.sha_file(journal)})
+                before = copy.deepcopy(candidate)
+                try:
+                    with patch.object(c, 'settlement_native', return_value=native), self.assertRaisesRegex(ValueError, 'original isolation binding'):
+                        c.reconcile(candidate, original['token'], incoming)
+                    self.assertEqual(before, candidate)
+                finally:
+                    for path, raw in saved.items(): path.write_bytes(raw)
         child = subprocess.Popen([sys.executable, '-c', 'import sys;print("ready",flush=True);sys.stdin.read()'],
             cwd='/tmp', env={**os.environ, 'DEPLOY_GATE_TOKEN':state['attempts'][-1]['results'][0]['token']},
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, start_new_session=True)
         try:
             self.assertEqual(child.stdout.readline().strip(), 'ready')
             candidate = copy.deepcopy(state)
-            with patch.object(c, 'settlement_native', return_value=native), self.assertRaisesRegex(ValueError, 'live adapter'):
+            with patch.object(c, 'settlement_native', return_value=native), only_processes(child.pid), \
+                    self.assertRaisesRegex(ValueError, 'live adapter'):
                 c.reconcile(candidate, original['token'], incoming)
             self.assertEqual(state, candidate)
         finally:
@@ -7754,6 +9480,30 @@ class Cycle(unittest.TestCase):
         c.reconcile(state, original['token'], {**proof, 'validation_source':copy.deepcopy(state['source'])})
         self.assertEqual(same, state)
 
+    def test_clean_historical_successor_renews_after_added_selection_reason_only(self):
+        # PR1682: a later diff added a run_all reason; execution contract and inventory unchanged.
+        state, paths, proof, gate, packet, original, folder, successor = self.clean_successor_renewal_state()
+        state['attempts'][-1]['source'] = copy.deepcopy(successor['source'])
+        gate['selection_evidence'] = ['run_all trigger: a', 'runtime/contract path trigger']
+        successor['execution_binding']['contract_digest'] = c.digest(gate)
+        c.write(folder/'receipt.json', successor)
+        renewed = {**proof, 'validation_source':copy.deepcopy(state['source'])}
+        for name, current in (('replaced', ['run_all trigger: b', 'runtime/contract path trigger']),
+                              ('reordered', ['runtime/contract path trigger', 'run_all trigger: a']),
+                              ('removed', ['run_all trigger: a']),
+                              ('not-a-list', {'run_all trigger: a': True})):
+            candidate = copy.deepcopy(state)
+            next(g for g in candidate['plan']['gates'] if g['name']==gate['name'])['selection_evidence'] = current
+            before = copy.deepcopy(candidate)
+            with self.subTest(name=name), self.assertRaises(ValueError):
+                c.reconcile(candidate, original['token'], renewed)
+            self.assertEqual(before, candidate)
+        gate['selection_evidence'] = ['run_all trigger: a', 'run_all trigger: b', 'runtime/contract path trigger']
+        before = copy.deepcopy(state)
+        c.reconcile(state, original['token'], renewed)
+        self.assertEqual(state['source'], state['reconciled_owners'][proof['receipt_sha256']]['validation_source'])
+        self.assertEqual(before['attempts'], state['attempts']); self.assertIsNone(c.full_pass_binding(state, gate))
+
     def test_clean_historical_successor_honors_catalog_deploy_omission_of_original_debt(self):
         # Merged main: the successor ran without an original case that the catalog omits from
         # all future deploys (user-directed). Only that authenticated omission may be absent.
@@ -7895,6 +9645,83 @@ class Cycle(unittest.TestCase):
         self.assertIsNone(c.full_pass_binding(state, gate))  # Native FAIL has not become coverage credit.
         same = copy.deepcopy(state); c.reconcile(state, original['token'], renewed)
         self.assertEqual(same, state)  # Historical successor binding survives repeated source renewals.
+
+    def test_isolated_renewal_ignores_later_prelaunch_admission_refusals(self):
+        # PR1682 rounds 19/21: admission raised before launch; run_phase recorded a token-less row.
+        state, paths, proof, gate, packet, original, folder, successor = self.clean_successor_renewal_state()
+        renewed = {**proof, 'validation_source':copy.deepcopy(state['source'])}
+        refusal = dict(gate=gate['name'], status='FAIL', complete=False, source=copy.deepcopy(state['source']),
+                       cases=dict.fromkeys(gate['checks'], 'UNVERIFIED'), reason='native cleanup: next source/inventory binding')
+        # The refusal is authenticated by the request namespace run_phase sealed before
+        # isolated_request raised (merged main contract; stale refusals stay blocking there).
+        state['attempts'].append(dict(phase='focused', source=copy.deepcopy(state['source']),
+                                      results=[copy.deepcopy(refusal)]))
+        c.write(self.directory / 'attempts/91/focused' / gate['name'] / 'request.json',
+                dict(token='refused-admission', source=copy.deepcopy(state['source']), gate=gate['name'],
+                     phase='focused', checks=list(gate['checks']), skips={}))
+        before = copy.deepcopy(state)
+        c.reconcile(state, original['token'], renewed)
+        self.assertEqual(state['source'], state['reconciled_owners'][proof['receipt_sha256']]['validation_source'])
+        self.assertEqual(before['attempts'], state['attempts']); self.assertEqual(before['failures'], state['failures'])
+        # Any row with a request token, an actual execution or a non-UNVERIFIED case is still a successor
+        # (main treats a token-less executed=False refusal as non-dispatched by design).
+        for name, mutate in (('token', lambda r: r.update(token='launched')), ('executed', lambda r: r.update(executed=True)),
+                             ('pass', lambda r: r['cases'].update({gate['checks'][0]: 'PASS'}))):
+            candidate = copy.deepcopy(before); mutate(candidate['attempts'][-1]['results'][0])
+            snapshot = copy.deepcopy(candidate)
+            with self.subTest(name=name), self.assertRaises(ValueError):
+                c.reconcile(candidate, original['token'], renewed)
+            self.assertEqual(snapshot, candidate)
+
+    def test_isolated_renewal_accepts_successor_with_historical_no_retry_custody_case(self):
+        # PR1682: a full smoke run whose payment case stayed under NO_RETRY_CUSTODY (never executed).
+        # Merged main authenticates custody from the canonical ledger, so compose its qualified fixture.
+        state, original, proof, gate, folder, successor = self.custody_clean_successor_state()
+        request = c.read(folder/'request.json'); skip = next(iter(successor['custody_skips']))
+        held = copy.deepcopy(successor['custody_skips'][skip])
+        renewed = {**proof, 'validation_source':copy.deepcopy(state['source'])}
+        bad = [('not-custody', lambda r, q: q['skips'][skip].update(disposition='resource_skip')),
+               ('unverified-missing', lambda r, q: r.update(current_execution={})),
+               ('other-case-incomplete', lambda r, q: r['case_complete'].update({next(k for k in r['case_complete'] if k not in r['custody_skips']): False})),
+               ('custody-not-skipped', lambda r, q: r['custody_skips'].update({'foreign-case': held}))]
+        for name, mutate in bad:
+            candidate = copy.deepcopy(state); row = candidate['attempts'][-1]['results'][0]; q = copy.deepcopy(request)
+            mutate(row, q); c.write(folder/'receipt.json', row); c.write(folder/'request.json', q)
+            before = copy.deepcopy(candidate)
+            with self.subTest(name=name), self.assertRaises(ValueError):
+                c.reconcile(candidate, original['token'], renewed)
+            self.assertEqual(before, candidate)
+        c.write(folder/'receipt.json', successor); c.write(folder/'request.json', request)
+        c.reconcile(state, original['token'], renewed)
+        entry = state['reconciled_owners'][proof['receipt_sha256']]
+        self.assertEqual(state['source'], entry['validation_source']); self.assertFalse(entry['credit_granted'])
+
+    def test_isolated_renewal_skips_strictly_reconciled_prepare_refusal(self):
+        # PR1682 round 29: a later campaign refused at cleanup-ticket prepare dispatched nothing.
+        state, paths, proof, gate, packet, original, folder, successor = self.clean_successor_renewal_state()
+        renewed = {**proof, 'validation_source':copy.deepcopy(state['source'])}
+        refused = dict(gate=gate['name'], token='prepare-refused', status='FAIL', complete=False, executed=True,
+                       cases=dict.fromkeys(gate['checks'], 'UNVERIFIED'), source=copy.deepcopy(state['source']))
+        state['attempts'].append(dict(phase='focused', results=[refused]))
+        import deploy_test_native_cleanup as native
+        entry = dict(kind=native.KIND, gate=gate['name'], token='prepare-refused', credit_granted=False,
+                     proof=dict(layout='campaign-cleanup-prepare-v1', receipt_sha256='f'*64))
+        state['reconciled_owners']['f'*64] = entry
+        for name, mutate in (('normal-layout', lambda e, r: e['proof'].update(layout='campaign-v1')),
+                             ('credited', lambda e, r: e.update(credit_granted=True)),
+                             ('executed-pass', lambda e, r: r['cases'].update({gate['checks'][0]: 'PASS'})),
+                             ('unreconciled', lambda e, r: e.update(token='other'))):
+            candidate = copy.deepcopy(state)
+            mutate(candidate['reconciled_owners']['f'*64], candidate['attempts'][-1]['results'][0])
+            before = copy.deepcopy(candidate)
+            with self.subTest(name=name), self.assertRaises(ValueError):
+                c.reconcile(candidate, original['token'], renewed)
+            self.assertEqual(before, candidate)
+        before = copy.deepcopy(state)
+        c.reconcile(state, original['token'], renewed)
+        self.assertEqual(state['source'], state['reconciled_owners'][proof['receipt_sha256']]['validation_source'])
+        self.assertEqual(before['attempts'], state['attempts'])
+        self.assertFalse(state['reconciled_owners'][proof['receipt_sha256']]['credit_granted'])
 
     def test_isolated_renewal_ignores_an_unexecuted_prelaunch_refusal(self):
         """PR1910 round 22: smoke refused before launch because renewal had not run yet.
@@ -8327,6 +10154,9 @@ class Cycle(unittest.TestCase):
         state['plan_digest'] = c.digest(state['plan'])
         return state, original, proof, successor, native_proof
 
+    @quarantine(since="2026-11-11", repair="https://boxes.dev/thread/thr_3767d8b2fa4d42d79d6d403f7ae46f76",
+                error="ValueError: native cleanup: old controller still active",
+                evidence="docs/rca/cases/2026-11-11-synthetic-controller-pids-collide-with-host.md")
     def test_reconciled_failed_successor_renews_at_repair_boundary_without_credit(self):
         state, original, proof, successor, native_proof = self.reconciled_failed_successor_renewal_state()
         before = copy.deepcopy(state)
@@ -8420,6 +10250,9 @@ class Cycle(unittest.TestCase):
         self.assertFalse(state['reconciled_owners'][proof['receipt_sha256']]['credit_granted'])
         self.assertEqual(state['source'], state['reconciled_owners'][proof['receipt_sha256']]['validation_source'])
 
+    @quarantine(since="2026-11-11", repair="https://boxes.dev/thread/thr_3767d8b2fa4d42d79d6d403f7ae46f76",
+                error="ValueError: native cleanup: old controller still active",
+                evidence="docs/rca/cases/2026-11-11-synthetic-controller-pids-collide-with-host.md")
     def test_reconciled_failed_successor_rejects_untrusted_authority_atomically(self):
         state, original, proof, successor, native_proof = self.reconciled_failed_successor_renewal_state()
         incoming = dict(proof, validation_source=state['source'])
@@ -8637,6 +10470,129 @@ class Cycle(unittest.TestCase):
         (runtime / 'logs/worker.log').write_text('changed')
         self.assertEqual([occurrence['gate']], c.retained_owners(state, [occurrence['gate']]))
 
+    def reseal_recovered(self, fleet, proof, edit):
+        """Apply `edit(audit)` to a fleet's local audit, mirror it canonically, reseal and rebind proof files."""
+        import hashlib
+        import shutil
+        audit = fleet / 'teardown-ownership'
+        owner = c.read(fleet / '_batch/lifecycle.json')['fleet_owner_token']
+        canonical = self.root / '.git/cloudbench-fleet-audits' / owner
+        (audit / 'source-audit').unlink()
+        edit(audit)
+        shutil.rmtree(canonical); shutil.copytree(audit, canonical)
+        h = hashlib.sha256()
+        for path in sorted(audit.rglob('*'), key=lambda p: str(p.relative_to(audit))):
+            if path.is_file():
+                for raw in (str(path.relative_to(audit)).encode(), path.read_bytes()):
+                    h.update(len(raw).to_bytes(8, 'big')); h.update(raw)
+        (audit / 'source-audit').write_text(f'path={canonical}\nsha256={h.hexdigest()}\n')
+        proof['files'] = {k: v for k, v in proof['files'].items() if Path(k).exists()}
+        for path in [*fleet.rglob('*'), *canonical.rglob('*')]:
+            if path.is_file(): proof['files'][str(path)] = c.sha_file(path)
+        return canonical
+
+    def test_campaign_lost_runtime_evidence_release_needs_provider_terminal_receipt(self):
+        # PR #1864: `--recover-stale-owner TOKEN --accept-lost-runtime-evidence` released owners whose
+        # Machines were destroyed before evidence capture; deploy custody accepts only that exact receipt.
+        state, occurrence, paths, proof, fleet, runtime = self.recovered_campaign_state()
+        owner = c.read(fleet / '_batch/lifecycle.json')['fleet_owner_token']
+        def receipt(machine_state, volume_state='pending_destroy', **changes):
+            return {**dict(schema='cloudbench-runtime-evidence-lost-v1', fleet_owner_token=owner, run_id=fleet.name,
+                           app='fixture', observed_at='2026-11-03T00:00:00+00:00',
+                           operator_flag='--accept-lost-runtime-evidence', runtime_evidence='LOST', outcome_credit=False,
+                           observations=[dict(kind='machine', id='48e7553f5dd4e8', state=machine_state),
+                                         dict(kind='volume', id='vol_fixture', state=volume_state,
+                                              attached_machine_id=None)]), **changes}
+        proof.pop('recovered_runtime')
+        proof['lost_runtime_evidence'] = [str(fleet)]
+        import shutil
+        shutil.rmtree(runtime.parent)  # destroyed before capture: no remote logs exist
+        unread = {'.cid', 'guest-shutdown.confirmed', 'runtime-evidence.owner.json'}  # recovered_runtime-only inputs
+        original_reseal = self.reseal_recovered
+        def reseal(fleet_, proof_, edit):
+            canonical = original_reseal(fleet_, proof_, edit)
+            for name in [k for k in proof_['files'] if Path(k).name in unread]:
+                proof_['files'].pop(name)
+            return canonical
+        self.reseal_recovered = reseal
+        before = copy.deepcopy(state)
+        for bad in (receipt('stopped'), receipt('destroyed', 'created'), receipt('destroyed', outcome_credit=True),
+                    receipt('destroyed', observed_at='2026-11-04T00:00:00+00:00')):
+            variant = copy.deepcopy(proof)
+            self.reseal_recovered(fleet, variant, lambda a: c.write(a / 'runtime-evidence-lost.json', bad))
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                c.reconcile(state, occurrence['id'], variant)
+            self.assertEqual(before, state)
+        self.reseal_recovered(fleet, proof, lambda a: c.write(a / 'runtime-evidence-lost.json', receipt('destroyed')))
+        c.reconcile(state, occurrence['id'], proof)
+        entry = state['reconciled_owners'][proof['receipt_sha256']]
+        release = entry['recovered_release_evidence'][str(fleet)]
+        self.assertEqual('LOST', release['runtime_evidence'])
+        self.assertFalse(release['credit_granted']); self.assertFalse(entry['credit_granted'])
+
+    def test_campaign_recovered_unlaunched_worker_clone_is_covered(self):
+        # PR #1864: an autoscaler worker clone provisioned but never started has no stack evidence.
+        state, occurrence, paths, proof, fleet, runtime = self.recovered_campaign_state()
+        bench = json.loads((fleet / '_batch/benches.json').read_text())[0]['name']
+        out = fleet / bench
+        owner = c.read(fleet / '_batch/lifecycle.json')['fleet_owner_token']
+        worker = '8747515a9131e8'
+        identity = dict(machine_id=worker, primary_machine_id='48e7553f5dd4e8', run_token=owner + '-0', version=1)
+        (out / 'worker-clones.ids').write_text(worker + '\n')
+        c.write(out / 'worker-runtime-evidence' / worker / 'owner.json', identity)
+        def add_row(audit):
+            (audit / 'owned-clones.ids').write_text('48e7553f5dd4e8\n' + worker + '\n')
+            (audit / 'owned-clones.names').write_text('clone-j2\nclone-w1\n')
+            (audit / 'fresh/clone-w1').write_text(''.join(f'{k}={v}\n' for k, v in dict(
+                fleet_owner_token=owner, run_id=fleet.name, app='fixture', source='fresh-clone',
+                disposition='destroyed-provider-retained', machine_id=worker, clone_name='clone-w1',
+                volume_id='vol_worker').items()))
+        before = copy.deepcopy(state)
+        for started in (True, None):
+            c.write(out / 'worker-runtime-evidence' / worker / 'not-launched.json', {**identity, 'worker_started': started})
+            variant = copy.deepcopy(proof)
+            self.reseal_recovered(fleet, variant, add_row)
+            with self.subTest(started=started), self.assertRaises(ValueError):
+                c.reconcile(state, occurrence['id'], variant)
+            self.assertEqual(before, state)
+        c.write(out / 'worker-runtime-evidence' / worker / 'not-launched.json', {**identity, 'worker_started': False})
+        self.reseal_recovered(fleet, proof, add_row)
+        c.reconcile(state, occurrence['id'], proof)
+        self.assertIn(proof['receipt_sha256'], state['reconciled_owners'])
+
+    def test_campaign_retired_hub_needs_its_exact_terminal_record(self):
+        # PR #1864: exact-owner recovery records `retired-exact-owner-verified-absent` once the Hub is gone.
+        state, occurrence, paths, proof, fleet, runtime = self.recovered_campaign_state()
+        meta = (fleet / 'teardown-ownership/meta').read_text()
+        fields = dict(line.split('=', 1) for line in meta.splitlines() if '=' in line)
+        hub = Path(fields['hub_owner_file'])
+        terminal = Path(str(hub) + '.terminal')
+        def record(**changes):
+            value = {**dict(version='1', owner_file=str(hub), owner_sha256=c.sha_file(hub), pid=fields['hub_pid'],
+                            pid_start=fields['hub_pid_start'], pgid=fields['hub_pid'], owner_token=fields['hub_owner_token'],
+                            disposition='terminated-verified'), **changes}
+            terminal.write_text(''.join(f'{k}={v}\n' for k, v in value.items()))
+        birth = 'proc-start:00000000-0000-4000-8000-000000000000:1'
+        fields['hub_pid_start'] = birth
+        def retire(audit):
+            (audit / 'meta').write_text(meta.replace('hub_disposition=retained-exact-owner-transfer-required',
+                                                     'hub_disposition=retired-exact-owner-verified-absent')
+                                        .replace('hub_pid_start=' + meta.split('hub_pid_start=')[1].split('\n')[0],
+                                                 'hub_pid_start=' + birth))
+        before = copy.deepcopy(state)
+        for changes in (dict(disposition='retained'), dict(owner_token='other'), dict(owner_sha256='0' * 64)):
+            record(**changes)
+            variant = copy.deepcopy(proof)
+            self.reseal_recovered(fleet, variant, retire)
+            variant['files'][str(terminal)] = c.sha_file(terminal)
+            with self.subTest(changes=changes), self.assertRaises(ValueError):
+                c.reconcile(state, occurrence['id'], variant)
+            self.assertEqual(before, state)
+        record()
+        self.reseal_recovered(fleet, proof, retire)
+        proof['files'][str(terminal)] = c.sha_file(terminal)
+        c.reconcile(state, occurrence['id'], proof)
+        self.assertIn(proof['receipt_sha256'], state['reconciled_owners'])
     def test_campaign_recovered_v2_release_ignores_machine_less_clone_rows(self):
         # PR #1928 review: recovery must cover only rows that own a Machine; a clone cancelled before its
         # Machine existed (`not-allocated-verified`) is closed by the audit, not by runtime identity.
@@ -10034,6 +11990,58 @@ class StructuralSupervisorCleanup(unittest.TestCase):
 
     reconcile = LocalCleanup.reconcile
 
+    def file_adapter(self):
+        name=self.gate['name']
+        command=[sys.executable,str(ROOT/'scripts/deploy_test_worker.py'),'--root',str(self.worker)]
+        self.recipe={'cases':{name:{'command':['python3','scripts/run-deploy-structural-gates.py',
+                      '--max-workers','5'],'cwd':'.','env':{},'aggregate':True}}}
+        self.gate.update(command=command,result_transport='file',worker_recipe=self.recipe)
+        self.request['worker_recipe']=self.recipe
+        self.result['recipe_digest']=c.digest(self.recipe)
+        self.result['evidence'][name]['command']=self.recipe['cases'][name]['command']
+        self.receipt.update(command=command,execution_binding={
+            'contract_digest':c.digest(self.gate),'environment':'env','input_fingerprint':'fp'})
+        self.process['reaped']=[{'pid':124,'status':256},{'pid':125,'status':15}]+[
+            {'pid':pid,'status':0} for pid in range(126,248)]
+        self.write_native()
+
+    def test_native_file_structural_cleanup_keeps_failure_and_history(self):
+        self.file_adapter()
+        self.assertEqual(124,len(self.process['reaped']))
+        self.test_reaped_structural_orphans_allow_launch_only_and_keep_all_failure_facts()
+
+    def test_native_file_structural_rejects_foreign_command_and_downgraded_recipe(self):
+        import copy
+        self.file_adapter()
+        base=(copy.deepcopy(self.gate),copy.deepcopy(self.request),copy.deepcopy(self.result),copy.deepcopy(self.receipt))
+        variants=[('worker-script',lambda:self.gate['command'].__setitem__(1,str(self.worker/'scripts/deploy_test_worker.py'))),
+                  ('foreign-script',lambda:self.gate['command'].__setitem__(1,str(ROOT/'scripts/other.py'))),
+                  ('foreign-interpreter',lambda:self.gate['command'].__setitem__(0,'/bin/sh')),
+                  ('foreign-root',lambda:self.gate['command'].__setitem__(3,str(self.root))),
+                  ('stdio-on-file',lambda:self.gate['command'].append('--stdio')),
+                  ('services-without-cleanup',lambda:self.recipe.update(services=True)),
+                  ('extra-setup',lambda:self.recipe.update(setup={'command':['true']})),
+                  ('partial-case',lambda:self.recipe['cases'][self.gate['name']]['command'].append('--only')),
+                  ('case-cwd',lambda:self.recipe['cases'][self.gate['name']].update(cwd='..')),
+                  ('case-env',lambda:self.recipe['cases'][self.gate['name']].update(env={'TMPDIR':'/tmp'})),
+                  ('nonaggregate',lambda:self.recipe['cases'][self.gate['name']].update(aggregate=False))]
+        for name,mutate in variants:
+            with self.subTest(name=name):
+                self.gate,self.request,self.result,self.receipt=copy.deepcopy(base)
+                self.recipe=self.gate['worker_recipe'];mutate()
+                self.request['worker_recipe']=self.recipe
+                self.result['recipe_digest']=c.digest(self.recipe)
+                self.result['evidence'][self.gate['name']]['command']=self.recipe['cases'][self.gate['name']]['command']
+                self.receipt['command']=copy.deepcopy(self.gate['command'])
+                self.receipt['execution_binding']['contract_digest']=c.digest(self.gate)
+                self.state['plan']={'gates':[self.gate]};self.state['attempts']=[{'results':[self.receipt]}]
+                self.write_native();before=copy.deepcopy(self.state)
+                with self.assertRaises(ValueError):self.reconcile()
+                self.assertEqual(before,self.state)
+
+    def test_native_file_structural_preserves_all_supervisor_and_evidence_rejections(self):
+        self.file_adapter()
+        self.test_unreaped_unknown_signalled_or_foreign_supervisor_closure_refuses_atomically()
     def metadata_drift_fixture(self):
         self.set_cases_only_recipe()
         self.gate['selection_evidence'] = ['dependency graph: 98 affected units']
@@ -10699,6 +12707,176 @@ class InterruptedLocalRecovery(unittest.TestCase):
         with self.assertRaises(ValueError):c.interrupted_boundary(self.state)
 
 
+    def file_interruption(self, returned=False):
+        self.gate.update(result_transport='file', command=[sys.executable,
+            str(ROOT/'scripts/deploy_test_worker.py'),'--root',str(self.worker)])
+        self.recipe.clear();self.recipe.update(cases={self.gate['name']:{
+            'command':['python3','scripts/run-deploy-structural-gates.py','--max-workers','5'],
+            'cwd':'.','env':{},'aggregate':True}})
+        self.receipt.update(command=self.gate['command'])
+        self.receipt['execution_binding']['contract_digest']=c.digest(self.gate)
+        if returned:
+            self.receipt.update(native_exit=1,worker_result=str(self.folder/'result.json'))
+            self.process.update(native_exit=1,orphaned_children=True,
+                reaped=[{'pid':124,'status':256},{'pid':125,'status':9}],
+                term_sent=[124,125],kill_sent=[125])
+            self.result.update(source=self.source,recipe_digest=c.digest(self.recipe),
+                cleanup_complete=True,complete=False,cases={self.gate['name']:'UNVERIFIED'})
+            self.result['evidence'][self.gate['name']].update(
+                command=self.recipe['cases'][self.gate['name']]['command'],
+                native_exit=143,cancelled=True)
+            c.write(self.folder/'result.json',self.result)
+        self.seal()
+        if returned:
+            self.paths['result.json']=self.folder/'result.json'
+            self.proof['files']['result.json']=c.sha_file(self.paths['result.json'])
+
+    def test_file_interrupted_killed_adapter_keeps_original_receipts(self):
+        self.file_interruption()
+        original=copy.deepcopy(self.state['attempts'])
+        self.reconcile()
+        self.assertEqual([],c.retained_owners(self.state,[self.gate['name']]))
+        self.assertEqual(original,self.state['attempts'])
+        self.assertFalse(next(iter(self.state['reconciled_owners'].values()))['credit_granted'])
+
+    def test_file_interrupted_returned_structural_keeps_original_receipts(self):
+        self.file_interruption(returned=True)
+        original=copy.deepcopy(self.state['attempts'])
+        self.reconcile()
+        self.assertEqual([],c.retained_owners(self.state,[self.gate['name']]))
+        self.assertEqual(original,self.state['attempts'])
+        self.assertFalse(next(iter(self.state['reconciled_owners'].values()))['credit_granted'])
+
+    def _returned_coverage_cancellation(self, name, spec):
+        self.file_interruption(returned=True)
+        old=self.gate['name']
+        self.recipe['cases']={name:spec}
+        self.gate.update(name=name,category=name,checks=[name])
+        self.request.update(gate=name,checks=[name])
+        self.receipt.update(gate=name,cases={name:'UNVERIFIED'},lingering_group=False)
+        self.process.update(orphaned_children=False,reaped=[{'pid':124,'status':256},{'pid':125,'status':15}],term_sent=[124,125],kill_sent=[])
+        self.receipt['execution_binding']['contract_digest']=c.digest(self.gate)
+        case=self.result['evidence'].pop(old)
+        log=self.worker/'.context/deploy-worker'/__import__('hashlib').sha256(self.token.encode()).hexdigest()/(__import__('hashlib').sha256(name.encode()).hexdigest()+'.log')
+        log.write_bytes(self.case_log.read_bytes())
+        case.update(native_exit=-15,command=spec['command'],log=str(log),sha256=c.sha_file(log),lingering_group=True)
+        self.result.update(gate=name,cases={name:'UNVERIFIED'},evidence={name:case},recipe_digest=c.digest(self.recipe))
+        c.write(self.paths['result.json'],self.result);self.seal()
+        self.proof['files']['result.json']=c.sha_file(self.paths['result.json'])
+        original=copy.deepcopy(self.state['attempts'])
+        self.reconcile()
+        self.assertEqual([],c.retained_owners(self.state,[name]))
+        self.assertEqual(original,self.state['attempts'])
+        self.assertFalse(next(iter(self.state['reconciled_owners'].values()))['credit_granted'])
+        case['cancelled']=False;c.write(self.paths['result.json'],self.result)
+        self.proof['files']['result.json']=c.sha_file(self.paths['result.json'])
+        with self.assertRaises(ValueError):c.retained_owners(self.state,[name])
+
+    def test_file_returned_coverage_cancellation_keeps_original_receipts(self):
+        self._returned_coverage_cancellation('frontend-coverage-blackbox',
+            {'command':['npm','run','test:coverage','--','--maxWorkers=1'],
+             'cwd':'front-end','env':{},'aggregate':True})
+
+    def test_file_returned_agents_cancellation_keeps_original_receipts(self):
+        self._returned_coverage_cancellation('agents-coverage-blackbox',
+            {'command':['bash','scripts/run-coverage.sh'], 'cwd':'agents',
+             'env':{'AGENTS_COVERAGE_CONCURRENCY':'2'},'aggregate':True})
+
+    def _late_agents_log(self):
+        self._returned_coverage_cancellation('agents-coverage-blackbox',
+            {'command':['bash','scripts/run-coverage.sh'], 'cwd':'agents',
+             'env':{'AGENTS_COVERAGE_CONCURRENCY':'2'},'aggregate':True})
+        self.state.pop('reconciled_owners',None)
+        case=self.result['evidence']['agents-coverage-blackbox']
+        case.update(cancelled=True,sha256=__import__('hashlib').sha256(b'').hexdigest())
+        log=Path(case['log']);log.write_text('late cancelled child output\n')
+        os.utime(log,ns=(191000000000,191000000000))
+        c.write(self.paths['result.json'],self.result);self.seal()
+        self.proof.update(kind='local-cancelled-log-supplement-v1',final_log={
+            'path':str(log),'sha256':c.sha_file(log),'size':log.stat().st_size,
+            'mtime_ns':log.stat().st_mtime_ns,'recorded_sha256':case['sha256']})
+        return log
+
+    def test_cancelled_log_supplement_preserves_mismatch_and_never_grants_credit(self):
+        log=self._late_agents_log()
+        original=copy.deepcopy(self.state['attempts']);raw={n:p.read_bytes() for n,p in self.paths.items()}
+        strict={k:v for k,v in self.proof.items() if k!='final_log'};strict['kind']=KIND
+        with self.assertRaises(ValueError):c.reconcile(self.state,self.token,strict)
+        self.reconcile()
+        self.assertEqual([],c.retained_owners(self.state,[self.gate['name']]))
+        self.assertEqual(original,self.state['attempts']);self.assertEqual(raw,{n:p.read_bytes() for n,p in self.paths.items()})
+        self.assertFalse(next(iter(self.state['reconciled_owners'].values()))['credit_granted'])
+        self.assertIsNone(c.full_pass_binding(self.state,self.gate))
+        log.write_text('changed again')
+        with self.assertRaises(ValueError):c.retained_owners(self.state,[self.gate['name']])
+
+    def test_cancelled_log_supplement_refuses_foreign_or_live_custody(self):
+        log=self._late_agents_log();proof=copy.deepcopy(self.proof)
+        for key,value in [('path',str(self.case_log)),('sha256','f'*64),('size',0),('mtime_ns',0),('recorded_sha256','f'*64)]:
+            self.proof=copy.deepcopy(proof);self.proof['final_log'][key]=value
+            with self.subTest(key=key),self.assertRaises(ValueError):self.reconcile()
+            self.assertNotIn('reconciled_owners',self.state)
+        self.proof=proof
+        original=copy.deepcopy(self.process)
+        self.process['reaped']=self.process['reaped'][:1];c.write(self.paths['output.log.process.json'],self.process)
+        self.proof['files']['output.log.process.json']=c.sha_file(self.paths['output.log.process.json'])
+        with self.assertRaises(ValueError):self.reconcile()
+        self.process=original;c.write(self.paths['output.log.process.json'],self.process)
+        self.proof['files']['output.log.process.json']=c.sha_file(self.paths['output.log.process.json'])
+        for key,value in [('token','foreign'),('source',{})]:
+            old=self.result[key];self.result[key]=value;c.write(self.paths['result.json'],self.result)
+            self.proof['files']['result.json']=c.sha_file(self.paths['result.json'])
+            with self.subTest(key=key),self.assertRaises(ValueError):self.reconcile()
+            self.result[key]=old
+        c.write(self.paths['result.json'],self.result);self.proof['files']['result.json']=c.sha_file(self.paths['result.json'])
+        import fcntl
+        with (self.worker/'.context/native-worker-admission.lock').open('r') as lock:
+            fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
+            with self.assertRaises(ValueError):self.reconcile()
+        proc=subprocess.Popen([sys.executable,'-c','import time;time.sleep(10)'],cwd=self.worker)
+        try:
+            with self.assertRaises(ValueError):self.reconcile()
+        finally:proc.terminate();proc.wait(timeout=2)
+
+    def test_cancelled_log_supplement_refuses_fd_only_and_mapped_holders(self):
+        log=self._late_agents_log()
+        for mapped in (False,True):
+            code=("import sys,time,mmap; p=sys.stdin.readline().strip(); f=open(p,'r+b'); "
+                  +( "m=mmap.mmap(f.fileno(),0); f.close(); " if mapped else "")
+                  +"print('ready',flush=True); time.sleep(10)")
+            proc=subprocess.Popen([sys.executable,'-c',code],cwd=self.root,
+                stdin=subprocess.PIPE,stdout=subprocess.PIPE,text=True)
+            try:
+                proc.stdin.write(str(log)+'\n');proc.stdin.flush()
+                self.assertEqual('ready',proc.stdout.readline().strip())
+                with self.subTest(mapped=mapped),self.assertRaises(ValueError):self.reconcile()
+                self.assertNotIn('reconciled_owners',self.state)
+            finally:
+                proc.terminate();proc.wait(timeout=2);proc.stdin.close();proc.stdout.close()
+
+    def test_cancelled_log_supplement_rechecks_after_native_custody_scan(self):
+        log=self._late_agents_log()
+        def changed(*args,**kwargs):log.write_text('changed during custody check')
+        with patch('deploy_test_process_scan.prepared_workers_idle',side_effect=changed),self.assertRaises(ValueError):
+            self.reconcile()
+        self.assertNotIn('reconciled_owners',self.state)
+
+    def test_file_returned_structural_rejects_incomplete_or_foreign_evidence(self):
+        self.file_interruption(returned=True)
+        original=copy.deepcopy(self.result)
+        for key,value in [('cleanup_complete',False),('token','foreign'),('recipe_digest','foreign')]:
+            self.result={**original,key:value};c.write(self.paths['result.json'],self.result)
+            self.proof['files']['result.json']=c.sha_file(self.paths['result.json'])
+            before=copy.deepcopy(self.state)
+            with self.subTest(key=key),self.assertRaises(ValueError):self.reconcile()
+            self.assertEqual(before,self.state)
+        self.result=original;c.write(self.paths['result.json'],self.result)
+        self.proof['files']['result.json']=c.sha_file(self.paths['result.json'])
+        self.process['reaped']=[{'pid':124,'status':256}];self.seal()
+        self.proof['files']['result.json']=c.sha_file(self.paths['result.json'])
+        with self.assertRaises(ValueError):self.reconcile()
+
+
 class InterruptedCardRecovery(unittest.TestCase):
     write_native = CardPreflightCleanup.write_native
 
@@ -10759,6 +12937,376 @@ class InterruptedCardRecovery(unittest.TestCase):
         with self.assertRaises(ValueError):c.reconcile(self.state,self.token,self.proof)
 
 
+
+class PremanifestCardRecovery(unittest.TestCase):
+    write_native = CardPreflightCleanup.write_native
+    """Captured FILE/cancelled/missing-receipt boundary; no real DB or providers."""
+    def setUp(self):
+        CardPreflightCleanup.setUp(self)
+        self.run.rename(self.run.with_name('1794032988-1971531-70259'))
+        old=self.run; self.run=old.with_name('1794032988-1971531-70259')
+        for key in ('local-stack-cleanup.status','services.json'):
+            self.paths[key]=self.run/self.paths[key].name
+            self.paths[key].unlink(); self.paths.pop(key)
+        for key in ('local-stack-owner.json','local-benchmark-owner.json'):
+            self.paths[key]=self.run/key
+        self.stack['run_id']=self.run.name
+        self.benchmark.update(run_id=self.run.name,receipt=str(self.run/'benchmark-cleanup.status'))
+        self.recipe.clear(); self.recipe.update(cases={'agentcard-lifecycle':dict(
+            command=['bash','scripts/run-bench','--local','agent-payment-test-shop','agent-payment-setup-resume',
+                     'agent-payment-idempotent-abandonment','agent-payment-abandonment','--bootstrap',
+                     '--max-concurrency','1','--no-dashboard'],cwd='.',env={},aggregate=True)})
+        self.gate.update(result_transport='file',command=[sys.executable,str(ROOT/'scripts/deploy_test_worker.py'),
+                        '--root',str(self.worker)],env={'CONDUCTOR_PORT':'13514','ROSE_USE_SYSTEM_PG':'true','CONDUCTOR_WORKSPACE_NAME':'deploy_agentcard_lifecycle'})
+        self.receipt.update(command=self.gate['command'],cancelled=True)
+        self.receipt['execution_binding']['contract_digest']=c.digest(self.gate)
+        self.result.update(recipe_digest=c.digest(self.recipe))
+        self.result['evidence']['agentcard-lifecycle'].update(command=self.recipe['cases']['agentcard-lifecycle']['command'],cancelled=True)
+        self.paths['case.log'].write_text('Received signal 15; draining owned benchmark before services...\n'
+            f'RuntimeError: cleanup receipt is missing or unsafe: {self.run}/local-stack-cleanup.status\n')
+        self.paths['services.log']=self.run/'services.log'
+        self.paths['services.log'].write_text('🔌 Ports: backend=13714 frontend=13715 health=13716 mac-app=13717 metrics=13718 db=13719 wmh=13720 ngrok_api=13723 queue=navi-agent-tasks-deploy_agentcard_lifecycle-bench-'+self.run.name+' temporal_namespace=rose-labs-bench.tch2n benchmark_mode=true worker_processes=1\n'
+            '🐘 System Postgres already running on port 5432\n'
+            '🐘 Created isolated system database victoria_bench_1794032988_1971531_70259\n'
+            'Python and Node Playwright Chromium assets are ready\n')
+        self.result['evidence']['agentcard-lifecycle']['sha256']=c.sha_file(self.paths['case.log'])
+        self.seal()
+        import deploy_test_local_cleanup as local
+        self.physical=self.enterContext(patch.object(local,'premanifest_card_absent',return_value=None,create=True))
+
+    def seal(self):
+        for key,value in [('request.json',self.request),('result.json',self.result),('native-result.json',self.result),
+                          ('local-stack-owner.json',self.stack),('local-benchmark-owner.json',self.benchmark)]:
+            c.write(self.paths[key],value)
+        reference=dict(result=str(self.paths['result.json']),native_directory=None,cleanup_complete=True,
+            result_sha256=c.sha_file(self.paths['result.json']),native_evidence=self.result['evidence'])
+        self.receipt.update(native_cleanup_reference=reference,cleanup_owner=dict(request_token=self.token,
+                            worker_root=str(self.worker),native_cleanup_reference=reference))
+        c.write(self.paths['receipt.json'],self.receipt)
+        self.proof=dict(kind=KIND,files={k:c.sha_file(p) for k,p in self.paths.items()},confirmed_at=201,observed_by='native-review')
+
+    def reconcile(self): c.reconcile(self.state,'occurrence',self.proof)
+
+    def test_file_missing_receipt_reconciles_only_resource_custody(self):
+        before={k:p.read_bytes() for k,p in self.paths.items()}
+        self.reconcile()
+        self.assertFalse(next(iter(self.state['reconciled_owners'].values()))['credit_granted'])
+        self.assertEqual('UNVERIFIED',self.failure['native_result'])
+        self.assertEqual(before,{k:p.read_bytes() for k,p in self.paths.items()})
+        self.assertFalse((self.run/'local-stack-cleanup.status').exists())
+        self.assertEqual([],c.retained_owners(self.state,['agentcard-lifecycle']))
+        self.assertEqual('victoria_bench_1794032988_1971531_70259',self.physical.call_args.args[3]['name'])
+
+    def test_physical_failure_and_late_database_refuse(self):
+        self.physical.side_effect=ValueError('database present')
+        before=copy.deepcopy(self.state)
+        with self.assertRaises(ValueError):self.reconcile()
+        self.assertEqual(before,self.state)
+        self.physical.side_effect=None;self.reconcile()
+        self.physical.side_effect=ValueError('database appeared')
+        with self.assertRaises(ValueError):c.retained_owners(self.state,['agentcard-lifecycle'])
+
+    def test_conflicting_artifacts_and_admission_refuse(self):
+        for name in ['services.json','local-stack-cleanup.status','run.json','benchmark-cleanup.status']:
+            path=self.run/name;path.write_text('{}')
+            with self.subTest(name=name),self.assertRaises(ValueError):self.reconcile()
+            path.unlink()
+            path.symlink_to(self.paths['services.log'])
+            with self.subTest(symlink=name),self.assertRaises(ValueError):self.reconcile()
+            path.unlink()
+        self.benchmark['state']='running';self.seal()
+        with self.assertRaises(ValueError):self.reconcile()
+
+    def test_resigned_wrong_launch_contract_refuses_before_physical_probe(self):
+        for key, replacement in [('services.log','victoria_bench_other'),('case.log','other-run')]:
+            original=self.paths[key].read_text()
+            altered=(original.replace('victoria_bench_1794032988_1971531_70259',replacement)
+                     if key=='services.log' else original.replace(self.run.name,replacement))
+            self.paths[key].write_text(altered)
+            self.result['evidence']['agentcard-lifecycle']['sha256']=c.sha_file(self.paths['case.log'])
+            self.seal()
+            with self.subTest(key=key),self.assertRaises(ValueError):self.reconcile()
+            self.paths[key].write_text(original)
+        self.result['evidence']['agentcard-lifecycle']['sha256']=c.sha_file(self.paths['case.log'])
+        for target,key,value in [(self.request,'token','wrong'),(self.stack,'native_identity','linux:wrong:1'),
+                                 (self.recipe['cases']['agentcard-lifecycle'],'env',{'CONDUCTOR_PORT':'1'}),
+                                 (self.benchmark,'pid',42)]:
+            old=target.get(key);target[key]=value;self.seal()
+            with self.subTest(key=key),self.assertRaises(ValueError):self.reconcile()
+            target[key]=old
+        self.physical.assert_not_called()
+
+    def test_tampering_and_replay_refuse(self):
+        for key in self.paths:
+            raw=self.paths[key].read_bytes();self.paths[key].write_bytes(raw+b' ')
+            with self.subTest(key=key),self.assertRaises(ValueError):self.reconcile()
+            self.paths[key].write_bytes(raw)
+        for target,key,value in [(self.stack,'run_id','other'),(self.stack,'pid',os.getpid()),
+                                 (self.result,'source',{}),(self.gate,'command',['other']),
+                                 (self.gate,'env',{'CONDUCTOR_PORT':'12000'})]:
+            old=target[key];target[key]=value;self.seal()
+            with self.subTest(key=key),self.assertRaises(ValueError):self.reconcile()
+            target[key]=old
+        self.seal();self.reconcile()
+        with self.assertRaises(ValueError):self.reconcile()
+
+
+class PremanifestPhysicalChecks(unittest.TestCase):
+    def test_database_query_failure_present_and_late_resource_are_not_absence(self):
+        import deploy_test_local_cleanup as local
+        owner={'pid':2000000000,'token':'a'*32}
+        with patch.object(local,'premanifest_card_scan') as scan, \
+             patch.object(local,'premanifest_card_database') as db, \
+             patch.object(local.Path,'read_text',return_value='header\n'):
+            for effect in ['present',RuntimeError('query failed')]:
+                db.side_effect=effect if isinstance(effect,Exception) else None
+                db.return_value=effect
+                with self.assertRaises((ValueError,RuntimeError)):
+                    local.premanifest_card_absent(Path('/unused'),Path('/unused/run'),owner,{'name':'exact'}, {'backend':12345})
+            db.side_effect=None;db.return_value=None;scan.side_effect=[None,ValueError('late owner')]
+            with self.assertRaises(ValueError):
+                local.premanifest_card_absent(Path('/unused'),Path('/unused/run'),owner,{'name':'exact'},{'backend':12345})
+            scan.side_effect=None
+            local.premanifest_card_absent(Path('/unused'),Path('/unused/run'),owner,{'name':'exact'},{'backend':12345})
+            with patch.object(local.Path,'read_text',return_value='header\n0: 00000000:3039 00:0 0A x\n'):
+                with self.assertRaises(ValueError):
+                    local.premanifest_card_absent(Path('/unused'),Path('/unused/run'),owner,{'name':'exact'},{'backend':12345})
+
+    def test_fixed_privileged_scanner_checks_real_fixture_fd_maps_root_and_token(self):
+        import io
+        import deploy_test_local_cleanup as local
+        import deploy_test_process_scan as scan
+        real_path=Path
+        with tempfile.TemporaryDirectory() as tmp:
+            base=Path(tmp);worker=base/'worker';worker.mkdir();proc=base/'proc';proc.mkdir()
+            caller=10;other=30;uid=os.getuid();token='b'*32
+            entry=proc/str(other);entry.mkdir();(entry/'fd').mkdir()
+            (entry/'stat').write_text('30 (fixture) S '+' '.join(['0']*18+['123']))
+            (entry/'cmdline').write_bytes(b'fixture\0');(entry/'environ').write_bytes(b'')
+            (entry/'maps').write_text('');(entry/'cwd').symlink_to(base);(entry/'root').symlink_to('/')
+            request=dict(uid=uid,pid=caller,birth='1',root=str(worker),token=token,owner_pid=20)
+            def path(value,*args):
+                v=str(value)
+                if v=='/proc' or v.startswith('/proc/'):return real_path(str(proc)+v[5:],*args)
+                return real_path(value,*args)
+            def invoke():
+                stdout=io.StringIO()
+                with patch.object(local,'Path',side_effect=path),patch.object(local,'os') as fake_os, \
+                     patch.object(local,'identity',create=True,side_effect=lambda pid:(uid,uid,'1',caller)), \
+                     patch.object(local,'scan_roots',create=True,side_effect=lambda roots,**kw:scan.scan_roots(roots,proc,birth_guard=True,excluded=(caller,))), \
+                     patch.object(local,'json',create=True,new=json),patch.object(local,'hashlib',create=True,new=__import__('hashlib')), \
+                     patch.object(local,'signal',create=True) as sig,patch.object(local,'sys',create=True) as fake_sys:
+                    fake_os.geteuid.return_value=0;fake_os.getppid.return_value=caller;fake_os.getpid.return_value=999
+                    fake_os.environ={'SUDO_UID':str(uid)};fake_os.readlink=os.readlink;fake_os.fsencode=os.fsencode
+                    fake_sys.stdin=io.TextIOWrapper(io.BytesIO(json.dumps(request).encode()))
+                    with patch('sys.stdout',stdout):
+                        try:local._premanifest_scan_main()
+                        except SystemExit:pass
+                return json.loads(stdout.getvalue())['quiescent']
+            self.assertTrue(invoke())
+            (proc/'20').mkdir()
+            self.assertFalse(invoke())  # live or reused original PID is never accepted
+            (proc/'20').rmdir()
+            for field in ('token','root','fd','maps','cwd','unreadable'):
+                with self.subTest(field=field):
+                    if field=='token':(entry/'environ').write_bytes(('RUN_STACK_CLEANUP_TOKEN='+token).encode())
+                    if field=='root':(entry/'root').unlink();(entry/'root').symlink_to(worker)
+                    if field=='fd':(entry/'fd/4').symlink_to(worker/'data')
+                    if field=='maps':(entry/'maps').write_text('00-ff r--p 0 00:00 1 '+str(worker/'data'))
+                    if field=='cwd':(entry/'cwd').unlink();(entry/'cwd').symlink_to(worker)
+                    if field=='unreadable':(entry/'environ').unlink()
+                    self.assertFalse(invoke())
+                    (entry/'environ').write_bytes(b'');(entry/'maps').write_text('')
+                    for link,target in [('root',Path('/')),('cwd',base)]:
+                        (entry/link).unlink();(entry/link).symlink_to(target)
+                    if (entry/'fd/4').is_symlink():(entry/'fd/4').unlink()
+
+
+class PremanifestCensusArrival(unittest.TestCase):
+    def run_census(self, mode):
+        import io
+        import shutil
+        import deploy_test_local_cleanup as local
+        import deploy_test_process_scan as scan
+        real_path=Path
+        with tempfile.TemporaryDirectory() as tmp:
+            base=Path(tmp);worker=base/'worker';worker.mkdir();proc=base/'proc';proc.mkdir()
+            uid=os.getuid();caller=10;token='b'*32;rounds=[0];scanned=[]
+            def create(pid):
+                entry=proc/str(pid);entry.mkdir();(entry/'fd').mkdir()
+                (entry/'stat').write_text(str(pid)+' (fixture) S '+' '.join(['0']*18+['123']))
+                (entry/'cmdline').write_bytes(b'fixture\0');(entry/'environ').write_bytes(b'')
+                (entry/'maps').write_text('');(entry/'cwd').symlink_to(base);(entry/'root').symlink_to('/')
+                return entry
+            create(30)
+            class CensusPath:
+                def glob(self, pattern):
+                    rounds[0]+=1
+                    if rounds[0]==2:
+                        if mode=='vanished':shutil.rmtree(proc/'30')
+                        elif mode not in ('identity','caller'):
+                            new=create(40)
+                            if mode=='owned':(new/'fd/5').symlink_to(worker/'active')
+                            if mode=='unreadable':(new/'environ').unlink()
+                    if mode=='reuse' and rounds[0]==2:shutil.rmtree(proc/'30')
+                    if mode=='reuse' and rounds[0]==3:create(30)
+                    if mode=='churn' and rounds[0]>2:create(40+rounds[0])
+                    return proc.glob(pattern)
+            def path(value,*args):
+                if str(value)=='/proc' and not args:return CensusPath()
+                if str(value)=='/proc' or str(value).startswith('/proc/'):
+                    return real_path(str(proc)+str(value)[5:],*args)
+                return real_path(value,*args)
+            def ident(pid):
+                if pid!=caller and not (proc/str(pid)).exists():raise FileNotFoundError()
+                changed=(rounds[0]>=2 and ((mode=='identity' and pid==30) or (mode=='caller' and pid==caller))) or (mode=='reuse' and rounds[0]>=3 and pid==30)
+                return (uid,uid,'2' if changed else '1',caller)
+            def inspect_roots(roots,**kw):
+                scanned.extend(p.name for p in proc.glob('[0-9]*'))
+                return scan.scan_roots(roots,proc,birth_guard=True,excluded=(caller,))
+            request=dict(uid=uid,pid=caller,birth='1',root=str(worker),token=token,owner_pid=20)
+            stdout=io.StringIO()
+            with patch.object(local,'Path',side_effect=path),patch.object(local,'os') as fake_os, \
+                 patch.object(local,'identity',create=True,side_effect=ident), \
+                 patch.object(local,'scan_roots',create=True,side_effect=inspect_roots), \
+                 patch.object(local,'json',create=True,new=json),patch.object(local,'hashlib',create=True,new=__import__('hashlib')), \
+                 patch.object(local,'signal',create=True),patch.object(local,'sys',create=True) as fake_sys:
+                fake_os.geteuid.return_value=0;fake_os.getppid.return_value=caller;fake_os.getpid.return_value=999
+                fake_os.environ={'SUDO_UID':str(uid)};fake_os.readlink=os.readlink;fake_os.fsencode=os.fsencode
+                fake_sys.stdin=io.TextIOWrapper(io.BytesIO(json.dumps(request).encode()))
+                with patch('sys.stdout',stdout):
+                    try:local._premanifest_scan_main()
+                    except SystemExit:pass
+            return json.loads(stdout.getvalue())['quiescent'],rounds[0],scanned
+
+    def test_new_safe_process_is_fully_scanned_and_unsafe_arrivals_refuse(self):
+        ok,rounds,scanned=self.run_census('safe')
+        self.assertTrue(ok)
+        self.assertIn('40',scanned)
+        self.assertGreaterEqual(rounds,3)
+        for mode in ('owned','unreadable','identity','caller','churn','reuse'):
+            with self.subTest(mode=mode):
+                ok,rounds,scanned=self.run_census(mode)
+                self.assertFalse(ok)
+                if mode in ('owned','unreadable'):self.assertIn('40',scanned)
+                self.assertLessEqual(rounds,8)
+        self.assertTrue(self.run_census('vanished')[0])
+
+
+class CleanFileCardRecovery(unittest.TestCase):
+    write_native = CardPreflightCleanup.write_native
+    seal_base = PremanifestCardRecovery.seal
+    reconcile = PremanifestCardRecovery.reconcile
+
+    def seal(self):
+        if hasattr(self,'manifest'):
+            c.write(self.paths['services.json'],self.manifest)
+            self.paths['local-stack-cleanup.status'].write_text(''.join(k+'='+v+'\n' for k,v in self.clean.items()))
+        self.seal_base()
+
+    def setUp(self):
+        PremanifestCardRecovery.setUp(self)
+        old=self.run;self.run=old.with_name('1794036647-2674647-70562');old.rename(self.run)
+        for key in ['services.log','local-stack-owner.json','local-benchmark-owner.json']:
+            self.paths[key]=self.run/key
+        self.stack['run_id']=self.run.name
+        self.benchmark.update(run_id=self.run.name,receipt=str(self.run/'benchmark-cleanup.status'))
+        self.paths['services.log'].write_text(self.paths['services.log'].read_text().replace(old.name,self.run.name).replace(old.name.replace('-','_'),self.run.name.replace('-','_'))+
+                                             '🧭 Service manifest: .context/benchmarks/'+self.run.name+'/services.json\n')
+        self.paths['case.log'].write_text('Isolated benchmark stack: run_id='+self.run.name+
+            ' context=.context/benchmarks/'+self.run.name+' backend=13714 frontend=13715 db=5432 db_name=victo' +
+            'ria_bench_'+self.run.name.replace('-','_')+' queue=navi-agent-tasks-deploy_agentcard_lifecycle-bench-'+self.run.name+'\n'
+            'Received signal 15; draining owned benchmark before services...\n')
+        case=self.result['evidence']['agentcard-lifecycle'];case.update(native_exit=143,sha256=c.sha_file(self.paths['case.log']))
+        self.paths['services.json']=self.run/'services.json';self.paths['local-stack-cleanup.status']=self.run/'local-stack-cleanup.status'
+        self.manifest=dict(schema_version=1,benchmark_mode=True,status='stopped',worktree=str(self.worker),run_sh_pid=self.stack['pid'],
+            ports=dict(backend=13714,frontend=13715,health=13716,local_db=13719,mac_app=13717,sdk_metrics=13718,ngrok_api=13723,wmh=0),
+            database=dict(name='victoria_bench_'+self.run.name.replace('-','_'),use_system_postgres=True,port=5432,runtime_port=5432,
+                          owned_by_run_sh=True,container='',volume=''),
+            temporal_task_queue='navi-agent-tasks-deploy_agentcard_lifecycle-bench-'+self.run.name,
+            services=[dict(name=n,pid=2000000001+i) for i,n in enumerate(['cloudflared','back-end','front-end','agents'])])
+        self.clean=dict(version='2',state='clean',token=self.stack['token'],stack_pid=str(self.stack['pid']),
+                        stack_birth=self.stack['birth'],stack_native_identity=self.stack['native_identity'])
+        self.seal()
+
+    def test_clean_file_cancellation_reconciles_resource_only(self):
+        original={k:p.read_bytes() for k,p in self.paths.items()};before=copy.deepcopy(self.state['attempts'])
+        self.reconcile()
+        self.assertEqual([],c.retained_owners(self.state,['agentcard-lifecycle']))
+        self.assertEqual(before,self.state['attempts']);self.assertEqual('UNVERIFIED',self.failure['native_result'])
+        self.assertFalse(next(iter(self.state['reconciled_owners'].values()))['credit_granted'])
+        self.assertEqual(original,{k:p.read_bytes() for k,p in self.paths.items()})
+        self.assertEqual('victoria_bench_'+self.run.name.replace('-','_'),self.physical.call_args.args[3]['name'])
+        with self.assertRaises(ValueError):self.reconcile()
+        self.physical.side_effect=ValueError('late database')
+        with self.assertRaises(ValueError):c.retained_owners(self.state,['agentcard-lifecycle'])
+
+    def test_clean_file_manifest_receipt_and_admission_guards(self):
+        cases=[(self.clean,'state','failed'),(self.clean,'token','foreign'),(self.clean,'version','1'),
+               (self.manifest,'status','running'),(self.manifest,'run_sh_pid',123),
+               (self.manifest['database'],'name','victoria'),(self.manifest['database'],'port',1),
+               (self.manifest['ports'],'backend',1),(self.manifest,'worktree',str(self.root)),
+               (self.benchmark,'state','running'),(self.stack,'pid',os.getpid()),
+               (self.result,'source',{}),(self.manifest,'temporal_task_queue','foreign')]
+        for target,key,value in cases:
+            old=target[key];target[key]=value;self.seal();before=copy.deepcopy(self.state)
+            with self.subTest(key=key),self.assertRaises(ValueError):self.reconcile()
+            self.assertEqual(before,self.state);target[key]=old
+        self.seal()
+        for key in ['services.json','local-stack-cleanup.status']:
+            p=self.paths[key];raw=p.read_bytes();p.unlink();p.symlink_to(self.paths['services.log'])
+            with self.subTest(symlink=key),self.assertRaises(ValueError):self.reconcile()
+            p.unlink();p.write_bytes(raw)
+        for key,p in self.paths.items():
+            raw=p.read_bytes();p.write_bytes(raw+b' ')
+            with self.subTest(hash=key),self.assertRaises(ValueError):self.reconcile()
+            p.write_bytes(raw)
+        self.manifest['services'][0]['pid']=os.getpid();self.seal()
+        with self.assertRaises(ValueError):self.reconcile()
+
+    def test_clean_file_resigned_malformed_conflicting_or_foreign_evidence_refuses(self):
+        for key in ['local-stack-cleanup.status','services.json','case.log','services.log']:
+            p=self.paths[key];original=p.read_bytes()
+            if key=='local-stack-cleanup.status':p.write_bytes(original+b'state=clean\n')
+            elif key=='services.json':p.write_bytes(b'{invalid-json')
+            elif key=='case.log':p.write_text(p.read_text().replace('db_name=victoria_bench_', 'db_name=foreign_'))
+            else:p.write_text(p.read_text().replace('Created isolated system database victoria_bench_', 'Created isolated system database foreign_'))
+            if key=='case.log':
+                self.result['evidence']['agentcard-lifecycle']['sha256']=c.sha_file(p);self.seal()
+            self.proof['files'][key]=c.sha_file(p)
+            with self.subTest(key=key),self.assertRaises(ValueError):self.reconcile()
+            p.write_bytes(original)
+            self.result['evidence']['agentcard-lifecycle']['sha256']=c.sha_file(self.paths['case.log']);self.seal()
+        for name in ['run.json','report-card.json','local-benchmark-results.json','services.json.tmp','benchmark-cleanup.status']:
+            p=self.run/name;p.write_text('{}')
+            with self.subTest(name=name),self.assertRaises(ValueError):self.reconcile()
+            p.unlink()
+
+    def test_clean_file_numeric_types_are_not_coerced(self):
+        for target,key,value in [(self.manifest,'schema_version',True),(self.manifest['ports'],'backend',13714.0),
+                                 (self.manifest['database'],'use_system_postgres',1),
+                                 (self.manifest['database'],'port',5432.0)]:
+            old=target[key];target[key]=value;self.seal()
+            with self.subTest(key=key),self.assertRaises(ValueError):self.reconcile()
+            target[key]=old
+
+    def test_clean_file_late_service_pid_reuse_refuses(self):
+        import deploy_test_local_cleanup as local
+        original=Path.exists;late=[False];pid=self.manifest['services'][0]['pid']
+        def exists(path):
+            if str(path)=='/proc/'+str(pid):return late[0]
+            return original(path)
+        def observed(*args):late[0]=True
+        self.physical.side_effect=observed
+        before=copy.deepcopy(self.state)
+        with patch.object(local.Path,'exists',exists),self.assertRaises(ValueError):self.reconcile()
+        self.assertEqual(before,self.state)
+
+    def test_clean_receipt_never_substitutes_for_physical_absence(self):
+        for reason in ['database present','query failed','unknown process','live token','listener busy']:
+            self.physical.side_effect=ValueError(reason);before=copy.deepcopy(self.state)
+            with self.subTest(reason=reason),self.assertRaises(ValueError):self.reconcile()
+            self.assertEqual(before,self.state)
 class NativeJsonEvidence(unittest.TestCase):
     def test_json_chunk_boundaries_and_original_scalar_forms(self):
         import hashlib
@@ -11471,6 +14019,31 @@ class RelayStartupEvidence(unittest.TestCase):
         self.save(Path(receipt['log']).parent/'receipt.json',receipt);proof['receipt_sha256']=c.sha_file(Path(receipt['log']).parent/'receipt.json')
         self.reseal();return receipt,owner,proof,fleets
 
+    def test_recovered_warning_projection_uses_existing_mixed_cleanup_contract(self):
+        import deploy_test_historical_custody as h
+        receipt, owner, proof, _ = self.mixed_preallocation_fixture()
+        folder = Path(receipt['log']).parent
+        request = json.loads((folder / 'request.json').read_text())
+        canonical = dict(kind=h.RECOVERED_KIND, current_binding={'source': receipt['source']},
+                         credit=copy.deepcopy(h.RECOVERED_CREDIT))
+        projected = h.recovered_projection(canonical, receipt['source'])
+        request['skips'].pop('old-one')
+        request['skips']['agent-payment-abandonment'] = projected
+        receipt['cases'].pop('old-one'); receipt['cases']['agent-payment-abandonment'] = 'SKIP'
+        receipt['case_complete'].pop('old-one'); receipt['case_complete']['agent-payment-abandonment'] = False
+        self.save(folder / 'request.json', request)
+        self.save(folder / 'receipt.json', receipt)
+        proof['receipt_sha256'] = c.sha_file(folder / 'receipt.json'); self.reseal()
+        result = self.validate_fixture(receipt, owner, proof)
+        self.assertFalse(result['credit_granted'])
+        self.assertFalse(receipt['case_complete']['agent-payment-abandonment'])
+        self.assertEqual(c.digest(canonical), projected['recovered_record_sha256'])
+        # Sending the canonical new kind/credit shape directly remains forbidden.
+        request['skips']['agent-payment-abandonment'].update(kind=h.RECOVERED_KIND, credit=h.RECOVERED_CREDIT)
+        self.save(folder / 'request.json', request); self.reseal()
+        with self.assertRaisesRegex(ValueError, 'mixed original exclusion inventory'):
+            self.validate_fixture(receipt, owner, proof)
+
     def test_mixed_preallocation_with_a_cancelled_infra_canary_reconciles(self):
         # PR #1928 smoke: 10 jobs were refused before allocation (warm source 429) while the infra canary
         # was TERMed mid-preflight; mixed preallocation must also admit that linked, released canary.
@@ -11759,7 +14332,7 @@ class CleanupPrepareEvidence(unittest.TestCase):
     setUp = RelayStartupEvidence.setUp
     fixture = RelayStartupEvidence.fixture
 
-    def prepare_fixture(self, producer_head='abd6e81ee0f0c5cbcd88a4a7f11b4a8920740077'):
+    def prepare_fixture(self, producer_head='abd6e81ee0f0c5cbcd88a4a7f11b4a8920740077', count=14, custody=False):
         import hashlib
         receipt, owner, proof = self.fixture()
         (self.relay / 'startup-cleanup.json').unlink()
@@ -11772,15 +14345,19 @@ class CleanupPrepareEvidence(unittest.TestCase):
         (self.relay/'broker.private.log').write_text('{"stopped": true}\n')
         folder = Path(receipt['log']).parent
         request = json.loads((folder/'request.json').read_text())
-        tasks = ['fixture-task-%02d' % i for i in range(14)]
+        tasks = ['fixture-task-%02d' % i for i in range(count)]
         request['checks'] = tasks
+        held = {'fixture-custody': dict(disposition='NO_RETRY_CUSTODY', kind='historical-agentcard-no-retry-v1')} if custody else {}
+        request['skips'] = held
         self.save(folder/'request.json', request)
         cases = dict.fromkeys(tasks, 'UNVERIFIED')
-        receipt.update(checks=tasks, cases=cases)
+        receipt.update(checks=tasks, cases={**dict.fromkeys(held, 'SKIP'), **cases})
+        if custody:
+            receipt.update(custody_skips=copy.deepcopy(held), current_execution=dict.fromkeys(held, 'UNVERIFIED'))
         adapter = json.loads(Path(receipt['worker_result']).read_text())
         adapter.update(checks=tasks, cases=cases, complete=False, cleanup_complete=False,
                        fleet_directory=str(self.campaign), native_command=['bash', 'scripts/run-bench', *tasks,
-                       '--runs', '1', '--concurrency', '14', '--retry-infra', '0', '--ref', receipt['source']['head']])
+                       '--runs', '1', '--concurrency', str(count), '--retry-infra', '0', '--ref', receipt['source']['head']])
         self.save(Path(receipt['worker_result']), adapter)
         reference = receipt['native_cleanup_reference']
         reference['result_sha256'] = hashlib.sha256(Path(receipt['worker_result']).read_bytes()).hexdigest()
@@ -11789,8 +14366,8 @@ class CleanupPrepareEvidence(unittest.TestCase):
                      worker_result_sha256=reference['result_sha256'], layout='campaign-cleanup-prepare-v1')
         summary = json.loads((self.campaign/'summary.json').read_text())
         summary.pop('shared_inventory_failed')
-        summary.update(concurrency=14, task_count=14, total_jobs=14, cleanup_ticket_failure='prepare',
-                       cleanup_cohorts=[dict(cohort_id='c001',status='queued',ready_count=0,expected_count=14,
+        summary.update(concurrency=count, task_count=count, total_jobs=count, cleanup_ticket_failure='prepare',
+                       cleanup_cohorts=[dict(cohort_id='c001',status='queued',ready_count=0,expected_count=count,
                                             failed_count=0,released_count=0,released_at=None)],
                        jobs=[dict(job_id='r001-j%04d' % (i+1), task=task, run=1, attempt=1, attempts=[],
                            status='cancelled', controller_pid=None, controller_exit_code=None, started_at=None,
@@ -11818,6 +14395,8 @@ class CleanupPrepareEvidence(unittest.TestCase):
         def source(args,**kwargs):
             if args[0]=='ps': return original(args,**kwargs)
             if args[-1].endswith('cloudbench-shared-relay.py'): return b'original-broker'
+            if args[-1].endswith(':agents/benchmarks/tasks.json'):
+                return b'[]' if getattr(self, 'foreign_catalog', False) else (self.base/'agents/benchmarks/tasks.json').read_bytes()
             return (self.base/'scripts'/args[-1].rsplit('/',1)[-1]).read_bytes()
         with patch.dict(sys.modules,deploy_test_cloud=published), patch.object(self.native.runpy,'run_path',return_value={}), \
              patch.object(self.native.subprocess,'check_output',side_effect=source):
@@ -11900,6 +14479,30 @@ class CleanupPrepareEvidence(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'terminal publication'):self.validate_prepare_fixture(receipt,owner,proof)
 
 
+    def test_prepare_accepts_full_width_with_no_retry_custody_and_current_producers(self):
+        # PR1682 round 29: 15 submitted smoke checks plus one NO_RETRY_CUSTODY case, refused at
+        # 'insufficient physical cleanup cohort floors' before any controller dispatch.
+        receipt,owner,proof=self.prepare_fixture('452e70ce9843c97b9587ed3125f6666cf10c7dfb',count=15,custody=True)
+        entry=self.validate_prepare_fixture(receipt,owner,proof)
+        self.assertEqual([],entry['participants']);self.assertFalse(entry['credit_granted'])
+        folder=Path(receipt['log']).parent
+        def reseal_receipt(row):
+            self.save(folder/'receipt.json',row)
+            proof['receipt_sha256']=hashlib.sha256((folder/'receipt.json').read_bytes()).hexdigest();self.reseal()
+        import hashlib
+        for name,mutate in [('custody-credited',lambda r:r['cases'].update({'fixture-custody':'PASS'})),
+                            ('custody-not-held',lambda r:r.update(custody_skips={})),
+                            ('custody-executed',lambda r:r.update(current_execution={})),
+                            ('check-credited',lambda r:r['cases'].update({'fixture-task-00':'PASS'}))]:
+            with self.subTest(name=name):
+                row=copy.deepcopy(receipt);mutate(row);reseal_receipt(row)
+                try:
+                    with self.assertRaises(ValueError):self.validate_prepare_fixture(row,owner,proof)
+                finally:reseal_receipt(receipt)
+        request=json.loads((folder/'request.json').read_text())
+        request['skips']['fixture-custody']['disposition']='resource_skip';self.save(folder/'request.json',request);self.reseal()
+        with self.assertRaises(ValueError):self.validate_prepare_fixture(receipt,owner,proof)
+
     def test_prepare_current_reviewed_pair_never_grants_credit(self):
         receipt,owner,proof=self.prepare_fixture('436576b7b05aa7421c597733c3df4f71f6f40eb7')
         before={p:p.read_bytes() for p in self.base.rglob('*') if p.is_file()}
@@ -11934,6 +14537,410 @@ class CleanupPrepareEvidence(unittest.TestCase):
                     self.reseal()
 
 
+    def current_prepare_fixture(self):
+        import hashlib
+        receipt, owner, proof = self.prepare_fixture('7b68f4f7cde6a8cd1c4edfcbe119f1514b706045')
+        folder = Path(receipt['log']).parent
+        source = dict(head='7b68f4f7cde6a8cd1c4edfcbe119f1514b706045',
+                      digest='b4caeead07132658dcc875c1231be33a9ec9c916ec36830d5e0ab7e2b53418a9')
+        checks = ['test-mass-agent-run-0', 'chat-mode', 'spawn-sub-agents', 'parallel-tool-calls',
+                  'background-agent-message-smoke', 'claude-code-agent', 'browser-smoke',
+                  'agent-payment-test-shop', 'agent-payment-setup-resume', 'agent-payment-idempotent-abandonment',
+                  'browser-biometrics-webdecoy', 'agent-payment-new-user-journey']
+        request = json.loads((folder/'request.json').read_text())
+        certificate = dict(kind='historical-agentcard-no-retry-v1', disposition='NO_RETRY_CUSTODY',
+                           source=source, original_failure={'id':'original-native-failure', 'native_result':'FAIL'},
+                           original_amount_cents=4396, current_execution='UNVERIFIED',
+                           current_financial_state='UNVERIFIED',
+                           credit=dict(test_execution=False, assertions=False, financial_release=False))
+        # Like this fixture's producer/publication adapters, replace only the test
+        # certificate pin. The actual proof separately checks the full native certificate.
+        import deploy_test_native_prepare as prepare
+        certificate_pin=patch.object(prepare, 'CURRENT_PREPARE_CUSTODY_SHA256', hashlib.sha256(
+            json.dumps(certificate, sort_keys=True, separators=(',', ':'), allow_nan=False).encode()).hexdigest())
+        certificate_pin.start(); self.addCleanup(certificate_pin.stop)
+        request.update(source=source, checks=checks, skips={'agent-payment-abandonment':certificate})
+        self.save(folder/'request.json', request)
+        receipt.update(source=source, checks=checks, custody_skips=copy.deepcopy(request['skips']),
+                       cases={**dict.fromkeys(checks,'UNVERIFIED'),
+                                                        'agent-payment-abandonment':'SKIP'})
+        adapter_path = Path(receipt['worker_result']); adapter = json.loads(adapter_path.read_text())
+        adapter.update(source=source, checks=checks, cases=dict.fromkeys(checks,'UNVERIFIED'),
+                       native_command=['bash','scripts/run-bench',*checks,'--runs','1','--concurrency','12',
+                                       '--retry-infra','0','--ref',source['head']])
+        self.save(adapter_path,adapter)
+        summary=json.loads((self.campaign/'summary.json').read_text())
+        summary.update(concurrency=12,task_count=12,total_jobs=12,
+                       cleanup_ticket_error=dict(type='ValueError',message='insufficient physical cleanup cohort floors'))
+        summary['jobs']=summary['jobs'][:12]
+        for row, task in zip(summary['jobs'],checks):
+            row.update(task=task,controller_command=['bash',str(self.base/'scripts/run-bench'),task,
+                                                    '--ref',source['head'],'--foreground'])
+        summary['cleanup_cohorts'][0]['expected_count']=12
+        self.save(self.campaign/'summary.json',summary)
+        self.save(self.campaign/'cleanup-cohorts/c001/manifest.json',dict(cohort_id='c001',
+                  jobs=dict.fromkeys(row['job_id'] for row in summary['jobs'])))
+        for f in [self.campaign/'shared-inventory/publisher.private.log',
+                  self.campaign/'hub-group-publication.private.log']: f.write_bytes(b'')
+        reference=receipt['native_cleanup_reference']
+        reference['result_sha256']=hashlib.sha256(adapter_path.read_bytes()).hexdigest()
+        self.save(folder/'receipt.json',receipt)
+        proof.update(source=source,receipt_sha256=hashlib.sha256((folder/'receipt.json').read_bytes()).hexdigest(),
+                     worker_result_sha256=reference['result_sha256'])
+        self.reseal()
+        return receipt,owner,proof
+
+    def test_current_twelve_case_prepare_preserves_original_unknown_and_custody(self):
+        receipt,owner,proof=self.current_prepare_fixture()
+        originals={p:p.read_bytes()for p in self.base.rglob('*')if p.is_file()}
+        entry=self.validate_prepare_fixture(receipt,owner,proof)
+        self.assertFalse(entry['credit_granted'])
+        self.assertEqual([],entry['participants'])
+        self.assertEqual([],entry['retained_services'])
+        self.assertEqual(originals,{p:p.read_bytes()for p in self.base.rglob('*')if p.is_file()})
+        self.assertEqual(12,list(receipt['cases'].values()).count('UNVERIFIED'))
+        self.assertEqual('SKIP',receipt['cases']['agent-payment-abandonment'])
+
+    def test_current_prepare_rejects_wrong_inventory_refusal_credit_and_writer(self):
+        receipt,owner,proof=self.current_prepare_fixture()
+        for key,value in [('credit_granted',True),('financial_cleanup_credit',True),('transfer_credit',True)]:
+            with self.subTest(key=key),self.assertRaisesRegex(ValueError,'cleanup only'):
+                self.validate_prepare_fixture(receipt,owner,{**proof,key:value})
+        forged=copy.deepcopy(receipt);forged['cases']['invented']='PASS'
+        with self.assertRaises(ValueError):self.validate_prepare_fixture(forged,owner,proof)
+        changed=copy.deepcopy(proof);changed['source']={**proof['source'],'head':'f'*40}
+        with self.assertRaises(ValueError):self.validate_prepare_fixture(receipt,owner,changed)
+        producer=self.base/'scripts/run-bench';native=producer.read_bytes()
+        producer.write_bytes(native+b'\n# altered producer\n');self.reseal()
+        with self.assertRaisesRegex(ValueError,'producer changed'):
+            self.validate_prepare_fixture(receipt,owner,proof)
+        producer.write_bytes(native);self.reseal()
+        path=self.campaign/'summary.json';original=path.read_bytes()
+        for mutate in [lambda v:v.update(cleanup_ticket_error={'type':'ValueError','message':'other'}),
+                       lambda v:v['jobs'][0].update(controller_pid=os.getpid()),
+                       lambda v:v['jobs'].append(v['jobs'][0])]:
+            value=json.loads(original);mutate(value);self.save(path,value);self.reseal()
+            with self.assertRaises(ValueError):self.validate_prepare_fixture(receipt,owner,proof)
+            path.write_bytes(original);self.reseal()
+        for log in [self.campaign/'shared-inventory/publisher.private.log', path]:
+            with self.subTest(writer=log),log.open('a'):
+                with self.assertRaisesRegex(ValueError,'active writer'):
+                    self.validate_prepare_fixture(receipt,owner,proof)
+
+    def test_current_prepare_rejects_forged_custody(self):
+        import hashlib
+        receipt,owner,proof=self.current_prepare_fixture()
+        folder=Path(receipt['log']).parent
+        request=json.loads((folder/'request.json').read_text())
+        protected=request['skips']['agent-payment-abandonment']
+        protected['original_failure']={'id':'FORGED','native_result':'PASS'}
+        protected['credit']={'test_execution':True,'assertions':True,'financial_release':True}
+        protected['current_financial_state']='SETTLED'
+        self.save(folder/'request.json',request);self.reseal()
+        with self.assertRaises(ValueError):self.validate_prepare_fixture(receipt,owner,proof)
+        # Even rewriting both copies and resealing must not replace the pinned certificate.
+        receipt['custody_skips']=request['skips']
+        self.save(folder/'receipt.json',receipt)
+        proof['receipt_sha256']=hashlib.sha256((folder/'receipt.json').read_bytes()).hexdigest()
+        self.reseal()
+        with self.assertRaises(ValueError):self.validate_prepare_fixture(receipt,owner,proof)
+
+    def test_current_prepare_rejects_contradictory_native_width(self):
+        import hashlib
+        receipt,owner,proof=self.current_prepare_fixture()
+        path=Path(receipt['worker_result']);adapter=json.loads(path.read_text())
+        adapter['native_command'][adapter['native_command'].index('--concurrency')+1]='1'
+        self.save(path,adapter)
+        reference=receipt['native_cleanup_reference']
+        reference['result_sha256']=hashlib.sha256(path.read_bytes()).hexdigest()
+        self.save(Path(receipt['log']).parent/'receipt.json',receipt)
+        proof.update(worker_result_sha256=reference['result_sha256'],
+                     receipt_sha256=hashlib.sha256((Path(receipt['log']).parent/'receipt.json').read_bytes()).hexdigest())
+        self.reseal()
+        with self.assertRaises(ValueError):self.validate_prepare_fixture(receipt,owner,proof)
+
+    def test_prepare_grant_path_uses_actual_git_common_directory(self):
+        import deploy_test_native_prepare as prepare
+        common=self.base/'common';reserve=common/'cloudbench-fleet-ownership'
+        reserve.mkdir(parents=True,mode=0o700)
+        budget=self.base/'budget'
+        import deploy_test_native_cleanup as cleanup
+        with patch.object(cleanup,'fleet_git_common',return_value=common):
+            actual=prepare.grant_path(self.base,budget)
+        self.assertEqual(str(reserve.stat().st_dev),actual.parent.parent.name)
+
+
+    def source_bound_prepare_fixture(self):
+        import hashlib
+        import deploy_test_native_prepare as prepare
+        receipt, owner, proof = self.prepare_fixture('12b1ff359defa16996a3794b7b11043ea1567d8b')
+        proof['source_bound_prepare'] = True
+        folder = Path(receipt['log']).parent
+        request = json.loads((folder/'request.json').read_text())
+        checks = list(prepare.CURRENT_PREPARE_CHECKS) + ['browser-auth-guest-purchase', 'browser-auth-member-discount-purchase']
+        certificate = {'kind': 'historical-agentcard-no-retry-v1', 'disposition': 'NO_RETRY_CUSTODY',
+                       'source': receipt['source'], 'credit': {'test_execution': False}}
+        request.update(checks=checks, skips={'agent-payment-abandonment': certificate})
+        ledger = {'source': receipt['source'], 'plan': {'source': receipt['source'], 'gates': [
+            {'name': 'smoke', 'checks': ['agent-payment-abandonment', *checks]}]},
+            'historical_no_retry_custody': [certificate], 'environment': 'e'*64, 'input_fingerprints': {}}
+        ledger['plan_digest'] = c.digest(ledger['plan'])
+        request['custody_state_sha256'] = c.digest(ledger)
+        proof['custody_ledger'] = str(self.base/'custody-ledger.json')
+        self.save(Path(proof['custody_ledger']), ledger)
+        self.save(folder/'request.json',request)
+        receipt.update(checks=checks,cases={**dict.fromkeys(checks,'UNVERIFIED'),'agent-payment-abandonment':'SKIP'},
+                       custody_skips=request['skips'])
+        adapter=json.loads(Path(receipt['worker_result']).read_text())
+        adapter.update(checks=checks,cases=dict.fromkeys(checks,'UNVERIFIED'),native_command=[
+            'bash','scripts/run-bench',*checks,'--runs','1','--concurrency','14','--retry-infra','0','--ref',receipt['source']['head']])
+        self.save(Path(receipt['worker_result']),adapter)
+        summary=json.loads((self.campaign/'summary.json').read_text())
+        summary['cleanup_ticket_error']={'type':'ValueError','message':'insufficient physical cleanup cohort floors'}
+        for job,name in zip(summary['jobs'],checks):
+            job.update(task=name,controller_command=['bash',str(self.base/'scripts/run-bench'),name,'--ref',receipt['source']['head'],'--foreground'])
+        self.save(self.campaign/'summary.json',summary)
+        for path in [self.campaign/'shared-inventory/publisher.private.log',self.campaign/'hub-group-publication.private.log']:
+            path.write_bytes(b'')
+        reference=receipt['native_cleanup_reference'];reference['result_sha256']=hashlib.sha256(Path(receipt['worker_result']).read_bytes()).hexdigest()
+        self.save(folder/'receipt.json',receipt);proof.update(receipt_sha256=hashlib.sha256((folder/'receipt.json').read_bytes()).hexdigest(),worker_result_sha256=reference['result_sha256'])
+        self.reseal()
+        return receipt,owner,proof,request
+
+    def omitted_prepare_fixture(self):
+        import hashlib
+        receipt, owner, proof, request = self.source_bound_prepare_fixture()
+        omitted = 'test-mass-agent-run-0'
+        checks = [name for name in request['checks'] if name != omitted]
+        request['checks'] = checks
+        ledger_path = Path(proof['custody_ledger'])
+        ledger = json.loads(ledger_path.read_text())
+        gate = ledger['plan']['gates'][0]
+        gate.update(checks=[name for name in gate['checks'] if name != omitted],
+                    category='smoke', native_cloud=True)
+        ledger['deploy_selection_omissions'] = [dict(source=copy.deepcopy(ledger['source']),
+            checks={'smoke/' + omitted: 'Explicit user deploy exclusion'},
+            executed=False, credit_granted=False)]
+        ledger['plan_digest'] = c.digest(ledger['plan'])
+        self.save(ledger_path, ledger)
+        request['custody_state_sha256'] = c.digest(ledger)
+        folder = Path(receipt['log']).parent
+        self.save(folder/'request.json', request)
+        receipt.update(checks=checks, cases={**dict.fromkeys(checks, 'UNVERIFIED'),
+                                           'agent-payment-abandonment': 'SKIP'})
+        adapter = json.loads(Path(receipt['worker_result']).read_text())
+        adapter.update(checks=checks, cases=dict.fromkeys(checks, 'UNVERIFIED'),
+                       native_command=['bash', 'scripts/run-bench', *checks, '--runs', '1',
+                                       '--concurrency', '13', '--retry-infra', '0',
+                                       '--ref', receipt['source']['head']])
+        self.save(Path(receipt['worker_result']), adapter)
+        summary = json.loads((self.campaign/'summary.json').read_text())
+        summary.update(concurrency=13, task_count=13, total_jobs=13)
+        summary['cleanup_cohorts'][0]['expected_count'] = 13
+        summary['jobs'] = summary['jobs'][:13]
+        for job, name in zip(summary['jobs'], checks):
+            job.update(task=name, controller_command=['bash', str(self.base/'scripts/run-bench'),
+                                                      name, '--ref', receipt['source']['head'], '--foreground'])
+        self.save(self.campaign/'summary.json', summary)
+        self.save(self.campaign/'cleanup-cohorts/c001/manifest.json',
+                  dict(cohort_id='c001', jobs=dict.fromkeys(j['job_id'] for j in summary['jobs'])))
+        catalog = self.base/'agents/benchmarks/tasks.json'
+        catalog.parent.mkdir(parents=True)
+        self.save(catalog, [{'name': omitted, 'deploy_quarantine': 'Explicit user deploy exclusion'}])
+        receipt['native_cleanup_reference']['result_sha256'] = hashlib.sha256(Path(receipt['worker_result']).read_bytes()).hexdigest()
+        self.save(folder/'receipt.json', receipt)
+        proof.update(receipt_sha256=hashlib.sha256((folder/'receipt.json').read_bytes()).hexdigest(),
+                     worker_result_sha256=receipt['native_cleanup_reference']['result_sha256'])
+        self.reseal()
+        return receipt, owner, proof, request
+
+    def narrowed_prepare_fixture(self, dropped=('browser-auth-guest-purchase', 'browser-auth-member-discount-purchase')):
+        """The authenticated ledger plan selected fewer smoke checks than the historical 14."""
+        import hashlib
+        receipt, owner, proof, request = self.source_bound_prepare_fixture()
+        checks = [name for name in request['checks'] if name not in dropped]
+        width = len(checks)
+        request['checks'] = checks
+        ledger_path = Path(proof['custody_ledger'])
+        ledger = json.loads(ledger_path.read_text())
+        gate = ledger['plan']['gates'][0]
+        gate['checks'] = [name for name in gate['checks'] if name not in dropped]
+        ledger['plan_digest'] = c.digest(ledger['plan'])
+        self.save(ledger_path, ledger)
+        request['custody_state_sha256'] = c.digest(ledger)
+        folder = Path(receipt['log']).parent
+        self.save(folder/'request.json', request)
+        receipt.update(checks=checks, cases={**dict.fromkeys(checks, 'UNVERIFIED'),
+                                           'agent-payment-abandonment': 'SKIP'})
+        adapter = json.loads(Path(receipt['worker_result']).read_text())
+        adapter.update(checks=checks, cases=dict.fromkeys(checks, 'UNVERIFIED'),
+                       native_command=['bash', 'scripts/run-bench', *checks, '--runs', '1',
+                                       '--concurrency', str(width), '--retry-infra', '0',
+                                       '--ref', receipt['source']['head']])
+        self.save(Path(receipt['worker_result']), adapter)
+        summary = json.loads((self.campaign/'summary.json').read_text())
+        summary.update(concurrency=width, task_count=width, total_jobs=width)
+        summary['cleanup_cohorts'][0]['expected_count'] = width
+        summary['jobs'] = summary['jobs'][:width]
+        for job, name in zip(summary['jobs'], checks):
+            job.update(task=name, controller_command=['bash', str(self.base/'scripts/run-bench'),
+                                                      name, '--ref', receipt['source']['head'], '--foreground'])
+        self.save(self.campaign/'summary.json', summary)
+        self.save(self.campaign/'cleanup-cohorts/c001/manifest.json',
+                  dict(cohort_id='c001', jobs=dict.fromkeys(j['job_id'] for j in summary['jobs'])))
+        receipt['native_cleanup_reference']['result_sha256'] = hashlib.sha256(Path(receipt['worker_result']).read_bytes()).hexdigest()
+        self.save(folder/'receipt.json', receipt)
+        proof.update(receipt_sha256=hashlib.sha256((folder/'receipt.json').read_bytes()).hexdigest(),
+                     worker_result_sha256=receipt['native_cleanup_reference']['result_sha256'])
+        self.reseal()
+        return receipt, owner, proof, request
+
+    def test_source_bound_prepare_takes_inventory_from_authenticated_ledger_plan(self):
+        import deploy_test_native_prepare as prepare
+        import deploy_test_historical_custody as custody
+        receipt, owner, proof, request = self.narrowed_prepare_fixture()
+        before = {p: p.read_bytes() for p in self.base.rglob('*') if p.is_file()}
+        with patch.object(prepare, 'SOURCE_ROOT', self.base), \
+             patch.object(custody, 'state_identity', side_effect=c.digest), \
+             patch.object(custody, 'guard', return_value=request['skips']):
+            entry = self.validate_prepare_fixture(receipt, owner, proof)
+        self.assertFalse(entry['credit_granted'])
+        self.assertFalse(receipt['complete'])
+        self.assertEqual(12, list(receipt['cases'].values()).count('UNVERIFIED'))
+        self.assertEqual('SKIP', receipt['cases']['agent-payment-abandonment'])
+        self.assertEqual(before, {p: p.read_bytes() for p in self.base.rglob('*') if p.is_file()})
+
+    def test_source_bound_prepare_rejects_request_outside_ledger_plan(self):
+        import deploy_test_native_prepare as prepare
+        import deploy_test_historical_custody as custody
+        receipt, owner, proof, request = self.narrowed_prepare_fixture()
+        ledger_path = Path(proof['custody_ledger'])
+        ledger = json.loads(ledger_path.read_text())
+        ledger['plan']['gates'][0]['checks'].remove('chat-mode')  # request still names chat-mode
+        ledger['plan_digest'] = c.digest(ledger['plan'])
+        self.save(ledger_path, ledger)
+        request['custody_state_sha256'] = c.digest(ledger)
+        self.save(Path(receipt['log']).parent/'request.json', request)
+        self.reseal()
+        with patch.object(prepare, 'SOURCE_ROOT', self.base), \
+             patch.object(custody, 'state_identity', side_effect=c.digest), \
+             patch.object(custody, 'guard', return_value=request['skips']):
+            with self.assertRaisesRegex(ValueError, 'custody inventory'):
+                self.validate_prepare_fixture(receipt, owner, proof)
+
+    def test_source_bound_prepare_accepts_only_authenticated_current_omission(self):
+        import deploy_test_native_prepare as prepare
+        import deploy_test_historical_custody as custody
+        receipt, owner, proof, request = self.omitted_prepare_fixture()
+        before = {p: p.read_bytes() for p in self.base.rglob('*') if p.is_file()}
+        with patch.object(prepare, 'SOURCE_ROOT', self.base), \
+             patch.object(custody, 'state_identity', side_effect=c.digest), \
+             patch.object(custody, 'guard', return_value=request['skips']):
+            entry = self.validate_prepare_fixture(receipt, owner, proof)
+        self.assertFalse(entry['credit_granted'])
+        self.assertEqual(13, list(receipt['cases'].values()).count('UNVERIFIED'))
+        self.assertFalse(receipt['complete'])
+        self.assertEqual(before, {p: p.read_bytes() for p in self.base.rglob('*') if p.is_file()})
+        self.foreign_catalog = True
+        try:
+            with patch.object(prepare, 'SOURCE_ROOT', self.base), \
+                 patch.object(custody, 'state_identity', side_effect=c.digest), \
+                 patch.object(custody, 'guard', return_value=request['skips']):
+                with self.assertRaisesRegex(ValueError, 'catalog source'):
+                    self.validate_prepare_fixture(receipt, owner, proof)
+        finally:
+            self.foreign_catalog = False
+
+    def test_source_bound_prepare_rejects_unproved_omission(self):
+        import deploy_test_native_prepare as prepare
+        import deploy_test_historical_custody as custody
+        receipt, owner, proof, request = self.omitted_prepare_fixture()
+        ledger_path = Path(proof['custody_ledger'])
+        catalog = self.base/'agents/benchmarks/tasks.json'
+        original = ledger_path.read_bytes()
+        for fault in ('missing', 'stale', 'credit', 'executed', 'reason', 'foreign', 'ordinary', 'arbitrary'):
+            with self.subTest(fault=fault):
+                ledger = json.loads(original)
+                row = ledger['deploy_selection_omissions'][0]
+                self.save(catalog, [{'name': 'test-mass-agent-run-0', 'deploy_quarantine': 'Explicit user deploy exclusion'}])
+                if fault == 'missing': ledger.pop('deploy_selection_omissions')
+                elif fault == 'stale': row['source'] = {'head': 'f'*40, 'digest': 'f'*64}
+                elif fault == 'credit': row['credit_granted'] = True
+                elif fault == 'executed': row['executed'] = True
+                elif fault == 'reason': row['checks']['smoke/test-mass-agent-run-0'] = 'Other reason'
+                elif fault == 'foreign': ledger['source'] = {'head': 'f'*40, 'digest': 'f'*64}
+                elif fault == 'ordinary': self.save(catalog, [{'name': 'test-mass-agent-run-0', 'quarantine': {'error': 'still runs'}}])
+                elif fault == 'arbitrary': row['checks'] = {'smoke/arbitrary-task': 'Explicit user deploy exclusion'}
+                self.save(ledger_path, ledger)
+                request['custody_state_sha256'] = c.digest(ledger)
+                self.save(Path(receipt['log']).parent/'request.json', request)
+                self.reseal()
+                with patch.object(prepare, 'SOURCE_ROOT', self.base), \
+                     patch.object(custody, 'state_identity', side_effect=c.digest), \
+                     patch.object(custody, 'guard', return_value=request['skips']):
+                    with self.assertRaises(ValueError): self.validate_prepare_fixture(receipt, owner, proof)
+
+    def test_source_bound_prepare_preserves_unknown_and_authenticates_custody(self):
+        import deploy_test_native_prepare as prepare
+        import deploy_test_historical_custody as custody
+        receipt,owner,proof,request=self.source_bound_prepare_fixture()
+        before={p:p.read_bytes() for p in self.base.rglob('*') if p.is_file()}
+        with patch.object(prepare,'SOURCE_ROOT',self.base), patch.object(custody,'state_identity',side_effect=c.digest), \
+             patch.object(custody,'guard',return_value=request['skips']) as guard:
+            entry=self.validate_prepare_fixture(receipt,owner,proof)
+        self.assertTrue(guard.called)
+        self.assertFalse(entry['credit_granted']);self.assertFalse(receipt['complete'])
+        self.assertEqual(14,list(receipt['cases'].values()).count('UNVERIFIED'))
+        self.assertEqual('SKIP',receipt['cases']['agent-payment-abandonment'])
+        self.assertEqual(before,{p:p.read_bytes() for p in self.base.rglob('*') if p.is_file()})
+
+    def test_source_bound_prepare_rejects_false_ledger_and_nonzero_admission(self):
+        import deploy_test_native_prepare as prepare
+        import deploy_test_historical_custody as custody
+        receipt,owner,proof,request=self.source_bound_prepare_fixture()
+        with patch.object(prepare,'SOURCE_ROOT',self.base), patch.object(custody,'state_identity',side_effect=c.digest), \
+             patch.object(custody,'guard',return_value={}):
+            with self.assertRaisesRegex(ValueError,'custody'):
+                self.validate_prepare_fixture(receipt,owner,proof)
+        with patch.object(prepare,'SOURCE_ROOT',self.base), patch.object(custody,'state_identity',side_effect=c.digest), \
+             patch.object(custody,'guard',return_value=request['skips']):
+            ledger=Path(proof['custody_ledger']);raw=ledger.read_bytes();value=json.loads(raw);value['source']={'head':'f'*40,'digest':'f'*64};self.save(ledger,value);self.reseal()
+            with self.assertRaisesRegex(ValueError,'custody'):
+                self.validate_prepare_fixture(receipt,owner,proof)
+            ledger.write_bytes(raw);self.reseal()
+            path=self.campaign/'summary.json';old=path.read_bytes()
+            for change in [lambda v:v['jobs'][0].update(started_at=v['started_at']),
+                           lambda v:v.update(peak_concurrency=1),
+                           lambda v:v.update(cleanup_ticket_error={'type':'ValueError','message':'other'})]:
+                value=json.loads(old);change(value);self.save(path,value);self.reseal()
+                with self.assertRaises(ValueError):self.validate_prepare_fixture(receipt,owner,proof)
+            path.write_bytes(old);self.reseal()
+
+
+    def test_source_bound_prepare_rejects_changed_producer_or_resource_artifacts(self):
+        import deploy_test_native_prepare as prepare
+        import deploy_test_historical_custody as custody
+        receipt,owner,proof,request=self.source_bound_prepare_fixture()
+        installed=self.base/'installed';(installed/'scripts').mkdir(parents=True)
+        for name in prepare.REVIEWED_SOURCES:
+            (installed/'scripts'/name).write_bytes((self.base/'scripts'/name).read_bytes())
+        with patch.object(prepare,'SOURCE_ROOT',installed), patch.object(custody,'state_identity',side_effect=c.digest), \
+             patch.object(custody,'guard',return_value=request['skips']):
+            path=self.base/'scripts/run-bench-campaign.py';old=path.read_bytes();path.write_bytes(old+b'\n# changed producer\n');self.reseal()
+            with self.assertRaisesRegex(ValueError,'installed producer differs'):
+                self.validate_prepare_fixture(receipt,owner,proof)
+            path.write_bytes(old);self.reseal()
+            for path in [self.runs/'unexpected-fleet',self.campaign/'cleanup-cohorts/c001/cleanup-budget/budget.json',
+                         self.campaign/'cleanup-cohorts/c001/ready/member']:
+                path.write_text('{}');self.reseal()
+                try:
+                    with self.assertRaises(ValueError):self.validate_prepare_fixture(receipt,owner,proof)
+                finally:path.unlink();self.reseal()
+            grant=self.base/'unexpected-grant';grant.write_text('{}')
+            with patch.object(prepare,'grant_path',return_value=grant), self.assertRaisesRegex(ValueError,'grant remains'):
+                self.validate_prepare_fixture(receipt,owner,proof)
+
+
 class RecoveredNativeReceiptGuard(unittest.TestCase):
     """Exercise actual full-pass admission on real files; never launch a worker."""
     def setUp(self):
@@ -11965,6 +14972,14 @@ class RecoveredNativeReceiptGuard(unittest.TestCase):
 
     def test_known_native_pass_is_still_admitted(self):
         self.assertIsNotNone(self.admit(self.receipt))
+
+    def test_protected_abandonment_without_plan_still_refuses(self):
+        import deploy_test_historical_custody as h
+        protected = dict(self.gate, name='smoke', checks=['agent-payment-abandonment'])
+        with patch.object(c, 'run_command') as launch:
+            with self.assertRaisesRegex(ValueError, 'known recovered check removed'):
+                h.guard(self.state, protected, ROOT)
+            launch.assert_not_called()
 
     def test_unknown_lifecycle_is_never_false(self):
         for field in ('cancelled', 'timed_out', 'lingering_group'):
@@ -12279,6 +15294,29 @@ class LocalCleanupQuietScan(unittest.TestCase):
                 finally:
                     child.kill(); child.wait(); child.stdout.close()
 
+    def test_unreaped_zombie_child_is_skipped_not_refused(self):
+        # PR #1864: an exited but unreaped same-user child reports EACCES on /proc/<pid>/environ, so the
+        # scan refused it as unverifiable for its 2 s grace and every later settlement scan failed.
+        import deploy_test_process
+        sys.path.insert(0, str(ROOT / 'scripts' / 'lib'))
+        from condition_wait import wait_until
+        child = subprocess.Popen([sys.executable, '-c', 'pass'])
+        state = Path('/proc') / str(child.pid) / 'stat'
+        wait_until(lambda: state.read_text().rsplit(') ', 1)[1].split()[0] == 'Z', timeout=10,
+                   description='child exited and is unreaped')
+        with self.assertRaises(PermissionError):
+            (Path('/proc') / str(child.pid) / 'environ').read_bytes()
+        inspected, refused = [], []
+        def inspect(process):
+            if process.name == str(child.pid):
+                inspected.append(process.name)
+                (process / 'environ').read_bytes()
+        try:
+            deploy_test_process.scan_same_user_processes(inspect, refused.append, grace=0.2)
+        finally:
+            child.wait()
+        self.assertEqual([], refused, 'a zombie cannot run code and must not be refused')
+
     @unittest.skipUnless(sys.platform.startswith('linux'), 'Linux /proc credential semantics')
     def test_setuid_process_first_seen_as_ours_is_skipped_not_refused(self):
         # The Blacksmith failure (PR #1760): a sibling suite's `sudo -n` was first seen while its euid
@@ -12300,10 +15338,11 @@ class LocalCleanupQuietScan(unittest.TestCase):
                 children = (proc_dir / 'task' / str(child.pid) / 'children').read_text().split()
                 return uids == [str(os.getuid()), '0'] and bool(children)
             try:
-                deadline = time.monotonic() + 10
-                while not steady():
-                    self.assertLess(time.monotonic(), deadline, 'sudo never ran its command as root')
-                    time.sleep(0.05)
+                def sudo_command_ready():
+                    self.assertIsNone(child.poll(), "sudo fixture exited before root command readiness")
+                    return steady()
+                wait_until(sudo_command_ready, timeout=10,
+                           description="sudo runs its owned command as root")
                 with self.assertRaises(PermissionError):
                     (proc_dir / 'cwd').resolve(strict=True)
                 real_stat, seen = Path.stat, []
@@ -12318,13 +15357,16 @@ class LocalCleanupQuietScan(unittest.TestCase):
                     local.quiet(root)
                 self.assertEqual(seen, [proc_dir])
             finally:
-                deadline = time.monotonic() + 10
-                while child.poll() is None:
+                def owned_sudo_reaped():
+                    if child.poll() is not None:
+                        return True
                     try:
                         child.terminate()  # refused only while sudo briefly holds a root real uid
                     except PermissionError:
-                        self.assertLess(time.monotonic(), deadline, 'sudo fixture could not be stopped')
-                    time.sleep(0.05)
+                        pass  # pending, never terminal evidence
+                    return child.poll() is not None
+                wait_until(owned_sudo_reaped, timeout=10,
+                           description="owned sudo fixture stopped and reaped")
 
 
 class BackendPrismaPreflightCleanup(unittest.TestCase):
@@ -12405,10 +15447,12 @@ class BackendPrismaPreflightCleanup(unittest.TestCase):
         # Historical source bytes are real; synthetic root has no Git repository.
         blobs = {name: subprocess.check_output(['git','--no-replace-objects','-C',str(ROOT),'show',
                     'abd6e81ee0f0c5cbcd88a4a7f11b4a8920740077:'+name]) for name in b.PINS}
-        self.addCleanup(patch.stopall)
-        patch.object(b.subprocess, 'check_output', side_effect=lambda argv: blobs[argv[-1].split(':',1)[1]]).start()
-        patch.object(b, 'docker_snapshot', side_effect=lambda machine: copy.deepcopy(self.pg)).start()
-        patch.object(b, 'listeners', return_value={12005}).start()
+        # Stop only these patches: patch.stopall() also retired setUpModule's own-tree process scope,
+        # so every later fixture's /proc scan refused on a sibling suite's non-dumpable process.
+        for patcher in (patch.object(b.subprocess, 'check_output', side_effect=lambda argv: blobs[argv[-1].split(':',1)[1]]),
+                        patch.object(b, 'docker_snapshot', side_effect=lambda machine: copy.deepcopy(self.pg)),
+                        patch.object(b, 'listeners', return_value={12005})):
+            patcher.start(); self.addCleanup(patcher.stop)
 
     def sync(self):
         for name, value in zip(self.paths, [self.request,self.result,self.receipt,self.process]):
@@ -12698,7 +15742,11 @@ class Round49RetirementCertificates(unittest.TestCase):
             # The observer executes while the one exact admission fd remains locked.
             if inspect is not None:
                 import fcntl
-                lock = self.active_root / '.context/native-worker-admission.lock'
+                # Recognition can re-audit any committed gate, not only the last issued certificate.
+                closure = dict(zip(inspect.__code__.co_freevars,
+                                   (cell.cell_contents for cell in (inspect.__closure__ or ()))))
+                audited_root = closure.get('root', self.active_root)
+                lock = audited_root / '.context/native-worker-admission.lock'
                 with lock.open('r') as other:
                     with self.assertRaises(BlockingIOError):
                         fcntl.flock(other, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -12975,6 +16023,84 @@ class Round49RetirementCertificates(unittest.TestCase):
         self.assertTrue(c.settled_round49_missing_request(persisted, self.directory, self.gate, Path(self.proof['old_request'])))
         self.assertEqual(persisted['attempts'], self.state['attempts'])
 
+    def _final_retirement_boundary(self):
+        # Issue real certificates from the committed journal, not a mocked verifier.
+        for proof in self.proofs.values():
+            self.issue(proof)
+        self.state.update(phase='final', pending=[], running=False)
+        self.state['plan']['source'] = copy.deepcopy(self.state['source'])
+        self.state['plan_digest'] = c.digest(self.state['plan'])
+        self.state['environment'] = 'e' * 64
+        self.state['input_fingerprints'] = {g['name']: 'd' * 64 for g in self.gates}
+        self.put(self.directory / 'cycle.json', self.state)
+
+    def _assert_final_retirement_boundary(self, refresh, *, refused=False):
+        class BeforeNativeWork(Exception):
+            pass
+        original = copy.deepcopy(self.state)
+        before = {p: p.read_bytes() for p in self.directory.rglob('*') if p.is_file()}
+        plan = self.state['plan']
+        with patch.object(c, 'validate_plan'), patch.object(c, 'initial_deferrals', return_value={}), \
+             patch.object(c, 'retained_owners', return_value=[]), \
+             patch.object(c, 'environment_digest', return_value=self.state['environment']), \
+             patch.object(c, 'input_fingerprints', return_value=self.state['input_fingerprints']), \
+             patch.object(c, 'records', return_value=self.gates), \
+             patch.object(c, 'cloud_smoke_prerequisite', side_effect=BeforeNativeWork) as launch_boundary, \
+             patch.object(c, 'source', side_effect=BeforeNativeWork if refresh else None,
+                          return_value=self.state['source']) as source_boundary:
+            expected = ValueError if refused else BeforeNativeWork
+            with self.assertRaises(expected):
+                if refresh:
+                    # _refresh reaches source(root) only after the saved-FINAL guards;
+                    # stop there, before any rebind, carry, write or native launch.
+                    c._refresh(self.state, plan, copy.deepcopy(plan), self.repo,
+                               directory=self.directory)
+                else:
+                    c.run_phase(plan, self.state, self.directory, self.repo)
+            if refresh:
+                self.assertEqual(source_boundary.call_count, 0 if refused else 1)
+                launch_boundary.assert_not_called()
+            else:
+                self.assertEqual(launch_boundary.call_count, 0 if refused else 1)
+        self.assertEqual(self.state, original)
+        self.assertEqual(before, {p: p.read_bytes() for p in self.directory.rglob('*') if p.is_file()})
+        self.assertTrue(all(not Path(p).exists() for p in self.proposal['original_missing_outer_paths']))
+        self.assertTrue(all(row['status'] == 'FAIL' and row['complete'] is False
+                            for row in self.state['attempts'][0]['results']))
+
+    def test_final_run_phase_accepts_committed_retirement_before_native_launch(self):
+        self._final_retirement_boundary()
+        self._assert_final_retirement_boundary(False)
+
+    def test_saved_final_refresh_accepts_committed_old_plan_retirement_before_rebind(self):
+        self._final_retirement_boundary()
+        self._assert_final_retirement_boundary(True)
+
+    def test_final_guards_refuse_invalid_committed_certificate(self):
+        self._final_retirement_boundary()
+        self.state['historical_launch_retirements'][self.proof['old_request']]['credit_granted'] = True
+        self.put(self.directory / 'cycle.json', self.state)
+        for refresh in (False, True):
+            with self.subTest(refresh=refresh):
+                self._assert_final_retirement_boundary(refresh, refused=True)
+
+    def test_final_guards_refuse_unknown_missing_outer_request(self):
+        self._final_retirement_boundary()
+        # Same selected gate, but outside the one exact retired request path.
+        folder = self.directory / 'attempts/99/final' / self.gate['name']
+        folder.mkdir(parents=True)
+        self.put(folder / 'request.json', {'gate': self.gate['name'], 'token': 'unretired'})
+        for refresh in (False, True):
+            with self.subTest(refresh=refresh):
+                self._assert_final_retirement_boundary(refresh, refused=True)
+
+    def test_saved_final_refresh_refuses_missing_request_for_unknown_old_gate(self):
+        self._final_retirement_boundary()
+        folder = self.directory / 'attempts/99/final/unknown-gate'
+        folder.mkdir(parents=True)
+        self.put(folder / 'request.json', {'gate': 'unknown-gate', 'token': 'unknown'})
+        self._assert_final_retirement_boundary(True, refused=True)
+
     def test_current_source_guard_still_refuses_with_retirement(self):
         self.issue()
         plan = self.state['plan']
@@ -13238,6 +16364,229 @@ class ExplicitAgentCardOverride(unittest.TestCase):
             self.assertEqual(set(seen['request']['skips']), {x.split('/')[1] for x in self.six[1:]})
             self.assertEqual(seen['argv'], ['python3', 'scripts/deploy_test_cloud.py'])
             self.assertFalse(any('agent-payment-' in arg for arg in seen['argv']))
+
+
+
+class ProcessScanExitedChildren(unittest.TestCase):
+    def test_privileged_scan_reobserves_transient_refusals_only_boundedly(self):
+        # PR1682 stability run 4: one loaded refusal must not fail the owning observation, but a
+        # refusal is never converted into quiescence and other errors are not retried.
+        import deploy_test_process_scan as scan
+        good = {'quiescent': True}
+        refused = ValueError('privileged read-only process scan refused or unavailable')
+        for outcomes, expect in (([refused, refused, good], good), ([refused] * 3, refused),
+                                 ([ValueError('privileged process scan response identity differs'), good], 'identity')):
+            calls = []
+            def once(roots, outcomes=list(outcomes)):
+                calls.append(roots); value = outcomes.pop(0)
+                if isinstance(value, Exception): raise value
+                return value
+            with self.subTest(expect=str(expect)), patch.object(scan, '_privileged_scan_once', side_effect=once), \
+                 patch.object(scan.time, 'sleep'):
+                if expect is good:
+                    self.assertEqual(good, scan.privileged_scan(['/x'])); self.assertEqual(3, len(calls))
+                elif expect is refused:
+                    with self.assertRaisesRegex(ValueError, 'refused'): scan.privileged_scan(['/x'])
+                    self.assertEqual(3, len(calls))
+                else:
+                    with self.assertRaisesRegex(ValueError, 'identity differs'): scan.privileged_scan(['/x'])
+                    self.assertEqual(1, len(calls))
+
+    def test_privileged_scan_preserves_positive_unreaped_child_absence(self):
+        import deploy_test_process_scan as scan
+        self.assertNotEqual(os.geteuid(), 0)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.assertTrue(scan.privileged_scan([root])['quiescent'])
+            pid = os.fork()
+            if pid == 0:
+                os.chdir(root)
+                os._exit(0)
+            try:
+                wait_until(lambda: Path(f'/proc/{pid}/stat').read_text().rsplit(')', 1)[1].split()[0] == 'Z',
+                           timeout=3, description='owned child exited before scan')
+                self.assertTrue(scan.privileged_scan([root])['quiescent'])
+            finally:
+                os.waitpid(pid, 0)
+            self.assertTrue(scan.privileged_scan([root])['quiescent'])
+
+    def test_privileged_scan_rejects_exited_leader_with_live_thread(self):
+        import select
+        import deploy_test_process_scan as scan
+        program = ("import ctypes,os,sys,threading\n"
+                   "def worker():\n"
+                   "    fd=os.open(sys.argv[1]+'/held',os.O_CREAT|os.O_RDWR,0o600)\n"
+                   "    print('READY',flush=True)\n"
+                   "    os.read(0,1)\n"
+                   "    os.close(fd)\n"
+                   "threading.Thread(target=worker).start()\n"
+                   "ctypes.CDLL(None).pthread_exit(None)\n")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            child = subprocess.Popen([sys.executable, '-c', program, str(root)], cwd=root,
+                                     stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                     text=True)
+            try:
+                wait_until(lambda: bool(select.select([child.stdout], [], [], 0)[0]),
+                           timeout=5, description='owned live thread ready')
+                self.assertEqual(child.stdout.readline().strip(), 'READY')
+                def leader_exited():
+                    fields = Path(f'/proc/{child.pid}/stat').read_text().rsplit(')', 1)[1].split()
+                    return fields[0] == 'Z' and int(fields[17]) > 1
+                wait_until(leader_exited, timeout=3, description='leader exited with live worker')
+                with self.assertRaises(ValueError):
+                    scan.privileged_scan([root])
+            finally:
+                child.stdin.close()
+                try:
+                    child.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    child.kill()
+                    child.wait(timeout=5)
+                    raise
+                child.stdout.close()
+                child.stderr.close()
+            self.assertEqual(child.returncode, 0)
+            self.assertTrue(scan.privileged_scan([root])['quiescent'])
+
+    def test_zombie_scan_requires_empty_references_and_stable_identity(self):
+        import deploy_test_process_scan as scan
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            proc = root / 'proc'
+            entry = proc / '2000000000'
+            entry.mkdir(parents=True)
+            (entry / 'fd').mkdir()
+            (entry / 'maps').write_bytes(b'')
+            fields = ['Z'] + ['0'] * 18 + ['10']
+            fields[17] = '1'
+            body = '2000000000 (fixture) ' + ' '.join(fields)
+            (entry / 'stat').write_text(body)
+            scan.scan_roots([root], proc, birth_guard=True)
+            for artifact in ('cwd', 'fd/3', 'maps'):
+                with self.subTest(artifact=artifact):
+                    if artifact == 'cwd':
+                        (entry / artifact).symlink_to(root)
+                    else:
+                        (entry / artifact).write_text(str(root))
+                    with self.assertRaises(ValueError):
+                        scan.scan_roots([root], proc, birth_guard=True)
+                    if artifact == 'maps':
+                        (entry / artifact).write_bytes(b'')
+                    else:
+                        (entry / artifact).unlink()
+            (entry / 'maps').unlink()
+            with self.assertRaises(ValueError):
+                scan.scan_roots([root], proc, birth_guard=True)
+            (entry / 'maps').write_bytes(b'')
+            (entry / 'fd').rmdir()
+            with self.assertRaises(ValueError):
+                scan.scan_roots([root], proc, birth_guard=True)
+            (entry / 'fd').mkdir()
+            threaded = fields.copy()
+            threaded[17] = '2'
+            (entry / 'stat').write_text('2000000000 (fixture) ' + ' '.join(threaded))
+            with self.assertRaises(ValueError):
+                scan.scan_roots([root], proc, birth_guard=True)
+            (entry / 'stat').write_text(body)
+            original = Path.read_text
+            reads = 0
+            def changed(path, *args, **kwargs):
+                nonlocal reads
+                if path == entry / 'stat':
+                    reads += 1
+                    return body if reads == 1 else body.rsplit(' ', 1)[0] + ' 11'
+                return original(path, *args, **kwargs)
+            with patch.object(Path, 'read_text', changed), self.assertRaises(ValueError):
+                scan.scan_roots([root], proc, birth_guard=True)
+            (entry / 'stat').write_text(body.replace(') Z ', ') S '))
+            with self.assertRaises(ValueError):
+                scan.scan_roots([root], proc, birth_guard=True)
+
+
+class GithubCleanupReconciliation(unittest.TestCase):
+    """Pure recorded-boundary tests: no Git, network, processes or real state writes."""
+    def fixture(self):
+        import base64, hashlib, io, zipfile
+        from deploy_test_github import tag_name
+        source = {'head': 'a' * 40, 'digest': 'b' * 64}
+        token, name, folder = 'f' * 32, 'semantic-stack', '/fixture'
+        owner = {'transport': 'github-actions', 'run_id': 123, 'url': 'https://github.com/org/repo/actions/runs/123'}
+        runner = 'blacksmith-8vcpu-ubuntu-2404'
+        tag = tag_name(runner, name, token)
+        request = dict(token=token, source=source, gate=name, checks=[name], skips={})
+        audit = dict(request, cases={name: 'PASS'}, complete=True, cleanup_complete=True,
+                     native_exit=0, reused=False)
+        raw = json.dumps(audit).encode()
+        archive = io.BytesIO()
+        with zipfile.ZipFile(archive, 'w') as z:
+            z.writestr('result.json', raw); z.writestr('request.json', json.dumps(request))
+        sha = hashlib.sha256(archive.getvalue()).hexdigest()
+        adapter = dict(request, cases={name: 'UNVERIFIED'}, complete=False, cleanup_complete=False,
+                       cleanup_owner=owner, remote=dict(tag=tag, run_attempt='1', runner_name='runner-original'))
+        receipt = dict(gate=name, token=token, source=source, complete=False, cases={name: 'UNVERIFIED'},
+                       log=folder+'/output.log', worker_result=folder+'/result.json', finished_at=100,
+                       lingering_group=True, cleanup_owner={'worker_cleanup_owner': owner})
+        run = dict(id=123, html_url=owner['url'], head_sha=source['head'], head_branch=tag,
+                   run_attempt=1, status='completed', updated_at='1970-01-01T00:01:40Z')
+        api = dict(run=run, jobs={'jobs':[dict(run_id=123, run_attempt=1, status='completed', runner_name='runner-original')]},
+                   artifacts={'artifacts':[dict(name='deploy-gate-result', digest='sha256:'+sha,
+                                                workflow_run={'id':123, 'head_sha':source['head']})]})
+        self.documents = {folder+'/receipt.json':receipt, folder+'/result.json':adapter,
+            folder+'/request.json':request, folder+'/audit.json':audit, folder+'/api.json':api,
+            folder+'/artifact.json':{'bytes':base64.b64encode(archive.getvalue()).decode()},
+            folder+'/output.log.process.json':dict(quiescent=True, orphaned_children=False, remaining=[], error=None,
+                                                  timed_out=True)}
+        self.raw = raw
+        def read(path, *args): return copy.deepcopy(self.documents[str(path)])
+        def digest(path): return hashlib.sha256(json.dumps(self.documents[str(path)],sort_keys=True).encode()).hexdigest()
+        self.patchers = [patch.object(c,'read',side_effect=read), patch.object(c,'bounded_read',side_effect=read),
+                         patch.object(c,'sha_file',side_effect=digest), patch.object(Path,'read_bytes',return_value=raw)]
+        for p in self.patchers:p.start();self.addCleanup(p.stop)
+        proof = dict(kind='github-actions-cleanup-v1', receipt_sha256=digest(folder+'/receipt.json'),
+            worker_result_sha256=digest(folder+'/result.json'),request_token=token,owner=owner,confirmed_at=101,observed_by='fixture')
+        for key, file in [('platform_result','api.json'),('native_audit','audit.json'),('artifact','artifact.json'),('process','output.log.process.json')]:
+            proof[key]={'path':folder+'/'+file,'sha256':digest(folder+'/'+file)}
+        failure=dict(id='f',gate=name,check=name+'/'+name,native_result='UNVERIFIED',complete=False)
+        state=dict(plan={'gates':[dict(name=name,command=['python','--runner',runner])]},
+                   attempts=[{'results':[receipt]}],failures=[failure],pending=['f'],phase='triage',repair_gates=[],ready=False)
+        return state,proof
+
+    def test_github_terminal_cleanup_preserves_original_failure_and_only_allows_retry(self):
+        state,proof=self.fixture();before=copy.deepcopy(state)
+        c.reconcile(state,'f',proof)
+        self.assertEqual([],c.retained_owners(state,['semantic-stack']))
+        self.assertEqual(before['attempts'],state['attempts']);self.assertEqual(before['failures'],state['failures'])
+        self.assertFalse(state['ready']);self.assertFalse(state['reconciled_owners'][proof['receipt_sha256']]['credit_granted'])
+        saved=copy.deepcopy(state);c.reconcile(state,'f',proof);self.assertEqual(saved,state)
+        c.reexecute(state,'f');self.assertEqual('UNVERIFIED',state['failures'][0]['native_result'])
+        self.assertEqual(['semantic-stack'],state['repair_gates'])
+
+    def test_github_cleanup_refuses_bad_identity_and_nonterminal_evidence_atomically(self):
+        state,proof=self.fixture()
+        variants=[dict(proof,request_token='wrong'),dict(proof,owner={**proof['owner'],'run_id':456}),
+                  dict(proof,receipt_sha256='wrong'),dict(proof,confirmed_at=0),dict(proof,observed_by=''),
+                  dict(proof,repair_agent='https://boxes.dev/thread/fake')]
+        for key in ('platform_result','artifact','native_audit','process'):
+            variants.append(dict(proof,**{key:{**proof[key],'sha256':'wrong'}}))
+        for variant in variants:
+            trial=copy.deepcopy(state)
+            with self.subTest(proof=variant),self.assertRaises(ValueError):c.reconcile(trial,'f',variant)
+            self.assertEqual(state,trial)
+        for key,change in [('platform_result',lambda d:d['run'].update(status='in_progress')),
+                           ('platform_result',lambda d:d['run'].update(run_attempt=2)),
+                           ('platform_result',lambda d:d['jobs']['jobs'][0].update(runner_name='foreign')),
+                           ('native_audit',lambda d:d.update(cleanup_complete=False)),
+                           ('process',lambda d:d.update(remaining=[99]))]:
+            path=proof[key]['path'];original=copy.deepcopy(self.documents[path]);change(self.documents[path])
+            variant=copy.deepcopy(proof);variant[key]['sha256']=c.sha_file(path);trial=copy.deepcopy(state)
+            with self.subTest(key=key),self.assertRaises(ValueError):c.reconcile(trial,'f',variant)
+            self.assertEqual(state,trial);self.documents[path]=original
+
+    def test_github_cleanup_certificate_rechecks_the_original_evidence(self):
+        state,proof=self.fixture();c.reconcile(state,'f',proof)
+        self.documents[proof['platform_result']['path']]['run']['status']='in_progress'
+        with self.assertRaises(ValueError):c.retained_owners(state,['semantic-stack'])
 
 
 class IsolatedRunlessWitnesses(unittest.TestCase):

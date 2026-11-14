@@ -86,6 +86,24 @@ case "$guest_identity_a" in
     [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) : ;;
     *) echo "FAIL: guest identity is not a 12-hex owner digest: $guest_identity_a" >&2; exit 1 ;;
 esac
+
+# Offline contract fixtures must not consume the real deployment source. The
+# caller still needs that exact binding when it later dispatches the Hub run.
+stage_harness="$TMP_ROOT/predeploy-stage.sh"
+sed -n '/^run_predeploy_stage() {/,/^}/p' \
+    "$ROOT_DIR/scripts/run-predeploy-cloud" > "$stage_harness"
+(
+    set -e
+    source "$stage_harness"
+    stage_mark() { :; }
+    export CLOUDBENCH_SOURCE_MANIFEST="$TMP_ROOT/real-deployment-source.json"
+    run_predeploy_stage isolation bash -c 'test -z "${CLOUDBENCH_SOURCE_MANIFEST+x}"' || exit 1
+    [ "$CLOUDBENCH_SOURCE_MANIFEST" = "$TMP_ROOT/real-deployment-source.json" ]
+) || {
+    echo "FAIL: offline stage must isolate the source binding without changing its caller" >&2
+    exit 1
+}
+echo "PASS: offline stage isolates the deployment source and preserves its caller"
 case "$workspace_6:$workspace_29:$workspace_31" in
     *"-$guest_identity_a-6:"*"-$guest_identity_a-29:"*"-$guest_identity_a-31") : ;;
     *)

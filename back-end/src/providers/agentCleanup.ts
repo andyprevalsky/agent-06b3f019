@@ -1,5 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { Sandbox } from 'e2b';
+import { isCliTemplateSession } from './cliTemplateReferences';
+import { closeClaudeCodeSession } from './e2bCloseSession';
 import { Prisma } from '@prisma/client';
 import { prisma } from './database';
 import { createLogger } from './logger';
@@ -11,7 +13,6 @@ import { withSteelLifecycleClaim } from './steel/lifecycleClaim';
 import { closeLocalClaudeCodeSession, isLocalClaudeCodeSandboxId } from './claudeCodeLocalSession';
 import { isLocalDeviceSandboxId } from './localDevices/hub';
 import { closeLocalDeviceCodeSession } from './localDevices/session';
-import { closeClaudeCodeSession } from './e2bCloseSession';
 import { sweepAllExpiredCodeSessions } from './codeSessions/lifecycle';
 
 const log = createLogger('Cleanup');
@@ -144,6 +145,16 @@ function codeSessionReleaseDependencies(): CodeSessionReleaseDependencies {
       if (isLocalDeviceSandboxId(session.sandboxId)) {
         await closeLocalDeviceCodeSession(session.id, session.sandboxId);
         return;
+      }
+      if (session.codeSessionId) {
+        const persistent = await prisma.codeSession.findUnique({
+          where: { id: session.codeSessionId },
+          select: { userId: true },
+        });
+        if (persistent && (await isCliTemplateSession(persistent.userId, session.codeSessionId))) {
+          await closeClaudeCodeSession(session.id);
+          return;
+        }
       }
       // false means E2B no longer has the sandbox, which is as released as a kill.
       await Sandbox.kill(session.sandboxId, { apiKey: process.env.E2B_API_KEY });

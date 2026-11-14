@@ -51,17 +51,22 @@ async function refundPurchaseOrRecordFailure(purchase: {
  * Close a minted card and reconcile the ledger. `HELD` means the AgentCard transfer completed and
  * the matching Stripe charge was captured, but the merchant has not settled. Abandonment therefore
  * reclaims the transfer and refunds Stripe. A settled purchase keeps its captured charge.
+ * HTTP callers must supply userId; omitting it preserves the trusted internal cleanup path.
  */
 export async function closePurchaseCard(
   cardId: string,
   cardProvider?: CardProvider,
-  walletFundingProvider?: WalletFundingProvider
+  walletFundingProvider?: WalletFundingProvider,
+  userId?: string
 ): Promise<{ ok: true; status: PurchaseSpendStatus }> {
   if (cardId.trim() === '') {
     throw new PurchaseError('cardId is required');
   }
 
-  const purchase = await repo.findPurchaseByCardId(cardId);
+  if (userId !== undefined && userId.trim() === '') {
+    throw new PurchaseError('Authenticated user required', 401);
+  }
+  const purchase = await repo.findPurchaseByCardId(cardId, userId);
   if (!purchase) {
     throw new PurchaseError('Purchase card not found', 404);
   }
@@ -138,12 +143,19 @@ function parseSignatureHeader(header: string): { timestamp: string; v1: string }
 }
 
 /**
- * Verify the AgentCard webhook signature (Svix/Stripe-style: `AgentCard-Signature: t=<ts>,v1=<hmac>`,
+ * Verify the AgentCard webhook signature (`AgentCard-Signature: t=<ts>,v1=<hmac>`,
  * HMAC-SHA256 over `"${t}.${rawBody}"`, secret used as-is, 5-minute replay tolerance). `rawBody` must
- * be the exact received bytes — a re-stringified parse will not match. No-op without a shared secret.
+ * be the exact received bytes — a re-stringified parse will not match. Missing configuration
+ * rejects delivery so an unsigned event cannot mutate the purchase ledger.
  */
 export function verifyAgentCardWebhookSignature(rawBody: string, signatureHeader?: string): void {
-  if (!hasValue(AGENTCARD_WEBHOOK_SECRET)) return;
+  if (!hasValue(AGENTCARD_WEBHOOK_SECRET)) {
+    throw new PurchaseError(
+      'AgentCard webhook signing secret is not configured',
+      503,
+      'agentcard_webhook_unconfigured'
+    );
+  }
   if (!hasValue(signatureHeader)) {
     throw new PurchaseError('Missing AgentCard webhook signature', 400);
   }

@@ -87,9 +87,13 @@ private acknowledgment, not sign-in proof; observe and verify. A
 phone_credential_unavailable receipt means request the protected user step if an
 actual critical password screen blocks progress. Binding/stale errors mean
 observe again, never supply a secret or blindly retry. UNKNOWN means inspect
-status/receipts, never replay. If a credential was rejected or user presence is
-required, request the protected step rather than retrying the rejected credential
-or bypassing biometric/device authentication.
+status/receipts, never replay. A saved-password rejection ends autonomous password attempts for that current
+sign-in. Request the protected user step only if the current observation confirms
+that a critical password step still blocks progress. Do not try another saved-password
+source, including credentials.fill_saved after native AutoFill rejection. This rejection
+rule takes precedence over every saved-credential fallback below or above.
+When user presence is required, request the protected step rather than bypassing
+biometric/device authentication.
 A filled masked field alone is not sign-in proof: observe and verify the result.
 If a password still blocks after saved-credential unavailability/rejection, or a
 user-only verification code, existing/owner-only device passcode, or user-presence authentication
@@ -155,8 +159,12 @@ detail label alone is
 not its switch state. If originally Off, open the row, tap its switch once (the
 right end of the AssistiveTouch row, not the label) and return
 to Touch to confirm the explicit value is now On, then reopen the detail page.
-Open the floating AssistiveTouch menu and tap the fresh observed Control Center
-label center. Keep this native route uninterrupted: after the launch use only
+Open the floating AssistiveTouch menu: screen.text does not report that textless
+button, which normally rests against the right edge (x 625-750, y 400-1250).
+Tap that band away from observed row labels and observe; an unchanged detail
+page means it missed, so try another band point, at most three in all, then keep
+portrait lock unconfirmed and report that blocker. Once the menu opens, tap the
+fresh observed Control Center label center. Keep this native route uninterrupted: after the launch use only
 screen.text, screen.bounds, the observed taps, the AssistiveTouch typing and
 setup.verify; no other operation (including input.keys, apps.list, Home, drags,
 scrolls or presses), other apps/URLs, private/user control or attention

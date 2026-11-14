@@ -341,6 +341,31 @@ class Coordination(unittest.TestCase):
         self.assertIn('30/600', record['terminate_reason'])
         self.assertTrue(all(r.signals == [signal.SIGTERM] for r in world.runners.values()))
 
+    def test_bounded_wave_counts_earlier_waves_against_the_original_total(self):
+        # A 70-task K3 batch (210 scheduled) at concurrency 70: earlier waves confirmed 8 infra
+        # jobs, so this 69-copy wave stops at 3 more (11/210), not at 4/69 or 11/69 of its own.
+        scripts = [{0: ('released', 0, None), 3: ('released', 2, None), 6: ('released', 3, None)}]
+        world = World(self.tmp.name, scripts)
+        record = world.run(scheduled_total=210, prior_infra=8)
+        self.assertIn('11/210', record['terminate_reason'])
+        self.assertEqual(record['prior_infra'], 8)
+        self.assertEqual(world.runners[0].signals, [signal.SIGTERM])
+        # The same live count without the prior waves stays below the 5% stop.
+        alone = tempfile.TemporaryDirectory(); self.addCleanup(alone.cleanup)
+        world = World(alone.name, [{0: ('released', 3, None), 6: ('released', 3, 0)}])
+        record = world.run(scheduled_total=210)
+        self.assertIsNone(record['terminated_at'])
+        self.assertNotIn('prior_infra', record)
+
+    def test_bounded_wave_never_launches_after_earlier_waves_reached_the_threshold(self):
+        world = World(self.tmp.name, [{0: ('released', 0, 0)}])
+        with self.assertRaisesRegex(ValueError, '11/210'):
+            world.run(scheduled_total=210, prior_infra=11)
+        self.assertEqual(world.runners[0].signals, [])
+        self.assertFalse((Path(self.tmp.name) / 'coordination.json').exists())
+        with self.assertRaisesRegex(ValueError, 'invalid prior infra'):
+            world.run(scheduled_total=210, prior_infra=-1)
+
     def test_infra_threshold_is_report_only_when_disabled(self):
         scripts = [{0: ('released', 10, None), 6: ('released', 10, 0)},
                    {0: ('released', 25, None), 6: ('released', 25, 0)}]

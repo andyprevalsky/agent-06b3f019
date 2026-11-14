@@ -2,14 +2,14 @@
 
 # LLM Call Map
 
-Every LLM call in the agent pipeline, ordered by execution flow.
+Every LLM call in the agent pipeline, ordered by execution flow. Pools, route order and budgets: `docs/internal/rose-completions.md` (registry `agents/providers/rose/pools.py`).
 
 ## Agent Pipeline (agents/, runs inside Temporal)
 
 | # | Call Site | Model | claudeAuth | Forces Ultra | Context Composition | Est. Tokens |
 |---|-----------|-------|------------|-------------|---------------------|-------------|
 | A1 | **Main Loop (PLAN)** `loop/run_agent.py` → `call_llm_activity` | agent.model | YES | no | `build_system_prompt` (2k) + user_context (200-15k) + 4 PLAN tool schemas (500t) + conversation + blueprints | 3-20k |
-| A2 | **Planner LLM** `helpers/llm.py:call_planner_llm_activity` | agent.model | YES | no | `build_planner_system_prompt` (3k) + user_context + conversation. **skip_cache=True** | 5-15k |
+| A2 | **Planner LLM** `helpers/llm.py:call_planner_llm_activity` | agent.model | YES | no | `build_planner_system_prompt` (3k) + user_context + conversation; prompt-cached, planner memory appended at the end | 5-15k |
 | A3 | **Verifier (PLAN)** `helpers/llm.py:check_progress` | agent.model | YES | no | `build_verifier_prompt` (500t) + full conversation (USER+TOOL only, no SYSTEM/ASSISTANT) | 3-40k |
 | A4 | **Main Loop (EXECUTE)** `loop/run_agent.py` → `call_llm_activity` | agent.model | YES | no | `build_system_prompt` (2k) + user_context (200-15k) + 6 EXECUTE tool schemas (800t) + full conversation + DAG results | 5-80k |
 | A5 | **Verifier (EXECUTE)** `helpers/llm.py:check_progress` | agent.model | YES | no | Same as A3 but with execute-phase conversation | 5-80k |
@@ -19,15 +19,14 @@ Every LLM call in the agent pipeline, ordered by execution flow.
 | # | Call Site | Model | claudeAuth | Forces Ultra | Context Composition | Est. Tokens |
 |---|-----------|-------|------------|-------------|---------------------|-------------|
 | S1 | **Explore Agent** `tools/spawn_agent.py` → `run_agent` | rose-1-flash | **NO** | no | `EXPLORE_AGENT_SYSTEM_PROMPT` (300t) + **network_metadata (2k contacts, 5-15k t)** + local_data_summary + 4 tools (web_search, web_fetch, grep, attempt_completion) | 2-25k |
-| S2 | **Browser Agent** `tools/spawn_browser_agent_v3.py` → `call_llm_structured_streaming` | agent.model | YES | no | `build_browser_system_prompt` (400t) + step history + screenshots (multimodal, heavy) | 5-30k |
+| S2 | **Browser Agent** `domains/spawn_browser_agent_v3/handler.py` → `BrowserStreamingRoseClient` | agent.model | YES | no | `build_browser_use_system_prompt` (`providers/rose/browser_use.py`, 400t) + step history + screenshots (multimodal, heavy) | 5-30k |
 | S3 | **Sub-Agent** spawns full workflow (A1-A5 repeat) | parent.model | YES | no | Inherits parent user_context (gatable via context_gates) + own conversation | recursive |
 
 ## Tool-Level LLM Calls (inside activities)
 
 | # | Call Site | Model | claudeAuth | Forces Ultra | Context Composition | Est. Tokens |
 |---|-----------|-------|------------|-------------|---------------------|-------------|
-| T1 | **message_person** `tools/message_person.py` → `call_llm` | agent.model | **NO** | no | system prompt with conversation history + person thread + user message | 1-5k |
-| T2 | **Deep Research** `tools/deep_research.py` → Perplexity API | sonar-deep-research | N/A | N/A | system prompt + query (separate provider, separate billing) | ~500 in, 8k out |
+| T1 | **message_person** `domains/message_person/repo.py` → `call_llm` | agent.model | YES | no | system prompt with conversation history + person thread + user message | 1-5k |
 
 ## claudeAuth Flow
 - User's Claude OAuth token fetched at workflow start (`fetch_claude_max_token_activity`)
@@ -63,15 +62,12 @@ Each LLM call site, the context chunks it receives, and which `context_gates` ke
 | | local message thread summary | `recent_communications` | 0-2k | Via `fetch_local_data_summary` |
 | | explore system prompt | *always on* | 300 | `EXPLORE_AGENT_SYSTEM_PROMPT` |
 | | 4 tool schemas | *always on* | 400 | web_search, web_fetch, grep, attempt_completion |
-| **S2 Browser** | browser system prompt | *always on* | 400 | `build_browser_system_prompt` |
+| **S2 Browser** | browser system prompt | *always on* | 400 | `build_browser_use_system_prompt` |
 | | step history + screenshots | *always on* | 5-30k | No user context, no gates |
 | **S3 Sub-Agent** | *all chunks from A1* | *inherits parent gates* | recursive | Gates set by parent's `spawn_agent` call |
 | **T1 message_person** | cross-contact voice sample | `recent_communications` | 1-5k | `fetch_recent_messages_activity` |
 | | 1-on-1 thread with person | *always on* | 0-3k | Always needed for context |
 | | Exa person enrichment | *always on* | 0-1k | Always needed for personalization |
-| **T2 Deep Research** | system prompt + query | *always on* | ~500 | Perplexity, separate billing |
 
 ## Remaining Waste (not gatable)
 1. **A3/A5 Verifier** - Gets full conversation with no truncation. On long runs (20+ iterations) this balloons to 40-80k. Not yet gated.
-2. **T1 message_person** - `call_llm` doesn't pass `claude_token`. Small per-call cost.
-3. **Schema gen** (`setResponseSchema.ts`) - Forces Rose Ultra for a simple task. Rose Flash would suffice.

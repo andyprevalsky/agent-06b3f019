@@ -214,7 +214,19 @@ NORMALIZE_LOCAL_USER_PHONES_DRY_RUN=1 bash "$NORMALIZE" "$LOCAL_URL" | grep -Fq 
 ADMIN_URL=postgresql://postgres:postgres@localhost:5432/postgres
 # Only when a local server accepts these credentials with a role that may create
 # the scratch database; otherwise the SQL check is reported as skipped.
+# `npm run test:structural` is the deploy's quick tier with a fixed 120 s budget, so
+# it skips these ~45 s live checks; the deploy command-structural registry
+# (scripts/run-deploy-structural-gates.py) runs this script directly on a gate VM
+# with PostgreSQL, where every live check executes.
+live_db_skip_reason() {
+  if [ "${npm_lifecycle_event:-}" = "test:structural" ]; then
+    echo "quick structural tier; runs live in the deploy structural registry"
+  else
+    echo "no local Postgres"
+  fi
+}
 can_create_scratch_db() {
+  [ "${npm_lifecycle_event:-}" != "test:structural" ] || return 1
   command -v psql >/dev/null 2>&1 || return 1
   [ "$(psql "$ADMIN_URL" -Atc \
     'SELECT rolsuper OR rolcreatedb FROM pg_roles WHERE rolname = current_user' \
@@ -271,7 +283,7 @@ SQL
   done
   echo "local Prisma push applies workflow DDL: PASS"
 else
-  echo "local User.phone normalization SQL: skipped (no local Postgres)"
+  echo "local User.phone normalization SQL: skipped ($(live_db_skip_reason))"
 fi
 
 # The pre-push MessageRecord owner backfill also rewrites rows: same guard.
@@ -331,7 +343,7 @@ SQL
     'ALTER TABLE "MessageRecord" ALTER COLUMN "userId" SET NOT NULL' >/dev/null
   echo "local MessageRecord owner backfill SQL: PASS"
 else
-  echo "local MessageRecord owner backfill SQL: skipped (no local Postgres)"
+  echo "local MessageRecord owner backfill SQL: skipped ($(live_db_skip_reason))"
 fi
 
 # Every stack/setup schema push must normalize User.phone first: a long-lived

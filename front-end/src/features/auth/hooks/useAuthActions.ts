@@ -5,6 +5,7 @@
  * STATE FLOW
  *
  *   session read
+ *       -> drop the query cache if the user id changed (lib/queryClient)
  *       -> apply identity/cache
  *       -> realtime auth succeeds ------> realtimeReady=true
  *       -> realtime auth fails ---------> realtimeReady=false, continue
@@ -24,6 +25,7 @@ import type { User, Session } from '@supabase/supabase-js';
 
 import { checkNeedsInviteCode } from '@/lib/api';
 import { getImpersonatedAccount } from '@/lib/impersonation';
+import { scopeQueryCacheToUser } from '@/lib/queryClient';
 import {
   clearSession,
   createAnonymousSession,
@@ -98,6 +100,8 @@ export function useAuthActions(setters: AuthStateSetters) {
         hasSession: !!nextSession,
         isAnonymous: nextSession?.user?.is_anonymous,
       });
+      // Before the new identity renders: another account never sees this one's cached data.
+      scopeQueryCacheToUser(nextSession?.user?.id ?? null);
       setSession(nextSession);
       setUser(nextSession?.user ?? null);
       persistCachedUser(nextSession?.user ?? null);
@@ -123,6 +127,7 @@ export function useAuthActions(setters: AuthStateSetters) {
 
   const signOut = useCallback(async () => {
     logAuth('Signing out');
+    scopeQueryCacheToUser(null);
     await clearSession();
     setSession(null);
     setUser(null);

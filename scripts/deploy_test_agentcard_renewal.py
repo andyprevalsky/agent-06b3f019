@@ -102,12 +102,20 @@ def original(state, occurrence, root):
             raise ValueError('native row mismatch')
     if task.get('execution_provenance', {}).get('base_sha') != failure['source']['head']:
         raise ValueError('native execution source mismatch')
-    if task.get('cleanup_failure', 'missing') is not None or task.get('context_violations') != []:
+    from deploy_test_historical_custody import warning_only_context
+    if task.get('cleanup_failure', 'missing') is not None or not warning_only_context(task.get('context_violations')):
         raise ValueError('independent native failure')
-    lifecycle = task['logs']['agentcard_release_stall_lifecycle']
+    from deploy_test_historical_custody import stall_lifecycle
+    lifecycle = task['logs'].get('agentcard_release_stall_lifecycle')
     cleanup = task['logs']['cloud_cleanup_evidence']
+    if not isinstance(lifecycle, dict):
+        raise ValueError('native in-task release-stall lifecycle missing')
+    # The cleanup map is keyed by the purchase's agent (root or browser sub-agent), never assumed root.
+    owner, snapshot = stall_lifecycle(cleanup, task['agent_id'])
+    tree = cleanup['final'].get('tree_agent_ids')
     if (cleanup.get('errors') != [] or cleanup.get('root_agent_id') != task['agent_id']
-            or cleanup['agentcard_release_stall_lifecycles'].get(task['agent_id']) != lifecycle
+            or snapshot != lifecycle
+            or (owner != task['agent_id'] and not (isinstance(tree, list) and task['agent_id'] in tree and owner in tree))
             or cleanup['final'].get('root_deleted') is not True
             or cleanup['final'].get('unsealed_tree_agent_ids') != []):
         raise ValueError('cleanup unknown or lifecycle join mismatch')
@@ -117,7 +125,7 @@ def original(state, occurrence, root):
                    and receipt.get('status') in (200, 204, 404, 410)
                    for receipt in cleanup.get('provider_receipts', [])):
             raise ValueError('browser resource cleanup unknown')
-    if lifecycle.get('agentId') != task['agent_id']:
+    if lifecycle.get('agentId') != owner:
         raise ValueError('lifecycle belongs to another agent')
     card, transfer = lifecycle['agentCard'], lifecycle['orgTransfer']
     if (card['status'] != 'CLOSED' or type(card['balanceCents']) is not int or card['balanceCents'] != 0

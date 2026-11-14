@@ -1,0 +1,329 @@
+{
+  "archives": [
+    {
+      "ciphertext_bytes": 364915776,
+      "ciphertext_sha256": "497d490033d0f447ef7fa6119fa16ccdde423e641bee1780d2745b25abede2eb",
+      "cutoff_completed_at": "2026-11-08T05:06:07.251177+00:00",
+      "evidence_record_sha256": {
+        "independent_verification": "3828ce81e4c354d0cd1d8566fa79fafda39bfd95ec9c4ed7966e02be0c5aca22",
+        "preservation_summary": "8ff33bc3ae6ed7fc4f0d77475590a4f713b763f2d344ccc4ab8a292ddee1246b"
+      },
+      "full_authenticated_readback": true,
+      "id": "static",
+      "independent_inner_member_hashes_verified": true,
+      "inner_member_count": 90902,
+      "object": "devbox-closeout-private/pr1795-06bd0d1/static-20261108T050445Z-a5b098c1.tar.gz.aesgcm",
+      "payload": {
+        "bytes": 1209559040,
+        "member": "pr1795-static-20261108T050445Z-a5b098c1/static-records.tar",
+        "sha256": "3b0842679d3a00e44111ac10c82f5f7776259e59e2cdc014651e8054c6ce9511"
+      },
+      "private_inventory": {
+        "member": "pr1795-static-20261108T050445Z-a5b098c1/static-manifest.json",
+        "sha256": "1e6df9c1eb0591fe429b1d557219022eccdcf2e1893ca3320f1e9351d6fd6291"
+      },
+      "raw_receipt": "archive-receipts/static.json",
+      "raw_receipt_sha256": "f0eb3ad4b319e5a1cd531cb2ccb57a39a52694318fb384257acb56e7ee6ec616",
+      "regular_bytes": 1047484418,
+      "regular_files": 85509,
+      "scope": "stable private records before first native sweep cutoff",
+      "source_at_capture": "06bd0d1ba94ffe8404c7be78bb5d728bfe83e58d"
+    },
+    {
+      "ciphertext_bytes": 613823982,
+      "ciphertext_sha256": "742d0d20532b5641b697e1df9f2baa31e62d73c1549b030a337de8309b534be4",
+      "cutoff_completed_at": "2026-11-08T05:51:31.626232+00:00",
+      "evidence_record_sha256": {
+        "independent_verification": "1967c7af89744dea074ad719bd90137c6c310d8618b35ec5f8fa276ba7b28b48",
+        "preservation_summary": "94ad74caff44261f350042ae66654bf0ba16eae431f6dc626669335edc0afeb8"
+      },
+      "full_authenticated_readback": true,
+      "id": "first-sweep",
+      "independent_inner_member_hashes_verified": true,
+      "inner_member_count": 16527,
+      "native_lifecycle_seals_verified": 14,
+      "object": "devbox-closeout-private/pr1795-06bd0d1/first-sweep-20261108T055115Z-10208b95.tar.gz.aesgcm",
+      "payload": {
+        "bytes": 2362562560,
+        "member": "pr1795-first-sweep-20261108T055115Z-10208b95/first-sweep-records.tar",
+        "sha256": "28b24eb1c5091ca9664e76c6e43a967535a898ba1c1d94536d27f8c5fb17a7cf"
+      },
+      "private_inventory": {
+        "member": "pr1795-first-sweep-20261108T055115Z-10208b95/first-sweep-manifest.json",
+        "sha256": "cc12880608b8583530be2fd9da5f871615d5f8f812b3ed4c40ca309db3e1e3b1"
+      },
+      "raw_receipt": "archive-receipts/first-sweep.json",
+      "raw_receipt_sha256": "a678998e3bdbb11811528ba5dd7e4cb5890a6e7b262999df4c7faa7df14057c8",
+      "regular_bytes": 2333704457,
+      "regular_files": 11964,
+      "scope": "closed first-source native sweep, attempts 1 through 6, completed RCA and review evidence",
+      "source_at_capture": "06bd0d1ba94ffe8404c7be78bb5d728bfe83e58d"
+    },
+    {
+      "ciphertext_bytes": 1148074135,
+      "ciphertext_sha256": "8541f5beeb54fc08357373e5a6e6bf756a476e4f99f32ad27316cd3985a80bfb",
+      "closure_manifest_sha256": "4cb3cbf25f23eeb50d7d963de57c859da189e49c4863a8c7d05e3650d214ca60",
+      "full_authenticated_readback": true,
+      "id": "final",
+      "independent_all_new_member_hashes_verified": true,
+      "new_logical_bytes": 4566022175,
+      "new_payload_files": 19027,
+      "object": "devbox-closeout-private/pr1795-8b90d7eb3/final-20261108T0920Z-a7c21f5e.tar.gz.aesgcm",
+      "payload_bytes": 4600924160,
+      "payload_sha256": "3c1544302ca6f571490827cb25f6ee166bcf143975b8c7555ecdc32e2cd1452c",
+      "previous_archive_bound_bytes": 3417103655,
+      "raw_receipt": "archive-receipts/final.json",
+      "raw_receipt_sha256": "d6a0cb36add824ed0a2254027dfc62d66bbfbdccad45fa16e45f509be2f87d76"
+    },
+    {
+      "ciphertext_bytes": 13865,
+      "ciphertext_sha256": "1366a442c99e69ae221fe4292401f2131ddefa116417115a10c9c626fd622f40",
+      "full_authenticated_readback": true,
+      "id": "backend-env-20261114",
+      "independent_all_members_verified": true,
+      "member_count": 2,
+      "object": "devbox-closeout-private/pr1795-8b90d7eb3/backend-env-20261114-c8c03c0631e2.tar.gz.aesgcm",
+      "raw_receipt": "archive-receipts/backend-env-20261114.json",
+      "raw_receipt_sha256": "c729663226ca2b5c8955e13949aaacda3fea63aaf8853e6e78562539e0a46090",
+      "scope": "Only changed private configuration after the original Nov8 cutoff; all earlier versions retained."
+    }
+  ],
+  "backend_current_source": "fdf1accd943462dfd0f933a55aec09b15d0a4dba",
+  "backend_deployed_source": "fdf1accd943462dfd0f933a55aec09b15d0a4dba",
+  "backend_first_deployed_source": "8b90d7eb370545af418d4e0b02d36a0b0d27ab71",
+  "candidate_source": "63f16ee80fd8511c7d35e2525daf375060b71d20",
+  "deletion_check": "deletion-readiness.json",
+  "deletion_ready": true,
+  "deployed_source": "8b90d7eb370545af418d4e0b02d36a0b0d27ab71",
+  "final_archive": {
+    "ciphertext_bytes": 1148074135,
+    "ciphertext_sha256": "8541f5beeb54fc08357373e5a6e6bf756a476e4f99f32ad27316cd3985a80bfb",
+    "closure_manifest_sha256": "4cb3cbf25f23eeb50d7d963de57c859da189e49c4863a8c7d05e3650d214ca60",
+    "full_authenticated_readback": true,
+    "independent_all_new_member_hashes_verified": true,
+    "new_logical_bytes": 4566022175,
+    "new_payload_files": 19027,
+    "object": "devbox-closeout-private/pr1795-8b90d7eb3/final-20261108T0920Z-a7c21f5e.tar.gz.aesgcm",
+    "payload_bytes": 4600924160,
+    "payload_sha256": "3c1544302ca6f571490827cb25f6ee166bcf143975b8c7555ecdc32e2cd1452c",
+    "previous_archive_bound_bytes": 3417103655,
+    "raw_receipt": "archive-receipts/final.json",
+    "raw_receipt_sha256": "d6a0cb36add824ed0a2254027dfc62d66bbfbdccad45fa16e45f509be2f87d76"
+  },
+  "first_sweep_outcome_scope": {
+    "credit_for_later_source": false,
+    "leaf_jobs": 13,
+    "native_leaf_pass": 12,
+    "qualified_skip": "original standing AgentCard qualification retained separately; raw result unchanged",
+    "raw_leaf_failed": 1,
+    "source": "06bd0d1ba94ffe8404c7be78bb5d728bfe83e58d",
+    "total_native_audits_including_nested_canary": 14
+  },
+  "format": "PR1795-SANITIZED-PROOF-INDEX-V1",
+  "local_database_preservation": {
+    "all_native_archive_lists_passed": true,
+    "atomic_cluster_snapshot_claimed": false,
+    "database_count": 17,
+    "final_cutoff_refresh_required": false,
+    "globals_dump_included": true,
+    "latest_read_only_cutoff_check": "2026-11-14T20:12:13.336965+00:00",
+    "manifest_sha256": "f37ad633d3b0057e3c055966cccaeef5908234f893682374eddfdbe130258eb5",
+    "native_custom_dumps": 17,
+    "per_database_consistent_snapshots": true,
+    "private_file_inventory": "Encrypted final closure manifest",
+    "refresh_needed_at_latest_check": false,
+    "status": "PRESERVED_IN_VERIFIED_FINAL_ARCHIVE",
+    "total_dump_bytes": 47635141
+  },
+  "merged_source": "8b90d7eb370545af418d4e0b02d36a0b0d27ab71",
+  "operator_resolution": {
+    "future_automatic_rollouts": "normal workflow re-enabled by existing release owner; ownership acknowledged",
+    "original_automatic_wait": "FAIL retained without fabricated workflow run or receipt rewrite",
+    "source": "8b90d7eb370545af418d4e0b02d36a0b0d27ab71",
+    "transport": "existing canonical direct cutover on exact merge",
+    "workflow_migration_and_semantic": "executed through canonical native paths with exact effective source proof"
+  },
+  "privacy": "Contains no private per-file path inventory, credential values, raw transcript, signed URL or service URL.",
+  "production_observation": {
+    "agentcard": {
+      "active_native_goal_verified": true,
+      "attribution": "NOT_INTRODUCED",
+      "bugs_folder_verified": true,
+      "different_devbox": true,
+      "disposition": "delegated / waived",
+      "existing_repair_pr": 1667,
+      "failure_report_occurrence": "production-agentcard-8b90d7eb3705-43838a70",
+      "finished_at": "2026-11-08T08:11:32Z",
+      "handoff_evidence_sha256": "a52a0b57b6a9aad476e9916adb28abb76940a7e7794afa6f2a0b0c2a0bf90283",
+      "latest_prerequisite_limit": "Owned live customers have no saved funding card; dedicated holder KYC pending and verified holder shared. No safe authorized automated prerequisite change.",
+      "latest_repair_goal_state": "blocked",
+      "latest_repair_pr_head": "22aee96f0d0a",
+      "latest_repair_pr_status": "unmerged",
+      "latest_repair_production_result": "FAIL; original happy-path acceptance not passed",
+      "native_exit": 1,
+      "native_goal_was_active_at_delivery": true,
+      "native_record_sha256": "778c29d01bf819110870a0ba569b716041d25dda80d20c39490f46268902f261",
+      "native_result": "FAIL",
+      "owner_public_thread": "thr_97890370dd214e6fa02ed9f1697f481d",
+      "owner_thread": "ph75aab9j122qx7tq9z726p7m58het8r",
+      "post_merge_delivery": "delivered",
+      "rerun_performed": false,
+      "standing_skip_eligible": false,
+      "test_mode_stripe_charge_cents": 100,
+      "unreleased_live_allocation_cents": 100
+    },
+    "backend_probes": {
+      "finished_at": "2026-11-08T07:54:00Z",
+      "status": "PASS"
+    },
+    "complete": true,
+    "completion_scope": "Native production verification complete with original failures explicitly retained and AgentCard repair delegated; archival/records/deletion readiness pending.",
+    "current_backend_smoke": {
+      "evidence_sha256": "f55586e8211f1caadb9c2c5db8f391ff07c04cd545f27415844722bab5911af7",
+      "finished_at": "2026-11-08T09:11:30.461314+00:00",
+      "status": "PASS"
+    },
+    "current_render": {
+      "all_owned_runtime_bytes_retained": true,
+      "evidence_sha256": "e72c25599459ab5fb7e22bf92599b09ea9c9475187712739830aa6fd88ad9f71",
+      "finished_at": "2026-11-08T08:53:13.665854Z",
+      "observed_at": "2026-11-08T09:08:48.397778+00:00",
+      "owned_runtime_paths_retained": 9,
+      "primary_merge_ancestor": true,
+      "retention_evidence_sha256": "05ad0e540e0ee780bc3c76c863083fcc70735c0ce5fac8b05c19e152be41a791",
+      "source": "fdf1accd943462dfd0f933a55aec09b15d0a4dba",
+      "status": "live"
+    },
+    "fly_recovery": {
+      "attempt": "pr1795-8b90-20261108T0857Z",
+      "evidence_sha256": "689dca2e2773bdff7e061294c7378a9828e619a5c307e23f440cdad7c34adaf4",
+      "job_id": "5012d38bcf7267a1d1d5d0ec2ed133663acdf8029f3f672593943efb70fb49ce",
+      "job_stage": "SUCCEEDED",
+      "monitor_verify_exit": 0,
+      "original_automatic_transport_fail_retained": true,
+      "queue_and_monitor_verified_at": "2026-11-08T09:06:15.830757+00:00",
+      "source": "8b90d7eb370545af418d4e0b02d36a0b0d27ab71",
+      "status": "PASS",
+      "transport": "canonical direct cutover"
+    },
+    "future_rollout_handoff": {
+      "evidence_sha256": "02d0594aec6a541454357f705f33515020b8952bf822876e557df7507e70a22e",
+      "owner": "ph7evm73qcb922emmb8de5rgb98hp5rr",
+      "owner_reported_enabled_at": "2026-11-08T09:15:57Z",
+      "read_only_confirmation_at": "2026-11-08T09:17:47.951315+00:00",
+      "root_dispatched_workflow": false,
+      "workflow_state": "active"
+    },
+    "initial_fly": {
+      "finished_at": "2026-11-08T07:58:45Z",
+      "native_result": "FAIL",
+      "reason": "No exact workflow run appeared while automatic workflow was disabled; no cutover job or dispatch from this initial wait. Parent is reconciling current cutover."
+    },
+    "native_result": "FAIL",
+    "observed_at": "2026-11-08T08:53:59.687711+00:00",
+    "ordinary_independent_review": {
+      "evidence_sha256": "aa462cb687e1186bf6d17743b15e1b12c05d2ef00c8b2c713406ec40e3cd08bf",
+      "new_code_blockers": 0,
+      "reviewed_at": "2026-11-08T09:15:45.904738+00:00",
+      "scope": "native production disposition; no records/deletion-readiness approval",
+      "status": "PASS"
+    },
+    "render": {
+      "finished_at": "2026-11-08T07:53:54Z",
+      "scope": "historical exact-merge deployment",
+      "status": "PASS"
+    },
+    "schema_verification": {
+      "evidence_sha256": "0dcc8679b717e31202d2a9c67f817f235b08a9e67178aafb9b603095cc03dd58",
+      "migration_finished_at": "2026-11-08T07:53:35.35759+00:00",
+      "nullable_columns_verified": 3,
+      "observed_at": "2026-11-08T09:11:21.946641+00:00",
+      "read_only": true,
+      "status": "PASS"
+    },
+    "semantic": {
+      "all_five_actual_checkout_logs_verified": true,
+      "checkout_proof_sha256": "ca57c86dda2d53bfc2159fef857e6fb6b294f6cf3cb2eb539fe44143f1a799e5",
+      "effective_source": "8b90d7eb370545af418d4e0b02d36a0b0d27ab71",
+      "evidence_sha256": "05688b7225fa2fee861b7ba80d7a94b8b6880863d8c537e96a75cf1858e8e26b",
+      "finished_at": "2026-11-08T09:14:56.198332+00:00",
+      "jobs": 5,
+      "native_log_sha256": "b27b7f99be1d29ba3b68a30b4efd259fd170a2f596c66d11e16b312cfd906dac",
+      "run_id": "42465976023",
+      "status": "PASS"
+    },
+    "source": "8b90d7eb370545af418d4e0b02d36a0b0d27ab71",
+    "workflow_migration": {
+      "cases": 45,
+      "cleanup": "PASS",
+      "evidence_sha256": "4f3652cb375b180ab5cace68db45a14a586f50744d320d9850d7164b0e1e3246",
+      "finished_at": "2026-11-08T09:09:16.303489+00:00",
+      "status": "PASS"
+    }
+  },
+  "publication": {
+    "archive_receipts_after_cutoff": "preserved directly in Git records; no recursive self-archive required",
+    "deployed_pr_link": "https://github.com/Rose-Ai-Labs/rose/pull/1795",
+    "final_visual_terminal_pointer": "Published on the primary PR after records merge; the latest pointer is sanitized terminal publication metadata.",
+    "records_commit": "The reviewed records branch and GitHub merge receipt identify the exact publication commit.",
+    "records_pr": "https://github.com/Rose-Ai-Labs/rose/pull/1822"
+  },
+  "readiness_classifier_repair": {
+    "bugs_folder_verified": true,
+    "current_status_record": "progress-publication.json",
+    "delivery_commits": [
+      "ea9ea83637",
+      "b7fc2d8379"
+    ],
+    "independent_devbox": "7a41cd23-5268-42c1-a5c8-85858fddf58b",
+    "original_blocked_history": "Retained in historical native receipts and progress-publication history.",
+    "owner": "ph75q9cp0yak89wec46tpnjcvd8hr80e",
+    "pr": 1821,
+    "root_guard_waived": false,
+    "status": "RESOLVED on canonical main; unchanged native check READY, no override",
+    "superseded_pr": 1821
+  },
+  "records_publication": "This records-only follow-up; native readiness requires committed exact receipt and merged publication.",
+  "recovery_tools": {
+    "existing_managed_key_fingerprint_sha256": "e351c7cc5b01303e579fe6d1df833940fdaadf325ca47314414ba10735fc7730",
+    "independently_managed_escrow_matches": true,
+    "legacy_helper": {
+      "git_blob": "592c092502cae2f08015858f98cdd1b5d436310b",
+      "path": "docs/handoffs/whm-b07d9037-preservation/private_archive.py",
+      "sha256": "2e35e736660660bb6118a939d51b0dd008abe5efaa6387cf252d5d0536b75cf4"
+    },
+    "portable_configuration_adapter": {
+      "path": "docs/handoffs/pr-1634-closeout/recover_closeout.py",
+      "sha256": "0c469e18e5b391bedc53669781e2633145d564156476955097be51ec554afe32"
+    }
+  },
+  "resume_verification": "evidence/resume-verification-20261114.json",
+  "source_recovery": {
+    "base_has_no_alternates": true,
+    "exact_tip_names_and_ids": "retained in encrypted static inventory; native deletion manifest binds current tips separately",
+    "fsck_exit": 0,
+    "local_branch_tips_verified": 72,
+    "order": [
+      "recorded main history",
+      "non-main prerequisite supplement",
+      "local-only tip bundle"
+    ],
+    "primary_bundle": {
+      "bytes": 2767596,
+      "sha256": "4d54cec84417ba4b296e0990cb7aeab092c59476529c19bda89fcd3432427cd7"
+    },
+    "primary_rejected_before_supplement": true,
+    "primary_verified_after_supplement": true,
+    "proof_record_sha256": "1141f2beace96eb30242012068c06d9463b93f9b2a49f0e9d9301bb80aa90aeb",
+    "recorded_main": "436727a0e6bde5e77d4463f246d8bf87618ca15b",
+    "stash_tips_verified": 1,
+    "supplement_bundle": {
+      "bytes": 867549,
+      "sha256": "d1ed001668eba5164377c6107861ec5bf34df53ec1eb73d9b7fdb1af8b441fd0"
+    },
+    "supplement_verified": true
+  },
+  "status": "PRIVATE_PRESERVATION_VERIFIED_NATIVE_READY_RECORDS_PUBLICATION_PENDING",
+  "validated_source": "63f16ee80fd8511c7d35e2525daf375060b71d20",
+  "worker_deployed_source": "8b90d7eb370545af418d4e0b02d36a0b0d27ab71"
+}

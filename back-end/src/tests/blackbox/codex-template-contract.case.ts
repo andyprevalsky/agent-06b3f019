@@ -47,7 +47,7 @@ export async function testPromptBuilder_sharedContractMentionsOutputRules() {
   );
   assert(prompt.includes('Do not return the original attachment path'), 'Transform rule missing');
   assert(
-    prompt.includes('Do not launch a separate claude/Claude Code CLI'),
+    prompt.includes('Do not start another coding-agent CLI or authenticate Claude/Codex again.'),
     'Nested Claude CLI guard missing'
   );
   assert(prompt.includes('/home/user/workspace'), 'Repo workDir missing');
@@ -77,7 +77,10 @@ export async function testPromptBuilder_sharedContractMentionsOutputRules() {
     githubRepoUrl: 'https://github.com/acme/widgets.git',
     workDir: '/home/user/workspace',
   });
-  assert(stock.includes('Do not launch a separate claude/Claude Code CLI'), 'stock contract');
+  assert(
+    stock.includes('Do not start another coding-agent CLI or authenticate Claude/Codex again.'),
+    'stock contract'
+  );
   assert(
     !stock.includes('rose_user_ui') && !stock.includes('rose-ui'),
     'stock prompt has no rose-ui skill'

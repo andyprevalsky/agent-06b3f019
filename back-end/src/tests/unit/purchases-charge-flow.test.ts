@@ -7,6 +7,7 @@
  */
 
 import assert from 'node:assert/strict';
+import { assertAmbiguousFundingRetryKeepsObligation } from './purchase-funding-prior-obligation.cases';
 import { randomUUID } from 'node:crypto';
 import { PurchaseSpendStatus, PurchaseWalletFundingStatus } from '@prisma/client';
 import { prisma } from '../../providers/database';
@@ -141,6 +142,7 @@ async function latestStatus(
 
 async function main(): Promise<void> {
   process.stdout.write('Running purchases charge-flow unit tests...\n');
+  assertAmbiguousFundingRetryKeepsObligation(path.resolve(__dirname, '../../..'));
 
   await test('mintPurchaseCard authorizes, funds, captures, and holds the card', async () => {
     const userId = await seedSubscribedUser();
