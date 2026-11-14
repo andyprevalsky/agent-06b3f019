@@ -20,7 +20,9 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 import unittest
+from unittest import mock
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 import runpy
@@ -150,9 +152,12 @@ def original_config() -> dict:
 
 class EvidenceArchive(unittest.TestCase):
     def setUp(self) -> None:
-        self.tmp = Path(tempfile.mkdtemp())
+        # Resolved: the guest collector refuses any original path that is not already canonical.
+        self.tmp = Path(tempfile.mkdtemp()).resolve()
         self.addCleanup(shutil.rmtree, self.tmp, True)
-        os.environ["CLOUDBENCH_CAPTURE_POLL_SECONDS"] = "0"
+        patcher = mock.patch.dict(os.environ, {"CLOUDBENCH_CAPTURE_POLL_SECONDS": "0"})
+        patcher.start()
+        self.addCleanup(patcher.stop)
         guest = self.tmp / "guest"
         data = guest / "data"
         context = data / "repo/.context/cloudbench"
@@ -167,8 +172,9 @@ class EvidenceArchive(unittest.TestCase):
         (context / "cloudflared.log").write_text("tunnel up\n")
         (data / "repo/front-end/frontend-logs.log").write_text("vite ready\n")
         (data / "repo/node_modules/pkg/noise.log").write_text("dependency noise\n")
-        (guest / "proc/41").mkdir(parents=True)
-        (guest / "proc/41/cmdline").write_bytes(b"sleep\0infinity\0")
+        # Fixture PIDs above PID_MAX_LIMIT never collide with the collector's own (skipped) PIDs.
+        (guest / "proc/4194399").mkdir(parents=True)
+        (guest / "proc/4194399/cmdline").write_bytes(b"sleep\0infinity\0")
         self.events: list = []
         self.original = original_config()
         machine = {"id": MID, "name": "cloudbench-0123456789abcdef0123", "state": "stopped",
@@ -246,12 +252,34 @@ class EvidenceArchive(unittest.TestCase):
         self.assertEqual((failure["stage"], failure["restored"]), ("r2-upload", True))
 
     def test_guest_refusal_retains_stopped_original(self) -> None:
-        (self.fly.proc / "42").mkdir()
-        (self.fly.proc / "42/cmdline").write_bytes(b"bash\0/cloudbench-boot.sh\0")
+        (self.fly.proc / "4194400").mkdir()
+        (self.fly.proc / "4194400/cmdline").write_bytes(b"bash\0/cloudbench-boot.sh\0")
         code, err, _ = self.run_capture()
         self.assertEqual(code, 2)
         self.assertIn("guest is not inert", err)
         self.assertEqual(self.s3.objects, {})
+        self.assert_retained_original()
+
+    def test_capture_deadline_retains_and_saved_original_restores(self) -> None:
+        real = self.fly.flyctl
+
+        def hung(seconds, *args):
+            if args[:2] == ("ssh", "console"):
+                time.sleep(10)
+            return real(seconds, *args)
+
+        self.fly.flyctl = hung
+        code, err, _ = self.run_capture(capture_seconds=1)
+        self.assertEqual(code, 2, err)
+        self.assertIn("interrupted by signal", err)
+        self.assert_retained_original()
+        saved = next(self.receipts.glob(f"{MID}/*/original-config.private.json"))
+        self.assertEqual(saved.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(json.loads(saved.read_text()), self.original)
+        # A SIGKILL mid-capture strands the inert config; the saved original restores it.
+        self.fly.machines[MID].update(state="started", config=CAP["inert_variant"](self.original))
+        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            self.assertEqual(H["restore_original"](self.fly, APP, MID, saved, wait_seconds=5), 0)
         self.assert_retained_original()
 
     def test_existing_r2_key_is_never_overwritten(self) -> None:

@@ -335,7 +335,13 @@ restores the stopped original config. Only then does the controller clear
 `runtime-evidence-unconfirmed` and let `reap_registry_clones` destroy the guest.
 Local receipts are in `<run>/_batch/evidence-archive/<machine>/<ts>/`. If any
 capture fails, the whole owner is retained as before and the controller prints
-`❌❌ evidence archive FAILED: unsealed guests stay RETAINED`. Worker clones and
+`❌❌ evidence archive FAILED: unsealed guests stay RETAINED`. Capture is bounded by
+`--capture-seconds` (fleet: 900), so the restore keeps its own budget. The exact
+original config is saved first as `original-config.private.json` in the receipt
+directory. If a guest is ever left in the inert config (for example after SIGKILL),
+`scripts/cloudbench-evidence-archive.py restore --app <app> --machine-id <id>
+--original-config <that file> --env-file agents/.env` stops it and restores the
+original. Worker clones and
 the warm donors (683e47df5094d8, any `*warm*` name, `WARM_ID`/`SHARED_WARM_ID`)
 are never archived or destroyed by this path.
 

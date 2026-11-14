@@ -17,7 +17,7 @@ def function(name):
 class Disposable(unittest.TestCase):
  def run_case(self,body,*,missing=False,disposable=True):
   with tempfile.TemporaryDirectory()as d:
-   p=Path(d);reg=p/'owners'/('a'*32);(reg/'clones').mkdir(parents=True);(reg/'meta').write_text('version=2\n');(reg/'disposable-resources-v1').write_text('a'*32+'\nfixture\n');(reg/'clones/cloudbench-fixture').write_text('name=cloudbench-fixture\nid=abcd1234\nvolume_id=vol_owned\n')
+   d=os.path.realpath(d);p=Path(d);reg=p/'owners'/('a'*32);(reg/'clones').mkdir(parents=True);(reg/'meta').write_text('version=2\n');(reg/'disposable-resources-v1').write_text('a'*32+'\nfixture\n');(reg/'clones/cloudbench-fixture').write_text('name=cloudbench-fixture\nid=abcd1234\nvolume_id=vol_owned\n')
    audit=p/'audit';run=p/'run';out=run/'task';out.mkdir(parents=True)
    for directory in ('fresh','expected-fresh','by-machine-id'):(audit/directory).mkdir(parents=True)
    def write(path,value):
@@ -150,7 +150,7 @@ cleanup_failed_worker "$out" "$wid"
   self.assertEqual(r.returncode,0,r.stderr)
   self.assertEqual(v['calls'].splitlines(),['machine destroy --force abcd1234 -a fixture','volumes destroy vol_owned -a fixture --yes'])
   self.assertEqual(records,[])
- def archive_case(self,status,*,primary='abcd1234',keep=0):
+ def archive_case(self,status,*,primary='abcd1234',keep=0,preconfig=False):
   # The real cleanup() span from evidence collection through the R2 archive
   # decision, then the unchanged exact-owner reap; the archive helper is faked.
   source=SOURCE.read_text();start=source.index('    local keep_before_evidence=',source.index('cleanup() {'))
@@ -165,9 +165,10 @@ cloudbench_fsync_directory(){ :; }
 CHILD_MACHINE=(@PRIMARY@);CLOUDBENCH_SCRIPT_SNAPSHOT="$CASE/snap";ROOT_DIR="$CASE/root";KEEP_CLONES=@KEEP@
 mkdir -p "$CASE/snap";printf %s "$HELPER" > "$CASE/snap/cloudbench-evidence-archive.py"
 touch "$FLEET_DIR/task/runtime-evidence.pending"
+[ @PRECONFIG@ = 0 ] || touch "$FLEET_REGISTRY_DIR/preconfig-evidence-consumed"
 teardown(){
  local ec=0 teardown_failed=0 runtime_evidence_failed=0 guest_shutdown_failed=0 billing_owned_joins=1
-'''.replace('@PRIMARY@',primary).replace('@KEEP@',str(keep))+branch+r'''
+'''.replace('@PRIMARY@',primary).replace('@KEEP@',str(keep)).replace('@PRECONFIG@',str(int(preconfig)))+branch+r'''
  if [ "$KEEP_CLONES" != 1 ];then reap_registry_clones "$FLEET_REGISTRY_DIR" current;fi
  printf "FLAGS %s %s %s %s\n" "$KEEP_CLONES" "$runtime_evidence_failed" "$ec" "$teardown_failed" >&2
  [ -e "$FLEET_REGISTRY_DIR/runtime-evidence-unconfirmed" ] && echo LATCHED >&2 || echo UNLATCHED >&2
@@ -183,7 +184,7 @@ teardown
   self.assertEqual(v['calls'].splitlines(),['machine destroy --force abcd1234 -a fixture','volumes destroy vol_owned -a fixture --yes'])
   self.assertEqual(records,[])
   self.assertEqual(v['archive-calls'].splitlines(),['capture-destroy --capture-only --app fixture --machine-id abcd1234 '
-   '--volume-id vol_owned --run-token '+'a'*32+'-0 --receipt-dir '+v['case']+'/run/_batch/evidence-archive '
+   '--volume-id vol_owned --run-token '+'a'*32+'-0 --receipt-dir '+v['case']+'/run/_batch/evidence-archive --capture-seconds 900 '
    '--env-file '+v['case']+'/root/agents/.env --protected-machine warm --protected-machine shared'])
  def test_failed_archive_retains_unsealed_guest_loudly(self):
   r,v,records=self.archive_case(2)
@@ -191,12 +192,13 @@ teardown
   self.assertIn('❌❌ evidence archive FAILED: unsealed guests stay RETAINED',r.stderr)
   self.assertEqual(len(v['archive-calls'].splitlines()),1);self.assertEqual(v['calls'],'');self.assertEqual(len(records),1)
  def test_non_primary_or_kept_owner_is_never_archived_or_destroyed(self):
-  for kwargs in (dict(primary='ffff0000'),dict(keep=1)):
+  for kwargs in (dict(primary='ffff0000'),dict(keep=1),dict(preconfig=True)):
    r,v,records=self.archive_case(0,**kwargs)
    with self.subTest(**kwargs):
     self.assertEqual(r.returncode,0,r.stderr);self.assertIn('FLAGS 1 1 1 1',r.stderr);self.assertIn('LATCHED',r.stderr)
     self.assertEqual(v['calls'],'');self.assertEqual(len(records),1)
     if kwargs.get('keep'):self.assertEqual(v['archive-calls'],'')
+    elif kwargs.get('preconfig'):self.assertIn('preconfiguration evidence phase present',r.stderr);self.assertEqual(v['archive-calls'],'')
     else:self.assertIn('not an archivable primary guest',r.stderr);self.assertEqual(v['archive-calls'],'')
  def test_mixed_retired_history_does_not_release_unsealed_original(self):
   body='cloudbench_collect_remaining_runtime_evidence(){ return 1; };ec=0;teardown_failed=0;runtime_evidence_failed=0\n'

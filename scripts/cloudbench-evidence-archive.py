@@ -71,8 +71,9 @@ MEMBER_NAME = re.compile(r"[A-Za-z0-9._/@+=,-]+")
 SECRET_ENV = re.compile(r"TOKEN|SECRET|PASSWORD|PASSWD|KEY|AUTH|COOKIE|CREDENTIAL|_URL$", re.I)
 MARKER = "CLOUDBENCH_EVIDENCE_ARCHIVE="
 ERROR_MARKER = "CLOUDBENCH_EVIDENCE_ARCHIVE_ERROR="
-PER_FILE_MAX = 256 * 1024 * 1024
-TOTAL_MAX = 1024 * 1024 * 1024
+# Bounded like the original-file contract; the controller holds a few copies per in-flight guest.
+PER_FILE_MAX = 128 * 1024 * 1024
+TOTAL_MAX = 512 * 1024 * 1024
 SWEEP_TREES = ("repo/.context/cloudbench", "repo/agents/.llm-dumps", "repo/.llm-dumps")
 SWEEP_LOG_DEPTH = 3
 # Repo-wide sweep takes service logs only; checked-in .jsonl ledgers are not runtime evidence.
@@ -430,10 +431,25 @@ def destroy(fly, capture: dict, machine_id: str, volume_id: str, inert: dict, se
     return {"machine": machine_final, "volume": volume_final}
 
 
+def restore_original(fly, app: str, machine_id: str, original_config: Path, wait_seconds: int = 240) -> int:
+    """Return a guest left in this helper's inert config (e.g. after SIGKILL) to its saved original."""
+    capture = sibling("cloudbench-original-volume-capture.py")
+    original = json.loads(original_config.read_text())
+    journal = capture["Journal"](original_config.with_name("journal.jsonl").resolve())
+    try:
+        restored = capture["stop_and_restore"](fly, {"machine_id": machine_id, "app": app}, original, journal, wait_seconds)
+    except (capture["CaptureFailure"], capture["NotFound"]) as error:
+        print(f"❌ restore of {machine_id} failed: {str(error)[:300]}", file=sys.stderr)
+        return EXIT_RETAINED
+    ok = restored.get("state") in ("stopped", "created") and restored.get("config") == original
+    print(json.dumps({"machine_id": machine_id, "restored": ok, "state": restored.get("state")}, sort_keys=True))
+    return EXIT_OK if ok else EXIT_RETAINED
+
+
 def capture_destroy(fly, store: R2Store, *, app: str, machine_id: str, volume_id: str | None,
                     run_token: str | None, receipt_dir: Path, attempts: int = 3, ssh_seconds: int = 240,
                     wait_seconds: int = 240, now=None, capture_only: bool = False,
-                    extra_protected: frozenset[str] = frozenset()) -> int:
+                    extra_protected: frozenset[str] = frozenset(), capture_seconds: int = 900) -> int:
     capture = sibling("cloudbench-original-volume-capture.py")
     try:
         ident = preflight(fly, capture, machine_id, volume_id, run_token, extra_protected)
@@ -449,11 +465,21 @@ def capture_destroy(fly, store: R2Store, *, app: str, machine_id: str, volume_id
     inert = capture["inert_variant"](original)
     restore_ident = {"machine_id": machine_id, "app": app}
     stage, mutated, objects = "inert-config", False, []
+    # Private exact original (secret env and boot payload) before any mutation, so even a
+    # SIGKILL mid-capture stays recoverable with the `restore` subcommand.
+    saved = work / "original-config.private.json"
+    with os.fdopen(os.open(saved, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600), "w") as stream:
+        stream.write(json.dumps(original, sort_keys=True) + "\n")
+        stream.flush()
+        os.fsync(stream.fileno())
 
     def interrupted(signum, _frame):
         raise capture["CaptureFailure"](f"interrupted by signal {signum}")
 
-    previous = {sig: signal.signal(sig, interrupted) for sig in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)}
+    previous = {sig: signal.signal(sig, interrupted)
+                for sig in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT, signal.SIGALRM)}
+    # The whole capture is bounded so the restore below keeps its own budget inside any outer timeout.
+    signal.alarm(max(1, capture_seconds))
     try:
         mutated = True
         fly.api("POST", f"/machines/{machine_id}", {"config": inert, "skip_launch": True})
@@ -492,8 +518,10 @@ def capture_destroy(fly, store: R2Store, *, app: str, machine_id: str, volume_id
         objects.append(store.put_verified(f"{prefix}/manifest.json",
                                           json.dumps(manifest, sort_keys=True, indent=1).encode() + b"\n",
                                           "application/json"))
+        signal.alarm(0)
         journal("r2-verified", keys=[o["key"] for o in objects])
     except BaseException as error:
+        signal.alarm(0)
         for sig in previous:
             signal.signal(sig, signal.SIG_IGN)
         outcome: dict = {"stopped": None, "restored": False}
@@ -511,9 +539,13 @@ def capture_destroy(fly, store: R2Store, *, app: str, machine_id: str, volume_id
         print(f"❌❌ EVIDENCE CAPTURE FAILED for Machine {machine_id} at {stage}: {str(error)[:300]}\n"
               f"❌❌ RETAINED: Machine {machine_id} and volume {volume} are kept "
               f"{'STOPPED with the original config' if outcome.get('restored') else 'in an UNPROVEN state'}; "
-              f"see {work / 'capture-failure.json'}", file=sys.stderr)
+              f"see {work / 'capture-failure.json'}"
+              + ("" if outcome.get("restored") else
+                 f"\n❌❌ restore with: {Path(sys.argv[0]).name} restore --app {app} --machine-id {machine_id} "
+                 f"--original-config {saved}"), file=sys.stderr)
         return EXIT_RETAINED
     finally:
+        signal.alarm(0)
         for sig, handler in previous.items():
             signal.signal(sig, handler)
     receipt = {"schema": SCHEMA, "kind": "archived-then-destroyed", "app": app, "machine_id": machine_id,
@@ -577,10 +609,17 @@ def main(argv: list[str]) -> int:
     run.add_argument("--capture-only", action="store_true",
                      help="archive, restore the original config and leave the destroy to the fleet reap")
     run.add_argument("--protected-machine", action="append", default=[])
+    run.add_argument("--capture-seconds", type=int, default=900,
+                     help="bound on boot+capture+upload; the original-config restore runs after it")
+    back = sub.add_parser("restore", help="return a guest stuck in the inert capture config to its saved original")
+    back.add_argument("--app", required=True)
+    back.add_argument("--machine-id", required=True)
+    back.add_argument("--original-config", required=True, type=Path)
+    back.add_argument("--env-file")
     args = parser.parse_args(argv)
     capture = sibling("cloudbench-original-volume-capture.py")
     try:
-        store = r2_store(args.env_file)
+        store = r2_store(args.env_file) if args.command == "capture-destroy" else None
         token = os.environ.get("FLY_API_TOKEN")
         if not token and args.env_file:
             from dotenv import dotenv_values
@@ -588,13 +627,15 @@ def main(argv: list[str]) -> int:
         if not token:
             raise Refusal("FLY_API_TOKEN is not set")
         fly = capture["Fly"](args.app, token)
-    except (Refusal, capture["Refusal"]) as error:
+    except (Refusal, capture["Refusal"], ImportError) as error:
         print(f"❌❌ evidence archive unavailable, guest RETAINED untouched: {error}", file=sys.stderr)
         return EXIT_REFUSED
+    if args.command == "restore":
+        return restore_original(fly, args.app, args.machine_id, args.original_config.resolve())
     return capture_destroy(fly, store, app=args.app, machine_id=args.machine_id, volume_id=args.volume_id,
                            run_token=args.run_token, receipt_dir=args.receipt_dir.resolve(), attempts=args.attempts,
                            ssh_seconds=args.ssh_seconds, wait_seconds=args.wait_seconds,
-                           capture_only=args.capture_only,
+                           capture_only=args.capture_only, capture_seconds=args.capture_seconds,
                            extra_protected=frozenset(m for m in args.protected_machine if m))
 
 

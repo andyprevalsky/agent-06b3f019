@@ -15909,6 +15909,12 @@ fleet_archive_unsealed_disposable_evidence() {  # 0 only when every owned guest 
     # restore its stopped original config, and let the exact-owner reap destroy it
     # instead of retaining a ~40 GB volume. Any failure retains the whole owner.
     [ "${FLEET_REGISTRY_PUBLISHED:-0}" = 1 ] && fleet_current_disposable_registry "$FLEET_REGISTRY_DIR" || return 1
+    # Preconfiguration phases keep evidence outside the guest volume; this archive cannot replace it.
+    if [ -e "$FLEET_REGISTRY_DIR/preconfig-evidence-consumed" ] || [ -L "$FLEET_REGISTRY_DIR/preconfig-evidence-consumed" ] \
+        || fleet_has_replaced_preconfig_phase "$FLEET_REGISTRY_DIR"; then
+        echo "❌❌ evidence archive: preconfiguration evidence phase present; not archiving" >&2
+        return 1
+    fi
     local record id volume j index pid failed=0 count=0 dir="$FLEET_DIR/_batch/evidence-archive"
     local -a protected=() pids=()
     [ -z "${WARM_ID:-}" ] || protected+=(--protected-machine "$WARM_ID")
@@ -15927,10 +15933,11 @@ fleet_archive_unsealed_disposable_evidence() {  # 0 only when every owned guest 
             failed=1
             break
         fi
-        timeout --kill-after=60 1200 \
+        # 900 s capture deadline, then up to 2 x 240 s to stop and restore the original config.
+        timeout --kill-after=120 1500 \
             python3 "${CLOUDBENCH_SCRIPT_SNAPSHOT:-$ROOT_DIR/scripts}/cloudbench-evidence-archive.py" \
             capture-destroy --capture-only --app "$APP" --machine-id "$id" --volume-id "$volume" \
-            --run-token "$FLEET_OWNER_TOKEN-$index" --receipt-dir "$dir" \
+            --run-token "$FLEET_OWNER_TOKEN-$index" --receipt-dir "$dir" --capture-seconds 900 \
             --env-file "$ROOT_DIR/agents/.env" "${protected[@]}" &
         pids+=("$!")
         count=$((count + 1))
