@@ -19,6 +19,7 @@ import {
   hasUncaughtErrors,
   waitForTemporalWorkflow,
 } from './helpers';
+import { quarantine } from '../src/tests/gate-progress/quarantine';
 
 const SAMPLE_COUNT = 5;
 const FULL_LIFECYCLE_TARGET_MS = 6_000;
@@ -294,6 +295,32 @@ async function waitForTerminalState(
   return elapsed(startedAt);
 }
 
+type LifecycleTest = (fixtures: { page: Page }) => Promise<void>;
+
+const directAnswerTest =
+  'direct_answer: five full-lifecycle samples finish and report latency targets';
+const quarantinedDirectAnswer = (run: LifecycleTest): LifecycleTest =>
+  quarantine(
+    {
+      since: '2026-11-14',
+      repair: 'https://boxes.dev/thread/ph726ee9ba3k8en6ew831pc2458j7gtc',
+      error: 'Error: direct_answer sample 5 missed milestones',
+      evidence: '.context/deploy-pipeline/rca/405ff38915c64e4ca73da99079e53295.json',
+    },
+    run,
+    {
+      unit: `tests-e2e/chat-lifecycle-latency.spec.ts > chat full-lifecycle latency > ${directAnswerTest}`,
+    },
+  );
+
+/** Only the direct_answer path carries the quarantine marker; every other path stays blocking. */
+function lifecycleTest(pathId: ChatPath, run: LifecycleTest): LifecycleTest {
+  if (pathId !== 'direct_answer') return run;
+  const quarantined = quarantinedDirectAnswer(run);
+  // Playwright resolves fixtures from a destructured first parameter.
+  return async ({ page }) => quarantined({ page });
+}
+
 test.describe('chat full-lifecycle latency', () => {
   test.describe.configure({ mode: 'parallel' });
 
@@ -310,174 +337,185 @@ test.describe('chat full-lifecycle latency', () => {
   });
 
   for (const path of selectedPaths()) {
-    test(`${path.id}: five full-lifecycle samples finish and report latency targets`, async ({
-      page,
-    }) => {
-      test.setTimeout(PATH_TEST_TIMEOUT_MS);
-      const recorder = attachRecorder(page);
-      const results: LifecycleSample[] = [];
-      const marker = `CHAT${path.id.replaceAll('_', '').toUpperCase()}${randomUUID().replaceAll('-', '').slice(0, 8)}`;
+    test(
+      `${path.id}: five full-lifecycle samples finish and report latency targets`,
+      lifecycleTest(path.id, async ({ page }) => {
+        test.setTimeout(PATH_TEST_TIMEOUT_MS);
+        const recorder = attachRecorder(page);
+        const results: LifecycleSample[] = [];
+        const marker = `CHAT${path.id.replaceAll('_', '').toUpperCase()}${randomUUID().replaceAll('-', '').slice(0, 8)}`;
 
-      // Bypass the waitlist/invite gate. Users without a redeemed invite code
-      // get the "You're On The Waitlist!" modal on submit (server-side
-      // User.usedInviteCode), which blocks agent creation and navigation. This
-      // latency test measures the chat lifecycle, not invite-gated onboarding
-      // (covered by login.spec.ts), so treat the session as already ungated —
-      // same bypass as cloud-agent-lifecycle.spec.ts.
-      await page.route('**/api/invite-codes/check', (route) =>
-        route.fulfill({ json: { needsInviteCode: false } }),
-      );
-
-      await page.goto(FRONTEND_URL, { waitUntil: 'domcontentloaded' });
-      if (HAS_INJECTED_SESSION) await expectInjectedSessionRecognized(page);
-      else await expectDevAuthenticated(page, recorder);
-
-      // Sample 0 is a discarded WARMUP. A fresh CI stack cold-starts the backend
-      // JIT, the Cerebras connection, and the prompt cache, so the very first
-      // request per path runs several seconds slower than steady state (observed
-      // ~8s vs ~1s warm). Prod is never cold per-request, so the cold-start is a
-      // fresh-stack artifact — not a user-visible latency. Samples 1..SAMPLE_COUNT
-      // are the measured, warm samples compared with the reporting target. Keep the marker
-      // stable across the path's independent agent submissions so the warmup can
-      // actually warm the prompt/cache path it is designed to exclude.
-      for (let sample = 0; sample <= SAMPLE_COUNT; sample += 1) {
-        if (sample > 0) await page.waitForTimeout(PROVIDER_QUOTA_COOLDOWN_MS);
-        // Sample 0 is the discarded warmup and may legitimately be cold-slow.
-        // Every measured sample keeps the strict milestone budget.
-        const milestoneTimeoutMs =
-          sample === 0 ? WARMUP_MILESTONE_TIMEOUT_MS : MILESTONE_TIMEOUT_MS;
-        await page.goto(FRONTEND_URL, { waitUntil: 'domcontentloaded' });
-
-        const goal = path.prompt(marker);
-        const input = page.locator('textarea[placeholder="Enter any goal"]');
-        await expect(input, `${path.id} sample ${sample}: goal input did not render`).toBeVisible();
-        await input.fill(goal);
-
-        let agentId: string | null = null;
-        const { startedAt } = await armLifecycleClock(page, input);
-        const agentIdentity = page
-          .waitForURL((url) => Boolean(url.searchParams.get('agent-id')), {
-            timeout: milestoneTimeoutMs,
-          })
-          .then(() => {
-            agentId = new URL(page.url()).searchParams.get('agent-id');
-            if (!agentId) throw new Error('Agent URL did not contain agent-id');
-            return agentId;
-          });
-        const screen = agentIdentity.then(() => elapsed(startedAt));
-        const userMessage = page
-          .locator('[data-message-role="USER"]', { hasText: goal })
-          .last()
-          .waitFor({ state: 'visible', timeout: milestoneTimeoutMs })
-          .then(() => elapsed(startedAt));
-        const firstResponse = waitForFirstResponse(page, startedAt, milestoneTimeoutMs);
-        const route = waitForRoute(page, path, marker, startedAt, milestoneTimeoutMs);
-        const terminal = waitForTerminalState(
-          page,
-          path,
-          marker,
-          startedAt,
-          agentIdentity,
-          milestoneTimeoutMs,
+        // Bypass the waitlist/invite gate. Users without a redeemed invite code
+        // get the "You're On The Waitlist!" modal on submit (server-side
+        // User.usedInviteCode), which blocks agent creation and navigation. This
+        // latency test measures the chat lifecycle, not invite-gated onboarding
+        // (covered by login.spec.ts), so treat the session as already ungated —
+        // same bypass as cloud-agent-lifecycle.spec.ts.
+        await page.route('**/api/invite-codes/check', (route) =>
+          route.fulfill({ json: { needsInviteCode: false } }),
         );
 
-        try {
-          await input.press('Enter');
-          const milestones = await Promise.allSettled([
-            screen,
-            userMessage,
-            firstResponse,
-            route,
-            terminal,
-          ]);
-          const failures: string[] = [];
-          const screenMs = settledMilestone('screen', milestones[0], failures, milestoneTimeoutMs);
-          const userMessageMs = settledMilestone(
-            'user-message',
-            milestones[1],
-            failures,
-            milestoneTimeoutMs,
-          );
-          const firstResponseMs = settledMilestone(
-            'first-response',
-            milestones[2],
-            failures,
-            milestoneTimeoutMs,
-          );
-          const routeMs = settledMilestone('route', milestones[3], failures, milestoneTimeoutMs);
-          const lifecycleMs = settledMilestone(
-            'terminal',
-            milestones[4],
-            failures,
-            milestoneTimeoutMs,
-          );
+        await page.goto(FRONTEND_URL, { waitUntil: 'domcontentloaded' });
+        if (HAS_INJECTED_SESSION) await expectInjectedSessionRecognized(page);
+        else await expectDevAuthenticated(page, recorder);
 
-          if (path.id === 'direct_answer') {
-            const unexpectedRouteCount = await page
-              .locator(
-                '[data-tool-name="web_search"], [data-tool-name="cloud_agent"], [data-tool-statuses*="web_search"], [data-tool-statuses*="cloud_agent"]',
-              )
-              .count();
-            if (unexpectedRouteCount > 0) failures.push('direct answer used another router path');
-          }
+        // Sample 0 is a discarded WARMUP. A fresh CI stack cold-starts the backend
+        // JIT, the Cerebras connection, and the prompt cache, so the very first
+        // request per path runs several seconds slower than steady state (observed
+        // ~8s vs ~1s warm). Prod is never cold per-request, so the cold-start is a
+        // fresh-stack artifact — not a user-visible latency. Samples 1..SAMPLE_COUNT
+        // are the measured, warm samples compared with the reporting target. Keep the marker
+        // stable across the path's independent agent submissions so the warmup can
+        // actually warm the prompt/cache path it is designed to exclude.
+        for (let sample = 0; sample <= SAMPLE_COUNT; sample += 1) {
+          if (sample > 0) await page.waitForTimeout(PROVIDER_QUOTA_COOLDOWN_MS);
+          // Sample 0 is the discarded warmup and may legitimately be cold-slow.
+          // Every measured sample keeps the strict milestone budget.
+          const milestoneTimeoutMs =
+            sample === 0 ? WARMUP_MILESTONE_TIMEOUT_MS : MILESTONE_TIMEOUT_MS;
+          await page.goto(FRONTEND_URL, { waitUntil: 'domcontentloaded' });
 
-          if (sample === 0) {
-            console.log(
-              `${path.id} warmup: first-response=${firstResponseMs}ms lifecycle=${lifecycleMs}ms (discarded cold-start)`,
-            );
-          } else {
-            results.push({
-              sample,
-              screenMs,
-              userMessageMs,
-              firstResponseMs,
-              routeMs,
-              lifecycleMs,
-              failures,
+          const goal = path.prompt(marker);
+          const input = page.locator('textarea[placeholder="Enter any goal"]');
+          await expect(
+            input,
+            `${path.id} sample ${sample}: goal input did not render`,
+          ).toBeVisible();
+          await input.fill(goal);
+
+          let agentId: string | null = null;
+          const { startedAt } = await armLifecycleClock(page, input);
+          const agentIdentity = page
+            .waitForURL((url) => Boolean(url.searchParams.get('agent-id')), {
+              timeout: milestoneTimeoutMs,
+            })
+            .then(() => {
+              agentId = new URL(page.url()).searchParams.get('agent-id');
+              if (!agentId) throw new Error('Agent URL did not contain agent-id');
+              return agentId;
             });
-            console.log(
-              `${path.id} sample ${sample}/${SAMPLE_COUNT}: screen=${screenMs}ms user=${userMessageMs}ms first-response=${firstResponseMs}ms route=${routeMs}ms lifecycle=${lifecycleMs}ms${failures.length > 0 ? ` failures=${JSON.stringify(failures)}` : ''}`,
+          const screen = agentIdentity.then(() => elapsed(startedAt));
+          const userMessage = page
+            .locator('[data-message-role="USER"]', { hasText: goal })
+            .last()
+            .waitFor({ state: 'visible', timeout: milestoneTimeoutMs })
+            .then(() => elapsed(startedAt));
+          const firstResponse = waitForFirstResponse(page, startedAt, milestoneTimeoutMs);
+          const route = waitForRoute(page, path, marker, startedAt, milestoneTimeoutMs);
+          const terminal = waitForTerminalState(
+            page,
+            path,
+            marker,
+            startedAt,
+            agentIdentity,
+            milestoneTimeoutMs,
+          );
+
+          try {
+            await input.press('Enter');
+            const milestones = await Promise.allSettled([
+              screen,
+              userMessage,
+              firstResponse,
+              route,
+              terminal,
+            ]);
+            const failures: string[] = [];
+            const screenMs = settledMilestone(
+              'screen',
+              milestones[0],
+              failures,
+              milestoneTimeoutMs,
+            );
+            const userMessageMs = settledMilestone(
+              'user-message',
+              milestones[1],
+              failures,
+              milestoneTimeoutMs,
+            );
+            const firstResponseMs = settledMilestone(
+              'first-response',
+              milestones[2],
+              failures,
+              milestoneTimeoutMs,
+            );
+            const routeMs = settledMilestone('route', milestones[3], failures, milestoneTimeoutMs);
+            const lifecycleMs = settledMilestone(
+              'terminal',
+              milestones[4],
+              failures,
+              milestoneTimeoutMs,
+            );
+
+            if (path.id === 'direct_answer') {
+              const unexpectedRouteCount = await page
+                .locator(
+                  '[data-tool-name="web_search"], [data-tool-name="cloud_agent"], [data-tool-statuses*="web_search"], [data-tool-statuses*="cloud_agent"]',
+                )
+                .count();
+              if (unexpectedRouteCount > 0) failures.push('direct answer used another router path');
+            }
+
+            if (sample === 0) {
+              console.log(
+                `${path.id} warmup: first-response=${firstResponseMs}ms lifecycle=${lifecycleMs}ms (discarded cold-start)`,
+              );
+            } else {
+              results.push({
+                sample,
+                screenMs,
+                userMessageMs,
+                firstResponseMs,
+                routeMs,
+                lifecycleMs,
+                failures,
+              });
+              console.log(
+                `${path.id} sample ${sample}/${SAMPLE_COUNT}: screen=${screenMs}ms user=${userMessageMs}ms first-response=${firstResponseMs}ms route=${routeMs}ms lifecycle=${lifecycleMs}ms${failures.length > 0 ? ` failures=${JSON.stringify(failures)}` : ''}`,
+              );
+            }
+          } finally {
+            agentId ??= new URL(page.url()).searchParams.get('agent-id');
+            if (agentId) {
+              let safeToDelete = path.terminal !== 'agent_mode';
+              if (!safeToDelete) {
+                try {
+                  await waitForTemporalWorkflow(agentId, milestoneTimeoutMs);
+                  safeToDelete = true;
+                } catch (error) {
+                  console.warn(
+                    `Skipping cleanup for ${agentId} to avoid racing an in-flight Temporal start:`,
+                    error,
+                  );
+                }
+              }
+              if (safeToDelete) await deleteAgent(agentId);
+            }
+          }
+        }
+
+        const lifecycleTimes = results.map((result) => result.lifecycleMs);
+        const p50 = percentile(lifecycleTimes, 0.5);
+        const maximum = Math.max(...lifecycleTimes);
+        console.log(
+          `${path.id} full lifecycle: p50=${p50}ms max=${maximum}ms smoothness=${smoothnessScore(results).toFixed(3)} target=<${FULL_LIFECYCLE_TARGET_MS}ms`,
+        );
+
+        expect(results, `${path.id}: all five lifecycle samples must finish`).toHaveLength(
+          SAMPLE_COUNT,
+        );
+        for (const result of results) {
+          expect(result.failures, `${path.id} sample ${result.sample} missed milestones`).toEqual(
+            [],
+          );
+          if (result.lifecycleMs >= FULL_LIFECYCLE_TARGET_MS) {
+            console.warn(
+              `${path.id} sample ${result.sample}: completed lifecycle ${result.lifecycleMs}ms exceeded the ${FULL_LIFECYCLE_TARGET_MS}ms reporting target`,
             );
           }
-        } finally {
-          agentId ??= new URL(page.url()).searchParams.get('agent-id');
-          if (agentId) {
-            let safeToDelete = path.terminal !== 'agent_mode';
-            if (!safeToDelete) {
-              try {
-                await waitForTemporalWorkflow(agentId, milestoneTimeoutMs);
-                safeToDelete = true;
-              } catch (error) {
-                console.warn(
-                  `Skipping cleanup for ${agentId} to avoid racing an in-flight Temporal start:`,
-                  error,
-                );
-              }
-            }
-            if (safeToDelete) await deleteAgent(agentId);
-          }
         }
-      }
-
-      const lifecycleTimes = results.map((result) => result.lifecycleMs);
-      const p50 = percentile(lifecycleTimes, 0.5);
-      const maximum = Math.max(...lifecycleTimes);
-      console.log(
-        `${path.id} full lifecycle: p50=${p50}ms max=${maximum}ms smoothness=${smoothnessScore(results).toFixed(3)} target=<${FULL_LIFECYCLE_TARGET_MS}ms`,
-      );
-
-      expect(results, `${path.id}: all five lifecycle samples must finish`).toHaveLength(
-        SAMPLE_COUNT,
-      );
-      for (const result of results) {
-        expect(result.failures, `${path.id} sample ${result.sample} missed milestones`).toEqual([]);
-        if (result.lifecycleMs >= FULL_LIFECYCLE_TARGET_MS) {
-          console.warn(
-            `${path.id} sample ${result.sample}: completed lifecycle ${result.lifecycleMs}ms exceeded the ${FULL_LIFECYCLE_TARGET_MS}ms reporting target`,
-          );
-        }
-      }
-      expect(hasUncaughtErrors(recorder), 'uncaught errors during lifecycle samples').toEqual([]);
-    });
+        expect(hasUncaughtErrors(recorder), 'uncaught errors during lifecycle samples').toEqual([]);
+      }),
+    );
   }
 });

@@ -2071,11 +2071,23 @@ verify_app_environment() {
     case "$read_timeout" in
         ''|*[!0-9]*) echo "❌ App environment read timeout must be positive whole seconds." >&2; return 1 ;;
     esac
-    listing="$(_with_timeout "$read_timeout" flyctl secrets list -a "$APP" --json)" || {
-        read_status=$?
+    # The listing is read-only and idempotent: one slow Fly API read (timeout,
+    # exit 124) must not abort a launch, so retry only that, at most 3 attempts
+    # with 2 s / 5 s pauses (worst case 3x timeout + 7 s). Any other exit (auth,
+    # missing app, interrupt) still fails at once.
+    local attempt pause
+    for attempt in 1 2 3; do
+        read_status=0
+        listing="$(_with_timeout "$read_timeout" flyctl secrets list -a "$APP" --json)" || read_status=$?
+        [ "$read_status" = 124 ] && [ "$attempt" -lt 3 ] || break
+        pause=$((attempt == 1 ? 2 : 5))
+        echo "⚠️ App secrets read for $APP timed out after ${read_timeout}s (attempt $attempt/3); retrying in ${pause}s." >&2
+        sleep "$pause"
+    done
+    if [ "$read_status" != 0 ]; then
         echo "❌ Could not read app secrets for $APP (read exit=$read_status)." >&2
         return 1
-    }
+    fi
     if ! missing="$(printf '%s' "$listing" | REQUIRED="$REQUIRED_APP_SECRETS" python3 -c '
 import json, os, sys
 try:
@@ -3352,6 +3364,11 @@ REMOTE_PY_FP=\$(cloudbench_manifest_fingerprint '$REMOTE_REPO' \"\${CLOUDBENCH_P
 echo \"::DEPS-REMOTE-REF::\$REMOTE_REF\"
 echo \"::DEPS-REMOTE-NODE::\$REMOTE_NODE_FP\"
 echo \"::DEPS-REMOTE-PY::\$REMOTE_PY_FP\"
+# Fresh-storage REAL clones boot this same image and sync deps from its baked
+# /app, not from this volume. Report the image's own fingerprints so the fleet
+# can keep those clones on this proven snapshot when the image is stale.
+echo \"::DEPS-IMAGE-NODE::\$(cloudbench_node_dependency_fingerprint /app 2>/dev/null || true)\"
+echo \"::DEPS-IMAGE-PY::\$(cloudbench_manifest_fingerprint /app \"\${CLOUDBENCH_PYTHON_MANIFESTS[@]}\" 2>/dev/null || true)\"
 # The donor is stopped by signal and snapshotted next; write back the synced
 # checkout and dependency trees first (see the native WMH refresh flush).
 sync -f '$REMOTE_REPO'
@@ -3367,6 +3384,8 @@ echo '::DEPS-REFRESH-DONE::'"
     REMOTE_REF="$(sed -n 's/^::DEPS-REMOTE-REF:://p' "$DEPS_LOG" | tail -1)"
     REMOTE_NODE_FP="$(sed -n 's/^::DEPS-REMOTE-NODE:://p' "$DEPS_LOG" | tail -1)"
     REMOTE_PY_FP="$(sed -n 's/^::DEPS-REMOTE-PY:://p' "$DEPS_LOG" | tail -1)"
+    IMAGE_NODE_FP="$(sed -n 's/^::DEPS-IMAGE-NODE:://p' "$DEPS_LOG" | tail -1)"
+    IMAGE_PY_FP="$(sed -n 's/^::DEPS-IMAGE-PY:://p' "$DEPS_LOG" | tail -1)"
     rm -f "$DEPS_LOG"
     if [ "$REMOTE_REF" != "$EXPECTED_REF" ] \
         || [ "$REMOTE_NODE_FP" != "$EXPECTED_NODE_FP" ] \
@@ -3405,6 +3424,14 @@ for m in json.load(sys.stdin) or []:
     # record the exact verified source ref this snapshot was produced from.
     # Sharded runs reuse a snapshot only for their own exact ref; a patched
     # workspace is not that ref, so it leaves no receipt.
+    # Sidecar: the baked image dependency fingerprints observed on the donor
+    # while it produced this snapshot (fleet fresh-storage admission reads it).
+    rm -f "$WARM_DEPS_STATE_FILE.image"
+    if [ -n "$IMAGE_NODE_FP" ] && [ -n "$IMAGE_PY_FP" ]; then
+        printf '%s %s %s %s %s\n' "$EXPECTED_NODE_FP" "$EXPECTED_PY_FP" "$NEW_SNAP" \
+            "$IMAGE_NODE_FP" "$IMAGE_PY_FP" > "$WARM_DEPS_STATE_FILE.image.$$" \
+            && mv -f "$WARM_DEPS_STATE_FILE.image.$$" "$WARM_DEPS_STATE_FILE.image"
+    fi
     rm -f "$WARM_DEPS_STATE_FILE.ref"
     if [ -z "$REFRESH_PATCH_FILE" ]; then
         printf '%s %s\n' "$EXPECTED_REF" "$NEW_SNAP" > "$WARM_DEPS_STATE_FILE.ref.$$" \
@@ -5173,16 +5200,35 @@ assert total <= maximum
 final = parent / "runtime-evidence"
 assert not final.exists() and not final.is_symlink()
 pending = Path(tempfile.mkdtemp(prefix=".runtime-evidence-", dir=parent))
-for name, metadata in files.items():
+# The sealed bundle is immutable and each file is proven by its manifest hash
+# and the final manifest re-read, not by the transport. A transient transport
+# read of sealed bytes (one 6 s socket stall or an early EOF through the status
+# proxy) is retried from the start of that read a bounded number of times;
+# HTTP statuses, oversized bodies and hash mismatches still fail closed at once.
+SEALED_READ_ATTEMPTS = 3
+def sealed_read(label, read):
+    for attempt in range(1, SEALED_READ_ATTEMPTS + 1):
+        try:
+            return read()
+        except urllib.error.HTTPError:
+            raise
+        except (urllib.error.URLError, TimeoutError, ConnectionError) as error:
+            if attempt == SEALED_READ_ATTEMPTS:
+                raise
+            print(f"⚠️  sealed runtime evidence read {label} attempt {attempt}/{SEALED_READ_ATTEMPTS} "
+                  f"failed: {error!r}; retrying", file=sys.stderr)
+        time.sleep(attempt)
+def download(name, metadata):
     target = pending / name
-    target.parent.mkdir(parents=True, exist_ok=True)
+    target.unlink(missing_ok=True)
     digest = hashlib.sha256()
     remaining = metadata["bytes"]
     with request("?" + urllib.parse.urlencode({"file": name})) as response, target.open("xb") as output:
         assert response.status == 200 and response.headers.get("Content-Length") == str(remaining)
         while remaining:
             chunk = response.read(min(65536, remaining))
-            assert chunk, "runtime evidence response ended early"
+            if not chunk:
+                raise ConnectionError("runtime evidence response ended early")
             output.write(chunk)
             digest.update(chunk)
             remaining -= len(chunk)
@@ -5190,6 +5236,9 @@ for name, metadata in files.items():
         output.flush()
         os.fsync(output.fileno())
     assert digest.hexdigest() == metadata["sha256"], "runtime evidence hash mismatch"
+for name, metadata in files.items():
+    (pending / name).parent.mkdir(parents=True, exist_ok=True)
+    sealed_read(name, lambda: download(name, metadata))
 if no_stack:
     if prestack:
         assert (pending / f"cloudbench-prestack-{run_token}.sealed").read_bytes() == (run_token + "\n").encode()
@@ -5201,7 +5250,7 @@ else:
     count = services["env"]["worker_processes"]
     assert services["status"] == "stopped" and type(count) is int and 1 <= count <= 1024
     assert set(files) - OPTIONAL == required | {"logs/worker.log", *(f"logs/worker.{i}.log" for i in range(1, count))}
-assert manifest() == expected, "runtime evidence changed across collection"
+assert sealed_read("manifest", manifest) == expected, "runtime evidence changed across collection"
 with (pending / "manifest.json").open("x") as output:
     json.dump(expected, output, sort_keys=True)
     output.write("\n")

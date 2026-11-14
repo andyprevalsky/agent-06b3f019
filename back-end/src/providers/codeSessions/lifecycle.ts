@@ -14,6 +14,7 @@ import { join, resolve, sep } from 'path';
 import { NotFoundError, Sandbox } from 'e2b';
 import { prisma } from '../database';
 import { createLogger } from '../logger';
+import { isCliTemplateSession } from '../cliTemplateReferences';
 import { checkpointKey, deleteCheckpointObject, getCheckpointObject } from './artifactStore';
 import {
   applyCheckpoint,
@@ -318,6 +319,9 @@ async function deleteCheckpoints(session: CodeSessionRow): Promise<void> {
 
 /** Kill the sandbox, delete stored checkpoints and mark the session retired. */
 export async function retireCodeSession(session: CodeSessionRow): Promise<void> {
+  if (await isCliTemplateSession(session.userId, session.id)) {
+    throw new Error('Disconnect the CLI integration before retiring its template');
+  }
   if (session.sandboxKind === 'e2b' && session.sandboxId !== null) {
     try {
       await Sandbox.kill(session.sandboxId, { apiKey: process.env.E2B_API_KEY });

@@ -23,9 +23,13 @@
  *   display media rows (ASSISTANT + file_pointer + display.kind 'media') → consecutive
  *     rows of one requester form ONE DisplayMediaGroup at the first row (gallery +
  *     sandboxed HTML frames); the other rows render nothing
+ *   tool-owned artifacts → owner bubble expansion; unresolved ownership → collapsed Files
  *   pinned question (display.placement 'pinned') → not inline; PinnedQuestionMount shows it
  *   metadata.a2a (USER or TOOL agent_message row) → AgentToAgentRow, never a user bubble
  */
+import { ToolArtifacts } from './ToolArtifacts';
+import { ToolArtifactContext } from './toolArtifactContext';
+import { isToolArtifact } from './toolArtifactGroups';
 import { Fragment, useEffect } from 'react';
 import { InlineUserView, parseInlineViewMetadata } from '@/features/user-ui';
 import { useRoseDesktop } from '@/hooks/roseDesktopContext';
@@ -85,6 +89,7 @@ type MessageListItemProps = Omit<
   'filteredMessages' | 'webSearchGrouping' | 'groupAgentMessages'
 > & {
   message: Message;
+  artifacts?: Message[];
 };
 
 function resolveMessageThinkingMetrics(
@@ -167,16 +172,12 @@ function StockMessageListItem({
   streamingPlanStartedAtMs,
   streamingMetricsBySubAgentId,
   streamingMessageIds,
+  artifacts,
 }: MessageListItemProps & { roseDesktop: boolean }) {
   const planCharCount = resolvePlanCharCount(message, streamingPlanCharCount);
   const thinkingMetrics = resolveMessageThinkingMetrics(message, streamingMetricsBySubAgentId);
   const isFinalAnswer = message.metadata?.isUserAttentionMessage === true;
-  const toolCallId =
-    typeof message.metadata?.toolCallId === 'string' ? message.metadata.toolCallId : undefined;
-  const toolName =
-    typeof message.metadata?.toolName === 'string' ? message.metadata.toolName : undefined;
-  const toolStatus =
-    typeof message.metadata?.toolStatus === 'string' ? message.metadata.toolStatus : undefined;
+  const { toolCallId, toolName, toolStatus } = message.metadata ?? {};
   const rawAgentStartPhase = message.metadata?.startPhase;
   const agentStartPhase =
     toolName === 'cloud_agent' &&
@@ -207,24 +208,26 @@ function StockMessageListItem({
       className="min-w-0 max-w-full"
     >
       {attribution && <CodeAgentAttribution requester={attribution} />}
-      <MessageBubble
-        message={message}
-        isStreaming={streamingMessageIds?.has(message.message_id) === true}
-        shouldType={message.message_id === currentAnimatingId}
-        onTypingComplete={onAnimationComplete}
-        onNavigateToAgent={onNavigateToAgent}
-        agentId={selectedAgentId || undefined}
-        onSendMessage={selectedAgentId ? onSendMessage : undefined}
-        compact={compact}
-        onSubmitFeedback={onSubmitFeedback}
-        exploreStepHistory={exploreStepMap.get(message.message_id)}
-        waitForChecks={waitForCheckMap.get(message.message_id)}
-        planCharCount={planCharCount}
-        planStreamStartedAtMs={planCharCount !== undefined ? streamingPlanStartedAtMs : undefined}
-        thinkingStreamTokenCount={thinkingMetrics.thinkingStreamTokenCount}
-        thinkingStreamStartedAtMs={thinkingMetrics.thinkingStreamStartedAtMs}
-        streamingMetricsBySubAgentId={streamingMetricsBySubAgentId}
-      />
+      <ToolArtifactContext.Provider value={artifacts ?? []}>
+        <MessageBubble
+          message={message}
+          isStreaming={streamingMessageIds?.has(message.message_id) === true}
+          shouldType={message.message_id === currentAnimatingId}
+          onTypingComplete={onAnimationComplete}
+          onNavigateToAgent={onNavigateToAgent}
+          agentId={selectedAgentId || undefined}
+          onSendMessage={selectedAgentId ? onSendMessage : undefined}
+          compact={compact}
+          onSubmitFeedback={onSubmitFeedback}
+          exploreStepHistory={exploreStepMap.get(message.message_id)}
+          waitForChecks={waitForCheckMap.get(message.message_id)}
+          planCharCount={planCharCount}
+          planStreamStartedAtMs={planCharCount !== undefined ? streamingPlanStartedAtMs : undefined}
+          thinkingStreamTokenCount={thinkingMetrics.thinkingStreamTokenCount}
+          thinkingStreamStartedAtMs={thinkingMetrics.thinkingStreamStartedAtMs}
+          streamingMetricsBySubAgentId={streamingMetricsBySubAgentId}
+        />
+      </ToolArtifactContext.Provider>
       {inlineView && <InlineUserView inlineView={inlineView} messageId={message.message_id} />}
     </div>
   );
@@ -238,6 +241,8 @@ function MessageListItem(props: MessageListItemProps) {
   const roseDesktop = useRoseDesktop();
   const { message } = props;
   if (roseDesktop && parsePinnedQuestion(message.metadata)) return null;
+  if (isToolArtifact(message))
+    return <ToolArtifacts artifacts={[message]} agentId={props.selectedAgentId || undefined} />;
   const a2a = roseDesktop ? parseAgentToAgentMessage(message) : null;
   if (a2a) {
     return (
@@ -270,7 +275,7 @@ export function MessageListItems({
   agentExchangeProjection,
   ...itemProps
 }: MessageListItemsProps) {
-  const { renderedMessages, displayGrouping, localExchanges, workGroups } =
+  const { renderedMessages, displayGrouping, localExchanges, workGroups, artifactsByOwner } =
     useMessageListProjection({
       ...itemProps,
       filteredMessages,
@@ -289,7 +294,12 @@ export function MessageListItems({
           group={workGroup}
           exploreStepMap={itemProps.exploreStepMap}
           renderMessage={(row) => (
-            <MessageListItem message={row} {...itemProps} currentAnimatingId={null} />
+            <MessageListItem
+              message={row}
+              {...itemProps}
+              artifacts={artifactsByOwner.get(row.message_id)}
+              currentAnimatingId={null}
+            />
           )}
         />
       );
@@ -329,7 +339,8 @@ export function MessageListItems({
         />
       );
     }
-    return <MessageListItem key={getMessageRenderKey(message)} message={message} {...itemProps} />;
+    const props = { ...itemProps, message, artifacts: artifactsByOwner.get(message.message_id) };
+    return <MessageListItem key={getMessageRenderKey(message)} {...props} />;
   });
   return <Fragment key={itemProps.selectedAgentId}>{items}</Fragment>;
 }

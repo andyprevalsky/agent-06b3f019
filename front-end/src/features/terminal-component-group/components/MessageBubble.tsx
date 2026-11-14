@@ -21,8 +21,11 @@
  *   - Empty thought      → null
  *   - else               → DefaultBubble (SYSTEM / plain ASSISTANT)
  *
+ * Tool artifacts stay in the specialised owner expansion or a collapsed disclosure.
  * Each sub-bubble owns its own state machine; this file is stateless.
  */
+import { useToolArtifacts } from './toolArtifactContext';
+import { ToolArtifacts } from './ToolArtifacts';
 import type { MessageBubbleProps } from './message-bubble/types';
 import { useMessageRouting } from './message-bubble/useMessageRouting';
 import { useToolData } from './message-bubble/useToolData';
@@ -41,8 +44,16 @@ export default function MessageBubble(rawProps: MessageBubbleProps) {
     isTool: routing.isTool,
   });
 
+  const artifacts = useToolArtifacts();
   const specialised = renderSpecialisedBubble({ props, routing });
-  if (specialised !== undefined) return specialised;
-
-  return renderFallbackBubble({ props, routing, toolData });
+  const bubble =
+    specialised !== undefined ? specialised : renderFallbackBubble({ props, routing, toolData });
+  if (!artifacts.length || routing.isBrowserAgentChipMessage || routing.isClaudeCodeChipMessage)
+    return bubble;
+  return (
+    <>
+      {bubble}
+      <ToolArtifacts artifacts={artifacts} agentId={props.agentId} />
+    </>
+  );
 }

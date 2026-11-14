@@ -248,29 +248,96 @@ PY
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual((self.root / "calls").read_text(), "2")
 
-    def test_actual_verifier_retains_native_failure_status_and_stderr(self):
+    def run_actual_verifier(self, reads):
+        """Run the real verify_app_environment with scripted secrets-list reads.
+
+        Each entry in ``reads`` is (exit status, stdout) for one flyctl read;
+        ``sleep`` is recorded instead of slept so pauses are asserted exactly.
+        """
         source = (ROOT / "scripts/run-bench-cloud").read_text()
         body = source[
-            source.index("verify_app_environment() {") : source.index(
+            source.index("REQUIRED_APP_SECRETS=") : source.index(
                 '\nif [ "$MODE" = "verify-secrets" ]; then'
             )
         ]
+        script = self.root / "reads"
+        script.write_text("".join(f"{status} {out}\n" for status, out in reads))
+        log = self.root / "read-log"
         result = subprocess.run(
             [
                 "bash",
                 "-c",
-                'APP=fixture; _with_timeout() { shift; "$@"; }; '
-                "flyctl() { echo native-read-fixture >&2; return 9; }; "
+                "APP=fixture; "
+                'sleep() { echo "sleep $1" >> "$LOG"; }; '
+                '_with_timeout() { echo "read timeout=$1" >> "$LOG"; shift; "$@"; }; '
+                "flyctl() { "
+                "n=$(grep -c '^read ' \"$LOG\"); "
+                "line=$(sed -n \"${n}p\" \"$READS\"); "
+                'echo native-read-fixture >&2; printf "%s" "${line#* }"; '
+                'return "${line%% *}"; }; '
                 + body
                 + "\nverify_app_environment",
             ],
             capture_output=True,
             text=True,
             check=False,
+            timeout=30,
+            env={
+                **{
+                    key: value
+                    for key, value in os.environ.items()
+                    if key != "CLOUDBENCH_APP_ENV_READ_TIMEOUT_SECONDS"
+                },
+                "LOG": str(log),
+                "READS": str(script),
+            },
         )
+        return result, log.read_text().splitlines()
+
+    def complete_listing(self):
+        source = (ROOT / "scripts/run-bench-cloud").read_text()
+        names = re.search(r'REQUIRED_APP_SECRETS="([^"]+)"', source).group(1).split()
+        return json.dumps([{"Name": name} for name in names])
+
+    def test_actual_verifier_retains_native_failure_status_and_stderr(self):
+        result, log = self.run_actual_verifier([(9, "")])
         self.assertEqual(result.returncode, 1)
         self.assertIn("native-read-fixture", result.stderr)
         self.assertIn("read exit=9", result.stderr)
+        # A non-timeout failure (auth, missing app) is never retried.
+        self.assertEqual(log, ["read timeout=20"])
+
+    def test_actual_verifier_retries_one_slow_read_then_verifies(self):
+        result, log = self.run_actual_verifier(
+            [(124, ""), (0, self.complete_listing())]
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("environment verified (read-only)", result.stdout)
+        self.assertIn("timed out after 20s (attempt 1/3)", result.stderr)
+        self.assertEqual(log, ["read timeout=20", "sleep 2", "read timeout=20"])
+
+    def test_actual_verifier_persistent_timeout_fails_after_three_reads(self):
+        result, log = self.run_actual_verifier([(124, "")] * 4)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("read exit=124", result.stderr)
+        self.assertEqual(
+            log,
+            [
+                "read timeout=20",
+                "sleep 2",
+                "read timeout=20",
+                "sleep 5",
+                "read timeout=20",
+            ],
+        )
+
+    def test_actual_verifier_missing_secret_after_slow_read_fails_loud(self):
+        listing = json.loads(self.complete_listing())
+        missing = listing.pop()["Name"]
+        result, log = self.run_actual_verifier([(124, ""), (0, json.dumps(listing))])
+        self.assertEqual(result.returncode, 1)
+        self.assertIn(f"missing secrets: {missing}", result.stderr)
+        self.assertEqual(log, ["read timeout=20", "sleep 2", "read timeout=20"])
 
     def test_selected_authentication_matches_canonical_shell_resolver(self):
         helper = runpy.run_path(str(self.helpers / "cloudbench-campaign-env.py"))
