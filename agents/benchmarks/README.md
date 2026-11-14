@@ -321,6 +321,39 @@ destroyed or running resources and existing captures. A failure leaves
 rerun with `--restore-original-config` and the same capture directory. Archive
 building and recovery still apply their own exact checks.
 
+**Default since 2026-11-14: unsealed guests are archived to R2, then destroyed.**
+When a disposable fleet's only teardown problem is unsealed runtime evidence (the
+guest acknowledged cleanup and owned joins succeeded), `cleanup()` no longer keeps
+the stopped Machine and its ~40 GB volume. `scripts/cloudbench-evidence-archive.py
+capture-destroy --capture-only` boots each primary inert (same functions as the
+helper above), tars the `original_files` contract plus every other log on the
+volume, and writes `evidence.tar.gz`, `inventory.json` (per-file sha256),
+`machine-config.redacted.json` and `manifest.json` to the private trace-archive
+bucket (`R2_BUCKET_TRACE_ARCHIVE`) under `smoke-evidence/<machine>/<utc-ts>/`.
+It never overwrites or deletes R2 objects and reads every object back before it
+restores the stopped original config. Only then does the controller clear
+`runtime-evidence-unconfirmed` and let `reap_registry_clones` destroy the guest.
+Local receipts are in `<run>/_batch/evidence-archive/<machine>/<ts>/`. If any
+capture fails, the whole owner is retained as before and the controller prints
+`❌❌ evidence archive FAILED: unsealed guests stay RETAINED`. Worker clones and
+the warm donors (683e47df5094d8, any `*warm*` name, `WARM_ID`/`SHARED_WARM_ID`)
+are never archived or destroyed by this path.
+
+For an already-stale stopped guest that an owner confirms dead, the same helper
+without `--capture-only` archives and then destroys the Machine and its volume
+itself, one Machine per call (exit 0 archived+destroyed, 2 capture failed and
+retained, 3 refused untouched, 4 archived but destroy unproven):
+
+```bash
+cd agents && source venv/bin/activate && cd ..
+python3 scripts/cloudbench-evidence-archive.py capture-destroy --app navi-whisper-lux-bench \
+  --machine-id <machine> --receipt-dir <private-dir> --env-file agents/.env
+```
+
+Then the owner finishes `scripts/run-bench --recover-stale-owner <token>
+--accept-lost-runtime-evidence`. Its lost-evidence receipt records that the sealed
+runtime bundle never existed; the original files are in the R2 archive.
+
 For generic failed-owner recovery, `_forensic/archive-verified.json` preserves
 complete originals with `native_release_verified=false` and zero proof credit.
 Continue `scripts/run-bench --recover-stale-owner <exact-owner-token>` through

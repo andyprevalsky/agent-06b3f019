@@ -804,6 +804,7 @@ if [ -z "${CLOUDBENCH_SCRIPT_SNAPSHOT:-}" ]; then
        "$ROOT_DIR/scripts/cloudbench-guest-recovery.py" \
        "$ROOT_DIR/scripts/cloudbench-prestart-recovery.py" \
        "$ROOT_DIR/scripts/cloudbench-lost-evidence-release.py" \
+       "$ROOT_DIR/scripts/cloudbench-evidence-archive.py" \
        "$ROOT_DIR/scripts/cloudbench-prestack-recovery.py" \
        "$ROOT_DIR/scripts/cloudbench-prestack-source-reviews.json" \
        "$ROOT_DIR/scripts/cloudbench-volume-migration.py" \
@@ -15901,6 +15902,52 @@ except Exception as error:
 PYBILLING
 }
 
+fleet_archive_unsealed_disposable_evidence() {  # 0 only when every owned guest is archived and stopped
+    # Default for a terminal, failed or cancelled guest whose runtime never sealed
+    # (Andy, 2026-11-14): copy its original volume evidence to the private R2 trace
+    # archive (smoke-evidence/<machine>/<ts>/, sha256 manifest, verified read-back),
+    # restore its stopped original config, and let the exact-owner reap destroy it
+    # instead of retaining a ~40 GB volume. Any failure retains the whole owner.
+    [ "${FLEET_REGISTRY_PUBLISHED:-0}" = 1 ] && fleet_current_disposable_registry "$FLEET_REGISTRY_DIR" || return 1
+    local record id volume j index pid failed=0 count=0 dir="$FLEET_DIR/_batch/evidence-archive"
+    local -a protected=() pids=()
+    [ -z "${WARM_ID:-}" ] || protected+=(--protected-machine "$WARM_ID")
+    [ -z "${SHARED_WARM_ID:-}" ] || protected+=(--protected-machine "$SHARED_WARM_ID")
+    mkdir -p "$dir" || return 1
+    for record in "$FLEET_REGISTRY_DIR"/clones/*; do
+        [ -e "$record" ] || [ -L "$record" ] || continue
+        id="$(registry_meta_value "$record" id)"
+        volume="$(registry_meta_value "$record" volume_id)"
+        index=""
+        for j in "${!CHILD_MACHINE[@]}"; do
+            [ "${CHILD_MACHINE[$j]}" != "$id" ] || index="$j"
+        done
+        if [ ! -f "$record" ] || [ -L "$record" ] || [ -z "$id" ] || [ -z "$volume" ] || [ -z "$index" ]; then
+            echo "❌❌ evidence archive: owned resource ${record##*/} is not an archivable primary guest" >&2
+            failed=1
+            break
+        fi
+        timeout --kill-after=60 1200 \
+            python3 "${CLOUDBENCH_SCRIPT_SNAPSHOT:-$ROOT_DIR/scripts}/cloudbench-evidence-archive.py" \
+            capture-destroy --capture-only --app "$APP" --machine-id "$id" --volume-id "$volume" \
+            --run-token "$FLEET_OWNER_TOKEN-$index" --receipt-dir "$dir" \
+            --env-file "$ROOT_DIR/agents/.env" "${protected[@]}" &
+        pids+=("$!")
+        count=$((count + 1))
+        # Bounded like worker evidence transfers: four guests at a time.
+        if [ "${#pids[@]}" -ge 4 ]; then
+            for pid in "${pids[@]}"; do wait "$pid" || failed=1; done
+            pids=()
+        fi
+    done
+    for pid in "${pids[@]:-}"; do
+        [ -n "$pid" ] || continue
+        wait "$pid" || failed=1
+    done
+    [ "$failed" = 0 ] && [ "$count" -gt 0 ] || return 1
+    rm -f "$FLEET_REGISTRY_DIR/runtime-evidence-unconfirmed" && cloudbench_fsync_directory "$FLEET_REGISTRY_DIR"
+}
+
 fleet_verify_staged_primary_return() {  # <machine> <volume>; before exact claim release
     local id="$1" volume="$2" index out="" attempt
     local -a refresh_args=()
@@ -16142,6 +16189,7 @@ cleanup() {
     # durable evidence latch through every crash window until all primary and
     # historical worker captures are verified, including workers scaled down
     # before the benchmark finished.
+    local keep_before_evidence="${KEEP_CLONES:-0}" teardown_before_evidence="$teardown_failed"
     if ! cloudbench_collect_remaining_runtime_evidence; then
         if fleet_current_disposable_registry "$FLEET_REGISTRY_DIR" && [ "${KEEP_CLONES:-0}" != 1 ]; then
             echo "❌ runtime evidence is incomplete; unsealed disposable resources remain retained pending evidence recovery" >&2
@@ -16154,13 +16202,27 @@ cleanup() {
         teardown_failed=1
     fi
     if fleet_current_disposable_registry "$FLEET_REGISTRY_DIR"; then
-        fleet_record_disposable_cleanup_state "$guest_shutdown_failed" "$runtime_evidence_failed" || { ec=1; teardown_failed=1; }
+        fleet_record_disposable_cleanup_state "$guest_shutdown_failed" "$runtime_evidence_failed" \
+            || { ec=1; teardown_failed=1; teardown_before_evidence=1; }
     fi
     # Finish all data-plane reads first. Evidence retention does not authorize
     # provider release; this separate helper may only stop verified idle owned
     # Machines and retains every latch, audit, claim, file and volume.
-    if ! archived_reuse_retire_all; then ec=1; teardown_failed=1; fi
+    if ! archived_reuse_retire_all; then ec=1; teardown_failed=1; teardown_before_evidence=1; fi
     fleet_billing_stop_retained_idle "$billing_owned_joins"
+    # Unsealed evidence alone no longer retains stopped guests: archive, then reap.
+    if [ "$runtime_evidence_failed" = 1 ] && [ "$keep_before_evidence" != 1 ] \
+        && [ "$teardown_before_evidence" = 0 ] && [ "$guest_shutdown_failed" = 0 ] \
+        && [ "$billing_owned_joins" = 1 ]; then
+        if fleet_archive_unsealed_disposable_evidence; then
+            echo "📦 unsealed guest evidence archived to R2 ($FLEET_DIR/_batch/evidence-archive); destroying the guests instead of retaining them"
+            runtime_evidence_failed=0
+            KEEP_CLONES=0
+            teardown_failed=0
+        else
+            echo "❌❌ evidence archive FAILED: unsealed guests stay RETAINED (stopped Machine + volume); recover with scripts/run-bench --recover-stale-owner $FLEET_OWNER_TOKEN" >&2
+        fi
+    fi
     # SIGKILL cannot run an autoscaler's EXIT trap. Release any remaining
     # complete lease records owned by this exact controller/run under the same
     # allocator lock before the snapshotted helper is removed.
