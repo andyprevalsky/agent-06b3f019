@@ -203,7 +203,7 @@ class Selection(unittest.TestCase):
         self.assertTrue(gates['smoke']['native_cloud'])
 
     def test_mac_app_static_is_a_conditional_quick_check_never_a_platform_pass(self):
-        # Original /deploy Step 4m-lint (DEPRECATED_deploy.md L1380-1388): run when mac-app/ changed.
+        # Original /deploy Step 4m-lint (the former /deploy skill): run when mac-app/ changed.
         gate = p.MAC_APP_STATIC
         self.assertEqual(['bash','-c','npm run format:check && npm run lint && npm run type-check'],gate['command'])
         self.assertEqual(('mac-app','darwin','mac-app-static'),(gate['cwd'],gate['platform'],gate['category']))

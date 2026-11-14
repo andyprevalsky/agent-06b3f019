@@ -945,15 +945,15 @@ class LaunchInstructions(unittest.TestCase):
         text = printed.getvalue()
         for needle in ("scripts/run-bench scorecard /runs/abc --html /runs/abc/scorecard.html",
                        "dvb-onbox visuals publish --file /runs/abc/scorecard.html",
-                       "hand-written cards are non-compliant", "every 10 minutes", "state change", "completion"):
+                       "hand-written cards are non-compliant", "every 15 minutes", "state change", "completion"):
             self.assertIn(needle, text)
-        self.assertNotIn("every 15 minutes", text)
+        self.assertNotIn("every 10 minutes", text)
 
-    def test_report_cadence_does_not_change_token_rate_window(self):
+    def test_report_cadence_is_fifteen_minutes_with_the_token_rate_window(self):
         result = subprocess.run([str(ROOT / "scripts/run-bench"), "report-format"], capture_output=True, text=True, timeout=10)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("every fixed 10-minute checkpoint", result.stdout)
-        self.assertNotIn("every fixed 15-minute checkpoint", result.stdout)
+        self.assertIn("every fixed 15-minute checkpoint", result.stdout)
+        self.assertNotIn("10-minute checkpoint", result.stdout)
         self.assertIn("rolling 15-minute tokens/min", result.stdout)
         self.assertIn("15-minute tokens/min", result.stdout)
 
