@@ -155,8 +155,12 @@ detail label alone is
 not its switch state. If originally Off, open the row, tap its switch once (the
 right end of the AssistiveTouch row, not the label) and return
 to Touch to confirm the explicit value is now On, then reopen the detail page.
-Open the floating AssistiveTouch menu and tap the fresh observed Control Center
-label center. Keep this native route uninterrupted: after the launch use only
+Open the floating AssistiveTouch menu: screen.text does not report that textless
+button, which normally rests against the right edge (x 625-750, y 400-1250).
+Tap that band away from observed row labels and observe; an unchanged detail
+page means it missed, so try another band point, at most three in all, then keep
+portrait lock unconfirmed and report that blocker. Once the menu opens, tap the
+fresh observed Control Center label center. Keep this native route uninterrupted: after the launch use only
 screen.text, screen.bounds, the observed taps, the AssistiveTouch typing and
 setup.verify; no other operation (including input.keys, apps.list, Home, drags,
 scrolls or presses), other apps/URLs, private/user control or attention

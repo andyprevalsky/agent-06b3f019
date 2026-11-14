@@ -1,8 +1,12 @@
-/** Fireflies adapter owning-boundary tests: real MCP SDK, mocked remote fetch only. */
+/** Fireflies adapter owning-boundary tests: real MCP SDK, mocked remote fetch only,
+ * plus an opt-in read-only production capture (FIREFLIES_CAPTURE_USER). */
+import { writeFileSync } from 'node:fs';
+import { prisma } from '../../providers/database';
+import { decryptPlaidAccessTokenOrThrow } from '../../providers/plaidCredentials';
 import * as mcp from '../../services/integrations/firefliesMcp';
 import { FakeFireflies, REDIRECT, NOW, DAY } from './fireflies-sync.blackbox.helpers';
 import { assert, equal, runSuite, type TestCase } from './google-workspace-sync.blackbox.helpers';
-import type { Fetcher } from '../../services/integrations/meetingProvider';
+import type { Fetcher, MeetingTokens } from '../../services/integrations/meetingProvider';
 const tests: TestCase[] = [];
 const test = (name: string, fn: TestCase['fn']) => tests.push({ name, fn });
 const pending = {
@@ -197,15 +201,16 @@ test('structured MCP content preserves summary schema fields and rejects incompl
     const message = init?.body ? JSON.parse(String(init.body)) : {};
     if (message.params?.name !== 'fireflies_get_transcripts') return response;
     const wire = await response.json();
-    const value = JSON.parse(wire.result.content[0].text);
-    if (omitSummary) delete value.transcripts[0].summary;
+    // Legacy nested structured shape {data: {transcripts: [...]}} stays supported.
+    const items = JSON.parse(wire.result.content[0].text).data;
+    if (omitSummary) delete items[0].summary;
     else
-      value.transcripts[0].summary = {
+      items[0].summary = {
         overview: 'Current overview',
         action_items: 'Current action',
         topics_discussed: ['Topic'],
       };
-    wire.result = { structuredContent: { data: value }, content: [] };
+    wire.result = { structuredContent: { data: { transcripts: items } }, content: [] };
     return Response.json(wire);
   };
   const session = await mcp.FirefliesSession.open(fake.accessToken, fetcher);
@@ -274,4 +279,77 @@ test('only identified unavailable transcript layers are unknown; malformed data 
     await session.close();
   }
 });
+test('live {data, warning} listing envelope parses, including an empty window', async () => {
+  // Regression: production replied {"data": [], "warning": "No meetings matched..."} and every
+  // sync failed with "Fireflies listing is not a JSON transcript array".
+  const fake = new FakeFireflies();
+  const session = await mcp.FirefliesSession.open(fake.accessToken, fake.fetcher);
+  try {
+    equal(
+      (await mcp.listMeetingsBetween(session, NOW.getTime() - 3 * DAY, NOW.getTime())).length,
+      0,
+      'empty window with a warning is an authoritative empty listing'
+    );
+    fake.add('live');
+    const [meeting] = await mcp.listMeetingsBetween(
+      session,
+      NOW.getTime() - 3 * DAY,
+      NOW.getTime()
+    );
+    equal(meeting?.id, 'live', 'data array meetings are listed');
+    assert(meeting.details.includes('ada@example.com'), 'camelCase organizerEmail retained');
+    assert(
+      ((await mcp.getMeetingNotes(session, ['live'])).get('live')?.summary ?? '').length > 0,
+      'short_summary object rendered'
+    );
+  } finally {
+    await session.close();
+  }
+});
+const captureUser = process.env.FIREFLIES_CAPTURE_USER;
+if (captureUser) {
+  test('stored Fireflies grant lists transcripts through the production MCP transport', async () => {
+    // Read-only: decrypts the stored access token, never refreshes or writes the grant.
+    const row = await prisma.userDataProviderSyncState.findUniqueOrThrow({
+      where: { userId_source: { userId: captureUser, source: 'fireflies' } },
+    });
+    const config = row.config as { encryptedTokens: string };
+    const tokens = JSON.parse(
+      decryptPlaidAccessTokenOrThrow(config.encryptedTokens)
+    ) as MeetingTokens;
+    const session = await mcp.FirefliesSession.open(tokens.accessToken);
+    try {
+      const raw = await session.call('fireflies_get_transcripts', {
+        fromDate: process.env.FIREFLIES_CAPTURE_START ?? '2026-10-01',
+        toDate: process.env.FIREFLIES_CAPTURE_END ?? '2026-11-14',
+        limit: 50,
+        skip: 0,
+        format: 'json',
+      });
+      const path = process.env.FIREFLIES_CAPTURE_PATH;
+      if (path) writeFileSync(path, JSON.stringify(raw, null, 1), { mode: 0o600 });
+      const listed = await mcp.listMeetingsBetween(
+        session,
+        Date.parse(process.env.FIREFLIES_CAPTURE_START ?? '2026-10-01'),
+        Date.parse(process.env.FIREFLIES_CAPTURE_END ?? '2026-11-14')
+      );
+      console.log(`Captured listing; parsed ${listed.length} meetings`);
+      if (listed.length > 0) {
+        const transcriptRaw = await session.call('fireflies_get_transcript', {
+          transcriptId: listed[0].id,
+        });
+        if (path)
+          writeFileSync(`${path}.transcript.json`, JSON.stringify(transcriptRaw, null, 1), {
+            mode: 0o600,
+          });
+        const text = await mcp.getTranscript(session, listed[0].id);
+        console.log(
+          `Transcript ${listed[0].id}: ${text === undefined ? 'unavailable' : (text ?? '').length} chars`
+        );
+      }
+    } finally {
+      await session.close();
+    }
+  });
+}
 void runSuite('fireflies MCP', tests);

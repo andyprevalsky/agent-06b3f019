@@ -211,6 +211,9 @@ export interface CreateAgentPayload {
   world_model_mode?: 'real' | 'simulate' | 'shadow'; // Per-agent provider/environment execution mode
   project_id?: string; // Rose Desktop: create the agent inside this project (omitted = Home)
   folder_id?: string | null; // Optional folder within the project
+  // Connected GitHub repo (gh:owner/repo, URL or project id); wins over the inherited repo.
+  // Omitted = inherit (project's / parent's repo); null = explicitly none; 404 when not connected.
+  github_repo_ref?: string | null;
 }
 
 // Sub-agent Tree Types

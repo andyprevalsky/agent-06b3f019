@@ -24,3 +24,12 @@ export async function findParentPlacement(parentAgentId: string, userId: string)
     select: { projectId: true, folderId: true },
   });
 }
+
+/** Parents' persisted repo refs (owner-scoped, one indexed query per batch). */
+export async function findParentRepoRefs(parentAgentIds: string[], userId: string) {
+  if (parentAgentIds.length === 0) return [];
+  return prisma.agent.findMany({
+    where: { id: { in: [...new Set(parentAgentIds)] }, userId },
+    select: { id: true, githubRepoRef: true, githubRepoUrl: true },
+  });
+}

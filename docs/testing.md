@@ -35,6 +35,34 @@ bash scripts/test.sh --list                        # list available repos/domain
 | Backend ESLint                   | `cd back-end && npm run lint`                                    | No                | —            |
 | Frontend ESLint                  | `cd front-end && npm run lint`                                   | No                | —            |
 
+## Per-Package Commands
+
+```bash
+cd back-end && npm run test:api                  # backend API blackbox domains (benchmarks, data, data-grep, ...)
+cd back-end && npm run test:coverage             # backend coverage, enforces back-end/.c8rc.json (:report = no threshold)
+cd front-end && npm run test                     # frontend vitest (blackbox + structural)
+cd front-end && npm run test:coverage            # enforces front-end/vitest.config.ts thresholds (:report = verbose, no threshold)
+cd agents && bash scripts/run-coverage.sh        # agents coverage, enforces fail_under (--report, --html for htmlcov/)
+cd agents && python tests/e2e/run_e2e_tests.py --basic   # E2E: spawns real agents through a running backend
+cd mac-app && npm run test                       # macOS only; also test:coverage[:report], scripts/run-blackbox-tests.sh <domain>
+source agents/venv/bin/activate && python3 scripts/run-deploy-structural-gates.py [--max-workers N]
+```
+
+`run-deploy-structural-gates.py` runs the whole deploy structural registry with a CPU-scaled default concurrency (at most 8); `--max-workers` never changes benchmark fleet width. Activate the venv first so its `bin` precedes Homebrew on `PATH`; otherwise child `python3` lacks the agent dependencies.
+
+## Running Services Directly
+
+Without `scripts/run.sh` (no ngrok or secrets): backend `cd back-end && PORT=<N> npx tsx watch src/bootstrap.ts`, frontend `cd front-end && npx vite --port <N+1>`. In dev the frontend assumes the backend is on its own port minus one (`front-end/src/lib/backendUrl.ts`) unless `VITE_BACKEND_API_URL` is non-default, matching `run.sh` (backend = base, frontend = base + 1); the backend's `ALLOWED_ORIGINS` must include the frontend origin. Export the same unique `TEMPORAL_TASK_QUEUE` for backend and worker.
+
+## Live-Account Prerequisites
+
+These fail on third-party configuration, which RCA Step 4 says to surface, not mask:
+
+- The Codex E2B backend blackbox domain and all smoke benchmarks need working OpenAI compute (a leased token or funded credits) plus OpenRouter access to the `rose-1-ultra` waterfall models.
+- `admin-health` needs Amplitude and admin-Stripe credentials; `agentcard` needs `AGENTCARD_PUBLIC_URL`.
+- The agents `benchmark` blackbox domain replays real Blue Bottle LLM judges, and full agents coverage needs the complete authoritative env plus outbound access (HTTP capture does not mock live responses).
+- On Andy's Mac, run that full suite natively when an isolated Linux container lacks these prerequisites; keep Linux runs for the cloud controller and platform-specific regressions.
+
 ## Suite Details
 
 ### Agents Blackbox (`agents/tests/blackbox/`)
@@ -53,6 +81,11 @@ then combines coverage before DEMO cache and unit checks:
 ```bash
 cd agents && bash scripts/run-coverage.sh
 ```
+
+Its runner control checks two bounded native lanes, ordered result reporting,
+cancellation drain and exited-parent descendant cleanup. The terminal-evidence
+fixtures share one 60-second deadline across two isolated pytest groups; never
+raise that limit or omit targets to hide serial waits.
 
 `AGENTS_COVERAGE_DOMAIN_TIMEOUT` sets the whole verification-domain budget in
 seconds (default 1800, positive integer). A large domain includes many individual
@@ -84,6 +117,11 @@ cd back-end && npm run test:blackbox                # all domains
 cd back-end && bash scripts/run-blackbox-tests.sh auth  # single domain
 ```
 
+The runner needs a local Postgres: it uses the workspace's
+`victoria-db-<workspace>` Docker container (start it with `docker start
+victoria-db-<workspace>`) and falls back to system PostgreSQL on Linux, always
+in its own `victoria_<workspace>` database, never the shared `victoria`.
+
 When a Fly machine hosts local backend tests, remove its production identity
 from the test child before imports: `env -u FLY_APP_NAME npm run test:coverage`.
 The dump writer intentionally disables local files whenever that variable is
@@ -112,6 +150,12 @@ cd front-end && bash scripts/run-blackbox-tests.sh              # all domains
 cd front-end && bash scripts/run-blackbox-tests.sh terminal      # single domain
 ```
 
+### Browser and Semantic Tests
+
+- Install the browser once inside the activated agents venv before browser blackbox tests: `python -m playwright install chromium`.
+- Semantic readiness checks session state and visible behavior; never add a network-idle prerequisite to the realtime app's authenticated test helper.
+- To diagnose a silent startup recurrence, set a temporary `NODE_DEBUG=esm` with all output redirected to private `.context` artifacts, and keep those diagnostics out of Git.
+
 ### Smoke Benchmarks (`agents/benchmarks/`)
 
 Rose root-agent execution has a separate 120-minute wall-clock backstop, including Polar
@@ -129,7 +173,10 @@ Long cloud fleet proofs need a continuously running controller host as well as
 cloud benchmark guests. Run the controller, status proxies, Hub, collectors and
 evidence publishers on the same persistent Linux host. Detaching a process or
 using macOS `caffeinate` does not prevent clamshell sleep from suspending local
-inventory publication and collection. Preserve that host's real checkout,
+inventory publication and collection. On a Mac, `caffeinate -is` stops idle sleep but
+closing the lid on battery still suspends the controller and local WebSockets
+while cloud tasks continue; check `pmset -g log` before treating a long
+wall-clock gap as a provider timeout. Preserve that host's real checkout,
 hostname and ownership records for exact recovery; copying a live owner's
 `.git` records to another host does not transfer recovery authority.
 Set `TZ=UTC` before detaching the controller and keep it for recovery, so legacy
@@ -163,7 +210,7 @@ concrete names and `--retry-infra 1 --concurrency 50 --strict-barrier
 published INFRA attempt may be retried without restarting healthy peers or either
 clock; retain every physical attempt in its original logical group. Genuine
 task FAIL remains valid and is not retried. Keep LIVE autoscale maximum
-15, scoped native admission, thirty-second exact-handle monitoring and grouped
+15, scoped native admission, exact-handle monitoring and grouped
 early task verdicts. Intermediate observations warn/retry; usable stage handoffs
 and the whole-run limit remain authoritative. Compare generous fixed historical
 LIVE stage targets and avoid paid deploy overlap with accepted LIVE latency.
@@ -231,11 +278,28 @@ production-only routing. `run-deploy-structural-gates.test.py` prevents those
 controls from disappearing from the automatic registry. They are also registered
 in `scripts/test.sh`; no live 50-task campaign is added to deploy by default.
 
+## Database Migrations
+
+Every `schema.prisma` change ships `back-end/prisma/migrations/<timestamp>_<name>/migration.sql`; local setup pushes the schema, so tests pass without one while prod `migrate deploy` fails (`back-end/src/tests/structural/migration-drift.test.ts` checks both directions). The authoring recipe (`migrate diff` against the local database, then `npm run prisma:push:local`) and the squashed `00000000000000_init` baseline are in `back-end/CLAUDE.md`.
+
+## Deploy Gates: Blacksmith and CI
+
+- `scripts/deploy gates` (`scripts/deploy_gates.py`) selects whole gate categories with `scripts/deploy_test_plan.py` (`--list-selected` prints them; gate names, commands and `cwd` are in its `standard_template()`). Quick checks (format, ESLint, TypeScript, backend structural) run on the coordinator.
+- With the default `--executor blacksmith`, every other selected gate gets its own Blacksmith VM sized by `BLACKSMITH_RUNNERS` (2-16 vCPU): `scripts/deploy_test_github.py` pushes an annotated `deploy-gates/<N>vcpu/<gate>-<token>` tag carrying the request, and `.github/workflows/deploy-gates.yml` checks it out from a sticky-disk git mirror, unpacks the `DEPLOY_GATE_ENV_BUNDLE` secret (re-set it when the env files change) and runs the unchanged `deploy_test_worker.py` / `deploy_test_backend.py`.
+- Results come back over R2 (`deploy-gates/v1/<tag>/started.json` and `done.json` in the trace bucket) because all of this user's tokens share one 5,000/h GitHub REST quota; never poll the REST API in a loop. A hung VM gate shows only `started.json`: cancel its Actions run, then read the job log.
+- `smoke` (including the AgentCard lifecycle tasks) runs on the Fly cloudbench fleet through `scripts/deploy_test_cloud.py`; `--executor local` runs every gate in a linked worktree on this host instead (capped by `--structural-workers` and `--semantic-worker-processes`).
+- To run one failing gate alone, run its template command in its `cwd` (e.g. `cd agents && bash scripts/run-coverage.sh` or `bash scripts/run-deploy-semantic-stack.sh`). That is repair evidence only: the staged cycle in `docs/deploy-test-cycle.md` (`focus`, then the full failed gates, then all selected gates) still has to pass. If a gate passes locally but fails on Blacksmith, diff the host first (users, `/proc` readability, git config, interpreter build).
+- Other workflows, all on Blacksmith runners: `deploy-agents.yml` deploys Fly workers for agents changes on main (also every 10 minutes and by `expected_sha` dispatch); `prebuild-agents-image.yml` prebuilds the agents image for PRs; `auto-tag-mac-app.yml` tags a Mac release when a main merge changes the shipped Mac surface and `release-mac-app.yml` builds `v*` tags on macOS; `chat-lifecycle-ratchet.yml` is the production semantic frontend gate on deployments; `claude-code-review-fallback.yml`, `deploy-fly-log-shipper.yml` and `download-egress.yml` cover review fallback, the log shipper and Mac download health.
+
 ## Adding New Tests
 
 - **Backend API endpoint:** Add `back-end/src/tests/blackbox/<domain>.blackbox.ts`
 - **Agent tool:** Add `agents/tests/blackbox/<tool-name>/test_<tool-name>.py`
 - **Frontend component:** Add `front-end/src/tests/blackbox/<domain>.blackbox.tsx`
+- Deploy-gate fixtures allow 60 seconds for startup/cleanup observations and assert actual terminal state, exact resource release and real failures; simulated review deadlines use a controlled clock so host load cannot change the scenario.
+- A native process-observation timeout is a read failure, not proof of a leak or absence: re-observe within the owning gate and require positive parent/group/state evidence before cleanup.
+- Teardown fixtures include the runner's early EXIT-trap setup and distinguish an executing child from an unreaped terminal child.
+- Correlate timing diagnostics with the measured operation (a router-stream clock excludes later database or Temporal completion); warn on inner elapsed observations and keep the outcome, ownership and end-to-end checks.
 
 **Waiting in tests: wait for the condition, never a fixed sleep.** A
 `time.sleep(0.2)`, `asyncio.sleep(0.5)` or `await sleep(100)` followed by an

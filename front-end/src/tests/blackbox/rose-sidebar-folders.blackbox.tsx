@@ -60,9 +60,9 @@ describe('one-level folders inside projects', () => {
     expect(within(group).getByText('Folder work')).toBeVisible();
     expect(within(group).queryByText('Root work')).toBeNull();
     const user = userEvent.setup();
-    fireEvent.click(within(group).getByRole('button', { name: 'Collapse folder Interface' }));
+    fireEvent.click(within(group).getByRole('button', { name: 'Collapse subfolder Interface' }));
     expect(within(group).queryByText('Folder work')).toBeNull();
-    fireEvent.click(within(group).getByRole('button', { name: 'Expand folder Interface' }));
+    fireEvent.click(within(group).getByRole('button', { name: 'Expand subfolder Interface' }));
     expect(within(group).getByText('Folder work')).toBeVisible();
     fireEvent.click(within(group).getByRole('button', { name: 'Create Super Agent in Interface' }));
     expect(create).toHaveBeenLastCalledWith(expect.objectContaining({ id: 'p-rose' }), 'f-ui');
@@ -79,20 +79,20 @@ describe('one-level folders inside projects', () => {
     const api = mockProjectsApi([makeProject({ folders: [folder] })]);
     renderBar({ agents });
     const user = userEvent.setup();
-    await user.click(await screen.findByRole('button', { name: 'New folder in Rose' }));
-    let input = screen.getByRole('textbox', { name: 'New folder name' });
+    await user.click(await screen.findByRole('button', { name: 'New subfolder in Rose' }));
+    let input = screen.getByRole('textbox', { name: 'New subfolder name' });
     await user.type(input, 'Interface{Enter}');
     expect(await screen.findByRole('alert')).toHaveTextContent(
-      'A folder with this name already exists',
+      'A subfolder with this name already exists',
     );
     await user.clear(input);
     await user.type(input, 'Research{Enter}');
     const created = await screen.findByTestId('rose-folder-f-2');
     expect(created).toHaveTextContent('No agents yet');
     expect(api.projects[0].folders).toHaveLength(2);
-    await user.click(within(created).getByRole('button', { name: 'Research folder options' }));
-    await user.click(screen.getByRole('menuitem', { name: 'Rename folder' }));
-    input = screen.getByRole('textbox', { name: 'Rename folder' });
+    await user.click(within(created).getByRole('button', { name: 'Research subfolder options' }));
+    await user.click(screen.getByRole('menuitem', { name: 'Rename subfolder' }));
+    input = screen.getByRole('textbox', { name: 'Rename subfolder' });
     await user.clear(input);
     await user.type(input, 'Discoveries{Enter}');
     await waitFor(() =>
@@ -100,14 +100,14 @@ describe('one-level folders inside projects', () => {
     );
     await user.click(
       within(screen.getByTestId('rose-folder-f-ui')).getByRole('button', {
-        name: 'Interface folder options',
+        name: 'Interface subfolder options',
       }),
     );
-    await user.click(screen.getByRole('menuitem', { name: 'Delete folder' }));
+    await user.click(screen.getByRole('menuitem', { name: 'Delete subfolder' }));
     expect(requests('DELETE', '/projects/p-rose/folders/f-ui')).toHaveLength(0);
     const dialog = screen.getByRole('dialog');
     expect(dialog).toHaveTextContent('Its agents stay in Rose');
-    await user.click(within(dialog).getByRole('button', { name: 'Delete folder' }));
+    await user.click(within(dialog).getByRole('button', { name: 'Delete subfolder' }));
     await waitFor(() => expect(screen.queryByTestId('rose-folder-f-ui')).toBeNull());
     expect(screen.getByTestId('rose-group-p-rose')).toHaveTextContent('Folder work');
     expect(screen.getByTestId('rose-group-home')).not.toHaveTextContent('Folder work');
@@ -123,13 +123,13 @@ describe('one-level folders inside projects', () => {
     );
     renderBar();
     const user = userEvent.setup();
-    await user.click(await screen.findByRole('button', { name: 'New folder in Rose' }));
-    const input = screen.getByRole('textbox', { name: 'New folder name' });
+    await user.click(await screen.findByRole('button', { name: 'New subfolder in Rose' }));
+    const input = screen.getByRole('textbox', { name: 'New subfolder name' });
     await user.type(input, 'Keep me{Enter}');
-    expect(await screen.findByRole('alert')).toHaveTextContent('Could not save folder');
+    expect(await screen.findByRole('alert')).toHaveTextContent('Could not save subfolder');
     expect(input).toHaveValue('Keep me');
     await user.keyboard('{Escape}');
-    expect(screen.queryByRole('textbox', { name: 'New folder name' })).toBeNull();
+    expect(screen.queryByRole('textbox', { name: 'New subfolder name' })).toBeNull();
   });
 
   const orderedFolders = [
@@ -144,7 +144,7 @@ describe('one-level folders inside projects', () => {
     const api = mockProjectsApi([makeProject({ folders: orderedFolders })]);
     renderBar({ agents });
     const user = userEvent.setup();
-    await user.click(await screen.findByRole('button', { name: 'Interface folder options' }));
+    await user.click(await screen.findByRole('button', { name: 'Interface subfolder options' }));
     expect(screen.getByRole('menuitem', { name: 'Move up' })).toBeDisabled();
     await user.click(screen.getByRole('menuitem', { name: 'Move down' }));
     await waitFor(() =>
@@ -154,7 +154,7 @@ describe('one-level folders inside projects', () => {
     expect(requests('PUT', '/projects/p-rose/folders/f-ui/position')[0].body).toEqual({
       beforeId: 'f-api',
     });
-    await user.click(screen.getByRole('button', { name: 'Services folder options' }));
+    await user.click(screen.getByRole('button', { name: 'Services subfolder options' }));
     expect(screen.getByRole('menuitem', { name: 'Move down' })).toBeDisabled();
     await user.click(screen.getByRole('menuitem', { name: 'Move up' }));
     await waitFor(() =>
@@ -187,7 +187,7 @@ describe('one-level folders inside projects', () => {
     );
     fireEvent.dragStart(row('f-doc'), { dataTransfer });
     fireEvent.drop(row('f-api'), { dataTransfer });
-    expect(await screen.findByRole('alert')).toHaveTextContent('Could not reorder folders');
+    expect(await screen.findByRole('alert')).toHaveTextContent('Could not reorder subfolders');
     await waitFor(() =>
       expect(folderOrder()).toEqual(['rose-folder-f-api', 'rose-folder-f-ui', 'rose-folder-f-doc']),
     );
@@ -202,25 +202,25 @@ describe('one-level folders inside projects', () => {
       ],
     });
     const user = userEvent.setup();
-    const project = await screen.findByRole('button', { name: 'Collapse Rose project' });
+    const project = await screen.findByRole('button', { name: 'Collapse Rose folder' });
     await user.click(project);
     expect(screen.getByTestId('rose-group-p-rose')).not.toBeVisible();
     expect(screen.getByTestId('rose-group-home')).toBeVisible();
-    expect(screen.getByRole('button', { name: 'Expand Rose project' })).toHaveAttribute(
+    expect(screen.getByRole('button', { name: 'Expand Rose folder' })).toHaveAttribute(
       'aria-expanded',
       'false',
     );
     collapseBar();
-    await user.click(screen.getByRole('button', { name: 'Collapse Home project' }));
+    await user.click(screen.getByRole('button', { name: 'Collapse Home' }));
     expect(screen.getByTestId('rose-group-home')).not.toBeVisible();
     expect(JSON.parse(localStorage.getItem('rose:collapsed-projects')!)).toEqual([
       'p-rose',
       'home',
     ]);
-    await user.click(screen.getByRole('button', { name: 'Expand Rose project' }));
+    await user.click(screen.getByRole('button', { name: 'Expand Rose folder' }));
     expect(screen.getByTestId('rose-group-p-rose')).toBeVisible();
     expect(screen.getByTestId('rose-group-home')).not.toBeVisible();
-    await user.click(screen.getByRole('button', { name: 'Expand Home project' }));
+    await user.click(screen.getByRole('button', { name: 'Expand Home' }));
     expect(screen.getByTestId('rose-group-home')).toBeVisible();
   });
 
@@ -233,12 +233,12 @@ describe('one-level folders inside projects', () => {
       ],
     });
     const user = userEvent.setup();
-    await user.click(await screen.findByRole('button', { name: 'Collapse Rose project' }));
+    await user.click(await screen.findByRole('button', { name: 'Collapse Rose folder' }));
     const saved = localStorage.getItem('rose:collapsed-projects');
     const search = screen.getByRole('searchbox', { name: 'Search agents' });
     await user.type(search, 'work');
-    const project = screen.getByRole('button', { name: 'Collapse Rose project' });
-    const home = screen.getByRole('button', { name: 'Collapse Home project' });
+    const project = screen.getByRole('button', { name: 'Collapse Rose folder' });
+    const home = screen.getByRole('button', { name: 'Collapse Home' });
     expect(project).toBeDisabled();
     expect(home).toBeDisabled();
     await user.click(project);
@@ -247,7 +247,7 @@ describe('one-level folders inside projects', () => {
     await user.clear(search);
     expect(screen.getByTestId('rose-group-p-rose')).not.toBeVisible();
     expect(screen.getByTestId('rose-group-home')).toBeVisible();
-    expect(screen.getByRole('button', { name: 'Expand Rose project' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Expand Rose folder' })).toBeEnabled();
   });
 
   it.each([0, 7, 42, 128, 999, 1234])(

@@ -67,9 +67,17 @@ async function handleProbeCookieVariant(req: AuthRequest, res: Response): Promis
 }
 
 async function handleRecoverChallenge(req: AuthRequest, res: Response): Promise<void> {
+  const caller = new AbortController();
+  const onClose = () => {
+    if (!res.writableFinished) caller.abort();
+  };
+  res.once('close', onClose);
+  if (res.destroyed && !res.writableFinished) caller.abort();
   try {
+    caller.signal.throwIfAborted();
     const input = recoverChallengeSchema.parse(req.body);
     const result = await recoverBrowserChallenge({
+      signal: caller.signal,
       taskId: input.task_id,
       userId: req.isInternal === true ? undefined : req.user?.id,
       currentUrl: input.current_url,
@@ -85,8 +93,10 @@ async function handleRecoverChallenge(req: AuthRequest, res: Response): Promise<
       preserveAuth: input.preserve_auth,
       blockedConfigKeys: input.blocked_config_keys,
     });
+    if (caller.signal.aborted) return;
     res.json({ success: true, ...result });
   } catch (error) {
+    if (caller.signal.aborted) return;
     if (error instanceof ZodError) {
       res.status(400).json({ error: 'Invalid recover-challenge request', issues: error.issues });
       return;
@@ -109,6 +119,8 @@ async function handleRecoverChallenge(req: AuthRequest, res: Response): Promise<
         ? { failed_config_keys: failedConfigKeys }
         : {}),
     });
+  } finally {
+    res.off('close', onClose);
   }
 }
 

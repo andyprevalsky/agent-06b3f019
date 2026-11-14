@@ -11,7 +11,7 @@ PIDS=()
 # benchmark controllers to prove they are PROTECTED from cleanup, so nothing else
 # ever reaps them. Leaked copies then masquerade as real benchmark runs under
 # `pgrep -f run-predeploy-local` — exactly the signal used to decide whether
-# someone else's fleet is live (repo rule 27). Reap descendants before the PID.
+# someone else's fleet is live (never kill another session's benchmark processes). Reap descendants before the PID.
 kill_pid_tree() {
     local pid="$1" child
     for child in $(pgrep -P "$pid" 2>/dev/null); do
@@ -686,7 +686,7 @@ echo "PASS: recorded wrappers are rechecked before they are signaled"
 
 # The protection walk must not stop before classifying PID 1. On a Fly cloudbench
 # guest the boot command IS PID 1, so it can genuinely be this script's ancestor;
-# bailing at ppid == 1 left it unprotected (CLAUDE.md rule 27). is_self_ancestor
+# bailing at ppid == 1 left it unprotected (never kill another session's benchmark processes). is_self_ancestor
 # must terminate only on an absent/zero/self parent. The kill-target walk in
 # add_pid_with_tree_and_ancestors deliberately KEEPS its ppid == 1 stop, since
 # climbing there could make PID 1 itself a target rather than merely classify it.

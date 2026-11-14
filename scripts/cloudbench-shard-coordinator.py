@@ -195,6 +195,8 @@ def adoptable(record, shards):
     need(type(record.get('scheduled_total')) is int and record['scheduled_total'] > 0
          and record.get('infra_early_stop') in ('enabled', 'disabled'),
          'original scheduled total and early-stop policy required')
+    need(type(record.get('prior_infra', 0)) is int and record.get('prior_infra', 0) >= 0,
+         'invalid prior infra count')
     need(record.get('released_at') is not None or record.get('aborted_at') is not None,
          'adoption covers a run after its global barrier decision; abort an undecided barrier instead')
     need(sorted(record.get('shards') or {}) == sorted(str(s['index']) for s in shards)
@@ -232,6 +234,7 @@ def adopt_coordinate(shards, spawn, journal, *, stop_reason=None, poll_seconds=1
         os.close(lock)
         raise ValueError('another adopting coordinator owns this run')
     total, policy, release_id = record['scheduled_total'], record['infra_early_stop'], record['release_id']
+    prior_infra = record.get('prior_infra', 0)
     if record.get('released_at') is not None:
         decision = ('global-release.json', dict(release_id=release_id, reason='all %d shards ready' % len(shards)))
     else:
@@ -277,9 +280,9 @@ def adopt_coordinate(shards, spawn, journal, *, stop_reason=None, poll_seconds=1
             for shard in shards:
                 if not (Path(shard['out']) / decision[0]).exists():
                     write_once(Path(shard['out']) / decision[0], decision[1])
-            if record['terminated_at'] is None and policy == 'enabled' and 20 * infra >= total:
+            if record['terminated_at'] is None and policy == 'enabled' and infra_stop_reached(infra + prior_infra, total):
                 record.update(terminated_at=clock(), terminate_cause='threshold',
-                              terminate_reason='infra %d/%d reached the 5%% threshold' % (infra, total))
+                              terminate_reason='infra %d/%d reached the 5%% threshold' % (infra + prior_infra, total))
                 save(journal, record)
             if terminate_cause(record) in REPLAYED_STOP_CAUSES:
                 for shard in shards:
@@ -338,8 +341,11 @@ def full_cohort_ready(barrier, expected=None):
 
 def coordinate(shards, spawn, journal, *, scheduled_total, infra_early_stop='enabled',
                poll_seconds=1.0, clock=time.time, sleep=time.sleep, respawn=None,
-               stagger_seconds=0.0, max_attempts=MAX_SHARD_ATTEMPTS, startup_deadline=None):
+               stagger_seconds=0.0, max_attempts=MAX_SHARD_ATTEMPTS, prior_infra=0, startup_deadline=None):
     """Run K runners to completion under one global barrier. Returns the coordination record.
+
+    scheduled_total is the original scheduled denominator; a bounded wave of a larger run passes
+    that run's total and the confirmed infra jobs of its earlier waves as prior_infra.
 
     shards: [{'index': i, 'out': Path}], spawn(shard) -> Popen-like (poll/wait/send_signal/pid).
     respawn(shard) -> (shard, Popen-like): a fresh attempt for a shard whose runner ended
@@ -348,6 +354,9 @@ def coordinate(shards, spawn, journal, *, scheduled_total, infra_early_stop='ena
     """
     journal = Path(journal)
     need(scheduled_total > 0 and shards, 'scheduled shards required')
+    need(type(prior_infra) is int and prior_infra >= 0, 'invalid prior infra count')
+    need(infra_early_stop != 'enabled' or not infra_stop_reached(prior_infra, scheduled_total),
+         'earlier waves already reached the 5%% infra threshold (%d/%d); launch nothing' % (prior_infra, scheduled_total))
     release_id = secrets.token_hex(12)
     stop = [None]
     previous = {s: signal.getsignal(s) for s in (signal.SIGTERM, signal.SIGINT)}
@@ -361,6 +370,8 @@ def coordinate(shards, spawn, journal, *, scheduled_total, infra_early_stop='ena
                   scheduled_total=scheduled_total, infra_early_stop=infra_early_stop, started_at=clock(),
                   released_at=None, aborted_at=None, abort_reason=None, terminated_at=None,
                   terminate_reason=None, shards={}, coordinator=dict(pid=os.getpid(), birth=process_birth(os.getpid())))
+    if prior_infra:
+        record['prior_infra'] = prior_infra
     runners, attempts = {}, {}
     record['retries'] = []
     try:
@@ -427,10 +438,10 @@ def coordinate(shards, spawn, journal, *, scheduled_total, infra_early_stop='ena
                     target = Path(shard['out'])
                     if target.is_dir() and not (target / decision[0]).exists():
                         write_once(target / decision[0], decision[1])
-            threshold = infra_early_stop == 'enabled' and infra_stop_reached(infra, scheduled_total)
+            threshold = infra_early_stop == 'enabled' and infra_stop_reached(infra + prior_infra, scheduled_total)
             if record['terminated_at'] is None and (stop[0] or threshold or (decided == 'abort' and (startup_expired or invalid_ready))):
                 record.update(terminated_at=clock(), terminate_cause='signal' if stop[0] else 'startup_budget' if decided == 'abort' and startup_expired else 'cohort_incomplete' if invalid_ready else 'threshold', terminate_reason=(
-                    'operator ' + stop[0] if stop[0] else 'startup budget exhausted before global release' if decided == 'abort' and startup_expired else 'incomplete shard readiness: %s' % invalid_ready if invalid_ready else 'infra %d/%d reached the 5%% threshold' % (infra, scheduled_total)))
+                    'operator ' + stop[0] if stop[0] else 'startup budget exhausted before global release' if decided == 'abort' and startup_expired else 'incomplete shard readiness: %s' % invalid_ready if invalid_ready else 'infra %d/%d reached the 5%% threshold' % (infra + prior_infra, scheduled_total)))
                 for process in runners.values():
                     if process.poll() is None:
                         process.send_signal(signal.SIGTERM)  # runner forwards TERM to its own supervisor only
