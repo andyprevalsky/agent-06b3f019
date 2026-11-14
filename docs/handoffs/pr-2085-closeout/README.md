@@ -17,7 +17,9 @@ pending subcall and production disconnect delivery were not recorded.
 Verification qualifications remain explicit:
 
 - The final native cycle satisfied17 selected gates. Actual smoke was10 PASS
-  and1 existing QUARANTINED_FAIL, with every guest released. The historical
+  and1 existing QUARANTINED_FAIL, with every guest released. Across the full gate report,12 quarantined checks
+  retained2 nonblocking failures and10 passes; macOS coverage was platform omitted
+  on Linux. The historical
   abandonment case was NO_RETRY_CUSTODY/SKIP and grants no execution, financial
   settlement or stability credit.
 - CodeRabbit organization spending cap prevented review; PR2085 was merged
