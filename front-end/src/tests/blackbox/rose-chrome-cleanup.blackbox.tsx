@@ -470,7 +470,7 @@ describe('Rose Desktop stacking order and composer continuity (UI review 1/13/14
     const user = userEvent.setup({ delay: null });
     await renderTerminal(true);
     expandBar();
-    await user.click(await screen.findByRole('button', { name: 'Rose project settings' }));
+    await user.click(await screen.findByRole('button', { name: 'Rose folder settings' }));
     const panel = screen.getByTestId('rose-project-settings');
     const composer = screen.getByTestId('query-input-layer');
     expect(rootLayerZ(composer)).toBe(100);
@@ -549,7 +549,7 @@ describe('Rose Desktop stacking order and composer continuity (UI review 1/13/14
     const user = userEvent.setup({ delay: null });
     await renderTerminal(true);
     expandBar();
-    await user.click(await screen.findByRole('button', { name: 'Rose project settings' }));
+    await user.click(await screen.findByRole('button', { name: 'Rose folder settings' }));
     const settings = screen.getByTestId('rose-project-settings');
     // Read before Browser opens: the open Browser docks the composer in its own pane.
     const composer = rootLayerZ(screen.getByTestId('query-input-layer'));
@@ -571,7 +571,7 @@ describe('Rose Desktop stacking order and composer continuity (UI review 1/13/14
     setViewport(800, 800);
     await renderTerminal(true);
     expandBar();
-    await user.click(await screen.findByRole('button', { name: 'Rose project settings' }));
+    await user.click(await screen.findByRole('button', { name: 'Rose folder settings' }));
     const settings = screen.getByTestId('rose-project-settings');
     // RoseAppsProvider publishes the icon row's width; the drawer subtracts it.
     expect(document.documentElement.style.getPropertyValue('--rose-app-icons-inset')).toMatch(

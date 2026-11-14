@@ -50,6 +50,56 @@ export async function classifyReportedLogin(
   return classifyLoginRejection(stored, heldFingerprint);
 }
 
+/** Resolved user logins by `${type}:${userId}:${fingerprint}`; bounded, short-lived. */
+const loginByCredential = new Map<string, { id: string; at: number }>();
+const LOGIN_BY_CREDENTIAL_MAX = 10_000;
+const LOGIN_BY_CREDENTIAL_TTL_MS = 10 * 60_000;
+/** A user never holds more logins of one kind than this (connect flow cap is far lower). */
+const USER_LOGIN_SCAN_LIMIT = 50;
+
+/**
+ * The user's own CONNECTED login of `tokenType` whose stored token has this
+ * fingerprint, or null. Names the account a usage heartbeat came from when the
+ * agent's lease carried no integration id; it can only ever pick one of that
+ * user's rows. 10k agents: a hit is a map read; a miss reads and decrypts at
+ * most the user's own logins, at most once per token per TTL.
+ */
+export async function resolveUserLoginByCredential(
+  tokenType: string,
+  userId: string,
+  credential: string
+): Promise<string | null> {
+  if (tokenType !== 'claude' && tokenType !== 'gpt') return null;
+  const key = `${tokenType}:${userId}:${credential}`;
+  const cached = loginByCredential.get(key);
+  if (cached !== undefined && Date.now() - cached.at <= LOGIN_BY_CREDENTIAL_TTL_MS) {
+    return cached.id;
+  }
+  const rows = await prisma.integration.findMany({
+    where: {
+      userId,
+      name: tokenType === 'claude' ? 'claude_code' : 'gpt_code',
+      status: 'CONNECTED',
+    },
+    select: { id: true },
+    take: USER_LOGIN_SCAN_LIMIT,
+  });
+  for (const row of rows) {
+    const stored =
+      tokenType === 'claude' ? await storedClaudeLogin(row.id) : await storedCodexLogin(row.id);
+    if (stored && credentialFingerprint(stored.accessToken) === credential) {
+      loginByCredential.delete(key);
+      loginByCredential.set(key, { id: row.id, at: Date.now() });
+      if (loginByCredential.size > LOGIN_BY_CREDENTIAL_MAX) {
+        const oldest = loginByCredential.keys().next().value;
+        if (oldest !== undefined) loginByCredential.delete(oldest);
+      }
+      return row.id;
+    }
+  }
+  return null;
+}
+
 /**
  * Back a compute token off after a failure.
  *

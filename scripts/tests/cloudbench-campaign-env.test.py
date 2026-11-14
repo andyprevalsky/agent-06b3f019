@@ -259,7 +259,8 @@ PY
             [
                 "bash",
                 "-c",
-                "APP=fixture; FLY() { echo native-read-fixture >&2; return 9; }; "
+                'APP=fixture; _with_timeout() { shift; "$@"; }; '
+                "flyctl() { echo native-read-fixture >&2; return 9; }; "
                 + body
                 + "\nverify_app_environment",
             ],

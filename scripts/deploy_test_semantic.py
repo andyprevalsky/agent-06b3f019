@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """One native semantic-stack sweep, exact per-Playwright-case evidence. No aggregate credit."""
 import argparse
+from datetime import datetime
 import hashlib
 import json
 import math
 import os
+import re
 from pathlib import Path
 import subprocess
 import sys
@@ -57,8 +59,13 @@ def specs(suites):
         yield from specs(suite.get('suites', []))
 
 
-def classify_lane(lane, expected, report, events):
-    """Classify complete native attempt chains; uncertain evidence stays unknown."""
+def classify_lane(lane, expected, report, events, retried=None):
+    """Classify complete native attempt chains; uncertain evidence stays unknown.
+
+    A structurally complete retried pass stays UNVERIFIED here; its id is
+    appended to ``retried`` so native_flaky can corroborate it from the
+    original failure evidence before it is credited.
+    """
     cases = {case_key(lane, row): 'UNVERIFIED' for row in expected}
     # Validate nested envelopes before the classification catch so the lane owns diagnostics.
     rows = list(specs(report.get('suites', []))) if isinstance(report, dict) else []
@@ -126,12 +133,44 @@ def classify_lane(lane, expected, report, events):
             # A retried pass needs the existing FLAKY attribution channel.
             # Keep it unknown until that channel is positively corroborated.
             if len(results) > 1 and results[-1]['status'] == 'passed':
+                if retried is not None:
+                    retried.append(item['id'])
                 continue
             cases[case_key(lane, item)] = {'passed': 'PASS', 'failed': 'FAIL',
                                          'timedOut': 'FAIL'}[results[-1]['status']]
-    except (KeyError, TypeError, ValueError):
+    except (AttributeError, KeyError, TypeError, ValueError):
+        if retried is not None:
+            retried.clear()
         return dict.fromkeys(cases, 'UNVERIFIED')
     return cases
+
+
+def native_flaky(lane, expected, report, retried):
+    """FLAKY receipts for classify_lane's complete retried passes.
+
+    Final native evidence, independent of best-effort live progress delivery;
+    a retried pass without its original failure evidence raises.
+    """
+    from deploy_gate_progress import row
+    rows = {item['id']: item for item in specs(report['suites'])}
+    outcomes = []
+    for item in expected:
+        if item['id'] not in retried:
+            continue
+        results = rows[item['id']]['tests'][0]['results']
+        config = report['config']
+        file = (Path(config['rootDir']) / item['file']).relative_to(Path(config['configFile']).parent)
+        unit = file.as_posix() + ' > ' + ' > '.join(item['title'][1:])
+        detail = '\n'.join(error.get('message') or error.get('value') or ''
+                           for error in results[0].get('errors', []))
+        detail = re.sub(r'\x1b\[[0-?]*[ -/]*[@-~]', '', detail)
+        finished = datetime.fromisoformat(results[-1]['startTime'].replace('Z', '+00:00')).timestamp()
+        finished += results[-1]['duration'] / 1000
+        if not detail or not math.isfinite(finished):
+            raise ValueError('retried pass lacks original failure evidence')
+        outcomes.append(row(unit, 'FLAKY', case='semantic-stack', scope='test', detail=detail,
+                            attempts=len(results), at=finished))
+    return outcomes
 
 
 def events_at(path):
@@ -235,7 +274,7 @@ def _execute(request, root):
     started = time.time()
     with (directory / 'runner.log').open('wb') as log:
         code, timeout, cancelled, lingering = run_command(RUNNER, cwd=root, env=env, output=log, timeout=budget)
-    cases, errors, lane_ends = {}, [], {}
+    cases, errors, lane_ends, flakes = {}, [], {}, []
     hashes = {}
     for lane in LANES:
         try:
@@ -245,9 +284,17 @@ def _execute(request, root):
             events = events_at(paths[1])
             if any(not isinstance(event, dict) for event in events):
                 raise ValueError('native lifecycle events must be JSON objects')
-            cases.update(classify_lane(lane, selected[lane], read(paths[0]), events))
+            report = read(paths[0])
+            retried = []
+            lane_cases = classify_lane(lane, selected[lane], report, events, retried)
+            lane_flakes = native_flaky(lane, selected[lane], report, retried)
+            for item in selected[lane]:
+                if item['id'] in retried:
+                    lane_cases[case_key(lane, item)] = 'PASS'
+            flakes.extend(lane_flakes)
+            cases.update(lane_cases)
             lane_ends[lane] = events[-1].get('status') if events and events[-1].get('event') == 'end' else None
-        except (OSError, ValueError, TypeError) as error:
+        except (OSError, ValueError, TypeError, KeyError) as error:
             errors.append(lane + ': ' + type(error).__name__)
             cases.update(dict.fromkeys([case_key(lane, row) for row in selected[lane]], 'UNVERIFIED'))
     cleaned = False
@@ -282,7 +329,8 @@ def _execute(request, root):
     evidence = {'artifacts': hashes, 'artifact_directory': str(directory),
                 'artifact_paths': {name: str(directory / name) for name in hashes},
                 'stack': lifecycle, 'errors': errors, 'inventory': selected,
-                'native_cases': native_cases, 'reported_native_cases': reported_native_cases}
+                'native_cases': native_cases, 'reported_native_cases': reported_native_cases,
+                'native_flaky': flakes}
     result = {key: request[key] for key in ('token', 'source', 'gate')}
     result.update(cases=cases, complete=cases['semantic-stack'] != 'UNVERIFIED',
                   cleanup_complete=cleaned and not lingering, reused=False, native_exit=code,

@@ -128,6 +128,12 @@ def _terminal_report_card(result: dict, fleet_dir: Path) -> dict:
                     if "fast_mode_cache_enabled" in task
                     else None
                 ),
+                # Preserve measured provider cache inputs separately from the legacy
+                # cache_hit_pct ratio and the provider-speed Fast Mode button.
+                **{key: task[key] for key in (
+                    "prompt_cache_read_input_tokens", "prompt_cache_creation_input_tokens",
+                    "prompt_cache_uncached_input_tokens",
+                ) if key in task},
                 "infra_usd": round(infra_usd, 4) if infra_usd is not None else None,
             }
         )

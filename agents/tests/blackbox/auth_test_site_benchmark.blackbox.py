@@ -238,7 +238,14 @@ def test_daily_catalog_covers_every_hosted_auth_branch_with_natural_prompts() ->
         "browser-auth-session-expires-at-checkout",
     ):
         lifecycle = get_task_by_name(name).expected_payment_lifecycle
-        assert lifecycle["integrity"] == {"purchaseCount": 1, "walletFundingCount": 1, "cardCount": 1}, name
+        assert lifecycle["integrity"] == {
+            "purchaseCount": 1,
+            "walletFundingCount": 1,
+            "cardCount": 1,
+            "agentCardProviderCardCount": 1,
+            "agentCardProviderTransferCount": 1,
+            "agentCardProviderUnlinkedTransferCount": 0,
+        }, name
         assert get_task_by_name(name).expected_approval_count == 1, name
 
     # A purchase bench left out of the runner's payment-task lists gets no payment

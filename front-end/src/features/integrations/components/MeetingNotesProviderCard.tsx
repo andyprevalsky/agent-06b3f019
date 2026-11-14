@@ -17,6 +17,7 @@ import { meetingNotesDetail } from '../hooks/meetingNotesView';
 import ConnectedAccountChip from './ConnectedAccountChip';
 import type { useMeetingNotes } from '../hooks/useMeetingNotes';
 import { meetingNotesProviders } from '../config';
+import firefliesLogo from '@/assets/fireflies-logo.svg';
 import type { MeetingNotesProvider } from '../types';
 
 interface MeetingNotesProviderCardProps {
@@ -112,16 +113,6 @@ export default function MeetingNotesProviderCard({
 /** Stateless provider glyphs. */
 export function MeetingNotesIcon({ provider }: { provider: MeetingNotesProvider }) {
   if (provider === 'granola') return <GranolaIcon />;
-  return (
-    <svg viewBox="0 0 24 24" className="h-full w-full" aria-hidden="true">
-      <rect width="24" height="24" rx="6" fill="#6639BA" />
-      <path
-        d="M8 17V7h9M8 12h7"
-        stroke="white"
-        strokeWidth="2.5"
-        strokeLinecap="round"
-        fill="none"
-      />
-    </svg>
-  );
+  // Official Fireflies mark (fireflies.ai brand asset).
+  return <img src={firefliesLogo} alt="" aria-hidden="true" className="h-full w-full" />;
 }

@@ -67,6 +67,9 @@ async def cached_browser_decision(
     exact-match ``demo_cache:on`` bench trees (mass-agent OAi demo) so warm paths
     stay ~$0 instead of live browser-use.
     """
+    from .context import owned_recording_namespace
+
+    enabled = enabled and owned_recording_namespace() is None
     if not goal or not (enabled or write_enabled):
         return await call_llm()
 

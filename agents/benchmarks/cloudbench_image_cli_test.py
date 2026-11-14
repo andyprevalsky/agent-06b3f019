@@ -22,6 +22,17 @@ BASH = shutil.which("bash")
 PUBLISHER_LIB = ROOT / "scripts/lib/cloudbench-image-publisher.sh"
 
 
+def _image_dependency_inputs(context):
+    # The real receipt producer now fingerprints actual selected manifests.
+    for relative in ('package.json', 'back-end/package.json', 'front-end/package.json'):
+        path = context / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('{}\n')
+    (context / 'back-end/package-lock.json').write_text(json.dumps({'lockfileVersion': 3, 'packages': {'': {'name': 'fixture'}}}) + '\n')
+    (context / 'agents').mkdir(exist_ok=True)
+    (context / 'agents/requirements.txt').write_text('fixture-requirements\n')
+
+
 @contextmanager
 def _manifest_registry(response):
     requests = []
@@ -409,8 +420,9 @@ def test_cold_image_registry_main_keeps_repeated_output_observations_private(tmp
 @pytest.mark.parametrize("receipt_state", ["unavailable", "missing", "false", "malformed", "wrong-tag"])
 def test_cold_image_unavailable_handoff_stops_the_normal_build_retry(tmp_path, receipt_state):
     source = (ROOT / "scripts/run-bench-cloud").read_text()
-    start = source.index("build_warm_image() {")
-    end = source.index("\n}\n", start) + 3
+    start = source.index("IMAGE_GIT_SEED_NAME=")
+    build_start = source.index("build_warm_image() {")
+    end = source.index("\n}\n", build_start) + 3
     calls = tmp_path / "builds"
     verifier = tmp_path / "verify.py"
     verifier.write_text(
@@ -808,6 +820,7 @@ def test_cold_image_build_skips_repository_auth_export(tmp_path, mode):
     registry = root / "agents/providers/rose/pools.py"
     registry.parent.mkdir(parents=True)
     shutil.copyfile(ROOT / "agents/providers/rose/pools.py", registry)
+    _image_dependency_inputs(root)
     (root / "Dockerfile.cloudbench-warm").write_text("FROM fixture-source\n")
     (root / "fly.cloudbench-warm.toml").write_text('app = "fixture-source"\n')
     binaries = tmp_path / "bin"
@@ -843,11 +856,13 @@ def test_cold_image_build_skips_repository_auth_export(tmp_path, mode):
 @pytest.mark.parametrize("builder", [None, "depot"])
 def test_cold_image_build_keeps_provider_cache_bypass_and_context(tmp_path, builder):
     source = (ROOT / "scripts/run-bench-cloud").read_text()
-    start = source.index("build_warm_image() {")
-    end = source.index("\n}\n", start) + 3
+    start = source.index("IMAGE_GIT_SEED_NAME=")
+    build_start = source.index("build_warm_image() {")
+    end = source.index("\n}\n", build_start) + 3
     helper = source[start:end]
     context = tmp_path / "selected checkout"
     context.mkdir()
+    _image_dependency_inputs(context)
     (context / "fly.cloudbench-warm.toml").write_text('app = "fixture-selected-checkout"\n')
     (context / "Dockerfile.cloudbench-warm").write_text("FROM fixture-selected-checkout\n")
     observed = tmp_path / "arguments.json"
@@ -894,12 +909,14 @@ def test_cold_image_build_keeps_provider_cache_bypass_and_context(tmp_path, buil
 
 
 @pytest.mark.parametrize("builder", [None, "depot"])
-def test_cold_image_receipt_records_selected_inputs_before_provider_build(tmp_path, builder):
+@pytest.mark.parametrize("change_dependencies", [False, True])
+def test_cold_image_receipt_records_selected_inputs_before_provider_build(tmp_path, builder, change_dependencies):
     source = (ROOT / "scripts/run-bench-cloud").read_text()
-    start = source.index("build_warm_image() {")
+    start = source.index("IMAGE_GIT_SEED_NAME=")
     end = source.index("# MODE: --setup", start)
     context = tmp_path / "selected checkout"
     context.mkdir()
+    _image_dependency_inputs(context)
     files = {
         "Dockerfile.cloudbench-warm": "FROM fixture-selected-checkout\n",
         "fly.cloudbench-warm.toml": 'app = "fixture-selected-checkout"\n',
@@ -920,6 +937,8 @@ def test_cold_image_receipt_records_selected_inputs_before_provider_build(tmp_pa
         "from pathlib import Path\n"
         "context=Path(sys.argv[1])\n"
         "(context/'Dockerfile.cloudbench-warm').write_text('changed after provider launch\\n')\n"
+        + ("(context/'back-end/package.json').write_text('{\"dependencies\":{\"fixture\":\"2.0\"}}')\n" if change_dependencies else "")
+        +
         "subprocess.run(['git','-C',str(context),'-c','user.name=Fixture','-c',"
         "'user.email=fixture@example.invalid','commit','-qm','provider started'],check=True,capture_output=True)\n"
     )
@@ -927,6 +946,7 @@ def test_cold_image_receipt_records_selected_inputs_before_provider_build(tmp_pa
     output.mkdir()
     harness = tmp_path / "build.sh"
     harness.write_text(
+        f"source {shlex.quote(str(ROOT / 'scripts/lib/cloudbench-env.sh'))}\n"
         "set -e\nAPP=owned-benchmark-app\nMODE=build-image\n"
         f"ROOT_DIR={shlex.quote(str(ROOT))}\n"
         f"IMAGE_BUILD_CONTEXT={shlex.quote(str(context))}\n"
@@ -945,8 +965,15 @@ def test_cold_image_receipt_records_selected_inputs_before_provider_build(tmp_pa
         text=True,
         timeout=30,
     )
+    if change_dependencies:
+        assert result.returncode != 0
+        assert "Dependency inputs changed during image build" in result.stderr
+        assert not (output / "cloudbench-image-build.json").exists()
+        return
     assert result.returncode == 0, result.stderr
     receipt = json.loads((output / "cloudbench-image-build.json").read_text())
+    assert len(receipt["node_dependency_fingerprint"]) == 64
+    assert len(receipt["python_dependency_fingerprint"]) == 64
     assert receipt["source_sha"] == before
     assert receipt["source_dirty"] is True
     assert receipt["build_context"] == str(context)
@@ -986,10 +1013,11 @@ def test_cold_image_published_tag_completion_prevents_only_proven_rebuild(
     tmp_path, scenario, builder, successful, resolve_calls
 ):
     source = (ROOT / "scripts/run-bench-cloud").read_text()
-    start = source.index("build_warm_image() {")
+    start = source.index("IMAGE_GIT_SEED_NAME=")
     end = source.index("# MODE: --setup", start)
     context = tmp_path / "selected checkout"
     context.mkdir()
+    _image_dependency_inputs(context)
     (context / "Dockerfile.cloudbench-warm").write_text("FROM fixture\n")
     (context / "fly.cloudbench-warm.toml").write_text('app = "fixture"\n')
     output = tmp_path / "receipt"
@@ -1015,6 +1043,7 @@ def test_cold_image_published_tag_completion_prevents_only_proven_rebuild(
     publisher.chmod(0o700)
     harness = tmp_path / "build.sh"
     harness.write_text(
+        f"source {shlex.quote(str(ROOT / 'scripts/lib/cloudbench-env.sh'))}\n"
         "set -e\nAPP=owned-benchmark-app\nMODE=build-image\n"
         f"ROOT_DIR={shlex.quote(str(ROOT))}\n"
         f"IMAGE_BUILD_CONTEXT={shlex.quote(str(context))}\n"
@@ -1148,10 +1177,11 @@ def test_cold_image_stalled_publisher_attempt_retries_under_its_own_tag(tmp_path
     the registry still returned attempt 1's manifest, so the handoff failed with 74.
     """
     source = (ROOT / "scripts/run-bench-cloud").read_text()
-    start = source.index("build_warm_image() {")
+    start = source.index("IMAGE_GIT_SEED_NAME=")
     end = source.index("# MODE: --setup", start)
     context = tmp_path / "selected checkout"
     context.mkdir()
+    _image_dependency_inputs(context)
     (context / "Dockerfile.cloudbench-warm").write_text("FROM fixture\n")
     (context / "fly.cloudbench-warm.toml").write_text('app = "fixture"\n')
     output = tmp_path / "receipt"
@@ -1185,7 +1215,8 @@ def test_cold_image_stalled_publisher_attempt_retries_under_its_own_tag(tmp_path
     with _manifest_registry(response) as (origin, _requests):
         harness = tmp_path / "build.sh"
         harness.write_text(
-            "set -e\nAPP=owned-benchmark-app\nMODE=build-image\n"
+            f"source {shlex.quote(str(ROOT / 'scripts/lib/cloudbench-env.sh'))}\n"
+        "set -e\nAPP=owned-benchmark-app\nMODE=build-image\n"
             f"ROOT_DIR={shlex.quote(str(ROOT))}\n"
             f"IMAGE_BUILD_CONTEXT={shlex.quote(str(context))}\n"
             f"OUT_DIR={shlex.quote(str(output))}\nIMAGE_BUILD_NO_CACHE=1\nWARM_IMAGE_REF=''\n"
@@ -1254,3 +1285,118 @@ def test_cold_image_stalled_publisher_attempt_retries_under_its_own_tag(tmp_path
         assert first_log.read_text().rstrip().endswith("ending this attempt for the normal retry.")
     for private in output.glob("*.private.log"):
         assert private.stat().st_mode & 0o777 == 0o600
+
+
+_TERMINAL_PROGRESS_PUBLISHER = r'''
+import json, os, signal, subprocess, sys, time
+from pathlib import Path
+
+state = Path(os.environ["IMAGE_TEST_STATE"])
+scenario = os.environ["IMAGE_TEST_SCENARIO"]
+metadata = {
+    "pid": os.getpid(), "stderr_tty": os.isatty(2), "stdout_tty": os.isatty(1),
+    "stdin_tty": os.isatty(0), "stdin_closed": sys.stdin.buffer.read(1) == b"",
+}
+if scenario in ("silent", "cancel"):
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(3600)"])
+    metadata["descendant_pid"] = child.pid
+(state / "invocation.json").write_text(json.dumps(metadata))
+if metadata["stdin_tty"] or metadata["stdout_tty"] or not metadata["stdin_closed"]:
+    raise SystemExit(92)
+print("fixture-layer: Preparing", file=sys.stderr, flush=True)
+if scenario in ("silent", "cancel"):
+    time.sleep(3600)
+if scenario == "exit":
+    raise SystemExit(37)
+if scenario == "signal":
+    os.kill(os.getpid(), signal.SIGTERM)
+for current in range(1, 17):
+    # The fixture's independent event sink proves actual transfer events continue
+    # even when Docker v28.5.2's nonterminal renderer suppresses progressDetail.
+    with (state / "actual-progress.jsonl").open("a") as output:
+        output.write(json.dumps({"id": "fixture-layer", "current": current, "total": 16}) + "\n")
+    if os.isatty(2) or os.environ["IMAGE_TEST_BUILDER"] == "depot":
+        print(f"fixture-layer: Pushing {current}/16", file=sys.stderr, flush=True)
+    time.sleep(0.3)
+print("fixture-layer: Pushed", file=sys.stderr, flush=True)
+'''
+
+
+def _terminal_progress_harness(tmp_path, builder, scenario):
+    state = tmp_path / "state"
+    state.mkdir()
+    publisher = tmp_path / "publisher.py"
+    publisher.write_text(f"#!{sys.executable}\n" + _TERMINAL_PROGRESS_PUBLISHER)
+    publisher.chmod(0o700)
+    log = tmp_path / "publisher.private.log"
+    log.touch(mode=0o600)
+    harness = tmp_path / "publish.sh"
+    harness.write_text(
+        f"source {shlex.quote(str(ROOT / 'scripts/lib/cloudbench-env.sh'))}\n"
+        f"source {shlex.quote(str(PUBLISHER_LIB))}\n"
+        f"IMAGE_BUILD_BUILDER={builder}\n"
+        f"cloudbench_image_publish_watched {shlex.quote(str(log))} {shlex.quote(str(publisher))} &\n"
+        "owner=$!\n"
+        "trap 'cloudbench_terminate_tree_and_wait 3 \"$owner\"; exit 143' TERM\n"
+        'wait "$owner"\n'
+    )
+    process = subprocess.Popen(
+        [BASH, str(harness)],
+        env={**os.environ, "IMAGE_TEST_STATE": str(state), "IMAGE_TEST_SCENARIO": scenario,
+             "IMAGE_TEST_BUILDER": builder, "CLOUDBENCH_IMAGE_PUBLISH_IDLE_SECONDS": "2"},
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True,
+    )
+    return process, state, log
+
+
+def _assert_terminal_fixture_pid(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return
+    status = subprocess.run(
+        ["ps", "-p", str(pid), "-o", "stat="], capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    assert not status or status.startswith("Z"), f"fixture-owned process survived: {pid} {status}"
+
+
+@pytest.mark.parametrize("builder", ["native", "depot"])
+def test_cold_image_native_terminal_progress_reaches_actual_watchdog(tmp_path, builder):
+    process, state, log = _terminal_progress_harness(tmp_path, builder, "progress")
+    stdout, stderr = process.communicate(timeout=30)
+    events = [json.loads(line) for line in (state / "actual-progress.jsonl").read_text().splitlines()]
+    assert len(events) >= 3, "Fixture must actually make progress before any timeout"
+    assert process.returncode == 0, stdout + stderr
+    assert [event["current"] for event in events] == list(range(1, 17))
+    assert "Pushing 1/16" in log.read_text() and "Pushing 16/16" in log.read_text()
+    assert "no output" not in stderr
+    invocation = json.loads((state / "invocation.json").read_text())
+    assert invocation["stderr_tty"] is (builder == "native")
+    assert invocation["stdout_tty"] is False and invocation["stdin_tty"] is False
+    assert invocation["stdin_closed"] is True
+    _assert_terminal_fixture_pid(invocation["pid"])
+
+
+@pytest.mark.parametrize("scenario,expected", [("silent", 124), ("exit", 37), ("signal", 143), ("cancel", 143)])
+def test_cold_image_native_terminal_progress_preserves_failure_and_cleanup(tmp_path, scenario, expected):
+    process, state, log = _terminal_progress_harness(tmp_path, "native", scenario)
+    if scenario == "cancel":
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "condition_wait", Path(__file__).resolve().parents[2] / "scripts" / "lib" / "condition_wait.py")
+        condition_wait = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(condition_wait)
+        # Cancel only after the actual publisher starts.
+        condition_wait.wait_until(lambda: (state / "invocation.json").exists(), timeout=10,
+                                  description="publisher fixture started")
+        process.terminate()
+    stdout, stderr = process.communicate(timeout=45)
+    assert process.returncode == expected, stdout + stderr
+    invocation = json.loads((state / "invocation.json").read_text())
+    assert invocation["stdin_closed"] is True
+    _assert_terminal_fixture_pid(invocation["pid"])
+    if "descendant_pid" in invocation:
+        _assert_terminal_fixture_pid(invocation["descendant_pid"])
+    if scenario == "silent":
+        assert "no output for 2s" in stderr
+        assert "Pushing" not in log.read_text()

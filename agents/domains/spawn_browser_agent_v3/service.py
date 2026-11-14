@@ -366,6 +366,7 @@ async def build_browser_verifier_context(
     browser_checkpoints: Optional[List[Dict[str, Any]]] = None,
     user_instruction_messages: Optional[List[Dict[str, str]]] = None,
     verification_goal: Optional[str] = None,
+    task_id: str = "",
 ) -> List[Dict[str, Any]]:
     """Assemble the verifier context from final-state browser ground truth.
 
@@ -375,6 +376,7 @@ async def build_browser_verifier_context(
     assembly plus one ``list_session_files`` read \u2014 no LLM call, no side
     effects on the caller.
     """
+    from helpers.screenshot_history import screenshot_message, screenshot_context_text
     all_action_entries = action_history.get_entries()
     window, older = all_action_entries[-30:], all_action_entries[:-30]
 
@@ -454,6 +456,22 @@ async def build_browser_verifier_context(
         and entry["result"]["formatted_state"]
     ]
 
+
+    # Executed JavaScript returns are attributable tool output, not native
+    # DOM ground truth. Keep request and returned value together per step so
+    # the compact history's cap cannot silently remove the middle results.
+    # get_entries() applies the existing history privacy projection; normal
+    # per-tool/aggregate verifier budgets still apply to these receipts.
+    evaluation_evidence = [
+        {"role": "TOOL", "text": "Recorded JavaScript request and returned value; not independent DOM confirmation.",
+         "metadata": {"toolName": "evaluate", "title": "Recorded JavaScript request and returned value; not independent DOM confirmation.", "toolStatus": "FINISHED" if entry["result"].get("success", True) else "ERROR",
+                      "browser_action_step": entry["step"],
+                      "structured_response": {"step": entry["step"], "params": entry.get("params", {}),
+                                              "result": {key: entry["result"][key] for key in ("success", "error", "value") if key in entry["result"]}}}}
+        for entry in reversed(all_action_entries)
+        if type(entry.get("step")) is int and entry.get("action") == "evaluate"
+        and isinstance(entry.get("result"), dict) and "value" in entry["result"]
+    ]
 
     page_stats = browser_state.get("page_stats", {})
     scroll_pos = browser_state.get("scroll_position", {})
@@ -586,6 +604,8 @@ async def build_browser_verifier_context(
         # Validated last-four digits from the trusted card-issuance boundary are
         # the only non-browser evidence allowed through; PAN/expiry/CVC excluded.
         *([payment_card_evidence] if payment_card_evidence else []),
+    ] + [message for entry in all_action_entries
+         if (message := screenshot_message(entry)) is not None] + [
         # Final-state screenshot \u2014 emitted as a multimodal
         # image block by build_verifier_context_messages when
         # screenshot_b64 is set in metadata. Body text stays
@@ -593,19 +613,26 @@ async def build_browser_verifier_context(
         {
             "role": "TOOL",
             "text": (
-                "Final-state screenshot attached (b64-encoded PNG of "
-                "the visible viewport). Treat the DOM tree above as "
-                "ground truth; the screenshot is supplementary."
+                screenshot_context_text({"screenshot_context": browser_state.get("screenshot_context") or {"url": current_url}})
                 if final_screenshot_b64
-                else "No final-state screenshot included; DOM tree is the verifier ground truth."
+                else "No screenshot was available for this verification step."
             ),
             "metadata": {
                 "toolName": "final_screenshot",
                 "toolStatus": "FINISHED",
                 "screenshot_b64": final_screenshot_b64 or "",
+                "screenshot_context": browser_state.get("screenshot_context") or {"url": current_url},
             },
         },
-    ] + observation_evidence
+    ] + observation_evidence[:1] + sorted(
+        # Keep the latest independent native observation first. Admit remaining
+        # step-owned receipts newest first across both kinds, so old native
+        # history cannot consume the whole budget ahead of recent evaluations.
+        # Stable sorting keeps native observations first for equal steps.
+        observation_evidence[1:] + evaluation_evidence,
+        key=lambda receipt: receipt["metadata"]["browser_action_step"],
+        reverse=True,
+    )
 
 
 def append_completion_evidence(
