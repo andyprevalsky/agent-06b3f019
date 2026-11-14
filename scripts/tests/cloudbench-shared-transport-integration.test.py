@@ -363,7 +363,7 @@ class SharedRelay(unittest.TestCase):
             start=time.monotonic();result=f.call('check',owner,'a'*32,['--lease',lease['lease']])
             self.assertEqual(result.returncode,0,result.stdout+result.stderr)
             self.assertLess(time.monotonic()-start,2,'blocked stream stalled broker control')
-            f.agent.release.set()
+            f.agent.release.set();released=time.monotonic()
             response=bytearray()
             while len(response)<len(payload):
                 try:block=client.recv(65536)
@@ -373,6 +373,8 @@ class SharedRelay(unittest.TestCase):
                 if not block:break
                 response.extend(block)
             thread.join(timeout=3)
+            print('shared relay backpressure: payload',len(payload)>>20,'MiB, kernel buffer capacity',kernel_socket_buffer_capacity()>>20,
+                  'MiB, echoed in %.2fs'%(time.monotonic()-released),flush=True)
             self.assertFalse(errors)
             self.assertEqual(len(response),len(payload))
             self.assertEqual(hashlib.sha256(response).digest(),hashlib.sha256(payload).digest())
