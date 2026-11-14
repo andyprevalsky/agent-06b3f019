@@ -329,7 +329,7 @@ for (const width of widths) {
       });
       await page.getByRole('button', { name: 'Integrations', exact: true }).click();
       await page.getByTestId('rose-sidebar').hover({ position: { x: 30, y: 90 } });
-      await page.getByRole('button', { name: 'Rose project settings', exact: true }).click();
+      await page.getByRole('button', { name: 'Rose folder settings', exact: true }).click();
       const projectSettings = page.getByRole('region', { name: 'Project team sharing' });
       await expect(
         projectSettings.getByRole('checkbox', { name: 'Share project with Rose Labs' }),

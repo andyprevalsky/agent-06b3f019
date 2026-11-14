@@ -1,0 +1,1470 @@
+{
+  "provenance": "Original campaign-20261027-211434-473987 selected reporting fields; no execution source captured",
+  "summary": {
+    "campaign_id": "campaign-20261027-211434-473987",
+    "started_at": "2026-10-27T21:14:34.000493+00:00",
+    "finished_at": "2026-10-27T21:18:28.741813+00:00",
+    "status": "cancelled",
+    "total_jobs": 30,
+    "runs": 2,
+    "task_count": 15,
+    "e2e_started_at_epoch": 1793135673.9932325,
+    "infra_stop": {
+      "job_id": "r002-j0019",
+      "task": "polar-bu-004",
+      "attempt": 1,
+      "task_status": "INFRA_ERROR",
+      "policy": "enabled",
+      "infra_jobs": 2,
+      "scheduled_total": 30,
+      "infra_job_ids": [
+        "r001-j0008",
+        "r002-j0019"
+      ],
+      "observed_at": "2026-10-27T21:15:15.360324+00:00",
+      "breached_at_epoch": 1793135715.3603287
+    }
+  },
+  "records": [
+    {
+      "job": {
+        "job_id": "r001-j0001",
+        "task": "polar-bu-001",
+        "run": 1,
+        "status": "cancelled",
+        "started_at": "2026-10-27T21:14:48.757487+00:00",
+        "finished_at": "2026-10-27T21:17:06.750411+00:00",
+        "attempts": [],
+        "task_status": "INFRA_ERROR",
+        "infra_failure": true,
+        "controller_exit_code": 143
+      },
+      "card": {
+        "run_id": "20261027-211452-477233",
+        "controller_exit_code": 143,
+        "code": "",
+        "per_task": [
+          {
+            "name": "polar-bu-001",
+            "status": "error",
+            "duration_s": null,
+            "cost_usd": null,
+            "agent_url": null,
+            "agent_id": null,
+            "failure_reason": "no current run artifact produced",
+            "lifecycle_stage": "released",
+            "tokens_in": 0,
+            "tokens_out": 0,
+            "world_model_mode": null,
+            "fast_mode": null,
+            "infra_usd": null
+          }
+        ]
+      },
+      "lifecycle": {
+        "audit_sha256": "ef760b39dfafbb3abd171b219649551cffad4fdd7fddb00f3fa9199fc119e7e1",
+        "controller_exit_code": 143,
+        "fleet_owner_token": "e5be3eac515d45799ce35524838a6de9",
+        "hub_publication_failed": false,
+        "run_id": "20261027-211452-477233",
+        "status": "failed",
+        "version": 1,
+        "workspace_root": "/home/boxes/rose"
+      },
+      "meta": "version=1\nfleet_owner_token=e5be3eac515d45799ce35524838a6de9\nrun_id=20261027-211452-477233\napp=navi-whisper-lux-bench\nworkspace_root=/home/boxes/rose\nstatus=provider-teardown-verified\nhub_disposition=retained-exact-owner-transfer-required\nhub_owner_file=/home/boxes/rose/.context/fleet/runs/_hub/agent-link-server.8765.a7acb8824c6eabd4d6ff0f6c7bebdf91.owner\nhub_owner_token=a7acb8824c6eabd4d6ff0f6c7bebdf91\nhub_pid=640582\nhub_pid_start=proc-start:6af9c450-c2c8-4647-a911-8ab19a296bbf:6748330\nhub_argv_sha256=46f64439b88bfe7bd91c6159a27b6f25faf9b83aea17b177db842688e3ab03bc\n",
+      "release_epoch": "1793135717\n"
+    },
+    {
+      "job": {
+        "job_id": "r001-j0002",
+        "task": "polar-bu-002",
+        "run": 1,
+        "status": "cancelled",
+        "started_at": "2026-10-27T21:14:48.758173+00:00",
+        "finished_at": "2026-10-27T21:15:46.171170+00:00",
+        "attempts": [],
+        "task_status": "INFRA_ERROR",
+        "infra_failure": true,
+        "controller_exit_code": 143
+      },
+      "card": {
+        "run_id": "20261027-211452-477234",
+        "controller_exit_code": 143,
+        "code": "",
+        "per_task": [
+          {
+            "name": "polar-bu-002",
+            "status": "error",
+            "duration_s": null,
+            "cost_usd": null,
+            "agent_url": null,
+            "agent_id": null,
+            "failure_reason": "no current run artifact produced",
+            "lifecycle_stage": "released",
+            "tokens_in": 0,
+            "tokens_out": 0,
+            "world_model_mode": null,
+            "fast_mode": null,
+            "infra_usd": null
+          }
+        ]
+      },
+      "lifecycle": {
+        "audit_sha256": "740ab5d226eddb803e43ce2b26ac26f5820433349bd548f304317a01630e1443",
+        "controller_exit_code": 143,
+        "fleet_owner_token": "83eac3727835403180ed5f89ffea1f5b",
+        "hub_publication_failed": false,
+        "run_id": "20261027-211452-477234",
+        "status": "failed",
+        "version": 1,
+        "workspace_root": "/home/boxes/rose"
+      },
+      "meta": "version=1\nfleet_owner_token=83eac3727835403180ed5f89ffea1f5b\nrun_id=20261027-211452-477234\napp=navi-whisper-lux-bench\nworkspace_root=/home/boxes/rose\nstatus=provider-teardown-verified\nhub_disposition=retained-exact-owner-transfer-required\nhub_owner_file=/home/boxes/rose/.context/fleet/runs/_hub/agent-link-server.8765.a7acb8824c6eabd4d6ff0f6c7bebdf91.owner\nhub_owner_token=a7acb8824c6eabd4d6ff0f6c7bebdf91\nhub_pid=640582\nhub_pid_start=proc-start:6af9c450-c2c8-4647-a911-8ab19a296bbf:6748330\nhub_argv_sha256=46f64439b88bfe7bd91c6159a27b6f25faf9b83aea17b177db842688e3ab03bc\n",
+      "release_epoch": "1793135717\n"
+    },
+    {
+      "job": {
+        "job_id": "r001-j0003",
+        "task": "polar-bu-003",
+        "run": 1,
+        "status": "cancelled",
+        "started_at": "2026-10-27T21:14:48.758782+00:00",
+        "finished_at": "2026-10-27T21:18:05.732597+00:00",
+        "attempts": [],
+        "task_status": "INFRA_ERROR",
+        "infra_failure": true,
+        "controller_exit_code": 143
+      },
+      "card": {
+        "run_id": "20261027-211452-477235",
+        "controller_exit_code": 143,
+        "code": "",
+        "per_task": [
+          {
+            "name": "polar-bu-003",
+            "status": "error",
+            "duration_s": null,
+            "cost_usd": null,
+            "agent_url": null,
+            "agent_id": null,
+            "failure_reason": "no current run artifact produced",
+            "lifecycle_stage": "released",
+            "tokens_in": 0,
+            "tokens_out": 0,
+            "world_model_mode": null,
+            "fast_mode": null,
+            "infra_usd": null
+          }
+        ]
+      },
+      "lifecycle": {
+        "audit_sha256": "4143b7d9999f8ecf3faad500ff79694b342f296f3d1f50cf90ab88e456294d1f",
+        "controller_exit_code": 143,
+        "fleet_owner_token": "2cb9585dc98f487a859d37186581f89e",
+        "hub_publication_failed": false,
+        "run_id": "20261027-211452-477235",
+        "status": "failed",
+        "version": 1,
+        "workspace_root": "/home/boxes/rose"
+      },
+      "meta": "version=1\nfleet_owner_token=2cb9585dc98f487a859d37186581f89e\nrun_id=20261027-211452-477235\napp=navi-whisper-lux-bench\nworkspace_root=/home/boxes/rose\nstatus=provider-teardown-verified\nhub_disposition=retained-exact-owner-transfer-required\nhub_owner_file=/home/boxes/rose/.context/fleet/runs/_hub/agent-link-server.8765.a7acb8824c6eabd4d6ff0f6c7bebdf91.owner\nhub_owner_token=a7acb8824c6eabd4d6ff0f6c7bebdf91\nhub_pid=640582\nhub_pid_start=proc-start:6af9c450-c2c8-4647-a911-8ab19a296bbf:6748330\nhub_argv_sha256=46f64439b88bfe7bd91c6159a27b6f25faf9b83aea17b177db842688e3ab03bc\n",
+      "release_epoch": "1793135717\n"
+    },
+    {
+      "job": {
+        "job_id": "r001-j0004",
+        "task": "polar-bu-004",
+        "run": 1,
+        "status": "cancelled",
+        "started_at": "2026-10-27T21:14:48.759545+00:00",
+        "finished_at": "2026-10-27T21:16:39.674067+00:00",
+        "attempts": [],
+        "task_status": "INFRA_ERROR",
+        "infra_failure": true,
+        "controller_exit_code": 143
+      },
+      "card": {
+        "run_id": "20261027-211451-477236",
+        "controller_exit_code": 143,
+        "code": "",
+        "per_task": [
+          {
+            "name": "polar-bu-004",
+            "status": "error",
+            "duration_s": null,
+            "cost_usd": null,
+            "agent_url": null,
+            "agent_id": null,
+            "failure_reason": "no current run artifact produced",
+            "lifecycle_stage": "released",
+            "tokens_in": 0,
+            "tokens_out": 0,
+            "world_model_mode": null,
+            "fast_mode": null,
+            "infra_usd": null
+          }
+        ]
+      },
+      "lifecycle": {
+        "audit_sha256": "69194c1606c45d173d4f7aad9a448f467c07ee326c795c0b5c1d891112b1382b",
+        "controller_exit_code": 143,
+        "fleet_owner_token": "c9e5d0d59ebc44e9a00b07bf96c0edcd",
+        "hub_publication_failed": false,
+        "run_id": "20261027-211451-477236",
+        "status": "failed",
+        "version": 1,
+        "workspace_root": "/home/boxes/rose"
+      },
+      "meta": "version=1\nfleet_owner_token=c9e5d0d59ebc44e9a00b07bf96c0edcd\nrun_id=20261027-211451-477236\napp=navi-whisper-lux-bench\nworkspace_root=/home/boxes/rose\nstatus=provider-teardown-verified\nhub_disposition=retained-exact-owner-transfer-required\nhub_owner_file=/home/boxes/rose/.context/fleet/runs/_hub/agent-link-server.8765.a7acb8824c6eabd4d6ff0f6c7bebdf91.owner\nhub_owner_token=a7acb8824c6eabd4d6ff0f6c7bebdf91\nhub_pid=640582\nhub_pid_start=proc-start:6af9c450-c2c8-4647-a911-8ab19a296bbf:6748330\nhub_argv_sha256=46f64439b88bfe7bd91c6159a27b6f25faf9b83aea17b177db842688e3ab03bc\n",
+      "release_epoch": "1793135717\n"
+    },
+    {
+      "job": {
+        "job_id": "r001-j0005",
+        "task": "polar-bu-005",
+        "run": 1,
+        "status": "cancelled",
+        "started_at": "2026-10-27T21:14:48.760129+00:00",
+        "finished_at": "2026-10-27T21:16:51.618642+00:00",
+        "attempts": [],
+        "task_status": "INFRA_ERROR",
+        "infra_failure": true,
+        "controller_exit_code": 143
+      },
+      "card": {
+        "run_id": "20261027-211452-477240",
+        "controller_exit_code": 143,
+        "code": "",
+        "per_task": [
+          {
+            "name": "polar-bu-005",
+            "status": "error",
+            "duration_s": null,
+            "cost_usd": null,
+            "agent_url": null,
+            "agent_id": null,
+            "failure_reason": "no current run artifact produced",
+            "lifecycle_stage": "released",
+            "tokens_in": 0,
+            "tokens_out": 0,
+            "world_model_mode": null,
+            "fast_mode": null,
+            "infra_usd": null
+          }
+        ]
+      },
+      "lifecycle": {
+        "audit_sha256": "3d8889e9c070aa63a2df2819740faee5982e4b5e9b14de56e291a4001afb0c65",
+        "controller_exit_code": 143,
+        "fleet_owner_token": "faeabcd87ffc40508e970ec49fd31888",
+        "hub_publication_failed": false,
+        "run_id": "20261027-211452-477240",
+        "status": "failed",
+        "version": 1,
+        "workspace_root": "/home/boxes/rose"
+      },
+      "meta": "version=1\nfleet_owner_token=faeabcd87ffc40508e970ec49fd31888\nrun_id=20261027-211452-477240\napp=navi-whisper-lux-bench\nworkspace_root=/home/boxes/rose\nstatus=provider-teardown-verified\nhub_disposition=retained-exact-owner-transfer-required\nhub_owner_file=/home/boxes/rose/.context/fleet/runs/_hub/agent-link-server.8765.a7acb8824c6eabd4d6ff0f6c7bebdf91.owner\nhub_owner_token=a7acb8824c6eabd4d6ff0f6c7bebdf91\nhub_pid=640582\nhub_pid_start=proc-start:6af9c450-c2c8-4647-a911-8ab19a296bbf:6748330\nhub_argv_sha256=46f64439b88bfe7bd91c6159a27b6f25faf9b83aea17b177db842688e3ab03bc\n",
+      "release_epoch": "1793135720\n"
+    },
+    {
+      "job": {
+        "job_id": "r001-j0006",
+        "task": "polar-bu-006",
+        "run": 1,
+        "status": "cancelled",
+        "started_at": "2026-10-27T21:14:48.760664+00:00",
+        "finished_at": "2026-10-27T21:17:16.589367+00:00",
+        "attempts": [],
+        "task_status": "INFRA_ERROR",
+        "infra_failure": true,
+        "controller_exit_code": 143
+      },
+      "card": {
+        "run_id": "20261027-211452-477243",
+        "controller_exit_code": 143,
+        "code": "",
+        "per_task": [
+          {
+            "name": "polar-bu-006",
+            "status": "error",
+            "duration_s": null,
+            "cost_usd": null,
+            "agent_url": null,
+            "agent_id": null,
+            "failure_reason": "no current run artifact produced",
+            "lifecycle_stage": "released",
+            "tokens_in": 0,
+            "tokens_out": 0,
+            "world_model_mode": null,
+            "fast_mode": null,
+            "infra_usd": null
+          }
+        ]
+      },
+      "lifecycle": {
+        "audit_sha256": "c036533a335feaaca2df9f506605f45a94ed2cd725b35ea12a4e1af17f0f4047",
+        "controller_exit_code": 143,
+        "fleet_owner_token": "a060cec1b50c4bafa241b4cf727899aa",
+        "hub_publication_failed": false,
+        "run_id": "20261027-211452-477243",
+        "status": "failed",
+        "version": 1,
+        "workspace_root": "/home/boxes/rose"
+      },
+      "meta": "version=1\nfleet_owner_token=a060cec1b50c4bafa241b4cf727899aa\nrun_id=20261027-211452-477243\napp=navi-whisper-lux-bench\nworkspace_root=/home/boxes/rose\nstatus=provider-teardown-verified\nhub_disposition=retained-exact-owner-transfer-required\nhub_owner_file=/home/boxes/rose/.context/fleet/runs/_hub/agent-link-server.8765.a7acb8824c6eabd4d6ff0f6c7bebdf91.owner\nhub_owner_token=a7acb8824c6eabd4d6ff0f6c7bebdf91\nhub_pid=640582\nhub_pid_start=proc-start:6af9c450-c2c8-4647-a911-8ab19a296bbf:6748330\nhub_argv_sha256=46f64439b88bfe7bd91c6159a27b6f25faf9b83aea17b177db842688e3ab03bc\n",
+      "release_epoch": "1793135717\n"
+    },
+    {
+      "job": {
+        "job_id": "r001-j0007",
+        "task": "polar-bu-007",
+        "run": 1,
+        "status": "cancelled",
+        "started_at": "2026-10-27T21:14:48.761211+00:00",
+        "finished_at": "2026-10-27T21:16:01.607969+00:00",
+        "attempts": [],
+        "task_status": "INFRA_ERROR",
+        "infra_failure": true,
+        "controller_exit_code": 143
+      },
+      "card": {
+        "run_id": "20261027-211452-477245",
+        "controller_exit_code": 143,
+        "code": "",
+        "per_task": [
+          {
+            "name": "polar-bu-007",
+            "status": "error",
+            "duration_s": null,
+            "cost_usd": null,
+            "agent_url": null,
+            "agent_id": null,
+            "failure_reason": "no current run artifact produced",
+            "lifecycle_stage": "released",
+            "tokens_in": 0,
+            "tokens_out": 0,
+            "world_model_mode": null,
+            "fast_mode": null,
+            "infra_usd": null
+          }
+        ]
+      },
+      "lifecycle": {
+        "audit_sha256": "5e7285a15f230063d162a8933b2e4393fc8177daaf85404b4c2dc625b76e6a05",
+        "controller_exit_code": 143,
+        "fleet_owner_token": "5b0a92d42a1541cdaee04e94dac27f45",
+        "hub_publication_failed": false,
+        "run_id": "20261027-211452-477245",
+        "status": "failed",
+        "version": 1,
+        "workspace_root": "/home/boxes/rose"
+      },
+      "meta": "version=1\nfleet_owner_token=5b0a92d42a1541cdaee04e94dac27f45\nrun_id=20261027-211452-477245\napp=navi-whisper-lux-bench\nworkspace_root=/home/boxes/rose\nstatus=provider-teardown-verified\nhub_disposition=retained-exact-owner-transfer-required\nhub_owner_file=/home/boxes/rose/.context/fleet/runs/_hub/agent-link-server.8765.a7acb8824c6eabd4d6ff0f6c7bebdf91.owner\nhub_owner_token=a7acb8824c6eabd4d6ff0f6c7bebdf91\nhub_pid=640582\nhub_pid_start=proc-start:6af9c450-c2c8-4647-a911-8ab19a296bbf:6748330\nhub_argv_sha256=46f64439b88bfe7bd91c6159a27b6f25faf9b83aea17b177db842688e3ab03bc\n",
+      "release_epoch": "1793135717\n"
+    },
+    {
+      "job": {
+        "job_id": "r001-j0008",
+        "task": "polar-bu-008",
+        "run": 1,
+        "status": "failed",
+        "started_at": "2026-10-27T21:14:48.761791+00:00",
+        "finished_at": "2026-10-27T21:15:15.358596+00:00",
+        "attempts": [],
+        "task_status": "INFRA_ERROR",
+        "infra_failure": true,
+        "controller_exit_code": 1
+      },
+      "card": {
+        "run_id": "20261027-211452-477248",
+        "controller_exit_code": 1,
+        "code": "",
+        "per_task": [
+          {
+            "name": "polar-bu-008",
+            "status": "error",
+            "duration_s": null,
+            "cost_usd": null,
+            "agent_url": null,
+            "agent_id": null,
+            "failure_reason": "no current run artifact produced",
+            "lifecycle_stage": "released",
+            "tokens_in": 0,
+            "tokens_out": 0,
+            "world_model_mode": null,
+            "fast_mode": null,
+            "infra_usd": null
+          }
+        ]
+      },
+      "lifecycle": {
+        "audit_sha256": "5c6985386cc0333a932c6c2f642a390057186bbc7db17d664ca5adf740b077a0",
+        "controller_exit_code": 1,
+        "fleet_owner_token": "63cc623784f34c5f99a10dee194d80cb",
+        "hub_publication_failed": false,
+        "run_id": "20261027-211452-477248",
+        "status": "failed",
+        "version": 1,
+        "workspace_root": "/home/boxes/rose"
+      },
+      "meta": "version=1\nfleet_owner_token=63cc623784f34c5f99a10dee194d80cb\nrun_id=20261027-211452-477248\napp=navi-whisper-lux-bench\nworkspace_root=/home/boxes/rose\nstatus=provider-teardown-verified\nhub_disposition=retained-exact-owner-transfer-required\nhub_owner_file=/home/boxes/rose/.context/fleet/runs/_hub/agent-link-server.8765.a7acb8824c6eabd4d6ff0f6c7bebdf91.owner\nhub_owner_token=a7acb8824c6eabd4d6ff0f6c7bebdf91\nhub_pid=640582\nhub_pid_start=proc-start:6af9c450-c2c8-4647-a911-8ab19a296bbf:6748330\nhub_argv_sha256=46f64439b88bfe7bd91c6159a27b6f25faf9b83aea17b177db842688e3ab03bc\n",
+      "release_epoch": "1793135706\n"
+    },
+    {
+      "job": {
+        "job_id": "r001-j0009",
+        "task": "polar-bu-009",
+        "run": 1,
+        "status": "cancelled",
+        "started_at": "2026-10-27T21:14:48.762750+00:00",
+        "finished_at": "2026-10-27T21:16:10.091960+00:00",
+        "attempts": [],
+        "task_status": "INFRA_ERROR",
+        "infra_failure": true,
+        "controller_exit_code": 143
+      },
+      "card": {
+        "run_id": "20261027-211452-477251",
+        "controller_exit_code": 143,
+        "code": "",
+        "per_task": [
+          {
+            "name": "polar-bu-009",
+            "status": "error",
+            "duration_s": null,
+            "cost_usd": null,
+            "agent_url": null,
+            "agent_id": null,
+            "failure_reason": "no current run artifact produced",
+            "lifecycle_stage": "released",
+            "tokens_in": 0,
+            "tokens_out": 0,
+            "world_model_mode": null,
+            "fast_mode": null,
+            "infra_usd": null
+          }
+        ]
+      },
+      "lifecycle": {
+        "audit_sha256": "56b167d7b4f9620d4c1a2d8290adb8a59087c04817d3ce07267ceb90614c410f",
+        "controller_exit_code": 143,
+        "fleet_owner_token": "0a845d3b7dbb402387b51b54c0c13c03",
+        "hub_publication_failed": false,
+        "run_id": "20261027-211452-477251",
+        "status": "failed",
+        "version": 1,
+        "workspace_root": "/home/boxes/rose"
+      },
+      "meta": "version=1\nfleet_owner_token=0a845d3b7dbb402387b51b54c0c13c03\nrun_id=20261027-211452-477251\napp=navi-whisper-lux-bench\nworkspace_root=/home/boxes/rose\nstatus=provider-teardown-verified\nhub_disposition=retained-exact-owner-transfer-required\nhub_owner_file=/home/boxes/rose/.context/fleet/runs/_hub/agent-link-server.8765.a7acb8824c6eabd4d6ff0f6c7bebdf91.owner\nhub_owner_token=a7acb8824c6eabd4d6ff0f6c7bebdf91\nhub_pid=640582\nhub_pid_start=proc-start:6af9c450-c2c8-4647-a911-8ab19a296bbf:6748330\nhub_argv_sha256=46f64439b88bfe7bd91c6159a27b6f25faf9b83aea17b177db842688e3ab03bc\n",
+      "release_epoch": "1793135717\n"
+    },
+    {
+      "job": {
+        "job_id": "r001-j0010",
+        "task": "polar-bu-010",
+        "run": 1,
+        "status": "cancelled",
+        "started_at": "2026-10-27T21:14:48.763925+00:00",
+        "finished_at": "2026-10-27T21:15:46.172437+00:00",
+        "attempts": [],
+        "task_status": "INFRA_ERROR",
+        "infra_failure": true,
+        "controller_exit_code": 143
+      },
+      "card": {
+        "run_id": "20261027-211452-477257",
+        "controller_exit_code": 143,
+        "code": "",
+        "per_task": [
+          {
+            "name": "polar-bu-010",
+            "status": "error",
+            "duration_s": null,
+            "cost_usd": null,
+            "agent_url": null,
+            "agent_id": null,
+            "failure_reason": "no current run artifact produced",
+            "lifecycle_stage": "released",
+            "tokens_in": 0,
+            "tokens_out": 0,
+            "world_model_mode": null,
+            "fast_mode": null,
+            "infra_usd": null
+          }
+        ]
+      },
+      "lifecycle": {
+        "audit_sha256": "71c7653e2e97fe72b04026e870635a86c46b02870c3bbe707aaba0db74e997f5",
+        "controller_exit_code": 143,
+        "fleet_owner_token": "4ee3b5b9fcff4d77a88b85ed7595cda2",
+        "hub_publication_failed": false,
+        "run_id": "20261027-211452-477257",
+        "status": "failed",
+        "version": 1,
+        "workspace_root": "/home/boxes/rose"
+      },
+      "meta": "version=1\nfleet_owner_token=4ee3b5b9fcff4d77a88b85ed7595cda2\nrun_id=20261027-211452-477257\napp=navi-whisper-lux-bench\nworkspace_root=/home/boxes/rose\nstatus=provider-teardown-verified\nhub_disposition=retained-exact-owner-transfer-required\nhub_owner_file=/home/boxes/rose/.context/fleet/runs/_hub/agent-link-server.8765.a7acb8824c6eabd4d6ff0f6c7bebdf91.owner\nhub_owner_token=a7acb8824c6eabd4d6ff0f6c7bebdf91\nhub_pid=640582\nhub_pid_start=proc-start:6af9c450-c2c8-4647-a911-8ab19a296bbf:6748330\nhub_argv_sha256=46f64439b88bfe7bd91c6159a27b6f25faf9b83aea17b177db842688e3ab03bc\n",
+      "release_epoch": "1793135717\n"
+    },
+    {
+      "job": {
+        "job_id": "r001-j0011",
+        "task": "polar-bu-011",
+        "run": 1,
+        "status": "cancelled",
+        "started_at": "2026-10-27T21:14:48.764764+00:00",
+        "finished_at": "2026-10-27T21:17:23.830054+00:00",
+        "attempts": [],
+        "task_status": "INFRA_ERROR",
+        "infra_failure": true,
+        "controller_exit_code": 143
+      },
+      "card": {
+        "run_id": "20261027-211452-477262",
+        "controller_exit_code": 143,
+        "code": "",
+        "per_task": [
+          {
+            "name": "polar-bu-011",
+            "status": "error",
+            "duration_s": null,
+            "cost_usd": null,
+            "agent_url": null,
+            "agent_id": null,
+            "failure_reason": "no current run artifact produced",
+            "lifecycle_stage": "released",
+            "tokens_in": 0,
+            "tokens_out": 0,
+            "world_model_mode": null,
+            "fast_mode": null,
+            "infra_usd": null
+          }
+        ]
+      },
+      "lifecycle": {
+        "audit_sha256": "829a43b9306ffc6f91766e97b6d86be35894ea2cb08843f181bfa67e5d22ee8e",
+        "controller_exit_code": 143,
+        "fleet_owner_token": "94967776850149c9b2123dcec3e8b0e1",
+        "hub_publication_failed": false,
+        "run_id": "20261027-211452-477262",
+        "status": "failed",
+        "version": 1,
+        "workspace_root": "/home/boxes/rose"
+      },
+      "meta": "version=1\nfleet_owner_token=94967776850149c9b2123dcec3e8b0e1\nrun_id=20261027-211452-477262\napp=navi-whisper-lux-bench\nworkspace_root=/home/boxes/rose\nstatus=provider-teardown-verified\nhub_disposition=retained-exact-owner-transfer-required\nhub_owner_file=/home/boxes/rose/.context/fleet/runs/_hub/agent-link-server.8765.a7acb8824c6eabd4d6ff0f6c7bebdf91.owner\nhub_owner_token=a7acb8824c6eabd4d6ff0f6c7bebdf91\nhub_pid=640582\nhub_pid_start=proc-start:6af9c450-c2c8-4647-a911-8ab19a296bbf:6748330\nhub_argv_sha256=46f64439b88bfe7bd91c6159a27b6f25faf9b83aea17b177db842688e3ab03bc\n",
+      "release_epoch": "1793135717\n"
+    },
+    {
+      "job": {
+        "job_id": "r001-j0012",
+        "task": "polar-bu-012",
+        "run": 1,
+        "status": "cancelled",
+        "started_at": "2026-10-27T21:14:48.766624+00:00",
+        "finished_at": "2026-10-27T21:17:44.238850+00:00",
+        "attempts": [],
+        "task_status": "INFRA_ERROR",
+        "infra_failure": true,
+        "controller_exit_code": 143
+      },
+      "card": {
+        "run_id": "20261027-211452-477266",
+        "controller_exit_code": 143,
+        "code": "",
+        "per_task": [
+          {
+            "name": "polar-bu-012",
+            "status": "error",
+            "duration_s": null,
+            "cost_usd": null,
+            "agent_url": null,
+            "agent_id": null,
+            "failure_reason": "no current run artifact produced",
+            "lifecycle_stage": "released",
+            "tokens_in": 0,
+            "tokens_out": 0,
+            "world_model_mode": null,
+            "fast_mode": null,
+            "infra_usd": null
+          }
+        ]
+      },
+      "lifecycle": {
+        "audit_sha256": "3fcd676d8641e6dcb5a7fa725b135a783c1f161b97c6de7bae46aa78030e2987",
+        "controller_exit_code": 143,
+        "fleet_owner_token": "1797d1157494486689e4593b114f01b7",
+        "hub_publication_failed": false,
+        "run_id": "20261027-211452-477266",
+        "status": "failed",
+        "version": 1,
+        "workspace_root": "/home/boxes/rose"
+      },
+      "meta": "version=1\nfleet_owner_token=1797d1157494486689e4593b114f01b7\nrun_id=20261027-211452-477266\napp=navi-whisper-lux-bench\nworkspace_root=/home/boxes/rose\nstatus=provider-teardown-verified\nhub_disposition=retained-exact-owner-transfer-required\nhub_owner_file=/home/boxes/rose/.context/fleet/runs/_hub/agent-link-server.8765.a7acb8824c6eabd4d6ff0f6c7bebdf91.owner\nhub_owner_token=a7acb8824c6eabd4d6ff0f6c7bebdf91\nhub_pid=640582\nhub_pid_start=proc-start:6af9c450-c2c8-4647-a911-8ab19a296bbf:6748330\nhub_argv_sha256=46f64439b88bfe7bd91c6159a27b6f25faf9b83aea17b177db842688e3ab03bc\n",
+      "release_epoch": "1793135717\n"
+    },
+    {
+      "job": {
+        "job_id": "r001-j0013",
+        "task": "polar-bu-013",
+        "run": 1,
+        "status": "cancelled",
+        "started_at": "2026-10-27T21:14:48.768658+00:00",
+        "finished_at": "2026-10-27T21:18:27.349552+00:00",
+        "attempts": [],
+        "task_status": "INFRA_ERROR",
+        "infra_failure": true,
+        "controller_exit_code": 143
+      },
+      "card": {
+        "run_id": "20261027-211452-477273",
+        "controller_exit_code": 143,
+        "code": "",
+        "per_task": [
+          {
+            "name": "polar-bu-013",
+            "status": "error",
+            "duration_s": null,
+            "cost_usd": null,
+            "agent_url": null,
+            "agent_id": null,
+            "failure_reason": "no current run artifact produced",
+            "lifecycle_stage": "released",
+            "tokens_in": 0,
+            "tokens_out": 0,
+            "world_model_mode": null,
+            "fast_mode": null,
+            "infra_usd": null
+          }
+        ]
+      },
+      "lifecycle": {
+        "audit_sha256": "efb1daed1198d1def5270dc553d3311d91e820ffc718076ee07c81b237136b7b",
+        "controller_exit_code": 143,
+        "fleet_owner_token": "2de401b48f45450dbbbb41b03b93e94a",
+        "hub_publication_failed": false,
+        "run_id": "20261027-211452-477273",
+        "status": "failed",
+        "version": 1,
+        "workspace_root": "/home/boxes/rose"
+      },
+      "meta": "version=1\nfleet_owner_token=2de401b48f45450dbbbb41b03b93e94a\nrun_id=20261027-211452-477273\napp=navi-whisper-lux-bench\nworkspace_root=/home/boxes/rose\nstatus=provider-teardown-verified\nhub_disposition=retained-exact-owner-transfer-required\nhub_owner_file=/home/boxes/rose/.context/fleet/runs/_hub/agent-link-server.8765.a7acb8824c6eabd4d6ff0f6c7bebdf91.owner\nhub_owner_token=a7acb8824c6eabd4d6ff0f6c7bebdf91\nhub_pid=640582\nhub_pid_start=proc-start:6af9c450-c2c8-4647-a911-8ab19a296bbf:6748330\nhub_argv_sha256=46f64439b88bfe7bd91c6159a27b6f25faf9b83aea17b177db842688e3ab03bc\n",
+      "release_epoch": "1793135717\n"
+    },
+    {
+      "job": {
+        "job_id": "r001-j0014",
+        "task": "polar-bu-014",
+        "run": 1,
+        "status": "cancelled",
+        "started_at": "2026-10-27T21:14:48.771258+00:00",
+        "finished_at": "2026-10-27T21:17:52.378107+00:00",
+        "attempts": [],
+        "task_status": "INFRA_ERROR",
+        "infra_failure": true,
+        "controller_exit_code": 143
+      },
+      "card": {
+        "run_id": "20261027-211452-477275",
+        "controller_exit_code": 143,
+        "code": "",
+        "per_task": [
+          {
+            "name": "polar-bu-014",
+            "status": "error",
+            "duration_s": null,
+            "cost_usd": null,
+            "agent_url": null,
+            "agent_id": null,
+            "failure_reason": "no current run artifact produced",
+            "lifecycle_stage": "released",
+            "tokens_in": 0,
+            "tokens_out": 0,
+            "world_model_mode": null,
+            "fast_mode": null,
+            "infra_usd": null
+          }
+        ]
+      },
+      "lifecycle": {
+        "audit_sha256": "b7d14c8450e4c80e7c42ef23d13126c588aa09482284c7858b986814fbd0a774",
+        "controller_exit_code": 143,
+        "fleet_owner_token": "777c46b881684257929d4ca25c772782",
+        "hub_publication_failed": false,
+        "run_id": "20261027-211452-477275",
+        "status": "failed",
+        "version": 1,
+        "workspace_root": "/home/boxes/rose"
+      },
+      "meta": "version=1\nfleet_owner_token=777c46b881684257929d4ca25c772782\nrun_id=20261027-211452-477275\napp=navi-whisper-lux-bench\nworkspace_root=/home/boxes/rose\nstatus=provider-teardown-verified\nhub_disposition=retained-exact-owner-transfer-required\nhub_owner_file=/home/boxes/rose/.context/fleet/runs/_hub/agent-link-server.8765.a7acb8824c6eabd4d6ff0f6c7bebdf91.owner\nhub_owner_token=a7acb8824c6eabd4d6ff0f6c7bebdf91\nhub_pid=640582\nhub_pid_start=proc-start:6af9c450-c2c8-4647-a911-8ab19a296bbf:6748330\nhub_argv_sha256=46f64439b88bfe7bd91c6159a27b6f25faf9b83aea17b177db842688e3ab03bc\n",
+      "release_epoch": "1793135717\n"
+    },
+    {
+      "job": {
+        "job_id": "r001-j0015",
+        "task": "polar-bu-015",
+        "run": 1,
+        "status": "cancelled",
+        "started_at": "2026-10-27T21:14:48.789790+00:00",
+        "finished_at": "2026-10-27T21:17:30.775000+00:00",
+        "attempts": [],
+        "task_status": "INFRA_ERROR",
+        "infra_failure": true,
+        "controller_exit_code": 143
+      },
+      "card": {
+        "run_id": "20261027-211452-477278",
+        "controller_exit_code": 143,
+        "code": "",
+        "per_task": [
+          {
+            "name": "polar-bu-015",
+            "status": "error",
+            "duration_s": null,
+            "cost_usd": null,
+            "agent_url": null,
+            "agent_id": null,
+            "failure_reason": "no current run artifact produced",
+            "lifecycle_stage": "released",
+            "tokens_in": 0,
+            "tokens_out": 0,
+            "world_model_mode": null,
+            "fast_mode": null,
+            "infra_usd": null
+          }
+        ]
+      },
+      "lifecycle": {
+        "audit_sha256": "c89ff69ced04d9f7997d62c8b7c6f6a915dcf1dc0cc103a3d9b8b2d9e1058a56",
+        "controller_exit_code": 143,
+        "fleet_owner_token": "183c1e598eea49f0964ad058002d0fe0",
+        "hub_publication_failed": false,
+        "run_id": "20261027-211452-477278",
+        "status": "failed",
+        "version": 1,
+        "workspace_root": "/home/boxes/rose"
+      },
+      "meta": "version=1\nfleet_owner_token=183c1e598eea49f0964ad058002d0fe0\nrun_id=20261027-211452-477278\napp=navi-whisper-lux-bench\nworkspace_root=/home/boxes/rose\nstatus=provider-teardown-verified\nhub_disposition=retained-exact-owner-transfer-required\nhub_owner_file=/home/boxes/rose/.context/fleet/runs/_hub/agent-link-server.8765.a7acb8824c6eabd4d6ff0f6c7bebdf91.owner\nhub_owner_token=a7acb8824c6eabd4d6ff0f6c7bebdf91\nhub_pid=640582\nhub_pid_start=proc-start:6af9c450-c2c8-4647-a911-8ab19a296bbf:6748330\nhub_argv_sha256=46f64439b88bfe7bd91c6159a27b6f25faf9b83aea17b177db842688e3ab03bc\n",
+      "release_epoch": "1793135717\n"
+    },
+    {
+      "job": {
+        "job_id": "r002-j0016",
+        "task": "polar-bu-001",
+        "run": 2,
+        "status": "cancelled",
+        "started_at": "2026-10-27T21:14:48.812658+00:00",
+        "finished_at": "2026-10-27T21:16:17.736555+00:00",
+        "attempts": [],
+        "task_status": "INFRA_ERROR",
+        "infra_failure": true,
+        "controller_exit_code": 143
+      },
+      "card": {
+        "run_id": "20261027-211452-477286",
+        "controller_exit_code": 143,
+        "code": "",
+        "per_task": [
+          {
+            "name": "polar-bu-001",
+            "status": "error",
+            "duration_s": null,
+            "cost_usd": null,
+            "agent_url": null,
+            "agent_id": null,
+            "failure_reason": "no current run artifact produced",
+            "lifecycle_stage": "released",
+            "tokens_in": 0,
+            "tokens_out": 0,
+            "world_model_mode": null,
+            "fast_mode": null,
+            "infra_usd": null
+          }
+        ]
+      },
+      "lifecycle": {
+        "audit_sha256": "34f6db437ddee25b07e428da0bf5ee8b6921ddf3f5d37966e86e7792148dcc01",
+        "controller_exit_code": 143,
+        "fleet_owner_token": "f00de5fb8d474964accb9cac3484229d",
+        "hub_publication_failed": false,
+        "run_id": "20261027-211452-477286",
+        "status": "failed",
+        "version": 1,
+        "workspace_root": "/home/boxes/rose"
+      },
+      "meta": "version=1\nfleet_owner_token=f00de5fb8d474964accb9cac3484229d\nrun_id=20261027-211452-477286\napp=navi-whisper-lux-bench\nworkspace_root=/home/boxes/rose\nstatus=provider-teardown-verified\nhub_disposition=retained-exact-owner-transfer-required\nhub_owner_file=/home/boxes/rose/.context/fleet/runs/_hub/agent-link-server.8765.a7acb8824c6eabd4d6ff0f6c7bebdf91.owner\nhub_owner_token=a7acb8824c6eabd4d6ff0f6c7bebdf91\nhub_pid=640582\nhub_pid_start=proc-start:6af9c450-c2c8-4647-a911-8ab19a296bbf:6748330\nhub_argv_sha256=46f64439b88bfe7bd91c6159a27b6f25faf9b83aea17b177db842688e3ab03bc\n",
+      "release_epoch": "1793135717\n"
+    },
+    {
+      "job": {
+        "job_id": "r002-j0017",
+        "task": "polar-bu-002",
+        "run": 2,
+        "status": "cancelled",
+        "started_at": "2026-10-27T21:14:48.860711+00:00",
+        "finished_at": "2026-10-27T21:17:16.591645+00:00",
+        "attempts": [],
+        "task_status": "INFRA_ERROR",
+        "infra_failure": true,
+        "controller_exit_code": 143
+      },
+      "card": {
+        "run_id": "20261027-211452-477292",
+        "controller_exit_code": 143,
+        "code": "",
+        "per_task": [
+          {
+            "name": "polar-bu-002",
+            "status": "error",
+            "duration_s": null,
+            "cost_usd": null,
+            "agent_url": null,
+            "agent_id": null,
+            "failure_reason": "no current run artifact produced",
+            "lifecycle_stage": "released",
+            "tokens_in": 0,
+            "tokens_out": 0,
+            "world_model_mode": null,
+            "fast_mode": null,
+            "infra_usd": null
+          }
+        ]
+      },
+      "lifecycle": {
+        "audit_sha256": "0d6fe3de2ec844786bf66daef4b79e16652c1c8335d85989d4a461a2df7edae7",
+        "controller_exit_code": 143,
+        "fleet_owner_token": "75ce4ce39f354096888719ecfc07a8bc",
+        "hub_publication_failed": false,
+        "run_id": "20261027-211452-477292",
+        "status": "failed",
+        "version": 1,
+        "workspace_root": "/home/boxes/rose"
+      },
+      "meta": "version=1\nfleet_owner_token=75ce4ce39f354096888719ecfc07a8bc\nrun_id=20261027-211452-477292\napp=navi-whisper-lux-bench\nworkspace_root=/home/boxes/rose\nstatus=provider-teardown-verified\nhub_disposition=retained-exact-owner-transfer-required\nhub_owner_file=/home/boxes/rose/.context/fleet/runs/_hub/agent-link-server.8765.a7acb8824c6eabd4d6ff0f6c7bebdf91.owner\nhub_owner_token=a7acb8824c6eabd4d6ff0f6c7bebdf91\nhub_pid=640582\nhub_pid_start=proc-start:6af9c450-c2c8-4647-a911-8ab19a296bbf:6748330\nhub_argv_sha256=46f64439b88bfe7bd91c6159a27b6f25faf9b83aea17b177db842688e3ab03bc\n",
+      "release_epoch": "1793135717\n"
+    },
+    {
+      "job": {
+        "job_id": "r002-j0018",
+        "task": "polar-bu-003",
+        "run": 2,
+        "status": "cancelled",
+        "started_at": "2026-10-27T21:14:48.878182+00:00",
+        "finished_at": "2026-10-27T21:16:31.941506+00:00",
+        "attempts": [],
+        "task_status": "INFRA_ERROR",
+        "infra_failure": true,
+        "controller_exit_code": 143
+      },
+      "card": {
+        "run_id": "20261027-211452-477304",
+        "controller_exit_code": 143,
+        "code": "",
+        "per_task": [
+          {
+            "name": "polar-bu-003",
+            "status": "error",
+            "duration_s": null,
+            "cost_usd": null,
+            "agent_url": null,
+            "agent_id": null,
+            "failure_reason": "no current run artifact produced",
+            "lifecycle_stage": "released",
+            "tokens_in": 0,
+            "tokens_out": 0,
+            "world_model_mode": null,
+            "fast_mode": null,
+            "infra_usd": null
+          }
+        ]
+      },
+      "lifecycle": {
+        "audit_sha256": "b990ff10fd05c28fc0cbfe8a5850f436a41959ba1f1fc1ff4db57cfd77d316e6",
+        "controller_exit_code": 143,
+        "fleet_owner_token": "d9eb64c148e24e5b9430f6d79c8499c4",
+        "hub_publication_failed": false,
+        "run_id": "20261027-211452-477304",
+        "status": "failed",
+        "version": 1,
+        "workspace_root": "/home/boxes/rose"
+      },
+      "meta": "version=1\nfleet_owner_token=d9eb64c148e24e5b9430f6d79c8499c4\nrun_id=20261027-211452-477304\napp=navi-whisper-lux-bench\nworkspace_root=/home/boxes/rose\nstatus=provider-teardown-verified\nhub_disposition=retained-exact-owner-transfer-required\nhub_owner_file=/home/boxes/rose/.context/fleet/runs/_hub/agent-link-server.8765.a7acb8824c6eabd4d6ff0f6c7bebdf91.owner\nhub_owner_token=a7acb8824c6eabd4d6ff0f6c7bebdf91\nhub_pid=640582\nhub_pid_start=proc-start:6af9c450-c2c8-4647-a911-8ab19a296bbf:6748330\nhub_argv_sha256=46f64439b88bfe7bd91c6159a27b6f25faf9b83aea17b177db842688e3ab03bc\n",
+      "release_epoch": "1793135717\n"
+    },
+    {
+      "job": {
+        "job_id": "r002-j0019",
+        "task": "polar-bu-004",
+        "run": 2,
+        "status": "failed",
+        "started_at": "2026-10-27T21:14:48.886026+00:00",
+        "finished_at": "2026-10-27T21:15:15.359993+00:00",
+        "attempts": [],
+        "task_status": "INFRA_ERROR",
+        "infra_failure": true,
+        "controller_exit_code": 1
+      },
+      "card": {
+        "run_id": "20261027-211452-477307",
+        "controller_exit_code": 1,
+        "code": "",
+        "per_task": [
+          {
+            "name": "polar-bu-004",
+            "status": "error",
+            "duration_s": null,
+            "cost_usd": null,
+            "agent_url": null,
+            "agent_id": null,
+            "failure_reason": "no current run artifact produced",
+            "lifecycle_stage": "released",
+            "tokens_in": 0,
+            "tokens_out": 0,
+            "world_model_mode": null,
+            "fast_mode": null,
+            "infra_usd": null
+          }
+        ]
+      },
+      "lifecycle": {
+        "audit_sha256": "c4416a6bb79a50234841f7d662e47a58afba7ed82308e773c9e49b25da7476fe",
+        "controller_exit_code": 1,
+        "fleet_owner_token": "8dfaa07ce65847f289020cb85b1cac13",
+        "hub_publication_failed": false,
+        "run_id": "20261027-211452-477307",
+        "status": "failed",
+        "version": 1,
+        "workspace_root": "/home/boxes/rose"
+      },
+      "meta": "version=1\nfleet_owner_token=8dfaa07ce65847f289020cb85b1cac13\nrun_id=20261027-211452-477307\napp=navi-whisper-lux-bench\nworkspace_root=/home/boxes/rose\nstatus=provider-teardown-verified\nhub_disposition=retained-exact-owner-transfer-required\nhub_owner_file=/home/boxes/rose/.context/fleet/runs/_hub/agent-link-server.8765.a7acb8824c6eabd4d6ff0f6c7bebdf91.owner\nhub_owner_token=a7acb8824c6eabd4d6ff0f6c7bebdf91\nhub_pid=640582\nhub_pid_start=proc-start:6af9c450-c2c8-4647-a911-8ab19a296bbf:6748330\nhub_argv_sha256=46f64439b88bfe7bd91c6159a27b6f25faf9b83aea17b177db842688e3ab03bc\n",
+      "release_epoch": "1793135706\n"
+    },
+    {
+      "job": {
+        "job_id": "r002-j0020",
+        "task": "polar-bu-005",
+        "run": 2,
+        "status": "cancelled",
+        "started_at": "2026-10-27T21:14:48.900515+00:00",
+        "finished_at": "2026-10-27T21:17:06.751729+00:00",
+        "attempts": [],
+        "task_status": "INFRA_ERROR",
+        "infra_failure": true,
+        "controller_exit_code": 143
+      },
+      "card": {
+        "run_id": "20261027-211452-477313",
+        "controller_exit_code": 143,
+        "code": "",
+        "per_task": [
+          {
+            "name": "polar-bu-005",
+            "status": "error",
+            "duration_s": null,
+            "cost_usd": null,
+            "agent_url": null,
+            "agent_id": null,
+            "failure_reason": "no current run artifact produced",
+            "lifecycle_stage": "released",
+            "tokens_in": 0,
+            "tokens_out": 0,
+            "world_model_mode": null,
+            "fast_mode": null,
+            "infra_usd": null
+          }
+        ]
+      },
+      "lifecycle": {
+        "audit_sha256": "456f7476b8c67289d072ff6e2a6395e62319404373c2e186cfa678bf14e3c5d7",
+        "controller_exit_code": 143,
+        "fleet_owner_token": "03d4661cda4a4a6680ad0901bb7f55fe",
+        "hub_publication_failed": false,
+        "run_id": "20261027-211452-477313",
+        "status": "failed",
+        "version": 1,
+        "workspace_root": "/home/boxes/rose"
+      },
+      "meta": "version=1\nfleet_owner_token=03d4661cda4a4a6680ad0901bb7f55fe\nrun_id=20261027-211452-477313\napp=navi-whisper-lux-bench\nworkspace_root=/home/boxes/rose\nstatus=provider-teardown-verified\nhub_disposition=retained-exact-owner-transfer-required\nhub_owner_file=/home/boxes/rose/.context/fleet/runs/_hub/agent-link-server.8765.a7acb8824c6eabd4d6ff0f6c7bebdf91.owner\nhub_owner_token=a7acb8824c6eabd4d6ff0f6c7bebdf91\nhub_pid=640582\nhub_pid_start=proc-start:6af9c450-c2c8-4647-a911-8ab19a296bbf:6748330\nhub_argv_sha256=46f64439b88bfe7bd91c6159a27b6f25faf9b83aea17b177db842688e3ab03bc\n",
+      "release_epoch": "1793135717\n"
+    },
+    {
+      "job": {
+        "job_id": "r002-j0021",
+        "task": "polar-bu-006",
+        "run": 2,
+        "status": "cancelled",
+        "started_at": "2026-10-27T21:14:48.920555+00:00",
+        "finished_at": "2026-10-27T21:17:38.004587+00:00",
+        "attempts": [],
+        "task_status": "INFRA_ERROR",
+        "infra_failure": true,
+        "controller_exit_code": 143
+      },
+      "card": {
+        "run_id": "20261027-211452-477330",
+        "controller_exit_code": 143,
+        "code": "",
+        "per_task": [
+          {
+            "name": "polar-bu-006",
+            "status": "error",
+            "duration_s": null,
+            "cost_usd": null,
+            "agent_url": null,
+            "agent_id": null,
+            "failure_reason": "no current run artifact produced",
+            "lifecycle_stage": "released",
+            "tokens_in": 0,
+            "tokens_out": 0,
+            "world_model_mode": null,
+            "fast_mode": null,
+            "infra_usd": null
+          }
+        ]
+      },
+      "lifecycle": {
+        "audit_sha256": "9b5d465c67c62c898b34f6777e42c81eb42c1a13eaad01ba2d57fb0878890c75",
+        "controller_exit_code": 143,
+        "fleet_owner_token": "2660693463f44731b35d06e8125a7cbe",
+        "hub_publication_failed": false,
+        "run_id": "20261027-211452-477330",
+        "status": "failed",
+        "version": 1,
+        "workspace_root": "/home/boxes/rose"
+      },
+      "meta": "version=1\nfleet_owner_token=2660693463f44731b35d06e8125a7cbe\nrun_id=20261027-211452-477330\napp=navi-whisper-lux-bench\nworkspace_root=/home/boxes/rose\nstatus=provider-teardown-verified\nhub_disposition=retained-exact-owner-transfer-required\nhub_owner_file=/home/boxes/rose/.context/fleet/runs/_hub/agent-link-server.8765.a7acb8824c6eabd4d6ff0f6c7bebdf91.owner\nhub_owner_token=a7acb8824c6eabd4d6ff0f6c7bebdf91\nhub_pid=640582\nhub_pid_start=proc-start:6af9c450-c2c8-4647-a911-8ab19a296bbf:6748330\nhub_argv_sha256=46f64439b88bfe7bd91c6159a27b6f25faf9b83aea17b177db842688e3ab03bc\n",
+      "release_epoch": "1793135717\n"
+    },
+    {
+      "job": {
+        "job_id": "r002-j0022",
+        "task": "polar-bu-007",
+        "run": 2,
+        "status": "cancelled",
+        "started_at": "2026-10-27T21:14:48.943162+00:00",
+        "finished_at": "2026-10-27T21:18:12.976965+00:00",
+        "attempts": [],
+        "task_status": "INFRA_ERROR",
+        "infra_failure": true,
+        "controller_exit_code": 143
+      },
+      "card": {
+        "run_id": "20261027-211452-477355",
+        "controller_exit_code": 143,
+        "code": "",
+        "per_task": [
+          {
+            "name": "polar-bu-007",
+            "status": "error",
+            "duration_s": null,
+            "cost_usd": null,
+            "agent_url": null,
+            "agent_id": null,
+            "failure_reason": "no current run artifact produced",
+            "lifecycle_stage": "released",
+            "tokens_in": 0,
+            "tokens_out": 0,
+            "world_model_mode": null,
+            "fast_mode": null,
+            "infra_usd": null
+          }
+        ]
+      },
+      "lifecycle": {
+        "audit_sha256": "85aa4fa30af31618d70db151435346815275081dfd68d5897c22149e1022caa1",
+        "controller_exit_code": 143,
+        "fleet_owner_token": "2929b6a620e14a7db95248355b8d44cf",
+        "hub_publication_failed": false,
+        "run_id": "20261027-211452-477355",
+        "status": "failed",
+        "version": 1,
+        "workspace_root": "/home/boxes/rose"
+      },
+      "meta": "version=1\nfleet_owner_token=2929b6a620e14a7db95248355b8d44cf\nrun_id=20261027-211452-477355\napp=navi-whisper-lux-bench\nworkspace_root=/home/boxes/rose\nstatus=provider-teardown-verified\nhub_disposition=retained-exact-owner-transfer-required\nhub_owner_file=/home/boxes/rose/.context/fleet/runs/_hub/agent-link-server.8765.a7acb8824c6eabd4d6ff0f6c7bebdf91.owner\nhub_owner_token=a7acb8824c6eabd4d6ff0f6c7bebdf91\nhub_pid=640582\nhub_pid_start=proc-start:6af9c450-c2c8-4647-a911-8ab19a296bbf:6748330\nhub_argv_sha256=46f64439b88bfe7bd91c6159a27b6f25faf9b83aea17b177db842688e3ab03bc\n",
+      "release_epoch": "1793135717\n"
+    },
+    {
+      "job": {
+        "job_id": "r002-j0023",
+        "task": "polar-bu-008",
+        "run": 2,
+        "status": "cancelled",
+        "started_at": "2026-10-27T21:14:48.988742+00:00",
+        "finished_at": "2026-10-27T21:15:29.908553+00:00",
+        "attempts": [],
+        "task_status": "INFRA_ERROR",
+        "infra_failure": true,
+        "controller_exit_code": 1
+      },
+      "card": {
+        "run_id": "20261027-211452-477383",
+        "controller_exit_code": 1,
+        "code": "",
+        "per_task": [
+          {
+            "name": "polar-bu-008",
+            "status": "error",
+            "duration_s": null,
+            "cost_usd": null,
+            "agent_url": null,
+            "agent_id": null,
+            "failure_reason": "no current run artifact produced",
+            "lifecycle_stage": "released",
+            "tokens_in": 0,
+            "tokens_out": 0,
+            "world_model_mode": null,
+            "fast_mode": null,
+            "infra_usd": null
+          }
+        ]
+      },
+      "lifecycle": {
+        "audit_sha256": "9c89755e5ab3f95b16f0ea0f2b99641639cc8ffa163f55cd7643c0ec113c29f2",
+        "controller_exit_code": 1,
+        "fleet_owner_token": "a8afcd2a542043a98f9d237111c7394a",
+        "hub_publication_failed": false,
+        "run_id": "20261027-211452-477383",
+        "status": "failed",
+        "version": 1,
+        "workspace_root": "/home/boxes/rose"
+      },
+      "meta": "version=1\nfleet_owner_token=a8afcd2a542043a98f9d237111c7394a\nrun_id=20261027-211452-477383\napp=navi-whisper-lux-bench\nworkspace_root=/home/boxes/rose\nstatus=provider-teardown-verified\nhub_disposition=retained-exact-owner-transfer-required\nhub_owner_file=/home/boxes/rose/.context/fleet/runs/_hub/agent-link-server.8765.a7acb8824c6eabd4d6ff0f6c7bebdf91.owner\nhub_owner_token=a7acb8824c6eabd4d6ff0f6c7bebdf91\nhub_pid=640582\nhub_pid_start=proc-start:6af9c450-c2c8-4647-a911-8ab19a296bbf:6748330\nhub_argv_sha256=46f64439b88bfe7bd91c6159a27b6f25faf9b83aea17b177db842688e3ab03bc\n",
+      "release_epoch": "1793135706\n"
+    },
+    {
+      "job": {
+        "job_id": "r002-j0024",
+        "task": "polar-bu-009",
+        "run": 2,
+        "status": "cancelled",
+        "started_at": "2026-10-27T21:14:49.014758+00:00",
+        "finished_at": "2026-10-27T21:16:10.093237+00:00",
+        "attempts": [],
+        "task_status": "INFRA_ERROR",
+        "infra_failure": true,
+        "controller_exit_code": 143
+      },
+      "card": {
+        "run_id": "20261027-211452-477428",
+        "controller_exit_code": 143,
+        "code": "",
+        "per_task": [
+          {
+            "name": "polar-bu-009",
+            "status": "error",
+            "duration_s": null,
+            "cost_usd": null,
+            "agent_url": null,
+            "agent_id": null,
+            "failure_reason": "no current run artifact produced",
+            "lifecycle_stage": "released",
+            "tokens_in": 0,
+            "tokens_out": 0,
+            "world_model_mode": null,
+            "fast_mode": null,
+            "infra_usd": null
+          }
+        ]
+      },
+      "lifecycle": {
+        "audit_sha256": "34c85a66dc77f804279091c61f6650ea5bda45a84711b12ef412d536a14a85fd",
+        "controller_exit_code": 143,
+        "fleet_owner_token": "19356dc90e4a44f3a3167c8e59bb51df",
+        "hub_publication_failed": false,
+        "run_id": "20261027-211452-477428",
+        "status": "failed",
+        "version": 1,
+        "workspace_root": "/home/boxes/rose"
+      },
+      "meta": "version=1\nfleet_owner_token=19356dc90e4a44f3a3167c8e59bb51df\nrun_id=20261027-211452-477428\napp=navi-whisper-lux-bench\nworkspace_root=/home/boxes/rose\nstatus=provider-teardown-verified\nhub_disposition=retained-exact-owner-transfer-required\nhub_owner_file=/home/boxes/rose/.context/fleet/runs/_hub/agent-link-server.8765.a7acb8824c6eabd4d6ff0f6c7bebdf91.owner\nhub_owner_token=a7acb8824c6eabd4d6ff0f6c7bebdf91\nhub_pid=640582\nhub_pid_start=proc-start:6af9c450-c2c8-4647-a911-8ab19a296bbf:6748330\nhub_argv_sha256=46f64439b88bfe7bd91c6159a27b6f25faf9b83aea17b177db842688e3ab03bc\n",
+      "release_epoch": "1793135717\n"
+    },
+    {
+      "job": {
+        "job_id": "r002-j0025",
+        "task": "polar-bu-010",
+        "run": 2,
+        "status": "cancelled",
+        "started_at": "2026-10-27T21:14:49.048778+00:00",
+        "finished_at": "2026-10-27T21:16:24.897805+00:00",
+        "attempts": [],
+        "task_status": "INFRA_ERROR",
+        "infra_failure": true,
+        "controller_exit_code": 143
+      },
+      "card": {
+        "run_id": "20261027-211452-477455",
+        "controller_exit_code": 143,
+        "code": "",
+        "per_task": [
+          {
+            "name": "polar-bu-010",
+            "status": "error",
+            "duration_s": null,
+            "cost_usd": null,
+            "agent_url": null,
+            "agent_id": null,
+            "failure_reason": "no current run artifact produced",
+            "lifecycle_stage": "released",
+            "tokens_in": 0,
+            "tokens_out": 0,
+            "world_model_mode": null,
+            "fast_mode": null,
+            "infra_usd": null
+          }
+        ]
+      },
+      "lifecycle": {
+        "audit_sha256": "12e96403ca545d17f8a1b66e8981b9c764c14ea19ec261405e64e1ad961694af",
+        "controller_exit_code": 143,
+        "fleet_owner_token": "d7d642de847b4a8ebfb9cbca1113b9e9",
+        "hub_publication_failed": false,
+        "run_id": "20261027-211452-477455",
+        "status": "failed",
+        "version": 1,
+        "workspace_root": "/home/boxes/rose"
+      },
+      "meta": "version=1\nfleet_owner_token=d7d642de847b4a8ebfb9cbca1113b9e9\nrun_id=20261027-211452-477455\napp=navi-whisper-lux-bench\nworkspace_root=/home/boxes/rose\nstatus=provider-teardown-verified\nhub_disposition=retained-exact-owner-transfer-required\nhub_owner_file=/home/boxes/rose/.context/fleet/runs/_hub/agent-link-server.8765.a7acb8824c6eabd4d6ff0f6c7bebdf91.owner\nhub_owner_token=a7acb8824c6eabd4d6ff0f6c7bebdf91\nhub_pid=640582\nhub_pid_start=proc-start:6af9c450-c2c8-4647-a911-8ab19a296bbf:6748330\nhub_argv_sha256=46f64439b88bfe7bd91c6159a27b6f25faf9b83aea17b177db842688e3ab03bc\n",
+      "release_epoch": "1793135717\n"
+    },
+    {
+      "job": {
+        "job_id": "r002-j0026",
+        "task": "polar-bu-011",
+        "run": 2,
+        "status": "cancelled",
+        "started_at": "2026-10-27T21:14:49.050894+00:00",
+        "finished_at": "2026-10-27T21:17:52.379548+00:00",
+        "attempts": [],
+        "task_status": "INFRA_ERROR",
+        "infra_failure": true,
+        "controller_exit_code": 143
+      },
+      "card": {
+        "run_id": "20261027-211451-477490",
+        "controller_exit_code": 143,
+        "code": "",
+        "per_task": [
+          {
+            "name": "polar-bu-011",
+            "status": "error",
+            "duration_s": null,
+            "cost_usd": null,
+            "agent_url": null,
+            "agent_id": null,
+            "failure_reason": "no current run artifact produced",
+            "lifecycle_stage": "released",
+            "tokens_in": 0,
+            "tokens_out": 0,
+            "world_model_mode": null,
+            "fast_mode": null,
+            "infra_usd": null
+          }
+        ]
+      },
+      "lifecycle": {
+        "audit_sha256": "cc1c7d4d24620561cc3743a8e0c1c330b50fc6dedec4f28fdceb03c043684698",
+        "controller_exit_code": 143,
+        "fleet_owner_token": "c558482220a94ea9aad0c0f7702af710",
+        "hub_publication_failed": false,
+        "run_id": "20261027-211451-477490",
+        "status": "failed",
+        "version": 1,
+        "workspace_root": "/home/boxes/rose"
+      },
+      "meta": "version=1\nfleet_owner_token=c558482220a94ea9aad0c0f7702af710\nrun_id=20261027-211451-477490\napp=navi-whisper-lux-bench\nworkspace_root=/home/boxes/rose\nstatus=provider-teardown-verified\nhub_disposition=retained-exact-owner-transfer-required\nhub_owner_file=/home/boxes/rose/.context/fleet/runs/_hub/agent-link-server.8765.a7acb8824c6eabd4d6ff0f6c7bebdf91.owner\nhub_owner_token=a7acb8824c6eabd4d6ff0f6c7bebdf91\nhub_pid=640582\nhub_pid_start=proc-start:6af9c450-c2c8-4647-a911-8ab19a296bbf:6748330\nhub_argv_sha256=46f64439b88bfe7bd91c6159a27b6f25faf9b83aea17b177db842688e3ab03bc\n",
+      "release_epoch": "1793135717\n"
+    },
+    {
+      "job": {
+        "job_id": "r002-j0027",
+        "task": "polar-bu-012",
+        "run": 2,
+        "status": "cancelled",
+        "started_at": "2026-10-27T21:14:49.055088+00:00",
+        "finished_at": "2026-10-27T21:16:01.710146+00:00",
+        "attempts": [],
+        "task_status": "INFRA_ERROR",
+        "infra_failure": true,
+        "controller_exit_code": 143
+      },
+      "card": {
+        "run_id": "20261027-211452-477493",
+        "controller_exit_code": 143,
+        "code": "",
+        "per_task": [
+          {
+            "name": "polar-bu-012",
+            "status": "error",
+            "duration_s": null,
+            "cost_usd": null,
+            "agent_url": null,
+            "agent_id": null,
+            "failure_reason": "no current run artifact produced",
+            "lifecycle_stage": "released",
+            "tokens_in": 0,
+            "tokens_out": 0,
+            "world_model_mode": null,
+            "fast_mode": null,
+            "infra_usd": null
+          }
+        ]
+      },
+      "lifecycle": {
+        "audit_sha256": "912ac090c41e76ece709569cde5b8cc3854a73a0efec38297a13541d5fba502f",
+        "controller_exit_code": 143,
+        "fleet_owner_token": "9a1d9e17b40a4dd7b7e4504d9d57705b",
+        "hub_publication_failed": false,
+        "run_id": "20261027-211452-477493",
+        "status": "failed",
+        "version": 1,
+        "workspace_root": "/home/boxes/rose"
+      },
+      "meta": "version=1\nfleet_owner_token=9a1d9e17b40a4dd7b7e4504d9d57705b\nrun_id=20261027-211452-477493\napp=navi-whisper-lux-bench\nworkspace_root=/home/boxes/rose\nstatus=provider-teardown-verified\nhub_disposition=retained-exact-owner-transfer-required\nhub_owner_file=/home/boxes/rose/.context/fleet/runs/_hub/agent-link-server.8765.a7acb8824c6eabd4d6ff0f6c7bebdf91.owner\nhub_owner_token=a7acb8824c6eabd4d6ff0f6c7bebdf91\nhub_pid=640582\nhub_pid_start=proc-start:6af9c450-c2c8-4647-a911-8ab19a296bbf:6748330\nhub_argv_sha256=46f64439b88bfe7bd91c6159a27b6f25faf9b83aea17b177db842688e3ab03bc\n",
+      "release_epoch": "1793135717\n"
+    },
+    {
+      "job": {
+        "job_id": "r002-j0028",
+        "task": "polar-bu-013",
+        "run": 2,
+        "status": "cancelled",
+        "started_at": "2026-10-27T21:14:49.066688+00:00",
+        "finished_at": "2026-10-27T21:16:51.619916+00:00",
+        "attempts": [],
+        "task_status": "INFRA_ERROR",
+        "infra_failure": true,
+        "controller_exit_code": 143
+      },
+      "card": {
+        "run_id": "20261027-211452-477499",
+        "controller_exit_code": 143,
+        "code": "",
+        "per_task": [
+          {
+            "name": "polar-bu-013",
+            "status": "error",
+            "duration_s": null,
+            "cost_usd": null,
+            "agent_url": null,
+            "agent_id": null,
+            "failure_reason": "no current run artifact produced",
+            "lifecycle_stage": "released",
+            "tokens_in": 0,
+            "tokens_out": 0,
+            "world_model_mode": null,
+            "fast_mode": null,
+            "infra_usd": null
+          }
+        ]
+      },
+      "lifecycle": {
+        "audit_sha256": "21ef03c331c01573f7d6a698abbac157f67d891265079c7144d0015a9a6b0d4e",
+        "controller_exit_code": 143,
+        "fleet_owner_token": "ec1e78772b0b497e9b847d0aee46df62",
+        "hub_publication_failed": false,
+        "run_id": "20261027-211452-477499",
+        "status": "failed",
+        "version": 1,
+        "workspace_root": "/home/boxes/rose"
+      },
+      "meta": "version=1\nfleet_owner_token=ec1e78772b0b497e9b847d0aee46df62\nrun_id=20261027-211452-477499\napp=navi-whisper-lux-bench\nworkspace_root=/home/boxes/rose\nstatus=provider-teardown-verified\nhub_disposition=retained-exact-owner-transfer-required\nhub_owner_file=/home/boxes/rose/.context/fleet/runs/_hub/agent-link-server.8765.a7acb8824c6eabd4d6ff0f6c7bebdf91.owner\nhub_owner_token=a7acb8824c6eabd4d6ff0f6c7bebdf91\nhub_pid=640582\nhub_pid_start=proc-start:6af9c450-c2c8-4647-a911-8ab19a296bbf:6748330\nhub_argv_sha256=46f64439b88bfe7bd91c6159a27b6f25faf9b83aea17b177db842688e3ab03bc\n",
+      "release_epoch": "1793135717\n"
+    },
+    {
+      "job": {
+        "job_id": "r002-j0029",
+        "task": "polar-bu-014",
+        "run": 2,
+        "status": "cancelled",
+        "started_at": "2026-10-27T21:14:49.074713+00:00",
+        "finished_at": "2026-10-27T21:18:20.311812+00:00",
+        "attempts": [],
+        "task_status": "INFRA_ERROR",
+        "infra_failure": true,
+        "controller_exit_code": 143
+      },
+      "card": {
+        "run_id": "20261027-211452-477517",
+        "controller_exit_code": 143,
+        "code": "",
+        "per_task": [
+          {
+            "name": "polar-bu-014",
+            "status": "error",
+            "duration_s": null,
+            "cost_usd": null,
+            "agent_url": null,
+            "agent_id": null,
+            "failure_reason": "no current run artifact produced",
+            "lifecycle_stage": "released",
+            "tokens_in": 0,
+            "tokens_out": 0,
+            "world_model_mode": null,
+            "fast_mode": null,
+            "infra_usd": null
+          }
+        ]
+      },
+      "lifecycle": {
+        "audit_sha256": "d81e7b8ea19993f2d4f1df54692673294738bd45dc140a680e59155c75ed4c73",
+        "controller_exit_code": 143,
+        "fleet_owner_token": "3df3edf51b1145a19d518900a9d49e2e",
+        "hub_publication_failed": false,
+        "run_id": "20261027-211452-477517",
+        "status": "failed",
+        "version": 1,
+        "workspace_root": "/home/boxes/rose"
+      },
+      "meta": "version=1\nfleet_owner_token=3df3edf51b1145a19d518900a9d49e2e\nrun_id=20261027-211452-477517\napp=navi-whisper-lux-bench\nworkspace_root=/home/boxes/rose\nstatus=provider-teardown-verified\nhub_disposition=retained-exact-owner-transfer-required\nhub_owner_file=/home/boxes/rose/.context/fleet/runs/_hub/agent-link-server.8765.a7acb8824c6eabd4d6ff0f6c7bebdf91.owner\nhub_owner_token=a7acb8824c6eabd4d6ff0f6c7bebdf91\nhub_pid=640582\nhub_pid_start=proc-start:6af9c450-c2c8-4647-a911-8ab19a296bbf:6748330\nhub_argv_sha256=46f64439b88bfe7bd91c6159a27b6f25faf9b83aea17b177db842688e3ab03bc\n",
+      "release_epoch": "1793135717\n"
+    },
+    {
+      "job": {
+        "job_id": "r002-j0030",
+        "task": "polar-bu-015",
+        "run": 2,
+        "status": "cancelled",
+        "started_at": "2026-10-27T21:14:49.080602+00:00",
+        "finished_at": "2026-10-27T21:15:29.909810+00:00",
+        "attempts": [],
+        "task_status": "INFRA_ERROR",
+        "infra_failure": true,
+        "controller_exit_code": 143
+      },
+      "card": {
+        "run_id": "20261027-211451-477531",
+        "controller_exit_code": 143,
+        "code": "",
+        "per_task": [
+          {
+            "name": "polar-bu-015",
+            "status": "error",
+            "duration_s": null,
+            "cost_usd": null,
+            "agent_url": null,
+            "agent_id": null,
+            "failure_reason": "no current run artifact produced",
+            "lifecycle_stage": "released",
+            "tokens_in": 0,
+            "tokens_out": 0,
+            "world_model_mode": null,
+            "fast_mode": null,
+            "infra_usd": null
+          }
+        ]
+      },
+      "lifecycle": {
+        "audit_sha256": "bf408298a38b1dc9c91f4e56421bcba82ec3e8f8c13dd869f6e1947121984aa3",
+        "controller_exit_code": 143,
+        "fleet_owner_token": "167dd03794c74b538877e75cceb39157",
+        "hub_publication_failed": false,
+        "run_id": "20261027-211451-477531",
+        "status": "failed",
+        "version": 1,
+        "workspace_root": "/home/boxes/rose"
+      },
+      "meta": "version=1\nfleet_owner_token=167dd03794c74b538877e75cceb39157\nrun_id=20261027-211451-477531\napp=navi-whisper-lux-bench\nworkspace_root=/home/boxes/rose\nstatus=provider-teardown-verified\nhub_disposition=retained-exact-owner-transfer-required\nhub_owner_file=/home/boxes/rose/.context/fleet/runs/_hub/agent-link-server.8765.a7acb8824c6eabd4d6ff0f6c7bebdf91.owner\nhub_owner_token=a7acb8824c6eabd4d6ff0f6c7bebdf91\nhub_pid=640582\nhub_pid_start=proc-start:6af9c450-c2c8-4647-a911-8ab19a296bbf:6748330\nhub_argv_sha256=46f64439b88bfe7bd91c6159a27b6f25faf9b83aea17b177db842688e3ab03bc\n",
+      "release_epoch": "1793135717\n"
+    }
+  ]
+}

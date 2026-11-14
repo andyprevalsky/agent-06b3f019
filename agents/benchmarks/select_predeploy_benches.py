@@ -15,7 +15,9 @@ Deploy cannot run the full daily suite. Selection rules:
 
 New catalog tasks auto-attach via `deploy_category` (or derived tags). Preferred
 canary order: `deploy_canary: true` → `pre-deploy`/`smoke` → `pipeline-e2e` →
-shorter `timeout_seconds`.
+shorter `timeout_seconds`. Catalog validation (`long_horizon.validate_catalog`
+→ `require_deploy_category`) rejects a ready task that resolves to no known
+category unless it opts out explicitly with `deploy_category: "none"`.
 """
 
 from __future__ import annotations
@@ -86,6 +88,12 @@ KNOWN_DEPLOY_CATEGORIES: frozenset[str] = frozenset(
         "display",
     }
 )
+
+# Explicit opt-out: the task is deliberately never auto-attached to predeploy
+# selection (e.g. a simulated or harness-independent capability measurement).
+# It is selected exactly like a task without a category; validation requires it
+# so that a missing category can never be silent.
+NO_DEPLOY_CATEGORY = "none"
 
 TAG_TO_CATEGORY: dict[str, str] = {
     "payment": "payment",
@@ -178,6 +186,7 @@ class TaskRef:
     deploy_category: str | None
     deploy_canary: bool
     raw: dict[str, Any]
+    deploy_opt_out: bool = False
 
     @property
     def local_only(self) -> bool:
@@ -225,45 +234,47 @@ class Selection:
         return len(self.selected)
 
 
+def task_ref_from_entry(item: dict[str, Any]) -> TaskRef:
+    """Parse one catalog entry; rejects an unknown `deploy_category`."""
+    quarantine = item.get("deploy_quarantine")
+    if quarantine is not None and (not isinstance(quarantine, str) or not quarantine.strip()):
+        raise ValueError(f"{item['name']}: deploy_quarantine must be a nonempty reason")
+    tags = tuple(str(t) for t in (item.get("tags") or []))
+    timeout = item.get("timeout_seconds")
+    try:
+        timeout_i = int(timeout) if timeout is not None else 10_000
+    except (TypeError, ValueError):
+        timeout_i = 10_000
+    deploy_category = item.get("deploy_category")
+    deploy_opt_out = False
+    if deploy_category is not None:
+        deploy_category = str(deploy_category)
+        if deploy_category == NO_DEPLOY_CATEGORY:
+            deploy_category, deploy_opt_out = None, True
+        elif deploy_category not in KNOWN_DEPLOY_CATEGORIES:
+            raise ValueError(
+                f"{item['name']}: unknown deploy_category {deploy_category!r}; "
+                f"known={sorted(KNOWN_DEPLOY_CATEGORIES)} or {NO_DEPLOY_CATEGORY!r} to opt out"
+            )
+    return TaskRef(
+        name=str(item["name"]),
+        tags=tags,
+        group=(str(item["group"]) if item.get("group") is not None else None),
+        status=(str(item["status"]) if item.get("status") is not None else None),
+        bench=(str(item["bench"]) if item.get("bench") is not None else None),
+        timeout_seconds=timeout_i,
+        deploy_category=deploy_category,
+        deploy_canary=bool(item.get("deploy_canary")),
+        raw=item,
+        deploy_opt_out=deploy_opt_out,
+    )
+
+
 def load_tasks(catalog: Path) -> list[TaskRef]:
     raw = json.loads(catalog.read_text())
     if not isinstance(raw, list):
         raise ValueError(f"{catalog}: expected a JSON array")
-    tasks: list[TaskRef] = []
-    for item in raw:
-        if not isinstance(item, dict) or not item.get("name"):
-            continue
-        quarantine = item.get("deploy_quarantine")
-        if quarantine is not None and (not isinstance(quarantine, str) or not quarantine.strip()):
-            raise ValueError(f"{item['name']}: deploy_quarantine must be a nonempty reason")
-        tags = tuple(str(t) for t in (item.get("tags") or []))
-        timeout = item.get("timeout_seconds")
-        try:
-            timeout_i = int(timeout) if timeout is not None else 10_000
-        except (TypeError, ValueError):
-            timeout_i = 10_000
-        deploy_category = item.get("deploy_category")
-        if deploy_category is not None:
-            deploy_category = str(deploy_category)
-            if deploy_category not in KNOWN_DEPLOY_CATEGORIES:
-                raise ValueError(
-                    f"{item['name']}: unknown deploy_category {deploy_category!r}; "
-                    f"known={sorted(KNOWN_DEPLOY_CATEGORIES)}"
-                )
-        tasks.append(
-            TaskRef(
-                name=str(item["name"]),
-                tags=tags,
-                group=(str(item["group"]) if item.get("group") is not None else None),
-                status=(str(item["status"]) if item.get("status") is not None else None),
-                bench=(str(item["bench"]) if item.get("bench") is not None else None),
-                timeout_seconds=timeout_i,
-                deploy_category=deploy_category,
-                deploy_canary=bool(item.get("deploy_canary")),
-                raw=item,
-            )
-        )
-    return tasks
+    return [task_ref_from_entry(item) for item in raw if isinstance(item, dict) and item.get("name")]
 
 
 def standing_skip_eligibility(tasks: Sequence[TaskRef], selected: Sequence[str]) -> dict[str, list[str]]:
@@ -343,6 +354,34 @@ def categories_for_task(task: TaskRef) -> set[str]:
             if cat in KNOWN_DEPLOY_CATEGORIES:
                 cats.add(str(cat))
     return cats
+
+
+def require_deploy_category(item: dict[str, Any]) -> None:
+    """Fail when a ready catalog entry cannot auto-attach to predeploy selection.
+
+    A ready task must resolve to a known category (`deploy_category`, a mapped
+    tag, `deploy_categories` or `smoke`) or opt out explicitly with
+    `deploy_category: "none"`. An opt-out must not also derive a category or be
+    a canary, so it can never silently remove existing coverage.
+    """
+    task = task_ref_from_entry(item)
+    categories = categories_for_task(task)
+    if task.deploy_opt_out:
+        conflicts = sorted(categories) + (["deploy_canary"] if task.deploy_canary else [])
+        if conflicts:
+            raise ValueError(
+                f"{task.name}: deploy_category {NO_DEPLOY_CATEGORY!r} opts out of predeploy selection, "
+                f"but the task also derives {conflicts}; remove the opt-out or those markers"
+            )
+        return
+    if (task.status or "ready") != "ready" or categories:
+        return
+    raise ValueError(
+        f"{task.name}: ready task resolves to no predeploy deploy category, so /deploy can never "
+        f"auto-attach it. Set deploy_category to one of {sorted(KNOWN_DEPLOY_CATEGORIES)} (or add a "
+        f"tag mapped in TAG_TO_CATEGORY), or set deploy_category {NO_DEPLOY_CATEGORY!r} to opt out of predeploy "
+        "selection explicitly."
+    )
 
 
 def discover_changed_files(repo_root: Path, explicit: Sequence[str] | None = None) -> list[str]:

@@ -4,6 +4,26 @@ JEV progress optimization
 This offline experiment changes no production prompts or sidebar behavior.
 It evaluates JEV 1.13.0 through TypeSafe and uses GPT-6.1-Sol on OpenRouter
 for reflective prompt proposals. It is GEPA-style, not the GEPA package.
+The owner goal is to optimize progress AND ETA in one loop, including how the
+incoming prefix is formatted, refreshed weekly from production.
+
+Runtime integration shipped separately (9347c525af per-turn asynchronous
+estimates through the existing realtime channels and sidebar ring; c3ffc0092d
+DEMO replays skip the live estimate). It reads the pinned prompt in
+agents/config/jev_progress_prompt.json (candidate-165). This research loop never
+edits that file or deploys a prompt; promoting a new champion is a reviewed
+source change.
+
+Hard rules:
+- Never commit production traces, datasets, raw responses or receipts: they
+  contain users' private messages. Keep them encrypted in R2 or under the
+  ignored .context/ directory. Never commit or print credentials.
+- Never rerun bootstrap, reset the watermark, regenerate validation membership
+  or restart from the generic seed to improve scores.
+- Never relabel unknown outcomes as successes, and never remove a trace only
+  because it ran a long time.
+- Every progress report includes the updated graph: one value per iteration
+  for average progress error and ETA error.
 
 Prerequisites:
 - The repository agents/venv, including tiktoken.
@@ -93,7 +113,11 @@ R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_BUCKET_TRACE_ARCHIVE and
 TRACE_ARCHIVE_ENCRYPTION_KEY_B64 use the existing private trace bucket.
 Production DB comes from explicit JEV_PROD_DATABASE_URL or back-end/.env's
 DATABASE_URL, not the commonly injected local development DATABASE_URL.
-All SQL runs with default_transaction_read_only and a 25-second timeout.
+All SQL runs with default_transaction_read_only and a 25-second statement
+timeout set through startup PGOPTIONS, and production.py also wraps every query
+in explicit BEGIN READ ONLY / ROLLBACK: transaction-pooling proxies may ignore
+startup PGOPTIONS. Behind such a proxy the read-only transaction still holds,
+but only the 90-second psql subprocess timeout bounds a query.
 
 One-time bootstrap (fails if an existing research head is present):
   agents/venv/bin/python scripts/jev_progress/weekly.py bootstrap --dataset .context/progress-jev-xp/training-success-v2 --prompt .context/progress-jev-xp/optimization/winner.json
@@ -104,7 +128,8 @@ Each run restores the champion (including input format), acquisition filters,
 fixed validation IDs and groups, retained Pareto prompts, next mutation number,
 joint scoring protocol, per-run budget, corpus, exclusions and watermark.
 Warm-start prompts are re-evaluated on current development data before selecting
-parents. Saved historical scores are never substituted for current scores.
+parents. Saved historical scores are provenance only and are never substituted
+for current scores.
 The optimizer writes optimizer-state.json after each completed mutation.
 --iterations N explicitly changes and persists the per-run budget; omit it to
 retain the last setting. Protocol mismatches fail closed, never reset to defaults.
@@ -129,8 +154,10 @@ the frozen incoming champion. Identical goals and all descendants stay in one
 split; repeats are excluded, sealed rows never enter optimization. Receipts
 are create-only; the state pointer advances conditionally to reject races.
 Only afterwards does the training split drive joint prompt/format mutation.
-The next week's new data evaluates that candidate prospectively. Empty
-cohorts are reported as empty, never as perfect accuracy. Nothing auto-deploys.
+The next week's new data evaluates that candidate prospectively. Sealed
+prefixes never reach reflection, validation or candidate selection. Report
+sample sizes, coverage and failures explicitly; empty cohorts are reported as
+empty, never as perfect accuracy. Nothing auto-deploys.
 
 Current fresh pull handles persistent root and child agents with verified
 terminal completion. It rejects missing/archived tool histories, and does NOT
@@ -180,3 +207,54 @@ Reproduce the explicit dataset/checkpoint migration:
 These are versioned one-time operations. Do not rerun checkpoint migration or
 reset a dataset to work around the success gate. The normal continuation
 remains weekly.py run, restoring the cleaned durable checkpoint.
+
+Recorded results (historical; reproduce from receipts, do not reuse as fresh scores)
+----------------------------------------------------------------------------------
+Pre-cleanup historical corpus (now quarantined): 8,000 training / 2,000 test
+prefixes from 1,615 completed traces; development used 256 training and 500
+validation prefixes grouped by root family AND normalized goal. Progress is the
+fraction of actually issued tool batches; ETA is time to the final own
+completion-tool receipt. The sample is not a random production census and
+repeated prefixes are correlated. Distribution audit: 125/179 held-out traces
+have two tool batches; of 499 prefixes in the 50-60% bin, 449 are exactly 50%
+(369 from two-batch traces, 186 from one root family). These are
+event-weighted counts, not time occupancy or semantic completion.
+
+Model and objective: remaining-batch anchors 0,1,2,3,5,8,13,21,34,55+ give
+progress = observed/(observed+expected remaining). ETA options are every minute
+1-59, hour 1-23, day 1-29, month 1-11 (30-day) and 1 year, so the one-minute
+minimum cannot represent zero-time cases exactly. The reflector runs at low
+reasoning effort. Labels, bins and decoding stay frozen.
+
+Format ablation chose the JSON-lines timeline with prefix-derived elapsed time
+and observed tool counts; compact first-2/latest-8 saved tokens but hurt
+accuracy. Final paired 2,000-case test (1,744 ETA labels, tainted corpus):
+progress MAE 18.56->14.45pp; within +/-10pp 38.0%->52.25%; empirical 65% band
++/-22.12->+/-17.57pp; 95% band +/-46.54->+/-48.52pp (coverage bands, not
+sigma). ETA log error 2.0435->2.0741 (worse), median relative error
+98.89%->98.40%, mean absolute error 18.18h->43.25h: no ETA improvement is
+claimed. Long waits are badly underestimated and some 15-104 minute jobs were
+called one year. Never use that test to select further mutations.
+
+35x5 parallel batch: all 175 candidates finished in 41.74 minutes; its original
+winner was candidate-165 (joint ratio 0.990991) on the tainted corpus. After
+the success-only cleanup the existing prompt is carried forward, not declared
+the clean-data winner. The user authorized report-only per-iteration test
+evaluations: all five frozen, validation-selected candidates have clean-cohort
+results in .context/progress-jev-xp/batch-35x5-clean-report/summary.json on
+the same 1,572 test / 164 validation prefixes; test results never enter
+mutation or selection.
+
+Previous-prediction ablation (500 validation prefixes, a prior estimate in
+457): one-step conditioning moved progress MAE 14.99->15.25pp and ETA log error
+1.726->1.683 (joint 0.06% worse); recursive sampled-prefix feedback gave
+15.31pp / 1.688 (0.17% worse). Keep it off by default.
+
+DeepSeek comparison (2026-10-21, pinned deepseek/deepseek-v4.1-flash-1017,
+reasoning off, same frozen instructions and 500 validation prefixes, 171 ETA
+labels): progress MAE JEV 14.99pp vs 18.46pp; within 10pp 44.4% vs 38.6%; ETA
+log error 1.726 vs 1.673; combined normalized error 1.0522 (DeepSeek 5.22%
+worse); mean absolute ETA error 51.47h vs 13.07m (one JEV 1-year outlier).
+OpenRouter reported $0.52584 for all 500 cases, median latency 0.995s. JEV
+stays the research incumbent; this is not a held-out or DeepSeek-tuned
+comparison. Encrypted receipt: jev-research/v1/objects/79300ede5bad8ebe3195cd648a1a97601557038cbc36552c59a1b2e4fd670f37.

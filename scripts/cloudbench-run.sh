@@ -206,6 +206,7 @@ CODEX_AUTH_ADMISSION_TOKEN=""
 CODEX_AUTH_HELPER="${CLOUDBENCH_CODEX_AUTH_HELPER:-$CONTROL_DIR/cloudbench-codex-auth.py}"
 HEARTBEAT_SLEEP_PID=""
 STACK_PID=""
+STACK_LAUNCH_ATTEMPTED=0
 STACK_NATIVE_IDENTITY=""
 TAIL_PID=""
 GUEST_DIAGNOSTICS_PID=""
@@ -288,6 +289,18 @@ publish_cleanup_ack() {
             return 1
         fi
     fi
+    if [ "${STACK_LAUNCH_ATTEMPTED:-1}" = 0 ] && [ -z "${STACK_PID:-}" ] \
+        && [ -z "${ACTIVE_COMMAND_PID:-}" ]; then
+        # This driver can exit during dependency setup, before run.sh creates
+        # services.json. Preserve that truthful terminal phase before the ACK.
+        local seal="$DATA_DIR/cloudbench-prestack-${CLOUDBENCH_RUN_TOKEN}.sealed"
+        local seal_temporary="${seal}.tmp.$$"
+        for artifact in services.json run.json stack.log logs/backend.log logs/worker.log; do
+            [ ! -e "$CONTEXT_DIR/$artifact" ] && [ ! -L "$CONTEXT_DIR/$artifact" ] || return 1
+        done
+        printf '%s\n' "$CLOUDBENCH_RUN_TOKEN" > "$seal_temporary" \
+            && mv -f "$seal_temporary" "$seal" || return 1
+    fi
     printf '%s\n' "${CLOUDBENCH_RUN_TOKEN:-boot}" > "$temporary" \
         && mv -f "$temporary" "$CLEANUP_ACK_FILE"
 }
@@ -329,7 +342,64 @@ cleanup_stack() {
     fi
     exit "$original_rc"
 }
-trap cleanup_stack EXIT
+# Establish run ownership before installing cleanup traps. Existing snapshot
+# evidence is retained outside the current context, never deleted or adopted.
+CONTEXT_CUSTODY_READY=0
+prepare_current_context() {
+    [ "$CONTEXT_CUSTODY_READY" = 0 ] || return 0
+    # A new checkout must stay absent/empty until fetch-ref has admitted it.
+    [ -d "$REPO_DIR/.git" ] || return 0
+    [ -n "$CLOUDBENCH_RUN_TOKEN" ] || return 1
+    python3 - "$REPO_DIR" "$DATA_DIR" "$CLOUDBENCH_RUN_TOKEN" <<'PY'
+import os
+from pathlib import Path
+import re
+import sys
+repo, data = map(Path, sys.argv[1:3])
+token = sys.argv[3]
+if not re.fullmatch(r"[A-Za-z0-9._-]+", token):
+    raise SystemExit("invalid context custody token")
+# No symlink traversal or ambiguous aliasing of retained/current evidence.
+for path in (repo, data, repo / ".context", repo / ".context/cloudbench"):
+    if path.is_symlink() or path.absolute() != path.resolve():
+        raise SystemExit("noncanonical context custody path")
+context = repo / ".context/cloudbench"
+archive = data / ("cloudbench-prior-context-" + token)
+if archive.exists() or archive.is_symlink():
+    raise SystemExit("context custody already entered; preserve partials")
+if context.exists() and not context.is_dir():
+    raise SystemExit("unexpected context object")
+# An exclusive destination is also the one-shot admission record. Failure after
+# entering it is ambiguous, never permission to move another context on retry.
+archive.mkdir(mode=0o700)
+def sync(path):
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+sync(data)
+if context.exists():
+    os.rename(context, archive / "cloudbench")
+    sync(archive)
+    sync(context.parent)
+context.mkdir(parents=True, mode=0o700)
+sync(context)
+sync(context.parent)
+sync(repo)
+sync(data)
+PY
+    [ "$?" = 0 ] || return 1
+    CONTEXT_CUSTODY_READY=1
+}
+
+# Environment inspection acquires no execution context and installs no cleanup traps.
+if [ "${CLOUDBENCH_PRINT_TASK_ENV:-0}" != 1 ]; then
+    if [ -d "$REPO_DIR/.git" ]; then
+        prepare_current_context || { log "FATAL: context custody admission failed; preserving evidence"; exit 1; }
+    fi
+    trap cleanup_stack EXIT
+fi
 
 request_graceful_shutdown() {
     local signal_rc=0 signal_ignored_mask="unreadable" signal_caught_mask="unreadable" signal_process_group="unreadable"
@@ -367,13 +437,15 @@ request_graceful_shutdown() {
     # EXIT cleanup still drains run.sh (if started) before publishing the ack.
     exit 143
 }
-trap request_graceful_shutdown HUP INT TERM
+if [ "${CLOUDBENCH_PRINT_TASK_ENV:-0}" != 1 ]; then
+    trap request_graceful_shutdown HUP INT TERM
 
-# The status service persists a request before signalling, so a request racing
-# driver launch is consumed here rather than starting a benchmark after teardown.
-if [ -e "$SHUTDOWN_REQUEST_FILE" ]; then
-    log "shutdown request preceded driver startup; honoring it without launching a benchmark"
-    exit 143
+    # The status service persists a request before signalling, so a request racing
+    # driver launch is consumed here rather than starting a benchmark after teardown.
+    if [ -e "$SHUTDOWN_REQUEST_FILE" ]; then
+        log "shutdown request preceded driver startup; honoring it without launching a benchmark"
+        exit 143
+    fi
 fi
 
 # stack_wait_budget_seconds: the box's fallback-safe stack-health ceiling. A
@@ -770,11 +842,10 @@ if [ ! -d "$REPO_DIR/.git" ]; then
 fi
 cd "$REPO_DIR" || { log "FATAL: cannot cd $REPO_DIR"; finish 1; }
 
-# Snapshot clones retain the source machine's ignored .context tree. Clear it
-# before any setup step that can fail so an infrastructure error can never be
-# presented as a benchmark result from the snapshot's previous run.
-rm -rf "$CONTEXT_DIR"
-mkdir -p "$CONTEXT_DIR"
+# Fresh checkouts reach this boundary only after native empty-checkout admission.
+# Existing checkouts already entered it before the traps; never rotate a second
+# time, since anything written after that boundary belongs to this run.
+prepare_current_context || { log "FATAL: context custody admission failed; preserving evidence"; finish 1; }
 chown -R "$APP_USER:$APP_USER" "$REPO_DIR/.context"
 touch "$RUN_OUTPUT_MARKER"
 printf '%s\n' "$$" > "$DATA_DIR/cloudbench-driver.pid"
@@ -1266,6 +1337,9 @@ fi
 if [ "$BENCH_NEEDS_AGENTCARD_ONBOARDING" = "1" ]; then
     STACK_ENV+=("AGENTCARD_ONBOARDING_RETURN_URL=$AGENTCARD_BENCHMARK_ONBOARDING_RETURN_URL")
 fi
+if [ "$BENCH_SIMULATE" != "1" ] && { [ "$BENCH_NEEDS_PAYMENT_FIXTURE" = "1" ] || [ "$BENCH_NEEDS_NEW_USER_CHECKOUT" = "1" ]; }; then
+    STACK_ENV+=("BENCHMARK_AGENTCARD_WORLD_IDENTITY=true")
+fi
 if [ "$BENCH_NEEDS_PAYMENT_FIXTURE" = "1" ]; then
     STACK_ENV+=(
         "BENCHMARK_FORCE_CUSTOMER_PURCHASE_PATH=1"
@@ -1371,6 +1445,7 @@ fi
 # End cloud guest Kernel proxy custody
 log "launching stack (run.sh --benchmark) — base_port=$BASE_PORT wmh_port=$WMH_PORT workspace=$WORKSPACE_NAME simulate=$BENCH_SIMULATE"
 rm -f "$STACK_CLEANUP_STATUS_FILE"
+STACK_LAUNCH_ATTEMPTED=1
 gosu "$APP_USER" env "${STACK_ENV[@]}" bash "$REPO_DIR/scripts/run.sh" --benchmark > "$STACK_LOG" 2>&1 &
 STACK_PID=$!
 if ! STACK_NATIVE_IDENTITY="$(python3 "$CONTROL_DIR/process-identity.py" "$STACK_PID")" \
@@ -1492,6 +1567,18 @@ PY
 python3 "$REPO_DIR/scripts/cloudbench-guest-diagnostics.py" "$CONTEXT_DIR/guest-diagnostics.jsonl" \
     "$STACK_DB_URL" "${DB_CONNECTION_LIMIT:-30}" 15 2880 >/dev/null 2>&1 &
 GUEST_DIAGNOSTICS_PID=$!
+if [ "$BENCH_SIMULATE" != "1" ] && { [ "$BENCH_NEEDS_PAYMENT_FIXTURE" = "1" ] || [ "$BENCH_NEEDS_NEW_USER_CHECKOUT" = "1" ]; }; then
+    BENCHMARK_AGENTCARD_V2_USER_ID="$(python3 - "$MANIFEST" "$WORKSPACE_NAME" <<'PY_WORLD_ID'
+import json, re, sys
+row=json.load(open(sys.argv[1])).get('agentcard_world_identity',{})
+assert row.get('version')==1 and row.get('worldId')==sys.argv[2]
+assert row.get('livemode') is False and row.get('fundsSource')=='company_flow'
+assert re.fullmatch(r'usr_[A-Za-z0-9_-]+',row.get('providerUserId',''))
+print(row['providerUserId'])
+PY_WORLD_ID
+)" || { log "FATAL: no verified native AgentCard world identity"; finish 1; }
+    export BENCHMARK_AGENTCARD_V2_USER_ID
+fi
 if [ "$BENCH_NEEDS_PAYMENT_FIXTURE" = "1" ]; then
     PAYMENT_USER_ID="${BENCHMARK_AGENT_PAYMENT_USER_ID:-1f85ff25-6e29-4c1b-8739-f917bd101a30}"
     log "seeding isolated payment fixture for $PAYMENT_USER_ID"
@@ -1499,6 +1586,7 @@ if [ "$BENCH_NEEDS_PAYMENT_FIXTURE" = "1" ]; then
         DATABASE_URL="$STACK_DB_URL" \
         DIRECT_URL="$STACK_DB_URL" \
         BENCHMARK_FORCE_CUSTOMER_PURCHASE_PATH=1 \
+        BENCHMARK_AGENTCARD_V2_USER_ID="${BENCHMARK_AGENTCARD_V2_USER_ID:-}" \
         sh -c 'cd "$1" && exec npx tsx scripts/setup-benchmark-payment.ts --user-id "$2"' \
           sh "$REPO_DIR/back-end" "$PAYMENT_USER_ID"; then
         log "FATAL: setup-benchmark-payment.ts failed for $PAYMENT_USER_ID"
@@ -1712,6 +1800,9 @@ if [ -n '$BENCHMARK_REPORT_FRONTEND_URL' ]; then
   export BENCHMARK_REPORT_FRONTEND_URL='$BENCHMARK_REPORT_FRONTEND_URL'
 else
   unset BENCHMARK_REPORT_FRONTEND_URL
+fi
+if [ '$BENCH_SIMULATE' != '1' ] && { [ '$BENCH_NEEDS_PAYMENT_FIXTURE' = '1' ] || [ '$BENCH_NEEDS_NEW_USER_CHECKOUT' = '1' ]; }; then
+  export BENCHMARK_AGENTCARD_V2_USER_ID='${BENCHMARK_AGENTCARD_V2_USER_ID:-}'
 fi
 if [ '$BENCH_NEEDS_AGENTCARD_ONBOARDING' = '1' ]; then
   export AGENTCARD_ONBOARDING_RETURN_URL='$AGENTCARD_BENCHMARK_ONBOARDING_RETURN_URL'

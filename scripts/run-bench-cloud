@@ -1380,7 +1380,8 @@ github_token_can_fetch_repo() {
 # Try candidates in priority order until one passes Contents validation so an
 # invalid DISPATCH value cannot block a later valid GITHUB_TOKEN.
 resolve_durable_github_token() {
-    local candidates=() t
+    # Optional arguments were already checked by this resolution only.
+    local candidates=() checked=("$@") t previous
     t="$(grep -E '^GITHUB_DISPATCH_TOKEN=' back-end/.env 2>/dev/null | head -1 | cut -d= -f2- | sed 's/^["'\'']//; s/["'\'']$//')"
     [ -n "$t" ] && candidates+=("$t")
     t="$(grep -E '^GITHUB_DISPATCH_TOKEN=' agents/.env 2>/dev/null | head -1 | cut -d= -f2- | sed 's/^["'\'']//; s/["'\'']$//')"
@@ -1390,6 +1391,10 @@ resolve_durable_github_token() {
     t="$(grep -E '^GITHUB_TOKEN=' agents/.env 2>/dev/null | head -1 | cut -d= -f2- | sed 's/^["'\'']//; s/["'\'']$//')"
     [ -n "$t" ] && candidates+=("$t")
     for t in "${candidates[@]}"; do
+        for previous in "${checked[@]}"; do
+            [ "$t" != "$previous" ] || continue 2
+        done
+        checked+=("$t")
         if github_token_can_fetch_repo "$t"; then
             printf '%s' "$t"
             return 0
@@ -1405,7 +1410,7 @@ resolve_durable_github_token() {
 # resolve_durable_github_token (DISPATCH first). Validate Contents access before
 # accepting any candidate. Never print the value.
 resolve_github_token() {
-    local candidates=() t decoded gh_tok
+    local candidates=() checked=() t previous decoded gh_tok
     if [ -n "${CLOUDBENCH_GITHUB_TOKEN_B64:-}" ]; then
         decoded="$(printf '%s' "$CLOUDBENCH_GITHUB_TOKEN_B64" | base64 -d 2>/dev/null || true)"
         [ -n "$decoded" ] && candidates+=("$decoded")
@@ -1418,15 +1423,21 @@ resolve_github_token() {
     [ -n "$gh_tok" ] && candidates+=("$gh_tok")
     t="${GITHUB_TOKEN:-${GH_TOKEN:-}}"
     [ -n "$t" ] && candidates+=("$t")
-    t="$(resolve_durable_github_token)"
-    [ -n "$t" ] && candidates+=("$t")
-
     for t in "${candidates[@]}"; do
+        for previous in "${checked[@]}"; do
+            [ "$t" != "$previous" ] || continue 2
+        done
+        checked+=("$t")
         if github_token_can_fetch_repo "$t"; then
             printf '%s' "$t"
             return 0
         fi
     done
+    # Resolve the lower-priority durable tier only after earlier candidates fail.
+    # It already validates Contents access; do not probe its result again.
+    if resolve_durable_github_token "${checked[@]}"; then
+        return 0
+    fi
     # Every candidate above can be Andy's one user identity; once its quota is
     # drained none of them can fetch. The token pool's pick adds the org GitHub
     # App (an hourly installation token), so it is tried last and only for this
@@ -1629,31 +1640,8 @@ resolve_prod_backend_browser_provider() {
 }
 
 resolve_prod_worker_browser_provider() {
-    local machines err
-    # The worker fallback marker must come from production, never local source files.
-    err="$(mktemp)"
-    if machines="$(FLY machines list -a "$PROD_APP" --json 2>"$err")"; then
-        rm -f "$err"
-        printf '%s' "$machines" | python3 -c '
-import json, sys
-machines = json.load(sys.stdin) or []
-values = [
-    str(((machine.get("config") or {}).get("env") or {}).get("BROWSER_PROVIDER") or "").strip().lower()
-    for machine in machines
-]
-if not machines or any(not value for value in values):
-    raise SystemExit("FATAL: every production Fly worker must expose BROWSER_PROVIDER")
-providers = set(values)
-if len(providers) != 1:
-    raise SystemExit(f"FATAL: production Fly workers do not expose one BROWSER_PROVIDER: {sorted(providers)!r}")
-print(next(iter(providers)))
-'
-        return
-    fi
-    cat "$err" >&2 || true
-    rm -f "$err"
-    echo "FATAL: could not read production Fly worker configuration" >&2
-    return 1
+    # Machine config omits app-secret overlays. Observe only already-started workers.
+    python3 "$ROOT_DIR/scripts/worker_pool_runtime.py" --browser-provider "$PROD_APP"
 }
 
 validate_environment_contract() {
@@ -1992,6 +1980,79 @@ inject_secrets() {
     return "$status"
 }
 
+# Shared native child deadline must be defined before --verify-secrets exits.
+# Hard timeout wrapper (macOS has no `timeout`). Own the child process explicitly:
+# SIGALRM is not a reliable contract across exec (a stopped-machine flyctl SSH
+# ignored it for 2h22m), which prevented the outer run deadline from being read.
+_with_timeout() {  # _with_timeout <secs> <cmd> [args...]
+    local mutation_launch_code=""
+    [ "${BOOT_CONFIG_UPDATE_SLOT_SHARED:-0}" != 1 ] || mutation_launch_code="$(cloudbench_mutation_launch_code)"
+    CLOUDBENCH_TIMEOUT_NATIVE_LAUNCH_CODE="$mutation_launch_code" \
+    CLOUDBENCH_TIMEOUT_NATIVE_MUTATION="${BOOT_CONFIG_UPDATE_SLOT_SHARED:-0}" \
+    CLOUDBENCH_TIMEOUT_NATIVE_LEASE="${BOOT_CONFIG_UPDATE_SLOT:-}" \
+    CLOUDBENCH_TIMEOUT_NATIVE_OWNER_PID="$$" \
+    CLOUDBENCH_TIMEOUT_NATIVE_OWNER_START="${MUTATION_OWNER_PID_START:-}" \
+    CLOUDBENCH_TIMEOUT_NATIVE_ROOT="${CLOUDBENCH_CAPACITY_RESERVATION_ROOT:-${TMPDIR:-/tmp}/rose-cloudbench-capacity-${APP:-}}" \
+    CLOUDBENCH_TIMEOUT_NATIVE_APP="${APP:-}" \
+    CLOUDBENCH_TIMEOUT_NATIVE_HELPER="${CLOUDBENCH_RUNTIME_SCRIPT_ROOT:-}/cloudbench-campaign-mutation.py" python3 -c '
+import os, signal, subprocess, sys
+
+timeout = float(sys.argv[1])
+guarded = os.environ.get("CLOUDBENCH_TIMEOUT_NATIVE_MUTATION") == "1"
+interrupted = None
+proc = None
+
+def native_receipt(action):
+    if guarded:
+        subprocess.run([sys.executable, "-c", os.environ["CLOUDBENCH_TIMEOUT_NATIVE_LAUNCH_CODE"],
+            os.environ["CLOUDBENCH_TIMEOUT_NATIVE_HELPER"], action,
+            "--app", os.environ["CLOUDBENCH_TIMEOUT_NATIVE_APP"],
+            "--root", os.environ["CLOUDBENCH_TIMEOUT_NATIVE_ROOT"],
+            "--owner-pid", os.environ["CLOUDBENCH_TIMEOUT_NATIVE_OWNER_PID"],
+            "--owner-start", os.environ["CLOUDBENCH_TIMEOUT_NATIVE_OWNER_START"],
+            "--lease", os.environ["CLOUDBENCH_TIMEOUT_NATIVE_LEASE"],
+            "--native-owner-pid", str(os.getpid())], check=True)
+
+def joined_receipt():
+    # Tell the caller this attempt reaped its child and wrote join-native;
+    # its exit status alone cannot distinguish that from an unjoined one.
+    path = os.environ.get("CLOUDBENCH_TIMEOUT_NATIVE_JOIN_RECEIPT")
+    if path:
+        os.close(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600))
+
+native_receipt("start-native")
+def stop(signum, _frame):
+    global interrupted
+    interrupted = signum
+    raise InterruptedError()
+for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+    signal.signal(signum, stop)
+try:
+    proc = subprocess.Popen(sys.argv[2:])
+    rc = proc.wait(timeout=timeout)
+except (subprocess.TimeoutExpired, InterruptedError):
+    if interrupted is not None:
+        for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+            signal.signal(signum, signal.SIG_IGN)
+    # An interruption inside Popen has no proven child handle. Retain the
+    # unjoined lease instead of asserting that a native mutation was drained.
+    if proc is None:
+        raise SystemExit(128 + interrupted if interrupted is not None else 124)
+    proc.terminate()
+    try:
+        proc.wait(timeout=1)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+    native_receipt("join-native")
+    joined_receipt()
+    raise SystemExit(128 + interrupted if interrupted is not None else 124)
+native_receipt("join-native")
+joined_receipt()
+raise SystemExit(rc if rc >= 0 else 128 - rc)
+' "$@"
+}
+
 # READ-ONLY env preflight for every RUN path: assert the prod-aligned app
 # secrets exist WITHOUT staging or activating anything, so concurrent
 # workstreams never race each other's environment. Staging/activation lives
@@ -2005,12 +2066,28 @@ inject_secrets() {
 REQUIRED_APP_SECRETS="AGENTS_ENV_B64 BACKEND_ENV_B64 AGENTS_ENV_SHA256 BACKEND_ENV_SHA256 CLOUDBENCH_BROWSER_PROVIDER CLOUDBENCH_WORKER_BROWSER_PROVIDER GITHUB_TOKEN"
 verify_app_environment() {
     local listing missing read_status
-    listing="$(FLY secrets list -a "$APP" --json)" || {
-        read_status=$?
+    local read_timeout="${CLOUDBENCH_APP_ENV_READ_TIMEOUT_SECONDS:-20}"
+    while [ "${read_timeout#0}" != "$read_timeout" ]; do read_timeout="${read_timeout#0}"; done
+    case "$read_timeout" in
+        ''|*[!0-9]*) echo "❌ App environment read timeout must be positive whole seconds." >&2; return 1 ;;
+    esac
+    # The listing is read-only and idempotent: one slow Fly API read (timeout,
+    # exit 124) must not abort a launch, so retry only that, at most 3 attempts
+    # with 2 s / 5 s pauses (worst case 3x timeout + 7 s). Any other exit (auth,
+    # missing app, interrupt) still fails at once.
+    local attempt pause
+    for attempt in 1 2 3; do
+        read_status=0
+        listing="$(_with_timeout "$read_timeout" flyctl secrets list -a "$APP" --json)" || read_status=$?
+        [ "$read_status" = 124 ] && [ "$attempt" -lt 3 ] || break
+        pause=$((attempt == 1 ? 2 : 5))
+        echo "⚠️ App secrets read for $APP timed out after ${read_timeout}s (attempt $attempt/3); retrying in ${pause}s." >&2
+        sleep "$pause"
+    done
+    if [ "$read_status" != 0 ]; then
         echo "❌ Could not read app secrets for $APP (read exit=$read_status)." >&2
-        echo "   One-time setup: bash scripts/run-bench-cloud --setup" >&2
         return 1
-    }
+    fi
     if ! missing="$(printf '%s' "$listing" | REQUIRED="$REQUIRED_APP_SECRETS" python3 -c '
 import json, os, sys
 try:
@@ -2185,78 +2262,6 @@ ssh_exec() {  # ssh_exec <machine_id> <remote-shell-command> [timeout_secs]
 # the session ends and can transiently fail (network blip, machine mid-start), so
 # every poll read is retried a few times. Returns the remote stdout on stdout;
 # returns non-zero only if every attempt failed. $1=machine id, $2=remote command.
-# Hard timeout wrapper (macOS has no `timeout`). Own the child process explicitly:
-# SIGALRM is not a reliable contract across exec (a stopped-machine flyctl SSH
-# ignored it for 2h22m), which prevented the outer run deadline from being read.
-_with_timeout() {  # _with_timeout <secs> <cmd> [args...]
-    local mutation_launch_code=""
-    [ "${BOOT_CONFIG_UPDATE_SLOT_SHARED:-0}" != 1 ] || mutation_launch_code="$(cloudbench_mutation_launch_code)"
-    CLOUDBENCH_TIMEOUT_NATIVE_LAUNCH_CODE="$mutation_launch_code" \
-    CLOUDBENCH_TIMEOUT_NATIVE_MUTATION="${BOOT_CONFIG_UPDATE_SLOT_SHARED:-0}" \
-    CLOUDBENCH_TIMEOUT_NATIVE_LEASE="${BOOT_CONFIG_UPDATE_SLOT:-}" \
-    CLOUDBENCH_TIMEOUT_NATIVE_OWNER_PID="$$" \
-    CLOUDBENCH_TIMEOUT_NATIVE_OWNER_START="${MUTATION_OWNER_PID_START:-}" \
-    CLOUDBENCH_TIMEOUT_NATIVE_ROOT="${CLOUDBENCH_CAPACITY_RESERVATION_ROOT:-${TMPDIR:-/tmp}/rose-cloudbench-capacity-${APP:-}}" \
-    CLOUDBENCH_TIMEOUT_NATIVE_APP="${APP:-}" \
-    CLOUDBENCH_TIMEOUT_NATIVE_HELPER="${CLOUDBENCH_RUNTIME_SCRIPT_ROOT:-}/cloudbench-campaign-mutation.py" python3 -c '
-import os, signal, subprocess, sys
-
-timeout = float(sys.argv[1])
-guarded = os.environ.get("CLOUDBENCH_TIMEOUT_NATIVE_MUTATION") == "1"
-interrupted = None
-proc = None
-
-def native_receipt(action):
-    if guarded:
-        subprocess.run([sys.executable, "-c", os.environ["CLOUDBENCH_TIMEOUT_NATIVE_LAUNCH_CODE"],
-            os.environ["CLOUDBENCH_TIMEOUT_NATIVE_HELPER"], action,
-            "--app", os.environ["CLOUDBENCH_TIMEOUT_NATIVE_APP"],
-            "--root", os.environ["CLOUDBENCH_TIMEOUT_NATIVE_ROOT"],
-            "--owner-pid", os.environ["CLOUDBENCH_TIMEOUT_NATIVE_OWNER_PID"],
-            "--owner-start", os.environ["CLOUDBENCH_TIMEOUT_NATIVE_OWNER_START"],
-            "--lease", os.environ["CLOUDBENCH_TIMEOUT_NATIVE_LEASE"],
-            "--native-owner-pid", str(os.getpid())], check=True)
-
-def joined_receipt():
-    # Tell the caller this attempt reaped its child and wrote join-native;
-    # its exit status alone cannot distinguish that from an unjoined one.
-    path = os.environ.get("CLOUDBENCH_TIMEOUT_NATIVE_JOIN_RECEIPT")
-    if path:
-        os.close(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600))
-
-native_receipt("start-native")
-if guarded:
-    def stop(signum, _frame):
-        global interrupted
-        interrupted = signum
-        raise InterruptedError()
-    for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
-        signal.signal(signum, stop)
-try:
-    proc = subprocess.Popen(sys.argv[2:])
-    rc = proc.wait(timeout=timeout)
-except (subprocess.TimeoutExpired, InterruptedError):
-    if interrupted is not None:
-        for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
-            signal.signal(signum, signal.SIG_IGN)
-    # An interruption inside Popen has no proven child handle. Retain the
-    # unjoined lease instead of asserting that a native mutation was drained.
-    if proc is None:
-        raise SystemExit(128 + interrupted if interrupted is not None else 124)
-    proc.terminate()
-    try:
-        proc.wait(timeout=1)
-    except subprocess.TimeoutExpired:
-        proc.kill()
-        proc.wait()
-    native_receipt("join-native")
-    joined_receipt()
-    raise SystemExit(128 + interrupted if interrupted is not None else 124)
-native_receipt("join-native")
-joined_receipt()
-raise SystemExit(rc if rc >= 0 else 128 - rc)
-' "$@"
-}
 
 ssh_read() {  # ssh_read <machine_id> <remote-shell-command>
     local id="$1" cmd="$2" out="" tries="${SSH_READ_TRIES:-3}"
@@ -2718,6 +2723,60 @@ except Exception: pass' 2>/dev/null); do
     exit 0
 fi
 
+# A fresh REAL volume otherwise fetches its whole tree from GitHub with nothing
+# to negotiate from. Stage a depth-1 bare repository of the build commit in the
+# context; `COPY . /app` bakes it read-only into the image once, and
+# cloudbench-fetch-ref.sh offers it as the fetch's only negotiation tip. It is
+# git-ignored, removed after the build, and only an optimization: a context
+# that is not a Git checkout builds without it.
+IMAGE_GIT_SEED_NAME=.cloudbench-git-seed
+IMAGE_GIT_SEED_OWNER_TOKEN=""
+IMAGE_GIT_SEED_CLEANUP_PID=""
+prepare_image_git_seed_owner() {
+    [ -z "$IMAGE_GIT_SEED_OWNER_TOKEN" ] || return 0
+    IMAGE_GIT_SEED_OWNER_TOKEN="$(python3 -c 'import secrets; print(secrets.token_hex(16))')" || return 1
+    IMAGE_GIT_SEED_CLEANUP_PID="$BASHPID"
+}
+remove_image_git_seed() {
+    # Only the invocation's cleanup parent may retire this context guard,
+    # after joining its publisher. Failed entrants never own another seed.
+    [ "${IMAGE_GIT_SEED_CLEANUP_PID:-}" = "$BASHPID" ] || return 0
+    [ -n "${IMAGE_BUILD_CONTEXT:-}" ] && [ -n "$IMAGE_GIT_SEED_OWNER_TOKEN" ] || return 0
+    local seed="$IMAGE_BUILD_CONTEXT/$IMAGE_GIT_SEED_NAME"
+    [ -d "$seed" ] && [ ! -L "$seed" ] || return 0
+    [ "$(cat "$seed/.cloudbench-seed-owner" 2>/dev/null)" = "$IMAGE_GIT_SEED_OWNER_TOKEN" ] || return 0
+    rm -rf "$seed"
+}
+stage_image_git_seed() {
+    local seed="$IMAGE_BUILD_CONTEXT/$IMAGE_GIT_SEED_NAME" commit
+    prepare_image_git_seed_owner || return 1
+    if ! commit="$(git -C "$IMAGE_BUILD_CONTEXT" rev-parse --verify -q 'HEAD^{commit}' 2>/dev/null)"; then
+        echo "ℹ️  image git seed skipped: build context has no Git HEAD"
+        return 0
+    fi
+    # The fixed directory is also an atomic context-scoped guard. Refuse
+    # existing custody, including unproven leftovers; never replace it.
+    mkdir "$seed" || { echo "❌ image git seed context is occupied: $seed" >&2; return 1; }
+    printf '%s\n' "$IMAGE_GIT_SEED_OWNER_TOKEN" > "$seed/.cloudbench-seed-owner" || {
+        rmdir "$seed" 2>/dev/null || true
+        return 1
+    }
+    git init -q --bare "$seed" \
+        && git -C "$seed" fetch -q --no-tags --depth=1 \
+            --upload-pack="git -c uploadpack.allowAnySHA1InWant=true upload-pack" \
+            "file://$IMAGE_BUILD_CONTEXT" "$commit" \
+        && git -C "$seed" update-ref refs/cloudbench/seed "$commit" \
+        && git -C "$seed" repack -q -a -d \
+        && [ "$(cat "$seed/shallow" 2>/dev/null)" = "$commit" ] \
+        && printf '{"schema": "cloudbench-git-seed-v1", "commit": "%s"}\n' "$commit" \
+            > "$seed/cloudbench-seed.json" || {
+        echo "❌ could not stage the image git seed for $commit" >&2
+        remove_image_git_seed
+        return 1
+    }
+    echo "🌱 image git seed: $commit ($(du -sh "$seed" 2>/dev/null | cut -f1))"
+}
+
 # ═════════════════════════════════════════════════════════════════════════════
 # CLI image-build → native uncached build/push → exact image receipt.
 # Setup consumes that same image builder before donor activation; ordinary
@@ -2753,6 +2812,7 @@ build_warm_image() {
     fi
     local attempt build_ok=0 build_status=0 used_labels=" " build_args=()
     local completion_file="$OUT_DIR/cloudbench-image-publication.json"
+    stage_image_git_seed || return 1
     echo "🏗️  Building dependency image (layer_cache_bypassed=$IMAGE_BUILD_NO_CACHE)..."
     for attempt in 1 2 3; do
         # A failed attempt's remote builder can still publish after its local
@@ -2788,10 +2848,11 @@ build_warm_image() {
             build_status=$?
             # Registry continuation reuses the same built manifest. A failed
             # handoff must not restart dependency installation or hide evidence.
-            [ "$build_status" != 74 ] || return "$build_status"
+            [ "$build_status" != 74 ] || { remove_image_git_seed; return "$build_status"; }
         fi
         [ "$attempt" = 3 ] || sleep 15
     done
+    remove_image_git_seed
     [ "$build_ok" = 1 ] || { echo "Image build failed after 3 attempts" >&2; return 1; }
     IMAGE_REF="$(python3 - "$IMAGE_BUILD_COMPLETION" "registry.fly.io/$APP:$IMAGE_LABEL" <<'PY_IMAGE_REF'
 import json,sys
@@ -2803,7 +2864,10 @@ PY_IMAGE_REF
 }
 
 image_build_input_provenance() {
-    python3 - "$IMAGE_BUILD_CONTEXT" "${IMAGE_BUILD_BUILDER:-native}" <<'PY_INPUTS'
+    local node_fp python_fp
+    node_fp="$(cloudbench_node_dependency_fingerprint "$IMAGE_BUILD_CONTEXT")" || return 1
+    python_fp="$(cloudbench_manifest_fingerprint "$IMAGE_BUILD_CONTEXT" "${CLOUDBENCH_PYTHON_MANIFESTS[@]}")" || return 1
+    python3 - "$IMAGE_BUILD_CONTEXT" "${IMAGE_BUILD_BUILDER:-native}" "$node_fp" "$python_fp" <<'PY_INPUTS'
 import hashlib
 import json
 import os
@@ -2825,6 +2889,8 @@ def git_value(*arguments):
 
 dirty = git_value("status", "--porcelain=v1", "--untracked-files=normal")
 print(json.dumps({
+    "node_dependency_fingerprint": sys.argv[3],
+    "python_dependency_fingerprint": sys.argv[4],
     "build_context": str(context),
     "source_sha": git_value("rev-parse", "HEAD") or "",
     "source_dirty": None if dirty is None else bool(dirty),
@@ -2850,14 +2916,20 @@ if [ "$MODE" = build-image ]; then
         trap '' HUP INT TERM
         # $! also covers a signal between asynchronous launch and PID assignment.
         # Capture native births before signaling; never touch the shared builder.
-        cloudbench_terminate_tree_and_wait "${CLOUDBENCH_CHILD_TERM_SECONDS:-30}" \
-            "${image_build_pid:-${!:-}}" || status=70
+        if cloudbench_terminate_tree_and_wait "${CLOUDBENCH_CHILD_TERM_SECONDS:-30}" \
+            "${image_build_pid:-${!:-}}"; then
+            remove_image_git_seed || status=70
+        else
+            status=70
+            echo "❌ publisher drain unverified; image git seed custody retained" >&2
+        fi
         exit "$status"
     }
     trap image_build_exit EXIT
     trap 'exit 129' HUP
     trap 'exit 130' INT
     trap 'exit 143' TERM
+    prepare_image_git_seed_owner || exit 1
     (
         # Parent owns cancellation and joining; the publisher owns no CLI traps.
         trap - EXIT HUP INT TERM
@@ -2870,6 +2942,17 @@ if [ "$MODE" = build-image ]; then
         # be attributed to an image whose build context was already submitted.
         image_build_provenance="$(image_build_input_provenance)" || exit $?
         build_warm_image || exit $?
+        # An image receipt must not attribute changed dependency inputs to a
+        # publication submitted before those edits.
+        image_build_final_provenance="$(image_build_input_provenance)" || exit 1
+        python3 - "$image_build_provenance" "$image_build_final_provenance" <<'PY_DEP_INPUTS'
+import json, sys
+before, after = map(json.loads, sys.argv[1:])
+for key in ('node_dependency_fingerprint', 'python_dependency_fingerprint'):
+    if before[key] != after[key]:
+        raise SystemExit('Dependency inputs changed during image build; publication is not admitted')
+PY_DEP_INPUTS
+        [ "$?" = 0 ] || exit 1
         image_build_finished="$(date +%s)"
         python3 - "$OUT_DIR/cloudbench-image-build.json" "$IMAGE_REF" \
             "$IMAGE_BUILD_NO_CACHE" "$image_build_provenance" \
@@ -2896,6 +2979,7 @@ PY_RECEIPT
     else
         image_build_status=$?
     fi
+    remove_image_git_seed || image_build_status=70
     trap - EXIT HUP INT TERM
     exit "$image_build_status"
 fi
@@ -2917,6 +3001,7 @@ if [ "$MODE" = "setup" ]; then
     [ -n "$setup_existing_machine" ] || { warm_source_machine_creation_admission; exit 78; }
     ensure_app
     CLOUDBENCH_HOLD_APP_ENV_LOCK=1
+    # Setup has no publisher-tree join owner; interrupted seed custody stays retained.
     trap 'release_app_environment_lock' EXIT
     trap 'release_app_environment_lock; exit 130' INT
     trap 'release_app_environment_lock; exit 143' TERM
@@ -5076,9 +5161,12 @@ assert expected["version"] == 1 and expected["run_token"] == run_token and expec
 files = expected["files"]
 # A guest stopped before launching anything seals only its exact bench.log.
 prelaunch = expected.get("prelaunch") is True
-if prelaunch:
-    required = {"bench.log"}
-    assert set(expected) == {"version", "run_token", "machine_id", "files", "prelaunch"}
+prestack = expected.get("prestack") is True
+no_stack = prelaunch or prestack
+if no_stack:
+    phase = "prelaunch" if prelaunch else "prestack"
+    required = {"bench.log"} if prelaunch else {"bench.log", f"cloudbench-prestack-{run_token}.sealed"}
+    assert set(expected) == {"version", "run_token", "machine_id", "files", phase}
     assert isinstance(files, dict) and set(files) == required
 else:
     required = {"services.json", "run.json", "stack.log", "logs/backend.log", f"cloudbench-stack-cleanup-{run_token}.status"}
@@ -5097,16 +5185,35 @@ assert total <= maximum
 final = parent / "runtime-evidence"
 assert not final.exists() and not final.is_symlink()
 pending = Path(tempfile.mkdtemp(prefix=".runtime-evidence-", dir=parent))
-for name, metadata in files.items():
+# The sealed bundle is immutable and each file is proven by its manifest hash
+# and the final manifest re-read, not by the transport. A transient transport
+# read of sealed bytes (one 6 s socket stall or an early EOF through the status
+# proxy) is retried from the start of that read a bounded number of times;
+# HTTP statuses, oversized bodies and hash mismatches still fail closed at once.
+SEALED_READ_ATTEMPTS = 3
+def sealed_read(label, read):
+    for attempt in range(1, SEALED_READ_ATTEMPTS + 1):
+        try:
+            return read()
+        except urllib.error.HTTPError:
+            raise
+        except (urllib.error.URLError, TimeoutError, ConnectionError) as error:
+            if attempt == SEALED_READ_ATTEMPTS:
+                raise
+            print(f"⚠️  sealed runtime evidence read {label} attempt {attempt}/{SEALED_READ_ATTEMPTS} "
+                  f"failed: {error!r}; retrying", file=sys.stderr)
+        time.sleep(attempt)
+def download(name, metadata):
     target = pending / name
-    target.parent.mkdir(parents=True, exist_ok=True)
+    target.unlink(missing_ok=True)
     digest = hashlib.sha256()
     remaining = metadata["bytes"]
     with request("?" + urllib.parse.urlencode({"file": name})) as response, target.open("xb") as output:
         assert response.status == 200 and response.headers.get("Content-Length") == str(remaining)
         while remaining:
             chunk = response.read(min(65536, remaining))
-            assert chunk, "runtime evidence response ended early"
+            if not chunk:
+                raise ConnectionError("runtime evidence response ended early")
             output.write(chunk)
             digest.update(chunk)
             remaining -= len(chunk)
@@ -5114,7 +5221,12 @@ for name, metadata in files.items():
         output.flush()
         os.fsync(output.fileno())
     assert digest.hexdigest() == metadata["sha256"], "runtime evidence hash mismatch"
-if prelaunch:
+for name, metadata in files.items():
+    (pending / name).parent.mkdir(parents=True, exist_ok=True)
+    sealed_read(name, lambda: download(name, metadata))
+if no_stack:
+    if prestack:
+        assert (pending / f"cloudbench-prestack-{run_token}.sealed").read_bytes() == (run_token + "\n").encode()
     with (pending / "bench.log").open("rb") as log:
         stamp = ("RUNSTAMP-" + run_token + "\n").encode()
         assert log.read(len(stamp)) == stamp, "pre-launch log belongs to another run"
@@ -5123,7 +5235,7 @@ else:
     count = services["env"]["worker_processes"]
     assert services["status"] == "stopped" and type(count) is int and 1 <= count <= 1024
     assert set(files) - OPTIONAL == required | {"logs/worker.log", *(f"logs/worker.{i}.log" for i in range(1, count))}
-assert manifest() == expected, "runtime evidence changed across collection"
+assert sealed_read("manifest", manifest) == expected, "runtime evidence changed across collection"
 with (pending / "manifest.json").open("x") as output:
     json.dump(expected, output, sort_keys=True)
     output.write("\n")
@@ -5131,7 +5243,7 @@ with (pending / "manifest.json").open("x") as output:
     os.fsync(output.fileno())
 # Persist child directory entries before acknowledging the published capture.
 # File fsync alone does not make their names durable across controller failure.
-for directory in ((pending,) if prelaunch else (pending / "logs", pending)):
+for directory in ((pending,) if no_stack else (pending / "logs", pending)):
     descriptor = os.open(directory, os.O_RDONLY)
     try:
         os.fsync(descriptor)
@@ -5143,7 +5255,7 @@ try:
     os.fsync(descriptor)
 finally:
     os.close(descriptor)
-if prelaunch:
+if no_stack:
     # No run result can exist to bind the latch to; the sealed pre-launch
     # bundle is the complete runtime evidence, so release the latch here.
     intent.unlink()
@@ -5810,7 +5922,26 @@ if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ]; then
         mv "$POST_CONFIG_START_MARKER.tmp.$$" "$POST_CONFIG_START_MARKER"
         stage_explicit_codex_auth /cloudbench-codex-auth.py || exit 1
     else
-    boot_config_payload_guard "${_boot_file_args[@]}" || exit 1
+    if ! boot_config_payload_guard "${_boot_file_args[@]}"; then
+        # No update was dispatched. Preserve this exact pre-boot boundary so
+        # normal cleanup captures the inert cohort before disposable reaping.
+        python3 - "$OUT_DIR/boot-config-unapplied" "$mid" <<'PY_UNAPPLIED' || exit 1
+import os, re, sys
+from pathlib import Path
+path, machine = Path(sys.argv[1]), sys.argv[2]
+assert re.fullmatch(r"[0-9a-f]+", machine)
+with path.open("x") as stream:
+    stream.write(machine + "\n")
+    stream.flush()
+    os.fsync(stream.fileno())
+fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+try:
+    os.fsync(fd)
+finally:
+    os.close(fd)
+PY_UNAPPLIED
+        exit 1
+    fi
     # Cross-workstream admission label: run-bench-fleet counts live labelled primaries
     # against the production pooler (demo) and delegating-guest (REAL/SIM) ceilings.
     _lane_args=(--metadata "rose_cloudbench_lane=$(cloudbench_guest_lane)")

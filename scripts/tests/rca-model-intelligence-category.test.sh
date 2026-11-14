@@ -3,7 +3,6 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 RCA_COMMAND="$ROOT_DIR/.claude/commands/rca.md"
-RCA_METHODOLOGY="$ROOT_DIR/docs/root-cause-analysis.md"
 TEST_RUNNER="$ROOT_DIR/scripts/test.sh"
 
 require_text() {
@@ -17,24 +16,24 @@ require_text() {
 }
 
 require_text \
-  "$RCA_METHODOLOGY" \
+  "$RCA_COMMAND" \
   '**Model intelligence limitation**' \
   "RCA problem buckets must include model intelligence"
 require_text \
-  "$RCA_METHODOLOGY" \
+  "$RCA_COMMAND" \
   'all non-model variables held constant' \
   "model-intelligence classification must require a model-only controlled replay"
 require_text \
-  "$RCA_METHODOLOGY" \
+  "$RCA_COMMAND" \
   'report repeated trial counts' \
   "stochastic model comparisons must not rely on one lucky sample"
 require_text \
   "$RCA_COMMAND" \
-  '## Model-intelligence classification gate' \
-  "/RCA must surface the model-intelligence evidence gate"
+  'model intelligence limitation, or unresolved' \
+  "/RCA must list model intelligence limitation as a failure class"
 require_text \
   "$RCA_COMMAND" \
-  'The original model fails and the upgraded model passes with all non-model variables held constant.' \
+  'needs the original model failing and the upgraded model passing with all non-model variables held constant' \
   "/RCA must require the same-call model-only A/B result"
 require_text \
   "$TEST_RUNNER" \

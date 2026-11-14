@@ -21,13 +21,19 @@
  *   - a lease's last flush is kept shortly after its release; later, nothing
  *   - the cooldown is returned with the account: why, whether the provider gave
  *     its reset, and nextResetAt only for a provider reset (never Rose's backoff)
- *   - a user cooldown that names no login never lands on sibling accounts
+ *   - a user cooldown that names no login never lands on sibling accounts; one
+ *     naming the held token's fingerprint cools exactly that login
+ *   - the agent loop's lease (no integration id) names its login by credential
+ *     fingerprint; usage lands on that login only, never a sibling or another user's
  *   - a code session's rate_limit_event usage lands on the task's login
  *   - the backend's own Rose completions (chat path: fetchChatComputeAuth →
  *     callWithChatComputeRotation → createStreamingCompletion) record the
  *     account's usage from every response, success or 429, in the background:
  *     a stalled usage write never delays the completion, and a 429's provider
  *     reset becomes an authoritative cooldown naming the spent window
+ *   - an account nothing has measured gets its windows and reset times in the
+ *     background: an inference-only login (setup-token, no user:profile) or one
+ *     the usage endpoint refuses gets them from one max_tokens 1 quota check
  */
 
 import { randomUUID } from 'node:crypto';
@@ -40,6 +46,9 @@ import {
 } from '../../providers/computeSubscriptionUsage';
 import { assertLocalDatabase } from './assertLocalDatabase';
 import { registerChatPathCases } from './compute-subscription-usage.chat.cases';
+import { registerCooldownReportCases } from './compute-subscription-usage.cooldown.cases';
+import { registerLeaseUsageCases } from './compute-subscription-usage.lease.cases';
+import { registerUsageRefreshCases } from './compute-subscription-usage.refresh.cases';
 
 // The chat-path cases run Rose in this process and write Integration rows.
 assertLocalDatabase();
@@ -455,6 +464,35 @@ registerChatPathCases({
   listAccounts,
   run: RUN,
   baseUrl: BASE_URL,
+  chatUsers,
+  integrationType: TYPE,
+});
+
+registerUsageRefreshCases({
+  test,
+  listAccounts,
+  run: RUN,
+  baseUrl: BASE_URL,
+  chatUsers,
+  integrationType: TYPE,
+});
+
+registerLeaseUsageCases({
+  test,
+  listAccounts,
+  run: RUN,
+  baseUrl: BASE_URL,
+  apiKey: API_KEY,
+  chatUsers,
+  leases,
+  integrationType: TYPE,
+});
+
+registerCooldownReportCases({
+  test,
+  run: RUN,
+  baseUrl: BASE_URL,
+  apiKey: API_KEY,
   chatUsers,
   integrationType: TYPE,
 });

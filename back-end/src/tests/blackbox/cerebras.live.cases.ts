@@ -76,7 +76,7 @@ export async function fetchLiveCerebrasModelIds(url: string, key: string): Promi
     true,
     `Cerebras /models must be reachable for the live probe: HTTP ${read.status} after ${attempts} attempt(s) ` +
       `cf-ray=${read.cfRay ?? '-'} retry-after=${read.retryAfter ?? '-'} ` +
-      `cf-error=${cloudflareErrorCode(read.text)} ${read.text.slice(0, 200)}`
+      `cf-error=${cloudflareErrorCode(read.text)} ${read.text.replaceAll(key, '[REDACTED]').slice(0, 200)}`
   );
   const catalog = JSON.parse(read.text) as { data?: Array<{ id?: string }> };
   return new Set(

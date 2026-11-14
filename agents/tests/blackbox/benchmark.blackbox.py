@@ -887,7 +887,11 @@ def test_cloudbench_shell_controllers_require_fresh_identity_and_child_success()
     assert "CURRENT_RUN_ARTIFACT_SCRIPT" in driver
     assert "RUN_OUTPUT_MARKER" in driver
     assert 'git -C "$REPO_DIR" clean -ffd' in driver
-    assert driver.index('rm -rf "$CONTEXT_DIR"') < driver.index("applying uploaded local workspace patch")
+    assert 'rm -rf "$CONTEXT_DIR"' not in driver
+    assert 'os.rename(context, archive / "cloudbench")' in driver
+    assert 'archive = data / ("cloudbench-prior-context-" + token)' in driver
+    assert driver.index("CONTEXT_CUSTODY_READY=0") < driver.index("trap cleanup_stack EXIT")
+    assert driver.index("prepare_current_context ||", driver.index("# ── 0. Sanity:")) < driver.index("applying uploaded local workspace patch")
     assert "cloudbench-sync-prisma-client.sh" in driver
     assert 'bash "$SYNC_PRISMA_SCRIPT" "$REPO_DIR" "$APP_USER"' in driver
     assert "NEEDS_IMESSAGE_RELAY" in controller
@@ -915,6 +919,62 @@ def test_cloudbench_shell_controllers_require_fresh_identity_and_child_success()
     assert "create-worktree-patch.sh" in controller
     assert "remote-logs/cloudbench-driver.log" in controller
     assert "logs/worker.log" in controller
+
+
+def test_cloudbench_task_env_diagnostic_is_read_only():
+    """Inspecting task routing must not acquire or replace execution evidence."""
+    repo_root = Path(__file__).resolve().parents[3]
+    driver = repo_root / "scripts" / "cloudbench-run.sh"
+    for mode, token in (("1", ""), ("1", "diagnostic-owner"), ("0", ""), ("TRUE", "")):
+        with tempfile.TemporaryDirectory() as directory:
+            data = Path(directory)
+            repo = data / "repo"
+            subprocess.run(["git", "init", "-q", str(repo)], check=True, timeout=10)
+            catalog = repo / "agents/benchmarks"
+            catalog.mkdir(parents=True)
+            for name in ("tasks.json", "polar_tasks.json"):
+                (catalog / name).write_bytes((repo_root / "agents/benchmarks" / name).read_bytes())
+            context = repo / ".context/cloudbench"
+            context.mkdir(parents=True)
+            (context / "services.json").write_text('{"preserve":"original"}')
+            (data / f"cloudbench-shutdown-{token or 'boot'}.request").write_text("preserve")
+
+            def inventory():
+                return {
+                    str(path.relative_to(data)): (
+                        path.stat().st_ino,
+                        path.stat().st_mode,
+                        hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else None,
+                    )
+                    for path in data.rglob("*")
+                }
+
+            before = inventory()
+            result = subprocess.run(
+                ["bash", str(driver)],
+                env={
+                    **os.environ,
+                    "CLOUDBENCH_PRINT_TASK_ENV": mode,
+                    "CLOUDBENCH_REPO_DIR": str(repo),
+                    "CLOUDBENCH_DATA_DIR": str(data),
+                    "CLOUDBENCH_RUN_TOKEN": token,
+                    "CLOUDBENCH_REQUIRE_EXECUTION_PROVENANCE": "0",
+                    "CLOUDBENCH_CATALOG_SCRIPT": str(repo_root / "scripts/cloudbench_catalog.py"),
+                    "CLOUDBENCH_SEED_BUDGET_LIB": str(repo_root / "scripts/lib/cloudbench-seed-budget.sh"),
+                    "BENCH_TASKS": "chat-mode",
+                    "BENCH_TASKS_B64": "",
+                },
+                text=True,
+                capture_output=True,
+                timeout=10,
+            )
+            assert inventory() == before, (mode, token, result.stderr)
+            if mode == "1":
+                assert result.returncode == 0, result.stderr
+                assert "stack:FAST_MODE_CACHE_USE_LOCAL=1" in result.stdout
+            else:
+                assert result.returncode != 0
+                assert "context custody admission failed" in result.stdout + result.stderr
 
 
 def test_cloud_fleet_controller_detaches_by_default():
@@ -3481,6 +3541,136 @@ def test_payment_benchmark_preserves_lifecycle_stack_contract():
         )
 
 
+def test_local_main_seeds_only_the_selected_child_payment_fixture():
+    """Native child main must not bind a sibling's payment identity into this world."""
+    from types import SimpleNamespace
+    from benchmarks import local
+    from benchmarks import run_benchmark as bench
+
+    cohort = ["agent-payment-new-user-journey", "agent-payment-test-shop", "chat-mode",
+        "agent-payment-idempotent-abandonment", "agent-payment-setup-resume", "agent-payment-abandonment",
+        "browser-auth-guest-purchase", "browser-auth-member-discount-purchase", "browser-auth-member-discount-signup-fails-purchase",
+        "browser-auth-paid-membership-purchase", "browser-auth-signup-purchase", "browser-auth-signup-purchase-no-subscription",
+        "browser-auth-session-expires-at-checkout", "spawn-sub-agents", "parallel-tool-calls", "gate-subscription-card-mint"]
+
+    class RunnerBoundaryReached(Exception):
+        pass
+
+    for selected, child_world, expected_seeds in [
+        (cohort[0], True, 0),
+        (cohort[1], True, 1),
+        (cohort[2], True, 0),
+        (cohort[0], False, 0),
+        (cohort[1], False, 1),
+    ]:
+        inherited_tasks = cohort if child_world else [selected]
+        stack = local.ServiceStack(
+            run_id="native-mixed-seed-test",
+            context_dir=local.REPO_ROOT / ".context" / "native-mixed-seed-test",
+            manifest_path=local.REPO_ROOT / ".context" / "native-mixed-seed-test" / "services.json",
+            service_log=local.REPO_ROOT / ".context" / "native-mixed-seed-test" / "services.log",
+            isolated=True,
+        )
+        manifest = {
+            "ports": {"backend": 3001, "frontend": 3002, "local_db": 5432},
+            "urls": {"public": "https://fixture.example.invalid"},
+            "database": {"name": "victoria_native_fixture"},
+        }
+        owner = SimpleNamespace(
+            starting=False, process=None, started=False, verified=True,
+            signum=None, record=lambda *_args: None,
+        )
+        def fixture_subprocess(command, **kwargs):
+            assert command[:3] == ["npx", "tsx", "scripts/setup-benchmark-payment.ts"]
+            assert command[-2:] == ["--user-id", local.AGENT_PAYMENT_BENCHMARK_USER_ID]
+            assert kwargs["env"]["DATABASE_URL"] == "postgresql://postgres:postgres@localhost:5432/victoria_native_fixture"
+            assert kwargs["env"]["DIRECT_URL"] == kwargs["env"]["DATABASE_URL"]
+            assert kwargs["env"]["BENCHMARK_AGENTCARD_V2_USER_ID"] == "usr_native_fixture"
+            return SimpleNamespace(returncode=0)
+
+        def service_boundary(*_args, **_kwargs):
+            expected_opt_in = selected in cohort[:2]
+            assert (os.environ.get("BENCHMARK_AGENTCARD_WORLD_IDENTITY") == "true") is expected_opt_in, (
+                f"selected {selected} must own bootstrap, not its {len(cohort)}-task cohort"
+            )
+            if expected_opt_in:
+                manifest["agentcard_world_identity"] = {"version":1,"worldId":stack.run_id,"providerUserId":"usr_native_fixture","livemode":False,"fundsSource":"company_flow","scope":"a"*64}
+            return None, manifest
+
+        def runner_boundary(*_args, **_kwargs):
+            if selected == cohort[0]:
+                def new_user_fixture(command, **options):
+                    assert command == ["npx", "tsx", "scripts/setup-benchmark-new-user-payment.ts"]
+                    assert options["env"]["BENCHMARK_AGENTCARD_V2_USER_ID"] == manifest["agentcard_world_identity"]["providerUserId"], "new-user CLI inherited a sibling/shared provider identity"
+                    assert options["env"]["BENCHMARK_USER_ID"] == "native-synthetic-new-user"
+                    # The CLI loads back-end/.env (production DIRECT_URL); both URLs must be the local DB.
+                    assert options["env"]["DATABASE_URL"] == "postgresql://postgres:postgres@localhost:5432/victoria_native_fixture"
+                    assert options["env"]["DIRECT_URL"] == options["env"]["DATABASE_URL"], "inherited remote DIRECT_URL reached the new-user fixture"
+                    return SimpleNamespace(returncode=0, stdout="{}", stderr="")
+                with (
+                    patch.dict(os.environ, {"DIRECT_URL": "postgresql://remote.example:6543/prod"}),
+                    patch.object(bench, "_local_victoria_database_url", return_value="postgresql://postgres:postgres@localhost:5432/victoria_native_fixture"),
+                    patch.object(bench.subprocess, "run", side_effect=new_user_fixture) as fixture,
+                ):
+                    bench._run_new_user_payment_fixture("native-synthetic-new-user")
+                    fixture.assert_called_once()
+            raise RunnerBoundaryReached
+
+        argv = [selected, "--no-dashboard"]
+        if selected == cohort[2]:
+            argv.append("--simulate")
+        if child_world:
+            read_fd, write_fd = os.pipe()
+            os.write(write_fd, b"1")
+            os.close(write_fd)
+            argv.extend(["--world-ready-fd", str(read_fd)])
+            for sibling in cohort:
+                argv.extend(["--cohort-task", sibling])
+        # Parse real argv, consume the real coordinator pipe, configure the real
+        # cohort environment, and reach main's actual fixture dispatch. Only the
+        # external service/fixture/runner boundaries are replaced; no stack,
+        # database, agent or provider call is allowed to start.
+        with (
+            patch.dict(os.environ, {"TRACE_ARCHIVE_ENABLED": "1", "BENCHMARK_AGENTCARD_WORLD_IDENTITY":"true", "BENCHMARK_AGENTCARD_V2_USER_ID":"usr_shared", local.AGENT_PAYMENT_BENCHMARK_USER_ID_ENV: local.AGENT_PAYMENT_BENCHMARK_USER_ID}),
+            patch.object(local, "enforce_provider_capacity"),
+            patch.object(local, "validate_agentcard_org_credentials"),
+            patch.object(local, "build_service_stack", return_value=stack),
+            patch.object(local, "configure_task_environment", wraps=local.configure_task_environment) as configure,
+            patch.object(local, "LocalBenchmarkOwner", return_value=owner),
+            patch.object(local, "start_services", side_effect=service_boundary) as services,
+            patch.object(local, "apply_manifest_environment", wraps=local.apply_manifest_environment),
+            patch.object(local, "diagnostic_log_env", return_value={}),
+            patch.object(local, "dashboard_enabled", return_value=False),
+            patch.object(local, "print_scorecard_instruction"),
+            patch.object(local, "seed_payment_fixture", wraps=local.seed_payment_fixture) as seed,
+            patch.object(local, "run_benchmark_invocation", side_effect=runner_boundary) as runner,
+            patch.object(local, "stop_services") as stop,
+            patch.object(local, "start_frontend_tunnel", side_effect=AssertionError("real tunnel started")),
+            patch.object(local.subprocess, "run", side_effect=fixture_subprocess) as fixture_process,
+        ):
+            try:
+                local.main(argv)
+            except RunnerBoundaryReached:
+                pass
+            else:
+                raise AssertionError("native main never reached the benchmark runner boundary")
+            assert seed.call_count == expected_seeds, (
+                f"selected {selected} child_world={child_world} seeded regular payment fixture "
+                f"{seed.call_count} time(s), expected {expected_seeds}; sibling cohort must not own this binding; "
+                f"attempted CLI users={[call.args[0][-1] for call in fixture_process.call_args_list]}"
+            )
+            assert fixture_process.call_count == expected_seeds
+            if expected_seeds:
+                seed.assert_called_once_with(manifest)
+            configure.assert_called_once_with(inherited_tasks, isolated=True)
+            assert services.call_args.kwargs["tasks"] == inherited_tasks
+            assert runner.call_args.args[0].tasks == [selected]
+            assert os.environ["BENCHMARK_ISOLATED_RUN"] == "true"
+            if selected in cohort[:2]:
+                assert os.environ["BENCHMARK_FORCE_CUSTOMER_PURCHASE_PATH"] == "1"
+            stop.assert_called_once_with(None, stack=stack)
+
+
 def test_payment_benchmark_seeds_admin_run_user_with_forced_customer_path():
     """Sandbox lifecycle benches run as the admin account and force the charged mint path."""
     import os
@@ -3835,6 +4025,20 @@ def test_payment_benchmark_accepts_org_client_credentials_from_dotenv(tmp_path):
         env={},
         env_path=env_path,
     )
+
+
+def test_payment_benchmark_rejects_mcp_only_credentials_for_rest_issuing(tmp_path):
+    """A legacy MCP token cannot authenticate the v2 card and wallet requests."""
+    import pytest
+
+    from benchmarks import local
+
+    env_path = tmp_path / ".env"
+    env_path.write_text('AGENTCARD_ORG_MCP_ACCESS_TOKEN="fake_legacy_org_token"\n')
+    with pytest.raises(RuntimeError, match="REST v2 requires organization client credentials"):
+        local.validate_agentcard_org_credentials(
+            ["agent-payment-test-shop"], env={}, env_path=env_path
+        )
 
 
 def test_isolated_benchmark_services_allow_slow_first_sync():
@@ -6886,7 +7090,9 @@ async def test_abandonment_timeout_surfaces_the_last_durable_mismatch():
     from benchmarks.benchmark_tasks import get_task_by_name
     from benchmarks.run_benchmark import _wait_for_expected_payment_lifecycle
 
+    # Provider inventory integrity is satisfied so the first durable mismatch is the HELD purchase.
     lifecycle = {
+        "integrity": dict(get_task_by_name("agent-payment-abandonment").expected_payment_lifecycle["integrity"]),
         "purchase": {"status": "HELD"},
         "walletFunding": {"status": "RECLAIMING"},
     }
@@ -6921,6 +7127,7 @@ async def test_abandonment_timeout_names_the_unreleased_agentcard_transfer():
     from benchmarks.run_benchmark import _wait_for_expected_payment_lifecycle
 
     lifecycle = {
+        "integrity": dict(get_task_by_name("agent-payment-abandonment").expected_payment_lifecycle["integrity"]),
         "purchase": {"status": "HELD"},
         "walletFunding": {"status": "RECLAIMING"},
         "agentCard": {"status": "CLOSED", "balanceCents": 0},
@@ -7277,6 +7484,9 @@ def test_agent_payment_catalog_requires_terminal_lifecycle_evidence():
         "purchaseCount": 1,
         "walletFundingCount": 1,
         "cardCount": 1,
+        "agentCardProviderCardCount": 1,
+        "agentCardProviderTransferCount": 1,
+        "agentCardProviderUnlinkedTransferCount": 0,
     }
     duplicate_lifecycle = deepcopy(idempotency.expected_payment_lifecycle)
     duplicate_lifecycle["integrity"]["cardCount"] = 2
@@ -7451,8 +7661,48 @@ def test_agent_payment_accepts_grounded_finished_browser_text_without_structured
         assert _extract_agent_payment_output_blob({"messages": [invalid_result]}) == ""
 
 
+async def test_production_payment_admission_requires_scoped_live_v2_readiness():
+    """Live billing plus a legacy connection must not admit a paid v2 probe."""
+    import httpx
+    import pytest
+
+    import benchmarks.run_benchmark as bench
+
+    original_client = httpx.AsyncClient
+    ready = {"connected": True, "apiVersion": 2, "status": "approved",
+             "livemode": True, "fundsSource": "company_flow"}
+    for status in (
+        {"connected": True, "status": "approved"},
+        {**ready, "connected": False},
+        {**ready, "livemode": False},
+        {**ready, "status": "pending"},
+        {**ready, "fundsSource": "onramp"},
+        ready,
+    ):
+        seen = []
+
+        def fixture(request):
+            seen.append(request)
+            assert request.method == "GET", "admission must never move money"
+            if request.url.path == "/api/credits/usage":
+                return httpx.Response(200, json={"tier": "pro", "remaining": 1000, "stripeLivemode": True})
+            assert request.url.path == "/api/agentcard/status"
+            assert request.headers["x-user-id"] == bench.AGENT_PAYMENT_LIFECYCLE_PROD_USER_ID
+            return httpx.Response(200, json=status)
+
+        with patch.object(bench, "_api_headers", new=AsyncMock(return_value={})), \
+             patch.object(bench.httpx, "AsyncClient",
+                          side_effect=lambda **kw: original_client(transport=httpx.MockTransport(fixture), **kw)):
+            if status == ready:
+                await bench._preflight_production_payment_identity("https://api.fixture.invalid")
+            else:
+                with pytest.raises(RuntimeError, match="live v2"):
+                    await bench._preflight_production_payment_identity("https://api.fixture.invalid")
+        assert [r.url.path for r in seen] == ["/api/credits/usage", "/api/agentcard/status"]
+
+
 async def test_production_payment_identity_gap_fails_closed_with_its_own_provisioning_rules():
-    """.claude/commands/DEPRECATED_deploy.md Step 13c (orig L3407-3434): when the non-admin
+    """the former /deploy skill Step 13c (orig L3407-3434): when the non-admin
     production identity is missing, `agent-payment-production-abandonment` stops before any live
     spend and its own error carries the exact provisioning command, the credential source and the
     guardrails, so the agent that hits it needs no other document and never asks the user."""
@@ -7484,17 +7734,17 @@ async def test_production_payment_identity_gap_fails_closed_with_its_own_provisi
     message = str(raised.value)
     command = (
         "  cd back-end && set -a && . ./.env && set +a && \\\n"
-        '    DATABASE_URL="$DIRECT_URL" STRIPE_SECRET_KEY="$STRIPE_SECRET_KEY_LIVE" \\\n'
+        '    BENCHMARK_AGENTCARD_V2_USER_ID= DATABASE_URL="$DIRECT_URL" STRIPE_SECRET_KEY="$STRIPE_SECRET_KEY_LIVE" \\\n'
         "    BENCHMARK_ALLOW_LIVE_STRIPE=true BENCHMARK_PAYMENT_ALLOW_REMOTE_DB=true \\\n"
-        "    npx tsx scripts/setup-benchmark-payment.ts --live --user-id 00000000-0000-4000-8000-000000000107 \\\n"
-        '    --agentcard-cardholder-id "$DEDICATED_AGENTCARD_CARDHOLDER_ID"\n'
+        "    npx tsx scripts/setup-benchmark-payment.ts --live --user-id 00000000-0000-4000-8000-000000000107\n"
     )
     assert command in message
     for rule in (
         "is not provisioned: it has no Subscription row",
         "Every credential it needs is already in back-end/.env; do not ask the user",
         "the 6543 pooler fails",
-        "EXISTING dedicated benchmark cardholder only",
+        "dedicated benchmark user's normal signed live v2 connection, consent and approved KYC first",
+        "A legacy cardholder is not a v2 connected user",
         "never create an identity automatically or bypass pending KYC",
         "never enter a card number",
         "one-time hosted Stripe Checkout link: a human saves the live card there once",
@@ -11305,8 +11555,8 @@ def _blue_bottle_k5_eval_data(fixture: dict) -> dict:
     return data
 
 
-async def _assert_blue_bottle_tree_proof_semantics_passes():
-    """Prove tree-aware evidence: payment facts live only on the browser sub-agent."""
+async def _assert_blue_bottle_tree_proof_rejects_incomplete_purchase():
+    """Keep tree payment facts while rejecting a purchase stopped before payment."""
     from benchmarks.benchmark_tasks import get_task_by_name
     from benchmarks.run_benchmark import (
         _call_declared_llm_judge,
@@ -11325,13 +11575,13 @@ async def _assert_blue_bottle_tree_proof_semantics_passes():
     with live_funded_azure():
         single_turn = await _call_declared_llm_judge(task, semantics, data)
     single_score = float(single_turn.get("score") or 0)
-    assert single_score >= 1.0, (
-        f"Expected tree-aware single-turn judge to pass; got score={single_score}: {single_turn.get('reasoning')}"
-    )
+    assert single_turn.get("task_completed") is False, single_turn
+    assert single_turn.get("extraction_score") == 1.0, single_turn
+    assert single_score < 1.0, "unpaid order must not pass task completion"
 
 
-async def _assert_blue_bottle_k5_replay_single_turn_passes(agent_id: str):
-    """Replay k=5 payment-boundary runs with real judges: static and single-turn both pass."""
+async def _assert_blue_bottle_k5_replay_rejects_incomplete_purchase(agent_id: str):
+    """Keep payment-boundary extraction complete without certifying an unpaid purchase."""
     from benchmarks.benchmark_tasks import get_task_by_name
     from benchmarks.run_benchmark import (
         _call_declared_llm_judge,
@@ -11349,31 +11599,31 @@ async def _assert_blue_bottle_k5_replay_single_turn_passes(agent_id: str):
     with live_funded_azure():
         single_turn = await _call_declared_llm_judge(task, semantics, data)
     single_score = float(single_turn.get("score") or 0)
-    assert single_score >= 1.0, (
-        f"Expected single-turn judge to pass for {agent_id}; got score={single_score}: {single_turn.get('reasoning')}"
-    )
+    assert single_turn.get("task_completed") is False, single_turn
+    assert single_turn.get("extraction_score") == 1.0, single_turn
+    assert single_score < 1.0, "unpaid order must not pass task completion"
 
 
-async def test_blue_bottle_k5_trial_b217afca_passes_single_turn_semantics():
-    await _assert_blue_bottle_k5_replay_single_turn_passes(
+async def test_blue_bottle_k5_trial_b217afca_rejects_incomplete_purchase():
+    await _assert_blue_bottle_k5_replay_rejects_incomplete_purchase(
         "b217afca-6595-4eb5-bfd1-9688c2c9826a",
     )
 
 
-async def test_blue_bottle_k5_trial_52d717ea_passes_single_turn_semantics():
-    await _assert_blue_bottle_k5_replay_single_turn_passes(
+async def test_blue_bottle_k5_trial_52d717ea_rejects_incomplete_purchase():
+    await _assert_blue_bottle_k5_replay_rejects_incomplete_purchase(
         "52d717ea-c5be-4bfe-b146-5efd535628ad",
     )
 
 
-async def test_blue_bottle_k5_trial_7d282652_passes_single_turn_semantics():
-    await _assert_blue_bottle_k5_replay_single_turn_passes(
+async def test_blue_bottle_k5_trial_7d282652_rejects_incomplete_purchase():
+    await _assert_blue_bottle_k5_replay_rejects_incomplete_purchase(
         "7d282652-2c5b-4dd3-b8c8-461929a37bf8",
     )
 
 
-async def test_blue_bottle_tree_proof_passes_with_subagent_evidence():
-    await _assert_blue_bottle_tree_proof_semantics_passes()
+async def test_blue_bottle_tree_proof_rejects_incomplete_purchase():
+    await _assert_blue_bottle_tree_proof_rejects_incomplete_purchase()
 
 
 def test_blue_bottle_spawn_contract_blocks_dom_patch_evaluate():
@@ -14804,7 +15054,12 @@ async def test_declared_judge_errors_are_not_evaluator_rejections():
 
 
 @contextlib.contextmanager
-def _scripted_judge_provider(verdict_from_invocation: int | None, score: float = 1.0, output: dict | None = None):
+def _scripted_judge_provider(
+    verdict_from_invocation: int | None,
+    score: float = 1.0,
+    output: dict | None = None,
+    task_completed: bool = True,
+):
     """Drive harness judges through the real check_progress → Rose waterfall path.
 
     OpenRouter answers 429 (the d0f65322 incident) until check_progress has been
@@ -14825,7 +15080,12 @@ def _scripted_judge_provider(verdict_from_invocation: int | None, score: float =
         return await real_check_progress(*args, **kwargs)
 
     verdict = json.dumps(
-        {"reasoning": f"judge verdict score={score}", "score": score, **({"output": output} if output else {})}
+        {
+            "reasoning": f"judge verdict score={score}",
+            "task_completed": task_completed,
+            "score": score,
+            **({"output": output} if output else {}),
+        }
     )
     verdict_stream = "\n".join(
         [
@@ -15039,12 +15299,13 @@ async def test_declared_judge_low_score_verdict_is_not_rejudged():
     """A genuine 0.0 verdict is an ordinary FAIL carrying the judge's reasoning, with no retry."""
     import benchmarks.run_benchmark as bench
 
-    with _scripted_judge_provider(verdict_from_invocation=1, score=0.0) as probe:
+    with _scripted_judge_provider(verdict_from_invocation=1, score=0.0, task_completed=False) as probe:
         passed, reason, results = await bench._run_declared_evaluators(
             _declared_judge_task(), json.loads(json.dumps(_DECLARED_JUDGE_RUN))
         )
     assert passed is False
-    assert reason == "Declared evaluator t7-schema-task-complete failed: judge verdict score=0.0", reason
+    assert reason.startswith("Declared evaluator t7-schema-task-complete failed: judge verdict score=0.0"), reason
+    assert "separate task-completion verdict is not true" in reason
     assert results[0]["score"] == 0.0, results
     assert (probe.invocations, probe.openrouter_calls) == (1, 1), (probe.invocations, probe.openrouter_calls)
     assert probe.sleeps.call_args_list == [], probe.sleeps.call_args_list
@@ -19413,6 +19674,46 @@ def test_runner_fixtures_retry_transient_local_database_probe_timeout():
                 os.environ[key] = value
 
 
+def test_compute_token_sync_preserves_seed_exit_status():
+    """A silent seed failure still reports its actual child status and stays failed."""
+    import io
+    from benchmarks import run_benchmark
+
+    native_run = run_benchmark._run_seed_subprocess
+    for expected, stderr in ((23, ""), (-15, ""), (1, "fixture query refused"), (0, "")):
+        with tempfile.TemporaryDirectory() as directory:
+            child = "import os,signal,sys; print('fixture seed startup',flush=True); "
+            if stderr:
+                child += f"print({stderr!r},file=sys.stderr,flush=True); "
+            child += ("os.kill(os.getpid(),signal.SIGTERM)" if expected < 0 else f"sys.exit({expected})")
+            seen = []
+            def run_seed(_command, **_kwargs):
+                result = native_run([sys.executable, "-c", child], cwd=Path(directory), env=None, timeout=5)
+                seen.append(result.returncode)
+                return result
+            output = io.StringIO()
+            with (
+                patch.object(run_benchmark, "_local_victoria_database_url", return_value="postgresql://localhost/fixture"),
+                patch.object(run_benchmark, "_compute_token_source_database_url", return_value=("postgresql://source.invalid/fixture", "fixture source")),
+                patch.object(run_benchmark, "_run_seed_subprocess", side_effect=run_seed),
+                patch.object(run_benchmark, "_withheld_compute_token_types", set()),
+                patch.dict(os.environ, {"CODEX_AUTH_PATH": ""}),
+                contextlib.redirect_stdout(output),
+            ):
+                accepted = run_benchmark._sync_compute_tokens()
+            assert seen == [expected]
+            assert accepted is (expected == 0)
+            text = output.getvalue()
+            if expected:
+                assert f"Compute-token sync failed (exit={expected}):" in text, text
+                assert "fixture seed startup" in text
+                if stderr:
+                    assert stderr in text
+            else:
+                assert "Compute-token sync failed" not in text
+                assert "Refreshed compute tokens" in text
+
+
 def test_compute_token_preflight_uses_credential_source_not_restored_guest_database():
     """A Fly guest must source live credentials from its verified backend env, not its restored target."""
     from types import SimpleNamespace
@@ -21960,6 +22261,47 @@ def test_logical_tool_counts_ignore_progress_messages():
     }
 
 
+def test_logical_tool_counts_include_typed_background_browser_start():
+    """R142: an actual background-start receipt is one logical browser spawn."""
+    from copy import deepcopy
+    from benchmarks.run_benchmark import _count_logical_tool_calls_from_messages
+
+    capsule = json.loads((Path(__file__).resolve().parents[2] / "benchmarks" / "fixtures"
+                          / "r142-background-browser-message.json").read_text())
+    original = capsule["messages"][0]["message"]
+    preserved = deepcopy(original)
+    count = _count_logical_tool_calls_from_messages
+    assert count([original]) == {"spawn_browser_agent": 1}
+    call_id = original["metadata"]["toolCallId"]
+    requested = {"role": "ASSISTANT", "metadata": {"tool_calls": [
+        {"tool": "spawn_agent", "type": "browser", "tool_call_id": call_id}]}}
+    progress = {"role": "TOOL", "metadata": {
+        "toolName": "spawn_browser_agent", "toolStatus": "IN_PROGRESS", "toolCallId": call_id}}
+    finished = {"role": "TOOL", "metadata": {
+        "toolName": "spawn_browser_agent", "toolStatus": "FINISHED", "toolCallId": call_id,
+        "action_type": "task_complete"}}
+    assert count([original, deepcopy(original), requested, progress, finished]) == {"spawn_browser_agent": 1}
+    assert count([requested, original, finished, progress]) == {"spawn_browser_agent": 1}
+    assert original == preserved
+    # Hidden is a presentation property: a visible copy cannot add a new invocation.
+    visible = deepcopy(original)
+    visible["metadata"]["hidden"] = False
+    assert count([visible, original]) == {"spawn_browser_agent": 1}
+    # Conflicting type or task identity must never create a browser invocation.
+    for changes in ({"agentType": "explore"}, {"backgroundTaskId": "foreign-task"},
+                    {"backgroundTaskId": None}, {"toolCallId": 1, "backgroundTaskId": 1},
+                    {"toolStatus": "IN_PROGRESS"}, {"toolStatus": "ERROR"}):
+        invalid = deepcopy(original)
+        invalid["metadata"].update(changes)
+        assert count([invalid]).get("spawn_browser_agent", 0) == 0, changes
+    # A background hint without its producer marker, or another typed spawn, is not a browser.
+    for changes in ({"runInBackground": False}, {"runInBackground": "true"},
+                    {"backgroundAgentType": "explore"}, {"backgroundAgentType": None}):
+        other = deepcopy(original)
+        other["metadata"].update(changes)
+        assert count([other]) == {"spawn_agent": 1}, changes
+
+
 def test_logical_tool_counts_canonicalize_model_facing_routed_calls():
     """A typed model-facing call and its routed runtime events are one logical tool."""
     from benchmarks.run_benchmark import _count_logical_tool_calls_from_messages
@@ -23803,7 +24145,9 @@ def test_agent_class_min_steps_contract_is_validated_and_defaulted():
     from benchmarks.benchmark_tasks import all_tasks, get_task_by_name
     from benchmarks.long_horizon import validate_task_contract
 
-    browser_tasks = [task for task in all_tasks() if task.requires_browser_agent]
+    from benchmarks.polar_catalog import is_polar_bench_task
+
+    browser_tasks = [task for task in all_tasks() if task.requires_browser_agent and not is_polar_bench_task(task)]
     assert browser_tasks
     assert all(task.min_steps.get("browser", 0) >= 1 for task in browser_tasks)
     assert get_task_by_name("browser-agent-amazon-cookie-payment").min_steps == {"browser": 5}
@@ -24339,6 +24683,42 @@ def test_browser_min_steps_ignores_init_timeout_retry_before_session():
     assert failed_task not in counts.get("browser", {})
     assert counts["browser"][ok_task] >= 5
     assert _validate_agent_class_min_steps({"browser": 5}, counts) is None
+
+
+async def test_polar_judge_preserves_full_tool_evidence():
+    """Captured command success after a long install log must reach every rubric.
+
+    Campaign A polar-bu-002 r3: Playwright succeeded; a trailing diagnostic
+    exited 127. The SDK event holding the successful page state lay beyond
+    the evaluator's former 4,000-character per-message cutoff.
+    """
+    from benchmarks.polar_evaluator import run_polar_evaluator
+
+    fixture = Path(__file__).parent / "fixtures" / "polar-code-events.json"
+    message = json.loads(fixture.read_text())
+    raw = message["text"]
+    events = json.loads(raw[raw.index("{"):])["code_agent_events"]
+    completed = next(event for event in events if event.get("seq") == 62)
+    assert completed["exit_code"] == 127
+    assert '"taskClass": "task completed"' in completed["output"]
+    assert raw.index('exec-016cfcff') > 4000
+    calls = []
+
+    async def capture_judge(messages, **kwargs):
+        user_text = messages[1]["content"][0]["text"]
+        calls.append(user_text)
+        return 'Thoughts: evidence transport checked, not task graded.\nStatus: failure'
+
+    result = await run_polar_evaluator(
+        task_prompt="Inspect the recorded task evidence.",
+        evaluator={"criteria": ["Task completed", "Output correct", "No fabrication"]},
+        data={"messages": [message]},
+        judge_llm=capture_judge,
+    )
+    assert len(calls) == 3
+    assert all(raw in user_text for user_text in calls), "Polar judge lost captured tool evidence"
+    assert result["perfect"] is False
+    assert result["score"] == 0.0
 
 
 def test_code_agent_sdk_evidence_chips_count_as_grounded_steps():
@@ -25092,7 +25472,7 @@ def test_history_ledger_task_names_still_exist_in_catalog():
 
     Every task name ever recorded in the success ledger must still exist in
     tasks.json. If this fails, a task was renamed or deleted — restore the name
-    (CLAUDE.md "Eval Suite": task name is the cross-store primary key).
+    (CLAUDE.md "Benchmarks": task name is the cross-store primary key).
     """
     import json as _json
     from pathlib import Path
@@ -26365,20 +26745,20 @@ async def test_benchmark_native_checks_overlap_judges_without_losing_ownership()
     ]
     judge_cases = [
         (
-            "test_blue_bottle_k5_trial_b217afca_passes_single_turn_semantics",
-            "blue_bottle_k5_trial_b217afca_passes_single_turn_semantics",
+            "test_blue_bottle_k5_trial_b217afca_rejects_incomplete_purchase",
+            "blue_bottle_k5_trial_b217afca_rejects_incomplete_purchase",
         ),
         (
-            "test_blue_bottle_k5_trial_52d717ea_passes_single_turn_semantics",
-            "blue_bottle_k5_trial_52d717ea_passes_single_turn_semantics",
+            "test_blue_bottle_k5_trial_52d717ea_rejects_incomplete_purchase",
+            "blue_bottle_k5_trial_52d717ea_rejects_incomplete_purchase",
         ),
         (
-            "test_blue_bottle_k5_trial_7d282652_passes_single_turn_semantics",
-            "blue_bottle_k5_trial_7d282652_passes_single_turn_semantics",
+            "test_blue_bottle_k5_trial_7d282652_rejects_incomplete_purchase",
+            "blue_bottle_k5_trial_7d282652_rejects_incomplete_purchase",
         ),
         (
-            "test_blue_bottle_tree_proof_passes_with_subagent_evidence",
-            "blue_bottle_tree_proof_passes_with_subagent_evidence",
+            "test_blue_bottle_tree_proof_rejects_incomplete_purchase",
+            "blue_bottle_tree_proof_rejects_incomplete_purchase",
         ),
     ]
     invoked_controllers, invoked_judges, reported_controllers = [], [], []
@@ -26420,10 +26800,15 @@ async def test_benchmark_native_checks_overlap_judges_without_losing_ownership()
             else:
                 await case()
 
+    outer_failures = _test_utils._RECORDED_FAILURES
+    outer_cases = _test_utils._EXECUTED_CASES
+    outer_failures_before, outer_cases_before = list(outer_failures), list(outer_cases)
     with (
         contextlib.redirect_stdout(io.StringIO()),
         contextlib.redirect_stderr(io.StringIO()),
         patch.dict(globals(), replacements),
+        patch.object(_test_utils, "_RECORDED_FAILURES", []),
+        patch.object(_test_utils, "_EXECUTED_CASES", []),
         patch.object(BlackboxResult, "record", record_registered),
         patch.object(BlackboxResult, "record_async", record_registered_async),
         patch.object(
@@ -26431,6 +26816,9 @@ async def test_benchmark_native_checks_overlap_judges_without_losing_ownership()
         ),
     ):
         await run_all_tests()
+    assert _test_utils._RECORDED_FAILURES is outer_failures
+    assert _test_utils._EXECUTED_CASES is outer_cases
+    assert outer_failures == outer_failures_before and outer_cases == outer_cases_before
     assert sorted(invoked_controllers) == sorted(name for name, _ in controller_cases)
     assert reported_controllers == controller_names, "native results must preserve registration order"
     assert invoked_judges == [name for name, _ in judge_cases]
@@ -27150,7 +27538,7 @@ async def test_polar_judge_sees_final_completion_summary():
     for output in card["outputs"]:
         assert output["label"] in last_step
         for value in output["value"].values():
-            assert json.dumps(value, ensure_ascii=False) in last_step, (output["key"], value)
+            assert (str(value) if not isinstance(value, bool) else str(value).lower()) in last_step, (output["key"], value)
     # The empty IN_PROGRESS card and the verifier rows are unchanged.
     assert "\n264. Action: completion_summary | status=IN_PROGRESS\n" in history
     assert history.count(card["summary"]) == 1
@@ -27226,12 +27614,12 @@ async def test_all_benchmark_judges_preserve_complete_final_cards():
     summary = "  Actual final answer " + "x" * 13000 + " END-OF-FINAL  "
     card = {"summary": summary, "outputs": outputs}
     final = {"id": "final-root", "role": "TOOL", "text": "existing final prose", "metadata": {
-        "toolName": "completion_summary", "toolStatus": "FINISHED", "toolCallId": "root-card",
+        "toolName": "completion_summary", "toolStatus": "FINISHED", "toolCallId": "root-card", "isFinalSummary": True,
         "completionSummary": card,
     }}
     child = {"id": "final-child", "role": "TOOL", "text": "", "metadata": {
-        "toolName": "completion_summary", "toolStatus": "FINISHED", "toolCallId": "child-card",
-        "completionSummary": {"summary": "child final answer", "outputs": [{"key": "ok", "value": False}]},
+        "toolName": "completion_summary", "toolStatus": "FINISHED", "toolCallId": "child-card", "isFinalSummary": True,
+        "completionSummary": {"summary": "child final answer", "outputs": [{"key": "ok", "label": "Ok", "value": False}]},
     }}
     pending = {"role": "TOOL", "text": "still working", "metadata": {
         "toolName": "completion_summary", "toolStatus": "IN_PROGRESS", "completionSummary": {"summary": "NOT FINAL"},
@@ -27274,25 +27662,62 @@ async def test_all_benchmark_judges_preserve_complete_final_cards():
 
 
 def test_polar_completion_card_does_not_repeat_same_message_summary():
-    """Project a card once while preserving distinct and independently repeated prose."""
+    """Deduplicate actual visible cards; private/non-final metadata is not a card."""
     from benchmarks.polar_evaluator import build_polar_trajectory
 
     summary = "ACTUAL FINAL SUMMARY"
-    final = {"id": "finished-card", "role": "ASSISTANT", "text": summary, "metadata": {
-        "toolName": "completion_summary", "toolStatus": "FINISHED",
-        "completionSummary": {"summary": summary, "outputs": [{"key": "answer", "value": 42}]},
+    final = {"id": "finished-card", "role": "TOOL", "text": summary, "metadata": {
+        "toolName": "completion_summary", "toolStatus": "FINISHED", "isFinalSummary": True,
+        "completionSummary": {"summary": summary, "outputs": [{"key": "PRIVATE_KEY", "label": "Answer", "value": 42}]},
     }}
-    for role in ("ASSISTANT", "TOOL"):
-        for text in (summary, summary + "\n- answer: 42", "distinct final detail"):
-            history, _ = build_polar_trajectory({"messages": [dict(final, role=role, text=text)]})
-            assert history.count(summary) == 1, history
-            assert history.count("- answer: 42") == 1, history
-            if text == "distinct final detail":
-                assert text in history, history
-    history, _ = build_polar_trajectory({"messages": [
-        final, {"id": "independent-message", "role": "ASSISTANT", "text": summary}
-    ]})
+    for text in (summary, "distinct final detail"):
+        row = dict(final, text=text)
+        history, _ = build_polar_trajectory({"messages": [row, dict(row)]})
+        assert history.count(summary) == 1, history
+        assert history.count("Answer\n42") == 1, history
+        assert "PRIVATE_KEY" not in history
+        if text == "distinct final detail":
+            assert history.count(text) == 1, history
+    hidden = dict(final, metadata={**final["metadata"], "hidden": True})
+    history, _ = build_polar_trajectory({"messages": [hidden, final,
+        {"id": "independent-message", "role": "ASSISTANT", "text": summary}]})
     assert history.count(summary) == 2, history
+    for field in ("hidden", "artifactOnly", "agentNotification"):
+        history, _ = build_polar_trajectory({"messages": [dict(final, metadata={**final["metadata"], field: True})]})
+        assert summary not in history and "42" not in history
+    value = dict(final, text="4", metadata={**final["metadata"], "completionSummary": {
+        "summary": "HIDDEN SUMMARY", "outputs": [{"label": "HIDDEN LABEL", "value": "HIDDEN VALUE"}],
+        "presentation": {"version": 1, "mode": "value"}, "answerText": "4"}})
+    history, _ = build_polar_trajectory({"messages": [value]})
+    assert history == "1. Response: 4\nAction: completion_summary | status=FINISHED"
+    assert "HIDDEN" not in history
+    # A durable ID can be updated; compare displayed content, not just the
+    # legacy summary/outputs payload (which omits value mode and error state).
+    first = dict(value, text="", metadata={**value["metadata"], "completionSummary": {
+        **value["metadata"]["completionSummary"], "answerText": "FIRST"}})
+    second = dict(first, metadata={**first["metadata"], "completionSummary": {
+        **first["metadata"]["completionSummary"], "answerText": "SECOND"}})
+    history, _ = build_polar_trajectory({"messages": [first, dict(first), second, dict(second)]})
+    assert history.count("Response: FIRST") == 1 and history.count("Response: SECOND") == 1, history
+    assert "HIDDEN" not in history
+    distinct = dict(first, id="different-durable-id")
+    history, _ = build_polar_trajectory({"messages": [first, distinct]})
+    assert history.count("Response: FIRST") == 2, history
+    report = dict(final, text="")
+    error = dict(report, metadata={**report["metadata"], "completionSummary": {
+        **report["metadata"]["completionSummary"], "error": True}})
+    history, _ = build_polar_trajectory({"messages": [report, error]})
+    assert history.count("Response: " + summary) == 1 and history.count("Response: Task Failed") == 1, history
+    mode_changed = dict(first, metadata={**first["metadata"], "completionSummary": {
+        **first["metadata"]["completionSummary"], "presentation": {"version": 1, "mode": "report"}}})
+    history, _ = build_polar_trajectory({"messages": [first, mode_changed]})
+    assert "Response: FIRST" in history and "Response: HIDDEN SUMMARY" in history, history
+    file_card = dict(final, text="", metadata={**final["metadata"], "completionSummary": {
+        "summary": "Download", "outputs": [{"key": "PRIVATE_KEY", "label": "PRIVATE_LABEL", "value": {
+            "id": "PRIVATE_ID", "storage_path": "PRIVATE_STORAGE", "original_filename": "report.pdf"}}]}})
+    history, _ = build_polar_trajectory({"messages": [file_card]})
+    assert "report.pdf" in history and "PRIVATE" not in history
+
 
 def test_fly_log_subprocesses_close_their_transports_before_loop_shutdown():
     """The prod runner printed "RuntimeError: Event loop is closed" after its result.
@@ -27353,9 +27778,80 @@ def test_fly_log_subprocesses_close_their_transports_before_loop_shutdown():
         assert not marker.exists(), "a timed-out flyctl snapshot child outlived the runner"
 
 
+def test_browser_iteration_budget_preserves_trajectory_counting():
+    from benchmarks import run_benchmark as b
+
+    def row(step, *, task="browser", tool="spawn_browser_agent"):
+        return {"role": "TOOL", "metadata": {
+            "toolName": tool, "task_id": task, "subAgentId": task,
+            "steps_taken": step, "toolStatus": "FINISHED",
+        }}
+
+    # Real producer initial navigation is zero; evidence scoring intentionally
+    # counts that work. Only the native loop budget reads the counter value.
+    messages = [row(step) for step in range(100)]
+    messages += [row(99), row(True), row(-1), row("100")]
+    data = {"messages": messages}
+    assert b._agent_class_step_counts(data) == {"browser": {"browser": 100}}
+    assert b._browser_iteration_budget_counts(data) == {"browser": 99}
+    assert b._browser_iteration_budget_counts({"messages": [row(0)]}) == {"browser": 0}
+    assert b._agent_class_step_counts({"messages": [row(0)]}) == {"browser": {"browser": 1}}
+    # Sparse/out-of-order counters and separate browser instances must not
+    # turn the native threshold back into a distinct-message count.
+    data = {"messages": [row(100), row(0), row(100), row(3, task="other")]}
+    assert b._browser_iteration_budget_counts(data) == {"browser": 100, "other": 3}
+    assert b._agent_class_step_counts(data) == {"browser": {"browser": 2, "other": 1}}
+
+
+async def test_browser_budget_poller_waits_for_native_iteration_limit():
+    import httpx
+    from benchmarks import run_benchmark as b
+
+    task = copy.deepcopy(b.get_task_by_name("polar-bu-088"))
+    posts, reads = [], []
+    rows = [{"role": "TOOL", "metadata": {
+        "toolName": "spawn_browser_agent", "task_id": "browser",
+        "steps_taken": step,
+    }} for step in range(100)]
+
+    async def get(*args):
+        reads.append(args)
+        # Original R141 prefix: initial navigation0 plus counters1..99.
+        # It must continue to read, without asking for stop or user pause.
+        if len(reads) == 1:
+            return {"agent": {"id": "root", "status": "ACTIVE", "progress": 0}, "messages": rows}
+        if len(reads) == 2:
+            assert posts == []
+            rows.append({"role": "TOOL", "metadata": {
+                "toolName": "spawn_browser_agent", "task_id": "browser", "steps_taken": 100,
+            }})
+            return {"agent": {"id": "root", "status": "ACTIVE", "progress": 0}, "messages": rows}
+        return {"agent": {"id": "root", "status": "PAUSED", "progress": 0}, "messages": rows}
+
+    async def request(req):
+        posts.append(req.url.path)
+        assert len(reads) == 2
+        assert req.url.path.endswith("/pause")
+        return httpx.Response(200, json={"accepted": True})
+
+    real_client = httpx.AsyncClient
+    with patch.object(b, "get_agent", get), patch.object(b, "get_attention_requests", AsyncMock(return_value=[])), patch.object(
+        b, "_fetch_tree_stats", AsyncMock(return_value={"total_messages": 100, "agent_count": 1, "total_cost_cents": 0, "all_agents": [], "failed_count": 0, "active_count": 1, "error_agents": []})
+    ), patch.object(b, "_api_headers", AsyncMock(return_value={})), patch.object(
+        b.httpx, "AsyncClient", side_effect=lambda **kw: real_client(transport=httpx.MockTransport(request), **kw)
+    ):
+        result = await b._poll_agent("http://offline.test", "root", task)
+    assert len(reads) == 3
+    assert posts == ["/api/agents/root/pause"]
+    assert result[0]["_benchmark"]["browser_steps"] == 100
+    assert result[0]["agent"]["status"] == "PAUSED"
+
+
 async def run_all_tests():
     print("benchmark blackbox tests:")
     r = BlackboxResult()
+    r.record("browser_iteration_budget_preserves_trajectory_counting", test_browser_iteration_budget_preserves_trajectory_counting)
+    await r.record_async("browser_budget_poller_waits_for_native_iteration_limit", test_browser_budget_poller_waits_for_native_iteration_limit)
     await r.record_async(
         "declared_judge_persists_its_isolated_identity_before_session_creation",
         test_declared_judge_persists_its_isolated_identity_before_session_creation,
@@ -27544,6 +28040,19 @@ async def run_all_tests():
     r.record("independent_runs_keep_distinct_records", test_independent_runs_keep_distinct_records)
     r.record("predeploy_selector_rejects_production_only", test_predeploy_selector_rejects_production_only_tasks)
     r.record("predeploy_selector_agentcard_lifecycle_smoke", test_predeploy_selector_runs_agentcard_lifecycle_tasks_as_smoke)
+    from benchmarks.select_predeploy_benches_test import (
+        test_catalog_validation_requires_ready_task_deploy_category,
+        test_selector_treats_explicit_deploy_opt_out_as_uncategorized,
+    )
+
+    r.record(
+        "catalog_requires_ready_task_deploy_category",
+        _with_tmp_path(test_catalog_validation_requires_ready_task_deploy_category),
+    )
+    r.record(
+        "predeploy_selector_explicit_deploy_opt_out",
+        _with_tmp_path(test_selector_treats_explicit_deploy_opt_out_as_uncategorized),
+    )
     r.record("predeploy_selector_machine_formats_at_cap", test_predeploy_selector_machine_formats_at_cap)
     r.record(
         "local_cleanup_preserves_run_id_observers",
@@ -27552,6 +28061,12 @@ async def run_all_tests():
     r.record(
         "local_cleanup_port_candidates_exclude_clients", test_local_cleanup_port_candidates_exclude_connected_clients
     )
+    from benchmarks.benchmark_tasks_policy_test import (
+        test_agentcard_world_inventory_contract_rejects_duplicate_and_unlinked_provider_objects,
+        test_agentcard_world_inventory_setup_accepts_compensated_initial_stripe_intent,
+    )
+    r.record("agentcard_world_inventory_contract", test_agentcard_world_inventory_contract_rejects_duplicate_and_unlinked_provider_objects)
+    r.record("agentcard_world_inventory_setup_compensation", test_agentcard_world_inventory_setup_accepts_compensated_initial_stripe_intent)
     from benchmarks import cloud_batch_cleanup_test, local_lifecycle_test
 
     for name in sorted(dir(local_lifecycle_test)):
@@ -27619,6 +28134,7 @@ async def run_all_tests():
         "required_attachment_upload_failure_is_fatal",
         test_required_attachment_upload_failure_is_fatal,
     )
+    r.record("cloudbench_task_env_diagnostic_is_read_only", test_cloudbench_task_env_diagnostic_is_read_only)
     r.record(
         "cloud_fleet_controller_detaches_by_default",
         test_cloud_fleet_controller_detaches_by_default,
@@ -27661,20 +28177,20 @@ async def run_all_tests():
         ],
         [
             (
-                "blue_bottle_k5_trial_b217afca_passes_single_turn_semantics",
-                test_blue_bottle_k5_trial_b217afca_passes_single_turn_semantics,
+                "blue_bottle_k5_trial_b217afca_rejects_incomplete_purchase",
+                test_blue_bottle_k5_trial_b217afca_rejects_incomplete_purchase,
             ),
             (
-                "blue_bottle_k5_trial_52d717ea_passes_single_turn_semantics",
-                test_blue_bottle_k5_trial_52d717ea_passes_single_turn_semantics,
+                "blue_bottle_k5_trial_52d717ea_rejects_incomplete_purchase",
+                test_blue_bottle_k5_trial_52d717ea_rejects_incomplete_purchase,
             ),
             (
-                "blue_bottle_k5_trial_7d282652_passes_single_turn_semantics",
-                test_blue_bottle_k5_trial_7d282652_passes_single_turn_semantics,
+                "blue_bottle_k5_trial_7d282652_rejects_incomplete_purchase",
+                test_blue_bottle_k5_trial_7d282652_rejects_incomplete_purchase,
             ),
             (
-                "blue_bottle_tree_proof_passes_with_subagent_evidence",
-                test_blue_bottle_tree_proof_passes_with_subagent_evidence,
+                "blue_bottle_tree_proof_rejects_incomplete_purchase",
+                test_blue_bottle_tree_proof_rejects_incomplete_purchase,
             ),
         ],
     )
@@ -28142,6 +28658,7 @@ async def run_all_tests():
         "runner_cleanup_manifest_database_without_probe",
         test_runner_cleanup_uses_manifest_database_without_discovery_probe,
     )
+    r.record("compute_token_seed_exit_status", test_compute_token_sync_preserves_seed_exit_status)
     r.record(
         "compute_token_preflight_isolated_source",
         test_compute_token_preflight_uses_credential_source_not_restored_guest_database,
@@ -28376,6 +28893,7 @@ async def run_all_tests():
     r.record("local_worker_health_url_derived", test_local_worker_health_url_derives_from_backend_port)
     r.record("benchmark_memory_baseline_guarded", test_benchmark_memory_baseline_endpoint_is_guarded)
     r.record("logical_tool_counts_ignore_progress", test_logical_tool_counts_ignore_progress_messages)
+    r.record("logical_tool_counts_typed_background_browser", test_logical_tool_counts_include_typed_background_browser_start)
     r.record(
         "logical_tool_counts_model_facing_routed_calls",
         test_logical_tool_counts_canonicalize_model_facing_routed_calls,
@@ -28474,6 +28992,10 @@ async def run_all_tests():
     r.record(
         "payment_benchmark_admin_run_user_forced_customer_path",
         test_payment_benchmark_seeds_admin_run_user_with_forced_customer_path,
+    )
+    r.record(
+        "local_main_selected_child_payment_fixture",
+        test_local_main_seeds_only_the_selected_child_payment_fixture,
     )
     await r.record_async(
         "agentcard_setup_effective_benchmark_user",
@@ -28682,6 +29204,10 @@ async def run_all_tests():
     await r.record_async(
         "production_payment_identity_gap_prints_its_provisioning_rules",
         test_production_payment_identity_gap_fails_closed_with_its_own_provisioning_rules,
+    )
+    await r.record_async(
+        "production_payment_admission_requires_scoped_live_v2_readiness",
+        test_production_payment_admission_requires_scoped_live_v2_readiness,
     )
     r.record(
         "production_frontend_ignores_stale_local_manifest",
@@ -29410,6 +29936,10 @@ async def run_all_tests():
         _with_tmp_path(test_payment_benchmark_accepts_org_client_credentials_from_dotenv),
     )
     r.record(
+        "payment_benchmark_rejects_mcp_only_credentials_for_rest_issuing",
+        _with_tmp_path(test_payment_benchmark_rejects_mcp_only_credentials_for_rest_issuing),
+    )
+    r.record(
         "agent_latency_time_containment_scales",
         test_agent_latency_time_containment_scales_and_picks_narrowest_parent,
     )
@@ -29460,6 +29990,10 @@ async def run_all_tests():
     r.record(
         "local_workspace_derived_base_skips_reported_ephemeral_window",
         test_local_workspace_derived_base_skips_reported_ephemeral_window,
+    )
+    await r.record_async(
+        "polar_judge_preserves_full_tool_evidence",
+        test_polar_judge_preserves_full_tool_evidence,
     )
     r.record(
         "code_agent_sdk_evidence_chips_count_as_grounded_steps",
