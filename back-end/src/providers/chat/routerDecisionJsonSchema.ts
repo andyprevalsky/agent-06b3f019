@@ -9,11 +9,17 @@ export const DIRECT_ANSWER_CONTRACT =
  *
  * The flat object keeps all fields required across OpenAI, Anthropic, and
  * Gemini. Action-specific fields use empty strings (or an empty array, or
- * null for `grep`) when they do not apply. `queries` has no maxItems: under
- * Cerebras's constrained decoding a capped array made the model loop inside
- * its last string. `grep` is the shared grep tool definition's parameters in
- * strict form (providers/grepTool), never a local copy; it comes last so the
- * top-level string fields before it stay recoverable from a cut-off stream.
+ * null for `grep`) when they do not apply. Order-keeping hosts write the
+ * fields in declared order, so `goal` and `mode` follow `action` directly:
+ * an escalation writes its agent goal in the first slot after deciding,
+ * never after a search field. With `queries` there, the live GLM failover
+ * once wrote the re-plan brief into `queries` and the stale first request
+ * into `goal` (FLAKY 6a3ec2af). Every stage shares this order. `queries` has
+ * no maxItems: under Cerebras's constrained decoding a capped array made the
+ * model loop inside its last string. `grep` is the shared grep tool
+ * definition's parameters in strict form (providers/grepTool), never a local
+ * copy; it comes last so the top-level string fields before it stay
+ * recoverable from a cut-off stream.
  */
 export const ROUTER_JSON_SCHEMA = {
   type: 'object',
@@ -26,12 +32,6 @@ export const ROUTER_JSON_SCHEMA = {
       type: 'string',
       enum: ['direct_answer', 'web_search', 'grep', 'start_superintelligence'],
       description: DIRECT_ANSWER_CONTRACT,
-    },
-    queries: {
-      type: 'array',
-      items: { type: 'string' },
-      description:
-        'Search queries, run in parallel. One or more for web_search; empty array for other actions.',
     },
     goal: {
       type: 'string',
@@ -46,13 +46,19 @@ export const ROUTER_JSON_SCHEMA = {
       description:
         'Agent start phase, chosen per Mode Selection. Required for start_superintelligence; ignored for other actions (pick either enum value).',
     },
+    queries: {
+      type: 'array',
+      items: { type: 'string' },
+      description:
+        'Search queries, run in parallel. One or more for web_search; empty array for other actions.',
+    },
     grep: {
       anyOf: [GREP_TOOL_STRICT_PARAMETERS, { type: 'null' }],
       description:
         'Arguments for the grep action (the grep tool definition); null for other actions.',
     },
   },
-  required: ['reasoning', 'action', 'queries', 'goal', 'mode', 'grep'],
+  required: ['reasoning', 'action', 'goal', 'mode', 'queries', 'grep'],
   additionalProperties: false,
 };
 

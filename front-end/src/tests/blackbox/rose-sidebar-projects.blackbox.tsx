@@ -73,7 +73,7 @@ function requests(method: string, path: string) {
 }
 
 async function openSettings(user: ReturnType<typeof userEvent.setup>) {
-  await user.click(await screen.findByRole('button', { name: 'Rose project settings' }));
+  await user.click(await screen.findByRole('button', { name: 'Rose folder settings' }));
   return screen.getByTestId('rose-project-settings');
 }
 
@@ -108,7 +108,7 @@ describe('Rose projects in the left bar', () => {
     expect(precedesHome(rose)).toBe(true);
     expect(precedesHome(screen.getByTestId('rose-project-row-p-site'))).toBe(true);
     expect(precedesHome(screen.getByTestId('rose-agent-row-a-rose'))).toBe(true);
-    const newProject = screen.getByRole('button', { name: '+ New project' });
+    const newProject = screen.getByRole('button', { name: '+ New folder' });
     expect(precedesHome(newProject)).toBe(true);
     for (const id of ['p-rose', 'p-site']) {
       const row = screen.getByTestId(`rose-project-row-${id}`);
@@ -118,25 +118,26 @@ describe('Rose projects in the left bar', () => {
     }
   });
 
-  it('+ New project creates inline: Enter creates, Escape cancels', async () => {
+  it('+ New folder creates inline with POST /folders { name } only: Enter creates, Escape cancels', async () => {
     const user = userEvent.setup();
     renderBar();
     await screen.findByTestId('rose-project-row-p-rose');
 
-    await user.click(screen.getByRole('button', { name: '+ New project' }));
-    const input = screen.getByRole('textbox', { name: 'New project name' });
+    await user.click(screen.getByRole('button', { name: '+ New folder' }));
+    const input = screen.getByRole('textbox', { name: 'New folder name' });
     await waitFor(() => expect(input).toHaveFocus());
     await user.type(input, 'Scratch{Escape}');
-    expect(screen.queryByRole('textbox', { name: 'New project name' })).toBeNull();
-    expect(requests('POST', '/projects')).toHaveLength(0);
+    expect(screen.queryByRole('textbox', { name: 'New folder name' })).toBeNull();
+    expect(requests('POST', '/folders')).toHaveLength(0);
 
-    await user.click(screen.getByRole('button', { name: '+ New project' }));
-    await user.type(screen.getByRole('textbox', { name: 'New project name' }), 'Habits{Enter}');
-    await waitFor(() => expect(requests('POST', '/projects')).toHaveLength(1));
-    expect(requests('POST', '/projects')[0].body).toEqual({ name: 'Habits' });
+    await user.click(screen.getByRole('button', { name: '+ New folder' }));
+    await user.type(screen.getByRole('textbox', { name: 'New folder name' }), 'Habits{Enter}');
+    await waitFor(() => expect(requests('POST', '/folders')).toHaveLength(1));
+    expect(requests('POST', '/folders')[0].body).toEqual({ name: 'Habits' });
+    expect(api.folderWrites).toEqual([{ method: 'POST', id: null, body: { name: 'Habits' } }]);
     expect(await screen.findByTestId('rose-project-row-p-2')).toHaveTextContent('Habits');
-    expect(screen.queryByRole('textbox', { name: 'New project name' })).toBeNull();
-    expect(screen.getByRole('button', { name: '+ New project' })).toBeInTheDocument();
+    expect(screen.queryByRole('textbox', { name: 'New folder name' })).toBeNull();
+    expect(screen.getByRole('button', { name: '+ New folder' })).toBeInTheDocument();
   });
 
   it('a duplicate name (409) keeps the inline input open with an inline error, no toast', async () => {
@@ -144,40 +145,40 @@ describe('Rose projects in the left bar', () => {
     renderBar();
     await screen.findByTestId('rose-project-row-p-rose');
 
-    await user.click(screen.getByRole('button', { name: '+ New project' }));
-    const input = screen.getByRole('textbox', { name: 'New project name' });
+    await user.click(screen.getByRole('button', { name: '+ New folder' }));
+    const input = screen.getByRole('textbox', { name: 'New folder name' });
     await user.type(input, 'Rose{Enter}');
-    await waitFor(() => expect(requests('POST', '/projects')).toHaveLength(1));
+    await waitFor(() => expect(requests('POST', '/folders')).toHaveLength(1));
 
     const error = await screen.findByTestId('rose-new-project-error');
-    expect(error).toHaveTextContent('A project named “Rose” already exists');
-    expect(screen.getByRole('textbox', { name: 'New project name' })).toHaveValue('Rose');
-    expect(screen.getByRole('textbox', { name: 'New project name' })).toHaveAttribute(
+    expect(error).toHaveTextContent('A folder named “Rose” already exists');
+    expect(screen.getByRole('textbox', { name: 'New folder name' })).toHaveValue('Rose');
+    expect(screen.getByRole('textbox', { name: 'New folder name' })).toHaveAttribute(
       'aria-invalid',
       'true',
     );
-    expect(screen.queryByText('Could not create project')).toBeNull();
+    expect(screen.queryByText('Could not create folder')).toBeNull();
     expect(api.projects).toHaveLength(1);
 
     // Editing the name clears the error; a unique name then creates.
-    await user.type(screen.getByRole('textbox', { name: 'New project name' }), ' 2');
+    await user.type(screen.getByRole('textbox', { name: 'New folder name' }), ' 2');
     expect(screen.queryByTestId('rose-new-project-error')).toBeNull();
     await user.keyboard('{Enter}');
-    await waitFor(() => expect(requests('POST', '/projects')).toHaveLength(2));
-    expect(requests('POST', '/projects')[1].body).toEqual({ name: 'Rose 2' });
+    await waitFor(() => expect(requests('POST', '/folders')).toHaveLength(2));
+    expect(requests('POST', '/folders')[1].body).toEqual({ name: 'Rose 2' });
     expect(await screen.findByTestId('rose-project-row-p-2')).toHaveTextContent('Rose 2');
   });
 
-  it('right-click a project: Rename project (inline, PUT), Project settings, Delete project (red)', async () => {
+  it('right-click a folder: Rename folder (inline, PATCH /folders), Folder settings, Delete folder (red)', async () => {
     const user = userEvent.setup();
     renderBar();
     const row = await screen.findByTestId('rose-project-row-p-rose');
     const menu = await openContextMenu(row, 'rose-project-menu');
     const items = within(menu).getAllByRole('menuitem');
     expect(items.map((i) => i.textContent)).toEqual([
-      'Rename project',
-      'Project settings',
-      'Delete project',
+      'Rename folder',
+      'Folder settings',
+      'Delete folder',
     ]);
     expect(items[2].className).toContain('text-[#e5484d]');
 
@@ -186,15 +187,15 @@ describe('Rose projects in the left bar', () => {
     await waitFor(() => expect(rename).toHaveFocus());
     await user.clear(rename);
     await user.type(rename, 'Rose Labs{Enter}');
-    await waitFor(() => expect(requests('PUT', '/projects/p-rose')).toHaveLength(1));
-    expect(requests('PUT', '/projects/p-rose')[0].body).toEqual({ name: 'Rose Labs' });
-    expect(requests('PATCH', '/projects/p-rose')).toHaveLength(0);
+    await waitFor(() => expect(requests('PATCH', '/folders/p-rose')).toHaveLength(1));
+    expect(requests('PATCH', '/folders/p-rose')[0].body).toEqual({ name: 'Rose Labs' });
+    expect(requests('PUT', '/projects/p-rose')).toHaveLength(0);
     await waitFor(() =>
       expect(screen.getByTestId('rose-project-row-p-rose')).toHaveTextContent('Rose Labs'),
     );
   });
 
-  it('Delete project asks to confirm, then deletes; its agents fall back to Home', async () => {
+  it('Delete folder asks to confirm, then DELETEs /folders/:id; its agents fall back to Home', async () => {
     const user = userEvent.setup();
     renderBar();
     const row = await screen.findByTestId('rose-project-row-p-rose');
@@ -202,22 +203,22 @@ describe('Rose projects in the left bar', () => {
       within(screen.getByTestId('rose-group-p-rose')).getByTestId('rose-agent-row-a-rose'),
     ).toBeInTheDocument();
     const menu = await openContextMenu(row, 'rose-project-menu');
-    await user.click(within(menu).getByRole('menuitem', { name: 'Delete project' }));
+    await user.click(within(menu).getByRole('menuitem', { name: 'Delete folder' }));
 
     const dialog = await screen.findByRole('dialog');
-    expect(dialog).toHaveTextContent('Delete project “Rose”?');
+    expect(dialog).toHaveTextContent('Delete folder “Rose”?');
     await user.click(within(dialog).getByRole('button', { name: 'Cancel' }));
-    expect(requests('DELETE', '/projects/p-rose')).toHaveLength(0);
+    expect(requests('DELETE', '/folders/p-rose')).toHaveLength(0);
 
     await user.click(
       within(await openContextMenu(row, 'rose-project-menu')).getByRole('menuitem', {
-        name: 'Delete project',
+        name: 'Delete folder',
       }),
     );
     await user.click(
-      within(await screen.findByRole('dialog')).getByRole('button', { name: 'Delete project' }),
+      within(await screen.findByRole('dialog')).getByRole('button', { name: 'Delete folder' }),
     );
-    await waitFor(() => expect(requests('DELETE', '/projects/p-rose')).toHaveLength(1));
+    await waitFor(() => expect(requests('DELETE', '/folders/p-rose')).toHaveLength(1));
     await waitFor(() => expect(screen.queryByTestId('rose-project-row-p-rose')).toBeNull());
     expect(api.projects).toHaveLength(0);
     expect(
@@ -230,7 +231,7 @@ describe('Rose projects in the left bar', () => {
     renderBar();
     await user.click(await findCreateAgentButton('p-rose'));
     expect(
-      await screen.findByText('New agent in a project is not available yet'),
+      await screen.findByText('New agent in a folder is not available yet'),
     ).toBeInTheDocument();
   });
 
@@ -250,9 +251,11 @@ describe('Rose projects in the left bar', () => {
     expect(panel.className).toContain('dark:bg-[#262624]');
     expect(within(panel).getByRole('heading', { level: 2 })).toHaveTextContent('Rose');
 
-    const repo = within(panel).getByRole('region', { name: 'Code repo' });
-    expect(repo).toHaveTextContent('https://github.com/Rose-Ai-Labs/rose');
-    expect(within(repo).getByRole('button', { name: 'Change' })).toBeInTheDocument();
+    const repo = within(panel).getByRole('region', { name: 'GitHub repo' });
+    // Read-only: the folder's connected repo; connect / change happens on Integrations.
+    expect(await within(repo).findByText('gh:rose-ai-labs/rose')).toBeInTheDocument();
+    expect(within(repo).queryByRole('textbox', { name: 'Repository URL' })).toBeNull();
+    expect(within(repo).queryByRole('button', { name: 'Change' })).toBeNull();
     expect(within(repo).getByRole('textbox', { name: 'Default branch' })).toHaveValue('main');
     expect(within(repo).getByTestId('project-github-status')).toHaveTextContent('Connected');
     expect(within(repo).getByTestId('project-last-synced').querySelector('time')).toHaveAttribute(
@@ -288,7 +291,7 @@ describe('Rose projects in the left bar', () => {
 
     // Working in the panel collapses the bar (pointer left it); hover back to reach ⚙.
     expandBar();
-    await user.click(screen.getByRole('button', { name: 'Rose project settings' }));
+    await user.click(screen.getByRole('button', { name: 'Rose folder settings' }));
     expect(screen.queryByTestId('rose-project-settings')).toBeNull();
   });
 
@@ -304,7 +307,7 @@ describe('Rose projects in the left bar', () => {
     ]);
     renderBar();
     const panel = await openSettings(user);
-    const repo = within(panel).getByRole('region', { name: 'Code repo' });
+    const repo = within(panel).getByRole('region', { name: 'GitHub repo' });
     expect(within(repo).getByTestId('project-github-status')).toHaveTextContent('Not connected');
     expect(within(repo).getByTestId('project-last-synced')).toHaveTextContent('Never');
     expect(repo).toHaveTextContent('No repository');
@@ -427,15 +430,15 @@ describe('Rose projects in the left bar', () => {
     await user.clear(timeout);
     await user.type(timeout, '300');
     await user.click(within(panel).getByRole('button', { name: 'Auto-wake' }));
-    await user.click(within(panel).getByRole('button', { name: 'Change' }));
-    const url = within(panel).getByRole('textbox', { name: 'Repository URL' });
-    await user.clear(url);
-    await user.type(url, 'https://github.com/Rose-Ai-Labs/rose-v2');
+    const branch = within(panel).getByRole('textbox', { name: 'Default branch' });
+    await user.clear(branch);
+    await user.type(branch, 'develop');
 
     await user.click(save);
     await waitFor(() => expect(requests('PUT', '/projects/p-rose')).toHaveLength(1));
+    // Never a repoUrl: the repo is connected on the Integrations panel.
     expect(requests('PUT', '/projects/p-rose')[0].body).toEqual({
-      repoUrl: 'https://github.com/Rose-Ai-Labs/rose-v2',
+      defaultBranch: 'develop',
       startupTimeoutS: 300,
       lifecycle: { autoWake: false },
     });

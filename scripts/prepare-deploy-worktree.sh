@@ -218,7 +218,7 @@ agents_venv_is_self_rooted() {
 }
 
 # The source workspace's healthy agents/venv is the verified toolchain
-# (CLAUDE.md "Fresh clone setup": link existing healthy trees, including
+# (docs/setup-mac.md: link existing healthy trees, including
 # agents/venv, when the manifests match). A fresh venv resolves every
 # unpinned range anew and drifted on 2026-10-30 (pytest 9.2.0 beside the
 # verified 9.1.1), so a deploy worktree links the source venv whenever its

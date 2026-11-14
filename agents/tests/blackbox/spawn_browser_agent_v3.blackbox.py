@@ -29281,8 +29281,9 @@ async def test_private_browser_pause_urls_use_protected_continuity(_lifecycle_pr
     assert not failures, f"credential-bearing URL escaped activity pause boundary: {failures}"
 
 
-async def _resume_drained_browser_task_on_reused_session(ttl_ms, on_step):
+async def _resume_drained_browser_task_on_reused_session(ttl_ms, on_step, *, activity_budget=None, activity_elapsed=None):
     """Run a drained task resumed at step 3 on the live Steel session the backend let it reuse."""
+    import dataclasses
     from contextlib import ExitStack
 
     from temporalio.testing import ActivityEnvironment
@@ -29293,6 +29294,12 @@ async def _resume_drained_browser_task_on_reused_session(ttl_ms, on_step):
     from domains.spawn_browser_agent_v3.handler import spawn_browser_agent_activity_v3
 
     env = ActivityEnvironment()
+    if activity_budget is not None:
+        env.info = dataclasses.replace(
+            env.info,
+            start_to_close_timeout=activity_budget,
+            started_time=datetime.now(timezone.utc) - (activity_elapsed or timedelta(0)),
+        )
     fake_browser = SimpleNamespace(contexts=[SimpleNamespace(pages=[SimpleNamespace()])], close=AsyncMock())
     session_info = {
         "task_id": "task-1",
@@ -29455,6 +29462,65 @@ async def test_browser_task_keeps_stepping_on_a_reused_session_with_time_left():
     assert result["step_count"] == 5, result
     resume_mock.assert_not_awaited()
     close_mock.assert_not_awaited()
+
+
+async def test_browser_task_checkpoints_before_its_activity_start_to_close():
+    """A long, healthy task must checkpoint before its own StartToClose kills it.
+
+    Prod agent 0b54f65d (2026-11-13): a phone-setup browser task made 127 steady
+    steps (123 successful phone actions, last at 09:19:45) and was hard-killed
+    by the 30-minute StartToClose at 09:20:48 mid-step, returning no result. The
+    step loop already yields for deploy drain and session expiry; it must yield
+    the same way while one more supervised step plus teardown still fits in the
+    attempt, so the manager restarts the same task at the same step count.
+    """
+    from domains.spawn_browser_agent_v3.config import (
+        ACTIVITY_START_TO_CLOSE_TIMEOUT_MINUTES,
+        BROWSER_ACTIVITY_DEADLINE,
+        BROWSER_DRAIN_YIELD_STATUS,
+        BROWSER_SESSION_MIN_REMAINING_SECONDS,
+    )
+
+    budget = timedelta(minutes=ACTIVITY_START_TO_CLOSE_TIMEOUT_MINUTES)
+    assert budget.total_seconds() >= 2 * BROWSER_SESSION_MIN_REMAINING_SECONDS
+
+    async def step(env):
+        await asyncio.sleep(0)
+
+    result, llm_step, resume_mock, close_mock = await _resume_drained_browser_task_on_reused_session(
+        24 * 3600 * 1000,
+        step,
+        activity_budget=budget,
+        activity_elapsed=budget - timedelta(seconds=BROWSER_SESSION_MIN_REMAINING_SECONDS),
+    )
+    assert llm_step.await_count == 1, f"started a step the activity may not outlive: {llm_step.await_count}"
+    assert result["status"] == BROWSER_DRAIN_YIELD_STATUS, result
+    assert result["yield_reason"] == BROWSER_ACTIVITY_DEADLINE, result
+    assert result["step_count"] == 4 and result["task_id"] == "task-1", result
+    close_mock.assert_not_awaited()
+
+    # Control: the same budget with time left keeps stepping until a real drain.
+    steps = []
+
+    async def deploy_lands_on_the_second_step(env):
+        steps.append(1)
+        if len(steps) == 2:
+            env.worker_shutdown()
+
+    result, llm_step, _resume, _close = await _resume_drained_browser_task_on_reused_session(
+        24 * 3600 * 1000, deploy_lands_on_the_second_step, activity_budget=budget, activity_elapsed=timedelta(0)
+    )
+    assert llm_step.await_count == 2, "an attempt with time left must keep serving steps"
+    assert result["yield_reason"] != BROWSER_ACTIVITY_DEADLINE, result
+
+    # The 3m Fast Mode demo ceiling stays a hard ceiling (no yield loop).
+    from temporalio.testing import ActivityEnvironment
+    from domains.spawn_browser_agent_v3.handler import _activity_deadline_near
+
+    short = timedelta(minutes=3)
+    env = ActivityEnvironment()
+    env.info = dataclasses.replace(env.info, start_to_close_timeout=short, started_time=datetime.now(timezone.utc) - short)
+    assert env.run(_activity_deadline_near) is False
 
 
 async def test_reused_session_lifetime_fixture_isolates_cached_generation():
@@ -31725,6 +31791,10 @@ async def _drive_payment_card_gate(
     checkout_error=None,
     lookup_result=None,
     approval_calls=None,
+    task_queue="navi-agent-tasks@funding-test",
+    workflow_state=None,
+    clock_read=None,
+    waiter=None,
 ):
     """Drive execute_tool through the payment-card gate branch.
 
@@ -31777,7 +31847,7 @@ async def _drive_payment_card_gate(
     )
     resume = _FakePaymentGateHandle({"success": True, "message": "done", "output_files": []})
 
-    workflow_instance = SimpleNamespace(
+    workflow_instance = workflow_state or SimpleNamespace(
         user_id="user-1",
         agent_id="agent-1",
         is_paused=False,
@@ -31838,9 +31908,11 @@ async def _drive_payment_card_gate(
     manager = SpawnBrowserAgentManagerV3()
     with (
         patch("domains.spawn_browser_agent_v3.handler.workflow.start_activity", side_effect=fake_start_activity),
-        patch("domains.spawn_browser_agent_v3.handler.workflow.wait_condition", AsyncMock(return_value=None)),
+        patch("domains.spawn_browser_agent_v3.handler.workflow.info", return_value=SimpleNamespace(task_queue=task_queue)),
+        patch("domains.spawn_browser_agent_v3.handler.workflow.time", side_effect=lambda: (clock_read or fake_now)().timestamp()),
+        patch("domains.spawn_browser_agent_v3.handler.workflow.wait_condition", side_effect=waiter or AsyncMock(return_value=None)),
         patch("domains.spawn_browser_agent_v3.handler.workflow.execute_activity", side_effect=fake_execute_activity),
-        patch("domains.spawn_browser_agent_v3.handler.workflow.now", side_effect=fake_now),
+        patch("domains.spawn_browser_agent_v3.handler.workflow.now", side_effect=clock_read or fake_now),
         patch("domains.spawn_browser_agent_v3.handler.workflow.sleep", AsyncMock(return_value=None)),
         patch(
             "tools.request_user_approval.request_user_approval_direct", side_effect=fake_request_user_approval_direct
@@ -32051,6 +32123,90 @@ async def test_manager_payment_gate_kyc_still_incomplete_after_retry_blocks():
     assert activity_calls.count("mint_purchase_card_activity") == 2
 
 
+async def _drive_funding_wait_review(*, task_queue, retry_seconds, interruption=None):
+    from helpers.generation_handoff import GenerationHandoffRequested
+
+    state = SimpleNamespace(user_id="user-1", agent_id="agent-1", is_paused=False,
+                            write_lock_enabled=True, system_name="Rose", _pause_signal_sequence=0)
+    clock = [datetime(2026, 11, 11, tzinfo=timezone.utc)]
+    timers, wake_results = [], []
+
+    async def wait(predicate, timeout=None):
+        # Only the funding park has a timeout; approval's companion is unbounded.
+        if timeout is None:
+            return
+        timers.append(timeout.total_seconds())
+        if interruption in ("pause", "pause-resume"):
+            state.is_paused = interruption == "pause"
+            state._user_pause_active = interruption == "pause"
+            state._pause_signal_sequence += 1
+            wake_results.append(predicate())
+            assert predicate(), "PAUSE did not wake the actual funding wait predicate"
+            return
+        if interruption == "handoff":
+            state._generation_handoff_hint = "navi-agent-tasks@next"
+            state._generation_handoff_hint_seq = 1
+            state._check_generation_handoff = AsyncMock(return_value="navi-agent-tasks@next")
+            assert predicate(), "generation signal did not wake funding park"
+            return
+        clock[0] += timeout
+        raise asyncio.TimeoutError()
+
+    pending = {"status": "agentcard_company_funding_in_progress", "retryAfterSeconds": retry_seconds}
+    held = {"status": "HELD", "purchaseId": "purchase-1", "cardId": "card-1",
+            "pan": "4242424242424242", "cvv": "123", "expiry": "12/30", "last4": "4242"}
+    try:
+        outcome = await _drive_payment_card_gate(
+            mint_results=[pending, held], task_queue=task_queue, workflow_state=state,
+            clock_read=lambda: clock[0], waiter=wait)
+    except GenerationHandoffRequested as exc:
+        outcome = exc
+    return outcome, timers, wake_results
+
+
+async def test_manager_funding_wait_wakes_on_pause_and_pause_resume():
+    for interruption in ("pause", "pause-resume"):
+        outcome, timers, wakes = await _drive_funding_wait_review(
+            task_queue="navi-agent-tasks@new", retry_seconds=599, interruption=interruption)
+        events, calls, _, _ = outcome
+        assert timers == [599.0] and wakes == [True], (timers, wakes)
+        assert calls.count("mint_purchase_card_activity") == 1, calls
+        terminals = [e for e in events if (getattr(e, "metadata", None) or {}).get("action_type") == "task_complete"]
+        assert len(terminals) == 1 and terminals[0].metadata["task_id"] == "task-1"
+        assert any((getattr(e, "metadata", None) or {}).get("userPauseRequested") for e in events) == (interruption == "pause")
+        assert not any(getattr(e, "title", "") == "Payment card ready" for e in events)
+
+
+async def test_manager_funding_plain_queue_preserves_legacy_retry_timer():
+    observations = []
+    expected = []
+    for queue in ("navi-agent-tasks", "benchmark-plain"):
+        for hint in (120, 600, 1e308):
+            outcome, timers, _ = await _drive_funding_wait_review(task_queue=queue, retry_seconds=hint)
+            events, calls, _, _ = outcome
+            ready = any(getattr(e, "title", "") == "Payment card ready" for e in events)
+            observations.append((queue, hint, timers, calls.count("mint_purchase_card_activity"), ready))
+            expected.append((queue, hint, [60.0], 2, True))
+    assert observations == expected, observations
+
+
+async def test_manager_funding_generation_queue_honors_hint_and_handoff():
+    from helpers.generation_handoff import GenerationHandoffRequested
+    for hint in (1, 5, 120, 599):
+        outcome, timers, _ = await _drive_funding_wait_review(task_queue="navi-agent-tasks@new", retry_seconds=hint)
+        _, calls, _, _ = outcome
+        assert timers == [float(hint)] and calls.count("mint_purchase_card_activity") == 2
+    for hint in (600, 1e308):
+        outcome, timers, _ = await _drive_funding_wait_review(task_queue="navi-agent-tasks@new", retry_seconds=hint)
+        events, calls, _, _ = outcome
+        assert timers == [] and calls.count("mint_purchase_card_activity") == 1
+        assert any(getattr(e, "title", "") == "Payment funding is delayed" for e in events)
+    outcome, timers, _ = await _drive_funding_wait_review(
+        task_queue="navi-agent-tasks@new", retry_seconds=599, interruption="handoff")
+    assert isinstance(outcome, GenerationHandoffRequested) and outcome.task_queue == "navi-agent-tasks@next"
+    assert timers == [599.0]
+
+
 async def test_manager_payment_gate_retries_company_funding_and_mints():
     events, activity_calls, _, _ = await _drive_payment_card_gate(
         mint_results=[
@@ -32080,7 +32236,20 @@ def test_manager_payment_gate_normalizes_company_funding_retry_delay():
         assert _normalize_funding_retry_seconds(invalid) == 5.0
     assert _normalize_funding_retry_seconds(0.001) == 1.0
     assert _normalize_funding_retry_seconds(5) == 5.0
-    assert _normalize_funding_retry_seconds(600) == 60.0
+    assert _normalize_funding_retry_seconds(120) == 120.0
+    assert _normalize_funding_retry_seconds(600) == 600.0
+
+
+async def test_manager_payment_gate_does_not_retry_before_a_hint_beyond_its_deadline():
+    for retry_seconds in (600, 1e308):
+        events, activity_calls, _, _ = await _drive_payment_card_gate(
+            mint_results=[{
+                "status": "agentcard_company_funding_in_progress",
+                "retryAfterSeconds": retry_seconds,
+            }]
+        )
+        assert activity_calls.count("mint_purchase_card_activity") == 1
+        assert any(getattr(event, "title", "") == "Payment funding is delayed" for event in events)
 
 
 async def test_manager_payment_gate_reports_company_funding_deadline():
@@ -38383,6 +38552,10 @@ async def run_all_tests():
         test_browser_task_keeps_stepping_on_a_reused_session_with_time_left,
     )
     await r.record_async(
+        "browser_task_checkpoints_before_activity_start_to_close",
+        test_browser_task_checkpoints_before_its_activity_start_to_close,
+    )
+    await r.record_async(
         "reused_session_lifetime_fixture_isolates_cached_generation",
         test_reused_session_lifetime_fixture_isolates_cached_generation,
     )
@@ -38608,6 +38781,9 @@ async def run_all_tests():
         "manager_payment_gate_kyc_still_incomplete",
         test_manager_payment_gate_kyc_still_incomplete_after_retry_blocks,
     )
+    await r.record_async("manager_funding_wait_pause", test_manager_funding_wait_wakes_on_pause_and_pause_resume)
+    await r.record_async("manager_funding_plain_replay", test_manager_funding_plain_queue_preserves_legacy_retry_timer)
+    await r.record_async("manager_funding_generation_wait", test_manager_funding_generation_queue_honors_hint_and_handoff)
     await r.record_async(
         "manager_payment_gate_company_funding_retry",
         test_manager_payment_gate_retries_company_funding_and_mints,
@@ -38619,6 +38795,10 @@ async def run_all_tests():
     await r.record_async(
         "manager_payment_gate_company_funding_deadline",
         test_manager_payment_gate_reports_company_funding_deadline,
+    )
+    await r.record_async(
+        "manager_payment_gate_honors_long_provider_delay",
+        test_manager_payment_gate_does_not_retry_before_a_hint_beyond_its_deadline,
     )
     r.record(
         "transient_session_init_failure_classification",

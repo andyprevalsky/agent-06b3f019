@@ -1,7 +1,8 @@
 /**
  * Integrations domain routes — main router + CRUD + mounts sub-routers.
  * Sub-routers: routes.upload.ts, routes.browser.ts, routes.email.ts, routes.claude.ts,
- * routes.compute.ts, routes.plaid.ts, routes.granola.ts, routes.accounts.ts (sync progress + delete alias)
+ * routes.compute.ts, routes.plaid.ts, routes.granola.ts, routes.githubRepos.ts,
+ * routes.accounts.ts (sync progress + delete alias)
  */
 
 import { type Response, Router } from 'express';
@@ -21,6 +22,7 @@ import documentRoutes from './routes.documents';
 import lanternRoutes from './routes.lantern';
 import granolaRoutes from './routes.granola';
 import firefliesRoutes from './routes.fireflies';
+import githubRepoRoutes from './routes.githubRepos';
 import linkedinRoutes from './routes.linkedin';
 import accountRoutes from './routes.accounts';
 
@@ -38,6 +40,7 @@ router.use(documentRoutes);
 router.use(lanternRoutes);
 router.use(granolaRoutes);
 router.use(firefliesRoutes);
+router.use(githubRepoRoutes);
 router.use(linkedinRoutes);
 router.use(accountRoutes);
 

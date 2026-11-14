@@ -5,9 +5,10 @@ export async function findSubscriptionByUserId(userId: string) {
   return prisma.subscription.findUnique({ where: { userId } });
 }
 
-export async function findPurchaseByCardId(cardId: string) {
+/** Omit userId only for trusted provider-event/internal reconciliation lookups. */
+export async function findPurchaseByCardId(cardId: string, userId?: string) {
   return prisma.purchaseSpend.findFirst({
-    where: { cardId },
+    where: { cardId, ...(userId !== undefined ? { userId } : {}) },
     orderBy: { createdAt: 'desc' },
   });
 }

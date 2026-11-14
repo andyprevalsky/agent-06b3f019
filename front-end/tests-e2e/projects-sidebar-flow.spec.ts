@@ -1,7 +1,47 @@
 /** Existing project rows/settings in the real desktop and mobile sidebar. Controlled API only. */
 import { expect, test } from '@playwright/test';
 import { FRONTEND_URL } from './helpers';
+import type { GithubRepo } from '../src/features/integrations/api/githubRepos';
+import type { Folder } from '../src/lib/api/folders';
 import type { MaintenanceState, Project } from '../src/lib/api/projects';
+
+/** GET /api/folders shape of a project row (mirrors rose-sidebar.fixtures `folderOf`). */
+function folderOf(p: Project): Folder {
+  const repo = /github\.com\/([^/]+)\/([^/.]+)/i.exec(p.repoUrl ?? '');
+  return {
+    id: p.id,
+    name: p.name,
+    legacy_project_id: p.id,
+    subfolders: (p.folders ?? []).map((f) => ({ id: f.id, name: f.name })),
+    github_repo:
+      repo !== null && p.repoUrl !== null
+        ? { canonical_ref: `gh:${repo[1]}/${repo[2]}`.toLowerCase(), repo_url: p.repoUrl }
+        : null,
+    created_at: p.createdAt,
+    updated_at: p.updatedAt,
+  };
+}
+
+/** GET /api/integrations/github/repos: each folder's connected repo, auto-imported. */
+function connectedReposOf(projects: Project[]): GithubRepo[] {
+  return projects.flatMap((p) => {
+    const repo = folderOf(p).github_repo;
+    if (repo === null) return [];
+    const [owner, name] = repo.canonical_ref.slice('gh:'.length).split('/');
+    return [
+      {
+        ...repo,
+        repo_name: name,
+        owner,
+        default_branch: p.defaultBranch,
+        connected_rose_project_ref: p.id,
+        integration_id: 'github-integration',
+        source: 'legacy_project',
+        connected_at: p.createdAt,
+      },
+    ];
+  });
+}
 for (const width of [1280, 390]) {
   test(`original project flow at ${width}px`, async ({ page }) => {
     test.setTimeout(60000);
@@ -79,16 +119,49 @@ for (const width of [1280, 390]) {
       const path = new URL(request.url()).pathname;
       if (!path.startsWith('/api/')) return route.continue();
       let body: unknown = {};
-      if (path === '/api/projects') {
+      if (path === '/api/folders') {
+        // Folders are the project rows (GET /api/folders shape: rose-sidebar.fixtures folderOf).
         if (request.method() === 'POST') {
           const input = request.postDataJSON();
           writes.push(input);
-          const created = { ...project, id: 'created', name: input.name };
+          const created: Project = {
+            ...project,
+            id: 'created',
+            name: input.name,
+            folders: [],
+            repoUrl: null,
+            githubConnected: false,
+          };
           projects = [...projects, created];
-          return route.fulfill({ json: created, status: 201 });
+          return route.fulfill({ json: folderOf(created), status: 201 });
         }
-        body = { projects };
-      } else if (path === '/api/projects/p-rose/folders' && request.method() === 'POST') {
+        body = { folders: projects.map(folderOf) };
+      } else if (path === '/api/projects') body = { projects };
+      else if (path === '/api/integrations/github/repos')
+        body = { repos: connectedReposOf(projects) };
+      // The rest of the Integrations panel the folder settings link opens: nothing connected.
+      else if (path === '/api/integrations') body = { integrations: [] };
+      else if (path === '/api/integrations/plaid/items') body = { items: [] };
+      else if (path === '/api/compute-accounts') body = { accounts: [] };
+      else if (path === '/api/integrations/granola')
+        body = {
+          connected: false,
+          status: 'NOT_CONNECTED',
+          accountEmail: null,
+          backfillDone: false,
+          lastSuccessfulSyncAt: null,
+          lastError: null,
+          documents: {},
+        };
+      else if (path === '/api/iphone/connection')
+        body = {
+          enabled: false,
+          configured: false,
+          status: 'not_connected',
+          setupAgentId: null,
+          connectionRevision: 0,
+        };
+      else if (path === '/api/projects/p-rose/folders' && request.method() === 'POST') {
         const folder = { id: 'f-new', name: request.postDataJSON().name, projectId: 'p-rose' };
         project = { ...project, folders: [...project.folders, folder] };
         projects = projects.map((p) => (p.id === project.id ? project : p));
@@ -157,11 +230,11 @@ for (const width of [1280, 390]) {
       clip: { x: 0, y: 0, width: width < 768 ? 390 : 235, height: width < 768 ? 510 : 370 },
     });
 
-    await folderRow.getByRole('button', { name: 'Collapse folder Interface' }).click();
+    await folderRow.getByRole('button', { name: 'Collapse subfolder Interface' }).click();
     await expect(folderRow.getByText('Rose work', { exact: true })).toHaveCount(0);
-    await folderRow.getByRole('button', { name: 'Expand folder Interface' }).click();
-    await row.getByRole('button', { name: 'New folder in Rose' }).click();
-    const folderName = page.getByRole('textbox', { name: 'New folder name' });
+    await folderRow.getByRole('button', { name: 'Expand subfolder Interface' }).click();
+    await row.getByRole('button', { name: 'New subfolder in Rose' }).click();
+    const folderName = page.getByRole('textbox', { name: 'New subfolder name' });
     await folderName.fill('Research');
     await folderName.press('Enter');
     await expect(page.getByTestId('rose-folder-f-new').filter({ visible: true })).toHaveText(
@@ -185,7 +258,7 @@ for (const width of [1280, 390]) {
     if (width < 768) await page.getByRole('button', { name: 'Open menu', exact: true }).click();
     else await page.getByTestId('rose-sidebar').hover({ position: { x: 30, y: 100 } });
     await expect(page.getByRole('button', { name: 'Projects', exact: true })).toHaveCount(0);
-    await row.getByRole('button', { name: 'Rose project settings' }).click();
+    await row.getByRole('button', { name: 'Rose folder settings' }).click();
     const settings =
       width < 768
         ? page.getByTestId('project-settings-content')
@@ -194,26 +267,55 @@ for (const width of [1280, 390]) {
     await expect(
       settings.getByRole('spinbutton', { name: 'Startup timeout (seconds)' }),
     ).toHaveValue('120');
-    await settings.getByRole('button', { name: 'Change', exact: true }).click();
-    await settings
-      .getByRole('textbox', { name: 'Repository URL' })
-      .fill('https://github.com/example/updated');
+    // The folder's repo is read-only here (GET /api/folders); the Integrations panel changes it.
+    const repo = settings.getByRole('region', { name: 'GitHub repo' });
+    await expect(repo.getByTestId('folder-github-repo')).toHaveText('gh:rose-ai-labs/rose');
+    await expect(settings.getByRole('textbox', { name: 'Repository URL' })).toHaveCount(0);
+    await expect(settings.getByRole('button', { name: 'Change', exact: true })).toHaveCount(0);
+    await settings.getByRole('textbox', { name: 'Default branch' }).fill('develop');
     await settings.getByRole('button', { name: 'Save', exact: true }).click();
-    await expect
-      .poll(() => writes)
-      .toContainEqual({ repoUrl: 'https://github.com/example/updated' });
+    await expect.poll(() => writes).toContainEqual({ defaultBranch: 'develop' });
     await expect(settings.getByRole('button', { name: 'Save', exact: true })).toBeDisabled();
-    if (width < 768) await page.getByRole('button', { name: 'Back to agents' }).click();
-    else await settings.getByRole('button', { name: 'Close project settings' }).click();
+    const switchInIntegrations = repo.getByRole('button', { name: 'Switch repo in Integrations' });
+    await expect(switchInIntegrations).toBeVisible();
+    // The link opens the Integrations panel at its GitHub section with this folder pre-selected.
+    // On mobile it also closes the agents sheet that holds these settings, so the panel is in view.
+    await switchInIntegrations.click();
+    const switchRepo = page.getByRole('form', { name: "Switch a folder's repo" });
+    await expect(switchRepo).toBeVisible();
+    await expect(switchRepo.getByRole('combobox', { name: 'Folder to switch' })).toHaveValue(
+      'p-rose',
+    );
+    await expect(switchRepo.getByTestId('switch-current-repo')).toContainText(
+      'Rose uses gh:rose-ai-labs/rose',
+    );
+    if (width >= 768) {
+      const integrations = page.getByTestId('rose-app-integrations');
+      await expect(integrations).toHaveAttribute('aria-pressed', 'true');
+      // No close X on desktop panels: the pressed icon closes it.
+      await integrations.click();
+      await expect(integrations).toHaveAttribute('aria-pressed', 'false');
+      await expect(switchRepo).toHaveCount(0);
+      await settings.getByRole('button', { name: 'Close folder settings' }).click();
+    } else {
+      await expect(page.getByTestId('rose-mobile-agent-list')).toBeHidden();
+      // The full-screen mobile sheet keeps its own close X.
+      await page.getByRole('button', { name: 'Close integrations' }).click();
+      await expect(switchRepo).toHaveCount(0);
+      // Reopening the menu lands on the agents list, not the closed settings.
+      await page.getByRole('button', { name: 'Open menu', exact: true }).click();
+      await expect(row).toBeVisible();
+      await expect(page.getByTestId('project-settings-content')).toHaveCount(0);
+    }
     if (width >= 768) {
       await page.mouse.move(500, 300);
       await page.getByTestId('rose-sidebar').hover({ position: { x: 30, y: 100 } });
     }
     const create = page
-      .getByRole('button', { name: '+ New project', exact: true })
+      .getByRole('button', { name: '+ New folder', exact: true })
       .filter({ visible: true });
     await create.click();
-    const input = page.getByRole('textbox', { name: 'New project name' });
+    const input = page.getByRole('textbox', { name: 'New folder name' });
     await input.fill('Cancelled');
     await input.press('Escape');
     await expect(input).toHaveCount(0);
@@ -221,6 +323,7 @@ for (const width of [1280, 390]) {
     await create.click();
     await input.fill('Website');
     await input.press('Enter');
+    await expect.poll(() => writes).toContainEqual({ name: 'Website' });
     await expect(
       page.getByTestId('rose-project-row-created').filter({ visible: true }),
     ).toBeVisible();
@@ -228,7 +331,7 @@ for (const width of [1280, 390]) {
     // A held press (like a person's), so the menu's pre-measure position cannot swallow the release.
     await row.click({ button: 'right', delay: 120 });
     const menu = page.getByTestId('rose-project-menu');
-    await expect(menu.getByRole('menuitem', { name: 'Rename project' })).toBeVisible();
+    await expect(menu.getByRole('menuitem', { name: 'Rename folder' })).toBeVisible();
     const hit = await menu.boundingBox();
     expect(
       await page.evaluate(
@@ -237,9 +340,9 @@ for (const width of [1280, 390]) {
         { x: hit!.x + 20, y: hit!.y + 15 },
       ),
     ).toBe(true);
-    await menu.getByRole('menuitem', { name: 'Delete project' }).click();
+    await menu.getByRole('menuitem', { name: 'Delete folder' }).click();
     const confirmation = page.getByRole(width < 768 ? 'alertdialog' : 'dialog', {
-      name: 'Delete project “Rose”?',
+      name: 'Delete folder “Rose”?',
     });
     await confirmation.getByRole('button', { name: 'Cancel' }).click();
     if (width >= 768) {

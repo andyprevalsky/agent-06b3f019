@@ -53,6 +53,22 @@
 # ─────────────────────────────────────────────────────────────────────────────
 set -uo pipefail
 
+# The controller stages this self-contained loader next to the trusted driver.
+# It replaces this process for owned capsules; re-entry verifies effective bytes.
+_source_env_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+_source_env_helper="${CLOUDBENCH_SOURCE_ENV_HELPER:-$_source_env_dir/cloudbench-source-env.py}"
+[ -f "$_source_env_helper" ] || { echo 'FATAL: missing source environment loader' >&2; exit 1; }
+_source_env_mode="$(python3 "$_source_env_helper" mode)" || exit 1
+case "$_source_env_mode" in
+    none) ;;
+    owned-capsule-v1)
+        if [ "${CLOUDBENCH_SOURCE_ENV_EXECUTED:-}" != owned-capsule-v1 ]; then
+            exec python3 "$_source_env_helper" exec -- /bin/bash "${BASH_SOURCE[0]}" "$@"
+        fi
+        python3 "$_source_env_helper" check-effective || exit 1 ;;
+    *) exit 1 ;;
+esac
+
 # The provenance helper and result tooling are controller-staged code. Never
 # create sibling bytecode while consuming that immutable bundle on the guest.
 export PYTHONDONTWRITEBYTECODE=1
@@ -894,6 +910,7 @@ step env_decode
 [ -f "$ENV_HELPER" ] || { log "FATAL: missing $ENV_HELPER"; finish 1; }
 # shellcheck source=lib/cloudbench-env.sh
 source "$ENV_HELPER"
+cloudbench_verify_source_guest_env || finish 1
 umask 077
 if [ -n "${AGENTS_ENV_B64:-}" ]; then
     echo "$AGENTS_ENV_B64" | base64 -d > "$REPO_DIR/agents/.env" || { log "FATAL: failed to decode AGENTS_ENV_B64"; finish 1; }
@@ -1249,6 +1266,9 @@ fi
 if [ "$BENCH_NEEDS_AGENTCARD_ONBOARDING" = "1" ]; then
     STACK_ENV+=("AGENTCARD_ONBOARDING_RETURN_URL=$AGENTCARD_BENCHMARK_ONBOARDING_RETURN_URL")
 fi
+if [ "$BENCH_SIMULATE" != "1" ] && { [ "$BENCH_NEEDS_PAYMENT_FIXTURE" = "1" ] || [ "$BENCH_NEEDS_NEW_USER_CHECKOUT" = "1" ]; }; then
+    STACK_ENV+=("BENCHMARK_AGENTCARD_WORLD_IDENTITY=true")
+fi
 if [ "$BENCH_NEEDS_PAYMENT_FIXTURE" = "1" ]; then
     STACK_ENV+=(
         "BENCHMARK_FORCE_CUSTOMER_PURCHASE_PATH=1"
@@ -1328,6 +1348,30 @@ else
     )
 fi
 
+# Cloud guest Kernel proxy custody
+case "${CLOUDBENCH_KERNEL_PROXY_CUSTODY-0}" in
+    0|1) ;;
+    *) log "FATAL: invalid cloud guest Kernel proxy custody policy"; finish 1 ;;
+esac
+# Bind the checked-out guest path only for the controller-selected policy.
+if [ "${CLOUDBENCH_KERNEL_PROXY_CUSTODY-0}" = 1 ]; then
+    # A guest preload cannot authorize allocation through a production target.
+    # Keep task routing unchanged; unsupported targets remain blocked, not waived.
+    if [ "${BENCH_TARGET_MODE_FOR_STACK:-}" != local ]; then
+        log "FATAL: Kernel proxy custody requires a verified isolated guest target"
+        finish 1
+    fi
+if ! KERNEL_PROXY_NODE_OPTIONS="$(cloudbench_kernel_proxy_node_options "$REPO_DIR")"; then
+    log "FATAL: cloud guest Kernel proxy custody launch policy unavailable"
+    finish 1
+fi
+if ! gosu "$APP_USER" test -r "$REPO_DIR/back-end/scripts/blackbox-kernel-proxy-custody.cjs"; then
+    log "FATAL: cloud guest Kernel proxy custody preload is unreadable by stack user"
+    finish 1
+fi
+STACK_ENV+=("NODE_OPTIONS=$KERNEL_PROXY_NODE_OPTIONS" "ROSE_KERNEL_ALL_RESOURCE_CUSTODY=1")
+fi
+# End cloud guest Kernel proxy custody
 log "launching stack (run.sh --benchmark) — base_port=$BASE_PORT wmh_port=$WMH_PORT workspace=$WORKSPACE_NAME simulate=$BENCH_SIMULATE"
 rm -f "$STACK_CLEANUP_STATUS_FILE"
 gosu "$APP_USER" env "${STACK_ENV[@]}" bash "$REPO_DIR/scripts/run.sh" --benchmark > "$STACK_LOG" 2>&1 &
@@ -1419,6 +1463,15 @@ if ! $STACK_READY; then
     log_stack_service_tails
     finish 1
 fi
+# Cloud guest Kernel proxy verification
+# Health alone is insufficient: confirm this backend actually loaded custody
+# before payment preparation or benchmark tasks can perform any live action.
+if [ "${CLOUDBENCH_KERNEL_PROXY_CUSTODY-0}" = 1 ] && ! gosu "$APP_USER" env "NODE_OPTIONS=$KERNEL_PROXY_NODE_OPTIONS" node \
+    "$REPO_DIR/back-end/scripts/verify-kernel-proxy-custody.cjs" "http://localhost:$BACKEND_PORT" --all-resources; then
+    log "FATAL: cloud guest backend did not prove Kernel proxy custody"
+    finish 1
+fi
+# End cloud guest Kernel proxy verification
 log "stack healthy — backend :$BACKEND_PORT, WMH :$WMH_PORT, dashboard :$BENCH_DASHPORT"
 STACK_DB_URL="$(python3 - "$MANIFEST" <<'PY'
 import json, sys
@@ -1442,6 +1495,18 @@ PY
 python3 "$REPO_DIR/scripts/cloudbench-guest-diagnostics.py" "$CONTEXT_DIR/guest-diagnostics.jsonl" \
     "$STACK_DB_URL" "${DB_CONNECTION_LIMIT:-30}" 15 2880 >/dev/null 2>&1 &
 GUEST_DIAGNOSTICS_PID=$!
+if [ "$BENCH_SIMULATE" != "1" ] && { [ "$BENCH_NEEDS_PAYMENT_FIXTURE" = "1" ] || [ "$BENCH_NEEDS_NEW_USER_CHECKOUT" = "1" ]; }; then
+    BENCHMARK_AGENTCARD_V2_USER_ID="$(python3 - "$MANIFEST" "$WORKSPACE_NAME" <<'PY_WORLD_ID'
+import json, re, sys
+row=json.load(open(sys.argv[1])).get('agentcard_world_identity',{})
+assert row.get('version')==1 and row.get('worldId')==sys.argv[2]
+assert row.get('livemode') is False and row.get('fundsSource')=='company_flow'
+assert re.fullmatch(r'usr_[A-Za-z0-9_-]+',row.get('providerUserId',''))
+print(row['providerUserId'])
+PY_WORLD_ID
+)" || { log "FATAL: no verified native AgentCard world identity"; finish 1; }
+    export BENCHMARK_AGENTCARD_V2_USER_ID
+fi
 if [ "$BENCH_NEEDS_PAYMENT_FIXTURE" = "1" ]; then
     PAYMENT_USER_ID="${BENCHMARK_AGENT_PAYMENT_USER_ID:-1f85ff25-6e29-4c1b-8739-f917bd101a30}"
     log "seeding isolated payment fixture for $PAYMENT_USER_ID"
@@ -1449,6 +1514,7 @@ if [ "$BENCH_NEEDS_PAYMENT_FIXTURE" = "1" ]; then
         DATABASE_URL="$STACK_DB_URL" \
         DIRECT_URL="$STACK_DB_URL" \
         BENCHMARK_FORCE_CUSTOMER_PURCHASE_PATH=1 \
+        BENCHMARK_AGENTCARD_V2_USER_ID="${BENCHMARK_AGENTCARD_V2_USER_ID:-}" \
         sh -c 'cd "$1" && exec npx tsx scripts/setup-benchmark-payment.ts --user-id "$2"' \
           sh "$REPO_DIR/back-end" "$PAYMENT_USER_ID"; then
         log "FATAL: setup-benchmark-payment.ts failed for $PAYMENT_USER_ID"
@@ -1662,6 +1728,9 @@ if [ -n '$BENCHMARK_REPORT_FRONTEND_URL' ]; then
   export BENCHMARK_REPORT_FRONTEND_URL='$BENCHMARK_REPORT_FRONTEND_URL'
 else
   unset BENCHMARK_REPORT_FRONTEND_URL
+fi
+if [ '$BENCH_SIMULATE' != '1' ] && { [ '$BENCH_NEEDS_PAYMENT_FIXTURE' = '1' ] || [ '$BENCH_NEEDS_NEW_USER_CHECKOUT' = '1' ]; }; then
+  export BENCHMARK_AGENTCARD_V2_USER_ID='${BENCHMARK_AGENTCARD_V2_USER_ID:-}'
 fi
 if [ '$BENCH_NEEDS_AGENTCARD_ONBOARDING' = '1' ]; then
   export AGENTCARD_ONBOARDING_RETURN_URL='$AGENTCARD_BENCHMARK_ONBOARDING_RETURN_URL'

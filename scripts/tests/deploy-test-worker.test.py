@@ -2150,7 +2150,7 @@ class LocalController(unittest.TestCase):
                             shutil.rmtree(case['fixture_tmp'])
 
     # The twelve cloud-benchmark controller suites the staged `cloudbench-controller` gate runs (the former
-    # deploy.md Step 4cb inventory, preserved in .claude/commands/DEPRECATED_deploy.md at L1408). The concise
+    # deploy.md Step 4cb inventory, preserved in the former /deploy skill). The concise
     # deploy.md no longer lists them: scripts/run-cloudbench-controller-local.py CASES is the executing
     # inventory, so it is pinned here and a change to it must be a deliberate edit of this test.
     CONTROLLER_PYTEST_KEYWORDS = (
@@ -3508,6 +3508,7 @@ class CerebrasRatchetHeadroom(unittest.TestCase):
 class StoppedPreStackIsolation(unittest.TestCase):
     """Versioned pre-stack receipts exercise the complete native admission consumer."""
     DRIVER_SHA256 = '1958de1798e8fdc46bd2081c1d530e9574c0957db80857d367802904f5ad5521'
+    DRIVER_COMMIT = 'a0030ab960344d48366b518a71b05c08200aa605'  # fix(deploy): isolate stopped guests rejected before stack startup
 
     def setUp(self):
         import base64
@@ -3523,9 +3524,12 @@ class StoppedPreStackIsolation(unittest.TestCase):
         self.addCleanup(fixture.doCleanups)
         self.addCleanup(fixture.tearDown)
         self.root = fixture.root
-        # The fixture uses the actual versioned driver, not a mock of its SHA.
-        # Driver changes require a newly reviewed before-stack contract.
-        self.driver = (ROOT / 'scripts/cloudbench-run.sh').read_bytes()
+        # The fixture uses the actual reviewed versioned driver, not a mock of its SHA.
+        # Receipts are historical: admission binds the driver at the receipt's head,
+        # so read the reviewed bytes from Git rather than the current checkout.
+        # Accepting a later driver requires a newly reviewed before-stack contract.
+        self.driver = subprocess.run(['git', '-C', str(ROOT), 'show', self.DRIVER_COMMIT + ':scripts/cloudbench-run.sh'],
+                                     check=True, capture_output=True).stdout
         self.assertEqual(self.DRIVER_SHA256, hashlib.sha256(self.driver).hexdigest())
         target = self.root / 'scripts/cloudbench-run.sh'
         target.parent.mkdir(exist_ok=True)
