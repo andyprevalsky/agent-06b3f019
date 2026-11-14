@@ -500,7 +500,9 @@ async function callOrgMcpTool(
           retryAfter: response.headers.get('retry-after')?.trim(),
         }
       );
-      if (attempt === authRetryAttempts || (response.status !== 401 && response.status !== 403)) {
+      // A provider 401 is AgentCard's answer to a throttled request (it follows a 429 on the same
+      // credential), so it is never replayed back-to-back here; callToolOnce backs off first.
+      if (attempt === authRetryAttempts || response.status !== 403) {
         throw lastError;
       }
       await delay(ORG_MCP_AUTH_RETRY_DELAY_MS);
@@ -723,8 +725,19 @@ export class AgentCardOrgRuntime {
     try {
       return await this.callToolWithImmediateAuthRetry(toolName, args);
     } catch (error) {
-      if (!IDEMPOTENT_READ_TOOLS.has(toolName) || !isProviderUnauthorized(error)) throw error;
-      return this.rideOutReadAuthFlap(toolName, args, deadlineAtMs, error);
+      if (!isProviderUnauthorized(error)) throw error;
+      if (IDEMPOTENT_READ_TOOLS.has(toolName)) {
+        return this.rideOutReadAuthFlap(toolName, args, deadlineAtMs, error);
+      }
+      // A mutation keeps one replay (the 401 rejected it before execution), after one backoff step.
+      const waitMs = ORG_MCP_READ_AUTH_FLAP_BASE_DELAY_MS;
+      log.warn('Organization MCP mutation auth rejected', {
+        tool: toolName,
+        error: errorMessage(error),
+        retry_wait_ms: waitMs,
+      });
+      await this.clock.sleep(waitMs);
+      return this.toolCaller(this.getAccessToken(), toolName, args, 1);
     }
   }
 
@@ -736,7 +749,9 @@ export class AgentCardOrgRuntime {
     try {
       return await this.toolCaller(accessToken, toolName, args);
     } catch (error) {
-      if (!hasClientCredentials() || !looksLikeAuthError(error)) throw error;
+      if (!hasClientCredentials() || !looksLikeAuthError(error) || isProviderUnauthorized(error)) {
+        throw error;
+      }
       return this.toolCaller(this.getAccessToken(), toolName, args);
     }
   }

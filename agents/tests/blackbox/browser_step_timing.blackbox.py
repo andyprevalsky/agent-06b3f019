@@ -525,7 +525,11 @@ async def test_resumed_transcript_indexes_resolve_on_first_step():
     needs_dom, result = await _observe_then_act_on_index(dom, transcript_restored=True)
     assert needs_dom is True
     assert dom.full_builds == 1
-    assert result == {"success": True, "message": ""}, result
+    assert result == {
+        "success": True,
+        "message": "",
+        "document_scroll": {"scope": "document", "status": "unknown", "before": None, "after": None},
+    }, result
 
     # The map is warm now (also true after an approved write-lock action was
     # replayed): later steps go back to the URL/title-only observe.

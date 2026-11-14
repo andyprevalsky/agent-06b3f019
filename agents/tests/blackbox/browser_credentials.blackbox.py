@@ -248,6 +248,230 @@ def test_steel_cdp_key_is_materialized_only_at_connection_boundary() -> None:
             os.environ["STEEL_API_KEY"] = previous
 
 
+def _async_credential_handler_fixture(*, ignore_cancel=False, fail=False):
+    import asyncio
+    import ast
+    import textwrap
+    from pathlib import Path
+    from domains.spawn_browser_agent_v3 import handler as h
+    from domains.spawn_browser_agent_v3.credential_runtime import OwnedCredentialTasks, unknown_realm_credential_state
+    source = Path(h.__file__).read_text()
+    start = source.index('        action_redaction_refs: Optional[List[Dict[str, str]]] = None')
+    end = source.index('        def _policy_authority()', start)
+    block = textwrap.dedent(source[start:end])
+    nonlocals = {name for node in ast.walk(ast.parse(block)) if isinstance(node, ast.Nonlocal) for name in node.names}
+    gate = asyncio.Event()
+    calls = []
+
+    async def prepare(config, **kwargs):
+        calls.append(kwargs)
+        try:
+            await gate.wait()
+        except asyncio.CancelledError:
+            if not ignore_cancel:
+                raise
+            await gate.wait()
+        if fail:
+            raise RuntimeError('private-provider-secret-must-not-leak')
+        return {'auth_realm': h.auth_realm_from_url(kwargs['target_url']), 'passwords': [], 'passkeys': [], 'auth_options': {}}
+
+    async def build(payload, **kwargs):
+        state = unknown_realm_credential_state(payload['auth_realm'])
+        state.password_secret_refs = {'pwd:fixture': 'private-' + payload['auth_realm']}
+        state.auth_options_section = payload['auth_realm']
+        return state
+    state = {name: None for name in nonlocals}
+    state.update(auth_realm='old.example', session_credential_ref=None, secret_refs={}, card_refs={}, credential_refs_by_secret_ref={}, auth_options={}, auth_options_section='', auth_runtime_state=unknown_realm_credential_state('old.example').auth_runtime_state, action_redaction_refs=None, session_passwords=[], session_passkeys=[], password_origins={}, session_id='session-1', task_id='task-1', agent_id='agent', user_id='user', browser_url='public', current_url='https://new.example/page', config=SimpleNamespace(payment=SimpleNamespace(decryption_key=None)), dom_service=SimpleNamespace(register_secret_refs=lambda refs: None), playwright_browser=object(), durable_browser_runtime={}, passkey_ref_by_credential_id={}, seeded_decrypted_passkeys_by_credential_id={}, credential_preparation=None, credential_tasks=OwnedCredentialTasks(), initial_credential_scope=None, initial_credential_payload={})
+    env = dict(vars(h))
+    env.update(prepare_browser_auth=prepare, build_realm_credential_state=build, save_browser_credential_ref_message=AsyncMock(), sync_passkeys_onto_target=AsyncMock(return_value=0), tilion_worker_apply_payload=lambda payload: None, apply_tilion_worker_state=AsyncMock(), browser_activity_checkpoint=lambda text: None, state=state)
+    assignments = '\n'.join((f'    {name} = state[{name!r}]' for name in state))
+    setters = '\n    def move(session, url):\n        nonlocal session_id, current_url\n        session_id, current_url = session, url\n    def snapshot():\n        return auth_realm, dict(secret_refs), credential_tasks\n    return _prepare_credentials_for_url, _auth_context_for_url, move, snapshot\n'
+    exec(compile('def setup():\n' + assignments + '\n' + textwrap.indent(block, '    ') + setters, h.__file__, 'exec'), env)
+    return (*env['setup'](), gate, calls)
+
+
+async def test_credential_callbacks_do_not_wait_for_preparation():
+    import asyncio
+    prepare, context, move, snapshot, gate, calls = _async_credential_handler_fixture()
+    pending = asyncio.create_task(context('https://new.example/page'))
+    try:
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        assert pending.done(), 'observed-auth callback blocks the next actor turn on credential preparation'
+        result = pending.result()
+        assert result['credential_preparation_status'] == 'pending', result
+        assert not result.get('auth_options'), result
+        gate.set()
+        for _ in range(6):
+            await asyncio.sleep(0)
+        ready = await context('https://new.example/page')
+        assert ready['credential_preparation_status'] == 'ready', ready
+        assert len(calls) == 1
+    finally:
+        gate.set()
+        pending.cancel()
+        await asyncio.gather(pending, return_exceptions=True)
+        owner = snapshot()[2]
+        if owner is not None:
+            await owner.close()
+
+
+async def test_navigation_runs_while_handler_preparation_is_pending():
+    import asyncio
+    from domains.spawn_browser_agent_v3.service_actions import _execute_goto
+    prepare, context, move, snapshot, gate, calls = _async_credential_handler_fixture()
+    events = []
+
+    class Event:
+
+        def __await__(self):
+
+            async def ready():
+                events.append('navigate')
+            return ready().__await__()
+
+        async def event_result(self, **kwargs):
+            return None
+    session = SimpleNamespace(event_bus=SimpleNamespace(dispatch=lambda event: Event()))
+    history = SimpleNamespace(record_action=AsyncMock())
+    task = asyncio.create_task(_execute_goto(session=session, dom_service=object(), action_history=history, params={'url': 'https://new.example/page'}, thinking='', session_id='session-1', config=None, current_auth_realm='old.example', prepare_credentials_for_url=prepare, wait_for_navigation=AsyncMock()))
+    try:
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        assert task.done() and events == ['navigate'], 'goto waits for optional credential preparation'
+        assert task.result()['success'] is True
+        assert not gate.is_set()
+    finally:
+        gate.set()
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        owner = snapshot()[2]
+        if owner is not None:
+            await owner.close()
+
+
+async def test_background_credentials_ignore_late_realm_and_session_results():
+    import asyncio
+    for new_session, new_url in (('session-1', 'https://other.example/'), ('session-2', 'https://new.example/page')):
+        prepare, context, move, snapshot, gate, calls = _async_credential_handler_fixture(ignore_cancel=True)
+        await context('https://new.example/page')
+        await asyncio.sleep(0)
+        move(new_session, new_url)
+        result = await context(new_url)
+        assert result['credential_preparation_status'] == 'pending'
+        assert snapshot()[1] == {}, 'old secrets remained active for a new owner'
+        await asyncio.sleep(0)
+        gate.set()
+        for _ in range(8):
+            await asyncio.sleep(0)
+        expected_realm = new_url.split('/')[2]
+        assert snapshot()[0] == expected_realm
+        assert snapshot()[1] == {'pwd:fixture': 'private-' + expected_realm}
+        assert calls[-1]['session_id'] == new_session
+        await snapshot()[2].close()
+
+
+async def test_background_credential_failure_is_safe_tool_state():
+    import asyncio
+    prepare, context, move, snapshot, gate, calls = _async_credential_handler_fixture(fail=True)
+    pending = await context('https://new.example/page')
+    assert pending['credential_preparation_status'] == 'pending'
+    gate.set()
+    for _ in range(6):
+        await asyncio.sleep(0)
+    failed = await context('https://new.example/page')
+    assert failed['credential_preparation_status'] == 'error'
+    assert 'private-provider-secret' not in str(failed)
+    assert not snapshot()[1] and len(calls) == 1
+    await snapshot()[2].close()
+
+
+async def test_credential_cleanup_only_cancels_owned_work():
+    import asyncio
+    from domains.spawn_browser_agent_v3.credential_runtime import OwnedCredentialTasks, AsyncCredentialPreparation
+    from helpers.workflow_generation import WorkflowGenerationSealed
+    owner = OwnedCredentialTasks()
+    started, cancelled = (asyncio.Event(), asyncio.Event())
+
+    async def work():
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.set()
+    owned = owner.start(work)
+    unrelated = asyncio.create_task(asyncio.Event().wait())
+    await started.wait()
+    await owner.close()
+    assert cancelled.is_set() and owned.cancelled() and (not unrelated.done())
+    unrelated.cancel()
+    await asyncio.gather(unrelated, return_exceptions=True)
+
+    async def sealed(*args):
+        raise WorkflowGenerationSealed()
+    owner = OwnedCredentialTasks()
+    pending = AsyncCredentialPreparation(owner, sealed)
+    pending.request('https://example.com/', ('session', 'example.com'), 'example.com')
+    for _ in range(3):
+        await asyncio.sleep(0)
+    try:
+        pending.request('https://example.com/', ('session', 'example.com'), 'example.com')
+    except WorkflowGenerationSealed:
+        pass
+    else:
+        raise AssertionError('sealed generation was hidden by background preparation')
+    await owner.close()
+    owner = OwnedCredentialTasks()
+    owned = owner.start(work, label='credential_upload')
+    await asyncio.sleep(0)
+    closing = asyncio.create_task(owner.close())
+    await asyncio.sleep(0)
+    closing.cancel()
+    await asyncio.gather(closing, return_exceptions=True)
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    assert owned.cancelled(), "cancelling cleanup leaked the owner's task"
+    assert owner.status['credential_upload'] == 'error'
+
+
+def test_missing_credentials_do_not_become_literal_input():
+    from domains.spawn_browser_agent_v3.credential_runtime import missing_credential_reference
+    assert missing_credential_reference({'text': '{{secret:pwd:missing}}'}, {})
+    assert missing_credential_reference({'text': 'pwd:missing'}, {})
+    assert not missing_credential_reference({'text': 'Search for prices'}, {})
+    assert not missing_credential_reference({'text': '{{secret:pwd:ready}}'}, {'pwd:ready': 'private'})
+
+
+async def test_goto_credential_summary_realm_fallback() -> None:
+    """Partial credential summaries use the URL realm but retain explicit realms."""
+    import asyncio
+    from domains.spawn_browser_agent_v3.service_actions import _execute_goto
+
+    class Event:
+        def __await__(self):
+            return asyncio.sleep(0).__await__()
+
+        async def event_result(self, **kwargs):
+            return None
+
+    for supplied, expected in ((None, "example.com"), ("", "example.com"), ("account.example.com", "account.example.com")):
+        summary = {"cookie_count": 1}
+        if supplied is not None:
+            summary["auth_realm"] = supplied
+        history = SimpleNamespace(record_action=AsyncMock())
+        result = await _execute_goto(
+            session=SimpleNamespace(event_bus=SimpleNamespace(dispatch=lambda event: Event())),
+            dom_service=SimpleNamespace(), action_history=history,
+            params={"url": "https://example.com/account"}, thinking="",
+            session_id="session", config=None, current_auth_realm="other.example",
+            prepare_credentials_for_url=AsyncMock(return_value=summary),
+            wait_for_navigation=AsyncMock(),
+        )
+        assert result["success"] is True
+        assert result["auth_realm"] == expected, result
+        assert history.record_action.await_args.kwargs["result"] == result
+
+
 async def test_cross_realm_goto_prepares_complete_credentials_before_navigation() -> None:
     from domains.spawn_browser_agent_v3.service_actions import _execute_goto
 
@@ -1520,6 +1744,23 @@ async def test_passkey_auth_reload_skips_foreign_host_and_same_href() -> None:
     assert sum(1 for method, _ in state.calls if method == "Page.navigate") == first_reloads
 
 
+async def test_deferred_passkey_injection_never_navigates():
+    from browser_tools.dom_service import DOMService
+    state, send = _webauthn_browser_double()
+
+    async def observed_send(method, params, target_id):
+        if method == 'Runtime.evaluate':
+            return {'result': {'value': 'https://www.amazon.com.mx/ap/signin'}}
+        return await send(method, params, target_id)
+    dom = DOMService(cdp_url='')
+    dom.allow_credential_reload = False
+    dom._session = _fake_webauthn_session(observed_send)
+    assert await dom.inject_passkeys([AMAZON_PASSKEY]) == 1
+    state.reset_environment('target-a')
+    assert await dom.inject_passkeys([AMAZON_PASSKEY]) == 1
+    assert not any((method == 'Page.navigate' for method, _ in state.calls)), 'background credential injection navigated the actor page'
+
+
 async def test_invalidate_preserves_advanced_signcounts_for_usage() -> None:
     """Invalidate must not erase an assertion that advanced signCount before remove."""
     from browser_tools.dom_service import DOMService
@@ -1672,6 +1913,17 @@ async def test_ceremony_capable_actions_arm_the_live_target_before_running() -> 
 async def run_all_tests():
     print("browser-credentials blackbox tests:")
     runner = BlackboxResult()
+    await runner.record_async("action_boundary_propagates_generation_cancellation", test_action_boundary_propagates_generation_cancellation)
+    await runner.record_async("deferred_passkey_injection_never_navigates", test_deferred_passkey_injection_never_navigates)
+    await runner.record_async("background_credentials_ignore_late_realm_and_session_results", test_background_credentials_ignore_late_realm_and_session_results)
+    await runner.record_async("background_credential_failure_is_safe_tool_state", test_background_credential_failure_is_safe_tool_state)
+    await runner.record_async("credential_cleanup_only_cancels_owned_work", test_credential_cleanup_only_cancels_owned_work)
+    runner.record("missing_credentials_do_not_become_literal_input", test_missing_credentials_do_not_become_literal_input)
+    await runner.record_async("credential_callbacks_do_not_wait_for_preparation", test_credential_callbacks_do_not_wait_for_preparation)
+    await runner.record_async("navigation_runs_while_handler_preparation_is_pending", test_navigation_runs_while_handler_preparation_is_pending)
+    await runner.record_async("goto_credential_summary_realm_fallback", test_goto_credential_summary_realm_fallback)
+    await runner.record_async("exact_neutral_inventory_has_no_auth_material_or_prompt", test_exact_neutral_inventory_has_no_auth_material_or_prompt)
+    await runner.record_async("neutral_hydration_rejects_missing_context_and_nonempty_inventory", test_neutral_hydration_rejects_missing_context_and_nonempty_inventory)
     await runner.record_async(
         "agent_browser_cannot_act_on_phone_provider_account_control_plane",
         test_agent_browser_cannot_act_on_phone_provider_account_control_plane,
@@ -1683,6 +1935,18 @@ async def run_all_tests():
     runner.record(
         "phone_provider_account_boundary_covers_the_broker_api_origin",
         test_phone_provider_account_boundary_covers_the_broker_api_origin,
+    )
+    await runner.record_async(
+        "phone_provider_boundary_rechecks_the_live_page_and_target_frame_at_action_time",
+        test_phone_provider_boundary_rechecks_the_live_page_and_target_frame_at_action_time,
+    )
+    await runner.record_async(
+        "phone_provider_boundary_reads_urls_the_way_chrome_does",
+        test_phone_provider_boundary_reads_urls_the_way_chrome_does,
+    )
+    await runner.record_async(
+        "phone_provider_boundary_sees_real_chrome_out_of_process_realm_frames",
+        test_phone_provider_boundary_sees_real_chrome_out_of_process_realm_frames,
     )
     runner.record(
         "steel_cdp_key_is_materialized_only_at_connection_boundary",
@@ -2058,6 +2322,93 @@ async def test_phone_stream_long_progress_remains_incremental():
     await _capture_phone_stream(exercise)
 
 
+def _neutral_credential_payload():
+    return {"auth_realm": "", "auth_options": {'realm': '',
+             'steel_session': None,
+             'cookie_bundles': [],
+             'passwords': [],
+             'passkeys': [],
+             'email_otp': {'available': False,
+                           'connected_emails': [],
+                           'match_for_site_account': None},
+             'readable_identifiers': [],
+             'minted': None},
+            "passwords": [], "passkeys": [], "auth_credential_ref": None}
+
+
+async def test_exact_neutral_inventory_has_no_auth_material_or_prompt():
+    from domains.spawn_browser_agent_v3.credential_runtime import build_realm_credential_state
+    state = await build_realm_credential_state(_neutral_credential_payload(), decryption_key=None, target_url="about:blank")
+    assert state.auth_realm == "" and state.auth_options_section == ""
+    assert not state.password_secret_refs and not state.password_origins
+    assert not state.credential_refs_by_secret_ref and not state.decrypted_passkeys
+    assert not state.passkey_ref_by_credential_id and state.auth_credential_ref is None
+    assert not state.auth_runtime_state.password_ids and not state.auth_runtime_state.minted_present
+
+
+async def test_neutral_hydration_rejects_missing_context_and_nonempty_inventory():
+    import copy
+    from domains.spawn_browser_agent_v3.credential_runtime import build_realm_credential_state
+    for url in (None, "", "https://example.com", "file:///tmp/page", "about:blank#other"):
+        try:
+            await build_realm_credential_state(_neutral_credential_payload(), decryption_key=None, target_url=url)
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError(f"Accepted empty realm for {url!r}")
+    payload = _neutral_credential_payload()
+    mutations = [
+        {"passwords": [{"id": "password"}]}, {"passkeys": [{"id": "passkey"}]},
+        {"auth_credential_ref": {"kind": "cookie_bundle", "id": "cookie"}},
+        {"auth_options": {}}, {"auth_realm": None},
+    ]
+    for key, value in (("cookie_bundles", [{"id": "cookie"}]), ("passwords", [{"id": "password"}]),
+                       ("passkeys", [{"id": "passkey"}]), ("minted", {"email": "fixture@example.com"}),
+                       ("readable_identifiers", ["fixture@example.com"]), ("steel_session", {"id": "session"}),
+                       ("email_otp", {"available": True})):
+        changed = copy.deepcopy(payload["auth_options"])
+        changed[key] = value
+        mutations.append({"auth_options": changed})
+    for mutation in mutations:
+        changed = {**copy.deepcopy(payload), **mutation}
+        try:
+            await build_realm_credential_state(changed, decryption_key=None, target_url="about:blank")
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError(f"Accepted inconsistent neutral inventory: {mutation!r}")
+
+
+async def test_action_boundary_propagates_generation_cancellation():
+    import asyncio
+    from unittest.mock import patch
+    from temporalio.exceptions import CancelledError as TemporalCancelledError
+    from helpers.workflow_generation import WorkflowGenerationSealed
+    from browser_tools.dom_service import DOMService
+    from domains.spawn_browser_agent_v3 import service_actions
+
+    for stage in ("execute", "retention"):
+        errors = [WorkflowGenerationSealed("sealed"), TemporalCancelledError("cancelled"), asyncio.CancelledError()]
+        if stage == "execute":
+            errors.append(TimeoutError("timeout"))
+        for error in errors:
+            dom = DOMService("ws://fixture.invalid/never-connect")
+            execute = AsyncMock(side_effect=error) if stage == "execute" else AsyncMock(return_value={"success": True})
+            retain = AsyncMock(side_effect=error) if stage == "retention" else AsyncMock(side_effect=lambda _name, value, **kwargs: value)
+            with patch.object(service_actions, "_execute_resolved_action", execute), patch.object(service_actions, "prepare_browser_result", retain):
+                try:
+                    await service_actions.execute_action(dom, ActionHistory(), {"action": "wait", "params": {"time_ms": 1}})
+                except BaseException as observed:
+                    assert observed is error
+                else:
+                    raise AssertionError(f"{stage} swallowed {type(error).__name__}")
+            if stage == "execute":
+                retain.assert_not_awaited()
+            assert "WorkflowGenerationSealed" not in execute.call_args.kwargs
+            assert "TemporalCancelledError" not in execute.call_args.kwargs
+    with patch.object(service_actions, "_execute_resolved_action", AsyncMock(side_effect=ValueError("ordinary action failure"))), patch.object(service_actions, "prepare_browser_result", AsyncMock(side_effect=lambda _name, value, **kwargs: value)):
+        result = await service_actions.execute_action(DOMService("ws://fixture.invalid/never-connect"), ActionHistory(), {"action": "wait", "params": {"time_ms": 1}})
+    assert result["success"] is False and "ordinary action failure" in result["error"]
 class _UntouchableDomService:
     """A DOM service that records every attribute the dispatcher reaches for.
 
@@ -2169,3 +2520,381 @@ def test_phone_provider_account_boundary_covers_the_broker_api_origin() -> None:
     assert origins, "phone broker origin not found"
     for origin in origins:
         assert phone_provider_account_realm(origin) == "phone-harness.com", origin
+
+
+class _RecordingBrowserSession:
+    """browser-use session whose target registry is readable and whose CDP use is recorded."""
+
+    def __init__(self, touched: list[str], targets: dict) -> None:
+        self._touched = touched
+        # browser-use's registry, as observed in real Chromium: an out-of-process
+        # iframe's attach event overwrites its URL with "" (review of #2060).
+        registry = {tid: SimpleNamespace(target_id=tid, target_type=t.target_type,
+                                         url="" if t.target_type == "iframe" else t.url)
+                    for tid, t in targets.items()}
+        self.session_manager = SimpleNamespace(get_target=registry.get, get_all_targets=lambda: dict(registry))
+
+    def __getattr__(self, name: str):
+        self._touched.append(f"session.{name}")
+        raise AttributeError(name)
+
+
+class _LivePageDomService:
+    """A connected DOM service whose live page differs from the step-start observation.
+
+    ``targets`` is browser-use's target registry (main page plus out-of-process
+    iframes) and ``selector_map`` holds the last DOM snapshot's indexed nodes.
+    Every other attribute (coordinates, humanized input, CDP sessions) is the
+    browser being driven and is recorded in ``touched``.
+    """
+
+    def __init__(self, live_url: str, targets: dict, selector_map: dict, pending_url: str = "") -> None:
+        self.touched: list[str] = []
+        self.live_url = live_url
+        # Chrome's target list names a pending browser-initiated navigation's URL.
+        self.pending_url = pending_url
+        self.selector_map = selector_map
+        self._targets = targets
+        self.session = _RecordingBrowserSession(self.touched, targets)
+
+    def get_parked_page_identity(self) -> dict:
+        return {"url": self.live_url, "target_id": "main"}
+
+    async def live_frame_targets(self) -> dict:
+        """Chrome's own target list (Target.getTargets): the live URLs."""
+        return {tid: {"type": t.target_type, "url": (self.pending_url or self.live_url) if tid == "main" else t.url}
+                for tid, t in self._targets.items()}
+
+    async def ensure_browser_overlays_suppressed(self) -> None:
+        return None
+
+    def __getattr__(self, name: str):
+        self.touched.append(name)
+        raise AttributeError(name)
+
+
+def _dom_node(target_id: str, node_name: str = "BUTTON", parent=None, attributes=None):
+    return SimpleNamespace(
+        target_id=target_id, node_name=node_name, parent_node=parent, attributes=attributes or {},
+        content_document=None,
+    )
+
+
+_DRIVEN = {"register_secret_refs", "mark_secret_used"}
+
+
+async def test_phone_provider_boundary_rechecks_the_live_page_and_target_frame_at_action_time() -> None:
+    """Post-merge review of PR #2028 (agent af4f4bb3, 2026-11-14): the boundary judged
+    the URL observed at step start. A page that redirects or meta-refreshes to
+    accounts.phone-harness.com after observation, or a cross-origin phone-harness
+    iframe inside an ordinary page, was acted on with the owner's session. The
+    dispatcher must re-check the live main frame and the action's target frame."""
+    from domains.spawn_browser_agent_v3.service_actions import execute_action
+
+    def target(target_id: str, url: str, kind: str = "page") -> SimpleNamespace:
+        return SimpleNamespace(target_id=target_id, target_type=kind, url=url)
+
+    device = "https://accounts.phone-harness.com/device"
+
+    async def run(dom, action, current_url="https://example.com/start"):
+        history = SimpleNamespace(record_action=AsyncMock(), last_action_step=lambda: None)
+        return await execute_action(dom, history, action, current_url=current_url)
+
+    # 1) Stale observation: the step saw example.com; the page has since redirected.
+    redirected = {"main": target("main", device)}
+    main_button = _dom_node("main")
+    for action in (
+        {"action": "click", "index": 7, "params": {}},
+        {"action": "input_text", "index": 7, "params": {"text": "JLLQDKNZ"}},
+        {"action": "press_key", "params": {"key": "Enter"}},
+        {"action": "click", "params": {}, "coordinates": {"x": 10, "y": 10}},
+        {"action": "evaluate", "params": {"code": "document.querySelector('button').click()"}},
+    ):
+        dom = _LivePageDomService(device, redirected, {7: main_button})
+        result = await run(dom, action)
+        assert result.get("code") == "phone_provider_account_boundary", (action, result)
+        assert result.get("success") is False, result
+        assert set(dom.touched) <= _DRIVEN, (action, dom.touched)
+
+    # 1b) A slow goto away from the realm: Chrome already reports the pending URL while
+    # the phone-harness document is still the one on screen (second review of #2060).
+    for action in ({"action": "click", "index": 7, "params": {}}, {"action": "press_key", "params": {"key": "Enter"}}):
+        dom = _LivePageDomService(device, redirected, {7: main_button}, pending_url="https://hang.example.org/x")
+        result = await run(dom, action)
+        assert result.get("code") == "phone_provider_account_boundary", (action, result)
+        assert set(dom.touched) <= _DRIVEN, (action, dom.touched)
+
+    # 2) A cross-origin phone-harness iframe inside an ordinary page.
+    framed = {
+        "main": target("main", "https://example.com/start"),
+        "oopif": target("oopif", device, "iframe"),
+        "ordinary-frame": target("ordinary-frame", "https://ads.example.net/", "iframe"),
+    }
+    oopif_iframe = _dom_node("main", "IFRAME", attributes={"src": "https://example.com/frame-was-here"})
+    oopif_doc = _dom_node("oopif", "#document", parent=oopif_iframe)
+    oopif_iframe.content_document = oopif_doc
+    approve_in_oopif = _dom_node("oopif", parent=oopif_doc)
+    inproc_iframe = _dom_node("main", "IFRAME", attributes={"src": "https://ACCOUNTS.phone-harness.com./device"})
+    code_box_in_frame = _dom_node("main", "INPUT", parent=_dom_node("main", "#document", parent=inproc_iframe))
+    page_button = _dom_node("main", parent=_dom_node("main", "BODY"))
+    ad_button = _dom_node("ordinary-frame", parent=_dom_node("ordinary-frame", "#document"))
+    selector_map = {11: approve_in_oopif, 12: code_box_in_frame, 13: page_button, 14: ad_button, 15: oopif_iframe}
+    for action in (
+        {"action": "click", "index": 11, "params": {}},
+        {"action": "input_text", "index": 12, "params": {"text": "JLLQDKNZ"}},
+        {"action": "select_dropdown", "params": {"index": 11, "text": "Approve"}},
+        # The frame element itself: its src is stale, its document is in the realm.
+        {"action": "click", "index": 15, "params": {}},
+        {"action": "scroll", "index": 15, "params": {"direction": "down"}},
+        # Drag points and non-integer indices do not determine the target frame.
+        {"action": "drag", "params": {"source_index": 13, "target_index": 13,
+                                      "start_x": 400, "start_y": 300, "end_x": 401, "end_y": 300}},
+        {"action": "click", "params": {"index": "11"}},
+        # Keys go to browser focus, which may sit in the realm frame, whatever index is named.
+        {"action": "press_key", "index": 13, "params": {"key": "Enter"}},
+        # Pointer input lands at coordinates: a realm frame can cover a public element,
+        # and the password-field fallback's frame-relative point (CodeRabbit, #2060).
+        {"action": "click", "index": 13, "params": {}},
+        {"action": "input_text", "index": 14, "params": {"text": "{{secret:password}}"}},
+        # Coordinates and keys land in whichever frame is under the point or focused:
+        # undeterminable, so a page embedding the realm refuses them.
+        {"action": "click", "params": {}, "coordinates": {"x": 10, "y": 10}},
+        {"action": "press_key", "params": {"key": "Enter"}},
+    ):
+        dom = _LivePageDomService("https://example.com/start", framed, selector_map)
+        result = await run(dom, action)
+        assert result.get("code") == "phone_provider_account_boundary", (action, result)
+        assert set(dom.touched) <= _DRIVEN, (action, dom.touched)
+
+    # A realm frame the snapshot omitted (hidden, tiny, no interactive nodes) is still
+    # seen in the live target registry (CodeRabbit, #2060 cycle 3).
+    for action in (
+        {"action": "click", "index": 13, "params": {}},
+        {"action": "press_key", "params": {"key": "Enter"}},
+    ):
+        dom = _LivePageDomService("https://example.com/start", framed, {13: page_button})
+        result = await run(dom, action)
+        assert result.get("code") == "phone_provider_account_boundary", (action, result)
+        assert set(dom.touched) <= _DRIVEN, (action, dom.touched)
+
+    # The main-frame script, reads and leaving still run on a page embedding the realm.
+    for action in (
+        {"action": "evaluate", "params": {"code": "1"}},
+        {"action": "read_browser_state", "params": {}},
+        {"action": "goto", "params": {"url": "https://www.google.com/"}},
+    ):
+        dom = _LivePageDomService("https://example.com/start", framed, selector_map)
+        result = await run(dom, action)
+        assert result.get("code") != "phone_provider_account_boundary", (action, result)
+        assert set(dom.touched) - _DRIVEN, (action, "an allowed action must reach the browser")
+
+    # Frame-scanning fill helpers (password-field fallback, payment fills) never
+    # evaluate in a realm frame, whether Playwright or CDP exposes it (CodeRabbit, #2060).
+    from domains.spawn_browser_agent_v3.service_actions import _resolve_password_field_coordinates
+
+    realm_frame = SimpleNamespace(url=device, evaluate=AsyncMock(return_value={"x": 5, "y": 5}))
+    page_frame = SimpleNamespace(url="https://example.com/start", evaluate=AsyncMock(return_value=None))
+    realm_cdp = SimpleNamespace(cdp_client=SimpleNamespace(send=SimpleNamespace(Runtime=SimpleNamespace(
+        evaluate=AsyncMock(return_value={"result": {"value": {"x": 6, "y": 6}}})))), session_id="realm")
+    all_frames = {
+        "root": {"url": "https://example.com/start", "frameTargetId": "main", "parentFrameId": None},
+        "child": {"url": device, "frameTargetId": "oopif", "parentFrameId": "root"},
+    }
+    sessions = {"oopif": realm_cdp}
+    fill_session = SimpleNamespace(
+        agent_focus_target_id="main",
+        get_all_frames=AsyncMock(return_value=(all_frames, {})),
+        get_or_create_cdp_session=AsyncMock(side_effect=lambda target_id=None, focus=False: sessions.get(target_id)),
+    )
+    page = SimpleNamespace(frames=[page_frame, realm_frame])
+    assert await _resolve_password_field_coordinates(fill_session, input_page=page) is None
+    realm_frame.evaluate.assert_not_awaited()
+    realm_cdp.cdp_client.send.Runtime.evaluate.assert_not_awaited()
+    page_frame.evaluate.assert_awaited()
+    page_frame.evaluate.return_value = {"x": 7, "y": 8}
+    assert await _resolve_password_field_coordinates(fill_session, input_page=page) == (7, 8)
+
+    # A page with no realm frame (an ordinary cross-origin frame included) keeps
+    # indexed, coordinate and keyboard input.
+    plain = {"main": target("main", "https://example.com/start"),
+             "ordinary-frame": target("ordinary-frame", "https://ads.example.net/", "iframe")}
+    for action in (
+        {"action": "click", "index": 13, "params": {}},
+        {"action": "click", "index": 14, "params": {}},
+        {"action": "click", "params": {}, "coordinates": {"x": 10, "y": 10}},
+        {"action": "press_key", "params": {"key": "Enter"}},
+    ):
+        dom = _LivePageDomService("https://example.com/start", plain, {13: page_button, 14: ad_button})
+        result = await run(dom, action)
+        assert result.get("code") != "phone_provider_account_boundary", (action, result)
+        assert set(dom.touched) - _DRIVEN, (action, "an allowed action must reach the browser")
+
+
+async def test_phone_provider_boundary_sees_real_chrome_out_of_process_realm_frames() -> None:
+    """Review of #2060: in real Chromium, browser-use's target registry holds ``''`` for a
+    freshly attached out-of-process iframe. The boundary must read Chrome's own target list,
+    so a tiny phone-harness iframe the DOM snapshot omits still blocks acting on the page,
+    while an ordinary cross-site iframe does not. Hosts resolve to a local server only."""
+    import importlib.util
+    import socket
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    from pathlib import Path
+    from urllib.request import urlopen
+
+    from browser_tools.dom_service import DOMService
+    from domains.spawn_browser_agent_v3.service_actions import _live_phone_provider_account_refusal, execute_action
+    from playwright.async_api import async_playwright
+
+    class Pages(BaseHTTPRequestHandler):
+        def do_GET(self):
+            host = (self.headers.get("Host") or "").split(":")[0]
+            port = self.server.server_address[1]
+            frame = {"/realm": f"http://accounts.phone-harness.com:{port}/device",
+                     "/ordinary": f"http://ads.example.net:{port}/ad"}.get(self.path, "")
+            body = (f'<button style="width:200px;height:60px">Pay</button>'
+                    f'<iframe src="{frame}" width="2" height="2"></iframe>' if host == "shop.example.com"
+                    else "<button>Approve</button>")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.end_headers()
+            self.wfile.write(body.encode())
+
+        def log_message(self, *args):
+            return None
+
+    # The repo's canonical condition wait (scripts/lib/condition_wait.py; stdlib only).
+    spec = importlib.util.spec_from_file_location(
+        "condition_wait", Path(__file__).resolve().parents[3] / "scripts" / "lib" / "condition_wait.py")
+    condition_wait = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(condition_wait)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Pages)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    port = server.server_address[1]
+    with socket.socket() as reservation:
+        reservation.bind(("127.0.0.1", 0))
+        debug_port = reservation.getsockname()[1]
+    rules = "MAP accounts.phone-harness.com 127.0.0.1, MAP shop.example.com 127.0.0.1, MAP ads.example.net 127.0.0.1"
+    dom = None
+    try:
+        async with async_playwright() as playwright:
+            browser = await playwright.chromium.launch(headless=True, args=[
+                f"--remote-debugging-port={debug_port}", "--site-per-process", f"--host-resolver-rules={rules}"])
+            try:
+                page = await browser.new_page()
+                with urlopen(f"http://127.0.0.1:{debug_port}/json/version", timeout=10) as response:
+                    endpoint = json.load(response)["webSocketDebuggerUrl"]
+                dom = DOMService(cdp_url=endpoint)
+                await dom.connect()
+                oracle = await browser.new_browser_cdp_session()
+
+                async def load(path: str, frame_host: str) -> None:
+                    await page.goto(f"http://shop.example.com:{port}{path}")
+
+                    async def frame_attached() -> bool:  # Chrome itself reports the frame's out-of-process target
+                        targets = (await oracle.send("Target.getTargets"))["targetInfos"]
+                        return any(t["type"] == "iframe" and frame_host in t["url"] for t in targets)
+
+                    await condition_wait.async_wait_until(
+                        frame_attached, timeout=30.0, description=f"out-of-process {frame_host} frame")
+                    await dom.get_browser_state(include_screenshot=False)
+
+                await load("/realm", "accounts.phone-harness.com")
+                button = next(i for i, n in dom.selector_map.items() if str(n.node_name).upper() == "BUTTON")
+                result = await execute_action(dom, ActionHistory(), {"action": "click", "index": button, "params": {}},
+                                              current_url=f"http://shop.example.com:{port}/realm")
+                assert result.get("code") == "phone_provider_account_boundary", result
+                for action in ("press_key", "input_text", "scroll"):
+                    assert (await _live_phone_provider_account_refusal(dom, action) or {}).get("code") == (
+                        "phone_provider_account_boundary"), action
+                assert await _live_phone_provider_account_refusal(dom, "evaluate") is None
+
+                await load("/ordinary", "ads.example.net")
+                for action in ("click", "press_key", "input_text"):
+                    assert await _live_phone_provider_account_refusal(dom, action) is None, action
+            finally:
+                if dom is not None:
+                    await dom.disconnect()
+                await browser.close()
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+async def test_phone_provider_boundary_reads_urls_the_way_chrome_does() -> None:
+    """Post-merge review of PR #2028: the realm was decided with urlparse, which
+    disagrees with Chrome's WHATWG parser. Chrome treats a backslash as a path
+    slash, percent-decodes the host and applies IDNA mapping (fullwidth letters,
+    ideographic full stops, soft hyphens), so these all open phone-harness.com."""
+    from domains.spawn_browser_agent_v3.service_actions import execute_action, phone_provider_account_realm
+
+    chrome_realm_forms = (
+        "https://phone-harness.com\\@example.com/",
+        "https://phone-harness%2ecom/",
+        "https://accounts.phone-harness%2Ecom/device",
+        "phone-harness．com",
+        "https://accounts.phone-harness。com/device",
+        "https://ｐｈｏｎｅ－ｈａｒｎｅｓｓ.com/",
+        "https://phone-harn­ess.com/",
+        "https:phone-harness.com/device",
+        "https:\\\\accounts.phone-harness.com\\device",
+        "https://ACCOUNTS.PHONE-HARNESS.COM./device\n ",
+        "https://accounts.phone-\tharn\ness.com/device",
+        "https://user:pw@phone-harness.com:443/dashboard",
+        "blob:https://phone-harness.com/7d2b1b0e",
+        # UTS-46 (not IDNA2003) mappings and ignorables Chrome applies.
+        "https://\u209ahone-harness.com/",
+        "https://\U0001f13fhone-harness.com/",
+        "https://phone-harness.c\u1d52m/",
+        "https://phone\U000e0100-harness.com/",
+        "https://phone\U0001bca0-harness.com/",
+        "https://phone\u2064-harness.com/",
+    )
+    for url in chrome_realm_forms:
+        # Scheme-less targets are opened as https:// by goto/open_new_tab.
+        assert phone_provider_account_realm(url if ":" in url else f"https://{url}") == "phone-harness.com", url
+        for nav in ("goto", "open_new_tab"):
+            dom = _UntouchableDomService()
+            history = SimpleNamespace(record_action=AsyncMock(), last_action_step=lambda: None)
+            result = await execute_action(
+                dom, history, {"action": nav, "params": {"url": url}}, current_url="https://www.google.com/",
+            )
+            assert result.get("code") == "phone_provider_account_boundary", (nav, url, result)
+            assert dom.touched == [], (nav, url, dom.touched)
+
+    ordinary_forms = (
+        "https://phone-harness.com@example.com/",
+        "https://example.com/\\phone-harness.com",
+        "https://example.com/?next=https://phone-harness.com/",
+        "https://phone-harness.com.example.org/",
+        "https://notphone-harness.com/",
+        "https://phone-harness%2ecom.example.org/",
+        "about:blank",
+        "data:text/html,phone-harness.com",
+    )
+    for url in ordinary_forms:
+        assert phone_provider_account_realm(url) == "", url
+    assert phone_provider_account_realm("") == ""
+
+    # Ground truth: Chromium's own URL parser agrees on every form above.
+    from domains.spawn_browser_agent_v3.service_actions import _normalize_goto_url
+    from playwright.async_api import async_playwright
+
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch(headless=True)
+        try:
+            page = await browser.new_page()
+            hosts = await page.evaluate(
+                """urls => urls.map(u => { try { const p = new URL(u);
+                    return p.protocol === 'blob:' ? new URL(p.pathname).hostname : p.hostname; }
+                    catch (e) { return ''; } })""",
+                [_normalize_goto_url(url) for url in (*chrome_realm_forms, *ordinary_forms)],
+            )
+        finally:
+            await browser.close()
+    hosts = [host.rstrip(".") for host in hosts]
+    for url, host in zip(chrome_realm_forms, hosts):
+        assert host == "phone-harness.com" or host.endswith(".phone-harness.com"), (url, host)
+    for url, host in zip(ordinary_forms, hosts[len(chrome_realm_forms):]):
+        assert host != "phone-harness.com" and not host.endswith(".phone-harness.com"), (url, host)

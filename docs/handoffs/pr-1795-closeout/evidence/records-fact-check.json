@@ -1,0 +1,15 @@
+{
+  "reviewer": "ph7cmzkx3gp8nzrn485j94t1f18hve0a",
+  "reviewed_head": "1df1139d1",
+  "verdict": "PASS for preservation and production facts; DRAFT/NOT_READY unchanged",
+  "original_report_sha256": "2d9afb343c03ed9e1e34d52663fe9fc7536f92c3ee479e48b4cf5ea16cfc1435",
+  "exact_inline_diff_parts": 11,
+  "archive_receipts_byte_identical": true,
+  "independent_new_payload_files_verified": 19027,
+  "current_closure_signatures_matched": 135604,
+  "metadata_nits_corrected": [
+    "Latest local DB cutoff check timestamp",
+    "Final archive pending label replaced with verified preservation status"
+  ],
+  "final_native_readiness_review": "pending after PR1821"
+}

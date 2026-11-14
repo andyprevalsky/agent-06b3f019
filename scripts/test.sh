@@ -335,6 +335,7 @@ run_suite "Benchmark Successful LLM Evidence" python3 scripts/tests/verify-succe
 run_suite "Original600 Portable Operator" python3 scripts/tests/original600-portable-operator.test.py
 run_suite "Benchmark Provider Rate-Limit Concurrency Cap" python3 scripts/tests/cloudbench-provider-capacity.test.py
 run_suite "Sharded Benchmark Controllers" python3 scripts/tests/cloudbench-shard-coordinator.test.py
+run_suite "Sharded Benchmark Waves" python3 scripts/tests/run-bench-sharded-waves.test.py
 run_suite "Original600 Bulk Controller Transfer" python3 scripts/tests/cloudbench-controller-bulk-transfer.test.py
 run_suite "Original600 Existing Controller Payload Recovery" python3 scripts/tests/cloudbench-resume-controller-payload.test.py
 run_suite "Original600 Recovered Controller Finalization" python3 scripts/tests/cloudbench-controller-payload-finalization.test.py
@@ -364,10 +365,13 @@ run_suite "Cloud Benchmark Archived Cloud Transport" python3 scripts/tests/cloud
 run_suite "Cloud Benchmark Archived Reuse Stream Transport" python3 scripts/tests/cloudbench-archived-reuse-transport.test.py
 run_suite "Cloud Benchmark Isolated Generation" python3 scripts/tests/cloudbench-isolated-generation.test.py
 run_suite "Cloud Benchmark Archived Owner Stop" python3 scripts/tests/cloudbench-archived-owner-stop.test.py
+run_suite "Cloud Benchmark Forensic Resource Closure" python3 scripts/tests/cloudbench-forensic-resource-closure.test.py
+run_suite "Cloud Benchmark Local Forensic Closure" python3 scripts/tests/cloudbench-local-forensic-closure.test.py
 run_suite "Cloud Benchmark Status Readiness Observability" python3 scripts/tests/cloudbench-status-readiness-observability.test.py
 run_suite "Cloud Benchmark Pre-Terminal Infra Release" python3 scripts/tests/cloudbench-preterminal-infra-release.test.py
 run_suite "Controller Operator Preflight" python3 scripts/tests/cloudbench-operator-preflight.test.py
 run_suite "Playwright Browser Bootstrap" python3 scripts/tests/playwright-browser-bootstrap.test.py
+run_suite "Cloud Benchmark Recovery Descriptor Custody" python3 scripts/tests/cloudbench-recovery-fd.test.py
 run_suite "Cloud Benchmark Inventory Stdlib Startup" python3 scripts/tests/cloudbench-inventory-site-startup.test.py
 run_suite "Cloud Benchmark Poll Stdlib Startup" python3 scripts/tests/cloudbench-poll-site-startup.test.py
 run_suite "Cloud Benchmark Composite Root Cleanup" python3 scripts/tests/cloudbench-exact-session-multi-root.test.py
@@ -408,6 +412,8 @@ if auto_rca_changed '^(scripts/(run\.sh|run-in-new-session\.py|run-bench|run-ben
   run_suite "Cloud Benchmark Disposable Volume CLI" python3 scripts/tests/cloudbench-disposable-volume-cli.test.py
   run_suite "Cloud Benchmark Original 600 Supervisor" python3 scripts/tests/cloudbench-original600-supervisor.test.py
   run_suite "Cloud Benchmark Disposable Recovery" python3 scripts/tests/cloudbench-disposable-recovery.test.py
+  run_suite "Cloud Benchmark Replaced Preconfiguration" python3 scripts/tests/cloudbench-replaced-preconfig.test.py
+  run_suite "Cloud Benchmark Configured Old Member Capture" python3 scripts/tests/cloudbench-configured-old-capture.test.py
   run_suite "Cloud Benchmark Disposable Decisions" python3 scripts/tests/cloudbench-disposable-lifecycle.test.py
   run_suite "Cloud Benchmark Retained Successor Completion" python3 scripts/tests/cloudbench-retained-successor.test.py
   run_suite "Cloud Benchmark Disposable Outer Lifecycle" env CLOUDBENCH_TEST_DISPOSABLE_ONLY=1 bash scripts/tests/cloudbench-multi-workstream.test.sh

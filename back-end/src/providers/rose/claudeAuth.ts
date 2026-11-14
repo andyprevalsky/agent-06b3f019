@@ -15,7 +15,10 @@
  *   network errors   -> RoseServerError after retries
  */
 
+import { createHash } from 'node:crypto';
+
 import { classifyComputeGrantFailure } from '../computeGrantFailure';
+import { createLogger } from '../logger';
 import {
   RoseAuthError,
   RoseError,
@@ -47,9 +50,53 @@ import type { CompletionMessage, ResponseFormat, RoseStreamChunk } from './types
  */
 export type AnthropicAuth = { mode: 'oauth'; token: string } | { mode: 'apiKey'; key: string };
 
+const log = createLogger('Rose');
+
 const MAX_ATTEMPTS = 3;
 const BACKOFF_CAP_MS = 5_000;
 const DEFAULT_IDLE_TIMEOUT_MS = 60_000;
+
+/**
+ * Fast mode on a subscription is billed as extra usage (overage). When the
+ * account cannot pay for it, Anthropic answers the fast request 429 with
+ * `anthropic-ratelimit-unified-overage-disabled-reason` and the MONTHLY overage
+ * reset, while the account's own 5h/7d windows still serve standard requests.
+ * Claude Code (services/api/withRetry.ts handleFastModeOverageRejection) turns
+ * fast mode off and retries at standard speed on the same credential; it never
+ * cools the account. Per token: fast mode stays off until that reset (or
+ * FAST_MODE_OFF_DEFAULT_MS without one). Process-local and bounded: it only
+ * saves the doomed fast request; correctness never depends on it. Mirrors
+ * agents/providers/rose/claude_auth.py.
+ */
+const OVERAGE_DISABLED_REASON_HEADER = 'anthropic-ratelimit-unified-overage-disabled-reason';
+const FAST_MODE_OFF_DEFAULT_MS = 60 * 60_000;
+const FAST_MODE_OFF_MAX_TOKENS = 1_000;
+const fastModeOffUntil = new Map<string, number>();
+
+function fastModeKey(token: string): string {
+  return createHash('sha256').update(token).digest('hex').slice(0, 16);
+}
+
+function fastModeOff(token: string): boolean {
+  const key = fastModeKey(token);
+  const until = fastModeOffUntil.get(key);
+  if (until === undefined) return false;
+  if (until > Date.now()) return true;
+  fastModeOffUntil.delete(key);
+  return false;
+}
+
+function turnFastModeOff(token: string, rateLimitedUntil: string | undefined): void {
+  const parsed = rateLimitedUntil === undefined ? NaN : Date.parse(rateLimitedUntil);
+  const key = fastModeKey(token);
+  fastModeOffUntil.delete(key);
+  fastModeOffUntil.set(key, Number.isNaN(parsed) ? Date.now() + FAST_MODE_OFF_DEFAULT_MS : parsed);
+  while (fastModeOffUntil.size > FAST_MODE_OFF_MAX_TOKENS) {
+    const oldest = fastModeOffUntil.keys().next().value;
+    if (oldest === undefined) break;
+    fastModeOffUntil.delete(oldest);
+  }
+}
 
 /**
  * Identity-block pair the Claude OAuth token validator requires as the
@@ -380,9 +427,15 @@ export async function* claudeAuthComplete(opts: ClaudeAuthOptions): AsyncIterabl
       : `${opts.poolSpec.claudeAuthModel}-anthropic`;
   const poolName = opts.auth.mode === 'oauth' ? 'claude-token' : 'anthropic-apikey';
 
-  let lastError: Error | null = null;
+  if (opts.auth.mode === 'oauth' && body.speed === 'fast' && fastModeOff(opts.auth.token)) {
+    delete body.speed;
+  }
 
-  for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+  let lastError: Error | null = null;
+  // The standard-speed retry after a fast-mode overage rejection gets its own attempt.
+  let maxAttempts = MAX_ATTEMPTS;
+
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
     let response;
     try {
       response =
@@ -403,7 +456,7 @@ export async function* claudeAuthComplete(opts: ClaudeAuthOptions): AsyncIterabl
             });
     } catch (err) {
       lastError = err instanceof Error ? err : new Error(String(err));
-      if (attempt < MAX_ATTEMPTS - 1) {
+      if (attempt < maxAttempts - 1) {
         await sleep(Math.min(2 ** attempt * 1000, BACKOFF_CAP_MS), opts.abortSignal);
         continue;
       }
@@ -441,6 +494,23 @@ export async function* claudeAuthComplete(opts: ClaudeAuthOptions): AsyncIterabl
       // the caller invents a 5-minute default that can clobber a real 5h/7d
       // usage window written by the Python agent path.
       const rateLimitedUntil = extractRateLimitedUntil(response.headers, errorBody) ?? undefined;
+      const overageDisabledReason = response.headers.get(OVERAGE_DISABLED_REASON_HEADER);
+      if (opts.auth.mode === 'oauth' && body.speed === 'fast' && overageDisabledReason !== null) {
+        // Fast mode needs extra usage this account cannot use; the subscription
+        // itself is not limited. Never surface a rate limit (that cools the
+        // account): retry the same token at standard speed.
+        turnFastModeOff(opts.auth.token, rateLimitedUntil);
+        delete body.speed;
+        maxAttempts += 1;
+        log.warn('claudeAuth.fast_mode_overage_rejected', {
+          requestId: opts.requestId,
+          callSite: opts.callSite,
+          overageDisabledReason,
+          fastModeOffUntil: rateLimitedUntil ?? null,
+          providerMessage: anthropicErrorFields(errorBody).message ?? null,
+        });
+        continue;
+      }
       // Retry in place ONLY when we can honor the provider's wait inside our
       // sleep cap. Sleeping less than it asked for is a guaranteed second 429
       // that burns an attempt (a `retry-after: 30` clipped to the 5s cap did
@@ -450,7 +520,7 @@ export async function* claudeAuthComplete(opts: ClaudeAuthOptions): AsyncIterabl
       // agents/providers/rose/claude_auth.py.
       const requiredWaitMs = providerRequiredWaitMs(response.headers, errorBody, rateLimitedUntil);
       const canWaitInPlace = requiredWaitMs === null || requiredWaitMs <= BACKOFF_CAP_MS;
-      if (attempt < MAX_ATTEMPTS - 1 && canWaitInPlace) {
+      if (attempt < maxAttempts - 1 && canWaitInPlace) {
         await sleep(
           boundedRateLimitBackoffMs(attempt, requiredWaitMs, BACKOFF_CAP_MS),
           opts.abortSignal
@@ -491,7 +561,7 @@ export async function* claudeAuthComplete(opts: ClaudeAuthOptions): AsyncIterabl
     }
 
     if (status >= 500) {
-      if (attempt < MAX_ATTEMPTS - 1) {
+      if (attempt < maxAttempts - 1) {
         await sleep(Math.min(2 ** attempt * 1000, BACKOFF_CAP_MS), opts.abortSignal);
         continue;
       }

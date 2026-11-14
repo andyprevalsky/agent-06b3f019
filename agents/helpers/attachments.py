@@ -6,10 +6,12 @@ Handles resolving FilePointers to multimodal content for LLM messages.
 
 import base64
 import logging
+import hashlib
+import json
 import uuid
 from dataclasses import asdict, dataclass
 from datetime import datetime
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple, TypedDict
 
 import httpx
 from temporalio import activity
@@ -148,6 +150,49 @@ async def download_from_storage(storage_path: str) -> bytes:
         return response.content
 
 
+_STORAGE_ERROR_CODES = frozenset({
+    "NoSuchKey", "NoSuchBucket", "AccessDenied", "ResourceAlreadyExists",
+    "InvalidKey", "InvalidMimeType", "InvalidRequest", "InvalidJWT",
+    "EntityTooLarge", "InternalError", "DatabaseError",
+})
+
+
+class StorageUploadDiagnostic(TypedDict, total=False):
+    http_status: int
+    response_class: str
+    provider_error_code: str
+    provider_error_code_sha256: str
+    request_id_sha256: str
+
+
+def _storage_upload_diagnostic(response: httpx.Response) -> StorageUploadDiagnostic:
+    """Closed diagnostic fields only; never copy body, URL or error messages."""
+    diagnostic: StorageUploadDiagnostic = {"http_status": response.status_code}
+    request_id = response.headers.get("x-request-id") or response.headers.get("sb-request-id")
+    if request_id:
+        diagnostic["request_id_sha256"] = hashlib.sha256(request_id.encode()).hexdigest()
+    body = response.content
+    media = response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+    if len(body) > 4096:
+        diagnostic["response_class"] = "oversized"
+    elif media != "application/json" and not media.endswith("+json"):
+        diagnostic["response_class"] = "non_json"
+    else:
+        try:
+            payload = json.loads(body)
+        except (ValueError, UnicodeError, RecursionError):
+            diagnostic["response_class"] = "invalid_json"
+        else:
+            diagnostic["response_class"] = "json_object" if isinstance(payload, dict) else "json_other"
+            if isinstance(payload, dict):
+                code = payload.get("code")
+                if isinstance(code, str):
+                    diagnostic["provider_error_code"] = code if code in _STORAGE_ERROR_CODES else "unrecognized"
+                    if code not in _STORAGE_ERROR_CODES:
+                        diagnostic["provider_error_code_sha256"] = hashlib.sha256(code.encode("utf-8", errors="surrogatepass")).hexdigest()
+    return diagnostic
+
+
 async def upload_to_storage(
     user_id: str,
     file_content: bytes,
@@ -202,7 +247,11 @@ async def upload_to_storage(
             content=file_content,
             timeout=60.0,
         )
-        response.raise_for_status()
+        try:
+            response.raise_for_status()
+        except httpx.HTTPStatusError:
+            logger.warning("Storage upload rejected: %s", json.dumps(_storage_upload_diagnostic(response), sort_keys=True))
+            raise
 
     logger.info(f"[Storage] Uploaded {filename} to {storage_path} ({len(file_content)} bytes)")
 

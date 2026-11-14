@@ -80,6 +80,7 @@ describe('Rose Desktop integrations: one account per integration', () => {
       'GitHub Repos',
       'Meeting note taker',
       'Other',
+      'CLIs',
     ]);
     expect(within(list).queryByText(/manage/i)).not.toBeInTheDocument();
     expect(within(list).queryByText(/\bof \d+ connected/i)).not.toBeInTheDocument();

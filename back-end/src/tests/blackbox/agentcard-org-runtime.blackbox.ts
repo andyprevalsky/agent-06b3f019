@@ -6,6 +6,7 @@ import {
   AgentCardOrgRuntimeError,
 } from '../../providers/agentcard/org-runtime';
 import { resolveBenchmarkCardholderId } from '../../providers/agentcard/benchmark-float';
+import { assertProviderUnauthorizedIsNeverReplayedWithoutBackoff } from './agentcard-org-runtime-throttle-401.cases';
 import { assertTransportRecoveryContract } from './agentcard-org-runtime-transport.cases';
 
 const CREDENTIAL_ENV = [
@@ -152,15 +153,15 @@ async function main(): Promise<void> {
     );
     assert.equal(
       outageRequests,
-      10,
-      'a sustained outage adds exactly 4 single-request flap steps to the previous 6 requests'
+      5,
+      'a sustained outage sends one request and then exactly 4 single-request backoff steps'
     );
 
-    // The flap window never shrinks the previous auth retry: with the caller's shared deadline
-    // already spent, a read still gets its 6 immediate attempts, and a 403 never enters the window.
-    for (const [status, deadlineAtMs] of [
-      [401, Date.now()],
-      [403, undefined],
+    // With the caller's shared deadline already spent, a provider 401 (a throttle answer) is not
+    // replayed at all; a 403 keeps its 6 immediate attempts and never enters the window.
+    for (const [status, deadlineAtMs, expectedRequests] of [
+      [401, Date.now(), 1],
+      [403, undefined, 6],
     ] as const) {
       const boundedClock = fakeClock();
       let boundedRequests = 0;
@@ -179,12 +180,16 @@ async function main(): Promise<void> {
         () => boundedRuntime.callTool('get_card', { card_id: 'card-1' }, deadlineAtMs),
         (error: unknown) => error instanceof AgentCardOrgRuntimeError && error.status === status
       );
-      assert.equal(boundedRequests, 6, `HTTP ${status} read must keep its 6 immediate attempts`);
+      assert.equal(
+        boundedRequests,
+        expectedRequests,
+        `HTTP ${status} read must send exactly ${expectedRequests} request(s)`
+      );
       assert.deepEqual(boundedClock.sleeps, [], `HTTP ${status} read must not enter the window`);
     }
 
-    // Mutations are never replayed by the read auth-flap window: their existing retry budget
-    // (3 HTTP-401 retries x 1 client-credential retry) is unchanged and they never sleep on it.
+    // Mutations never enter the read auth-flap window: a provider 401 gets exactly one replay,
+    // after one 1 s backoff step (it used to be 6 back-to-back requests inside the throttle).
     const mutationClock = fakeClock();
     const mutationRequests: string[] = [];
     const mutationRuntime = new AgentCardOrgRuntime(
@@ -200,10 +205,16 @@ async function main(): Promise<void> {
       (error: unknown) =>
         error instanceof AgentCardOrgRuntimeError && error.code === 'agentcard_org_mcp_unauthorized'
     );
-    assert.equal(mutationRequests.length, 6, 'a mutation must keep its existing auth retry count');
-    assert.deepEqual(mutationClock.sleeps, [], 'a mutation must never enter the read flap window');
+    assert.equal(mutationRequests.length, 2, 'a mutation replays a provider 401 exactly once');
+    assert.deepEqual(
+      mutationClock.sleeps,
+      [1_000],
+      'a mutation backs off once, outside the window'
+    );
 
     console.log('PASS AgentCard org reads ride out a bounded provider auth flap');
+
+    await assertProviderUnauthorizedIsNeverReplayedWithoutBackoff();
 
     // Regression (smoke agent-payment-idempotent-abandonment, PR #1775 deploy, agent 2c6b3ffd,
     // 2026-11-08 02:08:26-31Z): the second browser's reuse lookup read get_card_details, received
@@ -237,7 +248,8 @@ async function main(): Promise<void> {
       async () => {
         observedRequests += 1;
         if (observedRequests <= 2) return structuredThrottle();
-        if (observedRequests <= 8) return providerUnauthorized();
+        // Three rejections span two backoff steps (each replay of a provider 401 now backs off).
+        if (observedRequests <= 5) return providerUnauthorized();
         return liveCardResponse();
       },
       observedClock
@@ -247,7 +259,7 @@ async function main(): Promise<void> {
       liveCard,
       'the observed throttle-then-rejection read must recover'
     );
-    assert.equal(observedRequests, 9, 'the observed read must recover on its first clear request');
+    assert.equal(observedRequests, 6, 'the observed read must recover on its first clear request');
 
     // Hypothesised continuation, not observed: the window is still throttled when the rejection
     // clears. A throttle after the rejection must keep backing off instead of ending the read.
@@ -259,8 +271,8 @@ async function main(): Promise<void> {
       async () => {
         continuationRequests += 1;
         if (continuationRequests <= 2) return structuredThrottle();
-        if (continuationRequests <= 8) return providerUnauthorized();
-        if (continuationRequests <= 10) return structuredThrottle();
+        if (continuationRequests <= 5) return providerUnauthorized();
+        if (continuationRequests <= 7) return structuredThrottle();
         return liveCardResponse();
       },
       continuationClock
@@ -270,7 +282,7 @@ async function main(): Promise<void> {
       liveCard,
       'a read throttled again after the rejection must keep retrying while its budget remains'
     );
-    assert.equal(continuationRequests, 11, 'the read must recover on the first clear window');
+    assert.equal(continuationRequests, 8, 'the read must recover on the first clear window');
     assert.ok(
       continuationClock.now() - continuationStartedAtMs <= 30_000,
       'the read must stay inside the one 30 s rate-limit budget'

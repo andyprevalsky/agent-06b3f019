@@ -196,6 +196,32 @@ Exact command `bash scripts/run-bench agent-payment-setup-resume --runs 1
   `sess_993d70`: GET and DELETE returned 503 from `awselb/2.0`. The worker remained
   in rotation while the fixed runs passed.
 
+### PR #2015 smoke occurrences (test repair, 2026-11-13)
+
+The PR #2015 deploy smoke ran source `43a856b49`, which does not contain #2010. Both
+failures there had this cause:
+
+- `agent-payment-test-shop` (FLAKY `c59d68b1`, agent `23abff70`): at 08:53:37Z
+  `Failed to resume session: Tilion session sess_993d7086… failed validation and cleanup`.
+  The recovery browser then ran out the 900 s budget.
+- `browser-smoke` (FAIL `19847867`, agent `2f7dbbee`): all three browser agents hit
+  `Browser session init failed after 5 transient-proxy retries … before readiness`.
+
+The test-shop resume failures in Hub group `deploy-018530dd` (09:24Z and 10:01Z) also
+ran a source without #2010 (PR #2014 at `b6ed04d2d`).
+
+An east probe at 12:22Z still placed 3 of 12 creates on `sess_993d70`, with GET and
+DELETE returning 503 from `awselb/2.0`. On main `7f41708cd`, campaign
+`campaign-20261113-122039-4162732` ran `browser-smoke` 3 times and all 3 passed, with
+cleanup verified. Run `20261113-122112-4168998` landed on `sess_993d708272a5`, logged
+`failed validation; creating another released=false` and recovered.
+
+Hub group `deploy-8fe5aed…` failed `browser-smoke` with `before readiness` at 10:16Z
+and again in its 11:35Z rerun. That group cannot be attributed: it has no source SHA,
+it has no factory-ledger rows, and it was frozen before 10:43Z. Every attributable
+source that contains #2010 passed `browser-smoke`. From 12:00Z the Hub shows no
+`before readiness` or `failed validation and cleanup` failures.
+
 ## Human feedback
 
 None recorded.

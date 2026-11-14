@@ -1558,6 +1558,36 @@ class GitHubTerminalCleanup(unittest.TestCase):
         self.c.reexecute(self.state,'failure')
         self.assertEqual(self.state['failures'][0]['native_result'],'UNVERIFIED')
         self.assertEqual({p.name:p.read_bytes() for p in self.folder.iterdir() if p.is_file()},self.original)
+    def interrupted_fixture(self):
+        self.receipt['executed'] = True
+        (self.folder/'receipt.json').write_text(json.dumps(self.receipt))
+        self.proof['receipt_sha256'] = self.c.sha_file(self.folder/'receipt.json')
+        self.proof['original_files']['receipt.json'] = self.proof['receipt_sha256']
+        self.state.update(phase='interrupted', source=self.source, failures=[])
+        self.state.pop('pending')
+        self.state['attempts'][-1]['interrupted'] = True
+
+    def test_interrupted_original_token_reconciles_without_inventing_a_failure(self):
+        self.interrupted_fixture()
+        original = copy.deepcopy(self.state['attempts'])
+        self.c.reconcile(self.state,self.token,self.proof)
+        self.assertEqual([],self.state['failures'])
+        self.assertEqual(original,self.state['attempts'])
+        self.assertEqual([],self.c.retained_owners(self.state,['semantic-stack']))
+        self.assertFalse(next(iter(self.state['reconciled_owners'].values()))['credit_granted'])
+
+    def test_interrupted_token_does_not_bypass_source_phase_or_live_remote_checks(self):
+        self.interrupted_fixture()
+        for key,value in [('phase','ready'),('source',{'head':'wrong'}),('running',True)]:
+            before=copy.deepcopy(self.state)
+            self.state[key]=value
+            with self.subTest(key=key),self.assertRaises(ValueError):
+                self.c.reconcile(self.state,self.token,self.proof)
+            self.state=before
+        with self.assertRaises(ValueError):self.c.reconcile(self.state,'wrong-token',self.proof)
+        self.seen['run']['status']='in_progress'
+        with self.assertRaises(ValueError):self.c.reconcile(self.state,self.token,self.proof)
+        self.assertNotIn('reconciled_owners',self.state)
     def test_local_wait_identity_negatives(self):
         original=copy.deepcopy(self.process)
         malformed=[{'reaped':[{'pid':99,'status':0}]},
@@ -1788,6 +1818,105 @@ class GitHubTerminalCleanup(unittest.TestCase):
         self.assertIn(name, self.state['repair_gates'])
         self.assertEqual(self.state['attempts'], original)
         self.assertFalse(self.state['ready'])
+
+
+class GitHubRunnerRetirement(unittest.TestCase):
+    from deploy_test_github_retirement import registered_runners as inventory_reader
+
+    def setUp(self):
+        import deploy_test_github_retirement as retirement
+        import zipfile
+        GitHubTerminalCleanup.setUp(self)
+        self.retirement = retirement
+        self.gate = {'name':'semantic-stack', 'category':'semantic-stack', 'worker_transport':'github-actions',
+                     'command':[sys.executable,str(ROOT/'scripts/deploy_test_github.py')]}
+        self.receipt.update(command=self.gate['command'], native_exit=1, cancelled=True, timed_out=False,
+                            execution_binding={'contract_digest':self.c.digest(self.gate)}, executed=True)
+        (self.folder/'receipt.json').write_text(json.dumps(self.receipt))
+        self.proof.update(kind=retirement.KIND, execution_gate=self.gate,
+                          receipt_sha256=self.c.sha_file(self.folder/'receipt.json'))
+        self.proof['original_files']['receipt.json'] = self.proof['receipt_sha256']
+        with zipfile.ZipFile(self.artifact,'w') as z:
+            z.writestr('request.json',json.dumps(self.request))
+            z.writestr('timing.json',json.dumps({'extracted_at':100}))
+        digest=self.c.sha_file(self.artifact)
+        self.proof['remote']['artifact_sha256']=digest
+        self.seen['artifacts']['artifacts'][0]['digest']='sha256:'+digest
+        self.seen['run']['conclusion']='cancelled'
+        job=self.seen['jobs']['jobs'][0]
+        job['runner_id']=99
+        job['steps']=[{'name':name,'status':'completed','conclusion':'success',
+                       'started_at':start,'completed_at':end} for name,start,end in [
+            ('Complete runner','2026-11-09T00:00:00Z','2026-11-09T00:00:01Z'),
+            ('Complete job','2026-11-09T00:00:01Z','2026-11-09T00:00:02Z')]]
+        self.log=(b'2026-11-09T00:00:00.5Z No active SSH sessions detected. Proceeding with shutdown immediately.\n'
+                  b'2026-11-09T00:00:01.5Z Cleaning up orphan processes\n')
+        self.log_path=self.folder/'job.log';self.log_path.write_bytes(self.log)
+        self.proof['job_logs']={'8':{'path':str(self.log_path),'sha256':self.c.sha_file(self.log_path)}}
+        self.enterContext(patch.object(retirement,'registered_runners',return_value=set()))
+        self.enterContext(patch.object(retirement,'job_log',side_effect=lambda _: self.log))
+
+    def test_missing_result_can_retire_only_the_verified_runner_not_the_test(self):
+        before=copy.deepcopy(self.state['attempts'])
+        self.c.reconcile(self.state,'failure',self.proof)
+        entry=next(iter(self.state['reconciled_owners'].values()))
+        self.assertTrue(entry['runtime_retired'])
+        self.assertFalse(entry['native_cleanup_verified'])
+        self.assertFalse(entry['credit_granted'])
+        self.assertEqual(before,self.state['attempts'])
+        self.assertEqual(['failure'],self.state['pending'])
+        self.assertEqual([],self.c.retained_owners(self.state,['semantic-stack']))
+
+    def test_present_runner_or_missing_provider_teardown_refuses(self):
+        with patch.object(self.retirement,'registered_runners',return_value={99}):
+            with self.assertRaises(ValueError):self.c.reconcile(self.state,'failure',self.proof)
+        for change in ({'status':'in_progress'}, {'conclusion':'failure'}):
+            original=copy.deepcopy(self.seen['jobs']['jobs'][0]['steps'][0])
+            self.seen['jobs']['jobs'][0]['steps'][0].update(change)
+            with self.assertRaises(ValueError):self.c.reconcile(self.state,'failure',self.proof)
+            self.seen['jobs']['jobs'][0]['steps'][0]=original
+
+    def test_fake_or_wrong_time_log_is_not_provider_teardown(self):
+        original=self.log
+        for body in (original.replace(b'00:00:00.5',b'00:10:00.5'), b'No active SSH sessions detected. Proceeding with shutdown immediately.'):
+            self.log=body;self.log_path.write_bytes(body)
+            self.proof['job_logs']['8']['sha256']=self.c.sha_file(self.log_path)
+            with self.assertRaises(ValueError):self.c.reconcile(self.state,'failure',self.proof)
+        self.log=original;self.log_path.write_bytes(b'forged')
+        self.proof['job_logs']['8']['sha256']=self.c.sha_file(self.log_path)
+        with self.assertRaises(ValueError):self.c.reconcile(self.state,'failure',self.proof)
+
+    def test_cloud_or_changed_execution_contract_refuses(self):
+        self.gate['native_cloud']=True
+        self.receipt['execution_binding']['contract_digest']=self.c.digest(self.gate)
+        (self.folder/'receipt.json').write_text(json.dumps(self.receipt))
+        self.proof['receipt_sha256']=self.c.sha_file(self.folder/'receipt.json')
+        self.proof['original_files']['receipt.json']=self.proof['receipt_sha256']
+        with self.assertRaises(ValueError):self.c.reconcile(self.state,'failure',self.proof)
+
+    def test_registered_runner_inventory_requires_complete_unambiguous_pages(self):
+        for documents in ([{'total_count':True,'runners':[]}],
+                          [{'total_count':1,'runners':[]}],
+                          [{'total_count':2,'runners':[{'id':99}]},{'total_count':2,'runners':[]}],
+                          [{'total_count':2,'runners':[{'id':99},{'id':99}]}],
+                          [{'total_count':1,'runners':[{'id':True}]}]):
+            from unittest.mock import Mock
+            client=Mock()
+            client.json.side_effect=documents
+            with self.subTest(documents=documents), patch.object(gh,'GitHub',return_value=client), \
+                    patch.object(gh,'load_token',return_value='fixture-only'):
+                with self.assertRaises(ValueError):
+                    # Call the real implementation, not setUp's isolated observation.
+                    type(self).inventory_reader()
+
+    def test_retirement_revalidates_without_upgrading_cleanup(self):
+        self.c.reconcile(self.state,'failure',self.proof)
+        with patch.object(self.retirement,'registered_runners',return_value={99}):
+            self.assertEqual(['semantic-stack'],self.c.retained_owners(self.state,['semantic-stack']))
+        entry=next(iter(self.state['reconciled_owners'].values()))
+        entry['native_cleanup_verified']=True
+        self.assertEqual(['semantic-stack'],self.c.retained_owners(self.state,['semantic-stack']))
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -1,0 +1,5 @@
+{"task": "agent-payment-setup-resume", "duration_seconds": 275.4, "cost_cents": 2.0, "timestamp": "2026-11-05T14:07:41.980977+00:00", "agent_id": "280efef5-8a58-464f-a0ea-095f6742eafe"}
+{"task": "agent-payment-test-shop", "duration_seconds": 212.1, "cost_cents": 2.0, "timestamp": "2026-11-05T14:07:41.980977+00:00", "agent_id": "e5554d31-4c0e-4db5-8cf5-b3f5c344cd33"}
+{"task": "agent-payment-idempotent-abandonment", "duration_seconds": 498.4, "cost_cents": 4.0, "timestamp": "2026-11-05T14:07:41.980977+00:00", "agent_id": "fb649632-5bff-41dc-b440-35644af6296e"}
+{"task": "agent-payment-abandonment", "duration_seconds": 268.9, "cost_cents": 0.0, "timestamp": "2026-11-05T14:07:41.980977+00:00", "agent_id": "92559d83-635e-49c2-9231-7a5441c4a0ad"}
+{"task": "browser-biometrics-webdecoy", "duration_seconds": 244.2, "cost_cents": 77.0, "timestamp": "2026-11-05T17:22:39.509065+00:00", "agent_id": "e622db53-e7e7-4d6b-a79e-be1df89be429"}

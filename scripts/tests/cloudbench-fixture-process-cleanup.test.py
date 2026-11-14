@@ -637,8 +637,9 @@ exit "$1"
 ''')
         prefix = ('set -uo pipefail\n' + function + '\n' + '\n'.join(
             name + '=' + shlex.quote(str(root)) for name in (
-                'FIXTURE_STORAGE', 'FAKE_BIN', 'TMP_ROOT', 'SCRIPT_SNAPSHOT_TMP', 'FAKE_DIR'))
-            + '\nFIXTURE_STORAGE_DEVICE=1\nFAKE_FLY_TOKEN=synthetic\n')
+                'FIXTURE_STORAGE', 'FAKE_BIN', 'TMP_ROOT', 'SCRIPT_SNAPSHOT_TMP', 'FAKE_DIR',
+                'FIXTURE_IMAGE_BUILD_RECEIPT'))
+            + '\nFIXTURE_STORAGE_DEVICE=1\nFAKE_FLY_TOKEN=synthetic\nFIXTURE_IMAGE_BUILD_RECEIPT_SHA256=synthetic\n')
 
         def command(directory, label, status, extra=''):
             return (prefix + '\nexport CONTROL_DIR=' + shlex.quote(str(directory)) + '\n' + extra
