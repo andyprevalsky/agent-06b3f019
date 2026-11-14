@@ -1,0 +1,49 @@
+{
+  "format": "PR2085-ARCHIVE-RESTORE-PROOF-V1",
+  "final_receipt_sha256": "b88825f1aa9d3f870d08b31074d3344999dbd762dfe82bd1738d1370c0f00929",
+  "manifest_sha256": "c3d09ebfbc5e3b6830224c8b44fab8c96a15623db0f5af535c679aaf8de88a22",
+  "restored_payload_files": 15749,
+  "payload_bytes": 1027486027,
+  "additional_manifest_files": 1,
+  "all_payload_hashes_verified_by_restore": true,
+  "inventory_unchanged_before_and_after_capture": true,
+  "original_outcomes_reclassified": false,
+  "external_config_authentication": {
+    "checked_at": "2026-11-14T22:03:06.804100+00:00",
+    "method": "Canonical paginated Render read held only in memory; final full remote object authenticated with externally obtained config/key",
+    "raw_saved_or_printed": false,
+    "key_matches": true,
+    "key_length": 32,
+    "key_id_matches": true,
+    "bucket_matches": true,
+    "final_object_full_authentication": true,
+    "files": 15749,
+    "ciphertext_sha256": "14315bc8bbf28c521bed02fb59952983e5f3b853f52316cf21a5d3f9b7dadcd7"
+  },
+  "capture_steps": [
+    {
+      "step": 0,
+      "started_epoch": 1794693530.094797,
+      "finished_epoch": 1794693590.1899457,
+      "exit": 0
+    },
+    {
+      "step": 1,
+      "started_epoch": 1794693590.1982815,
+      "finished_epoch": 1794693698.7712302,
+      "exit": 0
+    },
+    {
+      "step": 2,
+      "started_epoch": 1794693698.7716029,
+      "finished_epoch": 1794693755.3646543,
+      "exit": 0
+    },
+    {
+      "step": 3,
+      "started_epoch": 1794693755.3650532,
+      "finished_epoch": 1794693776.1797295,
+      "exit": 0
+    }
+  ]
+}
