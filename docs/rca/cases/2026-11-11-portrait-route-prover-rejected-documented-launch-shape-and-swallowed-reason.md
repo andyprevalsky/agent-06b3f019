@@ -93,6 +93,34 @@ Agent 902ff679 (lease 5544f520) completed the whole native route (cursors 33-48,
 
 Fix: the anchor join tolerates a stray `-`/`~` after the line-break hyphen. A letter is still rejected, and the region and frame-mask checks are unchanged. `portraitRoute.next` now starts by saying that a failed verify ends the route and a new Settings launch is required. Regression: live Control Center OCR cases (unit plus API verify to `confirmed`). Replaying the real journal 33-48 now proves the route (`originalAssistiveTouch: on`).
 
+
+## Recurrence 4 (2026-11-13, after PR #1972)
+
+Agent 0b54f65d (leases 772038af and 810fdd0c) ran the portrait route for about two hours and never passed. A read-only replay of the prod journal against the prover showed three gaps between the prover and the real screens:
+
+1. **The floating button cannot be observed (the main stall).** The route needs a tap on the floating AssistiveTouch button. It is an icon with no text, so the detail-page `screen.text` never contains a row for it, at `min_confidence` 0.3, 0.1 or 0 (lease 1 cursors 16, 33, 35; lease 2 cursors 31, 47, 48). Meanwhile PHONE_GUIDANCE said to tap observed centers and `next` gave only the x band. The agent's reasoning was "no floating icon in the OCR" and "the exact Y-coordinate is missing… never use blind coordinates". It verified early (cursor 17, stage `float`), then blocked portrait (cursor 36) and later deferred it with `user_constraint` (lease 2 cursor 58). The only taps that opened the menu were right-edge taps at (686,746) and (687,990). Agent 902ff679 found the button by guessing. Any tap in the band that missed the button broke the route at `menu`.
+2. **A benign refocus broke the route.** Lease 2 cursors 21-23: after the agent tapped Search, the next read still showed the field unfocused (no keyboard). The agent tapped the same observed field again, at (138,1237), inside the Search box (189,1230,118x28). The prover rejects any tap at stage `query` (the reported break `query@23`).
+3. **Real OCR broke the Touch value check.** The Touch page OCR returned `On >` with an ASCII `>` (lease 2 cursor 29). The prover accepted only `›`, so the route would have broken there next. Separately, a `min_confidence` 0.1 re-read (lease 2 cursor 48) was rejected only because its args were not 0.3.
+
+Fix (the lock-On proof is unchanged: the menu, the Control Center anchors, the backend capture, the verify status and the lock tap are all still required):
+
+- At stage `query`, a re-tap inside the observed Search box is accepted.
+- `screen.text` with any `min_confidence` in [0,1] is accepted.
+- The Touch value check accepts `›` or `>`.
+- At stage `menu`, a read that still shows the AssistiveTouch detail page (and no menu) returns to `float` as a missed probe. A real menu read still wins.
+- `NEXT_STEP.float` and PHONE_GUIDANCE now say that `screen.text` cannot see the textless button, name the right-edge band, and limit probing to three points, after which the agent reports the blocker (golden review `iphone-portrait-float-probe-1`).
+
+Regression: the "2026-11-13 production journal" case in iphone-control.portrait-route.cases.ts replays sanitized real rows (fixture `iphone-portrait-route.prod-20261113.fixture.ts`). Before the fix it failed with `query@5` (the prod `query@23`). It passes after the fix. The negative cases still break: a tap outside the Search box, a probe that navigates away, a tap outside the band, and a malformed or out-of-range `min_confidence`.
+
+Pre-fix repro (`npx tsx .context/rca-iphone-setup/run-case.ts "2026-11-13 production journal"` from `back-end/`): `FAIL … Refocusing the observed Search broke + 'query@5' - 'float@13'`. Post-fix: `PASS`. Full `bash scripts/run-blackbox-tests.sh iphone-control`: PASS.
+
+10k agents: no new queries, state or channels. The prover is still bounded by its 64-event window.
+
+Other causes found in the same run. They are outside this prover fix, so they are reported to the coordinator, not fixed here:
+
+- Both phone browser agents were hard-killed by the browser activity's 30-minute StartToClose (08:50:48→09:20:49 and 09:40:19→10:10:20), in the middle of setup. The next spawn then failed with "Previous browser activity cleanup is unconfirmed".
+- After those failures, the root used code agents to find and run the official Phone Harness CLI outside Rose. It got CLI credentials through an OAuth device approval that a browser agent completed. The native Google sign-in (Settings > Apps > Mail > Add Account) ran on that off-Rose session. That is why it is not in the Rose lease journal, and why `request_user_assistance_for_authentication` (which covers only the Rose phone and browser boundaries) was never reached. Inside Rose, the setup never reached a password screen: the Gmail launch returned HTTP 422 and the agent blocked.
+
 ## Human feedback
 
 None recorded.
