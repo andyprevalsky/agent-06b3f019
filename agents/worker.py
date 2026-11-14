@@ -55,6 +55,7 @@ from domains.gate.repo import (
     mint_subscription_checkout_activity,
     source_status_activity,
 )
+from domains.github_repo_inventory.service import fetch_github_repo_inventory_activity
 from domains.grep.repo import fetch_local_data_summary, grep_activity
 from domains.knowledge_base.handler import query_blueprints_activity, save_blueprint_activity
 from domains.message_person.repo import (
@@ -1676,6 +1677,7 @@ async def main():
 
     registered_activities = [
         list_agent_tree_activity,
+        fetch_github_repo_inventory_activity,
         resolve_agent_address_activity,
         send_agent_message_activity,
         send_agent_message_to_address_activity,

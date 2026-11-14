@@ -17,7 +17,7 @@ import deploy_test_semantic as adapter
 class SemanticReports(unittest.TestCase):
     def fixture(self):
         item = {'id': 'native-id', 'project': 'chromium', 'file': 'a.spec.ts',
-                'title': ['a.spec.ts', 'case']}
+                'title': ['a.spec.ts', 'suite', 'case']}
         events = [{'event': 'begin', 'tests': [item]},
                   {'event': 'testBegin', 'id': item['id'], 'retry': 0},
                   {'event': 'hookEnd', 'id': item['id'], 'retry': 0,
@@ -29,13 +29,6 @@ class SemanticReports(unittest.TestCase):
         report = {'errors': [], 'suites': [{'specs': [{'id': item['id'], 'tests': [
             {'expectedStatus': 'passed', 'results': [{'retry': 0, 'status': 'failed',
               'errors': [{'message': 'expect received false'}]}]}]}]}]}
-        report['config'] = {'projects': [{'name': 'chromium', 'id': 'chromium', 'retries': 0}],
-                            'rootDir': '/native/front-end/tests-e2e',
-                            'configFile': '/native/front-end/playwright.config.ts'}
-        report['suites'][0]['title'] = item['file']
-        row = report['suites'][0]['specs'][0]
-        row.update(file=item['file'], title='case')
-        row['tests'][0].update(projectName='chromium', projectId='chromium')
         return item, events, report
 
     def test_native_assertion_failure_is_fail_not_aggregate_unknown(self):
@@ -75,7 +68,7 @@ class SemanticReports(unittest.TestCase):
 
     def test_complete_native_retries_preserve_terminal_assertion_failure(self):
         item, events, report = self.fixture()
-        report['config']['projects'][0]['retries'] = 1
+        report['config'] = {'projects': [{'name': 'chromium', 'retries': 1}]}
         result = report['suites'][0]['specs'][0]['tests'][0]['results'][0]
         second = copy.deepcopy(result)
         second['retry'] = 1
@@ -143,6 +136,56 @@ class SemanticReports(unittest.TestCase):
         self.assertEqual(adapter.summary_status(['PASS', 'PASS']), 'PASS')
         self.assertEqual(adapter.summary_status(['FAIL', 'UNVERIFIED']), 'UNVERIFIED')
         self.assertEqual(adapter.summary_status([]), 'UNVERIFIED')
+
+    def test_actual_playwright_retry_keeps_final_failure_and_flaky_first_error(self):
+        import os
+        import deploy_test_quarantine as quarantine
+        with tempfile.TemporaryDirectory() as d:
+            folder = Path(d)
+            pkg = Path(subprocess.check_output(
+                ['node', '-p', "require.resolve('@playwright/test')"], cwd=ROOT / 'front-end', text=True
+            ).strip())
+            (folder / 'fixture.spec.cjs').write_text(
+                f"const {{test,expect}} = require({json.dumps(str(pkg))});\n"
+                "test('final assertion',()=>expect(1).toBe(2));\n"
+                "test('retried pass',({},info)=>expect(info.retry).toBe(1));\n"
+                "test.describe('setup',()=>{test.beforeEach(()=>{throw Error('setup failed')});"
+                "test('not executed',()=>{});});\n")
+            (folder / 'playwright.config.cjs').write_text(
+                "module.exports={testDir:'.',retries:1,workers:1,projects:[{name:'chromium'}]};")
+            progress = folder / 'progress.jsonl'
+            env = {**os.environ, 'DEPLOY_SEMANTIC_LIFECYCLE': str(folder / 'events.jsonl'),
+                   'PLAYWRIGHT_JSON_OUTPUT_FILE': str(folder / 'report.json'),
+                   'DEPLOY_GATE_PROGRESS': str(progress), 'DEPLOY_GATE_CASE': 'semantic-stack'}
+            reporters = ['json', str(ROOT / 'scripts/deploy-semantic-reporter.cjs'),
+                         str(ROOT / 'front-end/src/tests/gate-progress/playwrightReporter.ts')]
+            proc = subprocess.run([*adapter.playwright_command(ROOT), 'test',
+                                   '--reporter=' + ','.join(reporters)], cwd=folder, env=env,
+                                  capture_output=True, timeout=45)
+            self.assertEqual(proc.returncode, 1, proc.stderr.decode())
+            events = [json.loads(line) for line in (folder / 'events.jsonl').read_text().splitlines()]
+            report = json.loads((folder / 'report.json').read_text())
+            retried = []
+            cases = adapter.classify_lane('ui', events[0]['tests'], report, events, retried)
+            # The retried pass stays UNVERIFIED until its native FLAKY receipt exists.
+            self.assertEqual(sorted(cases.values()), ['FAIL', 'UNVERIFIED', 'UNVERIFIED'])
+            self.assertEqual(len(retried), 1)
+            flaky = quarantine.gate_outcomes(progress)['flaky']
+            self.assertEqual(len(flaky), 1)
+            self.assertEqual(flaky[0]['attempts'], 2)
+            self.assertIn('retried pass', flaky[0]['unit'])
+            self.assertIn('expect(received).toBe(expected)', flaky[0]['detail'])
+            raw_flaky = [json.loads(line) for line in progress.read_text().splitlines()
+                         if json.loads(line)['status'] == 'FLAKY']
+            self.assertEqual(len(raw_flaky), 1)
+            self.assertIn('Expected: 1', raw_flaky[0]['detail'])
+            final_flaky = adapter.native_flaky('ui', events[0]['tests'], report, retried)
+            self.assertEqual(len(final_flaky), 1)
+            self.assertEqual(final_flaky[0]['unit'], raw_flaky[0]['unit'])
+            self.assertEqual(final_flaky[0]['attempts'], 2)
+            self.assertIn('Expected: 1', final_flaky[0]['detail'])
+            progress.unlink()  # Final evidence survives loss of the advisory file.
+            self.assertEqual(adapter.native_flaky('ui', events[0]['tests'], report, retried), final_flaky)
 
     def run_worker(self, defect=None, malformed_event=None, malformed_report=None):
         import deploy_test_worker as worker
@@ -446,244 +489,6 @@ Promise.resolve(vm.runInNewContext(fs.readFileSync(0,'utf8'), {
             cases = adapter.classify_lane('ui', events[0]['tests'],
                                            json.loads((folder / 'report.json').read_text()), events)
             self.assertEqual(sorted(cases.values()), ['FAIL', 'PASS', 'UNVERIFIED'], str(events) + (folder / 'report.json').read_text())
-
-
-class SemanticRetries(unittest.TestCase):
-    """Producer/consumer contract: native retries retain failures and RCA metadata."""
-    def fixture(self, first='failed', last='failed'):
-        item, events, report = SemanticReports().fixture()
-        item['title'] = ['a.spec.ts', 'suite', 'case']
-        row = report['suites'][0]['specs'][0]
-        report['suites'][0]['title'] = item['file']
-        report['suites'][0]['suites'] = [{'title': 'suite', 'specs': [row]}]
-        report['suites'][0]['specs'] = []
-        row.update(file=item['file'], title='case')
-        report['config'] = {'projects': [{'name': 'chromium', 'id': 'chromium', 'retries': 1}],
-                            'rootDir': '/native/front-end/tests-e2e',
-                            'configFile': '/native/front-end/playwright.config.ts'}
-        test = row['tests'][0]
-        test.update(projectName='chromium', projectId='chromium',
-                    status='flaky' if last == 'passed' else 'unexpected')
-        test['results'][0]['status'] = first
-        second = dict(copy.deepcopy(test['results'][0]), retry=1, status=last)
-        if last == 'passed': second['errors'] = []
-        test['results'].append(second)
-        events[4]['status'] = first
-        retry_events = copy.deepcopy(events[1:5])
-        for event in retry_events: event['retry'] = 1
-        retry_events[-1]['status'] = last
-        events[5:5] = retry_events
-        events[-1]['status'] = 'passed' if last == 'passed' else 'failed'
-        return item, events, report
-
-    def test_missing_config_cannot_hide_a_required_retry(self):
-        item, events, report = self.fixture()
-        report.pop('config')
-        report['suites'][0]['suites'][0]['specs'][0]['tests'][0]['results'].pop()
-        del events[5:9]
-        self.assertEqual(set(adapter.classify_lane('ui', [item], report, events).values()), {'UNVERIFIED'})
-
-    def test_zero_retry_pass_still_requires_full_native_identity_and_policy(self):
-        for defect in ('config', 'rootDir', 'configFile', 'projects', 'project_id', 'project_name',
-                       'missing_retries', 'boolean_retries', 'duplicate_project', 'file', 'title', 'test_project'):
-            with self.subTest(defect=defect):
-                item, events, report = SemanticReports().fixture()
-                events[4]['status'] = events[-1]['status'] = 'passed'
-                row = report['suites'][0]['specs'][0]
-                row['tests'][0]['results'][0]['status'] = 'passed'
-                if defect == 'config': report.pop('config'); row.update(file='foreign.ts', title='foreign')
-                if defect in ('rootDir', 'configFile', 'projects'): report['config'].pop(defect)
-                if defect == 'project_id': report['config']['projects'][0].pop('id')
-                if defect == 'project_name': report['config']['projects'][0].pop('name')
-                if defect == 'missing_retries': report['config']['projects'][0].pop('retries')
-                if defect == 'boolean_retries': report['config']['projects'][0]['retries'] = False
-                if defect == 'duplicate_project': report['config']['projects'].append(copy.deepcopy(report['config']['projects'][0]))
-                if defect == 'file': row['file'] = 'foreign.ts'
-                if defect == 'title': row['title'] = 'foreign'
-                if defect == 'test_project': row['tests'][0]['projectName'] = 'foreign'
-                self.assertEqual(set(adapter.classify_lane('ui', [item], report, events).values()), {'UNVERIFIED'})
-
-    def test_one_native_retry_keeps_all_failed_and_timeout_outcomes(self):
-        for first in ('failed', 'timedOut'):
-            for last in ('failed', 'timedOut'):
-                with self.subTest(first=first, last=last):
-                    item, events, report = self.fixture(first, last)
-                    self.assertEqual(adapter.classify_lane('ui', [item], report, events),
-                                     {adapter.case_key('ui', item): 'FAIL'})
-
-    def test_recovered_retry_is_flaky_with_original_failure(self):
-        item, events, report = self.fixture(last='passed')
-        flaky = []
-        self.assertEqual(adapter.classify_lane('ui', [item], report, events, flaky),
-                         {adapter.case_key('ui', item): 'FLAKY'})
-        key, row = flaky[0]
-        self.assertEqual(key, adapter.case_key('ui', item))
-        self.assertEqual(row['attempts'], 2)
-        self.assertEqual(row['case'], 'semantic-stack')
-        self.assertEqual(row['unit'], 'tests-e2e/a.spec.ts > suite > case')
-        self.assertIn('expect received false', row['detail'])
-        self.assertEqual(adapter.summary_status(['PASS', 'FLAKY']), 'PASS')
-        self.assertEqual(adapter.summary_status(['FLAKY', 'FAIL']), 'FAIL')
-        self.assertEqual(adapter.summary_status(['FLAKY', 'UNVERIFIED']), 'UNVERIFIED')
-
-    def test_retry_evidence_refuses_missing_duplicate_foreign_or_incomplete_attempts(self):
-        defects = ('missing_hook', 'duplicate_hook', 'wrong_hook_retry', 'missing_retry',
-                   'duplicate_result', 'third_retry', 'passed_first', 'skip', 'interrupted',
-                   'wrong_id', 'unknown_id', 'wrong_project', 'wrong_file', 'wrong_title',
-                   'wrong_status', 'retries_disabled', 'boolean_retry', 'missing_end',
-                   'extra_end', 'global_error', 'report_error', 'no_first_error',
-                   'retry_hook_failed', 'first_hook_failed', 'wrong_report_id', 'retry_limit_two', 'duplicate_attempt')
-        for defect in defects:
-            with self.subTest(defect=defect):
-                item, events, report = self.fixture(last='passed' if defect == 'no_first_error' else 'failed')
-                row = report['suites'][0]['suites'][0]['specs'][0]
-                test = row['tests'][0]
-                if defect == 'retry_hook_failed': events[7]['ok'] = False
-                if defect == 'first_hook_failed': events[2]['ok'] = False
-                if defect == 'wrong_report_id': row['id'] = 'foreign'
-                if defect == 'retry_limit_two': report['config']['projects'][0]['retries'] = 2
-                if defect == 'duplicate_attempt': events[5:5] = copy.deepcopy(events[5:9])
-                if defect == 'missing_hook': events.pop(6)
-                if defect == 'duplicate_hook': events.insert(7, copy.deepcopy(events[6]))
-                if defect == 'wrong_hook_retry': events[6]['retry'] = 0
-                if defect == 'missing_retry': del test['results'][1:]; del events[5:9]
-                if defect == 'duplicate_result': test['results'][1]['retry'] = 0
-                if defect == 'third_retry': test['results'].append(dict(test['results'][1], retry=2))
-                if defect == 'passed_first': test['results'][0]['status'] = events[4]['status'] = 'passed'
-                if defect in ('skip', 'interrupted'):
-                    test['results'][1]['status'] = events[8]['status'] = 'skipped' if defect == 'skip' else 'interrupted'
-                if defect == 'wrong_id': events[6]['id'] = 'foreign'
-                if defect == 'unknown_id': events.insert(5, {'event': 'testBegin', 'id': 'foreign', 'retry': 0})
-                if defect == 'wrong_project': test['projectName'] = 'webkit'
-                if defect == 'wrong_file': row['file'] = 'foreign.spec.ts'
-                if defect == 'wrong_title': row['title'] = 'foreign'
-                if defect == 'wrong_status': events[8]['status'] = 'passed'
-                if defect == 'retries_disabled': report['config']['projects'][0]['retries'] = 0
-                if defect == 'boolean_retry': test['results'][1]['retry'] = True
-                if defect == 'missing_end': events.pop()
-                if defect == 'extra_end': events.append(copy.deepcopy(events[-1]))
-                if defect == 'global_error': events.insert(-1, {'event': 'globalError'})
-                if defect == 'report_error': report['errors'] = [{'message': 'global setup failed'}]
-                if defect == 'no_first_error': test['results'][0]['errors'] = []
-                self.assertEqual(set(adapter.classify_lane('ui', [item], report, events).values()), {'UNVERIFIED'})
-
-    def run_retry_worker(self, *, recovered=False, bad_exit=False, progress_write=True):
-        import os
-        import deploy_test_worker as worker
-        import deploy_test_cycle as cycle
-        import deploy_test_quarantine as quarantine
-        import deploy_test_result as contract
-        with tempfile.TemporaryDirectory() as d:
-            root = Path(d)
-            freeze = {'head': 'fixture-head', 'digest': 'fixture-digest'}
-            item, events, report = self.fixture(last='passed' if recovered else 'failed')
-            selected = {lane: [dict(item, id=lane + '-native-id')] for lane in adapter.LANES}
-            request = {'token': 'retry-fixture', 'source': freeze, 'gate': 'semantic-stack', 'phase': 'focused',
-                       'worker_root': str(root), 'checks': ['semantic-stack'], 'skips': {},
-                       'worker_recipe': {'cases': {'semantic-stack': {'command': list(adapter.RUNNER),
-                                         'cwd': '.', 'aggregate': True, 'env': {}}}}}
-            def produce(argv, **kwargs):
-                self.assertEqual(argv, adapter.RUNNER)
-                folder = Path(kwargs['env']['DEPLOY_SEMANTIC_ARTIFACT_DIR'])
-                for lane in adapter.LANES:
-                    e, r = copy.deepcopy(events), copy.deepcopy(report)
-                    row = r['suites'][0]['suites'][0]['specs'][0]
-                    native = selected[lane][0]
-                    e[0]['tests'] = [native]
-                    for event in e[1:-1]: event['id'] = native['id']
-                    row['id'] = native['id']
-                    if lane == 'latency':
-                        del e[5:9]; e[4]['status'] = e[-1]['status'] = 'passed'
-                        test = row['tests'][0]; test['results'] = [dict(test['results'][0], status='passed', errors=[])]
-                        test['status'] = 'expected'
-                    (folder / (lane + '.json')).write_text(json.dumps(r))
-                    (folder / (lane + '.jsonl')).write_text(''.join(json.dumps(x) + '\n' for x in e))
-                (folder / 'stack.json').write_text(json.dumps({'token': request['token'], 'source': freeze,
-                    'ready': True, 'cleanup_complete': True, 'cleanup_exit': 0,
-                    'ui': 0 if recovered else 1, 'latency': 0}))
-                return (1 if bad_exit else (0 if recovered else 1)), False, False, False
-            progress_file = root / 'progress.jsonl'
-            from contextlib import ExitStack
-            with ExitStack() as stack:
-                stack.enter_context(patch.object(worker, 'source', return_value=freeze))
-                stack.enter_context(patch.object(adapter, 'source', return_value=freeze))
-                stack.enter_context(patch.object(adapter, 'native_inventory', return_value=selected))
-                stack.enter_context(patch.object(adapter, 'run_command', side_effect=produce))
-                stack.enter_context(patch.dict(os.environ, {'DEPLOY_GATE_PROGRESS': str(progress_file)}))
-                if not progress_write:
-                    stack.enter_context(patch.object(adapter.progress, 'report', return_value=False))
-                result = worker.execute(request, root)
-            if bad_exit or not progress_write:
-                self.assertEqual(result['cases'], {'semantic-stack': 'UNVERIFIED'})
-                self.assertFalse(result['complete'])
-                return
-            self.assertEqual(result['cases'], {'semantic-stack': 'PASS' if recovered else 'FAIL'})
-            self.assertTrue(result['complete']); contract.validate(result, request, 0 if recovered else 1)
-            if recovered:
-                rows = quarantine.gate_outcomes(progress_file)['flaky']
-                self.assertEqual(len(rows), 1)
-                self.assertIn('expect received false', rows[0]['detail'])
-                self.assertEqual(rows[0]['attempts'], 2)
-                state = {'source': freeze, 'phase': 'focused', 'round': 1, 'flaky': []}
-                opened = cycle.open_flaky(state, {'name': 'semantic-stack', 'checks': ['semantic-stack']}, rows, root)
-                self.assertEqual(len(opened), 1)
-                self.assertTrue(state['flaky'][0]['evidence'].endswith('/ui.json'))
-                self.assertIn('lack /RCA attribution', quarantine.attribution_block(state['flaky']))
-                self.assertEqual(result['evidence']['semantic-stack']['native_cases'][adapter.case_key('ui', selected['ui'][0])], 'FLAKY')
-            else:
-                self.assertEqual(result['evidence']['semantic-stack']['flaky'], [])
-
-    def test_fastpath_failed_retry_stays_complete_fail(self):
-        self.run_retry_worker()
-
-    def test_fastpath_recovered_retry_reaches_existing_required_rca_contract(self):
-        self.run_retry_worker(recovered=True)
-
-    def test_fastpath_recovered_retry_nonzero_exit_stays_unverified(self):
-        self.run_retry_worker(recovered=True, bad_exit=True)
-
-    def test_fastpath_missing_flaky_metadata_stays_unverified(self):
-        self.run_retry_worker(recovered=True, progress_write=False)
-
-    def test_real_playwright_retry_producer_and_native_reporter_contract(self):
-        import os
-        with tempfile.TemporaryDirectory() as d:
-            folder = Path(d)
-            pkg = Path(subprocess.check_output(['node', '-p', "require.resolve('@playwright/test')"],
-                                               cwd=ROOT / 'front-end', text=True).strip())
-            (folder / 'fixture.spec.cjs').write_text(
-                f"const {{test,expect}}=require({json.dumps(str(pkg))});\n"
-                "test('pass',()=>expect(1).toBe(1));\n"
-                "test('flaky',()=>expect(test.info().retry).toBe(1));\n"
-                "test('failure',()=>expect(1).toBe(2));\n"
-                "test.describe('hook',()=>{test.beforeEach(()=>{throw Error('setup failed')});test('blocked',()=>{});});\n")
-            (folder / 'playwright.config.cjs').write_text("module.exports={testDir:'.',retries:1,workers:1,projects:[{name:'chromium'}]};")
-            env = {**os.environ, 'DEPLOY_SEMANTIC_LIFECYCLE': str(folder / 'events.jsonl'),
-                   'PLAYWRIGHT_JSON_OUTPUT_FILE': str(folder / 'report.json')}
-            proc = subprocess.run([*adapter.playwright_command(ROOT), 'test', '--reporter=json,' +
-                                   str(ROOT / 'scripts/deploy-semantic-reporter.cjs')],
-                                  cwd=folder, env=env, capture_output=True, timeout=45)
-            self.assertEqual(proc.returncode, 1, proc.stderr.decode())
-            events = adapter.events_at(folder / 'events.jsonl'); report = json.loads((folder / 'report.json').read_text())
-            rows = []
-            actual = adapter.classify_lane('ui', events[0]['tests'], report, events, rows)
-            self.assertEqual(sorted(actual.values()), ['FAIL', 'FLAKY', 'PASS', 'UNVERIFIED'])
-            self.assertIn('toBe', rows[0][1]['detail'])
-            self.assertEqual(rows[0][1]['attempts'], 2)
-        truncated = copy.deepcopy(report)
-        truncated.pop('config')
-        for native_row in adapter.specs(truncated['suites']):
-            native_row['tests'][0]['results'] = native_row['tests'][0]['results'][:1]
-        original_only = [event for event in events if event.get('retry', 0) == 0]
-        self.assertEqual(set(adapter.classify_lane('ui', events[0]['tests'], truncated, original_only).values()),
-                         {'UNVERIFIED'})
-        foreign = copy.deepcopy(report)
-        native_pass = next(row for row in adapter.specs(foreign['suites']) if row['title'] == 'pass')
-        native_pass.update(file='foreign.spec.ts', title='foreign')
-        native_pass['tests'][0]['projectName'] = 'foreign'
-        pass_item = next(item for item in events[0]['tests'] if item['id'] == native_pass['id'])
-        self.assertEqual(adapter.classify_lane('ui', events[0]['tests'], foreign, events)[adapter.case_key('ui', pass_item)],
-                         'UNVERIFIED')
 
 
 if __name__ == '__main__':

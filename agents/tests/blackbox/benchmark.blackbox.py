@@ -3623,6 +3623,136 @@ def test_payment_benchmark_preserves_lifecycle_stack_contract():
         )
 
 
+def test_local_main_seeds_only_the_selected_child_payment_fixture():
+    """Native child main must not bind a sibling's payment identity into this world."""
+    from types import SimpleNamespace
+    from benchmarks import local
+    from benchmarks import run_benchmark as bench
+
+    cohort = ["agent-payment-new-user-journey", "agent-payment-test-shop", "chat-mode",
+        "agent-payment-idempotent-abandonment", "agent-payment-setup-resume", "agent-payment-abandonment",
+        "browser-auth-guest-purchase", "browser-auth-member-discount-purchase", "browser-auth-member-discount-signup-fails-purchase",
+        "browser-auth-paid-membership-purchase", "browser-auth-signup-purchase", "browser-auth-signup-purchase-no-subscription",
+        "browser-auth-session-expires-at-checkout", "spawn-sub-agents", "parallel-tool-calls", "gate-subscription-card-mint"]
+
+    class RunnerBoundaryReached(Exception):
+        pass
+
+    for selected, child_world, expected_seeds in [
+        (cohort[0], True, 0),
+        (cohort[1], True, 1),
+        (cohort[2], True, 0),
+        (cohort[0], False, 0),
+        (cohort[1], False, 1),
+    ]:
+        inherited_tasks = cohort if child_world else [selected]
+        stack = local.ServiceStack(
+            run_id="native-mixed-seed-test",
+            context_dir=local.REPO_ROOT / ".context" / "native-mixed-seed-test",
+            manifest_path=local.REPO_ROOT / ".context" / "native-mixed-seed-test" / "services.json",
+            service_log=local.REPO_ROOT / ".context" / "native-mixed-seed-test" / "services.log",
+            isolated=True,
+        )
+        manifest = {
+            "ports": {"backend": 3001, "frontend": 3002, "local_db": 5432},
+            "urls": {"public": "https://fixture.example.invalid"},
+            "database": {"name": "victoria_native_fixture"},
+        }
+        owner = SimpleNamespace(
+            starting=False, process=None, started=False, verified=True,
+            signum=None, record=lambda *_args: None,
+        )
+        def fixture_subprocess(command, **kwargs):
+            assert command[:3] == ["npx", "tsx", "scripts/setup-benchmark-payment.ts"]
+            assert command[-2:] == ["--user-id", local.AGENT_PAYMENT_BENCHMARK_USER_ID]
+            assert kwargs["env"]["DATABASE_URL"] == "postgresql://postgres:postgres@localhost:5432/victoria_native_fixture"
+            assert kwargs["env"]["DIRECT_URL"] == kwargs["env"]["DATABASE_URL"]
+            assert kwargs["env"]["BENCHMARK_AGENTCARD_V2_USER_ID"] == "usr_native_fixture"
+            return SimpleNamespace(returncode=0)
+
+        def service_boundary(*_args, **_kwargs):
+            expected_opt_in = selected in cohort[:2]
+            assert (os.environ.get("BENCHMARK_AGENTCARD_WORLD_IDENTITY") == "true") is expected_opt_in, (
+                f"selected {selected} must own bootstrap, not its {len(cohort)}-task cohort"
+            )
+            if expected_opt_in:
+                manifest["agentcard_world_identity"] = {"version":1,"worldId":stack.run_id,"providerUserId":"usr_native_fixture","livemode":False,"fundsSource":"company_flow","scope":"a"*64}
+            return None, manifest
+
+        def runner_boundary(*_args, **_kwargs):
+            if selected == cohort[0]:
+                def new_user_fixture(command, **options):
+                    assert command == ["npx", "tsx", "scripts/setup-benchmark-new-user-payment.ts"]
+                    assert options["env"]["BENCHMARK_AGENTCARD_V2_USER_ID"] == manifest["agentcard_world_identity"]["providerUserId"], "new-user CLI inherited a sibling/shared provider identity"
+                    assert options["env"]["BENCHMARK_USER_ID"] == "native-synthetic-new-user"
+                    # The CLI loads back-end/.env (production DIRECT_URL); both URLs must be the local DB.
+                    assert options["env"]["DATABASE_URL"] == "postgresql://postgres:postgres@localhost:5432/victoria_native_fixture"
+                    assert options["env"]["DIRECT_URL"] == options["env"]["DATABASE_URL"], "inherited remote DIRECT_URL reached the new-user fixture"
+                    return SimpleNamespace(returncode=0, stdout="{}", stderr="")
+                with (
+                    patch.dict(os.environ, {"DIRECT_URL": "postgresql://remote.example:6543/prod"}),
+                    patch.object(bench, "_local_victoria_database_url", return_value="postgresql://postgres:postgres@localhost:5432/victoria_native_fixture"),
+                    patch.object(bench.subprocess, "run", side_effect=new_user_fixture) as fixture,
+                ):
+                    bench._run_new_user_payment_fixture("native-synthetic-new-user")
+                    fixture.assert_called_once()
+            raise RunnerBoundaryReached
+
+        argv = [selected, "--no-dashboard"]
+        if selected == cohort[2]:
+            argv.append("--simulate")
+        if child_world:
+            read_fd, write_fd = os.pipe()
+            os.write(write_fd, b"1")
+            os.close(write_fd)
+            argv.extend(["--world-ready-fd", str(read_fd)])
+            for sibling in cohort:
+                argv.extend(["--cohort-task", sibling])
+        # Parse real argv, consume the real coordinator pipe, configure the real
+        # cohort environment, and reach main's actual fixture dispatch. Only the
+        # external service/fixture/runner boundaries are replaced; no stack,
+        # database, agent or provider call is allowed to start.
+        with (
+            patch.dict(os.environ, {"TRACE_ARCHIVE_ENABLED": "1", "BENCHMARK_AGENTCARD_WORLD_IDENTITY":"true", "BENCHMARK_AGENTCARD_V2_USER_ID":"usr_shared", local.AGENT_PAYMENT_BENCHMARK_USER_ID_ENV: local.AGENT_PAYMENT_BENCHMARK_USER_ID}),
+            patch.object(local, "enforce_provider_capacity"),
+            patch.object(local, "validate_agentcard_org_credentials"),
+            patch.object(local, "build_service_stack", return_value=stack),
+            patch.object(local, "configure_task_environment", wraps=local.configure_task_environment) as configure,
+            patch.object(local, "LocalBenchmarkOwner", return_value=owner),
+            patch.object(local, "start_services", side_effect=service_boundary) as services,
+            patch.object(local, "apply_manifest_environment", wraps=local.apply_manifest_environment),
+            patch.object(local, "diagnostic_log_env", return_value={}),
+            patch.object(local, "dashboard_enabled", return_value=False),
+            patch.object(local, "print_scorecard_instruction"),
+            patch.object(local, "seed_payment_fixture", wraps=local.seed_payment_fixture) as seed,
+            patch.object(local, "run_benchmark_invocation", side_effect=runner_boundary) as runner,
+            patch.object(local, "stop_services") as stop,
+            patch.object(local, "start_frontend_tunnel", side_effect=AssertionError("real tunnel started")),
+            patch.object(local.subprocess, "run", side_effect=fixture_subprocess) as fixture_process,
+        ):
+            try:
+                local.main(argv)
+            except RunnerBoundaryReached:
+                pass
+            else:
+                raise AssertionError("native main never reached the benchmark runner boundary")
+            assert seed.call_count == expected_seeds, (
+                f"selected {selected} child_world={child_world} seeded regular payment fixture "
+                f"{seed.call_count} time(s), expected {expected_seeds}; sibling cohort must not own this binding; "
+                f"attempted CLI users={[call.args[0][-1] for call in fixture_process.call_args_list]}"
+            )
+            assert fixture_process.call_count == expected_seeds
+            if expected_seeds:
+                seed.assert_called_once_with(manifest)
+            configure.assert_called_once_with(inherited_tasks, isolated=True)
+            assert services.call_args.kwargs["tasks"] == inherited_tasks
+            assert runner.call_args.args[0].tasks == [selected]
+            assert os.environ["BENCHMARK_ISOLATED_RUN"] == "true"
+            if selected in cohort[:2]:
+                assert os.environ["BENCHMARK_FORCE_CUSTOMER_PURCHASE_PATH"] == "1"
+            stop.assert_called_once_with(None, stack=stack)
+
+
 def test_payment_benchmark_seeds_admin_run_user_with_forced_customer_path():
     """Sandbox lifecycle benches run as the admin account and force the charged mint path."""
     import os
@@ -3977,6 +4107,20 @@ def test_payment_benchmark_accepts_org_client_credentials_from_dotenv(tmp_path):
         env={},
         env_path=env_path,
     )
+
+
+def test_payment_benchmark_rejects_mcp_only_credentials_for_rest_issuing(tmp_path):
+    """A legacy MCP token cannot authenticate the v2 card and wallet requests."""
+    import pytest
+
+    from benchmarks import local
+
+    env_path = tmp_path / ".env"
+    env_path.write_text('AGENTCARD_ORG_MCP_ACCESS_TOKEN="fake_legacy_org_token"\n')
+    with pytest.raises(RuntimeError, match="REST v2 requires organization client credentials"):
+        local.validate_agentcard_org_credentials(
+            ["agent-payment-test-shop"], env={}, env_path=env_path
+        )
 
 
 def test_isolated_benchmark_services_allow_slow_first_sync():
@@ -7028,7 +7172,9 @@ async def test_abandonment_timeout_surfaces_the_last_durable_mismatch():
     from benchmarks.benchmark_tasks import get_task_by_name
     from benchmarks.run_benchmark import _wait_for_expected_payment_lifecycle
 
+    # Provider inventory integrity is satisfied so the first durable mismatch is the HELD purchase.
     lifecycle = {
+        "integrity": dict(get_task_by_name("agent-payment-abandonment").expected_payment_lifecycle["integrity"]),
         "purchase": {"status": "HELD"},
         "walletFunding": {"status": "RECLAIMING"},
     }
@@ -7063,6 +7209,7 @@ async def test_abandonment_timeout_names_the_unreleased_agentcard_transfer():
     from benchmarks.run_benchmark import _wait_for_expected_payment_lifecycle
 
     lifecycle = {
+        "integrity": dict(get_task_by_name("agent-payment-abandonment").expected_payment_lifecycle["integrity"]),
         "purchase": {"status": "HELD"},
         "walletFunding": {"status": "RECLAIMING"},
         "agentCard": {"status": "CLOSED", "balanceCents": 0},
@@ -7419,6 +7566,9 @@ def test_agent_payment_catalog_requires_terminal_lifecycle_evidence():
         "purchaseCount": 1,
         "walletFundingCount": 1,
         "cardCount": 1,
+        "agentCardProviderCardCount": 1,
+        "agentCardProviderTransferCount": 1,
+        "agentCardProviderUnlinkedTransferCount": 0,
     }
     duplicate_lifecycle = deepcopy(idempotency.expected_payment_lifecycle)
     duplicate_lifecycle["integrity"]["cardCount"] = 2
@@ -7593,8 +7743,48 @@ def test_agent_payment_accepts_grounded_finished_browser_text_without_structured
         assert _extract_agent_payment_output_blob({"messages": [invalid_result]}) == ""
 
 
+async def test_production_payment_admission_requires_scoped_live_v2_readiness():
+    """Live billing plus a legacy connection must not admit a paid v2 probe."""
+    import httpx
+    import pytest
+
+    import benchmarks.run_benchmark as bench
+
+    original_client = httpx.AsyncClient
+    ready = {"connected": True, "apiVersion": 2, "status": "approved",
+             "livemode": True, "fundsSource": "company_flow"}
+    for status in (
+        {"connected": True, "status": "approved"},
+        {**ready, "connected": False},
+        {**ready, "livemode": False},
+        {**ready, "status": "pending"},
+        {**ready, "fundsSource": "onramp"},
+        ready,
+    ):
+        seen = []
+
+        def fixture(request):
+            seen.append(request)
+            assert request.method == "GET", "admission must never move money"
+            if request.url.path == "/api/credits/usage":
+                return httpx.Response(200, json={"tier": "pro", "remaining": 1000, "stripeLivemode": True})
+            assert request.url.path == "/api/agentcard/status"
+            assert request.headers["x-user-id"] == bench.AGENT_PAYMENT_LIFECYCLE_PROD_USER_ID
+            return httpx.Response(200, json=status)
+
+        with patch.object(bench, "_api_headers", new=AsyncMock(return_value={})), \
+             patch.object(bench.httpx, "AsyncClient",
+                          side_effect=lambda **kw: original_client(transport=httpx.MockTransport(fixture), **kw)):
+            if status == ready:
+                await bench._preflight_production_payment_identity("https://api.fixture.invalid")
+            else:
+                with pytest.raises(RuntimeError, match="live v2"):
+                    await bench._preflight_production_payment_identity("https://api.fixture.invalid")
+        assert [r.url.path for r in seen] == ["/api/credits/usage", "/api/agentcard/status"]
+
+
 async def test_production_payment_identity_gap_fails_closed_with_its_own_provisioning_rules():
-    """.claude/commands/DEPRECATED_deploy.md Step 13c (orig L3407-3434): when the non-admin
+    """the former /deploy skill Step 13c (orig L3407-3434): when the non-admin
     production identity is missing, `agent-payment-production-abandonment` stops before any live
     spend and its own error carries the exact provisioning command, the credential source and the
     guardrails, so the agent that hits it needs no other document and never asks the user."""
@@ -7626,17 +7816,17 @@ async def test_production_payment_identity_gap_fails_closed_with_its_own_provisi
     message = str(raised.value)
     command = (
         "  cd back-end && set -a && . ./.env && set +a && \\\n"
-        '    DATABASE_URL="$DIRECT_URL" STRIPE_SECRET_KEY="$STRIPE_SECRET_KEY_LIVE" \\\n'
+        '    BENCHMARK_AGENTCARD_V2_USER_ID= DATABASE_URL="$DIRECT_URL" STRIPE_SECRET_KEY="$STRIPE_SECRET_KEY_LIVE" \\\n'
         "    BENCHMARK_ALLOW_LIVE_STRIPE=true BENCHMARK_PAYMENT_ALLOW_REMOTE_DB=true \\\n"
-        "    npx tsx scripts/setup-benchmark-payment.ts --live --user-id 00000000-0000-4000-8000-000000000107 \\\n"
-        '    --agentcard-cardholder-id "$DEDICATED_AGENTCARD_CARDHOLDER_ID"\n'
+        "    npx tsx scripts/setup-benchmark-payment.ts --live --user-id 00000000-0000-4000-8000-000000000107\n"
     )
     assert command in message
     for rule in (
         "is not provisioned: it has no Subscription row",
         "Every credential it needs is already in back-end/.env; do not ask the user",
         "the 6543 pooler fails",
-        "EXISTING dedicated benchmark cardholder only",
+        "dedicated benchmark user's normal signed live v2 connection, consent and approved KYC first",
+        "A legacy cardholder is not a v2 connected user",
         "never create an identity automatically or bypass pending KYC",
         "never enter a card number",
         "one-time hosted Stripe Checkout link: a human saves the live card there once",
@@ -25514,7 +25704,7 @@ def test_history_ledger_task_names_still_exist_in_catalog():
 
     Every task name ever recorded in the success ledger must still exist in
     tasks.json. If this fails, a task was renamed or deleted — restore the name
-    (CLAUDE.md "Eval Suite": task name is the cross-store primary key).
+    (CLAUDE.md "Benchmarks": task name is the cross-store primary key).
     """
     import json as _json
     from pathlib import Path
@@ -27966,6 +28156,19 @@ async def run_all_tests():
     r.record("independent_runs_keep_distinct_records", test_independent_runs_keep_distinct_records)
     r.record("predeploy_selector_rejects_production_only", test_predeploy_selector_rejects_production_only_tasks)
     r.record("predeploy_selector_agentcard_lifecycle_smoke", test_predeploy_selector_runs_agentcard_lifecycle_tasks_as_smoke)
+    from benchmarks.select_predeploy_benches_test import (
+        test_catalog_validation_requires_ready_task_deploy_category,
+        test_selector_treats_explicit_deploy_opt_out_as_uncategorized,
+    )
+
+    r.record(
+        "catalog_requires_ready_task_deploy_category",
+        _with_tmp_path(test_catalog_validation_requires_ready_task_deploy_category),
+    )
+    r.record(
+        "predeploy_selector_explicit_deploy_opt_out",
+        _with_tmp_path(test_selector_treats_explicit_deploy_opt_out_as_uncategorized),
+    )
     r.record("predeploy_selector_machine_formats_at_cap", test_predeploy_selector_machine_formats_at_cap)
     r.record(
         "local_cleanup_preserves_run_id_observers",
@@ -27974,6 +28177,12 @@ async def run_all_tests():
     r.record(
         "local_cleanup_port_candidates_exclude_clients", test_local_cleanup_port_candidates_exclude_connected_clients
     )
+    from benchmarks.benchmark_tasks_policy_test import (
+        test_agentcard_world_inventory_contract_rejects_duplicate_and_unlinked_provider_objects,
+        test_agentcard_world_inventory_setup_accepts_compensated_initial_stripe_intent,
+    )
+    r.record("agentcard_world_inventory_contract", test_agentcard_world_inventory_contract_rejects_duplicate_and_unlinked_provider_objects)
+    r.record("agentcard_world_inventory_setup_compensation", test_agentcard_world_inventory_setup_accepts_compensated_initial_stripe_intent)
     from benchmarks import cloud_batch_cleanup_test, local_lifecycle_test
 
     for name in sorted(dir(local_lifecycle_test)):
@@ -28905,6 +29114,10 @@ async def run_all_tests():
         "payment_benchmark_admin_run_user_forced_customer_path",
         test_payment_benchmark_seeds_admin_run_user_with_forced_customer_path,
     )
+    r.record(
+        "local_main_selected_child_payment_fixture",
+        test_local_main_seeds_only_the_selected_child_payment_fixture,
+    )
     await r.record_async(
         "agentcard_setup_effective_benchmark_user",
         test_agentcard_setup_targets_effective_benchmark_user,
@@ -29112,6 +29325,10 @@ async def run_all_tests():
     await r.record_async(
         "production_payment_identity_gap_prints_its_provisioning_rules",
         test_production_payment_identity_gap_fails_closed_with_its_own_provisioning_rules,
+    )
+    await r.record_async(
+        "production_payment_admission_requires_scoped_live_v2_readiness",
+        test_production_payment_admission_requires_scoped_live_v2_readiness,
     )
     r.record(
         "production_frontend_ignores_stale_local_manifest",
@@ -29846,6 +30063,10 @@ async def run_all_tests():
     r.record(
         "payment_benchmark_accepts_org_client_credentials_from_dotenv",
         _with_tmp_path(test_payment_benchmark_accepts_org_client_credentials_from_dotenv),
+    )
+    r.record(
+        "payment_benchmark_rejects_mcp_only_credentials_for_rest_issuing",
+        _with_tmp_path(test_payment_benchmark_rejects_mcp_only_credentials_for_rest_issuing),
     )
     r.record(
         "agent_latency_time_containment_scales",

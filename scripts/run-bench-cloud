@@ -1653,31 +1653,8 @@ resolve_prod_backend_browser_provider() {
 }
 
 resolve_prod_worker_browser_provider() {
-    local machines err
-    # The worker fallback marker must come from production, never local source files.
-    err="$(mktemp)"
-    if machines="$(FLY machines list -a "$PROD_APP" --json 2>"$err")"; then
-        rm -f "$err"
-        printf '%s' "$machines" | python3 -c '
-import json, sys
-machines = json.load(sys.stdin) or []
-values = [
-    str(((machine.get("config") or {}).get("env") or {}).get("BROWSER_PROVIDER") or "").strip().lower()
-    for machine in machines
-]
-if not machines or any(not value for value in values):
-    raise SystemExit("FATAL: every production Fly worker must expose BROWSER_PROVIDER")
-providers = set(values)
-if len(providers) != 1:
-    raise SystemExit(f"FATAL: production Fly workers do not expose one BROWSER_PROVIDER: {sorted(providers)!r}")
-print(next(iter(providers)))
-'
-        return
-    fi
-    cat "$err" >&2 || true
-    rm -f "$err"
-    echo "FATAL: could not read production Fly worker configuration" >&2
-    return 1
+    # Machine config omits app-secret overlays. Observe only already-started workers.
+    python3 "$ROOT_DIR/scripts/worker_pool_runtime.py" --browser-provider "$PROD_APP"
 }
 
 validate_environment_contract() {

@@ -91,6 +91,46 @@ class CycleQuarantine(unittest.TestCase):
         self.assertEqual(0, code)
         return out.getvalue()
 
+    def final_retry_evidence(self, row, live=False):
+        code = "import atexit\n"
+        if live:
+            code += "p.report('test_flaky_unit','FLAKY',case='a',attempts=2,detail='first error')\n"
+        code += ("def attach_final():\n"
+                 " path=os.environ['DEPLOY_GATE_RESULT']\n"
+                 " result=json.load(open(path))\n"
+                 " result['evidence']={'a':{'native_flaky':[%r]}}\n"
+                 " json.dump(result,open(path,'w'))\n"
+                 "atexit.register(attach_final)\n") % row
+        return self.run_gate(code)
+
+    def test_final_native_retry_opens_attribution_without_live_progress(self):
+        row = progress.row('test_flaky_unit', 'FLAKY', case='a', attempts=2, detail='original first failure')
+        self.final_retry_evidence(row)
+        self.assertTrue(self.state['ready'])
+        [occurrence] = self.state['flaky']
+        self.assertEqual(occurrence['unit'], row['unit'])
+        self.assertEqual(occurrence['detail'], 'original first failure')
+        self.assertTrue(Path(occurrence['evidence']).is_file())
+        self.assertIn('lack /RCA attribution', c.pending_completion_block(self.state))
+        self.assertEqual(1, c.verify_saved(self.directory, self.root))
+
+    def test_final_and_live_retry_metadata_open_only_one_occurrence(self):
+        row = progress.row('test_flaky_unit', 'FLAKY', case='a', attempts=2, detail='original first failure')
+        self.final_retry_evidence(row, live=True)
+        self.assertEqual(len(self.state['flaky']), 1)
+        result = self.state['attempts'][-1]['results'][0]
+        self.assertEqual(len(result['flaky']), 1)
+        self.assertEqual(result['flaky'][0]['detail'], 'original first failure')
+
+    def test_foreign_final_retry_metadata_cannot_grant_a_complete_pass(self):
+        row = progress.row('test_flaky_unit', 'FLAKY', case='foreign', attempts=2)
+        self.final_retry_evidence(row)
+        self.assertFalse(self.state['ready'])
+        result = self.state['attempts'][-1]['results'][0]
+        self.assertFalse(result['complete'])
+        self.assertEqual(set(result['cases'].values()), {'UNVERIFIED'})
+        self.assertIn('invalid final native retry outcome', result['reason'])
+
     def test_quarantined_fail_is_non_blocking_and_reported(self):
         printed = self.run_gate(
             "p.report('test_flaky_unit','QUARANTINED_FAIL',case='a',detail='AssertionError: boom',quarantine=%r)\n"
@@ -458,6 +498,66 @@ class ReleaseReport(unittest.TestCase):
             q.validate_attribution({**occurrence, 'detail': bare.replace('1 failed case(s): real_model_controls',
                                                                          '2 failed case(s): real_model_controls, other')},
                                    {**entry, 'case': 'real_model_controls'}, self.root)
+
+    def test_typescript_domain_flake_binds_the_marker_of_its_single_failed_native_case(self):
+        occurrence_id = 'd' * 32
+        title = 'HMR: an agent write reaches the preview DOM in \u2264 3 s'
+        source = ("import { quarantine } from '../helpers/quarantine';\n\n"
+                  "test('a passing case', () => {});\n\n"
+                  # Unbalanced-looking literals within the parser's look-back window must not misname it.
+                  + "const noise = [\n" + "  `it's ${'x'} \"q\"`, 'don\\'t',\n" * 30 + "];\n\n" +
+                  "test(\n  '%s',\n  quarantine(\n    {\n      since: '2026-11-11',\n"
+                  "      repair: 'pending-handoff:%s',\n      error: 'page.waitForFunction: Timeout 10000ms exceeded.',\n"
+                  "      evidence: 'rca-ts',\n    },\n    async () => {}\n  )\n);\n" % (title, occurrence_id))
+        (self.root / 'tests' / 'preview.blackbox.ts').write_text(source)
+        tap = ('ok 1 - a passing case\nnot ok 2 - %s\n  ---\n  error: x\n  ...\n# fail 1\n' % title)
+        occurrence = {'id': occurrence_id, 'gate': 'backend-coverage-blackbox', 'unit': 'preview',
+                      'detail': '\x1b[36m' + tap + '\x1b[0m', 'source': {'head': 'a' * 40}}
+        packet = {k: 'x' for k in ('test', 'command', 'scope', 'error', 'source', 'evidence')}
+        entry = {'attribution': 'NOT_INTRODUCED', 'evidence': 'rca-ts', 'marker': 'tests/preview.blackbox.ts',
+                 'post_merge': packet}
+        with self.assertRaisesRegex(ValueError, 'no quarantine marker'):
+            q.validate_attribution(occurrence, entry, self.root)
+        recorded = q.validate_attribution(occurrence, {**entry, 'case': title}, self.root)
+        self.assertEqual(('NOT_INTRODUCED', 'preview', occurrence_id),
+                         tuple(recorded['post_merge'][k] for k in ('attribution', 'unit', 'occurrence')))
+        # The custom runners' FAIL line binds the same way.
+        runner = {**occurrence, 'detail': 'FAIL  %s (112312ms)\nError: boom\n\n1/1 preview cases failed\n' % title}
+        q.validate_attribution(runner, {**entry, 'case': title}, self.root)
+        # A case that did not fail, an unmarked failed case, or two failed cases never bind.
+        with self.assertRaisesRegex(ValueError, 'single failed case'):
+            q.validate_attribution(occurrence, {**entry, 'case': 'a passing case'}, self.root)
+        with self.assertRaisesRegex(ValueError, 'no quarantine marker'):
+            q.validate_attribution({**occurrence, 'detail': 'not ok 1 - a passing case\n'},
+                                   {**entry, 'case': 'a passing case'}, self.root)
+        with self.assertRaisesRegex(ValueError, 'single failed case'):
+            q.validate_attribution({**occurrence, 'detail': tap + 'not ok 3 - another\n'},
+                                   {**entry, 'case': title}, self.root)
+
+    def test_typescript_case_table_runner_binds_name_fn_marker(self):
+        occurrence_id = 'e' * 32
+        name = 'concurrent first use mints one agent identity for the user'
+        source = ("export const cases = [\n  { name: 'other case', fn: () => undefined },\n  {\n"
+                  "    name: '%s',\n    fn: quarantine(\n      {\n        since: '2026-11-11',\n"
+                  "        repair: 'pending-handoff:%s',\n        error: 'Foreign key constraint violated',\n"
+                  "        evidence: 'rca-cases',\n      },\n      () => undefined,\n      { unit: '%s' }\n    ),\n  },\n];\n"
+                  % (name, occurrence_id, name))
+        (self.root / 'tests' / 'identity.cases.ts').write_text(source)
+        detail = 'FAIL %s\nPrismaClientKnownRequestError:\n\nResults: 17 passed, 1 failed\n' % name
+        occurrence = {'id': occurrence_id, 'gate': 'backend-coverage-blackbox', 'unit': 'auth-options',
+                      'detail': detail, 'source': {'head': 'a' * 40}}
+        packet = {k: 'x' for k in ('test', 'command', 'scope', 'error', 'source', 'evidence')}
+        entry = {'attribution': 'NOT_INTRODUCED', 'evidence': 'rca-cases', 'marker': 'tests/identity.cases.ts',
+                 'post_merge': packet, 'case': name}
+        recorded = q.validate_attribution(occurrence, entry, self.root)
+        self.assertEqual('NOT_INTRODUCED', recorded['attribution'])
+        # Merge re-validates the stored attribution itself; the case must survive recording.
+        self.assertIsNone(q.attribution_block([{**occurrence, 'attribution': recorded}], self.root))
+        with self.assertRaisesRegex(ValueError, 'single failed case'):
+            q.validate_attribution({**occurrence, 'detail': detail + 'FAIL other case\n'}, entry, self.root)
+        with self.assertRaisesRegex(ValueError, 'no quarantine marker'):
+            q.validate_attribution({**occurrence, 'detail': 'FAIL other case\n'},
+                                   {**entry, 'case': 'other case'}, self.root)
 
     def test_catalog_marker_backs_a_not_introduced_smoke_flake_and_bad_markers_are_refused(self):
         self.write_catalog()

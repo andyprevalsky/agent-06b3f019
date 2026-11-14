@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# One-line /descend steps (.claude/commands/descend.md → Process). `scripts/descend --help` lists them.
+set -euo pipefail
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+exec python3 "$ROOT_DIR/scripts/descend_cli.py" "$@"

@@ -235,7 +235,16 @@ async def _mint_purchase_card_real(user_id: str, payload: Dict[str, Any]) -> Dic
         _archive_json(
             root_agent_id=archive_root_agent_id,
             path=f"provider/payment/mint/{body['fingerprint']}.json.gz.enc",
-            payload={"request": body, "response": result},
+            payload={
+                "request": body,
+                # Keep only receipt evidence. Checkout credentials remain in the returned
+                # result for the trusted worker, never in the durable trace archive.
+                "response": {
+                    key: result[key]
+                    for key in ("purchaseId", "cardId", "expiry", "last4", "status")
+                    if key in result
+                },
+            },
         )
         return result
 

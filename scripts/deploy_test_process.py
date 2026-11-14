@@ -45,9 +45,9 @@ def scan_same_user_processes(inspect, refuse, grace=2.0):
         units = systemd_cgroups(process / 'cgroup')
         return bool(units) and not units & own_cgroups and all(unit.endswith(manager_scope) for unit in units)
 
-    def terminated(process):
-        # A zombie (Z) or dead (X) entry has exited: it has no memory or environment left, so its
-        # environ/cwd read EACCES even for a dumpable child, until its parent reaps it.
+    def zombie(process):
+        # An exited, unreaped child reports EACCES for environ/cwd exactly like a non-dumpable process,
+        # but it can never execute again; /proc/<pid>/stat stays readable and names its state.
         return (process / 'stat').read_text().rsplit(') ', 1)[1].split()[0] in ('Z', 'X')
 
     def foreign(process):
@@ -70,7 +70,7 @@ def scan_same_user_processes(inspect, refuse, grace=2.0):
             except PermissionError:
                 unreadable = True
                 try:
-                    if terminated(process) or foreign(process) or service_manager(process):
+                    if zombie(process) or foreign(process) or service_manager(process):
                         break
                 except (FileNotFoundError, ProcessLookupError):
                     break

@@ -26,6 +26,7 @@ Usage:
   scripts/select_affected_tests.py --base A --head B     # a commit range
   scripts/select_affected_tests.py --changed-file path   # explicit list
   scripts/select_affected_tests.py --check               # mapping self-check
+  scripts/select_affected_tests.py --lanes-for <test>    # /deploy lanes that run it; exit 1 if none
   scripts/select_affected_tests.py --stability           # new/changed test cases: 5 consecutive runs under CPU load
   ... --format json|report|lane:<name>
 """
@@ -92,6 +93,14 @@ LIVE_SERVER_RE = re.compile(r"BASE_URL|BACKEND_URL|fetch\(|http://|localhost|sta
 
 
 # ---------------------------------------------------------------- lanes ---
+
+# Deploy structural gates whose runner discovers its suites with its own glob
+# (repository-relative here); scripts/tests/select-affected-tests.test.py
+# checks each glob still appears in that runner.
+RUNNER_GLOBS = {
+    "agents-structural": ("scripts/tests/agents-structural.test.sh", "agents/tests/structural/structural*.py"),
+}
+
 
 @dataclass
 class Unit:
@@ -251,6 +260,8 @@ def discover_lanes() -> dict[str, Lane]:
                 roots.append(normalized)
             elif normalized in src().dirs:
                 roots.extend(path for path in src().files if path.startswith(normalized + "/"))
+        if name in RUNNER_GLOBS and RUNNER_GLOBS[name][0] in roots:
+            roots.extend(path for path in _glob(RUNNER_GLOBS[name][1]) if path not in roots)
         lanes["deploy-structural-gates"].units.append(Unit("deploy-structural-gates", name, roots))
     gate = "scripts/run-cloudbench-controller-gate"
     if gate in src().fileset:
@@ -1956,6 +1967,41 @@ def self_check(selector: Selector) -> list[str]:
     return problems
 
 
+def units_running(lanes: dict[str, Lane], rel: str) -> list[Unit]:
+    """Lane units that execute ``rel``: it is one of the files the unit's runner runs.
+
+    Only registration counts. A unit that merely imports, reads or scans the
+    file can select it for a change, but does not run it as a test.
+    """
+    return [unit for lane in lanes.values() for unit in lane.units if rel in unit.roots]
+
+
+def report_lanes_for(paths: list[str]) -> int:
+    """Print the /deploy lane units that run each test file.
+
+    Exit 0 when every file is run by at least one lane, 1 when one is not,
+    2 when a path is not a file in the mapped tree.
+    """
+    lanes = discover_lanes()
+    status = 0
+    for path in paths:
+        absolute = Path(path).resolve()
+        rel = absolute.relative_to(ROOT).as_posix() if absolute.is_relative_to(ROOT) else ""
+        if rel not in src().fileset:
+            rel = os.path.normpath(path)  # repository-relative from another directory
+        if rel not in src().fileset:
+            print(f"{rel}: not a file in this tree (tracked or untracked, not ignored)")
+            status = max(status, 2)
+            continue
+        units = units_running(lanes, rel)
+        if not units:
+            print(f"{rel}: NOT RUN by any /deploy lane; register it with a lane runner "
+                  "(scripts/tests suites: a Gate in scripts/run-deploy-structural-gates.py)")
+            status = max(status, 1)
+            continue
+        for unit in units:
+            print(f"{rel}: {unit.lane} {unit.name}")
+    return status
 def _terminate(_signum: int, _frame: object) -> None:
     raise SystemExit(143)
 
@@ -1969,6 +2015,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--format", default="report")
     parser.add_argument("--check", action="store_true")
     parser.add_argument("--rev", help="map the tree of this revision instead of the worktree (history replay)")
+    parser.add_argument(
+        "--lanes-for", action="append", default=[], metavar="TEST_FILE",
+        help="print the /deploy lane units that run TEST_FILE (repeatable); exit 1 when one runs in no lane",
+    )
     parser.add_argument("--stability", action="store_true",
                         help="run every added/changed test case (or its whole unit) --stability-runs consecutive times under CPU load")
     parser.add_argument("--stability-runs", type=int, default=STABILITY_RUNS)
@@ -2028,6 +2078,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.rev:
         global SRC
         SRC = Source(args.rev)
+    if args.lanes_for:
+        return report_lanes_for(args.lanes_for)
     selector = Selector()
     if args.check:
         problems = self_check(selector)

@@ -12,6 +12,7 @@ import sys
 import builtins
 import contextlib
 import io
+import re
 import json
 import runpy
 from unittest.mock import patch
@@ -239,6 +240,78 @@ def check_extraction_precision(selector: sat.Selector) -> None:
                   f"edges.json: {sample} still selects the {len(expected)} unit(s) reading {target}")
 
 
+def check_worker_provider_gate_reachability(selector: sat.Selector) -> None:
+    owners = {
+        "cloudbench-provider-contract": "scripts/tests/cloudbench-provider-contract.test.py",
+        "worker-pool-cutover": "scripts/tests/worker-pool-cutover.test.py",
+        "retained-agent-machine": "scripts/tests/retained-agent-machine.test.py",
+    }
+    units = {unit.name: unit for unit in selector.lanes["deploy-structural-gates"].units}
+    for name, root in owners.items():
+        check(name in units and units[name].roots == [root],
+              f"provider/worker owning suite is a discovered deploy unit: {name}")
+        check(name in selector.select([root]).selected["deploy-structural-gates"],
+              f"provider/worker owning test selects its recurring gate: {name}")
+    for path, expected in (
+        ("scripts/run-bench-cloud", {"cloudbench-provider-contract"}),
+        ("scripts/worker_pool_runtime.py", {"cloudbench-provider-contract", "worker-pool-cutover"}),
+        ("scripts/retained_agent_machine.py", {"worker-pool-cutover", "retained-agent-machine"}),
+    ):
+        selected = selector.select([path]).selected["deploy-structural-gates"]
+        reached = selector.upstream({path}, package_scans=False)
+        direct = {unit.name for node in reached for unit in selector.root_units.get(node, [])
+                  if unit.lane == "deploy-structural-gates"}
+        check(expected <= selected and expected <= direct,
+              f"actual dependency edges retain owning provider/worker gates for {path}")
+
+
+def lanes_for(*paths: str) -> tuple[int, str]:
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        code = sat.main([arg for path in paths for arg in ("--lanes-for", path)])
+    return code, out.getvalue()
+
+
+def check_lanes_for() -> None:
+    """`--lanes-for` answers from lane registration, never from reachability."""
+    files = sat.src().files
+    gate = "scripts/tests/select-affected-tests.test.py"
+    code, out = lanes_for(gate)
+    check(code == 0 and "deploy-structural-gates select-affected-tests" in out,
+          f"--lanes-for: a registered deploy structural gate exits 0 and names its gate ({out.strip()})")
+    for pattern, lane in (("back-end/src/tests/blackbox/*.blackbox.ts", "backend-blackbox"),
+                          ("agents/tests/blackbox/*.blackbox.py", "agents-blackbox")):
+        sample = sat.src().glob(pattern)[0]
+        code, out = lanes_for(sample)
+        check(code == 0 and f": {lane} " in out, f"--lanes-for: {lane} file {sample} exits 0 ({out.strip()})")
+    code, out = lanes_for(str(sat.ROOT / gate))
+    check(code == 0, "--lanes-for: an absolute path resolves to the repository file")
+
+    # Suites run only by scripts/test.sh are not /deploy coverage.
+    runner_only = [
+        path for path in re.findall(r"^run_suite [^\n]*?\b(?:bash|python3) (scripts/tests/\S+)", sat.src().read("scripts/test.sh"), re.M)
+        if path in sat.src().fileset and not sat.units_running(sat.discover_lanes(), path)
+    ]
+    for path in runner_only[:3]:
+        code, out = lanes_for(path)
+        check(code == 1 and "NOT RUN by any /deploy lane" in out, f"--lanes-for: {path} (scripts/test.sh only) exits 1")
+    probe = "scripts/tests/zz-unregistered-probe.test.sh"
+    with patch.object(sat.src(), "fileset", sat.src().fileset | {probe}):
+        code, out = lanes_for(probe, gate)
+    check(code == 1 and "NOT RUN by any /deploy lane" in out, "--lanes-for: an unregistered test exits 1, also beside a registered one")
+    # Negative control: the selector is imported by a registered gate (reachable), but no lane runs it.
+    code, out = lanes_for("scripts/select_affected_tests.py")
+    check(code == 1, "--lanes-for: a file a lane unit only imports or reads is not reported as run")
+    code, out = lanes_for("scripts/tests/zz-missing-probe.test.sh")
+    check(code == 2 and "not a file" in out, "--lanes-for: a missing path exits 2")
+
+    # Gate runners that discover suites by their own glob: the glob must still be in the runner.
+    for name, (runner, pattern) in sat.RUNNER_GLOBS.items():
+        text = sat.src().read(runner)
+        check(pattern in text or pattern.split("/", 1)[1] in text, f"RUNNER_GLOBS: {runner} still runs {pattern}")
+        suites = sat.src().glob(pattern)
+        check(bool(suites) and all(lanes_for(path)[1].count(f"deploy-structural-gates {name}") == 1 for path in suites),
+              f"--lanes-for: every {pattern} suite is run by gate {name} ({len(suites)} files)")
 def check_new_test_stability() -> None:
     """The five-consecutive-run rule for new tests: every run under owned CPU load."""
     import os
@@ -890,6 +963,7 @@ def check_stability_backend_lanes() -> None:
 def main() -> int:
     check_coverage_map_dependency_preflight()
     selector = sat.Selector()
+    check_worker_provider_gate_reachability(selector)
 
     problems = sat.self_check(selector)
     for problem in problems[:50]:
@@ -948,6 +1022,7 @@ def main() -> int:
     check(sel.all_lanes, "changing the selector itself runs everything")
 
     check_extraction_precision(selector)
+    check_lanes_for()
     check_new_test_stability()
     check_stability_concurrency()
     check_stability_case_selection()

@@ -277,7 +277,7 @@ Per the 2026-10-20 goal ("make intelligent guesses; keep critical ones for revie
   - I1, I2, I6, I8 need a Mac app release (`MAC-APP-RELEASE`) and a real-Mac run of their suites.
 - Display HTML on usercontent (merged 47c77a5e6): new public route `GET /usercontent/display/<agentId>/<sha256>.html` (inline-view CSP, content-addressed, owner-scoped); `file_pointer.usercontent_url` on text/html display items.
 - Test infra (merged ff09676a2): blackbox and coverage runners use `victoria_<workspace>` on system Postgres, never the shared `victoria`. Instruction-file edit to approve:
-  - `CLAUDE.md` Cloud/Linux Database bullet: "`scripts/run.sh` falls back to it. The backend blackbox and coverage runners use their own `victoria_<workspace>` database on that server (created on demand), never the shared `victoria`."
+  - `CLAUDE.md` Cloud/Linux Database bullet (now the Database section's shared-`victoria` bullet): "`scripts/run.sh` falls back to it. The backend blackbox and coverage runners use their own `victoria_<workspace>` database on that server (created on demand), never the shared `victoria`."
 - Backend asks from the UI thread (merged): `USER_UI_ACTIVE_CHANGED` broadcast; `githubConnected` on Projects (63566611b); `a2a.text` (ea93d584b). No Zod changes.
 - W5b (C1–C5, C11, C13, C15; merged f78bf8aa8):
   - Prompt `CODE_AGENT_INSTRUCTIONS_VERSION` = `2026-10-20.code-agent-rose-ui-kit-branch.v6`:

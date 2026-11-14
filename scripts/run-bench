@@ -431,7 +431,9 @@ Wide runs (sharded controllers):
   inventory are discovered; a snapshot not produced for this exact HEAD (or
   expiring before the deadline) is refreshed first via the normal producer.
   Supported options: -k K, --timeout S (default: longest selected task; at most 7200), --ref <HEAD>,
-  --e2e-timeout S. Every routed launch runs --check first.
+  --e2e-timeout S. Every routed launch runs --check first. A --concurrency below
+  the copy count but above the bound is refused: omit it for one sharded run,
+  or pass at most 32 for a rolling campaign on one controller.
   --check             Dry run: local checks plus read-only provider preflight,
                       reporting the warm snapshot reuse/refresh decision.
   Wide runs admit every task the ordinary fleet runs, SIM/DEMO included.
@@ -477,8 +479,9 @@ Monitoring:
   report-format retrieves that same contract without starting services or tasks.
   Every launch also prints its exact `scripts/run-bench scorecard <run-dir> --html <file>`
   command. Publish that CLI-rendered card; hand-written cards are non-compliant.
-  Every launch prints its exact monitoring handle. Poll every 30 seconds,
-  checking terminal lifecycle on every observation, including stale cards.
+  Every launch prints its exact monitoring handle. Poll it on CLAUDE.md's
+  background-task cadence, checking terminal lifecycle on every observation,
+  including stale cards.
   Controller status is separate from task PASS/FAIL; retain genuine task FAIL.
   Retry transient observations with the original owner; preserve actual fatal
   status. Observe required terminal publication and exact browser/provider/local
@@ -487,6 +490,9 @@ Monitoring:
   or catastrophe, verify birth and stop only the exact owner through cleanup.
   For a dead original owner with retained resources, use:
     scripts/run-bench --recover-stale-owner <exact-token>
+  If recovery refuses only because runtime evidence is incomplete and every owned
+  Machine is already destroyed and every volume pending_destroy/destroyed, add
+  --accept-lost-runtime-evidence to record the evidence as LOST and finish release.
   Keep original receipts; interruption/recovery never grants acceptance credit.
   The documented cached 50-copy diagnostic alone uses execution 300s and hard 1200s
   allocation-to-full-release per copy; retain its original native/claim clock,
@@ -577,7 +583,7 @@ while [ "$#" -gt 0 ]; do
             INTERNAL_OPERATION=1
             FLEET_ARGS+=("$1" "$2"); shift 2
             ;;
-        --qualify-worker|--keep-clones|--reuse-pool-only|--cold-primary-bootstrap|--foreground|--wait|--detach|--infra-probe|--skip-autoscaler|--strict-barrier|--fresh-volumes|--snapshot-volumes)
+        --accept-lost-runtime-evidence|--qualify-worker|--keep-clones|--reuse-pool-only|--cold-primary-bootstrap|--foreground|--wait|--detach|--infra-probe|--skip-autoscaler|--strict-barrier|--fresh-volumes|--snapshot-volumes)
             FLEET_ARGS+=("$1"); shift
             ;;
         -h|--help)
@@ -761,14 +767,22 @@ print(c["copy_bound"](p["vcpus"],p["memory_mib"]))' "$ROOT_DIR/scripts/cloudbenc
         exit 2
     fi
 fi
+# The operator admits every copy at once behind one barrier; it has no rolling
+# admission width. A rolling window wider than one controller's bound is not a
+# supported shape on any route, so refuse it instead of silently handing it to
+# campaign controllers with a different batch shape and source transport.
+if [ -n "$SHARDED_ROUTE_REASON" ] && [ "$CONCURRENCY_EXPLICIT" -eq 1 ] && [ "$CONCURRENCY" -lt "$sharded_copies" ]; then
+    echo "❌ --concurrency $CONCURRENCY: $SHARDED_ROUTE_REASON, and the sharded operator admits all $sharded_copies copies behind one barrier. Supported: omit --concurrency (or pass $sharded_copies) for one sharded run, or --concurrency $SHARDED_BOUND or less for a rolling campaign on one controller" >&2
+    exit 2
+fi
 # Auto routing keeps an explicitly requested ordinary-fleet option working:
 # a request the operator would refuse falls back to the ordinary fleet path
-# with one warning. RUN_BENCH_SHARDED_ROUTE=always keeps the strict refusal.
+# (campaign controllers for campaign flags) with one warning.
+# RUN_BENCH_SHARDED_ROUTE=always keeps the strict refusal.
 sharded_refused_option() {
     [ "$DEMO_CACHE_PROBE" -eq 0 ] || { echo --demo-cache; return; }
     [ "$STRESS_DEFAULTS" -eq 0 ] || { echo --stress-defaults; return; }
     if [ "$RETRY_INFRA_EXPLICIT" -eq 1 ] && [ "$RETRY_INFRA" != 1 ]; then echo --retry-infra; return; fi
-    if [ "$CONCURRENCY_EXPLICIT" -eq 1 ] && [ "$CONCURRENCY" -lt "$sharded_copies" ]; then echo --concurrency; return; fi
     set -- "${FLEET_ARGS[@]}"
     while [ "$#" -gt 0 ]; do
         case "$1" in
@@ -789,7 +803,9 @@ if [ -n "$SHARDED_ROUTE_REASON" ] && [ "$SHARDED_CHECK" -eq 0 ] &&
     [ "${RUN_BENCH_SHARDED_ROUTE:-auto}" = auto ]; then
     SHARDED_REFUSED_OPTION="$(sharded_refused_option)"
     if [ -n "$SHARDED_REFUSED_OPTION" ]; then
-        echo "⚠️  $SHARDED_ROUTE_REASON, but $SHARDED_REFUSED_OPTION is not a sharded operator option; using the ordinary fleet path (RUN_BENCH_SHARDED_ROUTE=always refuses instead)" >&2
+        fallback_route="the ordinary fleet path"
+        [ "$CAMPAIGN_REQUESTED" -eq 0 ] || fallback_route="campaign controllers"
+        echo "⚠️  $SHARDED_ROUTE_REASON, but $SHARDED_REFUSED_OPTION is not a sharded operator option; using $fallback_route (RUN_BENCH_SHARDED_ROUTE=always refuses instead)" >&2
         SHARDED_ROUTE_REASON=""
     fi
 fi
@@ -801,10 +817,6 @@ if [ -n "$SHARDED_ROUTE_REASON" ]; then
     }
     if [ "$RETRY_INFRA_EXPLICIT" -eq 1 ] && [ "$RETRY_INFRA" != 1 ]; then
         echo "❌ the sharded operator retries each infrastructure failure exactly once; omit --retry-infra or pass 1" >&2
-        exit 2
-    fi
-    if [ "$CONCURRENCY_EXPLICIT" -eq 1 ] && [ "$CONCURRENCY" -lt "$sharded_copies" ]; then
-        echo "❌ the sharded operator admits all $sharded_copies copies behind one barrier; omit --concurrency or pass $sharded_copies" >&2
         exit 2
     fi
     SHARDED_TIMEOUT="$SELECTED_MAX_TIMEOUT"

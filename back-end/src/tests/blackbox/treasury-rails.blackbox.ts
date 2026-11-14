@@ -51,6 +51,7 @@ import {
   recordPendingMint,
   observePendingUnusedMint,
 } from './treasury-rails-pending-mints';
+import { quarantine } from '../helpers/quarantine';
 
 loadDotenvWithCallerOverrides();
 
@@ -454,23 +455,38 @@ async function main(): Promise<void> {
   console.log('\ntreasury-rails blackbox: all checks passed');
 }
 
-void main().catch((error: unknown) => {
-  const message = error instanceof Error ? error.message : String(error);
-  // Mid-flight AgentCard org OAuth/token outages (after the initial wallet probe) are the same
-  // credential-infra precondition as a failed first call — soft-skip rather than fail the gate.
-  if (
-    /temporarily unavailable|service unavailable/i.test(message) ||
-    /invalid or expired organization token/i.test(message) ||
-    /could not obtain an agentcard organization mcp access token/i.test(message) ||
-    /timed out acquiring an agentcard organization mcp access token/i.test(message) ||
-    /could not reach the agentcard organization mcp token endpoint/i.test(message) ||
-    /aborted due to timeout|operation was aborted/i.test(message)
-  ) {
-    console.log(
-      'SKIP treasury-rails: AgentCard sandbox MCP unavailable mid-run (credential-infra precondition)'
-    );
-    process.exit(0);
-  }
-  console.error(`treasury-rails blackbox FAILED: ${message}`);
-  process.exit(1);
-});
+const treasuryUnit = 'treasury-rails';
+void quarantine(
+  {
+    since: '2026-11-13',
+    repair: 'pending-handoff:1dc793d7777246c785e8d24beb75499a',
+    error:
+      'treasury-rails blackbox FAILED: AgentCard Organization MCP rate limit exhausted for list_transfers after 5 attempts; upstream: AgentCard Organization MCP list_transfers is rate limited: list_transfers failed: Too many requests, please try again later',
+    evidence: '.context/deploy-pipeline/rca/1dc793d7777246c785e8d24beb75499a.json',
+  },
+  async () => {
+    try {
+      await main();
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error);
+      // Mid-flight AgentCard org OAuth/token outages (after the initial wallet probe) are the same
+      // credential-infra precondition as a failed first call — soft-skip rather than fail the gate.
+      if (
+        /temporarily unavailable|service unavailable/i.test(message) ||
+        /invalid or expired organization token/i.test(message) ||
+        /could not obtain an agentcard organization mcp access token/i.test(message) ||
+        /timed out acquiring an agentcard organization mcp access token/i.test(message) ||
+        /could not reach the agentcard organization mcp token endpoint/i.test(message) ||
+        /aborted due to timeout|operation was aborted/i.test(message)
+      ) {
+        console.log(
+          'SKIP treasury-rails: AgentCard sandbox MCP unavailable mid-run (credential-infra precondition)'
+        );
+        return;
+      }
+      console.error(`treasury-rails blackbox FAILED: ${message}`);
+      throw error;
+    }
+  },
+  { unit: treasuryUnit }
+)();

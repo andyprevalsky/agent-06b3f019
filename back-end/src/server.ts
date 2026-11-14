@@ -80,6 +80,7 @@ import plannerMemoryRouter from './domains/planner-memory/routes';
 import userUiRouter, { usercontentRouter } from './domains/user-ui/routes';
 import agentToolsRouter, { agentQuestionsRouter } from './domains/agent-tools/routes';
 import projectsRouter from './domains/projects/routes';
+import foldersRouter from './domains/projects/routes.topFolders';
 import teamsRouter from './domains/teams/routes';
 import * as teamsService from './domains/teams/service';
 import { registerTeamAccess } from './providers/teamAccess';
@@ -558,6 +559,7 @@ app.use('/api/planner-memory', plannerMemoryRouter); // Planner memory history t
 app.use('/api/user-ui', userUiRouter); // Per-user rose_user_ui versions (publish/activate/active)
 app.use('/api/agent-tools', agentToolsRouter); // display / messages / approvals for agents + code-agent sandboxes
 app.use('/api/projects', projectsRouter); // Owner-scoped Projects: settings, env files, codebase sync
+app.use('/api/folders', foldersRouter); // Folders: user-facing alias of Projects (no repo)
 app.use('/api/teams', teamsRouter);
 app.use('/api/world-models', worldModelsRouter); // WMH-compatible simulation runtime shim
 // Anthropic tee-proxy for the code agent. Mounted OUTSIDE /api so the injected

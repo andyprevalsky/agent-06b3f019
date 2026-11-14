@@ -274,6 +274,23 @@ async function main(): Promise<void> {
     assert.equal(await repo.findPurchaseByCardId('missing-card'), null);
   });
 
+  await test('findPurchaseByCardId scopes ownership before ordering shared card purchases', async () => {
+    const owner = await seedUser();
+    const other = await seedUser();
+    const cardId = `card-shared-owners-${randomUUID()}`;
+    await seedPurchase(owner, { cardId, createdAt: new Date(Date.now() - 120_000) });
+    const ownId = await seedPurchase(owner, { cardId, createdAt: new Date(Date.now() - 60_000) });
+    const otherId = await seedPurchase(other, { cardId });
+    assert.equal((await repo.findPurchaseByCardId(cardId, owner))?.id, ownId);
+    assert.equal((await repo.findPurchaseByCardId(cardId, other))?.id, otherId);
+    assert.equal(await repo.findPurchaseByCardId(cardId, 'not-an-owner'), null);
+    assert.equal(
+      (await repo.findPurchaseByCardId(cardId))?.id,
+      otherId,
+      'trusted reconciliation retains the unscoped provider-card lookup'
+    );
+  });
+
   await test('findHeldPurchasesByTotal returns HELD carded rows and respects the limit', async () => {
     const userId = await seedUser();
     const totalCents = 3300 + Math.floor(Math.random() * 1000);

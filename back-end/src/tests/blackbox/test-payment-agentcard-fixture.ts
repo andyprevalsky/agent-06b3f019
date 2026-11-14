@@ -1,4 +1,4 @@
-import { startOrgCardholderOnboarding } from '../../providers/agentcard/org-onboarding';
+import { getV2ConnectedUserId } from '../../providers/agentcard/store';
 import { prisma } from '../../providers/database';
 
 function assert(condition: boolean, message: string): asserts condition {
@@ -21,23 +21,7 @@ export async function assertBenchmarkAgentCardResetFixture(userId: string): Prom
     !Array.isArray(integration.config)
       ? (integration.config as Record<string, unknown>)
       : {};
-  const expectedSessionId = `benchmark-agentcard-onboarding-${userId}`;
-  const expectedSetupUrl = 'https://example.invalid/agentcard/benchmark-onboarding';
-  assert(config.orgManaged === true, 'expected org-managed reset fixture');
-  assert(
-    config.onboardingSessionId === expectedSessionId,
-    'expected deterministic benchmark session'
-  );
-  assert(
-    config.onboardingSetupUrl === expectedSetupUrl,
-    'expected non-routable benchmark setup URL'
-  );
-
-  const onboarding = await startOrgCardholderOnboarding(userId, {
-    callOrgTool: async () => {
-      throw new Error('benchmark reset must not call the real onboarding provider');
-    },
-  });
-  assert(onboarding.sessionId === expectedSessionId, 'expected the seeded session to be reused');
-  assert(onboarding.setupUrl === expectedSetupUrl, 'expected the seeded setup URL to be reused');
+  assert(typeof config.v2UserId === 'string', 'reset must retain the exclusive provider identity');
+  assert(config.onboardingSessionId === undefined, 'reset must not manufacture an MCP session');
+  assert((await getV2ConnectedUserId(userId)) === undefined, 'reset must require connection again');
 }

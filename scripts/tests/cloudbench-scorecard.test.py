@@ -265,6 +265,29 @@ class Scorecard(unittest.TestCase):
         self.assertEqual(CARD["validate_html"](document), [])
         return document
 
+    def test_history_infra_uses_scheduled_jobs_not_scored_attempts(self):
+        cases = [(11, 1, 1, 0, 0, 0, False, "INFRA 0/11"),
+                 (1, 1, 1, 0, 0, 0, False, "INFRA 0/1"),
+                 (11, 0, 0, 0, 0, 0, False, "NO TERMINAL ATTEMPTS"),
+                 (11, 1, 1, 0, 0, 10, False, "INFRA 0/11"),
+                 (11, 1, 3, 2, 1, 8, False, "INFRA 1/11"),
+                 (None, 1, 1, 0, None, 0, False, "INFRA UNMEASURED"),
+                 (11, 1, 1, 0, 0, 10, True, "INFRA UNRECONCILED")]
+        for total, scored, attempts, infra_attempts, jobs, cancelled, unknown, expected in cases:
+            with self.subTest(total=total, attempts=attempts, cancelled=cancelled, unknown=unknown):
+                data = render(self.f.fleet(), self.f)
+                row = data["history"][0]
+                row.update(scheduled_total=total, scored=scored, terminal_attempts=attempts,
+                           infra_attempts=infra_attempts, infra_jobs=jobs,
+                           infra_unreconciled=unknown)
+                row["outcomes"].update(PASS=1 if scored else 0, CANCELLED=cancelled)
+                document = self.valid(data)
+                history = re.search(r'<section data-section="history">(.*?)</section>', document, re.S).group(1)
+                self.assertIn(expected, history)
+                self.assertIn(expected, CARD["render_text"](data).split("LAST 3 EXPERIMENTS", 1)[1])
+                self.assertEqual(row["scheduled_total"], total)
+                self.assertEqual(row["outcomes"]["CANCELLED"], cancelled)
+
     def test_fleet_golden_and_html(self):
         data = render(self.f.fleet(), self.f)
         self.golden("fleet", CARD["render_text"](data))
@@ -1006,6 +1029,100 @@ class Scorecard(unittest.TestCase):
         self.assertTrue(text.stdout.startswith("🧪 EXPERIMENT #1"), text.stdout[:200])
 
 
+class LocalWorldsScorecard(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="local-worlds-card-"))
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.parent = self.tmp / ".context/benchmarks/native-worlds"
+
+    def fixture(self):
+        rows = []
+        for i in range(11):
+            context = self.parent.parent / f"{self.parent.name}-{i}"
+            name = f"case-{i}"
+            result = {"run_id":f"canonical-{i}", "tasks":[{"name":name,"passed":True,"status":"COMPLETED","benchmark_status":"PASSED","agent_id":f"00000000-0000-4000-8000-{i:012d}","duration_seconds":10.0,"cost_cents":2.0}]}
+            target = write(context / "canonical.json", result)
+            write(context / "run.json", target.read_text())
+            import hashlib
+            write(context / "local-benchmark-results.json", {"version":1,"run_id":context.name,"results":[{"path":str(target),"sha256":hashlib.sha256(target.read_bytes()).hexdigest()}]})
+            write(context / "report-card.json", {"run_id":result["run_id"],"source_sha":"a"*40,"started_at":T0,"finished_at":T0+10,"tasks":{"total":1},"per_task":[dict(task(name,"passed"),agent_id=result["tasks"][0]["agent_id"])]})
+            write(context / "local-stack-owner.json", {"run_id":context.name,"token":"stack"})
+            write(context / "local-benchmark-owner.json", {"run_id":context.name,"token":"bench","state":"cleanup_verified"})
+            write(context / "local-stack-cleanup.status", "version=2\ntoken=stack\nstate=clean\n")
+            write(context / "benchmark-cleanup-bench.status", "version=1\ntoken=bench\nstate=clean\n")
+            rows.append({"ordinal":i,"task":name,"run_id":context.name,"context_dir":str(context),"status":"passed","exit_code":0,"results":[str(target)]})
+        journal={"version":1,"run_id":self.parent.name,"status":"passed","tasks":rows,"stop_signal":None}
+        write(self.parent / "local-worlds.json",journal)
+        return journal
+
+    def test_completed_eleven_worlds_uses_exact_canonical_results(self):
+        self.fixture();exp=CARD["load"](self.parent)
+        self.assertEqual(exp["outcomes"]["PASS"] if exp["outcomes"] else None,11,"native11PASSED worlds loaded as UNRECORDED")
+        self.assertEqual((exp["state"],exp["scheduled_total"]),("COMPLETE",11))
+        self.assertIsNone(exp["triggered_at"]);self.assertIsNone(exp["ended_at"],"journal has no parent producer clock")
+        self.assertEqual(exp["source_ref"],"a"*40)
+
+    def test_error_and_ten_never_started_cancellations_ignore_stale_pass_card(self):
+        journal=self.fixture();journal["status"]="failed";journal["stop_signal"]=15
+        row=journal["tasks"][0];row.update(status="failed-retained",exit_code=1,error="child benchmark cleanup remains unverified")
+        context=Path(row["context_dir"]);result=json.loads((context/"run.json").read_text());result["tasks"][0].update(passed=False,benchmark_status="ERROR",failure_reason="Cloud cleanup failed: ownership not established")
+        write(context/"run.json",result);(context/"local-benchmark-results.json").unlink()
+        for row in journal["tasks"][1:]:row["status"]="cancelled-before-start"
+        write(self.parent/"local-worlds.json",journal);exp=CARD["load"](self.parent)
+        self.assertEqual((exp["outcomes"]["PASS"],exp["outcomes"]["UNKNOWN"],exp["outcomes"]["CANCELLED"]),(0,1,10))
+        self.assertEqual(exp["state"],"FAILED");self.assertEqual(exp["scheduled_total"],11)
+        for field,category in (("infra_failure","INFRA"),("harness_failure","HARNESS")):
+            result["tasks"][0].pop("infra_failure",None);result["tasks"][0].pop("harness_failure",None)
+            result["tasks"][0][field]=True;write(context/"run.json",result)
+            self.assertEqual(CARD["load"](self.parent)["outcomes"][category],1)
+
+    def test_running_and_queued_do_not_consume_stale_child_results(self):
+        journal=self.fixture();journal["status"]="running"
+        for i,row in enumerate(journal["tasks"]):row["status"]="running" if i==0 else "queued"
+        write(self.parent/"local-worlds.json",journal);exp=CARD["load"](self.parent)
+        self.assertEqual((exp["state"],exp["progress"]["in_progress"],exp["progress"]["queued"]),("RUNNING",1,10))
+        self.assertEqual(exp["outcomes"]["PASS"],0)
+
+    def test_foreign_or_malformed_child_custody_never_passes(self):
+        for corruption in ("context","index","hash","task","copy","pointer"):
+            with self.subTest(corruption=corruption):
+                journal=self.fixture();row=journal["tasks"][0];context=Path(row["context_dir"]);index=json.loads((context/"local-benchmark-results.json").read_text())
+                if corruption=="context":row["context_dir"]=journal["tasks"][1]["context_dir"]
+                elif corruption=="index":index["run_id"]="foreign-world"
+                elif corruption=="hash":index["results"][0]["sha256"]="0"*64
+                elif corruption=="task":
+                    result=json.loads((context/"canonical.json").read_text());result["tasks"][0]["name"]="foreign-task";write(context/"canonical.json",result)
+                elif corruption=="copy":write(context/"run.json",{"run_id":"foreign-copy","tasks":[]})
+                else:row["results"]=[str(context/"foreign.json")]
+                write(context/"local-benchmark-results.json",index);write(self.parent/"local-worlds.json",journal)
+                exp=CARD["load"](self.parent);self.assertEqual(exp["outcomes"]["PASS"],10);self.assertNotEqual(exp["state"],"COMPLETE")
+
+    def test_false_or_nonboolean_pass_cannot_use_a_positive_verdict(self):
+        import hashlib
+        for flag in (False, None, "true", 1):
+            for phase in ("failed", "failed-retained"):
+                for indexed in (False, True):
+                    with self.subTest(flag=flag,phase=phase,indexed=indexed):
+                        journal=self.fixture();row=journal["tasks"][0];row.update(status=phase,exit_code=1)
+                        journal["status"]="failed";context=Path(row["context_dir"])
+                        result=json.loads((context/"canonical.json").read_text());result["tasks"][0].update(passed=flag,benchmark_status="PASSED")
+                        target=write(context/"canonical.json",result);write(context/"run.json",target.read_text())
+                        if indexed:
+                            index=json.loads((context/"local-benchmark-results.json").read_text());index["results"][0]["sha256"]=hashlib.sha256(target.read_bytes()).hexdigest();write(context/"local-benchmark-results.json",index)
+                        else:(context/"local-benchmark-results.json").unlink()
+                        write(self.parent/"local-worlds.json",journal);exp=CARD["load"](self.parent)
+                        self.assertEqual(exp["outcomes"]["PASS"],10,"inconsistent positive canonical verdict fabricated a child PASS")
+                        self.assertEqual(exp["outcomes"]["UNKNOWN"],1)
+                        self.assertEqual(exp["task_links"][0]["outcome"],"UNKNOWN")
+
+    def test_pass_without_index_or_cleanup_is_not_aggregate_complete(self):
+        journal=self.fixture();context=Path(journal["tasks"][0]["context_dir"])
+        (context/"local-benchmark-results.json").unlink();exp=CARD["load"](self.parent)
+        self.assertEqual(exp["outcomes"]["PASS"],10)
+        self.fixture();write(context/"local-stack-cleanup.status","version=2\ntoken=foreign\nstate=clean\n")
+        self.assertNotEqual(CARD["load"](self.parent)["state"],"COMPLETE")
+
+
 class NativeReleaseAuditOwnership(unittest.TestCase):
     """2026-10-19 polar70: three retained guests stayed started while the audit said released.
 
@@ -1127,15 +1244,15 @@ class LaunchInstructions(unittest.TestCase):
         text = printed.getvalue()
         for needle in ("scripts/run-bench scorecard /runs/abc --html /runs/abc/scorecard.html",
                        "dvb-onbox visuals publish --file /runs/abc/scorecard.html",
-                       "hand-written cards are non-compliant", "every 10 minutes", "state change", "completion"):
+                       "hand-written cards are non-compliant", "every 15 minutes", "state change", "completion"):
             self.assertIn(needle, text)
-        self.assertNotIn("every 15 minutes", text)
+        self.assertNotIn("every 10 minutes", text)
 
-    def test_report_cadence_does_not_change_token_rate_window(self):
+    def test_report_cadence_is_fifteen_minutes_with_the_token_rate_window(self):
         result = subprocess.run([str(ROOT / "scripts/run-bench"), "report-format"], capture_output=True, text=True, timeout=10)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("every fixed 10-minute checkpoint", result.stdout)
-        self.assertNotIn("every fixed 15-minute checkpoint", result.stdout)
+        self.assertIn("every fixed 15-minute checkpoint", result.stdout)
+        self.assertNotIn("10-minute checkpoint", result.stdout)
         self.assertIn("rolling 15-minute tokens/min", result.stdout)
         self.assertIn("15-minute tokens/min", result.stdout)
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Post-merge production verification as one command (`scripts/deploy production`).
 
-Ports the production lanes (DEPRECATED_deploy.md Steps 13-13c). Lane applicability comes from the merge commit's
+Ports the production lanes (the former /deploy skill Steps 13-13c). Lane applicability comes from the merge commit's
 own diff (`git diff --name-only <sha>^1 <sha>`, never the latest main). Every
 applicable lane runs concurrently once its dependencies pass; a failed lane
 never cancels another, and its dependents are recorded BLOCKED. Existing tools
