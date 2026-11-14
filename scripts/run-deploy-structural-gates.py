@@ -663,6 +663,10 @@ GATES = (
     ),
     Gate("cloudbench-staged-boot", ("python3", "scripts/tests/cloudbench-staged-boot.test.py")),
     Gate(
+        "cloudbench-runtime-evidence-collector",
+        ("python3", "scripts/tests/cloudbench-runtime-evidence-collector.test.py"),
+    ),
+    Gate(
         "cloudbench-prelaunch-cancel",
         ("python3", "scripts/tests/cloudbench-prelaunch-cancel.test.py"),
     ),
