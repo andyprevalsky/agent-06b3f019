@@ -820,6 +820,18 @@ class Cycle(unittest.TestCase):
             h.prepare_import(c.initialize(plan, self.root), donor, self.directory, self.root,
                              donor_sha256=self.donor_sha256)
         catalog.write_bytes(raw)
+        # PR #1865 (2026-11-14): a quarantine marker added or released after the original failure is
+        # gating metadata, not the task contract; the custody task still binds.
+        head = json.loads(original)['historical_custody_history'][0]['original_failure']['source']['head']
+        name = json.loads(original)['historical_custody_history'][0]['original_failure']['check'].split('/', 1)[1]
+        marked = json.loads(raw)
+        next(t for t in marked if t['name'] == name)['quarantine'] = dict(
+            since='2026-11-14', repair='pending-handoff:' + 'a' * 32, error='e', evidence='v')
+        c.write(catalog, marked)
+        try:
+            self.assertEqual(name, h.task_contract(self.root, head, name)['name'])
+        finally:
+            catalog.write_bytes(raw)
 
     def test_historical_import_cli_is_atomic_and_replay_revalidates(self):
         import contextlib, io
