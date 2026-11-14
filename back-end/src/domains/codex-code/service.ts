@@ -5,10 +5,10 @@ import {
   getClaudeCodeSession,
 } from '../../providers/e2b';
 import { checkGithubRepoAccess, ensureAgentTreeRepo } from '../../providers/github';
+import { resolveCodeSessionWorkspace } from '../../providers/githubRepos/resolve';
 import { GithubRateLimitedError } from '../../providers/githubRateLimit';
 import { createLogger } from '../../providers/logger';
 import { codexSpeedFor } from '../../providers/codexSpeed';
-import { resolveSessionProject } from '../../providers/projects/session';
 
 import { createWithCodeSession } from '../../providers/codeSessions/spawn';
 
@@ -87,6 +87,37 @@ async function resolveAgentProjectId(agentId: string): Promise<string | undefine
   return undefined;
 }
 
+/** The agent's persisted repo ref, else its tree root's (null on lookup failure). */
+async function resolveAgentRepoRef(agentId: string): Promise<string | null> {
+  try {
+    const agent = await repo.findAgentGithubInfo(agentId);
+    if (agent?.githubRepoRef !== undefined && agent.githubRepoRef !== null) {
+      return agent.githubRepoRef;
+    }
+    if (agent?.busId !== undefined && agent.busId !== null && agent.busId !== agentId) {
+      return (await repo.findRootAgentGithubInfo(agent.busId))?.githubRepoRef ?? null;
+    }
+  } catch (err) {
+    log.error('Failed to look up agent repo ref', {
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+  return null;
+}
+
+/**
+ * Project restore, unless a canonical repo ref (spawn's github_repo_ref or agent override)
+ * replaces it; then the repo's connected folder restores (its startup script, env files).
+ */
+async function sessionWorkspace(params: CreateSessionParams, userId: string) {
+  return resolveCodeSessionWorkspace(userId, {
+    githubRepoRef: params.github_repo_ref,
+    agentRepoRef: await resolveAgentRepoRef(params.agent_id),
+    projectId: await resolveAgentProjectId(params.agent_id),
+    requestedRepoUrl: params.github_repo_url,
+  });
+}
+
 export async function createSession(params: CreateSessionParams) {
   const { agent_id, goal, attachments, user_id } = params;
   if (!user_id) throw new MissingUserIdError();
@@ -95,10 +126,8 @@ export async function createSession(params: CreateSessionParams) {
   let effectiveUserId = user_id;
 
   // A project session restores the project's checkout; never also clone a repo.
-  const projectWorkspace = await resolveSessionProject(
-    effectiveUserId,
-    await resolveAgentProjectId(agent_id)
-  );
+  const { projectWorkspace, repoOverrideUrl } = await sessionWorkspace(params, effectiveUserId);
+  effectiveGithubRepoUrl = repoOverrideUrl ?? effectiveGithubRepoUrl;
   if (projectWorkspace !== null) effectiveGithubRepoUrl = undefined;
 
   if (
@@ -157,6 +186,10 @@ export async function createSession(params: CreateSessionParams) {
           memoryEnabled: params.memory_enabled,
           freshConversation: params.fresh_conversation === true,
           projectWorkspace,
+          taskName: params.task_name ?? null,
+          cliSettings: params.cli_settings ?? null,
+          resumeConfig: params.resume_config,
+          leaseOwner: params.lease_owner,
         },
         codeSession
       )

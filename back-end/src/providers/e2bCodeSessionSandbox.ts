@@ -30,12 +30,15 @@ import {
   heldSandboxSize,
   resolveSpawnSandbox,
   sameSize,
+  defaultSandboxSize,
   type SandboxProvider,
   type SandboxSize,
 } from './codeSessions/sandboxSize';
 import { e2bSandboxFs, localSandboxFs } from './codeSessions/sandboxFs';
 import { writeHandoffTrajectory, type SpawnCodeSession } from './codeSessions/usageLimit';
 import { createSandboxWithRetry } from './e2bSandboxCreate';
+import { withClaudeCodeCreateSlot } from './e2bCreateSlot';
+import { NATIVE_CLI_PATH, resolveNativeCliTemplate } from './nativeCliTemplateBuilder';
 import {
   codeSessionTurnToken,
   deliverUserTurnToCodeSession,
@@ -80,8 +83,11 @@ export interface CodeAgentSessionResult {
   startup?: { wsReadyMs: number; cloneMs: number | null };
 }
 
+export type { ClaudeCodeSessionOptions } from './codeSessionLaunchOptions';
+
 /** Sizing of a spawn (C16): the size it wants and the agent to attribute checkpoints to. */
 export interface SpawnSizing {
+  provider?: SandboxProvider;
   size?: SandboxSize;
   agentId?: string;
 }
@@ -104,7 +110,11 @@ export async function acquireCodeSessionSandbox(
   let session = codeSession;
   let replaced: Sandbox | null = null;
   if (session?.sandboxKind === 'e2b' && session.sandboxId !== null) {
-    const resumed = await connectPausedSandbox(session.sandboxId, SANDBOX_TIMEOUT_MS);
+    const sandboxId = session.sandboxId;
+    const resume = () => connectPausedSandbox(sandboxId, SANDBOX_TIMEOUT_MS);
+    const resumed = await (sizing.provider === 'claude'
+      ? withClaudeCodeCreateSlot(resume)
+      : resume());
     if (resumed !== null) {
       // The resumed sandbox may still run the paused CLI (E2B keeps memory and
       // processes): the spawn either attaches to it (attachLiveCodeCli) or
@@ -204,6 +214,17 @@ async function retireReplacedSandbox(
   }
 }
 
+/** Caller identity may supply a new spawn owner but never replace session authority. */
+export function codeSandboxUserId(
+  codeSession: CodeSessionRow | null,
+  userId?: string
+): string | undefined {
+  if (codeSession !== null && userId !== undefined && codeSession.userId !== userId) {
+    throw new Error('Code session does not belong to the spawning user');
+  }
+  return codeSession?.userId ?? userId;
+}
+
 /**
  * Acquire the sandbox for a spawn: resume the session's paused sandbox, else
  * create one (restoring the latest checkpoint). With a `provider`, the
@@ -220,6 +241,7 @@ export async function acquireCodeSandbox(
     provider?: SandboxProvider;
     projectSize?: unknown;
     agentId?: string;
+    userId?: string;
     /**
      * The session's project: its default size, and its published template
      * snapshot, which a BRAND-NEW session sandbox starts from.
@@ -235,6 +257,7 @@ export async function acquireCodeSandbox(
   /** The sandbox was created from the project's template snapshot. */
   fromSnapshot: boolean;
 }> {
+  const userId = codeSandboxUserId(codeSession, sizing.userId);
   const sized =
     sizing.provider !== undefined
       ? await resolveSpawnSandbox(
@@ -246,13 +269,24 @@ export async function acquireCodeSandbox(
   const spawnSizing: SpawnSizing = {
     ...(sized !== null ? { size: sized.size } : {}),
     agentId: sizing.agentId,
+    provider: sizing.provider,
   };
   const createOptions = {
     apiKey: process.env.E2B_API_KEY,
     timeoutMs: SANDBOX_TIMEOUT_MS,
-    envs,
+    envs: { ...envs, PATH: NATIVE_CLI_PATH },
     ...codeSessionCreateOptions(codeSession),
     ...(codeSession !== null ? { metadata: codeSessionSandboxMetadata(codeSession) } : {}),
+  };
+  // Resolve on the exact base image, including project snapshots, before reserving
+  // the runtime sandbox. Template builds have their own bounded creation slot.
+  const createWithNativeCli = async (baseTemplateId: string, size: SandboxSize) => {
+    const selectedTemplateId =
+      userId && sizing.provider
+        ? await resolveNativeCliTemplate(userId, sizing.provider, size, baseTemplateId)
+        : baseTemplateId;
+    const create = () => createSandboxWithRetry(selectedTemplateId, createOptions, label);
+    return sizing.provider === 'claude' ? withClaudeCodeCreateSlot(create) : create();
   };
   let fromSnapshot = false;
   const acquired = await acquireCodeSessionSandbox(
@@ -263,7 +297,10 @@ export async function acquireCodeSandbox(
       // snapshot; a lost sandbox being replaced or resized keeps the base path.
       if (snapshot !== null && (codeSession === null || codeSession.sandboxId === null)) {
         try {
-          const sandbox = await createSandboxWithRetry(snapshot.id, createOptions, label);
+          const sandbox = await createWithNativeCli(
+            snapshot.id,
+            snapshot.size ?? sized?.size ?? defaultSandboxSize()
+          );
           fromSnapshot = true;
           // The held size is the snapshot's: a later resume must not read it as a resize.
           if (snapshot.size !== null && spawnSizing.size !== undefined) {
@@ -283,7 +320,10 @@ export async function acquireCodeSandbox(
           `No ${label} sandbox template is built for ${sized.size.cpu} vCPU / ${sized.size.memoryGb} GB; configure E2B_SANDBOX_TEMPLATES for that size`
         );
       }
-      return createSandboxWithRetry(sized?.templateId ?? templateId, createOptions, label);
+      return createWithNativeCli(
+        sized?.templateId ?? templateId,
+        sized?.size ?? defaultSandboxSize()
+      );
     },
     spawnSizing
   );
@@ -307,12 +347,22 @@ export async function acquireCodeSandbox(
   };
 }
 
-/** Credential env a Claude Code CLI reads at start (claudeCodeSandboxAuth.ts + gateway base). */
+/**
+ * Env a running Claude Code CLI cannot adopt and must restart for: its
+ * credential (claudeCodeSandboxAuth.ts + gateway base) and its git commit
+ * identity (codeAgentGitIdentity.ts). A CLI started with another identity,
+ * or none (before the pushing account was injected), would keep committing
+ * as an author GitHub cannot link, which Vercel refuses to deploy.
+ */
 export const CLAUDE_CREDENTIAL_ENV_KEYS = [
   'ANTHROPIC_API_KEY',
   'ANTHROPIC_BASE_URL',
   'CLAUDE_CODE_CREDENTIALS',
   'CLAUDE_CODE_OAUTH_TOKEN',
+  'GIT_AUTHOR_EMAIL',
+  'GIT_AUTHOR_NAME',
+  'GIT_COMMITTER_EMAIL',
+  'GIT_COMMITTER_NAME',
 ] as const;
 
 /**
@@ -364,11 +414,20 @@ function spawnTurnId(codeSession: CodeSessionRow | null, taskId: string): string
  *   delivered / duplicate with `attached: true`
  *                         ─► attached: the in-flight turn, tools and background
  *                            processes continue; the goal is the CLI's next turn
+ *   queued (reason direct_hold) with `attached: true`
+ *                         ─► attached: the user is chatting with the CLI
+ *                            directly; the goal is its first turn after the
+ *                            hand back
+ *   relay_paused (a ws-server built before held attaches; the user holds the
+ *   CLI)                  ─► the live ws-server is NEVER stopped (that would
+ *                            end the user's chat and drop held turns): throws
+ *                            CodeSessionHeldError; the spawn's retry attaches
+ *                            after the hand back
  *   session_ended (stdin closed, CLI exited), credential_changed (the spawn
- *   leased another credential than the CLI holds), relay_paused (the user
- *   holds the CLI), unsupported_settings, unreachable, any other refusal, an
- *   ack without `attached` (a ws-server started before this support), or no
- *   previous task of this provider on the sandbox
+ *   leased another credential than the CLI holds), unsupported_settings,
+ *   unreachable, any other refusal, an ack without `attached` (a ws-server
+ *   started before this support), or no previous task of this provider on
+ *   the sandbox
  *                         ─► the stale ws-server is stopped; the caller starts
  *                            a new one (`--resume` of the conversation)
  *
@@ -396,6 +455,7 @@ export async function attachLiveCodeCli(
     if (live.attached) return live;
     reason = live.reason;
   } catch (error) {
+    if (error instanceof CodeSessionHeldError) throw error;
     // No turn token (BACKEND_API_KEY unset), a failed task lookup or delivery:
     // the restart path works without any of them, as before live attach.
     reason = `attach_error: ${error instanceof Error ? error.message : String(error)}`;
@@ -407,6 +467,20 @@ export async function attachLiveCodeCli(
   });
   await stopStaleWsServer(sandbox);
   return { attached: false, reason };
+}
+
+/**
+ * The user holds the live CLI in direct chat and its ws-server cannot hold an
+ * attaching spawn (an older build): the session must not be stopped, so the
+ * create fails retryably and the spawn attaches after the hand back.
+ */
+export class CodeSessionHeldError extends Error {
+  constructor() {
+    super(
+      'The user is chatting with this code session directly; the spawn attaches after they hand it back'
+    );
+    this.name = 'CodeSessionHeldError';
+  }
 }
 
 /** One attach attempt; throws on a missing token or a failed lookup (the caller restarts). */
@@ -447,7 +521,12 @@ async function deliverGoalToLiveCli(
       ),
     },
   });
-  const reached = delivery.status === 'delivered' || delivery.status === 'duplicate';
+  if (delivery.status === 'rejected' && delivery.reason === 'relay_paused') {
+    throw new CodeSessionHeldError();
+  }
+  // Held for the user's direct chat: attached, the goal waits for the hand back.
+  const held = delivery.status === 'queued' && delivery.reason === 'direct_hold';
+  const reached = delivery.status === 'delivered' || delivery.status === 'duplicate' || held;
   if (!reached || delivery.attached !== true) {
     return {
       attached: false,
@@ -615,6 +694,7 @@ export async function createLocalCodeSessionFallback(
     projectWorkspace?: ProjectWorkspace | null;
     claudeTokenSource: string | null;
     claudeTokenIntegrationId: string | null;
+    taskName?: string | null;
   }
 ): Promise<CodeAgentSessionResult | null> {
   if (!isLocalClaudeCodeFallbackEligible(err)) return null;

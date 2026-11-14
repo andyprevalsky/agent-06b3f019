@@ -116,6 +116,10 @@ follow-up is to reduce the shared sandbox organization's request volume, or to
 retry the side-effect-free reuse-only mint on typed transient codes. That
 change belongs to its own approval.
 
+### Update 2026-11-08
+
+Case 2026-11-08-throttled-agentcard-read-ended-on-attempt-cap-before-its-budget raises the throttled read allowance on this same read (PR #1825): throttled reads without an advertised reset now back off for up to 15 s before surrendering typed (an advertised reset can wait up to the 30 s budget). Whether that resolves this occurrence stays unproven, because its provider trigger was never captured. Failure logs now record `status` and `code`.
+
 ## Human feedback
 
 None yet.

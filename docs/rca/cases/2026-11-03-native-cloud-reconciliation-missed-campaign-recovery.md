@@ -250,3 +250,140 @@ failures, original sidecars and retained service custody remain preserved.
 Review stabilization records immutable controller commands in the initial campaign manifest, avoiding a full manifest rewrite for every launch. Native cloud host validation now rejects unsupported platforms before coordinator admission, and Hub cleanup attempts every independent owner before reporting aggregate failures. Separate causal regressions preserve the old failures. A further causal check proves the deploy environment fingerprint must omit the per-tool CODEX_TOOL_CALL_ID while still binding PATH and inherited SNAPSHOT_LOOP_TOKEN. Historical pre-agent publisher identity remains unresolved; no cleanup credit is inferred from the shape of an inventory health token.
 
 A subsequent zero-allocation smoke attempt exposed several already-dead starting Hub owners alongside the live shared Hub. The live-only terminator correctly refused those stale entries, but the new campaign join treated them as pending cleanup. A real failed-bind owner plus live Hub reproduces this boundary. The join now recognizes only a structurally exact, same-boot owner with both PID and process group wholly absent; live/reused identities still use the original strict protocol. The typed current-Hub retirement proof accounts for the complete original owner inventory with a clean original supervisor sidecar, preserves original pending/UNVERIFIED records and grants no execution credit. The original nine-controller proof validates and reconciles through the public entrypoint.
+
+
+## November 7 recurrence: diagnosed repair boundary and reconciled failed successor
+
+PR1708 reproduced the public next-source renewal refusal on source4a062337:
+`a quiescent interrupted operation token is required`. Source refresh and quick
+validation had legitimately reached `needs-focused-plan`. The original isolated
+proof was recorded against a failure occurrence rather than an interruption
+token, and its later complete-inventory successor retained FAILED/UNVERIFIED
+results even after strict normal cleanup reconciliation succeeded.
+
+The repair admits only quiescent repair phases and distinguishes original
+failure identity from request-token identity. Existing clean-successor and public
+native proof validation remain unchanged. A separate failed-successor route
+requires exact historical receipt/request/result and execution-binding seals,
+full inventory and original isolation admission, the same physical owner root,
+and exactly one replayed strict normal campaign reconciliation. Historical
+source/environment hashes remain bound to their original receipt, without
+claiming current-source carryover. Only the old proof's `validation_source` may
+change, and that target must equal the current state, plan and physical checkout.
+
+Four new owning controls passed with all193 existing tests (197 total) in private
+preparation. They cover the actual before/after CLI boundary, idempotence, changed
+target environment, strict negative/tamper controls and preserved obligations.
+The combined coordinator candidate subsequently passed202 and203 owning tests.
+A parent-added resume-marker restriction was rejected by existing valid recovery
+fixtures and removed; historical markers alone are not live execution evidence.
+Actual current-source canonical renewal remains a separate operation after the
+final source/environment refresh. No old result, exclusion, failure, retained Hub
+or financial record is rewritten, and no execution or cleanup PASS is granted.
+Evidence: `.context/rca-browser-4f77/isolated-renewal-refusal-4a062/` and
+`.context/rca-browser-4f77/isolated-renewal-rca-4a062/`.
+
+## November 8 recurrence: mixed graded and preallocation-failed parents
+
+PR #1770's round-17 smoke request on source
+`7df366f750b44cc53abea9dc0ffb2167e637b3b5` ended with eleven native
+task passes, one pre-task failure and one native cancellation. The immutable
+outer receipt retained thirteen active UNVERIFIED cases plus two historical
+NO_RETRY_CUSTODY exclusions. The two failed parents had sealed zero-resource
+audits and no task execution provenance or task matrix; the eleven graded
+parents and linked task-free canary had both. All fourteen original participants
+were accounted for. No native result, time, missing flag or financial record
+was rewritten.
+
+The normal campaign layout required provenance for every parent, while the
+preallocation layout required every parent to have zero allocation. Neither
+could describe this authentic mixture. The adapter correctly retained
+complete=false and cleanup_complete=false; native passes cannot be spliced
+into a new positive full-gate receipt. Search terms were `mixed campaign
+preallocation native cleanup provenance` and the literal unsupported-layout
+refusal. This extends the existing campaign evidence contract, rather than
+creating a task or resource exception.
+
+The explicit campaign-mixed-preallocation-v1 layout derives each branch from
+bound native artifacts. Both provenance files require the unchanged normal
+validation; both absent, including no dangling symlink, require captured
+controller-command/source authority and the existing strict zero-allocation
+release predicate. One-sided evidence, unexpected task artifacts, resources,
+foreign identity or live ownership refuses. Both parent classes and all fourteen
+participants, full supervisor/registry/audit/publication/Hub/inventory closure
+are mandatory. Original exclusions remain bound to the request and grant no
+new execution, assertion or financial credit.
+
+The unchanged mixed-case regression first refused the unsupported layout and
+then passed with the new verifier. A private replay of the actual request bound
+627 original files, fourteen participants and two zero-allocation parents.
+Deep-copy reconciliation changed only ownership metadata, preserving every
+original case and all source/results bytes. The ordinary public reconcile
+entrypoint remains the only route used for actual cycle mutation. This proof
+permits future launch custody only; historical thirteen UNVERIFIED observations
+and both separate 4396-cent sandbox obligations remain unchanged.
+
+The final owning coordinator suite passed 219 tests in 59.242 seconds.
+Independent review rehashed all 627 files and approved the final verifier.
+The public reconcile action then recorded only the retained-owner qualification
+on the original source plan; all thirteen pending observations, native grades,
+raw complete/cleanup flags and two historical exclusions remain unchanged.
+A fresh whole-gate execution is still required for positive execution credit.
+
+
+## November 11 recurrence: pre-command refusal shadowed an executed successor
+
+PR1919 source e979f73b8930bedb3dd5d3dba1518520e2931d8d correctly refused
+smoke admission because the original isolated proof still named the preceding
+validation source. Request1958fbf77dd84099b9fb21a6259fca71 was sealed, but
+`isolated_request` raised `native cleanup: next source/inventory binding`
+before opening command output or calling `run_command`. Its directory contains
+only request.json; the token-derived native root is absent. All15 smoke cases
+remain UNVERIFIED. This was not a native benchmark execution or task failure.
+
+The public token renewal then failed with `native cleanup: failed successor
+execution`: latest-receipt selection chose the coordinator's tokenless exception
+row instead of the preceding fully sealed executed successor. The already
+published historical-inventory repair accepts that preceding thirteen-case
+successor against the expanded fifteen-case gate; inventory extension was not
+the failed boundary. A diagnostic copy also exposed an older original-failure-ID
+registration route that overwrote an existing changed proof without renewal
+history or the newer quiescence and successor guards. That route was not used
+to mutate canonical state.
+
+The fix authenticates this exact legacy refusal against immutable producer Git
+bytes, request hash, source, phase, full current inventory, a request-only
+namespace and absent native root. Future producers write a typed request-bound
+pre-command refusal before command creation. Only the immediately preceding
+executed successor is selected; unchanged successor, prior-proof, physical-root,
+current-source and full native-proof validation still run. Changed proofs for an
+already registered failure ID enter the same guarded renewal and append history;
+identical re-registration remains idempotent. Global latest-receipt selection is
+unchanged. No result, exclusion, financial obligation or cleanup verdict changes.
+
+No pre-existing failing test covered this producer/consumer combination. Five
+new permanent methods in scripts/tests/deploy-test-cycle.test.py cover the
+legacy and future producers, failure-ID routing, preserved fifteen-case debt and
+atomic refusal of unknown execution, tampered requests, extra artifacts, changed
+sources, original exclusions and live markers. On unchanged e979 production the
+same five-method invocation failed (one assertion failure, three errors); after
+the runtime change it passed five consecutive runs (3.984,3.689,3.815,3.809,
+3.557 seconds). The twelve existing isolated-renewal tests also passed. The test
+file stayed byte-identical across these runs, SHA256
+bfbe0b3770049ee8f300d056d4af3aea9d9655e068428ed79bd7e0c5a3d0ae84.
+
+Exact owning command: agents/venv/bin/python3 -B
+scripts/tests/deploy-test-cycle.test.py
+Cycle.test_precommand_refusal_renews_only_target_after_full_historical_successor
+Cycle.test_precommand_refusal_refuses_unknown_tampered_or_admitted_debt_atomically
+Cycle.test_existing_failure_id_changed_proof_uses_guarded_renewal_and_history
+Cycle.test_existing_failure_id_cannot_bypass_live_guard_or_changed_debt
+Cycle.test_future_precommand_producer_seals_zero_execution_and_renews_without_credit.
+
+The original official CLI refusal and unchanged-state/proof receipts are retained
+under .context/rca-e388d514/integration-renewal-owning-red.log and
+integration-renewal-before.json; regression logs are renewal-five-owning-red.log,
+renewal-five-owning-green-{1..5}.log and renewal-existing-isolated.log. Actual
+current-source public proof renewal and fresh full smoke execution remain
+separate required operations. This causal test does not establish benchmark
+success, financial settlement or historical cleanup completion.

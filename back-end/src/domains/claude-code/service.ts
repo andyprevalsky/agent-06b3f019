@@ -7,10 +7,11 @@ import {
   createClaudeCodeSession,
   closeClaudeCodeSession,
   getClaudeCodeSession,
+  type ClaudeCodeSessionOptions,
 } from '../../providers/e2b';
 import { checkGithubRepoAccess, ensureAgentTreeRepo } from '../../providers/github';
+import { resolveCodeSessionWorkspace } from '../../providers/githubRepos/resolve';
 import { GithubRateLimitedError } from '../../providers/githubRateLimit';
-import { resolveSessionProject } from '../../providers/projects/session';
 import { createLogger } from '../../providers/logger';
 import {
   markPoolTokenRateLimited,
@@ -72,12 +73,14 @@ export async function resolveAgentContext(
   repoUrl: string | undefined;
   userId: string | undefined;
   projectId?: string | undefined;
+  repoRef?: string | undefined;
 }> {
   try {
     const agent = await repo.findAgentGithubInfo(agentId);
     let storedOwnerId = agent?.userId ?? undefined;
     let repoUrl = agent?.githubRepoUrl ?? undefined;
     let projectId = agent?.projectId ?? undefined;
+    let repoRef = agent?.githubRepoRef ?? undefined;
 
     if (
       repoUrl === undefined &&
@@ -90,6 +93,7 @@ export async function resolveAgentContext(
       repoUrl = rootAgent?.githubRepoUrl ?? undefined;
       storedOwnerId ??= rootAgent?.userId;
       projectId ??= rootAgent?.projectId ?? undefined;
+      repoRef ??= rootAgent?.githubRepoRef ?? undefined;
     }
 
     const callerUserId = userId !== undefined && userId !== '' ? userId : undefined;
@@ -102,7 +106,7 @@ export async function resolveAgentContext(
     }
     const resolvedUserId = storedOwnerId ?? callerUserId;
 
-    return { repoUrl, userId: resolvedUserId, projectId };
+    return { repoUrl, userId: resolvedUserId, projectId, repoRef };
   } catch (err) {
     log.error('Failed to look up agent owner and GitHub repo', {
       error: err instanceof Error ? err.message : String(err),
@@ -110,6 +114,39 @@ export async function resolveAgentContext(
     if (err instanceof AgentOwnerMismatchError) throw err;
     throw new AgentContextLookupError();
   }
+}
+
+/** The spawn's options for createClaudeCodeSession (project, code session, CLI conversation, title). */
+function sessionOptions(
+  params: CreateSessionParams,
+  projectWorkspace: ClaudeCodeSessionOptions['projectWorkspace'],
+  codeSession: ClaudeCodeSessionOptions['codeSession']
+): ClaudeCodeSessionOptions {
+  return {
+    projectWorkspace,
+    codeSession,
+    freshConversation: params.fresh_conversation === true,
+    taskName: params.task_name ?? null,
+    cliSettings: params.cli_settings ?? null,
+    resumeConfig: params.resume_config,
+    leaseOwner: params.lease_owner,
+  };
+}
+
+/**
+ * Project restore, unless a canonical repo ref (spawn's github_repo_ref or agent override)
+ * replaces it; then the repo's connected folder restores (its startup script, env files).
+ */
+function sessionWorkspace(
+  params: CreateSessionParams,
+  resolved: Awaited<ReturnType<typeof resolveAgentContext>>
+) {
+  return resolveCodeSessionWorkspace(resolved.userId, {
+    githubRepoRef: params.github_repo_ref,
+    agentRepoRef: resolved.repoRef,
+    projectId: params.project_id ?? resolved.projectId,
+    requestedRepoUrl: params.github_repo_url,
+  });
 }
 
 export async function createSession(params: CreateSessionParams): Promise<CreateSessionResult> {
@@ -122,10 +159,8 @@ export async function createSession(params: CreateSessionParams): Promise<Create
   // repo-less agents can still consume their user's stored OAuth credential.
   const resolved = await resolveAgentContext(agent_id, effectiveUserId);
   effectiveUserId = resolved.userId;
-  const projectWorkspace = await resolveSessionProject(
-    effectiveUserId,
-    params.project_id ?? resolved.projectId
-  );
+  const { projectWorkspace, repoOverrideUrl } = await sessionWorkspace(params, resolved);
+  if (repoOverrideUrl !== undefined) effectiveGithubRepoUrl = resolved.repoUrl = repoOverrideUrl;
   if (projectWorkspace !== null) {
     // The project restore owns the checkout; never also clone github_repo_url.
     effectiveGithubRepoUrl = undefined;
@@ -194,7 +229,7 @@ export async function createSession(params: CreateSessionParams): Promise<Create
         normalizedRepoUrl,
         effectiveUserId,
         fastModeCacheEnabled,
-        { projectWorkspace, codeSession, freshConversation: params.fresh_conversation === true }
+        sessionOptions(params, projectWorkspace, codeSession)
       )
   );
 

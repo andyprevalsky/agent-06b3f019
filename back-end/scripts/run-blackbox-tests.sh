@@ -108,6 +108,9 @@ export USER_UI_STORAGE_LOCAL_DIR="${USER_UI_STORAGE_LOCAL_DIR:-$ARTIFACT_DIR/use
 # display-tool media (domains/display) uses the same hermetic local store.
 export DISPLAY_STORAGE_BACKEND=local
 export DISPLAY_STORAGE_LOCAL_DIR="${DISPLAY_STORAGE_LOCAL_DIR:-$ARTIFACT_DIR/display-storage}"
+# Local Benchmark Hub index: its lock is per database, so a run beside another
+# stack on this checkout (different database) needs its own directory.
+export BENCHMARK_HUB_LOCAL_DIR="${BENCHMARK_HUB_LOCAL_DIR:-$ARTIFACT_DIR/benchmark-hub}"
 # User-tool handlers (POST /api/user-ui/tools/run) run in a local code-session
 # HOME instead of E2B; the backend refuses this mode in production.
 export USER_TOOLS_SESSION_SANDBOX=local
@@ -130,6 +133,15 @@ if [[ "$USE_EXISTING_BACKEND" != "1" ]]; then
   export BENCHMARK_SHARE_SECRET="${BENCHMARK_SHARE_SECRET:-blackbox-local-benchmark-share-secret}"
 fi
 
+# Explicit fixture opt-in for isolated phone-capable owning suites, never product defaults.
+# Respect caller-provided 0 so denial/rollout suites can run the real OFF branch.
+if [[ "$USE_EXISTING_BACKEND" != "1" && -z "${CLOUD_IPHONE_ENABLED+x}" ]]; then
+  case ",${1:-all}," in
+    *,all,*|*,iphone,*|*,iphone-control,*|*,iphone-interactions,*|*,iphone-rls,*|*,auth-assistance,*|*,sms-supervisor,*|*,attention-requests,*)
+      export CLOUD_IPHONE_ENABLED=1 ;;
+  esac
+fi
+
 # --list only needs filesystem discovery; skip backend boot for speed.
 for arg in "$@"; do
   if [[ "$arg" == "--list" ]]; then
@@ -150,6 +162,7 @@ fi
 # reach a live provider. Capture-only benchmark stacks deliberately fail this
 # contract; callers must relaunch them with the explicit replay opt-in.
 if [[ "$USE_EXISTING_BACKEND" == "1" ]]; then
+  node "$SCRIPT_DIR/verify-kernel-proxy-custody.cjs" "$TEST_BASE_URL"
   if [[ -z "${TEST_BASE_URL:-}" ]]; then
     echo "❌ TEST_BASE_URL must be set when BLACKBOX_TEST_USE_EXISTING_BACKEND=1 or CONTRACT_TEST_USE_EXISTING_BACKEND=1"
     exit 1
@@ -562,6 +575,8 @@ BACKEND_LOG="${BLACKBOX_TEST_BACKEND_LOG:-${CONTRACT_TEST_BACKEND_LOG:-$ARTIFACT
 # behavior is unchanged.
 export SURGE_API_KEY="${SURGE_API_KEY:-blackbox-surge-key}"
 export SURGE_ACCOUNT_ID="${SURGE_ACCOUNT_ID:-blackbox-surge-account}"
+# Provider fixtures must not inherit the production sender selected in .env.
+export SMS_PROVIDER="${BLACKBOX_TEST_SMS_PROVIDER:-surge}"
 export BLACKBOX_TEST_FAKE_SURGE="${BLACKBOX_TEST_FAKE_SURGE:-1}"
 export BLACKBOX_TEST_FAKE_WHATSAPP="${BLACKBOX_TEST_FAKE_WHATSAPP:-1}"
 export BLACKBOX_TEST_FAKE_TWILIO="${BLACKBOX_TEST_FAKE_TWILIO:-1}"
@@ -594,6 +609,7 @@ EOF
 
   PORT="$PORT" \
   DISABLE_GMAIL_SYNC=1 \
+  NODE_OPTIONS="${NODE_OPTIONS:+$NODE_OPTIONS }--require=$(node -p 'JSON.stringify(process.argv[1])' "$SCRIPT_DIR/blackbox-kernel-proxy-custody.cjs")" \
   ROSE_SANDBOX_STACK_ID="${SANDBOX_STACK_ID:-}" \
   npx tsx src/bootstrap.ts >"$BACKEND_LOG" 2>&1 &
   BACKEND_PID=$!

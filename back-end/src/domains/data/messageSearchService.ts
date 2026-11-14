@@ -1,3 +1,4 @@
+import { resolveMessageAccess, messageOwnership } from './teamAccessRepo';
 import { buildMessageConversationMatch } from './format.messages';
 import * as grepRepo from './grepRepo';
 import { findMessageContextRows, searchConversationMatchRows } from './messageContextRepo';
@@ -14,38 +15,39 @@ export async function searchMessageSource(params: {
   source: ValidSource;
 }): Promise<{ total: number; matches: GrepMatch[] }> {
   const { userId, input, source } = params;
-  let personId: string | undefined;
+  const access = await resolveMessageAccess(userId, input.teamScope);
+  let personIds: string[] | undefined;
   const messageFilters = input.filters.messages;
   // `filters.path` addresses a thread; its thread segment is the same identifier
   // space `person` already resolves (full name, phone, email, or person id), so
   // an emitted path narrows through the existing, tested resolution.
   const personIdentifier = messageFilters?.person ?? messageFilters?.pathThread;
   if (personIdentifier !== undefined) {
-    const resolved = await grepRepo.resolvePersonId(userId, personIdentifier);
-    if (resolved === null) return { total: 0, matches: [] };
-    personId = resolved;
+    const resolved = await grepRepo.resolveMessagePersonIds(access, personIdentifier);
+    if (resolved.length === 0) return { total: 0, matches: [] };
+    personIds = resolved;
   }
   const channel =
-    source === 'messages' || source === 'gmail'
-      ? undefined
-      : (DATA_SOURCE_CONFIGS[source].channel ?? undefined);
+    source === 'messages' ? undefined : (DATA_SOURCE_CONFIGS[source].channel ?? undefined);
   const [total, rows] = await Promise.all([
     grepRepo.countMessageGrepRows({
       userId,
+      access,
       pattern: input.dbPattern,
       caseInsensitive: input.caseInsensitive,
-      personId,
+      personIds,
       messageId: messageFilters?.pathMessageId,
       since: messageFilters?.since,
       channel,
     }),
     searchConversationMatchRows({
       userId,
+      access,
       pattern: input.dbPattern,
       caseInsensitive: input.caseInsensitive,
       limit: input.headLimit,
       offset: input.offset,
-      personId,
+      personIds,
       messageId: messageFilters?.pathMessageId,
       since: messageFilters?.since,
       channel,
@@ -53,6 +55,7 @@ export async function searchMessageSource(params: {
   ]);
   const contextRows = await findMessageContextRows({
     userId,
+    access,
     anchorIds: rows.map((row) => row.id),
     before: input.contextBefore,
     after: input.contextAfter,
@@ -67,8 +70,9 @@ export async function searchMessageSource(params: {
   }
   return {
     total,
-    matches: rows.map((row) =>
-      buildMessageConversationMatch(row, contextByAnchor.get(row.id) ?? [], input)
-    ),
+    matches: rows.map((row) => ({
+      ...buildMessageConversationMatch(row, contextByAnchor.get(row.id) ?? [], input),
+      ownership: messageOwnership(access, row),
+    })),
   };
 }

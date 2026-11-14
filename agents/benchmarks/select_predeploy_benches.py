@@ -15,7 +15,9 @@ Deploy cannot run the full daily suite. Selection rules:
 
 New catalog tasks auto-attach via `deploy_category` (or derived tags). Preferred
 canary order: `deploy_canary: true` → `pre-deploy`/`smoke` → `pipeline-e2e` →
-shorter `timeout_seconds`.
+shorter `timeout_seconds`. Catalog validation (`long_horizon.validate_catalog`
+→ `require_deploy_category`) rejects a ready task that resolves to no known
+category unless it opts out explicitly with `deploy_category: "none"`.
 """
 
 from __future__ import annotations
@@ -29,6 +31,18 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Sequence
+
+try:
+    from benchmarks import history_ledger
+except ImportError:  # loaded by file path: run as a script, or through importlib by a tool
+    import importlib.util
+
+    _spec = importlib.util.spec_from_file_location(
+        "benchmark_history_ledger", Path(__file__).resolve().with_name("history_ledger.py")
+    )
+    assert _spec and _spec.loader
+    history_ledger = importlib.util.module_from_spec(_spec)
+    _spec.loader.exec_module(history_ledger)
 
 DEFAULT_CAP = 20
 DEFAULT_CATALOG = Path(__file__).resolve().parent / "tasks.json"
@@ -74,6 +88,12 @@ KNOWN_DEPLOY_CATEGORIES: frozenset[str] = frozenset(
         "display",
     }
 )
+
+# Explicit opt-out: the task is deliberately never auto-attached to predeploy
+# selection (e.g. a simulated or harness-independent capability measurement).
+# It is selected exactly like a task without a category; validation requires it
+# so that a missing category can never be silent.
+NO_DEPLOY_CATEGORY = "none"
 
 TAG_TO_CATEGORY: dict[str, str] = {
     "payment": "payment",
@@ -166,6 +186,7 @@ class TaskRef:
     deploy_category: str | None
     deploy_canary: bool
     raw: dict[str, Any]
+    deploy_opt_out: bool = False
 
     @property
     def local_only(self) -> bool:
@@ -205,48 +226,55 @@ class Selection:
     pass_streak_required: int = DEFAULT_PASS_STREAK
     # Catalog eligibility/instructions only; runtime evidence owns every verdict.
     skip_eligibility: dict[str, list[str]] = field(default_factory=dict)
+    # Explicit user-approved omissions, never execution PASS or failure masking.
+    deploy_quarantined: dict[str, str] = field(default_factory=dict)
 
     @property
     def total(self) -> int:
         return len(self.selected)
 
 
+def task_ref_from_entry(item: dict[str, Any]) -> TaskRef:
+    """Parse one catalog entry; rejects an unknown `deploy_category`."""
+    quarantine = item.get("deploy_quarantine")
+    if quarantine is not None and (not isinstance(quarantine, str) or not quarantine.strip()):
+        raise ValueError(f"{item['name']}: deploy_quarantine must be a nonempty reason")
+    tags = tuple(str(t) for t in (item.get("tags") or []))
+    timeout = item.get("timeout_seconds")
+    try:
+        timeout_i = int(timeout) if timeout is not None else 10_000
+    except (TypeError, ValueError):
+        timeout_i = 10_000
+    deploy_category = item.get("deploy_category")
+    deploy_opt_out = False
+    if deploy_category is not None:
+        deploy_category = str(deploy_category)
+        if deploy_category == NO_DEPLOY_CATEGORY:
+            deploy_category, deploy_opt_out = None, True
+        elif deploy_category not in KNOWN_DEPLOY_CATEGORIES:
+            raise ValueError(
+                f"{item['name']}: unknown deploy_category {deploy_category!r}; "
+                f"known={sorted(KNOWN_DEPLOY_CATEGORIES)} or {NO_DEPLOY_CATEGORY!r} to opt out"
+            )
+    return TaskRef(
+        name=str(item["name"]),
+        tags=tags,
+        group=(str(item["group"]) if item.get("group") is not None else None),
+        status=(str(item["status"]) if item.get("status") is not None else None),
+        bench=(str(item["bench"]) if item.get("bench") is not None else None),
+        timeout_seconds=timeout_i,
+        deploy_category=deploy_category,
+        deploy_canary=bool(item.get("deploy_canary")),
+        raw=item,
+        deploy_opt_out=deploy_opt_out,
+    )
+
+
 def load_tasks(catalog: Path) -> list[TaskRef]:
     raw = json.loads(catalog.read_text())
     if not isinstance(raw, list):
         raise ValueError(f"{catalog}: expected a JSON array")
-    tasks: list[TaskRef] = []
-    for item in raw:
-        if not isinstance(item, dict) or not item.get("name"):
-            continue
-        tags = tuple(str(t) for t in (item.get("tags") or []))
-        timeout = item.get("timeout_seconds")
-        try:
-            timeout_i = int(timeout) if timeout is not None else 10_000
-        except (TypeError, ValueError):
-            timeout_i = 10_000
-        deploy_category = item.get("deploy_category")
-        if deploy_category is not None:
-            deploy_category = str(deploy_category)
-            if deploy_category not in KNOWN_DEPLOY_CATEGORIES:
-                raise ValueError(
-                    f"{item['name']}: unknown deploy_category {deploy_category!r}; "
-                    f"known={sorted(KNOWN_DEPLOY_CATEGORIES)}"
-                )
-        tasks.append(
-            TaskRef(
-                name=str(item["name"]),
-                tags=tags,
-                group=(str(item["group"]) if item.get("group") is not None else None),
-                status=(str(item["status"]) if item.get("status") is not None else None),
-                bench=(str(item["bench"]) if item.get("bench") is not None else None),
-                timeout_seconds=timeout_i,
-                deploy_category=deploy_category,
-                deploy_canary=bool(item.get("deploy_canary")),
-                raw=item,
-            )
-        )
-    return tasks
+    return [task_ref_from_entry(item) for item in raw if isinstance(item, dict) and item.get("name")]
 
 
 def standing_skip_eligibility(tasks: Sequence[TaskRef], selected: Sequence[str]) -> dict[str, list[str]]:
@@ -328,6 +356,34 @@ def categories_for_task(task: TaskRef) -> set[str]:
     return cats
 
 
+def require_deploy_category(item: dict[str, Any]) -> None:
+    """Fail when a ready catalog entry cannot auto-attach to predeploy selection.
+
+    A ready task must resolve to a known category (`deploy_category`, a mapped
+    tag, `deploy_categories` or `smoke`) or opt out explicitly with
+    `deploy_category: "none"`. An opt-out must not also derive a category or be
+    a canary, so it can never silently remove existing coverage.
+    """
+    task = task_ref_from_entry(item)
+    categories = categories_for_task(task)
+    if task.deploy_opt_out:
+        conflicts = sorted(categories) + (["deploy_canary"] if task.deploy_canary else [])
+        if conflicts:
+            raise ValueError(
+                f"{task.name}: deploy_category {NO_DEPLOY_CATEGORY!r} opts out of predeploy selection, "
+                f"but the task also derives {conflicts}; remove the opt-out or those markers"
+            )
+        return
+    if (task.status or "ready") != "ready" or categories:
+        return
+    raise ValueError(
+        f"{task.name}: ready task resolves to no predeploy deploy category, so /deploy can never "
+        f"auto-attach it. Set deploy_category to one of {sorted(KNOWN_DEPLOY_CATEGORIES)} (or add a "
+        f"tag mapped in TAG_TO_CATEGORY), or set deploy_category {NO_DEPLOY_CATEGORY!r} to opt out of predeploy "
+        "selection explicitly."
+    )
+
+
 def discover_changed_files(repo_root: Path, explicit: Sequence[str] | None = None) -> list[str]:
     if explicit is not None:
         return sorted({f.strip() for f in explicit if f and f.strip()})
@@ -378,7 +434,9 @@ def categories_triggered_by_paths(changed_files: Sequence[str]) -> list[str]:
     return found
 
 
-def _eligible(task: TaskRef, surface: str) -> bool:
+def _eligible(task: TaskRef, surface: str, *, for_deploy: bool = True) -> bool:
+    if for_deploy and task.raw.get("deploy_quarantine"):
+        return False
     if not task.eligible_status or task.production_only:
         return False
     # Both local and cloud predeploy execute against isolated backends. The
@@ -415,32 +473,30 @@ def counts_for_deploy_eligibility(entry: dict[str, Any]) -> bool:
 def load_attempt_passes(attempts_file: Path) -> dict[str, list[bool]]:
     """Return chronological pass/fail lists keyed by task name.
 
-    Reads `history/task_attempts.jsonl` (append-only). Entries are ordered by
-    file order, then by timestamp when present so out-of-order appends still
-    yield a stable recent window. Rows that do not count for deploy eligibility
-    (predeploy / active-worktree) are omitted.
+    Reads `history/task_attempts.jsonl` plus its per-writer shards (append-only,
+    see history_ledger.py). Entries are ordered by reader order, then by
+    timestamp when present so out-of-order appends still yield a stable recent
+    window. Rows that do not count for deploy eligibility (predeploy /
+    active-worktree) are omitted.
     """
-    if not attempts_file.exists():
-        return {}
     rows: list[tuple[str, bool, str]] = []
-    with attempts_file.open() as handle:
-        for index, raw_line in enumerate(handle):
-            line = raw_line.strip()
-            if not line:
-                continue
-            try:
-                entry = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if not counts_for_deploy_eligibility(entry):
-                continue
-            task = entry.get("task")
-            if not isinstance(task, str) or not task:
-                continue
-            passed = bool(entry.get("passed"))
-            timestamp = str(entry.get("timestamp") or "")
-            # Stable tie-break on file order when timestamps collide/missing.
-            rows.append((task, passed, f"{timestamp}:{index:08d}"))
+    for index, raw_line in enumerate(history_ledger.read_lines(attempts_file)):
+        line = raw_line.strip()
+        if not line:
+            continue
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not counts_for_deploy_eligibility(entry):
+            continue
+        task = entry.get("task")
+        if not isinstance(task, str) or not task:
+            continue
+        passed = bool(entry.get("passed"))
+        timestamp = str(entry.get("timestamp") or "")
+        # Stable tie-break on reader order when timestamps collide/missing.
+        rows.append((task, passed, f"{timestamp}:{index:08d}"))
     rows.sort(key=lambda row: (row[0], row[2]))
     passes: dict[str, list[bool]] = {}
     for task, passed, _timestamp in rows:
@@ -657,6 +713,8 @@ def select_predeploy_benches(
         uncovered_categories=uncovered_categories,
         pass_streak_required=pass_streak,
         skip_eligibility=standing_skip_eligibility(tasks, selected),
+        deploy_quarantined={t.name: t.raw["deploy_quarantine"] for t in tasks
+                            if t.raw.get("deploy_quarantine")},
     )
 
 
@@ -675,6 +733,8 @@ def format_report(selection: Selection) -> str:
         f"Path extras ({len(selection.path_extras)}): {', '.join(selection.path_extras) or '(none)'}",
         f"TOTAL SELECTED: {selection.total} / {selection.cap}",
     ]
+    for name, reason in selection.deploy_quarantined.items():
+        lines.append(f"Deploy quarantine (not run): {name}: {reason}")
     if selection.skipped_history:
         lines.append(
             f"Skipped (need last {selection.pass_streak_required} historic passes) "
@@ -706,13 +766,14 @@ def format_report(selection: Selection) -> str:
     return "\n".join(lines)
 
 
-def scream_if_cap_hit(selection: Selection, stream=None) -> None:
+def scream_if_cap_hit(selection: Selection, stream=None, *, machine_readable: bool = False) -> None:
     stream = stream or sys.stderr
     if not selection.cap_hit:
         if selection.total == selection.cap:
             msg = f"*** PREDEPLOY BENCH COUNT AT HARD CAP: {selection.total}/{selection.cap} ***"
             print(msg, file=stream)
-            print(msg, file=sys.stdout)
+            if not machine_readable:
+                print(msg, file=sys.stdout)
         return
     text = CAP_SCREAM.format(
         selected=selection.total,
@@ -721,7 +782,8 @@ def scream_if_cap_hit(selection: Selection, stream=None) -> None:
         dropped=", ".join(selection.dropped) or "(none)",
     )
     print(text, file=stream)
-    print(text, file=sys.stdout)
+    if not machine_readable:
+        print(text, file=sys.stdout)
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
@@ -802,7 +864,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         print("\n".join(selection.selected))
         if guidance := format_skip_eligibility(selection.skip_eligibility):
             print(guidance, file=sys.stderr)
-        scream_if_cap_hit(selection)
+        scream_if_cap_hit(selection, machine_readable=True)
     elif args.format == "report":
         print(format_report(selection))
         scream_if_cap_hit(selection)
@@ -811,6 +873,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             json.dumps(
                 {
                     "selected": selection.selected,
+                    "deploy_quarantined": selection.deploy_quarantined,
                     "floor": selection.floor,
                     "path_extras": selection.path_extras,
                     "dropped": selection.dropped,
@@ -831,7 +894,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 sort_keys=True,
             )
         )
-        scream_if_cap_hit(selection)
+        scream_if_cap_hit(selection, machine_readable=True)
     else:
         print(format_report(selection))
         scream_if_cap_hit(selection)

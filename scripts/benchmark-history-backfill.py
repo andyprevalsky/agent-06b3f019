@@ -26,6 +26,11 @@ lands, and a later row the merge already landed supersedes it.
     python3 scripts/benchmark-history-backfill.py                 # dry run, prints counts
     python3 scripts/benchmark-history-backfill.py --write         # append missing rows
     python3 scripts/benchmark-history-backfill.py --hub-index F   # use a saved index
+
+Each ledger is its base file plus per-writer shards
+(`task_attempts.<YYYYMMDD>.<branch>.jsonl`, agents/benchmarks/history_ledger.py).
+Deduplication and the git-history scans read the base file and every shard;
+--write appends to this checkout's own shard, never the shared base file.
 """
 
 from __future__ import annotations
@@ -57,6 +62,9 @@ latest_only = importlib.util.module_from_spec(_spec)
 sys.modules[_spec.name] = latest_only
 _spec.loader.exec_module(latest_only)
 parse_time = latest_only._parse_time
+history_ledger = latest_only._load_history_ledger(Path(__file__).resolve().parents[1])
+# git pathspecs for a ledger's base file and its shards
+ATTEMPTS_PATHS = (str(ATTEMPTS), f":(glob){HISTORY_DIR}/task_attempts.*.jsonl")
 
 
 def git(repo: Path, *args: str, check: bool = True) -> str:
@@ -76,13 +84,23 @@ def row_key(row: dict) -> tuple:
 
 
 def load_rows(path: Path) -> list[dict]:
+    """Rows of a ledger: its base file plus its per-writer shards."""
     rows = []
-    if path.is_file():
-        for line in path.read_text().splitlines():
-            row = latest_only._row(line.encode()) if line.strip() else None
-            if row is not None:
-                rows.append(row)
+    for line in history_ledger.read_lines(path):
+        row = latest_only._row(line.encode()) if line.strip() else None
+        if row is not None:
+            rows.append(row)
     return rows
+
+
+def base_ledger_lines(repo: Path, base: str, ledger: Path) -> list[str]:
+    """Lines of ``ledger`` and its shards as committed on ``base``."""
+    names = git(repo, "ls-tree", "--name-only", f"{base}:{ledger.parent}", check=False).split()
+    lines: list[str] = []
+    for name in sorted(names, key=lambda n: (n != ledger.name, n)):
+        if history_ledger.ledger_of(name) == ledger.name:
+            lines.extend(git(repo, "show", f"{base}:{ledger.parent}/{name}", check=False).splitlines())
+    return lines
 
 
 def env_value(repo: Path, name: str) -> str | None:
@@ -139,7 +157,7 @@ class Landing:
 def first_parent_history(repo: Path, base: str) -> tuple[dict, list[dict]]:
     """Rows each first-parent commit added, and rows merges dropped from the line."""
     out = git(repo, "log", base, "--first-parent", "-m", "--format=C %H %P", "-p", "--unified=0",
-              "--no-renames", "--", str(ATTEMPTS))
+              "--no-renames", "--", *ATTEMPTS_PATHS)
     landed: dict[tuple[str, str], list[tuple]] = collections.defaultdict(list)
     dropped: list[dict] = []
     commit, merge = None, False
@@ -164,7 +182,7 @@ def branch_rows(repo: Path, base_keys: set) -> list[tuple[dict, set[str]]]:
     """Ledger rows ever committed on any ref but absent from --base, with their adding commits."""
     proc = subprocess.Popen(
         ("git", "-C", str(repo), "log", "--all", "--format=C %H", "-p", "--unified=0", "--no-renames",
-         "--", str(ATTEMPTS)), stdout=subprocess.PIPE, text=True, errors="replace")
+         "--", *ATTEMPTS_PATHS), stdout=subprocess.PIPE, text=True, errors="replace")
     found: dict[tuple, tuple[dict, set[str]]] = {}
     parsed: dict[str, tuple | None] = {}  # rewrites repeat the same lines many times
     commit = None
@@ -223,7 +241,7 @@ def plan(repo: Path, base: str, hub_runs: list[dict] | None, scan_branches: bool
     have_keys = {row_key(r) for r in attempts}
     have_runs = {(r.get("task"), r.get("run_id")) for r in attempts if r.get("run_id")}
     base_keys = {row_key(r) for r in (latest_only._row(l.encode()) for l in
-                 git(repo, "show", f"{base}:{ATTEMPTS}", check=False).splitlines()) if r}
+                 base_ledger_lines(repo, base, ATTEMPTS)) if r}
     landing = Landing(repo, base)
     landed, dropped = first_parent_history(repo, base)
     counts: dict[str, collections.Counter] = collections.defaultdict(collections.Counter)
@@ -363,9 +381,10 @@ def plan(repo: Path, base: str, hub_runs: list[dict] | None, scan_branches: bool
 
 
 def write(repo: Path, result: dict) -> None:
+    """Append to this checkout's shard of each ledger, never to the shared base file."""
     for rel, rows in ((ATTEMPTS, result["attempts"]), (DURATIONS, result["durations"])):
         if rows:
-            with open(repo / rel, "a") as handle:
+            with open(history_ledger.shard_path(str(repo / rel)), "a") as handle:
                 handle.writelines(json.dumps(row) + "\n" for row in rows)
 
 

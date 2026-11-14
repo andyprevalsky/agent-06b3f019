@@ -12,12 +12,16 @@
  * because the chip loads a task's output once it is CLOSED.
  */
 import { z } from 'zod';
+import { CODE_SANDBOX_IDLE_TIMEOUT_MS } from '../../providers/e2bCodeSessionSandbox';
 import {
   CODE_AGENT_LIST_MAX_ROOTS,
   listCodeAgentsForRoots,
+  renameCodeAgentForUser,
   type GraphCodeSessionRow,
   type RootCodeAgentRow,
 } from './repoGraph';
+
+export { renameCodeAgentForUser };
 
 export const codeAgentsQuerySchema = z.object({
   root_ids: z
@@ -73,6 +77,43 @@ export function codeAgentAwaitingParent(
   return { question, at: typeof at === 'string' ? at : '' };
 }
 
+/** The spawn's task_name, else (legacy rows) the goal's first non-empty line. */
+export function codeAgentTitle(row: Pick<RootCodeAgentRow, 'taskName' | 'goal'>): string {
+  const taskName = row.taskName?.trim();
+  if (taskName !== undefined && taskName !== '') return taskName;
+  return (row.goal.split('\n').find((line) => line.trim() !== '') ?? '').trim();
+}
+
+/** Whether the code agent's container runs: awake | stopped (resumable) | destroyed. */
+export type CodeAgentContainerState = 'awake' | 'stopped' | 'destroyed';
+
+/**
+ * The container behind a code agent's task, from its persistent code session
+ * (one sandbox per session, shared by every task attached to it): a retired
+ * session is destroyed. It is awake while some task of the session runs (this
+ * one, or a later spawn attached to the same live sandbox) on an ACTIVE session
+ * whose keepalive (spawn.ts refreshes lastActiveAt with the sandbox timeout) is
+ * within E2B's idle window: E2B pauses an idle sandbox itself (onTimeout
+ * 'pause') without writing CodeSession.state, and a resume leases the session
+ * (ACTIVE, lastActiveAt now) before its sandbox connects and its task row
+ * exists, so a bare lease never reads awake. Anything else is stopped (it
+ * resumes on the next message). Without a persistent session (Mac and legacy
+ * runs) only a running task is known: awake, else unknown (null).
+ */
+export function codeAgentContainerState(
+  row: Pick<
+    RootCodeAgentRow,
+    'status' | 'sessionState' | 'sessionLastActiveAt' | 'sessionHasActiveTask'
+  >,
+  now = Date.now()
+): CodeAgentContainerState | null {
+  if (row.sessionState === null) return row.status === 'ACTIVE' ? 'awake' : null;
+  if (row.sessionState === 'RETIRED') return 'destroyed';
+  const lastActive = row.sessionLastActiveAt ? new Date(row.sessionLastActiveAt).getTime() : 0;
+  const fresh = now - lastActive < CODE_SANDBOX_IDLE_TIMEOUT_MS;
+  return row.sessionHasActiveTask && row.sessionState === 'ACTIVE' && fresh ? 'awake' : 'stopped';
+}
+
 export interface CodeAgentListItem {
   code_agent_id: string;
   owner_agent_id: string;
@@ -83,8 +124,10 @@ export interface CodeAgentListItem {
   code_session_id: string | null;
   /** Question it asked its spawning agent and is waiting on, if any. */
   awaiting_parent: CodeAgentAwaitingParent | null;
-  /** First line of the goal. */
+  /** The spawn's task_name; legacy rows without one show the goal's first line. */
   title: string;
+  /** Its container: awake | stopped | destroyed; null when unknown (no persistent session). */
+  container_state: CodeAgentContainerState | null;
   created_at: Date;
 }
 
@@ -104,7 +147,8 @@ export async function listCodeAgents(
         status,
         code_session_id: row.codeSessionId,
         awaiting_parent: codeAgentAwaitingParent(status, row.awaitingParent),
-        title: (row.goal.split('\n').find((line) => line.trim() !== '') ?? '').trim(),
+        title: codeAgentTitle(row),
+        container_state: codeAgentContainerState(row),
         created_at: row.createdAt,
       };
     }),

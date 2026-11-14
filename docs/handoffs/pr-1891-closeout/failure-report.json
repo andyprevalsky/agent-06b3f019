@@ -1,0 +1,25 @@
+{
+  "failures": [
+    {
+      "id": "prod-semantic-web-search-20261109",
+      "description": "Production semantic: Chat full-lifecycle latency ratchet (web_search) sample 3 never rendered its canonical final answer within 15s",
+      "evidence": "https://github.com/Rose-Ai-Labs/rose/actions/runs/42670669770 (job 129346076934); merge 06f9ef07a changed one docs/rca markdown file and rebuilt no service; same workflow passed 17:37/17:43/17:48Z on adjacent main SHAs",
+      "native_result": "FAIL",
+      "attribution": "NOT_INTRODUCED",
+      "repair_agent": "https://boxes.dev/thread/thr_da48fe6e812143d693c5229f9bc44b5b",
+      "disposition": "delegated / waived"
+    },
+    {
+      "id": "smoke-agent-payment-abandonment-agentcard-release-stall",
+      "description": "smoke/agent-payment-abandonment (assigned repair): AgentCard sandbox never releases never-charged closed-card transfers (consumed, releasedCents=0), so purchase stays HELD instead of VOIDED",
+      "evidence": "PR #1699 run agent f4f41b8e transfer owt_dbc27a5e still consumed/0 at 17:30Z; read-only v2 census: never-charged closes released 15/233 (MCP cleanup), 3/111 (treasury), 16/267 and 1/50 (PR #1864 v2 REST close) Nov 6-9 vs ~1/3 Oct 26-31; identical closed/canceled/0 card state; recorded in docs/rca/cases/2026-10-02-agentcard-abandonment-closed-card-transfer-never-released.md (PR #1891)",
+      "native_result": "SKIPPED (agentcard_release_stall)",
+      "attribution": "NOT_INTRODUCED",
+      "external_provider": {
+        "name": "AgentCard (sandbox)",
+        "reason": "outage"
+      },
+      "disposition": "external / waived"
+    }
+  ]
+}

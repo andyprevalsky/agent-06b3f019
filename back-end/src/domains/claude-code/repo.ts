@@ -11,7 +11,13 @@ import { prisma } from '../../providers/database';
 export async function findAgentGithubInfo(agentId: string) {
   return prisma.agent.findUnique({
     where: { id: agentId },
-    select: { githubRepoUrl: true, userId: true, busId: true, projectId: true },
+    select: {
+      githubRepoUrl: true,
+      githubRepoRef: true,
+      userId: true,
+      busId: true,
+      projectId: true,
+    },
   });
 }
 
@@ -21,7 +27,7 @@ export async function findAgentGithubInfo(agentId: string) {
 export async function findRootAgentGithubInfo(busId: string) {
   return prisma.agent.findUnique({
     where: { id: busId },
-    select: { githubRepoUrl: true, userId: true, projectId: true },
+    select: { githubRepoUrl: true, githubRepoRef: true, userId: true, projectId: true },
   });
 }
 
@@ -78,6 +84,14 @@ export async function findAgentById(agentId: string) {
   });
 }
 
+/** The agent unless deleted (deletion only sets deletedAt): direct chat never resumes it. */
+export async function findLiveAgentById(agentId: string) {
+  return prisma.agent.findFirst({
+    where: { id: agentId, deletedAt: null },
+    select: { userId: true },
+  });
+}
+
 /** Read the per-agent Fast Mode flag (used to decide ANTHROPIC_BASE_URL injection). */
 export async function findAgentDemoCache(agentId: string): Promise<boolean> {
   const agent = await prisma.agent.findUnique({
@@ -112,9 +126,63 @@ export async function findCodeSessionChip(
 }
 
 /** Session fields needed to address a live code session for direct chat. */
+/** The owning Rose agent's run state and persisted background tasks (resume of a stopped code agent). */
+export async function findAgentForCodeResume(agentId: string) {
+  return prisma.agent.findFirst({
+    // A deleted agent is never resumed (deletion only sets deletedAt).
+    where: { id: agentId, deletedAt: null },
+    select: {
+      id: true,
+      userId: true,
+      model: true,
+      status: true,
+      temporalWorkflowId: true,
+      backgroundTasks: true,
+    },
+  });
+}
+
+/**
+ * A row that ended a resume of this spawn after `since`: a failure (ERROR, a
+ * refused or failed resume) or the run's own terminal task_complete.
+ */
+export async function findResumeEndRow(agentId: string, toolCallId: string, since: Date) {
+  return prisma.message.findFirst({
+    where: {
+      agentId,
+      timestamp: { gt: since },
+      AND: [
+        { metadata: { path: ['toolCallId'], equals: toolCallId } },
+        {
+          OR: [
+            { metadata: { path: ['toolStatus'], equals: 'ERROR' } },
+            { metadata: { path: ['action_type'], equals: 'task_complete' } },
+          ],
+        },
+      ],
+    },
+    select: { id: true },
+  });
+}
+
+/** A persisted direct-turn row (its deterministic id), for a resent turn. */
+export async function findDirectTurnRow(id: string) {
+  return prisma.message.findUnique({
+    where: { id },
+    select: { id: true, metadata: true, timestamp: true },
+  });
+}
+
 export async function findSessionForDirectChat(taskId: string) {
   return prisma.claudeCodeSession.findUnique({
     where: { id: taskId },
-    select: { id: true, agentId: true, status: true, streamUrl: true },
+    select: {
+      id: true,
+      agentId: true,
+      status: true,
+      streamUrl: true,
+      codeSessionId: true,
+      taskName: true,
+    },
   });
 }

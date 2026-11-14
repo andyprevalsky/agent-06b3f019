@@ -4,6 +4,7 @@ import { sealPhoneValue } from '../../providers/phoneHarnessCredentials';
 import type { PhoneHarnessSession } from '../../providers/phoneHarness';
 import type { Transaction } from './types';
 import * as leases from './repo';
+import { configurationAfterConfirmedStop } from './repo.setupContinuity';
 
 async function rawLock(tx: Transaction, deviceId: string) {
   await tx.$queryRaw`SELECT id FROM "IPhoneDevice" WHERE id = ${deviceId} FOR UPDATE`;
@@ -45,6 +46,7 @@ export async function confirmCleanup(deviceId: string, key: string, retainedComm
     await rawLock(tx, deviceId);
     const device = await tx.iPhoneDevice.findUniqueOrThrow({ where: { id: deviceId } });
     if (device.providerStartKey !== key) return false;
+    const setupEncrypted = await configurationAfterConfirmedStop(tx, device);
     await tx.iPhoneOperation.updateMany({
       where: {
         deviceId,
@@ -66,6 +68,7 @@ export async function confirmCleanup(deviceId: string, key: string, retainedComm
         providerSessionId: null,
         providerSessionEncrypted: null,
         providerEpoch: { increment: 1 },
+        setupEncrypted,
       },
     });
     if (retainedCommandId !== undefined)

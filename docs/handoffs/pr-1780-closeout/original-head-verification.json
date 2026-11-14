@@ -1,0 +1,165 @@
+{
+ "base": "6e347fb7f9aa64c98e2c5257de93903da8b7db6e",
+ "format": "ORIGINAL-HEAD-VERIFICATION-V1",
+ "patch": "scripts/tests/original600-portable-operator.test.py only (+21/-1), identical to the PR #1780 change",
+ "purpose": "run the original failing command (deploy-command-structural: python3 scripts/run-deploy-structural-gates.py --max-workers 4 on blacksmith-8vcpu-ubuntu-2404) against PR #1760 failing head 6e347fb7f with only the original600 fixture fix applied",
+ "result": {
+  "executed_runs": 2,
+  "passed_runs": 2,
+  "setup_failure_cause": "GitHub release/setup-uv downloads returned HTTP 504 during the VM \"Prepare runner\"/setup-uv steps (2026-11-08 08:45-10:10Z); the gate never started on those VMs",
+  "setup_failures_not_executed": 11
+ },
+ "runs": [
+  {
+   "attempt": "run1",
+   "case": "PASS",
+   "complete": true,
+   "event_sha": "9e17b05504fca8490d0a31cc9d81715a8edf40df",
+   "executed_gate": true,
+   "reason": null,
+   "run_url": "https://github.com/Rose-Ai-Labs/rose/actions/runs/42464209725",
+   "runner": "blacksmith-8vcpu-ubuntu-2404-wz426z2p2wtzl5e7",
+   "summary": [
+    "62.78s  original600-portable-operator",
+    "All 98 deploy structural gates passed."
+   ]
+  },
+  {
+   "attempt": "run2-attempt1",
+   "case": "PASS",
+   "complete": true,
+   "event_sha": "9e17b05504fca8490d0a31cc9d81715a8edf40df",
+   "executed_gate": true,
+   "reason": null,
+   "run_url": "https://github.com/Rose-Ai-Labs/rose/actions/runs/42465644745",
+   "runner": "blacksmith-8vcpu-ubuntu-2404-npek442k3tuskqkr",
+   "summary": [
+    "64.96s  original600-portable-operator",
+    "All 98 deploy structural gates passed."
+   ]
+  },
+  {
+   "attempt": "run2-setup504",
+   "case": "UNVERIFIED",
+   "complete": false,
+   "event_sha": "9e17b05504fca8490d0a31cc9d81715a8edf40df",
+   "executed_gate": false,
+   "reason": "remote run ended without a worker result",
+   "run_url": "https://github.com/Rose-Ai-Labs/rose/actions/runs/42464210155",
+   "runner": "blacksmith-8vcpu-ubuntu-2404-ii7fd7wylgsmyyvv",
+   "summary": []
+  },
+  {
+   "attempt": "run2-setup504b",
+   "case": "UNVERIFIED",
+   "complete": false,
+   "event_sha": null,
+   "executed_gate": false,
+   "reason": "remote run failure without a worker result",
+   "run_url": "https://github.com/Rose-Ai-Labs/rose/actions/runs/42464518062",
+   "runner": "blacksmith-8vcpu-ubuntu-2404-svc2r4t5wijdkdwv",
+   "summary": []
+  },
+  {
+   "attempt": "run3-attempt1",
+   "case": "UNVERIFIED",
+   "complete": false,
+   "event_sha": "9e17b05504fca8490d0a31cc9d81715a8edf40df",
+   "executed_gate": false,
+   "reason": "remote run ended without a worker result",
+   "run_url": "https://github.com/Rose-Ai-Labs/rose/actions/runs/42464984140",
+   "runner": "blacksmith-8vcpu-ubuntu-2404-6qgwa3a3x3bgwfdz",
+   "summary": []
+  },
+  {
+   "attempt": "run3-attempt2",
+   "case": "UNVERIFIED",
+   "complete": false,
+   "event_sha": "9e17b05504fca8490d0a31cc9d81715a8edf40df",
+   "executed_gate": false,
+   "reason": "remote run ended without a worker result",
+   "run_url": "https://github.com/Rose-Ai-Labs/rose/actions/runs/42465436010",
+   "runner": "blacksmith-8vcpu-ubuntu-2404-fhkz7udgvu5tmspr",
+   "summary": []
+  },
+  {
+   "attempt": "run3-attempt3",
+   "case": "UNVERIFIED",
+   "complete": false,
+   "event_sha": null,
+   "executed_gate": false,
+   "reason": "remote run failure without a worker result",
+   "run_url": "https://github.com/Rose-Ai-Labs/rose/actions/runs/42465880125",
+   "runner": "blacksmith-8vcpu-ubuntu-2404-q7o75ijjfqbicg5k",
+   "summary": []
+  },
+  {
+   "attempt": "run3-attempt4",
+   "case": "UNVERIFIED",
+   "complete": false,
+   "event_sha": "9e17b05504fca8490d0a31cc9d81715a8edf40df",
+   "executed_gate": false,
+   "reason": "remote run ended without a worker result",
+   "run_url": "https://github.com/Rose-Ai-Labs/rose/actions/runs/42467383121",
+   "runner": "blacksmith-8vcpu-ubuntu-2404-bmz5rbuu7d4x5zsh",
+   "summary": []
+  },
+  {
+   "attempt": "run3-attempt5",
+   "case": "UNVERIFIED",
+   "complete": false,
+   "event_sha": "9e17b05504fca8490d0a31cc9d81715a8edf40df",
+   "executed_gate": false,
+   "reason": "remote run ended without a worker result",
+   "run_url": "https://github.com/Rose-Ai-Labs/rose/actions/runs/42468293842",
+   "runner": "blacksmith-8vcpu-ubuntu-2404-7uq5ke3tybca3lkt",
+   "summary": []
+  },
+  {
+   "attempt": "run3-attempt6",
+   "case": "UNVERIFIED",
+   "complete": false,
+   "event_sha": "9e17b05504fca8490d0a31cc9d81715a8edf40df",
+   "executed_gate": false,
+   "reason": "remote run ended without a worker result",
+   "run_url": "https://github.com/Rose-Ai-Labs/rose/actions/runs/42469176659",
+   "runner": "blacksmith-8vcpu-ubuntu-2404-z45vhipanneqt6ll",
+   "summary": []
+  },
+  {
+   "attempt": "run3-attempt7",
+   "case": "UNVERIFIED",
+   "complete": false,
+   "event_sha": null,
+   "executed_gate": false,
+   "reason": "remote run failure without a worker result",
+   "run_url": "https://github.com/Rose-Ai-Labs/rose/actions/runs/42470067563",
+   "runner": "blacksmith-8vcpu-ubuntu-2404-zb3srw3sbcbgkfss",
+   "summary": []
+  },
+  {
+   "attempt": "run3-setup504",
+   "case": "UNVERIFIED",
+   "complete": false,
+   "event_sha": "9e17b05504fca8490d0a31cc9d81715a8edf40df",
+   "executed_gate": false,
+   "reason": "remote run ended without a worker result",
+   "run_url": "https://github.com/Rose-Ai-Labs/rose/actions/runs/42464210020",
+   "runner": "blacksmith-8vcpu-ubuntu-2404-bbrp4m7s75pq3vtw",
+   "summary": []
+  },
+  {
+   "attempt": "run3-setup504b",
+   "case": "UNVERIFIED",
+   "complete": false,
+   "event_sha": "9e17b05504fca8490d0a31cc9d81715a8edf40df",
+   "executed_gate": false,
+   "reason": "remote run ended without a worker result",
+   "run_url": "https://github.com/Rose-Ai-Labs/rose/actions/runs/42464518635",
+   "runner": "blacksmith-8vcpu-ubuntu-2404-skxpyq6j4mm4zkgh",
+   "summary": []
+  }
+ ],
+ "verification_branch": "verify/orig600-on-6e347fb-with-fix",
+ "verification_commit": "9e17b05504fca8490d0a31cc9d81715a8edf40df"
+}

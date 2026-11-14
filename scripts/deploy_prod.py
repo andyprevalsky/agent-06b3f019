@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Post-merge production verification as one command (`scripts/deploy production`).
 
-Ports the production lanes (DEPRECATED_deploy.md Steps 13-13c). Lane applicability comes from the merge commit's
+Ports the production lanes (the former /deploy skill Steps 13-13c). Lane applicability comes from the merge commit's
 own diff (`git diff --name-only <sha>^1 <sha>`, never the latest main). Every
 applicable lane runs concurrently once its dependencies pass; a failed lane
 never cancels another, and its dependents are recorded BLOCKED. Existing tools
@@ -10,7 +10,11 @@ production-semantic, prod-endpoint-smoke.ts, validate-prod-workflow-migration.ts
 run-bench). The result is <state-dir>/production-lanes.json and one final
 `DEPLOY_PRODUCTION PASS|FAIL` line; exit 0 only when every applicable lane passed, was
 elected away (--skip-agentcard), or is the standing AgentCard release stall
-(SKIPPED-stall: satisfied like a pass, recorded loudly, never a PASS).
+(SKIPPED-stall: satisfied like a pass, recorded loudly, never a PASS). A Render,
+Vercel or Mac release rollout of the merge that a newer main commit replaced
+(canceled / inactive / superseded) is satisfied only by a successful live
+rollout of a strict descendant of the merge commit: recorded
+PASS-verified-by-descendant with the live SHA, never relabelled an exact PASS.
 """
 from __future__ import annotations
 
@@ -24,6 +28,7 @@ import re
 import shlex
 import subprocess
 import sys
+import tarfile
 import threading
 import time
 from typing import Callable
@@ -45,6 +50,7 @@ DEVBOX_GH = Path('/opt/devbox-tools/gh/current/bin/gh')
 EXISTING_PROCESS_DOC = 'docs/existing-worker-process-deployment.md'
 CLASSIFY = Path('scripts') / 'classify-agent-runtime-changes.sh'
 SMOKE_VARS = ('SMOKE_BASE_URL', 'SMOKE_HEALTH_URL', 'SMOKE_FRONTEND_URL')
+MIGRATIONS_PATH = 'back-end/prisma/migrations'
 REPORT = 'production-lanes.json'
 SCHEMA = 1
 
@@ -80,7 +86,11 @@ ELECTED = 'SKIPPED-elected'  # explicit --skip-agentcard election (deploy.md Age
 # transfer-never-released.md, deploy.md Skippable tests), proven from the run's own native record: satisfied like a
 # pass, never a PASS. The unreleased allocation and pending Stripe refund are recorded and never called cleaned up.
 STALL = 'SKIPPED-stall'
-SATISFIED = (PASS, ELECTED, STALL)
+# The merge's own rollout was replaced by a newer main commit and a successful live rollout of a strict descendant of
+# the merge commit carries it: satisfied like a pass, recorded with the live SHA, never an exact-SHA PASS.
+DESCENDANT = 'PASS-verified-by-descendant'
+SATISFIED = (PASS, ELECTED, STALL, DESCENDANT)
+PASSED = (PASS, DESCENDANT)  # what a dependent lane accepts
 STALL_ENV = 'BENCHMARK_SKIP_AGENTCARD_RELEASE_STALL'  # run_benchmark._agentcard_release_skip_enabled: only "1" waives
 AGENTCARD_TASK = 'agent-payment-production-abandonment'
 RUNS_DIR = Path('agents') / 'benchmarks' / 'runs'  # BenchmarkRun.save() writes the native record here
@@ -96,6 +106,11 @@ class LaneError(RuntimeError):
 class Stall(str):
     """The reason of the standing AgentCard release stall. A lane returns (False, Stall(...), code), so a caller that
     only reads `passed` fails closed; only the scheduler records it as the satisfied-but-never-PASS STALL status."""
+
+
+class Descendant(str):
+    """The reason of a lane verified by a descendant: (True, Descendant('verified by descendant <live sha>: ...'), 0).
+    The scheduler records it as DESCENDANT, never as an exact-SHA PASS."""
 
 
 @dataclass
@@ -396,7 +411,11 @@ def planned_commands(name: str, ctx: Ctx) -> list[str]:
     if name == 'backend-probes':
         return [f'GET {BACKEND_URL}/health',
                 f'GET {BACKEND_URL}/api/agents (X-API-Key=back-end/.env BACKEND_API_KEY, X-User-Id={PROBE_USER_ID}; '
-                'retry 12x5s until 200)', s(SMOKE_ARGV, cwd=backend, drop=SMOKE_VARS),
+                'retry 12x5s until 200)',
+                f'git archive <render live_commit, else {sha}> {MIGRATIONS_PATH} -> '
+                f'{sd / "production-migrations"}/<commit>',
+                s(SMOKE_ARGV, cwd=backend, drop=SMOKE_VARS,
+                  extra={'SCHEMA_MIGRATIONS_DIR': f'<that dir>/{MIGRATIONS_PATH}'}),
                 f'GET {RENDER_LOGS_URL}?ownerId=$RENDER_OWNER_ID&resource=$RENDER_SERVICE_ID&limit=100&direction=backward '
                 f'(fail on {", ".join(RENDER_LOG_PATTERNS)})']
     if name == 'fly':
@@ -429,6 +448,10 @@ Result = tuple[bool, str, int]
 def lane_render(ctx: Ctx) -> Result:
     code = ctx.sh('render', render_argv(ctx.sha, ctx.state_dir))
     render = ctx.production_receipt().get('render') or {}
+    if code == 0 and render.get('status') == 'verified-by-descendant':
+        evidence = render.get('verified_by_descendant') or {}
+        return True, Descendant(f'verified by descendant {render.get("live_commit")}: {evidence.get("reason")} '
+                                f'({evidence.get("detail")}); not an exact-SHA deploy'), 0
     if code == 0:
         return True, f'Render serves the merged backend ({render.get("status") or "live"})', 0
     return False, f'production-render exited {code}: {render.get("error") or "Render does not serve the merged backend"}', code
@@ -464,6 +487,42 @@ def render_log_scan(ctx: Ctx, lane: str = 'backend-probes') -> tuple[bool, str]:
     return (not bad), (f'{len(bad)} post-deploy error lines in the Render log' if bad else 'Render log clean')
 
 
+def production_migrations(ctx: Ctx, lane: str = 'backend-probes') -> tuple[Path | None, str]:
+    """(dir, '') holding the migrations of the commit Render serves (the merge, or the descendant that replaced it),
+    else (None, reason). The smoke replays them against the production catalog: this checkout is the pre-merge
+    source, and replaying it missed what other merges applied (2026-11-09: PR #1698's intentional index drop read
+    as drift in PR #1803's lane). A commit this checkout does not know yet gets one `git fetch origin main`."""
+    live = str((ctx.production_receipt().get('render') or {}).get('live_commit') or '')
+    commit = live if re.fullmatch(r'[0-9a-f]{40}', live) else ctx.sha
+    dest = ctx.state_dir / 'production-migrations' / commit
+    archive = ctx.state_dir / 'production-migrations' / f'{commit}.tar'
+    archive.parent.mkdir(parents=True, exist_ok=True)
+    argv = ['git', 'archive', '--format=tar', '-o', str(archive), commit, MIGRATIONS_PATH]
+    ctx.note(lane, f'{shlex.join(argv)} && tar -x -C {dest}')
+    code, _out, err = ctx.io.capture(argv, ctx.root, ctx.child_env())
+    fetch_failure = ''
+    if code != 0:
+        fetched, _out, fetch_err = ctx.io.capture(['git', 'fetch', '--quiet', 'origin', 'main'], ctx.root,
+                                                  ctx.child_env())
+        if fetched == 0:
+            code, _out, err = ctx.io.capture(argv, ctx.root, ctx.child_env())
+        else:
+            fetch_failure = f'; git fetch origin main exited {fetched}: {ctx.redact(fetch_err.strip())[:200]}'
+    if code != 0:
+        return None, (f'git archive {commit[:12]} {MIGRATIONS_PATH} failed: {ctx.redact(err.strip())[:200]}'
+                      f'{fetch_failure}')
+    try:
+        with tarfile.open(archive) as tar:
+            tar.extractall(dest, filter='data')
+    except (OSError, tarfile.TarError) as error:
+        return None, f'cannot extract {MIGRATIONS_PATH} of {commit[:12]}: {error}'
+    finally:
+        archive.unlink(missing_ok=True)
+    ctx.emit(lane, f'schema replay source: {MIGRATIONS_PATH} at {commit[:12]} '
+                   f'({"Render live commit" if commit == live else "merge commit"})')
+    return dest / MIGRATIONS_PATH, ''
+
+
 def lane_backend_probes(ctx: Ctx) -> Result:
     lane, url = 'backend-probes', BACKEND_URL
     ctx.note(lane, f'GET {url}/health')
@@ -486,7 +545,11 @@ def lane_backend_probes(ctx: Ctx) -> Result:
         ctx.emit(lane, body[:500].decode('utf-8', 'replace'))
         return False, f'FUNCTIONAL CHECK FAILED: /api/agents -> {status}', 1
     ctx.emit(lane, '/api/agents -> 200 (DB/Prisma path healthy)')
-    smoke = ctx.sh(lane, SMOKE_ARGV, cwd=ctx.root / 'back-end', drop=SMOKE_VARS)
+    migrations, reason = production_migrations(ctx, lane)
+    if migrations is None:
+        return False, reason, 1
+    smoke = ctx.sh(lane, SMOKE_ARGV, cwd=ctx.root / 'back-end', drop=SMOKE_VARS,
+                   extra={'SCHEMA_MIGRATIONS_DIR': str(migrations)})
     scanned, scan_reason = render_log_scan(ctx, lane)
     if smoke != 0 or not scanned:
         failures = ([f'prod-endpoint-smoke exited {smoke}'] if smoke else []) + ([scan_reason] if not scanned else [])
@@ -505,7 +568,7 @@ def lane_fly(ctx: Ctx) -> Result:
         receipt = ctx.production_receipt()
         fly = receipt.get('fly') or {}
         job, stage = fly.get('job_id'), fly.get('job_stage')
-        if not (job and stage and stage != 'SUCCEEDED'):
+        if not (job and stage and stage not in ('SUCCEEDED', 'ABORTED')):
             return False, f'Fly lane blocked (production exit {code}): {receipt.get("error") or "see [fly] output"}', code
         resume = show(resume_argv(job), cwd=ctx.root / 'back-end', root=ctx.root, env_file='back-end')
         if not ctx.resume_fly:
@@ -522,8 +585,10 @@ def lane_fly(ctx: Ctx) -> Result:
     fly = ctx.production_receipt().get('fly') or {}
     if fly.get('required') is False:
         return True, 'production gate open (no agent runtime change in the merge)', 0
+    carried = (fly.get('verified_by_descendant') or {}).get('descendant_job_id')
     return True, (f'deploy-agents run {fly.get("run_id")} attempt {fly.get("attempt")} job {fly.get("job_id")} '
-                  f'{fly.get("job_stage")} + monitor --verify'), 0
+                  f'{fly.get("job_stage")} + monitor --verify'
+                  + (f' (verified by descendant cutover {carried}, not its own)' if carried else '')), 0
 
 
 def lane_workflow_migration(ctx: Ctx) -> Result:
@@ -532,6 +597,24 @@ def lane_workflow_migration(ctx: Ctx) -> Result:
         return False, 'no fly.deployment_token for this sha in production.json; run the fly lane first', 1
     code = ctx.sh('workflow-migration', MIGRATION_ARGV, cwd=ctx.root / 'back-end', extra=migration_env(ctx.sha, token))
     return (code == 0), ('every migration row PASS' if code == 0 else f'validate-prod-workflow-migration exited {code}'), code
+
+
+def is_descendant(ctx: Ctx, live: str) -> bool:
+    """`live` strictly descends from the merge commit (`git merge-base --is-ancestor <merge> <live>`). A commit this
+    checkout does not know yet (a newer main merge) gets one `git fetch origin main`; any other git failure is a
+    LaneError, never an answer."""
+    if not re.fullmatch(r'[0-9a-f]{40}', live or '') or live == ctx.sha:
+        return False
+    argv = ['git', 'merge-base', '--is-ancestor', ctx.sha, live]
+    code, _out, err = ctx.io.capture(argv, ctx.root, ctx.child_env())
+    if code not in (0, 1):
+        fetched, _out, _err = ctx.io.capture(['git', 'fetch', '--quiet', 'origin', 'main'], ctx.root, ctx.child_env())
+        if fetched == 0:
+            code, _out, err = ctx.io.capture(argv, ctx.root, ctx.child_env())
+    if code not in (0, 1):
+        raise LaneError(f'git merge-base --is-ancestor {ctx.sha[:12]} {live[:12]} failed: {ctx.redact(err.strip())[:200]}'
+                        '; fetch origin main and rerun')
+    return code == 0
 
 
 def vercel_decide(statuses: object) -> tuple[str, str]:
@@ -546,11 +629,43 @@ def vercel_decide(statuses: object) -> tuple[str, str]:
     return 'pending', state
 
 
-def vercel_deployment(deployments: object) -> str | None:
-    for row in deployments if isinstance(deployments, list) else []:
-        if isinstance(row, dict) and (row.get('creator') or {}).get('login') == 'vercel[bot]':
-            return str(row.get('id'))
-    return None
+def vercel_rows(deployments: object) -> list[dict]:
+    return [row for row in deployments if isinstance(row, dict) and (row.get('creator') or {}).get('login')
+            == 'vercel[bot]'] if isinstance(deployments, list) else []
+
+
+def vercel_superseded(ctx: Ctx, mine: dict) -> tuple[str, str]:
+    """The merge's Vercel deployment is `inactive`: GitHub deactivates an older deployment once a newer one in the same
+    environment succeeds. (verdict, reason): `verified` only when the newest successful vercel[bot] deployment created
+    after ours in that environment is a strict descendant of the merge commit; `pending` while no newer deployment
+    succeeded but one is still in progress; otherwise `refused` (no newer success, an older or unrelated live commit)."""
+    ours, environment, created = str(mine.get('id')), mine.get('environment'), mine.get('created_at')
+    head = f'Vercel deployment {ours} inactive'
+    if not environment or not created:
+        return 'refused', f'{head}; it names no environment/created_at, so no newer production deployment is verifiable'
+    query = urllib.parse.urlencode({'environment': environment, 'per_page': 30})
+    newer = sorted((row for row in vercel_rows(ctx.gh_json(['api', f'repos/{{owner}}/{{repo}}/deployments?{query}']))
+                    if str(row.get('id')) != ours and str(row.get('created_at') or '') > str(created)),
+                   key=lambda row: str(row.get('created_at')), reverse=True)
+    pending = []
+    for row in newer:  # newest first: the first success is the live production deployment
+        decision, state = vercel_decide(ctx.gh_json(['api', f'repos/{{owner}}/{{repo}}/deployments/{row.get("id")}'
+                                                     '/statuses']))
+        if decision == 'pending':
+            pending.append(row)
+        if state != 'success':
+            continue
+        live = str(row.get('sha') or '')
+        if is_descendant(ctx, live):
+            return 'verified', (f'verified by descendant {live}: {head}; {environment} deployment {row.get("id")} for '
+                                f'{live[:12]} (a descendant of {ctx.sha[:12]}) success')
+        if pending:
+            break
+        return 'refused', (f'{head}; the live {environment} deployment {row.get("id")} is {live[:12] or "unknown"}, '
+                           f'not a descendant of {ctx.sha[:12]}')
+    if pending:
+        return 'pending', f'{head}; newer {environment} deployment {pending[-1].get("id")} still in progress'
+    return 'refused', f'{head} and no newer successful {environment} deployment exists'
 
 
 def lane_vercel(ctx: Ctx, attempts: int = 90, interval: float = 10.0) -> Result:
@@ -558,14 +673,22 @@ def lane_vercel(ctx: Ctx, attempts: int = 90, interval: float = 10.0) -> Result:
     ctx.note(lane, f'{ctx.gh} api repos/{{owner}}/{{repo}}/deployments?sha={ctx.sha} (vercel[bot]) + statuses')
     for attempt in range(1, attempts + 1):
         try:
-            deployment = vercel_deployment(ctx.gh_json(['api', f'repos/{{owner}}/{{repo}}/deployments?sha={ctx.sha}']))
-            if deployment:
+            rows = vercel_rows(ctx.gh_json(['api', f'repos/{{owner}}/{{repo}}/deployments?sha={ctx.sha}']))
+            if rows:
+                deployment = str(rows[0].get('id'))
                 statuses = ctx.gh_json(['api', f'repos/{{owner}}/{{repo}}/deployments/{deployment}/statuses'])
                 decision, state = vercel_decide(statuses)
                 ctx.emit(lane, f'Vercel: state={state} deployment={deployment}')
                 if decision == 'success':
                     return True, f'Vercel deployment {deployment} success', 0
-                if decision == 'failed':
+                if state == 'inactive':  # replaced by a newer deployment: only a live descendant verifies it
+                    verdict, reason = vercel_superseded(ctx, rows[0])
+                    ctx.emit(lane, f'Vercel: {verdict}: {reason}')
+                    if verdict == 'verified':
+                        return True, Descendant(reason), 0
+                    if verdict == 'refused':
+                        return False, reason, 1
+                elif decision == 'failed':
                     return False, f'Vercel deployment {deployment} {state}', 1
         except LaneError as error:  # a transient gh error is a missed poll, as in the old loop
             ctx.emit(lane, f'poll {attempt}: {error}')
@@ -728,37 +851,104 @@ def merge_time(ctx: Ctx) -> str:
     return iso(datetime.fromisoformat(out.strip().replace('Z', '+00:00')))
 
 
+MAC_RUN_FIELDS = 'databaseId,headSha,createdAt,headBranch,status,conclusion'
+MAC_DESCENDANT_HOPS = 5  # later releases followed when each one is itself cancelled by a newer tag
+
+
+def mac_release_runs(ctx: Ctx, lane: str, attempt: int) -> list[dict]:
+    try:
+        rows = ctx.gh_json(['run', 'list', '--workflow', 'release-mac-app.yml', '--limit', '30', '--json',
+                            MAC_RUN_FIELDS])
+    except LaneError as failure:
+        ctx.emit(lane, f'poll {attempt}: {failure}')
+        return []
+    return [row for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
+
+
+def mac_descendant_runs(ctx: Ctx, rows: list[dict], since: str, tried: set[str]) -> list[dict]:
+    """Release runs created after the merge for a tag on a strict descendant of the merge commit, oldest first (the
+    release that replaced ours), skipping runs already tried and runs GitHub cancelled for a newer tag."""
+    later = [row for row in rows if str(row.get('createdAt', '')) >= since and row.get('headSha') != ctx.sha
+             and str(row.get('databaseId')) not in tried
+             and not (row.get('status') == 'completed' and row.get('conclusion') == 'cancelled')]
+    return sorted((row for row in later if is_descendant(ctx, str(row.get('headSha') or ''))),
+                  key=lambda row: str(row.get('createdAt')))
+
+
+def mac_watch(ctx: Ctx, lane: str, run_id: str) -> tuple[int, str]:
+    """(exit code, conclusion) of `gh run watch --exit-status`; a non-zero exit reads the run's conclusion so a
+    cancelled (superseded) run is told apart from a failed one."""
+    code = ctx.sh(lane, [ctx.gh, 'run', 'watch', run_id, '--exit-status'])
+    if code == 0:
+        return 0, 'success'
+    try:
+        view = ctx.gh_json(['run', 'view', run_id, '--json', 'status,conclusion'])
+    except LaneError as failure:
+        ctx.emit(lane, f'run view {run_id}: {failure}')
+        return code, ''
+    return code, str(view.get('conclusion') or '') if isinstance(view, dict) else ''
+
+
 def lane_mac_release(ctx: Ctx, attempts: int = 60, interval: float = 10.0) -> Result:
     """release-mac-app.yml runs on the v* tag auto-tag-mac-app.yml points at the
     merge commit, so its headBranch is the tag, never main: bind the exact
-    headSha created after the merge (never a stale run)."""
+    headSha created after the merge (never a stale run). Both workflows keep at
+    most one pending run per concurrency group, so a newer merge can cancel the
+    merge's pending release (or its pending auto-tag, leaving no release run):
+    then only a later release run for a strict descendant of the merge commit
+    that succeeds verifies the lane, as PASS-verified-by-descendant."""
     lane, error = 'mac-release', ctx.plan['mac-release'].error
     if error:
         return False, f'cannot decide the Mac release: {error}', 1
     since = merge_time(ctx)
     ctx.note(lane, f'{ctx.gh} run list --workflow release-mac-app.yml --limit 30 (headSha={ctx.sha}, created>={since})')
-    run_id = None
+    run_id, descendant = None, None
     for attempt in range(1, attempts + 1):
-        try:
-            rows = ctx.gh_json(['run', 'list', '--workflow', 'release-mac-app.yml', '--limit', '30', '--json',
-                                'databaseId,headSha,createdAt,headBranch,status'])
-        except LaneError as failure:
-            ctx.emit(lane, f'poll {attempt}: {failure}')
-            rows = []
-        match = [r for r in rows if isinstance(r, dict) and r.get('headSha') == ctx.sha
-                 and str(r.get('createdAt', '')) >= since] if isinstance(rows, list) else []
+        rows = mac_release_runs(ctx, lane, attempt)
+        match = [r for r in rows if r.get('headSha') == ctx.sha and str(r.get('createdAt', '')) >= since]
         if match:
             run_id = str(match[0]['databaseId'])
             ctx.emit(lane, f'release run {run_id} ({match[0].get("headBranch")}) {match[0].get("status")}')
             break
+        later = mac_descendant_runs(ctx, rows, since, set())
+        if later:  # auto-tag serializes tags: a descendant's release with none for ours means ours was never tagged
+            descendant = later[0]
+            ctx.emit(lane, f'no release run for {ctx.sha[:12]}; descendant release run {descendant.get("databaseId")} '
+                           f'({descendant.get("headBranch")}) for {str(descendant.get("headSha"))[:12]}')
+            break
         if attempt < attempts:
             ctx.io.sleep(interval)
-    if not run_id:
+    if not run_id and not descendant:
         return False, (f'no release-mac-app.yml run for {ctx.sha[:12]} appeared within {attempts}x{interval:.0f}s '
                        '(check auto-tag-mac-app.yml)'), 1
-    code = ctx.sh(lane, [ctx.gh, 'run', 'watch', run_id, '--exit-status'])
-    return (code == 0), (f'release-mac-app run {run_id} success' if code == 0
-                         else f'release-mac-app run {run_id} failed (exit {code})'), code
+    tried: set[str] = set()
+    if run_id:
+        code, conclusion = mac_watch(ctx, lane, run_id)
+        if code == 0:
+            return True, f'release-mac-app run {run_id} success', 0
+        if conclusion != 'cancelled':
+            return False, f'release-mac-app run {run_id} failed (exit {code})', code
+        superseded = f'release-mac-app run {run_id} for {ctx.sha[:12]} was cancelled'
+        tried.add(run_id)
+    else:
+        code, superseded = 1, f'no release-mac-app run for {ctx.sha[:12]} was created (its auto-tag was superseded)'
+    for _hop in range(MAC_DESCENDANT_HOPS):
+        if descendant is None:
+            later = mac_descendant_runs(ctx, mac_release_runs(ctx, lane, 0), since, tried)
+            if not later:
+                return False, f'{superseded} and no later release run of a descendant of it exists', code or 1
+            descendant = later[0]
+        later_id, head = str(descendant.get('databaseId')), str(descendant.get('headSha'))
+        tried.add(later_id)
+        later_code, later_conclusion = mac_watch(ctx, lane, later_id)
+        if later_code == 0:
+            return True, Descendant(f'verified by descendant {head}: {superseded}; release-mac-app run {later_id} '
+                                    f'({descendant.get("headBranch")}) for {head[:12]} success'), 0
+        if later_conclusion != 'cancelled':
+            return False, (f'{superseded}; descendant release run {later_id} for {head[:12]} failed '
+                           f'(exit {later_code})'), later_code
+        descendant = None
+    return False, f'{superseded}; {MAC_DESCENDANT_HOPS} later descendant release runs were all cancelled', code or 1
 
 
 LANE_FUNCS: dict[str, Callable[[Ctx], Result]] = {
@@ -818,7 +1008,7 @@ def execute(ctx: Ctx, selected: set[str], meta: dict, lane_funcs: dict | None = 
         for dep in lane.deps:
             if dep in done:
                 done[dep].wait()
-        failed = [dep for dep in lane.deps if ctx.records[dep]['status'] != PASS]
+        failed = [dep for dep in lane.deps if ctx.records[dep]['status'] not in PASSED]
         if failed:
             ctx.emit(name, f'BLOCKED: dependency {", ".join(failed)} did not pass')
             return finish(name, status=BLOCKED, reason=f'dependency {", ".join(failed)} did not pass',
@@ -838,10 +1028,11 @@ def execute(ctx: Ctx, selected: set[str], meta: dict, lane_funcs: dict | None = 
         # The verdict lives in production-lanes.json and the final line, where the stall is never a PASS.
         if (passed or stalled) and name in FACTORY_LANES:
             ctx.factory('production-finish', name)
-        verdict = f'\u26a0\ufe0f\u26a0\ufe0f {STALL}' if stalled else PASS if passed else FAIL
-        ctx.emit(name, f'{verdict}: {reason}')
-        finish(name, status=STALL if stalled else PASS if passed else FAIL, reason=ctx.redact(reason),
-               exit_code=code, finished_at=iso(ctx.io.now()))
+        descended = passed is True and isinstance(reason, Descendant)
+        status = STALL if stalled else DESCENDANT if descended else PASS if passed else FAIL
+        shown = f'\u26a0\ufe0f\u26a0\ufe0f {STALL}' if stalled else status
+        ctx.emit(name, f'{shown}: {reason}')
+        finish(name, status=status, reason=ctx.redact(reason), exit_code=code, finished_at=iso(ctx.io.now()))
 
     def guarded(name: str) -> None:
         try:
@@ -997,6 +1188,8 @@ def main(argv: list[str] | None = None, *, io: IO | None = None, root: Path = RO
                        if records[n]['status'] == ELECTED)
     summary += ''.join(f' stall={n}:{json.dumps(records[n]["reason"])}' for n in applicable
                        if records[n]['status'] == STALL)
+    summary += ''.join(f' descendant={n}:{json.dumps(records[n]["reason"])}' for n in applicable
+                       if records[n]['status'] == DESCENDANT)
     for name in applicable:  # loud and last, where the verdict is read: satisfied, but never a PASS
         if records[name]['status'] == STALL:
             out(f'\u26a0\ufe0f\u26a0\ufe0f SKIPPED {name} (standing AgentCard release stall, never PASS): '

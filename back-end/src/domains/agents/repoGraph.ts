@@ -101,6 +101,23 @@ export const CODE_AGENT_LIST_MAX_ROOTS = 50;
 /** Newest code agents listed per requested root (so at most 50 x 50 rows). */
 export const CODE_AGENT_LIST_PER_ROOT = 50;
 
+/** Rename one task atomically with its owning user's scope; never alter the CLI session. */
+export async function renameCodeAgentForUser(
+  userId: string,
+  taskId: string,
+  title: string
+): Promise<{ code_agent_id: string; title: string } | null> {
+  const rows = await prisma.$queryRaw<Array<{ code_agent_id: string; title: string }>>`
+    UPDATE "ClaudeCodeSession" c
+    SET "taskName" = ${title}
+    FROM "Agent" a
+    WHERE c.id = ${taskId} AND a.id = c."agentId"
+      AND a."userId" = ${userId} AND a."deletedAt" IS NULL
+    RETURNING c.id AS code_agent_id, c."taskName" AS title
+  `;
+  return rows[0] ?? null;
+}
+
 export interface RootCodeAgentRow extends GraphCodeSessionRow {
   rootAgentId: string;
   codeSessionId: string | null;
@@ -109,6 +126,14 @@ export interface RootCodeAgentRow extends GraphCodeSessionRow {
   awaitingParent: unknown;
   /** The task is the newest of a code session that is not retired. */
   latestOfLiveSession: boolean;
+  /** The spawn's task_name; null for legacy rows and internal callers. */
+  taskName: string | null;
+  /** Its persistent code session's state (ACTIVE | PAUSED | RETIRED); null without one. */
+  sessionState: string | null;
+  /** That session's last keepalive (spawn keepalive / lease extension); null without one. */
+  sessionLastActiveAt: Date | null;
+  /** Some task of that session (this one or a later spawn attached to it) is running. */
+  sessionHasActiveTask: boolean;
 }
 
 /**
@@ -124,14 +149,19 @@ export async function listCodeAgentsForRoots(
   if (rootIds.length === 0) return [];
   return prisma.$queryRaw<RootCodeAgentRow[]>`
     SELECT r.id, r."agentId", r.status, r.goal, r."streamUrl", r."createdAt", r."codeProvider",
-           r."rootAgentId", r."codeSessionId", r."closeReason", r."awaitingParent",
+           r."rootAgentId", r."codeSessionId", r."closeReason", r."awaitingParent", r."taskName",
+           cs.state AS "sessionState", cs."lastActiveAt" AS "sessionLastActiveAt",
+           EXISTS (
+             SELECT 1 FROM "ClaudeCodeSession" n
+             WHERE n."codeSessionId" = r."codeSessionId" AND n.status = 'ACTIVE'
+           ) AS "sessionHasActiveTask",
            (cs.id IS NOT NULL AND cs.state <> 'RETIRED' AND NOT EXISTS (
              SELECT 1 FROM "ClaudeCodeSession" n
              WHERE n."codeSessionId" = r."codeSessionId" AND n."createdAt" > r."createdAt"
            )) AS "latestOfLiveSession"
     FROM (
       SELECT c.id, c."agentId", c.status::text AS status, c.goal, c."streamUrl", c."createdAt",
-             c."codeProvider", c."codeSessionId", c."closeReason", c."awaitingParent",
+             c."codeProvider", c."codeSessionId", c."closeReason", c."awaitingParent", c."taskName",
              a."busId" AS "rootAgentId",
              ROW_NUMBER() OVER (PARTITION BY a."busId" ORDER BY c."createdAt" DESC, c.id DESC) AS rank
       FROM "ClaudeCodeSession" c
@@ -224,6 +254,14 @@ export async function findCodeSessionChip(
       ? fields.code_provider
       : null;
   return { toolCallId, provider };
+}
+
+/** The owner's received row for one agent turn to its code session (one agent's rows only). */
+export async function findCodeTurnRow(ownerAgentId: string, codeTurnId: string) {
+  return prisma.message.findFirst({
+    where: { agentId: ownerAgentId, metadata: { path: ['code_turn_id'], equals: codeTurnId } },
+    select: { id: true, metadata: true },
+  });
 }
 
 export async function findMessageById(id: string) {

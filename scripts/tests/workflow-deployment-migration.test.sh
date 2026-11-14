@@ -130,7 +130,7 @@ require_text "$PIPELINE" '"--expected-hash", expected_hash, "--verify"' \
 # DOC GAP (reported, not edited): the executable Render old-instance drain wait
 # (RENDER_OLD_INSTANCE_DRAIN_SECONDS default/minimum 375 s measured from the exact
 # live producer deploy's finishedAt) existed only in the retired inline script
-# (DEPRECATED_deploy.md "First managed deployment"). No CLI code runs it; deploy.md
+# (the former /deploy skill "First managed deployment"). No CLI code runs it; deploy.md
 # keeps the rule, so assert the stated rule.
 require_text "$DEPLOY" 'old instances have drained for at least 375 s' "/deploy must wait through Render's maximum old-instance shutdown window plus margin"
 # Replacement matrix: executed by the production lane for the exact merge commit
@@ -502,6 +502,13 @@ require_text "$POOL_DRIVER" 'initialize-managed-worker-queue.ts' "fresh queues r
 require_text "$POOL_DRIVER" '"--verify-retired"' "recycled banks require their exact queue retirement certificate"
 require_text "$POOL_DRIVER" '"RETIRED" if managed else "RETAINED_LEGACY"' "legacy retention must not pretend retirement"
 require_text "$DEPLOY_AGENTS_WORKFLOW" 'secrets.PROD_DATABASE_URL' "shared control plane must use the production DB"
+# Cutover coalescing and the rollback guard need ancestry proofs: bounded history
+# (never the ~2.6 GB full benchmark history) plus the opted-in GitHub compare.
+require_text "$DEPLOY_AGENTS_WORKFLOW" 'fetch-depth: 64' "deploy checkout must carry bounded history for ancestry proofs"
+require_text "$DEPLOY_AGENTS_WORKFLOW" 'WORKER_DEPLOYMENT_ANCESTRY_GITHUB: "1"' "deploy cutover must opt into GitHub ancestry proofs"
+if grep -Eq 'fetch-depth: 0' "$DEPLOY_AGENTS_WORKFLOW"; then
+  fail "deploy-agents checkout must never fetch the full history"
+fi
 if grep -qE 'force-clear-generation-queue.ts|migrate-open-agent-workflows.ts' "$POOL_DRIVER" "$COOP"; then
   fail "routine pool cutover must not terminate unfinished work"
 fi

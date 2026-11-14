@@ -1,0 +1,27 @@
+import type { MeetingNotesConnections } from '../types';
+/**
+ * STATE MACHINE: MeetingNotesSection
+ * [MOUNTED] → provider choices; each card owns independent connection/sync state.
+ * Integrations → shared category → provider card → useMeetingNotes → mirrored API.
+ */
+import { MEETING_NOTES_TITLE, MEETING_NOTES_PROVIDERS } from '../config';
+import MeetingNotesProviderCard from './MeetingNotesProviderCard';
+
+export default function MeetingNotesSection({
+  connections,
+}: {
+  connections: MeetingNotesConnections;
+}) {
+  return (
+    <section aria-label={MEETING_NOTES_TITLE} className="space-y-3">
+      <h2 className="font-medium">{MEETING_NOTES_TITLE}</h2>
+      {MEETING_NOTES_PROVIDERS.map((provider) => (
+        <MeetingNotesProviderCard
+          key={provider}
+          provider={provider}
+          connection={connections[provider]}
+        />
+      ))}
+    </section>
+  );
+}

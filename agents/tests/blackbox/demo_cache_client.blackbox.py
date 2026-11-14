@@ -485,9 +485,69 @@ def test_history_normalization_runs_once_per_distinct_message():
     assert info.hits >= 5 * misses, info
 
 
+async def test_owned_recording_old_hits():
+    from owned_recording_cases import test_recording_never_consumes_legacy_hits
+    await test_recording_never_consumes_legacy_hits()
+
+
+async def test_owned_recording_browser():
+    from owned_recording_cases import test_recording_direct_browser_is_genuine
+    await test_recording_direct_browser_is_genuine()
+
+
+async def test_owned_recording_blobs():
+    from owned_recording_cases import test_recording_blobs_never_replace_historical_paths
+    await test_recording_blobs_never_replace_historical_paths()
+
+
+async def test_owned_recording_owner_identity_and_bounded_validation():
+    from owned_recording_cases import test_recording_owner_identity_and_bounded_validation
+    await test_recording_owner_identity_and_bounded_validation()
+
+
+async def test_owned_recording_native_and_compatibility_verdict_transport():
+    from owned_recording_cases import test_recording_native_and_compatibility_verdict_transport
+    await test_recording_native_and_compatibility_verdict_transport()
+
+
+async def test_owned_recording_direct_file_and_http_reads_are_bypassed():
+    from owned_recording_cases import test_recording_direct_file_and_http_reads_are_bypassed
+    await test_recording_direct_file_and_http_reads_are_bypassed()
+
+
+async def test_owned_recording_file_download():
+    from owned_recording_cases import test_recording_file_download_uses_current_bytes_and_owned_blob
+    await test_recording_file_download_uses_current_bytes_and_owned_blob()
+
+
+async def test_owned_recording_runtime_mode():
+    from owned_recording_cases import test_recording_runtime_mode_loss_never_soft_completes
+    await test_recording_runtime_mode_loss_never_soft_completes()
+
+
+async def test_owned_recording_write_guard():
+    from owned_recording_cases import test_recording_invalid_owner_cannot_write_directly
+    await test_recording_invalid_owner_cannot_write_directly()
+
+
+async def test_owned_real_recording():
+    from owned_recording_cases import test_real_recording_bypasses_history_and_soft_completion
+    await test_real_recording_bypasses_history_and_soft_completion()
+
+
 async def run_all_tests():
     print("demo-cache-client blackbox tests:")
     r = BlackboxResult()
+    await r.record_async("owned_real_recording", test_owned_real_recording)
+    await r.record_async("owned_recording_write_guard", test_owned_recording_write_guard)
+    await r.record_async("owned_recording_runtime_mode", test_owned_recording_runtime_mode)
+    await r.record_async("owned_recording_file_download", test_owned_recording_file_download)
+    await r.record_async("owned_recording_owner_identity_and_bounded_validation", test_owned_recording_owner_identity_and_bounded_validation)
+    await r.record_async("owned_recording_native_and_compatibility_verdict_transport", test_owned_recording_native_and_compatibility_verdict_transport)
+    await r.record_async("owned_recording_direct_file_and_http_reads_are_bypassed", test_owned_recording_direct_file_and_http_reads_are_bypassed)
+    await r.record_async("owned_recording_old_hits", test_owned_recording_old_hits)
+    await r.record_async("owned_recording_browser", test_owned_recording_browser)
+    await r.record_async("owned_recording_blobs", test_owned_recording_blobs)
     await r.record_async(
         "excluded_cached_candidate_not_replayed", test_excluded_cached_actual_candidate_is_not_replayed
     )

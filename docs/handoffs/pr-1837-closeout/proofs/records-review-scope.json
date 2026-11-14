@@ -1,0 +1,7 @@
+{
+  "change": "Broaden existing CodeRabbit closeout allowlist to include pr-1837-closeout alongside pr-1831 and pr-1857",
+  "runtime_behavior_changed": false,
+  "new_review_exclusions": [],
+  "reason": "Require substantive review of this public-safe records follow-up; default inherited filters excluded its directory",
+  "original_code_review_coverage_limit": "Earlier code PR inherited test/RCA filters unchanged; no retroactive broader-review claim"
+}

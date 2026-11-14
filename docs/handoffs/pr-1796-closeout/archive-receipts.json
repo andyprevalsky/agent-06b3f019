@@ -1,0 +1,276 @@
+{
+ "archives": {
+  "core": {
+   "name": "core",
+   "format": "PR1796-TAR-GZ-AESGCM-FRAMES-V1",
+   "bucket_env": "R2_BUCKET_TRACE_ARCHIVE",
+   "key_location": "TRACE_ARCHIVE_ENCRYPTION_KEY_B64 (back-end/agents env; trace archive key)",
+   "prefix": "devbox-closeout-private/pr1796-dd330764/core.tar.gz.aesgcm",
+   "frame_bytes": 67108864,
+   "base": "/",
+   "paths": [
+    "home/boxes/rose/.context/deploy-approval-batch.diff",
+    "home/boxes/rose/.context/deploy-approval-batch.json",
+    "home/boxes/rose/.context/deploy-collect.json",
+    "home/boxes/rose/.context/deploy-merged.json",
+    "home/boxes/rose/.context/deploy-pipeline",
+    "home/boxes/rose/.context/deploy-pipeline.attempt1-structural-timeout",
+    "home/boxes/rose/.context/deploy-pipeline.attempt2-smoke-release-stall",
+    "home/boxes/rose/.context/deploy-pipeline.attempt3-smoke-release-stall",
+    "home/boxes/rose/.context/deploy-pr.json",
+    "home/boxes/rose/.context/deploy-review-cycle.json",
+    "home/boxes/rose/.context/deploy-review-dispositions.jsonl",
+    "home/boxes/rose/.context/deploy-runs",
+    "home/boxes/rose/.context/factory-events.jsonl",
+    "home/boxes/rose/.context/frontend-builds",
+    "home/boxes/rose/.context/ngrok.log",
+    "home/boxes/rose/.context/pr1634-archive-recovery.env",
+    "home/boxes/rose/.context/rca-agentcard-401",
+    "home/boxes/rose/.context/services.json",
+    "home/boxes/rose/agents/.context",
+    "home/boxes/rose/agents/providers/fast_cache",
+    "home/boxes/rose/agents/navi-worker-log.txt",
+    "home/boxes/rose/back-end/backend-logs.log",
+    "home/boxes/rose/front-end/frontend-logs.log",
+    "home/boxes/rose/hub-poller-logs.log",
+    "home/boxes/rose/agents/.env.benchmark-temporal",
+    "home/boxes/rose/agents/benchmarks/runs/20261108_090117_ee62c52d-6a15-4110-860d-eb953a027655_agent-payment-production-abandonment.json",
+    "var/tmp/agc401/agentcard-prod-exception.json",
+    "var/tmp/agc401/archive-cloud.log",
+    "var/tmp/agc401/bin",
+    "var/tmp/agc401/commit-msg.txt",
+    "var/tmp/agc401/commit-msg2.txt",
+    "var/tmp/agc401/commit-msg3.txt",
+    "var/tmp/agc401/commit-msg4.txt",
+    "var/tmp/agc401/deletion-probe.json",
+    "var/tmp/agc401/deletion-probe.log",
+    "var/tmp/agc401/empty-manifest.json",
+    "var/tmp/agc401/env.sh",
+    "var/tmp/agc401/gates.attempt1.log",
+    "var/tmp/agc401/gates.attempt2.log",
+    "var/tmp/agc401/gates.attempt3.log",
+    "var/tmp/agc401/gates.log",
+    "var/tmp/agc401/harness-fix.patch",
+    "var/tmp/agc401/hub-index-pr1796.json",
+    "var/tmp/agc401/m1760.json",
+    "var/tmp/agc401/m1781.json",
+    "var/tmp/agc401/pr-body.md",
+    "var/tmp/agc401/prod-attempt-row.jsonl",
+    "var/tmp/agc401/production.log",
+    "var/tmp/agc401/push-trace.log",
+    "var/tmp/agc401/rca-case.md",
+    "var/tmp/agc401/restore.log",
+    "var/tmp/agc401/review-wait.log",
+    "var/tmp/agc401/review-wait2.log",
+    "var/tmp/agc401/review-wait3.log",
+    "var/tmp/agc401/review-wait4.log",
+    "var/tmp/agc401/review-wait5.log",
+    "var/tmp/agc401/review-wait6.log",
+    "var/tmp/agc401/review1-fix.patch",
+    "var/tmp/agc401/scripts",
+    "var/tmp/agc401/structural-solo.log",
+    "var/tmp/agc401/triage-attempt4.json"
+   ],
+   "gzip_sha256": "ad2093cd2c9eecec7bc918b45fc2d05b71fd4578506e7e5bba0464198f9d991d",
+   "gzip_bytes": 224789369,
+   "cipher": "AES-256-GCM nonce(12)||ciphertext, aad=object key",
+   "verified": "every part downloaded, authenticated and reassembled; gzip sha256 matches",
+   "restore": "decrypt each part in order with aad=its key, concatenate, tar -xzf",
+   "parts": [
+    {
+     "key": "devbox-closeout-private/pr1796-dd330764/core.tar.gz.aesgcm.part0000",
+     "sha256": "250e86001f6f20a3372fc099f534b3f0d2f3ec6f704e1c9a4bdf2272fa699c46",
+     "plain_bytes": 67108864
+    },
+    {
+     "key": "devbox-closeout-private/pr1796-dd330764/core.tar.gz.aesgcm.part0001",
+     "sha256": "3c6ef2666dcda04040a24194aa6bd4f96ed71484ce19dfc07a4dcaee24ab431a",
+     "plain_bytes": 67108864
+    },
+    {
+     "key": "devbox-closeout-private/pr1796-dd330764/core.tar.gz.aesgcm.part0002",
+     "sha256": "be8cb1ec6eab6be44b611e11d79d7c1f0023421f139d046194a0aad3b8c635fe",
+     "plain_bytes": 67108864
+    },
+    {
+     "key": "devbox-closeout-private/pr1796-dd330764/core.tar.gz.aesgcm.part0003",
+     "sha256": "1d747906312672f43c54e61b20967456537aad4a6e74a0dc692476dd85549172",
+     "plain_bytes": 23462777
+    }
+   ]
+  },
+  "cloud": {
+   "name": "cloud",
+   "format": "PR1796-TAR-GZ-AESGCM-FRAMES-V1",
+   "bucket_env": "R2_BUCKET_TRACE_ARCHIVE",
+   "key_location": "TRACE_ARCHIVE_ENCRYPTION_KEY_B64 (back-end/agents env; trace archive key)",
+   "prefix": "devbox-closeout-private/pr1796-dd330764/cloud.tar.gz.aesgcm",
+   "frame_bytes": 67108864,
+   "base": "/home/boxes/rose",
+   "paths": [
+    ".context/deploy-cloud"
+   ],
+   "gzip_sha256": "ed9d24ddd83700fafd43fa98e4bce7400b36fde72be9c5faf73464808599821f",
+   "gzip_bytes": 1317583716,
+   "cipher": "AES-256-GCM nonce(12)||ciphertext, aad=object key",
+   "verified": "every part downloaded, authenticated and reassembled; gzip sha256 matches",
+   "restore": "decrypt each part in order with aad=its key, concatenate, tar -xzf",
+   "parts": [
+    {
+     "key": "devbox-closeout-private/pr1796-dd330764/cloud.tar.gz.aesgcm.part0000",
+     "sha256": "d5f501348e789dcedf6f2efb4997c8aa25b53e5ecee4c8c4150aa15a3513152a",
+     "plain_bytes": 67108864
+    },
+    {
+     "key": "devbox-closeout-private/pr1796-dd330764/cloud.tar.gz.aesgcm.part0001",
+     "sha256": "463dfb34e492cabf3b5fddd6a8e941755af0edb9bf417f4a13075aa1b845ebc0",
+     "plain_bytes": 67108864
+    },
+    {
+     "key": "devbox-closeout-private/pr1796-dd330764/cloud.tar.gz.aesgcm.part0002",
+     "sha256": "04b438e88b7bb3ee096356e5e0c1d4f518706f7eb48346cec64bd7e70cae0897",
+     "plain_bytes": 67108864
+    },
+    {
+     "key": "devbox-closeout-private/pr1796-dd330764/cloud.tar.gz.aesgcm.part0003",
+     "sha256": "17a2780e2a62aefe837ffaa44f3671fc5351f82cc34685b9f12361c667ce3165",
+     "plain_bytes": 67108864
+    },
+    {
+     "key": "devbox-closeout-private/pr1796-dd330764/cloud.tar.gz.aesgcm.part0004",
+     "sha256": "fe75a07929816663083b6f594f9f15aa8a9823ace27a7a9db71ff5a8908e5519",
+     "plain_bytes": 67108864
+    },
+    {
+     "key": "devbox-closeout-private/pr1796-dd330764/cloud.tar.gz.aesgcm.part0005",
+     "sha256": "cfebe03610d4113559c7cfec926e40f6fdf8de3b31a10ba86b2718b3e3e95ff1",
+     "plain_bytes": 67108864
+    },
+    {
+     "key": "devbox-closeout-private/pr1796-dd330764/cloud.tar.gz.aesgcm.part0006",
+     "sha256": "9e176a430914db15347d4a1a3fa4b24d0ad07739b8d0266e248852b6c3f1fc57",
+     "plain_bytes": 67108864
+    },
+    {
+     "key": "devbox-closeout-private/pr1796-dd330764/cloud.tar.gz.aesgcm.part0007",
+     "sha256": "52a5f4e641110d2d0a8032e0c83c98c4a3b617ac5c385a8763f8bdbb5058f01e",
+     "plain_bytes": 67108864
+    },
+    {
+     "key": "devbox-closeout-private/pr1796-dd330764/cloud.tar.gz.aesgcm.part0008",
+     "sha256": "ee32d60c4aac911ba46c3232af946ff956cbe3e9596f9d375d5d15b09775293c",
+     "plain_bytes": 67108864
+    },
+    {
+     "key": "devbox-closeout-private/pr1796-dd330764/cloud.tar.gz.aesgcm.part0009",
+     "sha256": "c164726693307ed9b34e9426bb8cb817af13906e11b234c8771df91b02cbe974",
+     "plain_bytes": 67108864
+    },
+    {
+     "key": "devbox-closeout-private/pr1796-dd330764/cloud.tar.gz.aesgcm.part0010",
+     "sha256": "aa39d132a8449b69dc9bab4a3707c61e2499f175004f53c78fc54f94b0ce9660",
+     "plain_bytes": 67108864
+    },
+    {
+     "key": "devbox-closeout-private/pr1796-dd330764/cloud.tar.gz.aesgcm.part0011",
+     "sha256": "0b39b7891c48216ca5cb6bdc2cf3ebdbe903c8a3f4eb49a27320468e7587db0c",
+     "plain_bytes": 67108864
+    },
+    {
+     "key": "devbox-closeout-private/pr1796-dd330764/cloud.tar.gz.aesgcm.part0012",
+     "sha256": "160ecc028b53f3419c27139aa24df8738ff23044396eb897044acda9ae16dded",
+     "plain_bytes": 67108864
+    },
+    {
+     "key": "devbox-closeout-private/pr1796-dd330764/cloud.tar.gz.aesgcm.part0013",
+     "sha256": "86adf512b212b79e3cbc876539ae25ae712e8fd2f18dbefec14e9471ecd91d17",
+     "plain_bytes": 67108864
+    },
+    {
+     "key": "devbox-closeout-private/pr1796-dd330764/cloud.tar.gz.aesgcm.part0014",
+     "sha256": "ff047f8b1f9b2c86dd6cbb0d0785b5ff6e19738be1407263ca0cffc67a62293c",
+     "plain_bytes": 67108864
+    },
+    {
+     "key": "devbox-closeout-private/pr1796-dd330764/cloud.tar.gz.aesgcm.part0015",
+     "sha256": "014c3db457a6e3717ff2e14e076e83c7332f8c0b50cde647478968a136524ef3",
+     "plain_bytes": 67108864
+    },
+    {
+     "key": "devbox-closeout-private/pr1796-dd330764/cloud.tar.gz.aesgcm.part0016",
+     "sha256": "76fcbfb610d34c8b43cb07d22c20cb2b943bf7ca9f77dab15f335ea05388da55",
+     "plain_bytes": 67108864
+    },
+    {
+     "key": "devbox-closeout-private/pr1796-dd330764/cloud.tar.gz.aesgcm.part0017",
+     "sha256": "bb747a8bba23e582ab0757b1b75faa9cb8e364d126cf2d8a23ed574776ab9bfd",
+     "plain_bytes": 67108864
+    },
+    {
+     "key": "devbox-closeout-private/pr1796-dd330764/cloud.tar.gz.aesgcm.part0018",
+     "sha256": "ddc5f0a713a6bb9099c47d66b5cda45837a3b0f188246927d89b63a9d6b14f41",
+     "plain_bytes": 67108864
+    },
+    {
+     "key": "devbox-closeout-private/pr1796-dd330764/cloud.tar.gz.aesgcm.part0019",
+     "sha256": "e5ae76861f2d853c1f5b8f3a17ccf0f4856ddf513bdab64e525422259e33ddd2",
+     "plain_bytes": 42515300
+    }
+   ]
+  },
+  "extra": {
+   "name": "extra",
+   "format": "PR1796-TAR-GZ-AESGCM-FRAMES-V1",
+   "bucket_env": "R2_BUCKET_TRACE_ARCHIVE",
+   "key_location": "TRACE_ARCHIVE_ENCRYPTION_KEY_B64 (back-end/agents env; trace archive key)",
+   "prefix": "devbox-closeout-private/pr1796-dd330764/extra.tar.gz.aesgcm",
+   "frame_bytes": 67108864,
+   "base": "/",
+   "paths": [
+    "var/tmp/agc401/benchwt/.context",
+    "var/tmp/agc401/solo-bench.log"
+   ],
+   "gzip_sha256": "47fc5c9709801ca9972a1b7fae9c8c124f3d8f49c9ed0c2a1b0e8cfb61c7936e",
+   "gzip_bytes": 47071967,
+   "cipher": "AES-256-GCM nonce(12)||ciphertext, aad=object key",
+   "verified": "every part downloaded, authenticated and reassembled; gzip sha256 matches",
+   "restore": "decrypt each part in order with aad=its key, concatenate, tar -xzf",
+   "parts": [
+    {
+     "key": "devbox-closeout-private/pr1796-dd330764/extra.tar.gz.aesgcm.part0000",
+     "sha256": "bf03e587c04d81a2ab4c08722f376d84f3caabe6f77fa4ade7920c9c178c7600",
+     "plain_bytes": 47071967
+    }
+   ]
+  },
+  "extra2": {
+   "name": "extra2",
+   "format": "PR1796-TAR-GZ-AESGCM-FRAMES-V1",
+   "bucket_env": "R2_BUCKET_TRACE_ARCHIVE",
+   "key_location": "TRACE_ARCHIVE_ENCRYPTION_KEY_B64 (back-end/agents env; trace archive key)",
+   "prefix": "devbox-closeout-private/pr1796-dd330764/extra2.tar.gz.aesgcm",
+   "frame_bytes": 67108864,
+   "base": "/",
+   "paths": [
+    "var/tmp/agc401/benchwt2/.context",
+    "var/tmp/agc401/solo-bench2.log",
+    "var/tmp/agc401/quiet-loop.log",
+    "var/tmp/agc401/solo-gated-1.log",
+    "var/tmp/agc401/solo-gated-2.log",
+    "var/tmp/agc401/case-correction.md"
+   ],
+   "gzip_sha256": "8e6e2a6857f514566c2d642bd1dfa10cc5bce2dabf06d9fd671a3e64669e7878",
+   "gzip_bytes": 56349444,
+   "cipher": "AES-256-GCM nonce(12)||ciphertext, aad=object key",
+   "verified": "every part downloaded, authenticated and reassembled; gzip sha256 matches",
+   "restore": "decrypt each part in order with aad=its key, concatenate, tar -xzf",
+   "parts": [
+    {
+     "key": "devbox-closeout-private/pr1796-dd330764/extra2.tar.gz.aesgcm.part0000",
+     "sha256": "ade8708c3fedca8ae31e80e100854e281abf8b5c8d4bf6af51bb78a544a190d0",
+     "plain_bytes": 56349444
+    }
+   ]
+  }
+ }
+}

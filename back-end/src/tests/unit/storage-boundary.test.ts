@@ -5,6 +5,7 @@ import assert from 'node:assert';
 import {
   MAX_FILE_SIZE,
   MAX_TOTAL_SIZE,
+  getSignedUrl,
   processUploadedFile,
   putStorageObject,
   validateTotalSize,
@@ -97,6 +98,77 @@ async function main(): Promise<void> {
     }
   });
 
+  await test('a stored upload is served back through its signed URL', async () => {
+    // Hermetic twin of the live report-bug-storage-live probe: the real storage
+    // client stores, signs and reads back the same bytes from a fake Storage API.
+    const oldUrl = process.env.SUPABASE_URL;
+    const oldKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+    const oldFetch = globalThis.fetch;
+    const objects = new Map<string, Buffer>();
+    const signed: { path: string; expiresIn: unknown }[] = [];
+    const json = (body: unknown, status = 200) =>
+      new Response(JSON.stringify(body), {
+        status,
+        headers: { 'content-type': 'application/json' },
+      });
+    try {
+      process.env.SUPABASE_URL = 'https://example.supabase.co';
+      process.env.SUPABASE_SERVICE_ROLE_KEY = 'dummy';
+      globalThis.fetch = (async (input, init) => {
+        const url = new URL(input instanceof Request ? input.url : String(input));
+        const upload = /^\/storage\/v1\/object\/attachments\/(.+)$/.exec(url.pathname);
+        if (upload && init?.method === 'POST') {
+          const body = init.body;
+          const bytes =
+            body instanceof Blob
+              ? Buffer.from(await body.arrayBuffer())
+              : body instanceof FormData
+                ? Buffer.from(await (body.get('') as Blob).arrayBuffer())
+                : Buffer.from(body as Uint8Array);
+          objects.set(decodeURIComponent(upload[1]), bytes);
+          return json({ Key: `attachments/${upload[1]}` });
+        }
+        const sign = /^\/storage\/v1\/object\/sign\/attachments\/(.+)$/.exec(url.pathname);
+        if (sign && init?.method === 'POST') {
+          const path = decodeURIComponent(sign[1]);
+          signed.push({ path, expiresIn: JSON.parse(String(init.body)).expiresIn });
+          if (!objects.has(path))
+            return json(
+              { statusCode: '404', error: 'not_found', message: 'Object not found' },
+              400
+            );
+          return json({ signedURL: `/object/sign/attachments/${sign[1]}?token=t` });
+        }
+        if (sign && url.searchParams.get('token') === 't') {
+          const stored = objects.get(decodeURIComponent(sign[1]));
+          return stored ? new Response(stored) : json({ error: 'not_found' }, 404);
+        }
+        throw new Error(`unexpected storage request ${init?.method ?? 'GET'} ${url.href}`);
+      }) as typeof fetch;
+
+      const png = Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex');
+      const pointer = await processUploadedFile('user-1', png, 'live view.png', 'image/png');
+      const signedUrl = await getSignedUrl(pointer.storage_path, 604_800);
+      assert.deepEqual(signed, [{ path: pointer.storage_path, expiresIn: 604_800 }]);
+      const served = await fetch(signedUrl);
+      assert.equal(served.status, 200);
+      assert.ok(
+        Buffer.from(await served.arrayBuffer()).equals(png),
+        'signed URL served other bytes'
+      );
+      await assert.rejects(
+        getSignedUrl('user-1/missing.png', 60),
+        /Failed to generate signed URL: Object not found/
+      );
+    } finally {
+      if (oldUrl === undefined) delete process.env.SUPABASE_URL;
+      else process.env.SUPABASE_URL = oldUrl;
+      if (oldKey === undefined) delete process.env.SUPABASE_SERVICE_ROLE_KEY;
+      else process.env.SUPABASE_SERVICE_ROLE_KEY = oldKey;
+      globalThis.fetch = oldFetch;
+    }
+  });
+
   await test('putStorageObject treats an existing write-once object as stored', async () => {
     // Supabase answers a duplicate upload with HTTP 400 and statusCode "409" in the body
     // (a re-displayed page with the same content hash: display dedupe, not a failure).
@@ -159,5 +231,5 @@ void main().then(() => {
     process.exit(1);
   }
 
-  console.log(`\n${passed}/5 storage boundary tests passed`);
+  console.log(`\n${passed}/${passed} storage boundary tests passed`);
 });

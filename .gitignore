@@ -114,6 +114,7 @@ browser-agent-recordings/
 /codex/
 /prime-agent/
 /kimi-code/
+/openworker/
 
 # Prompt review tool — generated artifacts (regenerable via `bash prompt-review/run.sh`)
 prompt-review/data.json
@@ -123,3 +124,9 @@ prompt-review/.cache/
 
 # FCaptcha upstream source (reference only, not committed)
 agents/tests/e2e/fcaptcha_src/
+
+# Image-build git seed staged in the build context (scripts/run-bench-cloud)
+.cloudbench-git-seed/
+# RCA case index: generated locally by `python3 scripts/rca_archive.py reindex`.
+# Never committed — every case-adding PR rewrote it and conflicted on GitHub.
+/docs/rca/INDEX.md

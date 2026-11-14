@@ -7,8 +7,10 @@ import {
   type AgentCardSandboxSettlementInput,
   type AgentCardSandboxSettlementResult,
 } from '../../providers/agentcard/sandbox-settlement';
-import { resolveBenchmarkCardholderId } from '../../providers/agentcard/benchmark-float';
-import { getOrgCardholderVerificationStatus } from '../../providers/agentcard/org-onboarding';
+import { validateV2SandboxFixtureUser } from '../../providers/agentcard/v2-onboarding';
+import { saveV2ConnectedUserId } from '../../providers/agentcard/store';
+import type { AgentCardV2Request } from '../../providers/agentcard/api-v2';
+import { nonLocalDatabaseReason } from '../../utils/localDatabaseUrl';
 import { cleanupAgentPurchaseCards } from '../../providers/purchaseCleanup';
 import { stripe } from '../../providers/stripe';
 import {
@@ -18,13 +20,12 @@ import {
   normalizeLineItems,
   paymentMethodIdForBenchmarkCard,
 } from './catalog';
-import {
-  prepareBenchmarkAgentCardResidual,
-  type BenchmarkResidualDependencies,
-} from './benchmarkResidual';
+import type { BenchmarkResidualDependencies } from './benchmarkResidual';
 import {
   getPhoneBenchmarkPaymentAuditPathOverride,
-  isAgentCardOrgOAuthConfigured,
+  getBenchmarkV2FixtureUserId,
+  getSandboxFixtureDatabaseUrl,
+  isProductionEnv,
   TEST_PAYMENT_PUBLIC_BASE_URL,
 } from './config';
 import { TestPaymentError } from './errors';
@@ -52,7 +53,8 @@ interface TestPaymentDependencies extends BenchmarkResidualDependencies {
   settleAgentCardSandboxPayment?: (
     input: AgentCardSandboxSettlementInput
   ) => Promise<AgentCardSandboxSettlementResult>;
-  getCardholderVerificationStatus?: (cardholderId: string) => Promise<string>;
+  getV2FixtureUserId?: () => string | undefined;
+  v2Request?: AgentCardV2Request;
   /** Override live list_cardholders resolution (unit tests / offline fixtures). */
   resolveCardholderId?: () => Promise<string>;
 }
@@ -66,55 +68,32 @@ export async function configureBenchmarkAgentCardSetup(
 ): Promise<{ status: 'connect_required' | 'connected' | 'residual_ready' }> {
   const userId = typeof input.userId === 'string' ? input.userId.trim() : '';
   if (userId === '') throw new TestPaymentError('userId is required');
-  if (input.action === 'prepare-residual') {
-    return prepareBenchmarkAgentCardResidual(dependencies);
-  }
-  if (input.action === 'reset') {
-    await testPaymentRepo.resetBenchmarkAgentCardSetup(userId);
-    return { status: 'connect_required' };
-  }
-  if (input.action === 'complete') {
-    // Never trust BENCHMARK_AGENTCARD_CARDHOLDER_ID alone — per-task "complete"
-    // previously overwrote setup-benchmark-payment's live resolve with a stale id,
-    // producing create_card "Cardholder not found" loops.
-    let cardholderId: string;
-    try {
-      cardholderId = await (dependencies.resolveCardholderId ?? resolveBenchmarkCardholderId)();
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
+  if (
+    input.action === 'reset' ||
+    input.action === 'complete' ||
+    input.action === 'prepare-residual'
+  ) {
+    if (isProductionEnv() || nonLocalDatabaseReason(getSandboxFixtureDatabaseUrl()) !== null)
       throw new TestPaymentError(
-        `Benchmark AgentCard cardholder resolution failed: ${message}`,
-        502
+        'Sandbox AgentCard setup unavailable outside a local non-production database',
+        403
+      );
+    const providerUserId = (dependencies.getV2FixtureUserId ?? getBenchmarkV2FixtureUserId)();
+    if (providerUserId === undefined || providerUserId.trim() === '') {
+      throw new TestPaymentError(
+        'BENCHMARK_AGENTCARD_V2_USER_ID is required; complete the signed sandbox connection first. Legacy cardholderId is not a v2 identity.',
+        409
       );
     }
-    if (cardholderId.trim() === '') {
-      throw new TestPaymentError(
-        'Benchmark AgentCard cardholder resolution returned an empty id',
-        502
-      );
+    await validateV2SandboxFixtureUser(providerUserId, dependencies.v2Request);
+    // v2 company-funded issuance uses organization transfers; there is no MCP
+    // cardholder headroom to sweep. Legacy recovery remains in benchmarkResidual.
+    if (input.action === 'prepare-residual') return { status: 'residual_ready' };
+    if (input.action === 'reset') {
+      await testPaymentRepo.resetBenchmarkAgentCardSetup(userId);
+      return { status: 'connect_required' };
     }
-    const getVerificationStatus =
-      dependencies.getCardholderVerificationStatus ??
-      (isAgentCardOrgOAuthConfigured() ? getOrgCardholderVerificationStatus : undefined);
-    if (getVerificationStatus !== undefined) {
-      let verificationStatus: string;
-      try {
-        verificationStatus = await getVerificationStatus(cardholderId);
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        throw new TestPaymentError(
-          `Benchmark AgentCard cardholder readiness check failed: ${message}`,
-          502
-        );
-      }
-      if (verificationStatus !== 'verified' && verificationStatus !== 'approved') {
-        throw new TestPaymentError(
-          `Benchmark AgentCard cardholder is not ready (${verificationStatus})`,
-          409
-        );
-      }
-    }
-    await testPaymentRepo.completeBenchmarkAgentCardSetup(userId, cardholderId);
+    await saveV2ConnectedUserId(userId, providerUserId);
     return { status: 'connected' };
   }
   throw new TestPaymentError('action must be reset, complete, or prepare-residual');

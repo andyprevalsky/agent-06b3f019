@@ -790,6 +790,83 @@ def releasing(*releases: Path):
             release.touch()
 
 
+def check_identity_verified_zombie_memory(tmp: Path) -> None:
+    """Existing sampler owner: real ESRCH zombie plus conservative fake-proc negatives."""
+    pipeline = load_module("pipeline_verified_zombie", DRIVER)
+    proc = tmp / 'identity-zombie-proc'
+    pid = 901
+    (proc / str(pid)).mkdir(parents=True)
+    stat_path, rollup = proc / str(pid) / 'stat', proc / str(pid) / 'smaps_rollup'
+    def stat_text(state='S', birth='100', threads='1'):
+        fields = [state, '1'] + ['0'] * 17 + [birth, '0', '0']
+        fields[17] = threads
+        return f"{pid} (fake with spaces) {' '.join(fields)}\n"
+    stat_path.write_text(stat_text())
+    original_read = Path.read_text
+    original_exists = Path.exists
+    def observe(*, error=None, current=None, vanished=False, initial='S'):
+        stat_path.write_text(stat_text(initial))
+        calls = 0
+        def read(path, *args, **kwargs):
+            nonlocal calls
+            if path == rollup:
+                calls += 1
+                if error is not None:
+                    raise error
+                return 'Pss: 2048 kB\nPss_Anon: 1024 kB\n'
+            if path == stat_path and calls and current is not None:
+                return current
+            return original_read(path, *args, **kwargs)
+        def exists(path):
+            if vanished and path == proc / str(pid) and calls:
+                return False
+            return original_exists(path)
+        with patch.object(Path, 'read_text', read), patch.object(Path, 'exists', exists):
+            result = pipeline.sample_lane_tree_memory({pid}, proc)
+        assert calls == 1, 'one original smaps read, no retry'
+        return result
+    zero = {pid: {'anon_mb': 0.0, 'pss_mb': 0.0}}
+    unknown = {pid: None}
+    # Same observed identity, current Z at failedread; both initial Z and S->Z allowed.
+    for initial in ('S', 'Z'):
+        assert observe(error=ProcessLookupError(3, 'synthetic'), current=stat_text('Z'), initial=initial) == zero
+    for threads in ('2','0','malformed','-1','1.0'):
+        assert observe(error=ProcessLookupError(3, 'synthetic'), current=stat_text('Z',threads=threads)) == unknown
+    assert observe(error=PermissionError(13, 'synthetic'), current=stat_text('S')) == unknown
+    assert observe(error=ProcessLookupError(3, 'synthetic'), current=stat_text('S')) == unknown
+    assert observe(error=ProcessLookupError(3, 'synthetic'), current=stat_text('Z','101')) == unknown
+    assert observe(error=ProcessLookupError(3, 'synthetic'), current=stat_text('S','101'), initial='Z') == unknown
+    assert observe(error=ProcessLookupError(3, 'synthetic'), current='malformed') == unknown
+    assert observe(error=ProcessLookupError(3, 'synthetic'), vanished=True) == zero
+    assert observe() == {pid: {'anon_mb':1.0,'pss_mb':2.0}}
+    def malformed_read(path,*args,**kwargs):
+        return 'Pss: malformed\nPss_Anon: 1024 kB\n' if path==rollup else original_read(path,*args,**kwargs)
+    with patch.object(Path,'read_text',malformed_read):
+        assert pipeline.sample_lane_tree_memory({pid},proc)==unknown
+
+
+def check_identity_verified_zombie_memory_real(tmp: Path) -> None:
+    """Physical owning RED is independently runnable, not masked by fake-proc RED."""
+    pipeline = load_module("pipeline_verified_zombie_real", DRIVER)
+    if sys.platform == 'linux':
+        child = os.fork()
+        if child == 0:
+            os._exit(0)
+        try:
+            child_stat = Path('/proc') / str(child) / 'stat'
+            def is_zombie():
+                return child_stat.read_text().rsplit(') ',1)[1].split()[0] == 'Z'
+            await_fixture(is_zombie, 'owned child zombie before waitpid')
+            before = child_stat.read_text().rsplit(') ',1)[1].split()
+            assert before[0] == 'Z'
+            assert pipeline.sample_lane_tree_memory({child}) == {child:{'anon_mb':0.0,'pss_mb':0.0}}
+            after = child_stat.read_text().rsplit(') ',1)[1].split()
+            assert after[0] == 'Z' and after[19] == before[19]
+        finally:
+            reaped, status = os.waitpid(child,0)  # Exact own exited child only; no signals.
+            assert reaped == child and os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0
+
+
 def check_observation_validity(tmp: Path, env: dict[str, str]) -> None:
     """Review of f3127ca41: the credit must bind to a fresh, fully observed
     PSS sample. (1) Summed RSS is never a PSS substitute: shared pages count
@@ -2485,6 +2562,8 @@ def main() -> int:
         with patch.dict(os.environ, {"DEPLOY_ADMISSION_CREDIT": "0"}):
             check_materialized_reservation_credit(tmp / "inherited-flag", env, holder_start_delay_s=1.5)
         check_observation_validity(tmp, env)
+        check_identity_verified_zombie_memory(tmp)
+        check_identity_verified_zombie_memory_real(tmp)
         check_semantic_stack_beside_stack_owners(tmp, env)
         check_lane_scoped_reuse(tmp, env, source_root)
         check_reconcile_reused_lane(tmp)
@@ -2617,7 +2696,9 @@ def check_production_fly_wait(tmp: Path, env: dict[str, str]) -> None:
         "#!/usr/bin/env bash\n"
         'echo "$*" >> "$FAKE_GH_DIR/node-calls.log"\n'
         'case " $* " in\n'
-        '  *worker-deployment-queue.ts*) cat "$FAKE_GH_DIR/job.json" ;;\n'
+        '  *worker-deployment-queue.ts*) args="$*"; id="${args##*--job-id }"; id="${id%% *}"\n'
+        '    f="$FAKE_GH_DIR/job-$id.json"\n'
+        '    [ -f "$f" ] || f="$FAKE_GH_DIR/job.json"; cat "$f" ;;\n'
         '  *monitor-cooperative-cutover.ts*) exit "${FAKE_MONITOR_EXIT:-0}" ;;\n'
         '  *) echo "unexpected node $*" >&2; exit 1 ;;\n'
         "esac\n")
@@ -2631,7 +2712,7 @@ def check_production_fly_wait(tmp: Path, env: dict[str, str]) -> None:
     def reset(list_rows: list[dict], views: list[dict], log: str = "") -> None:
         for stale in fake.glob("view-*"):
             stale.unlink()
-        for stale in (calls, fake / "node-calls.log"):
+        for stale in (calls, fake / "node-calls.log", *fake.glob("job-*.json")):
             stale.unlink(missing_ok=True)
         (fake / "list.json").write_text(json.dumps(list_rows))
         for index, view in enumerate(views, start=1):
@@ -2768,6 +2849,69 @@ def check_production_fly_wait(tmp: Path, env: dict[str, str]) -> None:
         text=True, timeout=120)
     assert ran.returncode == 1 and "monitor-cooperative-cutover.ts --verify failed (exit 3)" in ran.stdout, ran.stdout
     assert "dispatch" not in call_lines(), call_lines()
+
+    # 7. The merged job never cut over itself: the queue coalesced it into a
+    #    queued git descendant (SUPERSEDED). The gate opens only on that
+    #    descendant's SUCCEEDED job + monitor --verify, recorded as verified by
+    #    descendant cutover; a pending, non-descendant or unlinked one blocks.
+    head = subprocess.run([*git, "rev-parse", "HEAD"], check=True, stdout=subprocess.PIPE, text=True).stdout.strip()
+    tree = subprocess.run([*git, "rev-parse", f"{runtime}^{{tree}}"], check=True, stdout=subprocess.PIPE,
+                          text=True).stdout.strip()
+    later = subprocess.run([*git, "commit-tree", tree, "-p", runtime, "-m", "later main merge"], check=True,
+                           stdout=subprocess.PIPE, text=True).stdout.strip()
+    descendant_id = "d" * 64
+
+    def write_superseded(descendant_stage: str, descendant_source: str, link: object = descendant_id) -> None:
+        (fake / "job.json").write_text(json.dumps({
+            "jobId": job_id, "stage": "SUPERSEDED", "identity": {"app": "app", "sourceCommit": runtime,
+                                                                  "attempt": "123-1"},
+            "evidence": {"SUPERSEDED": {"supersededBy": link}}}))
+        (fake / f"job-{descendant_id}.json").write_text(json.dumps({
+            "jobId": descendant_id, "stage": descendant_stage,
+            "identity": {"app": "app", "sourceCommit": descendant_source, "attempt": "130-1", "surfaceHash": "c0ffee"}}))
+
+    done = {"status": "completed", "conclusion": "success", "attempt": 1, "url": running["url"]}
+    reset([running], [done], log)
+    write_superseded("SUCCEEDED", later)
+    ran = run_production(runtime, tmp / "production-state-7a")
+    assert ran.returncode == 0, ran.stdout
+    assert call_lines()[-1] == "dispatch", call_lines()
+    assert f"verified_by=descendant-cutover descendant={descendant_id}" in ran.stdout, ran.stdout
+    node_calls = (fake / "node-calls.log").read_text().splitlines()
+    assert node_calls[0].endswith(f"read --job-id {job_id}") and node_calls[1].endswith(f"read --job-id {descendant_id}")
+    assert node_calls[2].endswith(f"monitor-cooperative-cutover.ts --job-id {descendant_id} --verify"), node_calls
+    receipt = json.loads((tmp / "production-state-7a" / "production.json").read_text())
+    verified = receipt["cutover_verify"]
+    assert receipt["status"] == "passed" and receipt["fly"]["job_stage"] == "SUPERSEDED", receipt
+    assert verified["verified_by"] == "descendant-cutover" and verified["job_stage"] == "SUPERSEDED", verified
+    assert verified["descendant_job_id"] == descendant_id and verified["descendant_source_commit"] == later, verified
+    assert verified["chain"] == [job_id, descendant_id] and verified["job_id"] == job_id, verified
+    assert receipt["fly"]["verified_by_descendant"]["descendant_job_id"] == descendant_id, receipt["fly"]
+    for stage, source, link, expected in (
+            ("PREPARING", later, descendant_id, f"SUPERSEDED by {descendant_id}, which is PREPARING, not SUCCEEDED"),
+            ("SUCCEEDED", tests_only, descendant_id, f"commit {tests_only} is not a descendant of {runtime}"),
+            ("SUCCEEDED", "e" * 40, descendant_id, "could not be proven (missing history)"),
+            ("SUCCEEDED", later, None, "has no valid supersededBy link")):
+        reset([running], [done], log)
+        write_superseded(stage, source, link)
+        ran = run_production(runtime, tmp / f"production-state-7-{stage}-{source[:4]}-{link is None}")
+        assert ran.returncode == 1 and expected in ran.stdout, (expected, ran.stdout)
+        assert "dispatch" not in call_lines(), call_lines()
+        assert "monitor-cooperative-cutover.ts" not in (fake / "node-calls.log").read_text(), "no monitor before proof"
+    assert subprocess.run([*git, "rev-parse", "HEAD"], check=True, stdout=subprocess.PIPE,
+                          text=True).stdout.strip() == head, "the descendant fixture must not move HEAD"
+    # 8. The queue refused an older/diverged release instead of rolling the live one
+    #    back: blocked with the refusal, no resume advice, no monitor, no dispatch.
+    reset([running], [done], log)
+    (fake / "job.json").write_text(json.dumps({
+        "jobId": job_id, "stage": "ABORTED", "identity": {"app": "app", "sourceCommit": runtime, "attempt": "123-1"},
+        "evidence": {"ABORTED": {"reason": "ROLLBACK_REFUSED", "liveJobId": descendant_id,
+                                 "message": "Refused: could roll production back"}}}))
+    ran = run_production(runtime, tmp / "production-state-8")
+    assert ran.returncode == 1 and "was refused before cutover: Refused: could roll production back" in ran.stdout, ran.stdout
+    assert "production was not rolled back" in ran.stdout and "worker_pool_cutover.py" not in ran.stdout, ran.stdout
+    assert "dispatch" not in call_lines(), call_lines()
+    assert "monitor-cooperative-cutover.ts" not in (fake / "node-calls.log").read_text()
     print("production fly wait: ok")
 
 
@@ -2782,8 +2926,15 @@ def check_production_render(tmp: Path, env: dict[str, str]) -> None:
     ancestor nor a descendant keeps waiting (only ancestry blocks); (d) a
     deploy for the merged SHA takes the exact-SHA path (live opens,
     build_failed blocks); (f) a live descendant with the identical backend is
-    equivalent, (g) a live descendant that changed the backend is refused;
-    (e) a Render API error or missing credentials fails closed (exit 2)
+    equivalent, (g) a live descendant that changed the backend is verified by
+    descendant (never source-equivalent, never RENDER_LIVE); (j) a merged
+    deploy Render canceled or (k) deactivated because a newer main commit
+    replaced it is verified by that live descendant once it is live, while
+    (l) a canceled merged deploy with only an older commit live, (m) a
+    descendant whose own deploy failed and (n) a deactivated merged deploy
+    replaced by a non-descendant (a rollback) block at once; (o) a live
+    descendant this checkout has not fetched is learned by one fetch of
+    origin main; (e) a Render API error or missing credentials fails closed (exit 2)
     without the follow-up. Every blocked receipt names the observed live
     commit. The lane never overwrites, and is never overwritten by, the Fly
     lane's receipt of the same merged SHA."""
@@ -2813,6 +2964,7 @@ def check_production_render(tmp: Path, env: dict[str, str]) -> None:
     backend_change = commit("backend v2", {"back-end/src/server.ts": "v2\n"})
     docs_after = commit("docs after", {"docs/after.md": "after\n"})
     root_manifest = commit("root manifest", {"package.json": '{"workspaces": ["back-end"]}\n'})
+    backend_v3 = commit("backend v3", {"back-end/src/server.ts": "v3\n"})
     branch = subprocess.run([*git, "rev-parse", "--abbrev-ref", "HEAD"], check=True, stdout=subprocess.PIPE,
                             text=True).stdout.strip()
     # `side` forks from the live commit with a docs-only change: its back-end
@@ -3018,11 +3170,113 @@ def check_production_render(tmp: Path, env: dict[str, str]) -> None:
         assert equivalence["live_commit"] == docs_after and equivalence["merged_sha"] == backend_change, equivalence
         assert equivalence["backend_diff"] == [] and equivalence["changed_files"] == ["docs/after.md"], equivalence
 
-        # (g) A descendant that changed the backend: the merged backend never ran
-        #     as-is, so the gate refuses (a manual decision), never equivalence.
-        render = blocked(docs_only, backend_change, tmp / "render-state-g", "live-descendant-backend-changed")
+        # (g) No deploy for the merged SHA and a live descendant that changed
+        #     the backend: the live backend contains the merge, so the gate opens
+        #     as verified-by-descendant, never as source-equivalent or RENDER_LIVE.
+        reset([deploy(backend_change, "live", "dep-later")])
+        state_g = tmp / "render-state-g"
+        ran = run_render(docs_only, state_g, "--timeout", "5")
+        assert ran.returncode == 0, ran.stdout
+        assert (f"RENDER_VERIFIED_BY_DESCENDANT live={backend_change} merged={docs_only} "
+                "reason=live-descendant-backend-changed") in ran.stdout, ran.stdout
+        assert "RENDER_SOURCE_EQUIVALENT" not in ran.stdout and "RENDER_LIVE " not in ran.stdout, ran.stdout
+        assert probes.read_text() == "probes\n", ran.stdout
+        render = receipt_of(state_g)["render"]
+        assert render["status"] == "verified-by-descendant" and render["live_commit"] == backend_change, render
+        assert render["deploy_id"] == "dep-later" and render["deploy_status"] == "live", render
         assert render["backend_diff"] == ["back-end/src/server.ts"], render
-        assert render["equivalence"]["live_is_descendant"] is True and "manual decision" in render["equivalence"]["detail"]
+        assert render["equivalence"]["equivalent"] is False and render["equivalence"]["live_is_descendant"] is True
+        descendant = render["verified_by_descendant"]
+        assert descendant["reason"] == "live-descendant-backend-changed", descendant
+        assert descendant["live_commit"] == backend_change and descendant["merged_sha"] == docs_only, descendant
+        assert descendant["live_deploy_id"] == "dep-later" and descendant["merged_deploy_id"] is None, descendant
+
+        # (j) Render canceled the merged deploy because a newer main commit
+        #     replaced it: keep waiting while that descendant builds, then open
+        #     on it as verified-by-descendant (never relabelled an exact pass).
+        superseding = [deploy(backend_v3, "build_in_progress", "dep-v3"), deploy(backend_change, "canceled", "dep-mine"),
+                       deploy(live, "live", "dep-live")]
+        reset(superseding, [deploy(backend_v3, "live", "dep-v3"), deploy(backend_change, "canceled", "dep-mine"),
+                            deploy(live, "deactivated", "dep-live")])
+        state_j = tmp / "render-state-j"
+        ran = run_render(backend_change, state_j, "--timeout", "30")
+        assert ran.returncode == 0, ran.stdout
+        assert (f"RENDER_VERIFIED_BY_DESCENDANT live={backend_v3} merged={backend_change} "
+                "reason=merged-deploy-canceled-live-descendant") in ran.stdout, ran.stdout
+        assert "RENDER_LIVE " not in ran.stdout and "RENDER_SOURCE_EQUIVALENT" not in ran.stdout, ran.stdout
+        assert probes.read_text() == "probes\n" and len(requests()) == 2, ran.stdout
+        render = receipt_of(state_j)["render"]
+        assert render["status"] == "verified-by-descendant" and render["live_commit"] == backend_v3, render
+        assert render["deploy_id"] == "dep-v3" and render["deploy_status"] == "live", render
+        descendant = render["verified_by_descendant"]
+        assert descendant["reason"] == "merged-deploy-canceled-live-descendant", descendant
+        assert descendant["merged_deploy_id"] == "dep-mine" and descendant["merged_deploy_status"] == "canceled"
+        assert descendant["live_commit"] == backend_v3 and descendant["live_deploy_id"] == "dep-v3", descendant
+
+        # (k) The merged deploy went live and was deactivated by a newer
+        #     descendant: verified by that descendant at the first poll.
+        reset([deploy(backend_v3, "live", "dep-v3"), deploy(backend_change, "deactivated", "dep-mine")])
+        state_k = tmp / "render-state-k"
+        ran = run_render(backend_change, state_k, "--timeout", "5")
+        assert ran.returncode == 0, ran.stdout
+        assert (f"RENDER_VERIFIED_BY_DESCENDANT live={backend_v3} merged={backend_change} "
+                "reason=merged-deploy-deactivated-live-descendant") in ran.stdout, ran.stdout
+        assert probes.read_text() == "probes\n" and len(requests()) == 1, ran.stdout
+        render = receipt_of(state_k)["render"]
+        assert render["status"] == "verified-by-descendant" and render["polls"] == 1, render
+        assert render["verified_by_descendant"]["merged_deploy_status"] == "deactivated", render
+
+        def refused(merged: str, page: list[dict], state: Path, expected: str) -> dict:
+            reset(page)
+            ran = run_render(merged, state, "--timeout", "5")
+            assert ran.returncode == 1 and expected in ran.stdout, ran.stdout
+            assert "RENDER_VERIFIED_BY_DESCENDANT" not in ran.stdout and "RENDER_LIVE " not in ran.stdout, ran.stdout
+            assert not probes.exists() and len(requests()) == 1, ran.stdout
+            render = receipt_of(state)["render"]
+            assert render["status"] == "deploy-failed" and render["live_commit"] is None, render
+            assert "verified_by_descendant" not in render, render
+            return render
+
+        # (l) Canceled with only an older commit live and nothing newer
+        #     deploying: blocked at once, naming the live commit.
+        render = refused(backend_change, [deploy(backend_change, "canceled", "dep-mine"), deploy(live, "live", "dep-live")],
+                         tmp / "render-state-l", "Render deploy canceled for")
+        assert render["observed_live_commit"] == live and render["deploy_status"] == "canceled", render
+        assert live[:9] in render["error"] and "no newer descendant" in render["error"], render
+        # (m) The descendant that replaced it failed its own build: an unhealthy
+        #     rollout is never accepted.
+        render = refused(backend_change, [deploy(backend_v3, "build_failed", "dep-v3"),
+                                          deploy(backend_change, "canceled", "dep-mine"), deploy(live, "live", "dep-live")],
+                         tmp / "render-state-m", "Render deploy canceled for")
+        assert render["observed_live_commit"] == live, render
+        # (n) Deactivated by a commit that does not descend from the merge (a
+        #     rollback to an older commit): blocked at once.
+        render = refused(backend_change, [deploy(live, "live", "dep-rollback"),
+                                          deploy(backend_change, "deactivated", "dep-mine")],
+                         tmp / "render-state-n", "Render deploy deactivated for")
+        assert render["observed_live_commit"] == live and "not a descendant" in render["error"], render
+        # (o) The live descendant is a newer main merge this checkout has not
+        #     fetched yet: one `git fetch origin main` learns it, then it verifies.
+        origin = tmp / "render-origin.git"
+        subprocess.run(["git", "clone", "-q", "--bare", str(repo), str(origin)], check=True)
+        work = tmp / "render-origin-work"
+        subprocess.run(["git", "clone", "-q", str(origin), str(work)], check=True)
+        (work / "back-end" / "src" / "server.ts").write_text("v4\n")
+        work_git = ["git", "-C", str(work), "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid"]
+        subprocess.run([*work_git, "commit", "-qam", "backend v4 (newer main)"], check=True)
+        unfetched = subprocess.run([*work_git, "rev-parse", "HEAD"], check=True, stdout=subprocess.PIPE,
+                                   text=True).stdout.strip()
+        subprocess.run([*work_git, "push", "-q", "origin", "HEAD:refs/heads/main"], check=True)
+        subprocess.run([*git, "remote", "add", "origin", str(origin)], check=True)
+        assert subprocess.run([*git, "cat-file", "-e", f"{unfetched}^{{commit}}"],
+                              stderr=subprocess.DEVNULL).returncode != 0, "the newer main merge must start unfetched"
+        reset([deploy(unfetched, "live", "dep-v4"), deploy(backend_v3, "canceled", "dep-mine")])
+        state_o = tmp / "render-state-o"
+        ran = run_render(backend_v3, state_o, "--timeout", "5")
+        assert ran.returncode == 0, ran.stdout
+        assert (f"RENDER_VERIFIED_BY_DESCENDANT live={unfetched} merged={backend_v3} "
+                "reason=merged-deploy-canceled-live-descendant") in ran.stdout, ran.stdout
+        assert receipt_of(state_o)["render"]["status"] == "verified-by-descendant", receipt_of(state_o)
 
         # (e) A Render API error fails closed: exit 2, no follow-up, error
         #     recorded; missing credentials never reach the API.
@@ -4769,22 +5023,29 @@ def check_declared_phase_lanes(tmp: Path, env: dict[str, str]) -> None:
     env = {**env, "DEPLOY_PIPELINE_LANE_DURATIONS": str(ledger)}
     plan = tmp / "declared-phase-plan.json"
     state = tmp / "declared-phase"
-    # smoke runs until semantic has started (a marker, not a sleep racing three
-    # lane startups on a loaded host); gating semantic behind smoke would hold
-    # smoke until its fixture bound and fail the overlap assertions below.
     semantic_started = tmp / "declared-phase-semantic-started"
+    # Preserve the original smoke duration, then synchronize overlap with semantic
+    # admission instead of assuming child startup/reaping fits inside 1.2 seconds.
+    smoke_command = [sys.executable, "-c",
+                     "import pathlib, time; "
+                     f"marker = pathlib.Path({str(semantic_started)!r}); "
+                     "time.sleep(1.2); deadline = time.monotonic() + 10\n"
+                     "while not marker.exists() and time.monotonic() < deadline: time.sleep(0.01)\n"
+                     "assert marker.exists(), 'semantic start was serialized behind smoke'"]
     # Budget 100: smoke (50) beside big (80) cannot fit; cov (30) beside smoke can.
     write_plan(plan, [
         {"name": "quick", "command": ["sleep", "0.2"], "reuse_passed": False, "group": "3", "memory_mb": 10},
         {"name": "big", "command": ["sleep", "0.4"], "reuse_passed": False, "group": "3", "exclusive": True,
          "memory_mb": 80},
         {"name": "cov", "command": ["sleep", "0.3"], "reuse_passed": False, "group": "3", "memory_mb": 30},
-        {"name": "smoke", "command": released_lane(semantic_started), "reuse_passed": False, "group": "4",
-         "memory_mb": 50, "phase": "coverage"},
+        {"name": "smoke", "command": smoke_command, "reuse_passed": False, "group": "4", "memory_mb": 50,
+         "phase": "coverage"},
         {"name": "probe", "command": ["sleep", "0.2"], "reuse_passed": False, "group": "3", "memory_mb": 10,
          "after": ["big", "cov"]},
-        {"name": "semantic", "command": ["touch", str(semantic_started)], "reuse_passed": False, "group": "4",
-         "memory_mb": 10, "after": ["big", "cov", "probe"]},
+        {"name": "semantic", "command": [sys.executable, "-c",
+                                          f"import pathlib, time; pathlib.Path({str(semantic_started)!r}).touch(); "
+                                          "time.sleep(0.2)"], "reuse_passed": False, "group": "4", "memory_mb": 10,
+         "after": ["big", "cov", "probe"]},
         {"name": "g4-free", "command": ["sleep", "0.2"], "reuse_passed": False, "group": "4", "memory_mb": 10},
     ], schedule={"policy": "phased"})
     with releasing(semantic_started):

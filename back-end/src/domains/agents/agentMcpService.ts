@@ -15,7 +15,7 @@ import { createLogger } from '../../providers/logger';
 import { uploadToStorage } from '../../providers/storage';
 import { getAgentUrl } from '../../providers/smsTemplates';
 import * as lifecycleService from './agentLifecycleService';
-import * as repo from './repo';
+import * as repo from './repoIndex01';
 import { createAgentSchema } from './types';
 
 const log = createLogger('AgentMcp');

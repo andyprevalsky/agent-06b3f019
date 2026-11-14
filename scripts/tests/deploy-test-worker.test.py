@@ -13,6 +13,7 @@ import signal
 import threading
 import json
 import os
+import runpy
 import subprocess
 import sys
 import tempfile
@@ -21,14 +22,104 @@ import unittest
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
+# The suite builds its own gate requests. A DEPLOY_GATE_REQUEST inherited from an
+# outer deploy worker (the local executor runs this suite inside a gate) would
+# make admission() demand that outer cycle's custody locator in-process.
+os.environ.pop('DEPLOY_GATE_REQUEST', None)
 sys.path.insert(0, str(ROOT / 'scripts'))
 import deploy_test_cycle as cycle
 import deploy_test_worker as worker
 
 
+def isolate_fixture_temp(test):
+    """Own temporary environment, without borrowing the enclosing worker's lease."""
+    original_tmp = os.environ.get('TMPDIR')
+    had_tmp = 'TMPDIR' in os.environ
+    original_cache = tempfile.tempdir
+    owner = tempfile.TemporaryDirectory(prefix='deploy-worker-fixture-', dir=Path('/tmp').resolve())
+    test.addCleanup(owner.cleanup)
+    def restore():
+        tempfile.tempdir = original_cache
+        if had_tmp:
+            os.environ['TMPDIR'] = original_tmp
+        else:
+            os.environ.pop('TMPDIR', None)
+    test.addCleanup(restore)
+    temporary = Path(owner.name) / 'tmp'
+    temporary.mkdir(mode=0o700)
+    os.environ['TMPDIR'] = str(temporary)
+    tempfile.tempdir = str(temporary)
+    return Path(owner.name), temporary
+
+
+class FixtureTempIsolation(unittest.TestCase):
+    def test_parent_environment_cache_and_marker_are_restored(self):
+        before = dict(os.environ); cache = tempfile.tempdir
+        marker = Path(before['TMPDIR']) / '.deploy-tmpdir-owner.json' if before.get('TMPDIR') else None
+        original_marker = marker.read_bytes() if marker and marker.is_file() else None
+        observed = {}
+        class Case(unittest.TestCase):
+            def setUp(inner):
+                owner, tmp = isolate_fixture_temp(inner)
+                observed.update(owner=owner, tmp=tmp)
+            def runTest(inner):
+                tmp = observed['tmp']
+                inner.assertEqual(str(tmp), os.environ['TMPDIR'])
+                inner.assertEqual(str(tmp), tempfile.tempdir)
+                inner.assertEqual(tmp, tmp.resolve())
+                inner.assertEqual(0o700, tmp.stat().st_mode & 0o777)
+                inner.assertFalse((tmp / '.deploy-tmpdir-owner.json').exists())
+                with tempfile.TemporaryDirectory() as a, tempfile.TemporaryDirectory() as b:
+                    inner.assertNotIn(Path(a), Path(b).parents)
+                    inner.assertNotIn(Path(b), Path(a).parents)
+        result = unittest.TestResult(); Case().run(result)
+        self.assertEqual([], result.errors); self.assertEqual([], result.failures)
+        self.assertEqual(before, dict(os.environ)); self.assertEqual(cache, tempfile.tempdir)
+        self.assertFalse(observed['owner'].exists())
+        if original_marker is not None:self.assertEqual(original_marker, marker.read_bytes())
+
+    def test_failed_setup_joins_owned_child_before_temp_cleanup(self):
+        before = dict(os.environ); cache = tempfile.tempdir; observed = {}
+        class Case(unittest.TestCase):
+            def setUp(inner):
+                owner, tmp = isolate_fixture_temp(inner); observed['owner'] = owner
+                child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'], cwd=tmp)
+                observed['child'] = child
+                def finish():
+                    child.terminate(); child.wait(timeout=5)
+                    observed['joined_before_removal'] = owner.exists() and child.poll() is not None
+                inner.addCleanup(finish)
+                raise RuntimeError('intentional setup failure')
+            def runTest(inner):
+                raise AssertionError('failed setup cannot execute its test')
+        result = unittest.TestResult(); Case().run(result)
+        self.assertEqual(1, len(result.errors)); self.assertEqual([], result.failures)
+        self.assertTrue(observed['joined_before_removal']); self.assertFalse(observed['owner'].exists())
+        self.assertIsNotNone(observed['child'].returncode)
+        self.assertEqual(before, dict(os.environ)); self.assertEqual(cache, tempfile.tempdir)
+        print('FIXTURE_OWNED_CHILD_JOINED', observed['child'].pid)
+
+    def test_restoration_does_not_replace_unrelated_environment(self):
+        key = 'DEPLOY_FIXTURE_UNRELATED_CONTROL'; old = os.environ.get(key); observed = {}
+        class Case(unittest.TestCase):
+            def setUp(inner):
+                isolate_fixture_temp(inner)
+            def runTest(inner):
+                os.environ[key] = 'changed-by-test'
+        try:
+            result = unittest.TestResult(); Case().run(result)
+            self.assertEqual([], result.errors); self.assertEqual([], result.failures)
+            self.assertEqual('changed-by-test', os.environ[key])
+        finally:
+            if old is None:os.environ.pop(key, None)
+            else:os.environ[key] = old
+
+
 class Worker(unittest.TestCase):
     def setUp(self):
+        isolate_fixture_temp(self)
         self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
         subprocess.run(['git', 'init', '-q', str(self.root)], check=True)
         (self.root/'code').write_text('fixture')
@@ -42,6 +133,7 @@ class Worker(unittest.TestCase):
                         'checks': ['first','second'], 'skips': {}, 'phase': 'initial',
                         'worker_recipe': self.recipe}
         self.coordinator_temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.coordinator_temp.cleanup)
         self.coordinator = Path(self.coordinator_temp.name)
         subprocess.run(['git','clone','-q','--shared',str(self.root),str(self.coordinator)],check=True)
         (self.coordinator/'.git/info/exclude').write_text('.context/\n')
@@ -55,6 +147,31 @@ class Worker(unittest.TestCase):
         cycle.CANCEL.clear()
         self.coordinator_temp.cleanup()
         self.temp.cleanup()
+
+    def test_owned_external_tmpdir_native_worker_contract(self):
+        with tempfile.TemporaryDirectory(prefix='dpt-') as value:
+            path=Path(value);path.chmod(0o700)
+            lease=dict(schema='deploy-external-tmpdir-v1',coordinator_root=str(self.coordinator),
+                       worker_root=str(self.root),gate='gate',
+                       uid=os.geteuid(),device=path.stat().st_dev,inode=path.stat().st_ino)
+            marker=path/'.deploy-tmpdir-owner.json'
+            marker.write_text(json.dumps(lease));marker.chmod(0o600)
+            request=copy.deepcopy(self.request)
+            request.update(external_tmpdir=lease,external_tmpdir_path=value)
+            # A valid lease reaches real native cases, preserving both their outcomes.
+            with patch.dict(os.environ,{'TMPDIR':value}):
+                result=worker.execute(request,self.root)
+            self.assertEqual({'first':'FAIL','second':'PASS'},result['cases'])
+            for failure in ('env','marker','recipe'):
+                bad=copy.deepcopy(request);bad['token']='rejected-'+failure
+                env=value
+                if failure=='env':env=str(self.root)
+                if failure=='marker':marker.chmod(0o644)
+                if failure=='recipe':bad['worker_recipe']['cases']['first']['env']={'TMPDIR':str(self.root)}
+                with patch.dict(os.environ,{'TMPDIR':env}),self.assertRaises(ValueError):
+                    worker.execute(bad,self.root)
+                marker.chmod(0o600)
+                self.assertFalse((self.root/'.context/deploy-worker'/worker.hashlib.sha256(bad['token'].encode()).hexdigest()).exists())
 
     def test_remote_cleanup_owner_in_an_otherwise_passing_result_is_unverified_and_blocks_resume(self):
         # CodeRabbit 4449994487: a boxes-thread (native-backend) gate is not a native producer; the adapter's
@@ -111,10 +228,10 @@ class Worker(unittest.TestCase):
         self.assertNotIn('cleanup_owner', result)
 
     def test_native_producer_and_generic_use_their_declared_cleanup_authority(self):
-        # 'agentcard' is a stale plan's retired AgentCard lane: its tasks run in cloud smoke now, so the
-        # category earns no native-producer cleanup authority and is owned like any generic gate.
+        # Existing explicitly bound legacy AgentCard owners retain native cleanup custody;
+        # this compatibility does not select a new lane in the current cloud-smoke planner.
         for kind in ('generic', 'cloud', 'agentcard'):
-            native = kind == 'cloud'
+            native = kind in {'cloud', 'agentcard'}
             with self.subTest(kind=kind):
                 gate = {'name': kind, 'checks': ['first'], 'command': ['fixture'],
                         'case_protocol': True, 'native_cloud': kind == 'cloud',
@@ -458,9 +575,23 @@ class Worker(unittest.TestCase):
 
 class Cloud(unittest.TestCase):
     def setUp(self):
+        # These native receipt fixtures own their adapter inputs, not the deploy's fanout.
+        environment = patch.dict(os.environ, {
+            'CLOUDBENCH_BROWSER_PROVIDER': 'tilion',
+            'CLOUDBENCH_PROVIDER_LIMITS_FILE': str(ROOT / 'scripts/cloudbench-provider-limits.json'),
+        })
+        environment.start()
+        self.addCleanup(environment.stop)
+        os.environ.pop('DEPLOY_CLOUD_CONCURRENCY', None)
+        # This standalone fixture owns its request, not the invoking gate's custody.
+        os.environ.pop('DEPLOY_GATE_REQUEST', None)
         import deploy_test_cloud as cloud
         import cloudbench_execution_provenance as provenance
         self.cloud=cloud;self.provenance=provenance
+        # Offline: these fixtures never read the shared Tilion account (see CloudSharedProviderHeadroom).
+        offline=patch.object(cloud.provider_headroom,'live_probes',return_value={});offline.start();self.addCleanup(offline.stop)
+        # Offline: the frozen ref counts as pushed; deploy-cloud-smoke-speed covers the unpushed refusal.
+        pushed=patch.object(cloud,'origin_fetchable',return_value=True);pushed.start();self.addCleanup(pushed.stop)
         self.temp=tempfile.TemporaryDirectory();self.root=Path(self.temp.name)
         self.runs=self.root/'runs';self.fleet=self.runs/'native-run'
         self.request={'token':'token','source':{'head':'a'*40,'digest':'frozen'},
@@ -573,6 +704,37 @@ class Cloud(unittest.TestCase):
         self.assertEqual('1',launch.call_args.kwargs['env']['CLOUDBENCH_SKIP_LOCAL_PATCH'])
         self.assertTrue(result['complete'])
 
+    def test_cloud_admission_limit_preserves_every_selected_case(self):
+        with patch.dict(os.environ, {'DEPLOY_CLOUD_CONCURRENCY': '1'}), \
+             patch.object(self.cloud, 'source', return_value=self.request['source']), \
+             patch.object(self.cloud, 'run_command', return_value=(0,False,False,False)) as launch, \
+             patch.object(self.cloud, 'collect_campaign', return_value=({'passing':'PASS','failing':'PASS'},{},True,'native-run')):
+            result=self.cloud.execute(self.request,self.root)
+        argv=launch.call_args.args[0]
+        self.assertEqual(['passing','failing'],argv[2:4])
+        self.assertEqual('1',argv[argv.index('--concurrency')+1])
+        self.assertEqual('1',argv[argv.index('--runs')+1])
+        self.assertEqual('0',argv[argv.index('--retry-infra')+1])
+        self.assertEqual({'passing':'PASS','failing':'PASS'},result['cases'])
+        self.assertTrue(result['complete'])
+
+    def test_cloud_admission_limit_cannot_raise_provider_capacity(self):
+        checks=[str(i) for i in range(100)]
+        with patch.dict(os.environ, {'DEPLOY_CLOUD_CONCURRENCY': '1000'}):
+            limited=self.cloud.campaign_width(checks)
+        with patch.dict(os.environ, {}, clear=True):
+            provider_width=self.cloud.campaign_width(checks)
+        self.assertEqual(provider_width,limited)
+
+    def test_invalid_cloud_admission_limit_fails_before_launch(self):
+        for value in ('', '0', '-1', '1.5', ' 2', 'two'):
+            with self.subTest(value=value), patch.dict(os.environ, {'DEPLOY_CLOUD_CONCURRENCY':value}), \
+                 patch.object(self.cloud, 'source', return_value=self.request['source']), \
+                 patch.object(self.cloud, 'run_command') as launch:
+                with self.assertRaisesRegex(ValueError,'DEPLOY_CLOUD_CONCURRENCY'):
+                    self.cloud.execute(self.request,self.root)
+                launch.assert_not_called()
+
     def test_cloud_launch_records_selected_standing_skip_eligibility_before_dispatch(self):
         names=['browser-auth-guest-purchase','claude-only','ordinary']
         self.request.update(checks=names,skips={'excluded-payment':{'disposition':'unchanged'}})
@@ -608,6 +770,123 @@ class Cloud(unittest.TestCase):
         self.assertEqual(names,dispatched.call_args.args[0][2:5])
         self.assertEqual(dict.fromkeys(names,'PASS'),result['cases'])
         self.assertTrue(result['complete'])
+
+    # --- quarantine markers and the single same-source rerun -------------------------------------
+    QMETA={'since':'2026-11-01','repair':'https://boxes.dev/thread/thr_smoke1',
+           'error':'AssertionError: no receipt','evidence':'runs/smoke-1/run.json'}
+
+    def campaign(self,verdicts,outcome='FAILED'):
+        """A collect_campaign return value: verdicts per task, native outcome for the failures."""
+        details={n:{'native_task':{'name':n,'passed':v=='PASS','benchmark_status':'PASSED' if v=='PASS' else outcome,
+                                   'status':'COMPLETED' if v=='PASS' else outcome,
+                                   'failure_reason':None if v=='PASS' else f'{n} failed'},'path':f'/runs/{n}'}
+                 for n,v in verdicts.items()}
+        return dict(verdicts),details,True,'campaign'
+
+    def run_smoke(self,collected,catalog=None):
+        """execute() with the native CLI and collector replaced; returns result, launches, rows, stdout."""
+        if catalog is not None:
+            path=self.root/'agents/benchmarks/tasks.json';path.parent.mkdir(parents=True,exist_ok=True)
+            cycle.write(path,catalog)
+        rows=self.root/'progress.jsonl';rows.unlink(missing_ok=True);out=io.StringIO()
+        with patch.object(self.cloud,'source',return_value=self.request['source']), \
+             patch.object(self.cloud,'run_command',return_value=(1,False,False,False)) as launch, \
+             patch.object(self.cloud,'collect_campaign',side_effect=collected) as collect, \
+             patch.dict(os.environ,{'DEPLOY_GATE_PROGRESS':str(rows)}), contextlib.redirect_stdout(out):
+            self.launch=launch
+            result=self.cloud.execute(self.request,self.root)
+        import deploy_gate_progress as progress
+        return result,launch,collect,progress.read_new(rows)[0],out.getvalue()
+
+    def test_failed_smoke_task_passing_its_single_rerun_is_flaky_and_the_gate_passes(self):
+        result,launch,collect,rows,out=self.run_smoke([self.campaign({'passing':'PASS','failing':'FAIL'}),
+                                                       self.campaign({'failing':'PASS'})])
+        self.assertEqual(2,launch.call_count)
+        rerun=launch.call_args_list[1].args[0]
+        self.assertEqual(['bash','scripts/run-bench','failing'],rerun[:3])  # that task only, same frozen ref
+        self.assertEqual(['--ref','a'*40],rerun[-2:])
+        self.assertNotIn('passing',rerun)
+        self.assertEqual(['failing'],collect.call_args_list[1].args[0]['checks'])
+        env=launch.call_args_list[1].kwargs['env']
+        self.assertTrue(env['RUN_BENCH_CAMPAIGN_ID'].endswith('-rerun'))
+        self.assertNotEqual(launch.call_args_list[0].kwargs['env']['CLOUDBENCH_RUNS_ROOT'],env['CLOUDBENCH_RUNS_ROOT'])
+        self.assertEqual({'passing':'PASS','failing':'PASS'},result['cases'])
+        self.assertTrue(result['complete'])
+        self.assertEqual('FAILED',result['evidence']['failing']['native_task']['benchmark_status'])  # first attempt kept
+        self.assertEqual('PASSED',result['evidence']['failing']['rerun']['native_task']['benchmark_status'])
+        self.assertEqual([('failing','FLAKY',2)],[(r['unit'],r['status'],r.get('attempts')) for r in rows])
+        self.assertIn('TEST_FLAKY unit=failing attempts=2 attribution=REQUIRED',out)
+        from deploy_test_result import validate
+        self.assertEqual((result['cases'],True),validate(result,self.request,0))  # adapter exit 0 = gate pass
+        state={'source':self.request['source'],'flaky':[],'phase':'initial','round':1}
+        opened=cycle.open_flaky(state,{'name':'smoke','checks':self.request['checks']},rows,self.root/'flaky')
+        self.assertEqual([('failing','smoke/failing')],[(o['unit'],o['check']) for o,_ in opened])
+        import deploy_test_quarantine as quarantine
+        self.assertIn('lack /RCA attribution',quarantine.attribution_block(state['flaky']))  # merge refuses
+
+    def test_failed_smoke_task_failing_its_rerun_fails_and_is_never_run_a_third_time(self):
+        result,launch,_,rows,out=self.run_smoke([self.campaign({'passing':'PASS','failing':'FAIL'}),
+                                                 self.campaign({'failing':'FAIL'})])
+        self.assertEqual(2,launch.call_count)
+        self.assertEqual({'passing':'PASS','failing':'FAIL'},result['cases'])
+        self.assertEqual('FAIL',result['rerun']['cases']['failing'])
+        self.assertEqual([],rows);self.assertNotIn('TEST_FLAKY',out)
+        from deploy_test_result import validate
+        self.assertEqual('FAIL',validate(result,self.request,1)[0]['failing'])
+
+    def test_resource_skip_and_infra_outcomes_keep_their_rca_handling_without_a_rerun(self):
+        for outcome in ('SKIPPED','INFRA_ERROR'):
+            with self.subTest(outcome=outcome):
+                shutil.rmtree(self.root/'.context',ignore_errors=True)
+                result,launch,_,rows,_=self.run_smoke([self.campaign({'passing':'PASS','failing':'FAIL'},outcome)])
+                self.assertEqual(1,launch.call_count)
+                self.assertEqual('FAIL',result['cases']['failing']);self.assertNotIn('rerun',result)
+                self.assertEqual([],rows)
+
+    def test_unverified_first_campaign_is_never_rerun(self):
+        verdicts,details,_,fleet=self.campaign({'passing':'PASS','failing':'FAIL'})
+        result,launch,_,_,_=self.run_smoke([(verdicts,details,False,fleet)])
+        self.assertEqual(1,launch.call_count);self.assertFalse(result['complete'])
+
+    def test_quarantined_smoke_task_runs_once_and_its_failure_is_non_blocking(self):
+        catalog=[{'name':'failing','quarantine':dict(self.QMETA)},{'name':'passing'}]
+        result,launch,_,rows,out=self.run_smoke([self.campaign({'passing':'PASS','failing':'FAIL'})],catalog)
+        self.assertEqual(1,launch.call_count)  # still runs, never rerun
+        self.assertIn('failing',launch.call_args.args[0])
+        self.assertEqual({'passing':'PASS','failing':'PASS'},result['cases']);self.assertTrue(result['complete'])
+        self.assertEqual([('failing','QUARANTINED_FAIL',self.QMETA)],[(r['unit'],r['status'],r['quarantine']) for r in rows])
+        self.assertEqual('failing failed',rows[0]['detail'])
+        self.assertIn(f"TEST_QUARANTINE status=QUARANTINED_FAIL unit=failing since=2026-11-01 repair={self.QMETA['repair']}",out)
+        self.assertEqual(('QUARANTINED_FAIL','FAIL'),tuple(result['evidence']['failing']['quarantine'][k] for k in ('status','native_case')))
+        self.assertEqual('FAILED',result['evidence']['failing']['native_task']['benchmark_status'])  # failure preserved
+
+    def test_quarantined_smoke_task_pass_and_unverified_outcomes(self):
+        catalog=[{'name':'failing','quarantine':dict(self.QMETA)}]
+        _,_,_,rows,_=self.run_smoke([self.campaign({'passing':'PASS','failing':'PASS'})],catalog)
+        self.assertEqual([('failing','QUARANTINED_PASS')],[(r['unit'],r['status']) for r in rows])
+        shutil.rmtree(self.root/'.context')
+        verdicts,details,_,fleet=self.campaign({'passing':'PASS','failing':'UNVERIFIED'})
+        result,_,_,rows,_=self.run_smoke([(verdicts,details,True,fleet)],catalog)
+        self.assertEqual('UNVERIFIED',result['cases']['failing']);self.assertEqual([],rows)  # unknown still blocks
+
+    def test_quarantined_smoke_task_skip_and_infra_outcomes_stay_blocking(self):
+        catalog=[{'name':'failing','quarantine':dict(self.QMETA)}]
+        for outcome in ('SKIPPED','INFRA_ERROR'):
+            with self.subTest(outcome=outcome):
+                shutil.rmtree(self.root/'.context',ignore_errors=True)
+                result,launch,_,rows,out=self.run_smoke([self.campaign({'passing':'PASS','failing':'FAIL'},outcome)],catalog)
+                self.assertEqual(1,launch.call_count)
+                self.assertEqual('FAIL',result['cases']['failing']);self.assertNotIn('quarantine',result['evidence']['failing'])
+                self.assertEqual([],rows);self.assertNotIn('TEST_QUARANTINE',out)
+
+    def test_invalid_task_quarantine_marker_is_refused_before_launch(self):
+        for bad in ({**self.QMETA,'repair':'https://example.com/x'},{k:v for k,v in self.QMETA.items() if k!='evidence'},
+                    {**self.QMETA,'since':'2026-13-01'},{**self.QMETA,'extra':'x'},'quarantined'):
+            with self.subTest(marker=bad):
+                with self.assertRaises(ValueError):
+                    self.run_smoke([],[{'name':'failing','quarantine':bad}])
+                self.launch.assert_not_called()
+                self.assertFalse((self.root/'.context/deploy-cloud').exists())  # nothing admitted
 
 
 class CloudCampaign(unittest.TestCase):
@@ -928,9 +1207,10 @@ raise SystemExit(reply.get('rc', 0))
 class Boxes(unittest.TestCase):
     """Fake dvb-onbox on PATH; nothing here contacts boxes.dev or runs services."""
     def setUp(self):
+        isolate_fixture_temp(self)
         import deploy_test_boxes as boxes
         self.boxes = boxes
-        self.temp = tempfile.TemporaryDirectory(); self.root = Path(self.temp.name) / 'worker'
+        self.temp = tempfile.TemporaryDirectory(); self.addCleanup(self.temp.cleanup); self.root = Path(self.temp.name) / 'worker'
         self.root.mkdir()
         subprocess.run(['git', 'init', '-q', str(self.root)], check=True)
         (self.root / 'code').write_text('fixture'); (self.root / '.git/info/exclude').write_text('.context/\n')
@@ -953,6 +1233,7 @@ class Boxes(unittest.TestCase):
                                            'FAKE_DVB_CONFIG': str(self.config), 'DEPLOY_BOXES_POLL_SECONDS': '0.01',
                                            'DEPLOY_BOXES_ATTACHMENTS_ROOT': str(self.attachments.parents[1])})
         self.env.start()
+        self.addCleanup(self.env.stop)
         native = worker.execute(self.request, self.root)  # the real native worker document
         self.native_bytes = json.dumps(native, indent=2, allow_nan=False) + '\n'
         self.native = native
@@ -1629,6 +1910,155 @@ class Boxes(unittest.TestCase):
         self.assertIn('request control-project-threads', Path(result['transport_receipt']['cli_log']).read_text())
         self.assertEqual(1, len(self.calls_of('send')))  # no retry loop
 
+    @contextlib.contextmanager
+    def scripted_transport(self, cancel_after=None):
+        # Orchestration-only seam: preserve real envelopes, logs, absolute deadlines,
+        # and collector/parser behavior without paying OS startup for each fake CLI.
+        # Real run_cli deadline, signal and reap tests below remain subprocess-backed.
+        clock = [time.time()]
+        started = clock[0]
+        elapsed = [0.0]
+        events = []
+
+        def sleep(seconds):
+            elapsed[0] += seconds
+            clock[0] = started + elapsed[0]
+            if cancel_after is not None and elapsed[0] >= cancel_after:
+                events[-1]["cancel_elapsed"] = elapsed[0]
+                self.boxes.CANCEL.set()
+
+        def invoke(argv, *, timeout, completion_deadline=None):
+            config = cycle.read(self.config)
+            key = argv[1]
+            with self.calls.open('a') as stream:
+                stream.write(json.dumps(argv) + '\n')
+            if key == 'list' and '--all' not in argv:
+                key = 'list_page1'
+            reply = config.get(key, {'rc': 1, 'stdout': {}, 'stderr': 'unsupported'})
+            if isinstance(reply, list):
+                count = len(self.calls_of(key))
+                reply = reply[min(count - 1, len(reply) - 1)]
+            budget = min(timeout, max(0, completion_deadline - clock[0])) if completion_deadline is not None else timeout
+            events.append({'op': key, 'at': clock[0], 'budget': budget, 'deadline': completion_deadline})
+            duration = reply.get('sleep', 0)
+            if duration >= budget:
+                sleep(budget)
+                raise subprocess.TimeoutExpired(argv, timeout)
+            sleep(duration)
+            return reply.get('rc', 0), json.dumps(reply.get('stdout', {})).encode(), reply.get('stderr', '').encode()
+
+        with patch.object(self.boxes, 'run_cli', side_effect=invoke), patch.object(self.boxes, 'time') as timer:
+            timer.time.side_effect = lambda: clock[0]
+            timer.monotonic.side_effect = lambda: clock[0]
+            timer.sleep.side_effect = sleep
+            yield events
+
+
+    def test_crash_between_send_and_persist_adopts_the_existing_turn_strict_scripted(self):
+        directory = self.coordinator / '.context/deploy-boxes' / __import__('hashlib').sha256(b'tok-1').hexdigest()
+        prompt = self.boxes.build_prompt(self.request, self.binding)
+        cycle.write(directory / 'state.json', {'token': 'tok-1', 'idempotency_key': 'tok-1', 'thread': 'ph-worker',
+            'host': self.host, 'worker_root': str(self.root.resolve()), 'deadline_at': time.time() + 30,
+            'prompt_sha256': __import__('hashlib').sha256(prompt.encode()).hexdigest(), 'sent_attempted_at': time.time(),
+            'turn_id': None, 'message_id': None, 'cli_log': str(directory / 'cli.log'), 'stderr_log': str(directory / 'stderr.log')})
+        self.configure(reply=self.reply(), read={'rc': 0, 'stdout': self.wrap({}, status='ready', messages=[
+            {'role': 'user', 'state': 'ready', 'text': 'unrelated', 'turnId': 'turn-0'},
+            {'role': 'user', 'state': 'ready', 'text': prompt, 'turnId': 'turn-7'}])})
+        result = self.run_adapter()
+        self.assertEqual({'first': 'UNVERIFIED', 'second': 'UNVERIFIED'}, result['cases'])
+        self.assertEqual([], self.calls_of('send')); self.assertEqual('turn-7', result['transport_receipt']['turn_id'])
+        # an indeterminate send whose assignment cannot be found is never repeated: re-read until the deadline
+        state = cycle.read(directory / 'state.json'); state.update(turn_id=None, deadline_at=time.time() + 0.3)
+        cycle.write(directory / 'state.json', state)  # the ORIGINAL deadline governs, not a later argument
+        self.configure(reply=self.reply()); self.calls.unlink()
+        with self.scripted_transport() as events:
+            result = self.boxes.execute(self.request, self.coordinator, self.binding, 30)
+        self.assertEqual('list', events[0]['op'])
+        self.assertTrue(all(event['op'] == 'read' for event in events[1:]))
+        self.assertEqual('send_indeterminate_unadopted', result['reason']); self.assertEqual([], self.calls_of('send'))
+        self.assertGreater(len(self.calls_of('read')), 1); self.assertTrue(all(v == 'UNVERIFIED' for v in result['cases'].values()))
+        # a changed prompt under the same token is never resent
+        state = cycle.read(directory / 'state.json'); state['prompt_sha256'] = 'f' * 64; state['turn_id'] = None
+        cycle.write(directory / 'state.json', state); self.calls.unlink()
+        result = self.run_adapter()
+        self.assertTrue(all(v == 'UNVERIFIED' for v in result['cases'].values())); self.assertEqual([], self.calls_of('send'))
+
+
+    def test_initial_send_slice_timeout_adopts_nested_read_without_second_send_strict_scripted(self):
+        self.configure(reply=self.reply(), send={'sleep': .6}, read=[
+            {'sleep': .6}, {'rc': 0, 'stdout': self.nested_assignment()}])
+        started = time.time()
+        with self.scripted_transport() as events, patch.object(self.boxes, 'CLI_MAX_SECONDS', .3):
+            result = self.run_adapter(deadline=5)
+        self.assertEqual({'first': 'UNVERIFIED', 'second': 'UNVERIFIED'}, result['cases'])
+        self.assertFalse(result['complete']); self.assertFalse(result['cleanup_complete'])
+        self.assertEqual('native-evidence-unavailable',result['reason'])
+        self.assertEqual('turn-1',result['cleanup_owner']['turn_id'])
+        self.assertEqual(1, len(self.calls_of('send')))
+        self.assertEqual(2, len(self.calls_of('read')))
+        send = self.calls_of('send')[0]
+        self.assertEqual('tok-1', send[send.index('--idempotency-key') + 1])
+        self.assertEqual('turn-1', result['transport_receipt']['turn_id'])
+        directory = self.coordinator / '.context/deploy-boxes' / __import__('hashlib').sha256(b'tok-1').hexdigest()
+        state = cycle.read(directory / 'state.json')
+        self.assertGreaterEqual(state['deadline_at'], started + 5)
+        self.assertLess(state['deadline_at'], started + 5.2)
+        self.assertEqual('turn-1', state['turn_id'])
+
+        self.assertEqual(['list', 'send', 'read', 'read', 'wait', 'result'], [event['op'] for event in events])
+        self.assertTrue(all(event['at'] + event['budget'] <= event['deadline'] for event in events))
+
+
+    def test_initial_send_adoption_cancel_retains_owner_without_resending_strict_scripted(self):
+        self.configure(reply=self.reply(), send={'sleep': 3})
+        started = time.monotonic()
+        with self.scripted_transport(cancel_after=.35) as events, patch.object(self.boxes, 'CLI_MAX_SECONDS', .15):
+            result = self.run_adapter(deadline=5)
+        self.assertLess(time.monotonic() - started, .8)
+        self.assertEqual('send_indeterminate_unadopted', result['reason'])
+        self.assertFalse(result['complete']); self.assertFalse(result['cleanup_complete'])
+        self.assertEqual('tok-1', result['cleanup_owner']['request_token'])
+        self.assertEqual(1, len(self.calls_of('send')))
+        self.assertEqual([], self.calls_of('wait')); self.assertEqual([], self.calls_of('result'))
+
+        self.assertEqual(['list', 'send'], [event['op'] for event in events[:2]])
+        self.assertTrue(all(event['op'] == 'read' for event in events[2:]))
+        self.assertTrue(self.boxes.CANCEL.is_set())
+        elapsed = next(event["cancel_elapsed"] for event in events if "cancel_elapsed" in event)
+        self.assertGreaterEqual(elapsed, .35)
+        self.assertLess(elapsed, .8)
+
+
+    def test_cancel_before_send_never_invokes_the_cli_strict_scripted(self):
+        drive = self.boxes._drive
+        def cancel_before_first_call(*args, **kwargs):
+            self.boxes.CANCEL.set()  # after cancellation handlers initialize, before any CLI
+            return drive(*args, **kwargs)
+        with patch.object(self.boxes, '_drive', side_effect=cancel_before_first_call), \
+             patch.object(self.boxes, 'run_cli') as invoke:
+            result = self.run_adapter()
+        invoke.assert_not_called()
+        self.assertEqual([], self.calls_of('send'))
+        self.assertEqual('cancelled during native CLI call', result['reason'])
+        self.assertTrue(all(value == 'UNVERIFIED' for value in result['cases'].values()))
+
+
+    def test_wrong_hash_attachment_or_truncated_inline_without_attachment_is_unverified_strict_scripted(self):
+        self.configure(reply=self.reply(inline=False)); self.attach(self.native_bytes.replace('"PASS"', '"FAIL"', 1))
+        with self.scripted_transport() as events:
+            result = self.run_adapter(deadline=0.3)
+        self.assertTrue(all(v == 'UNVERIFIED' for v in result['cases'].values())); self.assertEqual('attachment_missing', result['reason'])
+        __import__('shutil').rmtree(self.coordinator / '.context')
+        truncated = self.reply().replace('DEPLOY_GATE_RESULT_JSON_END\n', '')
+        self.configure(reply=truncated)
+        with self.scripted_transport() as events:
+            result = self.run_adapter(deadline=0.3)
+        self.assertTrue(all(v == 'UNVERIFIED' for v in result['cases'].values())); self.assertEqual('attachment_missing', result['reason'])
+
+        self.assertEqual(['list', 'send', 'wait', 'result'], [event['op'] for event in events])
+
+
+
 
 def load(name, relative):
     spec = importlib.util.spec_from_file_location(name, ROOT / relative)
@@ -1834,7 +2264,7 @@ class LocalController(unittest.TestCase):
                             shutil.rmtree(case['fixture_tmp'])
 
     # The twelve cloud-benchmark controller suites the staged `cloudbench-controller` gate runs (the former
-    # deploy.md Step 4cb inventory, preserved in .claude/commands/DEPRECATED_deploy.md at L1408). The concise
+    # deploy.md Step 4cb inventory, preserved in the former /deploy skill). The concise
     # deploy.md no longer lists them: scripts/run-cloudbench-controller-local.py CASES is the executing
     # inventory, so it is pinned here and a change to it must be a deliberate edit of this test.
     CONTROLLER_PYTEST_KEYWORDS = (
@@ -2077,6 +2507,13 @@ FAKE_NPM = """#!/usr/bin/env python3
 import json, os, signal, sys, time
 from pathlib import Path
 cfg = json.load(open(os.environ['FAKE_RUNNER_CONFIG'])); be = Path.cwd()
+if cfg.get('native_filter_js'):
+    import subprocess
+    requested = [r['domain'] for r in cfg['results']]
+    done = subprocess.run(['node', cfg['native_filter_js'], json.dumps(requested)], capture_output=True, text=True, check=True)
+    executed = json.loads(done.stdout.splitlines()[-1])
+    print('FAKE_NATIVE_EXECUTION ' + json.dumps(executed))
+    cfg['results'] = [r for r in cfg['results'] if r['domain'] in executed]
 if cfg.get('cancel_parent'): os.kill(os.getppid(), signal.SIGTERM)
 time.sleep(cfg.get('sleep', 0))
 (be / 'coverage/blackbox-run-shard1').mkdir(parents=True, exist_ok=True)
@@ -2110,9 +2547,10 @@ raise SystemExit(cfg.get('c8_rc', 0))
 class Backend(unittest.TestCase):
     """Case-aware backend coverage adapter over a fake sharded runner; no services, no real c8."""
     def setUp(self):
+        isolate_fixture_temp(self)
         import deploy_test_backend as backend
         self.backend = backend
-        self.temp = tempfile.TemporaryDirectory(); self.root = Path(self.temp.name) / 'root'
+        self.temp = tempfile.TemporaryDirectory(); self.addCleanup(self.temp.cleanup); self.root = Path(self.temp.name) / 'root'
         (self.root / 'back-end/scripts').mkdir(parents=True); (self.root / 'scripts/tests').mkdir(parents=True)
         (self.root / 'back-end/src/tests/blackbox').mkdir(parents=True)
         for d in ('alpha', 'beta', 'gamma'):
@@ -2135,6 +2573,7 @@ class Backend(unittest.TestCase):
                                            'ROSE_TRUST_CONDUCTOR_WORKSPACE_NAME': '0',
                                            'FAKE_RUNNER_CONFIG': str(self.config), 'FAKE_NPX_CALLS': str(self.npx_calls)})
         self.env.start()
+        self.addCleanup(self.env.stop)
         self.request = {'token': 'be-1', 'source': cycle.source(self.root), 'gate': 'backend-coverage-blackbox',
                         'checks': backend.checks_for(['alpha', 'beta', 'gamma']), 'skips': {}, 'phase': 'initial'}
 
@@ -2175,7 +2614,7 @@ class Backend(unittest.TestCase):
         docker.chmod(0o700)
         env = {'CONDUCTOR_WORKSPACE_NAME': 'fixture', 'CONDUCTOR_PORT': '20000',
                'ROSE_TRUST_CONDUCTOR_WORKSPACE_NAME': '1', 'FAKE_POSTGRES': str(state),
-               'FAKE_DOCKER_CALLS': str(calls)}
+               'FAKE_DOCKER_CALLS': str(calls), 'BACKEND_COVERAGE_DATABASE_URL': ''}
         # A stopped fixture genuinely prevents the original setup; no fabricated result.
         setup = [sys.executable, '-c', "import json,os; from pathlib import Path; "
                  "assert json.loads(Path(os.environ['FAKE_POSTGRES']).read_text())['row']['running']; "
@@ -2188,8 +2627,133 @@ class Backend(unittest.TestCase):
         self.request['source'] = cycle.source(self.root)
         return state, calls, env
 
+    def test_backend_rejects_external_tmpdir_before_effects(self):
+        self.request.update(external_tmpdir={'invalid':True},external_tmpdir_path='/not-owned')
+        with patch.object(self.backend,'restore_workspace_postgres',side_effect=AssertionError('effect reached')) as restore:
+            with self.assertRaises(ValueError):
+                self.backend.execute(self.request,self.root)
+        restore.assert_not_called()
+        self.assertFalse((self.root/'.context/deploy-backend').exists())
+
+    def test_backend_external_tmpdir_valid_and_denials(self):
+        with tempfile.TemporaryDirectory(prefix='dpt-') as value:
+            path=Path(value);path.chmod(0o700)
+            lease=dict(schema='deploy-external-tmpdir-v1',coordinator_root=str(Path(self.temp.name)/'coordinator'),
+                       worker_root=str(self.root),gate=self.request['gate'],uid=os.geteuid(),
+                       device=path.stat().st_dev,inode=path.stat().st_ino)
+            marker=path/'.deploy-tmpdir-owner.json';marker.write_text(json.dumps(lease));marker.chmod(0o600)
+            base=copy.deepcopy(self.request);base.update(external_tmpdir=lease,external_tmpdir_path=value)
+            for mode in ('missing-lease','missing-path','both-missing','wrong-lease','env','setup','cleanup','case'):
+                request=copy.deepcopy(base);env=value
+                if mode=='missing-lease':request.pop('external_tmpdir')
+                elif mode=='missing-path':request.pop('external_tmpdir_path')
+                elif mode=='both-missing':request.pop('external_tmpdir');request.pop('external_tmpdir_path')
+                elif mode=='wrong-lease':request['external_tmpdir']={**lease,'inode':lease['inode']+1}
+                elif mode=='env':env=str(self.root)
+                else:
+                    spec={'command':['true'],'env':{'TMPDIR':str(self.root)}}
+                    request['worker_recipe']={mode:spec} if mode!='case' else {'cases':{'x':spec}}
+                with patch.dict(os.environ,{'TMPDIR':env}),patch.object(self.backend,'restore_workspace_postgres') as restore:
+                    with self.assertRaises(ValueError):self.backend._execute(request,self.root)
+                    restore.assert_not_called()
+                self.assertFalse((self.root/'.context/deploy-backend').exists())
+            self.configure(0,self.rows(alpha=True,beta=True,gamma=True))
+            with patch.dict(os.environ,{'TMPDIR':value}):
+                result=self.backend.execute(base,self.root)
+            self.assertEqual('PASS',result['cases']['blackbox:alpha'])
+            self.assertTrue(result['cleanup_complete'])
+
+    def native_qualified_filter(self):
+        # Execute the actual existing run.ts filter block without importing its live runner.
+        text=(ROOT/'back-end/src/tests/blackbox/run.ts').read_text()
+        start=text.index('const skipDomains = new Set(')
+        end=text.index('if (requested.length === 0)',start)
+        script=Path(self.temp.name)/'native-filter.js'
+        script.write_text("const requestedRaw=JSON.parse(process.argv[2]);\n"
+            "const readEnv=(...names)=>names.map(n=>process.env[n]).find(v=>v!==undefined);\n"
+            +text[start:end]+"\nconsole.log(JSON.stringify(requested));\n")
+        config=cycle.read(self.config);config['native_filter_js']=str(script);cycle.write(self.config,config)
+
+    def qualified_filter_request(self):
+        self.configure(0,self.rows(alpha=True,beta=True,gamma=True))
+        self.native_qualified_filter()
+        entry={'source':self.request['source'],'disposition':'external / waived',
+            'rca':{'id':'native-credit-failure','description':'provider credits exhausted',
+                   'evidence':'retained-native.log','native_result':'FAIL','attribution':'NOT_INTRODUCED',
+                   'check':'backend-coverage-blackbox/blackbox:beta',
+                   'external_provider':{'name':'fixture-provider','reason':'credits exhausted'}}}
+        self.request['checks'].remove('blackbox:beta')
+        self.request['skips']={'blackbox:beta':entry}
+        return entry
+
+    def test_qualified_execution_uses_native_filter_without_running_excluded_domain(self):
+        entry=self.qualified_filter_request();before=copy.deepcopy(self.request)
+        with patch.dict(os.environ,{'CONTRACT_TEST_SKIP_DOMAINS':'integration-health'}):
+            result=self.backend.execute(self.request,self.root)
+        text=Path(result['runner_log']).read_text()
+        executed=json.loads(next(line.split('FAKE_NATIVE_EXECUTION ',1)[1] for line in text.splitlines() if line.startswith('FAKE_NATIVE_EXECUTION ')))
+        self.assertEqual(['alpha','gamma'],executed)
+        self.assertNotIn('blackbox:beta',result['cases'])
+        self.assertTrue(all(value=='PASS' for value in result['cases'].values()))
+        proof=result['evidence']['execution_exclusions']
+        self.assertEqual(['beta'],proof['qualified_domains'])
+        self.assertEqual(['integration-health'],proof['producer_fixed_domains'])
+        self.assertEqual(self.backend.qualified_exclusions(self.request,['alpha','beta','gamma']),proof['qualification_sha256'])
+        self.assertEqual(before,self.request)
+
+    def test_qualified_execution_rejects_caller_recipe_extras_before_launch(self):
+        self.qualified_filter_request()
+        recipe={'cases':{name:{'command':['npm','run','test:coverage:sharded'],'cwd':'back-end','sweep':'backend'}
+                         for name in self.backend.checks_for(['alpha','beta','gamma'])}}
+        for scope in ('caller','setup','cleanup','case'):
+            request=copy.deepcopy(self.request);request['worker_recipe']=copy.deepcopy(recipe)
+            extra={'BLACKBOX_TEST_SKIP_DOMAINS':'alpha'}
+            if scope in ('setup','cleanup'):request['worker_recipe'][scope]={'command':['true'],'env':extra}
+            if scope=='case':
+                for case in request['worker_recipe']['cases'].values():case['env']=extra
+            with patch.dict(os.environ,extra if scope=='caller' else {}),patch.object(self.backend,'run_command') as launch:
+                with self.assertRaisesRegex(ValueError,'skip_env_not_allowed'):self.backend.execute(request,self.root)
+                launch.assert_not_called()
+            shutil.rmtree(self.root/'.context',ignore_errors=True)
+
+    def test_qualified_execution_changes_only_sweep_environment(self):
+        self.qualified_filter_request()
+        self.request['worker_recipe']={'cases':{
+            k:{'command':['npm','run','test:coverage:sharded'],'cwd':'back-end','sweep':'backend','env':{'CASE_ONLY':'kept'}}
+            for k in self.backend.checks_for(['alpha','beta','gamma'])},
+            'setup':{'command':['true'],'env':{'SETUP_ONLY':'kept'}},
+            'cleanup':{'command':['true'],'env':{'CLEANUP_ONLY':'kept'}}}
+        before=copy.deepcopy(self.request);calls=[];native=self.backend.run_command
+        def run(argv,**kwargs):
+            calls.append((list(argv),dict(kwargs['env'])))
+            return native(argv,**kwargs)
+        with patch.dict(os.environ,{'BLACKBOX_TEST_SKIP_DOMAINS':'integration-health','CONTRACT_TEST_SKIP_DOMAINS':'integration-health','OTHER_VALUE':'kept'}), \
+             patch.object(self.backend,'run_command',side_effect=run):
+            result=self.backend.execute(self.request,self.root)
+        self.assertEqual(before,self.request)
+        self.assertTrue(result['complete'])
+        self.assertEqual(1,sum(argv==['npm','run','test:coverage:sharded'] for argv,env in calls))
+        for argv,env in calls:
+            expected='beta,integration-health' if argv==['npm','run','test:coverage:sharded'] else 'integration-health'
+            self.assertEqual(expected,env['BLACKBOX_TEST_SKIP_DOMAINS'])
+            self.assertEqual(expected,env['CONTRACT_TEST_SKIP_DOMAINS'])
+            self.assertEqual('kept',env['OTHER_VALUE']);self.assertEqual('kept',env['CASE_ONLY'])
+        self.assertTrue(all(result['cases'][k]=='PASS' for k in ('units','fps','coverage-threshold','teardown')))
+
+    def test_qualified_execution_missing_active_or_unexpected_rows_are_unverified(self):
+        self.qualified_filter_request()
+        config=cycle.read(self.config);config['results']=self.rows(alpha=True,beta=True);cycle.write(self.config,config)
+        result=self.backend.execute(self.request,self.root)
+        self.assertEqual('UNVERIFIED',result['cases']['blackbox:gamma'])
+        self.assertFalse(result['complete'])
+        shutil.rmtree(self.root/'.context')
+        self.configure(0,self.rows(alpha=True,beta=True,gamma=True))  # A child ignoring native filtering is not credited.
+        result=self.backend.execute(self.request,self.root)
+        self.assertTrue(all(v=='UNVERIFIED' for k,v in result['cases'].items() if k.startswith('blackbox:')))
+        self.assertFalse(result['complete'])
+
     def test_qualified_treasury_exclusion_keeps_full_native_peer_outcomes(self):
-        # Actual43: the unchanged full shards include an already-qualified treasury FAIL.
+        # Preserve the prior native treasury FAIL in its qualification; do not execute it again.
         (self.root / 'back-end/src/tests/blackbox/treasury-rails.blackbox.ts').write_text('export {}\n')
         self.request['source'] = cycle.source(self.root)
         qualification = {'source': self.request['source'], 'disposition': 'treasury / skipped with warning',
@@ -2206,6 +2770,7 @@ class Backend(unittest.TestCase):
         config = cycle.read(self.config)
         config['extra_summaries'] = {'blackbox-run-shard2': json.dumps({'results': self.rows(gamma=True)})}
         cycle.write(self.config, config)
+        self.native_qualified_filter()
         result = self.backend.execute(self.request, self.root)
         self.assertEqual('PASS', result['cases']['blackbox:alpha'])
         self.assertEqual('FAIL', result['cases']['blackbox:beta'])
@@ -2215,10 +2780,12 @@ class Backend(unittest.TestCase):
         self.assertEqual('PASS', result['cases']['teardown'])
         self.assertNotIn('blackbox:treasury-rails', result['cases'])
         self.assertEqual([], result['evidence']['unknown_domains'])
-        excluded = result['evidence']['qualified_excluded_rows']['blackbox:treasury-rails']
-        self.assertIs(excluded['passed'], False); self.assertIs(excluded['aborted'], False)
+        self.assertNotIn('qualified_excluded_rows',result['evidence'])
+        excluded = result['evidence']['execution_exclusions']
+        self.assertEqual(['treasury-rails'],excluded['qualified_domains'])
         self.assertEqual(__import__('hashlib').sha256(json.dumps(qualification, sort_keys=True).encode()).hexdigest(),
-                         excluded['qualification_sha256'])
+                         excluded['qualification_sha256']['blackbox:treasury-rails'])
+        self.assertEqual('FAIL',qualification['rca']['native_result'])
         self.assertEqual(2, len(result['evidence']['artifacts']['summaries']))
         self.assertEqual(1, result['native_exit']); self.assertFalse(result['complete'])
         self.assertTrue(result['cleanup_complete']); self.assertEqual(before, self.request)
@@ -2387,6 +2954,187 @@ class Backend(unittest.TestCase):
         self.configure(0, self.rows(alpha=True, beta=True, gamma=True))
         self.request['checks'] = ['blackbox:delta', 'units']
         with self.assertRaisesRegex(ValueError, 'frozen domain list'): self.backend.execute(self.request, self.root)
+
+    def collection_fixture(self):
+        self.configure(1, self.rows(alpha=True, beta=False, gamma=True))
+        result = self.backend.execute(self.request, self.root)
+        native = Path(result['runner_log']).parent
+        (native/'teardown.log').unlink()
+        for name in ('units.log','units-probe.log'):
+            (self.root/'back-end/coverage'/name).write_text('native fake complete\n')
+        folder = self.root/'.context/original';folder.mkdir()
+        finished=time.time()
+        receipt={'token':self.request['token'],'source':self.request['source'],'gate':self.request['gate'],
+                 'executed':True,'complete':False,'cancelled':True,'native_exit':-9,
+                 'cases':dict.fromkeys(self.request['checks'],'UNVERIFIED'),
+                 'started_at':result['started_at'],'finished_at':finished,
+                 'host_admission':{'original_budget_seconds':14400,'deadline_monotonic':time.monotonic()+14400,'started':True}}
+        original={**self.request,'worker_root':str(self.root),'worker_recipe':{
+            'cases':{c:{'command':['npm','run','test:coverage:sharded'],'cwd':'back-end','sweep':'backend'} for c in self.request['checks']}}}
+        cycle.write(folder/'request.json',original);cycle.write(folder/'receipt.json',receipt)
+        cycle.write(folder/'output.log.process.json',{'native_exit':-9,'quiescent':True,'remaining':[],'error':None})
+        text=Path(result['runner_log']).read_text()
+        children=self.backend.current_shard_logs(self.root,text,receipt['started_at'])
+        joined=text+'\n'+'\n'.join(t for _,t in children)
+        files=[folder/n for n in ('request.json','receipt.json','output.log.process.json')]+[
+            native/'runner.log',native/'threshold.log',self.root/'back-end/coverage/units.log',
+            self.root/'back-end/coverage/units-probe.log']+[p for p,_ in children]+list((self.root/'back-end/coverage').glob('blackbox-run-shard*/summary.json'))
+        archives=[self.backend.owned_archive(self.root,self.backend.ARCHIVE_LINE.search(joined).group(1))]+[
+            self.backend.owned_archive(self.root,n) for n in self.backend.FAILED_SHARD_LINE.findall(joined)]
+        sourcefiles={}
+        for raw in subprocess.check_output(['git','ls-files','-z'],cwd=self.root).split(b'\0'):
+            if raw:
+                name=os.fsdecode(raw);sourcefiles[name]={'sha256':self.backend.sha_file(self.root/name),'mode':cycle.source_mode(self.root/name)}
+        seal={'kind':'backend-collection-seal-v1','sealed_at':time.time(),'original_folder':str(folder),'worker_root':str(self.root),
+              'token':original['token'],'producer_source':original['source'],'source_files':sourcefiles,
+              'request_sha256':self.backend.sha_file(folder/'request.json'),'receipt_sha256':self.backend.sha_file(folder/'receipt.json'),
+              'files':{str(p):{'sha256':self.backend.sha_file(p),'size':p.stat().st_size,'mtime_ns':p.stat().st_mtime_ns} for p in files},
+              'archives':{str(a):{'sha256':self.backend.archive_manifest(a)[0],'files':self.backend.archive_manifest(a)[1]} for a in archives}}
+        path=self.root/'.context/seal.json';cycle.write(path,seal)
+        request={**original,'token':'new-collection','collection':{'seal':str(path),'seal_sha256':self.backend.sha_file(path),'report_timeout_seconds':30}}
+        return request,seal,path
+
+    def test_collection_only_never_launches_producer_or_teardown(self):
+        request,seal,path=self.collection_fixture()
+        runner=self.backend.run_command
+        def only_report(argv,**kwargs):
+            self.assertIn('c8 report',' '.join(argv),'collection launched a producer or teardown')
+            return runner(argv,**kwargs)
+        with patch.object(self.backend,'run_command',side_effect=only_report):
+            result=self.backend.execute(request,self.root)
+        self.assertEqual('FAIL',result['cases']['blackbox:beta'])
+        self.assertEqual('PASS',result['cases']['blackbox:alpha'])
+        self.assertEqual('UNVERIFIED',result['cases']['teardown'])
+        self.assertFalse(result['complete'])
+        self.assertEqual(seal['producer_source'],result['collection']['producer_source'])
+        self.assertEqual(seal['receipt_sha256'],self.backend.sha_file(Path(seal['original_folder'])/'receipt.json'))
+        self.backend.validate_collection_result(result,request,self.root)
+        with self.assertRaises(ValueError):self.backend.execute(request,self.root)
+
+    def test_collection_seal_tamper_source_and_late_writer_refuse(self):
+        request,seal,path=self.collection_fixture()
+        with patch.object(self.backend,'run_command',side_effect=AssertionError('must not execute')):
+            bad=copy.deepcopy(request);bad['collection']['seal_sha256']='0'*64
+            with self.assertRaises(ValueError):self.backend.execute(bad,self.root)
+            (self.root/'back-end/src/tests/blackbox/alpha.blackbox.ts').write_text('changed')
+            with self.assertRaises(ValueError):self.backend.execute(request,self.root)
+        self.assertFalse((self.root/'.context/deploy-backend/collection-new-collection').exists())
+
+    def test_collection_missing_partial_duplicate_and_clock_refuse(self):
+        request,seal,path=self.collection_fixture()
+        for mutate in [lambda d:d.update(archives={}),lambda d:d['files'].pop(next(iter(d['files']))),lambda d:d.update(sealed_at=0)]:
+            bad=copy.deepcopy(seal);mutate(bad);cycle.write(path,bad)
+            req=copy.deepcopy(request);req['collection']['seal_sha256']=self.backend.sha_file(path)
+            with self.assertRaises(ValueError):self.backend.execute(req,self.root)
+        cycle.write(path,seal)
+        summary=next((self.root/'back-end/coverage').glob('blackbox-run-shard*/summary.json'))
+        summary.unlink()
+        with self.assertRaises(ValueError):self.backend.execute(request,self.root)
+
+    def test_collection_post_report_change_is_not_accepted(self):
+        request,seal,path=self.collection_fixture()
+        runner=self.backend.run_command
+        def late(argv,**kwargs):
+            result=runner(argv,**kwargs)
+            next((self.root/'back-end/coverage').glob('blackbox-run-shard*/summary.json')).write_text('{}')
+            return result
+        with patch.object(self.backend,'run_command',side_effect=late),self.assertRaises(ValueError):
+            self.backend.execute(request,self.root)
+
+    def test_collection_report_failure_cannot_be_promoted(self):
+        request,seal,path=self.collection_fixture()
+        config=cycle.read(self.config);config['c8_rc']=1;cycle.write(self.config,config)
+        result=self.backend.execute(request,self.root)
+        self.assertEqual('UNVERIFIED',result['cases']['coverage-threshold'])
+        result['cases']['coverage-threshold']='PASS'
+        with self.assertRaises(ValueError):self.backend.validate_collection_result(result,request,self.root)
+
+    def test_collection_duplicate_shard_is_not_recoverable(self):
+        request,seal,path=self.collection_fixture()
+        summary=next((self.root/'back-end/coverage').glob('blackbox-run-shard*/summary.json'))
+        duplicate=summary.parent.parent/'blackbox-run-shard99/summary.json'
+        duplicate.parent.mkdir();duplicate.write_bytes(summary.read_bytes())
+        row={'sha256':self.backend.sha_file(duplicate),'size':duplicate.stat().st_size,'mtime_ns':duplicate.stat().st_mtime_ns}
+        seal['files'][str(duplicate)]=row;cycle.write(path,seal)
+        request['collection']['seal_sha256']=self.backend.sha_file(path)
+        with self.assertRaises(ValueError):self.backend.execute(request,self.root)
+
+    def test_collection_bounds_foreign_root_and_forged_result_refuse(self):
+        request,seal,path=self.collection_fixture()
+        for timeout in (True,0,-1,601,float('inf')):
+            bad=copy.deepcopy(request);bad['collection']['report_timeout_seconds']=timeout
+            with self.assertRaises(ValueError):self.backend.execute(bad,self.root)
+        bad=copy.deepcopy(request);bad['token']='../escape'
+        with self.assertRaises(ValueError):self.backend.execute(bad,self.root)
+        bad=copy.deepcopy(seal);bad['worker_root']=str(self.root.parent);cycle.write(path,bad)
+        changed=copy.deepcopy(request);changed['collection']['seal_sha256']=self.backend.sha_file(path)
+        with self.assertRaises(ValueError):self.backend.execute(changed,self.root)
+        cycle.write(path,seal)
+        result=self.backend.execute(request,self.root)
+        result['cases']['blackbox:beta']='PASS'
+        with self.assertRaises(ValueError):self.backend.validate_collection_result(result,request,self.root)
+
+    def test_collection_harness_delta_keeps_producer_source_explicit(self):
+        path=self.root/'scripts/deploy_test_backend.py';path.write_text('# original harness\n')
+        subprocess.run(['git','-C',str(self.root),'add','.'],check=True)
+        subprocess.run(['git','-C',str(self.root),'-c','user.name=t','-c','user.email=t@x','commit','-qm','harness'],check=True)
+        self.request['source']=cycle.source(self.root)
+        request,seal,pinpath=self.collection_fixture()
+        old=request['source'];path.write_text('# collection-only harness repair\n')
+        request['source']=cycle.source(self.root)
+        result=self.backend.execute(request,self.root)
+        self.assertNotEqual(old,request['source'])
+        self.assertEqual(old,result['collection']['producer_source'])
+        self.assertEqual(request['source'],result['collection']['collector_source'])
+        self.assertEqual({'scripts/deploy_test_backend.py'},set(result['collection']['harness_delta']))
+        self.backend.validate_collection_result(result,request,self.root)
+
+    def test_collection_union_and_native_case_tampering_refuse(self):
+        request,seal,path=self.collection_fixture()
+        result=self.backend.execute(request,self.root)
+        identity=result['evidence']['coverage-threshold']['identity']
+        union=Path(identity['union']);next(union.iterdir()).write_text('forged')
+        identity['union_manifest_sha256']=self.backend.archive_manifest(union)[0]
+        with self.assertRaises(ValueError):self.backend.validate_collection_result(result,request,self.root)
+
+    def test_collection_failed_cases_preserves_prefixed_native_evidence(self):
+        request,seal,path=self.collection_fixture()
+        result=self.backend.execute(request,self.root)
+        receipt={**result,'worker_evidence':result['evidence']}
+        failures=cycle.failed_cases({'phase':'collection','source':request['source']},[receipt])
+        failed=next(f for f in failures if f['check']=='backend-coverage-blackbox/blackbox:beta')
+        shard=next((self.root/'back-end/coverage').glob('blackbox-run-shard*/summary.json'))
+        self.assertEqual({'shard':str(shard),'passed':False,'aborted':False},failed['worker_evidence'])
+        self.assertNotIn('blackbox:blackbox:beta',result['evidence'])
+
+    def test_collection_claim_parent_is_synced_before_report(self):
+        request,seal,path=self.collection_fixture()
+        parent=self.root/'.context/deploy-backend'
+        claim=parent/'collection-claim-be-1.json'
+        events=[];fsync=os.fsync;report=self.backend.threshold_over_archive
+        def sync(fd):
+            target=Path(os.readlink('/proc/self/fd/'+str(fd)))
+            if target==claim:events.append('file')
+            if target==parent:events.append('directory')
+            return fsync(fd)
+        def tail(*args,**kwargs):
+            self.assertEqual(['file','directory'],events)
+            return report(*args,**kwargs)
+        with patch.object(os,'fsync',side_effect=sync),patch.object(self.backend,'threshold_over_archive',side_effect=tail):
+            self.backend.execute(request,self.root)
+
+    def test_collection_failed_claim_parent_sync_stops_report_and_retains_claim(self):
+        request,seal,path=self.collection_fixture()
+        parent=self.root/'.context/deploy-backend'
+        claim=parent/'collection-claim-be-1.json';fsync=os.fsync
+        def sync(fd):
+            if Path(os.readlink('/proc/self/fd/'+str(fd)))==parent:raise OSError('directory sync failed')
+            return fsync(fd)
+        with patch.object(os,'fsync',side_effect=sync),patch.object(self.backend,'threshold_over_archive',wraps=self.backend.threshold_over_archive) as report:
+            with self.assertRaisesRegex(OSError,'directory sync failed'):self.backend.execute(request,self.root)
+            report.assert_not_called()
+        self.assertEqual({'seal':request['collection']['seal_sha256'],'token':request['token']},cycle.read(claim))
+        with self.assertRaisesRegex(ValueError,'collection claim'):self.backend.execute(request,self.root)
 
     def test_one_failed_domain_keeps_its_peers_and_threshold_runs_over_the_archive(self):
         self.configure(1, self.rows(alpha=True, beta=False, gamma=True))
@@ -2954,6 +3702,442 @@ class WorkerBenchmarkControllerKill(unittest.TestCase):
         self.assertFalse(self.alive(self.pid))
         self.assertFalse(self.marker.exists())
         self.assertEqual('UNVERIFIED', row['status']); self.assertTrue(row['lingering_group'])
+
+
+class FakeTilionListing:
+    """Offline stand-in for Tilion GET /v1/sessions at the urllib boundary (no provider call)."""
+    def __init__(self, *live_counts, status=200, body=None):
+        self.live_counts=list(live_counts);self.status=status;self.body=body;self.requests=[]
+
+    def open(self, _director, request, data=None, timeout=None):
+        self.requests.append((request.full_url,request.get_method(),dict(request.header_items()),timeout))
+        count=self.live_counts.pop(0) if len(self.live_counts)>1 else self.live_counts[0]
+        body=self.body if self.body is not None else json.dumps(
+            [{'session_id':f'sess-{i}','state':'running','created_at':1} for i in range(count)]).encode()
+        status=self.status
+
+        class Response:
+            def __enter__(self):return self
+            def __exit__(self,*_exc):return False
+            def read(self,_limit=-1):return body
+        response=Response();response.status=status
+        return response
+
+
+class CloudSharedProviderHeadroom(unittest.TestCase):
+    """Two deploys and production share ONE 20-browser Tilion account: size smoke from its live usage."""
+    KEY='fixture-tilion-key-not-real'
+
+    def setUp(self):
+        import deploy_test_cloud as cloud
+        self.cloud=cloud;self.now=[1_000.0];self.sleeps=[]
+        env={'CLOUDBENCH_BROWSER_PROVIDER':'tilion','TILION_API_KEY':self.KEY,
+             'TILION_BASE_URL':'https://tilion.fixture.invalid',
+             'CLOUDBENCH_PROVIDER_LIMITS_FILE':str(ROOT/'scripts/cloudbench-provider-limits.json')}
+        for patcher in (patch.dict(os.environ,env),patch('time.time',side_effect=lambda:self.now[0]),
+                        patch('time.sleep',side_effect=self.sleep)):
+            patcher.start();self.addCleanup(patcher.stop)
+        # Test the account ceiling independently of the invoking deploy's width.
+        os.environ.pop('DEPLOY_CLOUD_CONCURRENCY', None)
+
+    def sleep(self, seconds):
+        self.sleeps.append(seconds);self.now[0]+=seconds
+
+    def width(self, listing, count=17):
+        stderr=io.StringIO()
+        with patch('urllib.request.OpenerDirector.open',new=lambda director,request,data=None,timeout=None:
+                   listing.open(director,request,data,timeout)), contextlib.redirect_stderr(stderr):
+            try:
+                return self.cloud.campaign_width([f'task-{i}' for i in range(count)]),stderr.getvalue()
+            finally:
+                self.assertNotIn(self.KEY,stderr.getvalue())
+
+    def test_live_account_sessions_narrow_the_smoke_width(self):
+        listing=FakeTilionListing(5)  # production + another deploy hold five browsers right now
+        width,output=self.width(listing)
+        self.assertEqual(11,width)  # floor(20 * 0.8 - 5), not the solo registry cap 16
+        url,method,headers,timeout=listing.requests[0]
+        self.assertEqual(('https://tilion.fixture.invalid/v1/sessions','GET'),(url,method))
+        self.assertEqual('Bearer '+self.KEY,headers['Authorization'])
+        self.assertLessEqual(timeout,15)
+        self.assertIn('5 live account-wide of 20 (20% reserved for production)',output)
+        self.assertEqual([],self.sleeps)
+
+    def test_idle_account_still_honours_the_registry_cap_and_request(self):
+        self.assertEqual(16,self.width(FakeTilionListing(0))[0])
+        self.assertEqual(3,self.width(FakeTilionListing(0),count=3)[0])
+
+    def test_second_deploy_waits_while_the_first_holds_the_pool_then_starts(self):
+        # Deploy A's 16 smoke browsers are live; production keeps its four-browser reserve.
+        listing=FakeTilionListing(16,17,9)
+        width,output=self.width(listing)
+        self.assertEqual(7,width)
+        self.assertEqual(3,len(listing.requests))
+        self.assertEqual([30.0,30.0],self.sleeps)
+        self.assertEqual(2,output.count('⏳ waiting for shared provider headroom'))
+        self.assertIn('16 live of 20, 20% reserved for production',output)
+
+    def test_full_account_until_the_deadline_refuses_before_any_launch(self):
+        launched=[]
+        with patch.object(self.cloud,'run_command',side_effect=lambda *a,**k:launched.append(a)):
+            with self.assertRaises(ValueError) as refused:
+                self.width(FakeTilionListing(16))
+        self.assertIn('cannot admit one smoke task by the deadline',str(refused.exception))
+        self.assertEqual([],launched)
+        self.assertAlmostEqual(900.0,sum(self.sleeps))
+        self.assertTrue(all(0<pause<=30 for pause in self.sleeps))
+
+    def test_unreadable_listing_never_admits_and_refuses_at_the_deadline(self):
+        for listing in (FakeTilionListing(0,status=500),FakeTilionListing(0,body=b'<html>'),
+                        FakeTilionListing(0,body=b'{"sessions":[]}')):
+            with self.subTest(status=listing.status,body=listing.body):
+                self.now[0]=1_000.0;self.sleeps.clear()
+                with self.assertRaises(ValueError) as refused:
+                    self.width(listing)
+                self.assertIn('live usage unreadable',str(refused.exception))
+
+    def test_devbox_without_tilion_credential_is_unmeasured_not_silent(self):
+        import cloudbench_provider_headroom as headroom
+        probes=headroom.live_probes(environ={},env_file=Path(tempfile.mkdtemp(prefix='no-env-'))/'.env')
+        self.assertIsNone(probes['tilion-browser-sessions']())
+        capacity=runpy.run_path(str(ROOT/'scripts/cloudbench-provider-capacity.py'))
+        registry=capacity['for_browser_provider'](capacity['load_registry'](),'tilion')
+        stderr=io.StringIO()
+        width=headroom.admitted_width(17,registry,probes=probes,deadline=0,stream=stderr)
+        self.assertEqual(16,width)
+        self.assertIn('live account usage UNMEASURED',stderr.getvalue())
+
+    def test_plain_http_base_url_never_receives_the_key(self):
+        import cloudbench_provider_headroom as headroom
+        with self.assertRaises(headroom.HeadroomUnavailable):
+            headroom.tilion_live_sessions(self.KEY,'http://tilion.fixture.invalid',
+                                          opener=lambda *_a:self.fail('plain-HTTP request was sent'))
+
+
+class FixtureEnvironmentIsolation(unittest.TestCase):
+    def test_cloud_request_custody_is_local_and_parent_environment_is_restored(self):
+        parent = '/tmp/fixture-parent/attempts/34/phase/gate/request.json'
+        with patch.dict(os.environ, {'DEPLOY_GATE_REQUEST': parent, 'DEPLOY_CLOUD_CONCURRENCY': '4'}):
+            result = unittest.TestResult()
+            Cloud('test_cloud_cli_gets_only_active_cases_and_frozen_ref').run(result)
+            self.assertTrue(result.wasSuccessful(), result.errors + result.failures)
+            self.assertEqual(parent, os.environ['DEPLOY_GATE_REQUEST'])
+            self.assertEqual('4', os.environ['DEPLOY_CLOUD_CONCURRENCY'])
+
+    def test_headroom_fixture_preserves_parent_width_and_explicit_limits(self):
+        with patch.dict(os.environ, {'DEPLOY_CLOUD_CONCURRENCY': '4'}):
+            result = unittest.TestResult()
+            CloudSharedProviderHeadroom('test_live_account_sessions_narrow_the_smoke_width').run(result)
+            self.assertTrue(result.wasSuccessful(), result.errors + result.failures)
+            self.assertEqual('4', os.environ['DEPLOY_CLOUD_CONCURRENCY'])
+            fixture = CloudSharedProviderHeadroom()
+            fixture.setUp()
+            try:
+                with patch.dict(os.environ, {'DEPLOY_CLOUD_CONCURRENCY': '4'}):
+                    self.assertEqual(4, fixture.width(FakeTilionListing(5))[0])
+            finally:
+                fixture.doCleanups()
+            self.assertEqual('4', os.environ['DEPLOY_CLOUD_CONCURRENCY'])
+
+
+class FakeCerebrasProbe:
+    """Offline stand-in for one 1-token Cerebras completion at the opener boundary."""
+    def __init__(self, *answers):
+        self.answers=list(answers);self.requests=[]
+
+    def __call__(self, request, timeout):
+        self.requests.append((request.full_url,request.get_method(),dict(request.header_items()),json.loads(request.data)))
+        status,headers=self.answers.pop(0) if len(self.answers)>1 else self.answers[0]
+        if status!=200:
+            import urllib.error
+            raise urllib.error.HTTPError(request.full_url,status,'limited',headers,io.BytesIO(b'{}'))
+
+        class Response:
+            def __enter__(self):return self
+            def __exit__(self,*_exc):return False
+            def read(self,_limit=-1):return b'{}'
+        response=Response();response.status=status;response.headers=headers
+        return response
+
+
+class CerebrasRatchetHeadroom(unittest.TestCase):
+    """The latency ratchet waits on the Cerebras org quota that every deploy and production spend."""
+    KEY='fixture-cerebras-key-not-real'
+
+    def setUp(self):
+        import cloudbench_provider_headroom as headroom
+        from fractions import Fraction
+        self.headroom=headroom;self.reserve=Fraction(1,5);self.now=[0.0];self.sleeps=[]
+
+    def sleep(self, seconds):
+        self.sleeps.append(seconds);self.now[0]+=seconds
+
+    def wait(self, probe, deadline=600):
+        out,err=io.StringIO(),io.StringIO()
+        with contextlib.redirect_stderr(err):
+            ready=self.headroom.wait_for_cerebras(self.KEY,reserve=self.reserve,deadline=deadline,opener=probe,
+                                                  clock=lambda:self.now[0],sleep=self.sleep,stream=out)
+        self.assertNotIn(self.KEY,out.getvalue()+err.getvalue())
+        return ready,out.getvalue(),err.getvalue()
+
+    @staticmethod
+    def window(remaining, limit=300, reset=17):
+        return {'x-ratelimit-limit-requests-minute':str(limit),'x-ratelimit-remaining-requests-minute':str(remaining),
+                'x-ratelimit-reset-requests-minute':str(reset),'x-ratelimit-remaining-requests-day':'0'}
+
+    def test_ample_shared_quota_starts_immediately_with_one_tiny_probe(self):
+        probe=FakeCerebrasProbe((200,self.window(240)))
+        ready,out,_=self.wait(probe)
+        self.assertTrue(ready);self.assertEqual([],self.sleeps)
+        url,method,headers,body=probe.requests[0]
+        self.assertEqual(('https://api.cerebras.ai/v1/chat/completions','POST'),(url,method))
+        self.assertEqual('Bearer '+self.KEY,headers['Authorization'])
+        self.assertEqual(1,body['max_completion_tokens']);self.assertEqual('qwen-3.8-27b',body['model'])
+        self.assertIn('requests-minute 240/300',out)  # a daily window never holds a per-minute ratchet
+
+    def test_other_deploys_draining_the_minute_window_hold_the_ratchet_until_reset(self):
+        probe=FakeCerebrasProbe((200,self.window(12,reset=23)),(429,{'retry-after':'9'}),(200,self.window(290)))
+        ready,out,_=self.wait(probe)
+        self.assertTrue(ready);self.assertEqual([23.0,9.0],self.sleeps)
+        self.assertIn('requests-minute 12 of 300 remaining',out);self.assertIn('probe answered 429',out)
+
+    def test_quota_still_short_at_the_deadline_fails_closed(self):
+        ready,_,err=self.wait(FakeCerebrasProbe((429,{})),deadline=150)
+        self.assertFalse(ready);self.assertAlmostEqual(150.0,sum(self.sleeps))
+        self.assertTrue(all(0<pause<=60 for pause in self.sleeps))
+        self.assertIn('FAIL: Cerebras shared quota still short at the deadline',err)
+
+    def test_unexpected_probe_status_is_not_headroom(self):
+        ready,_,err=self.wait(FakeCerebrasProbe((401,{})),deadline=40)
+        self.assertFalse(ready);self.assertIn('answered HTTP 401',err)
+
+    def test_a_rejected_credential_stops_at_once_but_a_provider_error_is_retried(self):
+        # 2026-11-08: the probe answered 403 for an hour while the semantic gate waited on it.
+        ready,_,err=self.wait(FakeCerebrasProbe((403,{})),deadline=3600)
+        self.assertFalse(ready);self.assertEqual([],self.sleeps)
+        self.assertIn('cannot measure the shared Cerebras quota',err)
+        ready,_,err=self.wait(FakeCerebrasProbe((503,{})),deadline=90)
+        self.assertFalse(ready);self.assertTrue(self.sleeps)
+
+    def test_cli_without_any_cerebras_key_reports_unmeasured(self):
+        env={k:v for k,v in os.environ.items() if not k.startswith('CEREBRAS')}
+        out=io.StringIO()
+        with patch.dict(os.environ,env,clear=True), \
+             patch.object(self.headroom,'BACKEND_ENV_FILE',Path(tempfile.gettempdir())/'missing-provider-headroom.env'), \
+             patch.object(self.headroom,'wait_for_cerebras',side_effect=AssertionError('probed without a key')), \
+             contextlib.redirect_stdout(out):
+            self.assertEqual(0,self.headroom.main(['cerebras-wait','--timeout-seconds','0']))
+        self.assertIn('UNMEASURED',out.getvalue())
+
+    def test_cli_prefers_a_dedicated_ratchet_key_and_fails_closed_on_timeout(self):
+        seen=[]
+        with patch.dict(os.environ,{'CEREBRAS_RATCHET_API_KEY':'dedicated','CEREBRAS_API_KEY':'shared'}), \
+             patch.object(self.headroom,'wait_for_cerebras',side_effect=lambda key,**kw:seen.append((key,kw['reserve'])) or False):
+            self.assertEqual(1,self.headroom.main(['cerebras-wait','--timeout-seconds','5']))
+        self.assertEqual([('dedicated',self.reserve)],seen)  # registry production_reserve_fraction 0.2
+
+
+class StoppedPreStackIsolation(unittest.TestCase):
+    """Versioned pre-stack receipts exercise the complete native admission consumer."""
+    DRIVER_SHA256 = '1958de1798e8fdc46bd2081c1d530e9574c0957db80857d367802904f5ad5521'
+    DRIVER_COMMIT = 'a0030ab960344d48366b518a71b05c08200aa605'  # fix(deploy): isolate stopped guests rejected before stack startup
+
+    def setUp(self):
+        import base64
+        import gzip
+        import hashlib
+        import deploy_test_native_cleanup as native
+        self.native = native
+        spec = importlib.util.spec_from_file_location('native_cycle_fixtures', ROOT / 'scripts/tests/deploy-test-cycle.test.py')
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        fixture = module.Cycle()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        self.addCleanup(fixture.tearDown)
+        self.root = fixture.root
+        # The fixture uses the actual versioned driver, not a mock of its SHA.
+        # Receipts are historical: these are the reviewed driver bytes at DRIVER_COMMIT, pinned by SHA256.
+        # Driver changes require a newly reviewed before-stack contract.
+        fixture_record = json.loads((ROOT / 'scripts/tests/fixtures/stopped-pre-stack-driver.fixture.json').read_text())
+        self.assertEqual(self.DRIVER_SHA256, fixture_record['sha256'])
+        self.driver = gzip.decompress(base64.b64decode(fixture_record['gzip_base64']))
+        self.assertEqual(self.DRIVER_SHA256, hashlib.sha256(self.driver).hexdigest())
+        target = self.root / 'scripts/cloudbench-run.sh'
+        target.parent.mkdir(exist_ok=True)
+        target.write_bytes(self.driver)
+        subprocess.run(['git', '-C', str(self.root), 'add', 'scripts/cloudbench-run.sh'], check=True)
+        subprocess.run(['git', '-C', str(self.root), '-c', 'user.name=test', '-c',
+                        'user.email=test@example.com', 'commit', '-qm', 'reviewed startup driver'], check=True)
+        head = subprocess.check_output(['git', '-C', str(self.root), 'rev-parse', 'HEAD'], text=True).strip()
+        self.state, self.failure, self.paths, self.proof, self.gate, self.packet = fixture.isolated_campaign_state()
+        def replace(value):
+            if isinstance(value, dict): return {k: replace(v) for k, v in value.items()}
+            if isinstance(value, list): return [replace(v) for v in value]
+            return head if value == 'a' * 40 else value
+        self.state, self.proof = replace(self.state), replace(self.proof)
+        for path in (self.root / '.context').rglob('*.json'):
+            try: value = json.loads(path.read_text())
+            except ValueError: continue
+            cycle.write(path, replace(value))
+        self.fleet = (Path(self.proof['campaign']).parent.parent / 'runs'
+                      / f'20261103-080440-{module.FIXTURE_CONTROLLER_PID_BASE + 1}')
+        self.output = self.fleet / self.gate['name']
+        self.output.mkdir(exist_ok=True)
+        self.owner = cycle.read(self.fleet / '_batch/lifecycle.json')['fleet_owner_token']
+        self.token = self.owner + '-0'
+        self.machine, self.volume = 'old-machine', 'old-volume'
+        (self.output / '.cid').write_text('clone ' + self.machine + '\n')
+        cycle.write(self.output / 'runtime-evidence.owner.json',
+                    dict(version=1, machine_id=self.machine, run_token=self.token))
+        self.payload = self.output / 'cloudbench-boot-payload.json.gz'
+        self.payload.write_bytes(gzip.compress(json.dumps(dict(version=1, files={
+            'cloudbench-run.sh': base64.b64encode(self.driver).decode()})).encode()))
+        self.log = self.output / 'remote-logs/cloudbench-driver.log'
+        self.log.parent.mkdir()
+        self.log.write_text(
+            f'RUNSTAMP-{self.token}\n[cloudbench] verified checkout {head}\n'
+            '[cloudbench 20:01:29] STEP git_sync\n[cloudbench 20:01:29] STEP env_decode\n'
+            '[cloudbench 20:01:30] STEP dep_sync\n'
+            '[cloudbench] FATAL: warm image/volume JavaScript dependencies do not match the checked-out ref\n'
+            '[cloudbench 20:01:31] FATAL: cloudbench dependency synchronization failed\n'
+            f'::CLOUDBENCH-DONE:: token={self.token} exit=1\n'
+            '[boot 20:01:31] driver cleanup evidence interrupt_status=0 cleanup_ack=1\n')
+        self.rows = cycle.read(self.packet)['rows']
+        self.machine_row = next(r for r in self.rows if r['expected_machine'] == self.machine and r['kind'] == 'machine')
+        self.volume_row = next(r for r in self.rows if r['expected_machine'] == self.machine and r['kind'] == 'volume')
+        self.raw_machine = dict(id=self.machine, state='stopped', config=dict(
+            env=dict(REF=head, CLOUDBENCH_RUN_TOKEN=self.token), mounts=[dict(volume=self.volume, path='/data')]))
+        self.raw_volume = dict(id=self.volume, state='created', attached_machine_id=self.machine)
+        self.machine_row['metadata'].update(state='stopped')
+        self.volume_row['metadata'].update(state='created', attached_machine_id=self.machine)
+        self.proof['execution_quiescence'][self.machine]['startup_rejection_log'] = str(self.log)
+        self.reseal()
+
+    def reseal(self):
+        import hashlib
+        for row, data in ((self.machine_row, self.raw_machine), (self.volume_row, self.raw_volume)):
+            path = self.root / '.context' / ('raw-' + row['kind'] + '.json')
+            cycle.write(path, data)
+            row.update(raw_response=str(path), response_sha256=hashlib.sha256(path.read_bytes()).hexdigest())
+        cycle.write(self.packet, dict(endpoint_origin='https://api.machines.dev', app='fixture', rows=self.rows))
+        receipt = cycle.read(self.paths['receipt'])
+        receipt['native_cleanup_reference']['result_sha256'] = cycle.sha_file(self.paths['adapter'])
+        receipt['cleanup_owner']['native_cleanup_reference'] = receipt['native_cleanup_reference']
+        cycle.write(self.paths['receipt'], receipt)
+        self.state['attempts'][-1]['results'][0] = receipt
+        self.proof.update(owner=copy.deepcopy(receipt['cleanup_owner']),
+                          receipt_sha256=cycle.sha_file(self.paths['receipt']),
+                          worker_result_sha256=cycle.sha_file(self.paths['adapter']))
+        self.proof['files'] = {str(p): cycle.sha_file(p) for base in (
+            self.fleet.parent, Path(self.proof['campaign']), self.root / '.git/cloudbench-fleet-audits',
+            self.root / '.git/cloudbench-fleet-ownership') for p in base.rglob('*') if p.is_file()}
+        for path in (self.paths['receipt'].parent / 'request.json', self.fleet.parent.parent / 'cli.log',
+                     self.packet, Path(self.machine_row['raw_response']), Path(self.volume_row['raw_response']),
+                     self.root / 'scripts/cloudbench-run.sh'):
+            self.proof['files'][str(path)] = cycle.sha_file(path)
+
+    def validate(self):
+        receipt = cycle.read(self.paths['receipt'])
+        return self.native.validate(receipt, receipt['cleanup_owner'], self.proof)
+
+    def test_stopped_pre_stack_launch_preserves_original_failures_and_cleanup_debt(self):
+        before = copy.deepcopy(self.state)
+        original = self.paths['receipt'].read_bytes()
+        cycle.reconcile(self.state, self.failure['id'], self.proof)
+        entry = next(iter(self.state['reconciled_owners'].values()))
+        self.assertFalse(entry['credit_granted'])
+        self.assertFalse(entry['cleanup_complete'])
+        self.assertTrue(entry['obligations_preserved'])
+        self.assertEqual('isolated-validation', entry['purpose'])
+        self.assertEqual(before['attempts'], self.state['attempts'])
+        self.assertEqual(before['failures'], self.state['failures'])
+        self.assertEqual(original, self.paths['receipt'].read_bytes())
+        self.assertEqual({self.machine: self.volume, 'machine1': 'vol_fixture'}, entry['excluded_resources'])
+        self.assertEqual([], cycle.retained_owners(self.state, [self.gate['name']]))
+        self.assertEqual({'UNVERIFIED'}, set(cycle.read(self.paths['receipt'])['cases'].values()))
+        self.assertTrue((self.root / '.git/cloudbench-fleet-ownership' / self.owner).is_dir())
+
+    def test_stopped_pre_stack_still_refuses_a_live_original_controller(self):
+        # The fixture controller PID sits above every kernel pid_max, so a host process can never
+        # hold it (RCA 4fda5d31). The native refusal itself must still fire when one is live.
+        pid = int(self.fleet.name.rsplit('-', 1)[-1])
+        self.assertGreater(pid, 4194304)  # Linux PID_MAX_LIMIT
+        actual = self.native.subprocess.check_output
+        def processes(args, *a, **kw):
+            return f'999999 {pid} S\n' if args[:1] == ['ps'] else actual(args, *a, **kw)
+        before, original = copy.deepcopy(self.state), self.paths['receipt'].read_bytes()
+        with patch.object(self.native.subprocess, 'check_output', side_effect=processes):
+            with self.assertRaisesRegex(ValueError, 'old controller still active'):
+                cycle.reconcile(self.state, self.failure['id'], self.proof)
+        self.assertEqual(before, self.state)
+        self.assertEqual(original, self.paths['receipt'].read_bytes())
+
+    def test_stopped_pre_stack_rejects_unsafe_provider_or_current_identity(self):
+        cases = ('started', 'unknown', 'current-token', 'source', 'mount', 'forged-raw-state', 'raw-token',
+                 'detached-volume', 'wrong-volume-state', 'quarantine-missing')
+        originals = copy.deepcopy((self.rows, self.raw_machine, self.raw_volume))
+        registry = self.root / '.git/cloudbench-fleet-ownership' / self.owner
+        for case in cases:
+            with self.subTest(case=case):
+                self.rows, self.raw_machine, self.raw_volume = copy.deepcopy(originals)
+                self.machine_row = next(r for r in self.rows if r['expected_machine'] == self.machine and r['kind'] == 'machine')
+                self.volume_row = next(r for r in self.rows if r['expected_machine'] == self.machine and r['kind'] == 'volume')
+                if case in ('started', 'unknown'): self.machine_row['metadata']['state'] = case
+                if case == 'current-token': self.machine_row['metadata']['source_binding']['CLOUDBENCH_RUN_TOKEN'] = 'new-request-0'
+                if case == 'source': self.machine_row['metadata']['source_binding']['REF'] = 'f' * 40
+                if case == 'mount': self.raw_machine['config']['mounts'][0]['volume'] = 'foreign'
+                if case == 'forged-raw-state': self.raw_machine['state'] = 'started'
+                if case == 'raw-token': self.raw_machine['config']['env']['CLOUDBENCH_RUN_TOKEN'] = 'foreign'
+                if case == 'detached-volume': self.volume_row['metadata']['attached_machine_id'] = None
+                if case == 'wrong-volume-state': self.volume_row['metadata']['state'] = 'restoring'
+                if case == 'quarantine-missing': registry.rename(registry.with_name('held'))
+                self.reseal()
+                try:
+                    with self.assertRaises(ValueError): self.validate()
+                finally:
+                    if case == 'quarantine-missing': registry.with_name('held').rename(registry)
+
+    def test_stopped_pre_stack_rejects_unknown_driver_and_incomplete_terminal_receipts(self):
+        import base64
+        import gzip
+        original_log, original_payload = self.log.read_bytes(), self.payload.read_bytes()
+        driver_path = self.root / 'scripts/cloudbench-run.sh'
+        for case in ('driver-tamper', 'later-stack-step', 'missing-ack', 'missing-done', 'wrong-done-token', 'unknown-driver'):
+            with self.subTest(case=case):
+                self.log.write_bytes(original_log); self.payload.write_bytes(original_payload)
+                driver_path.write_bytes(self.driver)
+                if case in ('driver-tamper', 'unknown-driver'):
+                    changed = self.driver + b'\n# unreviewed driver\n'
+                    self.payload.write_bytes(gzip.compress(json.dumps(dict(version=1, files={
+                        'cloudbench-run.sh': base64.b64encode(changed).decode()})).encode()))
+                    if case == 'unknown-driver':
+                        driver_path.write_bytes(changed)
+                        subprocess.run(['git', '-C', str(self.root), 'add', 'scripts/cloudbench-run.sh'], check=True)
+                        subprocess.run(['git', '-C', str(self.root), '-c', 'user.name=test', '-c',
+                                        'user.email=test@example.com', 'commit', '-qm', 'unreviewed driver'], check=True)
+                        head = subprocess.check_output(['git', '-C', str(self.root), 'rev-parse', 'HEAD'], text=True).strip()
+                        receipt = cycle.read(self.paths['receipt'])
+                        old_head = receipt['source']['head']
+                        def replace(value):
+                            if isinstance(value, dict): return {k: replace(v) for k, v in value.items()}
+                            if isinstance(value, list): return [replace(v) for v in value]
+                            return head if value == old_head else value
+                        self.state, self.proof = replace(self.state), replace(self.proof)
+                        for path in (self.root / '.context').rglob('*.json'):
+                            try: value = json.loads(path.read_text())
+                            except ValueError: continue
+                            cycle.write(path, replace(value))
+                        self.raw_machine['config']['env']['REF'] = head
+                        self.machine_row['metadata']['source_binding']['REF'] = head
+                        self.log.write_bytes(original_log.replace(old_head.encode(), head.encode()))
+                if case == 'later-stack-step': self.log.write_bytes(original_log + b'[cloudbench 20:01:32] STEP stack\n')
+                if case == 'missing-ack': self.log.write_bytes(original_log.replace(b'cleanup_ack=1', b'cleanup_ack=0'))
+                if case == 'missing-done': self.log.write_bytes(original_log.replace(b'::CLOUDBENCH-DONE::', b'not-DONE'))
+                if case == 'wrong-done-token': self.log.write_bytes(original_log.replace(b'::CLOUDBENCH-DONE:: token=', b'::CLOUDBENCH-DONE:: token=wrong'))
+                self.reseal()
+                expected = 'unreviewed pre-stack driver' if case == 'unknown-driver' else ('driver payload changed' if case == 'driver-tamper' else 'positive terminal boundary')
+                with self.assertRaisesRegex(ValueError, expected): self.validate()
 
 
 if __name__=='__main__': unittest.main()

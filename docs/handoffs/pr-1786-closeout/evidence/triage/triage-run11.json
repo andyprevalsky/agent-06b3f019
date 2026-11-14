@@ -1,0 +1,76 @@
+{
+  "failures": [
+    {
+      "id": "3f6fdb85deba4c47a245da1c7c8b5517",
+      "check": "backend-coverage-blackbox/blackbox:treasury-rails",
+      "command": [
+        "/home/boxes/rose/agents/venv/bin/python3",
+        "/home/boxes/rose/scripts/deploy_test_github.py",
+        "--runner",
+        "blacksmith-16vcpu-ubuntu-2404",
+        "--worker-script",
+        "deploy_test_backend.py",
+        "--worker-root",
+        "/home/runner/_work/rose/rose",
+        "--deadline-seconds",
+        "14400"
+      ],
+      "source": {
+        "head": "9d09b26a5f03b6ba624ad26101f313cfd2695ec0",
+        "digest": "c8bc9e6724a9cc6d4cb01396dc6b56d4865abb2303cbc648a76dac15613c36ed"
+      },
+      "native_result": "prior waived failure; changed inputs",
+      "attribution": "NOT_INTRODUCED",
+      "description": "blackbox:treasury-rails: renewal of the standing treasury skip on changed inputs (sync with main); original native FAIL (AgentCard org list_transfers rate limit) stays recorded.",
+      "evidence": "Renewal of the standing treasury skip on changed inputs; the original native FAIL and its evidence stay recorded (occurrence 44f05cb02a2540c68bf5742c09bc2df7 on 4cd6f73f7). PR #1786 does not touch treasury, cards or AgentCard. Standing user instruction 2026-10-29: treasury failures are SKIPPED with warning; no treasury or financial record mutated.",
+      "standing_policy": {
+        "name": "treasury-failures-skip-and-warn-2026-10-29",
+        "reason": "treasury-rails blackbox: AgentCard org list_transfers rate limited (third-party throttle); pending obligations stay visible",
+        "affected_records": [
+          "agentcard-org:list_transfers"
+        ],
+        "evidence_at": 1794117396.3113074
+      },
+      "prior_waiver": {
+        "source": {
+          "head": "4cd6f73f7ddc9d7d50a553374757b242542472c9",
+          "digest": "36fd02933d527d2568561e48992bbabb832520b7a9a96df674a764b68bca6cc7"
+        },
+        "rca": {
+          "id": "44f05cb02a2540c68bf5742c09bc2df7",
+          "check": "backend-coverage-blackbox/blackbox:treasury-rails",
+          "command": [
+            "/home/boxes/rose/agents/venv/bin/python3",
+            "/home/boxes/rose/scripts/deploy_test_github.py",
+            "--runner",
+            "blacksmith-16vcpu-ubuntu-2404",
+            "--worker-script",
+            "deploy_test_backend.py",
+            "--worker-root",
+            "/home/runner/_work/rose/rose",
+            "--deadline-seconds",
+            "14400"
+          ],
+          "source": {
+            "head": "4cd6f73f7ddc9d7d50a553374757b242542472c9",
+            "digest": "36fd02933d527d2568561e48992bbabb832520b7a9a96df674a764b68bca6cc7"
+          },
+          "native_result": "FAIL",
+          "attribution": "NOT_INTRODUCED",
+          "description": "blackbox:treasury-rails failed on AgentCard Organization MCP rate limit: list_transfers rate limit exhausted after 3 attempts (API key rate limit exceeded).",
+          "evidence": "Native log (Blacksmith backend-coverage-blackbox shard 1, attempt 4/final): \"treasury-rails blackbox FAILED: AgentCard Organization MCP rate limit exhausted for list_transfers after 3 attempts; upstream: ... API key rate limit exceeded\". PR #1786 touches only browser-session blackbox fixtures; no treasury, card or AgentCard code. Standing user instruction 2026-10-29: treasury failures are SKIPPED with warning, never block a deploy; no treasury or financial record mutated, reclaimed or deleted.",
+          "standing_policy": {
+            "name": "treasury-failures-skip-and-warn-2026-10-29",
+            "reason": "treasury-rails blackbox: AgentCard org list_transfers rate limited (third-party throttle); pending obligations stay visible",
+            "affected_records": [
+              "agentcard-org:list_transfers"
+            ],
+            "evidence_at": 1794117396.3113074
+          }
+        },
+        "disposition": "treasury / skipped with warning",
+        "input_fingerprint": "8e82f3d882eac36b1e872142c4645b09e16ed8de8c479576184f68f835999249"
+      }
+    }
+  ]
+}

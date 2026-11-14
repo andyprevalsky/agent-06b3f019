@@ -95,12 +95,19 @@ function testResumeReadsTheRotatedLocationBackFromTheProxyKey(): void {
   // a resume reads that location back from the cached proxy key and rebuilds
   // the identical candidate, so it lands on the same proxy instead of the
   // agent's home location.
-  for (const key of ['mobile:US:WA', 'residential:US:TX:dallas', 'residential:GB', 'isp:US:CA']) {
+  for (const key of ['mobile:US:WA', 'residential:US:TX:dallas', 'residential:GB', 'isp:US']) {
     const location = kernelProxyLocationFromKey(key);
     assert.ok(location !== undefined, `location for ${key}`);
     const type = key.split(':')[0] as 'mobile' | 'residential' | 'isp';
     assert.strictEqual(kernelProxyCandidates(location, type)[0]!.proxyKey, key);
   }
+  const legacyIsp = kernelProxyLocationFromKey('isp:US:CA');
+  assert.ok(legacyIsp);
+  assert.strictEqual(
+    kernelProxyCandidates(legacyIsp, 'isp')[0]!.proxyKey,
+    'isp:US',
+    'legacy ISP location keys normalize to the country that Kernel actually supports'
+  );
   assert.deepStrictEqual(kernelProxyLocationFromKey('mobile:US:WA'), {
     country: 'US',
     state: 'WA',

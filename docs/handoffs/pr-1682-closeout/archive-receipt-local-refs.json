@@ -1,0 +1,18 @@
+{
+ "name": "pr1682-a52c-local-refs-20261112",
+ "key_prefix": "devbox-closeout-private/pr1682-a52c-local-refs-20261112/",
+ "bucket_env": "R2_BUCKET_TRACE_ARCHIVE",
+ "archive_sha256": "33e3372a68b20dd1938d3b96fe60abc3679d3316288846c896b6ca775313364c",
+ "archive_size_bytes": 1050101,
+ "parts": 1,
+ "chunk_size": 67108864,
+ "members": [
+  "/var/tmp/pr1682-closeout/refs-a52c/local-refs.bundle",
+  "/var/tmp/pr1682-closeout/refs-a52c/ref-identities.txt"
+ ],
+ "files": 2,
+ "cipher": "AES-256-GCM nonce(12)||ciphertext, aad=object key",
+ "key_location": "TRACE_ARCHIVE_ENCRYPTION_KEY_B64 (back-end/.env; same key as the trace archive)",
+ "restore": "closeout_archive.py restore --receipt <receipt> --destination <dir>",
+ "verified": "every part downloaded, decrypted and the reassembled sha256 matched after upload"
+}

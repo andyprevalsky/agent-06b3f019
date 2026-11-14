@@ -1,12 +1,33 @@
 /**
  * Layout constants for the Rose Desktop left bar (UI ledger rows 21/22/66):
- * it rests at 64px and hover-expands to full titles. There is no right bar.
+ * it rests at 64px and hover-expands to full titles. Dragging its right edge
+ * sets the expanded width and pins it open. There is no right bar.
  */
 
 /** Resting width of the bar (matches the stock collapsed rail). */
 export const ROSE_BAR_WIDTH = 64;
-/** Width while the bar is hover-expanded (full titles). */
+/** Default (and minimum) width while the bar is expanded (full titles). */
 export const ROSE_BAR_EXPANDED_WIDTH = 236;
+/** Widest a dragged bar may be: this cap, or half the window if that is smaller. */
+export const ROSE_BAR_MAX_WIDTH = 560;
+/** Releasing a drag left of this collapses (and unpins) the bar. */
+export const ROSE_BAR_COLLAPSE_SNAP = 150;
+/** localStorage keys: the dragged width and whether the bar is pinned open. */
+export const ROSE_BAR_WIDTH_STORAGE_KEY = 'rose-sidebar-width';
+export const ROSE_BAR_PINNED_STORAGE_KEY = 'rose-sidebar-pinned';
+/**
+ * Root CSS var the content beside the bar offsets by: the bar's width while it
+ * is pinned or being dragged open, else 64px (a hover-expanded bar overlays).
+ */
+export const ROSE_BAR_OFFSET_VAR = '--rose-bar-offset';
+/** Window event fired after the offset changes, so fixed layers re-measure their anchors. */
+export const ROSE_BAR_OFFSET_EVENT = 'rose-bar-offset-change';
+
+/** Clamp a dragged width into [ROSE_BAR_EXPANDED_WIDTH, min(cap, 50% of the window)]. */
+export function clampRoseBarWidth(raw: number, viewportWidth: number): number {
+  const max = Math.max(ROSE_BAR_EXPANDED_WIDTH, Math.min(ROSE_BAR_MAX_WIDTH, viewportWidth / 2));
+  return Math.round(Math.min(max, Math.max(ROSE_BAR_EXPANDED_WIDTH, raw)));
+}
 /** Easing for the bar width and the panels beside it that slide with it. */
 export const ROSE_BAR_EASE = 'cubic-bezier(.2,.8,.2,1)';
 export const ROSE_BAR_DURATION_MS = 280;

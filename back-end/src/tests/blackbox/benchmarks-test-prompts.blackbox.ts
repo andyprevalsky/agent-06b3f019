@@ -14,7 +14,8 @@
  *   - filtering: external vitest smokes are excluded
  *   - adaptation: attachment urls live under /test-assets/, {frontend_url} token rewritten
  *   - lastFivePassed: boolean on every prompt; aligns with ledger when last 5 passed
- *   - dev default: the FE auto-load title exists in the catalog
+ *   - dev default: the FE auto-load title (DEV_DEFAULT_PROMPT_TITLE) is a ready,
+ *     served catalog task, and no status "retired" task is ever served
  *   - idempotency: identical across consecutive requests (same file on disk)
  *
  * Invariants not applicable:
@@ -217,13 +218,72 @@ async function testPrompts_frontendUrlTokenRewritten() {
   }
 }
 
+// ==================== CATALOG + DEV DEFAULT HELPERS ====================
+
+type CatalogRow = { name: string; title?: string; status?: string; runner?: string };
+
+async function readCatalogRows(): Promise<CatalogRow[]> {
+  // The committed catalog file, read independently of the service under test.
+  const fs = await import('fs');
+  const path = await import('path');
+  const file = path.join(process.cwd(), '..', 'agents', 'benchmarks', 'tasks.json');
+  return JSON.parse(fs.readFileSync(file, 'utf8')) as CatalogRow[];
+}
+
+async function frontEndDevDefaultTitle(): Promise<string> {
+  // The FE auto-loads DEV_DEFAULT_PROMPT_TITLE into the query box on mount in
+  // dev mode. Read it from the FE source so retiring that task (or moving the
+  // FE default to an unknown title) fails here instead of silently loading nothing.
+  const fs = await import('fs');
+  const path = await import('path');
+  const file = path.join(
+    process.cwd(),
+    '..',
+    'front-end/src/features/terminal-component-group/components/test-prompts-selector/fetchTestPrompts.ts'
+  );
+  const match = fs
+    .readFileSync(file, 'utf8')
+    .match(/export const DEV_DEFAULT_PROMPT_TITLE = (['"])(.+?)\1;/);
+  if (!match) throw new Error(`DEV_DEFAULT_PROMPT_TITLE not found in ${file}`);
+  return match[2];
+}
+
 async function testPrompts_devDefaultPresent() {
-  // The FE auto-loads this title on mount in dev mode — it must exist in the catalog.
+  // The FE auto-loads this title on mount in dev mode — it must be a ready,
+  // served catalog task, and retired tasks must never be served (status
+  // "retired" removes a task from every future run; its row stays in
+  // tasks.json only for history-ledger integrity).
+  const title = await frontEndDevDefaultTitle();
+  const rows = await readCatalogRows();
+  const row = rows.find((r) => r.title === title);
+  if (!row) {
+    throw new Error(`Dev default "${title}" (DEV_DEFAULT_PROMPT_TITLE) has no tasks.json row`);
+  }
+  const status = row.status ?? 'ready';
+  if (status !== 'ready') {
+    throw new Error(`Dev default "${title}" (${row.name}) has status "${status}", expected ready`);
+  }
+  if ((row.runner ?? 'agent') !== 'agent') {
+    throw new Error(`Dev default "${title}" (${row.name}) is not an agent-runner task`);
+  }
+  const retired = rows.filter((r) => r.status === 'retired');
+  if (retired.length === 0) {
+    // test-mass-agent-run-0 was retired by user direction (2026-11-12).
+    throw new Error('No retired catalog row — the retired-absence check would be vacuous');
+  }
+
   const res = await request(`${BASE_URL}/api/benchmarks/test-prompts`);
   if (res.status !== 200) return;
   const body = res.data as { prompts: TestPrompt[] };
-  if (!body.prompts.some((p) => p.title === 'Test Mass Agent Run - 0')) {
-    throw new Error('Dev default prompt "Test Mass Agent Run - 0" missing from catalog');
+  if (!body.prompts.some((p) => p.title === title)) {
+    throw new Error(
+      `Dev default prompt "${title}" (front-end DEV_DEFAULT_PROMPT_TITLE) missing from catalog`
+    );
+  }
+  const served = new Set(body.prompts.map((p) => p.title));
+  const offered = retired.filter((r) => r.title !== undefined && served.has(r.title));
+  if (offered.length > 0) {
+    throw new Error(`Retired tasks still served: ${offered.map((r) => r.name).join(', ')}`);
   }
 }
 
@@ -246,13 +306,16 @@ async function testPrompts_lastFivePassedIsBoolean() {
 }
 
 async function testPrompts_lastFivePassedReflectsRunHistory() {
-  // Cement against the committed attempts ledger for two known tasks:
+  // Cement against the committed attempts ledger:
+  //   - the FE dev default (DEV_DEFAULT_PROMPT_TITLE) must have a known run
+  //     history, and its lastFivePassed must match its ledger window (a single
+  //     new pass must not be treated as a 5-pass green check, and a frozen
+  //     "always false" snapshot must not reject a real 5-pass window)
+  //   - fail streak: every served prompt whose last 5 ledger attempts all
+  //     failed must not carry the green check (at least one must exist)
   //   - smoke tasks like "Basic Chat Response" (chat-mode) have a long
   //     trailing pass window → lastFivePassed true
-  //   - "Test Mass Agent Run - 0" lastFivePassed must match the ledger
-  //     (a single new pass must not be treated as a 5-pass green check,
-  //     and a frozen "always false" snapshot must not reject a real 5-pass
-  //     window). Hub uploads can add newer fails or extra samples.
+  // Hub uploads can add newer fails or extra samples.
   const fs = await import('fs');
   const path = await import('path');
   const ledgerPath = path.join(
@@ -266,43 +329,80 @@ async function testPrompts_lastFivePassedReflectsRunHistory() {
   if (!fs.existsSync(ledgerPath)) {
     throw new Error(`task_attempts.jsonl missing at ${ledgerPath}`);
   }
-  const byTask = new Map<string, boolean[]>();
-  for (const line of fs.readFileSync(ledgerPath, 'utf-8').split('\n')) {
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-    try {
-      const parsed = JSON.parse(trimmed) as { task?: unknown; passed?: unknown };
-      if (typeof parsed.task !== 'string' || parsed.task === '') continue;
-      const list = byTask.get(parsed.task) ?? [];
-      list.push(parsed.passed === true);
-      byTask.set(parsed.task, list);
-    } catch {
-      // skip malformed
-    }
+  // The ledger is the base file plus per-writer shards (history_ledger.py);
+  // the exported reader returns their union in recorded order. Windows are
+  // judged newest-last by attempt timestamp, as the run history orders them.
+  const { readTaskAttempts } = await import('../../domains/benchmarks/config');
+  const attemptsByTask = new Map<string, { timestamp: string; passed: boolean }[]>();
+  for (const attempt of readTaskAttempts()) {
+    const list = attemptsByTask.get(attempt.task) ?? [];
+    list.push({ timestamp: attempt.timestamp, passed: attempt.passed });
+    attemptsByTask.set(attempt.task, list);
   }
+  const byTask = new Map<string, boolean[]>();
+  for (const [task, list] of attemptsByTask) {
+    const ordered = [...list].sort((a, b) =>
+      a.timestamp === b.timestamp ? 0 : a.timestamp < b.timestamp ? -1 : 1
+    );
+    byTask.set(
+      task,
+      ordered.map((a) => a.passed)
+    );
+  }
+  const nameByTitle = new Map<string, string>();
+  for (const row of await readCatalogRows()) {
+    if (row.title !== undefined && row.status !== 'retired') nameByTitle.set(row.title, row.name);
+  }
+  const ledgerWindow = (prompt: TestPrompt) => {
+    const name = nameByTitle.get(prompt.title) ?? prompt.title;
+    const flags = byTask.get(name) ?? [];
+    const lastFive = flags.slice(-5);
+    return {
+      name,
+      attempts: flags.length,
+      allFail: flags.length >= 5 && lastFive.every((p) => p === false),
+      allPass: flags.length >= 5 && lastFive.every((p) => p === true),
+    };
+  };
 
   const res = await request(`${BASE_URL}/api/benchmarks/test-prompts`);
   if (res.status !== 200) return;
   const body = res.data as { prompts: TestPrompt[] };
 
-  const mass = body.prompts.find((p) => p.title === 'Test Mass Agent Run - 0');
-  if (!mass) {
-    throw new Error('Dev default "Test Mass Agent Run - 0" missing — cannot assert fail streak');
+  const devTitle = await frontEndDevDefaultTitle();
+  const dev = body.prompts.find((p) => p.title === devTitle);
+  if (!dev) {
+    throw new Error(`Dev default "${devTitle}" missing — cannot assert its ledger window`);
   }
-  const massFlags = byTask.get('test-mass-agent-run-0') ?? [];
-  const massLastFive = massFlags.slice(-5);
-  const massLedgerLastFiveFail = massFlags.length >= 5 && massLastFive.every((p) => p === false);
-  const massLedgerLastFivePass = massFlags.length >= 5 && massLastFive.every((p) => p === true);
-  if (massLedgerLastFiveFail && mass.lastFivePassed) {
-    throw new Error('Test Mass Agent Run - 0 has last-5 ledger fails but lastFivePassed=true');
+  const devLedger = ledgerWindow(dev);
+  if (devLedger.attempts < 5) {
+    throw new Error(
+      `Dev default ${devLedger.name} has ${devLedger.attempts} ledger attempts — needs a known run history`
+    );
   }
-  if (massLedgerLastFivePass && !mass.lastFivePassed) {
+  if (devLedger.allFail && dev.lastFivePassed) {
+    throw new Error(`${devLedger.name} has last-5 ledger fails but lastFivePassed=true`);
+  }
+  if (devLedger.allPass && !dev.lastFivePassed) {
     const anyGreen = body.prompts.some((p) => p.lastFivePassed);
     if (!anyGreen) {
       throw new Error(
-        'test-mass-agent-run-0 ledger last-5 all passed and no prompt has lastFivePassed=true'
+        `${devLedger.name} ledger last-5 all passed and no prompt has lastFivePassed=true`
       );
     }
+  }
+
+  const failStreaks = body.prompts.filter((p) => ledgerWindow(p).allFail);
+  if (failStreaks.length === 0) {
+    throw new Error('No served prompt has a last-5 ledger fail streak — cannot assert it');
+  }
+  const greenFailStreaks = failStreaks.filter((p) => p.lastFivePassed);
+  if (greenFailStreaks.length > 0) {
+    throw new Error(
+      `Last-5 ledger fails but lastFivePassed=true: ${greenFailStreaks
+        .map((p) => ledgerWindow(p).name)
+        .join(', ')}`
+    );
   }
 
   const chat = body.prompts.find((p) => p.title === 'Basic Chat Response');
@@ -342,6 +442,56 @@ async function testPrompts_idempotentSameResponse() {
   }
 }
 
+async function testPrompts_attemptsLedgerReadsBaseAndShards() {
+  // The attempts ledger is its base file plus per-writer shards
+  // `task_attempts.<YYYYMMDD>.<branch>.jsonl` (agents/benchmarks/history_ledger.py):
+  // concurrent PRs each add their own shard instead of editing one shared file,
+  // so readers must return the union — base rows in file order, then shard rows
+  // in recorded order — or a merged branch's runs vanish from lastFivePassed.
+  const fs = await import('fs');
+  const os = await import('os');
+  const path = await import('path');
+  const { readTaskAttempts } = await import('../../domains/benchmarks/config');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'attempts-ledger-'));
+  try {
+    const row = (agent: string, passed: boolean, timestamp: string) =>
+      JSON.stringify({
+        task: 'ledger-task',
+        passed,
+        status: 'COMPLETED',
+        timestamp,
+        agent_id: agent,
+      }) + '\n';
+    const base = path.join(dir, 'task_attempts.jsonl');
+    fs.writeFileSync(
+      base,
+      row('base-2', true, '2026-10-02T00:00:00+00:00') +
+        row('base-1', false, '2026-10-01T00:00:00+00:00')
+    );
+    fs.writeFileSync(
+      path.join(dir, 'task_attempts.20261107.feat-b.jsonl'),
+      row('b', true, '2026-11-07T12:00:00+00:00')
+    );
+    fs.writeFileSync(
+      path.join(dir, 'task_attempts.20261107.feat-a.jsonl'),
+      row('a', false, '2026-11-07T10:00:00+00:00')
+    );
+    fs.writeFileSync(
+      path.join(dir, 'task_durations.20261107.feat-a.jsonl'),
+      row('not-an-attempt', true, '2026-11-07T11:00:00+00:00')
+    );
+    const agents = readTaskAttempts(base).map((attempt) => attempt.agent_id);
+    const expected = ['base-2', 'base-1', 'a', 'b'];
+    if (JSON.stringify(agents) !== JSON.stringify(expected)) {
+      throw new Error(
+        `attempts ledger union ${JSON.stringify(agents)} != ${JSON.stringify(expected)}`
+      );
+    }
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
 // ==================== RUNNER ====================
 
 async function runAll() {
@@ -361,6 +511,10 @@ async function runAll() {
     {
       name: 'lastFivePassed reflects run history streaks',
       fn: testPrompts_lastFivePassedReflectsRunHistory,
+    },
+    {
+      name: 'attempts ledger reads base file and shards',
+      fn: testPrompts_attemptsLedgerReadsBaseAndShards,
     },
     { name: 'idempotent same response', fn: testPrompts_idempotentSameResponse },
   ];

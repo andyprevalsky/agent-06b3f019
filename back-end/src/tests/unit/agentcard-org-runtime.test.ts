@@ -15,6 +15,24 @@ const ENV_NAMES = [
   'AGENTCARD_OAUTH_CLIENT_SECRET',
 ] as const;
 
+/** Budget-bounded retry tests advance this instead of waiting out the backoff in real time. */
+function virtualClock(): { now: () => number; sleep: (ms: number) => Promise<void> } {
+  let nowMs = 1_800_000_000_000;
+  return {
+    now: () => nowMs,
+    sleep: async (ms) => {
+      nowMs += ms;
+    },
+  };
+}
+
+/** Keep retry schedules independent of wall-clock time and host scheduling. */
+function createRuntime(
+  ...args: ConstructorParameters<typeof AgentCardOrgRuntime>
+): AgentCardOrgRuntime {
+  return new AgentCardOrgRuntime(args[0], args[1], args[2] ?? virtualClock());
+}
+
 async function main(): Promise<void> {
   const original = Object.fromEntries(ENV_NAMES.map((name) => [name, process.env[name]]));
   try {
@@ -23,7 +41,7 @@ async function main(): Promise<void> {
     process.env.AGENTCARD_ORG_OAUTH_CLIENT_SECRET = 'wizard-secret';
 
     let calledWithToken = '';
-    const runtime = new AgentCardOrgRuntime(async (accessToken, toolName, args) => {
+    const runtime = createRuntime(async (accessToken, toolName, args) => {
       calledWithToken = accessToken;
       assert.equal(toolName, 'list_transfers');
       assert.deepEqual(args, { limit: 100 });
@@ -39,7 +57,7 @@ async function main(): Promise<void> {
     );
 
     let jsonRpcCalls = 0;
-    const jsonRpcRuntime = new AgentCardOrgRuntime(undefined, async (_input, init) => {
+    const jsonRpcRuntime = createRuntime(undefined, async (_input, init) => {
       jsonRpcCalls += 1;
       const parsed = JSON.parse(String(init?.body)) as {
         method?: string;
@@ -63,7 +81,7 @@ async function main(): Promise<void> {
     assert.equal(jsonRpcCalls, 1);
 
     let handshakeCalls = 0;
-    const handshakeRuntime = new AgentCardOrgRuntime(undefined, async () => {
+    const handshakeRuntime = createRuntime(undefined, async () => {
       handshakeCalls += 1;
       return new Response(
         'event: endpoint\ndata: /mcp?session=abc\n\n' +
@@ -80,7 +98,7 @@ async function main(): Promise<void> {
       'a Streamable HTTP endpoint event must not be parsed as the tool result'
     );
 
-    const rpcErrorRuntime = new AgentCardOrgRuntime(undefined, async () => {
+    const rpcErrorRuntime = createRuntime(undefined, async () => {
       return new Response(
         JSON.stringify({
           jsonrpc: '2.0',
@@ -97,7 +115,7 @@ async function main(): Promise<void> {
     );
 
     let authRetries = 0;
-    const authRetryRuntime = new AgentCardOrgRuntime(undefined, async () => {
+    const authRetryRuntime = createRuntime(undefined, async () => {
       authRetries += 1;
       if (authRetries < 2) {
         return new Response(JSON.stringify({ error: 'Invalid or expired organization token' }), {
@@ -118,7 +136,7 @@ async function main(): Promise<void> {
     assert.equal(authRetries, 2, 'flaky MCP 401 on tools/call must be retried');
 
     let toolCalls = 0;
-    const retryingRuntime = new AgentCardOrgRuntime(async (accessToken) => {
+    const retryingRuntime = createRuntime(async (accessToken) => {
       toolCalls += 1;
       if (toolCalls === 1) throw new Error('Invalid or expired organization token');
       assert.equal(accessToken, 'wizard-secret');
@@ -129,7 +147,7 @@ async function main(): Promise<void> {
 
     for (const name of ENV_NAMES) delete process.env[name];
     process.env.AGENTCARD_API_KEY = 'sk_test_retired';
-    const retiredKeyRuntime = new AgentCardOrgRuntime(async () => {
+    const retiredKeyRuntime = createRuntime(async () => {
       throw new Error('retired API key must never reach the Organization MCP transport');
     });
     await assert.rejects(
@@ -142,7 +160,7 @@ async function main(): Promise<void> {
 
     for (const name of ENV_NAMES) delete process.env[name];
     process.env.AGENTCARD_ORG_MCP_ACCESS_TOKEN = 'sk_test_retired';
-    const retiredDirectTokenRuntime = new AgentCardOrgRuntime(async () => {
+    const retiredDirectTokenRuntime = createRuntime(async () => {
       throw new Error('retired direct token must never reach the Organization MCP transport');
     });
     await assert.rejects(
@@ -166,10 +184,10 @@ async function main(): Promise<void> {
       `Streamable HTTP error: Error POSTing to endpoint: {"error":"Rate limit exceeded","message":"Too many requests. Limit: 120 requests per minute.","retryAfter":${retryAfterMs}}`;
 
     let throttledCalls = 0;
-    const throttledRuntime = new AgentCardOrgRuntime(async (_token, toolName) => {
+    const throttledRuntime = createRuntime(async (_token, toolName) => {
       assert.equal(toolName, 'get_card');
       throttledCalls += 1;
-      if (throttledCalls === 1) throw new Error(throttleBody(Date.now() + 50));
+      if (throttledCalls === 1) throw new Error(throttleBody(1_800_000_000_000 + 50));
       return { structuredContent: { card: { status: 'CLOSED', balanceCents: 0 } } };
     });
     assert.deepEqual(
@@ -183,7 +201,7 @@ async function main(): Promise<void> {
     // in this shape previously escaped as a successful tool call, then treasury-rails failed even
     // though the provider would accept the close on the next window.
     let structuredThrottleCalls = 0;
-    const structuredThrottleRuntime = new AgentCardOrgRuntime(async () => {
+    const structuredThrottleRuntime = createRuntime(async () => {
       structuredThrottleCalls += 1;
       if (structuredThrottleCalls === 1) {
         return {
@@ -204,9 +222,9 @@ async function main(): Promise<void> {
     // A throttle that never clears stays bounded and surfaces as a typed 429 rather than an opaque
     // transport error, so callers can distinguish provider backpressure from a Rose defect.
     let exhaustedCalls = 0;
-    const exhaustedRuntime = new AgentCardOrgRuntime(async () => {
+    const exhaustedRuntime = createRuntime(async () => {
       exhaustedCalls += 1;
-      throw new Error(throttleBody(Date.now() + 50));
+      throw new Error(throttleBody(1_800_000_000_000 + 50));
     });
     await assert.rejects(
       () => exhaustedRuntime.callTool('list_transfers', { limit: 100 }),
@@ -219,16 +237,21 @@ async function main(): Promise<void> {
         // exhausted throttle must stay recognisable to it.
         /too many requests|rate.?limit|\b429\b/i.test(error.message)
     );
-    assert.equal(exhaustedCalls, 3, 'rate-limit retries must stay bounded');
+    assert.equal(exhaustedCalls, 5, 'rate-limit retries on a read must stay bounded');
 
     // A window reset further out than the delay budget must fail fast rather than parking the
     // request: nested callers (the 20-attempt release observer) would otherwise multiply the wait.
     let unbudgetedCalls = 0;
-    const unbudgetedRuntime = new AgentCardOrgRuntime(async () => {
-      unbudgetedCalls += 1;
-      throw new Error(throttleBody(Date.now() + 60_000));
-    });
-    const unbudgetedStartedAt = Date.now();
+    const unbudgetedClock = virtualClock();
+    const unbudgetedRuntime = createRuntime(
+      async () => {
+        unbudgetedCalls += 1;
+        throw new Error(throttleBody(1_800_000_000_000 + 60_000));
+      },
+      undefined,
+      unbudgetedClock
+    );
+    const unbudgetedStartedAt = unbudgetedClock.now();
     await assert.rejects(
       () => unbudgetedRuntime.callTool('list_cards', { limit: 100 }),
       (error: unknown) =>
@@ -236,7 +259,7 @@ async function main(): Promise<void> {
     );
     assert.equal(unbudgetedCalls, 1, 'a reset beyond the delay budget must not be waited out');
     assert.ok(
-      Date.now() - unbudgetedStartedAt < 5_000,
+      unbudgetedClock.now() - unbudgetedStartedAt === 0,
       'exceeding the delay budget must fail fast, not sleep'
     );
 
@@ -245,7 +268,7 @@ async function main(): Promise<void> {
     // provider outage, not a successful wallet read, so retry it the same way
     // as a throttle rather than handing callers an empty wallet object.
     let unavailableCalls = 0;
-    const unavailableRuntime = new AgentCardOrgRuntime(async (_token, toolName) => {
+    const unavailableRuntime = createRuntime(async (_token, toolName) => {
       assert.equal(toolName, 'get_company_wallet');
       unavailableCalls += 1;
       if (unavailableCalls === 1) {
@@ -274,7 +297,7 @@ async function main(): Promise<void> {
     );
 
     let stuckUnavailableCalls = 0;
-    const stuckUnavailableRuntime = new AgentCardOrgRuntime(async () => {
+    const stuckUnavailableRuntime = createRuntime(async () => {
       stuckUnavailableCalls += 1;
       return {
         structuredContent: {
@@ -306,7 +329,7 @@ async function main(): Promise<void> {
       ],
     };
     let toolThrottledCalls = 0;
-    const toolThrottledRuntime = new AgentCardOrgRuntime(async () => {
+    const toolThrottledRuntime = createRuntime(async () => {
       toolThrottledCalls += 1;
       return toolThrottledCalls === 1
         ? apiKeyThrottle
@@ -319,10 +342,14 @@ async function main(): Promise<void> {
     assert.equal(toolThrottledCalls, 2, 'a tool-level throttle on a read must be retried');
 
     let stuckToolThrottleCalls = 0;
-    const stuckToolThrottleRuntime = new AgentCardOrgRuntime(async () => {
-      stuckToolThrottleCalls += 1;
-      return apiKeyThrottle;
-    });
+    const stuckToolThrottleRuntime = createRuntime(
+      async () => {
+        stuckToolThrottleCalls += 1;
+        return apiKeyThrottle;
+      },
+      fetch,
+      virtualClock()
+    );
     await assert.rejects(
       () =>
         stuckToolThrottleRuntime.callTool('get_cardholder_kyc_status', { cardholder_id: 'ch-1' }),
@@ -332,12 +359,12 @@ async function main(): Promise<void> {
         error.code === 'agentcard_org_mcp_rate_limited' &&
         /API key rate limit exceeded/.test(error.message)
     );
-    assert.equal(stuckToolThrottleCalls, 3, 'tool-level throttle retries must stay bounded');
+    assert.equal(stuckToolThrottleCalls, 5, 'tool-level throttle retries must stay bounded');
 
     // A tool-level throttle can arrive after a multi-step mutation already changed provider state,
     // so a mutation's result is handed back untouched for its caller to interpret.
     let mutationThrottleCalls = 0;
-    const mutationThrottleRuntime = new AgentCardOrgRuntime(async () => {
+    const mutationThrottleRuntime = createRuntime(async () => {
       mutationThrottleCalls += 1;
       return apiKeyThrottle;
     });
@@ -352,17 +379,14 @@ async function main(): Promise<void> {
     // hard fail (treasury-rails 2026-09-12: unused-card settle died on attempt 3). It is the same
     // transient provider class as a structured 503 — retry, then surface temporarily unavailable.
     let timedOutCalls = 0;
-    const timedOutThenOkRuntime = new AgentCardOrgRuntime(undefined, async () => {
+    const timedOutThenOkRuntime = createRuntime(undefined, async () => {
       timedOutCalls += 1;
       if (timedOutCalls === 1) {
         const timeout = new Error('The operation was aborted due to timeout');
         timeout.name = 'TimeoutError';
         throw timeout;
       }
-      return new Response(JSON.stringify({ result: { structuredContent: { transfers: [] } } }), {
-        status: 200,
-        headers: { 'content-type': 'application/json' },
-      });
+      return new Response(JSON.stringify({ result: { structuredContent: { transfers: [] } } }));
     });
     assert.deepEqual(await timedOutThenOkRuntime.callTool('list_transfers', { limit: 100 }), {
       structuredContent: { transfers: [] },
@@ -374,7 +398,7 @@ async function main(): Promise<void> {
     );
 
     let stuckTimeoutCalls = 0;
-    const stuckTimeoutRuntime = new AgentCardOrgRuntime(undefined, async () => {
+    const stuckTimeoutRuntime = createRuntime(undefined, async () => {
       stuckTimeoutCalls += 1;
       const timeout = new Error('The operation was aborted due to timeout');
       timeout.name = 'TimeoutError';
@@ -399,15 +423,11 @@ async function main(): Promise<void> {
     const fetchFailed = (code: string, message = 'fetch failed'): TypeError =>
       Object.assign(new TypeError(message), { cause: Object.assign(new Error(code), { code }) });
     let connectTimeoutCalls = 0;
-    const connectTimeoutThenOkRuntime = new AgentCardOrgRuntime(undefined, async () => {
+    const connectTimeoutThenOkRuntime = createRuntime(undefined, async () => {
       connectTimeoutCalls += 1;
       if (connectTimeoutCalls === 1) throw fetchFailed('UND_ERR_CONNECT_TIMEOUT');
       return new Response(
-        JSON.stringify({ result: { structuredContent: { card: { id: 'c1' } } } }),
-        {
-          status: 200,
-          headers: { 'content-type': 'application/json' },
-        }
+        JSON.stringify({ result: { structuredContent: { card: { id: 'c1' } } } })
       );
     });
     assert.deepEqual(
@@ -423,13 +443,10 @@ async function main(): Promise<void> {
     // A socket dropped after the request left (ECONNRESET, undici socket/headers timeouts) may
     // have reached the provider: replay only the idempotent reads, exactly like the text throttle.
     let resetReadCalls = 0;
-    const resetThenOkReadRuntime = new AgentCardOrgRuntime(undefined, async () => {
+    const resetThenOkReadRuntime = createRuntime(undefined, async () => {
       resetReadCalls += 1;
       if (resetReadCalls === 1) throw fetchFailed('ECONNRESET');
-      return new Response(JSON.stringify({ result: { structuredContent: { recoveries: [] } } }), {
-        status: 200,
-        headers: { 'content-type': 'application/json' },
-      });
+      return new Response(JSON.stringify({ result: { structuredContent: { recoveries: [] } } }));
     });
     assert.deepEqual(await resetThenOkReadRuntime.callTool('list_recoveries', { limit: 100 }), {
       structuredContent: { recoveries: [] },
@@ -437,7 +454,7 @@ async function main(): Promise<void> {
     assert.equal(resetReadCalls, 2, 'a reset read must be replayed within the retry budget');
 
     let resetMutationCalls = 0;
-    const resetMutationRuntime = new AgentCardOrgRuntime(undefined, async () => {
+    const resetMutationRuntime = createRuntime(undefined, async () => {
       resetMutationCalls += 1;
       throw fetchFailed('ECONNRESET');
     });
@@ -448,7 +465,7 @@ async function main(): Promise<void> {
     assert.equal(resetMutationCalls, 1, 'a reset mutation must never be replayed');
 
     let unknownCauseCalls = 0;
-    const unknownCauseRuntime = new AgentCardOrgRuntime(undefined, async () => {
+    const unknownCauseRuntime = createRuntime(undefined, async () => {
       unknownCauseCalls += 1;
       throw fetchFailed('ERR_TLS_CERT_ALTNAME_INVALID');
     });
@@ -472,13 +489,10 @@ async function main(): Promise<void> {
         },
       }) as unknown as Response;
     let terminatedReadCalls = 0;
-    const terminatedThenOkReadRuntime = new AgentCardOrgRuntime(undefined, async () => {
+    const terminatedThenOkReadRuntime = createRuntime(undefined, async () => {
       terminatedReadCalls += 1;
       if (terminatedReadCalls === 1) return terminatedBody();
-      return new Response(JSON.stringify({ result: { structuredContent: { recoveries: [] } } }), {
-        status: 200,
-        headers: { 'content-type': 'application/json' },
-      });
+      return new Response(JSON.stringify({ result: { structuredContent: { recoveries: [] } } }));
     });
     assert.deepEqual(
       await terminatedThenOkReadRuntime.callTool('list_recoveries', { limit: 100 }),
@@ -487,7 +501,7 @@ async function main(): Promise<void> {
     assert.equal(terminatedReadCalls, 2, 'a read whose body read was terminated must be replayed');
 
     let terminatedMutationCalls = 0;
-    const terminatedMutationRuntime = new AgentCardOrgRuntime(undefined, async () => {
+    const terminatedMutationRuntime = createRuntime(undefined, async () => {
       terminatedMutationCalls += 1;
       return terminatedBody();
     });
@@ -521,7 +535,7 @@ async function main(): Promise<void> {
         },
       }) as unknown as Response;
     let abortedMutationCalls = 0;
-    const abortedMutationRuntime = new AgentCardOrgRuntime(undefined, async () => {
+    const abortedMutationRuntime = createRuntime(undefined, async () => {
       abortedMutationCalls += 1;
       return abortedBody();
     });
@@ -539,13 +553,10 @@ async function main(): Promise<void> {
     );
 
     let abortedReadCalls = 0;
-    const abortedThenOkReadRuntime = new AgentCardOrgRuntime(undefined, async () => {
+    const abortedThenOkReadRuntime = createRuntime(undefined, async () => {
       abortedReadCalls += 1;
       if (abortedReadCalls === 1) return abortedBody();
-      return new Response(JSON.stringify({ result: { structuredContent: { recoveries: [] } } }), {
-        status: 200,
-        headers: { 'content-type': 'application/json' },
-      });
+      return new Response(JSON.stringify({ result: { structuredContent: { recoveries: [] } } }));
     });
     assert.deepEqual(await abortedThenOkReadRuntime.callTool('list_recoveries', { limit: 100 }), {
       structuredContent: { recoveries: [] },
@@ -554,7 +565,7 @@ async function main(): Promise<void> {
 
     // Non-throttle failures must never be retried — retrying a real error would multiply load.
     let hardFailureCalls = 0;
-    const hardFailureRuntime = new AgentCardOrgRuntime(async () => {
+    const hardFailureRuntime = createRuntime(async () => {
       hardFailureCalls += 1;
       throw new Error('card_closed: This card is closed and its credentials are unavailable');
     });
@@ -568,7 +579,7 @@ async function main(): Promise<void> {
     // arbitrary numbers (amounts in cents, record counts, id fragments); matching one relabels the
     // real failure as a rate limit, retries a request that can never succeed, and hides the cause.
     let bareNumberCalls = 0;
-    const bareNumberRuntime = new AgentCardOrgRuntime(async () => {
+    const bareNumberRuntime = createRuntime(async () => {
       bareNumberCalls += 1;
       throw new Error('MCP error -32603: transfer amount 429 cents could not be settled');
     });
@@ -581,25 +592,30 @@ async function main(): Promise<void> {
     // The measured production throttle advertised a reset 13.8s out. The budget must cover it: at
     // 10s this fell through instantly and failed the payment lifecycle on every contended run.
     let measuredWindowCalls = 0;
-    const measuredWindowRuntime = new AgentCardOrgRuntime(async () => {
-      measuredWindowCalls += 1;
-      if (measuredWindowCalls === 1) throw new Error(throttleBody(Date.now() + 13_800));
-      return { structuredContent: { transfers: [] } };
-    });
-    const measuredStartedAt = Date.now();
+    const measuredClock = virtualClock();
+    const measuredWindowRuntime = createRuntime(
+      async () => {
+        measuredWindowCalls += 1;
+        if (measuredWindowCalls === 1) throw new Error(throttleBody(1_800_000_000_000 + 13_800));
+        return { structuredContent: { transfers: [] } };
+      },
+      undefined,
+      measuredClock
+    );
+    const measuredStartedAt = measuredClock.now();
     assert.deepEqual(await measuredWindowRuntime.callTool('list_transfers', { limit: 100 }), {
       structuredContent: { transfers: [] },
     });
     assert.equal(measuredWindowCalls, 2, 'the advertised reset must be waited out, not abandoned');
     assert.ok(
-      Date.now() - measuredStartedAt >= 13_800,
+      measuredClock.now() - measuredStartedAt === 14_050,
       'the wait must clear the provider-advertised window boundary'
     );
 
     // An exhausted throttle must name the upstream body. Error logging prints the message and drops
     // structured details, so omitting it made every throttle unattributable.
-    const opaqueRuntime = new AgentCardOrgRuntime(async () => {
-      throw new Error(throttleBody(Date.now() + 50));
+    const opaqueRuntime = createRuntime(async () => {
+      throw new Error(throttleBody(1_800_000_000_000 + 50));
     });
     await assert.rejects(
       () => opaqueRuntime.callTool('get_card', { card_id: 'card_opaque' }),
@@ -617,7 +633,7 @@ async function main(): Promise<void> {
     const coalescedGate = new Promise<void>((resolve) => {
       releaseCoalescedCall = resolve;
     });
-    const coalescingRuntime = new AgentCardOrgRuntime(async (_token, toolName) => {
+    const coalescingRuntime = createRuntime(async (_token, toolName) => {
       coalescedCalls += 1;
       await coalescedGate;
       return { structuredContent: { tool: toolName, transfers: [{ id: 'owt_1' }] } };
@@ -654,7 +670,7 @@ async function main(): Promise<void> {
     const mutationGate = new Promise<void>((resolve) => {
       releaseMutation = resolve;
     });
-    const mutationRuntime = new AgentCardOrgRuntime(async () => {
+    const mutationRuntime = createRuntime(async () => {
       mutationCalls += 1;
       await mutationGate;
       return { structuredContent: { status: 'CLOSED' } };

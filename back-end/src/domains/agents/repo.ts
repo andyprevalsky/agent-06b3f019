@@ -141,10 +141,11 @@ export async function findAgentWithVerifier(agentId: string, userId?: string) {
 }
 
 /** Fetch agent status only. */
-export async function findAgentStatus(agentId: string) {
+export async function findAgentStatus(agentId: string, userId?: string) {
   return prisma.agent.findFirst({
     where: {
       id: agentId,
+      ...(userId !== undefined ? { userId } : {}),
       deletedAt: null,
     },
     select: {
@@ -375,10 +376,4 @@ export async function currentAgentWorkflowGeneration(agentId: string): Promise<s
     select: { temporalWorkflowId: true },
   });
   return agent?.temporalWorkflowId ?? null;
-}
-
-/** Owner of a Rose API key (Index 01 MCP auth), or null for an unknown key. */
-export async function findRoseApiKeyOwner(apiKey: string): Promise<string | null> {
-  const key = await prisma.roseApiKey.findUnique({ where: { apiKey }, select: { userId: true } });
-  return key?.userId ?? null;
 }

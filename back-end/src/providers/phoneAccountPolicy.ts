@@ -1,12 +1,15 @@
 import { parsePhoneAllowlist } from './phoneAllowlist';
 // Identity comes from the persisted, authenticated account, never request feature flags.
 export const ALLOWED_ACCOUNT_IDS = ['c49b4ce3-3489-499d-bfbd-846d04ba6275'] as const;
+export const IPHONE_ADMIN_PHONE = '+19729777432';
 export const ALLOWED_VERIFIED_PHONES: readonly string[] = [
-  '+19729777432',
+  IPHONE_ADMIN_PHONE,
   ...parsePhoneAllowlist(process.env.CLOUD_IPHONE_ALLOWED_PHONES),
 ];
 export const QUEUE_TIMEOUT_MS = 300_000;
 export const LEASE_TIMEOUT_MS = 120_000;
+/** User control and pending phone auth outlive agent heartbeats only for this bounded grace. */
+export const USER_CONTROL_TIMEOUT_MS = 15 * 60_000;
 export const TERMINAL_AGENT_STATUSES = [
   'COMPLETED',
   'FAILED',

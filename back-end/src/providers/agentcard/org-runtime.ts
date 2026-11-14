@@ -1,3 +1,4 @@
+import { parseOrgMcpResponse } from './org-mcp-frames';
 import { createLogger } from '../logger';
 import { AGENTCARD_MCP_RESOURCE } from './config';
 
@@ -34,6 +35,13 @@ const log = createLogger('AgentCardOrgRuntime');
  * request behind a throttle that deep.
  */
 const RATE_LIMIT_RETRY_ATTEMPTS = 3;
+/**
+ * A throttle that advertises no `retryAfter` spends only 3 s of the budget under the cap above.
+ * A read cannot change provider state, so a throttled read backs off a little longer (1+2+4+8 s,
+ * still capped by the caller's deadline). Mutations and non-throttle transient failures keep the
+ * smaller cap.
+ */
+const READ_RATE_LIMIT_RETRY_ATTEMPTS = 5;
 const RATE_LIMIT_BASE_DELAY_MS = 1_000;
 const RATE_LIMIT_TOTAL_DELAY_BUDGET_MS = 30_000;
 const ORG_MCP_TOOL_TIMEOUT_MS = 30_000;
@@ -65,7 +73,7 @@ export function orgRetryDeadlineAtMs(): number {
 }
 
 type FetchLike = typeof fetch;
-/** Time source for the read auth-flap backoff; injectable so tests do not wait in real time. */
+/** Time source for the retry backoff; injectable so tests do not wait in real time. */
 export type AgentCardOrgRuntimeClock = {
   now: () => number;
   sleep: (ms: number) => Promise<void>;
@@ -120,6 +128,8 @@ function hasClientCredentials(): boolean {
 }
 
 function looksLikeAuthError(error: unknown): boolean {
+  if (error instanceof AgentCardOrgRuntimeError)
+    return error.status === 401 || error.status === 403;
   const message = error instanceof Error ? error.message : String(error);
   return /\b401\b|\b403\b|unauthorized|forbidden|invalid[_ ]token|expired organization token/i.test(
     message
@@ -154,6 +164,7 @@ function errorMessage(error: unknown): string {
  * provider's own wording counts.
  */
 function looksLikeRateLimitError(error: unknown): boolean {
+  if (error instanceof AgentCardOrgRuntimeError && error.status === 429) return true;
   const message = errorMessage(error);
   return (
     /too many requests|rate.?limit/i.test(message) ||
@@ -216,13 +227,45 @@ function fetchTransportFailureCode(error: unknown): string | undefined {
 
 function looksLikeTransientUnavailableError(error: unknown): boolean {
   return (
+    (error instanceof AgentCardOrgRuntimeError &&
+      (error.status === 503 ||
+        (typeof error.details.status === 'number' &&
+          [500, 502, 504].includes(error.details.status)))) ||
     /temporarily unavailable|service unavailable/i.test(errorMessage(error)) ||
     looksLikeMcpTimeoutError(error)
   );
 }
 
-function shouldRetryOrgMcpError(error: unknown): boolean {
-  return looksLikeRateLimitError(error) || looksLikeTransientUnavailableError(error);
+function shouldRetryOrgMcpError(
+  error: unknown,
+  toolName: string,
+  args: Record<string, unknown>
+): boolean {
+  if (error instanceof AgentCardOrgRuntimeError && error.details.requestMayHaveCommitted === true) {
+    return false;
+  }
+  if (looksLikeRateLimitError(error)) {
+    // Transport HTTP 429 precedes tool execution. A tool's upstream throttle can follow a
+    // partial mutation, so only documented idempotent mutations may replay that result.
+    return (
+      IDEMPOTENT_READ_TOOLS.has(toolName) ||
+      (error instanceof AgentCardOrgRuntimeError && error.details.status === 429) ||
+      toolName === 'close_card' ||
+      toolName === 'confirm_collection' ||
+      (typeof args.idempotency_key === 'string' &&
+        args.idempotency_key.trim() !== '' &&
+        (toolName === 'recover_funds' ||
+          (toolName === 'create_card' && args.funds_source === 'company_flow')))
+    );
+  }
+  // An unavailable response or timeout says nothing about whether a mutation committed.
+  // Only connect-phase failures are safe for every tool. The card provider separately owns
+  // create_card timeout retries with the exact same intent's idempotency key.
+  return (
+    looksLikeTransientUnavailableError(error) &&
+    (IDEMPOTENT_READ_TOOLS.has(toolName) ||
+      (error instanceof AgentCardOrgRuntimeError && error.details.requestNotSent === true))
+  );
 }
 
 function mcpStructuredResultRetryableError(
@@ -294,13 +337,24 @@ function mcpToolResultRateLimitMessage(result: unknown): string | undefined {
 function rateLimitDelayMs(
   error: unknown,
   attempt: number,
-  remainingBudgetMs: number
+  remainingBudgetMs: number,
+  nowMs: number
 ): number | null {
   if (remainingBudgetMs <= 0) return null;
   const match = /"retryAfter"\s*:\s*(\d+)/.exec(errorMessage(error));
-  if (match !== null) {
+  const retryAfter =
+    error instanceof AgentCardOrgRuntimeError ? error.details.retryAfter : undefined;
+  const resetAtMs =
+    typeof retryAfter === 'string'
+      ? /^\d+(?:\.\d+)?$/.test(retryAfter)
+        ? nowMs + Number(retryAfter) * 1000
+        : Date.parse(retryAfter)
+      : match === null
+        ? undefined
+        : Number(match[1]);
+  if (resetAtMs !== undefined) {
     // Clear the window boundary rather than racing it.
-    const waitMs = Number(match[1]) - Date.now() + 250;
+    const waitMs = resetAtMs - nowMs + 250;
     if (Number.isFinite(waitMs) && waitMs > 0) {
       return waitMs <= remainingBudgetMs ? waitMs : null;
     }
@@ -318,38 +372,6 @@ function delay(ms: number): Promise<void> {
  * `initialize` 401s on a healthy secret while `tools/call` succeeds, so the org
  * runtime posts JSON-RPC tools/call directly instead of using the MCP SDK session.
  */
-function parseMcpJsonRpcFrames(bodyText: string): Record<string, unknown>[] {
-  const trimmed = bodyText.trim();
-  if (trimmed.startsWith('{')) {
-    return [JSON.parse(trimmed) as Record<string, unknown>];
-  }
-  const frames: Record<string, unknown>[] = [];
-  for (const line of trimmed.split(/\r?\n/)) {
-    if (!line.startsWith('data:')) continue;
-    const payload = line.slice('data:'.length).trim();
-    if (payload === '' || payload === '[DONE]' || !payload.startsWith('{')) continue;
-    try {
-      frames.push(JSON.parse(payload) as Record<string, unknown>);
-    } catch {
-      // Streamable HTTP may emit a non-JSON endpoint URL as the first data line.
-    }
-  }
-  return frames;
-}
-
-function selectMcpJsonRpcFrame(
-  frames: Record<string, unknown>[],
-  bodyText: string
-): Record<string, unknown> {
-  const withResult = [...frames].reverse().find((frame) => 'result' in frame);
-  if (withResult !== undefined) return withResult;
-  const withError = [...frames]
-    .reverse()
-    .find((frame) => frame.error !== undefined && frame.error !== null);
-  if (withError !== undefined) return withError;
-  return frames.at(-1) ?? { message: bodyText.trim() };
-}
-
 async function callOrgMcpTool(
   accessToken: string,
   toolName: string,
@@ -391,7 +413,12 @@ async function callOrgMcpTool(
             `tools/call transport failed (${transportCode})`,
           503,
           'agentcard_org_mcp_unavailable',
-          { tool: toolName, error: errorMessage(error), transport_code: transportCode }
+          {
+            tool: toolName,
+            error: errorMessage(error),
+            transport_code: transportCode,
+            requestNotSent: CONNECT_PHASE_FETCH_FAILURE_CODES.has(transportCode),
+          }
         );
       }
       if (!looksLikeMcpTimeoutError(error)) throw error;
@@ -424,7 +451,12 @@ async function callOrgMcpTool(
             `reached the provider (${transportCode ?? 'body-read-aborted'}); not replayed`,
           502,
           'agentcard_org_mcp_unavailable',
-          { tool: toolName, error: errorMessage(error), transport_code: transportCode ?? null }
+          {
+            tool: toolName,
+            error: errorMessage(error),
+            transport_code: transportCode ?? null,
+            requestMayHaveCommitted: true,
+          }
         );
       }
       if (transportCode === undefined) throw error;
@@ -438,7 +470,7 @@ async function callOrgMcpTool(
     }
     let parsed: Record<string, unknown>;
     try {
-      parsed = selectMcpJsonRpcFrame(parseMcpJsonRpcFrames(bodyText), bodyText);
+      parsed = parseOrgMcpResponse(bodyText);
     } catch {
       parsed = { message: bodyText };
     }
@@ -455,13 +487,22 @@ async function callOrgMcpTool(
     if (!response.ok || hasRpcError) {
       lastError = new AgentCardOrgRuntimeError(
         `AgentCard Organization MCP ${toolName} failed: ${errorText}`,
-        response.status >= 400 && response.status < 500 ? response.status : 502,
+        response.status >= 400 && response.status <= 599 ? response.status : 502,
         response.status === 401 || response.status === 403
           ? 'agentcard_org_mcp_unauthorized'
-          : 'agentcard_org_mcp_unavailable',
-        { status: response.status, error: rpcError, message: parsed.message }
+          : response.status === 429
+            ? 'agentcard_org_mcp_rate_limited'
+            : 'agentcard_org_mcp_unavailable',
+        {
+          status: response.status,
+          error: rpcError,
+          message: parsed.message,
+          retryAfter: response.headers.get('retry-after')?.trim(),
+        }
       );
-      if (attempt === authRetryAttempts || (response.status !== 401 && response.status !== 403)) {
+      // A provider 401 is AgentCard's answer to a throttled request (it follows a 429 on the same
+      // credential), so it is never replayed back-to-back here; callToolOnce backs off first.
+      if (attempt === authRetryAttempts || response.status !== 403) {
         throw lastError;
       }
       await delay(ORG_MCP_AUTH_RETRY_DELAY_MS);
@@ -568,7 +609,7 @@ export class AgentCardOrgRuntime {
   async callTool(
     toolName: string,
     args: Record<string, unknown>,
-    deadlineAtMs: number = orgRetryDeadlineAtMs()
+    deadlineAtMs: number = this.clock.now() + RATE_LIMIT_TOTAL_DELAY_BUDGET_MS
   ): Promise<unknown> {
     if (!IDEMPOTENT_READ_TOOLS.has(toolName))
       return this.callToolWithRateLimitRetry(toolName, args, deadlineAtMs);
@@ -588,7 +629,9 @@ export class AgentCardOrgRuntime {
     deadlineAtMs: number
   ): Promise<unknown> {
     let lastRetryError: unknown;
-    for (let attempt = 1; attempt <= RATE_LIMIT_RETRY_ATTEMPTS; attempt += 1) {
+    let attemptsMade = 0;
+    for (let attempt = 1; ; attempt += 1) {
+      attemptsMade = attempt;
       const startedAtMs = Date.now();
       try {
         const result = await this.callToolOnce(toolName, args, deadlineAtMs);
@@ -614,28 +657,30 @@ export class AgentCardOrgRuntime {
         });
         return result;
       } catch (error) {
-        const retryable = shouldRetryOrgMcpError(error);
+        const retryable = shouldRetryOrgMcpError(error, toolName, args);
         // Derived from the deadline, not decremented locally: time spent inside the throttled call
         // itself counts against the budget too, and a shared deadline already reflects every wait
         // the caller's earlier calls consumed.
         const waitMs =
-          retryable && attempt < RATE_LIMIT_RETRY_ATTEMPTS
-            ? rateLimitDelayMs(error, attempt, deadlineAtMs - Date.now())
+          retryable && attempt < this.retryAttemptCap(toolName, error)
+            ? rateLimitDelayMs(error, attempt, deadlineAtMs - this.clock.now(), this.clock.now())
             : null;
         log.warn('Organization MCP tool call failed', {
           tool: toolName,
           attempt,
           duration_ms: Date.now() - startedAtMs,
           error: errorMessage(error),
+          status: error instanceof AgentCardOrgRuntimeError ? error.status : undefined,
+          code: error instanceof AgentCardOrgRuntimeError ? error.code : undefined,
           retryable,
           retry_after_advertised: /"retryAfter"\s*:\s*\d+/.test(errorMessage(error)),
           retry_wait_ms: waitMs,
-          retry_budget_remaining_ms: Math.max(0, deadlineAtMs - Date.now()),
+          retry_budget_remaining_ms: Math.max(0, deadlineAtMs - this.clock.now()),
         });
         if (!retryable) throw error;
         lastRetryError = error;
         if (waitMs === null) break;
-        await delay(waitMs);
+        await this.clock.sleep(waitMs);
       }
     }
     if (
@@ -644,7 +689,7 @@ export class AgentCardOrgRuntime {
     ) {
       throw new AgentCardOrgRuntimeError(
         `AgentCard Organization MCP ${toolName} is temporarily unavailable ` +
-          `after ${RATE_LIMIT_RETRY_ATTEMPTS} attempts; upstream: ${errorMessage(lastRetryError)}`,
+          `after ${attemptsMade} attempts; upstream: ${errorMessage(lastRetryError)}`,
         503,
         'agentcard_org_mcp_unavailable',
         { tool: toolName, error: errorMessage(lastRetryError) }
@@ -659,11 +704,17 @@ export class AgentCardOrgRuntime {
     // to characterise.
     throw new AgentCardOrgRuntimeError(
       `AgentCard Organization MCP rate limit exhausted for ${toolName} ` +
-        `after ${RATE_LIMIT_RETRY_ATTEMPTS} attempts; upstream: ${errorMessage(lastRetryError)}`,
+        `after ${attemptsMade} attempts; upstream: ${errorMessage(lastRetryError)}`,
       429,
       'agentcard_org_mcp_rate_limited',
       { tool: toolName, error: errorMessage(lastRetryError) }
     );
+  }
+
+  private retryAttemptCap(toolName: string, error: unknown): number {
+    return IDEMPOTENT_READ_TOOLS.has(toolName) && looksLikeRateLimitError(error)
+      ? READ_RATE_LIMIT_RETRY_ATTEMPTS
+      : RATE_LIMIT_RETRY_ATTEMPTS;
   }
 
   private async callToolOnce(
@@ -674,8 +725,19 @@ export class AgentCardOrgRuntime {
     try {
       return await this.callToolWithImmediateAuthRetry(toolName, args);
     } catch (error) {
-      if (!IDEMPOTENT_READ_TOOLS.has(toolName) || !isProviderUnauthorized(error)) throw error;
-      return this.rideOutReadAuthFlap(toolName, args, deadlineAtMs, error);
+      if (!isProviderUnauthorized(error)) throw error;
+      if (IDEMPOTENT_READ_TOOLS.has(toolName)) {
+        return this.rideOutReadAuthFlap(toolName, args, deadlineAtMs, error);
+      }
+      // A mutation keeps one replay (the 401 rejected it before execution), after one backoff step.
+      const waitMs = ORG_MCP_READ_AUTH_FLAP_BASE_DELAY_MS;
+      log.warn('Organization MCP mutation auth rejected', {
+        tool: toolName,
+        error: errorMessage(error),
+        retry_wait_ms: waitMs,
+      });
+      await this.clock.sleep(waitMs);
+      return this.toolCaller(this.getAccessToken(), toolName, args, 1);
     }
   }
 
@@ -687,7 +749,9 @@ export class AgentCardOrgRuntime {
     try {
       return await this.toolCaller(accessToken, toolName, args);
     } catch (error) {
-      if (!hasClientCredentials() || !looksLikeAuthError(error)) throw error;
+      if (!hasClientCredentials() || !looksLikeAuthError(error) || isProviderUnauthorized(error)) {
+        throw error;
+      }
       return this.toolCaller(this.getAccessToken(), toolName, args);
     }
   }
@@ -710,9 +774,7 @@ export class AgentCardOrgRuntime {
       const nowMs = this.clock.now();
       const fits =
         nowMs - startedAtMs + waitMs <= ORG_MCP_READ_AUTH_FLAP_WINDOW_MS &&
-        // The shared deadline is wall-clock (orgRetryDeadlineAtMs); the injected clock only
-        // measures the flap window.
-        Date.now() + waitMs <= deadlineAtMs;
+        nowMs + waitMs <= deadlineAtMs;
       log.warn('Organization MCP read auth rejected', {
         tool: toolName,
         flap_step: step,

@@ -64,7 +64,9 @@ def is_agent_authored_user_metadata(metadata: Any) -> bool:
     """USER rows written by agents (notifications / agent messages), not by the user."""
     if not isinstance(metadata, dict):
         return False
-    return metadata.get("agentNotification") is True or metadata.get("agentMessage") is True
+    return (metadata.get("agentNotification") is True
+            or metadata.get("agentMessage") is True
+            or metadata.get("browserCredentialContext") is True)
 
 
 def is_agent_authored_user_row(message: Dict[str, Any]) -> bool:
@@ -221,15 +223,28 @@ RESUMABLE_TASK_TYPES = frozenset({"browser", "code"})
 FINISHED_TASK_STATUSES = frozenset({"completed", "failed"})
 PAUSED_TASK_STATUS = "paused"
 # Internal spawn args a resume sets (never model-supplied): see workflows/background_agents.py.
-RESUME_CONVERSATION_KEYS = frozenset({"_resume_paused_conversation", "_fresh_conversation"})
+RESUME_CONVERSATION_KEYS = frozenset(
+    {
+        "_resume_paused_conversation",
+        "_fresh_conversation",
+        "_user_attachments",
+        "_resume_code_provider",
+        "_resume_cli_settings",
+    }
+)
 
 
-def background_message_refusal(record: Dict[str, Any], continue_conversation: Optional[bool]) -> Optional[str]:
+def background_message_refusal(
+    record: Dict[str, Any], continue_conversation: Optional[bool], *, by_user: bool = False
+) -> Optional[str]:
     """Why send_message_to_agent cannot deliver to this own background task (None when it can).
 
     Reads the task's structured type, status and foreground flag only. Running
     tasks and background explore tasks are always deliverable; a finished
     foreground spawn never is (its result already is the spawn call's result).
+    ``by_user``: the owner typed to the code agent in its own view; a completed or
+    failed background code task then resumes its own conversation too (its
+    persistent session keeps the sandbox and the CLI conversation).
     """
     agent_type = record.get("agent_type")
     status = record.get("status")
@@ -247,7 +262,14 @@ def background_message_refusal(record: Dict[str, Any], continue_conversation: Op
         )
     if agent_type not in RESUMABLE_TASK_TYPES:
         return None
-    if status in FINISHED_TASK_STATUSES:
+    # A person's resume: a code agent continues its own CLI conversation; a finished
+    # browser kept no conversation, so it starts a fresh one carrying its earlier
+    # goal and result (the browser tool's continue_conversation=false recovery).
+    user_resume = by_user and (
+        (agent_type == "code" and continue_conversation is True)
+        or (agent_type == "browser" and continue_conversation is False)
+    )
+    if status in FINISHED_TASK_STATUSES and not user_resume:
         return (
             f"{address} is a {status} {agent_type} agent; completed browser and code agents cannot be "
             f"messaged. Spawn a new {agent_type} agent for new work."

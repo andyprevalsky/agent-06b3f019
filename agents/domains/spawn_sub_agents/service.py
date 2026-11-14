@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional
 import structlog
 import structlog.contextvars
 from temporalio import activity
+from temporalio.exceptions import ApplicationError
 
 from config import load_config
 from domains.spawn_sub_agents.config import (
@@ -25,6 +26,12 @@ from domains.spawn_sub_agents.repo import (
     spawn_http_client,
 )
 from domains.spawn_sub_agents.types import SpawnResult
+from helpers.github_repo_ref import (
+    GITHUB_REPO_NOT_CONNECTED_CODE,
+    explicit_github_repo_ref,
+    is_repo_not_connected_response,
+    repo_not_connected_message,
+)
 from helpers.tracing import traced
 
 logger = structlog.get_logger()
@@ -195,6 +202,10 @@ def build_spawn_payload(
     # Backend sets the child's path to <parent path>/<task_name> (409 on a live sibling).
     if agent_cfg.get("task_name"):
         payload["task_name"] = agent_cfg["task_name"]
+    # Explicit connected-repo selection; omitted, the backend inherits the parent's ref.
+    github_repo_ref = explicit_github_repo_ref(agent_cfg.get("github_repo_ref"))
+    if github_repo_ref:
+        payload["github_repo_ref"] = github_repo_ref
 
     return payload
 
@@ -317,11 +328,16 @@ async def spawn_sub_agent_activity(
                                     "model": data["model"],
                                     "status": data["status"],
                                     "task_path": data.get("task_path"),
+                                    "github_repo_ref": data.get("github_repo_ref"),
                                 }
 
                             status_code = response.status_code
                             response_text = response.text[:500]
                             last_error = f"HTTP {status_code}: {response_text}"
+                            if payload.get("github_repo_ref") and is_repo_not_connected_response(
+                                status_code, response_text
+                            ):
+                                last_error = repo_not_connected_message(payload["github_repo_ref"], last_error)
                             if status_code in RETRYABLE_STATUS_CODES and attempt < MAX_SPAWN_ATTEMPTS:
                                 delay = BASE_BACKOFF_SECONDS * (2 ** (attempt - 1))
                                 jitter = random.uniform(0, delay * 0.3)
@@ -527,8 +543,19 @@ async def spawn_sub_agents_batch_activity(
                     status_code=status_code,
                     response_text=response_text,
                 )
+                refs = sorted({p["github_repo_ref"] for p in payloads if p.get("github_repo_ref")})
+                if refs and is_repo_not_connected_response(status_code, response_text):
+                    # The explicit repo is not connected: no child is created and none
+                    # falls back to the parent's repo; a retry cannot connect it.
+                    raise ApplicationError(
+                        repo_not_connected_message(", ".join(refs), last_error),
+                        type=GITHUB_REPO_NOT_CONNECTED_CODE,
+                        non_retryable=True,
+                    )
                 raise RuntimeError(last_error)
 
+            except ApplicationError:
+                raise
             except Exception as exc:
                 last_error = str(exc)
                 if attempt < MAX_SPAWN_ATTEMPTS:
@@ -581,6 +608,7 @@ def _build_spawn_result_from_batch(
                 "goal": goal,
                 "model": r.get("model"),
                 "status": status or "STARTING_UP",
+                "github_repo_ref": r.get("github_repo_ref"),
             }
         )
     return SpawnResult(

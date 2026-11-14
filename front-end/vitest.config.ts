@@ -28,6 +28,9 @@ export default defineConfig({
     ],
     globals: true,
     css: false,
+    // Deploy gates only (the gate worker names a progress file): a failed test reruns once and a
+    // rerun pass is reported FLAKY (gate-progress/vitestReporter.ts). Local runs never retry.
+    retry: process.env.DEPLOY_GATE_PROGRESS ? 1 : 0,
     // /deploy verifies the front-end alongside backend, agents, and both Mac
     // suites. Four is the measured local optimum: lower widths leave a long
     // serial tail, while higher widths add contention without reducing wall time.

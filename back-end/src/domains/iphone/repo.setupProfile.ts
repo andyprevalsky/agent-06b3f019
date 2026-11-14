@@ -56,10 +56,12 @@ export async function configureSetup(
     if (state.profileRevision !== expectedRevision)
       throw new IPhoneError(409, 'Phone setup profile changed');
     const allowed = profileExceptionAllowed(state, googleIdentity, allowGooglePasscodeException);
+    if (!Number.isSafeInteger(state.claimRevision + 1))
+      throw new IPhoneError(409, 'Phone setup revision exhausted');
     const next = {
       version: 1 as const,
       profileRevision: state.profileRevision + 1,
-      claimRevision: state.claimRevision,
+      claimRevision: state.claimRevision + 1,
       ...(allowed ? { allowGooglePasscodeException: true } : {}),
       expectedAppleIdentity: identity,
       ...((googleIdentity ?? state.expectedGoogleIdentity) !== undefined

@@ -294,6 +294,62 @@ function compare(migrations: TableState, schema: TableState): Drift[] {
 // reverse-direction check fails the build on ANY new untracked model/column.
 const KNOWN_NON_PRISMA_TABLES = new Set(['_prisma_migrations', 'spatial_ref_sys']);
 
+// Private phone tables never expose encrypted grants through the Data API.
+// The registered iphone-rls blackbox separately exercises actual PostgreSQL roles.
+const phoneSql = fs
+  .readdirSync(MIGRATIONS_DIR)
+  .filter((name) => name.includes('_iphone_'))
+  .sort()
+  .map((name) => fs.readFileSync(path.join(MIGRATIONS_DIR, name, 'migration.sql'), 'utf8'))
+  .join('\n');
+for (const table of ['IPhoneDevice', 'IPhoneLease', 'IPhoneOperation', 'IPhoneAcquireIntent']) {
+  if (!phoneSql.includes(`ALTER TABLE public."${table}" ENABLE ROW LEVEL SECURITY;`))
+    throw new Error(`Private phone table ${table} has no RLS migration`);
+}
+if (
+  !phoneSql.includes('REVOKE ALL ON TABLE') ||
+  !phoneSql.includes("ARRAY['anon', 'authenticated']")
+)
+  throw new Error('Private phone migrations must revoke client table ACLs');
+
+// `anon` and `authenticated` hold SELECT on every public table and the Data API
+// exposes `public`, so RLS is the only barrier: every table a migration creates
+// must enable it somewhere in the history (no policy = backend-only, deny all).
+// PR #1975 created GithubRepoConnection without it and production served it to
+// the anon key until the post-deploy drift check caught it (2026-11-14).
+const allMigrationSql = fs
+  .readdirSync(MIGRATIONS_DIR)
+  .filter((name) => fs.existsSync(path.join(MIGRATIONS_DIR, name, 'migration.sql')))
+  .sort()
+  .map((name) => fs.readFileSync(path.join(MIGRATIONS_DIR, name, 'migration.sql'), 'utf8'))
+  .join('\n');
+const tableName = String.raw`(?:public\.)?"?(\w+)"?`;
+const createdTables = new Set(
+  [
+    ...allMigrationSql.matchAll(
+      new RegExp(String.raw`CREATE TABLE (?:IF NOT EXISTS )?${tableName}`, 'g')
+    ),
+  ].map((m) => m[1])
+);
+const rlsTables = new Set(
+  [
+    ...allMigrationSql.matchAll(
+      new RegExp(
+        String.raw`ALTER TABLE (?:IF EXISTS )?(?:ONLY )?${tableName} ENABLE ROW LEVEL SECURITY`,
+        'g'
+      )
+    ),
+  ].map((m) => m[1])
+);
+const withoutRls = [...createdTables]
+  .filter((table) => !KNOWN_NON_PRISMA_TABLES.has(table) && !rlsTables.has(table))
+  .sort();
+if (withoutRls.length > 0)
+  throw new Error(
+    `Migration-created tables without ENABLE ROW LEVEL SECURITY (readable by the anon key): ${withoutRls.join(', ')}. ` +
+      'Add an idempotent `ALTER TABLE IF EXISTS public."<table>" ENABLE ROW LEVEL SECURITY;` migration.'
+  );
+
 const drift = compare(buildMigrationState(), parseSchemaPrisma()).filter(
   (d) => !KNOWN_NON_PRISMA_TABLES.has(d.table)
 );

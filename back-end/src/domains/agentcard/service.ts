@@ -4,6 +4,7 @@
  */
 
 import { createLogger } from '../../providers/logger';
+import { refreshV2OnboardingStatus } from '../../providers/agentcard/v2-onboarding';
 import { loadOAuthConfig } from '../../providers/agentcard/config';
 import {
   buildAuthorizeUrl,
@@ -62,6 +63,9 @@ export async function handleCallback(code: string, state: string): Promise<{ use
 
 export interface AgentCardStatus {
   connected: boolean;
+  apiVersion?: 2;
+  livemode?: boolean;
+  fundsSource?: string;
   expiresAt?: string;
   expired?: boolean;
   status?: string;
@@ -69,10 +73,25 @@ export interface AgentCardStatus {
   setupSessionId?: string;
 }
 
-export async function getStatus(userId: string): Promise<AgentCardStatus> {
+export async function getStatus(
+  userId: string,
+  dependencies: Partial<{
+    refreshV2OnboardingStatus: typeof refreshV2OnboardingStatus;
+    refreshOrgCardholderStatus: typeof refreshOrgCardholderStatus;
+    getUserToken: typeof getUserToken;
+  }> = {}
+): Promise<AgentCardStatus> {
+  const deps = {
+    refreshV2OnboardingStatus,
+    refreshOrgCardholderStatus,
+    getUserToken,
+    ...dependencies,
+  };
+  const v2Status = await deps.refreshV2OnboardingStatus(userId);
+  if (v2Status !== undefined) return { ...v2Status, apiVersion: 2 };
   const [orgStatus, token] = await Promise.all([
-    refreshOrgCardholderStatus(userId),
-    getUserToken(userId),
+    deps.refreshOrgCardholderStatus(userId),
+    deps.getUserToken(userId),
   ]);
   const orgFields = {
     ...(orgStatus.status !== undefined ? { status: orgStatus.status } : {}),

@@ -6,7 +6,10 @@ import {
 } from './org-runtime';
 import { getOrgCardholderVerificationStatus } from './org-onboarding';
 import { readAgentCardOrgWallet } from './org-wallet-monitor';
+import { createLogger } from '../logger';
 import { retryWithBackoff } from '../retry';
+
+const log = createLogger('AgentCardBenchmarkFloat');
 
 /**
  * Minimum sandbox pool the benchmark payment fixture requires, in cents.
@@ -21,6 +24,18 @@ import { retryWithBackoff } from '../retry';
 export const DEFAULT_MIN_SANDBOX_FLOAT_CENTS = 100_000;
 const MAX_RATE_LIMIT_ATTEMPTS = 4;
 const MAX_RATE_LIMIT_WAIT_MS = 65_000;
+/**
+ * Benchmark fixtures verify the org with read-only calls, and a failure before the start barrier
+ * cancels the whole smoke campaign. Two transient provider states outlast a single call's own
+ * retries: the fixed 60 s rate-limit window shared with every lane using these credentials, and
+ * the intermittent HTTP 401 on a healthy secret (seen spanning 19 s, longer than the runtime's
+ * 15 s auth-flap window). The fixture waits them out: 30 s between attempts (the setup fixture's
+ * convention in run_benchmark.py), 1 + 3 attempts, spanning more than one full window, and no new
+ * attempt once 180 s have elapsed so nested per-call retries cannot multiply the total wait.
+ */
+const ORG_BACKPRESSURE_RETRY_DELAY_MS = 30_000;
+const ORG_BACKPRESSURE_TOTAL_WAIT_MS = 180_000;
+const ORG_BACKPRESSURE_MAX_RETRIES = 3;
 
 const AGENTCARD_DASHBOARD_URL = 'https://dashboard.agentcard.sh';
 /**
@@ -89,6 +104,85 @@ function preferredBenchmarkCardholderIds(
   return [...new Set(preferred)];
 }
 
+/**
+ * Follow the provider's declared offset contract under the resolver's original deadline.
+ *
+ * The org tool defaults to the newest 50 records, so a verified preferred identity may sit on a
+ * later page. Pages are refused rather than guessed when the provider's inventory metadata is
+ * malformed, changes its total mid-walk, or stops advancing before covering that total.
+ */
+async function* benchmarkCardholderPages(
+  callOrgTool: AgentCardOrgToolCaller,
+  deadlineAtMs: number
+): AsyncGenerator<AgentCardSandboxCardholder[]> {
+  const pageSize = 100; // Provider tools/list: documented maximum, not a total discovery cap.
+  const seen = new Set<string>();
+  let offset = 0;
+  let total: number | undefined;
+  for (;;) {
+    if (Date.now() >= deadlineAtMs) {
+      throw new Error(
+        'AgentCard cardholder inventory pagination exceeded its read deadline ' +
+          '(the original read deadline shared by every resolver read)'
+      );
+    }
+    const result = await callOrgTool('list_cardholders', { limit: pageSize, offset }, deadlineAtMs);
+    const outer = asRecord(result);
+    const record = asRecord(outer?.structuredContent) ?? outer;
+    const page = extractCardholders(result);
+    const raw = record?.cardholders;
+    if (!Array.isArray(raw) || page.length !== raw.length) {
+      throw new Error('AgentCard cardholder inventory pagination contains a record without an id');
+    }
+    if (page.length > pageSize) {
+      throw new Error('AgentCard cardholder inventory pagination page exceeds requested limit');
+    }
+    const reportedTotal = record?.total;
+    if (reportedTotal !== undefined) {
+      if (
+        typeof reportedTotal !== 'number' ||
+        !Number.isSafeInteger(reportedTotal) ||
+        reportedTotal < 0 ||
+        raw.length > pageSize
+      ) {
+        throw new Error(
+          'AgentCard cardholder inventory returned an invalid total (pagination metadata is malformed)'
+        );
+      }
+      if (total !== undefined && reportedTotal !== total) {
+        throw new Error('AgentCard cardholder inventory changed during pagination');
+      }
+      total = reportedTotal;
+    }
+    const fresh = page.filter(({ id }) => !seen.has(id));
+    for (const { id } of page) seen.add(id);
+    // Validate before yielding: the resolver may return as soon as a page holds its target.
+    // Distinct ids, not raw rows: churn can legitimately re-deliver an already-seen cardholder.
+    if (total !== undefined && seen.size > total) {
+      throw new Error(
+        'AgentCard cardholder inventory exceeded its reported total (pagination metadata is inconsistent)'
+      );
+    }
+    if (offset > 0 && page.length > 0 && fresh.length === 0) {
+      throw new Error(
+        'AgentCard cardholder inventory pagination did not advance (made no progress)'
+      );
+    }
+    if (raw.length === 0 && total !== undefined && offset < total) {
+      throw new Error(
+        'AgentCard cardholder inventory pagination did not cover its total (made no progress)'
+      );
+    }
+    if (total === undefined && raw.length < pageSize) {
+      // A short page without a declared total cannot prove complete org membership.
+      throw new Error('AgentCard cardholder inventory pagination requires a declared total');
+    }
+    yield page;
+    offset += raw.length;
+    if (total !== undefined && offset >= total) return;
+  }
+}
+
 /** AgentCard's terminal, mint-capable verification states. */
 const KYC_READY_STATUSES = new Set(['verified', 'approved']);
 
@@ -118,7 +212,32 @@ export async function resolveBenchmarkCardholderId(
   const deadlineAtMs = orgRetryDeadlineAtMs();
   const callWithinBudget: AgentCardOrgToolCaller = (toolName, args) =>
     callOrgTool(toolName, args, deadlineAtMs);
-  const cardholders = extractCardholders(await callWithinBudget('list_cardholders', {}));
+  const statuses = new Map<string, string | undefined>();
+  const readStatus = async (id: string): Promise<string | undefined> => {
+    if (statuses.has(id)) return statuses.get(id);
+    const status = await getOrgCardholderVerificationStatus(id, {
+      callOrgTool: callWithinBudget,
+    }).catch((error: unknown) => {
+      if (isOrgBackpressureError(error)) throw error;
+      return undefined;
+    });
+    statuses.set(id, status);
+    return status;
+  };
+  const discovered = new Map<string, AgentCardSandboxCardholder>();
+  for await (const page of benchmarkCardholderPages(callWithinBudget, deadlineAtMs)) {
+    for (const cardholder of page) {
+      if (!discovered.has(cardholder.id)) discovered.set(cardholder.id, cardholder);
+    }
+    // The highest-priority explicit candidate needs only positive membership and KYC.
+    // Do not wait for unrelated org-wide discovery/churn once that exact target is ready.
+    if (preferredIds[0] && discovered.has(preferredIds[0])) {
+      const status = await readStatus(preferredIds[0]);
+      if (status !== undefined && KYC_READY_STATUSES.has(status.toLowerCase()))
+        return preferredIds[0];
+    }
+  }
+  const cardholders = [...discovered.values()];
   if (cardholders.length === 0) {
     throw new Error(
       'AgentCard sandbox org has no cardholders. Create one in sandbox mode at ' +
@@ -140,24 +259,30 @@ export async function resolveBenchmarkCardholderId(
 
   for (const id of ordered) {
     // A cardholder whose status cannot be read is treated as not-ready rather than failing the
-    // whole resolution: another candidate may still be verified. An exhausted org-wide throttle
-    // says nothing about this cardholder, and reading the next one would only add load to it.
-    const status = await getOrgCardholderVerificationStatus(id, {
-      callOrgTool: callWithinBudget,
-    }).catch((error: unknown) => {
-      if (
-        error instanceof AgentCardOrgRuntimeError &&
-        error.code === 'agentcard_org_mcp_rate_limited'
-      )
-        throw error;
-      return undefined;
-    });
+    // whole resolution: another candidate may still be verified. Org-wide backpressure says
+    // nothing about this cardholder: skipping it could seed a less-preferred, unverified one, and
+    // reading the next candidate would only add load.
+    const status = await readStatus(id);
     if (status !== undefined && KYC_READY_STATUSES.has(status.toLowerCase())) return id;
   }
   // Nothing verifiable: fall back to the highest-preference candidate so the caller's more
   // specific KYC error surfaces, and so an org whose status endpoint is unavailable still
   // resolves the same cardholder the preference order would have chosen.
   return ordered[0];
+}
+
+/** Provider states that say nothing about this org or cardholder and clear on their own. */
+function isOrgBackpressureError(error: unknown): error is AgentCardOrgRuntimeError {
+  if (!(error instanceof AgentCardOrgRuntimeError)) return false;
+  return (
+    error.code === 'agentcard_org_mcp_rate_limited' ||
+    (error.code === 'agentcard_org_mcp_unauthorized' && error.status === 401) ||
+    (error.code === 'agentcard_org_mcp_unavailable' && error.status === 503)
+  );
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function minSandboxFloatCents(env: Record<string, string | undefined> = process.env): number {
@@ -269,6 +394,14 @@ export async function ensureBenchmarkOrgCardholder(
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
+    if (isOrgBackpressureError(error)) {
+      throw new AgentCardOrgRuntimeError(
+        `AgentCard benchmark cardholder readiness check failed: ${message}`,
+        error.status,
+        error.code,
+        error.details
+      );
+    }
     if (isCardholderNotFoundMessage(message)) {
       throw new Error(
         'AgentCard benchmark cardholder does not exist in the OAuth org tied to ' +
@@ -288,4 +421,60 @@ export async function ensureBenchmarkOrgCardholder(
   }
 
   return { verificationStatus };
+}
+
+type OrgBackpressureClock = {
+  sleep?: (ms: number) => Promise<void>;
+  now?: () => number;
+};
+
+/**
+ * Re-runs a read-only org verification after provider backpressure outlasts its per-call retries.
+ * Anything else (an empty org, a low float, a pending cardholder) fails on the first pass.
+ */
+export async function waitOutBenchmarkOrgBackpressure<T>(
+  verify: () => Promise<T>,
+  { sleep = delay, now = Date.now }: OrgBackpressureClock = {}
+): Promise<T> {
+  const startedAtMs = now();
+  for (let retries = 0; ; retries += 1) {
+    try {
+      return await verify();
+    } catch (error) {
+      if (
+        !isOrgBackpressureError(error) ||
+        retries >= ORG_BACKPRESSURE_MAX_RETRIES ||
+        now() - startedAtMs + ORG_BACKPRESSURE_RETRY_DELAY_MS > ORG_BACKPRESSURE_TOTAL_WAIT_MS
+      ) {
+        throw error;
+      }
+      log.warn('Waiting out AgentCard org backpressure before re-verifying the benchmark org', {
+        retry: retries + 1,
+        max_retries: ORG_BACKPRESSURE_MAX_RETRIES,
+        delay_ms: ORG_BACKPRESSURE_RETRY_DELAY_MS,
+        code: error.code,
+        error: error.message,
+      });
+      await sleep(ORG_BACKPRESSURE_RETRY_DELAY_MS);
+    }
+  }
+}
+
+export type BenchmarkOrgFixture = {
+  cardholderId: string;
+  sandboxFloat: AgentCardSandboxFloat;
+  cardholderVerificationStatus: string;
+};
+
+/** The pre-barrier org verification for the sandbox payment fixture, as one read-only unit. */
+export function verifyBenchmarkOrgFixture(
+  callOrgTool: AgentCardOrgToolCaller = defaultCallOrgTool,
+  clock: OrgBackpressureClock = {}
+): Promise<BenchmarkOrgFixture> {
+  return waitOutBenchmarkOrgBackpressure(async () => {
+    const cardholderId = await resolveBenchmarkCardholderId(undefined, callOrgTool);
+    const sandboxFloat = await ensureAgentCardSandboxFloat(undefined, callOrgTool);
+    const { verificationStatus } = await ensureBenchmarkOrgCardholder(cardholderId, callOrgTool);
+    return { cardholderId, sandboxFloat, cardholderVerificationStatus: verificationStatus };
+  }, clock);
 }

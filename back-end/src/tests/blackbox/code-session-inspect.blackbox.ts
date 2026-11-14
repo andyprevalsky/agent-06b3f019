@@ -16,7 +16,7 @@
  * Hermetic: local checkpoint storage, fake keys, no E2B, GitHub or provider calls.
  */
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import {
   chmodSync,
@@ -47,6 +47,11 @@ import {
   setCodeInspectSandboxFactoryForTests,
 } from '../../providers/codeSessions/inspect';
 import { fakeInspectCli } from './code-session-inspect.fake-cli';
+import { beginIsolatedFundedKeyCooldowns } from './funded-key-cooldown.support';
+import {
+  assertInspectionSubscriptionIsolation,
+  beginIsolatedInspectionSubscriptions,
+} from './code-session-inspect-subscriptions.support';
 
 config();
 
@@ -90,27 +95,10 @@ const savedEnv = new Map<string, string | undefined>(
 );
 const originalConnect = Sandbox.connect.bind(Sandbox);
 let liveConnects = 0;
-/** The shared Anthropic-key cooldown row (shared test DB): cleared for this suite, then restored. */
-const COOLDOWN_KEY = {
-  userId: '00000000-0000-0000-0000-000000000000',
-  name: 'anthropic_api_key_cooldown',
-  accountId: '',
-};
-let priorCooldown: Awaited<ReturnType<typeof prisma.integration.findUnique>> = null;
-
-async function restoreCooldownRow(): Promise<void> {
-  await __resetAnthropicApiKeyCooldown();
-  if (priorCooldown === null) return;
-  await prisma.integration.create({
-    data: {
-      ...COOLDOWN_KEY,
-      type: priorCooldown.type,
-      status: priorCooldown.status,
-      rateLimitedUntil: priorCooldown.rateLimitedUntil,
-      failureReason: priorCooldown.failureReason,
-    },
-  });
-}
+// The hermetic CLIs own private funded-key cooldowns for the whole fixture lifecycle.
+// Parallel suites continue reading and writing their real shared rows.
+let finishFundedCooldownIsolation: (() => Promise<void>) | null = null;
+let finishSubscriptionIsolation: (() => void) | null = null;
 
 const FAKE_CLI = fakeInspectCli({ cliLog, modeFile, realGit });
 
@@ -263,6 +251,8 @@ async function http(method: string, path: string, userId: string, body?: unknown
 }
 
 before(async () => {
+  finishSubscriptionIsolation = beginIsolatedInspectionSubscriptions(prisma.integration);
+  finishFundedCooldownIsolation = await beginIsolatedFundedKeyCooldowns();
   process.env.CODE_SESSION_STORAGE_BACKEND = 'local';
   process.env.CODE_SESSION_STORAGE_LOCAL_DIR = storageDir;
   // Fake funded keys; no decryption key, so no stored credential is ever decrypted.
@@ -298,10 +288,6 @@ before(async () => {
     throw new Error('the live sandbox must not be connected');
   };
   installFakeFactory();
-  priorCooldown = await prisma.integration.findUnique({
-    where: { userId_name_accountId: COOLDOWN_KEY },
-  });
-  await __resetAnthropicApiKeyCooldown();
   await prisma.user.create({ data: { userId: userA, name: 'Inspect A' } });
   await prisma.user.create({ data: { userId: userB, name: 'Inspect B' } });
   await prisma.agent.create({ data: { id: agentA, userId: userA, goal: 'Build the feature' } });
@@ -309,18 +295,25 @@ before(async () => {
 });
 
 after(async () => {
-  setCodeInspectSandboxFactoryForTests(null);
-  await restoreCooldownRow();
-  (Sandbox as unknown as { connect: typeof originalConnect }).connect = originalConnect;
-  for (const [key, value] of savedEnv) {
-    if (value === undefined) delete process.env[key];
-    else process.env[key] = value;
+  try {
+    setCodeInspectSandboxFactoryForTests(null);
+    (Sandbox as unknown as { connect: typeof originalConnect }).connect = originalConnect;
+    for (const [key, value] of savedEnv) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    await prisma.codeSession.deleteMany({ where: { userId: { in: [userA, userB] } } });
+    await prisma.agent.deleteMany({ where: { userId: { in: [userA, userB] } } });
+    await prisma.user.deleteMany({ where: { userId: { in: [userA, userB] } } });
+    rmSync(fixtureDir, { recursive: true, force: true });
+  } finally {
+    try {
+      await finishFundedCooldownIsolation?.();
+    } finally {
+      finishSubscriptionIsolation?.();
+      await prisma.$disconnect();
+    }
   }
-  await prisma.codeSession.deleteMany({ where: { userId: { in: [userA, userB] } } });
-  await prisma.agent.deleteMany({ where: { userId: { in: [userA, userB] } } });
-  await prisma.user.deleteMany({ where: { userId: { in: [userA, userB] } } });
-  rmSync(fixtureDir, { recursive: true, force: true });
-  await prisma.$disconnect();
 });
 
 test('an inspection restores the latest checkpoint into its own sandbox and answers with verified citations; the live session is untouched', async () => {
@@ -578,6 +571,11 @@ test('a caller that gives up (abort) gets its sandbox killed at once, not after 
   assert.ok(sandbox.killedAtMs < doneMs, 'the kill happened while the CLI was still running');
 });
 
+test(
+  'funded inspection fixture isolates subscriptions and restores unrelated queries',
+  assertInspectionSubscriptionIsolation
+);
+
 test('C15: a Claude usage limit backs that credential off and the inspection answers on Codex', async () => {
   const liveHome = join(fixtureDir, 'live-home-c15');
   seedWorkspace(liveHome);
@@ -638,4 +636,26 @@ test('C15: a Claude usage limit backs that credential off and the inspection ans
   } finally {
     await __resetAnthropicApiKeyCooldown();
   }
+});
+
+test('C15 keeps its Codex fallback while a sibling holds the funded cooldown', () => {
+  const child = spawnSync(
+    process.execPath,
+    [
+      '--import',
+      'tsx',
+      '--import',
+      './src/tests/blackbox/code-session-inspect-cooldown.fixture.ts',
+      '--test',
+      '--test-name-pattern=C15:',
+      'src/tests/blackbox/code-session-inspect.blackbox.ts',
+    ],
+    { env: process.env, encoding: 'utf8', timeout: 900_000 }
+  );
+  process.stdout.write(child.stdout ?? '');
+  process.stderr.write(child.stderr ?? '');
+  assert.ifError(child.error);
+  assert.equal(child.signal, null, 'the original C15 child completed');
+  assert.equal(child.status, 0, 'the unchanged C15 assertions pass with a competing cooldown');
+  assert.match(child.stdout, /ok \d+ - C15: a Claude usage limit/);
 });

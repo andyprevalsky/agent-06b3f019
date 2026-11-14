@@ -1,5 +1,6 @@
 #!/usr/bin/env tsx
-import { createPhoneFixtureUser } from './iphone-test-user';
+import { completedSyntheticSetup } from './iphone.synthetic-ready';
+import { createPhoneFixtureUser, revokePhoneFixtureIdentity } from './iphone-test-user';
 import { config } from 'dotenv';
 import { randomUUID } from 'crypto';
 import { prisma } from '../../providers/database';
@@ -257,7 +258,7 @@ test('deadline-equal/late heartbeat expires holder and promotes oldest waiter', 
   await expectStatus(view(f.userId, active.id), 'EXPIRED');
   await expectStatus(view(f.userId, waiting.id), 'ACTIVE');
 });
-test('pending auth retains paused lease across expiration; resolved auth provides bounded grace', async () => {
+test('pending auth retains lease across heartbeat expiry within the user-control grace; resolved auth provides bounded grace', async () => {
   const f = await fixture();
   const a = await agent(f.userId);
   const b = await agent(f.userId);
@@ -268,8 +269,11 @@ test('pending auth retains paused lease across expiration; resolved auth provide
     action(f.userId, active.id, 'awaiting-auth', { attentionRequestId: auth.id }),
     200
   );
-  await prisma.agent.update({ where: { id: a.id }, data: { status: 'PAUSED' } });
-  await expire(active.id);
+  // Heartbeat expired, still inside USER_CONTROL_TIMEOUT_MS: the pending auth keeps the phone.
+  await prisma.iPhoneLease.update({
+    where: { id: active.id },
+    data: { leaseExpiresAt: new Date(Date.now() - 60_000) },
+  });
   const retained = await view(f.userId, active.id);
   assert(
     retained.status === 'ACTIVE' && retained.attentionRequestId === auth.id,
@@ -364,7 +368,7 @@ test('server identity revocation rechecks lease authorization', async () => {
   const f = await fixture();
   const a = await agent(f.userId);
   const lease = await acquire(f.userId, a.id);
-  await prisma.user.update({ where: { userId: f.userId }, data: { phone: '+15550009999' } });
+  await revokePhoneFixtureIdentity(f.userId);
   await expectStatus(action(f.userId, lease.id, 'heartbeat'), 403);
   await expectStatus(action(f.userId, lease.id, 'release'), 200);
 });
@@ -416,6 +420,7 @@ test('browser task validates same agent and owning account', async () => {
   const session = await prisma.browserSession.create({
     data: { contextId: context.id, agentId: a.id, sessionId: `fixture-${randomUUID()}` },
   });
+  await completedSyntheticSetup(f, a.id, acquire, action);
   assert(
     (await acquire(f.userId, a.id, randomUUID(), session.id)).browserTaskId === session.id,
     'valid browser binding lost'
@@ -441,6 +446,7 @@ test('idempotency key cannot change its browser task association', async () => {
       })
     )
   );
+  await completedSyntheticSetup(f, a.id, acquire, action);
   const key = randomUUID();
   const original = await acquire(f.userId, a.id, key, sessions[0].id);
   const changed = await request('/leases', f.userId, 'POST', {

@@ -34,6 +34,7 @@ const COMPOSER_COVERING_APPS: readonly string[] = [
   'browser',
   'integrations',
   'health',
+  'teams',
   'feedback',
   'benchmarks',
   'settings',
@@ -51,18 +52,37 @@ export function appIconsInset(count: number): number {
   return count * APP_ICON_SIZE + Math.max(0, count - 1) * APP_ICON_GAP + APP_ICON_EDGE;
 }
 
-/** Default panel width: 560px, never wider than the space right of the left bar. */
-export function defaultDrawerWidth(viewportWidth: number): number {
-  return Math.min(DRAWER_DEFAULT_WIDTH, viewportWidth - LEFT_BAR_WIDTH);
+/**
+ * The live left offset: the Rose bar's published --rose-bar-offset (its width
+ * while pinned, else 64px), or LEFT_BAR_WIDTH when nothing is published.
+ */
+export function readLeftBarOffset(): number {
+  if (typeof document === 'undefined') return LEFT_BAR_WIDTH;
+  const raw = document.documentElement.style.getPropertyValue('--rose-bar-offset');
+  const parsed = Number.parseFloat(raw);
+  return Number.isFinite(parsed) ? parsed : LEFT_BAR_WIDTH;
 }
 
-/** Clamp a requested panel width to [min, viewport - left bar - chat room]. */
-export function clampDrawerWidth(width: number, viewportWidth: number): number {
-  const max = Math.max(DRAWER_MIN_WIDTH, viewportWidth - LEFT_BAR_WIDTH - CHAT_MIN_WIDTH);
+/** Default panel width: 560px, never wider than the space right of the left bar. */
+export function defaultDrawerWidth(viewportWidth: number, leftOffset = LEFT_BAR_WIDTH): number {
+  return Math.min(DRAWER_DEFAULT_WIDTH, viewportWidth - leftOffset);
+}
+
+/** Clamp a requested panel width to [min, viewport - left bar (live offset) - chat room]. */
+export function clampDrawerWidth(
+  width: number,
+  viewportWidth: number,
+  leftOffset = LEFT_BAR_WIDTH,
+): number {
+  const max = Math.max(DRAWER_MIN_WIDTH, viewportWidth - leftOffset - CHAT_MIN_WIDTH);
   return Math.round(Math.min(max, Math.max(DRAWER_MIN_WIDTH, width)));
 }
 
 /** Panel width for a drag handle at clientX (the panel's left edge follows the pointer). */
-export function drawerWidthFromPointer(clientX: number, viewportWidth: number): number {
-  return clampDrawerWidth(viewportWidth - clientX, viewportWidth);
+export function drawerWidthFromPointer(
+  clientX: number,
+  viewportWidth: number,
+  leftOffset = LEFT_BAR_WIDTH,
+): number {
+  return clampDrawerWidth(viewportWidth - clientX, viewportWidth, leftOffset);
 }

@@ -27,10 +27,17 @@ export type TerminalView =
   | 'settings'
   | 'usage'
   | 'network'
+  | 'teams'
   | 'admin-health'
   | 'benchmarks';
 
 export type AnimationPhase = 'revealing' | 'paused' | 'fading';
+
+/** The agent provider's optimistic USER row (agent-context StagedUserMessage). */
+export interface StagedUserMessage {
+  confirm: (server: Message) => void;
+  drop: () => void;
+}
 
 export interface PendingAgentCreationInput {
   agentId: string;

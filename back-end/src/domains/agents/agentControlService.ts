@@ -23,6 +23,8 @@ export {
   restartAgent,
   type RestartAgentOptions,
 } from './agentRestartService';
+import { pauseCodeAgentResumeRuns } from '../../providers/codeAgentResumeWorkflow';
+import { findSubtreeAgentIds } from './repoMessageResume';
 
 const log = createLogger('Agents');
 
@@ -36,6 +38,8 @@ export async function pauseAgent(agentId: string): Promise<number | undefined> {
   if (paused === null) return;
   if (!paused.paused) {
     log.info('Skipping pause - already terminal', { agent_id: agentId, status: paused.status });
+    // A finished agent's code / browser agents the person resumed still pause.
+    void pauseSubtreeResumeRuns(agentId);
     return paused.userControlRevision;
   }
 
@@ -55,8 +59,24 @@ export async function pauseAgent(agentId: string): Promise<number | undefined> {
     }
   }
   /* c8 ignore stop */
+  // After the pause is committed and the owner signalled, in the background: the
+  // code / browser agents the person resumed outside an agent's workflow in this
+  // subtree pause too. Never on the user's pause path (rule 28).
+  void pauseSubtreeResumeRuns(agentId);
   await broadcastUserControlState(agentId, paused);
   return paused.userControlRevision;
+}
+
+/** Pause the resume runs of the paused agent's subtree (background; failures are logged). */
+async function pauseSubtreeResumeRuns(agentId: string): Promise<void> {
+  try {
+    await pauseCodeAgentResumeRuns(await findSubtreeAgentIds(agentId));
+  } catch (error) {
+    log.warn('Pausing resume runs failed', {
+      agent_id: agentId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
 }
 
 /** Broadcast committed ordering metadata; transport failure cannot revoke accepted control. */

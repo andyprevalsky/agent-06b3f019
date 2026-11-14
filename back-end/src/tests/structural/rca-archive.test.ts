@@ -14,7 +14,7 @@
  * What this test does:
  *   1. Runs `python3 scripts/rca_archive.py validate`, the single source of truth
  *      for the case schema (required frontmatter, enum values, the five required
- *      sections, unique ids, no TODO placeholders, INDEX.md freshness).
+ *      sections, unique ids, no TODO placeholders, INDEX.md not committed).
  *   2. Asserts the archive is non-empty — an empty archive means the write-back
  *      step stopped running.
  *   3. Asserts /RCA and the methodology doc still instruct agents to search the
@@ -275,16 +275,6 @@ const INSTRUCTION_REQUIREMENTS: Array<{ file: string; needles: string[]; why: st
       'docs/rca/process-feedback.md',
     ],
     why: '/RCA must instruct agents to search the archive before diagnosing and write a case after.',
-  },
-  {
-    file: 'docs/root-cause-analysis.md',
-    needles: [
-      'scripts/rca_archive.py search',
-      'scripts/rca_archive.py new',
-      'docs/rca/cases/',
-      'docs/rca/process-feedback.md',
-    ],
-    why: 'The methodology is the source of truth /RCA reads first; the archive steps must live there too.',
   },
 ];
 

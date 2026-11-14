@@ -50,6 +50,7 @@ from helpers.generation_handoff import (
     DEPLOY_INTERRUPTED_TOOL_MESSAGE,
     GenerationHandoffRequested,
 )
+from helpers.github_repo_ref import explicit_github_repo_ref
 from helpers.source_connect_gates import raise_source_connect_gates
 from helpers.tool_interrupts import tool_stop_requested
 from helpers.tracing import span
@@ -1213,13 +1214,25 @@ class SpawnAgentManager(ToolManager):
             code_tool_call["attachments"] = tool_call["attachments"]
         if tool_call.get("github_repo_link"):
             code_tool_call["github_repo_link"] = tool_call["github_repo_link"]
+        github_repo_ref = explicit_github_repo_ref(tool_call.get("github_repo_ref"))
+        if github_repo_ref:
+            # Explicit connected-repo selection: outranks every inherited repo (backend).
+            code_tool_call["github_repo_ref"] = github_repo_ref
         if tool_call.get("code_session_id"):
             code_tool_call["code_session_id"] = tool_call["code_session_id"]
         if tool_call.get("target"):
             code_tool_call["target"] = tool_call["target"]
+        if tool_call.get("task_name"):
+            # Stored on the code task row: the agents list shows it as the title.
+            code_tool_call["task_name"] = tool_call["task_name"]
         if tool_call.get("_fresh_conversation") is True:
             # Set only by a continue_conversation=false resume (workflows/background_agents.py).
             code_tool_call["_fresh_conversation"] = True
+        # Set only by a person's resume of this code agent (helpers RESUME_CONVERSATION_KEYS):
+        # the typed turn's files, the stopped session's CLI and the turn's model / effort / speed.
+        for key in ("_user_attachments", "_resume_code_provider", "_resume_cli_settings"):
+            if tool_call.get(key):
+                code_tool_call[key] = tool_call[key]
 
         manager = get_code_manager()
         async for event in manager.execute_tool(workflow_instance, code_tool_call, tool_call_id):
@@ -1376,6 +1389,11 @@ class SpawnAgentManager(ToolManager):
             sub_agent_config["_spawn_group_id"] = group_id
         if tool_call.get("context_gates"):
             sub_agent_config["context_gates"] = tool_call["context_gates"]
+        github_repo_ref = explicit_github_repo_ref(tool_call.get("github_repo_ref"))
+        if github_repo_ref:
+            # Persisted as the child's Agent.githubRepoRef; omitted, the backend
+            # inherits the parent's ref (parent_agent_id).
+            sub_agent_config["github_repo_ref"] = github_repo_ref
 
         sub_agent_tool_call = {
             "tool": "spawn_sub_agent",
@@ -1430,6 +1448,7 @@ class SpawnAgentManager(ToolManager):
         attachments = tool_call.get("attachments")
         output_schema = tool_call.get("output_schema")
         context_gates = tool_call.get("context_gates")
+        github_repo_ref = explicit_github_repo_ref(tool_call.get("github_repo_ref"))
 
         # Resolve bus_id once (matches per-child SpawnSubAgentManager logic).
         parent_bus_id = getattr(workflow_instance, "bus_id", None)
@@ -1461,6 +1480,8 @@ class SpawnAgentManager(ToolManager):
                 cfg["task_name"] = f"{task_name}_{item_index}"
             if context_gates:
                 cfg["context_gates"] = context_gates
+            if github_repo_ref:
+                cfg["github_repo_ref"] = github_repo_ref
             agent_cfgs.append(cfg)
 
         # Wait for un-pause before spawning (parents pause cascades to children).

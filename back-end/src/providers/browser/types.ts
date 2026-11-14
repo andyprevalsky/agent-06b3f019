@@ -100,3 +100,26 @@ export class BrowserProviderRateLimitError extends Error {
     this.provider = provider;
   }
 }
+
+/**
+ * Every remote session one create allocated failed CDP validation and none was
+ * bound to the task. Each was released, or its release was unconfirmed and its
+ * id was logged at allocation for exact cleanup. The outcome is known, so the
+ * caller may run a fresh create.
+ */
+export class BrowserSessionValidationError extends AggregateError {
+  readonly provider: BrowserProviderName;
+  readonly sessionIds: readonly string[];
+
+  constructor(
+    provider: BrowserProviderName,
+    sessionIds: readonly string[],
+    errors: unknown[],
+    message: string
+  ) {
+    super(errors, message);
+    this.name = 'BrowserSessionValidationError';
+    this.provider = provider;
+    this.sessionIds = sessionIds;
+  }
+}

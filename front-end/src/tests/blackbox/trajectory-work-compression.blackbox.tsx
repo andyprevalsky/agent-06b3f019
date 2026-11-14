@@ -366,20 +366,25 @@ describe('one ordered live trajectory carousel', () => {
     },
   );
 
-  it('deduplicates mirrors and pages the ordered history', () => {
-    const messages = Array.from({ length: 45 }, (_, i) => [
+  it('deduplicates mirrors and pages the ordered history, 50 a page, newest page first', () => {
+    const messages = Array.from({ length: 120 }, (_, i) => [
       comm(String(i)),
       comm(String(i), `mirror-${i}`),
     ]).flat();
     renderWithProviders(view(messages, 'COMPLETED'));
     const row = screen.getByTestId('trajectory-work-group');
-    expect(row).toHaveTextContent('45 activities · 45 exchanges');
+    expect(row).toHaveTextContent('120 activities · 120 exchanges');
     fireEvent.click(within(row).getByRole('button'));
-    expect(screen.getAllByTestId('trajectory-history-entry')).toHaveLength(20);
-    fireEvent.click(screen.getByRole('button', { name: 'Next activities' }));
-    expect(screen.getAllByTestId('trajectory-history-entry')).toHaveLength(20);
+    // A finished batch opens on its most recent page too: the 50 newest (70–119).
+    expect(screen.getAllByTestId('trajectory-history-entry')).toHaveLength(50);
+    expect(screen.getByText('3 / 3')).toBeInTheDocument();
+    expect(screen.getByText('Coordinate 119')).toBeInTheDocument();
+    expect(screen.getByText('Coordinate 70')).toBeInTheDocument();
+    expect(screen.queryByText('Coordinate 69')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Previous activities' }));
+    expect(screen.getAllByTestId('trajectory-history-entry')).toHaveLength(50);
     expect(screen.getByText('Coordinate 20')).toBeInTheDocument();
-    expect(screen.queryByText('Coordinate 0')).toBeNull();
+    expect(screen.queryByText('Coordinate 19')).toBeNull();
   });
   it('keeps human requests, questions and results outside while internal failures fold', () => {
     const human = msg({}, { message_id: 'human', role: 'USER', text: 'Build the report' });

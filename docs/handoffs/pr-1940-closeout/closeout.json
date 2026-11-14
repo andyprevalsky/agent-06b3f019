@@ -1,0 +1,54 @@
+{
+  "format": "PR1940-CLOSEOUT-V1",
+  "pr": 1940,
+  "merged_sha": "8983b38cb12940ce9b1978d43c89f0551d46654b",
+  "source_head": "df2daa0ecc1764ab8dbf333182c064df397f244b",
+  "goal": "repair mobile-layout.spec.ts:194 'header is centered and never wider than the 390 px viewport' in the production semantic lane (run 43048557777, source ebe427a5e)",
+  "fix": "front-end/index.html entry-load recovery revalidates the failed entry with fetch(cache:'reload') before reloading (Vercel 404s for /assets/* carry immutable Cache-Control); offline-after-revalidation waits for online without recharging",
+  "related_main_pushes": {
+    "1666ab29c": "semantic stack skips trycloudflare quick tunnels (gate deadline exhausted on Blacksmith)",
+    "7b946966b": "acrossAppReload test helper (prod run 43085818750: Execution context destroyed by AppVersion reload)",
+    "1bdd93f9a": "acrossAppReload late-reload detection + static-page controls (review by run-43085818750 repair owner)"
+  },
+  "target_tests": {
+    "repro_prod_unfixed_entry404_origin": "FAIL locator.boundingBox timeout (identical to run 43048557777)",
+    "fixed_entry404_origin": "PASS",
+    "repro_appversion_origin_before_helper": "FAIL 4/4 Execution context was destroyed",
+    "appversion_origin_after_helper": "PASS 5/5, 3/3",
+    "deploy_semantic_stack_df2daa0ec": "PASS",
+    "production_semantic_8983b38cb": "run 43098562429 success; mobile-layout.spec.ts:195 header-centered PASS; 57 passed, 6 skipped"
+  },
+  "gates": {
+    "passed": [
+      "format",
+      "eslint",
+      "typescript",
+      "backend-structural",
+      "deploy-command-structural",
+      "frontend-coverage-blackbox",
+      "agents-coverage-blackbox",
+      "semantic-stack",
+      "e2b-smoke"
+    ],
+    "smoke": "11 PASS; agent-payment-abandonment resource warning agentcard_release_stall (native SKIPPED, no pass credit; owt_42dcdd48c121b48ff8dee73c $43.96 unreleased); quarantined: background-agent-message-smoke QUARANTINED_PASS",
+    "cycle_r1_archived": ".context/deploy-pipeline-pr1940-r1-archived: 4 semantic-stack UNVERIFIED (trycloudflare delay) + smoke UNVERIFIED (infra canary Fly volume-detach latency); r1 AgentCard stall owt_37a71fcbcace3be5203fc0e0 $43.96 unreleased"
+  },
+  "review": "cycle 1 CodeRabbit 1 finding [FIXED]; cycle 2 skipped: organization usage spending cap (merged unreviewed for cycle 2); cycles 3-5 sync-inherited",
+  "production": {
+    "vercel": "PASS deployment 7720909894",
+    "mac-release": "PASS run 43109523426 v1.1.318 (tag pushed manually per CLAUDE.md: auto-tag run 43098041536 stranded in queue by the 20:17-21:xx Actions stall, cancel 409/rerun 403)",
+    "semantic": "PASS run 43098562429"
+  },
+  "handoffs": [
+    {
+      "failure": "prod semantic run 43085818750 mobile-layout:194 Execution context destroyed",
+      "owner": "boxes.dev thread ph7db0wpz14mtgm0kr60799ks18j1zq3 (PR #1951 SHIPPED 7fa4b3065; regression + RCA case)",
+      "status": "fixed (helper on main 7b946966b/1bdd93f9a)"
+    }
+  ],
+  "followups": [
+    "AgentCard sandbox release stall: $43.96 unreleased x2 (owt_37a71fcbcace3be5203fc0e0, owt_42dcdd48c121b48ff8dee73c)",
+    "auto-tag-mac-app run 43098041536 still queued (stranded by Actions stall; v1.1.318 already points at its merge so it will no-op)",
+    "pin branch deploy-pin/pr1940-6290dbea kept on origin (historical cycle source)"
+  ]
+}

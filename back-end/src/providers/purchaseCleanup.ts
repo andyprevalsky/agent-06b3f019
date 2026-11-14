@@ -1,11 +1,7 @@
+import { reconcileIssuedPurchaseEvidence, purchaseCardWasSpent } from './purchaseIssuedEvidence';
 import { randomUUID } from 'node:crypto';
 import { PurchaseSpendStatus, PurchaseWalletFundingStatus } from '@prisma/client';
-import {
-  createCardProviderForAgent,
-  isCardLive,
-  type CardProvider,
-  type CardProviderDetailsResult,
-} from './card-provider';
+import { createCardProviderForAgent, type CardProvider } from './card-provider';
 import { isClosedCardDetailsError } from './card-provider/errors';
 import { prisma } from './database';
 import { createLogger } from './logger';
@@ -39,21 +35,6 @@ const STALE_CHARGING_MS = Number(process.env.PURCHASE_STALE_CHARGING_MS ?? 15 * 
 // release-observation loop while that pass is still alive; crashed attempts become retryable on the next
 // tick after this lease window.
 const STALE_RECLAIMING_MS = 2 * 60 * 1000;
-
-/**
- * A closed company card alone does not prove merchant spend: unused mints also close before their
- * exact transfer releases. Only canonical settlement's CONSUMED ledger can establish spending;
- * unresolved funding stays with the existing reclaim owner and its release/refund boundary.
- * Legacy cards without company funding retain their existing settlement behavior.
- */
-async function purchaseCardWasSpent(
-  purchaseId: string,
-  details: Pick<CardProviderDetailsResult, 'status' | 'balanceCents'>
-): Promise<boolean> {
-  if (isCardLive(details)) return false;
-  const funding = await findWalletFundingByPurchaseId(purchaseId);
-  return funding === null || funding.status === PurchaseWalletFundingStatus.CONSUMED;
-}
 
 async function closeCardForReclaim(
   cardProvider: CardProvider,
@@ -145,6 +126,8 @@ export async function cleanupAgentPurchaseCards(
   }
 
   for (const purchase of openPurchases) {
+    const evidence = await reconcileIssuedPurchaseEvidence(purchase.id);
+    if (evidence === 'settled' || evidence === 'pending') continue;
     const cardId = purchase.cardId;
     if (cardId === null) continue;
     try {
@@ -332,6 +315,8 @@ export async function reconcileFailedPurchaseFundingReclaims(
 
   for (const purchase of purchases) {
     try {
+      const evidence = await reconcileIssuedPurchaseEvidence(purchase.id);
+      if (evidence === 'settled' || evidence === 'pending') continue;
       if (purchase.cardId !== null) {
         const activeCardProvider =
           cardProvider ?? (await createCardProviderForAgent(purchase.userId, purchase.agentId));
@@ -490,6 +475,11 @@ export async function reconcileDissolvedPurchaseHolds(
       continue;
     }
     if (!hasDissolvedHold(paymentIntent)) continue;
+    const evidence = await reconcileIssuedPurchaseEvidence(
+      purchase.id,
+      PurchaseSpendStatus.CAPTURE_FAILED
+    );
+    if (evidence === 'settled' || evidence === 'pending') continue;
 
     let activeCardProvider: CardProvider;
     let cardWasUsed: boolean;
@@ -592,6 +582,8 @@ export async function reconcileStaleChargingPurchases(
   });
 
   for (const purchase of stalePurchases) {
+    const evidence = await reconcileIssuedPurchaseEvidence(purchase.id);
+    if (evidence === 'settled' || evidence === 'pending') continue;
     if (purchase.cardId !== null) {
       const marked = await prisma.purchaseSpend.updateMany({
         where: {

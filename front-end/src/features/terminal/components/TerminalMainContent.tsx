@@ -1,7 +1,7 @@
 /**
  * STATE MACHINE: TerminalMainContent
  *
- * [VIEW] -> browse | settings | integrations | usage | admin-health | benchmarks | network | agents
+ * [VIEW] -> browse | settings | integrations | usage | teams | admin-health | benchmarks | network | agents
  * Each view is selected by TerminalContent's currentView state.
  * benchmarks is team-gated (admin allowlist or dev mode) and full-width.
  *
@@ -12,6 +12,12 @@
  * Rose Desktop accounts get no top-right nav links at all (UI ledger #14, #66:
  * no Research, Careers or Download — the app icons sit there instead); the
  * signed-out stock website keeps Research, Careers and Download.
+ *
+ * LEFT OFFSET (md+): Rose Desktop with a left bar (sidebarWidthCollapsed > 0)
+ * pads every view by the fixed 64px rail. Expanded, pinned and resized bars
+ * overlay the trajectory without moving or narrowing it. Layouts without a
+ * bar (SharedBenchmarkLayout passes 0) get no offset. The stock sidebar keeps
+ * --browse-sidebar-offset on full-width views only.
  */
 
 import { isStandaloneApp } from '@/lib/isStandaloneApp';
@@ -27,6 +33,7 @@ import Browse from '@/pages/Browse';
 import Integrations from '@/pages/Integrations';
 import Settings from '@/pages/Settings';
 import Usage from '@/pages/Usage';
+import Teams from '@/pages/Teams';
 
 import type { TerminalView } from '../types';
 import type { derivePendingApproval, derivePendingGates } from '../hooks/derivations';
@@ -54,19 +61,23 @@ interface MainContentProps {
 }
 
 export function MainContent(props: MainContentProps) {
+  // The shared benchmark layout renders no bar (sidebarWidthCollapsed 0): nothing to clear.
+  const roseBar = useRoseDesktop() && props.sidebarWidthCollapsed > 0;
   // Full-width views (browse, benchmarks) must clear the fixed sidebar rail —
   // centered views never reach under it, but max-w-none content does.
   const fullWidthView = props.currentView === 'browse' || props.currentView === 'benchmarks';
-  const browseOffsetStyle = fullWidthView
-    ? ({
-        '--browse-sidebar-offset': `${props.sidebarWidthCollapsed}px`,
-      } as React.CSSProperties)
-    : undefined;
+  const browseOffsetStyle =
+    fullWidthView && !roseBar
+      ? ({
+          '--browse-sidebar-offset': `${props.sidebarWidthCollapsed}px`,
+        } as React.CSSProperties)
+      : undefined;
   return (
     <main
+      data-testid="terminal-main-content"
       className={cn(
         'flex-1 flex justify-center h-screen overflow-hidden',
-        fullWidthView && 'md:pl-[var(--browse-sidebar-offset)]',
+        roseBar ? 'md:pl-[64px]' : fullWidthView && 'md:pl-[var(--browse-sidebar-offset)]',
       )}
       style={{
         height: 'var(--app-height, 100dvh)',
@@ -104,6 +115,12 @@ function StandardView({ children }: { children: React.ReactNode }) {
 }
 
 function TerminalViewContent(props: MainContentProps) {
+  if (props.currentView === 'teams')
+    return (
+      <StandardView>
+        <Teams />
+      </StandardView>
+    );
   if (props.currentView === 'browse') return <Browse />;
   if (props.currentView === 'settings')
     return (

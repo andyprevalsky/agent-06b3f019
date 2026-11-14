@@ -76,6 +76,21 @@ for (const width of [1280, 390]) {
       if (!path.startsWith('/api/')) return route.continue();
       let body: unknown = {};
       if (path === '/api/projects') body = { projects: [{ ...project, folders }] };
+      else if (path === '/api/folders')
+        // GET /api/folders shape of the project row (rose-sidebar.fixtures `folderOf`).
+        body = {
+          folders: [
+            {
+              id: project.id,
+              name: project.name,
+              legacy_project_id: project.id,
+              subfolders: folders.map(({ id, name }) => ({ id, name })),
+              github_repo: null,
+              created_at: now,
+              updated_at: now,
+            },
+          ],
+        };
       else if (
         path.match(/^\/api\/projects\/project\/folders\/[^/]+\/position$/) &&
         request.method() === 'PUT'
@@ -125,28 +140,28 @@ for (const width of [1280, 390]) {
       expect(countBox!.x).toBeGreaterThanOrEqual(box!.x);
       expect(countBox!.x + countBox!.width).toBeLessThanOrEqual(box!.x + box!.width);
       expect(countBox!.y + countBox!.height).toBeLessThanOrEqual(box!.y + box!.height - 3);
-      await row.getByRole('button', { name: `Collapse folder ${folder.name}` }).click();
+      await row.getByRole('button', { name: `Collapse subfolder ${folder.name}` }).click();
     }
     if (width >= 768) await openSidebar();
     await page.screenshot({ path: `/tmp/rose-folder-counts-${width}.png` });
     await page
-      .getByRole('button', { name: 'Collapse Workspace project' })
+      .getByRole('button', { name: 'Collapse Workspace folder' })
       .filter({ visible: true })
       .click();
     await expect(group).toHaveCount(0);
     await expect(page.getByTestId('rose-group-home').filter({ visible: true })).toBeVisible();
     await page
-      .getByRole('button', { name: 'Collapse Home project' })
+      .getByRole('button', { name: 'Collapse Home', exact: true })
       .filter({ visible: true })
       .click();
     await expect(page.getByTestId('rose-group-home').filter({ visible: true })).toHaveCount(0);
     await page
-      .getByRole('button', { name: 'Expand Workspace project' })
+      .getByRole('button', { name: 'Expand Workspace folder' })
       .filter({ visible: true })
       .click();
     if (width >= 768) await openSidebar();
     await page
-      .getByRole('button', { name: 'Research folder options' })
+      .getByRole('button', { name: 'Research subfolder options' })
       .filter({ visible: true })
       .click();
     await page.getByRole('menuitem', { name: 'Move up' }).click();
@@ -172,7 +187,7 @@ for (const width of [1280, 390]) {
     await openSidebar();
     await expect.poll(order).toEqual(saved);
     await expect(
-      page.getByRole('button', { name: 'Expand Home project' }).filter({ visible: true }),
+      page.getByRole('button', { name: 'Expand Home', exact: true }).filter({ visible: true }),
     ).toBeVisible();
     await page
       .getByRole('button', { name: 'Create Super Agent', exact: true })

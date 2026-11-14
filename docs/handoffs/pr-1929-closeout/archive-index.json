@@ -1,0 +1,64 @@
+{
+  "format": "PR1929-PRIVATE-ARCHIVE-INDEX-V1",
+  "bucket_env": "R2_BUCKET_TRACE_ARCHIVE",
+  "key_env": "TRACE_ARCHIVE_ENCRYPTION_KEY_B64",
+  "key_fingerprint_sha256": "e351c7cc5b01303e579fe6d1df833940fdaadf325ca47314414ba10735fc7730",
+  "archives": {
+    "records": {
+      "format": "TAR+GZIP",
+      "sha256": "c8988a6b601143e7e78e8060ce82df80bf940063f56a7044b6816d2c615f477c",
+      "plain_bytes": 595968470,
+      "parts": [
+        {
+          "key": "devbox-closeout-private/pr1929/20261111T161843Z-records.tar.gz.part000.aesgcm",
+          "sha256": "64093d61a160b0849b311db81e4535afcc7773a15a7de65517d366c08bc212e9",
+          "plain_bytes": 268435456
+        },
+        {
+          "key": "devbox-closeout-private/pr1929/20261111T161843Z-records.tar.gz.part001.aesgcm",
+          "sha256": "4af650561d4e16b9c6176f0ae486a5e941a1f87dbf59543392c368e489b84fb8",
+          "plain_bytes": 268435456
+        },
+        {
+          "key": "devbox-closeout-private/pr1929/20261111T161843Z-records.tar.gz.part002.aesgcm",
+          "sha256": "1e9b87920de6798f6514d94f32c81f73fd684cd3fb74d4048ae9524ce20d7887",
+          "plain_bytes": 59097558
+        }
+      ],
+      "members": [
+        ".cloud-env",
+        ".context",
+        ".devbox",
+        ".env.npm",
+        "agents/.env",
+        "agents/.env.benchmark-temporal",
+        "agents/.env.cloudbench-upsert.lock",
+        "agents/navi-worker-log.txt",
+        "agents/providers/fast_cache",
+        "back-end/.env",
+        "back-end/.env.cloudbench-upsert.lock",
+        "back-end/backend-logs.log",
+        "front-end/.env",
+        "front-end/frontend-logs.log",
+        "hub-poller-logs.log",
+        "mac-app/.env",
+        "package-lock.json",
+        "research/.env"
+      ],
+      "extra": "var-tmp-sidebar-deploy (deploy logs, triage input, env wrapper)"
+    },
+    "local-git-refs": {
+      "format": "GIT-BUNDLE",
+      "sha256": "85108edce539f509d7dc81405c56e52b8790657d71f6d71ef0585f11d41d60a3",
+      "plain_bytes": 2820486,
+      "parts": [
+        {
+          "key": "devbox-closeout-private/pr1929/20261111T161843Z-local-refs.bundle.part000.aesgcm",
+          "sha256": "36c8b875608509ecc615306fe6061aac3ee72fc9a1e3fbe81c204d53a5113fa5",
+          "plain_bytes": 2820486
+        }
+      ],
+      "scope": "all refs/heads not reachable from remotes, plus refs/stash"
+    }
+  }
+}

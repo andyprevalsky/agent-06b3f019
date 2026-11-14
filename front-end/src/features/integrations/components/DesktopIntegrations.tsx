@@ -2,8 +2,10 @@
  * STATE MACHINE: DesktopIntegrations (Rose Desktop flag on; stock page unchanged when off)
  *
  *   [MOUNTED] → flat sections in the existing order:
- *     Browser Cookies · Passwords · Messages · Compute · Banks & Financial Accounts · Meetings
- *     · Socials · File System
+ *     Browser Cookies · Passwords · Messages · Compute · Banks & Financial Accounts
+ *     · Socials · File System · GitHub Repos (signed in; GithubReposSection: connect
+ *     with an optional folder, disconnect) · Meeting note taker (Granola, Fireflies)
+ *     · Other (Pebble Index 01, whose Connect opens its setup modal) · CLIs
  *   Every integration row is a DesktopIntegrationRow: the stock app-icon tile, the
  *   row's ONE account chip (Gmail addresses, Plaid institutions and compute
  *   subscriptions keep listing several, as the stock page does) and a gradient
@@ -25,7 +27,8 @@
  *   Connect / "+ Add account" call the same hooks/actions the stock sections use.
  */
 
-import { useMemo, type ReactNode } from 'react';
+import { integrationMatchesSearch } from '../hooks/integrationSearch';
+import { Fragment, useMemo, type ReactNode } from 'react';
 
 import { mergeAccountsByProvider } from '../hooks/integrationAccounts';
 import { useIntegrationRemoval } from '../hooks/useIntegrationRemoval';
@@ -35,20 +38,34 @@ import {
   useSyncRefresh,
 } from '../hooks/useSyncProgress';
 import DesktopComputeRow from './DesktopComputeRow';
+import GithubReposSection from './GithubReposSection';
+import SearchGroup from './IntegrationSearchGroup';
 import { type DesktopIntegrationsProps, desktopSectionViews } from './desktopSectionViews';
 import DesktopIntegrationRow, {
   DesktopSectionHeader,
   type DesktopIntegrationView,
 } from './DesktopIntegrationRow';
 import RemoveAccountDialog from './RemoveAccountDialog';
+import CliIntegrationsSection from './CliIntegrationsSection';
 
 /** Refetch cadence while any account reports a running sync. */
 export const DESKTOP_SYNC_REFRESH_MS = 5_000;
 
-function Section({ title, children }: { title: string; children: ReactNode }) {
+function Section({
+  title,
+  description,
+  children,
+  hidden,
+}: {
+  title: string;
+  description?: string;
+  hidden: boolean;
+  children: ReactNode;
+}) {
   return (
-    <section aria-label={title}>
+    <section aria-label={title} hidden={hidden}>
       <DesktopSectionHeader>{title}</DesktopSectionHeader>
+      {description && <p className="mb-2 text-xs text-muted-foreground">{description}</p>}
       {children}
     </section>
   );
@@ -85,31 +102,45 @@ export default function DesktopIntegrations(props: DesktopIntegrationsProps) {
             {removal.error}
           </p>
         )}
-        {sections.map(({ title, rows }) => (
-          <Section key={title} title={title}>
-            {title === 'Compute' && (
-              <>
-                <DesktopComputeRow
-                  provider="claude"
-                  isAvailable={props.isClaudeCodeAvailable}
-                  legacyRow={legacy('claude_code')}
-                  localSyncing={compute.claudeCodeSyncLoading}
-                  removal={removalPort}
-                />
-                <DesktopComputeRow
-                  provider="codex"
-                  isAvailable={props.isGptCodeAvailable}
-                  legacyRow={legacy('gpt_code')}
-                  localSyncing={compute.gptCodeSyncLoading}
-                  removal={removalPort}
-                />
-              </>
+        {sections.map(({ catalogKey, title, description, rows }) => (
+          <Fragment key={title}>
+            {catalogKey === 'meetingNotes' && props.isFullySignedIn && (
+              <SearchGroup catalogKey="githubRepos" search={props.search}>
+                <div className="my-3">
+                  <GithubReposSection github={props.github} />
+                </div>
+              </SearchGroup>
             )}
-            {rows.map((view) => (
-              <DesktopIntegrationRow key={view.key} view={view} />
-            ))}
-          </Section>
+            <Section
+              title={title}
+              description={description}
+              hidden={!integrationMatchesSearch(catalogKey, props.search)}
+            >
+              {title === 'Compute' && (
+                <>
+                  <DesktopComputeRow
+                    provider="claude"
+                    isAvailable={props.isClaudeCodeAvailable}
+                    legacyRow={legacy('claude_code')}
+                    localSyncing={compute.claudeCodeSyncLoading}
+                    removal={removalPort}
+                  />
+                  <DesktopComputeRow
+                    provider="codex"
+                    isAvailable={props.isGptCodeAvailable}
+                    legacyRow={legacy('gpt_code')}
+                    localSyncing={compute.gptCodeSyncLoading}
+                    removal={removalPort}
+                  />
+                </>
+              )}
+              {rows.map((view) => (
+                <DesktopIntegrationRow key={view.key} view={view} />
+              ))}
+            </Section>
+          </Fragment>
         ))}
+        {props.isFullySignedIn && <CliIntegrationsSection desktop />}
       </div>
       <RemoveAccountDialog
         pending={removal.pending}

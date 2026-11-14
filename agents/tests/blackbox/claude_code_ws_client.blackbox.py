@@ -666,8 +666,160 @@ async def run_all_tests():
     await r.record_async("chunked_replay_delivered_as_one_history", test_chunked_replay_is_delivered_as_one_history)
     await r.record_async("reconnects_without_progress_exhaust_budget", test_reconnects_without_progress_exhaust_the_budget)
     await r.record_async("unchanged_replays_do_not_refill_budget", test_unchanged_replays_do_not_refill_the_reconnect_budget)
+    r.record("backoff_delay_exponential_capped_jittered", test_backoff_delay_is_exponential_capped_and_jittered)
+    await r.record_async("reconnect_sleeps_jittered_backoff_and_heartbeats", test_reconnect_sleeps_jittered_backoff_and_heartbeats)
+    await r.record_async("reconnect_deadline_is_configurable", test_reconnect_deadline_is_configurable)
+    await r.record_async("connect_with_retry_recovers_from_failed_handshakes", test_connect_with_retry_recovers_from_failed_handshakes)
+    await r.record_async("connect_with_retry_gives_up_with_last_error", test_connect_with_retry_gives_up_with_the_last_error)
+    await r.record_async("connect_with_retry_stops_at_deadline", test_connect_with_retry_stops_at_the_deadline)
+    await r.record_async("connect_with_retry_reaches_late_sandbox", test_connect_with_retry_reaches_a_sandbox_that_comes_up_late)
     teardown_mock()
     return r.summary()
+
+
+# ── Backoff, jitter and connect retries (tar_2b02efd49fc2466497723b3e) ──
+
+
+def test_backoff_delay_is_exponential_capped_and_jittered():
+    """Delays double per attempt up to the cap, and jitter keeps half of each fixed."""
+    from helpers.claude_code_ws_client import backoff_delay
+
+    lows = [backoff_delay(n, 1.0, cap=20.0, rand=lambda: 0.0) for n in range(1, 8)]
+    highs = [backoff_delay(n, 1.0, cap=20.0, rand=lambda: 1.0) for n in range(1, 8)]
+    assert lows == [0.5, 1.0, 2.0, 4.0, 8.0, 10.0, 10.0], lows
+    assert highs == [1.0, 2.0, 4.0, 8.0, 16.0, 20.0, 20.0], highs
+    # Real jitter spreads simultaneous retries inside [exp/2, exp].
+    samples = {backoff_delay(3, 1.0) for _ in range(50)}
+    assert len(samples) > 1 and all(2.0 <= s <= 4.0 for s in samples), samples
+
+
+async def test_reconnect_sleeps_jittered_backoff_and_heartbeats():
+    """Every reconnect attempt waits a jittered, growing delay and keeps the activity alive."""
+    beats: list[str] = []
+    client = _make_client(max_reconnects=3, reconnect_delay=1.0, heartbeat_fn=beats.append)
+    sleep = AsyncMock()
+
+    with (
+        patch.object(client, "connect", new=AsyncMock(return_value=False)),
+        patch("helpers.claude_code_ws_client.asyncio.sleep", new=sleep),
+        patch("helpers.claude_code_ws_client.random.random", return_value=0.5),
+    ):
+        ok = await client._reconnect()
+
+    assert ok is False
+    assert [c.args[0] for c in sleep.await_args_list] == [0.75, 1.5, 3.0]
+    assert len(beats) == 3 and all("Reconnecting" in b for b in beats), beats
+
+
+async def test_reconnect_deadline_is_configurable():
+    """reconnect_deadline_s bounds a reconnect; the default leaves room for several 30s tries."""
+    from helpers.claude_code_ws_client import RECONNECT_DEADLINE_S
+
+    assert RECONNECT_DEADLINE_S >= 120
+    client = _make_client(max_reconnects=10, reconnect_delay=0.0, reconnect_deadline_s=0.0)
+    connect = AsyncMock(return_value=False)
+    with patch.object(client, "connect", new=connect):
+        assert await client._reconnect() is False
+    connect.assert_not_awaited()
+
+
+async def test_connect_with_retry_recovers_from_failed_handshakes():
+    """A brief blip on attach no longer ends the run: a later attempt connects."""
+    beats: list[str] = []
+    client = _make_client(reconnect_delay=1.0, heartbeat_fn=beats.append)
+    connect = AsyncMock(side_effect=[False, False, True])
+    sleep = AsyncMock()
+
+    with (
+        patch.object(client, "connect", new=connect),
+        patch("helpers.claude_code_ws_client.asyncio.sleep", new=sleep),
+        patch("helpers.claude_code_ws_client.random.random", return_value=0.0),
+    ):
+        ok = await client.connect_with_retry(attempts=5, deadline_s=100.0)
+
+    assert ok is True
+    assert connect.await_count == 3
+    assert [c.args[0] for c in sleep.await_args_list] == [0.5, 1.0]
+    assert len(beats) == 2, beats
+
+
+async def test_connect_with_retry_gives_up_with_the_last_error():
+    """Bounded: after the attempts are spent it returns False and keeps the exact error."""
+    client = _make_client(reconnect_delay=0.0)
+
+    class Refusing:
+        closed = False
+
+        async def ws_connect(self, *_args, **_kwargs):
+            raise ConnectionRefusedError("[Errno 111] Connect call failed")
+
+    client._session = Refusing()
+    ok = await client.connect_with_retry(attempts=3, deadline_s=60.0)
+    assert ok is False
+    assert client.last_error == "ConnectionRefusedError: [Errno 111] Connect call failed", client.last_error
+
+
+async def test_connect_with_retry_stops_at_the_deadline():
+    """A retry whose delay would pass the deadline is not attempted."""
+    client = _make_client(reconnect_delay=10.0)
+    connect = AsyncMock(return_value=False)
+    with patch.object(client, "connect", new=connect):
+        assert await client.connect_with_retry(attempts=5, deadline_s=1.0) is False
+    assert connect.await_count == 1
+
+
+async def test_connect_with_retry_reaches_a_sandbox_that_comes_up_late():
+    """Real sockets: the ws-server is not listening yet on the first handshake, then starts."""
+    import socket
+
+    from aiohttp import web
+
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+
+    async def upgrade(request):
+        ws = web.WebSocketResponse()
+        await ws.prepare(request)
+        await ws.send_str(json.dumps({"type": "exit", "code": 0}))
+        await ws.close()
+        return ws
+
+    app = web.Application()
+    app.router.add_get("/", upgrade)
+    runner = web.AppRunner(app)
+    await runner.setup()
+
+    client = _make_client(ws_url=f"ws://127.0.0.1:{port}", reconnect_delay=0.1)
+    real_connect = client.connect
+    handshakes: list[bool] = []
+    refused = asyncio.Event()
+
+    async def connect_and_record():
+        ok = await real_connect()
+        handshakes.append(ok)
+        if not ok:
+            refused.set()
+        return ok
+
+    async def start_late():
+        # Start listening only once a handshake has actually been refused.
+        await refused.wait()
+        await web.TCPSite(runner, "127.0.0.1", port).start()
+
+    starter = asyncio.create_task(start_late())
+    try:
+        with patch.object(client, "connect", new=connect_and_record):
+            assert await client.connect_with_retry(attempts=8, deadline_s=20.0), client.last_error
+        assert handshakes[0] is False and handshakes[-1] is True, handshakes
+        await asyncio.wait_for(client.listen(), timeout=5)
+        assert client._test_exits == [0]
+    finally:
+        if not starter.done():
+            starter.cancel()
+        await asyncio.gather(starter, return_exceptions=True)
+        await client.disconnect()
+        await runner.cleanup()
 
 
 if __name__ == "__main__":

@@ -1,5 +1,18 @@
 #!/usr/bin/env python3
-"""Run independent /deploy command-structural regression suites concurrently."""
+"""Run independent /deploy command-structural regression suites concurrently.
+
+A failed job (one suite or shard) is rerun once on the same source, never a third time:
+
+    job ─fail─> unittest output names every failure? ─yes─> rerun just those ids (no shard filter)
+     │                                                └─no──> rerun the same job once
+     │          rerun passes (ids: confirmed "Ran N" + OK) ─> FLAKY (gate passes, /RCA attribution
+     │                                                         required: TEST_FLAKY line, FLAKY row)
+     │          rerun fails ─> FAIL
+     └─ timeout or a signal to the runner ─> no rerun
+
+Quarantined tests (scripts/lib/test_quarantine.py) write rows to a per-attempt file that this
+runner forwards for the counted attempt; their ids read <suite>::<test id>.
+"""
 
 from __future__ import annotations
 
@@ -7,6 +20,7 @@ import argparse
 import json
 import math
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -65,6 +79,86 @@ def gate_environment() -> dict[str, str]:
 PROGRESS_ENV = "DEPLOY_GATE_PROGRESS"
 
 
+def _script_helper(name: str, directory: Path | None = None):
+    path = str(directory or Path(__file__).resolve().parent)
+    sys.path.insert(0, path)
+    try:
+        return __import__(name)
+    finally:
+        sys.path.remove(path)
+
+
+def forward_quarantine(rows: Path, log: str) -> list[str]:
+    """Forward a finished job's quarantined-test rows; return their TEST_QUARANTINE lines."""
+    try:
+        quarantine = _script_helper("test_quarantine", Path(__file__).resolve().parent / "lib")
+        return [quarantine.progress.stdout_line(row) for row in quarantine.forward(rows, log=log)]
+    except (ImportError, OSError, ValueError):
+        return []
+
+
+# unittest's failure headers and summary (3.11: "FAIL: name (module.Class.name)"; 3.10 omits
+# the method from the parenthesis). Subtest suffixes make the count disagree: rerun the job.
+UNITTEST_FAILURE = re.compile(r"^(?:FAIL|ERROR): (\S+) \(([^()\s]+)\)(.*)$", re.M)
+UNITTEST_FAILED = re.compile(r"^FAILED \(([^)]*)\)\s*$", re.M)
+UNITTEST_RAN = re.compile(r"^Ran (\d+) tests? in ", re.M)
+UNITTEST_OK = re.compile(r"^OK(?: \(([^)]*)\))?\s*$", re.M)
+
+
+def flaky_detail(labels: Sequence[str], first_outputs: Sequence[str]) -> str:
+    """FLAKY progress detail: the last failed first attempt, ending with EVERY flaky shard's failure headers.
+
+    The progress row keeps only the detail's tail (deploy_gate_progress.DETAIL_LIMIT); a long traceback
+    would otherwise cut the "FAIL: name (module.Class.name)" lines that suite-level /RCA attribution
+    matches against the quarantine marker (deploy_test_quarantine.failed_unittest_names), and a suite
+    with several flaky shards must name all of their failures so each one needs attribution.
+    """
+    headers = [m.group(0) for output in first_outputs for m in UNITTEST_FAILURE.finditer(output)]
+    tail = ("\nfailed unittest headers:\n" + "\n".join(headers)) if headers else ""
+    return f"passed on rerun: {', '.join(labels)}\n" + (first_outputs[-1] if first_outputs else "") + tail
+
+
+def failed_unittest_ids(command: Sequence[str], output: str) -> tuple[str, ...]:
+    """The exact unittest ids to rerun, or () when the output does not name every failure.
+
+    Only `python3 <suite>.py` commands, the run's last summary, and test methods of the suite's
+    own __main__ module qualify; anything else (bash, nested fixture output, setUpClass errors,
+    subtests, unexpected successes) reruns the whole job instead.
+    """
+    if len(command) != 2 or not Path(command[0]).name.startswith("python") or not command[1].endswith(".py"):
+        return ()
+    summaries = UNITTEST_FAILED.findall(output)
+    if not summaries:
+        return ()
+    counts = {}
+    for part in summaries[-1].split(","):
+        key, _, value = part.strip().partition("=")
+        if not value.isdigit():
+            return ()
+        counts[key] = int(value)
+    if set(counts) - {"failures", "errors", "skipped", "expected failures"}:
+        return ()
+    expected = counts.get("failures", 0) + counts.get("errors", 0)
+    ids = []
+    for name, where, rest in UNITTEST_FAILURE.findall(output):
+        if rest.strip() or not name.startswith("test"):
+            return ()
+        qualified = where if where.endswith(f".{name}") else f"{where}.{name}"
+        module, _, test = qualified.partition(".")
+        if module != "__main__" or test.count(".") != 1:
+            return ()
+        if test not in ids:
+            ids.append(test)
+    return tuple(ids) if expected and len(ids) == expected else ()
+
+
+def rerun_confirms(ids: Sequence[str], output: str) -> bool:
+    """An id rerun passes only when unittest ran exactly those tests, all OK, none skipped."""
+    ran = UNITTEST_RAN.findall(output)
+    ok = UNITTEST_OK.findall(output)
+    return bool(ran) and int(ran[-1]) == len(ids) and bool(ok) and not ok[-1]
+
+
 def report_progress(suite: str, status: str, *, detail: str = "", log: str = "") -> None:
     """Append one suite row to the worker's progress file, if it named one.
 
@@ -80,7 +174,8 @@ def report_progress(suite: str, status: str, *, detail: str = "", log: str = "")
             import deploy_gate_progress
         finally:
             sys.path.remove(scripts)
-        deploy_gate_progress.report(suite, status, scope="suite", detail=detail, log=log)
+        deploy_gate_progress.report(suite, status, scope="suite", detail=detail, log=log,
+                                    attempts=2 if status == "FLAKY" else None)
     except (ImportError, OSError, ValueError):
         return
 
@@ -159,12 +254,23 @@ class Gate:
 class Job:
     gate: Gate
     shard: int  # 1-based; 0 means unsharded
+    # 2 for the one rerun of a failed job; `tests` narrows it to the failed unittest ids.
+    attempt: int = 1
+    tests: tuple[str, ...] = ()
 
     @property
     def label(self) -> str:
         if not self.shard:
             return self.gate.name
         return f"{self.gate.name}[{self.shard}/{self.gate.shards}]"
+
+    @property
+    def command(self) -> tuple[str, ...]:
+        return self.gate.command + self.tests
+
+    @property
+    def log_name(self) -> str:
+        return self.label.replace("/", "-of-") + (".rerun.log" if self.attempt > 1 else ".log")
 
     @property
     def expected_seconds(self) -> float:
@@ -176,7 +282,8 @@ class Job:
 
     def environment(self) -> dict[str, str]:
         env = gate_environment()
-        if self.shard:
+        # An id rerun names its tests exactly; a shard filter could drop one of them.
+        if self.shard and not self.tests:
             env[SHARD_ENV] = f"{self.shard}/{self.gate.shards}"
         else:
             env.pop(SHARD_ENV, None)
@@ -192,6 +299,7 @@ class RunningGate:
     output_path: Path
     started: float
     timed_out: bool = False
+    quarantine_rows: Path | None = None
 
 
 def next_launchable(pending: Sequence[Job], running: Sequence[RunningGate]) -> Job | None:
@@ -324,20 +432,33 @@ PROC_OBSERVATION = "proc-observation"
 
 GATES = (
     Gate("deploy-test-cycle", ("python3", "scripts/tests/deploy-test-cycle.test.py"), exclusive=PROC_OBSERVATION),
+    Gate("deploy-focused10-settlement", ("python3", "scripts/tests/deploy-focused10-settlement.test.py"), exclusive=PROC_OBSERVATION),
+    Gate("deploy-test-user-omission", ("python3", "scripts/tests/deploy-test-user-omission.test.py")),
     Gate("deploy-test-plan", ("python3", "scripts/tests/deploy-test-plan.test.py"), exclusive=PROC_OBSERVATION),
     Gate("deploy-test-worker", ("python3", "scripts/tests/deploy-test-worker.test.py")),
+    Gate("deploy-test-semantic", ("python3", "scripts/tests/deploy-test-semantic.test.py")),
     Gate("deploy-test-static", ("python3", "scripts/tests/deploy-test-static.test.py")),
     Gate("deploy-cli", ("python3", "scripts/tests/deploy-cli.test.py")),
     Gate("deploy-gates", ("python3", "scripts/tests/deploy-gates.test.py")),
     Gate("deploy-test-github", ("python3", "scripts/tests/deploy-test-github.test.py")),
     Gate("deploy-cloud-smoke-speed", ("python3", "scripts/tests/deploy-cloud-smoke-speed.test.py")),
     Gate("deploy-gate-progress", ("python3", "scripts/tests/deploy-gate-progress.test.py")),
+    Gate("deploy-test-quarantine", ("python3", "scripts/tests/deploy-test-quarantine.test.py")),
+    Gate("cloudbench-private-source-snapshot-read", ("python3", "scripts/tests/cloudbench-private-source-snapshot-read.test.py")),
+    # In-definition @quarantine marker (scripts/lib/test_quarantine.py): runs, never blocks.
+    Gate("test-quarantine", ("python3", "scripts/tests/test-quarantine.test.py")),
     Gate("deploy-prod", ("python3", "scripts/tests/deploy-prod.test.py")),
+    Gate("mac-app-release-drift", ("bash", "scripts/tests/mac-app-release-drift.test.sh")),
     Gate("swap-harness", ("python3", "scripts/tests/swap-harness.test.py")),
     Gate(
         "cloudbench-controller-linux",
         ("python3", "scripts/tests/cloudbench-controller-linux.test.py"),
     ),
+    Gate(
+        "cloudbench-fixture-process-cleanup",
+        ("python3", "scripts/tests/cloudbench-fixture-process-cleanup.test.py"),
+    ),
+    Gate("cloudbench-pid-identity", ("bash", "scripts/tests/cloudbench-pid-identity.test.sh")),
     Gate("workspace-env", ("bash", "scripts/tests/workspace-env.test.sh")),
     Gate("rose-startup-script", ("bash", "scripts/tests/rose-startup-script.test.sh")),
     Gate("temporal-namespace-isolation", ("python3", "scripts/tests/temporal-namespace-isolation.test.py")),
@@ -347,7 +468,13 @@ GATES = (
         "deploy-worktree-preflight",
         ("bash", "scripts/tests/deploy-worktree-preflight.test.sh"),
     ),
+    Gate("deploy-gate-release-tool", ("bash", "scripts/tests/deploy-gate-release-tool.test.sh")),
     Gate("seed-cache-decision", ("bash", "scripts/tests/seed-cache-decision.test.sh")),
+    # Its live scratch-database Prisma push checks need a local Postgres and ~45 s, which pushed the quick
+    # backend-structural chain (npm run test:structural) past its 120 s budget; that chain skips them and
+    # this direct run on the gate VM executes every live check.
+    Gate("prisma-local-push", ("bash", "back-end/scripts/prisma-local-push.test.sh"), expected_seconds=60),
+    Gate("canonical-seed-migration-readiness", ("python3", "scripts/tests/migrate-canonical-seed.test.py")),
     Gate(
         "canonical-seed-whatsapp-content",
         ("bash", "scripts/tests/canonical-seed-whatsapp-content.test.sh"),
@@ -357,6 +484,7 @@ GATES = (
         ("bash", "scripts/tests/benchmark-sms-transport-mock.test.sh"),
     ),
     Gate("descend-command", ("bash", "scripts/tests/descend-command.test.sh"), expected_seconds=118),
+    Gate("descend-handoff", ("python3", "scripts/tests/descend-handoff.test.py"), expected_seconds=5),
     Gate("benchmark-live-results", ("python3", "scripts/tests/benchmark-live-results.test.py"), expected_seconds=700, shards=6),
     Gate("jev-progress-core", ("python3", "scripts/tests/jev-progress-core.test.py")),
     Gate("select-affected-tests", ("python3", "scripts/tests/select-affected-tests.test.py")),
@@ -369,6 +497,10 @@ GATES = (
         ("python3", "scripts/tests/benchmark-history-backfill.test.py"),
     ),
     Gate(
+        "concurrent-pr-shared-paths",
+        ("python3", "scripts/tests/concurrent-pr-shared-paths.test.py"),
+    ),
+    Gate(
         "cloudbench-full-selection",
         ("python3", "scripts/tests/cloudbench-full-selection.test.py"),
     ),
@@ -377,6 +509,9 @@ GATES = (
         ("python3", "-m", "unittest", "discover", "-s", "scripts/live_display", "-p", "test_*.py"),
     ),
     Gate("benchmark-scorecard", ("python3", "scripts/tests/cloudbench-scorecard.test.py")),
+    Gate("sharded-waves", ("python3", "scripts/tests/run-bench-sharded-waves.test.py")),
+
+
     # Linux pidfd fixtures select a capable runtime or the offline controller image.
     Gate(
         "cloudbench-export-recovery",
@@ -390,9 +525,34 @@ GATES = (
         "benchmark-provider-capacity",
         ("python3", "scripts/tests/cloudbench-provider-capacity.test.py"),
     ),
+    Gate("cloudbench-provider-contract", ("python3", "scripts/tests/cloudbench-provider-contract.test.py")),
+    Gate("worker-pool-cutover", ("python3", "scripts/tests/worker-pool-cutover.test.py")),
+    Gate("retained-agent-machine", ("python3", "scripts/tests/retained-agent-machine.test.py")),
     Gate("benchmark-campaign-grouping", ("bash", "scripts/tests/campaign-hub-grouping.test.sh")),
+    Gate(
+        "claude-md-replay-cli",
+        ("python3", "-m", "pytest", "-q", "agents/benchmarks/claude_md_replay/replay_cli_test.py"),
+    ),
     Gate("cloudbench-fetch-ref", ("bash", "scripts/tests/cloudbench-fetch-ref.test.sh")),
     Gate("cloudbench-warm-pool", ("python3", "scripts/tests/cloudbench-warm-pool.test.py")),
+    Gate(
+        "cloudbench-cross-devbox-admission",
+        ("python3", "scripts/tests/cloudbench-cross-devbox-admission.test.py"),
+    ),
+    Gate("cloudbench-warm-source", ("python3", "scripts/tests/cloudbench-warm-source.test.py")),
+    Gate("cloudbench-prepare-source", ("python3", "scripts/tests/cloudbench-prepare-source.test.py")),
+    Gate("cloudbench-prepare-source-create", ("python3", "scripts/tests/cloudbench-prepare-source-create.test.py")),
+    Gate("cloudbench-source-version", ("python3", "scripts/tests/cloudbench-source-version.test.py")),
+    Gate("cloudbench-original-image-failure", ("python3", "scripts/tests/cloudbench-original-image-failure.test.py")),
+    Gate("cloudbench-source-lease", ("python3", "scripts/tests/cloudbench-source-lease.test.py")),
+    Gate("cloudbench-source-lease-fleet", ("python3", "scripts/tests/cloudbench-source-lease-fleet.test.py")),
+    Gate("cloudbench-source-lease-recovery", ("python3", "scripts/tests/cloudbench-source-lease-recovery.test.py")),
+    Gate("cloudbench-source-guest-env", ("python3", "scripts/tests/cloudbench-source-guest-env.test.py")),
+    Gate("cloudbench-source-env", ("python3", "scripts/tests/cloudbench-source-env.test.py")),
+    Gate("cloudbench-campaign-env", ("python3", "scripts/tests/cloudbench-campaign-env.test.py")),
+    Gate("cloudbench-inventory-site-startup", ("python3", "scripts/tests/cloudbench-inventory-site-startup.test.py")),
+    Gate("cloudbench-source-env-handoff", ("python3", "scripts/tests/cloudbench-source-env-handoff.test.py")),
+    Gate("cloudbench-kernel-custody", ("python3", "scripts/tests/cloudbench-kernel-custody.test.py")),
     Gate(
         "benchmark-successful-llm-evidence",
         ("python3", "scripts/tests/verify-successful-llm-queries.test.py"),
@@ -405,7 +565,9 @@ GATES = (
         "cloudbench-quiesced-forensic-retirement",
         ("python3", "scripts/tests/cloudbench-forensic-quiesced.test.py"), expected_seconds=83
     ),
+    Gate("cloudbench-lost-evidence-release", ("python3", "scripts/tests/cloudbench-lost-evidence-release.test.py")),
     Gate("seed-memory-ratchet", ("bash", "scripts/tests/seed-memory-ratchet.test.sh")),
+    Gate("test-sleep-ratchet", ("python3", "scripts/tests/condition-waits.test.py")),
     Gate("semantic-deploy", ("bash", "scripts/tests/semantic-deploy-gate.test.sh")),
     Gate(
         "prompt-human-approval",
@@ -420,6 +582,8 @@ GATES = (
         ("bash", "scripts/tests/check-llm-trajectory-injection-approval.test.sh"),
     ),
     Gate("approval-format", ("bash", "scripts/tests/approval-format.test.sh")),
+    Gate("rca-model-intelligence-category", ("bash", "scripts/tests/rca-model-intelligence-category.test.sh")),
+    Gate("rca-prompt-edit-abstraction", ("bash", "scripts/tests/rca-prompt-edit-abstraction.test.sh")),
     Gate(
         "durable-evidence-links",
         ("bash", "scripts/tests/durable-evidence-links.test.sh"),
@@ -466,6 +630,7 @@ GATES = (
         "cloudbench-explicit-idle-admission",
         ("python3", "scripts/tests/cloudbench-explicit-idle-admission.test.py"),
     ),
+    Gate("cloudbench-cohort-reconcile", ("python3", "scripts/tests/cloudbench-cohort-reconcile.test.py")),
     Gate(
         "cloudbench-fixed-native-worker",
         ("python3", "scripts/tests/cloudbench-fixed-native-worker.test.py"),
@@ -499,6 +664,11 @@ GATES = (
         ("python3", "scripts/tests/cloudbench-controller-orphan-drain.test.py"),
     ),
     Gate("cloudbench-staged-boot", ("python3", "scripts/tests/cloudbench-staged-boot.test.py")),
+    Gate("local-stack-retention", ("python3", "scripts/tests/local-stack-retention.test.py")),
+    Gate(
+        "cloudbench-runtime-evidence-collector",
+        ("python3", "scripts/tests/cloudbench-runtime-evidence-collector.test.py"),
+    ),
     Gate(
         "cloudbench-prelaunch-cancel",
         ("python3", "scripts/tests/cloudbench-prelaunch-cancel.test.py"),
@@ -506,6 +676,14 @@ GATES = (
     Gate(
         "cloudbench-controller-gate-flyctl-bounds",
         ("python3", "scripts/tests/cloudbench-controller-gate-flyctl-bounds.test.py"),
+    ),
+    Gate(
+        "cloudbench-recovery-fd",
+        ("python3", "scripts/tests/cloudbench-recovery-fd.test.py"),
+    ),
+    Gate(
+        "cloudbench-shared-transport-integration",
+        ("python3", "scripts/tests/cloudbench-shared-transport-integration.test.py"),
     ),
     Gate(
         "cloudbench-bootstrap-recovery",
@@ -703,6 +881,10 @@ def run_gates(
     # a suite fails with its first failed shard and passes with its last shard.
     unfinished = Counter(job.gate.name for job in jobs)
     reported: set[str] = set()
+    # First failed attempt of each rerun job (exit, duration, output), and jobs whose rerun passed.
+    first_attempts: dict[str, tuple[int, float, str]] = {}
+    first_quarantine_rows: dict[str, Path] = {}
+    flaky: dict[str, str] = {}
     received_signal = 0
 
     def forward(signum: int, _frame: object) -> None:
@@ -731,12 +913,16 @@ def run_gates(
                     if job is None:
                         break  # everything pending waits for a running exclusive job
                     pending.remove(job)
-                    output_path = output_root / (job.label.replace("/", "-of-") + ".log")
+                    output_path = output_root / job.log_name
                     output = output_path.open("wb")
+                    quarantine_rows = output_path.with_suffix(".quarantine.jsonl")
+                    env = job.environment()
+                    env["DEPLOY_GATE_QUARANTINE_PROGRESS"] = str(quarantine_rows)
+                    env["DEPLOY_GATE_QUARANTINE_UNIT_PREFIX"] = job.gate.name
                     process = subprocess.Popen(
-                        job.gate.command,
+                        job.command,
                         cwd=ROOT,
-                        env=job.environment(),
+                        env=env,
                         stdout=output,
                         stderr=subprocess.STDOUT,
                         start_new_session=True,
@@ -749,6 +935,7 @@ def run_gates(
                             output=output,
                             output_path=output_path,
                             started=time.monotonic(),
+                            quarantine_rows=quarantine_rows,
                         )
                     )
 
@@ -764,33 +951,88 @@ def run_gates(
                     duration = time.monotonic() - item.started
                     item.output.close()
                     rendered = item.output_path.read_text(errors="replace")
+                    job = item.gate
                     if item.timed_out:
                         exit_code = TIMEOUT_EXIT_CODE
-                        timed_out.add(item.gate.label)
+                        timed_out.add(job.label)
                         rendered += (
-                            f"\nTIMEOUT: {item.gate.label} killed after "
-                            f"{item.gate.timeout_seconds:.0f}s\n"
+                            f"\nTIMEOUT: {job.label} killed after "
+                            f"{job.timeout_seconds:.0f}s\n"
                         )
-                    results[item.gate.label] = (exit_code, duration, rendered)
                     running.remove(item)
+                    attempt_note = f" attempt={job.attempt}/2" if job.attempt > 1 else ""
                     print(
-                        f"[+{time.monotonic() - began:7.1f}s] {item.gate.label} "
-                        f"exit={exit_code} duration={duration:.1f}s",
+                        f"[+{time.monotonic() - began:7.1f}s] {job.label} "
+                        f"exit={exit_code} duration={duration:.1f}s{attempt_note}",
                         file=sys.stderr,
                         flush=True,
                     )
-                    suite = item.gate.gate.name
+                    if exit_code != 0 and job.attempt == 1 and not item.timed_out and not received_signal:
+                        # Rerun once, at the head of the queue; this attempt is not the verdict.
+                        tests = failed_unittest_ids(job.gate.command, rendered)
+                        first_attempts[job.label] = (exit_code, duration, rendered)
+                        if item.quarantine_rows is not None:
+                            first_quarantine_rows[job.label] = item.quarantine_rows
+                        pending.appendleft(replace(job, attempt=2, tests=tests))
+                        print(
+                            f"deploy structural gates: rerunning {job.label} once ("
+                            + (f"{len(tests)} failed test(s): {' '.join(tests)}" if tests else "whole job")
+                            + ")",
+                            file=sys.stderr,
+                            flush=True,
+                        )
+                        continue
+                    if job.attempt > 1:
+                        first_exit, first_duration, first_rendered = first_attempts[job.label]
+                        if exit_code == 0 and job.tests and not rerun_confirms(job.tests, rendered):
+                            exit_code = first_exit
+                            rendered += (
+                                f"\nRERUN UNCONFIRMED: expected unittest to run exactly "
+                                f"{len(job.tests)} test(s) OK; keeping the first failure\n"
+                            )
+                        rendered = (
+                            first_rendered
+                            + f"\n--- rerun of {job.label} (attempt 2 of 2"
+                            + (f": {' '.join(job.tests)}" if job.tests else "")
+                            + ") ---\n"
+                            + rendered
+                        )
+                        duration += first_duration
+                        if exit_code == 0:
+                            flaky[job.label] = first_rendered
+                            print(f"TEST_FLAKY unit={job.gate.name} attempts=2 attribution=REQUIRED", flush=True)
+                    results[job.label] = (exit_code, duration, rendered)
+                    # Quarantined tests count from the counted attempt; an id rerun ran only the
+                    # failed ids, so the first attempt's quarantined rows still count too.
+                    counted = [item.quarantine_rows]
+                    if job.tests and job.label in first_quarantine_rows:
+                        counted.insert(0, first_quarantine_rows[job.label])
+                    for rows_path in counted:
+                        if rows_path is None:
+                            continue
+                        for line in forward_quarantine(rows_path, str(item.output_path)):
+                            print(line, flush=True)
+                    suite = job.gate.name
                     unfinished[suite] -= 1
                     if suite not in reported and (exit_code != 0 or not unfinished[suite]):
                         reported.add(suite)
-                        report_progress(
-                            suite,
-                            "PASS" if exit_code == 0 else "FAIL",
-                            detail="" if exit_code == 0 else rendered,
-                            log=str(item.output_path) if exit_code != 0 or not item.gate.shard else "",
-                        )
-                    if exit_code != 0 and item.gate.gate.name in previously_failed:
-                        repeated_failure = item.gate.label
+                        suite_flaky = [label for label in flaky if label.split("[", 1)[0] == suite]
+                        if exit_code != 0:
+                            report_progress(suite, "FAIL", detail=rendered, log=str(item.output_path))
+                        elif suite_flaky:
+                            report_progress(
+                                suite,
+                                "FLAKY",
+                                detail=flaky_detail(suite_flaky, [flaky[label] for label in suite_flaky]),
+                                # The failed first attempt is the evidence /RCA attributes.
+                                log=str(output_root / (suite_flaky[-1].replace("/", "-of-") + ".log")),
+                            )
+                        else:
+                            report_progress(
+                                suite, "PASS", log=str(item.output_path) if not job.shard else ""
+                            )
+                    if exit_code != 0 and suite in previously_failed:
+                        repeated_failure = job.label
 
             if not received_signal:
                 for job in jobs:
@@ -814,14 +1056,17 @@ def run_gates(
 
     if received_signal:
         return 128 + received_signal
+    # Queue order, not completion order: a rerun must not reorder the summary.
     failures = [
-        name + (" (timed out)" if name in timed_out else "")
-        for name, (exit_code, _, _) in results.items()
-        if exit_code != 0
+        job.label + (" (timed out)" if job.label in timed_out else "")
+        for job in jobs
+        if results.get(job.label, (0,))[0] != 0
     ]
     failed_gates = {
         job.gate.name for job in jobs if results.get(job.label, (0,))[0] != 0
     }
+    # A failed job whose rerun never finished (signal or early stop) stays failed.
+    failed_gates |= {job.gate.name for job in jobs if job.label in first_attempts and job.label not in results}
     if repeated_failure:
         failed_gates |= previously_failed
         skipped = [job.label for job in jobs if job.label not in results]
@@ -836,9 +1081,17 @@ def run_gates(
             record_failures(failure_state, sorted(failed_gates))
         except OSError as error:
             print(f"deploy structural gates: failure record not saved: {error}", file=sys.stderr)
+    if flaky:
+        print(
+            f"deploy structural gates: {len(flaky)} job(s) failed and passed their one rerun "
+            "(FLAKY; /RCA attribution required): " + ", ".join(sorted(flaky)),
+            file=sys.stderr,
+        )
     if durations_state is not None and not received_signal:
         try:
-            record_durations(durations_state, jobs, results)
+            # A rerun job's two attempts are not one cost observation.
+            clean = {label: result for label, result in results.items() if label not in first_attempts}
+            record_durations(durations_state, jobs, clean)
         except OSError as error:
             print(f"deploy structural gates: duration record not saved: {error}", file=sys.stderr)
     if failures or repeated_failure:

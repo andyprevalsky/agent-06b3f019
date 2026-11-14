@@ -19,6 +19,8 @@ const log = createLogger('Retry');
 export interface RetryOptions<T = unknown> {
   /** Maximum number of attempts (default: 3) */
   maxRetries?: number;
+  /** Injectable clock for deterministic callers/tests; defaults to a real timer. */
+  sleep?: (milliseconds: number) => Promise<void>;
   /** Initial backoff delay in ms (default: 1000). Doubles each attempt. */
   initialBackoffMs?: number;
   /** Fixed backoff delays per attempt. Overrides exponential if provided. */
@@ -146,7 +148,7 @@ export async function retryWithBackoff<T>(
         log.warn(`${component}: attempt ${attempt}/${maxRetries} failed, retrying in ${delay}ms`, {
           error: error instanceof Error ? error.message : String(error),
         });
-        await sleep(delay);
+        await (opts.sleep ?? sleep)(delay);
         continue;
       }
 
@@ -165,7 +167,7 @@ export async function retryWithBackoff<T>(
       log.warn(
         `${component}: attempt ${attempt}/${maxRetries} returned a retryable result, retrying in ${delay}ms`
       );
-      await sleep(delay);
+      await (opts.sleep ?? sleep)(delay);
       continue;
     }
 

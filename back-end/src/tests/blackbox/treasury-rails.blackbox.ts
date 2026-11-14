@@ -30,13 +30,17 @@ import { loadDotenvWithCallerOverrides } from '../../providers/loadDotenvWithCal
 import { callOrgTool } from '../../providers/agentcard/org-runtime';
 import { readAgentCardOrgWallet } from '../../providers/agentcard/org-wallet-monitor';
 import { resolveBenchmarkCardholderId } from '../../providers/agentcard/benchmark-float';
-import { recoverAllCardholderResiduals } from '../../providers/agentcard/fund-recovery';
+import {
+  AgentCardRecoveryError,
+  isSettledRecovery,
+  nudgeCardholderRecovery,
+} from '../../providers/agentcard/fund-recovery';
 import { planOrgWalletTopUp } from '../../providers/agentcard/org-wallet-topup';
 import { fiatPullEnabled, resolveFiatSource } from '../../providers/agentcard/org-wallet-fiat';
 import {
   UNUSED_MINT_RECLAIM_DEADLINE_MS,
   classifyUnusedMintTransfer,
-  unusedMintSettleOutcome,
+  waitForUnusedMintSettled,
   type MintTransferObservation,
 } from '../../providers/agentcard/unused-mint-settle';
 import { loadCoinbaseTreasuryConfig } from '../../providers/coinbase/config';
@@ -48,9 +52,11 @@ import {
   checkPendingUnusedMints,
   overdueReclaimSkipped,
   pendingMintLedgerPath,
+  readOpenPendingMints,
   recordPendingMint,
   observePendingUnusedMint,
 } from './treasury-rails-pending-mints';
+import { quarantine } from '../helpers/quarantine';
 
 loadDotenvWithCallerOverrides();
 
@@ -65,19 +71,51 @@ function isTransientOrgMcpPollError(error: unknown): boolean {
 }
 
 /**
- * Drain idle cardholder headroom into the pool before minting.
+ * One recovery nudge per cardholder whose residual matters to this run (coalescing on a recovery
+ * already in flight). A provider refusal for one cardholder is logged and the rest continue.
+ */
+async function recoverCardholderResiduals(
+  cardholderIds: readonly string[]
+): Promise<{ settledCents: number; pendingCents: number }> {
+  let settledCents = 0;
+  let pendingCents = 0;
+  for (const id of cardholderIds) {
+    try {
+      const nudge = await nudgeCardholderRecovery(id, callOrgTool);
+      if (nudge.kind === 'coalesced') pendingCents += nudge.inFlightCents;
+      else if (nudge.kind === 'requested' && isSettledRecovery(nudge.recovery.status))
+        settledCents += nudge.recovery.amountCents;
+      else if (nudge.kind === 'requested') pendingCents += nudge.recovery.amountCents;
+    } catch (error) {
+      if (!(error instanceof AgentCardRecoveryError)) throw error;
+      console.log(`  residual recovery refused for ${id}: ${error.message}`);
+    }
+  }
+  return { settledCents, pendingCents };
+}
+
+/**
+ * Drain idle headroom into the pool before minting, from the cardholders whose residual matters:
+ * the mint cardholder (a mint nets only its own cardholder's headroom) and the cardholders of
+ * earlier runs' unused mints still awaiting reclaim (recovering their residual is what usually
+ * flips those transfers). The org is shared and throttled org-wide (~120 requests/min); sweeping
+ * every cardholder twice cost ~110 requests in ~37 s and starved this run's own settle poll
+ * (treasury-rails 2026-11-13, occurrence 1dc793d7).
  *
  * A mint against existing residual can net (`transferred_cents: 0`, pool untouched).
  * Sweeping cannot reserve a globally shared cardholder's headroom, and unrelated residual
  * recovery cannot prove this mint's funding. Sweep first, then retry once if the provider
  * still nets headroom: at least one settled mint must prove a full pool debit on its own transfer.
  */
-async function sweepResidualHeadroom(timeoutMs = 60_000): Promise<number> {
+async function sweepResidualHeadroom(
+  cardholderIds: readonly string[],
+  timeoutMs = 60_000
+): Promise<number> {
   const deadline = Date.now() + timeoutMs;
   let recoveredTotal = 0;
   let idleRounds = 0;
   while (Date.now() < deadline && idleRounds < 2) {
-    const sweep = await recoverAllCardholderResiduals(callOrgTool);
+    const sweep = await recoverCardholderResiduals(cardholderIds);
     if (sweep.settledCents > 0) {
       recoveredTotal += sweep.settledCents;
       idleRounds = 0;
@@ -128,73 +166,25 @@ async function readCardTransfer(cardId: string): Promise<CardTransfer | undefine
 /**
  * Wait until THIS card's unused mint transfer reaches a terminal release state.
  *
- * `recover_funds` is called each poll as an accelerator (AgentCard often flips the mint transfer
- * to `reclaimed` only after residual is pulled). A foreign cardholder's recover_funds yield is
- * NEVER treated as success — that false-passed the old wait while THIS transfer stayed
- * `consumed`, then the follow-up poll stopped calling recover_funds and timed out.
- *
- * Auto-reclaim without residual (transfer flips while recover answers insufficient_headroom) is
- * still accepted via the transfer observation alone. When the in-run wait runs out this returns
- * the latest observation instead of failing: a reclaim can legitimately take up to a day.
+ * Each poll nudges only THIS card's cardholder, coalescing on a recovery already in flight
+ * (another deploy shares the sandbox org and the benchmark cardholder), then reads THIS card's
+ * transfer — the only success signal. A recovery yield is never success; that false-passed the
+ * old wait while THIS transfer stayed `consumed`. See waitForUnusedMintSettled.
  */
-async function waitForUnusedMintSettled(
+async function waitForCardSettled(
   cardId: string,
-  minReleasedCents: number,
-  timeoutMs = 240_000
+  cardholderId: string,
+  minReleasedCents: number
 ): Promise<CardTransfer | undefined> {
-  const deadline = Date.now() + timeoutMs;
-  let attempt = 0;
-  let last: CardTransfer | undefined;
-  // A residual can be recovered while THIS transfer never flips. Keep every attempt's sweep yield
-  // and the provider's own transfer row so a timeout shows which side stalled.
-  const sweepYields: string[] = [];
-  for (;;) {
-    attempt += 1;
-    try {
-      const sweep = await recoverAllCardholderResiduals(callOrgTool);
-      if (sweep.settledCents > 0 || sweep.pendingCents > 0) {
-        sweepYields.push(
-          `#${attempt} settled=${usd(sweep.settledCents)} pending=${usd(sweep.pendingCents)}`
-        );
-      }
-      const transfer = await readCardTransfer(cardId);
-      if (transfer !== undefined) last = transfer;
-      const outcome = unusedMintSettleOutcome(transfer, minReleasedCents);
-      if (outcome.done) {
-        assert.ok(transfer !== undefined, `no org-wallet transfer found for ${cardId}`);
-        if (sweep.settledCents > 0 || sweep.pendingCents > 0) {
-          console.log(
-            `  (transfer ${outcome.status} with ${usd(outcome.settledCents)} on attempt ${attempt}; ` +
-              `recover_funds also yielded settled=${usd(sweep.settledCents)} pending=${usd(sweep.pendingCents)})`
-          );
-        } else {
-          console.log(
-            `  (transfer already ${outcome.status} with ${usd(outcome.settledCents)} on attempt ${attempt}; ` +
-              `recover_funds not needed)`
-          );
-        }
-        return transfer;
-      }
-      if (Date.now() >= deadline) {
-        console.warn(
-          `  unused mint not reclaimed within the in-run wait (${attempt} attempts); provider row ` +
-            `for ${cardId}: ${JSON.stringify(last?.raw ?? null)}` +
-            `; recover_funds yields: ${sweepYields.join(', ') || 'none'}`
-        );
-        return last;
-      }
-    } catch (error) {
-      if (!isTransientOrgMcpPollError(error)) throw error;
-      if (Date.now() >= deadline) throw error;
-      if (attempt % 3 === 0)
-        console.log(`  (MCP poll timed out, retrying settle wait, attempt ${attempt})`);
-      await sleep(8_000);
-      continue;
-    }
-    if (attempt % 3 === 0)
-      console.log(`  (still waiting for release to settle, attempt ${attempt})`);
-    await sleep(8_000);
-  }
+  return waitForUnusedMintSettled<CardTransfer>({
+    cardholderId,
+    minReleasedCents,
+    callOrgTool,
+    readTransfer: () => readCardTransfer(cardId),
+    isTransientError: isTransientOrgMcpPollError,
+    describe: (transfer) => `for ${cardId}: ${JSON.stringify(transfer?.raw ?? null)}`,
+    report: (line) => console.log(line),
+  });
 }
 
 function record(name: string): void {
@@ -376,22 +366,27 @@ async function main(): Promise<void> {
       : `reclaim proof on cardholder ${cardholderId}, away from the payment-benchmark cardholder`
   );
 
-  const preSweepCents = await sweepResidualHeadroom();
+  const ledgerPath = pendingMintLedgerPath();
+  const sweepCardholderIds = [
+    ...new Set([cardholderId, ...readOpenPendingMints(ledgerPath).map((m) => m.cardholderId)]),
+  ];
+  const preSweepCents = await sweepResidualHeadroom(sweepCardholderIds);
   if (preSweepCents > 0) {
     record(`pre-mint residual sweep returned ${usd(preSweepCents)} to the pool`);
   } else {
-    record('pre-mint residual sweep found nothing idle');
+    record(
+      `pre-mint residual sweep of ${sweepCardholderIds.length} cardholder(s) found nothing idle`
+    );
   }
 
   // After the sweep: recovering residual is what usually flips an earlier mint to reclaimed.
-  const ledgerPath = pendingMintLedgerPath();
   await checkEarlierUnusedMints(new Set(cardholders.map((holder) => holder.id)), ledgerPath);
 
   const mintCents = 1_300;
   const cardsToClose = new Set<string>();
   let provedPoolMint = false;
   for (let mintAttempt = 1; mintAttempt <= 2; mintAttempt += 1) {
-    if (mintAttempt > 1) await sweepResidualHeadroom();
+    if (mintAttempt > 1) await sweepResidualHeadroom([cardholderId]);
     const minted = (await callOrgTool('create_card', {
       cardholder_id: cardholderId,
       amount_cents: mintCents,
@@ -442,9 +437,9 @@ async function main(): Promise<void> {
           : undefined;
       const transfer = pendingMint
         ? await observePendingUnusedMint(ledgerPath, pendingMint, () =>
-            waitForUnusedMintSettled(cardId, mintCents)
+            waitForCardSettled(cardId, cardholderId, mintCents)
           )
-        : await waitForUnusedMintSettled(cardId, mintCents);
+        : await waitForCardSettled(cardId, cardholderId, mintCents);
       assert.ok(transfer !== undefined, `no company-wallet transfer listed for ${cardId}`);
       assert.ok(
         transfer.transferredCents >= 0 && transfer.transferredCents <= mintCents,
@@ -502,23 +497,38 @@ async function main(): Promise<void> {
   console.log('\ntreasury-rails blackbox: all checks passed');
 }
 
-void main().catch((error: unknown) => {
-  const message = error instanceof Error ? error.message : String(error);
-  // Mid-flight AgentCard org OAuth/token outages (after the initial wallet probe) are the same
-  // credential-infra precondition as a failed first call — soft-skip rather than fail the gate.
-  if (
-    /temporarily unavailable|service unavailable/i.test(message) ||
-    /invalid or expired organization token/i.test(message) ||
-    /could not obtain an agentcard organization mcp access token/i.test(message) ||
-    /timed out acquiring an agentcard organization mcp access token/i.test(message) ||
-    /could not reach the agentcard organization mcp token endpoint/i.test(message) ||
-    /aborted due to timeout|operation was aborted/i.test(message)
-  ) {
-    console.log(
-      'SKIP treasury-rails: AgentCard sandbox MCP unavailable mid-run (credential-infra precondition)'
-    );
-    process.exit(0);
-  }
-  console.error(`treasury-rails blackbox FAILED: ${message}`);
-  process.exit(1);
-});
+const treasuryUnit = 'treasury-rails';
+void quarantine(
+  {
+    since: '2026-11-13',
+    repair: 'https://boxes.dev/thread/ph75k13xzhes1bcm32q38mqq3n8j6pmj',
+    error:
+      'treasury-rails blackbox FAILED: AgentCard Organization MCP rate limit exhausted for list_transfers after 5 attempts; upstream: AgentCard Organization MCP list_transfers is rate limited: list_transfers failed: Too many requests, please try again later',
+    evidence: '.context/deploy-pipeline/rca/1dc793d7777246c785e8d24beb75499a.json',
+  },
+  async () => {
+    try {
+      await main();
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error);
+      // Mid-flight AgentCard org OAuth/token outages (after the initial wallet probe) are the same
+      // credential-infra precondition as a failed first call — soft-skip rather than fail the gate.
+      if (
+        /temporarily unavailable|service unavailable/i.test(message) ||
+        /invalid or expired organization token/i.test(message) ||
+        /could not obtain an agentcard organization mcp access token/i.test(message) ||
+        /timed out acquiring an agentcard organization mcp access token/i.test(message) ||
+        /could not reach the agentcard organization mcp token endpoint/i.test(message) ||
+        /aborted due to timeout|operation was aborted/i.test(message)
+      ) {
+        console.log(
+          'SKIP treasury-rails: AgentCard sandbox MCP unavailable mid-run (credential-infra precondition)'
+        );
+        return;
+      }
+      console.error(`treasury-rails blackbox FAILED: ${message}`);
+      throw error;
+    }
+  },
+  { unit: treasuryUnit }
+)();

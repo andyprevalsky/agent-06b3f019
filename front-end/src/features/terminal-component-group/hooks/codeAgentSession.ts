@@ -34,6 +34,8 @@ export interface CodeSessionFacts {
   pr?: CodeSessionPullRequest;
   /** True only once GitHub confirms the merge and the target contains head. */
   merged: boolean;
+  /** The session's state at the task's close (ACTIVE | PAUSED | RETIRED), when reported. */
+  state?: string;
 }
 
 /** C15 usage-limit stop: the CLI whose limit was hit and when it resets. */
@@ -93,6 +95,7 @@ export function parseCodeSession(value: unknown): CodeSessionFacts | undefined {
         ? { number: prNumber, url: prUrl, merged: pr.merged === true }
         : undefined,
     merged: r.merged === true,
+    state: str(r.state),
   };
 }
 

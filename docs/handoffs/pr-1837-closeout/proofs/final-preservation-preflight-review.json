@@ -1,0 +1,39 @@
+{
+  "status": "REVIEWED_PREPARATION_ONLY_NO_CAPTURE_AUTHORIZATION",
+  "reviewed_at": "2026-11-09T00:32:26.534910+00:00",
+  "config": {
+    "sha256": "01907ffc558c8d5198ff3f47d5d9a0853100a2f464b72372caca94817650a3d9",
+    "bytes": 111856
+  },
+  "helper": {
+    "sha256": "3afd6733f44c866351ed34cb0cd5b381279141d7ce896b544049c83d21b8af30",
+    "bytes": 14990
+  },
+  "protocol": {
+    "sha256": "8d56a505dd20c257d2700c247f994f7fd68529e937d201875297180313c675fd",
+    "bytes": 8383
+  },
+  "existing_catalogs": 6,
+  "exact_pinned_metadata_records_checked": 20,
+  "pinned_metadata_mismatches": 0,
+  "existing_archive_tool_pin_matches": true,
+  "helper_unchanged": true,
+  "prior_six_fixture_result": "Historical prepared receipt; no tests rerun",
+  "actual_code_merge_recorded": true,
+  "actual_final_review_and_smoke_recorded": true,
+  "terminal_ACK_template_authorization": false,
+  "real_final_capture_performed": false,
+  "real_archive_upload_performed": false,
+  "financial_credit": false,
+  "remaining_gaps": "Deploy-finish terminal/root ACK (production now terminal PASS); dynamic final scope/consumer guards; exact exclusion qualification; forensic managed-byte approval; fresh encrypted cut plus full authenticated recovery; receipt-tail closure. Scope/references remain private. No final capture/upload authorization.",
+  "postmerge_handoff_links_resolved": true,
+  "additional_native_forensic_prefix_required": true,
+  "prefix_is_not_complete_growing_original_session": true,
+  "production_terminal_verified": true,
+  "deploy_finish_and_ROOT_terminal_ACK_pending": true,
+  "historical_preparation_only": true,
+  "later_actual_completion_proofs": [
+    "final-forensic-preservation.json",
+    "finite-receipt-tail.json"
+  ]
+}

@@ -5,7 +5,87 @@ import { check } from 'recheck';
 
 import { checkPatternSafety, translateWordBoundaries } from '../../domains/data/regexSafety';
 
+async function testFiniteLiteralAlternations(): Promise<void> {
+  for (const flags of ['', 'i', 'm', 's', 'ims']) {
+    for (const pattern of [
+      'Project Sync|Lease',
+      'alpha|beta|gamma',
+      'a|aa|aaa',
+      'é|日本語|😀',
+      String.raw`a\|b|c`,
+      String.raw`a\\b|c`,
+      String.raw`a\.b|c\+d`,
+    ]) {
+      assert.equal(
+        (await checkPatternSafety(pattern, flags, 0)).ok,
+        true,
+        `finite literal alternation must not depend on analyzer scheduling: ${pattern} /${flags}`
+      );
+    }
+  }
+  for (const pattern of [
+    'a|b+',
+    'a+|b',
+    'a|b+|c',
+    'a|(b+)+',
+    '(a+)+|b',
+    'a|.*',
+    '.*|a',
+    'a|[b]',
+    'a|(b)',
+    'a|^b',
+    'a|b$',
+    'a|(?=b)',
+    String.raw`a|\1`,
+    String.raw`a|\w`,
+    String.raw`a|\x61`,
+    String.raw`a|\u0061`,
+    String.raw`a|\k<name>`,
+    'a|b\\',
+    '|a',
+    'a|',
+    'a||b',
+    String.raw`a\|b|c+`,
+    String.raw`a\q|b`,
+  ]) {
+    assert.equal(
+      (await checkPatternSafety(pattern, '', 0)).ok,
+      false,
+      `an unproved alternative must remain analyzer-owned: ${pattern}`
+    );
+  }
+  assert.equal(
+    (await checkPatternSafety(String.raw`a\|b`, '', 0)).ok,
+    true,
+    'escaped pipe remains a literal under the existing linear proof'
+  );
+  assert.equal(
+    (await checkPatternSafety('a|b', 'u', 0)).ok,
+    false,
+    'unproved flags remain analyzer-owned'
+  );
+  assert.equal(
+    (await checkPatternSafety('a'.repeat(1000) + '|b', '', 0)).ok,
+    false,
+    'the existing length cap precedes local proof'
+  );
+  let calls = 0;
+  assert.equal(
+    (
+      await checkPatternSafety('a|b', '', () => {
+        calls += 1;
+        return Promise.resolve({ status: 'unknown' }) as ReturnType<typeof check>;
+      })
+    ).ok,
+    false,
+    'explicit analyzer seam still overrides every local proof'
+  );
+  assert.equal(calls, 3, 'explicit analyzer seam retains existing retry count');
+  process.stdout.write('PASS finite literal alternation safety proof\n');
+}
+
 async function run(): Promise<void> {
+  await testFiniteLiteralAlternations();
   for (const pattern of [
     String.raw`\\bpassport\\b`,
     String.raw`[\b]`,

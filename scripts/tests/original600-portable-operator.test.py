@@ -28,7 +28,11 @@ import threading
 import time
 import unittest
 import types
+import zlib
 from unittest.mock import patch
+
+# CI's uv Python can lack pidfd; use the existing supported interpreter route.
+runpy.run_path(str(Path(__file__).with_name('pidfd_interpreter.py')))['require_pidfd_interpreter'](__file__)
 
 ROOT = Path(__file__).resolve().parents[2]
 SPEC = importlib.util.spec_from_file_location('operator_cli', Path(os.environ.get('PORTABLE_OPERATOR_SOURCE', ROOT/'scripts/run-original600-controller.py')))
@@ -61,7 +65,38 @@ MANIFEST_CATALOG_MEMBERS = ('fleet_infra_sample.py', 'cloudbench_catalog.py')
 CANONICAL_SEED_MEMBERS = ('back-end/prisma/schema.prisma', 'agents/benchmarks/seed_cache_path.py')
 # Import closure of scripts/cloudbench-timeout-policy.py inside agents/benchmarks.
 TIMEOUT_POLICY_MODULES = ('__init__', 'benchmark_tasks', 'fixtures', 'live_fixtures',
-                          'polar_catalog', 'timeout_history')
+                          'polar_catalog', 'timeout_history', 'history_ledger')
+
+
+def cache_public_check_catalog(root):
+    """Keep exact historical catalog objects local to each timed CLI fixture."""
+    ref = RUNNER['TASK_REF']
+    expressions = [ref, ref + '^{tree}', ref + ':agents', ref + ':agents/benchmarks',
+                   ref + ':agents/benchmarks/tasks.json', ref + ':agents/benchmarks/polar_tasks.json',
+                   ref + ':agents/providers', ref + ':agents/providers/fast_cache',
+                   ref + ':agents/providers/fast_cache/normalize.py', ref + ':agents/utils',
+                   ref + ':agents/utils/__init__.py', ref + ':agents/utils/oai_demo.py',
+                   ref + ':agents/utils/oai_demo_july.py']
+    ids = subprocess.check_output(['git', '--no-replace-objects', '-C', str(ROOT),
+                                   'rev-parse', *expressions], text=True).splitlines()
+    if len(ids) != len(expressions):
+        raise AssertionError('incomplete historical catalog object selection')
+    raw = subprocess.check_output(['git', '--no-replace-objects', '-C', str(ROOT), 'cat-file', '--batch'],
+                                  input=('\n'.join(ids) + '\n').encode())
+    stream = io.BytesIO(raw)
+    for expected in ids:
+        oid, kind, size = stream.readline().decode().split()
+        body = stream.read(int(size))
+        if oid != expected or stream.read(1) != b'\n':
+            raise AssertionError('historical catalog object response differs')
+        encoded = f'{kind} {len(body)}\0'.encode() + body
+        if hashlib.sha1(encoded).hexdigest() != expected:
+            raise AssertionError('historical catalog object content differs')
+        target = root / '.git/objects' / oid[:2] / oid[2:]
+        target.parent.mkdir(exist_ok=True)
+        target.write_bytes(zlib.compress(encoded))
+    if stream.read():
+        raise AssertionError('unexpected trailing catalog object response')
 
 
 def polar_names(count=70):
@@ -2033,9 +2068,8 @@ class Portable(unittest.TestCase):
                 (root/member).write_bytes((ROOT/member).read_bytes())
             subprocess.run(['git', 'init', '-q', str(root)], check=True)
             disable_auto_maintenance(root)
-            # The manifest eligibility check reads the runner's TASK_REF catalog: borrow its objects read-only.
-            common = Path(subprocess.check_output(['git', '-C', str(ROOT), 'rev-parse', '--path-format=absolute', '--git-common-dir'], text=True).strip())
-            (root/'.git/objects/info/alternates').write_text(str(common/'objects') + '\n')
+            # Copy the exact historical catalog locally; timed checks own every needed object.
+            cache_public_check_catalog(root)
             subprocess.run(['git', '-C', str(root), 'add', 'scripts', *CANONICAL_SEED_MEMBERS], check=True)
             subprocess.run(['git', '-C', str(root), '-c', 'user.name=fixture', '-c', 'user.email=fixture@example.test',
                             '-c', 'commit.gpgsign=false', 'commit', '-qm', 'fixture'], check=True)
@@ -2071,6 +2105,35 @@ class Portable(unittest.TestCase):
             if limits is not None:
                 env['CLOUDBENCH_PROVIDER_LIMITS_FILE'] = str(private(inputs/'provider-limits.json', limits))
             yield types.SimpleNamespace(root=root, args=args, env=env, marker=marker, state=state, inputs=inputs, fakebin=fakebin)
+
+    def test_public_check_owns_exact_historical_catalog_objects(self):
+        expressions = [RUNNER['TASK_REF'], RUNNER['TASK_REF'] + '^{tree}',
+                       RUNNER['TASK_REF'] + ':agents', RUNNER['TASK_REF'] + ':agents/benchmarks',
+                       RUNNER['TASK_REF'] + ':agents/benchmarks/tasks.json',
+                       RUNNER['TASK_REF'] + ':agents/benchmarks/polar_tasks.json',
+                       RUNNER['TASK_REF'] + ':agents/providers',
+                       RUNNER['TASK_REF'] + ':agents/providers/fast_cache',
+                       RUNNER['TASK_REF'] + ':agents/providers/fast_cache/normalize.py',
+                       RUNNER['TASK_REF'] + ':agents/utils',
+                       RUNNER['TASK_REF'] + ':agents/utils/__init__.py',
+                       RUNNER['TASK_REF'] + ':agents/utils/oai_demo.py',
+                       RUNNER['TASK_REF'] + ':agents/utils/oai_demo_july.py']
+        expected = [subprocess.check_output(['git', '-C', str(ROOT), 'rev-parse', expression],
+                                           text=True).strip() for expression in expressions]
+        with self.public_check(warm_fixture(time.time()), [], limits=wide_provider_limits()) as fx:
+            self.assertFalse((fx.root / '.git/objects/info/alternates').exists(),
+                             'timed checks must not consult a shared object store')
+            for oid in expected:
+                loose = fx.root / '.git/objects' / oid[:2] / oid[2:]
+                self.assertTrue(loose.is_file(), 'timed checks must not depend on shared catalog object reads: ' + oid)
+                raw = zlib.decompress(loose.read_bytes())
+                self.assertEqual(hashlib.sha1(raw).hexdigest(), oid)
+            for name in ('agents/benchmarks/tasks.json', 'agents/benchmarks/polar_tasks.json',
+                         'agents/providers/fast_cache/normalize.py', 'agents/utils/__init__.py',
+                         'agents/utils/oai_demo.py', 'agents/utils/oai_demo_july.py'):
+                spec = RUNNER['TASK_REF'] + ':' + name
+                self.assertEqual(subprocess.check_output(['git', '-C', str(fx.root), 'show', spec]),
+                                 subprocess.check_output(['git', '-C', str(ROOT), 'show', spec]))
 
     def test_public_check_samples_one_catalog_for_all_shard_placements(self):
         requests = []
@@ -2651,6 +2714,32 @@ class Sharded(unittest.TestCase):
                     total_active_inventory_objects=1000-free-1, conservative_extra_destroying_bench_objects=1, apps=[],
                     available_slots_conservative=free, new_controller_slots=1, requested_original_primary_slots=600,
                     proof_path=str(private(directory/'capacity-proof.private.json', {})))
+
+    def test_adopted_wave_preserves_prior_infra_threshold_and_rejects_invalid_counts(self):
+        """Main's adoption path must retain the prior-wave numerator from the original journal."""
+        coordinator = runpy.run_path(str(ROOT / 'scripts/cloudbench-shard-coordinator.py'))
+        for prior, stopped in ((0, False), (2, True)):
+            with self.subTest(prior=prior), tempfile.TemporaryDirectory() as name:
+                out = Path(name) / 'shard'; out.mkdir()
+                journal = Path(name) / 'coordination.json'
+                record = dict(schema='original600-shard-coordination-v1', release_id='a'*24,
+                              scheduled_total=60, infra_early_stop='enabled', started_at=1,
+                              released_at=2, aborted_at=None, abort_reason=None, terminated_at=None,
+                              terminate_reason=None, prior_infra=prior,
+                              shards={'0': dict(out=str(out), pid=99999999)})
+                journal.write_text(json.dumps(record))
+                (out / 'shard-status.json').write_text(json.dumps(dict(state='JOINED', infra=dict(infra_true=1))))
+                process = types.SimpleNamespace(pid=99999999, poll=lambda:0, wait=lambda:0)
+                result = coordinator['adopt_coordinate']([dict(index=0, out=out)], lambda _:process, journal)
+                self.assertEqual((out / coordinator['OWNER_STOP']).exists(), stopped)
+                self.assertEqual(result['prior_infra'], prior)
+                self.assertEqual(result.get('terminate_cause'), 'threshold' if stopped else None)
+                if stopped:
+                    self.assertIn('3/60', result['terminate_reason'])
+                for invalid in (-1, True, '2'):
+                    bad = dict(record, prior_infra=invalid)
+                    with self.assertRaisesRegex(ValueError, 'invalid prior infra'):
+                        coordinator['adoptable'](bad, [dict(index=0, out=out)])
 
     def test_final_group_status_uses_the_hub_vocabulary(self):
         """Every coordination outcome maps onto the Hub's passed|failed|cancelled group statuses."""
@@ -3513,8 +3602,18 @@ def disable_auto_maintenance(root, env=None):
 
 
 def hermetic_git_env():
-    """A Git view that ignores the host's system/global configuration (hooks, filters, auto-maintenance)."""
-    return dict(os.environ, GIT_CONFIG_GLOBAL='/dev/null', GIT_CONFIG_NOSYSTEM='1')
+    """Host-independent Git whose automatic maintenance stays with its fixture owner."""
+    env = dict(os.environ, GIT_CONFIG_GLOBAL='/dev/null', GIT_CONFIG_NOSYSTEM='1')
+    for key in ('GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_INDEX_FILE',
+                'GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES'):
+        env.pop(key, None)
+    count = int(env.get('GIT_CONFIG_COUNT', '0'))
+    for key in ('gc.autoDetach', 'maintenance.autoDetach'):
+        env[f'GIT_CONFIG_KEY_{count}'] = key
+        env[f'GIT_CONFIG_VALUE_{count}'] = 'false'
+        count += 1
+    env['GIT_CONFIG_COUNT'] = str(count)
+    return env
 
 
 def processes_naming(directory):
@@ -3661,6 +3760,25 @@ class RunBenchShardedRouting(unittest.TestCase):
     def option(self, argv, flag):
         return argv[argv.index(flag) + 1] if flag in argv else None
 
+    def test_wide_check_retains_explicit_image_receipt_exports_without_launch(self):
+        with self.checkout() as fx:
+            receipt = private(fx.root.parent/'image-build.json', {'schema':'cloudbench-image-build-v1'})
+            captured = fx.root.parent/'image-env.json'
+            operator = Path(fx.env['RUN_BENCH_SHARDED_OPERATOR_UNDER_TEST'])
+            code = operator.read_text().replace('import json,os,sys\n',
+                'import json,os,sys\n' + 'open(os.environ["I20_CAPTURE"],"w").write(json.dumps({k:os.environ.get(k) for k in ("CLOUDBENCH_IMAGE_BUILD_RECEIPT","CLOUDBENCH_IMAGE_BUILD_RECEIPT_SHA256")}))\n')
+            operator.write_text(code)
+            checksum = CLI.digest(receipt.read_bytes())
+            fx.env.update(CLOUDBENCH_IMAGE_BUILD_RECEIPT=str(receipt),
+                          CLOUDBENCH_IMAGE_BUILD_RECEIPT_SHA256=checksum, I20_CAPTURE=str(captured))
+            result, operators, fleets = fx.run(*polar_names(20), '-k', '2', '--concurrency', '40', '--check')
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(len(operators), 1)
+            self.assertNotIn('--run', operators[0])
+            self.assertEqual(fleets, [])
+            self.assertEqual(json.loads(captured.read_bytes()), dict(CLOUDBENCH_IMAGE_BUILD_RECEIPT=str(receipt),
+                                                                  CLOUDBENCH_IMAGE_BUILD_RECEIPT_SHA256=checksum))
+
     def test_wide_runs_route_check_then_run_with_manifest_repetitions_timeout_and_pushed_head(self):
         names = polar_names(40)
         with self.checkout() as fx:
@@ -3757,6 +3875,33 @@ class RunBenchShardedRouting(unittest.TestCase):
             self.assertEqual((result.returncode, ops, fleets), (2, [], []))
             self.assertIn('fit one controller', result.stderr)
 
+    def test_concurrency_below_the_copies_runs_one_batch_of_bounded_waves(self):
+        # descend I3: 40 tasks x K3 at --concurrency 70 is one batch of task-aligned sharded
+        # waves (23 + 17 tasks), each bound to the batch's 120 scheduled copies.
+        names = polar_names(40)
+        with self.checkout() as fx:
+            result, ops, fleets = fx.run(*names, '-k', '3', '--concurrency', '70', '--timeout', '7200', '--check')
+            self.assertEqual((result.returncode, len(ops), fleets), (0, 2, []), result.stderr)
+            self.assertIn('bounded sharded waves: 120 copies, at most 70 at once (23 tasks x 3 per wave)', result.stdout)
+            waves = [json.loads(Path(self.option(op, '--tasks')).read_text()) for op in ops]
+            self.assertEqual(waves, [names[:23], names[23:]])
+            for op in ops:
+                self.assertNotIn('--run', op)
+                self.assertEqual((self.option(op, '--scheduled-total'), self.option(op, '--prior-infra')), ('120', '0'))
+                self.assertEqual((self.option(op, '--source-ref'), self.option(op, '--task-timeout'), self.option(op, '--repetitions')),
+                                 (fx.head, '7200', '3'))
+            batch = json.loads(next(Path(self.option(ops[0], '--state-dir')).glob('waves-*/batch.json')).read_text())
+            self.assertEqual(([w['state'] for w in batch['waves']], batch['scheduled_total'], batch['unlaunched_copies']),
+                             (['CHECKED', 'CHECKED'], 120, 120))
+            # A launch whose first wave never reports an admission launches nothing more.
+            result, ops, fleets = fx.run(*names, '-k', '3', '--concurrency', '70', '--timeout', '7200')
+            self.assertEqual((result.returncode, fleets), (1, []), result.stderr)
+            self.assertEqual([op.count('--run') for op in ops], [0, 1])  # wave 1 check + run; wave 2 never checked
+            batch = json.loads(sorted(Path(self.option(ops[0], '--state-dir')).glob('waves-*/batch.json'))[-1].read_text())
+            self.assertEqual([w['state'] for w in batch['waves']], ['FAILED_NO_RESULT', 'NOT_LAUNCHED'])
+            self.assertEqual(batch['unlaunched_copies'], 51)
+            self.assertFalse(batch['batch_complete'])
+
     def test_routed_runs_refuse_unpushed_dirty_foreign_ref_and_unsupported_options(self):
         names = polar_names(40)
         with self.checkout() as fx:
@@ -3764,7 +3909,7 @@ class RunBenchShardedRouting(unittest.TestCase):
                 (('--ref', 'HEAD~0^{tree}'), 'execute the pushed checkout HEAD'),
                 (('--sim-on', names[0]), 'not a sharded operator option'),
                 (('--retry-infra', '2'), 'exactly once'),
-                (('--concurrency', '39', '--retry-infra', '1'), 'admits all 40 copies'),
+                (('-k', '40', '--concurrency', '39', '--retry-infra', '1'), "cannot hold one task's 40 copies"),
                 (('--e2e-started-at', '1'), 'owns its admission clock'),
             ]
             # The strict route refuses every unsupported option before any launch.
@@ -3780,6 +3925,24 @@ class RunBenchShardedRouting(unittest.TestCase):
             result, ops, fleets = fx.run(*names, '--sim-on', names[0])
             self.assertEqual((result.returncode, ops, len(fleets)), (0, [], 1), result.stderr)
             self.assertEqual(result.stderr.count('--sim-on is not a sharded operator option; using the ordinary fleet path'), 1)
+            # A rolling window wider than one controller's bound is never silently handed to campaign
+            # controllers: auto routing keeps it on the sharded route as one batch of bounded waves.
+            for extra in (('--concurrency', '39'), ('-k', '2', '--concurrency', '79')):
+                with self.subTest(extra=extra):
+                    result, ops, fleets = fx.run(*names, *extra, '--check')
+                    self.assertEqual((result.returncode, len(ops), fleets), (0, 2, []), result.stderr)
+                    self.assertIn('bounded sharded waves:', result.stdout)
+                    self.assertNotIn('using campaign controllers', result.stderr)
+                    self.assertFalse((fx.root/'.context/benchmarks/campaigns').exists())
+            # A window that cannot hold one task's copies has no supported route: auto routing refuses it,
+            # naming the supported shapes, instead of handing it to campaign controllers.
+            result, ops, fleets = fx.run(*names, '-k', '40', '--concurrency', '39')
+            self.assertEqual((result.returncode, ops, fleets), (2, [], []), result.stderr)
+            self.assertIn("cannot hold one task's 40 copies", result.stderr)
+            self.assertIn('the sharded operator admits all', result.stderr)
+            self.assertIn('--concurrency 32 or less for a rolling campaign', result.stderr)
+            self.assertNotIn('using campaign controllers', result.stderr)
+            self.assertFalse((fx.root/'.context/benchmarks/campaigns').exists())
             (fx.root/'agents/benchmarks/tasks.json').write_bytes((fx.root/'agents/benchmarks/tasks.json').read_bytes() + b' ')
             result, ops, fleets = fx.run(*names)
             self.assertEqual((result.returncode, ops), (2, []))
@@ -3788,6 +3951,241 @@ class RunBenchShardedRouting(unittest.TestCase):
             result, ops, fleets = fx.run(*names)
             self.assertEqual((result.returncode, ops), (2, []))
             self.assertIn('is not pushed to origin', result.stderr)
+
+    def test_fixture_git_lifetime_guard_preserves_inherited_config_entries(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            foreign, repo = root/'foreign', root/'repo'
+            foreign.mkdir(); repo.mkdir()
+            (foreign/'keep').write_text('unchanged')
+            with patch.dict(os.environ, GIT_CONFIG_COUNT='2',
+                            GIT_CONFIG_KEY_0='fixture.inherited', GIT_CONFIG_VALUE_0='kept',
+                            GIT_CONFIG_KEY_1='gc.auto', GIT_CONFIG_VALUE_1='123',
+                            GIT_DIR=str(foreign/'git'), GIT_WORK_TREE=str(foreign),
+                            GIT_COMMON_DIR=str(foreign/'git'), GIT_INDEX_FILE=str(foreign/'index'),
+                            GIT_OBJECT_DIRECTORY=str(foreign/'objects'),
+                            GIT_ALTERNATE_OBJECT_DIRECTORIES=str(foreign/'alternates')):
+                env = hermetic_git_env()
+            subprocess.run(['git', '-C', str(repo), 'init', '-q'], check=True, env=env)
+            for key, expected in (('fixture.inherited', 'kept'), ('gc.auto', '123'),
+                                  ('gc.autoDetach', 'false'), ('maintenance.autoDetach', 'false')):
+                observed = subprocess.check_output(['git', '-C', str(repo), 'config', '--get', key],
+                                                   env=env, text=True).strip()
+                self.assertEqual(observed, expected)
+            self.assertEqual([p.name for p in foreign.iterdir()], ['keep'])
+            self.assertEqual((foreign/'keep').read_text(), 'unchanged')
+
+    def test_git_auto_maintenance_stays_owned_until_its_native_work_finishes(self):
+        # Force real native maintenance, hold it at a hook barrier, inspect its
+        # ancestry, then release and join exact owners even if a check fails.
+        import select
+        if not sys.platform.startswith('linux'):
+            self.skipTest('native Git ownership join uses Linux pidfds')
+        supported = subprocess.check_output(['git', 'help', '--config'], text=True)
+        self.assertIn('gc.recentObjectsHook', supported.splitlines())
+
+        def probe(control, detached_control, fault=None):
+            repo = control/'repo'; repo.mkdir()
+            ready, release = control/'ready', control/'release'
+            os.mkfifo(ready); os.mkfifo(release)
+            ready_fd = os.open(ready, os.O_RDWR | os.O_NONBLOCK)
+            release_fd = os.open(release, os.O_RDWR | os.O_NONBLOCK)
+            record, released = control/'native-pid', control/'released'
+            hook = control/'hold-native-gc.py'
+            hook.write_text('import os, select, signal, sys\nfrom pathlib import Path\n'
+                            'signal.alarm(30)\n'
+                            'try: Path(sys.argv[1]).touch(exist_ok=False)\n'
+                            'except FileExistsError: raise SystemExit(0)\n'
+                            'Path(sys.argv[4]).write_text(str(os.getpid()))\n'
+                            'fd=os.open(sys.argv[2], os.O_RDWR); os.write(fd,b"R"); os.close(fd)\n'
+                            'fd=os.open(sys.argv[3], os.O_RDWR | os.O_NONBLOCK)\n'
+                            'while not Path(sys.argv[5]).exists():\n'
+                            ' if select.select([fd],[],[],0.05)[0]: os.read(fd,1); break\n'
+                            'os.close(fd)\n')
+            env = hermetic_git_env()
+            count = int(env.get('GIT_CONFIG_COUNT', '0'))
+            settings = [('gc.auto', '1'), ('gc.recentObjectsHook',
+                         'exec ' + shlex.join([sys.executable, str(hook), str(control/'hook-started'),
+                                              str(ready), str(release), str(record), str(released)]))]
+            if detached_control:
+                settings += [('gc.autoDetach', 'true'), ('maintenance.autoDetach', 'true')]
+            for key, value in settings:
+                env[f'GIT_CONFIG_KEY_{count}'] = key
+                env[f'GIT_CONFIG_VALUE_{count}'] = value
+                count += 1
+            env['GIT_CONFIG_COUNT'] = str(count)
+            git = ['git', '-C', str(repo), '-c', 'user.name=fixture',
+                   '-c', 'user.email=fixture@example.test', '-c', 'commit.gpgsign=false']
+            owner, handles, verified, adopted = None, {}, False, False
+
+            def adopt_native():
+                # The hook writes its own PID before publishing readiness. Its
+                # held ancestry identifies prune, GC and any detached maintenance
+                # parent. No broad process scan or signalling is used.
+                pid = int(record.read_text())
+                if os.readlink(f'/proc/{pid}/cwd') != str(repo):
+                    raise ValueError('foreign native hook cwd')
+                chain = set()
+                while pid > 1 and pid not in chain:
+                    chain.add(pid)
+                    if os.readlink(f'/proc/{pid}/cwd') != str(repo):
+                        break
+                    if pid not in handles:
+                        handles[pid] = os.pidfd_open(pid)
+                    if pid == owner.pid:
+                        break
+                    stat = Path(f'/proc/{pid}/stat').read_text()
+                    pid = int(stat[stat.rindex(')') + 2:].split()[1])
+                return owner.pid in chain
+
+            try:
+                subprocess.run(git + ['init', '-q', '--object-format=sha1'], check=True, env=env, capture_output=True)
+                found, candidate = 0, 0
+                while found < 4:
+                    data = f'owned-native-gc-{candidate}'.encode(); candidate += 1
+                    if hashlib.sha1(b'blob ' + str(len(data)).encode() + b'\0' + data).hexdigest().startswith('17'):
+                        oid = subprocess.check_output(git + ['hash-object', '-w', '--stdin'], input=data,
+                                                      env=env).decode().strip()
+                        os.utime(repo/'.git/objects'/oid[:2]/oid[2:], (1, 1))
+                        found += 1
+                (repo/'tracked').write_text('committed fixture\n')
+                subprocess.run(git + ['add', 'tracked'], check=True, env=env, capture_output=True)
+                with (control/'git-output').open('wb') as output:
+                    owner = subprocess.Popen(git + ['commit', '-qm', 'fixture'], cwd=repo, env=env,
+                                             stdout=output, stderr=output)
+                    try:
+                        handles[owner.pid] = os.pidfd_open(owner.pid)
+                    except ProcessLookupError:
+                        pass  # already terminal; Popen.wait still reaps the exact child
+                    ready_now = select.select([ready_fd], [], [], 10)[0]
+                    if fault == 'ready':
+                        raise RuntimeError('injected ready timeout')
+                    self.assertTrue(ready_now, 'native GC hook never reached barrier')
+                    self.assertEqual(os.read(ready_fd, 1), b'R')
+                    if fault == 'foreign_hook':
+                        actual = record.read_text()
+                        try:
+                            record.write_text(str(os.getpid()))
+                            adopt_native()
+                        finally:
+                            record.write_text(actual)
+                        self.fail('foreign native hook was accepted')
+                    owned = adopt_native()
+                    adopted = True
+                    if not owned:
+                        self.assertEqual(owner.wait(timeout=10), 0)
+                    else:
+                        self.assertIsNone(owner.poll())
+                    return owned
+            finally:
+                try:
+                    if owner is not None:
+                        # Capture native handles before releasing the barrier when
+                        # possible. Unknown ownership still drains known owners,
+                        # fails, and retains files; it never permits rmtree.
+                        errors, forced_stop = [], False
+                        if not adopted:
+                            if not record.exists():
+                                select.select([ready_fd], [], [], 10)
+                            if record.exists():
+                                try:
+                                    adopt_native()
+                                    adopted = True
+                                except (OSError, ValueError) as error:
+                                    errors.append(error)
+                            else:
+                                errors.append(RuntimeError('native ownership unknown'))
+                        released.touch()  # also releases a hook that starts after this error path
+                        os.write(release_fd, b'G')
+                        try:
+                            if fault == 'owner_wait':
+                                raise subprocess.TimeoutExpired('injected owner wait failure', 10)
+                            owner.wait(timeout=10)
+                        except Exception as error:
+                            errors.append(error)
+                        # A raced exit or one failed signal must not skip the
+                        # remaining exact handles. ESRCH still needs terminal proof.
+                        raced = False
+                        for pid, fd in handles.items():
+                            try:
+                                terminal = bool(select.select([fd], [], [], 10)[0])
+                                inject_race = fault == 'signal_race' and not raced
+                                if not terminal or inject_race:
+                                    try:
+                                        if inject_race:
+                                            self.assertTrue(terminal)
+                                            raced = True
+                                            raise ProcessLookupError(errno.ESRCH, 'injected raced exit')
+                                        signal.pidfd_send_signal(fd, signal.SIGTERM)
+                                        forced_stop = True
+                                    except ProcessLookupError:
+                                        pass
+                                    except Exception as error:
+                                        errors.append(error)
+                                    if not select.select([fd], [], [], 5)[0]:
+                                        try:
+                                            signal.pidfd_send_signal(fd, signal.SIGKILL)
+                                            forced_stop = True
+                                        except ProcessLookupError:
+                                            pass
+                                        except Exception as error:
+                                            errors.append(error)
+                                        if not select.select([fd], [], [], 5)[0]:
+                                            errors.append(RuntimeError(f'exact native owner {pid} did not exit'))
+                            except Exception as error:
+                                errors.append(error)
+                        if fault == 'signal_race' and not raced:
+                            errors.append(RuntimeError('signal race control did not execute'))
+                        if forced_stop:
+                            errors.append(RuntimeError('native owner required termination'))
+                        try:
+                            if owner.wait(timeout=10) != 0:
+                                errors.append(RuntimeError('native Git command failed'))
+                        except Exception as error:
+                            errors.append(error)
+                        verified = adopted and not forced_stop and all(
+                            select.select([fd], [], [], 0)[0] for fd in handles.values())
+                        if errors:
+                            raise RuntimeError('native drain failed: ' + str(errors[0])) from errors[0]
+                finally:
+                    if verified:
+                        drained[control] = {pid: bool(select.select([fd], [], [], 0)[0])
+                                            for pid, fd in handles.items()}
+                    else:
+                        released.touch()
+                        os.write(release_fd, b'G')
+                    for fd in handles.values():
+                        os.close(fd)
+                    os.close(ready_fd); os.close(release_fd)
+                    if owner is not None and not verified:
+                        unsafe.add(control)
+
+        # Never remove a control whose ownership could not be drained. Such an
+        # error still fails the test and names retained evidence; no rmtree error
+        # is caught, ignored, retried, or converted to success.
+        root = Path(tempfile.mkdtemp())
+        unsafe, drained = set(), {}
+        try:
+            for label, detached in (('detached', True), ('helper', False)):
+                control = root/label; control.mkdir()
+                self.assertEqual(probe(control, detached), not detached,
+                                 'fixture helper let native auto-maintenance outlive its commit')
+            race = root/'signal_race'; race.mkdir()
+            self.assertTrue(probe(race, False, 'signal_race'))
+            self.assertTrue(all(drained[race].values()))
+            foreign = root/'foreign_hook'; foreign.mkdir()
+            with self.assertRaisesRegex(ValueError, 'foreign native hook cwd'):
+                probe(foreign, True, 'foreign_hook')
+            self.assertTrue(all(drained[foreign].values()))
+            for fault in ('ready', 'owner_wait'):
+                control = root/fault; control.mkdir()
+                with self.assertRaisesRegex(RuntimeError, 'injected'):
+                    probe(control, True, fault)
+                self.assertTrue(drained[control])
+                self.assertTrue(all(drained[control].values()))  # all exact pidfds reached terminal readiness
+        finally:
+            if not unsafe:
+                shutil.rmtree(root)
 
     def test_fixture_repository_is_built_independently_of_the_hosts_git_configuration(self):
         # A host system/global configuration (hooks, filters, auto-maintenance, LFS) must not act inside the fixture
@@ -3879,6 +4277,290 @@ class TaskRefPins(unittest.TestCase):
             pins = set(re.findall(assignment, (ROOT/'scripts'/name).read_text()))
             self.assertEqual(pins, {ref}, name)
 
+
+class ImageProofTransport(unittest.TestCase):
+    IMAGE = 'sha256:' + 'a' * 64
+    NODE = 'b' * 64
+    PYTHON = 'c' * 64
+
+    def receipt(self, root, **changes):
+        value = dict(schema='cloudbench-image-build-v1', publication_verified=True,
+                     image_ref='registry.fly.io/fixture:build@' + self.IMAGE,
+                     published_image_ref='registry.fly.io/fixture:build@' + self.IMAGE,
+                     published_digest=self.IMAGE, node_dependency_fingerprint=self.NODE,
+                     python_dependency_fingerprint=self.PYTHON)
+        value.update(changes)
+        return private(root/'image-build.json', value)
+
+    def prepared(self, root, receipt=None, sharded=False, **overrides):
+        helper = Sharded()
+        options = dict(image_build_receipt=receipt,
+                       image_build_receipt_sha256=CLI.digest(receipt.read_bytes()) if receipt else None)
+        options.update(overrides)
+        args = helper.args(root, **options)
+        args.warm_deps.write_text(self.NODE + ' ' + self.PYTHON + ' 1000 vs_fixture\n')
+        shard = None
+        if sharded:
+            names = polar_names(20)
+            args.tasks.write_text(json.dumps(names))
+            shard = dict(index=0, count=2, tasks=names[::2], task_indexes=list(range(0,20,2)),
+                         runs=2, group_run_id='i20-fixture', group_total=40, group_started_at=time.time(),
+                         tasks_sha256=CLI.digest(('\n'.join(names[::2])+'\n').encode()),
+                         manifest_sha256=RUNNER['manifest_sha'](names))
+        directory = root/'prepared'
+        directory.mkdir(mode=0o700)
+        config = CLI.prepare(args, ROOT, {n: 'b'*64 for n in CLI.PINS}, RUNNER,
+                             directory, helper.capacity(root),
+                             guest_env=dict(temporal_namespace=None, override=False), shard=shard,
+                             runtime_env=dict(CLOUDBENCH_APP_MACHINE_CEILING='1000', CLOUDBENCH_SHARED_CPU_GOVERNOR='200'),
+                             scheduled_total=40 if sharded else 600)
+        return args, config
+
+    def test_image_proof_is_in_admission_and_staged_environment(self):
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name); receipt = self.receipt(root)
+            args, config = self.prepared(root, receipt)
+            binding = CLI.admission_binding(args, RUNNER)
+            self.assertEqual(binding['inputs']['image_build_receipt'],
+                             dict(path=str(receipt), sha256=CLI.digest(receipt.read_bytes())))
+            value = json.loads(config.read_bytes())
+            row = next(x for x in value['remote_files'] if x['relative_path'] == '.git/cloudbench-image-build-receipt.json')
+            self.assertEqual(row['source_path'], str(receipt))
+            self.assertEqual(value['remote_env']['CLOUDBENCH_IMAGE_BUILD_RECEIPT'],
+                             '/tmp/gate/repo/.git/cloudbench-image-build-receipt.json')
+            self.assertEqual(value['remote_env']['CLOUDBENCH_IMAGE_BUILD_RECEIPT_SHA256'], row['sha256'])
+            receipt.write_text('{}')
+            with self.assertRaisesRegex(ValueError, 'checksum'):
+                CLI.admission_binding(args, RUNNER)
+
+    def test_invalid_or_unowned_image_inputs_are_refused(self):
+        for fault in ('missing-hash', 'missing-path', 'checksum', 'symlink', 'mode', 'schema'):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as name:
+                root = Path(name); receipt = self.receipt(root)
+                checksum = CLI.digest(receipt.read_bytes())
+                path = receipt
+                if fault == 'missing-hash': checksum = None
+                if fault == 'missing-path': path = None
+                if fault == 'checksum': checksum = '0'*64
+                if fault == 'symlink':
+                    path = root/'link'; path.symlink_to(receipt)
+                if fault == 'mode': receipt.chmod(0o644)
+                if fault == 'schema':
+                    receipt.write_text('{"schema":"not-an-image-build"}')
+                    checksum = CLI.digest(receipt.read_bytes())
+                args = argparse.Namespace(image_build_receipt=path, image_build_receipt_sha256=checksum)
+                with self.assertRaises((ValueError, OSError)):
+                    CLI.image_build_receipt_input(args, RUNNER)
+
+    def test_legacy_unconfigured_transport_remains_unchanged(self):
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name); args, config = self.prepared(root)
+            self.assertNotIn('image_build_receipt', CLI.admission_binding(args, RUNNER)['inputs'])
+            value = json.loads(config.read_bytes())
+            self.assertFalse(any('IMAGE_BUILD_RECEIPT' in key for key in value['remote_env']))
+            self.assertEqual(len(value['remote_files']), 2)
+            RUNNER['pin_image_build_receipt']({}, {})
+            with self.assertRaisesRegex(ValueError, 'not staged'):
+                RUNNER['pin_image_build_receipt']({'CLOUDBENCH_IMAGE_BUILD_RECEIPT': '/host/unavailable'}, {})
+            staged = {'.git/cloudbench-image-build-receipt.json': b'raw-receipt'}
+            for wrong in ({'CLOUDBENCH_IMAGE_BUILD_RECEIPT': '/host/old'},
+                          {'CLOUDBENCH_IMAGE_BUILD_RECEIPT_SHA256': '0'*64}):
+                with self.assertRaisesRegex(ValueError, 'binding differs'):
+                    RUNNER['pin_image_build_receipt'](wrong, staged)
+
+    def test_actual_payload_and_remote_consumer_do_not_need_host_receipt(self):
+        for fault in ('none', 'wrong-image', 'wrong-node', 'unverified', 'wire-hash', 'host-changed'):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as name:
+                root = Path(name); changes = {}
+                if fault == 'wrong-image': changes['published_digest'] = 'sha256:' + 'd'*64
+                if fault == 'wrong-node': changes['node_dependency_fingerprint'] = 'e'*64
+                if fault == 'unverified': changes['publication_verified'] = False
+                receipt = self.receipt(root, **changes)
+                args, config = self.prepared(root, receipt, sharded=True)
+                value = json.loads(config.read_bytes())
+                guest = root/'guest'; (guest/'scripts/lib').mkdir(parents=True)
+                shutil.copyfile(ROOT/'scripts/lib/cloudbench-env.sh', guest/'scripts/lib/cloudbench-env.sh')
+                (guest/'agents/benchmarks').mkdir(parents=True)
+                for catalog in ('tasks.json', 'polar_tasks.json'):
+                    shutil.copyfile(ROOT/'agents/benchmarks'/catalog, guest/'agents/benchmarks'/catalog)
+                shutil.copyfile(ROOT/'scripts/cloudbench_catalog.py', guest/'scripts/cloudbench_catalog.py')
+                supervisor = guest/'scripts/cloudbench-original600-supervisor.py'
+                supervisor.write_text('''import json, os, subprocess
+from pathlib import Path
+root=Path.cwd()
+prefix=Path('/tmp/gate/repo')
+path=Path(os.environ['CLOUDBENCH_IMAGE_BUILD_RECEIPT'])
+assert path==prefix/'.git/cloudbench-image-build-receipt.json'
+local=root/path.relative_to(prefix)
+result=subprocess.run(['bash','-c','source "$1"; shift; cloudbench_verify_image_dependency_receipt "$@"','fixture',str(root/'scripts/lib/cloudbench-env.sh'),str(local),os.environ['CLOUDBENCH_IMAGE_BUILD_RECEIPT_SHA256'],'warm',"''' + self.NODE + '''","''' + self.PYTHON + '''"],input=json.dumps([{'id':'warm','image_ref':{'digest':"''' + self.IMAGE + '''"},'config':{}}]),text=True,capture_output=True)
+if result.returncode: raise SystemExit(result.stderr)
+(root/'accepted.json').write_text(json.dumps({'sha256':os.environ['CLOUDBENCH_IMAGE_BUILD_RECEIPT_SHA256']}))
+''')
+                subprocess.run(['git','init','-q',str(guest)],check=True)
+                subprocess.run(['git','-C',str(guest),'add','.'],check=True)
+                subprocess.run(['git','-C',str(guest),'-c','user.name=fixture','-c','user.email=fixture@example.invalid','commit','-qm','consumer'],check=True)
+                ref=subprocess.check_output(['git','-C',str(guest),'rev-parse','HEAD'],text=True).strip()
+                value['source_root']=str(guest);value['source_ref']=ref;value['shard']['task_ref']=ref
+                value['source_files']={'cloudbench-original600-supervisor.py':CLI.digest(supervisor.read_bytes())}
+                authority=Path(value['authority_template']);auth=json.loads(authority.read_bytes());auth['source_ref']=ref;authority.write_text(json.dumps(auth))
+                config.write_text(json.dumps(value))
+                captured=[]
+                class AtPayload(Exception): pass
+                def capture(out, remote):
+                    captured.append(remote);raise AtPayload()
+                if fault == 'host-changed':
+                    receipt.write_text('{}')
+                with patch.dict(RUNNER['run'].__globals__,validate_source_members=lambda *a:None,launch_handoff=capture):
+                    if fault == 'host-changed':
+                        with self.assertRaisesRegex(ValueError, 'remote metadata source changed'):
+                            RUNNER['run'](config,CLI.digest(config.read_bytes()),root/'run')
+                        self.assertEqual(captured, [])
+                        continue
+                    with self.assertRaises(AtPayload):
+                        RUNNER['run'](config,CLI.digest(config.read_bytes()),root/'run')
+                self.assertEqual(len(captured),1)
+                remote=captured[0]
+                self.assertEqual(remote['shard']['group_total'], 40)
+                self.assertEqual(remote['remote_env']['CLOUDBENCH_IMAGE_BUILD_RECEIPT'], '/tmp/gate/repo/.git/cloudbench-image-build-receipt.json')
+                if fault=='wire-hash':
+                    next(x for x in remote['remote_files'] if 'image-build' in x['relative_path'])['sha256']='0'*64
+                # Match the existing runner fixture's relocated controller namespace.
+                remote['remote_env']['RUN_BENCH_CAMPAIGN_EXTERNAL_BARRIER'] = str(
+                    guest/'.context'/(Path(remote['identity_name']).stem + '.barrier'))
+                payload_dir=root/'payload';payload_dir.mkdir(mode=0o700)
+                payload,_,command=RUNNER['launch_handoff'](payload_dir,remote)
+                receipt.unlink()  # The remote controller cannot access the original host file.
+                command[2]=command[2].replace("Path('/tmp/controller-launch-payload.json.gz')",'Path('+repr(str(payload))+')').replace("root=Path('/tmp/gate/repo')",'root=Path('+repr(str(guest))+')')
+                command[3]=str(payload)
+                result=subprocess.run(command,capture_output=True,text=True,timeout=10,env=dict(os.environ,FLY_MACHINE_ID='1'*14))
+                self.assertEqual(result.returncode==0,fault=='none',result.stderr)
+                self.assertEqual((guest/'accepted.json').exists(),fault=='none')
+                if fault=='none':
+                    staged=guest/'.git/cloudbench-image-build-receipt.json'
+                    self.assertEqual(CLI.digest(staged.read_bytes()),remote['remote_env']['CLOUDBENCH_IMAGE_BUILD_RECEIPT_SHA256'])
+
+
+class OrdinaryDonorBinding(unittest.TestCase):
+    IMAGE = 'registry.fly.io/navi-whisper-lux-bench:active@sha256:' + 'a'*64
+    def binding(self):
+        return dict(machine_id='683e47df5094d8', machine_name='cloudbench-warm', volume_id='vol_active',
+                    volume_name='cloudbench_data', region='iad', image_ref=self.IMAGE)
+    def native(self):
+        b=self.binding()
+        row=dict(id=b['machine_id'], name=b['machine_name'], region=b['region'],
+                 config=dict(image=b['image_ref'], mounts=[dict(volume=b['volume_id'])]))
+        volume=dict(id=b['volume_id'], name=b['volume_name'], region=b['region'], attached_machine_id=b['machine_id'])
+        return row,volume
+    def select(self, rows, volume):
+        class API:
+            def api(self, method, path, timeout):
+                assert (method,path,timeout)==('GET','/volumes/vol_active',20)
+                return volume
+        runner=dict(RUNNER)
+        binding=CLI.select_warm_donor(runner,rows,API(),('cloudbench-warm','cloudbench_data','iad'))
+        return runner,binding
+    def test_exact_native_selection_preserves_legacy_and_default_proof_path(self):
+        row,volume=self.native();runner,binding=self.select([row],volume)
+        self.assertEqual(binding,self.binding())
+        self.assertEqual(runner['WARM_MACHINE_ID'],row['id'])
+        self.assertEqual(runner['WARM_DEPS_RELATIVE'],'.git/cloudbench-warm-deps.fp')
+        self.assertEqual(RUNNER['WARM_MACHINE_ID'],'8ed16dc75ee958')
+        self.assertEqual(RUNNER['donor_binding'](None)['region'],'ord')
+    def test_ambiguous_missing_or_foreign_native_identity_refuses(self):
+        row,volume=self.native()
+        for rows,vol in [([],volume),([row,row],volume),([dict(row,region='ord')],volume),
+                         ([row],dict(volume,attached_machine_id='foreign')),([row],dict(volume,name='wrong'))]:
+            with self.subTest(rows=rows,vol=vol),self.assertRaises(ValueError):self.select(rows,vol)
+    def test_actual_prepare_runner_and_remote_binding(self):
+        with tempfile.TemporaryDirectory() as name:
+            root=Path(name);fixture=ImageProofTransport();receipt=fixture.receipt(root)
+            args,config=fixture.prepared(root,receipt,sharded=True)
+            facts=json.loads(args.facts.read_bytes());b=self.binding()
+            facts.update(image_ref=b['image_ref'],warm_donor=b,
+                         protected_machines=['m1','m2','m3',b['machine_id']],protected_volumes=[b['volume_id']])
+            args.facts.write_text(json.dumps(facts))
+            directory=root/'selected';directory.mkdir(mode=0o700)
+            old=json.loads(config.read_bytes())
+            config=CLI.prepare(args,ROOT,{n:'b'*64 for n in CLI.PINS},RUNNER,directory,Sharded().capacity(root),
+                               guest_env=dict(temporal_namespace=None,override=False),shard=old['shard'],scheduled_total=40,
+                               runtime_env=dict(CLOUDBENCH_APP_MACHINE_CEILING='1000',CLOUDBENCH_SHARED_CPU_GOVERNOR='200'))
+            value=json.loads(config.read_bytes())
+            self.assertEqual(value['warm_donor'],b)
+            self.assertEqual(CLI.admission_binding(args,RUNNER)['inputs']['facts']['sha256'],CLI.digest(args.facts.read_bytes()))
+            self.assertIn('.git/cloudbench-warm-deps.fp',[x['relative_path'] for x in value['remote_files']])
+            guest=root/'guest';(guest/'agents/benchmarks').mkdir(parents=True)
+            for catalog in ('tasks.json','polar_tasks.json'):shutil.copyfile(ROOT/'agents/benchmarks'/catalog,guest/'agents/benchmarks'/catalog)
+            (guest/'scripts').mkdir();shutil.copyfile(ROOT/'scripts/cloudbench_catalog.py',guest/'scripts/cloudbench_catalog.py')
+            subprocess.run(['git','init','-q',str(guest)],check=True)
+            (guest/'seed').write_text('fixture');subprocess.run(['git','-C',str(guest),'add','.'],check=True)
+            subprocess.run(['git','-C',str(guest),'-c','user.name=fixture','-c','user.email=fixture@example.invalid','commit','-qm','fixture'],check=True)
+            ref=subprocess.check_output(['git','-C',str(guest),'rev-parse','HEAD'],text=True).strip()
+            value.update(source_root=str(guest),source_ref=ref);value['shard']['task_ref']=ref
+            authpath=Path(value['authority_template']);auth=json.loads(authpath.read_bytes());auth['source_ref']=ref;authpath.write_text(json.dumps(auth))
+            captured=[]
+            class AtPayload(Exception):pass
+            def capture(out,remote):captured.append(remote);raise AtPayload()
+            for fault in ('none','foreign-image','foreign-id','env-override'):
+                candidate=json.loads(json.dumps(value))
+                if fault=='foreign-image':candidate['warm_donor']['image_ref']=self.IMAGE.replace('a'*64,'d'*64)
+                if fault=='foreign-id':candidate['warm_donor']['machine_id']='foreign'
+                if fault=='env-override':candidate['remote_env']['CLOUDBENCH_WARM_MACHINE_NAME']='foreign'
+                config.write_text(json.dumps(candidate));captured.clear()
+                with patch.dict(RUNNER['run'].__globals__,validate_source_members=lambda *a:None,launch_handoff=capture):
+                    with self.assertRaises(AtPayload if fault=='none' else ValueError):
+                        RUNNER['run'](config,CLI.digest(config.read_bytes()),root/('run-'+fault))
+                if fault!='none':self.assertEqual(captured,[]);continue
+                remote=captured[0];env=remote['remote_env']
+                self.assertEqual(env['CLOUDBENCH_WARM_MACHINE_NAME'],b['machine_name'])
+                self.assertEqual(env['CLOUDBENCH_EXPECTED_WARM_MACHINE_ID'],b['machine_id'])
+                self.assertEqual(env['CLOUDBENCH_EXPECTED_WARM_VOLUME_ID'],b['volume_id'])
+                self.assertEqual(env['CLOUDBENCH_REGION'],'iad')
+                self.assertEqual(env['CLOUDBENCH_SNAPSHOT_ID'],'vs_fixture')
+                self.assertEqual(env['CLOUDBENCH_WARM_SNAPSHOT_INVENTORY_FILE'],'/tmp/gate/repo/.git/cloudbench-warm-snapshot-inventory.cloudbench-warm.json')
+    def test_actual_discovery_uses_selected_producer_and_checks_image_before_refresh(self):
+        fixture=warm_fixture();row,volume=self.native();volume=dict(volume,id='vol_fixture')
+        row['config']['mounts']=[dict(volume='vol_fixture')]
+        row['config']['metadata']={k:v.replace(RUNNER['WARM_MACHINE_ID'],row['id']) for k,v in fixture['machine']['config']['metadata'].items()}
+        fixture['machine']=row
+        class Native(DiscoveryFly):
+            def api(self,method,path,**kw):
+                if (method,path)==('GET','/volumes/vol_fixture'):
+                    self.requests.append((method,path));return volume
+                return super().api(method,path,**kw)
+        for fault in ('none','wrong-image','wrong-node'):
+            with self.subTest(fault=fault),InputDiscovery().common() as common:
+                proof=common.common/'cloudbench-warm-deps.fp'
+                private(proof,fixture['warm_deps']);private(proof.with_name(proof.name+'.ref'),RUN_REF+' '+FIXTURE_SNAPSHOT+'\n')
+                receipt=private(common.common/'image.json',dict(schema='cloudbench-image-build-v1',publication_verified=True,
+                    image_ref=self.IMAGE,published_image_ref=self.IMAGE,published_digest='sha256:'+('d' if fault=='wrong-image' else 'a')*64,
+                    node_dependency_fingerprint=('e' if fault=='wrong-node' else 'a')*64,python_dependency_fingerprint='b'*64))
+                common.args.image_build_receipt=receipt;common.args.image_build_receipt_sha256=CLI.digest(receipt.read_bytes())
+                common.args.warm_donor_selection=('cloudbench-warm','cloudbench_data','iad')
+                machines=[row]+[dict(id='m'+str(i),name='protected'+str(i),config=dict(image=self.IMAGE,mounts=[])) for i in range(3)]
+                api=Native(fixture,machines)
+                with patch.object(CLI,'run_warm_refresh',side_effect=AssertionError('must not refresh')):
+                    if fault!='none':
+                        with self.assertRaisesRegex(ValueError,'image'):
+                            CLI.discover_inputs(common.args,ROOT,dict(RUNNER),'fixture',False,api)
+                    else:
+                        report,paths=CLI.discover_inputs(common.args,ROOT,dict(RUNNER),'fixture',False,api)
+                        self.assertEqual(report['action'],'reuse');self.assertIsNone(paths)
+                        self.assertEqual(report['warm_snapshot']['snapshot_id'],FIXTURE_SNAPSHOT)
+                        self.assertEqual(report['facts']['image_ref'],self.IMAGE)
+                self.assertNotIn(('GET','/machines/'+RUNNER['WARM_MACHINE_ID']),api.requests)
+
+    def test_native_fleet_guard_rejects_post_admission_identity_change(self):
+        source=Path(os.environ.get('I26_FLEET_SOURCE',ROOT/'scripts/run-bench-fleet')).read_text()
+        start=source.index('# An explicitly admitted ordinary-wide donor')
+        guard=source[start:source.index('echo "🏭 warm source machine:',start)]
+        base=dict(os.environ,WARM_ID='683e47df5094d8',WARM_VOLUME_ID='vol_active',warm_region='iad',
+                  CLOUDBENCH_EXPECTED_WARM_MACHINE_ID='683e47df5094d8',
+                  CLOUDBENCH_EXPECTED_WARM_VOLUME_ID='vol_active',CLOUDBENCH_EXPECTED_WARM_REGION='iad')
+        for key in ('none','WARM_ID','WARM_VOLUME_ID','warm_region'):
+            env=dict(base)
+            if key!='none':env[key]='foreign'
+            result=subprocess.run(['bash','-c',guard],env=env,capture_output=True,text=True)
+            self.assertEqual(result.returncode,0 if key=='none' else 1)
 
 if __name__ == '__main__':
     unittest.main()

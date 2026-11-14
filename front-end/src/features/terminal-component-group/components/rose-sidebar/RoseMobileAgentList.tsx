@@ -3,6 +3,8 @@
  *
  * STATE MACHINE: RoseMobileAgentList
  *   [DELETE CONFIRM] (deleteTarget) | [PROJECT SETTINGS] (openProject) | [LIST]
+ *   [PROJECT SETTINGS] --"Connect / Switch repo in Integrations"--> menu closes
+ *     (onClose), revealing the Integrations panel it opened
  *   [LIST] shows a spinner only while there is nothing to show yet: the first
  *   agent load (the drawer passes isLoading only until that load settles) or a
  *   search with no rows. Background polls must keep the groups mounted so an
@@ -113,6 +115,7 @@ export function RoseMobileAgentList(props: MobileAgentListProps) {
               barExpanded={false}
               onClose={projects.closeProjectSettings}
               embedded
+              onOpenedIntegrations={props.onClose}
             />
           </div>
         ) : (

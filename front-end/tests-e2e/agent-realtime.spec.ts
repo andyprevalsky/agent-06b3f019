@@ -15,6 +15,7 @@ import {
   FRONTEND_URL,
   HAS_INJECTED_SESSION,
   attachRecorder,
+  countMessageRowsWithWorkExpanded,
   createAgent,
   deleteAgent,
   expectDevAuthenticated,
@@ -27,11 +28,11 @@ import {
 test.describe('agent-realtime', () => {
   test('new agent produces realtime messages with no duplicates', async ({ page }) => {
     const rec = attachRecorder(page);
-    // Reuse the `claude-code-agent` smoke prompt so semantic stays in lockstep
+    // Reuse the `chat-mode` smoke prompt so semantic stays in lockstep
     // with the benchmark suite. Start in chat mode (omit start_phase) — the
     // agent's chat-mode reply streams enough bubbles to exercise the dedup
     // invariant without needing the full Temporal workflow to complete.
-    const task = await loadBenchmarkTask('claude-code-agent');
+    const task = await loadBenchmarkTask('chat-mode');
     const agentId = await createAgent(task.prompt);
 
     try {
@@ -65,9 +66,11 @@ test.describe('agent-realtime', () => {
       // Chat mode produces: user goal bubble, then an assistant stream that
       // updates a single message_id over time. ≥2 is enough to prove realtime
       // broadcasts flowed AND to exercise the dedup invariant over streaming.
+      // Live assistant/tool rows fold into a collapsed work group, so open it
+      // to count the rows themselves rather than waiting for the final answer.
       const messageLocator = page.locator('[data-message-id]');
       await expect
-        .poll(() => messageLocator.count(), {
+        .poll(() => countMessageRowsWithWorkExpanded(page), {
           timeout: 180_000,
           message: 'Agent never produced ≥2 realtime message bubbles',
         })

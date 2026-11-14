@@ -1,7 +1,8 @@
 """Separate worker qualification: actual demand/readiness/capture/return boundaries."""
-import json,os,subprocess,sys
+import json,os,shlex,subprocess,sys
 from pathlib import Path
 import pytest
+from benchmarks.fixture_proxy_cli import install_proxy_cli
 from benchmarks.cloudbench_worker_evidence_test import capture_fixture
 from benchmarks.cloudbench_campaign_workspace_test import bound_campaign
 ROOT=Path(__file__).resolve().parents[2]
@@ -54,11 +55,17 @@ def test_incomplete_worker_cannot_qualify(tmp_path,monkeypatch,defect):
  assert verify(out,claims).returncode!=0
 
 def test_actual_ready_producer(tmp_path):
+ from benchmarks.cloudbench_dependency_sync_test import _extract_fleet_function
+ helpers='\n'.join(_extract_fleet_function(FLEET,name+'() {')for name in (
+  'worker_ledger_lock_acquire','worker_ledger_lock_release','worker_is_tracked','reconcile_worker_ready_outcomes'))
+ (tmp_path/'worker-clones.ids').write_text('worker\n')
+ (tmp_path/'worker-ready.ids').touch()
  start=FLEET.index('      publish_worker_ready() {');end=FLEET.index('      log_worker_stage()',start)
- script=FLEET[start:end]+'\npublish_worker_ready'
+ script=helpers+'\n'+FLEET[start:end]+'\npublish_worker_ready'
  env={'out':str(tmp_path),'wid':'worker','runtime_run_token':'run','primary_id':'primary','QUALIFY_WORKER':'1'}
  result=shell(script,env);assert result.returncode==0,result.stderr
  assert (tmp_path/'worker-worker.qualification-ready').read_text()=='worker|run|primary\n'
+ assert (tmp_path/'worker-ready.ids').read_text()=='worker\n'
 
 @pytest.mark.parametrize('defect',['multiple','infra','skip','keep','update','shape','simulate'])
 def test_selection_refuses_before_provider(defect):
@@ -89,14 +96,14 @@ def test_real_outer_cli_forwards_qualification(bound_campaign):
 
 def test_actual_autoscaler_requests_worker_at_idle_floor(tmp_path):
  from benchmarks.cloudbench_dependency_sync_test import _extract_fleet_function
- functions='\n'.join(_extract_fleet_function(FLEET,n+'() {')for n in ['bench_autoscaler','_pool_ids','_ready_pool_ids','_box_desired'])
+ proxy_bin=install_proxy_cli(tmp_path,['proxy','12345:3003','ip','-a','fixture','--bind-addr','127.0.0.1','-q'],10)
+ functions='source '+shlex.quote(str(ROOT/'scripts/lib/cloudbench-env.sh'))+'\n'+'\n'.join(_extract_fleet_function(FLEET,n+'() {')for n in ['bench_autoscaler','_pool_ids','_ready_pool_ids','_box_desired'])
  script=functions+r"""
  QUALIFY_WORKER=1; RUN_ID=fixture; APP=fixture; AUTOSCALE_POLL=.01; AUTOSCALE_MAX=2
  AUTOSCALER_FINALIZATION_WAIT_SECONDS=1; BOX_HEALTH_PORT=3003; CLOUDBENCH_BOOT_LAUNCH=0
  _machine_priv_ip(){ printf ip; }
  claim_autoscaler_metrics_port(){ printf -v "$1" 12345; }
  release_autoscaler_metrics_owner(){ :; }
- flyctl(){ sleep 10; }
  cloudbench_terminate_and_wait(){ shift; for p in "$@"; do [ -z "$p" ] || { kill "$p" 2>/dev/null || :; wait "$p" 2>/dev/null || :; }; done; }
  fleet_job_running(){ kill -0 "$1" 2>/dev/null; }
  inventory_machine_exists(){ return 0; }
@@ -110,6 +117,8 @@ def test_actual_autoscaler_requests_worker_at_idle_floor(tmp_path):
  provision_worker(){ printf 'worker\n' >> "$OUT/worker-clones.ids"; printf finished > "$OUT/benchmark-child.finished"; }
  bench_autoscaler task primary ws 0 "$OUT" 12345 token
  """
- r=shell(script,{'OUT':str(tmp_path)})
+ r=shell(script,{'OUT':str(tmp_path),'PATH':str(proxy_bin)+os.pathsep+os.environ.get('PATH',''),'CLOUDBENCH_SHARED_RELAY_AUTHORITY':'','CLOUDBENCH_SHARED_RELAY_DIRECTORY':''})
  assert r.returncode==0,r.stderr+r.stdout
  assert (tmp_path/'worker-clones.ids').read_text()=='worker\n'
+
+ assert (tmp_path/'proxy.commands').read_text().splitlines()==['proxy 12345:3003 ip -a fixture --bind-addr 127.0.0.1 -q']

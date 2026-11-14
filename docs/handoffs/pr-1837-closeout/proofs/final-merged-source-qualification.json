@@ -1,0 +1,86 @@
+{
+  "actual_merge": {
+    "pr": 1837,
+    "merged_sha": "b7c77bdde14badd0f957e86375f177f6ef686fc3",
+    "reviewed_head": "b7a69ec4ef61d5612ea3534e2e00c7d7cfc9d50c",
+    "receipt": {
+      "sha256": "773d4e7c2d64a0455c10768c53cd81f64171d9fb08b30fe681afe2de455069aa",
+      "bytes": 140
+    }
+  },
+  "reviewed_source": {
+    "head": "b7a69ec4ef61d5612ea3534e2e00c7d7cfc9d50c",
+    "digest": "da014c131a0cc8bf43f6884f2165d9f71b8eda545c53c2e70e1a64265258ffbd"
+  },
+  "actual_physical_native_execution": {
+    "source": {
+      "digest": "83e8e46db6843f154be93497d347e6324a594e644363002231e2384b4fa5e91d",
+      "head": "06b65bc6c7339277a76719a5a2560dccf293db9e"
+    },
+    "command": "cd back-end && npm run test:coverage:sharded",
+    "native_exit": 0,
+    "all_cases": 255,
+    "case_outcomes": {
+      "PASS": 255
+    },
+    "report_bug": "PASS",
+    "complete": true,
+    "cleanup_complete": true,
+    "non_domain_checks": {
+      "units": "PASS",
+      "fps": "PASS",
+      "coverage-threshold": "PASS",
+      "teardown": "PASS"
+    },
+    "receipt": {
+      "sha256": "8fc7da869d3b6c3010aebb0efa02262702c98625340e50abd2b1fb182510e16d",
+      "bytes": 2221
+    }
+  },
+  "owning_staged_qualification": {
+    "status": "PASS_WITH_TYPED_NO_RETRY_OMISSIONS",
+    "verified_at": "2026-11-09T00:18:02.517732+00:00",
+    "native_verifier_exit": 0,
+    "ready": true,
+    "fresh_quick_gates": 4,
+    "heavy_gates_under_identical_input_and_full_contract_protocol": 12,
+    "native_source": "06b65bc6c7339277a76719a5a2560dccf293db9e",
+    "smoke_actual_passes": 11,
+    "smoke_typed_no_retry_omissions": 2,
+    "omissions_financial_or_execution_credit": false,
+    "receipt": {
+      "sha256": "f9a1ff8946b9b675b051605e214786e7dc1743fc0c9b1e7065ab0fb63bc1b8b1",
+      "bytes": 872
+    }
+  },
+  "review": {
+    "status": "DELIVERED_CLEAN",
+    "cycle": 3,
+    "kind": "verification",
+    "head": "b7a69ec4ef61d5612ea3534e2e00c7d7cfc9d50c",
+    "native_finish_result": "clean",
+    "finished_at": "2026-11-09T00:15:20.864630+00:00",
+    "actual_review": "Detailed current-head walkthrough and final_review_risk_coverage source/covered=head kindreviewed, no actionable comments, minimalrisk; all four endpoints read",
+    "new_formal_review_object_present": false,
+    "coverage_limit": "Current inherited filters exclude report-bug test files and RCA prose; no filters weakened",
+    "earlier_quota_skips": "Historical; superseded for final reviewed head. No final merged-unreviewed claim.",
+    "proof": {
+      "sha256": "61f547f5d49a0163bd3f3e0c0be5077b85b756281db55bab0d149d4b4653ebda",
+      "bytes": 699
+    },
+    "four_endpoint_evidence": {
+      "sha256": "7f20610ce669201c2e7d6e42774de56821c7ebb903339bb20e107f1ca021057f",
+      "bytes": 215933
+    },
+    "finish_receipt": {
+      "sha256": "077db9f9fb7826a8edeccc7dc72f5e970efe9c167ce4e969eb6f4cde3d77c650",
+      "bytes": 4279
+    }
+  },
+  "limits": [
+    "No physical native result is rebound to reviewed head or merge commit. Logical qualification is the owning verifier result, separately source-bound.",
+    "Review inherited filters exclude report-bug test files and RCA prose; no filters weakened.",
+    "Actual merge is complete; production, final preservation, records followup and deletionREADY remain pending until actual receipts.",
+    "Historical browser certificate/DNS failures remain failures with distinct postmerge routing; later native success does not establish their cause or repair."
+  ]
+}

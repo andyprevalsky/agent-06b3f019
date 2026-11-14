@@ -1,0 +1,6 @@
+{
+  "recipe_sha256": "2e35e736660660bb6118a939d51b0dd008abe5efaa6387cf252d5d0536b75cf4",
+  "adapter_sha256": "0c469e18e5b391bedc53669781e2633145d564156476955097be51ec554afe32",
+  "key_fingerprint_sha256": "e351c7cc5b01303e579fe6d1df833940fdaadf325ca47314414ba10735fc7730",
+  "control_script_review": "IndependentordinarycodePASS with outputcontainment, explicitcontrolinventory and capturedhash assertion; sourceboundprivateindex in encrypted supplement."
+}

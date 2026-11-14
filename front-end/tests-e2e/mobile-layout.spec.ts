@@ -30,7 +30,9 @@ import fs from 'node:fs';
 import {
   FRONTEND_URL,
   HAS_INJECTED_SESSION,
+  acrossAppReload,
   attachRecorder,
+  countMessageRowsWithWorkExpanded,
   createAgent,
   deleteAgent,
   expectDevAuthenticated,
@@ -109,7 +111,7 @@ test.describe('mobile-layout', () => {
     page,
   }) => {
     const rec = attachRecorder(page);
-    const task = await loadBenchmarkTask('claude-code-agent');
+    const task = await loadBenchmarkTask('chat-mode');
     const agentId = await createAgent(task.prompt);
 
     try {
@@ -132,10 +134,11 @@ test.describe('mobile-layout', () => {
         )
         .toBe(true);
 
-      // Wait for ≥2 message bubbles (user goal + ≥1 assistant/tool).
-      const messageLocator = page.locator('[data-message-id]');
+      // Wait for ≥2 message bubbles (user goal + ≥1 assistant/tool). Live
+      // assistant/tool rows fold into a collapsed work group; open it so they
+      // render (and fall under the overflow check) before the agent finishes.
       await expect
-        .poll(() => messageLocator.count(), {
+        .poll(() => countMessageRowsWithWorkExpanded(page), {
           timeout: 120_000,
           message: 'Agent never produced ≥2 realtime message bubbles on mobile',
         })
@@ -207,15 +210,17 @@ test.describe('mobile-layout', () => {
     // Previously the header used a hard-coded `width: 320px` inline style.
     // Fix: `width: min(320px, calc(100vw - 32px))` so it shrinks on
     // sub-320 px viewports and stays centered.
-    const result = await page.evaluate(() => {
-      const header = document.querySelector('header');
-      if (!header) return null;
-      const rect = header.getBoundingClientRect();
-      return {
-        center: Math.round(rect.left + rect.width / 2),
-        midpoint: Math.round(window.innerWidth / 2),
-      };
-    });
+    const result = await acrossAppReload(page, () =>
+      page.evaluate(() => {
+        const header = document.querySelector('header');
+        if (!header) return null;
+        const rect = header.getBoundingClientRect();
+        return {
+          center: Math.round(rect.left + rect.width / 2),
+          midpoint: Math.round(window.innerWidth / 2),
+        };
+      }),
+    );
     expect(result, 'Header element not found').not.toBeNull();
     if (result) {
       expect(
@@ -226,4 +231,71 @@ test.describe('mobile-layout', () => {
 
     expect(hasUncaughtErrors(rec), 'Uncaught errors on mobile header check').toEqual([]);
   });
+});
+
+// Desktop uses the same opening surface but must center the art itself, rather
+// than the combined art/caption stack. Keep the real CSS geometry under test.
+test('desktop opening ASCII stays centered on the large grid tile', async ({ page }) => {
+  const rec = attachRecorder(page);
+  for (const viewport of [
+    { width: 1440, height: 900 },
+    { width: 768, height: 813 },
+  ]) {
+    await page.setViewportSize(viewport);
+    if (HAS_INJECTED_SESSION) await injectSemanticSession(page);
+    await page.goto(FRONTEND_URL, { waitUntil: 'domcontentloaded' });
+    await waitForDevLogin(page, rec);
+    // Dev login persists the browser-review user, whose reload opens Browse.
+    // Enter an empty chat through the same Home action a user would take.
+    const home = page.getByTestId('rose-home-project-row');
+    await page.mouse.move(viewport.width / 2, viewport.height / 2);
+    await page.getByTestId('rose-sidebar').hover({ position: { x: 30, y: 100 } });
+    await home.getByRole('button', { name: 'Create Super Agent', exact: true }).click();
+    const frame = page.locator('pre[data-ascii-layer="frame"]').first();
+    await expect(frame).toBeVisible();
+    const tile = page.locator('[data-testid="terminal-grid-background-layer"] rect[width="429"]');
+    await expect
+      .poll(
+        async () => {
+          const box = await frame.boundingBox();
+          const grid = await tile.boundingBox();
+          if (!box || !grid || box.height === 0) return Infinity;
+          return Math.max(
+            Math.abs(box.x + box.width / 2 - (grid.x + grid.width / 2)),
+            Math.abs(box.y + box.height / 2 - (grid.y + grid.height / 2)),
+          );
+        },
+        { message: 'ASCII center must match the large grid tile, independently of caption height' },
+      )
+      .toBeLessThan(2);
+  }
+});
+
+// Frozen from the November 3 render (0784fff6) in the pinned Playwright browser.
+test('desktop opening caption matches the November 3 reference geometry', async ({ page }) => {
+  for (const reference of [
+    { width: 1440, height: 900, x: 420, y: 518, captionHeight: 32 },
+    { width: 1280, height: 900, x: 339.984375, y: 500.515625, captionHeight: 28.4375 },
+    { width: 768, height: 900, x: 83.984375, y: 470.6875, captionHeight: 22.390625 },
+  ]) {
+    await page.setViewportSize({ width: reference.width, height: reference.height });
+    if (HAS_INJECTED_SESSION) await injectSemanticSession(page);
+    await page.goto(FRONTEND_URL, { waitUntil: 'domcontentloaded' });
+    const caption = page.getByTestId('opening-message-display');
+    await expect
+      .poll(
+        async () => {
+          const box = await caption.boundingBox();
+          if (!box) return Infinity;
+          return Math.max(
+            Math.abs(box.x - reference.x),
+            Math.abs(box.y - reference.y),
+            Math.abs(box.width - 600),
+            Math.abs(box.height - reference.captionHeight),
+          );
+        },
+        { message: 'Caption must match the historical rendered box within a tenth of a CSS pixel' },
+      )
+      .toBeLessThan(0.1);
+  }
 });

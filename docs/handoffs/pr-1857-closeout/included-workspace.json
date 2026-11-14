@@ -1,0 +1,34 @@
+{
+  "observed_at": "2026-11-08T22:25:34.220230+00:00",
+  "source_workspace": "/home/boxes/rose",
+  "head": "cf85beba8d87fa02212065c0560f32198f09de01",
+  "source_digest": "8151be07ba488847bb6845f04382b2836c05bf86ff2d5c098a09e7f3cd423ce6",
+  "included_paths": [
+    "docs/rca/cases/2026-11-08-background-child-vetoes-parent-thinking.md",
+    "front-end/src/features/terminal-component-group/components/useMessageList.ts",
+    "front-end/src/features/terminal-component-group/components/useThinkingVisibility.ts",
+    "front-end/src/tests/blackbox/message-list-thinking-visibility.blackbox.tsx"
+  ],
+  "owners": [
+    {
+      "thread": "ph7chyy9knyndf8rammrf6f60s8hvjs1",
+      "role": "sole source editor and deploy coordinator"
+    },
+    {
+      "thread": "ph739b039twaea285r52nx7j2h8hvk38",
+      "role": "read-only evidence/review, ignored private preservation only"
+    }
+  ],
+  "source_freeze": "cf85beba8d87fa02212065c0560f32198f09de01",
+  "worktree_inventory": "one canonical checkout; no isolated contributor worktrees",
+  "other_threads_inventory": "project-wide same-devbox discovery at source freeze found only these two threads; no outstanding source deliverables",
+  "historical_refs": "not active deliverables; inherited refs independently privately preserved; see closeout-prep",
+  "active_bug_scope_reconciliation": [
+    "PR1708 browser display/proxy provider selection",
+    "PR1743 browser lifecycle/custody cleanup",
+    "PR1697 browser session lifecycle",
+    "PR1826 stopped-agent resumes/work-history rendering"
+  ],
+  "outstanding_source_blockers": [],
+  "folder_membership_gap": "Bugs folder listing devboxes:null; project-wide active bug discovery used; feedback bef4906d053745a8940bc219786bfee6"
+}

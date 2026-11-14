@@ -1,0 +1,101 @@
+{
+  "format": "PR1905-PRIVATE-TAR-AESGCM-FRAMES-V1",
+  "label": "eaa-before-native-recovery-20261110T0617",
+  "created_at": "2026-11-10T06:12:00.366848+00:00",
+  "bucket": "trace-archive",
+  "prefix": "devbox-closeout-private/pr1905/eaa-before-native-recovery-20261110T0617",
+  "parts": [
+    {
+      "key": "devbox-closeout-private/pr1905/eaa-before-native-recovery-20261110T0617/evidence.part0000.aesgcm",
+      "sha256": "95fe34bd18f968d94f527ee1e11a90e811e8691ae36355d6b97f308b1039f2c4",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/eaa-before-native-recovery-20261110T0617/evidence.part0001.aesgcm",
+      "sha256": "4f1fad5cc34f8d29b563b01dcacc60523c043b78d02c7b3fe5b519c86ee004b3",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/eaa-before-native-recovery-20261110T0617/evidence.part0002.aesgcm",
+      "sha256": "5acd53bbf6212a962226ef71abd352327fa0dbb78a11aecf1ce6740fa8ec87f9",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/eaa-before-native-recovery-20261110T0617/evidence.part0003.aesgcm",
+      "sha256": "667b427969c42f4b562124c722ce1e85863a337880053865289a69293fe68118",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/eaa-before-native-recovery-20261110T0617/evidence.part0004.aesgcm",
+      "sha256": "05f35033f6e019b55a77ffb123191849a3e868463cae890953110fc7d095db8d",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/eaa-before-native-recovery-20261110T0617/evidence.part0005.aesgcm",
+      "sha256": "a324a476dd7e6e33bebf76c9b164aaf649cd0571e2f79fc94b510fb287212add",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/eaa-before-native-recovery-20261110T0617/evidence.part0006.aesgcm",
+      "sha256": "9a887b87d65f701f318e3afa80a002b88b07976e82acbc761fb770651d38c5b8",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/eaa-before-native-recovery-20261110T0617/evidence.part0007.aesgcm",
+      "sha256": "787e6f86eee703d85deb4606ac5276eca58377b0dead0ba2b0113ec6492ed4a0",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/eaa-before-native-recovery-20261110T0617/evidence.part0008.aesgcm",
+      "sha256": "bd6ba30aac7f0cb233156fd5c2976ff6bfbce6be0ccd57bc654013be35f1680c",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/eaa-before-native-recovery-20261110T0617/evidence.part0009.aesgcm",
+      "sha256": "f1380f59e82d64b275ae8bbbc24ab11567f83baf1cb876b20ea44478d59d7a8b",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/eaa-before-native-recovery-20261110T0617/evidence.part0010.aesgcm",
+      "sha256": "b1d0a48a875a420e278e048f416eeeac1b8cab2dca26d8a488d5f2defd981ac0",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/eaa-before-native-recovery-20261110T0617/evidence.part0011.aesgcm",
+      "sha256": "7299d63eabaa1bfcffa7ad9cf14c0fd509ca8406f7434e3e3cfe8f9e863e6edb",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/eaa-before-native-recovery-20261110T0617/evidence.part0012.aesgcm",
+      "sha256": "14284498a15c125c2af79c0f827b7669151430ffc687be9247e0bd0923b25e51",
+      "plain_bytes": 33554432
+    },
+    {
+      "key": "devbox-closeout-private/pr1905/eaa-before-native-recovery-20261110T0617/evidence.part0013.aesgcm",
+      "sha256": "1469dc564f96a027ff67bdbc38f2b7442a1c03485b02ec4a88eaf8269d623e86",
+      "plain_bytes": 11506998
+    }
+  ],
+  "sha256": "6c4dff5f0125f73deb32e9afa0d329bec80135d9c5a7c43a12e5a0be751fd8d3",
+  "member_count": 48602,
+  "member_manifest_sha256": "3724668f510a557b712cb766c8b1c77a10016c4495413a7f440edee7e6e4292e",
+  "full_readback_verified": true,
+  "authenticated_decryption_verified": true,
+  "all_member_hashes_verified": true,
+  "excludes": [
+    ".context/assigned-pr1885-failures/ascii-fixture-repro/checkout",
+    ".context/assigned-pr1885-failures/cloud-smoke-rca/activation-checkout",
+    ".context/assigned-pr1885-failures/recovery-check",
+    ".context/assigned-pr1885-failures/original",
+    ".context/assigned-pr1885-failures/native-evidence.tar.gz",
+    ".context/assigned-pr1885-failures/private-preservation",
+    ".context/assigned-pr1885-failures/auth-options-rca/baseline/digest-clone",
+    ".context/frontend-builds",
+    ".context/tsbuildinfo"
+  ],
+  "original_evidence_reference": "attachments/failure-evidence-receipt--bbe0d10ee40a41921ea3.json",
+  "original_verified_members": 1948,
+  "raw_logs_private": true,
+  "snapshot_not_final_closeout": true,
+  "catalog_manifest_sha256": "3724668f510a557b712cb766c8b1c77a10016c4495413a7f440edee7e6e4292e"
+}

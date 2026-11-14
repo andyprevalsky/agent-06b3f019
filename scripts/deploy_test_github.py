@@ -57,6 +57,10 @@ CHANNEL_POLL_SECONDS = 15.0     # R2 GETs: no GitHub quota
 LIVENESS_SECONDS = 600.0        # one REST status read per gate every 10 min
 STREAM_SECONDS = 5.0            # VM -> R2 progress uploads while the worker runs
 CANCEL_SECONDS = 180.0       # cancel request -> run completed (VM destroyed)
+# After TERM/INT/HUP or parent exit: find, cancel and confirm the launched run inside the owning
+# supervisor's 10 s TERM grace (deploy_test_supervisor.TERM_GRACE_SECONDS), then write the receipt.
+STOP_CANCEL_SECONDS = 7.0
+PARENT_POLL_SECONDS = 1.0
 MAX_ARTIFACT_BYTES = 512 * 1024 * 1024
 PUSH_ATTEMPTS = 4
 MAX_RESULT_BYTES = 64 * 1024 * 1024
@@ -67,6 +71,24 @@ SERVICE_LOGS = ('back-end/backend-logs.log', 'agents/navi-worker-log.txt', 'fron
 BUNDLE_SUMMARIES = ('summary.json', 'manifest.json')  # small run indexes RCA reads first
 LOG_TREES = ('back-end/coverage', 'front-end/coverage', 'agents/coverage', 'front-end/test-results')
 STOP = threading.Event()
+STOPPED = {'at': None, 'cause': None}
+
+
+def request_stop(cause: str) -> None:
+    if STOPPED['at'] is None:
+        STOPPED.update(at=time.time(), cause=cause)
+    STOP.set()
+
+
+def stop_bound() -> float:
+    return (STOPPED['at'] or time.time()) + STOP_CANCEL_SECONDS
+
+
+def watch_parent(parent: int) -> None:
+    """A launcher whose supervisor/cycle died (SIGKILL, OOM) still cancels the run it launched."""
+    while not STOP.wait(PARENT_POLL_SECONDS):
+        if os.getppid() != parent:
+            request_stop('parent exited')
 
 
 # ---------------------------------------------------------------- shared helpers
@@ -90,12 +112,30 @@ def tag_name(runner: str, gate: str, token: str) -> str:
     return f'{TAG_PREFIX}/{match.group(1)}vcpu/{safe_name(gate)}-{hashlib.sha256(token.encode()).hexdigest()[:16]}'
 
 
+OVERRIDES_ENV = 'DEPLOY_GATE_OVERRIDES'
+OVERRIDE_NAME = re.compile(r'[a-z0-9][a-z0-9_.:-]*')
+
+
+def gate_overrides(value: str | None = None) -> str:
+    """The user-elected harness overrides (deploy.md: an override names its gate explicitly), as the
+    comma list the suites read from DEPLOY_GATE_OVERRIDES. The coordinator's value is part of the cycle's
+    bound environment; remote gates receive it through the envelope, since a VM's env is its own."""
+    raw = os.environ.get(OVERRIDES_ENV, '') if value is None else value
+    names = [part.strip() for part in raw.split(',') if part.strip()]
+    if any(not OVERRIDE_NAME.fullmatch(name) for name in names):
+        raise ValueError(f'invalid {OVERRIDES_ENV} entry in {raw!r}')
+    return ','.join(sorted(set(names)))
+
+
 def envelope(request: dict, worker_script: str, runner: str) -> bytes:
     if worker_script not in WORKER_SCRIPTS:
         raise ValueError(f'unsupported worker script: {worker_script}')
     if request.get('worker_root') != REMOTE_ROOT:
         raise ValueError(f'remote gates must bind worker_root {REMOTE_ROOT}')
     body = {'version': ENVELOPE_VERSION, 'worker_script': worker_script, 'runner': runner, 'request': request}
+    overrides = gate_overrides()
+    if overrides:  # absent when none, so the deterministic tag of an ordinary request is unchanged
+        body['overrides'] = overrides
     return (json.dumps(body, sort_keys=True, separators=(',', ':')) + '\n').encode()
 
 
@@ -144,53 +184,181 @@ def repository(root: Path) -> str:
     return match.group(1)
 
 
+def rate_limit_pause(headers, now: float) -> float:
+    """Seconds until GitHub says the limit lifts: Retry-After (secondary), else X-RateLimit-Reset (primary).
+
+    GitHub documents waiting at least a minute when a secondary limit names neither.
+    """
+    for name, base in (('Retry-After', 0.0), ('X-RateLimit-Reset', now - 1.0)):
+        try:
+            return max(float(headers[name]) - base, 1.0)
+        except (KeyError, TypeError, ValueError):
+            continue
+    return 60.0
+
+
+READ_METHODS = ('GET', 'HEAD')
+READ_REPICK_SECONDS = 1500.0    # App installation tokens live an hour; re-pick the read member well before
+READ_REPICK_RETRY_SECONDS = 60.0  # a failed pick is not retried on every request
+READ_LOW_REMAINING = 200        # re-pick once the read member's own X-RateLimit-Remaining runs low
+
+
+def identity(token: str) -> str:
+    """A non-secret key for one credential: ETags and cached bodies are per identity."""
+    return hashlib.sha256(token.encode()).hexdigest()[:16]
+
+
+def pick_read_member(root: Path) -> tuple[str, str] | None:
+    """(name, token) of the token-pool member with the most core quota, for READ-ONLY REST calls.
+
+    DEPLOY_GATE_GITHUB_POOL=0 keeps every read on the launch identity. Any pool failure does the same.
+    """
+    if os.environ.get('DEPLOY_GATE_GITHUB_POOL', '1') == '0':
+        return None
+    try:
+        import github_token_pool
+        member = github_token_pool.pick_member('core', repo_root=root, timeout=5.0)
+    except Exception as error:  # advisory: reads fall back to the launch identity
+        print(f'DEPLOY_GATE_GITHUB_POOL pick failed ({type(error).__name__}); reads use the launch token', flush=True)
+        return None
+    return (member.name, member.token) if member else None
+
+
 class GitHub:
-    def __init__(self, token: str, repo: str):
+    """REST client. Writes (POST cancel) always use `token`, the launch identity that pushed the tag.
+
+    Reads (GET) use the token-pool member with the most quota when a `read_picker` is given, then
+    retry with `token` when that member answers 401/403/404 (not authoritative: it may lack access)
+    or is itself rate limited. Only the launch identity's answer, or its rate-limit wait, is final.
+    """
+
+    def __init__(self, token: str, repo: str, deadline: float | None = None, read_picker=None):
         self.token, self.repo, self.etags, self.cache = token, repo, {}, {}
         self.rate_limited_seconds = 0.0  # time spent waiting out the shared REST quota, for the receipt
+        self.deadline = deadline  # epoch the caller must be done by; a rate-limit wait never passes it
+        self.read_picker = read_picker
+        self.read_name, self.read_token, self.read_remaining = None, None, None
+        self.read_picked_at = self.read_attempted_at = float('-inf')
+        self.read_fallbacks = 0  # reads a pool member could not answer, retried with the launch token
+        self.read_denied: set[str] = set()  # pool identities refused (401/403/404) where the launch token was not
+        self.served = identity(token)  # identity that produced the last response (selects the 304 cache)
+        self.until = None  # epoch every request must finish by (the stop-cancel bound); None: 60 s per request
 
-    def request(self, method: str, path: str, *, conditional: bool = False, redirect: bool = True):
-        url = path if path.startswith('https://') else f'{API}/repos/{self.repo}{path}'
-        req = urllib.request.Request(url, method=method, headers={
-            'Authorization': f'Bearer {self.token}', 'Accept': 'application/vnd.github+json',
-            'X-GitHub-Api-Version': '2022-11-28', 'User-Agent': 'rose-deploy-gates'})
-        if conditional and url in self.etags:
-            req.add_header('If-None-Match', self.etags[url])
-        opener = urllib.request.build_opener(*([] if redirect else [NoRedirect()]))
-        for attempt in range(5):
+    def _read(self) -> str | None:
+        """The pool member's token for a read, re-picked when stale or low; None means use `token`."""
+        if self.read_picker is None:
+            return None
+        now = time.time()
+        denied = self.read_token is not None and identity(self.read_token) in self.read_denied
+        stale = (self.read_token is None or denied or now - self.read_picked_at >= READ_REPICK_SECONDS
+                 or (self.read_remaining is not None and self.read_remaining < READ_LOW_REMAINING))
+        if stale and now - self.read_attempted_at >= READ_REPICK_RETRY_SECONDS:
+            self.read_attempted_at = now
+            picked = self.read_picker()
+            if picked and identity(picked[1]) not in self.read_denied:  # never hand out a denied member again
+                (self.read_name, self.read_token), self.read_picked_at, self.read_remaining = picked, now, None
+        token = self.read_token
+        return token if token and token != self.token and identity(token) not in self.read_denied else None
+
+    def tokens(self, method: str) -> list[str]:
+        # A bounded stop window (until) spends nothing on a pool pick or a second identity: launch token only.
+        read = self._read() if method in READ_METHODS and self.until is None else None
+        return [read, self.token] if read else [self.token]
+
+    def _settle_denied(self, denied: str | None, token: str) -> None:
+        """A pool member's 401/403/404 is remembered only once the launch token answered the same read."""
+        if denied is not None and token == self.token:
+            self.read_denied.add(denied)
+
+    def _note_quota(self, token: str, headers) -> None:
+        if token == self.read_token:
             try:
-                with opener.open(req, timeout=60) as response:
+                self.read_remaining = int(headers.get('X-RateLimit-Remaining'))
+            except (AttributeError, TypeError, ValueError):
+                pass
+
+    def request(self, method: str, path: str, *, conditional: bool = False, redirect: bool = True,
+                wait_on_rate_limit: bool = True):
+        url = path if path.startswith('https://') else f'{API}/repos/{self.repo}{path}'
+        opener = urllib.request.build_opener(*([] if redirect else [NoRedirect()]))
+        tokens, index, attempt = self.tokens(method), 0, 0
+        denied = None  # identity of a pool member that refused this read, pending the launch token's answer
+        while attempt < 5:
+            if self.until is not None and time.time() >= self.until:
+                raise urllib.error.URLError(f'stop-cancel bound exhausted before {method} {path}')
+            token = tokens[index]
+            key = identity(token)
+            req = urllib.request.Request(url, method=method, headers={
+                'Authorization': f'Bearer {token}', 'Accept': 'application/vnd.github+json',
+                'X-GitHub-Api-Version': '2022-11-28', 'User-Agent': 'rose-deploy-gates'})
+            if conditional and (key, url) in self.etags:
+                req.add_header('If-None-Match', self.etags[(key, url)])
+            try:
+                timeout = 60.0 if self.until is None else max(0.5, min(60.0, self.until - time.time()))
+                with opener.open(req, timeout=timeout) as response:
                     body = response.read()
+                    self.served = key
+                    self._settle_denied(denied, token)
+                    self._note_quota(token, response.headers)
                     if conditional and response.headers.get('ETag'):
-                        self.etags[url] = response.headers['ETag']
-                        self.cache[url] = json.loads(body or b'null')
+                        self.etags[(key, url)] = response.headers['ETag']
+                        self.cache[(key, url)] = json.loads(body or b'null')
                     return response.status, response.headers, body
             except urllib.error.HTTPError as error:
-                if error.code == 304 and url in self.cache:
+                self.served = key
+                if error.code == 304 and (key, url) in self.cache:
+                    self._settle_denied(denied, token)
                     return 304, error.headers, None
                 if error.code in (301, 302, 303, 307, 308) and not redirect:
                     return error.code, error.headers, b''
-                if error.code in (403, 429) and 'rate limit' in error.read().decode(errors='replace').lower():
-                    reset = float(error.headers.get('X-RateLimit-Reset') or time.time() + 60)
-                    pause = min(max(reset - time.time(), 5), 300)
-                    print(f'DEPLOY_GATE_RATE_LIMITED waiting {pause:.0f}s', flush=True)
+                try:
+                    text = error.read().decode(errors='replace').lower()
+                except (AttributeError, OSError, ValueError):
+                    text = ''
+                limited = error.code in (403, 429) and 'rate limit' in text
+                if index + 1 < len(tokens) and (limited or error.code in (401, 403, 404)):
+                    # A pool member's 401/403/404 is not authoritative and its quota is not the launch
+                    # identity's: ask the launch token before treating this as GitHub's answer.
+                    if not limited:
+                        denied = key  # remembered only if the launch token then answers (both 404: GitHub's answer)
+                    index += 1
+                    self.read_fallbacks += 1
+                    if limited or error.code == 401:
+                        # Expired or drained: re-pick on the next read (one pick per such answer).
+                        self.read_picked_at = self.read_attempted_at = float('-inf')
+                    continue
+                if limited:
+                    if not wait_on_rate_limit:
+                        raise  # Advisory liveness must not block the authoritative R2 result poll.
+                    now = time.time()
+                    pause = rate_limit_pause(error.headers, now)
+                    if self.deadline is not None:
+                        if self.deadline - now <= 0:
+                            raise  # the caller's deadline is spent; its own timeout path reports it
+                        pause = min(pause, self.deadline - now)
+                    print(f'DEPLOY_GATE_RATE_LIMITED waiting {pause:.0f}s (until '
+                          f'{time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now + pause))})', flush=True)
                     self.rate_limited_seconds += pause
                     STOP.wait(pause)
+                    attempt += 1
+                    tokens, index = self.tokens(method), 0
                     continue
                 if error.code >= 500 and attempt < 4:
                     STOP.wait(2 ** attempt)
+                    attempt += 1
                     continue
                 raise
             except (urllib.error.URLError, TimeoutError):
                 if attempt == 4:
                     raise
                 STOP.wait(2 ** attempt)
+                attempt += 1
         raise RuntimeError(f'GitHub API {method} {path} kept failing')
 
-    def json(self, path: str, conditional: bool = False):
-        status, _, body = self.request('GET', path, conditional=conditional)
+    def json(self, path: str, conditional: bool = False, *, wait_on_rate_limit: bool = True):
+        status, _, body = self.request('GET', path, conditional=conditional, wait_on_rate_limit=wait_on_rate_limit)
         url = path if path.startswith('https://') else f'{API}/repos/{self.repo}{path}'
-        return self.cache[url] if status == 304 else json.loads(body)
+        return self.cache[(self.served, url)] if status == 304 else json.loads(body)
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -301,13 +469,14 @@ class WorkflowRejected(Exception):
     """GitHub refused the workflow file at this commit; the run never owned a VM."""
 
 
-def find_run(gh: GitHub, head: str, name: str, deadline: float, pushed: float) -> dict | None:
+def find_run(gh: GitHub, head: str, name: str, deadline: float, pushed: float, stopping: bool = False) -> dict | None:
     # Filter by path, not the by-filename endpoint: that 404s until the workflow is on the default branch.
     # head_branch is the tag for a tag push; the small filtered list rarely changes, so most polls are 304s.
     path = f'/actions/runs?event=push&head_sha={head}&branch={urllib.parse.quote(name, safe="")}&per_page=20'
     unnamed = f'/actions/runs?event=push&head_sha={head}&per_page=20'
     rejected_since = None
-    while time.time() < deadline and not STOP.is_set():
+    # `stopping`: the tag was pushed before the stop, so its run may exist although nothing named it yet.
+    while time.time() < deadline and (stopping or not STOP.is_set()):
         mine = [r for r in gh.json(path, conditional=True).get('workflow_runs', [])
                 if r.get('path') == WORKFLOW_PATH and r.get('head_branch') == name]
         if mine:
@@ -320,8 +489,25 @@ def find_run(gh: GitHub, head: str, name: str, deadline: float, pushed: float) -
             rejected_since = rejected_since or time.time()
             if time.time() - rejected_since > 30:
                 raise WorkflowRejected(f"GitHub rejected {WORKFLOW_PATH} at {head}: {invalid[0].get('html_url')}")
-        STOP.wait(START_POLL_SECONDS)
+        if stopping:
+            time.sleep(min(1.0, max(0.0, deadline - time.time())))
+        else:
+            STOP.wait(START_POLL_SECONDS)
     return None
+
+
+def launched_run(gh: GitHub, head: str, name: str, deadline: float, pushed: float) -> dict | None:
+    """find_run, then (once stopped) one bounded lookup of the run this tag push started."""
+    run = find_run(gh, head, name, deadline, pushed)
+    if run is None and STOP.is_set():
+        gh.until = stop_bound()
+        try:
+            run = find_run(gh, head, name, gh.until, pushed, stopping=True)
+        except (WorkflowRejected, urllib.error.URLError, RuntimeError, OSError):
+            run = None
+        finally:
+            gh.until = None
+    return run
 
 
 def iso_epoch(value: str | None) -> float:
@@ -337,18 +523,20 @@ def wait_run(gh: GitHub, run_id: int, deadline: float) -> dict:
         STOP.wait(min(POLL_SECONDS, max(1.0, deadline - time.time())))
 
 
-def cancel_run(gh: GitHub, run_id: int) -> dict:
+def cancel_run(gh: GitHub, run_id: int, end: float | None = None, note: dict | None = None) -> dict:
     try:
         gh.request('POST', f'/actions/runs/{run_id}/cancel')
     except urllib.error.HTTPError as error:
         if error.code != 409:  # 409: already completed
             raise
-    end = time.time() + CANCEL_SECONDS
+    if note is not None:
+        note['cancel_requested_at'] = time.time()
+    end = time.time() + CANCEL_SECONDS if end is None else end
     while time.time() < end:
-        run = gh.json(f'/actions/runs/{run_id}')
+        run = gh.json(f'/actions/runs/{run_id}', conditional=True)  # a 5 s poll; unchanged reads are free 304s
         if run.get('status') == 'completed':
             return run
-        time.sleep(5)
+        time.sleep(max(0.0, min(5.0, end - time.time())))
     return gh.json(f'/actions/runs/{run_id}')
 
 
@@ -424,7 +612,8 @@ def launch(args) -> int:
     started = time.time()
     deadline = started + args.deadline_seconds - CANCEL_SECONDS
     for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
-        signal.signal(sig, lambda *_: STOP.set())
+        signal.signal(sig, lambda number, _frame: request_stop(signal.Signals(number).name))
+    threading.Thread(target=watch_parent, args=(os.getppid(),), daemon=True).start()
 
     def finish(result: dict) -> int:
         result.setdefault('remote', {})
@@ -447,7 +636,8 @@ def launch(args) -> int:
     except (KeyError, ValueError, OSError, subprocess.CalledProcessError, urllib.error.URLError) as error:
         detail = error.stderr.decode(errors='replace')[-2000:] if isinstance(error, subprocess.CalledProcessError) else ''
         return finish(blocked(request, f'remote gate launch failed: {error} {detail}'.strip()))
-    gh = GitHub(token, repo)
+    # Watching stops CANCEL_SECONDS early so a cancel still fits; a rate-limit wait keeps that window too.
+    gh = GitHub(token, repo, deadline=deadline, read_picker=lambda: pick_read_member(root))
     folder = result_path.parent / 'remote-artifact'
     try:
         channel = Channel(env_file_values(root))
@@ -463,13 +653,26 @@ def launch(args) -> int:
         return finish(blocked(request, str(error), receipt={'transport': TRANSPORT, 'tag': name}))
     kind, receipt = outcome['kind'], outcome.get('receipt') or {'transport': TRANSPORT, 'tag': name}
     receipt['rate_limited_seconds'] = gh.rate_limited_seconds
+    receipt.update(read_identity=gh.read_name, read_fallbacks=gh.read_fallbacks)  # names only, never tokens
+    gh.deadline = started + args.deadline_seconds  # cancel, receipts and artifacts may use the reserved window
+    if STOP.is_set():
+        receipt['stop_cause'] = STOPPED['cause']
     if kind == 'never-started':
         delete_tag(root, token, repo, name)  # Nothing started that we can name; the tag alone owns no VM.
+        if STOP.is_set():
+            receipt['run_lookup'] = f'no run named {name} within the stop-cancel bound'
         reason = 'cancelled before the remote run started' if STOP.is_set() else 'deploy-gates workflow run never started'
         return finish(blocked(request, reason, receipt=receipt))
     if kind == 'unfinished':
         reason = 'cancelled' if STOP.is_set() else 'existing gate deadline exhausted'
-        run = cancel_run(gh, receipt['run_id'])
+        end = stop_bound() if STOP.is_set() else None
+        gh.until = end  # stopped: every cancel request fits the supervisor's TERM grace
+        try:
+            run = cancel_run(gh, receipt['run_id'], end, note=receipt)
+        except (urllib.error.URLError, RuntimeError, OSError) as error:  # best effort: the owner is retained
+            run = {}
+            receipt['cancel_error'] = f'{type(error).__name__}: {error}'[:300]
+        gh.until = None
         confirmed = run.get('status') == 'completed'
         receipt.update(status=run.get('status'), conclusion=run.get('conclusion'))
         if confirmed:
@@ -514,7 +717,7 @@ def launch(args) -> int:
 
 
 def watch_rest(gh: GitHub, head: str, name: str, deadline: float, pushed: float) -> dict:
-    run = find_run(gh, head, name, min(deadline, time.time() + START_SECONDS), pushed)
+    run = launched_run(gh, head, name, min(deadline, time.time() + START_SECONDS), pushed)
     if run is None:
         return {'kind': 'never-started'}
     print(f'DEPLOY_GATE_REMOTE_RUN {run["html_url"]}', flush=True)
@@ -580,6 +783,8 @@ def watch_channel(gh: GitHub, channel: 'Channel', head: str, name: str, deadline
                 # Silent channel: a rejected workflow, a setup failure before the env bundle, or no runner yet.
                 run = find_run(gh, head, name, time.time() + 30, pushed)
                 if run is None:
+                    if STOP.is_set():
+                        break  # stopped mid-lookup: the bounded lookup below still names the run
                     return {'kind': 'never-started'}
                 receipt = {'transport': TRANSPORT, 'run_id': run['id'], 'url': run.get('html_url'), 'tag': name}
                 print(f"DEPLOY_GATE_REMOTE_RUN {receipt['url']}", flush=True)
@@ -587,7 +792,7 @@ def watch_channel(gh: GitHub, channel: 'Channel', head: str, name: str, deadline
             # A run that ended without done.json (VM lost, setup died early) must not wait out the deadline.
             checked = time.time()
             try:
-                run = gh.json(f"/actions/runs/{receipt['run_id']}", conditional=True)
+                run = gh.json(f"/actions/runs/{receipt['run_id']}", conditional=True, wait_on_rate_limit=False)
             except urllib.error.HTTPError:
                 run = {}
             if run.get('status') == 'completed' and channel.get(name, 'done.json') is None:
@@ -596,7 +801,7 @@ def watch_channel(gh: GitHub, channel: 'Channel', head: str, name: str, deadline
                     return {'kind': 'rest', 'receipt': job_receipt(gh, run)}
         STOP.wait(START_POLL_SECONDS if receipt is None else CHANNEL_POLL_SECONDS)
     if receipt is None:
-        run = find_run(gh, head, name, time.time() + 30, pushed)
+        run = launched_run(gh, head, name, time.time() + 30, pushed)
         if run is None:
             return {'kind': 'never-started'}
         receipt = {'transport': TRANSPORT, 'run_id': run['id'], 'url': run.get('html_url'), 'tag': name}
@@ -624,6 +829,7 @@ def remote_extract(args) -> int:
         raise SystemExit('deploy-gates envelope does not match this checkout and tag')
     (out / 'request.json').write_text(json.dumps(request))
     (out / 'worker_script').write_text(body['worker_script'])
+    (out / 'overrides').write_text(gate_overrides(body.get('overrides', '')))
     timing = {'job_started_at': float(os.environ.get('DEPLOY_GATE_T0') or time.time()), 'extracted_at': time.time()}
     (out / 'timing.json').write_text(json.dumps(timing))
     print(f"gate={request['gate']} worker={body['worker_script']} checks={len(request['checks'])}")
@@ -676,6 +882,11 @@ def remote_run(args) -> int:
     timing['timing_run_started'] = started.returncode == 0
     env = {**os.environ, 'DEPLOY_GATE_REQUEST': str(out / 'request.json'), 'DEPLOY_GATE_RESULT': str(out / 'result.json'),
            progress.ENV: str(out / 'progress.jsonl')}
+    env.pop(OVERRIDES_ENV, None)  # only the coordinator's elected overrides apply, never the VM's own env
+    overrides = (out / 'overrides').read_text().strip() if (out / 'overrides').is_file() else ''
+    if overrides:
+        env[OVERRIDES_ENV] = gate_overrides(overrides)
+        print(f'DEPLOY_GATE_OVERRIDDEN {overrides} (user-elected; the overridden cases do not run)', flush=True)
     streamer = None
     try:
         streamer = ProgressStreamer(Channel(env_file_values(ROOT)), os.environ['GITHUB_REF_NAME'], out / 'progress.jsonl')
@@ -718,6 +929,35 @@ def remote_bundle(args) -> int:
         for row in (json.loads((out / 'result.json').read_text()).get('evidence') or {}).values():
             if isinstance(row, dict):
                 paths.update(v for k, v in row.items() if isinstance(v, str) and v.startswith(str(root) + '/'))
+    # The native dump producers both write <checkout>/.llm-dumps/<agent>/*.json.
+    # Retain existing dev dumps only; never enable dumping or read session configs.
+    dumps = root / '.llm-dumps'
+    if dumps.is_dir() and not dumps.is_symlink():
+        paths.update(str(p) for p in dumps.glob('*/*.json') if p.is_file())
+    # run.sh publishes actual service paths; local_worker_supervisor.py writes
+    # worker 0 there and additional streams as <stem>.<index><suffix>.
+    service_logs = {root / rel for rel in SERVICE_LOGS}
+    for manifest in (root / '.context').rglob('services.json'):
+        if manifest.is_symlink() or not manifest.is_file() or manifest.stat().st_size > 65536:
+            continue
+        try:
+            document = json.loads(manifest.read_text())
+            logs = document.get('logs', {}) if isinstance(document, dict) else {}
+            for name in ('backend', 'frontend', 'worker'):
+                raw = logs.get(name) if isinstance(logs, dict) else None
+                if isinstance(raw, str):
+                    path = Path(raw)
+                    service_logs.add(path if path.is_absolute() else root / path)
+        except (OSError, ValueError):
+            continue
+    for path in tuple(service_logs):
+        if path.name and root in path.absolute().parents:
+            for sibling in path.parent.glob(f'{path.stem}.*{path.suffix}'):
+                index = sibling.name[len(path.stem) + 1:len(sibling.name) - len(path.suffix) or None]
+                if index.isdigit():
+                    service_logs.add(sibling)
+    paths.update(str(p) for p in service_logs if p.is_file())
+    # Existing dumps and all actual service streams outrank bulk cache JSON.
     evidence = frozenset(paths)
     # Everything a gate leaves for RCA: its .context state and logs plus the stack's service logs.
     # Caches and dependency trees stay behind; per-file and total caps bound the artifact.
@@ -731,10 +971,18 @@ def remote_bundle(args) -> int:
         if (root / rel).is_dir():
             paths.update(str(p) for p in (root / rel).rglob('*')
                          if p.is_file() and not p.is_symlink() and p.suffix in ('.log', '.json', '.txt'))
-    total, skipped = 0, []
+    total, skipped, captured = 0, [], []
     for raw in sorted(paths, key=lambda p: bundle_priority(Path(p), evidence)):
         path = Path(raw)
-        if not path.is_file() or root not in path.resolve().parents:
+        if not path.is_file() or root not in path.absolute().parents or root not in path.resolve().parents:
+            continue
+        relative = path.absolute().relative_to(root)
+        # Reject every symlink component, including aliases to in-checkout secrets.
+        if any((root.joinpath(*relative.parts[:i])).is_symlink() for i in range(1, len(relative.parts) + 1)):
+            skipped.append({'path': str(relative), 'reason': 'symlink'})
+            continue
+        if any(part in {'.rose', '.codex'} or part == '.env' or part.startswith('.env.') for part in relative.parts):
+            skipped.append({'path': str(relative), 'reason': 'private_config'})
             continue
         size = path.stat().st_size
         if size > BUNDLE_FILE_BYTES or total + size > BUNDLE_TOTAL_BYTES:
@@ -743,8 +991,10 @@ def remote_bundle(args) -> int:
         target = artifact / 'files' / path.resolve().relative_to(root)
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(path, target)
+        captured.append({'path': str(target.relative_to(artifact / 'files')), 'bytes': size,
+                         'sha256': hashlib.sha256(target.read_bytes()).hexdigest()})
         total += size
-    (artifact / 'bundle.json').write_text(json.dumps({'bytes': total, 'skipped': skipped}, indent=1))
+    (artifact / 'bundle.json').write_text(json.dumps({'bytes': total, 'skipped': skipped, 'captured': captured}, indent=1))
     publish_done(out, artifact)
     return 0
 

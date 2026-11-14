@@ -59,6 +59,7 @@ import {
 
 export {
   BrowserProviderRateLimitError,
+  BrowserSessionValidationError,
   type BrowserFileInfo,
   type BrowserProviderName,
   type BrowserSessionHealth,
@@ -160,13 +161,18 @@ export async function createSessionWithContextUsingDependencies(
   dependencies: BrowserSessionCreationDependencies
 ): Promise<BrowserProviderSession> {
   const requiredSteelProfileId = options?.requiredSteelProfileId;
-  const preferred =
+  const defaultProvider =
+    requiredSteelProfileId !== undefined ? 'steel' : dependencies.defaultProvider();
+  const learned =
     requiredSteelProfileId === undefined
       ? compatiblePreferredBrowserConfig(
           await dependencies.readPreferredConfig(contextId),
           proxyLocation
         )
       : null;
+  // Recovery preferences tune the selected provider; they never select a different
+  // provider for a fresh session. Resume dispatch follows the existing row.
+  const preferred = learned?.provider === defaultProvider ? learned : null;
   const createForProvider = async (
     provider: BrowserProviderName,
     usePreference: typeof preferred
@@ -230,9 +236,6 @@ export async function createSessionWithContextUsingDependencies(
   }
 
   let fallback: BrowserProviderSelection | undefined;
-  if (preferred !== null && preferred.provider === 'tilion' && !tilionEnabled()) {
-    fallback = { requestedProvider: 'tilion', fallbackReason: 'preferred_provider_kill_switch' };
-  }
   if (
     preferred !== null &&
     (preferred.provider !== 'browser-use' || browserUseEnabled()) &&
@@ -255,7 +258,6 @@ export async function createSessionWithContextUsingDependencies(
     }
   }
   // A failure of the default provider propagates (typed by the adapter); never swallowed.
-  const defaultProvider = dependencies.defaultProvider();
   if (fallback === undefined && defaultProvider === 'kernel' && tilionKillSwitchRedirect()) {
     fallback = { requestedProvider: 'tilion', fallbackReason: 'tilion_kill_switch' };
   }
@@ -282,45 +284,52 @@ export async function closeSession(
   sessionId: string,
   pause = false,
   currentUrl?: string,
-  worldState: { signedInSites?: string[] } = {}
+  worldState: { signedInSites?: string[]; signal?: AbortSignal } = {}
 ): Promise<{ worldState: WorldStateMergeReceipt | null }> {
   const logical = await prisma.browserSession.findUnique({
     where: { sessionId },
     select: { id: true, logicalOwnerKey: true },
   });
-  return withLogicalBrowserPause(logical, sessionId, pause, async (providerPause) => {
-    // A logical pause keeps its state private in the checkpoint. Retiring a
-    // logical browser ends that state, so its verified logins are published like
-    // any other browser's: the harvest takes only realms with sign-in evidence on
-    // this exact session.
-    if (!(pause && logical?.logicalOwnerKey))
-      await persistSignedInBrowserState(sessionId, { currentUrl }).catch((error) => {
-        log.warn('Failed to persist signed-in browser state before close', {
-          sessionId,
-          error: error instanceof Error ? error.message : String(error),
-        });
-      });
-    // Root world state (A6): merge the sites this task forked while its browser
-    // still exists. Best-effort and bounded; never blocks the provider release.
-    const merged = logical?.logicalOwnerKey
-      ? null
-      : await mergeSessionWorldState(sessionId, {
-          signedInSites: worldState.signedInSites,
-        }).catch((error: unknown) => {
-          log.warn('Failed to merge browser world state before close', {
+  return withLogicalBrowserPause(
+    logical,
+    sessionId,
+    pause,
+    async (providerPause) => {
+      // A logical pause keeps its state private in the checkpoint. Retiring a
+      // logical browser ends that state, so its verified logins are published like
+      // any other browser's: the harvest takes only realms with sign-in evidence on
+      // this exact session.
+      if (!(pause && logical?.logicalOwnerKey))
+        await persistSignedInBrowserState(sessionId, { currentUrl }).catch((error) => {
+          log.warn('Failed to persist signed-in browser state before close', {
             sessionId,
             error: error instanceof Error ? error.message : String(error),
           });
-          return null;
         });
-    const provider = await providerForSession(sessionId);
-    if (provider === 'kernel') await closeKernelSession(sessionId, providerPause, currentUrl);
-    else if (provider === 'browser-use')
-      await closeBrowserUseSession(sessionId, providerPause, currentUrl);
-    else if (provider === 'tilion') await closeTilionSession(sessionId, providerPause, currentUrl);
-    else await closeSteelSession(sessionId, providerPause, currentUrl);
-    return { worldState: merged };
-  });
+      // Root world state (A6): merge the sites this task forked while its browser
+      // still exists. Best-effort and bounded; never blocks the provider release.
+      const merged = logical?.logicalOwnerKey
+        ? null
+        : await mergeSessionWorldState(sessionId, {
+            signedInSites: worldState.signedInSites,
+          }).catch((error: unknown) => {
+            log.warn('Failed to merge browser world state before close', {
+              sessionId,
+              error: error instanceof Error ? error.message : String(error),
+            });
+            return null;
+          });
+      const provider = await providerForSession(sessionId);
+      if (provider === 'kernel') await closeKernelSession(sessionId, providerPause, currentUrl);
+      else if (provider === 'browser-use')
+        await closeBrowserUseSession(sessionId, providerPause, currentUrl);
+      else if (provider === 'tilion')
+        await closeTilionSession(sessionId, providerPause, currentUrl);
+      else await closeSteelSession(sessionId, providerPause, currentUrl);
+      return { worldState: merged };
+    },
+    worldState.signal
+  );
 }
 
 export async function resumeSession(

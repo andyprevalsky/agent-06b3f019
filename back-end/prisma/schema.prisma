@@ -102,6 +102,10 @@ model Agent {
   memoryEnabled                    Boolean                     @default(true)
   isBenchmark                      Boolean                     @default(false)
   githubRepoUrl                    String?
+  /// Canonical connected-repo ref (`gh:<owner>/<repo>`, GithubRepoConnection.canonicalRef)
+  /// resolved at create: explicit override > parent's ref > the project's connection.
+  /// A ref, not a FK: it survives disconnect/reconnect; access is checked on use.
+  githubRepoRef                    String?
   /// LocalDevice.id of the Rose Mac app that started this root agent (C14).
   /// Null for web/PWA/SMS roots and for sub-agents (they resolve it via busId).
   originDeviceId                   String?
@@ -478,6 +482,8 @@ model User {
   projectCliLogins            ProjectCliLogin[]
   iphoneDevice                IPhoneDevice?
   iphoneLeases                IPhoneLease[]
+  ownedTeams                  Team[]
+  teamMemberships             TeamMember[]
 
   @@index([userId])
   @@index([inviteCode])
@@ -685,6 +691,9 @@ model ClaudeCodeSession {
   sandboxId                String
   streamUrl                String?
   goal                     String
+  /// The spawn's task_name (spawn_agent type=code); the agents list shows it as
+  /// the code agent's title. Null for legacy rows and internal callers.
+  taskName                 String?
   status                   ClaudeCodeSessionStatus @default(ACTIVE)
   output                   String?
   createdAt                DateTime                @default(now())
@@ -817,6 +826,36 @@ model GithubRepoAccess {
 
   @@unique([userId, repoUrl])
   @@index([userId])
+}
+
+/// A GitHub repository connected on the integrations panel ("github_repo"
+/// Integration row, accountId = canonicalRef). Replaces the project-level repo
+/// connection: a Project is now only a folder, and the repo it used to carry is
+/// imported here (source = legacy_project) with connectedRoseProjectRef pointing
+/// back at it. Clone permission stays the GithubRepoAccess grant.
+model GithubRepoConnection {
+  id                      String      @id @default(uuid())
+  userId                  String
+  integrationId           String
+  /// Stable, user-independent ref every API and Agent.githubRepoRef uses: `gh:<owner>/<repo>` (lowercase).
+  canonicalRef            String
+  /// Normalized https://github.com/<owner>/<repo> (case as GitHub/the user spelled it).
+  repoUrl                 String
+  owner                   String
+  repoName                String
+  defaultBranch           String      @default("main")
+  /// Project (now "folder") this repo was connected through; null = connected directly.
+  connectedRoseProjectRef String?
+  /// connect | legacy_project
+  source                  String      @default("connect")
+  createdAt               DateTime    @default(now())
+  updatedAt               DateTime    @updatedAt
+  integration             Integration @relation(fields: [integrationId], references: [id], onDelete: Cascade)
+  connectedRoseProject    Project?    @relation(fields: [connectedRoseProjectRef], references: [id], onDelete: SetNull)
+
+  @@unique([userId, canonicalRef])
+  @@index([integrationId])
+  @@index([connectedRoseProjectRef])
 }
 
 model MessageRecord {
@@ -975,10 +1014,23 @@ model Integration {
   usage7dUsedPct         Float?
   usage7dResetsAt        DateTime?
   usageObservedAt        DateTime?
+  /// Where the latest usage came from: response | rate_limit | usage_endpoint |
+  /// code_session; and the provider's unified status then (allowed |
+  /// allowed_warning | rejected), when it said.
+  usageSource            String?
+  usageStatus            String?
+  /// Why `rateLimitedUntil` is set (usage_window_5h | usage_window_7d |
+  /// usage_window | rate_limit | stall | auth) and whether the provider supplied
+  /// that reset (true) or it is Rose's own default/stall backoff (false). Null on
+  /// cooldowns written before these existed.
+  rateLimitReason        String?
+  rateLimitAuthoritative Boolean?
   createdAt              DateTime                     @default(now())
   updatedAt              DateTime                     @updatedAt
   emailCredentials       EmailIntegrationCredential[]
   plaidItems             PlaidItem[]
+  githubRepoConnections  GithubRepoConnection[]
+  teamShares             TeamIntegrationShare[]
 
   @@unique([userId, name, accountId])
   @@index([userId])
@@ -1553,9 +1605,10 @@ model ImessageQueue {
   attempts             Int       @default(0)
   failures             Int       @default(0)
   transport            String    @default("mac")
-  phoneBrowserTaskId   String?   @unique
+  phoneBrowserTaskId   String?
   phoneSendOperationId String?   @unique
 
+  @@index([phoneBrowserTaskId], map: "ImessageQueue_phoneBrowserTaskId_idx")
   @@index([userId])
   @@index([agentId])
   @@index([userId, sentAt, failedAt, dispatchedAt, expiresAt, claimedAt, createdAt], map: "ImessageQueue_send_claim_idx")
@@ -2233,9 +2286,81 @@ model Project {
   agents                    Agent[]
   cliLogins                 ProjectCliLogin[]
   folders                   ProjectFolder[]
+  githubRepoConnections     GithubRepoConnection[]
+  teamShares                TeamProjectShare[]
 
   @@unique([userId, name])
   @@index([userId, updatedAt])
+}
+
+/// Sharing is always explicit and evaluated against current accepted memberships.
+model Team {
+  id                String                 @id @default(uuid())
+  name              String
+  ownerUserId       String
+  createdAt         DateTime               @default(now())
+  updatedAt         DateTime               @updatedAt
+  owner             User                   @relation(fields: [ownerUserId], references: [userId], onDelete: Cascade)
+  members           TeamMember[]
+  integrationShares TeamIntegrationShare[]
+  projectShares     TeamProjectShare[]
+
+  @@index([ownerUserId])
+}
+
+model TeamMember {
+  id                   String                 @id @default(uuid())
+  teamId               String
+  userId               String?
+  email                String?
+  role                 String                 @default("MEMBER")
+  status               String                 @default("INVITED")
+  acceptedAt           DateTime?
+  inviteDeliveryStatus String                 @default("PENDING")
+  inviteMessageId      String?
+  inviteTokenHash      String?
+  createdAt            DateTime               @default(now())
+  updatedAt            DateTime               @updatedAt
+  team                 Team                   @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  user                 User?                  @relation(fields: [userId], references: [userId], onDelete: Cascade)
+  integrationShares    TeamIntegrationShare[]
+  projectShares        TeamProjectShare[]
+
+  @@unique([teamId, email])
+  @@unique([teamId, userId])
+  @@index([email, status])
+  @@index([userId, status])
+}
+
+model TeamIntegrationShare {
+  id            String      @id @default(uuid())
+  teamId        String
+  integrationId String
+  ownerUserId   String
+  provider      String
+  accountId     String      @default("")
+  accountEmail  String?
+  createdAt     DateTime    @default(now())
+  team          Team        @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  integration   Integration @relation(fields: [integrationId], references: [id], onDelete: Cascade)
+  member        TeamMember  @relation(fields: [teamId, ownerUserId], references: [teamId, userId], onDelete: Cascade)
+
+  @@unique([teamId, integrationId, accountId])
+  @@index([ownerUserId, provider, accountId])
+}
+
+model TeamProjectShare {
+  id          String     @id @default(uuid())
+  teamId      String
+  projectId   String
+  ownerUserId String
+  createdAt   DateTime   @default(now())
+  team        Team       @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  project     Project    @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  member      TeamMember @relation(fields: [teamId, ownerUserId], references: [teamId, userId], onDelete: Cascade)
+
+  @@unique([teamId, projectId])
+  @@index([ownerUserId])
 }
 
 /// One run of a project's template sync script (trigger: manual | snapshot |

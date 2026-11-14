@@ -1,0 +1,231 @@
+{
+  "version": 1,
+  "status": "initial_archive_verified_final_delta_pending",
+  "purpose": "Preserve cloud-iPhone and Google OAuth RCA evidence without placing credentials or private traces in Git.",
+  "initial_archive": {
+    "version": 1,
+    "phase": "initial",
+    "recorded_at": "2026-11-05T23:01:39.729053+00:00",
+    "root": "workspace-b3332d73-20261105-initial",
+    "member_count": 44109,
+    "plaintext_tar_sha256": "a10c2012cc08f8d0e5bf2e4f675d8de61b30d7b3a5dd508695de2952824438e1",
+    "chunks": [
+      {
+        "key": "trace-archive/workspace-b3332d73-20261105-initial/part-00000.bin.enc",
+        "metadata_key": "trace-archive/workspace-b3332d73-20261105-initial/part-00000.bin.enc.meta.json",
+        "bytes": 33554432,
+        "sha256": "5e0e48a89ef0d85e3ef3e3361a83315cc5104860a16b540a215c89a615b90737",
+        "verified": true
+      },
+      {
+        "key": "trace-archive/workspace-b3332d73-20261105-initial/part-00001.bin.enc",
+        "metadata_key": "trace-archive/workspace-b3332d73-20261105-initial/part-00001.bin.enc.meta.json",
+        "bytes": 33554432,
+        "sha256": "ba6ba503678af29de2552fa04177feea3ce7250ab2a97c545f43de189ad3a4cb",
+        "verified": true
+      },
+      {
+        "key": "trace-archive/workspace-b3332d73-20261105-initial/part-00002.bin.enc",
+        "metadata_key": "trace-archive/workspace-b3332d73-20261105-initial/part-00002.bin.enc.meta.json",
+        "bytes": 33554432,
+        "sha256": "3c1a382071002924e308b138bbe68a3391ae89e05d160683c65597c96961132b",
+        "verified": true
+      },
+      {
+        "key": "trace-archive/workspace-b3332d73-20261105-initial/part-00003.bin.enc",
+        "metadata_key": "trace-archive/workspace-b3332d73-20261105-initial/part-00003.bin.enc.meta.json",
+        "bytes": 33554432,
+        "sha256": "bc21e4748d31f830f851a1a477a35d3f5e9a5740a94bb1348fe0ffc9dd063e4d",
+        "verified": true
+      },
+      {
+        "key": "trace-archive/workspace-b3332d73-20261105-initial/part-00004.bin.enc",
+        "metadata_key": "trace-archive/workspace-b3332d73-20261105-initial/part-00004.bin.enc.meta.json",
+        "bytes": 33554432,
+        "sha256": "1dbe875e1a92aa588fb0e9e59cfbd6d10b3c40aa5ba0fd7c2b6ff883da8f46c5",
+        "verified": true
+      },
+      {
+        "key": "trace-archive/workspace-b3332d73-20261105-initial/part-00005.bin.enc",
+        "metadata_key": "trace-archive/workspace-b3332d73-20261105-initial/part-00005.bin.enc.meta.json",
+        "bytes": 33554432,
+        "sha256": "aa5fb7da77168229a2cfef48a23e0de0ba58c2ba66d0d892a68f3028a52c30f3",
+        "verified": true
+      },
+      {
+        "key": "trace-archive/workspace-b3332d73-20261105-initial/part-00006.bin.enc",
+        "metadata_key": "trace-archive/workspace-b3332d73-20261105-initial/part-00006.bin.enc.meta.json",
+        "bytes": 33554432,
+        "sha256": "3a3266b9fe1c6886e448a88ced28680cacf9568298987e47c4f91b5cbb1c1b59",
+        "verified": true
+      },
+      {
+        "key": "trace-archive/workspace-b3332d73-20261105-initial/part-00007.bin.enc",
+        "metadata_key": "trace-archive/workspace-b3332d73-20261105-initial/part-00007.bin.enc.meta.json",
+        "bytes": 33554432,
+        "sha256": "a11bc8db917c3ebc960e9306d7ea32636c71783cd48384b4d7818a7655161dcc",
+        "verified": true
+      },
+      {
+        "key": "trace-archive/workspace-b3332d73-20261105-initial/part-00008.bin.enc",
+        "metadata_key": "trace-archive/workspace-b3332d73-20261105-initial/part-00008.bin.enc.meta.json",
+        "bytes": 33554432,
+        "sha256": "45c8f4e1eeae5f65a3412c0dbf6a64e96e8c16a4169966df2220da82bca17db0",
+        "verified": true
+      },
+      {
+        "key": "trace-archive/workspace-b3332d73-20261105-initial/part-00009.bin.enc",
+        "metadata_key": "trace-archive/workspace-b3332d73-20261105-initial/part-00009.bin.enc.meta.json",
+        "bytes": 33554432,
+        "sha256": "0505f02ebfc50c18aa72117c79af8d582bd9317c7051752545c2d7e01ac9c94a",
+        "verified": true
+      },
+      {
+        "key": "trace-archive/workspace-b3332d73-20261105-initial/part-00010.bin.enc",
+        "metadata_key": "trace-archive/workspace-b3332d73-20261105-initial/part-00010.bin.enc.meta.json",
+        "bytes": 33554432,
+        "sha256": "af531057372c72557777e8812bf692a12554f018c84b95f5951922e970b63ed4",
+        "verified": true
+      },
+      {
+        "key": "trace-archive/workspace-b3332d73-20261105-initial/part-00011.bin.enc",
+        "metadata_key": "trace-archive/workspace-b3332d73-20261105-initial/part-00011.bin.enc.meta.json",
+        "bytes": 33554432,
+        "sha256": "76b0ec3393baf129bfdb19361922bc6053817d00fa39b59b83a91953685e78af",
+        "verified": true
+      },
+      {
+        "key": "trace-archive/workspace-b3332d73-20261105-initial/part-00012.bin.enc",
+        "metadata_key": "trace-archive/workspace-b3332d73-20261105-initial/part-00012.bin.enc.meta.json",
+        "bytes": 33554432,
+        "sha256": "c750d0f7727145e6265bad2b2710057571da4e515933c65ed212de9b66128cce",
+        "verified": true
+      },
+      {
+        "key": "trace-archive/workspace-b3332d73-20261105-initial/part-00013.bin.enc",
+        "metadata_key": "trace-archive/workspace-b3332d73-20261105-initial/part-00013.bin.enc.meta.json",
+        "bytes": 33554432,
+        "sha256": "020b61ebaf7ef331d8763f9b218ff9f51dfab7549a1a626d8d2303bb57d7184f",
+        "verified": true
+      },
+      {
+        "key": "trace-archive/workspace-b3332d73-20261105-initial/part-00014.bin.enc",
+        "metadata_key": "trace-archive/workspace-b3332d73-20261105-initial/part-00014.bin.enc.meta.json",
+        "bytes": 33554432,
+        "sha256": "79f5227a3fd5419095ba696d62c4a941b5b4ffd4b531326428555cae41f22897",
+        "verified": true
+      },
+      {
+        "key": "trace-archive/workspace-b3332d73-20261105-initial/part-00015.bin.enc",
+        "metadata_key": "trace-archive/workspace-b3332d73-20261105-initial/part-00015.bin.enc.meta.json",
+        "bytes": 33554432,
+        "sha256": "b1926ab2117adeeb98cd052da6a832991b8fa8a985ecff439e0d1a7853f613b9",
+        "verified": true
+      },
+      {
+        "key": "trace-archive/workspace-b3332d73-20261105-initial/part-00016.bin.enc",
+        "metadata_key": "trace-archive/workspace-b3332d73-20261105-initial/part-00016.bin.enc.meta.json",
+        "bytes": 33554432,
+        "sha256": "3416ef24e8e4b59109867dea9865c900663809186a92ad98e9636934edb44bdb",
+        "verified": true
+      },
+      {
+        "key": "trace-archive/workspace-b3332d73-20261105-initial/part-00017.bin.enc",
+        "metadata_key": "trace-archive/workspace-b3332d73-20261105-initial/part-00017.bin.enc.meta.json",
+        "bytes": 33554432,
+        "sha256": "cb5f675bb33c3d9f79e574b172c71bf02985fd52ee51cc5f427e054c4e486bae",
+        "verified": true
+      },
+      {
+        "key": "trace-archive/workspace-b3332d73-20261105-initial/part-00018.bin.enc",
+        "metadata_key": "trace-archive/workspace-b3332d73-20261105-initial/part-00018.bin.enc.meta.json",
+        "bytes": 33554432,
+        "sha256": "0cf0fc122f5e2cc665fe5c10f34c1485c3afe68bf7b136150954b3bd3f896b52",
+        "verified": true
+      },
+      {
+        "key": "trace-archive/workspace-b3332d73-20261105-initial/part-00019.bin.enc",
+        "metadata_key": "trace-archive/workspace-b3332d73-20261105-initial/part-00019.bin.enc.meta.json",
+        "bytes": 33554432,
+        "sha256": "d05e3212be9901e457ac63de2bede2eced661f72066e54ba1ef873c15b6ddf65",
+        "verified": true
+      },
+      {
+        "key": "trace-archive/workspace-b3332d73-20261105-initial/part-00020.bin.enc",
+        "metadata_key": "trace-archive/workspace-b3332d73-20261105-initial/part-00020.bin.enc.meta.json",
+        "bytes": 33554432,
+        "sha256": "815656303c302ba1fa45d8d7e929d7565831dfe35808315a92bcd25848bd2faf",
+        "verified": true
+      },
+      {
+        "key": "trace-archive/workspace-b3332d73-20261105-initial/part-00021.bin.enc",
+        "metadata_key": "trace-archive/workspace-b3332d73-20261105-initial/part-00021.bin.enc.meta.json",
+        "bytes": 33554432,
+        "sha256": "0abfab5a96a9bd87d97712ee321ac473cf5c856c7e5656299f407957dd16d0c0",
+        "verified": true
+      },
+      {
+        "key": "trace-archive/workspace-b3332d73-20261105-initial/part-00022.bin.enc",
+        "metadata_key": "trace-archive/workspace-b3332d73-20261105-initial/part-00022.bin.enc.meta.json",
+        "bytes": 33554432,
+        "sha256": "e3532c8c0436c75fcbd17d1077e589b0ddaf3555a371fddf9e426eb71e6547d9",
+        "verified": true
+      },
+      {
+        "key": "trace-archive/workspace-b3332d73-20261105-initial/part-00023.bin.enc",
+        "metadata_key": "trace-archive/workspace-b3332d73-20261105-initial/part-00023.bin.enc.meta.json",
+        "bytes": 33554432,
+        "sha256": "4dda2f2db70ab77585488253de9c30244b81a25bf7427d9c8b63efe7a919abb8",
+        "verified": true
+      },
+      {
+        "key": "trace-archive/workspace-b3332d73-20261105-initial/part-00024.bin.enc",
+        "metadata_key": "trace-archive/workspace-b3332d73-20261105-initial/part-00024.bin.enc.meta.json",
+        "bytes": 33554432,
+        "sha256": "c2fdd6084ea4a50189ace4691691ccf9ecf2999f7a74deb1c3e491bf239bb665",
+        "verified": true
+      },
+      {
+        "key": "trace-archive/workspace-b3332d73-20261105-initial/part-00025.bin.enc",
+        "metadata_key": "trace-archive/workspace-b3332d73-20261105-initial/part-00025.bin.enc.meta.json",
+        "bytes": 23603298,
+        "sha256": "04af440ba92240a519066400e61c56a095cdd6c78e6091308dff2cbfc0796b51",
+        "verified": true
+      }
+    ],
+    "remote_key_recovery_verified": true,
+    "remote_key_service": "srv-d3jga77diees73cgrvk0",
+    "source": "c969c951fb11f87aad8e108d6e4fc5b50b850801",
+    "all_parts_decrypted_and_hash_verified": true,
+    "final_delta_pending": true,
+    "local_restored_member_hashes_verified": 44109
+  },
+  "recovery": {
+    "encryption": "AES-256-GCM with per-part metadata and AAD; concatenated plaintext parts form a gzip tar archive.",
+    "key_source": "Existing Navi Render service TRACE_ARCHIVE_ENCRYPTION_KEY_B64; remotely compared with the archive key before publication. Never store the key in Git.",
+    "storage_credentials": "Existing authorized trace-archive R2 configuration.",
+    "code": "agents/helpers/trace_archive.py: read_r2_artifact and decrypt_and_validate_artifact",
+    "inventory_member": "PRIVATE-PRESERVATION-INVENTORY.json contains every member path, mode, byte count and SHA256 inside the encrypted archive."
+  },
+  "dispositions": {
+    "intended_source": "Retained on cloud-iphone-harness and PR1696; exact final merge SHA and final remote-ref check pending.",
+    "private_logs_and_configuration": "44,109 initial ignored files sealed in the encrypted archive; includes original failures, phone journals, credentials configuration and raw OAuth evidence.",
+    "dependencies_and_build_products": "Reproducible from committed lockfiles and documented setup; excluded from the archive.",
+    "isolated_test_checkouts": "Disposable copies of the final source; their unique test receipts require a final archive delta before deletion.",
+    "reference_repositories": "Public upstream checkouts; exact commit inventory recorded below.",
+    "protected_machine_configuration": "Freedom and managed-machine protections remain untouched. This receipt authorizes no deletion."
+  },
+  "reference_repositories": {
+    "openclaw": "c969c951fb11f87aad8e108d6e4fc5b50b850801",
+    "hermes-agent": "c969c951fb11f87aad8e108d6e4fc5b50b850801",
+    "codex": "c969c951fb11f87aad8e108d6e4fc5b50b850801",
+    "prime-agent": "c969c951fb11f87aad8e108d6e4fc5b50b850801"
+  },
+  "remaining": [
+    "Final test/review/deploy receipts and all changed evidence since the initial capture",
+    "/opt/cursor/artifacts recovery copies",
+    "Full remote member-hash restoration check",
+    "Final source/ref coverage and owned resource reconciliation",
+    "Records-only follow-up after production verification"
+  ]
+}

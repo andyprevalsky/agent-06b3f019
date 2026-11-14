@@ -355,6 +355,59 @@ stack_owner_process_gone() {
     return 0
 }
 
+# A failed benchmark explicitly transfers this exact stack to recovery authority.
+# That journal outlives the controller. Neither a stale run record nor an ordinary
+# orphan grants retention; bind the controller incarnation and this stack token.
+stack_has_retained_recovery_authority() {
+    [ "$BENCHMARK_ISOLATED_RUN" = true ] || return 1
+    [ -n "${RUN_STACK_CLEANUP_TOKEN:-}" ] || return 1
+    python3 - "$RUN_CONTEXT_DIR" "${BENCHMARK_RUN_ID:-}" "$$" \
+        "$RUN_STACK_CLEANUP_TOKEN" "$RUN_SH_OWNER_PID" "${RUN_SH_OWNER_START:-}" <<'PYRETAIN'
+import json
+from pathlib import Path
+import re
+import sys
+
+def unique(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError('duplicate owner field')
+        result[key] = value
+    return result
+
+def record(path):
+    if path.is_symlink() or not path.is_file() or path.stat().st_size > 65536:
+        raise ValueError('unsafe recovery owner')
+    return json.loads(path.read_text(), object_pairs_hook=unique)
+
+try:
+    directory, run, stack_pid, stack_token, controller, start = sys.argv[1:]
+    context = Path(directory)
+    if context.resolve() != context:
+        raise ValueError('noncanonical recovery context')
+    owner = record(context / 'local-benchmark-owner.json')
+    stack = record(context / 'local-stack-owner.json')
+    token = owner.get('token', '')
+    valid = (run and owner.get('version') == stack.get('version') == 1
+             and owner.get('run_id') == stack.get('run_id') == run
+             and owner.get('state') == 'failed_retained'
+             and type(owner.get('controller_pid')) is int
+             and owner['controller_pid'] == int(controller) > 1
+             and bool(start) and owner.get('controller_start') == start
+             and type(stack.get('pid')) is int and stack['pid'] == int(stack_pid)
+             and stack.get('token') == stack_token
+             and isinstance(token, str) and re.fullmatch(r'[A-Za-z0-9_-]+', token)
+             and owner.get('receipt') == str(context / ('benchmark-cleanup-' + token + '.status')))
+    # The producer records failed_retained even when a receipt is missing or
+    # malformed. Its explicit, identity-bound decision is the recovery authority;
+    # do not reinterpret missing cleanup evidence as permission to destroy it.
+    sys.exit(0 if valid else 1)
+except (OSError, ValueError, TypeError, KeyError):
+    sys.exit(1)
+PYRETAIN
+}
+
 # Runs from the moment the service cleanup trap exists (service start, builds,
 # tunnels and steady state): TERM this script through its normal teardown once
 # the owner is gone. Bootstrap before that point is checked once at install.
@@ -364,7 +417,7 @@ start_stack_owner_watch() {
     (
         trap - EXIT HUP INT TERM
         while kill -0 "$stack_pid" 2>/dev/null; do
-            if stack_owner_process_gone; then
+            if stack_owner_process_gone && ! stack_has_retained_recovery_authority; then
                 echo ""
                 echo "⚠️  Stack owner PID $RUN_SH_OWNER_PID exited without stopping this stack — shutting down all services."
                 kill -TERM "$stack_pid" 2>/dev/null
@@ -1083,8 +1136,7 @@ else
     SYSTEM_PG_PORT=5432
     LOCAL_DB_ACTUAL_PORT="$SYSTEM_PG_PORT"
     if [ "$BENCHMARK_ISOLATED_RUN" = "true" ] && [ -n "${BENCHMARK_RUN_ID:-}" ]; then
-        SAFE_BENCHMARK_RUN_ID=$(printf '%s' "$BENCHMARK_RUN_ID" | tr -c '[:alnum:]' '_')
-        LOCAL_DB_NAME="victoria_bench_${SAFE_BENCHMARK_RUN_ID}"
+        LOCAL_DB_NAME="$(benchmark_system_pg_db_name "$BENCHMARK_RUN_ID")" || exit 1
     else
         # One server serves every workspace on this host; never default a named
         # workspace onto the shared `victoria` (same resolver as setup-db.sh).
@@ -2074,9 +2126,14 @@ start_ngrok_ephemeral_tunnel() {
     # every new worktree loses its primary domain. Run-scoped names are bound
     # without a reservation; only the per-worktree name is reserved.
     local fallback_label fallback_domain
-    fallback_label="$(dns_label_from_workspace)" || return 1
+    if [ -n "${BENCHMARK_PUBLIC_TUNNEL_RUN_ID:-}" ]; then
+        # Identity names only the endpoint; workspace/DB/queue identity is unchanged.
+        fallback_label="run-$(python3 -c 'import hashlib,sys; print(hashlib.sha256(sys.argv[1].encode()).hexdigest()[:24])' "$BENCHMARK_PUBLIC_TUNNEL_RUN_ID")" || return 1
+    else
+        fallback_label="$(dns_label_from_workspace)" || return 1
+    fi
     fallback_domain="rose-${fallback_label}-bench.${NGROK_DOMAIN_SUFFIX:-ngrok.app}"
-    if [ -n "${NGROK_API_KEY:-}" ] && [[ "${CONDUCTOR_WORKSPACE_NAME:-}" != *-bench-* ]]; then
+    if [ -n "${NGROK_API_KEY:-}" ] && [ -z "${BENCHMARK_PUBLIC_TUNNEL_RUN_ID:-}" ] && [[ "${CONDUCTOR_WORKSPACE_NAME:-}" != *-bench-* ]]; then
         ensure_ngrok_domain_reserved "$fallback_domain" soft ||
             echo "   Proceeding without pre-reservation of $fallback_domain."
     fi
@@ -2084,7 +2141,7 @@ start_ngrok_ephemeral_tunnel() {
     local -a ngrok_args=("http" "$FRONTEND_PORT")
     if [ -n "$fallback_domain" ]; then
         ngrok_args+=("--domain" "$fallback_domain")
-        echo "🌐 Falling back to ngrok (reserved $fallback_domain) → localhost:$FRONTEND_PORT"
+        echo "🌐 Falling back to ngrok (named $fallback_domain) → localhost:$FRONTEND_PORT"
     else
         echo "🌐 Falling back to an ephemeral ngrok tunnel → localhost:$FRONTEND_PORT"
     fi
@@ -2269,6 +2326,11 @@ start_public_tunnel() {
             # run when trycloudflare will not route.
             start_cloudflare_quick_tunnel && return 0
             start_ngrok_ephemeral_tunnel && return 0
+            if [ -n "${BENCHMARK_PUBLIC_TUNNEL_RUN_ID:-}" ]; then
+                reap_failed_ngrok_tunnel
+                echo "❌ Run-scoped public tunnel unavailable; refusing a shared workspace endpoint." >&2
+                exit 1
+            fi
             # No ngrok credentials at all → the reserved-domain path cannot
             # succeed either.
             if [ -z "${NGROK_AUTHTOKEN:-}" ] && ! ngrok config check >/dev/null 2>&1; then
@@ -2459,6 +2521,16 @@ data = {
     },
     "services": services,
 }
+identity_receipt = os.environ.get("BENCHMARK_AGENTCARD_WORLD_RECEIPT")
+if identity_receipt:
+    with open(identity_receipt) as identity_file:
+        identity = json.load(identity_file)
+    if (identity.get("worldId") != os.environ.get("BENCHMARK_RUN_ID")
+            or identity.get("providerUserId") != os.environ.get("BENCHMARK_AGENTCARD_V2_USER_ID")
+            or identity.get("livemode") is not False
+            or identity.get("fundsSource") != "company_flow"):
+        raise RuntimeError("AgentCard world receipt does not match native runtime")
+    data["agentcard_world_identity"] = identity
 tmp_path = os.path.join(root, context_dir, "services.json.tmp")
 path = os.path.join(root, context_dir, "services.json")
 with open(tmp_path, "w") as f:
@@ -2874,6 +2946,30 @@ mkdir -p "$(dirname "$FRONTEND_DIST_DIR")"
 BACKEND_INDEX=${#PIDS[@]}
 PIDS+=("")
 NAMES+=("back-end")
+# Provision native sandbox world identity before backend/worker setup routes can run.
+if [ "${BENCHMARK_AGENTCARD_WORLD_IDENTITY:-}" = "true" ]; then
+    agentcard_world_context="$(python3 - "$RUN_CONTEXT_DIR" <<'PY_WORLD_CONTEXT'
+import os, sys
+print(os.path.abspath(sys.argv[1]))
+PY_WORLD_CONTEXT
+)"
+    mkdir -p "$agentcard_world_context"
+    unset BENCHMARK_AGENTCARD_WORLD_RECEIPT
+    agentcard_world_receipt="$agentcard_world_context/agentcard-world.json"
+    (cd back-end && BENCHMARK_CONTEXT_DIR="$agentcard_world_context" node --import tsx scripts/setup-benchmark-agentcard-world.ts --out "$agentcard_world_receipt") || exit 1
+    BENCHMARK_AGENTCARD_V2_USER_ID="$(python3 - "$agentcard_world_receipt" "${BENCHMARK_RUN_ID:-}" <<'PY_WORLD_ID'
+import json, re, sys
+row=json.load(open(sys.argv[1]))
+assert row.get('version')==1 and row.get('worldId')==sys.argv[2]
+assert row.get('livemode') is False and row.get('fundsSource')=='company_flow'
+assert re.fullmatch(r'usr_[A-Za-z0-9_-]+',row.get('providerUserId',''))
+print(row['providerUserId'])
+PY_WORLD_ID
+)" || exit 1
+    export BENCHMARK_AGENTCARD_V2_USER_ID
+    export BENCHMARK_AGENTCARD_WORLD_RECEIPT="$agentcard_world_receipt"
+fi
+
 BACKEND_PID=""
 BACKEND_PGID=""
 launch_backend_service() {

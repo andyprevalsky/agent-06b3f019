@@ -2,7 +2,21 @@
 """Case-aware staged adapter over the existing isolated cloud benchmark CLI.
 
 Native failures remain failures until canonical /RCA grants an exception. This
-adapter neither retries nor launches the request's already-skipped tasks.
+adapter never launches the request's already-skipped tasks.
+
+Quarantine and rerun-once (scripts/deploy_test_quarantine.py, .claude/commands/deploy.md):
+
+    campaign(checks) ──> cases ─┬─ quarantined task (tasks.json `quarantine`): ran; FAIL/PASS is
+                                │    reported as a QUARANTINED_FAIL/QUARANTINED_PASS row and never blocks
+                                ├─ FAIL with native FAILED/ERROR, not quarantined, cleanup verified
+                                │    └─> ONE campaign(those tasks) on the same frozen ref
+                                │          PASS => FLAKY row (attempts 2; merge needs attribution)
+                                │          else => FAIL (first attempt's evidence + rerun evidence)
+                                └─ SKIPPED (compute-token/resource) and INFRA_ERROR keep their /RCA
+                                   resource/external-provider handling: never rerun
+
+Both campaigns are ordinary native runs, so each attempt reaches the benchmark history as it
+ran (a quarantined failure stays a failed attempt). A rerun never reruns.
 """
 import argparse
 from datetime import datetime
@@ -10,16 +24,30 @@ import hashlib
 import json
 import math
 import os
+import re
 import runpy
 from pathlib import Path
 import sys
 import subprocess
 import time
 
+import cloudbench_provider_headroom as provider_headroom
 from cloudbench_execution_provenance import load_provenance, verify_code_binding
 from cloudbench_result import validate_run_document, validate_run_file
+import deploy_gate_progress as progress
+from deploy_test_quarantine import catalog_quarantines
+from deploy_test_cloud_refusal import SOURCE_DIFFERS, unpushed_reason
 from deploy_test_cycle import NAME, ROOT, read, source, write
 from deploy_test_process import cancellation_handlers, run_command
+
+
+class SourceRefusal(ValueError):
+    """The source or custody-locator guard refused before this request could admit any resources."""
+
+    def __init__(self, message, reason_code=None):
+        """Source refusals carry no reason code; custody locator refusals carry theirs."""
+        super().__init__(message)
+        self.reason_code = reason_code
 
 
 def collect(request, root, runs, started, native_exit):
@@ -113,11 +141,26 @@ def autoscaler_reason(directory):
     return 'mandatory autoscaler failed; see the fleet controller log'
 
 
-def campaign_width(checks):
+def campaign_width(checks, deadline=None):
+    """Smoke width: the reviewed registry cap, narrowed by live usage of shared provider accounts.
+
+    Tilion's browsers are one account shared with production and every other deploy, so the
+    width comes from its live session listing (cloudbench_provider_headroom), waiting with
+    progress lines until `deadline` (epoch; default 15 min) when no browser is free.
+    """
     capacity = runpy.run_path(str(Path(__file__).with_name('cloudbench-provider-capacity.py')))
     registry = capacity['for_browser_provider'](capacity['load_registry'](),
                                                capacity['resolve_browser_provider']())
-    return min(len(checks), registry['cap'])
+    requested = len(checks)
+    limit = os.environ.get('DEPLOY_CLOUD_CONCURRENCY')
+    if limit is not None:
+        if not re.fullmatch(r'[1-9][0-9]*', limit):
+            raise ValueError('DEPLOY_CLOUD_CONCURRENCY must be a positive integer')
+        requested = min(requested, int(limit))
+    if deadline is None:
+        deadline = time.time() + provider_headroom.DEFAULT_WAIT_SECONDS
+    return provider_headroom.admitted_width(requested, registry, probes=provider_headroom.live_probes(),
+                                            deadline=deadline)
 
 
 def campaign_published(summary, campaign, started, native):
@@ -227,37 +270,87 @@ def shared_canary_env(root, environ=os.environ):
                               ('FLEET_INFRA_CANARY_LOCK', 'transaction.lock'))}
 
 
-def execute(request, root):
-    """Run the frozen native campaign with owned supervision and retain its cleanup evidence."""
-    checks, skipped = request['checks'], request.get('skips', {})
-    if (not checks or len(set(checks)) != len(checks) or set(checks) & set(skipped)
-            or any(not isinstance(n, str) or not NAME.fullmatch(n) or n.startswith('-')
-                   or n in {'.','..'} for n in checks)):
-        raise ValueError('invalid cloud case inventory')
-    if source(root) != request['source']:
-        raise ValueError('cloud source differs from the requested freeze')
-    directory = root / '.context/deploy-cloud' / hashlib.sha256(request['token'].encode()).hexdigest()
-    runs = directory / 'runs'
-    runs.mkdir(parents=True, exist_ok=False)
+def origin_fetchable(root, head, environ=None):
+    """Run the exact run-bench-fleet preflight (cloudbench_fetchable_ref, local patch shipping disabled).
+
+    Guests fetch only origin/main ancestors or live origin branch/tag tips. PR #1767 dispatched a
+    merge commit that was not yet pushed: all 13 campaign jobs died in ~4 s at this same check and
+    the coordinator retained an unreconcilable cleanup owner. Same helper, same env, same answer.
+    The helper bounds its own ls-remote; stdout goes to a file so a lingering grandchild cannot
+    hold a pipe open past the timeout.
+    """
+    import tempfile
+    argv = ['bash', '-c', 'source "$1"; cloudbench_fetchable_ref "$2" "$3" 0', 'deploy-fetchable-ref',
+            str(Path(root) / 'scripts/lib/cloudbench-env.sh'), str(root), head]
+    with tempfile.TemporaryFile() as output:
+        try:
+            code = subprocess.run(argv, cwd=root, env=os.environ if environ is None else environ,
+                                  stdin=subprocess.DEVNULL, stdout=output, stderr=subprocess.DEVNULL,
+                                  timeout=120).returncode
+        except subprocess.TimeoutExpired:
+            return False
+        output.seek(0)
+        return code == 0 and output.read(4096).decode(errors='replace').strip() == head
+
+
+def capacity_admission_env(now, environ=os.environ):
+    """Pass this gate's deadline to native Fly capacity admission as an explicit input.
+
+    Every devbox shares the benchmark app's DEMO/delegating/Machine/shared-CPU ceilings, so a
+    shortfall is normally another devbox's fleet that will release. The fleet's own default
+    gives up after 300 s and failed smoke; within a deploy it now keeps polling until the
+    gate's existing deadline (deploy_gates.GATE_DEADLINE_SECONDS). The ceilings are unchanged.
+    An operator's explicit deadline wins and is never extended.
+    """
+    from deploy_gates import GATE_DEADLINE_SECONDS
+    key = 'CLOUDBENCH_CAPACITY_ADMISSION_DEADLINE_EPOCH'
+    return {key: environ.get(key) or str(int(now) + GATE_DEADLINE_SECONDS)}
+
+
+# Native outcomes of an ordinary task failure. SKIPPED (compute-token exhaustion, the AgentCard release
+# stall) and INFRA_ERROR are classified by the cycle's resource/external-provider /RCA paths; never rerun.
+RERUN_OUTCOMES = frozenset({'FAILED', 'ERROR'})
+
+
+def rerun_candidates(cases, details, quarantines):
+    """Verified non-quarantined task failures eligible for the single same-source rerun."""
+    out = []
+    for name, verdict in cases.items():
+        task = (details.get(name) or {}).get('native_task') or {}
+        outcome = str(task.get('benchmark_status') or task.get('status') or '').upper()
+        if verdict == 'FAIL' and name not in quarantines and outcome in RERUN_OUTCOMES:
+            out.append(name)
+    return out
+
+
+def emit(name, status, *, detail='', log='', quarantine=None, attempts=None):
+    """One progress row (unit = task name) plus its TEST_QUARANTINE / TEST_FLAKY stdout line."""
+    value = progress.row(name, status, detail=detail, log=log, quarantine=quarantine, attempts=attempts)
+    print(progress.stdout_line(value), flush=True)
+    progress.report(name, status, detail=detail, log=log, quarantine=quarantine, attempts=attempts)
+    return value
+
+
+def launch(request, root, base, campaign_id, checks, env, guidance=''):
+    """One native campaign of `checks` under `base`; returns its collected attempt."""
+    # Retain the adapter parent, but admit this attempt's namespace only after capacity is known.
+    base.parent.mkdir(parents=True, exist_ok=True)
     width = campaign_width(checks)
     if width < 1:
         raise ValueError('provider capacity cannot admit one smoke task')
-    campaign = directory / 'campaigns' / ('deploy-' + directory.name)
-    env = {**os.environ, 'CLOUDBENCH_RUNS_ROOT': str(runs), 'CLOUDBENCH_SKIP_LOCAL_PATCH': '1',
-           'DEPLOY_NATIVE_HUB_JOIN': '1',
-           'RUN_BENCH_CAMPAIGN_ROOT': str(campaign.parent), 'RUN_BENCH_CAMPAIGN_ID': campaign.name,
-           'DEPLOY_LANE_SCOPED_REUSE': '0', 'DEPLOY_CYCLE_FRESH': '1', **shared_canary_env(root)}
+    runs = base / 'runs'
+    runs.mkdir(parents=True, exist_ok=False)
+    campaign = base / 'campaigns' / campaign_id
+    # Every attempt owns its Fly transport (inventory, relay, private agent), including the width-1
+    # single rerun: an unowned per-HOME flyctl agent outlived PR #1981's reruns and voided the gate.
+    # The shared inventory/relay switches are pinned too, so an inherited "0" cannot drop that ownership.
+    env = {**env, 'CLOUDBENCH_RUNS_ROOT': str(runs), 'CLOUDBENCH_CAMPAIGN_OWNED_TRANSPORT': '1',
+           'CLOUDBENCH_CAMPAIGN_SHARED_INVENTORY': '1', 'CLOUDBENCH_CAMPAIGN_SHARED_RELAY': '1',
+           'RUN_BENCH_CAMPAIGN_ROOT': str(campaign.parent), 'RUN_BENCH_CAMPAIGN_ID': campaign.name}
     scheduling = ['--runs', '1', '--concurrency', str(width), '--retry-infra', '0']
     argv = ['bash', 'scripts/run-bench', *checks, *scheduling, '--ref', request['source']['head']]
-    catalog = root / 'agents/benchmarks/tasks.json'
-    guidance = ''
-    if catalog.is_file():
-        selector = runpy.run_path(str(Path(__file__).resolve().parents[1]
-                                     / 'agents/benchmarks/select_predeploy_benches.py'))
-        guidance = selector['format_skip_eligibility'](
-            selector['standing_skip_eligibility'](selector['load_tasks'](catalog), checks))
     started = time.time()
-    with cancellation_handlers(), (directory / 'cli.log').open('wb') as log:
+    with cancellation_handlers(), (base / 'cli.log').open('wb') as log:
         if guidance:
             print(guidance, file=sys.stderr, flush=True)
             log.write((guidance + '\n').encode())
@@ -265,18 +358,111 @@ def execute(request, root):
         code, timed_out, cancelled, lingering = run_command(argv, cwd=root, env=env, output=log, timeout=None, owned_lifecycle=True)
     reason = None
     try:
-        if timed_out or cancelled or lingering or source(root) != request['source']:
-            raise ValueError('cloud command interrupted or source changed')
+        causes = [text for flag, text in ((timed_out, 'timed out'), (cancelled, 'was cancelled'),
+                                          (lingering, 'left a lingering process (see cli.log.process.json)'))
+                  if flag]
+        if source(root) != request['source']:
+            causes.append('ran while the source changed')
+        if causes:
+            raise ValueError('cloud command ' + '; '.join(causes))
         cases, details, cleaned, fleet = collect_campaign(
-            request, root, runs, campaign, started, code, width)
+            {**request, 'checks': checks}, root, runs, campaign, started, code, width)
     except (OSError, ValueError, KeyError, TypeError, IndexError) as error:
         cases, details, cleaned, fleet = dict.fromkeys(checks, 'UNVERIFIED'), {}, False, None
         reason = str(error)
+    return {'cases': cases, 'details': details, 'cleaned': cleaned, 'fleet': fleet, 'code': code,
+            'argv': argv, 'reason': reason, 'log': str(base / 'cli.log'), 'started_at': started}
+
+
+def execute(request, root):
+    """Run the frozen native campaign with owned supervision and retain its cleanup evidence."""
+    checks, skipped = request['checks'], request.get('skips', {})
+    if (not checks or len(set(checks)) != len(checks) or set(checks) & set(skipped)
+            or any(not isinstance(n, str) or not NAME.fullmatch(n) or n.startswith('-')
+                   or n in {'.','..'} for n in checks)):
+        raise ValueError('invalid cloud case inventory')
+    directory = root / '.context/deploy-cloud' / hashlib.sha256(request['token'].encode()).hexdigest()
+    if source(root) != request['source']:
+        if directory.exists() or directory.is_symlink():
+            raise ValueError('cloud source differs with an existing request namespace')
+        raise SourceRefusal(SOURCE_DIFFERS)
+    catalog = root / 'agents/benchmarks/tasks.json'
+    if catalog.is_file():
+        catalog_rows = json.loads(catalog.read_text())
+        excluded = {row['name']: row['deploy_quarantine'] for row in catalog_rows
+                    if isinstance(row, dict) and row.get('deploy_quarantine')}
+        requested_exclusions = set(checks) & set(excluded)
+        if requested_exclusions:
+            raise SourceRefusal('deploy plan includes quarantined tasks; regenerate selection: '
+                                + ', '.join(sorted(requested_exclusions)))
+    if not origin_fetchable(root, request['source']['head']):
+        if directory.exists() or directory.is_symlink():
+            raise ValueError('unpushed cloud source with an existing request namespace')
+        raise SourceRefusal(unpushed_reason(request['source']['head']))
+    from deploy_test_historical_custody import AdmissionRefusal, admission
+    try:
+        admission(request, root)
+    except AdmissionRefusal as error:
+        if directory.exists() or directory.is_symlink():
+            raise ValueError('historical custody refused with an existing request namespace') from error
+        if error.detail:
+            print(f'DEPLOY_CLOUD custody detail: {error.detail}', file=sys.stderr)
+        raise SourceRefusal(str(error), error.reason_code) from error
+    # An invalid marker refuses here, before any resource is admitted (same rules as @quarantine).
+    quarantines = catalog_quarantines(root, checks)
+    # launch() owns each campaign's runs root, width check and campaign id (first run and rerun).
+    env = {**os.environ, 'CLOUDBENCH_SKIP_LOCAL_PATCH': '1', 'DEPLOY_NATIVE_HUB_JOIN': '1',
+           'DEPLOY_LANE_SCOPED_REUSE': '0', 'DEPLOY_CYCLE_FRESH': '1', **shared_canary_env(root),
+           **capacity_admission_env(time.time())}  # one gate deadline, kept by the rerun
+    catalog = root / 'agents/benchmarks/tasks.json'
+    guidance = ''
+    if catalog.is_file():
+        selector = runpy.run_path(str(Path(__file__).resolve().parents[1]
+                                     / 'agents/benchmarks/select_predeploy_benches.py'))
+        guidance = selector['format_skip_eligibility'](
+            selector['standing_skip_eligibility'](selector['load_tasks'](catalog), checks))
+    first = launch(request, root, directory, 'deploy-' + directory.name, checks, env, guidance)
+    cases, details, cleaned = dict(first['cases']), dict(first['details']), first['cleaned']
+    rerun = None
+    candidates = rerun_candidates(cases, details, quarantines) if cleaned and first['reason'] is None else []
+    second = None
+    if candidates:
+        try:
+            second = launch(request, root, directory / 'rerun', f'deploy-{directory.name}-rerun', candidates, env)
+        except (OSError, ValueError) as error:  # refused before launch (e.g. no provider capacity): stays FAIL
+            rerun = {'checks': candidates, 'executed': False, 'reason': str(error)}
+    if second is not None:
+        cleaned = cleaned and second['cleaned']
+        rerun = {'checks': candidates, 'executed': True, 'cleanup_complete': second['cleaned'],
+                 **{k: second[k] for k in ('cases', 'reason', 'fleet', 'code', 'argv', 'log', 'started_at')}}
+        for name in candidates:
+            # The first attempt's evidence stays the case's evidence; the rerun is attached to it.
+            details[name] = {**details.get(name, {}), 'rerun': second['details'].get(name, {})}
+            if second['cases'].get(name) == 'PASS':
+                cases[name] = 'PASS'
+                reason = str((details[name].get('native_task') or {}).get('failure_reason') or '')
+                emit(name, progress.FLAKY, detail=f'first attempt failed: {reason}', log=second['log'], attempts=2)
+    # The rerun's outcome filter: only an executed test failure is quarantined; SKIPPED and infra stay FAIL.
+    executed_failures = set(rerun_candidates(cases, details, {}))
+    for name, meta in quarantines.items():
+        verdict = cases.get(name)
+        if verdict not in ('PASS', 'FAIL'):
+            continue  # an unverified quarantined task stays blocking: it is unknown, not a non-blocking failure
+        if verdict == 'FAIL' and name not in executed_failures:
+            continue  # SKIPPED and infra outcomes keep their blocking /RCA handling; only a test failure is quarantined
+        status = 'QUARANTINED_FAIL' if verdict == 'FAIL' else 'QUARANTINED_PASS'
+        task = (details.get(name) or {}).get('native_task') or {}
+        emit(name, status, detail=str(task.get('failure_reason') or '') if verdict == 'FAIL' else '',
+             log=first['log'], quarantine=meta)
+        details[name] = {**details.get(name, {}), 'quarantine': {'status': status, 'native_case': verdict, **meta}}
+        cases[name] = 'PASS'  # the quarantined task ran; its result never fails the gate
     result = {k: request[k] for k in ('token', 'source', 'gate')}
     result.update(cases=cases, complete=cleaned and all(v != 'UNVERIFIED' for v in cases.values()),
-                  cleanup_complete=cleaned, reused=False, native_exit=code, native_command=argv,
-                  evidence=details, reason=reason, fleet_directory=fleet,
-                  runner_log=str(directory / 'cli.log'), started_at=started, finished_at=time.time())
+                  cleanup_complete=cleaned, reused=False, native_exit=first['code'], native_command=first['argv'],
+                  evidence=details, reason=first['reason'], fleet_directory=first['fleet'],
+                  runner_log=first['log'], started_at=first['started_at'], finished_at=time.time())
+    if rerun is not None:
+        result['rerun'] = rerun
     write(directory / 'result.json', result)
     return result
 
@@ -291,6 +477,19 @@ def main():
         result = execute(request, args.root.resolve())
         write(Path(os.environ['DEPLOY_GATE_RESULT']), result)
         return 0 if result['complete'] and all(v == 'PASS' for v in result['cases'].values()) else 1
+    except SourceRefusal as error:
+        # This exception is raised only before mkdir, capacity checks or provider commands.
+        # It closes admission custody, never test execution or financial cleanup credit.
+        receipt = {k: request[k] for k in ('token', 'source', 'gate')}
+        receipt.update(cases=dict.fromkeys(request['checks'], 'UNVERIFIED'), complete=False,
+                       cleanup_complete=True, reused=False, evidence={}, native_exit=2,
+                       native_command=[], fleet_directory=None, reason=str(error),
+                       admission={'kind': 'cloud-source-refusal-v1', 'admitted': False})
+        if error.reason_code:
+            receipt['reason_code'] = error.reason_code
+        write(Path(os.environ['DEPLOY_GATE_RESULT']), receipt)
+        print(f'DEPLOY_CLOUD BLOCKED: {error}', file=sys.stderr)
+        return 2
     except (OSError, ValueError, KeyError, TypeError) as error:
         print(f'DEPLOY_CLOUD BLOCKED: {error}', file=sys.stderr)
         return 2

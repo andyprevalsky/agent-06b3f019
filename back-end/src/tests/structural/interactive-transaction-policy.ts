@@ -60,12 +60,6 @@ const RAW_INTERACTIVE_TRANSACTION_ALLOWLIST: AllowlistEntry[] = [
     reason: 'legacy migration debt',
   },
   {
-    file: 'providers/agentcard/sandbox-settlement.ts',
-    scope: 'markPurchaseCleared',
-    fingerprint: '4e25776d5c66fd9b',
-    reason: 'legacy migration debt',
-  },
-  {
     file: 'providers/benchmarkHubStore.base.ts',
     scope: 'withIndexLock',
     fingerprint: '19952f6e5ed95ad9',

@@ -2,11 +2,15 @@
  * STATE MACHINE: RoseSidebar (Rose Desktop left bar; AppSidebar renders it when
  * useRoseDesktop() is true — the stock sidebar is unchanged otherwise)
  *
- * WIDTH (UI ledger row 21, no dragging):
- *   [COLLAPSED 64px] --pointer enters--> [EXPANDED 236px, full titles]
+ * WIDTH (UI ledger row 21; useSidebarExpansion):
+ *   [COLLAPSED 64px] --pointer enters--> [EXPANDED at the saved width (236px default), full titles]
  *   [EXPANDED] --pointer leaves (non-Mac, no menu/input)--> [COLLAPSED]
- *   Mac stays expanded after leaving; pointer in the left18% outside controls or a leftward drag collapses it.
+ *   Mac stays expanded after leaving; moving well right of the bar collapses it.
  *   A right-click menu, the search box or an inline name input keeps it EXPANDED.
+ *   Right-edge handle (col-resize): drag → width follows the pointer, clamped
+ *   to [236, min(560, 50% window)]; release → [PINNED] (never auto-closes);
+ *   release left of 150px → [COLLAPSED]. Back unpins and collapses.
+ *   Width + pinned persist in localStorage. Titles ellipsize at the live width.
  *
  * LAYOUT (top → bottom, Andy 2026-10-28):
  *   [Mac app only: a draggable title-bar strip so the row clears the traffic lights]
@@ -57,7 +61,7 @@
  * agent or code-agent row and every "+" (a project's or Home's) close it first.
  */
 
-import { Activity, Archive, Globe, Megaphone } from 'lucide-react';
+import { Activity, Archive, Globe, Megaphone, Users } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 
@@ -86,12 +90,7 @@ import {
   RoseNavRow,
   RoseSearchRow,
 } from './RoseSidebarChrome';
-import {
-  ROSE_BAR_DURATION_MS,
-  ROSE_BAR_EASE,
-  ROSE_BAR_EXPANDED_WIDTH,
-  ROSE_BAR_WIDTH,
-} from './roseSidebarLayout';
+import { ROSE_BAR_DURATION_MS, ROSE_BAR_EASE, ROSE_BAR_WIDTH } from './roseSidebarLayout';
 import { useNotYet, useRoseAgentMenuActions } from './useRoseAgentMenuActions';
 import { useRoseCodeAgents } from './useRoseCodeAgents';
 import { useRoseSidebarProjects } from './useRoseSidebarProjects';
@@ -219,7 +218,7 @@ function RoseSidebarBar(props: AppSidebarProps) {
   const createInProject = roseActions.onCreateAgentInProject;
   const projects = useRoseSidebarProjects((project, folderId) => {
     if (createInProject === undefined) {
-      notYet('New agent in a project');
+      notYet('New agent in a folder');
       return;
     }
     pendingGroup.mark(folderId ? `folder:${folderId}` : project.id);
@@ -274,8 +273,9 @@ function RoseSidebarBar(props: AppSidebarProps) {
     onViewChange(view);
     onSelectAgent(null);
   };
-  const openPanel = (app: 'feedback' | 'health' | 'settings') => {
+  const openPanel = (app: 'feedback' | 'health' | 'settings' | 'teams') => {
     if (apps !== null) apps.toggleApp(app);
+    else if (app === 'teams') goToView('teams');
     else if (app === 'health') goToView('admin-health');
     else if (app === 'settings') goToView('settings');
   };
@@ -287,6 +287,7 @@ function RoseSidebarBar(props: AppSidebarProps) {
         <aside
           data-testid="rose-sidebar"
           data-expanded={isExpanded}
+          data-pinned={expansion.isPinned}
           data-surface="opaque"
           aria-label="Agents"
           {...expansion.surface}
@@ -295,8 +296,10 @@ function RoseSidebarBar(props: AppSidebarProps) {
             isExpanded && 'z-[110] shadow-[0_10px_40px_rgba(20,20,40,0.10)]',
           )}
           style={{
-            width: isExpanded ? ROSE_BAR_EXPANDED_WIDTH : ROSE_BAR_WIDTH,
-            transition: `width ${ROSE_BAR_DURATION_MS}ms ${ROSE_BAR_EASE}`,
+            width: isExpanded ? expansion.width : ROSE_BAR_WIDTH,
+            transition: expansion.isDragging
+              ? 'none'
+              : `width ${ROSE_BAR_DURATION_MS}ms ${ROSE_BAR_EASE}`,
           }}
         >
           <RoseMacTitleBarInset />
@@ -348,6 +351,13 @@ function RoseSidebarBar(props: AppSidebarProps) {
               />
             )}
             <RoseNavRow
+              icon={<Users className="h-5 w-5" strokeWidth={1.7} />}
+              label="Teams"
+              isExpanded={isExpanded}
+              isActive={apps?.openApp === 'teams'}
+              onClick={() => openPanel('teams')}
+            />
+            <RoseNavRow
               icon={<Archive className="h-5 w-5" strokeWidth={1.7} />}
               label="Archived"
               isExpanded={isExpanded}
@@ -372,6 +382,18 @@ function RoseSidebarBar(props: AppSidebarProps) {
               onLoginClick={props.onLoginClick}
             />
           </div>
+          <div
+            role="separator"
+            aria-orientation="vertical"
+            aria-label="Resize sidebar"
+            aria-valuenow={expansion.width}
+            aria-valuemin={expansion.minWidth}
+            aria-valuemax={expansion.maxWidth}
+            tabIndex={0}
+            data-testid="rose-sidebar-resize-handle"
+            {...expansion.resizeHandle}
+            className="absolute inset-y-0 right-0 z-10 w-1.5 cursor-col-resize touch-none transition-colors hover:bg-gray-300/60 focus-visible:bg-gray-300/60 dark:hover:bg-white/[0.12] dark:focus-visible:bg-white/[0.12] [-webkit-app-region:no-drag]"
+          />
         </aside>,
         document.body,
       )}
@@ -379,6 +401,7 @@ function RoseSidebarBar(props: AppSidebarProps) {
         <RoseProjectSettingsPanel
           project={projects.openProject}
           barExpanded={isExpanded}
+          barExpandedWidth={expansion.width}
           onClose={projects.closeProjectSettings}
         />
       )}

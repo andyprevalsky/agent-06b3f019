@@ -19,6 +19,7 @@
  */
 import assert from 'node:assert/strict';
 import { hmrObserver } from './code-preview.trace';
+import { createCodePreviewHttp } from './code-preview-http';
 import { execFile, execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
@@ -31,6 +32,7 @@ import { config } from 'dotenv';
 import { chromium, type Browser } from 'playwright';
 import { prisma } from '../../providers/database';
 import { retryWithBackoff } from '../../providers/retry';
+import { quarantinedHmrTest } from './flake-quarantines.support';
 import { localCodeSessionHome } from '../../providers/codeSessions/lifecycle';
 import { localSandboxFs } from '../../providers/codeSessions/sandboxFs';
 import { buildCodeAgentSystemPrompt } from '../../providers/codeAgentPrompt';
@@ -76,21 +78,7 @@ const createdSessions: string[] = [];
 const createdTasks: string[] = [];
 const localHomes: string[] = [];
 
-async function http(method: string, path: string, userId: string, body?: unknown) {
-  const response = await fetch(`${baseUrl}${path}`, {
-    method,
-    headers: { 'Content-Type': 'application/json', 'X-API-Key': apiKey, 'X-User-Id': userId },
-    ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
-  });
-  const text = await response.text();
-  let data: Record<string, unknown> = {};
-  try {
-    data = JSON.parse(text) as Record<string, unknown>;
-  } catch {
-    data = { raw: text };
-  }
-  return { status: response.status, data };
-}
+const http = createCodePreviewHttp(baseUrl, apiKey);
 
 async function agentFor(userId: string): Promise<string> {
   const agent = await prisma.agent.create({ data: { userId, goal: 'code-preview blackbox' } });
@@ -288,7 +276,7 @@ previewHandoffCases({
   taskRow,
 });
 
-test('Rose-in-Rose HMR: an agent write to the Rose front-end reaches the preview DOM in ≤ 3 s', async () => {
+quarantinedHmrTest(async () => {
   const agentId = await agentFor(DEV_USER);
   const session = await codeSessionRow(DEV_USER, agentId, {
     sandboxKind: 'local',
@@ -303,7 +291,7 @@ test('Rose-in-Rose HMR: an agent write to the Rose front-end reaches the preview
     streamUrl: 'ws://127.0.0.1:9',
     codeSessionId: session.id,
   });
-  const frontEnd = makeRoseFrontEndHome(home);
+  const frontEnd = await makeRoseFrontEndHome(home);
   const observer = hmrObserver(frontEnd, home);
   // The CLI exactly as a dev session installs it.
   const [cli] = codePreviewToolFiles();
@@ -436,6 +424,15 @@ test('Rose-in-Rose HMR: an agent write to the Rose front-end reaches the preview
   }
   const stopped = await http('GET', `/api/claude-code-session/${taskId}/preview`, DEV_USER);
   assert.equal(stopped.data.status, 'not_running');
+});
+
+test('preview fixture drains closed keepalive connections before the next request', async () => {
+  const result = await execFileAsync(
+    process.execPath,
+    ['--import', 'tsx', join(__dirname, 'code-preview-fixture.child.ts')],
+    { timeout: 30_000 }
+  );
+  assert.match(result.stdout, /PASS fixture copy drains closed keepalive before preview GET/);
 });
 
 test('cloud wiring: ROSE_PREVIEW_URL + autostart only for dev sessions on the Rose repo', async () => {

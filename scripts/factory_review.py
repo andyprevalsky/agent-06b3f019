@@ -857,6 +857,8 @@ def classify_deploy_gates(invocation: Invocation) -> set[str]:
         "credential-health": "credential-health",
         "amplitude-live": "credential-health",
         "chat-router-failover-live": "credential-health",
+        "browser-provider-live": "credential-health",
+        "report-bug-storage-live": "credential-health",
         "migration-preflight": "credential-health",
         "backend-blackbox": "backend-blackbox",
         "smoke": "smoke",
@@ -2501,7 +2503,9 @@ def predeploy_consumption(
 ) -> dict[str, Any]:
     """Measured resource use of each predeploy benchmark trajectory per deploy."""
     attempts = []
-    for row in _factory_ledger_module().read_jsonl(history_dir / "task_attempts.jsonl"):
+    for row in _factory_ledger_module("factory_diagnostics")._history_ledger().read_rows(
+        history_dir / "task_attempts.jsonl"
+    ):  # base file + per-writer shards
         if row.get("suite") != "predeploy" or not row.get("task") or not row.get("timestamp"):
             continue
         try:

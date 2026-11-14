@@ -1,0 +1,342 @@
+{
+  "format": "PR1859-PREMERGE-VALIDATION-V1",
+  "reviewed_head": "0fecb25d0d92659d4df4aabd633cab1b336bad6f",
+  "merged_sha": "4e28dab648a66e70f513979cb11b59e614866424",
+  "native_cycle_ready": true,
+  "pending_post_merge_count": 0,
+  "native_gate_counts": {
+    "FAIL": 1,
+    "PASS": 14
+  },
+  "gates": [
+    {
+      "gate": "agents-coverage-blackbox",
+      "native_status": "PASS",
+      "native_exit": 0,
+      "complete": true,
+      "case_counts": {
+        "PASS": 1
+      },
+      "source": {
+        "head": "0fecb25d0d92659d4df4aabd633cab1b336bad6f",
+        "digest": "4eddfabda87521757b824c07f01fe8ff66a1e620aa170eec75a8d9e5792f758e"
+      },
+      "started_at": 1794184852.0882642,
+      "finished_at": 1794185624.7829087,
+      "native_receipt_sha256": "a513c542bce64abb9b290b57bbb81ead086806a1cf505db831124d3bf04896ea",
+      "request_sha256": "cd2417b87cfd8a1b411401a73c6eca37f01416e6dd9555f06b2119948818e6d8",
+      "cleanup_owner_retained": false,
+      "timed_out": false,
+      "cancelled": false,
+      "lingering_group": false
+    },
+    {
+      "gate": "backend-coverage-blackbox",
+      "native_status": "FAIL",
+      "native_exit": 1,
+      "complete": true,
+      "case_counts": {
+        "FAIL": 1,
+        "PASS": 254
+      },
+      "source": {
+        "head": "0fecb25d0d92659d4df4aabd633cab1b336bad6f",
+        "digest": "4eddfabda87521757b824c07f01fe8ff66a1e620aa170eec75a8d9e5792f758e"
+      },
+      "started_at": 1794184852.1507673,
+      "finished_at": 1794185557.2048752,
+      "native_receipt_sha256": "7b826d1a483af7fe7eb80d8560b86b2ac873f596871f5766b752ae7efb292c7f",
+      "request_sha256": "690d93db70e65ac83ee57678f7c0052df51512d1f733d64a75e124d4b42dfc57",
+      "cleanup_owner_retained": false,
+      "timed_out": false,
+      "cancelled": false,
+      "lingering_group": false
+    },
+    {
+      "gate": "backend-structural",
+      "native_status": "PASS",
+      "native_exit": 0,
+      "complete": true,
+      "case_counts": {
+        "PASS": 1
+      },
+      "source": {
+        "head": "0fecb25d0d92659d4df4aabd633cab1b336bad6f",
+        "digest": "4eddfabda87521757b824c07f01fe8ff66a1e620aa170eec75a8d9e5792f758e"
+      },
+      "started_at": 1794184754.1125708,
+      "finished_at": 1794184841.3454812,
+      "native_receipt_sha256": "085474a8cd6336e3d9763373a802261ff73b2d40b08a763d830d5ef174c46d44",
+      "request_sha256": "c39df90b015616ffe7ffd8c21e2e72e4ee34adb250df0fcebb6336a377312539",
+      "cleanup_owner_retained": false,
+      "timed_out": false,
+      "cancelled": false,
+      "lingering_group": false
+    },
+    {
+      "gate": "canonical-seed-whatsapp-content",
+      "native_status": "PASS",
+      "native_exit": 0,
+      "complete": true,
+      "case_counts": {
+        "PASS": 1
+      },
+      "source": {
+        "head": "0fecb25d0d92659d4df4aabd633cab1b336bad6f",
+        "digest": "4eddfabda87521757b824c07f01fe8ff66a1e620aa170eec75a8d9e5792f758e"
+      },
+      "started_at": 1794184852.0983222,
+      "finished_at": 1794184905.1260781,
+      "native_receipt_sha256": "c89d8ef233752737a9a74ec434742c83b50ee7c04d59256bbe01f863ed3ebde1",
+      "request_sha256": "28cc520cffe0a3e2a7dfae9bbe6aa2ee8ea4d6b6fb40602977c5cb84459eb781",
+      "cleanup_owner_retained": false,
+      "timed_out": false,
+      "cancelled": false,
+      "lingering_group": false
+    },
+    {
+      "gate": "cloudbench-controller",
+      "native_status": "PASS",
+      "native_exit": 0,
+      "complete": true,
+      "case_counts": {
+        "PASS": 1
+      },
+      "source": {
+        "head": "0fecb25d0d92659d4df4aabd633cab1b336bad6f",
+        "digest": "4eddfabda87521757b824c07f01fe8ff66a1e620aa170eec75a8d9e5792f758e"
+      },
+      "started_at": 1794181550.6939738,
+      "finished_at": 1794182825.624981,
+      "native_receipt_sha256": "fc7330b7b191a66ba858aff0cb29f3ec3bfc8d479253c689ae4733a37513449a",
+      "request_sha256": "cc898598ba82dfede88f4f43a579171bdd8f7896e0e8c2bf44262e1fce17a86d",
+      "cleanup_owner_retained": false,
+      "timed_out": false,
+      "cancelled": false,
+      "lingering_group": false
+    },
+    {
+      "gate": "deploy-command-structural",
+      "native_status": "PASS",
+      "native_exit": 0,
+      "complete": true,
+      "case_counts": {
+        "PASS": 1
+      },
+      "source": {
+        "head": "0fecb25d0d92659d4df4aabd633cab1b336bad6f",
+        "digest": "4eddfabda87521757b824c07f01fe8ff66a1e620aa170eec75a8d9e5792f758e"
+      },
+      "started_at": 1794184852.0086298,
+      "finished_at": 1794185408.7305932,
+      "native_receipt_sha256": "a6253e15d40998c4647b3da273e60786a2002f2a873d859f9fe454c54043f012",
+      "request_sha256": "2cee437c67a90dbb5ee0d6a543c9be6b73893e2b6ad1e0954fc1d139f1fca10d",
+      "cleanup_owner_retained": false,
+      "timed_out": false,
+      "cancelled": false,
+      "lingering_group": false
+    },
+    {
+      "gate": "e2b-smoke",
+      "native_status": "PASS",
+      "native_exit": 0,
+      "complete": true,
+      "case_counts": {
+        "PASS": 1
+      },
+      "source": {
+        "head": "0fecb25d0d92659d4df4aabd633cab1b336bad6f",
+        "digest": "4eddfabda87521757b824c07f01fe8ff66a1e620aa170eec75a8d9e5792f758e"
+      },
+      "started_at": 1794184852.1123443,
+      "finished_at": 1794184935.1838975,
+      "native_receipt_sha256": "717760e51bfaac88f2e03df46d1126397c9ad94db0521af1cf87569a6fbd21f7",
+      "request_sha256": "8b4a32331de73575ce6cc5317f480ddfb1fa23bd57e98031b5bbfdb2bfe2f80a",
+      "cleanup_owner_retained": false,
+      "timed_out": false,
+      "cancelled": false,
+      "lingering_group": false
+    },
+    {
+      "gate": "eslint",
+      "native_status": "PASS",
+      "native_exit": 0,
+      "complete": true,
+      "case_counts": {
+        "PASS": 1
+      },
+      "source": {
+        "head": "0fecb25d0d92659d4df4aabd633cab1b336bad6f",
+        "digest": "4eddfabda87521757b824c07f01fe8ff66a1e620aa170eec75a8d9e5792f758e"
+      },
+      "started_at": 1794184754.1070461,
+      "finished_at": 1794184754.4652312,
+      "native_receipt_sha256": "6e1921f4196204665c9618af72ccecd8e9e96d778600649cbf2dacefb710e7f3",
+      "request_sha256": "7244a08d8dcacbd3814337d32531ccc759a532b0591b330c0975bd6215fb9bd5",
+      "cleanup_owner_retained": false,
+      "timed_out": false,
+      "cancelled": false,
+      "lingering_group": false
+    },
+    {
+      "gate": "format",
+      "native_status": "PASS",
+      "native_exit": 0,
+      "complete": true,
+      "case_counts": {
+        "PASS": 1
+      },
+      "source": {
+        "head": "0fecb25d0d92659d4df4aabd633cab1b336bad6f",
+        "digest": "4eddfabda87521757b824c07f01fe8ff66a1e620aa170eec75a8d9e5792f758e"
+      },
+      "started_at": 1794184754.1180701,
+      "finished_at": 1794184754.5336328,
+      "native_receipt_sha256": "396702210f1a83a18f8fc21b8a6002688505f45679853b61072612cbe2749bfb",
+      "request_sha256": "3607e77070688779a3fa6d8319fcbdfe290729d6628f4c46e65df19d4f03f9a3",
+      "cleanup_owner_retained": false,
+      "timed_out": false,
+      "cancelled": false,
+      "lingering_group": false
+    },
+    {
+      "gate": "live-probes",
+      "native_status": "PASS",
+      "native_exit": 0,
+      "complete": true,
+      "case_counts": {
+        "PASS": 1
+      },
+      "source": {
+        "head": "0fecb25d0d92659d4df4aabd633cab1b336bad6f",
+        "digest": "4eddfabda87521757b824c07f01fe8ff66a1e620aa170eec75a8d9e5792f758e"
+      },
+      "started_at": 1794184852.0973318,
+      "finished_at": 1794184951.5811899,
+      "native_receipt_sha256": "3a23cf5228620b7b83b3aa1719d84c5f96cf3dfe41d804882be003b5de59fd5a",
+      "request_sha256": "0d8d7de2bd4a075715aa42a79f703fe2343f169f788e767096fc619d8a5166bd",
+      "cleanup_owner_retained": false,
+      "timed_out": false,
+      "cancelled": false,
+      "lingering_group": false
+    },
+    {
+      "gate": "seed-cache-decision",
+      "native_status": "PASS",
+      "native_exit": 0,
+      "complete": true,
+      "case_counts": {
+        "PASS": 1
+      },
+      "source": {
+        "head": "0fecb25d0d92659d4df4aabd633cab1b336bad6f",
+        "digest": "4eddfabda87521757b824c07f01fe8ff66a1e620aa170eec75a8d9e5792f758e"
+      },
+      "started_at": 1794184852.0852058,
+      "finished_at": 1794184905.2759142,
+      "native_receipt_sha256": "da998bb3c2ed60d872813c66b108c0a59461e929fa3d2c22ef7d6f927b656dc6",
+      "request_sha256": "580dc46d3b8b50750bca56f7435f52422177322c6511b022ac931c4dac91c110",
+      "cleanup_owner_retained": false,
+      "timed_out": false,
+      "cancelled": false,
+      "lingering_group": false
+    },
+    {
+      "gate": "seed-memory-ratchet",
+      "native_status": "PASS",
+      "native_exit": 0,
+      "complete": true,
+      "case_counts": {
+        "PASS": 1
+      },
+      "source": {
+        "head": "0fecb25d0d92659d4df4aabd633cab1b336bad6f",
+        "digest": "4eddfabda87521757b824c07f01fe8ff66a1e620aa170eec75a8d9e5792f758e"
+      },
+      "started_at": 1794184852.0512767,
+      "finished_at": 1794184937.9429853,
+      "native_receipt_sha256": "bc81688d96f3523d104a0b1c1bd34287ac049be52218612da7936ace8fc8e0b1",
+      "request_sha256": "9f4939683928772ceb7c3632214deedb3a128003da5f5f0652b75199f9ac6297",
+      "cleanup_owner_retained": false,
+      "timed_out": false,
+      "cancelled": false,
+      "lingering_group": false
+    },
+    {
+      "gate": "semantic-stack",
+      "native_status": "PASS",
+      "native_exit": 0,
+      "complete": true,
+      "case_counts": {
+        "PASS": 1
+      },
+      "source": {
+        "head": "0fecb25d0d92659d4df4aabd633cab1b336bad6f",
+        "digest": "4eddfabda87521757b824c07f01fe8ff66a1e620aa170eec75a8d9e5792f758e"
+      },
+      "started_at": 1794184852.102629,
+      "finished_at": 1794186032.9728937,
+      "native_receipt_sha256": "c2a54deef39e2891c27ac0fe58b3da35da4b33b2a80b73fe235c58fd3fb10b63",
+      "request_sha256": "d3ab098861b9319febdebd02ce78b12ddeb6f6c6babea3bac8c8c1d7ed2e45fc",
+      "cleanup_owner_retained": false,
+      "timed_out": false,
+      "cancelled": false,
+      "lingering_group": false
+    },
+    {
+      "gate": "smoke",
+      "native_status": "PASS",
+      "native_exit": 0,
+      "complete": true,
+      "case_counts": {
+        "PASS": 13
+      },
+      "source": {
+        "head": "0fecb25d0d92659d4df4aabd633cab1b336bad6f",
+        "digest": "4eddfabda87521757b824c07f01fe8ff66a1e620aa170eec75a8d9e5792f758e"
+      },
+      "started_at": 1794182825.6781468,
+      "finished_at": 1794184732.1886802,
+      "native_receipt_sha256": "f29190ad7eb4185b734f34b0d7b09355071211929c5cbe21dd76a906b83e5fde",
+      "request_sha256": "875ffdecf8cec57826ab65645b764168e0c1e8bb9f289f01edeb276a40a35cf9",
+      "cleanup_owner_retained": false,
+      "timed_out": false,
+      "cancelled": false,
+      "lingering_group": false
+    },
+    {
+      "gate": "typescript",
+      "native_status": "PASS",
+      "native_exit": 0,
+      "complete": true,
+      "case_counts": {
+        "PASS": 1
+      },
+      "source": {
+        "head": "0fecb25d0d92659d4df4aabd633cab1b336bad6f",
+        "digest": "4eddfabda87521757b824c07f01fe8ff66a1e620aa170eec75a8d9e5792f758e"
+      },
+      "started_at": 1794184754.112194,
+      "finished_at": 1794184774.3466449,
+      "native_receipt_sha256": "e98224af3d4acaea5cb285d64ccdd090d08ca034eae4ff92c676c55d499307e6",
+      "request_sha256": "3a9887edefaec422509f74e0052f1f86e7ab26f114d748b20f2542af473aabab",
+      "cleanup_owner_retained": false,
+      "timed_out": false,
+      "cancelled": false,
+      "lingering_group": false
+    }
+  ],
+  "qualified_failure": {
+    "occurrence": "11442f6bb29b4c01bfcdc98d943de742",
+    "attribution": "NOT_INTRODUCED",
+    "test": "backend-coverage-blackbox/blackbox:browser-provider",
+    "native_result": "FAIL",
+    "error": "FAIL live Tilion provider parity: page.goto: net::ERR_NAME_NOT_RESOLVED at https://example.com/",
+    "source_equivalence": "18 relevant current/original/baseline objects equal; direct vendor navigation before backend initialization",
+    "repair_agent": "https://boxes.dev/thread/thr_a22cd6bd7dd145e489a128a9a0d88e4e",
+    "existing_repair_pr": 1860,
+    "post_merge_goal_delivery": "delivered",
+    "native_handoff_resolved": true,
+    "repair_completion_claimed": false
+  }
+}

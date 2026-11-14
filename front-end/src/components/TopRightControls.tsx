@@ -6,6 +6,9 @@
  * [INSPECTING] --> compact inspection pill + admin account pill share one rail
  * [NARROW VIEWPORT] --> inspection label truncates; controls stay on one row
  *
+ * [PHONE FULLSCREEN] -> same rail host moves into its reserved header slot.
+ * [CLOSE] -> restore normal placement and focus without remounting children.
+ *
  * Vertical offset is breakpoint-aware:
  *   - Desktop (md+): the terminal header is a CENTERED floating pill, so this
  *     top-right rail never overlaps it. top-9 just clears the close (X) buttons
@@ -20,7 +23,9 @@
  * so it never covers them; the stock UI publishes nothing (offset 0).
  */
 
-import type { ReactNode } from 'react';
+import { useLayoutEffect, useState, type ReactNode } from 'react';
+import { createPortal } from 'react-dom';
+import { useGlobalControlsLayout } from './globalControlsLayoutContext';
 
 export const TOP_RIGHT_INSPECTION_SLOT_ID = 'top-right-inspection-slot';
 
@@ -29,13 +34,31 @@ interface TopRightControlsProps {
 }
 
 export function TopRightControls({ children }: TopRightControlsProps) {
-  return (
+  const { slot } = useGlobalControlsLayout();
+  const [host] = useState(() => {
+    const element = document.createElement('div');
+    element.className = 'min-w-0 max-w-full';
+    return element;
+  });
+  useLayoutEffect(() => {
+    const focused = document.activeElement;
+    if (slot) slot.appendChild(host);
+    else document.body.insertBefore(host, document.body.firstChild);
+    if (focused instanceof HTMLElement && host.contains(focused)) focused.focus();
+  }, [host, slot]);
+  useLayoutEffect(() => () => host.remove(), [host]);
+  return createPortal(
     <div
-      className="fixed right-4 md:right-[calc(var(--rose-app-icons-inset,0px)+1rem)] top-[calc(var(--mobile-terminal-header-height)+0.5rem)] z-[100] flex max-w-[calc(100vw-2rem)] items-start justify-end gap-2 md:top-9"
+      className={
+        slot
+          ? 'flex min-w-0 max-w-full items-start justify-end gap-2'
+          : 'fixed right-4 md:right-[calc(var(--rose-app-icons-inset,0px)+1rem)] top-[calc(var(--mobile-terminal-header-height)+0.5rem)] z-[100] flex max-w-[calc(100vw-2rem)] items-start justify-end gap-2 md:top-9'
+      }
       data-testid="top-right-controls"
     >
       <div className="contents" id={TOP_RIGHT_INSPECTION_SLOT_ID} />
       {children}
-    </div>
+    </div>,
+    host,
   );
 }

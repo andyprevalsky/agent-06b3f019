@@ -4,6 +4,7 @@ import { test } from 'node:test';
 import { Sandbox } from 'e2b';
 import { prisma } from '../../providers/database';
 import {
+  CodeSessionHeldError,
   releaseSandboxAfterFailedRestore,
   releaseSandboxAfterFailedStart,
 } from '../../providers/e2bCodeSessionSandbox';
@@ -83,6 +84,41 @@ export function registerFailedStartPauseCases(userId: string, agentId: string) {
       }
     });
   }
+  test('a spawn refused because the user holds the live CLI leaves the session live', async () => {
+    // The user chats with this session's CLI directly and an older ws-server
+    // refuses the attaching spawn (CodeSessionHeldError). The session is live:
+    // it must not be marked PAUSED (it would read as stopped and let another
+    // spawn take the lease and stop that ws-server); only this lease is dropped.
+    const seed = await prisma.codeSession.create({
+      data: {
+        userId,
+        rootAgentId: agentId,
+        ownerAgentId: agentId,
+        repoKey: '',
+        codeProvider: 'claude',
+        state: 'PAUSED',
+      },
+    });
+    try {
+      const held = new CodeSessionHeldError();
+      await assert.rejects(
+        createWithCodeSession(
+          { userId, agentId, repoUrl: null, codeProvider: 'claude', codeSessionId: seed.id },
+          async (session) => {
+            assert(session);
+            throw held;
+          }
+        ),
+        (error: unknown) => error === held
+      );
+      const row = await prisma.codeSession.findUniqueOrThrow({ where: { id: seed.id } });
+      assert.notEqual(row.state, 'PAUSED', 'a held session is live, never marked PAUSED');
+      assert.equal(row.leaseOwner, null, "the refused spawn's lease is released");
+    } finally {
+      await prisma.codeSession.delete({ where: { id: seed.id } });
+    }
+  });
+
   test('confirmed switched native pause retains custody through outer rollback', async (t) => {
     const seed = await prisma.codeSession.create({
       data: {

@@ -14,6 +14,7 @@ import { join, resolve, sep } from 'path';
 import { NotFoundError, Sandbox } from 'e2b';
 import { prisma } from '../database';
 import { createLogger } from '../logger';
+import { isCliTemplateSession } from '../cliTemplateReferences';
 import { checkpointKey, deleteCheckpointObject, getCheckpointObject } from './artifactStore';
 import {
   applyCheckpoint,
@@ -111,8 +112,14 @@ export async function checkpointCodeSession(params: {
   fs: CodeSessionFs;
   reason: string;
   agentId: string;
+  /** Epoch ms the checkpoint must finish by; default: now + CODE_SESSION_CLOSE_CHECKPOINT_BUDGET_MS (75 s). */
+  deadlineAt?: number;
 }): Promise<CheckpointResult | null> {
   const { session, fs, reason, agentId } = params;
+  // Every checkpoint is bounded well inside the worker's 180 s close call: an
+  // unbounded tarball download held the lease and lost the handoff (2026-11-08).
+  const budget = Number(process.env.CODE_SESSION_CLOSE_CHECKPOINT_BUDGET_MS);
+  const deadlineAt = params.deadlineAt ?? Date.now() + (budget > 0 ? budget : 75_000);
   try {
     const seq = await allocateCheckpointSeq(session.id);
     const manifest = await createCheckpoint({
@@ -123,6 +130,7 @@ export async function checkpointCodeSession(params: {
       reason,
       codeProvider: session.codeProvider,
       diffBase: session.mergeTarget,
+      deadlineAt,
     });
     const repo = primaryRepoFacts(manifest);
     await commitCheckpoint(session.id, seq, {
@@ -311,6 +319,9 @@ async function deleteCheckpoints(session: CodeSessionRow): Promise<void> {
 
 /** Kill the sandbox, delete stored checkpoints and mark the session retired. */
 export async function retireCodeSession(session: CodeSessionRow): Promise<void> {
+  if (await isCliTemplateSession(session.userId, session.id)) {
+    throw new Error('Disconnect the CLI integration before retiring its template');
+  }
   if (session.sandboxKind === 'e2b' && session.sandboxId !== null) {
     try {
       await Sandbox.kill(session.sandboxId, { apiKey: process.env.E2B_API_KEY });

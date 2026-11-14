@@ -4,12 +4,14 @@ import { mkdir, readdir, writeFile } from 'node:fs/promises';
 import { basename, dirname, join, relative, resolve } from 'node:path';
 import { nonLocalDatabaseReason } from '../src/utils/localDatabaseUrl';
 import { createIsolatedDatabase, ISOLATED_DATABASE_FILES } from './unit-test-database-isolation';
+import { describeChildTermination, type ChildTermination } from './unit-test-child-exit';
 
 type UnitResult = {
   durationMs: number;
   exitCode: number;
   file: string;
   output: string;
+  signal: NodeJS.Signals | null;
 };
 
 const backendDir = resolve(__dirname, '..');
@@ -274,6 +276,7 @@ async function main(): Promise<void> {
     // Preserve one isolated process per file without npm/tsx wrapper processes.
     const childEnv = {
       ...process.env,
+      SMS_PROVIDER: process.env.BACKEND_UNIT_SMS_PROVIDER ?? 'surge',
       ...localDatabaseEnv,
       ...(privateDatabase === undefined
         ? {}
@@ -297,29 +300,44 @@ async function main(): Promise<void> {
     child.stdout?.on('data', (chunk: Buffer) => chunks.push(chunk));
     child.stderr?.on('data', (chunk: Buffer) => chunks.push(chunk));
 
-    const exitCode = await new Promise<number>((resolveExit) => {
+    const termination = await new Promise<ChildTermination>((resolveExit) => {
       child.once('error', (error) => {
         chunks.push(Buffer.from(`\nFailed to start unit test: ${String(error)}\n`));
-        resolveExit(1);
+        resolveExit(describeChildTermination(1, null));
       });
       child.once('close', (code, signal) => {
-        resolveExit(code ?? (signal ? 128 : 1));
+        resolveExit(describeChildTermination(code, signal));
       });
     });
     activeChildren.delete(child);
     privateDatabase?.drop();
 
+    const { exitCode, signal, label: terminationLabel } = termination;
+    const durationMs = Math.round(performance.now() - startedAt);
+    // A native crash prints nothing, so the terminating signal is the only evidence it leaves.
+    if (exitCode !== 0) {
+      chunks.push(
+        Buffer.from(
+          `\n[run-unit-tests] child pid=${child.pid ?? 'none'} ended with ${terminationLabel} after ${durationMs}ms\n`
+        )
+      );
+    }
     const result = {
-      durationMs: Math.round(performance.now() - startedAt),
+      durationMs,
       exitCode,
       file,
       output: Buffer.concat(chunks).toString('utf8'),
+      signal,
     };
     const fileLabel = relative(unitDir, file);
     const logPath = join(logDir, fileLabel.replace(/\.test\.ts$/, '.log'));
     await mkdir(dirname(logPath), { recursive: true });
     await writeFile(logPath, result.output);
-    console.log(`  ${exitCode === 0 ? 'PASS' : 'FAIL'}  ${fileLabel} (${result.durationMs}ms)`);
+    console.log(
+      exitCode === 0
+        ? `  PASS  ${fileLabel} (${durationMs}ms)`
+        : `  FAIL  ${fileLabel} (${durationMs}ms, ${terminationLabel})`
+    );
     return result;
   }
 
@@ -350,6 +368,13 @@ async function main(): Promise<void> {
         {
           total: results.length,
           failed: failures.map((failure) => relative(unitDir, failure.file)).sort(),
+          terminations: failures
+            .map((failure) => ({
+              exitCode: failure.exitCode,
+              file: relative(unitDir, failure.file),
+              signal: failure.signal,
+            }))
+            .sort((a, b) => a.file.localeCompare(b.file)),
         },
         null,
         2

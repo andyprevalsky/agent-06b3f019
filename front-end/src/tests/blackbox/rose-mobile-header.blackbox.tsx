@@ -15,7 +15,7 @@
  * jsdom has no layout engine: widths are asserted from the declared sizes.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
 
@@ -203,6 +203,35 @@ describe('Rose mobile header (flag on, < 768px)', () => {
     expect(document.documentElement).not.toHaveClass('dark');
     await user.click(within(header()).getByRole('button', { name: 'Dark mode' }));
     expect(document.documentElement).toHaveClass('dark');
+  });
+});
+
+describe('Rose header frame beside the left bar (flag on, desktop)', () => {
+  it('keeps the header frame fixed when the sidebar is resized and pinned', async () => {
+    setViewport(1440, 900);
+    await renderTerminal();
+    const banner = screen.getByRole('banner');
+    const frame = screen.getByTestId('terminal-header-frame');
+    expect(banner.parentElement).toBe(frame);
+    expect(banner.className).toContain('left-1/2');
+    expect(frame.className).toContain('md:left-[64px]');
+    expect(document.documentElement.style.getPropertyValue('--rose-bar-offset')).toBe('64px');
+
+    const handle = screen.getByTestId('rose-sidebar-resize-handle');
+    act(() => {
+      fireEvent.pointerDown(handle);
+    });
+    act(() => {
+      fireEvent.pointerMove(window, { clientX: 420 });
+    });
+    act(() => {
+      fireEvent.pointerUp(window, { clientX: 420 });
+    });
+    expect(document.documentElement.style.getPropertyValue('--rose-bar-offset')).toBe('420px');
+    expect(frame.className).toContain('md:left-[64px]');
+    expect(screen.getByRole('banner').parentElement).toBe(frame);
+    localStorage.removeItem('rose-sidebar-width');
+    localStorage.removeItem('rose-sidebar-pinned');
   });
 });
 

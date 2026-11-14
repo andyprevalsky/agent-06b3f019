@@ -200,7 +200,12 @@ def _git_env(home: Path) -> dict[str, str]:
 
 def _git(args: list[str], cwd: Path, env: dict[str, str]) -> str:
     result = subprocess.run(
-        ["git", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", *args],
+        # Auto maintenance runs detached after commits and creates/removes .git lock files while the
+        # workspace is archived (code_bench_test FileNotFoundError on objects/maintenance.lock).
+        # Disable it, and keep any maintenance that still runs (explicit or receive-side) in the foreground.
+        ["git", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null",
+         "-c", "maintenance.auto=false", "-c", "gc.auto=0",
+         "-c", "gc.autoDetach=false", "-c", "maintenance.autoDetach=false", *args],
         cwd=cwd,
         env=env,
         capture_output=True,
@@ -234,9 +239,17 @@ def build_workspace(fixture: Fixture, parent: Path, files_from: Optional[Path] =
     if fixture.remote:
         origin = top / "origin.git"
         _git(["clone", "-q", "--bare", "--no-hardlinks", str(repo), str(origin)], parent, env)
+        # A local push starts receive-pack in the bare repository without the
+        # sender's command-scope -c options. Join its writers before archiving.
+        _git(["--git-dir", str(origin), "config", "gc.autoDetach", "false"], parent, env)
+        _git(["--git-dir", str(origin), "config", "maintenance.autoDetach", "false"], parent, env)
         # The bare clone records the build directory as its own origin; drop it so
         # the archive carries no host path and stays byte-identical across builds.
         _git(["--git-dir", str(origin), "remote", "remove", "origin"], parent, env)
+        # A push into origin.git runs receive-pack's auto maintenance on the receiving
+        # side, where `-c` options never reach; git >= 2.47 detaches it, so its
+        # maintenance.lock could be written while the result archive is captured.
+        _git(["--git-dir", str(origin), "config", "receive.autogc", "false"], parent, env)
         _git(["remote", "add", "origin", "../origin.git"], repo, env)
         _git(["fetch", "-q", "origin"], repo, env)
         _git(["branch", "-q", "--set-upstream-to=origin/main", "main"], repo, env)

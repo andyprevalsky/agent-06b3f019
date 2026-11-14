@@ -177,6 +177,8 @@ if command -v actionlint >/dev/null 2>&1; then
 fi
 
 # Cemented in the consistently-run gate.
+python3 "$ROOT_DIR/scripts/tests/mac-app-autotag.test.py"
+
 require_text "$TEST_RUNNER" 'mac-app-release-drift.test.sh' \
   "full test gate must run the Mac app release drift contract"
 
