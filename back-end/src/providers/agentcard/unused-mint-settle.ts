@@ -17,7 +17,7 @@ import {
   nudgeCardholderRecovery,
   type CardholderRecoveryNudge,
 } from './fund-recovery';
-import type { AgentCardOrgToolCaller } from './org-runtime';
+import { AgentCardOrgRuntimeError, type AgentCardOrgToolCaller } from './org-runtime';
 
 export type MintTransferObservation = {
   status: string;
@@ -186,6 +186,19 @@ export function deferredUnusedMintVerdict(
 
 export const UNUSED_MINT_SETTLE_POLL_MS = 8_000;
 export const UNUSED_MINT_SETTLE_WAIT_MS = 240_000;
+/**
+ * The org MCP throttle is one fixed 60 s window shared by every caller of the org (concurrent
+ * deploys, smoke payment tasks, production). A poll that still gets 429 after the runtime's own
+ * bounded retry waits out a whole window before polling again instead of adding to the backlog.
+ */
+export const UNUSED_MINT_SETTLE_THROTTLE_BACKOFF_MS = 60_000;
+
+/** The runtime's typed outcome for org-wide throttling that its bounded retry did not outlast. */
+function isOrgThrottle(error: unknown): boolean {
+  return (
+    error instanceof AgentCardOrgRuntimeError && error.code === 'agentcard_org_mcp_rate_limited'
+  );
+}
 
 export interface UnusedMintSettleWait<T extends MintTransferObservation> {
   /** The closed card's own cardholder: the only residual that can release its mint. */
@@ -218,7 +231,9 @@ function nudgeNote(attempt: number, nudge: CardholderRecoveryNudge): string | un
  * Each poll nudges only the card's own cardholder (nudgeCardholderRecovery: read open recoveries
  * first, coalesce on one in flight), then reads THIS card's transfer. A recovery yield is never
  * success. When the in-run wait runs out this returns the latest observation instead of failing:
- * a reclaim can legitimately take up to a day (UNUSED_MINT_RECLAIM_DEADLINE_MS).
+ * a reclaim can legitimately take up to a day (UNUSED_MINT_RECLAIM_DEADLINE_MS). An org throttle
+ * the runtime could not outlast is paced (UNUSED_MINT_SETTLE_THROTTLE_BACKOFF_MS) within the same
+ * window and fails only if it is still in force at the deadline.
  */
 export async function waitForUnusedMintSettled<T extends MintTransferObservation>(
   wait: UnusedMintSettleWait<T>
@@ -264,6 +279,16 @@ export async function waitForUnusedMintSettled<T extends MintTransferObservation
         return last;
       }
     } catch (error) {
+      // Org-wide backpressure says nothing about THIS transfer: keep polling inside the same
+      // settle window, one poll per throttle window. A throttle that outlasts it still fails.
+      if (isOrgThrottle(error)) {
+        if (now() >= deadline) throw error;
+        wait.report(
+          `  (org MCP throttled on attempt ${attempt}; waiting one throttle window before polling again)`
+        );
+        await sleep(Math.min(UNUSED_MINT_SETTLE_THROTTLE_BACKOFF_MS, deadline - now()));
+        continue;
+      }
       if (!wait.isTransientError(error)) throw error;
       if (now() >= deadline) throw error;
       if (attempt % 3 === 0) {

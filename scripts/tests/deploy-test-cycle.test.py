@@ -426,7 +426,7 @@ class Cycle(unittest.TestCase):
         self.assertEqual(other_before, {k: v for k, v in unrelated.items() if k != h.RECOVERED_KEY})
         self.assertEqual(current17, unrelated['failures'][-17:])
 
-    def custody_fixture(self, top_level=None, gate_name='api'):
+    def custody_fixture(self, top_level=None, gate_name="api", purchase_owner=None, failed_status='FAILED'):
         import deploy_test_historical_custody as h
         mocked = patch.object(h, 'native_closure', return_value={'fixture': 'terminal native fleet'})
         mocked.start(); self.addCleanup(mocked.stop)
@@ -459,15 +459,21 @@ class Cycle(unittest.TestCase):
                                      agentCardProviderUnlinkedTransferCount=0, cardCount=1, purchaseCount=1,
                                      stripePaymentIntentCount=1, stripeProviderPaymentIntentCount=1,
                                      walletFundingCount=1)
-            final = dict(root_deleted=True, tree_agent_ids=[snap['agentId']], unsealed_tree_agent_ids=[], browser_sessions=[],
+            root_id = snap['agentId']
+            if i and purchase_owner:
+                # The timed-out task's browser sub-agent requested the card, so the runner keyed
+                # the stall lifecycle by that child, not the root (PR #1972 r7 native evidence).
+                snap['agentId'] = purchase_owner
+            final = dict(root_deleted=True, tree_agent_ids=sorted({root_id, snap['agentId']}), unsealed_tree_agent_ids=[],
+                         browser_sessions=[],
                          purchase_cleanup=[dict(agent_id=snap['agentId'], purchase_id=snap['purchase']['id'],
                           card_id=snap['agentCard']['id'], provider_transfer_id=snap['orgTransfer']['id'],
                           total_cents=4396, status='HELD', funding_status='RECLAIMING')])
-            row = dict(name=name, agent_id=snap['agentId'], passed=False, status='ACTIVE' if i else 'SKIPPED',
-                       benchmark_status='FAILED' if i else 'SKIPPED', failure_reason='auth then timeout' if i else self.STALL_REASON)
+            row = dict(name=name, agent_id=root_id, passed=False, status=('ERROR' if failed_status == 'ERROR' else 'ACTIVE') if i else 'SKIPPED',
+                       benchmark_status=failed_status if i else 'SKIPPED', failure_reason='auth then timeout' if i else self.STALL_REASON)
             native = dict(**row, cleanup_failure=None, context_violations=[],
                           execution_provenance={'base_sha': self.state['source']['head']},
-                          logs={'cloud_cleanup_evidence': dict(errors=[], root_agent_id=snap['agentId'], final=final,
+                          logs={'cloud_cleanup_evidence': dict(errors=[], root_agent_id=root_id, final=final,
                                 provider_receipts=[], agentcard_release_stall_lifecycles={snap['agentId']: snap})})
             if not i:
                 native['logs']['agentcard_release_stall_lifecycle'] = top_level(copy.deepcopy(snap)) if top_level else snap
@@ -1860,6 +1866,111 @@ class Cycle(unittest.TestCase):
                     self.assertFalse(c.carried_pass(candidate, gate, root=self.root))
                     launch.assert_not_called()
             (self.root / 'code').write_text(code)
+
+    def test_historical_custody_binds_subagent_owned_stall_and_refuses_unprovable_owner(self):
+        # PR #1972 r7: the protected timed-out idempotent-abandonment row's stall lifecycle was keyed
+        # by its browser sub-agent, and prepare-historical-no-retry crashed with KeyError(root id).
+        import deploy_test_historical_custody as h
+        new = self.custody_fixture(purchase_owner='browser-1')
+        proof = h.build(self.state, self.plan, new, self.root)
+        case = next(r for r in proof['cases'] if r['original_failure']['id'] == 'failure-1')
+        self.assertEqual(('root-1', 'purchase-1', 'card-1', 'transfer-1', 4396),
+                         tuple(case[k] for k in ('root_id', 'purchase_id', 'card_id', 'transfer_id', 'original_amount_cents')))
+        self.assertEqual('canonical_pending_repair', case['authority']['kind'])
+        f = self.state['failures'][1]; file = Path(f['worker_evidence']['path']); raw = file.read_bytes()
+        adapter_path = Path(f['worker_result']); adapter_raw = adapter_path.read_bytes()
+
+        def evidence(t):
+            return t['logs']['cloud_cleanup_evidence']
+
+        def lifecycles(t):
+            return evidence(t)['agentcard_release_stall_lifecycles']
+        refusals = {
+            'ambiguous release-stall': lambda t: lifecycles(t).update({'browser-2': dict(lifecycles(t)['browser-1'], agentId='browser-2')}),
+            # A root snapshot beside the child's would leave the second stalled purchase unbound.
+            'ambiguous release-stall lifecycles': lambda t: lifecycles(t).update({'root-1': dict(lifecycles(t)['browser-1'], agentId='root-1')}),
+            'malformed release-stall': lambda t: lifecycles(t)['browser-1'].update(agentCard=None),
+            'owner mismatch': lambda t: lifecycles(t)['browser-1'].update(agentId='browser-2'),
+            'root not sealed': lambda t: evidence(t)['final'].update(tree_agent_ids=['root-1']),
+            'final purchase join': lambda t: evidence(t)['final']['purchase_cleanup'][0].update(agent_id='root-1'),
+            'confirmed sandbox release stall': lambda t: lifecycles(t)['browser-1']['orgTransfer'].update(releasedCents=1),
+        }
+        for message, change in refusals.items():
+            candidate = copy.deepcopy(self.state)
+            doc = json.loads(raw); change(doc['tasks'][0]); c.write(file, doc)
+            candidate['failures'][1]['worker_evidence']['sha256'] = c.sha_file(file)
+            adapter = json.loads(adapter_raw)
+            adapter['evidence'][doc['tasks'][0]['name']] = candidate['failures'][1]['worker_evidence']
+            c.write(adapter_path, adapter)
+            with self.assertRaisesRegex(ValueError, 'historical custody: .*' + message, msg=message):
+                h.build(candidate, self.plan, new, self.root)
+            file.write_bytes(raw); adapter_path.write_bytes(adapter_raw)
+        # No recorded lifecycle at all is not a discovered custody obligation; only the stall stays protected.
+        candidate = copy.deepcopy(self.state)
+        doc = json.loads(raw); evidence(doc['tasks'][0]).update(agentcard_release_stall_lifecycles={}); c.write(file, doc)
+        candidate['failures'][1]['worker_evidence']['sha256'] = c.sha_file(file)
+        self.assertEqual(['failure-0'], list(h.known(candidate, self.root)))
+        file.write_bytes(raw)
+        before = copy.deepcopy(self.state)
+        c.refresh(self.state, self.plan, new, self.root, historical_no_retry_proof=proof)
+        self.assertEqual(new, self.state['plan'])
+        rows = {r['original_failure']['id']: r for r in self.state['historical_no_retry_custody']}
+        self.assertEqual({'failure-0', 'failure-1'}, set(rows))
+        self.assertTrue(all(r['disposition'] == h.DISPOSITION and r['current_execution'] == 'UNVERIFIED'
+                            and not any(r['credit'].values()) for r in rows.values()))
+        self.assertEqual(before['failures'], self.state['failures'])
+        self.assertEqual([p['id'] for p in before['pending_post_merge']], [p['id'] for p in self.state['pending_post_merge']])
+        h.verify(self.state, self.root)
+        self.assertEqual({'agent-payment-abandonment', 'agent-payment-idempotent-abandonment'},
+                         set(c.reuse_qualifications(self.state, new['gates'][1], root=self.root)))
+
+    def test_historical_custody_keeps_no_retry_for_stall_row_that_ended_error(self):
+        # PR #2014 smoke: agent-payment-abandonment hit the exact sandbox stall, but an AgentCard org-token
+        # 401/429 storm failed its final lifecycle read, so the native row ended ERROR, not FAILED. Its
+        # canonical pending repair must still carry no-retry custody; a refusal forces a re-minting rerun.
+        import deploy_test_historical_custody as h
+        new = self.custody_fixture(failed_status='ERROR')
+        proof = h.build(self.state, self.plan, new, self.root)
+        case = next(r for r in proof['cases'] if r['original_failure']['id'] == 'failure-1')
+        self.assertEqual('canonical_pending_repair', case['authority']['kind'])
+        c.refresh(self.state, self.plan, new, self.root, historical_no_retry_proof=proof)
+        self.assertEqual({'failure-0', 'failure-1'}, {r['original_failure']['id'] for r in self.state['historical_no_retry_custody']})
+        h.verify(self.state, self.root)
+        # Only complete non-passing native outcomes qualify; a PASSED row is never custody.
+        state = copy.deepcopy(self.state)
+        f = state['failures'][1]; file = Path(f['worker_evidence']['path']); doc = json.loads(file.read_bytes())
+        doc['tasks'][0]['benchmark_status'] = 'PASSED'; c.write(file, doc)
+        f['worker_evidence']['sha256'] = c.sha_file(file); f['worker_evidence']['native_task']['benchmark_status'] = 'PASSED'
+        adapter_path = Path(f['worker_result']); adapter = c.read(adapter_path)
+        adapter['evidence'][doc['tasks'][0]['name']] = f['worker_evidence']; c.write(adapter_path, adapter)
+        state.pop('historical_custody_history', None); state.pop('historical_no_retry_custody', None)
+        with self.assertRaisesRegex(ValueError, 'independent failure lacks canonical pending repair'):
+            h.historical(state, f, self.root)
+
+    def test_historical_custody_ignores_warning_context_violations_only(self):
+        # PR #2014 smoke: agent-payment-test-shop's confirmed-stall row carried one warning-severity
+        # context violation (whitespace-only assistant message); run_benchmark fails rows only on
+        # error severity, so custody must not refuse and force a re-minting rerun.
+        import deploy_test_historical_custody as h
+        new = self.custody_fixture()
+        f = self.state['failures'][1]; file = Path(f['worker_evidence']['path']); raw = file.read_bytes()
+        adapter_path = Path(f['worker_result']); adapter_raw = adapter_path.read_bytes()
+        warning = {'message': 'Assistant message 23 has only whitespace text content.', 'message_index': 23,
+                   'rule': 'non_empty_content', 'severity': 'warning'}
+        for violations, ok in (([warning], True), ([dict(warning, severity='error')], False),
+                               ([warning, 'malformed'], False), (None, False)):
+            state = copy.deepcopy(self.state)
+            doc = json.loads(raw); doc['tasks'][0]['context_violations'] = violations; c.write(file, doc)
+            failure = state['failures'][1]; failure['worker_evidence']['sha256'] = c.sha_file(file)
+            adapter = json.loads(adapter_raw); adapter['evidence'][doc['tasks'][0]['name']] = failure['worker_evidence']
+            c.write(adapter_path, adapter)
+            if ok:
+                row = h.historical(state, failure, self.root)
+                self.assertEqual('canonical_pending_repair', row['authority']['kind'])
+            else:
+                with self.assertRaisesRegex(ValueError, 'native task/cleanup unknown'):
+                    h.historical(state, failure, self.root)
+            file.write_bytes(raw); adapter_path.write_bytes(adapter_raw)
 
     def test_historical_custody_rejects_tampering_and_missing_admission_proof(self):
         import deploy_test_historical_custody as h
@@ -5899,13 +6010,13 @@ class Cycle(unittest.TestCase):
             with self.assertRaises(ValueError): renewal.contract(self.root, head, 'fixture')
             path.write_text(original)
 
-    def renewal_fixture(self):
+    def renewal_fixture(self, purchase_owner='root-fixture'):
         import deploy_test_agentcard_renewal as renewal
         import time
         task = next(t for t in json.loads((ROOT / 'agents/benchmarks/tasks.json').read_text())
                     if t['name'] == 'agent-payment-abandonment')
         lifecycle = copy.deepcopy(task['expected_payment_lifecycle'])
-        lifecycle.update(agentId='root-fixture', stripeRefund=None)
+        lifecycle.update(agentId=purchase_owner, stripeRefund=None)
         lifecycle['purchase'].update(status='HELD', cardId='card_fixture')
         lifecycle['walletFunding'].update(status='RECLAIMING', providerTransferId='owt_fixture')
         lifecycle['agentCard'].update(id='card_fixture', status='CLOSED')
@@ -5919,8 +6030,10 @@ class Cycle(unittest.TestCase):
         row['logs']['agentcard_release_stall_lifecycle'] = lifecycle
         row['logs']['cloud_cleanup_evidence'] = {
             'errors': [], 'root_agent_id': 'root-fixture',
-            'agentcard_release_stall_lifecycles': {'root-fixture': lifecycle},
+            'agentcard_release_stall_lifecycles': {purchase_owner: lifecycle},
             'final': {'root_deleted': True, 'unsealed_tree_agent_ids': [], 'browser_sessions': []}}
+        if purchase_owner != 'root-fixture':
+            row['logs']['cloud_cleanup_evidence']['final']['tree_agent_ids'] = ['root-fixture', purchase_owner]
         c.write(path, doc)
         sha = c.sha_file(path)
         failure = self.resource_failure(reason=self.STALL_REASON, name='agent-payment-abandonment', sha=sha)
@@ -5941,6 +6054,26 @@ class Cycle(unittest.TestCase):
                  'observations': {'card': {'id': 'card_fixture', 'status': 'CLOSED', 'balanceCents': 0, 'livemode': False},
                                   'transfer': copy.deepcopy(lifecycle['orgTransfer'])}}
         return renewal, task, proof, original, path
+
+    def test_renewal_binds_subagent_owned_stall_and_refuses_unsealed_owner(self):
+        # Same root-owner assumption as the PR #1972 custody KeyError, in the warning renewal path.
+        renewal, task, proof, original, path = self.renewal_fixture(purchase_owner='browser-fixture')
+        self.assertEqual(('card_fixture', 'owt_fixture'), (proof['binding']['card_id'], proof['binding']['transfer_id']))
+        occurrence = proof['binding']['occurrence']; raw = path.read_bytes()
+        for message, change in (('lifecycle join mismatch', lambda e: e['final'].update(tree_agent_ids=['root-fixture'])),
+                                ('ambiguous release-stall', lambda e: e['agentcard_release_stall_lifecycles'].update(
+                                    {'root-fixture': dict(e['agentcard_release_stall_lifecycles']['browser-fixture'], agentId='root-fixture')}))):
+            doc = json.loads(raw); change(doc['tasks'][0]['logs']['cloud_cleanup_evidence']); c.write(path, doc)
+            state = copy.deepcopy(self.state)
+            failure = next(f for f in state['failures'] if f['id'] == occurrence)
+            failure['worker_evidence']['sha256'] = failure['rca']['resource_skip']['receipt_sha256'] = c.sha_file(path)
+            for warning in state['superseded_resource_warnings']:
+                if warning['id'] == occurrence:
+                    warning['receipt_sha256'] = warning['confirmation']['receipt_sha256'] = c.sha_file(path)
+            with patch.object(renewal, 'contract', return_value=(task, 'contract-sha')):
+                with self.assertRaisesRegex(ValueError, message):
+                    renewal.original(state, occurrence, self.root)
+        path.write_bytes(raw)
 
     def test_changed_source_agentcard_renewal_cli_keeps_failure_and_runs_peers(self):
         renewal, task, proof, original, path = self.renewal_fixture()

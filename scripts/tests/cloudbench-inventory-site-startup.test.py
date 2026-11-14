@@ -59,5 +59,63 @@ class InventorySiteStartup(unittest.TestCase):
                 self.assertFalse(marker.exists(), 'stdlib publisher initialized venv site packages')
 
 
+    def run_snapshot_init(self, reads):
+        """Run the real start_machines_snapshot_loop with scripted Fly list reads.
+
+        ``reads`` holds one native status per fly_with_timeout call (machines
+        list, then volumes list, per refresh); ``sleep`` is logged, not slept.
+        """
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            (root/'reads').write_text(''.join(f'{status}\n' for status in reads))
+            machines = json.dumps([dict(id='1234567890abcd', name='warm-fixture', state='stopped',
+                config=dict(mounts=[dict(volume='vol-fixture', path='/data')]))])
+            env = {key: value for key, value in os.environ.items()
+                   if not key.startswith(('CLOUDBENCH_', 'INVENTORY_'))}
+            env.update(FLEET_DIR=str(root), APP='fixture', LOG=str(root/'log'), READS=str(root/'reads'),
+                       MACHINES=machines, VOLUMES=json.dumps([dict(id='vol-fixture', state='created')]),
+                       MACHINE_READINESS_SCRIPT=str(SOURCE/'scripts/cloudbench-machine-readiness.py'))
+            script = (
+                'source "$1"; source "$2"\n'
+                'sleep() { echo "sleep $1" >> "$LOG"; }\n'
+                'machines_snapshot_loop() { exec /bin/sleep 30; }\n'
+                'fly_with_timeout() {\n'
+                '  echo "read $3 timeout=$1" >> "$LOG"\n'
+                '  local n status; n=$(grep -c "^read " "$LOG"); status=$(sed -n "${n}p" "$READS")\n'
+                '  [ "$status" = 0 ] || return "$status"\n'
+                '  if [ "$3" = list ] && [ "$2" = machines ]; then printf "%s" "$MACHINES"; else printf "%s" "$VOLUMES"; fi\n'
+                '}\n'
+                'status=0; start_machines_snapshot_loop || status=$?\n'
+                '[ -z "${SNAPSHOT_LOOP_PID:-}" ] || kill "$SNAPSHOT_LOOP_PID"\n'
+                'exit "$status"\n'
+            )
+            result = subprocess.run(['/bin/bash', '-c', script, 'fixture', str(SOURCE/'scripts/lib/cloudbench-env.sh'),
+                                     str(SOURCE/'scripts/lib/cloudbench-inventory.sh')],
+                                    env=env, capture_output=True, text=True, timeout=20)
+            published = (root/'inventory/current/names/warm-fixture').exists()
+            return result, (root/'log').read_text().splitlines(), published
+
+    def test_snapshot_init_retries_one_slow_read_then_publishes(self):
+        result, log, published = self.run_snapshot_init([0, 142, 0, 0])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('timed out (attempt 1/3)', result.stderr)
+        self.assertEqual(log, ['read list timeout=30', 'read list timeout=30', 'sleep 2',
+                               'read list timeout=30', 'read list timeout=30'])
+        self.assertTrue(published)
+
+    def test_snapshot_init_persistent_timeout_and_other_failures_refuse(self):
+        result, log, published = self.run_snapshot_init([142] * 4)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('shared inventory snapshot did not initialize', result.stderr)
+        self.assertEqual(log, ['read list timeout=30', 'sleep 2', 'read list timeout=30',
+                               'sleep 5', 'read list timeout=30'])
+        self.assertFalse(published)
+        # A non-timeout failure (auth, missing app) is never retried.
+        result, log, published = self.run_snapshot_init([1, 0])
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(log, ['read list timeout=30'])
+        self.assertFalse(published)
+
+
 if __name__ == '__main__':
     unittest.main()
