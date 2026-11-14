@@ -243,7 +243,7 @@ A failed lane goes through **When a gate fails**; a code fix ships as a new PR t
 
 Publish the `deploy-summary-v2` card from `.claude/shared/report-display-format.md` using `.claude/shared/deploy-scorecard-template.html`, following the scorecard freshness rule in `.claude/shared/deploy-failure-policy.md`.
 
-Before publishing the final card, run `python3 scripts/check_stale_versions.py` (critical pinned versions: the Claude Code and Codex CLIs) and copy every `⚠️` line it prints, unchanged, into the FOLLOWUPS box. A pin more than 30 days behind its newest stable release prints `⚠️ STALE VERSION`; an unreadable registry prints `⚠️ UNMEASURED VERSION`. It warns only and never blocks the deploy.
+Before publishing the final card, run `python3 scripts/check_stale_versions.py` (critical pinned versions: the Claude Code and Codex CLIs) and copy every `⚠️` line it prints, unchanged, into the FOLLOWUPS box. A pin that is behind its newest stable release and was itself released more than 30 days ago prints `⚠️ STALE VERSION`; a pin or registry it cannot read prints `⚠️ UNMEASURED VERSION`; `OK` lines are not follow-ups. It warns only and never blocks the deploy, whatever its exit code.
 
 ## References
 

@@ -177,6 +177,17 @@ class CheckStaleVersionsTest(unittest.TestCase):
         self.assertIn("no `ARG CODEX_VERSION=<version>` in e2b-templates/codex-code/e2b.Dockerfile", result.stderr)
         self.assertEqual(result.stdout.splitlines(), ["Claude Code CLI 2.1.311 (@anthropic-ai/claude-code, stable)"])
 
+    def test_missing_pin_still_prints_a_followup_line_for_the_scorecard(self) -> None:
+        self.pin("2.1.311", None)
+        with Registry({CLAUDE: document({"stable": "2.1.311"}, {"2.1.311": 3})}) as registry:
+            result = self.run_cli(registry.url)
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stdout.splitlines(), [
+            "OK — Claude Code CLI 2.1.311 is the newest stable release",
+            "⚠️ UNMEASURED VERSION — Codex CLI: no `ARG CODEX_VERSION=<version>` in "
+            "e2b-templates/codex-code/e2b.Dockerfile",
+        ])
+
     def test_this_checkout_ships_readable_pins_for_every_critical_dependency(self) -> None:
         result = subprocess.run([sys.executable, str(SCRIPT), "--list-pins"],
                                 capture_output=True, text=True, encoding="utf-8", env=CHILD_ENV, timeout=60, check=False)

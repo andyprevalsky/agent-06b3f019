@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Warn when a critical pinned dependency has fallen more than a month behind its release channel.
+"""Warn when a critical pinned dependency is behind its stable release and the pin is over a month old.
 
 /deploy runs this while preparing the final scorecard and copies every line that starts
 with ⚠️ into the FOLLOWUPS box. It never blocks a deploy.
@@ -10,13 +10,14 @@ with ⚠️ into the FOLLOWUPS box. It never blocks a deploy.
            pin >= newest                        ─▶ OK, current
            pin behind, released <= 30 days ago  ─▶ OK, behind but within the window
            pin behind, released  > 30 days ago  ─▶ ⚠️ STALE VERSION (upgrade it)
-           registry unreachable / unparseable   ─▶ ⚠️ UNMEASURED VERSION (never a silent OK)
+           pin or registry unreadable           ─▶ ⚠️ UNMEASURED VERSION (never a silent OK)
 
     python3 scripts/check_stale_versions.py                 # one line per dependency
     python3 scripts/check_stale_versions.py --json          # machine-readable rows
     python3 scripts/check_stale_versions.py --list-pins     # offline: the pins this checkout ships
 
-An unreadable pin exits 1: the registry below no longer matches the repository.
+An unreadable pin also exits 1 (the list below no longer matches the repository); its
+⚠️ UNMEASURED line still prints, so the scorecard never drops it.
 """
 
 from __future__ import annotations
@@ -142,7 +143,15 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"{dep.name} {pins[dep.name]} ({dep.package}, {dep.channel})")
         return 1 if missing else 0
 
-    rows = [check(dep, pins[dep.name], args.registry, now) for dep in CRITICAL if pins[dep.name]]
+    rows = [
+        check(dep, pins[dep.name], args.registry, now) if pins[dep.name] else {
+            "name": dep.name, "package": dep.package, "channel": dep.channel, "pinned": None,
+            "pin_file": dep.pin_file, "pin_arg": dep.pin_arg, "status": "unmeasured",
+            # A follow-up like any other: the scorecard copies every ⚠️ line, so none is dropped.
+            "message": f"⚠️ UNMEASURED VERSION — {dep.name}: no `ARG {dep.pin_arg}=<version>` in {dep.pin_file}",
+        }
+        for dep in CRITICAL
+    ]
     if args.json:
         print(json.dumps(rows, indent=2))
     else:
