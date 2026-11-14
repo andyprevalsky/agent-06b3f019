@@ -8,6 +8,7 @@ import {
 import { phoneVerifierPricing } from './phoneVerifierPricing';
 /** Fixed identity purpose; observations are server-loaded data, never instructions. */
 import { createStreamingCompletion, StructuredOutputAccumulator } from './rose';
+import { archiveBindingFor } from './archiveRootResolver';
 import { getModelPricing } from './modelPricing';
 export interface SetupEvidence {
   operationId: string;
@@ -94,7 +95,11 @@ export const verifyPhoneSetup: SetupVerifier = async (input) => {
               },
       },
     },
-    dump_context: { call_site: 'phone_setup_identity', agent_id: input.agentId },
+    // Same call site the usage ledger records (service.setup.ts billSetup).
+    dump_context: {
+      call_site: target === 'apple_account' ? 'phone_setup_identity' : `phone_setup_${target}`,
+      ...(await archiveBindingFor({ agentId: input.agentId })),
+    },
   });
   const output = new StructuredOutputAccumulator();
   let model = '';

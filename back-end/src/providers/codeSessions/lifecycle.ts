@@ -7,7 +7,9 @@
  *                                 ├─ other connect error ──► throw (spawn retries; never orphan)
  *                                 └─ local fallback: reuse HOME, else restore checkpoint
  *   close  ─► checkpointCodeSession ─► index code_event rows ─► pause (never kill)
- *   retire ─► explicit close or TTL: kill sandbox, delete checkpoints
+ *                └─► archive job: mirror into the root's R2 bundle ─► prune (archiveMirror.ts)
+ *   retire ─► explicit close or TTL: kill sandbox, delete checkpoints — each only
+ *             once its R2 copy is confirmed (else the session stays for the next sweep)
  */
 import { existsSync, mkdirSync, rmSync } from 'fs';
 import { join, resolve, sep } from 'path';
@@ -15,6 +17,13 @@ import { NotFoundError, Sandbox } from 'e2b';
 import { prisma } from '../database';
 import { createLogger } from '../logger';
 import { checkpointKey, deleteCheckpointObject, getCheckpointObject } from './artifactStore';
+import {
+  archiveTargetFor,
+  ensureCheckpointArchived,
+  mirrorCheckpointToArchive,
+  scheduleCheckpointArchiveJob,
+  type CheckpointArchiveTarget,
+} from './archiveMirror';
 import {
   applyCheckpoint,
   CheckpointIntegrityError,
@@ -24,6 +33,7 @@ import {
   MANIFEST_NAME,
   type CheckpointManifest,
   type CheckpointRepo,
+  type StoredCheckpoint,
   type VerifiedCheckpoint,
 } from './checkpoint';
 import { indexCodeEvents } from './codeEvents';
@@ -34,6 +44,7 @@ import {
   findExpiredCodeSessions,
   markRetired,
   type CodeSessionRow,
+  type ExpiredSweepCursor,
 } from './store';
 
 const log = createLogger('CodeSessionLifecycle');
@@ -121,7 +132,7 @@ export async function checkpointCodeSession(params: {
   const deadlineAt = params.deadlineAt ?? Date.now() + (budget > 0 ? budget : 75_000);
   try {
     const seq = await allocateCheckpointSeq(session.id);
-    const manifest = await createCheckpoint({
+    const stored = await createCheckpoint({
       fs,
       userId: session.userId,
       codeSessionId: session.id,
@@ -130,23 +141,28 @@ export async function checkpointCodeSession(params: {
       codeProvider: session.codeProvider,
       diffBase: session.mergeTarget,
       deadlineAt,
+      previousSeq: session.latestCheckpointSeq,
     });
+    const { manifest } = stored;
     const repo = primaryRepoFacts(manifest);
     await commitCheckpoint(session.id, seq, {
       cliSessionId: manifest.cliSessionId,
       repoFacts: repo,
     });
-    // Restore never looks further back than RESTORE_LOOKBACK, so periodic saves
-    // keep a bounded window: drop the one checkpoint that just fell out of it.
-    if (seq > RESTORE_LOOKBACK) {
-      await deleteCheckpoint(session.userId, session.id, seq - RESTORE_LOOKBACK).catch(
-        (error: unknown) => {
-          log.warn('Pruning an old code session checkpoint failed', {
-            codeSessionId: session.id,
-            seq: String(seq - RESTORE_LOOKBACK),
-            error: error instanceof Error ? error.message : String(error),
-          });
-        }
+    // Off the close path: mirror into the trace archive, then prune. The root is
+    // resolved here so the job itself never touches the database. Unresolvable
+    // now: no mirror or prune this time (the next prune or the retire archives it).
+    const target = await archiveTargetFor(session).catch((error: unknown) => {
+      log.warn('Resolving the archive root failed; checkpoint archived later', {
+        codeSessionId: session.id,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return null;
+    });
+    if (target !== null) {
+      scheduleCheckpointArchiveJob(
+        archiveJobWithBytes(session, target, seq, stored),
+        archiveJobFromStorage(session, target, seq)
       );
     }
     let indexedCodeEvents = 0;
@@ -183,6 +199,67 @@ export async function checkpointCodeSession(params: {
     });
     return null;
   }
+}
+
+type ArchivedSession = Pick<CodeSessionRow, 'id' | 'userId' | 'rootAgentId'>;
+
+/**
+ * Mirror checkpoint `seq` into the root's trace-archive bundle, then prune the
+ * checkpoint that just left the restore window. Restore never looks further back
+ * than RESTORE_LOOKBACK, so periodic saves keep a bounded Supabase window; the
+ * pruned checkpoint is deleted only once its archive copy is confirmed.
+ */
+async function archiveThenPrune(
+  session: ArchivedSession,
+  target: CheckpointArchiveTarget,
+  seq: number,
+  stored: StoredCheckpoint | null
+): Promise<void> {
+  try {
+    if (stored !== null) {
+      await mirrorCheckpointToArchive({
+        target,
+        seq,
+        manifestBytes: stored.manifestBytes,
+        artifacts: stored.artifacts,
+      });
+    } else {
+      await ensureCheckpointArchived(session, seq, target);
+    }
+  } catch (error) {
+    log.warn('Archiving a code session checkpoint failed; kept in storage and retried', {
+      codeSessionId: session.id,
+      seq: String(seq),
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+  if (seq > RESTORE_LOOKBACK) {
+    await pruneCheckpoint(session, seq - RESTORE_LOOKBACK, target).catch((error: unknown) => {
+      log.warn('Pruning an old code session checkpoint failed', {
+        codeSessionId: session.id,
+        seq: String(seq - RESTORE_LOOKBACK),
+        error: error instanceof Error ? error.message : String(error),
+      });
+    });
+  }
+}
+
+/** Separate scopes: the storage job must not keep the checkpoint bytes alive. */
+function archiveJobWithBytes(
+  session: ArchivedSession,
+  target: CheckpointArchiveTarget,
+  seq: number,
+  stored: StoredCheckpoint
+): () => Promise<void> {
+  return () => archiveThenPrune(session, target, seq, stored);
+}
+
+function archiveJobFromStorage(
+  session: ArchivedSession,
+  target: CheckpointArchiveTarget,
+  seq: number
+): () => Promise<void> {
+  return () => archiveThenPrune(session, target, seq, null);
 }
 
 /** github.com remotes fetch with the platform token, as the ws-server clone does. */
@@ -310,13 +387,46 @@ async function deleteCheckpoint(userId: string, codeSessionId: string, seq: numb
   await deleteCheckpointObject(manifestKey);
 }
 
+/**
+ * Seqs whose checkpoint may still be in storage, newest first. Starts at the
+ * highest allocated seq: a checkpoint can be uploaded and its commit lost, so
+ * nextCheckpointSeq can sit far above latestCheckpointSeq (4 vs 23 in prod).
+ * Goes down to 1, since a prune that failed or waited for its archive copy
+ * keeps an older checkpoint. `lookback` caps the scan below the top but never
+ * skips the restore window under the latest committed seq.
+ */
+export function checkpointSeqsToScan(
+  session: Pick<CodeSessionRow, 'latestCheckpointSeq' | 'nextCheckpointSeq'>,
+  lookback?: number
+): number[] {
+  const top = Math.max(session.latestCheckpointSeq, session.nextCheckpointSeq);
+  const floor =
+    lookback === undefined || !Number.isFinite(lookback)
+      ? 1
+      : Math.max(1, Math.min(top - lookback, session.latestCheckpointSeq - RESTORE_LOOKBACK));
+  const seqs: number[] = [];
+  for (let seq = top; seq >= floor; seq -= 1) seqs.push(seq);
+  return seqs;
+}
+
+/** Delete one checkpoint once its trace-archive copy is confirmed (else throw and keep it). */
+async function pruneCheckpoint(
+  session: ArchivedSession,
+  seq: number,
+  target?: CheckpointArchiveTarget
+): Promise<void> {
+  if ((await ensureCheckpointArchived(session, seq, target)) === 'absent') return;
+  await deleteCheckpoint(session.userId, session.id, seq);
+}
+
 async function deleteCheckpoints(session: CodeSessionRow): Promise<void> {
+  const target = await archiveTargetFor(session);
   for (let seq = 1; seq <= session.nextCheckpointSeq; seq += 1) {
-    await deleteCheckpoint(session.userId, session.id, seq);
+    await pruneCheckpoint(session, seq, target);
   }
 }
 
-/** Kill the sandbox, delete stored checkpoints and mark the session retired. */
+/** Kill the sandbox, delete stored checkpoints (each once archived) and mark the session retired. */
 export async function retireCodeSession(session: CodeSessionRow): Promise<void> {
   if (session.sandboxKind === 'e2b' && session.sandboxId !== null) {
     try {
@@ -376,11 +486,38 @@ export function sweepExpiredCodeSessions(userId: string): Promise<void> {
 }
 
 /**
- * Scheduled TTL sweep across all users, oldest first, at most `limit` sessions
- * per call (a backlog drains over ticks). Returns how many were retired.
+ * A TTL sweeper that pages through the expired backlog, oldest first, at most
+ * `limit` sessions per call. Each call resumes after the last session the
+ * previous call took and wraps to the oldest once it reaches the end, so
+ * sessions that keep failing retirement (an archive copy not yet confirmed)
+ * are retried once per pass and never block the sessions behind them.
+ */
+export function createExpiredCodeSessionSweeper(
+  userId: string | null = null
+): (limit?: number) => Promise<number> {
+  let cursor: ExpiredSweepCursor | null = null;
+  return async (limit = 20) => {
+    let batch = await findExpiredCodeSessions(userId, limit, new Date(), cursor);
+    if (batch.length === 0 && cursor !== null) {
+      batch = await findExpiredCodeSessions(userId, limit, new Date(), null);
+    }
+    const last = batch[batch.length - 1];
+    cursor =
+      batch.length < limit || last === undefined
+        ? null
+        : { lastActiveAt: last.lastActiveAt, id: last.id };
+    return retireExpired(batch);
+  };
+}
+
+const sweepAllExpired = createExpiredCodeSessionSweeper(null);
+
+/**
+ * Scheduled TTL sweep across all users (createExpiredCodeSessionSweeper): a
+ * backlog drains over ticks. Returns how many were retired.
  */
 export async function sweepAllExpiredCodeSessions(limit = 20): Promise<number> {
-  return retireExpired(await findExpiredCodeSessions(null, limit));
+  return sweepAllExpired(limit);
 }
 
 /**

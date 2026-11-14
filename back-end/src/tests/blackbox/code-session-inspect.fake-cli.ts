@@ -1,7 +1,9 @@
 /**
  * Scripted CLIs for code-session-inspect.blackbox.ts. claude reads the question on stdin; codex gets it as the last
  * argument and writes its answer to --output-last-message. Each run records
- * what it saw (argv, cwd, env, guard results) to cli-runs.jsonl.
+ * what it saw (argv, cwd, env, guard results) to cli-runs.jsonl. Like the real
+ * CLIs, an answering run leaves its session files in HOME: a Claude transcript
+ * plus a subagent transcript under ~/.claude/projects, or a Codex rollout.
  */
 export function fakeInspectCli(paths: {
   cliLog: string;
@@ -65,6 +67,20 @@ feature = pathlib.Path("feature.txt").read_text().strip()
 LOG.open("a").write(json.dumps(record) + "\n")
 answer = ("feature.txt holds: " + feature + "\n\nCitations:\n- feature.txt:1\n- README.md:1-2\n"
           "- missing/nowhere.ts:9\n- ../escape.txt:1\n")
+import uuid
+home = pathlib.Path(os.environ["HOME"])
+sid = str(uuid.uuid4())
+turns = json.dumps({"type": "user", "message": {"content": prompt}}) + "\n" + json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": answer}]}}) + "\n"
+if CLI == "codex":
+    rollout = home / ".codex" / "sessions" / "2026" / "11" / "14" / ("rollout-2026-11-14T00-00-00-" + sid + ".jsonl")
+    rollout.parent.mkdir(parents=True, exist_ok=True)
+    rollout.write_text(json.dumps({"type": "session_meta", "payload": {"id": sid}}) + "\n" + turns)
+else:
+    project = home / ".claude" / "projects" / "".join(c if c.isalnum() else "-" for c in os.getcwd())
+    sub = project / sid / "subagents" / "agent-inspect.jsonl"
+    sub.parent.mkdir(parents=True, exist_ok=True)
+    (project / (sid + ".jsonl")).write_text(turns)
+    sub.write_text(json.dumps({"type": "user", "isSidechain": True}) + "\n")
 if CLI == "codex":
     out = argv[argv.index("--output-last-message") + 1]
     pathlib.Path(out).write_text(answer)

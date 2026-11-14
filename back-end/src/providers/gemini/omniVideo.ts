@@ -26,6 +26,10 @@
  * 10k agents: one bounded request (≤ OMNI_MAX_WAIT_MS) per call and nothing held
  * between calls; the per-user in-flight cap lives in the service.
  */
+import { createHash } from 'node:crypto';
+import { archiveBytes } from '../traceArchive';
+import { finishLlmCapture, startLlmCapture } from '../llmDump';
+import { simpleArchiveOutput } from '../llmArchiveRecord';
 import { createLogger } from '../logger';
 
 const log = createLogger('GeminiOmniVideo');
@@ -130,6 +134,8 @@ export interface OmniVideoRequest {
   aspectRatio: OmniAspectRatio;
   resolution: OmniResolution;
   seed?: number;
+  /** Agent tree binding: request + generated video are archived in the root bundle. */
+  archive?: { agent_id: string; root_agent_id: string } | null;
 }
 
 export interface OmniVideoResult {
@@ -322,6 +328,17 @@ export async function generateOmniVideo(request: OmniVideoRequest): Promise<Omni
     store: true,
     stream: false,
   };
+  const capture =
+    request.archive === undefined || request.archive === null
+      ? null
+      : startLlmCapture({
+          call_site: 'generate_video',
+          ...request.archive,
+          model,
+          message_count: 1,
+          messages: [{ role: 'user', content: input }],
+          config: { provider: 'gemini', request: { ...body, input: '[messages[0].content]' } },
+        });
   log.info('[GenerateVideo] provider request', {
     model,
     prompt_chars: request.prompt.length,
@@ -377,6 +394,36 @@ export async function generateOmniVideo(request: OmniVideoRequest): Promise<Omni
   }
   const latencyMs = Date.now() - started;
   const usage = readUsage(interaction);
+  if (capture !== null && request.archive) {
+    const videoPath = `media/video/${createHash('sha256').update(bytes).digest('hex')}.mp4`;
+    await archiveBytes({
+      rootAgentId: request.archive.root_agent_id,
+      objectPath: videoPath,
+      body: bytes,
+      contentType: part.mime_type || 'video/mp4',
+      compress: false,
+      createOnly: true,
+    }).catch((error: unknown) =>
+      log.warn('[GenerateVideo] video archive failed', {
+        error: error instanceof Error ? error.message : String(error),
+      })
+    );
+    finishLlmCapture(capture, {
+      model,
+      output: simpleArchiveOutput({
+        content: '',
+        actualModel: model,
+        provider: 'gemini',
+        startedAtMs: started,
+        requestId: interaction.id ?? null,
+        structured: {
+          interaction,
+          video_archive_path: videoPath,
+          duration_seconds: durationSeconds,
+        },
+      }),
+    });
+  }
   log.info('[GenerateVideo] provider response', {
     model,
     interaction_id: interaction.id ?? null,

@@ -1,12 +1,20 @@
 /**
- * DEV-only LLM context dumps for backend Rose calls.
+ * LLM call capture for backend Rose calls.
  *
- * Mirrors agents/helpers/observability.py:
- *   .llm-dumps/<agent_id>/<timestamp>-<span_id>-<call_site>.json
+ * Two outputs per call:
+ *   - DEV-only plaintext dump, mirroring agents/helpers/observability.py:
+ *       .llm-dumps/<agent_id>/<timestamp>-<span_id>-<call_site>.json
+ *     Production is Fly (FLY_APP_NAME, as in the Python helper) or Render, which
+ *     sets NODE_ENV=production but not FLY_APP_NAME.
+ *   - Encrypted archive records in the ROOT agent's bundle (llmArchiveRecord.ts,
+ *     contract shared/llm-archive-record/record.schema.json v2):
  *
- * Production is Fly (FLY_APP_NAME, as in the Python helper) or Render, which sets
- * NODE_ENV=production but not FLY_APP_NAME. Dump failures are best-effort and
- * never affect the LLM call.
+ *       call start ──► llm/<dump_id>          (start record: inputs; crash-safe)
+ *       stream end ──► llm-updates/<dump_id>-<ms>-<call_site>  (final record:
+ *                      output, usage, reasoning blocks, losing race attempts)
+ *
+ * Dump/archive failures never affect the LLM call; an unbound root is refused
+ * loudly (error log) instead of filed under a placeholder bundle.
  */
 
 import fs from 'node:fs';
@@ -17,6 +25,17 @@ import { currentTraceContext } from './tracing';
 import { archiveEnabled, encryptArtifact } from './traceArchive';
 import { storeWorkerArtifact } from './traceArchiveLifecycle';
 import { ownLlmCapture } from './llmCaptureTasks';
+import {
+  type ArchiveAttempt,
+  type ArchiveIdentity,
+  type ArchiveOutput,
+  buildFinalRecord,
+  buildStartRecord,
+  finalRecordPath,
+  isBoundArchiveId,
+  startRecordPath,
+} from './llmArchiveRecord';
+import type { ArchiveAttemptSink, RoseStreamChunk } from './rose/types';
 
 const log = createLogger('LlmDump');
 
@@ -48,6 +67,7 @@ function safeJson(value: unknown): string {
 
 export interface LlmDumpPayload {
   call_site: string;
+  dump_id?: string;
   agent_id?: string | null;
   root_agent_id?: string | null;
   span_id?: string | null;
@@ -58,6 +78,8 @@ export interface LlmDumpPayload {
   response_format?: unknown;
   tools?: unknown[];
   extra?: Record<string, unknown>;
+  /** Called with each archive record path after it is durably stored. */
+  on_record?: (objectPath: string) => Promise<void> | void;
 }
 
 export function dumpLlmContext(payload: LlmDumpPayload): string | null {
@@ -133,71 +155,178 @@ export function updateLlmDump(dumpPath: string | null, patch: Record<string, unk
   }
 }
 
+/** Losing hedge branches report after their abort settles; never wait on them forever. */
+const ATTEMPT_DRAIN_TIMEOUT_MS = 10_000;
+
+/** Collects losing race legs for the final record (sink passed through CompletionOptions). */
+export interface AttemptCollector extends ArchiveAttemptSink {
+  lost: Array<{ branch: string; chunks: readonly RoseStreamChunk[] }>;
+  drains: Promise<void>[];
+}
+
+export function createAttemptCollector(): AttemptCollector {
+  const collector: AttemptCollector = {
+    lost: [],
+    drains: [],
+    lostRace(branch, chunks) {
+      collector.lost.push({ branch, chunks });
+    },
+    drained(settled) {
+      collector.drains.push(settled.catch(() => undefined));
+    },
+  };
+  return collector;
+}
+
+async function waitForAttempts(collector: AttemptCollector): Promise<void> {
+  if (collector.drains.length === 0) return;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<void>((resolve) => {
+    timer = setTimeout(resolve, ATTEMPT_DRAIN_TIMEOUT_MS);
+    timer.unref?.();
+  });
+  try {
+    await Promise.race([Promise.all(collector.drains), timeout]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
 /** Archive completion at the finalizer; model streaming never waits on archive I/O. */
 export interface LlmCapture {
   localPath: string | null;
   agentId: string;
-  value: LlmDumpPayload & { span_id: string; dump_id: string };
+  /** Null when the caller supplied no bound root: nothing is archived (logged loudly). */
+  identity: ArchiveIdentity | null;
   startedAtMs: number;
+  attempts: AttemptCollector;
+  onRecord?: (objectPath: string) => Promise<void> | void;
 }
 
-/** Capture call identities and the start clock before provider streaming begins. */
+export interface LlmCaptureFinish {
+  model: string | null;
+  output: ArchiveOutput;
+  /** Converts collected losing legs into schema attempts at write time. */
+  attempts?: (lost: AttemptCollector['lost']) => ArchiveAttempt[];
+  extra?: Record<string, unknown>;
+}
+
+function refuseUnbound(payload: LlmDumpPayload, agentId: string): void {
+  log.error('llm.archive.unbound_root_refused', {
+    call_site: payload.call_site,
+    agent_id: agentId || null,
+    root_agent_id: payload.root_agent_id ?? null,
+    message: 'LLM archive record not written: caller passed no bound root_agent_id',
+  });
+}
+
+/** Capture identities, the start clock and the crash-safe start record before streaming. */
 export function startLlmCapture(payload: LlmDumpPayload): LlmCapture {
   const trace = currentTraceContext();
-  const agentId = payload.agent_id || trace?.agent_id || 'unbound';
-  const value = {
+  const agentId = payload.agent_id || trace?.agent_id || '';
+  const rootAgentId = payload.root_agent_id ?? null;
+  const spanId = payload.span_id || trace?.span_id || randomUUID();
+  const dumpId = randomUUID();
+  const startedAtMs = Date.now();
+  const attempts = createAttemptCollector();
+  const localPath = dumpLlmContext({
     ...payload,
+    agent_id: agentId || 'unbound',
+    span_id: spanId,
+    dump_id: dumpId,
+  } as LlmDumpPayload);
+  if (!archiveEnabled()) return { localPath, agentId, identity: null, startedAtMs, attempts };
+  if (!isBoundArchiveId(rootAgentId) || !isBoundArchiveId(agentId)) {
+    refuseUnbound(payload, agentId);
+    return { localPath, agentId, identity: null, startedAtMs, attempts };
+  }
+  const identity: ArchiveIdentity = {
+    call_site: payload.call_site,
     agent_id: agentId,
-    span_id: payload.span_id || trace?.span_id || randomUUID(),
-    dump_id: randomUUID(),
+    root_agent_id: rootAgentId,
+    span_id: spanId,
+    dump_id: dumpId,
   };
-  return { localPath: dumpLlmContext(value), agentId, value, startedAtMs: Date.now() };
+  const record = buildStartRecord(identity, {
+    started_at_ms: startedAtMs,
+    model: payload.model ?? null,
+    message_count: payload.message_count,
+    messages: payload.messages,
+    config: payload.config ?? {},
+    ...(payload.response_format !== undefined ? { response_format: payload.response_format } : {}),
+    ...(payload.tools !== undefined ? { tools: payload.tools } : {}),
+    ...(payload.extra !== undefined ? { extra: payload.extra } : {}),
+  });
+  const startPath = startRecordPath(dumpId);
+  own(
+    identity,
+    persistRecord(identity, startPath, record, startedAtMs).then(() =>
+      payload.on_record?.(startPath)
+    )
+  );
+  return { localPath, agentId, identity, startedAtMs, attempts, onRecord: payload.on_record };
 }
 
-/** Register the completed capture with both owners without blocking stream return. */
-export function finishLlmCapture(capture: LlmCapture, patch: Record<string, unknown>): void {
-  updateLlmDump(capture.localPath, patch);
-  if (!capture.value.root_agent_id) return;
-  const task = persistLlmCapture(capture, patch).catch((error: unknown) => {
+/** Register the final record with both owners without blocking stream return. */
+export function finishLlmCapture(capture: LlmCapture, finish: LlmCaptureFinish): void {
+  const finishedAtMs = Date.now();
+  updateLlmDump(capture.localPath, {
+    record: 'final',
+    model: finish.model,
+    finished_at_ms: finishedAtMs,
+    output: finish.output,
+    attempts: finish.attempts?.(capture.attempts.lost) ?? [],
+    extra: finish.extra ?? {},
+  });
+  const identity = capture.identity;
+  if (identity === null) return;
+  const task = (async () => {
+    await waitForAttempts(capture.attempts);
+    const attempts = finish.attempts?.(capture.attempts.lost) ?? [];
+    const record = buildFinalRecord(identity, {
+      finished_at_ms: finishedAtMs,
+      model: finish.model,
+      output: finish.output,
+      ...(attempts.length > 0 ? { attempts } : {}),
+      ...(finish.extra !== undefined ? { extra: finish.extra } : {}),
+    });
+    const finalPath = finalRecordPath(identity.dump_id, finishedAtMs, identity.call_site);
+    await persistRecord(identity, finalPath, record, finishedAtMs);
+    await capture.onRecord?.(finalPath);
+  })();
+  own(identity, task);
+}
+
+function own(identity: ArchiveIdentity, task: Promise<void>): void {
+  const logged = task.catch((error: unknown) => {
     log.warn('llm.context.archive_failed', {
-      agent_id: capture.agentId,
-      dump_id: capture.value.dump_id,
+      agent_id: identity.agent_id,
+      root_agent_id: identity.root_agent_id,
+      dump_id: identity.dump_id,
       error: error instanceof Error ? error.name : 'unknown',
     });
     throw error;
   });
-  ownLlmCapture(capture.agentId, task, capture.value.root_agent_id);
+  ownLlmCapture(identity.agent_id, logged, identity.root_agent_id);
 }
 
-/** Encrypt the complete call under its explicit root, preserving its start time. */
-async function persistLlmCapture(
-  capture: LlmCapture,
-  patch: Record<string, unknown>
+/** Encrypt one record under its explicit root, stamped with its captured clock. */
+async function persistRecord(
+  identity: ArchiveIdentity,
+  objectPath: string,
+  record: unknown,
+  recordedAtMs: number
 ): Promise<void> {
-  if (!archiveEnabled()) return;
-  const rootAgentId = capture.value.root_agent_id;
-  if (!rootAgentId) return;
-  const value = {
-    ...capture.value,
-    ...patch,
-    agent_id: capture.agentId,
-    root_agent_id: rootAgentId,
-    dump_id: capture.value.dump_id,
-    config: { ...capture.value.config, ...(patch.config as Record<string, unknown> | undefined) },
-    extra: { ...capture.value.extra, ...(patch.extra as Record<string, unknown> | undefined) },
-  };
-  const objectPath = `llm/${capture.value.dump_id}.json.gz.enc`;
   const encrypted = encryptArtifact(
     objectPath,
-    Buffer.from(safeJson(value)),
+    Buffer.from(safeJson(record)),
     'application/json',
     true
   );
   if (!encrypted) throw new Error('LLM archive encryption unavailable');
-  // This is the captured call-start clock, not upload/finish order.
-  encrypted.metadata.created_at_ms = capture.startedAtMs;
+  encrypted.metadata.created_at_ms = recordedAtMs;
   await storeWorkerArtifact({
-    rootAgentId,
+    rootAgentId: identity.root_agent_id,
     path: objectPath,
     ciphertextB64: encrypted.ciphertext.toString('base64'),
     metadata: encrypted.metadata,

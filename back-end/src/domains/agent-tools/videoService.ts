@@ -28,6 +28,7 @@
  * bounded per call (≤ 10 s, ≤ 5 images; worst case 4k ≈ $3) and per user by an in-process
  * in-flight cap (MAX_IN_FLIGHT_PER_USER); idle cost is zero.
  */
+import { archiveBindingFor } from '../../providers/archiveRootResolver';
 import { createHash } from '../../providers/crypto';
 import {
   OmniVideoError,
@@ -228,6 +229,7 @@ async function produce(
     aspectRatio: body.aspect_ratio,
     resolution: body.resolution,
     seed: body.seed,
+    archive: await archiveBindingFor({ agentId: agent.id, userId: agent.userId }),
   });
   onBilled();
   const sha256 = createHash('sha256').update(video.bytes).digest('hex');

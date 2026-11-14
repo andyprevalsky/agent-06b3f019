@@ -24,9 +24,11 @@ import { lookupUserVoiceAndName, normalizeJsonSchema, normalizePhoneNumber } fro
 import {
   agentIdForCallId,
   agentIdFromOperationKey,
+  archiveRootForCall,
   archiveVapiJson,
   archiveVapiPollResult,
   buildVapiPollExchange,
+  rememberCallArchiveRoot,
 } from './archive';
 import { placeHoldCapableCall, type HoldCallPlacement } from './holdService';
 import { getHoldCallStatus } from './holdStatusService';
@@ -239,11 +241,15 @@ export async function initiateCall(
     });
   }
 
-  await archiveVapiJson(
-    agentIdFromOperationKey(call.operationKey),
-    `${placed.callId}.create.json.gz.enc`,
-    { request: placed.request, response: placed.response, operationKey: call.operationKey }
-  );
+  // Every call (not only idempotent ones) is archived under its tree's ROOT.
+  const archiveRoot = await archiveRootForCall(call);
+  await rememberCallArchiveRoot(placed.callId, archiveRoot);
+  await archiveVapiJson(archiveRoot, `${placed.callId}.create.json.gz.enc`, {
+    request: placed.request,
+    response: placed.response,
+    operationKey: call.operationKey,
+    userId: call.userId ?? null,
+  });
 
   log.info('Vapi call initiated', {
     callId: placed.callId,

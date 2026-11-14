@@ -1,3 +1,4 @@
+import { archiveBindingFor } from './archiveRootResolver';
 import { createStreamingCompletion, StructuredOutputAccumulator } from './rose';
 import { phoneVerifierPricing } from './phoneVerifierPricing';
 import { getModelPricing } from './modelPricing';
@@ -65,7 +66,10 @@ export const verifyPhoneMessage: MessageVerifier = async (input) => {
         },
       },
     },
-    dump_context: { call_site: `phone_message_${input.mode}`, agent_id: input.agentId },
+    dump_context: {
+      call_site: `phone_message_${input.mode}`,
+      ...(await archiveBindingFor({ agentId: input.agentId })),
+    },
   });
   const accumulator = new StructuredOutputAccumulator();
   let model = '',

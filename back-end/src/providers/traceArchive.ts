@@ -36,6 +36,14 @@ import {
 import { createLogger } from './logger';
 import { retryDelayMs, sleep, withTraceArchiveRequestTimeout } from './traceArchiveRequest';
 import { redactGmailArchive } from './traceArchiveGmailRedaction';
+import { isBoundArchiveId } from './llmArchiveRecord';
+import { assertR2ArchiveWriteAllowed } from './traceArchiveR2Guard';
+import { reconcileLateArtifact } from './traceArchiveLateWrites';
+import {
+  type ArchiveDeletionRequest,
+  assertUserRequestedDeletion,
+} from './traceArchiveDeletionPolicy';
+export { type ArchiveDeletionRequest, assertUserRequestedDeletion };
 
 const log = createLogger('TraceArchive');
 
@@ -94,6 +102,15 @@ export interface ArchiveBundleDeleteResult {
   deletedObjectCount: number;
 }
 
+/** Every bundle belongs to a real agent tree root or a documented `user-<id>` root. */
+function requireBoundRoot(rootAgentId: string): void {
+  if (!isBoundArchiveId(rootAgentId)) {
+    throw new Error(
+      `Archive root must be a bound agent or user root; refusing ${JSON.stringify(rootAgentId)}`
+    );
+  }
+}
+
 export function isProduction(): boolean {
   return process.env.NODE_ENV === 'production' || process.env.ENVIRONMENT === 'production';
 }
@@ -139,11 +156,29 @@ function shouldCompress(objectPath: string, contentType: string, compress?: bool
   );
 }
 
+/**
+ * Synthetic nonce for create-only writes: HMAC(key, path, plaintext) makes a
+ * retry of the same artifact produce byte-identical ciphertext, so an attempt
+ * whose body landed but whose sidecar did not can be completed idempotently.
+ * Distinct plaintexts still get distinct nonces (no GCM nonce reuse).
+ */
+function syntheticNonce(key: Buffer, objectPath: string, plaintext: Buffer): Buffer {
+  return crypto
+    .createHmac('sha256', key)
+    .update('rose-trace-archive-siv-v1\0')
+    .update(objectPath)
+    .update('\0')
+    .update(crypto.createHash('sha256').update(plaintext).digest())
+    .digest()
+    .subarray(0, 12);
+}
+
 export function encryptArtifact(
   objectPath: string,
   plaintext: Buffer,
   contentType: string,
-  compress?: boolean
+  compress?: boolean,
+  options: { deterministic?: boolean } = {}
 ): { ciphertext: Buffer; metadata: EncryptedArtifactMetadata } | null {
   const key = encryptionKey();
   if (key === null) return null;
@@ -151,7 +186,9 @@ export function encryptArtifact(
   const normalizedPath = safeArchivePath(objectPath);
   const useGzip = shouldCompress(normalizedPath, contentType, compress);
   const storedPlaintext = useGzip ? zlib.gzipSync(plaintext, { level: 6 }) : plaintext;
-  const nonce = crypto.randomBytes(12);
+  const nonce = options.deterministic
+    ? syntheticNonce(key, normalizedPath, plaintext)
+    : crypto.randomBytes(12);
   const cipher = crypto.createCipheriv('aes-256-gcm', key, nonce);
   cipher.setAAD(Buffer.from(normalizedPath, 'utf8'));
   const encrypted = Buffer.concat([cipher.update(storedPlaintext), cipher.final()]);
@@ -269,7 +306,11 @@ export async function storeEncryptedArtifact(params: {
   createOnly?: boolean;
 }): Promise<string | null> {
   if (!archiveEnabled()) return null;
+  requireBoundRoot(params.rootAgentId);
   const backend = (process.env.TRACE_ARCHIVE_BACKEND || '').trim().toLowerCase();
+  if (backend === 'r2' || (isProduction() && backend !== 'local' && backend !== 'fake-r2')) {
+    assertR2ArchiveWriteAllowed();
+  }
   const contentType = params.contentType || 'application/octet-stream';
   // Retry a failed sidecar after an acknowledged creation without recreating its body.
   const creation = params.createOnly ? { bodyStored: false } : undefined;
@@ -336,7 +377,11 @@ export async function storePlainArtifact(params: {
   createOnly?: boolean;
 }): Promise<string | null> {
   if (!archiveEnabled()) return null;
+  requireBoundRoot(params.rootAgentId);
   const backend = (process.env.TRACE_ARCHIVE_BACKEND || '').trim().toLowerCase();
+  if (backend === 'r2' || (isProduction() && backend !== 'local' && backend !== 'fake-r2')) {
+    assertR2ArchiveWriteAllowed();
+  }
   const objectPath = safeArchivePath(params.objectPath);
   let lastError: unknown;
   for (let attempt = 1; attempt <= STORE_MAX_ATTEMPTS; attempt += 1) {
@@ -440,7 +485,8 @@ export async function archiveBytes(params: {
     params.objectPath,
     params.body,
     params.contentType,
-    params.compress
+    params.compress,
+    { deterministic: params.createOnly === true }
   );
   if (encrypted === null) return null;
   const ref = await storeEncryptedArtifact({
@@ -450,6 +496,7 @@ export async function archiveBytes(params: {
     metadata: encrypted.metadata,
     createOnly: params.createOnly,
   });
+  if (ref !== null) await reconcileLateArtifact(params.rootAgentId, encrypted.metadata.path);
   return ref === null ? null : { ref, metadata: encrypted.metadata };
 }
 
@@ -515,8 +562,15 @@ export async function listArchivedObjectsStrict(
 }
 
 export async function deleteArchivedBundle(
-  rootAgentId: string
+  rootAgentId: string,
+  request: ArchiveDeletionRequest
 ): Promise<ArchiveBundleDeleteResult> {
+  assertUserRequestedDeletion(request);
+  log.warn('Trace archive bundle deletion on explicit user request', {
+    root_agent_id: rootAgentId,
+    requested_by: request.requestedBy,
+    reason: request.reason.slice(0, 200),
+  });
   if (!archiveEnabled()) {
     return { rootAgentId, backend: storageBackend(), deletedObjectCount: 0 };
   }
@@ -565,6 +619,7 @@ async function listR2Objects(rootAgentId: string): Promise<ArchivedObjectSummary
 }
 
 async function deleteR2Bundle(rootAgentId: string): Promise<ArchiveBundleDeleteResult> {
+  assertR2ArchiveWriteAllowed('delete from');
   const bucket = process.env.R2_BUCKET_TRACE_ARCHIVE || '';
   return deleteR2ArchivedBundle({
     rootAgentId,

@@ -1,3 +1,4 @@
+import { copyLinkedSchemaArchiveInBackground } from '../../providers/schemaArchiveLinks';
 import { assertExternalExecution, EXTERNAL_EXECUTION_START_PHASE } from './agentExternalExecution';
 /**
  * Agent lifecycle service — create and delete agents.
@@ -18,6 +19,7 @@ import { getPromptSecret } from './config';
 import * as repo from './repo';
 import { resolveCreateMetadata } from './agentCreateMetadata';
 import { resolveCreateTaskPaths } from './agentTaskPathCreate';
+import { rootOf } from './agentTaskPath';
 import { createAgentResponse } from './agentCreateResponse';
 import { prepareAgentStartArchive } from '../../providers/traceArchiveLifecycle';
 import {
@@ -64,15 +66,19 @@ export function resolvePromptSecrets(text: string): string {
  * delay the create response.
  */
 function runPostCreateSideEffects(
-  agentDbId: string,
-  archiveStartFixture: (() => Promise<void>) | null
+  agent: { id: string; userId: string; busId: string | null },
+  archiveStartFixture: (() => Promise<void>) | null,
+  preallocated: boolean
 ): void {
   archiveStartFixture?.().catch((error: unknown) => {
     log.warn('Trace archive start fixture failed', {
-      agent_id: agentDbId,
+      agent_id: agent.id,
       error: error instanceof Error ? error.message : String(error),
     });
   });
+  // A client-allocated id may have schema-generation records under its creator's
+  // user root (schemaArchiveLinks.ts): copy them into this agent's root bundle.
+  if (preallocated) copyLinkedSchemaArchiveInBackground(agent.userId, agent.id, rootOf(agent));
 }
 
 /* c8 ignore start -- startSubAgentWorkflow, startDirectWorkflow, startChatMode require Temporal/GitHub/LLM infrastructure */
@@ -271,7 +277,7 @@ export async function createAgent(
   if (options.graphSpawn !== undefined || options.phoneSetupHash !== undefined)
     await repo.updateAgent(agentId, { temporalWorkflowStartPending: false });
 
-  runPostCreateSideEffects(agent.agent.id, archiveStartFixture);
+  runPostCreateSideEffects(agent.agent, archiveStartFixture, body.agent_id !== undefined);
 
   return createAgentResponse(agent, body, isSubAgent, workflowId, options.externalExecution);
 }

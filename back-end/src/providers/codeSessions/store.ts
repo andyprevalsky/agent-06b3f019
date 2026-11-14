@@ -341,19 +341,38 @@ export async function markRetired(codeSessionId: string, now = new Date()): Prom
  * CODE_SESSION_TTL_DAYS a running task would otherwise be swept between two
  * keepalives. Its sandbox is retired once the lease lapses (spawn gone).
  */
+/** Position in the expired-session order (lastActiveAt, id): a sweep resumes after it. */
+export interface ExpiredSweepCursor {
+  lastActiveAt: Date;
+  id: string;
+}
+
 export async function findExpiredCodeSessions(
   userId: string | null,
   limit = 5,
-  now = new Date()
+  now = new Date(),
+  after: ExpiredSweepCursor | null = null
 ): Promise<CodeSessionRow[]> {
   return prisma.codeSession.findMany({
     where: {
       ...(userId === null ? {} : { userId }),
       state: { in: [CODE_SESSION_STATES.PAUSED, CODE_SESSION_STATES.ACTIVE] },
       lastActiveAt: { lt: new Date(now.getTime() - codeSessionTtlMs()) },
-      OR: [{ leaseExpiresAt: null }, { leaseExpiresAt: { lt: now } }],
+      AND: [
+        { OR: [{ leaseExpiresAt: null }, { leaseExpiresAt: { lt: now } }] },
+        ...(after === null
+          ? []
+          : [
+              {
+                OR: [
+                  { lastActiveAt: { gt: after.lastActiveAt } },
+                  { lastActiveAt: after.lastActiveAt, id: { gt: after.id } },
+                ],
+              },
+            ]),
+      ],
     },
-    orderBy: { lastActiveAt: 'asc' },
+    orderBy: [{ lastActiveAt: 'asc' }, { id: 'asc' }],
     take: limit,
   });
 }

@@ -27,6 +27,18 @@ const coverageDir = process.env.BACKEND_UNIT_COVERAGE_DIR;
 // via the instrumented backend / data-grep path.
 const SERIAL_FIRST_FILES = new Set(['regex-safety.test.ts']);
 
+/**
+ * Unit tests never write the production trace archive. back-end/.env (and Cursor/
+ * boxes secrets) carry TRACE_ARCHIVE_BACKEND=r2, and dotenv never overrides an
+ * already-set variable, so pin a local backend here exactly like
+ * run-blackbox-tests.sh / run-coverage.sh. Tests that exercise the R2 code path
+ * use mocked clients and opt in explicitly in-process.
+ */
+function hermeticArchiveEnv(env: NodeJS.ProcessEnv): Record<string, string> {
+  const backend = (env.TRACE_ARCHIVE_BACKEND ?? '').trim().toLowerCase();
+  return backend === 'local' || backend === 'fake-r2' ? {} : { TRACE_ARCHIVE_BACKEND: 'local' };
+}
+
 if (!Number.isInteger(requestedConcurrency) || requestedConcurrency < 1) {
   console.error('BACKEND_UNIT_CONCURRENCY must be a positive integer.');
   process.exit(2);
@@ -274,13 +286,15 @@ async function main(): Promise<void> {
         ? createIsolatedDatabase(localDatabaseEnv.DATABASE_URL)
         : undefined;
     // Preserve one isolated process per file without npm/tsx wrapper processes.
-    const childEnv = {
+    const childEnv: NodeJS.ProcessEnv = {
       ...process.env,
       ...localDatabaseEnv,
       ...(privateDatabase === undefined
         ? {}
         : { DATABASE_URL: privateDatabase.url, DIRECT_URL: privateDatabase.url }),
+      ...hermeticArchiveEnv(process.env),
     };
+    delete childEnv.TRACE_ARCHIVE_ALLOW_NONPROD_R2;
     if (SERIAL_FIRST_FILES.has(basename(file))) {
       delete childEnv.NODE_V8_COVERAGE;
     } else if (coverageDir !== undefined) {

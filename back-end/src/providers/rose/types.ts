@@ -110,13 +110,49 @@ export interface CompletionOptions {
     grantId?: string;
   };
   disable_waterfall?: boolean;
+  /**
+   * Archive binding. `root_agent_id` is the agent tree's root (busId ?? id), or
+   * the documented per-user root `user-<userId>` for user-level calls with no
+   * agent tree. The writer refuses an unbound root rather than filing loose records.
+   */
   dump_context?: {
     call_site: string;
     root_agent_id?: string;
     agent_id?: string;
     config?: Record<string, unknown>;
     extra?: Record<string, unknown>;
+    /** Internal, never serialized: called with each record path once it is stored. */
+    on_record?: (objectPath: string) => Promise<void> | void;
   };
+  /**
+   * Internal, never serialized. Collects other legs that generated tokens for
+   * this call (losing hedge branches) so the archive keeps them as attempts[].
+   */
+  archive_attempts?: ArchiveAttemptSink;
+}
+
+/** Receives every chunk a non-winning hedge branch produced, once it settles. */
+export interface ArchiveAttemptSink {
+  lostRace(branch: string, chunks: readonly RoseStreamChunk[]): void;
+  /** A race settled; resolves once its aborted losers have reported. */
+  drained(settled: Promise<void>): void;
+}
+
+/** Provider reasoning block preserved verbatim for replay (signatures, encrypted items). */
+export interface ReasoningBlock {
+  type:
+    | 'anthropic_thinking'
+    | 'anthropic_redacted_thinking'
+    | 'openai_reasoning_item'
+    | 'openrouter_reasoning_detail'
+    | 'provider_reasoning';
+  text?: string | null;
+  signature?: string | null;
+  data?: string | null;
+  id?: string | null;
+  encrypted_content?: string | null;
+  summary?: unknown;
+  raw?: unknown;
 }
 
 /** One subscription credential: a Claude or ChatGPT/Codex OAuth access token. */
@@ -187,7 +223,14 @@ export interface CompletionChunk {
  * them into the OpenAI-shaped CompletionChunk for chat callers.
  */
 export type ChunkKind =
-  'metadata' | 'content' | 'tool_call' | 'reasoning' | 'codex_reasoning_item' | 'usage' | 'done';
+  | 'metadata'
+  | 'content'
+  | 'tool_call'
+  | 'reasoning'
+  | 'reasoning_block'
+  | 'codex_reasoning_item'
+  | 'usage'
+  | 'done';
 
 export interface OutputProvenance {
   item_id: string;
@@ -205,6 +248,8 @@ export type RoseStreamChunk =
   | { kind: 'reasoning'; data: { text: string } & OutputProvenance }
   | { kind: 'tool_call'; data: { id: string; name: string; arguments: string } }
   | { kind: 'codex_reasoning_item'; data: Record<string, unknown> }
+  /** Archive-only: never caller-visible, never progress for stall guards. */
+  | { kind: 'reasoning_block'; data: ReasoningBlock }
   | {
       kind: 'usage';
       data: {
@@ -213,6 +258,8 @@ export type RoseStreamChunk =
         total_tokens: number;
         cache_creation_input_tokens?: number;
         cache_read_input_tokens?: number;
+        /** Reasoning/thinking tokens when the provider reports them separately. */
+        reasoning_tokens?: number;
         finish_reason?: string;
       };
     }

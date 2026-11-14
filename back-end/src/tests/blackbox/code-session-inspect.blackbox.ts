@@ -12,6 +12,7 @@
  *            attempt blocked, nothing checkpointed back, sandbox killed exactly once
  *            (success, CLI failure, restore failure), foreign sessions 404, C15 fall-over
  *   running backend ──HTTP──► route wiring: 400 / 404 / 409 before any sandbox exists
+ *   trace archive of every attempt: code-session-inspect-archive.cases.ts
  *
  * Hermetic: local checkpoint storage, fake keys, no E2B, GitHub or provider calls.
  */
@@ -47,6 +48,10 @@ import {
   setCodeInspectSandboxFactoryForTests,
 } from '../../providers/codeSessions/inspect';
 import { fakeInspectCli } from './code-session-inspect.fake-cli';
+import {
+  archivedInspection,
+  registerInspectArchiveCases,
+} from './code-session-inspect-archive.cases';
 import { beginIsolatedFundedKeyCooldowns } from './funded-key-cooldown.support';
 
 config();
@@ -582,6 +587,9 @@ test('C15: a Claude usage limit backs that credential off and the inspection ans
     assert.equal(result.status, 'answered', JSON.stringify(result));
     assert.equal(result.provider, 'codex');
     assert.match(result.answer ?? '', /committed locally/);
+    const { manifest } = await archivedInspection(agentA, live.id);
+    const archived = manifest.attempts.map((attempt) => attempt.provider);
+    assert.deepEqual(archived, ['claude', 'codex'], 'both attempts are archived');
     assert.equal(
       await isAnthropicApiKeyOnCooldown(),
       true,
@@ -647,3 +655,5 @@ test('C15 keeps its Codex fallback while a sibling holds the funded cooldown', (
   assert.equal(child.status, 0, 'the unchanged C15 assertions pass with a competing cooldown');
   assert.match(child.stdout, /ok \d+ - C15: a Claude usage limit/);
 });
+
+registerInspectArchiveCases({ fixtureDir, userA, agentA, setMode, seedWorkspace, liveSession });

@@ -17,14 +17,20 @@
  *     └─ headless CLI on the provider with a leasable credential (C15); a Claude
  *        usage limit marks that credential and retries once on Codex
  *     ▼
- *   answer + verified file:line citations + timings; finally: kill the sandbox
+ *   answer + verified file:line citations + timings; capture the CLI trajectory
+ *   (inspectArchive.ts); finally: kill the sandbox
+ *     ▼
+ *   archive every attempt's trajectory + the result into the caller's root
+ *   trace-archive bundle: code/<codeSessionId>/inspect-<id>/ (best-effort)
  *
  * Idempotent by construction: nothing outside the throwaway sandbox is written
- * (except an exhausted credential's cooldown), so a Temporal retry only re-asks.
+ * (except an exhausted credential's cooldown and a new create-only archive
+ * record per call), so a Temporal retry only re-asks.
  *
  * 10k agents: per call one indexed agent read, one session read, one checkpoint
  * download and one short-lived sandbox; no shared row, lock or channel.
  */
+import { randomUUID } from 'crypto';
 import { Sandbox } from 'e2b';
 import { prisma } from '../database';
 import { createLogger } from '../logger';
@@ -43,7 +49,14 @@ import {
   shouldSkipSandboxAnthropicGatewayForOauth,
 } from '../claudeCodeSandboxAuth';
 import { createSandboxWithRetry } from '../e2bSandboxCreate';
-import { applyCheckpoint } from './checkpoint';
+import { applyCheckpoint, CLI_LOG_ARTIFACT } from './checkpoint';
+import {
+  archiveInspection,
+  captureInspectAttempt,
+  emptyInspectCapture,
+  type ArchivedInspectAttempt,
+  type InspectAttemptCapture,
+} from './inspectArchive';
 import { githubAuthRemoteUrl, loadNewestVerifiedCheckpoint, primaryRepoFacts } from './lifecycle';
 import { type CodeSessionFs, e2bSandboxFs } from './sandboxFs';
 import { CODE_SESSION_STATES, findOwnedCodeSession } from './store';
@@ -278,6 +291,8 @@ interface Attempt {
   unverified: string[];
   sandboxId: string;
   timings: Omit<InspectTimings, 'total_ms'>;
+  /** The attempt's CLI trajectory, read before the sandbox was killed. */
+  capture: InspectAttemptCapture;
 }
 
 function homeRelative(path: string): string {
@@ -381,6 +396,14 @@ async function inspectOnce(
       outcome.answer !== null
         ? await verifyCitations(fs, workDir, extractCitations(outcome.answer))
         : { verified: [], unverified: [] };
+    const restoredLog = checkpoint.manifest.artifacts[CLI_LOG_ARTIFACT];
+    const capture = await captureInspectAttempt(
+      fs,
+      paths,
+      checkpoint.manifest.cliLogPath !== null && restoredLog !== undefined
+        ? { path: checkpoint.manifest.cliLogPath, sha256: restoredLog.sha256 }
+        : null
+    ).catch(() => emptyInspectCapture());
     return {
       outcome,
       citations: verified,
@@ -393,6 +416,7 @@ async function inspectOnce(
         guard_ms: guarded - restored,
         cli_ms: cliDone - guarded,
       },
+      capture,
     };
   } finally {
     signal?.removeEventListener('abort', onAbort);
@@ -459,6 +483,7 @@ export async function inspectCodeSession(params: InspectCodeParams): Promise<Cod
     head: repo?.head ?? null,
   };
   let last: (Attempt & { provider: InspectProvider }) | null = null;
+  const archivedAttempts: ArchivedInspectAttempt[] = [];
   let resetsAt: Date | null = null;
   const settings = await codeAgentSettingsForAgent(params.agentId);
   const tier = settings.tier;
@@ -479,6 +504,7 @@ export async function inspectCodeSession(params: InspectCodeParams): Promise<Cod
       settings
     );
     last = { ...attempt, provider };
+    archivedAttempts.push({ provider, sandboxId: attempt.sandboxId, capture: attempt.capture });
     const limit = attempt.outcome.usageLimit;
     if (limit === null || provider !== 'claude') break;
     // C15: this credential is out; the next provider (if any) answers instead.
@@ -520,9 +546,21 @@ export async function inspectCodeSession(params: InspectCodeParams): Promise<Cod
     sandbox_id: last?.sandboxId ?? null,
     timings: { ...(last?.timings ?? emptyTimings), total_ms: totalMs },
   };
+  const inspectionId = randomUUID();
+  await archiveInspection({
+    inspectionId,
+    userId: params.userId,
+    agentId: params.agentId,
+    codeSessionId: session.id,
+    checkpointSeq: checkpoint.manifest.seq,
+    question,
+    result,
+    attempts: archivedAttempts,
+  });
   log.info('Code inspection finished', {
     codeSessionId: session.id,
     agentId: params.agentId,
+    inspectionId,
     status,
     provider: result.provider ?? undefined,
     checkpointSeq: String(result.checkpoint_seq),

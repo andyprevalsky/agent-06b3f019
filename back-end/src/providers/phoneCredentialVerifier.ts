@@ -1,3 +1,4 @@
+import { archiveBindingFor } from './archiveRootResolver';
 import { phoneVerifierPricing } from './phoneVerifierPricing';
 /** Fixed identity purpose; observations are server-loaded data, never instructions. */
 import { createStreamingCompletion, StructuredOutputAccumulator } from './rose';
@@ -103,7 +104,10 @@ export const verifyPhoneCredential: CredentialVerifier = async (input) => {
         },
       },
     },
-    dump_context: { call_site: 'phone_saved_credential_binding', agent_id: input.agentId },
+    dump_context: {
+      call_site: 'phone_saved_credential_binding',
+      ...(await archiveBindingFor({ agentId: input.agentId })),
+    },
   });
   const output = new StructuredOutputAccumulator();
   let model = '';

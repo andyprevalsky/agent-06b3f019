@@ -116,6 +116,14 @@ export async function findAgentBrowserTask(agentId: string, browserTaskId: strin
   });
 }
 
+/** Owner and tree root of an agent (archive binding); one primary-key read. */
+export async function findAgentArchiveIdentity(agentId: string) {
+  return prisma.agent.findUnique({
+    where: { id: agentId },
+    select: { userId: true, busId: true },
+  });
+}
+
 /** Fetch a single agent by ID (no ownership check, not deleted). */
 export async function findAgentById(agentId: string) {
   return prisma.agent.findFirst({

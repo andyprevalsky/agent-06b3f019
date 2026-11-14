@@ -518,6 +518,16 @@ interface StreamAttemptOptions {
   goal: string;
   maxTokens: number;
   directAuth?: ResponseSchemaDirectAuth;
+  archive?: ResponseSchemaArchiveBinding;
+}
+
+/** Archive binding for the schema-generation LLM call (agent tree root or per-user root). */
+export interface ResponseSchemaArchiveBinding {
+  agent_id: string;
+  root_agent_id: string;
+  extra?: Record<string, unknown>;
+  /** Records each stored record path (pre-allocated agent id link; schemaArchiveLinks.ts). */
+  on_record?: (objectPath: string) => Promise<void> | void;
 }
 
 export interface ResponseSchemaDirectAuth {
@@ -593,6 +603,9 @@ async function attemptSchemaGeneration(opts: StreamAttemptOptions): Promise<Stre
         }
       : {}),
     disable_waterfall: opts.directAuth !== undefined,
+    ...(opts.archive !== undefined
+      ? { dump_context: { call_site: 'response_schema_generation', ...opts.archive } }
+      : {}),
     response_format: {
       type: 'json_schema',
       json_schema: {
@@ -647,7 +660,7 @@ async function attemptSchemaGeneration(opts: StreamAttemptOptions): Promise<Stre
  */
 export async function generateResponseSchema(
   goal: string,
-  opts: { directAuth?: ResponseSchemaDirectAuth } = {}
+  opts: { directAuth?: ResponseSchemaDirectAuth; archive?: ResponseSchemaArchiveBinding } = {}
 ): Promise<GenerateResult> {
   const startTime = Date.now();
   const maxGenerationAttempts = 3;
@@ -664,6 +677,7 @@ export async function generateResponseSchema(
           goal,
           maxTokens: initialMaxTokens,
           directAuth: opts.directAuth,
+          archive: opts.archive,
         });
       } catch (innerErr) {
         if (innerErr instanceof MaxTokensTruncationError) {
@@ -682,6 +696,7 @@ export async function generateResponseSchema(
             goal,
             maxTokens: escalatedMaxTokens,
             directAuth: opts.directAuth,
+            archive: opts.archive,
           });
         } else {
           throw innerErr;
@@ -765,7 +780,7 @@ export async function setResponseSchema(agentId: string): Promise<void> {
         // Fetch agent goal from DB
         const agent = await prisma.agent.findUnique({
           where: { id: agentId },
-          select: { goal: true, tokensIn: true, tokensOut: true },
+          select: { goal: true, tokensIn: true, tokensOut: true, busId: true },
         });
 
         if (!agent) {
@@ -774,7 +789,9 @@ export async function setResponseSchema(agentId: string): Promise<void> {
         }
 
         // Generate schema using Rose Flash
-        const { schema, tokensIn, tokensOut } = await generateResponseSchema(agent.goal);
+        const { schema, tokensIn, tokensOut } = await generateResponseSchema(agent.goal, {
+          archive: { agent_id: agentId, root_agent_id: agent.busId ?? agentId },
+        });
 
         // Update agent with schema and token usage
         await prisma.agent.update({

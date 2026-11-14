@@ -1,3 +1,4 @@
+import { archiveBindingFor } from './archiveRootResolver';
 import type { AgentStatus, Prisma } from '@prisma/client';
 import { computeSubscriptionLeases } from './computeSubscriptionLeases';
 import { prisma } from './database';
@@ -618,7 +619,7 @@ async function classifierContent(
     },
     dump_context: {
       call_site: 'credential_failure_classifier',
-      agent_id: agent.id,
+      ...(await archiveBindingFor({ agentId: agent.id, userId: agent.userId })),
       config: {
         classifier: 'browser_run_credential_outcomes',
         credential_ref_count: credentialRefs.length,

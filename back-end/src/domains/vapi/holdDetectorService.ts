@@ -2,6 +2,7 @@
  * LLM human detector for parked calls: decides whether the latest utterance
  * heard on hold is a live person (re-enter the call) or automated hold audio.
  */
+import { archiveBindingFor } from '../../providers/archiveRootResolver';
 import { z } from 'zod';
 
 import { HUMAN_DETECTOR_MODEL } from './config';
@@ -76,7 +77,7 @@ async function detectWith(
       response_model: responseModel('HoldHumanDetection', HumanDetectionSchema),
       dump_context: {
         call_site: 'vapi_hold_human_detector',
-        agent_id: input.agentId ?? undefined,
+        ...(await archiveBindingFor({ agentId: input.agentId, userId: input.userId })),
         config: { session_id: input.sessionId ?? null },
       },
     });

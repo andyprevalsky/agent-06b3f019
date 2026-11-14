@@ -229,7 +229,8 @@ router.post(
       const body = generateSchemaRequestSchema.parse(req.body);
       const { schema, tokensIn, tokensOut } = await messageLookupService.generateSchema(
         body.goal,
-        readResponseSchemaDirectAuth(req)
+        readResponseSchemaDirectAuth(req),
+        { agentId: body.agent_id, userId: req.userId, isInternal: req.isInternal === true }
       );
       res.json({ schema, tokensIn, tokensOut });
     } catch (error) {

@@ -34,11 +34,25 @@ export interface HedgeParams<T> {
    * rethrowing. Use when the hedge is itself the fallover for primary errors.
    */
   hedgeOnPrimaryFailure?: boolean;
+  /**
+   * Called once per branch that lost to a latched winner, with every item it
+   * produced (before and after the latch, until its abort took effect). The
+   * caller never sees these items; this is their only record (archive).
+   */
+  onLoser?: (name: string, items: readonly T[]) => void;
+  /**
+   * Called once when the race settles with a promise that resolves after every
+   * started branch has finished (aborted losers included), so an archive writer
+   * can wait for late onLoser reports without delaying the caller's stream.
+   */
+  onDrained?: (drained: Promise<void>) => void;
 }
 
 interface BranchState<T> {
   name: string;
   buffer: T[];
+  /** Items a branch produced after another branch latched (archive only). */
+  lateItems: T[];
   done: boolean;
   failure: unknown;
   controller: AbortController;
@@ -67,7 +81,10 @@ export async function* hedgeStreams<T>(params: HedgeParams<T>): AsyncIterable<T>
   const runBranch = async (branch: HedgeBranch<T>, state: BranchState<T>): Promise<void> => {
     try {
       for await (const item of branch.produce(state.controller.signal)) {
-        if (winner !== null && winner !== state) return; // lost; drain quietly
+        if (winner !== null && winner !== state) {
+          state.lateItems.push(item);
+          return; // lost; drain quietly
+        }
         state.buffer.push(item);
         if (winner === null && params.isContent(item)) {
           winner = state;
@@ -84,20 +101,30 @@ export async function* hedgeStreams<T>(params: HedgeParams<T>): AsyncIterable<T>
       }
     } finally {
       state.done = true;
+      if (winner !== null && winner !== state) {
+        const items = [...state.buffer, ...state.lateItems];
+        state.buffer = [];
+        state.lateItems = [];
+        if (items.length > 0) params.onLoser?.(state.name, items);
+      }
       notify();
     }
   };
 
+  const runs: Promise<void>[] = [];
   const startBranch = (branch: HedgeBranch<T>): { state: BranchState<T>; run: Promise<void> } => {
     const state: BranchState<T> = {
       name: branch.name,
       buffer: [],
+      lateItems: [],
       done: false,
       failure: null,
       controller: new AbortController(),
     };
     states.push(state);
-    return { state, run: runBranch(branch, state) };
+    const run = runBranch(branch, state);
+    runs.push(run);
+    return { state, run };
   };
 
   const primary = startBranch(params.primary);
@@ -170,5 +197,6 @@ export async function* hedgeStreams<T>(params: HedgeParams<T>): AsyncIterable<T>
     for (const state of states) {
       if (!state.done) state.controller.abort(new Error('chat hedge race settled'));
     }
+    params.onDrained?.(Promise.allSettled(runs).then(() => undefined));
   }
 }

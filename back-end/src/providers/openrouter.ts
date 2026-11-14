@@ -1,3 +1,5 @@
+import { finishLlmCapture, startLlmCapture } from './llmDump';
+import { simpleArchiveOutput } from './llmArchiveRecord';
 import OpenAI from 'openai';
 import dotenv from 'dotenv';
 
@@ -20,7 +22,14 @@ const openai = new OpenAI({
   fetch: ((url: string | URL, init?: RequestInit) => globalThis.fetch(url, init)) as typeof fetch,
 });
 
-export async function generateLLMJudgePrompt(goal: string): Promise<string> {
+/**
+ * `archive` binds the call to the caller's documented per-user root
+ * (`user-<userId>`): the judge prompt is generated before the agent exists.
+ */
+export async function generateLLMJudgePrompt(
+  goal: string,
+  archive: { agent_id: string; root_agent_id: string } | null = null
+): Promise<string> {
   const systemPrompt = `You are an expert at creating LLM judge prompts for evaluating a SUPER-INTELLIGENT AUTONOMOUS SYSTEM capable of solving ANY problem with enough persistence, creativity, and effort.
 
 CRITICAL CONTEXT: You are generating a judge prompt for an AI agent system that:
@@ -45,26 +54,57 @@ Return ONLY the judge prompt text, nothing else.`;
 
   const fallback = `Return a score from 0 to 1 indicating how well this goal was achieved: "${goal}". Be EXTREMELY STRICT — only give 1.0 if the goal is COMPLETELY accomplished with verifiable results. The system is autonomous and can solve any problem with persistence, creativity, and tool use; do not accept "as an AI, I cannot…" as completion. 0.0 means no real progress; 1.0 means the goal is fully done with concrete, verifiable evidence.`;
 
+  const messages = [
+    { role: 'system' as const, content: systemPrompt },
+    {
+      role: 'user' as const,
+      content: `Generate a STRICT LLM judge prompt for a super-intelligent autonomous agent system with this goal:\n\n${goal}`,
+    },
+  ];
+  const startedAtMs = Date.now();
+  const capture = startLlmCapture({
+    call_site: 'llm_judge_prompt_generation',
+    agent_id: archive?.agent_id,
+    root_agent_id: archive?.root_agent_id,
+    model: 'gpt-4.1',
+    message_count: messages.length,
+    messages,
+    config: { provider: 'openai', model: 'gpt-4.1', temperature: 0.3 },
+  });
+  const finish = (content: string, response: unknown, error?: unknown) =>
+    finishLlmCapture(capture, {
+      model: 'gpt-4.1',
+      output: simpleArchiveOutput({
+        content,
+        actualModel:
+          typeof (response as { model?: unknown } | null)?.model === 'string'
+            ? (response as { model: string }).model
+            : 'gpt-4.1',
+        provider: 'openai',
+        startedAtMs,
+        structured: response ?? undefined,
+        error,
+      }),
+      ...(error !== undefined ? { extra: { returned_fallback: true } } : {}),
+    });
   try {
     const completion = await openai.chat.completions.create({
       model: 'gpt-4.1',
-      messages: [
-        { role: 'system', content: systemPrompt },
-        {
-          role: 'user',
-          content: `Generate a STRICT LLM judge prompt for a super-intelligent autonomous agent system with this goal:\n\n${goal}`,
-        },
-      ],
+      messages,
       temperature: 0.3,
     });
 
-    return completion.choices[0].message.content || fallback;
+    const content = completion.choices[0].message.content || fallback;
+    finish(content, completion);
+    return content;
   } catch (error) {
     // Tests: when fastForward has no cached response and OpenAI rejects (quota,
     // missing key, etc.), fall back to a deterministic prompt so tests that
     // don't care about exact wording still pass. Scoped strictly to the
     // blackbox test backend.
     if (process.env.BLACKBOX_TEST_CAPTURE_OUTBOUND === '1') {
+      // The fallback is what the caller receives: keep it in the trajectory.
+      finish(fallback, null, error);
       return fallback;
     }
     throw error;

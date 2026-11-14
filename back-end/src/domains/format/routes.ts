@@ -1,3 +1,4 @@
+import { type HybridAuthRequest, hybridAuth } from '../../providers/hybridAuth';
 import { Router } from 'express';
 import { z } from 'zod';
 import { asyncHandler } from '../../utils/asyncHandler';
@@ -11,11 +12,14 @@ const router = Router();
 // POST /api/generate-llm-judge-prompt - Generate an LLM judge prompt from a goal
 router.post(
   '/generate-llm-judge-prompt',
-  asyncHandler(async (req, res) => {
+  // hybridAuth resolves the caller's userId (JWT sub, or X-User-Id on internal
+  // calls) so the generation is archived under that user's root.
+  asyncHandler<HybridAuthRequest>(hybridAuth),
+  asyncHandler<HybridAuthRequest>(async (req, res) => {
     try {
       const body = generatePromptSchema.parse(req.body);
 
-      const generatedPrompt = await generatePrompt(body.goal);
+      const generatedPrompt = await generatePrompt(body.goal, req.userId);
 
       res.json({
         prompt: generatedPrompt,
