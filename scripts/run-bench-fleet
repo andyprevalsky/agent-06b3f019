@@ -52,6 +52,10 @@
 #                      exact recovery, handing proven stopped primaries to this pool
 #   --recover-stale-owner <32-hex-token>
 #                      internal exact-owner recovery after forced cancellation
+#   --accept-lost-runtime-evidence
+#                      with --recover-stale-owner only: when every owned Machine is
+#                      destroyed and every volume pending_destroy/destroyed, record
+#                      the runtime evidence as LOST and finish ordinary recovery
 #   --timeout <s>      task execution window (default 7200): the controller ceiling
 #                      passed to run-bench-cloud and, unless BENCHMARK_WALL_CLOCK_
 #                      BACKSTOP_SECONDS is set, the guest backstop that stops agents;
@@ -799,6 +803,7 @@ if [ -z "${CLOUDBENCH_SCRIPT_SNAPSHOT:-}" ]; then
        "$ROOT_DIR/scripts/cloudbench-exact-session-cleanup.py" \
        "$ROOT_DIR/scripts/cloudbench-guest-recovery.py" \
        "$ROOT_DIR/scripts/cloudbench-prestart-recovery.py" \
+       "$ROOT_DIR/scripts/cloudbench-lost-evidence-release.py" \
        "$ROOT_DIR/scripts/cloudbench-prestack-recovery.py" \
        "$ROOT_DIR/scripts/cloudbench-prestack-source-reviews.json" \
        "$ROOT_DIR/scripts/cloudbench-volume-migration.py" \
@@ -1357,6 +1362,8 @@ while [ $# -gt 0 ]; do
             RECOVER_STALE_ONLY="1"; RECOVER_PRIMARY_TO_POOL="1"; DETACH="0"; WAIT_FOR_DETACHED="0"
             RECOVER_OWNER_TOKEN="${2:-}"; shift 2
             ;;
+        --accept-lost-runtime-evidence)
+            RECOVER_ACCEPT_LOST_EVIDENCE="1"; shift ;;
         --sim-on)         SIM_ON_CSV="${2:-}"; shift 2 ;;
         --ref)            BENCH_REF="${2:-}"; shift 2 ;;
         --dash-base)      DASH_BASE="${2:-}"; shift 2 ;;
@@ -1459,6 +1466,12 @@ if [ "${CLOUDBENCH_TEST_FLEET_OWNER_TOKEN+x}" != "x" ]; then
         [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;;
         *) echo "❌ fleet owner token must be exactly 32 lowercase hex characters" >&2; exit 2 ;;
     esac
+fi
+if [ "${RECOVER_ACCEPT_LOST_EVIDENCE:-0}" = "1" ] && { [ "$RECOVER_STALE_ONLY" != "1" ] \
+    || [ "${RECOVER_PRIMARY_TO_POOL:-0}" = "1" ] || [ "${RECOVER_UNSTAGED_WORKER:-0}" = "1" ] \
+    || [ -n "$COLD_HANDOFF_REQUEST" ] || [ "${#EXPLICIT_IDLE_ARGS[@]}" -ne 0 ]; }; then
+    echo "❌ --accept-lost-runtime-evidence is valid only with --recover-stale-owner TOKEN" >&2
+    exit 2
 fi
 if [ "$RECOVER_STALE_ONLY" = "1" ] && [ -z "$COLD_HANDOFF_REQUEST" ] && [ "${#EXPLICIT_IDLE_ARGS[@]}" -eq 0 ]; then
     case "$RECOVER_OWNER_TOKEN" in
@@ -12968,8 +12981,19 @@ recover_exact_stale_fleet_owner() {  # <32-hex-owner-token>
             fi
             ;;
         retain)
-            echo "❌ exact stale-owner cleanup policy retains durable ownership: $registry" >&2
-            return 1
+            # Resume an interrupted lost-guest release: the receipt is recorded and both latches are
+            # gone, but quarantine retain was not yet returned to reap. The helper re-reads every owned
+            # resource as provider-terminal before flipping the policy.
+            if [ "${RECOVER_ACCEPT_LOST_EVIDENCE:-0}" = 1 ] && [ "${RECOVER_PRIMARY_TO_POOL:-0}" != 1 ] \
+                && [ -f "$FLEET_AUDIT_ROOT/$token/runtime-evidence-lost.json" ] \
+                && python3 "$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-lost-evidence-release.py" \
+                    --registry "$registry" --audit-root "$FLEET_AUDIT_ROOT" \
+                    --app "$(registry_meta_value "$meta" app)" --root "$ROOT_DIR"; then
+                policy="$(registry_meta_value "$meta" cleanup_policy)"
+            else
+                echo "❌ exact stale-owner cleanup policy retains durable ownership: $registry" >&2
+                return 1
+            fi
             ;;
         *)
             echo "❌ exact stale-owner cleanup authorization state is unsafe: $registry" >&2
@@ -13086,7 +13110,11 @@ PY
     fi
     if [ "$needs_guest_recovery" = "1" ]; then
         echo "🧭 reconnecting exact owned guests for authenticated cleanup acknowledgement"
-        if ! fleet_recovery_reconnect_guest_shutdowns "$registry"; then
+        if ! fleet_recovery_reconnect_guest_shutdowns "$registry" \
+            && ! { [ "${RECOVER_ACCEPT_LOST_EVIDENCE:-0}" = 1 ] && [ "${RECOVER_PRIMARY_TO_POOL:-0}" != 1 ] \
+                   && python3 "$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-lost-evidence-release.py" \
+                       --registry "$registry" --audit-root "$FLEET_AUDIT_ROOT" --app "$(registry_meta_value "$meta" app)" \
+                       --root "$ROOT_DIR"; }; then
             # Runtime transfer may fail after every exact guest acknowledged
             # cleanup. Free one independently sealed own Machine slot while
             # retaining its volume, full ledger, failed exit and runtime latch.
@@ -13104,7 +13132,11 @@ PY
     if [ "$preconfig_verified" != 1 ] && { [ "${RECOVER_PRIMARY_TO_POOL:-0}" = 1 ] \
         || [ -e "$registry/runtime-evidence-unconfirmed" ] \
         || [ -L "$registry/runtime-evidence-unconfirmed" ]; } \
-        && ! fleet_recovery_confirm_runtime_evidence "$registry"; then
+        && ! fleet_recovery_confirm_runtime_evidence "$registry" \
+        && ! { [ "${RECOVER_ACCEPT_LOST_EVIDENCE:-0}" = 1 ] && [ "${RECOVER_PRIMARY_TO_POOL:-0}" != 1 ] \
+               && python3 "$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-lost-evidence-release.py" \
+                   --registry "$registry" --audit-root "$FLEET_AUDIT_ROOT" --app "$(registry_meta_value "$meta" app)" \
+                   --root "$ROOT_DIR"; }; then
         local sealed_retirement_status=0
         if [ "${RECOVER_PRIMARY_TO_POOL:-0}" != 1 ]; then
             fleet_recovery_retire_one_sealed_machine "$registry" || sealed_retirement_status=$?

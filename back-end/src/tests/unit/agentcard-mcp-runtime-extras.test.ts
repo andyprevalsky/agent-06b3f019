@@ -294,11 +294,10 @@ async function main(): Promise<void> {
       let nowMs = Date.now();
       const runtime = new AgentCardOrgRuntime(
         undefined,
-        (async () => ({
-          ok: false,
-          status: 401,
-          text: async () => JSON.stringify({ error: 'Invalid or expired organization token' }),
-        })) as unknown as typeof fetch,
+        async () =>
+          new Response(JSON.stringify({ error: 'Invalid or expired organization token' }), {
+            status: 401,
+          }),
         {
           now: () => nowMs,
           sleep: async (ms) => {

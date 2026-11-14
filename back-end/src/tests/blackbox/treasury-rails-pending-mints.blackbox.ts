@@ -1,5 +1,6 @@
 #!/usr/bin/env tsx
 import assert from 'node:assert/strict';
+import { assertV2WalletContract } from './agentcard-wallet-v2.cases';
 import { appendFileSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -49,6 +50,7 @@ function transferRow(cardId: string, status: string, releasedCents: number): Row
 }
 
 async function main(): Promise<void> {
+  await assertV2WalletContract();
   // Overdue reclaims are skippable only through the exact opt-in flag.
   assert.equal(overdueReclaimSkipped({ TREASURY_RAILS_SKIP_OVERDUE_RECLAIM: '1' }), true);
   for (const value of [undefined, '', '0', 'true', 'yes']) {

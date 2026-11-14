@@ -1672,6 +1672,18 @@ async def test_ceremony_capable_actions_arm_the_live_target_before_running() -> 
 async def run_all_tests():
     print("browser-credentials blackbox tests:")
     runner = BlackboxResult()
+    await runner.record_async(
+        "agent_browser_cannot_act_on_phone_provider_account_control_plane",
+        test_agent_browser_cannot_act_on_phone_provider_account_control_plane,
+    )
+    await runner.record_async(
+        "brokered_phone_lane_still_runs_on_the_phone_provider_page",
+        test_brokered_phone_lane_still_runs_on_the_phone_provider_page,
+    )
+    runner.record(
+        "phone_provider_account_boundary_covers_the_broker_api_origin",
+        test_phone_provider_account_boundary_covers_the_broker_api_origin,
+    )
     runner.record(
         "steel_cdp_key_is_materialized_only_at_connection_boundary",
         test_steel_cdp_key_is_materialized_only_at_connection_boundary,
@@ -2044,3 +2056,116 @@ async def test_phone_stream_long_progress_remains_incremental():
             assert "".join(r["delta"] for r in records) == "Progress. " * 10000
 
     await _capture_phone_stream(exercise)
+
+
+class _UntouchableDomService:
+    """A DOM service that records every attribute the dispatcher reaches for.
+
+    The phone-provider account boundary must refuse before the browser is driven,
+    so a refused action leaves ``touched`` empty.
+    """
+
+    def __init__(self) -> None:
+        self.touched: list[str] = []
+
+    def __getattr__(self, name: str):
+        self.touched.append(name)
+        raise AttributeError(name)
+
+
+async def test_agent_browser_cannot_act_on_phone_provider_account_control_plane() -> None:
+    """Replay prod root 0b54f65d (2026-11-13 10:22Z): a browser agent carrying the
+    owner's synced phone-harness.com login typed a CLI device code and clicked
+    Approve, minting an off-Rose Phone Harness credential that then drove the
+    phone outside Rose's broker. The provider account belongs to Rose's phone
+    broker; an agent browser may observe that realm but never act on it."""
+    from domains.spawn_browser_agent_v3.service_actions import execute_action
+
+    incident_steps = [
+        ("https://accounts.phone-harness.com/device", {"action": "input_text", "params": {"index": 3, "text": "JLLQDKNZ"}}),
+        ("https://accounts.phone-harness.com/device", {"action": "click", "params": {"index": 7}}),
+        ("https://accounts.phone-harness.com/device?user_code=JLLQ-DKNZ", {"action": "press_key", "params": {"key": "Enter"}}),
+        ("https://phone-harness.com/dashboard", {"action": "evaluate", "params": {"code": "document.querySelector('button').click()"}}),
+        ("https://clerk.phone-harness.com/v1/client", {"action": "click", "params": {"x": 10, "y": 10}}),
+    ]
+    for current_url, action in incident_steps:
+        dom = _UntouchableDomService()
+        history = SimpleNamespace(record_action=AsyncMock(), last_action_step=lambda: None)
+        result = await execute_action(dom, history, action, current_url=current_url)
+        assert result.get("success") is False, (current_url, action, result)
+        assert result.get("code") == "phone_provider_account_boundary", (current_url, action, result)
+        assert dom.touched == [], (current_url, action["action"], dom.touched)
+
+    # Leaving (or reaching) that realm by navigation is decided before any credential prep.
+    for target in ("https://accounts.phone-harness.com/device", "https://phone-harness.com/dashboard", "phone-harness.com"):
+        for nav in ("goto", "open_new_tab"):
+            dom = _UntouchableDomService()
+            prepare = AsyncMock()
+            history = SimpleNamespace(record_action=AsyncMock(), last_action_step=lambda: None)
+            result = await execute_action(
+                dom, history, {"action": nav, "params": {"url": target}},
+                current_url="https://www.google.com/", prepare_credentials_for_url=prepare,
+            )
+            assert result.get("success") is False, (nav, target, result)
+            assert result.get("code") == "phone_provider_account_boundary", (nav, target, result)
+            prepare.assert_not_awaited()
+            assert dom.touched == [], (nav, target, dom.touched)
+
+    # Observation of the realm stays available, and look-alike hosts are untouched.
+    for current_url, action in (
+        ("https://accounts.phone-harness.com/device", {"action": "read_browser_state", "params": {}}),
+        ("https://notphone-harness.com/device", {"action": "click", "params": {"index": 7}}),
+        ("https://phone-harness.com.example.org/", {"action": "click", "params": {"index": 7}}),
+    ):
+        dom = _UntouchableDomService()
+        history = SimpleNamespace(record_action=AsyncMock(), last_action_step=lambda: None)
+        result = await execute_action(dom, history, action, current_url=current_url)
+        assert result.get("code") != "phone_provider_account_boundary", (current_url, result)
+        assert "unexpected keyword" not in str(result.get("error")), result
+        assert set(dom.touched) - {"register_secret_refs"}, (current_url, "an allowed action must reach the browser")
+
+
+async def test_brokered_phone_lane_still_runs_on_the_phone_provider_page() -> None:
+    """Prod root 0b54f65d's setup browser sat on https://phone-harness.com/ and ran 203
+    brokered ``phone`` actions plus reads. That lane goes through Rose's broker and
+    must keep working on the provider page while acting on the page is refused."""
+    import domains.spawn_browser_agent_v3.phone as phone_module
+    from domains.spawn_browser_agent_v3.service_actions import execute_action
+
+    calls: list[dict] = []
+
+    async def fake_execute_phone(params, **kwargs):
+        calls.append({"params": params, **kwargs})
+        return {"success": True, "operation": {"status": "SUCCEEDED"}}
+
+    original = phone_module.execute_phone
+    phone_module.execute_phone = fake_execute_phone
+    try:
+        for current_url in ("https://phone-harness.com/", "https://phone-harness.com/dashboard"):
+            dom = _UntouchableDomService()
+            history = SimpleNamespace(record_action=AsyncMock(), last_action_step=lambda: None)
+            result = await execute_action(
+                dom, history, {"action": "phone", "params": {"op": "screen.text"}},
+                current_url=current_url, user_id="user-1", agent_id="agent-1", browser_task_id="task-1",
+            )
+            assert result.get("success") is True, (current_url, result)
+            assert result.get("code") != "phone_provider_account_boundary", result
+            assert dom.touched == [], dom.touched
+    finally:
+        phone_module.execute_phone = original
+    assert [c["params"] for c in calls] == [{"op": "screen.text"}] * 2, calls
+    assert all(c["user_id"] == "user-1" and c["task_id"] == "task-1" for c in calls), calls
+
+
+def test_phone_provider_account_boundary_covers_the_broker_api_origin() -> None:
+    """The realm Rose refuses to agents is the one whose API key Rose's broker holds."""
+    import re
+    from pathlib import Path
+
+    from domains.spawn_browser_agent_v3.service_actions import phone_provider_account_realm
+
+    source = (Path(__file__).resolve().parents[3] / "back-end/src/providers/phoneHarness.ts").read_text()
+    origins = set(re.findall(r"'(https://[a-z0-9.-]+)'", source))
+    assert origins, "phone broker origin not found"
+    for origin in origins:
+        assert phone_provider_account_realm(origin) == "phone-harness.com", origin

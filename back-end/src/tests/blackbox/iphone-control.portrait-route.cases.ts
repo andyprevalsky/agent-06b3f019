@@ -14,6 +14,12 @@ import {
   unchangedSearchRows,
 } from './iphone-portrait-route.fixture';
 import { livePortraitOcr, portraitFrame, portraitOcr } from './iphone-portrait.fixture';
+import {
+  PROD_20261113_FLOAT_TAP,
+  PROD_20261113_LEASE1_ROUTE,
+  PROD_20261113_LEASE2_ROUTE,
+  PROD_20261113_MENU_ROWS,
+} from './iphone-portrait-route.prod-20261113.fixture';
 import { portraitControlCenterAnchors } from '../../providers/phonePortraitProof';
 import { freshSetup, observe, setupPost, type SetupDto } from './iphone-control.setup-fixtures';
 import type { Case } from './iphone-control.cases';
@@ -464,5 +470,96 @@ portraitRouteCases.push([
         .verification.checks.portrait_lock.status,
       'confirmed'
     );
+  },
+]);
+portraitRouteCases.push([
+  'portrait route accepts benign refocus, reads and floating-button probes from the 2026-11-13 production journal',
+  async () => {
+    const context = {
+      attemptId: 'attempt',
+      revision: 1,
+      firstRun: 'firstRun',
+      profileRevision: 1,
+      now: Date.now(),
+    };
+    const stamp = (raw: typeof PROD_20261113_LEASE1_ROUTE) =>
+      raw.map((e, i) => ({
+        ...structuredClone(e),
+        cursor: i + 1,
+        attemptId: 'attempt',
+        revision: 1,
+      }));
+    const stage = (events: ReturnType<typeof stamp>) => {
+      const verdict = portraitRouteVerdict(events, context);
+      return 'break' in verdict ? `${verdict.break.stage}@${verdict.break.cursor}` : 'proof';
+    };
+    // Lease 2 (cursors 19-31): the first read after tapping Search showed the field still
+    // unfocused (no keyboard), so the agent re-tapped that observed field before typing.
+    const lease2 = stamp(PROD_20261113_LEASE2_ROUTE);
+    assert.equal(stage(lease2), `float@${lease2.length}`, 'Refocusing the observed Search broke');
+    // A tap outside the observed Search field is still a deviation.
+    const outside = structuredClone(lease2);
+    outside[4].args = { x: 320, y: 1230 };
+    assert.equal(stage(outside), 'query@5', 'A tap outside the observed Search was accepted');
+    // Lease 1 (cursors 5-16) reached the detail page with AssistiveTouch already On. The
+    // floating button is textless, so screen.text never reports it: a right-edge probe that
+    // leaves the detail page unchanged is benign; the real tap at (686, 746) then opens the menu.
+    const detailRead = PROD_20261113_LEASE1_ROUTE.at(-1)!;
+    const tap = (x: number, y: number) => ({
+      cursor: 0,
+      operation: 'input.tap',
+      args: { x, y },
+      result: true,
+    });
+    const read = (result: unknown) => ({
+      cursor: 0,
+      operation: 'screen.text',
+      args: { min_confidence: 0.3 },
+      result,
+    });
+    const lockOn = stamp([
+      ...PROD_20261113_LEASE1_ROUTE,
+      tap(686, 450),
+      read(detailRead.result),
+      tap(PROD_20261113_FLOAT_TAP.x, PROD_20261113_FLOAT_TAP.y),
+      read(PROD_20261113_MENU_ROWS),
+      tap(542, 891),
+      read(livePortraitOcr()),
+    ]);
+    assert.equal(stage(lockOn), 'proof', 'A benign floating-button probe broke the route');
+    assert.equal(provePortraitRoute(lockOn, context)?.originalAssistiveTouch, 'on');
+    // Any in-range confidence read is read-only (the agent's real 0.1 re-read); malformed is not.
+    const n = PROD_20261113_LEASE1_ROUTE.length;
+    const lowRead = (min_confidence: unknown) =>
+      stamp([
+        ...PROD_20261113_LEASE1_ROUTE,
+        { ...detailRead, args: { min_confidence } },
+        ...lockOn.slice(n).map(({ operation, args, result }) => ({
+          cursor: 0,
+          operation,
+          args,
+          result,
+        })),
+      ]);
+    assert.equal(stage(lowRead(0.1)), 'proof', 'A min_confidence 0.1 read broke the route');
+    assert.equal(stage(lowRead(0)), 'proof', 'A min_confidence 0 read broke the route');
+    assert.equal(stage(lowRead('x')), `float@${n + 1}`, 'A malformed min_confidence was accepted');
+    assert.equal(
+      stage(lowRead(2)),
+      `float@${n + 1}`,
+      'An out-of-range min_confidence was accepted'
+    );
+    // A probe that navigated away from the detail page is still a route break.
+    const navigated = structuredClone(lockOn);
+    navigated[n + 1].result = PROD_20261113_LEASE2_ROUTE[2].result;
+    assert.equal(stage(navigated), `menu@${n + 2}`);
+    // A float-stage tap outside the right-edge band is still rejected.
+    const band = structuredClone(lockOn);
+    band[n].args = { x: 400, y: 450 };
+    assert.equal(stage(band), `float@${n + 1}`);
+    // The returned float step names the probe rule instead of an unobservable target.
+    const floatBreak = portraitRouteVerdict(stamp(PROD_20261113_LEASE1_ROUTE), context);
+    assert.ok('break' in floatBreak);
+    assert.match(floatBreak.break.next, /screen\.text does not report/);
   },
 ]);

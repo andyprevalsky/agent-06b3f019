@@ -205,7 +205,9 @@ router.get(
     const agentId = typeof req.query.agentId === 'string' ? req.query.agentId : '';
     try {
       if (!(await authorizeAgentForCaller(benchmarkCaller(req), agentId, res))) return;
-      const result = await getTestPaymentLifecycle(agentId);
+      const result = await getTestPaymentLifecycle(agentId, {
+        includeStripeCustody: req.query.stripeCustody === '1',
+      });
       res.json(result);
     } catch (error) {
       respondTestPaymentError(res, error, 'Failed to read test payment lifecycle', { agentId });
