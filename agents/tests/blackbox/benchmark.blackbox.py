@@ -24010,6 +24010,25 @@ def test_unified_catalog_delineates_bench_axes():
     assert live["environment"]["live_targets"] == ["https://www.amazon.com"]
 
 
+def test_catalog_refuses_a_task_with_a_duplicate_json_key():
+    """A textual merge that leaves two `quarantine` objects on one task must fail validation;
+    json's last-one-wins silently dropped PR1910's markers on two smoke tasks (2026-11-13)."""
+    from benchmarks.long_horizon import load_raw_catalog
+
+    with tempfile.TemporaryDirectory() as tmp:
+        catalog = Path(tmp) / "tasks.json"
+        catalog.write_text(
+            '[{"name": "dup-task", "quarantine": {"since": "2026-11-13"}, "prompt": "p", '
+            '"quarantine": {"since": "2026-11-13"}}]'
+        )
+        try:
+            load_raw_catalog(catalog)
+        except ValueError as exc:
+            assert "dup-task: duplicate JSON key 'quarantine'" in str(exc), exc
+        else:
+            raise AssertionError("duplicate quarantine key was silently accepted")
+
+
 def test_daily_ecommerce_v1_catalog_has_distinct_transaction_flows():
     """The daily ecommerce slice stays focused, complete, and stable."""
     from benchmarks.benchmark_tasks import get_task_by_name
@@ -29697,6 +29716,10 @@ async def run_all_tests():
     r.record(
         "unified_catalog_bench_axes",
         test_unified_catalog_delineates_bench_axes,
+    )
+    r.record(
+        "catalog_refuses_a_task_with_a_duplicate_json_key",
+        test_catalog_refuses_a_task_with_a_duplicate_json_key,
     )
     r.record(
         "daily_ecommerce_v1_catalog",

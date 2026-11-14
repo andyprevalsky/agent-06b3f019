@@ -569,6 +569,16 @@ class ReleaseReport(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     q.catalog_quarantines(self.root)
 
+    def test_a_task_carrying_two_quarantine_keys_is_refused_not_silently_last_one_wins(self):
+        # PR1910's merge of main left a second `quarantine` object on two tasks (PR #1981's marker plus
+        # its own); json.loads kept only the last, so one marker vanished from report and attribution.
+        catalog = self.write_catalog()
+        marker = json.dumps(META)
+        catalog.write_text(f'[{{"name": "cloud-smoke", "quarantine": {marker}, "prompt": "p", '
+                           f'"quarantine": {marker}}}]')
+        with self.assertRaisesRegex(ValueError, "cloud-smoke: duplicate JSON key 'quarantine'"):
+            q.catalog_quarantines(self.root)
+
     def test_suite_level_flaky_unit_matches_the_marker_named_by_its_own_failure_output(self):
         # The structural runner reports a FLAKY unit as the suite job ("deploy-test-plan"); the marker
         # sits on the one method unittest named in that job's failed first attempt (PR #1928).
