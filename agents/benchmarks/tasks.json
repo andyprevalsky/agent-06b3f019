@@ -4771,7 +4771,7 @@
     "name": "browser-auth-account-locked",
     "quarantine": {
       "since": "2026-11-11",
-      "repair": "pending-handoff:0abef87d9243474f8097fbc34b36f604",
+      "repair": "https://boxes.dev/thread/thr_c71bb796ab6e4c7aa1f6543fae520280",
       "error": "Tool 'spawn_browser_agent' exceeded its exact root call limit during execution: expected 1, got 2.",
       "evidence": ".context/deploy-session/round23-flaky-account-locked/REPORT.md (Tilion closed CDP 1012/410 shutdown mid-run; rerun PASS)"
     },

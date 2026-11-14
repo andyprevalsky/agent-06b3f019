@@ -10021,7 +10021,7 @@ class Cycle(unittest.TestCase):
         state['plan_digest'] = c.digest(state['plan'])
         return state, original, proof, successor, native_proof
 
-    @quarantine(since="2026-11-11", repair="pending-handoff:18edffd9ba6d49e18caf29de07fd5696",
+    @quarantine(since="2026-11-11", repair="https://boxes.dev/thread/thr_3767d8b2fa4d42d79d6d403f7ae46f76",
                 error="ValueError: native cleanup: old controller still active",
                 evidence="docs/rca/cases/2026-11-11-synthetic-controller-pids-collide-with-host.md")
     def test_reconciled_failed_successor_renews_at_repair_boundary_without_credit(self):
@@ -10117,7 +10117,7 @@ class Cycle(unittest.TestCase):
         self.assertFalse(state['reconciled_owners'][proof['receipt_sha256']]['credit_granted'])
         self.assertEqual(state['source'], state['reconciled_owners'][proof['receipt_sha256']]['validation_source'])
 
-    @quarantine(since="2026-11-11", repair="pending-handoff:18edffd9ba6d49e18caf29de07fd5696",
+    @quarantine(since="2026-11-11", repair="https://boxes.dev/thread/thr_3767d8b2fa4d42d79d6d403f7ae46f76",
                 error="ValueError: native cleanup: old controller still active",
                 evidence="docs/rca/cases/2026-11-11-synthetic-controller-pids-collide-with-host.md")
     def test_reconciled_failed_successor_rejects_untrusted_authority_atomically(self):
