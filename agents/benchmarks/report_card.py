@@ -470,12 +470,18 @@ class ReportCardEmitter:
         if not self._should_emit(force):
             return None
         card = build_report_card(state)
-        self._emit(render_report_card(card))
+        messages = [render_report_card(card)]
         try:
             write_report_card(card, self._context_dir)
         except OSError as e:
             # Writing the JSON must never crash a live benchmark run.
-            self._emit(f"[report-card] ⚠ write failed (non-fatal): {e}")
+            messages.append(f"[report-card] ⚠ write failed (non-fatal): {e}")
         self._last_emit_at = self._now()
         self.last_card = card
+        # Persist the native projection before optional console output.
+        for message in messages:
+            try:
+                self._emit(message)
+            except (OSError, ValueError):
+                pass  # A closed output sink cannot replace the canonical outcome.
         return card

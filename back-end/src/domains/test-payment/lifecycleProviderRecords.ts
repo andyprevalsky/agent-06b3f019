@@ -1,5 +1,6 @@
 import { TestPaymentError } from './errors';
 import type { TestPaymentLifecycle } from './types';
+import type { LifecycleAttention } from './lifecycleDependencies';
 
 export function asRecord(value: unknown): Record<string, unknown> | undefined {
   return typeof value === 'object' && value !== null
@@ -193,5 +194,37 @@ export function providerIntegrity(
     agentCardProviderUnlinkedTransferCount: transfers.filter(
       (transfer) => typeof transfer.card_id !== 'string' || transfer.card_id === ''
     ).length,
+  };
+}
+
+function attentionKind(metadata: unknown): string | null {
+  const value = asRecord(metadata)?.attentionKind;
+  return typeof value === 'string' && value !== '' ? value : null;
+}
+
+export function buildAttention(
+  attentionRequests: LifecycleAttention
+): TestPaymentLifecycle['attention'] {
+  const kinds = attentionRequests
+    .map((request) => ({
+      kind: attentionKind(request.metadata),
+      open: request.userResponse === null,
+    }))
+    .filter((entry): entry is { kind: string; open: boolean } => entry.kind !== null);
+  return {
+    openKinds: kinds.filter((entry) => entry.open).map((entry) => entry.kind),
+    resolvedKinds: kinds.filter((entry) => !entry.open).map((entry) => entry.kind),
+  };
+}
+
+export function mapAgentCard(
+  purchase: { cardId: string | null },
+  cardDetails: { status: string; balanceCents: number } | null
+): TestPaymentLifecycle['agentCard'] {
+  if (cardDetails === null || purchase.cardId === null) return null;
+  return {
+    id: purchase.cardId,
+    status: cardDetails.status,
+    balanceCents: cardDetails.balanceCents,
   };
 }

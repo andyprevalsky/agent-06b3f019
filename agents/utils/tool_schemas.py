@@ -1190,7 +1190,11 @@ SPAWN_AGENT_TYPE_DESCRIPTION_ROSE_DESKTOP = _SPAWN_TYPE_BROWSER + _SPAWN_TYPE_CO
 BROWSER_GOAL_PROFILE_NOTE = (
     "Exception: a browser agent also receives the user's profile (name, email, phone, delivery "
     "address) and the target site's sign-in options itself; do not restate the user's profile in "
-    "its goal."
+    "its goal. Keep the goal and required output fields limited to the requested outcome and "
+    "evidence needed to establish it. Make supplementary observations conditional in the goal "
+    "and optional in output_schema; do not turn possible site details or background facts into "
+    "mandatory completion evidence. Preserve explicit and standing user constraints and all "
+    "steps and evidence necessary for correct execution."
 )
 
 

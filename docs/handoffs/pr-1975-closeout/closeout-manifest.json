@@ -1,0 +1,78 @@
+{
+ "branch:backup/cerebras-chat-quota-prepush-20261002": {
+  "disposition": "archived",
+  "tip": "12d996f0d8e24b93c0e276d5b3f91887a0da9aca",
+  "archive": "devbox-closeout-private/pr1932/20261111T211955Z-records.tar.gz.aesgcm",
+  "sha256": "d7d80541e820a33628e3a1f83a6a971d2b7d5a36f9a85393ad553f4fb947e9f6",
+  "note": "template-inherited local-only branch (not this deploy); identical tip already preserved by the PR #1932 private archive; left in place"
+ },
+ "stash:0e2ffe95ba40a2d0c2b8ae9e884b4a85d96af3f2": {
+  "disposition": "archived",
+  "tip": "0e2ffe95ba40a2d0c2b8ae9e884b4a85d96af3f2",
+  "archive": "devbox-closeout-private/pr1932/20261111T211955Z-records.tar.gz.aesgcm",
+  "sha256": "d7d80541e820a33628e3a1f83a6a971d2b7d5a36f9a85393ad553f4fb947e9f6",
+  "note": "template-inherited stash (not this deploy); identical object preserved by the PR #1932 private archive"
+ },
+ "agents/navi-worker-log.txt": {
+  "disposition": "archived",
+  "archive": "devbox-closeout-private/pr1989/20261113T005947Z-records.tar.gz.aesgcm",
+  "sha256": "acc32a90d0f72fd8aa90eac5b144433a1a6b90b7f298ef3ae790066f50c9a53a",
+  "receipt": "docs/handoffs/pr-1989-closeout/private-archive-receipt.json",
+  "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-1989-closeout/private-archive-receipt.json --destination <empty dir>",
+  "note": "local stack log (template-inherited, Oct 8)"
+ },
+ "back-end/backend-logs.log": {
+  "disposition": "archived",
+  "archive": "devbox-closeout-private/pr1989/20261113T005947Z-records.tar.gz.aesgcm",
+  "sha256": "acc32a90d0f72fd8aa90eac5b144433a1a6b90b7f298ef3ae790066f50c9a53a",
+  "receipt": "docs/handoffs/pr-1989-closeout/private-archive-receipt.json",
+  "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-1989-closeout/private-archive-receipt.json --destination <empty dir>",
+  "note": "local stack log (template-inherited, Oct 8)"
+ },
+ "front-end/frontend-logs.log": {
+  "disposition": "archived",
+  "archive": "devbox-closeout-private/pr1989/20261113T005947Z-records.tar.gz.aesgcm",
+  "sha256": "acc32a90d0f72fd8aa90eac5b144433a1a6b90b7f298ef3ae790066f50c9a53a",
+  "receipt": "docs/handoffs/pr-1989-closeout/private-archive-receipt.json",
+  "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-1989-closeout/private-archive-receipt.json --destination <empty dir>",
+  "note": "local stack log (template-inherited, Oct 8)"
+ },
+ "hub-poller-logs.log": {
+  "disposition": "archived",
+  "archive": "devbox-closeout-private/pr1989/20261113T005947Z-records.tar.gz.aesgcm",
+  "sha256": "acc32a90d0f72fd8aa90eac5b144433a1a6b90b7f298ef3ae790066f50c9a53a",
+  "receipt": "docs/handoffs/pr-1989-closeout/private-archive-receipt.json",
+  "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-1989-closeout/private-archive-receipt.json --destination <empty dir>",
+  "note": "local stack log (template-inherited, Oct 8)"
+ },
+ ".cloud-env": "managed-env (boxes.dev project environment; secrets never archived)",
+ ".env.npm": "managed-env (boxes.dev project environment; secrets never archived)",
+ "agents/.env": "managed-env (boxes.dev project environment; secrets never archived)",
+ "back-end/.env": "managed-env (boxes.dev project environment; secrets never archived)",
+ "front-end/.env": "managed-env (boxes.dev project environment; secrets never archived)",
+ "mac-app/.env": "managed-env (boxes.dev project environment; secrets never archived)",
+ "research/.env": "managed-env (boxes.dev project environment; secrets never archived)",
+ "agents/.env.benchmark-temporal": "managed-env (generated benchmark Temporal override; secrets never archived)",
+ "agents/.env.cloudbench-upsert.lock": "reproducible (lock file)",
+ "back-end/.env.cloudbench-upsert.lock": "reproducible (lock file)",
+ "agents/providers/fast_cache/": "reproducible (runtime cache)",
+ "package-lock.json": "reproducible (ignored root install lock)",
+ ".devbox/": "managed (boxes.dev runtime state)",
+ ".context/": {
+  "disposition": "archived",
+  "archive": "devbox-closeout-private/pr1975/20261114T040222Z-records.tar.gz.aesgcm",
+  "sha256": "6f3025234129ff2c646f366aec066ef71b45dedfb8bbdfc5debac4bd87ea871e",
+  "receipt": "docs/handoffs/pr-1975-closeout/private-archive-receipt.json",
+  "restore": "agents/venv/bin/python -I docs/handoffs/whm-b07d9037-preservation/private_archive.py restore --receipt docs/handoffs/pr-1975-closeout/private-archive-receipt.json --destination <empty dir>",
+  "note": "PR #1975 takeover deploy evidence (14,220 files, full readback): deploy cycle deploy-pipeline-t2 (17 gates PASS at dd5627cccb, custody import, attempts, production-lanes.json, production-migrations), abandoned pre-run cycle deploy-pipeline-t1, smoke campaign deploy-cloud/159a396f (11/11 PASS), timing run 20261114-013246-3979152, deploy-pr/merged/approval/review state, and the takeover workspace /var/tmp/pr1975 copied to /home/boxes/pr1975-evidence (gate/prod logs, live-check evidence, RLS before/after, approval packet A2038-1). The restored custody donor (.context/deploy-donor-r2, .context/deploy-pipeline/attempts/{1,2}, .context/deploy-cloud/3354402..., .git/cloudbench-fleet-audits) is the original-owner archive deploy-handoff/pr1975/20261114T012535Z/donor.tar.zst (sha256 8a631c820cabdea762f33c8c7a01cc314d20a3184848ffba515b92b340241652). devbox-closeout-private/pr1975/20261114T040103Z-records.tar.gz.aesgcm is an aborted partial upload (no receipt), never a valid archive. Other .context contents (own-completion-*, earlier deploys) belong to the parent thread ph78393fcn3 or are preserved by earlier closeouts (pr-2015, pr-2010, pr-1989, pr-1932)."
+ },
+ "/home/boxes/rose-pr1975/.context/": {
+  "disposition": "in-use",
+  "note": "isolated deploy worktree for follow-up PR #2038 (branch fix/github-repo-connection-rls, pushed); its deploy evidence is archived by the #2038 closeout"
+ },
+ "/home/boxes/rose-pr1975/agents/.env": "managed-env (symlink to /home/boxes/rose/agents/.env; secrets never archived)",
+ "/home/boxes/rose-pr1975/back-end/.env": "managed-env (symlink to /home/boxes/rose/back-end/.env; secrets never archived)",
+ "/home/boxes/rose-pr1975/front-end/.env": "managed-env (symlink to /home/boxes/rose/front-end/.env; secrets never archived)",
+ "/home/boxes/rose-pr1975/mac-app/.env": "managed-env (symlink to /home/boxes/rose/mac-app/.env; secrets never archived)",
+ "/home/boxes/rose-pr1975/package-lock.json": "reproducible (ignored root install lock)"
+}
