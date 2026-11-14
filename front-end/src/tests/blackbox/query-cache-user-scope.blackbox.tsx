@@ -7,6 +7,8 @@
  *   - from the switch on, the left bar's folders/projects queries never return A's
  *     data, even while B's responses are still in flight
  *   - a token refresh for the same user keeps the cache (no refetch)
+ *   - a root-browser action account A started that completes after B signs in
+ *     never writes A's state into B's cache (CodeRabbit review of #2052)
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, renderHook, waitFor } from '@testing-library/react';
@@ -20,6 +22,10 @@ import {
   useFoldersQuery,
   useProjectsQuery,
 } from '@/features/terminal-component-group/components/rose-sidebar/useProjects';
+import {
+  ROOT_BROWSER_KEY,
+  useRootBrowserActions,
+} from '@/features/terminal-component-group/components/rose-apps/useBrowserWorld';
 import { appQueryClient, resetQueryCacheScope } from '@/lib/queryClient';
 
 import { makeProject } from './rose-sidebar.fixtures';
@@ -48,6 +54,26 @@ vi.mock('@/lib/api', async (importOriginal) => ({
 }));
 
 const API_BASE = 'http://localhost:3001/api';
+
+/** useAuthActions with real React state, as in useAuth: identity changes re-render the hooks. */
+function useStatefulAuthActions() {
+  const [, setUser] = useState<User | null>(null);
+  const [, setSession] = useState<Session | null>(null);
+  const [, setIsFullySignedIn] = useState(false);
+  const [, setInviteRequired] = useState(false);
+  const [, setRealtimeReady] = useState(false);
+  return useAuthActions({
+    setUser,
+    setSession,
+    setIsFullySignedIn,
+    setInviteRequired,
+    setRealtimeReady,
+  });
+}
+
+const wrapper = ({ children }: { children: ReactNode }) => (
+  <QueryClientProvider client={appQueryClient}>{children}</QueryClientProvider>
+);
 
 function folderNamed(user: string) {
   return {
@@ -101,24 +127,9 @@ describe('query cache user scope', () => {
     localStorage.setItem('rose-session', JSON.stringify(sessionOf('user-a')));
 
     const observed: string[] = [];
-    const wrapper = ({ children }: { children: ReactNode }) => (
-      <QueryClientProvider client={appQueryClient}>{children}</QueryClientProvider>
-    );
     const { result } = renderHook(
       () => {
-        // Real React state, as in useAuth: identity changes re-render the left bar's queries.
-        const [, setUser] = useState<User | null>(null);
-        const [, setSession] = useState<Session | null>(null);
-        const [, setIsFullySignedIn] = useState(false);
-        const [, setInviteRequired] = useState(false);
-        const [, setRealtimeReady] = useState(false);
-        const auth = useAuthActions({
-          setUser,
-          setSession,
-          setIsFullySignedIn,
-          setInviteRequired,
-          setRealtimeReady,
-        });
+        const auth = useStatefulAuthActions();
         const folders = useFoldersQuery();
         const projects = useProjectsQuery();
         observed.push(
@@ -159,5 +170,47 @@ describe('query cache user scope', () => {
     await act(() => result.current.auth.applySession('refresh', sessionOf('user-b')));
     expect(result.current.folders.data?.map((f) => f.name)).toEqual(['user-b folder']);
     expect(fetches).toEqual(before);
+  });
+
+  it('drops a root-browser open that account A started if it completes after B signs in', async () => {
+    let releaseOpen: () => void = () => {};
+    const openReady = new Promise<void>((resolve) => {
+      releaseOpen = resolve;
+    });
+    server.use(
+      http.post(`${API_BASE}/browser-world/root/open`, async () => {
+        await openReady; // A's open is still in flight when B signs in
+        return HttpResponse.json({
+          root: { session_id: 'a-root-session', live_url: 'https://live.example/a' },
+        });
+      }),
+    );
+    localStorage.setItem('rose-session', JSON.stringify(sessionOf('user-a')));
+    const { result } = renderHook(
+      () => ({ auth: useStatefulAuthActions(), root: useRootBrowserActions() }),
+      { wrapper },
+    );
+    await act(() => result.current.auth.applySession('init', sessionOf('user-a')));
+
+    let opened: Promise<unknown> = Promise.resolve();
+    act(() => {
+      opened = result.current.root.open.mutateAsync('https://a.example').catch(() => undefined);
+    });
+    await waitFor(() => expect(result.current.root.open.isPending).toBe(true));
+
+    await act(async () => {
+      await result.current.auth.signOut();
+      localStorage.setItem('rose-session', JSON.stringify(sessionOf('user-b')));
+      await result.current.auth.applySession('login', sessionOf('user-b'));
+    });
+    // B's own read of Root: nothing open.
+    const bRoot = { root: null, sites: [], default_url: null };
+    appQueryClient.setQueryData([...ROOT_BROWSER_KEY, null], bRoot);
+
+    releaseOpen();
+    await act(async () => {
+      await opened;
+    });
+    expect(appQueryClient.getQueryData([...ROOT_BROWSER_KEY, null])).toEqual(bRoot);
   });
 });
