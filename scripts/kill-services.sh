@@ -202,7 +202,7 @@ is_self_ancestor() {
     done
 }
 
-# Benchmark controllers are NEVER ours to kill (CLAUDE.md rule 27). They own Fly
+# Benchmark controllers are NEVER ours to kill (never kill another session's benchmark processes). They own Fly
 # machines, volumes, and isolated stacks, and they reap those resources through
 # their own signal traps — killing one from outside leaks paid infrastructure and
 # can terminate healthy fleets belonging to other worktrees or sessions.
@@ -405,7 +405,7 @@ is_live_isolated_run_process() {
 # The tmux server is a same-cwd ancestor of every pane started in this
 # worktree. Walking ancestors from Step 5 services and signalling it
 # destroys every session — including an isolated smoke supervisor that
-# kill-services is explicitly forbidden to touch (rule 27). Protect the
+# kill-services is explicitly forbidden to touch (never kill another session's benchmark processes). Protect the
 # server and its clients; the services they wrap are still discovered
 # as descendants of run.sh.
 is_tmux_process() {

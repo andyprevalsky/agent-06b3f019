@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { generateLLMJudgePrompt, getTools, useToast, type Tool } from '../../hooks';
 import type { CreateAgentSubmitData, ReasoningEffort } from './types';
+import { useGithubRepoSelection } from './useGithubRepoSelection';
 
 interface UseCreateAgentFormArgs {
   open: boolean;
@@ -26,6 +27,7 @@ export function useCreateAgentForm({ open, onClose, onSubmit }: UseCreateAgentFo
   const [availableTools, setAvailableTools] = useState<Tool[]>([]);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isFormatting, setIsFormatting] = useState(false);
+  const repo = useGithubRepoSelection(open);
 
   useEffect(() => {
     if (!open) return;
@@ -66,21 +68,19 @@ export function useCreateAgentForm({ open, onClose, onSubmit }: UseCreateAgentFo
     }
     setIsSubmitting(true);
     try {
-      await onSubmit({ goal, model: selectedModel, reasoning_effort: reasoningEffort });
+      const fields = { model: selectedModel, reasoning_effort: reasoningEffort };
+      await onSubmit({ goal, ...fields, ...repo.requestField() });
       setGoal('');
       setSelectedModel(DEFAULT_MODEL);
       setReasoningEffort(DEFAULT_EFFORT);
       onClose();
     } catch (error) {
-      toast({
-        title: 'Error',
-        description: error instanceof Error ? error.message : 'Failed to create agent',
-        variant: 'destructive',
-      });
+      const description = repo.describeSubmitError(error);
+      toast({ title: 'Error', description, variant: 'destructive' });
     } finally {
       setIsSubmitting(false);
     }
-  }, [goal, onSubmit, selectedModel, reasoningEffort, onClose, toast]);
+  }, [goal, onSubmit, selectedModel, reasoningEffort, repo, onClose, toast]);
 
   return {
     goal,
@@ -94,6 +94,7 @@ export function useCreateAgentForm({ open, onClose, onSubmit }: UseCreateAgentFo
     selectedTools,
     toggleTool,
     availableTools,
+    githubRepo: repo,
     isSubmitting,
     isFormatting,
     generatePrompt,

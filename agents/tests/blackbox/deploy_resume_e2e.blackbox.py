@@ -414,7 +414,8 @@ class _BrowserServices:
         self.session_inits.append(_WORKER_LABEL.get())
         return {**copy.deepcopy(self.SESSION), "task_id": task_id}
 
-    async def fetch_session_info(self, config, task_id, validate_live=False):
+    async def fetch_session_info(self, config, task_id, validate_live=False, *, include_credentials=True):
+        assert include_credentials is False, "resumed browser metadata must not wait for credentials"
         self.session_lookups.append((_WORKER_LABEL.get(), task_id))
         return {
             **copy.deepcopy(self.SESSION),
@@ -464,6 +465,7 @@ class _BrowserServices:
         self.verifications.append(_WORKER_LABEL.get())
         return {
             "score": 1.0,
+            "task_completed": True,
             "reasoning": "Order SHOP-4242 is confirmed on the page",
             "structured_response": {"confirmation": "SHOP-4242"},
             "usage": {},

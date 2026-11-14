@@ -1,6 +1,8 @@
 """Blackbox tests for request-payment-card helpers and activities."""
 
 import asyncio
+import base64
+import gzip
 import json
 import os
 import tempfile
@@ -809,6 +811,22 @@ async def test_mint_purchase_card_activity_boundary():
             result = await mint_purchase_card_activity("user-123", payload)
             archived = Path(tmp) / "agent-1" / "provider" / "payment" / "mint" / f"{payload['fingerprint']}.json.gz.enc"
             assert archived.exists()
+            from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+            metadata = json.loads(archived.with_suffix(archived.suffix + ".meta.json").read_text())
+            key = trace_archive._encryption_key()
+            assert key is not None
+            plaintext = AESGCM(key).decrypt(
+                base64.b64decode(metadata["nonce_b64"]), archived.read_bytes(), metadata["aad"].encode()
+            )
+            evidence = json.loads(gzip.decompress(plaintext))
+            assert evidence["request"]["fingerprint"] == payload["fingerprint"]
+            assert evidence["response"] == {
+                "purchaseId": "purchase-1", "cardId": "card-1", "expiry": "12/30",
+                "last4": "4242", "status": "HELD",
+            }, "persisted mint evidence must exclude card credentials"
+            assert result["pan"] == "4242424242424242"
+            assert result["cvv"] == "123", "trusted worker still needs checkout credentials"
         finally:
             trace_archive._LOCAL_ROOT = old_root
             if old_enabled is None:

@@ -1,4 +1,4 @@
-import { resolveBatchProjectIds, type BatchAgentResult } from './agentProject';
+import { batchAgentResults, resolveBatchProjectIds, type BatchAgentResult } from './agentProject';
 import { resolveCreateTaskPaths } from './agentTaskPathCreate';
 import { isWorkflowStartAdmissionPending } from '../../providers/workflowQueueAdmission';
 /**
@@ -271,7 +271,7 @@ export async function createAgentsBatch(args: BatchCreateAgentsArgs): Promise<Ba
   }
   const parentById = await loadBatchParentExecutionFlags(bodies, userId);
   applyExecutionModeInheritanceForBatch(bodies, parentById);
-  await resolveBatchProjectIds(bodies, userId, parentById);
+  const repoFields = await resolveBatchProjectIds(bodies, userId, parentById);
   for (const body of bodies) {
     applyMemoryDefault(body, inheritsBenchmarkFromBatchParent(body, parentById));
     disableFastModeForWorldModel(body);
@@ -319,7 +319,7 @@ export async function createAgentsBatch(args: BatchCreateAgentsArgs): Promise<Ba
 
   const taskPaths = await resolveCreateTaskPaths(newBodies);
   newItems.forEach((item, index) => {
-    item.taskPath = taskPaths[index];
+    Object.assign(item, { taskPath: taskPaths[index] }, repoFields.get(item.agentId));
   });
   if (newItems.length > 0) {
     // Phase 1: atomic create. Rolls back on any error.
@@ -333,21 +333,5 @@ export async function createAgentsBatch(args: BatchCreateAgentsArgs): Promise<Ba
     verifierType
   );
 
-  // Mirror input order; existing rows surface their stored status.
-  return bodies.map((body) => {
-    const agentId = body.agent_id!;
-    const newResult = newResultByAgentId.get(agentId);
-    if (newResult) return newResult;
-    const row = existingById.get(agentId)!;
-    return {
-      agent_id: row.id,
-      project_id: row.projectId,
-      folder_id: row.folderId,
-      status: row.status as BatchAgentResult['status'],
-      temporal_workflow_id: row.temporalWorkflowId,
-      goal: row.goal,
-      model: row.model,
-      already_existed: true,
-    };
-  });
+  return batchAgentResults(bodies, newResultByAgentId, existingById, repoFields);
 }

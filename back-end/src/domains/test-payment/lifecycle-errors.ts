@@ -1,3 +1,4 @@
+import { AgentCardV2Error } from '../../providers/agentcard/api-v2';
 import { AgentCardOrgRuntimeError } from '../../providers/agentcard/org-runtime';
 import { createLogger } from '../../providers/logger';
 import { TestPaymentError } from './errors';
@@ -43,7 +44,11 @@ export function classifyLifecycleError(
   fallbackMessage: string
 ): LifecycleErrorResponse {
   if (error instanceof TestPaymentError) {
-    return { status: error.statusCode, body: { error: error.message }, retryAfterSeconds: null };
+    return {
+      status: error.statusCode,
+      body: { error: error.message },
+      retryAfterSeconds: null,
+    };
   }
 
   const retryAfterMs = upstreamRateLimitRetryMs(error);
@@ -67,6 +72,20 @@ export function classifyLifecycleError(
     };
   }
 
+  if (error instanceof AgentCardV2Error) {
+    log.error(fallbackMessage, {
+      error: error.message,
+      code: error.code,
+      status: error.status,
+      upstream: 'agentcard_v2',
+    });
+    return {
+      status: error.status,
+      body: { error: error.message, code: error.code },
+      retryAfterSeconds: null,
+    };
+  }
+
   // An upstream outage is a 502/504 owned by the upstream, not a bare 500 from
   // us — reporting it as our own error made a provider blip look like a
   // lifecycle defect.
@@ -87,5 +106,9 @@ export function classifyLifecycleError(
   log.error(fallbackMessage, {
     error: error instanceof Error ? error.message : String(error),
   });
-  return { status: 500, body: { error: fallbackMessage }, retryAfterSeconds: null };
+  return {
+    status: 500,
+    body: { error: fallbackMessage },
+    retryAfterSeconds: null,
+  };
 }

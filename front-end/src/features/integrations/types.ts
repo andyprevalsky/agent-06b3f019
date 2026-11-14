@@ -291,5 +291,7 @@ export type IntegrationCatalogKey =
   | 'banks'
   | 'socials'
   | 'files'
+  | 'githubRepos'
   | 'meetingNotes'
-  | 'pebble';
+  | 'pebble'
+  | 'clis';

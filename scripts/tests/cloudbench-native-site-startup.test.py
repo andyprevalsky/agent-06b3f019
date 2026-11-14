@@ -148,6 +148,19 @@ class NativeSiteStartup(unittest.TestCase):
         self.assertNotEqual(refused.returncode, 0, 'duplicate Machine IDs must not grant a full inventory')
         self.assertEqual(refused.stdout, '')
 
+    def test_app_metadata_accepts_only_optional_string_network(self):
+        import runpy
+        helper=runpy.run_path(str(SOURCE/'scripts/cloudbench-campaign-machines.py'))
+        value={'name':'fixture','organization':{'slug':'owner'}}
+        for network in (None,'','default','private'):
+            with self.subTest(network=network):
+                expected='' if network in (None,'','default') else network
+                self.assertEqual(helper['app_metadata']({**value,'network':network},'fixture')['Network'],expected)
+        self.assertEqual(helper['app_metadata'](value,'fixture')['Network'],'')
+        for network in (0,False,[],{}):
+            with self.subTest(network=network),self.assertRaises(helper['Refusal']):
+                helper['app_metadata']({**value,'network':network},'fixture')
+
 
     def cloud_function(self, name):
         text = (SOURCE/'scripts/run-bench-cloud').read_text()

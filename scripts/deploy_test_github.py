@@ -277,7 +277,8 @@ class GitHub:
             except (AttributeError, TypeError, ValueError):
                 pass
 
-    def request(self, method: str, path: str, *, conditional: bool = False, redirect: bool = True):
+    def request(self, method: str, path: str, *, conditional: bool = False, redirect: bool = True,
+                wait_on_rate_limit: bool = True):
         url = path if path.startswith('https://') else f'{API}/repos/{self.repo}{path}'
         opener = urllib.request.build_opener(*([] if redirect else [NoRedirect()]))
         tokens, index, attempt = self.tokens(method), 0, 0
@@ -327,6 +328,8 @@ class GitHub:
                         self.read_picked_at = self.read_attempted_at = float('-inf')
                     continue
                 if limited:
+                    if not wait_on_rate_limit:
+                        raise  # Advisory liveness must not block the authoritative R2 result poll.
                     now = time.time()
                     pause = rate_limit_pause(error.headers, now)
                     if self.deadline is not None:
@@ -352,8 +355,8 @@ class GitHub:
                 attempt += 1
         raise RuntimeError(f'GitHub API {method} {path} kept failing')
 
-    def json(self, path: str, conditional: bool = False):
-        status, _, body = self.request('GET', path, conditional=conditional)
+    def json(self, path: str, conditional: bool = False, *, wait_on_rate_limit: bool = True):
+        status, _, body = self.request('GET', path, conditional=conditional, wait_on_rate_limit=wait_on_rate_limit)
         url = path if path.startswith('https://') else f'{API}/repos/{self.repo}{path}'
         return self.cache[(self.served, url)] if status == 304 else json.loads(body)
 
@@ -789,7 +792,7 @@ def watch_channel(gh: GitHub, channel: 'Channel', head: str, name: str, deadline
             # A run that ended without done.json (VM lost, setup died early) must not wait out the deadline.
             checked = time.time()
             try:
-                run = gh.json(f"/actions/runs/{receipt['run_id']}", conditional=True)
+                run = gh.json(f"/actions/runs/{receipt['run_id']}", conditional=True, wait_on_rate_limit=False)
             except urllib.error.HTTPError:
                 run = {}
             if run.get('status') == 'completed' and channel.get(name, 'done.json') is None:

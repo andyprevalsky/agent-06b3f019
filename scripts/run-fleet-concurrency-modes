@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # run-fleet-concurrency-modes — e2e-prove the three Cloud Fleet interfaces
-# that /descend (PR #1285 rolling lanes) and /deploy must share:
+# that benchmark batches (PR #1285 rolling lanes) and /deploy must share:
 #
 #   sequential  == campaign_cap=1
 #                 one active one-task `run-bench-fleet` at a time
@@ -134,7 +134,7 @@ print_mode_contract() {
   local tasks_joined="${DEMO_TASKS[*]}"
   cat <<EOF
 ════════════════════════════════════════════════════════════
-Fleet concurrency interfaces (/descend campaign_cap mapping)
+Fleet concurrency interfaces (campaign_cap mapping)
 ════════════════════════════════════════════════════════════
 tasks: ${tasks_joined}
 
