@@ -1,11 +1,11 @@
 /**
- * Code agents (Claude Code / Codex in E2B) cannot ask the user — or the agent
- * that started them — a question.
+ * Code agents (Claude Code / Codex in E2B) cannot open user-question or approval
+ * flows. CLI authentication can coordinate with the parent Rose agent.
  *
  *   rose CLI / MCP (back-end/src/assets/rose-tools/rose.cjs, installed at
  *   ~/.rose/bin/rose in every code session)
  *     tools/list            display (inline only), send_message_to_user,
- *                           change_environment_size — no approval, no pinned
+ *                           change_environment_size, cli — no approval, no pinned
  *                           question, nothing that waits for an answer
  *     tools/call <removed>  unknown tool
  *     rose approve | wait   unknown command
@@ -41,7 +41,7 @@ after(() => {
   rmSync(home, { recursive: true, force: true });
 });
 
-const ALLOWED_TOOLS = ['change_environment_size', 'display', 'send_message_to_user'];
+const ALLOWED_TOOLS = ['change_environment_size', 'cli', 'display', 'send_message_to_user'];
 const QUESTION_ARGUMENTS = ['placement', 'options', 'allow_other'];
 
 function roseEnv(roseDesktop: boolean): NodeJS.ProcessEnv {
@@ -114,7 +114,7 @@ for (const roseDesktop of [false, true]) {
     assert.deepEqual(
       tools.map((tool) => tool.name).sort(),
       ALLOWED_TOOLS,
-      'REGRESSION: the rose MCP server lists a tool beyond display / messages / env size'
+      'REGRESSION: the rose MCP server lists a tool beyond display / messages / env size / CLI'
     );
     const display = tools.find((tool) => tool.name === 'display');
     for (const argument of QUESTION_ARGUMENTS) {
@@ -124,6 +124,18 @@ for (const roseDesktop of [false, true]) {
       );
     }
     for (const tool of tools) {
+      if (tool.name === 'cli') {
+        assert.match(tool.description, /immediate parent Rose agent/);
+        assert.doesNotMatch(tool.description, /ask the user|request.*approval/i);
+        assert.deepEqual(tool.inputSchema.properties.action, {
+          type: 'string',
+          enum: ['list', 'run', 'publish'],
+        });
+        for (const argument of ['question', ...QUESTION_ARGUMENTS]) {
+          assert.ok(!(argument in tool.inputSchema.properties));
+        }
+        continue;
+      }
       assert.doesNotMatch(
         tool.description,
         /\bask\b|question|approv/i,

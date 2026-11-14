@@ -2170,10 +2170,26 @@ bench_simulates() {  # <task>; --sim-on or a catalog simulate task (the guest se
     done
     return 1
 }
+# Fresh storage carries no dependency trees: its guest syncs from the image's
+# baked /app and refuses a manifest mismatch. When the warm refresh recorded
+# that this donor image is stale for the current manifests, default REAL clones
+# use the refreshed snapshot instead. An explicit --fresh-volumes still wins.
+image_deps_stale_for_current_ref() {
+    [ "${FRESH_VOLUMES_REQUESTED:-0}" = 0 ] || return 1
+    local sidecar="${WARM_DEPS_STATE_FILE:-}.image" s_node s_py s_snap i_node i_py _rest
+    [ -n "${WARM_DEPS_STATE_FILE:-}" ] && [ -f "$sidecar" ] || return 1
+    read -r s_node s_py s_snap i_node i_py _rest < "$sidecar" || return 1
+    [ -n "$i_node" ] && [ -n "$i_py" ] || return 1
+    [ "$s_node" = "${CURRENT_NODE_FP:-}" ] && [ "$s_py" = "${CURRENT_PY_FP:-}" ] \
+        && [ "$s_snap" = "${SNAP_ID:-}" ] || return 1
+    [ "$i_node" != "$s_node" ] || [ "$i_py" != "$s_py" ]
+}
+
 primary_clone_storage_mode() {
     local bench="$1" index
     [ "${PRIVATE_SOURCE_GUEST_ENV_MODE:-none}" != owned-capsule-v1 ] || { printf snapshot; return; }
     [ "$FRESH_VOLUMES" = 1 ] || { printf snapshot; return; }
+    image_deps_stale_for_current_ref && { printf snapshot; return; }
     is_sim_on "$bench" && { printf snapshot; return; }
     for index in "${!BENCHES[@]}"; do
         [ "${BENCHES[$index]}" = "$bench" ] || continue
@@ -17317,7 +17333,18 @@ warm_deps_preflight() {
                 return 1
             }
         else
-            snap_epoch="$(snapshot_created_epoch "$SNAP_ID")" || {
+            # A fresh listing that omits the snapshot is not authoritative: Fly
+            # answers HTTP 200 [] for existing snapshots under concurrent reads.
+            # Re-read (bounded) only on that omission (exit 1); a failed read or
+            # an invalid inventory (75) still refuses at once.
+            local epoch_status _epoch_read
+            for _epoch_read in 1 2 3 4 5 6; do
+                epoch_status=0
+                snap_epoch="$(snapshot_created_epoch "$SNAP_ID")" || epoch_status=$?
+                [ "$epoch_status" -eq 1 ] && [ "$_epoch_read" -lt 6 ] || break
+                sleep $((_epoch_read * 2))
+            done
+            [ "$epoch_status" -eq 0 ] || {
                 echo "❌ warm snapshot freshness could not be verified; refusing maintenance" >&2
                 return 1
             }
@@ -19045,7 +19072,7 @@ provision_worker() {  # provision_worker <bench> <workspace> <primary_id> <prima
     worker_storage=snapshot
     if [ "$borrowed_worker" = 0 ]; then
     [ "${PRIVATE_SOURCE_GUEST_ENV_MODE:-none}" = owned-capsule-v1 ] \
-        || { [ "${FRESH_VOLUMES:-0}" = 1 ] && [ "$sim" = 0 ] && worker_storage=fresh; }
+        || { [ "${FRESH_VOLUMES:-0}" = 1 ] && [ "$sim" = 0 ] && ! image_deps_stale_for_current_ref && worker_storage=fresh; }
     if [ "$worker_storage" = fresh ]; then
         worker_snapshot="$SNAP_ID"  # unused: fresh workers retain no donor storage
     else
