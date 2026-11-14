@@ -251,8 +251,16 @@ class R2Store:
         if self.exists(key):
             raise RuntimeError(f"R2 key already exists, refusing to overwrite: {key}")
         digest = sha(data)
-        self.client.put_object(Bucket=self.bucket, Key=key, Body=data, ContentType=content_type,
-                               Metadata={"sha256": digest})
+        try:
+            # Atomic create-only: a concurrent writer that also passed the HEAD check cannot replace it.
+            # A botocore without IfNoneMatch rejects the parameter, which fails closed (guest retained).
+            self.client.put_object(Bucket=self.bucket, Key=key, Body=data, ContentType=content_type,
+                                   Metadata={"sha256": digest}, IfNoneMatch="*")
+        except Exception as error:
+            code = str(getattr(error, "response", {}).get("Error", {}).get("Code", ""))
+            if code in ("PreconditionFailed", "412"):
+                raise RuntimeError(f"R2 key already exists, refusing to overwrite: {key}") from None
+            raise
         body = self.client.get_object(Bucket=self.bucket, Key=key)["Body"].read()
         if sha(body) != digest or len(body) != len(data):
             raise RuntimeError(f"R2 read-back mismatch for {key}")

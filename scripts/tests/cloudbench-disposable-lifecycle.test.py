@@ -150,14 +150,16 @@ cleanup_failed_worker "$out" "$wid"
   self.assertEqual(r.returncode,0,r.stderr)
   self.assertEqual(v['calls'].splitlines(),['machine destroy --force abcd1234 -a fixture','volumes destroy vol_owned -a fixture --yes'])
   self.assertEqual(records,[])
- def archive_case(self,status,*,primary='abcd1234',keep=0,preconfig=False):
+ def archive_case(self,status,*,primary='abcd1234',keep=0,preconfig=False,worker=False):
   # The real cleanup() span from evidence collection through the R2 archive
   # decision, then the unchanged exact-owner reap; the archive helper is faked.
   source=SOURCE.read_text();start=source.index('    local keep_before_evidence=',source.index('cleanup() {'))
   branch=source[start:source.index('    # SIGKILL cannot run an autoscaler',start)]
   helper="import os,sys\nopen(os.environ['CASE']+'/archive-calls','a').write(' '.join(sys.argv[1:])+'\\n')\nsys.exit(STATUS)\n".replace('STATUS',str(status))
-  body=function('fleet_archive_unsealed_disposable_evidence')+r'''
+  body=function('fleet_archive_unsealed_disposable_evidence')+function('fleet_worker_evidence_verified')+r'''
 cloudbench_collect_remaining_runtime_evidence(){ return 1; }
+cloudbench_validate_worker_evidence_coverage(){ return 0; }
+CHILD_OUT=("$FLEET_DIR/task")
 fleet_record_disposable_cleanup_state(){ :; }
 archived_reuse_retire_all(){ return 0; }
 fleet_billing_stop_retained_idle(){ :; }
@@ -166,9 +168,10 @@ CHILD_MACHINE=(@PRIMARY@);CLOUDBENCH_SCRIPT_SNAPSHOT="$CASE/snap";ROOT_DIR="$CAS
 mkdir -p "$CASE/snap";printf %s "$HELPER" > "$CASE/snap/cloudbench-evidence-archive.py"
 touch "$FLEET_DIR/task/runtime-evidence.pending"
 [ @PRECONFIG@ = 0 ] || touch "$FLEET_REGISTRY_DIR/preconfig-evidence-consumed"
+if [ @WORKER@ = 1 ]; then mkdir -p "$FLEET_DIR/task/worker-runtime-evidence/abcd9999";printf '{"version":1,"machine_id":"abcd9999","run_token":"w"}' > "$FLEET_DIR/task/worker-runtime-evidence/abcd9999/owner.json";fi
 teardown(){
  local ec=0 teardown_failed=0 runtime_evidence_failed=0 guest_shutdown_failed=0 billing_owned_joins=1
-'''.replace('@PRIMARY@',primary).replace('@KEEP@',str(keep)).replace('@PRECONFIG@',str(int(preconfig)))+branch+r'''
+'''.replace('@PRIMARY@',primary).replace('@KEEP@',str(keep)).replace('@PRECONFIG@',str(int(preconfig))).replace('@WORKER@',str(int(worker)))+branch+r'''
  if [ "$KEEP_CLONES" != 1 ];then reap_registry_clones "$FLEET_REGISTRY_DIR" current;fi
  printf "FLAGS %s %s %s %s\n" "$KEEP_CLONES" "$runtime_evidence_failed" "$ec" "$teardown_failed" >&2
  [ -e "$FLEET_REGISTRY_DIR/runtime-evidence-unconfirmed" ] && echo LATCHED >&2 || echo UNLATCHED >&2
@@ -192,13 +195,14 @@ teardown
   self.assertIn('❌❌ evidence archive FAILED: unsealed guests stay RETAINED',r.stderr)
   self.assertEqual(len(v['archive-calls'].splitlines()),1);self.assertEqual(v['calls'],'');self.assertEqual(len(records),1)
  def test_non_primary_or_kept_owner_is_never_archived_or_destroyed(self):
-  for kwargs in (dict(primary='ffff0000'),dict(keep=1),dict(preconfig=True)):
+  for kwargs in (dict(primary='ffff0000'),dict(keep=1),dict(preconfig=True),dict(worker=True)):
    r,v,records=self.archive_case(0,**kwargs)
    with self.subTest(**kwargs):
     self.assertEqual(r.returncode,0,r.stderr);self.assertIn('FLAGS 1 1 1 1',r.stderr);self.assertIn('LATCHED',r.stderr)
     self.assertEqual(v['calls'],'');self.assertEqual(len(records),1)
     if kwargs.get('keep'):self.assertEqual(v['archive-calls'],'')
     elif kwargs.get('preconfig'):self.assertIn('preconfiguration evidence phase present',r.stderr);self.assertEqual(v['archive-calls'],'')
+    elif kwargs.get('worker'):self.assertIn('worker runtime evidence is unverified',r.stderr);self.assertEqual(v['archive-calls'],'')
     else:self.assertIn('not an archivable primary guest',r.stderr);self.assertEqual(v['archive-calls'],'')
  def test_mixed_retired_history_does_not_release_unsealed_original(self):
   body='cloudbench_collect_remaining_runtime_evidence(){ return 1; };ec=0;teardown_failed=0;runtime_evidence_failed=0\n'

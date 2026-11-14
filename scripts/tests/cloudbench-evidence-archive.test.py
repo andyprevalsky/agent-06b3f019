@@ -47,16 +47,20 @@ class ClientError(Exception):
 class FakeS3:
     def __init__(self, events: list, fail_put: bool = False) -> None:
         self.objects: dict[str, bytes] = {}
+        self.racing: set[str] = set()  # created by a concurrent run after this run's HEAD check
         self.events, self.fail_put = events, fail_put
 
     def head_object(self, Bucket, Key):
-        if Key not in self.objects:
+        if Key not in self.objects or Key in self.racing:
             raise ClientError("404")
         return {}
 
-    def put_object(self, Bucket, Key, Body, ContentType, Metadata):
+    def put_object(self, Bucket, Key, Body, ContentType, Metadata, IfNoneMatch=None):
         if self.fail_put:
             raise RuntimeError("R2 unavailable")
+        assert IfNoneMatch == "*", "R2 object creation must be conditional"
+        if Key in self.objects:
+            raise ClientError("PreconditionFailed")
         assert Metadata["sha256"] == hashlib.sha256(Body).hexdigest()
         self.events.append(("PUT", Key))
         self.objects[Key] = bytes(Body)
@@ -287,6 +291,16 @@ class EvidenceArchive(unittest.TestCase):
         code, err, _ = self.run_capture()
         self.assertEqual(code, 2, err)
         self.assertEqual(self.s3.objects, {f"{PREFIX}/evidence.tar.gz": b"earlier capture"})
+        self.assert_retained_original()
+
+    def test_concurrent_creation_is_never_replaced(self) -> None:
+        key = f"{PREFIX}/evidence.tar.gz"
+        self.s3.objects[key] = b"concurrent capture"
+        self.s3.racing.add(key)  # passes this run's HEAD check, then wins the create
+        code, err, _ = self.run_capture()
+        self.assertEqual(code, 2, err)
+        self.assertIn("refusing to overwrite", err)
+        self.assertEqual(self.s3.objects, {key: b"concurrent capture"})
         self.assert_retained_original()
 
     def test_protected_warm_donor_untouched(self) -> None:

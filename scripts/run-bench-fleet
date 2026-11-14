@@ -15918,6 +15918,25 @@ except Exception as error:
 PYBILLING
 }
 
+fleet_worker_evidence_verified() {  # read-only: primary archives never replace a worker's runtime evidence
+    local j out base wid token
+    for j in "${!CHILD_OUT[@]}"; do
+        out="${CHILD_OUT[$j]}"
+        [ -n "$out" ] || continue
+        cloudbench_validate_worker_evidence_coverage "$out" "${CHILD_MACHINE[$j]}" "$FLEET_OWNER_TOKEN-$j" || return 1
+        for base in "$out"/worker-runtime-evidence/*; do
+            [ -e "$base" ] || [ -L "$base" ] || continue
+            wid="${base##*/}"
+            [ -d "$base" ] && [ ! -L "$base" ] && [ -f "$base/capture/manifest.json" ] \
+                && [ ! -L "$base/capture/manifest.json" ] || return 1
+            token="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["run_token"])' "$base/owner.json")" \
+                || return 1
+            python3 "${CLOUDBENCH_SCRIPT_SNAPSHOT:-$ROOT_DIR/scripts}/cloudbench-worker-evidence.py" verify-directory \
+                --run-token "$token" --machine-id "$wid" --output "$base/capture" > /dev/null || return 1
+        done
+    done
+}
+
 fleet_archive_unsealed_disposable_evidence() {  # 0 only when every owned guest is archived and stopped
     # Default for a terminal, failed or cancelled guest whose runtime never sealed
     # (Andy, 2026-11-14): copy its original volume evidence to the private R2 trace
@@ -15929,6 +15948,10 @@ fleet_archive_unsealed_disposable_evidence() {  # 0 only when every owned guest 
     if [ -e "$FLEET_REGISTRY_DIR/preconfig-evidence-consumed" ] || [ -L "$FLEET_REGISTRY_DIR/preconfig-evidence-consumed" ] \
         || fleet_has_replaced_preconfig_phase "$FLEET_REGISTRY_DIR"; then
         echo "❌❌ evidence archive: preconfiguration evidence phase present; not archiving" >&2
+        return 1
+    fi
+    if ! fleet_worker_evidence_verified; then
+        echo "❌❌ evidence archive: worker runtime evidence is unverified; primary archives cannot replace it" >&2
         return 1
     fi
     local record id volume j index pid failed=0 count=0 dir="$FLEET_DIR/_batch/evidence-archive"
