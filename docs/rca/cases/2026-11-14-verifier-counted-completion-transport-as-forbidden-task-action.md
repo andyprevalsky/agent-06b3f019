@@ -47,7 +47,7 @@ Path: USER goal and schema → PLAN → reasoning DAG task → persisted reasoni
 answer → post-DAG completion chip → `check_progress` → execute-phase filter →
 verifier messages → independent completion verdict → rejection → next actor turn.
 
-Two defects contributed to this incident:
+Three boundaries contributed to this incident:
 
 1. `_filter_context_for_execute_verifier` preferred the first EXECUTE-tagged
    message over the earlier explicit transition. DAG reasoning has no phase;
@@ -61,6 +61,12 @@ Two defects contributed to this incident:
    final-answer transport from task actions. The actor must submit completion
    through that transport; judging it as forbidden task work makes a no-tools
    reply impossible. Extraction coverage alone must still not imply completion.
+
+3. Preserved DAG writing was serialized as TOOL_RESULT with tool_name reasoning,
+   despite being an internally authored assistant result. The first repaired-path
+   live replay still failed for prohibited reasoning-tool use, while extracting
+   OK correctly. AUTHORED_RESULT now preserves its source and exact text without
+   inventing a task tool invocation. Actual tool receipts remain TOOL_RESULT.
 
 The deeper class is a mismatch between execution lifecycle and task evidence,
 not a special OK classifier or a request to suppress actual tool actions.
@@ -120,13 +126,17 @@ Verification on the recorded request:
 Private source requests, all failed and successful replies, raw rows, diagnostics,
 worker logs, trial configs and hashes live under `.context/rca-no-tools` until
 archived for closeout. They are not committed because they contain private
-production context. Independent RCA/flakiness and golden review are pending.
+production context. Independent RCA review found the first-path gap; its live replay and negative
+controls drove the authored-result projection fix. Final golden review is pending.
 Reference analogs opened: Claude `src/query.ts:554` completes the final-response
 path absent tool use; Codex `core/src/stream_events_utils.rs:356` and
 `core/src/session/turn.rs:657` separate tool follow-up from turn completion;
 Hermes `agent/conversation_loop.py:1685` and `agent/turn_final_response.py:53`
 separate tool execution from final text. Rose retains its verifier and completion
-transport while converging on that lifecycle/task distinction.
+transport while converging on that lifecycle/task distinction. Ordinary rejection
+feedback now contains the actual verdict and extracted output without appending
+an unconditional instruction to produce fresh tool evidence. Existing
+infrastructure-error guidance is preserved.
 
 At 10,000 agents this adds no requests, shared state, fan-in or polling. It adds
 one existing-context scan and a static cached rubric paragraph per judge prompt.

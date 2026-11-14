@@ -5629,6 +5629,16 @@ def test_filter_context_for_execute_verifier_uses_execute_boundary():
     assert "Beginning execute" not in text
     assert "late plan row" not in text
     assert "execute spawn result" in text
+    # set_plan can finish before more unphased planning work. Without an
+    # explicit execution transition, a later EXECUTE tag remains authoritative.
+    no_transition = context[:3] + [
+        {"role": "ASSISTANT", "text": "unphased planning draft", "timestamp": "2024-01-01T00:00:03Z",
+         "metadata": {"plannedToolName": "reasoning"}},
+        {**context[4], "metadata": {**context[4]["metadata"], "phase": "EXECUTE"}},
+    ]
+    scoped = _filter_context_for_execute_verifier(no_transition)
+    assert no_transition[3] not in scoped
+    assert no_transition[4] in scoped and context[0] in scoped
 
 
 async def test_check_progress_execute_filters_plan_context_before_llm():

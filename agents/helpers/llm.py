@@ -1707,13 +1707,18 @@ def _filter_context_for_execute_verifier(context: List[Dict[str, Any]]) -> List[
             break
 
     boundary_idx: Optional[int] = None
+    transition_idx: Optional[int] = None
     for idx, msg in enumerate(sorted_context):
         if _is_execute_boundary_message(msg):
             boundary_idx = idx
-    if boundary_idx is not None:
+            if (msg.get("metadata") or {}).get("toolName") == "attempt_completion":
+                transition_idx = idx
+    if transition_idx is not None:
         # DAG reasoning can precede the first EXECUTE-tagged status chip.
         # The explicit transition already establishes that work as execution.
-        first_execute_idx = min(first_execute_idx, boundary_idx + 1) if first_execute_idx is not None else boundary_idx + 1
+        first_execute_idx = min(first_execute_idx, transition_idx + 1) if first_execute_idx is not None else transition_idx + 1
+    elif first_execute_idx is None and boundary_idx is not None:
+        first_execute_idx = boundary_idx + 1
     if first_execute_idx is None:
         return context
 
@@ -3116,6 +3121,7 @@ async def call_llm_structured_streaming(
     ttft_timeout_s: Optional[float] = None,  # Override Rose TTFT timeout
     idle_timeout_s: Optional[float] = None,  # Override Rose idle/inter-chunk timeout (-1 disables)
     reserved_tool_call_ids: frozenset[str] = frozenset(),  # Stored ids new tool calls must not reuse
+    include_reasoning_in_response: bool = True,  # Authored-output callers keep the provider's answer field exact
     _exclude_anthropic_family: bool = False,  # Internal: refusal retry skips Anthropic direct/waterfall routes
     _is_escalation: bool = False,  # Internal: prevents infinite recursion on max_tokens escalation
     _parse_retry_attempt: int = 0,  # Internal: bounds re-generation on a malformed/schema-invalid structured output
@@ -3774,6 +3780,7 @@ async def call_llm_structured_streaming(
                 tool_choice=tool_choice,
                 context_tools=context_tools,
                 reserved_tool_call_ids=reserved_tool_call_ids,
+                include_reasoning_in_response=include_reasoning_in_response,
                 _exclude_anthropic_family=_exclude_anthropic_family,
                 _is_escalation=True,
                 _parse_retry_attempt=_parse_retry_attempt,
@@ -3987,7 +3994,7 @@ async def call_llm_structured_streaming(
 
             combined_reasoning = "\n\n".join(part for part in combined_reasoning_parts if part)
 
-            if combined_reasoning and "response" in parsed_content:
+            if include_reasoning_in_response and combined_reasoning and "response" in parsed_content:
                 parsed_content["response"] = combined_reasoning + "\n\n" + parsed_content["response"]
 
             response = response_model.model_validate(parsed_content)
@@ -4072,6 +4079,7 @@ async def call_llm_structured_streaming(
                     ttft_timeout_s=ttft_timeout_s,
                     idle_timeout_s=idle_timeout_s,
                     reserved_tool_call_ids=reserved_tool_call_ids,
+                    include_reasoning_in_response=include_reasoning_in_response,
                     _exclude_anthropic_family=_exclude_anthropic_family,
                     _is_escalation=_is_escalation,
                     _parse_retry_attempt=_parse_retry_attempt + 1,
