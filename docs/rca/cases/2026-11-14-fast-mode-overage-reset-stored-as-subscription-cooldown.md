@@ -22,8 +22,10 @@ sources:
   - agent b2f12926-54b4-4a37-877f-0dfc46fee218
   - task RCA prod ultra calls never use Claude subscription auth (parent thread ph78393fcn3fqnvcdhq1f3jn0s8j3jyk)
   - PR #2030
+  - PR #2048
+  - commit e0c797307d0f40309c98ad14b4833811ca0f22d3
 repro: agents/tests/blackbox/rose.blackbox.py::test_claude_auth_fast_mode_overage_rejection_retries_standard_on_same_token; back-end/src/tests/blackbox/rose.blackbox.ts (claudeAuth / fast-mode overage rejection retries standard on the same token); back-end/src/tests/blackbox/compute-subscription-usage.refresh.cases.ts (a provider cooldown beyond any subscription window is re-checked and lifted when allowed)
-status: open
+status: fixed
 ---
 
 ## Problem
@@ -130,6 +132,24 @@ Open follow-ups (from the GROUNDED review, not fixed here):
   on a fast-mode 429. hermes-agent
   (`agent/turn_recovery.py:252-258`, `agent/fast_mode.py:92-115`) drops
   `speed` for that model before any credential is benched.
+
+Shipped and verified in prod (PR #2048, merge `e0c797307d`, 2026-11-14):
+
+- `scripts/deploy production` passed every lane: render, fly (cutover job
+  `d1823494`), backend-probes, workflow-migration and semantic (run
+  43578733268). Vercel `version.json` buildId was `e0c797307d0f`.
+- The re-check lifted the stuck rows. At 08:58:32Z Render logged
+  `cooldown.reconciled ... "lifted"` for `6aa8c17b` and `9b51c93b`. Both
+  standard-speed quota checks answered `allowed`. `d50e4b97` stayed benched,
+  correctly, until its real 7d reset (2026-11-17T10:00Z, `usage_window_7d`).
+- The fallback fired live. At 09:00:39Z a prod `explore_agent` fast-mode
+  request got 429 "Usage credits are required for fast mode." with
+  `org_level_disabled`. The worker logged
+  `rose.claude_auth.fast_mode_overage_rejected` and retried the same token at
+  standard speed. No new 2026-12-01 cooldown was written.
+- From 09:00Z, the ultra `planner`, `plan_loop`, `explore_agent` and
+  `execute_loop` calls were served by `claude-opus-5-5-claude`. Summaries
+  were served by `claude-haiku-4-5-claude`.
 
 ## Human feedback
 
