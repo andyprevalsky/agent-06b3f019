@@ -18,6 +18,7 @@ tags:
   - lifecycle
   - tilion
 sources:
+  - PR #2085
   - agent 8789a5df-0119-4bbf-b90c-c7e58de56fe4
   - commit 57c3e35899f05b3eec9bca465ba825050b0aaa20
 repro: back-end/src/tests/blackbox/browser-session-pause-abort.cases.ts
@@ -140,3 +141,45 @@ request revokes the standing instruction to preserve Freedom.
 
 Propagate caller cancellation to owned capture resources and join exact cleanup
 before releasing lifecycle custody, while retaining custody for unknown work.
+
+
+### Final local proof and introduced verification repair
+
+At `6da67bf6bb36e05891d97d53c224318842178465`, the final owning command
+above passed five consecutive unchanged runs (`stable-6` through `stable-10`),
+all exits 0 with all source hashes checked. Each took 31.2–31.4 seconds. The
+original basic reproduction exited 1 in 13.2 seconds; the enhanced reproduction
+first observed the literal 30-second custody error, then failed the unchanged
+caller-abort assertion (exit 1, 40.5 seconds). Route/socket disconnect regression
+also passed five times. Independent code/flakiness review passed that source;
+backend TypeScript, formatting, lint and structural quick gates passed. The
+approval batch reported empty flagged-file/guard scope: Golden reference not
+applicable (no approval-gated hunk). An unused conservative packet draft was not
+GROUNDED and is not approval evidence.
+
+The first full Blacksmith backend gate (GitHub run `43632440309`) passed every
+blackbox domain, including browser-session and these new regressions. It failed
+one of 425 unit files: `browser-session-metadata-only.test.ts` threw
+`Error: Unexpected dependency ./config`. The VM fixture still mocked a direct
+multer import after the route reused its already-existing domain configuration.
+The isolated unchanged unit passed on parent `57c3e35899`, failed on `6da67bf6`,
+and passed five times with only the fixture's dependency adapter corrected.
+All metadata/ownership assertions and upload middleware signature were retained.
+This failure is INTRODUCED and owned here; the original units FAIL and partial
+coverage-threshold UNVERIFIED remain recorded. Focused passes do not replace
+full coverage acceptance.
+
+Supported focused unit reproduction, from back-end:
+
+```bash
+BACKEND_UNIT_DATABASE_URL=postgresql://postgres:postgres@localhost:5432/victoria_rca2085 BACKEND_UNIT_TEST_FILES=browser-session-metadata-only.test.ts BACKEND_UNIT_CONCURRENCY=1 npm run test:unit
+```
+
+The fixture correction arrived while independent gates completed, so the first
+native cycle became STALE with its two original pending failures. Triage
+correctly refused that stale boundary. After confirming all sixteen quick/full
+receipts were terminal with zero live owners or smoke admissions, the complete
+cycle was preserved intact for audit. A fresh final-source cycle reruns the
+complete selected inventory with no stale-source credit. The deploy clock is
+unchanged. PR #2085 retains the original failures and the subsequent repair
+proof; final full-gate and production results are recorded at closeout.
