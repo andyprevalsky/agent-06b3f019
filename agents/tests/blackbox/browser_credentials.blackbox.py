@@ -2184,7 +2184,7 @@ class _RecordingBrowserSession:
 
     def __init__(self, touched: list[str], targets: dict) -> None:
         self._touched = touched
-        self.session_manager = SimpleNamespace(get_target=targets.get)
+        self.session_manager = SimpleNamespace(get_target=targets.get, get_all_targets=lambda: dict(targets))
 
     def __getattr__(self, name: str):
         self._touched.append(f"session.{name}")
@@ -2298,6 +2298,17 @@ async def test_phone_provider_boundary_rechecks_the_live_page_and_target_frame_a
         {"action": "press_key", "params": {"key": "Enter"}},
     ):
         dom = _LivePageDomService("https://example.com/start", framed, selector_map)
+        result = await run(dom, action)
+        assert result.get("code") == "phone_provider_account_boundary", (action, result)
+        assert set(dom.touched) <= _DRIVEN, (action, dom.touched)
+
+    # A realm frame the snapshot omitted (hidden, tiny, no interactive nodes) is still
+    # seen in the live target registry (CodeRabbit, #2060 cycle 3).
+    for action in (
+        {"action": "click", "index": 13, "params": {}},
+        {"action": "press_key", "params": {"key": "Enter"}},
+    ):
+        dom = _LivePageDomService("https://example.com/start", framed, {13: page_button})
         result = await run(dom, action)
         assert result.get("code") == "phone_provider_account_boundary", (action, result)
         assert set(dom.touched) <= _DRIVEN, (action, dom.touched)

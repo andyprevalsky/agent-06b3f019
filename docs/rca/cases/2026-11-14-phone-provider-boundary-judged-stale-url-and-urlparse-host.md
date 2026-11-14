@@ -120,6 +120,12 @@ All in `agents/domains/spawn_browser_agent_v3/service_actions.py`:
     keys go to browser focus. So a realm frame anywhere on the page can
     receive an action aimed at a public element. CodeRabbit found this on
     #2060 cycle 2.
+  - The snapshot omits small, hidden and node-less frames. So it also refuses
+    while browser-use's live target registry holds any out-of-process
+    `iframe` target in the realm (CodeRabbit, cycle 3). The registry has no
+    tab ownership, so a realm frame in another tab also counts. That is
+    conservative, and a cross-site phone-harness frame is not a legitimate
+    embed.
   - `_iter_payment_fill_targets`, the frame scan behind the password-field
     coordinate fallback and the payment-fill helpers, skips realm frames
     (Playwright frames by live `frame.url`, CDP targets by their frames'
@@ -142,11 +148,11 @@ Residual risk (reviewer-confirmed):
   (hundreds of milliseconds to seconds) still receives the rest of that action,
   instead of a whole LLM step as before. Closing that window needs request
   interception, which is ruled out by the Stripe Elements breakage.
-- In-process frames are known by their snapshot `src`, not live. This matters
+- In-process frames are known only by their snapshot `src`. This matters
   only when site isolation is off, because a cross-site phone-harness frame is
-  otherwise an out-of-process target.
-- A frame injected after the snapshot, or an out-of-process frame whose target
-  is briefly missing from the registry, is not seen.
+  otherwise an out-of-process target, and those are read live from the
+  registry.
+- An out-of-process frame whose target has not yet registered is not seen.
 - If UTS-46 data in `idna` lags Chrome's ICU, characters assigned after that
   data could still map differently.
 - Interactions now fail closed ("Focused browser target is unavailable") in
@@ -157,8 +163,9 @@ bad boundaries independently. It then found UTS-46 forms, IFRAME-element
 indices, drag coordinates and `0x.0x.0x.0x` gaps in the first fix; each is now
 fixed and pinned in the regressions above. CodeRabbit (#2060 cycles 1-2) found
 `press_key` with an index, the frame-scanning password and payment fill
-helpers, and realm frames overlaying a public element's click point. All
-three are fixed and pinned in the same regression.
+helpers, realm frames overlaying a public element's click point, and realm
+frames the snapshot omits. All four are fixed and pinned in the same
+regression.
 
 Repro, identical command before and after:
 `BLACKBOX_CASE_FUNCTIONS=test_phone_provider_boundary_rechecks_the_live_page_and_target_frame_at_action_time,test_phone_provider_boundary_reads_urls_the_way_chrome_does python scripts/run_blackbox_tests.py browser-credentials`

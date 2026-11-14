@@ -1033,6 +1033,14 @@ def _live_phone_provider_account_refusal(dom_service: Any, action_name: str) -> 
         for frame_url in _frame_urls_of_node(node, session_manager):
             if realm := phone_provider_account_realm(frame_url):
                 return _phone_provider_account_boundary_result(action_name, realm, live_url)
+    # The snapshot omits small, hidden and node-less frames; the live target
+    # registry lists every out-of-process frame (it has no tab ownership, so a
+    # realm frame in any tab counts).
+    for target in (session_manager.get_all_targets() if session_manager is not None else {}).values():
+        if getattr(target, "target_type", "") == "iframe" and (
+            realm := phone_provider_account_realm(str(getattr(target, "url", "") or ""))
+        ):
+            return _phone_provider_account_boundary_result(action_name, realm, live_url)
     return None
 
 
