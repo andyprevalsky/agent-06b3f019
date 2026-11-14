@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Regression for scripts/run-deploy-semantic-stack.sh, the versioned Group 4
 # semantic lane (the former deploy.md Steps 5, 6b, 6c, kept in
-# .claude/commands/DEPRECATED_deploy.md; `run_deploy_pipeline.py plan
+# the former /deploy skill; `run_deploy_pipeline.py plan
 # --semantic-stack` / `--e2b-smoke`, follow-up 12, 2026-10-31). The script
 # must parse, refuse to run without its required environment before any side
 # effect (no sweep, no stack, no stage record), honour its three modes, carry
@@ -51,8 +51,8 @@ require_text "$SCRIPT" 'curl -sf --max-time 5 "$SMOKE_BASE_URL/health"' "readine
 EXPORT_LINE=$(grep -n '^export CONDUCTOR_WORKSPACE_NAME=' "$SCRIPT" | head -1 | cut -d: -f1)
 CONFIGURE_LINE=$(grep -n '^configure_deploy_local_env || exit 2' "$SCRIPT" | head -1 | cut -d: -f1)
 [ -n "$EXPORT_LINE" ] && [ -n "$CONFIGURE_LINE" ] && [ "$EXPORT_LINE" -lt "$CONFIGURE_LINE" ] || fail "CONDUCTOR_WORKSPACE_NAME fallback (line ${EXPORT_LINE:-?}) must precede configure_deploy_local_env (line ${CONFIGURE_LINE:-?})"
-require_text "$SCRIPT" 'BENCHMARK_BUNDLED_FRONTEND=true DISABLE_GMAIL_SYNC=1 BENCHMARK_SKIP_WMH_BUILD=1 WORKER_PROCESSES="$SEMANTIC_WORKER_PROCESSES" TRACE_ARCHIVE_ENABLED=0' "stack launch must keep the Step 5 environment (DEPRECATED_deploy.md)"
-# The worker count is overridable for memory-bounded hosts, but the Step 5 default (DEPRECATED_deploy.md) stays 8.
+require_text "$SCRIPT" 'BENCHMARK_BUNDLED_FRONTEND=true DISABLE_GMAIL_SYNC=1 BENCHMARK_SKIP_WMH_BUILD=1 WORKER_PROCESSES="$SEMANTIC_WORKER_PROCESSES" TRACE_ARCHIVE_ENABLED=0' "stack launch must keep the Step 5 environment (the former /deploy skill)"
+# The worker count is overridable for memory-bounded hosts, but the Step 5 default (the former /deploy skill) stays 8.
 require_text "$SCRIPT" 'SEMANTIC_WORKER_PROCESSES="${DEPLOY_SEMANTIC_WORKER_PROCESSES:-8}"' "the stack must default to the Step 5 WORKER_PROCESSES=8"
 [ "$(grep -Ec '(^|[[:space:]])WORKER_PROCESSES=' "$SCRIPT")" = 1 ] || fail "only the defaulted override may set the stack's WORKER_PROCESSES"
 require_text "$SCRIPT" 'bash scripts/run.sh --benchmark > .context/deploy-smoke.log 2>&1 &' "stack must be the Step 5 run.sh --benchmark launch"
@@ -179,7 +179,7 @@ expect_exit 2 env CONDUCTOR_PORT="$closed_base" bash scripts/run-deploy-semantic
 expect_output "E2B smoke: Postgres is not ready on localhost:65534" "a running stack manifest supplies the database port"
 [ ! -e "$SWEEP_MARKER" ] || fail "E2B-only mode must never sweep the worktree"
 
-# 5. The E2B gate's own verdict (Step 6c, DEPRECATED_deploy.md L2133-2148). PASS needs exit 0, the summary line
+# 5. The E2B gate's own verdict (Step 6c, the former /deploy skill). PASS needs exit 0, the summary line
 #    `PASS  smoke -- Claude Code answers 2+2 (real E2B sandbox)` and an observed CLAUDE_E2B_DONE from
 #    a real sandbox. A credential/billing block only the user can fix is a loud SKIPPED with its
 #    evidence (exit 1, never PASS); every other no-sandbox path is FAIL.
@@ -376,5 +376,40 @@ for inherited in http://localhost:40000 https://foreign.example.test; do
 done
 MATCHING=$(callback_for_run aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa "https://$FIRST/")
 [ "$MATCHING" = "$FIRST" ] || fail 'matching scoped origin with trailing slash must remain valid'
+# Native semantic startup must select the existing canonical seed consumer.
+# The fake child exits before services start; these cases only inspect the actual
+# launch environment and the production cache-selection helper.
+cat > "$FIXTURE/scripts/run.sh" <<'SEED_CHILD'
+#!/usr/bin/env bash
+printf '%s\n%s\n' "${BENCHMARK_SEED_DUMP:-}" "${BENCHMARK_REQUIRE_SEED_DUMP:-}" > "$FAKE_SEED_ENV"
+exit 7
+SEED_CHILD
+for tool in curl sleep; do printf '#!/usr/bin/env bash\nexit 1\n' > "$SHIMS/$tool"; chmod +x "$SHIMS/$tool"; done
+. "$ROOT_DIR/scripts/lib/seed-cache.sh"
+seed_case() {
+    local expected_dump="$1" token="$2" configured="$3" native_flag
+    rm -f "$FIXTURE/.context/seed-env"
+    expect_exit 1 env -u DEPLOY_SEMANTIC_TOKEN -u DEPLOY_SEMANTIC_ARTIFACT_DIR \
+        -u BENCHMARK_SEED_DUMP -u BENCHMARK_REQUIRE_SEED_DUMP \
+        CONDUCTOR_PORT=40000 PATH="$SHIMS:$PATH" FAKE_SEED_ENV="$FIXTURE/.context/seed-env" \
+        DEPLOY_SEMANTIC_TOKEN="$token" BENCHMARK_SEED_DUMP="$configured" BENCHMARK_REQUIRE_SEED_DUMP=0 \
+        bash scripts/run-deploy-semantic-stack.sh
+    [ -f "$FIXTURE/.context/seed-env" ] || fail "seed case never reached its fake run.sh"
+    mapfile -t seed_env < "$FIXTURE/.context/seed-env"
+    [ "${seed_env[0]}" = "$expected_dump" ] || fail "canonical path missing or configured path replaced"
+    native_flag=0
+    [ -z "$token" ] || native_flag=1
+    [ "${seed_env[1]}" = "$native_flag" ] || fail "native canonical requirement not enforced or manual caller changed"
+}
+seed_case "$FIXTURE_PHYS/.context/seed-cache/semantic-base.dump" native-token ''
+seed_case "$FIXTURE_PHYS/configured-seed.dump" native-token "$FIXTURE_PHYS/configured-seed.dump"
+seed_case '' '' ''
+seed_case "$FIXTURE_PHYS/manual-seed.dump" '' "$FIXTURE_PHYS/manual-seed.dump"
+# A missing object must be requested, never silently treated as a valid restore;
+# the native child's REQUIRE=1 makes run.sh refuse its existing cold-sync branch.
+[ "$(seed_cache_decision "$FIXTURE_PHYS/missing.dump" schema 1 canonical)" = consult-remote ] \
+    || fail "missing canonical object must consult remote cache"
+require_text "$ROOT_DIR/scripts/run.sh" 'if [ "${BENCHMARK_REQUIRE_SEED_DUMP:-0}" = "1" ] && [ "$_SEED_DECISION" != "restore-local" ]; then' \
+    "required unavailable canonical fixture must fail closed before cold-sync"
 
 echo "run-deploy-semantic-stack: all checks passed"

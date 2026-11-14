@@ -9,12 +9,14 @@ ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 VALIDATE="$ROOT_DIR/scripts/validate-canonical-seed-dump.sh"
 PASS=0
 FAIL=0
+TEST_OUTPUT_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/canonical-seed-output.XXXXXX")"
+trap 'rm -rf "$TEST_OUTPUT_ROOT"' EXIT
 
 assert_exit() {
   local label="$1" expected="$2"
   shift 2
   set +e
-  "$@" >/tmp/validate-canonical-seed-test.out 2>/tmp/validate-canonical-seed-test.err
+  "$@" >"$TEST_OUTPUT_ROOT/stdout" 2>"$TEST_OUTPUT_ROOT/stderr"
   local got=$?
   set -e
   if [ "$got" -eq "$expected" ]; then
@@ -23,8 +25,8 @@ assert_exit() {
   else
     FAIL=$((FAIL + 1))
     echo "  ❌ $label (expected exit $expected, got $got)"
-    echo "     stdout: $(cat /tmp/validate-canonical-seed-test.out)"
-    echo "     stderr: $(cat /tmp/validate-canonical-seed-test.err)"
+    echo "     stdout: $(cat "$TEST_OUTPUT_ROOT/stdout")"
+    echo "     stderr: $(cat "$TEST_OUTPUT_ROOT/stderr")"
   fi
 }
 
@@ -73,22 +75,59 @@ if [ ! -x "${INITDB:-}" ] || [ ! -x "${PG_CTL:-}" ]; then
   echo "      on PATH or under \$(pg_config --bindir); install the local Postgres server package."
   exit 1
 fi
-FIXTURE_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/canonical-seed-pg.XXXXXX")"
-FIXTURE_PG_HOST="$FIXTURE_ROOT"
+FIXTURE_ROOT=""
+FIXTURE_PG_HOST=""
 FIXTURE_PG_PORT=55432
 FIXTURE_DB="canonical_seed_content_test"
+CONTROL_ROOT=""
 stop_fixture_cluster() {
-  "$PG_CTL" -D "$FIXTURE_ROOT/data" -m immediate stop >/dev/null 2>&1 || true
-  rm -rf "$FIXTURE_ROOT"
+  if [ -n "$FIXTURE_ROOT" ]; then
+    if [ -s "$FIXTURE_ROOT/data/postmaster.pid" ]; then
+      "$PG_CTL" -D "$FIXTURE_ROOT/data" -m immediate stop >/dev/null 2>&1 || return 1
+    fi
+    rm -rf "$FIXTURE_ROOT"
+  fi
+  [ -z "$FIXTURE_PG_HOST" ] || rm -rf "$FIXTURE_PG_HOST"
+  FIXTURE_ROOT=""
+  FIXTURE_PG_HOST=""
 }
-trap stop_fixture_cluster EXIT
-"$INITDB" -D "$FIXTURE_ROOT/data" -U postgres --auth=trust -E UTF8 >"$FIXTURE_ROOT/initdb.log" 2>&1
-if ! "$PG_CTL" -D "$FIXTURE_ROOT/data" -l "$FIXTURE_ROOT/server.log" -w -t 60 \
-  -o "-k $FIXTURE_ROOT -p $FIXTURE_PG_PORT -c listen_addresses=''" start >/dev/null; then
-  echo "FAIL: throwaway Postgres for the canonical content fixture did not start"
-  cat "$FIXTURE_ROOT/server.log"
-  exit 1
-fi
+cleanup_fixture_test() {
+  stop_fixture_cluster
+  [ -z "$CONTROL_ROOT" ] || rm -rf "$CONTROL_ROOT"
+  rm -rf "$TEST_OUTPUT_ROOT"
+}
+trap cleanup_fixture_test EXIT
+start_fixture_cluster() {
+  local LC_ALL=C
+  local socket_parent="${1:-$ROOT_DIR/.context}"
+  # Data/logs retain the worker's TMPDIR; sockets have a separate private,
+  # short namespace inside this same checkout, never shared /tmp or TCP.
+  [ ! -L "$ROOT_DIR/.context" ] || return 1
+  mkdir -p "$ROOT_DIR/.context"
+  case "$(cd "$socket_parent" && pwd -P)" in
+    "$ROOT_DIR/.context"|"$ROOT_DIR/.context/"*) ;;
+    *) echo "FAIL: socket directory must be inside this worker"; return 1 ;;
+  esac
+  FIXTURE_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/canonical-seed-pg.XXXXXX")"
+  FIXTURE_PG_HOST="$(mktemp -d "$socket_parent/pg.XXXXXX")"
+  local socket_path="$FIXTURE_PG_HOST/.s.PGSQL.$FIXTURE_PG_PORT"
+  if [ "${#socket_path}" -gt 107 ]; then
+    echo "FAIL: private Postgres socket path exceeds 107 bytes"
+    return 1
+  fi
+  "$INITDB" -D "$FIXTURE_ROOT/data" -U postgres --auth=trust -E UTF8 >"$FIXTURE_ROOT/initdb.log" 2>&1
+  if ! "$PG_CTL" -D "$FIXTURE_ROOT/data" -l "$FIXTURE_ROOT/server.log" -w -t 60 \
+    -o "-k '$FIXTURE_PG_HOST' -p $FIXTURE_PG_PORT -c listen_addresses=''" start >/dev/null; then
+    echo "FAIL: throwaway Postgres for the canonical content fixture did not start"
+    cat "$FIXTURE_ROOT/server.log"
+    return 1
+  fi
+}
+start_fixture_cluster
+# This is part of the registered owning gate, including when TMPDIR is long.
+assert_exit "data stays in TMPDIR; socket is private and inside this worker" 0 \
+  python3 -c 'import os,stat,sys; data,sock,root,tmp=sys.argv[1:]; assert os.path.dirname(data)==tmp; assert os.path.commonpath([sock,root])==root; assert stat.S_IMODE(os.stat(sock).st_mode)==0o700; assert len(os.fsencode(sock+"/.s.PGSQL.55432"))<=107' \
+  "$FIXTURE_ROOT" "$FIXTURE_PG_HOST" "$ROOT_DIR" "${TMPDIR:-/tmp}"
 fixture_psql() {
   psql -h "$FIXTURE_PG_HOST" -p "$FIXTURE_PG_PORT" -U postgres -v ON_ERROR_STOP=1 -q "$@" >/dev/null
 }
@@ -164,8 +203,37 @@ fixture_psql -d "$FIXTURE_DB" -c \
   "UPDATE \"User\" SET email = 'andy@fixture.test' WHERE \"userId\" = '1f85ff25-6e29-4c1b-8739-f917bd101a30'"
 assert_exit "named bench user with an email and address passes again" 0 \
   bash "$VALIDATE" "$FIXTURE_DB" "$FIXTURE_PG_HOST" "$FIXTURE_PG_PORT"
+LONG_DATA="$FIXTURE_ROOT"
+LONG_SOCKET="$FIXTURE_PG_HOST"
 stop_fixture_cluster
-trap - EXIT
+assert_exit "completed content cluster removes data and socket directories" 0 \
+  test ! -e "$LONG_DATA"
+assert_exit "completed content socket is removed" 0 test ! -e "$LONG_SOCKET"
+
+# Real Postgres also works with a short private TMPDIR. An overlong socket
+# parent fails before initdb/start and is cleaned without a shared fallback.
+CONTROL_ROOT="$(mktemp -d "$ROOT_DIR/.context/pg-control.XXXXXX")"
+TMPDIR="$CONTROL_ROOT" start_fixture_cluster
+fixture_psql -d postgres -c 'SELECT 1'
+SHORT_DATA="$FIXTURE_ROOT"
+SHORT_SOCKET="$FIXTURE_PG_HOST"
+assert_exit "each cluster owns a unique socket directory" 0 test "$SHORT_SOCKET" != "$LONG_SOCKET"
+stop_fixture_cluster
+assert_exit "ordinary short-path cluster is cleaned" 0 test ! -e "$SHORT_DATA"
+assert_exit "ordinary short-path socket is cleaned" 0 test ! -e "$SHORT_SOCKET"
+OVERLONG_PARENT="$CONTROL_ROOT/$(printf '%0150d' 0)"
+mkdir "$OVERLONG_PARENT"
+assert_exit "overlong private socket fails closed before database initialization" 1 \
+  start_fixture_cluster "$OVERLONG_PARENT"
+OVERLONG_REASON="$(cat "$TEST_OUTPUT_ROOT/stdout")"
+assert_exit "overlong socket is rejected by the byte bound" 0 \
+  test "$OVERLONG_REASON" = "FAIL: private Postgres socket path exceeds 107 bytes"
+assert_exit "overlong socket never initialized a database" 0 test ! -e "$FIXTURE_ROOT/data"
+OVERLONG_DATA="$FIXTURE_ROOT"
+OVERLONG_SOCKET="$FIXTURE_PG_HOST"
+stop_fixture_cluster
+assert_exit "rejected data directory is removed" 0 test ! -e "$OVERLONG_DATA"
+assert_exit "rejected socket directory is removed" 0 test ! -e "$OVERLONG_SOCKET"
 
 # run.sh must call the validator after restore and before publish
 if grep -q 'validate-canonical-seed-dump.sh' "$ROOT_DIR/scripts/run.sh" \

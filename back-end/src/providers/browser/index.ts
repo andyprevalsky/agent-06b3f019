@@ -59,6 +59,7 @@ import {
 
 export {
   BrowserProviderRateLimitError,
+  BrowserSessionValidationError,
   type BrowserFileInfo,
   type BrowserProviderName,
   type BrowserSessionHealth,

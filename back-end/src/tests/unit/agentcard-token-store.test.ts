@@ -13,6 +13,7 @@ import { randomUUID } from 'node:crypto';
 import { IntegrationStatus } from '@prisma/client';
 import { prisma } from '../../providers/database';
 import type { TokenSet } from '../../providers/agentcard/oauth';
+import * as agentCardRepo from '../../providers/agentcard/repo';
 import {
   clearUserToken,
   getOrgManagedCardholderId,
@@ -23,6 +24,8 @@ import {
   saveOrgOnboardingConfig,
   saveUserToken,
   takePendingAuth,
+  getV2ConnectedUserId,
+  saveV2ConnectedUserId,
 } from '../../providers/agentcard/store';
 
 const createdUserIds: string[] = [];
@@ -59,7 +62,102 @@ function sampleToken(overrides: Partial<TokenSet> = {}): TokenSet {
 }
 
 async function main(): Promise<void> {
+  process.env.AGENTCARD_ORG_OAUTH_CLIENT_ID = 'unit_token_store_client';
   process.stdout.write('Running AgentCard token-store unit tests...\n');
+  await test('stale legacy onboarding cannot erase a concurrent v2 binding or connected status', async () => {
+    const userId = await seedUser();
+    let readDone!: () => void;
+    let releaseRead!: () => void;
+    const read = new Promise<void>((resolve) => {
+      readDone = resolve;
+    });
+    const gate = new Promise<void>((resolve) => {
+      releaseRead = resolve;
+    });
+    const legacy = saveOrgOnboardingConfig(
+      userId,
+      { sessionId: 'stale', setupUrl: 'https://legacy.invalid' },
+      {
+        findTokenConfig: async (id) => {
+          const snapshot = await agentCardRepo.findTokenConfig(id);
+          readDone();
+          await gate;
+          return snapshot;
+        },
+        saveIntegrationConfig: agentCardRepo.saveIntegrationConfig,
+      }
+    );
+    await read;
+    await saveV2ConnectedUserId(userId, `usr_race_${userId}`);
+    releaseRead();
+    await legacy;
+    assert.equal(await getV2ConnectedUserId(userId), `usr_race_${userId}`);
+    const row = await prisma.integration.findUnique({
+      where: { userId_name_accountId: { userId, name: 'agentcard', accountId: '' } },
+    });
+    assert.equal(row?.status, 'CONNECTED');
+  });
+  await test('sandbox/live client identities round-trip and same-client switches remain forbidden', async () => {
+    const userId = await seedUser();
+    const previous = process.env.AGENTCARD_ORG_OAUTH_CLIENT_ID;
+    try {
+      process.env.AGENTCARD_ORG_OAUTH_CLIENT_ID = 'unit_sandbox_client';
+      await saveV2ConnectedUserId(userId, 'usr_mode_sandbox');
+      process.env.AGENTCARD_ORG_OAUTH_CLIENT_ID = 'unit_live_client';
+      assert.equal(await getV2ConnectedUserId(userId), undefined);
+      await saveV2ConnectedUserId(userId, 'usr_mode_live');
+      assert.equal(await getV2ConnectedUserId(userId), 'usr_mode_live');
+      await assert.rejects(saveV2ConnectedUserId(userId, 'usr_other_live'), /already bound/);
+      process.env.AGENTCARD_ORG_OAUTH_CLIENT_ID = 'unit_sandbox_client';
+      assert.equal(await getV2ConnectedUserId(userId), 'usr_mode_sandbox');
+      await saveV2ConnectedUserId(userId, 'usr_mode_sandbox');
+      process.env.AGENTCARD_ORG_OAUTH_CLIENT_ID = 'unit_live_client';
+      assert.equal(await getV2ConnectedUserId(userId), 'usr_mode_live');
+      const config = (await agentCardRepo.findTokenConfig(userId)) as Record<string, unknown>;
+      assert.deepEqual(config.v2Bindings, {
+        unit_sandbox_client: 'usr_mode_sandbox',
+        unit_live_client: 'usr_mode_live',
+      });
+      delete process.env.AGENTCARD_ORG_OAUTH_CLIENT_ID;
+      assert.equal(
+        await getV2ConnectedUserId(userId),
+        undefined,
+        'optional reads must support legacy MCP-only credentials'
+      );
+      await assert.rejects(
+        saveV2ConnectedUserId(userId, 'usr_missing_credentials'),
+        /AGENTCARD_ORG_OAUTH_CLIENT_ID/
+      );
+    } finally {
+      if (previous === undefined) delete process.env.AGENTCARD_ORG_OAUTH_CLIENT_ID;
+      else process.env.AGENTCARD_ORG_OAUTH_CLIENT_ID = previous;
+    }
+  });
+  await test('all legacy config writers retain v2 ownership under concurrent writes', async () => {
+    for (const write of [
+      (id: string) => saveOrgCardholderId(id, `ch_${id}`),
+      (id: string) => saveUserToken(id, sampleToken()),
+      (id: string) =>
+        saveOrgOnboardingConfig(id, { sessionId: `s_${id}`, setupUrl: 'https://legacy.invalid' }),
+      (id: string) => clearUserToken(id),
+    ]) {
+      const userId = await seedUser();
+      const providerId = `usr_writers_${userId}`;
+      await Promise.all([write(userId), saveV2ConnectedUserId(userId, providerId)]);
+      const config = (await agentCardRepo.findTokenConfig(userId)) as Record<string, unknown>;
+      assert.equal(
+        (config.v2Bindings as Record<string, unknown>)[process.env.AGENTCARD_ORG_OAUTH_CLIENT_ID!],
+        providerId
+      );
+    }
+  });
+  await test('legacy MCP token refresh preserves an exclusive v2 identity', async () => {
+    const userId = await seedUser();
+    const providerUserId = `usr_${randomUUID()}`;
+    await saveV2ConnectedUserId(userId, providerUserId);
+    await saveUserToken(userId, sampleToken());
+    assert.equal(await getV2ConnectedUserId(userId), providerUserId);
+  });
 
   await test('pending PKCE state is single-use', async () => {
     const state = `state-${randomUUID()}`;

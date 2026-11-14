@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { prisma, runTransactionWithRetry } from '../database';
 import { retryWithBackoff } from '../retry';
 import { nativeRequestRejected } from '../steel/lifecycleClaim';
-import { BrowserProviderRateLimitError } from './types';
+import { BrowserProviderRateLimitError, BrowserSessionValidationError } from './types';
 import { announceBrowserSessionBinding } from './sessionBindingAnnounce';
 
 const OPERATION_TYPE = 'browser_session_initialization';
@@ -100,10 +100,17 @@ export async function initializeLogicalBrowser<T extends { session_id: string }>
     await announceBrowserSessionBinding({ id: taskId });
     return result;
   } catch (error) {
-    if (error instanceof BrowserProviderRateLimitError || nativeRequestRejected(error)) {
+    if (
+      error instanceof BrowserProviderRateLimitError ||
+      nativeRequestRejected(error) ||
+      error instanceof BrowserSessionValidationError
+    ) {
       // A typed rejection plus no binding proves this exact attempt allocated
-      // nothing. Release only its receipt, under the logical row lock; never
-      // infer safety from a missing binding alone or steal an uncertain attempt.
+      // nothing usable: nothing (rate limit, 4xx), or only sessions that failed
+      // validation and are each released or identified for exact cleanup.
+      // Release only its receipt, under the logical row lock, so the worker's
+      // retry creates afresh; never infer safety from a missing binding alone
+      // or steal an uncertain attempt.
       const released = await runTransactionWithRetry(async (tx) => {
         await tx.$queryRaw`SELECT id FROM "BrowserSession" WHERE id = ${taskId} FOR UPDATE`;
         const binding = await tx.browserSession.findUnique({ where: { id: taskId } });

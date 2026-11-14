@@ -172,7 +172,7 @@ export function ProjectMaintenanceSection({
     : running || start.isPending
       ? 'A sync is running.'
       : project.repoUrl === null
-        ? 'Set a code repository first.'
+        ? 'Connect a GitHub repo on the Integrations panel first.'
         : null;
   const runBlocked = blocked ?? (hasScript ? null : 'Add a sync script first.');
 
@@ -190,7 +190,7 @@ export function ProjectMaintenanceSection({
     <section aria-label="Template sync">
       <h3 className={H3}>Template sync</h3>
       <p className={MUTED}>
-        Runs on this project&apos;s template sandbox. When it succeeds, Rose snapshots the sandbox
+        Runs on this folder&apos;s template sandbox. When it succeeds, Rose snapshots the sandbox
         and new code sessions start from the latest snapshot with dependencies installed.
       </p>
 

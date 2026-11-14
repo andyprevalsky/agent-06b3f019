@@ -432,6 +432,7 @@ PROC_OBSERVATION = "proc-observation"
 
 GATES = (
     Gate("deploy-test-cycle", ("python3", "scripts/tests/deploy-test-cycle.test.py"), exclusive=PROC_OBSERVATION),
+    Gate("deploy-focused10-settlement", ("python3", "scripts/tests/deploy-focused10-settlement.test.py"), exclusive=PROC_OBSERVATION),
     Gate("deploy-test-user-omission", ("python3", "scripts/tests/deploy-test-user-omission.test.py")),
     Gate("deploy-test-plan", ("python3", "scripts/tests/deploy-test-plan.test.py"), exclusive=PROC_OBSERVATION),
     Gate("deploy-test-worker", ("python3", "scripts/tests/deploy-test-worker.test.py")),
@@ -453,6 +454,11 @@ GATES = (
         "cloudbench-controller-linux",
         ("python3", "scripts/tests/cloudbench-controller-linux.test.py"),
     ),
+    Gate(
+        "cloudbench-fixture-process-cleanup",
+        ("python3", "scripts/tests/cloudbench-fixture-process-cleanup.test.py"),
+    ),
+    Gate("cloudbench-pid-identity", ("bash", "scripts/tests/cloudbench-pid-identity.test.sh")),
     Gate("workspace-env", ("bash", "scripts/tests/workspace-env.test.sh")),
     Gate("rose-startup-script", ("bash", "scripts/tests/rose-startup-script.test.sh")),
     Gate("temporal-namespace-isolation", ("python3", "scripts/tests/temporal-namespace-isolation.test.py")),
@@ -464,6 +470,10 @@ GATES = (
     ),
     Gate("deploy-gate-release-tool", ("bash", "scripts/tests/deploy-gate-release-tool.test.sh")),
     Gate("seed-cache-decision", ("bash", "scripts/tests/seed-cache-decision.test.sh")),
+    # Its live scratch-database Prisma push checks need a local Postgres and ~45 s, which pushed the quick
+    # backend-structural chain (npm run test:structural) past its 120 s budget; that chain skips them and
+    # this direct run on the gate VM executes every live check.
+    Gate("prisma-local-push", ("bash", "back-end/scripts/prisma-local-push.test.sh"), expected_seconds=60),
     Gate("canonical-seed-migration-readiness", ("python3", "scripts/tests/migrate-canonical-seed.test.py")),
     Gate(
         "canonical-seed-whatsapp-content",
@@ -474,6 +484,7 @@ GATES = (
         ("bash", "scripts/tests/benchmark-sms-transport-mock.test.sh"),
     ),
     Gate("descend-command", ("bash", "scripts/tests/descend-command.test.sh"), expected_seconds=118),
+    Gate("descend-handoff", ("python3", "scripts/tests/descend-handoff.test.py"), expected_seconds=5),
     Gate("benchmark-live-results", ("python3", "scripts/tests/benchmark-live-results.test.py"), expected_seconds=700, shards=6),
     Gate("jev-progress-core", ("python3", "scripts/tests/jev-progress-core.test.py")),
     Gate("select-affected-tests", ("python3", "scripts/tests/select-affected-tests.test.py")),
@@ -498,6 +509,9 @@ GATES = (
         ("python3", "-m", "unittest", "discover", "-s", "scripts/live_display", "-p", "test_*.py"),
     ),
     Gate("benchmark-scorecard", ("python3", "scripts/tests/cloudbench-scorecard.test.py")),
+    Gate("sharded-waves", ("python3", "scripts/tests/run-bench-sharded-waves.test.py")),
+
+
     # Linux pidfd fixtures select a capable runtime or the offline controller image.
     Gate(
         "cloudbench-export-recovery",
@@ -511,7 +525,14 @@ GATES = (
         "benchmark-provider-capacity",
         ("python3", "scripts/tests/cloudbench-provider-capacity.test.py"),
     ),
+    Gate("cloudbench-provider-contract", ("python3", "scripts/tests/cloudbench-provider-contract.test.py")),
+    Gate("worker-pool-cutover", ("python3", "scripts/tests/worker-pool-cutover.test.py")),
+    Gate("retained-agent-machine", ("python3", "scripts/tests/retained-agent-machine.test.py")),
     Gate("benchmark-campaign-grouping", ("bash", "scripts/tests/campaign-hub-grouping.test.sh")),
+    Gate(
+        "claude-md-replay-cli",
+        ("python3", "-m", "pytest", "-q", "agents/benchmarks/claude_md_replay/replay_cli_test.py"),
+    ),
     Gate("cloudbench-fetch-ref", ("bash", "scripts/tests/cloudbench-fetch-ref.test.sh")),
     Gate("cloudbench-warm-pool", ("python3", "scripts/tests/cloudbench-warm-pool.test.py")),
     Gate(
@@ -519,6 +540,17 @@ GATES = (
         ("python3", "scripts/tests/cloudbench-cross-devbox-admission.test.py"),
     ),
     Gate("cloudbench-warm-source", ("python3", "scripts/tests/cloudbench-warm-source.test.py")),
+    Gate("cloudbench-prepare-source", ("python3", "scripts/tests/cloudbench-prepare-source.test.py")),
+    Gate("cloudbench-prepare-source-create", ("python3", "scripts/tests/cloudbench-prepare-source-create.test.py")),
+    Gate("cloudbench-source-version", ("python3", "scripts/tests/cloudbench-source-version.test.py")),
+    Gate("cloudbench-original-image-failure", ("python3", "scripts/tests/cloudbench-original-image-failure.test.py")),
+    Gate("cloudbench-source-lease", ("python3", "scripts/tests/cloudbench-source-lease.test.py")),
+    Gate("cloudbench-source-lease-fleet", ("python3", "scripts/tests/cloudbench-source-lease-fleet.test.py")),
+    Gate("cloudbench-source-lease-recovery", ("python3", "scripts/tests/cloudbench-source-lease-recovery.test.py")),
+    Gate("cloudbench-source-guest-env", ("python3", "scripts/tests/cloudbench-source-guest-env.test.py")),
+    Gate("cloudbench-source-env", ("python3", "scripts/tests/cloudbench-source-env.test.py")),
+    Gate("cloudbench-source-env-handoff", ("python3", "scripts/tests/cloudbench-source-env-handoff.test.py")),
+    Gate("cloudbench-kernel-custody", ("python3", "scripts/tests/cloudbench-kernel-custody.test.py")),
     Gate(
         "benchmark-successful-llm-evidence",
         ("python3", "scripts/tests/verify-successful-llm-queries.test.py"),
@@ -531,6 +563,7 @@ GATES = (
         "cloudbench-quiesced-forensic-retirement",
         ("python3", "scripts/tests/cloudbench-forensic-quiesced.test.py"), expected_seconds=83
     ),
+    Gate("cloudbench-lost-evidence-release", ("python3", "scripts/tests/cloudbench-lost-evidence-release.test.py")),
     Gate("seed-memory-ratchet", ("bash", "scripts/tests/seed-memory-ratchet.test.sh")),
     Gate("test-sleep-ratchet", ("python3", "scripts/tests/condition-waits.test.py")),
     Gate("semantic-deploy", ("bash", "scripts/tests/semantic-deploy-gate.test.sh")),
@@ -547,6 +580,8 @@ GATES = (
         ("bash", "scripts/tests/check-llm-trajectory-injection-approval.test.sh"),
     ),
     Gate("approval-format", ("bash", "scripts/tests/approval-format.test.sh")),
+    Gate("rca-model-intelligence-category", ("bash", "scripts/tests/rca-model-intelligence-category.test.sh")),
+    Gate("rca-prompt-edit-abstraction", ("bash", "scripts/tests/rca-prompt-edit-abstraction.test.sh")),
     Gate(
         "durable-evidence-links",
         ("bash", "scripts/tests/durable-evidence-links.test.sh"),
@@ -638,6 +673,10 @@ GATES = (
     Gate(
         "cloudbench-controller-gate-flyctl-bounds",
         ("python3", "scripts/tests/cloudbench-controller-gate-flyctl-bounds.test.py"),
+    ),
+    Gate(
+        "cloudbench-recovery-fd",
+        ("python3", "scripts/tests/cloudbench-recovery-fd.test.py"),
     ),
     Gate(
         "cloudbench-shared-transport-integration",

@@ -34,6 +34,7 @@ export function createAgentResponse(
     world_model_mode: agent.worldModelMode,
     project_id: agent.projectId,
     folder_id: agent.folderId,
+    github_repo_ref: agent.githubRepoRef,
     created_at: agent.createdAt,
     updated_at: agent.updatedAt,
     available_endpoints: getX402Endpoints(agent.id),

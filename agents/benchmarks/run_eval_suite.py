@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""THE single full-suite benchmark entrypoint (see CLAUDE.md "Eval Suite").
+"""THE single full-suite benchmark entrypoint (see CLAUDE.md "Benchmarks" and agents/benchmarks/README.md).
 
 Runs every `status == "ready"` benchmark entry in the unified catalog
 (agents/benchmarks/tasks.json) through one run_benchmark.py invocation

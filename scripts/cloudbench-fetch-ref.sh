@@ -220,6 +220,54 @@ if [[ "$remote_url" == https://github.com/* || "$remote_url" == *github.com/* ]]
     [ -n "$APP_USER" ] && chown "$APP_USER" "$auth_config"
 fi
 
+# A fresh REAL primary has no HEAD to negotiate from, so a depth-1 fetch of the
+# requested SHA otherwise transfers the whole tree (about 330 MB, mostly
+# append-only benchmark history; ~230 s per copy on 2026-10-27). The warm image
+# can carry a read-only seed: a depth-1 bare repository of its pushed build
+# commit. Import it through Git (every object re-hashed) and offer that commit
+# as the only negotiation tip; GitHub still serves the exact requested SHA, and
+# the checkout below is verified as before. A missing, stale or corrupt seed is
+# ignored, and a failed seeded fetch retries once unseeded.
+GIT_SEED_DIR="${CLOUDBENCH_GIT_SEED_DIR:-/app/.cloudbench-git-seed}"
+seed_commit=""
+seed_store_owned=0
+seed_fresh_checkout() {
+    local manifest commit existing_objects existing_refs
+    manifest="$GIT_SEED_DIR/cloudbench-seed.json"
+    [ -d "$GIT_SEED_DIR/objects/pack" ] && [ -f "$manifest" ] && [ -f "$GIT_SEED_DIR/shallow" ] || return 1
+    commit="$(python3 -c 'import json,re,sys
+v=json.load(open(sys.argv[1]))
+assert v.get("schema")=="cloudbench-git-seed-v1" and re.fullmatch("[0-9a-f]{40}",v.get("commit") or "")
+print(v["commit"])' "$manifest" 2>/dev/null)" || return 1
+    [ "$(cat "$GIT_SEED_DIR/shallow")" = "$commit" ] || return 1
+    # A HEAD-less checkout may still hold objects from an earlier attempt.
+    # Only an empty store, exclusively held by our fetch lock, can be retired
+    # wholesale when this invocation's native seed import/fetch fails.
+    [ ! -e "$REPO_DIR/.git/shallow" ] && [ ! -L "$REPO_DIR/.git/shallow" ] || return 1
+    [ ! -L "$REPO_DIR/.git/objects" ] || return 1
+    existing_objects="$(find "$REPO_DIR/.git/objects" -mindepth 1 ! -type d -print -quit)" || return 1
+    existing_refs="$(git_cmd for-each-ref --format='%(refname)')" || return 1
+    [ -z "$existing_objects" ] && [ -z "$existing_refs" ] || return 1
+    seed_store_owned=1
+    # Import through Git's own transport: index-pack re-hashes every object
+    # (a damaged pack or index cannot name wrong content) and Git records the
+    # shallow boundary. The seed's files are never copied by hand.
+    git_cmd fetch -q --no-tags --no-auto-gc --depth=1 \
+        --upload-pack="git -c safe.directory=$GIT_SEED_DIR upload-pack" \
+        "file://$GIT_SEED_DIR" "+refs/cloudbench/seed:refs/cloudbench/seed" >/dev/null 2>&1 || return 1
+    [ "$(git_cmd rev-parse --verify -q refs/cloudbench/seed 2>/dev/null)" = "$commit" ] || return 1
+    git_cmd cat-file -e "$commit^{tree}" || return 1
+    seed_commit="$commit"
+}
+unseed_fresh_checkout() {  # leave exactly the unseeded fresh state behind
+    [ "$seed_store_owned" = 1 ] || return 0
+    git_cmd update-ref -d refs/cloudbench/seed || return 1
+    rm -f "$REPO_DIR/.git/shallow" "$REPO_DIR"/.git/objects/pack/pack-* || return 1
+    find "$REPO_DIR/.git/objects" -mindepth 1 -maxdepth 1 -type d -name '[0-9a-f][0-9a-f]' -exec rm -rf {} + || return 1
+    seed_commit=""
+    seed_store_owned=0
+}
+
 stage_started="$(date +%s)"
 # This checkout has one relevant parent: its current HEAD. Advertising every
 # historic detached ref wastes negotiation on persistent pool volumes. Object
@@ -232,6 +280,15 @@ elif [ "$fresh_checkout_admitted" = 1 ]; then
     # A fresh REAL volume needs the complete requested source, not historical
     # benchmark checkouts. Retained volumes keep their existing history above.
     fetch_args+=(--depth=1)
+    if [ "$source_scope" = complete ] && [ -e "$GIT_SEED_DIR" ]; then
+        if seed_fresh_checkout; then
+            fetch_args+=(--negotiation-tip=refs/cloudbench/seed)
+            echo "[cloudbench] git-seed $seed_commit"
+        else
+            unseed_fresh_checkout || exit 1
+            echo "[cloudbench] git-seed ignored: $GIT_SEED_DIR is not an intact seed"
+        fi
+    fi
     # Blobs outside the sparse definition are never transferred; checkout
     # fetches the rest once, under this request-scoped credential.
     if [ "$source_scope" = worker-runtime ]; then
@@ -247,6 +304,18 @@ else
     exit 1
 fi
 git_cmd fetch "${fetch_args[@]}" origin "$REF" || fetch_status=$?
+if [ -n "$seed_commit" ] && [ "${fetch_status:-0}" -ne 0 ]; then
+    # A seeded fetch failure retries once exactly as an unseeded fresh fetch.
+    echo "[cloudbench] git-seed fetch failed; retrying without the seed"
+    unseed_fresh_checkout || exit 1
+    unseeded_args=()
+    for arg in "${fetch_args[@]}"; do
+        [ "$arg" = --negotiation-tip=refs/cloudbench/seed ] || unseeded_args+=("$arg")
+    done
+    fetch_status=0
+    git_cmd fetch "${unseeded_args[@]}" origin "$REF" || fetch_status=$?
+fi
+[ -z "$seed_commit" ] || git_cmd update-ref -d refs/cloudbench/seed || fetch_status=1
 echo "[cloudbench] git-fetch $(( $(date +%s) - stage_started ))s"
 if [ "${fetch_status:-0}" -ne 0 ]; then
     echo "[cloudbench] FATAL: could not fetch requested ref $REF" >&2

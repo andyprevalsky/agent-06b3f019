@@ -34,6 +34,9 @@ export const codeAgentResumeConfigSchema = z
           .nullable(),
         target: z.enum(['cloud', 'local']),
         task_name: z.string().nullable(),
+        // The spawn's explicit connected-repo selection; a resumed run keeps it (agents
+        // workflows/code_agent_resume.py copies spawn_args into the next tool call).
+        github_repo_ref: z.string().trim().min(1).max(300).optional(),
         attachments: z.array(z.string()),
       })
       .strict(),

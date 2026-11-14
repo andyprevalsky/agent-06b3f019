@@ -26,10 +26,11 @@ ABANDON = "agent-payment-abandonment"
 class CoordinatorFixture:
     """Real coordinator/receipt validators; deterministic child lifecycle and files."""
 
-    def __init__(self, root: Path, *, fault: str | None = None, cancel: bool = False):
+    def __init__(self, root: Path, *, fault: str | None = None, cancel: bool = False, stack_version: str = "1"):
         self.root = root
         self.fault = fault
         self.cancel = cancel
+        self.stack_version = stack_version
         self.processes = []
         self.events = []
         self.max_live = 0
@@ -41,10 +42,11 @@ class CoordinatorFixture:
             _benchmark_python=lambda: sys.executable,
             _owned_shutdown_timeout=lambda: 1,
             _process_identity_tools=lambda: {"current_identity": self.identity},
-            _pid_is_alive=lambda pid: self.fault == "live-stack" and pid == 900001,
+            _pid_is_alive=lambda pid: self.fault in {"live-stack", "unreadable-live-stack"} and pid == 900001,
             _signal_owned_process=self.send_signal,
             _write_owner_record=self.write_record,
             _read_cleanup_receipt=local._read_cleanup_receipt,
+            _validate_stack_cleanup_receipt=local._validate_stack_cleanup_receipt,
             failed_tasks_from_run=local.failed_tasks_from_run,
             service_base_environ=local.service_base_environ,
         )
@@ -96,7 +98,8 @@ class CoordinatorFixture:
         }
         stack_receipt = context / "local-stack-cleanup.status"
         stack_receipt.write_text(
-            "version=1\ntoken=fixture-stack-token\nstate=clean\nstack_pid=900001\nstack_birth=fixture-birth\n"
+            f"version={self.stack_version}\ntoken=fixture-stack-token\nstate=clean\nstack_pid=900001\nstack_birth=fixture-birth\n"
+            + ("stack_native_identity=fixture-stack\n" if self.stack_version == "2" else "")
         )
         passed = self.fault not in {"failed-task", "false-zero"} or process.ordinal != 0
         result = context / "result.json"
@@ -123,6 +126,18 @@ class CoordinatorFixture:
                 stack_receipt.write_text(stack_receipt.read_text().replace("900001", "900002"))
             elif self.fault == "wrong-stack-birth":
                 stack_receipt.write_text(stack_receipt.read_text().replace("fixture-birth", "foreign-birth"))
+            elif self.fault == "missing-stack-native":
+                stack_receipt.write_text(stack_receipt.read_text().replace("stack_native_identity=fixture-stack\n", ""))
+            elif self.fault == "foreign-stack-native":
+                stack_receipt.write_text(
+                    stack_receipt.read_text().replace("stack_native_identity=fixture-stack", "stack_native_identity=foreign")
+                )
+            elif self.fault == "malformed-stack-receipt":
+                stack_receipt.write_text(stack_receipt.read_text() + "stack_pid=900001\n")
+            elif self.fault == "wrong-stack-token":
+                stack_receipt.write_text(stack_receipt.read_text().replace("token=fixture-stack-token", "token=foreign"))
+            elif self.fault == "v2-benchmark-receipt":
+                receipt.write_text(receipt.read_text().replace("version=1", "version=2"))
             elif self.fault == "foreign-result-index":
                 index["run_id"] = "foreign-world"
             elif self.fault == "changed-result":
@@ -245,6 +260,37 @@ def test_local_worlds_rejects_missing_or_foreign_cleanup_and_results():
             assert report["tasks"][0]["status"] == "failed-retained", (fault, report)
             assert report["tasks"][1]["status"] == "cancelled-before-start"
             assert len(fixture.processes) == 1, "failed ownership must not admit queued work"
+
+
+def test_local_worlds_accepts_native_v2_stack_cleanup_and_preserves_guards():
+    """Native coordinator consumes the stack's current schema, with custody intact."""
+    with tempfile.TemporaryDirectory(prefix="rose-worlds-v2-clean-") as temporary:
+        fixture = CoordinatorFixture(Path(temporary), stack_version="2")
+        code, report = fixture.run([SETUP, ABANDON], width=1)
+        assert code == 0, report
+        assert all(row["status"] == "passed" for row in report["tasks"]), report
+
+    faults = (
+        "missing-stack-native",
+        "foreign-stack-native",
+        "wrong-stack-pid",
+        "wrong-stack-token",
+        "malformed-stack-receipt",
+        "foreign-stack-owner",
+        "live-stack",
+        "unreadable-live-stack",
+        "v2-benchmark-receipt",
+        "foreign-result-index",
+        "changed-result",
+    )
+    for fault in faults:
+        with tempfile.TemporaryDirectory(prefix="rose-worlds-v2-guard-") as temporary:
+            fixture = CoordinatorFixture(Path(temporary), fault=fault, stack_version="2")
+            code, report = fixture.run([SETUP, ABANDON], width=1)
+            assert code != 0, (fault, report)
+            assert report["tasks"][0]["status"] == "failed-retained", (fault, report)
+            assert report["tasks"][1]["status"] == "cancelled-before-start", (fault, report)
+            assert len(fixture.processes) == 1, fault
 
 
 def test_local_worlds_preserves_duplicate_task_occurrences():
@@ -503,6 +549,7 @@ def test_local_worlds_console_failure_preserves_child_retirement():
 CONTROL_TESTS = (
     test_local_worlds_propagates_task_and_post_run_failures,
     test_local_worlds_rejects_missing_or_foreign_cleanup_and_results,
+    test_local_worlds_accepts_native_v2_stack_cleanup_and_preserves_guards,
     test_local_worlds_preserves_duplicate_task_occurrences,
     test_local_worlds_preserves_exclusive_phase_concurrency_and_sms_guard,
     test_local_worlds_cancellation_does_not_admit_queued_children,

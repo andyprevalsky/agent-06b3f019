@@ -103,6 +103,21 @@ class NativeReadinessTests(unittest.TestCase):
     def run_native_proxy(self, scenario):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
+            fake_bin = root / 'bin'
+            fake_bin.mkdir()
+            fake_flyctl = fake_bin / 'flyctl'
+            # The production launcher uses exec: supply an executable, not a shell function.
+            fake_flyctl.write_text(r'''#!/usr/bin/env bash
+set -uo pipefail
+    printf '%s\n' "$BASHPID" >> "$FIXTURE/launches"
+    printf '%s\n' "$BASHPID" > "$FIXTURE/current-pid"
+    trap 'exit 0' TERM
+    if [ "$SCENARIO" = dead-first ] && [ "$(wc -l < "$FIXTURE/launches")" = 1 ]; then
+        exit 1
+    fi
+    while :; do command sleep 0.05; done
+''')
+            fake_flyctl.chmod(0o755)
             source = Path(os.environ.get('READINESS_TEST_SOURCE', str(ROOT / 'scripts/lib/cloudbench-env.sh')))
             script = r'''set -uo pipefail
 source "$1"
@@ -138,15 +153,6 @@ sleep() {
     case "$1" in 0.5) delta=5 ;; *) delta=$(($1 * 10)) ;; esac
     ticks=$(cat "$FIXTURE/clock")
     printf '%s\n' "$((ticks + delta))" > "$FIXTURE/clock"
-}
-flyctl() {
-    printf '%s\n' "$BASHPID" >> "$FIXTURE/launches"
-    printf '%s\n' "$BASHPID" > "$FIXTURE/current-pid"
-    trap 'exit 0' TERM
-    if [ "$SCENARIO" = dead-first ] && [ "$(wc -l < "$FIXTURE/launches")" = 1 ]; then
-        return 1
-    fi
-    while :; do command sleep 0.05; done
 }
 curl() {
     local pid n=0 code=000
@@ -184,7 +190,8 @@ exit 0
 '''
             environment = {key: value for key, value in os.environ.items()
                            if not key.startswith('CLOUDBENCH_SHARED_RELAY_')}
-            environment.update(FIXTURE=temporary, SCENARIO=scenario)
+            environment.update(FIXTURE=temporary, SCENARIO=scenario,
+                               PATH=str(fake_bin) + os.pathsep + environment.get('PATH', ''))
             result = subprocess.run(['bash', '-c', script, 'native-readiness', str(source)],
                                     env=environment, capture_output=True, text=True, timeout=15)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
