@@ -207,11 +207,22 @@ cleanup() {
 }
 trap cleanup EXIT
 mkdir -p .context
-# No semantic spec reaches the stack through a public origin, so the stack takes no tunnel.
-# Every deploy's gate VM checks out to .../rose/rose and so derived the same reserved ngrok
-# domain (rose-rose.ngrok.app): a second deploy, or any `rose` checkout running a stack, held
-# it and this gate died before readiness (ERR_NGROK_334, 2026-11-07).
-BENCHMARK_SKIP_PUBLIC_TUNNEL=1 BENCHMARK_BUNDLED_FRONTEND=true DISABLE_GMAIL_SYNC=1 BENCHMARK_SKIP_WMH_BUILD=1 WORKER_PROCESSES="$SEMANTIC_WORKER_PROCESSES" TRACE_ARCHIVE_ENABLED=0 \
+# Native deploy gates use the reviewed canonical base fixture via run.sh's
+# existing schema/PG/revision-checked restore path. An unconfigured dump path
+# otherwise selects a fresh production cold-sync on every ephemeral runner.
+if [ -n "${DEPLOY_SEMANTIC_TOKEN:-}" ]; then
+    export BENCHMARK_SEED_DUMP="${BENCHMARK_SEED_DUMP:-$ROOT_DIR/.context/seed-cache/semantic-base.dump}"
+    export BENCHMARK_REQUIRE_SEED_DUMP=1
+fi
+
+# The UI stays local, but real code agents need a public backend callback.
+# Bind a run-scoped tunnel without reserving or falling back to the shared workspace name.
+# Skip trycloudflare and take run.sh's run-scoped ngrok endpoint directly: on Blacksmith
+# gate VMs no quick tunnel routed on 2026-11-11 (3 x 45 s probes + 60 s backoff = 3.5 min
+# per run), pushing the gate past its 1800 s deadline after its tests had passed.
+BENCHMARK_SKIP_PUBLIC_TUNNEL=0 BENCHMARK_EPHEMERAL_PUBLIC_TUNNEL=1 CLOUDFLARE_TUNNEL_MAX_ATTEMPTS=0 \
+DISABLE_FAST_MODE_PROXY=1 BENCHMARK_PUBLIC_TUNNEL_RUN_ID="${DEPLOY_SEMANTIC_TOKEN:-$(python3 -c 'import uuid; print(uuid.uuid4().hex)')}" \
+BENCHMARK_BUNDLED_FRONTEND=true DISABLE_GMAIL_SYNC=1 BENCHMARK_SKIP_WMH_BUILD=1 WORKER_PROCESSES="$SEMANTIC_WORKER_PROCESSES" TRACE_ARCHIVE_ENABLED=0 \
     bash scripts/run.sh --benchmark > .context/deploy-smoke.log 2>&1 &
 stack_pid=$!
 printf 'STEP5_STACK_PID=%s\n' "$stack_pid"

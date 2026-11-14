@@ -83,6 +83,8 @@ export interface CreateAgentParams {
   workflowTaskQueue?: string;
   /** Repository code sessions in this tree clone (set before the workflow starts). */
   githubRepoUrl?: string;
+  /** Canonical connected-repo ref (agentProject.ts resolveCreateRepoFields). */
+  githubRepoRef?: string;
   /** Rose Mac app device that started this root agent (C14 local code agents). */
   originDeviceId?: string;
   projectId?: string | null;
@@ -178,6 +180,8 @@ export async function createAgentTransaction(params: CreateAgentParams) {
 export interface BatchCreateAgentParams {
   projectId?: string | null;
   folderId?: string | null;
+  githubRepoUrl?: string;
+  githubRepoRef?: string;
   agentId: string;
   userId: string;
   parentAgentId: string | null;

@@ -20,7 +20,9 @@ import sys
 import time
 
 import deploy_gate_progress as progress
+import deploy_test_quarantine as quarantine
 from deploy_test_cycle import ROOT, command, digest, read, source, write
+from deploy_test_isolation import validate_tmpdir_request
 from deploy_test_process import CANCEL, cancellation_handlers, run_command
 
 MAX_REQUEST_BYTES = 16 * 1024 * 1024
@@ -75,6 +77,7 @@ def read_request(timeout: float) -> dict:
 
 
 def execute(request: dict, root: Path) -> dict:
+    validate_tmpdir_request(request, root)
     recipe = request['worker_recipe']
     cases = recipe['cases']
     selected, skipped = request['checks'], request.get('skips', {})
@@ -119,6 +122,7 @@ def execute(request: dict, root: Path) -> dict:
                     rows[name] = {'status': 'UNVERIFIED', 'reason': 'setup failed or worker interrupted'}
                 else:
                     rows[name] = run_step(name, cases[name], root, folder)
+                    rows[name].update(case_outcomes(name, folder))
                     report_case(name, rows[name], folder)
         finally:
             cleanup = recipe.get('cleanup')
@@ -164,6 +168,13 @@ def owned_benchmark_draining(root: Path, token: str, since: float) -> bool:
 def progress_path(folder: Path) -> str:
     """The gate's live progress file: the coordinator's, else one beside this worker's evidence."""
     return os.environ.get(progress.ENV) or str(folder / 'progress.jsonl')
+
+
+def case_outcomes(name: str, folder: Path) -> dict:
+    """This case's quarantined and FLAKY units, kept in its evidence row (they never change its status)."""
+    outcomes = quarantine.gate_outcomes(Path(progress_path(folder)))
+    picked = {k: [r for r in v if r.get('case') == name] for k, v in outcomes.items()}
+    return {k: v for k, v in picked.items() if v}
 
 
 def report_case(name: str, row: dict, folder: Path) -> None:

@@ -84,7 +84,7 @@ marker** and their launchers hung polling for a DONE that never comes.
    already does tree-wide token/cache breakdown — extend it to split by provider +
    sub-model. Provider detection: Rose completions `actual_model` suffix
    (`-claude` = Claude OAuth token; waterfall = OpenRouter; `gpt*` = GPT key;
-   codex = codex token) — see `CLAUDE.md` → "LLM Call Map" / "claudeAuth Flow".
+   codex = codex token) — see `docs/internal/llm-call-map.md` ("claudeAuth Flow").
 
 ## WORKING DISCIPLINE — check in continuously, kill failing runs EARLY
 
@@ -134,7 +134,7 @@ death, then ~60 s; exit the instant it completes or is clearly failing.)
   load / a race / a 404").
 - Do not touch the **prod** worker app `navi-whisper-lux` — the fleet app is
   `navi-whisper-lux-bench`.
-- Do not create markdown docs unless asked (rule 4) — this handoff was explicitly
+- Do not create markdown docs unless asked — this handoff was explicitly
   requested.
 
 ## KEY FACTS / COMMANDS / CREDS

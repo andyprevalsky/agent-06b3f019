@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import shlex
 import subprocess
 import sys
 import signal
@@ -90,7 +91,8 @@ class Fixture(unittest.TestCase):
         (self.root / 'a.txt').write_text('two')
         self.commit('second')
         self.head = sh(self.root, 'git', 'rev-parse', 'HEAD').strip()
-        self.environ = patch.dict(os.environ, {'DEPLOY_WORKER_ROOT': str(self.workers)})
+        self.environ = patch.dict(os.environ, {'DEPLOY_WORKER_ROOT': str(self.workers),
+                                               'CLOUDBENCH_KERNEL_PROXY_CUSTODY': '0', 'NODE_OPTIONS': ''})
         self.environ.start()
         os.environ.pop('DEPLOY_TEST_CYCLE_STATE_DIR', None)
         os.environ.pop('DEPLOY_RUN_ROOT', None)
@@ -104,7 +106,8 @@ class Fixture(unittest.TestCase):
                            ('standard_template', standard),
                            ('factory_event', lambda root, *event: self.events.append(event)),
                            ('check_capacity', lambda root, workers, proc=None: {
-                               'memory_mb': 0, 'available_mb': 0, 'disk_mb': 0, 'free_disk_mb': 0})):
+                               'memory_mb': 0, 'available_mb': 0, 'disk_mb': 0, 'free_disk_mb': 0}),
+                           ('wait_for_cpu_headroom', lambda *args, **kwargs: {'headroom': True})):
             patcher = patch.object(g, name, fake)
             patcher.start()
             self.addCleanup(patcher.stop)
@@ -234,6 +237,38 @@ class Inventory(Fixture):
             self.assertEqual(str(self.root.resolve() / '.context/deploy-ledger-park'),
                              g.local_slot(self.root, 'agentcard-lifecycle', path, values)['env']['BENCHMARK_HISTORY_PARK_DIR'])
 
+    def test_selected_kernel_custody_is_remapped_and_loaded_by_actual_worker_child(self):
+        guard = self.root / 'back-end/scripts/blackbox-kernel-proxy-custody.cjs'
+        guard.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(Path(__file__).resolve().parents[2] / 'back-end/scripts/blackbox-kernel-proxy-custody.cjs', guard)
+        with patch.dict(os.environ, {'NODE_OPTIONS': '--max-old-space-size=128 --require=/controller-only/blackbox-kernel-proxy-custody.cjs',
+                                     'CLOUDBENCH_KERNEL_PROXY_CUSTODY': '1'}):
+            selected = g.kernel_custody_environment(self.root)
+            child = subprocess.run(['node', '-e', 'if(!globalThis[Symbol.for("rose.test.kernelProxyCustody")])process.exit(1);console.log("guard-loaded")'],
+                                   env={**os.environ, **selected}, capture_output=True, text=True, timeout=8)
+            self.assertEqual(child.returncode, 0, child.stderr)
+            self.assertIn('guard-loaded', child.stdout)
+            self.assertNotIn('/controller-only/', selected['NODE_OPTIONS'])
+            self.assertIn('--max-old-space-size=128', selected['NODE_OPTIONS'])
+            remote = g.remote_slot(self.root, 'agents-coverage-blackbox')['env']
+            self.assertIn(g.GITHUB_WORKER_ROOT, remote['NODE_OPTIONS'])
+            self.assertNotIn('/controller-only/', remote['NODE_OPTIONS'])
+        for preload in ('--import=/controller-only/blackbox-kernel-proxy-custody.cjs',
+                        '--import /controller-only/blackbox-kernel-proxy-custody.cjs',
+                        '-r /controller-only/blackbox-kernel-proxy-custody.cjs'):
+            with self.subTest(preload=preload), patch.dict(os.environ, {'NODE_OPTIONS': preload,
+                                                                        'CLOUDBENCH_KERNEL_PROXY_CUSTODY': '0'}):
+                selected = g.kernel_custody_environment(self.root)
+                self.assertNotIn('/controller-only/', selected['NODE_OPTIONS'])
+                self.assertEqual(shlex.split(selected['NODE_OPTIONS']), ['--require=' + str(guard)])
+                child = subprocess.run(['node', '-e', 'if(!globalThis[Symbol.for("rose.test.kernelProxyCustody")])process.exit(1)'],
+                                       env={**os.environ, **selected}, capture_output=True, text=True, timeout=8)
+                self.assertEqual(child.returncode, 0, child.stderr)
+        with patch.dict(os.environ, {'NODE_OPTIONS': '', 'CLOUDBENCH_KERNEL_PROXY_CUSTODY': '0'}):
+            self.assertEqual(g.kernel_custody_environment(self.root), {})
+        with patch.dict(os.environ, {'CLOUDBENCH_KERNEL_PROXY_CUSTODY': 'invalid'}):
+            with self.assertRaises(g.Blocked): g.kernel_custody_environment(self.root)
+
     def test_semantic_stack_gets_its_measured_deadline_on_every_transport(self):
         """2026-11-08: a semantic run blocked in its runner's hour-long waits held PR1784's round for 70+ min
         under the 4 h default; its 72 passes had p99 23.1 min. Every other gate keeps the default."""
@@ -242,6 +277,21 @@ class Inventory(Fixture):
         self.assertEqual(1800, g.local_slot(self.root, 'semantic-stack', self.path('semantic-stack'), values)['timeout_seconds'])
         for gate in ('deploy-command-structural', 'agents-coverage-blackbox', 'frontend-coverage-blackbox'):
             self.assertEqual(g.GATE_DEADLINE_SECONDS, g.remote_slot(self.root, gate)['timeout_seconds'])
+
+    def test_live_probes_slot_binds_one_case_per_probe_on_every_transport(self):
+        """An aggregate exit is UNVERIFIED and unwaivable (PR #1934: one provider-side GLM failover miss
+        blocked the whole gate); each probe is its own non-aggregate case, run in PROBE_NAMES order."""
+        from run_deploy_live_probes import PROBE_NAMES
+        values = {'CONDUCTOR_WORKSPACE_NAME': 'w', 'CONDUCTOR_PORT': '21530'}
+        for slot in (g.remote_slot(self.root, 'live-probes'),
+                     g.local_slot(self.root, 'live-probes', self.path('live-probes'), values)):
+            cases = slot['recipe']['cases']
+            self.assertEqual(list(PROBE_NAMES), list(cases))
+            for name, spec in cases.items():
+                self.assertEqual(['python3', 'scripts/run_deploy_live_probes.py', '--only', name], spec['command'])
+                self.assertIs(False, spec['aggregate'])
+                self.assertEqual(slot['env'], spec['env'])
+        self.assertNotIn('recipe', g.remote_slot(self.root, 'semantic-stack'))
 
     def test_system_pg_is_carried_only_when_prepared_and_identity_is_required(self):
         self.system_pg = False
@@ -898,6 +948,12 @@ class Template(unittest.TestCase):
         self.assertTrue(backend[0]['native_backend'] and len(backend[0]['checks']) > 1)
         structural, = [gate for gate in cut['gates'] if gate['name'] == g.STRUCTURAL_GATE]
         self.assertEqual('2', structural['command'][structural['command'].index('--max-workers') + 1])
+        live, = [gate for gate in cut['gates'] if gate['name'] == g.LIVE_PROBES_GATE]
+        from run_deploy_live_probes import PROBE_NAMES
+        self.assertEqual(list(PROBE_NAMES), live['checks'])
+        stability, = [gate for gate in cut['gates'] if gate['name'] == g.STABILITY_GATE]
+        self.assertEqual(str(g.LOCAL_STABILITY_LOAD_WORKERS),
+                         stability['command'][stability['command'].index('--load-workers') + 1])
 
 
 class Memory(unittest.TestCase):
@@ -1106,6 +1162,70 @@ class RunMemory(Fixture):
         self.assertEqual(2, code)
         self.assertEqual(['init', 'begin', 'finish'], self.sampler.events)
 
+
+
+
+class CpuHeadroom(unittest.TestCase):
+    """Host gates wait (bounded) for CPU headroom instead of starting on a saturated shared box."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.proc = Path(self.tmp.name)
+        (self.proc / 'uptime').write_text('1000.0 0.0\n')
+        self.now = [0.0]
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def run_wait(self, loads, **kwargs):
+        sequence = iter(loads)
+
+        def load(proc):
+            return next(sequence), 8
+
+        def sleep(seconds):
+            self.now[0] += seconds
+
+        out = io.StringIO()
+        with patch.object(g, 'load_per_cpu', load), redirect_stdout(out):
+            result = g.wait_for_cpu_headroom(self.proc, clock=lambda: self.now[0], sleep=sleep, **kwargs)
+        return result, out.getvalue()
+
+    def test_idle_host_starts_immediately_without_output(self):
+        result, out = self.run_wait([0.4])
+        self.assertEqual({'load_per_cpu': 0.4, 'cpus': 8, 'waited_seconds': 0.0, 'headroom': True}, result)
+        self.assertEqual('', out)
+
+    def test_saturated_host_waits_until_load_drops(self):
+        result, out = self.run_wait([2.2, 1.6, 0.9], poll=15)
+        self.assertTrue(result['headroom'])
+        self.assertEqual(30.0, result['waited_seconds'])
+        self.assertIn('DEPLOY_GATES CPU wait: load 17.6 on 8 CPUs exceeds 8', out)
+        self.assertNotIn('WARNING', out)
+
+    def test_wait_is_bounded_and_then_starts_with_a_warning(self):
+        result, out = self.run_wait([3.0] * 100, max_wait=60, poll=15)
+        self.assertFalse(result['headroom'])
+        self.assertEqual(60.0, result['waited_seconds'])
+        self.assertIn('DEPLOY_GATES CPU WARNING: load 24.0 on 8 CPUs still exceeds 8 after 60 s', out)
+
+    def write_proc(self, pid, name, cpu_ticks):
+        folder = self.proc / pid
+        folder.mkdir(exist_ok=True)
+        fields = ['S', '1'] + ['0'] * 9 + [str(cpu_ticks), '0'] + ['0'] * 6 + ['0']
+        (folder / 'stat').write_text(f'{pid} ({name}) ' + ' '.join(fields))
+        (folder / 'cmdline').write_bytes(f'{name}\0--flag'.encode())
+
+    def test_busiest_processes_ranks_by_cpu_used_during_the_sample(self):
+        ticks = os.sysconf('SC_CLK_TCK')
+        self.write_proc('11', 'repack', 0)
+        self.write_proc('12', 'daemon', 10_000 * ticks)  # huge lifetime total, idle now
+
+        def sleep(seconds):
+            self.write_proc('11', 'repack', int(1.8 * ticks * seconds))
+
+        rows = g.busiest_processes(self.proc, sleep=sleep)
+        self.assertEqual(['pid 11 180% repack --flag'], rows)
 
 if __name__ == '__main__':
     unittest.main()

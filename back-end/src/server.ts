@@ -32,6 +32,9 @@ import browserSessionRouter from './domains/browser-session/routes';
 import browserWorldRouter from './domains/browser-world/routes';
 import peopleRouter from './domains/people/routes';
 import integrationsRouter from './domains/integrations/routes';
+import { createCliIntegrationRoutes } from './domains/integrations/routes.cli';
+import { createAgent as createCliSetupAgent } from './domains/agents/agentLifecycleService';
+import { createAgentSchema as cliSetupAgentSchema } from './domains/agents/types';
 import authRouter from './domains/auth/routes';
 import authOptionsRouter from './domains/auth-options/routes';
 import authAssistanceRouter from './domains/auth-assistance/routes';
@@ -48,6 +51,8 @@ import codexCodeRouter from './domains/codex-code/routes';
 import billingRouter from './domains/billing/routes';
 import apiKeysRouter from './domains/api-keys/routes';
 import smsWebhookRouter from './domains/sms-webhook/routes';
+import { routeToSupervisor, handleClearCommand } from './domains/sms-webhook/service';
+import { createLinqWebhookRouter } from './domains/linq-webhook/routes';
 import whatsappWebhookRouter from './domains/whatsapp-webhook/routes';
 import credentialPropagationRouter from './domains/credential-propagation/routes';
 import purchasesRouter, { agentCardWebhookHandler } from './domains/purchases/routes';
@@ -74,6 +79,10 @@ import plannerMemoryRouter from './domains/planner-memory/routes';
 import userUiRouter, { usercontentRouter } from './domains/user-ui/routes';
 import agentToolsRouter, { agentQuestionsRouter } from './domains/agent-tools/routes';
 import projectsRouter from './domains/projects/routes';
+import foldersRouter from './domains/projects/routes.topFolders';
+import teamsRouter from './domains/teams/routes';
+import * as teamsService from './domains/teams/service';
+import { registerTeamAccess } from './providers/teamAccess';
 import worldModelsRouter from './domains/world-models/routes';
 import slackAutoRcaRouter from './domains/slack-auto-rca/routes';
 import downloadTelemetryRouter from './domains/download-telemetry/routes';
@@ -121,6 +130,7 @@ if (!process.env.BACKEND_API_KEY) {
 // bridge so the SMS supervisor and web chat search user data without a
 // provider→domain import.
 registerUserDataGrep(userDataGrep);
+registerTeamAccess(teamsService);
 // SMS and chat have no connect gate: they report unconnected sources themselves.
 registerUserDataGrepTool(executeGatelessGrepTool);
 
@@ -130,6 +140,9 @@ const PORT = process.env.PORT || 3001;
 // Webhooks must be mounted BEFORE express.json() middleware
 // (Stripe requires raw body for signature verification)
 app.use('/webhooks', webhooksRouter);
+
+// Linq authenticates exact bytes; its bounded raw parser must precede global JSON parsing.
+app.use('/api/linq', createLinqWebhookRouter({ routeToSupervisor, handleClearCommand }));
 
 // SMS Webhook from Surge (JSON body, preserve raw body for HMAC signature verification)
 app.use(
@@ -281,6 +294,12 @@ if (process.env.BLACKBOX_TEST_CAPTURE_OUTBOUND === '1') {
 
 // Health check endpoint (no auth required)
 app.get('/health', (req, res) => {
+  if (Reflect.get(globalThis, Symbol.for('rose.test.kernelProxyCustody')) === true) {
+    res.setHeader('X-Rose-Kernel-Proxy-Custody', 'enforced-v1');
+  }
+  if (Reflect.get(globalThis, Symbol.for('rose.test.kernelResourceCustody')) === true) {
+    res.setHeader('X-Rose-Kernel-Resource-Custody', 'enforced-v1');
+  }
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
@@ -515,6 +534,17 @@ app.use('/api/claude-code-session', claudeCodeRouter);
 app.use('/api/local-devices', localDevicesRouter);
 app.use('/api/codex-code-session', codexCodeRouter);
 app.use('/api/people', peopleRouter);
+app.use(
+  '/api/integrations/cli',
+  createCliIntegrationRoutes(async ({ userId, agentId, goal }) => {
+    await createCliSetupAgent(
+      cliSetupAgentSchema.parse({ agent_id: agentId, goal, start_phase: 'execute' }),
+      userId,
+      false,
+      null
+    );
+  })
+);
 app.use('/api/integrations', integrationsRouter);
 app.use('/api/compute-accounts', computeGrantsRouter);
 app.use('/api/billing', billingRouter);
@@ -537,6 +567,8 @@ app.use('/api/planner-memory', plannerMemoryRouter); // Planner memory history t
 app.use('/api/user-ui', userUiRouter); // Per-user rose_user_ui versions (publish/activate/active)
 app.use('/api/agent-tools', agentToolsRouter); // display / messages / approvals for agents + code-agent sandboxes
 app.use('/api/projects', projectsRouter); // Owner-scoped Projects: settings, env files, codebase sync
+app.use('/api/folders', foldersRouter); // Folders: user-facing alias of Projects (no repo)
+app.use('/api/teams', teamsRouter);
 app.use('/api/world-models', worldModelsRouter); // WMH-compatible simulation runtime shim
 // Anthropic tee-proxy for the code agent. Mounted OUTSIDE /api so the injected
 // ANTHROPIC_BASE_URL = <backend>/anthropic-proxy/<goalHash> resolves to /v1/messages.

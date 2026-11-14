@@ -232,12 +232,17 @@ class _Reader:
             s.charged = old_charge
 
 
-def read_run_artifact(path, expected_sha256, limit, *, raw_limit=None, deadline=None, raw_remaining=None):
+def read_run_artifact(path, expected_sha256, limit, *, raw_limit=None, deadline=None, raw_remaining=None, raw_aggregate_limit=None, expected_size=None):
     """Higher raw_limit is explicit and caller-bound; the generic default stays unchanged."""
     checkpoint(deadline)
+    if expected_size is not None and (type(expected_size) is not int or expected_size <= 0):
+        raise ValueError('native artifact: invalid exact-size contract')
     raw_limit = MAX_RECEIPT_BYTES if raw_limit is None else raw_limit
     if type(raw_limit) is not int or raw_limit <= 0 or type(limit) is not int or limit <= 0:
         raise ValueError('native artifact: invalid byte contract')
+    aggregate_limit = raw_limit if raw_aggregate_limit is None else raw_aggregate_limit
+    if type(aggregate_limit) is not int or aggregate_limit <= 0:
+        raise ValueError('native artifact: invalid aggregate byte contract')
     path = Path(path)
     if not path.is_absolute() or path.resolve(strict=True) != path or path.is_symlink():
         raise ValueError('native artifact: canonical regular file required')
@@ -248,10 +253,12 @@ def read_run_artifact(path, expected_sha256, limit, *, raw_limit=None, deadline=
             raise ValueError('native artifact: regular fd required')
         if not 0 < before.st_size <= raw_limit:
             raise ValueError('native artifact: raw file byte bound exceeded (proof file too large)')
+        if expected_size is not None and before.st_size != expected_size:
+            raise ValueError('native artifact: exact raw file size mismatch')
         if raw_remaining is not None:
             if (not isinstance(raw_remaining, list) or len(raw_remaining) != 1
                     or type(raw_remaining[0]) is not int
-                    or not 0 <= raw_remaining[0] <= raw_limit
+                    or not 0 <= raw_remaining[0] <= aggregate_limit
                     or before.st_size > raw_remaining[0]):
                 raise ValueError('native artifact: aggregate raw admission bound exceeded')
             raw_remaining[0] -= before.st_size  # Charge the verified FD, not a racy path stat.

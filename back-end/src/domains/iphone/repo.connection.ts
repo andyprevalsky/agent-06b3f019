@@ -11,7 +11,9 @@ import {
   type PhoneConnectionReservation,
 } from '../../providers/phoneConnectionState';
 import { setupProgress } from '../../providers/phoneSetupVerification';
+import { resumedPrivacy } from './privacy';
 import * as leases from './repo';
+import { accessRequested } from './repo.accessRequest';
 import { IPhoneError, type IPhoneDevice, type Transaction } from './types';
 
 // A paused setup agent is not driving setup (and no longer holds the phone), so it must not
@@ -23,10 +25,12 @@ async function activeSetup(tx: Transaction, userId: string, id: string | undefin
     where: { id },
     select: { status: true, userId: true, deletedAt: true },
   });
-  if (agent && (agent.userId !== userId || agent.deletedAt !== null))
+  if (agent && agent.userId !== userId)
     throw new IPhoneError(409, 'iPhone setup agent is unavailable');
   // The encrypted reservation is committed before normal creation starts.
-  return agent === null || !inactive.includes(agent.status);
+  if (agent === null) return true;
+  // An owner-deleted setup agent is an ended setup: Connect starts a fresh one.
+  return agent.deletedAt === null && !inactive.includes(agent.status);
 }
 /** Connection screen projection: stored checks as ordered steps plus the setup browser task. */
 async function withProgress(
@@ -36,8 +40,9 @@ async function withProgress(
   device: IPhoneDevice | null,
   state: SetupState | null
 ) {
+  const requested = await accessRequested(tx, userId);
   if (dto.status === 'not_connected' || device === null || state === null)
-    return { ...dto, setupProgress: null, setupTaskId: null };
+    return { ...dto, accessRequested: requested, setupProgress: null, setupTaskId: null };
   const task =
     dto.setupAgentId === null
       ? null
@@ -48,6 +53,7 @@ async function withProgress(
         });
   return {
     ...dto,
+    accessRequested: requested,
     setupProgress: setupProgress(connectionVerification(device, state), {
       status: dto.status,
       setupState: device.setupState,
@@ -87,9 +93,10 @@ export async function connection(userId: string) {
 }
 export async function reserve(userId: string, expectedRevision: number, requestKey: string) {
   return leases.transaction(async (tx) => {
-    const { device, enabled } = await leases.lockedDevice(tx, userId);
-    if (!enabled || !(await leases.accountPermitted(tx, userId)))
+    if (!(await leases.accountPermitted(tx, userId)))
       throw new IPhoneError(403, 'iPhone access denied');
+    const { device, enabled } = await leases.lockedDevice(tx, userId);
+    if (!enabled) throw new IPhoneError(403, 'iPhone access denied');
     const state = setupState(device.setupEncrypted);
     const owner = await tx.user.findUniqueOrThrow({ where: { userId }, select: { phone: true } });
     if (state.expectedPhone !== undefined && state.expectedPhone !== owner.phone)
@@ -113,14 +120,30 @@ export async function reserve(userId: string, expectedRevision: number, requestK
       requestKey,
       active
     );
-    if (!result.reused)
+    if (!result.reused) {
+      // Connect is the owner's explicit hand-off of the phone to setup, so it resumes a private
+      // phase left by an ended session (known values stay for redaction). While any lease still
+      // holds the phone or an operation (including an UNKNOWN private input) keeps device
+      // custody, the phase is left alone.
+      const holder = await tx.iPhoneLease.findFirst({
+        where: { deviceId: device.id, status: 'ACTIVE' },
+        select: { id: true },
+      });
+      const custody = await tx.iPhoneOperation.findUnique({
+        where: { activeDeviceId: device.id },
+        select: { id: true },
+      });
       await tx.iPhoneDevice.update({
         where: { id: device.id },
         data: {
           setupEncrypted: sealSetup(state),
           setupState: 'not_started',
+          ...(holder === null && custody === null
+            ? { privateInputEncrypted: resumedPrivacy(device.privateInputEncrypted) }
+            : {}),
         },
       });
+    }
     return {
       dto: connectionDto({ ...device, setupState: 'not_started' }, state, true, true),
       reservation: result.reservation,

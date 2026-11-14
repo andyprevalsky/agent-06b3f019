@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Regression for scripts/run-deploy-semantic-stack.sh, the versioned Group 4
 # semantic lane (the former deploy.md Steps 5, 6b, 6c, kept in
-# .claude/commands/DEPRECATED_deploy.md; `run_deploy_pipeline.py plan
+# the former /deploy skill; `run_deploy_pipeline.py plan
 # --semantic-stack` / `--e2b-smoke`, follow-up 12, 2026-10-31). The script
 # must parse, refuse to run without its required environment before any side
 # effect (no sweep, no stack, no stage record), honour its three modes, carry
@@ -51,15 +51,19 @@ require_text "$SCRIPT" 'curl -sf --max-time 5 "$SMOKE_BASE_URL/health"' "readine
 EXPORT_LINE=$(grep -n '^export CONDUCTOR_WORKSPACE_NAME=' "$SCRIPT" | head -1 | cut -d: -f1)
 CONFIGURE_LINE=$(grep -n '^configure_deploy_local_env || exit 2' "$SCRIPT" | head -1 | cut -d: -f1)
 [ -n "$EXPORT_LINE" ] && [ -n "$CONFIGURE_LINE" ] && [ "$EXPORT_LINE" -lt "$CONFIGURE_LINE" ] || fail "CONDUCTOR_WORKSPACE_NAME fallback (line ${EXPORT_LINE:-?}) must precede configure_deploy_local_env (line ${CONFIGURE_LINE:-?})"
-require_text "$SCRIPT" 'BENCHMARK_BUNDLED_FRONTEND=true DISABLE_GMAIL_SYNC=1 BENCHMARK_SKIP_WMH_BUILD=1 WORKER_PROCESSES="$SEMANTIC_WORKER_PROCESSES" TRACE_ARCHIVE_ENABLED=0' "stack launch must keep the Step 5 environment (DEPRECATED_deploy.md)"
-# The worker count is overridable for memory-bounded hosts, but the Step 5 default (DEPRECATED_deploy.md) stays 8.
+require_text "$SCRIPT" 'BENCHMARK_BUNDLED_FRONTEND=true DISABLE_GMAIL_SYNC=1 BENCHMARK_SKIP_WMH_BUILD=1 WORKER_PROCESSES="$SEMANTIC_WORKER_PROCESSES" TRACE_ARCHIVE_ENABLED=0' "stack launch must keep the Step 5 environment (the former /deploy skill)"
+# The worker count is overridable for memory-bounded hosts, but the Step 5 default (the former /deploy skill) stays 8.
 require_text "$SCRIPT" 'SEMANTIC_WORKER_PROCESSES="${DEPLOY_SEMANTIC_WORKER_PROCESSES:-8}"' "the stack must default to the Step 5 WORKER_PROCESSES=8"
 [ "$(grep -Ec '(^|[[:space:]])WORKER_PROCESSES=' "$SCRIPT")" = 1 ] || fail "only the defaulted override may set the stack's WORKER_PROCESSES"
 require_text "$SCRIPT" 'bash scripts/run.sh --benchmark > .context/deploy-smoke.log 2>&1 &' "stack must be the Step 5 run.sh --benchmark launch"
+# 2026-11-11 (PR #1940): unroutable trycloudflare quick tunnels cost every Blacksmith run ~3.5 min and the
+# gate's 1800 s deadline cancelled runs whose UI and latency stages had passed. Go straight to run.sh's
+# run-scoped ngrok endpoint (zero quick-tunnel attempts), never the shared workspace domain.
+require_text "$SCRIPT" 'BENCHMARK_SKIP_PUBLIC_TUNNEL=0 BENCHMARK_EPHEMERAL_PUBLIC_TUNNEL=1 CLOUDFLARE_TUNNEL_MAX_ATTEMPTS=0' "the semantic stack must not spend its gate deadline on quick-tunnel retries"
 # 2026-11-07: every deploy's gate VM derived the same reserved ngrok domain, so a
 # concurrent deploy holding it killed this stack before readiness. No semantic spec
 # uses a public origin: the stack must start without a tunnel.
-require_text "$SCRIPT" 'BENCHMARK_SKIP_PUBLIC_TUNNEL=1 BENCHMARK_BUNDLED_FRONTEND=true' "the semantic stack must not contend for a shared public tunnel"
+# Public callback behavior is verified by the real launcher/helper fixture below.
 require_text "$SCRIPT" 'configure_deploy_local_env || exit 2' "the deploy environment library must gate every mode"
 require_text "$SCRIPT" 'bash scripts/resolve-deploy-stack-db.sh' "E2B smoke must prefer the running stack's database port"
 forbid_text "$SCRIPT" 'BLACKBOX_TEST_REPLAY_OUTBOUND=1' "the semantic stack stays capture-only"
@@ -175,7 +179,7 @@ expect_exit 2 env CONDUCTOR_PORT="$closed_base" bash scripts/run-deploy-semantic
 expect_output "E2B smoke: Postgres is not ready on localhost:65534" "a running stack manifest supplies the database port"
 [ ! -e "$SWEEP_MARKER" ] || fail "E2B-only mode must never sweep the worktree"
 
-# 5. The E2B gate's own verdict (Step 6c, DEPRECATED_deploy.md L2133-2148). PASS needs exit 0, the summary line
+# 5. The E2B gate's own verdict (Step 6c, the former /deploy skill). PASS needs exit 0, the summary line
 #    `PASS  smoke -- Claude Code answers 2+2 (real E2B sandbox)` and an observed CLAUDE_E2B_DONE from
 #    a real sandbox. A credential/billing block only the user can fix is a loud SKIPPED with its
 #    evidence (exit 1, never PASS); every other no-sandbox path is FAIL.
@@ -252,5 +256,160 @@ expect_output "E2B_SMOKE_VERDICT FAIL" "any other failing case keeps the gate FA
 run_e2b_case 143 "$CREDENTIAL_LOG" 143
 expect_output "E2B_SMOKE_VERDICT FAIL" "an interrupted runner is not a SKIPPED and keeps its native exit"
 [ ! -e "$SWEEP_MARKER" ] || fail "E2B-only mode must never sweep the worktree"
+
+# 6. The actual launcher environment must give the real tools producer a
+# run-owned public callback while the frontend/DB/workspace remain local.
+cp "$ROOT_DIR/scripts/lib/ngrok-tunnel.sh" "$FIXTURE/scripts/lib/"
+python3 - "$ROOT_DIR/scripts/run.sh" "$FIXTURE/.context/tunnel-functions.sh" <<'PY'
+from pathlib import Path
+import sys
+text=Path(sys.argv[1]).read_text();chunks=[]
+for name in ('dns_label_from_workspace','ngrok_reported_owned_origin','start_ngrok_ephemeral_tunnel','reap_failed_ngrok_tunnel','start_public_tunnel'):
+ start=text.index(name+'() {');end=text.index('\n}',start)+2;chunks.append(text[start:end])
+Path(sys.argv[2]).write_text('\n\n'.join(chunks)+'\n')
+start=text.index('if [ "${BENCHMARK_SKIP_PUBLIC_TUNNEL:-}" = "1" ]; then', text.index('# Public URL flow:'))
+end=text.index('export_sandbox_backend_base_url',start)+len('export_sandbox_backend_base_url')
+Path(sys.argv[2]).with_name('tunnel-flow.sh').write_text(text[start:end]+'\n')
+start=text.index('if [ "${DISABLE_FAST_MODE_PROXY:-}" = "1" ]; then',end)
+end=text.index('unset FAST_MODE_CODEX_PROXY_URL',start)+len('unset FAST_MODE_CODEX_PROXY_URL')
+Path(sys.argv[2]).with_name('proxy-flow.sh').write_text(text[start:end]+'\n')
+PY
+cat > "$SHIMS/curl" <<'TOOL'
+#!/usr/bin/env bash
+[ -f .context/services.json ]
+TOOL
+chmod +x "$SHIMS/curl"
+cat > "$FIXTURE/scripts/run-deploy-stage" <<'STAGE'
+#!/usr/bin/env bash
+exit 0
+STAGE
+cat > "$FIXTURE/scripts/run.sh" <<'STACK'
+#!/usr/bin/env bash
+set -euo pipefail
+. scripts/lib/workspace-env.sh
+. scripts/lib/ngrok-tunnel.sh
+. .context/tunnel-functions.sh
+RUN_CONTEXT_DIR="$PWD/.context/tunnel-fixture"
+mkdir -p "$RUN_CONTEXT_DIR"
+FRONTEND_PORT=$((CONDUCTOR_PORT + 1)); BACKEND_URL="http://localhost:$CONDUCTOR_PORT"; export BACKEND_URL
+ALLOWED_ORIGINS="http://localhost:$FRONTEND_PORT"
+PIDS=(999999); NAMES=(protected)
+NGROK_AUTHTOKEN=offline-fixture; NGROK_API_KEY=offline_fixture
+ensure_ngrok_domain_reserved() { echo RESERVATION >> "$RUN_CONTEXT_DIR/actions"; return 1; }
+start_cloudflare_quick_tunnel() { return 1; }
+start_ngrok_public_tunnel() { echo SHARED_FALLBACK >> "$RUN_CONTEXT_DIR/actions"; return 1; }
+ngrok_tunnel_edge_is_routing() { printf 'edge %s %s\n' "$1" "$2" >> "$RUN_CONTEXT_DIR/actions"; }
+# The fixture reports an endpoint only; no callback or model response is synthesized.
+ngrok() {
+ local port="$2" domain=""; shift 2
+ while [ "$#" -gt 0 ]; do if [ "$1" = --domain ]; then domain="$2"; shift; fi; shift; done
+ [ "${TEST_TUNNEL_FAIL:-0}" != 1 ] || domain=foreign.example.test
+ printf '{"msg":"started tunnel","obj":"tunnels","name":"command_line","url":"https://%s","addr":"http://localhost:%s"}\n' "$domain" "$port"
+}
+kill() { [ "${1:-}" = -0 ] || printf 'cleanup %s\n' "$1" >> "$RUN_CONTEXT_DIR/actions"; }
+trap 'reap_failed_ngrok_tunnel' EXIT
+. .context/tunnel-flow.sh
+. .context/proxy-flow.sh
+if [ -n "${BENCHMARK_PUBLIC_TUNNEL_RUN_ID:-}" ]; then
+ public_tunnel_process_is_required ngrok 1
+ ! public_tunnel_process_is_optional ngrok 1
+fi
+AGENT_TOOLS_TOKEN_SECRET=offline-fixture-only TSX_DISABLE_CACHE=1 NODE_DISABLE_COMPILE_CACHE=1 \
+ node --import "$PRODUCER_TSX_IMPORT" -e '
+const {withAgentTools}=require(process.env.PRODUCER_SOURCE);
+const w=withAgentTools(null,{userId:"fixture",agentId:"fixture-root",taskId:"fixture-task",provider:"codex",roseDesktop:false});
+console.log(JSON.stringify({callback:w.envs.ROSE_TOOLS_URL,backend:process.env.BACKEND_URL,workspace:process.env.CONDUCTOR_WORKSPACE_NAME,queue:process.env.TEMPORAL_TASK_QUEUE,frontend:process.env.SMOKE_FRONTEND_URL,db_port:process.env.LOCAL_DB_PORT,usercontent:process.env.USERCONTENT_BASE_URL,anthropic_proxy:process.env.FAST_MODE_ANTHROPIC_PROXY_URL,codex_proxy:process.env.FAST_MODE_CODEX_PROXY_URL,proxy_disabled:process.env.DISABLE_FAST_MODE_PROXY}));
+' > "$RUN_CONTEXT_DIR/producer.log"
+reap_failed_ngrok_tunnel
+[ "${PIDS[*]}" = 999999 ] && [ "${NAMES[*]}" = protected ]
+printf '{"status":"running","ports":{"backend":%s},"database":{"runtime_port":%s}}\n' "$CONDUCTOR_PORT" "$((CONDUCTOR_PORT+5))" > .context/services.json
+trap 'exit 0' TERM
+while :; do sleep 0.1; done
+STACK
+chmod +x "$FIXTURE/scripts/run.sh"
+callback_for_run() {
+ rm -f "$FIXTURE/.context/tunnel-fixture/actions" "$FIXTURE/.context/tunnel-fixture/producer.log" "$FIXTURE/.context/services.json"
+ expect_exit 0 env -u USERCONTENT_BASE_URL -u PUBLIC_BASE_URL ROSE_UI_PUBLISH_BASE_URL="${2:-}" \
+  CONDUCTOR_PORT=40000 CONDUCTOR_WORKSPACE_NAME=same-workspace ROSE_TRUST_CONDUCTOR_WORKSPACE_NAME=1 \
+  DEPLOY_SEMANTIC_TOKEN="$1" PATH="$SHIMS:$PATH" PRODUCER_TSX_IMPORT="$ROOT_DIR/node_modules/tsx/dist/loader.mjs" PRODUCER_SOURCE="$ROOT_DIR/back-end/src/providers/agentTools/workspace.ts" \
+  bash scripts/run-deploy-semantic-stack.sh
+ python3 - "$FIXTURE/.context/tunnel-fixture/producer.log" "$FIXTURE/.context/tunnel-fixture/actions" <<'PY'
+from pathlib import Path
+from urllib.parse import urlsplit
+import json,sys
+rows=[json.loads(x) for x in Path(sys.argv[1]).read_text().splitlines() if x.startswith('{')];r=rows[-1];u=urlsplit(r['callback']);actions=Path(sys.argv[2]).read_text() if Path(sys.argv[2]).exists() else ''
+assert u.scheme=='https' and u.hostname and u.hostname!='rose-rose.ngrok.app',r
+assert u.path=='/api/agent-tools/fixture-root',u.path
+assert r['backend']=='http://localhost:40000' and r['workspace']=='same-workspace',r
+assert r['queue'].startswith('navi-agent-tasks-same-workspace-deploy-'),r
+assert r['anthropic_proxy']=='' and r.get('codex_proxy') is None and r['proxy_disabled']=='1',r
+assert r['frontend']=='http://localhost:40001' and r['db_port']=='40005' and r['usercontent']=='http://localhost:40000',r
+assert 'RESERVATION' not in actions and 'SHARED_FALLBACK' not in actions,actions
+assert f'edge https://{u.hostname} 40001' in actions and 'cleanup ' in actions,actions
+print(u.hostname)
+PY
+}
+FIRST=$(callback_for_run aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa)
+SECOND=$(callback_for_run bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb)
+[ "$FIRST" != "$SECOND" ] || fail "distinct runs must own distinct tunnel domains"
+echo "callback-origin fixture: $FIRST / $SECOND; no reservation; local identity and owned cleanup preserved"
+# Foreign provider output must fail closed; never reuse a shared reserved name.
+rm -f "$FIXTURE/.context/services.json"
+expect_exit 1 env -u ROSE_UI_PUBLISH_BASE_URL -u PUBLIC_BASE_URL CONDUCTOR_PORT=40000 \
+ DEPLOY_SEMANTIC_TOKEN=cccccccccccccccccccccccccccccccc TEST_TUNNEL_FAIL=1 PATH="$SHIMS:$PATH" \
+ PRODUCER_TSX_IMPORT="$ROOT_DIR/node_modules/tsx/dist/loader.mjs" PRODUCER_SOURCE="$ROOT_DIR/back-end/src/providers/agentTools/workspace.ts" bash scripts/run-deploy-semantic-stack.sh
+! grep -qE 'RESERVATION|SHARED_FALLBACK' "$FIXTURE/.context/tunnel-fixture/actions" || fail "run-scoped failure touched a shared reservation"
+
+
+
+# Scoped callback ownership: reject inherited loopback/foreign origins before publication.
+for inherited in http://localhost:40000 https://foreign.example.test; do
+ rm -f "$FIXTURE/.context/services.json" "$FIXTURE/.context/tunnel-fixture/producer.log"
+ expect_exit 1 env -u PUBLIC_BASE_URL ROSE_UI_PUBLISH_BASE_URL="$inherited" \
+  CONDUCTOR_PORT=40000 DEPLOY_SEMANTIC_TOKEN=dddddddddddddddddddddddddddddddd PATH="$SHIMS:$PATH" \
+  PRODUCER_TSX_IMPORT="$ROOT_DIR/node_modules/tsx/dist/loader.mjs" PRODUCER_SOURCE="$ROOT_DIR/back-end/src/providers/agentTools/workspace.ts" \
+  bash scripts/run-deploy-semantic-stack.sh
+ grep -Fq 'Run-scoped callback origin must match the owned public tunnel' "$FIXTURE/.context/deploy-smoke.log" || fail 'foreign inherited callback must fail closed'
+ [ ! -e "$FIXTURE/.context/tunnel-fixture/producer.log" ] || fail 'foreign override reached tools producer'
+ [ ! -e "$FIXTURE/.context/services.json" ] || fail 'foreign override published services'
+ grep -q '^cleanup ' "$FIXTURE/.context/tunnel-fixture/actions" || fail 'failed override did not clean owned tunnel'
+done
+MATCHING=$(callback_for_run aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa "https://$FIRST/")
+[ "$MATCHING" = "$FIRST" ] || fail 'matching scoped origin with trailing slash must remain valid'
+# Native semantic startup must select the existing canonical seed consumer.
+# The fake child exits before services start; these cases only inspect the actual
+# launch environment and the production cache-selection helper.
+cat > "$FIXTURE/scripts/run.sh" <<'SEED_CHILD'
+#!/usr/bin/env bash
+printf '%s\n%s\n' "${BENCHMARK_SEED_DUMP:-}" "${BENCHMARK_REQUIRE_SEED_DUMP:-}" > "$FAKE_SEED_ENV"
+exit 7
+SEED_CHILD
+for tool in curl sleep; do printf '#!/usr/bin/env bash\nexit 1\n' > "$SHIMS/$tool"; chmod +x "$SHIMS/$tool"; done
+. "$ROOT_DIR/scripts/lib/seed-cache.sh"
+seed_case() {
+    local expected_dump="$1" token="$2" configured="$3" native_flag
+    rm -f "$FIXTURE/.context/seed-env"
+    expect_exit 1 env -u DEPLOY_SEMANTIC_TOKEN -u DEPLOY_SEMANTIC_ARTIFACT_DIR \
+        -u BENCHMARK_SEED_DUMP -u BENCHMARK_REQUIRE_SEED_DUMP \
+        CONDUCTOR_PORT=40000 PATH="$SHIMS:$PATH" FAKE_SEED_ENV="$FIXTURE/.context/seed-env" \
+        DEPLOY_SEMANTIC_TOKEN="$token" BENCHMARK_SEED_DUMP="$configured" BENCHMARK_REQUIRE_SEED_DUMP=0 \
+        bash scripts/run-deploy-semantic-stack.sh
+    [ -f "$FIXTURE/.context/seed-env" ] || fail "seed case never reached its fake run.sh"
+    mapfile -t seed_env < "$FIXTURE/.context/seed-env"
+    [ "${seed_env[0]}" = "$expected_dump" ] || fail "canonical path missing or configured path replaced"
+    native_flag=0
+    [ -z "$token" ] || native_flag=1
+    [ "${seed_env[1]}" = "$native_flag" ] || fail "native canonical requirement not enforced or manual caller changed"
+}
+seed_case "$FIXTURE_PHYS/.context/seed-cache/semantic-base.dump" native-token ''
+seed_case "$FIXTURE_PHYS/configured-seed.dump" native-token "$FIXTURE_PHYS/configured-seed.dump"
+seed_case '' '' ''
+seed_case "$FIXTURE_PHYS/manual-seed.dump" '' "$FIXTURE_PHYS/manual-seed.dump"
+# A missing object must be requested, never silently treated as a valid restore;
+# the native child's REQUIRE=1 makes run.sh refuse its existing cold-sync branch.
+[ "$(seed_cache_decision "$FIXTURE_PHYS/missing.dump" schema 1 canonical)" = consult-remote ] \
+    || fail "missing canonical object must consult remote cache"
+require_text "$ROOT_DIR/scripts/run.sh" 'if [ "${BENCHMARK_REQUIRE_SEED_DUMP:-0}" = "1" ] && [ "$_SEED_DECISION" != "restore-local" ]; then' \
+    "required unavailable canonical fixture must fail closed before cold-sync"
 
 echo "run-deploy-semantic-stack: all checks passed"

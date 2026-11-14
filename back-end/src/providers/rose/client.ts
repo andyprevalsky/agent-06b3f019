@@ -49,7 +49,7 @@ import { buildOpenAiResponseFormat } from './schema';
 import type { CompletionChunk, CompletionOptions, RoseStreamChunk } from './types';
 import { withNativeToolContract } from './transforms';
 import { waterfallComplete } from './waterfall';
-import { dumpLlmContext, updateLlmDump } from '../llmDump';
+import { startLlmCapture, finishLlmCapture, type LlmCapture } from '../llmDump';
 import { exclusiveOpenRouterWaterfall } from './openrouterRoute';
 import { PreContentFallThroughError, runWithFallThrough } from './fallThroughStream';
 import { exclusiveCerebrasCompletion, POOL_CEREBRAS_IDLE_TIMEOUT_MS } from './cerebrasRoute';
@@ -154,11 +154,12 @@ interface WrapOptions {
   callSite: string;
 }
 
+/** Normalize provider chunks and finalize opted-in capture on completion, error or close. */
 async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
   const poolSpec = getPool(opts.pool);
   const startedAt = Date.now();
   const acc = createStreamAccumulator();
-  let dumpPath: string | null = null;
+  let dumpCapture: LlmCapture | null = null;
 
   // OpenAI-dialect legs receive a tool-envelope response_model as native tools.
   // Anthropic legs extract the same tools from response_format themselves.
@@ -170,9 +171,10 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
   };
 
   if (opts.options.dump_context) {
-    dumpPath = dumpLlmContext({
+    dumpCapture = startLlmCapture({
       call_site: opts.options.dump_context.call_site,
       agent_id: opts.options.dump_context.agent_id,
+      root_agent_id: opts.options.dump_context.root_agent_id,
       model: opts.options.model,
       message_count: opts.options.messages.length,
       messages: opts.options.messages,
@@ -218,11 +220,11 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
 
   let dumpFinalized = false;
   const finalizeDump = (error?: unknown, consumerClosed = false) => {
-    if (!dumpPath || dumpFinalized) return;
+    if (!dumpCapture || dumpFinalized) return;
     dumpFinalized = true;
     const actualModelRaw = acc.metadata.actual_model || '';
     const actualModel = actualModelRaw ? dumpDisplayModel(actualModelRaw) : null;
-    updateLlmDump(dumpPath, {
+    finishLlmCapture(dumpCapture, {
       model: actualModel ?? opts.options.model,
       config: {
         actual_model: actualModel,

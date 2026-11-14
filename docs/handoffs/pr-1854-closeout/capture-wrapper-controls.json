@@ -1,0 +1,100 @@
+{
+  "wrapper_sha256": "ca1a6f64776fbb3f7391ed8787570eb49d7a92110f8ed0567bb51296ae7da192",
+  "cases": [
+    {
+      "case": "unchanged_full_inventory_accepted",
+      "pass": true
+    },
+    {
+      "case": "new_regular_file_after_readbacks",
+      "pass": true,
+      "rejected": "Inventory changed"
+    },
+    {
+      "case": "new_symlink_after_readbacks",
+      "pass": true,
+      "rejected": "Inventory changed"
+    },
+    {
+      "case": "new_empty_custody_directory_after_readbacks",
+      "pass": true,
+      "rejected": "Inventory changed"
+    },
+    {
+      "case": "added_ref_after_readbacks",
+      "pass": true,
+      "rejected": "Inventory changed"
+    },
+    {
+      "case": "normal_hardlink_metadata_recorded_and_verified",
+      "pass": true
+    },
+    {
+      "case": "later_source_link_metadata_drift",
+      "pass": true,
+      "rejected": "Evidence changed through authenticated upload/readbacks"
+    },
+    {
+      "case": "protected_alias_before_named_path_is_copied_without_inode_metadata_change",
+      "pass": true
+    },
+    {
+      "case": "preexisting_duplicate_inode_one_link_one_copy_both_verify",
+      "pass": true
+    },
+    {
+      "case": "protected_path_outside_rows_protects_its_inventoried_alias",
+      "pass": true
+    },
+    {
+      "case": "unique_tar_regular_members_byte_exact_roundtrip",
+      "pass": true
+    },
+    {
+      "case": "source_content_drift",
+      "pass": true,
+      "rejected": "Evidence changed through authenticated upload/readbacks"
+    },
+    {
+      "case": "mutable_BASE_manifest_cannot_certify_extra_path",
+      "pass": true
+    },
+    {
+      "case": "sealed_ref_tip_mismatch",
+      "pass": true,
+      "rejected": "Manifest ref tip differs from sealed bundle plan"
+    },
+    {
+      "case": "sealed_ref_key_missing",
+      "pass": true,
+      "rejected": "Manifest ref keys differ from sealed bundle plan"
+    },
+    {
+      "case": "sealed_bundle_hash_mismatch",
+      "pass": true,
+      "rejected": "Ref plan differs from archived bundle hash"
+    },
+    {
+      "case": "staged_manifest_overwrite",
+      "pass": true,
+      "rejected": "Pinned file changed"
+    },
+    {
+      "case": "included_wrapper_metadata_overwrite",
+      "pass": true,
+      "rejected": "Pinned file changed"
+    },
+    {
+      "case": "ctime_recorded_without_assuming_clock_tick_advance",
+      "pass": true,
+      "before": 1794272096806787589,
+      "after": 1794272096810787650
+    }
+  ],
+  "all_passed": true,
+  "case_count": 19,
+  "archive_invoked": false,
+  "provider_queries": false,
+  "canonical_source_or_state_modified": false,
+  "temporary_fixture_removed": true
+}

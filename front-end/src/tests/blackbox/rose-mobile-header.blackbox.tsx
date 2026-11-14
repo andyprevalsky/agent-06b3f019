@@ -207,14 +207,14 @@ describe('Rose mobile header (flag on, < 768px)', () => {
 });
 
 describe('Rose header frame beside the left bar (flag on, desktop)', () => {
-  it('centres the pill on the content area: its frame starts at the pinned bar offset', async () => {
+  it('keeps the header frame fixed when the sidebar is resized and pinned', async () => {
     setViewport(1440, 900);
     await renderTerminal();
     const banner = screen.getByRole('banner');
     const frame = screen.getByTestId('terminal-header-frame');
     expect(banner.parentElement).toBe(frame);
     expect(banner.className).toContain('left-1/2');
-    expect(frame.className).toContain('md:left-[var(--rose-bar-offset,0px)]');
+    expect(frame.className).toContain('md:left-[64px]');
     expect(document.documentElement.style.getPropertyValue('--rose-bar-offset')).toBe('64px');
 
     const handle = screen.getByTestId('rose-sidebar-resize-handle');
@@ -228,6 +228,7 @@ describe('Rose header frame beside the left bar (flag on, desktop)', () => {
       fireEvent.pointerUp(window, { clientX: 420 });
     });
     expect(document.documentElement.style.getPropertyValue('--rose-bar-offset')).toBe('420px');
+    expect(frame.className).toContain('md:left-[64px]');
     expect(screen.getByRole('banner').parentElement).toBe(frame);
     localStorage.removeItem('rose-sidebar-width');
     localStorage.removeItem('rose-sidebar-pinned');

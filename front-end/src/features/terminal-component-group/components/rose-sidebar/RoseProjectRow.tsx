@@ -5,8 +5,8 @@
  *           every "+" (Home's too): tooltip and aria-label "Create Super Agent"
  *           icon = ProjectIcon: the GitHub repo owner's avatar when repoUrl is a
  *           GitHub repo, else (or after a load error) the folder (UI item 32)
- *   [REST] --folder-plus--> parent opens a one-level folder name editor
- *   [REST] --right-click--> [MENU] Rename project | Project settings | Delete project (red)
+ *   [REST] --folder-plus--> parent opens a one-level subfolder name editor
+ *   [REST] --right-click--> [MENU] Rename folder | Folder settings | Delete folder (red)
  *   [MENU] --Rename--> [RENAMING] inline input --Enter (non-empty)--> onRename(name) --> [REST]
  *                                              --Escape | blur--> [REST]
  *   [MENU] --Delete--> onRequestDelete (parent confirms in a dialog)
@@ -18,9 +18,9 @@
  * Clicking a project's icon toggles its contents; Home has the same control.
  * The composer labels the next agent's destination without decorating the icon.
  *
- * NewProjectRow: [IDLE] folder-plus · "New project" (collapsed: icon only, same top
+ * NewProjectRow: [IDLE] folder-plus · "New folder" (collapsed: icon only, same top
  *   slot, so expanding never shifts the rows below) --click--> [EDITING] inline input
- *   [EDITING] --Enter (non-empty)--> [CREATING] (POST /api/projects)
+ *   [EDITING] --Enter (non-empty)--> [CREATING] (POST /api/folders { name }; never a repo)
  *   [CREATING] --created | other failure (toast)--> [IDLE]
  *   [CREATING] --409 duplicate name--> [EDITING + inline error] (value kept)
  *   [EDITING + inline error] --type--> [EDITING] (error cleared)
@@ -149,11 +149,11 @@ function ProjectRowMenu(props: RoseProjectRowProps) {
     >
       <ContextMenuItem onSelect={props.onStartRename} className={MENU_ROW}>
         <Pencil className={icon} strokeWidth={1.7} />
-        Rename project
+        Rename folder
       </ContextMenuItem>
       <ContextMenuItem onSelect={props.onOpenSettings} className={MENU_ROW}>
         <SettingsIcon className={icon} strokeWidth={1.7} />
-        Project settings
+        Folder settings
       </ContextMenuItem>
       <ContextMenuSeparator className="mx-1.5 my-1 bg-gray-200/95 dark:bg-white/[0.07]" />
       <ContextMenuItem
@@ -161,7 +161,7 @@ function ProjectRowMenu(props: RoseProjectRowProps) {
         className={cn(MENU_ROW, 'text-[#e5484d] focus:text-[#e5484d]')}
       >
         <Trash2 className={MENU_ICON} strokeWidth={1.7} />
-        Delete project
+        Delete folder
       </ContextMenuItem>
     </ContextMenuContent>
   );
@@ -230,7 +230,7 @@ export default function RoseProjectRow(props: RoseProjectRowProps) {
         >
           <button
             type="button"
-            aria-label={`${props.contentsOpen === false ? 'Expand' : 'Collapse'} ${project.name} project`}
+            aria-label={`${props.contentsOpen === false ? 'Expand' : 'Collapse'} ${project.name} folder`}
             aria-expanded={props.contentsOpen !== false}
             aria-controls={`rose-project-group-${project.id}`}
             title={`${props.contentsOpen === false ? 'Expand' : 'Collapse'} ${project.name}`}
@@ -256,8 +256,8 @@ export default function RoseProjectRow(props: RoseProjectRowProps) {
               {props.onCreateFolder && (
                 <button
                   type="button"
-                  aria-label={`New folder in ${project.name}`}
-                  title="New folder"
+                  aria-label={`New subfolder in ${project.name}`}
+                  title="New subfolder"
                   onClick={props.onCreateFolder}
                   className={ICON_BUTTON}
                 >
@@ -266,8 +266,8 @@ export default function RoseProjectRow(props: RoseProjectRowProps) {
               )}
               <button
                 type="button"
-                aria-label={`${project.name} project settings`}
-                title="Project settings"
+                aria-label={`${project.name} folder settings`}
+                title="Folder settings"
                 onClick={props.onOpenSettings}
                 className={cn(ICON_BUTTON, 'ml-1')}
               >
@@ -311,7 +311,7 @@ export function HomeProjectRow({
     >
       <button
         type="button"
-        aria-label={`${contentsOpen ? 'Collapse' : 'Expand'} Home project`}
+        aria-label={`${contentsOpen ? 'Collapse' : 'Expand'} Home`}
         aria-expanded={contentsOpen}
         aria-controls="rose-project-group-home"
         title={`${contentsOpen ? 'Collapse' : 'Expand'} Home`}
@@ -348,7 +348,7 @@ export function NewProjectRow({
     return (
       <button
         type="button"
-        aria-label="+ New project"
+        aria-label="+ New folder"
         tabIndex={isExpanded ? 0 : -1}
         onClick={() => {
           setError(null);
@@ -360,7 +360,7 @@ export function NewProjectRow({
         )}
       >
         <FolderPlus className="h-5 w-5 flex-none" strokeWidth={1.7} />
-        <RowName isExpanded={isExpanded}>New project</RowName>
+        <RowName isExpanded={isExpanded}>New folder</RowName>
       </button>
     );
   }
@@ -372,7 +372,7 @@ export function NewProjectRow({
           strokeWidth={1.7}
         />
         <InlineNameInput
-          label="New project name"
+          label="New folder name"
           initial=""
           errorId={error === null ? undefined : NEW_PROJECT_ERROR_ID}
           onEdit={() => setError(null)}

@@ -95,6 +95,62 @@ export async function getOrgManagedCardholderId(userId: string): Promise<string 
     : undefined;
 }
 
+/** v2 user ids are a separate provider identity; legacy cardholder ids are never aliases. */
+export function getV2CredentialClientId(): string {
+  const id = process.env.AGENTCARD_ORG_OAUTH_CLIENT_ID?.trim();
+  if (!id) throw new Error('Missing AGENTCARD_ORG_OAUTH_CLIENT_ID for v2 identity scope');
+  return id;
+}
+
+export async function getV2ConnectedUserId(
+  userId: string,
+  deps: Pick<typeof repo, 'findConnectedConfig'> = repo
+): Promise<string | undefined> {
+  const clientId = process.env.AGENTCARD_ORG_OAUTH_CLIENT_ID?.trim();
+  if (!clientId) return undefined;
+  const config = configRecord(await deps.findConnectedConfig(userId));
+  const id = configRecord(config.v2Bindings)[clientId];
+  return typeof id === 'string' && id.trim() !== '' ? id : undefined;
+}
+
+export class AgentCardV2BindingConflictError extends Error {
+  constructor() {
+    super('AgentCard connection is already bound to a different user');
+    this.name = 'AgentCardV2BindingConflictError';
+  }
+}
+
+export async function saveV2ConnectedUserId(
+  userId: string,
+  v2UserId: string,
+  deps: Pick<typeof repo, 'bindV2UserExclusively'> = repo
+): Promise<void> {
+  if (userId.trim() === '' || v2UserId.trim() === '') {
+    throw new Error('Rose and AgentCard user ids are required');
+  }
+  const clientId = getV2CredentialClientId();
+  const result = await deps.bindV2UserExclusively(
+    userId,
+    v2UserId,
+    (existing) => {
+      const config = configRecord(existing);
+      const bindings = configRecord(config.v2Bindings);
+      // Reconnecting must not silently switch the identity owning existing cards.
+      if (typeof bindings[clientId] === 'string' && bindings[clientId] !== v2UserId) {
+        throw new AgentCardV2BindingConflictError();
+      }
+      return {
+        ...config,
+        v2UserId,
+        v2ClientId: clientId,
+        v2Bindings: { ...bindings, [clientId]: v2UserId },
+      } as Prisma.InputJsonObject;
+    },
+    clientId
+  );
+  if (result.conflictingUserId !== undefined) throw new AgentCardV2BindingConflictError();
+}
+
 export interface OrgOnboardingConfig {
   sessionId: string;
   setupUrl: string;
@@ -127,9 +183,10 @@ export async function getOrgOnboardingConfig(
 
 export async function saveOrgOnboardingConfig(
   userId: string,
-  onboarding: OrgOnboardingConfig
+  onboarding: OrgOnboardingConfig,
+  deps: Pick<typeof repo, 'findTokenConfig' | 'saveIntegrationConfig'> = repo
 ): Promise<void> {
-  const existing = configRecord(await repo.findTokenConfig(userId));
+  const existing = configRecord(await deps.findTokenConfig(userId));
   const config: Prisma.InputJsonObject = {
     ...existing,
     orgManaged: true,
@@ -137,7 +194,7 @@ export async function saveOrgOnboardingConfig(
     onboardingSetupUrl: onboarding.setupUrl,
     ...(onboarding.expiresAt !== undefined ? { onboardingExpiresAt: onboarding.expiresAt } : {}),
   } as Prisma.InputJsonObject;
-  await repo.saveIntegrationConfig(userId, config, false);
+  await deps.saveIntegrationConfig(userId, config, false);
 }
 
 export class AgentCardCardholderConflictError extends Error {

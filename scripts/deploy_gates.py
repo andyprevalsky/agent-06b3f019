@@ -65,6 +65,7 @@ def gate_deadline(gate: str) -> int:
 PREPARE_TIMEOUT_SECONDS = 3600
 PROVISION_JOBS = 4
 BACKEND_GATE = 'backend-coverage-blackbox'
+LIVE_PROBES_GATE = 'live-probes'
 CLOUD_GATE = 'smoke'
 CLOUD_SLOT = {'id': 'cloud-smoke-worker', 'transport': 'benchmark-cloud-cli'}
 SLOT_ENV = ('CONDUCTOR_WORKSPACE_NAME', 'CONDUCTOR_PORT')
@@ -84,6 +85,9 @@ RUNNABLE = {'quick', 'initial', 'focused', 'failed-gates', 'final'}
 STRUCTURAL_GATE, SEMANTIC_GATE = 'deploy-command-structural', 'semantic-stack'
 STRUCTURAL_WORKERS = 2  # standard template: run-deploy-structural-gates.py --max-workers 5
 SEMANTIC_WORKER_PROCESSES = 2  # run-deploy-semantic-stack.sh default: WORKER_PROCESSES=8
+# select_affected_tests.py --stability keeps nproc CPU load slots busy by default; on the local executor it
+# shares this host with the other gates, so its load is bounded. A Blacksmith VM runs it alone, unchanged.
+STABILITY_GATE, LOCAL_STABILITY_LOAD_WORKERS = 'new-test-stability', 2
 SEMANTIC_ENV = 'DEPLOY_SEMANTIC_WORKER_PROCESSES'
 # Executors (2026-11-06): Blacksmith VMs remove this host's memory/CPU queueing; local keeps the cuts above.
 EXECUTORS = ('blacksmith', 'local')
@@ -103,6 +107,8 @@ BLACKSMITH_RUNNERS = {
     'canonical-seed-whatsapp-content': 'blacksmith-2vcpu-ubuntu-2404',
     'live-probes': 'blacksmith-2vcpu-ubuntu-2404',
     'e2b-smoke': 'blacksmith-2vcpu-ubuntu-2404',
+    # Loads every CPU while it reruns new/changed tests 5x (select_affected_tests.py --stability).
+    'new-test-stability': 'blacksmith-8vcpu-ubuntu-2404',
 }
 DEFAULT_BLACKSMITH_RUNNER = 'blacksmith-4vcpu-ubuntu-2404'  # a gate added before it is sized here
 # The workflow sets the system-Postgres mode, trusted identity and checkout paths at job level; each VM is
@@ -227,10 +233,49 @@ def backend_recipe(root: Path, env: dict, timeout: float) -> dict:
     return handoff_recipe(aggregate, selection(root)[1], timeout)
 
 
+def live_probes_recipe(env: dict) -> dict:
+    """One case per live probe, run in PROBE_NAMES order (the worker runs cases one after another)."""
+    from run_deploy_live_probes import PROBE_NAMES
+    return {'cases': {name: {'command': ['python3', 'scripts/run_deploy_live_probes.py', '--only', name],
+                             'cwd': '.', 'env': dict(env), 'aggregate': False} for name in PROBE_NAMES}}
+
+
 def run_root(root: Path) -> Path:
     """The coordinator's deploy timing-run root (run-deploy-stage's DEPLOY_RUN_ROOT default)."""
     value = os.environ.get(RUN_ROOT_ENV)
     return Path(value).resolve() if value else (root / '.context/deploy-runs').resolve()
+
+
+def kernel_custody_environment(worker_root: Path) -> dict:
+    """Project an opted-in allocation guard into each worker's own checkout."""
+    policy = os.environ.get('CLOUDBENCH_KERNEL_PROXY_CUSTODY', '0')
+    try:
+        options = shlex.split(os.environ.get('NODE_OPTIONS', ''))
+    except ValueError as error:
+        raise Blocked('workers', 'invalid Node launch options for Kernel custody') from error
+    guard_name = 'blackbox-kernel-proxy-custody.cjs'
+    if policy not in ('0', '1'):
+        raise Blocked('workers', 'invalid Kernel allocation custody policy')
+    selected = policy == '1' or any(guard_name in option for option in options)
+    if not selected:
+        return {}
+    # Every preload form that loads the coordinator guard (CommonJS --require/-r or the
+    # --import preload) is dropped; the worker gets exactly one worker-root guard.
+    preload_flags = ('--require', '-r', '--import')
+    remapped = []
+    index = 0
+    while index < len(options):
+        option = options[index]
+        if option in preload_flags and index + 1 < len(options) and guard_name in options[index + 1]:
+            index += 2
+            continue
+        if not (option.startswith(tuple(flag + '=' for flag in preload_flags)) and guard_name in option):
+            remapped.append(option)
+        index += 1
+    guard = worker_root / 'back-end/scripts' / guard_name
+    remapped.append('--require=' + str(guard))
+    return {'NODE_OPTIONS': ' '.join(json.dumps(option) for option in remapped),
+            'CLOUDBENCH_KERNEL_PROXY_CUSTODY': '1'}
 
 
 def local_slot(root: Path, gate: str, path: Path, values: dict) -> dict:
@@ -240,6 +285,7 @@ def local_slot(root: Path, gate: str, path: Path, values: dict) -> dict:
     if values.get('ROSE_DEPLOY_WORKTREE_PATH', str(path)) != str(path):
         raise Blocked('workers', f'{gate}: prepared env belongs to {values["ROSE_DEPLOY_WORKTREE_PATH"]}, not {path}')
     env = {key: values[key] for key in (*SLOT_ENV, *OPTIONAL_ENV) if values.get(key)}
+    env.update(kernel_custody_environment(path))
     env[RUN_ROOT_ENV] = str(run_root(root))
     # Gates inherit the coordinator's environment, so a test-suite gate clears an inherited park
     # directory explicitly (the ledger writers treat an empty value as unset).
@@ -253,17 +299,22 @@ def local_slot(root: Path, gate: str, path: Path, values: dict) -> dict:
             'env': env, 'timeout_seconds': gate_deadline(gate)}
     if gate == BACKEND_GATE:
         slot['recipe'] = backend_recipe(root, env, GATE_DEADLINE_SECONDS)
+    if gate == LIVE_PROBES_GATE:
+        slot['recipe'] = live_probes_recipe(env)
     return slot
 
 
 def remote_slot(root: Path, gate: str) -> dict:
     """A github-actions slot: nothing is provisioned here; the VM checks out the frozen commit."""
     env = {'CONDUCTOR_WORKSPACE_NAME': f'deploy-{gate}', 'CONDUCTOR_PORT': REMOTE_PORT}
+    env.update(kernel_custody_environment(Path(GITHUB_WORKER_ROOT)))
     slot = {'id': f'{gate}-blacksmith', 'transport': GITHUB_TRANSPORT,
             'runner': BLACKSMITH_RUNNERS.get(gate, DEFAULT_BLACKSMITH_RUNNER),
             'worker_root': GITHUB_WORKER_ROOT, 'env': env, 'timeout_seconds': gate_deadline(gate)}
     if gate == BACKEND_GATE:
         slot['recipe'] = backend_recipe(root, env, GATE_DEADLINE_SECONDS)
+    if gate == LIVE_PROBES_GATE:
+        slot['recipe'] = live_probes_recipe(env)
     return slot
 
 
@@ -353,6 +404,78 @@ def check_capacity(root: Path, workers: list[dict], proc: Path = Path('/proc')) 
     return report
 
 
+# Quick gates run on this host under fixed per-gate deadlines (120 s by default). Another thread's
+# load on a shared box (a repack, a CPU-burner stability check, a local benchmark) has failed them
+# with timeouts on unchanged source. Wait, bounded, until the 1-minute load average leaves headroom
+# instead of starting them on a saturated host; the deadlines themselves never change.
+CPU_HEADROOM_LOAD_PER_CPU = 1.0
+CPU_HEADROOM_MAX_WAIT_SECONDS = 600
+CPU_HEADROOM_POLL_SECONDS = 15
+
+
+def load_per_cpu(proc: Path = Path('/proc')) -> tuple[float, int]:
+    cpus = os.cpu_count() or 1
+    return float((proc / 'loadavg').read_text().split()[0]) / cpus, cpus
+
+
+def wait_for_cpu_headroom(proc: Path = Path('/proc'), *, max_wait: float = CPU_HEADROOM_MAX_WAIT_SECONDS,
+                          threshold: float = CPU_HEADROOM_LOAD_PER_CPU, poll: float = CPU_HEADROOM_POLL_SECONDS,
+                          clock=time.monotonic, sleep=time.sleep) -> dict:
+    """Wait until load1/CPU <= threshold or max_wait passes. Never stops or kills anything; on expiry the
+    gates start anyway with a warning naming the busiest processes, so the owner of that load can act."""
+    started = clock()
+    load, cpus = load_per_cpu(proc)
+    announced = False
+    while load > threshold and clock() - started < max_wait:
+        if not announced:
+            print(f'DEPLOY_GATES CPU wait: load {load * cpus:.1f} on {cpus} CPUs exceeds {threshold * cpus:.0f}; '
+                  f'waiting up to {max_wait:.0f} s before starting host gates. Busiest processes '
+                  '(stop only ones you own):', flush=True)
+            for line in busiest_processes(proc):
+                print('    ' + line, flush=True)
+            announced = True
+        sleep(poll)
+        load, cpus = load_per_cpu(proc)
+    waited = round(clock() - started, 1)
+    if load > threshold:
+        print(f'DEPLOY_GATES CPU WARNING: load {load * cpus:.1f} on {cpus} CPUs still exceeds '
+              f'{threshold * cpus:.0f} after {waited:.0f} s; host gates start on a saturated box and a timeout '
+              'there is host load until shown otherwise', flush=True)
+    return {'load_per_cpu': round(load, 2), 'cpus': cpus, 'waited_seconds': waited, 'headroom': load <= threshold}
+
+
+def _cpu_ticks(proc: Path) -> dict[str, tuple[int, str]]:
+    """pid -> (utime+stime ticks, command line) for every readable process."""
+    out = {}
+    for entry in proc.iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            stat = (entry / 'stat').read_text()
+            fields = stat[stat.rindex(')') + 2:].split()
+            args = (entry / 'cmdline').read_bytes().replace(b'\0', b' ').decode(errors='replace').strip()
+            out[entry.name] = (int(fields[11]) + int(fields[12]), args or stat[stat.index('(') + 1:stat.rindex(')')])
+        except (OSError, ValueError, IndexError):
+            continue
+    return out
+
+
+def busiest_processes(proc: Path, limit: int = 6, *, interval: float = 1.0, sleep=time.sleep) -> list[str]:
+    """Current top CPU consumers: CPU ticks used across a short sample, so a long-lived idle daemon
+    never outranks the process loading the box right now."""
+    try:
+        ticks = os.sysconf('SC_CLK_TCK')
+    except (OSError, ValueError):
+        return []
+    before = _cpu_ticks(proc)
+    sleep(interval)
+    after = _cpu_ticks(proc)
+    rows = [((used - before[pid][0]) / ticks / interval, pid, args)
+            for pid, (used, args) in after.items() if pid in before and used > before[pid][0]]
+    rows.sort(reverse=True)
+    return [f'pid {pid} {share * 100:.0f}% {args[:140]}' for share, pid, args in rows[:limit]]
+
+
 def layout(root: Path, head: str, needs_worker: list[str], executor: str = 'local') -> list[dict]:
     if executor not in EXECUTORS:
         raise Blocked('workers', f'unknown executor {executor!r}')
@@ -422,6 +545,9 @@ def build_template(structural_workers: int, semantic_worker_processes: int, stan
     if executor == 'blacksmith':  # neither cut gate is in BLACKSMITH_LOCAL_GATES
         return template
     for gate in template['gates']:
+        if gate['name'] == STABILITY_GATE and '--load-workers' not in gate['command']:
+            gate['command'] = [*gate['command'], '--load-workers', str(LOCAL_STABILITY_LOAD_WORKERS)]
+            continue
         if gate['name'] == STRUCTURAL_GATE:
             command = list(gate['command'])
             if command.count('--max-workers') != 1 or command.index('--max-workers') + 1 >= len(command):
@@ -770,6 +896,7 @@ def run(args, root: Path) -> int:
                   f"{capacity['available_mb']:.0f}), {capacity['disk_mb'] / 1024:.1f} GB disk (have "
                   f"{capacity['free_disk_mb'] / 1024:.1f})")
         if not args.dry_run:
+            wait_for_cpu_headroom()
             refresh_prisma_client(root)
         if sampler is not None:
             sampler.set_roots({w['gate']: Path(w['path']) for w in workers if w['mode'] in ('create', 'reuse')})

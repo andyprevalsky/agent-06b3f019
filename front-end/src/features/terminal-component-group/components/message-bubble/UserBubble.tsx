@@ -1,6 +1,9 @@
 /**
  * Right-aligned USER bubble with optional inline attachment row.
  *
+ * Long text: collapsed preview ⇄ expanded via UserMessageText; short text is full.
+ * Copy (MessageMeta.CopyMessageButton) is revealed on message hover or keyboard
+ * focus; its tooltip reads Copy, then a checkmark and Copied for two seconds.
  * META LINE (always, under the bubble): the local send time (formatMessageSentAt:
  * day label once before today), with one state to its left:
  *   resume (from real rows only, codeAgentResume.ts; live region, role="status"):
@@ -30,6 +33,8 @@ import {
 } from '../../hooks/codeAgentResume';
 import { roleConfig } from './constants';
 import { AttachmentDisplay } from './AttachmentDisplay';
+import { UserMessageText } from './UserMessageText';
+import { CopyMessageButton } from './MessageMeta';
 
 interface UserBubbleProps {
   message: Message;
@@ -45,7 +50,7 @@ export function UserBubble({ message, agentId }: UserBubbleProps) {
     message.metadata?.excludeFromModel === true;
 
   return (
-    <div className="flex flex-col items-end gap-2 animate-in fade-in duration-300">
+    <div className="group/message flex flex-col items-end gap-2 animate-in fade-in duration-300">
       {message.text && (
         <div
           className={cn(
@@ -54,10 +59,7 @@ export function UserBubble({ message, agentId }: UserBubbleProps) {
             config.border,
           )}
         >
-          <p data-testid="user-message-text" className="text-sm whitespace-pre-wrap break-words">
-            {toBrowser && <span className="text-muted-foreground">You → Browser: </span>}
-            {message.text}
-          </p>
+          <UserMessageText key={message.message_id} text={message.text} toBrowser={toBrowser} />
         </div>
       )}
       {attachments.length > 0 && (
@@ -77,6 +79,9 @@ function MetaLine({ message }: { message: Message }) {
     browserResumeState(messages, message) ??
     roseResumeState(messages, message);
   const time = <time dateTime={message.timestamp}>{formatMessageSentAt(message.timestamp)}</time>;
+  const copyButton = message.text ? (
+    <CopyMessageButton key={`${message.message_id}:${message.text}`} text={message.text} />
+  ) : null;
   if (resume) {
     return (
       <p
@@ -84,11 +89,14 @@ function MetaLine({ message }: { message: Message }) {
         data-testid="code-agent-resume-status"
         data-resume-status={resume.status}
         className={cn(
-          '-mt-1 pr-1 text-xs text-muted-foreground',
+          '-mt-1 flex items-center gap-2 pr-1 text-xs text-muted-foreground',
           resume.status === 'failed' && 'text-red-500 dark:text-red-400',
         )}
       >
-        {time} · {codeAgentResumeLabel(resume)}
+        {copyButton}
+        <span>
+          {time} · {codeAgentResumeLabel(resume)}
+        </span>
       </p>
     );
   }
@@ -99,6 +107,7 @@ function MetaLine({ message }: { message: Message }) {
         data-testid="user-message-meta"
         className="-mt-1 flex items-center gap-2 pr-1 text-xs text-muted-foreground"
       >
+        {copyButton}
         {sending && (
           <span
             aria-hidden

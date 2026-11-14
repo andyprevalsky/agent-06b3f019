@@ -66,9 +66,22 @@ if [ ${#missing[@]} -gt 0 ]; then
 fi
 
 step "postgres $PG_MAJOR"
-sudo systemctl start postgresql 2>/dev/null || sudo service postgresql start
+# Devbox parity (scripts/cloud-build.sh): backend-coverage-blackbox runs two blackbox shards beside
+# the unit pass, every process with its own Prisma pool (run-coverage.sh connection_limit=16). The
+# stock max_connections=100 refused clients mid-gate (FLAKY ae9ae00c, 2026-11-11: "sorry, too many
+# clients already"). Set it before the server (re)starts and verify the live value.
+PG_MAX_CONNECTIONS=300
+PG_CONF="/etc/postgresql/$PG_MAJOR/main/postgresql.conf"
+[ -f "$PG_CONF" ] || { echo "postgres config $PG_CONF is missing" >&2; exit 1; }
+sudo sed -i "s/^#*max_connections.*/max_connections = $PG_MAX_CONNECTIONS/" "$PG_CONF"
+sudo systemctl restart postgresql 2>/dev/null || sudo service postgresql restart
 for _ in $(seq 1 30); do pg_isready -h localhost -q && break; sleep 1; done
 sudo -u postgres psql -q -c "ALTER USER postgres PASSWORD 'postgres';"
+live_max_connections=$(sudo -u postgres psql -Atc 'SHOW max_connections')
+[ "$live_max_connections" = "$PG_MAX_CONNECTIONS" ] || {
+  echo "postgres max_connections is $live_max_connections, want $PG_MAX_CONNECTIONS" >&2
+  exit 1
+}
 sudo -u postgres createdb victoria 2>/dev/null || true
 
 # Release binaries (flyctl, cloudflared) are fetched through the GitHub API with the job token,
@@ -93,6 +106,8 @@ step "flyctl"
 sudo chown "$(id -u):$(id -g)" "$DEPS"
 export RELEASE_TOOL_CACHE="$DEPS/release-tools"
 . scripts/ci/release-tool.sh
+# Optional like cloudflared: hunt round 9 (cold disk) lost 10 of 11 gates, most never calling flyctl,
+# to fly.io/install.sh 504s. A gate that drives Fly fails at first use with "flyctl: command not found".
 install_flyctl() {
   local tmp status=0
   tmp="$(mktemp -d)"
@@ -104,13 +119,19 @@ install_flyctl() {
   return "$status"
 }
 command -v flyctl >/dev/null || [ -x "$HOME/.fly/bin/flyctl" ] \
-  || release_tool flyctl "$HOME/.fly/bin/flyctl" install_flyctl
+  || RELEASE_TOOL_ATTEMPTS=2 release_tool flyctl "$HOME/.fly/bin/flyctl" install_flyctl \
+  || echo "⚠️ flyctl unavailable; only gates that drive Fly fail, at first use" >&2
 echo "$HOME/.fly/bin" >> "$GITHUB_PATH"
 
 step "tunnel tools"
 # run.sh needs ngrok (configured from the bundle) and cloudflared for its account-less fallback;
 # the cloud benchmark lock needs shlock. Same installers as scripts/cloud-init.sh.
-sudo bash scripts/cloudbench-install-ngrok.sh >/dev/null
+# ngrok (bin.equinox.io) gets the same last-good-copy cache and is optional: only run.sh's public
+# tunnel uses it, and that refuses explicitly when ngrok is missing.
+install_ngrok() { sudo bash scripts/cloudbench-install-ngrok.sh >/dev/null; }
+command -v ngrok >/dev/null \
+  || RELEASE_TOOL_ATTEMPTS=2 release_tool ngrok /usr/local/bin/ngrok install_ngrok \
+  || echo "⚠️ ngrok unavailable; run.sh refuses any public tunnel that needs it" >&2
 install_cloudflared() {
   local tmp status=0
   tmp="$(mktemp)"

@@ -4,7 +4,10 @@
  * Centralized SMS message templates for Rose Labs.
  */
 
-export const ROSE_SMS_NUMBER = '+14154498445';
+export const ROSE_SMS_NUMBER =
+  process.env.SMS_PROVIDER === 'linq'
+    ? (process.env.LINQ_FROM_PHONE ?? '+14154498445')
+    : '+14154498445';
 export const ROSE_LABS_URL = 'https://roselabs.ai';
 
 // vCard URL - always use production since Twilio needs a publicly accessible URL

@@ -88,3 +88,62 @@ complete_autoscaler_after_child || fail "settled infrastructure must retain the 
 [ ! -e "$out/autoscaler.failed" ] || fail "a benchmark failure is not an infrastructure failure"
 [ "$SECONDS" -lt 30 ] || fail "failed-child settlement must not wait the finalization budget"
 echo "✅ settled infrastructure preserves the failed child exit code"
+
+# 6. A failed observation records command statuses without exposing its value.
+# Both collaborator faults leave a real, valid capacity file in place, as in
+# the captured I28 terminal state. They are controlled faults, not a claim
+# about which operation failed on the original controller.
+cat() {
+    if [ "${TEST_CAPACITY_READ_MODE:-}" = fail ] && [ "${1:-}" = "$out/desired-worker-count" ]; then
+        return 7
+    fi
+    if [ "${TEST_CAPACITY_READ_MODE:-}" = partial ] && [ "${1:-}" = "$out/desired-worker-count" ]; then
+        printf '0\n'
+        return 7
+    fi
+    command cat "$@"
+}
+grep() {
+    if [ "${TEST_CAPACITY_VALIDATOR_FAIL:-0}" = 1 ] && [ "${1:-}" = -Eq ]; then
+        return 2
+    fi
+    command grep "$@"
+}
+for fault in read validator invalid; do
+    new_case "diagnostic-$fault" 0
+    : > "$out/autoscaler.ready"
+    TEST_CAPACITY_READ_MODE=""; TEST_CAPACITY_VALIDATOR_FAIL=0
+    case "$fault" in
+        read) TEST_CAPACITY_READ_MODE=fail; expected='read_exit=7 validation_exit=1 printf_exit=0 readiness=1' ;;
+        validator) TEST_CAPACITY_VALIDATOR_FAIL=1; expected='read_exit=0 validation_exit=2 printf_exit=0 readiness=1' ;;
+        invalid)
+            printf 'private-invalid-value\n' > "$out/desired-worker-count"
+            expected='read_exit=0 validation_exit=1 printf_exit=0 readiness=1' ;;
+    esac
+    rc=0; complete_autoscaler_after_child 2> "$out/diagnostic.log" || rc=$?
+    [ "$rc" = 1 ] || fail "$fault must retain its failure"
+    TEST_CAPACITY_READ_MODE=""; TEST_CAPACITY_VALIDATOR_FAIL=0
+    grep -Fq "$expected" "$out/diagnostic.log" || fail "$fault command statuses missing"
+    ! grep -Fq 'private-invalid-value' "$out/diagnostic.log" || fail "invalid value leaked"
+    grep -Fq 'autoscaler never observed valid desired capacity' "$out/autoscaler.failed" \
+        || fail "$fault changed the existing durable failure reason"
+    [ ! -e "$out/autoscaler.completed-after-child" ] || fail "$fault published completion"
+done
+echo '✅ capacity failures retain classification and record bounded command statuses'
+
+# Readiness and valid zero retain their independent semantics. A partial read
+# whose numeric output already passed the old validator still passes: this
+# diagnostics-only change must not introduce a new acceptance predicate.
+new_case diagnostic-before-ready unknown
+rc=0; complete_autoscaler_after_child 2> "$out/diagnostic.log" || rc=$?
+[ "$rc" = 1 ] || fail 'invalid pre-ready observation must fail'
+grep -Fq 'readiness=0' "$out/diagnostic.log" || fail 'pre-ready state not recorded'
+for read_mode in normal partial; do
+    new_case "diagnostic-zero-$read_mode" 0
+    TEST_CAPACITY_READ_MODE="$read_mode"
+    complete_autoscaler_after_child 2> "$out/diagnostic.log" || fail 'valid zero behavior changed'
+    TEST_CAPACITY_READ_MODE=""
+    [ -e "$out/autoscaler.completed-after-child" ] || fail 'valid zero completion missing'
+    [ ! -s "$out/diagnostic.log" ] || fail 'valid zero emitted failure diagnostics'
+done
+echo '✅ readiness coverage and valid-zero acceptance remain unchanged'

@@ -1,0 +1,39 @@
+{
+  "originating_merge": "889f69816fa41c0c98f818160cd07a46e7df1d46",
+  "assigned_original_failure": "Fixed here with unchanged 45/45 production acceptance; never waived or re-delegated",
+  "additional_repairs": [
+    {
+      "failure": "smoke/test-mass-agent-run-0",
+      "repair_agent": "https://boxes.dev/thread/thr_41d7c25e5cb640349b7407357ac718e6",
+      "devbox": "6ae2c8fc-85ee-4d55-8c5b-016ef825c2c8",
+      "folder": "Bugs",
+      "folder_id": "z57k17gzz4egv17ag6qqtasexs8h273j",
+      "folder_revision": 1,
+      "native_result": "Task FAIL; preserved",
+      "disposition": "Delegated / waived",
+      "creation_accepted": true,
+      "durable_evidence_delivered": true
+    },
+    {
+      "failure": "required-evidence-publisher/chat-mode",
+      "repair_agent": "https://boxes.dev/thread/thr_4d569dba86904e9295d1c7266640644a",
+      "devbox": "1f1d162e-4626-4e10-9e36-a196b751672e",
+      "folder": "Bugs",
+      "folder_id": "z57k17gzz4egv17ag6qqtasexs8h273j",
+      "folder_revision": 1,
+      "native_result": "Required publisher FAIL; original chat task PASS preserved",
+      "disposition": "Delegated / waived",
+      "creation_accepted": true,
+      "durable_evidence_delivered": true
+    }
+  ],
+  "execution_settings": {
+    "requested_model": "gpt-6.1-sol",
+    "requested_reasoning_effort": "high",
+    "requested_speed": "standard",
+    "accepted_start": true,
+    "effective_native_tier": "UNVERIFIED; children instructed to retain native metadata without inventing absent tier",
+    "ack_or_repair_completion_required": false
+  },
+  "underlying_evidence": "Private encrypted native archive; exact failure commands, errors, source, clocks and causal limits retained"
+}

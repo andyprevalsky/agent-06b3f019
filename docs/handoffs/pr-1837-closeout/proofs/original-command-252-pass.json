@@ -1,0 +1,28 @@
+{
+  "source": {
+    "digest": "c3310c43fe1806751bafe169945dec9a3d0d1c63b3f7829d19bfdd102c03b138",
+    "head": "7694449343b82ec8bd4bf7990fd760bace97857d"
+  },
+  "scope": "Historical merged-source backend gate; not qualification of later dcf/final-history source.",
+  "command": "cd back-end && npm run test:coverage:sharded",
+  "native_argv": [
+    "npm",
+    "run",
+    "test:coverage:sharded"
+  ],
+  "native_exit": 0,
+  "complete": true,
+  "cleanup_complete": true,
+  "selected_cases": 252,
+  "passed_cases": 252,
+  "report_bug": "PASS",
+  "browser_provider": "PASS",
+  "native_finished_at": 1794145491.8069043,
+  "aggregate_summary_finished_at": 1794145507.1609166,
+  "native_result_sha256": "23a079e718ecf247c782e86a3616eb2dec8748c3e5e42063c86383e08e0d088a",
+  "summary_sha256": "6812d3f36c75a8324eebb409f9f7aecac4d807ec42a9316b92729ae7b69633da",
+  "summary_preserved_in_stable_archive": true,
+  "raw_result_preserved_in_stable_archive": false,
+  "raw_result_final_archive_status": "PENDING final terminal-producer snapshot/archive; do not infer from this public summary.",
+  "raw_sensitive_evidence": "Recover via private encrypted artifacts only."
+}

@@ -1,0 +1,79 @@
+{
+  "format": "PR1854-PRODUCTION-QUALIFICATION-V1",
+  "merged_sha": "8263a39d8e847f105765479fda6a9c84d7229de2",
+  "native_overall": "FAIL / exit 1",
+  "qualified_outcome": "verified with one credential/billing-configuration exception; native result remains FAIL",
+  "lanes": {
+    "render": {
+      "status": "PASS",
+      "started_at": "2026-11-10T00:54:33Z",
+      "finished_at": "2026-11-10T01:01:28Z",
+      "exit_code": 0
+    },
+    "fly": {
+      "status": "PASS",
+      "started_at": "2026-11-10T00:54:33Z",
+      "finished_at": "2026-11-10T01:07:10Z",
+      "exit_code": 0
+    },
+    "vercel": {
+      "status": "PASS",
+      "started_at": "2026-11-10T00:54:33Z",
+      "finished_at": "2026-11-10T00:59:43Z",
+      "exit_code": 0
+    },
+    "mac-release": {
+      "status": "PASS",
+      "started_at": "2026-11-10T00:54:33Z",
+      "finished_at": "2026-11-10T01:02:25Z",
+      "exit_code": 0
+    },
+    "wmh": {
+      "status": "SKIPPED-not-applicable",
+      "started_at": null,
+      "finished_at": null,
+      "exit_code": null
+    },
+    "backend-probes": {
+      "status": "PASS",
+      "started_at": "2026-11-10T01:01:28Z",
+      "finished_at": "2026-11-10T01:01:33Z",
+      "exit_code": 0
+    },
+    "workflow-migration": {
+      "status": "PASS",
+      "started_at": "2026-11-10T01:07:10Z",
+      "finished_at": "2026-11-10T01:12:27Z",
+      "exit_code": 0
+    },
+    "agentcard": {
+      "status": "FAIL",
+      "started_at": "2026-11-10T01:01:28Z",
+      "finished_at": "2026-11-10T01:01:53Z",
+      "exit_code": 1
+    },
+    "semantic": {
+      "status": "PASS",
+      "started_at": "2026-11-10T01:07:10Z",
+      "finished_at": "2026-11-10T01:14:09Z",
+      "exit_code": 0
+    }
+  },
+  "agentcard_exception": {
+    "actual": "preflight FAIL; payment task UNEXECUTED/UNVERIFIED",
+    "reason": "No verified explicitly authorized dedicated live benchmark cardholder/customer binding; identity remains Stripe test mode. Current cardholder link shared with another user; automatic identity selection/foreign binding prohibited.",
+    "policy": "credential or billing change / user decision; no repair handoff for this exception",
+    "not_claimed": [
+      "provider outage",
+      "missing API keys",
+      "credit exhaustion",
+      "missing saved card",
+      "only human has technical API access"
+    ],
+    "evidence_sha256": "79d5d464ef6abfcf9918db83332b51203dc01a15970022ddbbab6771b7fda751"
+  },
+  "repair_handoff_complete": true,
+  "all_17_selected_gates_passed": true,
+  "mac_release": "v1.1.306",
+  "wmh": "not applicable"
+}

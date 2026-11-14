@@ -793,6 +793,212 @@ async def test_browser_verifier_target_attempt_survives_admission_and_provider_b
         assert "Unrelated Resend code label" not in step
 
 
+async def test_browser_evaluate_receipts_survive_compact_history_truncation():
+    from browser_tools.dom_service import ActionHistory
+    from domains.spawn_browser_agent_v3 import service as bsvc
+    from helpers.llm import build_verifier_context_messages
+    history = ActionHistory()
+    rows = [
+        {"step": step, "action": "evaluate", "params": {"code": f"window.rows.slice({step})"},
+         "result": {"success": True, "value": {"sentinel": f"returned-chunk-{step}", "data": "x" * 7000}}}
+        for step in range(1, 6)
+    ]
+    history.restore_entries(rows)
+    with patch.object(bsvc, "list_session_files", AsyncMock(return_value=[])):
+        ctx = await bsvc.build_browser_verifier_context(
+            goal="Read rows", current_url="https://example.test/current", browser_state={"dom_tree": "Independent current page"},
+            action_history=history, config=SimpleNamespace(), session_id="fixture")
+    body = json.dumps(build_verifier_context_messages(ctx, "Verify", call_site="verifier_browser"))
+    assert "not independent DOM confirmation" in body
+    assert "verifier truncated" in body
+    assert all(f"returned-chunk-{step}" in body for step in range(1, 6)), "Middle executed results were lost"
+    receipts = [m for m in ctx if m.get("metadata", {}).get("toolName") == "evaluate"]
+    assert [m["metadata"]["browser_action_step"] for m in receipts] == [5, 4, 3, 2, 1]
+    for receipt in receipts:
+        evidence = receipt["metadata"]["structured_response"]
+        original = rows[evidence["step"] - 1]
+        assert evidence["params"] == original["params"] and evidence["result"] == original["result"]
+        assert "not independent DOM confirmation" in receipt["text"]
+    assert "Independent current page" in ctx[0]["text"]
+
+
+async def test_browser_evaluate_receipts_keep_failure_conflict_privacy_and_caps():
+    from browser_tools.dom_service import ActionHistory, DOMService
+    from domains.spawn_browser_agent_v3 import service as bsvc
+    from domains.spawn_browser_agent_v3.handler import _model_visible_browser_verifier_context
+    from helpers.llm import build_verifier_context_messages, VERIFIER_MAX_TOTAL_TOOL_RESULT_CHARS
+    policy = DOMService("ws://unused.test")
+    policy.register_secret_refs({"secret:fixture": "private-secret-value"})
+    history = ActionHistory(); history.bind_dom_service(policy)
+    rows = [
+        {"step": 1, "action": "evaluate", "params": {"code": "private-secret-value"}, "result": {"success": False, "error": "blocked", "value": "private-secret-value"}},
+        {"step": 2, "action": "evaluate", "params": {"code": "readA()"}, "result": {"success": True, "value": {"count": 4}}},
+        {"step": 2, "action": "evaluate", "params": {"code": "readB()"}, "result": {"success": True, "value": {"count": 3}}},
+        {"step": 3, "action": "evaluate", "params": {}, "result": {"success": True}},
+        {"step": 4, "action": "evaluate", "params": {}, "result": {"success": True, "value": "z" * 20000}},
+    ]
+    history.restore_entries(rows)
+    with patch.object(bsvc, "list_session_files", AsyncMock(return_value=[])):
+        ctx = await bsvc.build_browser_verifier_context(goal="Inspect", current_url="https://example.test/", browser_state={"dom_tree": "Native page disagrees"}, action_history=history, config=SimpleNamespace(), session_id="fixture")
+    ctx = _model_visible_browser_verifier_context(ctx, policy, {})
+    receipts = [m for m in ctx if m.get("metadata", {}).get("toolName") == "evaluate"]
+    assert len(receipts) == 4  # Missing result is not reconstructed; duplicate/conflicting receipts remain distinct.
+    assert "private-secret-value" not in json.dumps(ctx)
+    failed = next(m for m in receipts if m["metadata"]["structured_response"]["step"] == 1)
+    assert failed["metadata"]["toolStatus"] == "ERROR" and failed["metadata"]["structured_response"]["result"]["success"] is False
+    conflicts = [m["metadata"]["structured_response"]["result"]["value"] for m in receipts if m["metadata"]["structured_response"]["step"] == 2]
+    assert conflicts == [{"count": 3}, {"count": 4}]
+    body = json.dumps(build_verifier_context_messages(ctx, "Verify", call_site="verifier_browser"))
+    assert "Native page disagrees" in body and "verifier truncated" in body
+    assert len(body) < VERIFIER_MAX_TOTAL_TOOL_RESULT_CHARS
+
+
+async def test_browser_receipt_budget_keeps_recent_evaluations_and_native_authority():
+    from browser_tools.dom_service import ActionHistory
+    from domains.spawn_browser_agent_v3 import service as bsvc
+    from helpers.llm import build_verifier_context_messages, VERIFIER_MAX_TOTAL_TOOL_RESULT_CHARS
+
+    # Captured R11b shape: older native observations alone exhaust the budget,
+    # while recent step-owned evaluation receipts are waiting behind them.
+    rows = [
+        {"step": step, "action": "read_browser_state", "params": {},
+         "result": {"success": True, "formatted_state": f"native-{step}: count=3 " + "n" * 10000}}
+        for step in range(1, 22)
+    ] + [
+        {"step": step, "action": "evaluate", "params": {"code": f"readRows({step})"},
+         "result": {"success": True, "value": f"evaluation-{step}: count=4 " + "e" * 6500}}
+        for step in range(22, 31)
+    ]
+    # Equal-step conflicting and failed receipts remain distinct and attributed.
+    rows += [{"step": 30, "action": "evaluate", "params": {"code": "failedRead()"},
+              "result": {"success": False, "error": "denied", "value": "failed-receipt"}},
+             {"step": None, "action": "evaluate", "params": {},
+              "result": {"success": True, "value": "unknown-step-must-not-be-promoted"}}]
+    history = ActionHistory(); history.restore_entries(rows)
+    with patch.object(bsvc, "list_session_files", AsyncMock(return_value=[])):
+        ctx = await bsvc.build_browser_verifier_context(
+            goal="Read rows", current_url="https://example.test/current",
+            browser_state={"dom_tree": "Independent current page: count=3"},
+            action_history=history, config=SimpleNamespace(), session_id="fixture")
+    receipts = [m for m in ctx if m.get("metadata", {}).get("toolName") in {"read_browser_state", "evaluate"}]
+    assert receipts[0]["metadata"]["toolName"] == "read_browser_state"
+    assert receipts[0]["metadata"]["browser_action_step"] == 21
+    body = json.dumps(build_verifier_context_messages(ctx, "Verify", call_site="verifier_browser"))
+    assert "evaluation-30" in body, "Recent executed receipt starved behind old native observations"
+    assert "native-21" in body and "Independent current page: count=3" in body
+    assert "count=4" in body and "not independent DOM confirmation" in body
+    assert "failed-receipt" in body and "denied" in body
+    assert not any(m["metadata"].get("browser_action_step") is None for m in receipts)
+    assert "native-1:" not in body, "Oldest native history must not displace recent receipts"
+    assert len(body) < VERIFIER_MAX_TOTAL_TOOL_RESULT_CHARS + 15000
+
+    # A huge latest JS result still obeys the individual cap, and cannot remove
+    # the latest native contradictory observation or become independent proof.
+    rows[29]["result"]["value"] = "oversized-head " + "z" * 50000 + " oversized-tail"
+    rows.append({"step": 30, "action": "read_browser_state", "params": {},
+                    "result": {"success": True, "formatted_state": "latest-native-conflict: count=3"}})
+    history.restore_entries(rows)
+    with patch.object(bsvc, "list_session_files", AsyncMock(return_value=[])):
+        ctx = await bsvc.build_browser_verifier_context(
+            goal="Read rows", current_url="https://example.test/current",
+            browser_state={"dom_tree": "Independent current page: count=3"},
+            action_history=history, config=SimpleNamespace(), session_id="fixture")
+    body = json.dumps(build_verifier_context_messages(ctx, "Verify", call_site="verifier_browser"))
+    assert "oversized-head" in body and "oversized-tail" in body and "verifier truncated" in body
+    assert "latest-native-conflict: count=3" in body and "Independent current page: count=3" in body
+    assert "not independent DOM confirmation" in body
+    assert len(body) < VERIFIER_MAX_TOTAL_TOOL_RESULT_CHARS + 15000
+
+
+async def test_browser_evaluate_receipts_outlive_compact_window_with_fixed_budgets():
+    from browser_tools.dom_service import ActionHistory, DOMService
+    from domains.spawn_browser_agent_v3 import service as bsvc
+    from helpers.llm import build_verifier_context_messages, VERIFIER_MAX_TOTAL_TOOL_RESULT_CHARS
+
+    async def project(rows):
+        policy = DOMService("ws://unused.test")
+        policy.register_secret_refs({"secret:fixture": "private-old-value"})
+        history = ActionHistory()
+        history.bind_dom_service(policy)
+        history.restore_entries(rows)
+        with patch.object(bsvc, "list_session_files", AsyncMock(return_value=[])):
+            ctx = await bsvc.build_browser_verifier_context(
+                goal="Inspect", current_url="https://example.test/current",
+                browser_state={"dom_tree": "Independent current page: count=3"},
+                action_history=history, config=SimpleNamespace(), session_id="fixture")
+        body = json.dumps(build_verifier_context_messages(ctx, "Verify", call_site="verifier_browser"))
+        return ctx, body
+
+    old = [
+        {"step": 1, "action": "evaluate", "params": {"code": "readOld()"},
+         "result": {"success": True, "value": "old-independent-request-result"}},
+        {"step": 2, "action": "evaluate", "params": {"code": "private-old-value"},
+         "result": {"success": False, "error": "denied", "value": "private-old-value"}},
+        {"step": 3, "action": "evaluate", "params": {"code": "readLarge()"},
+         "result": {"success": True, "value": "old-large-head " + "x" * 20000 + " old-large-tail"}},
+        {"step": None, "action": "evaluate", "params": {},
+         "result": {"success": True, "value": "unknown-step-not-evidence"}},
+        {"step": 4, "action": "evaluate", "params": {}, "result": {"success": True}},
+    ]
+    recent = [{"step": step, "action": "scroll", "params": {}, "result": {"success": True}}
+              for step in range(5, 45)] + [
+        {"step": 45, "action": "read_browser_state", "params": {},
+         "result": {"success": True, "formatted_state": "latest-native: count=3"}},
+        {"step": 46, "action": "evaluate", "params": {"code": "readRecent()"},
+         "result": {"success": True, "value": "recent-request-result: count=4"}},
+    ]
+    ctx, body = await project(old + recent)
+    receipts = [m for m in ctx if m.get("metadata", {}).get("toolName") == "evaluate"]
+    assert [m["metadata"]["browser_action_step"] for m in receipts] == [46, 3, 2, 1], "Older executed receipts lost before budget admission"
+    compact = next(m["text"] for m in ctx if m.get("metadata", {}).get("toolName") == "action_history")
+    assert "Step 1:" not in compact and "Step 46:" in compact  # History stays at 30 entries.
+    assert "old-independent-request-result" in body and "recent-request-result" in body
+    assert "old-large-head" in body and "old-large-tail" in body and "verifier truncated" in body
+    assert "private-old-value" not in json.dumps(ctx) and "unknown-step-not-evidence" not in body
+    failed = next(m for m in receipts if m["metadata"]["browser_action_step"] == 2)
+    assert failed["metadata"]["toolStatus"] == "ERROR" and failed["metadata"]["structured_response"]["result"]["success"] is False
+    assert "not independent DOM confirmation" in body and "latest-native: count=3" in body
+    assert len(body) < VERIFIER_MAX_TOTAL_TOOL_RESULT_CHARS + 15000
+
+    # Old evidence cannot push newer receipts out of the unchanged total budget.
+    flood = [{"step": step, "action": "evaluate", "params": {"code": "oldRead()"},
+              "result": {"success": True, "value": f"old-flood-{step}: " + "o" * 20000}}
+             for step in range(1, 21)]
+    recent = [{"step": step, "action": "evaluate", "params": {"code": "recentRead()"},
+               "result": {"success": True, "value": f"recent-flood-{step}: " + "r" * 20000}}
+              for step in range(51, 66)] + [
+        {"step": step, "action": "scroll", "params": {}, "result": {"success": True}}
+        for step in range(21, 51)
+    ] + [{"step": 66, "action": "read_browser_state", "params": {},
+           "result": {"success": True, "formatted_state": "latest-native-flood: count=3"}}]
+    recent.sort(key=lambda entry: entry["step"])
+    _, recent_body = await project(recent)
+    ctx, body = await project(flood + recent)
+    assert body == recent_body, "Old evidence displaced a previously admitted recent receipt"
+    assert "latest-native-flood: count=3" in body and "recent-flood-65:" in body
+    assert "old-flood-1:" not in body, "Old receipts bypassed the existing budget"
+    assert len(body) < VERIFIER_MAX_TOTAL_TOOL_RESULT_CHARS + 15000
+    ordered = [m["metadata"]["browser_action_step"] for m in ctx
+               if m.get("metadata", {}).get("toolName") in {"evaluate", "read_browser_state"}]
+    assert ordered == sorted(ordered, reverse=True)
+
+
+    # Same shared recency policy may retire an older native row; it never
+    # promotes JavaScript output into native evidence or retires the latest DOM.
+    native_old = {"step": 0, "action": "read_browser_state", "params": {},
+                  "result": {"success": True, "formatted_state": "older-native-displaced"}}
+    tail = [{"step": step, "action": "scroll", "params": {}, "result": {"success": True}}
+            for step in range(21, 62)] + [
+        {"step": 62, "action": "read_browser_state", "params": {},
+         "result": {"success": True, "formatted_state": "latest-native-retained"}}]
+    _, baseline_native_body = await project([native_old] + tail)
+    _, crowded_body = await project([native_old] + flood + tail)
+    assert "older-native-displaced" in baseline_native_body and "older-native-displaced" not in crowded_body
+    assert "latest-native-retained" in crowded_body and "not independent DOM confirmation" in crowded_body
+
+
+
+
 async def test_browser_verifier_context_grounds_in_final_state():
     """The extracted verifier-context builder (shared by attempt_completion AND
     the new max-steps final synthesis pass) grounds in final-state DOM +
@@ -932,14 +1138,14 @@ async def test_browser_verifier_context_uses_real_capture_not_blank_placeholder(
     assert "screenshot_placeholder" not in real_state
     real = await verifier_screenshot(real_state)
     assert real["metadata"]["screenshot_b64"] == "cmVhbC1wbmc="
-    assert real["text"].startswith("Final-state screenshot attached")
+    assert real["text"].startswith("Screenshot tool result")
 
     blank_state = await browser_state(None)
-    assert blank_state["screenshot_placeholder"] is True
-    assert blank_state["screenshot"]  # the browser-use step still receives a frame
+    assert blank_state["screenshot_unavailable"] is True
+    assert not blank_state.get("screenshot")
     blank = await verifier_screenshot(blank_state)
     assert blank["metadata"]["screenshot_b64"] == ""
-    assert blank["text"].startswith("No final-state screenshot included")
+    assert blank["text"] == "No screenshot was available for this verification step."
 
 
 def test_evaluate_does_not_snapshot_dom_behind_the_model():
@@ -7509,7 +7715,7 @@ async def test_browser_observation_survives_action_persistence_without_planner_d
     policy.register_secret_refs({"pwd:synthetic": "secret-plaintext"})
     history.bind_dom_service(policy)
     namespace = dict(vars(handler))
-    namespace.update(result=result, action_history=history,
+    namespace.update(result=result, unified_action={"params": {}}, action_history=history,
                      write_lock_resume_state={"secret_redaction_refs": {"pwd:synthetic": "secret-plaintext"}}, action_name="read_browser_state", auth_runtime_state=SimpleNamespace(mark_credential_ref=lambda _: None),
                      save_browser_action_message=repo.save_browser_action_message, agent_id="ag1", title_done="read_browser_state", task_id="t1",
                      current_url="https://private-user:private-password@example.com/login?token=private-token#private-fragment",
@@ -9229,7 +9435,8 @@ def test_passkeys_reseed_on_target_reset_like_cookies_and_localstorage():
 
     # 3. Bootstrap and realm transitions seed through the helper.
     assert 'context="session start"' in source
-    assert "realm transition to " in source
+    assert "await captured_dom.inject_passkeys(realm_state.decrypted_passkeys)" in source
+    assert "if not still_current():" in source
 
     # 4. The rotation recovery path re-seeds the held passkeys AFTER restoring the
     #    cookie/localStorage state — parity with the storage restore.
@@ -9328,7 +9535,8 @@ def test_passkeys_rearmed_before_each_step_state_observe():
     # ensure/get_browser_state calls (comment growth previously broke an 800-char
     # window while the call order stayed correct).
     observe = source.index("observe_page_state = await", start)
-    window = source[start : observe + 120]
+    observe_end = source.index("step_timer.mark(\"observe_state\")", observe)
+    window = source[start:observe_end]
     assert "ensure_browser_overlays_suppressed()" in window
     assert window.index("ensure_browser_overlays_suppressed()") < window.index("_observe_step_page(")
 
@@ -11075,7 +11283,7 @@ async def test_browser_streaming_rose_client_forwards_and_folds_chunks():
         )
         yield StreamChunk(
             kind="tool_call",
-            data={"id": "call-2", "name": "wait", "arguments": '{"seconds":1}'},
+            data={"id": "call-2", "name": "wait", "arguments": '{"time_ms":1000}'},
         )
         yield StreamChunk(kind="usage", data={"prompt_tokens": 10, "completion_tokens": 4})
         yield StreamChunk(kind="done", data={})
@@ -11091,11 +11299,12 @@ async def test_browser_streaming_rose_client_forwards_and_folds_chunks():
     assert result["actual_model"] == "gpt-5.6-sol-gpt"
     assert result["action"]["action"] == "click"
     assert result["tool_call_id"] == "call-1"
-    assert sink.on_chunk.await_count == 5
+    assert sink.on_chunk.await_count == 6
     forwarded_tools = [
         call.args[0].data["id"] for call in sink.on_chunk.await_args_list if call.args[0].kind == "tool_call"
     ]
-    assert forwarded_tools == ["call-1"]
+    assert forwarded_tools == ["call-1", "call-2"]
+    assert [item["tool_call_ids"] for item in result["batch_actions"]] == [["call-1"], ["call-2"]]
 
 
 @_in_browser_activity_context
@@ -13614,7 +13823,7 @@ async def test_verifier_history_keeps_card_receipt_image_urls_after_private_entr
                     "status": "approved",
                     "card_last4": "9176",
                     "payment_request": receipt,
-                    "media": [{"kind": "product", "url": images[0]}],
+                    "media": [{"kind": "product", "url": images[0], "caption": f"Receipt caption {card_number}"}],
                 },
             },
             {"step": 2, "action": "input_text", "index": 7, "params": {"text": card_number}},
@@ -13639,12 +13848,18 @@ async def test_verifier_history_keeps_card_receipt_image_urls_after_private_entr
     for image in images:
         assert image in params, f"verifier lost request image_url {image}"
         assert image in result, f"verifier lost receipt image_url {image}"
-    assert "'media'" not in step, "private-entry media policy no longer withholds arbitrary media"
+    assert "'media'" in result, "public media disappeared from verifier history"
+    assert images[0] in result and "Receipt caption " in result
     assert card_number not in wire, "card number reached the verifier"
     # The browser model's own action history uses the same receipt projection.
     entry = history.get_entries()[0]
     assert [item["image_url"] for item in entry["result"]["payment_request"]["line_items"]] == images
     assert [item["image_url"] for item in entry["params"]["line_items"]] == images
+    media = entry["result"]["media"][0]
+    assert media["kind"] == "product" and media["url"] == images[0]
+    assert media["caption"].startswith("Receipt caption ")
+    assert media["caption"] != f"Receipt caption {card_number}"
+    assert card_number not in media["caption"]
 
 
 async def test_execute_action_request_payment_card_without_image_urls_skips_page_read():
@@ -14053,7 +14268,14 @@ async def test_execute_action_scroll_with_humanizer_down():
         {"action": "scroll", "params": {"direction": "down", "amount": 400}},
         humanizer=hu,
     )
-    assert out == {"success": True, "message": ""}
+    assert out == {
+        "success": True,
+        "message": "",
+        "document_scroll": {"scope": "document", "status": "unknown", "before": None, "after": None},
+    }
+    ah.record_action.assert_awaited_once()
+    assert ah.record_action.await_args.kwargs["result"] == out
+    assert ah.record_action.await_args.kwargs["action"] == "scroll"
     hu.scroll.assert_awaited_once_with(400, at_coords=None)
 
 
@@ -14094,7 +14316,14 @@ async def test_execute_action_scroll_with_humanizer_uses_element_coords():
         {"action": "scroll", "index": 34, "params": {"direction": "up", "amount": 500}},
         humanizer=hu,
     )
-    assert out == {"success": True, "message": ""}
+    assert out == {
+        "success": True,
+        "message": "",
+        "document_scroll": {"scope": "document", "status": "unknown", "before": None, "after": None},
+    }
+    ah.record_action.assert_awaited_once()
+    assert ah.record_action.await_args.kwargs["result"] == out
+    assert ah.record_action.await_args.kwargs["action"] == "scroll"
     dom.get_element_coordinates.assert_awaited_once_with(34)
     hu.scroll.assert_awaited_once_with(-500, at_coords=(120, 340))
 
@@ -14116,7 +14345,14 @@ async def test_execute_action_scroll_index_zero_scrolls_viewport():
         {"action": "scroll", "index": 0, "params": {"direction": "up", "amount": 3000}},
         humanizer=hu,
     )
-    assert out == {"success": True, "message": ""}
+    assert out == {
+        "success": True,
+        "message": "",
+        "document_scroll": {"scope": "document", "status": "unknown", "before": None, "after": None},
+    }
+    ah.record_action.assert_awaited_once()
+    assert ah.record_action.await_args.kwargs["result"] == out
+    assert ah.record_action.await_args.kwargs["action"] == "scroll"
     dom.get_element_coordinates.assert_not_awaited()
     hu.scroll.assert_awaited_once_with(-3000, at_coords=None)
 
@@ -14337,7 +14573,14 @@ async def test_execute_action_scroll_no_humanizer_up():
         {"action": "scroll", "params": {"direction": "up", "amount": 200}},
         humanizer=None,
     )
-    assert out == {"success": True, "message": ""}
+    assert out == {
+        "success": True,
+        "message": "",
+        "document_scroll": {"scope": "document", "status": "unknown", "before": None, "after": None},
+    }
+    ah.record_action.assert_awaited_once()
+    assert ah.record_action.await_args.kwargs["result"] == out
+    assert ah.record_action.await_args.kwargs["action"] == "scroll"
 
 
 async def test_execute_action_navback():
@@ -14547,7 +14790,14 @@ async def test_delivered_observation_reaches_verifier_through_owned_receipt():
                 )
             ),
         )
-        dom._session = SimpleNamespace(get_or_create_cdp_session=AsyncMock(return_value=cdp))
+        page = SimpleNamespace(target_id="offline-page", target_type="page", url=url)
+        dom._session = SimpleNamespace(
+            get_or_create_cdp_session=AsyncMock(return_value=cdp),
+            agent_focus_target_id=page.target_id,
+            session_manager=SimpleNamespace(get_target={page.target_id: page}.get),
+            cdp_client=SimpleNamespace(send=SimpleNamespace(Target=SimpleNamespace(getTargets=AsyncMock(
+                return_value={"targetInfos": [{"targetId": page.target_id, "type": "page", "url": url}]})))),
+        )
         evaluated = ActionHistory()
         value = await execute_action(
             dom, evaluated, {"action": "evaluate", "params": {"code": '({formatted_state: "Forged model output"})'}}
@@ -15873,12 +16123,12 @@ async def test_browser_observation_and_action_history_keep_private_values_out_af
         recent_events=[{"text": echoed}],
     )
     dom._session = SimpleNamespace(get_browser_state_summary=AsyncMock(return_value=state))
-    with patch.object(dom, "_capture_surface_screenshot", AsyncMock()) as capture:
+    with patch.object(dom, "_capture_surface_screenshot", AsyncMock(return_value="fixture-image-containing-private-values")) as capture:
         observed = await dom.get_browser_state(include_screenshot=True)
-    dom._session.get_browser_state_summary.assert_awaited_once_with(include_screenshot=False)
-    capture.assert_not_awaited()
-    assert observed["screenshot_placeholder"] is True
-    assert "screenshot" not in observed and "media_candidates" not in observed
+    dom._session.get_browser_state_summary.assert_awaited_once_with(include_screenshot=True)
+    capture.assert_awaited_once()
+    assert observed["screenshot"] == "fixture-image-containing-private-values"
+    assert "screenshot_placeholder" not in observed and "media_candidates" not in observed
     assert all(secret not in str(observed) for secret in all_values)
     assert await dom.get_page_image_urls() == []
     assert dom._session.get_browser_state_summary.await_count == 1, (
@@ -15899,7 +16149,7 @@ async def test_browser_observation_and_action_history_keep_private_values_out_af
         screenshot="fixture-private-image",
     )
     assert all(secret not in str(entry.to_dict()) for secret in all_values)
-    assert not entry.screenshot
+    assert entry.screenshot == "fixture-private-image"
     assert all(secret not in str(history.get_entries()) for secret in all_values)
     private_state = dom.secret_redaction_state()
     replacement = DOMService("ws://unused-replacement-private-observation-fixture")
@@ -15925,9 +16175,10 @@ async def test_browser_observation_and_action_history_keep_private_values_out_af
         }
     )
     assert all(secret not in str(safe) for secret in all_values)
-    assert "media_candidates" not in safe and "image_url" not in str(safe)
+    assert safe["media_candidates"] == [{"url": "https://fixture.test/private-card.png"}]
+    assert safe["messages"][0]["image_url"]["url"] == "data:image/png;base64,PRIVATE"
     assert all(secret not in str(history.get_entries()) for secret in all_values)
-    assert not history.get_entries()[0].get("screenshot")
+    assert history.get_entries()[0]["screenshot"] == "fixture-private-image"
 
     # Page-controlled JSON may use any JSON value for a field named "type".
     # It stays ordinary data while actual media and credentials are filtered.
@@ -15947,10 +16198,7 @@ async def test_browser_observation_and_action_history_keep_private_values_out_af
         assert visible["value"]["type"] == page_type
         assert visible["value"]["private"] == "{{secret:card_cvv}}"
         assert visible["value"]["nested"] == [
-            {
-                "type": "text",
-                "text": "[image withheld after private credential entry]",
-            }
+            {"type": "image", "url": "https://fixture.test/image"}
         ]
 
     # Exercise the native observation -> action builder -> private result boundary.
@@ -16109,6 +16357,8 @@ async def test_nested_action_timeout_keeps_actual_deadline_owner():
         action_task=asyncio.current_task(),
         input_page=None,
         playwright_browser=None,
+        dom_service=None,
+        tab_focus_cache=SimpleNamespace(target_ids={}),
         agent_id="owned",
         task_id="owned-task",
         session_id="owned-session",
@@ -16321,7 +16571,7 @@ async def test_execute_action_switch_tab_found():
 
     dom = MagicMock()
     dom.ensure_browser_overlays_suppressed = AsyncMock()
-    session = _fake_session_with_event_bus()
+    session = _fake_session_with_event_bus(event_result="xxxxxxxx1122")
     session.get_tabs = AsyncMock(
         return_value=[
             SimpleNamespace(target_id="xxxxxxxx1122", title="t", url="u"),
@@ -17687,6 +17937,280 @@ async def test_alchemy_evaluate_js_completes_on_healthy_canvas():
             await browser.close()
 
 
+@contextlib.asynccontextmanager
+async def _owned_probe_fixture(*, renderer="ok", browser="ok", identity=None):
+    import websockets.exceptions
+    from cdp_use.client import CDPClient
+    from browser_tools.cdp_probe import OwnedCdpProbe
+    class Socket:
+        def __init__(self):
+            self.sent = []
+            self.replies = asyncio.Queue()
+        async def send(self, raw):
+            message = json.loads(raw)
+            self.sent.append(message)
+            kind = "renderer" if message["method"] == "Runtime.evaluate" else "browser"
+            mode = renderer if kind == "renderer" else browser
+            if mode == "send_block":
+                await asyncio.Future()
+            if mode == "ok":
+                result = {"result": {"value": 2}} if kind == "renderer" else {"product": "test"}
+                await self.replies.put(json.dumps({"id": message["id"], "result": result}))
+            elif mode == "error":
+                await self.replies.put(json.dumps({"id": message["id"], "error": {"message": "test"}}))
+        async def recv(self):
+            return await self.replies.get()
+    socket = Socket()
+    client = SimpleNamespace(ws=socket, msg_id=0, pending_requests={})
+    flags = identity if identity is not None else {"current": True, "renderer": True}
+    probe = OwnedCdpProbe(client, lambda: flags["current"], "owned-session", lambda: flags["renderer"])
+    reader = asyncio.create_task(CDPClient._handle_messages(client))
+    try:
+        yield probe, client, socket, flags
+    finally:
+        reader.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await reader
+        assert client.pending_requests == {}, "probe request escaped its owner"
+
+
+async def test_cdp_probe_does_not_wait_for_playwright_abort_ack():
+    """Same deadline assertion against the old SDK and new owned transport."""
+    import inspect
+    from types import MethodType
+    from playwright._impl._connection import Channel, Connection, ProtocolCallback
+    from domains.spawn_browser_agent_v3.service_actions import classify_evaluate_cdp_stall
+    sdk_calls = []
+    connection = SimpleNamespace(
+        _error=None,
+        _transport=SimpleNamespace(
+            on_error_future=asyncio.get_running_loop().create_future(),
+            send=lambda message: sdk_calls.append(message["method"]),
+        ),
+    )
+    def send(*args):
+        sdk_calls.append("attach")
+        return ProtocolCallback(asyncio.get_running_loop(), 1)
+    connection._send_message_to_server = send
+    connection._abort = MethodType(Connection._abort, connection)
+    channel = SimpleNamespace(_connection=connection, _object=SimpleNamespace(_guid="context"))
+    async def attach(page):
+        return await Channel._inner_send(channel, "newCDPSession", lambda _: None, {}, False)
+    legacy_page = SimpleNamespace(context=SimpleNamespace(new_cdp_session=attach))
+    async with _owned_probe_fixture(renderer="pending") as (probe, client, socket, flags):
+        kwargs = {"input_page": legacy_page, "timeout_s": .01}
+        if "probe" in inspect.signature(classify_evaluate_cdp_stall).parameters:
+            kwargs["probe"] = probe
+        task = asyncio.create_task(classify_evaluate_cdp_stall(**kwargs))
+        try:
+            done, _ = await asyncio.wait({task}, timeout=.15)
+            assert done, "probe deadline stuck awaiting Playwright abort acknowledgement"
+            result = task.result()
+            assert result["renderer"] == "frozen" and result["browser"] == "ok"
+            assert client.pending_requests == {}
+            assert sdk_calls == []
+        finally:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+
+async def test_cdp_stall_probe_bounds_session_attachment():
+    """No attachment is attempted; absent target binding is not renderer failure."""
+    from domains.spawn_browser_agent_v3.service_actions import classify_evaluate_cdp_stall
+    async with _owned_probe_fixture() as (probe, client, socket, flags):
+        flags["renderer"] = False
+        result = await classify_evaluate_cdp_stall(probe=probe, timeout_s=.02)
+        assert result["renderer"] == "error" and result["browser"] == "ok"
+        assert result["verdict"] == "unknown"
+        assert [m["method"] for m in socket.sent] == ["Browser.getVersion"]
+    result = await classify_evaluate_cdp_stall(timeout_s=.02)
+    assert result["verdict"] == "unknown" and result["renderer"] == "error"
+
+
+async def test_cdp_stall_probe_preserves_send_and_cancellation():
+    from domains.spawn_browser_agent_v3.service_actions import classify_evaluate_cdp_stall
+    for mode, expected in (("ok", "ok"), ("pending", "frozen"), ("error", "error"), ("send_block", "error")):
+        async with _owned_probe_fixture(renderer=mode) as (probe, client, socket, flags):
+            result = await asyncio.wait_for(classify_evaluate_cdp_stall(probe=probe, timeout_s=.02), .3)
+            assert result["renderer"] == expected
+            assert client.pending_requests == {}
+    async with _owned_probe_fixture(renderer="pending") as (probe, client, socket, flags):
+        task = asyncio.create_task(classify_evaluate_cdp_stall(probe=probe, timeout_s=1))
+        while not socket.sent:
+            await asyncio.sleep(0)
+        task.cancel("owner cancelled")
+        with pytest.raises(asyncio.CancelledError, match="owner cancelled"):
+            await task
+        assert client.pending_requests == {}
+        assert len(socket.sent) == 1
+
+
+async def test_cdp_stall_probe_keeps_renderer_browser_distinction():
+    from domains.spawn_browser_agent_v3.service_actions import classify_evaluate_cdp_stall
+    for renderer, browser, verdict in (("pending", "ok", "renderer_main_thread_blocked"),
+                                      ("pending", "pending", "cdp_or_browser_process_unresponsive"),
+                                      ("ok", "ok", "renderer_responsive_after_timeout")):
+        async with _owned_probe_fixture(renderer=renderer, browser=browser) as (probe, client, socket, flags):
+            result = await asyncio.wait_for(classify_evaluate_cdp_stall(probe=probe, timeout_s=.02), .3)
+            assert result["verdict"] == verdict
+            assert [m["method"] for m in socket.sent] == ["Runtime.evaluate", "Browser.getVersion"]
+            assert socket.sent[0]["sessionId"] == "owned-session"
+            assert "sessionId" not in socket.sent[1]
+
+
+async def test_owned_cdp_probe_expiry_identity_and_late_reply():
+    from browser_tools.cdp_probe import bind_native_cdp_probe, ProbeBindingUnavailable, ProbeReadTimeout
+    async with _owned_probe_fixture(renderer="pending") as (probe, client, socket, flags):
+        unrelated = asyncio.get_running_loop().create_future()
+        client.pending_requests[900] = unrelated
+        with pytest.raises(ProbeReadTimeout):
+            await probe.read("renderer", .01)
+        assert client.pending_requests == {900: unrelated}
+        await socket.replies.put(json.dumps({"id": 1, "result": {"result": {"value": 99}}}))
+        await asyncio.sleep(0)
+        assert not unrelated.done()
+        assert (await probe.read("browser", .1))["product"] == "test"
+        client.pending_requests.pop(900)
+        unrelated.cancel()
+        flags["current"] = False
+        with pytest.raises(ProbeBindingUnavailable):
+            await probe.read("browser", .1)
+        assert len(socket.sent) == 2
+    async with _owned_probe_fixture() as (unused, client, socket, flags):
+        class BoundPage:
+            def is_closed(self):
+                return False
+        page = BoundPage()
+        attached = SimpleNamespace(target_id="target", session_id="session", cdp_client=client)
+        manager = SimpleNamespace(_target_sessions={"target": {"session"}}, _sessions={"session": attached},
+                                  _targets={"target": SimpleNamespace(target_id="target", target_type="page")})
+        session = SimpleNamespace(_cdp_client_root=client, session_manager=manager, agent_focus_target_id="target")
+        service = SimpleNamespace(session=session)
+        browser = SimpleNamespace(contexts=[SimpleNamespace(pages=[page])], is_connected=lambda: True)
+        probe = bind_native_cdp_probe(service, page, SimpleNamespace(target_ids={page: "target"}), browser)
+        assert probe is not None
+        assert (await probe.read("renderer", .1))["result"]["value"] == 2
+        manager._target_sessions["target"].clear()
+        with pytest.raises(ProbeBindingUnavailable):
+            await probe.read("renderer", .1)
+        service.session = SimpleNamespace()
+        with pytest.raises(ProbeBindingUnavailable):
+            await probe.read("browser", .1)
+
+
+async def test_native_probe_rejects_reconnect_before_first_read():
+    from browser_tools.cdp_probe import bind_native_cdp_probe, ProbeBindingUnavailable
+    from domains.spawn_browser_agent_v3.service_actions import classify_evaluate_cdp_stall
+    for replacement in ("socket", "pending"):
+        async with _owned_probe_fixture() as (_, client, socket, flags):
+            class Page:
+                def is_closed(self):
+                    return False
+            page = Page()
+            attached = SimpleNamespace(target_id="target", session_id="sid", cdp_client=client)
+            manager = SimpleNamespace(_target_sessions={"target": {"sid"}}, _sessions={"sid": attached},
+                                      _targets={"target": SimpleNamespace(target_id="target", target_type="page")})
+            session = SimpleNamespace(_cdp_client_root=client, session_manager=manager, agent_focus_target_id="target")
+            service = SimpleNamespace(session=session)
+            browser = SimpleNamespace(contexts=[SimpleNamespace(pages=[page])], is_connected=lambda: True)
+            probe = bind_native_cdp_probe(service, page, SimpleNamespace(target_ids={page: "target"}), browser)
+            old_pending = client.pending_requests
+            if replacement == "socket":
+                client.ws = SimpleNamespace(send=AsyncMock(), recv=socket.recv)
+            else:
+                client.pending_requests = {}
+            for kind in ("renderer", "browser"):
+                with pytest.raises(ProbeBindingUnavailable):
+                    await probe.read(kind, .01)
+            result = await classify_evaluate_cdp_stall(probe=probe, timeout_s=.01)
+            assert result["renderer"] == result["browser"] == "error"
+            assert result["verdict"] == "unknown"
+            assert old_pending == {} and client.pending_requests == {}
+            assert socket.sent == []
+            if replacement == "socket":
+                client.ws.send.assert_not_awaited()
+
+
+async def test_native_probe_rejects_changed_binding_and_preserves_foreign_requests():
+    from browser_tools.cdp_probe import bind_native_cdp_probe, ProbeBindingUnavailable
+    for mode in ("focus", "session", "socket", "page", "membership", "target"):
+        async with _owned_probe_fixture(renderer="pending") as (_, client, socket, flags):
+            class Page:
+                closed = False
+                def is_closed(self):
+                    return self.closed
+            page = Page()
+            context = SimpleNamespace(pages=[page])
+            browser = SimpleNamespace(contexts=[context], is_connected=lambda: True)
+            attached = SimpleNamespace(target_id="target", session_id="sid", cdp_client=client)
+            target = SimpleNamespace(target_id="target", target_type="page")
+            manager = SimpleNamespace(_target_sessions={"target": {"sid"}}, _sessions={"sid": attached}, _targets={"target": target})
+            session = SimpleNamespace(_cdp_client_root=client, session_manager=manager, agent_focus_target_id="target")
+            service = SimpleNamespace(session=session)
+            probe = bind_native_cdp_probe(service, page, SimpleNamespace(target_ids={page: "target"}), browser)
+            task = asyncio.create_task(probe.read("renderer", .1))
+            while not socket.sent:
+                await asyncio.sleep(0)
+            if mode == "focus":
+                session.agent_focus_target_id = "foreign"
+            elif mode == "session":
+                service.session = SimpleNamespace()
+            elif mode == "socket":
+                client.ws = object()
+            elif mode == "page":
+                page.closed = True
+            elif mode == "membership":
+                context.pages = []
+            else:
+                manager._targets["target"] = SimpleNamespace(target_id="target", target_type="page")
+            await socket.replies.put(json.dumps({"id": socket.sent[0]["id"], "result": {"result": {"value": 2}}}))
+            with pytest.raises(ProbeBindingUnavailable):
+                await task
+            assert client.pending_requests == {}
+    async with _owned_probe_fixture() as (probe, client, socket, flags):
+        with pytest.raises(ValueError):
+            await probe.read("Page.navigate", .01)
+        assert socket.sent == []
+
+
+@contextlib.asynccontextmanager
+async def _local_raw_probe_browser(playwright):
+    """Local-only real Chromium fixture; same cdp-use owner as production."""
+    import tempfile
+    from cdp_use.client import CDPClient
+    with tempfile.TemporaryDirectory(prefix="rose-cdp-probe-") as profile:
+        context = await playwright.chromium.launch_persistent_context(
+            profile, headless=True, args=["--remote-debugging-port=0"],
+        )
+        browser = context.browser
+        assert browser is not None
+        lines = (Path(profile) / "DevToolsActivePort").read_text().splitlines()
+        client = CDPClient(f"ws://127.0.0.1:{int(lines[0])}{lines[1]}")
+        async def for_page(page):
+            from browser_tools.cdp_probe import OwnedCdpProbe
+            native = await page.context.new_cdp_session(page)
+            try:
+                target = (await native.send("Target.getTargetInfo"))["targetInfo"]["targetId"]
+            finally:
+                await native.detach()
+            result = await client.send_raw("Target.attachToTarget", {"targetId": target, "flatten": True})
+            sid = result["sessionId"]
+            return OwnedCdpProbe(client, lambda: client.ws is not None,
+                                 sid, lambda: not page.is_closed())
+        try:
+            await client.start()
+            yield browser, for_page
+        finally:
+            try:
+                assert client.pending_requests == {}, "probe request leaked before fixture shutdown"
+            finally:
+                try:
+                    await client.stop()
+                finally:
+                    await context.close()
+
+
 async def test_renderer_block_matches_evaluate_timeout_recovery_signature():
     """Renderer main-thread freeze reproduces the live evaluate-timeout recovery shape.
 
@@ -17710,106 +18234,107 @@ async def test_renderer_block_matches_evaluate_timeout_recovery_signature():
                 proc.kill()
 
     async with async_playwright() as playwright:
-        browser = await playwright.chromium.launch(headless=True)
-        try:
-            page = await browser.new_page(viewport={"width": 1280, "height": 800})
-            await page.set_content("<canvas width='480' height='150'></canvas><button disabled>Accept</button>")
-            cdp = await page.context.new_cdp_session(page)
+        async with _local_raw_probe_browser(playwright) as (browser, probe_for_page):
+            try:
+                page = await browser.new_page(viewport={"width": 1280, "height": 800})
+                await page.set_content("<canvas width='480' height='150'></canvas><button disabled>Accept</button>")
+                probe = await probe_for_page(page)
+                cdp = await page.context.new_cdp_session(page)
 
-            # Control: cancelling a long awaitPromise evaluate must not wedge CDP.
-            with pytest.raises(asyncio.TimeoutError):
-                await asyncio.wait_for(
+                # Control: cancelling a long awaitPromise evaluate must not wedge CDP.
+                with pytest.raises(asyncio.TimeoutError):
+                    await asyncio.wait_for(
+                        cdp.send(
+                            "Runtime.evaluate",
+                            {
+                                "expression": (
+                                    "(async () => { await new Promise(r => setTimeout(r, 10000)); return 42; })()"
+                                ),
+                                "returnByValue": True,
+                                "awaitPromise": True,
+                            },
+                        ),
+                        timeout=0.8,
+                    )
+                await asyncio.sleep(0.2)
+                retry = await asyncio.wait_for(
                     cdp.send(
                         "Runtime.evaluate",
-                        {
-                            "expression": (
-                                "(async () => { await new Promise(r => setTimeout(r, 10000)); return 42; })()"
-                            ),
-                            "returnByValue": True,
-                            "awaitPromise": True,
-                        },
+                        {"expression": "1+1", "returnByValue": True, "awaitPromise": True},
                     ),
-                    timeout=0.8,
+                    timeout=3.0,
                 )
-            await asyncio.sleep(0.2)
-            retry = await asyncio.wait_for(
-                cdp.send(
+                assert (retry.get("result") or {}).get("value") == 2
+
+                # Block renderer without awaiting the spinning work.
+                await cdp.send(
                     "Runtime.evaluate",
-                    {"expression": "1+1", "returnByValue": True, "awaitPromise": True},
-                ),
-                timeout=3.0,
-            )
-            assert (retry.get("result") or {}).get("value") == 2
-
-            # Block renderer without awaiting the spinning work.
-            await cdp.send(
-                "Runtime.evaluate",
-                {
-                    "expression": "setTimeout(() => { while (true) {} }, 0)",
-                    "returnByValue": True,
-                    "awaitPromise": False,
-                },
-            )
-            await asyncio.sleep(0.2)
-
-            with pytest.raises(asyncio.TimeoutError):
-                await asyncio.wait_for(
-                    cdp.send(
-                        "Runtime.evaluate",
-                        {
-                            "expression": _ALCHEMY_STEP24_EVAL,
-                            "returnByValue": True,
-                            "awaitPromise": True,
-                        },
-                    ),
-                    timeout=2.0,
+                    {
+                        "expression": "setTimeout(() => { while (true) {} }, 0)",
+                        "returnByValue": True,
+                        "awaitPromise": False,
+                    },
                 )
+                await asyncio.sleep(0.2)
 
-            stall = await classify_evaluate_cdp_stall(
-                input_page=page,
-                playwright_browser=browser,
-                timeout_s=1.5,
-            )
-            assert stall["verdict"] == "renderer_main_thread_blocked"
-            assert stall["renderer"] == "frozen"
-            assert stall["browser"] == "ok"
+                with pytest.raises(asyncio.TimeoutError):
+                    await asyncio.wait_for(
+                        cdp.send(
+                            "Runtime.evaluate",
+                            {
+                                "expression": _ALCHEMY_STEP24_EVAL,
+                                "returnByValue": True,
+                                "awaitPromise": True,
+                            },
+                        ),
+                        timeout=2.0,
+                    )
 
-            soft_actions = []
-            try:
-                await asyncio.wait_for(page.bring_to_front(), timeout=1.5)
-                soft_actions.append("bring_to_front")
-            except asyncio.TimeoutError:
-                soft_actions.append("bring_to_front:TimeoutError")
-            try:
-                await asyncio.wait_for(page.keyboard.press("Escape"), timeout=1.5)
-                soft_actions.append("press_escape")
-            except asyncio.TimeoutError:
-                soft_actions.append("press_escape:TimeoutError")
-            assert "bring_to_front" in soft_actions
-            assert "press_escape:TimeoutError" in soft_actions
+                stall = await classify_evaluate_cdp_stall(
+                    input_page=page,
+                    playwright_browser=browser,
+                    timeout_s=1.5, probe=probe,
+                )
+                assert stall["verdict"] == "renderer_main_thread_blocked"
+                assert stall["renderer"] == "frozen"
+                assert stall["browser"] == "ok"
 
-            with pytest.raises(asyncio.TimeoutError):
-                await asyncio.wait_for(
-                    cdp.send(
+                soft_actions = []
+                try:
+                    await asyncio.wait_for(page.bring_to_front(), timeout=1.5)
+                    soft_actions.append("bring_to_front")
+                except asyncio.TimeoutError:
+                    soft_actions.append("bring_to_front:TimeoutError")
+                try:
+                    await asyncio.wait_for(page.keyboard.press("Escape"), timeout=1.5)
+                    soft_actions.append("press_escape")
+                except asyncio.TimeoutError:
+                    soft_actions.append("press_escape:TimeoutError")
+                assert "bring_to_front" in soft_actions
+                assert "press_escape:TimeoutError" in soft_actions
+
+                with pytest.raises(asyncio.TimeoutError):
+                    await asyncio.wait_for(
+                        cdp.send(
+                            "Runtime.evaluate",
+                            {"expression": "1+1", "returnByValue": True},
+                        ),
+                        timeout=1.5,
+                    )
+
+                fresh = await browser.new_page()
+                await fresh.goto("about:blank")
+                fresh_cdp = await fresh.context.new_cdp_session(fresh)
+                ok = await asyncio.wait_for(
+                    fresh_cdp.send(
                         "Runtime.evaluate",
                         {"expression": "1+1", "returnByValue": True},
                     ),
-                    timeout=1.5,
+                    timeout=2.0,
                 )
-
-            fresh = await browser.new_page()
-            await fresh.goto("about:blank")
-            fresh_cdp = await fresh.context.new_cdp_session(fresh)
-            ok = await asyncio.wait_for(
-                fresh_cdp.send(
-                    "Runtime.evaluate",
-                    {"expression": "1+1", "returnByValue": True},
-                ),
-                timeout=2.0,
-            )
-            assert (ok.get("result") or {}).get("value") == 2
-        finally:
-            await _force_close(browser)
+                assert (ok.get("result") or {}).get("value") == 2
+            finally:
+                await _force_close(browser)
 
 
 async def test_hard_recover_frozen_renderer_page_restores_evaluate():
@@ -17829,45 +18354,46 @@ async def test_hard_recover_frozen_renderer_page_restores_evaluate():
                     proc.kill()
 
     async with async_playwright() as playwright:
-        browser = await playwright.chromium.launch(headless=True)
-        try:
-            page = await browser.new_page(viewport={"width": 1280, "height": 800})
-            await page.set_content("<html><body><h1>waiver</h1></body></html>")
-            cdp = await page.context.new_cdp_session(page)
-            await cdp.send(
-                "Runtime.evaluate",
-                {
-                    "expression": "setTimeout(() => { while (true) {} }, 0)",
-                    "returnByValue": True,
-                    "awaitPromise": False,
-                },
-            )
-            await asyncio.sleep(0.2)
-            stalled = await classify_evaluate_cdp_stall(input_page=page, playwright_browser=browser, timeout_s=1.5)
-            assert stalled["verdict"] == "renderer_main_thread_blocked"
-
-            new_page, actions = await _hard_recover_frozen_renderer_page(
-                input_page=page,
-                playwright_browser=browser,
-                fallback_url="about:blank",
-            )
-            assert new_page is not None
-            assert any(a in {"new_page", "new_context_page"} or a.startswith("new_page") for a in actions)
-            recovered = await classify_evaluate_cdp_stall(
-                input_page=new_page, playwright_browser=browser, timeout_s=2.0
-            )
-            assert recovered["renderer"] == "ok"
-            cdp2 = await new_page.context.new_cdp_session(new_page)
-            result = await asyncio.wait_for(
-                cdp2.send(
+        async with _local_raw_probe_browser(playwright) as (browser, probe_for_page):
+            try:
+                page = await browser.new_page(viewport={"width": 1280, "height": 800})
+                await page.set_content("<html><body><h1>waiver</h1></body></html>")
+                probe = await probe_for_page(page)
+                cdp = await page.context.new_cdp_session(page)
+                await cdp.send(
                     "Runtime.evaluate",
-                    {"expression": "1+1", "returnByValue": True, "awaitPromise": True},
-                ),
-                timeout=3.0,
-            )
-            assert (result.get("result") or {}).get("value") == 2
-        finally:
-            await _force_close(browser)
+                    {
+                        "expression": "setTimeout(() => { while (true) {} }, 0)",
+                        "returnByValue": True,
+                        "awaitPromise": False,
+                    },
+                )
+                await asyncio.sleep(0.2)
+                stalled = await classify_evaluate_cdp_stall(input_page=page, playwright_browser=browser, timeout_s=1.5, probe=probe)
+                assert stalled["verdict"] == "renderer_main_thread_blocked"
+
+                new_page, actions = await _hard_recover_frozen_renderer_page(
+                    input_page=page,
+                    playwright_browser=browser,
+                    fallback_url="about:blank",
+                )
+                assert new_page is not None
+                assert any(a in {"new_page", "new_context_page"} or a.startswith("new_page") for a in actions)
+                recovered = await classify_evaluate_cdp_stall(
+                    input_page=new_page, playwright_browser=browser, timeout_s=2.0, probe=await probe_for_page(new_page)
+                )
+                assert recovered["renderer"] == "ok"
+                cdp2 = await new_page.context.new_cdp_session(new_page)
+                result = await asyncio.wait_for(
+                    cdp2.send(
+                        "Runtime.evaluate",
+                        {"expression": "1+1", "returnByValue": True, "awaitPromise": True},
+                    ),
+                    timeout=3.0,
+                )
+                assert (result.get("result") or {}).get("value") == 2
+            finally:
+                await _force_close(browser)
 
 
 async def test_hard_recover_frozen_renderer_page_restores_click():
@@ -17900,40 +18426,41 @@ async def test_hard_recover_frozen_renderer_page_restores_click():
             return type(exc).__name__
 
     async with async_playwright() as playwright:
-        browser = await playwright.chromium.launch(headless=True)
-        try:
-            page = await browser.new_page(viewport={"width": 1280, "height": 800})
-            await page.set_content("<html><body><button>Sign</button></body></html>")
-            assert await _timed_click(page) == "ok"
+        async with _local_raw_probe_browser(playwright) as (browser, probe_for_page):
+            try:
+                page = await browser.new_page(viewport={"width": 1280, "height": 800})
+                await page.set_content("<html><body><button>Sign</button></body></html>")
+                assert await _timed_click(page) == "ok"
 
-            cdp = await page.context.new_cdp_session(page)
-            await cdp.send(
-                "Runtime.evaluate",
-                {
-                    "expression": "setTimeout(() => { while (true) {} }, 0)",
-                    "returnByValue": True,
-                    "awaitPromise": False,
-                },
-            )
-            await asyncio.sleep(0.25)
-            stalled = await classify_evaluate_cdp_stall(input_page=page, playwright_browser=browser, timeout_s=1.5)
-            assert stalled["verdict"] == "renderer_main_thread_blocked"
-            assert await _timed_click(page) != "ok"
+                probe = await probe_for_page(page)
+                cdp = await page.context.new_cdp_session(page)
+                await cdp.send(
+                    "Runtime.evaluate",
+                    {
+                        "expression": "setTimeout(() => { while (true) {} }, 0)",
+                        "returnByValue": True,
+                        "awaitPromise": False,
+                    },
+                )
+                await asyncio.sleep(0.25)
+                stalled = await classify_evaluate_cdp_stall(input_page=page, playwright_browser=browser, timeout_s=1.5, probe=probe)
+                assert stalled["verdict"] == "renderer_main_thread_blocked"
+                assert await _timed_click(page) != "ok"
 
-            await asyncio.wait_for(page.bring_to_front(), timeout=2.0)
-            assert await _timed_click(page) != "ok", "soft bring_to_front must not restore click"
+                await asyncio.wait_for(page.bring_to_front(), timeout=2.0)
+                assert await _timed_click(page) != "ok", "soft bring_to_front must not restore click"
 
-            new_page, actions = await _hard_recover_frozen_renderer_page(
-                input_page=page,
-                playwright_browser=browser,
-                fallback_url="about:blank",
-            )
-            assert new_page is not None
-            assert any(a in {"new_page", "new_context_page"} or a.startswith("new_page") for a in actions)
-            await new_page.set_content("<html><body><button>Sign</button></body></html>")
-            assert await _timed_click(new_page) == "ok"
-        finally:
-            await _force_close(browser)
+                new_page, actions = await _hard_recover_frozen_renderer_page(
+                    input_page=page,
+                    playwright_browser=browser,
+                    fallback_url="about:blank",
+                )
+                assert new_page is not None
+                assert any(a in {"new_page", "new_context_page"} or a.startswith("new_page") for a in actions)
+                await new_page.set_content("<html><body><button>Sign</button></body></html>")
+                assert await _timed_click(new_page) == "ok"
+            finally:
+                await _force_close(browser)
 
 
 def test_action_timeout_cdp_classify_not_gated_on_evaluate():
@@ -21568,8 +22095,20 @@ def test_url_looks_like_api_surface_guard():
         "http://[::1]/",
         "http://[fe80::1]/",
         "http://[fc00::1]/",
+        # Chrome reads a backslash as a path slash and percent-decodes the host,
+        # so these open the private address urlparse does not see.
+        "https://169.254.169.254\\@example.com/latest/meta-data/",
+        "https://127.0.0.1\\@example.com/",
+        "https://localhost\\@example.com/",
+        "https://[::1]\\@example.com/",
+        "https://127%2e0.0.1/",
+        # Chrome's IPv4 parser and UTS-46 mapping (segmented digits, subscript o).
+        "http://0x.0x.0x.0x/",
+        "http://\U0001fbf1\U0001fbf2\U0001fbf7.0.0.1/",
+        "http://l\u2092calhost/",
     ):
-        assert _navigation_guard_error(ctx, action="goto", target_url=unsafe_url) is not None
+        assert _navigation_guard_error(ctx, action="goto", target_url=unsafe_url) is not None, unsafe_url
+    assert _navigation_guard_error(ctx, action="goto", target_url="https://example.com\\@127.0.0.1/") is None
     # API surfaces still refused.
     assert _navigation_guard_error(ctx, action="goto", target_url="https://api.example.com/") is not None
 
@@ -22113,10 +22652,79 @@ async def test_execute_upload_file_not_file_input():
 # ── _execute_switch_tab / _execute_close_tab ─────────────────────────
 
 
+
+async def test_switch_tab_observes_native_event_result():
+    """A completed EventBus event may still contain the original handler error."""
+    from bubus import EventBus
+    from browser_use.browser.events import SwitchTabEvent
+    from domains.spawn_browser_agent_v3 import service_actions
+
+    for outcome in ("success", "timeout", "missing", "foreign"):
+        bus = EventBus(name=f"switch_result_{outcome}")
+        original = TimeoutError("Target.activateTarget did not respond")
+        async def handle(event):
+            if outcome == "timeout":
+                raise original
+            if outcome == "cancelled":
+                raise asyncio.CancelledError()
+            if outcome == "missing":
+                return None
+            return "foreign-target" if outcome == "foreign" else event.target_id
+        bus.on(SwitchTabEvent, handle)
+        session = SimpleNamespace(event_bus=bus, get_tabs=AsyncMock(return_value=[SimpleNamespace(target_id="owned1234", title="Owned tab", url="https://example.test")]))
+        history = SimpleNamespace(record_action=AsyncMock())
+        try:
+            try:
+                result = await service_actions._execute_switch_tab(
+                    session=session, dom_service=SimpleNamespace(), action_history=history,
+                    params={"tab_id": "1234"}, thinking=None,
+                )
+            except BaseException as exc:
+                assert outcome != "success", repr(exc)
+                if outcome == "timeout":
+                    assert isinstance(exc, TimeoutError)
+                if outcome == "cancelled":
+                    assert isinstance(exc, asyncio.CancelledError)
+                history.record_action.assert_not_awaited()
+            else:
+                assert outcome == "success", f"Handler {outcome} was recorded as a successful switch"
+                assert result["success"] is True
+                history.record_action.assert_awaited_once()
+        finally:
+            await bus.stop(timeout=2, clear=True)
+
+
+async def test_switch_tab_cancellation_propagates_without_success():
+    from bubus import EventBus
+    from browser_use.browser.events import SwitchTabEvent
+    from domains.spawn_browser_agent_v3 import service_actions
+    bus = EventBus(name="switch_cancel")
+    entered = asyncio.Event()
+    async def handler(event):
+        entered.set()
+        await asyncio.Event().wait()
+    bus.on(SwitchTabEvent, handler)
+    history = SimpleNamespace(record_action=AsyncMock())
+    session = SimpleNamespace(event_bus=bus, get_tabs=AsyncMock(return_value=[SimpleNamespace(target_id="owned1234",title="tab",url="https://example.test")]))
+    task = asyncio.create_task(service_actions._execute_switch_tab(session=session,dom_service=SimpleNamespace(),action_history=history,params={"tab_id":"1234"},thinking=None))
+    try:
+        await asyncio.wait_for(entered.wait(),timeout=2)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        else:
+            raise AssertionError("Switch caller cancellation was swallowed")
+        history.record_action.assert_not_awaited()
+    finally:
+        await bus.stop(timeout=0.01,clear=True)
+
+
 async def test_execute_switch_tab_success():
     from domains.spawn_browser_agent_v3 import service_actions
 
-    session = _fake_session_with_event_bus()
+    session = _fake_session_with_event_bus(event_result="aaaaaaaa1234")
     session.get_tabs = AsyncMock(return_value=[SimpleNamespace(target_id="aaaaaaaa1234", title="t", url="u")])
     dom = MagicMock()
     ah = MagicMock()
@@ -22262,9 +22870,10 @@ async def test_execute_screenshot_success():
                 "media_candidates": [{"url": "https://fixture.test/image"}],
             },
         )
-        assert "screenshot" not in visible and "screenshot_b64" not in visible and "media_candidates" not in visible
-        assert "screenshot" not in visible["value"]
-    assert not history.get_entries()[0].get("screenshot")
+        assert visible["screenshot"] == trusted_png and visible["screenshot_b64"] == trusted_png
+        assert visible["value"]["screenshot"] == trusted_png
+        assert visible["media_candidates"] == [{"url": "https://fixture.test/image"}]
+    assert history.get_entries()[0]["screenshot"] == trusted_png
 
 
 async def test_browser_use_screenshots_get_distinct_remote_names():
@@ -23934,10 +24543,6 @@ async def test_spawn_browser_activity_raises_when_new_session_has_no_cdp_url():
             "domains.spawn_browser_agent_v3.handler.init_browser_session",
             AsyncMock(return_value=session_data),
         ),
-        patch(
-            "domains.spawn_browser_agent_v3.handler.fetch_auth_options",
-            AsyncMock(return_value={"realm": "example.com"}),
-        ),
     ):
         try:
             await spawn_browser_agent_activity_v3(
@@ -24059,7 +24664,7 @@ async def test_spawn_browser_activity_auth_assistance_resume_reuses_live_session
 
     assert fetch_mock.await_count == 1
     assert fetch_mock.await_args.args[1] == "task-1"
-    assert fetch_mock.await_args.kwargs == {"validate_live": True}
+    assert fetch_mock.await_args.kwargs == {"validate_live": True, "include_credentials": False}
     resume_mock.assert_not_awaited()
 
 
@@ -24100,6 +24705,104 @@ async def test_spawn_browser_activity_ends_cleanly_when_the_user_declines_auth_a
                 assert actor.activity_result["user_declined_auth"] is True
 
 
+
+
+async def test_browser_required_file_delivery_retries_before_completion():
+    """A verified remote path cannot complete before the requested file is delivered."""
+    # Exact schema/output/resolver attachments from BU034 run SHA b69afd0d...5d6607.
+    partial = {'apa_databases_file': {'path': '/files/response-headers'}}
+    schema = {'fields': [{'description': 'File containing every available APA research database with its name and brief description.', 'name': 'apa_databases_file', 'nullable': False, 'required': True, 'type': 'file_pointer'}]}
+    original_attachments = [{'created_at': '2026-10-28T08:22:40.792670Z', 'id': 'e06d10c5-4d34-44d9-8fd2-26ba2f076a6f', 'mime_type': 'image/png', 'original_filename': 'screenshot_final.png', 'size_bytes': 268107, 'storage_path': '1f85ff25-6e29-4c1b-8739-f917bd101a30/e06d10c5-4d34-44d9-8fd2-26ba2f076a6f_screenshot_final.png'}]
+    pointer = {"id": "delivered-file", "storage_path": "user/delivered-file", "original_filename": "response-headers", "mime_type": "application/json", "size_bytes": 2079}
+    verdict = {"score": 1.0, "task_completed": True, "reasoning": "The requested content exists in a session file", "structured_response": partial, "usage": {}}
+    actor, judge = await _exercise_browser_resume_user_input(
+        task_goal="List the databases and descriptions",
+        output_schema_override=schema,
+        actor_responses_override=[{"action": {"action": "attempt_completion", "params": {}}, "usage": {}}] * 2,
+        verifier_responses_override=[verdict, verdict],
+        extraction_results=[original_attachments, [pointer]],
+    )
+    assert actor.await_count == 2 and judge.await_count == 2, "Unresolved required output completed the activity"
+    assert actor.activity_result["success"] is True
+    assert actor.close_call.await_count == 1
+    assert actor.activity_result["structured_response"]["apa_databases_file"]["id"] == pointer["id"]
+    assert any("Required file outputs" in str(turn) for turn in actor.captured_turns[1])
+    assert "/files/response-headers" not in str([turn for turn in actor.captured_turns[1] if "Required file outputs" in str(turn)])
+
+
+async def test_browser_nullable_file_outputs_preserve_native_contract():
+    """Explicit null accepted by the native schema needs no artifact delivery."""
+    from helpers import llm
+    from helpers.file_resolution import transform_schema_for_remote_session
+    for kind in ("file_pointer", "list[file_pointer]"):
+        schema = {"fields": [{"name": "report", "type": kind, "required": True, "nullable": True}]}
+        model = llm._build_verifier_response_model(
+            transform_schema_for_remote_session(schema), require_task_completion=True
+        )
+        validated = model.model_validate({"output": {"report": None}, "reasoning": "No report applies", "score": 1.0, "task_completed": True}).model_dump()
+        response = {"score": validated["score"], "task_completed": validated["task_completed"],
+                    "reasoning": validated["reasoning"], "structured_response": validated["output"], "usage": {}}
+        actor, judge = await _exercise_browser_resume_user_input(
+            output_schema_override=schema,
+            actor_responses_override=[{"action": {"action": "attempt_completion", "params": {}}, "usage": {}}],
+            verifier_response_override=response, extraction_results=[[]],
+        )
+        assert actor.await_count == 1 and judge.await_count == 1
+        assert actor.activity_result["structured_response"] == {"report": None}
+        assert actor.activity_result["success"] is True
+
+
+async def test_browser_required_file_delivery_cancellation_propagates():
+    """Cancellation during extraction cannot become successful completion."""
+    verdict = {"score": 1.0, "task_completed": True, "reasoning": "complete", "structured_response": {"report": {"path": "/files/report"}}, "usage": {}}
+    actor, _ = await _exercise_browser_resume_user_input(
+        output_schema_override={"fields": [{"name": "report", "type": "file_pointer", "required": True}]},
+        actor_responses_override=[{"action": {"action": "attempt_completion", "params": {}}, "usage": {}}],
+        verifier_response_override=verdict, extraction_results=[asyncio.CancelledError()],
+        expected_activity_status="cancelled",
+    )
+    assert actor.activity_result["status"] == "cancelled"
+    assert actor.activity_result.get("success") is not True
+
+
+
+def test_browser_file_delivery_schema_boundaries():
+    from domains.spawn_browser_agent_v3.handler import _browser_has_unresolved_file_outputs as missing
+    fp = {"id": "file", "storage_path": "user/file"}
+    for schema, value, expected in [
+        ({"type": "file_pointer", "required": True}, {"path": "/private/never-echo"}, True),
+        ({"type": "file_pointer", "required": True}, fp, False),
+        ({"type": "file_pointer", "required": False}, None, False),
+        ({"type": "file_pointer", "required": True}, None, True),
+        ({"type": "file_pointer", "required": True, "nullable": True}, None, False),
+        ({"type": "list[file_pointer]", "required": True, "nullable": True}, None, False),
+        ({"type": "session_file_pointer", "required": True}, {"path": "/files/remote"}, False),
+        ({"type": "str", "required": True}, "/files/plain-text", False),
+        ({"type": "list[file_pointer]", "required": True}, [fp, {"path": "/files/missing"}], True),
+        ({"type": "list[file_pointer]", "required": True}, [fp], False),
+        ({"type": "object", "properties": [{"name": "nested", "type": "file_pointer", "required": True}]}, {"nested": {"path": "/files/missing"}}, True),
+        ({"type": "list[object]", "properties": [{"name": "nested", "type": "file_pointer", "required": True}]}, [{"nested": fp}], False),
+    ]:
+        assert missing({"result": value}, {"fields": [{"name": "result", **schema}]}) is expected
+
+async def test_browser_replayed_verifier_requires_explicit_completion_before_terminal():
+    """An older activity score cannot bypass the new browser terminal gate."""
+    for flag in (None, False, 1, "true"):
+        old = {"score": 1.0, "reasoning": "Extracted a negative answer", "structured_response": {"result": False}, "usage": {}}
+        if flag is not None:
+            old["task_completed"] = flag
+        completed = {**old, "task_completed": True, "reasoning": "The informational request is complete"}
+        actor, judge = await _exercise_browser_resume_user_input(
+            task_goal="Report whether a slot is available", approval_type="manual_pause",
+            output_schema_override={"fields": [{"name": "result", "type": "bool"}]},
+            actor_responses_override=[{"action": {"action": "attempt_completion", "params": {}}, "usage": {}}] * 2,
+            verifier_responses_override=[old, completed],
+        )
+        assert actor.await_count == 2 and judge.await_count == 2, "Old or non-boolean completion verdict terminated the browser"
+        assert actor.activity_result["success"] is True
+        assert actor.activity_result["structured_response"] == {"result": False}
+
+
 async def test_browser_empty_completion_preserves_verified_denial_for_parent():
     """The parent receives the denial without another browser completion turn."""
     from domains.spawn_browser_agent_v3 import handler as h
@@ -24125,7 +24828,7 @@ async def test_browser_empty_completion_preserves_verified_denial_for_parent():
         approval_type=h.AUTH_ASSISTANCE_DECLINED,
         actor_responses_override=[{"action": {"action": "attempt_completion", "params": {}}, "usage": {}}],
         verifier_response_override={
-            "score": 1.0, "reasoning": reason,
+            "score": 1.0, "task_completed": True, "reasoning": reason,
             "structured_response": {"member_number": "", "evidence": ""}, "usage": {},
         },
         resume_overrides={
@@ -24220,7 +24923,7 @@ async def test_spawn_browser_activity_auth_assistance_resume_reuses_backend_refr
 
     assert fetch_mock.await_count == 1
     assert fetch_mock.await_args.args[1] == "task-1"
-    assert fetch_mock.await_args.kwargs == {"validate_live": True}
+    assert fetch_mock.await_args.kwargs == {"validate_live": True, "include_credentials": False}
     # The refreshed live session is the only provider browser that should be
     # used after handoff. Creating another browser races profile persistence.
     resume_mock.assert_not_awaited()
@@ -24313,7 +25016,7 @@ async def test_spawn_browser_activity_auth_assistance_resume_falls_back_when_liv
 
     assert fetch_mock.await_count == 1
     assert fetch_mock.await_args.args[1] == "task-1"
-    assert fetch_mock.await_args.kwargs == {"validate_live": True}
+    assert fetch_mock.await_args.kwargs == {"validate_live": True, "include_credentials": False}
     assert resume_mock.await_count == 1
     assert resume_mock.await_args.args[1] == "task-1"
 
@@ -24381,7 +25084,7 @@ async def test_spawn_browser_activity_write_approval_resume_falls_back_when_live
 
     assert fetch_mock.await_count == 1
     assert fetch_mock.await_args.args[1] == "task-1"
-    assert fetch_mock.await_args.kwargs == {"validate_live": True}
+    assert fetch_mock.await_args.kwargs == {"validate_live": True, "include_credentials": False}
     assert resume_mock.await_count == 1
     assert resume_mock.await_args.args[1] == "task-1"
 
@@ -24445,7 +25148,7 @@ async def test_spawn_browser_activity_write_approval_resume_falls_back_when_live
         else:
             raise AssertionError("expected missing fallback cdp_url to raise")
 
-    assert fetch_mock.await_args.kwargs == {"validate_live": True}
+    assert fetch_mock.await_args.kwargs == {"validate_live": True, "include_credentials": False}
     assert resume_mock.await_count == 1
     assert resume_mock.await_args.args[1] == "task-1"
 
@@ -24633,6 +25336,9 @@ class _FakeDomService:
     async def get_browser_state(self, include_screenshot=False):
         return {"url": "https://example.com/login", "screenshot": None}
 
+    def get_parked_page_identity(self):
+        return {"url": "https://example.com/login", "target_id": "fixture-target"}
+
     async def get_page_identity(self):
         return {"url": "https://example.com/login", "title": ""}
 
@@ -24683,7 +25389,7 @@ class _FakeAsyncPlaywright:
 
 
 @_in_browser_activity_context
-async def _exercise_browser_resume_user_input(correction_rows=(), task_goal="Buy socks", approval_type="manual_pause", generated_schema=None, selected_gpt_token=None, real_schema_generator=False, schema_failure=None, pending_action=None, initial_poll_failure=False, native_auth=False, off_phone_action=False, browser_auth_pause=False, approved_message_intent=None, provider="steel", resume_overrides=None, actor_responses_override=None, verifier_response_override=None, output_schema_override=None):
+async def _exercise_browser_resume_user_input(correction_rows=(), task_goal="Buy socks", approval_type="manual_pause", generated_schema=None, selected_gpt_token=None, real_schema_generator=False, schema_failure=None, pending_action=None, initial_poll_failure=False, native_auth=False, off_phone_action=False, browser_auth_pause=False, approved_message_intent=None, provider="steel", resume_overrides=None, actor_responses_override=None, verifier_response_override=None, output_schema_override=None, verifier_responses_override=None, extraction_results=None, expected_activity_status="completed", credential_propagation_override=None, actor_step_barrier=None):
     from contextlib import ExitStack
 
     from domains.spawn_browser_agent_v3.handler import spawn_browser_agent_activity_v3
@@ -24791,6 +25497,9 @@ async def _exercise_browser_resume_user_input(correction_rows=(), task_goal="Buy
     decision_order = []
 
     async def capture_actor(**kwargs):
+        await asyncio.sleep(0)
+        if actor_step_barrier is not None:
+            await actor_step_barrier()
         decision_order.append("model")
         captured_turns.append(copy.deepcopy(kwargs["turn_messages"]))
         captured_system_context.append(kwargs["dynamic_system_context"])
@@ -24798,11 +25507,16 @@ async def _exercise_browser_resume_user_input(correction_rows=(), task_goal="Buy
 
     actor_call = AsyncMock(side_effect=capture_actor)
     actor_call.captured_turns = captured_turns
+    actor_call.fixture_browser = fake_browser
+    actor_call.fixture_playwright = fake_playwright
     actor_call.captured_system_context = captured_system_context
     actor_call.decision_order = decision_order
+    actor_call.close_call = close_mock
+    actor_call.saved_messages = AsyncMock()
     judge_call = AsyncMock(
         return_value={
             "score": 1.0,
+            "task_completed": True,
             "reasoning": "completed",
             "structured_response": {"result": "ride requested"},
             "usage": {},
@@ -24810,6 +25524,8 @@ async def _exercise_browser_resume_user_input(correction_rows=(), task_goal="Buy
     )
     if verifier_response_override is not None:
         judge_call.return_value = verifier_response_override
+    if verifier_responses_override is not None:
+        judge_call.side_effect = verifier_responses_override
     schema_generator = AsyncMock(
         return_value=(
             generated_schema or {"fields": [{"name": "result", "type": "string"}]},
@@ -24907,19 +25623,20 @@ async def _exercise_browser_resume_user_input(correction_rows=(), task_goal="Buy
             reconnect_mock,
         ),
         patch("domains.spawn_browser_agent_v3.handler.call_temporal_activity_from_activity", judge_call),
-        patch("domains.spawn_browser_agent_v3.handler.extract_session_files", AsyncMock(return_value=[])),
+        patch("domains.spawn_browser_agent_v3.handler.extract_session_files",
+              AsyncMock(side_effect=extraction_results) if extraction_results is not None else AsyncMock(return_value=[])),
         patch(
             "domains.spawn_browser_agent_v3.handler.disconnect_browser_after_passkey_capture",
             AsyncMock(),
         ),
         patch(
             "domains.spawn_browser_agent_v3.handler.propagate_browser_run_credentials",
-            propagation_mock,
+            credential_propagation_override or propagation_mock,
         ),
         patch("domains.spawn_browser_agent_v3.handler.close_browser_session", close_mock),
         patch(
             "domains.spawn_browser_agent_v3.handler.save_browser_action_message",
-            AsyncMock(),
+            actor_call.saved_messages,
         ),
         patch(
             "domains.spawn_browser_agent_v3.handler.save_browser_assistant_message",
@@ -24981,7 +25698,11 @@ async def _exercise_browser_resume_user_input(correction_rows=(), task_goal="Buy
         return actor_call, judge_call
     if actor_responses_override is not None:
         assert actor_call.await_count, "auth denial terminalized the browser before its next model decision"
-        assert result["status"] == "completed" and result["success"]
+        assert result["status"] == expected_activity_status
+        if expected_activity_status == "completed":
+            assert result["success"]
+        else:
+            assert result.get("success") is not True
         assert result["session_id"] == "session-1"
         restart_mock.assert_not_awaited()
         reconnect_mock.assert_not_awaited()
@@ -26250,8 +26971,9 @@ async def test_initial_auth_inventory_is_delivered_by_page_state_result():
     assert len(tools) == 1
     context = json.loads(tools[0]["content"])["auth_context"]
     assert context["auth_realm"] == "admin.google.com" and context["inventory_status"] == "available"
-    assert "fixture@workspace.example" in context["auth_options"]
-    assert "18000ms" in context["credential_preparation_error"]
+    assert "fixture@workspace.example" in context["auth_options"], context
+    assert context["credential_preparation_status"] == "error"
+    assert context["credential_preparation_error"] == "Saved credential preparation failed"
     assert "cookies_injected" not in context and "encryptedPassword" not in str(context)
 
 
@@ -26386,13 +27108,116 @@ async def test_return_to_quarantined_realm_invalidates_other_auth_context():
     import json
 
     contexts = [json.loads(message["content"])["auth_context"] for message in tool_results]
-    assert [context["auth_realm"] for context in contexts] == ["admin.google.com", "claude.ai"]
-    assert all(
-        context["inventory_status"] == "unknown" and context["credential_preparation_error"] for context in contexts
-    )
-    assert all("auth_options" not in context for context in contexts), (
-        "failed discovery was presented as an empty known inventory"
-    )
+    assert [context["auth_realm"] for context in contexts] == ["admin.google.com", "claude.ai"], contexts
+    assert all(context["credential_preparation_status"] in {"pending", "ready", "error"} for context in contexts)
+    assert contexts[0]["inventory_status"] == "unknown" and "auth_options" not in contexts[0]
+    for context in contexts:
+        if context["credential_preparation_status"] == "error":
+            assert context["credential_preparation_error"] == "Saved credential preparation failed"
+        if "auth_options" in context:
+            assert "admin.google.com" not in context["auth_options"] if context["auth_realm"] == "claude.ai" else "claude.ai" not in context["auth_options"]
+
+
+
+async def test_native_failed_navigation_restriction_and_escape():
+    from navigation_policy_cases import (assert_navigation_policy_activity_cases,
+                                         assert_failed_navigation_identity_and_restore,
+                                         assert_navigation_admission_at_native_dispatch)
+    await assert_navigation_policy_activity_cases(globals(), failed_navigation=True)
+    await assert_navigation_policy_activity_cases(
+        globals(), failed_navigation=True, native_error_code="net::ERR_CONNECTION_CLOSED")
+    await assert_failed_navigation_identity_and_restore()
+    await assert_navigation_admission_at_native_dispatch()
+
+
+async def test_native_navigation_policy_restriction_and_escape():
+    from navigation_policy_cases import assert_navigation_policy_activity_cases, assert_navigation_admission_at_native_dispatch
+    await assert_navigation_policy_activity_cases(globals())
+    await assert_navigation_admission_at_native_dispatch()
+
+
+async def test_pending_credentials_refuse_only_the_secret_dependent_action():
+    actor, judge = await _exercise_browser_resume_user_input(actor_responses_override=[{'action': {'action': 'input_text', 'params': {'text': '{{secret:pwd:missing}}'}}, 'usage': {}}, {'action': {'action': 'press_key', 'params': {'key': 'Escape'}}, 'usage': {}}, {'action': {'action': 'attempt_completion', 'params': {'reasoning': 'done'}}, 'usage': {}}], pending_action={'action': 'press_key', 'params': {'key': 'a'}})
+    assert actor.activity_result['status'] == 'completed' and judge.await_count == 1
+    assert actor.pending_execution.await_count == 1, actor.pending_execution.await_args_list
+    call = actor.pending_execution.await_args
+    action = call.args[2] if len(call.args) > 2 else call.kwargs['action']
+    assert action['action'] == 'press_key'
+    assert any(('Requested saved credential is not ready or unavailable' in str(turns) for turns in actor.captured_turns))
+
+
+async def test_initial_credential_hydration_and_upload_do_not_hold_browser_completion(stage='both'):
+    import asyncio
+    from unittest.mock import patch
+    from contextlib import nullcontext
+    from domains.spawn_browser_agent_v3 import handler as h
+    started = asyncio.Event()
+    upload_started = asyncio.Event()
+    blocked = asyncio.Event()
+
+    async def blocked_upload(*args, **kwargs):
+        upload_started.set()
+        await blocked.wait()
+
+    async def blocked_hydration(*args, **kwargs):
+        started.set()
+        await blocked.wait()
+    with patch.object(h, 'build_realm_credential_state', blocked_hydration) if stage != 'upload' else nullcontext():
+        actor, judge = await asyncio.wait_for(_exercise_browser_resume_user_input(actor_responses_override=[{'action': {'action': 'attempt_completion', 'params': {'reasoning': 'done'}}, 'usage': {}}], credential_propagation_override=blocked_upload if stage != 'hydration' else None), timeout=5)
+    assert actor.activity_result['status'] == 'completed' and actor.await_count == 1
+    if stage != 'upload':
+        assert started.is_set() and (not blocked.is_set()), 'initial hydration did not run independently'
+    if stage != 'hydration':
+        assert upload_started.is_set(), 'credential upload did not run independently'
+        assert actor.activity_result['credential_background_status']['credential_upload'] == 'error'
+
+
+async def test_terminal_visual_persistence_error_keeps_verified_completion():
+    from unittest.mock import AsyncMock, patch
+    persist = AsyncMock(side_effect=RuntimeError('evidence write unavailable'))
+    with patch('domains.spawn_browser_agent_v3.service_visual_evidence.persist_terminal_visual_evidence', persist):
+        actor, judge = await _exercise_browser_resume_user_input(actor_responses_override=[
+            {'action': {'action': 'attempt_completion', 'params': {'reasoning': 'done'}}, 'usage': {}},
+        ])
+    assert actor.await_count == 1 and judge.await_count == 1
+    assert actor.activity_result['status'] == 'completed'
+    completed = [c.kwargs for c in actor.saved_messages.await_args_list
+                 if 'historical_visual_evidence' in (c.kwargs.get('extra_metadata') or {})]
+    assert len(completed) == 1 and completed[0]['extra_metadata']['historical_visual_evidence'] == {'status': 'failed'}, actor.saved_messages.await_args_list
+    assert not any(c.kwargs.get('action_type') == 'error' for c in actor.saved_messages.await_args_list)
+    persist.assert_awaited_once()
+
+
+async def test_terminal_visual_persistence_preserves_control_exceptions():
+    import textwrap
+    from pathlib import Path
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, patch
+    from domains.spawn_browser_agent_v3.handler import BrowserInstructionUnavailableError
+    from domains.spawn_browser_agent_v3.repo import BrowserSessionCloseError
+    from helpers.workflow_generation import WorkflowGenerationSealed
+    text = (Path(__file__).resolve().parents[2] / 'domains/spawn_browser_agent_v3/handler.py').read_text()
+    start = text.index('                        from domains.spawn_browser_agent_v3.service_visual_evidence import persist_terminal_visual_evidence')
+    stop = text.index('                        await _close_browser_with_cleanup_receipt', start)
+    code = 'async def run():\n' + textwrap.indent(textwrap.dedent(text[start:stop]), '    ') + '    return visual_evidence\n'
+    env = {'asyncio': asyncio, 'BrowserSessionCloseError': BrowserSessionCloseError,
+           'BrowserInstructionUnavailableError': BrowserInstructionUnavailableError,
+           'WorkflowGenerationSealed': WorkflowGenerationSealed,
+           'action_history': None, 'dom_service': None, 'session_id': 'session', 'task_id': 'task', 'agent_id': 'agent',
+           '_redact_activity_value': lambda value: value, 'extract_error_message': str,
+           'logger': SimpleNamespace(warning=lambda *args, **kwargs: None)}
+    exec(compile(code, __file__, 'exec'), env)
+    for error in (asyncio.CancelledError(), WorkflowGenerationSealed(),
+                  BrowserSessionCloseError('session', True),
+                  BrowserInstructionUnavailableError({'type': 'fixture', 'message': 'fixture'})):
+        with patch('domains.spawn_browser_agent_v3.service_visual_evidence.persist_terminal_visual_evidence',
+                   AsyncMock(side_effect=error)):
+            try:
+                await env['run']()
+            except BaseException as raised:
+                assert raised is error
+            else:
+                raise AssertionError('terminal evidence swallowed control exception')
 
 
 async def _run_realm_transition_action_fixture(
@@ -26405,8 +27230,12 @@ async def _run_realm_transition_action_fixture(
     credential_action=None,
     credential_failure=False,
     credential_origin=None,
+    navigation_error=None,
+    navigation_stays_on_old_page=False,
+    reload_error=None,
     unexpected_worker_state=False,
     reported_cookie_injection=False,
+    preparation_states=None,
 ):
     """Drive real activity/action/history with synthetic CDP and private hydration."""
     from contextlib import ExitStack
@@ -26427,6 +27256,13 @@ async def _run_realm_transition_action_fixture(
     active_page = {"url": final_url if preapproved_handoff else old_url, "title": "Sign in", "dom_tree": "Sign in"}
     events = []
     model_contexts = []
+    initial_credentials_ready = asyncio.Event()
+    native_register = _FakeDomService.register_secret_refs
+
+    def register_credentials(dom, refs):
+        native_register(dom, refs)
+        if old_secret in refs.values():
+            initial_credentials_ready.set()
     saved = AsyncMock()
     propagated = AsyncMock(return_value={"outcome": "unknown", "refs": 0, "applied": 0})
     session_info = {
@@ -26470,6 +27306,9 @@ async def _run_realm_transition_action_fixture(
         return payload
 
     class NavigationEvent:
+        def __init__(self, kind):
+            self.kind = kind
+
         def __await__(self):
             async def done():
                 return None
@@ -26477,16 +27316,20 @@ async def _run_realm_transition_action_fixture(
             return done().__await__()
 
         async def event_result(self, **_kwargs):
+            error = navigation_error if self.kind == "navigate" else reload_error
+            if error is not None:
+                raise RuntimeError(error)
             return None
 
     def dispatch(event):
-        if action_name == "goto" and not any(item[0] == "navigate" for item in events):
+        if action_name in {"goto", "open_new_tab"} and not any(item[0] == "navigate" for item in events):
             events.append(("navigate", event.url))
-            active_page["url"] = final_url
+            active_page["url"] = old_url if navigation_stays_on_old_page else final_url
+            return NavigationEvent("navigate")
         else:
             events.append(("reload", event.url))
             active_page["url"] = event.url
-        return NavigationEvent()
+            return NavigationEvent("reload")
 
     async def evaluate(**_kwargs):
         events.append(("evaluate", _kwargs["params"]["expression"]))
@@ -26512,6 +27355,12 @@ async def _run_realm_transition_action_fixture(
         return {"success": True, "payment_refs_filled": ["card_number"], "message": "Fields filled"}
 
     async def model_step(**kwargs):
+        if fatal_error is not None or minted_password_text is not None or credential_action is not None:
+            await asyncio.wait_for(initial_credentials_ready.wait(), timeout=2)
+        else:
+            await asyncio.sleep(0)  # Let the already scheduled background work run.
+        if fatal_error is not None:
+            return {"action": {"action": "evaluate", "params": {"code": "1"}}, "usage": {}}
         model_contexts.append(copy.deepcopy(kwargs))
         events.append(("model", len(model_contexts)))
         action = (
@@ -26522,7 +27371,7 @@ async def _run_realm_transition_action_fixture(
         params = (
             {"code": "(() => window.fixtureReadbackAndNavigate())()"}
             if action == "evaluate"
-            else ({"url": requested_url} if action == "goto" else {})
+            else ({"url": requested_url} if action in {"goto", "open_new_tab"} else {})
         )
         if credential_action is not None and len(model_contexts) == 1:
             action = credential_action["action"]
@@ -26535,10 +27384,29 @@ async def _run_realm_transition_action_fixture(
             "mode": "waterfall",
         }
 
+    control_calls = 0
+
+    async def user_control(*_args, **_kwargs):
+        nonlocal control_calls
+        control_calls += 1
+        if fatal_error is not None and control_calls > 1:
+            await asyncio.wait_for(initial_credentials_ready.wait(), timeout=2)
+            raise fatal_error
+        return False
+
     fake_browser = SimpleNamespace(contexts=[SimpleNamespace(pages=[SimpleNamespace()])], close=AsyncMock())
     fake_playwright = _FakePlaywright(fake_browser)
     prefix = "domains.spawn_browser_agent_v3.handler."
+    preparations = []
+    original_preparation = handler.AsyncCredentialPreparation
+
+    def capture_preparation(*args, **kwargs):
+        instance = original_preparation(*args, **kwargs)
+        preparations.append(instance)
+        return instance
+
     targets = [
+        patch(prefix + "AsyncCredentialPreparation", capture_preparation),
         patch(prefix + "load_config", return_value=_fake_config()),
         patch(prefix + "activity.heartbeat"),
         patch(prefix + "BrowserAgentRecorder.create", AsyncMock(return_value=None)),
@@ -26549,6 +27417,7 @@ async def _run_realm_transition_action_fixture(
             AsyncMock(return_value={"input_cents_per_1k": 0, "output_cents_per_1k": 0}),
         ),
         patch(prefix + "build_realm_credential_state", hydrate),
+        patch.object(_FakeDomService, "register_secret_refs", register_credentials),
         patch(prefix + "activity_drain_reason", AsyncMock(return_value=None)),
         patch(prefix + "prepare_browser_auth", prepare),
         patch(
@@ -26558,12 +27427,16 @@ async def _run_realm_transition_action_fixture(
         patch(prefix + "_call_browser_use_with_rotation", model_step),
         patch(
             prefix + "_wait_for_browser_user_control",
-            AsyncMock(side_effect=fatal_error) if fatal_error is not None else AsyncMock(return_value=False),
+            user_control,
         ),
         patch(prefix + "_observe_step_page", observe),
         patch.object(_FakeDomService, "get_page_identity", identity),
         patch.object(_FakeDomService, "get_browser_state", observe),
         patch.object(_FakeDomSession, "event_bus", SimpleNamespace(dispatch=dispatch), create=True),
+        patch.object(
+            _FakeDomSession, "get_focused_target",
+            return_value=SimpleNamespace(target_id="fixture-tab"), create=True,
+        ),
         patch.object(_FakeDomSession, "get_or_create_cdp_session", AsyncMock(return_value=cdp), create=True),
         patch(prefix + "wait_for_navigation_ready", AsyncMock()),
         patch("domains.spawn_browser_agent_v3.service_actions.wait_for_navigation_ready", AsyncMock()),
@@ -26659,6 +27532,8 @@ async def _run_realm_transition_action_fixture(
                 "private_state": _FakeDomService.last_instance.secret_redaction_state(),
             }
         result = await pending
+    if preparation_states is not None:
+        preparation_states.extend(copy.deepcopy(p.state) for p in preparations)
     assert result["status"] == "awaiting_auth_assistance"
     assert len(model_contexts) == (1 if preapproved_handoff else 2), "redirect reload added a model call"
     if preapproved_handoff:
@@ -26752,7 +27627,7 @@ async def test_activity_fatal_error_keeps_credentials_out_of_classifier_and_temp
     assert secret in captured["private_state"]["secret_redaction_refs"].values(), (
         "fatal fixture did not reach private credential hydration"
     )
-    assert not captured["contexts"], "fatal fixture unexpectedly advanced into model generation"
+    assert not captured["contexts"], "fatal fixture unexpectedly recorded a normal actor decision"
     assert captured["classifier_calls"], "fatal fixture did not exercise actual credential propagation"
     assert secret not in str(captured["classifier_calls"]), (
         "the fatal activity sent a raw password into the credential classifier"
@@ -26791,64 +27666,115 @@ async def test_activity_cross_realm_action_redacts_reused_ref_values():
     assert ("prepare", "new.example") in events, "test did not activate a different private credential realm"
 
 
+def _assert_nonblocking_navigation_context(contexts, events, *, realm, success, error=None):
+    from urllib.parse import urlsplit
+    assert len(contexts) == 2
+    assert sum(kind == "navigate" for kind, _ in events) == 1, "navigation was repeated"
+    assert events.count(("model", 2)) == 1, "actor missed the navigation result"
+    assert not any(kind == "reload" for kind, _ in events), "credential work forced a navigation reload"
+    assert events.index(next(event for event in events if event[0] == "navigate")) < events.index(("model", 2))
+    tools = [message for message in contexts[1]["turn_messages"] if message["role"] == "tool"]
+    result = json.loads(tools[0]["content"])
+    assert result["success"] is success
+    assert urlsplit(result["current_url"]).hostname == realm, "result URL and current credential realm diverged"
+    if error is not None:
+        assert error in result["error"]
+    auth = result["auth_context"]
+    assert auth["auth_realm"] == realm
+    assert auth["credential_preparation_status"] in {"pending", "ready", "error"}
+    assert "synthetic-prior-realm-password" not in str(contexts)
+    assert "synthetic-current-realm-password" not in str(contexts)
+    return auth
+
+
+
+
+@_in_browser_activity_context
+async def test_activity_redirected_goto_reports_realm_without_credential_reload():
+    """Redirects report current realm and background status without a forced reload."""
+    for redirect, restoration_error in ((True, False), (False, False), (True, True), (False, True)):
+        contexts, _, events, _, _ = await _run_realm_transition_action_fixture("goto", redirect=redirect, restoration_error=restoration_error)
+        _assert_nonblocking_navigation_context(contexts, events, realm="new.example", success=True)
+
+
+@_in_browser_activity_context
+async def test_activity_open_new_tab_reports_failed_navigation_without_credential_wait():
+    """The real navigation error reaches the actor while credential work is asynchronous."""
+    error = "Navigation failed: net::ERR_SSL_PROTOCOL_ERROR"
+    contexts, _, events, _, _ = await _run_realm_transition_action_fixture("open_new_tab", redirect=False, navigation_error=error)
+    _assert_nonblocking_navigation_context(contexts, events, realm="new.example", success=False, error=error)
+
+
+@_in_browser_activity_context
+async def test_activity_open_new_tab_keeps_observed_realm_after_early_failure():
+    error = "Navigation failed: net::ERR_SSL_PROTOCOL_ERROR"
+    contexts, _, events, _, _ = await _run_realm_transition_action_fixture("open_new_tab", redirect=False, navigation_error=error, navigation_stays_on_old_page=True)
+    _assert_nonblocking_navigation_context(contexts, events, realm="old.example", success=False, error=error)
+
+
+@_in_browser_activity_context
+async def test_activity_open_new_tab_success_and_optional_preparation_error():
+    for restoration_error in (False, True):
+        contexts, _, events, _, _ = await _run_realm_transition_action_fixture("open_new_tab", redirect=False, restoration_error=restoration_error)
+        _assert_nonblocking_navigation_context(contexts, events, realm="new.example", success=True)
+
+
+@_in_browser_activity_context
+async def test_activity_open_new_tab_does_not_insert_redirect_reload():
+    """Credential-only reload failures cannot invent a second navigation or block the actor."""
+    for error in (None, "Navigation failed: net::ERR_SSL_PROTOCOL_ERROR"):
+        contexts, _, events, _, _ = await _run_realm_transition_action_fixture("open_new_tab", redirect=True, reload_error=error)
+        _assert_nonblocking_navigation_context(contexts, events, realm="new.example", success=True)
 @_in_browser_activity_context
 async def test_activity_redirected_goto_preserves_active_auth_transaction():
-    """Discover redirected credentials without replacing an already-started transaction."""
-    import json
-
+    """Background inventory must never replace a started auth transaction."""
     for redirect, restoration_error in ((True, False), (False, False), (True, True)):
+        states = []
         contexts, _saved, events, _prior, _active = await _run_realm_transition_action_fixture(
-            "goto",
-            redirect=redirect,
-            restoration_error=restoration_error,
+            "goto", redirect=redirect, restoration_error=restoration_error,
+            preparation_states=states,
         )
-        reloads = [event for event in events if event[0] == "reload"]
-        assert not reloads, "observed redirect restarted the active authentication transaction"
-        assert events.index(("prepare", "new.example")) < events.index(("model", 2))
-        assert (("restore", "new.example") in events) is (not redirect), (
-            "observed redirect must use inventory only; explicit navigation must still restore before navigation"
-        )
+        assert ("prepare", "new.example") in events
+        assert not any(kind in {"reload", "restore"} for kind, _ in events)
         tools = [message for message in contexts[1]["turn_messages"] if message["role"] == "tool"]
         context = json.loads(tools[0]["content"])["auth_context"]
         assert context["auth_realm"] == "new.example"
-        if not redirect:
-            assert events.index(("prepare", "new.example")) < events.index(("navigate", "https://new.example/login"))
-        if restoration_error:
-            assert "18000ms" in context["credential_preparation_error"]
+        assert context["credential_preparation_status"] in {"pending", "ready", "error"}
+        assert states[-1]["credential_preparation_status"] == ("error" if restoration_error else "ready")
 
 
 @_in_browser_activity_context
 async def test_activity_observed_realm_preserves_state_and_private_inventory():
-    """A tool-observed realm change hydrates secrets without replacing live cookies."""
-    import json
-
-    contexts, _saved, events, prior, active = await _run_realm_transition_action_fixture("evaluate")
+    """An observed realm prepares private inventory asynchronously without a cookie restore."""
+    states = []
+    contexts, _saved, events, prior, active = await _run_realm_transition_action_fixture(
+        "evaluate", preparation_states=states,
+    )
     assert ("prepare", "new.example") in events
-    assert ("restore", "new.example") not in events, "observation overwrote the active realm's browser state"
-    assert not any(event[0] == "reload" for event in events), "observation restarted the active page"
+    assert not any(kind in {"restore", "reload"} for kind, _ in events)
     tools = [message for message in contexts[1]["turn_messages"] if message["role"] == "tool"]
     context = json.loads(tools[0]["content"])["auth_context"]
-    assert context["auth_realm"] == "new.example" and context["inventory_status"] == "available"
+    assert context["auth_realm"] == "new.example"
+    assert states[-1]["credential_preparation_status"] == "ready"
     assert prior not in str(contexts) and active not in str(contexts)
+    assert prior not in str(states) and active not in str(states)
 
 
 @_in_browser_activity_context
 async def test_activity_inventory_rejects_unrequested_worker_state():
-    """An older or inconsistent server cannot turn an inventory read into a state write."""
-    import json
-
+    """A rejected asynchronous inventory read cannot mutate the live browser."""
     for reported_cookie_injection in (False, True):
+        states = []
         contexts, _saved, events, _prior, _active = await _run_realm_transition_action_fixture(
             "evaluate", unexpected_worker_state=not reported_cookie_injection,
-            reported_cookie_injection=reported_cookie_injection,
+            reported_cookie_injection=reported_cookie_injection, preparation_states=states,
         )
-        assert not any(event[0] == "apply-worker-state" for event in events), (
-            "inventory-only preparation applied an unrequested browser-state payload"
-        )
+        assert not any(event[0] == "apply-worker-state" for event in events)
         tools = [message for message in contexts[1]["turn_messages"] if message["role"] == "tool"]
         context = json.loads(tools[0]["content"])["auth_context"]
         assert context["inventory_status"] == "unknown"
-        assert "Inventory-only" in context["credential_preparation_error"]
+        assert states[-1]["credential_preparation_status"] == "error"
+        assert states[-1]["credential_preparation_error"] == "Saved credential preparation failed"
 
 
 @_in_browser_activity_context
@@ -26934,6 +27860,7 @@ async def test_spawn_browser_activity_verified_completion_message_leads_with_goa
             AsyncMock(
                 return_value={
                     "score": 1.0,
+                    "task_completed": True,
                     "reasoning": "Heading confirmed",
                     "structured_response": {"result": "Example Domain"},
                     "usage": {},
@@ -27059,6 +27986,7 @@ async def test_spawn_browser_activity_tilion_cost_row_bills_live_session_bytes_n
             AsyncMock(
                 return_value={
                     "score": 1.0,
+                    "task_completed": True,
                     "reasoning": "Heading confirmed",
                     "structured_response": {"result": "Example Domain"},
                     "usage": {},
@@ -27145,10 +28073,6 @@ async def test_spawn_browser_activity_failure_completion_message_leads_with_goal
             "domains.spawn_browser_agent_v3.handler.init_browser_session",
             AsyncMock(return_value=session_data),
         ),
-        patch(
-            "domains.spawn_browser_agent_v3.handler.fetch_auth_options",
-            AsyncMock(return_value={"realm": "example.com"}),
-        ),
         patch("domains.spawn_browser_agent_v3.handler.close_browser_session", AsyncMock()),
         patch(
             "domains.spawn_browser_agent_v3.handler.propagate_browser_run_credentials",
@@ -27208,10 +28132,6 @@ async def test_spawn_browser_activity_setup_failure_hands_unread_input_to_owner(
         patch("domains.spawn_browser_agent_v3.handler.load_config", return_value=_fake_config()),
         patch("domains.spawn_browser_agent_v3.handler.activity.heartbeat"),
         patch("domains.spawn_browser_agent_v3.handler.init_browser_session", AsyncMock(return_value=session_data)),
-        patch(
-            "domains.spawn_browser_agent_v3.handler.fetch_auth_options",
-            AsyncMock(return_value={"realm": "example.com"}),
-        ),
         patch("domains.spawn_browser_agent_v3.handler.close_browser_session", AsyncMock()),
         patch(
             "domains.spawn_browser_agent_v3.handler.propagate_browser_run_credentials",
@@ -27236,7 +28156,7 @@ async def test_spawn_browser_activity_setup_failure_hands_unread_input_to_owner(
     assert "- go to instacart instead" in failed[0]["message"], failed[0]["message"]
 
 
-async def test_spawn_browser_activity_checkpoints_at_step_boundary_on_worker_shutdown():
+async def _exercise_first_step_shutdown(*, neutral=False, resume=False, resume_url="about:blank", require_trace=False, unconfirmed_disconnect=False, setup_failure=False):
     """A deploy SIGTERM mid-step must end the activity at the next step boundary.
 
     Agent 3efa7cae: a deploy stopped the worker machine while a browser task
@@ -27257,6 +28177,12 @@ async def test_spawn_browser_activity_checkpoints_at_step_boundary_on_worker_shu
     from helpers.activity_generation_drain import WORKER_SHUTDOWN
 
     env = ActivityEnvironment()
+    if unconfirmed_disconnect:
+        env.info = dataclasses.replace(
+            env.info, activity_id="browser-cleanup:discarded-multiplexer-owner" if setup_failure == "constructor"
+            else "browser-cleanup:discarded-setup-owner" if setup_failure
+            else "browser-cleanup:discarded-drain-owner"
+        )
     fake_browser = SimpleNamespace(contexts=[SimpleNamespace(pages=[SimpleNamespace()])], close=AsyncMock())
     session_data = {
         "task_id": "task-1",
@@ -27269,6 +28195,29 @@ async def test_spawn_browser_activity_checkpoints_at_step_boundary_on_worker_shu
         "browser_session_metadata": {"provider": "steel", "profile_id": "profile-1"},
         "user_settings": {},
     }
+    if neutral:
+        session_data.update(
+            auth_realm="",
+            auth_options={'realm': '',
+             'steel_session': None,
+             'cookie_bundles': [],
+             'passwords': [],
+             'passkeys': [],
+             'email_otp': {'available': False,
+                           'connected_emails': [],
+                           'match_for_site_account': None},
+             'readable_identifiers': [],
+             'minted': None},
+            passkeys=[], auth_credential_ref=None, current_url=resume_url, same_session_available=True,
+        )
+    final_url = "about:blank" if neutral else "https://example.com/cart"
+    multiplexer = SimpleNamespace(
+        start=AsyncMock(return_value="ws://live"),
+        close=AsyncMock(side_effect=RuntimeError("fixture multiplexer detach failed")),
+    )
+    if setup_failure == "constructor":
+        session_data["ws_url"] = "wss://back.tilion.dev/v1/session/sess_" + "1" * 32 + "/cdp"
+        session_data["browser_session_metadata"]["provider"] = "tilion"
     llm_step = AsyncMock(
         return_value={
             "action": {"action": "scroll", "thinking": "Looking for the cart", "params": {"direction": "down"}},
@@ -27281,9 +28230,26 @@ async def test_spawn_browser_activity_checkpoints_at_step_boundary_on_worker_shu
     async def execute_step_while_deploy_lands(*args, **kwargs):
         executed_steps.append(args[2] if len(args) > 2 else kwargs.get("unified_action"))
         env.worker_shutdown()
-        return {"success": True, "message": "Scrolled down", "current_url": "https://example.com/cart"}
+        return {"success": True, "message": "Scrolled down", "current_url": final_url}
 
     close_mock = AsyncMock()
+    cleanup_activity_ids = []
+
+    async def cleanup_receipt():
+        from temporalio import activity
+
+        cleanup_activity_ids.append(activity.info().activity_id)
+
+    class UnconfirmedDom(_FakeDomService):
+        def __init__(self, *args, **kwargs):
+            if setup_failure == "constructor":
+                raise RuntimeError("fixture CDP setup failed")
+            super().__init__(*args, **kwargs)
+            self.disconnect_confirmed = False
+            self.disconnect = AsyncMock(side_effect=RuntimeError("fixture earlier disconnect failed"))
+            if setup_failure:
+                self.connect = AsyncMock(side_effect=RuntimeError("fixture CDP setup failed"))
+
     native_start = await native_browser_start_source("1970-01-01T00:00:00+00:00")
     patch_targets = [
         patch("domains.spawn_browser_agent_v3.handler.load_config", return_value=_fake_config()),
@@ -27298,7 +28264,12 @@ async def test_spawn_browser_activity_checkpoints_at_step_boundary_on_worker_shu
         patch("domains.spawn_browser_agent_v3.handler.execute_action", side_effect=execute_step_while_deploy_lands),
         patch("domains.spawn_browser_agent_v3.handler.build_browser_verifier_context", AsyncMock(return_value=[])),
         patch("domains.spawn_browser_agent_v3.handler.extract_session_files", AsyncMock(return_value=[])),
-        patch("domains.spawn_browser_agent_v3.handler.disconnect_browser_after_passkey_capture", AsyncMock()),
+        patch(
+            "domains.spawn_browser_agent_v3.handler.disconnect_browser_after_passkey_capture",
+            AsyncMock(side_effect=RuntimeError("fixture earlier disconnect failed"))
+            if unconfirmed_disconnect else AsyncMock(),
+        ),
+        patch("domains.spawn_browser_agent_v3.handler.acknowledge_browser_activity_cleanup", cleanup_receipt),
         patch(
             "domains.spawn_browser_agent_v3.handler.propagate_browser_run_credentials",
             AsyncMock(return_value={"outcome": "unknown", "refs": 0, "applied": 0}),
@@ -27306,7 +28277,7 @@ async def test_spawn_browser_activity_checkpoints_at_step_boundary_on_worker_shu
         patch("domains.spawn_browser_agent_v3.handler.close_browser_session", close_mock),
         patch("domains.spawn_browser_agent_v3.handler.save_browser_action_message", AsyncMock()),
         patch("domains.spawn_browser_agent_v3.handler.save_browser_assistant_message", AsyncMock()),
-        patch("browser_tools.dom_service.DOMService", _FakeDomService),
+        patch("browser_tools.dom_service.DOMService", UnconfirmedDom if unconfirmed_disconnect else _FakeDomService),
         patch("browser_tools.humanizer.BrowserHumanizer", _FakeHumanizer),
         patch(
             "playwright.async_api.async_playwright", return_value=_FakeAsyncPlaywright(_FakePlaywright(fake_browser))
@@ -27314,21 +28285,64 @@ async def test_spawn_browser_activity_checkpoints_at_step_boundary_on_worker_shu
         patch("domains.spawn_browser_agent_v3.handler.live_tab_looks_challenged", AsyncMock(return_value=False)),
     ]
 
+    if neutral:
+        patch_targets.extend([
+            patch.object(_FakeDomService, "get_page_identity", AsyncMock(return_value={"url": "about:blank", "title": ""})),
+            patch.object(_FakeDomService, "get_browser_state", AsyncMock(return_value={"url": "about:blank", "screenshot": None})),
+            patch.object(_FakeDomService, "get_current_url", AsyncMock(return_value="about:blank")),
+            patch("domains.spawn_browser_agent_v3.handler.fetch_session_info", AsyncMock(return_value=session_data)),
+        ])
+    if setup_failure == "constructor":
+        patch_targets.append(patch("browser_tools.cdp_multiplexer.SingleCdpConnectionMultiplexer", return_value=multiplexer))
+
     with ExitStack() as stack:
         for patch_target in patch_targets:
             stack.enter_context(patch_target)
         captured = stack.enter_context(capture_logs())
-        result = await env.run(
-            spawn_browser_agent_activity_v3,
-            user_id="user-1",
-            agent_id="agent-1",
-            goal="Add the socks to the cart",
-            tool_call_id="tool-1",
-            task_id="task-1",
-            output_schema={"fields": [{"name": "result", "type": "string"}]},
-            use_claude_mode=False,
-            start_url="https://example.com",
-        )
+        setup_error = None
+        try:
+            result = await env.run(
+                spawn_browser_agent_activity_v3,
+                user_id="user-1",
+                agent_id="agent-1",
+                goal="Add the socks to the cart",
+                tool_call_id="tool-1",
+                task_id="task-1",
+                output_schema={"fields": [{"name": "result", "type": "string"}]},
+                use_claude_mode=False,
+                start_url="about:blank" if neutral else "https://example.com",
+                is_resume=resume,
+            )
+        except RuntimeError as error:
+            if not setup_failure:
+                raise
+            setup_error = error
+        if unconfirmed_disconnect:
+            from domains.spawn_browser_agent_v3.handler import drain_background_browser_cleanups
+
+            await drain_background_browser_cleanups(timeout=5)
+
+    if setup_failure:
+        assert setup_error is not None and "fixture CDP setup failed" in str(setup_error), setup_error
+        assert any(entry.get("event") == "Browser cleanup finished in background" for entry in captured)
+        assert not any(entry.get("event") == "Browser cleanup failed in background" for entry in captured)
+        if setup_failure == "constructor":
+            assert "browser-cleanup:discarded-multiplexer-owner" not in cleanup_activity_ids, "live multiplexer acknowledged cleanup"
+            assert multiplexer.close.await_count, "cleanup discarded a multiplexer created before DOM construction"
+            return
+        assert _FakeDomService.last_instance.disconnect.await_count >= 2, "cleanup discarded the failed setup owner"
+        assert "browser-cleanup:discarded-setup-owner" not in cleanup_activity_ids, "failed setup detach acknowledged cleanup"
+        return
+
+    if require_trace:
+        events = [e for e in captured if e.get("event") == "browser.foreground.await"]
+        starts = [e["operation"] for e in events if e.get("state") == "start" and e["operation"] not in {"control_read", "control_ack", "control_yield"}]
+        assert starts[:3] == ["user_control", "tab_rebind", "instruction_sync"], starts
+        assert "overlay_suppress" in starts and "observe_page" in starts, starts
+        assert all(e["step"] == 1 for e in events), events
+        assert len({e["trace_id"] for e in events}) == 1, events
+        for start in (e for e in events if e.get("state") == "start"):
+            assert any(e.get("request_ordinal") == start["request_ordinal"] and e.get("state") in {"done", "error", "cancelled"} for e in events), events
 
     assert result["status"] == BROWSER_DRAIN_YIELD_STATUS, result
     assert result["yield_reason"] == WORKER_SHUTDOWN, result
@@ -27343,8 +28357,8 @@ async def test_spawn_browser_activity_checkpoints_at_step_boundary_on_worker_shu
     assert result["session_id"] == "session-1" and result["cdp_url"] == "ws://live", result
     assert result["task_id"] == "task-1", result
     close_mock.assert_not_awaited()
-    assert result["current_url"] == "https://example.com/cart", result
-    assert "https://example.com/cart" in result.get("visited_urls", []), result
+    assert result["current_url"] == final_url, result
+    assert final_url in result.get("visited_urls", []), result
     turn_tool_calls = [
         call["function"]["name"]
         for message in result.get("browser_turn_messages", [])
@@ -27354,8 +28368,54 @@ async def test_spawn_browser_activity_checkpoints_at_step_boundary_on_worker_shu
     assert result.get("reasoning_messages") == ["Looking for the cart"], result
     llm_usage = [item for item in result.get("usage_items") or [] if item.get("type") == "llm"]
     assert llm_usage and llm_usage[0]["input_tokens"] == 900, result.get("usage_items")
+    if unconfirmed_disconnect:
+        cleanup_errors = [entry for entry in captured if entry.get("event") == "Browser cleanup failed in background"]
+        assert not cleanup_errors, cleanup_errors
+        assert any(entry.get("event") == "Browser cleanup finished in background" for entry in captured), [
+            entry.get("event") for entry in captured if "cleanup" in str(entry.get("event", "")).lower()
+        ]
+        assert _FakeDomService.last_instance.disconnect.await_count, "cleanup discarded the failed DOM owner"
+        assert "browser-cleanup:discarded-drain-owner" not in cleanup_activity_ids, (
+            "discarded failed DOM detach acknowledged cleanup"
+        )
 
 
+async def test_discarded_drain_disconnect_never_acknowledges_cleanup():
+    await _exercise_first_step_shutdown(unconfirmed_disconnect=True)
+
+
+async def test_discarded_setup_disconnect_never_acknowledges_cleanup():
+    await _exercise_first_step_shutdown(
+        unconfirmed_disconnect=True, setup_failure=True
+    )
+
+
+async def test_pre_dom_multiplexer_failure_never_acknowledges_cleanup():
+    await _exercise_first_step_shutdown(
+        unconfirmed_disconnect=True, setup_failure="constructor"
+    )
+
+
+async def test_spawn_browser_activity_checkpoints_at_step_boundary_on_worker_shutdown():
+    await _exercise_first_step_shutdown()
+
+
+async def test_neutral_initialization_reaches_first_browser_step():
+    await _exercise_first_step_shutdown(neutral=True)
+
+
+async def test_neutral_resume_reaches_first_browser_step():
+    await _exercise_first_step_shutdown(neutral=True, resume=True)
+
+
+async def test_neutral_resume_defers_inventory_at_web_url():
+    """Resume metadata does not pretend that credential preparation is complete."""
+    await _exercise_first_step_shutdown(neutral=True, resume=True, resume_url="https://example.com/account")
+
+
+async def test_neutral_resume_defers_inventory_without_metadata_url():
+    """The first live page observation supplies the realm without blocking resume."""
+    await _exercise_first_step_shutdown(neutral=True, resume=True, resume_url=None)
 async def test_reattached_browser_session_starts_in_the_realm_its_credentials_belong_to():
     """A reattached browser starts in the realm its credential material was prepared for.
 
@@ -27390,27 +28450,41 @@ async def test_reattached_browser_session_starts_in_the_realm_its_credentials_be
         "browser_session_metadata": {"provider": "steel", "profile_id": "profile-1"},
         "user_settings": {},
     }
-    google_passkeys = [{"id": f"pk-{index}", "label": "Google passkey"} for index in range(3)]
 
-    async def auth_options_for(_config, _user_id, realm):
-        # The backend canonicalizes mail.google.com to the google.com realm.
-        if realm.endswith("google.com"):
-            return {"realm": "google.com", "passkeys": google_passkeys}
-        return {"realm": realm}
+    from domains.spawn_browser_agent_v3 import handler
+    original_hydrate = handler.build_realm_credential_state
+    provider_entered, actor_entered = asyncio.Event(), asyncio.Event()
+    provider_release, hydrated, step_release = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    payloads = []
+    google_payload = {"auth_realm": "google.com", "auth_options": {"realm": "google.com"},
+                      "passwords": [], "passkeys": []}
 
-    fetch_options = AsyncMock(side_effect=auth_options_for)
-    prepare_auth = AsyncMock(
-        return_value={"auth_realm": "google.com", "auth_options": {"realm": "google.com"}, "passkeys": []}
-    )
-    llm_step = AsyncMock(
-        return_value={
-            "action": {"action": "scroll", "thinking": "Opening the inbox", "params": {"direction": "down"}},
-            "usage": {"prompt_tokens": 900, "completion_tokens": 60, "actual_model": "rose-1-browser-use"},
-            "mode": "waterfall",
-        }
-    )
+    async def prepare_current_realm(*_args, **kwargs):
+        assert kwargs["user_id"] == "user-1" and kwargs["session_id"] == "session-1"
+        assert kwargs["target_url"] == inbox_url
+        provider_entered.set()
+        await provider_release.wait()
+        return google_payload
+
+    async def record_hydration(payload, **kwargs):
+        payloads.append(copy.deepcopy(payload))
+        state = await original_hydrate(payload, **kwargs)
+        hydrated.set()
+        return state
+
+    async def observe_first_actor(**kwargs):
+        assert not provider_release.is_set(), "actor waited for provider credentials"
+        assert kwargs["dom_service"].allow_credential_reload is False
+        actor_entered.set()
+        return {"action": {"action": "scroll", "thinking": "Opening the inbox", "params": {"direction": "down"}},
+                "usage": {"prompt_tokens": 900, "completion_tokens": 60, "actual_model": "rose-1-browser-use"},
+                "mode": "waterfall"}
+
+    prepare_auth = AsyncMock(side_effect=prepare_current_realm)
+    llm_step = AsyncMock(side_effect=observe_first_actor)
 
     async def execute_step(*args, **kwargs):
+        await step_release.wait()
         env.worker_shutdown()
         return {"success": True, "message": "Scrolled down", "current_url": inbox_url}
 
@@ -27451,8 +28525,9 @@ async def test_reattached_browser_session_starts_in_the_realm_its_credentials_be
         patch("domains.spawn_browser_agent_v3.handler.load_config", return_value=_fake_config()),
         patch("domains.spawn_browser_agent_v3.handler.poll_new_messages", AsyncMock(return_value=[native_start])),
         patch("domains.spawn_browser_agent_v3.handler.init_browser_session", AsyncMock(return_value=session_data)),
-        patch("domains.spawn_browser_agent_v3.handler.fetch_auth_options", fetch_options),
         patch("domains.spawn_browser_agent_v3.handler.prepare_browser_auth", prepare_auth),
+        patch("domains.spawn_browser_agent_v3.handler._wait_for_document_ready", AsyncMock(return_value="complete")),
+        patch("domains.spawn_browser_agent_v3.handler.build_realm_credential_state", side_effect=record_hydration),
         patch("domains.spawn_browser_agent_v3.handler.fetch_recent_otps", AsyncMock(return_value=[])),
         patch(
             "domains.spawn_browser_agent_v3.handler.get_model_pricing_with_fallback",
@@ -27481,7 +28556,7 @@ async def test_reattached_browser_session_starts_in_the_realm_its_credentials_be
     with ExitStack() as stack:
         for patch_target in patch_targets:
             stack.enter_context(patch_target)
-        result = await env.run(
+        run = asyncio.create_task(env.run(
             spawn_browser_agent_activity_v3,
             user_id="user-1",
             agent_id="agent-1",
@@ -27491,15 +28566,29 @@ async def test_reattached_browser_session_starts_in_the_realm_its_credentials_be
             output_schema={"fields": [{"name": "result", "type": "string"}]},
             use_claude_mode=False,
             start_url="https://mail.google.com/",
-        )
+        ))
+        try:
+            await asyncio.wait_for(asyncio.gather(provider_entered.wait(), actor_entered.wait()), timeout=10)
+            assert not run.done(), "activity ended before the concurrent preparation proof"
+            provider_release.set()
+            await asyncio.wait_for(hydrated.wait(), timeout=10)
+            step_release.set()
+            result = await asyncio.wait_for(run, timeout=10)
+        finally:
+            provider_release.set()
+            step_release.set()
+            if not run.done():
+                run.cancel()
+            await asyncio.gather(run, return_exceptions=True)
 
     # Setup succeeded and the run reached a step boundary on the inbox.
     assert result["status"] == BROWSER_DRAIN_YIELD_STATUS, result
     assert result["current_url"] == inbox_url, result
     assert result["auth_realm"] == "google.com", result
-    assert [call.args[2] for call in fetch_options.await_args_list] == ["linkedin.com"], (
-        "initial auth options must come from the realm the reattached material belongs to"
+    assert payloads == [google_payload], (
+        "only the observed Google realm payload may hydrate; never mix LinkedIn material with Google options"
     )
+    assert payloads[0]["auth_realm"] == payloads[0]["auth_options"]["realm"] == "google.com"
     assert [call.kwargs["target_url"] for call in prepare_auth.await_args_list] == [inbox_url], (
         "the first google.com observation must prepare that realm through the transition"
     )
@@ -27516,75 +28605,150 @@ async def test_reattached_browser_session_starts_in_the_realm_its_credentials_be
 
 
 @_in_browser_activity_context
-async def test_credential_setup_failure_disconnects_the_connected_browser_clients():
-    """A credential-setup failure releases the CDP clients the browser side connected.
+async def test_data_setup_failure_disconnects_the_connected_browser_clients():
+    """A real parallel data-side failure adopts and releases already-connected clients."""
+    from contextlib import ExitStack
+    from domains.spawn_browser_agent_v3 import handler
+    validated = asyncio.Event()
+    sentinel = RuntimeError("data setup failed after validated attach")
 
-    Agent ae7983a2: credential preparation raised while the parallel browser
-    setup had already attached DOMService and Playwright. `asyncio.gather`
-    propagated the data error and dropped the browser result, so teardown saw
-    no clients; the orphaned loopback client kept Tilion's single CDP slot and
-    every later browser start for the agent failed with 4409 / connect() timeouts.
-    """
-    from domains.spawn_browser_agent_v3.handler import spawn_browser_agent_activity_v3
+    async def data_setup_failure(*_args, **_kwargs):
+        await validated.wait()
+        raise sentinel
 
     fake_browser = SimpleNamespace(contexts=[SimpleNamespace(pages=[SimpleNamespace()])], close=AsyncMock())
-    session_data = {
-        "task_id": "task-1",
-        "session_id": "session-1",
-        "debug_url": "https://steel.example/debug",
-        "ws_url": "ws://live",
-        "fingerprint_injection": None,
-        "passwords": [],
-        "passkeys": [],
-        "browser_session_metadata": {"provider": "steel", "profile_id": "profile-1"},
-        "user_settings": {},
-    }
-    # Inventory names an enabled passkey whose material the session lacks.
-    auth_options = {"realm": "example.com", "passkeys": [{"id": "pk-1", "label": "Example passkey"}]}
     _FakeDomService.last_instance = None
-    native_start = await native_browser_start_source("1970-01-01T00:00:00+00:00")
-    with (
-        patch("domains.spawn_browser_agent_v3.handler.load_config", return_value=_fake_config()),
-        patch("domains.spawn_browser_agent_v3.handler.activity.heartbeat"),
-        patch("domains.spawn_browser_agent_v3.handler.poll_new_messages", AsyncMock(return_value=[native_start])),
-        patch("domains.spawn_browser_agent_v3.handler.init_browser_session", AsyncMock(return_value=session_data)),
-        patch("domains.spawn_browser_agent_v3.handler.fetch_auth_options", AsyncMock(return_value=auth_options)),
-        patch(
-            "domains.spawn_browser_agent_v3.handler.get_model_pricing_with_fallback",
-            AsyncMock(return_value={"input_cents_per_1k": 0, "output_cents_per_1k": 0}),
-        ),
-        patch(
-            "domains.spawn_browser_agent_v3.handler.propagate_browser_run_credentials",
-            AsyncMock(return_value={"outcome": "unknown", "refs": 0, "applied": 0}),
-        ),
-        patch("domains.spawn_browser_agent_v3.handler.close_browser_session", AsyncMock()),
-        patch("domains.spawn_browser_agent_v3.handler.save_browser_action_message", AsyncMock()),
-        patch("domains.spawn_browser_agent_v3.handler.save_browser_assistant_message", AsyncMock()),
-        patch("browser_tools.dom_service.DOMService", _FakeDomService),
-        patch("browser_tools.humanizer.BrowserHumanizer", _FakeHumanizer),
-        patch(
-            "playwright.async_api.async_playwright", return_value=_FakeAsyncPlaywright(_FakePlaywright(fake_browser))
-        ),
-    ):
-        with pytest.raises(RuntimeError, match="missing passkey material"):
-            await spawn_browser_agent_activity_v3(
-                user_id="user-1",
-                agent_id="agent-1",
-                goal="Check the inbox",
-                tool_call_id="tool-1",
+    with ExitStack() as stack:
+        for target in _parallel_setup_patches(dict(_PARALLEL_SETUP_SESSION), fake_browser, _FakeDomService, **{
+            "domains.spawn_browser_agent_v3.handler.get_model_pricing_with_fallback": dict(new=data_setup_failure),
+            "domains.spawn_browser_agent_v3.handler._require_live_playwright_client": dict(new=_validated_setup_attach(validated)),
+        }):
+            stack.enter_context(target)
+        earlier = set(handler._background_browser_cleanup_tasks)
+        with pytest.raises(RuntimeError, match="data setup failed after validated attach") as caught:
+            await asyncio.wait_for(handler.spawn_browser_agent_activity_v3(
+                user_id="user-1", agent_id="agent-1", goal="Check the inbox", tool_call_id="tool-1",
                 output_schema={"fields": [{"name": "result", "type": "string"}]},
-                use_claude_mode=False,
-                start_url="https://example.com",
-            )
+                use_claude_mode=False, start_url="https://example.com"), timeout=10)
+        assert caught.value is sentinel
+        pending = set(handler._background_browser_cleanup_tasks) - earlier
+        if pending:
+            await asyncio.wait_for(asyncio.gather(*pending, return_exceptions=True), timeout=10)
+        assert validated.is_set() and _FakeDomService.last_instance is not None
+        _FakeDomService.last_instance.disconnect.assert_awaited()
+        fake_browser.close.assert_awaited()
+        fake_browser._fixture_playwright_instance.stop.assert_awaited()
 
+
+async def test_background_malformed_credentials_report_error_without_blocking_actor():
+    """Real malformed hydration becomes a safe background status, never a setup failure."""
+    from domains.spawn_browser_agent_v3.credential_runtime import (
+        AsyncCredentialPreparation, OwnedCredentialTasks, build_realm_credential_state,
+    )
+    entered, release = asyncio.Event(), asyncio.Event()
+    owner = OwnedCredentialTasks()
+    secret = "fixture-private-credential-label"
+    payload = {"auth_realm": "example.com", "auth_options": {
+        "realm": "example.com", "passkeys": [{"id": secret}]}, "passwords": [], "passkeys": []}
+    errors = []
+
+    async def hydrate(_url, _current):
+        entered.set()
+        await release.wait()
+        try:
+            return await build_realm_credential_state(payload, decryption_key=None)
+        except RuntimeError as error:
+            errors.append(str(error))
+            raise
+
+    preparation = AsyncCredentialPreparation(owner, hydrate)
+    try:
+        pending = preparation.request("https://example.com", ("session-1", "example.com"), "example.com")
+        assert pending["credential_preparation_status"] == "pending"
+        await asyncio.wait_for(entered.wait(), timeout=10)
+        # An independent actor turn completes while the actual builder remains blocked.
+        actor = AsyncMock(return_value="ordinary public action")
+        assert await actor() == "ordinary public action" and not release.is_set()
+        release.set()
+        await asyncio.wait_for(preparation.task, timeout=10)
+        state = preparation.request("https://example.com", ("session-1", "example.com"), "example.com")
+        assert errors and "missing passkey material" in errors[0] and secret in errors[0]
+        assert state == {"auth_realm": "example.com", "credential_preparation_status": "error",
+                         "credential_preparation_error": "Saved credential preparation failed"}
+        assert secret not in json.dumps(state)
+    finally:
+        release.set()
+        await owner.close()
+    assert not owner.tasks
+
+
+def _validated_setup_attach(event):
+    from domains.spawn_browser_agent_v3 import handler
+    original = handler._require_live_playwright_client
+
+    def validated(*args, **kwargs):
+        original(*args, **kwargs)
+        event.set()
+    return validated
+
+
+@_in_browser_activity_context
+async def test_data_setup_credential_failure_disconnects_connected_browser_clients():
+    """Malformed optional credentials do not block the actor or leak attached clients."""
+    from domains.spawn_browser_agent_v3 import handler
+
+    attached, failed = asyncio.Event(), asyncio.Event()
+    build = handler.build_realm_credential_state
+    errors = []
+
+    async def malformed_after_attach(payload, **kwargs):
+        await attached.wait()
+        malformed = {
+            **payload,
+            "auth_realm": "example.com",
+            "auth_options": {"realm": "example.com", "passkeys": [{"id": "pk-1"}]},
+            "passkeys": [],
+        }
+        try:
+            return await build(malformed, **kwargs)
+        except RuntimeError as error:
+            errors.append(str(error))
+            failed.set()
+            raise
+
+    _FakeDomService.last_instance = None
+    earlier = set(handler._background_browser_cleanup_tasks)
+    with (
+        patch.object(handler, "build_realm_credential_state", malformed_after_attach),
+        patch.object(handler, "_require_live_playwright_client", _validated_setup_attach(attached)),
+    ):
+        actor, _judge = await asyncio.wait_for(
+            _exercise_browser_resume_user_input(
+                actor_responses_override=[{
+                    "action": {"action": "attempt_completion", "params": {"reasoning": "done"}},
+                    "usage": {},
+                }],
+                actor_step_barrier=failed.wait,
+            ),
+            timeout=10,
+        )
+
+    assert attached.is_set() and failed.is_set()
+    assert errors and "missing passkey material" in errors[0]
+    assert actor.await_count == 1 and actor.activity_result["status"] == "completed"
     dom_service = _FakeDomService.last_instance
-    assert dom_service is not None, "the browser side must have connected before the data side failed"
+    assert dom_service is not None, "both browser clients attached before credential failure"
+    actor.fixture_playwright.chromium.connect_over_cdp.assert_awaited_once()
     dom_service.disconnect.assert_awaited()
-    fake_browser.close.assert_awaited()
+    actor.fixture_browser.close.assert_awaited()
+    actor.fixture_playwright.stop.assert_awaited()
+    assert not (set(handler._background_browser_cleanup_tasks) - earlier)
 
 
 def _parallel_setup_patches(session_data, fake_browser, dom_service_class, **overrides):
     """Patches for driving the real activity through its parallel browser/data setup."""
+    instance = _FakePlaywright(fake_browser)
+    fake_browser._fixture_playwright_instance = instance
     targets = {
         "domains.spawn_browser_agent_v3.handler.load_config": dict(return_value=_fake_config()),
         "domains.spawn_browser_agent_v3.handler.activity.heartbeat": dict(),
@@ -27600,10 +28764,13 @@ def _parallel_setup_patches(session_data, fake_browser, dom_service_class, **ove
         "domains.spawn_browser_agent_v3.handler.save_browser_assistant_message": dict(new=AsyncMock()),
         "browser_tools.dom_service.DOMService": dict(new=dom_service_class),
         "browser_tools.humanizer.BrowserHumanizer": dict(new=_FakeHumanizer),
-        "playwright.async_api.async_playwright": dict(return_value=_FakeAsyncPlaywright(_FakePlaywright(fake_browser))),
+        "playwright.async_api.async_playwright": dict(return_value=_FakeAsyncPlaywright(instance)),
     }
+    targets["domains.spawn_browser_agent_v3.handler._call_browser_use_with_rotation"] = dict(
+        new=AsyncMock(side_effect=AssertionError("actor entered before failed/cancelled setup ended")))
     targets.update(overrides)
-    return [patch(target, **kwargs) for target, kwargs in targets.items()]
+    return [patch.dict(os.environ, {"BROWSER_AGENT_PARALLEL_CDP_CONNECT": "0"}),
+            *[patch(target, **kwargs) for target, kwargs in targets.items()]]
 
 
 _PARALLEL_SETUP_SESSION = {
@@ -27623,7 +28790,7 @@ _PARALLEL_SETUP_SESSION = {
 async def test_activity_cancelled_mid_setup_releases_the_connected_browser_clients():
     """Cancelling the activity after the browser connected still releases its CDP clients.
 
-    Credential setup is still running when the activity is cancelled (user pause,
+    Parallel data setup is still running when the activity is cancelled (user pause,
     heartbeat cancel). The browser side already attached DOMService and
     Playwright; those handles must reach the finally-scheduled cleanup instead
     of being dropped with the cancelled gather.
@@ -27633,14 +28800,15 @@ async def test_activity_cancelled_mid_setup_releases_the_connected_browser_clien
     from domains.spawn_browser_agent_v3 import handler
     from domains.spawn_browser_agent_v3.handler import spawn_browser_agent_activity_v3
 
-    connected = asyncio.Event()
+    connected, validated, data_entered, data_release = (asyncio.Event() for _ in range(4))
 
     class _ConnectingDomService(_FakeDomService):
         async def connect(self):
             connected.set()
 
-    async def credential_setup_never_finishes(*_args, **_kwargs):
-        await asyncio.Event().wait()
+    async def data_setup_never_finishes(*_args, **_kwargs):
+        data_entered.set()
+        await data_release.wait()
 
     fake_browser = SimpleNamespace(contexts=[SimpleNamespace(pages=[SimpleNamespace()])], close=AsyncMock())
     native_start = await native_browser_start_source("1970-01-01T00:00:00+00:00")
@@ -27650,9 +28818,8 @@ async def test_activity_cancelled_mid_setup_releases_the_connected_browser_clien
             fake_browser,
             _ConnectingDomService,
             **{
-                "domains.spawn_browser_agent_v3.handler.build_realm_credential_state": dict(
-                    new=credential_setup_never_finishes
-                ),
+                "domains.spawn_browser_agent_v3.handler.get_model_pricing_with_fallback": dict(new=data_setup_never_finishes),
+                "domains.spawn_browser_agent_v3.handler._require_live_playwright_client": dict(new=_validated_setup_attach(validated)),
                 "domains.spawn_browser_agent_v3.handler.poll_new_messages": dict(
                     new=AsyncMock(return_value=[native_start])
                 ),
@@ -27671,27 +28838,31 @@ async def test_activity_cancelled_mid_setup_releases_the_connected_browser_clien
                 start_url="https://example.com",
             )
         )
-        await asyncio.wait_for(connected.wait(), timeout=10)
-        for _ in range(100):  # until the browser side has returned its handles
-            if fake_browser.contexts and _FakeDomService.last_instance is not None:
-                await asyncio.sleep(0.05)
-                break
-            await asyncio.sleep(0.01)
-        run.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await run
+        try:
+            await asyncio.wait_for(asyncio.gather(connected.wait(), validated.wait(), data_entered.wait()), timeout=10)
+            assert not run.done(), "parallel data setup was not held at the intended boundary"
+            run.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await run
+        finally:
+            data_release.set()
+            if not run.done():
+                run.cancel()
+            await asyncio.gather(run, return_exceptions=True)
         own_cleanups = set(handler._background_browser_cleanup_tasks) - earlier_cleanups
         if own_cleanups:
             await asyncio.wait_for(asyncio.gather(*own_cleanups, return_exceptions=True), timeout=10)
     _FakeDomService.last_instance.disconnect.assert_awaited()
     fake_browser.close.assert_awaited()
 
+    fake_browser._fixture_playwright_instance.stop.assert_awaited()
+
 
 @_in_browser_activity_context
 async def test_setup_failure_bounds_a_hung_disconnect_of_a_still_connecting_browser():
     """A browser side cancelled mid-connect stays owned until its wedged disconnect is bounded.
 
-    Credential setup fails after DOMService connected but while the browser side
+    Data setup fails after DOMService connected but while the browser side
     is still attaching. The cancelled browser side tears down its client itself.
     With production ordering (the 20s disconnect bound outlives the parallel
     setup's 10s wait), the still-releasing side must stay tracked for the
@@ -27727,7 +28898,7 @@ async def test_setup_failure_bounds_a_hung_disconnect_of_a_still_connecting_brow
 
     multiplexer = SimpleNamespace(close=AsyncMock())
 
-    async def credential_setup_fails_after_connect(*_args, **_kwargs):
+    async def data_setup_fails_after_connect(*_args, **_kwargs):
         await connected.wait()
         raise RuntimeError("credential setup failed")
 
@@ -27739,8 +28910,8 @@ async def test_setup_failure_bounds_a_hung_disconnect_of_a_still_connecting_brow
             fake_browser,
             _StillConnectingDomService,
             **{
-                "domains.spawn_browser_agent_v3.handler.build_realm_credential_state": dict(
-                    new=credential_setup_fails_after_connect
+                "domains.spawn_browser_agent_v3.handler.get_model_pricing_with_fallback": dict(
+                    new=data_setup_fails_after_connect
                 ),
                 "domains.spawn_browser_agent_v3.handler.poll_new_messages": dict(
                     new=AsyncMock(return_value=[native_start])
@@ -27794,7 +28965,7 @@ async def test_setup_failure_bounds_a_hung_disconnect_of_a_still_connecting_brow
 async def test_failed_activity_closes_the_multiplexer_when_its_disconnect_is_wedged():
     """A failed activity whose DOMService disconnect wedges still frees Tilion's CDP slot.
 
-    Browser setup connected and handed its clients to the activity, then credential
+    Browser setup connected and handed its clients to the activity, then parallel data
     setup failed. The error handler's bounded disconnect timed out; a timeout does
     not prove the loopback client detached, so the multiplexer (captured before
     disconnect clears it) must be closed.
@@ -27805,7 +28976,7 @@ async def test_failed_activity_closes_the_multiplexer_when_its_disconnect_is_wed
     from domains.spawn_browser_agent_v3.handler import spawn_browser_agent_activity_v3
 
     release = asyncio.Event()
-    browser_ready = asyncio.Event()
+    browser_ready, validated = asyncio.Event(), asyncio.Event()
 
     async def wedged_stop(*_args, **_kwargs):
         # Like DomService.disconnect, a cancel while draining continues into a wedged stop.
@@ -27822,9 +28993,8 @@ async def test_failed_activity_closes_the_multiplexer_when_its_disconnect_is_wed
         async def connect(self):
             browser_ready.set()
 
-    async def credential_setup_fails_after_browser(*_args, **_kwargs):
-        await browser_ready.wait()
-        await asyncio.sleep(0.2)  # the browser side has returned its handles
+    async def data_setup_fails_after_browser(*_args, **_kwargs):
+        await asyncio.gather(browser_ready.wait(), validated.wait())
         raise RuntimeError("credential setup failed")
 
     multiplexer = SimpleNamespace(close=AsyncMock())
@@ -27836,9 +29006,10 @@ async def test_failed_activity_closes_the_multiplexer_when_its_disconnect_is_wed
             fake_browser,
             _WedgedDisconnectDomService,
             **{
-                "domains.spawn_browser_agent_v3.handler.build_realm_credential_state": dict(
-                    new=credential_setup_fails_after_browser
+                "domains.spawn_browser_agent_v3.handler.get_model_pricing_with_fallback": dict(
+                    new=data_setup_fails_after_browser
                 ),
+                "domains.spawn_browser_agent_v3.handler._require_live_playwright_client": dict(new=_validated_setup_attach(validated)),
                 "domains.spawn_browser_agent_v3.handler.poll_new_messages": dict(
                     new=AsyncMock(return_value=[native_start])
                 ),
@@ -27885,17 +29056,23 @@ async def test_playwright_connect_failure_with_a_hung_stop_still_disconnects_dom
 
     from domains.spawn_browser_agent_v3.handler import spawn_browser_agent_activity_v3
 
-    release = asyncio.Event()
+    release, data_entered, attach_refused = (asyncio.Event() for _ in range(3))
 
     async def hung_stop(*_args, **_kwargs):
         await release.wait()
 
-    async def credential_setup_never_finishes(*_args, **_kwargs):
-        await asyncio.Event().wait()
+    async def data_setup_never_finishes(*_args, **_kwargs):
+        data_entered.set()
+        await release.wait()
 
     fake_browser = SimpleNamespace(contexts=[SimpleNamespace(pages=[SimpleNamespace()])], close=AsyncMock())
     instance = _FakePlaywright(fake_browser)
-    instance.chromium.connect_over_cdp = AsyncMock(side_effect=RuntimeError("cdp attach refused"))
+    async def refuse_attach(*_args, **_kwargs):
+        await data_entered.wait()
+        attach_refused.set()
+        raise RuntimeError("cdp attach refused")
+
+    instance.chromium.connect_over_cdp = AsyncMock(side_effect=refuse_attach)
     instance.stop = AsyncMock(side_effect=hung_stop)
     native_start = await native_browser_start_source("1970-01-01T00:00:00+00:00")
     _FakeDomService.last_instance = None
@@ -27905,9 +29082,7 @@ async def test_playwright_connect_failure_with_a_hung_stop_still_disconnects_dom
             fake_browser,
             _FakeDomService,
             **{
-                "domains.spawn_browser_agent_v3.handler.build_realm_credential_state": dict(
-                    new=credential_setup_never_finishes
-                ),
+                "domains.spawn_browser_agent_v3.handler.get_model_pricing_with_fallback": dict(new=data_setup_never_finishes),
                 "domains.spawn_browser_agent_v3.handler.poll_new_messages": dict(
                     new=AsyncMock(return_value=[native_start])
                 ),
@@ -27931,6 +29106,7 @@ async def test_playwright_connect_failure_with_a_hung_stop_still_disconnects_dom
                 )
         finally:
             release.set()
+    assert data_entered.is_set() and attach_refused.is_set()
     instance.stop.assert_awaited()
     _FakeDomService.last_instance.disconnect.assert_awaited()
 
@@ -28230,19 +29406,19 @@ async def test_terminal_passkey_failure_still_pauses_without_weakening_approval(
                         assert probe.alive and "checkpoint" not in probe.events and "backend_release" not in probe.events, probe.events
                         assert "recording_finalized" in probe.events and "reset_cdp" in probe.events, probe.events
                     elif scenario == "auth":
-                        # Existing auth observation propagates persistence exceptions
-                        # and cancellation; those are terminal paths, not live handoff.
+                        # Optional parking capture never owns terminal cancellation.
+                        # The matrix's cancelled/error cases still exercise required
+                        # foreground control flow and assert actual provider cleanup.
+                        await test_private_browser_pause_urls_use_protected_continuity(probe)
+                        assert probe.result["status"] == "awaiting_auth_assistance", probe.result
+                        assert probe.alive and "backend_release" not in probe.events, probe.events
+                        assert "checkpoint" not in probe.events and "recording_finalized" in probe.events, probe.events
                         if mode == "save_exception":
-                            with pytest.raises(RuntimeError, match="fixture persistence unavailable"):
-                                await test_private_browser_pause_urls_use_protected_continuity(probe)
-                            await probe.assert_terminal_cleanup(handler)
+                            assert "save_reference" in probe.events, "persistence failure was never exercised"
+                            assert probe.result.get("browser_page_observation") is None
                         elif mode == "cancel_read":
-                            await test_private_browser_pause_urls_use_protected_continuity(probe)
-                            await probe.assert_terminal_cleanup(handler)
-                        else:
-                            await test_private_browser_pause_urls_use_protected_continuity(probe)
-                            assert probe.result["status"] == "awaiting_auth_assistance", probe.result
-                            assert probe.alive and "checkpoint" not in probe.events, probe.events
+                            assert "readback" in probe.events, "read cancellation was never exercised"
+                            assert probe.result.get("browser_page_observation") is None
                     else:
                         if scenario == "error":
                             with pytest.raises(RuntimeError, match="fixture terminal model failure"):
@@ -28255,6 +29431,27 @@ async def test_terminal_passkey_failure_still_pauses_without_weakening_approval(
                         raise
                     failures.append((provider, mode, scenario, type(error).__name__, str(error)))
     assert not failures, failures
+
+
+async def test_terminal_passkey_error_keeps_fixture_transports_until_cleanup():
+    from browser_approval_lifecycle_support import TerminalPasskeyCaptureProbe
+    from domains.spawn_browser_agent_v3 import handler
+
+    class PendingRecorderProbe(TerminalPasskeyCaptureProbe):
+        def install(self, stack, handler):
+            super().install(stack, handler)
+            schedule = handler._schedule_browser_cleanup
+
+            def cleanup(**kwargs):
+                kwargs["network_recorder_task"] = asyncio.create_task(asyncio.sleep(0.01, result=None))
+                return schedule(**kwargs)
+
+            stack.enter_context(patch.object(handler, "_schedule_browser_cleanup", side_effect=cleanup))
+
+    probe = PendingRecorderProbe("browser-use", "command_failure", "error")
+    with pytest.raises(RuntimeError, match="fixture terminal model failure"):
+        await test_private_browser_pause_urls_use_protected_continuity(probe)
+    await probe.assert_terminal_cleanup(handler)
 
 
 async def test_tilion_terminal_pause_detaches_after_optional_passkey_capture():
@@ -28506,6 +29703,7 @@ async def test_approval_pause_checkpoint_failures_do_not_acknowledge_parking():
 
 
 async def test_private_browser_pause_urls_use_protected_continuity(_lifecycle_probe=None):
+
     """Activity results expose redacted URLs while exact continuation stays private."""
     from contextlib import ExitStack
     from temporalio.testing import ActivityEnvironment
@@ -28662,7 +29860,7 @@ async def test_private_browser_pause_urls_use_protected_continuity(_lifecycle_pr
                 state = self.model_visible_value(
                     {"url": raw_url, "title": "Checkout", "dom_tree": "Checkout " + secret}
                 )
-                if include_screenshot and not self.secret_values_used:
+                if include_screenshot:
                     state["screenshot"] = screenshot
                 return state
 
@@ -28756,7 +29954,7 @@ async def test_private_browser_pause_urls_use_protected_continuity(_lifecycle_pr
             return {"action": {"action": action, "coordinates": {"x": 234, "y": 234}, "params": {}}, "usage": {}}
 
         actor_client = AsyncMock(side_effect=actor_transport)
-        judge = AsyncMock(return_value={"score": 1.0, "structured_response": {"url": raw_url}, "usage": {}})
+        judge = AsyncMock(return_value={"score": 1.0, "task_completed": True, "structured_response": {"url": raw_url}, "usage": {}})
         verifier_prompt_builder = MagicMock(wraps=handler.build_verifier_prompt)
         screenshot_upload = AsyncMock(
             return_value={
@@ -28889,21 +30087,27 @@ async def test_private_browser_pause_urls_use_protected_continuity(_lifecycle_pr
                 stack.enter_context(item)
             if _lifecycle_probe:
                 _lifecycle_probe.install(stack, handler)
-            result = await env.run(
-                handler.spawn_browser_agent_activity_v3,
-                user_id="u1",
-                agent_id="a1",
-                goal="Inspect checkout",
-                tool_call_id="tool-1",
-                task_id="task-1",
-                is_resume=True,
-                use_claude_mode=False,
-                output_schema={"fields": [{**output_schema["fields"][0], "description": visible_url}]}
-                if pause == "max_steps"
-                else copy.deepcopy(output_schema),
-                start_url=start_url,
-                write_lock_resume_state=resume_state,
-            )
+            try:
+                result = await env.run(
+                    handler.spawn_browser_agent_activity_v3,
+                    user_id="u1",
+                    agent_id="a1",
+                    goal="Inspect checkout",
+                    tool_call_id="tool-1",
+                    task_id="task-1",
+                    is_resume=True,
+                    use_claude_mode=False,
+                    output_schema={"fields": [{**output_schema["fields"][0], "description": visible_url}]}
+                    if pause == "max_steps"
+                    else copy.deepcopy(output_schema),
+                    start_url=start_url,
+                    write_lock_resume_state=resume_state,
+                )
+            finally:
+                if _lifecycle_probe:
+                    # Remote transport fakes own the entire async cleanup lifetime,
+                    # including activity exceptions that bypass observe().
+                    await handler.drain_background_browser_cleanups(timeout=2)
             if _lifecycle_probe:
                 await _lifecycle_probe.observe(result, handler)
                 return
@@ -29023,8 +30227,14 @@ async def test_private_browser_pause_urls_use_protected_continuity(_lifecycle_pr
             )
             assert items[1].get("image_url") == visible_url, "receipt URL leaked private credential"
             assert items[0]["product_url"] == visible_url and items[0]["note"] == "{{secret:pwd:url}}"
-            assert "screenshot" not in items[0] and "image_url" not in items[2], "private raster escaped suppression"
-        if scenario == "raster_completed":
+            # These are scalar receipt fields, not typed captured-image transport.
+            # Keep their ordinary secret redaction while preserving actual image blocks below.
+            redacted_receipt_raster = _FakeDomService.last_instance.model_visible_value(
+                "data:image/png;base64," + screenshot
+            )
+            assert items[0]["screenshot"] == redacted_receipt_raster
+            assert "image_url" not in items[2], "receipt URL schema admitted a data URI"
+        if pause == "completed":
             screenshot_upload.assert_awaited_once_with(
                 user_id="u1",
                 file_content=base64.b64decode(screenshot, validate=True),
@@ -29061,20 +30271,10 @@ async def test_private_browser_pause_urls_use_protected_continuity(_lifecycle_pr
                     "role": "{{secret:pwd:user-token}}",
                     "{{secret:pwd:function-token}}": "{{secret:pwd:url}}",
                 }, "page-controlled protocol-looking values bypassed redaction"
-                if private_entry:
-                    assert "data:image" not in str(messages), "private-entry resume exposed historical raster"
-                else:
-                    actual_url = messages[2]["content"][1]["image_url"]["url"]
-                    assert actual_url == "data:image/png;base64," + screenshot, (
-                        "resumed screenshot transport was text-masked"
-                    )
-                    assert base64.b64decode(actual_url.split(",", 1)[1], validate=True) == base64.b64decode(screenshot)
-                    # A text-masked base64 payload is invalid provider input.
-                    # Untrusted media uses the native omission block instead.
-                    assert messages[3]["content"][1] == {
-                        "type": "text",
-                        "text": "[image omitted from Temporal resume]",
-                    }
+                actual_url = messages[2]["content"][1]["image_url"]["url"]
+                assert actual_url == "data:image/png;base64," + screenshot, "resumed screenshot transport was text-masked"
+                assert base64.b64decode(actual_url.split(",", 1)[1], validate=True) == base64.b64decode(screenshot)
+                assert messages[3]["content"][1]["image_url"]["url"] == actual_url
         if pause in {"drain", "max_steps"}:
             action_saves = [call.kwargs for call in save_action.await_args_list
                             if "coordinates" in (call.kwargs.get("auxiliary") or {})]
@@ -29110,15 +30310,8 @@ async def test_private_browser_pause_urls_use_protected_continuity(_lifecycle_pr
             validate_transport_images(context)
             assert context[0]["role"] == "USER" and context[-1]["role"] == "TOOL"
             final_frame = context[-1]["metadata"]
-            if private_entry:
-                assert "screenshot_b64" not in final_frame
-                assert "data:image" not in str(context)
-            else:
-                assert final_frame["screenshot_b64"] == screenshot, "trusted final verifier raster was text-masked"
-                assert context[0]["content"][0] == {
-                    "type": "text",
-                    "text": "[image omitted from Temporal resume]",
-                }, "untrusted verifier media reached the provider"
+            assert final_frame["screenshot_b64"] == screenshot, "final verifier raster was text-masked"
+            assert context[0]["content"][0]["image_url"]["url"] == "data:image/png;base64," + screenshot
             assert secret not in str(context)
         if pause in {"completed", "max_steps"}:
             assert result["browser_output_schema"]["fields"][0] == {
@@ -29151,8 +30344,9 @@ async def test_private_browser_pause_urls_use_protected_continuity(_lifecycle_pr
     assert not failures, f"credential-bearing URL escaped activity pause boundary: {failures}"
 
 
-async def _resume_drained_browser_task_on_reused_session(ttl_ms, on_step):
+async def _resume_drained_browser_task_on_reused_session(ttl_ms, on_step, *, activity_budget=None, activity_elapsed=None):
     """Run a drained task resumed at step 3 on the live Steel session the backend let it reuse."""
+    import dataclasses
     from contextlib import ExitStack
 
     from temporalio.testing import ActivityEnvironment
@@ -29163,6 +30357,12 @@ async def _resume_drained_browser_task_on_reused_session(ttl_ms, on_step):
     from domains.spawn_browser_agent_v3.handler import spawn_browser_agent_activity_v3
 
     env = ActivityEnvironment()
+    if activity_budget is not None:
+        env.info = dataclasses.replace(
+            env.info,
+            start_to_close_timeout=activity_budget,
+            started_time=datetime.now(timezone.utc) - (activity_elapsed or timedelta(0)),
+        )
     fake_browser = SimpleNamespace(contexts=[SimpleNamespace(pages=[SimpleNamespace()])], close=AsyncMock())
     session_info = {
         "task_id": "task-1",
@@ -29325,6 +30525,65 @@ async def test_browser_task_keeps_stepping_on_a_reused_session_with_time_left():
     assert result["step_count"] == 5, result
     resume_mock.assert_not_awaited()
     close_mock.assert_not_awaited()
+
+
+async def test_browser_task_checkpoints_before_its_activity_start_to_close():
+    """A long, healthy task must checkpoint before its own StartToClose kills it.
+
+    Prod agent 0b54f65d (2026-11-13): a phone-setup browser task made 127 steady
+    steps (123 successful phone actions, last at 09:19:45) and was hard-killed
+    by the 30-minute StartToClose at 09:20:48 mid-step, returning no result. The
+    step loop already yields for deploy drain and session expiry; it must yield
+    the same way while one more supervised step plus teardown still fits in the
+    attempt, so the manager restarts the same task at the same step count.
+    """
+    from domains.spawn_browser_agent_v3.config import (
+        ACTIVITY_START_TO_CLOSE_TIMEOUT_MINUTES,
+        BROWSER_ACTIVITY_DEADLINE,
+        BROWSER_DRAIN_YIELD_STATUS,
+        BROWSER_SESSION_MIN_REMAINING_SECONDS,
+    )
+
+    budget = timedelta(minutes=ACTIVITY_START_TO_CLOSE_TIMEOUT_MINUTES)
+    assert budget.total_seconds() >= 2 * BROWSER_SESSION_MIN_REMAINING_SECONDS
+
+    async def step(env):
+        await asyncio.sleep(0)
+
+    result, llm_step, resume_mock, close_mock = await _resume_drained_browser_task_on_reused_session(
+        24 * 3600 * 1000,
+        step,
+        activity_budget=budget,
+        activity_elapsed=budget - timedelta(seconds=BROWSER_SESSION_MIN_REMAINING_SECONDS),
+    )
+    assert llm_step.await_count == 1, f"started a step the activity may not outlive: {llm_step.await_count}"
+    assert result["status"] == BROWSER_DRAIN_YIELD_STATUS, result
+    assert result["yield_reason"] == BROWSER_ACTIVITY_DEADLINE, result
+    assert result["step_count"] == 4 and result["task_id"] == "task-1", result
+    close_mock.assert_not_awaited()
+
+    # Control: the same budget with time left keeps stepping until a real drain.
+    steps = []
+
+    async def deploy_lands_on_the_second_step(env):
+        steps.append(1)
+        if len(steps) == 2:
+            env.worker_shutdown()
+
+    result, llm_step, _resume, _close = await _resume_drained_browser_task_on_reused_session(
+        24 * 3600 * 1000, deploy_lands_on_the_second_step, activity_budget=budget, activity_elapsed=timedelta(0)
+    )
+    assert llm_step.await_count == 2, "an attempt with time left must keep serving steps"
+    assert result["yield_reason"] != BROWSER_ACTIVITY_DEADLINE, result
+
+    # The 3m Fast Mode demo ceiling stays a hard ceiling (no yield loop).
+    from temporalio.testing import ActivityEnvironment
+    from domains.spawn_browser_agent_v3.handler import _activity_deadline_near
+
+    short = timedelta(minutes=3)
+    env = ActivityEnvironment()
+    env.info = dataclasses.replace(env.info, start_to_close_timeout=short, started_time=datetime.now(timezone.utc) - short)
+    assert env.run(_activity_deadline_near) is False
 
 
 async def test_reused_session_lifetime_fixture_isolates_cached_generation():
@@ -29620,6 +30879,8 @@ async def test_manager_cancelled_browser_pause_preserves_preallocated_task_id(us
 
     with (
         patch("domains.spawn_browser_agent_v3.handler.workflow.in_workflow", return_value=True),
+        patch("domains.spawn_browser_agent_v3.handler.workflow.info", return_value=SimpleNamespace(run_id="cancel-run")),
+        patch("domains.spawn_browser_agent_v3.handler.workflow.uuid4", return_value="cancel-attempt"),
         patch(
             "domains.spawn_browser_agent_v3.handler.workflow.start_activity",
             side_effect=fake_start_activity,
@@ -29956,6 +31217,8 @@ async def test_manager_generation_handoff_terminal_falls_back_to_preallocated_ta
     }
     with (
         patch("domains.spawn_browser_agent_v3.handler.workflow.in_workflow", return_value=True),
+        patch("domains.spawn_browser_agent_v3.handler.workflow.info", return_value=SimpleNamespace(run_id="parked-run")),
+        patch("domains.spawn_browser_agent_v3.handler.workflow.uuid4", return_value="parked-attempt"),
     ):
         workflow_instance, events, raised = await _run_manager_with_parked_activity(
             result_without_task_id, approval_error=GenerationHandoffRequested("navi-agent-tasks@new")
@@ -31591,6 +32854,10 @@ async def _drive_payment_card_gate(
     checkout_error=None,
     lookup_result=None,
     approval_calls=None,
+    task_queue="navi-agent-tasks@funding-test",
+    workflow_state=None,
+    clock_read=None,
+    waiter=None,
 ):
     """Drive execute_tool through the payment-card gate branch.
 
@@ -31643,7 +32910,7 @@ async def _drive_payment_card_gate(
     )
     resume = _FakePaymentGateHandle({"success": True, "message": "done", "output_files": []})
 
-    workflow_instance = SimpleNamespace(
+    workflow_instance = workflow_state or SimpleNamespace(
         user_id="user-1",
         agent_id="agent-1",
         is_paused=False,
@@ -31704,9 +32971,11 @@ async def _drive_payment_card_gate(
     manager = SpawnBrowserAgentManagerV3()
     with (
         patch("domains.spawn_browser_agent_v3.handler.workflow.start_activity", side_effect=fake_start_activity),
-        patch("domains.spawn_browser_agent_v3.handler.workflow.wait_condition", AsyncMock(return_value=None)),
+        patch("domains.spawn_browser_agent_v3.handler.workflow.info", return_value=SimpleNamespace(task_queue=task_queue)),
+        patch("domains.spawn_browser_agent_v3.handler.workflow.time", side_effect=lambda: (clock_read or fake_now)().timestamp()),
+        patch("domains.spawn_browser_agent_v3.handler.workflow.wait_condition", side_effect=waiter or AsyncMock(return_value=None)),
         patch("domains.spawn_browser_agent_v3.handler.workflow.execute_activity", side_effect=fake_execute_activity),
-        patch("domains.spawn_browser_agent_v3.handler.workflow.now", side_effect=fake_now),
+        patch("domains.spawn_browser_agent_v3.handler.workflow.now", side_effect=clock_read or fake_now),
         patch("domains.spawn_browser_agent_v3.handler.workflow.sleep", AsyncMock(return_value=None)),
         patch(
             "tools.request_user_approval.request_user_approval_direct", side_effect=fake_request_user_approval_direct
@@ -31917,6 +33186,90 @@ async def test_manager_payment_gate_kyc_still_incomplete_after_retry_blocks():
     assert activity_calls.count("mint_purchase_card_activity") == 2
 
 
+async def _drive_funding_wait_review(*, task_queue, retry_seconds, interruption=None):
+    from helpers.generation_handoff import GenerationHandoffRequested
+
+    state = SimpleNamespace(user_id="user-1", agent_id="agent-1", is_paused=False,
+                            write_lock_enabled=True, system_name="Rose", _pause_signal_sequence=0)
+    clock = [datetime(2026, 11, 11, tzinfo=timezone.utc)]
+    timers, wake_results = [], []
+
+    async def wait(predicate, timeout=None):
+        # Only the funding park has a timeout; approval's companion is unbounded.
+        if timeout is None:
+            return
+        timers.append(timeout.total_seconds())
+        if interruption in ("pause", "pause-resume"):
+            state.is_paused = interruption == "pause"
+            state._user_pause_active = interruption == "pause"
+            state._pause_signal_sequence += 1
+            wake_results.append(predicate())
+            assert predicate(), "PAUSE did not wake the actual funding wait predicate"
+            return
+        if interruption == "handoff":
+            state._generation_handoff_hint = "navi-agent-tasks@next"
+            state._generation_handoff_hint_seq = 1
+            state._check_generation_handoff = AsyncMock(return_value="navi-agent-tasks@next")
+            assert predicate(), "generation signal did not wake funding park"
+            return
+        clock[0] += timeout
+        raise asyncio.TimeoutError()
+
+    pending = {"status": "agentcard_company_funding_in_progress", "retryAfterSeconds": retry_seconds}
+    held = {"status": "HELD", "purchaseId": "purchase-1", "cardId": "card-1",
+            "pan": "4242424242424242", "cvv": "123", "expiry": "12/30", "last4": "4242"}
+    try:
+        outcome = await _drive_payment_card_gate(
+            mint_results=[pending, held], task_queue=task_queue, workflow_state=state,
+            clock_read=lambda: clock[0], waiter=wait)
+    except GenerationHandoffRequested as exc:
+        outcome = exc
+    return outcome, timers, wake_results
+
+
+async def test_manager_funding_wait_wakes_on_pause_and_pause_resume():
+    for interruption in ("pause", "pause-resume"):
+        outcome, timers, wakes = await _drive_funding_wait_review(
+            task_queue="navi-agent-tasks@new", retry_seconds=599, interruption=interruption)
+        events, calls, _, _ = outcome
+        assert timers == [599.0] and wakes == [True], (timers, wakes)
+        assert calls.count("mint_purchase_card_activity") == 1, calls
+        terminals = [e for e in events if (getattr(e, "metadata", None) or {}).get("action_type") == "task_complete"]
+        assert len(terminals) == 1 and terminals[0].metadata["task_id"] == "task-1"
+        assert any((getattr(e, "metadata", None) or {}).get("userPauseRequested") for e in events) == (interruption == "pause")
+        assert not any(getattr(e, "title", "") == "Payment card ready" for e in events)
+
+
+async def test_manager_funding_plain_queue_preserves_legacy_retry_timer():
+    observations = []
+    expected = []
+    for queue in ("navi-agent-tasks", "benchmark-plain"):
+        for hint in (120, 600, 1e308):
+            outcome, timers, _ = await _drive_funding_wait_review(task_queue=queue, retry_seconds=hint)
+            events, calls, _, _ = outcome
+            ready = any(getattr(e, "title", "") == "Payment card ready" for e in events)
+            observations.append((queue, hint, timers, calls.count("mint_purchase_card_activity"), ready))
+            expected.append((queue, hint, [60.0], 2, True))
+    assert observations == expected, observations
+
+
+async def test_manager_funding_generation_queue_honors_hint_and_handoff():
+    from helpers.generation_handoff import GenerationHandoffRequested
+    for hint in (1, 5, 120, 599):
+        outcome, timers, _ = await _drive_funding_wait_review(task_queue="navi-agent-tasks@new", retry_seconds=hint)
+        _, calls, _, _ = outcome
+        assert timers == [float(hint)] and calls.count("mint_purchase_card_activity") == 2
+    for hint in (600, 1e308):
+        outcome, timers, _ = await _drive_funding_wait_review(task_queue="navi-agent-tasks@new", retry_seconds=hint)
+        events, calls, _, _ = outcome
+        assert timers == [] and calls.count("mint_purchase_card_activity") == 1
+        assert any(getattr(e, "title", "") == "Payment funding is delayed" for e in events)
+    outcome, timers, _ = await _drive_funding_wait_review(
+        task_queue="navi-agent-tasks@new", retry_seconds=599, interruption="handoff")
+    assert isinstance(outcome, GenerationHandoffRequested) and outcome.task_queue == "navi-agent-tasks@next"
+    assert timers == [599.0]
+
+
 async def test_manager_payment_gate_retries_company_funding_and_mints():
     events, activity_calls, _, _ = await _drive_payment_card_gate(
         mint_results=[
@@ -31946,7 +33299,20 @@ def test_manager_payment_gate_normalizes_company_funding_retry_delay():
         assert _normalize_funding_retry_seconds(invalid) == 5.0
     assert _normalize_funding_retry_seconds(0.001) == 1.0
     assert _normalize_funding_retry_seconds(5) == 5.0
-    assert _normalize_funding_retry_seconds(600) == 60.0
+    assert _normalize_funding_retry_seconds(120) == 120.0
+    assert _normalize_funding_retry_seconds(600) == 600.0
+
+
+async def test_manager_payment_gate_does_not_retry_before_a_hint_beyond_its_deadline():
+    for retry_seconds in (600, 1e308):
+        events, activity_calls, _, _ = await _drive_payment_card_gate(
+            mint_results=[{
+                "status": "agentcard_company_funding_in_progress",
+                "retryAfterSeconds": retry_seconds,
+            }]
+        )
+        assert activity_calls.count("mint_purchase_card_activity") == 1
+        assert any(getattr(event, "title", "") == "Payment funding is delayed" for event in events)
 
 
 async def test_manager_payment_gate_reports_company_funding_deadline():
@@ -32423,7 +33789,7 @@ async def _drive_browser_write_pause_archive_boundary(
         patch("helpers.messages.load_config", return_value=config),
         patch("temporalio.activity.heartbeat"),
         patch.object(browser.workflow, "logger", MagicMock()),
-        patch.object(browser.workflow, "info", return_value=SimpleNamespace(workflow_id=root)),
+        patch.object(browser.workflow, "info", return_value=SimpleNamespace(workflow_id=root, run_id="approval-run")),
         patch.object(browser.workflow, "uuid4", return_value="approval-tool"),
         patch.object(browser.workflow, "now", return_value=datetime(2026, 10, 1, tzinfo=timezone.utc)),
         patch.object(browser.workflow, "start_activity", side_effect=start_activity),
@@ -32908,6 +34274,305 @@ def test_challenge_recovery_call_keywords_match_callee_contract():
     assert ast.unparse(keywords["skip_cookie_probes"]) == (
         "provider_exit_rejected or escalate_after_cookie_false_stable"
     )
+
+
+async def test_browser_tab_rebind_preserves_provider_keyboard_transport():
+    """Exercise actual activity call kwargs, focus rebinding, and humanizer dispatch."""
+    import ast
+    import inspect
+    import textwrap
+    import browser_tools.humanizer as hm
+    from domains.spawn_browser_agent_v3 import handler
+    from domains.spawn_browser_agent_v3.tilion_worker import is_single_cdp_client_provider
+
+    # Resolve the actual activity call expression, so omitting its policy keyword
+    # cannot be hidden by a test that passes the new helper argument itself.
+    tree = ast.parse(textwrap.dedent(inspect.getsource(handler._spawn_browser_agent_activity_v3_real)))
+    calls = [n for n in ast.walk(tree) if isinstance(n, ast.Call)
+             and isinstance(n.func, ast.Name) and n.func.id == '_rebind_browser_tab_runtime']
+    assert len(calls) == 2
+
+    class Gateway:
+        def __init__(self, target):
+            self.target = target
+            self.in_flight = 0
+            self.delivered = []
+            self.timestamps = []
+            self.cancelled = 0
+        async def send(self, method, params=None):
+            if method == 'Target.getTargetInfo':
+                return {'targetInfo': {'targetId': self.target}}
+            assert method == 'Input.dispatchKeyEvent'
+            if self.in_flight:
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    self.cancelled += 1
+                    raise
+            self.in_flight += 1
+            try:
+                await asyncio.sleep(0.01)
+                self.timestamps.append(params['timestamp'])
+                if params['type'] == 'char':
+                    self.delivered.append(params['text'])
+                return {}
+            finally:
+                self.in_flight -= 1
+        async def detach(self):
+            pass
+
+    class Page:
+        def __init__(self, target):
+            self.gateway = Gateway(target)
+            self.front_calls = 0
+            self.viewport_size = {'width': 1280, 'height': 800}
+            self.keyboard = SimpleNamespace()
+        async def bring_to_front(self):
+            self.front_calls += 1
+
+    async def exercise(call, provider, same_page=False, cancel=False):
+        a, b = Page('a'), Page('b')
+        context = SimpleNamespace(pages=[a, b])
+        async def new_cdp_session(page):
+            return page.gateway
+        context.new_cdp_session = new_cdp_session
+        a.context = b.context = context
+        closed = []
+        async def close():
+            closed.append(True)
+        old = SimpleNamespace(close=close)
+        recorder = SimpleNamespace(page=a)
+        observer = lambda *_: None
+        scope = dict(dom_service=SimpleNamespace(session=SimpleNamespace(agent_focus_target_id='a' if same_page else 'b')),
+                     dom_page=None, playwright_browser=SimpleNamespace(contexts=[context]),
+                     input_page=a, humanizer=old, browser_recorder=recorder, observe_cursor=observer,
+                     tab_focus_cache=None, browser_session_metadata={'provider': provider},
+                     is_single_cdp_client_provider=is_single_cdp_client_provider)
+        kwargs = {k.arg: eval(compile(ast.Expression(k.value), '<actual-call-keyword>', 'eval'), scope)
+                  for k in call.keywords}
+        # Cursor initialization is unrelated I/O; all ownership and typing code is real.
+        with patch.object(hm.BrowserHumanizer, 'initialize_cursor', new=AsyncMock()):
+            selected, rebound = await handler._rebind_browser_tab_runtime(**kwargs)
+        if same_page:
+            assert selected is a and rebound is old and not closed and recorder.page is a
+            return
+        assert selected is b and recorder.page is b and closed == [True]
+        assert a.front_calls == 0 and b.front_calls == 1
+        assert rebound._cursor_observer is observer
+        expected_serial = provider == 'tilion'
+        # Type before checking policy so baseline proves the actual lost-key path.
+        rebound._keycap = SimpleNamespace(next=lambda _: SimpleNamespace(dwell_s=0.001, interval_s=0.001))
+        if expected_serial:
+            if cancel:
+                started = asyncio.Event()
+                async def blocked(method, params=None):
+                    started.set()
+                    await asyncio.Event().wait()
+                b.gateway.send = blocked
+                task = asyncio.create_task(rebound.type_text('ab'))
+                await started.wait()
+                task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+                assert not rebound._movement_lock.locked()
+            else:
+                await rebound.type_text('ab')
+                assert ''.join(b.gateway.delivered) == 'ab'
+                assert b.gateway.timestamps == sorted(b.gateway.timestamps)
+                assert b.gateway.in_flight == 0
+        assert rebound._serial_cdp_keyboard is expected_serial
+        await rebound.close()
+
+    with patch.dict(os.environ, {'BROWSER_AGENT_CDP_MOUSE_TRANSPORT':'0',
+                                'BROWSER_AGENT_IDLE_MOUSE_ENABLED':'0',
+                                'BROWSER_AGENT_VISUAL_CURSOR_ENABLED':'0'}), \
+         patch.object(hm, 'CDP_INPUT_DRAIN_TIMEOUT_SECONDS', 1.0):
+        for call in calls:
+            await exercise(call, 'tilion')
+            await exercise(call, 'kernel')
+            await exercise(call, 'steel')
+            await exercise(call, 'tilion', same_page=True)
+            await exercise(call, 'tilion', cancel=True)
+
+
+async def test_cached_tab_focus_ignores_unrelated_stalled_page():
+    """Known live focus must not await an unrelated tab's CDP attachment."""
+    from domains.spawn_browser_agent_v3.handler import (
+        TabFocusCache, _rebind_browser_tab_runtime,
+        _synchronize_playwright_page_with_agent_focus,
+    )
+
+    class Page:
+        def __init__(self, target):
+            self.target = target
+            self.closed = False
+            self.front_calls = 0
+            self.on_front = None
+        def is_closed(self):
+            return self.closed
+        async def bring_to_front(self):
+            self.front_calls += 1
+            if self.on_front:
+                await self.on_front()
+
+    class Context:
+        def __init__(self, pages):
+            self.pages = pages
+            self.lookups = []
+            self.detached = []
+            self.block = None
+            self.on_lookup = None
+        async def new_cdp_session(self, page):
+            self.lookups.append(page.target)
+            if page is self.block:
+                await asyncio.Future()
+            if self.on_lookup:
+                self.on_lookup(page)
+            context = self
+            class Session:
+                async def send(self, method):
+                    assert method == "Target.getTargetInfo"
+                    return {"targetInfo": {"targetId": page.target}}
+                async def detach(self):
+                    context.detached.append(page.target)
+            return Session()
+
+    foreign, focused = Page("foreign"), Page("focus")
+    context = Context([foreign, focused])
+    context.block = foreign
+    cache = TabFocusCache()
+    cache.target_ids[focused] = "focus"
+    session = SimpleNamespace(agent_focus_target_id="focus")
+    browser = SimpleNamespace(contexts=[context])
+    service = SimpleNamespace(session=session)
+    recorder = SimpleNamespace(page=foreign)
+    old = SimpleNamespace(closed=False)
+    async def close_old():
+        old.closed = True
+    old.close = close_old
+    class Humanizer:
+        def __init__(self, **kwargs):
+            self.page = kwargs["input_page"]
+        async def initialize_cursor(self, **kwargs):
+            pass
+        def set_cursor_observer(self, observer):
+            self.observer = observer
+    task = asyncio.create_task(_rebind_browser_tab_runtime(
+        dom_service=service, dom_page=object(), playwright_browser=browser,
+        current_page=foreign, humanizer=old, browser_recorder=recorder,
+        cursor_observer=None, humanizer_factory=Humanizer, focus_cache=cache,
+    ))
+    try:
+        for _ in range(3):
+            await asyncio.sleep(0)
+        assert task.done(), "known focus blocked behind unrelated CDP attachment"
+        selected, rebound = await task
+        assert selected is focused and rebound.page is focused
+        assert old.closed and recorder.page is focused
+        assert context.lookups == [] and focused.front_calls == 1
+    finally:
+        if not task.done():
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+    async def select(ctx, current, target, cached=None, other_context=None):
+        local_cache = cached or TabFocusCache()
+        owner = SimpleNamespace(agent_focus_target_id=target)
+        result = await _synchronize_playwright_page_with_agent_focus(
+            dom_service=SimpleNamespace(session=owner),
+            playwright_browser=SimpleNamespace(contexts=[ctx] + ([other_context] if other_context else [])),
+            current_page=current, focus_cache=local_cache,
+        )
+        return result, local_cache
+
+    # A closed or removed cached Page cannot be selected.
+    focused.closed = True
+    context.block = None
+    result, _ = await select(context, foreign, "focus", cache)
+    assert result is foreign and focused.front_calls == 1
+    focused.closed = False
+    context.pages = [foreign]
+    result, _ = await select(context, foreign, "focus", cache)
+    assert result is foreign and focused.front_calls == 1
+
+    # A matching Page in another context is not an authority to cross contexts.
+    result, _ = await select(context, foreign, "focus", cache, Context([focused]))
+    assert result is foreign and focused.front_calls == 1
+
+    # Focus changes select the new cached target, not the former focus.
+    second = Page("second")
+    context.pages = [foreign, focused, second]
+    context.block = foreign
+    cache.target_ids[second] = "second"
+    result, _ = await select(context, focused, "second", cache)
+    assert result is second and second.front_calls == 1
+
+    # Existing uncached discovery and exact acquired-session cleanup still work.
+    context.block = None
+    context.lookups.clear()
+    context.detached.clear()
+    result, _ = await select(context, foreign, "focus")
+    assert result is focused
+    assert context.lookups == ["foreign", "focus"]
+    assert context.detached == context.lookups
+
+    # Target changes or removal while discovery awaits cannot authorize old focus.
+    for mutation in ("focus", "removed", "closed", "context"):
+        current, candidate = Page("current"), Page("candidate")
+        ctx = Context([candidate, current])
+        owner = SimpleNamespace(agent_focus_target_id="candidate")
+        active_browser = SimpleNamespace(contexts=[ctx])
+        def mutate(page):
+            if mutation == "focus":
+                owner.agent_focus_target_id = "new-target"
+            elif mutation == "removed":
+                ctx.pages.remove(page)
+            elif mutation == "context":
+                active_browser.contexts = [Context([current])]
+            else:
+                page.closed = True
+        ctx.on_lookup = mutate
+        result = await _synchronize_playwright_page_with_agent_focus(
+            dom_service=SimpleNamespace(session=owner),
+            playwright_browser=active_browser,
+            current_page=current, focus_cache=TabFocusCache(),
+        )
+        assert result is current and candidate.front_calls == 0
+
+    # A change during foregrounding is not published as a current selection.
+    current, candidate = Page("current"), Page("candidate")
+    ctx = Context([current, candidate])
+    owner = SimpleNamespace(agent_focus_target_id="candidate")
+    after_cache = TabFocusCache()
+    after_cache.target_ids[candidate] = "candidate"
+    async def change_during_front():
+        owner.agent_focus_target_id = "replacement"
+    candidate.on_front = change_during_front
+    result = await _synchronize_playwright_page_with_agent_focus(
+        dom_service=SimpleNamespace(session=owner),
+        playwright_browser=SimpleNamespace(contexts=[ctx]), current_page=current,
+        focus_cache=after_cache,
+    )
+    assert result is current and after_cache.foreground is None
+    assert candidate.front_calls == 1  # Dispatched foreground cannot be retracted.
+
+    # Cancellation of actual focus foregrounding propagates without publishing it.
+    entered = asyncio.Event()
+    async def blocked_front():
+        entered.set()
+        await asyncio.Future()
+    focused.on_front = blocked_front
+    context.pages = [foreign, focused]
+    task = asyncio.create_task(select(context, foreign, "focus", cache))
+    await entered.wait()
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+    else:
+        raise AssertionError("focus cancellation swallowed")
 
 
 async def test_playwright_page_tracks_browser_use_tab_focus():
@@ -34391,6 +36056,7 @@ async def _run_browser_durable_user_feedback_replay(
         if schema_failure:
             return {
                 "score": 1.0,
+                "task_completed": True,
                 "reasoning": "Passing verdict under previous events contract",
                 "structured_response": {"events": []},
                 "usage": {},
@@ -34410,6 +36076,7 @@ async def _run_browser_durable_user_feedback_replay(
             )
             return {
                 "score": 0.5 if verifier_feedback == "omit_fields" else 1.0,
+                "task_completed": True,
                 "reasoning": "Verdict for the previous events requirement",
                 "structured_response": {"events": [{"title": "STALE PREVIOUS VERDICT"}]},
                 "usage": {},
@@ -34417,6 +36084,7 @@ async def _run_browser_durable_user_feedback_replay(
         if verifier_feedback:
             return {
                 "score": 1.0,
+                "task_completed": True,
                 "reasoning": "Verdict for the current access requirement",
                 "structured_response": None
                 if verifier_feedback == "omit_fields"
@@ -34428,6 +36096,7 @@ async def _run_browser_durable_user_feedback_replay(
             }
         return {
             "score": 1.0,
+            "task_completed": True,
             "reasoning": "Calendar evidence confirmed",
             "structured_response": {
                 "calendar_accessible": True,
@@ -35513,6 +37182,7 @@ async def test_kernel_replay_is_stopped_before_the_browser_session_is_closed():
             AsyncMock(
                 return_value={
                     "score": 1.0,
+                    "task_completed": True,
                     "reasoning": "Heading confirmed",
                     "structured_response": {"result": "Example Domain"},
                     "usage": {},
@@ -35574,6 +37244,713 @@ async def test_kernel_replay_is_stopped_before_the_browser_session_is_closed():
     assert recordings, "the Kernel replay recording message must still be saved"
 
 
+
+
+
+
+
+async def test_foreground_trace_actual_step_entry():
+    await _exercise_first_step_shutdown(neutral=True, require_trace=True)
+    await _exercise_first_step_shutdown(neutral=True, resume=True, require_trace=True)
+
+
+async def test_foreground_trace_pending_native_attach():
+    """Execute the real focus helper and identify its pending await before cancellation."""
+    from structlog.testing import capture_logs
+    from domains.spawn_browser_agent_v3 import handler as h
+    from domains.spawn_browser_agent_v3.foreground_trace import ForegroundAwaitTrace, _identity
+
+    entered = asyncio.Event()
+    async def attach(page):
+        entered.set()
+        await asyncio.Future()
+    page = SimpleNamespace(is_closed=lambda: False)
+    context = SimpleNamespace(pages=[page], new_cdp_session=attach)
+    service = SimpleNamespace(session=SimpleNamespace(agent_focus_target_id="target-private"))
+    trace = ForegroundAwaitTrace(agent_id="agent-private", task_id="task-private", session_id="session-private", step=6)
+    with capture_logs() as events:
+        task = asyncio.create_task(trace.run("tab_rebind", h._rebind_browser_tab_runtime(
+            dom_service=service, dom_page=None, playwright_browser=SimpleNamespace(contexts=[context]),
+            current_page=None, humanizer=None, browser_recorder=None, cursor_observer=None,
+        )))
+        try:
+            await entered.wait()
+            assert not task.done()
+            pending = [e for e in events if e.get("operation") == "cdp_attach" and e.get("state") == "start"]
+            assert len(pending) == 1, "real native attach suspended without an owned diagnostic"
+            assert pending[0]["task_key"] == _identity("task-private") and pending[0]["step"] == 6
+            outer = next(e for e in events if e.get("operation") == "tab_rebind" and e.get("state") == "start")
+            assert pending[0]["trace_id"] == outer["trace_id"]
+            assert pending[0]["request_ordinal"] != outer["request_ordinal"]
+        finally:
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+    terminals = [e for e in events if e.get("state") == "cancelled"]
+    assert {e["operation"] for e in terminals} == {"tab_rebind", "cdp_attach"}, events
+    assert trace._active_tasks == {}
+    assert "private" not in json.dumps(events), events
+
+
+async def test_foreground_trace_outcome_privacy_and_budget():
+    from structlog.testing import capture_logs
+    from domains.spawn_browser_agent_v3 import foreground_trace as ft
+    async def result(value):
+        return value
+    sentinel = object()
+    trace = ft.ForegroundAwaitTrace(agent_id="https://secret/?token=value", task_id="task", session_id="s" * 10000, step=7)
+    error = RuntimeError("PRIVATE-ERROR-CONTENT")
+    async def fail():
+        raise error
+    with capture_logs() as events:
+        assert await trace.run("observe_page", result(sentinel)) is sentinel
+        with pytest.raises(RuntimeError) as caught:
+            await trace.run("target_info", fail())
+        assert caught.value is error
+        for _ in range(40):
+            assert await trace.run("user_control", result(sentinel)) is sentinel
+        assert await trace.run("PRIVATE-OPERATION", result(sentinel)) is sentinel
+    events = [event for event in events if event.get("event") == "browser.foreground.await" and event.get("trace_id") == trace._owner["trace_id"]]
+    assert len(events) == ft.MAX_OPERATIONS * 2 + 1, len(events)
+    assert events[-1]["state"] == "budget_exhausted"
+    encoded = json.dumps(events)
+    assert all(secret not in encoded for secret in ("PRIVATE", "https://", "token=value", "s" * 100))
+    assert all(len(json.dumps(e)) < 650 for e in events), events
+    assert any(e.get("state") == "error" for e in events)
+    # Logging failures do not affect original results or exceptions.
+    with patch.object(ft.logger, "info", side_effect=RuntimeError("logger unavailable")):
+        other = ft.ForegroundAwaitTrace(agent_id="a", task_id="b", session_id="c", step=1)
+        assert await other.run("user_control", result(sentinel)) is sentinel
+    # Independent concurrent owners must not share their nested request ordinals.
+    gate = asyncio.Event()
+    async def nested():
+        await gate.wait()
+        return await ft.trace_foreground_await("target_info", result(sentinel))
+    with capture_logs() as concurrent:
+        one = ft.ForegroundAwaitTrace(agent_id="a", task_id="one", session_id="s", step=1)
+        two = ft.ForegroundAwaitTrace(agent_id="a", task_id="two", session_id="s", step=1)
+        tasks = [asyncio.create_task(t.run("tab_rebind", nested())) for t in (one, two)]
+        await asyncio.sleep(0)
+        gate.set()
+        # Global structlog capture can also receive unrelated background events.
+        ft.logger.info("unrelated.fixture.event")
+        assert all(value is sentinel for value in await asyncio.gather(*tasks))
+    owned_ids = {one._owner["trace_id"], two._owner["trace_id"]}
+    concurrent = [event for event in concurrent if event.get("event") == "browser.foreground.await" and event.get("trace_id") in owned_ids]
+    assert {e["trace_id"] for e in concurrent} == owned_ids
+    for owner in ("one", "two"):
+        rows = [e for e in concurrent if e["task_key"] == ft._identity(owner)]
+        assert [e["operation"] for e in rows if e["state"] == "start"] == ["tab_rebind", "target_info"]
+    # No owner context leaks after the wrapped coroutine completes.
+    with capture_logs() as outside:
+        assert await ft.trace_foreground_await("target_info", result(sentinel)) is sentinel
+    assert [event for event in outside if event.get("event") == "browser.foreground.await" and event.get("trace_id") in (owned_ids | {trace._owner["trace_id"]})] == []
+
+
+async def test_foreground_trace_control_ownership_wait():
+    from structlog.testing import capture_logs
+    from domains.spawn_browser_agent_v3 import handler as h
+    from domains.spawn_browser_agent_v3.foreground_trace import ForegroundAwaitTrace
+    trace = ForegroundAwaitTrace(agent_id="a", task_id="t", session_id="s", step=1)
+    with capture_logs() as events, \
+         patch.object(h, "fetch_browser_control_state", AsyncMock(side_effect=["requested", "agent"])), \
+         patch.object(h, "acknowledge_browser_user_control", AsyncMock(return_value="user")), \
+         patch.object(h, "browser_activity_checkpoint"), \
+         patch.object(h.asyncio, "sleep", AsyncMock()):
+        assert await trace.run("user_control", h._wait_for_browser_user_control(None, "t")) is True
+    rows = [(e["operation"], e["state"]) for e in events if e.get("event") == "browser.foreground.await"]
+    assert rows == [("user_control", "start"), ("control_read", "start"), ("control_read", "done"),
+                    ("control_ack", "start"), ("control_ack", "done"), ("control_yield", "start"),
+                    ("control_yield", "done"), ("control_read", "start"), ("control_read", "done"),
+                    ("user_control", "done")], rows
+
+
+async def test_foreground_trace_detached_context_is_not_foreground():
+    from structlog.testing import capture_logs
+    from domains.spawn_browser_agent_v3.foreground_trace import ForegroundAwaitTrace, trace_foreground_await
+    trace = ForegroundAwaitTrace(agent_id="a", task_id="t", session_id="s", step=1)
+    after_return = asyncio.Event()
+    after_done = asyncio.Event()
+    later_operation = asyncio.Event()
+    ran_during = asyncio.Event()
+    calls = []
+    async def result(label):
+        calls.append(label)
+        return label
+    async def detached():
+        assert await trace_foreground_await("cdp_attach", result("during")) == "during"
+        ran_during.set()
+        await after_return.wait()
+        assert await trace_foreground_await("cdp_attach", result("after")) == "after"
+        after_done.set()
+        await later_operation.wait()
+        assert await trace_foreground_await("cdp_attach", result("later")) == "later"
+    child = None
+    async def parent():
+        nonlocal child
+        child = asyncio.create_task(detached())
+        await ran_during.wait()
+        return "parent"
+    with capture_logs() as events:
+        assert await trace.run("tab_rebind", parent()) == "parent"
+        after_return.set()
+        await after_done.wait()
+        async def next_operation():
+            later_operation.set()
+            await child
+        await trace.run("instruction_sync", next_operation())
+    assert calls == ["during", "after", "later"]
+    assert [(e["operation"], e["state"]) for e in events] == [
+        ("tab_rebind", "start"), ("tab_rebind", "done"),
+        ("instruction_sync", "start"), ("instruction_sync", "done"),
+    ], events
+    assert trace._active_tasks == {}
+    # An explicit awaited operation in wait_for's Task is still a foreground owner.
+    async def nested():
+        return await trace_foreground_await("target_info", result("explicit"))
+    with capture_logs() as events:
+        assert await asyncio.wait_for(trace.run("observe_page", nested()), timeout=1) == "explicit"
+    assert [(e["operation"], e["state"]) for e in events] == [
+        ("observe_page", "start"), ("target_info", "start"),
+        ("target_info", "done"), ("observe_page", "done"),
+    ], events
+    assert trace._active_tasks == {}
+
+async def _exercise_disconnected_playwright_full_activity(mode="reconnect"):
+    neutral=True
+    resume=mode == "resume"
+    resume_url="about:blank"
+    """Original reconnect shape: next native action must use a live input client."""
+    from contextlib import ExitStack
+
+    from structlog.testing import capture_logs
+    from temporalio.testing import ActivityEnvironment
+
+    from domains.spawn_browser_agent_v3.config import BROWSER_DRAIN_YIELD_STATUS
+    from domains.spawn_browser_agent_v3.handler import spawn_browser_agent_activity_v3
+    from helpers.activity_generation_drain import WORKER_SHUTDOWN
+
+    env = ActivityEnvironment()
+    old_page = SimpleNamespace(is_closed=lambda: False)
+    new_page = SimpleNamespace(is_closed=lambda: False)
+    fake_browser = SimpleNamespace(contexts=[SimpleNamespace(pages=[old_page])], close=AsyncMock(), is_connected=lambda: True)
+    new_browser = SimpleNamespace(contexts=[SimpleNamespace(pages=[new_page])], close=AsyncMock(), is_connected=lambda: True)
+    fake_playwright = _FakePlaywright(fake_browser)
+    new_playwright = _FakePlaywright(new_browser)
+    new_retired = asyncio.Event()
+    async def retire_new():
+        new_retired.set()
+    new_playwright.stop.side_effect = retire_new
+    old_retired = asyncio.Event()
+    if mode == "retire_order":
+        async def connect_after_retirement(*args, **kwargs):
+            assert fake_playwright.stop.await_count == 1, "old disconnected driver must retire before new attachment"
+            return new_browser
+        new_playwright.chromium.connect_over_cdp.side_effect = connect_after_retirement
+    if mode == "old_stop_cancel":
+        old_stop_count = 0
+        async def cancelled_old_retirement():
+            nonlocal old_stop_count
+            old_stop_count += 1
+            if old_stop_count == 1:
+                raise asyncio.CancelledError()
+            old_retired.set()
+        fake_playwright.stop.side_effect = cancelled_old_retirement
+    if mode == "focus_disconnect":
+        async def disconnect_while_foregrounding():
+            new_page.is_closed = lambda: True
+            new_browser.is_connected = lambda: False
+        new_page.bring_to_front = AsyncMock(side_effect=disconnect_while_foregrounding)
+        new_browser.contexts[0].new_cdp_session = AsyncMock(return_value=SimpleNamespace(
+            send=AsyncMock(return_value={"targetInfo": {"targetId": "same-target"}}), detach=AsyncMock()))
+    if mode == "attach_failure":
+        new_playwright.chromium.connect_over_cdp.side_effect = RuntimeError("fixture attach failure")
+    if mode == "cancel_attach":
+        new_playwright.chromium.connect_over_cdp.side_effect = asyncio.CancelledError()
+    if mode == "empty_context":
+        new_browser.contexts = []
+    class RecordingHumanizer(_FakeHumanizer):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.input_page = kwargs['input_page']
+        async def initialize_cursor(self, *args, **kwargs):
+            await super().initialize_cursor(*args, **kwargs)
+            if mode == "humanizer_disconnect" and self.input_page is new_page:
+                new_page.is_closed = lambda: True
+                new_browser.is_connected = lambda: False
+    session_data = {
+        "task_id": "task-1",
+        "session_id": "session-1",
+        "debug_url": "https://steel.example/debug",
+        "ws_url": "ws://live",
+        "fingerprint_injection": None,
+        "passwords": [],
+        "auth_options": {"realm": "example.com"},
+        "browser_session_metadata": {"provider": "steel", "profile_id": "profile-1"},
+        "user_settings": {},
+    }
+    if neutral:
+        session_data.update(
+            auth_realm="",
+            auth_options={'realm': '',
+             'steel_session': None,
+             'cookie_bundles': [],
+             'passwords': [],
+             'passkeys': [],
+             'email_otp': {'available': False,
+                           'connected_emails': [],
+                           'match_for_site_account': None},
+             'readable_identifiers': [],
+             'minted': None},
+            passkeys=[], auth_credential_ref=None, current_url=resume_url, same_session_available=True,
+        )
+    final_url = "about:blank" if neutral else "https://example.com/cart"
+    llm_step = AsyncMock(
+        return_value={
+            "action": {"action": "scroll", "thinking": "Looking for the cart", "params": {"direction": "down"}},
+            "usage": {"prompt_tokens": 900, "completion_tokens": 60, "actual_model": "rose-1-browser-use"},
+            "mode": "waterfall",
+        }
+    )
+    executed_steps = []
+    seen_input_pages = []
+
+    async def execute_step_while_deploy_lands(*args, **kwargs):
+        executed_steps.append(args[2] if len(args) > 2 else kwargs.get("unified_action"))
+        if len(executed_steps) == 1:
+            # CDP downstream closure invalidates the local Playwright browser;
+            # the native DOM client is already reconnected before step two.
+            if mode != "healthy":
+                from browser_tools.cdp_multiplexer import SingleCdpConnectionMultiplexer, _Client
+
+                closure_order = []
+                class ClosedUpstream:
+                    close_code = 1000
+                    close_reason = ""
+                    def __aiter__(self):
+                        return self
+                    async def __anext__(self):
+                        raise StopAsyncIteration
+                    async def close(self):
+                        closure_order.append("upstream-close")
+                    async def wait_closed(self):
+                        assert closure_order == ["upstream-close"]
+                        closure_order.append("upstream-closed")
+
+                class InputClient:
+                    async def close(self, **kwargs):
+                        assert closure_order == ["upstream-close", "upstream-closed"]
+                        closure_order.append("input-closed")
+                        fake_browser.contexts = []
+                        fake_browser.is_connected = lambda: False
+                        old_page.is_closed = lambda: True
+                    async def wait_closed(self):
+                        assert closure_order[-1] == "input-closed"
+                        closure_order.append("input-close-confirmed")
+
+                native_client = SimpleNamespace(close=AsyncMock(), wait_closed=AsyncMock())
+                upstream = ClosedUpstream()
+                mux = SingleCdpConnectionMultiplexer("ws://fixture.invalid", arm_webauthn=False)
+                mux._upstream = upstream
+                mux._clients = {_Client(InputClient(), 1), _Client(native_client, 2)}
+                await mux._read_upstream(upstream)
+                native_client.close.assert_awaited_once()
+                native_client.wait_closed.assert_awaited_once()
+                assert closure_order == ["upstream-close", "upstream-closed", "input-closed", "input-close-confirmed"]
+                assert not fake_browser.is_connected()
+                # Native browser-use reconnect is external to this fixture;
+                # its existing DOM service is live for the next step.
+            if mode == "missing_endpoint":
+                _FakeDomService.last_instance.cdp_url = None
+            _FakeDomService.last_instance.mark_secret_used()
+            if mode == "focus_disconnect":
+                _FakeDomService.last_instance.session.agent_focus_target_id = "same-target"
+        else:
+            assert _FakeDomService.last_instance.secret_values_used
+            seen_input_pages.append(kwargs['humanizer'].input_page)
+            env.worker_shutdown()
+        return {"success": True, "message": "Scrolled down", "current_url": final_url}
+
+    close_mock = AsyncMock()
+    cache_setup = AsyncMock()
+    diagnostics_setup = AsyncMock()
+    if mode == "setup_failure":
+        diagnostics_setup.side_effect = [None, RuntimeError("fixture configure failure")]
+    if mode == "disconnect_during_setup":
+        async def disconnect_in_setup(page, **kwargs):
+            if page is new_page:
+                new_browser.is_connected = lambda: False
+                new_page.is_closed = lambda: True
+        diagnostics_setup.side_effect = disconnect_in_setup
+    native_start = await native_browser_start_source("1970-01-01T00:00:00+00:00")
+    patch_targets = [
+        patch.dict(os.environ, {"BROWSER_AGENT_PARALLEL_CDP_CONNECT": "true" if mode == "parallel" else "false"}),
+        patch("domains.spawn_browser_agent_v3.handler.write_through_enabled_for_user", return_value=True),
+        patch("domains.spawn_browser_agent_v3.handler._install_fast_mode_network_cache", cache_setup),
+        patch("domains.spawn_browser_agent_v3.handler._botsigged_diagnostics_enabled", return_value=True),
+        patch("domains.spawn_browser_agent_v3.handler._install_botsigged_diagnostics", diagnostics_setup),
+        patch("domains.spawn_browser_agent_v3.handler.load_config", return_value=_fake_config()),
+        patch("domains.spawn_browser_agent_v3.handler.poll_new_messages", AsyncMock(return_value=[native_start])),
+        patch("domains.spawn_browser_agent_v3.handler.init_browser_session", AsyncMock(return_value=session_data)),
+        patch("domains.spawn_browser_agent_v3.handler.fetch_recent_otps", AsyncMock(return_value=[])),
+        patch(
+            "domains.spawn_browser_agent_v3.handler.get_model_pricing_with_fallback",
+            AsyncMock(return_value={"input_cents_per_1k": 0, "output_cents_per_1k": 0}),
+        ),
+        patch("domains.spawn_browser_agent_v3.handler._call_browser_use_with_rotation", llm_step),
+        patch("domains.spawn_browser_agent_v3.handler.execute_action", side_effect=execute_step_while_deploy_lands),
+        patch("domains.spawn_browser_agent_v3.handler.build_browser_verifier_context", AsyncMock(return_value=[])),
+        patch("domains.spawn_browser_agent_v3.handler.extract_session_files", AsyncMock(return_value=[])),
+        patch("domains.spawn_browser_agent_v3.handler.disconnect_browser_after_passkey_capture", AsyncMock()),
+        patch(
+            "domains.spawn_browser_agent_v3.handler.propagate_browser_run_credentials",
+            AsyncMock(return_value={"outcome": "unknown", "refs": 0, "applied": 0}),
+        ),
+        patch("domains.spawn_browser_agent_v3.handler.close_browser_session", close_mock),
+        patch("domains.spawn_browser_agent_v3.handler.save_browser_action_message", AsyncMock()),
+        patch("domains.spawn_browser_agent_v3.handler.save_browser_assistant_message", AsyncMock()),
+        patch("browser_tools.dom_service.DOMService", _FakeDomService),
+        patch("browser_tools.humanizer.BrowserHumanizer", RecordingHumanizer),
+        patch(
+            "playwright.async_api.async_playwright", side_effect=[_FakeAsyncPlaywright(fake_playwright), _FakeAsyncPlaywright(new_playwright)]
+        ),
+        patch("domains.spawn_browser_agent_v3.handler.live_tab_looks_challenged", AsyncMock(return_value=False)),
+    ]
+
+    if neutral:
+        patch_targets.extend([
+            patch.object(_FakeDomService, "get_page_identity", AsyncMock(return_value={"url": "about:blank", "title": ""})),
+            patch.object(_FakeDomService, "get_browser_state", AsyncMock(return_value={"url": "about:blank", "screenshot": None})),
+            patch.object(_FakeDomService, "get_current_url", AsyncMock(return_value="about:blank")),
+            patch("domains.spawn_browser_agent_v3.handler.fetch_session_info", AsyncMock(return_value=session_data)),
+        ])
+    with ExitStack() as stack:
+        for patch_target in patch_targets:
+            stack.enter_context(patch_target)
+        captured = stack.enter_context(capture_logs())
+        failure = None
+        try:
+            result = await env.run(
+                spawn_browser_agent_activity_v3,
+                user_id="user-1",
+                agent_id="agent-1",
+                goal="Add the socks to the cart",
+                tool_call_id="tool-1",
+                task_id="task-1",
+                output_schema={"fields": [{"name": "result", "type": "string"}]},
+                use_claude_mode=False,
+                start_url="about:blank" if neutral else "https://example.com",
+                is_resume=resume,
+            )
+        except (RuntimeError, IndexError, asyncio.CancelledError) as exc:
+            if mode not in {"missing_endpoint", "attach_failure", "empty_context", "cancel_attach", "setup_failure", "disconnect_during_setup", "humanizer_disconnect", "focus_disconnect", "old_stop_cancel"}:
+                raise
+            failure = exc
+        if mode == "old_stop_cancel":
+            await asyncio.wait_for(old_retired.wait(), 1)
+        elif mode in {"attach_failure", "empty_context", "cancel_attach", "setup_failure", "disconnect_during_setup", "humanizer_disconnect", "focus_disconnect"}:
+            await asyncio.wait_for(new_retired.wait(), 1)
+
+
+    if mode in {"missing_endpoint", "attach_failure", "empty_context", "cancel_attach", "setup_failure", "disconnect_during_setup", "humanizer_disconnect", "focus_disconnect", "old_stop_cancel"}:
+        if mode in {"cancel_attach", "old_stop_cancel"}:
+            assert failure is None and result["status"] == "cancelled", result
+        else:
+            assert failure is not None, (mode, "invalid attach must not continue", result)
+        assert len(executed_steps) == 1 and llm_step.await_count == 1
+        assert not seen_input_pages
+        if mode == "old_stop_cancel":
+            await asyncio.wait_for(old_retired.wait(), 1)
+            new_playwright.chromium.connect_over_cdp.assert_not_awaited()
+            return
+        if mode != "missing_endpoint":
+            new_playwright.stop.assert_awaited_once()
+            if mode in {"humanizer_disconnect", "focus_disconnect"}:
+                # The committed handle is owned by normal terminal cleanup.
+                new_browser.close.assert_awaited_once()
+            else:
+                new_browser.close.assert_not_awaited()
+        return
+
+    assert result["status"] == BROWSER_DRAIN_YIELD_STATUS, result
+    assert result["yield_reason"] == WORKER_SHUTDOWN, result
+    step_phases = [entry for entry in captured if entry.get("event") == "browser.step.phases"]
+    assert [entry.get("step") for entry in step_phases] == [1, 2], (
+        f"the step that ran before the drain yield must report its phases: {step_phases}"
+    )
+    assert "execute_action" in step_phases[0]["phases_ms"], step_phases[0]
+    assert llm_step.await_count == 2, "the activity must not start another step after the drain began"
+    assert len(executed_steps) == 2, executed_steps
+    assert result["step_count"] == 2, result
+    assert result["session_id"] == "session-1" and result["cdp_url"] == "ws://live", result
+    assert result["task_id"] == "task-1", result
+    close_mock.assert_not_awaited()
+    assert result["current_url"] == final_url, result
+    assert final_url in result.get("visited_urls", []), result
+    turn_tool_calls = [
+        call["function"]["name"]
+        for message in result.get("browser_turn_messages", [])
+        for call in message.get("tool_calls") or []
+    ]
+    assert turn_tool_calls == ["scroll", "scroll"], f"the completed step must ride the resume payload: {turn_tool_calls}"
+    assert result.get("reasoning_messages") == ["Looking for the cart", "Looking for the cart"], result
+    llm_usage = [item for item in result.get("usage_items") or [] if item.get("type") == "llm"]
+    assert llm_usage and llm_usage[0]["input_tokens"] == 1800, result.get("usage_items")
+
+    assert seen_input_pages == ([old_page] if mode == "healthy" else [new_page]), "second action received stale Playwright input page"
+    assert cache_setup.await_count == (1 if mode == "healthy" else 2)
+    assert diagnostics_setup.await_count == (1 if mode == "healthy" else 2)
+    assert diagnostics_setup.await_args_list[0].args[0] is old_page
+    if mode != "healthy":
+        assert diagnostics_setup.await_args_list[1].args[0] is new_page
+    if mode == "healthy":
+        assert fake_playwright.chromium.connect_over_cdp.await_count == 1
+        new_playwright.chromium.connect_over_cdp.assert_not_awaited()
+        return
+    assert fake_playwright.chromium.connect_over_cdp.await_count == 1
+    assert new_playwright.chromium.connect_over_cdp.await_count == 1
+    fake_playwright.stop.assert_awaited_once()
+    fake_browser.close.assert_not_awaited()
+    assert all(call.args == ("ws://live",) for call in fake_playwright.chromium.connect_over_cdp.await_args_list + new_playwright.chromium.connect_over_cdp.await_args_list)
+
+
+
+async def test_disconnected_playwright_full_activity():
+    await _exercise_disconnected_playwright_full_activity()
+
+
+async def test_disconnected_playwright_lifecycle_guards():
+    for mode in ("healthy", "resume", "parallel"):
+        await _exercise_disconnected_playwright_full_activity(mode)
+
+
+async def test_disconnected_playwright_refusal_cleanup():
+    for mode in ("missing_endpoint", "attach_failure", "empty_context", "cancel_attach", "setup_failure", "disconnect_during_setup"):
+        await _exercise_disconnected_playwright_full_activity(mode)
+
+
+async def test_disconnected_playwright_handoff_liveness():
+    for mode in ("retire_order", "humanizer_disconnect", "focus_disconnect", "old_stop_cancel"):
+        await _exercise_disconnected_playwright_full_activity(mode)
+
+
+async def test_closed_page_waits_for_authoritative_focus_recovery():
+    """A detach/recovery handoff must finish before selecting its exact Page."""
+    from browser_use.browser.session_manager import SessionManager
+    from domains.spawn_browser_agent_v3 import handler
+
+    class QuietLogger:
+        def __getattr__(self, name):
+            return lambda *args, **kwargs: None
+
+    class Page:
+        def __init__(self, closed=False):
+            self.closed = closed
+            self.bring_to_front = AsyncMock()
+        def is_closed(self):
+            return self.closed
+
+    class Humanizer:
+        def __init__(self, **kwargs):
+            self.initialize_cursor = AsyncMock()
+        def set_cursor_observer(self, observer):
+            pass
+
+    for mode in ("recovered", "failed", "no_recovery", "missing_manager", "current_live",
+                 "cancelled", "session_replaced", "replacement_closed", "focus_changed"):
+        old, other, selected = Page(mode != "current_live"), Page(), Page()
+        context = SimpleNamespace(pages=[other, selected])
+        context.new_cdp_session = AsyncMock(side_effect=AssertionError("no foreign discovery"))
+        browser = SimpleNamespace(contexts=[context], is_connected=lambda: True)
+        session = SimpleNamespace(agent_focus_target_id=None, logger=QuietLogger())
+        manager = SessionManager(session)
+        session.session_manager = None if mode == "missing_manager" else manager
+        manager._get_session_for_target = lambda target: object() if target == "chosen" else None
+        manager._recovery_in_progress = mode not in ("no_recovery", "missing_manager", "current_live")
+        manager._recovery_complete_event = asyncio.Event()
+        service = SimpleNamespace(session=session)
+        cache = handler.TabFocusCache()
+        cache.target_ids[other], cache.target_ids[selected] = "other", "chosen"
+        entered = asyncio.Event()
+        real_ensure = manager.ensure_valid_focus
+        async def ensure():
+            entered.set()
+            return await real_ensure()
+        manager.ensure_valid_focus = ensure
+        old_humanizer = SimpleNamespace(close=AsyncMock())
+        call = asyncio.create_task(handler._rebind_browser_tab_runtime(
+            dom_service=service, dom_page=object(), playwright_browser=browser,
+            current_page=old, humanizer=old_humanizer, browser_recorder=None,
+            cursor_observer=None, humanizer_factory=Humanizer, focus_cache=cache,
+        ))
+        try:
+            if manager._recovery_in_progress:
+                # Baseline returns/raises without entering the authoritative wait.
+                for _ in range(10):
+                    if entered.is_set() or call.done():
+                        break
+                    await asyncio.sleep(0)
+                assert entered.is_set(), "closed-page rebind skipped active focus recovery"
+                assert not call.done()
+                if mode == "cancelled":
+                    call.cancel("original cancellation")
+                    with pytest.raises(asyncio.CancelledError, match="original cancellation"):
+                        await call
+                    assert not manager._recovery_complete_event.is_set()
+                    continue
+                if mode != "failed":
+                    session.agent_focus_target_id = "chosen"
+                if mode == "session_replaced":
+                    service.session = SimpleNamespace(agent_focus_target_id="chosen")
+                if mode == "replacement_closed":
+                    selected.closed = True
+                if mode == "focus_changed":
+                    async def changed():
+                        session.agent_focus_target_id = "other"
+                    selected.bring_to_front.side_effect = changed
+                manager._recovery_complete_event.set()
+            if mode in ("recovered", "current_live"):
+                result, _ = await call
+                assert result is (selected if mode == "recovered" else old)
+                assert selected.bring_to_front.await_count == (1 if mode == "recovered" else 0)
+                assert other.bring_to_front.await_count == 0
+            else:
+                with pytest.raises(RuntimeError, match="Playwright input page closed"):
+                    await call
+                old_humanizer.close.assert_not_awaited()
+            context.new_cdp_session.assert_not_awaited()
+        finally:
+            if not call.done():
+                call.cancel()
+            with contextlib.suppress(asyncio.CancelledError, RuntimeError):
+                await call
+
+
+async def test_playwright_focus_fallback_diagnostics():
+    from structlog.testing import capture_logs
+    from domains.spawn_browser_agent_v3 import handler
+
+    class Page:
+        def __init__(self, closed):
+            self.closed = closed
+            self.bring_to_front = AsyncMock()
+        def is_closed(self):
+            return self.closed
+
+    class Humanizer:
+        def __init__(self, **kwargs):
+            self.initialize_cursor = AsyncMock()
+        def set_cursor_observer(self, observer):
+            pass
+
+    for mode in ("healthy", "missing_focus", "missing_page", "missing_context"):
+        old, live = Page(True), Page(False)
+        context = SimpleNamespace(pages=[old] if mode == "missing_page" else [old, live])
+        context.new_cdp_session = AsyncMock(side_effect=AssertionError("no CDP lookup expected"))
+        browser = SimpleNamespace(contexts=[] if mode == "missing_context" else [context], is_connected=lambda: True)
+        service = SimpleNamespace(session=SimpleNamespace(agent_focus_target_id=None if mode == "missing_focus" else "target-new"))
+        cache = handler.TabFocusCache()
+        cache.target_ids[old], cache.target_ids[live] = "target-old", "target-new"
+        old_humanizer = SimpleNamespace(close=AsyncMock())
+        with capture_logs() as events:
+            if mode == "healthy":
+                page, _ = await handler._rebind_browser_tab_runtime(
+                    dom_service=service, dom_page=object(), playwright_browser=browser,
+                    current_page=old, humanizer=old_humanizer, browser_recorder=None,
+                    cursor_observer=None, humanizer_factory=Humanizer, focus_cache=cache,
+                )
+                assert page is live
+            else:
+                try:
+                    await handler._rebind_browser_tab_runtime(
+                        dom_service=service, dom_page=object(), playwright_browser=browser,
+                        current_page=old, humanizer=old_humanizer, browser_recorder=None,
+                        cursor_observer=None, humanizer_factory=Humanizer, focus_cache=cache,
+                    )
+                except RuntimeError as error:
+                    assert str(error) == "Playwright input page closed during attachment or focus binding"
+                else:
+                    raise AssertionError("closed-page refusal changed")
+        records = [event for event in events if event.get("event") == "browser.focus_fallback"]
+        if mode == "healthy":
+            assert records == []
+            old_humanizer.close.assert_awaited_once()
+        else:
+            reason = {"missing_focus": "missing_focus", "missing_page": "no_matching_page", "missing_context": "missing_context"}[mode]
+            assert [record["reason"] for record in records] == [reason, "input_page_closed"]
+            record = records[0]
+            assert record["focus_present"] is (mode != "missing_focus")
+            assert record["context_count"] == (0 if mode == "missing_context" else 1)
+            assert record["live_candidate_count"] == (1 if mode == "missing_focus" else 0)
+            assert record["current_closed"] is True and record["client_connected"] is True
+            old_humanizer.close.assert_not_awaited()
+        context.new_cdp_session.assert_not_awaited()
+
+
+def test_playwright_focus_diagnostics_private_and_bounded():
+    from structlog.testing import capture_logs
+    from domains.spawn_browser_agent_v3 import handler
+
+    reads = []
+    class Page:
+        url = "https://secret.invalid/?token=DO_NOT_LOG"
+        def is_closed(self):
+            reads.append(1)
+            return False
+    pages = [Page() for _ in range(300)]
+    browser = SimpleNamespace(contexts=[SimpleNamespace(pages=pages)], is_connected=lambda: True)
+    service = SimpleNamespace(session=SimpleNamespace(agent_focus_target_id="PRIVATE_TARGET"))
+    with capture_logs() as events:
+        handler._record_playwright_focus_fallback("no_matching_page", playwright_browser=browser, current_page=pages[0], dom_service=service)
+        handler._record_playwright_focus_fallback("DO_NOT_LOG", playwright_browser=browser, current_page=pages[0])
+    assert len(events) == 1
+    record = events[0]
+    assert record["page_count"] == record["live_candidate_count"] == 256
+    assert record["counts_capped"] is True and len(reads) == 257
+    assert "DO_NOT_LOG" not in json.dumps(record) and "PRIVATE_TARGET" not in json.dumps(record)
+    assert set(record) == {"event", "log_level", "reason", "focus_present", "context_count", "page_count", "live_candidate_count", "current_closed", "client_connected", "counts_capped"}
+
+
+async def test_playwright_focus_diagnostics_preserve_failure_and_cancellation():
+    from domains.spawn_browser_agent_v3 import handler
+
+    class Page:
+        def __init__(self, closed):
+            self.closed = closed
+            self.bring_to_front = AsyncMock()
+        def is_closed(self):
+            return self.closed
+    old, live = Page(True), Page(False)
+    browser = SimpleNamespace(contexts=[SimpleNamespace(pages=[old, live])], is_connected=lambda: True)
+    service = SimpleNamespace(session=SimpleNamespace(agent_focus_target_id="target-new"))
+    with patch.object(handler.logger, "info", side_effect=OSError("diagnostic sink unavailable")):
+        try:
+            handler._require_live_playwright_client(browser, old, dom_service=service)
+        except RuntimeError as error:
+            assert str(error) == "Playwright input page closed during attachment or focus binding"
+        else:
+            raise AssertionError("logger failure replaced required refusal")
+    class BrokenLocalState:
+        @property
+        def contexts(self):
+            raise ValueError("PRIVATE_DIAGNOSTIC_VALUE")
+    with patch.object(handler.logger, "info") as logged:
+        handler._record_playwright_focus_fallback("missing_context", playwright_browser=BrokenLocalState(), current_page=old)
+        assert "PRIVATE_DIAGNOSTIC_VALUE" not in str(logged.call_args)
+    cache = handler.TabFocusCache()
+    cache.target_ids[old], cache.target_ids[live] = "target-old", "target-new"
+    cancelled = asyncio.CancelledError("original cancellation")
+    live.bring_to_front.side_effect = cancelled
+    try:
+        await handler._synchronize_playwright_page_with_agent_focus(
+            dom_service=service, playwright_browser=browser, current_page=old, focus_cache=cache,
+        )
+    except asyncio.CancelledError as error:
+        assert error is cancelled
+    else:
+        raise AssertionError("cancellation was swallowed")
+
+
 async def run_all_tests():
     print("spawn-browser-agent-v3 blackbox tests:")
     from browser_operational_projection_fixtures import (
@@ -35583,6 +37960,34 @@ async def run_all_tests():
     )
 
     r = BlackboxResult()
+    await r.record_async("closed_page_waits_for_authoritative_focus_recovery", test_closed_page_waits_for_authoritative_focus_recovery)
+    await r.record_async("playwright_focus_fallback_diagnostics", test_playwright_focus_fallback_diagnostics)
+    r.record("playwright_focus_diagnostics_private_and_bounded", test_playwright_focus_diagnostics_private_and_bounded)
+    await r.record_async("playwright_focus_diagnostics_preserve_failure_and_cancellation", test_playwright_focus_diagnostics_preserve_failure_and_cancellation)
+    await r.record_async("cdp_probe_does_not_wait_for_playwright_abort_ack", test_cdp_probe_does_not_wait_for_playwright_abort_ack)
+    await r.record_async("owned_cdp_probe_expiry_identity_and_late_reply", test_owned_cdp_probe_expiry_identity_and_late_reply)
+    await r.record_async("native_probe_rejects_changed_binding_and_preserves_foreign_requests", test_native_probe_rejects_changed_binding_and_preserves_foreign_requests)
+    await r.record_async("native_probe_rejects_reconnect_before_first_read", test_native_probe_rejects_reconnect_before_first_read)
+    await r.record_async("cdp_stall_probe_bounds_session_attachment", test_cdp_stall_probe_bounds_session_attachment)
+    await r.record_async("cdp_stall_probe_preserves_send_and_cancellation", test_cdp_stall_probe_preserves_send_and_cancellation)
+    await r.record_async("cdp_stall_probe_keeps_renderer_browser_distinction", test_cdp_stall_probe_keeps_renderer_browser_distinction)
+
+
+    from browser_payment_history_cases import (
+        test_payment_history_storage_read_and_restore,
+        test_payment_history_resume_and_export,
+        test_payment_history_llm_reprojection,
+        test_payment_history_verifier_projection,
+        test_payment_history_rejects_media_and_evaluate_spoofs,
+    )
+    for test in (
+        test_payment_history_storage_read_and_restore,
+        test_payment_history_resume_and_export,
+        test_payment_history_llm_reprojection,
+        test_payment_history_verifier_projection,
+        test_payment_history_rejects_media_and_evaluate_spoofs,
+    ):
+        await r.record_async(test.__name__, test)
     from browser_navigation_cases import test_browser_user_navigation_history, test_browser_user_navigation_command_binding
     await r.record_async("browser user navigation real history", test_browser_user_navigation_history)
     await r.record_async("browser user navigation command binding", test_browser_user_navigation_command_binding)
@@ -36469,6 +38874,19 @@ async def run_all_tests():
         test_challenge_recovery_call_keywords_match_callee_contract,
     )
     await r.record_async(
+        "browser_tab_rebind_preserves_provider_keyboard_transport",
+        test_browser_tab_rebind_preserves_provider_keyboard_transport,
+    )
+    await r.record_async("foreground_trace_detached_context_is_not_foreground", test_foreground_trace_detached_context_is_not_foreground)
+    await r.record_async("foreground_trace_control_ownership_wait", test_foreground_trace_control_ownership_wait)
+    await r.record_async("foreground_trace_actual_step_entry", test_foreground_trace_actual_step_entry)
+    await r.record_async("foreground_trace_pending_native_attach", test_foreground_trace_pending_native_attach)
+    await r.record_async("foreground_trace_outcome_privacy_and_budget", test_foreground_trace_outcome_privacy_and_budget)
+    await r.record_async(
+        "cached_tab_focus_ignores_unrelated_stalled_page",
+        test_cached_tab_focus_ignores_unrelated_stalled_page,
+    )
+    await r.record_async(
         "playwright_page_tracks_browser_use_tab_focus",
         test_playwright_page_tracks_browser_use_tab_focus,
     )
@@ -36935,6 +39353,7 @@ async def run_all_tests():
     await r.record_async("browser_retained_handle_survives_native_redaction", test_browser_retained_handle_survives_native_redaction)
     await r.record_async("browser_native_read_tool_output_call_reaches_dispatcher", test_browser_native_read_tool_output_call_reaches_dispatcher)
     await r.record_async("browser_fallback_and_attachment_contract", test_browser_fallback_and_attachment_contract)
+    r.record("native_observation_binding_preserves_model_preview", test_native_observation_binding_preserves_model_preview)
     await r.record_async("retained_browser_output_real_dispatch_and_history", test_retained_browser_output_real_dispatch_and_history)
     await r.record_async("retained_browser_output_redaction_expiry_failure", test_retained_browser_output_redaction_expiry_failure)
     await r.record_async("evaluate_result_bounded_once", test_evaluate_result_is_bounded_once_in_model_context)
@@ -37468,10 +39887,41 @@ async def run_all_tests():
     await r.record_async("execute_upload_file_not_file_input", test_execute_upload_file_not_file_input)
 
     await r.record_async("execute_switch_tab_success", test_execute_switch_tab_success)
+    await r.record_async("switch_tab_observes_native_event_result", test_switch_tab_observes_native_event_result)
+    await r.record_async("switch_tab_cancellation_propagates_without_success", test_switch_tab_cancellation_propagates_without_success)
     await r.record_async("execute_switch_tab_no_id", test_execute_switch_tab_missing_id)
     await r.record_async("execute_close_tab_explicit_id", test_execute_close_tab_with_explicit_id)
 
+    from terminal_visual_evidence_fixture import (
+        test_terminal_capture_reaches_polar, test_terminal_privacy_identity_and_restore,
+        test_terminal_invalid_receipts_fail_closed, test_terminal_failed_write_cancel_and_revocation,
+        test_terminal_body_budget_and_no_authority,
+    )
+    for name, fn in (
+        ("terminal_visual_original_to_polar", test_terminal_capture_reaches_polar),
+        ("terminal_visual_privacy_identity_restore", test_terminal_privacy_identity_and_restore),
+        ("terminal_visual_invalid_receipts", test_terminal_invalid_receipts_fail_closed),
+        ("terminal_visual_failed_write_cancel_revocation", test_terminal_failed_write_cancel_and_revocation),
+        ("terminal_visual_budget_no_authority", test_terminal_body_budget_and_no_authority),
+    ):
+        await r.record_async(name, fn)
+
     await r.record_async("execute_screenshot_success", test_execute_screenshot_success)
+    from browser_visual_receipt_fixture import (
+        test_original_capture_admitted, test_private_and_session, test_identity_and_tamper,
+        test_dedup_and_recent, test_byte_budget, test_restore_and_failure, test_capture_cancellation,
+    )
+    for name, fn in (
+        ("historical_visual_original", test_original_capture_admitted),
+        ("historical_visual_private_session", test_private_and_session),
+        ("historical_visual_identity_tamper", test_identity_and_tamper),
+        ("historical_visual_dedup_recent", test_dedup_and_recent),
+        ("historical_visual_byte_budget", test_byte_budget),
+        ("historical_visual_restore_failure", test_restore_and_failure),
+        ("historical_visual_cancellation", test_capture_cancellation),
+    ):
+        await r.record_async(name, fn)
+
     await r.record_async(
         "browser_use_screenshots_get_distinct_remote_names",
         test_browser_use_screenshots_get_distinct_remote_names,
@@ -38096,6 +40546,32 @@ async def run_all_tests():
         "activity_fatal_error_keeps_credentials_out_of_classifier_and_temporal_failure",
         test_activity_fatal_error_keeps_credentials_out_of_classifier_and_temporal_failure,
     )
+    await r.record_async("native_navigation_policy_restriction_and_escape", test_native_navigation_policy_restriction_and_escape)
+    await r.record_async("native_failed_navigation_restriction_and_escape", test_native_failed_navigation_restriction_and_escape)
+    await r.record_async("terminal_visual_persistence_preserves_control_exceptions", test_terminal_visual_persistence_preserves_control_exceptions)
+    await r.record_async("pending_credentials_refuse_only_the_secret_dependent_action", test_pending_credentials_refuse_only_the_secret_dependent_action)
+    await r.record_async("initial_credential_hydration_and_upload_do_not_hold_browser_completion", test_initial_credential_hydration_and_upload_do_not_hold_browser_completion)
+    await r.record_async("terminal_visual_persistence_error_keeps_verified_completion", test_terminal_visual_persistence_error_keeps_verified_completion)
+    await r.record_async(
+        "activity_redirected_goto_reports_realm_without_credential_reload",
+        test_activity_redirected_goto_reports_realm_without_credential_reload,
+    )
+    await r.record_async(
+        "activity_open_new_tab_reports_failed_navigation_without_credential_wait",
+        test_activity_open_new_tab_reports_failed_navigation_without_credential_wait,
+    )
+    await r.record_async(
+        "activity_open_new_tab_keeps_observed_realm_after_early_failure",
+        test_activity_open_new_tab_keeps_observed_realm_after_early_failure,
+    )
+    await r.record_async(
+        "activity_open_new_tab_success_and_optional_preparation_error",
+        test_activity_open_new_tab_success_and_optional_preparation_error,
+    )
+    await r.record_async(
+        "activity_open_new_tab_does_not_insert_redirect_reload",
+        test_activity_open_new_tab_does_not_insert_redirect_reload,
+    )
     await r.record_async(
         "activity_redirected_goto_preserves_active_auth_transaction",
         test_activity_redirected_goto_preserves_active_auth_transaction,
@@ -38144,13 +40620,39 @@ async def run_all_tests():
         "activity_checkpoints_at_step_boundary_on_worker_shutdown",
         test_spawn_browser_activity_checkpoints_at_step_boundary_on_worker_shutdown,
     )
+    await r.record_async("disconnected_playwright_full_activity", test_disconnected_playwright_full_activity)
+    await r.record_async("disconnected_playwright_lifecycle_guards", test_disconnected_playwright_lifecycle_guards)
+    await r.record_async("disconnected_playwright_refusal_cleanup", test_disconnected_playwright_refusal_cleanup)
+    await r.record_async("disconnected_playwright_handoff_liveness", test_disconnected_playwright_handoff_liveness)
+    await r.record_async("neutral_initialization_reaches_first_browser_step", test_neutral_initialization_reaches_first_browser_step)
+    await r.record_async("neutral_resume_reaches_first_browser_step", test_neutral_resume_reaches_first_browser_step)
+    await r.record_async("neutral_resume_defers_inventory_at_web_url", test_neutral_resume_defers_inventory_at_web_url)
+    await r.record_async("neutral_resume_defers_inventory_without_metadata_url", test_neutral_resume_defers_inventory_without_metadata_url)
+    await r.record_async("background_malformed_credentials_report_error_without_blocking_actor",
+                         test_background_malformed_credentials_report_error_without_blocking_actor)
+    await r.record_async(
+        "pre_dom_multiplexer_retains_cleanup_owner",
+        test_pre_dom_multiplexer_failure_never_acknowledges_cleanup,
+    )
+    await r.record_async(
+        "discarded_setup_disconnect_retains_cleanup_owner",
+        test_discarded_setup_disconnect_never_acknowledges_cleanup,
+    )
+    await r.record_async(
+        "discarded_drain_disconnect_retains_cleanup_owner",
+        test_discarded_drain_disconnect_never_acknowledges_cleanup,
+    )
     await r.record_async(
         "reattached_session_starts_in_its_credential_realm",
         test_reattached_browser_session_starts_in_the_realm_its_credentials_belong_to,
     )
     await r.record_async(
         "credential_setup_failure_disconnects_connected_browser_clients",
-        test_credential_setup_failure_disconnects_the_connected_browser_clients,
+        test_data_setup_failure_disconnects_the_connected_browser_clients,
+    )
+    await r.record_async(
+        "background_credential_failure_disconnects_connected_browser_clients",
+        test_data_setup_credential_failure_disconnects_connected_browser_clients,
     )
     await r.record_async(
         "activity_cancelled_mid_setup_releases_connected_browser_clients",
@@ -38180,6 +40682,10 @@ async def run_all_tests():
     await r.record_async(
         "private_browser_pause_urls_use_protected_continuity",
         test_private_browser_pause_urls_use_protected_continuity,
+    )
+    await r.record_async(
+        "terminal_passkey_error_keeps_fixture_transports_until_cleanup",
+        test_terminal_passkey_error_keeps_fixture_transports_until_cleanup,
     )
     await r.record_async(
         "tilion_terminal_pause_detaches_after_optional_passkey_capture",
@@ -38216,6 +40722,10 @@ async def run_all_tests():
     await r.record_async(
         "reused_session_with_time_left_keeps_stepping",
         test_browser_task_keeps_stepping_on_a_reused_session_with_time_left,
+    )
+    await r.record_async(
+        "browser_task_checkpoints_before_activity_start_to_close",
+        test_browser_task_checkpoints_before_its_activity_start_to_close,
     )
     await r.record_async(
         "reused_session_lifetime_fixture_isolates_cached_generation",
@@ -38443,6 +40953,9 @@ async def run_all_tests():
         "manager_payment_gate_kyc_still_incomplete",
         test_manager_payment_gate_kyc_still_incomplete_after_retry_blocks,
     )
+    await r.record_async("manager_funding_wait_pause", test_manager_funding_wait_wakes_on_pause_and_pause_resume)
+    await r.record_async("manager_funding_plain_replay", test_manager_funding_plain_queue_preserves_legacy_retry_timer)
+    await r.record_async("manager_funding_generation_wait", test_manager_funding_generation_queue_honors_hint_and_handoff)
     await r.record_async(
         "manager_payment_gate_company_funding_retry",
         test_manager_payment_gate_retries_company_funding_and_mints,
@@ -38454,6 +40967,10 @@ async def run_all_tests():
     await r.record_async(
         "manager_payment_gate_company_funding_deadline",
         test_manager_payment_gate_reports_company_funding_deadline,
+    )
+    await r.record_async(
+        "manager_payment_gate_honors_long_provider_delay",
+        test_manager_payment_gate_does_not_retry_before_a_hint_beyond_its_deadline,
     )
     r.record(
         "transient_session_init_failure_classification",
@@ -38550,6 +41067,15 @@ async def run_all_tests():
         test_browser_error_propagation_writers_preserve_native_sealing,
     )
     await r.record_async("browser_verifier_preserves_native_target_attempt_receipts", test_browser_verifier_preserves_native_target_attempt_receipts)
+    await r.record_async("browser_required_file_delivery_retries", test_browser_required_file_delivery_retries_before_completion)
+    await r.record_async("browser_nullable_file_outputs_native_contract", test_browser_nullable_file_outputs_preserve_native_contract)
+    await r.record_async("browser_required_file_delivery_cancellation", test_browser_required_file_delivery_cancellation_propagates)
+    r.record("browser_file_delivery_schema_boundaries", test_browser_file_delivery_schema_boundaries)
+    await r.record_async("browser_replayed_verifier_requires_explicit_completion_before_terminal", test_browser_replayed_verifier_requires_explicit_completion_before_terminal)
+    await r.record_async("browser_evaluate_receipts_survive_compact_history_truncation", test_browser_evaluate_receipts_survive_compact_history_truncation)
+    await r.record_async("browser_evaluate_receipts_outlive_compact_window_with_fixed_budgets", test_browser_evaluate_receipts_outlive_compact_window_with_fixed_budgets)
+    await r.record_async("browser_receipt_budget_keeps_recent_evaluations_and_native_authority", test_browser_receipt_budget_keeps_recent_evaluations_and_native_authority)
+    await r.record_async("browser_evaluate_receipts_keep_failure_conflict_privacy_and_caps", test_browser_evaluate_receipts_keep_failure_conflict_privacy_and_caps)
     await r.record_async("browser_verifier_target_attempt_survives_admission_and_provider_bodies", test_browser_verifier_target_attempt_survives_admission_and_provider_bodies)
     await r.record_async("phone_off_rotation_has_no_discovery_or_input_change", test_phone_off_rotation_has_no_discovery_or_input_change)
     await r.record_async("phone_off_actual_activity_never_observes_phone", test_phone_off_actual_activity_never_observes_phone)
@@ -38582,6 +41108,8 @@ async def run_all_tests():
     await r.record_async("native_phone_auth_generation_reattaches_exact_request", test_native_phone_auth_generation_reattaches_exact_request)
     await r.record_async("native_phone_auth_cancellation_preserves_exact_pending_request", test_native_phone_auth_cancellation_preserves_exact_pending_request)
     await r.record_async("phone_supervisor_preserves_unknown_and_cancellation", test_phone_supervisor_preserves_unknown_and_cancellation)
+    await r.record_async("phone_setup_window_rejection_feedback_and_latest_observation", test_phone_setup_window_rejection_feedback_and_latest_observation)
+    await r.record_async("phone_setup_window_feedback_never_reflects_untrusted_errors", test_phone_setup_window_feedback_never_reflects_untrusted_errors)
     return r.all_passed
 
 
@@ -38801,11 +41329,16 @@ async def test_phone_live_completion_records_real_results_for_existing_verifier(
     from browser_tools.dom_service import ActionHistory
     tree=ast.parse(Path(handler.__file__).read_text())
     boundary=next(node for node in ast.walk(tree) if isinstance(node,ast.AsyncFunctionDef) and node.name=='_execute_action')
-    factory=ast.parse('def factory():\n    action_redaction_refs = None\n').body[0]
-    factory.body.extend([boundary,ast.Return(value=ast.Name(id='_execute_action',ctx=ast.Load()))])
+    policy = next(node for node in ast.walk(tree) if isinstance(node,ast.AsyncFunctionDef) and node.name=='_policy_action_error')
+    authority = next(node for node in ast.walk(tree) if isinstance(node,ast.FunctionDef) and node.name=='_policy_authority')
+    factory=ast.parse('def factory():\n    action_redaction_refs = None\n    policy_decision_tab = None\n').body[0]
+    factory.body.extend([authority, policy, boundary,ast.Return(value=ast.Name(id='_execute_action',ctx=ast.Load()))])
     code=ast.fix_missing_locations(ast.Module(body=[factory],type_ignores=[]))
     history=ActionHistory()
+    from domains.spawn_browser_agent_v3.action_batch import BrowserActionBatch
     ns=dict(handler.__dict__)
+    ns.update(navigation_policy=handler.NavigationPolicyBarrier("task"),
+              action_batch=BrowserActionBatch(lambda *_args: None))
     ns.update(secret_refs={'pwd:fixture':'CANARY-PRIVATE-PASSWORD'},dom_service=SimpleNamespace(),
               action_history=history,_auth_context_for_url=AsyncMock(),current_url='https://phone-harness.com/cloud',
               config=_fake_config(),user_id='user',agent_id='agent',task_id='task',
@@ -39669,6 +42202,64 @@ async def test_phone_supervisor_preserves_unknown_and_cancellation():
     await check_phone_supervisor_boundary()
 
 
+def test_native_observation_binding_preserves_model_preview():
+    """Execute the activity's native binding block with the real batch and serializer."""
+    from domains.spawn_browser_agent_v3 import handler
+    from domains.spawn_browser_agent_v3.action_batch import BrowserActionBatch, context
+    from browser_tools.result_projection import BrowserModelResult
+    from benchmarks.browser_action_batch_test import dom_fixture, stream
+
+    tree = ast.parse(Path(handler.__file__).read_text())
+    activity_node = next(node for node in tree.body if isinstance(node, ast.AsyncFunctionDef)
+                         and node.name == "_spawn_browser_agent_activity_v3_real")
+    for owner in ast.walk(activity_node):
+        body = getattr(owner, "body", None)
+        if not isinstance(body, list):
+            continue
+        positions = [i for i, node in enumerate(body) if isinstance(node, ast.If)
+                     and ast.unparse(node.test) == "unified_action.get('observation_source_call_id')"]
+        if not positions:
+            continue
+        start = positions[0]
+        if start and isinstance(body[start - 1], ast.Assign) and any(
+                isinstance(target, ast.Name) and target.id == "observation_result_source"
+                for target in body[start - 1].targets):
+            start -= 1
+        end = next(i for i in range(start, len(body)) if isinstance(body[i], ast.Expr)
+                   and isinstance(body[i].value, ast.Call)
+                   and getattr(body[i].value.func, "id", "") == "_append_browser_turn_messages")
+        binding = copy.deepcopy(body[start:end + 1])
+        break
+    else:
+        raise AssertionError("Actual activity observation binding was not found")
+    for source_call in (None, "prior-native-call"):
+        dom = dom_fixture(); messages = []
+        action = {"action": "read_browser_state", "params": {"observation_id": "checkout",
+                  "targets": [{"key": "pay", "role": "button", "name": "Pay"}]}}
+        if source_call:
+            action["observation_source_call_id"] = source_call
+        batch = BrowserActionBatch(lambda *_: None)
+        state = context(dom, "https://shop.test", messages, (None, "shop.test", None, 0))
+        batch.begin({"action": action, "tool_call_id": "read", "batch_actions": [
+            {"action": action, "tool_call_ids": ["read"]}]}, dom, state, stream())
+        raw = BrowserModelResult(success=True, formatted_state="[3] Pay RAW_TAIL", action_step=7)
+        raw.model_preview = {"success": True, "formatted_state": "[3] Pay BOUNDED_PREVIEW"}
+        namespace = dict(vars(handler), result=raw, unified_action=action, action_batch=batch, batch_context=context,
+                         dom_service=dom, current_url="https://shop.test", browser_turn_messages=messages,
+                         _credential_binding=lambda: None, auth_realm="shop.test", instruction_state={},
+                         schema_user_instruction_count=0, tool_call_id_action="read")
+        exec(compile(ast.fix_missing_locations(ast.Module(body=binding, type_ignores=[])),
+                     "<actual activity native observation binding>", "exec"), namespace)
+        payload = json.loads(messages[-1]["content"])
+        assert payload["formatted_state"] == "[3] Pay BOUNDED_PREVIEW", payload
+        assert "RAW_TAIL" not in json.dumps(payload)
+        assert payload["observation_id"] == "checkout"
+        assert payload["target_refs"] == {"pay": {"status": "bound", "index": 3}}
+        assert payload["action_step"] == 7
+        assert payload.get("observation_source_call_id") == source_call
+        assert namespace["result"]["formatted_state"].endswith("RAW_TAIL")
+
+
 async def test_phone_task_availability_is_authoritative():
     teardown_mock()
     import httpx
@@ -39710,3 +42301,64 @@ async def test_phone_task_availability_is_authoritative():
         assert calls == []
         assert await observe_phone(config, 'user', 'task-owned', client=client) == {'enabled': False}
         assert len(calls) == 1
+
+
+async def test_phone_setup_window_rejection_feedback_and_latest_observation():
+    """The captured [12,14] rejection must teach the agent how to form fresh evidence."""
+    teardown_mock()
+    import httpx
+    from domains.spawn_browser_agent_v3.phone import execute_phone
+    lease = {"id": "lease", "status": "ACTIVE", "browserTaskId": "task"}
+    snapshot = {"enabled": True, "interaction": {"lease": lease, "cursor": 14,
+                "setup": {"attemptId": "attempt", "revision": 2}}}
+    posts = []
+    def backend(request):
+        if "/availability/" in request.url.path:
+            return httpx.Response(200, json={"enabled": True, "source": "bootstrap"})
+        assert request.method == "POST" and request.url.path.endswith("/setup")
+        body = json.loads(request.content); posts.append(body)
+        assert body["expectedCursor"] == 14 and body["expectedRevision"] == 2
+        if body["evidenceOperationIds"] == ["read-12", "read-14"]:
+            return httpx.Response(409, json={"error": "Setup observations must be the current uninterrupted cursor window"})
+        assert body["evidenceOperationIds"] == ["read-14"]
+        return httpx.Response(200, json={"operation": {"id": body["requestKey"], "status": "SUCCEEDED"}})
+    async with httpx.AsyncClient(transport=httpx.MockTransport(backend)) as client:
+        common = dict(config=_fake_config(), user_id="user", agent_id="agent", task_id="task",
+                      snapshot=snapshot, client=client)
+        params = {"mode": "setup", "action": "verify", "verificationTarget": "portrait_lock"}
+        rejected = await execute_phone({**params, "evidenceOperationIds": ["read-12", "read-14"]},
+                                       **common, decision_id="bad-window")
+        assert rejected["success"] is False and rejected["_httpStatus"] == 409
+        assert rejected.get("errorCode") == "phone_setup_observation_window", rejected
+        assert "latest" in rejected["error"] and "Do not replay" in rejected["error"]
+        assert len(posts) == 1, "rejection must not automatically retry or mutate the evidence"
+        accepted = await execute_phone({**params, "evidenceOperationIds": ["read-14"]},
+                                       **common, decision_id="fresh-window")
+        assert accepted["success"] is True and len(posts) == 2
+
+
+async def test_phone_setup_window_feedback_never_reflects_untrusted_errors():
+    teardown_mock()
+    import httpx
+    from domains.spawn_browser_agent_v3.phone import _request
+    literal = "Setup observations must be the current uninterrupted cursor window"
+    deeply_nested = b"[" * 1100 + b"]" * 1100
+    assert len(deeply_nested) == 2200
+    async with httpx.AsyncClient(transport=httpx.MockTransport(lambda req: httpx.Response(409, content=deeply_nested))) as client:
+        result = await _request(client, _fake_config(), "user", "POST", "interactions/task/setup", {})
+    assert result == {"_httpStatus": 409}, "deep malformed JSON must stay an opaque rejection"
+    for status, path, body in (
+        (409, "interactions/task/setup", {"error": "CANARY-PRIVATE-ERROR"}),
+        (403, "interactions/task/setup", {"error": literal}),
+        (409, "leases/lease/operations", {"error": literal}),
+        (409, "interactions/task/setup", {"error": literal + " CANARY-PRIVATE-ERROR"}),
+        (409, "interactions/task/setup", {"error": {"private": "CANARY-PRIVATE-ERROR"}}),
+        (409, "interactions/task/setup", {"error": literal, "padding": "x" * 4096}),
+    ):
+        async with httpx.AsyncClient(transport=httpx.MockTransport(lambda req: httpx.Response(status, json=body))) as client:
+            result = await _request(client, _fake_config(), "user", "POST", path, {})
+        assert result == {"_httpStatus": status}, result
+    async with httpx.AsyncClient(transport=httpx.MockTransport(lambda req: httpx.Response(409, json={"error": literal, "private": "CANARY-PRIVATE-ERROR"}))) as client:
+        result = await _request(client, _fake_config(), "user", "POST", "interactions/task/setup", {})
+    assert result["errorCode"] == "phone_setup_observation_window"
+    assert "CANARY" not in json.dumps(result)

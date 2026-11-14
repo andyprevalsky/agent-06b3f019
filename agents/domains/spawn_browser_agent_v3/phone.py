@@ -87,9 +87,13 @@ private acknowledgment, not sign-in proof; observe and verify. A
 phone_credential_unavailable receipt means request the protected user step if an
 actual critical password screen blocks progress. Binding/stale errors mean
 observe again, never supply a secret or blindly retry. UNKNOWN means inspect
-status/receipts, never replay. If a credential was rejected or user presence is
-required, request the protected step rather than retrying the rejected credential
-or bypassing biometric/device authentication.
+status/receipts, never replay. A saved-password rejection ends autonomous password attempts for that current
+sign-in. Request the protected user step only if the current observation confirms
+that a critical password step still blocks progress. Do not try another saved-password
+source, including credentials.fill_saved after native AutoFill rejection. This rejection
+rule takes precedence over every saved-credential fallback below or above.
+When user presence is required, request the protected step rather than bypassing
+biometric/device authentication.
 A filled masked field alone is not sign-in proof: observe and verify the result.
 If a password still blocks after saved-credential unavailability/rejection, or a
 user-only verification code, existing/owner-only device passcode, or user-presence authentication
@@ -127,7 +131,13 @@ all required settings. Inspect existing signed-in state without signing out or
 resetting it. Configure authorized required settings autonomously within this
 same original task, honoring user restrictions and protected authentication.
 After fresh observations, use mode=setup, action=verify with evidenceOperationIds
-containing 1..8 successful current broker observation IDs and verificationTarget:
+containing 1..8 successful current broker screen.text observation IDs and verificationTarget.
+After any navigation or mutation, obtain a fresh screen.text observation and normally
+submit only its latest operation ID with the current setup revision. If multiple
+IDs are needed, they must be consecutive screen.text operations ending at the
+current cursor, with no intervening tap, scroll, app launch, or other operation.
+Never combine an earlier screen with a later screen across an intervening action.
+Supported verification targets:
 apple_account (the default when omitted), icloud_messages, icloud_keychain,
 icloud_contacts,
 imessage, receive_address, portrait_lock, device_passcode, gmail, or runtime. Verify iCloud Messages sync and iCloud
@@ -138,17 +148,32 @@ contact names or counts do not prove the iCloud Contacts setting is on.
 For receive_address use only the
 server's active expectedReceiveAddress and verify it is actually selected for
 receiving, not merely listed. For portrait_lock, open native Settings with
-apps.launch name Settings; use its observed Search to find AssistiveTouch and
-open the observed result. From its detail page return to the native Touch parent
-and read the explicit same-row AssistiveTouch On/Off value (only a trailing native
-chevron is ignorable). Preserve that original state; the detail label alone is
-not its switch state. If originally Off, open the row, enable it once and return
+apps.launch name Settings. Only the route since the latest Settings launch
+counts, and its first screen.text must show the Settings root with Search; if
+Settings resumed a subpage or hid Search, return to the root with Search
+visible and launch Settings again. Tap the observed Search, type AssistiveTouch
+with input.text keystrokes true and open the observed result. From its detail
+page return to the native Touch parent and read the explicit same-row AssistiveTouch On/Off value (only a
+trailing native chevron is ignorable). Preserve that original state; the
+detail label alone is
+not its switch state. If originally Off, open the row, tap its switch once (the
+right end of the AssistiveTouch row, not the label) and return
 to Touch to confirm the explicit value is now On, then reopen the detail page.
-Open the floating AssistiveTouch menu and tap the fresh observed Control Center
-label center. Keep this native route uninterrupted: no other apps/URLs, Home,
-unrelated input, private/user control or attention transitions. Submit setup.verify
-with fresh observations. The backend reports current portrait_lock status:
-confirmed is On, disabled is Off, and unknown is unproven. If the returned
+Open the floating AssistiveTouch menu: screen.text does not report that textless
+button, which normally rests against the right edge (x 625-750, y 400-1250).
+Tap that band away from observed row labels and observe; an unchanged detail
+page means it missed, so try another band point, at most three in all, then keep
+portrait lock unconfirmed and report that blocker. Once the menu opens, tap the
+fresh observed Control Center label center. Keep this native route uninterrupted: after the launch use only
+screen.text, screen.bounds, the observed taps, the AssistiveTouch typing and
+setup.verify; no other operation (including input.keys, apps.list, Home, drags,
+scrolls or presses), other apps/URLs, private/user control or attention
+transitions. Submit setup.verify with fresh observations.
+phone_portrait_route_unproven means that route broke; operation.result.portraitRoute
+names the cursor where it broke and the next expected step. Restart from a new
+Settings launch at the root. The
+backend reports current portrait_lock status: confirmed is On, disabled is
+Off, and unknown is unproven. If the returned
 operation.portraitActionHint exists, use its existing input.tap arguments only
 at that current evidenceCursor, then observe and verify again. Never reuse a hint
 after any intervening action. Verification never taps for you. Close Control
@@ -284,6 +309,17 @@ def _identity(*parts: Any) -> str:
     return hashlib.sha256(data.encode()).hexdigest()
 
 
+_SETUP_WINDOW_REJECTION = "Setup observations must be the current uninterrupted cursor window"
+_SETUP_WINDOW_FEEDBACK = {
+    "errorCode": "phone_setup_observation_window",
+    "error": (
+        "Setup evidence must be the current uninterrupted screen.text window. "
+        "After navigation, read screen.text again and normally verify only its latest "
+        "operation ID with the current setup revision. Do not replay a phone input."
+    ),
+}
+
+
 async def _request(client, config, user_id, method, path, payload=None):
     response = await client.request(
         method,
@@ -293,7 +329,15 @@ async def _request(client, config, user_id, method, path, payload=None):
         timeout=105.0 if path.endswith(("/operations", "/setup")) else 10.0,
     )
     if not response.is_success:
-        # Never include response text, URL, headers, input, or exception strings.
+        # Only this exact backend setup rejection maps to local constant feedback.
+        # Never reflect response text, URL, headers, input, or exception strings.
+        if response.status_code == 409 and path.endswith("/setup") and len(response.content) <= 4096:
+            try:
+                body = response.json()
+            except (ValueError, RecursionError):
+                body = None
+            if isinstance(body, dict) and body.get("error") == _SETUP_WINDOW_REJECTION:
+                return {"_httpStatus": 409, **_SETUP_WINDOW_FEEDBACK}
         return {"_httpStatus": response.status_code}
     data = response.json()
     return data if isinstance(data, dict) else {"_httpStatus": 502}

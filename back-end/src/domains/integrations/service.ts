@@ -32,6 +32,7 @@ import {
   markGptApiKeyOnCooldown,
   releaseComputeTokenLineage,
 } from '../../providers/computeCredentials';
+import { resolveUserLoginByCredential } from '../../providers/computeLoginFailure';
 import {
   getFoundryDeploymentCooldowns,
   markFoundryDeploymentCooldown,
@@ -54,6 +55,7 @@ import {
   isIntegrationAuthFailureReason,
 } from '../../providers/integrationConnectionSync';
 import * as repo from './repo';
+import { scheduleClaudeUsageRefresh } from '../../providers/computeUsageRefresh';
 import {
   redactLanternIntegration,
   updateLanternIntegration,
@@ -735,7 +737,10 @@ export async function getComputeCodeToken(
 }
 
 export { heartbeatComputeTokenLineage, releaseComputeTokenLineage };
-export { parseSubscriptionUsageReport } from '../../providers/computeSubscriptionUsage';
+export {
+  parseSubscriptionUsageReport,
+  recordCodeTaskSubscriptionUsage,
+} from '../../providers/computeSubscriptionUsage';
 
 /**
  * A worker's auth-failure report disables a login only when it names that login
@@ -766,6 +771,24 @@ async function unrevokedLoginReply(
   return { ok: true, source, disabled: false, rejection };
 }
 
+/**
+ * A user cooldown names its login by the held token's fingerprint even when it
+ * omits the lease's integration id (the agent loop's auth context has none).
+ * Resolve that login here, once, so the cooldown lands on exactly the spent
+ * subscription and never on its siblings. A login-disabling auth failure still
+ * has to name its login explicitly (S33/T7): this never widens a destructive
+ * write, only the reversible cooldown.
+ */
+async function namedUserReport<
+  T extends { integrationId?: string; credential?: string; failureReason?: string },
+>(type: 'claude' | 'gpt', userId: string, params: T): Promise<T> {
+  if (params.integrationId !== undefined && params.integrationId !== '') return params;
+  if (isIntegrationAuthFailureReason(params.failureReason)) return params;
+  if (params.credential === undefined || params.credential === '') return params;
+  const integrationId = await resolveUserLoginByCredential(type, userId, params.credential);
+  return integrationId === null ? params : { ...params, integrationId };
+}
+
 export async function markTokenRateLimited(
   source: string,
   params: {
@@ -775,6 +798,8 @@ export async function markTokenRateLimited(
     failureReason?: string;
     integrationId?: string;
     credential?: string;
+    rateLimitReason?: string;
+    rateLimitAuthoritative?: boolean;
   }
 ) {
   if (source === 'pool') {
@@ -786,6 +811,8 @@ export async function markTokenRateLimited(
     await markPoolTokenRateLimited(params.poolTokenId, {
       rateLimitedUntil: params.rateLimitedUntil,
       failureReason: params.failureReason,
+      rateLimitReason: params.rateLimitReason,
+      rateLimitAuthoritative: params.rateLimitAuthoritative,
     });
     return {
       ok: true,
@@ -799,12 +826,15 @@ export async function markTokenRateLimited(
     if (params.userId === undefined || params.userId === '') {
       throw new Error('Missing userId for source=user');
     }
-    const unrevoked = await unrevokedLoginReply('claude', source, params);
+    const named = await namedUserReport('claude', params.userId, params);
+    const unrevoked = await unrevokedLoginReply('claude', source, named);
     if (unrevoked !== null) return unrevoked;
     await markUserTokenRateLimited(params.userId, {
       rateLimitedUntil: params.rateLimitedUntil,
       failureReason: params.failureReason,
-      integrationId: params.integrationId,
+      integrationId: named.integrationId,
+      rateLimitReason: params.rateLimitReason,
+      rateLimitAuthoritative: params.rateLimitAuthoritative,
     });
     return {
       ok: true,
@@ -831,10 +861,22 @@ export async function markComputeTokenRateLimited(
     region?: string;
     deployment?: string;
     retryAfterSeconds?: number;
+    rateLimitReason?: string;
+    rateLimitAuthoritative?: boolean;
   }
 ) {
   if (type === 'claude') {
-    return markTokenRateLimited(source, params);
+    const result = await markTokenRateLimited(source, params);
+    // Rose's own backoff (a 429 without a provider reset, a stall) says nothing
+    // about the account's windows: fetch them in the background so the usage
+    // bar shows real numbers. Never awaited; never on an auth failure.
+    if (
+      params.rateLimitAuthoritative !== true &&
+      !isIntegrationAuthFailureReason(params.failureReason)
+    ) {
+      scheduleClaudeUsageRefresh(source === 'pool' ? params.poolTokenId : params.integrationId);
+    }
+    return result;
   }
   if (type === 'gpt') {
     return markGptTokenRateLimited(source, params);
@@ -905,6 +947,8 @@ export async function markGptTokenRateLimited(
     failureReason?: string;
     integrationId?: string;
     credential?: string;
+    rateLimitReason?: string;
+    rateLimitAuthoritative?: boolean;
   }
 ) {
   if (source === 'pool') {
@@ -916,6 +960,8 @@ export async function markGptTokenRateLimited(
     await markGptPoolTokenRateLimited(params.poolTokenId, {
       rateLimitedUntil: params.rateLimitedUntil,
       failureReason: params.failureReason,
+      rateLimitReason: params.rateLimitReason,
+      rateLimitAuthoritative: params.rateLimitAuthoritative,
     });
     return {
       ok: true,
@@ -929,12 +975,15 @@ export async function markGptTokenRateLimited(
     if (params.userId === undefined || params.userId === '') {
       throw new Error('Missing userId for source=user');
     }
-    const unrevoked = await unrevokedLoginReply('gpt', source, params);
+    const named = await namedUserReport('gpt', params.userId, params);
+    const unrevoked = await unrevokedLoginReply('gpt', source, named);
     if (unrevoked !== null) return unrevoked;
     await markGptUserTokenRateLimited(params.userId, {
       rateLimitedUntil: params.rateLimitedUntil,
       failureReason: params.failureReason,
-      integrationId: params.integrationId,
+      integrationId: named.integrationId,
+      rateLimitReason: params.rateLimitReason,
+      rateLimitAuthoritative: params.rateLimitAuthoritative,
     });
     return {
       ok: true,

@@ -30,12 +30,15 @@ import {
   heldSandboxSize,
   resolveSpawnSandbox,
   sameSize,
+  defaultSandboxSize,
   type SandboxProvider,
   type SandboxSize,
 } from './codeSessions/sandboxSize';
 import { e2bSandboxFs, localSandboxFs } from './codeSessions/sandboxFs';
 import { writeHandoffTrajectory, type SpawnCodeSession } from './codeSessions/usageLimit';
 import { createSandboxWithRetry } from './e2bSandboxCreate';
+import { withClaudeCodeCreateSlot } from './e2bCreateSlot';
+import { NATIVE_CLI_PATH, resolveNativeCliTemplate } from './nativeCliTemplateBuilder';
 import {
   codeSessionTurnToken,
   deliverUserTurnToCodeSession,
@@ -80,8 +83,11 @@ export interface CodeAgentSessionResult {
   startup?: { wsReadyMs: number; cloneMs: number | null };
 }
 
+export type { ClaudeCodeSessionOptions } from './codeSessionLaunchOptions';
+
 /** Sizing of a spawn (C16): the size it wants and the agent to attribute checkpoints to. */
 export interface SpawnSizing {
+  provider?: SandboxProvider;
   size?: SandboxSize;
   agentId?: string;
 }
@@ -104,7 +110,11 @@ export async function acquireCodeSessionSandbox(
   let session = codeSession;
   let replaced: Sandbox | null = null;
   if (session?.sandboxKind === 'e2b' && session.sandboxId !== null) {
-    const resumed = await connectPausedSandbox(session.sandboxId, SANDBOX_TIMEOUT_MS);
+    const sandboxId = session.sandboxId;
+    const resume = () => connectPausedSandbox(sandboxId, SANDBOX_TIMEOUT_MS);
+    const resumed = await (sizing.provider === 'claude'
+      ? withClaudeCodeCreateSlot(resume)
+      : resume());
     if (resumed !== null) {
       // The resumed sandbox may still run the paused CLI (E2B keeps memory and
       // processes): the spawn either attaches to it (attachLiveCodeCli) or
@@ -204,6 +214,17 @@ async function retireReplacedSandbox(
   }
 }
 
+/** Caller identity may supply a new spawn owner but never replace session authority. */
+export function codeSandboxUserId(
+  codeSession: CodeSessionRow | null,
+  userId?: string
+): string | undefined {
+  if (codeSession !== null && userId !== undefined && codeSession.userId !== userId) {
+    throw new Error('Code session does not belong to the spawning user');
+  }
+  return codeSession?.userId ?? userId;
+}
+
 /**
  * Acquire the sandbox for a spawn: resume the session's paused sandbox, else
  * create one (restoring the latest checkpoint). With a `provider`, the
@@ -220,6 +241,7 @@ export async function acquireCodeSandbox(
     provider?: SandboxProvider;
     projectSize?: unknown;
     agentId?: string;
+    userId?: string;
     /**
      * The session's project: its default size, and its published template
      * snapshot, which a BRAND-NEW session sandbox starts from.
@@ -235,6 +257,7 @@ export async function acquireCodeSandbox(
   /** The sandbox was created from the project's template snapshot. */
   fromSnapshot: boolean;
 }> {
+  const userId = codeSandboxUserId(codeSession, sizing.userId);
   const sized =
     sizing.provider !== undefined
       ? await resolveSpawnSandbox(
@@ -246,13 +269,24 @@ export async function acquireCodeSandbox(
   const spawnSizing: SpawnSizing = {
     ...(sized !== null ? { size: sized.size } : {}),
     agentId: sizing.agentId,
+    provider: sizing.provider,
   };
   const createOptions = {
     apiKey: process.env.E2B_API_KEY,
     timeoutMs: SANDBOX_TIMEOUT_MS,
-    envs,
+    envs: { ...envs, PATH: NATIVE_CLI_PATH },
     ...codeSessionCreateOptions(codeSession),
     ...(codeSession !== null ? { metadata: codeSessionSandboxMetadata(codeSession) } : {}),
+  };
+  // Resolve on the exact base image, including project snapshots, before reserving
+  // the runtime sandbox. Template builds have their own bounded creation slot.
+  const createWithNativeCli = async (baseTemplateId: string, size: SandboxSize) => {
+    const selectedTemplateId =
+      userId && sizing.provider
+        ? await resolveNativeCliTemplate(userId, sizing.provider, size, baseTemplateId)
+        : baseTemplateId;
+    const create = () => createSandboxWithRetry(selectedTemplateId, createOptions, label);
+    return sizing.provider === 'claude' ? withClaudeCodeCreateSlot(create) : create();
   };
   let fromSnapshot = false;
   const acquired = await acquireCodeSessionSandbox(
@@ -263,7 +297,10 @@ export async function acquireCodeSandbox(
       // snapshot; a lost sandbox being replaced or resized keeps the base path.
       if (snapshot !== null && (codeSession === null || codeSession.sandboxId === null)) {
         try {
-          const sandbox = await createSandboxWithRetry(snapshot.id, createOptions, label);
+          const sandbox = await createWithNativeCli(
+            snapshot.id,
+            snapshot.size ?? sized?.size ?? defaultSandboxSize()
+          );
           fromSnapshot = true;
           // The held size is the snapshot's: a later resume must not read it as a resize.
           if (snapshot.size !== null && spawnSizing.size !== undefined) {
@@ -283,7 +320,10 @@ export async function acquireCodeSandbox(
           `No ${label} sandbox template is built for ${sized.size.cpu} vCPU / ${sized.size.memoryGb} GB; configure E2B_SANDBOX_TEMPLATES for that size`
         );
       }
-      return createSandboxWithRetry(sized?.templateId ?? templateId, createOptions, label);
+      return createWithNativeCli(
+        sized?.templateId ?? templateId,
+        sized?.size ?? defaultSandboxSize()
+      );
     },
     spawnSizing
   );
@@ -307,12 +347,22 @@ export async function acquireCodeSandbox(
   };
 }
 
-/** Credential env a Claude Code CLI reads at start (claudeCodeSandboxAuth.ts + gateway base). */
+/**
+ * Env a running Claude Code CLI cannot adopt and must restart for: its
+ * credential (claudeCodeSandboxAuth.ts + gateway base) and its git commit
+ * identity (codeAgentGitIdentity.ts). A CLI started with another identity,
+ * or none (before the pushing account was injected), would keep committing
+ * as an author GitHub cannot link, which Vercel refuses to deploy.
+ */
 export const CLAUDE_CREDENTIAL_ENV_KEYS = [
   'ANTHROPIC_API_KEY',
   'ANTHROPIC_BASE_URL',
   'CLAUDE_CODE_CREDENTIALS',
   'CLAUDE_CODE_OAUTH_TOKEN',
+  'GIT_AUTHOR_EMAIL',
+  'GIT_AUTHOR_NAME',
+  'GIT_COMMITTER_EMAIL',
+  'GIT_COMMITTER_NAME',
 ] as const;
 
 /**

@@ -1,0 +1,747 @@
+diff --git a/scripts/deploy_test_cloud.py b/scripts/deploy_test_cloud.py
+index 41d630f99..edea2d573 100644
+--- a/scripts/deploy_test_cloud.py
++++ b/scripts/deploy_test_cloud.py
+@@ -133,6 +133,9 @@ def collect_fleet(request, root, fleet, started, native_exit):
+     details = {}
+     provenance = load_provenance(fleet / 'execution-provenance.json')
+     verify_source_transport(request, root, provenance)
++    if 'private_source_binding' in request:
++        from deploy_test_private_source import verify_fleet
++        verify_fleet(request, root, fleet)
+     lifecycle = read(fleet / '_batch/lifecycle.json')
+     audit_rows = [line.split('=', 1) for line in
+                   (fleet / 'teardown-ownership/source-audit').read_text().splitlines()]
+@@ -406,6 +409,9 @@ def execute(request, root):
+     for key in ('CLOUDBENCH_LOCAL_PATCH_SOURCE', 'CLOUDBENCH_LOCAL_PATCH_SHA256', 'CLOUDBENCH_LOCAL_PATCH_BASE_REF'):
+         env.pop(key, None)
+     env.update(source_transport_environment(binding))
++    if 'private_source_binding' in request:
++        from deploy_test_private_source import environment
++        env.update(environment(request, root, directory))
+     scheduling = ['--runs', '1', '--concurrency', str(width), '--retry-infra', '0']
+     argv = ['bash', 'scripts/run-bench', *checks, *scheduling, '--ref', request['source']['head']]
+     catalog = root / 'agents/benchmarks/tasks.json'
+@@ -436,6 +442,8 @@ def execute(request, root):
+         cases, details, cleaned, fleet = dict.fromkeys(checks, 'UNVERIFIED'), {}, False, None
+         reason = str(error)
+     result = {k: request[k] for k in ('token', 'source', 'gate')}
++    if 'private_source_binding' in request:
++        result['private_source_binding'] = request['private_source_binding']
+     result.update(preallocation_evidence=preallocation_evidence, source_transport=binding, cases=cases, complete=cleaned and all(v != 'UNVERIFIED' for v in cases.values()),
+                   cleanup_complete=cleaned, reused=False, native_exit=code, native_command=argv,
+                   evidence=details, reason=reason, fleet_directory=fleet,
+diff --git a/scripts/deploy_test_cycle.py b/scripts/deploy_test_cycle.py
+index 730a33ed6..84644a752 100644
+--- a/scripts/deploy_test_cycle.py
++++ b/scripts/deploy_test_cycle.py
+@@ -687,6 +687,8 @@ def _execute(gate: dict, state: dict, directory: Path, root: Path, *, host_admis
+     result['execution_binding'] = {'input_fingerprint': state['input_fingerprints'].get(name),
+                                    'contract_digest': digest(gate), 'environment': state['environment']}
+     result['isolated_validation'] = admission
++    if 'private_source_binding' in request:
++        result['private_source_binding'] = request['private_source_binding']
+     result['host_admission'] = host_admission
+     result['lifecycle'] = lifecycle
+     result['native_cleanup_reference'] = native_cleanup_reference
+@@ -1290,6 +1292,9 @@ def isolated_admissions(state: dict, gate: str, *, _with_sources=False):
+ 
+ def isolated_request(state: dict, gate: dict, request: dict, root: Path, env: dict) -> list[dict]:
+     admitted = isolated_admissions(state, gate['name'], _with_sources=True)
++    if 'private_source_binding' in state and state['private_source_binding']['gate'] == gate['name']:
++        from deploy_test_private_source import bind_request
++        bind_request(state, admitted[0], request, root)
+     entries, covered = admitted if isinstance(admitted, tuple) else (admitted, {})
+     if not entries:
+         return []
+@@ -2480,7 +2485,7 @@ def verify_saved(directory: Path, root: Path, expect_head: str | None = None) ->
+ def main(argv: list[str] | None = None) -> int:
+     """Dispatch a validated cycle transition and persist its evidence."""
+     parser = argparse.ArgumentParser(description=__doc__)
+-    parser.add_argument("action", choices=["init", "run", "resume", "status", "triage", "focus", "refresh", "rebind-local", "triage-quick", "triage-independent", "rca", "verify", "report", "resolve", "complete", "reexecute", "reconcile", "standing-skip", "accept-omitted-custody", "prepare-agentcard-renewal", "renew-agentcard-warning", "prepare-historical-no-retry", "prepare-historical-import", "import-historical-custody", "import-historical-no-retry", "prepare-completed-local"])
++    parser.add_argument("action", choices=["prepare-private-source-transport", "prepare-private-source", "init", "run", "resume", "status", "triage", "focus", "refresh", "rebind-local", "triage-quick", "triage-independent", "rca", "verify", "report", "resolve", "complete", "reexecute", "reconcile", "standing-skip", "accept-omitted-custody", "prepare-agentcard-renewal", "renew-agentcard-warning", "prepare-historical-no-retry", "prepare-historical-import", "import-historical-custody", "import-historical-no-retry", "prepare-completed-local"])
+     parser.add_argument('--donor-state', type=Path,
+                         help='import-historical-no-retry: immutable independent donor cycle snapshot')
+     parser.add_argument('--exclude-root', type=Path, action='append', default=[],
+@@ -2514,7 +2519,18 @@ def main(argv: list[str] | None = None) -> int:
+             state = initialize(plan, args.root) if args.action == "init" else read(state_path)
+             if args.action == "init" and state_path.exists():
+                 raise ValueError("existing cycle must not be reset")
+-            if args.action in {"run", "resume"}:
++            if args.action == 'prepare-private-source-transport':
++                if args.input is None:
++                    raise ValueError('--input exact private transport operation required')
++                from deploy_test_private_source import prepare_transport
++                print(json.dumps(prepare_transport(state, plan, args.root, bounded_read(args.input, 'private transport'))))
++                return 0
++            elif args.action == 'prepare-private-source':
++                if args.input is None:
++                    raise ValueError('--input exact private preparation operation required')
++                from deploy_test_private_source import prepare_cycle
++                prepare_cycle(state, plan, args.root, state_path, bounded_read(args.input, 'private preparation'))
++            elif args.action in {"run", "resume"}:
+                 if args.action == "resume":
+                     if state["phase"] != "interrupted":
+                         raise ValueError("resume requires an interrupted cycle")
+diff --git a/scripts/deploy_test_native_cleanup.py b/scripts/deploy_test_native_cleanup.py
+index b19772a2e..1dea89217 100644
+--- a/scripts/deploy_test_native_cleanup.py
++++ b/scripts/deploy_test_native_cleanup.py
+@@ -1421,6 +1421,9 @@ def clean_isolated_successor(state, prior, original, successor):
+     request = bounded_read(folder / 'request.json', 'successor request')
+     need(all(request.get(k) == successor.get(k) for k in ('token', 'source', 'gate'))
+          and request.get('worker_recipe') == gate.get('worker_recipe'), 'successor request identity')
++    if 'private_source_binding' in request:
++        need(successor.get('private_source_binding') == request['private_source_binding'],
++             'successor private source binding changed')
+     checks, skips = request['checks'], request['skips']
+     need(isinstance(checks, list) and checks and isinstance(skips, dict)
+          and len(set(checks)) == len(checks) and not set(checks) & set(skips)
+@@ -1438,6 +1441,9 @@ def clean_isolated_successor(state, prior, original, successor):
+     result_path = folder / 'result.json'
+     need(successor.get('worker_result') == str(result_path), 'successor result locator')
+     result = bounded_read(result_path, 'successor native result')
++    if 'private_source_binding' in request:
++        need(result.get('private_source_binding') == request['private_source_binding'],
++             'native private source binding changed')
+     cases, complete = validate_result(result, request, successor['native_exit'], invalid_process=False)
+     need(complete and successor.get('cases') == {**dict.fromkeys(skips, 'SKIP'), **cases}
+          and successor.get('case_complete') == dict.fromkeys(gate['checks'], True)
+@@ -1625,7 +1631,11 @@ def inherited_native_sources(state, entries, *, _historical_only=False):
+     anchors = [e for e in entries if e['proof'].get('compatibility') in {r16.MODE, r19.MODE}]
+     need(anchors, 'current shared partition authority missing')
+     native_source_covered=False
+-    if not clean and not _historical_only and candidate['validation_source']!=state['source']:
++    if not clean and not _historical_only and 'private_source_binding' in state:
++        from deploy_test_private_source import validate_binding
++        validate_binding(state, entries, Path(candidate['owner']['worker_root']))
++        native_source_covered=True
++    if not clean and not _historical_only and not native_source_covered and candidate['validation_source']!=state['source']:
+         from cloudbench_maintenance import validate_current, anchor_for
+         maintenance_anchor,operation=anchor_for(entries)
+         try:
+diff --git a/scripts/deploy_test_private_source.py b/scripts/deploy_test_private_source.py
+new file mode 100644
+index 000000000..080ecab20
+--- /dev/null
++++ b/scripts/deploy_test_private_source.py
+@@ -0,0 +1,342 @@
++"""Read-only parent admission for an independently prepared fleet source.
++
++cycle/debt seals -> native prepare verifier -> versioned manifest -> captured fleet base.
++Historical cleanup and financial outcomes remain owned by their original audits.
++"""
++from __future__ import annotations
++
++import hashlib
++import json
++import os
++from pathlib import Path
++import re
++import runpy
++
++SCHEMA = 'parent-private-source-v1'
++PROTECTED = {'683e47df5094d8': 'vol_vwnym366kn7k8mmv',
++             '811d632f2650e8': 'vol_r1jde9donnx2mn9r'}
++CUSTODY = runpy.run_path(str(Path(__file__).with_name('cloudbench-explicit-idle-admission.py')))
++HISTORY = ('reconciled_owners', 'failures', 'native_maintenance',
++           'historical_no_retry_custody', 'historical_custody_history',
++           'historical_custody_import', 'historical_custody_transfers',
++           'completed_local_custody_history', 'private_source_preparations')
++FIELDS = {'schema', 'source', 'gate', 'plan_digest', 'debt_sha256', 'history_sha256',
++          'protected_resources', 'artifacts', 'helper_sha256', 'image_ref',
++          'node_fingerprint', 'python_fingerprint'}
++
++
++def need(ok, label):
++    if not ok:
++        raise ValueError('private source admission: ' + label)
++
++
++def digest(value):
++    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(',', ':'),
++                                     allow_nan=False).encode()).hexdigest()
++
++
++def history_digest(state):
++    return digest({key: state.get(key) for key in HISTORY})
++
++
++def sealed_file(record, context):
++    need(isinstance(record, dict) and set(record) == {'path', 'sha256'}, 'artifact fields')
++    path = Path(record['path'])
++    need(path.is_absolute() and path.resolve() == path and path.is_relative_to(context)
++         and path.is_file() and not path.is_symlink(), 'artifact custody')
++    raw = CUSTODY['read'](path, limit=8 * 1024 * 1024)
++    need(hashlib.sha256(raw).hexdigest() == record['sha256'], 'artifact bytes')
++    return path
++
++
++def validate_binding(state, entries, root):
++    """Source admission only; caller must retain all historical native audits."""
++    root = Path(root)
++    value = state.get('private_source_binding')
++    need(isinstance(value, dict) and set(value) == FIELDS and value['schema'] == SCHEMA,
++         'binding schema')
++    need(value['source'] == state['source'] == state['plan']['source']
++         and value['plan_digest'] == state['plan_digest'] == digest(state['plan']), 'source/plan')
++    gates = [g for g in state['plan']['gates'] if g['name'] == value['gate']]
++    need(len(gates) == 1 and gates[0].get('native_cloud') is True, 'native gate')
++    expected = [e for e in state.get('reconciled_owners', {}).values()
++                if e.get('gate') == value['gate'] and e.get('purpose') == 'isolated-validation']
++    need(entries and len({e['token'] for e in entries}) == len(entries)
++         and sorted(entries, key=lambda e: e['token']) == sorted(expected, key=lambda e: e['token'])
++         and value['debt_sha256'] == digest(sorted(entries, key=lambda e: e['token']))
++         and value['history_sha256'] == history_digest(state), 'complete preserved history')
++    need(all(e.get('cleanup_complete') is False and e.get('credit_granted') is False
++             and e.get('obligations_preserved') is True for e in entries), 'debt outcomes')
++    protected = value['protected_resources']
++    need(isinstance(protected, dict) and protected == PROTECTED, 'protected resource binding')
++    artifacts = value['artifacts']
++    need(isinstance(artifacts, dict) and set(artifacts) == {'request', 'result', 'manifest', 'build', 'intent'}, 'native artifacts')
++    paths = {k: sealed_file(v, root / '.context') for k, v in artifacts.items()}
++    intent = json.loads(paths['intent'].read_bytes())
++    records = state.get('private_source_preparations', [])
++    need(isinstance(records, list) and len([r for r in records if r.get('intent') == artifacts['intent']
++         and r.get('result') == artifacts['result']]) == 1, 'cycle pre-effect anchor missing')
++    need(intent.get('schema') == 'parent-private-source-intent-v1'
++         and intent['source'] == value['source'] and intent['gate'] == value['gate']
++         and intent['plan_digest'] == value['plan_digest'] and intent['debt_sha256'] == value['debt_sha256']
++         and intent['request'] == artifacts['request'] and intent['helper_sha256'] == value['helper_sha256'],
++         'original parent preparation intent')
++    need(records[-1] == {'intent': artifacts['intent'], 'result': artifacts['result']}, 'last native preparation')
++    previous = dict(state)
++    if len(records) > 1:
++        previous['private_source_preparations'] = records[:-1]
++    else:
++        previous.pop('private_source_preparations', None)
++    need(intent['history_sha256'] == history_digest(previous), 'pre-effect original history changed')
++    for row in records:
++        need(set(row) == {'intent', 'result'}, 'unfinished native preparation')
++        sealed_file(row['intent'], root / '.context')
++        sealed_file(row['result'], root / '.context')
++    origin_path = sealed_file(intent['origin'], root / '.context')
++    origin = json.loads(origin_path.read_bytes())
++    result = json.loads(paths['result'].read_bytes())
++    need(result.get('origin') == intent['origin'] and origin.get('schema') == 'cloudbench-prepare-source-origin-v1'
++         and origin['request'] == artifacts['request'] and origin['source_ref'] == value['source']['head']
++         and origin['helper_sha256'] == value['helper_sha256'] and origin['nonce'] == intent['nonce']
++         and origin['output'] == intent['output'] and origin['producer']['pid'] > 1
++         and origin['producer']['birth'] and origin['producer']['argv_sha256']
++         and intent['producer_cmdline_sha256'] and origin['dependencies'] == intent['dependencies'],
++         'native origin/result chain')
++    helper = root / 'scripts/cloudbench-prepare-source.py'
++    need(helper.is_file() and not helper.is_symlink() and helper.resolve() == helper
++         and hashlib.sha256(helper.read_bytes()).hexdigest() == value['helper_sha256'], 'native verifier source')
++    library = runpy.run_path(str(helper))
++    verifier = library.get('verify_prepared_source')
++    need(callable(verifier), 'native verifier API unavailable')
++    manifest = verifier(paths['request'], paths['result'], paths['manifest'],
++                        source_ref=value['source']['head'], image_ref=value['image_ref'],
++                        node_fingerprint=value['node_fingerprint'],
++                        python_fingerprint=value['python_fingerprint'])
++    # The native verifier establishes request/lease/guest/snapshot authority.
++    # The parent independently binds those exact bytes to its preserved debt.
++    request = json.loads(paths['request'].read_bytes())
++    validate_transport(request, value['source'], root)
++    need(request.get('protected_resources') == protected, 'native protected resources')
++    need(request.get('build') == artifacts['build'], 'native build receipt binding')
++    from cloudbench_maintenance import image_build
++    image_build(paths['build'], value['image_ref'], root, state['source'])
++    source = runpy.run_path(str(root / 'scripts/cloudbench-source.py'))
++    raw = paths['manifest'].read_bytes()
++    need(manifest == source['manifest'](raw), 'native/versioned manifest disagreement')
++    need(manifest.get('version') == 2 and manifest.get('lease_protocol') == 'cloudbench-source-lease-v1'
++         and re.fullmatch('[0-9a-f]{32}', manifest.get('creation_nonce', '')) is not None,
++         'versioned source consumer protocol required')
++    need(isinstance(request.get('guest_env_sha256'), dict)
++         and manifest.get('guest_env_sha256') == request['guest_env_sha256'], 'requested guest environment')
++    need(manifest['shared_machine_id'] == '683e47df5094d8'
++         and manifest['shared_volume_id'] == protected['683e47df5094d8'], 'shared base identity')
++    excluded = dict(protected)
++    for entry in entries:
++        for mid, vid in entry['excluded_resources'].items():
++            need(mid not in excluded or excluded[mid] == vid, 'conflicting resource provenance')
++            excluded[mid] = vid
++    need(manifest['machine_id'] not in excluded and manifest['volume_id'] not in excluded.values(),
++         'source aliases excluded debt resource')
++    need(manifest['image_digest'] == value['image_ref'].rsplit('@', 1)[-1]
++         and manifest['node_fingerprint'] == value['node_fingerprint']
++         and manifest['python_fingerprint'] == value['python_fingerprint'], 'source image/dependencies')
++    # Re-read every sealed input after executing the owning verifier.
++    for key, record in artifacts.items():
++        need(sealed_file(record, root / '.context') == paths[key], 'native artifacts changed')
++    return manifest
++
++
++def bind_request(state, entries, request, root):
++    validate_binding(state, entries, root)
++    value = state['private_source_binding']
++    need(request['source'] == value['source'] and request['gate'] == value['gate']
++         and isinstance(request['token'], str) and re.fullmatch('[0-9a-f]{32}', request['token'])
++         and request['token'] not in {e['token'] for e in entries}, 'new consumer identity')
++    request['private_source_binding'] = {'sha256': digest(value), 'request_token': request['token']}
++
++
++def request_manifest(request, root):
++    from deploy_test_cycle import read
++    locator = Path(request.get('custody_state', ''))
++    need(locator.is_absolute() and locator.resolve() == locator and not locator.is_symlink()
++         and locator.is_relative_to(root / '.context') and locator.name == 'cycle.json', 'cycle locator')
++    state = read(locator)
++    value = state.get('private_source_binding')
++    need(request.get('private_source_binding') == {'sha256': digest(value), 'request_token': request['token']}
++         and request['source'] == state['source'] and request['gate'] == value['gate'], 'consumer binding')
++    entries = [e for e in state.get('reconciled_owners', {}).values()
++               if e.get('gate') == request['gate'] and e.get('purpose') == 'isolated-validation']
++    candidate = dict(request)
++    bind_request(state, entries, candidate, root)
++    # Re-run the existing ancestry and native debt audit, including all old failures.
++    from deploy_test_native_cleanup import inherited_native_sources
++    need(set(inherited_native_sources(state, entries, _historical_only=True)) == set(), 'historical audit')
++    return validate_binding(state, entries, root)
++
++
++def environment(request, root, directory):
++    manifest = request_manifest(request, root)
++    source = runpy.run_path(str(root / 'scripts/cloudbench-source.py'))
++    path = directory / 'private-source-manifest.json'
++    raw = source['canonical'](manifest)
++    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o400)
++    with os.fdopen(fd, 'wb') as stream:
++        stream.write(raw)
++        stream.flush()
++        os.fsync(stream.fileno())
++    return {'CLOUDBENCH_SOURCE_MANIFEST': str(path)}
++
++
++def verify_fleet(request, root, fleet):
++    manifest = request_manifest(request, root)
++    source = runpy.run_path(str(root / 'scripts/cloudbench-source.py'))
++    expected = hashlib.sha256(source['canonical'](manifest)).hexdigest()
++    for path in (fleet / 'source-manifest.json', fleet / 'teardown-ownership/source-manifest.json'):
++        need(path.is_file() and not path.is_symlink()
++             and hashlib.sha256(path.read_bytes()).hexdigest() == expected, 'fleet captured source')
++    from deploy_test_native_cleanup import fields
++    meta = fields((fleet / 'teardown-ownership/meta').read_bytes())
++    need(meta.get('source_manifest_sha256') == expected, 'fleet source provenance')
++
++
++def prepare_cycle(state, plan, root, state_path, operation):
++    """Called only by the cycle CLI while its existing exclusive lock is held."""
++    import sys
++    from deploy_test_cycle import source, write, read
++    root = Path(root)
++    def sync_cycle():
++        write(state_path, state)
++        fd = os.open(state_path.parent, os.O_RDONLY | os.O_DIRECTORY)
++        try:
++            os.fsync(fd)
++        finally:
++            os.close(fd)
++    need(operation.get('schema') == 'parent-private-source-operation-v1', 'operation schema')
++    need(source(root) == state['source'] == plan['source'] and plan == state['plan']
++         and digest(plan) == state['plan_digest'] and state.get('ready') is False
++         and state.get('phase') == 'needs-focused-plan', 'frozen failed cycle')
++    need(state_path.resolve() == state_path and state_path.is_relative_to(root / '.context')
++         and not state_path.is_symlink() and state_path.name == 'cycle.json', 'physical cycle')
++    need(Path(sys.argv[0]).resolve() == root / 'scripts/deploy_test_cycle.py'
++         and len(sys.argv) > 1 and sys.argv[1] == 'prepare-private-source', 'original cycle producer')
++    locks = [fd for fd in Path('/proc/self/fd').iterdir()
++             if fd.resolve() == state_path.parent / 'lock'
++             and 'FLOCK  ADVISORY  WRITE' in Path('/proc/self/fdinfo', fd.name).read_text()]
++    need(len(locks) == 1, 'original cycle exclusive lock')
++    entries = [e for e in state.get('reconciled_owners', {}).values()
++               if e.get('gate') == operation['gate'] and e.get('purpose') == 'isolated-validation']
++    from deploy_test_native_cleanup import inherited_native_sources
++    need(entries and inherited_native_sources(state, entries, _historical_only=True) == {}, 'historical native audit')
++    records = state.get('private_source_preparations', [])
++    need(all('result' in row for row in records), 'unfinished private preparation retained')
++    request_path = sealed_file(operation['request'], root / '.context')
++    request = read(request_path)
++    validate_transport(request, state['source'], root)
++    need(request['source_ref'] == state['source']['head'], 'exact parent requested source')
++    helper = root / 'scripts/cloudbench-prepare-source.py'
++    need(helper.resolve() == helper and not helper.is_symlink()
++         and hashlib.sha256(helper.read_bytes()).hexdigest() == operation['helper_sha256'], 'operation helper source')
++    library = runpy.run_path(str(helper))
++    library['read_request'](request_path)  # Native ownership/build/schema checks, no API construction.
++    build_path = sealed_file(request['build'], root / '.context')
++    from cloudbench_maintenance import image_build
++    image_build(build_path, request['image_ref'], root, state['source'])
++    output = Path(operation['output'])
++    need(output.is_absolute() and output.resolve() == output and output.is_relative_to(root / '.context')
++         and not output.exists() and not output.is_symlink(), 'fresh operation output')
++    prior_history = history_digest(state)
++    pointer = None
++
++    def anchor(origin_path):
++        nonlocal pointer
++        need(pointer is None and origin_path == output / 'origin.json', 'single original origin')
++        raw = origin_path.read_bytes(); origin = json.loads(raw)
++        need(origin.get('schema') == 'cloudbench-prepare-source-origin-v1'
++             and origin['producer'] == dict(pid=os.getpid(), birth=runpy.run_path(str(root / 'scripts/process-identity.py'))['linux_identity'](os.getpid()),
++                 argv_sha256=hashlib.sha256(Path('/proc/self/cmdline').read_bytes()).hexdigest())
++             and origin['request'] == operation['request'] and origin['nonce'] == request['nonce']
++             and origin['source_ref'] == state['source']['head'] and origin['output'] == str(output)
++             and origin['helper_sha256'] == operation['helper_sha256']
++             and origin['dependencies'] == library['dependency_seals'](), 'genuine native origin')
++        need(read(state_path) == state and source(root) == state['source'], 'cycle changed before native effects')
++        intent = dict(schema='parent-private-source-intent-v1', source=state['source'],
++            gate=operation['gate'], plan_digest=state['plan_digest'], debt_sha256=digest(sorted(entries,key=lambda e:e['token'])),
++            history_sha256=prior_history, origin=dict(path=str(origin_path),sha256=hashlib.sha256(raw).hexdigest()),
++            request=operation['request'], helper_sha256=operation['helper_sha256'],
++            output=str(output), nonce=request['nonce'], dependencies=origin['dependencies'],
++            producer_cmdline_sha256=hashlib.sha256(Path('/proc/self/cmdline').read_bytes()).hexdigest())
++        intent_path = output / 'parent-intent.json'
++        library['save'](intent_path, intent)
++        pointer = {'intent': {'path': str(intent_path), 'sha256': hashlib.sha256(intent_path.read_bytes()).hexdigest()}}
++        records.append(pointer)
++        state['private_source_preparations'] = records
++        sync_cycle()  # Durable BEFORE returning to the first native provider effect.
++
++    import signal
++    def interrupted(signum, frame):
++        raise InterruptedError('private source preparation interrupted')
++    handlers = {sig: signal.signal(sig, interrupted) for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)}
++    try:
++        library['prepare'](request_path, output, before_effects=anchor)
++    finally:
++        for sig, handler in handlers.items():
++            signal.signal(sig, handler)
++        if pointer is not None and (output / 'result.json').is_file():
++            pointer['result'] = dict(path=str(output / 'result.json'),
++                                     sha256=hashlib.sha256((output / 'result.json').read_bytes()).hexdigest())
++            sync_cycle()
++    need(pointer is not None and 'result' in pointer, 'native result missing; original intent retained')
++    binding = dict(schema=SCHEMA, source=state['source'], gate=operation['gate'], plan_digest=state['plan_digest'],
++        debt_sha256=digest(sorted(entries,key=lambda e:e['token'])), history_sha256=history_digest(state),
++        protected_resources=request['protected_resources'], helper_sha256=operation['helper_sha256'],
++        image_ref=request['image_ref'], node_fingerprint=request['node_fingerprint'], python_fingerprint=request['python_fingerprint'],
++        artifacts=dict(request=operation['request'], result=pointer['result'], build=request['build'],
++            manifest=dict(path=str(output / 'source-manifest.json'),
++                          sha256=hashlib.sha256((output / 'source-manifest.json').read_bytes()).hexdigest()),
++            intent=pointer['intent']))
++    candidate = {**state, 'private_source_binding': binding}
++    validate_binding(candidate, entries, root)
++    state['private_source_binding'] = binding
++
++
++def validate_transport(request, expected_source, root):
++    """Reuse the parent producer's exact base+patch+two-index tree contract."""
++    import tempfile
++    import subprocess
++    from deploy_test_cloud import source_transport_environment
++    value = request.get('transport')
++    need(isinstance(value, dict) and value.get('source') == expected_source
++         and value.get('token') == request['nonce'] and value.get('workspace_root') == str(root),
++         'exact parent source transport')
++    path = Path(value['patch'])
++    need(path.resolve() == path and path.is_relative_to(root / '.context') and not path.is_symlink()
++         and json.loads(path.with_name('source-transport.json').read_bytes()) == value, 'canonical source transport seal')
++    source_transport_environment(value)  # Existing immutable patch hash check.
++    trees = []
++    with tempfile.TemporaryDirectory(dir=root / '.context') as temp:
++        for kind in ('replay', 'workspace'):
++            env = {**os.environ, 'GIT_INDEX_FILE': str(Path(temp) / kind)}
++            def git(*args):
++                return subprocess.check_output(['git', '-c', 'core.filemode=true', *args],
++                                               cwd=root, env=env).strip().decode()
++            git('read-tree', value['base_sha'])
++            if kind == 'replay' and value['workspace_patch_sha256'] != 'none':
++                git('apply', '--cached', '--binary', str(path))
++            if kind == 'workspace':
++                git('add', '--all', '--', '.', ':(exclude)agents/benchmarks/history/*.jsonl')
++            trees.append(git('write-tree'))
++    need(trees[0] == trees[1] == value['replayed_tree'], 'exact parent source reconstruction')
++
++
++def prepare_transport(state, plan, root, operation):
++    from deploy_test_cloud import prepare_source_transport
++    from deploy_test_cycle import source
++    need(operation.get('schema') == 'parent-private-source-transport-v1'
++         and source(root) == state['source'] == plan['source'] and state['plan'] == plan
++         and digest(plan) == state['plan_digest'], 'frozen source transport inputs')
++    directory = Path(operation['output'])
++    need(directory.is_absolute() and directory.resolve() == directory
++         and directory.is_relative_to(root / '.context') and not directory.exists(), 'fresh transport output')
++    need(re.fullmatch('[a-f0-9]{32}', operation['nonce']), 'transport nonce')
++    directory.mkdir(mode=0o700)
++    return prepare_source_transport({'source': state['source'], 'token': operation['nonce']}, root, directory)
+diff --git a/scripts/tests/deploy-test-cycle.test.py b/scripts/tests/deploy-test-cycle.test.py
+index c0d9a1ff7..56d431589 100644
+--- a/scripts/tests/deploy-test-cycle.test.py
++++ b/scripts/tests/deploy-test-cycle.test.py
+@@ -8796,4 +8796,272 @@ class BoundNativeHubRetirement(unittest.TestCase):
+                 self.m.retired_hub(self.owner_path,self.owner)
+ 
+ 
++class ParentPrivateSourceContract(unittest.TestCase):
++    """Parent seam only: the native producer verifier is an explicit test double."""
++    def setUp(self):
++        import deploy_test_private_source as private
++        self.p = private
++        self.temp = tempfile.TemporaryDirectory()
++        self.addCleanup(self.temp.cleanup)
++        self.root = Path(self.temp.name)
++        scripts = self.root / 'scripts'; scripts.mkdir()
++        import shutil
++        for name in ('cloudbench-source.py', 'cloudbench-volume-migration.py',
++                     'cloudbench-machine-readiness.py', 'cloudbench-select-snapshot.py'):
++            shutil.copy2(ROOT / 'scripts' / name, scripts / name)
++        self.helper = scripts / 'cloudbench-prepare-source.py'
++        self.helper.write_text('# explicit native verifier test double\n')
++        self.directory = self.root / '.context'; self.directory.mkdir()
++        self.protected = {'683e47df5094d8': 'vol_vwnym366kn7k8mmv',
++                          '811d632f2650e8': 'vol_r1jde9donnx2mn9r'}
++        self.manifest = dict(version=2, lease_protocol='cloudbench-source-lease-v1', creation_nonce='6'*32,
++            guest_env_sha256={'AGENTS_ENV_B64':'1'*64,'BACKEND_ENV_B64':'2'*64},
++            app='navi-whisper-lux-bench', owner_token='a'*32,
++            machine_id='abcd', instance_id='INSTANCE', machine_name='cloudbench-source-'+'a'*32,
++            volume_id='vol_FIXTUREprivate', region='iad', image_digest='sha256:'+'b'*64,
++            snapshot_id='vs_FIXTURE', node_fingerprint='c'*64, python_fingerprint='d'*64,
++            verified_at=1794250000, shared_machine_id='683e47df5094d8',
++            shared_volume_id='vol_vwnym366kn7k8mmv')
++        self.source = dict(head='e'*40, digest='f'*64)
++        self.entries = [dict(token=str(i), gate='smoke', purpose='isolated-validation',
++                            cleanup_complete=False, credit_granted=False,
++                            obligations_preserved=True, excluded_resources={}) for i in range(7)]
++        self.state = dict(source=self.source, plan={'source':self.source,
++            'gates':[{'name':'smoke','native_cloud':True}]},
++            reconciled_owners={e['token']:e for e in self.entries},
++            failures=[{'id':str(i),'native_result':'FAIL','financial':'unchanged'} for i in range(6)],
++            native_maintenance=[{'qualified':False,'native_exit':0}])
++        self.state['plan_digest'] = private.digest(self.state['plan'])
++        self.artifacts = {}
++        for key, value in [('request', {'protected_resources':self.protected}),
++                           ('result', {'qualified':False}), ('manifest', self.manifest),
++                           ('build', {'schema':'explicit-image-build-test-double'})]:
++            path = self.directory / (key+'.json'); c.write(path,value)
++            self.artifacts[key] = dict(path=str(path),sha256=c.sha_file(path))
++        c.write(Path(self.artifacts['request']['path']),
++                {'protected_resources':self.protected,'build':self.artifacts['build'],
++                 'guest_env_sha256':self.manifest['guest_env_sha256']})
++        self.artifacts['request']['sha256']=c.sha_file(self.artifacts['request']['path'])
++        import cloudbench_maintenance as maintenance
++        build_mock=patch.object(maintenance,'image_build',return_value={'explicit':'image-build-test-double'})
++        build_mock.start();self.addCleanup(build_mock.stop)
++        self.binding = dict(schema=private.SCHEMA, source=self.source, gate='smoke',
++            plan_digest=self.state['plan_digest'], debt_sha256=private.digest(self.entries),
++            history_sha256=private.history_digest(self.state), protected_resources=self.protected,
++            artifacts=self.artifacts, helper_sha256=c.sha_file(self.helper),
++            image_ref='registry.fly.io/navi-whisper-lux-bench@'+self.manifest['image_digest'],
++            node_fingerprint=self.manifest['node_fingerprint'],
++            python_fingerprint=self.manifest['python_fingerprint'])
++        self.state['private_source_binding'] = self.binding
++        origin = dict(schema='cloudbench-prepare-source-origin-v1', producer=dict(pid=77,birth='fixture-birth',argv_sha256='a'*64),
++            request=self.artifacts['request'],source_ref=self.source['head'],helper_sha256=c.sha_file(self.helper),
++            nonce='9'*32,output=str(self.directory),dependencies={'fixture-dependency':'f'*64})
++        origin_path=self.directory/'origin.json';c.write(origin_path,origin)
++        origin_pin=dict(path=str(origin_path),sha256=c.sha_file(origin_path))
++        c.write(Path(self.artifacts['result']['path']),{'origin':origin_pin,'qualified':False})
++        self.artifacts['result']['sha256']=c.sha_file(self.artifacts['result']['path'])
++        intent=dict(schema='parent-private-source-intent-v1',source=self.source,gate='smoke',
++            plan_digest=self.state['plan_digest'],debt_sha256=private.digest(self.entries),
++            request=self.artifacts['request'],helper_sha256=c.sha_file(self.helper),origin=origin_pin,
++            nonce='9'*32,output=str(self.directory),producer_cmdline_sha256='a'*64,
++            history_sha256=private.history_digest(self.state),dependencies=origin['dependencies'])
++        intent_path=self.directory/'parent-intent.json';c.write(intent_path,intent)
++        self.artifacts['intent']=dict(path=str(intent_path),sha256=c.sha_file(intent_path))
++        self.state['private_source_preparations']=[dict(intent=self.artifacts['intent'],result=self.artifacts['result'])]
++        self.binding['history_sha256']=private.history_digest(self.state)
++        transport_mock=patch.object(private,'validate_transport',return_value=None)
++        transport_mock.start();self.addCleanup(transport_mock.stop)
++        self.native = unittest.mock.Mock(return_value=self.manifest)
++        actual = private.runpy.run_path
++        def load(path, *args, **kwargs):
++            return {'verify_prepared_source':self.native} if Path(path)==self.helper else actual(path,*args,**kwargs)
++        mocked=patch.object(private.runpy,'run_path',side_effect=load)
++        mocked.start(); self.addCleanup(mocked.stop)
++
++    def validate(self):
++        return self.p.validate_binding(self.state,self.entries,self.root)
++
++    def test_exact_source_seam_keeps_seven_debts_six_failures_and_false_receipt(self):
++        before=copy.deepcopy(self.state)
++        self.assertEqual(self.validate(),self.manifest)
++        self.native.assert_called_once_with(*(Path(self.artifacts[k]['path']) for k in ('request','result','manifest')),
++            source_ref=self.source['head'],image_ref=self.binding['image_ref'],
++            node_fingerprint='c'*64,python_fingerprint='d'*64)
++        self.assertEqual(self.state,before)
++        self.assertEqual(len(self.state['reconciled_owners']),7)
++        self.assertEqual(len(self.state['failures']),6)
++        self.assertFalse(self.state['native_maintenance'][0]['qualified'])
++
++    def test_qualified_flag_never_substitutes_for_native_verifier(self):
++        self.native.side_effect=ValueError('unverified lease/guest/snapshot')
++        with self.assertRaisesRegex(ValueError,'unverified lease'):self.validate()
++
++    def test_unknown_schema_source_plan_debt_history_and_protection_refuse(self):
++        baseline=copy.deepcopy(self.state)
++        mutations=[lambda s:s['private_source_binding'].update(schema='unknown'),
++            lambda s:s['private_source_binding'].update(source={}),
++            lambda s:s['private_source_binding'].update(plan_digest='0'*64),
++            lambda s:s['reconciled_owners'].pop('0'),
++            lambda s:s['failures'][0].update(native_result='PASS'),
++            lambda s:s['native_maintenance'][0].update(qualified=True),
++            lambda s:s['private_source_binding']['protected_resources'].pop('811d632f2650e8')]
++        for mutate in mutations:
++            state=copy.deepcopy(baseline); mutate(state)
++            with self.subTest(mutate=mutate),self.assertRaises((ValueError,KeyError)):
++                self.p.validate_binding(state,list(state['reconciled_owners'].values()),self.root)
++        self.native.assert_not_called()
++
++    def test_changed_receipt_manifest_request_or_helper_refuses(self):
++        for path in [*(Path(v['path']) for v in self.artifacts.values()),self.helper]:
++            original=path.read_bytes();path.write_bytes(original+b' ')
++            with self.subTest(path=path.name),self.assertRaises(ValueError):self.validate()
++            path.write_bytes(original)
++        self.native.assert_not_called()
++
++    def test_native_protected_tuple_and_target_alias_refuse(self):
++        original=copy.deepcopy(self.manifest)
++        for key,value in [('machine_id','811d632f2650e8'),('volume_id','vol_r1jde9donnx2mn9r'),
++                          ('snapshot_id','unknown'),('node_fingerprint','0'*64)]:
++            self.manifest.clear();self.manifest.update(original);self.manifest[key]=value
++            c.write(Path(self.artifacts['manifest']['path']),self.manifest)
++            self.artifacts['manifest']['sha256']=c.sha_file(self.artifacts['manifest']['path'])
++            with self.subTest(key=key),self.assertRaises(ValueError):self.validate()
++        self.manifest.clear();self.manifest.update(original)
++        c.write(Path(self.artifacts['manifest']['path']),self.manifest)
++        self.artifacts['manifest']['sha256']=c.sha_file(self.artifacts['manifest']['path'])
++        c.write(Path(self.artifacts['request']['path']),{'protected_resources':{}})
++        self.artifacts['request']['sha256']=c.sha_file(self.artifacts['request']['path'])
++        with self.assertRaises(ValueError):self.validate()
++
++    def test_unanchored_or_posthoc_origin_is_rejected_before_native_verifier(self):
++        state=copy.deepcopy(self.state)
++        state.pop('private_source_preparations')
++        state['private_source_binding']['history_sha256']=self.p.history_digest(state)
++        with self.assertRaisesRegex(ValueError,'pre-effect anchor'):
++            self.p.validate_binding(state,self.entries,self.root)
++        self.native.assert_not_called()
++
++    def test_real_cycle_flock_and_durable_origin_precede_native_effects(self):
++        import hashlib
++        import shutil
++        import sys
++        shutil.copy2(ROOT/'scripts/process-identity.py',self.root/'scripts/process-identity.py')
++        request_path=Path(self.artifacts['request']['path'])
++        request=c.read(request_path)
++        request.update(source_ref=self.source['head'],nonce='8'*32,image_ref=self.binding['image_ref'])
++        c.write(request_path,request)
++        request_pin=dict(path=str(request_path),sha256=c.sha_file(request_path))
++        self.state.update(ready=False,phase='needs-focused-plan')
++        cycle=self.directory/'cycle.json';c.write(cycle,self.state)
++        output=self.directory/'new-native'
++        operation=dict(schema='parent-private-source-operation-v1',gate='smoke',request=request_pin,
++                       helper_sha256=c.sha_file(self.helper),output=str(output))
++        events=[]
++        actual=self.p.runpy.run_path
++        def native_prepare(path,out,*,before_effects):
++            out.mkdir()
++            birth=actual(str(self.root/'scripts/process-identity.py'))['linux_identity'](os.getpid())
++            origin=dict(schema='cloudbench-prepare-source-origin-v1',producer=dict(pid=os.getpid(),birth=birth,
++                argv_sha256=hashlib.sha256(Path('/proc/self/cmdline').read_bytes()).hexdigest()),
++                request=request_pin,nonce=request['nonce'],source_ref=request['source_ref'],
++                helper_sha256=c.sha_file(self.helper),output=str(out),dependencies={'fixture-dependency':'f'*64})
++            origin_path=out/'origin.json';c.write(origin_path,origin)
++            before_effects(origin_path)
++            anchored=c.read(cycle)['private_source_preparations'][-1]
++            self.assertEqual(c.read(Path(anchored['intent']['path']))['origin']['sha256'],c.sha_file(origin_path))
++            events.append('native-effect-after-durable-anchor')
++            raise ValueError('fixture stop before any provider call')
++        library=dict(read_request=lambda path:None,prepare=native_prepare,save=c.write,
++                     dependency_seals=lambda:{'fixture-dependency':'f'*64})
++        def load(path,*args,**kwargs):
++            return library if Path(path)==self.helper else actual(path,*args,**kwargs)
++        import deploy_test_native_cleanup as native
++        with patch.object(self.p.runpy,'run_path',side_effect=load), \
++             patch.object(c,'source',return_value=self.source), \
++             patch.object(native,'inherited_native_sources',return_value={}), \
++             patch.object(sys,'argv',[str(self.root/'scripts/deploy_test_cycle.py'),'prepare-private-source']):
++            with self.assertRaisesRegex(ValueError,'exclusive lock'):
++                self.p.prepare_cycle(self.state,self.state['plan'],self.root,cycle,operation)
++            self.assertEqual(events,[])
++            with c.exclusive(self.directory),self.assertRaisesRegex(ValueError,'fixture stop'):
++                self.p.prepare_cycle(self.state,self.state['plan'],self.root,cycle,operation)
++        self.assertEqual(events,['native-effect-after-durable-anchor'])
++        retained=c.read(cycle)['private_source_preparations'][-1]
++        self.assertNotIn('result',retained)  # Unknown outcomes stay unfinished, never credited.
++        self.assertEqual(self.state['failures'],c.read(cycle)['failures'])
++
++    def test_parent_binds_native_successor_to_the_requested_guest_environment(self):
++        self.manifest['guest_env_sha256']['AGENTS_ENV_B64']='0'*64
++        path=Path(self.artifacts['manifest']['path']);c.write(path,self.manifest)
++        self.artifacts['manifest']['sha256']=c.sha_file(path)
++        with self.assertRaisesRegex(ValueError,'requested guest environment'):
++            self.validate()
++
++    def test_protocol_downgrade_cannot_admit_a_new_source(self):
++        self.manifest['version']=1
++        del self.manifest['lease_protocol'];del self.manifest['creation_nonce'];del self.manifest['guest_env_sha256']
++        path=Path(self.artifacts['manifest']['path']);c.write(path,self.manifest)
++        self.artifacts['manifest']['sha256']=c.sha_file(path)
++        with self.assertRaisesRegex(ValueError,'versioned source consumer protocol'):
++            self.validate()
++
++    def test_actual_second_protected_volume_is_exact_not_a_pattern(self):
++        state=copy.deepcopy(self.state)
++        state['private_source_binding']['protected_resources']['811d632f2650e8']='vol_wrongButWellFormed'
++        with self.assertRaisesRegex(ValueError,'protected resource binding'):
++            self.p.validate_binding(state,self.entries,self.root)
++        self.native.assert_not_called()
++
++    def test_sealed_artifacts_refuse_oversize_and_fifo_without_unbounded_read(self):
++        large=self.directory/'oversized.json'
++        with large.open('wb') as stream:stream.truncate(8*1024*1024+1)
++        fifo=self.directory/'artifact.fifo';os.mkfifo(fifo)
++        with patch.object(Path,'read_bytes',side_effect=AssertionError('unbounded read forbidden')):
++            for path in (large,fifo):
++                with self.subTest(path=path.name),self.assertRaises(ValueError):
++                    self.p.sealed_file({'path':str(path),'sha256':'0'*64},self.directory)
++
++    def test_new_request_identity_is_exact_and_cannot_reuse_old_debt_token(self):
++        request=dict(token='1'*32,source=self.source,gate='smoke')
++        self.p.bind_request(self.state,self.entries,request,self.root)
++        self.assertEqual(request['private_source_binding'],dict(sha256=self.p.digest(self.binding),request_token='1'*32))
++        for changes in ({'token':'0'},{'source':{}},{'gate':'foreign'}):
++            with self.subTest(changes=changes),self.assertRaises(ValueError):
++                self.p.bind_request(self.state,self.entries,{**request,**changes},self.root)
++
++    def test_captured_manifest_and_fleet_provenance_must_match(self):
++        request=dict(token='1'*32,source=self.source,gate='smoke')
++        with patch.object(self.p,'request_manifest',return_value=self.manifest):
++            env=self.p.environment(request,self.root,self.directory)
++            captured=Path(env['CLOUDBENCH_SOURCE_MANIFEST'])
++            raw=captured.read_bytes();sha=__import__('hashlib').sha256(raw).hexdigest()
++            fleet=self.directory/'fleet';audit=fleet/'teardown-ownership';audit.mkdir(parents=True)
++            (fleet/'source-manifest.json').write_bytes(raw);(audit/'source-manifest.json').write_bytes(raw)
++            (audit/'meta').write_text('source_manifest_sha256='+sha+'\n')
++            self.p.verify_fleet(request,self.root,fleet)
++            (fleet/'source-manifest.json').write_bytes(raw+b' ')
++            with self.assertRaisesRegex(ValueError,'captured source'):self.p.verify_fleet(request,self.root,fleet)
++            with self.assertRaises(FileExistsError):self.p.environment(request,self.root,self.directory)
++
++
++class ParentPrivateSourceAncestry(GenericNativeInheritedAdmission):
++    def test_private_source_replaces_only_current_shared_partition_authority(self):
++        import deploy_test_private_source as private
++        import cloudbench_maintenance as maintenance
++        self.state['private_source_binding']={'gate':'smoke'}
++        self.state['source']=self.state['plan']['source']={'head':'new-harness','digest':'new-harness'}
++        before=copy.deepcopy(self.state)
++        with patch.object(private,'validate_binding',return_value={'verified':'native-test-double'}) as verified, \
++             patch.object(maintenance,'validate_current',side_effect=AssertionError('global maintenance forbidden')):
++            _,coverage=c.isolated_admissions(self.state,'smoke',_with_sources=True)
++            self.assertEqual(coverage,dict.fromkeys((e['token'] for e in self.entries),self.state['source']))
++            verified.assert_called_once()
++        self.assertEqual(self.state,before)
++        with patch.object(private,'validate_binding',side_effect=ValueError('native receipt unknown')):
++            with self.assertRaisesRegex(ValueError,'native receipt unknown'):c.isolated_admissions(self.state,'smoke')
++        # Historical replay still cannot grant current-source admission.
++        with patch.object(private,'validate_binding',side_effect=AssertionError('historical replay grants nothing')):
++            self.assertEqual(self.n.inherited_native_sources(self.state,self.entries,_historical_only=True),{})
++
++
+ if __name__ == '__main__': unittest.main()

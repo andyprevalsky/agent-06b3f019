@@ -3,6 +3,7 @@
  * The private artifact uses an explicit graph encoding, never executable saved code.
  */
 import type { CDPSession, Frame } from 'playwright';
+import type { CapturePages } from './checkpointCapture';
 
 const transfer = String.raw`
 async ({ mode, saved }) => {
@@ -297,9 +298,17 @@ type AutoStore = { database: string; store: string };
 type Generator = AutoStore & { value: number };
 
 /** Use the actual frame's native storage key, including its top-level-site partition. */
-async function storageSession(frame: Frame): Promise<{ client: CDPSession; storageKey: string }> {
+async function storageSession(
+  frame: Frame,
+  resources?: CapturePages
+): Promise<{ client: CDPSession; storageKey: string }> {
   const context = frame.page().context();
-  let client = await context.newCDPSession(frame.page());
+  const create = (target: Frame | ReturnType<Frame['page']>) =>
+    resources
+      ? resources.session(() => context.newCDPSession(target))
+      : context.newCDPSession(target);
+  const detach = (client: CDPSession) => (resources ? resources.detach(client) : client.detach());
+  let client = await create(frame.page());
   try {
     const { frameTree } = await client.send('Page.getFrameTree');
     const find = (node: typeof frameTree): string | undefined => {
@@ -311,19 +320,22 @@ async function storageSession(frame: Frame): Promise<{ client: CDPSession; stora
     };
     let id = find(frameTree);
     if (!id) {
-      await client.detach();
-      client = await context.newCDPSession(frame);
+      await detach(client);
+      client = await create(frame);
       id = (await client.send('Page.getFrameTree')).frameTree.frame.id;
     }
     const { storageKey } = await client.send('Storage.getStorageKeyForFrame', { frameId: id });
     return { client, storageKey };
   } catch (error) {
-    await client.detach();
+    await detach(client);
     throw error;
   }
 }
 
-export async function captureFrameIndexedDB(frame: Frame): Promise<string | undefined> {
+export async function captureFrameIndexedDB(
+  frame: Frame,
+  resources?: CapturePages
+): Promise<string | undefined> {
   const snapshot = await frame.evaluate<{
     data: string;
     databaseCount: number;
@@ -332,7 +344,7 @@ export async function captureFrameIndexedDB(frame: Frame): Promise<string | unde
   if (!snapshot.databaseCount) return undefined;
   const generators: Generator[] = [];
   if (snapshot.autoStores.length) {
-    const { client, storageKey } = await storageSession(frame);
+    const { client, storageKey } = await storageSession(frame, resources);
     try {
       for (const store of snapshot.autoStores) {
         const metadata = await client.send('IndexedDB.getMetadata', {
@@ -343,7 +355,8 @@ export async function captureFrameIndexedDB(frame: Frame): Promise<string | unde
         generators.push({ ...store, value: metadata.keyGeneratorValue });
       }
     } finally {
-      await client.detach();
+      if (resources) await resources.detach(client);
+      else await client.detach();
     }
   }
   return JSON.stringify({ version: 1, data: snapshot.data, generators });

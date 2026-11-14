@@ -22,12 +22,23 @@
 //
 // CommonJS: ~/.rose/bin is a {"type":"commonjs"} package scope, where an ES
 // module silently exits 0 without running (back-end userUi/workspace.ts).
-const { execFileSync } = require('node:child_process');
+const { execFileSync, spawn } = require('node:child_process');
 const { createHash, randomUUID } = require('node:crypto');
-const { readFileSync, readdirSync, statSync, writeFileSync } = require('node:fs');
+const {
+  readFileSync,
+  readdirSync,
+  statSync,
+  writeFileSync,
+  lstatSync,
+  mkdirSync,
+  chmodSync,
+  unlinkSync,
+} = require('node:fs');
 const { cpus, freemem, homedir, loadavg, totalmem } = require('node:os');
 const { basename, dirname, join, posix, resolve } = require('node:path');
 const { createInterface } = require('node:readline');
+const http = require('node:http');
+const https = require('node:https');
 
 const VERSION = '1';
 const MAX_ITEMS = 20;
@@ -38,6 +49,69 @@ const MAX_BUNDLE_BYTES = 50 * 1024 * 1024;
 const SEND_ATTEMPTS = 6;
 
 class ToolError extends Error {}
+
+// Publication can build up to 18 clean template variants. Use a bounded
+// one-attempt transport without fetch's shorter response-header deadline.
+function publishRequest(url, token, body) {
+  const maximum = 12 * 60 * 60 * 1000;
+  const configured = Number(process.env.ROSE_CLI_PUBLISH_TIMEOUT_MS || maximum);
+  if (!Number.isInteger(configured) || configured < 100 || configured > maximum) {
+    throw new ToolError('ROSE_CLI_PUBLISH_TIMEOUT_MS must be between 100 and 43200000');
+  }
+  return new Promise((resolve, reject) => {
+    const target = new URL(url);
+    const transport = target.protocol === 'https:' ? https : http;
+    const payload = JSON.stringify(body);
+    const request = transport.request(
+      target,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+          'Content-Length': Buffer.byteLength(payload),
+        },
+      },
+      (response) => {
+        const chunks = [];
+        response.on('data', (chunk) => chunks.push(chunk));
+        response.on('error', (error) => {
+          clearTimeout(deadline);
+          reject(
+            new ToolError(
+              `publication response interrupted: ${error.message}; outcome is unknown; publication was not retried`
+            )
+          );
+        });
+        response.on('end', () => {
+          clearTimeout(deadline);
+          const text = Buffer.concat(chunks).toString('utf8');
+          let data;
+          try {
+            data = text ? JSON.parse(text) : {};
+          } catch {
+            data = { error: text.slice(0, 500) };
+          }
+          if (response.statusCode >= 200 && response.statusCode < 300) resolve(data);
+          else
+            reject(
+              new ToolError(
+                `${data.error || `HTTP ${response.statusCode}`} (HTTP ${response.statusCode})`
+              )
+            );
+        });
+      }
+    );
+    const deadline = setTimeout(() => {
+      request.destroy(new Error('CLI publication response deadline exceeded; outcome is unknown'));
+    }, configured);
+    request.on('error', (error) => {
+      clearTimeout(deadline);
+      reject(new ToolError(`could not reach Rose: ${error.message}; publication was not retried`));
+    });
+    request.end(payload);
+  });
+}
 
 const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
 
@@ -90,7 +164,7 @@ function config() {
  * SEND_ATTEMPTS times. Every POST is idempotent
  * server-side, so a retried send never posts twice.
  */
-async function call(method, path, body) {
+async function call(method, path, body, maxAttempts = SEND_ATTEMPTS, timeoutMs) {
   const { url, token } = config();
   let delay = 1000;
   for (let attempt = 1; ; attempt += 1) {
@@ -101,6 +175,7 @@ async function call(method, path, body) {
         method,
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
         body: body === undefined ? undefined : JSON.stringify(body),
+        ...(timeoutMs ? { signal: AbortSignal.timeout(timeoutMs) } : {}),
       });
       status = res.status;
       const text = await res.text();
@@ -114,7 +189,7 @@ async function call(method, path, body) {
     }
     if (status >= 200 && status < 300) return data;
     const retryable = status === 0 || status === 429 || status >= 500;
-    if (!retryable || attempt >= SEND_ATTEMPTS) {
+    if (!retryable || attempt >= maxAttempts) {
       const details = Array.isArray(data.details) ? `\n  - ${data.details.join('\n  - ')}` : '';
       throw new ToolError(
         `${data.error || `HTTP ${status}`}${status ? ` (HTTP ${status})` : ''}${details}`
@@ -122,6 +197,265 @@ async function call(method, path, body) {
     }
     await sleep(delay);
     delay = Math.min(delay * 2, 15_000);
+  }
+}
+
+// CLI connections are managed server-side; native wrappers borrow auth per command.
+// Commands may have side effects: never replay one after an uncertain response.
+async function cliTool(args) {
+  const action = args.action;
+  if (action === 'list') {
+    const data = await call('GET', '/cli');
+    return { text: JSON.stringify(data), rejected: false };
+  }
+  if (typeof args.integration_id !== 'string' || !args.integration_id) {
+    throw new ToolError('integration_id is required');
+  }
+  const path = `/cli/${encodeURIComponent(args.integration_id)}`;
+  if (action === 'publish') {
+    const { url, token } = config();
+    const data = await publishRequest(`${url}${path}/publish`, token, {
+      name: args.name,
+      command: args.command,
+      verify: args.verify,
+      install: args.install,
+      install_verify: args.install_verify,
+      credential_files: args.credential_files,
+    });
+    return { text: JSON.stringify(data), rejected: false };
+  }
+  if (action !== 'run') throw new ToolError('CLI action must be list, run or publish');
+  if (!Array.isArray(args.args) || args.args.some((arg) => typeof arg !== 'string')) {
+    throw new ToolError('args must be an array of strings');
+  }
+  const data = await call(
+    'POST',
+    `${path}/run`,
+    {
+      args: args.args,
+      request_id: args.request_id || randomUUID(),
+    },
+    1
+  );
+  if (!Number.isInteger(data.exit_code)) throw new ToolError('CLI returned no exit status');
+  return {
+    text: JSON.stringify(data),
+    rejected: false,
+    failed: data.exit_code !== 0,
+    exitCode: data.exit_code,
+  };
+}
+
+// Native commands run in this sandbox/cwd. Renewable auth is borrowed for one
+// command under a server lease, then captured and removed before returning.
+const NATIVE_BLOCKED_ROOTS = new Set(['.rose', '.claude', '.codex', '.agents', '.ssh', '.gnupg']);
+function nativeCredentialPath(relative) {
+  if (
+    typeof relative !== 'string' ||
+    relative.length > 1024 ||
+    relative.includes('\\') ||
+    relative.includes('\0') ||
+    relative.startsWith('/') ||
+    relative.split('/').some((part) => !part || part === '.' || part === '..') ||
+    NATIVE_BLOCKED_ROOTS.has(relative.split('/')[0])
+  )
+    throw new ToolError('Unsafe native CLI credential path');
+  const home = homedir();
+  let current = home;
+  for (const part of relative.split('/')) {
+    current = join(current, part);
+    try {
+      const stat = lstatSync(current);
+      if (stat.isSymbolicLink() || (current !== join(home, relative) && !stat.isDirectory()))
+        throw new ToolError('Unsafe native CLI credential path');
+      if (current === join(home, relative) && !stat.isFile())
+        throw new ToolError('Unsafe native CLI credential file');
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+    }
+  }
+  return current;
+}
+
+async function nativeCli(integrationId, args) {
+  if (!integrationId || !Array.isArray(args)) throw new ToolError(CLI_USAGE);
+  const base = `/cli/${encodeURIComponent(integrationId)}/native`;
+  const request = async (action, body) => {
+    try {
+      return await call('POST', `${base}/${action}`, body, 1, 15_000);
+    } catch {
+      throw new ToolError(`Native CLI ${action} failed; inspect the connection before retrying.`);
+    }
+  };
+  const lease = await request('acquire', {});
+  const saved = [];
+  let ready = false;
+  let interval;
+  let active = true;
+  let heartbeatFailed = false;
+  let heartbeatPromise = null;
+  let child;
+  let killTimer;
+  let interrupted = false;
+  const stop = () => {
+    if (!child || child.exitCode !== null || child.signalCode !== null) return;
+    // A new child process group contains only this command and its descendants.
+    const signal = (value) => {
+      try {
+        if (process.platform !== 'win32' && child.pid > 1) process.kill(-child.pid, value);
+        else child.kill(value);
+      } catch (error) {
+        if (error.code !== 'ESRCH') throw error;
+      }
+    };
+    signal('SIGTERM');
+    killTimer ??= setTimeout(() => signal('SIGKILL'), 5_000);
+    killTimer.unref();
+  };
+  const interrupt = () => {
+    interrupted = true;
+    stop();
+  };
+  try {
+    process.on('SIGINT', interrupt);
+    process.on('SIGTERM', interrupt);
+    if (
+      typeof lease.lease_token !== 'string' ||
+      !lease.lease_token ||
+      typeof lease.command !== 'string' ||
+      !lease.command.startsWith('/') ||
+      !Array.isArray(lease.files) ||
+      lease.files.length > 16
+    )
+      throw new ToolError('Invalid native CLI connection');
+    let total = 0;
+    const seen = new Set();
+    for (const file of lease.files) {
+      const path = nativeCredentialPath(file.path);
+      if (seen.has(path) || (file.data !== null && typeof file.data !== 'string'))
+        throw new ToolError('Invalid native CLI credentials');
+      seen.add(path);
+      const bytes = file.data === null ? null : Buffer.from(file.data, 'base64');
+      total += bytes?.length ?? 0;
+      if (
+        bytes &&
+        (bytes.toString('base64') !== file.data || bytes.length > 65_536 || total > 262_144)
+      )
+        throw new ToolError('Native CLI credentials exceed limits');
+      let previous = null;
+      let mode = 0o600;
+      try {
+        const stat = lstatSync(path);
+        if (stat.size > 65_536)
+          throw new ToolError('Existing native CLI credentials exceed limits');
+        previous = readFileSync(path);
+        mode = stat.mode & 0o777;
+      } catch (error) {
+        if (error.code !== 'ENOENT') throw error;
+      }
+      saved.push({ relative: file.path, path, previous, mode, bytes, touched: false });
+    }
+    for (const file of saved) {
+      nativeCredentialPath(file.relative);
+      file.touched = true;
+      if (file.bytes === null) {
+        try {
+          unlinkSync(file.path);
+        } catch (error) {
+          if (error.code !== 'ENOENT') throw error;
+        }
+        continue;
+      }
+      mkdirSync(dirname(file.path), { recursive: true, mode: 0o700 });
+      writeFileSync(file.path, file.bytes, { mode: 0o600 });
+      chmodSync(file.path, 0o600);
+    }
+    ready = true;
+    if (interrupted) throw new ToolError('Native CLI interrupted before launch');
+    child = spawn(lease.command, args, {
+      cwd: process.cwd(),
+      stdio: 'inherit',
+      detached: process.platform !== 'win32',
+      env: {
+        ...process.env,
+        YC_CLI_SESSION: process.env.ROSE_CLI_TASK_ID || process.env.ROSE_AGENT_ID || randomUUID(),
+      },
+    });
+    interval = setInterval(() => {
+      if (!active || heartbeatPromise) return;
+      heartbeatPromise = (async () => {
+        try {
+          await request('heartbeat', { lease_token: lease.lease_token });
+        } catch {
+          if (active) {
+            heartbeatFailed = true;
+            stop();
+          }
+        }
+      })().finally(() => {
+        heartbeatPromise = null;
+      });
+    }, 20_000);
+    const exitCode = await new Promise((done, reject) => {
+      child.once('error', () => reject(new ToolError('Could not start native CLI')));
+      child.once('close', (code) => done(code ?? 1));
+    });
+    active = false;
+    if (heartbeatFailed)
+      throw new ToolError('Native CLI lost its credential lease; command stopped.');
+    return interrupted ? 130 : exitCode;
+  } finally {
+    active = false;
+    clearInterval(interval);
+    clearTimeout(killTimer);
+    try {
+      // A heartbeat and release both update the lease; finish that update first.
+      await heartbeatPromise;
+      if (typeof lease.lease_token === 'string') {
+        let total = 0;
+        const files = ready
+          ? saved.map((file) => {
+              nativeCredentialPath(file.relative);
+              let data = null;
+              try {
+                if (lstatSync(file.path).size > 65_536)
+                  throw new ToolError('Native credentials exceed limits');
+                const bytes = readFileSync(file.path);
+                total += bytes.length;
+                if (bytes.length > 65_536 || total > 262_144)
+                  throw new ToolError('Native credentials exceed limits');
+                data = bytes.toString('base64');
+              } catch (error) {
+                if (error.code !== 'ENOENT') throw error;
+              }
+              return { path: file.relative, data };
+            })
+          : lease.files;
+        await request('release', { lease_token: lease.lease_token, files });
+      }
+    } finally {
+      let cleanupFailed = false;
+      for (const file of saved) {
+        if (!file.touched) continue;
+        try {
+          nativeCredentialPath(file.relative);
+          if (file.previous === null) {
+            unlinkSync(file.path);
+          } else {
+            writeFileSync(file.path, file.previous, { mode: file.mode });
+            chmodSync(file.path, file.mode);
+          }
+        } catch (error) {
+          if (error.code !== 'ENOENT') cleanupFailed = true;
+        }
+      }
+      process.removeListener('SIGINT', interrupt);
+      process.removeListener('SIGTERM', interrupt);
+      if (cleanupFailed)
+        throw new ToolError(
+          'Native CLI credential cleanup failed; inspect the session before continuing.'
+        );
+    }
   }
 }
 
@@ -816,12 +1150,55 @@ const ROSE_DESKTOP_MCP_TOOLS = [
   ENV_SIZE_MCP_TOOL,
 ];
 
-const mcpTools = () => (roseDesktop() ? ROSE_DESKTOP_MCP_TOOLS : STOCK_MCP_TOOLS);
+const CLI_MCP_TOOL = {
+  name: 'cli',
+  description:
+    'List or run connected CLIs. In a code session, use the installed native command wrapper for files and cwd in your current sandbox. Publish is only for the assigned CLI setup agent after installation and authentication. Supply install script, unauthenticated install verification and HOME-relative credential file paths. For browser login ask your immediate parent Rose agent via rose-agents send parent.',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      action: { type: 'string', enum: ['list', 'run', 'publish'] },
+      integration_id: { type: 'string' },
+      args: { type: 'array', items: { type: 'string' } },
+      request_id: { type: 'string' },
+      name: { type: 'string' },
+      command: { type: 'string', description: 'Absolute executable path in the template.' },
+      verify: {
+        type: 'array',
+        items: { type: 'string' },
+        description: 'Read-only argv that verifies the authenticated account.',
+      },
+      install: {
+        type: 'string',
+        maxLength: 32768,
+        description: 'Shell script that installs the CLI without credentials.',
+      },
+      install_verify: {
+        type: 'array',
+        items: { type: 'string' },
+        description: 'Unauthenticated argv confirming installation, such as --version.',
+      },
+      credential_files: {
+        type: 'array',
+        maxItems: 16,
+        items: { type: 'string' },
+        description: 'Credential paths relative to HOME, such as .yc/credentials.json.',
+      },
+    },
+    required: ['action'],
+  },
+};
+
+const mcpTools = () => [
+  ...(roseDesktop() ? ROSE_DESKTOP_MCP_TOOLS : STOCK_MCP_TOOLS),
+  CLI_MCP_TOOL,
+];
 
 const MCP_HANDLERS = {
   display: displayTool,
   send_message_to_user: messageTool,
   change_environment_size: environmentSizeTool,
+  cli: cliTool,
 };
 
 function serveMcp() {
@@ -846,7 +1223,10 @@ function serveMcp() {
       if (!handler) return fail(id, -32602, `unknown tool ${params.name}`);
       try {
         const result = await handler(params.arguments || {});
-        return reply(id, { content: [{ type: 'text', text: result.text }], isError: false });
+        return reply(id, {
+          content: [{ type: 'text', text: result.text }],
+          isError: result.failed === true,
+        });
       } catch (err) {
         const text = err instanceof ToolError ? err.message : `rose tool failed: ${err.message}`;
         return reply(id, { content: [{ type: 'text', text }], isError: true });
@@ -878,12 +1258,18 @@ const VIDEO_USAGE = `  rose video <prompt> [--out FILE.mp4] [--duration 3-10] [-
       [--ref IMG]... [--audio TEXT | --no-audio] [--avoid TEXT] [--take N] [--caption TEXT]
       real footage with native audio (Gemini Omni); --caption also displays it`;
 
+const CLI_USAGE = `  rose cli list
+  rose cli run <integration-id> -- <args...>
+  rose cli native <integration-id> -- <args...>
+  rose cli publish <integration-id> --name NAME --command /absolute/path --verify '["me","--json"]' --install-script 'installer commands' --install-verify '["--version"]' --credential-files '[".yc/credentials.json"]'`;
+
 const STOCK_USAGE = `usage:
   rose display <file|url>... [--html PAGE] [--caption TEXT]
   rose message <text>
 ${VIDEO_USAGE}
   rose env status [--json]
   rose env size [--cpu N] [--memory-gb M] --reason TEXT
+${CLI_USAGE}
   rose mcp`;
 
 const ROSE_DESKTOP_USAGE = `usage:
@@ -895,6 +1281,7 @@ const ROSE_DESKTOP_USAGE = `usage:
 ${VIDEO_USAGE}
   rose env status [--json]
   rose env size [--cpu N] [--memory-gb M] --reason TEXT
+${CLI_USAGE}
   rose mcp`;
 
 const usage = () => (roseDesktop() ? ROSE_DESKTOP_USAGE : STOCK_USAGE);
@@ -937,7 +1324,62 @@ async function main(argv) {
     return null;
   }
   let result;
-  if (command === 'display') {
+  if (command === 'cli') {
+    const [action, integrationId, ...cliArgs] = rest;
+    if (action === 'list') {
+      if (integrationId !== undefined) throw new ToolError('usage: rose cli list');
+      result = await cliTool({ action });
+    } else if (action === 'native') {
+      if (cliArgs[0] !== '--') throw new ToolError(CLI_USAGE);
+      return await nativeCli(integrationId, cliArgs.slice(1));
+    } else if (action === 'run') {
+      if (cliArgs[0] !== '--')
+        throw new ToolError('usage: rose cli run <integration-id> -- <args...>');
+      result = await cliTool({ action, integration_id: integrationId, args: cliArgs.slice(1) });
+    } else if (action === 'publish') {
+      const { flags, positional } = parseFlags(
+        cliArgs,
+        new Set([
+          'name',
+          'command',
+          'verify',
+          'install-script',
+          'install-verify',
+          'credential-files',
+        ])
+      );
+      if (positional.length) throw new ToolError(CLI_USAGE);
+      let verify;
+      try {
+        verify = JSON.parse((flags.verify || [])[0]);
+      } catch {
+        throw new ToolError('--verify must be a JSON argv array');
+      }
+      let installVerify;
+      let credentialFiles;
+      try {
+        installVerify = JSON.parse((flags['install-verify'] || [])[0]);
+      } catch {
+        throw new ToolError('--install-verify must be a JSON argv array');
+      }
+      try {
+        credentialFiles = JSON.parse((flags['credential-files'] || [])[0]);
+      } catch {
+        throw new ToolError('--credential-files must be a JSON path array');
+      }
+      if (!(flags['install-script'] || [])[0]) throw new ToolError('--install-script is required');
+      result = await cliTool({
+        action,
+        integration_id: integrationId,
+        name: (flags.name || [])[0],
+        command: (flags.command || [])[0],
+        verify,
+        install: flags['install-script'][0],
+        install_verify: installVerify,
+        credential_files: credentialFiles,
+      });
+    } else throw new ToolError(CLI_USAGE);
+  } else if (command === 'display') {
     const { positional, flags } = parseFlags(rest, new Set(['caption', 'html']));
     result = await displayTool({
       paths: positional.filter((ref) => !/^https?:\/\//i.test(ref)),
@@ -1035,7 +1477,7 @@ async function main(argv) {
     throw new ToolError(`unknown command ${command}\n${usage()}`);
   }
   console.log(result.text);
-  return result.rejected ? 2 : 0;
+  return result.exitCode ?? (result.rejected ? 2 : 0);
 }
 
 main(process.argv.slice(2)).then(

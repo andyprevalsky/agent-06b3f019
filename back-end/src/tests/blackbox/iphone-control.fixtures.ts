@@ -10,6 +10,7 @@ import {
 } from './iphone-control.transport-fixture';
 export type { ProviderCall, Lease, ApiData, ApiResult } from './iphone-control.transport-fixture';
 import type { SetupAgentLauncher } from '../../domains/iphone/service.connection';
+import type { AccessRequestSmsSender } from '../../domains/iphone/service.accessRequest';
 import { phoneFixtureNumber } from './phone-fixture-users';
 import imessageRouter from '../../domains/imessage/routes';
 import type { MessageVerifier } from '../../providers/phoneMessageVerifier';
@@ -81,6 +82,7 @@ export class Harness {
   launchResult?: unknown;
   authLossVerifier?: ImessageAuthLossVerifier;
   setupAgentLauncher?: SetupAgentLauncher;
+  accessRequestSms: AccessRequestSmsSender = async () => ({ success: true, messageSid: 'fixture' });
   messageVerifier: MessageVerifier = async () => ({
     status: 'allowed',
     x: 50,
@@ -351,6 +353,7 @@ export class Harness {
     app.use(
       '/api/iphone',
       createIPhoneRouter({
+        accessRequestSms: (...args) => this.accessRequestSms(...args),
         authLossVerifier: (input) =>
           this.authLossVerifier?.(input) ?? Promise.resolve(SYNTHETIC_AUTH_LOSS_UNKNOWN),
         setupAgentLauncher: (...args) =>
@@ -561,12 +564,7 @@ export class Harness {
     const operationLease = /^\/leases\/([^/]+)\/operations$/.exec(path)?.[1];
     if (operationLease && options.actor !== 'user') {
       const context = await syntheticSetupContext(userId, operationLease);
-      if (
-        context &&
-        options.actor !== 'user' &&
-        options.body !== null &&
-        typeof options.body === 'object'
-      )
+      if (context && options.body !== null && typeof options.body === 'object')
         options = { ...options, body: { ...context, ...options.body } };
     }
     const user = options.actor === 'user';
@@ -602,6 +600,9 @@ export class Harness {
         await prisma.browserContext.deleteMany({ where: { userId: { in: this.users } } });
         await prisma.smsSession.deleteMany({ where: { userId: { in: this.users } } });
         await prisma.roseApiKey.deleteMany({ where: { userId: { in: this.users } } });
+        await prisma.integration.deleteMany({
+          where: { userId: { in: this.users }, name: 'iphone' },
+        });
         await prisma.agentAttentionRequest.deleteMany({ where: { userId: { in: this.users } } });
         await prisma.agent.deleteMany({ where: { userId: { in: this.users } } });
         await prisma.user.deleteMany({ where: { userId: { in: this.users } } });

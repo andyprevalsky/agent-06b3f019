@@ -46,6 +46,28 @@ The PR is merged, every applicable production lane is verified or has a recorded
 - Sync with main once, first (`scripts/deploy sync`), and never during the run; a merge conflict reported by `scripts/deploy merge` forces another sync, then rerun the affected gates.
 - Resolve sync conflicts keeping all of main's code and the branch's intent; never discard main's side.
 
+### Safe integration during an already active deploy
+
+- If an active deploy must integrate newer main under an explicit release, fetch and inspect first and merge only after that checkout's source consumers finish. Keep the compact CLI workflow; do not restart the deploy clock or reset the existing cycle.
+- Keep every originally selected check, native failure, qualified exception, pending repair, retained resource and financial obligation. A source change grants no new-source PASS. Reuse only the runner's verified unchanged-input contract; execute changed or unknown inputs on the merged source.
+- Refresh only changed dependency inputs after their consumers finish. A required local database refresh waits for every consumer of that exact existing database; `setup-db.sh` does not discover test consumers. Preserve private configuration and mark the refresh pending until it actually finishes.
+- Resource-only cleanup never grants execution credit: preserve empty/invalid/mismatched-hash evidence, private history backups, exact ownership and FD/maps plus post-scan rehash guards. Do not remove protected mounts, objects, refs, caches, configuration or financial debts as a sync shortcut.
+- An explicitly elected legacy AgentCard gate stays SKIPPED, never PASS or settled funds, across integration; the current CLI's ordinary smoke selection remains unchanged. Preserve historical no-retry custody rather than minting replacement cards.
+- Prepared worker bindings, temp-directory corrections and backend coverage collection are explicit guarded runner operations, not permission to mutate running workers or the cycle during source integration.
+
+### Mass-agent deploy quarantine
+
+`test-mass-agent-run-0` is indefinitely excluded from every deploy by its
+`deploy_quarantine` catalog marker (explicit user instruction, 2026-11-10).
+Both local and cloud deploy selection honor this marker before the smoke floor,
+path triggers and history eligibility. Do not add it back through a custom deploy
+selection or require cache repairs for it. The test remains available for explicit
+manual benchmark runs; historical failures remain failures and exclusion grants
+no PASS credit. A source refresh records catalog-approved omissions without deleting
+prior attempts; every other previously selected check remains required.
+Other required deploy checks remain enabled. Removing this
+quarantine requires an explicit user instruction.
+
 ### Execution
 
 - Keep going until **Done** or a **Stopping condition**; a blocking result is work to resolve, not a reason to pause.
@@ -60,6 +82,7 @@ The PR is merged, every applicable production lane is verified or has a recorded
 - Never merge an unwaived blocking failure, and never invent a PASS.
 - A skip, waiver, exception or override is never PASS; keep the native result visible.
 - An override must name the gate explicitly; never infer one, never re-confirm it, keep it narrow, and list its risk in the PR.
+- Apply a user-elected harness override by exporting `DEPLOY_GATE_OVERRIDES=<gate>` in the one environment that runs `gates` and `merge`; Blacksmith gates receive it through their request.
 - On any stop, run `scripts/deploy finish --outcome blocked` before ending the turn.
 
 ### Approvals
@@ -67,7 +90,8 @@ The PR is merged, every applicable production lane is verified or has a recorded
 - `scripts/deploy fix` runs the same formatters and lint fixes without committing.
 - Classify every hunk `freeze` flags: code-only hunks pass without review; text an LLM reads, including text built at runtime, is a prompt.
 - Run one golden-reference review over the remaining hunks; a `GROUNDED` verdict clears them: `scripts/deploy approval decide --decision grounded --evidence "<reviewer id>"`.
-- Otherwise run `scripts/deploy approval request` and send one packet in `.claude/shared/approval-format.md` format, pasting the exact diff inline.
+- Otherwise run `scripts/deploy approval request` and send one packet in `.claude/shared/approval-format.md` format, showing the key user- and model-visible strings that change (well formatted, with the conditions under which each appears) and a plain list of schema or API fields; never code diffs or file pointers.
+- Collect every approval request into that one packet after `freeze` and send it once, at the start of the deploy; never pause the run to ask the user anything else. Only the snapshot re-requests below and the review-ledger decisions in **Stopping conditions** may come later.
 - Send the packet as the turn's last message only after gates run in the background, under a bounded keep-awake cancelled by its `holdId`.
 - Never infer approval from silence or earlier discussion; record the answer with `scripts/deploy approval decide --decision approved|rejected --evidence "<user message>"`.
 - A rejection stays blocked; a re-request from `approval decide` or `merge` means re-freeze and send a packet for only the changed files.
@@ -129,7 +153,7 @@ The PR is merged, every applicable production lane is verified or has a recorded
 
 Stop and ask the user only for a prompt, agent-behavior or trajectory-injection approval the golden-reference review did not clear; gates keep running, only the merge waits.
 
-Two more decisions stay with the user, though this skill adds no stop of its own: the verification-cycle approval id (the review ledger will not start that cycle without it), and a security or prod-impacting finding still open after cycle 3 (the user's answer of 2026-11-05; the ledger refuses a 4th cycle). See **Review**.
+Review cycles are never a stop: never ask the user to approve another review cycle (user, 2026-11-12). See **Review**.
 
 Stop immediately when the user says stop. Credential or billing changes only the user can make, provider credit exhaustion, review cycles, owner labels, monitoring deadlines, review-quota exhaustion, provider outages and failed rounds are never stops.
 
@@ -147,7 +171,7 @@ Everything not listed here must pass. Record every skip as `⚠️ Skipped` with
 | Codex E2B smoke | Every Codex credential path is out of credits (the test skips itself) | Never use `BLACKBOX_TEST_SKIP_DOMAINS` |
 | Benchmark judge | Confirmed third-party compute quota | |
 | Credential health: Anthropic, Parallel.ai | Any failure (warn-only) | Other providers' auth rejections block |
-| CodeRabbit | Confirmed quota or spending cap on the current HEAD: `deploy_review_cycle.py skip --reason usage-cap` | The PR body says it merged unreviewed |
+| CodeRabbit | Confirmed quota or spending cap on the current HEAD: `deploy_review_cycle.py skip --reason usage-cap`, at any cycle (1, 2, 3 or verification) | Never wait for the window or ask; the PR body says it merged unreviewed |
 | Mac-only checks on Linux | Always | Unverified, never PASS |
 | Mac local-execution acceptance | Device discovery shows no connected Mac | An auth error is not proof of absence |
 | Unselected categories | The gate planner omitted them | The plan lists every omission |
@@ -167,21 +191,34 @@ Never skip for an unexplained failure, an auth failure our own configuration cau
 8. Import the attributions: `python3 scripts/deploy_test_cycle.py triage --input report.json`.
 9. After a fix: `focus --input focused.json` then `run` (failing tests plus regressions), then the full failed gates, then every selected gate on the final source.
 10. A failure in the final sweep goes back to step 2; a focused pass is never a deploy pass.
-11. Never rerun blind: the staged runner requests `/RCA` on the first failure of every round, so each rerun follows a repro, a fix and its regression.
+11. Runners rerun a failed unit once on the same source (FLAKY if it passes, FAIL if not); never rerun anything else blind: each further rerun follows a repro, a fix and its regression.
 12. After merge, dispatch each NOT_INTRODUCED packet as a `/goal` on a new devbox in the Bugs folder at high effort and standard speed.
 
 Details: `.claude/shared/deploy-failure-policy.md` and `docs/deploy-test-cycle.md`.
 
+### Quarantined and flaky tests
+
+- `QUARANTINED_FAIL` / `QUARANTINED_PASS`: the test carries a quarantine marker in its own definition (`@quarantine(since=, repair=, error=, evidence=)` from `scripts/lib/test_quarantine.py`, `quarantine(meta, fn)` in TypeScript). It ran; its failure never blocks and is the only accepted non-blocking test failure.
+- `FLAKY` (`TEST_FLAKY ... attribution=REQUIRED`): a unit failed and passed its one rerun. The gate passes, the cycle opens an `/RCA` request, and `scripts/deploy merge` refuses until its attribution is recorded with `python3 scripts/deploy_test_cycle.py attribute-flaky --occurrence <id> --input <attribution.json> --plan <plan> --state-dir <dir>`:
+  - INTRODUCED: fix it in this deploy, no marker: `{"attribution": "INTRODUCED", "evidence": "<RCA>", "fix_commit": "<sha>"}`.
+  - NOT_INTRODUCED: add the marker with `repair` set to `pending-handoff:<occurrence id>`, the verbatim first error line, the failure evidence and today's date, then record `{"attribution": "NOT_INTRODUCED", "evidence": "<RCA>", "marker": "<test file>", "post_merge": {<the failed-test packet>}}`. The packet carries this attribution. After merge, step 13 dispatches it like every NOT_INTRODUCED packet, then `python3 scripts/test_quarantine.py link-repair --occurrence <id> --repair <thread URL>` replaces the pending reference in the records follow-up PR. A repair is never dispatched before merge.
+  - UNKNOWN keeps the merge blocked.
+- Smoke benchmark tasks: the marker is a `"quarantine": {"since", "repair", "error", "evidence"}` object on the task's `agents/benchmarks/tasks.json` entry (same rules; never change its prompt, evaluators, timeouts or pass criteria). Smoke still runs it once and reports `QUARANTINED_FAIL` / `QUARANTINED_PASS` (unit = task name). A non-quarantined task that natively FAILED/ERRORed is rerun once alone on the same ref (`FLAKY` on pass, else FAIL); SKIPPED (resource) and INFRA_ERROR outcomes keep their existing `/RCA` handling. NOT_INTRODUCED attribution names `agents/benchmarks/tasks.json` as `marker`.
+- Never add a marker to get green, or for a test without a NOT_INTRODUCED attribution.
+- Release: `python3 scripts/test_quarantine.py report` lists every marker with its consecutive passes from recorded results; any quarantined failure resets the count. At 5 it reads `ready to release`: remove that marker in this deploy.
+- Scorecard: copy the lines `python3 scripts/deploy_test_cycle.py report` prints, `Tests skipped (quarantined): N — F failed (non-blocking), P passed` and, when present, `Flaky (passed on rerun): ...`.
+
 ## Review
 
 - Cycle 1 starts when the PR opens; cycle 2 is one batched incremental review; cycle 3 only when cycle 2 found a valid issue; the ledger refuses a 4th.
-- After a clean cycle 2, gate fixes that changed source need a verification cycle, which the ledger only starts with the user's explicit approval id (`scripts/deploy review-next --verification-approval <id>`); batch every source fix into cycle 2 where possible, and ask for the id in the same message as any other pending question.
+- After a clean (or usage-cap skipped) cycle 2, never run another full verification review and never ask (user, 2026-11-12). Publish the later gate fixes with the standing approval, `scripts/deploy review-next --verification-approval user-standing-20261112`, and do not wait on it: skip it with `usage-cap` when out of quota, otherwise take whatever incremental review arrives with the gates. Batch source fixes into one push where possible.
 - Read the reviews for the exact HEAD from the reviews, inline comments and issue comments endpoints; a green check is not a review.
 - Fix every valid finding, including pre-existing ones; ignore only pure style nits.
 - Reply to every comment with `[FIXED]`, `[DEFERRED]`, `[IGNORED]`, `[DELEGATED]` or `[POST-MERGE REPAIR]`; `override` requires `[DEFERRED]` or `[FIXED]` on each deferred finding.
-- If cycle 3 still has valid findings, defer the non-security ones with `deploy_review_cycle.py override` and merge; fix security or prod-impacting ones, then ask the user how the fix is reviewed (the ledger refuses a 4th cycle).
+- If cycle 3 still has valid findings, defer the non-security ones with `deploy_review_cycle.py override` and merge; fix security or prod-impacting ones and continue with the standing approval (`--one-final-review-approval user-standing-20261112`, skipped as `usage-cap` when out of quota). Never ask the user to approve another review cycle.
 - A false-green or bot-posted request gets one `@coderabbitai full review` from the user's account.
 - Over 150 files: add the canonical path filters in a later stabilized commit; never weaken the review.
+- `open-pr`/`review-next` request nothing for a HEAD whose changed paths the `.coderabbit.yaml` path filters all exclude: the ledger records `no-reviewable-paths` (no cycle spent), carrying only a clean prior result.
 - Main moved after a clean final review: `deploy_review_cycle.py inherit-sync --head "$(git rev-parse HEAD)" --base origin/main`.
 - The Claude fallback review is disabled.
 

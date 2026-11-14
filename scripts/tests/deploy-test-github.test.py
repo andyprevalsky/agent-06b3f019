@@ -14,6 +14,7 @@ import copy
 import io
 import json
 import os
+import re
 from pathlib import Path
 import subprocess
 import sys
@@ -23,6 +24,8 @@ import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'lib'))
+from condition_wait import wait_until
 import deploy_gates as g
 import deploy_test_plan as p
 from deploy_test_bindings import generate
@@ -33,8 +36,6 @@ from deploy_test_result import validate as validate_result
 
 ROOT = p.ROOT
 LAUNCHER = str(ROOT / 'scripts/deploy_test_github.py')
-# Read-only REST calls ask the GitHub token pool first; no scenario probes the real API (no member).
-os.environ['DEPLOY_GH_TOKEN_POOL'] = str(ROOT / 'scripts/tests/no-such-token-pool.py')
 RUNNER = 'blacksmith-8vcpu-ubuntu-2404'
 
 
@@ -264,7 +265,8 @@ class Executor(unittest.TestCase):
                                 'GIT_COMMITTER_NAME': 't', 'GIT_COMMITTER_EMAIL': 't@x'})
         self.head = subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=self.root, check=True, capture_output=True,
                                    text=True).stdout.strip()
-        environ = patch.dict(os.environ, {'DEPLOY_WORKER_ROOT': str(self.workers)})
+        environ = patch.dict(os.environ, {'DEPLOY_WORKER_ROOT': str(self.workers),
+                                         'CLOUDBENCH_KERNEL_PROXY_CUSTODY': '0', 'NODE_OPTIONS': ''})
         environ.start()
         self.addCleanup(environ.stop)
         recipe = patch.object(g, 'backend_recipe', lambda root, env, timeout: {'sentinel': timeout, 'env': env})
@@ -345,6 +347,19 @@ class Executor(unittest.TestCase):
         self.assertEqual('2', structural['command'][-1])
         self.assertEqual('2', semantic['env'][g.SEMANTIC_ENV])
 
+    def test_local_new_test_stability_bounds_its_cpu_load_and_blacksmith_keeps_nproc(self):
+        def with_stability():
+            template = standard()
+            template['gates'].append({'name': 'new-test-stability', 'checks': ['new-test-stability'], 'command': [
+                'python3', 'scripts/select_affected_tests.py', '--stability', '--base', 'origin/main']})
+            return template
+        remote = next(gate for gate in g.build_template(2, 2, with_stability, executor='blacksmith')['gates']
+                      if gate['name'] == 'new-test-stability')
+        self.assertNotIn('--load-workers', remote['command'])
+        local = next(gate for gate in g.build_template(2, 2, with_stability, executor='local')['gates']
+                     if gate['name'] == 'new-test-stability')
+        self.assertEqual(['--load-workers', str(g.LOCAL_STABILITY_LOAD_WORKERS)], local['command'][-2:])
+
     def test_cli_defaults_to_blacksmith_and_refuses_host_cuts_there(self):
         with patch.object(g, 'run', return_value=0) as run, patch.object(g, 'ROOT', self.root):
             g.main([])
@@ -410,6 +425,27 @@ class Launcher(unittest.TestCase):
         with self.assertRaises(ValueError):
             gh.tag_name('ubuntu-latest', 'g', 'tok')
 
+    def test_user_elected_overrides_travel_to_the_vm_and_nothing_else_does(self):
+        """deploy.md lets the user override a named gate; a Blacksmith VM's env is its own, so the
+        coordinator's DEPLOY_GATE_OVERRIDES must ride the envelope (PR #1854's live Tilion override)."""
+        self.assertEqual('a:b,browser-provider:tilion-residential-live',
+                         gh.gate_overrides(' browser-provider:tilion-residential-live , a:b,a:b '))
+        for bad in ('Bad Name', 'x;rm -rf /', '-flag'):
+            with self.assertRaises(ValueError):
+                gh.gate_overrides(bad)
+        with patch.dict(os.environ, {gh.OVERRIDES_ENV: ''}):
+            plain = gh.envelope(remote_request('a' * 40), 'deploy_test_worker.py', RUNNER)
+        self.assertNotIn(b'overrides', plain)  # an ordinary request keeps its deterministic tag
+        with patch.dict(os.environ, {gh.OVERRIDES_ENV: 'browser-provider:tilion-residential-live'}):
+            elected = gh.envelope(remote_request('a' * 40), 'deploy_test_worker.py', RUNNER)
+        self.assertEqual('browser-provider:tilion-residential-live', json.loads(elected)['overrides'])
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            head = git_repo(root)
+            for elected_value in ('browser-provider:tilion-residential-live', ''):
+                out = self.run_extract(root, remote_request(head, root=str(root)), overrides=elected_value)
+                self.assertEqual(elected_value, (out / 'overrides').read_text())
+
     def test_envelope_binds_the_runner_root_and_a_known_worker(self):
         with self.assertRaises(ValueError):
             gh.envelope(remote_request('a' * 40, root='/elsewhere'), 'deploy_test_worker.py', RUNNER)
@@ -427,10 +463,12 @@ class Launcher(unittest.TestCase):
             self.assertEqual((fields['object'], fields['type']), (head, 'commit'))
             self.assertEqual(json.loads(body)['request']['source']['head'], head)
 
-    def run_extract(self, root, request, runner=RUNNER, script='deploy_test_worker.py', name=None):
+    def run_extract(self, root, request, runner=RUNNER, script='deploy_test_worker.py', name=None, overrides=''):
         name = name or gh.tag_name(runner, request['gate'], request['token'])
-        body = (json.dumps({'version': gh.ENVELOPE_VERSION, 'worker_script': script, 'runner': runner,
-                            'request': request}) + '\n').encode()
+        fields = {'version': gh.ENVELOPE_VERSION, 'worker_script': script, 'runner': runner, 'request': request}
+        if overrides:
+            fields['overrides'] = overrides
+        body = (json.dumps(fields) + '\n').encode()
         head = subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=root, check=True, capture_output=True,
                               text=True).stdout.strip()
         sha = subprocess.run(['git', 'hash-object', '-t', 'tag', '-w', '--stdin'], cwd=root, check=True,
@@ -481,6 +519,78 @@ class Launcher(unittest.TestCase):
             self.assertEqual(result['evidence']['c']['log'], str(local))
             self.assertEqual(result['evidence']['c']['remote_log'], gh.REMOTE_ROOT + '/.context/deploy-worker/h/a.log')
             self.assertEqual(result['evidence']['d']['log'], '/etc/passwd')
+
+    def test_preexisting_native_dumps_and_all_manifest_worker_logs_are_hash_bound(self):
+        # Explicit offline fixture bytes, never an original provider payload.
+        import hashlib
+        with tempfile.TemporaryDirectory() as tmp:
+            root, out = Path(tmp) / 'repo', Path(tmp) / 'out'
+            out.mkdir(); (root / '.context').mkdir(parents=True)
+            primary = root / 'agents/custom-worker.txt'
+            primary.parent.mkdir()
+            expected = {'.llm-dumps/offline-fixture/1-span-router.json': b'offline retention fixture'}
+            expected.update({f'agents/custom-worker{suffix}.txt': f'offline worker {i}'.encode()
+                             for i, suffix in enumerate([''] + [f'.{i}' for i in range(1, 8)])})
+            for rel, data in expected.items():
+                path = root / rel; path.parent.mkdir(parents=True, exist_ok=True); path.write_bytes(data)
+            private = root / '.context/private/.env.secret'; private.parent.mkdir(); private.write_text('offline-secret')
+            (root / '.context/services.json').write_text(json.dumps({'logs': {'worker': str(primary),
+                'backend': str(private), 'frontend': str(Path(tmp) / 'outside.txt')}}))
+            malformed = root / '.context/offline-fixture/services.json'
+            malformed.parent.mkdir(); malformed.write_text('[]')
+            secret = root / '.rose/tools.json'; secret.parent.mkdir(); secret.write_text('secret fixture')
+            (root / '.llm-dumps/offline-fixture/alias.json').symlink_to(secret)
+            (root / '.llm-dumps/alias-dir').symlink_to(secret.parent, target_is_directory=True)
+            (root / '.llm-dumps/offline-fixture/.env').write_text('secret fixture')
+            (primary.parent / 'custom-worker.extra.txt').write_text('unrelated')
+            large = root / '.llm-dumps/offline-fixture/oversize.json'
+            with large.open('wb') as stream: stream.truncate(gh.BUNDLE_FILE_BYTES + 1)
+            outside = Path(tmp) / 'outside.txt'; outside.write_text('outside fixture')
+            (root / '.context/outside.txt').symlink_to(outside)
+            with patch.object(gh, 'ROOT', root), patch.object(gh, 'publish_done') as publish:
+                self.assertEqual(gh.remote_bundle(type('Args', (), {'out': out})()), 0)
+            publish.assert_called_once_with(out, out / 'artifact')
+            self.assertEqual([rel for rel in expected if not (out / 'artifact/files' / rel).is_file()], [],
+                             'preexisting native dumps/worker streams excluded')
+            for rel, data in expected.items():
+                path = out / 'artifact/files' / rel
+                self.assertTrue(path.is_file(), f'preexisting native evidence lost: {rel}')
+                self.assertEqual(path.read_bytes(), data)
+            manifest = json.loads((out / 'artifact/bundle.json').read_text())
+            bound = {row['path']: row for row in manifest['captured']}
+            for rel, data in expected.items():
+                self.assertEqual(bound[rel]['sha256'], hashlib.sha256(data).hexdigest())
+                self.assertEqual(bound[rel]['bytes'], len(data))
+            self.assertTrue(any(row['path'] == str(large.relative_to(root)) for row in manifest['skipped']))
+            self.assertFalse((out / 'artifact/files/.rose').exists())
+            self.assertFalse((out / 'artifact/files/.context/private/.env.secret').exists())
+            self.assertTrue(any(row['path'] == '.context/private/.env.secret'
+                                and row.get('reason') == 'private_config' for row in manifest['skipped']))
+            self.assertFalse((out / 'artifact/files/.llm-dumps/offline-fixture/.env').exists())
+            self.assertFalse((out / 'artifact/files/.llm-dumps/offline-fixture/alias.json').exists())
+            self.assertFalse((out / 'artifact/files/agents/custom-worker.extra.txt').exists())
+            self.assertEqual(gh.BUNDLE_FILE_BYTES, 64 * 1024 * 1024)
+            self.assertEqual(gh.BUNDLE_TOTAL_BYTES, 400 * 1024 * 1024)
+
+    def test_capped_bundle_keeps_existing_dumps_before_bulk_coverage_json(self):
+        # Same capped selection as production, with small offline fixture bytes.
+        self.assertEqual(gh.BUNDLE_FILE_BYTES, 64 * 1024 * 1024)
+        self.assertEqual(gh.BUNDLE_TOTAL_BYTES, 400 * 1024 * 1024)
+        with tempfile.TemporaryDirectory() as tmp:
+            root, out = Path(tmp) / 'repo', Path(tmp) / 'out'
+            dump = root / '.llm-dumps/offline-fixture/last-request.json'
+            dump.parent.mkdir(parents=True); dump.write_bytes(b'd' * 60)
+            raw = root / '.context/test-runs/backend-coverage-failed-fixture/raw-v8'
+            raw.mkdir(parents=True); out.mkdir()
+            for index in range(8):
+                (raw / f'coverage-{index}.json').write_bytes(b'v' * 50)
+            with patch.object(gh, 'ROOT', root), patch.object(gh, 'BUNDLE_FILE_BYTES', 64), \
+                    patch.object(gh, 'BUNDLE_TOTAL_BYTES', 400), patch.object(gh, 'publish_done'):
+                gh.remote_bundle(type('Args', (), {'out': out})())
+            self.assertEqual((out / 'artifact/files' / dump.relative_to(root)).read_bytes(), b'd' * 60)
+            manifest = json.loads((out / 'artifact/bundle.json').read_text())
+            self.assertLessEqual(manifest['bytes'], 400)
+            self.assertTrue(any(row['path'].startswith('.context/') for row in manifest['skipped']))
 
     def test_capped_bundle_keeps_server_logs_before_bulk_coverage_json(self):
         # The PR #1762 shard-2 artifact dropped its 10 MB server log: 3,000 raw V8
@@ -737,72 +847,46 @@ class RestQuota(unittest.TestCase):
         with self.assertRaises(gh.urllib.error.HTTPError):
             self.run_request(client, [self.limited(reset)], now=1_000_100.0)
 
-    def run_auth(self, client, outcomes, method='GET'):
-        """Like run_request, also recording each attempt's Authorization header."""
-        sent = []
+    def test_rate_limited_liveness_keeps_polling_the_r2_result(self):
+        # PR1881: the worker finished while a synchronous REST quota wait consumed
+        # the remaining gate deadline, hiding its already-published R2 result.
+        clock, pauses, calls = [1_000_000.0], [], []
+        start = clock[0]
+        done = {'run_id': 42, 'objects': {}, 'at': start + 700}
+        owner = {'run_id': 42, 'url': 'https://github.com/org/repo/actions/runs/42'}
+        outer = self
 
-        class Response:
-            status, headers = 200, {}
-
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *exc):
-                return False
-
-            def read(self):
-                return b'{"ok": true}'
+        class Channel:
+            def get(self, name, leaf):
+                if leaf == 'started.json':
+                    return json.dumps(owner).encode()
+                if leaf == 'done.json' and clock[0] >= start + 700:
+                    return json.dumps(done).encode()
+                return None
 
         class Opener:
-            def open(self, req, timeout):
-                sent.append(req.get_header('Authorization'))
-                outcome = outcomes.pop(0)
-                if isinstance(outcome, Exception):
-                    raise outcome
-                return Response()
+            def open(self, request, timeout):
+                calls.append(request.full_url)
+                if len(calls) == 1:
+                    raise outer.limited({'X-RateLimit-Reset': str(start + 1606)})
+                raise outer.limited({}, b'{"message": "Forbidden"}')
 
-        pauses = []
-        with patch.object(gh.urllib.request, 'build_opener', return_value=Opener()), \
-             patch.object(gh.time, 'time', return_value=1_000_000.0), \
-             patch.object(gh.STOP, 'wait', side_effect=pauses.append), redirect_stdout(io.StringIO()):
-            status, _, _ = client.request(method, '/actions/runs/1')
-        return status, sent, pauses
+        def wait(seconds):
+            pauses.append(seconds)
+            clock[0] += seconds
 
-    def test_reads_use_the_pool_member_and_writes_keep_the_workflow_token(self):
-        # PR #1901 deploy, 2026-11-09: the primary token's quota ran out; the watcher waited 1007 s and
-        # spent the semantic-stack gate's whole deadline although its run had already succeeded.
-        picks = []
-        client = gh.GitHub('primary', 'acme/rose', repick=lambda: picks.append(1) or 'pool-app')
-        self.assertEqual(self.run_auth(client, [None]), (200, ['Bearer pool-app'], []))
-        self.assertEqual(self.run_auth(client, [None]), (200, ['Bearer pool-app'], []))
-        self.assertEqual(self.run_auth(client, [None], method='POST'), (200, ['Bearer primary'], []))
-        self.assertEqual(len(picks), 1, 'one pool pick serves every read until a limit')
-
-    def test_a_rate_limited_read_switches_member_without_waiting(self):
-        members = iter(['pool-a', 'pool-b'])
-        client = gh.GitHub('primary', 'acme/rose', repick=lambda: next(members))
-        reset = {'X-RateLimit-Remaining': '0', 'X-RateLimit-Reset': '1003600'}
-        status, sent, pauses = self.run_auth(client, [self.limited(reset), None])
-        self.assertEqual((status, sent, pauses), (200, ['Bearer pool-a', 'Bearer pool-b'], []))
-        self.assertEqual(client.rate_limited_seconds, 0.0)
-
-    def test_every_member_limited_still_waits_for_the_reset(self):
-        client = gh.GitHub('primary', 'acme/rose', repick=lambda: 'pool-a')
-        reset = {'X-RateLimit-Remaining': '0', 'X-RateLimit-Reset': '1000100'}
-        status, sent, pauses = self.run_auth(client, [self.limited(reset), None])
-        self.assertEqual((status, sent, pauses), (200, ['Bearer pool-a', 'Bearer pool-a'], [101.0]))
-
-    def test_a_pool_member_that_cannot_see_the_run_retries_with_the_workflow_token(self):
-        from email.message import Message
-        missing = gh.urllib.error.HTTPError('https://api.github.com/x', 404, 'Not Found', Message(),
-                                            io.BytesIO(b'{"message": "Not Found"}'))
-        client = gh.GitHub('primary', 'acme/rose', repick=lambda: 'pool-app')
-        self.assertEqual(self.run_auth(client, [missing, None]), (200, ['Bearer pool-app', 'Bearer primary'], []))
-
-    def test_no_pool_member_reads_with_the_workflow_token(self):
-        client = gh.GitHub('primary', 'acme/rose', repick=lambda: None)
-        self.assertEqual(self.run_auth(client, [None]), (200, ['Bearer primary'], []))
-        self.assertIsNone(gh.pool_read_token(ROOT), 'the suite stubs the pool to no member')
+        client = gh.GitHub('unused', 'org/repo', deadline=start + 1620)
+        with patch.object(gh.time, 'time', side_effect=lambda: clock[0]), \
+             patch.object(gh.STOP, 'wait', side_effect=wait), \
+             patch.object(gh.urllib.request, 'build_opener', return_value=Opener()), \
+             redirect_stdout(io.StringIO()):
+            result = gh.watch_channel(client, Channel(), 'head', 'tag', start + 1620, start)
+        self.assertTrue(calls, 'exercise the actual REST liveness failure boundary')
+        self.assertEqual('channel', result['kind'])
+        self.assertEqual(done, result['done'])
+        self.assertLess(clock[0], start + 1620)
+        self.assertLessEqual(max(pauses), gh.CHANNEL_POLL_SECONDS)
+        self.assertEqual(0, client.rate_limited_seconds)
 
     def test_the_cancel_poll_is_conditional(self):
         polled = []
@@ -818,6 +902,197 @@ class RestQuota(unittest.TestCase):
         with patch.object(gh.time, 'sleep'):
             self.assertEqual(gh.cancel_run(Fake(), 1)['status'], 'completed')
         self.assertEqual(polled, [True, True, True])
+
+
+class PoolReads(unittest.TestCase):
+    """Reads use the token-pool member with the most quota; writes keep the launch identity.
+
+    A pool member's 401/403/404 is not authoritative (it may lack access) and its rate limit is not the
+    launch identity's, so the read is retried with the launch token; that token's answer stays final.
+    """
+
+    def http_error(self, code, body=b'{}', headers=None):
+        from email.message import Message
+        message = Message()
+        for key, value in (headers or {}).items():
+            message[key] = value
+        return gh.urllib.error.HTTPError('https://api.github.com/x', code, 'x', message, io.BytesIO(body))
+
+    def client(self, behave, picks=(('GITHUB_APP', 'pool'),), now=1_000_000.0):
+        """A GitHub client whose transport calls behave(method, token, if_none_match) for every request."""
+        seen, pauses, queue = [], [], list(picks)
+
+        class Response:
+            def __init__(self, status, headers, body):
+                self.status, self.headers, self.body = status, headers, body
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def read(self):
+                return self.body
+
+        class Opener:
+            def open(self, req, timeout):
+                token = req.get_header('Authorization').removeprefix('Bearer ')
+                etag = req.get_header('If-none-match')
+                seen.append((req.get_method(), token, etag))
+                outcome = behave(req.get_method(), token, etag)
+                if isinstance(outcome, Exception):
+                    raise outcome
+                return Response(*outcome)
+
+        client = gh.GitHub('launch', 'acme/rose', read_picker=lambda: queue.pop(0) if queue else None)
+        patches = [patch.object(gh.urllib.request, 'build_opener', return_value=Opener()),
+                   patch.object(gh.time, 'time', return_value=now),
+                   patch.object(gh.STOP, 'wait', side_effect=pauses.append)]
+        for item in patches:
+            item.start()
+            self.addCleanup(item.stop)
+        return client, seen, pauses
+
+    def ok(self, body=b'{"ok": 1}', headers=None):
+        return 200, dict(headers or {}), body
+
+    def test_reads_use_the_pool_member_and_writes_keep_the_launch_identity(self):
+        client, seen, _ = self.client(lambda method, token, etag: self.ok())
+        client.request('GET', '/actions/runs/1')
+        client.request('POST', '/actions/runs/1/cancel')
+        self.assertEqual([('GET', 'pool', None), ('POST', 'launch', None)], seen)
+        self.assertEqual(('GITHUB_APP', 0), (client.read_name, client.read_fallbacks))
+
+    def test_a_pool_404_403_or_401_is_retried_with_the_launch_token_whose_404_is_final(self):
+        for code in (404, 403, 401):
+            client, seen, _ = self.client(
+                lambda method, token, etag, code=code: self.http_error(code) if token == 'pool' else self.ok())
+            self.assertEqual(200, client.request('GET', '/actions/runs/1/artifacts')[0])
+            self.assertEqual(['pool', 'launch'], [token for _, token, _ in seen], code)
+            self.assertEqual(1, client.read_fallbacks)
+        client, seen, _ = self.client(lambda method, token, etag: self.http_error(404))
+        with self.assertRaises(gh.urllib.error.HTTPError) as raised:
+            client.request('GET', '/actions/runs/1')
+        self.assertEqual(404, raised.exception.code)
+        self.assertEqual(['pool', 'launch'], [token for _, token, _ in seen])
+
+    def test_a_member_the_launch_token_outranked_is_never_handed_out_again(self):
+        for code in (404, 403, 401):
+            client, seen, _ = self.client(
+                lambda method, token, etag, code=code: self.http_error(code) if token == 'pool' else self.ok(),
+                picks=(('GITHUB_APP', 'pool'), ('GITHUB_APP', 'pool'), ('GITHUB_TOKEN_2', 'pool2')))
+            client.request('GET', '/actions/runs/1/artifacts')
+            client.read_attempted_at -= gh.READ_REPICK_RETRY_SECONDS
+            client.request('GET', '/actions/runs/2')  # the re-pick returns the denied member: refused
+            client.read_attempted_at -= gh.READ_REPICK_RETRY_SECONDS
+            client.request('GET', '/actions/runs/3')
+            self.assertEqual(['pool', 'launch', 'launch', 'pool2'], [token for _, token, _ in seen], code)
+            self.assertEqual({gh.identity('pool')}, client.read_denied)
+        # Both identities answered 404: that is GitHub's answer, and the member keeps serving reads.
+        client, seen, _ = self.client(
+            lambda method, token, etag: self.http_error(404) if len(seen) <= 2 else self.ok())
+        with self.assertRaises(gh.urllib.error.HTTPError):
+            client.request('GET', '/actions/runs/1')
+        client.request('GET', '/actions/runs/2')
+        self.assertEqual(['pool', 'launch', 'pool'], [token for _, token, _ in seen])
+        self.assertEqual(set(), client.read_denied)
+
+    def test_a_bounded_stop_window_reads_with_the_launch_token_only(self):
+        picked = []
+        client, seen, _ = self.client(lambda method, token, etag: self.ok())
+        client.read_picker = lambda: picked.append(1) or ('GITHUB_APP', 'pool')
+        client.until = 1_000_010.0
+        self.assertEqual(['launch'], client.tokens('GET'))
+        client.request('GET', '/actions/runs/1')
+        self.assertEqual(([], [('GET', 'launch', None)]), (picked, seen))
+        client.until = None
+        self.assertEqual(['pool', 'launch'], client.tokens('GET'))
+
+    def test_a_drained_pool_member_asks_the_launch_token_before_the_existing_reset_wait(self):
+        limit = b'{"message": "API rate limit exceeded"}'
+        reset = {'X-RateLimit-Remaining': '0', 'X-RateLimit-Reset': '1000010'}
+        client, seen, pauses = self.client(
+            lambda method, token, etag: self.http_error(403, limit, reset) if token == 'pool' else self.ok())
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(200, client.request('GET', '/actions/runs/1')[0])
+        self.assertEqual(([], ['pool', 'launch']), (pauses, [token for _, token, _ in seen]))
+        # Both identities drained: the unchanged wait until X-RateLimit-Reset, then the pool member first again.
+        calls = []
+
+        def both(method, token, etag):
+            calls.append(token)
+            return self.http_error(403, limit, reset) if len(calls) <= 2 else self.ok()
+
+        client, seen, pauses = self.client(both, picks=(('GITHUB_APP', 'pool'), ('GITHUB_TOKEN_2', 'pool2')))
+        with redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(200, client.request('GET', '/actions/runs/1')[0])
+        self.assertEqual([11.0], pauses)
+        self.assertEqual(11.0, client.rate_limited_seconds)
+        self.assertIn('DEPLOY_GATE_RATE_LIMITED waiting 11s', out.getvalue())
+        self.assertEqual(['pool', 'launch', 'pool2'], calls, 'the drained member is re-picked after the wait')
+
+    def test_etags_and_cached_bodies_are_per_identity_so_a_304_stays_free(self):
+        tags = {'pool': '"p"', 'launch': '"l"'}
+
+        def behave(method, token, etag):
+            if etag == tags[token]:
+                return self.http_error(304)
+            if etag is not None:
+                raise AssertionError(f'{token} was sent another identity\'s ETag')
+            return self.ok(json.dumps({'who': token}).encode(), {'ETag': tags[token]})
+
+        client, seen, _ = self.client(behave)
+        self.assertEqual({'who': 'pool'}, client.json('/actions/runs/1', conditional=True))
+        self.assertEqual({'who': 'pool'}, client.json('/actions/runs/1', conditional=True))
+        self.assertEqual(('GET', 'pool', '"p"'), seen[-1])
+        client.read_token = 'launch'  # the pool now picks the launch identity: its own ETag, never the pool's
+        self.assertEqual({'who': 'launch'}, client.json('/actions/runs/1', conditional=True))
+        self.assertEqual(('GET', 'launch', None), seen[-1])
+        self.assertEqual({'who': 'launch'}, client.json('/actions/runs/1', conditional=True))
+        self.assertEqual(('GET', 'launch', '"l"'), seen[-1])
+
+    def test_the_read_member_is_re_picked_when_low_stale_or_rejected(self):
+        client, seen, _ = self.client(lambda method, token, etag: self.ok(headers={'X-RateLimit-Remaining': '50'}),
+                                      picks=(('GITHUB_APP', 'pool'), ('GITHUB_TOKEN_2', 'pool2')))
+        client.request('GET', '/a')
+        client.request('GET', '/b')  # remaining 50 < READ_LOW_REMAINING, but a re-pick waits a minute
+        self.assertEqual(['pool', 'pool'], [token for _, token, _ in seen])
+        client.read_attempted_at -= gh.READ_REPICK_RETRY_SECONDS
+        client.request('GET', '/c')
+        self.assertEqual(('pool2', 'GITHUB_TOKEN_2'), (seen[-1][1], client.read_name))
+        client, seen, _ = self.client(lambda method, token, etag: self.ok(), picks=(('A', 'pool'),))
+        client.request('GET', '/a')
+        client.read_picked_at -= gh.READ_REPICK_SECONDS
+        client.read_attempted_at -= gh.READ_REPICK_SECONDS
+        client.request('GET', '/b')  # stale, and the pool has nothing better: the old member stays
+        self.assertEqual(['pool', 'pool'], [token for _, token, _ in seen])
+
+    def test_no_picker_or_a_pick_of_the_launch_token_reads_with_the_launch_token(self):
+        client, seen, _ = self.client(lambda method, token, etag: self.ok(), picks=(('GITHUB_TOKEN', 'launch'),))
+        client.request('GET', '/a')
+        self.assertEqual([('GET', 'launch', None)], seen)
+        plain = gh.GitHub('launch', 'acme/rose')
+        self.assertEqual(['launch'], plain.tokens('GET'))
+
+    def test_pick_read_member_uses_core_quota_and_fails_open_to_the_launch_token(self):
+        import github_token_pool as pool
+        calls = []
+
+        def fake_pick(resource, repo_root=None, timeout=None):
+            calls.append((resource, repo_root))
+            return pool.Member('GITHUB_APP', 'pool')
+
+        with patch.object(pool, 'pick_member', fake_pick), patch.dict(os.environ, {'DEPLOY_GATE_GITHUB_POOL': '1'}):
+            self.assertEqual(('GITHUB_APP', 'pool'), gh.pick_read_member(ROOT))
+        self.assertEqual([('core', ROOT)], calls)
+        with patch.object(pool, 'pick_member', side_effect=RuntimeError('probe')), \
+                redirect_stdout(io.StringIO()) as out:
+            self.assertIsNone(gh.pick_read_member(ROOT))
+        self.assertNotIn('pool', out.getvalue().split('(')[0].lower().replace('deploy_gate_github_pool', ''))
+        with patch.object(pool, 'pick_member', fake_pick), patch.dict(os.environ, {'DEPLOY_GATE_GITHUB_POOL': '0'}):
+            self.assertIsNone(gh.pick_read_member(ROOT))
+        self.assertEqual(1, len(calls))
 
 
 class TagPush(unittest.TestCase):
@@ -873,6 +1148,7 @@ class Channel:
     def __init__(self, env, client=None):
         pass
     def get(self, name, leaf):
+        note(op='channel-get', leaf=leaf)  # the observable "launcher is watching its channel" signal
         mode = os.environ['FAKE_MODE']
         if leaf == 'started.json' and mode != 'silent':
             return json.dumps({'transport': gh.TRANSPORT, 'run_id': RUN, 'url': 'u', 'tag': name}).encode()
@@ -968,19 +1244,15 @@ class LauncherStopTest(unittest.TestCase):
         return [json.loads(line) for line in self.log.read_text().splitlines()] if self.log.exists() else []
 
     def launched(self, proc):
-        """Wait until the fake tag push happened (the remote run now exists), never on a fixed sleep."""
-        end = time.monotonic() + 30
-        while not any(r['op'] == 'push' for r in self.rows()):
+        """Wait until the tag push happened (the remote run exists) and the launcher polls its channel."""
+        def watching():
             self.assertIsNone(proc.poll(), 'launcher exited before launching')
-            self.assertLess(time.monotonic(), end, 'launcher never pushed its tag')
-            time.sleep(0.05)
-        time.sleep(0.3)  # a few channel polls: the launcher is now watching
+            ops = [r['op'] for r in self.rows()]
+            return 'push' in ops and ops[ops.index('push'):].count('channel-get') >= 2
+        wait_until(watching, timeout=30, description='launcher pushed its tag and polls its channel')
 
     def wait_result(self, seconds=20):
-        end = time.monotonic() + seconds
-        while not self.result.exists():
-            self.assertLess(time.monotonic(), end, 'launcher wrote no receipt')
-            time.sleep(0.05)
+        wait_until(self.result.exists, timeout=seconds, description='launcher receipt')
         return json.loads(self.result.read_text())
 
     def assert_cancelled_once(self, result, cause):
@@ -1116,6 +1388,9 @@ class WorkflowMirrorCheckout(unittest.TestCase):
             self.assertEqual(log.stderr, '')
             self.assertEqual(log.stdout.strip(), self.git('rev-parse', 'deploy-gates/8vcpu/x^{commit}', cwd=origin).stdout.strip())
             self.assertIn('-c gc.autoDetach=false', script, 'mirror gc must not outlive the step')
+            # Git 2.47+ starts `maintenance run --auto --detach` from fetch; it rewrites the split
+            # commit-graph after the --shared clone chained onto it (hunt round 10, original600).
+            self.assertIn('-c maintenance.autoDetach=false', script, 'mirror maintenance must not outlive the step')
 
 
 
@@ -1180,6 +1455,468 @@ class GateSetupReleaseTools(unittest.TestCase):
             self.assertEqual(second.returncode, 0, second.stderr)
             self.assertIn("flyctl: installing the dependency disk's last good copy", second.stderr)
             self.assertTrue((tmp / 'home/.fly/bin/flyctl').exists())
+
+
+class GateSetupPostgres(unittest.TestCase):
+    """scripts/ci/deploy-gate-setup.sh postgres step, executed with stand-in sudo/systemctl/psql.
+
+    FLAKY ae9ae00c (2026-11-11): the gate VM kept PostgreSQL's stock max_connections=100 while the
+    devbox (scripts/cloud-build.sh) runs 300, so backend-coverage-blackbox's concurrent shard pools
+    were refused mid-gate with "sorry, too many clients already". The step must configure the
+    devbox value before the server restarts and refuse to continue unless the live server reports it.
+    """
+
+    STOCK = 'listen_addresses = localhost\nmax_connections = 100\t\t\t# (change requires restart)\n'
+
+    def run_block(self, tmp, applies=True):
+        text = (ROOT / 'scripts/ci/deploy-gate-setup.sh').read_text()
+        block = text[text.index('step "postgres $PG_MAJOR"'):text.index('# Release binaries (flyctl')]
+        block = block.replace('/etc/postgresql/', f'{tmp}/etc/')
+        conf = tmp / 'etc/16/main/postgresql.conf'
+        conf.parent.mkdir(parents=True)
+        conf.write_text(self.STOCK)
+        live = tmp / 'live'
+        live.write_text('100')  # the server the runner image already started
+        bin_dir = tmp / 'bin'
+        bin_dir.mkdir()
+        stubs = {
+            'sudo': '[ "$1" = -u ] && shift 2\nexec "$@"\n',
+            # A restart makes the server read the config file as it is at that moment.
+            'systemctl': ('[ "$1" = restart ] || exit 0\n' + (
+                f'sed -n "s/^max_connections = \\([0-9]*\\).*/\\1/p" {conf} > {live}\n' if applies else '')),
+            'pg_isready': 'exit 0\n',
+            'psql': f'case "$*" in *"SHOW max_connections"*) cat {live};; esac\n',
+            'createdb': 'exit 0\n',
+        }
+        for name, body in stubs.items():
+            (bin_dir / name).write_text('#!/usr/bin/env bash\n' + body)
+            (bin_dir / name).chmod(0o755)
+        env = {'PATH': f'{bin_dir}:/usr/bin:/bin', 'PG_MAJOR': '16'}
+        result = subprocess.run(['bash', '-c', 'set -euo pipefail\nstep() { :; }\n' + block], cwd=ROOT, env=env,
+                                capture_output=True, text=True, timeout=60)
+        return result, conf.read_text(), live.read_text().strip()
+
+    def test_gate_postgres_runs_the_devbox_connection_ceiling(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            result, conf, live = self.run_block(Path(tmp))
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn('max_connections = 300\n', conf)
+            self.assertEqual(live, '300', 'the restarted server must run the configured ceiling')
+        devbox = re.search(r"max_connections = (\d+)/", (ROOT / 'scripts/cloud-build.sh').read_text())
+        self.assertIsNotNone(devbox)
+        self.assertEqual(devbox.group(1), '300', 'gate VM and devbox Postgres must allow the same clients')
+
+    def test_gate_setup_fails_when_the_server_keeps_the_stock_ceiling(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            result, _, live = self.run_block(Path(tmp), applies=False)
+            self.assertEqual(live, '100')
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('postgres max_connections is 100, want 300', result.stderr)
+
+
+class GitHubTerminalCleanup(unittest.TestCase):
+    """Cleanup reconciliation retains observation loss, even after remote worker PASS."""
+    def setUp(self):
+        import deploy_test_cycle as cycle
+        import deploy_test_github_cleanup as cleanup
+        import hashlib, zipfile
+        self.c, self.m = cycle, cleanup
+        self.tmp = tempfile.TemporaryDirectory(); self.addCleanup(self.tmp.cleanup)
+        self.folder = Path(self.tmp.name)
+        self.source = {'head': 'a' * 40, 'digest': 'b' * 64}
+        self.token = 'same-original-token'
+        self.tag = gh.tag_name(RUNNER, 'semantic-stack', self.token)
+        self.owner = {'transport':'github-actions','run_id':7,'url':'https://github.com/Rose-Ai-Labs/rose/actions/runs/7'}
+        self.request = {'token':self.token,'source':self.source,'gate':'semantic-stack','worker_root':gh.REMOTE_ROOT,'checks':['semantic-stack'],'skips':{}}
+        self.adapter = {**self.request,'cases':{'semantic-stack':'UNVERIFIED'},'complete':False,'cleanup_complete':False,'cleanup_owner':self.owner,
+                        'remote':{'run_id':7,'run_attempt':'1','event_sha':self.source['head'],'tag':self.tag}}
+        self.receipt = {**self.request,'cases':{'semantic-stack':'UNVERIFIED'},'complete':False,'worker_result':str(self.folder/'result.json'),
+                        'log':str(self.folder/'output.log'),'cleanup_owner':{'worker_cleanup_owner':self.owner,'request_token':self.token},'timed_out':True}
+        self.process = {'supervisor_pid':41,'child_pid':42,'native_exit':1,'quiescent':True,'orphaned_children':False,'remaining':[],'error':None,'reaped':[{'pid':42,'status':256}],'term_sent':[42],'timed_out':True}
+        for n, doc in [('request.json',self.request),('result.json',self.adapter),('receipt.json',self.receipt),('output.log.process.json',self.process)]:
+            (self.folder/n).write_text(json.dumps(doc))
+        self.artifact = self.folder/'artifact.zip'
+        native = {**self.request,'complete':True,'cases':{'semantic-stack':'PASS'},'cleanup_complete':True}
+        with zipfile.ZipFile(self.artifact,'w') as z:
+            for n, doc in [('request.json',self.request),('result.json',native),('timing.json',{'worker_finished_at':100,'worker_exit':0})]: z.writestr(n,json.dumps(doc))
+        digest=cycle.sha_file(self.artifact)
+        self.seen={'run':{'id':7,'run_attempt':1,'status':'completed','conclusion':'success','head_sha':self.source['head'],'head_branch':self.tag,'path':'.github/workflows/deploy-gates.yml','event':'push','repository':{'id':10},'head_repository':{'id':10}},
+                   'jobs':{'total_count':1,'jobs':[{'id':8,'run_id':7,'run_attempt':1,'status':'completed','completed_at':'2026-11-09T00:00:00Z','labels':[RUNNER]}]},
+                   'artifacts':{'artifacts':[{'id':9,'name':gh.ARTIFACT,'expired':False,'digest':'sha256:'+digest,'workflow_run':{'id':7,'repository_id':10,'head_repository_id':10,'head_branch':self.tag,'head_sha':self.source['head']}}]}}
+        self.proof={'kind':cleanup.KIND,'token':self.token,'receipt_sha256':cycle.sha_file(self.folder/'receipt.json'),
+                    'original_files':{n:cycle.sha_file(self.folder/n) for n in cleanup.FILES},'artifact':str(self.artifact),
+                    'remote':{'repository':'Rose-Ai-Labs/rose','run_id':7,'run_attempt':1,'job_ids':[8],'artifact_id':9,'artifact_sha256':digest}}
+        self.state={'attempts':[{'results':[self.receipt]}],'failures':[{'id':'failure','gate':'semantic-stack','native_result':'UNVERIFIED','complete':False}],
+                    'phase':'triage','pending':['failure'],'repair_gates':[]}
+        self.mock=self.enterContext(patch.object(cleanup,'observe',side_effect=lambda rid:copy.deepcopy(self.seen)))
+        self.original={p.name:p.read_bytes() for p in self.folder.iterdir() if p.is_file()}
+    def test_exact_terminal_owner_allows_normal_reexecute_without_credit(self):
+        self.assertEqual(self.c.retained_owners(self.state,['semantic-stack']),['semantic-stack'])
+        self.c.reconcile(self.state,'failure',self.proof)
+        self.assertEqual(self.c.retained_owners(self.state,['semantic-stack']),[])
+        self.assertFalse(next(iter(self.state['reconciled_owners'].values()))['credit_granted'])
+        self.c.reexecute(self.state,'failure')
+        self.assertEqual(self.state['failures'][0]['native_result'],'UNVERIFIED')
+        self.assertEqual({p.name:p.read_bytes() for p in self.folder.iterdir() if p.is_file()},self.original)
+    def interrupted_fixture(self):
+        self.receipt['executed'] = True
+        (self.folder/'receipt.json').write_text(json.dumps(self.receipt))
+        self.proof['receipt_sha256'] = self.c.sha_file(self.folder/'receipt.json')
+        self.proof['original_files']['receipt.json'] = self.proof['receipt_sha256']
+        self.state.update(phase='interrupted', source=self.source, failures=[])
+        self.state.pop('pending')
+        self.state['attempts'][-1]['interrupted'] = True
+
+    def test_interrupted_original_token_reconciles_without_inventing_a_failure(self):
+        self.interrupted_fixture()
+        original = copy.deepcopy(self.state['attempts'])
+        self.c.reconcile(self.state,self.token,self.proof)
+        self.assertEqual([],self.state['failures'])
+        self.assertEqual(original,self.state['attempts'])
+        self.assertEqual([],self.c.retained_owners(self.state,['semantic-stack']))
+        self.assertFalse(next(iter(self.state['reconciled_owners'].values()))['credit_granted'])
+
+    def test_interrupted_token_does_not_bypass_source_phase_or_live_remote_checks(self):
+        self.interrupted_fixture()
+        for key,value in [('phase','ready'),('source',{'head':'wrong'}),('running',True)]:
+            before=copy.deepcopy(self.state)
+            self.state[key]=value
+            with self.subTest(key=key),self.assertRaises(ValueError):
+                self.c.reconcile(self.state,self.token,self.proof)
+            self.state=before
+        with self.assertRaises(ValueError):self.c.reconcile(self.state,'wrong-token',self.proof)
+        self.seen['run']['status']='in_progress'
+        with self.assertRaises(ValueError):self.c.reconcile(self.state,self.token,self.proof)
+        self.assertNotIn('reconciled_owners',self.state)
+    def test_local_wait_identity_negatives(self):
+        original=copy.deepcopy(self.process)
+        malformed=[{'reaped':[{'pid':99,'status':0}]},
+                   {'reaped':[{'pid':42,'status':256},{'pid':42,'status':256}]},
+                   {'reaped':[{'pid':42,'status':0}]},
+                   {'reaped':[{'pid':42,'status':127}]},
+                   {'reaped':[{'pid':42,'status':65535}]},
+                   {'reaped':[{'pid':41,'status':0},{'pid':42,'status':256}]},
+                   {'child_pid':True},{'supervisor_pid':True},{'native_exit':True},
+                   {'child_pid':41},{'native_exit':-999},{'native_exit':256}]
+        for change in malformed:
+            with self.subTest(change=change):
+                row={**original,**change}
+                (self.folder/'output.log.process.json').write_text(json.dumps(row))
+                self.proof['original_files']['output.log.process.json']=self.c.sha_file(self.folder/'output.log.process.json')
+                with self.assertRaises(ValueError):self.c.reconcile(self.state,'failure',self.proof)
+        row={**original,'native_exit':-15,'reaped':[{'pid':42,'status':15},{'pid':43,'status':9}]}
+        (self.folder/'output.log.process.json').write_text(json.dumps(row))
+        self.proof['original_files']['output.log.process.json']=self.c.sha_file(self.folder/'output.log.process.json')
+        self.c.reconcile(self.state,'failure',self.proof)
+        self.assertFalse(next(iter(self.state['reconciled_owners'].values()))['credit_granted'])
+
+    def test_wrong_run_attempt_head_tag_live_jobs_and_digest_refuse(self):
+        for group,key,value in [('run','id',True),('run','run_attempt',2),('run','head_sha','c'*40),('run','head_branch','wrong'),('run','status','in_progress')]:
+            with self.subTest(key=key):
+                original=self.seen[group][key];self.seen[group][key]=value
+                with self.assertRaises(ValueError):self.c.reconcile(self.state,'failure',self.proof)
+                self.seen[group][key]=original
+        self.seen['jobs']['jobs'][0]['status']='in_progress'
+        with self.assertRaises(ValueError):self.c.reconcile(self.state,'failure',self.proof)
+        self.seen['jobs']['jobs'][0]['status']='completed';self.seen['artifacts']['artifacts'][0]['digest']='sha256:wrong'
+        with self.assertRaises(ValueError):self.c.reconcile(self.state,'failure',self.proof)
+    def test_original_mutation_and_new_owner_refuse(self):
+        (self.folder/'result.json').write_text('{}')
+        with self.assertRaises(ValueError):self.c.reconcile(self.state,'failure',self.proof)
+        (self.folder/'result.json').write_bytes(self.original['result.json'])
+        newer=copy.deepcopy(self.receipt);newer['token']='new-owner';self.state['attempts'].append({'results':[newer]})
+        with self.assertRaises(ValueError):self.c.reconcile(self.state,'failure',self.proof)
+    def test_stale_certificate_keeps_gate_owned_and_execution_fenced(self):
+        self.c.reconcile(self.state,'failure',self.proof)
+        entry=next(iter(self.state['reconciled_owners'].values()))
+        self.assertFalse(self.m.still_bound(self.state,self.receipt,self.owner,None))
+        for key, value in [('credit_granted',True),('token','wrong'),('owner',{})]:
+            with self.subTest(key=key):
+                original=entry[key];entry[key]=value
+                self.assertFalse(self.m.still_bound(self.state,self.receipt,self.owner,entry))
+                self.assertEqual(self.c.retained_owners(self.state,['semantic-stack']),['semantic-stack'])
+                with self.assertRaisesRegex(ValueError,'cleanup owner'):self.c.reexecute(self.state,'failure')
+                entry[key]=original
+        self.assertEqual({p.name:p.read_bytes() for p in self.folder.iterdir() if p.is_file()},self.original)
+
+    def test_missing_malformed_and_changed_native_evidence_keeps_gate_owned(self):
+        self.c.reconcile(self.state,'failure',self.proof)
+        entry=next(iter(self.state['reconciled_owners'].values()))
+        artifact=self.artifact.read_bytes()
+        self.artifact.unlink()
+        self.assertFalse(self.m.still_bound(self.state,self.receipt,self.owner,entry))
+        self.assertEqual(self.c.retained_owners(self.state,['semantic-stack']),['semantic-stack'])
+        self.artifact.write_bytes(artifact)
+        # Authenticate malformed retained process bytes to exercise bounded JSON rejection,
+        # rather than merely the earlier changed-file hash guard.
+        path=self.folder/'output.log.process.json';path.write_text('{malformed')
+        self.proof['original_files']['output.log.process.json']=self.c.sha_file(path)
+        self.assertFalse(self.m.still_bound(self.state,self.receipt,self.owner,entry))
+        self.assertEqual(self.c.retained_owners(self.state,['semantic-stack']),['semantic-stack'])
+
+    def test_unrelated_programming_errors_propagate(self):
+        self.c.reconcile(self.state,'failure',self.proof)
+        for error in (RuntimeError('unexpected bug'),AssertionError('invariant bug'),ValueError('unrelated value bug')):
+            with self.subTest(error=type(error).__name__),patch.object(self.m,'validate',side_effect=error):
+                with self.assertRaises(type(error)):self.c.retained_owners(self.state,['semantic-stack'])
+
+    def test_expected_observation_refusal_keeps_gate_owned(self):
+        self.c.reconcile(self.state,'failure',self.proof)
+        try:
+            self.m.need(False,'remote unavailable')
+        except ValueError as error:
+            rejection=error
+        with patch.object(self.m,'observe',side_effect=rejection):
+            self.assertEqual(self.c.retained_owners(self.state,['semantic-stack']),['semantic-stack'])
+        self.assertEqual(self.c.retained_owners(self.state,['semantic-stack']),[])
+
+    def test_revalidation_and_remote_drift_refuse(self):
+        self.c.reconcile(self.state,'failure',self.proof)
+        self.seen['run']['run_attempt']=2
+        self.assertEqual(self.c.retained_owners(self.state,['semantic-stack']),['semantic-stack'])
+
+
+    def cancelled_controller_fixture(self):
+        import zipfile
+        name = 'cloudbench-controller'
+        recipe = {'cases': {name: {'command': ['python3', 'scripts/run-cloudbench-controller-local.py'],
+                  'cwd': '.', 'env': {'CONDUCTOR_WORKSPACE_NAME': 'deploy-cloudbench-controller',
+                                      'CONDUCTOR_PORT': '12000'}, 'aggregate': True}}}
+        self.tag = gh.tag_name(RUNNER, name, self.token)
+        self.request.update(gate=name, checks=[name], worker_recipe=recipe)
+        self.adapter.update(gate=name, cases={name:'UNVERIFIED'}, recipe_digest=self.c.digest(recipe))
+        self.adapter['remote'].update(tag=self.tag, stop_cause='SIGTERM',runner_name='exact-runner')
+        command=['python3','scripts/deploy_test_github.py','--runner',RUNNER,
+                 '--worker-script','deploy_test_worker.py','--worker-root',gh.REMOTE_ROOT]
+        self.receipt['command']=command
+        gate = {'name':name,'checks':[name],'worker_recipe':recipe,'command':command,
+                'worker_transport':'github-actions','worker_root':gh.REMOTE_ROOT}
+        self.state.update(source=self.source,plan={'source':self.source,'gates':[gate]},
+                          input_fingerprints={name:'c'*64},environment='d'*64)
+        self.state['failures'][0]['gate'] = name
+        self.receipt.update(gate=name, checks=[name],cases={name:'UNVERIFIED'},cancelled=True,timed_out=False,
+                            native_exit=1,execution_binding={'input_fingerprint':'c'*64,
+                            'contract_digest':self.c.digest(gate),'environment':'d'*64})
+        self.process.update(cancelled=True,timed_out=False)
+        self.seen['run'].update(head_branch=self.tag,conclusion='cancelled')
+        job=self.seen['jobs']['jobs'][0]
+        labels=[('Run gate','cancelled'),('Bundle evidence','success'),('Release dependency mounts','success'),
+                ('Run actions/upload-artifact@v4','success'),('Post Mount dependency disk','success'),
+                ('Post Mount git mirror','success'),('Complete runner','success'),('Complete job','success')]
+        job.update(conclusion='cancelled',runner_id=11,runner_name='exact-runner',steps=[
+            {'name':label,'conclusion':conclusion,'status':'completed','number':i+1,
+             'completed_at':'2026-11-09T00:00:00Z'} for i,(label,conclusion) in enumerate(labels)])
+        self.seen['artifacts']['artifacts'][0]['workflow_run']['head_branch']=self.tag
+        for n,doc in [('request.json',self.request),('result.json',self.adapter),('receipt.json',self.receipt),
+                      ('output.log.process.json',self.process)]: (self.folder/n).write_text(json.dumps(doc))
+        self.proof['receipt_sha256']=self.c.sha_file(self.folder/'receipt.json')
+        self.proof['original_files']={n:self.c.sha_file(self.folder/n) for n in self.m.FILES}
+        with zipfile.ZipFile(self.artifact,'w') as z:
+            for n,doc in [('request.json',self.request),('timing.json',{'job_started_at':100,'extracted_at':101}),
+                          ('bundle.json',{'bytes':0,'skipped':[],'captured':[]})]:z.writestr(n,json.dumps(doc))
+        self.proof['remote']['artifact_sha256']=self.c.sha_file(self.artifact)
+        self.seen['artifacts']['artifacts'][0]['digest']='sha256:'+self.proof['remote']['artifact_sha256']
+        return name
+
+    def test_cancelled_missing_result_controller_certificate_routes_normal_reexecute_without_credit(self):
+        name=self.cancelled_controller_fixture()
+        original=copy.deepcopy(self.state)
+        files={p.name:p.read_bytes() for p in self.folder.iterdir() if p.is_file()}
+        self.assertEqual(self.c.retained_owners(self.state,[name]),[name])
+        self.c.reconcile(self.state,'failure',self.proof)
+        self.assertEqual(self.c.retained_owners(self.state,[name]),[])
+        self.assertFalse(next(iter(self.state['reconciled_owners'].values()))['credit_granted'])
+        self.c.reexecute(self.state,'failure')
+        self.assertIn(name,self.state['repair_gates'])
+        self.assertEqual(self.state['failures'][0]['native_result'],'UNVERIFIED')
+        self.assertIs(self.state['failures'][0]['complete'],False)
+        self.assertEqual(self.state['attempts'],original['attempts'])
+        self.assertEqual({p.name:p.read_bytes() for p in self.folder.iterdir() if p.is_file()},files)
+
+    def test_cancelled_missing_result_refuses_foreign_recipe_owner_job_process_and_artifact(self):
+        import zipfile
+        self.cancelled_controller_fixture()
+        pristine=copy.deepcopy((self.state,self.request,self.adapter,self.receipt,self.process,self.seen,self.proof))
+        files={p.name:p.read_bytes() for p in self.folder.iterdir() if p.is_file()}
+        mutations=[lambda:self.request.update(gate='semantic-stack'),
+                   lambda:self.request['source'].update(head='f'*40),
+                   lambda:self.adapter.update(cleanup_owner={}),
+                   lambda:self.seen['jobs']['jobs'][0].update(status='in_progress'),
+                   lambda:self.seen['jobs']['jobs'][0]['steps'][2].update(conclusion='failure'),
+                   lambda:self.seen['jobs']['jobs'][0].update(runner_name='foreign'),
+                   lambda:self.process.update(child_pid=99),
+                   lambda:self.request['worker_recipe']['cases']['cloudbench-controller'].update(command=['python3','scripts/run-bench-cloud']),
+                   lambda:self.seen['artifacts']['artifacts'][0].update(digest='sha256:forged')]
+        for i,mutate in enumerate(mutations):
+            self.state,self.request,self.adapter,self.receipt,self.process,self.seen,self.proof=copy.deepcopy(pristine)
+            for name,data in files.items():(self.folder/name).write_bytes(data)
+            mutate()
+            for n,doc in [('request.json',self.request),('result.json',self.adapter),('output.log.process.json',self.process)]:
+                (self.folder/n).write_text(json.dumps(doc));self.proof['original_files'][n]=self.c.sha_file(self.folder/n)
+            before=copy.deepcopy(self.state)
+            with self.subTest(control=i),self.assertRaises(ValueError):self.c.reconcile(self.state,'failure',self.proof)
+            self.assertEqual(self.state,before)
+        for control in ('contradictory_result','malformed_bundle','forged_file'):
+            self.state,self.request,self.adapter,self.receipt,self.process,self.seen,self.proof=copy.deepcopy(pristine)
+            for name,data in files.items():(self.folder/name).write_bytes(data)
+            with zipfile.ZipFile(self.artifact) as z:members={n:z.read(n) for n in z.namelist()}
+            if control=='contradictory_result':members['result.json']=json.dumps({'cleanup_complete':True}).encode()
+            elif control=='malformed_bundle':members['bundle.json']=b'[]'
+            else:members['files/unmanifested']=b'forged'
+            with zipfile.ZipFile(self.artifact,'w') as z:
+                for name,data in members.items():z.writestr(name,data)
+            self.proof['remote']['artifact_sha256']=self.c.sha_file(self.artifact)
+            self.seen['artifacts']['artifacts'][0]['digest']='sha256:'+self.proof['remote']['artifact_sha256']
+            before=copy.deepcopy(self.state)
+            with self.subTest(control=control),self.assertRaises(ValueError):self.c.reconcile(self.state,'failure',self.proof)
+            self.assertEqual(self.state,before)
+
+    def test_cancelled_missing_result_external_gate_stays_owned(self):
+        import zipfile
+        for gate in ('semantic-stack','codeagent-smoke','smoke','agentcard-lifecycle'):
+            self.cancelled_controller_fixture()
+            self.request.update(gate=gate,checks=[gate])
+            self.adapter.update(gate=gate,cases={gate:'UNVERIFIED'})
+            self.receipt.update(gate=gate,cases={gate:'UNVERIFIED'})
+            self.state['failures'][0]['gate']=gate
+            self.state['plan']['gates'][0]['name']=gate
+            self.tag=gh.tag_name(RUNNER,gate,self.token)
+            self.adapter['remote']['tag']=self.tag
+            self.seen['run']['head_branch']=self.tag
+            self.seen['artifacts']['artifacts'][0]['workflow_run']['head_branch']=self.tag
+            for n,doc in [('request.json',self.request),('result.json',self.adapter),('receipt.json',self.receipt)]:
+                (self.folder/n).write_text(json.dumps(doc))
+            self.proof['receipt_sha256']=self.c.sha_file(self.folder/'receipt.json')
+            self.proof['original_files']={n:self.c.sha_file(self.folder/n)for n in self.m.FILES}
+            with zipfile.ZipFile(self.artifact,'w') as z:
+                for n,doc in [('request.json',self.request),('timing.json',{'job_started_at':100,'extracted_at':101}),
+                              ('bundle.json',{'bytes':0,'skipped':[],'captured':[]})]:z.writestr(n,json.dumps(doc))
+            self.proof['remote']['artifact_sha256']=self.c.sha_file(self.artifact)
+            self.seen['artifacts']['artifacts'][0]['digest']='sha256:'+self.proof['remote']['artifact_sha256']
+            before=copy.deepcopy(self.state)
+            with self.subTest(gate=gate),self.assertRaises(ValueError):self.c.reconcile(self.state,'failure',self.proof)
+            self.assertEqual(self.state,before)
+
+    def test_cancelled_certificate_survives_current_source_refresh_but_not_original_contract_drift(self):
+        name = self.cancelled_controller_fixture()
+        self.state['ready'] = False
+        self.c.reconcile(self.state, 'failure', self.proof)
+        original = copy.deepcopy(self.state['attempts'])
+        self.state['source'] = {'head': '9' * 40, 'digest': '8' * 64}
+        self.state['plan']['source'] = self.state['source']
+        self.state['plan']['gates'][0]['explanation'] = 'current refreshed selection'
+        self.state['input_fingerprints'][name] = '7' * 64
+        self.state['environment'] = '6' * 64
+        self.assertEqual(self.c.retained_owners(self.state, [name]), [])
+        self.assertEqual(self.state['attempts'], original)
+        pristine = copy.deepcopy(self.state)
+        record = next(iter(self.state['reconciled_owners'].values()))
+        record['original_controller_gate']['worker_recipe']['cases'][name]['command'] = ['foreign']
+        self.assertEqual(self.c.retained_owners(self.state, [name]), [name])
+        self.state = pristine
+        self.c.reexecute(self.state, 'failure')
+        self.assertIn(name, self.state['repair_gates'])
+        self.assertEqual(self.state['attempts'], original)
+        self.assertFalse(self.state['ready'])
+
+
+class GitHubRunnerRetirement(unittest.TestCase):
+    from deploy_test_github_retirement import registered_runners as inventory_reader
+
+    def setUp(self):
+        import deploy_test_github_retirement as retirement
+        import zipfile
+        GitHubTerminalCleanup.setUp(self)
+        self.retirement = retirement
+        self.gate = {'name':'semantic-stack', 'category':'semantic-stack', 'worker_transport':'github-actions',
+                     'command':[sys.executable,str(ROOT/'scripts/deploy_test_github.py')]}
+        self.receipt.update(command=self.gate['command'], native_exit=1, cancelled=True, timed_out=False,
+                            execution_binding={'contract_digest':self.c.digest(self.gate)}, executed=True)
+        (self.folder/'receipt.json').write_text(json.dumps(self.receipt))
+        self.proof.update(kind=retirement.KIND, execution_gate=self.gate,
+                          receipt_sha256=self.c.sha_file(self.folder/'receipt.json'))
+        self.proof['original_files']['receipt.json'] = self.proof['receipt_sha256']
+        with zipfile.ZipFile(self.artifact,'w') as z:
+            z.writestr('request.json',json.dumps(self.request))
+            z.writestr('timing.json',json.dumps({'extracted_at':100}))
+        digest=self.c.sha_file(self.artifact)
+        self.proof['remote']['artifact_sha256']=digest
+        self.seen['artifacts']['artifacts'][0]['digest']='sha256:'+digest
+        self.seen['run']['conclusion']='cancelled'
+        job=self.seen['jobs']['jobs'][0]
+        job['runner_id']=99
+        job['steps']=[{'name':name,'status':'completed','conclusion':'success',
+                       'started_at':start,'completed_at':end} for name,start,end in [
+            ('Complete runner','2026-11-09T00:00:00Z','2026-11-09T00:00:01Z'),
+            ('Complete job','2026-11-09T00:00:01Z','2026-11-09T00:00:02Z')]]
+        self.log=(b'2026-11-09T00:00:00.5Z No active SSH sessions detected. Proceeding with shutdown immediately.\n'
+                  b'2026-11-09T00:00:01.5Z Cleaning up orphan processes\n')
+        self.log_path=self.folder/'job.log';self.log_path.write_bytes(self.log)
+        self.proof['job_logs']={'8':{'path':str(self.log_path),'sha256':self.c.sha_file(self.log_path)}}
+        self.enterContext(patch.object(retirement,'registered_runners',return_value=set()))
+        self.enterContext(patch.object(retirement,'job_log',side_effect=lambda _: self.log))
+
+    def test_missing_result_can_retire_only_the_verified_runner_not_the_test(self):
+        before=copy.deepcopy(self.state['attempts'])
+        self.c.reconcile(self.state,'failure',self.proof)
+        entry=next(iter(self.state['reconciled_owners'].values()))
+        self.assertTrue(entry['runtime_retired'])
+        self.assertFalse(entry['native_cleanup_verified'])
+        self.assertFalse(entry['credit_granted'])
+        self.assertEqual(before,self.state['attempts'])
+        self.assertEqual(['failure'],self.state['pending'])
+        self.assertEqual([],self.c.retained_owners(self.state,['semantic-stack']))
+
+    def test_present_runner_or_missing_provider_teardown_refuses(self):
+        with patch.object(self.retirement,'registered_runners',return_value={99}):
+            with self.assertRaises(ValueError):self.c.reconcile(self.state,'failure',self.proof)
+        for change in ({'status':'in_progress'}, {'conclusion':'failure'}):
+            original=copy.deepcopy(self.seen['jobs']['jobs'][0]['steps'][0])
+            self.seen['jobs']['jobs'][0]['steps'][0].update(change)
+            with self.assertRaises(ValueError):self.c.reconcile(self.state,'failure',self.proof)
+            self.seen['jobs']['jobs'][0]['steps'][0]=original
+
+    def test_fake_or_wrong_time_log_is_not_provider_teardown(self):
+        original=self.log
+        for body in (original.replace(b'00:00:00.5',b'00:10:00.5'), b'No active SSH sessions detected. Proceeding with shutdown immediately.'):
+            self.log=body;self.log_path.write_bytes(body)
+            self.proof['job_logs']['8']['sha256']=self.c.sha_file(self.log_path)
+            with self.assertRaises(ValueError):self.c.reconcile(self.state,'failure',self.proof)
+        self.log=original;self.log_path.write_bytes(b'forged')
+        self.proof['job_logs']['8']['sha256']=self.c.sha_file(self.log_path)
+        with self.assertRaises(ValueError):self.c.reconcile(self.state,'failure',self.proof)
+
+    def test_cloud_or_changed_execution_contract_refuses(self):
+        self.gate['native_cloud']=True
+        self.receipt['execution_binding']['contract_digest']=self.c.digest(self.gate)
+        (self.folder/'receipt.json').write_text(json.dumps(self.receipt))
+        self.proof['receipt_sha256']=self.c.sha_file(self.folder/'receipt.json')
+        self.proof['original_files']['receipt.json']=self.proof['receipt_sha256']
+        with self.assertRaises(ValueError):self.c.reconcile(self.state,'failure',self.proof)
+
+    def test_registered_runner_inventory_requires_complete_unambiguous_pages(self):
+        for documents in ([{'total_count':True,'runners':[]}],
+                          [{'total_count':1,'runners':[]}],
+                          [{'total_count':2,'runners':[{'id':99}]},{'total_count':2,'runners':[]}],
+                          [{'total_count':2,'runners':[{'id':99},{'id':99}]}],
+                          [{'total_count':1,'runners':[{'id':True}]}]):
+            from unittest.mock import Mock
+            client=Mock()
+            client.json.side_effect=documents
+            with self.subTest(documents=documents), patch.object(gh,'GitHub',return_value=client), \
+                    patch.object(gh,'load_token',return_value='fixture-only'):
+                with self.assertRaises(ValueError):
+                    # Call the real implementation, not setUp's isolated observation.
+                    type(self).inventory_reader()
+
+    def test_retirement_revalidates_without_upgrading_cleanup(self):
+        self.c.reconcile(self.state,'failure',self.proof)
+        with patch.object(self.retirement,'registered_runners',return_value={99}):
+            self.assertEqual(['semantic-stack'],self.c.retained_owners(self.state,['semantic-stack']))
+        entry=next(iter(self.state['reconciled_owners'].values()))
+        entry['native_cleanup_verified']=True
+        self.assertEqual(['semantic-stack'],self.c.retained_owners(self.state,['semantic-stack']))
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -235,6 +235,9 @@ def test_grep_tool_schema_exact_contract():
         "pattern",
         "sources",
         "source",
+        "team_id",
+        "owner_user_id",
+        "account_id",
         "role",
         "record_kind",
         "surface",
@@ -291,6 +294,7 @@ def test_grep_tool_schema_exact_contract():
     assert "pattern" not in schema.get("required", [])
 
     removed = {
+        "scope",
         "path",
         "glob",
         "type",
@@ -303,6 +307,34 @@ def test_grep_tool_schema_exact_contract():
         "tool_status",
     }
     assert props.isdisjoint(removed)
+    assert GrepTool.__doc__.splitlines()[:3] == [
+        "Search this user's local records and current agent tree.",
+        "",
+        "- Also covers accounts teammates shared with this user; narrow by owner, team or account.",
+    ]
+    assert "scope" not in GrepTool.__doc__ and "shared_project_agents" not in GrepTool.__doc__
+    descriptions = {
+        name: schema["properties"][name]["description"] for name in ("owner_user_id", "team_id", "account_id")
+    }
+    assert descriptions == {
+        "owner_user_id": "Only this owner's records (ids from the shared data map).",
+        "team_id": "Only accounts shared with this team.",
+        "account_id": 'Only this inbox email ("" = default iMessage account).',
+    }
+
+
+def test_list_agents_tool_schema_exact_contract():
+    """list_agents adds project/owner/team filters for own + team-shared project agents."""
+    from utils.tool_schemas import ListAgentsTool
+
+    schema = ListAgentsTool.model_json_schema()
+    assert set(schema["properties"]) == {
+        "tool", "node", "depth", "cursor", "query", "path_prefix", "project_id", "owner_user_id", "team_id"
+    }
+    assert ListAgentsTool.__doc__.endswith(
+        "With project_id, owner_user_id or team_id it also lists teammates' agents in projects shared with you "
+        "(title and status only)."
+    )
 
 
 # ── WaitForTool validation ─────────────────────────────────────────────
@@ -1258,7 +1290,14 @@ async def test_call_llm_activity_declares_tools_for_the_calling_account():
 
 async def run_all_tests():
     print("tool-schemas blackbox tests:")
+    # Recursive public schemas use a finite native node-table contract.
     r = BlackboxResult()
+    r.record("final_presentation_native_shape", test_final_presentation_native_shape)
+    r.record("response_schema_reasoning_order", test_response_schema_reasoning_precedes_nodes)
+    r.record("response_schema_nodes_legacy_forms", test_response_schema_nodes_name_preserves_legacy_input_forms)
+    r.record("recursive_response_schema_public_native", test_recursive_response_schema_public_and_native_wire)
+    r.record("recursive_response_schema_invalid_graphs", test_recursive_response_schema_wire_rejects_invalid_graphs)
+    await r.record_async("recursive_response_schema_generator", test_recursive_response_schema_generator_to_public)
     r.record(
         "desktop_display_json_arrays_preserve_validation",
         test_desktop_display_decodes_json_arrays_without_changing_stock_or_item_validation,
@@ -1284,6 +1323,7 @@ async def run_all_tests():
     )
     r.record("planner_response_schema_compact", test_planner_response_schema_is_compact)
     r.record("grep_tool_schema_exact_contract", test_grep_tool_schema_exact_contract)
+    r.record("list_agents_tool_schema_exact_contract", test_list_agents_tool_schema_exact_contract)
     # WaitForTool validation
     r.record("wait_for_mutually_exclusive", test_wait_for_tool_mutually_exclusive_raises)
     r.record("wait_for_neither", test_wait_for_tool_neither_raises)
@@ -1365,6 +1405,21 @@ async def run_all_tests():
     return r.all_passed
 
 
+def test_response_schema_reasoning_precedes_nodes():
+    from helpers import llm
+    from providers.rose.schema import build_openai_response_format
+    from utils.response_schema_wire import wire_model
+
+    for internal in (False, True):
+        for title in (False, True):
+            schema = wire_model(internal=internal, reasoning=True, title=title).model_json_schema()
+            assert list(schema["properties"]) == ["reasoning", "nodes", "presentation"] + (["title"] if title else [])
+            ordinary = wire_model(internal=internal, title=title).model_json_schema()
+            assert list(ordinary["properties"]) == ["nodes", "presentation"] + (["title"] if title else [])
+    native = build_openai_response_format(llm._GeneratedResponseSchemaWithTitle)["json_schema"]["schema"]
+    assert list(native["properties"]) == ["reasoning", "nodes", "presentation", "title"]
+
+
 if __name__ == "__main__":
     asyncio.run(run_all_tests())
 
@@ -1399,3 +1454,228 @@ def test_desktop_display_decodes_json_arrays_without_changing_stock_or_item_vali
     assert DisplayRoseDesktopTool.model_validate({"tool": "display", "paths": None}).paths is None
     schema = DisplayRoseDesktopTool.model_json_schema()
     assert schema["properties"]["paths"]["anyOf"] == [{"items": {"type": "string"}, "type": "array"}, {"type": "null"}]
+
+
+def _nested_response_schema_wire():
+    def node(identifier, parent, name, field_type, position=0, required=True):
+        return {"id": identifier, "parent_id": parent, "position": position,
+                "name": name, "type": field_type, "required": required,
+                "nullable": False, "description": name, "constraints": []}
+    return {"nodes": [
+        node("groups", None, "groups", "list[object]"),
+        node("member", "groups", "member", "object"),
+        node("name", "member", "name", "str"),
+        node("file", "member", "document", "file_pointer", 1, False),
+    ]}
+
+
+def test_recursive_response_schema_public_and_native_wire():
+    import json
+    from helpers import llm
+    from helpers.file_resolution import transform_schema_for_remote_session, restore_schema_from_remote_session
+    from providers.rose.schema import build_openai_response_format, prepare_schema_for_openai
+    from utils.tool_schemas import (ResponseSchemaConfig, SpawnAgentTool, SpawnAgentToolNoGP,
+                                   CallPhoneNumberTool, create_agent_action_model, EXECUTE_PHASE_TOOLS)
+
+    # The old public DTO rejects this ordinary nested shape before reaching native transport.
+    canonical = {"fields": [{"name": "groups", "type": "list[object]", "required": True,
+        "properties": [{"name": "member", "type": "object", "properties": [
+            {"name": "name", "type": "str", "minLength": 1},
+            {"name": "document", "type": "file_pointer", "required": False}]}]}]}
+    config = ResponseSchemaConfig.model_validate(canonical)
+    dump = config.model_dump()
+    assert ResponseSchemaConfig.model_validate_json(config.model_dump_json()).model_dump() == dump
+    assert restore_schema_from_remote_session(transform_schema_for_remote_session(dump)) == dump
+    output_model = llm._build_nested_verifier_model("groups", dump["fields"])
+    value = output_model.model_validate({"groups": [{"member": {"name": "Ada"}}]})
+    assert value.groups[0].member.name == "Ada"
+    for model in (ResponseSchemaConfig, SpawnAgentTool, SpawnAgentToolNoGP, CallPhoneNumberTool,
+                  create_agent_action_model(EXECUTE_PHASE_TOOLS), output_model):
+        for builder in (build_openai_response_format, prepare_schema_for_openai, llm.prepare_schema_for_openai):
+            encoded = json.dumps(builder(model))
+            assert '"$ref"' not in encoded and '"$defs"' not in encoded
+    assert "fields" in ResponseSchemaConfig.model_json_schema(mode="serialization")["properties"]
+    assert "Use file_pointer for open-ended multi-attribute collections" in json.dumps(build_openai_response_format(ResponseSchemaConfig))
+    wire = _nested_response_schema_wire()
+    for model, arguments in (
+        (SpawnAgentTool, {"tool": "spawn_agent", "type": "browser", "task_name": "directory",
+                          "start_url": "https://example.test", "goal": "Read the directory"}),
+        (SpawnAgentToolNoGP, {"tool": "spawn_agent", "type": "browser", "task_name": "directory",
+                              "start_url": "https://example.test", "goal": "Read the directory"}),
+        (CallPhoneNumberTool, {"tool": "call_phone_number", "to": "+15555550100",
+                               "system_prompt": "Read the directory"}),
+    ):
+        parsed = model.model_validate({**arguments, "output_schema": wire})
+        assert parsed.output_schema.fields[0].properties[0].properties[0].name == "name"
+
+
+def test_recursive_response_schema_wire_rejects_invalid_graphs():
+    import copy
+    from utils.tool_schemas import ResponseSchemaConfig
+    wire = _nested_response_schema_wire()
+    for invalid in ("duplicate", "orphan", "cycle", "order", "sibling", "empty", "parent", "bounds", "boolean", "unknown", "mixed", "inverted", "duplicate_bound", "negative_bound"):
+        bad = copy.deepcopy(wire)
+        nodes = bad["nodes"]
+        if invalid == "duplicate": nodes.append(copy.deepcopy(nodes[0]))
+        elif invalid == "orphan": nodes[-1]["parent_id"] = "missing"
+        elif invalid == "cycle": nodes[0]["parent_id"] = "member"
+        elif invalid == "order": nodes[-1]["position"] = 8
+        elif invalid == "sibling": nodes[-1]["name"] = "name"
+        elif invalid == "empty": bad["nodes"] = nodes[:1]
+        elif invalid == "parent": nodes[1]["type"] = "str"
+        elif invalid == "bounds": nodes[-1]["constraints"] = [{"kind": "minLength", "value": 3}]
+        elif invalid == "boolean": nodes[-1]["position"] = True
+        elif invalid == "unknown": nodes[-1]["unexpected"] = "ignored?"
+        elif invalid == "mixed": bad["fields"] = []
+        elif invalid == "inverted": nodes[2]["constraints"] = [{"kind": "minLength", "value": 3}, {"kind": "maxLength", "value": 2}]
+        elif invalid == "duplicate_bound": nodes[2]["constraints"] = [{"kind": "minLength", "value": 1}, {"kind": "minLength", "value": 2}]
+        elif invalid == "negative_bound": nodes[2]["constraints"] = [{"kind": "minLength", "value": -1}]
+        try:
+            ResponseSchemaConfig.model_validate(bad)
+        except ValueError:
+            continue
+        raise AssertionError(f"invalid node graph admitted: {invalid}")
+    shuffled = copy.deepcopy(wire)
+    shuffled["nodes"].reverse()
+    assert ResponseSchemaConfig.model_validate(shuffled).model_dump() == ResponseSchemaConfig.model_validate(wire).model_dump()
+    assert ResponseSchemaConfig.model_validate({"nodes": []}).model_dump() == {"fields": []}
+    optional = copy.deepcopy(wire)
+    optional["nodes"][0]["required"] = False
+    assert ResponseSchemaConfig.model_validate(optional).fields[0].required is False
+    nullable = copy.deepcopy(wire)
+    nullable["nodes"][2]["nullable"] = True
+    from helpers.llm import _build_nested_verifier_model
+    parsed = ResponseSchemaConfig.model_validate(nullable).model_dump()
+    verifier = _build_nested_verifier_model("nullable", parsed["fields"])
+    verifier.model_validate({"groups": [{"member": {"name": None}}]})
+    try:
+        verifier.model_validate({"groups": [{"member": {}}]})
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("nullable required field was treated as optional")
+    internal = copy.deepcopy(wire)
+    internal["nodes"][-1]["type"] = "session_file_pointer"
+    try:
+        ResponseSchemaConfig.model_validate(internal)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("internal session pointer leaked into public wire")
+
+
+async def test_recursive_response_schema_generator_to_public():
+    import json
+    from unittest.mock import patch
+    from helpers import llm
+    from providers.rose.schema import build_openai_response_format
+    from utils.tool_schemas import ResponseSchemaConfig
+    wire = {"reasoning": "Preserve the directory structure", "title": "Directory",
+            **_nested_response_schema_wire()}
+
+    class Reply:
+        content = json.dumps(wire)
+        tool_calls = []
+        usage = {"prompt_tokens": 12, "completion_tokens": 24, "from_fast_cache": False}
+
+    class Client:
+        async def collect(self, **kwargs):
+            assert kwargs["response_model"] is llm._GeneratedResponseSchemaWithTitle
+            assert kwargs["pool"] == "rose-1-flash" and kwargs["max_tokens"] == 2000
+            assert kwargs["skip_cache_write"] is True
+            assert '"$ref"' not in json.dumps(build_openai_response_format(kwargs["response_model"]))
+            return Reply()
+
+    with patch.object(llm, "RoseClient", Client):
+        schema, title, usage = await llm._generate_response_schema_with_rose(
+            "Read the directory", agent_id="offline-schema-control", include_title=True)
+    assert title == "Directory" and usage["prompt_tokens"] == 12
+    assert ResponseSchemaConfig.model_validate(schema).fields[0].properties[0].properties[0].name == "name"
+
+
+def test_response_schema_nodes_name_preserves_legacy_input_forms():
+    import json
+    from utils.tool_schemas import ResponseSchemaConfig
+
+    for fields in (
+        {"nodes": "Count graph nodes"},
+        {"nodes": "Count graph nodes", "edges": "Count graph edges"},
+    ):
+        expected = [{"name": name, "description": description, "type": "str", "required": True}
+                    for name, description in fields.items()]
+        direct = ResponseSchemaConfig.model_validate(fields).model_dump()
+        encoded = ResponseSchemaConfig.model_validate(json.dumps(fields)).model_dump()
+        assert direct == encoded
+        for actual, wanted in zip(direct["fields"], expected, strict=True):
+            for key, value in wanted.items():
+                assert actual[key] == value
+    # Actual node-table data still follows strict wire validation, not shorthand coercion.
+    for invalid in ({"nodes": [{"id": "incomplete"}]}, {"nodes": [], "edges": "extra"}):
+        try:
+            ResponseSchemaConfig.model_validate(invalid)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("malformed node envelope was accepted as a legacy map")
+
+
+def test_final_presentation_native_shape():
+    import copy
+    import json
+    from pathlib import Path
+    import jsonschema
+    from helpers.llm import _GeneratedResponseSchemaWithTitle
+    from providers.rose.schema import build_openai_response_format
+    from providers.rose.cerebras import build_cerebras_body
+    from utils.final_presentation import FinalPresentation
+
+    original = json.loads(Path(__file__).with_name("final_presentation_wire_original.json").read_text())
+    response_format = build_openai_response_format(_GeneratedResponseSchemaWithTitle)
+    body = build_cerebras_body(model="qwen-3.8-27b", messages=[], tools=None,
+        tool_choice=None, response_format=response_format, temperature=.3,
+        max_tokens=16000, effort="high")
+    schema = body["response_format"]["json_schema"]["schema"]
+
+    def rejected(value):
+        try:
+            jsonschema.validate(value, schema)
+        except jsonschema.ValidationError:
+            return True
+        return False
+
+    # Actual provider-produced value/null-field object failed canonical parsing.
+    try:
+        _GeneratedResponseSchemaWithTitle.model_validate(original)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("Captured canonical rejection changed")
+    assert rejected(original), "Native format admitted invalid value presentation"
+    report = copy.deepcopy(original)
+    report["presentation"] = {"version": 1, "mode": "report", "field": None, "encoding": None}
+    jsonschema.validate(report, schema)
+    _GeneratedResponseSchemaWithTitle.model_validate(report)
+    report["presentation"] = None
+    jsonschema.validate(report, schema)
+    _GeneratedResponseSchemaWithTitle.model_validate(report)
+
+    for encoding in ("text", "json"):
+        valid = {"nodes": [{"id": "name", "parent_id": None, "position": 0,
+            "name": "name", "type": "str", "required": True, "nullable": False,
+            "description": "Requested name", "constraints": []}],
+            "presentation": {"version": 1, "mode": "value", "field": "name", "encoding": encoding},
+            "reasoning": "One requested name", "title": "Requested Name"}
+        jsonschema.validate(valid, schema)
+        _GeneratedResponseSchemaWithTitle.model_validate(valid)
+        for key in ("field", "encoding"):
+            invalid = copy.deepcopy(valid)
+            invalid["presentation"][key] = None
+            assert rejected(invalid)
+        invalid = copy.deepcopy(valid)
+        invalid["presentation"]["mode"] = "report"
+        assert rejected(invalid)
+
+    assert FinalPresentation.model_validate({"version": 1, "mode": "report"}).model_dump() == {
+        "version": 1, "mode": "report"}
+    assert FinalPresentation.model_validate({"version": 1, "mode": "value", "field": "x", "encoding": "text"}).model_dump() == {
+        "version": 1, "mode": "value", "field": "x", "encoding": "text"}

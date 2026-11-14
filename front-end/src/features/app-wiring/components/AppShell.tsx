@@ -19,6 +19,9 @@
  *   +--> "/open-agent" --> <OpenAgentRedirect /> (durable ?agent-id deep link)
  *   +--> "*" --> <NotFound />
  *
+ * The query cache is the shared, user-scoped appQueryClient (lib/queryClient):
+ * it is dropped whenever the signed-in user changes.
+ *
  * WaitlistGate overlays every route: authenticated users without a redeemed
  * invite code see "You're On The Waitlist!" instead of being fully signed in.
  *
@@ -31,31 +34,32 @@
  */
 
 import { Suspense } from 'react';
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { QueryClientProvider } from '@tanstack/react-query';
 import { BrowserRouter, Routes, Route } from 'react-router-dom';
 import { SpeedInsights } from '@vercel/speed-insights/react';
 import { Analytics } from '@vercel/analytics/react';
 import { TooltipProvider } from '@/components/ui/tooltip';
+import TeamInviteContinuation from '@/components/teams/TeamInviteContinuation';
 import { GlobalControlsLayoutProvider } from '@/components/GlobalControlsLayout';
 import { TopRightControls } from '@/components/TopRightControls';
 import { AppDataProvider } from '@/hooks/useAppData';
 import ErrorBoundary from '@/components/ErrorBoundary';
 import { WaitlistGate } from '@/features/auth';
+import { appQueryClient } from '@/lib/queryClient';
 
 import { AdminSwitcherMount } from './AdminSwitcherMount';
 
 import { ROUTE_TABLE } from '../config';
 
-const queryClient = new QueryClient();
-
 const AppShell = () => (
   <ErrorBoundary name="App Root">
-    <QueryClientProvider client={queryClient}>
+    <QueryClientProvider client={appQueryClient}>
       <AppDataProvider>
         <TooltipProvider>
           <SpeedInsights />
           <Analytics />
           <BrowserRouter>
+            <TeamInviteContinuation />
             <GlobalControlsLayoutProvider>
               <WaitlistGate />
               <TopRightControls>

@@ -1,3 +1,4 @@
+import { externalExecutionOptions } from './routes.externalExecution';
 /**
  * Agents routes — thin controller layer.
  * Parse request, call service, send response.
@@ -136,23 +137,6 @@ router.get(
   })
 );
 
-router.get(
-  '/:id/status',
-  auth,
-  asyncHandler<HybridAuthRequest>(async (req, res) => {
-    try {
-      const result = await queryService.getAgentStatus(req.params.id);
-      if (result === null) {
-        res.status(404).json({ error: 'Agent not found' });
-        return;
-      }
-      res.json(result);
-    } catch (error) {
-      handleRouteError(res, error, 'Failed to get agent status', { agent_id: req.params.id });
-    }
-  })
-);
-
 // ---------------------------------------------------------------------------
 // Lifecycle routes
 // ---------------------------------------------------------------------------
@@ -163,6 +147,8 @@ router.post(
   asyncHandler<HybridAuthRequest>(async (req, res) => {
     try {
       const body = createAgentSchema.parse(req.body);
+      const executionOptions = externalExecutionOptions(req, res, body);
+      if (executionOptions === null) return;
       if (routeGuards.rejectAnonymousCreate(req, res)) return;
       if (await routeGuards.rejectGatedCreate(req, res)) return;
       const userId = req.userId ?? body.user_id;
@@ -171,17 +157,16 @@ router.post(
         return;
       }
       const clientIP = getClientIP(req);
-      // The Rose Mac app's main process stamps its device id on renderer
-      // requests; it is recorded as the agent's origin (C14 local code agents).
-      const originDeviceHeader =
-        req.isInternal === true ? undefined : req.header('x-rose-device-id');
       const result = await lifecycleService.createAgent(
         body,
         userId,
         req.isInternal === true,
         clientIP,
         routeGuards.isBenchmarkRequest(req),
-        originDeviceHeader !== undefined ? { originDeviceHeader } : {}
+        {
+          originDeviceHeader: req.isInternal === true ? undefined : req.header('x-rose-device-id'),
+          ...executionOptions,
+        }
       );
       res.status(201).json(result);
     } catch (error) {

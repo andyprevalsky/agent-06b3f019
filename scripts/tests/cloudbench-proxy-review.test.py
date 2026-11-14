@@ -3,18 +3,26 @@ from pathlib import Path
 import os,subprocess,tempfile,unittest
 ROOT=Path(__file__).resolve().parents[2]
 class ProxyReviewTests(unittest.TestCase):
- def replay(self,body):
+ def native_fixture(self,temp,body):
+  binary=Path(temp)/'bin'/'flyctl'
+  binary.parent.mkdir(exist_ok=True)
+  binary.write_text('#!/usr/bin/env bash\n'+body+'\n')
+  binary.chmod(0o700)
+  return {**os.environ,'PATH':str(binary.parent)+os.pathsep+os.environ['PATH'],
+          'PROXY_NATIVE_FIXTURE':str(binary)}
+ def replay(self,body,flyctl='exec sleep 30'):
   with tempfile.TemporaryDirectory() as temp:
    script='''set -eu
 source "$1"
-D="$2"; APP=offline
+export D="$2"; APP=offline
+[ "$(command -v flyctl)" = "$PROXY_NATIVE_FIXTURE" ] || exit 97
 cloudbench_shared_relay_enabled() { return 1; }
 cloudbench_terminate_and_wait() { kill -TERM "$2" 2>/dev/null || true; wait "$2" 2>/dev/null || true; }
 clock=0; echo 0 > "$D/clock"
 date() { case "$*" in *+%s*) cat "$D/clock";; *) echo replay;; esac; }
 '''+body
-   return subprocess.run(['bash','-c',script,'replay',str(ROOT/'scripts/lib/cloudbench-env.sh'),temp],capture_output=True,text=True,timeout=10)
- def late_collision(self,before_call=''):
+   return subprocess.run(['bash','-c',script,'replay',str(ROOT/'scripts/lib/cloudbench-env.sh'),temp],env=self.native_fixture(temp,flyctl),capture_output=True,text=True,timeout=10)
+ def late_collision(self,before_call='',delay='.04'):
   r=self.replay('''sleep() { local n; n=$(cat "$D/clock"); echo $((n+1)) > "$D/clock"; case "$1" in 0.5) command sleep .01;; *) command sleep .10;; esac; }
 mkfifo "$D/collision-release"
 exec {COLLISION_FD}<>"$D/collision-release"
@@ -64,7 +72,7 @@ rc=0; cloudbench_start_data_plane_proxy 61000 3001 host "$D/proxy.log" result ba
 [ -f "$D/released-after-first-scan" ] || { echo 'late collision phase was not exercised'; exit 92; }
 [ "$(head -n 4 "$D/events")" = "$(printf 'scan\nrelease\npublication\njoin')" ] || { cat "$D/events"; echo 'late collision event order violated'; exit 93; }
 [ "$rc" = 98 ] || { cat "$D/proxy.log"; echo "expected rotation98 got$rc"; exit 1; }
-''')
+''',flyctl="command sleep "+delay+'; IFS= read -r release < "$D/collision-release"; echo "listen tcp: bind: address already in use"; printf "publication\\n" >> "$D/events"; exit 1')
   return r
  def test_collision_reported_after_initial_scan_returns_rotation(self):
   r=self.late_collision();self.assertEqual(r.returncode,0,r.stdout+r.stderr)
@@ -80,17 +88,11 @@ rc=0; cloudbench_start_data_plane_proxy 61000 3001 host "$D/proxy.log" result ba
   self.assertIn('status=1',r.stderr)
   self.assertIn('collision cleanup complete primary=92',r.stderr)
  def test_delayed_collision_is_joined_after_initial_scan(self):
-  original=self.replay
-  def delayed(body):
-   # A child may be descheduled beyond the parent readiness sleeps.
-   # Preserve its original .04 call and every parent polling/clock charge.
-   return original(body.replace('flyctl() { command sleep .04;', 'flyctl() { command sleep .35; command sleep .04;', 1))
-  self.replay=delayed
-  try:self.test_collision_reported_after_initial_scan_returns_rotation()
-  finally:self.replay=original
+  r=self.late_collision(delay='.39')
+  self.assertEqual(r.returncode,0,r.stdout+r.stderr)
+
  def test_last_budget_step_stall_gets_one_fresh_observation(self):
   r=self.replay('''sleep() { local n increment=1; n=$(cat "$D/clock"); [ "$1" != 3 ] || increment=2; echo $((n+increment)) > "$D/clock"; command sleep .01; }
-flyctl() { exec sleep 30; }
 curl() {
  case " $* " in *" -w %{http_code} "*)
   if [ -f "$D/thawed" ]; then printf 204; else echo $(( $(cat "$D/clock") + 537 )) > "$D/clock"; touch "$D/thawed"; printf 000; fi;; esac
@@ -102,7 +104,6 @@ cloudbench_terminate_and_wait 1 "$result"
 ''');self.assertEqual(r.returncode,0,r.stdout+r.stderr)
  def test_repeated_stalls_cannot_reserve_unbounded_probes(self):
   r=self.replay('''sleep() { local n; n=$(cat "$D/clock"); echo $((n+1)) > "$D/clock"; command sleep .01; }
-flyctl() { exec sleep 30; }
 curl() {
  case " $* " in *" -w %{http_code} "*)
   count=$(cat "$D/probes" 2>/dev/null || echo 0); echo $((count+1)) > "$D/probes"
@@ -117,7 +118,6 @@ rc=0; result=''; cloudbench_start_data_plane_proxy 61000 3001 host "$D/proxy.log
   for timeout, expected_calls, expected_rc in ((5, 1, 1), (6, 1, 1), (7, 2, 0)):
    with self.subTest(timeout=timeout):
     r=self.replay(r'''sleep() { local n; n=$(cat "$D/clock"); echo $((n+1)) > "$D/clock"; command sleep .01; }
-flyctl() { exec sleep 30; }
 eval "$(declare -f cloudbench_charge_bounded_step | sed '1s/cloudbench_charge_bounded_step/original_charge/')"
 cloudbench_charge_bounded_step() {
  local before=${!1}
@@ -156,7 +156,6 @@ fi
  else echo $((n+1)) > "$D/clock"; fi
  command sleep .01
 }
-flyctl() { exec sleep 30; }
 curl() { case " $* " in *" -w %{http_code} "*)
  if [ -f "$D/thawed" ]; then printf 204; else printf 000; fi;; esac; }
 rc=0; result=''; cloudbench_start_data_plane_proxy 61000 3001 host "$D/proxy.log" result status 18 || rc=$?
@@ -168,7 +167,6 @@ cloudbench_terminate_and_wait 1 "$result"
 
  def test_short_tail_zero_clock_progress_is_bounded_without_relaunch(self):
   r=self.replay(r'''sleep() { [ "$1" != 2 ] || echo 3 > "$D/clock"; command sleep .01; }
-flyctl() { echo launch >> "$D/launches"; exec sleep 30; }
 eval "$(declare -f cloudbench_charge_bounded_step | sed '1s/cloudbench_charge_bounded_step/original_charge/')"
 cloudbench_charge_bounded_step() {
  local before=${!1}
@@ -188,7 +186,7 @@ rc=0; result=''; cloudbench_start_data_plane_proxy 61000 3001 host "$D/proxy.log
 [ "$rc" = 1 ] && [ -z "$result" ] && [ "$(wc -l < "$D/launches")" = 1 ] || exit 92
 [ "$(tr '\n' ' ' < "$D/probe-limits")" = '2 1 1 ' ] || exit 93
 [ "$(tr '\n' ' ' < "$D/charges")" = '1 2 3 ' ] || exit 94
-''');self.assertEqual(r.returncode,0,r.stdout+r.stderr)
+''',flyctl='echo launch >> "$D/launches"; exec sleep 30');self.assertEqual(r.returncode,0,r.stdout+r.stderr)
 
 
  def test_each_one_two_three_second_tail_observes_same_live_proxy(self):
@@ -201,7 +199,6 @@ rc=0; result=''; cloudbench_start_data_plane_proxy 61000 3001 host "$D/proxy.log
  esac
  command sleep .01
 }
-flyctl() { echo launch >> "$D/launches"; exec sleep 30; }
 curl() {
  case " $* " in *" -w %{http_code} "*)
   while [ "$#" -gt 0 ]; do if [ "$1" = --max-time ]; then shift; echo "$1" >> "$D/probe-limits"; break; fi; shift; done
@@ -212,7 +209,7 @@ rc=0; result=''; cloudbench_start_data_plane_proxy 61000 3001 host "$D/proxy.log
 [ "$rc" = 0 ] && [ -n "$result" ] || { cat "$D/proxy.log"; exit 91; }
 [ "$(wc -l < "$D/launches")" = 1 ] && [ "$(cat "$D/probe-limits")" = "$EXPECTED_LIMIT" ] || exit 92
 cloudbench_terminate_and_wait 1 "$result"
-''')
+''',flyctl='echo launch >> "$D/launches"; exec sleep 30')
     self.assertEqual(r.returncode,0,r.stdout+r.stderr)
 
  def test_invalid_timeout_rejected_before_dispatch(self):
@@ -227,16 +224,16 @@ cloudbench_terminate_and_wait 1 "$result"
   for settle,expected in [('bad','3'),('-1','3'),('1.2.3','3'),('NaN','3'),('1e309','3'),('.5','.5'),('0','0'),('3','3')]:
    with tempfile.TemporaryDirectory() as tmp:
     script='''source "$1"
-D="$2"; echo 0 > "$D/clock"; APP=offline
+export D="$2"; echo 0 > "$D/clock"; APP=offline
+[ "$(command -v flyctl)" = "$PROXY_NATIVE_FIXTURE" ] || exit 97
 cloudbench_shared_relay_enabled(){ return 1; }
 date(){ if [ "$1" = +%s ]; then n=$(cat "$D/clock"); echo "$n"; echo $((n+1)) > "$D/clock"; else echo fixed; fi; }
 sleep(){ printf '%s\\n' "$1" >> "$D/sleeps"; }
-flyctl(){ return 1; }
 curl(){ return 0; }
 cloudbench_terminate_and_wait(){ wait "$2" 2>/dev/null || true; }
 cloudbench_start_data_plane_proxy 1 2 host "$D/proxy.log" pid backend 1 || true
 '''
-    r=subprocess.run(['bash','-c',script,'test',str(ROOT/'scripts/lib/cloudbench-env.sh'),tmp],env={**os.environ,'CLOUDBENCH_PROXY_POST_PROBE_SETTLE_SECONDS':settle},capture_output=True,text=True,timeout=5)
+    r=subprocess.run(['bash','-c',script,'test',str(ROOT/'scripts/lib/cloudbench-env.sh'),tmp],env={**self.native_fixture(tmp,'exit 1'),'CLOUDBENCH_PROXY_POST_PROBE_SETTLE_SECONDS':settle},capture_output=True,text=True,timeout=5)
     self.assertEqual(r.returncode,0,r.stderr);values=(Path(tmp)/'sleeps').read_text().splitlines();self.assertIn(expected,values);self.assertNotIn(settle,values) if settle!=expected else None
 
 if __name__=='__main__':unittest.main()

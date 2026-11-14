@@ -17,6 +17,7 @@ export async function createOrGetWalletFunding(data: {
   amountCents: number;
   currency: string;
   idempotencyKey: string;
+  cardProviderRail?: 'v2';
 }) {
   return prisma.purchaseWalletFunding.upsert({
     where: { purchaseId: data.purchaseId },
@@ -28,6 +29,7 @@ export async function createOrGetWalletFunding(data: {
       currency: data.currency,
       idempotencyKey: data.idempotencyKey,
       status: PurchaseWalletFundingStatus.PENDING,
+      ...(data.cardProviderRail ? { metadata: { cardProviderRail: data.cardProviderRail } } : {}),
     },
     update: {},
   });

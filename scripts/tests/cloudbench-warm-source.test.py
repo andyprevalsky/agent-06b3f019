@@ -19,12 +19,15 @@ import sys
 import tempfile
 import threading
 import time
+
 import unittest
 import uuid
 from pathlib import Path
 from urllib.parse import urlparse
 
 ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / "scripts" / "lib"))
+from condition_wait import wait_until
 CLI = ROOT / "scripts" / "cloudbench-warm-source.py"
 NODE_A, PY_A = "a" * 64, "b" * 64
 NODE_B, PY_B = "c" * 64, "d" * 64
@@ -154,6 +157,8 @@ def serve(fake):
             status, payload = fake.handle(self.command, self.path, body, self.headers.get("fly-machine-lease-nonce"))
             raw = b"" if payload is None else json.dumps(payload).encode()
             self.send_response(status)
+            if status == 429:
+                self.send_header("Retry-After", "0")
             self.send_header("Content-Length", str(len(raw)))
             self.end_headers()
             self.wfile.write(raw)
@@ -192,6 +197,48 @@ class FakeApiCase(unittest.TestCase):
 
 
 class WarmSource(FakeApiCase):
+    def test_metadata_write_backs_off_through_a_rate_limited_burst(self):
+        # PR #1928 smoke: 13 concurrent jobs wrote last-used metadata on one warm source and Fly answered
+        # 429; the write retries with backoff, and a 429 that never clears still fails the selection.
+        mid = self.donor
+        self.fake.add_machine(mid, "cloudbench-warm", "stopped")
+        real = self.fake.handle
+        throttled = {"left": 2}
+
+        def handle(method, path, body, nonce):
+            if "/metadata/" in path and method == "POST" and throttled["left"] > 0:
+                throttled["left"] -= 1
+                return 429, {"error": "rate limited"}
+            return real(method, path, body, nonce)
+
+        self.fake.handle = handle
+        self.api.write_metadata(mid, self.mod["LAST_USED_KEY"], "123")
+        self.assertEqual("123", self.meta(mid)[self.mod["LAST_USED_KEY"]])
+        self.assertEqual(0, throttled["left"])
+        throttled["left"] = self.mod["RATE_LIMIT_ATTEMPTS"]
+        with self.assertRaisesRegex(self.mod["WarmSourceError"], "HTTP 429"):
+            self.api.write_metadata(mid, self.mod["LAST_USED_KEY"], "456")
+
+    def test_ensure_accepts_a_peer_fresh_last_used_when_fly_keeps_throttling(self):
+        # PR #1928 smoke: one of 13 jobs still got 429 after the client's backoff. A peer's write in the same
+        # burst keeps the set fresh, so ensure() succeeds; a stale value still fails the selection.
+        set_id, machine_name, _ = self.mod["names"](NODE_A, PY_A)
+        mid = "0c0000000000bb"
+        self.fake.add_machine(mid, machine_name, "stopped", metadata={
+            self.mod["SET_KEY"]: set_id, self.mod["LAST_USED_KEY"]: str(int(time.time()) - 30)})
+        real = self.fake.handle
+
+        def handle(method, path, body, nonce):
+            if "/metadata/" in path and method == "POST":
+                return 429, {"error": "rate limited"}
+            return real(method, path, body, nonce)
+
+        self.fake.handle = handle
+        self.assertEqual(machine_name, self.mod["ensure"](self.api, NODE_A, PY_A, "devbox-1")[1])
+        self.meta(mid)[self.mod["LAST_USED_KEY"]] = str(int(time.time()) - 3600)
+        with self.assertRaisesRegex(self.mod["WarmSourceError"], "HTTP 429"):
+            self.mod["ensure"](self.api, NODE_A, PY_A, "devbox-1")
+
     def test_names_are_per_dependency_set_and_never_task_shaped(self):
         set_a, machine_a, volume_a = self.mod["names"](NODE_A, PY_A)
         set_b, machine_b, _ = self.mod["names"](NODE_B, PY_B)
@@ -266,13 +313,15 @@ class WarmSource(FakeApiCase):
                                            "devbox-1", "--ttl", "4", "--renew", "1", "--parent-pid",
                                            str(parent.pid), "--ready", str(ready)], env=env,
                                           stderr=subprocess.PIPE, text=True)
-                deadline = time.time() + 20
-                while not ready.exists() and time.time() < deadline:
-                    time.sleep(0.2)
-                self.assertTrue(ready.exists())
-                first = int(self.meta(self.donor)["rose_cloudbench_warm_claim_" + set_a].split()[1])
-                time.sleep(3)
-                renewed = int(self.meta(self.donor)["rose_cloudbench_warm_claim_" + set_a].split()[1])
+                wait_until(ready.exists, timeout=20, description="claim hold ready file")
+                claim = "rose_cloudbench_warm_claim_" + set_a
+                first = int(self.meta(self.donor)[claim].split()[1])
+
+                def renewed_expiry():
+                    value = int(self.meta(self.donor)[claim].split()[1])
+                    return value if value > first else None
+
+                renewed = wait_until(renewed_expiry, timeout=20, description="claim renewed past its first expiry")
                 self.assertGreater(renewed, first)
                 self.assertFalse(self.mod["claim_acquire"](self.api, self.donor, set_a, "devbox-2", 600, 0))
             finally:

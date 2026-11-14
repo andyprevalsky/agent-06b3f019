@@ -47,7 +47,11 @@ function hasIdempotentKind(params: IdempotentMessageParams): boolean {
   }
   if (params.role === 'ASSISTANT') return params.metadata?.source === 'display';
   if (params.role !== 'TOOL') return false;
-  return params.metadata?.isDirectCodeTurn === true || params.metadata?.isCodeTranscript === true;
+  return (
+    params.metadata?.isDirectCodeTurn === true ||
+    params.metadata?.isCodeTranscript === true ||
+    params.metadata?.action_type === 'code_resume_config'
+  );
 }
 
 /** Row id for one (agent, key) write. */

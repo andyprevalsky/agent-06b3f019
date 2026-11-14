@@ -18,7 +18,11 @@ import { createLogger } from '../../providers/logger';
 import { StaleParentWorkflowGenerationError } from '../../providers/workflowGeneration';
 import * as batchService from './agentBatchService';
 import { WorldModelModeAccessError } from './agentExecutionMode';
-import { AgentProjectNotFoundError, AgentPlacementConflictError } from './agentProject';
+import {
+  AgentProjectNotFoundError,
+  AgentPlacementConflictError,
+  agentProjectNotFoundBody,
+} from './agentProject';
 import { batchCreateAgentsSchema } from './types';
 import { rejectAnonymousCreate, rejectGatedCreate } from './routes.guards';
 
@@ -48,7 +52,7 @@ function handleRouteError(res: Response, error: unknown, msg: string): void {
     return;
   }
   if (error instanceof AgentProjectNotFoundError) {
-    res.status(404).json({ error: error.message });
+    res.status(404).json(agentProjectNotFoundBody(error));
     return;
   }
   log.error(msg, { error: error instanceof Error ? error.message : String(error) });

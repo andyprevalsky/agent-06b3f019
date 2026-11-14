@@ -11,6 +11,7 @@
 
 import { GREP_TOOL_DEFINITION } from '../grepTool';
 import { MAX_CHAT_SEARCH_ROUNDS } from './routerDecision';
+import { DIRECT_ANSWER_CONTRACT } from './routerDecisionJsonSchema';
 
 // ============================================
 // PHASE PROMPT MIRRORS
@@ -63,7 +64,7 @@ The beginning of your context might have information generated from the PLAN pha
 // search rounds are spent no further search is offered. Every other section is
 // shared, so the stages cannot drift apart.
 // ============================================
-const ROUTER_DIRECT_ANSWER = `1. direct_answer - Simple questions you can answer directly (greetings, explanations, creative writing)`;
+const ROUTER_DIRECT_ANSWER = `1. direct_answer - ${DIRECT_ANSWER_CONTRACT}`;
 
 const ROUTER_WEB_SEARCH = `2. web_search - Current information needed (news, prices, facts, recent events). Give one or more queries; they run in parallel, and you route again once their results arrive`;
 
@@ -108,7 +109,7 @@ const ROUTER_AFTER_SEARCH_STEP = `Step 2: Do the search results contain what the
 
 const ROUTER_SEARCH_BUDGET_SPENT_ACTIONS = `This turn's searches have already run; their results are the latest [Tool Result] messages. Chat has used its ${MAX_CHAT_SEARCH_ROUNDS} rounds of searches for this turn, so web_search and grep are not available now.
 
-1. direct_answer - Answer from the search results
+${ROUTER_DIRECT_ANSWER}
 2. ${ROUTER_ESCALATE}`;
 
 const ROUTER_SEARCH_BUDGET_SPENT_STEP = `Step 2: Do the search results contain what the user asked for?

@@ -165,13 +165,16 @@ normalize_conductor_workspace_env() {
 
   pwd_physical="$(cd "$PWD" && pwd -P)"
   deploy_worktree_env="$pwd_physical/.context/deploy-worktree.env"
-  if [ -f "$deploy_worktree_env" ] && [ "${BENCHMARK_ISOLATED_RUN:-false}" != "true" ]; then
-    # /descend-created deploy worktrees are not registered with Conductor and
+  if [ -f "$deploy_worktree_env" ] && [ "${BENCHMARK_ISOLATED_RUN:-false}" != "true" ] \
+    && [ "${ROSE_STABILITY_UNIT_IDENTITY:-}" != "1" ]; then
+    # Prepared deploy worktrees are not registered with Conductor and
     # otherwise inherit their controller's identity and port range. Rehydrate
     # the durable child identity on every new shell before resolving resources.
     # A nested benchmark run already owns a separately reserved identity and
     # port range; rehydrating the parent here would collapse both stacks onto
-    # the deploy database.
+    # the deploy database. So does a new-test stability unit
+    # (select_affected_tests.py --stability): each concurrent backend unit owns
+    # its own victoria_<identity> database.
     . "$deploy_worktree_env"
     if [ "${ROSE_DEPLOY_WORKTREE_PATH:-}" != "$pwd_physical" ]; then
       echo "Deploy worktree config belongs to ${ROSE_DEPLOY_WORKTREE_PATH:-unknown}, not $pwd_physical." >&2
@@ -208,6 +211,23 @@ normalize_conductor_workspace_env() {
     export CONDUCTOR_WORKSPACE_NAME="$actual_name"
   fi
   export CONDUCTOR_WORKSPACE_PATH="$workspace_physical"
+}
+
+# Usage: benchmark_system_pg_db_name <native run id>
+# PostgreSQL truncates identifiers after63bytes. Hash long native identities
+# before creation so sibling worlds cannot share the truncated prefix.
+benchmark_system_pg_db_name() {
+  python3 - "${1:?benchmark run id required}" <<'PY_BENCHMARK_DATABASE'
+import hashlib
+import re
+import sys
+
+run_id = sys.argv[1]
+name = "victoria_bench_" + re.sub(r"[^A-Za-z0-9]", "_", run_id)
+if len(name) > 63:
+    name = name[:46] + "_" + hashlib.sha256(run_id.encode()).hexdigest()[:16]
+print(name)
+PY_BENCHMARK_DATABASE
 }
 
 # Usage: workspace_system_pg_db_name [root]
@@ -287,7 +307,7 @@ resolve_temporal_task_queue() {
 # DIFFERENT running container that already binds that host port (empty if none).
 #
 # This guards against a foreign CONDUCTOR_PORT (e.g. one leaked into a shell by
-# a /descend or benchmark run whose mismatched CONDUCTOR_WORKSPACE_NAME was
+# a benchmark run whose mismatched CONDUCTOR_WORKSPACE_NAME was
 # normalized away here) deriving the wrong LOCAL_DB_PORT and clobbering a
 # sibling workspace's database. Only running containers actually bind the host
 # port, so `docker ps` (not `-a`) is the correct input.
@@ -307,12 +327,40 @@ db_port_conflict_owner() {
 # Agent Display iframes keep loading /usercontent from the loopback backend the
 # local frontend already uses. An explicit ROSE_UI_PUBLISH_BASE_URL wins.
 export_sandbox_backend_base_url() {
-  [ -n "${ROSE_UI_PUBLISH_BASE_URL:-}" ] && return 0
-  case "${PUBLIC_BASE_URL:-}" in
-    https://*) ;;
-    *) return 0 ;;
-  esac
-  export ROSE_UI_PUBLISH_BASE_URL="${PUBLIC_BASE_URL%/}"
+  if [ -n "${ROSE_UI_PUBLISH_BASE_URL:-}" ]; then
+    # Ordinary stacks retain explicit overrides. A run-owned tunnel cannot
+    # silently send code-agent callbacks to a different stack.
+    [ -n "${BENCHMARK_PUBLIC_TUNNEL_RUN_ID:-}" ] || return 0
+    if ! CALLBACK_CONFIGURED="$ROSE_UI_PUBLISH_BASE_URL" CALLBACK_OWNED="${PUBLIC_BASE_URL:-}" python3 - <<'PY'
+import os
+from urllib.parse import urlsplit
+
+def origin(value):
+    parsed = urlsplit(value)
+    if (parsed.scheme != 'https' or not parsed.hostname or parsed.username is not None
+            or parsed.password is not None or parsed.path not in ('', '/')
+            or parsed.query or parsed.fragment):
+        raise ValueError('not an HTTPS origin base')
+    return parsed.scheme, parsed.hostname, parsed.port if parsed.port is not None else 443
+
+try:
+    owned = origin(os.environ['CALLBACK_OWNED'])
+    valid = owned[0] == 'https' and origin(os.environ['CALLBACK_CONFIGURED']) == owned
+except ValueError:
+    valid = False
+raise SystemExit(0 if valid else 1)
+PY
+    then
+      echo "Run-scoped callback origin must match the owned public tunnel" >&2
+      return 1
+    fi
+  else
+    case "${PUBLIC_BASE_URL:-}" in
+      https://*) ;;
+      *) return 0 ;;
+    esac
+    export ROSE_UI_PUBLISH_BASE_URL="${PUBLIC_BASE_URL%/}"
+  fi
   if [ -z "${USERCONTENT_BASE_URL:-}" ] && [ -n "${BACKEND_URL:-}" ]; then
     export USERCONTENT_BASE_URL="$BACKEND_URL"
   fi

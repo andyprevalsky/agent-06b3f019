@@ -27,6 +27,7 @@ import type { FilePointer } from '../../providers/storage';
 import * as service from './service';
 import { registerCodeSessionRoutes, sendCodeSessionError } from './routes.codeSessions';
 import { registerCodeInspectRoutes } from './routes.codeInspect';
+import { GithubRepoRefNotFoundError } from '../../providers/githubRepos/resolve';
 import { AgentOwnerMismatchError, MissingUserIdError, GitHubAccessDeniedError } from './service';
 import {
   LocalTargetUnavailableError,
@@ -56,6 +57,7 @@ async function createSessionForTarget(body: unknown) {
     goal,
     attachments,
     github_repo_url,
+    github_repo_ref,
     user_id,
     code_session_id,
     fresh_conversation,
@@ -66,6 +68,7 @@ async function createSessionForTarget(body: unknown) {
     device_id,
     task_name,
     cli_settings,
+    resume_config,
   } = createSessionSchema.parse(body);
   if (target === 'local') {
     const local = await createLocalCodeSessionResponse({
@@ -75,6 +78,9 @@ async function createSessionForTarget(body: unknown) {
       expectedUserId: user_id,
       deviceId: device_id,
       taskName: task_name ?? null,
+      cliSettings: cli_settings,
+      resumeConfig: resume_config,
+      leaseOwner: lease_owner,
     });
     return { ...local, project: null };
   }
@@ -83,6 +89,7 @@ async function createSessionForTarget(body: unknown) {
     goal,
     attachments: attachments as FilePointer[] | undefined,
     github_repo_url,
+    github_repo_ref,
     user_id,
     code_session_id,
     fresh_conversation,
@@ -91,6 +98,7 @@ async function createSessionForTarget(body: unknown) {
     project_id,
     task_name,
     cli_settings,
+    resume_config,
   });
 }
 
@@ -141,6 +149,10 @@ router.post(
           error: error.detail,
           code: 'GITHUB_ACCESS_DENIED',
         });
+        return;
+      }
+      if (error instanceof GithubRepoRefNotFoundError) {
+        res.status(403).json({ error: error.message, code: 'GITHUB_ACCESS_DENIED' });
         return;
       }
       if (error instanceof ProjectNotFoundForSessionError) {

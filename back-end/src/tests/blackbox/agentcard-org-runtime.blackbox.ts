@@ -5,6 +5,9 @@ import {
   AgentCardOrgRuntime,
   AgentCardOrgRuntimeError,
 } from '../../providers/agentcard/org-runtime';
+import { resolveBenchmarkCardholderId } from '../../providers/agentcard/benchmark-float';
+import { assertProviderUnauthorizedIsNeverReplayedWithoutBackoff } from './agentcard-org-runtime-throttle-401.cases';
+import { assertTransportRecoveryContract } from './agentcard-org-runtime-transport.cases';
 
 const CREDENTIAL_ENV = [
   'AGENTCARD_ORG_MCP_ACCESS_TOKEN',
@@ -22,6 +25,8 @@ async function main(): Promise<void> {
     for (const name of CREDENTIAL_ENV) delete process.env[name];
     process.env.AGENTCARD_ORG_OAUTH_CLIENT_ID = 'blackbox-client';
     process.env.AGENTCARD_ORG_OAUTH_CLIENT_SECRET = 'blackbox-secret';
+
+    await assertTransportRecoveryContract();
 
     let tokenRequests = 0;
     const seenTokens: string[] = [];
@@ -148,15 +153,15 @@ async function main(): Promise<void> {
     );
     assert.equal(
       outageRequests,
-      10,
-      'a sustained outage adds exactly 4 single-request flap steps to the previous 6 requests'
+      5,
+      'a sustained outage sends one request and then exactly 4 single-request backoff steps'
     );
 
-    // The flap window never shrinks the previous auth retry: with the caller's shared deadline
-    // already spent, a read still gets its 6 immediate attempts, and a 403 never enters the window.
-    for (const [status, deadlineAtMs] of [
-      [401, Date.now()],
-      [403, undefined],
+    // With the caller's shared deadline already spent, a provider 401 (a throttle answer) is not
+    // replayed at all; a 403 keeps its 6 immediate attempts and never enters the window.
+    for (const [status, deadlineAtMs, expectedRequests] of [
+      [401, Date.now(), 1],
+      [403, undefined, 6],
     ] as const) {
       const boundedClock = fakeClock();
       let boundedRequests = 0;
@@ -175,12 +180,16 @@ async function main(): Promise<void> {
         () => boundedRuntime.callTool('get_card', { card_id: 'card-1' }, deadlineAtMs),
         (error: unknown) => error instanceof AgentCardOrgRuntimeError && error.status === status
       );
-      assert.equal(boundedRequests, 6, `HTTP ${status} read must keep its 6 immediate attempts`);
+      assert.equal(
+        boundedRequests,
+        expectedRequests,
+        `HTTP ${status} read must send exactly ${expectedRequests} request(s)`
+      );
       assert.deepEqual(boundedClock.sleeps, [], `HTTP ${status} read must not enter the window`);
     }
 
-    // Mutations are never replayed by the read auth-flap window: their existing retry budget
-    // (3 HTTP-401 retries x 1 client-credential retry) is unchanged and they never sleep on it.
+    // Mutations never enter the read auth-flap window: a provider 401 gets exactly one replay,
+    // after one 1 s backoff step (it used to be 6 back-to-back requests inside the throttle).
     const mutationClock = fakeClock();
     const mutationRequests: string[] = [];
     const mutationRuntime = new AgentCardOrgRuntime(
@@ -196,10 +205,16 @@ async function main(): Promise<void> {
       (error: unknown) =>
         error instanceof AgentCardOrgRuntimeError && error.code === 'agentcard_org_mcp_unauthorized'
     );
-    assert.equal(mutationRequests.length, 6, 'a mutation must keep its existing auth retry count');
-    assert.deepEqual(mutationClock.sleeps, [], 'a mutation must never enter the read flap window');
+    assert.equal(mutationRequests.length, 2, 'a mutation replays a provider 401 exactly once');
+    assert.deepEqual(
+      mutationClock.sleeps,
+      [1_000],
+      'a mutation backs off once, outside the window'
+    );
 
     console.log('PASS AgentCard org reads ride out a bounded provider auth flap');
+
+    await assertProviderUnauthorizedIsNeverReplayedWithoutBackoff();
 
     // Regression (smoke agent-payment-idempotent-abandonment, PR #1775 deploy, agent 2c6b3ffd,
     // 2026-11-08 02:08:26-31Z): the second browser's reuse lookup read get_card_details, received
@@ -233,7 +248,8 @@ async function main(): Promise<void> {
       async () => {
         observedRequests += 1;
         if (observedRequests <= 2) return structuredThrottle();
-        if (observedRequests <= 8) return providerUnauthorized();
+        // Three rejections span two backoff steps (each replay of a provider 401 now backs off).
+        if (observedRequests <= 5) return providerUnauthorized();
         return liveCardResponse();
       },
       observedClock
@@ -243,7 +259,7 @@ async function main(): Promise<void> {
       liveCard,
       'the observed throttle-then-rejection read must recover'
     );
-    assert.equal(observedRequests, 9, 'the observed read must recover on its first clear request');
+    assert.equal(observedRequests, 6, 'the observed read must recover on its first clear request');
 
     // Hypothesised continuation, not observed: the window is still throttled when the rejection
     // clears. A throttle after the rejection must keep backing off instead of ending the read.
@@ -255,8 +271,8 @@ async function main(): Promise<void> {
       async () => {
         continuationRequests += 1;
         if (continuationRequests <= 2) return structuredThrottle();
-        if (continuationRequests <= 8) return providerUnauthorized();
-        if (continuationRequests <= 10) return structuredThrottle();
+        if (continuationRequests <= 5) return providerUnauthorized();
+        if (continuationRequests <= 7) return structuredThrottle();
         return liveCardResponse();
       },
       continuationClock
@@ -266,7 +282,7 @@ async function main(): Promise<void> {
       liveCard,
       'a read throttled again after the rejection must keep retrying while its budget remains'
     );
-    assert.equal(continuationRequests, 11, 'the read must recover on the first clear window');
+    assert.equal(continuationRequests, 8, 'the read must recover on the first clear window');
     assert.ok(
       continuationClock.now() - continuationStartedAtMs <= 30_000,
       'the read must stay inside the one 30 s rate-limit budget'
@@ -371,6 +387,156 @@ async function main(): Promise<void> {
     assert.equal(mutationThrottleRequests, 3, 'a mutation must keep its three throttle attempts');
 
     console.log('PASS AgentCard org reads keep backing off a throttle within the budget');
+    // The org tool defaults to the newest 50 records. A verified preferred identity may be older.
+    // Synthetic identities retain the actually observed content + structuredContent envelope.
+    const inventory = Array.from({ length: 101 }, (_, index) => ({
+      id: `inventory-${index}`,
+      email: index === 100 ? 'agentcard-benchmark@roselabs.ai' : `fixture-${index}@example.test`,
+    }));
+    const pageRequests: Array<Record<string, unknown>> = [];
+    const statusIds: string[] = [];
+    const deadlines: Array<number | undefined> = [];
+    const inventoryRuntime = new AgentCardOrgRuntime(undefined, async (_input, init) => {
+      const request = JSON.parse(String(init?.body)) as {
+        params: { name: string; arguments: Record<string, unknown> };
+      };
+      const { name, arguments: args } = request.params;
+      let structuredContent: Record<string, unknown>;
+      if (name === 'list_cardholders') {
+        pageRequests.push(args);
+        const limit = typeof args.limit === 'number' ? args.limit : 50;
+        const offset = typeof args.offset === 'number' ? args.offset : 0;
+        const cardholders = inventory.slice(offset, offset + limit);
+        structuredContent = {
+          message: `${inventory.length} cardholder(s); showing ${cardholders.length}.`,
+          cardholders,
+          total: inventory.length,
+        };
+      } else {
+        assert.equal(name, 'get_cardholder_kyc_status', 'resolution must remain read-only');
+        const id = String(args.cardholder_id);
+        statusIds.push(id);
+        structuredContent = {
+          message: 'Synthetic verification result',
+          status: id === 'inventory-100' ? 'verified' : 'not_started',
+        };
+      }
+      return new Response(
+        JSON.stringify({
+          jsonrpc: '2.0',
+          id: 1,
+          result: {
+            content: [{ type: 'text', text: JSON.stringify(structuredContent) }],
+            structuredContent,
+          },
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } }
+      );
+    });
+    const preferred = await resolveBenchmarkCardholderId([], (name, args, deadlineAtMs) => {
+      deadlines.push(deadlineAtMs);
+      return inventoryRuntime.callTool(name, args, deadlineAtMs);
+    });
+    assert.equal(
+      preferred,
+      'inventory-100',
+      'verified preference beyond the first 100 must resolve'
+    );
+    assert.deepEqual(pageRequests, [
+      { limit: 100, offset: 0 },
+      { limit: 100, offset: 100 },
+    ]);
+    assert.deepEqual(
+      statusIds,
+      ['inventory-100'],
+      'preference order applies to the full inventory'
+    );
+    assert.equal(
+      new Set(deadlines).size,
+      1,
+      'all pagination and KYC reads share the original deadline'
+    );
+
+    const incompleteInventories = [
+      {
+        label: 'duplicate page',
+        pages: [
+          { cardholders: [{ id: 'first' }], total: 2 },
+          { cardholders: [{ id: 'first' }], total: 2 },
+        ],
+        error: /pagination did not advance/,
+      },
+      {
+        label: 'changed inventory',
+        pages: [
+          { cardholders: [{ id: 'first' }], total: 2 },
+          { cardholders: [{ id: 'second' }], total: 3 },
+        ],
+        error: /inventory changed during pagination/,
+      },
+      {
+        label: 'empty incomplete page',
+        pages: [{ cardholders: [], total: 1 }],
+        error: /pagination did not cover its total/,
+      },
+      {
+        label: 'page beyond reported total',
+        pages: [{ cardholders: [{ id: 'first' }], total: 0 }],
+        error: /exceeded its reported total/,
+      },
+      {
+        label: 'later page beyond reported total',
+        pages: [
+          { cardholders: [{ id: 'first' }], total: 2 },
+          { cardholders: [{ id: 'second' }, { id: 'third' }], total: 2 },
+        ],
+        error: /exceeded its reported total/,
+      },
+    ];
+    for (const scenario of incompleteInventories) {
+      let reads = 0;
+      await assert.rejects(
+        resolveBenchmarkCardholderId([], async (name) => {
+          assert.equal(
+            name,
+            'list_cardholders',
+            'incomplete inventory must not select any identity'
+          );
+          const page = scenario.pages[reads++];
+          assert.ok(page, 'malformed pagination must stop without another read');
+          return { structuredContent: page };
+        }),
+        scenario.error,
+        scenario.label
+      );
+      assert.equal(reads, scenario.pages.length);
+    }
+
+    const realNow = Date.now;
+    let pageClock = realNow();
+    let successfulPageReads = 0;
+    try {
+      Date.now = () => pageClock;
+      await assert.rejects(
+        resolveBenchmarkCardholderId([], async (name, _args, deadlineAtMs) => {
+          assert.equal(name, 'list_cardholders');
+          successfulPageReads += 1;
+          if (successfulPageReads > 1) {
+            throw new Error('another page was requested after the original deadline');
+          }
+          assert.ok(deadlineAtMs !== undefined);
+          pageClock = deadlineAtMs + 1;
+          return { structuredContent: { cardholders: inventory.slice(0, 100) } };
+        }),
+        /pagination exceeded its read deadline/
+      );
+      assert.equal(successfulPageReads, 1, 'successful pages must not rearm the original budget');
+    } finally {
+      Date.now = realNow;
+    }
+    console.log(
+      'PASS AgentCard benchmark selection covers all pages and refuses incomplete inventories'
+    );
   } finally {
     for (const name of CREDENTIAL_ENV) {
       const value = original[name];

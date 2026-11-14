@@ -13,6 +13,7 @@
  */
 
 import { sendSms } from '../smsQueue';
+import { isLinqEnabled, sendLinqMessage } from '../linq';
 import { sendWhatsAppMessage, getWhatsAppConfig } from '../whatsappCloud';
 import type { QuotedMessage } from './messageReply';
 import { isEmojiOnlyMessage } from './emoji';
@@ -41,6 +42,15 @@ export async function sendOnChannel(
   if (channel === 'WHATSAPP') {
     return sendWhatsAppMessage(phoneNumber, message, options);
   }
+  const replyId = options?.replyToMessageId;
+  // Old Surge/session IDs remain replyable as text after a number migration.
+  if (
+    isLinqEnabled(phoneNumber) &&
+    (replyId === undefined ||
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(replyId))
+  ) {
+    return sendLinqMessage(phoneNumber, message, options);
+  }
   if (isEmojiOnlyMessage(message)) {
     return {
       success: false,
@@ -61,7 +71,9 @@ export async function sendOnChannel(
     options?.replyToMessageId === undefined || !options.quotedMessage
       ? message
       : `Replying to ${options.quotedMessage.role === 'user' ? 'your' : 'my'} message:\n“${options.quotedMessage.content}”\n\n${message}`;
-  const delivery = await sendSms(phoneNumber, deliveredBody, options);
+  const deliveryOptions = { ...options };
+  delete deliveryOptions.replyToMessageId;
+  const delivery = await sendSms(phoneNumber, deliveredBody, deliveryOptions);
   return { ...delivery, ...(delivery.success ? { deliveredBody } : {}) };
 }
 

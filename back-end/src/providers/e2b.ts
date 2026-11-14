@@ -12,7 +12,8 @@ import { isAnthropicApiKeyOnCooldown } from './computeCredentials';
 import { buildCodeAgentSystemPrompt, buildCodexHarnessSystemPrompt } from './codeAgentPrompt';
 import { uploadAttachmentsToSandbox } from './e2bAttachments';
 import { overlayCodexRoseBridge } from './e2bCodexHarness';
-import { workDirForGithubRepo } from './e2bWorkDir';
+import { workDirForGithubRepo, WS_SERVER_BACKGROUND } from './e2bWorkDir';
+import { codeSandboxGithubEnvs } from './codeAgentGitIdentity';
 import {
   fileHash,
   findLocalClaudeCodeWsServer,
@@ -25,6 +26,7 @@ import {
   CLAUDE_CONFIG_ENV_KEYS,
   CLAUDE_CREDENTIAL_ENV_KEYS,
   codeSessionBranchEnvs,
+  codeSandboxUserId,
   codeSessionTaskFields,
   type CodeAgentSessionResult,
   createLocalCodeSessionFallback,
@@ -35,10 +37,12 @@ import {
 } from './e2bCodeSessionSandbox';
 import { type CodeSessionRow } from './codeSessions/store';
 import { resolveCodexSpawnAuth } from './codeSessions/usageLimit';
-import type { ProjectWorkspace } from './projects/types';
 import { restoreSandboxProject } from './projects/workspace';
-import { withClaudeCodeCreateSlot } from './e2bCreateSlot';
-import { waitForSandboxWsServer, wsReadinessOutcome, wsStartupBudgetMs } from './e2bWsReady';
+import {
+  waitForSandboxWsServer,
+  wsReadinessOutcome,
+  codeSessionWsReadyOptions,
+} from './e2bWsReady';
 import { codeSessionTurnToken } from './codeSessionTurns';
 import { applyUserUiSandboxEnvs, writeUserUiWorkspaceToSandboxSafe } from './userUi/workspace';
 import { prepareCodeSessionWorkspace, promptFlagsForUser } from './codeSessionWorkspace';
@@ -82,9 +86,12 @@ export {
   shouldPreferSandboxAnthropicBaseUrlOverFastMode,
   shouldSkipSandboxAnthropicGatewayForOauth,
 } from './claudeCodeSandboxAuth';
-import { DEFAULT_CLAUDE_CODE_TEMPLATE_ID } from './claudeCodeTemplate';
+import { DEFAULT_CLAUDE_CODE_TEMPLATE_ID as templateId } from './claudeCodeTemplate';
 import { DEFAULT_CODEX_CODE_TEMPLATE_ID } from './codexTemplate';
-import { codeAgentCliEnvs, type CodeCliSettingsOverride } from './codeAgentModels';
+import { codeAgentResumeCliEnvs } from './codeAgentResumeCli';
+import { persistCodeResumeConfig } from './codeAgentResumeConfigStore';
+import type { ClaudeCodeSessionOptions, CodexCodeSessionOptions } from './codeSessionLaunchOptions';
+export type { ClaudeCodeSessionOptions } from './codeSessionLaunchOptions';
 
 const log = createLogger('E2B');
 
@@ -94,9 +101,6 @@ if (!process.env.E2B_API_KEY) {
 }
 
 const WS_PORT = 3000;
-const WS_READY_TIMEOUT_MS = 10000;
-const CODEX_WS_READY_TIMEOUT_MS = 30000;
-const WS_READY_POLL_INTERVAL_MS = 100;
 /**
  * Create a new E2B sandbox with Claude Code and WebSocket streaming.
  *
@@ -106,18 +110,6 @@ const WS_READY_POLL_INTERVAL_MS = 100;
  * @param githubRepoUrl - Optional GitHub repo URL to clone before starting Claude
  * @returns Session info including WebSocket URL for terminal streaming
  */
-export interface ClaudeCodeSessionOptions {
-  /** Project restored into `~/workspace` before the CLI starts (PJ3 / C9). */
-  projectWorkspace?: ProjectWorkspace | null;
-  /** Persistent code session to resume or start (C1, C13). */
-  codeSession?: CodeSessionRow | null;
-  /** Keep the session's sandbox and files but start a new CLI conversation. */
-  freshConversation?: boolean;
-  /** The spawn's task_name, stored on the task row (the agents list title). */
-  taskName?: string | null;
-  cliSettings?: CodeCliSettingsOverride | null; // a resuming turn's model / effort / speed
-}
-
 export async function createClaudeCodeSession(
   agentId: string,
   goal: string,
@@ -127,17 +119,16 @@ export async function createClaudeCodeSession(
   fastModeCacheEnabled?: boolean,
   options: ClaudeCodeSessionOptions = {}
 ): Promise<CodeAgentSessionResult> {
-  // Serialize creates — concurrent reserve-script calls stampede E2B redis.
-  return withClaudeCodeCreateSlot(() =>
-    createClaudeCodeSessionUnlocked(
-      agentId,
-      goal,
-      attachments,
-      githubRepoUrl,
-      userId,
-      fastModeCacheEnabled,
-      options
-    )
+  // E2B reserve calls are serialized inside acquireCodeSandbox (create/resume
+  // only). Taking the same non-reentrant slot here would deadlock that inner call.
+  return createClaudeCodeSessionUnlocked(
+    agentId,
+    goal,
+    attachments,
+    githubRepoUrl,
+    userId,
+    fastModeCacheEnabled,
+    options
   );
 }
 
@@ -152,6 +143,7 @@ async function createClaudeCodeSessionUnlocked(
 ): Promise<CodeAgentSessionResult> {
   const projectWorkspace = options.projectWorkspace ?? null;
   const codeSession = options.codeSession ?? null;
+  codeSandboxUserId(codeSession, userId);
   log.info(`Creating Claude Code session for agent ${agentId}`);
 
   if (!process.env.E2B_API_KEY) {
@@ -173,10 +165,8 @@ async function createClaudeCodeSessionUnlocked(
     log.info('OpenRouter configured — skipping Fast Mode tee-proxy/flags for Claude Code session');
   }
   // The spawning agent's tier and Fast Mode button pick model, effort and speed.
-  const { envs: cliSettings } = await codeAgentCliEnvs('claude', agentId, options.cliSettings);
-  const model = cliSettings.CLAUDE_CODE_MODEL;
+  const { envs: cliSettings } = await codeAgentResumeCliEnvs('claude', agentId, options);
   const workDir = workDirForGithubRepo(githubRepoUrl);
-  const templateId = DEFAULT_CLAUDE_CODE_TEMPLATE_ID;
   const runtimeFingerprint = [
     `template:${templateId}`,
     `wrapper:${fileHash(findLocalClaudeCodeWsServer())}`,
@@ -269,7 +259,7 @@ async function createClaudeCodeSessionUnlocked(
           trace: {
             goal,
             systemPrompt,
-            model,
+            model: cliSettings.CLAUDE_CODE_MODEL,
             codeProvider: 'claude',
             templateId,
             runtimeFingerprint: attachmentFingerprint
@@ -345,14 +335,12 @@ async function createClaudeCodeSessionUnlocked(
   }
 
   // Add GitHub config if repo specified
-  if (githubRepoUrl) {
-    if (!process.env.GITHUB_TOKEN) {
-      throw new Error('GITHUB_TOKEN not configured - cannot clone repositories');
-    }
-    envs.GITHUB_REPO_URL = githubRepoUrl;
-    envs.GITHUB_TOKEN = process.env.GITHUB_TOKEN;
-    log.info(`GitHub repo configured: ${githubRepoUrl}`);
-  }
+  // Clone/push credentials, and the pushing account as the commit identity
+  // so GitHub links each commit and Vercel deploys it (codeAgentGitIdentity.ts).
+  Object.assign(
+    envs,
+    await codeSandboxGithubEnvs(githubRepoUrl, projectWorkspace?.project.repoUrl, '')
+  );
 
   const userUiWorkspace = await prepareCodeSessionWorkspace(userId, agentId, taskId, 'claude');
   applyUserUiSandboxEnvs(envs, userUiWorkspace);
@@ -360,11 +348,25 @@ async function createClaudeCodeSessionUnlocked(
   // Create sandbox first (before DB record) to avoid placeholder conflicts.
   // When E2B team billing blocks creates, fall back to a same-host local
   // Claude Code ws-server so code-agent benches can still make progress.
-  const templateIdForCreate = DEFAULT_CLAUDE_CODE_TEMPLATE_ID;
+  // Before acquisition can start a CLI (including the billing local fallback).
+  await persistCodeResumeConfig({
+    agentId,
+    taskId,
+    provider: 'claude',
+    envs,
+    resumeConfig: options.resumeConfig,
+    leaseOwner: options.leaseOwner ?? codeSession?.leaseOwner,
+    execution: {
+      github_repo_link: githubRepoUrl ?? projectWorkspace?.project.repoUrl ?? null,
+      target: 'cloud',
+      code_session_id: codeSession?.id ?? null,
+    },
+  });
   let acquired;
   try {
-    acquired = await acquireCodeSandbox(codeSession, templateIdForCreate, envs, 'Claude Code', {
+    acquired = await acquireCodeSandbox(codeSession, templateId, envs, 'Claude Code', {
       provider: 'claude',
+      userId,
       project: projectWorkspace?.project,
       agentId,
     });
@@ -456,11 +458,14 @@ async function createClaudeCodeSessionUnlocked(
   // Start the WebSocket server (runs Claude Code internally)
   // timeoutMs: 0 = no timeout (default is 60s which was killing the process!)
   // envs: a resumed sandbox keeps its creation env; pass this spawn's explicitly.
+  // Filesystem snapshots default commands to root; the coding harness requires
+  // the user account and its home even when the source template defaulted to user.
   sandbox.commands
     .run('node /home/user/ws-server.mjs', {
-      background: true,
-      timeoutMs: 0,
-      envs: sessionEnvs,
+      ...WS_SERVER_BACKGROUND,
+      user: 'user',
+      cwd: '/home/user',
+      envs: { ...sessionEnvs, HOME: '/home/user' },
     })
     .catch((err) =>
       log.error('Failed to start WS server', {
@@ -470,12 +475,7 @@ async function createClaudeCodeSessionUnlocked(
 
   // Wait for WS server to be ready
   log.info('Waiting for WebSocket server to start');
-  const ws = await waitForSandboxWsServer(sandbox, {
-    port: WS_PORT,
-    timeoutMs: WS_READY_TIMEOUT_MS,
-    pollMs: WS_READY_POLL_INTERVAL_MS,
-    startupBudgetMs: wsStartupBudgetMs(),
-  });
+  const ws = await waitForSandboxWsServer(sandbox, codeSessionWsReadyOptions('claude'));
   const wsFailure = wsReadinessOutcome(log, 'claude', ws);
   if (wsFailure !== null) {
     await releaseSandboxAfterFailedStart(sandbox, codeSession);
@@ -515,19 +515,10 @@ export async function createCodexCodeSession(
   githubRepoUrl?: string,
   userId?: string,
   codexSpeed: CodexServiceSpeed = 'priority',
-  harnessOptions?: {
-    harnessMode?: 'code' | 'rose';
-    roseApiBaseUrl?: string;
-    memoryEnabled?: boolean;
-    freshConversation?: boolean;
-    /** Project restored into `~/workspace` before the CLI starts (PJ3 / C9). */
-    projectWorkspace?: ProjectWorkspace | null;
-    /** The spawn's task_name, stored on the task row (the agents list title). */
-    taskName?: string | null;
-    cliSettings?: CodeCliSettingsOverride | null; // a resuming turn's model / effort / speed
-  },
+  harnessOptions?: CodexCodeSessionOptions,
   codeSession: CodeSessionRow | null = null
 ): Promise<CodeAgentSessionResult> {
+  codeSandboxUserId(codeSession, userId);
   const projectWorkspace = harnessOptions?.projectWorkspace ?? null;
   log.info(`Creating Codex Code session for agent ${agentId}`);
 
@@ -540,10 +531,9 @@ export async function createCodexCodeSession(
 
   const taskId = uuidv4();
   const templateId = process.env.E2B_CODEX_CODE_TEMPLATE_ID || DEFAULT_CODEX_CODE_TEMPLATE_ID;
-  const cli = await codeAgentCliEnvs('codex', agentId, harnessOptions?.cliSettings);
+  const cli = await codeAgentResumeCliEnvs('codex', agentId, { ...harnessOptions, codeSession });
   const harnessMode = harnessOptions?.harnessMode ?? 'code';
   const roseApiBaseUrl = harnessOptions?.roseApiBaseUrl?.replace(/\/$/, '');
-  const workDir = workDirForGithubRepo(githubRepoUrl);
   const systemPrompt =
     harnessMode === 'rose' && roseApiBaseUrl
       ? buildCodexHarnessSystemPrompt({
@@ -553,7 +543,7 @@ export async function createCodexCodeSession(
         })
       : buildCodeAgentSystemPrompt({
           githubRepoUrl,
-          workDir,
+          workDir: workDirForGithubRepo(githubRepoUrl),
           branch: codeSession?.branch,
           mergeTarget: codeSession?.mergeTarget,
           ...promptFlagsForUser(userId),
@@ -610,20 +600,32 @@ export async function createCodexCodeSession(
   envs.CODEX_SPEED = cli.speedOverride ?? codexSpeed;
   log.info('Codex code-agent speed', { agentId, taskId, codexSpeed: envs.CODEX_SPEED });
 
-  if (githubRepoUrl) {
-    if (!process.env.GITHUB_TOKEN) {
-      throw new Error('GITHUB_TOKEN not configured - cannot clone repositories');
-    }
-    envs.GITHUB_REPO_URL = githubRepoUrl;
-    envs.GITHUB_TOKEN = process.env.GITHUB_TOKEN;
-    log.info(`GitHub repo configured for Codex: ${githubRepoUrl}`);
-  }
+  // Clone/push credentials, and the pushing account as the commit identity
+  // so GitHub links each commit and Vercel deploys it (codeAgentGitIdentity.ts).
+  Object.assign(
+    envs,
+    await codeSandboxGithubEnvs(githubRepoUrl, projectWorkspace?.project.repoUrl, 'Codex')
+  );
 
   const userUiWorkspace = await prepareCodeSessionWorkspace(userId, agentId, taskId, 'codex');
   applyUserUiSandboxEnvs(envs, userUiWorkspace);
 
+  await persistCodeResumeConfig({
+    agentId,
+    taskId,
+    provider: 'codex',
+    envs,
+    resumeConfig: harnessOptions?.resumeConfig,
+    leaseOwner: harnessOptions?.leaseOwner ?? codeSession?.leaseOwner,
+    execution: {
+      github_repo_link: githubRepoUrl ?? projectWorkspace?.project.repoUrl ?? null,
+      target: 'cloud',
+      code_session_id: codeSession?.id ?? null,
+    },
+  });
   const acquired = await acquireCodeSandbox(codeSession, templateId, envs, 'Codex Code', {
     provider: 'codex',
+    userId,
     project: projectWorkspace?.project,
     agentId,
   });
@@ -671,11 +673,13 @@ export async function createCodexCodeSession(
   const sessionEnvs = { ...envs, ...(project.envs ?? {}) };
   const wsLaunchedAt = Date.now();
 
+  // Filesystem snapshots do not preserve the base template's default command user.
   sandbox.commands
     .run('node /home/user/ws-server.mjs', {
-      background: true,
-      timeoutMs: 0,
-      envs: sessionEnvs,
+      ...WS_SERVER_BACKGROUND,
+      user: 'user',
+      cwd: '/home/user',
+      envs: { ...sessionEnvs, HOME: '/home/user' },
     })
     .catch((err) =>
       log.error('Failed to start Codex WS server', {
@@ -684,12 +688,7 @@ export async function createCodexCodeSession(
     );
 
   log.info('Waiting for Codex WebSocket server to start');
-  const ws = await waitForSandboxWsServer(sandbox, {
-    port: WS_PORT,
-    timeoutMs: CODEX_WS_READY_TIMEOUT_MS,
-    pollMs: WS_READY_POLL_INTERVAL_MS,
-    startupBudgetMs: wsStartupBudgetMs(),
-  });
+  const ws = await waitForSandboxWsServer(sandbox, codeSessionWsReadyOptions('codex'));
   const wsFailure = wsReadinessOutcome(log, 'codex', ws);
   if (wsFailure !== null) {
     await releaseSandboxAfterFailedStart(sandbox, codeSession);

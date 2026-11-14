@@ -16,6 +16,7 @@ import * as service from './service';
 import { resizeSession } from './resizeService';
 import { codeSessionHttpError, keepAliveCodeTask } from '../../providers/codeSessions/spawn';
 import { parseResetsAt, reportCodeTaskUsageLimit } from '../../providers/codeSessions/usageLimit';
+import { GithubRepoRefNotFoundError } from '../../providers/githubRepos/resolve';
 import { GitHubAccessDeniedError, MissingUserIdError } from './service';
 import { ProjectNotFoundForSessionError } from '../../providers/projects/session';
 import {
@@ -117,6 +118,9 @@ function createErrorResponse(error: unknown): { status: number; body: object } |
   if (error instanceof GitHubAccessDeniedError) {
     return { status: 403, body: { error: error.detail, code: 'GITHUB_ACCESS_DENIED' } };
   }
+  if (error instanceof GithubRepoRefNotFoundError) {
+    return { status: 403, body: { error: error.message, code: 'GITHUB_ACCESS_DENIED' } };
+  }
   if (error instanceof ProjectNotFoundForSessionError) {
     return { status: 404, body: { error: error.message, code: 'PROJECT_NOT_FOUND' } };
   }
@@ -141,6 +145,9 @@ router.post(
               expectedUserId: body.user_id,
               deviceId: body.device_id,
               taskName: body.task_name ?? null,
+              cliSettings: body.cli_settings,
+              resumeConfig: body.resume_config,
+              leaseOwner: body.lease_owner,
             })
           : await service.createSession({
               ...body,

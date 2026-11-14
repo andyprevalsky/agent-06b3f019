@@ -284,6 +284,7 @@ REPO_URL="${CLOUDBENCH_GATE_REPO_URL:-https://github.com/Rose-Ai-Labs/rose.git}"
 DEFAULT_SUITES=(
   "bash scripts/tests/cloudbench-env.test.sh"
   "bash scripts/tests/cloudbench-acceptance-autoscale.test.sh"
+  "python3 scripts/tests/cloudbench-prestart-recovery.test.py"
   "bash scripts/tests/fleet-infra-canary.test.sh"
   "bash scripts/tests/fleet-infra-stability-proof.test.sh"
   "python3 scripts/tests/cloudbench-exact-session-rootless-sms.test.py"

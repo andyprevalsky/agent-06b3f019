@@ -27,6 +27,8 @@ from domains.spawn_claude_code_agent.config import (
     LOCAL_TARGET_UNAVAILABLE_CODE,
 )
 from helpers.activity_heartbeat import safe_heartbeat
+from helpers.github_repo_ref import GITHUB_REPO_REF_DENIED_CODE, repo_ref_denied_message
+from helpers.http_client import get_http_client
 from helpers.workflow_generation import (
     WorkflowGenerationSealed,
     raise_if_generation_sealed,
@@ -328,17 +330,24 @@ async def create_e2b_session(
     fast_mode_cache_enabled: bool = False,
     code_session_id: Optional[str] = None,
     lease_owner: Optional[str] = None,
+    github_repo_ref: Optional[str] = None,
     target: str = "cloud",
     local_device_id: Optional[str] = None,
     fresh_conversation: bool = False,
     task_name: Optional[str] = None,
     cli_settings: Optional[dict[str, Any]] = None,
+    resume_config: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
     """Create an E2B sandbox session via back-end API.
 
     ``code_session_id`` resumes that persistent code session; omitted, the
     backend resumes the spawning agent's latest session for the repo.
     ``lease_owner`` is stable per tool call so Temporal retries keep the lease.
+    ``github_repo_ref`` is the spawn's explicit connected-repo selection: it replaces
+    the project restore (backend resolveCodeSessionWorkspace). A resume by
+    ``code_session_id`` keeps that session's own repo, so the ref is not sent with it.
+    A ref the user has no connection for answers 403 ``GITHUB_ACCESS_DENIED``, raised
+    as a non-retryable ``GITHUB_REPO_REF_DENIED`` naming the ref (never a fallback).
 
     Returns the session data dict with task_id, sandbox_id, ws_url,
     code_session_id, branch, merge_target, resumed_from, etc.
@@ -364,6 +373,8 @@ async def create_e2b_session(
     if cli_settings:
         # A resuming turn's model / effort / speed (backend cliSettingsEnvOverrides).
         create_payload["cli_settings"] = cli_settings
+    if resume_config is not None:
+        create_payload["resume_config"] = resume_config
     if github_repo_url and target != "local":
         create_payload["github_repo_url"] = github_repo_url
     if target == "local":
@@ -373,6 +384,8 @@ async def create_e2b_session(
     else:
         if code_session_id:
             create_payload["code_session_id"] = code_session_id
+        elif github_repo_ref:
+            create_payload["github_repo_ref"] = github_repo_ref
         if lease_owner:
             create_payload["lease_owner"] = lease_owner[:200]
         if fresh_conversation:
@@ -403,6 +416,17 @@ async def create_e2b_session(
                     body["error"],
                     {"reason": body.get("reason"), "device_name": body.get("device_name")},
                     type=LOCAL_TARGET_UNAVAILABLE_CODE,
+                    non_retryable=True,
+                )
+
+        if response.status_code == 403 and "github_repo_ref" in create_payload:
+            body = _json_or_empty(response)
+            if body.get("code") == "GITHUB_ACCESS_DENIED":
+                # The explicit selection is not connected (or was disconnected): fail
+                # naming it; neither a retry nor the project's repo can stand in for it.
+                raise ApplicationError(
+                    repo_ref_denied_message(create_payload["github_repo_ref"], str(body.get("error") or "")),
+                    type=GITHUB_REPO_REF_DENIED_CODE,
                     non_retryable=True,
                 )
 
@@ -487,6 +511,35 @@ async def report_undelivered_code_turns(agent_id: str, task_id: str, turn_ids: l
             task_id=task_id,
             error=extract_error_message(e),
         )
+
+
+async def report_code_session_subscription_usage(task_id: str, usage: dict[str, Any]) -> bool:
+    """Record a code session's subscription usage (from the CLI's rate_limit_event).
+
+    Code sessions run the provider CLI in a sandbox, outside the lineage lease,
+    so their usage goes to the task's credential row by task id. Best-effort and
+    bounded (5 s); callers fire it in the background. Lives here, beside the
+    other code-session reports, so importing the code-session domain never pulls
+    in the LLM client stack (helpers.llm → openai).
+    """
+    if not task_id or not usage:
+        return False
+    config = load_config()
+    try:
+        client = get_http_client()
+        response = await client.post(
+            f"{config.backend.api_url}/api/integrations/compute-code/code-session-usage",
+            headers={
+                "X-API-Key": config.backend.api_key or "",
+                "Content-Type": "application/json",
+            },
+            json={"taskId": task_id, "usage": usage},
+            timeout=5.0,
+        )
+        return response.status_code == 200
+    except Exception as e:
+        logger.warning("[ClaudeCode] Code session usage report failed", task_id=task_id, error=extract_error_message(e))
+        return False
 
 
 async def persist_terminal_output(

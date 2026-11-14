@@ -14,8 +14,16 @@ failed unit while the gate is still running.
 
 Row (v1), one JSON object per line:
     {"v": 1, "scope": "case"|"domain"|"suite"|"file"|"test", "case": <DEPLOY_GATE_CASE or "">,
-     "unit": <name>, "status": "PASS"|"FAIL"|"UNVERIFIED", "at": <epoch seconds>,
-     "detail": <at most 2000 chars>, "log": <path or "">}
+     "unit": <name>, "status": <STATUSES>, "at": <epoch seconds>,
+     "detail": <at most 2000 chars>, "log": <path or "">,
+     "quarantine": {"since", "repair", "error", "evidence"}   # QUARANTINED_* rows only
+     "attempts": <int >= 2>}                                   # FLAKY rows only (optional)
+
+Blocking statuses are FAIL and UNVERIFIED (failures()). QUARANTINED_FAIL / QUARANTINED_PASS
+come from a test carrying the in-definition @quarantine marker (scripts/lib/test_quarantine.py):
+it ran, and its result never blocks. FLAKY means the runner's single rerun of a failed unit
+passed; the gate passes but the unit still needs /RCA attribution. The optional keys are
+appended after the original eight, so a v1 reader that ignores unknown keys is unaffected.
 
 Progress is advisory. The gate's exit code and result.json stay the verdict; a progress row
 only lets diagnosis start earlier. Writers append each row with one O_APPEND write and never
@@ -31,30 +39,57 @@ from pathlib import Path
 ENV = 'DEPLOY_GATE_PROGRESS'
 CASE_ENV = 'DEPLOY_GATE_CASE'
 VERSION = 1
-STATUSES = ('PASS', 'FAIL', 'UNVERIFIED')
+STATUSES = ('PASS', 'FAIL', 'UNVERIFIED', 'QUARANTINED_FAIL', 'QUARANTINED_PASS', 'FLAKY')
+BLOCKING = ('FAIL', 'UNVERIFIED')
+QUARANTINED = ('QUARANTINED_FAIL', 'QUARANTINED_PASS')
+FLAKY = 'FLAKY'
+QUARANTINE_KEYS = ('since', 'repair', 'error', 'evidence')
 SCOPES = ('case', 'domain', 'suite', 'file', 'test')
 DETAIL_LIMIT = 2000
 
 
+def quarantine_valid(value: object) -> bool:
+    return (isinstance(value, dict) and set(value) == set(QUARANTINE_KEYS)
+            and all(isinstance(value[key], str) and value[key] for key in QUARANTINE_KEYS))
+
+
 def row(unit: str, status: str, *, scope: str = 'test', detail: str = '', log: str = '',
-        case: str | None = None, at: float | None = None) -> dict:
+        case: str | None = None, at: float | None = None, quarantine: dict | None = None,
+        attempts: int | None = None) -> dict:
     if status not in STATUSES:
         raise ValueError(f'progress status must be one of {STATUSES}')
     if scope not in SCOPES:
         raise ValueError(f'progress scope must be one of {SCOPES}')
-    return {'v': VERSION, 'scope': scope, 'case': os.environ.get(CASE_ENV, '') if case is None else case,
-            'unit': str(unit), 'status': status, 'at': time.time() if at is None else at,
-            'detail': str(detail)[-DETAIL_LIMIT:], 'log': str(log or '')}
+    if (status in QUARANTINED) != (quarantine is not None):
+        raise ValueError('quarantine metadata belongs on QUARANTINED_* rows only, and they require it')
+    if quarantine is not None and not quarantine_valid(quarantine):
+        raise ValueError(f'quarantine metadata needs exactly the non-empty string keys {QUARANTINE_KEYS}')
+    if attempts is not None and (status != FLAKY or isinstance(attempts, bool)
+                                 or not isinstance(attempts, int) or attempts < 2):
+        raise ValueError('attempts belongs on FLAKY rows only and must be an integer >= 2')
+    value = {'v': VERSION, 'scope': scope, 'case': os.environ.get(CASE_ENV, '') if case is None else case,
+             'unit': str(unit), 'status': status, 'at': time.time() if at is None else at,
+             'detail': str(detail)[-DETAIL_LIMIT:], 'log': str(log or '')}
+    if quarantine is not None:
+        value['quarantine'] = {key: quarantine[key] for key in QUARANTINE_KEYS}
+    if attempts is not None:
+        value['attempts'] = attempts
+    return value
+
+
+def serialize(value: dict) -> bytes:
+    return (json.dumps(value, separators=(',', ':')) + '\n').encode()
 
 
 def report(unit: str, status: str, *, scope: str = 'test', detail: str = '', log: str = '',
-           case: str | None = None, path: str | os.PathLike | None = None) -> bool:
+           case: str | None = None, path: str | os.PathLike | None = None,
+           quarantine: dict | None = None, attempts: int | None = None) -> bool:
     """Append one row to the gate's progress file. Returns False when there is none or it is unwritable."""
     target = path or os.environ.get(ENV)
     if not target:
         return False
-    data = (json.dumps(row(unit, status, scope=scope, detail=detail, log=log, case=case),
-                       separators=(',', ':')) + '\n').encode()
+    data = serialize(row(unit, status, scope=scope, detail=detail, log=log, case=case,
+                         quarantine=quarantine, attempts=attempts))
     try:
         fd = os.open(target, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
         try:
@@ -67,9 +102,18 @@ def report(unit: str, status: str, *, scope: str = 'test', detail: str = '', log
 
 
 def valid(value: object) -> bool:
-    return (isinstance(value, dict) and value.get('v') == VERSION and value.get('status') in STATUSES
+    if not (isinstance(value, dict) and value.get('v') == VERSION and value.get('status') in STATUSES
             and value.get('scope') in SCOPES and isinstance(value.get('unit'), str) and value['unit']
-            and isinstance(value.get('case', ''), str) and isinstance(value.get('at'), (int, float)))
+            and isinstance(value.get('case', ''), str) and isinstance(value.get('at'), (int, float))):
+        return False
+    if value['status'] in QUARANTINED:
+        return quarantine_valid(value.get('quarantine'))
+    if 'quarantine' in value:
+        return False
+    attempts = value.get('attempts')
+    if attempts is None:
+        return True
+    return value['status'] == FLAKY and isinstance(attempts, int) and not isinstance(attempts, bool) and attempts >= 2
 
 
 def parse(chunk: bytes) -> list[dict]:
@@ -99,7 +143,27 @@ def read_new(path: str | os.PathLike, offset: int = 0) -> tuple[list[dict], int]
 
 
 def failures(rows: list[dict]) -> list[dict]:
-    return [r for r in rows if r['status'] != 'PASS']
+    """Blocking rows only: FAIL and UNVERIFIED. Quarantined and flaky units never block here."""
+    return [r for r in rows if r['status'] in BLOCKING]
+
+
+def quarantined(rows: list[dict]) -> list[dict]:
+    return [r for r in rows if r['status'] in QUARANTINED]
+
+
+def flaky(rows: list[dict]) -> list[dict]:
+    return [r for r in rows if r['status'] == FLAKY]
+
+
+def stdout_line(value: dict) -> str | None:
+    """The one log line a QUARANTINED_* or FLAKY row is also printed as; None for other rows."""
+    if value['status'] in QUARANTINED:
+        meta = value['quarantine']
+        return (f"TEST_QUARANTINE status={value['status']} unit={value['unit']} "
+                f"since={meta['since']} repair={meta['repair']}")
+    if value['status'] == FLAKY:
+        return f"TEST_FLAKY unit={value['unit']} attempts={value.get('attempts', 2)} attribution=REQUIRED"
+    return None
 
 
 def describe(gate: str, failure: dict, *, check: str | None = None, occurrence: str | None = None,

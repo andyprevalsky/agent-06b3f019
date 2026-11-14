@@ -1,10 +1,14 @@
 /**
  * DEPLOY_GATE_PROGRESS rows from the front-end runners (src/tests/gate-progress/).
  *
- *   writer             exact Python-protocol bytes, mode 0600, no-op when unset, never throws
- *   vitest reporter    FAIL row the moment a failing test case reports; file PASS/FAIL rows
+ *   writer             exact Python-protocol bytes (incl. QUARANTINED_* + quarantine, FLAKY +
+ *                      attempts), mode 0600, no-op when unset, never throws; blocking = FAIL/UNVERIFIED
+ *   vitest reporter    FAIL row the moment a failing test case reports; FLAKY row (+ TEST_FLAKY
+ *                      line) for a pass after a retry; file PASS/FAIL rows
  *   vitest plugin      appended after the reporters Vitest resolved; config adds it only when set
- *   playwright         FAIL row only for a test's final failing attempt, "<file> > <titles>"
+ *   playwright         FAIL row only for a test's final failing attempt, "<file> > <titles>";
+ *                      FLAKY row (detail = the failed attempt) for a pass on a retry
+ *   retry              retry/retries 1 only behind DEPLOY_GATE_PROGRESS (local runs never retry)
  *
  * Runners are fed fake test/result objects; each writes to a private temp file.
  */
@@ -18,7 +22,11 @@ import type {
 } from '@playwright/test/reporter';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
+  failures,
+  flaky,
   gateProgressRow,
+  gateProgressStdoutLine,
+  quarantined,
   reportGateProgress,
   serializeGateProgressRow,
 } from '../gate-progress/gateProgress';
@@ -59,9 +67,20 @@ function rows(): Record<string, unknown>[] {
     .map((line) => JSON.parse(line) as Record<string, unknown>);
 }
 
-function vitestCase(fullName: string, state: 'passed' | 'failed' | 'skipped'): TestCase {
+const QUARANTINE = {
+  since: '2026-11-08',
+  repair: 'https://boxes.dev/thread/thr_0123456789abcdef0123456789abcdef',
+  error: 'AssertionError: é ✓',
+  evidence: '.context/x.log',
+};
+
+function vitestCase(
+  fullName: string,
+  state: 'passed' | 'failed' | 'skipped',
+  retryCount = 0,
+): TestCase {
   const errors =
-    state === 'failed'
+    state === 'failed' || retryCount > 0
       ? [
           {
             name: 'AssertionError',
@@ -75,6 +94,7 @@ function vitestCase(fullName: string, state: 'passed' | 'failed' | 'skipped'): T
     module: { relativeModuleId: 'src/tests/blackbox/agents.blackbox.ts' },
     fullName,
     result: () => ({ state, errors }),
+    diagnostic: () => ({ retryCount, flaky: state === 'passed' && retryCount > 0 }),
   } as unknown as TestCase;
 }
 
@@ -134,6 +154,48 @@ describe('gate progress writer', () => {
     expect(Array.from(long.detail)).toHaveLength(2000);
   });
 
+  it('serializes quarantine and flaky rows byte-for-byte like the Python helper', () => {
+    // Golden output of deploy_gate_progress.row(..., quarantine=...) / row(..., attempts=2).
+    const quarantinedGolden = String.raw`{"v":1,"scope":"test","case":"frontend-coverage","unit":"src/a.test.ts > suite > \u00e9","status":"QUARANTINED_FAIL","at":1762540000.125,"detail":"boom \u2713","log":"","quarantine":{"since":"2026-11-08","repair":"https://boxes.dev/thread/thr_0123456789abcdef0123456789abcdef","error":"AssertionError: \u00e9 \u2713","evidence":".context/x.log"}}`;
+    const flakyGolden = String.raw`{"v":1,"scope":"test","case":"frontend-coverage","unit":"src/a.test.ts > suite > a","status":"FLAKY","at":1762540000.125,"detail":"first","log":"","attempts":2}`;
+    const at = () => 1762540000125;
+    const held = gateProgressRow(
+      'src/a.test.ts > suite > é',
+      'QUARANTINED_FAIL',
+      { scope: 'test', detail: 'boom ✓', quarantine: QUARANTINE },
+      env,
+      at,
+    );
+    const retried = gateProgressRow(
+      'src/a.test.ts > suite > a',
+      'FLAKY',
+      { scope: 'test', detail: 'first', attempts: 2 },
+      env,
+      at,
+    );
+    expect(serializeGateProgressRow(held)).toBe(`${quarantinedGolden}\n`);
+    expect(serializeGateProgressRow(retried)).toBe(`${flakyGolden}\n`);
+    expect(gateProgressStdoutLine(held)).toBe(
+      `TEST_QUARANTINE status=QUARANTINED_FAIL unit=src/a.test.ts > suite > é since=2026-11-08 repair=${QUARANTINE.repair}\n`,
+    );
+    expect(gateProgressStdoutLine(retried)).toBe(
+      'TEST_FLAKY unit=src/a.test.ts > suite > a attempts=2 attribution=REQUIRED\n',
+    );
+    const plain = gateProgressRow('u', 'FAIL', {}, env, at);
+    const unverified = gateProgressRow('u', 'UNVERIFIED', {}, env, at);
+    expect(Object.keys(plain)).toEqual(KEYS);
+    expect(gateProgressStdoutLine(plain)).toBe('');
+    const all = [held, retried, plain, unverified];
+    expect(failures(all)).toEqual([plain, unverified]);
+    expect(quarantined(all)).toEqual([held]);
+    expect(flaky(all)).toEqual([retried]);
+    // Misplaced metadata is a programming error, as in Python's row().
+    expect(() => gateProgressRow('u', 'FAIL', { quarantine: QUARANTINE }, env)).toThrow();
+    expect(() => gateProgressRow('u', 'QUARANTINED_PASS', {}, env)).toThrow();
+    expect(() => gateProgressRow('u', 'FLAKY', { attempts: 1 }, env)).toThrow();
+    expect(() => gateProgressRow('u', 'PASS', { attempts: 2 }, env)).toThrow();
+  });
+
   it('writes nothing when DEPLOY_GATE_PROGRESS is unset or empty', () => {
     expect(reportGateProgress('u', 'FAIL', {}, {})).toBe(false);
     expect(reportGateProgress('u', 'FAIL', {}, { DEPLOY_GATE_PROGRESS: '' })).toBe(false);
@@ -181,6 +243,28 @@ describe('vitest gate progress reporter', () => {
     });
   });
 
+  it('maps a pass after a retry to FLAKY with a TEST_FLAKY line', () => {
+    const lines: string[] = [];
+    const reporter = new GateProgressVitestReporter({ env, write: (line) => lines.push(line) });
+    reporter.onTestCaseResult(vitestCase('agents > steady', 'passed'));
+    expect(rows()).toEqual([]);
+    reporter.onTestCaseResult(vitestCase('agents > wobbly', 'passed', 1));
+    const [row] = rows();
+    expect(rows()).toHaveLength(1);
+    expect(Object.keys(row)).toEqual([...KEYS, 'attempts']);
+    expect(row).toMatchObject({
+      scope: 'test',
+      case: 'frontend-coverage',
+      unit: 'src/tests/blackbox/agents.blackbox.ts > agents > wobbly',
+      status: 'FLAKY',
+      attempts: 2,
+    });
+    expect(row.detail).toContain('AssertionError: expected 2 to be 3');
+    expect(lines).toEqual([
+      'TEST_FLAKY unit=src/tests/blackbox/agents.blackbox.ts > agents > wobbly attempts=2 attribution=REQUIRED\n',
+    ]);
+  });
+
   it('reports file PASS rows and collection failures', () => {
     const reporter = new GateProgressVitestReporter({ env });
     reporter.onTestModuleEnd(vitestModule(true, [], []));
@@ -216,11 +300,13 @@ describe('vitest gate progress reporter', () => {
     expect(reporters[2]).toBeInstanceOf(GateProgressVitestReporter);
   });
 
-  it('vitest.config.ts adds the plugin only when DEPLOY_GATE_PROGRESS is set', () => {
+  it('vitest.config.ts adds the plugin and one retry only when DEPLOY_GATE_PROGRESS is set', () => {
     const config = fs.readFileSync(path.join(FRONTEND_DIR, 'vitest.config.ts'), 'utf8');
     expect(config).toContain(
       '...(process.env.DEPLOY_GATE_PROGRESS ? [gateProgressVitestPlugin()] : [])',
     );
+    expect(config).toContain('retry: process.env.DEPLOY_GATE_PROGRESS ? 1 : 0,');
+    expect(config.match(/\bretry:/g)).toHaveLength(1);
     expect(gateProgressVitestPlugin(env).name).toBe('rose-deploy-gate-progress');
   });
 });
@@ -233,6 +319,7 @@ describe('playwright gate progress reporter', () => {
 
   function test(retries = 0, expectedStatus = 'passed'): PlaywrightTestCase {
     return {
+      id: 'login-signs-in',
       title: 'signs in',
       parent: inner,
       location: { file: path.join(FRONTEND_DIR, 'tests-e2e/login.spec.ts'), line: 9, column: 3 },
@@ -254,8 +341,8 @@ describe('playwright gate progress reporter', () => {
     } as unknown as PlaywrightTestResult;
   }
 
-  function reporter(reporterEnv: Record<string, string> = env) {
-    const instance = new GateProgressPlaywrightReporter({ env: reporterEnv });
+  function reporter(reporterEnv: Record<string, string> = env, write?: (line: string) => void) {
+    const instance = new GateProgressPlaywrightReporter({ env: reporterEnv, write });
     instance.onBegin({ configFile, rootDir: path.dirname(configFile) } as FullConfig);
     return instance;
   }
@@ -289,15 +376,33 @@ describe('playwright gate progress reporter', () => {
     expect(rows()).toMatchObject([{ case: 'semantic', status: 'FAIL' }]);
   });
 
-  it('ignores passed, skipped, flaky-then-passed and expected failures', () => {
+  it('ignores passed, skipped and expected failures', () => {
     const instance = reporter();
     instance.onTestEnd(test(), result('passed'));
     instance.onTestEnd(test(), result('skipped'));
-    instance.onTestEnd(test(1), result('failed', 0));
-    instance.onTestEnd(test(1), result('passed', 1));
     instance.onTestEnd(test(0, 'failed'), result('failed'));
     expect(rows()).toEqual([]);
     expect(instance.printsToStdio()).toBe(false);
+  });
+
+  it('maps failed-then-passed-on-retry to FLAKY with the failed attempt as detail', () => {
+    const lines: string[] = [];
+    const instance = reporter(env, (line) => lines.push(line));
+    instance.onTestEnd(test(1), result('failed', 0));
+    expect(rows()).toEqual([]);
+    instance.onTestEnd(test(1), { status: 'passed', retry: 1, errors: [] } as never);
+    const [row] = rows();
+    expect(rows()).toHaveLength(1);
+    expect(Object.keys(row)).toEqual([...KEYS, 'attempts']);
+    expect(row).toMatchObject({
+      unit: 'tests-e2e/login.spec.ts > Login > with OTP > signs in',
+      status: 'FLAKY',
+      attempts: 2,
+      detail: 'Timed out 15000ms waiting for expect(locator).toBeVisible()',
+    });
+    expect(lines).toEqual([
+      'TEST_FLAKY unit=tests-e2e/login.spec.ts > Login > with OTP > signs in attempts=2 attribution=REQUIRED\n',
+    ]);
   });
 
   it('writes nothing when unset and swallows write errors', () => {
@@ -314,6 +419,8 @@ describe('playwright gate progress reporter', () => {
     const config = fs.readFileSync(configFile, 'utf8');
     expect(config).toContain('process.env.DEPLOY_GATE_PROGRESS');
     expect(config).toContain(`'${reporterPath}'`);
+    expect(config).toContain('retries: process.env.DEPLOY_GATE_PROGRESS ? 1 : 0,');
+    expect(config.match(/\bretries:/g)).toHaveLength(1);
     const runner = fs.readFileSync(
       path.join(FRONTEND_DIR, 'scripts/run-semantic-tests.sh'),
       'utf8',

@@ -50,3 +50,17 @@ None recorded.
 ## Reusable lesson
 
 A poll loop that marks an event handled before acting on it must turn a failed action into a retry or a loud task failure, never a printed warning.
+
+
+## 2026-11-09 v2 setup event compatibility
+
+The unchanged `agent-payment-setup-resume` task failed in
+`agentcard-v2-e2e-20261109-cohort-02-worlds`: its ordered gate expected
+`agentcard_user_cardholder_onboarding_required` but received
+`agentcard_user_connection_required`. The new REST routing adapter had put its
+provider connection phase into the established product setup category. Preserve
+the category and expose the v2 phase separately through `setupStatus`; continue
+using the signed v2 connection URL. The default routing regression and unchanged
+attention producer/ordered gate reproduce the old error and pass the candidate.
+The original native failure remains recorded; browser rerun is required before
+claiming the full setup/resume flow fixed.

@@ -1250,7 +1250,14 @@ def test_judge_profile_reads_the_product_context_loader_fields():
     loader = source.split("async function fetchUserProfile(userId: string)", 1)[1].split(
         "async function fetchSmsSession", 1
     )[0]
-    selected = set(re.findall(r"^\s*([A-Za-z0-9_]+): true,", loader, re.MULTILINE))
+    assert re.search(r"\bselect:\s*USER_PROFILE_SELECT\b", loader)
+    shared = (
+        REPO_ROOT_FOR_TEST / "back-end/src/providers/userProfileContext.ts"
+    ).read_text()
+    selector = shared.split("export const USER_PROFILE_SELECT = {", 1)[1].split(
+        "} as const", 1
+    )[0]
+    selected = set(re.findall(r"^\s*([A-Za-z0-9_]+): true,", selector, re.MULTILINE))
     row = judge_profile_row()
     assert set(row) == selected
     deps, queries = _recording_deps({'row_to_json(profile)': json.dumps(row)})

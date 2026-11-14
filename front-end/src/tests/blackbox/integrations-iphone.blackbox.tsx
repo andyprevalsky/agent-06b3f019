@@ -6,8 +6,8 @@
  *  - setup progress fills by completed steps; each step is listed on the phone;
  *    ready stops the fast /connection polling
  */
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { screen, waitFor, within } from '@testing-library/react';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { act, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
 import { server } from './msw/server';
@@ -40,6 +40,8 @@ function backend(initial = 'not_connected', enabled = true, configured = true) {
     status: initial,
     enabled,
     configured,
+    accessRequested: false,
+    accessPosts: 0,
     setupAgentId: null as string | null,
     connectionRevision: 1,
     steps: null as ReturnType<typeof steps> | null,
@@ -49,6 +51,7 @@ function backend(initial = 'not_connected', enabled = true, configured = true) {
   };
   const dto = () => ({
     enabled: state.enabled,
+    accessRequested: state.accessRequested,
     configured: state.configured,
     status: state.status,
     setupAgentId: state.setupAgentId,
@@ -60,6 +63,11 @@ function backend(initial = 'not_connected', enabled = true, configured = true) {
     http.get(`${API}/integrations`, () => HttpResponse.json({ integrations: [] })),
     http.get(`${API}/iphone/connection`, () => {
       state.reads += 1;
+      return HttpResponse.json(dto());
+    }),
+    http.post(`${API}/iphone/request-access`, () => {
+      state.accessPosts += 1;
+      state.accessRequested = true;
       return HttpResponse.json(dto());
     }),
     http.post(`${API}/iphone/connect`, async ({ request }) => {
@@ -88,7 +96,10 @@ const leaseOrQueueRequests = () =>
   capturedRequests.filter((r) => /\/(leases|interactions)\//.test(new URL(r.url).pathname));
 
 beforeEach(() => mockTerminalHookSession());
-afterEach(() => localStorage.clear());
+afterEach(() => {
+  vi.useRealTimers();
+  localStorage.clear();
+});
 
 describe('iPhone connection in normal Integrations', () => {
   it.each([false, true])(
@@ -135,15 +146,84 @@ describe('iPhone connection in normal Integrations', () => {
     );
   });
 
-  it('disabled accounts get the contact instruction and cannot start setup', async () => {
+  it('disabled accounts request access once and keep the requested state after remount', async () => {
     const state = backend('not_connected', false, false);
+    const view = renderWithProviders(<Integrations />, { roseDesktop: false });
+    expect(screen.queryByRole('button', { name: 'Connect iPhone' })).toBeNull();
+    const request = await screen.findByRole('button', { name: 'Request iPhone access' });
+    expect(request).toHaveTextContent('Request access');
+    expect(screen.queryByRole('button', { name: 'Connect iPhone' })).toBeNull();
+    await userEvent.dblClick(request);
+    expect(await screen.findByRole('button', { name: 'iPhone access requested' })).toBeDisabled();
+    expect(state.accessPosts).toBe(1);
+    expect(state.posts).toEqual([]);
+    expect(leaseOrQueueRequests()).toEqual([]);
+    view.unmount();
     renderWithProviders(<Integrations />, { roseDesktop: false });
-    expect(await screen.findByRole('link', { name: 'andy@roselabs.ai' })).toHaveAttribute(
-      'href',
-      'mailto:andy@roselabs.ai',
+    expect(await screen.findByRole('button', { name: 'iPhone access requested' })).toBeDisabled();
+    expect(state.accessPosts).toBe(1);
+  });
+
+  it('keeps failed access requests retryable without allowing Connect', async () => {
+    const state = backend('not_connected', false, false);
+    server.use(
+      http.post(`${API}/iphone/request-access`, () =>
+        HttpResponse.json({ error: 'unavailable' }, { status: 503 }),
+      ),
     );
+    renderWithProviders(<Integrations />, { roseDesktop: false });
+    await userEvent.click(await screen.findByRole('button', { name: 'Request iPhone access' }));
+    expect(
+      await screen.findByText('Unable to request iPhone access. Try again.'),
+    ).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Request iPhone access' })).toBeEnabled();
     expect(screen.queryByRole('button', { name: 'Connect iPhone' })).toBeNull();
     expect(state.posts).toEqual([]);
+  });
+
+  it('revoked enablement overrides an older setup revision and offers access requests', async () => {
+    const state = backend('ready');
+    renderWithProviders(<Integrations />, { roseDesktop: false });
+    expect(await screen.findByText('Connected')).toBeInTheDocument();
+    state.enabled = false;
+    state.status = 'not_connected';
+    state.connectionRevision = 0;
+    window.dispatchEvent(new Event('focus'));
+    expect(await screen.findByRole('button', { name: 'Request iPhone access' })).toBeEnabled();
+    expect(screen.queryByText('Connected')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Connect iPhone' })).toBeNull();
+    expect(state.posts).toEqual([]);
+  });
+
+  it('a stale status read cannot revert a saved access request', async () => {
+    backend('not_connected', false, false);
+    renderWithProviders(<Integrations />, { roseDesktop: false });
+    const request = await screen.findByRole('button', { name: 'Request iPhone access' });
+    let release: (() => void) | undefined;
+    server.use(
+      http.get(`${API}/iphone/connection`, async () => {
+        await new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        return HttpResponse.json({
+          enabled: false,
+          configured: false,
+          accessRequested: false,
+          status: 'not_connected',
+          setupAgentId: null,
+          connectionRevision: 1,
+        });
+      }),
+    );
+    window.dispatchEvent(new Event('focus'));
+    await waitFor(() => expect(release).toBeDefined());
+    await userEvent.click(request);
+    expect(await screen.findByRole('button', { name: 'iPhone access requested' })).toBeDisabled();
+    release?.();
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(screen.getByRole('button', { name: 'iPhone access requested' })).toBeDisabled();
   });
 
   it('Connect posts once, then opens the Phone app in device view to watch boot-up', async () => {
@@ -167,6 +247,7 @@ describe('iPhone connection in normal Integrations', () => {
   });
 
   it('fills the setup bar by completed steps, lists each step on the phone, and stops fast polling when ready', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
     const state = backend('setting_up');
     state.setupAgentId = AGENT;
     state.steps = steps(1);
@@ -187,6 +268,9 @@ describe('iPhone connection in normal Integrations', () => {
     for (const [, label] of STEPS) expect(card).toHaveTextContent(label);
 
     state.steps = steps(3);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2500);
+    });
     await waitFor(
       () => expect(within(card).getByRole('progressbar')).toHaveAttribute('aria-valuenow', '43'),
       { timeout: 5000 },
@@ -196,6 +280,9 @@ describe('iPhone connection in normal Integrations', () => {
 
     state.status = 'ready';
     state.steps = steps(STEPS.length);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2500);
+    });
     await waitFor(() => expect(within(row).getByText('Connected')).toBeInTheDocument(), {
       timeout: 5000,
     });
@@ -203,7 +290,9 @@ describe('iPhone connection in normal Integrations', () => {
     expect(step('passcode')).toHaveAttribute('data-status', 'done');
     expect(within(row).queryByRole('progressbar')).toBeNull();
     const reads = state.reads;
-    await new Promise((resolve) => setTimeout(resolve, 3200));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3200);
+    });
     expect(state.reads).toBe(reads);
   }, 20_000);
 
@@ -297,7 +386,9 @@ describe('iPhone connection in normal Integrations', () => {
     const view = renderWithProviders(<IPhoneConnectionSection key="account-a" />);
     await waitFor(() => expect(release).toBeDefined());
     view.rerender(<IPhoneConnectionSection key="account-b" />);
-    expect(await screen.findByRole('link', { name: 'andy@roselabs.ai' })).toBeInTheDocument();
+    expect(
+      await screen.findByRole('button', { name: 'Request iPhone access' }),
+    ).toBeInTheDocument();
     expect(oldSignal?.aborted).toBe(true);
     release?.();
     await waitFor(() => expect(reads).toBe(2));
@@ -323,7 +414,8 @@ describe('iPhone connection in normal Integrations', () => {
     );
     renderWithProviders(<Integrations />, { roseDesktop: false });
     expect(await screen.findByText('Unable to load iPhone connection.')).toBeInTheDocument();
-    await userEvent.click(screen.getByRole('button', { name: 'Connect iPhone' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Retry iPhone connection' }));
+    await userEvent.click(await screen.findByRole('button', { name: 'Connect iPhone' }));
     expect(await screen.findByText('Setting up…')).toBeInTheDocument();
     expect(state.posts).toHaveLength(1);
     expect(screen.queryByText('Connected')).not.toBeInTheDocument();

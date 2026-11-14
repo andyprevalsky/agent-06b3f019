@@ -251,8 +251,9 @@ it('cannot act on a different agent through an exact notification locator', asyn
     '',
     '/?agent-id=another-agent&browser-id=task-a&attention-request-id=request-a',
   );
-  render(<BrowserStatusBarFullscreen {...props()} messages={[]} />);
-  await new Promise((resolve) => setTimeout(resolve, 25));
+  await act(async () => {
+    render(<BrowserStatusBarFullscreen {...props()} messages={[]} />);
+  });
   expect(screen.queryByLabelText('Private phone password')).toBeNull();
   expect(f.posts).toEqual([]);
   expect(f.calls).toEqual([]);

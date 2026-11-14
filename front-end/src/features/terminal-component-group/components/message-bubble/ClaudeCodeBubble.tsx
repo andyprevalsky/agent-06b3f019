@@ -1,6 +1,7 @@
 /**
  * spawn_claude_code_agent tool → ClaudeCodeChip.
  *
+ * Output files have a collapsed disclosure inside this owning code result.
  * Three visible states:
  *   - IN_PROGRESS (toolStatus)           → "spinning_up"
  *   - action_type=claude_code_started   → live terminal
@@ -15,6 +16,8 @@
  *     toolCallId dedupe may then anchor the chip on that bare cancel message)
  *   [no sibling task_id] → "pending" (chip stays spinning_up until a real id arrives)
  */
+import { useToolArtifacts } from '../toolArtifactContext';
+import { ToolArtifacts } from '../ToolArtifacts';
 import { useMemo } from 'react';
 import { useAgentContext, type Message } from '../../hooks';
 import type { CodeProvider } from '../../types';
@@ -47,7 +50,8 @@ function resolveTaskId(message: Message, messages: Message[]): string {
 }
 
 export function ClaudeCodeBubble({ message, shouldType, onTypingComplete }: ClaudeCodeBubbleProps) {
-  const { messages } = useAgentContext();
+  const { messages, selectedAgentId } = useAgentContext();
+  const artifacts = useToolArtifacts();
   const metadata = message.metadata;
   const taskId = useMemo(() => resolveTaskId(message, messages), [message, messages]);
   const wsUrl = metadata?.ws_url as string | undefined;
@@ -66,6 +70,9 @@ export function ClaudeCodeBubble({ message, shouldType, onTypingComplete }: Clau
           codeProvider={codeProvider}
           toolCallId={typeof metadata?.toolCallId === 'string' ? metadata.toolCallId : undefined}
         />
+        {artifacts.length > 0 && (
+          <ToolArtifacts artifacts={artifacts} agentId={selectedAgentId || undefined} />
+        )}
       </div>
     </div>
   );

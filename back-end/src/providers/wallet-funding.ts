@@ -8,6 +8,7 @@ import { orgPollWaitsMs } from './agentcard/org-poll-schedule';
 import { recoverCardholderFunds } from './agentcard/fund-recovery';
 import { getOrgManagedCardholderId } from './agentcard/store';
 import { createLogger } from './logger';
+import { AgentCardWalletFundingRouter } from './agentcard/wallet-v2';
 
 const log = createLogger('WalletFunding');
 const RELEASE_LOOKUP_ATTEMPTS = 20;
@@ -15,6 +16,34 @@ const RELEASE_LOOKUP_DELAY_MS = 3_000;
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Organization backpressure that says nothing about one transfer: the provider's throttle, its
+ * intermittent org-token 401 on a healthy secret (left after the runtime's read auth-flap window),
+ * and a transient 503. Same set as the benchmark float's backpressure classification.
+ */
+function isOrgReleaseObservationBackpressure(error: unknown): boolean {
+  if (
+    error instanceof AgentCardOrgRuntimeError &&
+    (error.code === 'agentcard_org_mcp_rate_limited' ||
+      (error.code === 'agentcard_org_mcp_unauthorized' && error.status === 401) ||
+      (error.code === 'agentcard_org_mcp_unavailable' && error.status === 503))
+  ) {
+    return true;
+  }
+  // The exact REST reader converts the same backpressure (AgentCardV2Request's final 401
+  // `unauthorized`, 429 and default-code 503) into WalletFundingProviderError.
+  if (
+    error instanceof WalletFundingProviderError &&
+    (error.status === 429 ||
+      (error.status === 401 && error.code === 'unauthorized') ||
+      (error.status === 503 && error.code === 'agentcard_v2_unavailable'))
+  ) {
+    return true;
+  }
+  const message = error instanceof Error ? error.message : String(error);
+  return /too many requests|rate.?limit|\b429\b/i.test(message);
 }
 
 export interface WalletFundingRequest {
@@ -171,6 +200,17 @@ export class AgentCardCompanyWalletFundingProvider implements WalletFundingProvi
     ) => Promise<string | undefined> = getOrgManagedCardholderId
   ) {}
 
+  /** Override only the read boundary when an exact REST transfer lookup is available. */
+  protected async readTransfer(
+    transferId: string,
+    retryDeadlineAtMs: number
+  ): Promise<Record<string, unknown> | undefined> {
+    const result = await this.toolCaller('list_transfers', { limit: 100 }, retryDeadlineAtMs);
+    const record = assertToolSuccess('list_transfers', result);
+    const transfers = Array.isArray(record.transfers) ? record.transfers : [];
+    return transfers.map(asRecord).find((value) => value.id === transferId);
+  }
+
   async fundUserWallet(request: WalletFundingRequest): Promise<WalletFundingResult> {
     log.info('Company-flow card creation will trigger AgentCard wallet funding', {
       user_id: maskId(request.userId),
@@ -252,23 +292,19 @@ export class AgentCardCompanyWalletFundingProvider implements WalletFundingProvi
     let cardholderId: string | undefined;
     let cardholderResolved = false;
     for (let attempt = 1; attempt <= observations; attempt += 1) {
-      let result: unknown;
+      let transfer: Record<string, unknown> | undefined;
       try {
-        result = await this.toolCaller('list_transfers', { limit: 100 }, retryDeadlineAtMs);
+        transfer = await this.readTransfer(request.providerTransferId, retryDeadlineAtMs);
       } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        if (!/too many requests|rate.?limit|\b429\b/i.test(message)) throw error;
+        // Backpressure skips one observation; persisting it as a failed reclaim would turn a
+        // still-pending release (the stalled RECLAIMING lease) into RECLAIM_FAILED.
+        if (!isOrgReleaseObservationBackpressure(error)) throw error;
         if (attempt < observations) {
           await delay(waits[attempt - 1]);
           continue;
         }
         break;
       }
-      const record = assertToolSuccess('list_transfers', result);
-      const transfers = Array.isArray(record.transfers) ? record.transfers : [];
-      const transfer = transfers
-        .map((value) => asRecord(value))
-        .find((value) => value.id === request.providerTransferId);
       const releasedCents = transfer?.released_cents;
       const status = transfer?.status;
       log.info('Observed AgentCard company-wallet funding release state', {
@@ -339,5 +375,5 @@ export class AgentCardCompanyWalletFundingProvider implements WalletFundingProvi
 }
 
 export function createWalletFundingProvider(): WalletFundingProvider {
-  return new AgentCardCompanyWalletFundingProvider();
+  return new AgentCardWalletFundingRouter();
 }
