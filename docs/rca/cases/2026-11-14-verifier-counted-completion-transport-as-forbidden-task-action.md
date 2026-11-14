@@ -6,7 +6,7 @@ surface: agents
 component: verifier-context
 classification: our-bug
 problem_class: logical-inconsistency-in-harness-contracts
-first_bad_boundary: helpers/llm.py call_llm_structured_streaming prepends provider reasoning to the authored DAG response; subsequent verifier projection drops or mislabels that output and the rubric conflates completion control with task actions
+first_bad_boundary: helpers/llm.py execute phase projection drops DAG reasoning before the first tagged completion chip; utils/prompts.py leaves mandatory completion transport indistinguishable from task actions
 symptoms:
   - "Verifier score: 50%"
   - "contrary to the user's explicit prohibition on using any tools"
@@ -21,7 +21,7 @@ sources:
   - agent b16f9e06-7b74-5d01-adb6-24314e18c78c
   - commit 9de48a21c156772390f830d76e5fa0e239d81cac
   - commit e49c701aaaf34c0cbac1b1234240846b630affbc
-repro: agents/tests/blackbox/reasoning.blackbox.py test_reasoning_authored_answer_excludes_provider_reasoning
+repro: agents/tests/blackbox/llm.blackbox.py test_check_progress_keeps_completed_reasoning_before_completion_chip
 status: open
 ---
 
@@ -49,22 +49,18 @@ verifier messages → independent completion verdict → rejection → next acto
 
 Four boundaries contributed to this incident:
 
-1. The structured LLM parser prepended provider reasoning to the separate
-   authored response field. Once task-tool attribution was fixed, a current-code
-   live replay correctly rejected the explanatory preamble for exact-word
-   noncompliance. The reasoning service now opts out of that presentation merge;
-   ordinary loop callers retain it by default, and both retry paths forward
-   the option. The same provider stream yields exact OK in the DAG and the
-   existing thought-plus-answer presentation in ordinary callers. No text is
-   stripped or inferred after generation.
-
-2. `_filter_context_for_execute_verifier` preferred the first EXECUTE-tagged
+1. `_filter_context_for_execute_verifier` preferred the first EXECUTE-tagged
    message over the earlier explicit transition. DAG reasoning has no phase;
    the first tagged row was a completion status chip after the reasoning. A
    local replay of the captured prefix exactly reproduced the original first
    verifier's reply-free request. Removing only the late phase tag retained the
    reply through the existing transition fallback. The owning integration test
    failed before the repair with the reasoning TOOL_RESULT absent.
+2. The verifier kept truthful model-origin completion invocation provenance
+   (introduced by 9de48a21c15), but its rubric never distinguished the mandatory
+   final-answer transport from task actions. The actor must submit completion
+   through that transport; judging it as forbidden task work makes a no-tools
+   reply impossible. Extraction coverage alone must still not imply completion.
 
 3. Preserved DAG writing was serialized as TOOL_RESULT with tool_name reasoning,
    despite being an internally authored assistant result. The first repaired-path
@@ -72,11 +68,14 @@ Four boundaries contributed to this incident:
    OK correctly. AUTHORED_RESULT now preserves its source and exact text without
    inventing a task tool invocation. Actual tool receipts remain TOOL_RESULT.
 
-4. The verifier kept truthful model-origin completion invocation provenance
-   (introduced by 9de48a21c15), but its rubric never distinguished the mandatory
-   final-answer transport from task actions. The actor must submit completion
-   through that transport; judging it as forbidden task work makes a no-tools
-   reply impossible. Extraction coverage alone must still not imply completion.
+4. The structured LLM parser prepended provider reasoning to the separate
+   authored response field. Once task-tool attribution was fixed, a current-code
+   live replay correctly rejected the explanatory preamble for exact-word
+   noncompliance. The reasoning service now opts out of that presentation merge;
+   ordinary loop callers retain it by default, and both retry paths forward
+   the option. The same provider stream yields exact OK in the DAG and the
+   existing thought-plus-answer presentation in ordinary callers. No text is
+   stripped or inferred after generation.
 
 The deeper class is a mismatch between execution lifecycle and task evidence,
 not a special OK classifier or a request to suppress actual tool actions.
@@ -130,20 +129,15 @@ Verification on the recorded request:
   Before exit 1: reasoning TOOL_RESULT absent. After exit 0: reasoning retained,
   goal preserved, planning evidence excluded, captured rejection not overridden.
 - Prompt contract regression failed before, passed after. Full owning suites:
-  llm 276/276, prompts 8/8, run-agent 105/105 and reasoning all pass. All four changed-test units passed five consecutive runs
+  llm 276/276, prompts 8/8. Both changed cases passed five consecutive runs
   under eight CPU load slots via `scripts/select_affected_tests.py --stability`.
   Selector maps both files into the ordinary agents-blackbox deploy lane.
 
 Private source requests, all failed and successful replies, raw rows, diagnostics,
 worker logs, trial configs and hashes live under `.context/rca-no-tools` until
 archived for closeout. They are not committed because they contain private
-production context. Independent review exposed each first-path gap, and the final source-bound
-producer/verifier replay accepted exact OK in 13.269s. Earlier rejected
-intermediate repairs remain recorded. RCA-B16-2 was independently GROUNDED at
-f3f060294defef913467af2a07fec80cc95a7a4c by thread
-ph7b8w1efg50ndq894jzh141wd8j6h61; final packet SHA256
-7e82c7f6df3331fa54bc5dc6d40f4994aab7618ff872a8f3b2e8b78229521999.
-Three primary reference harnesses were opened directly for every scoped mechanism.
+production context. Independent RCA review found the first-path gap; its live replay and negative
+controls drove the authored-result projection fix. Final golden review is pending.
 Reference analogs opened: Claude `src/query.ts:554` completes the final-response
 path absent tool use; Codex `core/src/stream_events_utils.rs:356` and
 `core/src/session/turn.rs:657` separate tool follow-up from turn completion;
@@ -153,10 +147,6 @@ transport while converging on that lifecycle/task distinction. Ordinary rejectio
 feedback now contains the actual verdict and extracted output without appending
 an unconditional instruction to produce fresh tool evidence. Existing
 infrastructure-error guidance is preserved.
-
-A neighbouring existing eval, `scripts/run-bench eval --only grep-agent-trajectories-code-tool-status`, passed 1/1 in 82.9s on f3f060294def. It correctly distinguishes tool FAILED from process exit0. Its stack processes/ports/database were retired; the generated card remains INCOMPLETE because the eval route did not emit a benchmark-owner receipt. Native PASS and cleanup proof are preserved separately; this reporting gap is not relabeled complete.
-
-The frozen repair f3f060294def passed all 17 selected deploy gates. Native cloud smoke passed all 11 actual tasks with no retries or new failures; three existing QUARANTINED_PASS labels remain visible. All 11 fleets and the canary have verified lifecycle/provider teardown receipts, and the supervisor exited 0 with no remaining processes. The separately retained historical abandonment SKIP grants no current execution or financial-release credit. Production shipping remains pending.
 
 At 10,000 agents this adds no requests, shared state, fan-in or polling. It adds
 one existing-context scan and a static cached rubric paragraph per judge prompt.
@@ -170,4 +160,3 @@ No implementation-specific correction or acceptance override was requested.
 ## Reusable lesson
 
 Keep final-answer lifecycle transport distinct from task actions and preserve completed execution evidence before judging task constraints.
-
