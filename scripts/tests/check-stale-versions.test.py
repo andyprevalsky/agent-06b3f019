@@ -42,17 +42,22 @@ def document(dist_tags: dict[str, str], released_days_ago: dict[str, float]) -> 
 class Registry:
     """A local npm registry: GET /<url-encoded package> returns its document, else 404."""
 
-    def __init__(self, documents: dict[str, dict]) -> None:
+    def __init__(self, documents: dict[str, dict], truncated: tuple[str, ...] = ()) -> None:
         documents = dict(documents)
 
         class Handler(BaseHTTPRequestHandler):
             def do_GET(self) -> None:
                 package = urllib.parse.unquote(self.path.lstrip("/"))
                 body = documents.get(package)
+                data = json.dumps(body if body is not None else {"error": "Not found"}).encode()
                 self.send_response(200 if body is not None else 404)
                 self.send_header("Content-Type", "application/json")
+                if package in truncated:
+                    # Promise more bytes than are sent, then close: the client sees IncompleteRead.
+                    self.send_header("Content-Length", str(len(data) + 100))
+                    self.send_header("Connection", "close")
                 self.end_headers()
-                self.wfile.write(json.dumps(body if body is not None else {"error": "Not found"}).encode())
+                self.wfile.write(data)
 
             def log_message(self, *_args: object) -> None:
                 return
@@ -168,6 +173,20 @@ class CheckStaleVersionsTest(unittest.TestCase):
         self.assertIn("KeyError", lines[0])
         self.assertTrue(lines[1].startswith("⚠️ UNMEASURED VERSION — Codex CLI 0.159.0: "), lines[1])
         self.assertIn("HTTP Error 404", lines[1])
+
+    def test_truncated_registry_answer_is_unmeasured_and_keeps_the_other_line(self) -> None:
+        documents = {
+            CLAUDE: document({"stable": "2.1.311"}, {"2.1.305": 35, "2.1.311": 19}),
+            CODEX: document({"latest": "0.169.0"}, {"0.159.0": 46, "0.169.0": 1}),
+        }
+        with Registry(documents, truncated=(CLAUDE,)) as registry:
+            result = self.run_cli(registry.url)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        lines = result.stdout.splitlines()
+        self.assertEqual(len(lines), 2, result.stdout + result.stderr)
+        self.assertTrue(lines[0].startswith("⚠️ UNMEASURED VERSION — Claude Code CLI 2.1.305: "), lines[0])
+        self.assertIn("IncompleteRead", lines[0])
+        self.assertTrue(lines[1].startswith("⚠️ STALE VERSION — Codex CLI 0.159.0 "), lines[1])
 
     def test_missing_pin_exits_nonzero_and_names_the_file(self) -> None:
         self.pin("2.1.311", None)

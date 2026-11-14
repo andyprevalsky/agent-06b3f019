@@ -26,7 +26,6 @@ import argparse
 import json
 import re
 import sys
-import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
@@ -95,22 +94,25 @@ def check(dep: Critical, pinned: str, registry: str, now: datetime) -> dict:
     try:
         document = fetch_document(registry, dep.package)
         newest = document["dist-tags"][dep.channel]
-        if not VERSION.match(newest):
+        if not isinstance(newest, str) or not VERSION.match(newest):
             raise ValueError(f"{dep.channel} is not a release version: {newest}")
         pinned_at = released(document, pinned)
         newest_at = released(document, newest)
-    except (OSError, urllib.error.URLError, ValueError, KeyError, TypeError) as error:
+        age = now - pinned_at
+    except Exception as error:
+        # Every unreadable answer (unreachable, truncated, malformed) is a follow-up line, never a
+        # crash that would drop this and every other dependency's line from the scorecard.
         reason = f"{type(error).__name__}: {error}"[:200]
         row.update(status="unmeasured", message=(
             f"⚠️ UNMEASURED VERSION — {dep.name} {pinned}: could not read its newest stable release "
             f"(npm dist-tag {dep.channel}: {reason})"))
         return row
-    age_days = (now - pinned_at).days
+    age_days = age.days
     row.update(newest=newest, pinned_released=pinned_at.date().isoformat(),
                newest_released=newest_at.date().isoformat(), age_days=age_days)
     if version_key(pinned) >= version_key(newest):
         row.update(status="current", message=f"OK — {dep.name} {pinned} is the newest stable release")
-    elif now - pinned_at <= STALE_AFTER:
+    elif age <= STALE_AFTER:
         row.update(status="behind", message=(
             f"OK — {dep.name} {pinned} is behind stable {newest} but only {age_days} days old"))
     else:
@@ -135,9 +137,9 @@ def main(argv: list[str] | None = None) -> int:
 
     pins = {dep.name: read_pin(args.root, dep) for dep in CRITICAL}
     missing = [dep for dep in CRITICAL if pins[dep.name] is None]
-    for dep in missing:
-        print(f"error: no `ARG {dep.pin_arg}=<version>` in {dep.pin_file} for {dep.name}", file=sys.stderr)
     if args.list_pins:
+        for dep in missing:
+            print(f"error: no `ARG {dep.pin_arg}=<version>` in {dep.pin_file} for {dep.name}", file=sys.stderr)
         for dep in CRITICAL:
             if pins[dep.name] is not None:
                 print(f"{dep.name} {pins[dep.name]} ({dep.package}, {dep.channel})")
