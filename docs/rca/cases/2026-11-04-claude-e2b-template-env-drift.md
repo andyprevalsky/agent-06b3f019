@@ -66,3 +66,15 @@ deployment. No gate waiver or env write was used.
 Bind an image to the code that requires its pinned tool version. A
 per-environment image id drifts from the Dockerfile on fresh machines; editing
 one local .env fixes only that machine.
+
+## November 5: CLI integration fixture follows supported configuration
+
+The CLI integration unit fixture still expected its legacy Claude environment
+variable to choose `fixture-claude-template`. After the versioned-default
+repair above, that variable intentionally no longer selects the default.
+The exact unit run failed with the versioned template in place of its expected
+fixture. Supplying explicit Claude and Codex `2x4` entries through
+`E2B_SANDBOX_TEMPLATES` makes the unchanged assertions pass. All 52 assertions
+and 15 rejection checks remain; runtime selection, timeouts and the
+zero-allocation guard are unchanged. Independent review accepted the isolated
+red/green proof in `.context/cli-nov05-review/template-review.json`.

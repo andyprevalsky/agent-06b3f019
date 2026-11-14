@@ -303,7 +303,7 @@ const quarantinedDirectAnswer = (run: LifecycleTest): LifecycleTest =>
   quarantine(
     {
       since: '2026-11-14',
-      repair: 'pending-handoff:405ff38915c64e4ca73da99079e53295',
+      repair: 'https://boxes.dev/thread/ph726ee9ba3k8en6ew831pc2458j7gtc',
       error: 'Error: direct_answer sample 5 missed milestones',
       evidence: '.context/deploy-pipeline/rca/405ff38915c64e4ca73da99079e53295.json',
     },
