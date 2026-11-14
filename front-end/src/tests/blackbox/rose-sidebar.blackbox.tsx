@@ -198,14 +198,14 @@ describe('Rose left bar (flag on)', () => {
     const project = screen.getByTestId('rose-project-row-p-rose');
     expect(within(project).getByRole('button', { name: 'Create Super Agent' })).toBeInTheDocument();
     expect(
-      within(project).getByRole('button', { name: 'Rose project settings' }),
+      within(project).getByRole('button', { name: 'Rose folder settings' }),
     ).toBeInTheDocument();
     const home = screen.getByTestId('rose-home-project-row');
     expect(home).toHaveTextContent('Home');
     expect(within(home).getByRole('button', { name: 'Create Super Agent' })).toBeInTheDocument();
-    // "+ New project" is the first row of the list: right under Back | Search,
+    // "+ New folder" is the first row of the list: right under Back | Search,
     // above the first project (Andy: "new project above rose").
-    const newProject = screen.getByRole('button', { name: '+ New project' });
+    const newProject = screen.getByRole('button', { name: '+ New folder' });
     expect(groups.firstElementChild).toBe(newProject);
     expect(
       newProject.compareDocumentPosition(project) & Node.DOCUMENT_POSITION_FOLLOWING,
@@ -257,20 +257,20 @@ describe('Rose left bar (flag on)', () => {
       'agent:orphan',
       'agent:home-done',
     ]);
-    // Icons only: names faded, no + / ⚙ buttons. New project keeps its icon in
+    // Icons only: names faded, no + / ⚙ buttons. New folder keeps its icon in
     // the same top slot (label faded), so expanding never shifts the rows.
     const project = screen.getByTestId('rose-project-row-p-rose');
     expect(within(project).getByText('Rose').className).toContain('opacity-0');
-    expect(within(project).getByRole('button', { name: 'Collapse Rose project' })).toBeVisible();
+    expect(within(project).getByRole('button', { name: 'Collapse Rose folder' })).toBeVisible();
     expect(within(project).getAllByRole('button')).toHaveLength(1);
     expect(
       within(screen.getByTestId('rose-home-project-row')).getByRole('button', {
-        name: 'Collapse Home project',
+        name: 'Collapse Home',
       }),
     ).toBeVisible();
-    const newProject = screen.getByRole('button', { name: '+ New project' });
+    const newProject = screen.getByRole('button', { name: '+ New folder' });
     expect(screen.getByTestId('rose-agent-groups').firstElementChild).toBe(newProject);
-    expect(within(newProject).getByText('New project').className).toContain('opacity-0');
+    expect(within(newProject).getByText('New folder').className).toContain('opacity-0');
     const pill = screen.getAllByTestId('rose-group-divider')[0].querySelector('i')!;
     expect(pill.className).toContain('h-[3px]');
     expect(pill.className).toContain('w-[18px]');
@@ -395,8 +395,8 @@ describe('Rose left bar (flag on)', () => {
       within(roseBar())
         .getAllByRole('button')
         .map((b) => b.getAttribute('aria-label'))
-        .slice(-3);
-    expect(bottom()).toEqual(['Feedback', 'Archived', 'Andy Prevalsky']);
+        .slice(-4);
+    expect(bottom()).toEqual(['Feedback', 'Teams', 'Archived', 'Andy Prevalsky']);
     const bar = roseBar();
     expect(
       within(bar).getByRole('button', { name: 'Feedback' }).querySelector('svg.lucide-megaphone'),
@@ -406,7 +406,7 @@ describe('Rose left bar (flag on)', () => {
     unmount();
 
     renderBar({ showAdminHealth: true });
-    expect(bottom()).toEqual(['Biz health', 'Archived', 'Andy Prevalsky']);
+    expect(bottom()).toEqual(['Biz health', 'Teams', 'Archived', 'Andy Prevalsky']);
   });
 
   it('Biz health opens the admin health page in the right drawer; clicking again closes it', async () => {

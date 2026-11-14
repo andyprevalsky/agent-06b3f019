@@ -1,10 +1,13 @@
+import { observeStripeCustody } from './lifecycleStripeCustody';
+import { isV2LifecycleFunding, observeV2Lifecycle } from './lifecycleV2';
 import { callOrgTool } from '../../providers/agentcard/org-runtime';
 import { getOrgManagedCardholderId } from '../../providers/agentcard/store';
 import { getStripeClientForLivemode } from '../../providers/stripe';
 import { TestPaymentError } from './errors';
 import {
   agentCardSummaryFromMcpResult,
-  asRecord,
+  buildAttention,
+  mapAgentCard,
   mcpResultCode,
   providerIntegrity,
 } from './lifecycleProviderRecords';
@@ -29,30 +32,11 @@ type LoadedPurchase = NonNullable<LifecyclePurchase>;
 
 export type { TestPaymentLifecycleDependencies } from './lifecycleDependencies';
 
-function attentionKind(metadata: unknown): string | null {
-  const value = asRecord(metadata)?.attentionKind;
-  return typeof value === 'string' && value !== '' ? value : null;
-}
-
 async function getOrgCardSummary(cardId: string): Promise<{
   status: string;
   balanceCents: number;
 }> {
-  const result = await callOrgTool('get_card', { card_id: cardId });
-  return agentCardSummaryFromMcpResult(result);
-}
-
-function buildAttention(attentionRequests: LifecycleAttention): TestPaymentLifecycle['attention'] {
-  const kinds = attentionRequests
-    .map((request) => ({
-      kind: attentionKind(request.metadata),
-      open: request.userResponse === null,
-    }))
-    .filter((entry): entry is { kind: string; open: boolean } => entry.kind !== null);
-  return {
-    openKinds: kinds.filter((entry) => entry.open).map((entry) => entry.kind),
-    resolvedKinds: kinds.filter((entry) => !entry.open).map((entry) => entry.kind),
-  };
+  return agentCardSummaryFromMcpResult(await callOrgTool('get_card', { card_id: cardId }));
 }
 
 function resolveDependencies(
@@ -149,18 +133,6 @@ function mapWalletFunding(purchase: LoadedPurchase): TestPaymentLifecycle['walle
   };
 }
 
-function mapAgentCard(
-  purchase: LoadedPurchase,
-  cardDetails: { status: string; balanceCents: number } | null
-): TestPaymentLifecycle['agentCard'] {
-  if (cardDetails === null || purchase.cardId === null) return null;
-  return {
-    id: purchase.cardId,
-    status: cardDetails.status,
-    balanceCents: cardDetails.balanceCents,
-  };
-}
-
 function isClosedCardDetailsError(error: unknown): boolean {
   if (mcpResultCode(error)?.toLowerCase() === 'card_closed') return true;
   const message = error instanceof Error ? error.message : String(error);
@@ -187,6 +159,52 @@ async function loadCardSummary(
   }
 }
 
+async function buildV2LoadedLifecycle(
+  agentId: string,
+  purchase: LoadedPurchase,
+  attentionRequests: LifecycleAttention,
+  integrity: LifecycleIntegrity,
+  dependencies: TestPaymentLifecycleDependencies
+): Promise<TestPaymentLifecycle> {
+  const { retrieveStripeHold, listStripeRefunds, searchStripeHolds } = resolveDependencies(
+    dependencies,
+    purchase.stripeLivemode
+  );
+  const cardId = purchase.cardId;
+  const intentId = purchase.stripePaymentIntentId;
+  const emptyRefunds: StripeRefundList = { data: [] };
+  const [observation, stripeHold, stripeRefunds, stripeResults] = await Promise.all([
+    observeV2Lifecycle(purchase, dependencies.v2Request, dependencies.getV2OwnerId),
+    intentId !== null && intentId !== '' ? retrieveStripeHold(intentId) : Promise.resolve(null),
+    intentId !== null && intentId !== ''
+      ? listStripeRefunds(intentId)
+      : Promise.resolve(emptyRefunds),
+    searchAllStripeHolds(agentId, searchStripeHolds),
+  ]);
+  return {
+    agentId,
+    integrity: {
+      ...integrity,
+      ...observation.integrity,
+      stripeProviderPaymentIntentCount: new Set(stripeResults.data.map((intent) => intent.id)).size,
+    },
+    purchase: {
+      id: purchase.id,
+      status: purchase.status,
+      merchant: purchase.merchant,
+      totalCents: purchase.totalCents,
+      cardId,
+      stripePaymentIntentId: intentId,
+    },
+    walletFunding: mapWalletFunding(purchase),
+    stripeHold: mapStripeHold(stripeHold),
+    stripeRefund: mapStripeRefund(stripeRefunds, stripeHold, intentId),
+    agentCard: mapAgentCard(purchase, observation.card),
+    orgTransfer: observation.transfer,
+    attention: buildAttention(attentionRequests),
+  };
+}
+
 async function buildLoadedLifecycle(
   agentId: string,
   purchase: LoadedPurchase,
@@ -194,6 +212,9 @@ async function buildLoadedLifecycle(
   integrity: LifecycleIntegrity,
   dependencies: TestPaymentLifecycleDependencies
 ): Promise<TestPaymentLifecycle> {
+  if (isV2LifecycleFunding(purchase.walletFunding?.metadata)) {
+    return buildV2LoadedLifecycle(agentId, purchase, attentionRequests, integrity, dependencies);
+  }
   const {
     getCardSummary,
     retrieveStripeHold,
@@ -247,7 +268,7 @@ async function buildLoadedLifecycle(
   };
 }
 
-export async function getTestPaymentLifecycle(
+async function readTestPaymentLifecycle(
   agentId: string,
   dependencies: TestPaymentLifecycleDependencies = {}
 ): Promise<TestPaymentLifecycle> {
@@ -284,4 +305,14 @@ export async function getTestPaymentLifecycle(
     };
   }
   return buildLoadedLifecycle(agentId, purchase, attentionRequests, integrity, dependencies);
+}
+
+export async function getTestPaymentLifecycle(
+  agentId: string,
+  dependencies: TestPaymentLifecycleDependencies = {}
+): Promise<TestPaymentLifecycle> {
+  const result = await readTestPaymentLifecycle(agentId, dependencies);
+  if (dependencies.includeStripeCustody === true)
+    result.stripeCustody = await observeStripeCustody(agentId, dependencies);
+  return result;
 }

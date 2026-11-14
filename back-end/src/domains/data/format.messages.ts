@@ -28,6 +28,9 @@ export function buildMessageConversationMatch(
   const path = `messages/${thread}/${anchor.id}`;
   const records: GrepMessageRecord[] = contextRows.map((row) => ({
     message_id: row.id,
+    owner_user_id: row.userId,
+    account_id:
+      row.channel === 'EMAIL' ? row.googleAccountEmail : row.channel === 'IMESSAGE' ? '' : null,
     channel: row.channel,
     from: row.from,
     to: row.to,

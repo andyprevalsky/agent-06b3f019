@@ -7,6 +7,7 @@ import {
 } from '../../providers/agentcard/org-runtime';
 import { resolveBenchmarkCardholderId } from '../../providers/agentcard/benchmark-float';
 import { assertProviderUnauthorizedIsNeverReplayedWithoutBackoff } from './agentcard-org-runtime-throttle-401.cases';
+import { assertTransportRecoveryContract } from './agentcard-org-runtime-transport.cases';
 
 const CREDENTIAL_ENV = [
   'AGENTCARD_ORG_MCP_ACCESS_TOKEN',
@@ -24,6 +25,8 @@ async function main(): Promise<void> {
     for (const name of CREDENTIAL_ENV) delete process.env[name];
     process.env.AGENTCARD_ORG_OAUTH_CLIENT_ID = 'blackbox-client';
     process.env.AGENTCARD_ORG_OAUTH_CLIENT_SECRET = 'blackbox-secret';
+
+    await assertTransportRecoveryContract();
 
     let tokenRequests = 0;
     const seenTokens: string[] = [];
@@ -475,6 +478,19 @@ async function main(): Promise<void> {
         label: 'empty incomplete page',
         pages: [{ cardholders: [], total: 1 }],
         error: /pagination did not cover its total/,
+      },
+      {
+        label: 'page beyond reported total',
+        pages: [{ cardholders: [{ id: 'first' }], total: 0 }],
+        error: /exceeded its reported total/,
+      },
+      {
+        label: 'later page beyond reported total',
+        pages: [
+          { cardholders: [{ id: 'first' }], total: 2 },
+          { cardholders: [{ id: 'second' }, { id: 'third' }], total: 2 },
+        ],
+        error: /exceeded its reported total/,
       },
     ];
     for (const scenario of incompleteInventories) {

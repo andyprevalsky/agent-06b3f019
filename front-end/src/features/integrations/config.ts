@@ -5,7 +5,6 @@ import { BACKEND_BASE_URL } from '@/lib/backendUrl';
 /** Shared provider metadata for the meeting note taker category. */
 
 export const MEETING_NOTES_TITLE = 'Meeting note taker';
-export const MEETING_NOTES_DESCRIPTION = 'granola.ai, fireflies.ai, etc.';
 export const MEETING_NOTES_PUBLIC_ORIGIN = 'https://www.roselabs.ai';
 export const MEETING_NOTES_PROVIDERS = ['granola', 'fireflies'] as const;
 
@@ -53,6 +52,10 @@ export const INTEGRATION_CATALOG = {
     aliases: `${Object.values(meetingNotesProviders)
       .map(({ name, domain }) => `${name} ${domain}`)
       .join(' ')} meeting notes transcript transcripts summary summaries recording calls`,
+  },
+  githubRepos: {
+    title: 'GitHub Repos',
+    aliases: 'github gh git repository repositories repo code projects folders',
   },
   pebble: { title: 'Other', aliases: 'pebble index 01 ring wearable audio recording webhook' },
 } as const satisfies Record<IntegrationCatalogKey, { title: string; aliases: string }>;

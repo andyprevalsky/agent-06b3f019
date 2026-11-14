@@ -6,6 +6,7 @@
  * service.ts for max-lines compliance.
  */
 
+import { resolveTeamDataAccess } from '../../providers/teamAccess';
 import { hasGoogleWorkspaceAccount } from '../../services/integrations/googleWorkspaceSync';
 import { SourceNotFoundError } from './errors';
 import * as repo from './repo';
@@ -69,6 +70,17 @@ function connectUrlForConnector(connector: string): string {
  */
 export async function getSourceStatus(userId: string, sources: string[]): Promise<SourceStatus[]> {
   const statuses: SourceStatus[] = [];
+  const grants = sources.some((source) => ['email', 'gmail', 'imessage'].includes(source))
+    ? await resolveTeamDataAccess(userId)
+    : [];
+  const shared = (source: string) =>
+    grants.some((grant) =>
+      source === 'imessage'
+        ? grant.provider === 'imessage' && grant.accountId === ''
+        : ['email', 'gmail'].includes(source) &&
+          grant.provider === 'gmail' &&
+          Boolean(grant.accountEmail)
+    );
   for (const rawSource of sources) {
     // One generic source requires either provider, never both. Keep the actual
     // provider identity for connected results and a working connect route otherwise.
@@ -96,9 +108,11 @@ export async function getSourceStatus(userId: string, sources: string[]): Promis
     // Calendar and Drive are connected when a Google account that granted them
     // is: one connected for email alone must be reconnected, and a failing email
     // sync (the shared `gmail` row's status) says nothing about these two.
-    const connected = needsGoogleWorkspaceGrant(rawSource)
-      ? await hasGoogleWorkspaceAccount(userId)
-      : await repo.isConnectorConnected(userId, connector);
+    const connected =
+      shared(rawSource) ||
+      (needsGoogleWorkspaceGrant(rawSource)
+        ? await hasGoogleWorkspaceAccount(userId)
+        : await repo.isConnectorConnected(userId, connector));
     statuses.push({
       source: rawSource,
       connector,

@@ -20,6 +20,7 @@ from pydantic import (
     model_validator,
 )
 
+from utils.grep_tool_contract import GREP_SOURCE_FILTER_KEYS, GREP_TOOL_PROMPT
 from utils.prompts import (
     PLANNER_RESPONSE_JOIN_DESCRIPTION,
     PLANNER_RESPONSE_TASKS_DESCRIPTION,
@@ -35,7 +36,6 @@ from utils.response_schema_constraints import (
     bounds_from_entries,
     coerce_direct_bounds_to_entries,
 )
-from utils.grep_tool_contract import GREP_SOURCE_FILTER_KEYS, GREP_TOOL_PROMPT
 from utils.tool_output_schema import ReadToolOutputTool
 from utils.user_facing_writing_prompt import user_facing_text_description
 from utils.wait_for_bounds import (
@@ -788,6 +788,13 @@ class GrepTool(BaseModel):
         default=None,
         description="Legacy single-source alias for `sources`. Prefer `sources` (a list of the exact sources the task needs).",
     )
+    owner_user_id: Optional[str] = Field(
+        default=None, description="Only this owner's records (ids from the shared data map)."
+    )
+    team_id: Optional[str] = Field(default=None, description="Only accounts shared with this team.")
+    account_id: Optional[str] = Field(
+        default=None, description='Only this inbox email ("" = default iMessage account).'
+    )
     role: Optional[Literal["USER", "ASSISTANT", "TOOL"]] = Field(
         default=None,
         description="Message role in agent_trajectories or agent_network. Implies agent_trajectories when sources are omitted.",
@@ -1183,7 +1190,11 @@ SPAWN_AGENT_TYPE_DESCRIPTION_ROSE_DESKTOP = _SPAWN_TYPE_BROWSER + _SPAWN_TYPE_CO
 BROWSER_GOAL_PROFILE_NOTE = (
     "Exception: a browser agent also receives the user's profile (name, email, phone, delivery "
     "address) and the target site's sign-in options itself; do not restate the user's profile in "
-    "its goal."
+    "its goal. Keep the goal and required output fields limited to the requested outcome and "
+    "evidence needed to establish it. Make supplementary observations conditional in the goal "
+    "and optional in output_schema; do not turn possible site details or background facts into "
+    "mandatory completion evidence. Preserve explicit and standing user constraints and all "
+    "steps and evidence necessary for correct execution."
 )
 
 
@@ -1191,6 +1202,16 @@ def _require_spawn_output_schema_key(schema: Dict[str, Any]) -> None:
     required = schema.setdefault("required", [])
     if "output_schema" not in required:
         required.append("output_schema")
+
+
+_GITHUB_REPO_REF_DESCRIPTION = (
+    "A GitHub repo the user connected to Rose: 'gh:owner/repo', its GitHub URL, 'owner/repo' "
+    "or a Rose project id. Code agents check it out; spawned agents keep it as their repo. "
+    "Explicit selection wins over inherited references (your repo, the project's repo) and "
+    "over github_repo_link. Omit it to inherit. A repo that is not connected fails with an "
+    "error naming it; it never falls back to another repo. Not allowed with target='local'. "
+    "Ignored when code_session_id resumes a session, which keeps its own repo."
+)
 
 
 class SpawnAgentTool(BaseModel):
@@ -1257,9 +1278,14 @@ class SpawnAgentTool(BaseModel):
             "Optional when type='code'. GitHub repository URL to clone and sync to. "
             "Ignored for every other type. Only provide this when the user supplied a real, "
             "accessible repository URL; do not invent placeholder repositories. If omitted, "
-            "uses the current project's repo when the agent is in a project, otherwise a repo "
-            "created for this agent tree."
+            "uses github_repo_ref, else your own connected repo, else the current project's repo "
+            "when the agent is in a project, otherwise a repo created for this agent tree."
         ),
+    )
+    github_repo_ref: Optional[str] = Field(
+        default=None,
+        description="Optional when type='code', 'general_purpose' or 'for_each'; ignored for every other type. "
+        + _GITHUB_REPO_REF_DESCRIPTION,
     )
     code_session_id: Optional[str] = Field(
         default=None,
@@ -1456,6 +1482,10 @@ class SpawnAgentToolNoGP(BaseModel):
             "Optional when type='code'. GitHub repository URL to clone and sync to. Ignored for every other type."
         ),
     )
+    github_repo_ref: Optional[str] = Field(
+        default=None,
+        description="Optional when type='code'; ignored for every other type. " + _GITHUB_REPO_REF_DESCRIPTION,
+    )
     code_session_id: Optional[str] = Field(
         default=None,
         description=(
@@ -1569,7 +1599,7 @@ class SpawnExploreAgentTool(BaseModel):
 
 
 class ListAgentsTool(BaseModel):
-    """Browse your agent tree like a table of contents: where you are, nearby agents, drill-down hints."""
+    """Browse your agent tree like a table of contents: where you are, nearby agents, drill-down hints. With project_id, owner_user_id or team_id it also lists teammates' agents in projects shared with you (title and status only)."""
 
     tool: Literal["list_agents"]
     node: Optional[str] = Field(
@@ -1582,6 +1612,9 @@ class ListAgentsTool(BaseModel):
     path_prefix: Optional[str] = Field(
         default=None, description="List agents at or below this path, e.g. /root/outreach."
     )
+    project_id: Optional[str] = Field(default=None, description="Only agents in this project.")
+    owner_user_id: Optional[str] = Field(default=None, description="Only this owner's project agents.")
+    team_id: Optional[str] = Field(default=None, description="Only projects shared with this team.")
 
 
 _AGENT_ADDRESS_DESCRIPTION = (

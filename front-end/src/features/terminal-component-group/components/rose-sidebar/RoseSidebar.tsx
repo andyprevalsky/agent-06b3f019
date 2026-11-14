@@ -61,7 +61,7 @@
  * agent or code-agent row and every "+" (a project's or Home's) close it first.
  */
 
-import { Activity, Archive, Globe, Megaphone } from 'lucide-react';
+import { Activity, Archive, Globe, Megaphone, Users } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 
@@ -218,7 +218,7 @@ function RoseSidebarBar(props: AppSidebarProps) {
   const createInProject = roseActions.onCreateAgentInProject;
   const projects = useRoseSidebarProjects((project, folderId) => {
     if (createInProject === undefined) {
-      notYet('New agent in a project');
+      notYet('New agent in a folder');
       return;
     }
     pendingGroup.mark(folderId ? `folder:${folderId}` : project.id);
@@ -273,8 +273,9 @@ function RoseSidebarBar(props: AppSidebarProps) {
     onViewChange(view);
     onSelectAgent(null);
   };
-  const openPanel = (app: 'feedback' | 'health' | 'settings') => {
+  const openPanel = (app: 'feedback' | 'health' | 'settings' | 'teams') => {
     if (apps !== null) apps.toggleApp(app);
+    else if (app === 'teams') goToView('teams');
     else if (app === 'health') goToView('admin-health');
     else if (app === 'settings') goToView('settings');
   };
@@ -349,6 +350,13 @@ function RoseSidebarBar(props: AppSidebarProps) {
                 onClick={() => openPanel('health')}
               />
             )}
+            <RoseNavRow
+              icon={<Users className="h-5 w-5" strokeWidth={1.7} />}
+              label="Teams"
+              isExpanded={isExpanded}
+              isActive={apps?.openApp === 'teams'}
+              onClick={() => openPanel('teams')}
+            />
             <RoseNavRow
               icon={<Archive className="h-5 w-5" strokeWidth={1.7} />}
               label="Archived"

@@ -117,15 +117,24 @@ export class FakeFireflies {
         const skip = this.repeatPage ? 0 : Number(args.skip);
         value = this.malformed
           ? { message: 'temporarily unavailable' }
-          : {
-              transcripts: hits.slice(skip, skip + 50).map((m) => ({
+          : // Live Fireflies MCP envelope (captured 2026-11-13): {data: [...], warning?} with
+            // camelCase fields; an empty window adds a warning instead of failing.
+            {
+              data: hits.slice(skip, skip + 50).map((m) => ({
                 id: m.id,
                 title: m.title,
-                date: m.date,
-                summary: m.summary === null ? null : { overview: m.summary },
+                dateString: new Date(m.date).toISOString(),
+                duration: 30,
+                organizerEmail: 'ada@example.com',
+                summary: m.summary === null ? null : { short_summary: m.summary },
                 participants: ['ada@example.com'],
-                transcript_url: `https://app.fireflies.ai/view/${m.id}`,
               })),
+              ...(hits.length <= skip
+                ? {
+                    warning:
+                      'No meetings matched. A meeting that is still in progress does not appear yet.',
+                  }
+                : {}),
             };
       } else {
         assert(typeof args.transcriptId === 'string', 'documented transcriptId input');

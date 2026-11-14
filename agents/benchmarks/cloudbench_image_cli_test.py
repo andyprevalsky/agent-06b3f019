@@ -765,7 +765,7 @@ def test_cold_image_builder_rejected_before_auth(tmp_path, arguments):
     root = tmp_path / "checkout"
     libraries = root / "scripts/lib"
     libraries.mkdir(parents=True)
-    (libraries / "cloudbench-env.sh").write_text("")
+    shutil.copy2(ROOT / "scripts/lib/cloudbench-env.sh", libraries / "cloudbench-env.sh")
     (libraries / "cloudbench-app-env-lock.sh").write_text("")
     observed = tmp_path / "auth-called"
     (libraries / "cloudbench-github-token.sh").write_text(
@@ -1254,3 +1254,118 @@ def test_cold_image_stalled_publisher_attempt_retries_under_its_own_tag(tmp_path
         assert first_log.read_text().rstrip().endswith("ending this attempt for the normal retry.")
     for private in output.glob("*.private.log"):
         assert private.stat().st_mode & 0o777 == 0o600
+
+
+_TERMINAL_PROGRESS_PUBLISHER = r'''
+import json, os, signal, subprocess, sys, time
+from pathlib import Path
+
+state = Path(os.environ["IMAGE_TEST_STATE"])
+scenario = os.environ["IMAGE_TEST_SCENARIO"]
+metadata = {
+    "pid": os.getpid(), "stderr_tty": os.isatty(2), "stdout_tty": os.isatty(1),
+    "stdin_tty": os.isatty(0), "stdin_closed": sys.stdin.buffer.read(1) == b"",
+}
+if scenario in ("silent", "cancel"):
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(3600)"])
+    metadata["descendant_pid"] = child.pid
+(state / "invocation.json").write_text(json.dumps(metadata))
+if metadata["stdin_tty"] or metadata["stdout_tty"] or not metadata["stdin_closed"]:
+    raise SystemExit(92)
+print("fixture-layer: Preparing", file=sys.stderr, flush=True)
+if scenario in ("silent", "cancel"):
+    time.sleep(3600)
+if scenario == "exit":
+    raise SystemExit(37)
+if scenario == "signal":
+    os.kill(os.getpid(), signal.SIGTERM)
+for current in range(1, 17):
+    # The fixture's independent event sink proves actual transfer events continue
+    # even when Docker v28.5.2's nonterminal renderer suppresses progressDetail.
+    with (state / "actual-progress.jsonl").open("a") as output:
+        output.write(json.dumps({"id": "fixture-layer", "current": current, "total": 16}) + "\n")
+    if os.isatty(2) or os.environ["IMAGE_TEST_BUILDER"] == "depot":
+        print(f"fixture-layer: Pushing {current}/16", file=sys.stderr, flush=True)
+    time.sleep(0.3)
+print("fixture-layer: Pushed", file=sys.stderr, flush=True)
+'''
+
+
+def _terminal_progress_harness(tmp_path, builder, scenario):
+    state = tmp_path / "state"
+    state.mkdir()
+    publisher = tmp_path / "publisher.py"
+    publisher.write_text(f"#!{sys.executable}\n" + _TERMINAL_PROGRESS_PUBLISHER)
+    publisher.chmod(0o700)
+    log = tmp_path / "publisher.private.log"
+    log.touch(mode=0o600)
+    harness = tmp_path / "publish.sh"
+    harness.write_text(
+        f"source {shlex.quote(str(ROOT / 'scripts/lib/cloudbench-env.sh'))}\n"
+        f"source {shlex.quote(str(PUBLISHER_LIB))}\n"
+        f"IMAGE_BUILD_BUILDER={builder}\n"
+        f"cloudbench_image_publish_watched {shlex.quote(str(log))} {shlex.quote(str(publisher))} &\n"
+        "owner=$!\n"
+        "trap 'cloudbench_terminate_tree_and_wait 3 \"$owner\"; exit 143' TERM\n"
+        'wait "$owner"\n'
+    )
+    process = subprocess.Popen(
+        [BASH, str(harness)],
+        env={**os.environ, "IMAGE_TEST_STATE": str(state), "IMAGE_TEST_SCENARIO": scenario,
+             "IMAGE_TEST_BUILDER": builder, "CLOUDBENCH_IMAGE_PUBLISH_IDLE_SECONDS": "2"},
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True,
+    )
+    return process, state, log
+
+
+def _assert_terminal_fixture_pid(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return
+    status = subprocess.run(
+        ["ps", "-p", str(pid), "-o", "stat="], capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    assert not status or status.startswith("Z"), f"fixture-owned process survived: {pid} {status}"
+
+
+@pytest.mark.parametrize("builder", ["native", "depot"])
+def test_cold_image_native_terminal_progress_reaches_actual_watchdog(tmp_path, builder):
+    process, state, log = _terminal_progress_harness(tmp_path, builder, "progress")
+    stdout, stderr = process.communicate(timeout=30)
+    events = [json.loads(line) for line in (state / "actual-progress.jsonl").read_text().splitlines()]
+    assert len(events) >= 3, "Fixture must actually make progress before any timeout"
+    assert process.returncode == 0, stdout + stderr
+    assert [event["current"] for event in events] == list(range(1, 17))
+    assert "Pushing 1/16" in log.read_text() and "Pushing 16/16" in log.read_text()
+    assert "no output" not in stderr
+    invocation = json.loads((state / "invocation.json").read_text())
+    assert invocation["stderr_tty"] is (builder == "native")
+    assert invocation["stdout_tty"] is False and invocation["stdin_tty"] is False
+    assert invocation["stdin_closed"] is True
+    _assert_terminal_fixture_pid(invocation["pid"])
+
+
+@pytest.mark.parametrize("scenario,expected", [("silent", 124), ("exit", 37), ("signal", 143), ("cancel", 143)])
+def test_cold_image_native_terminal_progress_preserves_failure_and_cleanup(tmp_path, scenario, expected):
+    process, state, log = _terminal_progress_harness(tmp_path, "native", scenario)
+    if scenario == "cancel":
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "condition_wait", Path(__file__).resolve().parents[2] / "scripts" / "lib" / "condition_wait.py")
+        condition_wait = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(condition_wait)
+        # Cancel only after the actual publisher starts.
+        condition_wait.wait_until(lambda: (state / "invocation.json").exists(), timeout=10,
+                                  description="publisher fixture started")
+        process.terminate()
+    stdout, stderr = process.communicate(timeout=45)
+    assert process.returncode == expected, stdout + stderr
+    invocation = json.loads((state / "invocation.json").read_text())
+    assert invocation["stdin_closed"] is True
+    _assert_terminal_fixture_pid(invocation["pid"])
+    if "descendant_pid" in invocation:
+        _assert_terminal_fixture_pid(invocation["descendant_pid"])
+    if scenario == "silent":
+        assert "no output for 2s" in stderr
+        assert "Pushing" not in log.read_text()

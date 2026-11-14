@@ -21,6 +21,8 @@
  * Pebble Index 01 (last row/card) --Connect--> PebbleIndexSetupModal (guided
  * webhook setup; state owned here, in both presentations).
  *
+ * Team sharing uses explicit per-account, per-team opt-ins, saved independently.
+ *
  * File System is a FE-only section: website is Download for Mac; Mac app
  * plus click stays [IDLE/READY] (no hook).
  *
@@ -38,6 +40,7 @@ import { hasIntegrationSearchResults, integrationMatchesSearch } from '../hooks/
 import IntegrationSearch from './IntegrationSearch';
 import { Loader2 } from 'lucide-react';
 
+import { IntegrationTeamSharing } from '@/components/teams/TeamSharing';
 import { useRoseDesktop } from '@/hooks/roseDesktopContext';
 
 import {
@@ -55,6 +58,7 @@ import {
   useAuth,
 } from '../hooks';
 import { usePlaidIntegration } from '../hooks/usePlaidIntegration';
+import { useGithubRepos } from '../hooks/useGithubRepos';
 import { useMeetingNotes } from '../hooks/useMeetingNotes';
 
 import DesktopIntegrations from './DesktopIntegrations';
@@ -170,6 +174,7 @@ export default function Integrations({ initialSearch = '' }: { initialSearch?: s
         />
 
         <div className="space-y-3">
+          <IntegrationTeamSharing />
           <div hidden={!integrationMatchesSearch('iphone', search)}>
             <IPhoneConnectionSection key={user?.id ?? 'signed-out'} />
           </div>
@@ -184,6 +189,7 @@ export default function Integrations({ initialSearch = '' }: { initialSearch?: s
             </div>
           ) : (
             <IntegrationSectionsSwitch
+              userId={user?.id ?? null}
               search={search}
               isBrowserCookiesAvailable={!!handlers.browserCookies?.isAvailable}
               isPasskeysAvailable={!!handlers.passkeys?.isAvailable}
@@ -217,11 +223,16 @@ export default function Integrations({ initialSearch = '' }: { initialSearch?: s
 /** Stock cards with the flag off; the Rose Desktop list with it on. */
 function IntegrationSectionsSwitch({
   accordion,
+  userId,
   ...rest
-}: Omit<React.ComponentProps<typeof IntegrationSections>, 'meetingNotes'>) {
+}: Omit<React.ComponentProps<typeof IntegrationSections>, 'meetingNotes' | 'github'> & {
+  /** Signed-in user: keys the GitHub repo and folder caches to this account. */
+  userId: string | null;
+}) {
   const granola = useMeetingNotes('granola', rest.isFullySignedIn, rest.data.fetchIntegrations);
   const fireflies = useMeetingNotes('fireflies', rest.isFullySignedIn, rest.data.fetchIntegrations);
-  const props = { ...rest, meetingNotes: { granola, fireflies } };
+  const github = useGithubRepos(rest.isFullySignedIn, userId);
+  const props = { ...rest, meetingNotes: { granola, fireflies }, github };
   if (useRoseDesktop()) return <DesktopIntegrations {...props} />;
   return <IntegrationSections accordion={accordion} {...props} />;
 }
