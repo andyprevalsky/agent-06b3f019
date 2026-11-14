@@ -211,6 +211,7 @@ class FreshPrestartRecoveryTest(PrestartRecoveryTest):
             (self.audit / "by-machine-id" / machine).write_text(clone + "\n")
             (out / "primary.ids").write_text(machine + "\n")
             (out / "primary.names").write_text("")
+            # The guest received the historical driver at base_sha, not the current checkout.
             files = {"cloudbench-run.sh": base64.b64encode(original_scripts["cloudbench-run.sh"]).decode()}
             payload = gzip.compress(json.dumps({"version": 1, "files": files}).encode(), mtime=0)
             (out / "cloudbench-boot-payload.json.gz").write_bytes(payload)

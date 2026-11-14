@@ -188,3 +188,59 @@ export async function advance(ms: number) {
 
 export const progressCalls = () =>
   capturedRequests.filter((r) => new URL(r.url).pathname === '/api/integrations/progress');
+
+const HOUR_MS = 3_600_000;
+const isoIn = (offsetMs: number) => new Date(Date.now() + offsetMs).toISOString();
+
+export interface ComputeAccountOverrides {
+  provider?: string;
+  state?: string;
+  usage?: unknown;
+  rateLimitedUntil?: string | null;
+  /** Newer backends only; omitted keys keep the old-backend wire shape. */
+  cooldown?: { until: string; reason: CooldownReason; authoritative: boolean } | null;
+  nextResetAt?: string | null;
+}
+
+/** ComputeAccount as GET /api/compute-accounts returns it. */
+export function computeAccount(
+  accountId: string,
+  accountEmail: string,
+  extra: ComputeAccountOverrides = {},
+) {
+  return {
+    provider: 'claude',
+    accountId,
+    accountEmail,
+    state: 'connected',
+    lastErrorReason: null,
+    connectedAt: '2026-10-01T00:00:00Z',
+    usage: null as unknown,
+    rateLimitedUntil: null as string | null,
+    ...extra,
+  };
+}
+
+export interface UsageOverrides {
+  fiveHour?: { usedPct: number; resetsAt: string | null } | null;
+  observedAt?: string;
+  source?: 'response' | 'rate_limit' | 'usage_endpoint' | 'code_session' | null;
+  status?: 'allowed' | 'allowed_warning' | 'rejected' | null;
+}
+
+/** A usage snapshot whose 7d window is `usedPct` used; 5h is 10% used unless overridden. */
+export const weekly = (usedPct: number, resetsAt: string | null, extra: UsageOverrides = {}) => ({
+  fiveHour: { usedPct: 10, resetsAt: isoIn(2 * HOUR_MS) },
+  sevenDay: { usedPct, resetsAt },
+  observedAt: isoIn(-60_000),
+  ...extra,
+});
+
+export type CooldownReason =
+  'usage_window_5h' | 'usage_window_7d' | 'usage_window' | 'rate_limit' | 'stall' | 'auth';
+
+export const cooldown = (until: string, reason: CooldownReason, authoritative: boolean) => ({
+  until,
+  reason,
+  authoritative,
+});

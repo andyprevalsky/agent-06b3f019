@@ -777,7 +777,7 @@ def test_cold_image_builder_rejected_before_auth(tmp_path, arguments):
     root = tmp_path / "checkout"
     libraries = root / "scripts/lib"
     libraries.mkdir(parents=True)
-    (libraries / "cloudbench-env.sh").write_text("")
+    shutil.copy2(ROOT / "scripts/lib/cloudbench-env.sh", libraries / "cloudbench-env.sh")
     (libraries / "cloudbench-app-env-lock.sh").write_text("")
     observed = tmp_path / "auth-called"
     (libraries / "cloudbench-github-token.sh").write_text(

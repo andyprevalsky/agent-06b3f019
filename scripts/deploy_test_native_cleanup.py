@@ -210,6 +210,535 @@ def recovered_runtime(fleet, owner_token, benches, rows, identities, bound, docu
     need(machines == {row['machine_id'] for row in rows}, 'recovered resource coverage')
 
 
+# These typed witnesses admit only a separate validation launch. They never close old cleanup.
+RUNLESS_SCAN = r'''import base64,hashlib,json,os,stat,sys,time,subprocess
+from pathlib import Path
+b=json.loads(sys.argv[1]);end=time.monotonic()+8
+assert os.geteuid()==0 and os.environ.get('FLY_MACHINE_ID')==b['machine_id']
+boot=Path('/proc/sys/kernel/random/boot_id').read_text().strip()
+repo_head=subprocess.check_output(['/usr/bin/git','-c','safe.directory=/data/repo','-C','/data/repo','rev-parse','HEAD'],text=True,timeout=2,env={'PATH':'/usr/bin:/bin','GIT_CONFIG_GLOBAL':'/dev/null','GIT_CONFIG_NOSYSTEM':'1','GIT_OPTIONAL_LOCKS':'0'}).strip()
+payload_stats={}
+def payload(path,limit):
+ p=Path(path)
+ if not p.exists():return None
+ assert p.resolve()==p and not p.is_symlink() and p.is_file()
+ fd=os.open(p,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+ try:
+  before=os.fstat(fd);assert stat.S_ISREG(before.st_mode) and before.st_size<=limit
+  with os.fdopen(fd,'rb',closefd=False) as stream:raw=stream.read(limit+1)
+  after=os.fstat(fd)
+  assert len(raw)==before.st_size and (before.st_ino,before.st_dev,before.st_size,before.st_mtime_ns)==(after.st_ino,after.st_dev,after.st_size,after.st_mtime_ns)
+  payload_stats[path]=dict(device=before.st_dev,mode=before.st_mode)
+  return raw
+ finally:os.close(fd)
+mountinfo=Path('/proc/self/mountinfo').read_text();assert len(mountinfo.encode())<=2097152
+paths={}
+for name in ('/','/data','/data/repo'):
+ info=os.lstat(name);paths[name]=dict(device=info.st_dev,inode=info.st_ino,mode=info.st_mode,realpath=str(Path(name).resolve(strict=True)))
+services=payload('/data/repo/.context/cloudbench/services.json',1048576)
+run=payload('/data/repo/.context/cloudbench/run.json',134217728)
+backend=payload('/data/repo/.context/cloudbench/logs/backend.log',67108864)
+def identity(path,follow=False):
+ fd=os.open(path,os.O_RDONLY|os.O_NONBLOCK|(0 if follow else os.O_NOFOLLOW))
+ try:
+  a=os.fstat(fd);assert stat.S_ISREG(a.st_mode) and a.st_size<=67108864
+  digest=hashlib.sha256();count=0
+  while count<a.st_size:
+   block=os.read(fd,min(65536,a.st_size-count));assert block;count+=len(block);digest.update(block)
+  z=os.fstat(fd);assert(a.st_dev,a.st_ino,a.st_mode,a.st_uid,a.st_gid,a.st_size,a.st_mtime_ns)==(z.st_dev,z.st_ino,z.st_mode,z.st_uid,z.st_gid,z.st_size,z.st_mtime_ns)
+  return dict(device=a.st_dev,inode=a.st_ino,mode=a.st_mode,uid=a.st_uid,sha256=digest.hexdigest())
+ finally:os.close(fd)
+roles={}
+rows=[];gone=[];errors=[]
+for p in sorted(Path('/proc').iterdir()):
+ if not p.name.isdigit():continue
+ assert time.monotonic()<end
+ try:
+  raw=(p/'stat').read_text();v=raw.rsplit(') ',1)[1].split();flags=int(v[6]);pid=int(p.name)
+  row=dict(pid=pid,stat=raw)
+  if flags&0x00200000 or v[0] in ('Z','X','x'):rows.append(row);continue
+  with (p/'environ').open('rb') as f:env=f.read(4194305)
+  with (p/'cmdline').open('rb') as f:cmd=f.read(4194305)
+  cwd=os.readlink(p/'cwd');exe=os.readlink(p/'exe')
+  assert len(env)<=4194304 and len(cmd)<=4194304
+  values=dict(x.split(b'=',1) for x in env.split(b'\0') if b'=' in x)
+  row.update(run_token=values.get(b'CLOUDBENCH_RUN_TOKEN',b'').decode(errors='replace'),
+   cwd=cwd,exe=exe,cmdline_b64=base64.b64encode(cmd).decode(),stat_after=(p/'stat').read_text())
+  args=[x for x in cmd.split(b'\0') if x]
+  if args in ([b'sleep',b'infinity'],[b'/bin/sleep',b'infinity'],[b'/usr/bin/sleep',b'infinity']) or (len(args)>1 and args[1]==b'/cloudbench-status-server.py'):
+   canonical=str(Path('/bin/sleep' if b'sleep' in args[0] else '/usr/bin/python3').resolve(strict=True))
+   info=dict(uid_status=(p/'status').read_text(),exe_path=canonical,exe=identity(canonical),proc_exe=identity(p/'exe',True),
+    fd_links={name:os.readlink(p/'fd'/name) for name in os.listdir(p/'fd')},
+    unsafe_startup={k.decode():hashlib.sha256(values[k]).hexdigest() for k in (b'PYTHONPATH',b'PYTHONHOME',b'PYTHONSTARTUP',b'PYTHONINSPECT',b'PYTHONUSERBASE',b'PYTHONEXECUTABLE',b'PYTHONPLATLIBDIR',b'LD_PRELOAD',b'LD_LIBRARY_PATH',b'LD_AUDIT') if values.get(k)})
+   if len(args)>1 and args[1]==b'/cloudbench-status-server.py':info['script']=identity('/cloudbench-status-server.py')
+   roles[str(pid)]=info
+  row['stat_after']=(p/'stat').read_text()
+  rows.append(row)
+ except FileNotFoundError:gone.append(int(p.name))
+ except (PermissionError,OSError,ValueError) as e:errors.append(dict(pid=int(p.name),error=type(e).__name__))
+by={x['pid']:x for x in rows};ancestry=[];pid=os.getpid()
+while pid>1:
+ assert pid in by and pid not in ancestry
+ ancestry.append(pid);pid=int(by[pid]['stat'].rsplit(') ',1)[1].split()[1])
+sockets={}
+for name in ('tcp','tcp6','udp','udp6'):
+ with Path('/proc/net/'+name).open() as f:sockets[name]=f.read(2097153)
+ assert len(sockets[name].encode())<=2097152
+print(json.dumps(dict(schema='original-runless-proc-scan-v1',binding=b,uid=os.geteuid(),machine_id=os.environ.get('FLY_MACHINE_ID'),
+ boot=boot,repo_head=repo_head,self_pid=os.getpid(),ancestors=ancestry,processes=rows,gone=gone,errors=errors,sockets=sockets,
+ infrastructure=dict(roles=roles,driver_state=payload('/data/cloudbench-driver.state',4096).decode() if Path('/data/cloudbench-driver.state').exists() else None,driver_pid_b64=None if not Path('/data/cloudbench-driver.pid').exists() else base64.b64encode(payload('/data/cloudbench-driver.pid',4096)).decode()),
+ filesystem=dict(mountinfo=mountinfo,mountinfo_after=Path('/proc/self/mountinfo').read_text(),paths=paths,payloads=payload_stats),
+ services_b64=None if services is None else base64.b64encode(services).decode(),run_present=run is not None,
+ backend_sha256=None if backend is None else hashlib.sha256(backend).hexdigest(),finished_epoch=time.time())))
+'''
+
+
+def isolated_original(fleet, owner, root, receipt, row, bound, document):
+    """Canonical captured custody; no missing task/run payload can become a success."""
+    audit, registry = fleet_audit_root(root) / owner, fleet_ownership_root(root) / owner
+    meta = fields(bound(registry / 'meta'))
+    need(meta.get('fleet_owner_token') == owner and meta.get('run_id') == fleet.name
+         and meta.get('workspace_root') == str(root) and meta.get('app') == row['app'], 'runless registry custody')
+    original = fields(bound(audit / 'fresh' / row['clone_name']))
+    need(original == row and bound(audit / 'by-machine-id' / row['machine_id']).decode().strip() == row['clone_name'],
+         'runless ledger identity')
+    provenance = document(fleet / 'execution-provenance.json')
+    from cloudbench_execution_provenance import validate_provenance
+    need(not validate_provenance(provenance) and provenance['base_sha'] == receipt['source']['head'],
+         'runless original provenance')
+    matrix = document(fleet / 'execution-task-matrix.json')
+    source = document(fleet / 'source-manifest.json')
+    need(bound(registry / 'source-manifest.json') == bound(audit / 'source-manifest.json')
+         == bound(fleet / 'source-manifest.json') and source['machine_id'] == row['source_machine_id']
+         and provenance['config']['values']['base_source_manifest_sha256']
+             == hashlib.sha256(bound(fleet / 'source-manifest.json')).hexdigest()
+         and isinstance(matrix, dict), 'runless source capture')
+    binding = dict(app=row['app'], owner=owner, run_id=fleet.name, machine_id=row['machine_id'],
+                   volume_id=row['volume_id'], run_token=owner+'-0', source=receipt['source']['head'])
+    return binding
+
+
+def isolation_wire(packet, kind, machine, volume, bound):
+    rows = packet['rows']
+    selected = [row for row in rows if row.get('kind') == kind]
+    need(len(selected) == 1, 'typed provider response closure')
+    row = selected[0]
+    need(row['method'] == 'GET' and row['path'] == '/'+('machines/' + machine if kind == 'machine' else 'volumes/' + volume)
+         and row.get('no_retry') is True, 'typed provider request scope')
+    raw = bound(row['body_path'])
+    need(hashlib.sha256(raw).hexdigest() == row['response_sha256'], 'typed raw native response seal')
+    import base64
+    wire=Path(row['wire']);request=json.loads(bound(wire/'request.json'));record=json.loads(bound(wire/'0001-wire.json'))
+    native_raw=base64.b64decode(record['body_b64'],validate=True)
+    need(request['method']=='GET' and request['path']==row['path'] and request['body'] is None
+         and request['headers']=={} and request['app']==packet['app']
+         and record['method']=='GET' and record['path']==row['path'] and record['status']==row['http_status']
+         and native_raw==raw and hashlib.sha256(native_raw).hexdigest()==record['sha256'], 'authenticated current GET wire')
+    return row['http_status'], json.loads(raw) if row['http_status'] == 200 else None
+
+
+def isolated_absent_pair(fleet, owner, root, receipt, row, evidence, proof, bound, document):
+    """404 is current nonexecution, never a substitute for an authenticated original DELETE."""
+    import base64
+    need(proof.get('purpose')=='isolated-validation','typed witness is launch-only')
+    binding = isolated_original(fleet, owner, root, receipt, row, bound, document)
+    packet = document(evidence)
+    need(packet.get('app')==binding['app'],'typed provider app')
+    need(packet.get('schema') == 'original-absent-pair-v1' and packet.get('binding') == binding
+         and packet.get('endpoint_origin') == 'https://api.machines.dev'
+         and receipt['finished_at'] <= packet['observed_epoch'] <= proof['confirmed_at'], 'absent pair original custody')
+    status, _ = isolation_wire(packet, 'machine', row['machine_id'], row['volume_id'], bound)
+    vstatus, volume = isolation_wire(packet, 'volume', row['machine_id'], row['volume_id'], bound)
+    need(status == 404 and vstatus == 200 and volume['id'] == row['volume_id']
+         and volume['state'] in {'pending_destroy','destroyed'} and volume.get('attached_machine_id') is None,
+         'absent pair not nonexecuting')
+    registry = fleet_ownership_root(root) / owner
+    for kind, identifier in [('machine', row['machine_id']), ('volume', row['volume_id'])]:
+        need(document(registry / ('disposable-delete-'+kind+'-'+identifier+'.json'))
+             == dict(owner=owner, app=row['app'], kind=kind, identifier=identifier), 'original delete intent')
+    directory = Path(packet['delete_fence'])
+    expected = fleet_git_common(root) / 'cloudbench-native-effect-fences' / owner / fleet.name / row['machine_id'] / 'destroy'
+    need(directory.parent == expected and directory.name == hashlib.sha256(
+        json.dumps([row['machine_id'],document(directory/'intent.json')['machine']['instance_id'],
+                    document(directory/'intent.json')['machine']['config']],sort_keys=True,separators=(',',':')).encode()).hexdigest(),
+         'original native delete fence path')
+    intent = document(directory/'intent.json');native=intent['machine']
+    need(intent['operation'] == 'destroy' and native['id'] == row['machine_id'] and native['name'] == row['clone_name']
+         and native['config']['env'].get('REF') == binding['source']
+         and native['config']['env'].get('CLOUDBENCH_RUN_TOKEN') == binding['run_token']
+         and [m['volume'] for m in native['config']['mounts']] == [row['volume_id']], 'original deleted incarnation')
+    ack = document(directory/'ack.json')
+    wire = Path(packet['delete_wire']);request=document(wire/'request.json');response=document(wire/'0001-wire.json')
+    need(wire.parent == expected/'wire' and request['app'] == row['app'] and request['method'] == 'DELETE'
+         and request['path'] == '/machines/'+row['machine_id']+'?force=true' and request['body'] is None
+         and response['method'] == 'DELETE' and response['path'] == request['path']
+         and response['status'] in {200,202,204}, 'original authenticated DELETE acknowledgement')
+    raw = base64.b64decode(response['body_b64'],validate=True)
+    need(hashlib.sha256(raw).hexdigest() == response['sha256'] and json.loads(raw or b'{}') == ack
+         == document(wire/'result.json'), 'original DELETE raw ACK seal')
+    records=[]
+    for folder in sorted((expected/'wire').iterdir()):
+        req=document(folder/'request.json');body=document(folder/'0001-wire.json')
+        data=base64.b64decode(body['body_b64'],validate=True)
+        need(hashlib.sha256(data).hexdigest()==body['sha256'] and body['method']==req['method']
+             and body['path']==req['path'] and req['app']==row['app'], 'original leased wire seal')
+        records.append((req,body,json.loads(data or b'{}')))
+    acquired=[x for x in records if x[0]['method']=='POST' and x[0]['path']=='/machines/'+row['machine_id']+'/lease']
+    released=[x for x in records if x[0]['method']=='DELETE' and x[0]['path']=='/machines/'+row['machine_id']+'/lease']
+    guarded=[x for x in records if x[0]['method']=='GET' and x[0]['path']=='/machines/'+row['machine_id']]
+    need(len(acquired)==len(released)==len(guarded)==1 and len(records)==4, 'original exact lease journal closure')
+    acquire,release,guard=acquired[0],released[0],guarded[0]
+    nonce=acquire[2]['data']['nonce']
+    need(acquire[1]['status'] in {200,201} and acquire[2]['data']['version']==native['instance_id']
+         and isinstance(nonce,str) and nonce and guard[2]==native and guard[1]['status']==200
+         and release[1]['status']==200 and release[2]['data']['ok'] is True
+         and all(x['headers']=={'fly-machine-lease-nonce':nonce} for x in (request,guard[0],release[0]))
+         and acquire[1]['monotonic_ns']<guard[1]['monotonic_ns']<response['monotonic_ns']<release[1]['monotonic_ns'],
+         'original delete lease/version/chronology')
+
+
+def isolated_runless_os(fleet, owner, root, receipt, row, evidence, proof, bound, document):
+    import base64
+    need(proof.get('purpose')=='isolated-validation','typed witness is launch-only')
+    binding = isolated_original(fleet, owner, root, receipt, row, bound, document)
+    packet = document(evidence)
+    need(packet.get('schema') == 'original-runless-current-os-v1' and packet.get('binding') == binding
+         and packet.get('endpoint_origin') == 'https://api.machines.dev'
+         and receipt['finished_at'] <= packet['observed_epoch'] <= proof['confirmed_at'], 'runless observation custody')
+    original_path=Path(packet['original_native'])
+    need(original_path == fleet.parent.parent/'campaigns'/('deploy-'+fleet.parent.parent.name)/'shared-inventory/machines.json',
+         'canonical original native cache required')
+    originals=json.loads(bound(original_path));need(isinstance(originals,list),'original native array');matches=[x for x in originals if isinstance(x,dict) and x.get('id')==row['machine_id']]
+    need(len(matches)==1,'original native exact row');expected=matches[0]
+    observed = []
+    attachment = packet.get('attachment_observation')
+    need(attachment in (None,'explicit-null-original-quarantined-v1'), 'runless attachment observation kind')
+    unresolved = attachment is not None
+    volumes = []
+    for phase in ('before','after'):
+        native = document(packet[phase])
+        need(native.get('app')==binding['app'],'current native app')
+        mstatus,machine=isolation_wire(native,'machine',row['machine_id'],row['volume_id'],bound)
+        vstatus,volume=isolation_wire(native,'volume',row['machine_id'],row['volume_id'],bound)
+        need(mstatus == vstatus == 200 and machine.get('state')=='started' and machine['id'] == row['machine_id'] and machine['name'] == row['clone_name']
+             and machine.get('instance_id') and machine['config']['env'].get('REF') == binding['source']
+             and machine['config']['env'].get('CLOUDBENCH_RUN_TOKEN') == binding['run_token']
+             and [(m['volume'],m['path']) for m in machine['config']['mounts']] == [(row['volume_id'],'/data')]
+             and volume['id'] == row['volume_id'] and volume.get('encrypted') is True
+             and volume['state'] == 'created'
+             and (volume.get('attached_machine_id') == row['machine_id'] if not unresolved else
+                  all(key in volume and volume[key] is None for key in ('attached_machine_id','attached_alloc_id'))),
+             'runless exact current native identity')
+        need(all(machine.get(key) == expected.get(key) for key in ('id','name','instance_id','config')),
+             'runless original incarnation differs')
+        if unresolved:
+            mount=expected['config']['mounts'][0]
+            need(all(key in volume and key in mount and volume[key] == mount[key] for key in ('name','size_gb'))
+                 and type(volume['size_gb']) is int and volume['size_gb']>0
+                 and mount.get('encrypted') is True and volume.get('region') == expected.get('region')
+                 and isinstance(expected.get('region'),str) and expected['region'],
+                 'unresolved original Volume identity differs')
+            volumes.append({key:volume[key] for key in ('id','name','region','size_gb','encrypted','state','attached_machine_id','attached_alloc_id')})
+        observed.append(machine)
+    need(all(observed[0][key] == observed[1][key] for key in ('id','name','instance_id','config','state')),
+         'runless native incarnation changed')
+    need(not unresolved or volumes[0] == volumes[1], 'unresolved Volume observation changed')
+    scan = document(packet['scan'])
+    need(packet['program_sha256'] == hashlib.sha256(RUNLESS_SCAN.encode()).hexdigest()
+         and packet['command'] == shlex.join(['timeout','--signal=TERM','10s','/usr/bin/python3','-I','-B','-c',RUNLESS_SCAN,
+                                              json.dumps(binding,sort_keys=True,separators=(',',':'))])
+         and packet['ssh_argv'] == ['ssh','console','--quiet','-a',row['app'],'--machine',row['machine_id'],'-C',packet['command']]
+         and packet['ssh_exit'] == 0
+         and bound(packet['ssh_stderr']) in (b'',('Connecting to '+str(observed[0].get('private_ip',''))+'...\n').encode())
+         and json.loads(bound(packet['ssh_stdout'])) == scan and scan['binding'] == binding
+         and scan['schema'] == 'original-runless-proc-scan-v1' and type(scan['uid']) is int and scan['uid'] == 0
+         and scan['machine_id'] == row['machine_id'] and scan['repo_head'] == binding['source'] and scan['errors'] == []
+         and scan['run_present'] is False and receipt['finished_at'] <= scan['finished_epoch'] <= proof['confirmed_at'],
+         'runless authentic collector output')
+    if unresolved:
+        import stat
+        fs=scan['filesystem'];paths=fs['paths'];payloads=fs['payloads']
+        need(isinstance(fs['mountinfo'],str) and fs['mountinfo']==fs['mountinfo_after']
+             and len(fs['mountinfo'].encode())<=2097152, 'unresolved mount changed during scan')
+        for path in ('/','/data','/data/repo'):
+            entry=paths[path]
+            need(type(entry['device']) is int and entry['device']>=0 and type(entry['mode']) is int
+                 and stat.S_ISDIR(entry['mode']) and entry['realpath']==path, 'unresolved canonical directory')
+        device=paths['/data']['device']
+        need(device!=paths['/']['device'] and paths['/data/repo']['device']==device, 'unresolved data rootfs or device mismatch')
+        mounts=[]
+        for line in fs['mountinfo'].splitlines():
+            parts=line.split();need(len(parts)>=10 and '-' in parts, 'unresolved mountinfo malformed')
+            mounts.append(parts)
+        data=[parts for parts in mounts if parts[4]=='/data']
+        need(len(data)==1 and data[0][2]==str(os.major(device))+':'+str(os.minor(device))
+             and data[0][3]=='/' and not any(parts[4]!='/' and parts[4]!='/data' and (target==parts[4] or target.startswith(parts[4].rstrip('/')+'/'))
+                 for parts in mounts for target in ('/data/repo','/data/repo/.context/cloudbench/services.json','/data/repo/.context/cloudbench/logs/backend.log')),
+             'unresolved actual data mount missing or redirected')
+        for path in ('/data/repo/.context/cloudbench/services.json','/data/repo/.context/cloudbench/logs/backend.log'):
+            entry=payloads[path]
+            need(type(entry['device']) is int and entry['device']==device and type(entry['mode']) is int
+                 and stat.S_ISREG(entry['mode']), 'unresolved original payload is on another filesystem')
+        # This proves Machine/filesystem execution only, never physical Volume attachment or release.
+    services = json.loads(base64.b64decode(scan['services_b64'],validate=True))
+    original_state=document(packet['original_state'])
+    task=Path(packet['original_state']).parent
+    benches=json.loads(bound(fleet/'_batch/benches.json'))
+    need(task.parent==fleet and task.name in {x['name'] for x in benches}
+         and Path(packet['original_state'])==task/'guest-cleanup.state.json'
+         and Path(packet['original_backend'])==task/'guest-cleanup.backend.log'
+         and document(task/'runtime-evidence.owner.json')==dict(version=1,machine_id=row['machine_id'],run_token=binding['run_token'])
+         and bound(task/'.cid').decode().split()==['clone',row['machine_id']], 'runless exact original task files')
+    need(services.get('status') == 'stopped' and services.get('worktree') == '/data/repo'
+         and services.get('benchmark_mode') is True and original_state['machine_id'] == row['machine_id']
+         and original_state['guest_run_token'] == binding['run_token']
+         and original_state['services_status'] == 'stopped' and original_state['live_service_pids'] == []
+         and original_state['driver_pid'] is None and original_state['driver_state'] == 'exited'
+         and scan['backend_sha256'] == hashlib.sha256(bound(packet['original_backend'])).hexdigest(),
+         'runless original service/backend custody')
+    recovery=runpy.run_path(str(Path(__file__).with_name('cloudbench-guest-recovery.py')))
+    need(services.get('schema_version')==1 and isinstance(services.get('services'),list), 'runless services schema')
+    try:service_pids=recovery['service_pids'](services);recovery['backend_port'](services)
+    except recovery['GuestRecoveryError'] as error:raise ValueError('native cleanup: exact services parser refused') from error
+    need(set(service_pids) == set(original_state['stopped_service_pids']), 'runless original service PIDs')
+    rows = scan['processes'];need(len({p['pid'] for p in rows}) == len(rows), 'runless proc inventory')
+    index={p['pid']:p for p in rows};ancestors=scan['ancestors'];pid=scan['self_pid']
+    need(not set(service_pids)&set(index), 'original service PID present or reused')
+    ports=services.get('ports');need(isinstance(ports,dict) and ports and all(type(x) is int and 0<=x<=65535 for x in ports.values()),
+         'runless original ports')
+    need(ancestors and len(set(ancestors)) == len(ancestors), 'collector ancestry')
+    def stat_fields(process):
+        raw=process['stat'];need(raw.startswith(str(process['pid'])+' ('),'raw proc PID')
+        values=raw.rsplit(') ',1)[1].split();need(len(values)>=20 and all(values[k].isdigit() for k in (1,6,19)), 'raw proc stat')
+        return values
+    for parent in ancestors:
+        need(parent == pid and parent in index, 'collector process chain');pid=int(stat_fields(index[parent])[1])
+    need(pid == 1, 'collector ancestry root')
+    infrastructure=set()
+    if 'infrastructure_prior' in packet:
+        prior=document(packet['infrastructure_prior']);past=document(prior['scan'])
+        prior_command=shlex.split(prior['command'])
+        need(prior['binding']==binding and prior['schema']=='original-runless-current-os-v1'
+             and prior['endpoint_origin']=='https://api.machines.dev' and prior['ssh_exit']==0
+             and len(prior_command)==9 and prior_command[:7]==['timeout','--signal=TERM','10s','/usr/bin/python3','-I','-B','-c']
+             and hashlib.sha256(prior_command[7].encode()).hexdigest()==prior['program_sha256']=='aa33a7dc25dbc450b00f99556ca5349d9cab57bc36016aedabeacdeab8eadc43'
+             and json.loads(prior_command[8])==binding
+             and prior['ssh_argv']==['ssh','console','--quiet','-a',row['app'],'--machine',row['machine_id'],'-C',prior['command']]
+             and bound(prior['ssh_stderr']) in (b'',('Connecting to '+str(expected.get('private_ip',''))+'...\n').encode())
+             and json.loads(bound(prior['ssh_stdout']))==past and past['binding']==binding
+             and past['boot']==scan['boot'] and past['finished_epoch']<=scan['finished_epoch'], 'infrastructure prior authenticated scan')
+        for phase in ('before','after'):
+            native=document(prior[phase]);status,old=isolation_wire(native,'machine',row['machine_id'],row['volume_id'],bound)
+            need(native['app']==binding['app'] and status==200 and all(old.get(k)==expected.get(k) for k in ('id','name','instance_id','config')),
+                 'infrastructure prior original incarnation')
+        env=expected['config']['env'];port=env.get('CLOUDBENCH_STATUS_PORT');barrier=env.get('CLOUDBENCH_START_BARRIER')
+        need(isinstance(port,str) and port.isdigit() and 0<int(port)<=65535 and int(port) not in set(ports.values())
+             and barrier==binding['run_id'] and expected['config']['init']=={'cmd':['bash','/cloudbench-boot.sh']}, 'original metadata boot configuration')
+        expected_args=dict(sleep=[b'sleep',b'infinity'],status=[b'python3',b'/cloudbench-status-server.py',b'--directory',b'/data',b'--port',port.encode(),b'--barrier',barrier.encode(),b'--run-token',binding['run_token'].encode()])
+        injected={}
+        for target,digest in (('/cloudbench-status-server.py','738ad4b98a1aa1f441601ae078b3f9f405e275ec492ccc75f8a10621425c5093'),('/cloudbench-boot.sh','66ce198f59bc8f6c32e4667e11151dcec5fb81631ddafb86624a69540464fa9c')):
+            candidates=[f for f in expected['config']['files'] if f.get('guest_path')==target]
+            need(len(candidates)==1 and hashlib.sha256(base64.b64decode(candidates[0]['raw_value'],validate=True)).hexdigest()==digest, 'original metadata program source')
+            injected[target]=digest
+        info=scan['infrastructure'];need(info['driver_state']=='exited\n' and info['driver_pid_b64'] is None, 'original driver terminal metadata')
+        def trusted_file(value):
+            return (type(value['mode']) is int and __import__('stat').S_ISREG(value['mode']) and value['uid']==0
+                    and not value['mode']&0o022 and type(value['device']) is int and type(value['inode']) is int
+                    and re.fullmatch('[0-9a-f]{64}',value['sha256']) is not None)
+        for role,args in expected_args.items():
+            pins=[p for p in past['processes'] if 'cmdline_b64' in p and base64.b64decode(p['cmdline_b64'],validate=True).split(b'\0')[:-1]==args]
+            need(len(pins)==1 and pins[0]['pid'] in index, 'original infrastructure role missing or duplicated')
+            pin=pins[0];process=index[pin['pid']];values=stat_fields(process);evidence=info['roles'][str(process['pid'])]
+            need(base64.b64decode(process['cmdline_b64'],validate=True).split(b'\0')[:-1]==args
+                 and stat_fields(pin)[19]==values[19] and stat_fields(dict(process,stat=process['stat_after']))[19]==values[19]
+                 and values[1]=='1' and values[0] not in {'Z','X','x'} and process['run_token']==binding['run_token']
+                 and process['cwd']==('/app' if role=='sleep' else '/data/repo')
+                 and values[2]==('0' if role=='sleep' else str(process['pid']))
+                 and not any(int(stat_fields(p)[1])==process['pid'] for p in rows), 'infrastructure role epoch/ancestry differs')
+            uid_rows=[line.split()[1:] for line in evidence['uid_status'].splitlines() if line.startswith('Uid:')]
+            need(len(uid_rows)==1 and len(uid_rows[0])==4 and len(set(uid_rows[0]))==1 and uid_rows[0][0] in {'0','1001'}
+                 and not evidence['unsafe_startup'] and trusted_file(evidence['exe']) and evidence['exe']==evidence['proc_exe']
+                 and process['exe']==evidence['exe_path']
+                 and (process['exe']=='/usr/bin/sleep' if role=='sleep' else re.fullmatch('/usr/bin/python3(?:[.][0-9]+)?',process['exe']) is not None),
+                 'infrastructure UID/executable or startup differs')
+            if role=='status':
+                need(trusted_file(evidence['script']) and evidence['script']['sha256']==injected['/cloudbench-status-server.py'], 'metadata server script changed')
+                sockets={link[8:-1] for link in evidence['fd_links'].values() if re.fullmatch(r'socket:\[[0-9]+\]',link)}
+                listeners=[]
+                for protocol,raw in scan['sockets'].items():
+                    for line in raw.splitlines()[1:]:
+                        fields=line.split();need(len(fields)>=10,'metadata socket row malformed')
+                        if protocol.startswith('tcp') and fields[3]=='0A':
+                            if int(fields[1].rsplit(':',1)[1],16)==int(port):
+                                need(fields[9] in sockets, 'metadata port owned by another process')
+                                listeners.append(fields[9])
+                            if fields[9] in sockets:need(int(fields[1].rsplit(':',1)[1],16)==int(port), 'metadata server extra listener')
+                        if protocol.startswith('udp') and int(fields[1].rsplit(':',1)[1],16)==int(port):need(False,'metadata port is UDP')
+                need(len(listeners)==1, 'exact metadata listener missing or duplicated')
+            infrastructure.add(process['pid'])
+        need(set(info['roles'])=={str(pid) for pid in infrastructure}, 'unexpected infrastructure role')
+    for process in rows:
+        values=stat_fields(process)
+        if int(values[6])&0x00200000 or values[0] in {'Z','X','x'}:continue
+        after_stat=dict(process,stat=process['stat_after'])
+        need(stat_fields(after_stat)[19]==values[19], 'process birth changed during scan')
+        command=base64.b64decode(process['cmdline_b64'],validate=True)
+        need(len(command)<=4194304,'bounded proc command')
+        if process['pid'] in ancestors or process['pid'] in infrastructure:continue
+        scoped=(process['run_token']==binding['run_token'] or process['cwd']=='/data/repo'
+                or process['cwd'].startswith('/data/repo/') or process['exe'].startswith('/data/repo/')
+                or re.search(rb'(?<![A-Za-z0-9_./-])/data/repo(?:/|\x00|$)',command) is not None
+                or any(x in command for x in (b'cloudbench-run.sh',b'cloudbench-worker.sh',b'run_benchmark.py')))
+        need(not scoped, 'original scoped execution remains active')
+    for protocol,raw in scan['sockets'].items():
+        for line in raw.splitlines()[1:]:
+            parts=line.split();need(len(parts)>=10,'socket scan malformed')
+            port=int(parts[1].rsplit(':',1)[1],16)
+            active=parts[3]=='0A' if protocol.startswith('tcp') else int(parts[9])>0
+            need(not (port and active and port in set(ports.values())),'owned listener remains')
+    need(set(scan['sockets']) == {'tcp','tcp6','udp','udp6'}, 'socket scan closure')
+    # Missing historical run is preserved as debt; no synthetic empty run or cleanup receipt.
+
+
+def make_isolated_read_plan(root, fleet, machine, receipt_path, *, branch, delete_fence=None, delete_wire=None, infrastructure_prior=None):
+    """Local-only constructor: bind original canonical bytes before any provider construction."""
+    root, fleet, receipt_path = Path(root).absolute(), Path(fleet).absolute(), Path(receipt_path).absolute()
+    files = {}
+    def bound(path):
+        path=Path(path);need(path.resolve()==path and path.is_file() and not path.is_symlink(), 'canonical plan file')
+        raw=path.read_bytes();need(len(raw)<=MAX_RAW_FORENSIC_RUN_BYTES,'plan file bound')
+        files[str(path)]=hashlib.sha256(raw).hexdigest();return raw
+    document=lambda path:json.loads(bound(path))
+    receipt=document(receipt_path);owner=document(fleet/'_batch/lifecycle.json')['fleet_owner_token']
+    need(receipt.get('complete') is False and receipt.get('cleanup_complete') is not True
+         and receipt.get('lifecycle')=='native-producer' and receipt['cleanup_owner']['worker_root']==str(root), 'original failed receipt required')
+    audit=fleet_audit_root(root)/owner;registry=fleet_ownership_root(root)/owner
+    name=bound(audit/'by-machine-id'/machine).decode().strip();ledger=audit/'fresh'/name;row=fields(bound(ledger))
+    binding=isolated_original(fleet,owner,root,receipt,row,bound,document)
+    need(machine==binding['machine_id'] and fleet.parent==root/'.context/deploy-cloud'/hashlib.sha256(receipt['token'].encode()).hexdigest()/'runs', 'original request namespace')
+    need(not Path('/proc',fleet.name.rsplit('-',1)[-1]).exists(), 'original controller remains')
+    for directory in (audit,registry):
+        for path in directory.rglob('*'):
+            if path.is_file():bound(path)
+            else:need(path.is_dir() and not path.is_symlink(),'canonical original quarantine tree')
+    plan=dict(schema='original-isolation-read-plan-v1',branch=branch,root=str(root),fleet=str(fleet),owner=owner,
+        receipt=str(receipt_path),ledger=str(ledger),binding=binding,files=files,
+        collector_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest())
+    if branch=='runless-os':
+        original=fleet.parent.parent/'campaigns'/('deploy-'+fleet.parent.parent.name)/'shared-inventory/machines.json'
+        inventory=json.loads(bound(original));need(isinstance(inventory,list) and len([x for x in inventory if isinstance(x,dict) and x.get('id')==machine])==1,'original exact native inventory')
+        task=next(p for p in fleet.iterdir() if p.is_dir() and (p/'runtime-evidence.owner.json').is_file()
+                  and document(p/'runtime-evidence.owner.json').get('machine_id')==machine)
+        plan.update(original_native=str(original),original_state=str(task/'guest-cleanup.state.json'),original_backend=str(task/'guest-cleanup.backend.log'))
+        for key in ('original_state','original_backend'):bound(plan[key])
+        if infrastructure_prior is not None:
+            prior=Path(infrastructure_prior);packet=document(prior)
+            need(packet['binding']==binding and packet['schema']=='original-runless-current-os-v1', 'original infrastructure prior identity')
+            plan['infrastructure_prior']=str(prior)
+            for path in prior.parent.rglob('*'):
+                if path.is_file():bound(path)
+    else:
+        need(branch=='absent-pair' and delete_fence and delete_wire,'original absent fence required')
+        plan.update(delete_fence=str(Path(delete_fence)),delete_wire=str(Path(delete_wire)))
+        for folder in [Path(delete_fence),Path(delete_wire)]:
+            for path in folder.rglob('*'):
+                if path.is_file():bound(path)
+    return plan
+
+
+def collect_isolated_witness(plan, output, *, fly_factory=None):
+    """Explicit finite GET/SSH collector. Constructing a plan does not invoke this function."""
+    import base64
+    need(plan.get('schema') == 'original-isolation-read-plan-v1' and plan.get('branch') in {'runless-os','absent-pair'},
+         'typed isolation collection plan required')
+    root, fleet, output = Path(plan['root']), Path(plan['fleet']), Path(output)
+    need(hashlib.sha256(Path(__file__).read_bytes()).hexdigest()==plan['collector_sha256'], 'collector producer changed')
+    need(not Path('/proc',fleet.name.rsplit('-',1)[-1]).exists(), 'original controller remains at collection')
+    need(root.resolve() == root and fleet.resolve() == fleet and output.is_absolute()
+         and output.resolve() == output and not output.exists(), 'physical fresh collection output')
+    def bound(path):
+        path=Path(path);need(path.resolve()==path and path.is_file() and not path.is_symlink(), 'original collection file')
+        raw=path.read_bytes();need(len(raw)<=MAX_RAW_FORENSIC_RUN_BYTES
+             and hashlib.sha256(raw).hexdigest()==plan['files'].get(str(path)), 'collection original input changed')
+        return raw
+    document=lambda p:json.loads(bound(p))
+    receipt=document(plan['receipt']);row=fields(bound(plan['ledger']))
+    binding=isolated_original(fleet, plan['owner'], root, receipt, row, bound, document)
+    need(binding==plan['binding'] and row['machine_id'] not in {'8d04d3fe39e3d8','83dd701b759598','683e47df5094d8','811d632f2650e8'}
+         and row['machine_id'] != row['source_machine_id'], 'protected/nonoriginal collector target')
+    for path in plan['files']:bound(path)
+    output.mkdir(mode=0o700)
+    deadline=time.monotonic()+90
+    def save(name,value):
+        path=output/name;raw=value if isinstance(value,bytes) else json.dumps(value,sort_keys=True).encode()
+        fd=os.open(path,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+        try:os.write(fd,raw);os.fsync(fd)
+        finally:os.close(fd)
+        return str(path)
+    save('intent.json',plan)
+    capture=runpy.run_path(str(Path(__file__).with_name('cloudbench-original-volume-capture.py')))
+    effects=runpy.run_path(str(Path(__file__).with_name('cloudbench-archived-machine-reuse.py')))
+    fly=(fly_factory or capture['Fly'])(binding['app'],os.environ.get('FLY_API_TOKEN',''))
+    need(fly.base=='https://api.machines.dev', 'collector native endpoint')
+    adapter=effects['NativeAdapter'](fly,output/'native')
+    def native_pair(name):
+        rows=[];values={};started=time.time()
+        for kind,key,plural in [('machine','machine_id','machines'),('volume','volume_id','volumes')]:
+            existing=set((output/'native').glob('*')) if (output/'native').exists() else set()
+            try:
+                remaining=int(deadline-time.monotonic())-5;need(remaining>0,'collector absolute deadline')
+                values[kind]=adapter.request('GET','/'+plural+'/'+binding[key],timeout=min(15,remaining))
+            except Exception:values[kind]=None
+            fresh=set((output/'native').glob('*'))-existing
+            need(len(fresh)==1,'one exact native observation')
+            wire=next(iter(fresh));packets=list(wire.glob('*-wire.json'));need(len(packets)==1,'native outcome unconfirmed')
+            record=json.loads(packets[0].read_bytes());raw=base64.b64decode(record['body_b64'],validate=True)
+            need(record['status'] in {200,404}, 'native observation unsuccessful')
+            rows.append(dict(kind=kind,method='GET',path='/'+plural+'/'+binding[key],no_retry=True,
+                http_status=record['status'],response_sha256=hashlib.sha256(raw).hexdigest(),
+                body_path=save(name+'-'+kind+'.raw.json',raw),wire=str(wire)))
+        return save(name+'.json',dict(rows=rows,app=binding['app'],started_epoch=started,finished_epoch=time.time())),values
+    packet=dict(schema='original-absent-pair-v1' if plan['branch']=='absent-pair' else 'original-runless-current-os-v1',
+                binding=binding,endpoint_origin=fly.base)
+    if 'infrastructure_prior' in plan:packet['infrastructure_prior']=plan['infrastructure_prior']
+    if plan['branch']=='absent-pair':
+        pair,_=native_pair('current');packet.update(json.loads(Path(pair).read_bytes()),
+            delete_fence=plan['delete_fence'],delete_wire=plan['delete_wire'])
+    else:
+        before,values=native_pair('before');originals=json.loads(bound(plan['original_native']));need(isinstance(originals,list),'collector original native array');matches=[x for x in originals if isinstance(x,dict) and x.get('id')==binding['machine_id']];need(len(matches)==1,'collector original native row');expected=matches[0]
+        volume=values['volume'];mount=expected['config']['mounts'][0]
+        unresolved=volume is not None and all(key in volume and volume[key] is None for key in ('attached_machine_id','attached_alloc_id'))
+        if unresolved:
+            need(all(key in volume and key in mount and volume[key]==mount[key] for key in ('name','size_gb'))
+                 and type(volume['size_gb']) is int and volume['size_gb']>0 and mount.get('encrypted') is True
+                 and isinstance(expected.get('region'),str) and expected['region']
+                 and volume.get('region')==expected['region'], 'collector unresolved original Volume differs')
+            packet['attachment_observation']='explicit-null-original-quarantined-v1'
+        need(values['machine'] is not None and values['machine'].get('state')=='started' and all(values['machine'].get(k)==expected.get(k)
+             for k in ('id','name','instance_id','config')) and values['volume'] is not None
+             and values['volume'].get('id')==binding['volume_id'] and values['volume'].get('encrypted') is True
+             and (values['volume'].get('attached_machine_id')==binding['machine_id'] or unresolved)
+             and values['volume'].get('state')=='created', 'collector original incarnation differs before SSH')
+        command=shlex.join(['timeout','--signal=TERM','10s','/usr/bin/python3','-I','-B','-c',RUNLESS_SCAN,
+                           json.dumps(binding,sort_keys=True,separators=(',',':'))])
+        argv=['ssh','console','--quiet','-a',binding['app'],'--machine',binding['machine_id'],'-C',command]
+        save('ssh-request.json',dict(argv=argv,program_sha256=hashlib.sha256(RUNLESS_SCAN.encode()).hexdigest()))
+        remaining=int(deadline-time.monotonic());need(remaining>0,'collector absolute deadline')
+        code,stdout,stderr=fly.flyctl(min(20,remaining),*argv)
+        packet.update(before=before,command=command,ssh_argv=argv,ssh_exit=code,
+            ssh_stdout=save('ssh.stdout.private.json',stdout.encode()),ssh_stderr=save('ssh.stderr.private.log',stderr.encode()),
+            program_sha256=hashlib.sha256(RUNLESS_SCAN.encode()).hexdigest(),original_native=plan['original_native'],
+            original_state=plan['original_state'],original_backend=plan['original_backend'])
+        need(code==0 and stderr in ('','Connecting to '+str(values['machine'].get('private_ip',''))+'...\n'),
+             'collector SSH outcome unconfirmed')
+        need(len(stdout.encode())<=16*1024*1024,'collector output bound')
+        packet['scan']=save('scan.json',json.loads(stdout))
+        packet['after'],_=native_pair('after')
+    packet['observed_epoch']=time.time();save('packet.json',packet)
+    # This output is a witness candidate only: the normal native-cloud validator must admit it.
+    return packet
+
+
 def stopped_pre_stack_execution(fleet, root, receipt, machine, token, evidence, bound, document):
     """Launch isolation only for a positively captured pre-stack dependency rejection."""
     native_driver = bound(root / 'scripts/cloudbench-run.sh', historical_head=receipt['source']['head'])
@@ -468,6 +997,10 @@ def isolated_execution(fleet, life, root, receipt, proof, bound, document, tree,
                  == {'path': str(audit), 'sha256': seal}, 'native release seal')
             release = float(bound(audit / 'provider-teardown-verified.epoch'))
             need(finite(release) and receipt['started_at'] <= release <= proof['confirmed_at'], 'native release clock')
+        elif set(evidence) == {'original_absent_pair'}:
+            isolated_absent_pair(fleet, owner, root, receipt, row, evidence['original_absent_pair'], proof, bound, document)
+        elif set(evidence) == {'runless_current_os'}:
+            isolated_runless_os(fleet, owner, root, receipt, row, evidence['runless_current_os'], proof, bound, document)
         elif 'provider_pair' in evidence:
             packet = document(evidence['provider_pair'])
             need(packet.get('endpoint_origin') == 'https://api.machines.dev' and packet.get('app') == meta['app'],
@@ -1197,6 +1730,231 @@ def inventory_init_failure(root, runs, campaign, request, receipt, adapter, boun
         need(not Path('/proc', str(pid)).exists(), 'inventory init process remains')
 
 
+SOURCE_REFUSAL_PRODUCERS = {'scripts/run-bench': 'd6a63399d3ae00ae83d469f06ad44870a57ad13a85c99703366137012fc1420e', 'scripts/run-bench-campaign.py': 'bc906abd2450d58b7b9668ba6ab7db972aa79097fa9bef139a0e6031aab2c20a', 'scripts/run-bench-fleet': 'd0e6b6a4c82183560a8e51564c0f3ae2fecc722e91b4b66d11cf90255e6352fa', 'scripts/deploy_test_cloud.py': '96badb95c00fd2a735a7ddeb7f1e5616eb336c389534ca85ae71264b1c808e29', 'scripts/cloudbench-script-snapshot.py': '4065ecfecaf533b74f8b296b2c192a8d55036304e4fc4fbc52cf860e225671bc', 'scripts/cloudbench_execution_provenance.py': '04122d46f536923a0c8aa8e7859d6dcf1d1395e5d8a1998f6cad573a7073c6c2', 'scripts/cloudbench-source-lease.py': '29697fd3049d50ee6c4423eecb9e6475f5d9c544077a6798742ad5d770df0718', 'scripts/cloudbench-prepare-source-create.py': '9a65c6bd2ddb964998257b1eab58316b403021ddc3cb4a86059a6615139d2384', 'scripts/cloudbench-source.py': 'e8a03c13e9b59379d92a71502bb92c54126a64e1655620bd639d6b37eddd1ba3', 'scripts/cloudbench-volume-migration.py': '5e00ce80101dcb21b1e746f4d1a4de6fafdbeba6185d885e366e10a9cdbc1b54', 'scripts/cloudbench-disposable-controller.py': '2155f76fa604797bb1b5de224a4d97d18c34081b202c7fc51c555d7aaa3ae43d', 'scripts/cloudbench-select-snapshot.py': '8037c6cb618c772a2753c1abd80500eef4e465e17cf39afa6a86949ddfb65128', 'scripts/cloudbench-campaign-machines.py': 'e85eb826790c70e87b4d397467e01b2d1f9e805ce1efedb458edc16bff60353b', 'scripts/cloudbench-shared-relay.py': 'f28934b757c6c22427687a04af1b551ad3e18a05594a61028568b09aab5a8fbe', 'scripts/cloudbench-campaign-inventory.sh': 'e924d72f258bd5b2507348e5b53143aa4c2afa1c410cd63bdf495f27dfd2082d', 'scripts/lib/cloudbench-env.sh': '9b65b1fd201bdac49ab4e718b41f3b7c57fe89cfa0ef95934989c17ee765e93a', 'back-end/scripts/blackbox-kernel-proxy-custody.cjs': 'caa4b6a7d1941cdcda84d578009deb078594720916eaaa6a23cbcabae0aba0a9'}
+
+def source_validation_refusal(receipt, owner, proof, adapter, root, runs, cli_text, bound, document, tree):
+    """Cleanup only for the reviewed zero-allocation source validation refusal.
+
+    Original command and signal exits stay distinct. Environment preimages are
+    private inputs authenticated by original hashes, never historical captures.
+    SourceLease receipts certify the known producer's guarded semantic success;
+    they are not raw HTTP acknowledgements and confer no source/task credit.
+    """
+    import stat
+    need(set(proof) <= {'kind','layout','owner','request_token','source','receipt_sha256','worker_result_sha256',
+         'confirmed_at','observed_by','campaign','files','parent_environment_preimage','child_environment_preimage',
+         'source_recovery_journal','purpose'}, 'source refusal unknown proof authority')
+    from deploy_test_historical_custody import environment_identity, runtime_identity
+    from deploy_test_cloud import campaign_published
+    need(proof.get('purpose') is None and not proof.get('recovered_runtime')
+         and not proof.get('execution_quiescence'), 'source refusal cleanup only')
+    head = receipt['source']['head']
+    need(isinstance(head, str) and re.fullmatch('[0-9a-f]{40}', head), 'source refusal producer head')
+    for name, expected in SOURCE_REFUSAL_PRODUCERS.items():
+        raw = (bound(root / name, historical_head=head) if name.startswith('scripts/') else
+               subprocess.check_output(['git','--no-replace-objects','-C',str(root),'show',head+':'+name]))
+        need(hashlib.sha256(raw).hexdigest() == expected, 'source refusal producer closure differs')
+    campaign = runs.parent / 'campaigns' / ('deploy-' + runs.parent.name)
+    need(proof.get('campaign') == str(campaign) and str(campaign) in cli_text
+         and owner['native_cleanup_reference']['native_directory'] == str(campaign), 'source refusal campaign')
+    request = document(Path(receipt['log']).parent / 'request.json')
+    need(runtime_identity(root) == request['custody_runtime'], 'source refusal original runtime config differs')
+    parent_path, child_path = (Path(proof[k]) for k in ('parent_environment_preimage', 'child_environment_preimage'))
+    for path in (parent_path, child_path):
+        need(path.is_file() and stat.S_IMODE(path.stat().st_mode) == 0o600
+             and path.stat().st_uid == os.geteuid(), 'private source refusal environment preimage')
+    parent, child = document(parent_path), document(child_path)
+    need(all(isinstance(k, str) and isinstance(v, str) for env in (parent, child) for k, v in env.items())
+         and environment_identity(parent) == receipt['execution_binding']['environment']
+         and environment_identity(child) == request['custody_child_environment'], 'original dispatch environment differs')
+    from run_deploy_pipeline import LANE_TOKEN_ENV
+    import deploy_gate_progress
+    expected_child = {**parent, 'DEPLOY_GATE_REQUEST': str(Path(receipt['log']).parent / 'request.json'),
+        'DEPLOY_GATE_RESULT': receipt['worker_result'], 'DEPLOY_GATE_TOKEN': receipt['token'],
+        deploy_gate_progress.ENV: str(Path(receipt['log']).parent / 'progress.jsonl'),
+        'DEPLOY_LANE_SCOPED_REUSE': '0', 'DEPLOY_CYCLE_FRESH': '1', LANE_TOKEN_ENV: receipt['token']}
+    need(environment_identity(expected_child) == environment_identity(child), 'noncanonical dispatch environment derivation')
+    forbidden = {'BASH_ENV', 'ENV', 'PYTHONPATH', 'PYTHONHOME', 'LD_PRELOAD', 'LD_LIBRARY_PATH', 'LD_AUDIT',
+        'CLOUDBENCH_FLEET_ROOT', 'RUN_BENCH_ROOT', 'CLOUDBENCH_FAKE_DIR', 'CLOUDBENCH_FLY_CMD',
+        'FLY_FLAPS_BASE_URL', 'FLY_GRAPHQL_URL', 'FLY_API_HOSTNAME'}
+    need(not any(k in forbidden or 'UNDER_TEST' in k or k.startswith('CLOUDBENCH_SCRIPT_SNAPSHOT')
+                 or k.startswith('CLOUDBENCH_TEST_') for k in child), 'source refusal dispatch override')
+    need(child.get('CLOUDBENCH_KERNEL_PROXY_CUSTODY') == '1'
+         and child.get('BENCHMARK_SKIP_AGENTCARD_RELEASE_STALL') == '0'
+         and child.get('NODE_OPTIONS') == '--require=' + str(root / 'back-end/scripts/blackbox-kernel-proxy-custody.cjs'),
+         'source refusal guarded dispatch')
+    summary = document(campaign / 'summary.json');jobs, checks = summary['jobs'], request['checks']
+    need(checks and len(set(checks)) == len(checks) and len(jobs) == len(checks)
+         and {j['task'] for j in jobs} == set(checks) and len({j['job_id'] for j in jobs}) == len(jobs)
+         and summary['campaign_id'] == campaign.name and summary['status'] == 'failed'
+         and summary['runs'] == 1 and summary['retry_infra'] == 0
+         and summary['task_count'] == summary['total_jobs'] == len(checks)
+         and summary['concurrency'] == summary['peak_concurrency'] == len(checks)
+         and not any(summary.get(k) for k in ('startup_cohorts', 'cleanup_ticket_failure',
+             'shared_inventory_failed', 'shared_transport_cleanup_pending', 'e2e_timeout_exceeded')),
+         'source refusal original campaign inventory')
+    active = dict.fromkeys(checks, 'UNVERIFIED');active.update(dict.fromkeys(request.get('skips', {}), 'SKIP'))
+    need(receipt['cases'] == active and adapter['cases'] == dict.fromkeys(checks, 'UNVERIFIED') and adapter['complete'] is False
+         and adapter['cleanup_complete'] is False and receipt['status'] == 'FAIL', 'source refusal original outcomes')
+    need(adapter['native_command'] == ['bash', 'scripts/run-bench', *checks, '--runs', '1', '--concurrency',
+        str(len(checks)), '--retry-infra', '0', '--ref', head], 'source refusal original native command')
+    failures = [j for j in jobs if j['status'] == 'failed']
+    need(len(failures) == 1 and failures[0]['controller_exit_code'] == 1, 'source refusal trigger')
+    from datetime import datetime
+    instant = lambda x: datetime.fromisoformat(x).timestamp()
+    start, finish = instant(summary['started_at']), instant(summary['finished_at'])
+    trigger = instant(failures[0]['finished_at'])
+    need(adapter['started_at'] <= start <= trigger <= finish <= receipt['finished_at'] <= proof['confirmed_at'],
+         'source refusal clocks')
+    for name in ('hub-group.json', 'hub-group-publication-ack.private.json'):document(campaign / name)
+    native = runpy.run_path(str(Path(__file__).with_name('run-bench-campaign.py')))
+    need(campaign_published(summary, campaign, adapter['started_at'], native), 'source refusal publication')
+    supervision = preallocation_processes(root, runs, campaign, request, receipt, adapter, document, bound)
+    need(supervision['orphaned_children'] is False, 'source refusal orphaned child')
+    parents, participants, source_links = {}, set(), {}
+    for job in jobs:
+        need(re.fullmatch('r001-j[0-9]{4}', job['job_id']) and job['run'] == job['attempt'] == 1
+             and job['attempts'] == [] and job['controller_exit_code'] == 1
+             and type(job['controller_pid']) is int and job['controller_pid'] > 1,
+             'source refusal job identity')
+        need(job['controller_command'] == ['bash', str(root / 'scripts/run-bench'), job['task'], '--ref', head, '--foreground'],
+             'source refusal controller command')
+        log = campaign / (job['job_id'] + '.log');need(job['log'] == str(log), 'source refusal job log')
+        text = bound(log).decode();lines = text.splitlines();handles=[];infra=False;ref=None
+        if job is failures[0]:
+            need(text.count('private fleet source validation failed: snapshot identity missing or duplicate') == 1,
+                 'source refusal exact original boundary')
+        else:
+            need(job['status'] == 'cancelled' and instant(job['started_at']) <= trigger <= instant(job['finished_at'])
+                 and sum(re.fullmatch(r'⚰️  controller received TERM \([0-9]{2}:[0-9]{2}:[0-9]{2}\)', line) is not None
+                         for line in lines) >= 1, 'source refusal cancelled command/signal chain')
+        for index, line in enumerate(lines):
+            m = re.fullmatch(r'ref\s*:\s*([0-9a-f]{40})(?:\s+.*)?', line.strip())
+            if m:ref=m[1];need(ref == head, 'source refusal foreign ref')
+            if line.strip() == 'mode: --infra-probe (strict barrier, no LLM / run_benchmark)':infra=True
+            if str(root / 'scripts/run-bench') + ' monitor ' not in line:continue
+            args=shlex.split(line.strip());need(len(args)==3 and args[:2]==[str(root/'scripts/run-bench'),'monitor'], 'source refusal handle')
+            fleet=Path(args[2]);m=re.fullmatch(r'owner: ([0-9a-f]{32}); private controller diagnostics stay in this run directory[.]',lines[index+1].strip())
+            need(m is not None and fleet.parent==runs and fleet not in participants, 'source refusal owner link')
+            if handles:need(infra and ref==head, 'source refusal canary code linkage')
+            source_links[fleet]=m[1];handles.append(fleet);participants.add(fleet)
+        need(handles and handles[0].name.rsplit('-',1)[-1]==str(job['controller_pid']), 'source refusal original parent')
+        if job is not failures[0]:
+            need(sum(re.fullmatch(r'⚰️  controller received TERM \([0-9]{2}:[0-9]{2}:[0-9]{2}\)', line) is not None for line in lines)==len(handles), 'source refusal exact linked termination count')
+        parents[handles[0]]=job
+    need(participants == {p for p in runs.iterdir() if p.is_dir() and p.name!='_hub'}
+         and len(participants)==len(parents)+1, 'source refusal exact participant closure')
+    recoveries=Path(proof['source_recovery_journal']);recovery_intent=document(recoveries/'intent.json')
+    results=json.loads(bound(recoveries/'results.json'))
+    need(recovery_intent['head']==head and recovery_intent['owners']==[v['owner'] for v in results]
+         and len(results)==len(participants) and len({v['owner'] for v in results})==len(results), 'source refusal recovery inventory')
+    seals={};retained={};status_facts={}
+    from cloudbench_execution_provenance import validate_provenance,validate_task_matrix_binding
+    for fleet in sorted(participants):
+        life=document(fleet/'_batch/lifecycle.json');owner_token=source_links[fleet]
+        need(type(life['version']) is int and life['version']==1 and life['fleet_owner_token']==owner_token and life['run_id']==fleet.name
+             and life['workspace_root']==str(root) and life['status']=='failed' and life['cleanup_verified'] is False
+             and life['hub_publication_failed'] is False and life['controller_exit_code']==(1 if fleet in parents and parents[fleet] is failures[0] else 143),
+             'source refusal original lifecycle facts')
+        status_facts[str(fleet)]={'command_exit':parents[fleet]['controller_exit_code']if fleet in parents else None,
+                                  'signal_lifecycle_exit':life['controller_exit_code'],'original_cleanup_verified':False}
+        benches=json.loads(bound(fleet/'_batch/benches.json'));names={b['name']for b in benches}
+        need(benches and len(names)==len(benches) and all(b['mode']=='REAL'for b in benches) and (names=={parents[fleet]['task']}if fleet in parents else len(benches)==2), 'source refusal bench inventory')
+        run=document(fleet/'_batch/run.json');tasks=run['tasks']
+        need(run['run_id']==fleet.name and run['status']=='failed' and run['controller_exit_code']==life['controller_exit_code']
+             and len(tasks)==len(names) and {t['name']for t in tasks}==names
+             and all(t.get('status')=='INFRA_ERROR' and t.get('passed') is False and t.get('agent_id') is None
+                     and not t.get('owned_roots') and t.get('lifecycle_stage')=='released' for t in tasks), 'source refusal no guest task')
+        for bench in names:
+            for name in ('cloudbench-run.json','.cid','primary.ids','worker-clones.ids'):
+                need(not (fleet/bench/name).exists() and not (fleet/bench/name).is_symlink(), 'source refusal guest artifact')
+        paths=[fleet/'execution-provenance.json',fleet/'execution-task-matrix.json']
+        if any(p.exists()for p in paths):
+            need(all(p.is_file()for p in paths), 'source refusal partial original provenance')
+            prov,matrix=map(document,paths)
+            need(not validate_provenance(prov) and not validate_task_matrix_binding(prov,matrix)
+                 and prov['base_sha']==head and prov['workspace_patch_sha256']=='none', 'source refusal original controller provenance')
+        audit=fleet/'teardown-ownership';canonical=fleet_audit_root(root)/owner_token;seal=tree(audit)
+        need(tree(canonical)==seal==life['audit_sha256'] and fields(bound(audit/'source-audit'))=={'path':str(canonical),'sha256':seal}, 'source refusal original audit seal')
+        meta=fields(bound(audit/'meta'))
+        need(meta.get('version')=='1' and meta.get('status')=='provider-teardown-verified' and meta.get('fleet_owner_token')==owner_token
+             and meta.get('run_id')==fleet.name and meta.get('workspace_root')==str(root) and meta.get('app')=='navi-whisper-lux-bench', 'source refusal audit identity')
+        allowed={'meta','source-audit','source-manifest.json','owned-clones.ids','owned-clones.names','provider-teardown-verified.epoch','fresh','expected-fresh','by-machine-id','pool','pool-handoffs','volume-migrations'}
+        need({p.name for p in audit.iterdir()}<=allowed, 'source refusal unknown intent class')
+        for name in ('fresh','expected-fresh','by-machine-id','pool','pool-handoffs','volume-migrations'):
+            path=audit/name;need(not path.exists()or path.is_dir()and not path.is_symlink()and not any(path.iterdir()), 'source refusal allocation intent')
+        need(bound(audit/'owned-clones.ids')==bound(audit/'owned-clones.names')==b'', 'source refusal resource IDs')
+        epoch=float(bound(audit/'provider-teardown-verified.epoch'));need(start<=epoch<=proof['confirmed_at'], 'source refusal release clock')
+        registry=fleet_ownership_root(root)/owner_token;need(not registry.exists()and not registry.is_symlink(), 'source refusal registry retained')
+        dc=document(fleet/'_batch/disposable-cleanup.json');need(dc=={'schema':'disposable-cleanup-v1','owner':owner_token,'guest_cleanup_missing':False,'runtime_evidence_missing':False,'successful_runtime_inferred':False}, 'source refusal disposable facts')
+        journal=fleet/'source-lease';claim=document(journal/'claim.json');ready=document(journal/'ready.json')
+        physical=document(journal/'recovered-physical-closure.json');closed=document(journal/'recovered-close.json')
+        value=json.loads(claim['owned']['value']);manifest=claim['manifest'];custody=value['custody']
+        need(set(claim)=={'manifest','owned','consumer_owner','run_id','parent_pid','parent_birth','workspace'}
+             and set(claim['owned'])=={'key','value'}
+             and set(value)=={'version','source_owner','creation_nonce','machine_id','instance_id','volume_id','snapshot_id','source_manifest_sha256','custody','consumer_owner','run_id','nonce'}
+             and type(value['version']) is int and value['version']==1 and set(custody)=={'workspace','registry_dir','audit_dir','lifecycle','manifest_digest','original_registry_sha256'}
+             and set(ready)=={'claim_guard_deadline_monotonic','claimed','consumer_owner','guard_kind','holder_birth','holder_pid','native_lease_held','parent_birth','parent_pid','protocol','run_id','source_machine_id','source_manifest_sha256'}
+             and ready['claimed'] is False and ready['native_lease_held'] is False and ready['claim_guard_deadline_monotonic']==0
+             and ready['protocol']=='cloudbench-source-lease-v1' and ready['guard_kind']=='durable-consumer-claim'
+             and ready['source_machine_id']==manifest['machine_id'] and ready['source_manifest_sha256']==value['source_manifest_sha256']
+             and set(physical)=={'schema','consumer_owner','run_id','source_manifest_sha256','custody','original_claim_sha256','source_audit_sha256','original_lifecycle_sha256','native_observations','historical_task_credit','producer','started_epoch','observed_epoch'}
+             and set(physical['producer'])=={'pid','birth','helper_sha256'}, 'source refusal typed claim/closure records')
+        for name in ('claim.json','ready.json','recovered-physical-closure.json','recovered-close.json'):
+            info=(journal/name).stat()
+            need(stat.S_IMODE(info.st_mode)==0o600 and info.st_uid==os.geteuid() and info.st_nlink==1,
+                 'source refusal private producer receipt')
+        retired_local_process({'pid':ready['holder_pid'],'birth':ready['holder_birth'].replace('linux:','proc-start:',1)})
+        source=runpy.run_path(str(Path(__file__).with_name('cloudbench-source.py')))
+        source['manifest'](bound(fleet/'source-manifest.json'))
+        need(json.loads(bound(fleet/'source-manifest.json'))==manifest and bound(audit/'source-manifest.json')==bound(fleet/'source-manifest.json'), 'source refusal source manifest')
+        manifest_sha=hashlib.sha256(bound(fleet/'source-manifest.json')).hexdigest()
+        need(meta.get('source_manifest_sha256')==manifest_sha and json.dumps(value,sort_keys=True,separators=(',',':'),allow_nan=False)==claim['owned']['value'], 'source refusal canonical source claim bytes')
+        need(claim['consumer_owner']==value['consumer_owner']==ready['consumer_owner']==owner_token
+             and claim['run_id']==value['run_id']==ready['run_id']==fleet.name and claim['workspace']==str(root)
+             and claim['parent_pid']==ready['parent_pid']==int(fleet.name.rsplit('-',1)[-1])
+             and claim['parent_birth']==ready['parent_birth'] and claim['owned']['key']=='cloudbench_source_consumer_'+owner_token
+             and re.fullmatch('[0-9a-f]{32}',value['nonce']) and value['source_manifest_sha256']==manifest_sha
+             and value['source_owner']==manifest['owner_token'] and value['creation_nonce']==manifest['creation_nonce']
+             and all(value[k]==manifest[k]for k in ('machine_id','instance_id','volume_id','snapshot_id')),
+             'source refusal original native claim')
+        retired_local_process({'pid':claim['parent_pid'],'birth':claim['parent_birth'].replace('linux:','proc-start:',1)})
+        need(custody==physical['custody'] and custody['audit_dir']==str(canonical) and custody['lifecycle']==str(fleet/'_batch/lifecycle.json')
+             and custody['workspace']==str(root) and custody['registry_dir']==str(registry) and custody['manifest_digest']==manifest_sha
+             and re.fullmatch('[0-9a-f]{64}',custody['original_registry_sha256']), 'source refusal original registry custody')
+        need(physical['schema']=='cloudbench-source-recovered-physical-closure-v1' and physical['consumer_owner']==owner_token
+             and physical['run_id']==fleet.name and physical['historical_task_credit'] is False
+             and physical['source_manifest_sha256']==manifest_sha and physical['source_audit_sha256']==seal
+             and physical['original_claim_sha256']==hashlib.sha256(bound(journal/'claim.json')).hexdigest()
+             and physical['original_lifecycle_sha256']==hashlib.sha256(bound(fleet/'_batch/lifecycle.json')).hexdigest()
+             and physical['native_observations']=={'machines':{},'volumes':{}}
+             and physical['producer']['helper_sha256']==SOURCE_REFUSAL_PRODUCERS['scripts/cloudbench-source-lease.py'], 'source refusal physical closure')
+        retired_local_process({'pid':physical['producer']['pid'],'birth':physical['producer']['birth'].replace('linux:','proc-start:',1)})
+        need(closed=={'closed':True,'consumer_owner':owner_token,'run_id':fleet.name,'physical_receipt_sha256':hashlib.sha256((json.dumps(physical,sort_keys=True,separators=(',',':'),allow_nan=False)+'\n').encode()).hexdigest(),'historical_task_credit':False}, 'source refusal claim close')
+        result=document(recoveries/owner_token/'result.json');intent=document(recoveries/owner_token/'intent.json');log=bound(recoveries/owner_token/'canonical.log')
+        need(result in results and result['owner']==intent['owner']==owner_token and result['exit_code']==0
+             and result['closed_receipts']==[str(journal/'recovered-close.json')] and result['log_sha256']==hashlib.sha256(log).hexdigest()
+             and intent['argv']==['bash','scripts/run-bench','--recover-stale-owner',owner_token]
+             and intent['original_lifecycle_sha256']==physical['original_lifecycle_sha256']
+             and all(finite(x)for x in (intent['began_at'],physical['started_epoch'],physical['observed_epoch'],result['ended_at']))
+             and receipt['finished_at']<=intent['began_at']<=physical['started_epoch']<=physical['observed_epoch']<=result['ended_at']<=proof['confirmed_at']
+             and result['ended_at']-intent['began_at']<125, 'source refusal canonical recovery/lease lifetime')
+        seals[str(audit)]=seal
+        hub=Path(meta['hub_owner_file']);ho=fields(bound(hub));need(hub.parent==runs/'_hub'
+             and meta.get('hub_disposition')=='retained-exact-owner-transfer-required' and ho.get('version')=='1'
+             and ho.get('status')=='live-transfer-required' and ho.get('owner_token')==meta['hub_owner_token']
+             and ho.get('root')==str(runs) and ho.get('context_dir')==str(runs/'_hub')
+             and ho.get('command')==str(root/'agents/benchmarks/agent_link_server.py') and ho.get('pgid')==ho.get('pid')
+             and ho.get('runs_root')==str(runs) and ho.get('repo_root')==str(root)
+             and all(ho.get(k)==meta['hub_'+k]for k in ('pid','pid_start','argv_sha256')), 'source refusal retained Hub custody')
+        retained[str(hub)]={'path':str(hub),'sha256':hashlib.sha256(bound(hub)).hexdigest(),'owner':ho,'disposition':'retained-exact-owner-transfer-required'}
+    need(set(source_links.values())=={r['owner']for r in results}, 'source refusal full recovery closure')
+    return {'kind':KIND,'gate':receipt['gate'],'token':receipt['token'],'owner':copy.deepcopy(owner),
+        'worker_result_sha256':proof['worker_result_sha256'],'proof':copy.deepcopy(proof),'participants':sorted(map(str,participants)),
+        'native_audit_seals':seals,'retained_services':[retained[k]for k in sorted(retained)],'credit_granted':False,
+        'financial_cleanup_credit':False,'original_status_facts':status_facts,'source_validation_refusal_cleanup':True}
+
+
 def quarantine_bytes(archive, proof, root):
     """Authenticate original mutable audit/registry bytes against the admitted proof."""
     from deploy_test_cycle import MAX_RECEIPT_BYTES
@@ -1315,6 +2073,10 @@ def validate(receipt, owner, proof, *, quarantine_archive=None):
     cli_text = bound(cli).decode()
     parents, canary_links, preallocation_links = {}, {}, {}
     layout = proof.get('layout')
+    if layout == 'campaign-source-validation-refusal-v1':
+        result = source_validation_refusal(receipt, owner, proof, adapter, root, runs, cli_text, bound, document, tree)
+        need(used == set(bindings), 'source refusal proof file closure')
+        return result
     if layout in {'campaign-unlaunched-v1', 'campaign-unlaunched-relay-v1', 'campaign-inventory-init-failure-v1'}:
         # Missing host tooling can stop inventory before any controller exists.
         # Reconcile only that zero-admission boundary, retaining every native
@@ -1913,7 +2675,7 @@ def historical_gate_contract(witness, successor, gate, root, binding, state):
     return historical
 
 
-def clean_isolated_successor(state, prior, original, successor, renewal_witness=None):
+def clean_isolated_successor(state, prior, original, successor, renewal_witness=None, custody_state=None):
     """A later full native result may close execution without clearing historical debt or FAILs."""
     from deploy_test_cycle import bounded_read, digest, receipt_owner, sha_file, validate_result
     gate = next(g for g in state['plan']['gates'] if g['name'] == prior['gate'])
@@ -1940,8 +2702,38 @@ def clean_isolated_successor(state, prior, original, successor, renewal_witness=
     need(bounded_read(folder / 'receipt.json', 'successor receipt') == successor, 'successor receipt changed')
     need(all(request.get(k) == successor.get(k) for k in ('token', 'source', 'gate'))
          and request.get('worker_recipe') == gate.get('worker_recipe'), 'successor request identity')
+    execution_gate, execution_environment = admitted_gate, state['environment']
+    if custody_state is not None:
+        from deploy_test_historical_custody import state_identity
+        need(renewal_witness is None, 'successor custody snapshot and renewal witness are exclusive')
+        need(isinstance(custody_state, dict) and set(custody_state) == {'path', 'sha256'}
+             and isinstance(custody_state['path'], str) and Path(custody_state['path']).is_absolute()
+             and isinstance(custody_state['sha256'], str)
+             and re.fullmatch('[a-f0-9]{64}', custody_state['sha256']), 'successor custody descriptor')
+        path = Path(custody_state['path'])
+        need(sha_file(path) == custody_state['sha256'], 'successor custody file changed')
+        snapshot = bounded_read(path, 'successor original custody state')
+        need(sha_file(path) == custody_state['sha256']
+             and state_identity(snapshot) == request.get('custody_state_sha256')
+             and digest(snapshot['plan']) == snapshot['plan_digest']
+             and snapshot['source'] == snapshot['plan']['source'] == successor['source']
+             and snapshot['environment'] == binding['environment']
+             and snapshot['input_fingerprints'].get(prior['gate']) == binding['input_fingerprint'],
+             'successor original custody binding')
+        gates = [g for g in snapshot['plan']['gates'] if g.get('name') == prior['gate']]
+        need(len(gates) == 1, 'successor original gate identity')
+        execution_gate, execution_environment = gates[0], snapshot['environment']
+        need(set(execution_gate) == set(gate)
+             and all(isinstance(g.get('selection_evidence'), list)
+                     and all(isinstance(v, str) for v in g['selection_evidence'])
+                     for g in (execution_gate, gate))
+             and digest({k:v for k,v in execution_gate.items() if k != 'selection_evidence'})
+                 == digest({k:v for k,v in gate.items() if k != 'selection_evidence'}),
+             'successor execution contract changed')
+        admitted_gate = execution_gate
     checks, skips = request['checks'], request['skips']
-    if renewal_witness is None and binding.get('contract_digest') != digest(gate):
+    if (renewal_witness is None and custody_state is None
+            and binding.get('contract_digest') != digest(admitted_gate)):
         # Authenticate the complete historical gate, not current-case coverage. Only an
         # inventory extension can be reconstructed: every other byte and old ordering
         # must still hash to the immutable successor receipt's original contract.
@@ -1979,7 +2771,7 @@ def clean_isolated_successor(state, prior, original, successor, renewal_witness=
                     admitted_gate = candidate
                     break
     need(binding.get('contract_digest') == digest(admitted_gate)
-         and (renewal_witness is not None or binding.get('environment') == state['environment'])
+         and (renewal_witness is not None or binding.get('environment') == execution_environment)
          and isinstance(binding.get('input_fingerprint'), str) and binding['input_fingerprint'], 'successor contract')
     if renewal_witness is not None and (binding.get('environment') != state['environment']
                                         or admitted_gate['checks'] != gate['checks']):
@@ -2062,14 +2854,43 @@ def clean_isolated_successor(state, prior, original, successor, renewal_witness=
     cases, complete = validate_result(result, request, successor['native_exit'], invalid_process=False)
     # Historical no-retry custody cases never execute, so execute() records them incomplete and
     # UNVERIFIED; every other case must still be complete.
-    custody = successor.get('custody_skips') or {}
-    need(isinstance(custody, dict) and set(custody) <= set(skips)
+    successor_custody = successor.get('custody_skips') or {}
+    need(isinstance(successor_custody, dict) and set(successor_custody) <= set(skips)
          and all(isinstance(skips[c], dict) and skips[c].get('disposition') == 'NO_RETRY_CUSTODY'
-                 and custody[c] == skips[c] for c in custody)
-         and (successor.get('current_execution') or {}) == dict.fromkeys(custody, 'UNVERIFIED'),
+                 and successor_custody[c] == skips[c] for c in successor_custody)
+         and (successor.get('current_execution') or {}) == dict.fromkeys(successor_custody, 'UNVERIFIED'),
          'successor custody cases')
+    expected_complete = dict.fromkeys(admitted_gate['checks'], True)
+    historical = {name: value for name, value in skips.items()
+                  if value.get('disposition') == 'NO_RETRY_CUSTODY'}
+    if historical:
+        from deploy_test_historical_custody import KIND as CUSTODY_KIND, guard, state_identity
+        old_binding = next(iter(historical.values())).get('current_binding')
+        need(isinstance(old_binding, dict)
+             and set(old_binding) == {'source', 'plan_digest', 'environment', 'input_fingerprints'}
+             and old_binding['source'] == successor['source']
+             and old_binding['environment'] == binding['environment']
+             and isinstance(old_binding['plan_digest'], str)
+             and re.fullmatch('[a-f0-9]{64}', old_binding['plan_digest'])
+             and isinstance(old_binding['input_fingerprints'], dict)
+             and old_binding['input_fingerprints'].get(prior['gate']) == binding['input_fingerprint']
+             and all(value.get('kind') == CUSTODY_KIND and value.get('current_binding') == old_binding
+                     for value in historical.values()), 'successor historical custody authority')
+        # Reuse the identity-bearing projection admitted above: it keeps the
+        # complete custody inventory (other gates' rows, original order) that
+        # state_identity() hashes. guard() rejoins the committed original history,
+        # verifies the retained native closure without provider calls, and needs
+        # the same legacy qualifications for known cases that are not custody.
+        need(historical == custody and old_binding == admitted
+             and state_identity(projection) == request.get('custody_state_sha256')
+             and guard(projection, admitted_gate, root, legacy, current=old_binding) == historical,
+             'successor historical custody proof')
+        need(isinstance(successor.get('case_complete'), dict)
+             and all(type(value) is bool for value in successor['case_complete'].values()),
+             'successor historical completion types')
+        expected_complete.update(dict.fromkeys(historical, False))
     need(complete and successor.get('cases') == {**dict.fromkeys(skips, 'SKIP'), **cases}
-         and successor.get('case_complete') == {k: k not in custody for k in admitted_gate['checks']}
+         and successor.get('case_complete') == expected_complete
          and successor.get('status') == ('PASS' if all(v == 'PASS' for v in cases.values()) else 'FAIL'),
          'successor complete cases')
     reference = successor['native_cleanup_reference']
@@ -2164,7 +2985,9 @@ def reconciled_failed_isolated_successor_v1(state, prior, original, successor):
     need(entry.get('kind') == KIND and entry.get('gate') == prior['gate']
          and entry.get('purpose') is None and normal.get('purpose') is None
          # Mixed is the same full-cohort validator with zero-allocation members (infra stop).
-         and normal.get('layout') in {'campaign-v1', 'campaign-mixed-preallocation-v1'}
+         and (normal.get('layout') in {'campaign-v1', 'campaign-mixed-preallocation-v1'}
+              or normal.get('layout') == 'campaign-source-validation-refusal-v1'
+              and entry.get('source_validation_refusal_cleanup') is True)
          and key == normal.get('receipt_sha256')
          and key == sha_file(folder / 'receipt.json') and entry.get('credit_granted') is False,
          'strict normal successor reconciliation required')
@@ -2592,6 +3415,8 @@ def isolated_refusal_successor(state, prior, latest):
 def renew_isolated_validation(state, request_token, proof, renewal_witness=None):
     """Renew only the next source of an already verified original operation."""
     from deploy_test_cycle import CANCEL, receipt_owner, source
+    custody_state = proof.get('successor_custody_state')
+    proof = {k:v for k,v in proof.items() if k != 'successor_custody_state'}
     need(state.get('phase') in ISOLATED_RENEWAL_PHASES and state.get('ready') is False
          and not state.get('running')
          and 'live_failures' not in state and not CANCEL.is_set(), 'quiescent repair boundary required')
@@ -2607,8 +3432,22 @@ def renew_isolated_validation(state, request_token, proof, renewal_witness=None)
     receipt = receipts[0]
     reconciliation_occurrence(state, prior, receipt)
     latest = isolated_successor(state, prior, renewal_witness)
-    if latest is not None and latest != receipt:
+    if (latest is not None and latest is not receipt and latest.get('token') is None
+            and latest.get('executed') is not True and latest.get('complete') is False
+            and latest.get('status') == 'FAIL' and isinstance(latest.get('reason'), str)
+            and latest.get('pre_command_refusal') is None
+            and latest.get('source') != LEGACY_ISOLATED_REFUSAL['source']
+            and set(latest) != {'gate', 'status', 'complete', 'cases', 'source', 'reason'}):
+        # A launch refused before any request was issued (for example this missing renewal)
+        # executed nothing: it is not a successor. Its FAIL record stays in the history.
+        # Known pre-dispatch refusal rows keep their strict isolated_successor() path above.
+        executed = [row for attempt in state.get('attempts', []) for row in attempt.get('results', [])
+                    if row.get('gate') == prior['gate'] and row.get('token') is not None]
+        latest = executed[-1] if executed else None
+    elif latest is not None and latest != receipt:
         latest = isolated_refusal_successor(state, prior, latest)
+    need(custody_state is None or latest is not None and latest != receipt
+         and latest.get('complete') is True, 'historical contract requires clean successor')
     if latest != receipt:
         if latest is not None and latest.get('complete') is False:
             need(renewal_witness is None, 'historical witness requires complete successor')
@@ -2617,7 +3456,7 @@ def renew_isolated_validation(state, request_token, proof, renewal_witness=None)
             else:
                 reconciled_failed_isolated_successor_v1(state, prior, receipt, latest)
         else:
-            clean_isolated_successor(state, prior, receipt, latest, renewal_witness)
+            clean_isolated_successor(state, prior, receipt, latest, renewal_witness, custody_state)
     else:
         need(renewal_witness is None, 'historical witness requires successor')
     need(any(g.get('name') == prior['gate'] and g.get('native_cloud') is True for g in state['plan']['gates']), 'native_cloud gate required')

@@ -3940,6 +3940,7 @@ class CerebrasRatchetHeadroom(unittest.TestCase):
 class StoppedPreStackIsolation(unittest.TestCase):
     """Versioned pre-stack receipts exercise the complete native admission consumer."""
     DRIVER_SHA256 = '1958de1798e8fdc46bd2081c1d530e9574c0957db80857d367802904f5ad5521'
+    DRIVER_COMMIT = 'a0030ab960344d48366b518a71b05c08200aa605'  # fix(deploy): isolate stopped guests rejected before stack startup
 
     def setUp(self):
         import base64
@@ -3956,6 +3957,7 @@ class StoppedPreStackIsolation(unittest.TestCase):
         self.addCleanup(fixture.tearDown)
         self.root = fixture.root
         # The fixture uses the actual versioned driver, not a mock of its SHA.
+        # Receipts are historical: these are the reviewed driver bytes at DRIVER_COMMIT, pinned by SHA256.
         # Driver changes require a newly reviewed before-stack contract.
         fixture_record = json.loads((ROOT / 'scripts/tests/fixtures/stopped-pre-stack-driver.fixture.json').read_text())
         self.assertEqual(self.DRIVER_SHA256, fixture_record['sha256'])

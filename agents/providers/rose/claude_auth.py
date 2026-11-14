@@ -56,6 +56,7 @@ from providers.rose.errors import (
 from providers.rose.pools import PoolSpec
 from providers.rose.speed import anthropic_speed_for
 from providers.rose.streaming import parse_anthropic_sse
+from providers.rose.subscription_usage import flush as flush_subscription_usage
 from providers.rose.subscription_usage import observe as observe_subscription_usage
 from providers.rose.transforms import (
     _extract_tools_from_response_format,
@@ -715,7 +716,10 @@ async def _attempt_with_token(
                 connect_timeout_s=ttft_timeout_s,
             ) as response:
                 status = response.status_code
-                observe_subscription_usage("claude", auth.token, response.headers)
+                observe_subscription_usage("claude", auth.token, response.headers, status_code=status)
+                if status == 200:
+                    # Background, throttled per token: never delays the stream.
+                    flush_subscription_usage(auth)
 
                 if status == 200:
                     try:
@@ -744,6 +748,7 @@ async def _attempt_with_token(
                         # retry on same token; persistent (usage-window
                         # signal or far-future reset) → rotate.
                         msg = str(exc)
+                        flush_subscription_usage(auth, urgent=True)
                         rate_limited_until = _extract_rate_limited_until(response, msg)
                         if _should_rotate_429_without_retry(msg, rate_limited_until):
                             raise _RotateToken(
@@ -779,6 +784,9 @@ async def _attempt_with_token(
                         )
 
                 error_body = get_error_body(response)
+                # The failure's usage headers (e.g. the rejected 5h/7d window) go
+                # out now: this token is about to be retried or rotated away.
+                flush_subscription_usage(auth, urgent=True)
 
                 if status == 429:
                     rate_limited_until = _extract_rate_limited_until(response, error_body)

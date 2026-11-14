@@ -724,13 +724,26 @@ class Graph:
         pkg = package_root(rel)
         allow_dirs = is_test_support(rel)
         shell = PurePosixPath(rel).suffix in {".sh", ".bash", ""}
+        copy_continuation = False
         for line in source.splitlines():
+            # A plain snapshot copy reads bytes; it does not run each copied
+            # module and its imports. Keep compound/substituted commands
+            # conservative, including executable paths on the same line.
+            copy_start = re.search(r"(?:^|&&|\|\||\bthen)\s*!?\s*(?:command\s+)?cp(?:\s|$)", line) if shell else None
+            copy_tail = line[copy_start.end():] if copy_start else line
+            copy_data = shell and (copy_continuation or copy_start is not None) and not re.search(r"\$\(|[<>]\(|`|[;&|]", copy_tail)
+            copy_continuation = bool(copy_data and line.rstrip().endswith("\\"))
             if not PATH_HINT_RE.search(line):
                 continue
             # Product code names repo scripts in help text and error messages;
             # only tests, scripts and shell are treated as executing them.
-            exec_line = shell or (allow_dirs and bool(EXEC_LINE_RE.search(line)))
-            for token in PATH_TOKEN_RE.findall(line):
+            exec_line = (shell and not copy_data) or (allow_dirs and bool(EXEC_LINE_RE.search(line)))
+            # Commands chained before the copy (`./scripts/run-helper && cp ...`)
+            # still execute: only the copy segment itself is a data read.
+            exec_before = copy_start.start() if copy_data and copy_start else 0
+            for token_match in PATH_TOKEN_RE.finditer(line):
+                token = token_match.group(0)
+                token_exec = exec_line or token_match.start() < exec_before
                 stripped = token.lstrip("/")
                 while stripped.startswith(("./", "../")):
                     stripped = stripped.split("/", 1)[1]
@@ -781,7 +794,7 @@ class Graph:
                 for cand in targets:
                     # A test naming a code path runs or loads it (directly, or after
                     # copying it into a fixture), so its imports count too.
-                    runs_it = exec_line or is_test_file(rel)
+                    runs_it = token_exec or is_test_file(rel)
                     if runs_it and PurePosixPath(cand).suffix in CODE_EXT | {""}:
                         self.add(rel, cand)
                     else:
