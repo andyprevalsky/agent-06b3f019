@@ -119,9 +119,7 @@
       "locked": false,
       "needs_integration": false,
       "path": "/home/boxes/rose-pr1975",
-      "uncommitted": [
-        "docs/handoffs/pr-2038-closeout/deletion-readiness.json"
-      ],
+      "uncommitted": [],
       "unpushed_commits": 0
     }
   ]
