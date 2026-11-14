@@ -92,7 +92,8 @@ test('saved phone credential binding uses fixed actual-evidence Rose purpose and
       assert.equal(replay.y, undefined);
     }
   }
-  // Prod 2026-11-14: account suggestions covering the Google password field must not bind;
+  // Prod 2026-11-14: account suggestions covering the Google password field must not bind,
+  // even with its floated label still visible (synthetic variant);
   // visible unfocused and focused (floated-label) fields bind to a point on that field.
   assert.equal(PHONE_MULTI_CREDENTIAL_PURPOSE, googleFixture.recordedPurpose);
   for (const fixture of googleFixture.cases) {
@@ -105,7 +106,10 @@ test('saved phone credential binding uses fixed actual-evidence Rose purpose and
     };
     const replay = await verifyPhoneCredential(fixture.input);
     assert.equal(captured?.messages[0].content, PHONE_MULTI_CREDENTIAL_PURPOSE);
-    assert.equal(replay.allowed, fixture.name !== 'occluded-by-suggestions', fixture.name);
+    const covered = ['occluded-by-suggestions', 'covered-with-visible-label'].includes(
+      fixture.name
+    );
+    assert.equal(replay.allowed, !covered, fixture.name);
     if (!replay.allowed) continue;
     assert.equal(replay.credentialRealm, 'google');
     const items = fixture.input.evidence[0].result as { text: string; y: number; h: number }[];
