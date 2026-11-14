@@ -71,7 +71,7 @@ Return ONLY the judge prompt text, nothing else.`;
     messages,
     config: { provider: 'openai', model: 'gpt-4.1', temperature: 0.3 },
   });
-  const finish = (content: string, response: unknown, error?: unknown) =>
+  const finish = (content: string, response: unknown, error?: unknown, returnedFallback = false) =>
     finishLlmCapture(capture, {
       model: 'gpt-4.1',
       output: simpleArchiveOutput({
@@ -85,7 +85,7 @@ Return ONLY the judge prompt text, nothing else.`;
         structured: response ?? undefined,
         error,
       }),
-      ...(error !== undefined ? { extra: { returned_fallback: true } } : {}),
+      ...(returnedFallback ? { extra: { returned_fallback: true } } : {}),
     });
   try {
     const completion = await openai.chat.completions.create({
@@ -94,8 +94,9 @@ Return ONLY the judge prompt text, nothing else.`;
       temperature: 0.3,
     });
 
-    const content = completion.choices[0].message.content || fallback;
-    finish(content, completion);
+    const generated = completion.choices[0].message.content;
+    const content = generated || fallback;
+    finish(content, completion, undefined, !generated);
     return content;
   } catch (error) {
     // Tests: when fastForward has no cached response and OpenAI rejects (quota,
@@ -104,9 +105,11 @@ Return ONLY the judge prompt text, nothing else.`;
     // blackbox test backend.
     if (process.env.BLACKBOX_TEST_CAPTURE_OUTBOUND === '1') {
       // The fallback is what the caller receives: keep it in the trajectory.
-      finish(fallback, null, error);
+      finish(fallback, null, error, true);
       return fallback;
     }
+    // A failed call still closes its start record (no orphaned start in the archive).
+    finish('', null, error);
     throw error;
   }
 }

@@ -39,6 +39,7 @@ import {
   validateFieldConstraints,
   type FieldConstraints,
 } from './responseSchemaBounds';
+import { archiveBindingFor } from './archiveRootResolver';
 import { retryWithBackoff } from './retry';
 import { createStreamingCompletion, RoseAuthError, RoseInvalidRequest } from './rose';
 import { StructuredOutputAccumulator } from './rose/structuredOutput';
@@ -759,7 +760,7 @@ export async function setResponseSchema(agentId: string): Promise<void> {
         // Fetch agent goal from DB
         const agent = await prisma.agent.findUnique({
           where: { id: agentId },
-          select: { goal: true, tokensIn: true, tokensOut: true, busId: true },
+          select: { goal: true, tokensIn: true, tokensOut: true },
         });
 
         if (!agent) {
@@ -769,7 +770,7 @@ export async function setResponseSchema(agentId: string): Promise<void> {
 
         // Generate schema using Rose Flash
         const { schema, tokensIn, tokensOut } = await generateResponseSchema(agent.goal, {
-          archive: { agent_id: agentId, root_agent_id: agent.busId ?? agentId },
+          archive: (await archiveBindingFor({ agentId })) ?? undefined,
         });
 
         // Update agent with schema and token usage
