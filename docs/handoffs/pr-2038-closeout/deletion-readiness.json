@@ -114,7 +114,7 @@
       "unpushed_commits": 0
     },
     {
-      "branch": "refs/heads/records/pr-2038-closeout",
+      "branch": "refs/heads/records/pr-2038-readiness",
       "current": true,
       "locked": false,
       "needs_integration": false,
