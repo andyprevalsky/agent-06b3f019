@@ -24,6 +24,7 @@ import {
   uploadKernelSessionFile,
 } from './kernel';
 import { providerForSession } from './sessionProvider';
+import { validateSessionFilePath } from './sessionFilePath';
 import {
   captureTilionScreenshot,
   listTilionSessionFiles,
@@ -112,6 +113,8 @@ export async function listFiles(sessionId: string): Promise<BrowserFileInfo[]> {
 
 export async function readSessionFile(sessionId: string, filePath: string): Promise<Buffer> {
   const provider = await providerForSession(sessionId);
+  // Use the same stored provider for namespace validation and dispatch.
+  validateSessionFilePath(filePath, provider);
   if (provider === 'browser-use') return readBrowserUseSessionFile(sessionId, filePath);
   if (provider === 'tilion') return readTilionSessionFile(sessionId, filePath);
   if (provider === 'kernel') return readKernelSessionFile(sessionId, filePath);

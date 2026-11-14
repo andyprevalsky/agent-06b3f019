@@ -1,4 +1,5 @@
 /** Browser session provenance and injection metadata, without provider I/O. */
+import { EMPTY_BROWSER_BASELINE } from '../../providers/browser/checkpoint';
 import type { ProxyGeoLocation } from '../../providers/geoip';
 import type { BrowserGeoTargeting } from '../../providers/browser/types';
 
@@ -58,4 +59,16 @@ export function buildBrowserSessionMetadata(
         }
       : {}),
   };
+}
+
+// A logical browser is private only after it has a checkpoint or non-empty baseline.
+export function logicalHasPrivateState(session: {
+  logicalOwnerKey: string | null;
+  checkpointRef: string | null;
+  baselineCheckpointRef: string | null;
+}): boolean {
+  return (
+    session.logicalOwnerKey !== null &&
+    (session.checkpointRef !== null || session.baselineCheckpointRef !== EMPTY_BROWSER_BASELINE)
+  );
 }

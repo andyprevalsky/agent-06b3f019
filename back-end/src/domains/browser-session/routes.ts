@@ -101,7 +101,7 @@ router.post(
 /**
  * GET /api/browser-session/task/:taskId
  * Get current session info for a task.
- * Includes user's passwords for type interception.
+ * Includes credentials by default; includeCredentials=false defers their preparation.
  */
 router.get(
   '/task/:taskId',
@@ -119,7 +119,8 @@ router.get(
       }
 
       const validateLive = req.query.validateLive === 'true' || req.query.validate_live === 'true';
-      const result = await getTaskInfo(taskId, { validateLive });
+      const includeCredentials = req.query.includeCredentials !== 'false';
+      const result = await getTaskInfo(taskId, { validateLive, includeCredentials });
 
       if (!result) {
         res.status(404).json({ error: 'Session not found' });

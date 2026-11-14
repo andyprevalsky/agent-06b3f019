@@ -10,7 +10,7 @@ from __future__ import annotations
 import argparse
 import copy
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
-from contextlib import contextmanager
+from contextlib import contextmanager, ExitStack
 from fnmatch import fnmatchcase
 import fcntl
 import hashlib
@@ -26,12 +26,13 @@ import tempfile
 import threading
 import time
 import uuid
+from urllib.parse import urlsplit, unquote
 
 import deploy_gate_progress as progress
 import deploy_test_quarantine as quarantine
 from deploy_test_process import CANCEL, cancellation_handlers, run_command
 from deploy_test_result import MAX_RECEIPT_BYTES, preserve_contract, validate as validate_result, validate_recipe
-from deploy_test_isolation import validate as validate_isolation
+from deploy_test_isolation import validate as validate_isolation, external_tmpdir
 
 ROOT = Path(__file__).resolve().parents[1]
 QUICK = {"format", "eslint", "typescript", "backend-structural", "application-structural", "mac-app-static"}
@@ -483,13 +484,13 @@ def run_with_local_slot(gate: dict, root: Path, admission: dict, *, operation=No
             return result
 
 
-def execute(gate: dict, state: dict, directory: Path, root: Path, *, local_failure=None) -> dict:
+def execute(gate: dict, state: dict, directory: Path, root: Path, *, local_failure=None, collection=None) -> dict:
     if gate.get('worker_transport') != 'local-isolated' or not gate.get('case_protocol'):
-        return _execute(gate, state, directory, root)
+        return _execute(gate, state, directory, root, collection=collection)
     admission = {}
     return run_with_local_slot(gate, root, admission, local_failure=local_failure,
         timeout=gate.get('timeout_seconds'), operation=lambda remaining: _execute(
-            gate, state, directory, root, host_admission=admission, host_timeout=remaining))
+            gate, state, directory, root, host_admission=admission, host_timeout=remaining, collection=collection))
 
 
 def benchmark_teardown(gate: dict, token: str, started: float, folder: Path, root: Path, attempt: int) -> dict:
@@ -510,7 +511,7 @@ def benchmark_teardown(gate: dict, token: str, started: float, folder: Path, roo
     return lanes._teardown_summary(receipt)
 
 
-def _execute(gate: dict, state: dict, directory: Path, root: Path, *, host_admission=None, host_timeout=None) -> dict:
+def _execute(gate: dict, state: dict, directory: Path, root: Path, *, host_admission=None, host_timeout=None, collection=None) -> dict:
     """Admit one source-bound gate, run it, and retain its native cleanup receipt."""
     from run_deploy_pipeline import LANE_TOKEN_ENV
     name, phase = gate["name"], state["phase"]
@@ -558,9 +559,17 @@ def _execute(gate: dict, state: dict, directory: Path, root: Path, *, host_admis
                "checks": active, "skips": {**case_skips, **qualified, **custody}, "phase": phase}
     if custody or (directory / 'cycle.json').exists():
         request.update(custody_state=str((directory / 'cycle.json').resolve()), custody_state_sha256=state_identity(state))
+    if collection is not None:
+        request['collection'] = collection
     if 'worker_recipe' in gate:
         request['worker_recipe'] = gate['worker_recipe']
         request['worker_root'] = gate.get('worker_root', str((root / gate.get('cwd', '.')).resolve()))
+    if gate.get('worker_transport') == 'local-isolated' and 'TMPDIR' in gate.get('env', {}):
+        temp = Path(gate['env']['TMPDIR'])
+        worker = Path(gate.get('worker_root', gate.get('cwd', root)))
+        if worker not in temp.parents:
+            request['external_tmpdir'] = external_tmpdir(str(temp), worker, root, name, state['source'])
+            request['external_tmpdir_path'] = str(temp)
     write(folder / "request.json", request)
     result_path = folder / "result.json"
     env = {**os.environ, **gate.get("env", {}), "DEPLOY_GATE_REQUEST": str(folder / "request.json"),
@@ -597,7 +606,14 @@ def _execute(gate: dict, state: dict, directory: Path, root: Path, *, host_admis
     started = time.time()
     timeout = gate.get("timeout_seconds", 120 if gate.get("quick") else None)  # declared wins; 120 s is the quick default
     timed_out = cancelled = lingering = False
-    native_producer = gate.get("native_cloud") is True
+    # Retained explicit legacy local/remote AgentCard owners still use native cleanup custody.
+    # The current planner continues to select payment tasks in cloud smoke, not a new local lane.
+    if (gate.get("category") == "agentcard-lifecycle"
+            and gate.get("worker_transport") not in {"local-isolated", "boxes-thread"}):
+        raise ValueError("AgentCard native lifecycle requires its validated worker binding")
+    native_producer = (gate.get("native_cloud") is True
+                       or (gate.get("category") == "agentcard-lifecycle"
+                           and gate.get("worker_transport") in {"local-isolated", "boxes-thread"}))
     lifecycle = "native-producer" if native_producer else "owned"
     native_cleanup_reference = None
     preallocation_refused = False
@@ -661,6 +677,9 @@ def _execute(gate: dict, state: dict, directory: Path, root: Path, *, host_admis
             else:
                 raw_cases, complete = validate_result(result, request, code,
                     invalid_process=timed_out or cancelled or lingering)
+            if collection is not None:
+                from deploy_test_backend import validate_collection_result
+                validate_collection_result(result, request, Path(gate['worker_root']))
             # The final source-bound result retains retry outcomes even when
             # best-effort live progress was unavailable or a transport fell back.
             for check, evidence in worker_evidence.items():
@@ -752,6 +771,71 @@ def _execute(gate: dict, state: dict, directory: Path, root: Path, *, host_admis
     return result
 
 
+def collect_backend(state, spec, directory, root):
+    """Explicit native report-tail observation; never import caller-supplied cases."""
+    import deploy_test_backend as backend
+    if (CANCEL.is_set() or state.get('running') or 'live_failures' in state
+            or state.get('pending') or state.get('phase') not in
+            {'interrupted', 'initial', 'focused', 'failed-gates', 'final', 'needs-focused-plan'}):
+        raise ValueError('backend collection requires a quiescent boundary without pending RCA')
+    if state.get('phase') == 'interrupted':
+        interrupted_boundary(state)
+    if (source(root) != state['source'] or digest(state['plan']) != state['plan_digest']
+            or environment_digest() != state['environment']
+            or input_fingerprints(state['plan'], root) != state['input_fingerprints']):
+        raise ValueError('refresh exact collector source/plan before collection')
+    validate_plan(state['plan'], root)
+    gate, = [g for g in state['plan']['gates'] if g.get('name') == 'backend-coverage-blackbox']
+    worker = Path(gate['worker_root'])
+    if (gate.get('native_backend') is not True or gate.get('worker_transport') != 'local-isolated'
+            or gate.get('result_transport') != 'file' or gate.get('case_protocol') is not True
+            or gate['command'][1:] != [str(ROOT / 'scripts/deploy_test_backend.py'), '--root', str(worker)]
+            or source(worker) != state['source']):
+        raise ValueError('collection requires the exact native local backend adapter')
+    seal, original, producer, *_ = backend.validate_collection(spec, worker)
+    matches = [r for a in state['attempts'] for r in a.get('results', [])
+               if r.get('token') == original['token']]
+    if len(matches) != 1 or matches[0] != producer or not local_reconciliation_bound(state, producer):
+        raise ValueError('collection requires unique exact reconciled producer receipt')
+    from deploy_test_result import preserve_contract
+    entry = state['reconciled_owners'][sha_file(Path(seal['original_folder'])/'receipt.json')]
+    preserve_contract(entry['execution_gate'], gate)
+    if producer.get('execution_binding', {}).get('environment') != state['environment']:
+        raise ValueError('producer execution environment differs')
+    if (original.get('worker_recipe') != gate.get('worker_recipe') or original['checks'] != gate['checks']
+            or any(k.startswith(gate['name']+'/') for k in state.get('skips', {}))):
+        raise ValueError('collection cannot change producer recipe, inventory or qualifications')
+    claims = state.setdefault('backend_collections', {})
+    if original['token'] in claims:
+        raise ValueError('producer already has a collection attempt; no automatic retry')
+    from deploy_test_process_scan import prepared_workers_idle
+    before = prepared_workers_idle([worker], birth_guard=True)
+    claims[original['token']] = {'seal_sha256':spec['seal_sha256'], 'state':'started', 'at':time.time()}
+    write(directory/'cycle.json', state)  # publish the one-shot claim before any execution
+    parent_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        os.fsync(parent_fd)
+    finally:
+        os.close(parent_fd)
+    state['round'] += 1
+    observed = {**state, 'phase':'collection'}
+    result = execute(gate, observed, directory, root, collection=spec)
+    after = prepared_workers_idle([worker], birth_guard=True)
+    if not local_reconciliation_bound(state, producer) or source(root) != state['source']:
+        raise ValueError('original cleanup or collector source no longer bound')
+    claims[original['token']].update(state='finished', token=result.get('token'), before=before, after=after)
+    state['attempts'].append({'phase':'collection', 'source':state['source'],
+        'producer_source':original['source'], 'producer_token':original['token'], 'results':[result]})
+    failures = failed_cases({**state, 'phase':'collection'}, [result])
+    state['failures'].extend(failures)
+    state['pending'] = [f['id'] for f in failures]
+    state.pop('resume_phase', None)
+    state.pop('resume_independent', None)
+    state.update(phase='triage', ready=False, failure_phase='collection')
+    # Even an unexpected all-green result does not discharge normal full/quick sequencing.
+    return result
+
+
 def failed_cases(state: dict, results: list[dict]) -> list[dict]:
     phase = state["phase"]
     failed = []
@@ -784,12 +868,15 @@ def advance(state: dict, results: list[dict], failures: list[dict] | None = None
     if phase == "quick":
         state["phase"] = state.pop("next_after_quick", "initial")
     elif phase == "initial":
+        state.pop("initial_pending", None)
         state.update(phase="ready", ready=True)
     elif phase == "focused":
         state["phase"] = "failed-gates"
     elif phase == "failed-gates":
         state.update(phase="quick", next_after_quick="final")
     elif phase == "final":
+        state.pop("initial_pending", None)
+        state.pop("final_pending", None)
         state.update(phase="ready", ready=True)
 
 
@@ -1175,6 +1262,8 @@ def adjudicate(state: dict, report: dict) -> None:
             state["next_after_quick"] = "final"
         if state["phase"] == "triage":
             state["phase"] = "needs-focused-plan" if state["repair_gates"] else "final"
+        if (state.get("initial_pending") or state.get("final_pending")) and state["phase"] == "ready":
+            state["phase"] = "final" if prior == "final" else "initial"
         state["ready"] = state["phase"] == "ready"
 
 
@@ -1215,6 +1304,9 @@ def bounded_read(path, label: str) -> dict:
 def receipt_owner(gate: str, receipt: dict):
     """Owner retained by a gate's latest receipt. New receipts carry it directly; a legacy incomplete
     receipt without one is resolved from its recorded adapter result, identity-checked, failing closed."""
+    if receipt.get('kind') == 'focused10-negative-observation-v1':
+        from deploy_test_focused10_settlement import observation_owner
+        return observation_owner(receipt)
     if receipt.get("lingering_group") or receipt.get("cleanup_owner"):
         owner = receipt.get("cleanup_owner") or {}
         return owner.get("worker_cleanup_owner") if isinstance(owner.get("worker_cleanup_owner"), dict) else (owner or {"lingering": True})
@@ -1247,7 +1339,7 @@ def _reconciled(state: dict, receipt: dict, owner: dict) -> bool:
         entry = state.get("reconciled_owners", {}).get(sha_file(Path(log).parent / "receipt.json"))
         if entry and entry.get('kind') == 'github-actions-cleanup-v1':
             return github_cleanup_evidence(state, receipt, entry['proof']) == entry
-        if entry and entry.get('kind') == 'github-terminal-cleanup-v1':
+        if entry and entry.get('kind') in ('github-terminal-cleanup-v1', 'github-runner-retirement-v1'):
             from deploy_test_github_cleanup import still_bound
             return still_bound(state, receipt, owner, entry)
         if entry and entry.get('kind') == 'cloud-source-refusal-cleanup-v1':
@@ -1333,6 +1425,25 @@ def isolated_request(state: dict, gate: dict, request: dict, root: Path, env: di
     return bindings
 
 
+def local_reconciliation_bound(state, receipt):
+    """Recheck a unique exact-receipt local proof, never just its presence."""
+    entries = state.get('reconciled_owners', {})
+    matches = [(key, entry) for key, entry in entries.items()
+               if entry.get('kind') in ('local-supervisor-cleanup-v1', 'local-cancelled-log-supplement-v1')
+               and entry.get('gate') == receipt.get('gate')
+               and entry.get('token') == receipt.get('token')]
+    if not matches:
+        return False
+    from deploy_test_local_cleanup import still_bound
+    key, entry = matches[0]
+    path = Path(receipt['log']).parent / 'receipt.json'
+    if (len(matches) != 1 or bounded_read(path, 'reconciled receipt') != receipt
+            or key != sha_file(path) or entry.get('proof', {}).get('files', {}).get('receipt.json') != key):
+        raise ValueError('ambiguous or changed local cleanup reconciliation')
+    still_bound(state, receipt, entry)
+    return True
+
+
 def retained_owners(state: dict, gates) -> list[str]:
     latest = latest_receipts(state)
     owned = []
@@ -1342,14 +1453,7 @@ def retained_owners(state: dict, gates) -> list[str]:
         receipt = latest.get(gate)
         if not receipt:
             continue
-        local = [e for e in state.get('reconciled_owners', {}).values()
-                 if e.get('kind') == 'local-supervisor-cleanup-v1'
-                 and e.get('gate') == gate and e.get('token') == receipt.get('token')]
-        if local:
-            from deploy_test_local_cleanup import still_bound
-            if len(local) != 1:
-                raise ValueError('ambiguous local cleanup reconciliation')
-            still_bound(state, receipt, local[0])
+        if local_reconciliation_bound(state, receipt):
             continue  # launch eligibility only; original incomplete cases stay immutable
         owner = receipt_owner(gate, receipt)
         if owner and not _reconciled(state, receipt, owner):
@@ -1446,7 +1550,7 @@ def reconcile(state: dict, occurrence_id: str, proof: dict, *, persist=None, ren
         entry = github_cleanup_evidence(state, receipt, proof)
         state.setdefault('reconciled_owners', {})[proof['receipt_sha256']] = entry
         return
-    if proof.get('kind') == 'github-terminal-cleanup-v1':
+    if proof.get('kind') in ('github-terminal-cleanup-v1', 'github-runner-retirement-v1'):
         from deploy_test_github_cleanup import reconcile as reconcile_github
         reconcile_github(state, occurrence_id, proof)
         return
@@ -1474,7 +1578,7 @@ def reconcile(state: dict, occurrence_id: str, proof: dict, *, persist=None, ren
         from deploy_test_interrupted_fresh_cleanup import reconcile as reconcile_fresh
         reconcile_fresh(state, occurrence_id, proof)
         return
-    if proof.get('kind') == 'local-supervisor-cleanup-v1':
+    if proof.get('kind') in ('local-supervisor-cleanup-v1', 'local-cancelled-log-supplement-v1'):
         from deploy_test_local_cleanup import reconcile as reconcile_local
         reconcile_local(state, occurrence_id, proof)
         return
@@ -1605,8 +1709,24 @@ def interrupted_receipt(state: dict, request_token: str) -> dict:
 
 def interrupted_boundary(state: dict) -> None:
     """All original ownership must be accounted before resume or source refresh."""
-    if (state.get('phase') != 'interrupted' or state.get('resume_phase') not in
-            {'quick', 'initial', 'focused', 'failed-gates', 'final'}
+    last = state.get('attempts', [{}])[-1] if state.get('attempts') else {}
+    pending = state.get('pending', [])
+    failures = [f for f in state.get('failures', []) if f.get('id') in pending]
+    triage_resume = (state.get('resume_phase') == 'triage' and state.get('failure_phase') in {'initial', 'final'}
+        and last.get('phase') == state.get('failure_phase') and last.get('independent_full') is True
+        and last.get('source') == state.get('source') and bool(pending)
+        and len(failures) == len(set(pending))
+        and all(f.get('source') == state['source'] and any(
+            r.get('gate') == f.get('gate') and r.get('source') == f['source']
+            and r.get('cases', {}).get(f['check'].split('/', 1)[1]) == f.get('native_result')
+            for r in last.get('results', [])) for f in failures))
+    if state.get('resume_independent') and not (
+            state.get('resume_independent') is True and last.get('phase') == 'final'
+            and last.get('independent_full') is True and last.get('source') == state.get('source')
+            and state.get('resume_phase') in {'final', 'triage'}):
+        raise ValueError('independent resume must bind the interrupted FINAL observation')
+    if (state.get('phase') != 'interrupted' or (state.get('resume_phase') not in
+            {'quick', 'initial', 'focused', 'failed-gates', 'final'} and not triage_resume)
             or not state.get('attempts') or state['attempts'][-1].get('interrupted') is not True
             or CANCEL.is_set() or state.get('running') or 'live_failures' in state):
         raise ValueError('quiescent interrupted repair boundary required')
@@ -1870,6 +1990,33 @@ def launch_rca(path: Path, launcher: list[str]) -> None:
         write(receipt, value)
 
 
+def initial_deferrals(plan: dict, state: dict, payload: dict, root: Path, phase: str = "initial") -> dict:
+    """Operator deferrals are pending work, never a waiver or native outcome."""
+    if (phase not in {'initial', 'final'} or state.get('phase') != phase or state.get('ready') or state.get('pending')
+            or CANCEL.is_set() or any(k in state for k in ('running', 'live_failures', 'resume_phase', 'resume_independent'))):
+        raise ValueError(f'{phase} observation requires quiescent {phase} state')
+    if not isinstance(payload, dict) or set(payload) - {'source', 'gates', 'roots'} or payload.get('source') != state['source']:
+        raise ValueError('initial deferrals require the exact source and gate/root reasons')
+    gates = {g['name']: g for g in plan['gates'] if not g.get('quick')}
+    deferred = {}
+    for kind in ('gates', 'roots'):
+        values = payload.get(kind, {})
+        if not isinstance(values, dict):
+            raise ValueError('deferrals must map gate/root to reason')
+        for key, reason in values.items():
+            if not isinstance(reason, str) or not reason.strip():
+                raise ValueError('every initial deferral requires a reason')
+            names = ([key] if kind == 'gates' and key in gates else
+                     [name for name, gate in gates.items() if gate.get('worker_transport') == 'local-isolated'
+                      and str(local_admission_root(gate, root)) == key] if kind == 'roots' else [])
+            if len(names) != 1:
+                raise ValueError('deferral must name one existing full gate or exact worker root')
+            name = names[0]
+            if name in deferred:
+                raise ValueError('duplicate initial gate deferral')
+            deferred[name] = {'status': 'PENDING', 'executed': False, 'reason': reason.strip(),
+                              'source': state['source'], 'selector': kind, 'key': key}
+    return deferred
 CLOUD_SMOKE, CLOUD_SMOKE_PREREQUISITE = 'smoke', 'cloudbench-controller'
 
 
@@ -1910,6 +2057,9 @@ def cloud_smoke_blocked(gate: dict, state: dict, held: dict) -> dict:
 
 
 def settled_round49_missing_request(state, directory, gate, request_path):
+    from deploy_test_focused10_settlement import recognized as focused10_recognized
+    if focused10_recognized(state, directory, gate, request_path):
+        return True
     from deploy_test_round49_retirement import recognized
     if recognized(state, directory, gate, request_path):
         return True
@@ -2040,7 +2190,8 @@ def settled_round49_missing_request(state, directory, gate, request_path):
 
 def run_phase(plan: dict, state: dict, directory: Path, root: Path,
               launcher: list[str] | None = None, *, independent: bool = False,
-              excluded_roots=(), repair_independent: bool = False,
+              excluded_roots=(), initial_observation: dict | None = None,
+              final_observation: dict | None = None, repair_independent: bool = False,
               include_repair_local: bool = False) -> None:
     if (source(root) != state["source"] or digest(plan) != state["plan_digest"]
             or environment_digest() != state["environment"]
@@ -2051,7 +2202,22 @@ def run_phase(plan: dict, state: dict, directory: Path, root: Path,
         raise ValueError('repair observation requires independent full execution')
     if include_repair_local and not repair_independent:
         raise ValueError('local repair observation requires the explicit repair-independent action')
-    if independent:
+    if initial_observation is not None and final_observation is not None:
+        raise ValueError('initial and final observations cannot be combined')
+    observation_phase = 'final' if final_observation is not None else 'initial'
+    observation = final_observation if final_observation is not None else initial_observation
+    pending_key = observation_phase + '_pending'
+    deferred = None
+    if observation is not None:
+        if independent:
+            raise ValueError('initial and triage observation cannot be combined')
+        validate_plan(plan, root)
+        deferred = initial_deferrals(plan, state, observation, root, observation_phase)
+        if observation_phase == 'initial' and any(entry.get('from_source') != state['source']
+                for entry in state.get('carried_passes', {}).values()):
+            raise ValueError('initial observation cannot carry old-source execution credit')
+        selected = [g for g in records(plan, state) if g['name'] not in deferred]
+    elif independent:
         boundary = (origin_phase == 'needs-focused-plan' and not state.get('pending')
                     and bool(state.get('repair_gates'))) if repair_independent else (
                         origin_phase == 'triage' and bool(state.get('pending')))
@@ -2079,15 +2245,27 @@ def run_phase(plan: dict, state: dict, directory: Path, root: Path,
                 raise ValueError('prior independent worker request has no terminal receipt')
     else:
         selected = records(plan, state)
+    if state['phase'] in {'initial', 'final'}:
+        for gate in selected:
+            for path in (directory / 'attempts').glob('*/' + '*/' + gate['name'] + '/request.json'):
+                if (not (path.parent / 'receipt.json').is_file()
+                        and not settled_round49_missing_request(state, directory, gate, path)):
+                    raise ValueError('prior worker request has unknown terminal ownership')
     held_rows = []
     prerequisite = cloud_smoke_prerequisite(plan, state, selected)
     held = next((g for g in selected if g.get('category') == CLOUD_SMOKE), None) if prerequisite else None
     if prerequisite is not None and all(g['name'] != prerequisite['name'] for g in selected):
-        if independent:
-            # The prerequisite is itself under unresolved triage: observe everything else, never pay
-            # for cloud smoke on a source whose controller regressions have not passed.
+        prerequisite_deferred = deferred is not None and prerequisite['name'] in deferred
+        if independent or prerequisite_deferred:
+            # A pending/deferred prerequisite cannot be launched through the smoke dependency edge.
+            # Keep independent work running; neither the controller nor paid smoke receives credit.
             selected = [g for g in selected if g is not held]
-            held_rows.append(cloud_smoke_held(held, 'it is pending triage'))
+            why = 'it is explicitly deferred' if prerequisite_deferred else 'it is pending triage'
+            held_rows.append(cloud_smoke_held(held, why))
+            if prerequisite_deferred:
+                deferred[held['name']] = {'status': 'PENDING', 'executed': False,
+                    'reason': held_rows[-1]['reason'], 'source': state['source'],
+                    'selector': 'gates', 'key': held['name']}
             held = prerequisite = None
         else:
             selected = [*selected, prerequisite]  # run it first: smoke is held until it passes
@@ -2108,6 +2286,15 @@ def run_phase(plan: dict, state: dict, directory: Path, root: Path,
         # Universal launch guard: a gate whose latest receipt still owns remote/native cleanup is
         # never relaunched on the same worker until that owner is reconciled (finding 4450239861).
         raise ValueError("gates still own unreconciled cleanup; refuse launch: " + ", ".join(owned))
+    if deferred is not None:
+        state.setdefault(observation_phase + '_deferral_history', []).append({'at': time.time(), 'source': state['source'],
+                                                               'deferrals': copy.deepcopy(deferred)})
+        state[pending_key] = {name: row for name, row in deferred.items()
+            if not reusable_full_pass(state, next(g for g in plan['gates'] if g['name'] == name))}
+        state['ready'] = False
+        if not selected:
+            write(directory / 'cycle.json', state)
+            return
     if independent and not selected:
         return  # No worker ran: do not invent an empty full attempt.
     state["round"] += 1
@@ -2184,17 +2371,17 @@ def run_phase(plan: dict, state: dict, directory: Path, root: Path,
             # Quick checks keep their short budget only on an otherwise idle host (a focused phase can
             # repair them beside heavy workers): launch the workers once every quick check finished.
             quick = [g for g in selected if g.get('quick') and g is not held]
-            deferred = [g for g in selected if not g.get('quick') and g is not held] if quick else []
+            queued_full = [g for g in selected if not g.get('quick') and g is not held] if quick else []
             futures = {submit(gate): gate for gate in (quick or [g for g in selected if g is not held])}
             pending = set(futures)
-            while pending or deferred:
-                if deferred and not any(futures[f].get('quick') for f in pending):
+            while pending or queued_full:
+                if queued_full and not any(futures[f].get('quick') for f in pending):
                     if not CANCEL.is_set():
-                        for gate in deferred:
+                        for gate in queued_full:
                             started = submit(gate)
                             futures[started] = gate
                             pending.add(started)
-                    deferred = []
+                    queued_full = []
                     continue
                 done, pending = wait(pending, timeout=EARLY_POLL_SECONDS, return_when=FIRST_COMPLETED)
                 scan([futures[f] for f in pending])
@@ -2224,11 +2411,12 @@ def run_phase(plan: dict, state: dict, directory: Path, root: Path,
                         held_rows.append(reason)
                         record(cloud_smoke_blocked(held, state, reason))
         failures = state.pop("live_failures")
-        if independent:
+        if independent or deferred is not None:
             changed = (source(root) != state['source'] or environment_digest() != state['environment']
                        or input_fingerprints(plan, root) != state['input_fingerprints'])
-            state['attempts'].append({'phase': 'triage', 'source': state['source'], 'results': results,
-                                     'independent_full': True, 'excluded_roots': sorted(str(p) for p in excluded),
+            state['attempts'].append({'phase': observation_phase if deferred is not None else 'triage', 'source': state['source'], 'results': results,
+                                     'independent_full': True, 'excluded_roots': sorted(str(p) for p in excluded) if deferred is None else [],
+                                     **({observation_phase + '_deferrals': copy.deepcopy(deferred)} if deferred is not None else {}),
                                      'interrupted': CANCEL.is_set(), 'stale': changed})
             if repair_independent:
                 state['attempts'][-1].update(origin_phase=origin_phase,
@@ -2237,14 +2425,31 @@ def run_phase(plan: dict, state: dict, directory: Path, root: Path,
             for result in results:
                 state.get('carried_passes', {}).pop(result['gate'], None)
             state['failures'].extend(failures)
-            pending = list(dict.fromkeys([*state.get('pending', []), *[f['id'] for f in failures]]))
-            if pending:
-                state.update(pending=pending, phase='triage', ready=False)
-                if repair_independent:
-                    state['failure_phase'] = origin_phase
+            state['pending'] = list(dict.fromkeys([*state.get('pending', []), *[f['id'] for f in failures]]))
+            if deferred is not None:
+                if failures:
+                    state['failure_phase'] = observation_phase
+                for key in ('initial_pending', 'final_pending'):
+                    if key in state:
+                        state[key] = {name: row for name, row in state[key].items()
+                            if not reusable_full_pass(state, next(g for g in plan['gates'] if g['name'] == name))}
+                if CANCEL.is_set():
+                    state.update(phase='interrupted', resume_phase='triage' if failures else observation_phase, ready=False)
+                    if observation_phase == 'final':
+                        state['resume_independent'] = True
+                elif changed:
+                    state.update(phase='stale', ready=False)
+                else:
+                    state.update(phase='triage' if failures else observation_phase, ready=False)
             else:
-                state.pop('pending', None)
-                state.update(phase=origin_phase, ready=False)
+                pending = list(dict.fromkeys([*state.get('pending', []), *[f['id'] for f in failures]]))
+                if pending:
+                    state.update(pending=pending, phase='triage', ready=False)
+                    if repair_independent:
+                        state['failure_phase'] = origin_phase
+                else:
+                    state.pop('pending', None)
+                    state.update(phase=origin_phase, ready=False)
         elif CANCEL.is_set():
             state["attempts"].append({"phase": state["phase"], "results": results, "interrupted": True})
             state.update(resume_phase=state["phase"], phase="interrupted", ready=False)
@@ -2436,6 +2641,298 @@ def rebind_local(state: dict, old: dict, new: dict, root: Path) -> None:
                  phase='quick', next_after_quick='initial', focused={}, ready=False)
 
 
+def _prepared_private_directory(value: str, worker: Path) -> None:
+    path = Path(value)
+    if (not path.is_absolute() or str(path) != value or '..' in path.parts
+            or worker / '.context' not in path.parents or path.resolve() != path or not path.is_dir()):
+        raise ValueError('prepared runtime directory must be private inside its worker')
+    for parent in (path, *path.parents):
+        if parent.is_symlink():
+            raise ValueError('prepared runtime directory cannot traverse symlinks')
+        if parent == worker:
+            break
+
+
+def _prepared_workers_idle(workers: list[Path], proc: Path = Path('/proc'), *, birth_guard=False):
+    from deploy_test_process_scan import prepared_workers_idle
+    return prepared_workers_idle(workers, proc, birth_guard=birth_guard)
+
+
+def prepare_bindings(state: dict, old: dict, new: dict, root: Path, directory: Path, *, tmpdir_replacement=None) -> None:
+    """Admit prepared runtime locations, or an explicit failed-cycle temp correction."""
+    if tmpdir_replacement is not None:
+        return replace_prepared_tmpdirs(state, old, new, root, directory, tmpdir_replacement)
+    if (CANCEL.is_set() or state.get('phase') not in {'quick', 'initial'} or state.get('ready')
+            or state.get('pending') or state.get('failures') or state.get('skips')
+            or state.get('carried_passes') or state.get('resource_warnings') or state.get('pending_post_merge')
+            or any(key in state for key in ('running', 'live_failures', 'resume_phase'))
+            or any(not isinstance(a, dict) or a.get('phase') != 'quick'
+                   or a.get('interrupted') or a.get('stale') for a in state.get('attempts', []))):
+        raise ValueError('prepared bindings require quiescent pre-full state')
+    if (old != state['plan'] or digest(old) != state['plan_digest']
+            or old['source'] != state['source'] or state['environment'] != environment_digest()):
+        raise ValueError('prepared binding source/plan/environment identity mismatch')
+    if ({k:v for k,v in old.items() if k not in {'source', 'gates'}} !=
+            {k:v for k,v in new.items() if k not in {'source', 'gates'}}
+            or [g['name'] for g in old['gates']] != [g['name'] for g in new['gates']]):
+        raise ValueError('prepared binding must preserve the complete selection')
+    validate_plan(old, root)
+    validate_plan(new, root)
+    current = source(root)
+    if new['source'] != current:
+        raise ValueError('prepared bindings require current source')
+    if subprocess.run(['git', 'merge-base', '--is-ancestor', old['source']['head'], current['head']],
+                      cwd=root, capture_output=True).returncode:
+        raise ValueError('prepared source must descend from original source')
+    if subprocess.run(['git', 'diff', '--quiet', 'HEAD'], cwd=root).returncode:
+        raise ValueError('commit prepared source before binding')
+    workers, changed = [], []
+    for before, after in zip(old['gates'], new['gates']):
+        if {k:v for k,v in before.items() if k != 'env'} != {k:v for k,v in after.items() if k != 'env'}:
+            raise ValueError('prepared binding cannot change commands/checks/deadlines or workers')
+        prior, env = before.get('env', {}), after.get('env', {})
+        if any(env.get(k) != v for k,v in prior.items()):
+            raise ValueError('prepared binding cannot change existing environment keys')
+        additions = {k:v for k,v in env.items() if k not in prior}
+        if additions and (before.get('quick') or before.get('worker_transport') != 'local-isolated'):
+            raise ValueError('prepared additions require a local full worker')
+        if set(additions) - {'TMPDIR', 'XDG_CACHE_HOME', 'npm_config_cache', 'BACKEND_COVERAGE_DATABASE_URL'}:
+            raise ValueError('unsupported prepared environment addition')
+        if before.get('worker_transport') != 'local-isolated':
+            continue
+        worker = Path(after['worker_root'])
+        if worker.resolve() != worker or not worker.is_dir():
+            raise ValueError('worker root must be a real prepared directory')
+        workers.append(worker)
+        for key, value in additions.items():
+            if key != 'BACKEND_COVERAGE_DATABASE_URL':
+                _prepared_private_directory(value, worker)
+                continue
+            url = urlsplit(value)
+            workspace = env.get('CONDUCTOR_WORKSPACE_NAME', '')
+            expected = 'victoria_' + re.sub(r'[^a-zA-Z0-9]', '_', workspace)
+            if (before['name'] != 'backend-coverage-blackbox' or not before.get('native_backend')
+                    or env.get('ROSE_USE_SYSTEM_PG') != 'true' or env.get('ROSE_DEPLOY_WORKTREE')
+                    or url.scheme not in {'postgres', 'postgresql'}
+                    or url.hostname not in {'localhost', '127.0.0.1', '::1'} or url.port != 5432
+                    or unquote(url.path) != '/' + expected or url.query or url.fragment
+                    or not re.fullmatch(r'victoria_[A-Za-z0-9_]+', expected)
+                    or expected.startswith('victoria_wmh_recording_')):
+                raise ValueError('backend binding must name its own loopback workspace database')
+        if source(worker) != current:
+            raise ValueError('worker source does not match prepared source')
+        for rel in ('.env', 'env.sh', 'back-end/.env', 'agents/.env', 'agents/.env.benchmark-temporal',
+                    'front-end/.env', 'front-end/.env.local'):
+            origin, target = root / rel, worker / rel
+            if (origin.is_file() != target.is_file() or target.is_symlink()
+                    or origin.is_file() and (sha_file(origin) != sha_file(target)
+                                             or target.stat().st_mode & 0o777 != 0o600)):
+                raise ValueError('prepared worker configuration differs or is not private')
+        if additions:
+            changed.append(before['name'])
+    if current == state['source'] and state['input_fingerprints'] != input_fingerprints(old, root):
+        raise ValueError('original frozen inputs changed')
+    if not changed and current == state['source']:
+        raise ValueError('prepared binding has no change')
+    if retained_owners(state, [g['name'] for g in old['gates']]):
+        raise ValueError('prepared binding has retained ownership')
+    for path in (directory / 'attempts').glob('**/request.json'):
+        request = bounded_read(path, 'existing request')
+        if (request.get('phase') != 'quick'
+                or request.get('gate') not in {g['name'] for g in old['gates'] if g.get('quick')}):
+            raise ValueError('full worker request already exists')
+        if not (path.parent / 'receipt.json').is_file():
+            raise ValueError('prior quick request has unknown owner')
+    with ExitStack() as stack:
+        for worker in workers:
+            stack.enter_context(exclusive(worker / '.context' / 'deploy-worker'))
+            stack.enter_context(exclusive(worker / '.context' / 'deploy-backend'))
+            lock = stack.enter_context((worker / '.context' / 'native-worker-admission.lock').open('a'))
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        _prepared_workers_idle(workers)
+        fingerprints = input_fingerprints(new, root)
+        if (source(root) != current or any(source(worker) != current for worker in workers)
+                or environment_digest() != state['environment'] or CANCEL.is_set()):
+            raise ValueError('prepared source/environment changed during validation')
+        state.setdefault('prepared_binding_history', []).append({
+            'from_plan': copy.deepcopy(old), 'from_source': copy.deepcopy(state['source']),
+            'to_source': current, 'gates': changed, 'at': time.time(), 'credit_granted': False})
+        state.update(plan=copy.deepcopy(new), plan_digest=digest(new), source=current,
+                     input_fingerprints=fingerprints, phase='quick', next_after_quick='initial', ready=False)
+
+
+def replace_prepared_tmpdirs(state, old, new, root, directory, proof):
+    """Same-source, post-failure correction only; retain the native failure history."""
+    if (state.get('phase') != 'triage' or not state.get('failures') or not state.get('pending')
+            or CANCEL.is_set() or state.get('ready')
+            or any(k in state for k in ('running', 'live_failures', 'resume_phase'))):
+        raise ValueError('TMPDIR correction requires quiescent failed triage')
+    if (old != state['plan'] or digest(old) != state['plan_digest']
+            or old['source'] != state['source'] or new.get('source') != state['source']
+            or source(root) != state['source'] or environment_digest() != state['environment']
+            or input_fingerprints(old, root) != state['input_fingerprints']):
+        raise ValueError('TMPDIR correction source/plan/environment changed')
+    if (not isinstance(proof, dict) or set(proof) != {'kind','source','from_plan_digest','paths'}
+            or proof['kind'] != 'replace-owned-tmpdir-v1' or proof['source'] != state['source']
+            or proof['from_plan_digest'] != digest(old) or not isinstance(proof['paths'], dict)):
+        raise ValueError('explicit exact TMPDIR correction proof required')
+    if ({k:v for k,v in old.items() if k != 'gates'} != {k:v for k,v in new.items() if k != 'gates'}
+            or len(old['gates']) != len(new.get('gates', []))):
+        raise ValueError('TMPDIR correction must preserve the complete plan')
+    changed, workers, paths, leases = [], [], [], {}
+    for before, after in zip(old['gates'], new['gates']):
+        worker = Path(before.get('worker_root', before.get('cwd', root)))
+        if before.get('worker_transport') == 'local-isolated':
+            workers.append(worker)
+        if before == after:
+            continue
+        prior, env = before.get('env', {}), after.get('env', {})
+        allowed = copy.deepcopy(before)
+        allowed.setdefault('env', {})['TMPDIR'] = env.get('TMPDIR')
+        if (allowed != after or before.get('quick') or before.get('worker_transport') != 'local-isolated'
+                or 'TMPDIR' not in prior or prior['TMPDIR'] == env.get('TMPDIR')
+                or not isinstance(env.get('TMPDIR'), str)):
+            raise ValueError('only existing local full-worker TMPDIR may change')
+        path = Path(env['TMPDIR'])
+        lease = external_tmpdir(str(path), worker, root, before['name'], state['source'])
+        if any(path == p or path in p.parents or p in path.parents for p in paths):
+            raise ValueError('workers cannot share external TMPDIR custody')
+        if set(p.name for p in path.iterdir()) != {'.deploy-tmpdir-owner.json'}:
+            raise ValueError('new external TMPDIR must contain only its custody marker')
+        paths.append(path); paths.append(Path(prior['TMPDIR']))
+        changed.append(before['name']); leases[before['name']] = lease
+    if not changed or proof['paths'] != {g['name']:g['env']['TMPDIR'] for g in new['gates'] if g['name'] in changed}:
+        raise ValueError('TMPDIR correction paths must match every changed worker')
+    validate_plan(old, root); validate_plan(new, root)
+    all_roots = [root, *workers]
+    for path in paths:
+        if path in [Path(g['env']['TMPDIR']) for g in new['gates'] if g['name'] in changed]:
+            if any(path == r or r in path.parents or path in r.parents for r in all_roots):
+                raise ValueError('external TMPDIR overlaps a checkout')
+    if retained_owners(state, [g['name'] for g in old['gates']]):
+        raise ValueError('TMPDIR correction has retained ownership')
+    records = {r.get('token'):r for a in state['attempts'] for r in a.get('results', []) if r.get('token')}
+    native_failure = False
+    for request_path in (directory / 'attempts').glob('**/request.json'):
+        request = bounded_read(request_path, 'existing request')
+        receipt_path = request_path.parent / 'receipt.json'
+        if not receipt_path.is_file():
+            raise ValueError('TMPDIR correction has unknown request ownership')
+        receipt = bounded_read(receipt_path, 'existing receipt')
+        recorded = records.get(request.get('token'))
+        if (recorded != receipt or any(request.get(k) != receipt.get(k) for k in ('token','gate','source'))):
+            raise ValueError('TMPDIR correction has unknown or active request ownership')
+        if ((receipt.get('lingering_group') or receipt.get('cleanup_owner'))
+                and not local_reconciliation_bound(state, receipt)):
+            raise ValueError('TMPDIR correction has unknown or active request ownership')
+        native_failure |= (request.get('phase') in {'initial','final','failed-gates'}
+                           and receipt.get('status') == 'FAIL' and receipt.get('executed') is True)
+    if not native_failure:
+        raise ValueError('TMPDIR correction requires a retained actual full failure receipt')
+    with ExitStack() as stack:
+        for worker in workers:
+            if source(worker) != state['source']:
+                raise ValueError('TMPDIR worker source changed')
+            for rel in ('.env', 'env.sh', 'back-end/.env', 'agents/.env',
+                        'agents/.env.benchmark-temporal', 'front-end/.env', 'front-end/.env.local'):
+                origin, target = root / rel, worker / rel
+                if (origin.is_file() != target.is_file() or target.is_symlink()
+                        or origin.is_file() and (sha_file(origin) != sha_file(target)
+                            or stat.S_IMODE(target.stat().st_mode) != 0o600)):
+                    raise ValueError('TMPDIR worker private configuration differs')
+            stack.enter_context(exclusive(worker / '.context/deploy-worker'))
+            stack.enter_context(exclusive(worker / '.context/deploy-backend'))
+            lock = stack.enter_context((worker / '.context/native-worker-admission.lock').open('a'))
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        _prepared_workers_idle([*workers, *paths], birth_guard=True)
+        for gate in new['gates']:
+            if gate['name'] in changed:
+                if external_tmpdir(gate['env']['TMPDIR'], Path(gate['worker_root']), root,
+                                   gate['name'], state['source']) != leases[gate['name']]:
+                    raise ValueError('TMPDIR lease changed during admission')
+        candidate = copy.deepcopy(state)
+        refresh(candidate, old, new, root, directory=directory, _tmpdir_gates=set(changed))
+        candidate.setdefault('prepared_binding_history', []).append(dict(
+            kind='replace-owned-tmpdir-v1', from_plan=copy.deepcopy(old), to_plan=copy.deepcopy(new),
+            from_source=copy.deepcopy(state['source']), to_source=new['source'],
+            gates=changed, leases=leases, at=time.time(), credit_granted=False))
+        _prepared_workers_idle([*workers, *paths], birth_guard=True)
+        state.clear(); state.update(candidate)
+
+
+def recover_interrupted_triage_refresh(state: dict, old: dict, new: dict, root: Path, directory: Path) -> None:
+    """No-launch source refresh after a reconciled interrupted independent observation."""
+    if (read(directory / 'cycle.json') != state or old != state.get('plan')
+            or old.get('source') != state.get('source') or digest(old) != state.get('plan_digest')
+            or state.get('phase') != 'interrupted' or state.get('resume_phase') != 'triage'
+            or not state.get('pending') or state.get('ready')
+            or state.get('environment') != environment_digest()):
+        raise ValueError('interrupted TRIAGE refresh requires the exact saved source/plan/environment')
+    interrupted_boundary(state)
+    last = state['attempts'][-1]
+    if (last.get('phase') not in {'initial', 'final'} or last.get('independent_full') is not True
+            or state.get('failure_phase') != last['phase']):
+        raise ValueError('interrupted TRIAGE refresh requires the original independent observation')
+    validate_plan(new, root)
+    if new['source'] != source(root) or new['source'] == state['source']:
+        raise ValueError('interrupted TRIAGE refresh requires actual changed current source')
+    if ({k:v for k,v in old.items() if k not in {'source','gates'}} !=
+            {k:v for k,v in new.items() if k not in {'source','gates'}}
+            or [g['name'] for g in old['gates']] != [g['name'] for g in new['gates']]):
+        raise ValueError('interrupted TRIAGE refresh must preserve the complete selection')
+    workers = []
+    for before, after in zip(old['gates'], new['gates']):
+        preserve_contract(before, after)
+        if before['checks'] != after['checks']:
+            raise ValueError('interrupted TRIAGE refresh must preserve every check')
+        if not after.get('quick') and after.get('worker_transport') == 'local-isolated':
+            worker = Path(after['worker_root'])
+            if source(worker) != new['source']:
+                raise ValueError('interrupted TRIAGE refresh requires prepared current-source workers')
+            workers.append(worker)
+    if retained_owners(state, [g['name'] for g in old['gates']]):
+        raise ValueError('interrupted TRIAGE refresh has retained ownership')
+    records = {r.get('token'): r for a in state['attempts'] for r in a.get('results', []) if r.get('token')}
+    for path in (directory / 'attempts').glob('**/request.json'):
+        request = bounded_read(path, 'original request')
+        receipt = bounded_read(path.parent / 'receipt.json', 'original receipt')
+        if (records.get(request.get('token')) != receipt
+                or any(request.get(k) != receipt.get(k) for k in ('token','source','gate'))):
+            raise ValueError('interrupted TRIAGE refresh has unknown request ownership')
+        owner = receipt_owner(receipt['gate'], receipt)
+        if owner and not (local_reconciliation_bound(state, receipt) or _reconciled(state, receipt, owner)):
+            raise ValueError('interrupted TRIAGE refresh has unreconciled historical ownership')
+    from deploy_test_process_scan import prepared_workers_idle
+    if workers:
+        prepared_workers_idle(workers, birth_guard=True)
+    candidate = copy.deepcopy(state)
+    candidate['phase'] = 'triage'
+    candidate.pop('resume_phase')
+    candidate.pop('resume_independent', None)
+    refresh(candidate, old, new, root, directory=directory)
+    # Nothing has been published yet. Recheck the original custody and new inputs.
+    interrupted_boundary(state)
+    if (read(directory / 'cycle.json') != state or environment_digest() != state['environment']
+            or source(root) != new['source'] or input_fingerprints(new, root) != candidate['input_fingerprints']
+            or any(source(worker) != new['source'] for worker in workers)):
+        raise ValueError('interrupted TRIAGE refresh changed during validation')
+    if workers:
+        prepared_workers_idle(workers, birth_guard=True)
+    if (CANCEL.is_set() or read(directory / 'cycle.json') != state
+            or source(root) != new['source'] or environment_digest() != state['environment']
+            or any(source(worker) != new['source'] for worker in workers)):
+        raise ValueError('interrupted TRIAGE refresh changed before publication')
+    candidate.setdefault('interrupted_triage_refresh_history', []).append({
+        'kind': 'interrupted-pending-triage-refresh-v1', 'at': time.time(), 'credit_granted': False,
+        'from_source': copy.deepcopy(state['source']), 'to_source': copy.deepcopy(new['source']),
+        'from_plan_digest': state['plan_digest'], 'to_plan_digest': digest(new),
+        'round': state.get('round'), 'resume_phase': state['resume_phase'],
+        'resume_independent': state.get('resume_independent'), 'interruption_digest': digest(last),
+        'original_pending': list(state['pending'])})
+    state.clear()
+    state.update(candidate)
+
+
 GRAPH_CARRY_BASIS = 'affected-test graph: delta selects no lane of this gate'
 GIT_MODES = {b'100644': stat.S_IFREG, b'100755': stat.S_IFREG | stat.S_IXUSR,
              b'120000': stat.S_IFLNK | stat.S_IXUSR}  # source_mode() of a checked-out entry
@@ -2512,8 +3009,8 @@ def graph_carries(state: dict, candidates: dict, gates: dict, new_source: dict, 
     return carried
 
 
-def refresh(state: dict, old: dict, new: dict, root: Path, *, election_proof: dict | None = None,
-            historical_no_retry_proof: dict | None = None) -> None:
+def refresh(state: dict, old: dict, new: dict, root: Path, *, directory: Path | None = None, _tmpdir_gates=frozenset(),
+            election_proof: dict | None = None, historical_no_retry_proof: dict | None = None) -> None:
     from deploy_test_historical_custody import known, prepare, apply, verify
     if historical_no_retry_proof is not None and election_proof is not None:
         raise ValueError('historical custody cannot mix election flags')
@@ -2527,7 +3024,7 @@ def refresh(state: dict, old: dict, new: dict, root: Path, *, election_proof: di
         rows = prepare(state, old, new, historical_no_retry_proof, root)
         candidate = copy.deepcopy(state)
         pending = copy.deepcopy(state.get('pending_post_merge', []))
-        _refresh(candidate, old, new, root)
+        _refresh(candidate, old, new, root, directory=directory, _tmpdir_gates=_tmpdir_gates)
         protected = {r['original_failure']['id'] for r in rows}
         candidate['pending_post_merge'] = [p for p in candidate.get('pending_post_merge', []) if p['id'] not in protected] + [p for p in pending if p['id'] in protected]
         candidate['superseded_pending_post_merge'] = [p for p in candidate.get('superseded_pending_post_merge', [])
@@ -2549,10 +3046,10 @@ def refresh(state: dict, old: dict, new: dict, root: Path, *, election_proof: di
         same = input_fingerprints(new, root) == state['input_fingerprints']
         if not same or state.get('historical_no_retry_custody'):
             raise ValueError('historical custody proof required before source refresh')
-    _refresh(state, old, new, root, election_proof=election_proof)
+    _refresh(state, old, new, root, directory=directory, _tmpdir_gates=_tmpdir_gates, election_proof=election_proof)
 
 
-def _refresh(state: dict, old: dict, new: dict, root: Path, *, election_proof=None) -> None:
+def _refresh(state: dict, old: dict, new: dict, root: Path, *, directory: Path | None = None, _tmpdir_gates=frozenset(), election_proof=None) -> None:
     if digest(old) != state["plan_digest"]:
         raise ValueError("previous plan does not match the frozen selection")
     validate_plan(new, root)
@@ -2562,6 +3059,44 @@ def _refresh(state: dict, old: dict, new: dict, root: Path, *, election_proof=No
         if state.get('pending'):
             raise ValueError('interrupted pending triage must resume before refresh')
     pending_refresh = bool(state.get('pending'))
+    stale_quick = pending_refresh and state.get('phase') == 'stale'
+    if stale_quick:
+        # Runtime inputs may change while quick checks finish. Keep their stale
+        # receipts and every pending failure, but permit a fresh input binding.
+        attempt = state.get('attempts', [{}])[-1]
+        quick = {g['name']: g for g in old['gates'] if g.get('quick')}
+        results = attempt.get('results', [])
+        if (directory is None or read(directory / 'cycle.json') != state
+                or attempt.get('phase') != 'quick' or attempt.get('stale') is not True
+                or attempt.get('interrupted') or len(results) != len(quick)
+                or {r.get('gate') for r in results} != set(quick)
+                or any(r.get('status') != 'PASS' or r.get('complete') is not True
+                       or r.get('executed') is not True or type(r.get('native_exit')) is not int
+                       or r['native_exit'] != 0 or r.get('source') != state['source']
+                       or r.get('command') != quick[r['gate']]['command']
+                       or r.get('cases') != {case: 'PASS' for case in quick[r['gate']]['checks']}
+                       or r.get('timed_out') or r.get('cancelled') or r.get('lingering_group')
+                       or r.get('cleanup_owner')
+                       for r in results)
+                or retained_owners(state, [g['name'] for g in old['gates']])):
+            raise ValueError('stale quick refresh requires complete quiescent native receipts')
+        for result in results:
+            gate = quick[result['gate']]
+            folder = Path(result['log']).parent
+            receipt = bounded_read(folder / 'receipt.json', 'stale quick receipt')
+            request = bounded_read(folder / 'request.json', 'stale quick request')
+            if (receipt != result
+                    or any(request.get(k) != result.get(k) for k in ('token', 'source', 'gate'))
+                    or request.get('phase') != 'quick' or request.get('checks') != gate['checks']
+                    or request.get('skips') != {}
+                    or result.get('execution_binding') != {
+                        'input_fingerprint': state['input_fingerprints'].get(gate['name']),
+                        'contract_digest': digest(gate), 'environment': state['environment']}):
+                raise ValueError('stale quick native provenance differs')
+        workers = [Path(g['worker_root'] if g.get('worker_root') else g['cwd'])
+                   for g in old['gates'] if g.get('worker_transport') == 'local-isolated']
+        if workers:
+            _prepared_workers_idle(workers, birth_guard=True)
     quick_names = {g['name'] for g in old['gates'] if g.get('quick')}
     pending_quick_refresh = (
         pending_refresh and state.get('phase') == 'quick' and state.get('ready') is False
@@ -2572,9 +3107,25 @@ def _refresh(state: dict, old: dict, new: dict, root: Path, *, election_proof=No
         and not any((a.get('phase') == 'quick' and a.get('source') == state['source'])
                     or any(r.get('gate') in quick_names and r.get('source', a.get('source')) == state['source']
                            for r in a.get('results', [])) for a in state.get('attempts', [])))
-    if pending_refresh and (state.get('phase') != 'triage' and not pending_quick_refresh or CANCEL.is_set()
+    if pending_refresh and (state.get('phase') != 'triage' and not stale_quick and not pending_quick_refresh
+                            or CANCEL.is_set()
             or 'live_failures' in state or state.get('running') or state.get('resume_phase')):
         raise ValueError("adjudicate pending occurrences or reach quiescent triage before binding a changed source")
+    final_refresh = state.get('phase') == 'final'
+    if final_refresh:
+        initial_deferrals(old, state, {'source': state['source']}, root, 'final')
+        if directory is None or read(directory / 'cycle.json') != state:
+            raise ValueError('FINAL refresh requires the exact saved native cycle')
+        if retained_owners(state, [g['name'] for g in old['gates']]):
+            raise ValueError('FINAL refresh has unreconciled worker ownership')
+        for path in (directory / 'attempts').glob('*/*/*/request.json'):
+            if (path.parent / 'receipt.json').is_file():
+                continue
+            # Retirement belongs to the saved selection, before any source rebind.
+            gates = [gate for gate in old['gates'] if gate['name'] == path.parent.name]
+            if (len(gates) != 1
+                    or not settled_round49_missing_request(state, directory, gates[0], path)):
+                raise ValueError('FINAL refresh has a worker request with unknown terminal ownership')
     unstarted_quick = (state["phase"] == "quick" and (not state.get('pending') or pending_quick_refresh)
                        and 'live_failures' not in state and not state.get('resume_phase')
                        and not state.get('running'))
@@ -2583,7 +3134,7 @@ def _refresh(state: dict, old: dict, new: dict, root: Path, *, election_proof=No
                        and not state.get('running')
                        and not any(a.get('phase') == 'final' and a.get('source') == state['source']
                                    and not a.get('stale') for a in state.get('attempts', [])))
-    if state["phase"] not in {"ready", "needs-focused-plan", "focused", "failed-gates", "triage", "stale"} and not unstarted_quick and not unstarted_final and not interrupted_refresh:
+    if state["phase"] not in {"ready", "needs-focused-plan", "focused", "failed-gates", "triage", "stale"} and not unstarted_quick and not unstarted_final and not interrupted_refresh and not final_refresh:
         raise ValueError("source refresh only at the repair boundary")
     if new["source"] != source(root):
         raise ValueError("new plan is not bound to current source")
@@ -2598,7 +3149,12 @@ def _refresh(state: dict, old: dict, new: dict, root: Path, *, election_proof=No
     for name, gate in old_gates.items():
         if name in removed:
             continue
-        preserve_contract(gate, new_gates[name])
+        if name in _tmpdir_gates:
+            comparison = copy.deepcopy(new_gates[name])
+            comparison['env']['TMPDIR'] = gate['env']['TMPDIR']
+            preserve_contract(gate, comparison)
+        else:
+            preserve_contract(gate, new_gates[name])
         if not set(gate["checks"]) <= set(new_gates[name]["checks"]):
             omissions = quarantine.deploy_selection_omissions(root, gate, new_gates[name])
             pending_checks = {f['check'] for f in state['failures'] if f['id'] in state.get('pending', [])}
@@ -2713,6 +3269,7 @@ def _refresh(state: dict, old: dict, new: dict, root: Path, *, election_proof=No
         })
     if interrupted_refresh:
         state.pop('resume_phase')
+        state.pop('resume_independent', None)
     state.update(plan=new, source=new["source"], plan_digest=digest(new), ready=False, focused={},
                  input_fingerprints=fingerprints, environment=environment_digest(),
                  phase="quick", next_after_quick="triage" if state.get("pending") else
@@ -2747,6 +3304,8 @@ def resolve_post_merge(state: dict, occurrence_id: str, repair_agent: str) -> No
 
 
 def pending_completion_block(state: dict) -> str | None:
+    if state.get("initial_pending") or state.get("final_pending"):
+        return "full gates remain pending; deferral grants no completion credit"
     try:
         from deploy_test_election import completion_block as election_block
         blocked = election_block(state)
@@ -3025,7 +3584,7 @@ def recover_round(plan: dict, directory: Path, root: Path, proof: dict) -> None:
 def main(argv: list[str] | None = None) -> int:
     """Dispatch a validated cycle transition and persist its evidence."""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=["recover-round", "init", "run", "resume", "status", "triage", "focus", "refresh", "rebind-local", "triage-quick", "triage-independent", "repair-independent", "rca", "verify", "report", "resolve", "complete", "reexecute", "reconcile", "standing-skip", "accept-omitted-custody", "prepare-agentcard-renewal", "renew-agentcard-warning", "prepare-historical-no-retry", "prepare-historical-import", "admit-historical-import", "import-historical-custody", "import-historical-no-retry", "attribute-flaky", "elect-user-omission", "prepare-recovered-stall", "record-recovered-stall"])
+    parser.add_argument("action", choices=["recover-round", "init", "run", "resume", "status", "triage", "focus", "refresh", "rebind-local", "triage-quick", "triage-independent", "repair-independent", "rca", "verify", "report", "resolve", "complete", "reexecute", "reconcile", "standing-skip", "accept-omitted-custody", "prepare-agentcard-renewal", "renew-agentcard-warning", "prepare-historical-no-retry", "prepare-historical-import", "admit-historical-import", "import-historical-custody", "import-historical-no-retry", "attribute-flaky", "elect-user-omission", "prepare-bindings", "initial-independent", "final-independent", "collect-backend", "settle-focused10", "prepare-recovered-stall", "record-recovered-stall"])
     parser.add_argument('--donor-state', type=Path,
                         help='import-historical-no-retry: immutable independent donor cycle snapshot')
     parser.add_argument('--exclude-root', type=Path, action='append', default=[],
@@ -3034,6 +3593,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument('--donor-sha256')
     parser.add_argument('--donor-index-sha256')
     parser.add_argument("--historical-no-retry-proof", type=Path)
+    parser.add_argument('--recover-interrupted-triage', action='store_true',
+                        help='refresh only: no-launch source recovery for reconciled interrupted pending TRIAGE')
     parser.add_argument('--include-repair-local', action='store_true',
                         help='repair-independent: also observe complete original local repair gates; cloud stays deferred')
     parser.add_argument("--proof", type=Path, help="reconcile: typed cleanup proof JSON")
@@ -3049,6 +3610,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--rca-launcher", nargs=argparse.REMAINDER)
     args = parser.parse_args(argv)
     try:
+        if args.recover_interrupted_triage and args.action != 'refresh':
+            raise ValueError('--recover-interrupted-triage is only valid for refresh')
         if args.include_repair_local and args.action != 'repair-independent':
             raise ValueError('--include-repair-local requires repair-independent')
         if args.historical_no_retry_proof is not None and args.action not in {'refresh', 'import-historical-no-retry'}:
@@ -3058,6 +3621,8 @@ def main(argv: list[str] | None = None) -> int:
         plan = read(args.plan)
         directory = args.state_dir.resolve()
         with exclusive(directory):
+            from deploy_test_focused10_settlement import pending_guard
+            pending_guard(directory, args.action)
             journals = [directory / 'settlement-journal.json',
                         *sorted(directory.glob('settlement-round*-journal.json'))]
             for journal in journals:
@@ -3097,14 +3662,32 @@ def main(argv: list[str] | None = None) -> int:
             if args.action == "init" and state_path.exists():
                 raise ValueError("existing cycle must not be reset")
             if args.action in {"run", "resume"}:
+                resume_independent = False
                 if args.action == "resume":
                     if state["phase"] != "interrupted":
                         raise ValueError("resume requires an interrupted cycle")
                     interrupted_boundary(state)
+                    if (state['resume_phase'] == 'triage' or state.get('resume_independent')) and (
+                            source(args.root) != state['source'] or digest(plan) != state['plan_digest']
+                            or environment_digest() != state['environment']
+                            or input_fingerprints(plan, args.root) != state['input_fingerprints']):
+                        raise ValueError('interrupted triage source/plan/inputs changed; resume refused')
                     state["phase"] = state.pop("resume_phase")
+                    resume_independent = state.pop("resume_independent", False)
                 with cancellation_handlers():
-                    while state["phase"] in {"quick", "initial", "focused", "failed-gates", "final"}:
+                    while not resume_independent and state["phase"] in {"quick", "initial", "focused", "failed-gates", "final"}:
                         run_phase(plan, state, directory, args.root, args.rca_launcher)
+            elif args.action == 'settle-focused10':
+                if args.input is None:
+                    raise ValueError('--input exact reviewed focused10 negative authority required')
+                from deploy_test_focused10_settlement import settle
+                settle(state, directory, args.root, read(args.input), sys.modules[__name__],
+                       lambda candidate: write(state_path, candidate))
+            elif args.action == "collect-backend":
+                if args.input is None:
+                    raise ValueError("--input sealed collection specification required")
+                with cancellation_handlers():
+                    collect_backend(state, read(args.input), directory, args.root)
             elif args.action == 'elect-user-omission':
                 from deploy_test_user_omission import elect, pinned_document
                 if args.input is None or not args.input_sha256 or plan != state['plan']:
@@ -3118,6 +3701,18 @@ def main(argv: list[str] | None = None) -> int:
                 if args.input is None:
                     raise ValueError("--input focused command plan required")
                 focused_plan(state, plan, read(args.input), root=args.root)
+            elif args.action == 'initial-independent':
+                if args.input is None:
+                    raise ValueError('--input source-bound deferral reasons required')
+                with cancellation_handlers():
+                    run_phase(plan, state, directory, args.root, args.rca_launcher,
+                              initial_observation=read(args.input))
+            elif args.action == 'final-independent':
+                if args.input is None:
+                    raise ValueError('--input source-bound deferral reasons required')
+                with cancellation_handlers():
+                    run_phase(plan, state, directory, args.root, args.rca_launcher,
+                              final_observation=read(args.input))
             elif args.action in {'triage-independent', 'repair-independent'}:
                 with cancellation_handlers():
                     run_phase(plan, state, directory, args.root, args.rca_launcher,
@@ -3204,13 +3799,23 @@ def main(argv: list[str] | None = None) -> int:
             elif args.action == "refresh":
                 if args.input is None:
                     raise ValueError("--input previous plan required")
-                refresh(state, read(args.input), plan, args.root,
-                        election_proof=bounded_read(args.proof, 'AgentCard election custody') if args.proof else None,
-                        historical_no_retry_proof=read(args.historical_no_retry_proof) if args.historical_no_retry_proof else None)
+                if args.recover_interrupted_triage:
+                    if args.proof is not None or args.historical_no_retry_proof is not None:
+                        raise ValueError('interrupted TRIAGE recovery cannot change gate election')
+                    recover_interrupted_triage_refresh(state, read(args.input), plan, args.root, directory)
+                else:
+                    refresh(state, read(args.input), plan, args.root, directory=directory,
+                            election_proof=bounded_read(args.proof, 'AgentCard election custody') if args.proof else None,
+                            historical_no_retry_proof=read(args.historical_no_retry_proof) if args.historical_no_retry_proof else None)
             elif args.action == 'rebind-local':
                 if args.input is None:
                     raise ValueError('--input previous frozen plan required')
                 rebind_local(state, read(args.input), plan, args.root)
+            elif args.action == "prepare-bindings":
+                if args.input is None:
+                    raise ValueError("--input previous plan required")
+                prepare_bindings(state, read(args.input), plan, args.root, directory,
+                                 tmpdir_replacement=read(args.proof) if args.proof else None)
             elif args.action == "rca":
                 requests = rca_requests(state, directory)
                 if state["phase"] != "triage" or not requests or not args.rca_launcher:

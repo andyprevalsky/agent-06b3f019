@@ -248,6 +248,230 @@ def test_steel_cdp_key_is_materialized_only_at_connection_boundary() -> None:
             os.environ["STEEL_API_KEY"] = previous
 
 
+def _async_credential_handler_fixture(*, ignore_cancel=False, fail=False):
+    import asyncio
+    import ast
+    import textwrap
+    from pathlib import Path
+    from domains.spawn_browser_agent_v3 import handler as h
+    from domains.spawn_browser_agent_v3.credential_runtime import OwnedCredentialTasks, unknown_realm_credential_state
+    source = Path(h.__file__).read_text()
+    start = source.index('        action_redaction_refs: Optional[List[Dict[str, str]]] = None')
+    end = source.index('        def _policy_authority()', start)
+    block = textwrap.dedent(source[start:end])
+    nonlocals = {name for node in ast.walk(ast.parse(block)) if isinstance(node, ast.Nonlocal) for name in node.names}
+    gate = asyncio.Event()
+    calls = []
+
+    async def prepare(config, **kwargs):
+        calls.append(kwargs)
+        try:
+            await gate.wait()
+        except asyncio.CancelledError:
+            if not ignore_cancel:
+                raise
+            await gate.wait()
+        if fail:
+            raise RuntimeError('private-provider-secret-must-not-leak')
+        return {'auth_realm': h.auth_realm_from_url(kwargs['target_url']), 'passwords': [], 'passkeys': [], 'auth_options': {}}
+
+    async def build(payload, **kwargs):
+        state = unknown_realm_credential_state(payload['auth_realm'])
+        state.password_secret_refs = {'pwd:fixture': 'private-' + payload['auth_realm']}
+        state.auth_options_section = payload['auth_realm']
+        return state
+    state = {name: None for name in nonlocals}
+    state.update(auth_realm='old.example', session_credential_ref=None, secret_refs={}, card_refs={}, credential_refs_by_secret_ref={}, auth_options={}, auth_options_section='', auth_runtime_state=unknown_realm_credential_state('old.example').auth_runtime_state, action_redaction_refs=None, session_passwords=[], session_passkeys=[], password_origins={}, session_id='session-1', task_id='task-1', agent_id='agent', user_id='user', browser_url='public', current_url='https://new.example/page', config=SimpleNamespace(payment=SimpleNamespace(decryption_key=None)), dom_service=SimpleNamespace(register_secret_refs=lambda refs: None), playwright_browser=object(), durable_browser_runtime={}, passkey_ref_by_credential_id={}, seeded_decrypted_passkeys_by_credential_id={}, credential_preparation=None, credential_tasks=OwnedCredentialTasks(), initial_credential_scope=None, initial_credential_payload={})
+    env = dict(vars(h))
+    env.update(prepare_browser_auth=prepare, build_realm_credential_state=build, save_browser_credential_ref_message=AsyncMock(), sync_passkeys_onto_target=AsyncMock(return_value=0), tilion_worker_apply_payload=lambda payload: None, apply_tilion_worker_state=AsyncMock(), browser_activity_checkpoint=lambda text: None, state=state)
+    assignments = '\n'.join((f'    {name} = state[{name!r}]' for name in state))
+    setters = '\n    def move(session, url):\n        nonlocal session_id, current_url\n        session_id, current_url = session, url\n    def snapshot():\n        return auth_realm, dict(secret_refs), credential_tasks\n    return _prepare_credentials_for_url, _auth_context_for_url, move, snapshot\n'
+    exec(compile('def setup():\n' + assignments + '\n' + textwrap.indent(block, '    ') + setters, h.__file__, 'exec'), env)
+    return (*env['setup'](), gate, calls)
+
+
+async def test_credential_callbacks_do_not_wait_for_preparation():
+    import asyncio
+    prepare, context, move, snapshot, gate, calls = _async_credential_handler_fixture()
+    pending = asyncio.create_task(context('https://new.example/page'))
+    try:
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        assert pending.done(), 'observed-auth callback blocks the next actor turn on credential preparation'
+        result = pending.result()
+        assert result['credential_preparation_status'] == 'pending', result
+        assert not result.get('auth_options'), result
+        gate.set()
+        for _ in range(6):
+            await asyncio.sleep(0)
+        ready = await context('https://new.example/page')
+        assert ready['credential_preparation_status'] == 'ready', ready
+        assert len(calls) == 1
+    finally:
+        gate.set()
+        pending.cancel()
+        await asyncio.gather(pending, return_exceptions=True)
+        owner = snapshot()[2]
+        if owner is not None:
+            await owner.close()
+
+
+async def test_navigation_runs_while_handler_preparation_is_pending():
+    import asyncio
+    from domains.spawn_browser_agent_v3.service_actions import _execute_goto
+    prepare, context, move, snapshot, gate, calls = _async_credential_handler_fixture()
+    events = []
+
+    class Event:
+
+        def __await__(self):
+
+            async def ready():
+                events.append('navigate')
+            return ready().__await__()
+
+        async def event_result(self, **kwargs):
+            return None
+    session = SimpleNamespace(event_bus=SimpleNamespace(dispatch=lambda event: Event()))
+    history = SimpleNamespace(record_action=AsyncMock())
+    task = asyncio.create_task(_execute_goto(session=session, dom_service=object(), action_history=history, params={'url': 'https://new.example/page'}, thinking='', session_id='session-1', config=None, current_auth_realm='old.example', prepare_credentials_for_url=prepare, wait_for_navigation=AsyncMock()))
+    try:
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        assert task.done() and events == ['navigate'], 'goto waits for optional credential preparation'
+        assert task.result()['success'] is True
+        assert not gate.is_set()
+    finally:
+        gate.set()
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        owner = snapshot()[2]
+        if owner is not None:
+            await owner.close()
+
+
+async def test_background_credentials_ignore_late_realm_and_session_results():
+    import asyncio
+    for new_session, new_url in (('session-1', 'https://other.example/'), ('session-2', 'https://new.example/page')):
+        prepare, context, move, snapshot, gate, calls = _async_credential_handler_fixture(ignore_cancel=True)
+        await context('https://new.example/page')
+        await asyncio.sleep(0)
+        move(new_session, new_url)
+        result = await context(new_url)
+        assert result['credential_preparation_status'] == 'pending'
+        assert snapshot()[1] == {}, 'old secrets remained active for a new owner'
+        await asyncio.sleep(0)
+        gate.set()
+        for _ in range(8):
+            await asyncio.sleep(0)
+        expected_realm = new_url.split('/')[2]
+        assert snapshot()[0] == expected_realm
+        assert snapshot()[1] == {'pwd:fixture': 'private-' + expected_realm}
+        assert calls[-1]['session_id'] == new_session
+        await snapshot()[2].close()
+
+
+async def test_background_credential_failure_is_safe_tool_state():
+    import asyncio
+    prepare, context, move, snapshot, gate, calls = _async_credential_handler_fixture(fail=True)
+    pending = await context('https://new.example/page')
+    assert pending['credential_preparation_status'] == 'pending'
+    gate.set()
+    for _ in range(6):
+        await asyncio.sleep(0)
+    failed = await context('https://new.example/page')
+    assert failed['credential_preparation_status'] == 'error'
+    assert 'private-provider-secret' not in str(failed)
+    assert not snapshot()[1] and len(calls) == 1
+    await snapshot()[2].close()
+
+
+async def test_credential_cleanup_only_cancels_owned_work():
+    import asyncio
+    from domains.spawn_browser_agent_v3.credential_runtime import OwnedCredentialTasks, AsyncCredentialPreparation
+    from helpers.workflow_generation import WorkflowGenerationSealed
+    owner = OwnedCredentialTasks()
+    started, cancelled = (asyncio.Event(), asyncio.Event())
+
+    async def work():
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.set()
+    owned = owner.start(work)
+    unrelated = asyncio.create_task(asyncio.Event().wait())
+    await started.wait()
+    await owner.close()
+    assert cancelled.is_set() and owned.cancelled() and (not unrelated.done())
+    unrelated.cancel()
+    await asyncio.gather(unrelated, return_exceptions=True)
+
+    async def sealed(*args):
+        raise WorkflowGenerationSealed()
+    owner = OwnedCredentialTasks()
+    pending = AsyncCredentialPreparation(owner, sealed)
+    pending.request('https://example.com/', ('session', 'example.com'), 'example.com')
+    for _ in range(3):
+        await asyncio.sleep(0)
+    try:
+        pending.request('https://example.com/', ('session', 'example.com'), 'example.com')
+    except WorkflowGenerationSealed:
+        pass
+    else:
+        raise AssertionError('sealed generation was hidden by background preparation')
+    await owner.close()
+    owner = OwnedCredentialTasks()
+    owned = owner.start(work, label='credential_upload')
+    await asyncio.sleep(0)
+    closing = asyncio.create_task(owner.close())
+    await asyncio.sleep(0)
+    closing.cancel()
+    await asyncio.gather(closing, return_exceptions=True)
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    assert owned.cancelled(), "cancelling cleanup leaked the owner's task"
+    assert owner.status['credential_upload'] == 'error'
+
+
+def test_missing_credentials_do_not_become_literal_input():
+    from domains.spawn_browser_agent_v3.credential_runtime import missing_credential_reference
+    assert missing_credential_reference({'text': '{{secret:pwd:missing}}'}, {})
+    assert missing_credential_reference({'text': 'pwd:missing'}, {})
+    assert not missing_credential_reference({'text': 'Search for prices'}, {})
+    assert not missing_credential_reference({'text': '{{secret:pwd:ready}}'}, {'pwd:ready': 'private'})
+
+
+async def test_goto_credential_summary_realm_fallback() -> None:
+    """Partial credential summaries use the URL realm but retain explicit realms."""
+    import asyncio
+    from domains.spawn_browser_agent_v3.service_actions import _execute_goto
+
+    class Event:
+        def __await__(self):
+            return asyncio.sleep(0).__await__()
+
+        async def event_result(self, **kwargs):
+            return None
+
+    for supplied, expected in ((None, "example.com"), ("", "example.com"), ("account.example.com", "account.example.com")):
+        summary = {"cookie_count": 1}
+        if supplied is not None:
+            summary["auth_realm"] = supplied
+        history = SimpleNamespace(record_action=AsyncMock())
+        result = await _execute_goto(
+            session=SimpleNamespace(event_bus=SimpleNamespace(dispatch=lambda event: Event())),
+            dom_service=SimpleNamespace(), action_history=history,
+            params={"url": "https://example.com/account"}, thinking="",
+            session_id="session", config=None, current_auth_realm="other.example",
+            prepare_credentials_for_url=AsyncMock(return_value=summary),
+            wait_for_navigation=AsyncMock(),
+        )
+        assert result["success"] is True
+        assert result["auth_realm"] == expected, result
+        assert history.record_action.await_args.kwargs["result"] == result
+
+
 async def test_cross_realm_goto_prepares_complete_credentials_before_navigation() -> None:
     from domains.spawn_browser_agent_v3.service_actions import _execute_goto
 
@@ -1520,6 +1744,23 @@ async def test_passkey_auth_reload_skips_foreign_host_and_same_href() -> None:
     assert sum(1 for method, _ in state.calls if method == "Page.navigate") == first_reloads
 
 
+async def test_deferred_passkey_injection_never_navigates():
+    from browser_tools.dom_service import DOMService
+    state, send = _webauthn_browser_double()
+
+    async def observed_send(method, params, target_id):
+        if method == 'Runtime.evaluate':
+            return {'result': {'value': 'https://www.amazon.com.mx/ap/signin'}}
+        return await send(method, params, target_id)
+    dom = DOMService(cdp_url='')
+    dom.allow_credential_reload = False
+    dom._session = _fake_webauthn_session(observed_send)
+    assert await dom.inject_passkeys([AMAZON_PASSKEY]) == 1
+    state.reset_environment('target-a')
+    assert await dom.inject_passkeys([AMAZON_PASSKEY]) == 1
+    assert not any((method == 'Page.navigate' for method, _ in state.calls)), 'background credential injection navigated the actor page'
+
+
 async def test_invalidate_preserves_advanced_signcounts_for_usage() -> None:
     """Invalidate must not erase an assertion that advanced signCount before remove."""
     from browser_tools.dom_service import DOMService
@@ -1672,6 +1913,29 @@ async def test_ceremony_capable_actions_arm_the_live_target_before_running() -> 
 async def run_all_tests():
     print("browser-credentials blackbox tests:")
     runner = BlackboxResult()
+    await runner.record_async("action_boundary_propagates_generation_cancellation", test_action_boundary_propagates_generation_cancellation)
+    await runner.record_async("deferred_passkey_injection_never_navigates", test_deferred_passkey_injection_never_navigates)
+    await runner.record_async("background_credentials_ignore_late_realm_and_session_results", test_background_credentials_ignore_late_realm_and_session_results)
+    await runner.record_async("background_credential_failure_is_safe_tool_state", test_background_credential_failure_is_safe_tool_state)
+    await runner.record_async("credential_cleanup_only_cancels_owned_work", test_credential_cleanup_only_cancels_owned_work)
+    runner.record("missing_credentials_do_not_become_literal_input", test_missing_credentials_do_not_become_literal_input)
+    await runner.record_async("credential_callbacks_do_not_wait_for_preparation", test_credential_callbacks_do_not_wait_for_preparation)
+    await runner.record_async("navigation_runs_while_handler_preparation_is_pending", test_navigation_runs_while_handler_preparation_is_pending)
+    await runner.record_async("goto_credential_summary_realm_fallback", test_goto_credential_summary_realm_fallback)
+    await runner.record_async("exact_neutral_inventory_has_no_auth_material_or_prompt", test_exact_neutral_inventory_has_no_auth_material_or_prompt)
+    await runner.record_async("neutral_hydration_rejects_missing_context_and_nonempty_inventory", test_neutral_hydration_rejects_missing_context_and_nonempty_inventory)
+    await runner.record_async(
+        "agent_browser_cannot_act_on_phone_provider_account_control_plane",
+        test_agent_browser_cannot_act_on_phone_provider_account_control_plane,
+    )
+    await runner.record_async(
+        "brokered_phone_lane_still_runs_on_the_phone_provider_page",
+        test_brokered_phone_lane_still_runs_on_the_phone_provider_page,
+    )
+    runner.record(
+        "phone_provider_account_boundary_covers_the_broker_api_origin",
+        test_phone_provider_account_boundary_covers_the_broker_api_origin,
+    )
     runner.record(
         "steel_cdp_key_is_materialized_only_at_connection_boundary",
         test_steel_cdp_key_is_materialized_only_at_connection_boundary,
@@ -2044,3 +2308,203 @@ async def test_phone_stream_long_progress_remains_incremental():
             assert "".join(r["delta"] for r in records) == "Progress. " * 10000
 
     await _capture_phone_stream(exercise)
+
+
+def _neutral_credential_payload():
+    return {"auth_realm": "", "auth_options": {'realm': '',
+             'steel_session': None,
+             'cookie_bundles': [],
+             'passwords': [],
+             'passkeys': [],
+             'email_otp': {'available': False,
+                           'connected_emails': [],
+                           'match_for_site_account': None},
+             'readable_identifiers': [],
+             'minted': None},
+            "passwords": [], "passkeys": [], "auth_credential_ref": None}
+
+
+async def test_exact_neutral_inventory_has_no_auth_material_or_prompt():
+    from domains.spawn_browser_agent_v3.credential_runtime import build_realm_credential_state
+    state = await build_realm_credential_state(_neutral_credential_payload(), decryption_key=None, target_url="about:blank")
+    assert state.auth_realm == "" and state.auth_options_section == ""
+    assert not state.password_secret_refs and not state.password_origins
+    assert not state.credential_refs_by_secret_ref and not state.decrypted_passkeys
+    assert not state.passkey_ref_by_credential_id and state.auth_credential_ref is None
+    assert not state.auth_runtime_state.password_ids and not state.auth_runtime_state.minted_present
+
+
+async def test_neutral_hydration_rejects_missing_context_and_nonempty_inventory():
+    import copy
+    from domains.spawn_browser_agent_v3.credential_runtime import build_realm_credential_state
+    for url in (None, "", "https://example.com", "file:///tmp/page", "about:blank#other"):
+        try:
+            await build_realm_credential_state(_neutral_credential_payload(), decryption_key=None, target_url=url)
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError(f"Accepted empty realm for {url!r}")
+    payload = _neutral_credential_payload()
+    mutations = [
+        {"passwords": [{"id": "password"}]}, {"passkeys": [{"id": "passkey"}]},
+        {"auth_credential_ref": {"kind": "cookie_bundle", "id": "cookie"}},
+        {"auth_options": {}}, {"auth_realm": None},
+    ]
+    for key, value in (("cookie_bundles", [{"id": "cookie"}]), ("passwords", [{"id": "password"}]),
+                       ("passkeys", [{"id": "passkey"}]), ("minted", {"email": "fixture@example.com"}),
+                       ("readable_identifiers", ["fixture@example.com"]), ("steel_session", {"id": "session"}),
+                       ("email_otp", {"available": True})):
+        changed = copy.deepcopy(payload["auth_options"])
+        changed[key] = value
+        mutations.append({"auth_options": changed})
+    for mutation in mutations:
+        changed = {**copy.deepcopy(payload), **mutation}
+        try:
+            await build_realm_credential_state(changed, decryption_key=None, target_url="about:blank")
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError(f"Accepted inconsistent neutral inventory: {mutation!r}")
+
+
+async def test_action_boundary_propagates_generation_cancellation():
+    import asyncio
+    from unittest.mock import patch
+    from temporalio.exceptions import CancelledError as TemporalCancelledError
+    from helpers.workflow_generation import WorkflowGenerationSealed
+    from browser_tools.dom_service import DOMService
+    from domains.spawn_browser_agent_v3 import service_actions
+
+    for stage in ("execute", "retention"):
+        errors = [WorkflowGenerationSealed("sealed"), TemporalCancelledError("cancelled"), asyncio.CancelledError()]
+        if stage == "execute":
+            errors.append(TimeoutError("timeout"))
+        for error in errors:
+            dom = DOMService("ws://fixture.invalid/never-connect")
+            execute = AsyncMock(side_effect=error) if stage == "execute" else AsyncMock(return_value={"success": True})
+            retain = AsyncMock(side_effect=error) if stage == "retention" else AsyncMock(side_effect=lambda _name, value, **kwargs: value)
+            with patch.object(service_actions, "_execute_resolved_action", execute), patch.object(service_actions, "prepare_browser_result", retain):
+                try:
+                    await service_actions.execute_action(dom, ActionHistory(), {"action": "wait", "params": {"time_ms": 1}})
+                except BaseException as observed:
+                    assert observed is error
+                else:
+                    raise AssertionError(f"{stage} swallowed {type(error).__name__}")
+            if stage == "execute":
+                retain.assert_not_awaited()
+            assert "WorkflowGenerationSealed" not in execute.call_args.kwargs
+            assert "TemporalCancelledError" not in execute.call_args.kwargs
+    with patch.object(service_actions, "_execute_resolved_action", AsyncMock(side_effect=ValueError("ordinary action failure"))), patch.object(service_actions, "prepare_browser_result", AsyncMock(side_effect=lambda _name, value, **kwargs: value)):
+        result = await service_actions.execute_action(DOMService("ws://fixture.invalid/never-connect"), ActionHistory(), {"action": "wait", "params": {"time_ms": 1}})
+    assert result["success"] is False and "ordinary action failure" in result["error"]
+class _UntouchableDomService:
+    """A DOM service that records every attribute the dispatcher reaches for.
+
+    The phone-provider account boundary must refuse before the browser is driven,
+    so a refused action leaves ``touched`` empty.
+    """
+
+    def __init__(self) -> None:
+        self.touched: list[str] = []
+
+    def __getattr__(self, name: str):
+        self.touched.append(name)
+        raise AttributeError(name)
+
+
+async def test_agent_browser_cannot_act_on_phone_provider_account_control_plane() -> None:
+    """Replay prod root 0b54f65d (2026-11-13 10:22Z): a browser agent carrying the
+    owner's synced phone-harness.com login typed a CLI device code and clicked
+    Approve, minting an off-Rose Phone Harness credential that then drove the
+    phone outside Rose's broker. The provider account belongs to Rose's phone
+    broker; an agent browser may observe that realm but never act on it."""
+    from domains.spawn_browser_agent_v3.service_actions import execute_action
+
+    incident_steps = [
+        ("https://accounts.phone-harness.com/device", {"action": "input_text", "params": {"index": 3, "text": "JLLQDKNZ"}}),
+        ("https://accounts.phone-harness.com/device", {"action": "click", "params": {"index": 7}}),
+        ("https://accounts.phone-harness.com/device?user_code=JLLQ-DKNZ", {"action": "press_key", "params": {"key": "Enter"}}),
+        ("https://phone-harness.com/dashboard", {"action": "evaluate", "params": {"code": "document.querySelector('button').click()"}}),
+        ("https://clerk.phone-harness.com/v1/client", {"action": "click", "params": {"x": 10, "y": 10}}),
+    ]
+    for current_url, action in incident_steps:
+        dom = _UntouchableDomService()
+        history = SimpleNamespace(record_action=AsyncMock(), last_action_step=lambda: None)
+        result = await execute_action(dom, history, action, current_url=current_url)
+        assert result.get("success") is False, (current_url, action, result)
+        assert result.get("code") == "phone_provider_account_boundary", (current_url, action, result)
+        assert dom.touched == [], (current_url, action["action"], dom.touched)
+
+    # Leaving (or reaching) that realm by navigation is decided before any credential prep.
+    for target in ("https://accounts.phone-harness.com/device", "https://phone-harness.com/dashboard", "phone-harness.com"):
+        for nav in ("goto", "open_new_tab"):
+            dom = _UntouchableDomService()
+            prepare = AsyncMock()
+            history = SimpleNamespace(record_action=AsyncMock(), last_action_step=lambda: None)
+            result = await execute_action(
+                dom, history, {"action": nav, "params": {"url": target}},
+                current_url="https://www.google.com/", prepare_credentials_for_url=prepare,
+            )
+            assert result.get("success") is False, (nav, target, result)
+            assert result.get("code") == "phone_provider_account_boundary", (nav, target, result)
+            prepare.assert_not_awaited()
+            assert dom.touched == [], (nav, target, dom.touched)
+
+    # Observation of the realm stays available, and look-alike hosts are untouched.
+    for current_url, action in (
+        ("https://accounts.phone-harness.com/device", {"action": "read_browser_state", "params": {}}),
+        ("https://notphone-harness.com/device", {"action": "click", "params": {"index": 7}}),
+        ("https://phone-harness.com.example.org/", {"action": "click", "params": {"index": 7}}),
+    ):
+        dom = _UntouchableDomService()
+        history = SimpleNamespace(record_action=AsyncMock(), last_action_step=lambda: None)
+        result = await execute_action(dom, history, action, current_url=current_url)
+        assert result.get("code") != "phone_provider_account_boundary", (current_url, result)
+        assert "unexpected keyword" not in str(result.get("error")), result
+        assert set(dom.touched) - {"register_secret_refs"}, (current_url, "an allowed action must reach the browser")
+
+
+async def test_brokered_phone_lane_still_runs_on_the_phone_provider_page() -> None:
+    """Prod root 0b54f65d's setup browser sat on https://phone-harness.com/ and ran 203
+    brokered ``phone`` actions plus reads. That lane goes through Rose's broker and
+    must keep working on the provider page while acting on the page is refused."""
+    import domains.spawn_browser_agent_v3.phone as phone_module
+    from domains.spawn_browser_agent_v3.service_actions import execute_action
+
+    calls: list[dict] = []
+
+    async def fake_execute_phone(params, **kwargs):
+        calls.append({"params": params, **kwargs})
+        return {"success": True, "operation": {"status": "SUCCEEDED"}}
+
+    original = phone_module.execute_phone
+    phone_module.execute_phone = fake_execute_phone
+    try:
+        for current_url in ("https://phone-harness.com/", "https://phone-harness.com/dashboard"):
+            dom = _UntouchableDomService()
+            history = SimpleNamespace(record_action=AsyncMock(), last_action_step=lambda: None)
+            result = await execute_action(
+                dom, history, {"action": "phone", "params": {"op": "screen.text"}},
+                current_url=current_url, user_id="user-1", agent_id="agent-1", browser_task_id="task-1",
+            )
+            assert result.get("success") is True, (current_url, result)
+            assert result.get("code") != "phone_provider_account_boundary", result
+            assert dom.touched == [], dom.touched
+    finally:
+        phone_module.execute_phone = original
+    assert [c["params"] for c in calls] == [{"op": "screen.text"}] * 2, calls
+    assert all(c["user_id"] == "user-1" and c["task_id"] == "task-1" for c in calls), calls
+
+
+def test_phone_provider_account_boundary_covers_the_broker_api_origin() -> None:
+    """The realm Rose refuses to agents is the one whose API key Rose's broker holds."""
+    import re
+    from pathlib import Path
+
+    from domains.spawn_browser_agent_v3.service_actions import phone_provider_account_realm
+
+    source = (Path(__file__).resolve().parents[3] / "back-end/src/providers/phoneHarness.ts").read_text()
+    origins = set(re.findall(r"'(https://[a-z0-9.-]+)'", source))
+    assert origins, "phone broker origin not found"
+    for origin in origins:
+        assert phone_provider_account_realm(origin) == "phone-harness.com", origin

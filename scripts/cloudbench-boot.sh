@@ -94,7 +94,7 @@ done
 # ambiguous during checkout: it means "not launched yet", not "driver died".
 # Relays and fleet collectors only treat the terminal `exited` state as proof
 # that waiting cannot succeed.
-rm -f "$DRIVER_PID_FILE" "$SHUTDOWN_REQUEST_FILE" "$CLEANUP_ACK_FILE" "$PRELAUNCH_SEAL_FILE"
+rm -f "$DRIVER_PID_FILE" "$SHUTDOWN_REQUEST_FILE" "$CLEANUP_ACK_FILE" "$PRELAUNCH_SEAL_FILE" "$DATA_DIR/cloudbench-prestack-${CLOUDBENCH_RUN_TOKEN:-boot}.sealed"
 publish_driver_state booting || exit 1
 
 # RUNSTAMP first — the controller polls the log for this token to confirm the box

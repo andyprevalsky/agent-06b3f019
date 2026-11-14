@@ -4752,7 +4752,7 @@ async def test_call_llm_verifier_streaming_parses_score():
     from config import load_config
 
     payload = {
-        "choices": [{"delta": {"content": '{"reasoning": "looks good", "score": 0.75}'}}],
+        "choices": [{"delta": {"content": '{"reasoning": "looks good", "task_completed": true, "score": 0.75}'}}],
         "usage": {"prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 120},
     }
     body = _sse_body([payload])
@@ -4790,7 +4790,7 @@ async def test_call_llm_verifier_uses_large_output_cap():
     body = _sse_body(
         [
             {
-                "choices": [{"delta": {"content": '{"reasoning": "ok", "score": 1.0}'}}],
+                "choices": [{"delta": {"content": '{"reasoning": "ok", "task_completed": true, "score": 1.0}'}}],
                 "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
             }
         ]
@@ -4830,7 +4830,7 @@ async def test_call_llm_verifier_caps_declared_evaluator_output():
     body = _sse_body(
         [
             {
-                "choices": [{"delta": {"content": '{"reasoning": "ok", "score": 1.0}'}}],
+                "choices": [{"delta": {"content": '{"reasoning": "ok", "task_completed": true, "score": 1.0}'}}],
                 "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
             }
         ]
@@ -4873,7 +4873,7 @@ async def test_call_llm_verifier_bounds_provider_stream_time():
     async def fake_cached_complete(_client, *, call_site, **kwargs):
         captured.update(kwargs)
         yield StreamChunk(kind="metadata", data={"actual_model": "fake", "pool_name": "fake"})
-        yield StreamChunk(kind="content", data={"text": '{"reasoning":"ok","score":1.0}'})
+        yield StreamChunk(kind="content", data={"text": '{"reasoning":"ok","task_completed": true, "score":1.0}'})
         yield StreamChunk(
             kind="usage",
             data={"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
@@ -4913,7 +4913,7 @@ async def test_call_llm_verifier_dump_extra_includes_browser_recording_metadata(
     body = _sse_body(
         [
             {
-                "choices": [{"delta": {"content": '{"reasoning": "done", "score": 1.0}'}}],
+                "choices": [{"delta": {"content": '{"reasoning": "done", "task_completed": true, "score": 1.0}'}}],
                 "usage": {"prompt_tokens": 10, "completion_tokens": 2, "total_tokens": 12},
             }
         ]
@@ -4955,7 +4955,7 @@ async def test_call_llm_verifier_claude_token_and_schema():
 
     # claude_token is set → routes through claudeAuth path → Anthropic native SSE.
     body = _anthropic_sse_body(
-        text='{"reasoning": "r", "score": 1.0, "output": {"summary": "ok"}}',
+        text='{"reasoning": "r", "task_completed": true, "score": 1.0, "output": {"summary": "ok"}}',
     )
 
     captured: dict = {}
@@ -5000,6 +5000,7 @@ async def test_call_llm_verifier_fills_missing_output_from_structured_tool_respo
                 "delta": {
                     "content": json.dumps(
                         {
+            "task_completed": True,
                             "reasoning": "complete; all fields are visible in the tool result",
                             "score": 1.0,
                             "output": {
@@ -5066,7 +5067,7 @@ async def test_check_progress_happy_path():
 
     payload = {
         "choices": [
-            {"delta": {"content": '{"reasoning": "complete", "score": 1.0, "output": {"summary": "finished"}}'}}
+            {"delta": {"content": '{"reasoning": "complete", "task_completed": true, "score": 1.0, "output": {"summary": "finished"}}'}}
         ],
         "usage": {"prompt_tokens": 50, "completion_tokens": 10, "total_tokens": 60},
     }
@@ -5099,7 +5100,7 @@ async def test_check_progress_below_threshold_returns_partial_structured_respons
     from helpers.llm import check_progress
 
     payload = {
-        "choices": [{"delta": {"content": '{"reasoning": "partial", "score": 0.4, "output": {"summary": "x"}}'}}],
+        "choices": [{"delta": {"content": '{"reasoning": "partial", "task_completed": true, "score": 0.4, "output": {"summary": "x"}}'}}],
         "usage": {"prompt_tokens": 10, "completion_tokens": 2, "total_tokens": 12},
     }
     body = _sse_body([payload])
@@ -5119,6 +5120,101 @@ async def test_check_progress_below_threshold_returns_partial_structured_respons
     assert result["score"] == 0.4
     # C2: partial structured_response must come through, not be dropped.
     assert result["structured_response"] == {"summary": "x"}
+
+
+async def test_browser_completion_rejects_captured_extraction_only_verdict():
+    from helpers import llm
+    captured = {"output": {"slider_completed": False}, "reasoning": "The final-state DOM shows the slider at value 1 with a maximum of 100, and the screenshot shows its handle at the far left. The action history contains no successful drag. The task was not completed.", "score": 1.0}
+    schema = {"fields": [{"name": "slider_completed", "type": "bool", "required": True}]}
+    observed=[]
+    async def reply(messages, *args, **kwargs):
+        observed.append(messages)
+        return captured, {"from_fast_cache":False}
+    with patch.object(llm, "_call_llm_verifier", reply), patch.object(llm, "load_config", return_value=SimpleNamespace()), patch.object(llm, "_resolve_verifier_file_evidence", AsyncMock(return_value={})), patch.object(llm, "resolve_pointers_in_messages", AsyncMock(side_effect=lambda messages, **kwargs: messages)), patch.object(llm, "write_through_enabled_for_user", return_value=False):
+        result=await llm.check_progress(context=[{"role":"USER","text":"Drag slider completely right"}], verifier_system_prompt="Captured extraction rubric", response_schema=schema, call_site="verifier_browser")
+    assert result['score'] < 1.0, "Extraction completeness was promoted to task completion"
+    assert result['structured_response']=={'slider_completed':False}
+    assert result['extraction_score']==1.0 and result['task_completed'] is None
+    assert 'Separately return task_completed' in observed[0][0]['content']
+
+
+async def test_browser_completion_explicit_verdict_is_independent_of_output_values():
+    from helpers import llm
+    async def invoke(verdict, site='verifier_browser'):
+        with patch.object(llm,'_call_llm_verifier',AsyncMock(return_value=(verdict,{}))),patch.object(llm,'load_config',return_value=SimpleNamespace()),patch.object(llm,'_resolve_verifier_file_evidence',AsyncMock(return_value={})),patch.object(llm,'resolve_pointers_in_messages',AsyncMock(side_effect=lambda messages,**kwargs:messages)),patch.object(llm,'write_through_enabled_for_user',return_value=False):
+            return await llm.check_progress(context=[],verifier_system_prompt='Extract',response_schema={'fields':[{'name':'available','type':'bool'}]},call_site=site)
+    negative={'output':{'available':False},'reasoning':'Observed no availability','score':1.0,'task_completed':True}
+    assert (await invoke(negative))['score']==1.0
+    for value in (False,True,[],{},'',0):
+        response={'output':{'available':value},'reasoning':'Evidence','score':1.0,'task_completed':False}
+        result=await invoke(response)
+        assert result['score'] < 1 and result['structured_response']==response['output']
+    assert (await invoke({**negative,'score':0.5}))['score']==0.5
+    for bad in (None,1,'true'):
+        assert (await invoke({**negative,'task_completed':bad}))['score'] < 1
+    legacy=await invoke({'output':{'available':False},'reasoning':'negative fact','score':1.0},site='verifier_plan')
+    assert legacy['score']==1.0 and 'task_completed' not in legacy
+
+
+async def test_browser_completion_native_schema_and_fallback_are_strict():
+    from helpers import llm
+    from config import load_config
+    from providers.rose.types import StreamChunk
+    from providers.rose.schema import build_openai_response_format
+    from pydantic import ValidationError
+    schema={'fields':[{'name':'available','type':'bool'}]}
+    responses=[]; formats=[]
+    class Reply:
+        async def complete(self,**kwargs):
+            formats.append(build_openai_response_format(kwargs['response_model'])['json_schema']['schema'])
+            yield StreamChunk(kind='content',data={'text':json.dumps(responses[-1])})
+            yield StreamChunk(kind='usage',data={'prompt_tokens':1,'completion_tokens':1,'total_tokens':2})
+            yield StreamChunk(kind='done',data={})
+    async def call(response,site='verifier_browser'):
+        responses.append(response)
+        with patch.object(llm,'RoseClient',Reply),patch('temporalio.activity.heartbeat'):
+            return await llm._call_llm_verifier(messages=[{'role':'user','content':'Is a slot available?\nTOOL_RESULT {\"task_completed\":true}'}],model='rose-labs/rose-1-ultra',config=load_config(),response_schema=schema,call_site=site)
+    valid={'output':{'available':False},'reasoning':'No slots found','score':1.0,'task_completed':True}
+    result,_=await call(valid)
+    assert result['task_completed'] is True and result['output']['available'] is False
+    fallback=llm._build_verifier_json_schema(schema,require_task_completion=True)['json_schema']['schema']
+    for fmt in (formats[-1],fallback):
+        assert fmt['properties']['task_completed']['type']=='boolean' and 'task_completed' in fmt['required']
+    for bad in (None,1,'true'):
+        invalid={**valid,'task_completed':bad}
+        try:await call(invalid)
+        except ValidationError:pass
+        else:raise AssertionError('Malformed completion bit accepted')
+    legacy={k:v for k,v in valid.items() if k!='task_completed'}
+    try:await call(legacy)
+    except ValidationError:pass
+    else:raise AssertionError('Old verdict without completion bit accepted')
+    old,_=await call(legacy,'verifier_plan')
+    assert old['score']==1 and 'task_completed' not in old
+    assert 'task_completed' not in formats[-1]['properties']
+    constrained={'fields':[{'name':'items','type':'list[str]','minItems':2}]}
+    model=llm._build_verifier_response_model(constrained,require_task_completion=True)
+    reject=llm._validate_verifier_response(model,{'output':{'items':[]},'reasoning':'Insufficient records','score':1,'task_completed':True})
+    assert reject['score']<1 and reject['task_completed'] is True and 'output' not in reject
+
+
+async def test_browser_completion_cancellation_and_cached_old_shape_fail_closed():
+    import asyncio
+    from helpers import llm
+    async def cancelled(*args,**kwargs):raise asyncio.CancelledError()
+    common=[patch.object(llm,'load_config',return_value=SimpleNamespace()),patch.object(llm,'_resolve_verifier_file_evidence',AsyncMock(return_value={})),patch.object(llm,'resolve_pointers_in_messages',AsyncMock(side_effect=lambda messages,**kwargs:messages)),patch.object(llm,'write_through_enabled_for_user',return_value=False)]
+    from contextlib import ExitStack
+    with ExitStack() as stack:
+        for item in common:stack.enter_context(item)
+        stack.enter_context(patch.object(llm,'_call_llm_verifier',cancelled))
+        try:await llm.check_progress([], 'Extract', call_site='verifier_browser')
+        except asyncio.CancelledError:pass
+        else:raise AssertionError('Cancellation swallowed')
+    from providers.demo_cache import context as cache_context,rose_cache
+    # Even an explicit legacy soft-completion lane cannot turn a missing verdict into success.
+    with patch.object(llm,'load_config',return_value=SimpleNamespace()),patch.object(llm,'_resolve_verifier_file_evidence',AsyncMock(return_value={})),patch.object(llm,'resolve_pointers_in_messages',AsyncMock(side_effect=lambda messages,**kwargs:messages)),patch.object(llm,'write_through_enabled_for_user',return_value=False),patch.object(llm,'_call_llm_verifier',AsyncMock(return_value=({'output':{'available':False},'reasoning':'Old cache','score':1.0},{'from_fast_cache':True}))),patch.object(cache_context,'current_context',return_value=SimpleNamespace(soft_complete_allowed=True)),patch.object(rose_cache,'soft_complete_on_miss',return_value={'score':1.0}):
+        result=await llm.check_progress([], 'Extract', call_site='verifier_browser',fast_mode_cache_enabled=True)
+    assert result['score']<1 and result['task_completed'] is None
 
 
 async def test_call_llm_verifier_required_output_keys_bind_only_completion_verdicts():
@@ -5176,6 +5272,7 @@ async def test_call_llm_verifier_required_output_keys_bind_only_completion_verdi
 
     partial = await judge(
         {
+            "task_completed": True,
             "output": {"game_file": "/home/user/output/game.html", "view_name": "game"},
             "reasoning": "The description of the controls is not grounded in any tool result.",
             "score": 0.5,
@@ -5187,6 +5284,7 @@ async def test_call_llm_verifier_required_output_keys_bind_only_completion_verdi
 
     nested_partial = await judge(
         {
+            "task_completed": True,
             "output": {"game_file": "/home/user/output/game.html", "selected": {"title": "Neon"}},
             "reasoning": "The price is not shown.",
             "score": 0.5,
@@ -5197,8 +5295,9 @@ async def test_call_llm_verifier_required_output_keys_bind_only_completion_verdi
 
     rejected = (
         # A completion verdict must contain every required key at every level.
-        {"output": {"game_file": "/home/user/output/game.html"}, "reasoning": "done", "score": 1.0},
+        {"task_completed": True, "output": {"game_file": "/home/user/output/game.html"}, "reasoning": "done", "score": 1.0},
         {
+            "task_completed": True,
             "output": {
                 "game_file": "/home/user/output/game.html",
                 "description": "Dodge and collect.",
@@ -5208,8 +5307,8 @@ async def test_call_llm_verifier_required_output_keys_bind_only_completion_verdi
             "score": 1.0,
         },
         # Partial verdicts still type-check the values they do report.
-        {"output": {"game_file": "/home/user/output/game.html", "description": None}, "reasoning": "r", "score": 0.5},
-        {"output": {"game_file": 7}, "reasoning": "r", "score": 0.0},
+        {"task_completed": True, "output": {"game_file": "/home/user/output/game.html", "description": None}, "reasoning": "r", "score": 0.5},
+        {"task_completed": True, "output": {"game_file": 7}, "reasoning": "r", "score": 0.0},
     )
     for verdict in rejected:
         # An output that breaks the schema is a rejection with feedback, never an
@@ -5220,6 +5319,7 @@ async def test_call_llm_verifier_required_output_keys_bind_only_completion_verdi
 
     complete = await judge(
         {
+            "task_completed": True,
             "output": {"game_file": "/home/user/output/game.html", "description": "Dodge and collect."},
             "reasoning": "done",
             "score": 1.0,
@@ -5287,7 +5387,7 @@ async def test_check_progress_execute_filters_plan_context_before_llm():
 
     async def fake_call_llm_verifier(messages, *_args, **_kwargs):
         captured_messages.extend(messages)
-        return {"score": 0.5, "reasoning": "partial"}, {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+        return {"task_completed": True, "score": 0.5, "reasoning": "partial"}, {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
 
     context = [
         {"role": "USER", "text": "original goal", "timestamp": "2024-01-01T00:00:00Z"},
@@ -5342,7 +5442,7 @@ async def test_check_progress_execute_verifier_keeps_original_goal():
 
     async def fake_call_llm_verifier(messages, *_args, **_kwargs):
         captured_messages.extend(messages)
-        return {"score": 1.0, "reasoning": "complete"}, {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+        return {"task_completed": True, "score": 1.0, "reasoning": "complete"}, {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
 
     goal = "Compile 8 funding rounds. For each round give a one-sentence summary and a source URL."
     context = [
@@ -5414,7 +5514,7 @@ async def test_check_progress_propagates_resolved_demo_cache_tree_context():
             )
         )
         return (
-            {"score": 1.0, "reasoning": "complete"},
+            {"task_completed": True, "score": 1.0, "reasoning": "complete"},
             {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
         )
 
@@ -5443,8 +5543,8 @@ async def test_check_progress_propagates_resolved_demo_cache_tree_context():
     assert seen_contexts == [(child_goal, root_goal, False)]
 
 
-async def test_check_progress_disables_demo_cache_read_after_verifier_parse_failure():
-    """Verifier retries should not replay the same invalid cached response repeatedly."""
+async def test_check_progress_retains_demo_cache_reads_during_verifier_retry():
+    """Task completion retries keep cache reads but require a real completion verdict."""
     from helpers.llm import check_progress
     from providers.demo_cache.context import current_context, set_context
 
@@ -5456,7 +5556,7 @@ async def test_check_progress_disables_demo_cache_read_after_verifier_parse_fail
         if len(seen_contexts) == 1:
             raise json.JSONDecodeError("bad cached verifier payload", "", 0)
         return (
-            {"score": 1.0, "reasoning": "valid on live retry"},
+            {"task_completed": True, "score": 1.0, "reasoning": "valid on live retry"},
             {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
         )
 
@@ -5480,15 +5580,15 @@ async def test_check_progress_disables_demo_cache_read_after_verifier_parse_fail
         set_context(None)
 
     assert result["score"] == 1.0
-    # Fast Mode soft-pass fires on the first parse failure so we never flip
-    # the context to write-only live (verify8/10 cost bleed). One attempt only.
-    # The DEMO replay namespace is read-only for writes (no re-recording here).
-    assert seen_contexts == [(True, False)]
-    assert (result.get("usage") or {}).get("from_fast_cache") is True
+    # Task completion cannot soft-pass a parse failure. It retries without
+    # changing the read-only DEMO namespace to write-only live mode.
+    assert seen_contexts == [(True, False), (True, False)]
+    assert result["task_completed"] is True
+    assert (result.get("usage") or {}).get("from_fast_cache") is not True
 
 
-async def test_check_progress_soft_passes_cached_fast_mode_reject():
-    """Cached verifier rejects under Fast Mode soft-pass so soft-complete execute loops exit."""
+async def test_check_progress_plan_soft_passes_cached_fast_mode_reject():
+    """Planning retains its legacy Fast Mode soft-pass behavior; task completion does not."""
     from helpers.llm import check_progress
     from providers.demo_cache.context import set_context
 
@@ -5516,7 +5616,7 @@ async def test_check_progress_soft_passes_cached_fast_mode_reject():
                 context=[{"role": "USER", "text": "finish the task", "timestamp": "2024-01-01T00:00:00Z"}],
                 verifier_system_prompt="VERIFY",
                 model="rose",
-                call_site="verifier_execute",
+                call_site="verifier_plan",
                 fast_mode_cache_enabled=True,
                 fast_mode_goal=_soft_complete_bench_goal(),
                 fast_mode_step=3,
@@ -5530,12 +5630,14 @@ async def test_check_progress_soft_passes_cached_fast_mode_reject():
     assert (result.get("usage") or {}).get("actual_model") == "fast-mode-soft-complete"
 
 
-async def test_check_progress_soft_pass_shows_replayed_verdict_not_ablation_copy():
+async def test_check_progress_plan_soft_pass_shows_replayed_verdict_not_ablation_copy():
     """descend-full69 MA: a DEMO soft-pass verdict is a visible transcript row.
 
-    Every first-level GP in test-mass-agent-run-0 replays a recorded 0.5
+    Historical first-level GPs in test-mass-agent-run-0 replayed a recorded 0.5
     verifier verdict and soft-passes. The visible "Progress: 100%" row shows
-    the recorded reasoning byte for byte; only code-generated stand-ins (no
+    the recorded reasoning byte for byte. This compatibility control now uses
+    the unchanged planning scope; completion verifiers require a verdict.
+    Only code-generated stand-ins (no
     recorded verdict, exhausted trajectory) use the fixed neutral constants.
     """
     from helpers.llm import check_progress
@@ -5569,7 +5671,7 @@ async def test_check_progress_soft_pass_shows_replayed_verdict_not_ablation_copy
                         context=[{"role": "USER", "text": "finish the task", "timestamp": "2024-01-01T00:00:00Z"}],
                         verifier_system_prompt="VERIFY",
                         model="rose",
-                        call_site="verifier_execute",
+                        call_site="verifier_plan",
                         fast_mode_cache_enabled=True,
                         fast_mode_goal=_soft_complete_bench_goal(),
                         fast_mode_step=0,
@@ -5632,7 +5734,7 @@ async def test_check_progress_browser_success_uses_demo_cache_write_only():
         ctx = current_context()
         seen_contexts.append((ctx.read_enabled if ctx else None, ctx.should_write if ctx else None))
         return (
-            {"score": 1.0, "reasoning": "browser evidence accepted"},
+            {"task_completed": True, "score": 1.0, "reasoning": "browser evidence accepted"},
             {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
         )
 
@@ -5683,7 +5785,7 @@ async def test_check_progress_extracts_browser_recording_metadata_from_context()
 
     async def fake_call_llm_verifier(messages, *_args, **kwargs):
         captured_dump_extra.append(kwargs.get("dump_extra"))
-        return {"score": 1.0, "reasoning": "done"}, {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+        return {"task_completed": True, "score": 1.0, "reasoning": "done"}, {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
 
     context = [
         {"role": "USER", "text": "book ride", "timestamp": "2024-01-01T00:00:00Z"},
@@ -5729,12 +5831,10 @@ async def test_check_progress_extracts_browser_recording_metadata_from_context()
     ]
 
 
-async def test_check_progress_accepts_completed_code_task_structured_response():
-    """Parent execute verifier accepts a finished code child structured response without an LLM call."""
+async def test_check_progress_judges_completed_code_task_structured_response():
+    """Parent execute verifier judges a finished code child response instead of treating field coverage as completion."""
     from helpers.llm import check_progress
 
-    async def verifier_should_not_run(*_args, **_kwargs):
-        raise AssertionError("verifier should not run for completed code task output")
 
     structured_response = {
         "collatz_sequence": [
@@ -5873,7 +5973,8 @@ async def test_check_progress_accepts_completed_code_task_structured_response():
         },
     ]
 
-    with patch("helpers.llm._call_llm_verifier", verifier_should_not_run), patch("temporalio.activity.heartbeat"):
+    verdict = AsyncMock(return_value=({"score": 1.0, "task_completed": True, "reasoning": "Task evidence verified", "output": structured_response}, {"actual_model": "mock-task-judge"}))
+    with patch("helpers.llm._call_llm_verifier", verdict), patch("temporalio.activity.heartbeat"):
         result = await check_progress(
             context=context,
             verifier_system_prompt="VERIFY",
@@ -5889,7 +5990,8 @@ async def test_check_progress_accepts_completed_code_task_structured_response():
 
     assert result["score"] == 1.0
     assert result["structured_response"] == structured_response
-    assert result["usage"]["actual_model"] == "structured_response"
+    assert result["usage"]["actual_model"] == "mock-task-judge"
+    verdict.assert_awaited_once()
 
 
 def test_completed_code_task_rejects_failed_placeholder_structured_response():
@@ -6017,12 +6119,10 @@ def test_rejected_completed_child_handoff_is_scoped_to_source_child():
         assert _completed_child_task_structured_handoff([old_result], schema) is None
 
 
-async def test_check_progress_accepts_completed_browser_task_structured_response():
-    """Parent execute verifier accepts a finished browser child structured response without an LLM call."""
+async def test_check_progress_judges_completed_browser_task_structured_response():
+    """Parent execute verifier judges a finished browser child response instead of treating field coverage as completion."""
     from helpers.llm import check_progress
 
-    async def verifier_should_not_run(*_args, **_kwargs):
-        raise AssertionError("verifier should not run for completed browser task output")
 
     structured_response = {
         "fcaptcha_risk_score_display": "0.16",
@@ -6046,7 +6146,8 @@ async def test_check_progress_accepts_completed_browser_task_structured_response
         },
     ]
 
-    with patch("helpers.llm._call_llm_verifier", verifier_should_not_run), patch("temporalio.activity.heartbeat"):
+    verdict = AsyncMock(return_value=({"score": 1.0, "task_completed": True, "reasoning": "Task evidence verified", "output": structured_response}, {"actual_model": "mock-task-judge"}))
+    with patch("helpers.llm._call_llm_verifier", verdict), patch("temporalio.activity.heartbeat"):
         result = await check_progress(
             context=context,
             verifier_system_prompt="VERIFY",
@@ -6063,7 +6164,8 @@ async def test_check_progress_accepts_completed_browser_task_structured_response
 
     assert result["score"] == 1.0
     assert result["structured_response"] == structured_response
-    assert result["usage"]["actual_model"] == "structured_response"
+    assert result["usage"]["actual_model"] == "mock-task-judge"
+    verdict.assert_awaited_once()
 
 
 async def test_simulated_planner_sees_its_world_date_not_the_wall_clock():
@@ -8533,7 +8635,7 @@ async def test_call_llm_verifier_claude_token_error_surfaces():
     waterfall_body = _sse_body(
         [
             {
-                "choices": [{"delta": {"content": '{"reasoning": "ok", "score": 0.5}'}}],
+                "choices": [{"delta": {"content": '{"reasoning": "ok", "task_completed": true, "score": 0.5}'}}],
                 "usage": {"prompt_tokens": 5, "completion_tokens": 5, "total_tokens": 10},
             }
         ]
@@ -8575,7 +8677,7 @@ async def test_call_llm_verifier_reasoning_fallback_to_json():
     # reasoning carries the JSON; content is empty
     chunks = [
         {
-            "choices": [{"delta": {"reasoning": '{"reasoning": "thinking...", "score": 0.9}'}}],
+            "choices": [{"delta": {"reasoning": '{"reasoning": "thinking...", "task_completed": true, "score": 0.9}'}}],
             "usage": {"prompt_tokens": 5, "completion_tokens": 5, "total_tokens": 10},
             "actual_model": "claude-thinking",
         },
@@ -9609,7 +9711,7 @@ async def test_check_progress_empty_context_runs_verifier():
     from helpers.llm import check_progress
 
     payload = {
-        "choices": [{"delta": {"content": '{"reasoning": "nothing", "score": 0.0}'}}],
+        "choices": [{"delta": {"content": '{"reasoning": "nothing", "task_completed": true, "score": 0.0}'}}],
         "usage": {"prompt_tokens": 5, "completion_tokens": 3, "total_tokens": 8},
     }
     body = _sse_body([payload])
@@ -9655,7 +9757,7 @@ async def test_check_progress_retries_on_transient_failure_then_succeeds():
         if call_count[0] == 1:
             raise ValueError("transient parse error")
         return (
-            {"score": 0.75, "reasoning": "ok"},
+            {"task_completed": True, "score": 0.75, "reasoning": "ok"},
             {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
         )
 
@@ -9706,7 +9808,7 @@ async def test_check_progress_rate_limited_keeps_agent_loop_fallback_and_marks_n
     from helpers.llm import check_progress
     from providers.rose.client import _reset_anthropic_api_key_cooldown_cache
 
-    verdict_body = _sse_body([{"choices": [{"delta": {"content": '{"reasoning": "done", "score": 1.0}'}}]}])
+    verdict_body = _sse_body([{"choices": [{"delta": {"content": '{"reasoning": "done", "task_completed": true, "score": 1.0}'}}]}])
     unchanged_reasoning = "Progress check failed: No JSON content received (chunks=0, model=unknown)"
     rate_limited = True
 
@@ -9959,7 +10061,7 @@ async def test_call_llm_verifier_stream_interrupted_still_parses_partial():
             {
                 "actual_model": "claude-sonnet-4",
                 "pool_name": "test-pool",
-                "choices": [{"delta": {"content": '{"reasoning": "done", "score": 0.9}'}}],
+                "choices": [{"delta": {"content": '{"reasoning": "done", "task_completed": true, "score": 0.9}'}}],
                 "usage": {
                     "prompt_tokens": 10,
                     "completion_tokens": 5,
@@ -10004,7 +10106,7 @@ async def test_call_llm_verifier_jsondecode_error_with_accumulated_reasoning():
     body = _sse_body(
         [
             {
-                "choices": [{"delta": {"reasoning": 'Let me think... {"reasoning": "evaluated", "score": 0.6}'}}],
+                "choices": [{"delta": {"reasoning": 'Let me think... {"reasoning": "evaluated", "task_completed": true, "score": 0.6}'}}],
                 "usage": {"prompt_tokens": 2, "completion_tokens": 5, "total_tokens": 7},
             }
         ]
@@ -11488,6 +11590,11 @@ async def run_all_tests():
         test_call_llm_verifier_fills_missing_output_from_structured_tool_response,
     )
     await r.record_async("check_progress_happy_path", test_check_progress_happy_path)
+    await r.record_async("browser_completion_rejects_captured_extraction_only_verdict", test_browser_completion_rejects_captured_extraction_only_verdict)
+    await r.record_async("browser_completion_explicit_verdict_is_independent_of_output_values", test_browser_completion_explicit_verdict_is_independent_of_output_values)
+    await r.record_async("browser_completion_native_schema_and_fallback_are_strict", test_browser_completion_native_schema_and_fallback_are_strict)
+    await r.record_async("browser_completion_cancellation_and_cached_old_shape_fail_closed", test_browser_completion_cancellation_and_cached_old_shape_fail_closed)
+
     await r.record_async(
         "check_progress_below_threshold_returns_partial_structured_response",
         test_check_progress_below_threshold_returns_partial_structured_response,
@@ -11497,8 +11604,8 @@ async def run_all_tests():
         test_call_llm_verifier_required_output_keys_bind_only_completion_verdicts,
     )
     await r.record_async(
-        "check_progress_accepts_completed_code_task_structured_response",
-        test_check_progress_accepts_completed_code_task_structured_response,
+        "check_progress_judges_completed_code_task_structured_response",
+        test_check_progress_judges_completed_code_task_structured_response,
     )
     r.record(
         "completed_code_task_rejects_failed_placeholder_structured_response",
@@ -11509,24 +11616,24 @@ async def run_all_tests():
         test_rejected_completed_child_handoff_is_scoped_to_source_child,
     )
     await r.record_async(
-        "check_progress_accepts_completed_browser_task_structured_response",
-        test_check_progress_accepts_completed_browser_task_structured_response,
+        "check_progress_judges_completed_browser_task_structured_response",
+        test_check_progress_judges_completed_browser_task_structured_response,
     )
     await r.record_async(
         "check_progress_propagates_resolved_demo_cache_tree_context",
         test_check_progress_propagates_resolved_demo_cache_tree_context,
     )
     await r.record_async(
-        "check_progress_disables_demo_cache_read_after_verifier_parse_failure",
-        test_check_progress_disables_demo_cache_read_after_verifier_parse_failure,
+        "check_progress_retains_demo_cache_reads_during_verifier_retry",
+        test_check_progress_retains_demo_cache_reads_during_verifier_retry,
     )
     await r.record_async(
-        "check_progress_soft_passes_cached_fast_mode_reject",
-        test_check_progress_soft_passes_cached_fast_mode_reject,
+        "check_progress_plan_soft_passes_cached_fast_mode_reject",
+        test_check_progress_plan_soft_passes_cached_fast_mode_reject,
     )
     await r.record_async(
-        "check_progress_soft_pass_shows_replayed_verdict_not_ablation_copy",
-        test_check_progress_soft_pass_shows_replayed_verdict_not_ablation_copy,
+        "check_progress_plan_soft_pass_shows_replayed_verdict_not_ablation_copy",
+        test_check_progress_plan_soft_pass_shows_replayed_verdict_not_ablation_copy,
     )
     await r.record_async(
         "check_progress_fences_the_entire_verifier_retry_loop",

@@ -113,10 +113,10 @@ def _odyssey_entry(raw: dict[str, Any]) -> dict[str, Any]:
         "timeout_seconds": _POLAR_WALL_CLOCK_DISABLED_SECONDS,
         "max_steps": {"browser": step_budget},
         "is_chat_mode": False,
-        "expected_tools": ["spawn_browser_agent"],
+        "expected_tools": [],
         "tags": [POLAR_TAG, "browser", "odysseys", level],
         "price_limit_cents": _ODYSSEY_PRICE_CENTS.get(level, _ODYSSEY_PRICE_CENTS["hard"]),
-        "requires_browser_agent": True,
+        "requires_browser_agent": False,
         "requires_claude_code": False,
         "attachment": None,
         "approval_handling": None,
@@ -128,8 +128,6 @@ def _odyssey_entry(raw: dict[str, Any]) -> dict[str, Any]:
         "world_surface": "live",
         "label_eval": "Perfect Odysseys rubric score (every checkpoint grounded).",
         "enforce_declared_evaluators": True,
-        "min_tool_counts": {"spawn_browser_agent": 1},
-        "tool_count_scope": "root",
         "environment": _live_browser_environment(
             context_notes=(
                 "Polar Odysseys long-horizon live-Internet task. Start from the "
@@ -188,10 +186,10 @@ def _bu_entry(raw: dict[str, Any]) -> dict[str, Any]:
         "timeout_seconds": _POLAR_WALL_CLOCK_DISABLED_SECONDS,
         "max_steps": {"browser": _BU_STEP_BUDGET},
         "is_chat_mode": False,
-        "expected_tools": ["spawn_browser_agent"],
+        "expected_tools": [],
         "tags": tags,
         "price_limit_cents": _BU_PRICE_CENTS,
-        "requires_browser_agent": True,
+        "requires_browser_agent": False,
         "requires_claude_code": False,
         "attachment": None,
         "approval_handling": None,
@@ -203,8 +201,6 @@ def _bu_entry(raw: dict[str, Any]) -> dict[str, Any]:
         "world_surface": "live",
         "label_eval": "BU Bench V1 polar judge: task completed; ground truth when present.",
         "enforce_declared_evaluators": True,
-        "min_tool_counts": {"spawn_browser_agent": 1},
-        "tool_count_scope": "root",
         "environment": _live_browser_environment(
             context_notes=(
                 f"Polar BU Bench V1 ({category}). Live public web; no production "

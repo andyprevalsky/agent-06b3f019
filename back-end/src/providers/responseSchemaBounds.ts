@@ -1,3 +1,5 @@
+import { z } from 'zod';
+
 export type FieldConstraints = {
   minItems?: number;
   maxItems?: number;
@@ -44,4 +46,23 @@ export function boundsFromEntries(
     throw new Error('minLength must be <= maxLength');
   }
   return bounds;
+}
+
+export const GeneratedBoundSchema = z.object({
+  kind: z.enum(['minItems', 'maxItems', 'minLength', 'maxLength']),
+  value: z.number().int().min(0),
+});
+
+export function validateFieldConstraints(
+  field: { type: string; constraints?: z.infer<typeof GeneratedBoundSchema>[] },
+  ctx: z.RefinementCtx
+): void {
+  try {
+    boundsFromEntries(field.type, field.constraints);
+  } catch (error) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: error instanceof Error ? error.message : String(error),
+    });
+  }
 }

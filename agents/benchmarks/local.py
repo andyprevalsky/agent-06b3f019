@@ -72,8 +72,12 @@ def apply_owned_wmh_recording(
     fixture_database: str | Callable[[], str],
 ) -> bool:
     """Admit explicitly selected recording only into its retained owned cache."""
+    if isolated and (env.get("WMH_OWNED_RECORDING_CACHE_MANIFEST") or env.get("WMH_OWNED_RECORDING_CACHE_DATABASE_URL")):
+        current, legacy = env.get("DEMO_CACHE_RECORD_DEMO"), env.get("FAST_MODE_CACHE_RECORD_DEMO")
+        if current is not None and legacy is not None and current != legacy:
+            raise ValueError("Conflicting DEMO recording aliases")
     recording = env.get("FAST_MODE_CACHE_RECORD_DEMO", env.get("DEMO_CACHE_RECORD_DEMO", "")).strip().lower()
-    if not (isolated and simulate and recording in {"1", "true", "yes", "on"}):
+    if not (isolated and recording in {"1", "true", "yes", "on"}):
         return False
     if not tasks or not all(getattr(task, "demo_cache", None) == "on" for task in tasks):
         return False
@@ -83,31 +87,18 @@ def apply_owned_wmh_recording(
         return False
     if not manifest_path:
         raise ValueError("Selected isolated WMH recording requires a retained owned cache manifest")
-    manifest_file = Path(manifest_path)
-    if manifest_file.is_symlink() or not manifest_file.is_file():
-        raise ValueError("Owned recording manifest must be a regular private file")
-    manifest = json.loads(manifest_file.read_text())
-    url = env.get("WMH_OWNED_RECORDING_CACHE_DATABASE_URL", "")
-    parsed = urlsplit(url)
-    database = parsed.path.removeprefix("/")
+    from providers.demo_cache.context import validate_owned_recording
+
     fixture_database = fixture_database() if callable(fixture_database) else fixture_database
-    owned = (
-        parsed.scheme in {"postgres", "postgresql"}
-        and parsed.hostname in {"localhost", "127.0.0.1", "::1"}
-        and database.startswith("victoria_wmh_recording_")
-        and database != fixture_database
-        and manifest.get("checkout") == str(REPO_ROOT.resolve())
-        and manifest.get("owner_workspace") == workspace
-        and manifest.get("database") == database
-        and manifest.get("host") == parsed.hostname
-        and manifest.get("url_sha256") == hashlib.sha256(url.encode()).hexdigest()
-        and manifest.get("retained_across_iterations") is True
-    )
-    if not owned:
-        raise ValueError("WMH recording cache must be a retained loopback owner separate from the fixture")
-    env["FAST_MODE_CACHE_DATABASE_URL"] = url
+    validate_owned_recording(env, checkout=str(REPO_ROOT.resolve()), workspace=workspace, fixture_database=fixture_database)
+    mode = "simulate" if simulate else "real"
+    if env.get("BENCHMARK_WORLD_MODEL_MODE", mode) != mode:
+        raise ValueError("Owned recording world mode conflicts with the selected run mode")
+    env["BENCHMARK_WORLD_MODEL_MODE"] = mode
+    for prefix in ("DEMO_CACHE_", "FAST_MODE_CACHE_"):
+        env[prefix + "DATABASE_URL"] = retained_url
+        env[prefix + "DISABLE_WRITE_THROUGH"] = "0"
     _pop_demo_cache_env(env, "USE_LOCAL")
-    env["FAST_MODE_CACHE_DISABLE_WRITE_THROUGH"] = "0"
     return True
 
 
@@ -405,6 +396,7 @@ class LocalBenchmarkOwner:
         self.receipt = stack.context_dir / "benchmark-cleanup.status"
         self.deadline: float | None = None
         self.shutdown_timeout = _owned_shutdown_timeout()
+        self.preparation_deadline: float | None = None
 
     def environment(self, env: dict[str, str]) -> dict[str, str]:
         if self.signum is not None:
@@ -468,6 +460,8 @@ class LocalBenchmarkOwner:
         with selectors.DefaultSelector() as selector:
             selector.register(self.process.stdout, selectors.EVENT_READ)
             while True:
+                if self.preparation_deadline is not None and time.monotonic() >= self.preparation_deadline and self.signum is None:
+                    self.interrupt(signal.SIGTERM)
                 if self.deadline is not None and time.monotonic() >= self.deadline:
                     self.record("failed_retained")
                     raise RuntimeError("benchmark cleanup deadline expired; owned stack retained")
@@ -490,6 +484,8 @@ class LocalBenchmarkOwner:
         # EOF can precede process exit. Keep observing a deadline armed by a
         # later signal instead of entering an unbounded wait at that boundary.
         while self.process.poll() is None:
+            if self.preparation_deadline is not None and time.monotonic() >= self.preparation_deadline and self.signum is None:
+                self.interrupt(signal.SIGTERM)
             if self.deadline is not None and time.monotonic() >= self.deadline:
                 self.record("failed_retained")
                 raise RuntimeError("benchmark cleanup deadline expired; owned stack retained")
@@ -2738,7 +2734,14 @@ def run_benchmark_invocation(
     wmh_initial_state_file: str | None = None,
     timeout_seconds: int | None = None,
     owner: LocalBenchmarkOwner | None = None,
+    preparation_seconds: int | None = None,
+    preparation_price_limit_cents: int | None = None,
 ) -> Path:
+    if preparation_price_limit_cents is not None and (
+        preparation_seconds is None or type(preparation_price_limit_cents) is not int
+        or not 1 <= preparation_price_limit_cents <= 1000
+    ):
+        raise ValueError("Preparation price requires explicit preparation mode and an integer 1..1000 cents")
     started = time.time()
     command = build_benchmark_args(
         invocation.tasks,
@@ -2752,9 +2755,27 @@ def run_benchmark_invocation(
         wmh_initial_state_file=wmh_initial_state_file,
         timeout_seconds=timeout_seconds,
     )
+    preparation_out = None
+    if preparation_seconds is not None:
+        if owner is None or not owner.stack.isolated:
+            raise ValueError("Preparation requires an isolated native owner")
+        preparation_out = owner.stack.context_dir / "recording-preparation.json"
+        command.extend(["--owned-recording-preparation-seconds", str(preparation_seconds),
+                        "--owned-recording-preparation-out", str(preparation_out)])
+        if preparation_price_limit_cents is not None:
+            command.extend(["--owned-recording-preparation-price-limit-cents", str(preparation_price_limit_cents)])
+        owner.preparation_deadline = time.monotonic() + preparation_seconds
     print(f"\n== Running {invocation.label}: {', '.join(invocation.tasks)}")
     print("$ " + " ".join(command))
     env = benchmark_runner_env()
+    if preparation_seconds is not None:
+        if not apply_owned_wmh_recording(
+            env, isolated=owner.stack.isolated, simulate=False,
+            tasks=[get_task_by_name(name) for name in invocation.tasks],
+            workspace=owner.stack.workspace_name,
+            fixture_database=urlsplit(env.get("DATABASE_URL", "")).path.removeprefix("/"),
+        ):
+            raise ValueError("Preparation child lacks a validated owned recording environment")
     if owner is not None:
         env = owner.environment(env)
     process = subprocess.Popen(
@@ -2792,6 +2813,15 @@ def run_benchmark_invocation(
         finally:
             _ACTIVE_CHILD_PROCESSES.discard(process)
         output = "".join(output_lines)
+    if preparation_out is not None:
+        if not preparation_out.is_file():
+            raise RuntimeError(f"Preparation produced no receipt (exit {code})")
+        receipt = json.loads(preparation_out.read_text())
+        if receipt.get("mode") != "UNSCORED_RECORDING_PREPARATION" or receipt.get("qualification") != "NOT_VALIDATION":
+            raise RuntimeError("Invalid preparation receipt; refusing benchmark credit")
+        if code != 0:
+            raise RuntimeError(f"Preparation failed with exit {code}; evidence: {preparation_out}")
+        return preparation_out
     result_path = extract_results_path(output)
     if result_path is None:
         latest = latest_result_file(started)
@@ -2807,6 +2837,29 @@ def run_benchmark_invocation(
             raise RuntimeError(f"Benchmark invocation failed with exit code {code}; result: {result_path}")
         print(f"Benchmark tasks failed with exit code {code}; collecting diagnostics from: {result_path}")
     return result_path
+
+
+def validate_owned_preparation_options(args, selected_tasks: Sequence[str]) -> None:
+    seconds = getattr(args, "owned_recording_preparation_seconds", None)
+    price = getattr(args, "owned_recording_preparation_price_limit_cents", None)
+    if price is not None and (seconds is None or type(price) is not int or not 1 <= price <= 1000):
+        raise ValueError("Preparation price requires explicit preparation mode and an integer 1..1000 cents")
+    if seconds is None:
+        return
+    if isinstance(seconds, bool) or not isinstance(seconds, int) or not 1 <= seconds <= 3600:
+        raise ValueError("Preparation budget must be 1..3600 seconds")
+    if len(selected_tasks) != 1:
+        raise ValueError("Preparation requires exactly one task")
+    task = get_task_by_name(selected_tasks[0])
+    if task.demo_cache != "on" or task.runner != "agent":
+        raise ValueError("Preparation requires an existing demo-cache agent task")
+    if any(getattr(args, name, False) for name in (
+        "simulate", "shared_stack", "use_existing", "eval_suite", "anon", "checkpoint_start_agent_id",
+        "checkpoint_source_json", "checkpoint_tree_json", "checkpoint_no_start", "wmh_initial_state_file",
+    )) or getattr(args, "checkpoint", None) is not None or getattr(args, "timeout_seconds", None) is not None:
+        raise ValueError("Preparation requires a new isolated REAL stack and unchanged task options")
+    if resolve_simulate_mode(False, selected_tasks):
+        raise ValueError("Preparation requires a REAL task")
 
 
 def wmh_model_prebuilt(env: dict[str, str] | None = None) -> bool:
@@ -3061,6 +3114,10 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
         type=int,
         help="Number of pre-checkpoint messages when starting an existing checkpoint without a manifest",
     )
+    parser.add_argument("--owned-recording-preparation-seconds", type=int, default=None,
+                        help="UNSCORED local REAL recording preparation, 1..3600s; never validation")
+    parser.add_argument("--owned-recording-preparation-price-limit-cents", type=int, default=None,
+                        help="Optional owned-preparation user-charge threshold, 1..1000 cents; never validation")
     parser.add_argument("--checkpoint-timeout-seconds", type=int, default=900, help="Checkpoint poll timeout")
     parser.add_argument(
         "--checkpoint-price-limit-cents",
@@ -3164,6 +3221,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         finally:
             os.close(world_ready_fd)
     selected_tasks = tasks_from_args(args)
+    validate_owned_preparation_options(args, selected_tasks)
     if getattr(args, "wmh_initial_state_file", None) and len(selected_tasks) != 1:
         raise ValueError("--wmh-initial-state-file requires exactly one benchmark task")
     if not getattr(args, "cohort_tasks", []) and not args.eval_suite:
@@ -3195,6 +3253,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         os.environ["BENCHMARK_AGENTCARD_WORLD_IDENTITY"] = "true"
     else:
         os.environ.pop("BENCHMARK_AGENTCARD_WORLD_IDENTITY", None)
+    if args.owned_recording_preparation_seconds is not None:
+        recording_env = service_base_environ()
+        if not apply_owned_wmh_recording(
+            recording_env, isolated=stack.isolated, simulate=False,
+            tasks=[get_task_by_name(name) for name in selected_tasks], workspace=stack.workspace_name,
+            fixture_database=lambda: (benchmark_system_pg_db_name(stack.run_id)
+                                      if stack.use_system_postgres else f"victoria_{stack.workspace_name}"),
+        ):
+            raise ValueError("Preparation requires a validated explicit owned recording manifest")
+
     process: subprocess.Popen | None = None
     frontend_tunnel: FrontendTunnel | None = None
     imessage_relay: IMessageRelay | None = None
@@ -3364,9 +3432,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                     wmh_initial_state_file=getattr(args, "wmh_initial_state_file", None),
                     timeout_seconds=getattr(args, "timeout_seconds", None),
                     owner=benchmark_owner,
+                    preparation_seconds=args.owned_recording_preparation_seconds,
+                    preparation_price_limit_cents=args.owned_recording_preparation_price_limit_cents,
                 )
             finally:
                 benchmark_owner.starting = False
+            if args.owned_recording_preparation_seconds is not None:
+                print(f"UNSCORED / NOT_VALIDATION preparation evidence: {result_path}")
+                return 0
             result_paths.append(result_path)
             _write_owner_record(
                 stack.context_dir / "local-benchmark-results.json",

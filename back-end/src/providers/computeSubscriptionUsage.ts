@@ -8,12 +8,18 @@
  * each LLM attempt), so recording usage adds no provider request: this module
  * only validates that payload and stores it on the Integration row that served
  * the token. Code sessions report the CLI's rate_limit_event by task, and the
- * Claude usage endpoint (computeUsageRefresh) fills accounts nothing measured.
+ * Claude usage endpoint or a one-token quota check (computeUsageRefresh) fills
+ * accounts nothing measured.
  *
  *   source        response | rate_limit | usage_endpoint | code_session
  *   status        allowed | allowed_warning | rejected | null (provider's unified status)
  *   cooldown      Integration.rateLimitedUntil + rateLimitReason + rateLimitAuthoritative
  *   nextResetAt   earliest future reset of a spent window, else an authoritative cooldown
+ *
+ * A heartbeat that cannot name its login (the agent loop's lease carries no
+ * integration id) names its token by credential fingerprint instead: the
+ * lease's own user rows are matched against it (computeLoginFailure
+ * resolveUserLoginByCredential), never another user's rows.
  *
  * 10k agents: one PK read of the lease plus one conditional UPDATE per
  * heartbeat that carries a snapshot. The UPDATE matches only when the row's
@@ -58,7 +64,10 @@ export interface UsageWindowReport {
 }
 
 export interface SubscriptionUsageReport {
+  /** The login that served the lease; '' when only `credential` names it. */
   integrationId: string;
+  /** Fingerprint of the token the agent held (codeLoginRejection credentialFingerprint). */
+  credential?: string;
   observedAt: Date;
   fiveHour?: UsageWindowReport | null;
   sevenDay?: UsageWindowReport | null;
@@ -120,6 +129,9 @@ export function parseUsagePayload(
   };
 }
 
+/** parseUsagePayload's placeholder for a report its credential names (never stored). */
+const UNNAMED_LOGIN = 'unnamed-login';
+
 /**
  * The optional `integrationId` + `usage` fields of a heartbeat body. Returns
  * null when the body carries no usable snapshot; a malformed snapshot is
@@ -130,7 +142,12 @@ export function parseSubscriptionUsageReport(
   now = new Date()
 ): SubscriptionUsageReport | null {
   const integrationId = typeof body.integrationId === 'string' ? body.integrationId.trim() : '';
-  return parseUsagePayload(body.usage, integrationId, now);
+  if (integrationId !== '') return parseUsagePayload(body.usage, integrationId, now);
+  // No login id: a token fingerprint still names it within the lease's own rows.
+  const credential = typeof body.credential === 'string' ? body.credential.trim() : '';
+  if (!/^[0-9a-f]{16}$/.test(credential)) return null;
+  const report = parseUsagePayload(body.usage, UNNAMED_LOGIN, now);
+  return report === null ? null : { ...report, integrationId: '', credential };
 }
 
 function integrationNameForTokenType(tokenType: string): 'claude_code' | 'gpt_code' | null {
@@ -182,7 +199,8 @@ async function applyUsageReport(
 export async function recordSubscriptionUsage(
   lineageKey: string,
   report: SubscriptionUsageReport,
-  now = new Date()
+  now = new Date(),
+  resolveLogin: ResolveUserLogin = async () => null
 ): Promise<boolean> {
   const lease = await prisma.computeTokenLineageLease.findUnique({
     where: { lineageKey },
@@ -198,16 +216,34 @@ export async function recordSubscriptionUsage(
   const name = integrationNameForTokenType(lease.tokenType);
   if (name === null) return false;
   let owner: { id: string } | { userId: string };
+  let integrationId = report.integrationId;
   if (lease.tokenSource === 'pool') {
-    if (lease.tokenIdentity !== report.integrationId) return false;
+    // A pool lease names its own row; a report may only confirm it.
+    if (integrationId === '') integrationId = lease.tokenIdentity;
+    if (lease.tokenIdentity !== integrationId) return false;
     owner = { id: lease.tokenIdentity };
   } else if (lease.tokenSource === 'user') {
     owner = { userId: lease.tokenIdentity };
+    if (integrationId === '') {
+      const resolved =
+        report.credential === undefined
+          ? null
+          : await resolveLogin(lease.tokenType, lease.tokenIdentity, report.credential);
+      if (resolved === null) return false;
+      integrationId = resolved;
+    }
   } else {
     return false;
   }
-  return applyUsageReport({ name, ...owner }, report);
+  return applyUsageReport({ name, ...owner }, { ...report, integrationId });
 }
+
+/** The user's login (Integration id) whose stored token has this fingerprint, or null. */
+export type ResolveUserLogin = (
+  tokenType: string,
+  userId: string,
+  credential: string
+) => Promise<string | null>;
 
 /**
  * Store a snapshot measured outside a lease (the Claude usage endpoint, a code
@@ -218,6 +254,89 @@ export async function recordIntegrationUsage(
   report: SubscriptionUsageReport
 ): Promise<boolean> {
   return applyUsageReport({ name }, report);
+}
+
+/**
+ * The longest subscription usage window (Claude 7d, Codex weekly), plus slack for
+ * resets rounded to the hour. A cooldown that ends later than this from now is
+ * not a usage-window reset, whoever wrote it.
+ */
+export const SUBSCRIPTION_WINDOW_MAX_MS = 7 * 24 * 60 * 60_000 + 60 * 60_000;
+
+export function beyondEverySubscriptionWindow(now: Date): Date {
+  return new Date(now.getTime() + SUBSCRIPTION_WINDOW_MAX_MS);
+}
+
+/**
+ * Reconcile a row's Rose backoff with what the provider just said about it.
+ * Only Rose's own non-authoritative cooldown (a 429 without a reset, a stall,
+ * or an older row with no metadata) is ever changed; a provider reset and an
+ * auth cooldown never are:
+ *   - allowed, no window spent → the backoff is lifted (the account serves again)
+ *   - rejected with the spent window's reset → the cooldown becomes that reset,
+ *     authoritative, so the account returns exactly when the provider says
+ * Production on 2026-11-13: rows cooled to 2026-12-01 on Rose's backoff while
+ * the provider reported 7d utilization 0 (allowed) or a 7d reset that day.
+ * A cooldown further out than SUBSCRIPTION_WINDOW_MAX_MS is reconciled too, even
+ * when it is a provider reset: no 5h/7d window resets that far out, so it is
+ * not this account's subscription limit (2026-11-14: a fast-mode request's
+ * monthly overage reset, 2026-12-01, stored as an authoritative rate_limit).
+ *
+ * 10k agents: one conditional UPDATE per usage refresh (at most one per row
+ * per refresh interval), never on the completion path.
+ */
+export async function reconcileRoseCooldown(
+  name: 'claude_code' | 'gpt_code',
+  report: SubscriptionUsageReport,
+  reason: CooldownReason | null,
+  now = new Date()
+): Promise<'lifted' | 'provider_reset' | 'unchanged'> {
+  const windows = [report.fiveHour, report.sevenDay].filter(
+    (w): w is UsageWindowReport => w !== null && w !== undefined
+  );
+  const spent = windows.filter((w) => w.usedPct >= 100);
+  const where = {
+    id: report.integrationId,
+    name,
+    rateLimitedUntil: { gt: now },
+    AND: [
+      {
+        OR: [
+          { rateLimitAuthoritative: null },
+          { rateLimitAuthoritative: false },
+          { rateLimitedUntil: { gt: beyondEverySubscriptionWindow(now) } },
+        ],
+      },
+      { OR: [{ rateLimitReason: null }, { rateLimitReason: { not: 'auth' } }] },
+    ],
+  };
+  if (report.status === 'rejected') {
+    const named =
+      reason === 'usage_window_7d'
+        ? report.sevenDay
+        : reason === 'usage_window_5h'
+          ? report.fiveHour
+          : undefined;
+    const resets = (named ? [named] : spent)
+      .map((w) => w.resetsAt?.getTime() ?? NaN)
+      .filter((t) => Number.isFinite(t) && t > now.getTime());
+    if (resets.length === 0) return 'unchanged';
+    const result = await prisma.integration.updateMany({
+      where,
+      data: {
+        rateLimitedUntil: new Date(Math.max(...resets)),
+        rateLimitReason: reason ?? 'usage_window',
+        rateLimitAuthoritative: true,
+      },
+    });
+    return result.count > 0 ? 'provider_reset' : 'unchanged';
+  }
+  if (windows.length === 0 || spent.length > 0) return 'unchanged';
+  const result = await prisma.integration.updateMany({
+    where,
+    data: { rateLimitedUntil: null, rateLimitReason: null, rateLimitAuthoritative: null },
+  });
+  return result.count > 0 ? 'lifted' : 'unchanged';
 }
 
 /**

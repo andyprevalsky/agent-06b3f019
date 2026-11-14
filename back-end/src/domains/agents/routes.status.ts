@@ -4,6 +4,9 @@ import { type HybridAuthRequest, hybridAuth } from '../../providers/hybridAuth';
 import { createLogger } from '../../providers/logger';
 import { asyncHandler } from '../../utils/asyncHandler';
 import * as controlService from './agentControlService';
+import * as queryService from './agentQueryService';
+import { handleRouteError } from './routes.helpers';
+import { resolveAgentReadAccess } from './routes.guards';
 import { updateStatusSchema } from './types';
 import { workerWriteGeneration } from '../../providers/codeResumeGeneration';
 import { applyResumeCost } from './agentResumeCostService';
@@ -11,6 +14,24 @@ import { applyResumeCost } from './agentResumeCostService';
 const log = createLogger('Agents');
 const router = Router();
 const auth = asyncHandler<HybridAuthRequest>(hybridAuth);
+
+router.get(
+  '/:id/status',
+  auth,
+  asyncHandler<HybridAuthRequest>(async (req, res) => {
+    try {
+      const { userId } = resolveAgentReadAccess(req);
+      const result = await queryService.getAgentStatus(req.params.id, userId);
+      if (result === null) {
+        res.status(404).json({ error: 'Agent not found' });
+        return;
+      }
+      res.json(result);
+    } catch (error) {
+      handleRouteError(res, error, 'Failed to get agent status', { agent_id: req.params.id });
+    }
+  })
+);
 
 router.post(
   '/:id/workflow-replacement/bootstrap-ack',

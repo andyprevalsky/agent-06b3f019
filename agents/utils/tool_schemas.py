@@ -220,6 +220,8 @@ ResponseSchemaPrimitiveType = Literal[
     "bool",
     "list[str]",
     "list[int]",
+    "object",
+    "list[object]",
     "file_pointer",
     "list[file_pointer]",
 ]
@@ -237,6 +239,7 @@ class ResponseSchemaNestedFieldConfig(BaseModel):
 
     name: str = Field(description="Field name in snake_case.")
     type: ResponseSchemaPrimitiveType = Field(description="Nested field type.")
+    properties: List["ResponseSchemaNestedFieldConfig"] = Field(default_factory=list)
     description: str = Field(default="", description="Optional semantic description; not used for object shape.")
     required: bool = Field(default=True, description="False when this property may be omitted entirely.")
     constraints: List[ResponseSchemaBound] = Field(
@@ -251,12 +254,16 @@ class ResponseSchemaNestedFieldConfig(BaseModel):
 
     @model_validator(mode="after")
     def _validate_constraints(self):
+        if self.type in ("object", "list[object]") and not self.properties:
+            raise ValueError("object schema fields require explicit properties")
         bounds_from_entries(self.type, self.constraints)
         return self
 
     @model_serializer(mode="wrap")
     def _serialize(self, handler):
         data = handler(self)
+        if not data.get("properties"):
+            data.pop("properties", None)
         data.pop("constraints", None)
         data.update(bounds_from_entries(self.type, self.constraints))
         return data
@@ -284,7 +291,7 @@ class ResponseSchemaFieldConfig(BaseModel):
     )
     required: bool = Field(description="Whether this field is required in the output.")
     description: str = Field(default="", description="Optional semantic description; not used for object shape.")
-    properties: List[ResponseSchemaNestedFieldConfig] = Field(
+    properties: List["ResponseSchemaNestedFieldConfig"] = Field(
         default_factory=list,
         description="Explicit subfields for object/list[object] outputs. Required when type is object or list[object].",
     )
@@ -318,8 +325,25 @@ class ResponseSchemaFieldConfig(BaseModel):
         return data
 
 
+from utils.final_presentation import FinalPresentation, validate_presentation
+
+
 class ResponseSchemaConfig(BaseModel):
     """Structured output schema defining what data the agent must return when complete."""
+
+    presentation: FinalPresentation | None = None
+
+    @model_serializer(mode="wrap")
+    def _serialize_presentation(self, handler):
+        data = handler(self)
+        if self.presentation is None:
+            data.pop("presentation", None)
+        return data
+
+    @model_validator(mode="after")
+    def _validate_presentation(self):
+        validate_presentation(self.model_dump(exclude_none=True))
+        return self
 
     fields: List[ResponseSchemaFieldConfig] = Field(
         description=(
@@ -328,9 +352,17 @@ class ResponseSchemaConfig(BaseModel):
         )
     )
 
+    @classmethod
+    def __get_pydantic_json_schema__(cls, core_schema, handler):
+        if handler.mode == "serialization":
+            return handler(core_schema)
+        from utils.response_schema_wire import wire_json_schema
+        return wire_json_schema()
+
     @model_validator(mode="before")
     @classmethod
     def _coerce_malformed_input(cls, value: Any) -> Any:
+        from utils.response_schema_wire import decode_wire
         # Models reliably emit output_schema in three malformed shapes that the
         # canonical {"fields": [...]} form does not match. Coerce each into the
         # structured form rather than failing validation -  failure forces a costly
@@ -357,7 +389,7 @@ class ResponseSchemaConfig(BaseModel):
                 return {
                     "fields": [{"name": k, "description": v, "type": "str", "required": True} for k, v in value.items()]
                 }
-        return value
+        return decode_wire(value)
 
 
 class WaitForTool(BaseModel):
