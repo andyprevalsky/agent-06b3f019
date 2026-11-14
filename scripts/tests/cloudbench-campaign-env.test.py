@@ -282,7 +282,15 @@ PY
             text=True,
             check=False,
             timeout=30,
-            env={**os.environ, "LOG": str(log), "READS": str(script)},
+            env={
+                **{
+                    key: value
+                    for key, value in os.environ.items()
+                    if key != "CLOUDBENCH_APP_ENV_READ_TIMEOUT_SECONDS"
+                },
+                "LOG": str(log),
+                "READS": str(script),
+            },
         )
         return result, log.read_text().splitlines()
 
