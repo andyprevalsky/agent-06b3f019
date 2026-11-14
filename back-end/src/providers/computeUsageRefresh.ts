@@ -1,6 +1,11 @@
 /**
- * Background retrieval of a Claude subscription's usage windows (and their
- * reset times) for accounts the response-header path has not measured.
+ * Background retrieval of a Claude or Codex subscription's usage windows (and
+ * their reset times) for accounts the response-header path has not measured.
+ *
+ *   Codex (gpt_code): no usage endpoint; always one minimal Codex request
+ *   (codexQuotaCheck) whose x-codex-* headers (200 or 429) and a 429's
+ *   usage_limit_reached body carry the windows. Prod 2026-11-14: Codex rows sat
+ *   on a sibling's copied cooldown days past their own weekly reset.
  *
  *   user:profile token:  GET https://api.anthropic.com/api/oauth/usage
  *     Authorization: Bearer <the account's OAuth access token>
@@ -53,6 +58,7 @@
 import { randomUUID } from 'node:crypto';
 
 import { readClaudeUsageCredential } from './computeCredentials';
+import { readCodexUsageCredential } from './gptCredentials';
 import {
   beyondEverySubscriptionWindow,
   parseUsagePayload,
@@ -63,6 +69,7 @@ import {
 } from './computeSubscriptionUsage';
 import { createLogger } from './logger';
 import { claudeQuotaCheck } from './rose/claudeAuth';
+import { codexQuotaCheck } from './rose/gptAuth';
 import { analyzeSubscriptionUsage } from './rose/subscriptionUsage';
 
 const log = createLogger('ComputeUsageRefresh');
@@ -82,6 +89,8 @@ export interface UsageCredential {
   accessToken: string;
   /** The grant carries `user:profile`, which the usage endpoint requires. */
   profileScope: boolean;
+  /** ChatGPT account id a Codex request names (`ChatGPT-Account-ID`). */
+  accountId?: string;
 }
 
 export interface QuotaCheckResponse {
@@ -91,9 +100,11 @@ export interface QuotaCheckResponse {
 }
 
 export interface RefreshDeps {
+  /** Whose headers the quota check returns; Claude when omitted. */
+  provider?: 'claude' | 'codex';
   fetch: (url: string, init: RequestInit) => Promise<Response>;
   readToken: (integrationId: string) => Promise<UsageCredential | null>;
-  quotaCheck: (accessToken: string) => Promise<QuotaCheckResponse>;
+  quotaCheck: (accessToken: string, credential?: UsageCredential) => Promise<QuotaCheckResponse>;
   store: (report: SubscriptionUsageReport) => Promise<boolean>;
   /** Align Rose's own backoff on the row with what the provider just said. */
   reconcile: (
@@ -111,6 +122,28 @@ const defaultDeps: RefreshDeps = {
     claudeQuotaCheck({ token: accessToken, requestId: `usage-quota-${randomUUID()}` }),
   store: (report) => recordIntegrationUsage('claude_code', report),
   reconcile: (report, reason, now) => reconcileRoseCooldown('claude_code', report, reason, now),
+  now: () => new Date(),
+};
+
+/**
+ * Codex has no usage endpoint: its windows come from the `x-codex-*` headers of
+ * any ChatGPT-backend response, so the refresh is always one quota check.
+ */
+const codexDeps: RefreshDeps = {
+  provider: 'codex',
+  fetch: (url, init) => fetch(url, init),
+  readToken: async (integrationId) => {
+    const credential = await readCodexUsageCredential(integrationId);
+    return credential === null ? null : { ...credential, profileScope: false };
+  },
+  quotaCheck: (accessToken, credential) =>
+    codexQuotaCheck({
+      token: accessToken,
+      accountId: credential?.accountId,
+      requestId: `usage-quota-${randomUUID()}`,
+    }),
+  store: (report) => recordIntegrationUsage('gpt_code', report),
+  reconcile: (report, reason, now) => reconcileRoseCooldown('gpt_code', report, reason, now),
   now: () => new Date(),
 };
 
@@ -261,13 +294,13 @@ async function readUsageEndpoint(
 /** The quota check's unified headers → the row's windows (the chat path's own parser). */
 async function readQuotaHeaders(
   integrationId: string,
-  accessToken: string,
+  credential: UsageCredential,
   now: Date,
   deps: RefreshDeps
 ): Promise<RefreshOutcome> {
   let response: QuotaCheckResponse;
   try {
-    response = await deps.quotaCheck(accessToken);
+    response = await deps.quotaCheck(credential.accessToken, credential);
   } catch (error) {
     log.info('quota_check.request_failed', {
       integrationId,
@@ -275,7 +308,8 @@ async function readQuotaHeaders(
     });
     return 'error';
   }
-  const { snapshot, reason } = analyzeSubscriptionUsage('claude', response.headers, {
+  const provider = deps.provider === 'codex' ? 'gpt' : 'claude';
+  const { snapshot, reason } = analyzeSubscriptionUsage(provider, response.headers, {
     status: response.status,
     body: response.body,
     now,
@@ -306,13 +340,28 @@ export async function refreshClaudeUsage(
     const outcome = await readUsageEndpoint(integrationId, credential.accessToken, now, deps);
     if (outcome !== 'refused') return outcome;
   }
-  return readQuotaHeaders(integrationId, credential.accessToken, now, deps);
+  return readQuotaHeaders(integrationId, credential, now, deps);
+}
+
+/** Fetch and store one Codex (gpt_code) row's usage now: always a quota check. */
+export function refreshCodexUsage(
+  integrationId: string,
+  deps: RefreshDeps = codexDeps
+): Promise<RefreshOutcome> {
+  return refreshClaudeUsage(integrationId, deps);
 }
 
 /**
  * Fire-and-forget refresh: returns immediately, never throws, never blocks the
  * caller (a completion's cooldown report or GET /api/compute-accounts).
  */
+export function scheduleCodexUsageRefresh(
+  integrationId: string | null | undefined,
+  deps: RefreshDeps = codexDeps
+): void {
+  scheduleClaudeUsageRefresh(integrationId, deps);
+}
+
 export function scheduleClaudeUsageRefresh(
   integrationId: string | null | undefined,
   deps: RefreshDeps = defaultDeps
