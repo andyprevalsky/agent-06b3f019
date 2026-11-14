@@ -2286,6 +2286,8 @@ async def test_phone_provider_boundary_rechecks_the_live_page_and_target_frame_a
         {"action": "drag", "params": {"source_index": 13, "target_index": 13,
                                       "start_x": 400, "start_y": 300, "end_x": 401, "end_y": 300}},
         {"action": "click", "params": {"index": "11"}},
+        # Keys go to browser focus, which may sit in the realm frame, whatever index is named.
+        {"action": "press_key", "index": 13, "params": {"key": "Enter"}},
         # Coordinates and keys land in whichever frame is under the point or focused:
         # undeterminable, so a page embedding the realm refuses them.
         {"action": "click", "params": {}, "coordinates": {"x": 10, "y": 10}},
@@ -2308,6 +2310,32 @@ async def test_phone_provider_boundary_rechecks_the_live_page_and_target_frame_a
         result = await run(dom, action)
         assert result.get("code") != "phone_provider_account_boundary", (action, result)
         assert set(dom.touched) - _DRIVEN, (action, "an allowed action must reach the browser")
+
+    # Frame-scanning fill helpers (password-field fallback, payment fills) never
+    # evaluate in a realm frame, whether Playwright or CDP exposes it (CodeRabbit, #2060).
+    from domains.spawn_browser_agent_v3.service_actions import _resolve_password_field_coordinates
+
+    realm_frame = SimpleNamespace(url=device, evaluate=AsyncMock(return_value={"x": 5, "y": 5}))
+    page_frame = SimpleNamespace(url="https://example.com/start", evaluate=AsyncMock(return_value=None))
+    realm_cdp = SimpleNamespace(cdp_client=SimpleNamespace(send=SimpleNamespace(Runtime=SimpleNamespace(
+        evaluate=AsyncMock(return_value={"result": {"value": {"x": 6, "y": 6}}})))), session_id="realm")
+    all_frames = {
+        "root": {"url": "https://example.com/start", "frameTargetId": "main", "parentFrameId": None},
+        "child": {"url": device, "frameTargetId": "oopif", "parentFrameId": "root"},
+    }
+    sessions = {"oopif": realm_cdp}
+    fill_session = SimpleNamespace(
+        agent_focus_target_id="main",
+        get_all_frames=AsyncMock(return_value=(all_frames, {})),
+        get_or_create_cdp_session=AsyncMock(side_effect=lambda target_id=None, focus=False: sessions.get(target_id)),
+    )
+    page = SimpleNamespace(frames=[page_frame, realm_frame])
+    assert await _resolve_password_field_coordinates(fill_session, input_page=page) is None
+    realm_frame.evaluate.assert_not_awaited()
+    realm_cdp.cdp_client.send.Runtime.evaluate.assert_not_awaited()
+    page_frame.evaluate.assert_awaited()
+    page_frame.evaluate.return_value = {"x": 7, "y": 8}
+    assert await _resolve_password_field_coordinates(fill_session, input_page=page) == (7, 8)
 
     # A page with no realm frame keeps coordinate and keyboard input.
     plain = {"main": target("main", "https://example.com/start")}

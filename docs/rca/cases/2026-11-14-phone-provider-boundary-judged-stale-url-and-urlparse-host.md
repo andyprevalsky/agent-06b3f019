@@ -119,6 +119,12 @@ All in `agents/domains/spawn_browser_agent_v3/service_actions.py`:
     `input_text` without an index), or when an index is not an integer. Then
     the action is refused if the last snapshot shows any realm frame on the
     page.
+  - `press_key` is always undeterminable: keys go to browser focus whatever
+    index is named.
+  - `_iter_payment_fill_targets`, the frame scan behind the password-field
+    coordinate fallback and the payment-fill helpers, skips realm frames
+    (Playwright frames by live `frame.url`, CDP targets by their frames'
+    URLs). Those helpers evaluate and click in every frame of the page.
   - `evaluate` runs in the main frame only. Terminal actions keep PR #2028's
     observed-URL check, because they do not act on page content.
   - There is no Playwright request routing.
@@ -150,7 +156,9 @@ Residual risk (reviewer-confirmed):
 Independent review (fresh sub-agent, RCA step 7): it reached the same first
 bad boundaries independently. It then found UTS-46 forms, IFRAME-element
 indices, drag coordinates and `0x.0x.0x.0x` gaps in the first fix; each is now
-fixed and pinned in the regressions above.
+fixed and pinned in the regressions above. CodeRabbit (#2060 cycle 1) found
+two more: `press_key` with an index, and the frame-scanning password and
+payment fill helpers. Both are fixed and pinned in the same regression.
 
 Repro, identical command before and after:
 `BLACKBOX_CASE_FUNCTIONS=test_phone_provider_boundary_rechecks_the_live_page_and_target_frame_at_action_time,test_phone_provider_boundary_reads_urls_the_way_chrome_does python scripts/run_blackbox_tests.py browser-credentials`

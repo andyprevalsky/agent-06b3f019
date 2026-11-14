@@ -1037,7 +1037,8 @@ def _live_phone_provider_account_refusal(
         selector_map.get(value) if isinstance(value, int) and not isinstance(value, bool) else None
         for value in indices
     ]
-    determinable = bool(targets) and None not in targets and coords is None and not any(
+    # Keys go to browser focus whatever index is supplied.
+    determinable = action_name != "press_key" and bool(targets) and None not in targets and coords is None and not any(
         key in {"x", "y", "coordinates"} or key.endswith(("_x", "_y")) for key in params
     )
     # Coordinates and keys land in whichever frame is under the point or
@@ -2765,7 +2766,11 @@ async def _iter_payment_fill_targets(
     targets: List[tuple[str, Any]] = []
     seen_cdp_targets: set[str] = set()
 
+    # These helpers evaluate and act in every frame; the phone-provider account
+    # realm is never one of them (see _live_phone_provider_account_refusal).
     for index, frame in enumerate(_playwright_frames(input_page)):
+        if phone_provider_account_realm(str(getattr(frame, "url", "") or "")):
+            continue
         targets.append((f"playwright:{index}", frame))
 
     get_page = _explicit_session_callable(session, "get_page", "get_current_page")
@@ -2818,13 +2823,19 @@ async def _iter_payment_fill_targets(
             owned_frames.add(frame_id)
             focused_frames.extend(children.get(frame_id, []))
 
+        realm_targets = {
+            str(info.get("frameTargetId"))
+            for frame_id, info in all_frames.items()
+            if frame_id in owned_frames and isinstance(info, dict)
+            and phone_provider_account_realm(str(info.get("url") or ""))
+        }
         for frame_id, info in all_frames.items():
             if frame_id not in owned_frames:
                 continue
             if not isinstance(info, dict):
                 continue
             target_id = info.get("frameTargetId")
-            if not target_id or str(target_id) in seen_cdp_targets:
+            if not target_id or str(target_id) in seen_cdp_targets or str(target_id) in realm_targets:
                 continue
             seen_cdp_targets.add(str(target_id))
             try:
