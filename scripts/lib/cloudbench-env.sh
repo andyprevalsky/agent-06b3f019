@@ -2270,26 +2270,30 @@ cloudbench_pid_birth_state() {  # <pid> <expected-start> -> live|absent|unknown
 }
 
 cloudbench_pid_matches_start() {
-  # The match runs as a pipeline child (cloudbench_tristate_into): a forwarded
-  # cancellation signal can interrupt a $(...) parse in this trapped caller.
-  local birth_state
-  cloudbench_tristate_into birth_state cloudbench_pid_start_match_state "$1" "$2"
-  [ "$birth_state" = "live" ]
-}
-
-cloudbench_pid_start_match_state() {  # <pid> <expected-start> -> live only on an exact birth match
-  local observation
+  local match_status=0 birth_state
   case "$2" in
     proc-start:*)
       # A boolean birth match needs one native observation, not the nested
       # command substitutions used to classify absent versus unknown owners.
       # Both classifications are non-matches here; keep their richer API intact.
-      case "$1" in ''|*[!0-9]*) echo unknown; return 0 ;; esac
-      { [ "$1" -gt 1 ] && [ -r /proc/self/stat ]; } || { echo unknown; return 0; }
-      observation="$(cloudbench_proc_pid_observation "$1")" || { echo unknown; return 0; }
-      if [ "${observation%%$'\t'*}" = "$2" ]; then echo live; else echo absent; fi
+      case "$1" in ''|*[!0-9]*) return 1 ;; esac
+      { [ "$1" -gt 1 ] && [ -r /proc/self/stat ]; } || return 1
+      # The observation is this pipeline's producer, so no $(...) is parsed in
+      # this trapped caller (see cloudbench_tristate_into). A failed observation
+      # appends a line, and only one exact matching line is a match.
+      { cloudbench_proc_pid_observation "$1" || printf '%s\n' observation-failed; } | {
+        IFS= read -r match_observation
+        match_extra=0
+        while IFS= read -r _; do match_extra=1; done
+        [ "$match_extra" = 0 ] && [ "${match_observation%%$'\t'*}" = "$2" ] && exit 10
+        exit 11
+      } || match_status=$?
+      [ "$match_status" = 10 ]
       ;;
-    *) cloudbench_pid_birth_state "$1" "$2" ;;
+    *)
+      cloudbench_tristate_into birth_state cloudbench_pid_birth_state "$1" "$2"
+      [ "$birth_state" = "live" ]
+      ;;
   esac
 }
 
