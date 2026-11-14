@@ -1,0 +1,85 @@
+{
+  "nodes": [
+    {
+      "constraints": [
+        {
+          "kind": "minItems",
+          "value": 3
+        },
+        {
+          "kind": "maxItems",
+          "value": 3
+        }
+      ],
+      "description": "List of exactly three supplied records, each containing name, status, and date.",
+      "id": "records",
+      "name": "records",
+      "nullable": false,
+      "parent_id": null,
+      "position": 0,
+      "required": true,
+      "type": "list[object]"
+    },
+    {
+      "constraints": [],
+      "description": "The supplied name of the record (e.g., Orion, Lyra, Vega).",
+      "id": "name",
+      "name": "name",
+      "nullable": false,
+      "parent_id": "records",
+      "position": 0,
+      "required": true,
+      "type": "str"
+    },
+    {
+      "constraints": [],
+      "description": "Status of the record; must be either 'queued' or 'done'.",
+      "id": "status",
+      "name": "status",
+      "nullable": false,
+      "parent_id": "records",
+      "position": 1,
+      "required": true,
+      "type": "str"
+    },
+    {
+      "constraints": [
+        {
+          "kind": "minLength",
+          "value": 8
+        },
+        {
+          "kind": "maxLength",
+          "value": 8
+        }
+      ],
+      "description": "Date in MM/DD/YY format (e.g., 04/15/18).",
+      "id": "date",
+      "name": "date",
+      "nullable": false,
+      "parent_id": "records",
+      "position": 2,
+      "required": true,
+      "type": "str"
+    },
+    {
+      "constraints": [],
+      "description": "Integer count of records; must equal 3.",
+      "id": "record_count",
+      "name": "record_count",
+      "nullable": false,
+      "parent_id": null,
+      "position": 1,
+      "required": true,
+      "type": "int"
+    }
+  ],
+  "presentation": {
+    "encoding": "json",
+    "field": null,
+    "mode": "value",
+    "version": 1
+  },
+  "reasoning": "The goal explicitly requests a JSON object with two top-level fields: a list of exactly three records (each with name, status, date) and an integer record_count. The records list must be constrained to exactly 3 items, each record object must have name (str), status (str, queued or done), and date (str, MM/DD/YY format, 8 chars). record_count is an int that must equal 3.",
+  "title": "Supplied Records JSON"
+}

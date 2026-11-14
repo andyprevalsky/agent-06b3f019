@@ -150,7 +150,8 @@ async function createSession(
 
 /**
  * Live sessions of one owner for one repo, primary (oldest) first. Sessions idle
- * past the TTL are not live; only the retire path (lifecycle.ts: kill sandbox,
+ * past the TTL are not live unless referenced by a published CLI template;
+ * only the retire path (lifecycle.ts: kill sandbox,
  * delete checkpoints) may mark them RETIRED.
  */
 export async function ownerCodeSessions(
@@ -159,17 +160,29 @@ export async function ownerCodeSessions(
   repoUrl: string | null,
   now = new Date()
 ): Promise<CodeSessionRow[]> {
-  return prisma.codeSession.findMany({
-    where: {
-      userId,
-      ownerAgentId,
-      repoKey: repoKeyFor(repoUrl),
-      state: { not: CODE_SESSION_STATES.RETIRED },
-      lastActiveAt: { gte: new Date(now.getTime() - codeSessionTtlMs()) },
-    },
-    orderBy: { createdAt: 'asc' },
-    take: OWNER_SESSION_SCAN,
-  });
+  // Apply eligibility before LIMIT: old unpinned rows must not hide a live
+  // session or a published CLI template. EXISTS preserves one row per session
+  // even when multiple CLI integrations reference it, without loading all pins.
+  return prisma.$queryRaw<CodeSessionRow[]>(Prisma.sql`
+    SELECT session.*
+    FROM "CodeSession" AS session
+    WHERE session."userId" = ${userId}
+      AND session."ownerAgentId" = ${ownerAgentId}
+      AND session."repoKey" = ${repoKeyFor(repoUrl)}
+      AND session.state <> 'RETIRED'
+      AND (
+        session."lastActiveAt" >= ${new Date(now.getTime() - codeSessionTtlMs())}
+        OR EXISTS (
+          SELECT 1 FROM "Integration" AS integration
+          WHERE integration."userId" = session."userId"
+            AND integration.name = 'cli'
+            AND integration.type = 'TOOL_SETUP'
+            AND integration.config ->> 'code_session_id' = session.id
+        )
+      )
+    ORDER BY session."createdAt" ASC
+    LIMIT ${OWNER_SESSION_SCAN}
+  `);
 }
 
 /** Find a session the caller owns; foreign and unknown ids are indistinguishable. */
@@ -346,16 +359,22 @@ export async function findExpiredCodeSessions(
   limit = 5,
   now = new Date()
 ): Promise<CodeSessionRow[]> {
-  return prisma.codeSession.findMany({
-    where: {
-      ...(userId === null ? {} : { userId }),
-      state: { in: [CODE_SESSION_STATES.PAUSED, CODE_SESSION_STATES.ACTIVE] },
-      lastActiveAt: { lt: new Date(now.getTime() - codeSessionTtlMs()) },
-      OR: [{ leaseExpiresAt: null }, { leaseExpiresAt: { lt: now } }],
-    },
-    orderBy: { lastActiveAt: 'asc' },
-    take: limit,
-  });
+  return prisma.$queryRaw<CodeSessionRow[]>(Prisma.sql`
+    SELECT session.* FROM "CodeSession" AS session
+    WHERE session.state IN ('PAUSED', 'ACTIVE')
+      ${userId === null ? Prisma.empty : Prisma.sql`AND session."userId" = ${userId}`}
+      AND session."lastActiveAt" < ${new Date(now.getTime() - codeSessionTtlMs())}
+      AND (session."leaseExpiresAt" IS NULL OR session."leaseExpiresAt" < ${now})
+      AND NOT EXISTS (
+        SELECT 1 FROM "Integration" AS integration
+        WHERE integration."userId" = session."userId"
+          AND integration.name = 'cli'
+          AND integration.type = 'TOOL_SETUP'
+          AND integration.config->>'code_session_id' = session.id
+      )
+    ORDER BY session."lastActiveAt" ASC
+    LIMIT ${limit}
+  `);
 }
 
 export async function linkClaudeCodeSession(taskId: string, codeSessionId: string): Promise<void> {

@@ -865,7 +865,8 @@ cloudbench_validate_browser_provider_contract() {
     echo "FATAL: production worker BROWSER_PROVIDER is invalid: ${prod_worker:-<unset>}" >&2
     return 1
   esac
-  # Backend session selection and worker fallback are separate production surfaces.
+  # Backend selects new sessions; workers consume their recorded provider.
+  # Mirror each production role independently, not one role into the other.
   if [ "$backend_provider" != "$prod_backend" ]; then
     echo "FATAL: benchmark backend env does not match production: local=${backend_provider:-<unset>} prod=$prod_backend" >&2
     return 1
@@ -2038,8 +2039,13 @@ cloudbench_start_data_plane_proxy() {  # <local-port> <remote-port> <host> <log>
     printf '[%s] %s proxy attempt %s: localhost:%s -> %s:%s\n' \
       "$(date -u +%H:%M:%S)" "$label" "$attempt" "$local_port" "$host" "$remote_port" \
       >> "$log_file"
-    flyctl proxy "$local_port:$remote_port" "$host" -a "$APP" --bind-addr 127.0.0.1 -q \
-      >> "$log_file" 2>&1 &
+    # Exec in this background child so $! still identifies native Fly.
+    (
+      if [ -n "${REGISTRY_RECOVERY_GUARD_FD:-}" ]; then
+        exec {REGISTRY_RECOVERY_GUARD_FD}<&- || exit 1
+      fi
+      exec flyctl proxy "$local_port:$remote_port" "$host" -a "$APP" --bind-addr 127.0.0.1 -q
+    ) >> "$log_file" 2>&1 &
     pid=$!
     # flyctl resolves the remote host lazily on the first client connection.
     # Trigger lazy DNS, but classify a local bind collision before waiting.
@@ -3135,6 +3141,40 @@ if values["TEMPORAL_NAMESPACE"] == production:
 for name in ("TEMPORAL_ADDRESS", "TEMPORAL_NAMESPACE", "TEMPORAL_API_KEY"):
     print("export %s=%s" % (name, shlex.quote(values[name])))
 PY
+}
+
+# A volume snapshot proof cannot establish the baked /app inputs used by fresh
+# storage. Consume only an explicitly pinned, verified image-build receipt.
+cloudbench_verify_image_dependency_receipt() {  # <receipt> <sha256> <source-id> <node> <python>
+    python3 -c '
+import hashlib, json, re, sys
+from pathlib import Path
+try:
+    path, expected, source, node, python = sys.argv[1:]
+    if not re.fullmatch("[0-9a-f]{64}", expected):
+        raise ValueError("missing pinned image-build receipt SHA256")
+    raw = Path(path).read_bytes()
+    if hashlib.sha256(raw).hexdigest() != expected:
+        raise ValueError("image-build receipt checksum differs")
+    proof = json.loads(raw)
+    rows = [row for row in json.load(sys.stdin) if row.get("id") == source]
+    if len(rows) != 1:
+        raise ValueError("image source missing or ambiguous")
+    row = rows[0]
+    digest = (row.get("image_ref") or {}).get("digest") or row["config"]["image"].rpartition("@")[2]
+    if not re.fullmatch("sha256:[0-9a-f]{64}", digest):
+        raise ValueError("source image has no immutable digest")
+    if proof.get("schema") != "cloudbench-image-build-v1" or proof.get("publication_verified") is not True:
+        raise ValueError("image publication is unverified")
+    image = proof.get("published_image_ref", "")
+    if image.rpartition("@")[2] != digest or proof.get("image_ref") != image or proof.get("published_digest") != digest:
+        raise ValueError("image receipt does not cover actual source image")
+    if proof.get("node_dependency_fingerprint") != node or proof.get("python_dependency_fingerprint") != python:
+        raise ValueError("baked image dependency identity differs from requested ref")
+except (OSError, ValueError, TypeError, KeyError, AttributeError) as error:
+    print("Fresh-storage image dependency admission refused: " + str(error), file=sys.stderr)
+    raise SystemExit(1)
+' "$@"
 }
 
 # Guest-only Node launch policy; never rewrite production or staged dotenv blobs.

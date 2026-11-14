@@ -40,6 +40,7 @@ const log = createLogger('BrowserChallengeRecovery');
 
 export async function searchAndPromoteBrowserConfig(
   input: {
+    signal?: AbortSignal;
     taskId: string;
     userId?: string;
     targetUrl: string;
@@ -61,6 +62,7 @@ export async function searchAndPromoteBrowserConfig(
   },
   dependencies: BrowserConfigSearchRuntimeDependencies = browserConfigSearchRuntimeDependencies
 ) {
+  input.signal?.throwIfAborted();
   const current = await prisma.browserSession.findFirst({
     where: {
       id: input.taskId,
@@ -230,6 +232,7 @@ export async function searchAndPromoteBrowserConfig(
       return probe;
     },
     promote: async ({ config, session }) => {
+      input.signal?.throwIfAborted();
       if (config.provider === 'browser-use' && !browserUseEnabled()) {
         throw new Error('Browser Use is disabled by BROWSER_AGENT_BROWSER_USE_ENABLED');
       }
@@ -241,6 +244,7 @@ export async function searchAndPromoteBrowserConfig(
         session.wsUrl = await dependencies.refreshTilionConnectUrl(session.sessionId);
       }
       const updated = await runTransactionWithRetry(async (tx) => {
+        input.signal?.throwIfAborted();
         const replaced = await tx.browserSession.updateMany({
           where: { id: current.id, sessionId: current.sessionId },
           data: {
@@ -258,6 +262,7 @@ export async function searchAndPromoteBrowserConfig(
             proxyTier: config.proxyMode,
           },
         });
+        input.signal?.throwIfAborted();
         if (replaced.count !== 1) return false;
         await tx.browserContext.update({
           where: { id: current.contextId },
@@ -268,6 +273,7 @@ export async function searchAndPromoteBrowserConfig(
             ) as unknown as Prisma.InputJsonValue,
           },
         });
+        input.signal?.throwIfAborted();
         return true;
       });
       if (!updated) throw new Error(`Browser task ${input.taskId} changed during config search`);
@@ -312,6 +318,7 @@ export async function searchAndPromoteBrowserConfig(
       {
         avoidConfigKey: sessionAvoidConfigKey,
         ownerKey: current.agentId,
+        signal: input.signal,
         blockedConfigKeys: blacklist.blacklistExpired ? [] : input.blockedConfigKeys,
         // Two transport-dead provider candidates get 90s each. The full search
         // stops at 210s, leaving 90s under the worker's 300s HTTP read deadline

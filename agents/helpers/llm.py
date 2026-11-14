@@ -19,12 +19,14 @@ import httpx  # Used with instructor
 import instructor  # Import at module level for Temporal workflow sandbox compatibility
 import structlog
 from openai import AsyncOpenAI
-from pydantic import BaseModel, Field, ValidationError, create_model, model_validator
+from pydantic import BaseModel, Field, StrictBool, ValidationError, create_model, model_validator
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
 from config import load_config
 from helpers.activity_heartbeat import safe_heartbeat
+from helpers.image_count_retry import collect_with_image_count_retry, stream_with_image_count_retry
+from helpers.screenshot_history import screenshot_context_text
 from helpers.agent_addressing import planned_task_name
 from helpers.attachment_context import (
     AttachmentContextLimitError,
@@ -88,7 +90,7 @@ from providers.rose import (
     gpt_auth_from_token,
     pool_for_model,
 )
-from providers.rose.errors import RoseAllFailed
+from providers.rose.errors import RoseAllFailed, RoseRefusalError
 from providers.rose.flash_agent import is_flash_agent_call
 from providers.rose.inter_agent_context import inter_agent_message, is_inter_agent_message
 from providers.rose.policy import anthropic_family_excluded, benchmark_compute_token_type
@@ -112,6 +114,7 @@ from utils.response_schema_constraints import (
     value_satisfies_output_field_constraints,
 )
 from utils.rose_desktop import is_rose_desktop_user
+from utils.tool_call_ids import claim_tool_call_id, context_tool_call_ids, request_tool_call_ids
 from utils.tool_schemas import (
     ResponseSchemaBound,
     create_agent_action_model,
@@ -368,7 +371,14 @@ def _safe_time() -> float:
 T = TypeVar("T", bound=BaseModel)
 
 
-_RESPONSE_SCHEMA_SYSTEM_PROMPT = """You are an expert at analyzing agent goals and producing the MINIMAL output schema needed to verify the goal was completed.
+_RESPONSE_SCHEMA_SYSTEM_PROMPT = """When the user explicitly requests only a final value or an exact output format,
+select presentation version 1, mode value, bound to the single required nonnullable
+output field. Use text for scalar text/numbers/booleans, json only for explicitly
+requested JSON. Otherwise use mode report or omit presentation. Never suppress
+additional deliverables, files, required disclosures or approval/payment notices.
+Do not infer value mode merely because the schema has one field.
+
+You are an expert at analyzing agent goals and producing the MINIMAL output schema needed to verify the goal was completed.
 
 Your output is consumed by an automated verifier that scores 1.0 when every required field can be populated accurately from tool-result evidence. Therefore:
   - Required defaults to true; `required: false` lets the agent omit a field.
@@ -451,7 +461,7 @@ Selecting a product URL, adding an item to cart, or reaching checkout is not eno
 
 Given a goal, return JSON with:
   - reasoning: 1-3 sentences on what concrete outputs the goal requires.
-  - fields: a compact list with at least one required field, specific names and concrete types. For object/list[object], include explicit `properties`. A zero-length `fields` array is invalid.
+  - nodes: encode the conceptual fields above as the response schema node table. Use parent_id=null for root fields and each object field's id as its property nodes' parent_id. Assign contiguous zero-based positions among siblings. Preserve every field's type, requirement, nullable flag, description and bounds. At least one root field must be required.
 
 Output JSON only. Do not include prose outside the JSON envelope."""
 
@@ -490,23 +500,12 @@ _SchemaFieldType = Literal[
     "list[session_file_pointer]",
 ]
 
-_SchemaNestedFieldType = Literal[
-    "str",
-    "int",
-    "float",
-    "bool",
-    "list[str]",
-    "list[int]",
-    "file_pointer",
-    "list[file_pointer]",
-    "session_file_pointer",
-    "list[session_file_pointer]",
-]
-
+_SchemaNestedFieldType = _SchemaFieldType
 
 class _GeneratedResponseSchemaNestedField(BaseModel):
     name: str = Field(description="Nested field name in snake_case.")
     type: _SchemaNestedFieldType = Field(description="Nested field type.")
+    properties: Optional[List["_GeneratedResponseSchemaNestedField"]] = None
     constraints: List[ResponseSchemaBound] = Field(
         default_factory=list, description="Bounds: minItems/maxItems for lists; minLength/maxLength for strings."
     )
@@ -521,6 +520,8 @@ class _GeneratedResponseSchemaNestedField(BaseModel):
 
     @model_validator(mode="after")
     def _validate_constraints(self):
+        if self.type in ("object", "list[object]") and not self.properties:
+            raise ValueError("object schema fields require explicit properties")
         bounds_from_entries(self.type, self.constraints)
         return self
 
@@ -552,15 +553,33 @@ class _GeneratedResponseSchemaField(BaseModel):
         return self
 
 
+from utils.final_presentation import FinalPresentation, validate_presentation
+
+
 class _GeneratedResponseSchema(BaseModel):
+    presentation: FinalPresentation | None = None
     reasoning: str = Field(description="Analysis of what concrete outputs the goal requires.")
     fields: List[_GeneratedResponseSchemaField] = Field(
         min_length=1,
         description="Output fields with at least one required key; optional keys may be omitted.",
     )
 
+    @classmethod
+    def __get_pydantic_json_schema__(cls, core_schema, handler):
+        if handler.mode == "serialization":
+            return handler(core_schema)
+        from utils.response_schema_wire import wire_json_schema
+        return wire_json_schema(internal=True, reasoning=True, title="title" in cls.model_fields)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _decode_wire(cls, value):
+        from utils.response_schema_wire import decode_wire
+        return decode_wire(value, internal=True, reasoning=True, title="title" in cls.model_fields)
+
     @model_validator(mode="after")
     def _at_least_one_required_field(self):
+        validate_presentation(self.model_dump(exclude_none=True))
         if not any(field.required for field in self.fields):
             raise ValueError("generated output schema must contain at least one required field")
         return self
@@ -869,32 +888,20 @@ def _build_compute_auth_context_from_payload(
 
 
 def _schema_from_generated_model(generated: _GeneratedResponseSchema) -> Dict[str, Any]:
-    fields: List[Dict[str, Any]] = []
-    for field in generated.fields:
-        item: Dict[str, Any] = {
-            "name": field.name,
-            "type": field.type,
-            "required": field.required,
-        }
+    def project(field):
+        item = {"name": field.name, "type": field.type, "required": field.required}
         item.update(bounds_from_entries(field.type, field.constraints))
         item.update(
             {key: getattr(field, key) for key in ("description", "nullable") if getattr(field, key) is not None}
         )
         if field.properties is not None:
-            item["properties"] = [
-                {
-                    "name": prop.name,
-                    "type": prop.type,
-                    "required": prop.required,
-                    **bounds_from_entries(prop.type, prop.constraints),
-                    **{
-                        key: getattr(prop, key) for key in ("description", "nullable") if getattr(prop, key) is not None
-                    },
-                }
-                for prop in field.properties
-            ]
-        fields.append(item)
-    return {"fields": fields}
+            item["properties"] = [project(child) for child in field.properties]
+        return item
+    schema = {"fields": [project(field) for field in generated.fields]}
+    if generated.presentation is not None:
+        schema["presentation"] = generated.presentation.model_dump(exclude_none=True)
+    validate_presentation(schema)
+    return schema
 
 
 def _normalize_generated_agent_title(raw: str) -> Optional[str]:
@@ -1173,6 +1180,25 @@ def build_verifier_context_messages(
         for payload in verifier_file_evidence_by_message.get(_verifier_file_evidence_key(msg), []):
             current_batch.append("TOOL_RESULT " + json.dumps(payload, ensure_ascii=False, default=str))
 
+    completion_declarations: dict[str, set[tuple[str, str]]] = {}
+    for declaration in sorted_context:
+        if (declaration.get("role") != "ASSISTANT"
+                or is_excluded_from_model(declaration)
+                or is_internal_subagent_message(declaration)):
+            continue
+        declaration_metadata = declaration.get("metadata") or {}
+        for call in declaration_metadata.get("tool_calls") or []:
+            if not isinstance(call, dict):
+                continue
+            call_id = call.get("tool_call_id")
+            if not isinstance(call_id, str) or not call_id:
+                continue
+            origin = declaration_metadata.get("tool_call_origin")
+            identity = "model" if call.get("tool") == "attempt_completion" and origin == "model" else "other"
+            signature = json.dumps(call, sort_keys=True, default=str)
+            completion_declarations.setdefault(call_id, set()).add((identity, signature))
+
+    seen_completion_invocations: set[str] = set()
     for msg in sorted_context:
         role = msg.get("role", "")
         text = _self_close_trailing_message_reference(msg.get("text", ""))
@@ -1244,6 +1270,19 @@ def build_verifier_context_messages(
                 continue
 
             if metadata.get("toolStatus") == "IN_PROGRESS":
+                call_id = metadata.get("toolCallId")
+                if (metadata.get("toolName") == "attempt_completion"
+                        and isinstance(call_id, str)
+                        and len(completion_declarations.get(call_id, set())) == 1
+                        and next(iter(completion_declarations[call_id]))[0] == "model"
+                        and call_id not in seen_completion_invocations):
+                    seen_completion_invocations.add(call_id)
+                    current_batch.append("TOOL_INVOCATION " + json.dumps({
+                        "tool_name": "attempt_completion",
+                        "tool_call_id": call_id,
+                        "origin": "model",
+                        "event": "started",
+                    }, ensure_ascii=False))
                 continue
 
             if metadata.get("verifierMessage"):
@@ -1290,13 +1329,15 @@ def build_verifier_context_messages(
                 )
             if truncated:
                 _tool_result_budget_hits += 1
-            # Aggregate budget exhausted → empty text; skip append so later
-            # tools cannot keep growing the verifier prompt past the cap.
-            if not tool_text:
-                continue
-            _tool_result_chars_used += len(tool_text)
-
             screenshot_b64 = metadata.get("screenshot_b64")
+            # Text budgeting must not silently remove an ordinary screenshot.
+            # Only a provider image-count rejection may reduce the image list.
+            if not tool_text:
+                if screenshot_b64:
+                    tool_text = screenshot_context_text(metadata)
+                else:
+                    continue
+            _tool_result_chars_used += len(tool_text)
             if screenshot_b64:
                 # Multimodal path. The text body must NOT include the b64 blob —
                 # we already emit it as an image block. spawn_browser_agent_v3
@@ -2290,6 +2331,12 @@ def convert_context_to_messages(
                     sections.append(f"Structured Response: {json.dumps(metadata['structured_response'])}")
                 system_content = _append_llm_context_sections_preserving_reference(system_content, sections)
                 messages.append({"role": "system", "content": system_content})
+            screenshot = metadata.get("screenshot_b64")
+            if isinstance(screenshot, str) and screenshot:
+                messages.append({"role": "user", "content": [
+                    {"type": "text", "text": screenshot_context_text(metadata)},
+                    {"type": "image_url", "image_url": {"url": f"data:{metadata.get('screenshot_media_type', 'image/png')};base64,{screenshot}"}},
+                ]})
 
     # Same closing provider-invariant guard build_llm_messages runs. Both
     # converters feed the same providers, so both owe the same contract:
@@ -2481,6 +2528,14 @@ async def _render_llm_messages(
         content, metadata_texts = await resolve_message_attachments(
             msg, pre_resolved_ids, render_text=render_text, require_inline=require_inline_attachments
         )
+        screenshot = metadata.get("screenshot_b64")
+        screenshot_blocks = []
+        if isinstance(screenshot, str) and screenshot:
+            screenshot_blocks = [
+                {"type": "text", "text": screenshot_context_text(metadata)},
+                {"type": "image_url", "image_url": {"url": f"data:{metadata.get('screenshot_media_type', 'image/png')};base64,{screenshot}"}},
+            ]
+            content = list(content or []) + screenshot_blocks
         attachment_labels = []
         for att_data in attachments_data:
             fp = FilePointer.from_dict(att_data) if isinstance(att_data, dict) else None
@@ -2639,7 +2694,7 @@ async def _render_llm_messages(
                     tool_content = _append_llm_context_sections_preserving_reference(tool_content, sections)
                     label = tool_name or "tool"
                     tool_content = await bounded_tool_text(f"{ts_prefix}[{label} result]: {tool_content}", attachment_labels)
-                    messages.append({"role": "user", "content": tool_content})
+                    messages.append({"role": "user", "content": ([{"type": "text", "text": tool_content}] + screenshot_blocks) if screenshot_blocks else tool_content})
                     continue
 
                 tool_content = ts_prefix + text
@@ -2667,6 +2722,8 @@ async def _render_llm_messages(
                     "name": declared_tool_calls[canonical_tool_call_id][0],
                 }
                 messages.append(tool_msg)
+                if screenshot_blocks:
+                    messages.append({"role": "user", "content": screenshot_blocks})
                 continue
 
             # Non-terminal TOOL messages are passed as context text.
@@ -3056,6 +3113,7 @@ async def call_llm_structured_streaming(
     deadline_s: Optional[float] = None,  # Override Rose top-level deadline; None uses Rose default
     ttft_timeout_s: Optional[float] = None,  # Override Rose TTFT timeout
     idle_timeout_s: Optional[float] = None,  # Override Rose idle/inter-chunk timeout (-1 disables)
+    reserved_tool_call_ids: frozenset[str] = frozenset(),  # Stored ids new tool calls must not reuse
     _exclude_anthropic_family: bool = False,  # Internal: refusal retry skips Anthropic direct/waterfall routes
     _is_escalation: bool = False,  # Internal: prevents infinite recursion on max_tokens escalation
     _parse_retry_attempt: int = 0,  # Internal: bounds re-generation on a malformed/schema-invalid structured output
@@ -3128,6 +3186,8 @@ async def call_llm_structured_streaming(
         text_buffer = ""
         hidden_stream_bytes = 0
         tool_use_blocks: List[Dict[str, Any]] = []
+        # Ids this conversation already uses; each new native call claims a unique one.
+        taken_tool_call_ids = request_tool_call_ids(messages) | reserved_tool_call_ids
 
         # Tool detection tracking (for early IN_PROGRESS messages)
         detected_tools_ordered: List[tuple] = []  # (tool_name, tool_call_id, timestamp)
@@ -3280,8 +3340,8 @@ async def call_llm_structured_streaming(
         # hit this re-streams the stored response without touching Rose/Anthropic.
         from providers.demo_cache.rose_cache import cached_complete
 
-        _stream_iter = cached_complete(
-            rose_client,
+        _stream_iter = stream_with_image_count_retry(
+            lambda **request: cached_complete(rose_client, **request),
             call_site=call_site,
             pool=pool,
             messages=messages,
@@ -3371,12 +3431,20 @@ async def call_llm_structured_streaming(
                     if not isinstance(parsed_args, dict):
                         parsed_args = {}
                     tool_name = chunk.data.get("name", "") or ""
-                    # Keep the provider's tool_use id: a schema-invalid turn is
-                    # replayed on the parse retry, and a tool_use block can only
-                    # be paired with its tool_result by id.
+                    # The provider's id, made unique within the conversation: some
+                    # models (kimi-k3) reuse ids across turns, and two declarations
+                    # sharing one id poison every later request. The same id names
+                    # the parse-retry replay, the early IN_PROGRESS row and the
+                    # persisted declaration, so tool_use/tool_result pairing holds.
+                    provider_tool_call_id = chunk.data.get("id", "") or ""
+                    native_tool_call_id = (
+                        claim_tool_call_id(provider_tool_call_id, taken_tool_call_ids)
+                        if provider_tool_call_id
+                        else ""
+                    )
                     tool_use_blocks.append(
                         {
-                            "id": chunk.data.get("id", "") or "",
+                            "id": native_tool_call_id,
                             "name": tool_name,
                             "input": parsed_args,
                         }
@@ -3388,7 +3456,7 @@ async def call_llm_structured_streaming(
 
                     # Fire on_tool_detected for non-attention tools.
                     if on_tool_detected and tool_name and tool_name not in SKIP_EARLY_PROGRESS:
-                        tool_call_id = chunk.data.get("id") or str(uuid.uuid4())
+                        tool_call_id = native_tool_call_id or str(uuid.uuid4())
                         detected_tools_ordered.append((tool_name, tool_call_id, _safe_time()))
                         position = detected_tool_positions.get(tool_name, 0)
                         detected_tool_positions[tool_name] = position + 1
@@ -3403,7 +3471,7 @@ async def call_llm_structured_streaming(
                     # send_message_to_user on the native direct-token path arrives complete; emit
                     # the full message immediately rather than streaming partials.
                     if on_attention_stream and tool_name == "send_message_to_user":
-                        attention_tool_call_id = chunk.data.get("id") or str(uuid.uuid4())
+                        attention_tool_call_id = native_tool_call_id or str(uuid.uuid4())
                         detected_tools_ordered.append(("send_message_to_user", attention_tool_call_id, _safe_time()))
                         message_text = parsed_args.get("message", "") or ""
                         is_question = parsed_args.get("is_question", True)
@@ -3703,6 +3771,7 @@ async def call_llm_structured_streaming(
                 call_site=call_site,
                 tool_choice=tool_choice,
                 context_tools=context_tools,
+                reserved_tool_call_ids=reserved_tool_call_ids,
                 _exclude_anthropic_family=_exclude_anthropic_family,
                 _is_escalation=True,
                 _parse_retry_attempt=_parse_retry_attempt,
@@ -4000,6 +4069,7 @@ async def call_llm_structured_streaming(
                     deadline_s=deadline_s,
                     ttft_timeout_s=ttft_timeout_s,
                     idle_timeout_s=idle_timeout_s,
+                    reserved_tool_call_ids=reserved_tool_call_ids,
                     _exclude_anthropic_family=_exclude_anthropic_family,
                     _is_escalation=_is_escalation,
                     _parse_retry_attempt=_parse_retry_attempt + 1,
@@ -4497,7 +4567,8 @@ async def call_llm(
                     exclude_anthropic_family=anthropic_family_excluded(),
                 )
             try:
-                rose_response = await rose_client.collect(
+                rose_response = await collect_with_image_count_retry(
+                    rose_client.collect,
                     pool=pool,
                     messages=messages,
                     response_model=response_model,
@@ -4864,7 +4935,8 @@ async def _call_llm_verifier(
         f"all verifier paths must go through check_progress, which forces rose-1-ultra."
     )
 
-    response_model = _build_verifier_response_model(response_schema)
+    require_task_completion = _task_completion_required(call_site)
+    response_model = _build_verifier_response_model(response_schema, require_task_completion=require_task_completion)
 
     accumulated_reasoning = ""
     accumulated_json = ""
@@ -4951,8 +5023,8 @@ async def _call_llm_verifier(
 
     try:
         # Fast Mode record/replay (verifier path).
-        async for chunk in cached_complete(
-            rose_client,
+        async for chunk in stream_with_image_count_retry(
+            lambda **request: cached_complete(rose_client, **request),
             call_site=call_site,
             pool=pool,
             messages=messages,
@@ -5009,6 +5081,9 @@ async def _call_llm_verifier(
                 stream_usage = dict(chunk.data)
             elif kind == "done":
                 pass
+    except RoseRefusalError:
+        # A provider refusal invalidates any preceding partial verdict.
+        raise
     except RoseError as e:
         provider_error = e
         logger.warning(
@@ -5065,7 +5140,7 @@ async def _call_llm_verifier(
     verdict_model = (
         response_model
         if _verifier_verdict_claims_completion(parsed_json)
-        else _build_verifier_response_model(response_schema, completion_verdict=False)
+        else _build_verifier_response_model(response_schema, completion_verdict=False, require_task_completion=require_task_completion)
     )
     parsed = _validate_verifier_response(verdict_model, parsed_json)
 
@@ -5760,10 +5835,46 @@ def _completed_child_task_structured_response(
     return handoff[0] if handoff else None
 
 
+_TASK_COMPLETION_DIRECTIVE = """
+# Task completion verdict
+The numeric score continues to measure how completely the required output can
+be extracted. Separately return task_completed as a boolean: true only when
+grounded evidence establishes that the user's requested work is completed.
+Assess the original goal and later task updates, not output truthiness or field
+coverage. A correct negative answer can complete an information request; a
+field accurately reporting that a requested action was not done does not make
+that action complete. Preserve the existing explicit user-refusal rule.
+Keep accurate partial or negative output even when task_completed is false.
+""".strip()
+
+
+def _task_completion_required(call_site: str) -> bool:
+    # Planning and field-recovery checks do not declare the user task complete.
+    return call_site not in {"verifier_plan", "semantic_output_field_recovery_judge"}
+
+
+def _admit_task_completion(result: Dict[str, Any]) -> Dict[str, Any]:
+    """Keep extraction data while requiring the separate completion verdict."""
+    admitted = dict(result)
+    extraction_score = result["score"]
+    verdict = result.get("task_completed")
+    completed = verdict is True
+    admitted["extraction_score"] = extraction_score
+    admitted["task_completed"] = verdict if type(verdict) is bool else None
+    if not completed:
+        admitted["score"] = min(float(extraction_score), 0.5)
+        admitted["reasoning"] = (
+            str(result.get("reasoning") or "")
+            + "\n\nThe separate task-completion verdict is not true; extracted output alone does not complete the task."
+        ).strip()
+    return admitted
+
+
 def _build_verifier_response_model(
     response_schema: Optional[Dict[str, Any]] = None,
     *,
     completion_verdict: bool = True,
+    require_task_completion: bool = False,
 ) -> Type[BaseModel]:
     """Build the verifier's Pydantic contract for RoseClient.complete.
 
@@ -5807,6 +5918,10 @@ def _build_verifier_response_model(
             ),
         ),
     )
+    if require_task_completion:
+        fields["task_completed"] = (
+            StrictBool, Field(..., description="Whether the requested task was completed, independently of output extraction completeness."),
+        )
     fields["score"] = (
         float,
         Field(..., description="Final numeric commitment from 0.0 to 1.0."),
@@ -6042,9 +6157,11 @@ def _validate_verifier_response(response_model: Type[BaseModel], parsed_json: An
             or any(not error.get("loc") or error["loc"][0] != "output" for error in errors)
         ):
             raise
-        verdict = _build_verifier_response_model(None).model_validate(
-            {"reasoning": parsed_json.get("reasoning"), "score": parsed_json.get("score")}
-        )
+        require_task_completion = "task_completed" in response_model.model_fields
+        verdict_fields = {"reasoning": parsed_json.get("reasoning"), "score": parsed_json.get("score")}
+        if require_task_completion:
+            verdict_fields["task_completed"] = parsed_json.get("task_completed")
+        verdict = _build_verifier_response_model(None, require_task_completion=require_task_completion).model_validate(verdict_fields)
         violations = "; ".join(f"{'.'.join(str(part) for part in error['loc'])}: {error['msg']}" for error in errors)
         logger.warning(
             "Verifier output violates the response schema; treating as rejection", violations=violations[:300]
@@ -6055,10 +6172,11 @@ def _validate_verifier_response(response_model: Type[BaseModel], parsed_json: An
                 f"output schema ({violations}), so completion cannot pass yet."
             ),
             "score": min(float(verdict.score), 0.5),
+            **({"task_completed": verdict.task_completed} if require_task_completion else {}),
         }
 
 
-def _build_verifier_json_schema(response_schema: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+def _build_verifier_json_schema(response_schema: Optional[Dict[str, Any]] = None, *, require_task_completion: bool = False) -> Dict[str, Any]:
     """
     Build a JSON schema for the verifier response.
 
@@ -6130,6 +6248,12 @@ def _build_verifier_json_schema(response_schema: Optional[Dict[str, Any]] = None
     }
     required.append("reasoning")
 
+    if require_task_completion:
+        properties["task_completed"] = {
+            "type": "boolean",
+            "description": "Whether the requested task was completed, independently of output extraction completeness.",
+        }
+        required.append("task_completed")
     properties["score"] = {
         "type": "number",
         "description": "Final numeric commitment from 0.0 to 1.0.",
@@ -6194,6 +6318,24 @@ VERIFIER_ATTEMPT_DEADLINE_S = 180.0
 VERIFIER_TTFT_TIMEOUT_S = 60.0
 VERIFIER_IDLE_TIMEOUT_S = 90.0
 VERIFIER_TOTAL_TIMEOUT_S = 420.0
+
+
+def _browser_verifier_text_evidence(messages: list, call_site: str) -> dict:
+    """Pair a browser judgment with its already-admitted textual input only."""
+    if call_site not in {"verifier_browser", "verifier_browser_max_steps"}:
+        return {}
+    texts = []
+    for message in messages:
+        if not isinstance(message, dict) or message.get("role") != "user":
+            continue
+        content = message.get("content")
+        if isinstance(content, str):
+            texts.append(content)
+        elif isinstance(content, list):
+            texts.extend(block["text"] for block in content
+                         if isinstance(block, dict) and block.get("type") == "text"
+                         and isinstance(block.get("text"), str))
+    return {"browser_verifier_input": {"call_site": call_site, "texts": texts}} if texts else {}
 
 
 @activity.defn
@@ -6288,6 +6430,10 @@ async def check_progress(
         - ``structured_response`` (dict | None): always returned as
             ``result["output"]`` regardless of score — callers decide what
             to do with partial output (C2).
+        - ``task_completed`` / ``extraction_score``: task-completion checks
+            retain the strict verdict and original extraction score. The public
+            ``score`` cannot reach 1.0 unless ``task_completed is True``.
+            Planning and field-recovery checks keep their existing scoped contracts.
         - ``verdict_available`` / ``judge_error``: only on the error path,
             where no judge verdict was produced and ``score`` is the 0.5
             keep-running placeholder. ``verdict_available`` is ``False`` and
@@ -6298,6 +6444,7 @@ async def check_progress(
     # Fast Mode: set the cache context so the verifier's Rose call (via
     # _call_llm_verifier → cached_complete) records/replays by canonical request
     # fingerprint. Prompt/schema/message changes intentionally miss.
+    require_task_completion = _task_completion_required(call_site)
     write_through_enabled = write_through_enabled_for_user(claude_token_user_id or gpt_token_user_id)
     demo_cache_should_write = fast_mode_cache_enabled or write_through_enabled
     if fast_mode_goal and demo_cache_should_write:
@@ -6386,39 +6533,12 @@ async def check_progress(
 
         _safe_heartbeat("Checking progress with LLM judge")
 
-        if call_site == "verifier_execute" and schema_for_call:
-            completed_child_output = _completed_child_task_structured_response(context, schema_for_call)
-            if completed_child_output is not None:
-                field_names = _schema_field_names(schema_for_call)
-                reasoning = (
-                    "A completed child task returned a grounded structured response "
-                    f"covering the required fields: {', '.join(field_names)}."
-                )
-                logger.info(
-                    "Progress satisfied by completed child task structured response",
-                    fields=field_names,
-                    call_site=call_site,
-                )
-                return {
-                    "score": 1.0,
-                    "reasoning": reasoning,
-                    "message": f"{reasoning}\n\nScore: 1.0",
-                    "usage": {
-                        "prompt_tokens": 0,
-                        "completion_tokens": 0,
-                        "total_tokens": 0,
-                        "actual_model": "structured_response",
-                        "pool_name": "completed_child_task",
-                        "cache_creation_input_tokens": 0,
-                        "cache_read_input_tokens": 0,
-                        "claude_token_error": None,
-                        "gpt_token_error": None,
-                    },
-                    "structured_response": completed_child_output,
-                }
-
+        # Child output is evidence for this task, not a substitute for its completion verdict.
         config = load_config()
+        require_task_completion = _task_completion_required(call_site)
         system_prompt = verifier_system_prompt
+        if require_task_completion:
+            system_prompt += "\n\n" + _TASK_COMPLETION_DIRECTIVE
         verifier_dump_extra = {
             **_extract_browser_recording_dump_extra(context),
             **(dump_extra or {}),
@@ -6504,6 +6624,7 @@ async def check_progress(
                     _ctx = _fm_ctx()
                     if (
                         fast_mode_cache_enabled
+                        and not require_task_completion
                         and soft_complete_on_miss(call_site) is not None
                         and (_ctx.soft_complete_allowed if _ctx is not None else False)
                     ):
@@ -6554,6 +6675,8 @@ async def check_progress(
                 else:
                     raise last_error
 
+        if require_task_completion:
+            result = _admit_task_completion(result)
         score = result["score"]
         # C3: score_reasoning is gone. Read only `reasoning` now.
         reasoning = result.get("reasoning", "")
@@ -6581,7 +6704,7 @@ async def check_progress(
         # agent loops until the activity times out (verify18 leaves). Promote
         # any from_fast_cache reject to a soft-pass so the tree can finish at
         # 100% hits / ~$0 instead of hanging ACTIVE.
-        if fast_mode_cache_enabled and float(score or 0) < 1.0 and bool((usage or {}).get("from_fast_cache")):
+        if not require_task_completion and fast_mode_cache_enabled and float(score or 0) < 1.0 and bool((usage or {}).get("from_fast_cache")):
             from providers.demo_cache.context import current_context as _fm_ctx
             from providers.demo_cache.rose_cache import soft_complete_on_miss as _fm_soft
 
@@ -6609,11 +6732,13 @@ async def check_progress(
                 }
 
         return {
+            **_browser_verifier_text_evidence(messages, call_site),
             "score": score,
             "reasoning": reasoning,
             "message": f"{reasoning}\n\nScore: {score}",
             "usage": usage,
             "structured_response": structured_response,
+            **({"task_completed": result["task_completed"], "extraction_score": result["extraction_score"]} if require_task_completion else {}),
         }
     except Exception as e:
         error_message = extract_error_message(e)
@@ -6627,6 +6752,7 @@ async def check_progress(
         _ctx = _fm_ctx()
         if (
             fast_mode_cache_enabled
+            and not require_task_completion
             and _fm_soft(call_site) is not None
             and (_ctx.soft_complete_allowed if _ctx is not None else False)
         ):
@@ -6804,6 +6930,10 @@ async def call_llm_activity(
 
         # Resolve messages: either pre-built or build from shared context
         _context_key = None
+        # Every tool-call id the stored context holds. The request below omits a
+        # declaration whose result was never written, but the next build still
+        # registers it, so a new provider tool call must not reuse its id.
+        stored_tool_call_ids: set[str] = set()
         if isinstance(messages_or_agent_id, str):
             _context_key = messages_or_agent_id
             pending = (
@@ -6818,6 +6948,7 @@ async def call_llm_activity(
                 else:
                     context, _sys_prompt, pre_resolved_ids = pending
                     pending_user_id = user_id
+                stored_tool_call_ids = context_tool_call_ids(context)
                 messages = await build_llm_messages(
                     context,
                     _sys_prompt,
@@ -6841,6 +6972,7 @@ async def call_llm_activity(
                 )
                 data = await _fetch_agent_data_impl(_context_key)
                 context = data.get("messages", [])
+                stored_tool_call_ids = context_tool_call_ids(context)
                 messages = await build_llm_messages(
                     context,
                     system_prompt,
@@ -7021,6 +7153,7 @@ async def call_llm_activity(
                 skip_cache_write=skip_cache_write,
                 cache_sequence_id=cache_sequence_id,
                 tool_choice={"name": required_tool} if required_tool else None,
+                reserved_tool_call_ids=frozenset(stored_tool_call_ids),
                 # Without this the agent loop's refusal reroute dies at the activity boundary:
                 # every retry goes back to the model that just refused, so one refusal becomes a
                 # guaranteed 3-strikes kill instead of a provider switch.
@@ -7315,6 +7448,11 @@ async def set_response_schema_activity(
                         {"schema": schema, "title": title, "usage": usage},
                         goal=goal,
                     )
+            # Persist/return the public schema vocabulary; remote verifiers apply
+            # their own public-to-session conversion after dispatch.
+            from helpers.file_resolution import restore_schema_from_remote_session
+
+            schema = restore_schema_from_remote_session(schema)
             title = mass_agent_root_title(goal, include_title, title)
             generate_elapsed = time.perf_counter() - generate_start
             logger.info(

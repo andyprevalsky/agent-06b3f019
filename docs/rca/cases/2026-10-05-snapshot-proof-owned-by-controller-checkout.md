@@ -11,6 +11,8 @@ symptoms:
   - warm snapshot dep trees unproven/stale
   - healing warm snapshot (dep trees)
   - fresh checkout unnecessarily rebuilt and snapshotted reusable dependencies
+  - snapshot epoch exact snapshot absent
+  - warm snapshot freshness could not be verified; refusing maintenance
 tags:
   - cloudbench
   - dependencies
@@ -20,8 +22,10 @@ tags:
 sources:
   - commit 813bdbfe28077fe904e960b614be686083dce846
   - fleet run 20261005-091438-84183
+  - commit 7b89e7902998fd49773a5b4273acd9e9678f22e1
+  - fleet run 20261027-211452-477248
 repro: agents/benchmarks/cloudbench_dependency_sync_test.py::test_fresh_controller_reuses_only_proven_donor_dependencies
-status: fixed
+status: open
 ---
 
 ## Problem
@@ -184,3 +188,72 @@ cemented regression coverage rather than a new massive verification scheme.
 ## Reusable lesson
 
 Store verified cache provenance with the remote artifact owner and restore local receipts through the normal CLI before rebuilding it.
+
+## Recurrence — legacy local proof still re-read selected snapshot epoch (2026-10-27)
+
+Polar k2 iteration3 source `7b89e7902998fd49773a5b4273acd9e9678f22e1` stopped
+before task allocation. Three first-bad controllers were r001-j0008/BU008
+(fleet20261027-211452-477248), r002-j0019/BU004 (477307), and
+r002-j0023/BU008 (477383). All logged donor `683e47df5094d8`, then
+`using recorded proven snapshot: vs_a56XkOMV2e9hmLg8BppZ`, then
+`snapshot epoch exact snapshot absent` and freshness refusal. Their owned
+clone inventories are empty. Do not change the original infrastructure verdict
+or count recovered admission as a task PASS.
+
+The selected local receipt contains exact snapshot ID and dependency hashes,
+with epoch1792995448. The selection branch at this source only emits that
+message after finding the ID in the initial volume list with complete status,
+positive size, and creation timestamp. None of the three logs contains either
+message emitted by successful remote proof hydration. Thus, by the exact
+source control flow, these copies entered the local-receipt epoch branch and
+made a second list read. That read parsed as a list but lacked the selected ID.
+This is a control-flow deduction from preserved logs, not recovered raw bytes.
+
+The underlying native omission remains unknown: the controller did not save
+snapshot-list raw responses, return codes, stderr, or which epoch input path
+ran. A later operator native read reportedly saw the snapshot on
+`vol_vwnym366kn7k8mmv` attached to the same donor, but its raw snapshot bytes
+were not saved either. It does not prove transient concurrency, pagination,
+or any particular provider cause. The saved later volume list only establishes
+that observed donor/volume association at its own time.
+
+The prior captured-inventory repair covered remote hydrated proof but retained
+the redundant read when the valid dependency receipt came from the legacy local
+slot. This is the remaining branch of the same observation-consistency defect.
+The repair uses the already captured selected inventory for its epoch
+regardless of receipt location. Exact snapshot ID, dependency fingerprints,
+status/positive-size selection and epoch comparison remain unchanged. A pinned
+path with no captured list still reads live; a newly created refresh snapshot
+still receives both live epoch and completion verification. No global cache,
+new retry, fabricated timestamp, relaxed age, task or provider mutation is added.
+
+The registered regression uses the real extracted preflight/epoch functions
+with a valid local receipt and no matching donor metadata. Its first list
+contains the selected complete snapshot; its second read fails, is empty, or
+malformed. Unchanged source fails all three cases in4.40s, including the exact
+absent-ID error for the empty list. The same assertions pass against the
+reviewed repair. Nineteen focused cases pass in2.51s, including existing hydrated,
+pinned, wrong donor/volume/manifests, pending/expired and live post-refresh
+controls. Evidence and exact patch are in `.context/polar-i13/`.
+
+Opened grounding: the existing selection and hydrated preflight mechanism
+above; Codex `14ff9c3a43ebf9bf543cf5f7c45cff2bfea2e512`,
+`codex-rs/config/src/requirements_layers/stack.rs:104-118` resolves hostname
+once per composition to keep every layer on the same observation. The proposed
+inventory lifetime is similarly one selection/preflight transaction. OpenClaw
+`76ddbf697fc263cc1bf89fe3f4d08d96ed4a43af`,
+`src/infra/backup-archive-publication.ts:75-120,185+` refreshes identity for
+mutating publication; corresponding Rose post-refresh live checks are retained.
+These are observation-consistency analogs, not authority to loosen Fly identity.
+
+Independent review by ph74rex3pescaywbxyjn3njr158h3pp9 returned GROUNDED
+for patch SHA256 0b76a24eb2710a93737cc83a2ffc0324d83efcc2c1c180085e0f382ff7a8e847.
+Additional snapshot/pin/private-source controls passed 168 cases in39.56s.
+The exact applied source then passed the combined 187 cases in41.66s; Bash
+syntax and the archive validator also passed. Runtime and test bytes were
+compared with a fresh application of the reviewed patch to the frozen base.
+The recurrence remains open pending the unchanged cohort outcome; the earlier
+fixed status did not cover this local-receipt branch. No
+paid benchmark, deployment or native resource mutation was performed. The next
+parent-coordinated unchanged cohort must prove admission and actual outcomes;
+these deterministic controls do not establish a task PASS.

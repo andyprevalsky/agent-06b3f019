@@ -734,6 +734,37 @@ def cleanup_ticket_command(root: Path, action: str, cohort: dict[str, object],
     return getattr(module, action)(args)
 
 
+def cleanup_ticket_failure_detail(error: BaseException) -> dict[str, object]:
+    """Keep bounded diagnostic identity without exception payloads or paths."""
+    reasons = {
+        "cleanup parent identity changed": "parent_identity_changed",
+        "invalid cleanup ticket policy": "invalid_policy",
+        "invalid cleanup cohort membership": "invalid_membership",
+        "invalid cleanup member": "invalid_member",
+        "cleanup parent lock not held": "parent_lock_not_held",
+        "changed incomplete cleanup grant": "incomplete_grant_changed",
+        "insufficient physical cleanup cohort floors": "insufficient_physical_floors",
+        "cleanup member ticket changed": "member_ticket_changed",
+    }
+    category = next((kind.__name__ for kind in (
+        subprocess.CalledProcessError, subprocess.TimeoutExpired,
+        subprocess.SubprocessError, OSError, ValueError,
+    ) if isinstance(error, kind)), "Exception")
+    message = error.args[0] if error.args and type(error.args[0]) is str else ""
+    if isinstance(error, OSError) and type(error.strerror) is str:
+        message = error.strerror
+    reason = reasons.get(message) if type(error) is ValueError else None
+    detail: dict[str, object] = {"error_class": category, "reason_code": reason or "unknown"}
+    number = getattr(error, "errno", None)
+    if isinstance(error, OSError) and type(number) is int and 0 < number < 4096:
+        detail["errno"] = number
+    if reason is None:
+        detail["message_prefix_sha256"] = hashlib.sha256(
+            message[:4096].encode("utf-8", errors="replace")
+        ).hexdigest()
+    return detail
+
+
 def stress_inventory_baseline(root: Path, authority: str) -> tuple[int, list[dict[str, object]] | None]:
     """Borrow the exact parent feed with existing checks; temporary absence never fans out."""
     expected = json.loads(authority)
@@ -1112,8 +1143,9 @@ RELAY_METADATA_ATTEMPTS = 3
 
 
 def read_relay_app_metadata(app: str, workspace: Path, environment: dict,
-                            deadline: float | None) -> subprocess.CompletedProcess:
-    """Read-only `flyctl status`; a transient Fly API stall gets bounded retries within the deadline."""
+                            deadline: float | None, *, source_root: Path | None = None) -> subprocess.CompletedProcess:
+    """Read only the native App identity, with bounded retries within the campaign deadline."""
+    reader = (source_root or workspace) / "scripts/cloudbench-campaign-machines.py"
     for attempt in range(1, RELAY_METADATA_ATTEMPTS + 1):
         timeout = RELAY_METADATA_TIMEOUT
         if deadline is not None:
@@ -1121,17 +1153,17 @@ def read_relay_app_metadata(app: str, workspace: Path, environment: dict,
             if timeout <= 0:
                 raise ValueError('shared transport app metadata unavailable before the campaign deadline')
         try:
-            metadata = subprocess.run(['flyctl', 'status', '-a', app, '--json'], cwd=workspace,
-                                      env=environment, capture_output=True, timeout=timeout)
+            metadata = subprocess.run([sys.executable, '-S', str(reader), app, str(timeout), '--app-metadata'],
+                                      cwd=workspace, env=environment, capture_output=True, timeout=timeout)
         except subprocess.TimeoutExpired:
             if attempt == RELAY_METADATA_ATTEMPTS:
                 raise
-            print(f'[campaign] flyctl status timed out after {timeout:.0f}s; retry {attempt}/{RELAY_METADATA_ATTEMPTS - 1}',
+            print(f'[campaign] App metadata read timed out after {timeout:.0f}s; retry {attempt}/{RELAY_METADATA_ATTEMPTS - 1}',
                   file=sys.stderr)
             continue
         if metadata.returncode == 0 or attempt == RELAY_METADATA_ATTEMPTS:
             return metadata
-        print(f'[campaign] flyctl status exited {metadata.returncode}; retry {attempt}/{RELAY_METADATA_ATTEMPTS - 1}',
+        print(f'[campaign] App metadata read exited {metadata.returncode}; retry {attempt}/{RELAY_METADATA_ATTEMPTS - 1}',
               file=sys.stderr)
     raise AssertionError('unreachable')
 
@@ -1154,7 +1186,7 @@ def _start_shared_relay(root: Path, campaign_dir: Path, workspace: Path,
     """Start a request-owned relay only after provider preflight succeeds."""
     ref = subprocess.check_output(['git', '-C', str(root), 'rev-parse', 'HEAD'], text=True).strip()
     checked = {}
-    for relative in ['scripts/cloudbench-shared-relay.py', 'scripts/lib/cloudbench-inventory.sh', 'scripts/run-bench-cloud', 'scripts/run-bench-fleet']:
+    for relative in ['scripts/cloudbench-shared-relay.py', 'scripts/cloudbench-campaign-machines.py', 'scripts/lib/cloudbench-inventory.sh', 'scripts/run-bench-cloud', 'scripts/run-bench-fleet']:
         raw = subprocess.check_output(['git', '-C', str(root), 'show', ref + ':' + relative])
         if (root / relative).read_bytes() != raw:
             raise ValueError('shared relay source differs from reviewed controller')
@@ -1179,7 +1211,8 @@ def _start_shared_relay(root: Path, campaign_dir: Path, workspace: Path,
     agent_socket = directory / 'fly-agent.sock'
     environment['FLY_AGENT_SOCKET_PATH'] = str(agent_socket)
     environment['FLY_AGENT_ISOLATED'] = '1'
-    metadata = read_relay_app_metadata(app, workspace, environment, deadline)
+    environment['CLOUDBENCH_INVENTORY_PHASE_FILE'] = str(directory / 'app-metadata-phase.private')
+    metadata = read_relay_app_metadata(app, workspace, environment, deadline, source_root=root)
     metadata_path = directory / 'app-metadata.private.json'
     metadata_path.write_bytes(metadata.stdout); metadata_path.chmod(0o600)
     if metadata.returncode: raise ValueError('shared transport app metadata unavailable')
@@ -2247,11 +2280,12 @@ def main() -> int:
                     if not current_cohort.get("_cleanup_tickets_prepared"):
                         try:
                             prepare_cleanup_tickets(current_cohort)
-                        except (OSError, ValueError, subprocess.SubprocessError):
+                        except (OSError, ValueError, subprocess.SubprocessError) as error:
                             # End through normal summary/Hub finalization, never a traceback.
                             first_failure = first_failure or 1
                             barrier_failure = True
                             state["cleanup_ticket_failure"] = "prepare"
+                            state["cleanup_ticket_failure_detail"] = cleanup_ticket_failure_detail(error)
                             abort_startup_cohort(current_cohort, "cleanup ticket preparation failed before child admission")
                             write_json_atomic(summary_path, state)
                             continue

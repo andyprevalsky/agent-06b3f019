@@ -1,6 +1,9 @@
 """A canceled composite run may retire only from exact quiesced receipts."""
 
 import hashlib
+import copy
+import shutil
+import subprocess
 import io
 import os
 import sys
@@ -155,6 +158,169 @@ class StoppedArchiveExtensionTest(unittest.TestCase):
     def test_rewritten_original_prefix_cannot_borrow_earlier_receipt(self):
         with self.assertRaises(AssertionError):
             self.verify(b"rewritten\n" + self.backend)
+
+
+    def capture_fixture(self):
+        capture = load("capture_append", ROOT / "scripts/cloudbench-original-volume-capture.py")
+        state = {
+            "schema_version": "cloudbench-guest-state-v1", "version": 1,
+            "machine_id": self.args.machine_id, "guest_run_token": self.args.guest_run_token,
+            "state": "active", "driver_state": "running", "driver_pid": 123,
+            "driver_token_match": True,
+            "backend_log": {"exists": True, "regular": True, "symlink": False,
+                            "within_limit": True, "bytes": len(self.backend)},
+            "services_manifest": {"exists": True, "bytes": 2},
+            "run_json": {"exists": True, "bytes": 2},
+        }
+        (self.out / "guest-cleanup.state.json").write_text(json.dumps(state))
+        ident = {"owner": self.args.owner, "run_id": self.args.fleet_run_id,
+                 "bench": self.args.bench, "machine_id": self.args.machine_id,
+                 "token": self.args.guest_run_token}
+        originals = {"repo/.context/cloudbench/services.json": b"{}",
+                     "repo/.context/cloudbench/run.json": b"{}",
+                     "repo/.context/cloudbench/logs/backend.log": self.backend}
+        return capture, state, ident, originals
+
+    def test_capture_cross_check_admits_bound_stopped_backend_append(self):
+        capture, state, ident, originals = self.capture_fixture()
+        tail = b"[Server] SIGTERM received, closing server...\n"
+        originals["repo/.context/cloudbench/logs/backend.log"] += tail
+        before = {path.name: path.read_bytes() for path in self.out.iterdir() if path.is_file()}
+        checks = capture.cross_check_receipts(self.out, ident, originals)
+        self.assertEqual(before, {path.name: path.read_bytes() for path in self.out.iterdir() if path.is_file()})
+        proof = checks["backend_log_append"]
+        self.assertEqual(proof["prior_sha256"], hashlib.sha256(self.backend).hexdigest())
+        self.assertEqual(proof["captured_sha256"], hashlib.sha256(self.backend + tail).hexdigest())
+        self.assertEqual(proof["appended_sha256"], hashlib.sha256(tail).hexdigest())
+        self.assertEqual(proof["appended_bytes"], len(tail))
+        self.assertEqual(proof["kind"], "stopped-provider-backend-extension")
+        for name in ("guest-cleanup.state.json", "guest-cleanup.provider-manifest.json"):
+            self.assertEqual(checks[name], hashlib.sha256((self.out/name).read_bytes()).hexdigest())
+
+    def test_capture_cross_check_keeps_exact_nonappend_contract(self):
+        capture, state, ident, originals = self.capture_fixture()
+        self.assertNotIn("backend_log_append", capture.cross_check_receipts(self.out, ident, originals))
+        for name in ("repo/.context/cloudbench/run.json", "repo/.context/cloudbench/services.json"):
+            changed = dict(originals, **{name: b"{}\n"})
+            with self.subTest(name=name), self.assertRaises(capture.CaptureFailure):
+                capture.cross_check_receipts(self.out, ident, changed)
+
+    def test_capture_backend_append_rejects_rewrite_growth_and_new_ownership(self):
+        capture, state, ident, originals = self.capture_fixture()
+        for tail in (
+            b"Created Kernel browser session sessionId=kernel_late123\n",
+            b"model=BrowserSession operation=update\n",
+            b"[HTTP] POST /api/agents -> 201\n",
+            b"model=AgentPayment operation=create\n",
+            b"invalid-utf8-\xff\n", b"incomplete-line",
+            b"x" * (1024 * 1024) + b"\n",
+        ):
+            with self.subTest(tail=tail[:50]), self.assertRaises(capture.CaptureFailure):
+                capture.cross_check_receipts(self.out, ident, dict(originals, **{
+                    "repo/.context/cloudbench/logs/backend.log": self.backend + tail}))
+        for changed in (self.backend[:-1], b"rewrite" + self.backend[7:], b"rewrite\n" + self.backend):
+            with self.subTest(change=changed[:20]), self.assertRaises(capture.CaptureFailure):
+                capture.cross_check_receipts(self.out, ident, dict(originals, **{
+                    "repo/.context/cloudbench/logs/backend.log": changed}))
+
+    def test_capture_backend_append_requires_original_body_and_stopped_receipts(self):
+        capture, state, ident, originals = self.capture_fixture()
+        originals["repo/.context/cloudbench/logs/backend.log"] += b"[Server] SIGTERM received, closing server...\n"
+        saved = {path: path.read_bytes() for path in self.out.iterdir() if path.is_file()}
+        for name in ("guest-cleanup.backend.log", "guest-cleanup.machine-stopped.json",
+                     "guest-cleanup.machine-status.txt", "guest-cleanup.recovery-receipt.json",
+                     "guest-cleanup.provider-manifest.json"):
+            path = self.out/name
+            with self.subTest(missing=name):
+                path.unlink()
+                with self.assertRaises(capture.CaptureFailure):
+                    capture.cross_check_receipts(self.out, ident, originals)
+                path.write_bytes(saved[path])
+        for field, value in (("version", True), ("state", "exited"), ("driver_state", "exited"),
+                             ("driver_token_match", False), ("driver_pid", None),
+                             ("machine_id", "c"*14), ("guest_run_token", "other-token")):
+            with self.subTest(field=field):
+                (self.out/"guest-cleanup.state.json").write_text(json.dumps(dict(state, **{field: value})))
+                with self.assertRaises(capture.CaptureFailure):
+                    capture.cross_check_receipts(self.out, ident, originals)
+        (self.out/"guest-cleanup.state.json").write_text(json.dumps(state))
+        old_body = self.out/"guest-cleanup.backend.log"
+        old_body.write_bytes(b"X" + self.backend[1:])
+        with self.assertRaises(capture.CaptureFailure):
+            capture.cross_check_receipts(self.out, ident, originals)
+        old_body.write_bytes(saved[old_body])
+        for name, field, value in (("guest-cleanup.provider-manifest.json", "version", True),
+                                   ("guest-cleanup.provider-manifest.json", "kind", "provider-exact-manifest"),
+                                   ("guest-cleanup.provider-manifest.json", "fleet_owner_token", "c"*32),
+                                   ("guest-cleanup.provider-manifest.json", "root_agent_id", "d"*32),
+                                   ("guest-cleanup.machine-stopped.json", "machine_id", "c"*14),
+                                   ("guest-cleanup.recovery-receipt.json", "results", [])):
+            path=self.out/name
+            row=json.loads(saved[path])
+            row[field]=value
+            path.write_text(json.dumps(row))
+            with self.subTest(changed=name), self.assertRaises(capture.CaptureFailure):
+                capture.cross_check_receipts(self.out, ident, originals)
+            path.write_bytes(saved[path])
+
+
+    def test_capture_publishes_append_proof_without_changing_old_receipts(self):
+        capture, state, ident, originals = self.capture_fixture()
+        originals["repo/.context/cloudbench/logs/backend.log"] += b"[Server] SIGTERM received, closing server...\n"
+        originals["bench.log"] = ("RUNSTAMP-" + ident["token"] + "\n").encode()
+        encoded = io.BytesIO()
+        with tarfile.open(fileobj=encoded, mode="w:gz") as archive:
+            for name, data in originals.items():
+                member = tarfile.TarInfo(name)
+                member.size = len(data)
+                archive.addfile(member, io.BytesIO(data))
+        payload = encoded.getvalue()
+        directory = self.out/"capture"
+        directory.mkdir(mode=0o700)
+        downloaded = directory/"download.unverified"
+        downloaded.write_bytes(payload)
+        inventory = {"version": 1, "run_token": ident["token"], "archive_bytes": len(payload),
+                     "archive_sha256": hashlib.sha256(payload).hexdigest(), "missing": [],
+                     "files": {name: {"bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()}
+                               for name, data in originals.items()}}
+        config = {"init": {"cmd": ["bash", "/cloudbench-boot.sh"]}}
+        initial = {"id": ident["machine_id"], "state": "stopped", "instance_id": "instance", "config": copy.deepcopy(config)}
+        calls = []
+        class NativeFixture:
+            current = copy.deepcopy(initial)
+            def machine(self, machine_id):
+                self_outer.assertEqual(machine_id, ident["machine_id"])
+                return copy.deepcopy(self.current)
+            def volume(self, volume_id):
+                return {"id": volume_id, "state": "created", "attached_machine_id": ident["machine_id"]}
+            def api(self, method, path, body=None):
+                self_outer.assertEqual(method, "POST")
+                calls.append(path)
+                if path.endswith("/start"):
+                    self.current["state"] = "started"
+                elif path.endswith("/stop"):
+                    self.current["state"] = "stopped"
+                else:
+                    self.current["config"] = copy.deepcopy(body["config"])
+        self_outer = self
+        ident.update(volume_id="vol_fixture", kind="clone", clone_name=self.args.clone_name, app="fixture-app", ordinal=0, out=self.out)
+        artifacts = {name: directory/(ident["machine_id"]+"."+name) for name in (
+            "tar.gz", "provenance.json", "original-config.private.json", "capture-failure.json")}
+        before = {path.name: path.read_bytes() for path in self.out.iterdir() if path.is_file()}
+        with patch.dict(capture.mutate_and_capture.__globals__, {
+            "guest_capture": lambda *args: (downloaded, inventory),
+        }):
+            result = capture.mutate_and_capture(NativeFixture(), ident,
+                argparse.Namespace(wait_seconds=5, attempts=1, ssh_seconds=5), directory, artifacts, initial, config)
+        self.assertEqual(result, 0)
+        proof = json.loads(artifacts["provenance.json"].read_bytes())
+        append = proof["receipt_cross_checks"]["backend_log_append"]
+        self.assertEqual(append["captured_sha256"], inventory["files"]["repo/.context/cloudbench/logs/backend.log"]["sha256"])
+        self.assertEqual(proof["proof_credit"], 0)
+        self.assertIs(proof["native_release_verified"], False)
+        self.assertEqual(calls, ["/machines/"+ident["machine_id"], "/machines/"+ident["machine_id"]+"/start",
+                                 "/machines/"+ident["machine_id"]+"/stop", "/machines/"+ident["machine_id"]])
+        self.assertEqual(before, {path.name: path.read_bytes() for path in self.out.iterdir() if path.is_file()})
 
 
 bootstrap_test = load("bootstrap_test", ROOT / "scripts/tests/cloudbench-bootstrap-recovery.test.py")
@@ -334,6 +500,352 @@ class PreServiceArchiveTest(unittest.TestCase):
         manifest_path.write_text(json.dumps(manifest))
         return retirement.verify(f.registry, f.run, manifest_path, archive, f.machines, f.volumes,
                                  archive_only=True)
+
+    def native_builder_fixture(self):
+        # Start with the existing full consumer fixture, including real worker
+        # capture and source recipe. Replace only its hand-built outer packet.
+        self.generic()
+        f = self.fixture
+        shutil.rmtree(f.run / "_forensic")
+        f.captures.mkdir(exist_ok=True)
+        machine = bootstrap_test.MACHINE
+        raw = self.originals["original-volume-capture.tar.gz"]
+        config = self.originals["original-native-config.json"] + b"\n"
+        legacy = json.loads(self.originals["original-capture-manifest.json"])
+        proof = dict(
+            schema="cloudbench-original-volume-capture-v1", version=1,
+            kind="original-volume-inert-capture", direct_original_volume=True,
+            proof_credit=0, native_release_verified=False,
+            fleet_owner_token=bootstrap_test.OWNER, run_id=bootstrap_test.RUN,
+            app=bootstrap_test.APP, bench=bootstrap_test.BENCH, ordinal=0,
+            allocation_kind="clone", guest_run_token=bootstrap_test.TOKEN,
+            machine_id=machine, source_machine_id=machine,
+            volume_id=bootstrap_test.VOLUME, source_volume_id=bootstrap_test.VOLUME,
+            archive_name=machine + ".tar.gz", archive_bytes=len(raw),
+            archive_sha256=hashlib.sha256(raw).hexdigest(),
+            files=legacy["files"], missing=legacy["missing"],
+            native_original_config_sha256=hashlib.sha256(json.dumps(
+                json.loads(config), sort_keys=True, separators=(",", ":")).encode()).hexdigest(),
+            native_final_state="stopped", native_final_volume_state="created",
+            inert_command=["sleep", "infinity"], guest_inert_sleepers=1,
+            provider_mutations=["config-inert", "start", "stop", "config-restore"],
+        )
+        for suffix, data in (("tar.gz", raw), ("original-config.private.json", config),
+                             ("provenance.json", json.dumps(proof).encode())):
+            (f.captures / (machine + "." + suffix)).write_bytes(data)
+        (f.run / "execution-task-matrix.json").write_text("{}")
+        return proof
+
+    def build_native(self):
+        f = self.fixture
+        return subprocess.run([
+            sys.executable, str(ROOT / "scripts/cloudbench-build-interrupted-pool-archive.py"),
+            "--registry", str(f.registry), "--capture-dir", str(f.captures),
+        ], capture_output=True, text=True)
+
+    def verify_built_native(self):
+        f = self.fixture
+        packet = f.run / "_forensic"
+        return retirement.verify(f.registry, f.run, packet / "manifest.json",
+                                 packet / "originals.tar.gz", f.machines, f.volumes,
+                                 archive_only=True)
+
+    def test_native_capture_builder_roundtrip_uses_real_verifier(self):
+        proof = self.native_builder_fixture()
+        result = self.build_native()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        result = self.verify_built_native()
+        self.assertEqual(result["proof_credit"], 0)
+        self.assertFalse(result["native_release_verified"])
+        packet = self.fixture.run / "_forensic"
+        row = json.loads((packet / "manifest.json").read_bytes())["tasks"][0]
+        self.assertEqual(row["missing"], proof["missing"])
+        with tarfile.open(packet / "originals.tar.gz") as archive:
+            for name, suffix in (("original-capture-provenance.json", "provenance.json"),
+                                 ("original-native-config.json", "original-config.private.json"),
+                                 ("original-volume-capture.tar.gz", "tar.gz")):
+                self.assertEqual(archive.extractfile(bootstrap_test.BENCH + "/" + name).read(),
+                                 (self.fixture.captures / (bootstrap_test.MACHINE + "." + suffix)).read_bytes())
+
+    def test_native_builder_refuses_missing_symlinked_or_mismatched_sidecars(self):
+        proof = self.native_builder_fixture()
+        f = self.fixture
+        config = f.captures / (bootstrap_test.MACHINE + ".original-config.private.json")
+        provenance = f.captures / (bootstrap_test.MACHINE + ".provenance.json")
+        original_config = config.read_bytes()
+        for fault in ("missing-config", "symlink-config", "foreign-owner", "wrong-hash", "wrong-files"):
+            with self.subTest(fault=fault):
+                changed = copy.deepcopy(proof)
+                if fault == "missing-config":
+                    config.unlink()
+                elif fault == "symlink-config":
+                    config.unlink()
+                    target = f.captures / "config-target"
+                    target.write_bytes(original_config)
+                    config.symlink_to(target)
+                elif fault == "foreign-owner":
+                    changed["fleet_owner_token"] = "f" * 32
+                elif fault == "wrong-hash":
+                    changed["archive_sha256"] = "0" * 64
+                else:
+                    changed["files"]["bench.log"]["sha256"] = "0" * 64
+                provenance.write_text(json.dumps(changed))
+                result = self.build_native()
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse((f.run / "_forensic/manifest.json").exists())
+                shutil.rmtree(f.run / "_forensic")
+                config.unlink(missing_ok=True)
+                config.write_bytes(original_config)
+
+    def test_native_consumer_rejects_tampering_even_with_rehashed_outer_packet(self):
+        self.native_builder_fixture()
+        result = self.build_native()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        f = self.fixture
+        packet = f.run / "_forensic"
+        manifest = json.loads((packet / "manifest.json").read_bytes())
+        with tarfile.open(packet / "originals.tar.gz") as archive:
+            original = {member.name: archive.extractfile(member).read() for member in archive}
+        prefix = bootstrap_test.BENCH + "/"
+        for field, value in (
+            ("fleet_owner_token", "f" * 32), ("run_id", "foreign"),
+            ("app", "foreign"), ("bench", "foreign"), ("ordinal", 1),
+            ("machine_id", "c" * 14), ("source_machine_id", "c" * 14),
+            ("source_volume_id", "vol_foreign"), ("volume_id", "vol_foreign"),
+            ("guest_run_token", "foreign"), ("proof_credit", 1),
+            ("native_release_verified", True), ("native_final_state", "started"),
+            ("native_final_volume_state", "destroyed"), ("provider_mutations", ["config-inert", "start"]),
+            ("native_original_config_sha256", "0" * 64), ("archive_sha256", "0" * 64),
+            ("missing", []), ("files", {}), ("changed-config", None),
+            ("changed-raw", None), ("mixed-wrappers", None),
+        ):
+            with self.subTest(field=field):
+                payloads = dict(original)
+                proof = json.loads(payloads[prefix + "original-capture-provenance.json"])
+                if field == "changed-config":
+                    config = json.loads(payloads[prefix + "original-native-config.json"])
+                    config["env"]["CLOUDBENCH_RUN_TOKEN"] = "foreign"
+                    payloads[prefix + "original-native-config.json"] = json.dumps(config).encode()
+                    proof["native_original_config_sha256"] = hashlib.sha256(json.dumps(
+                        config, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+                elif field == "changed-raw":
+                    payloads[prefix + "original-volume-capture.tar.gz"] += b"changed"
+                elif field == "mixed-wrappers":
+                    payloads[prefix + "original-capture-receipt.json"] = b"{}"
+                else:
+                    proof[field] = value
+                payloads[prefix + "original-capture-provenance.json"] = json.dumps(proof).encode()
+                changed = copy.deepcopy(manifest)
+                for member, data in payloads.items():
+                    if member.startswith(prefix):
+                        changed["tasks"][0]["files"][member[len(prefix):]] = dict(
+                            bytes=len(data), sha256=hashlib.sha256(data).hexdigest())
+                changed["uncompressed_bytes"] = sum(map(len, payloads.values()))
+                with tarfile.open(packet / "originals.tar.gz", "w:gz") as archive:
+                    for name, data in payloads.items():
+                        member = tarfile.TarInfo(name)
+                        member.size = len(data)
+                        archive.addfile(member, io.BytesIO(data))
+                raw = (packet / "originals.tar.gz").read_bytes()
+                changed.update(archive_bytes=len(raw), archive_sha256=hashlib.sha256(raw).hexdigest())
+                (packet / "manifest.json").write_text(json.dumps(changed))
+                with self.assertRaises((AssertionError, KeyError, ValueError)):
+                    self.verify_built_native()
+
+    def test_native_consumer_keeps_reviewed_source_policy_mandatory(self):
+        self.native_builder_fixture()
+        result = self.build_native()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.reviewed_sources.clear()
+        with self.assertRaises(AssertionError):
+            self.verify_built_native()
+
+    def rebuild_native(self, manifest_sha=None, archive_sha=None):
+        f = self.fixture
+        packet = f.run / "_forensic"
+        return subprocess.run([
+            sys.executable, str(ROOT / "scripts/cloudbench-build-interrupted-pool-archive.py"),
+            "--registry", str(f.registry), "--capture-dir", str(f.captures),
+            "--rebuild-existing",
+            "--expected-manifest-sha256", manifest_sha or hashlib.sha256((packet / "manifest.json").read_bytes()).hexdigest(),
+            "--expected-archive-sha256", archive_sha or hashlib.sha256((packet / "originals.tar.gz").read_bytes()).hexdigest(),
+        ], capture_output=True, text=True)
+
+    def test_hash_bound_rebuild_preserves_previous_packet_and_real_verifier(self):
+        self.native_builder_fixture()
+        self.assertEqual(self.build_native().returncode, 0)
+        f = self.fixture
+        packet = f.run / "_forensic"
+        before = {path.name: path.read_bytes() for path in packet.iterdir()}
+        registry_before = {str(path.relative_to(f.registry)): path.read_bytes()
+                           for path in f.registry.rglob("*") if path.is_file()}
+        result = self.rebuild_native()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        rejected = f.run / ("_forensic.rejected-" + hashlib.sha256(before["manifest.json"]).hexdigest())
+        self.assertEqual({path.name: path.read_bytes() for path in rejected.iterdir()}, before)
+        self.assertEqual({str(path.relative_to(f.registry)): path.read_bytes()
+                          for path in f.registry.rglob("*") if path.is_file()}, registry_before)
+        result = self.verify_built_native()
+        self.assertEqual(result["proof_credit"], 0)
+        self.assertFalse(result["native_release_verified"])
+
+    def test_hash_bound_rebuild_refuses_wrong_digest_or_failed_capture_without_replacing(self):
+        self.native_builder_fixture()
+        self.assertEqual(self.build_native().returncode, 0)
+        f = self.fixture
+        packet = f.run / "_forensic"
+        before = {path.name: path.read_bytes() for path in packet.iterdir()}
+        for kind in ("manifest", "archive", "failed-capture", "existing-destination", "unexpected-member"):
+            with self.subTest(kind=kind):
+                config = f.captures / (bootstrap_test.MACHINE + ".original-config.private.json")
+                config_bytes = config.read_bytes()
+                rejected = f.run / ("_forensic.rejected-" + hashlib.sha256(before["manifest.json"]).hexdigest())
+                if kind == "failed-capture":
+                    config.unlink()
+                elif kind == "existing-destination":
+                    rejected.mkdir()
+                    (rejected / "do-not-overwrite").write_bytes(b"preserve")
+                elif kind == "unexpected-member":
+                    (packet / "unknown").write_bytes(b"preserve")
+                result = self.rebuild_native(manifest_sha="0" * 64 if kind == "manifest" else None,
+                                             archive_sha="0" * 64 if kind == "archive" else None)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual({name: (packet / name).read_bytes() for name in before}, before)
+                self.assertTrue((f.registry / "runtime-evidence-unconfirmed").is_file())
+                if kind == "failed-capture":
+                    config.write_bytes(config_bytes)
+                elif kind == "existing-destination":
+                    self.assertEqual((rejected / "do-not-overwrite").read_bytes(), b"preserve")
+                    shutil.rmtree(rejected)
+                elif kind == "unexpected-member":
+                    self.assertEqual((packet / "unknown").read_bytes(), b"preserve")
+                    (packet / "unknown").unlink()
+
+    def test_rebuild_refuses_held_recovery_guard(self):
+        self.native_builder_fixture()
+        self.assertEqual(self.build_native().returncode, 0)
+        helper = retirement.runpy.run_path(str(ROOT / "scripts/cloudbench-original-volume-capture.py"))
+        lock = helper["RecoveryLock"](self.fixture.registry)
+        lock.acquire()
+        try:
+            result = self.rebuild_native()
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("guard is held", result.stderr)
+        finally:
+            lock.release()
+        self.assertEqual(self.verify_built_native()["proof_credit"], 0)
+
+    def test_rebuild_refuses_changed_old_packet_staging_or_parent_before_publish(self):
+        self.native_builder_fixture()
+        self.assertEqual(self.build_native().returncode, 0)
+        f = self.fixture
+        packet = f.run / "_forensic"
+        before = {path.name: path.read_bytes() for path in packet.iterdir()}
+        builder = load("rebuild_builder", ROOT / "scripts/cloudbench-build-interrupted-pool-archive.py")
+        original_snapshot = builder.packet_snapshot
+        for fault in ("old-packet", "stage-directory", "stage-payload", "parent-alias"):
+            with self.subTest(fault=fault):
+                calls = 0
+                moved_parent = f.run.with_name(f.run.name + "-retained")
+                def changed_snapshot(path, *args, **kwargs):
+                    nonlocal calls
+                    if path == packet:
+                        calls += 1
+                        if calls == 2 and fault == "old-packet":
+                            (packet / "manifest.json").write_bytes(before["manifest.json"] + b" ")
+                    result = original_snapshot(path, *args, **kwargs)
+                    if path == packet and calls == 2:
+                        stages = list(f.run.glob("_forensic.rebuild-*"))
+                        stage = max(stages, key=lambda item: item.stat().st_mtime_ns)
+                        if fault == "stage-directory":
+                            retained = stage.with_name(stage.name + "-retained")
+                            stage.rename(retained)
+                            shutil.copytree(retained, stage)
+                        elif fault == "stage-payload":
+                            (stage / "manifest.json").write_bytes(b'{"substituted":true}\n')
+                            (stage / "originals.tar.gz").write_bytes(b"substituted archive")
+                        elif fault == "parent-alias":
+                            f.run.rename(moved_parent)
+                            f.run.symlink_to(moved_parent, target_is_directory=True)
+                    return result
+                argv = ["builder", "--registry", str(f.registry), "--capture-dir", str(f.captures),
+                        "--rebuild-existing", "--expected-manifest-sha256", hashlib.sha256(before["manifest.json"]).hexdigest(),
+                        "--expected-archive-sha256", hashlib.sha256(before["originals.tar.gz"]).hexdigest()]
+                try:
+                    with patch.object(builder, "packet_snapshot", side_effect=changed_snapshot), patch.object(sys, "argv", argv):
+                        with self.assertRaises((AssertionError, OSError)):
+                            builder.main()
+                finally:
+                    if f.run.is_symlink():
+                        f.run.unlink()
+                        moved_parent.rename(f.run)
+                    (packet / "manifest.json").write_bytes(before["manifest.json"])
+                self.assertEqual({path.name: path.read_bytes() for path in packet.iterdir()}, before)
+
+    def test_rebuild_publication_rollback_never_overwrites_concurrent_canonical(self):
+        builder = load("rebuild_publish", ROOT / "scripts/cloudbench-build-interrupted-pool-archive.py")
+        helper = retirement.runpy.run_path(str(ROOT / "scripts/cloudbench-original-volume-capture.py"))
+        for concurrent in (False, True):
+            with self.subTest(concurrent=concurrent), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                canonical, rejected, stage = (root / name for name in ("canonical", "rejected", "stage"))
+                canonical.mkdir(mode=0o700)
+                stage.mkdir(mode=0o700)
+                (canonical / "original").write_bytes(b"original")
+                (stage / "replacement").write_bytes(b"replacement")
+                calls = 0
+                def failed_publish(source, target):
+                    nonlocal calls
+                    calls += 1
+                    if calls == 2:
+                        if concurrent:
+                            canonical.mkdir(mode=0o700)
+                            (canonical / "foreign").write_bytes(b"foreign")
+                        raise OSError("injected final publication failure")
+                    return helper["rename_noreplace"](source, target)
+                with self.assertRaises(OSError):
+                    builder.publish_rebuilt_packet(stage, canonical, rejected,
+                        {**helper, "rename_noreplace": failed_publish})
+                if concurrent:
+                    self.assertEqual((canonical / "foreign").read_bytes(), b"foreign")
+                    self.assertEqual((rejected / "original").read_bytes(), b"original")
+                else:
+                    self.assertEqual((canonical / "original").read_bytes(), b"original")
+                    self.assertFalse(rejected.exists())
+                self.assertEqual((stage / "replacement").read_bytes(), b"replacement")
+
+    def test_rebuild_resumes_crash_after_preservation_through_same_cli(self):
+        self.native_builder_fixture()
+        self.assertEqual(self.build_native().returncode, 0)
+        f = self.fixture
+        packet = f.run / "_forensic"
+        before = {path.name: path.read_bytes() for path in packet.iterdir()}
+        md, ad = (hashlib.sha256(before[name]).hexdigest() for name in ("manifest.json", "originals.tar.gz"))
+        rejected = f.run / ("_forensic.rejected-" + md)
+        stage = f.run / "_forensic.crash-stage"
+        stage.mkdir(mode=0o700)
+        (stage / "partial").write_bytes(b"retained partial")
+        code = f'''import importlib.util,os,runpy,signal
+from pathlib import Path
+spec=importlib.util.spec_from_file_location("builder",{str(ROOT / "scripts/cloudbench-build-interrupted-pool-archive.py")!r})
+b=importlib.util.module_from_spec(spec);spec.loader.exec_module(b)
+h=runpy.run_path({str(ROOT / "scripts/cloudbench-original-volume-capture.py")!r})
+lock=h["RecoveryLock"](Path({str(f.registry)!r}));lock.acquire()
+def crash_after_preserve(source,target):
+ h["rename_noreplace"](source,target)
+ os.kill(os.getpid(),signal.SIGKILL)
+b.publish_rebuilt_packet(Path({str(stage)!r}),Path({str(packet)!r}),Path({str(rejected)!r}),{{**h,"rename_noreplace":crash_after_preserve}})
+'''
+        child = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+        self.assertEqual(child.returncode, -9, child.stderr)
+        self.assertFalse(packet.exists())
+        self.assertEqual({path.name: path.read_bytes() for path in rejected.iterdir()}, before)
+        self.assertEqual((stage / "partial").read_bytes(), b"retained partial")
+        result = self.rebuild_native(manifest_sha=md, archive_sha=ad)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual({path.name: path.read_bytes() for path in rejected.iterdir()}, before)
+        self.assertEqual(self.verify_built_native()["proof_credit"], 0)
+        self.assertEqual((stage / "partial").read_bytes(), b"retained partial")
 
     def test_generic_archive_retains_honest_failed_worker_and_full_ledger(self):
         result = self.generic()

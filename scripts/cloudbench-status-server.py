@@ -107,10 +107,30 @@ def prelaunch_sealed(root: Path, run_token: str) -> bool:
         return False
 
 
+def prestack_evidence_paths(root: Path, run_token: str) -> dict[str, Path]:
+    """The native driver acknowledged cleanup without ever attempting run.sh."""
+    seal = root / f"cloudbench-prestack-{run_token}.sealed"
+    expected = f"{run_token}\n".encode()
+    if (read_runtime_metadata(seal, MAX_RECOVERY_RECEIPT_BYTES) != expected
+        or read_runtime_metadata(root / f"cloudbench-driver-clean-{run_token}.ack", MAX_RECOVERY_RECEIPT_BYTES) != expected
+        or read_runtime_metadata(root / "cloudbench-driver.state", MAX_RECOVERY_RECEIPT_BYTES) != b"exited\n"
+        or os.path.lexists(root / "cloudbench-driver.pid")):
+        raise ValueError("pre-stack driver is not terminal and acknowledged")
+    context = root / "repo/.context/cloudbench"
+    if any(os.path.lexists(context / name) for name in
+           ("services.json", "run.json", "stack.log", "logs/backend.log", "logs/worker.log")):
+        raise ValueError("pre-stack seal conflicts with stack evidence")
+    return {"bench.log": root / "bench.log", seal.name: seal}
+
+
 def runtime_evidence_manifest(root: Path, run_token: str, machine: str, cleanup_state: str = "clean") -> dict:
     if cleanup_state == "clean" and prelaunch_sealed(root, run_token):
         manifest = runtime_evidence_files_manifest({"bench.log": root / "bench.log"}, run_token, machine)
         manifest["prelaunch"] = True
+        return manifest
+    if cleanup_state == "clean" and os.path.lexists(root / f"cloudbench-prestack-{run_token}.sealed"):
+        manifest = runtime_evidence_files_manifest(prestack_evidence_paths(root, run_token), run_token, machine)
+        manifest["prestack"] = True
         return manifest
     return runtime_evidence_context_manifest(root / "repo/.context/cloudbench", run_token, machine, cleanup_state)
 
@@ -377,6 +397,8 @@ def main() -> int:
                             raise ValueError("invalid runtime evidence request")
                         if cleanup_state == "clean" and prelaunch_sealed(root, run_token):
                             paths = {"bench.log": root / "bench.log"}
+                        elif cleanup_state == "clean" and os.path.lexists(root / f"cloudbench-prestack-{run_token}.sealed"):
+                            paths = prestack_evidence_paths(root, run_token)
                         else:
                             paths = runtime_evidence_paths(root, run_token, cleanup_state)
                         target = paths[parameters["file"][0]]

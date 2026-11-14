@@ -72,6 +72,58 @@ serial fallback. An active operation on the same isolation root is refused
 before launch; its existing owner and deadline remain authoritative. A concrete
 capacity shortfall must be reported, not converted into hidden suite ordering.
 
+At quiescent INITIAL, an operator can defer a known-unready gate or bound
+worker root while observing all other selected full gates concurrently:
+
+```bash
+python3 scripts/deploy_test_cycle.py initial-independent --plan "$PLAN" \
+  --state-dir "$STATE" --root "$SOURCE" --input initial-deferrals.json
+```
+
+The input must contain the exact plan `source`, plus `gates` and/or `roots`
+maps of existing full-gate names or exact bound local root paths to nonempty
+reasons. For example, `gates: {"smoke": "exact ref/fixture prerequisite pending"}`.
+Deferrals remain **PENDING/unexecuted**, never SKIP or PASS; the action leaves
+ready=false. It adds native full receipts for executed gates and preserves all
+prior attempts. A genuine failure enters ordinary RCA triage; no failure is
+invented to obtain this boundary. Repeated same-source observations reuse only
+validated full native receipts. Old-source credit is refused. Normal `run`
+executes remaining gates, retaining exact valid receipts, and final verification
+still requires the complete selected inventory. Active/unknown ownership on a
+selected worker refuses launch; a deferred worker is left untouched. This is an
+explicit readiness selection, not a host-capacity guarantee or serial scheduler.
+
+At quiescent FINAL, the same source-bound input format is available through:
+
+```bash
+python3 scripts/deploy_test_cycle.py final-independent --plan "$PLAN" \
+  --state-dir "$STATE" --root "$SOURCE" --input final-deferrals.json
+```
+
+This observes the operator-selected ready gates concurrently while keeping every
+other selected gate PENDING. It preserves initial deferral history and records
+final deferral reasons separately. Exact full native receipts can be reused only
+when the existing source/input/contract checks accept them. It neither grants a
+capacity waiver nor adds ordering among selected workers. A partial pass remains
+FINAL/ready=false; ordinary `run` still accounts for the entire selection.
+Failures enter RCA without stopping healthy independent workers. A cancelled
+FINAL observation resumes to quiescent FINAL (or TRIAGE when failures exist),
+without automatically launching deferred gates; cleanup and source guards still
+apply before resume. The operator must explicitly choose the next observation
+or full run. A quiescent FINAL cycle can use normal `refresh` with its exact
+saved cycle and no active or unknown owner. It preserves history, revalidates
+input/contract carry, and returns to quick checks; changed inputs get no old
+execution credit.
+
+If a reconciled interrupted independent INITIAL/FINAL observation is waiting to
+resume into TRIAGE but its source has changed, explicitly use
+`refresh --recover-interrupted-triage --input <old-plan>` with the current plan.
+This no-launch transition requires the exact saved interruption, unchanged
+private environment, complete original selection and current-source prepared
+local workers. It preserves pending failures and original receipts, records the
+interruption, and returns to QUICK with TRIAGE next. Ordinary `resume` remains
+strict; unknown ownership or changed contracts still refuse the refresh.
+
 At a quiescent `needs-focused-plan` boundary, `repair-independent` observes
 missing complete local categories while required repairs remain in the same plan.
 Use `--include-repair-local` to include complete original local repair contracts.
@@ -243,6 +295,35 @@ unbounded.
 Worker stderr is preserved separately from its stdout JSON receipt. Request
 input and receipt size are bounded; an incomplete transport cannot become PASS.
 
+## Prepared bindings before the first full gate
+
+At a quiescent `quick` or `initial` boundary, `prepare-bindings` can admit
+prepared local runtime locations without resetting a cycle:
+
+```bash
+python3 scripts/deploy_test_cycle.py prepare-bindings --input old-plan.json \
+  --plan prepared-plan.json --state-dir .context/deploy-pipeline --root "$SOURCE"
+```
+
+It permits only new `TMPDIR`, `XDG_CACHE_HOME`, and `npm_config_cache`
+directories inside each existing local worker root, plus the backend native
+worker's own loopback `BACKEND_COVERAGE_DATABASE_URL` on port5432. Existing env
+keys, workers, recipes, checks, commands, deadlines, selection and skips cannot
+change. Every worker must match the current source and private configuration;
+paths cannot traverse symlinks. The backend URL cannot select the canonical,
+recording or another worker's database, or carry connection-option parameters.
+Database readiness remains the preparation owner's responsibility.
+
+No full attempt or outstanding owner may exist. Worker admission locks and
+local process cwd/FD/mapping inspection must prove quiescence; unreadable process
+ownership fails closed. The caller must have sufficient local read access for
+that inspection. This action does not launch, signal or grant test credit.
+It also permits a committed descendant source refresh at that same boundary,
+provided all workers already match it. Original quick receipts and identities
+remain historical, and **all quick checks run again** before any full gate.
+Repeated no-change admission is rejected. Ordinary `refresh` and `rebind-local`
+retain their stricter existing contracts.
+
 ## Result protocol
 
 The coordinator supplies `DEPLOY_GATE_REQUEST` (JSON file) and
@@ -383,6 +464,22 @@ If pending execution ownership prevents another isolated lane from starting,
 report that exact unsupported transition and continue supported independent work;
 do not infer live execution from an owner label or infer cleanup from a dead PID.
 
+Cancelled local file-adapter executions may use `local-supervisor-cleanup-v1`
+only with exact request/receipt/process hashes, fully reaped native child and
+descendant identities, idle admission, no root listeners, and no live root
+consumer. Structural and frontend/agents coverage adapters that return exit 1
+after cancellation also require their exact registered recipe, unchanged
+UNVERIFIED result, and cancelled inner-case log. This
+reconciles launch custody only; original failures and missing test credit remain. A
+separate `local-cancelled-log-supplement-v1` proof can seal nonempty agents
+coverage output written after its cancelled inner case recorded an empty log,
+but before its outer adapter finished. It retains the original hash mismatch
+and binds the final path, hash, size and mtime; all original supervisor reaping,
+recipe, source, admission and fresh root/listener checks still apply. A complete
+birth-checked native cwd/FD/maps scan must also pass, with privileged read-only
+fallback on unavailable process visibility, followed by another log seal check. A changed
+supplement or log reblocks launch. Neither proof grants test credit.
+
 When the coordinator itself disappears before writing its round receipt, preserve
 that observation gap separately from terminal native worker results. After independent
 review of the original state and artifact hashes, `recover-round --proof <proof.json>`
@@ -407,6 +504,92 @@ exit1 means not ready, and exit2 means missing or malformed evidence. The staged
 runner requests `/RCA` immediately for every failure, rather than waiting for
 the legacy pipeline's repeated-round cap.
 
+
+### Correcting an owned temporary directory after a full failure
+
+`prepare-bindings --proof tmpdir-proof.json` additionally supports a quiescent
+`triage` cycle with actual pending native failures. This is a same-source
+correction of **existing TMPDIR values only**, not a general environment rebind.
+Refresh committed source and prepared workers through the ordinary source
+refresh first if needed. All prior attempts, failures and pending RCA obligations
+remain; changed inputs receive no carried credit, and all quick checks run again.
+
+The proof has exactly `kind: "replace-owned-tmpdir-v1"`, `source` (the exact
+source object), `from_plan_digest`, and `paths` (changed gate name to new absolute
+TMPDIR). The plan must otherwise be identical. Each new directory must be unique,
+mode0700, owned by the executing uid, outside all checkouts, symlink-free and
+short enough for Chromium's107-byte Unix socket path. Before admission it contains
+only a mode0600 `.deploy-tmpdir-owner.json` with exactly these fields:
+`schema: "deploy-external-tmpdir-v1"`, `coordinator_root`, `worker_root`, `gate`,
+`uid`, `device` and `inode`. These are actual directory stat values,
+not placeholders. Native workers revalidate the lease before executing recipes;
+a recipe cannot substitute another TMPDIR. Cache paths and database bindings
+remain unchanged.
+
+Every saved request must match its recorded terminal receipt; unknown or retained
+owners block correction. Existing native admission locks and process cwd/FD/maps
+checks, including process birth identity, cover all local worker roots and old/new
+temporary roots. Unreadable ownership fails closed. Admission requires private
+worker configuration and exact source equality. No directory is created or
+cleaned by this action. The caller owns reviewed preparation and must wait for
+all original consumers to finish; do not hand-edit cycle state or reuse old PASS
+credit for a changed binding.
+
+The custody marker binds a directory to its worker, not permanently to one source
+revision. Exact source remains mandatory in the admission proof and each native
+request; ordinary source refresh still invalidates credit and the worker checks
+its current source before any test. Thus a later legitimate source refresh does
+not require rewriting a directory's ownership history. Non-sticky writable
+shared parent directories are rejected.
+
+
+If the original nonroot coordinator cannot read a live `/proc` entry, the strict
+birth-guarded scan delegates only the fixed read-only scanner through
+`sudo -n /usr/bin/python3 -I -S -B -c ...`. The worker and directory owner stay
+nonroot. Bounded JSON carries the exact root list, caller uid/pid/birth and a
+nonce; the helper verifies sudo uid and caller ancestry, rejects unowned or
+noncanonical roots, and returns only a request-bound quiescence receipt. It
+reads all processes using the same scanner and excludes only its verified
+caller and itself. Root execution has a25-second alarm; delegation has a30-second
+timeout. No shell, imported workspace code, root filesystem writes, worker
+execution or permission changes are involved. Missing sudo access or any
+unreadable/active ownership still blocks admission. Both generic and backend
+native adapters validate the shared lease and all recipe TMPDIR overrides before
+directory creation, fixture restore or child execution.
+
+
+### Explicit backend collection after a terminal interrupted producer
+
+`collect-backend --input <spec.json>` is a separately admitted native report-tail
+observation, not `resume` and not a test replay. Its specification contains
+`seal`, `seal_sha256`, and `report_timeout_seconds` (positive, at most 600 and
+within the unused original request allowance). Before any harness edit, retain
+a reviewed `backend-collection-seal-v1` inventory of the exact original request,
+receipt, supervisor proof, completed shard summaries/logs, unit/FPS logs and
+announced raw archive manifests, plus producer source/runtime-config hashes.
+The original receipt must be uniquely present and have a revalidated native
+local cleanup reconciliation. The seal is not an arbitrary result import.
+
+The coordinator must first have the current collector source/plan and isolated
+worker frozen normally. Only the named backend/cycle harness, their two owning
+test files and this guide may differ from the producer; all other captured
+inputs must match. The new native receipt records both source identities and
+all harness hash differences. It never relabels the old cancelled execution.
+The exact original full case inventory and recipe remain intact.
+
+Collection takes the normal private-worker admission lock, fresh process
+quiescence before/after and the backend exclusive lock. It runs only c8 report
+over a distinct union of the sealed originals. It never invokes setup, fixture
+restore, unit/blackbox/FPS tests or teardown tests. Claims survive a crash and
+refuse automatic repetition. Partial/missing/changed source, logs or archives
+fail closed. Any later attempt requires diagnosis, not deletion of a claim.
+
+Original native failures stay FAIL. A teardown acceptance test absent from the
+old run stays UNVERIFIED even when cleanup is proven, so collection alone cannot
+make that gate ready. Original failures and the new observation are both kept;
+normal RCA/focused/full coverage obligations and provider-exhaustion rules remain.
+This action does not implement new domain-only execution or automatic provider
+exclusions; those still require a separately reviewed native path if needed.
 ## Changed-source AgentCard warning renewal
 
 `refresh` still revokes resource warnings whose inputs changed. For an already

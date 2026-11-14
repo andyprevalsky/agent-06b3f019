@@ -148,6 +148,51 @@ normal main delivery/source integration, official CLI application and the
 original full phase/all16 gates/full9 smoke. Those runtime outcomes remain
 unverified; this case remains open until the owning validation completes.
 
+
+## November 9 recurrence: quick timeout had no local cleanup reconciliation
+
+The normal CLI cycle at `ec466fa42ec5b0c52e9b97c2f1253292cd77cd8d`, quick
+attempt55, recorded real 120-second timeouts for eslint and backend-structural.
+Both original receipts remain FAIL with UNVERIFIED cases, native exit -15,
+`lingering_group=true`; both supervisor sidecars report quiescent, no remaining
+children, and terminal wait records for every listed child. Native teardown
+receipts are clean. The normal eslint reexecute for occurrence
+`7c29135219b9473c9d4dde954e655bb9` refused: `its source receipt still carries a
+remote/native cleanup owner; reconcile that owner before re-executing`.
+
+This recurs at the same local custody boundary: ordinary quick commands have
+no isolated worker root. The earlier interrupted-worker support handles a
+cancelled isolated worker, not a timed-out quick command. Replaying the exact
+copied state through local reconciliation on unchanged source fails with
+`local cleanup: missing or unknown evidence` from the nonexistent worker root.
+This diagnosis does not attribute or repair the original timeout.
+
+The proposed extension uses the existing `local-supervisor-cleanup-v1` entry
+and its unchanged retained-owner revalidation. It accepts only a known local
+quick gate with its original command/contract, unique original attempt, source,
+token and complete hashed request/receipt/log/process/teardown inventory. It
+requires terminal wait status for the child and every signal target, clean
+native teardown, original chronology, and a fresh read proving all recorded
+PIDs (including the supervisor) absent. Unreadable, live, nonquiescent,
+unproven, changed or foreign evidence refuses. Other local validators retain
+their dispatch. It changes launch eligibility only, never grants test or
+financial cleanup credit, and never rewrites the original receipt or failure.
+
+Evidence: `.context/cli-nov09-quick55-rca/cleanup-red.log` reproduces the exact
+reexecute guard on copied actual state. The unchanged `replay.py` in the owned
+quick-timeout scratch fails against original source and passes against the
+candidate for both actual gates; the results are in
+`cleanup-actual-replay-{red.log,green.json}`. The permanent owning
+`QuickTimeoutCleanup` controls exercise actual coordinator reconcile/reexecute,
+sealed-proof revalidation, live PIDs, changed contracts and refreshed-hash
+negative evidence. Independent review and the parent's normal rerun remain
+pending; the original case status stays open.
+
+Coordinator instructions for this recurrence, not a new end-user quote: work
+only in existing private scratch, preserve all original timeouts and debts,
+make no provider/DB/service/signal calls, and require independent review before
+parent integration. Golden-reference comparison is not applicable to this
+repository-specific offline receipt reconciliation.
 ## November 11 related occurrence: allocated fresh cohort, unfinalized campaign
 
 PR1918 request `4ee3b87f768d4631ad68739dafcf7032` on original source

@@ -119,6 +119,10 @@ Time every state with `python3 scripts/descend_step_log.py transition --run-id $
 - Show the wall-clock trend, the largest step regression and improvement, and the retro's chosen speedup.
 - Pass the completed iteration count so the card's success-rate graph appears after iteration 3 (gap: `--iterations` exists only on the unmerged `descend/polar-*` branches).
 
+AFTER EVERY ITERATION, REFLECT ON YOUR ITERATIONS/HOUR AND ENSURE THE NUMBER IS INCREASING OVER TIME.
+Include that reflection and the measured improvement or corrective action in
+the scorecard ISSUES / NEXT ACTION; a declining rate must remain visible.
+
 ## References
 
 `.claude/commands/benchmark.md`, `.claude/commands/rca.md`, `.claude/commands/deploy.md`, `.claude/shared/approval-format.md`, `.claude/shared/benchmark-report-format.txt`, `agents/benchmarks/README.md`, `docs/factory-telemetry.md`; the previous version is in Git history (`git log -p -- .claude/commands/descend.md`).

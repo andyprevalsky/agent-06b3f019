@@ -11,6 +11,7 @@
  *   [CLOSED] --left bar Feedback / Benchmarks / account row--> [FEEDBACK|BENCHMARKS|SETTINGS]
  *   [ANY] --click its trigger again | close button | Escape--> [CLOSED]
  *   [ANY] --another trigger--> that app
+ *   [ANY] --open-agent navigation--> [CLOSED], revealing the selected agent
  *
  * BROWSER TAB (only meaningful while [BROWSER]):
  *   [ROOT] --click agent tab | openAgentBrowser--> [AGENT(id, taskId)]
@@ -64,6 +65,7 @@ import {
 } from 'react';
 import { captureTeamInviteLink, removeTeamInviteFromUrl } from '@/lib/teamInviteLink';
 import { createPortal } from 'react-dom';
+import { OPEN_AGENT_EVENT } from '@/lib/openAgent';
 import { PhoneLauncherContext, type PhoneLauncher } from '@/hooks/phoneLauncherContext';
 import type { Agent } from '../../hooks';
 import {
@@ -324,6 +326,11 @@ export function RoseAppsProvider({
   }, []);
   useEffect(() => setPhoneDeviceView(false), [selectedAgentId]);
   const phoneLauncher = useMemo<PhoneLauncher>(() => ({ openPhoneDevice }), [openPhoneDevice]);
+
+  useEffect(() => {
+    window.addEventListener(OPEN_AGENT_EVENT, closeApp);
+    return () => window.removeEventListener(OPEN_AGENT_EVENT, closeApp);
+  }, [closeApp]);
 
   const openAgentBrowser = useCallback(
     (agentId: string, taskId: string) => {

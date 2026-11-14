@@ -137,23 +137,6 @@ router.get(
   })
 );
 
-router.get(
-  '/:id/status',
-  auth,
-  asyncHandler<HybridAuthRequest>(async (req, res) => {
-    try {
-      const result = await queryService.getAgentStatus(req.params.id);
-      if (result === null) {
-        res.status(404).json({ error: 'Agent not found' });
-        return;
-      }
-      res.json(result);
-    } catch (error) {
-      handleRouteError(res, error, 'Failed to get agent status', { agent_id: req.params.id });
-    }
-  })
-);
-
 // ---------------------------------------------------------------------------
 // Lifecycle routes
 // ---------------------------------------------------------------------------

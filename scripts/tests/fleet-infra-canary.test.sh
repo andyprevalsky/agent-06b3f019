@@ -333,6 +333,9 @@ python3 "$PREFLIGHT_REPRO/root/scripts/cloudbench-infra-canary-preflight.py" \
   || fail "crashed lock helper released while its nested canary was still active"
 [ -f "$CRASH_STAMP" ] || fail "crash-recovery follower did not stamp success"
 
+# Real transaction descriptor custody, crash survival and native exclusion.
+python3 "$ROOT_DIR/scripts/tests/canary-preflight-fd.test.py"
+
 # Dry-run arg validation (no Fly): invalid N fails closed.
 # Scrub inherited fixture env so N validation is what we exercise.
 unset CLOUDBENCH_FAKE_DIR

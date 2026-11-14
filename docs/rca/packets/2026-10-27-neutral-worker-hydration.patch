@@ -1,0 +1,273 @@
+--- a/agents/domains/spawn_browser_agent_v3/credential_runtime.py
++++ b/agents/domains/spawn_browser_agent_v3/credential_runtime.py
+@@ -54,11 +54,34 @@
+     *,
+     decryption_key: Optional[str],
+     decrypt_secret: Callable[[str, Any], Optional[str]] = decrypt_password_with_key,
++    target_url: Optional[str] = None,
+ ) -> RealmCredentialState:
+-    """Hydrate a complete backend realm payload or fail without partial auth."""
++    """Hydrate a complete realm or explicit neutral inventory without partial auth."""
+     auth_options = copy.deepcopy(payload.get("auth_options") or {})
+     auth_realm = str(payload.get("auth_realm") or auth_options.get("realm") or "")
+     if not auth_realm:
++        # The neutral initializer owns this exact empty inventory. Do not
++        # accept incomplete web-realm payloads or retain any prior secrets.
++        neutral_options = {
++            "realm": "", "steel_session": None, "cookie_bundles": [],
++            "passwords": [], "passkeys": [],
++            "email_otp": {"available": False, "connected_emails": [], "match_for_site_account": None},
++            "readable_identifiers": [], "minted": None,
++        }
++        if (
++            target_url == "about:blank"
++            and payload.get("auth_realm") == ""
++            and auth_options == neutral_options
++            and payload.get("passwords") == []
++            and payload.get("passkeys") == []
++            and payload.get("auth_credential_ref") is None
++        ):
++            return RealmCredentialState(
++                auth_realm="", auth_options=auth_options, auth_options_section="",
++                password_secret_refs={}, password_origins={}, credential_refs_by_secret_ref={},
++                auth_runtime_state=AuthRuntimeState.from_auth_options(auth_options),
++                decrypted_passkeys=[], passkey_ref_by_credential_id={}, auth_credential_ref=None,
++            )
+         raise RuntimeError("Credential payload is missing auth_realm")
+     auth_options["realm"] = auth_realm
+ 
+--- a/agents/domains/spawn_browser_agent_v3/handler.py
++++ b/agents/domains/spawn_browser_agent_v3/handler.py
+@@ -8083,6 +8083,7 @@
+             has_write_lock_resume_state=write_lock_resume_state is not None,
+         )
+         reused_session_deadline: Optional[Tuple[str, float]] = None
++        credential_target_url = start_url
+         if is_resume and task_id:
+             is_auth_assistance_resume = (
+                 write_lock_resume_state is not None
+@@ -8187,6 +8188,10 @@
+             session_credential_ref = session_info.get("credential_ref") or session_info.get("auth_credential_ref")
+             browser_session_metadata = session_info.get("browser_session_metadata") or {}
+             user_profile, auth_realm = _resume_context_from_session_info(session_info, auth_realm)
++            credential_target_url = (
++                session_info.get("current_url") or session_info.get("saved_url")
++                or session_info.get("start_url") or ""
++            )
+             browser_activity_checkpoint(f"Resuming task {task_id}")
+         else:
+             browser_activity_checkpoint("Initializing browser session")
+@@ -8516,13 +8521,14 @@
+                 logger.info(f"Loaded {len(session_passwords)} passwords from session response")
+             _realm_credential_state = await build_realm_credential_state(
+                 {
+-                    "auth_realm": auth_realm,
++                    "auth_realm": auth_options.get("realm", auth_realm),
+                     "auth_options": auth_options,
+                     "passwords": session_passwords,
+                     "passkeys": session_passkeys,
+                     "auth_credential_ref": session_credential_ref,
+                 },
+                 decryption_key=config.payment.decryption_key,
++                target_url=credential_target_url,
+             )
+             _auth_options_section = _realm_credential_state.auth_options_section
+             _password_origins = _realm_credential_state.password_origins
+--- a/agents/tests/blackbox/browser_credentials.blackbox.py
++++ b/agents/tests/blackbox/browser_credentials.blackbox.py
+@@ -1654,6 +1654,8 @@
+ async def run_all_tests():
+     print("browser-credentials blackbox tests:")
+     runner = BlackboxResult()
++    await runner.record_async("exact_neutral_inventory_has_no_auth_material_or_prompt", test_exact_neutral_inventory_has_no_auth_material_or_prompt)
++    await runner.record_async("neutral_hydration_rejects_missing_context_and_nonempty_inventory", test_neutral_hydration_rejects_missing_context_and_nonempty_inventory)
+     runner.record(
+         "steel_cdp_key_is_materialized_only_at_connection_boundary",
+         test_steel_cdp_key_is_materialized_only_at_connection_boundary,
+@@ -2022,3 +2024,60 @@
+             assert "".join(r["delta"] for r in records) == "Progress. " * 10000
+ 
+     await _capture_phone_stream(exercise)
++
++
++def _neutral_credential_payload():
++    return {"auth_realm": "", "auth_options": {'realm': '',
++             'steel_session': None,
++             'cookie_bundles': [],
++             'passwords': [],
++             'passkeys': [],
++             'email_otp': {'available': False,
++                           'connected_emails': [],
++                           'match_for_site_account': None},
++             'readable_identifiers': [],
++             'minted': None},
++            "passwords": [], "passkeys": [], "auth_credential_ref": None}
++
++
++async def test_exact_neutral_inventory_has_no_auth_material_or_prompt():
++    from domains.spawn_browser_agent_v3.credential_runtime import build_realm_credential_state
++    state = await build_realm_credential_state(_neutral_credential_payload(), decryption_key=None, target_url="about:blank")
++    assert state.auth_realm == "" and state.auth_options_section == ""
++    assert not state.password_secret_refs and not state.password_origins
++    assert not state.credential_refs_by_secret_ref and not state.decrypted_passkeys
++    assert not state.passkey_ref_by_credential_id and state.auth_credential_ref is None
++    assert not state.auth_runtime_state.password_ids and not state.auth_runtime_state.minted_present
++
++
++async def test_neutral_hydration_rejects_missing_context_and_nonempty_inventory():
++    import copy
++    from domains.spawn_browser_agent_v3.credential_runtime import build_realm_credential_state
++    for url in (None, "", "https://example.com", "file:///tmp/page", "about:blank#other"):
++        try:
++            await build_realm_credential_state(_neutral_credential_payload(), decryption_key=None, target_url=url)
++        except RuntimeError:
++            pass
++        else:
++            raise AssertionError(f"Accepted empty realm for {url!r}")
++    payload = _neutral_credential_payload()
++    mutations = [
++        {"passwords": [{"id": "password"}]}, {"passkeys": [{"id": "passkey"}]},
++        {"auth_credential_ref": {"kind": "cookie_bundle", "id": "cookie"}},
++        {"auth_options": {}}, {"auth_realm": None},
++    ]
++    for key, value in (("cookie_bundles", [{"id": "cookie"}]), ("passwords", [{"id": "password"}]),
++                       ("passkeys", [{"id": "passkey"}]), ("minted", {"email": "fixture@example.com"}),
++                       ("readable_identifiers", ["fixture@example.com"]), ("steel_session", {"id": "session"}),
++                       ("email_otp", {"available": True})):
++        changed = copy.deepcopy(payload["auth_options"])
++        changed[key] = value
++        mutations.append({"auth_options": changed})
++    for mutation in mutations:
++        changed = {**copy.deepcopy(payload), **mutation}
++        try:
++            await build_realm_credential_state(changed, decryption_key=None, target_url="about:blank")
++        except RuntimeError:
++            pass
++        else:
++            raise AssertionError(f"Accepted inconsistent neutral inventory: {mutation!r}")
+--- a/agents/tests/blackbox/spawn_browser_agent_v3.blackbox.py
++++ b/agents/tests/blackbox/spawn_browser_agent_v3.blackbox.py
+@@ -25225,7 +25225,7 @@
+     ), completions[0]["message"]
+ 
+ 
+-async def test_spawn_browser_activity_checkpoints_at_step_boundary_on_worker_shutdown():
++async def _exercise_first_step_shutdown(*, neutral=False, resume=False, resume_url="about:blank"):
+     """A deploy SIGTERM mid-step must end the activity at the next step boundary.
+ 
+     Agent 3efa7cae: a deploy stopped the worker machine while a browser task
+@@ -25258,6 +25258,22 @@
+         "browser_session_metadata": {"provider": "steel", "profile_id": "profile-1"},
+         "user_settings": {},
+     }
++    if neutral:
++        session_data.update(
++            auth_realm="",
++            auth_options={'realm': '',
++             'steel_session': None,
++             'cookie_bundles': [],
++             'passwords': [],
++             'passkeys': [],
++             'email_otp': {'available': False,
++                           'connected_emails': [],
++                           'match_for_site_account': None},
++             'readable_identifiers': [],
++             'minted': None},
++            passkeys=[], auth_credential_ref=None, current_url=resume_url, same_session_available=True,
++        )
++    final_url = "about:blank" if neutral else "https://example.com/cart"
+     llm_step = AsyncMock(
+         return_value={
+             "action": {"action": "scroll", "thinking": "Looking for the cart", "params": {"direction": "down"}},
+@@ -25270,7 +25286,7 @@
+     async def execute_step_while_deploy_lands(*args, **kwargs):
+         executed_steps.append(args[2] if len(args) > 2 else kwargs.get("unified_action"))
+         env.worker_shutdown()
+-        return {"success": True, "message": "Scrolled down", "current_url": "https://example.com/cart"}
++        return {"success": True, "message": "Scrolled down", "current_url": final_url}
+ 
+     close_mock = AsyncMock()
+     native_start = await native_browser_start_source("1970-01-01T00:00:00+00:00")
+@@ -25303,6 +25319,13 @@
+         patch("domains.spawn_browser_agent_v3.handler.live_tab_looks_challenged", AsyncMock(return_value=False)),
+     ]
+ 
++    if neutral:
++        patch_targets.extend([
++            patch.object(_FakeDomService, "get_page_identity", AsyncMock(return_value={"url": "about:blank", "title": ""})),
++            patch.object(_FakeDomService, "get_browser_state", AsyncMock(return_value={"url": "about:blank", "screenshot": None})),
++            patch.object(_FakeDomService, "get_current_url", AsyncMock(return_value="about:blank")),
++            patch("domains.spawn_browser_agent_v3.handler.fetch_session_info", AsyncMock(return_value=session_data)),
++        ])
+     with ExitStack() as stack:
+         for patch_target in patch_targets:
+             stack.enter_context(patch_target)
+@@ -25316,7 +25339,8 @@
+             task_id="task-1",
+             output_schema={"fields": [{"name": "result", "type": "string"}]},
+             use_claude_mode=False,
+-            start_url="https://example.com",
++            start_url="about:blank" if neutral else "https://example.com",
++            is_resume=resume,
+         )
+ 
+     assert result["status"] == BROWSER_DRAIN_YIELD_STATUS, result
+@@ -25332,8 +25356,8 @@
+     assert result["session_id"] == "session-1" and result["cdp_url"] == "ws://live", result
+     assert result["task_id"] == "task-1", result
+     close_mock.assert_not_awaited()
+-    assert result["current_url"] == "https://example.com/cart", result
+-    assert "https://example.com/cart" in result.get("visited_urls", []), result
++    assert result["current_url"] == final_url, result
++    assert final_url in result.get("visited_urls", []), result
+     turn_tool_calls = [
+         call["function"]["name"]
+         for message in result.get("browser_turn_messages", [])
+@@ -25343,6 +25367,36 @@
+     assert result.get("reasoning_messages") == ["Looking for the cart"], result
+     llm_usage = [item for item in result.get("usage_items") or [] if item.get("type") == "llm"]
+     assert llm_usage and llm_usage[0]["input_tokens"] == 900, result.get("usage_items")
++
++
++async def test_spawn_browser_activity_checkpoints_at_step_boundary_on_worker_shutdown():
++    await _exercise_first_step_shutdown()
++
++
++async def test_neutral_initialization_reaches_first_browser_step():
++    await _exercise_first_step_shutdown(neutral=True)
++
++
++async def test_neutral_resume_reaches_first_browser_step():
++    await _exercise_first_step_shutdown(neutral=True, resume=True)
++
++
++async def test_neutral_resume_rejects_empty_inventory_at_web_url():
++    try:
++        await _exercise_first_step_shutdown(neutral=True, resume=True, resume_url="https://example.com/account")
++    except RuntimeError as error:
++        assert str(error) == "Credential payload is missing auth_realm"
++    else:
++        raise AssertionError("Resumed HTTPS page accepted a neutral inventory")
++
++
++async def test_neutral_resume_rejects_missing_session_url():
++    try:
++        await _exercise_first_step_shutdown(neutral=True, resume=True, resume_url=None)
++    except RuntimeError as error:
++        assert str(error) == "Credential payload is missing auth_realm"
++    else:
++        raise AssertionError("Resumed unknown page borrowed the original blank URL")
+ 
+ 
+ async def test_private_browser_pause_urls_use_protected_continuity():
+@@ -34747,6 +34801,10 @@
+         "activity_checkpoints_at_step_boundary_on_worker_shutdown",
+         test_spawn_browser_activity_checkpoints_at_step_boundary_on_worker_shutdown,
+     )
++    await r.record_async("neutral_initialization_reaches_first_browser_step", test_neutral_initialization_reaches_first_browser_step)
++    await r.record_async("neutral_resume_reaches_first_browser_step", test_neutral_resume_reaches_first_browser_step)
++    await r.record_async("neutral_resume_rejects_empty_inventory_at_web_url", test_neutral_resume_rejects_empty_inventory_at_web_url)
++    await r.record_async("neutral_resume_rejects_missing_session_url", test_neutral_resume_rejects_missing_session_url)
+     await r.record_async(
+         "private_browser_pause_urls_use_protected_continuity",
+         test_private_browser_pause_urls_use_protected_continuity,
