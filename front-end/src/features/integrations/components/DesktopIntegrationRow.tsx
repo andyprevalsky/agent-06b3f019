@@ -14,6 +14,7 @@
  *     (Gmail addresses, Plaid institutions, compute subscriptions): one chip per
  *     account, one bar per syncing account, "+ Add account" re-runs connect
  *     chip [SYNCING + light] (Gmail `history`) → "checking for new mail", no bar
+ *     addLabel → "+ <addLabel>" instead of "+ Add account"
  *     rowSync (the backend reports one account for the whole row) → one row bar,
  *       no per-chip bars
  *   bar text: provider phase as words, bytes as sizes, "N of M <unit>", "~ETA left"
@@ -95,6 +96,8 @@ export interface DesktopIntegrationView {
   layout?: 'chips' | 'rows';
   /** Row-scoped extras (sign-in modal, inline error). */
   extra?: ReactNode;
+  /** multiAccount add button text; default "+ Add account". */
+  addLabel?: string;
 }
 
 /** Shared row look (the iPhone row reuses these so every integration row matches). */
@@ -261,10 +264,11 @@ function AccountsBlock({ view }: { view: DesktopIntegrationView }) {
           type="button"
           onClick={view.onConnect}
           disabled={view.connecting}
-          aria-label={`Add ${view.name} account`}
+          aria-label={view.addLabel ?? `Add ${view.name} account`}
           className="inline-flex w-fit items-center gap-1 text-xs text-muted-foreground hover:text-[#e8507f] disabled:opacity-60 dark:hover:text-[#ff7aa2]"
         >
-          {view.connecting && <Loader2 className="h-3 w-3 animate-spin" />}+ Add account
+          {view.connecting && <Loader2 className="h-3 w-3 animate-spin" />}+{' '}
+          {view.addLabel ?? 'Add account'}
         </button>
       )}
     </div>
