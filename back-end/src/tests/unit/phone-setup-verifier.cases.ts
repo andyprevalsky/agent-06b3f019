@@ -153,7 +153,7 @@ test('phone setup canonical Rose wrapper purpose, evidence, timeout and actual u
       if (verificationTarget === 'imessage')
         assert.ok(
           settingsPurpose(verificationTarget).includes(
-            'an Apple Account line naming any other identity is disabled'
+            'on that Send and Receive screen clearly naming a different identity is disabled'
           )
         );
       if (verificationTarget === 'imessage')

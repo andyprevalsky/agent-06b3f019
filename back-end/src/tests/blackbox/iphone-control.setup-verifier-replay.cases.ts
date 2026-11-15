@@ -48,7 +48,7 @@ async function recordedProofScreensVerify(): Promise<void> {
           ? 'Next'
           : text
   );
-  const checks: Array<[string, SetupTarget, Ocr, 'confirmed' | 'not_confirmed']> = [
+  const checks: Array<[string, SetupTarget, Ocr, 'confirmed' | 'not_confirmed' | 'unknown']> = [
     ['Gmail account Settings', 'gmail', o.gmail_settings_cursor119, 'confirmed'],
     [
       'Send & Receive receive address',
@@ -110,6 +110,14 @@ async function recordedProofScreensVerify(): Promise<void> {
       'not_confirmed',
     ],
     [
+      'FaceTime page with another Apple Account is not evidence',
+      'imessage',
+      rewrite(o.facetime_settings_cursor71, (t) =>
+        t.replace('Apple Account: andyprevalsky@yahoo.com', 'Apple Account: someone@icloud.com')
+      ),
+      'unknown',
+    ],
+    [
       'real FaceTime page sent as receive_address',
       'receive_address',
       o.facetime_settings_cursor71,
@@ -137,8 +145,10 @@ async function recordedProofScreensVerify(): Promise<void> {
   const statuses = await Promise.all(checks.map(([, target, ocr]) => verify(target, ocr)));
   const wrong = checks
     .map(([name, , , expected], index) => ({ name, expected, status: statuses[index] }))
-    .filter(
-      ({ expected, status }) => (expected === 'confirmed') !== status.startsWith('confirmed:')
+    .filter(({ expected, status }) =>
+      expected === 'unknown'
+        ? !status.startsWith('unknown:')
+        : (expected === 'confirmed') !== status.startsWith('confirmed:')
     );
   assert.deepEqual(wrong, [], 'recorded setup screens must verify exactly as expected');
 }
