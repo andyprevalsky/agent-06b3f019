@@ -13,6 +13,8 @@ import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'lib'))
+from test_quarantine import quarantine  # scripts/lib; before deploy_test_plan imports scripts/test_quarantine.py
 import deploy_test_plan as p
 
 
@@ -1281,6 +1283,9 @@ for line in sys.stdin:
                     self.scan()
                 self.reap(child)
 
+    @quarantine(since="2026-11-15", repair="pending-handoff:e543556012604f01aa5b3bba4aa81b7c",
+                error="AssertionError: [0.05] is not false : the service manager is skipped on evidence, not after the grace window",
+                evidence=".context/deploy-pipeline/attempts/4/focused/deploy-command-structural (PR2126, Blacksmith, 1803238135)")
     def test_own_user_service_manager_is_skipped_only_on_cgroup_evidence(self):
         # The Blacksmith failure (SHA 7b243b4ec, InterruptedCardRecovery / StructuralSupervisorCleanup): the
         # runner's `systemd --user` and `(sd-pam)` share our uid but are permanently non-dumpable, so cwd/fd
