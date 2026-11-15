@@ -9128,7 +9128,7 @@
       "orgTransfer": {
         "status": "reclaimed",
         "amountCents": 100,
-        "transferredCents": 100,
+        "transferredCents": 0,
         "releasedCents": 100,
         "livemode": true
       },
