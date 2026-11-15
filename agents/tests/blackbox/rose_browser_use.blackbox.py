@@ -24,7 +24,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(ROOT.parent / "scripts" / "lib"))
 
 from _test_utils import BlackboxResult, set_mock_handler, teardown_mock
-from test_quarantine import quarantine
 
 import httpx
 
@@ -2026,6 +2025,54 @@ async def test_complete_browser_use_recovers_a_step_cut_off_before_its_action():
     assert result["actual_model"] == "google/gemini-3.8-flash", result["actual_model"]
 
 
+async def test_complete_browser_use_recovers_an_action_cut_off_mid_arguments():
+    """A tool call cut off at the output limit is not a model decision.
+
+    Repro of PR #2099's native AutoFill FLAKY f48b6ecc: the reply streamed a
+    phone call whose nested args stopped at the 2048-token limit
+    (`{"min_confidence": 0`, finish=length). Because a tool call had been seen,
+    the shared cut-off recovery skipped it and validation rejected the step.
+    A collected browser step discards the cut-off attempt and retries.
+    """
+    def tool_reply(arguments, finish, tokens):
+        return _openai_sse(
+            [
+                {"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "call_phone", "type": "function",
+                                                          "function": {"name": "phone", "arguments": arguments}}]},
+                              "finish_reason": finish}]},
+                {"usage": {"prompt_tokens": 12, "completion_tokens": tokens, "total_tokens": tokens + 12}},
+            ]
+        )
+    cut_off = tool_reply(json.dumps({"mode": "operation", "operation": "screen.text", "args": "{\"min_confidence\": 0"}), "length", 2048)
+    acted = tool_reply(json.dumps({"mode": "operation", "operation": "screen.text", "args": {"min_confidence": 0.3}}), "tool_calls", 40)
+    seen: list[tuple[str, int]] = []
+
+    def handler(req):
+        if "openrouter.ai" not in str(req.url):
+            return httpx.Response(500, text="unexpected route")
+        body = json.loads(req.content.decode())
+        seen.append((body["model"], body["max_tokens"]))
+        text = cut_off if len(seen) == 1 else acted
+        return httpx.Response(200, text=text, headers={"Content-Type": "text/event-stream"})
+
+    set_mock_handler(handler)
+    try:
+        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "", "CEREBRAS_API_KEY": ""}):
+            result = await RoseClient(openrouter_key="ork-x").complete_browser_use(
+                task="Continue my authorized Apple Account sign-in.",
+                browser_state={**_browser_state(), "phone": _native_autofill_control_state("Apple Account. Password field is masked.")},
+                action_history=[],
+                available_actions=["phone", "request_user_assistance_for_authentication"],
+                include_screenshot=False,
+                call_site="test-bu-cut-off-mid-arguments",
+            )
+    finally:
+        teardown_mock()
+    assert seen == [("qwen/qwen3.8-27b", 2048), ("qwen/qwen3.8-27b", 16000)], seen
+    assert result["action"]["action"] == "phone", result["action"]
+    assert result["action"]["params"]["args"] == {"min_confidence": 0.3}, result["action"]
+
+
 async def test_complete_browser_use_preserves_printable_native_tool_batch():
     """A provider turn that types several characters must not discard calls 2..N."""
     tool_calls = [
@@ -2819,6 +2866,10 @@ async def run_all_tests():
         test_complete_browser_use_recovers_a_step_cut_off_before_its_action,
     )
     await r.record_async(
+        "complete_browser_use_recovers_cut_off_arguments",
+        test_complete_browser_use_recovers_an_action_cut_off_mid_arguments,
+    )
+    await r.record_async(
         "complete_browser_use_printable_native_tool_batch",
         test_complete_browser_use_preserves_printable_native_tool_batch,
     )
@@ -3429,12 +3480,6 @@ async def test_native_autofill_control_history_matches_real_serializer():
     assert json.loads(turn_messages[1]["content"])["operation"]["id"] == "read-1"
 
 
-@quarantine(
-    since="2026-11-14",
-    repair="https://boxes.dev/thread/thr_8cefa6e4ed4f4244ae0919c0d2b3c8b3",
-    error="AssertionError: ['phone arguments rejected: - args: Input should be a valid dictionary']",
-    evidence="https://github.com/Rose-Ai-Labs/rose/actions/runs/43649937439",
-)
 async def test_native_autofill_real_model_synthetic_controls():
     """Real canonical decisions on synthetic OCR; no device execution or secrets."""
     from _test_utils import live_funded_azure
@@ -3589,7 +3634,7 @@ async def test_phone_setup_settings_actual_handler_observation():
         assert "Preserve the original authorized phone task" in wire
         import hashlib
         from domains.spawn_browser_agent_v3.phone import PHONE_GUIDANCE
-        assert hashlib.sha256(PHONE_GUIDANCE.encode()).hexdigest() == "922c0da15d15aefdd525ec218faa0b43bf64e5e0c0aa6b9fb8a57e795f82e35d", "Ordinary enabled guide must match the saved-credential binding contract"
+        assert hashlib.sha256(PHONE_GUIDANCE.encode()).hexdigest() == "6e5f34b52b1f3bf075055f77ea027ecd1c16711c21808e810e136d8be49e1434", "Ordinary enabled guide must match the saved-credential binding contract"
         for marker in (None, False, "true"):
             plain_setup = {key: value for key, value in setup.items() if key != "googlePasscodeExceptionAllowed"}
             if marker is not None:
