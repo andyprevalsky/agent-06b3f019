@@ -3,7 +3,8 @@
  * A teammate's code agent lists and calls the owner's team-shared MCP server (mcp grant,
  * docs/plans/active/share-mcp-servers.md). The call runs with the OWNER's API-key header
  * server-side; the teammate never receives it. The shared server's tool names never
- * collide with the reader's own server. Unshare, the owner's server leaving CONNECTED,
+ * collide with the reader's own server, and the sandbox `rose mcp` tool list names the
+ * owner and team of every shared tool. Unshare, the owner's server leaving CONNECTED,
  * an invited-only reader and a non-member all lose access on the next list or call.
  *
  * Network: the loopback MCP fixture (mcp-servers.fixture.ts) with the SSRF guard relaxed
@@ -11,6 +12,8 @@
  * through the running backend's real agent-tools route.
  */
 import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
+import { join } from 'node:path';
 import { after, before, test } from 'node:test';
 import { prisma } from '../../providers/database';
 import { mintAgentToolsToken } from '../../providers/agentTools/token';
@@ -23,7 +26,7 @@ import {
 } from '../../providers/mcp/servers';
 import * as teamsService from '../../domains/teams/service';
 import { KEY, startMcpFixture, type McpFixture } from './mcp-servers.fixture';
-import { call, expectStatus } from './projects-harness';
+import { BASE_URL, call, expectStatus } from './projects-harness';
 import { randomUUID, share, teamFixture, unshare } from './teams-capabilities.harness';
 
 const REDIRECT = 'http://localhost:5173/integrations/mcp/callback';
@@ -51,6 +54,36 @@ async function refused(run: Promise<unknown>, status: number) {
   );
   assert.ok(error instanceof McpServerError, `expected McpServerError, got ${String(error)}`);
   assert.equal(error.status, status, error.message);
+}
+
+/** tools/list over the sandbox CLI's stdio MCP server, as Claude Code / Codex drive it. */
+async function roseMcpTools(agentId: string, token: string) {
+  const cli = join(__dirname, '../../assets/rose-tools/rose.cjs');
+  const child = spawn(process.execPath, [cli, 'mcp'], {
+    env: {
+      ...process.env,
+      ROSE_TOOLS_URL: `${BASE_URL}/api/agent-tools/${agentId}`,
+      ROSE_TOOLS_TOKEN: token,
+      HOME: '/nonexistent-rose-home',
+    },
+  });
+  let buffer = '';
+  const reply = new Promise<{ result: { tools: Array<{ name: string; description: string }> } }>(
+    (resolve, reject) => {
+      child.stdout.on('data', (chunk: Buffer) => {
+        buffer += chunk.toString();
+        const end = buffer.indexOf('\n');
+        if (end >= 0) resolve(JSON.parse(buffer.slice(0, end)));
+      });
+      child.on('exit', () => reject(new Error('rose mcp exited before tools/list replied')));
+    }
+  );
+  child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' })}\n`);
+  try {
+    return (await reply).result.tools;
+  } finally {
+    child.kill();
+  }
 }
 
 /** A code agent of `userId` (teams-harness removes the user's agents after the file). */
@@ -126,6 +159,17 @@ test("a teammate lists and calls the owner's shared MCP server with the owner's 
   const routed = res.data.servers as Array<{ id: string; shared?: { owner_user_id: string } }>;
   assert.equal(routed.find((row) => row.id === owned.id)?.shared?.owner_user_id, f.owner.userId);
   assert.ok(!JSON.stringify(res.data).includes(KEY), 'the route never returns the key');
+  // The sandbox tool list tells the code agent whose server a shared tool runs on.
+  const tools = await roseMcpTools(reader.agentId, reader.token);
+  const sharedEcho = tools.find((tool) => tool.name === 'team-docs-2__echo');
+  const ownEcho = tools.find((tool) => tool.name === 'team-docs__echo');
+  assert.ok(
+    sharedEcho?.description.startsWith(
+      `[Team Docs MCP server, shared by mcp owner (ownerUserId ${f.owner.userId}) via team mcp team]`
+    ),
+    sharedEcho?.description
+  );
+  assert.ok(ownEcho?.description.startsWith('[Team Docs MCP server] '), ownEcho?.description);
 
   for (const other of [f.invited, f.outsider]) {
     assert.equal(
