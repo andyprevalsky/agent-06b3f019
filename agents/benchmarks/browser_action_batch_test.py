@@ -540,8 +540,8 @@ def test_portrait_route_journal_is_identical_when_batched():
 def test_phone_prompt_permits_same_response_verification():
     from domains.spawn_browser_agent_v3.phone import PHONE_GUIDANCE
     from providers.rose.browser_use import BROWSER_USE_TOOLS
-    assert 'act once' not in PHONE_GUIDANCE and 'follow the action with screen.text in the' in PHONE_GUIDANCE
-    assert 'may be followed by screen.text in the same response' in BROWSER_USE_TOOLS['phone']['description']
+    assert 'act once' not in PHONE_GUIDANCE and 'put screen.text as the next call in the' in PHONE_GUIDANCE
+    assert 'put screen.text after an action in the same response' in BROWSER_USE_TOOLS['phone']['description']
 
 
 async def full_activity_phone_batch():
