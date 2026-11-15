@@ -23,6 +23,7 @@ tags:
 sources:
   - PR #2110 round-1 smoke, source 091ab4e0e4ef, task agent-payment-test-shop (FLAKY 21815f3c), root agent cf2f2f5d-6054-4f1f-bf17-37399f231f2f, browser task 5da61f13, 2026-11-15T02:42:43-02:43:24Z
   - PR #2125 smoke, 4 recovered capacity_unavailable creates (2026-11-15 parallel deploy wave)
+  - PR #2154 (fix, merged e21c7633a9)
   - commit 5cc808dfa5 (agent-payment-test-shop quarantine marker, repair pending-handoff:21815f3c6d454cecacbf0c74d5e7ee28)
 repro: back-end/src/tests/blackbox/browser-session-tilion-dead-worker.fixture.ts
 status: fixed
@@ -135,6 +136,15 @@ domain through `runLogicalBrowserCases`, adds four scenarios:
 
 `tilion-client.test.ts` asserts the capacity typing, a same-key capacity retry, and an
 untyped outcome after an in-flight 409.
+
+Shipped in PR #2154 (merge e21c7633a9, 2026-11-15). Deploy gates 17/17 passed on
+dc11332ecb48. That smoke run included `agent-payment-test-shop`, which passed with no
+capacity rejection in its logs, so the live run did not exercise this path. The local
+fixture is the recovery proof. Production lanes passed: Render (verified by the live
+descendant 6e2977bc0), backend probes, and production semantics. CodeRabbit was at its
+organization spending cap, so the PR merged unreviewed after the adversarial RCA review.
+The `agent-payment-test-shop` marker from PR #2110 (5cc808dfa5) is released by its
+5-pass streak.
 
 Residuals, which are not part of this fix:
 

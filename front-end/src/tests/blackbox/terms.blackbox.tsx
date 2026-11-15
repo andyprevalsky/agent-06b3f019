@@ -206,12 +206,10 @@ describe('Terms page', () => {
     expect(screen.getByText('Rose')).toBeInTheDocument();
   });
 
-  it('renders header navigation links', () => {
+  it('renders header navigation links without an About page link', () => {
     renderWithProviders(<Terms />);
     expect(screen.getByRole('link', { name: /research/i })).toBeInTheDocument();
-    // "About" appears in both header nav and footer company links
-    const aboutLinks = screen.getAllByRole('link', { name: /about/i });
-    expect(aboutLinks.length).toBeGreaterThanOrEqual(2);
+    expect(screen.queryByRole('link', { name: /^about$/i })).not.toBeInTheDocument();
   });
 
   it('renders footer with copyright', () => {

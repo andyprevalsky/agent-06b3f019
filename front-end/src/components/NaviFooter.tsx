@@ -114,18 +114,6 @@ const NaviFooter = () => {
             <ul className="space-y-2 text-primary-foreground/70">
               <li>
                 <a
-                  href="/about"
-                  onClick={(event) => {
-                    if (!openExternalFromElectron('/about')) return;
-                    event.preventDefault();
-                  }}
-                  className="hover:text-primary-foreground transition-colors"
-                >
-                  About
-                </a>
-              </li>
-              <li>
-                <a
                   href="/careers"
                   onClick={(event) => {
                     if (!openExternalFromElectron('/careers')) return;

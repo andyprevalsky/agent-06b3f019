@@ -10,7 +10,6 @@ const Index = lazy(() => import('@/features/index'));
 const Privacy = lazy(() => import('@/features/privacy'));
 const Terms = lazy(() => import('@/features/terms'));
 const NotFound = lazy(() => import('@/features/not-found'));
-const About = lazy(() => import('@/features/about'));
 const ResearchBlog = lazy(() => import('@/features/research-blog'));
 const ResearchBlogPost = lazy(() => import('@/features/research-blog-post'));
 const Careers = lazy(() => import('@/features/careers'));
@@ -52,7 +51,6 @@ export const ROUTE_TABLE: readonly RouteEntry[] = [
   { path: '/', component: Terminal },
   { path: '/privacy', component: Privacy },
   { path: '/terms', component: Terms },
-  { path: '/about', component: About },
   { path: '/terminal', component: Index },
   { path: '/research', component: ResearchBlog },
   { path: '/research/:slug', component: ResearchBlogPost },
