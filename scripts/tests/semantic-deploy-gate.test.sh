@@ -476,15 +476,21 @@ if rerun:
     fail(f"/deploy must not rerun blackbox after coverage already ran it: {sorted(rerun)}")
 if "BLACKBOX_TEST_REPLAY_OUTBOUND" in json.dumps(template):
     fail("/deploy gates must not retain replay config used only by the removed duplicate backend blackbox run")
-# AgentCard has no separate lane: its four sandbox lifecycle tasks are cloud smoke tasks.
+# AgentCard has no separate lane: its four sandbox lifecycle tasks are cloud smoke
+# tasks, selected only when this checkout's diff touches AgentCard infrastructure.
 if "agentcard-lifecycle" in gates:
     fail("AgentCard sandbox lifecycle tasks must not form a separate deploy gate")
 if tuple(pipeline.AGENTCARD_TASKS) != ("agent-payment-test-shop", "agent-payment-setup-resume",
                                       "agent-payment-idempotent-abandonment", "agent-payment-abandonment"):
     fail("the four AgentCard lifecycle tasks must stay one set")
-missing = set(pipeline.AGENTCARD_TASKS) - set(gates["smoke"]["checks"])
-if missing:
-    fail(f"the cloud smoke gate must run every AgentCard lifecycle task: {sorted(missing)}")
+selector = prod._SELECTOR
+agentcard_changed = selector.agentcard_infra_paths(selector.discover_changed_files(root))
+in_smoke = set(pipeline.AGENTCARD_TASKS) & set(gates["smoke"]["checks"])
+if agentcard_changed and in_smoke != set(pipeline.AGENTCARD_TASKS):
+    fail(f"AgentCard infra changed ({agentcard_changed}): the cloud smoke gate must run every AgentCard lifecycle task, "
+         f"missing {sorted(set(pipeline.AGENTCARD_TASKS) - in_smoke)}")
+if not agentcard_changed and in_smoke:
+    fail(f"no AgentCard infra changed: the cloud smoke gate must not run AgentCard lifecycle tasks {sorted(in_smoke)}")
 
 mac = {"ship": "false", "reason": "test", "label": "false"}
 # Benchmark history-ledger rows never start the production AgentCard lane.
