@@ -16123,7 +16123,14 @@ async def test_browser_observation_and_action_history_keep_private_values_out_af
         recent_events=[{"text": echoed}],
     )
     dom._session = SimpleNamespace(get_browser_state_summary=AsyncMock(return_value=state))
-    with patch.object(dom, "_capture_surface_screenshot", AsyncMock(return_value="fixture-image-containing-private-values")) as capture:
+    import browser_tools.dom_service as dom_service_module
+
+    # screenshot_context.captured_at is a wall-clock float and the scan below reads
+    # str(observed): pin it so a timestamp containing the CVV digits cannot fail it.
+    with (
+        patch.object(dom, "_capture_surface_screenshot", AsyncMock(return_value="fixture-image-containing-private-values")) as capture,
+        patch.object(dom_service_module.time, "time", return_value=1_700_000_000.0),
+    ):
         observed = await dom.get_browser_state(include_screenshot=True)
     dom._session.get_browser_state_summary.assert_awaited_once_with(include_screenshot=True)
     capture.assert_awaited_once()
@@ -40945,6 +40952,18 @@ async def run_all_tests():
     await r.record_async(
         "browser_task_checkpoints_before_activity_start_to_close",
         test_browser_task_checkpoints_before_its_activity_start_to_close,
+    )
+    await r.record_async(
+        "provider_ended_session_yields_for_replacement",
+        test_browser_task_yields_for_a_replacement_when_the_provider_ends_its_session,
+    )
+    await r.record_async(
+        "provider_session_recovery_confirmed_ends_within_budget",
+        test_browser_task_recovers_only_confirmed_provider_ends_within_budget,
+    )
+    await r.record_async(
+        "provider_session_recovery_first_step_snapshot_and_checkpointed_restore",
+        test_browser_provider_session_recovery_covers_first_step_snapshot_and_checkpointed_restore,
     )
     await r.record_async(
         "reused_session_lifetime_fixture_isolates_cached_generation",
