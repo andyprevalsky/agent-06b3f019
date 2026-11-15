@@ -8278,6 +8278,12 @@
   },
   {
     "name": "agent-payment-test-shop",
+    "quarantine": {
+      "since": "2026-11-15",
+      "repair": "pending-handoff:21815f3c6d454cecacbf0c74d5e7ee28",
+      "error": "Timeout after 904s (task timeout=900s) | Agent status: ACTIVE (expected COMPLETED) | Browser agent 5da61f13 (Tilion POST /v1/session 503 capacity_unavailable x2, then timed out after 15000ms; the FAILED browser-initialization record stayed latched so every later init failed 'Browser initialization failed before readiness'). First native attempt FAILED; one automatic retry PASS (FLAKY).",
+      "evidence": "PR #2110 deploy smoke .context/deploy-cloud/b05d3a22af70afd20fc25877a2789bf41e21591032a98d08c58e53a9160e4baf (agent cf2f2f5d-6054-4f1f-bf17-37399f231f2f); RCA: initialization.ts initializeLogicalBrowser latches an ambiguous TilionTimeoutError create (unhandled by PR #2010's typed-validation release)"
+    },
     "title": "Agent Payment Test Shop",
     "prompt": "Use a browser agent (spawn_agent with type=\"browser\" \u2014 do NOT delegate this to a general_purpose sub-agent) to go to {frontend_url}/test_payment and complete the visible Rose Labs Test Payment checkout. Buy exactly these 3 products and no others: Aurora Notebook, Ceramic Mug, and Canvas Tote.",
     "timeout_seconds": 900,
