@@ -72,48 +72,9 @@
     "scripts/lib/__pycache__/": "reproducible",
     "scripts/tests/__pycache__/": "reproducible"
   },
-  "live_processes": [
-    {
-      "argv": "/bin/bash -c source /home/boxes/.claude/shell-snapshots/snapshot-bash-1794708123261-gu3065.sh 2>/dev/null || true && shopt -u extglob 2>/dev/null || true && { \\builtin unalias -- 'which'; \\builtin uns",
-      "cwd": "/home/boxes/rose",
-      "pid": 1530177
-    },
-    {
-      "argv": "tail -n +1 -f /var/tmp/rgf/closeout/recover-7a92.log",
-      "cwd": "/home/boxes/rose",
-      "pid": 1530180
-    },
-    {
-      "argv": "/bin/bash -c source /home/boxes/.claude/shell-snapshots/snapshot-bash-1794708123261-gu3065.sh 2>/dev/null || true && shopt -u extglob 2>/dev/null || true && { \\builtin unalias -- 'which'; \\builtin uns",
-      "cwd": "/home/boxes/rose",
-      "pid": 1530181
-    },
-    {
-      "argv": "ugrep -G --ignore-files --hidden -I --exclude-dir=.git --exclude-dir=.svn --exclude-dir=.hg --exclude-dir=.bzr --exclude-dir=.jj --exclude-dir=.sl --line-buffered -iE refus|error|fail|EXIT|captur|dest",
-      "cwd": "/home/boxes/rose",
-      "pid": 1530183
-    },
-    {
-      "argv": "/bin/bash -c source /home/boxes/.claude/shell-snapshots/snapshot-bash-1794708123261-gu3065.sh 2>/dev/null || true && shopt -u extglob 2>/dev/null || true && { \\builtin unalias -- 'which'; \\builtin uns",
-      "cwd": "/home/boxes/rose",
-      "pid": 1544108
-    },
-    {
-      "argv": "tail -n +1 -f /var/tmp/rgf/closeout/accept-summary.log",
-      "cwd": "/home/boxes/rose",
-      "pid": 1544113
-    }
-  ],
+  "live_processes": [],
   "manifest": "/home/boxes/rose/docs/handoffs/pr-1990-closeout/closeout-manifest.json",
-  "open_items": [
-    "uncommitted changes in /home/boxes/rose: docs/handoffs/pr-1990-closeout/closeout-manifest.json, docs/handoffs/pr-1990-closeout/private-archive-delta-receipt.json, docs/handoffs/pr-1990-closeout/private-archive-receipt.json",
-    "live process 1530177 in this checkout: /bin/bash -c source /home/boxes/.claude/shell-snapshots/snapshot-bash-1794708123261-gu3065.sh 2>/dev/null || true && shopt -u extglob 2>/dev/null || true && { \\builtin unalias -- 'which'; \\builtin uns",
-    "live process 1530180 in this checkout: tail -n +1 -f /var/tmp/rgf/closeout/recover-7a92.log",
-    "live process 1530181 in this checkout: /bin/bash -c source /home/boxes/.claude/shell-snapshots/snapshot-bash-1794708123261-gu3065.sh 2>/dev/null || true && shopt -u extglob 2>/dev/null || true && { \\builtin unalias -- 'which'; \\builtin uns",
-    "live process 1530183 in this checkout: ugrep -G --ignore-files --hidden -I --exclude-dir=.git --exclude-dir=.svn --exclude-dir=.hg --exclude-dir=.bzr --exclude-dir=.jj --exclude-dir=.sl --line-buffered -iE refus|error|fail|EXIT|captur|dest",
-    "live process 1544108 in this checkout: /bin/bash -c source /home/boxes/.claude/shell-snapshots/snapshot-bash-1794708123261-gu3065.sh 2>/dev/null || true && shopt -u extglob 2>/dev/null || true && { \\builtin unalias -- 'which'; \\builtin uns",
-    "live process 1544113 in this checkout: tail -n +1 -f /var/tmp/rgf/closeout/accept-summary.log"
-  ],
+  "open_items": [],
   "pr": 1990,
   "preserved_refs": {
     "branch:andyprevalsky/P3-message-person-hillclimb": {
@@ -770,7 +731,7 @@
       "tip": "0e2ffe95ba40a2d0c2b8ae9e884b4a85d96af3f2"
     }
   },
-  "ready": false,
+  "ready": true,
   "worktrees": [
     {
       "branch": "refs/heads/records/pr-1990-closeout",
@@ -779,10 +740,7 @@
       "needs_integration": false,
       "path": "/home/boxes/rose",
       "uncommitted": [
-        "docs/handoffs/pr-1990-closeout/closeout-manifest.json",
-        "docs/handoffs/pr-1990-closeout/deletion-readiness.json",
-        "docs/handoffs/pr-1990-closeout/private-archive-delta-receipt.json",
-        "docs/handoffs/pr-1990-closeout/private-archive-receipt.json"
+        "docs/handoffs/pr-1990-closeout/deletion-readiness.json"
       ],
       "unpushed_commits": 0
     }
