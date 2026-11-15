@@ -22,7 +22,7 @@ from http.client import HTTPConnection, HTTPException, HTTPSConnection
 from time import monotonic, sleep
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
-from urllib.request import HTTPHandler, HTTPRedirectHandler, HTTPSHandler, Request, build_opener
+from urllib.request import HTTPRedirectHandler, Request, urlopen
 
 POOL_KEY = "rose_cooperative_worker_pool"
 CUSTODY_KEY = "rose_worker_reuse_custody"
@@ -200,47 +200,29 @@ def initial_spare(machine, app, live_hash):
 TRANSIENT_ATTEMPTS = 3
 
 
-class RequestNotSent(OSError):
-    """connect() (TCP or TLS) failed, so no request byte reached the Machines API."""
-
-
-def _connect_phase(connection):
-    class Connection(connection):
-        def connect(self):
-            try:
-                super().connect()
-            except OSError as exc:
-                raise RequestNotSent(exc.errno, f"request not sent: {exc}") from exc
-
-    return Connection
-
-
-class _HTTPHandler(HTTPHandler):
-    def http_open(self, req):
-        return self.do_open(_connect_phase(HTTPConnection), req)
-
-
-class _HTTPSHandler(HTTPSHandler):
-    def https_open(self, req):
-        return self.do_open(_connect_phase(HTTPSConnection), req, context=self._context)
-
-
-class _NoRedirect(HTTPRedirectHandler):
-    """The Machines API never redirects; following one would let a second hop's
-    connect failure masquerade as the first request never having been sent."""
-
-    def redirect_request(self, *_):
-        return None
-
-
 # 2026-11-15 run 43669103359: a retirement metadata POST died in connect()
 # (Errno 101 Network is unreachable). urllib reports that the same way as a
-# failure after the request was sent; this opener tells the two apart.
-urlopen = build_opener(_HTTPHandler, _HTTPSHandler, _NoRedirect).open
+# failure after the request was sent. A request provably never left when its
+# OSError was raised inside HTTP(S)Connection.connect (TCP, TLS, proxy CONNECT
+# all run before any request byte) on the first hop, not a redirect hop.
+_CONNECT_CODES = {HTTPConnection.connect.__code__, HTTPSConnection.connect.__code__}
+_REDIRECT_CODES = {HTTPRedirectHandler.http_error_302.__code__}
+
+
+def _codes(traceback):
+    while traceback is not None:
+        yield traceback.tb_frame.f_code
+        traceback = traceback.tb_next
 
 
 def not_sent(exc):
-    return isinstance(exc, URLError) and isinstance(exc.reason, RequestNotSent)
+    reason = getattr(exc, "reason", None)
+    return (
+        isinstance(exc, URLError)
+        and isinstance(reason, OSError)
+        and not _REDIRECT_CODES.intersection(_codes(exc.__traceback__))
+        and bool(_CONNECT_CODES.intersection(_codes(reason.__traceback__)))
+    )
 
 
 def transient(exc):

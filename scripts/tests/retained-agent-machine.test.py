@@ -656,7 +656,7 @@ class RetainedWorkerTests(unittest.TestCase):
             def do_POST(self):
                 received.append(self.rfile.read(int(self.headers["Content-Length"])))
                 if self.path.endswith("/redirect"):
-                    self.send_response(307)
+                    self.send_response(303)
                     self.send_header("Location", "http://127.0.0.1:9/elsewhere")
                     self.send_header("Content-Length", "0")
                     self.end_headers()
@@ -698,11 +698,14 @@ class RetainedWorkerTests(unittest.TestCase):
             pool.Fly("prod", "1234").request("POST", "/lost-response", {"value": "idle"})
         self.assertFalse(pool.not_sent(caught.exception))
         self.assertEqual(received, [b'{"value": "idle"}'])
-        # A redirect is never followed, so a second hop cannot pose as "never sent".
+        # A redirected POST whose second hop cannot connect was still delivered once: no replay.
         received.clear()
-        with patch.object(pool, "API", api), self.assertRaises(HTTPError) as caught:
-            pool.Fly("prod", "1234").request("POST", "/redirect", {"value": "idle"})
-        self.assertEqual(caught.exception.code, 307)
+        with patch.object(pool, "API", api):
+            try:
+                pool.Fly("prod", "1234").request("POST", "/redirect", {"value": "idle"})
+                self.fail("a redirected write to an unreachable hop must fail")
+            except URLError as error:  # assertRaises strips __traceback__, which not_sent reads
+                self.assertFalse(pool.not_sent(error))
         self.assertEqual(received, [b'{"value": "idle"}'])
         # Bounded: a connect that never succeeds raises after three attempts.
         connects.clear()
