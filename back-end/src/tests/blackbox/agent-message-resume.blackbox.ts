@@ -229,6 +229,9 @@ test('a browser whose owner finished, or a foreground browser, resumes under its
     assert.equal(request.mode, item.mode, JSON.stringify(item));
     assert.equal(request.tool_call_id, 'tc-browser');
     assert.equal(request.message, 'Now add a croissant.');
+    // The worker stamps this root on every activity so resumed LLM records land
+    // in the tree's root archive bundle.
+    assert.equal(request.root_agent_id, agentId, 'resume request carries the archive root');
     if (item.mode === 'continue') {
       assert.equal(request.inbox_address, 'tc-browser');
       assert.equal(row.metadata.recipientTaskId, 'tc-browser');

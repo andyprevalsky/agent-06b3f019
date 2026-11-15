@@ -2,9 +2,11 @@
  * Checkpoint deletion cases, run inside code-sessions.blackbox.ts with its local
  * object store (CODE_SESSION_STORAGE_LOCAL_DIR):
  *
- *   retire ──► delete artifacts, manifest last ──► markRetired
+ *   retire ──► per checkpoint: archive copy confirmed ──► delete artifacts,
+ *     manifest last ──► markRetired
  *     a failed manifest read or artifact delete keeps the manifest (the only
- *     index of the artifact keys) and the session, so a later retire finishes;
+ *     index of the artifact keys) and the session, so a later retire finishes
+ *     (the archive gating itself: code-sessions-archive.cases.ts);
  *   TTL sweep ──► one session that keeps failing never stops the others;
  *     a session with a live lease (an attached spawn) is never swept.
  */
@@ -23,6 +25,7 @@ import {
   sweepExpiredCodeSessions,
 } from '../../providers/codeSessions/lifecycle';
 import { localSandboxFs } from '../../providers/codeSessions/sandboxFs';
+import { waitForCodeSessionArchiveJobs } from '../../providers/codeSessions/archiveMirror';
 
 export interface CheckpointDeletionContext {
   fixtureDir: string;
@@ -76,6 +79,8 @@ export function registerCheckpointDeletionCases(ctx: CheckpointDeletionContext):
         })
       );
     }
+    // Each checkpoint's trace-archive mirror runs in the background; settle it first.
+    await waitForCodeSessionArchiveJobs();
     if (ageDays > 0) {
       await prisma.codeSession.update({
         where: { id: row.id },

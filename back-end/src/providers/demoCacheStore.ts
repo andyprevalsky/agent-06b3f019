@@ -579,12 +579,13 @@ export interface FastCacheOffloadBatch {
  * (sha256 verified) before its row is pointed at it, and the row is replaced
  * only if it still holds the value that was uploaded, so a concurrent
  * re-record is never overwritten with a stale pointer. Idempotent: rows that
- * already hold a pointer are skipped.
+ * already hold a pointer are skipped. `keyPrefix` confines the scan to keys
+ * starting with it (a cursor alone continues into every later key).
  */
 export async function offloadFastCacheBatch(
   afterKey: string | null,
   limit: number,
-  options: { dryRun?: boolean; concurrency?: number } = {}
+  options: { dryRun?: boolean; concurrency?: number; keyPrefix?: string } = {}
 ): Promise<FastCacheOffloadBatch> {
   const client = getDemoCachePrisma();
   // One non-interactive transaction per statement: its timeouts apply to that
@@ -603,6 +604,7 @@ export async function offloadFastCacheBatch(
     client.$queryRaw<Array<{ key: string; kind: string; size: number }>>(Prisma.sql`
       SELECT key, kind, pg_column_size(value)::int AS size FROM "FastModeCacheEntry"
       WHERE ${afterKey === null ? Prisma.sql`TRUE` : Prisma.sql`key > ${afterKey}`}
+        AND ${options.keyPrefix === undefined ? Prisma.sql`TRUE` : Prisma.sql`starts_with(key, ${options.keyPrefix})`}
         AND "blobPath" IS NULL
       ORDER BY key LIMIT ${limit}
     `)

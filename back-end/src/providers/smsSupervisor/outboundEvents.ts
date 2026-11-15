@@ -104,6 +104,7 @@ async function deliverAcrossChannels(
       requiredLinks: content.requiredLinks,
       preserveText: content.preserveText,
       agentId: options?.archiveRootAgentId,
+      userId,
       eventType: options?.archiveContext?.event_type,
       correctionBudget,
       send: (candidate) => send(channel, candidate),

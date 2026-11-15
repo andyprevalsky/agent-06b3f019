@@ -13,6 +13,7 @@ import { createStreamingCompletion } from '../../providers/rose/client';
 import { CEREBRAS_API_URL } from '../../providers/rose/transport';
 import { buildRouterCompletionOptions } from '../../providers/chat/routerLlm';
 import { buildGeneratorCompletionOptions } from '../../providers/chat/generatorLlm';
+import { archiveRecordSchemaErrors } from '../helpers/llmArchiveRecordSchema';
 const repoRoot = path.resolve(__dirname, '../../../..');
 const fixtures = JSON.parse(
   fs.readFileSync(path.join(repoRoot, 'shared/llm-stream-contract/fixtures.json'), 'utf8')
@@ -100,15 +101,28 @@ export async function testChatArchivedCompletionEvidence(consumerClose = false):
         });
         const dump = JSON.parse(fs.readFileSync(recovered.latest.path, 'utf8'));
         assert.equal(dump.root_agent_id, rootId);
+        // v2: a crash-safe start record (llm/) plus one final record (llm-updates/).
         assert.equal(recovered.baseCallCount, 1);
-        assert.equal(recovered.updateCount, 0);
+        assert.equal(recovered.updateCount, 1);
+        for (const source of recovered.sources) {
+          assert.deepEqual(
+            archiveRecordSchemaErrors(source.payload),
+            [],
+            `${source.path} must satisfy shared/llm-archive-record/record.schema.json`
+          );
+        }
+        assert.deepEqual(
+          recovered.sources.map((source) => source.payload.record),
+          ['start', 'final']
+        );
         assert.equal(dump.agent_id, agentId);
         assert.deepEqual(dump.messages, JSON.parse(JSON.stringify(options.messages)));
         assert.deepEqual(dump.response_format, options.response_format);
         assert.deepEqual(dump.config.requested_params.provider_route, 'direct-cerebras');
-        assert.equal(dump.extra.output, expectedOutput);
+        assert.equal(dump.output.content, expectedOutput);
+        assert.equal(typeof dump.output.usage, 'object');
         if (consumerClose) assert.equal(dump.extra.consumer_closed, true);
-        assert(dump.config.actual_model);
+        assert(dump.output.actual_model);
         assert(dump.dump_id);
       }
     }

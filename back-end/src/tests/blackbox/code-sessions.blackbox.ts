@@ -9,8 +9,9 @@
  *   running backend ──HTTP──► ownership 404s, keepalive, grep over code_event rows
  *   (merge facts and the commit/merge prompt: code-session-merge-facts.blackbox.ts)
  *
- * Storage is hermetic (CODE_SESSION_STORAGE_BACKEND=local); nothing reaches E2B,
- * GitHub or Supabase Storage.
+ * Storage is hermetic (CODE_SESSION_STORAGE_BACKEND=local; the trace archive is a
+ * temp dir, see code-sessions-archive.cases.ts); nothing reaches E2B, GitHub,
+ * Supabase Storage or R2.
  */
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
@@ -65,6 +66,8 @@ import { registerCheckpointSizeCases } from './code-sessions-checkpoint-size.cas
 import { registerCloseBoundCases } from './code-sessions-close-bounds.cases';
 import { registerCloseConfirmationCases } from './code-sessions-close-confirmation.cases';
 import { registerCloseReviewCases } from './code-sessions-close-review.cases';
+import { registerCodeSessionArchiveCases } from './code-sessions-archive.cases';
+import { waitForCodeSessionArchiveJobs } from '../../providers/codeSessions/archiveMirror';
 
 config();
 
@@ -233,6 +236,7 @@ before(async () => {
 
 after(async () => {
   patchConnect(originalConnect);
+  await waitForCodeSessionArchiveJobs();
   for (const [key, value] of [
     ['CODE_SESSION_STORAGE_BACKEND', savedEnv.backend],
     ['CODE_SESSION_STORAGE_LOCAL_DIR', savedEnv.dir],
@@ -622,6 +626,7 @@ registerCodeSessionLiveResumeCases(liveSandboxCases);
 registerCodeSessionHeldAttachCases(liveSandboxCases);
 registerSandboxAttributionCases(userA);
 registerCheckpointDeletionCases({ fixtureDir, seedWorkspace });
+registerCodeSessionArchiveCases({ fixtureDir, seedWorkspace, cliSessionId });
 registerCheckpointSizeCases({ fixtureDir });
 registerCloseBoundCases({ fixtureDir, patchConnect, originalConnect });
 registerCloseConfirmationCases({

@@ -317,22 +317,25 @@ async def run_tests(domain_filters: list[str] | None = None, concurrency: int = 
     return 0 if failed == 0 else 1
 
 
+async def run_tests_then_join_native_callbacks(domain_filters: list[str] | None, concurrency: int) -> int:
+    """Run the suites, then let Temporal SDK native callbacks finish before asyncio.run returns.
+
+    Suites start WorkflowEnvironment servers and Workers whose shutdown futures
+    resolve from Tokio threads; exiting while one is still in Python aborts the
+    process during interpreter finalization after every test passed.
+    """
+    from helpers.process_exit import drain_native_python_callbacks
+
+    try:
+        return await run_tests(domain_filters, concurrency)
+    finally:
+        if not await drain_native_python_callbacks():
+            print("[BlackboxRunner] Native SDK callback still executing Python at runner exit", file=sys.stderr)
+
+
 def _usage_error(message: str) -> NoReturn:
     print(f"Error: {message}\n{__doc__}", file=sys.stderr)
     sys.exit(2)
-
-
-async def run_tests_then_drain(domain_filters: list[str] | None = None, concurrency: int = 30) -> int:
-    """Run the domains, then let SDK native threads leave Python before the loop closes.
-
-    A domain's last Temporal call settles from a Tokio thread; exiting while it is still in
-    Python aborts finalization (exit -6/-11) after every test passed. Same drain as worker.main.
-    """
-    from helpers.native_callback_drain import drain_native_python_callbacks  # agents root is on sys.path above
-
-    exit_code = await run_tests(domain_filters, concurrency)
-    await drain_native_python_callbacks()
-    return exit_code
 
 
 def parse_args(args: list[str]) -> tuple[list[str], int]:
@@ -376,7 +379,7 @@ def main() -> None:
         return
 
     domain_filters, concurrency = parse_args(args)
-    exit_code = asyncio.run(run_tests_then_drain(domain_filters or None, concurrency))
+    exit_code = asyncio.run(run_tests_then_join_native_callbacks(domain_filters or None, concurrency))
     sys.exit(exit_code)
 
 

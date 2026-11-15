@@ -43,27 +43,26 @@ def _run_python_on_native_thread(seconds):
 
 
 def test_worker_exit_waits_for_native_thread_python_callback():
-    import worker
-    from helpers.native_callback_drain import foreign_threads_running_python
+    from helpers import process_exit
 
     thread, callback, finished = _run_python_on_native_thread(0.3)
     try:
-        assert foreign_threads_running_python()
-        assert asyncio.run(worker._drain_native_python_callbacks(timeout=5)) is True
+        assert process_exit.foreign_threads_running_python()
+        assert asyncio.run(process_exit.drain_native_python_callbacks(timeout=5)) is True
         assert finished.is_set(), "entry point could return while a native callback was still in Python"
-        assert not foreign_threads_running_python()
+        assert not process_exit.foreign_threads_running_python()
     finally:
         assert _pthread.pthread_join(thread, None) == 0
         del callback
 
 
 def test_worker_exit_native_callback_wait_is_bounded():
-    import worker
+    from helpers import process_exit
 
     thread, callback, finished = _run_python_on_native_thread(1.0)
     try:
         started = time.monotonic()
-        assert asyncio.run(worker._drain_native_python_callbacks(timeout=0.05)) is False
+        assert asyncio.run(process_exit.drain_native_python_callbacks(timeout=0.05)) is False
         assert time.monotonic() - started < 0.5
         assert not finished.is_set()
     finally:

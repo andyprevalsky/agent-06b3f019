@@ -25,7 +25,7 @@ import {
   RoseRateLimitError,
   RoseServerError,
 } from './errors';
-import type { PoolSpec } from './pools';
+import { getPool, type PoolSpec } from './pools';
 import { openAiServiceTierFor, type AgentSpeed } from './speed';
 import {
   boundedRateLimitBackoffMs,
@@ -423,6 +423,47 @@ interface GptAuthOptions {
   speed?: AgentSpeed;
   idleTimeoutMs?: number;
   abortSignal?: AbortSignal;
+}
+
+/** The small pool's Codex model, as the Claude quota check uses the small Claude model. */
+const CODEX_QUOTA_CHECK_POOL = 'rose-1-mini';
+const CODEX_QUOTA_CHECK_TIMEOUT_MS = 15_000;
+
+export interface CodexQuotaCheckResponse {
+  status: number;
+  headers: Headers;
+  /** Error body of a non-2xx response (a usage_limit_reached body names the reset). */
+  body?: string;
+}
+
+/**
+ * The Codex counterpart of claudeQuotaCheck: one minimal subscription request
+ * at standard speed, made only for the `x-codex-*` window headers (and, on a
+ * 429, the usage_limit_reached body) every ChatGPT-backend response carries.
+ * Same body builder and transport as gptAuthComplete; one attempt, no retry or
+ * rotation, and the stream is cancelled unread. The caller reads the headers.
+ */
+export async function codexQuotaCheck(opts: {
+  token: string;
+  accountId?: string;
+  requestId: string;
+}): Promise<CodexQuotaCheckResponse> {
+  const body = buildCodexResponsesBody({
+    poolSpec: getPool(CODEX_QUOTA_CHECK_POOL),
+    messages: [{ role: 'user', content: 'quota' }],
+    effort: 'low',
+    requestId: opts.requestId,
+  });
+  const response = await postCodexStream({
+    body,
+    gptToken: opts.token,
+    accountId: opts.accountId,
+    requestId: opts.requestId,
+    callSite: 'usage_quota_check',
+    connectTimeoutMs: CODEX_QUOTA_CHECK_TIMEOUT_MS,
+  });
+  await response.body?.cancel().catch(() => undefined);
+  return { status: response.status, headers: response.headers, body: response.errorBody };
 }
 
 export async function* gptAuthComplete(opts: GptAuthOptions): AsyncIterable<RoseStreamChunk> {

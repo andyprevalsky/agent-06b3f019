@@ -4,17 +4,27 @@ import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
 import { createAgentPhoneNumber, isAgentPhoneEmailFallbackSafe } from '../../providers/agentPhone';
 import { prisma } from '../../providers/database';
+import { boundedReconcileCases } from './agentphone-recovery-scan-bound.bounded.cases';
 
 const previousAgentPhoneApiKey = process.env.AGENTPHONE_API_KEY;
 const previousAgentPhoneBaseUrl = process.env.AGENTPHONE_BASE_URL;
+const previousAgentPhoneTestApiKey = process.env.AGENTPHONE_TEST_API_KEY;
+const previousCaptureOutbound = process.env.BLACKBOX_TEST_CAPTURE_OUTBOUND;
 const previousFetch = globalThis.fetch;
 
 function markerForUser(userId: string) {
   return `rose-provisioning:${createHash('sha256').update(userId).digest('hex')}`;
 }
 
+function restoreOptional(key: string, value: string | undefined) {
+  if (value === undefined) delete process.env[key];
+  else process.env[key] = value;
+}
+
 function restoreEnv() {
   globalThis.fetch = previousFetch;
+  restoreOptional('AGENTPHONE_TEST_API_KEY', previousAgentPhoneTestApiKey);
+  restoreOptional('BLACKBOX_TEST_CAPTURE_OUTBOUND', previousCaptureOutbound);
   if (previousAgentPhoneApiKey === undefined) delete process.env.AGENTPHONE_API_KEY;
   else process.env.AGENTPHONE_API_KEY = previousAgentPhoneApiKey;
   if (previousAgentPhoneBaseUrl === undefined) delete process.env.AGENTPHONE_BASE_URL;
@@ -563,7 +573,8 @@ async function main(): Promise<void> {
       'confirmed provider-agent cleanup does not force a recovery scan on the next attempt',
       testConfirmedCleanupDoesNotForceRecoveryScan,
     ],
-  ] as const) {
+    ...boundedReconcileCases({ withUser, installProvider, markerForUser }),
+  ] satisfies Array<readonly [string, () => Promise<void>]>) {
     try {
       await fn();
       results.push({ name });
