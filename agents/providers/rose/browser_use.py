@@ -54,7 +54,7 @@ def recover_from_challenge_enabled() -> bool:
 # ---------------------------------------------------------------------------
 
 BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
-    "phone": {"description": "Use the dedicated cloud iPhone through Rose. mode=operation ensures/reuses a lease, status observes without allocating, release relinquishes it. mode=setup records defer/block or requests backend verification using actual observation IDs. Setup uses the current task; honor its user constraints. Observe screen.text, act, verify: put screen.text after an action in the same response. UNKNOWN input must never be replayed. Private password refs require verified app/account binding."},
+    "phone": {"description": "Use the dedicated cloud iPhone through Rose. mode=operation ensures/reuses a lease, status observes without allocating, release relinquishes it. mode=setup records defer/block or requests backend verification using actual observation IDs. Setup uses the current task; honor its user constraints. Observe screen.text, act, verify: put screen.text after an action in the same response; a credentials.*, messages.*, setup or release call must be the only tool call in its response. UNKNOWN input must never be replayed. Private password refs require verified app/account binding."},
     "read_browser_state": {
         "description": (
             "Read the current browser page state (URL, viewport, scroll, tabs, page stats, indexed DOM tree). "

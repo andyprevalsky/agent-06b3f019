@@ -6,16 +6,20 @@ surface: back-end
 component: browser-provider-live-parity
 classification: third-party-failure
 problem_class: other
-first_bad_boundary: a direct (exit worker) Tilion session landed on a west worker whose browser fails every DNS lookup for the whole session
+first_bad_boundary: a direct (exit worker) Tilion session landed on a west worker whose browser fails every DNS lookup for the whole session; on 2026-11-15 both west workers did, and the live gate reached west only because the back.tilion.dev accelerator routes the Blacksmith VM there while production lands on east
 symptoms:
   - "page.goto: net::ERR_NAME_NOT_RESOLVED at https://example.com/"
   - "FAIL live Tilion provider parity"
   - "navigating to \"https://example.com/\", waiting until \"domcontentloaded\""
+  - "replacing session sess_6f1b23"
+  - "its worker could not resolve DNS"
 tags:
   - tilion
   - dns
   - external-provider
   - live-parity
+  - region-routing
+  - deploy-live-probes
 sources:
   - PR #1831
   - PR #1844
@@ -24,7 +28,9 @@ sources:
   - PR #1844 superseded; Blacksmith live repro GitHub Actions run 42529620811 (240 fresh direct sessions)
   - PR #1844 superseded; Blacksmith GitHub Actions run 42530551265 (unchanged vendor contract 12x on main vs fix)
   - plan:.context/production-mixed-mode-evidence/tilion-dns-waiver-prepared.json
-repro: GitHub Actions run 42529620811; back-end/src/tests/blackbox/browser-provider.tilion-dns-worker.support.ts
+  - PR #2225 live-probes gate, GitHub Actions runs 43744817065 (3489e309dc) and 43748598189 (c3933ed27d); passed in run 43690339328 (b614704d74)
+  - commit 37308b16bd974838258f5ca8485471da73c708b5
+repro: GitHub Actions run 42529620811; back-end/src/tests/blackbox/browser-provider.tilion-dns-worker.support.ts; scripts/tests/deploy-live-probes.test.py (production-region pin)
 status: fixed
 ---
 
@@ -75,6 +81,53 @@ Gate: NOT_INTRODUCED. The fault is in the provider, not in a change.
   `993d70`, `b28038` and `463b41`. None is `26173b`, so no production session was
   observed on the dead worker.
 
+### Recurrence on 2026-11-15: the whole west region, reached only by the gate
+
+On 2026-11-15 the guardrail above stopped holding. The live-probes gate
+(`python3 scripts/run_deploy_live_probes.py --only browser-provider-live` on a
+Blacksmith VM) failed with the same `page.goto: net::ERR_NAME_NOT_RESOLVED at
+https://example.com/` in PR #2225's runs 43744817065 (18:06Z, 3489e309dc) and
+43748598189 (18:46Z, c3933ed27d). Run 43690339328 had passed at 07:31Z on
+b614704d74, on `sess_26173b52d8c8…` without a replacement.
+
+- The failing step is still `assertLiveTilionVendorContract` inside parity, before
+  any backend `/init`. It is not the product `/api/browser-session` path. Each
+  failure consumed all eight sessions, alternating `sess_26173b*` and `sess_6f1b23*`,
+  then raised the native error. Both rounds of both runs did this (32 dead
+  sessions in total).
+- Both west workers' direct-exit resolver is now dead, not only `26173b`. In the
+  same runs, residential sessions on `6f1b23` loaded example.com, because the
+  proxy resolves DNS for them.
+- The failure does not depend on the client network. From the devbox, explicit
+  `west.back.tilion.dev` direct sessions failed 4/4 (both workers), while
+  `east.back.tilion.dev` (`993d70`, `c3d0eb`, `98241c`) passed 4/4 and then 6/6,
+  and `oregon.back.tilion.dev` passed 4/4. An independent reviewer's probe
+  agreed: west 0/3, east 3/3, oregon 3/3.
+- Production never reaches west. `back.tilion.dev` is an accelerator that routes
+  each client to its nearest region:
+  - Production Navi runs on Render `ohio` with `TILION_BASE_URL=https://back.tilion.dev`.
+    All 19 `Tilion session allocated` lines in its Render logs from 11-14 19:00Z to
+    11-15 19:30Z were on `c3d0eb`, `993d70` or `98241c`, the three workers the east
+    endpoint serves.
+  - Production `BrowserSession` rows over 30 days show only east workers.
+  - The Blacksmith VM is routed to west.
+- East direct sessions report `exit: eip`, while west and oregon report
+  `exit: worker`. So production's direct sessions are `eip` exits, and the gate
+  was testing an exit production does not get.
+- Why was this possible? The gate trusted the accelerator to reach the vendor
+  region production uses. It reached a different one. Both incidents in this
+  case (one dead worker on 11-08, the whole region on 11-15) were on west,
+  where no production session was observed. Replacing sessions within one
+  region cannot help once the whole region is dead.
+
+Local repro, with this devbox pointed at west the way Blacksmith is routed:
+`TILION_BASE_URL=https://west.back.tilion.dev python3 scripts/run_deploy_live_probes.py --only browser-provider-live`.
+- On main 37308b16bd, `live probe browser-provider-live: exit=1`: 7 replacements
+  across both west workers, then `FAIL live Tilion provider parity: page.goto:
+  net::ERR_NAME_NOT_RESOLVED at https://example.com/`.
+- On the fix, `exit=0`: `PASS live Tilion vendor contract (...) session=sess_993d7072…`
+  with no replacement, then `PASS live Tilion provider parity (sessions=4, ...)`.
+
 ## Solution
 
 Live Tilion parity now acquires its direct session through
@@ -114,6 +167,35 @@ this change; that stays open as a product follow-up. The dead worker itself is a
 Tilion defect that needs a vendor ticket: worker prefix `26173b` on
 `west.back.tilion.dev`, direct exits.
 
+### 2026-11-15: the live probe reaches production's Tilion region
+
+The `browser-provider-live` probe in `scripts/run_deploy_live_probes.py` now runs
+under `env ... TILION_BASE_URL=https://east.back.tilion.dev`
+(`TILION_PRODUCTION_REGION_BASE_URL`), the region production's Render (ohio) and
+Fly (iad) clients reach. An `env NAME=VALUE` argument replaces an inherited
+value, so a runner's own environment cannot route the probe elsewhere. The
+vendor contract, the backend fixture server the test starts and the
+`fetchCapture` Tilion host allowlist all read that one variable.
+
+- Unchanged: the URL, every assertion, every timeout, and `acquireResolvingSession`,
+  which still covers a dead worker inside production's region.
+- Regression: `test_live_tilion_cases_reach_the_production_region_from_any_runner`
+  in `scripts/tests/deploy-live-probes.test.py`, which runs in the
+  `deploy-structural-gates`/`deploy-live-probes` lane. It checks the pin, then runs
+  the probe's own `env` prefix under an inherited west value and checks that
+  east wins. As a negative control, no other probe is pinned. It fails on main
+  (no pin) and passes on the fix.
+- The live proof is the gate itself on Blacksmith.
+- Production code and configuration are unchanged. No production session was
+  observed on west.
+
+Still open:
+- Production direct sessions have no DNS-dead detection. A production client
+  routed to west would fail every navigation.
+- If production's Render or Fly region moves, the pin must follow it.
+- The vendor ticket is now for `west.back.tilion.dev`: direct-exit DNS is dead
+  on both workers (`26173b`, `6f1b23`) since 2026-11-15 between 07:31Z and 18:06Z.
+
 ## Human feedback
 
 The user forbids treating the production mixed-mode payment ERROR as an
@@ -125,4 +207,4 @@ session instead of retrying it.
 
 ## Reusable lesson
 
-Map a hosted-browser network failure to the provider worker that served it (session-ID prefix, connect host, client egress) and reproduce from the failing network before choosing between retrying and replacing the session.
+Point a live vendor gate at the provider region production actually reaches, never at a geo-routed endpoint that sends the gate runner elsewhere; and map a hosted-browser network failure to the provider worker that served it (session-ID prefix, connect host, client egress) and reproduce from the failing network before choosing between retrying and replacing the session.

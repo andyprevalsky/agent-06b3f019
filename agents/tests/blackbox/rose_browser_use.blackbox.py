@@ -21,10 +21,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-sys.path.insert(0, str(ROOT.parent / "scripts" / "lib"))
 
 from _test_utils import BlackboxResult, set_mock_handler, teardown_mock
-from test_quarantine import quarantine
 
 import httpx
 
@@ -3481,12 +3479,6 @@ async def test_native_autofill_control_history_matches_real_serializer():
     assert json.loads(turn_messages[1]["content"])["operation"]["id"] == "read-1"
 
 
-@quarantine(
-    since="2026-11-15",
-    repair="https://boxes.dev/thread/ph7acytvjk02fm7513pjvmcva58j80p6",
-    error="AssertionError: ['Completed browser model response did not contain a valid action']",
-    evidence="https://github.com/Rose-Ai-Labs/rose/actions/runs/43744819009",
-)
 async def test_native_autofill_real_model_synthetic_controls():
     """Real canonical decisions on synthetic OCR; no device execution or secrets."""
     from _test_utils import live_funded_azure
@@ -3641,7 +3633,7 @@ async def test_phone_setup_settings_actual_handler_observation():
         assert "Preserve the original authorized phone task" in wire
         import hashlib
         from domains.spawn_browser_agent_v3.phone import PHONE_GUIDANCE
-        assert hashlib.sha256(PHONE_GUIDANCE.encode()).hexdigest() == "47c5beb673ae5fe95be3c2a4100c2a7b5a5006c1c3a4700e17b1f0248e9c9ec9", "Ordinary enabled guide must match the saved-credential binding contract"
+        assert hashlib.sha256(PHONE_GUIDANCE.encode()).hexdigest() == "c15b28e3d9f242271b84c331f62494076786edda94a0d0a84d4d848b73bcc2b9", "Ordinary enabled guide must match the saved-credential binding contract"
         for marker in (None, False, "true"):
             plain_setup = {key: value for key, value in setup.items() if key != "googlePasscodeExceptionAllowed"}
             if marker is not None:
