@@ -34,6 +34,7 @@ import {
 } from './archive-planner-memory.helper';
 import { ids, jsonRoundTrip, request, runTest, type TestResult } from './archive-blackbox.support';
 import { runCostCases } from './archive-run-cost.helper';
+import { assertWorkerArtifactsFiledUnderTrueRoot } from './archive-root-binding.cases';
 import { testSmsKillDoesNotAwaitRootArchiveFinalization } from './archive-kill-finalize.helper';
 
 config();
@@ -575,6 +576,11 @@ async function runAll(): Promise<void> {
     {
       name: 'terminal archive joins owned root and child captures and rejects failed writers',
       fn: () => withSeededRun(assertDirectCaptureFinalizationOwnership),
+    },
+    {
+      name: 'worker artifacts posted with a child id land in the root bundle; unbound refused',
+      fn: () =>
+        withSeededRun((seed) => assertWorkerArtifactsFiledUnderTrueRoot(BASE_URL, API_KEY, seed)),
     },
     {
       name: 'curation pool stops claims and joins in-flight work before rejecting',

@@ -18,7 +18,7 @@ import { exec } from "child_process";
 
 const TEMPLATE_ID =
   process.env.E2B_CLAUDE_CODE_TEMPLATE_ID ||
-  "claude-code-v21305-node22234-c2-m4";
+  "claude-code-v21311-node22234-c2-m4";
 
 async function openUrl(url: string) {
   const platform = process.platform;

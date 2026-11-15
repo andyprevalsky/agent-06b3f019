@@ -24,9 +24,11 @@ import { lookupUserVoiceAndName, normalizeJsonSchema, normalizePhoneNumber } fro
 import {
   agentIdForCallId,
   agentIdFromOperationKey,
+  archiveRootForCall,
   archiveVapiJson,
   archiveVapiPollResult,
   buildVapiPollExchange,
+  rememberCallArchiveRoot,
 } from './archive';
 import { placeHoldCapableCall, type HoldCallPlacement } from './holdService';
 import { getHoldCallStatus } from './holdStatusService';
@@ -220,6 +222,47 @@ async function placeCall(call: PreparedCall): Promise<HoldCallPlacement> {
 }
 
 /**
+ * Archive a placed call under its tree's ROOT (every call, not only idempotent
+ * ones). The call is already live: archive failures are logged, never thrown,
+ * so the caller always gets its call id. Each step is independent — a failed
+ * root memo still archives the create record, and later polls fall back to
+ * the idempotency ledger (archiveRootForCallId) for agent-keyed calls.
+ */
+export async function archivePlacedCall(
+  call: Pick<PreparedCall, 'operationKey' | 'userId'>,
+  placed: Pick<HoldCallPlacement, 'callId' | 'request' | 'response'>
+): Promise<void> {
+  let archiveRoot: string | null;
+  try {
+    archiveRoot = await archiveRootForCall(call);
+  } catch (error) {
+    log.error('Vapi call archive root resolution failed', {
+      callId: placed.callId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return;
+  }
+  const steps = await Promise.allSettled([
+    rememberCallArchiveRoot(placed.callId, archiveRoot),
+    archiveVapiJson(archiveRoot, `${placed.callId}.create.json.gz.enc`, {
+      request: placed.request,
+      response: placed.response,
+      operationKey: call.operationKey,
+      userId: call.userId ?? null,
+    }),
+  ]);
+  for (const [index, step] of steps.entries()) {
+    if (step.status === 'fulfilled') continue;
+    log.error('Vapi call archive step failed', {
+      callId: placed.callId,
+      step: index === 0 ? 'remember_root' : 'create_record',
+      root_agent_id: archiveRoot,
+      error: step.reason instanceof Error ? step.reason.message : String(step.reason),
+    });
+  }
+}
+
+/**
  * Initiate an outbound phone call via Vapi. When hold parking is configured the
  * backend owns the Twilio call and the assistant gets the wait_for_human tool.
  */
@@ -239,11 +282,7 @@ export async function initiateCall(
     });
   }
 
-  await archiveVapiJson(
-    agentIdFromOperationKey(call.operationKey),
-    `${placed.callId}.create.json.gz.enc`,
-    { request: placed.request, response: placed.response, operationKey: call.operationKey }
-  );
+  await archivePlacedCall(call, placed);
 
   log.info('Vapi call initiated', {
     callId: placed.callId,

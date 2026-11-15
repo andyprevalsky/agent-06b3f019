@@ -25,7 +25,7 @@ import { readFileSync } from "fs";
 
 const TEMPLATE_ID =
   process.env.E2B_CLAUDE_CODE_TEMPLATE_ID ||
-  "claude-code-v21305-node22234-c2-m4";
+  "claude-code-v21311-node22234-c2-m4";
 const E2B_API_KEY = process.env.E2B_API_KEY;
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 // Per-user credentials (claudeAuth) — pass as env var or file path

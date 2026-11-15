@@ -122,7 +122,9 @@ export const deviceCases: Case[] = [
     },
   ],
   [
-    'paused agent with unanswered phone auth releases the phone and the next waiter is admitted',
+    // Prod 2026-11-15 lease 83e3484c: the pause for owner phone auth released the lease 1.5 s
+    // later, so the owner's request had no live phone. The 15-minute grace still bounds the hold.
+    'paused agent keeps the phone for its own pending phone auth, then the bounded grace admits the next waiter',
     async (h) => {
       const f = await h.fixture();
       const waiter = await h.acquire(f.userId, (await h.createAgent(f.userId)).id);
@@ -133,12 +135,26 @@ export const deviceCases: Case[] = [
         data: { attentionRequestId: attention.id, controlOwner: 'user' },
       });
       await prisma.agent.update({ where: { id: f.agentId }, data: { status: 'PAUSED' } });
-      const status = await h.request(f.userId, '/device', user);
-      assert.equal(status.status, 200);
-      assert.equal(status.data.holder, null, 'Paused agent still holds the phone');
+      const held = await h.request(f.userId, '/device', user);
+      assert.equal(held.status, 200);
+      assert.equal(
+        object(held.data.holder).leaseId,
+        f.leaseId,
+        'Pausing for owner phone auth released the phone the owner must act on'
+      );
       assert.equal(
         (await prisma.iPhoneLease.findUniqueOrThrow({ where: { id: f.leaseId } })).status,
-        'RELEASED'
+        'ACTIVE'
+      );
+      await prisma.iPhoneLease.update({
+        where: { id: f.leaseId },
+        data: { leaseExpiresAt: new Date(Date.now() - USER_CONTROL_TIMEOUT_MS - 60_000) },
+      });
+      const status = await h.request(f.userId, '/device', user);
+      assert.equal(status.data.holder, null, 'Paused pending auth held the phone past the grace');
+      assert.notEqual(
+        (await prisma.iPhoneLease.findUniqueOrThrow({ where: { id: f.leaseId } })).status,
+        'ACTIVE'
       );
       assert.equal(
         (await prisma.iPhoneLease.findUniqueOrThrow({ where: { id: waiter.id } })).status,
@@ -147,6 +163,19 @@ export const deviceCases: Case[] = [
       );
       const promoted = await h.request(f.userId, `/leases/${waiter.id}`);
       assert.equal(object(promoted.data.lease).status, 'ACTIVE', 'Next waiter was not admitted');
+    },
+  ],
+  [
+    'paused agent without pending phone auth releases the phone at once',
+    async (h) => {
+      const f = await h.fixture();
+      await prisma.agent.update({ where: { id: f.agentId }, data: { status: 'PAUSED' } });
+      const status = await h.request(f.userId, '/device', user);
+      assert.equal(status.data.holder, null, 'Paused agent still holds the phone');
+      assert.equal(
+        (await prisma.iPhoneLease.findUniqueOrThrow({ where: { id: f.leaseId } })).status,
+        'RELEASED'
+      );
     },
   ],
   [

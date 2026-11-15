@@ -31,6 +31,8 @@ import {
 const offlineArchiveEnvironment = {
   TRACE_ARCHIVE_ENABLED: '1',
   TRACE_ARCHIVE_BACKEND: 'r2',
+  // Offline mocked S3 client: deliberate R2 code path outside production.
+  TRACE_ARCHIVE_ALLOW_NONPROD_R2: '1',
   TRACE_ARCHIVE_ENCRYPTION_KEY_B64: Buffer.alloc(32, 7).toString('base64'),
   R2_ACCOUNT_ID: 'offline',
   R2_ACCESS_KEY_ID: 'offline',
