@@ -66,11 +66,12 @@ test('phone setup canonical Rose wrapper purpose, evidence, timeout and actual u
     assert.equal(deadline, 60000);
     assert.equal(captured?.messages[0].content, PHONE_SETUP_PURPOSE);
     assert.equal(captured?.route_key, input.agentId);
-    // Archived in the agent tree's root bundle under the ledger's call site.
+    // Archived in the agent tree's root bundle under the ledger's call site;
+    // the root is resolved off the call path from archive_scope.
     assert.deepEqual(captured?.dump_context, {
       call_site: 'phone_setup_identity',
       agent_id: input.agentId,
-      root_agent_id: input.agentId,
+      archive_scope: { agentId: input.agentId },
     });
     assert.deepEqual(JSON.parse(captured!.messages[1].content as string), {
       expectedAppleIdentity: input.expectedAppleIdentity,
@@ -109,7 +110,7 @@ test('phone setup canonical Rose wrapper purpose, evidence, timeout and actual u
       });
       assert.equal(check.status, 'confirmed');
       assert.equal(captured?.dump_context?.call_site, `phone_setup_${verificationTarget}`);
-      assert.equal(captured?.dump_context?.root_agent_id, input.agentId);
+      assert.deepEqual(captured?.dump_context?.archive_scope, { agentId: input.agentId });
       assert.equal(captured?.messages[0].content, settingsPurpose(verificationTarget));
       assert.deepEqual(JSON.parse(captured!.messages[1].content as string), {
         expectedAppleIdentity: input.expectedAppleIdentity,

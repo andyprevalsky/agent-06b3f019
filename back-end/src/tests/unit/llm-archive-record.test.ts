@@ -44,6 +44,7 @@ import {
   readArchivedArtifactStrict,
 } from '../../providers/traceArchive';
 import { archiveRecordSchemaErrors } from '../helpers/llmArchiveRecordSchema';
+import { waitFor } from '../helpers/waitFor';
 
 function sse(lines: string[]): ReadableStream<Uint8Array> {
   return new ReadableStream({
@@ -297,9 +298,14 @@ async function testEndToEndRecordsAndRaceLosers(): Promise<void> {
     const iterator = stream[Symbol.asyncIterator]();
     const firstChunk = iterator.next();
     // Crash safety: the start record exists while the provider has not answered.
-    await new Promise((resolve) => setTimeout(resolve, 50));
-    await drainLlmCaptures([childId]);
-    const beforeAnswer = await readRecords(rootId);
+    const beforeAnswer = await waitFor(
+      'start record stored before the provider answers',
+      async () => {
+        await drainLlmCaptures([childId]);
+        const records = await readRecords(rootId);
+        return records.length > 0 ? records : false;
+      }
+    );
     assert.deepEqual(
       beforeAnswer.map((item) => item.record.record),
       ['start'],

@@ -92,7 +92,12 @@ async function loadSources(
       proof: { body, metadata, plaintext: plaintextProof },
     });
   }
-  return sources.sort((a, b) => a.createdAtMs - b.createdAtMs || a.path.localeCompare(b.path));
+  // Equal clocks (a call that starts and finishes within one millisecond) keep
+  // the base record before its updates; path order alone would list updates first.
+  const kind = (source: Source): number => (source.path.startsWith('llm/') ? 0 : 1);
+  return sources.sort(
+    (a, b) => a.createdAtMs - b.createdAtMs || kind(a) - kind(b) || a.path.localeCompare(b.path)
+  );
 }
 function mergeUpdate(base: Payload, patch: Payload): void {
   for (const [key, value] of Object.entries(patch)) {

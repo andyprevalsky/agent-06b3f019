@@ -13,9 +13,9 @@ import {
   authHeaders,
   createAnonymousSession,
   request,
-  sleep,
   test,
 } from './agents-blackbox-harness';
+import { waitFor } from '../helpers/waitFor';
 
 async function archivedPaths(rootAgentId: string): Promise<string[]> {
   return (await listArchivedObjects(rootAgentId, { throwOnError: true })).map((o) => o.path);
@@ -26,13 +26,14 @@ async function waitForPaths(
   predicate: (paths: string[]) => boolean,
   label: string
 ): Promise<string[]> {
-  const deadline = Date.now() + 20_000;
-  for (;;) {
-    const paths = await archivedPaths(rootAgentId);
-    if (predicate(paths)) return paths;
-    if (Date.now() > deadline) throw new Error(`${label}: ${JSON.stringify(paths)}`);
-    await sleep(250);
-  }
+  return waitFor(
+    label,
+    async () => {
+      const paths = await archivedPaths(rootAgentId);
+      return predicate(paths) ? paths : false;
+    },
+    20_000
+  );
 }
 
 test('POST /generate-llm-judge-prompt — no auth → 401', async () => {
