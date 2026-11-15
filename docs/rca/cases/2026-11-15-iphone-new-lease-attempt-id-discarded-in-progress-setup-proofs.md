@@ -22,6 +22,7 @@ tags:
 sources:
   - agent 1772a64a-c22a-5cf7-9184-17508eda5df6
   - PR #2123
+  - PR #2225
 repro: back-end/src/tests/blackbox/iphone-control.setup.cases.ts "same setup actor on a re-acquired lease keeps verified first-setup steps without promoting"
 status: fixed
 ---
@@ -43,6 +44,8 @@ Why was this possible? The attempt id was doing two jobs: fencing one lease's co
 When the new lease belongs to the same reservation's actor, `ensureSetup` rebinds the earlier attempt's still-current non-runtime proofs to the new attempt (`attemptId`, `workflowId`, `floorCursor`). "Same actor" means `currentConnection` agent equals the lease agent and the earlier attempt's agent, with the same browser task, workflow id and first execution run, the same expected phone, and not `observed_signed_out`. The rebind keeps `observedAt`, `providerEpoch` and `observedProviderEpoch`, and records the new floor in a new `carriedAt` field. `proofCurrent` compares the later of `observedAt` and `carriedAt` against the floor. The independent review caught that an ordering check (`carriedAt >= observedAt`) in `validSetupChecks` would have made the setup state unreadable (409) once a later sign-out rewrote `observedAt`. That check was removed, and a regression signs out after a carry. A proof that was stale on the earlier lease (attention floor, epoch change, profile change) is never revived. A later attention floor still invalidates carried proofs, and the runtime proof is always dropped. A different agent, workflow or run, a reconnect (which deletes `state.attempt`) or a ready configuration takes the old path. The work is O(checks) per device inside the existing transaction, with no fan-in at 10k agents.
 
 Regressions in `iphone-control.setup.cases.ts`: the same actor on a new lease keeps its proofs, is not promoted, and stays readable after a later sign-out; another agent, or the same agent on a restarted execution run, starts fresh; and an attention-floor-stale proof stays stale on the new lease.
+
+Shipped: PR #2225 (merge 37308b16bd974838258f5ca8485471da73c708b5). Production lanes passed: Render was live on the merged SHA, backend probes and the log scan were clean, and production semantics passed (2026-11-15 19:2xZ). The live phone was not touched, and Connect was not called. A live proof is still pending the owner's next setup re-acquire.
 
 ## Human feedback
 
