@@ -49,7 +49,8 @@ if grep -Eq 'force-clear-generation-queue|migrate-open-agent-workflows|machines 
   fail 'routine cutover must not force-stop workflows or destroy capacity'
 fi
 require_text "$WORKFLOW" 'cron: "*/10 * * * *"' 'interrupted jobs need bounded scheduled recovery'
-require_text "$WORKFLOW" '--if-idle -- python3 ../scripts/worker_pool_cutover.py' 'recovery must use the shared lease without competing with a healthy owner'
+require_text "$WORKFLOW" 'bash scripts/deploy-agents-recover.sh' 'scheduled and failure-triggered recovery must run the shared recovery script'
+require_text "$ROOT/scripts/deploy-agents-recover.sh" '--if-idle -- python3 "$ROOT/scripts/worker_pool_cutover.py"' 'recovery must use the shared lease without competing with a healthy owner'
 require_text "$WORKFLOW" 'timeout-minutes: 90' 'normal runner must allow time for readiness and cooperative drain'
 # A full checkout spent ~4 min fetching 2.8 GB of agents/benchmarks history.
 [ "$(grep -Fc 'filter: blob:none' "$WORKFLOW")" = 2 ] || fail 'deploy and recover jobs must use the blob-filtered checkout'
