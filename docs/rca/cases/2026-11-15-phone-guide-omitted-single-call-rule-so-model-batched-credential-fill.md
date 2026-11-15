@@ -24,6 +24,7 @@ sources:
   - commit c3933ed27d (quarantine marker, PR #2225)
   - PR #2186 (phone batch continuation, commits c7c9652cee, e34e7ee85f)
   - plan:docs/plans/completed/phone-batch-continuation.md
+  - PR #2237 (fix, merged a867f5d4c463f64d136b4feac05b1e4cdaf39ce3)
 repro: agents/tests/blackbox/rose_browser_use.blackbox.py::test_native_autofill_real_model_synthetic_controls (live) and agents/benchmarks/browser_action_batch_test.py::assert_guidance_names_single_call_phone_families via the phone_batch_contract blackbox case (deterministic)
 status: fixed
 ---
@@ -114,6 +115,11 @@ Siblings prevented: the same rejection for `credentials.fill_device_passcode`,
 `messages.*`, `setup` and `release` batched with a verification read.
 10k agents: prompt bytes only; no new I/O, state or fan-in, and fewer wasted
 model turns.
+
+Shipped in PR #2237 (merge a867f5d4c4, 2026-11-15). In that deploy's
+`agents-coverage-blackbox` gate the unquarantined case passed natively
+(rose-browser-use 128/128, no rerun), and production verified fly,
+workflow-migration and semantic.
 
 ## Human feedback
 
