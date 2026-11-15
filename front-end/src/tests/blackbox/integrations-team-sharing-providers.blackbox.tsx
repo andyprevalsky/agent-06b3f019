@@ -1,7 +1,7 @@
 /**
  * Every shareable Integrations account carries the same team-sharing caption, in both
  * presentations: WhatsApp, LinkedIn, Granola, Fireflies, each Plaid institution, each
- * Claude / ChatGPT subscription account, each GitHub repo and each CLI. The caption
+ * Claude / ChatGPT subscription account, each GitHub repo, each CLI and each MCP server. The caption
  * names the account by its label, opens one checkbox per team and PUTs / DELETEs that
  * account's exact selector. iPhone, Browser Cookies, the Passwords rows and Pebble
  * Index 01 never get one, even when the shareable list (wrongly) contains them.
@@ -72,9 +72,20 @@ const cli = (id: string, name: string) => ({
   error: null,
 });
 
+const mcpServer = (id: string, name: string, url: string) => ({
+  id,
+  name,
+  url,
+  auth: 'none',
+  status: 'connected',
+  tools: [{ name: 'resolve-library-id', description: 'Resolve a library' }],
+  error: null,
+});
+
 /**
  * Every shareable provider connected. Each multi-account row also has a sibling the
- * backend does not list (second Claude account, docs repo, GitHub CLI): it gets no caption.
+ * backend does not list (second Claude account, docs repo, GitHub CLI, internal MCP server): it
+ * gets no caption.
  */
 function serveProviders() {
   serveList(() =>
@@ -108,6 +119,14 @@ function serveProviders() {
     ),
     http.get(`${API_BASE}/integrations/cli`, () =>
       HttpResponse.json({ integrations: [cli('cli-yc', 'YC CLI'), cli('cli-gh', 'GitHub CLI')] }),
+    ),
+    http.get(`${API_BASE}/integrations/mcp`, () =>
+      HttpResponse.json({
+        servers: [
+          mcpServer('mcp-docs', 'Context7', 'https://mcp.context7.com/mcp'),
+          mcpServer('mcp-internal', 'Internal Tools', 'https://tools.example.test/mcp'),
+        ],
+      }),
     ),
     http.get(`${API_BASE}/integrations/granola`, () =>
       HttpResponse.json(notes('andy@example.com', 'granola_note')),
@@ -225,6 +244,15 @@ const CASES: Case[] = [
     desktop: region('CLIs'),
     stock: region('CLIs'),
     sibling: { name: 'GitHub CLI', caption: null },
+  },
+  {
+    row: 'MCP server',
+    label: 'Context7',
+    selector: 'mcp-docs',
+    effect: "Teammates' code agents can use this server's tools through your connection.",
+    desktop: region('MCP servers'),
+    stock: region('MCP servers'),
+    sibling: { name: 'Internal Tools', caption: null },
   },
 ];
 

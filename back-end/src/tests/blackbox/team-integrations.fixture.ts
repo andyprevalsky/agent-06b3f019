@@ -1,6 +1,6 @@
 /**
- * Team-shared WhatsApp, LinkedIn, Granola, Fireflies, Plaid and a GitHub repo on isolated synthetic
- * owners (docs/plans/active/share-all-integrations.md). Every row a teammate's agent may read is owned
+ * Team-shared WhatsApp, LinkedIn, Granola, Fireflies, Plaid, a GitHub repo and an MCP server on isolated synthetic
+ * owners (docs/plans/completed/share-all-integrations.md). Every row a teammate's agent may read is owned
  * by a synthetic owner, never by the reader, so the bench user's real single-account rows never
  * collide. Grants use the stored shapes: '' for WhatsApp/LinkedIn, '' plus the pinned account email
  * for meeting notes, the PlaidItem id for one bank login and the canonical ref for a repo.
@@ -18,6 +18,7 @@ import {
   grantGithubRepoAccess,
   type GithubRepoConnectionRecord,
 } from '../../providers/githubRepos/store';
+import { connectMcpServer } from '../../providers/mcp/servers';
 
 export const TEAM_INTEGRATIONS_MARKER = 'ROSE-TEAM-SHARED';
 /** Values a teammate's agent must find (shared) or must never see (private). */
@@ -454,5 +455,116 @@ export function teamRepoExpectation(fixture: TeamRepoFixture) {
     },
     expected: { readme_first_line: expected.readmeFirstLine, head_commit: expected.headCommit },
     private_values: expected.privateValues,
+  };
+}
+
+export const TEAM_MCP_MARKER = 'ROSE-TEAM-MCP';
+/** Context7 is public and needs no sign-in; the owner's connection is probed live at seed time. */
+export const TEAM_MCP_EXPECTED = {
+  url: 'https://mcp.context7.com/mcp',
+  tool: 'resolve-library-id',
+  library: 'react',
+  privateValues: ['ROSE-TEAM-MCP Private Tools', 'tools.private.example.test'],
+} as const;
+
+/**
+ * A teammate's (owner's) live Context7 MCP server shared with the reader's team, and an
+ * outsider's server shared only with an unrelated team. The reader has no MCP server of
+ * its own, so any MCP tool its code agent calls can only come through the share.
+ */
+export async function seedTeamMcpFixture(
+  readerId: string = randomUUID(),
+  marker = TEAM_MCP_MARKER
+) {
+  const expected = TEAM_MCP_EXPECTED;
+  if ((await prisma.integration.count({ where: { userId: readerId, name: 'mcp' } })) > 0)
+    throw new Error(
+      `Reader ${readerId} already connects an MCP server; the shared-MCP fixture needs a reader without one`
+    );
+  const { ids, emails, createdReader, member } = await fixtureUsers(marker, readerId);
+  const teams = { shared: randomUUID(), unrelated: randomUUID() };
+  await prisma.team.create({
+    data: {
+      id: teams.shared,
+      name: `${marker} Builders`,
+      ownerUserId: ids.owner,
+      members: { create: [member('owner', true), member('reader')] },
+    },
+  });
+  await prisma.team.create({
+    data: {
+      id: teams.unrelated,
+      name: `${marker} Unrelated`,
+      ownerUserId: ids.outsider,
+      members: { create: [member('outsider', true), member('owner')] },
+    },
+  });
+  const { server } = await connectMcpServer(ids.owner, {
+    url: expected.url,
+    name: `${marker} Docs`,
+    redirectUri: 'https://www.roselabs.ai/integrations/mcp/callback',
+  });
+  if (server.status !== 'connected' || !server.tools.some((tool) => tool.name === expected.tool))
+    throw new Error(`Context7 did not connect with ${expected.tool}: ${JSON.stringify(server)}`);
+  const privateUrl = `https://${expected.privateValues[1]}/mcp`;
+  const outsider = await prisma.integration.create({
+    data: {
+      userId: ids.outsider,
+      name: 'mcp',
+      type: 'TOOL_SETUP',
+      accountId: privateUrl,
+      status: 'CONNECTED',
+      isActive: true,
+      config: {
+        kind: 'mcp-server-v1',
+        name: expected.privateValues[0],
+        slug: 'rose-team-mcp-private',
+        url: privateUrl,
+        auth: 'none',
+        tools: [{ name: 'private_lookup', description: 'Never shared with the reader' }],
+      },
+    },
+  });
+  const share = (
+    teamId: string,
+    ownerKey: 'owner' | 'outsider',
+    integrationId: string,
+    url: string
+  ) =>
+    prisma.teamIntegrationShare.create({
+      data: { teamId, integrationId, ownerUserId: ids[ownerKey], provider: 'mcp', accountId: url },
+    });
+  await share(teams.shared, 'owner', server.id, expected.url);
+  await share(teams.unrelated, 'outsider', outsider.id, privateUrl);
+  return {
+    marker,
+    ids,
+    emails,
+    teams,
+    server: {
+      id: server.id,
+      name: server.name,
+      url: expected.url,
+      tools: server.tools.map((t) => t.name),
+    },
+    createdReader,
+  };
+}
+
+export type TeamMcpFixture = Awaited<ReturnType<typeof seedTeamMcpFixture>>;
+
+/** The exact shared server and facts a benchmark judge and the fixture runner report. */
+export function teamMcpExpectation(fixture: TeamMcpFixture) {
+  return {
+    teams: fixture.teams,
+    owner_user_id: fixture.ids.owner,
+    mcp: {
+      integration_id: fixture.server.id,
+      name: fixture.server.name,
+      url: fixture.server.url,
+      tools: fixture.server.tools,
+    },
+    expected: { tool: TEAM_MCP_EXPECTED.tool, library: TEAM_MCP_EXPECTED.library },
+    private_values: TEAM_MCP_EXPECTED.privateValues,
   };
 }

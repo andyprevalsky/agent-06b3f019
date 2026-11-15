@@ -11,6 +11,7 @@ export const SHAREABLE_PROVIDERS = [
   'claude_code',
   'gpt_code',
   'cli',
+  'mcp',
 ] as const;
 export const CONTACT_LIMIT = 20;
 /** A SENDING claim older than this lease is presumed to have crashed before recording its result. */

@@ -85,6 +85,18 @@ async function connectEverything(owner: User) {
       type: 'TOOL_SETUP',
       config: { kind: 'cli-template-v1', request: 'vercel', name: 'Vercel CLI', agent_id: 'agent' },
     }),
+    mcp: await integration(owner, 'mcp', {
+      accountId: 'https://mcp.example.test/mcp',
+      type: 'TOOL_SETUP',
+      config: {
+        kind: 'mcp-server-v1',
+        name: 'Docs MCP',
+        slug: 'docs-mcp',
+        url: 'https://mcp.example.test/mcp',
+        auth: 'none',
+        tools: [],
+      },
+    }),
   };
   // Never shareable, even when connected.
   for (const name of ['iphone', 'chrome', 'apple_passwords', 'pebble_index'])
@@ -108,6 +120,7 @@ test('every provider except iPhone, browser cookies, passwords and Pebble lists 
     'gpt_code',
     'granola',
     'linkedin',
+    'mcp',
     'plaid',
     'whatsapp',
   ]);
@@ -126,6 +139,7 @@ test('every provider except iPhone, browser cookies, passwords and Pebble lists 
   assert.equal(byKey.get('github_repo:gh:acme/app')?.label, 'gh:acme/app');
   assert.equal(byKey.get('claude_code:claude-acct')?.label, 'claude@example.test');
   assert.equal(listed.find((row) => row.provider === 'cli')?.label, 'Vercel CLI');
+  assert.equal(byKey.get('mcp:https://mcp.example.test/mcp')?.label, 'Docs MCP');
 });
 
 test('shares bind one exact account and are revalidated at read time for every provider', async () => {
@@ -166,6 +180,10 @@ test('shares bind one exact account and are revalidated at read time for every p
     data: { status: 'NOT_CONNECTED' },
   });
   await prisma.integration.update({ where: { id: rows.repo.id }, data: { isActive: false } });
+  await prisma.integration.update({
+    where: { id: rows.mcp.id },
+    data: { status: 'EXPIRED', isActive: false },
+  });
   const remaining = (await service.resolveTeamDataAccess(member.userId))
     .map((grant) => grant.provider)
     .sort();

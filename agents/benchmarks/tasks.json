@@ -23970,5 +23970,86 @@
         "judge_prompt": "Require exact grounded values: Shared repo=gh:octocat/hello-world, taken from the ROSE-TEAM-REPO team's github_repo entry in the shared data map; Owner=that entry's ownerUserId; README first line=Hello World!; HEAD commit=7fd1a60b01f91b314f59955a4e4d4e80d8edf11d. Tool evidence must show a successful spawn_agent type=code call with github_repo_ref gh:octocat/hello-world (case-insensitive), and both repo facts must come from that code agent's own successful command output in its checkout of the shared repo, not from memory, the web or narration. Fail if the code agent ran on any other repository or committed to or pushed the repo, if gh:octocat/spoon-knife or SECRET_REPO_FOLDER_DO_NOT_EXPOSE appears in the answer or returned tool context, or on any web browsing, external message or sharing change."
       }
     ]
+  },
+  {
+    "timeout_seconds": 600,
+    "is_chat_mode": false,
+    "expected_tools": [
+      "spawn_agent",
+      "spawn_claude_code_agent"
+    ],
+    "tags": [
+      "teams",
+      "claude-code",
+      "mcp",
+      "DAILY"
+    ],
+    "price_limit_cents": 200,
+    "requires_browser_agent": false,
+    "requires_claude_code": true,
+    "attachment": null,
+    "approval_handling": null,
+    "start_phase": "execute",
+    "min_tool_counts": {
+      "spawn_claude_code_agent": 1
+    },
+    "forbidden_tools": [
+      "web_search",
+      "web_fetch",
+      "spawn_browser_agent",
+      "message_person",
+      "send_email"
+    ],
+    "status": "ready",
+    "runner": "agent",
+    "bench": "pipeline-e2e",
+    "group": "daily",
+    "demo_cache": "off",
+    "enforce_declared_evaluators": true,
+    "environment": {
+      "mode": "hybrid",
+      "db_fixtures": [
+        "team_mcp_v1"
+      ],
+      "base_images": [],
+      "live_fixtures": [
+        "live"
+      ],
+      "services": [
+        "backend",
+        "temporal",
+        "e2b_code_sandbox"
+      ],
+      "secrets": [],
+      "live_targets": [
+        "https://mcp.context7.com/mcp"
+      ],
+      "context_notes": "Synthetic team grant in isolated DB: a teammate (owner) connected the public no-auth Context7 MCP server (https://mcp.context7.com/mcp, probed live at seed time, tools cached) as 'ROSE-TEAM-MCP Docs' and shares it with the reader's ROSE-TEAM-MCP team via an mcp TeamIntegrationShare. The reader has no MCP server of its own, so the code agent's rose mcp tools/list can only show the shared server; every call is proxied by the backend with the owner's connection. An outsider's 'ROSE-TEAM-MCP Private Tools' server is shared only with an unrelated team. The code agent needs a Claude Code credential. No external messages."
+    },
+    "name": "team-daily-shared-mcp",
+    "title": "Team daily shared MCP server",
+    "prompt": "Use the shared data map in your context to find the MCP server a teammate shares with your ROSE-TEAM-MCP team (provider mcp; its label is the server name). Spawn exactly one code agent with spawn_agent type=code and this read-only task: list your MCP tools, call that shared server's resolve-library-id tool for the library react, and report the first library ID it returns verbatim; do not browse the web, curl or fetch any site directly, or use any other tool to find it. Wait for it to finish, then return lines Shared MCP server: <label>, Owner: <ownerUserId>, React library ID: <id>. Do not send messages or change sharing.",
+    "evaluators": [
+      {
+        "id": "teams_execution",
+        "method": "static_check",
+        "criteria": [
+          "No failed tools or external actions."
+        ],
+        "checks": [
+          {
+            "type": "no_tool_failures"
+          }
+        ]
+      },
+      {
+        "id": "teams_grounded_mcp",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "Require exact grounded values: Shared MCP server=ROSE-TEAM-MCP Docs, taken from the ROSE-TEAM-MCP team's mcp entry in the shared data map; Owner=that entry's ownerUserId; React library ID=a Context7-compatible library ID (it starts with /) that appears verbatim in the code agent's own successful resolve-library-id MCP tool result for react. Tool evidence must show a successful spawn_agent type=code call and, inside that code agent, a successful call to the shared server's MCP tool whose name ends with resolve-library-id; the library ID must come from that tool result, not from memory, the web or narration. Fail if the code agent browsed the web, fetched Context7 or any other site directly (curl, wget, web fetch) instead of using the MCP tool, if ROSE-TEAM-MCP Private Tools, tools.private.example.test or private_lookup appears in the answer or returned tool context, or on any external message or sharing change."
+        ],
+        "judge_prompt": "Require exact grounded values: Shared MCP server=ROSE-TEAM-MCP Docs, taken from the ROSE-TEAM-MCP team's mcp entry in the shared data map; Owner=that entry's ownerUserId; React library ID=a Context7-compatible library ID (it starts with /) that appears verbatim in the code agent's own successful resolve-library-id MCP tool result for react. Tool evidence must show a successful spawn_agent type=code call and, inside that code agent, a successful call to the shared server's MCP tool whose name ends with resolve-library-id; the library ID must come from that tool result, not from memory, the web or narration. Fail if the code agent browsed the web, fetched Context7 or any other site directly (curl, wget, web fetch) instead of using the MCP tool, if ROSE-TEAM-MCP Private Tools, tools.private.example.test or private_lookup appears in the answer or returned tool context, or on any external message or sharing change."
+      }
+    ]
   }
 ]

@@ -6,13 +6,13 @@
  * sync bar.
  *
  *   CLIs        row "CLIs": one chip per CLI
- *     connected  → synced chip
+ *     connected  → synced chip + its team-sharing caption (AccountTeamShare)
  *     setting_up → syncing chip + the shared sync bar; chip action "Open setup"
  *                  focuses the setup agent
  *     failed     → error chip, its reason under the chips; chip action "Retry"
  *                  reopens the form with the same request (disabled while a submit is pending)
  *   MCP servers row "MCP servers": one chip per server ("N tools")
- *     connected  → synced chip, × removes it
+ *     connected  → synced chip + its team-sharing caption (AccountTeamShare), × removes it
  *     needs_auth → warning chip; chip action "Sign in" (reconnect → OAuth)
  *     failed     → error chip + reason; chip action "Reconnect"
  *     desktop sign-in awaited (signingInId) → syncing chip + sync bar
@@ -28,6 +28,8 @@
 import { useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { Loader2, Plug, Terminal } from 'lucide-react';
 
+import { AccountTeamShare } from '@/components/teams/TeamSharing';
+import { useAccountShares, type AccountShareLookup } from '@/hooks/useTeams';
 import { openAgentInCurrentClient } from '@/lib/openAgent';
 import { integrationMatchesSearch } from '../hooks/integrationSearch';
 import { useCliIntegrations } from '../hooks/useCliIntegrations';
@@ -110,13 +112,26 @@ function RowForm({
   );
 }
 
+/** Team-sharing caption for a connected tool account the backend lists as shareable. */
+function shareCaption(shareTarget: AccountShareLookup, provider: 'cli' | 'mcp', id: string) {
+  const target = shareTarget(provider, id);
+  return target && <AccountTeamShare {...target} />;
+}
+
 function cliAccount(
   row: Cli['integrations'][number],
   retry: (request: string) => void,
   submitting: boolean,
+  shareTarget: AccountShareLookup,
 ): DesktopAccountView {
   const base = { provider: 'cli', accountId: row.id, label: row.name };
-  if (row.status === 'connected') return { ...base, tone: 'synced', title: 'Connected' };
+  if (row.status === 'connected')
+    return {
+      ...base,
+      tone: 'synced',
+      title: 'Connected',
+      share: shareCaption(shareTarget, 'cli', row.id),
+    };
   if (row.status === 'setting_up')
     return {
       ...base,
@@ -139,6 +154,7 @@ function cliAccount(
 }
 
 function CliRow({ cli }: { cli: Cli }) {
+  const { shareTarget } = useAccountShares();
   const [open, setOpen] = useState(false);
   const [request, setRequest] = useState('');
   const requestId = useRef<string | null>(null);
@@ -166,7 +182,7 @@ function CliRow({ cli }: { cli: Cli }) {
       preset: DropdownIconPreset.cli,
       glyph: glyph(<Terminal className="h-[70%] w-[70%]" />),
     },
-    accounts: cli.integrations.map((row) => cliAccount(row, retry, cli.submitting)),
+    accounts: cli.integrations.map((row) => cliAccount(row, retry, cli.submitting, shareTarget)),
     availability: 'ready',
     onConnect: () => setOpen(true),
     connecting: cli.submitting,
@@ -199,7 +215,11 @@ function CliRow({ cli }: { cli: Cli }) {
   return <DesktopIntegrationRow view={view} />;
 }
 
-function mcpAccount(server: Mcp['servers'][number], mcp: Mcp): DesktopAccountView {
+function mcpAccount(
+  server: Mcp['servers'][number],
+  mcp: Mcp,
+  shareTarget: AccountShareLookup,
+): DesktopAccountView {
   const busy = mcp.busyId === server.id;
   // The hook runs one row action at a time: other servers' actions wait, visibly disabled.
   const otherBusy = mcp.busyId !== null && !busy;
@@ -221,6 +241,7 @@ function mcpAccount(server: Mcp['servers'][number], mcp: Mcp): DesktopAccountVie
       tone: 'synced',
       detail: `${tools} tool${tools === 1 ? '' : 's'}`,
       title: 'Connected',
+      share: shareCaption(shareTarget, 'mcp', server.id),
     };
   const reconnect = { onResync: () => void mcp.reconnect(server.id), resyncing: busy };
   if (server.status === 'needs_auth')
@@ -242,6 +263,7 @@ function mcpAccount(server: Mcp['servers'][number], mcp: Mcp): DesktopAccountVie
 }
 
 function McpRow({ mcp }: { mcp: Mcp }) {
+  const { shareTarget } = useAccountShares();
   const [open, setOpen] = useState(false);
   const [url, setUrl] = useState('');
   const [headerName, setHeaderName] = useState(MCP_DEFAULT_HEADER_NAME);
@@ -261,7 +283,7 @@ function McpRow({ mcp }: { mcp: Mcp }) {
     key: 'mcp',
     name: 'MCP servers',
     icon: { preset: DropdownIconPreset.mcp, glyph: glyph(<Plug className="h-[70%] w-[70%]" />) },
-    accounts: mcp.servers.map((server) => mcpAccount(server, mcp)),
+    accounts: mcp.servers.map((server) => mcpAccount(server, mcp, shareTarget)),
     availability: 'ready',
     onConnect: () => setOpen(true),
     connecting: mcp.connecting,
