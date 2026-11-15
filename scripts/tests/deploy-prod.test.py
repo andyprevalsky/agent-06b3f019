@@ -830,6 +830,10 @@ class FlyTest(Base):
         self.assertNotIn(('stage-finish', 'cooperative-cutover'), fake.factory)
 
     def test_resume_fly_resumes_same_job_then_migration_uses_token(self) -> None:
+        # 2026-10-26 and 2026-11-15 (job b17fd597): the resumed cutover died on KeyError: 'FLY_API_TOKEN',
+        # which lives only in agents/.env.
+        (self.root / 'agents').mkdir()
+        (self.root / 'agents' / '.env').write_text('FLY_API_TOKEN="fo1_SEKRIT_fly_0005"\n')
         fake = Fake(self.root, ['agents/tools/c.py'], handler=self.handler(['FAILED', 'SUCCEEDED']))
         self.assertEqual(self.main(fake, '--lanes', 'fly,workflow-migration', '--resume-fly'), 1)  # semantic not selected
         lanes = self.report()['lanes']
@@ -839,6 +843,8 @@ class FlyTest(Base):
         resume_argv, resume_cwd, resume_env = fake.runs[1]
         self.assertEqual((resume_argv, resume_cwd), (dp.resume_argv(self.JOB), self.root / 'back-end'))
         self.assertEqual(resume_env['DATABASE_URL'], SECRETS['DATABASE_URL'])  # `source back-end/.env`
+        self.assertEqual(resume_env['FLY_API_TOKEN'], 'fo1_SEKRIT_fly_0005')
+        self.assertNotIn('fo1_SEKRIT_fly_0005', json.dumps(self.report()))
         _argv, cwd, env = fake.runs[3]
         self.assertEqual(cwd, self.root / 'back-end')
         self.assertEqual({k: env[k] for k in dp.migration_env(SHA, '')}, {
@@ -846,6 +852,15 @@ class FlyTest(Base):
             'TEMPORAL_WORKER_BUILD_ID': SHA, 'TEMPORAL_WORKER_DEPLOYMENT_TOKEN': '123-2'})
         self.assertIn(('stage-finish', 'cooperative-cutover'), fake.factory)
         self.assertEqual(lanes['semantic']['status'], dp.NOT_SELECTED)
+
+    def test_resume_fly_without_fly_token_fails_actionably_before_resuming(self) -> None:
+        fake = Fake(self.root, ['agents/tools/c.py'], handler=self.handler(['FAILED']))
+        self.assertEqual(self.main(fake, '--lanes', 'fly', '--resume-fly'), 1)
+        lanes = self.report()['lanes']
+        self.assertEqual(lanes['fly']['status'], dp.FAIL)
+        self.assertIn('FLY_API_TOKEN', lanes['fly']['reason'])
+        self.assertIn('agents/.env', lanes['fly']['reason'])
+        self.assertEqual(fake.kinds(), ['production'])
 
     def test_existing_process_mode_is_refused(self) -> None:
         fake = Fake(self.root, ['agents/tools/c.py'])

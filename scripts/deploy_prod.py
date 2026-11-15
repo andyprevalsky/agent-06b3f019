@@ -283,12 +283,14 @@ class Ctx:
 
     def sh(self, lane: str, argv: list[str], *, cwd: Path | None = None, extra: dict | None = None,
            drop: tuple[str, ...] = (), env_file: str | None = None,
-           watch: tuple[re.Pattern, list[str]] | None = None) -> int:
+           watch: tuple[re.Pattern, list[str]] | None = None, secret: dict | None = None) -> int:
         """Stream one lane command, prefixed `[lane]`, and record its display form. `watch` = (pattern, hits):
-        the first group of every output line the pattern matches is appended to hits."""
+        the first group of every output line the pattern matches is appended to hits. `secret` reaches the child
+        environment but is displayed only as `KEY=***`."""
         cwd = cwd or self.root
-        loaded = self.dotenv(env_file) if env_file else {}
-        display = show(argv, cwd=cwd, root=self.root, extra=extra, drop=drop, env_file=env_file)
+        loaded = {**(self.dotenv(env_file) if env_file else {}), **(secret or {})}
+        display = show(argv, cwd=cwd, root=self.root, extra={**{key: '***' for key in secret or {}}, **(extra or {})},
+                       drop=drop, env_file=env_file)
         with self.lock:
             record = self.records.setdefault(lane, {})
             record['command'] = ' && '.join(filter(None, [record.get('command'), display]))
@@ -572,9 +574,15 @@ def lane_fly(ctx: Ctx) -> Result:
             return False, f'Fly lane blocked (production exit {code}): {receipt.get("error") or "see [fly] output"}', code
         resume = show(resume_argv(job), cwd=ctx.root / 'back-end', root=ctx.root, env_file='back-end')
         if not ctx.resume_fly:
-            return False, (f'durable job {job} is {stage}, not SUCCEEDED; resume the SAME job: `{resume}` '
-                           '(or rerun with --resume-fly)'), code
-        resumed = ctx.sh('fly', resume_argv(job), cwd=ctx.root / 'back-end', env_file='back-end')
+            return False, (f'durable job {job} is {stage}, not SUCCEEDED; resume the SAME job: `{resume}` with '
+                           'FLY_API_TOKEN from agents/.env exported (or rerun with --resume-fly)'), code
+        # The cutover child needs FLY_API_TOKEN, which only agents/.env holds; the environment wins.
+        token = {} if ctx.environ.get('FLY_API_TOKEN') else {
+            key: value for key, value in ctx.dotenv('agents').items() if key == 'FLY_API_TOKEN' and value}
+        if not (ctx.environ.get('FLY_API_TOKEN') or token):
+            return False, (f'durable job {job} is {stage}; resuming it needs FLY_API_TOKEN: export it or add it to '
+                           'agents/.env, then rerun with --resume-fly'), 2
+        resumed = ctx.sh('fly', resume_argv(job), cwd=ctx.root / 'back-end', env_file='back-end', secret=token)
         if resumed != 0:
             return False, f'resume of durable job {job} exited {resumed}', resumed
         code = ctx.sh('fly', production_argv(ctx.sha, ctx.state_dir))

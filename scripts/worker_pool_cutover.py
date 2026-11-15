@@ -158,16 +158,18 @@ class NativePool(WorkerRuntime):
                 ledger.assert_owned()
                 ledger.assert_mutable(machine_id)
 
-            def request(self, method, suffix="", data=None):
+            def request(self, method, suffix="", data=None, *, replay=None):
+                # The exact runtime probe only reads, so it may replay transient failures.
+                probe = (
+                    method == "POST"
+                    and suffix == "/exec"
+                    and data == {"command": ["python", "-I", "-B", "-c", RUNTIME_QUEUE_PROBE], "timeout": 10}
+                )
                 if method != "GET":
                     ledger.assert_owned()
-                    if not (
-                        method == "POST"
-                        and suffix == "/exec"
-                        and data == {"command": ["python", "-I", "-B", "-c", RUNTIME_QUEUE_PROBE], "timeout": 10}
-                    ):
+                    if not probe:
                         ledger.assert_mutable(machine_id)
-                return super().request(method, suffix, data)
+                return super().request(method, suffix, data, replay=True if probe else replay)
 
         return OwnedFly(self.app, machine_id)
 
@@ -176,8 +178,12 @@ class NativePool(WorkerRuntime):
             f"{pool.API}/apps/{quote(self.app, safe='')}/machines",
             headers={"Authorization": "Bearer " + os.environ["FLY_API_TOKEN"]},
         )
-        with urlopen(request, timeout=30) as response:
-            values = json.load(response)
+
+        def read():
+            with urlopen(request, timeout=30) as response:
+                return json.load(response)
+
+        values = pool.replay_transient(read)
         if not isinstance(values, list) or len({m["id"] for m in values}) != len(values):
             raise ValueError("Native inventory is not a complete distinct Machine list")
         return values

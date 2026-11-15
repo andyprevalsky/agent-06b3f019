@@ -394,6 +394,39 @@ class WorkerPoolCutoverTests(unittest.TestCase):
             )
             self.assertEqual(request.call_count, 2)
 
+    def test_native_reads_and_exact_runtime_probe_replay_transient_fly_failures(self):
+        """2026-10-20/10-26/11-15: one transient Machines API answer killed a production cutover."""
+        from urllib.error import HTTPError
+
+        ledger = Ledger()
+        native = cutover.NativePool(ledger.job["identity"], ledger)
+        probe = {"command": ["python", "-I", "-B", "-c", cutover.RUNTIME_QUEUE_PROBE], "timeout": 10}
+        calls = []
+
+        def flaky(request, timeout):
+            calls.append((request.get_method(), request.full_url.rsplit("/", 1)[-1]))
+            if len(calls) % 2:
+                raise HTTPError(request.full_url, 408, "Request Timeout", {}, io.BytesIO(b""))
+            return io.BytesIO(json.dumps([{"id": "m1"}] if request.full_url.endswith("/machines") else {}).encode())
+
+        with (
+            patch.dict("os.environ", {"FLY_API_TOKEN": "fixture-token"}),
+            patch.object(pool, "sleep", lambda seconds: None),
+            patch.object(pool, "urlopen", flaky),
+            patch.object(cutover, "urlopen", flaky),
+        ):
+            client = native.client("m1")
+            self.assertEqual(client.request("GET"), {})
+            self.assertEqual(client.request("POST", "/exec", probe), {})
+            self.assertEqual(native.list(), [{"id": "m1"}])
+            self.assertEqual(len(calls), 6)
+            # Owned mutations, including a non-probe exec, are never replayed.
+            for suffix, data in (("/stop", None), ("/exec", {"command": ["arbitrary"]})):
+                calls.clear()
+                with self.assertRaises(HTTPError):
+                    client.request("POST", suffix, data)
+                self.assertEqual(len(calls), 1)
+
     def test_unreachable_host_null_config_blocks_preparation_and_retirement_cleanly(self):
         # Fly returns "config": null for a Machine on an unreachable host (2026-10-26).
         native, value, _ = self.runtime_native()
