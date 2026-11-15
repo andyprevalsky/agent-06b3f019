@@ -25,6 +25,8 @@ sources:
   - commit e54032c7fba36b09b58b5a83fef7754f89df716f
   - commit 7a170d4172
   - PR #2021
+  - PR #2110
+  - commit 3b50a5906fd22e13d16a163d2f9ecc40e9081c18
 repro: front-end/tests-e2e/entry-load-recovery.spec.ts
 status: fixed
 ---
@@ -143,6 +145,16 @@ by construction: each recovery reload follows that document's own entry
 revalidate fetch, which re-arms the counter.
 
 10k-agent behaviour: test-only; no runtime path changes.
+
+Shipped in PR #2110 (merge 3b50a5906f, 2026-11-15). Deploy gates passed in two
+rounds; round 1's only blemish was an unrelated smoke FLAKY
+(`agent-payment-test-shop`, Tilion capacity, NOT_INTRODUCED, quarantined and
+handed to a repair thread). The original failing command,
+`scripts/deploy production --lanes semantic` (production semantic run
+43677752701 on source 3b50a5906f against https://www.roselabs.ai), passed all
+six `entry-load-recovery.spec.ts` tests, including the assigned
+"connectivity lost during the backoff waits for online without spending an
+attempt" and the new deploy-switch regression (suite: 60 passed, 0 failed).
 
 ## Human feedback
 
