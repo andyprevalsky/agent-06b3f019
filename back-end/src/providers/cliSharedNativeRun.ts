@@ -181,9 +181,18 @@ export async function startOwnerCliSandbox(
     )
     .sort((a, b) => a.cpu - b.cpu || a.memoryGb - b.memoryGb)[0];
   if (variant === undefined) throw new CliIntegrationError(409, OWNER_CLI_TEMPLATE_UNAVAILABLE);
+  return startCliSandboxFromTemplate(variant.snapshotId, variant.provider, integrationId);
+}
+
+/** Create the owner-side sandbox from an exact template or snapshot id (clean env, no agent home). */
+export async function startCliSandboxFromTemplate(
+  templateId: string,
+  provider: 'claude' | 'codex',
+  integrationId: string
+): Promise<OwnerCliSandbox> {
   const create = () =>
     createSandboxWithRetry(
-      variant.snapshotId,
+      templateId,
       {
         apiKey: process.env.E2B_API_KEY,
         timeoutMs: 5 * 60_000,
@@ -192,9 +201,7 @@ export async function startOwnerCliSandbox(
       },
       'Shared native CLI'
     );
-  const sandbox = await (variant.provider === 'claude'
-    ? withClaudeCodeCreateSlot(create)
-    : create());
+  const sandbox = await (provider === 'claude' ? withClaudeCodeCreateSlot(create) : create());
   return e2bOwnerSandbox(sandbox);
 }
 

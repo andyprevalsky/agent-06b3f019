@@ -12,9 +12,15 @@ Real activity code; only the backend HTTP is mocked.
 
 import asyncio
 import json
+import os
+from unittest.mock import patch
 
 import httpx
 from _test_utils import BlackboxResult, set_mock_handler, teardown_mock
+
+# A benchmark stack's provider pin (or Anthropic exclusion) would refuse one of the two
+# token types this suite leases on purpose; neutralize both, as llm.blackbox.py does.
+_UNPINNED = {"BENCHMARK_COMPUTE_TOKEN_TYPE": "", "ROSE_EXCLUDE_ANTHROPIC_FAMILY": "0"}
 
 
 def _backend(lease: dict, posted: list):
@@ -31,6 +37,11 @@ def _backend(lease: dict, posted: list):
 
 
 async def test_team_lease_reports_the_shared_row_for_the_caller():
+    with patch.dict(os.environ, _UNPINNED):
+        await _team_lease_reports_the_shared_row_for_the_caller()
+
+
+async def _team_lease_reports_the_shared_row_for_the_caller():
     from helpers.llm import _build_compute_auth_context, credential_fingerprint, fetch_compute_token_activity
     from providers.rose.types import ClaudeAuthContext, GptAuthContext
 
@@ -73,6 +84,11 @@ async def test_team_lease_reports_the_shared_row_for_the_caller():
 
 
 async def test_user_and_pool_reports_are_unchanged():
+    with patch.dict(os.environ, _UNPINNED):
+        await _user_and_pool_reports_are_unchanged()
+
+
+async def _user_and_pool_reports_are_unchanged():
     from helpers.llm import _build_compute_auth_context
 
     for source, expected in (
