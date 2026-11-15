@@ -150,7 +150,8 @@ cleanup_failed_worker "$out" "$wid"
   self.assertEqual(r.returncode,0,r.stderr)
   self.assertEqual(v['calls'].splitlines(),['machine destroy --force abcd1234 -a fixture','volumes destroy vol_owned -a fixture --yes'])
   self.assertEqual(records,[])
- def archive_case(self,status,*,primary='abcd1234',keep=0,preconfig=False,worker=False):
+ def archive_case(self,status,*,primary='abcd1234',keep=0,preconfig=False,worker=None):
+  # worker: None | 'unsealed' (no capture) | 'no-record' (coverage refuses) | 'corrupt' (real verifier rejects)
   # The real cleanup() span from evidence collection through the R2 archive
   # decision, then the unchanged exact-owner reap; the archive helper is faked.
   source=SOURCE.read_text();start=source.index('    local keep_before_evidence=',source.index('cleanup() {'))
@@ -158,7 +159,7 @@ cleanup_failed_worker "$out" "$wid"
   helper="import os,sys\nopen(os.environ['CASE']+'/archive-calls','a').write(' '.join(sys.argv[1:])+'\\n')\nsys.exit(STATUS)\n".replace('STATUS',str(status))
   body=function('fleet_archive_unsealed_disposable_evidence')+function('fleet_worker_evidence_verified')+r'''
 cloudbench_collect_remaining_runtime_evidence(){ return 1; }
-cloudbench_validate_worker_evidence_coverage(){ return 0; }
+cloudbench_validate_worker_evidence_coverage(){ return @COVERAGE@; }
 CHILD_OUT=("$FLEET_DIR/task")
 fleet_record_disposable_cleanup_state(){ :; }
 archived_reuse_retire_all(){ return 0; }
@@ -169,16 +170,17 @@ mkdir -p "$CASE/snap";printf %s "$HELPER" > "$CASE/snap/cloudbench-evidence-arch
 touch "$FLEET_DIR/task/runtime-evidence.pending"
 [ @PRECONFIG@ = 0 ] || touch "$FLEET_REGISTRY_DIR/preconfig-evidence-consumed"
 if [ @WORKER@ = 1 ]; then mkdir -p "$FLEET_DIR/task/worker-runtime-evidence/abcd9999";printf '{"version":1,"machine_id":"abcd9999","run_token":"w"}' > "$FLEET_DIR/task/worker-runtime-evidence/abcd9999/owner.json";fi
+if [ @CORRUPT@ = 1 ]; then mkdir -p "$FLEET_DIR/task/worker-runtime-evidence/abcd9999/capture";printf '{"not":"a sealed worker manifest"}' > "$FLEET_DIR/task/worker-runtime-evidence/abcd9999/capture/manifest.json";cp "$WORKER_EVIDENCE" "$CASE/snap/cloudbench-worker-evidence.py";fi
 teardown(){
  local ec=0 teardown_failed=0 runtime_evidence_failed=0 guest_shutdown_failed=0 billing_owned_joins=1
-'''.replace('@PRIMARY@',primary).replace('@KEEP@',str(keep)).replace('@PRECONFIG@',str(int(preconfig))).replace('@WORKER@',str(int(worker)))+branch+r'''
+'''.replace('@PRIMARY@',primary).replace('@KEEP@',str(keep)).replace('@PRECONFIG@',str(int(preconfig))).replace('@WORKER@',str(int(worker in ('unsealed','corrupt')))).replace('@CORRUPT@',str(int(worker=='corrupt'))).replace('@COVERAGE@','1' if worker=='no-record' else '0')+branch+r'''
  if [ "$KEEP_CLONES" != 1 ];then reap_registry_clones "$FLEET_REGISTRY_DIR" current;fi
  printf "FLAGS %s %s %s %s\n" "$KEEP_CLONES" "$runtime_evidence_failed" "$ec" "$teardown_failed" >&2
  [ -e "$FLEET_REGISTRY_DIR/runtime-evidence-unconfirmed" ] && echo LATCHED >&2 || echo UNLATCHED >&2
 }
 teardown
 '''
-  with mock.patch.dict(os.environ,{'HELPER':helper}):
+  with mock.patch.dict(os.environ,{'HELPER':helper,'WORKER_EVIDENCE':str(SOURCE.parent/'cloudbench-worker-evidence.py')}):
    return self.run_case(body,missing=True)
  def test_unsealed_disposable_guest_is_archived_to_r2_then_destroyed(self):
   r,v,records=self.archive_case(0)
@@ -195,7 +197,7 @@ teardown
   self.assertIn('❌❌ evidence archive FAILED: unsealed guests stay RETAINED',r.stderr)
   self.assertEqual(len(v['archive-calls'].splitlines()),1);self.assertEqual(v['calls'],'');self.assertEqual(len(records),1)
  def test_non_primary_or_kept_owner_is_never_archived_or_destroyed(self):
-  for kwargs in (dict(primary='ffff0000'),dict(keep=1),dict(preconfig=True),dict(worker=True)):
+  for kwargs in (dict(primary='ffff0000'),dict(keep=1),dict(preconfig=True),dict(worker='unsealed'),dict(worker='no-record'),dict(worker='corrupt')):
    r,v,records=self.archive_case(0,**kwargs)
    with self.subTest(**kwargs):
     self.assertEqual(r.returncode,0,r.stderr);self.assertIn('FLAGS 1 1 1 1',r.stderr);self.assertIn('LATCHED',r.stderr)
