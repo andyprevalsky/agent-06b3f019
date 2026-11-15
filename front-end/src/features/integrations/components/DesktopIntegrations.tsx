@@ -4,7 +4,8 @@
  *   [MOUNTED] → flat sections in the existing order:
  *     Browser Cookies · Passwords · Messages · Compute · Banks & Financial Accounts
  *     · Socials · File System · GitHub Repos · CLIs · MCP servers (signed in; the
- *     same cards as the stock page: GithubReposSection, ToolIntegrationSections)
+ *     GitHub Repos card; CLIs and MCP servers are ordinary rows with account chips:
+ *     DesktopToolSections)
  *     · Meeting note taker (Granola, Fireflies) · Other (Pebble Index 01, whose Connect opens its setup modal)
  *   Every integration row is a DesktopIntegrationRow: the stock app-icon tile, the
  *   row's ONE account chip (Gmail addresses, Plaid institutions and compute
@@ -18,8 +19,12 @@
  *     /integrations/:name --> full list refetch (the delta poll cannot see
  *     deletes) | error → alert
  *   Gmail / Plaid / compute chips keep their existing disconnect / reconnect flows.
- *   Gmail addresses and iMessage carry their team-sharing caption beside the chip
- *     (useAccountShares → AccountTeamShare); see TeamSharing for its states.
+ *   Every shareable account carries its team-sharing caption (useAccountShares →
+ *     AccountTeamShare; see TeamSharing for its states): beside the chip for iMessage,
+ *     Gmail addresses, WhatsApp, Plaid institutions, LinkedIn, Granola and Fireflies,
+ *     beside the label on each Claude / ChatGPT account line, and on each GitHub repo
+ *     and CLI in their shared cards. Browser Cookies, Passwords, File System, iPhone and
+ *     Pebble Index 01 never show one.
  *
  * System context:
  *   Integrations (flag) → DesktopIntegrations
@@ -49,7 +54,7 @@ import DesktopIntegrationRow, {
   type DesktopIntegrationView,
 } from './DesktopIntegrationRow';
 import RemoveAccountDialog from './RemoveAccountDialog';
-import ToolIntegrationSections from './ToolIntegrationSections';
+import DesktopToolSections from './DesktopToolSections';
 
 /** Refetch cadence while any account reports a running sync. */
 export const DESKTOP_SYNC_REFRESH_MS = 5_000;
@@ -116,7 +121,7 @@ export default function DesktopIntegrations(props: DesktopIntegrationsProps) {
                     <GithubReposSection github={props.github} />
                   </div>
                 </SearchGroup>
-                <ToolIntegrationSections search={props.search} desktop />
+                <DesktopToolSections search={props.search} />
               </>
             )}
             <Section

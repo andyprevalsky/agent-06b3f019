@@ -9,10 +9,17 @@
  *
  * The repair affordance renders inline with the institution chips as a labeled
  * "Reconnect" control, never as a standalone icon-only button in the card body.
+ *
+ * With a team to share with, each institution the backend lists as shareable (by its
+ * PlaidItem.id) gets its team-sharing caption (AccountTeamShare) after its chip, and the
+ * institutions stack one per line.
  */
 
 import { Fragment } from 'react';
 import { Loader2, Plus, Wrench } from 'lucide-react';
+
+import { AccountTeamShare } from '@/components/teams/TeamSharing';
+import { useAccountShares } from '@/hooks/useTeams';
 
 import ConnectedAccountChip from './ConnectedAccountChip';
 import DropdownIconFrame, { DropdownIconPreset } from './DropdownIconFrame';
@@ -119,33 +126,44 @@ export default function PlaidSection({
 }: PlaidSectionProps) {
   const isConnected = items.length > 0;
   const detailText = getPlaidDetailText(items, itemsLoading);
-  const visibleItems = visibleInstitutionItems(items);
-  const itemChips = (
-    <>
-      {visibleItems.map((item) => (
-        <Fragment key={item.id}>
-          <ConnectedAccountChip
-            label={itemChipLabel(item)}
-            tone={chipToneForState(item.sync.state)}
-            removing={disconnectingItemId === item.id}
-            disabled={connectLoading}
-            onRemove={() => onDisconnect(item.id)}
-            removeLabel={`Disconnect ${item.institutionName ?? 'Plaid connection'} and its connected accounts`}
-            title={itemChipTitle(item)}
+  const { shareTarget } = useAccountShares();
+  const visibleItems = visibleInstitutionItems(items).map((item) => {
+    const target = shareTarget('plaid', item.id);
+    return { item, share: target && <AccountTeamShare {...target} /> };
+  });
+  const shared = visibleItems.some(({ share }) => share !== undefined);
+  const itemChips = visibleItems.map(({ item, share }) => {
+    const chips = (
+      <>
+        <ConnectedAccountChip
+          label={itemChipLabel(item)}
+          tone={chipToneForState(item.sync.state)}
+          removing={disconnectingItemId === item.id}
+          disabled={connectLoading}
+          onRemove={() => onDisconnect(item.id)}
+          removeLabel={`Disconnect ${item.institutionName ?? 'Plaid connection'} and its connected accounts`}
+          title={itemChipTitle(item)}
+        />
+        {itemNeedsUpdate(item) && (
+          <PlaidRepairButton
+            item={item}
+            // Reconnect and disconnect mutate the same Plaid item, so each must
+            // be inert while the other is in flight.
+            isLoading={connectLoading || disconnectingItemId === item.id}
+            onClick={() => onUpdate(item.id)}
           />
-          {itemNeedsUpdate(item) && (
-            <PlaidRepairButton
-              item={item}
-              // Reconnect and disconnect mutate the same Plaid item, so each must
-              // be inert while the other is in flight.
-              isLoading={connectLoading || disconnectingItemId === item.id}
-              onClick={() => onUpdate(item.id)}
-            />
-          )}
-        </Fragment>
-      ))}
-    </>
-  );
+        )}
+      </>
+    );
+    // With a caption, one institution per line: chip, repair, then its sharing caption.
+    if (!shared) return <Fragment key={item.id}>{chips}</Fragment>;
+    return (
+      <span key={item.id} className="flex min-w-0 items-center gap-1.5">
+        {chips}
+        {share}
+      </span>
+    );
+  });
 
   return (
     <div className="rounded-lg border border-border bg-card/60 overflow-hidden">
@@ -162,7 +180,11 @@ export default function PlaidSection({
               <span className="truncate text-xs text-muted-foreground">{detailText}</span>
             )}
             {visibleItems.length > 0 && (
-              <div className="mt-1 flex min-w-0 flex-wrap items-center gap-1.5">{itemChips}</div>
+              <div
+                className={`mt-1 flex min-w-0 gap-1.5 ${shared ? 'flex-col items-start' : 'flex-wrap items-center'}`}
+              >
+                {itemChips}
+              </div>
             )}
           </div>
         </div>

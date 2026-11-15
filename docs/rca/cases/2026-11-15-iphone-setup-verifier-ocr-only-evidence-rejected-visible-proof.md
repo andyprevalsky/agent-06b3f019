@@ -20,6 +20,8 @@ tags:
   - prompt
   - rose-1-mini
 sources:
+  - PR #2210
+  - commit 8e74738f13adfe9a5db1c61cd673dd8c3dd69b73
   - agent 1772a64a-c22a-5cf7-9184-17508eda5df6
   - agent 1772a64a lease 45543f2e-e77c-4470-b258-4c19dc135226
   - agent 1772a64a lease 7c1dd8c6-b81e-4bcc-908b-15f76b23d1ed
@@ -52,9 +54,22 @@ Class stopped at: "verifier prompts must name the OCR-observable proof for each 
 - Regression: live rose-1-mini replay of the recorded observations with negative controls (inbox under dialog, Google Account page alone, typed sign-in form, wrong Google account, phone row without glyph, phone unchecked only under Receive, Waiting for activation, FaceTime look-alike, wrong Apple Account). Before: FAIL 3/3 (Gmail Settings and iMessage unknown); after: PASS 5/5. The independent review's Waiting-for-activation negative caught an overbroad first draft, fixed before landing.
 - 10k agents: prompt text only; no new queries or fan-in.
 
+Shipped: PR #2210, merged 8e74738f13 on 2026-11-15. Production lanes PASS: Render live via descendant 37308b16bd, backend probes, Fly verified by descendant cutover 64f91559 (a867f5d4), workflow migration, semantic via descendant 6c9aa700. Live owner retry (agent 87c1e09a-28ed-5f81-b7ce-6166c18523d7, 20:40Z) after #2210 shipped:
+- gmail, icloud_messages and icloud_keychain confirmed on the real Gmail account Settings and Saved to iCloud screens.
+- receive_address was a FALSE CONFIRM from the FaceTime settings page ("You can be reached by FaceTime at … Caller ID"). The #2210 checkmark-glyph rule let FaceTime checkmarks read as iMessage receive selection. imessage on the same page was unknown in prod, but confirmed 2/3 in replay.
+- Exact replay of that request on #2210's prompt: receive_address confirmed 3/3.
+
+Follow-up fix (this PR):
+- receive_address needs the phone checkmark inside the You Can Receive iMessages to and Reply From list. Start New Conversations From, FaceTime and Caller ID checkmarks do not count, and a FaceTime screen is never Send and Receive.
+- imessage: a FaceTime screen never proves iMessage, and an Apple Account line naming another identity is disabled.
+- Regressions use the real FaceTime page (as receive_address and as imessage) and the real Saved to iCloud page: messages and keychain confirm, contacts stays unproven without a Contacts row.
+- The replay case fails 3/3 runs on #2210's prompt and passes 10/10 consecutive runs after.
+
+Remaining for ready, none of them a verifier defect: device_passcode is disabled (no passcode set); imessage needs the real Send & Receive screen; icloud_contacts needs See All under Saved to iCloud. The agent-guidance wording for the last two is held until the coordinator allows a Fly cutover after the live setup. The progress reset across leases (finding 3) shipped separately in PR #2225. The Fly cutover was delayed by an unrelated drain wedge: agent 8789a5df, continuation payload TMPRL1103, RCA thread ph7dv1m8q2ye99cdta8n3q7g3s8j92q4.
+
 ## Human feedback
 
-The user required no weakening of proof (a typed-but-unsigned identifier must never confirm) and replay regressions from the real observations.
+The coordinator asked to hold Fly cutovers during the live owner setup, so the follow-up is backend-only. The user required no weakening of proof (a typed-but-unsigned identifier must never confirm) and replay regressions from the real observations.
 
 ## Reusable lesson
 

@@ -5,8 +5,11 @@
  *   gh:owner/repo | GitHub URL        the user's GithubRepoConnection (canonical ref)
  *   <project uuid> | rose-project:<id> the project's repoUrl → its connection (legacy)
  *
- * A ref the user has no connection for resolves to null: a foreign user's repo,
- * a disconnected repo and a missing one are indistinguishable.
+ * A canonical ref or URL the user has no own connection for falls back to a
+ * repo a teammate shares with the user's team (shared.ts): the repository only,
+ * never the owner's folder, and cloned under the owner's access grant. Any
+ * other ref resolves to null: a foreign user's unshared repo, a disconnected
+ * repo and a missing one are indistinguishable.
  *
  * Agent creation (resolveAgentRepoRef) precedence, highest first:
  *   explicit `github_repo_ref` (null = explicitly none) > trusted server repo URL >
@@ -20,6 +23,11 @@ import {
   githubRepoIdentity,
   sameGithubRepo,
 } from './refs';
+import {
+  ownGithubRepoConnection,
+  sharedGithubRepoConnections,
+  type UsableGithubRepoConnection,
+} from './shared';
 import {
   findGithubRepoConnection,
   findOwnedProjectRepo,
@@ -51,8 +59,8 @@ export async function projectRepoConnection(
   return findGithubRepoConnection(userId, ref);
 }
 
-/** Any ref spelling (canonical, URL, legacy project id) → the user's connection, or null. */
-export async function resolveGithubRepoRef(
+/** Any ref spelling (canonical, URL, legacy project id) → the user's own connection, or null. */
+export async function resolveOwnGithubRepoRef(
   userId: string,
   ref: string
 ): Promise<GithubRepoConnectionRecord | null> {
@@ -70,11 +78,23 @@ export async function resolveGithubRepoRef(
   return findGithubRepoConnection(userId, identity.canonicalRef);
 }
 
+/** The user's own connection, else a teammate's shared one for a canonical ref or URL. */
+export async function resolveGithubRepoRef(
+  userId: string,
+  ref: string
+): Promise<UsableGithubRepoConnection | null> {
+  const own = await resolveOwnGithubRepoRef(userId, ref);
+  if (own !== null) return ownGithubRepoConnection(own);
+  const canonicalRef = canonicalGithubRepoRef(ref);
+  if (canonicalRef === null) return null;
+  return (await sharedGithubRepoConnections(userId, canonicalRef))[0] ?? null;
+}
+
 /** Like resolveGithubRepoRef, but a ref the user cannot use is an error. */
 export async function requireGithubRepoRef(
   userId: string,
   ref: string
-): Promise<GithubRepoConnectionRecord> {
+): Promise<UsableGithubRepoConnection> {
   const connection = await resolveGithubRepoRef(userId, ref);
   if (connection === null) throw new GithubRepoRefNotFoundError(ref);
   return connection;
@@ -162,29 +182,41 @@ export interface CodeSessionRepoOverride {
   repoProjectId: string | null;
 }
 
-/** The connection's folder, when that folder still carries the repo (its settings apply). */
+/**
+ * The connection's folder, when that folder still carries the repo (its settings apply).
+ * A teammate's shared repo never restores the owner's folder.
+ */
 async function connectedProjectId(
   userId: string,
-  connection: GithubRepoConnectionRecord
+  connection: UsableGithubRepoConnection
 ): Promise<string | null> {
   const projectId = connection.connectedRoseProjectRef;
-  if (projectId === null) return null;
+  if (projectId === null || connection.shared !== null) return null;
   const project = await findOwnedProjectRepo(userId, projectId);
   return project !== null && sameGithubRepo(project.repoUrl, connection.repoUrl)
     ? project.id
     : null;
 }
 
+/** An override plus the user whose clone grant authorizes it (the owner of a shared repo). */
+interface ResolvedRepoOverride {
+  override: CodeSessionRepoOverride;
+  accessUserId: string;
+}
+
 async function overrideFor(
   userId: string,
-  connection: GithubRepoConnectionRecord,
+  connection: UsableGithubRepoConnection,
   skipProject: boolean
-): Promise<CodeSessionRepoOverride> {
+): Promise<ResolvedRepoOverride> {
   return {
-    repoUrl: connection.repoUrl,
-    canonicalRef: connection.canonicalRef,
-    skipProject,
-    repoProjectId: skipProject ? await connectedProjectId(userId, connection) : null,
+    override: {
+      repoUrl: connection.repoUrl,
+      canonicalRef: connection.canonicalRef,
+      skipProject,
+      repoProjectId: skipProject ? await connectedProjectId(userId, connection) : null,
+    },
+    accessUserId: connection.userId,
   };
 }
 
@@ -198,12 +230,20 @@ async function overrideFor(
  * (`repoProjectId`) restores instead, so its startup script, env files and
  * commands still apply. Legacy `github_repo_url` keeps its old rule when there
  * is a project (the project restore ignores it), so the agent prompts stay true.
- * Null: no override (legacy resolution runs unchanged).
+ * A teammate's shared repo overrides like an own one, but never restores the
+ * owner's folder. Null: no override (legacy resolution runs unchanged).
  */
 export async function resolveCodeSessionRepoOverride(
   userId: string | undefined,
   input: CodeSessionRepoInput
 ): Promise<CodeSessionRepoOverride | null> {
+  return (await resolveRepoOverride(userId, input))?.override ?? null;
+}
+
+async function resolveRepoOverride(
+  userId: string | undefined,
+  input: CodeSessionRepoInput
+): Promise<ResolvedRepoOverride | null> {
   const ref = input.githubRepoRef ?? '';
   const agentRef = input.agentRepoRef ?? null;
   const requestedUrl = input.requestedRepoUrl ?? '';
@@ -239,15 +279,36 @@ export async function resolveCodeSessionRepoOverride(
 /**
  * The project workspace a code session restores plus its canonical-ref repo
  * override. When the override replaces the session's project, the repo's own
- * connected folder restores (null when the repo has none).
+ * connected folder restores (null when the repo has none or it is a teammate's).
+ * `repoAccessUserId` is whose clone grant the override's repo is checked
+ * against: the caller for an own repo, the owner for a shared one. The session
+ * itself (sandbox, credentials) always stays the caller's.
  */
 export async function resolveCodeSessionWorkspace(
   userId: string | undefined,
   input: CodeSessionRepoInput
-): Promise<{ projectWorkspace: ProjectWorkspace | null; repoOverrideUrl: string | undefined }> {
-  const override = await resolveCodeSessionRepoOverride(userId, input);
+): Promise<{
+  projectWorkspace: ProjectWorkspace | null;
+  repoOverrideUrl: string | undefined;
+  repoAccessUserId: string | undefined;
+}> {
+  const resolved = await resolveRepoOverride(userId, input);
+  const override = resolved?.override;
   const projectId =
     override?.skipProject === true ? (override.repoProjectId ?? undefined) : input.projectId;
   const projectWorkspace = await resolveSessionProject(userId, projectId);
-  return { projectWorkspace, repoOverrideUrl: override?.repoUrl };
+  return {
+    projectWorkspace,
+    repoOverrideUrl: override?.repoUrl,
+    repoAccessUserId: resolved?.accessUserId,
+  };
+}
+
+/** Whose clone grant authorizes `repoUrl`: a shared override's owner, else `userId` itself. */
+export function repoAccessUserFor(
+  workspace: { repoOverrideUrl: string | undefined; repoAccessUserId: string | undefined },
+  repoUrl: string,
+  userId: string
+): string {
+  return repoUrl === workspace.repoOverrideUrl ? (workspace.repoAccessUserId ?? userId) : userId;
 }
