@@ -75,7 +75,7 @@ describe('Index (landing) page', () => {
       // Desktop nav links
       expect(within(header).getByText('Features')).toBeInTheDocument();
       expect(within(header).getByText('Research')).toBeInTheDocument();
-      expect(within(header).getByText('About')).toBeInTheDocument();
+      expect(within(header).queryByText('About')).not.toBeInTheDocument();
     });
 
     it('renders footer with legal links and copyright', () => {
@@ -89,12 +89,25 @@ describe('Index (landing) page', () => {
       expect(screen.getByText(ROSE_APP_DESCRIPTION)).toBeInTheDocument();
     });
 
-    it('ships public About and Privacy links in static HTML', () => {
+    it('ships public Privacy and Terms links (and no About page link) in static HTML', () => {
       const html = readFileSync(resolve(process.cwd(), 'index.html'), 'utf8');
       expect(html).toMatch(/<footer class="rose-static-links">/);
-      expect(html).toContain('<a href="/about">About</a>');
+      expect(html).not.toContain('href="/about"');
+      expect(html).toContain('<a href="/terms">Terms</a>');
       expect(html).toContain('<a href="/privacy">Privacy</a>');
       expect(html).not.toMatch(/rose-static-links[^}]*display:\s*none/);
+    });
+
+    it('ships the Agentic Supercomputer description in static link-preview metadata', () => {
+      const html = readFileSync(resolve(process.cwd(), 'index.html'), 'utf8');
+      const doc = new DOMParser().parseFromString(html, 'text/html');
+      const meta = (selector: string) =>
+        doc.querySelector(selector)?.getAttribute('content') ?? null;
+      const description =
+        'Rose is an Agentic Supercomputer, capable of spawning 100s of thousands of agents to complete complex real world tasks over months.';
+      expect(meta('meta[name="description"]')).toBe(description);
+      expect(meta('meta[property="og:description"]')).toBe(description);
+      expect(meta('meta[property="og:title"]')).toBe('Rose | Agentic Supercomputer by Rose Labs');
     });
 
     it('renders the Powered By ticker with provider logos', () => {

@@ -17,7 +17,6 @@ import '@/features/index';
 import '@/features/privacy';
 import '@/features/terms';
 import '@/features/not-found';
-import '@/features/about';
 import '@/features/research-blog';
 import '@/features/research-blog-post';
 import '@/features/careers';
@@ -235,10 +234,11 @@ describe('App wiring', () => {
       expect(screen.getByRole('heading', { name: /terms of service/i })).toBeInTheDocument();
     });
 
-    it('"/about" renders the About page', async () => {
+    it('"/about" is taken down and falls through to the 404 page', async () => {
+      expect(ROUTE_TABLE.some((route) => route.path === '/about')).toBe(false);
       await renderAppRoutes('/about');
       await waitFor(() => expect(screen.queryByTestId('route-loading')).not.toBeInTheDocument());
-      expect(screen.getByRole('heading', { name: /mission/i })).toBeInTheDocument();
+      expect(screen.getByText('404')).toBeInTheDocument();
     });
 
     it('"/terminal" renders the Index (landing) page', async () => {
@@ -381,18 +381,20 @@ describe('App wiring', () => {
 
     it('routes work without an auth session (public pages)', async () => {
       // No session in localStorage -- public pages should still render.
-      await renderAppRoutes('/about');
+      await renderAppRoutes('/terms');
       await waitFor(() => expect(screen.queryByTestId('route-loading')).not.toBeInTheDocument());
-      expect(screen.getByRole('heading', { name: /mission/i })).toBeInTheDocument();
+      expect(screen.getByRole('heading', { name: /terms of service/i })).toBeInTheDocument();
     });
 
     it('TooltipProvider is present (components that use tooltips do not crash)', async () => {
-      // The Terminal page and others use Tooltip from radix. If TooltipProvider
-      // was missing, rendering would throw. Rendering About (which uses NaviHeader
-      // with potential tooltip triggers) without error proves the provider exists.
-      await renderAppRoutes('/about');
+      // The Terminal page uses Tooltip from radix (the legal footer's About
+      // description). If TooltipProvider was missing, rendering would throw.
+      await renderAppRoutes('/');
       await waitFor(() => expect(screen.queryByTestId('route-loading')).not.toBeInTheDocument());
-      expect(screen.getByText(/we.re hiring/i)).toBeInTheDocument();
+      const legalLinks = await screen.findByTestId('terminal-legal-links');
+      expect(within(legalLinks).getAllByRole('button', { name: 'About' }).length).toBeGreaterThan(
+        0,
+      );
     });
 
     it('QueryClientProvider is present (react-query hooks do not crash)', async () => {
@@ -464,14 +466,6 @@ describe('App wiring', () => {
       ).toBeInTheDocument();
       expect(screen.getByRole('heading', { name: /8\. sms\/text messaging/i })).toBeInTheDocument();
       expect(screen.getByRole('heading', { name: /9\. contact/i })).toBeInTheDocument();
-    });
-
-    it('/about shows Mission, Team, and hiring sections', async () => {
-      await renderAppRoutes('/about');
-      await waitFor(() => expect(screen.queryByTestId('route-loading')).not.toBeInTheDocument());
-      expect(screen.getByRole('heading', { name: /mission/i })).toBeInTheDocument();
-      expect(screen.getByRole('heading', { name: /team/i })).toBeInTheDocument();
-      expect(screen.getByText(/we.re hiring/i)).toBeInTheDocument();
     });
 
     it('/download includes a fallback download link', async () => {
