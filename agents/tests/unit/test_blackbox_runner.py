@@ -246,6 +246,33 @@ def test_domains_and_concurrency_reach_the_suite_runner(monkeypatch):
     assert started == [(["workflow", "web-search"], 4)]
 
 
+@pytest.mark.parametrize("suite_exit_code", [0, 1])
+def test_runner_exit_waits_for_native_sdk_callback_still_in_python(monkeypatch, suite_exit_code):
+    """A Tokio thread settling a WorkflowEnvironment/Worker shutdown future can still be
+    in Python when the suites return; exiting then aborts the process (SIGABRT
+    PyGILState_Release while finalizing) after every case passed."""
+    from tests.unit.test_worker_observability_shutdown import _pthread, _run_python_on_native_thread
+
+    runner = load_runner()
+    native: list[tuple] = []
+
+    async def suites_leaving_a_native_callback(domain_filters, concurrency):
+        native.append(_run_python_on_native_thread(0.3))
+        return suite_exit_code
+
+    monkeypatch.setattr(runner, "run_tests", suites_leaving_a_native_callback)
+    monkeypatch.setattr(sys, "argv", ["run_blackbox_tests.py", "workflow"])
+    try:
+        with pytest.raises(SystemExit) as exited:
+            runner.main()
+        finished = native[0][2]
+        assert finished.is_set(), "runner exited while a native SDK callback was still executing Python"
+        assert exited.value.code == suite_exit_code
+    finally:
+        for thread, _callback, _finished in native:
+            assert _pthread.pthread_join(thread, None) == 0
+
+
 def test_failed_domain_names_its_failing_cases_and_first_error(tmp_path: Path):
     """A domain returning only result.all_passed must not reach results.json with
     an empty message: the failing case names and their first error are recorded."""

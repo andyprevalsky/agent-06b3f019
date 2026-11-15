@@ -134,6 +134,36 @@ async def test_execute_reasoning_happy_path():
     assert streamed_chunks[-1]["done"] is True
 
 
+async def test_reasoning_authored_answer_excludes_provider_reasoning():
+    """The actual parser must not prepend thought text to the DAG's authored answer."""
+    from domains.reasoning import service
+    from domains.reasoning.types import ReasoningResponse
+    from helpers import llm
+    from providers.rose.types import StreamChunk
+
+    class RecordedProvider:
+        async def complete(self, **_kwargs):
+            yield StreamChunk(kind="reasoning", data={"text": "The user wants exactly OK."})
+            yield StreamChunk(kind="content", data={"text": '{"response":"OK"}'})
+            yield StreamChunk(kind="usage", data={"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2})
+            yield StreamChunk(kind="done", data={})
+
+    with (
+        patch.object(llm, "RoseClient", RecordedProvider),
+        patch.object(service, "build_reasoning_messages", AsyncMock(return_value=[{"role": "user", "content": "Reply OK"}])),
+        patch.object(service, "get_model_context_window", AsyncMock(return_value=10000)),
+    ):
+        output = await service.execute_reasoning("Reply OK", [], "rose-labs/rose-1-ultra")
+        assert output["content"] == "OK", output
+        # Existing loop callers keep their visible reasoning presentation.
+        response, _usage, _tools = await llm.call_llm_structured_streaming(
+            messages=[{"role": "user", "content": "Reply OK"}],
+            model="rose-labs/rose-1-ultra", temperature=0.3, max_tokens=16000,
+            response_model=ReasoningResponse, on_chunk=AsyncMock(),
+        )
+        assert response.response == "The user wants exactly OK.\n\nOK"
+
+
 async def test_execute_reasoning_marks_gpt_streams():
     """All GPT routes keep their streaming UI classification."""
     from activities.reasoning import ReasoningResponse
@@ -387,6 +417,7 @@ async def run_all_tests():
     await r.record_async("build_reasoning_messages_trims", test_build_reasoning_messages_trims_to_max)
     await r.record_async("build_reasoning_messages_small", test_build_reasoning_messages_small_context)
     await r.record_async("execute_reasoning_happy_path", test_execute_reasoning_happy_path)
+    await r.record_async("reasoning_authored_answer_excludes_provider_reasoning", test_reasoning_authored_answer_excludes_provider_reasoning)
     await r.record_async("execute_reasoning_marks_gpt_streams", test_execute_reasoning_marks_gpt_streams)
     await r.record_async(
         "execute_reasoning_streamed_text_json_missing",

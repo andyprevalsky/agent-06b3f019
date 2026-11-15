@@ -151,6 +151,65 @@ Shipped and verified in prod (PR #2048, merge `e0c797307d`, 2026-11-14):
   `execute_loop` calls were served by `claude-opus-5-5-claude`. Summaries
   were served by `claude-haiku-4-5-claude`.
 
+### Follow-up 2026-11-14: Codex cooldowns were never re-checked
+
+Andy's order puts Codex subscriptions first. A live minimal Codex request per
+pooled `gpt_code` row (~09:20Z, prod body builder and transport, headers
+only) found:
+
+- `86ae2dc2`, `de79f8a2` and `de25c911` returned 429 `usage_limit_reached`
+  with the weekly window at 100%. Their real resets were about 11-17 00:44Z,
+  11-15 19:47Z and 11-18 02:52Z.
+- `6a703dd4` returned 401 `token_expired`.
+
+Three rows still held 11-17T21:28Z. That deadline had been copied from a
+sibling by a pre-#1981 unnamed report, so `de79` sat benched about 2 days
+past its real reset.
+
+Nothing re-asked Codex: the usage refresher and reconcile handled Claude
+only.
+
+Repro: the three cases in
+`compute-subscription-usage.codex-refresh.cases.ts` go through the real
+`listConnectedAccounts` trigger with Codex scripted. Before the fix all
+three failed with `Timed out ... waiting for the Codex quota check scheduled
+by the account list`. After the fix they pass 5/5.
+
+Fix (a follow-up PR):
+
+- `codexQuotaCheck` makes one minimal request at standard speed on the small
+  pool's Codex model.
+- `readCodexUsageCredential` reads the stored token read-only.
+- The refresher is provider-aware, reusing `analyzeSubscriptionUsage('gpt')`
+  and `reconcileRoseCooldown('gpt_code')`.
+- It is triggered by the compute-accounts list and by non-authoritative GPT
+  cooldown reports.
+- A 401/403 backs off and never expires the login.
+- From the GROUNDED review: only a 2xx or a recognized usage-limit rejection
+  may reconcile. A short-term 429 can still carry windows under 100%, and
+  before this guard it lifted the cooldown (regression observed failing, then
+  passing).
+
+Open, not fixed:
+
+- Only the default `codex` limit bucket is read. codex-rs reads each
+  `x-codex-<limit_id>-*` bucket and the active-limit header
+  (`codex-rs/codex-api/src/rate_limits.rs:28-46`).
+- Codex's `/wham/usage` endpoint is unused
+  (`codex-rs/backend-client/src/client.rs:385-396`).
+
+Shipped and verified 2026-11-15:
+
+- PR #2059 merged as `20a9430bd9`. Render is live through descendant `2af91a1`, and Vercel `version.json` shows buildId `20a9430bd988`.
+- The deploy's sleep ratchet caught that the repro synchronized with a fixed 300 ms sleep. `46da772ac0` replaced it: the cases that change the row wait for their reconcile, and the no-change cases await `refreshCodexUsage` and assert its outcome.
+- Prod read-back after the normal `GET /api/compute-accounts?provider=codex` (03:49:21Z):
+  - `de79f8a2`: 2026-11-15T19:47:04Z
+  - `86ae2dc2`: 2026-11-17T00:44:44Z
+  - Both are `usage_window_7d`, authoritative, with the 7d window at 100%. Both match the 11-14 probes.
+- `6a703dd4` serves again: usage observed from a served response at 03:48:59Z, and `gpt-6.1-sol-gpt` ×39 between 02:30 and 02:54Z. Claude subscription calls continue (`claude-opus-5-5-claude` ×140 between 02:50 and 03:45Z).
+
+Also open: `de25c911` has no `ComputeAccountConnection` row, so the account list never refreshes it. Only a cooldown report does. Its stored 11-18T02:52:32Z already equals its real reset.
+
 ## Human feedback
 
 The parent thread relayed Andy's rules: do not mint, rotate or revoke

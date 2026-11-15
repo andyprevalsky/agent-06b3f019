@@ -86,7 +86,9 @@ async function main() {
       '../../providers/browser/tilion': {},
       '../../providers/browser/exitGeoLocale': {},
       '../../providers/geoip': {},
-      '../../providers/browser/sessionPersist': {},
+      '../../providers/browser/sessionPersist': {
+        isConfirmedBrowserEnd: (status: string | null) => status === 'deleted',
+      },
       './repo': {
         findSessionByTaskId: async () => session,
         findUserSettings: async (id: string) => {
@@ -168,10 +170,9 @@ async function main() {
     },
     post() {},
   };
-  const multer = Object.assign(() => ({ single: () => () => {} }), { memoryStorage: () => ({}) });
   const modules: Record<string, unknown> = {
     express: { Router: () => router },
-    multer: { default: multer },
+    './config': { upload: { single: () => () => {} } },
     '../../providers/auth': {},
     '../../providers/hybridAuth': {},
     '../../providers/logger': { createLogger: () => ({ error() {} }) },

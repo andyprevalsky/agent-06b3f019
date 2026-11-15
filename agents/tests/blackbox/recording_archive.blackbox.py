@@ -146,6 +146,7 @@ def test_recording_archive_worker_exit_has_no_serial_publication_tail():
             "TRACE_ARCHIVE_ENABLED": "1",
             "TRACE_ARCHIVE_ASYNC_WRITES": "1",
             "TRACE_ARCHIVE_BACKEND": "r2",
+            "TRACE_ARCHIVE_ALLOW_NONPROD_R2": "1",
             "TRACE_ARCHIVE_ENCRYPTION_KEY_B64": base64.b64encode(FIXTURE_KEY).decode(),
             "TRACE_ARCHIVE_LOCAL_ROOT": str(root / "archive"),
             "BACKEND_API_KEY": "offline-fixture-key",
@@ -248,6 +249,7 @@ async def test_recording_batch_failure_retains_sources_and_retryable_envelopes()
             env = {
                 "TRACE_ARCHIVE_ENABLED": "1",
                 "TRACE_ARCHIVE_BACKEND": "r2",
+                "TRACE_ARCHIVE_ALLOW_NONPROD_R2": "1",
                 "TRACE_ARCHIVE_LOCAL_ROOT": str(root / "archive"),
                 "TRACE_ARCHIVE_ENCRYPTION_KEY_B64": base64.b64encode(FIXTURE_KEY).decode(),
                 "BACKEND_API_URL": "http://127.0.0.1:1",
@@ -309,6 +311,7 @@ def test_recording_batches_bound_count_bytes_and_preserve_large_sources():
         env = {
             "TRACE_ARCHIVE_ENABLED": "1",
             "TRACE_ARCHIVE_BACKEND": "r2",
+            "TRACE_ARCHIVE_ALLOW_NONPROD_R2": "1",
             "TRACE_ARCHIVE_ENCRYPTION_KEY_B64": base64.b64encode(FIXTURE_KEY).decode(),
         }
         with patch.dict(os.environ, env), patch.object(archive, "_publish_artifact_batch", side_effect=publish):
@@ -368,6 +371,7 @@ def test_recording_batch_lease_blocks_foreign_process_drain_and_recovers_after_c
             "PYTHONPATH": str(AGENTS),
             "TRACE_ARCHIVE_ENABLED": "1",
             "TRACE_ARCHIVE_BACKEND": "r2",
+            "TRACE_ARCHIVE_ALLOW_NONPROD_R2": "1",
             "TRACE_ARCHIVE_LOCAL_ROOT": str(root / "archive"),
             "TRACE_ARCHIVE_ENCRYPTION_KEY_B64": base64.b64encode(FIXTURE_KEY).decode(),
             "BACKEND_API_URL": f"http://127.0.0.1:{server.server_port}",
@@ -458,6 +462,7 @@ def test_failed_recording_batch_still_publishes_later_files():
         env = {
             "TRACE_ARCHIVE_ENABLED": "1",
             "TRACE_ARCHIVE_BACKEND": "r2",
+            "TRACE_ARCHIVE_ALLOW_NONPROD_R2": "1",
             "TRACE_ARCHIVE_LOCAL_ROOT": str(root / "archive"),
             "TRACE_ARCHIVE_ENCRYPTION_KEY_B64": base64.b64encode(FIXTURE_KEY).decode(),
             "BACKEND_API_URL": "http://127.0.0.1:1",

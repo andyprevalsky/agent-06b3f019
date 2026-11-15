@@ -6,6 +6,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {
+  archiveBytes,
   archiveJson,
   decryptAndValidateArtifact,
   readArchivedArtifact,
@@ -96,6 +97,61 @@ async function seedStaleFinalizedBundle(
 }
 
 async function main(): Promise<void> {
+  await test(
+    'late code/llm writes after the finalization fence reconcile the manifest automatically',
+    withEnv(
+      {
+        TRACE_ARCHIVE_ENABLED: '1',
+        TRACE_ARCHIVE_BACKEND: 'local',
+        TRACE_ARCHIVE_ENCRYPTION_KEY_B64: undefined,
+        TRACE_ARCHIVE_LOCAL_DIR: undefined,
+        TRACE_ARCHIVE_PUBLIC_MANIFEST: 'true',
+      },
+      async () => {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'trace-archive-late-auto-'));
+        process.env.TRACE_ARCHIVE_LOCAL_DIR = dir;
+        const rootAgentId = 'reconcile-late-auto';
+        const earlyPath = await seedStaleFinalizedBundle(rootAgentId);
+        // Finalization fence + current manifest, as after a real finalize.
+        assert.strictEqual((await reconcileFinalizedManifest(rootAgentId)).status, 'current');
+        const latePaths = [
+          'code/session-1/0001/rollout.jsonl.gz.enc',
+          'code/session-1/0002/rollout.jsonl.gz.enc',
+          'llm-updates/late-1-chat.json.gz.enc',
+        ];
+        // A concurrent burst coalesces into bounded reconciliation passes.
+        await Promise.all([
+          archiveBytes({
+            rootAgentId,
+            objectPath: latePaths[0],
+            body: Buffer.from('{"turn":1}'),
+            contentType: 'application/json',
+            createOnly: true,
+          }),
+          archiveBytes({
+            rootAgentId,
+            objectPath: latePaths[1],
+            body: Buffer.from('{"turn":2}'),
+            contentType: 'application/json',
+          }),
+          archiveJson({ rootAgentId, objectPath: latePaths[2], value: { late: true } }),
+        ]);
+        assert.strictEqual((await inspectFinalizedManifest(rootAgentId)).status, 'current');
+        const encrypted = await readArchivedArtifact({
+          rootAgentId,
+          objectPath: 'manifest.json.gz.enc',
+        });
+        assert(encrypted);
+        const manifest = JSON.parse(decryptAndValidateArtifact(encrypted).toString('utf8')) as {
+          artifacts: { path: string }[];
+        };
+        assert.deepStrictEqual(
+          manifest.artifacts.map((artifact) => artifact.path).sort(),
+          [earlyPath, ...latePaths].sort()
+        );
+      }
+    )
+  );
   await test(
     'late finalized artifact is added to encrypted and public manifests',
     withEnv(

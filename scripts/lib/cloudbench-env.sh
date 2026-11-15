@@ -1128,6 +1128,39 @@ cloudbench_tracked_owner_value() {  # <owner-file> <key>
   sed -n "s/^${key}=//p" "$owner_file" 2>/dev/null | head -1
 }
 
+# Bash 5.2 can run a pending trap while the trapped shell itself re-parses
+# $(...) or <(...) text. The trap clobbers that parse ("trap: line 2:
+# unexpected EOF while looking for matching `)'"), so the substitution fails
+# and its caller abandons its cleanup path. Code that a forwarded cancellation
+# signal can reach therefore reads records fork-free and runs state producers
+# as already-parsed pipeline children, which never re-enter that parser.
+cloudbench_tracked_owner_value_into() {  # <variable> <owner-file> <key>
+  local __owner_line __owner_value=""
+  if [ -r "$2" ]; then
+    while IFS= read -r __owner_line || [ -n "$__owner_line" ]; do
+      case "$__owner_line" in
+        "$3="*) __owner_value="${__owner_line#"$3="}"; break ;;
+      esac
+    done 2>/dev/null < "$2"
+  fi
+  printf -v "$1" '%s' "$__owner_value"
+}
+
+cloudbench_tristate_into() {  # <variable> <producer...>: live|absent, else unknown
+  local __tristate_rc=0
+  "${@:2}" | {
+    IFS= read -r __tristate_state
+    cat >/dev/null
+    case "$__tristate_state" in live) exit 10 ;; absent) exit 11 ;; esac
+    exit 12
+  } || __tristate_rc=$?
+  case "$__tristate_rc" in
+    10) printf -v "$1" live ;;
+    11) printf -v "$1" absent ;;
+    *) printf -v "$1" unknown ;;
+  esac
+}
+
 cloudbench_process_group_state() {  # <pgid> -> live|absent|unknown
   local pgid="$1" observed observed_pgid
   if ! observed="$(ps -axo pgid= 2>/dev/null)"; then
@@ -1144,7 +1177,9 @@ cloudbench_process_group_state() {  # <pgid> -> live|absent|unknown
 }
 
 cloudbench_process_group_exists() {  # <pgid>
-  [ "$(cloudbench_process_group_state "$1")" = "live" ]
+  local group_state
+  cloudbench_tristate_into group_state cloudbench_process_group_state "$1"
+  [ "$group_state" = "live" ]
 }
 
 cloudbench_pid_exists() {  # <pid>
@@ -1161,17 +1196,19 @@ cloudbench_wait_tracked_detached() {  # <owner-file> <status-file>
   local owner_file="$1" status_file="$2"
   shift 2
   local recovery_command=("$@")
-  local pid pid_start pgid group_token group_state status pending_signal="" forwarded_signal=""
+  local pid pid_start pgid group_token group_state status status_grace pending_signal="" forwarded_signal=""
   local recovery_seconds="${CLOUDBENCH_DETACHED_RECOVERY_SECONDS:-120}"
   local recovery_deadline=0 drain_deadline recovery_required=0
   local terminal_grace_seconds="${CLOUDBENCH_DETACHED_TERMINAL_GRACE_SECONDS:-2}"
   local terminal_term_seconds="${CLOUDBENCH_DETACHED_TERMINAL_TERM_SECONDS:-5}"
   local terminal_deadline=0 terminal_term_sent=0 terminal_teardown_failed=0
 
-  pid="$(cloudbench_tracked_owner_value "$owner_file" pid)"
-  pid_start="$(cloudbench_tracked_owner_value "$owner_file" pid_start)"
-  pgid="$(cloudbench_tracked_owner_value "$owner_file" pgid)"
-  group_token="$(cloudbench_tracked_owner_value "$owner_file" group_token)"
+  # Callers may publish this process as a cancellation target before calling;
+  # keep every expansion below signal-safe (see cloudbench_tristate_into).
+  cloudbench_tracked_owner_value_into pid "$owner_file" pid
+  cloudbench_tracked_owner_value_into pid_start "$owner_file" pid_start
+  cloudbench_tracked_owner_value_into pgid "$owner_file" pgid
+  cloudbench_tracked_owner_value_into group_token "$owner_file" group_token
   case "$pid:$pgid" in
     ''|*[!0-9:]*|:*|*:)
       echo "FATAL: detached ownership handshake is malformed" >&2
@@ -1228,7 +1265,7 @@ cloudbench_wait_tracked_detached() {  # <owner-file> <status-file>
     # own provider resources. Bound the full process-group drain, then escalate
     # the still-live owned group. Only consume status after the group is gone.
     if [ -n "$forwarded_signal" ]; then
-      group_state="$(cloudbench_process_group_state "$pgid")"
+      cloudbench_tristate_into group_state cloudbench_process_group_state "$pgid"
       if [ "$group_state" = "unknown" ]; then
         trap - HUP INT TERM
         echo "FATAL: could not prove detached fleet process-group state during cancellation" >&2
@@ -1243,7 +1280,7 @@ cloudbench_wait_tracked_detached() {  # <owner-file> <status-file>
         if [ "$SECONDS" -ge "$recovery_deadline" ]; then
           echo "⚠️  detached fleet group survived bounded $forwarded_signal recovery; escalating" >&2
           if ! cloudbench_pid_matches_start "$pid" "$pid_start"; then
-            group_state="$(cloudbench_process_group_state "$pgid")"
+            cloudbench_tristate_into group_state cloudbench_process_group_state "$pgid"
             if [ "$group_state" != "absent" ] || cloudbench_pid_exists "$pid"; then
               trap - HUP INT TERM
               echo "FATAL: detached fleet identity anchor vanished before KILL escalation" >&2
@@ -1253,11 +1290,11 @@ cloudbench_wait_tracked_detached() {  # <owner-file> <status-file>
             kill -s KILL -- "-$pgid" 2>/dev/null || true
           fi
           drain_deadline=$((SECONDS + 10))
-          group_state="$(cloudbench_process_group_state "$pgid")"
+          cloudbench_tristate_into group_state cloudbench_process_group_state "$pgid"
           while [ "$group_state" = "live" ] \
               && [ "$SECONDS" -lt "$drain_deadline" ]; do
             sleep 0.1 || true
-            group_state="$(cloudbench_process_group_state "$pgid")"
+            cloudbench_tristate_into group_state cloudbench_process_group_state "$pgid"
           done
           if [ "$group_state" != "absent" ] || cloudbench_pid_exists "$pid"; then
             trap - HUP INT TERM
@@ -1291,7 +1328,7 @@ cloudbench_wait_tracked_detached() {  # <owner-file> <status-file>
           return 1
         fi
       fi
-      for _ in $(seq 1 20); do
+      for ((status_grace = 0; status_grace < 20; status_grace++)); do
         [ -s "$status_file" ] && break
         sleep 0.1 || true
       done
@@ -1306,7 +1343,7 @@ cloudbench_wait_tracked_detached() {  # <owner-file> <status-file>
     fi
 
     if [ -s "$status_file" ]; then
-      group_state="$(cloudbench_process_group_state "$pgid")"
+      cloudbench_tristate_into group_state cloudbench_process_group_state "$pgid"
       if [ "$group_state" = "unknown" ]; then
         trap - HUP INT TERM
         echo "FATAL: detached terminal status arrived while process-group state was unknown" >&2
@@ -1328,7 +1365,7 @@ cloudbench_wait_tracked_detached() {  # <owner-file> <status-file>
         # The persistent anchor can exit between the group and PID probes once
         # the final command has drained. Re-probe; only the jointly absent
         # state is terminal, never the earlier numeric-PGID observation alone.
-        group_state="$(cloudbench_process_group_state "$pgid")"
+        cloudbench_tristate_into group_state cloudbench_process_group_state "$pgid"
         if [ "$group_state" = "absent" ] && ! cloudbench_pid_exists "$pid"; then
           if [ "$terminal_term_sent" = "1" ]; then
             recovery_required=1
@@ -1351,7 +1388,7 @@ cloudbench_wait_tracked_detached() {  # <owner-file> <status-file>
       elif [ "$terminal_term_sent" = "1" ] \
           && [ "$SECONDS" -ge "$terminal_deadline" ]; then
         if ! cloudbench_pid_matches_start "$pid" "$pid_start"; then
-          group_state="$(cloudbench_process_group_state "$pgid")"
+          cloudbench_tristate_into group_state cloudbench_process_group_state "$pgid"
           if [ "$group_state" != "absent" ] || cloudbench_pid_exists "$pid"; then
             trap - HUP INT TERM
             echo "FATAL: detached identity anchor vanished before terminal KILL escalation" >&2
@@ -1361,11 +1398,11 @@ cloudbench_wait_tracked_detached() {  # <owner-file> <status-file>
           kill -s KILL -- "-$pgid" 2>/dev/null || true
         fi
         drain_deadline=$((SECONDS + 10))
-        group_state="$(cloudbench_process_group_state "$pgid")"
+        cloudbench_tristate_into group_state cloudbench_process_group_state "$pgid"
         while [ "$group_state" = "live" ] \
             && [ "$SECONDS" -lt "$drain_deadline" ]; do
           sleep 0.1 || true
-          group_state="$(cloudbench_process_group_state "$pgid")"
+          cloudbench_tristate_into group_state cloudbench_process_group_state "$pgid"
         done
         if [ "$group_state" != "absent" ] || cloudbench_pid_exists "$pid"; then
           trap - HUP INT TERM
@@ -1387,12 +1424,12 @@ cloudbench_wait_tracked_detached() {  # <owner-file> <status-file>
       # The wrapper writes status from its EXIT trap. Process reaping and file
       # visibility can race by a few scheduler ticks; give the atomic rename a
       # short bounded grace before classifying the marker as missing.
-      for _ in $(seq 1 20); do
+      for ((status_grace = 0; status_grace < 20; status_grace++)); do
         [ -s "$status_file" ] && break
         sleep 0.1 || true
       done
       [ -s "$status_file" ] && continue
-      group_state="$(cloudbench_process_group_state "$pgid")"
+      cloudbench_tristate_into group_state cloudbench_process_group_state "$pgid"
       if [ "$group_state" = "unknown" ]; then
         trap - HUP INT TERM
         echo "FATAL: detached fleet identity anchor vanished while process-group state was unknown" >&2
@@ -1441,7 +1478,8 @@ cloudbench_wait_tracked_detached() {  # <owner-file> <status-file>
       return 1
     fi
   fi
-  status="$(head -1 "$status_file" 2>/dev/null || true)"
+  status=""
+  { IFS= read -r status || :; } 2>/dev/null < "$status_file" || true
   # Ownership rendezvous is retired after group drain; the printed terminal
   # receipt remains available to the independent monitor after --wait returns.
   rm -f "$owner_file" "$owner_file".tmp.* "$status_file".tmp.* \
@@ -1720,6 +1758,76 @@ cloudbench_resolve_controller_github_token() {
 # Canonical name used by main's warm_source_fetch_ref / export helpers.
 cloudbench_controller_github_token() {
   cloudbench_resolve_controller_github_token "$@"
+}
+
+# A cloud guest fetches its ref minutes after the controller hands it a token
+# (Machine boot, credential handoff). On boxes.dev the controller credentials
+# above (Git helper, gh, .env GITHUB_TOKEN/GITHUB_DISPATCH_TOKEN) are the
+# daemon's user credential, which it rotates and revokes several times an hour:
+# a guest fetching after a rotation got `could not read Username` and the run
+# hit the infra stop (smoke/agent-payment-setup-resume, PR #1927 round 5).
+# Guests therefore get the GitHub App installation token, minted from the App
+# key with at least CLOUDBENCH_GUEST_GITHUB_TOKEN_MIN_TTL_SECONDS left; nothing
+# on the devbox revokes it. It is validated by a Contents read before use.
+cloudbench_guest_github_token_can_read_repo() {  # <token>
+  # Validate the operation the guest performs: a bounded git ls-remote of the
+  # private remote (needs Contents read; spends no REST quota, so an exhausted
+  # App rate window cannot push guests back onto the rotating credential).
+  # The header lives in a mode-0600 config, never in argv or the ambient config.
+  local token="${1:-}" cfg rc bound=()
+  local url="${CLOUDBENCH_GITHUB_REPO_GIT_URL:-https://github.com/Rose-Ai-Labs/rose.git}"
+  [ -n "$token" ] || return 1
+  cfg="$(umask 077; mktemp)" || return 1
+  printf '[http]\n\textraheader = Authorization: Basic %s\n' \
+    "$(printf 'x-access-token:%s' "$token" | base64 | tr -d '\n')" >"$cfg"
+  command -v timeout >/dev/null 2>&1 && bound=(timeout 30)
+  env -u GIT_CONFIG_COUNT -u GIT_CONFIG_PARAMETERS GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=true \
+    GIT_CONFIG_GLOBAL="$cfg" GIT_CONFIG_NOSYSTEM=1 ${bound[@]+"${bound[@]}"} \
+    git -c credential.helper= ls-remote --exit-code "$url" refs/heads/main >/dev/null 2>&1
+  rc=$?
+  rm -f "$cfg"
+  return "$rc"
+}
+
+cloudbench_guest_durable_github_token() {  # [workspace-root]
+  local workspace_root="${1:-${CLOUDBENCH_FLEET_ROOT:-.}}" token
+  local min_ttl="${CLOUDBENCH_GUEST_GITHUB_TOKEN_MIN_TTL_SECONDS:-2700}"
+  local bound=()
+  # An installation token lives one hour; a longer minimum could never be met.
+  case "$min_ttl" in ''|*[!0-9]*) min_ttl=2700 ;; esac
+  [ "$min_ttl" -le 3300 ] || min_ttl=3300
+  [ -f "$workspace_root/scripts/github_token_pool.py" ] || {
+    echo "guest GitHub App token unavailable: scripts/github_token_pool.py missing" >&2
+    return 1
+  }
+  # macOS has no GNU timeout without coreutils; the pool bounds its own HTTP calls.
+  command -v timeout >/dev/null 2>&1 && bound=(timeout 60)
+  # The pool's stderr names a failure reason and never a token value.
+  token="$(cd "$workspace_root" && ${bound[@]+"${bound[@]}"} python3 scripts/github_token_pool.py \
+    app-token --min-ttl "$min_ttl" --read-repository rose)" || return 1
+  cloudbench_guest_github_token_can_read_repo "$token" || {
+    echo "guest GitHub App token failed the repository Contents read" >&2
+    return 1
+  }
+  printf '%s' "$token"
+}
+
+# Token handed to a cloud guest for its private-repo fetch. An explicit
+# request-scoped CLOUDBENCH_GITHUB_TOKEN_B64 pin wins; then the durable App
+# token; otherwise the controller chain, with a warning that rotation can
+# revoke it before the guest fetches. Never prints the token anywhere else.
+cloudbench_guest_github_token() {  # [workspace-root]
+  local workspace_root="${1:-${CLOUDBENCH_FLEET_ROOT:-.}}" token=""
+  if [ -n "${CLOUDBENCH_GITHUB_TOKEN_B64:-}" ]; then
+    token="$(printf '%s' "$CLOUDBENCH_GITHUB_TOKEN_B64" | base64 -d 2>/dev/null || true)"
+    [ -n "$token" ] && { printf '%s' "$token"; return 0; }
+  fi
+  if token="$(cloudbench_guest_durable_github_token "$workspace_root")" && [ -n "$token" ]; then
+    printf '%s' "$token"
+    return 0
+  fi
+  echo "WARN: no GitHub App installation token for guest fetch; using the controller credential, which a devbox rotation can revoke before the guest fetches" >&2
+  cloudbench_resolve_controller_github_token "$workspace_root"
 }
 
 cloudbench_github_basic_auth_header() {  # <token>
@@ -2232,18 +2340,30 @@ cloudbench_pid_birth_state() {  # <pid> <expected-start> -> live|absent|unknown
 }
 
 cloudbench_pid_matches_start() {
-  local observation
+  local match_status=0 birth_state
   case "$2" in
     proc-start:*)
       # A boolean birth match needs one native observation, not the nested
       # command substitutions used to classify absent versus unknown owners.
       # Both classifications are non-matches here; keep their richer API intact.
       case "$1" in ''|*[!0-9]*) return 1 ;; esac
-      [ "$1" -gt 1 ] && [ -r /proc/self/stat ] || return 1
-      observation="$(cloudbench_proc_pid_observation "$1")" || return 1
-      [ "${observation%%$'\t'*}" = "$2" ]
+      { [ "$1" -gt 1 ] && [ -r /proc/self/stat ]; } || return 1
+      # The observation is this pipeline's producer, so no $(...) is parsed in
+      # this trapped caller (see cloudbench_tristate_into). A failed observation
+      # appends a line, and only one exact matching line is a match.
+      { cloudbench_proc_pid_observation "$1" || printf '%s\n' observation-failed; } | {
+        IFS= read -r match_observation
+        match_extra=0
+        while IFS= read -r _; do match_extra=1; done
+        [ "$match_extra" = 0 ] && [ "${match_observation%%$'\t'*}" = "$2" ] && exit 10
+        exit 11
+      } || match_status=$?
+      [ "$match_status" = 10 ]
       ;;
-    *) [ "$(cloudbench_pid_birth_state "$1" "$2")" = "live" ] ;;
+    *)
+      cloudbench_tristate_into birth_state cloudbench_pid_birth_state "$1" "$2"
+      [ "$birth_state" = "live" ]
+      ;;
   esac
 }
 
@@ -3015,7 +3135,8 @@ cloudbench_controller_lock_release() {
 
 cloudbench_controller_github_token_b64() {
   local token
-  token="$(cloudbench_controller_github_token "${1:-${ROOT_DIR:-.}}")" || return 1
+  # Guest-bound token: never the devbox's rotating credential when the App is available.
+  token="$(cloudbench_guest_github_token "${1:-${ROOT_DIR:-.}}")" || return 1
   printf '%s' "$token" | base64 | tr -d '\n'
 }
 
