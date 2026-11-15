@@ -61,7 +61,14 @@ case "$SCENARIO:$1" in
   failing:run)
     echo '{"requestedJobId":"job-head","runningJobId":"job-head","recoveringPredecessor":false}'
     exit 1 ;;
-  busy:run) echo '{"waiting":true,"requestedJobId":"job-head","reason":"GLOBAL_LEASE_BUSY"}' ;;
+  busy:run)
+    if [ "$runs" -eq 1 ]; then
+      echo '{"waiting":true,"requestedJobId":"job-head","reason":"GLOBAL_LEASE_BUSY"}'
+    else
+      echo '{"jobId":"job-head","stage":"SUCCEEDED"}'
+      touch "$STATE/done"
+    fi ;;
+  busylong:run) echo '{"waiting":true,"requestedJobId":"job-head","reason":"GLOBAL_LEASE_BUSY"}' ;;
   far:run)
     echo '{"waiting":true,"requestedJobId":"job-head","reason":"FAILED_ATTEMPT_CADENCE","retryAt":"'"$(date -u -d '+2 hours' +%Y-%m-%dT%H:%M:%S.000Z)"'"}' ;;
   *) echo "unexpected $SCENARIO $*" >&2; exit 98 ;;
@@ -74,7 +81,8 @@ scenario() {
   rm -rf "$WORK/$name"; mkdir -p "$WORK/$name"
   set +e
   PATH="$WORK/bin:$PATH" SCENARIO="$name" CALLS="$WORK/$name/calls" STATE="$WORK/$name" \
-    APP=test-app RECOVER_ATTEMPTS="$attempts" bash "$SCRIPT" > "$WORK/$name/out" 2>&1
+    APP=test-app RECOVER_ATTEMPTS="$attempts" RECOVER_BUSY_SECONDS="${BUSY:-1800}" \
+    RECOVER_BUSY_POLL_SECONDS=1 bash "$SCRIPT" > "$WORK/$name/out" 2>&1
   echo $? > "$WORK/$name/code"
   set -e
   touch "$WORK/$name/calls"
@@ -99,9 +107,17 @@ grep -qE "Waiting -?[0-9]+s for the failed-attempt cadence of job-head" "$WORK/c
 # A head that keeps failing: bounded attempts, loud failure.
 scenario failing 2
 expect failing 1 2 "still queued after 2 recovery cutover(s)"
-# Another controller owns the lease: never start a second cutover.
+# A brief non-FIFO lease holder (e.g. the backend worker-process recovery cron)
+# must not strand the head: poll the lease, then resume once it frees.
 scenario busy 3
-expect busy 0 1 "Another controller holds the deployment lease"
+expect busy 0 2 "Recovered FIFO head job-head"
+grep -q "Deployment lease busy; retrying job-head in 1s" "$WORK/busy/out" ||
+  fail "busy lease retry not reported: $(cat "$WORK/busy/out")"
+# A lease that stays busy past the budget: give up without starting a cutover.
+BUSY=1 scenario busylong 3
+grep -c '^run ' "$WORK/busylong/calls" | grep -qE '^[2-9]$' || fail "busylong polled $(cat "$WORK/busylong/calls")"
+[ "$(cat "$WORK/busylong/code")" = 0 ] && grep -q "Deployment lease still busy after 1s" "$WORK/busylong/out" ||
+  fail "busylong: $(cat "$WORK/busylong/out")"
 # Nothing queued: no cutover.
 scenario empty 3
 expect empty 0 0 "No queued worker deployment for test-app"

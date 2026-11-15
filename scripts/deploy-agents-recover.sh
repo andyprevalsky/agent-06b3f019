@@ -1,22 +1,28 @@
 #!/usr/bin/env bash
 # Resume the saved worker-deployment FIFO head without rebuilding or enqueuing.
 #
-# deploy-agents.yml runs this right after a failed deploy (job `recover-failed`)
-# and from its best-effort `schedule`. GitHub fires that schedule only every few
+# deploy-agents.yml job `recover` runs this right after a failed deploy and
+# from its best-effort `schedule`. GitHub fires that schedule only every few
 # hours, so it cannot be the only trigger after a failure (RCA
 # 2026-11-15-deploy-agents-recover-relied-on-sparse-github-schedule).
 #
 # Every attempt goes through `worker-deployment-queue.ts run --if-idle`. Its
 # global deployment lease, FIFO head and 600s failed-attempt cadence decide
 # whether a cutover may start, so this never runs beside another controller.
-# The loop waits out that cadence and stops after RECOVER_ATTEMPTS cutovers.
+# The loop waits out that cadence, polls a busy lease (other holders, such as
+# the backend's worker-process recovery cron, never run the FIFO head) for up
+# to RECOVER_BUSY_SECONDS, and stops after RECOVER_ATTEMPTS failed cutovers.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 APP="${APP:-$(sed -nE 's/^app = "([a-z0-9-]+)"/\1/p' "$ROOT/agents/fly.toml")}"
 ATTEMPTS="${RECOVER_ATTEMPTS:-3}"
+BUSY_SECONDS="${RECOVER_BUSY_SECONDS:-1800}"
+BUSY_POLL_SECONDS="${RECOVER_BUSY_POLL_SECONDS:-30}"
 : "${APP:?APP is required}"
 [[ "$ATTEMPTS" =~ ^[1-9][0-9]*$ ]] || { echo "RECOVER_ATTEMPTS must be a positive integer" >&2; exit 2; }
+[[ "$BUSY_SECONDS" =~ ^[0-9]+$ && "$BUSY_POLL_SECONDS" =~ ^[1-9][0-9]*$ ]] ||
+  { echo "RECOVER_BUSY_SECONDS and RECOVER_BUSY_POLL_SECONDS must be integers" >&2; exit 2; }
 
 cd "$ROOT/back-end"
 OUT=$(mktemp)
@@ -39,6 +45,7 @@ PY
 }
 
 cutovers=0
+busy_deadline=$(( $(date +%s) + BUSY_SECONDS ))
 while :; do
   JOB_ID=$(queue head --app "$APP" | python3 -I -c '
 import json, sys
@@ -74,8 +81,12 @@ print(job["jobId"] if job else "")')
       [ "$wait_seconds" -le 0 ] || sleep "$wait_seconds"
       ;;
     GLOBAL_LEASE_BUSY)
-      echo "Another controller holds the deployment lease; it owns $JOB_ID now"
-      exit 0
+      if [ "$(date +%s)" -ge "$busy_deadline" ]; then
+        echo "Deployment lease still busy after ${BUSY_SECONDS}s; a lease-holding deploy or the next schedule resumes $JOB_ID"
+        exit 0
+      fi
+      echo "Deployment lease busy; retrying $JOB_ID in ${BUSY_POLL_SECONDS}s"
+      sleep "$BUSY_POLL_SECONDS"
       ;;
     "")
       echo "Recovered FIFO head $JOB_ID"

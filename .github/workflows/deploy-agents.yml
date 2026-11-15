@@ -142,7 +142,8 @@ jobs:
     needs: deploy
     if: always() && (github.event_name == 'schedule' || needs.deploy.result == 'failure')
     runs-on: blacksmith-4vcpu-ubuntu-2404
-    timeout-minutes: 240
+    # 3 cutovers under the 90-min deploy ceiling plus 2 cadence waits.
+    timeout-minutes: 330
     # This limits duplicate observers only. It never holds an unpersisted deploy.
     concurrency:
       group: recover-agent-pool
