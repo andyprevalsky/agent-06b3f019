@@ -23,16 +23,21 @@ from utils.llm_timeouts import SMS_NOTIFICATION_HTTP_TIMEOUT_SECONDS
 logger = structlog.get_logger()
 
 
+# Agent.source values for agents started from the phone (Linq delivers as SMS).
+# WhatsApp follows the same notification rules as SMS.
+MESSAGING_AGENT_SOURCES = frozenset({"SMS", "WHATSAPP"})
+
+
 @activity.defn
 async def get_agent_source(agent_id: str) -> str:
     """
-    Get the source of an agent (WEB, MAC_APP, SMS).
+    Get the source of an agent (WEB, MAC_APP, SMS, WHATSAPP).
 
     Args:
         agent_id: Agent ID
 
     Returns:
-        Source string: "WEB", "MAC_APP", or "SMS"
+        Source string: "WEB", "MAC_APP", "SMS" or "WHATSAPP"
     """
     config = load_config()
 

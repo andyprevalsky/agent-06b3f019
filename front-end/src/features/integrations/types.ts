@@ -294,4 +294,5 @@ export type IntegrationCatalogKey =
   | 'githubRepos'
   | 'meetingNotes'
   | 'pebble'
-  | 'clis';
+  | 'clis'
+  | 'mcp';

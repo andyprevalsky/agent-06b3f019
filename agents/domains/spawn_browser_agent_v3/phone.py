@@ -16,8 +16,11 @@ PHONE_GUIDANCE = """Cloud iPhone skill (Phone Harness 0.3.2, Rose adaptation):
 Use phone for authorized tasks where the account's dedicated cloud iPhone helps,
 including authentication, OTPs, messages, and apps. Use mode=status to inspect
 ownership/last receipt without allocating, mode=operation to ensure/reuse the
-phone, and mode=release when finished. Observe with screen.text, act once, then
-verify. iPhone coordinates are screen points; focus a field before input.text.
+phone, and mode=release when finished. Observe with screen.text, act, then verify. After a tap, launch, press, drag,
+scroll, key, Home or input.text action, put screen.text as the next call in the
+same response instead of waiting for another turn; calls run in order, stop at
+the first failure, and only reads run after a navigating action.
+iPhone coordinates are screen points; focus a field before input.text.
 Use only supported cloud operations; no CLI, local bridge, Android, or shell.
 In mode=operation, set operation to the wire name and args to its arguments:
 - screen.text: {"min_confidence": 0.3} returns visible text and tap centers.
@@ -79,7 +82,10 @@ Never reveal, extract, copy, or transcribe a saved password into observations,
 model messages, tool arguments, or logs. A blank password field alone does not
 prove that no saved credential exists. If no matching usable native suggestion
 is available, use credentials.fill_saved once with empty args and the actual
-observed setup context BEFORE requesting password assistance. Native AutoFill
+observed setup context BEFORE requesting password assistance. A matching
+suggestion that requires the owner's biometric or trusted-device approval is
+not unavailable: request that user-presence step (criticalReason=manual_verification)
+and never use credentials.fill_saved to route around it. Native AutoFill
 and the backend saved-password catalog are separate: an empty native suggestion
 list does not mean the backend has no saved credential. Do not skip this secure
 backend attempt merely because the current screen asks for a password. A filled receipt is only a
