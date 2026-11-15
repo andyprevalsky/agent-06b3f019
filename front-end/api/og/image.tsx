@@ -1,9 +1,10 @@
 import { ImageResponse } from '@vercel/og';
 import { getBlogMeta } from './_blogMeta.js';
 
-export const config = { runtime: 'edge' };
+// Node runtime: Vercel's edge runtime refuses to compile @vercel/og's WebAssembly
+// ("Wasm code generation disallowed by embedder"), so every edge render was an empty PNG.
 
-export default async function handler(req: Request) {
+export async function GET(req: Request): Promise<Response> {
   const { searchParams } = new URL(req.url);
   const slug = searchParams.get('slug');
 

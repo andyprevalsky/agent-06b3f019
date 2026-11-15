@@ -2,6 +2,8 @@ import { fetchAgentPreview, isAgentId, statusLine } from './_agentPreview.js';
 
 export const config = { runtime: 'edge' };
 
+export const IMAGE_VERSION = 2;
+
 /** /a/<agent-id>: the app page with that agent's link-preview tags. */
 export default async function handler(req: Request) {
   const url = new URL(req.url);
@@ -17,7 +19,9 @@ export default async function handler(req: Request) {
 
   const title = escapeHtml(preview.title);
   const description = escapeHtml(statusLine(preview));
-  const image = `${url.origin}/api/og/agent-image?agent-id=${agentId}&state=${preview.state}`;
+  // `v` versions the cached image URL (bumped when the renderer changes, e.g. the
+  // empty edge renders cached before the Node runtime move).
+  const image = `${url.origin}/api/og/agent-image?agent-id=${agentId}&state=${preview.state}&v=${IMAGE_VERSION}`;
   const pageUrl = `${url.origin}/a/${agentId}`;
   let tagged = withRestore.replace(/<title>[^<]*<\/title>/, `<title>${title} | Rose</title>`);
   for (const [attribute, key, value] of [
