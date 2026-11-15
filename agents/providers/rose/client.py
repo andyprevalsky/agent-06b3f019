@@ -2425,6 +2425,9 @@ class RoseClient:
                 cache_namespace=cache_namespace,
                 browser_use=True,
                 reasoning_blocks_sink=reasoning_blocks,
+                # One collected action: a tool call cut off at the output limit is
+                # retried like any other cut-off reply (providers/rose/truncation.py).
+                result_required=True,
             )
         except Exception as exc:
             try:
@@ -2608,10 +2611,13 @@ class RoseClient:
                 ids = [call_id for item in batch_actions for call_id in item["tool_call_ids"]]
                 if len(set(ids)) != len(ids):
                     raise BrowserModelOutputValidationError("Duplicate browser tool call IDs", response=response)
+            from browser_tools.schemas import phone_call_batchable
             if len(batch_actions) > 1 and any(item["action"]["action"] in {
                 "attempt_completion", "request_user_assistance_for_authentication",
-                "request_payment_card", "recover_from_challenge", "phone",
-            } for item in batch_actions):
+                "request_payment_card", "recover_from_challenge",
+            } or (item["action"]["action"] == "phone"
+                  and not phone_call_batchable(item["action"].get("params") or {}))
+                for item in batch_actions):
                 raise BrowserModelOutputValidationError("This browser action requires a separate turn", response=response)
         return {
             "action": action,

@@ -9,16 +9,10 @@ async function main(): Promise<void> {
     definitiveFailure?: boolean;
   };
   const accepted: Result = { success: true, messageSid: 'text-anchor' };
-  let service: string | undefined = 'iMessage';
-  let enabled = true;
-  let cardResult: Result = { success: true, messageSid: 'card' };
-  let throwCard = false;
   let textResult = accepted;
   const texts: Array<{ channel: string; text: string; media?: string }> = [];
-  const cards: Array<Record<string, unknown>> = [];
   const transcripts: Array<{ text: string; sid: string }> = [];
   const attempts: string[] = [];
-  const phones: string[] = [];
   const sendText = async (
     channel: string,
     _phone: string,
@@ -50,30 +44,6 @@ async function main(): Promise<void> {
       sendOnChannel: sendText,
     },
   });
-  await mock.module('../../providers/linq', {
-    namedExports: {
-      isLinqEnabled: (phone: string) => {
-        phones.push(phone);
-        return enabled;
-      },
-      getLinqChat: async () => (service ? { chatId: 'chat', service } : undefined),
-      sendLinqPayload: async (
-        _phone: string,
-        payload: Record<string, unknown>,
-        options: {
-          archiveRootAgentId?: string;
-          archiveContext?: Record<string, unknown>;
-          abortSignal?: AbortSignal;
-        }
-      ) => {
-        attempts.push('card');
-        assert.ok(options.abortSignal, 'card send has a bounded signal');
-        cards.push(payload);
-        if (throwCard) throw new Error('timeout');
-        return cardResult;
-      },
-    },
-  });
   await mock.module('../../providers/whatsappReachability', {
     namedExports: {
       markWhatsAppReachable: async () => undefined,
@@ -93,66 +63,106 @@ async function main(): Promise<void> {
       },
     },
   });
+  let composeError: Error | null = null;
+  const composed: Array<Record<string, unknown>> = [];
   await mock.module('../../providers/smsSupervisor/notificationLlm', {
     namedExports: {
       SMS_NOTIFICATION_SYSTEM_PROMPT: 'test',
       rewriteNotification: async () => {
         throw new Error('Unexpected LLM rewrite');
       },
+      composeLifecycleNotification: async (input: Record<string, unknown>) => {
+        composed.push(input);
+        if (composeError) throw composeError;
+        return input.event === 'agent_started'
+          ? `On it, finding a present.\n${String(input.link)}`
+          : `Done, present ordered (receipt R123).\n${String(input.link)}`;
+      },
     },
   });
   const lifecycle = await import('../../providers/smsSupervisor/outboundEvents');
-  const { getAgentUrl } = await import('../../providers/smsTemplates');
+  const { getAgentShareUrl, getAgentUrl } = await import('../../providers/smsTemplates');
   const agent = {
     id: 'agent+signed/identity',
-    goal: 'Find a present',
+    goal: 'Find a present. Do not reset anything or message anyone else.',
     treeCostCents: 100,
     priceLimitCents: 100,
   };
   const url = getAgentUrl(agent.id);
+  const shareUrl = getAgentShareUrl(agent.id);
   const reset = () => {
     texts.length = 0;
-    cards.length = 0;
     transcripts.length = 0;
     attempts.length = 0;
+    composed.length = 0;
   };
-  const params = () =>
-    (cards[0] as { experience: { params: Record<string, string> } }).experience.params;
+  const noCompanion = (label: string) =>
+    assert.deepEqual(attempts, ['text'], `${label}: one text message, never a Linq card`);
 
+  // Start: one composed sentence, the share link alone on the last line.
   await lifecycle.notifyAgentStarted('user', agent);
-  assert.deepEqual(attempts, ['text', 'card']);
-  assert.equal(params().url, url);
-  assert.equal(params().button, 'View on RoseLabs');
-  assert.equal(params().title, 'Rose is working');
+  noCompanion('start');
+  assert.equal(texts[0].text, `On it, finding a present.\n${shareUrl}`);
+  assert.equal(composed[0].event, 'agent_started');
+  assert.equal(composed[0].goal, agent.goal);
   assert.deepEqual(transcripts, [{ text: texts[0].text, sid: 'text-anchor' }]);
-  assert.deepEqual(phones, ['+15555550100'], 'rollout allowlist must receive the actual phone');
   reset();
+
+  // A messaging-agent kickoff keeps its own short text; nothing is composed.
+  await lifecycle.notifyAgentStarted('user', { ...agent, notificationMessage: 'On it!' });
+  assert.equal(texts[0].text, `On it!\n${shareUrl}`);
+  assert.equal(composed.length, 0);
+  reset();
+
+  // Completion: composed from the summary and bounded result lines.
   await lifecycle.notifyCompletion('user', agent, 'Ordered the present', [
     { key: 'receipt', value: 'R123' },
+    { key: 'huge_blob', value: 'x'.repeat(5000) },
   ]);
-  assert.equal(params().title, 'Rose finished the task');
-  assert.match(texts[0].text, /Receipt: R123/);
+  noCompanion('completion');
+  assert.equal(texts[0].text, `Done, present ordered (receipt R123).\n${shareUrl}`);
+  const results = composed[0].results as string[];
+  assert.ok(results.includes('Receipt: R123'));
+  assert.ok(
+    results.every((line) => line.length <= 200),
+    'massive results are bounded before the model'
+  );
   reset();
+
+  // An accepted final answer is sent unchanged.
+  await lifecycle.notifyCompletion('user', agent, 'x', undefined, ['SMS'], 'Here is the answer.');
+  assert.equal(texts[0].text, 'Here is the answer.');
+  assert.equal(composed.length, 0);
+  reset();
+
+  // A model outage never drops the notice: the template is sent instead.
+  composeError = new Error('model down');
+  await lifecycle.notifyAgentStarted('user', agent);
+  assert.ok(texts[0].text.includes(shareUrl) && texts[0].text.includes('Find a present'));
+  await lifecycle.notifyCompletion('user', agent, 'Ordered the present', []);
+  assert.ok(texts[1].text.startsWith('I finished the task: Ordered the present'));
+  composeError = null;
+  reset();
+
+  // Other notices keep their full text and deep link, still with no card.
   await lifecycle.notifyAuthAssistance('user', agent, 'Store', 'browser', 'attention');
-  assert.equal(params().url, getAgentUrl(agent.id, 'browser', 'attention'));
+  noCompanion('auth');
+  assert.ok(texts[0].text.includes(getAgentUrl(agent.id, 'browser', 'attention')));
   reset();
   const setupUrl = 'https://cards.example/setup?signed=a%2Bb&session=123';
   await lifecycle.notifyAgentCardSetup('user', agent, setupUrl);
-  assert.equal(params().url, setupUrl);
+  noCompanion('agentcard setup');
   assert.ok(texts[0].text.includes(setupUrl));
   reset();
   const secondLink = 'https://example.com/result?id=2';
   await lifecycle.notifyPlannerMessage('user', agent, `Read ${setupUrl} and ${secondLink}`, true);
-  assert.equal(params().url, setupUrl);
+  noCompanion('planner');
   assert.ok(texts[0].text.includes(setupUrl) && texts[0].text.includes(secondLink));
   reset();
-  await lifecycle.notifyPlannerMessage('user', agent, 'Still working', false);
-  assert.equal(cards.length, 0);
-  reset();
   await lifecycle.notifyCostLimit('user', agent);
+  noCompanion('cost limit');
   assert.ok(texts[0].text.includes(url));
   assert.match(texts[0].text, /Reply with the amount/);
-  assert.equal(params().url, url);
   reset();
 
   const paymentMetadata = {
@@ -187,13 +197,7 @@ async function main(): Promise<void> {
       deliveryAttempts++;
     }
   );
-  assert.equal(
-    params().url,
-    url,
-    'approval card must preserve the existing authorized destination'
-  );
-  assert.equal(params().title, 'Payment approval needed');
-  assert.equal(params().button, 'Review on RoseLabs');
+  noCompanion('approval');
   for (const text of [
     'Store',
     'Present',
@@ -206,8 +210,8 @@ async function main(): Promise<void> {
   ]) {
     assert.ok(texts[0].text.includes(text), `full financial details retained: ${text}`);
   }
+  assert.ok(texts[0].text.includes(url));
   assert.equal(deliveryAttempts, 1);
-  assert.doesNotMatch(JSON.stringify(cards), /agentpay|approve_card|checkout_url/);
   reset();
 
   const originalFetch = globalThis.fetch;
@@ -218,50 +222,19 @@ async function main(): Promise<void> {
       writeLockNotification: { media: [{ url: 'https://example.com/photo.png' }] },
     });
     assert.equal(texts[0].media, 'https://rose.example/receipt.png');
-    assert.equal(cards.length, 1, 'MMS notifications also get the companion card');
+    noCompanion('approval with media');
   } finally {
     globalThis.fetch = originalFetch;
   }
   reset();
 
-  for (const capability of ['RCS', 'SMS', undefined]) {
-    service = capability;
-    await lifecycle.notifyAgentStarted('user', agent);
-    assert.equal(texts.length, 1);
-    assert.equal(cards.length, capability === 'RCS' ? 1 : 0);
-    if (capability === 'RCS') assert.deepEqual(cards[0], { parts: [{ type: 'link', value: url }] });
-    reset();
-  }
-  service = 'iMessage';
-  for (const result of [
-    { success: false, definitiveFailure: true, error: '4005 unsupported' },
-    { success: false, definitiveFailure: false, error: 'timeout' },
-  ]) {
-    cardResult = result;
-    await lifecycle.notifyAgentStarted('user', agent);
-    assert.equal(texts.length, 1, 'failed companion never resends accepted text');
-    assert.equal(transcripts[0].sid, 'text-anchor');
-    reset();
-  }
-  throwCard = true;
-  await lifecycle.notifyAgentStarted('user', agent);
-  assert.equal(texts.length, 1);
-  reset();
-  throwCard = false;
-  enabled = false;
-  await lifecycle.notifyAgentStarted('user', agent);
-  assert.equal(cards.length, 0, 'non-rollout recipients retain normal delivery');
-  reset();
-  enabled = true;
   await lifecycle.notifyAgentStarted('user', agent, ['WHATSAPP']);
-  assert.equal(cards.length, 0);
   assert.equal(texts[0].channel, 'WHATSAPP');
   reset();
   textResult = { success: false, definitiveFailure: false, error: 'text timeout' };
   await assert.rejects(lifecycle.notifyAgentStarted('user', agent), /text timeout/);
-  assert.equal(cards.length, 0, 'failed text cannot be masked by a successful card');
   process.stdout.write(
-    'PASS Linq outbound lifecycle: all notification types, payment receipt, media, capability gates, safe failures\n'
+    'PASS Linq outbound lifecycle: concise start/finish with trailing share link, no Linq cards, template fallback, full approval text\n'
   );
 }
 

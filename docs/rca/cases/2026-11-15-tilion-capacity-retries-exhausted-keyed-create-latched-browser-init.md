@@ -22,7 +22,9 @@ tags:
   - idempotency
 sources:
   - PR #2110 round-1 smoke, source 091ab4e0e4ef, task agent-payment-test-shop (FLAKY 21815f3c), root agent cf2f2f5d-6054-4f1f-bf17-37399f231f2f, browser task 5da61f13, 2026-11-15T02:42:43-02:43:24Z
+  - PR #2005 smoke, source 47eeada6ba51 (pre-fix), task agent-payment-test-shop FLAKY 1c280e1e, run 20261115-025606-917426, 2026-11-15T03:06:54-03:21:00Z
   - PR #2125 smoke, 4 recovered capacity_unavailable creates (2026-11-15 parallel deploy wave)
+  - PR #2154 (fix, merged e21c7633a9)
   - commit 5cc808dfa5 (agent-payment-test-shop quarantine marker, repair pending-handoff:21815f3c6d454cecacbf0c74d5e7ee28)
 repro: back-end/src/tests/blackbox/browser-session-tilion-dead-worker.fixture.ts
 status: fixed
@@ -43,6 +45,13 @@ showed this sequence for one `POST /api/browser-session/init`:
 | 02:43:19.358 | `Tilion request failed before a response … attempt=3 durationMs=15001 … timed out after 15000ms` |
 | 02:43:19.361 | `Failed to init browser session error=TilionTimeoutError`, then init returned 500 after 35428 ms |
 | 02:43:24.410 | first `Browser initialization failed before readiness` (134 in total, until the 900 s task timeout) |
+
+A second occurrence, PR #2005's smoke (FLAKY 1c280e1e, source 47eeada6ba51, which
+predates the fix), took the capacity-only path. `POST /v1/session` returned
+`503 capacity_unavailable` on all 3 attempts (03:06:54–03:07:14Z, X-Request-ID
+410dc09367824994). The untyped `TilionApiError` latched the receipt for task 6cfe8669,
+and `Browser initialization failed before readiness` followed 29 times until 03:21:00Z.
+The regression scenario `capacity-exhausted-then-healthy` replays that sequence.
 
 ## Diagnosis
 
@@ -135,6 +144,15 @@ domain through `runLogicalBrowserCases`, adds four scenarios:
 
 `tilion-client.test.ts` asserts the capacity typing, a same-key capacity retry, and an
 untyped outcome after an in-flight 409.
+
+Shipped in PR #2154 (merge e21c7633a9, 2026-11-15). Deploy gates 17/17 passed on
+dc11332ecb48. That smoke run included `agent-payment-test-shop`, which passed with no
+capacity rejection in its logs, so the live run did not exercise this path. The local
+fixture is the recovery proof. Production lanes passed: Render (verified by the live
+descendant 6e2977bc0), backend probes, and production semantics. CodeRabbit was at its
+organization spending cap, so the PR merged unreviewed after the adversarial RCA review.
+The `agent-payment-test-shop` marker from PR #2110 (5cc808dfa5) is released by its
+5-pass streak.
 
 Residuals, which are not part of this fix:
 

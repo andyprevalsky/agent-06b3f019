@@ -1022,6 +1022,76 @@ def check_explicit_composite_stability_budget() -> None:
        assert sat.main(argv)==0
       assert captured==[supplied]
 
+def check_stability_treasury_policy() -> None:
+    """Deploy #2106 (2026-11-15 03:35Z): new-test-stability ran the treasury-rails blackbox, its
+    native FAIL (AgentCard org 429) blocked the whole check, because the standing treasury rule
+    (deploy.md "Skippable tests"; deploy_failure_report.TREASURY_POLICY) was applied only to the
+    backend coverage gate. Same rule here: still runs, FAIL retained on its row, non-blocking; no
+    other unit, no UNVERIFIED and no sibling treasury-rails-* domain is weakened."""
+    import tempfile
+    from deploy_failure_report import TREASURY_POLICY, TREASURY_SKIP
+
+    class OwnedLoad:
+        tool = "fake-owned-load"; pids: list = []
+        def __init__(self, *args): pass
+        def __enter__(self): return self
+        def __exit__(self, *args): return False
+        def take(self): pass
+        def give(self): pass
+        def alive(self): return True
+
+    def unit(lane: str, name: str) -> "sat.Unit":
+        return sat.Unit(lane, name, [f"back-end/src/tests/blackbox/{name}.blackbox.ts"])
+
+    treasury, sibling = unit("backend-blackbox", "treasury-rails"), unit("backend-blackbox", "treasury-rails-cardholder")
+    other = unit("backend-blackbox", "purchases")
+
+    def run(units, exits, folder, runner_error=()):
+        calls: dict[str, int] = {}
+        def plan(u, changed, diff):
+            if u.name in runner_error:
+                return None
+            return sat.StabilityPlan(f"{u.lane}:{u.name}", ["fixture", u.name], ROOT, [sat.WHOLE_UNIT], "fixture")
+        def once(command, cwd, log, timeout, env, unset):
+            calls[command[1]] = calls.get(command[1], 0) + 1
+            Path(log).write_text(f"fixture run of {command[1]}\n")
+            return exits[command[1]], 0.01
+        with patch.object(sat, "CpuLoad", OwnedLoad), patch.object(sat, "plan_unit", plan), \
+                patch.object(sat, "isolate_plan", lambda p, u, i, server=None: p), patch.object(sat, "_run_once", once):
+            return sat.run_stability(units, load_workers=1, timeout=60, log_root=Path(folder)), calls
+
+    with tempfile.TemporaryDirectory() as d:
+        report, calls = run([treasury, other], {"treasury-rails": 1, "purchases": 0}, d + "/a")
+        row = report["units"]["backend-blackbox:treasury-rails"]
+        check(report["status"] == "TREASURY_SKIPPED" and report["treasury_skipped"] == ["backend-blackbox:treasury-rails"]
+              and row["status"] == "FAIL" and row["disposition"] == TREASURY_SKIP
+              and row["standing_policy"] == TREASURY_POLICY and row["attempts"][-1]["exit"] == 1
+              and calls == {"treasury-rails": 1, "purchases": 5}
+              and report["units"]["backend-blackbox:purchases"]["status"] == "PASS",
+              f"stability: a treasury-rails native FAIL ran, stays FAIL on its row and is non-blocking ({report['status']})")
+        printed = io.StringIO()
+        with patch.object(sat, "new_test_units", return_value=[treasury]), \
+                patch.object(sat, "run_stability", lambda *a, **k: report), contextlib.redirect_stdout(printed):
+            code = sat.main(["--stability", "--changed-file", treasury.roots[0]])
+        text = printed.getvalue()
+        check(code == 0 and "⚠️ Skipped — backend-blackbox:treasury-rails · native FAIL retained" in text
+              and "FAIL        backend-blackbox:treasury-rails" in text and text.startswith("new-test stability: TREASURY_SKIPPED"),
+              f"stability: the CLI exits 0, prints the native FAIL and the treasury warning, never a PASS ({text!r})")
+
+        report, _ = run([treasury, other], {"treasury-rails": 1, "purchases": 1}, d + "/b")
+        check(report["status"] == "FAIL" and "disposition" not in report["units"]["backend-blackbox:purchases"],
+              "stability: a treasury skip never hides another unit's FAIL")
+        report, _ = run([sibling], {"treasury-rails-cardholder": 1}, d + "/c")
+        check(report["status"] == "FAIL" and "treasury_skipped" not in report,
+              "stability: only the exact policy unit (blackbox:treasury-rails) is covered, not sibling domains")
+        report, _ = run([treasury], {"treasury-rails": 0}, d + "/d")
+        check(report["status"] == "PASS" and "treasury_skipped" not in report,
+              "stability: a passing treasury unit is an ordinary PASS")
+        report, _ = run([treasury], {"treasury-rails": 1}, d + "/e", runner_error=("treasury-rails",))
+        check(report["status"] == "UNVERIFIED" and "treasury_skipped" not in report,
+              "stability: a treasury unit that never ran is not a native FAIL and stays blocking")
+
+
 def main() -> int:
     check_coverage_map_dependency_preflight()
     selector = sat.Selector()
@@ -1091,6 +1161,7 @@ def main() -> int:
     check_stability_case_selection()
     check_stability_blackbox_cases()
     check_stability_backend_lanes()
+    check_stability_treasury_policy()
 
     print(f"select-affected-tests: {len(FAILURES)} failure(s)")
     return 1 if FAILURES else 0

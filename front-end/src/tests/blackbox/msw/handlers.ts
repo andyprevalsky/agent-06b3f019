@@ -21,6 +21,7 @@ function folderDto(params: Record<string, unknown>) {
 
 export const handlers = [
   http.get(`${API_BASE}/integrations/cli`, () => HttpResponse.json({ integrations: [] })),
+  http.get(`${API_BASE}/integrations/mcp`, () => HttpResponse.json({ servers: [] })),
   // Teams never shares by default; individual suites exercise real mutations.
   http.get(`${API_BASE}/teams`, () => HttpResponse.json({ teams: [], invitations: [] })),
   http.get(`${API_BASE}/teams/shareable-integrations`, () =>

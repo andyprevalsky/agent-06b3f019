@@ -610,7 +610,7 @@ def _build_claude_auth_context(
     if not claude_token:
         return None
 
-    if source not in ("user", "pool") or not user_id:
+    if source not in ("user", "team", "pool") or not user_id:
         return claude_auth_from_token(claude_token)
 
     async def _mark_rate_limited(
@@ -624,7 +624,7 @@ def _build_claude_auth_context(
             ctx.source,
             user_id=ctx.user_id,
             pool_token_id=ctx.pool_token_id,
-            integration_id=integration_id if ctx.source == "user" else None,
+            integration_id=integration_id if ctx.source in ("user", "team") else None,
             cooldown_seconds=cooldown_seconds,
             rate_limited_until=rate_limited_until,
             failure_reason=failure_reason,
@@ -694,7 +694,7 @@ def _build_gpt_auth_context(
     if not gpt_token:
         return None
 
-    if source not in ("user", "pool") or not user_id:
+    if source not in ("user", "team", "pool") or not user_id:
         return gpt_auth_from_token(gpt_token, account_id)
 
     async def _mark_rate_limited(
@@ -708,7 +708,7 @@ def _build_gpt_auth_context(
             ctx.source,
             user_id=ctx.user_id,
             pool_token_id=ctx.pool_token_id,
-            integration_id=integration_id if ctx.source == "user" else None,
+            integration_id=integration_id if ctx.source in ("user", "team") else None,
             cooldown_seconds=cooldown_seconds,
             rate_limited_until=rate_limited_until,
             failure_reason=failure_reason,
@@ -7697,6 +7697,8 @@ async def fetch_compute_token_activity(
                     user_id=user_id,
                     type=provider_type,
                     source=data.get("source", "user"),
+                    # A team lease names the teammate whose shared account served it.
+                    owner_user_id=data.get("ownerUserId"),
                 )
                 return {
                     "type": provider_type,
@@ -7890,10 +7892,11 @@ async def mark_compute_token_rate_limited_activity(
         body["rateLimitReason"] = rate_limit_reason
     if source == "pool" and pool_token_id:
         body["poolTokenId"] = pool_token_id
-    if source == "user":
+    if source in ("user", "team"):
         body["userId"] = user_id
         # Name the exact leased row: an auth_error must never expire the
-        # user's other subscriptions (S33).
+        # user's other subscriptions (S33). A team lease names the shared row,
+        # which the backend maps to its owner while the share is current.
         if integration_id:
             body["integrationId"] = integration_id
     if credential:

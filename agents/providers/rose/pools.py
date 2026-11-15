@@ -21,7 +21,8 @@ Flash chat and browser-use keep their Cerebras-first policy. Root/explore
 overrides in flash_agent.py enable compute subscriptions only for those roles.
 Funded OpenAI/Anthropic API keys remain disabled. Primary is Cerebras ``qwen-3.8-27b`` (direct, not OpenRouter). OpenRouter
 fallback is qwen/qwen3.8-27b then google/gemini-3.8-flash. Planner stays
-on rose-1-ultra (Opus 5.5 xhigh) regardless of the agent model.
+on rose-1-ultra regardless of the agent model; its "max" effort sentinel resolves
+to a 220s-deadline-fit tier (Opus high, GPT-6.1 Sol medium).
 
     rose-1-mini:
         claudeAuth = claude-haiku-4-5

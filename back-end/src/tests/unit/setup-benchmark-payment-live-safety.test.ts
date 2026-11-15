@@ -170,7 +170,7 @@ async function main(): Promise<void> {
         toolUsage: { aggregate: async () => ({_sum:{totalCostCents:0}}) },
         subscription: { findUnique: async () => scenario === 'default-new' ? null : ({stripeCustomerId:scenario === 'default-resume'?'cus_new_live':'cus_owned_live'}), upsert: async args => { record('subscription-write', {customer:args.update.stripeCustomerId,livemode:args.update.stripeLivemode}); return {}; } },
         integration: { findMany: async () => [], upsert: async () => { record('integration-write'); return {}; } },
-        $queryRaw: async () => [{locked:1}], $transaction: async fn => fn(client), $disconnect: async () => {},
+        $queryRaw: async () => [{locked:1}], $transaction: async fn => fn(client), $connect: async () => {}, $disconnect: async () => {},
       };
       const prisma = localRequire('@prisma/client');
       put('@prisma/client', {...prisma, PrismaClient: class { constructor(){return client;} }});

@@ -1,86 +1,17 @@
-import { createLogger } from '../logger';
-import {
-  getLinqChat,
-  isLinqEnabled,
-  sendLinqPayload,
-  type LinqSendOptions,
-  type LinqSendResult,
-} from '../linq';
-import { sendLinqNotificationCard, type LinqNotificationCard } from '../linqCards';
 import type { NotificationContent } from './notificationDelivery';
 
-const log = createLogger('NotificationCards');
-
-/** Write-lock / payment approval: the full approval text plus a review card for the agent. */
+/** Write-lock / payment approval: the full approval text; the user answers by replying. */
 export function approvalNotificationContent(
   message: string,
-  agentUrl: string,
-  question: string,
-  isPayment: boolean
+  agentUrl: string
 ): NotificationContent {
-  return {
-    message,
-    requiredLinks: [agentUrl],
-    card: {
-      url: agentUrl,
-      title: isPayment ? 'Payment approval needed' : 'Your approval is needed',
-      subtitle: question,
-      button: 'Review on RoseLabs',
-    },
-  };
+  return { message, requiredLinks: [agentUrl] };
 }
 
+/** Planner question/update: every link the planner wrote must survive delivery. */
 export function plannerNotificationContent(
   message: string,
-  sourceText: string,
-  isQuestion: boolean
+  sourceText: string
 ): NotificationContent {
-  const requiredLinks = sourceText.match(/https?:\/\/[^\s]+/g) ?? [];
-  return {
-    message,
-    requiredLinks,
-    ...(requiredLinks[0]
-      ? {
-          card: {
-            url: requiredLinks[0],
-            title: isQuestion ? 'Rose needs your input' : 'An update from Rose',
-            subtitle: sourceText,
-            button: 'Open link',
-          },
-        }
-      : {}),
-  };
-}
-
-/** An accepted text/receipt remains the transcript anchor, even if its card fails. */
-export async function deliverNotificationCard(
-  phone: string,
-  card: LinqNotificationCard,
-  acceptedText: LinqSendResult,
-  options?: LinqSendOptions
-): Promise<void> {
-  if (!isLinqEnabled(phone)) return;
-  try {
-    const chat = await getLinqChat(phone);
-    const result = await sendLinqNotificationCard({
-      card,
-      service: chat?.service,
-      sendPayload: (payload) =>
-        sendLinqPayload(phone, payload, {
-          ...options,
-          abortSignal: AbortSignal.timeout(10_000),
-        }),
-      fallback: async () => acceptedText,
-    });
-    if (!result.success) {
-      log.warn('Linq notification card failed after text delivery', {
-        agentId: options?.archiveRootAgentId,
-        definitiveFailure: result.definitiveFailure,
-      });
-    }
-  } catch {
-    log.warn('Linq notification card unavailable after text delivery', {
-      agentId: options?.archiveRootAgentId,
-    });
-  }
+  return { message, requiredLinks: sourceText.match(/https?:\/\/[^\s]+/g) ?? [] };
 }

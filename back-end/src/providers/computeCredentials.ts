@@ -8,6 +8,8 @@ import {
 import { createLogger } from './logger';
 import { recordSubscriptionUsage, type SubscriptionUsageReport } from './computeSubscriptionUsage';
 import { rememberSubscriptionCredential } from './rose/subscriptionUsage';
+import { teamComputeIntegrations as teamIntegrations } from './computeTeamShares';
+export { teamComputeOwner } from './computeTeamShares';
 export { classifyReportedLogin, markComputeTokenUnavailable } from './computeLoginFailure';
 import { resolveUserLoginByCredential } from './computeLoginFailure';
 export {
@@ -21,12 +23,24 @@ const log = createLogger('ComputeCredentials');
 
 export type ComputeCodeCredentialType = 'claude' | 'gpt';
 
+/**
+ * Where a served compute token comes from, in lease order:
+ *   user  the caller's own subscription
+ *   team  a teammate's subscription shared with one of the caller's teams
+ *         (docs/plans/active/share-all-integrations.md); `userId` is its owner
+ *   pool  a pooled subscription
+ */
+export type ComputeTokenSource = 'user' | 'team' | 'pool';
+
 export interface ComputeCodeCredentialResult {
   type: ComputeCodeCredentialType;
   accessToken: string;
   accountId?: string;
-  source: 'user' | 'pool';
+  source: ComputeTokenSource;
+  /** The token's owner: the caller for `user`, the sharing teammate for `team`. */
   userId: string;
+  /** Set for `team`: the team the owner shared this compute account with. */
+  teamId?: string;
   poolTokenId?: string;
   /** The exact Integration row served; failure reports name it (S33). */
   integrationId?: string;
@@ -46,6 +60,13 @@ type ComputeLeaseOptions = {
   rootAgentId?: string;
   fastCacheAffinityKey?: string;
   tokenType?: ComputeCodeCredentialType;
+  /**
+   * Lease a teammate's shared subscription after the caller's own (default
+   * true). Only server-side Rose completions may hold one: no sandbox or Mac
+   * credential path reads this module, and the HTTP route passes false for any
+   * caller that is not the internal agents service.
+   */
+  includeTeam?: boolean;
 };
 type RequiredLineageLease = Required<
   Pick<ComputeLeaseOptions, 'lineageKey' | 'agentId' | 'rootAgentId'>
@@ -59,10 +80,13 @@ function capacityForType(type: ComputeCodeCredentialType): number {
   return type === 'gpt' ? GPT_LINEAGE_CAPACITY : CLAUDE_LINEAGE_CAPACITY;
 }
 
+/** Lease capacity key: the pool row, the shared row (team leases are keyed by integration), or the user. */
 function tokenIdentity(
-  token: Pick<ComputeCodeCredentialResult, 'source' | 'userId' | 'poolTokenId'>
+  token: Pick<ComputeCodeCredentialResult, 'source' | 'userId' | 'poolTokenId' | 'integrationId'>
 ): string {
-  return token.source === 'pool' ? (token.poolTokenId ?? '') : token.userId;
+  if (token.source === 'pool') return token.poolTokenId ?? '';
+  if (token.source === 'team') return token.integrationId ?? '';
+  return token.userId;
 }
 
 function liveLeaseCutoff(now: Date): Date {
@@ -116,10 +140,11 @@ function typeForIntegration(name: string): ComputeCodeCredentialType | null {
 }
 
 async function rowToCredential(
-  integration: IntegrationRow,
+  integration: IntegrationRow & { teamId?: string },
   decryptionKey: string,
-  source: 'user' | 'pool'
+  source: ComputeTokenSource
 ): Promise<ComputeCodeCredentialResult | null> {
+  const team = source === 'team' ? { teamId: integration.teamId } : {};
   const type = typeForIntegration(integration.name);
   if (!type) return null;
   const decrypted = decryptIntegrationCredentials(integration, decryptionKey);
@@ -154,6 +179,7 @@ async function rowToCredential(
       userId: integration.userId,
       poolTokenId: source === 'pool' ? integration.id : undefined,
       integrationId: integration.id,
+      ...team,
     };
   }
 
@@ -167,13 +193,14 @@ async function rowToCredential(
     userId: integration.userId,
     poolTokenId: source === 'pool' ? integration.id : undefined,
     integrationId: integration.id,
+    ...team,
   };
 }
 
 async function selectFirstUsable(
   integrations: IntegrationRow[],
   decryptionKey: string,
-  source: 'user' | 'pool',
+  source: ComputeTokenSource,
   now: Date
 ) {
   for (const integration of integrations) {
@@ -191,11 +218,41 @@ async function selectFirstUsable(
   return null;
 }
 
+async function leasedIntegration(
+  lease: { tokenType: string; tokenSource: string; tokenIdentity: string },
+  userId: string,
+  now: Date
+): Promise<(IntegrationRow & { teamId?: string }) | null> {
+  const name = lease.tokenType === 'claude' ? 'claude_code' : 'gpt_code';
+  if (lease.tokenSource === 'team') {
+    // Revalidated on every reuse: unshare, disconnect or leaving the team ends it at once.
+    const [row] = await teamIntegrations(
+      userId,
+      lease.tokenType as ComputeCodeCredentialType,
+      now,
+      lease.tokenIdentity
+    );
+    return row ?? null;
+  }
+  return prisma.integration.findFirst({
+    where: {
+      name,
+      status: 'CONNECTED',
+      OR: [{ rateLimitedUntil: null }, { rateLimitedUntil: { lt: now } }],
+      ...(lease.tokenSource === 'pool'
+        ? { id: lease.tokenIdentity, poolingEnabled: true }
+        : { userId: lease.tokenIdentity }),
+    },
+  });
+}
+
 async function fetchCredentialForLease(
   lineageKey: string,
+  userId: string,
   decryptionKey: string,
   now: Date,
-  requiredTokenType: ComputeCodeCredentialType | null = null
+  requiredTokenType: ComputeCodeCredentialType | null = null,
+  includeTeam = true
 ): Promise<ComputeCodeCredentialResult | null> {
   const lease = await prisma.computeTokenLineageLease.findUnique({ where: { lineageKey } });
   if (!lease || lease.releasedAt || lease.lastUsedAt <= liveLeaseCutoff(now)) return null;
@@ -207,19 +264,15 @@ async function fetchCredentialForLease(
     });
     return null;
   }
-  if (lease.tokenSource !== 'user' && lease.tokenSource !== 'pool') return null;
+  if (
+    lease.tokenSource !== 'user' &&
+    lease.tokenSource !== 'pool' &&
+    (lease.tokenSource !== 'team' || !includeTeam)
+  )
+    return null;
+  const tokenSource: ComputeTokenSource = lease.tokenSource;
 
-  const name = lease.tokenType === 'claude' ? 'claude_code' : 'gpt_code';
-  const integration = await prisma.integration.findFirst({
-    where: {
-      name,
-      status: 'CONNECTED',
-      OR: [{ rateLimitedUntil: null }, { rateLimitedUntil: { lt: now } }],
-      ...(lease.tokenSource === 'pool'
-        ? { id: lease.tokenIdentity, poolingEnabled: true }
-        : { userId: lease.tokenIdentity }),
-    },
-  });
+  const integration = await leasedIntegration(lease, userId, now);
   if (!integration) {
     await prisma.computeTokenLineageLease.update({
       where: { lineageKey },
@@ -228,7 +281,7 @@ async function fetchCredentialForLease(
     return null;
   }
 
-  const result = await rowToCredential(integration, decryptionKey, lease.tokenSource);
+  const result = await rowToCredential(integration, decryptionKey, tokenSource);
   if (!result) {
     await prisma.computeTokenLineageLease.update({
       where: { lineageKey },
@@ -334,9 +387,9 @@ async function tryAcquireLineageLease(
 }
 
 async function selectFirstUsableWithLineage(
-  integrations: IntegrationRow[],
+  integrations: Array<IntegrationRow & { teamId?: string }>,
   decryptionKey: string,
-  source: 'user' | 'pool',
+  source: ComputeTokenSource,
   now: Date,
   lineage: RequiredLineageLease
 ): Promise<ComputeCodeCredentialResult | null> {
@@ -418,6 +471,18 @@ export async function fetchComputeUserToken(
   return selectFirstUsable(integrations, decryptionKey, 'user', now);
 }
 
+/** A teammate's shared subscription (no lineage); server-side Rose completions only. */
+export async function fetchComputeTeamToken(
+  userId: string,
+  tokenType: ComputeCodeCredentialType | null = null
+): Promise<ComputeCodeCredentialResult | null> {
+  const decryptionKey = process.env.CLAUDE_CREDENTIAL_DECRYPTION_KEY;
+  if (!decryptionKey) return null;
+  const now = new Date();
+  const integrations = await teamIntegrations(userId, tokenType, now);
+  return selectFirstUsable(integrations, decryptionKey, 'team', now);
+}
+
 export async function fetchComputePoolToken(
   excludeIds?: string[],
   tokenType: ComputeCodeCredentialType | null = null
@@ -445,9 +510,11 @@ type ComputeTokenForUserOptions = {
 } & ComputeLeaseOptions;
 
 /**
- * Lease a compute token for a user. The served row is remembered (by token
- * fingerprint) so this process's own Rose completions on it record the
- * account's usage onto that row (rose/subscriptionUsage.ts).
+ * Lease a compute token for a user: own → team-shared → pool (the Rose
+ * waterfall's funded keys follow when this returns null). The served row is
+ * remembered (by token fingerprint) so this process's own Rose completions on
+ * it record the account's usage onto that row (rose/subscriptionUsage.ts).
+ * Server-side Rose LLM calls only: never hand a result to a sandbox or Mac.
  */
 export async function fetchComputeTokenForUser(
   userId: string,
@@ -465,6 +532,8 @@ async function leaseComputeTokenForUser(
   const fastCacheAffinityKey = normalizeDemoCacheAffinityKey(options?.fastCacheAffinityKey);
   const requestedTokenType = options?.tokenType ?? null;
   const pinnedTokenType = requestedTokenType ?? (await readDemoCacheAffinity(fastCacheAffinityKey));
+  const includeTeam = options?.includeTeam !== false;
+  const ownFirst = options?.forcePool !== true;
   const lineage =
     options?.lineageKey && options.lineageKey.trim() !== ''
       ? {
@@ -479,13 +548,31 @@ async function leaseComputeTokenForUser(
     const now = new Date();
     const existing = await fetchCredentialForLease(
       lineage.lineageKey,
+      userId,
       decryptionKey,
       now,
-      pinnedTokenType
+      pinnedTokenType,
+      includeTeam
     );
     if (existing) return existing;
 
-    if (options?.forcePool !== true) {
+    // A served token pins the demo-cache affinity; a conflicting pin re-leases on it.
+    const settle = async (token: ComputeCodeCredentialResult) => {
+      if (requestedTokenType !== null) return token;
+      const affinityType = await persistOrReadDemoCacheAffinity(
+        fastCacheAffinityKey,
+        userId,
+        token.type
+      );
+      if (affinityType === token.type) return token;
+      await releaseComputeTokenLineage(lineage.lineageKey);
+      return fetchComputeTokenForUser(userId, {
+        ...options,
+        fastCacheAffinityKey: fastCacheAffinityKey ?? undefined,
+      });
+    };
+
+    if (ownFirst) {
       const userIntegrations = await prisma.integration.findMany({
         where: {
           userId,
@@ -502,19 +589,23 @@ async function leaseComputeTokenForUser(
         now,
         lineage
       );
-      if (userToken) {
-        if (requestedTokenType !== null) return userToken;
-        const affinityType = await persistOrReadDemoCacheAffinity(
-          fastCacheAffinityKey,
-          userId,
-          userToken.type
+      if (userToken) return settle(userToken);
+      if (includeTeam) {
+        const teamToken = await selectFirstUsableWithLineage(
+          await teamIntegrations(userId, pinnedTokenType, now),
+          decryptionKey,
+          'team',
+          now,
+          lineage
         );
-        if (affinityType === userToken.type) return userToken;
-        await releaseComputeTokenLineage(lineage.lineageKey);
-        return fetchComputeTokenForUser(userId, {
-          ...options,
-          fastCacheAffinityKey: fastCacheAffinityKey ?? undefined,
-        });
+        if (teamToken) {
+          // The holder: usage reports on the owner's row count only while it is still shared.
+          await prisma.computeTokenLineageLease.update({
+            where: { lineageKey: lineage.lineageKey },
+            data: { userId },
+          });
+          return settle(teamToken);
+        }
       }
     }
 
@@ -537,24 +628,14 @@ async function leaseComputeTokenForUser(
       now,
       lineage
     );
-    if (!poolToken) return null;
-    if (requestedTokenType !== null) return poolToken;
-    const affinityType = await persistOrReadDemoCacheAffinity(
-      fastCacheAffinityKey,
-      userId,
-      poolToken.type
-    );
-    if (affinityType === poolToken.type) return poolToken;
-    await releaseComputeTokenLineage(lineage.lineageKey);
-    return fetchComputeTokenForUser(userId, {
-      ...options,
-      fastCacheAffinityKey: fastCacheAffinityKey ?? undefined,
-    });
+    return poolToken ? settle(poolToken) : null;
   }
 
-  if (options?.forcePool !== true) {
+  if (ownFirst) {
     const userToken = await fetchComputeUserToken(userId, pinnedTokenType);
     if (userToken) return userToken;
+    const teamToken = includeTeam ? await fetchComputeTeamToken(userId, pinnedTokenType) : null;
+    if (teamToken) return teamToken;
   }
   const poolToken = await fetchComputePoolToken(options?.excludePoolTokenIds, pinnedTokenType);
   return poolToken;
@@ -594,96 +675,10 @@ export async function releaseComputeTokenLineage(lineageKey: string) {
   return { ok: result.count > 0, updated: result.count };
 }
 
-// ── Shared Anthropic API-key cooldown ──────────────────────────────────────
-//
-// The funded ANTHROPIC_API_KEY (a global default for any user) is a single
-// credential. When it reports out-of-credits (402) or bad-key (401/403) there
-// is no point any agent on any Temporal workflow retrying it until it recovers.
-// We persist a cooldown in the DB — reusing the same `Integration.rateLimitedUntil`
-// column the OAuth pool tokens use — so every backend instance AND every Fly
-// worker shares one backoff instead of each independently hammering the key.
-//
-// A tiny in-memory write-through cache keeps the LLM hot path off the DB: the
-// row is re-read at most once per recheck interval, cooled or clear, so a
-// cooldown cleared in the DB is honored by every instance within that interval.
-const ANTHROPIC_API_KEY_COOLDOWN_MS = 30 * 60 * 1000; // 30 min (out-of-credits)
-const ANTHROPIC_API_KEY_COOLDOWN_DB_RECHECK_MS = 15 * 1000;
-// Sentinel singleton row. userId has no FK; name is outside the served
-// ['claude_code','gpt_code'] set, so this row is never handed out as a token.
-const ANTHROPIC_API_KEY_COOLDOWN_USER_ID = '00000000-0000-0000-0000-000000000000';
-const ANTHROPIC_API_KEY_COOLDOWN_NAME = 'anthropic_api_key_cooldown';
-const ANTHROPIC_API_KEY_COOLDOWN_KEY = {
-  userId: ANTHROPIC_API_KEY_COOLDOWN_USER_ID,
-  name: ANTHROPIC_API_KEY_COOLDOWN_NAME,
-  accountId: '',
-};
-
-let cachedCooldownUntilMs = 0;
-let lastCooldownDbCheckMs = 0;
-let cooldownCacheRevision = 0;
-
-/** True when the shared Anthropic API key is currently backed off. */
-export async function isAnthropicApiKeyOnCooldown(): Promise<boolean> {
-  const now = Date.now();
-  if (now - lastCooldownDbCheckMs < ANTHROPIC_API_KEY_COOLDOWN_DB_RECHECK_MS) {
-    return now < cachedCooldownUntilMs;
-  }
-  lastCooldownDbCheckMs = now;
-  const cacheRevision = cooldownCacheRevision;
-  const row = await prisma.integration.findUnique({
-    where: { userId_name_accountId: ANTHROPIC_API_KEY_COOLDOWN_KEY },
-    select: { rateLimitedUntil: true },
-  });
-  if (cacheRevision !== cooldownCacheRevision) {
-    return Date.now() < cachedCooldownUntilMs;
-  }
-  cachedCooldownUntilMs = row?.rateLimitedUntil ? row.rateLimitedUntil.getTime() : 0;
-  return Date.now() < cachedCooldownUntilMs;
-}
-
-/** When the shared Anthropic API key's backoff ends; null when it is not backed off. */
-export async function anthropicApiKeyCooldownUntil(now = new Date()): Promise<Date | null> {
-  const row = await prisma.integration.findUnique({
-    where: { userId_name_accountId: ANTHROPIC_API_KEY_COOLDOWN_KEY },
-    select: { rateLimitedUntil: true },
-  });
-  const until = row?.rateLimitedUntil ?? null;
-  return until !== null && until > now ? until : null;
-}
-
-/** Back the shared Anthropic API key off for the cooldown window (DB + cache). */
-export async function markAnthropicApiKeyOnCooldown(reason: string): Promise<void> {
-  const until = new Date(Date.now() + ANTHROPIC_API_KEY_COOLDOWN_MS);
-  cooldownCacheRevision++;
-  cachedCooldownUntilMs = until.getTime();
-  // A read issued before the upsert below commits would drop this mark.
-  lastCooldownDbCheckMs = Date.now();
-  await prisma.integration.upsert({
-    where: { userId_name_accountId: ANTHROPIC_API_KEY_COOLDOWN_KEY },
-    create: {
-      userId: ANTHROPIC_API_KEY_COOLDOWN_USER_ID,
-      name: ANTHROPIC_API_KEY_COOLDOWN_NAME,
-      type: 'TOOL_SETUP',
-      status: 'NOT_CONNECTED',
-      rateLimitedUntil: until,
-      failureReason: reason,
-    },
-    update: { rateLimitedUntil: until, failureReason: reason },
-  });
-  log.warn('Anthropic API key backed off', { reason, until: until.toISOString() });
-}
-
-/** Test-only: clear both the in-memory cache and the DB cooldown row. */
-export async function __resetAnthropicApiKeyCooldown(): Promise<void> {
-  cooldownCacheRevision++;
-  cachedCooldownUntilMs = 0;
-  lastCooldownDbCheckMs = 0;
-  await prisma.integration.deleteMany({
-    where: {
-      userId: ANTHROPIC_API_KEY_COOLDOWN_USER_ID,
-      name: ANTHROPIC_API_KEY_COOLDOWN_NAME,
-    },
-  });
-}
-
+export {
+  __resetAnthropicApiKeyCooldown,
+  anthropicApiKeyCooldownUntil,
+  isAnthropicApiKeyOnCooldown,
+  markAnthropicApiKeyOnCooldown,
+} from './anthropicApiKeyCooldown';
 export { getCerebrasApiKeyCooldown, markCerebrasApiKeyOnCooldown } from './cerebrasApiKeyCooldown';

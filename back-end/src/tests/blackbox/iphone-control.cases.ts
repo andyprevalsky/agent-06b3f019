@@ -11,6 +11,7 @@ import { privacyCases } from './iphone-control.privacy.cases';
 import { viewCases } from './iphone-control.view.cases';
 import { cleanupCases } from './iphone-control.cleanup.cases';
 import { deviceCases } from './iphone-control.device.cases';
+import { setupVerifierReplayCases } from './iphone-control.setup-verifier-replay.cases';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { prisma } from '../../providers/database';
@@ -86,6 +87,7 @@ export const cases: Case[] = [
   ...cleanupCases,
   ...viewCases,
   ...deviceCases,
+  ...setupVerifierReplayCases,
   [
     'invalid lease requests and queued input cannot trigger cleanup for a pending phone',
     async (h) => {

@@ -7,16 +7,17 @@ import os
 from pathlib import Path
 import re
 import signal
+import sys
 import tempfile
 import subprocess
 import time
-import sys
 import unittest
 from unittest import mock
 
 ROOT=Path(__file__).resolve().parents[2]
-sys.path.insert(0,str(ROOT/'scripts/lib'))
-from test_quarantine import quarantine
+sys.path.insert(0, str(ROOT / 'scripts' / 'lib'))
+import test_quarantine as tq
+
 MODULE=ROOT/'scripts/cloudbench-cohort-reconcile.py'
 loader=importlib.machinery.SourceFileLoader('ticket_fixture',str(ROOT/'scripts/tests/cloudbench-cleanup-admission-tickets.test.py'))
 spec=importlib.util.spec_from_loader(loader.name,loader)
@@ -271,9 +272,9 @@ class CohortReconciliation(unittest.TestCase):
         lease.write_text(json.dumps(winner));done.write_text(json.dumps(baseline))
         f.assert_records_preserved()
 
-    @quarantine(since='2026-11-15', repair='pending-handoff:06c40ea34d6c4379bf3ddce6b0e80b70',
-                error='AssertionError: 1 != 0 : ❌ timed out waiting for a new healthy parent inventory generation',
-                evidence='https://github.com/Rose-Ai-Labs/rose/actions/runs/43657340705')
+    @tq.quarantine(since='2026-11-15', repair='pending-handoff:b7248ac5873d434aa5320ab2bea17f4c',
+                   error='FAIL: test_campaign_noop_and_mutation_share_the_completed_barrier (__main__.CohortReconciliation.test_campaign_noop_and_mutation_share_the_completed_barrier) (mutated=True)',
+                   evidence='.context/deploy-pipeline-pr2104/rca/b7248ac5873d434aa5320ab2bea17f4c.json')
     def test_campaign_noop_and_mutation_share_the_completed_barrier(self):
         for mutated in (False,True):
             with self.subTest(mutated=mutated):

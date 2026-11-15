@@ -3,9 +3,10 @@
  *
  *   [MOUNTED] → flat sections in the existing order:
  *     Browser Cookies · Passwords · Messages · Compute · Banks & Financial Accounts
- *     · Socials · File System · GitHub Repos (signed in; GithubReposSection: connect
- *     with an optional folder, disconnect) · Meeting note taker (Granola, Fireflies)
- *     · Other (Pebble Index 01, whose Connect opens its setup modal) · CLIs
+ *     · Socials · File System · GitHub Repos · CLIs · MCP servers (signed in; the
+ *     GitHub Repos card; CLIs and MCP servers are ordinary rows with account chips:
+ *     DesktopToolSections)
+ *     · Meeting note taker (Granola, Fireflies) · Other (Pebble Index 01, whose Connect opens its setup modal)
  *   Every integration row is a DesktopIntegrationRow: the stock app-icon tile, the
  *   row's ONE account chip (Gmail addresses, Plaid institutions and compute
  *   subscriptions keep listing several, as the stock page does) and a gradient
@@ -18,8 +19,12 @@
  *     /integrations/:name --> full list refetch (the delta poll cannot see
  *     deletes) | error → alert
  *   Gmail / Plaid / compute chips keep their existing disconnect / reconnect flows.
- *   Gmail addresses and iMessage carry their team-sharing caption beside the chip
- *     (useAccountShares → AccountTeamShare); see TeamSharing for its states.
+ *   Every shareable account carries its team-sharing caption (useAccountShares →
+ *     AccountTeamShare; see TeamSharing for its states): beside the chip for iMessage,
+ *     Gmail addresses, WhatsApp, Plaid institutions, LinkedIn, Granola and Fireflies,
+ *     beside the label on each Claude / ChatGPT account line, and on each GitHub repo
+ *     and CLI in their shared cards. Browser Cookies, Passwords, File System, iPhone and
+ *     Pebble Index 01 never show one.
  *
  * System context:
  *   Integrations (flag) → DesktopIntegrations
@@ -49,7 +54,7 @@ import DesktopIntegrationRow, {
   type DesktopIntegrationView,
 } from './DesktopIntegrationRow';
 import RemoveAccountDialog from './RemoveAccountDialog';
-import CliIntegrationsSection from './CliIntegrationsSection';
+import DesktopToolSections from './DesktopToolSections';
 
 /** Refetch cadence while any account reports a running sync. */
 export const DESKTOP_SYNC_REFRESH_MS = 5_000;
@@ -110,11 +115,14 @@ export default function DesktopIntegrations(props: DesktopIntegrationsProps) {
         {sections.map(({ catalogKey, title, description, rows }) => (
           <Fragment key={title}>
             {catalogKey === 'meetingNotes' && props.isFullySignedIn && (
-              <SearchGroup catalogKey="githubRepos" search={props.search}>
-                <div className="my-3">
-                  <GithubReposSection github={props.github} />
-                </div>
-              </SearchGroup>
+              <>
+                <SearchGroup catalogKey="githubRepos" search={props.search}>
+                  <div className="my-3">
+                    <GithubReposSection github={props.github} />
+                  </div>
+                </SearchGroup>
+                <DesktopToolSections search={props.search} />
+              </>
             )}
             <Section
               title={title}
@@ -145,7 +153,6 @@ export default function DesktopIntegrations(props: DesktopIntegrationsProps) {
             </Section>
           </Fragment>
         ))}
-        {props.isFullySignedIn && <CliIntegrationsSection desktop />}
       </div>
       <RemoveAccountDialog
         pending={removal.pending}
