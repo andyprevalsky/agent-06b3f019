@@ -6,7 +6,9 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import signal
+import sys
 import tempfile
 import subprocess
 import time
@@ -14,6 +16,8 @@ import unittest
 from unittest import mock
 
 ROOT=Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / 'scripts' / 'lib'))
+from condition_wait import wait_until
 MODULE=ROOT/'scripts/cloudbench-cohort-reconcile.py'
 loader=importlib.machinery.SourceFileLoader('ticket_fixture',str(ROOT/'scripts/tests/cloudbench-cleanup-admission-tickets.test.py'))
 spec=importlib.util.spec_from_loader(loader.name,loader)
@@ -96,6 +100,11 @@ inventory_refresh_wait_tick(){
 }
 read -r ready
 FLEET_OWNER_PID_START="$(cat "$CASE/birth-$$")"
+if [ -n "${EXIT_HOLD_MB:-}" ];then
+ # Its pages are freed during exit after the lock fd's flock is released.
+ exec {exit_hold}<>"/dev/shm/cohort-exit-hold-$$" && rm -f "/dev/shm/cohort-exit-hold-$$" || exit 1
+ head -c "${EXIT_HOLD_MB}M" /dev/zero >&"$exit_hold" || exit 1
+fi
 __STARTUP_CALLSITE__
 status=0
 printf 'status=%s mutated=%s\n' "$status" "${FLEET_STALE_RECONCILIATION_MAY_HAVE_MUTATED:-unset}"
@@ -140,6 +149,21 @@ exit "$status"
             if len(list(self.root.glob('entered-*')))>=count:return
             time.sleep(.01)
         self.case.fail('actual full scanner did not reach fixture metadata boundary')
+
+    def kill_group_children(self,leader):
+        def stat(pid):
+            try:return Path('/proc',pid,'stat').read_text().rsplit(') ',1)[1].split()
+            except FileNotFoundError:return None
+        members=[pid for pid in os.listdir('/proc') if pid.isdigit() and int(pid)!=leader and (stat(pid) or ['','','0'])[2]==str(leader)]
+        for pid in members:
+            try:os.kill(int(pid),signal.SIGKILL)
+            except ProcessLookupError:pass
+        wait_until(lambda:all((stat(pid) or ['Z'])[0]=='Z' for pid in members),timeout=4,description='winner children exited')
+
+    def wait_lock_waiter(self):
+        # /proc/locks lists a blocked flock() waiter as '<n>: -> FLOCK ... <maj>:<min>:<inode> ...'.
+        inode=':'+str((self.ticket.cohort/'stale-reconcile.lock').stat().st_ino)+' '
+        wait_until(lambda:any('->' in line and inode in line for line in Path('/proc/locks').read_text().splitlines()),timeout=4,description='successor blocked on the reconciliation lock')
 
     def release(self):
         (self.root/'release-scan').touch()
@@ -355,6 +379,34 @@ class CohortReconciliation(unittest.TestCase):
         first.wait(timeout=3)
         third=f.spawn(2);code,out,err=f.join(third);self.assertEqual(code,0,out+err)
         self.assertEqual(len(f.metadata()),13)
+        f.assert_records_preserved()
+
+    def test_dead_winner_observed_mid_exit_is_recovered_by_successor(self):
+        # do_exit() drops the killed winner's flock while it closes files, before
+        # exit_notify() makes it a zombie. Freeing a large unlinked tmpfs file after
+        # the lock's release holds that window open: the successor sees state 'R'.
+        self.assertGreater(shutil.disk_usage('/dev/shm').free,1<<30,'exit-hold fixture needs 1 GiB free on /dev/shm tmpfs')
+        f=ReconciliationFixture(self,barrier=True)
+        first=f.spawn(0,extra={'EXIT_HOLD_MB':'512'});f.wait_entered()
+        second=f.spawn(1);f.wait_lock_waiter()
+        # The winner itself is the last lock holder: stop it, retire its scan
+        # children (they also inherit the lock fd), then kill it.
+        os.kill(first.pid,signal.SIGSTOP)
+        f.kill_group_children(first.pid)
+        os.kill(first.pid,signal.SIGKILL)
+        f.wait_entered(2)
+        self.assertEqual(len(f.metadata()),2)
+        f.release()
+        code,out,err=f.join(second);self.assertEqual(code,0,out+err)
+        first.wait(timeout=3)
+        self.assertTrue((f.ticket.cohort/'stale-reconcile.completed.json').exists())
+        # Negative control: a live winner that left the lock without a terminal stays refused.
+        lease=f.ticket.cohort/'stale-reconcile.owner.json'
+        (f.ticket.cohort/'stale-reconcile.completed.json').unlink()
+        lease.write_text(json.dumps(dict(json.loads(lease.read_bytes()),owner_pid=os.getpid(),owner_start=tickets.birth(os.getpid()))))
+        code,out,err=f.join(f.spawn(2));self.assertNotEqual(code,0,out+err)
+        self.assertIn('live reconciliation winner lost lock',err)
+        self.assertEqual(len(f.metadata()),13,'refused successor rescanned historical registries')
         f.assert_records_preserved()
 
     def test_completed_failure_is_not_cached_as_success_or_rescanned(self):

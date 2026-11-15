@@ -14,16 +14,26 @@ import subprocess
 import time
 
 
+PF_EXITING=0x4  # Linux task flag: set at do_exit() entry, never cleared.
+
+
 def retired(T,pid,expected):
     if T.birth(pid)!=expected:return True
+    exiting=False
     if Path('/proc/self/stat').exists():
-        try:state=Path('/proc',str(pid),'stat').read_text().rsplit(') ',1)[1].split()[0]
+        try:fields=Path('/proc',str(pid),'stat').read_text().rsplit(') ',1)[1].split()
         except FileNotFoundError:return T.birth(pid)!=expected
+        # do_exit() releases the winner's flock while closing its files, before
+        # exit_notify() makes it a zombie: a successor holding the lock can see
+        # the killed winner still 'R'. An exiting task never runs user code again.
+        state=fields[0];exiting=bool(int(fields[6])&PF_EXITING)
     else:
         state=subprocess.check_output(['ps','-p',str(pid),'-o','stat='],text=True).strip()
-    # A zombie cannot execute or hold inherited descriptors. Keep unknown or
-    # live states conservative; repeat the exact birth comparison after read.
-    return state.startswith('Z') and T.birth(pid)==expected
+    # A zombie cannot execute or hold inherited descriptors; an exiting task can
+    # never execute again, and the caller's held flock proves it released the
+    # lock. Keep unknown or live states conservative; repeat the exact birth
+    # comparison after read.
+    return (state.startswith('Z') or exiting) and T.birth(pid)==expected
 
 def main():
     p=argparse.ArgumentParser()
