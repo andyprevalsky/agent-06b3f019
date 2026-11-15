@@ -206,7 +206,7 @@ for counts, layout and overflow is permitted; do not emit screenshot output.
   3. One **WHAT DEPLOYED** box.
   4. One cumulative **DELEGATED** box: each handed-off failure's description and repair-agent link, with no attribution column or acknowledgement state, kept across refreshes and resume.
   5. One **EXTERNAL PROVIDER FAILURES** box: each unresolved **🚨🚨 EXTERNAL PROVIDER FAILURE — <provider>: <reason> — NEEDS FIXING** with its affected checks and evidence.
-  6. One **FOLLOWUPS** box, only if follow-ups exist.
+  6. One **FOLLOWUPS** box, only if follow-ups exist; every `⚠️` line from `python3 scripts/check_stale_versions.py` (a stale or unmeasured critical pinned version) is one, shown unchanged.
   7. Last, concise colored per-stage bars on **one shared elapsed-time axis**.
 - This layout supersedes the general placement rules and older section/alert placement; only evidence-backed values, applicable stage rows and attempt intervals change, and a layout change needs an explicit user request and a new documented version.
 - Never replace the boxes with a lane table or add production/validation hashes, observed/producer noise or a secondary deploy-owner-complete line; provenance stays in the underlying evidence.

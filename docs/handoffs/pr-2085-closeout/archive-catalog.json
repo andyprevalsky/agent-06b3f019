@@ -1,0 +1,154 @@
+{
+  "format": "PR2085-PRIVATE-RECOVERY-CATALOG-V1",
+  "application_pr": 2085,
+  "application_merge": "620d1f6049969d292dea8c60af9cbdcc134f29b6",
+  "scope": "Workspace recovery; no archive of unrelated home identities or entire machine. No actual deletion authorized.",
+  "helper": {
+    "path": "docs/handoffs/whm-b07d9037-preservation/private_archive.py",
+    "sha256": "2e35e736660660bb6118a939d51b0dd008abe5efaa6387cf252d5d0536b75cf4",
+    "git_blob": "592c092502cae2f08015858f98cdd1b5d436310b"
+  },
+  "recovery_owner": "Rose project maintainers with authorized Navi Render environment access and trace-archive R2 access; preserve original key version.",
+  "archives": [
+    {
+      "purpose": "rca-evidence",
+      "receipt": {
+        "format": "ROSE-PRIVATE-TAR-GCM-V1",
+        "bucket": "trace-archive",
+        "key": "devbox-closeout-private/pr2085-c8a41c13/rca-evidence-20261114T2010Z.tar.gz.aesgcm",
+        "encryption_key_id": "trace-archive-prod-2026-07-03",
+        "ciphertext_sha256": "54a4ea80a8936c4026d0a0878fb329eefdb4d6fe6a13d77a62af4fe0c9a5b6f4",
+        "gzip_sha256": "95ed4e4379bf3ab15d8996f275cc0f9bbfa17d9659e9a68c2fd723d91f8e0b6e",
+        "stored_bytes": 33113029,
+        "frames": 4,
+        "files": 842,
+        "original_bytes": 133061428,
+        "manifest_sha256": "7aefcaa3e470a2bfe8aed182e36dd968c182fcf8c44470288b81a133c8dbd613",
+        "full_readback_verified": true
+      },
+      "receipt_sha256": "bad3cc21c0a8246e56a42ab4fe9ecb7b053b32d064c5fcc945c6c2b74474cd7b",
+      "verification_scope": "Full authenticated readback and actual empty-directory restore, all payload hashes rechecked."
+    },
+    {
+      "purpose": "old-cycle",
+      "receipt": {
+        "format": "ROSE-PRIVATE-TAR-GCM-V1",
+        "bucket": "trace-archive",
+        "key": "devbox-closeout-private/pr2085-c8a41c13/old-cycle-20261114T2021Z.tar.gz.aesgcm",
+        "encryption_key_id": "trace-archive-prod-2026-07-03",
+        "ciphertext_sha256": "929e80670397a1e30439dd2a86706edd2b1776729034bc155e152fe672c54733",
+        "gzip_sha256": "e23ca56efe299c8dd7faefd0b2f2669e46dd53d0ec6f3679beb4ca872f2ef09f",
+        "stored_bytes": 128051185,
+        "frames": 16,
+        "files": 12991,
+        "original_bytes": 600994166,
+        "manifest_sha256": "9ccd31e224802123db966090a1993e41d68089b363257284701f5cef97251698",
+        "full_readback_verified": true
+      },
+      "receipt_sha256": "01a0434f0a398fa926b115d1326a8f46e6c77a92ce8d1eb75136e08e60f3b6d4",
+      "verification_scope": "Full authenticated readback and all local payload hashes checked; no actual full restore claim."
+    },
+    {
+      "purpose": "source-bundle",
+      "receipt": {
+        "format": "ROSE-PRIVATE-TAR-GCM-V1",
+        "bucket": "trace-archive",
+        "key": "devbox-closeout-private/pr2085-c8a41c13/git-all-refs-20261114T2042Z.tar.gz.aesgcm",
+        "encryption_key_id": "trace-archive-prod-2026-07-03",
+        "ciphertext_sha256": "36d8ddf65e47a225b805e1d5d036513a9190184ad8822b53d25d59bbaca35e99",
+        "gzip_sha256": "cdc77269f49f34933fd9a109238d9cd363808d7936609e31ffe85be6fa1a0149",
+        "stored_bytes": 1262458344,
+        "frames": 151,
+        "files": 6,
+        "original_bytes": 1276449264,
+        "manifest_sha256": "947b4a6b9c49e9b934e5dc7bf2489646719f03be5e7bd5383fd20f2636009698",
+        "full_readback_verified": true
+      },
+      "receipt_sha256": "a8599af0f1d4f66efa0566fabc0cf579c8cc3911f25c3564b7fd8ebd8862ad06",
+      "verification_scope": "Full authenticated readback. Before upload, local bundle independently restored to a bare mirror, fsck full and19532refs matched; no claim this Git restore consumed remote bytes."
+    },
+    {
+      "purpose": "local-wrapper-packet",
+      "receipt": {
+        "format": "ROSE-PRIVATE-TAR-GCM-V1",
+        "bucket": "trace-archive",
+        "key": "devbox-closeout-private/pr2085-c8a41c13/wrapper-rca-20261114T2051Z.tar.gz.aesgcm",
+        "encryption_key_id": "trace-archive-prod-2026-07-03",
+        "ciphertext_sha256": "ac0c3b2f3127e4cb5c6766a920155e6ebe8b679f7e1f5c6739d489296b6cd418",
+        "gzip_sha256": "60fc0b7c340179aa86a4afeb0a50a18fe78e1097f01e28b136b10eddf2c60245",
+        "stored_bytes": 425981,
+        "frames": 1,
+        "files": 3,
+        "original_bytes": 529789,
+        "manifest_sha256": "d07cce604fab4ac43e6c253b5d643b53777db7667046a5bdcaa32e2b15cfddf3",
+        "full_readback_verified": true
+      },
+      "receipt_sha256": "cbbcd28f413d6546133997ae3895c3f94dd5ee6f237c9f51f2df3036cad12e2e",
+      "verification_scope": "Full authenticated readback."
+    },
+    {
+      "purpose": "payment-packet",
+      "receipt": {
+        "format": "ROSE-PRIVATE-TAR-GCM-V1",
+        "bucket": "trace-archive",
+        "key": "devbox-closeout-private/pr2085-c8a41c13/payment-rca-20261114T2115Z.tar.gz.aesgcm",
+        "encryption_key_id": "trace-archive-prod-2026-07-03",
+        "ciphertext_sha256": "bcc540d37f85ecca7398376eb666479c8f33e4b8ddb99d142dd185f3c6638519",
+        "gzip_sha256": "fc08ceb697d399c7de966bf7a733c5ac1e2198d9692bb1149cccef911a6beb44",
+        "stored_bytes": 13813033,
+        "frames": 2,
+        "files": 4,
+        "original_bytes": 34942769,
+        "manifest_sha256": "f93ae7a41731a496f820cd0ff2e2e7e09e35563bb7fc4eeb793df0db85e2c963",
+        "full_readback_verified": true
+      },
+      "receipt_sha256": "d762926d3ff1f6916e065291563553464c116942963d88538aa1fa0b5120bf27",
+      "verification_scope": "Full authenticated readback."
+    },
+    {
+      "purpose": "final-workspace-supplement",
+      "receipt": {
+        "format": "ROSE-PRIVATE-TAR-GCM-V1",
+        "bucket": "trace-archive",
+        "key": "devbox-closeout-private/pr2085-c8a41c13/final-cutoff-20261114T2158Z.tar.gz.aesgcm",
+        "encryption_key_id": "trace-archive-prod-2026-07-03",
+        "ciphertext_sha256": "14315bc8bbf28c521bed02fb59952983e5f3b853f52316cf21a5d3f9b7dadcd7",
+        "gzip_sha256": "fc66ebf52f2f2fb944f561389b065b595fc84347f752bd6bd09b087c1159c004",
+        "stored_bytes": 303944514,
+        "frames": 37,
+        "files": 15749,
+        "original_bytes": 1027486027,
+        "manifest_sha256": "c3d09ebfbc5e3b6830224c8b44fab8c96a15623db0f5af535c679aaf8de88a22",
+        "full_readback_verified": true
+      },
+      "receipt_sha256": "b88825f1aa9d3f870d08b31074d3344999dbd762dfe82bd1738d1370c0f00929",
+      "verification_scope": "Full authenticated readback, unchanged inventory before and after upload, actual empty-directory restore with all15749payload hashes verified; separate full remote authentication with only externally fetched Render configuration.",
+      "cutoff": {
+        "source_head": "63ac41454f87e8d1483c6bad62c742dc00b4fda6",
+        "inventory_finished_at": "2026-11-14T21:58:20.760154+00:00",
+        "metadata_sha256": "1da654ce5ac8be25b86fe360bf244d1a3f10ce25650c95bc20ec73c5ac8593f4",
+        "payload_files": 15749,
+        "payload_bytes": 1027486027
+      }
+    }
+  ],
+  "key_availability": "Existing key and R2 configuration independently obtained through canonical paginated Render reader and both first archives fully authenticated using only that in-memory configuration. No new key, rotation or independent escrow claim.",
+  "limits": [
+    "Private regular-file archives do not reconstruct symlinks, empty directories, ownership or xattrs; private metadata describes safe isolated reconstruction.",
+    "Keep original object keys: each key is authenticated AAD. Never restore over a live/protected checkout.",
+    "Original failures, skips, unverified records and financial obligations retain their classifications."
+  ],
+  "external_bootstrap_final": {
+    "checked_at": "2026-11-14T22:03:06.804100+00:00",
+    "method": "Canonical paginated Render read held only in memory; final full remote object authenticated with externally obtained config/key",
+    "raw_saved_or_printed": false,
+    "key_matches": true,
+    "key_length": 32,
+    "key_id_matches": true,
+    "bucket_matches": true,
+    "final_object_full_authentication": true,
+    "files": 15749,
+    "ciphertext_sha256": "14315bc8bbf28c521bed02fb59952983e5f3b853f52316cf21a5d3f9b7dadcd7"
+  },
+  "post_cutoff_records": "This catalog/receipt, review summary, readiness, records PR merge and visual pointer are finite control records published in Git or the durable visual; they are not claimed inside their own encrypted payload. Restore/proof/index outputs are reproducible verification copies, not independent needed originals."
+}

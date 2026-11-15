@@ -2169,10 +2169,26 @@ bench_simulates() {  # <task>; --sim-on or a catalog simulate task (the guest se
     done
     return 1
 }
+# Fresh storage carries no dependency trees: its guest syncs from the image's
+# baked /app and refuses a manifest mismatch. When the warm refresh recorded
+# that this donor image is stale for the current manifests, default REAL clones
+# use the refreshed snapshot instead. An explicit --fresh-volumes still wins.
+image_deps_stale_for_current_ref() {
+    [ "${FRESH_VOLUMES_REQUESTED:-0}" = 0 ] || return 1
+    local sidecar="${WARM_DEPS_STATE_FILE:-}.image" s_node s_py s_snap i_node i_py _rest
+    [ -n "${WARM_DEPS_STATE_FILE:-}" ] && [ -f "$sidecar" ] || return 1
+    read -r s_node s_py s_snap i_node i_py _rest < "$sidecar" || return 1
+    [ -n "$i_node" ] && [ -n "$i_py" ] || return 1
+    [ "$s_node" = "${CURRENT_NODE_FP:-}" ] && [ "$s_py" = "${CURRENT_PY_FP:-}" ] \
+        && [ "$s_snap" = "${SNAP_ID:-}" ] || return 1
+    [ "$i_node" != "$s_node" ] || [ "$i_py" != "$s_py" ]
+}
+
 primary_clone_storage_mode() {
     local bench="$1" index
     [ "${PRIVATE_SOURCE_GUEST_ENV_MODE:-none}" != owned-capsule-v1 ] || { printf snapshot; return; }
     [ "$FRESH_VOLUMES" = 1 ] || { printf snapshot; return; }
+    image_deps_stale_for_current_ref && { printf snapshot; return; }
     is_sim_on "$bench" && { printf snapshot; return; }
     for index in "${!BENCHES[@]}"; do
         [ "${BENCHES[$index]}" = "$bench" ] || continue
@@ -17182,6 +17198,28 @@ except (ValueError, TypeError, OverflowError, OSError) as error:
 '
 }
 
+# Defined before warm_deps_preflight, which calls it at top level for the
+# refresh-deps token (it was previously defined after that call and never ran).
+CONTROLLER_GITHUB_TOKEN_B64_CACHE="${CLOUDBENCH_GITHUB_TOKEN_B64:-}"
+controller_github_token_b64() {
+    local token=""
+    if [ -n "$CONTROLLER_GITHUB_TOKEN_B64_CACHE" ]; then
+        # An explicit request-scoped pin from the launcher. Reuse it only when
+        # it decodes non-empty (a prior empty gh auth token produced empty b64).
+        token="$(printf '%s' "$CONTROLLER_GITHUB_TOKEN_B64_CACHE" | base64 -d 2>/dev/null || true)"
+        if [ -n "$token" ]; then
+            printf '%s' "$CONTROLLER_GITHUB_TOKEN_B64_CACHE"
+            return 0
+        fi
+        CONTROLLER_GITHUB_TOKEN_B64_CACHE=""
+    fi
+    # Resolve per guest, never cached: workers are staged throughout a long run
+    # and the App token expires hourly while the devbox credential rotates.
+    token="$(cloudbench_guest_github_token "$ROOT_DIR" || true)"
+    [ -n "$token" ] || return 1
+    printf '%s' "$token" | base64 | tr -d '\n'
+}
+
 snapshot_is_complete_exact() {  # snapshot_is_complete_exact <snap_id>
     FLY volume snapshots list "$VOL_ID" -a "$APP" --json 2>/dev/null | SNAP_ID="$1" python3 -c '
 import json, os, sys
@@ -17248,7 +17286,18 @@ warm_deps_preflight() {
                 return 1
             }
         else
-            snap_epoch="$(snapshot_created_epoch "$SNAP_ID")" || {
+            # A fresh listing that omits the snapshot is not authoritative: Fly
+            # answers HTTP 200 [] for existing snapshots under concurrent reads.
+            # Re-read (bounded) only on that omission (exit 1); a failed read or
+            # an invalid inventory (75) still refuses at once.
+            local epoch_status _epoch_read
+            for _epoch_read in 1 2 3 4 5 6; do
+                epoch_status=0
+                snap_epoch="$(snapshot_created_epoch "$SNAP_ID")" || epoch_status=$?
+                [ "$epoch_status" -eq 1 ] && [ "$_epoch_read" -lt 6 ] || break
+                sleep $((_epoch_read * 2))
+            done
+            [ "$epoch_status" -eq 0 ] || {
                 echo "❌ warm snapshot freshness could not be verified; refusing maintenance" >&2
                 return 1
             }
@@ -17293,13 +17342,14 @@ warm_deps_preflight() {
     echo "♻️  warm snapshot dep trees unproven/stale → central refresh ONCE (instead of ×${#BENCHES[@]} per-clone rsyncs) ..."
     # Export a live controller token so --refresh-deps never depends solely on
     # the durable Fly GITHUB_TOKEN secret (often missing/stale on the warm box).
-    if _refresh_tok_b64="$(controller_github_token_b64 2>/dev/null)"; then
-        export CLOUDBENCH_GITHUB_TOKEN_B64="$_refresh_tok_b64"
-    fi
-    unset _refresh_tok_b64
-    if CLOUDBENCH_LOCAL_PATCH_SOURCE="${FLEET_PATCH_FILE:-}" \
-       CLOUDBENCH_LOCAL_PATCH_SHA256="${FLEET_PATCH_SHA256:-}" \
-       bash "$RUN_BENCH_CLOUD_BIN" --refresh-deps --ref "$BENCH_REF" 2>&1 | while IFS= read -r _l; do printf '   %s\n' "$_l"; done; then
+    # Scope it to this command: the pipeline's left side runs in a subshell, so
+    # the export never pins one token into every later bench guest, where a
+    # credential rotation or the App token's expiry would revoke it.
+    _refresh_tok_b64="$(controller_github_token_b64 2>/dev/null)" || _refresh_tok_b64=""
+    if { [ -z "$_refresh_tok_b64" ] || export CLOUDBENCH_GITHUB_TOKEN_B64="$_refresh_tok_b64"
+         CLOUDBENCH_LOCAL_PATCH_SOURCE="${FLEET_PATCH_FILE:-}" \
+         CLOUDBENCH_LOCAL_PATCH_SHA256="${FLEET_PATCH_SHA256:-}" \
+         bash "$RUN_BENCH_CLOUD_BIN" --refresh-deps --ref "$BENCH_REF"; } 2>&1 | while IFS= read -r _l; do printf '   %s\n' "$_l"; done; then
         s_node=""; s_py=""; s_epoch=""; new_snap=""
         [ -f "$state" ] && read -r s_node s_py s_epoch new_snap < "$state" || true
         snap_epoch="$(snapshot_created_epoch "$new_snap")"
@@ -18626,26 +18676,6 @@ mandatory_worker_health_acceptable() {  # <bench-output-dir> <bench>
     return 1
 }
 
-CONTROLLER_GITHUB_TOKEN_B64_CACHE="${CLOUDBENCH_GITHUB_TOKEN_B64:-}"
-controller_github_token_b64() {
-    local token=""
-    if [ -n "$CONTROLLER_GITHUB_TOKEN_B64_CACHE" ]; then
-        # Cached value may be stale empty b64 from a prior empty gh auth token —
-        # only reuse when decode is non-empty.
-        token="$(printf '%s' "$CONTROLLER_GITHUB_TOKEN_B64_CACHE" | base64 -d 2>/dev/null || true)"
-        if [ -n "$token" ]; then
-            printf '%s' "$CONTROLLER_GITHUB_TOKEN_B64_CACHE"
-            return 0
-        fi
-        CONTROLLER_GITHUB_TOKEN_B64_CACHE=""
-    fi
-    # Prefer live controller credentials (git insteadOf / gh hosts) over a
-    # stale injected GITHUB_TOKEN — see cloudbench_controller_github_token.
-    token="$(cloudbench_controller_github_token "$ROOT_DIR" 2>/dev/null || true)"
-    [ -n "$token" ] || return 1
-    CONTROLLER_GITHUB_TOKEN_B64_CACHE="$(printf '%s' "$token" | base64 | tr -d '\n')"
-    printf '%s' "$CONTROLLER_GITHUB_TOKEN_B64_CACHE"
-}
 
 worker_is_tracked() {  # worker_is_tracked <bench-output-dir> <worker-id>
     local out="$1" wid="$2"
@@ -18976,7 +19006,7 @@ provision_worker() {  # provision_worker <bench> <workspace> <primary_id> <prima
     worker_storage=snapshot
     if [ "$borrowed_worker" = 0 ]; then
     [ "${PRIVATE_SOURCE_GUEST_ENV_MODE:-none}" = owned-capsule-v1 ] \
-        || { [ "${FRESH_VOLUMES:-0}" = 1 ] && [ "$sim" = 0 ] && worker_storage=fresh; }
+        || { [ "${FRESH_VOLUMES:-0}" = 1 ] && [ "$sim" = 0 ] && ! image_deps_stale_for_current_ref && worker_storage=fresh; }
     if [ "$worker_storage" = fresh ]; then
         worker_snapshot="$SNAP_ID"  # unused: fresh workers retain no donor storage
     else
@@ -19117,6 +19147,15 @@ PY
     local wrapper worker_env; wrapper="$(mktemp)"; worker_env="$(mktemp)"
     chmod 600 "$worker_env" 2>/dev/null || true
     printf 'CLOUDBENCH_GITHUB_TOKEN_B64=%q\n' "$worker_github_token_b64" > "$worker_env"
+    # Each staging attempt rewrites this 0600 file with a freshly resolved guest
+    # token before uploading it: staging can retry for longer than a token lives.
+    # Writes only the file; never prints the token.
+    write_worker_github_env() {  # <env-file>
+        local token_b64
+        token_b64="$(controller_github_token_b64)" || return 1
+        [ -n "$token_b64" ] || return 1
+        ( umask 077; printf 'CLOUDBENCH_GITHUB_TOKEN_B64=%q\n' "$token_b64" > "$1" )
+    }
     {
         echo "set -e"
         echo 'if [ -f /tmp/rbw.env ]; then'
@@ -19292,6 +19331,8 @@ PY
                 fly_with_timeout 20 ssh sftp put -a "$APP" --machine "$wid" -q -m 0444 "$PRIVATE_SOURCE_FILE" /data/cloudbench-source-manifest.json; } \
              && run_worker_stage_cmd "upload execution provenance" \
                 fly_with_timeout 20 ssh sftp put -a "$APP" --machine "$wid" -q -m 0444 "$EXECUTION_PROVENANCE_FILE" /data/cloudbench-execution-provenance.json \
+             && run_worker_stage_cmd "refresh worker GitHub token" \
+                write_worker_github_env "$worker_env" \
              && run_worker_stage_cmd "upload worker environment" \
                 fly_with_timeout 20 ssh sftp put -a "$APP" --machine "$wid" -q -m 0600 "$worker_env" /tmp/rbw.env \
              && run_worker_stage_cmd "upload worker wrapper" \

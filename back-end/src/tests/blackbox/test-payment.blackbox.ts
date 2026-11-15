@@ -237,6 +237,29 @@ const tests: Array<[string, () => Promise<void>]> = [
     },
   ],
   [
+    'owner-billing readiness reports an unconfigured dedicated probe customer',
+    async () => {
+      // The blackbox server runs without BENCHMARK_PAYMENT_LIFECYCLE_STRIPE_CUSTOMER_ID; the
+      // configured path is covered in-process by purchases-owner-lifecycle.cases.ts.
+      const response = await request('/api/test-payment/lifecycle/owner-billing');
+      assertStatus(response.status, 200, response.data);
+      assert(
+        (response.data as { configured?: unknown }).configured === false,
+        'expected an unconfigured owner probe customer'
+      );
+    },
+  ],
+  [
+    'purge refuses an agent that is not the owner lifecycle probe',
+    async () => {
+      const response = await request('/api/test-payment/lifecycle/purge', {
+        method: 'POST',
+        body: JSON.stringify({ agentId: `missing-agent-${Date.now()}` }),
+      });
+      assertStatus(response.status, 404, response.data);
+    },
+  ],
+  [
     'lifecycle cross-verifies purchase, hold, card, transfer, and resolved setup',
     async () => {
       let transferReads = 0;

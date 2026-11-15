@@ -1,3 +1,4 @@
+import { assertUserRequestedDeletion } from '../../providers/traceArchive';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -7,6 +8,7 @@ type Curation = (options: {
   rootAgentIds: string[];
   concurrency?: number;
   deleteRejected?: boolean;
+  userDeletionRequest?: { userRequested: true; requestedBy: string; reason: string };
   onResult?: (value: unknown, index: number) => void;
 }) => Promise<{ classification: { rootAgentId: string } }[]>;
 function deferred() {
@@ -39,6 +41,7 @@ function loadOwner(
         listArchivedObjects: async () => [],
         readArchivedArtifact: async () => null,
         deleteArchivedBundle: remove,
+        assertUserRequestedDeletion,
         decryptAndValidateArtifact: () => {
           throw new Error('unexpected decryption');
         },
@@ -104,6 +107,7 @@ export async function runCurationPoolControls(): Promise<void> {
       rootAgentIds: ['a', 'b', 'c', 'd'],
       concurrency: 2,
       deleteRejected: true,
+      userDeletionRequest: { userRequested: true, requestedBy: 'test', reason: 'pool control' },
       onResult: (_v, index) => {
         if (index === 0 && phase === 'onResult') throw original;
       },

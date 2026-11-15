@@ -74,7 +74,10 @@ export async function composeLifecycleNotification(input: {
       }),
     },
   ];
-  const text = await rewriteNotification(messages, input.agentId, lifecycleComposeFixtureKey);
+  const text = await rewriteNotification(messages, input.agentId, undefined, {
+    fixtureKey: lifecycleComposeFixtureKey,
+    timeoutMs: 20_000,
+  });
   return withTrailingLink(text, input.link);
 }
 
@@ -93,8 +96,14 @@ export function withTrailingLink(text: string, link: string): string {
 export async function rewriteNotification(
   messages: CompletionMessage[],
   agentId?: string,
-  fixtureKey: (agentId: string) => string = notificationFixtureKey
+  userId?: string,
+  options: {
+    fixtureKey?: (agentId: string) => string;
+    /** The start/finish text waits on this call; a stalled model falls back sooner. */
+    timeoutMs?: number;
+  } = {}
 ): Promise<string> {
+  const fixtureKey = options.fixtureKey ?? notificationFixtureKey;
   const fixture = agentId ? loadBlackboxFixtureObject(fixtureKey(agentId), messages) : null;
   if (fixture) {
     if (typeof fixture.message !== 'string')
@@ -106,7 +115,7 @@ export async function rewriteNotification(
     route_key: agentId,
     messages,
     temperature: 0.3,
-    abort_signal: AbortSignal.timeout(60_000),
+    abort_signal: AbortSignal.timeout(options.timeoutMs ?? 60_000),
     response_format: {
       type: 'json_schema',
       json_schema: {
@@ -122,7 +131,13 @@ export async function rewriteNotification(
         },
       },
     },
-    dump_context: { call_site: 'sms_notification', agent_id: agentId },
+    // Notifications act on an agent tree: archive under that tree's root, or
+    // under the per-user root when the notification has no agent.
+    dump_context: {
+      call_site: 'sms_notification',
+      agent_id: agentId,
+      archive_scope: { agentId, userId },
+    },
   });
   const output = new StructuredOutputAccumulator();
   for await (const chunk of stream) output.addCompletionChunk(chunk);

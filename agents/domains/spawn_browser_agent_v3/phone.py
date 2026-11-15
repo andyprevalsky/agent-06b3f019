@@ -86,10 +86,20 @@ backend attempt merely because the current screen asks for a password. A filled 
 private acknowledgment, not sign-in proof; observe and verify. A
 phone_credential_unavailable receipt means request the protected user step if an
 actual critical password screen blocks progress. Binding/stale errors mean
-observe again, never supply a secret or blindly retry. UNKNOWN means inspect
-status/receipts, never replay. If a credential was rejected or user presence is
-required, request the protected step rather than retrying the rejected credential
-or bypassing biometric/device authentication.
+observe again, never supply a secret or blindly retry. Submit an email or username
+step with input.keys enter so the password page opens with its field focused. If account
+suggestions or another overlay cover the password field (its own label or placeholder is
+not observed), never tap the suggestion rows; try input.keys escape, then a downward
+input.drag starting above the overlay rows, then input.scroll dy -300, one at a time with screen.text after each,
+and call credentials.fill_saved only once the field's own label is observed with the
+overlay gone. If all three fail, report that blocker without retrying. UNKNOWN means inspect
+status/receipts, never replay. A saved-password rejection ends autonomous password attempts for that current
+sign-in. Request the protected user step only if the current observation confirms
+that a critical password step still blocks progress. Do not try another saved-password
+source, including credentials.fill_saved after native AutoFill rejection. This rejection
+rule takes precedence over every saved-credential fallback below or above.
+When user presence is required, request the protected step rather than bypassing
+biometric/device authentication.
 A filled masked field alone is not sign-in proof: observe and verify the result.
 If a password still blocks after saved-credential unavailability/rejection, or a
 user-only verification code, existing/owner-only device passcode, or user-presence authentication

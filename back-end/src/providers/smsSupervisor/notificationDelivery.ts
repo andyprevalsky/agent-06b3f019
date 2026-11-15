@@ -39,6 +39,8 @@ export async function deliverNotificationMessage(
   config: NotificationContent & {
     channel: SupervisorChannel;
     agentId?: string;
+    /** Archive owner when no agent is bound (per-user root). */
+    userId?: string;
     eventType?: unknown;
     correctionBudget?: { remaining: number };
     send: (message: string) => Promise<DeliveryResult>;
@@ -107,7 +109,7 @@ export async function deliverNotificationMessage(
       }
     );
     try {
-      message = await rewriteNotification(messages, config.agentId);
+      message = await rewriteNotification(messages, config.agentId, config.userId);
     } catch (generationError) {
       return {
         success: false,
