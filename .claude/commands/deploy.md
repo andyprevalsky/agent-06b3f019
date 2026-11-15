@@ -100,7 +100,7 @@ quarantine requires an explicit user instruction.
 
 ### AgentCard
 
-- The sandbox lifecycle tasks are ordinary smoke tasks on the fleet; there is no separate AgentCard gate or election.
+- AgentCard tasks (every task that mints, funds or closes an AgentCard card) run only when the diff touches AgentCard infrastructure (`AGENTCARD_INFRA_PATH_RE` in `agents/benchmarks/select_predeploy_benches.py`, also the production `agentcard` lane's trigger); then every eligible one runs on the fleet, with no separate AgentCard gate or election.
 - After a confirmed release stall, stop retrying: never mint another card, keep reclaiming, or ask the user again.
 - A failed AgentCard task finishes its payment lifecycle cleanup on its own guest before the fleet releases it.
 - If a production AgentCard run is force-killed, recover its agent's execution and browser resources before judging the financial exception.
@@ -232,7 +232,7 @@ Details: `.claude/shared/deploy-failure-policy.md` and `docs/deploy-test-cycle.m
 | Fly worker cutover, then the workflow migration matrix | agent runtime or `deploy-agents.yml` changed |
 | Vercel live on the merged SHA | `front-end/` changed |
 | Production semantics | always, after the Render, Vercel and Fly lanes it exercises |
-| AgentCard production lifecycle (PASS, `SKIPPED-elected`, or `SKIPPED-stall` for the exact release stall) | AgentCard or payment paths changed |
+| AgentCard production lifecycle (PASS, `SKIPPED-elected`, or `SKIPPED-stall` for the exact release stall) | AgentCard infrastructure paths changed (`AGENTCARD_INFRA_PATH_RE`) |
 | WMH SIM smoke | World Model Harness paths changed |
 | Mac release | `scripts/mac-app-release-decision` ships (shipped Mac surface changed, or the `MAC-APP-RELEASE` label) |
 | Mac local execution + computer use (manual) | a connected Mac exists: cloud-origin `spawn_agent(type="code", target="local")`, one visible computer-use action, native app build |

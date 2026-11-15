@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """Exercise the real staged coordinator; no provider, database, or app processes."""
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import contextmanager
 import copy
 import hashlib
 import json
@@ -31,47 +30,8 @@ import deploy_gate_progress as progress
 import deploy_test_process
 
 production_process_entries = deploy_test_process.process_entries
-
-
-@contextmanager
-def unrelated_unreadable_process():
-    """A same-user non-dumpable process outside this test's tree, like the runner's pid 211414 (PR #1762)."""
-    grandchild = ("import ctypes,os,sys;ctypes.CDLL(None).prctl(4,0,0,0,0);"
-                  "print(os.getpid(),flush=True);sys.stdin.read()")
-    launcher = subprocess.Popen([sys.executable, '-c', 'import subprocess,sys;subprocess.Popen('
-                                 f'[sys.executable,"-c",{grandchild!r}],start_new_session=True)'],
-                                stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
-    try:
-        pid = int(launcher.stdout.readline())
-        launcher.wait(timeout=10)  # the re-parented grandchild leaves this process tree
-        yield pid
-    finally:
-        launcher.stdin.close()  # EOF ends the grandchild; nothing is signalled
-        launcher.stdout.close()
-        launcher.wait(timeout=10)
-
-
-def own_process_entries():
-    """This test process and its descendants: the only processes a test here can create or own.
-
-    quiet() and namespace_quiet() refuse any same-user process they cannot read, which is the real
-    safety check. Unrelated host processes (a sibling suite's non-dumpable fixture, a runner's
-    (sd-pam)) are outside every fixture, so the suite scans only its own process tree.
-    """
-    children = {}
-    for process in Path('/proc').iterdir():
-        try:
-            parent = int((process / 'stat').read_text().rsplit(') ', 1)[1].split()[1]) if process.name.isdigit() else None
-        except (FileNotFoundError, ProcessLookupError):
-            continue  # exited mid-scan
-        if parent is not None:
-            children.setdefault(parent, []).append(int(process.name))
-    owned, frontier = [], [os.getpid()]
-    while frontier:
-        pid = frontier.pop()
-        owned.append(Path('/proc', str(pid)))
-        frontier.extend(children.get(pid, ()))
-    return iter(owned)
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from proc_scan_scope import own_process_entries, unrelated_unreadable_process
 
 
 def only_processes(*pids):

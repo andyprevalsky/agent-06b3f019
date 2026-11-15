@@ -375,3 +375,34 @@ export async function nudgeCardholderRecovery(
     ? { kind: 'nothing_to_recover' }
     : { kind: 'requested', recovery };
 }
+
+/**
+ * One nudge round over several cardholders, reading the org's open recoveries ONCE.
+ *
+ * `list_recoveries` is org-wide, so a per-cardholder nudge re-read the same list once per
+ * cardholder in the same round: N identical reads against the shared org throttle (deploy #2106,
+ * 2026-11-15). Each cardholder still coalesces or requests exactly as
+ * {@link nudgeCardholderRecovery}; a recovery this round requests is for that cardholder only, so
+ * the shared snapshot cannot change another cardholder's decision. A provider refusal for one
+ * cardholder is returned in its slot and the rest continue; any other error propagates.
+ */
+export async function nudgeCardholderRecoveries(
+  cardholderIds: readonly string[],
+  callOrgTool: AgentCardOrgToolCaller = callOrgToolProvider
+): Promise<Array<CardholderRecoveryNudge | AgentCardRecoveryError>> {
+  let openRecoveries: Promise<unknown> | undefined;
+  const oneOpenRecoveriesRead: AgentCardOrgToolCaller = (toolName, args, deadlineAtMs) =>
+    toolName === 'list_recoveries'
+      ? (openRecoveries ??= callOrgTool(toolName, args, deadlineAtMs))
+      : callOrgTool(toolName, args, deadlineAtMs);
+  const nudges: Array<CardholderRecoveryNudge | AgentCardRecoveryError> = [];
+  for (const cardholderId of cardholderIds) {
+    try {
+      nudges.push(await nudgeCardholderRecovery(cardholderId, oneOpenRecoveriesRead));
+    } catch (error) {
+      if (!(error instanceof AgentCardRecoveryError)) throw error;
+      nudges.push(error);
+    }
+  }
+  return nudges;
+}

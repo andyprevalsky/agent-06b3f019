@@ -9,6 +9,7 @@ import assert from 'node:assert/strict';
 import { BrowserProviderRateLimitError } from '../../providers/browser/types';
 import {
   parseTilionErrorBody,
+  postTilionSession,
   redactTilionSecrets,
   TilionApiError,
   TilionInsufficientCreditsError,
@@ -108,6 +109,56 @@ async function main(): Promise<void> {
     assert.equal(capped.slug, 'concurrency_limit');
     assert.match(capped.message, /X-Request-ID req\d+/);
     assert.equal(server.requests.length, 1);
+
+    // ── 503 capacity_unavailable: typed "nothing allocated", retried ─────────
+    server.reset();
+    server.route('POST', /^\/v1\/session$/, () => ({
+      status: 503,
+      body: { detail: { error: 'capacity_unavailable', message: 'no session capacity' } },
+      headers: { 'Retry-After': '0' },
+    }));
+    const full = await tilionRequest('/v1/session', { method: 'POST', body: {} }).catch((e) => e);
+    assert(full instanceof TilionRateLimitError);
+    assert(full instanceof BrowserProviderRateLimitError);
+    assert.equal(full.status, 503);
+    assert.equal(full.slug, 'capacity_unavailable');
+    assert.equal(server.requests.length, 3);
+
+    // ── keyed create: capacity retried under one key, then the session ───────
+    server.reset();
+    let keyedCreates = 0;
+    server.route('POST', /^\/v1\/session$/, () =>
+      ++keyedCreates <= 3
+        ? {
+            status: 503,
+            body: { detail: { error: 'capacity_unavailable', message: 'no session capacity' } },
+            headers: { 'Retry-After': '0' },
+          }
+        : { status: 201, body: { session_id: 'sess_keyed' } }
+    );
+    const keyed = await postTilionSession<{ session_id: string }>('rose-key-1', {});
+    assert.equal(keyed.session_id, 'sess_keyed');
+    assert.equal(server.requests.length, 4);
+    assert(server.requests.every((r) => r.headers['idempotency-key'] === 'rose-key-1'));
+
+    // ── keyed create: a later rejection cannot settle an earlier in-flight attempt ──
+    server.reset();
+    keyedCreates = 0;
+    server.route('POST', /^\/v1\/session$/, () =>
+      ++keyedCreates === 1
+        ? {
+            status: 409,
+            body: { detail: { error: 'idempotency_key_in_use', message: 'running' } },
+            headers: { 'Retry-After': '0' },
+          }
+        : { status: 400, body: { detail: { error: 'stealth_always_on', message: 'no' } } }
+    );
+    const unsettled = await postTilionSession('rose-key-2', {}).catch((e) => e);
+    assert(unsettled instanceof Error);
+    assert(!(unsettled instanceof TilionApiError) && !(unsettled instanceof TilionRateLimitError));
+    assert.equal((unsettled as { status?: number }).status, undefined);
+    assert.match(unsettled.message, /rose-key-2 is unsettled and may own a browser/);
+    assert.equal(server.requests.length, 2);
 
     // ── 402 insufficient_credits: typed, non-retryable, not retried ──────────
     server.reset();

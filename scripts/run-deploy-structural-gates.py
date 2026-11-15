@@ -567,6 +567,8 @@ GATES = (
         ("python3", "scripts/tests/cloudbench-forensic-quiesced.test.py"), expected_seconds=83
     ),
     Gate("cloudbench-lost-evidence-release", ("python3", "scripts/tests/cloudbench-lost-evidence-release.test.py")),
+    Gate("cloudbench-evidence-archive", ("python3", "scripts/tests/cloudbench-evidence-archive.test.py")),
+    Gate("cloudbench-disposable-lifecycle", ("python3", "scripts/tests/cloudbench-disposable-lifecycle.test.py")),
     Gate("seed-memory-ratchet", ("bash", "scripts/tests/seed-memory-ratchet.test.sh")),
     Gate("test-sleep-ratchet", ("python3", "scripts/tests/condition-waits.test.py")),
     Gate("semantic-deploy", ("bash", "scripts/tests/semantic-deploy-gate.test.sh")),
@@ -632,6 +634,10 @@ GATES = (
         ("python3", "scripts/tests/cloudbench-explicit-idle-admission.test.py"),
     ),
     Gate("cloudbench-cohort-reconcile", ("python3", "scripts/tests/cloudbench-cohort-reconcile.test.py")),
+    Gate(
+        "cloudbench-recovery-guard-inheritance",
+        ("python3", "scripts/tests/cloudbench-recovery-guard-inheritance.test.py"),
+    ),
     Gate(
         "cloudbench-fixed-native-worker",
         ("python3", "scripts/tests/cloudbench-fixed-native-worker.test.py"),
