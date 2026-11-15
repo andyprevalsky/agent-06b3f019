@@ -172,6 +172,7 @@ async def execute_reasoning(
             agent_id=agent_id,
             skip_cache_write=True,
             call_site="dag_reasoning",
+            include_reasoning_in_response=False,
             claude_token=claude_token,
             claude_token_source=claude_token_source,
             claude_token_pool_id=claude_token_pool_id,

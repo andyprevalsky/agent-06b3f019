@@ -6,7 +6,10 @@
  */
 
 import assert from 'node:assert/strict';
-import { BENCHMARK_PAYMENT_LIFECYCLE_PROD_USER_ID } from '../../providers/benchmarkPaymentIdentity';
+import {
+  BENCHMARK_PAYMENT_LIFECYCLE_OWNER_USER_ID,
+  BENCHMARK_PAYMENT_LIFECYCLE_PROD_USER_ID,
+} from '../../providers/benchmarkPaymentIdentity';
 import { closeHeldPurchaseReuseForLifecycleProbe } from '../../domains/test-payment/closeHeldReuse';
 import { TestPaymentError } from '../../domains/test-payment/errors';
 
@@ -39,6 +42,25 @@ async function main(): Promise<void> {
   assert.equal(result.agentsCleaned, 2);
   assert.equal(result.orphanHeldIgnored, 1);
   assert.deepEqual(cleanedAgentIds.sort(), ['agent-a', 'agent-b']);
+
+  // The owner probe account: only its benchmark agents' held probe cards are closed; its real
+  // $1 purchases (non-benchmark agents) are never touched.
+  const ownerCleaned: string[] = [];
+  const owner = await closeHeldPurchaseReuseForLifecycleProbe(
+    BENCHMARK_PAYMENT_LIFECYCLE_OWNER_USER_ID,
+    {
+      findHeldProbePurchases: async () => [
+        { id: 'o1', agentId: 'bench-agent' },
+        { id: 'o2', agentId: 'real-agent' },
+      ],
+      isBenchmarkAgent: async (agentId) => agentId === 'bench-agent',
+      cleanupAgent: async (agentId) => {
+        ownerCleaned.push(agentId);
+      },
+    }
+  );
+  assert.equal(owner.heldFound, 1);
+  assert.deepEqual(ownerCleaned, ['bench-agent']);
 
   process.stdout.write('PASS close-held-reuse\n');
 }

@@ -6,7 +6,12 @@ import {
   IMPERSONATION_CHANGED_EVENT,
   getSession,
 } from '@/lib/supabase';
-import { fetchShareableIntegrations, fetchTeams } from '@/lib/api/teams';
+import {
+  fetchShareableIntegrations,
+  fetchTeams,
+  type ShareableIntegration,
+  type Team,
+} from '@/lib/api/teams';
 
 function currentTeamUserId(): string | null {
   const user = getSession()?.user;
@@ -64,4 +69,38 @@ export function useTeamMutation<T>(mutationFn: (input: T) => Promise<unknown>) {
         client.invalidateQueries({ queryKey: ['team-integrations', userId] }),
       ]),
   });
+}
+
+/** One shareable account plus the caller's accepted teams: what a sharing caption needs. */
+export interface AccountShareTarget {
+  account: ShareableIntegration;
+  teams: Team[];
+}
+export type AccountShareLookup = (
+  provider: 'gmail' | 'imessage',
+  email?: string,
+) => AccountShareTarget | undefined;
+
+/**
+ * Per-account sharing lookup for Integrations rows (both queries share one cache).
+ * No target while loading, signed out, with no accepted team, or for an account the
+ * backend does not list as shareable.
+ */
+export function useAccountShares(): { shareTarget: AccountShareLookup; error: string | null } {
+  const teams = useTeams();
+  const accounts = useShareableIntegrations();
+  const joined = teams.data?.teams ?? [];
+  const shareTarget: AccountShareLookup = (provider, email) => {
+    if (joined.length === 0) return undefined;
+    const key = email?.trim().toLowerCase();
+    const account = accounts.data?.integrations.find(
+      (item) => item.provider === provider && (key === undefined || item.accountEmail === key),
+    );
+    return account === undefined ? undefined : { account, teams: joined };
+  };
+  const failure = teams.error ?? accounts.error;
+  return {
+    shareTarget,
+    error: teams.userId === null || failure === null ? null : failure.message,
+  };
 }

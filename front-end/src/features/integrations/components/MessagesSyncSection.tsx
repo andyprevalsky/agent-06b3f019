@@ -5,12 +5,15 @@
  *
  * Sub-items:
  *   iMessage: [IDLE] --click--> [SYNCING] --done--> [SYNCED]  (Desktop only)
+ *             a shareable connected iMessage shows its team-sharing caption by its name
  *   Gmail:    [IDLE] --plus click--> [CONNECTING] --OAuth--> [CONNECTED + email chips]
  *   WhatsApp: [DESKTOP_ONLY + download] --paired in Mac app--> [CONNECTED]
  *   Telegram, Messenger: [COMING_SOON] (static)
  */
 
 import { Button } from '@/components/ui/button';
+import { AccountTeamShare } from '@/components/teams/TeamSharing';
+import { useAccountShares } from '@/hooks/useTeams';
 
 import { hasDamagedGmailAccount } from '../hooks/useIntegrationData';
 import type { ConnectedIntegration, MessageSyncType } from '../types';
@@ -81,6 +84,8 @@ function IMessageRow({
   loading: MessageSyncType | null;
   onSync: () => void;
 }) {
+  const target = useAccountShares().shareTarget('imessage');
+  const share = target && <AccountTeamShare {...target} />;
   if (isAvailable) {
     return (
       <div className="px-4 py-2 flex items-center justify-between border-b border-border/50">
@@ -88,8 +93,9 @@ function IMessageRow({
           <DropdownIconFrame {...DropdownIconPreset.imessage} isSynced={synced}>
             <IMessageIcon gradientId="imessageGrad" />
           </DropdownIconFrame>
-          <div className="flex min-w-0 items-center">
+          <div className="flex min-w-0 items-center gap-2.5">
             <span className="truncate text-sm">iMessage</span>
+            {share}
           </div>
         </div>
         <SyncItemButton isLoading={loading === 'imessage'} isSynced={synced} onClick={onSync} />
@@ -107,6 +113,7 @@ function IMessageRow({
           <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-muted text-muted-foreground">
             Desktop Only
           </span>
+          {share}
         </div>
       </div>
       <Button size="sm" variant="outline" asChild>

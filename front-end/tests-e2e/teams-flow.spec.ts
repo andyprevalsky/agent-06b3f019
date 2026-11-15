@@ -317,16 +317,26 @@ for (const width of widths) {
       await page.getByTestId('rose-sidebar').hover({ position: { x: 30, y: 90 } });
       await page.getByRole('button', { name: 'Teams', exact: true }).click();
       await page.getByRole('button', { name: 'Integrations', exact: true }).click();
-      const settings = page.getByRole('region', { name: 'Integration team sharing' });
-      await expect(settings).toBeVisible();
-      await settings.getByRole('checkbox', { name: /owner@roselabs.ai with Rose Labs/ }).click();
+      // Sharing lives on each account: its "Share" caption opens a checkbox per team.
+      await expect(page.getByRole('region', { name: 'Integration team sharing' })).toHaveCount(0);
+      await page.getByRole('button', { name: 'Share owner@roselabs.ai', exact: true }).click();
+      const picker = page.getByRole('dialog', { name: 'Share owner@roselabs.ai with teams' });
+      const rose = picker.getByRole('checkbox', { name: 'Rose Labs' });
+      await expect(rose).not.toBeChecked();
+      await rose.click();
+      await expect(rose).toBeChecked();
       await expect(
-        settings.getByRole('checkbox', { name: /private@example.test/ }),
-      ).not.toBeChecked();
+        page.getByRole('button', { name: 'owner@roselabs.ai shared with Rose Labs', exact: true }),
+      ).toBeVisible();
+      await expect(
+        page.getByRole('button', { name: 'Share private@example.test', exact: true }),
+      ).toBeVisible();
       await page.screenshot({
         path: resolve(evidence, 'integration-sharing-1280.png'),
         fullPage: true,
       });
+      await page.keyboard.press('Escape');
+      await expect(picker).toHaveCount(0);
       await page.getByRole('button', { name: 'Integrations', exact: true }).click();
       await page.getByTestId('rose-sidebar').hover({ position: { x: 30, y: 90 } });
       await page.getByRole('button', { name: 'Rose folder settings', exact: true }).click();

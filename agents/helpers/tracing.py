@@ -100,6 +100,37 @@ def current_root_agent_id() -> Optional[str]:
     return _current().get("root_agent_id") or current_agent_id()
 
 
+def current_bound_root_agent_id() -> Optional[str]:
+    """The tree root bound by a workflow or activity header, never a guess."""
+    return _current().get("root_agent_id")
+
+
+def current_workflow_agent_id() -> Optional[str]:
+    """Agent whose workflow scheduled the current activity (activity header)."""
+    return _current().get("workflow_agent_id")
+
+
+@contextmanager
+def archive_scope(root_agent_id: Optional[str], agent_id: Optional[str] = None) -> Iterator[None]:
+    """Bind archive identity for model calls made outside a workflow activity.
+
+    Benchmark harness judges, warmups and transcriptions run in the CLI
+    process; their records belong to the benchmark run's root bundle. An empty
+    root masks any outer identity for the scope (root, acting agent and
+    workflow agent), so the archive writer refuses the record loudly instead
+    of filing it under an enclosing root.
+    """
+    if root_agent_id:
+        bindings: Dict[str, Any] = {"root_agent_id": root_agent_id, "agent_id": agent_id or root_agent_id}
+    else:
+        bindings = {"root_agent_id": None, "agent_id": agent_id or None, "workflow_agent_id": None}
+    tokens = structlog.contextvars.bind_contextvars(**bindings)
+    try:
+        yield
+    finally:
+        structlog.contextvars.reset_contextvars(**tokens)
+
+
 def _sanitize_runtime_value(value: Any, depth: int = 0) -> Any:
     """Return a log-safe runtime value without dumping bulky objects."""
     if value is None or isinstance(value, (bool, int, float)):

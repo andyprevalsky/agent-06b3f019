@@ -69,7 +69,7 @@ def _fakes(browser_impl, posted):
     return [fake_browser, fake_post, fake_pointer, fake_resume_cost, fake_usage]
 
 
-async def _run(activities, request):
+async def _run(activities, request, interceptors=()):
     from temporalio.client import WorkflowFailureError
     from temporalio.testing import WorkflowEnvironment
     from temporalio.worker import Worker
@@ -84,6 +84,7 @@ async def _run(activities, request):
             workflows=[BrowserAgentResumeWorkflow],
             activities=activities,
             workflow_runner=production_workflow_runner(),
+            interceptors=list(interceptors),
             max_heartbeat_throttle_interval=timedelta(seconds=1),
             default_heartbeat_throttle_interval=timedelta(seconds=1),
         ):
@@ -343,6 +344,59 @@ async def test_bad_request_posts_could_not_resume_and_fails_non_retryably():
     assert rows and rows[-1][3]["toolStatus"] == "ERROR" and "inbox_address" in rows[-1][1], posted
 
 
+async def test_resumed_sub_agent_llm_records_land_in_the_root_bundle():
+    """A resumed sub-agent's browser activity archives under the request's tree root.
+
+    Without `root_agent_id` the root is unknown: no root header is guessed, the
+    record falls back to the acting agent, and the fallback is counted loudly.
+    """
+    import os
+    import tempfile
+    from pathlib import Path
+
+    import helpers.observability as observability
+    import helpers.trace_archive as trace_archive
+    from helpers.archive_identity import production_worker_interceptors
+    from helpers.llm_archive_record import archive_counters
+    from helpers.tracing import current_bound_root_agent_id, current_workflow_agent_id
+
+    seen = []
+
+    async def browser(*args):
+        seen.append((current_bound_root_agent_id(), current_workflow_agent_id()))
+        observability.dump_llm_context("verifier_browser", [{"role": "user", "content": "check"}], output={"content": "ok"})
+        return _done(args)
+
+    old_root, old_prod = trace_archive._LOCAL_ROOT, observability._IS_PRODUCTION
+    old_env = {key: os.environ.get(key) for key in ("TRACE_ARCHIVE_ENABLED", "TRACE_ARCHIVE_BACKEND")}
+    with tempfile.TemporaryDirectory() as tmp:
+        try:
+            trace_archive._LOCAL_ROOT = Path(tmp)
+            observability._IS_PRODUCTION = True
+            os.environ.update({"TRACE_ARCHIVE_ENABLED": "1", "TRACE_ARCHIVE_BACKEND": "local"})
+            result = await _run(
+                _fakes(browser, []), _request(root_agent_id="root-1"), interceptors=production_worker_interceptors()
+            )
+            assert not isinstance(result, Exception), result
+            assert seen == [("root-1", "owner-1")], seen
+            assert len(list((Path(tmp) / "root-1" / "llm").glob("*.enc"))) == 1
+            assert len(list((Path(tmp) / "root-1" / "llm-updates").glob("*.enc"))) == 1
+            assert not (Path(tmp) / "owner-1").exists(), "sub-agent records must not split into their own bundle"
+
+            before = archive_counters().get("root_fallback_to_agent_id", 0)
+            result = await _run(_fakes(browser, []), _request(), interceptors=production_worker_interceptors())
+            assert not isinstance(result, Exception), result
+            assert seen[-1] == (None, "owner-1"), "an unknown root must not be guessed in the header"
+            assert archive_counters().get("root_fallback_to_agent_id", 0) == before + 1
+        finally:
+            trace_archive._LOCAL_ROOT, observability._IS_PRODUCTION = old_root, old_prod
+            for key, value in old_env.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+
+
 async def run_all_tests():
     print("browser_agent_resume blackbox tests:")
     r = BlackboxResult()
@@ -359,6 +413,7 @@ async def run_all_tests():
     await r.record_async(
         "bad_request_fails_non_retryably", test_bad_request_posts_could_not_resume_and_fails_non_retryably
     )
+    await r.record_async("resumed_sub_agent_records_land_in_root", test_resumed_sub_agent_llm_records_land_in_the_root_bundle)
     return r.all_passed
 
 

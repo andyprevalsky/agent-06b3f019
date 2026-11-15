@@ -4195,57 +4195,45 @@ def test_agent_payment_lifecycle_tasks_run_as_the_admin_account_with_forced_cust
         assert "BENCHMARK_FORCE_CUSTOMER_PURCHASE_PATH" in task.environment["context_notes"]
 
 
-def test_production_payment_lifecycle_tasks_run_as_a_non_admin_identity():
-    """The PRODUCTION payment tasks must run on an identity that can satisfy their own contract.
+def test_production_payment_lifecycle_tasks_run_as_the_owner_identity():
+    """The PRODUCTION payment tasks run as the owner and can still satisfy their hold contract.
 
-    Only the NON-admin branch of `resolveAndIssuePurchaseCard` authorizes a personal Stripe hold;
-    the admin branch calls `issueAdminCompanyCard`, which never creates a payment intent. The
-    default benchmark user is a hardcoded ADMIN_USER_IDS entry, so leaving a hold-asserting task on
-    it makes the production gate unpassable by construction -- which is exactly how it broke.
-
-    The charge expectation itself is owned by the payment tasks, not by this guard: a task may
-    legitimately declare a personal hold (`stripeHold.status == succeeded`) or the admin no-charge
-    contract (`stripeHold: null`). Pinning one of those here made the guard disagree with a
-    definition that shipped separately. So assert the INVARIANT that actually matters -- a task that
-    expects a hold must not run as an admin -- and let the task own which contract it declares.
+    The admin branch of `resolveAndIssuePurchaseCard` never creates a payment intent. The owner is
+    an admin, so the back-end routes ONLY the owner's benchmark agents onto the charged path against
+    a dedicated live customer (providers/ownerLifecycleBilling.ts). This guard pins that the harness
+    identity and the back-end override key on the same id and stay scoped to benchmark agents.
     """
     import re
 
     from benchmarks.benchmark_tasks import get_task_by_name
     from benchmarks.run_benchmark import (
         AGENT_PAYMENT_LIFECYCLE_PROD_USER_ID,
-        AGENT_PAYMENT_LIFECYCLE_USER_ID,
         AGENT_PAYMENT_PRODUCTION_LIFECYCLE_TASK_NAMES,
         USER_ID,
         benchmark_run_user_id_for_task,
     )
 
     repo_root = Path(__file__).resolve().parents[3]
-    # Canonical home is providers/: domains/test-payment needs this id too, and a
-    # cross-domain import (or a re-export from a `config` layer) is a structural
-    # violation. The drift guard below is unchanged -- only the path moved.
+    # 2026-11-14 (user directive): the live production probe runs as the OWNER account. The hold is
+    # satisfiable because the back-end scopes the owner's benchmark agents onto the charged path
+    # against a dedicated live customer (providers/ownerLifecycleBilling.ts), keyed on the same id.
     identity_ts = (repo_root / "back-end" / "src" / "providers" / "benchmarkPaymentIdentity.ts").read_text()
-    match = re.search(r"export const BENCHMARK_PAYMENT_LIFECYCLE_PROD_USER_ID = '([^']+)'", identity_ts)
-    assert match, "providers/benchmarkPaymentIdentity.ts must export BENCHMARK_PAYMENT_LIFECYCLE_PROD_USER_ID"
-    assert match.group(1) == AGENT_PAYMENT_LIFECYCLE_PROD_USER_ID, (
-        "production payment identity drifted between the harness and the back-end: "
-        f"{AGENT_PAYMENT_LIFECYCLE_PROD_USER_ID} vs {match.group(1)}"
+    match = re.search(r"export const BENCHMARK_PAYMENT_LIFECYCLE_OWNER_USER_ID = '([^']+)'", identity_ts)
+    assert match, "providers/benchmarkPaymentIdentity.ts must export BENCHMARK_PAYMENT_LIFECYCLE_OWNER_USER_ID"
+    assert match.group(1) == AGENT_PAYMENT_LIFECYCLE_PROD_USER_ID == USER_ID, (
+        "owner lifecycle probe identity drifted between the harness and the back-end"
     )
-
-    # Never the default (admin) user, never a hardcoded admin, and never shared with the sandbox
-    # identity: one user holds exactly one Subscription (stripeCustomerId) and one agentcard
-    # Integration (cardholderId), and production needs LIVE values where sandbox needs TEST ones.
-    assert AGENT_PAYMENT_LIFECYCLE_PROD_USER_ID != USER_ID
-    assert AGENT_PAYMENT_LIFECYCLE_PROD_USER_ID != AGENT_PAYMENT_LIFECYCLE_USER_ID
-    admin_ts = (repo_root / "back-end" / "src" / "utils" / "adminAccess.ts").read_text()
-    assert AGENT_PAYMENT_LIFECYCLE_PROD_USER_ID not in admin_ts
+    owner_billing_ts = (
+        repo_root / "back-end" / "src" / "providers" / "ownerLifecycleBilling.ts"
+    ).read_text()
+    assert "BENCHMARK_PAYMENT_LIFECYCLE_OWNER_USER_ID" in owner_billing_ts
+    assert "isBenchmarkAgent" in owner_billing_ts, "the override must stay scoped to benchmark agents"
 
     for name in sorted(AGENT_PAYMENT_PRODUCTION_LIFECYCLE_TASK_NAMES):
         task = get_task_by_name(name)
         assert task.production_only, f"{name} must stay production_only"
         assert benchmark_run_user_id_for_task(name) == AGENT_PAYMENT_LIFECYCLE_PROD_USER_ID, (
-            f"{name} must run as the non-admin production payment identity, otherwise a "
-            "stripeHold expectation cannot be satisfied"
+            f"{name} must run as the owner lifecycle identity"
         )
         # The task owns WHICH contract it declares; this guard owns that the declaration is
         # satisfiable by the identity it runs on. A declared hold requires the non-admin path,
@@ -5757,6 +5745,10 @@ async def _exercise_owned_payment_reconciliation_caller(
             clock += 70
             # Provider release is already visible; GET cannot run Rose's compensator.
             return httpx.Response(200, json=deepcopy(pending))
+        if request.method == "POST" and request.url.path == "/api/test-payment/lifecycle/purge":
+            # The owner production probe purges only after its lifecycle verified terminal.
+            assert json.loads(request.content) == {"agentId": agent_id}
+            return httpx.Response(200, json={"agentId": agent_id, "purged": 1})
         raise AssertionError("reconciliation must not create, fund, or issue another payment")
 
     def client(*args, **kwargs):
@@ -5817,7 +5809,14 @@ async def _exercise_owned_payment_reconciliation_caller(
         assert snapshot["messages"] == ready["messages"]
         assert snapshot["_benchmark"]["payment_lifecycle"]["purchase"]["id"] == purchase_id
     assert all(
-        path in {"/api/test-payment/lifecycle", "/api/test-payment/lifecycle/abandon"} for _, path, _ in requests
+        path
+        in {
+            "/api/test-payment/lifecycle",
+            "/api/test-payment/lifecycle/abandon",
+            # The owner production probe purges its settled records after a verified cleanup.
+            "/api/test-payment/lifecycle/purge",
+        }
+        for _, path, _ in requests
     )
     assert terminal["integrity"]["cardCount"] == 1
     assert terminal["integrity"]["purchaseCount"] == 1
@@ -7663,7 +7662,7 @@ def test_agent_payment_accepts_grounded_finished_browser_text_without_structured
 
 
 async def test_production_payment_admission_requires_scoped_live_v2_readiness():
-    """Live billing plus a legacy connection must not admit a paid v2 probe."""
+    """Owner billing plus a legacy connection must not admit a paid v2 probe."""
     import httpx
     import pytest
 
@@ -7685,8 +7684,8 @@ async def test_production_payment_admission_requires_scoped_live_v2_readiness():
         def fixture(request):
             seen.append(request)
             assert request.method == "GET", "admission must never move money"
-            if request.url.path == "/api/credits/usage":
-                return httpx.Response(200, json={"tier": "pro", "remaining": 1000, "stripeLivemode": True})
+            if request.url.path == "/api/test-payment/lifecycle/owner-billing":
+                return httpx.Response(200, json={"configured": True})
             assert request.url.path == "/api/agentcard/status"
             assert request.headers["x-user-id"] == bench.AGENT_PAYMENT_LIFECYCLE_PROD_USER_ID
             return httpx.Response(200, json=status)
@@ -7699,14 +7698,13 @@ async def test_production_payment_admission_requires_scoped_live_v2_readiness():
             else:
                 with pytest.raises(RuntimeError, match="live v2"):
                     await bench._preflight_production_payment_identity("https://api.fixture.invalid")
-        assert [r.url.path for r in seen] == ["/api/credits/usage", "/api/agentcard/status"]
+        assert [r.url.path for r in seen] == [
+            "/api/test-payment/lifecycle/owner-billing", "/api/agentcard/status"]
 
 
 async def test_production_payment_identity_gap_fails_closed_with_its_own_provisioning_rules():
-    """the former /deploy skill Step 13c (orig L3407-3434): when the non-admin
-    production identity is missing, `agent-payment-production-abandonment` stops before any live
-    spend and its own error carries the exact provisioning command, the credential source and the
-    guardrails, so the agent that hits it needs no other document and never asks the user."""
+    """Step 13c: when the owner probe's billing pointer is missing, the production abandonment task
+    stops before any live spend and its own error carries the exact setup command and guardrails."""
     import contextlib
     import io
 
@@ -7718,37 +7716,30 @@ async def test_production_payment_identity_gap_fails_closed_with_its_own_provisi
     original_client = httpx.AsyncClient
     seen = []
     printed = io.StringIO()
+    ready = {"connected": True, "apiVersion": 2, "status": "approved",
+             "livemode": True, "fundsSource": "company_flow"}
 
-    def missing_identity(request):
-        seen.append(request)
-        return httpx.Response(200, json={"tier": None, "remaining": 0})
+    def missing_billing(request):
+        seen.append(request.url.path)
+        if request.url.path == "/api/test-payment/lifecycle/owner-billing":
+            return httpx.Response(200, json={"configured": False})
+        return httpx.Response(200, json=ready)
 
     assert bench.AGENT_PAYMENT_PRODUCTION_TASK_NAME == "agent-payment-production-abandonment"
     assert bench.AGENT_PAYMENT_PRODUCTION_TASK_NAME in bench.AGENT_PAYMENT_PRODUCTION_LIFECYCLE_TASK_NAMES
     with patch.object(bench, "_api_headers", new=AsyncMock(return_value={})), \
          patch.object(bench.httpx, "AsyncClient",
-                      side_effect=lambda **kw: original_client(transport=httpx.MockTransport(missing_identity), **kw)):
+                      side_effect=lambda **kw: original_client(transport=httpx.MockTransport(missing_billing), **kw)):
         with pytest.raises(RuntimeError) as raised, contextlib.redirect_stdout(printed):
             await bench._preflight_production_payment_identity("https://api.fixture.invalid")
-    assert [(r.url.path, r.url.params.get("userId")) for r in seen] == [
-        ("/api/credits/usage", "00000000-0000-4000-8000-000000000107")]
+    assert seen == ["/api/test-payment/lifecycle/owner-billing", "/api/agentcard/status"]
     message = str(raised.value)
-    command = (
-        "  cd back-end && set -a && . ./.env && set +a && \\\n"
-        '    BENCHMARK_AGENTCARD_V2_USER_ID= DATABASE_URL="$DIRECT_URL" STRIPE_SECRET_KEY="$STRIPE_SECRET_KEY_LIVE" \\\n'
-        "    BENCHMARK_ALLOW_LIVE_STRIPE=true BENCHMARK_PAYMENT_ALLOW_REMOTE_DB=true \\\n"
-        "    npx tsx scripts/setup-benchmark-payment.ts --live --user-id 00000000-0000-4000-8000-000000000107\n"
-    )
-    assert command in message
     for rule in (
-        "is not provisioned: it has no Subscription row",
-        "Every credential it needs is already in back-end/.env; do not ask the user",
-        "the 6543 pooler fails",
-        "dedicated benchmark user's normal signed live v2 connection, consent and approved KYC first",
-        "A legacy cardholder is not a v2 connected user",
-        "never create an identity automatically or bypass pending KYC",
-        "never enter a card number",
-        "one-time hosted Stripe Checkout link: a human saves the live card there once",
+        "BENCHMARK_PAYMENT_LIFECYCLE_STRIPE_CUSTOMER_ID is not configured on the backend",
+        "npx tsx scripts/setup-benchmark-payment.ts --owner-billing",
+        "normal signed live AgentCard v2 connection with consent and approved KYC",
+        "The owner's own Subscription and billing are never touched",
+        "never enter a card number from a script",
     ):
         assert rule in message, rule
     assert message in printed.getvalue()  # printed in full, not only raised
@@ -13693,6 +13684,11 @@ async def test_parallel_tasks_keep_their_own_run_user():
     base_url = "https://bench-run-user.invalid"
     sibling = bench.get_task_by_name("chat-mode")
     payer = bench.get_task_by_name(bench.AGENT_PAYMENT_PRODUCTION_TASK_NAME)
+    # The production payer now runs as the owner (the default user); pin a distinct synthetic
+    # identity so this regression still exercises a non-default run user beside a default sibling.
+    distinct_payer = "00000000-0000-4000-8000-0000000000aa"
+    identity_patch = patch.object(bench, "AGENT_PAYMENT_LIFECYCLE_PROD_USER_ID", distinct_payer)
+    identity_patch.start()
     payer_user = bench.benchmark_run_user_id_for_task(payer.name)
     assert payer_user and payer_user != bench.USER_ID
     assert bench.benchmark_run_user_id_for_task(sibling.name) is None
@@ -13740,6 +13736,7 @@ async def test_parallel_tasks_keep_their_own_run_user():
 
     assert sibling_result.status == "ERROR", sibling_result
     assert isinstance(payer_result, RuntimeError), payer_result
+    identity_patch.stop()
     assert seen == {"sibling": bench.USER_ID, "payer": payer_user}, seen
     assert leaked_user is None
     assert user_after_run == bench.USER_ID
@@ -26616,12 +26613,37 @@ def test_predeploy_selector_machine_formats_at_cap():
 
 def test_predeploy_selector_runs_agentcard_lifecycle_tasks_as_smoke():
     from benchmarks.select_predeploy_benches_test import (
-        test_agentcard_sandbox_lifecycle_tasks_are_ordinary_smoke_with_isolated_fixtures,
+        test_agentcard_sandbox_lifecycle_tasks_are_smoke_floor_only_on_agentcard_infra_change,
     )
 
     for surface in ("local", "cloud"):
         with tempfile.TemporaryDirectory() as folder:
-            test_agentcard_sandbox_lifecycle_tasks_are_ordinary_smoke_with_isolated_fixtures(Path(folder), surface)
+            test_agentcard_sandbox_lifecycle_tasks_are_smoke_floor_only_on_agentcard_infra_change(Path(folder), surface)
+
+
+def test_predeploy_selector_gates_agentcard_tasks_on_agentcard_infra():
+    """Rule 5 (Andy 2026-11-15): AgentCard tasks run on /deploy only when AgentCard infra changed."""
+    from benchmarks.select_predeploy_benches_test import (
+        AGENTCARD_INFRA_DIFFS,
+        NON_AGENTCARD_DIFFS,
+        test_agentcard_infra_diff_keeps_hard_cap_scream,
+        test_agentcard_infra_diff_selects_every_agentcard_task,
+        test_catalog_agentcard_tasks_are_identified_from_catalog_fields,
+        test_deploy_prod_agentcard_lane_uses_selector_path_set,
+        test_non_agentcard_diff_selects_zero_agentcard_tasks,
+    )
+
+    test_catalog_agentcard_tasks_are_identified_from_catalog_fields()
+    test_deploy_prod_agentcard_lane_uses_selector_path_set()
+    for surface in ("local", "cloud"):
+        for changed in NON_AGENTCARD_DIFFS:
+            with tempfile.TemporaryDirectory() as folder:
+                test_non_agentcard_diff_selects_zero_agentcard_tasks(Path(folder), surface, changed)
+        for path in AGENTCARD_INFRA_DIFFS:
+            with tempfile.TemporaryDirectory() as folder:
+                test_agentcard_infra_diff_selects_every_agentcard_task(Path(folder), surface, path)
+    with tempfile.TemporaryDirectory() as folder:
+        test_agentcard_infra_diff_keeps_hard_cap_scream(Path(folder))
 
 
 async def _run_benchmark_subprocess_and_judge_cases(result, subprocess_cases, judge_cases):
@@ -28061,6 +28083,9 @@ async def run_all_tests():
     r.record("independent_runs_keep_distinct_records", test_independent_runs_keep_distinct_records)
     r.record("predeploy_selector_rejects_production_only", test_predeploy_selector_rejects_production_only_tasks)
     r.record("predeploy_selector_agentcard_lifecycle_smoke", test_predeploy_selector_runs_agentcard_lifecycle_tasks_as_smoke)
+    r.record(
+        "predeploy_selector_agentcard_infra_gate", test_predeploy_selector_gates_agentcard_tasks_on_agentcard_infra
+    )
     from benchmarks.select_predeploy_benches_test import (
         test_catalog_validation_requires_ready_task_deploy_category,
         test_selector_treats_explicit_deploy_opt_out_as_uncategorized,
@@ -29059,8 +29084,8 @@ async def run_all_tests():
         test_agent_payment_lifecycle_tasks_run_as_the_admin_account_with_forced_customer_path,
     )
     r.record(
-        "production_payment_lifecycle_user_is_non_admin",
-        test_production_payment_lifecycle_tasks_run_as_a_non_admin_identity,
+        "production_payment_lifecycle_user_is_owner",
+        test_production_payment_lifecycle_tasks_run_as_the_owner_identity,
     )
     r.record(
         "admin_bypass_gate_grants_synthetic_admin",
