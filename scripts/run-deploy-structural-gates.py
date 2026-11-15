@@ -609,6 +609,10 @@ GATES = (
     ),
     Gate("agents-structural", ("bash", "scripts/tests/agents-structural.test.sh")),
     Gate(
+        "deploy-agents-recover",
+        ("bash", "scripts/tests/deploy-agents-recover.test.sh"),
+    ),
+    Gate(
         "deploy-agent-clone-recovery",
         ("bash", "scripts/tests/deploy-agent-clone-recovery.test.sh"),
     ),

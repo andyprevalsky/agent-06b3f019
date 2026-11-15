@@ -134,11 +134,15 @@ jobs:
           release success "reusable worker-bank cutover completed"
           trap - ERR
 
+  # A failed deploy leaves its job as the FIFO head with a recorded failure.
+  # The best-effort GitHub schedule fires only every few hours, so recovery
+  # starts here and waits out the queue's 600s failed-attempt cadence.
   recover:
     name: Resume interrupted worker deployment
-    if: github.event_name == 'schedule'
+    needs: deploy
+    if: always() && (github.event_name == 'schedule' || needs.deploy.result == 'failure')
     runs-on: blacksmith-4vcpu-ubuntu-2404
-    timeout-minutes: 60
+    timeout-minutes: 240
     # This limits duplicate observers only. It never holds an unpersisted deploy.
     concurrency:
       group: recover-agent-pool
@@ -172,14 +176,5 @@ jobs:
           BACKEND_API_URL: https://navi-j9a9.onrender.com
         run: |
           set -euo pipefail
-          APP=$(sed -nE 's/^app = "([a-z0-9-]+)"/\1/p' agents/fly.toml)
-          cd back-end
-          npm ci --workspaces=false --ignore-scripts
-          npx prisma generate
-          HEAD_JOB=$(node --import tsx scripts/worker-deployment-queue.ts head --app "$APP")
-          JOB_ID=$(printf '%s' "$HEAD_JOB" | node --input-type=module -e '
-            let body=""; for await (const chunk of process.stdin) body+=chunk;
-            const job=JSON.parse(body); if(job) process.stdout.write(job.jobId);')
-          [ -n "$JOB_ID" ] || exit 0
-          node --import tsx scripts/worker-deployment-queue.ts run \
-            --job-id "$JOB_ID" --if-idle -- python3 ../scripts/worker_pool_cutover.py
+          (cd back-end && npm ci --workspaces=false --ignore-scripts && npx prisma generate)
+          bash scripts/deploy-agents-recover.sh
