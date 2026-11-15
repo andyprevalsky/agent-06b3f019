@@ -75,6 +75,9 @@ export async function runBrowserPrivateRestoreCases(): Promise<void> {
   let injections = 0;
   let releases = 0;
   let captureFails = false;
+  // The one native the provider reports ended ('deleted' is Tilion's 404/410 shutdown).
+  let endedSessionId: string | null = null;
+  let healthFails = false;
   const navigated: string[] = [];
   const frame = {
     url: () => row.currentUrl,
@@ -134,7 +137,15 @@ export async function runBrowserPrivateRestoreCases(): Promise<void> {
   loader._load = function (id, parent, isMain) {
     if (id === './browser/initialization')
       return { assertBrowserInitializationReady: async () => {} };
-    if (id === './browser/sessionPersist') return { isConfirmedBrowserEnd: () => false };
+    if (id === './browser/sessionPersist')
+      return {
+        isConfirmedBrowserEnd: (status: string | null) => status === 'deleted',
+        recordEndedLogicalBrowser: async (_taskId: string, sessionId: string) => {
+          assert.equal(sessionId, row.sessionId);
+          row.status = 'PAUSED';
+          return true;
+        },
+      };
     if (id === '../steel/lifecycleClaim' || id === './steel/lifecycleClaim')
       return {
         browserResumeScope: () => undefined,
@@ -197,7 +208,13 @@ export async function runBrowserPrivateRestoreCases(): Promise<void> {
         };
       if (id === './browser')
         return {
-          getBrowserSessionHealth: async (sessionId: string) => ({ sessionId, status: 'live' }),
+          getBrowserSessionHealth: async (sessionId: string) => {
+            if (healthFails) throw new Error('fixture health unavailable');
+            return {
+              sessionId,
+              status: sessionId === endedSessionId ? 'deleted' : 'live',
+            };
+          },
           resumeSession: async (_id: string, options: { forceFreshProfile: boolean }) => {
             creates += 1;
             if (row.logicalOwnerKey) assert.equal(options.forceFreshProfile, true);
@@ -241,6 +258,34 @@ export async function runBrowserPrivateRestoreCases(): Promise<void> {
     row.status = 'PAUSED';
     await assert.rejects(resumeBrowserSession(row.id), /saved checkpoint is missing/);
     assert.equal(creates, 1, 'missing source checkpoint must not allocate another browser');
+
+    // The provider ended the source before any pause (Tilion CDP 1012, connect
+    // 410 shutdown): its state cannot be captured, so resume restores the last
+    // durable checkpoint (the baseline) with exactly one replacement, whether the
+    // ended source is first seen ACTIVE or was already recorded PAUSED.
+    for (const sourceStatus of ['ACTIVE', 'PAUSED']) {
+      const replacementsBefore = creates;
+      row.status = sourceStatus;
+      restored = undefined;
+      endedSessionId = row.sessionId;
+      const resumed = await resumeBrowserSession(row.id);
+      endedSessionId = null;
+      assert.deepEqual(restored, { cookies: [], origins: [] }, `${sourceStatus} provider-ended`);
+      assert.deepEqual(
+        (resumed as { provider_session_lost?: unknown }).provider_session_lost,
+        { restored_checkpoint_revision: 0 },
+        'a provider-ended restore reports the lost state, never silently'
+      );
+      assert.equal(creates, replacementsBefore + 1, `${sourceStatus} provider-ended replacement`);
+      assert.equal(row.checkpointRef, null, 'restore from the baseline publishes no checkpoint');
+    }
+    row.status = 'PAUSED';
+    await assert.rejects(resumeBrowserSession(row.id), /saved checkpoint is missing/);
+    assert.equal(creates, 3, 'a live replacement without its checkpoint still refuses');
+    healthFails = true;
+    await assert.rejects(resumeBrowserSession(row.id), /fixture health unavailable/);
+    healthFails = false;
+    assert.equal(creates, 3, 'unknown provider health never accepts the state loss');
     row.status = 'ACTIVE';
 
     // The existing pause capture supplies the state needed by the exact same resume path.
@@ -254,7 +299,12 @@ export async function runBrowserPrivateRestoreCases(): Promise<void> {
     assert.equal(row.checkpointRevision, 1);
     assert.equal(row.status, 'PAUSED');
     assert.equal(releases, 1);
-    await resumeBrowserSession(row.id);
+    const checkpointed = await resumeBrowserSession(row.id);
+    assert.equal(
+      (checkpointed as { provider_session_lost?: unknown }).provider_session_lost,
+      undefined,
+      'a checkpointed resume lost nothing'
+    );
     assert.deepEqual(
       restored,
       authenticatedStorage,
@@ -281,7 +331,7 @@ export async function runBrowserPrivateRestoreCases(): Promise<void> {
     await resumeBrowserSession(row.id);
     assert.equal(injections, 1, 'legacy nonlogical credential injection remains supported');
     console.log(
-      'PASS private browser pause/restore (missing-capture control; capture failure retains provider; encrypted auth/cart roundtrip; first materialization; legacy)'
+      'PASS private browser pause/restore (missing-capture control; provider-ended source restores last durable checkpoint; capture failure retains provider; encrypted auth/cart roundtrip; first materialization; legacy)'
     );
   } finally {
     loader._load = originalLoad;

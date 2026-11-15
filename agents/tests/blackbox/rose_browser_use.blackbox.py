@@ -2174,7 +2174,8 @@ async def test_complete_browser_use_dumps_cerebras_context():
 
     set_mock_handler(handler)
     client = RoseClient(openrouter_key="ork-x")
-    dump_root = ROOT.parent / ".llm-dumps" / "unbound"
+    # Dumps need a bound agent: unbound records are refused (llm_archive blackbox).
+    dump_root = ROOT.parent / ".llm-dumps" / "bu-cerebras-dump-agent"
     for path in dump_root.glob("*test-bu-cerebras-dump.json"):
         path.unlink()
 
@@ -2186,6 +2187,7 @@ async def test_complete_browser_use_dumps_cerebras_context():
             available_actions=["click", "click_coordinates"],
             include_screenshot=False,
             gpt_auth=gpt_auth_from_token("good-gpt-token", "acct_123"),
+            agent_id="bu-cerebras-dump-agent",
             call_site="test-bu-cerebras-dump",
             dump_extra={
                 "browser_recording_manifest_path": "/tmp/browser-recording/manifest.json",
@@ -2238,7 +2240,7 @@ async def _assert_failed_browser_context_capture(*, dump_unavailable=False, canc
             patch.object(observability, "_IS_PRODUCTION", False),
             patch.object(observability, "archive_json", return_value=None),
             patch.object(observability, "current_span_id", return_value="offline-browser-span"),
-            patch.object(observability, "current_root_agent_id", return_value=root_id),
+            patch.object(observability, "current_bound_root_agent_id", return_value=root_id),
             patch.object(
                 observability,
                 "dump_llm_context",
@@ -2511,7 +2513,7 @@ async def test_complete_browser_use_runs_on_spawning_agents_pool():
         return httpx.Response(500, text="ultra must not reach Cerebras or OpenRouter")
 
     set_mock_handler(handler)
-    dump_root = ROOT.parent / ".llm-dumps" / "unbound"
+    dump_root = ROOT.parent / ".llm-dumps" / "bu-spawning-pool-agent"
     for path in dump_root.glob("*write_lock_notification_fork_3.json"):
         path.unlink()
     token = set_context(DemoCacheContext(enabled=True, goal="click submit", write_enabled=True))
@@ -2540,6 +2542,7 @@ async def test_complete_browser_use_runs_on_spawning_agents_pool():
                     },
                 ],
                 claude_auth=claude_auth_from_token("good-token"),
+                agent_id="bu-spawning-pool-agent",
                 call_site="write_lock_notification_fork_3",
                 pool="rose-1-ultra",
             )
@@ -2737,8 +2740,9 @@ async def run_all_tests():
         "normalize_provider_input_text_batch_mixed_indexes",
         test_normalize_provider_input_text_batch_mixed_indexes_keeps_first_action,
     )
-    from benchmarks.browser_action_batch_test import form_chain, observe_chain, full_activity_batch
+    from benchmarks.browser_action_batch_test import form_chain, observe_chain, full_activity_batch, phone_batch_contract
     await r.record_async("ordered native batch uses one model decision", form_chain)
+    await r.record_async("phone calls share one model turn in order with per-call fences", phone_batch_contract)
     await r.record_async("same-turn observed target binds before click", observe_chain)
     await r.record_async("actual browser activity consumes ordered batch", full_activity_batch)
     r.record("normalize_request_auth_assistance", test_normalize_request_user_assistance)
@@ -3427,7 +3431,7 @@ async def test_native_autofill_control_history_matches_real_serializer():
 
 @quarantine(
     since="2026-11-14",
-    repair="pending-handoff:f48b6ecc19c2402cb3abc744c0abb18d",
+    repair="https://boxes.dev/thread/thr_8cefa6e4ed4f4244ae0919c0d2b3c8b3",
     error="AssertionError: ['phone arguments rejected: - args: Input should be a valid dictionary']",
     evidence="https://github.com/Rose-Ai-Labs/rose/actions/runs/43649937439",
 )
@@ -3585,7 +3589,7 @@ async def test_phone_setup_settings_actual_handler_observation():
         assert "Preserve the original authorized phone task" in wire
         import hashlib
         from domains.spawn_browser_agent_v3.phone import PHONE_GUIDANCE
-        assert hashlib.sha256(PHONE_GUIDANCE.encode()).hexdigest() == "2b3e22e08844fddf9493440c5e3d8452b428fafd5b2120c8599a55c223465fbc", "Ordinary enabled guide must match the saved-credential binding contract"
+        assert hashlib.sha256(PHONE_GUIDANCE.encode()).hexdigest() == "922c0da15d15aefdd525ec218faa0b43bf64e5e0c0aa6b9fb8a57e795f82e35d", "Ordinary enabled guide must match the saved-credential binding contract"
         for marker in (None, False, "true"):
             plain_setup = {key: value for key, value in setup.items() if key != "googlePasscodeExceptionAllowed"}
             if marker is not None:

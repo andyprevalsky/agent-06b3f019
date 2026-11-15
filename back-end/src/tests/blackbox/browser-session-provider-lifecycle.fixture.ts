@@ -526,10 +526,11 @@ Module._load = function (id, parent, isMain) {
           where: { id: row.id },
         });
         unknownHealth = true;
-        assert.equal(
-          (await getTaskInfo(row.id, { validateLive: true })).status,
-          'ACTIVE',
-          'unknown health is not confirmed expiry'
+        const unknown = await getTaskInfo(row.id, { validateLive: true });
+        // Unknown health is neither a confirmed expiry nor a reported provider end.
+        assert.deepEqual(
+          [unknown.status, unknown.provider_session_ended === true],
+          ['ACTIVE', false]
         );
         unknownHealth = false;
         await natives.get(beforeExpiry.sessionId!)!.close();
@@ -537,6 +538,7 @@ Module._load = function (id, parent, isMain) {
         const ended = await getTaskInfo(row.id, { validateLive: true });
         assert.equal(ended.status, 'PAUSED', 'confirmed native end pauses logical task');
         assert.equal(ended.same_session_available, false);
+        assert.equal(ended.provider_session_ended, true, 'the worker can tell a confirmed end');
         assert.equal(
           (await prisma.browserSession.findUniqueOrThrow({ where: { id: row.id } })).checkpointRef,
           beforeExpiry.checkpointRef

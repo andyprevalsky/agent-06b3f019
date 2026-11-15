@@ -19,11 +19,12 @@ tags:
   - phone-auth
   - paused-agent
 sources:
+  - PR #2123
   - agent c1ad83f7-901b-5dca-9fa6-8977975d5f44
   - agent f1802539-7e5d-5a76-9028-133ad4e9fb75
   - PR #2101
 repro: back-end/src/tests/blackbox/iphone-control.device.cases.ts "paused agent keeps the phone for its own pending phone auth, then the bounded grace admits the next waiter"
-status: open
+status: fixed
 ---
 
 ## Problem
@@ -39,6 +40,8 @@ Why possible: commit dcd4c57fcc (11-09) fixed a 3-day block, where a paused agen
 ## Solution
 
 Release a paused agent's lease immediately only when the lease has no phone-auth attention. A pause for the lease's own pending auth falls through to the existing pending-auth branch: held for the 15-minute user grace, then expired, which admits the next waiter. Answered or rejected auth keeps its existing transitions; a still-paused agent is then released on the next reconcile. The regression asserts that the paused pending-auth lease is held within the grace, released after it with the waiter admitted, and that a paused agent without pending auth still releases at once (negative control). Per-lease constant work under the existing device lock, so there is no 10k-agent impact.
+
+Shipped: PR #2123 (merge 5860080c279a), production lanes PASS; regression RED 172/173 -> GREEN 174/174 x5. The 2026-11-15 live proof did not need an owner pause, so the hold is proven by the blackbox regression only.
 
 ## Human feedback
 

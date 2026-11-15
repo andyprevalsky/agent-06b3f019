@@ -8,7 +8,6 @@
  *   +--> "/" --> <Terminal />
  *   +--> "/privacy" --> <Privacy />
  *   +--> "/terms" --> <Terms />
- *   +--> "/about" --> <About />
  *   +--> "/terminal" --> <Index />
  *   +--> "/research" --> <ResearchBlog />
  *   +--> "/research/:slug" --> <ResearchBlogPost />

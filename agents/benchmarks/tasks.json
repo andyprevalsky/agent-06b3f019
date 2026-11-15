@@ -950,6 +950,12 @@
   },
   {
     "name": "background-agent-message-smoke",
+    "quarantine": {
+      "since": "2026-11-15",
+      "repair": "https://boxes.dev/thread/ph77xckbcc8jvnqeaaw3x92tg18j0eb4",
+      "error": "Timeout after 182s (task timeout=180s) | Investigate: python agents/benchmarks/agent_latency.py 058a97e4-1978-4db6-b342-35da913f3a71 | Cache/cost: python agents/benchmarks/run_benchmark.py --compare <run.json> | Agent status: ACTIVE (expected COMPLETED)",
+      "evidence": "PR #2097 deploy 17ba8b2cd6 smoke: first attempt (root 058a97e4) still ACTIVE at 180s: response_schema refresh after the mid-run follow-up (Cerebras 429 -> Foundry fallback, 16.5s) blocked the root's next turn, explore finished first, verifier rejected the post-completion forward (50%), second cycle completed ~16s late; same-source rerun PASSED (FLAKY 48f4f224); NOT_INTRODUCED, #2097 changes only front-end/ (0 /api/teams or browser traffic); same symptom as docs/rca/cases/2026-11-10-background-message-completion-exceeded-deadline.md, repair owner PR #1946"
+    },
     "title": "Root Forwards A Mid-Run Message To A Background Agent",
     "prompt": "Use exactly one explore agent to inspect the official RFC Editor pages for RFC 9110 and RFC 9111. For each document, return its RFC number, exact title, publication month and year, official source URL, and a note. Have that single explore agent do all research: spawn it with run_in_background set to true, then wait for it to finish before you answer.",
     "timeout_seconds": 180,
@@ -6015,6 +6021,12 @@
   },
   {
     "name": "browser-auth-guest-purchase",
+    "quarantine": {
+      "since": "2026-11-13",
+      "repair": "https://boxes.dev/thread/thr_717118a13d76431a95869b1abba1577b",
+      "error": "Tool 'spawn_browser_agent' exceeded its exact root call limit during execution: expected 1, got 2. Full counts: {'agent_init': 1, 'cloud_agent': 1, 'spawn_browser_agent': 2, 'spawn_agent': 2, 'wait_for': 2} | Agent status: ACTIVE (expected COMPLETED) | Browser agent aeb2dafa-36c8-5945-ab58-a24fa46f2518 recorded 0 trajectory step(s); expected at least 5 per browser agent",
+      "evidence": "PR #1992 smoke gate on e7af654e05 FLAKY 896710fd9bdc4326914365053da347e2 (first attempt FAILED run 20261113-015501-1857759, same-ref rerun PASSED); passed natively on 1b85b08dd with this PR's bytes unchanged"
+    },
     "title": "Hosted Purchase: Buy Without An Account",
     "description": "No saved credentials and the shop lets shoppers buy without an account; the browser agent buys as a guest instead of creating an account.",
     "prompt": "Buy me a Canvas Tote from {auth_test_site_url}",
@@ -8272,6 +8284,12 @@
   },
   {
     "name": "agent-payment-test-shop",
+    "quarantine": {
+      "since": "2026-11-15",
+      "repair": "https://boxes.dev/thread/thr_ca4cc0b2e036448c8d617a473e298ec0",
+      "error": "Timeout after 904s (task timeout=900s) | Agent status: ACTIVE (expected COMPLETED) | Browser agent 5da61f13 (Tilion POST /v1/session 503 capacity_unavailable x2, then timed out after 15000ms; the FAILED browser-initialization record stayed latched so every later init failed 'Browser initialization failed before readiness'). First native attempt FAILED; one automatic retry PASS (FLAKY).",
+      "evidence": "PR #2110 deploy smoke .context/deploy-cloud/b05d3a22af70afd20fc25877a2789bf41e21591032a98d08c58e53a9160e4baf (agent cf2f2f5d-6054-4f1f-bf17-37399f231f2f); RCA: initialization.ts initializeLogicalBrowser latches an ambiguous TilionTimeoutError create (unhandled by PR #2010's typed-validation release)"
+    },
     "title": "Agent Payment Test Shop",
     "prompt": "Use a browser agent (spawn_agent with type=\"browser\" \u2014 do NOT delegate this to a general_purpose sub-agent) to go to {frontend_url}/test_payment and complete the visible Rose Labs Test Payment checkout. Buy exactly these 3 products and no others: Aurora Notebook, Ceramic Mug, and Canvas Tote.",
     "timeout_seconds": 900,
@@ -8583,12 +8601,6 @@
   },
   {
     "name": "agent-payment-setup-resume",
-    "quarantine": {
-      "since": "2026-11-13",
-      "repair": "https://boxes.dev/thread/ph701cd5nwt9pn2tjrzcjv5pch8j46n5",
-      "error": "Timeout after 901s (task timeout=900s)",
-      "evidence": "PR #1972 deploy f93b9ad17f smoke: first attempt timed out with the agent still ACTIVE, same-source rerun PASSED (FLAKY 9a4a72a7); NOT_INTRODUCED, #1972 changes only back-end/src/providers/phonePortrait{Proof,Route}.ts and portrait tests"
-    },
     "title": "Agent Payment Setup And Auto Resume",
     "group": "pre-deploy",
     "prompt": "Use a browser agent to go to {frontend_url}/test_payment and complete the visible Rose Labs Test Payment checkout. Buy exactly these 3 products and no others: Aurora Notebook, Ceramic Mug, and Canvas Tote. Use only the visible checkout UI; do not navigate to source files or API endpoints. If One Time Agent Payment Setup is required after payment approval, wait for the user to complete it and then continue automatically with the same checkout.",
@@ -8721,7 +8733,7 @@
     "name": "agent-payment-idempotent-abandonment",
     "quarantine": {
       "since": "2026-11-13",
-      "repair": "pending-handoff:a9d11683c4174469ac2c7d5eca89d2d5",
+      "repair": "https://boxes.dev/thread/thr_717118a13d76431a95869b1abba1577b",
       "error": "Timeout after 905s (task timeout=900s)",
       "evidence": "PR #2014 deploy b6ed04d2d smoke: first attempt (root 464ba8f6) timed out after its browser never started on Tilion dead east worker sess_993d7086* (DELETE /v1/session 503; 'Browser session init failed after 5 transient-proxy retries'), same-source rerun PASSED (FLAKY a9d11683); NOT_INTRODUCED, #2014 changes only deploy custody/renewal scripts; fix PR #2010 on main"
     },
@@ -9146,12 +9158,6 @@
   },
   {
     "name": "browser-biometrics-webdecoy",
-    "quarantine": {
-      "since": "2026-11-13",
-      "repair": "pending-handoff:2e42c9c8d6d442fc92fa0b6735969b7e",
-      "error": "Timeout after 425s (task timeout=420s)",
-      "evidence": "PR #2014 deploy 16f0be6d3 smoke: first attempt (root 332cd6e6) timed out after browser 7c73d66a recorded 0 steps on Tilion dead east worker sess_993d70* (create 201, validation/DELETE 503; 'Browser initialization failed before readiness'), same-source rerun PASSED (FLAKY 2e42c9c8); NOT_INTRODUCED, #2014 changes only deploy custody/renewal scripts; fix PR #2010 on main"
-    },
     "title": "Browser Biometrics WebDecoy",
     "prompt": "Use a browser agent to go to https://webdecoy.com/product/fcaptcha-demo/. This is a live third-party behavioral biometrics demo. Interact with it like a normal user: move to and click the checkbox mode verification control if present, then use the invisible mode form by entering benchmark-human@example.com as the email and a short message, and submit it. Do not use JavaScript evaluate to click or fill controls. Use visible browser actions only. Return the final visible FCaptcha risk score exactly as shown, whether the checkbox mode appeared to pass, whether the invisible form was submitted, and any visible bot/human verdict text.",
     "timeout_seconds": 420,

@@ -19,6 +19,57 @@ function delay(ms: number): Promise<void> {
 }
 
 /**
+ * The residual-recovery accelerator is cardholder-scoped and never substitutes for a transfer's own
+ * release status. Concurrent release observations (cron, abandon, resume) each re-fired it on every
+ * poll of a still-consumed transfer, spending the org-wide 120 requests/minute budget on repeats.
+ * Run it at most once per cardholder per rate window; a concurrent caller shares the in-flight call
+ * for at most its own deadline.
+ */
+const CARDHOLDER_RECOVERY_WINDOW_MS = 60_000;
+type CardholderRecovery = { startedAtMs: number; done: Promise<unknown>; settled: boolean };
+const cardholderRecoveries = new Map<string, CardholderRecovery>();
+
+async function coalesceCardholderRecovery(
+  cardholderId: string,
+  waiterDeadlineAtMs: number,
+  recover: () => Promise<unknown>
+): Promise<void> {
+  const now = Date.now();
+  for (const [key, entry] of cardholderRecoveries) {
+    // An in-flight recovery never expires: replacing it would start a duplicate call.
+    if (entry.settled && now - entry.startedAtMs >= CARDHOLDER_RECOVERY_WINDOW_MS) {
+      cardholderRecoveries.delete(key);
+    }
+  }
+  const existing = cardholderRecoveries.get(cardholderId);
+  if (existing !== undefined) {
+    if (existing.settled) return;
+    // Join the shared call only within this caller's own budget; its result is not required.
+    const remainingMs = waiterDeadlineAtMs - Date.now();
+    if (remainingMs <= 0) return;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    await Promise.race([
+      existing.done.catch(() => undefined),
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, remainingMs);
+      }),
+    ]);
+    if (timer !== undefined) clearTimeout(timer);
+    return;
+  }
+  const entry: CardholderRecovery = { startedAtMs: now, done: recover(), settled: false };
+  cardholderRecoveries.set(cardholderId, entry);
+  try {
+    await entry.done;
+    entry.settled = true;
+  } catch (error) {
+    // A failed accelerator does not consume the window: the next observation may retry it.
+    if (cardholderRecoveries.get(cardholderId) === entry) cardholderRecoveries.delete(cardholderId);
+    throw error;
+  }
+}
+
+/**
  * Organization backpressure that says nothing about one transfer: the provider's throttle, its
  * intermittent org-token 401 on a healthy secret (left after the runtime's read auth-flap window),
  * and a transient 503. Same set as the benchmark float's backpressure classification.
@@ -350,8 +401,11 @@ export class AgentCardCompanyWalletFundingProvider implements WalletFundingProvi
             cardholderResolved = true;
           }
           if (cardholderId !== undefined) {
-            await recoverCardholderFunds(cardholderId, (toolName, args) =>
-              this.toolCaller(toolName, args, retryDeadlineAtMs)
+            const recoveryCardholderId = cardholderId;
+            await coalesceCardholderRecovery(recoveryCardholderId, retryDeadlineAtMs, () =>
+              recoverCardholderFunds(recoveryCardholderId, (toolName, args) =>
+                this.toolCaller(toolName, args, retryDeadlineAtMs)
+              )
             );
           }
         } catch (error) {

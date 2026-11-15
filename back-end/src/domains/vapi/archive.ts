@@ -1,6 +1,9 @@
 import { VAPI_BASE_URL } from './config';
 import { createLogger } from '../../providers/logger';
 import { archiveBytes, archiveJson } from '../../providers/traceArchive';
+import { resolveArchiveRoot } from '../../providers/archiveRootResolver';
+import { userArchiveRoot } from '../../providers/llmArchiveRecord';
+import { getEphemeral, putEphemeral } from '../../providers/sharedState';
 import {
   VAPI_CALL_OPERATION_TYPE,
   agentIdFromOperationKey,
@@ -69,6 +72,43 @@ export async function agentIdForCallId(callId: string): Promise<string | null> {
   return agentIdFromOperationKey(operationKey ?? undefined);
 }
 
+/**
+ * Archive root of a voice call:
+ *   idempotency key names the agent ─► that agent tree's ROOT (busId ?? id)
+ *   no key, caller user known        ─► the documented per-user root `user-<userId>`
+ * Calls placed without either have no owner to file under (logged loudly).
+ */
+export async function archiveRootForCall(call: {
+  operationKey?: string;
+  userId?: string;
+}): Promise<string | null> {
+  const agentId = agentIdFromOperationKey(call.operationKey);
+  if (agentId !== null) return resolveArchiveRoot(agentId);
+  if (call.userId !== undefined && call.userId !== '') return userArchiveRoot(call.userId);
+  log.error('Vapi call has no agent or user to archive under', {
+    operation_key: call.operationKey ?? null,
+  });
+  return null;
+}
+
+const CALL_ROOT_NAMESPACE = 'vapi-call-archive-root';
+/** Polls, transcripts and recordings of a call arrive for days after placement. */
+const CALL_ROOT_TTL_MS = 30 * 24 * 60 * 60_000;
+
+/** Remember where a call's later polls/transcript/recording are filed (one row per call). */
+export async function rememberCallArchiveRoot(callId: string, rootAgentId: string | null) {
+  if (rootAgentId === null || callId === '') return;
+  await putEphemeral(CALL_ROOT_NAMESPACE, callId, { rootAgentId }, CALL_ROOT_TTL_MS);
+}
+
+/** Root for a call id: recorded at placement, else the idempotency ledger's agent → root. */
+export async function archiveRootForCallId(callId: string): Promise<string | null> {
+  const remembered = await getEphemeral<{ rootAgentId?: string }>(CALL_ROOT_NAMESPACE, callId);
+  if (typeof remembered?.rootAgentId === 'string') return remembered.rootAgentId;
+  const agentId = await agentIdForCallId(callId);
+  return agentId === null ? null : resolveArchiveRoot(agentId);
+}
+
 export async function archiveVapiJson(
   rootAgentId: string | null,
   path: string,
@@ -111,7 +151,7 @@ export async function archiveVapiPollResult(
   result: Record<string, unknown>,
   exchange?: VapiPollExchange
 ): Promise<void> {
-  const rootAgentId = await agentIdForCallId(callId);
+  const rootAgentId = await archiveRootForCallId(callId);
   await archiveVapiJson(rootAgentId, `${callId}.poll.${Date.now()}.json.gz.enc`, {
     request: exchange?.request ?? { method: 'GET', url: `${VAPI_BASE_URL}/call/${callId}` },
     http: exchange?.response,

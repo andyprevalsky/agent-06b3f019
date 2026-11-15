@@ -126,6 +126,7 @@ async def main():
             {
                 "TRACE_ARCHIVE_ENABLED": "1",
                 "TRACE_ARCHIVE_BACKEND": "r2",
+                "TRACE_ARCHIVE_ALLOW_NONPROD_R2": "1",
                 "TRACE_ARCHIVE_ASYNC_WRITES": "1",
                 "TRACE_ARCHIVE_WORKERS": str(ARCHIVE_WORKERS),
                 "TRACE_ARCHIVE_MAX_IN_FLIGHT": "64",
@@ -158,7 +159,7 @@ async def main():
         recording = load(
             "domains.spawn_browser_agent_v3.recording", SOURCE / "agents/domains/spawn_browser_agent_v3/recording.py"
         )
-        assert archive._BATCH_MAX_BYTES == 64 * 1024 * 1024
+        assert archive._BATCH_MAX_BYTES == 96 * 1024 * 1024 + 64 * 1024  # backend batch JSON contract
         assert archive._BATCH_MAX_RECORDS == 256
         if MODE in ["backlog", "queued", "mutation", "failed_ack", "foreign_ack", "incomplete_ack", "byte_budget"]:
             archive._BATCH_MAX_RECORDS = 1

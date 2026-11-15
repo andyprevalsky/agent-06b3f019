@@ -211,13 +211,14 @@ describe('Terminal page', () => {
       expect(Number(inputAreaMask.getAttribute('height'))).toBe(landingControlsClearance + 5000);
     });
 
-    it('renders About, Privacy, and Terms links', async () => {
+    it('renders the About description trigger and Privacy and Terms links', async () => {
       renderWithProviders(<Terminal />);
       const legalLinks = await screen.findByTestId('terminal-legal-links');
-      expect(within(legalLinks).getByRole('link', { name: 'About' })).toHaveAttribute(
-        'href',
-        '/about',
+      expect(within(legalLinks).getAllByRole('button', { name: 'About' }).length).toBeGreaterThan(
+        0,
       );
+      expect(within(legalLinks).queryByRole('link', { name: 'About' })).not.toBeInTheDocument();
+      expect(document.querySelector('a[href="/about"]')).toBeNull();
       expect(within(legalLinks).getByRole('link', { name: 'Privacy' })).toHaveAttribute(
         'href',
         '/privacy',
@@ -239,12 +240,13 @@ describe('Terminal page', () => {
       expect(within(legalLinks).getByRole('link', { name: 'Privacy' })).toBeInTheDocument();
       expect(legalLinks).not.toHaveClass('absolute');
       expect(legalLinks).toHaveClass('shrink-0');
-      await user.click(within(legalLinks).getByRole('button', { name: 'About' }));
+      // jsdom applies no CSS, so the desktop tooltip trigger is present too; open the popover one.
+      const mobileAbout = within(legalLinks)
+        .getAllByRole('button', { name: 'About' })
+        .find((button) => button.getAttribute('aria-haspopup') === 'dialog');
+      await user.click(mobileAbout!);
       expect(await screen.findByText(ROSE_APP_DESCRIPTION)).toBeInTheDocument();
-      expect(screen.getByRole('link', { name: 'Full About page' })).toHaveAttribute(
-        'href',
-        '/about',
-      );
+      expect(screen.queryByRole('link', { name: 'Full About page' })).not.toBeInTheDocument();
     });
 
     it('reserves a two-line-safe opening caption box on mobile', async () => {

@@ -202,7 +202,34 @@ async function testLocalClientOpensAfterEngineTlsProbe(): Promise<void> {
   );
 }
 
+// The cloud guest's payment fixture died 1 s into seeding with no output (PR #1981 smoke round
+// r12, 2026-11-13): its AgentCard org imports construct database.ts's module client, and main()
+// then constructed a second client before either had connected, the same getenv/setenv window as
+// the seed. The fixture now opens its own client only after the module client has connected.
+function testPaymentFixtureOpensItsClientAfterTheModuleClient(): void {
+  const fixture = readFileSync(
+    resolve(__dirname, '../../../scripts/setup-benchmark-payment.ts'),
+    'utf8'
+  );
+  assert(
+    fixture.includes("import { prisma as sharedPrisma } from '../src/providers/database';"),
+    'setup-benchmark-payment must name the module client it shares the process with'
+  );
+  assert(
+    !/new PrismaClient\(\);/.test(fixture) &&
+      fixture.includes(
+        'const prisma = await connectThenOpen(sharedPrisma, () => new PrismaClient());'
+      ),
+    'setup-benchmark-payment must open its client through connectThenOpen(sharedPrisma, ...)'
+  );
+  assert(
+    fixture.includes('await Promise.all([prisma.$disconnect(), sharedPrisma.$disconnect()]);'),
+    'setup-benchmark-payment must release both clients so the fixture process exits'
+  );
+}
+
 async function main(): Promise<void> {
+  testPaymentFixtureOpensItsClientAfterTheModuleClient();
   await testLocalClientOpensAfterEngineTlsProbe();
   await testProductionColumnCompatibility();
   await testSyncFailureIsFatal();

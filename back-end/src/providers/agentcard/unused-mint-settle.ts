@@ -200,6 +200,62 @@ function isOrgThrottle(error: unknown): boolean {
   );
 }
 
+/** Paced throttle waits one caller may still spend; shared by every read it paces. */
+export interface OrgThrottleBudget {
+  remainingMs: number;
+}
+
+export interface OrgThrottlePacing {
+  budget: OrgThrottleBudget;
+  report?: (line: string) => void;
+  sleep?: (ms: number) => Promise<void>;
+  now?: () => number;
+  /** Jitter in [0, 1) (PR #2129's runtime clock design); omitted means none, for exact tests. */
+  random?: () => number;
+}
+
+/**
+ * Re-issue one org read that the runtime's own bounded retry could not carry through an
+ * org-wide throttle (typed `agentcard_org_mcp_rate_limited`), waiting for the advertised reset
+ * (`"retryAfter": <epoch ms>` in the provider text) plus up to 1 s of jitter, or else one throttle
+ * window grown by up to half. Concurrent deploys share one org window, so the jitter keeps their
+ * retries from re-colliding at the refill. Every wait is charged to the caller's shared budget:
+ * a reset that does not fit it, or an exhausted budget, rethrows the throttle untouched. Any
+ * other error propagates on first sight.
+ */
+export async function paceOrgThrottle<T>(
+  read: () => Promise<T>,
+  pacing: OrgThrottlePacing
+): Promise<T> {
+  const now = pacing.now ?? Date.now;
+  const sleep =
+    pacing.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  for (;;) {
+    try {
+      return await read();
+    } catch (error) {
+      if (!isOrgThrottle(error)) throw error;
+      const remainingMs = pacing.budget.remainingMs;
+      const jitter = Math.min(Math.max(pacing.random?.() ?? 0, 0), 1);
+      const match = /"retryAfter"\s*:\s*(\d+)/.exec(
+        error instanceof Error ? error.message : String(error)
+      );
+      const resetWaitMs = match === null ? Number.NaN : Number(match[1]) - now() + 250;
+      const hinted = Number.isFinite(resetWaitMs) && resetWaitMs > 0;
+      if (remainingMs <= 0 || (hinted && resetWaitMs > remainingMs)) throw error;
+      const waitMs = hinted
+        ? Math.min(resetWaitMs + jitter * 1_000, remainingMs)
+        : Math.min(UNUSED_MINT_SETTLE_THROTTLE_BACKOFF_MS * (1 + jitter / 2), remainingMs);
+      pacing.budget.remainingMs = remainingMs - waitMs;
+      pacing.report?.(
+        `  (org MCP throttled; waiting ${Math.round(waitMs)} ms before one more read, ` +
+          `${Math.round(pacing.budget.remainingMs)} ms of throttle budget left)`
+      );
+      await sleep(waitMs);
+    }
+  }
+}
+
 export interface UnusedMintSettleWait<T extends MintTransferObservation> {
   /** The closed card's own cardholder: the only residual that can release its mint. */
   cardholderId: string;
