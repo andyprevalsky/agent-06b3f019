@@ -1415,6 +1415,10 @@ resolve_github_token() {
         decoded="$(printf '%s' "$CLOUDBENCH_GITHUB_TOKEN_B64" | base64 -d 2>/dev/null || true)"
         [ -n "$decoded" ] && candidates+=("$decoded")
     fi
+    # The warm box fetches after this returns; prefer the App token that a
+    # devbox credential rotation cannot revoke (see cloudbench_guest_github_token).
+    t="$(cloudbench_guest_durable_github_token "$ROOT_DIR" 2>/dev/null || true)"
+    [ -n "$t" ] && candidates+=("$t")
     t="$(cloudbench_git_credential_github_token "$ROOT_DIR" 2>/dev/null || true)"
     [ -n "$t" ] && candidates+=("$t")
     # gh prefers ambient GH_TOKEN/GITHUB_TOKEN/GH_HOST over hosts.yml — unset them
@@ -5660,7 +5664,7 @@ cloudbench_guest_lane() {
 if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ]; then
     POST_CONFIG_START_MARKER="$OUT_DIR/post-config-start.accepted"
     rm -f "$POST_CONFIG_START_MARKER"
-    _ghb64="$(printf '%s' "$(cloudbench_controller_github_token)" | base64 | tr -d '\n')"
+    _ghb64="$(printf '%s' "$(cloudbench_guest_github_token "$ROOT_DIR")" | base64 | tr -d '\n')"
     [ -n "$_ghb64" ] || { echo "❌ No controller GitHub token for boot-launch." >&2; exit 1; }
     _envargs=(
         --env CLOUDBENCH_BOOT=1
@@ -6165,7 +6169,7 @@ fi
 # frontend was fragile AND RLS-blocked; see agent_link_server.py.)
 # LIVE_BACKEND_PORT/URL + CLOUDBENCH_API_KEY are now set once before the launch
 # branch (shared by boot-launch + the post-launch proxy code).
-CONTROLLER_GITHUB_TOKEN="$(cloudbench_controller_github_token)"
+CONTROLLER_GITHUB_TOKEN="$(cloudbench_guest_github_token "$ROOT_DIR")"
 [ -n "$CONTROLLER_GITHUB_TOKEN" ] || { echo "❌ No current controller GitHub token available." >&2; exit 1; }
 CONTROLLER_GITHUB_TOKEN_B64="$(printf '%s' "$CONTROLLER_GITHUB_TOKEN" | base64 | tr -d '\n')"
 
