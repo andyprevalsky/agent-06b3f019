@@ -14,6 +14,9 @@
  * Rose Desktop (window.api.openExternal): sign-in opens the system browser and
  * returns to the public web origin's callback; this hook then re-lists every
  * MCP_SIGN_IN_POLL_MS until that row is connected (or MCP_SIGN_IN_TIMEOUT_MS).
+ * Each poll run has an identity (a newer sign-in replaces it), and responses
+ * from an older request or from before a mutation never overwrite newer state.
+ * A browser that fails to open ({success:false} or a rejection) is a connect error.
  *
  * The backend owns connection state; the client never guesses it.
  */
@@ -93,8 +96,13 @@ export function useMcpServers() {
   }, []);
 
   const poll = useRef<ReturnType<typeof setInterval> | null>(null);
+  /** Identity of the current desktop sign-in poll; a replaced run ignores its own callbacks. */
+  const pollRun = useRef(0);
+  /** Bumped by every successful mutation; list responses started earlier are dropped. */
+  const mutation = useRef(0);
   useEffect(
     () => () => {
+      pollRun.current += 1;
       if (poll.current !== null) clearInterval(poll.current);
     },
     [],
@@ -103,35 +111,50 @@ export function useMcpServers() {
   /** Desktop: wait for the system-browser sign-in to land server-side. */
   const awaitDesktopSignIn = useCallback((id: string) => {
     if (poll.current !== null) clearInterval(poll.current);
+    const run = ++pollRun.current;
     const startedAt = Date.now();
-    poll.current = setInterval(() => {
-      if (!mounted.current || Date.now() - startedAt > MCP_SIGN_IN_TIMEOUT_MS) {
-        if (poll.current !== null) clearInterval(poll.current);
-        poll.current = null;
-        return;
-      }
+    let applied = 0;
+    let sent = 0;
+    const handle = setInterval(() => {
+      const stop = () => {
+        clearInterval(handle);
+        if (poll.current === handle) poll.current = null;
+      };
+      if (run !== pollRun.current || !mounted.current) return stop();
+      if (Date.now() - startedAt > MCP_SIGN_IN_TIMEOUT_MS) return stop();
+      const request = ++sent;
+      const startedMutation = mutation.current;
       void fetchMcpServers()
         .then((rows) => {
-          if (!mounted.current) return;
+          // Drop responses from a replaced run, an older request, or before a mutation.
+          if (run !== pollRun.current || !mounted.current) return;
+          if (request < applied || startedMutation !== mutation.current) return;
+          applied = request;
           setServers(rows);
-          if (rows.some((row) => row.id === id && row.status === 'connected')) {
-            if (poll.current !== null) clearInterval(poll.current);
-            poll.current = null;
-          }
+          if (rows.some((row) => row.id === id && row.status === 'connected')) stop();
         })
         .catch(() => undefined);
     }, MCP_SIGN_IN_POLL_MS);
+    poll.current = handle;
   }, []);
 
+  /** Upserts the row; for authorize_url, starts sign-in (throws if the browser cannot open). */
   const apply = useCallback(
-    (result: McpServerResult) => {
+    async (result: McpServerResult): Promise<void> => {
+      mutation.current += 1;
       setServers((rows) => [...rows.filter((row) => row.id !== result.server.id), result.server]);
       if (!result.authorize_url) return;
       const openExternal = window.api?.openExternal;
       if (!openExternal) return startSignIn(result.authorize_url);
-      void Promise.resolve(openExternal(result.authorize_url)).then(() =>
-        awaitDesktopSignIn(result.server.id),
-      );
+      const opened = await openExternal(result.authorize_url);
+      if (
+        typeof opened === 'object' &&
+        opened !== null &&
+        'success' in opened &&
+        opened.success === false
+      )
+        throw new Error('Could not open your browser to sign in. Try again.');
+      awaitDesktopSignIn(result.server.id);
     },
     [awaitDesktopSignIn],
   );
@@ -142,7 +165,7 @@ export function useMcpServers() {
     setConnectError(null);
     try {
       const result = await connectMcpServer(input, mcpRedirectUri());
-      if (mounted.current) apply(result);
+      if (mounted.current) await apply(result);
       return true;
     } catch (cause) {
       if (mounted.current) setConnectError(message(cause, 'Could not connect MCP server'));
@@ -170,7 +193,7 @@ export function useMcpServers() {
       id,
       async () => {
         const result = await reconnectMcpServer(id, mcpRedirectUri());
-        if (mounted.current) apply(result);
+        if (mounted.current) await apply(result);
       },
       'Could not reconnect MCP server',
     );
@@ -180,6 +203,7 @@ export function useMcpServers() {
       id,
       async () => {
         await deleteMcpServer(id);
+        mutation.current += 1;
         if (mounted.current) setServers((rows) => rows.filter((row) => row.id !== id));
       },
       'Could not remove MCP server',

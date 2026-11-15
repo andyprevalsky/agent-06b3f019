@@ -53,6 +53,29 @@ function withTokens(grant: McpOAuthGrant, tokens: OAuthTokens, now: number): Mcp
   };
 }
 
+/**
+ * RFC 9728 §3.3: the advertised resource must identify this server (same origin,
+ * path a prefix of the server's), or a server could obtain another server's token.
+ */
+export function assertResourceCoversServer(resource: string | undefined, serverUrl: string): void {
+  if (resource === undefined) return;
+  let advertised: URL;
+  try {
+    advertised = new URL(resource);
+  } catch {
+    throw new Error('The server advertised an invalid OAuth resource');
+  }
+  const server = new URL(serverUrl);
+  const prefix = advertised.pathname.endsWith('/')
+    ? advertised.pathname
+    : `${advertised.pathname}/`;
+  if (
+    advertised.origin !== server.origin ||
+    !(server.pathname === advertised.pathname || server.pathname.startsWith(prefix))
+  )
+    throw new Error(`The server's OAuth resource ${resource} does not match ${serverUrl}`);
+}
+
 export async function beginMcpOAuth(
   serverUrl: string,
   resourceMetadataUrl: URL | undefined,
@@ -60,6 +83,7 @@ export async function beginMcpOAuth(
   previous?: McpOAuthGrant
 ): Promise<{ grant: McpOAuthGrant; authorizeUrl: string }> {
   const info = await discoverOAuthServerInfo(serverUrl, { resourceMetadataUrl, fetchFn });
+  assertResourceCoversServer(info.resourceMetadata?.resource, serverUrl);
   const metadata = info.authorizationServerMetadata;
   const reuse =
     previous !== undefined &&

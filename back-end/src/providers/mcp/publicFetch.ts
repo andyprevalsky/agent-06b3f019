@@ -2,8 +2,9 @@
  * Fetch for user-supplied MCP server URLs: http(s) only, public hosts only.
  *
  *   url ──► scheme + hostname check (localhost/.internal/private literals refused)
+ *       ├─► redirects followed by hand: every hop's URL is checked first
  *       └─► undici connect-time lookup: every resolved address must be public,
- *           which also covers redirects and DNS rebinding.
+ *           which also covers DNS rebinding.
  *
  * Blackbox tests swap `mcpNetwork` (in-process only) to reach a loopback server;
  * the running backend always uses the guarded pair.
@@ -68,10 +69,36 @@ export function assertPublicMcpUrl(value: string): URL {
   return url;
 }
 
-const guardedFetch: FetchLike = (url, init) => {
-  assertPublicMcpUrl(String(url));
-  return fetch(url, { ...init, dispatcher } as unknown as RequestInit);
-};
+const MAX_REDIRECTS = 5;
+
+/** Follows redirects itself so every hop's URL passes `check` first. */
+export const createGuardedFetch =
+  (check: (value: string) => URL = assertPublicMcpUrl): FetchLike =>
+  async (url, init) => {
+    let current = String(url);
+    let request: RequestInit = { ...init };
+    for (let hop = 0; ; hop += 1) {
+      check(current);
+      const response = await fetch(current, {
+        ...request,
+        redirect: 'manual',
+        dispatcher,
+      } as unknown as RequestInit);
+      const location = response.headers.get('location');
+      if (response.status < 300 || response.status >= 400 || !location) return response;
+      if (hop >= MAX_REDIRECTS) throw new McpUrlError('Too many redirects');
+      await response.body?.cancel().catch(() => undefined);
+      current = new URL(location, current).toString();
+      // 303 (and 301/302 after POST) become GET without a body, as fetch would.
+      if (
+        response.status === 303 ||
+        ((response.status === 301 || response.status === 302) && request.method === 'POST')
+      )
+        request = { ...request, method: 'GET', body: undefined };
+    }
+  };
+
+const guardedFetch = createGuardedFetch();
 
 /** Indirection so in-process blackbox tests can reach a loopback MCP server. */
 export const mcpNetwork: { fetch: FetchLike; checkUrl: (value: string) => URL } = {

@@ -162,10 +162,16 @@ export interface ConnectInput {
   redirectUri: string;
 }
 
+/**
+ * New URL: create (upsert keeps a concurrent create idempotent). Existing row:
+ * update only that row while `guard` still holds, so a stale sign-in or probe
+ * never recreates a server the user removed or overwrites a newer state.
+ */
 async function save(
   userId: string,
   url: string,
-  data: { status: 'CONNECTED' | 'EXPIRED' | 'SYNC_FAILED'; config: McpConfig; failure?: string }
+  data: { status: 'CONNECTED' | 'EXPIRED' | 'SYNC_FAILED'; config: McpConfig; failure?: string },
+  existing?: { id: string; guard?: Prisma.IntegrationWhereInput }
 ) {
   const fields = {
     status: data.status,
@@ -174,11 +180,22 @@ async function save(
     failureReason: data.failure ?? null,
     ...(data.status === 'CONNECTED' ? { lastSuccessfulSyncAt: new Date() } : {}),
   };
-  const row = await prisma.integration.upsert({
-    where: { userId_name_accountId: { userId, name: 'mcp', accountId: url } },
-    create: { userId, name: 'mcp', type: 'TOOL_SETUP', accountId: url, ...fields },
-    update: fields,
-  });
+  let row;
+  if (existing) {
+    const updated = await prisma.integration.updateMany({
+      where: { id: existing.id, userId, name: 'mcp', ...existing.guard },
+      data: fields,
+    });
+    if (updated.count === 0)
+      throw new McpServerError(409, 'This MCP server was removed or changed. Connect it again.');
+    row = await prisma.integration.findUniqueOrThrow({ where: { id: existing.id } });
+  } else {
+    row = await prisma.integration.upsert({
+      where: { userId_name_accountId: { userId, name: 'mcp', accountId: url } },
+      create: { userId, name: 'mcp', type: 'TOOL_SETUP', accountId: url, ...fields },
+      update: fields,
+    });
+  }
   log.info(`[McpServers] saved ${data.status}`, { userId, integrationId: row.id, url });
   return row;
 }
@@ -224,7 +241,8 @@ export async function connectMcpServer(userId: string, input: ConnectInput) {
       ...base(probe.name || fallbackName, auth, probe.tools),
       secret: sealed(secret),
     };
-    return { server: mcpView(await save(userId, url, { status: 'CONNECTED', config })) };
+    const target = current ? { id: current.id } : undefined;
+    return { server: mcpView(await save(userId, url, { status: 'CONNECTED', config }, target)) };
   } catch (error) {
     if (error instanceof McpProbeUnauthorized && !input.headers) {
       let begun;
@@ -246,7 +264,12 @@ export async function connectMcpServer(userId: string, input: ConnectInput) {
         secret: sealed({ oauth: begun.grant }),
         oauth_state: begun.grant.state,
       };
-      const row = await save(userId, url, { status: 'EXPIRED', config });
+      const row = await save(
+        userId,
+        url,
+        { status: 'EXPIRED', config },
+        current ? { id: current.id } : undefined
+      );
       return { server: mcpView(row), authorize_url: begun.authorizeUrl };
     }
     const message =
@@ -256,7 +279,12 @@ export async function connectMcpServer(userId: string, input: ConnectInput) {
     log.warn('[McpServers] connect failed', { userId, url, error: reason(error) });
     if (previous && current) {
       const config = { ...previous, secret: sealed(secret) };
-      await save(userId, url, { status: 'SYNC_FAILED', config, failure: message });
+      await save(
+        userId,
+        url,
+        { status: 'SYNC_FAILED', config, failure: message },
+        { id: current.id }
+      );
     }
     throw new McpServerError(error instanceof McpUrlError ? 400 : 422, message);
   }
@@ -284,6 +312,8 @@ export async function completeMcpServerOAuth(userId: string, state: string, code
     throw new McpServerError(502, `Sign-in failed: ${reason(error)}`);
   }
   const secret: Secret = { oauth: signedIn };
+  // Only the row still waiting on this exact sign-in may be updated.
+  const pending = { id: row.id, guard: { config: { path: ['oauth_state'], equals: state } } };
   try {
     const probe = await openMcpSession(config.url, requestHeaders(secret), async (session) => ({
       tools: await session.listTools(),
@@ -298,13 +328,15 @@ export async function completeMcpServerOAuth(userId: string, state: string, code
     };
     delete next.oauth_state;
     return {
-      server: mcpView(await save(userId, config.url, { status: 'CONNECTED', config: next })),
+      server: mcpView(
+        await save(userId, config.url, { status: 'CONNECTED', config: next }, pending)
+      ),
     };
   } catch (error) {
     const failure = `Signed in, but listing tools failed: ${reason(error)}`;
     const next: McpConfig = { ...config, secret: sealed(secret) };
     delete next.oauth_state;
-    await save(userId, config.url, { status: 'SYNC_FAILED', config: next, failure });
+    await save(userId, config.url, { status: 'SYNC_FAILED', config: next, failure }, pending);
     throw new McpServerError(502, failure);
   }
 }
@@ -327,51 +359,60 @@ export async function listAgentMcpServers(userId: string) {
       .filter((row) => row.status === 'CONNECTED')
       .map((row) => {
         const config = mcpConfig(row.config)!;
+        // Normalization can collide (search.docs vs search_docs): suffix later ones.
+        const used = new Set<string>();
         return {
           id: row.id,
           name: config.name,
-          tools: config.tools.map((tool) => ({
-            ...tool,
-            agent_name: mcpAgentToolName(config.slug, tool.name),
-          })),
+          tools: config.tools.map((tool) => {
+            let agentName = mcpAgentToolName(config.slug, tool.name);
+            for (let n = 2; used.has(agentName); n += 1)
+              agentName = mcpAgentToolName(config.slug, `${tool.name}_${n}`);
+            used.add(agentName);
+            return { ...tool, agent_name: agentName };
+          }),
         };
       }),
   };
 }
 
 /** Current auth headers; refreshes an OAuth access token under the row lock. */
+type AuthResult =
+  { kind: 'headers'; headers: Record<string, string> } | { kind: 'expired'; name: string };
+
 async function authHeaders(id: string, force: boolean): Promise<Record<string, string>> {
-  const headers: Record<string, string> | { expired: string } = await runTransactionWithRetry(
+  const result: AuthResult = await runTransactionWithRetry(
     async (tx) => {
       await tx.$queryRaw`SELECT id FROM "Integration" WHERE id = ${id} FOR UPDATE`;
       const row = await tx.integration.findUniqueOrThrow({ where: { id } });
       const config = mcpConfig(row.config)!;
       const secret = secretOf(config);
       if (!secret.oauth || !(force || mcpGrantNeedsRefresh(secret.oauth)))
-        return requestHeaders(secret);
+        return { kind: 'headers', headers: requestHeaders(secret) };
       let oauth: McpOAuthGrant;
       try {
         oauth = await refreshMcpOAuth(secret.oauth);
       } catch (error) {
         log.warn('[McpServers] token refresh failed', { integrationId: id, error: reason(error) });
-        return { expired: config.name };
+        // Still under the row lock, so a concurrent successful refresh cannot be overwritten.
+        await tx.integration.update({
+          where: { id },
+          data: { status: 'EXPIRED', failureReason: 'Sign in again to keep using this server.' },
+        });
+        return { kind: 'expired', name: config.name };
       }
       const next = { ...config, secret: sealed({ ...secret, oauth }) };
       await tx.integration.update({
         where: { id },
         data: { config: next as unknown as Prisma.InputJsonValue },
       });
-      return requestHeaders({ ...secret, oauth });
+      return { kind: 'headers', headers: requestHeaders({ ...secret, oauth }) };
     },
     { timeout: 45_000, maxWait: 15_000 }
   );
-  if (!('expired' in headers)) return headers;
-  // Outside the transaction, so the status survives the refusal.
-  await prisma.integration.update({
-    where: { id },
-    data: { status: 'EXPIRED', failureReason: 'Sign in again to keep using this server.' },
-  });
-  throw new McpServerError(401, `${headers.expired} needs you to sign in again in Integrations`);
+  if (result.kind === 'headers') return result.headers;
+  // Thrown after commit, so the EXPIRED status survives the refusal.
+  throw new McpServerError(401, `${result.name} needs you to sign in again in Integrations`);
 }
 
 export async function callMcpTool(
@@ -402,7 +443,7 @@ export async function callMcpTool(
     }
     result = await run(await authHeaders(id, true));
   }
-  await prisma.integration.update({ where: { id }, data: { lastUsedAt: new Date() } });
+  await prisma.integration.updateMany({ where: { id }, data: { lastUsedAt: new Date() } });
   log.info('[McpServers] tool call', {
     userId,
     integrationId: id,

@@ -13,6 +13,7 @@ import { mcpNetwork } from './publicFetch';
 
 const CONNECT_TIMEOUT_MS = 30_000;
 const MAX_TOOLS = 200;
+const MAX_PAGES = 20;
 
 export interface McpTool {
   name: string;
@@ -58,8 +59,11 @@ export async function openMcpSession<T>(
       serverName: () => client.getServerVersion()?.name ?? '',
       listTools: async () => {
         const tools: McpTool[] = [];
+        const seen = new Set<string>();
         let cursor: string | undefined;
+        let pages = 0;
         do {
+          if (pages++ >= MAX_PAGES) throw new Error(`tools/list exceeded ${MAX_PAGES} pages`);
           const page = await client.listTools(cursor ? { cursor } : undefined, {
             timeout: CONNECT_TIMEOUT_MS,
           });
@@ -71,6 +75,9 @@ export async function openMcpSession<T>(
             });
           }
           cursor = page.nextCursor;
+          if (cursor !== undefined && seen.has(cursor))
+            throw new Error('tools/list repeated a cursor');
+          if (cursor !== undefined) seen.add(cursor);
         } while (cursor && tools.length < MAX_TOOLS);
         return tools.slice(0, MAX_TOOLS);
       },

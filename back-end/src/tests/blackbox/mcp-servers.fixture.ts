@@ -5,6 +5,9 @@
  *   /oauth-mcp  Bearer tokens from the fake authorization server below
  *               (RFC 9728 metadata, RFC 8414 metadata, RFC 7591 /register,
  *               /authorize → 302 with code, /token with PKCE S256 + rotating refresh)
+ *   /dup-mcp    no auth; tools search.docs + search_docs (agent names collide)
+ *   /redirect   307 → /open-mcp (the redirect guard must refuse the loopback hop)
+ *   /loop-mcp   raw JSON-RPC: tools/list pages forever with fresh cursors
  * Tools: echo {text} → "echo:<text>", whoami → the bearer token the call used.
  */
 import { createHash, randomUUID } from 'node:crypto';
@@ -25,8 +28,16 @@ export interface McpFixture {
   close(): Promise<void>;
 }
 
-function mcpFor(token: string | null) {
-  const server = new McpServer({ name: 'fixture-docs', version: '1.0.0' });
+function mcpFor(token: string | null, duplicates = false) {
+  const server = new McpServer({
+    name: duplicates ? 'dup-docs' : 'fixture-docs',
+    version: '1.0.0',
+  });
+  if (duplicates)
+    for (const name of ['search.docs', 'search_docs'])
+      server.registerTool(name, { description: name }, async () => ({
+        content: [{ type: 'text', text: name }],
+      }));
   server.registerTool(
     'echo',
     { description: 'Echo text back', inputSchema: { text: z.string() } },
@@ -122,6 +133,27 @@ export async function startMcpFixture(): Promise<McpFixture> {
         fixture.refreshes += 1;
         return json(200, issue());
       }
+      if (url.pathname === '/redirect') {
+        res.writeHead(307, { Location: `${fixture.base}/open-mcp` });
+        return res.end();
+      }
+      if (url.pathname === '/loop-mcp' && req.method === 'POST') {
+        // Answers initialize, then pages tools/list forever with an empty page.
+        const message = JSON.parse(await body(req)) as { id?: number; method: string };
+        if (message.id === undefined) {
+          res.writeHead(202);
+          return res.end();
+        }
+        const result =
+          message.method === 'initialize'
+            ? {
+                protocolVersion: '2025-06-18',
+                capabilities: { tools: {} },
+                serverInfo: { name: 'loop', version: '1' },
+              }
+            : { tools: [], nextCursor: `again-${randomUUID()}` };
+        return json(200, { jsonrpc: '2.0', id: message.id, result });
+      }
       let token: string | null = null;
       if (url.pathname === '/key-mcp' && req.headers['x-api-key'] !== KEY)
         return json(401, { error: 'bad key' });
@@ -136,10 +168,11 @@ export async function startMcpFixture(): Promise<McpFixture> {
             }
           );
       }
-      if (!['/open-mcp', '/key-mcp', '/oauth-mcp'].includes(url.pathname)) return json(404, {});
+      if (!['/open-mcp', '/key-mcp', '/oauth-mcp', '/dup-mcp'].includes(url.pathname))
+        return json(404, {});
       const raw = req.method === 'POST' ? await body(req) : '';
       const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
-      const mcp = mcpFor(token);
+      const mcp = mcpFor(token, url.pathname === '/dup-mcp');
       res.on('close', () => {
         void transport.close();
         void mcp.close();

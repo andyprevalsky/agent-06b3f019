@@ -21,7 +21,13 @@ import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { prisma } from '../../providers/database';
-import { mcpNetwork } from '../../providers/mcp/publicFetch';
+import {
+  assertPublicMcpUrl,
+  createGuardedFetch,
+  mcpNetwork,
+  McpUrlError,
+} from '../../providers/mcp/publicFetch';
+import { assertResourceCoversServer } from '../../providers/mcp/oauth';
 import {
   callMcpTool,
   completeMcpServerOAuth,
@@ -211,6 +217,71 @@ const tests: BlackboxTest[] = [
         await prisma.integration.update({ where: { id: row.id }, data: { status: row.status } });
         fixture = await startMcpFixture();
         await deleteMcpServer(userA, server.id);
+      }),
+  },
+  {
+    name: 'review regressions: resource audience, redirect hop, endless pages, header named expired, colliding names',
+    fn: () =>
+      inProcess(async () => {
+        const bad = (() => {
+          try {
+            assertResourceCoversServer(
+              'https://victim.example/mcp',
+              'https://attacker.example/mcp'
+            );
+            return null;
+          } catch (error) {
+            return error;
+          }
+        })();
+        assert(bad instanceof Error, 'a foreign OAuth resource is refused');
+        assertResourceCoversServer(
+          'https://mcp.context7.com/mcp',
+          'https://mcp.context7.com/mcp/oauth'
+        );
+        // First hop allowed (loopback fixture); the redirect target must pass the real guard.
+        const first = `${fixture.base}/redirect`;
+        const guarded = createGuardedFetch((value) =>
+          value === first ? new URL(value) : assertPublicMcpUrl(value)
+        );
+        const hop = await guarded(first).catch((error: Error) => error);
+        assert(hop instanceof McpUrlError && /public host/.test(hop.message), String(hop));
+        const looped = await connectMcpServer(userA, {
+          url: `${fixture.base}/loop-mcp`,
+          redirectUri: REDIRECT,
+        }).catch((error: Error) => error);
+        assert(looped instanceof Error && /exceeded 20 pages/.test(looped.message), String(looped));
+        const expiredHeader = await connectMcpServer(userA, {
+          url: `${fixture.base}/dup-mcp`,
+          headers: { expired: 'not-a-marker' },
+          redirectUri: REDIRECT,
+        });
+        assert(expiredHeader.server.status === 'connected', 'header named expired connects');
+        const id = expiredHeader.server.id;
+        const listed = (await listAgentMcpServers(userA)).servers.find((s) => s.id === id)!;
+        const names = listed.tools.map((tool) => tool.agent_name);
+        assert(
+          names.length === 4 && new Set(names).size === 4,
+          `unique agent names: ${names.join()}`
+        );
+        assert(text(await callMcpTool(userA, id, 'search_docs', {})) === 'search_docs', 'call');
+        await deleteMcpServer(userA, id);
+      }),
+  },
+  {
+    name: 'a server removed during OAuth completion is not recreated',
+    fn: () =>
+      inProcess(async () => {
+        const begun = await connectMcpServer(userA, {
+          url: `${fixture.base}/oauth-mcp`,
+          redirectUri: REDIRECT,
+        });
+        const { code, state } = await signIn(begun.authorize_url!);
+        await deleteMcpServer(userA, begun.server.id);
+        const stale = await completeMcpServerOAuth(userA, state, code).catch((e: Error) => e);
+        assert(stale instanceof Error, 'completion of a removed server is refused');
+        const left = await prisma.integration.count({ where: { id: begun.server.id } });
+        assert(left === 0, 'the removed server stays removed');
       }),
   },
   {

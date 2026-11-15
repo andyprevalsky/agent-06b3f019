@@ -193,6 +193,27 @@ describe.each([false, true])('MCP servers (desktop=%s)', (roseDesktop) => {
     }
   });
 
+  it('desktop app shows an error when the system browser cannot open', async () => {
+    const authorizeUrl = 'https://mcp.linear.app/authorize?client_id=c&state=s';
+    captureConnect(() =>
+      HttpResponse.json({ server: linear, authorize_url: authorizeUrl }, { status: 201 }),
+    );
+    const openExternal = vi.fn(async () => ({ success: false }));
+    window.api = { isElectron: true, openExternal };
+    try {
+      renderWithProviders(<Integrations />, { roseDesktop });
+      const card = await section();
+      const user = userEvent.setup();
+      const input = card.getByLabelText('MCP server URL');
+      await user.type(input, 'https://mcp.linear.app/sse');
+      await user.click(card.getByRole('button', { name: 'Connect MCP server' }));
+      expect(await card.findByText(/Could not open your browser to sign in/)).toBeVisible();
+      expect(input).toHaveValue('https://mcp.linear.app/sse');
+    } finally {
+      delete window.api;
+    }
+  });
+
   it('removes a server with ×', async () => {
     const deleted: string[] = [];
     server.use(
