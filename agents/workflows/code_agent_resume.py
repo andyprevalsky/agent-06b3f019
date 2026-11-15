@@ -100,6 +100,8 @@ class CodeAgentResumeWorkflow(ResumeBillingMixin):
         self.is_paused = False
         self._user_pause_active = False
         self.agent_id = ""
+        # Tree root for archive records (helpers/archive_identity.py headers).
+        self.root_agent_id = ""
         self.user_id = ""
         self.model = "rose-labs/rose-1-flash"
         self.fast_mode_cache_enabled = False
@@ -166,6 +168,7 @@ class CodeAgentResumeWorkflow(ResumeBillingMixin):
         tool_call_id = str(request.get("tool_call_id") or "")
         # Known before validation so even a bad request can post its failure row.
         self.agent_id = str(request.get("agent_id") or "")
+        self.root_agent_id = str(request.get("root_agent_id") or "")
         self.user_id = str(request.get("user_id") or "")
         try:
             missing = [field for field in REQUIRED_FIELDS if not request.get(field)]

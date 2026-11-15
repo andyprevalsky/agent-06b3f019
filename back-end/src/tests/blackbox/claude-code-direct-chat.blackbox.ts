@@ -496,6 +496,8 @@ test('an owner that finished or is paused, or a foreground spawn (listed or not)
       message: `pick up where you left off ${index}`,
       message_id: res.json.message_id,
       attachments: [],
+      // Archive root of the tree, stamped on every resumed activity by the worker.
+      root_agent_id: AGENT_ID,
     });
   }
 });

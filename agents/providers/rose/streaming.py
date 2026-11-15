@@ -48,6 +48,11 @@ from providers.rose.types import StreamChunk
 
 logger = structlog.get_logger()
 
+# Usage-chunk key carrying provider reasoning blocks (Anthropic thinking with
+# signatures, redacted_thinking, OpenRouter reasoning_details). RoseClient pops
+# it into the archived final record; callers never receive it.
+REASONING_BLOCKS_USAGE_KEY = "_archive_reasoning_blocks"
+
 # Parsers buffer tool arguments until a complete tool_call can be emitted.
 # Report genuine fragments privately to the request guard without introducing
 # partial tools, changing normalized output or counting them as completed calls.
@@ -178,6 +183,10 @@ async def parse_anthropic_sse(
     current_tool_id: Optional[str] = None
     current_tool_name: Optional[str] = None
     current_tool_args: list[str] = []
+    # Thinking blocks with their signatures and redacted_thinking payloads:
+    # required to replay a thinking trajectory, archived via the usage chunk.
+    reasoning_blocks: list[Dict[str, Any]] = []
+    blocks_by_index: Dict[int, Dict[str, Any]] = {}
 
     emitted_content_or_tool = False
 
@@ -247,6 +256,16 @@ async def parse_anthropic_sse(
                     current_tool_args = []
                 elif block_type == "thinking":
                     current_block_kind = "thinking"
+                    thinking_block = {
+                        "type": "anthropic_thinking",
+                        "text": block.get("thinking") or "",
+                        "signature": block.get("signature") or None,
+                    }
+                    reasoning_blocks.append(thinking_block)
+                    blocks_by_index[current_block_index] = thinking_block
+                elif block_type == "redacted_thinking":
+                    current_block_kind = None
+                    reasoning_blocks.append({"type": "anthropic_redacted_thinking", "data": block.get("data")})
                 elif block_type == "text":
                     current_block_kind = "text"
                 else:
@@ -271,8 +290,16 @@ async def parse_anthropic_sse(
                                 "phase": "final_answer",
                             },
                         )
+                elif delta_type == "signature_delta":
+                    block_index = event.get("index", current_block_index)
+                    target = blocks_by_index.get(block_index)
+                    if target is not None:
+                        target["signature"] = (target.get("signature") or "") + (delta.get("signature") or "")
                 elif delta_type == "thinking_delta":
                     text = delta.get("thinking") or ""
+                    target = blocks_by_index.get(event.get("index", current_block_index))
+                    if target is not None:
+                        target["text"] += text
                     if text:
                         # Reasoning counts as emitted: thinking models
                         # legitimately place their JSON payload in
@@ -351,17 +378,20 @@ async def parse_anthropic_sse(
     if not emitted_content_or_tool and finish_reason != "length":
         raise RoseStallError(f"Anthropic stream closed without content or tool_call (request_id={request_id})")
 
-    yield StreamChunk(
-        kind="usage",
-        data={
-            "prompt_tokens": input_tokens,
-            "completion_tokens": output_tokens,
-            "total_tokens": input_tokens + output_tokens,
-            "cache_creation_input_tokens": cache_creation_tokens,
-            "cache_read_input_tokens": cache_read_tokens,
-            "finish_reason": finish_reason,
-        },
-    )
+    usage_data: Dict[str, Any] = {
+        "prompt_tokens": input_tokens,
+        "completion_tokens": output_tokens,
+        "total_tokens": input_tokens + output_tokens,
+        "cache_creation_input_tokens": cache_creation_tokens,
+        "cache_read_input_tokens": cache_read_tokens,
+        "finish_reason": finish_reason,
+    }
+    if any(block.get("signature") or block["type"] == "anthropic_redacted_thinking" for block in reasoning_blocks):
+        # Only when blocks carry data the reasoning chunks cannot (signatures,
+        # redacted payloads). RoseClient moves them into the archived output
+        # record and strips them from the usage chunk callers see.
+        usage_data[REASONING_BLOCKS_USAGE_KEY] = reasoning_blocks
+    yield StreamChunk(kind="usage", data=usage_data)
     yield StreamChunk(kind="done", data={})
 
 
@@ -406,6 +436,20 @@ async def parse_openai_sse(
     flushed_tool_indices: set[int] = set()
     emitted_content_or_tool = False
     saw_done = False
+    # OpenRouter `reasoning_details` (encrypted / summary / text items with
+    # signatures) merged per streamed index; archived via the usage chunk.
+    reasoning_details: Dict[Any, Dict[str, Any]] = {}
+
+    def _merge_reasoning_detail(detail: Any) -> None:
+        if not isinstance(detail, dict):
+            return
+        key = detail.get("index", detail.get("id", len(reasoning_details)))
+        slot = reasoning_details.setdefault(key, {})
+        for field, value in detail.items():
+            if field in ("text", "summary", "data", "signature") and isinstance(value, str):
+                slot[field] = (slot.get(field) or "") + value
+            elif value is not None:
+                slot[field] = value
 
     def _flush_tool_calls() -> list[StreamChunk]:
         chunks: list[StreamChunk] = []
@@ -496,6 +540,9 @@ async def parse_openai_sse(
                     },
                 )
 
+            for detail in delta.get("reasoning_details") or []:
+                _merge_reasoning_detail(detail)
+
             for tc_delta in delta.get("tool_calls") or []:
                 index = tc_delta.get("index", 0)
                 slot = tool_calls.setdefault(index, {"id": "", "name": "", "arguments": ""})
@@ -541,17 +588,31 @@ async def parse_openai_sse(
     cache_write = usage.get("cache_creation_input_tokens") or ptd.get("cache_write_tokens") or 0
     cache_read = usage.get("cache_read_input_tokens") or ptd.get("cached_tokens") or 0
 
-    yield StreamChunk(
-        kind="usage",
-        data={
-            "prompt_tokens": usage.get("prompt_tokens", 0),
-            "completion_tokens": usage.get("completion_tokens", 0),
-            "total_tokens": usage.get("total_tokens", 0),
-            "cache_creation_input_tokens": cache_write,
-            "cache_read_input_tokens": cache_read,
-            "finish_reason": finish_reason,
-        },
-    )
+    usage_data: Dict[str, Any] = {
+        "prompt_tokens": usage.get("prompt_tokens", 0),
+        "completion_tokens": usage.get("completion_tokens", 0),
+        "total_tokens": usage.get("total_tokens", 0),
+        "cache_creation_input_tokens": cache_write,
+        "cache_read_input_tokens": cache_read,
+        "finish_reason": finish_reason,
+    }
+    reasoning_tokens = (usage.get("completion_tokens_details") or {}).get("reasoning_tokens")
+    if isinstance(reasoning_tokens, int):
+        usage_data["reasoning_tokens"] = reasoning_tokens
+    if reasoning_details:
+        usage_data[REASONING_BLOCKS_USAGE_KEY] = [
+            {
+                "type": "openrouter_reasoning_detail",
+                "text": detail.get("text") if isinstance(detail.get("text"), str) else None,
+                "signature": detail.get("signature") if isinstance(detail.get("signature"), str) else None,
+                "data": detail.get("data") if isinstance(detail.get("data"), str) else None,
+                "id": detail.get("id") if isinstance(detail.get("id"), str) else None,
+                "summary": detail.get("summary"),
+                "raw": detail,
+            }
+            for detail in reasoning_details.values()
+        ]
+    yield StreamChunk(kind="usage", data=usage_data)
     yield StreamChunk(kind="done", data={})
 
 
@@ -579,6 +640,7 @@ async def parse_responses_sse(
     cache_write_tokens = 0
     cache_write_reported = False
     cache_read_tokens = 0
+    reasoning_tokens: Optional[int] = None
     finish_reason = ""
     emitted_content_or_tool = False
     saw_done = False
@@ -586,9 +648,12 @@ async def parse_responses_sse(
 
     def apply_usage(usage: Optional[Dict[str, Any]]) -> None:
         nonlocal prompt_tokens, completion_tokens, total_tokens, cache_write_tokens, cache_read_tokens
-        nonlocal cache_write_reported
+        nonlocal cache_write_reported, reasoning_tokens
         if not usage:
             return
+        output_details = usage.get("output_tokens_details") or {}
+        if isinstance(output_details.get("reasoning_tokens"), int):
+            reasoning_tokens = output_details["reasoning_tokens"]
         prompt_tokens = usage.get("input_tokens", prompt_tokens) or prompt_tokens
         completion_tokens = usage.get("output_tokens", completion_tokens) or completion_tokens
         total_tokens = usage.get("total_tokens", total_tokens) or total_tokens
@@ -759,19 +824,19 @@ async def parse_responses_sse(
             f"Responses stream closed without content or tool_call (request_id={request_id}, saw_done={saw_done})"
         )
 
-    yield StreamChunk(
-        kind="usage",
-        data={
-            "prompt_tokens": prompt_tokens,
-            "completion_tokens": completion_tokens,
-            "total_tokens": total_tokens or prompt_tokens + completion_tokens,
-            "cache_creation_input_tokens": (
-                cache_write_tokens if cache_write_reported else max(prompt_tokens - cache_read_tokens, 0)
-            ),
-            "cache_read_input_tokens": cache_read_tokens,
-            "finish_reason": finish_reason or "stop",
-        },
-    )
+    responses_usage: Dict[str, Any] = {
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "total_tokens": total_tokens or prompt_tokens + completion_tokens,
+        "cache_creation_input_tokens": (
+            cache_write_tokens if cache_write_reported else max(prompt_tokens - cache_read_tokens, 0)
+        ),
+        "cache_read_input_tokens": cache_read_tokens,
+        "finish_reason": finish_reason or "stop",
+    }
+    if reasoning_tokens is not None:
+        responses_usage["reasoning_tokens"] = reasoning_tokens
+    yield StreamChunk(kind="usage", data=responses_usage)
     yield StreamChunk(kind="done", data={})
 
 

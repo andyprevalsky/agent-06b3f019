@@ -20,7 +20,8 @@ export function notificationFixtureKey(agentId: string): string {
 
 export async function rewriteNotification(
   messages: CompletionMessage[],
-  agentId?: string
+  agentId?: string,
+  userId?: string
 ): Promise<string> {
   const fixture = agentId
     ? loadBlackboxFixtureObject(notificationFixtureKey(agentId), messages)
@@ -51,7 +52,13 @@ export async function rewriteNotification(
         },
       },
     },
-    dump_context: { call_site: 'sms_notification', agent_id: agentId },
+    // Notifications act on an agent tree: archive under that tree's root, or
+    // under the per-user root when the notification has no agent.
+    dump_context: {
+      call_site: 'sms_notification',
+      agent_id: agentId,
+      archive_scope: { agentId, userId },
+    },
   });
   const output = new StructuredOutputAccumulator();
   for await (const chunk of stream) output.addCompletionChunk(chunk);

@@ -619,6 +619,7 @@ async function classifierContent(
     dump_context: {
       call_site: 'credential_failure_classifier',
       agent_id: agent.id,
+      archive_scope: { agentId: agent.id, userId: agent.userId },
       config: {
         classifier: 'browser_run_credential_outcomes',
         credential_ref_count: credentialRefs.length,

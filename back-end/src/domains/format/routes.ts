@@ -1,3 +1,4 @@
+import type { AuthRequest } from '../../providers/auth';
 import { Router } from 'express';
 import { z } from 'zod';
 import { asyncHandler } from '../../utils/asyncHandler';
@@ -11,11 +12,13 @@ const router = Router();
 // POST /api/generate-llm-judge-prompt - Generate an LLM judge prompt from a goal
 router.post(
   '/generate-llm-judge-prompt',
-  asyncHandler(async (req, res) => {
+  // The router-level `authenticate` (server.ts) already set req.user: archive
+  // the generation under that user's root without another auth/DB round trip.
+  asyncHandler<AuthRequest>(async (req, res) => {
     try {
       const body = generatePromptSchema.parse(req.body);
 
-      const generatedPrompt = await generatePrompt(body.goal);
+      const generatedPrompt = await generatePrompt(body.goal, req.user?.id);
 
       res.json({
         prompt: generatedPrompt,

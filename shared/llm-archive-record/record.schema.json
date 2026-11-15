@@ -1,0 +1,111 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://roselabs.ai/contracts/llm-archive-record/v2",
+  "title": "Rose archived LLM call record (Python and TypeScript writers)",
+  "description": "One standardized record per model call, written encrypted into the ROOT agent's trace bundle. Start record: llm/<dump_id>.json.gz.enc (inputs, written when the call starts). Final record: llm-updates/<dump_id>-<epoch_ms>-<call_site>.json.gz.enc (outputs). Field names follow the existing Python layout. Cancelled calls, cache replays and failed attempts may be omitted; everything needed to reconstruct the trajectory (content, reasoning incl. provider reasoning blocks/signatures, tool calls, usage incl. reasoning tokens) must be present.",
+  "$defs": {
+    "boundId": { "type": "string", "minLength": 1, "not": { "enum": ["unbound", "none", "null", "undefined"] } },
+    "identity": {
+      "type": "object",
+      "required": ["schema_version", "call_site", "agent_id", "root_agent_id", "span_id", "dump_id"],
+      "properties": {
+        "schema_version": { "const": 2 },
+        "call_site": { "type": "string", "minLength": 1, "not": { "enum": ["unspecified", "unknown"] } },
+        "agent_id": { "$ref": "#/$defs/boundId" },
+        "root_agent_id": { "$ref": "#/$defs/boundId" },
+        "span_id": { "type": "string", "minLength": 1 },
+        "dump_id": { "type": "string", "minLength": 1 }
+      }
+    },
+    "usage": {
+      "type": "object",
+      "required": ["prompt", "completion"],
+      "properties": {
+        "prompt": { "type": ["integer", "null"] },
+        "completion": { "type": ["integer", "null"] },
+        "total": { "type": ["integer", "null"] },
+        "reasoning": { "type": ["integer", "null"], "description": "Reasoning/thinking tokens when the provider reports them." },
+        "cache_creation": { "type": ["integer", "null"] },
+        "cache_read": { "type": ["integer", "null"] },
+        "finish_reason": { "type": ["string", "null"] }
+      }
+    },
+    "reasoningBlock": {
+      "type": "object",
+      "required": ["type"],
+      "properties": {
+        "type": { "enum": ["anthropic_thinking", "anthropic_redacted_thinking", "openai_reasoning_item", "openrouter_reasoning_detail", "provider_reasoning"] },
+        "text": { "type": ["string", "null"] },
+        "signature": { "type": ["string", "null"] },
+        "data": { "type": ["string", "null"] },
+        "id": { "type": ["string", "null"] },
+        "encrypted_content": { "type": ["string", "null"] },
+        "summary": {},
+        "raw": {}
+      }
+    },
+    "output": {
+      "type": "object",
+      "required": ["content", "reasoning", "tool_calls", "usage", "actual_model"],
+      "properties": {
+        "content": { "type": "string" },
+        "reasoning": { "type": "string" },
+        "reasoning_blocks": { "type": "array", "items": { "$ref": "#/$defs/reasoningBlock" } },
+        "codex_reasoning_items": { "type": "array" },
+        "tool_calls": {
+          "type": "array",
+          "items": { "type": "object", "required": ["name", "arguments"], "properties": { "id": {}, "name": { "type": "string" }, "arguments": {} } }
+        },
+        "structured": {},
+        "usage": { "$ref": "#/$defs/usage" },
+        "timing": { "type": "object" },
+        "request_id": { "type": ["string", "null"] },
+        "actual_model": { "type": ["string", "null"] },
+        "pool_name": { "type": ["string", "null"] },
+        "provider": { "type": ["string", "null"] },
+        "error": { "type": ["object", "null"], "properties": { "type": { "type": "string" }, "message": { "type": "string" } } }
+      }
+    },
+    "attempt": {
+      "type": "object",
+      "required": ["model", "outcome", "output"],
+      "properties": {
+        "model": { "type": ["string", "null"] },
+        "pool_name": { "type": ["string", "null"] },
+        "outcome": { "enum": ["won", "lost_race", "fell_through", "failed"] },
+        "output": { "$ref": "#/$defs/output" }
+      }
+    }
+  },
+  "oneOf": [
+    {
+      "title": "start record (llm/)",
+      "allOf": [{ "$ref": "#/$defs/identity" }],
+      "required": ["record", "started_at_ms", "model", "message_count", "messages", "config"],
+      "properties": {
+        "record": { "const": "start" },
+        "started_at_ms": { "type": "integer" },
+        "model": { "type": ["string", "null"] },
+        "message_count": { "type": "integer" },
+        "messages": { "type": "array" },
+        "config": { "type": "object" },
+        "response_format": {},
+        "tools": { "type": ["array", "null"], "description": "Every tool definition sent to the provider, including declared-only context tools." },
+        "extra": { "type": "object" }
+      }
+    },
+    {
+      "title": "final record (llm-updates/)",
+      "allOf": [{ "$ref": "#/$defs/identity" }],
+      "required": ["record", "finished_at_ms", "output"],
+      "properties": {
+        "record": { "const": "final" },
+        "finished_at_ms": { "type": "integer" },
+        "model": { "type": ["string", "null"] },
+        "output": { "$ref": "#/$defs/output" },
+        "attempts": { "type": "array", "items": { "$ref": "#/$defs/attempt" }, "description": "Other legs that generated tokens for this call (e.g. losing branches of a race). Failed attempts may be omitted." },
+        "extra": { "type": "object" }
+      }
+    }
+  ]
+}
