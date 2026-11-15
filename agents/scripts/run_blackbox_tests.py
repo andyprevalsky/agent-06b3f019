@@ -322,6 +322,19 @@ def _usage_error(message: str) -> NoReturn:
     sys.exit(2)
 
 
+async def run_tests_then_drain(domain_filters: list[str] | None = None, concurrency: int = 30) -> int:
+    """Run the domains, then let SDK native threads leave Python before the loop closes.
+
+    A domain's last Temporal call settles from a Tokio thread; exiting while it is still in
+    Python aborts finalization (exit -6/-11) after every test passed. Same drain as worker.main.
+    """
+    from helpers.native_callback_drain import drain_native_python_callbacks  # agents root is on sys.path above
+
+    exit_code = await run_tests(domain_filters, concurrency)
+    await drain_native_python_callbacks()
+    return exit_code
+
+
 def parse_args(args: list[str]) -> tuple[list[str], int]:
     """Return (domain filters, concurrency).
 
@@ -363,7 +376,7 @@ def main() -> None:
         return
 
     domain_filters, concurrency = parse_args(args)
-    exit_code = asyncio.run(run_tests(domain_filters or None, concurrency))
+    exit_code = asyncio.run(run_tests_then_drain(domain_filters or None, concurrency))
     sys.exit(exit_code)
 
 

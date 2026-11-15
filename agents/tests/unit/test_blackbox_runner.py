@@ -291,3 +291,33 @@ def test_failed_domain_names_its_failing_cases_and_first_error(tmp_path: Path):
     assert not passed
     assert message.startswith("0 passed, 1 failed; 1 failed case(s): only_bad"), message
     assert "ValueError: boom" in message and "bad_case" not in message, message
+
+
+def test_runner_exit_waits_for_native_thread_python_callback(monkeypatch):
+    """The runner must not exit into interpreter finalization while an SDK native thread runs Python.
+
+    A domain's last Temporal call settles its asyncio future from a Tokio thread. If main()
+    returns first, that thread re-takes the GIL while Python finalizes and the process aborts
+    (exit -6 "PyGILState_Release ... finalizing", or -11) after every test passed: PR #2086's
+    new-test-stability gate, 2026-11-15, and origin/main d6d533f662 1/18 runs under load.
+    """
+    from tests.unit.test_worker_observability_shutdown import _pthread, _run_python_on_native_thread
+
+    runner = load_runner()
+    native = {}
+
+    async def domains_end_with_native_callback(domain_filters=None, concurrency=30):
+        native["thread"], native["callback"], native["finished"] = _run_python_on_native_thread(0.3)
+        return 0
+
+    monkeypatch.setattr(runner, "run_tests", domains_end_with_native_callback)
+    monkeypatch.setattr(runner, "parse_args", lambda args: ([], 1))
+    monkeypatch.setattr(sys, "argv", ["run_blackbox_tests.py"])
+    try:
+        with pytest.raises(SystemExit) as exited:
+            runner.main()
+        assert exited.value.code == 0
+        assert native["finished"].is_set(), "runner exited while a native callback was still in Python"
+    finally:
+        assert _pthread.pthread_join(native["thread"], None) == 0
+        del native["callback"]

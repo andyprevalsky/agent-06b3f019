@@ -44,13 +44,14 @@ def _run_python_on_native_thread(seconds):
 
 def test_worker_exit_waits_for_native_thread_python_callback():
     import worker
+    from helpers.native_callback_drain import foreign_threads_running_python
 
     thread, callback, finished = _run_python_on_native_thread(0.3)
     try:
-        assert worker._foreign_threads_running_python()
+        assert foreign_threads_running_python()
         assert asyncio.run(worker._drain_native_python_callbacks(timeout=5)) is True
         assert finished.is_set(), "entry point could return while a native callback was still in Python"
-        assert not worker._foreign_threads_running_python()
+        assert not foreign_threads_running_python()
     finally:
         assert _pthread.pthread_join(thread, None) == 0
         del callback
