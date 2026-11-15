@@ -21,13 +21,9 @@ import {
   navigateKernelPage,
   retryBackendFetch,
 } from './browser-provider.helpers';
-import {
-  LOCATION,
-  runLiveTilionProviderParity,
-  tilionApi,
-  withPage,
-} from './browser-provider.tilion-live.support';
+import { LOCATION, tilionApi, withPage } from './browser-provider.tilion-live.support';
 import { quarantine } from '../helpers/quarantine';
+import { runQuarantinedLiveTilionProviderParity } from './browser-provider.tilion-parity.quarantine';
 
 const RECOVERY_URL = 'https://en.wikipedia.org/wiki/Web_browser';
 
@@ -241,32 +237,6 @@ export function gateOverridden(gate: string): boolean {
     .includes(gate);
 }
 
-// FLAKY, NOT_INTRODUCED (PR #1990, PR #2023): the live-probes gate uses the prod AgentPhone
-// key, and the prod AgentPhone account is at its 50 of 50 number cap. Tilion provider parity
-// /init then saw an uncertain agent creation and could not reconcile it within the 10000-agent
-// scan bound, so init returned 500; the same case passed on its rerun. The case still runs and
-// reports; the repair thread owns the AgentPhone number cap and the reconcile scan bound, and
-// the marker is released after five consecutive passes. Bound to the same domain unit as above.
-const tilionParityUnit = 'browser-provider';
-const tilionProviderParity = quarantine(
-  {
-    since: '2026-11-15',
-    repair: 'https://boxes.dev/thread/thr_b5c1359b7cac4edc8341b4a8dd614b17',
-    error:
-      'FAIL live Tilion provider parity: /init 500: {"error":"AgentPhone agent creation is uncertain; reconciliation failed: AgentPhone reconciliation exceeded the 10000-agent scan bound"}',
-    evidence:
-      'PR #1990 live-probes round 2 on 2897e06746: browser-provider FLAKY 4418c14313bc4d9d81e98ca09490aa3f (rerun passed); same signature on PR #2023; prod AgentPhone at 50/50 numbers',
-  },
-  runLiveTilionProviderParity,
-  { unit: tilionParityUnit }
-);
-
-// Keep this comment free of quote characters. The deploy quarantine report names each TypeScript
-// marker after the last string literal in the 500 characters before its quarantine call, so each
-// marker here is preceded by its own unit constant, and this spacer keeps the Steel marker below
-// from reading quote pairs out of the Tilion marker above. Both markers bind to the same domain
-// unit; the Tilion one comes first because attribution validates the first matching marker.
-
 // FLAKY, NOT_INTRODUCED (PR #1975): the Steel residential tunnel refused example.com.
 const liveUnit = 'browser-provider';
 const steelAuthPersist = quarantine(
@@ -297,7 +267,7 @@ export async function runLiveCrossProviderCases(): Promise<number> {
   const tilion = TILION_RESIDENTIAL_LIVE_OVERRIDE;
   const cases: Array<[string, () => Promise<void>, string | null]> = [
     ['live Kernel/Steel auth persist', steelAuthPersist, kernel],
-    ['live Tilion provider parity', tilionProviderParity, tilion],
+    ['live Tilion provider parity', runQuarantinedLiveTilionProviderParity, tilion],
     ['live Kernel/Tilion auth persist', () => runLiveKernelSteelAuthPersist('tilion'), tilion],
     ['live Tilion challenge recovery', runLiveTilionChallengeRecovery, tilion],
     ['live Tilion concurrency cap', runLiveTilionConcurrency, null],
