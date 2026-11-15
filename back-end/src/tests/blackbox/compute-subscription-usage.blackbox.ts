@@ -46,6 +46,7 @@ import {
 } from '../../providers/computeSubscriptionUsage';
 import { assertLocalDatabase } from './assertLocalDatabase';
 import { registerChatPathCases } from './compute-subscription-usage.chat.cases';
+import { registerCodexUsageRefreshCases } from './compute-subscription-usage.codex-refresh.cases';
 import { registerCooldownReportCases } from './compute-subscription-usage.cooldown.cases';
 import { registerLeaseUsageCases } from './compute-subscription-usage.lease.cases';
 import { registerUsageRefreshCases } from './compute-subscription-usage.refresh.cases';
@@ -496,6 +497,8 @@ registerCooldownReportCases({
   chatUsers,
   integrationType: TYPE,
 });
+
+registerCodexUsageRefreshCases({ test, run: RUN, chatUsers, integrationType: TYPE });
 
 async function main() {
   let passed = 0;

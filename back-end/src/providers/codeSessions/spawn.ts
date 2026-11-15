@@ -26,6 +26,7 @@ import { createLogger } from '../logger';
 import { getEphemeral, putEphemeral, withSerializedLock } from '../sharedState';
 import { isLocalClaudeCodeSandboxId } from '../claudeCodeLocalSession';
 import { isLocalDeviceSandboxId } from '../localDevices/hub';
+import { resolveArchiveRootAgentId } from './archiveMirror';
 import { effectiveOwnerAgentId, planCodeSessionBranch } from './branch';
 import { drainStartupTurns } from './startupTurns';
 import {
@@ -125,10 +126,12 @@ export async function resolveSpawnCodeSession(
     where: { id: params.agentId },
     select: { busId: true },
   });
+  // Every descendant carries its tree's busId; one without it (a sub-agent
+  // created without bus_id) is keyed by its parent chain's root, never itself.
   const rootAgentId =
     agent?.busId !== undefined && agent.busId !== null && agent.busId !== ''
       ? agent.busId
-      : params.agentId;
+      : await resolveArchiveRootAgentId(params.agentId);
   void sweepExpiredCodeSessions(userId);
   // "New agent in this branch" works in the shared agent's session; every
   // other agent owns its own worktree and branch (plan §1b).

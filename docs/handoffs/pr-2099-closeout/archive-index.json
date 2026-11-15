@@ -1,0 +1,84 @@
+{
+  "format": "PR2099-RECOVERY-INDEX-V1",
+  "primary_pr": 2099,
+  "deployed_sha": "e158477bc23a0527df4500c3adf209b74ae1b7fd",
+  "validated_source": "c41b933b246b8c7f9ced14bfff97c38fcb6657f7",
+  "carrier_count": 6,
+  "carriers": [
+    {
+      "name": "git",
+      "receipt": "archives/git.json",
+      "key": "devbox-closeout-private/pr2099/git-preservation-20261114T210002Z-9a6f137d7553.tar.gz.aesgcm",
+      "ciphertext_sha256": "80ea09b4e9fa390746cb92090429985ad4084ec343f8a25423117ecbacdd908a",
+      "manifest_sha256": "03c8340c6c79a5ddb7c8e0bba87b8fd9d041822516662b40aa3fcce5b2555ba0",
+      "files": 28,
+      "logical_bytes": 177622354,
+      "encrypted_bytes": 164942743,
+      "native_full_readback_verified": true,
+      "independent_restore_all_member_hashes_verified": true
+    },
+    {
+      "name": "baseline",
+      "receipt": "archives/baseline.json",
+      "key": "devbox-closeout-private/pr2099/baseline-private-20261114T211200Z-810e304e02a0.tar.gz.aesgcm",
+      "ciphertext_sha256": "5bbfd851daead6ef0bdb7ea73d289ba01e4bcbfbf997d6c36b13f406a6712d4a",
+      "manifest_sha256": "12577f24ff3870ec83ad76c9431f0a92d24cd450a9b15b6b8d349bab98974137",
+      "files": 87586,
+      "logical_bytes": 2046965344,
+      "encrypted_bytes": 876556485,
+      "native_full_readback_verified": true,
+      "independent_restore_all_member_hashes_verified": true
+    },
+    {
+      "name": "rca",
+      "receipt": "archives/rca.json",
+      "key": "devbox-closeout-private/pr2099/completed-rca-20261114T212400Z-44045bfca477.tar.gz.aesgcm",
+      "ciphertext_sha256": "26cb39f651e31080ede7a6eb0f6b59aee60bfb8c488f036642cfcc4dc0d8b408",
+      "manifest_sha256": "e2db4b859a192f4186668e61368fd2ff489f1324b06ea392c32c04f0a1063671",
+      "files": 1489,
+      "logical_bytes": 49061313,
+      "encrypted_bytes": 18035960,
+      "native_full_readback_verified": true,
+      "independent_restore_all_member_hashes_verified": true
+    },
+    {
+      "name": "validation",
+      "receipt": "archives/validation.json",
+      "key": "devbox-closeout-private/pr2099/validation-private-20261115T000036Z-60de2f8f3f14.tar.gz.aesgcm",
+      "ciphertext_sha256": "a440fd82661cf50836dc5d3641721d929daab454e386849e9ab3735bed845378",
+      "manifest_sha256": "356d4b492fc4ce922355a46ad293469a75ae2d3546e829066e68dfbd5cbec7a2",
+      "files": 42816,
+      "logical_bytes": 2582624756,
+      "encrypted_bytes": 740808825,
+      "native_full_readback_verified": true,
+      "independent_restore_all_member_hashes_verified": true
+    },
+    {
+      "name": "bulk",
+      "receipt": "archives/bulk.json",
+      "key": "devbox-closeout-private/pr2099/bulk-private-20261115T015309Z-ad55ee430649.tar.gz.aesgcm",
+      "ciphertext_sha256": "d512741c77b5612585efef234d27fc765a39d52908e7b38d00e7b75a899abd71",
+      "manifest_sha256": "d1ad3ae9ab9bfb2a8f6398a04240db0cacd5f42031188d2913a7214fcdccbe25",
+      "files": 2486,
+      "logical_bytes": 1577762959,
+      "encrypted_bytes": 707454453,
+      "native_full_readback_verified": true,
+      "independent_restore_all_member_hashes_verified": true
+    },
+    {
+      "name": "final",
+      "receipt": "archives/final.json",
+      "key": "devbox-closeout-private/pr2099/final-private-20261115T022544Z-f0fd54abc6c8.tar.gz.aesgcm",
+      "ciphertext_sha256": "83a33bdaed23f72cbc580dee01462d5d09a97a69e29c8b7442d007badfa740b4",
+      "manifest_sha256": "fbfeebc02ef5060e31cb5df8180d8a1a793ef518b8ed313831f72af8b7d7917d",
+      "files": 255,
+      "logical_bytes": 48531209,
+      "encrypted_bytes": 17223014,
+      "native_full_readback_verified": true,
+      "independent_restore_all_member_hashes_verified": true
+    }
+  ],
+  "coverage": "coverage-summary.json",
+  "bootstrap": "README.md",
+  "cutoff_qualification": "Each immutable carrier has its own manifest/cutoffs. Later safe records are committed sidecars, not claimed inside their own encrypted payload."
+}

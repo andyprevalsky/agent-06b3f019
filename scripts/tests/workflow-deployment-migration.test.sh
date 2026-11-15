@@ -279,7 +279,7 @@ require_text "$DEPLOY" 'Keep automatic worker deploys off for the first managed 
 require_text "$DEPLOY" 'old instances have drained' "first publication cannot race legacy producers"
 require_text "$DEPLOY" 'An interrupted Fly cutover resumes the same job' "interrupted preparation must retain its ownership"
 require_text "$DEPLOY" 'release reservations on a timer' "an interrupted cutover must not release its reservations"
-require_text "$PROD" "resumed = ctx.sh('fly', resume_argv(job), cwd=ctx.root / 'back-end', env_file='back-end', secret=token)" "an interrupted cutover must resume the exact saved job"
+require_text "$PROD" "resumed = ctx.sh('fly', resume_argv(job), cwd=ctx.root / 'back-end', env_file='back-end', hidden=token)" "an interrupted cutover must resume the exact saved job"
 require_text "$PIPELINE" '"scripts/monitor-cooperative-cutover.ts", "--job-id", job_id,' "post-merge verification must read the durable job"
 if grep -Fq 'migrate-open-agent-workflows' "$PROD" "$PIPELINE" "$DEPLOY_CLI" "$DEPLOY"; then
   fail "routine cutover must not force-migrate unfinished production work"

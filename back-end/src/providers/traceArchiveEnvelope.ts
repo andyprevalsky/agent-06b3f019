@@ -2,6 +2,17 @@ import crypto from 'node:crypto';
 import zlib from 'node:zlib';
 import type { EncryptedArtifactMetadata } from './traceArchive';
 
+/**
+ * Archive ingest bounds (every path: worker batch, worker single artifact and
+ * backend-internal writers). Records are never dropped for being large:
+ *   - plaintext ≤ 1 GiB is only a decompression-bomb guard (browser step
+ *     records grow ~0.3 MB/step; a 32 MiB cap silently dropped late steps);
+ *   - ciphertext ≤ 72 MiB keeps one base64 record (×4/3 = 96 MiB) inside the
+ *     100mb express.json body limit (server.ts).
+ */
+export const ARCHIVE_MAX_PLAINTEXT_BYTES = 1024 * 1024 * 1024;
+export const ARCHIVE_MAX_CIPHERTEXT_BYTES = 72 * 1024 * 1024;
+
 export function metadataFromUnknown(value: unknown): EncryptedArtifactMetadata {
   if (value === null || typeof value !== 'object') {
     throw new Error('Archive metadata is missing');
@@ -55,6 +66,16 @@ export function validateEncryptedArtifactEnvelope(params: {
   if (metadata.ciphertext_bytes !== params.ciphertext.length) {
     throw new Error('Archive ciphertext byte count mismatch');
   }
+  if (params.ciphertext.length > ARCHIVE_MAX_CIPHERTEXT_BYTES) {
+    throw new Error('Archive ciphertext exceeds bounds');
+  }
+  if (
+    !Number.isSafeInteger(metadata.plaintext_bytes) ||
+    metadata.plaintext_bytes < 0 ||
+    metadata.plaintext_bytes > ARCHIVE_MAX_PLAINTEXT_BYTES
+  ) {
+    throw new Error('Archive plaintext byte count exceeds bounds');
+  }
   const ciphertextSha = crypto.createHash('sha256').update(params.ciphertext).digest('hex');
   if (metadata.ciphertext_sha256 !== ciphertextSha) {
     throw new Error('Archive ciphertext SHA-256 mismatch');
@@ -96,7 +117,9 @@ export function decryptAndValidateArtifact(params: {
     throw new Error('Archive stored plaintext byte count mismatch');
   }
   const plaintext =
-    metadata.compression === 'gzip' ? zlib.gunzipSync(storedPlaintext) : storedPlaintext;
+    metadata.compression === 'gzip'
+      ? zlib.gunzipSync(storedPlaintext, { maxOutputLength: ARCHIVE_MAX_PLAINTEXT_BYTES })
+      : storedPlaintext;
   if (plaintext.length !== metadata.plaintext_bytes) {
     throw new Error('Archive plaintext byte count mismatch');
   }

@@ -8,9 +8,17 @@ import { listArchiveBundleIds } from '../src/providers/traceArchiveAudit';
 
 config();
 
+/**
+ * Classify archive bundles (dry run by default). R2 is append-only: `--delete`
+ * runs only on an explicit user request, for explicitly listed roots:
+ *   --delete --user-requested-by <who> --reason <why> --root-agent-id <id> [...]
+ * `--delete --all` is refused; no automated job may delete trace bundles.
+ */
 interface Args {
   all: boolean;
   deleteRejected: boolean;
+  requestedBy?: string;
+  reason?: string;
   json: boolean;
   rootAgentIds: string[];
   concurrency?: number;
@@ -26,6 +34,12 @@ function parseArgs(argv: string[]): Args {
       args.deleteRejected = true;
     } else if (arg === '--dry-run') {
       args.deleteRejected = false;
+    } else if (arg === '--user-requested-by' || arg === '--reason') {
+      const value = argv[index + 1];
+      if (value === undefined || value.startsWith('--')) throw new Error(`${arg} requires a value`);
+      if (arg === '--reason') args.reason = value;
+      else args.requestedBy = value;
+      index += 1;
     } else if (arg === '--json') {
       args.json = true;
     } else if (arg === '--concurrency') {
@@ -48,6 +62,14 @@ function parseArgs(argv: string[]): Args {
   }
   if (!args.all && args.rootAgentIds.length === 0) {
     throw new Error('provide --all or at least one --root-agent-id');
+  }
+  if (args.deleteRejected && args.all) {
+    throw new Error(
+      '--delete never runs with --all: list the user-requested --root-agent-id values'
+    );
+  }
+  if (args.deleteRejected && (!args.requestedBy || !args.reason)) {
+    throw new Error('--delete requires an explicit user request: --user-requested-by and --reason');
   }
   return args;
 }
@@ -76,6 +98,15 @@ async function main(): Promise<void> {
   const results = await curateTraceArchives({
     rootAgentIds,
     deleteRejected: args.deleteRejected,
+    ...(args.deleteRejected
+      ? {
+          userDeletionRequest: {
+            userRequested: true as const,
+            requestedBy: args.requestedBy!,
+            reason: args.reason!,
+          },
+        }
+      : {}),
     concurrency: args.concurrency,
   });
   const summary = {

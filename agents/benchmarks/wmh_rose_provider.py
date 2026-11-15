@@ -61,12 +61,12 @@ from providers.rose import (
     GptAuthContext,
     RoseClient,
 )
+from providers.rose.client import _fold
 from providers.rose.errors import RoseError
 from providers.rose.pricing import get_model_pricing
+from providers.rose.structured_output import StructuredOutputAccumulator
 from providers.rose.truncation import USAGE_COUNTERS, recover_truncated
 from providers.rose.types import RoseResponse, StreamChunk
-from providers.rose.client import _fold
-from providers.rose.structured_output import StructuredOutputAccumulator
 from utils.world_model_observation import effective_world_model_content
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -1038,20 +1038,44 @@ class RoseWMHProvider:
             running_loop = None
         if running_loop is loop:
             raise RuntimeError("WMH synchronous complete cannot run on its async bridge loop")
-        future = asyncio.run_coroutine_threadsafe(self._complete_async(system, messages, max_tokens=max_tokens), loop)
+        from helpers.tracing import current_bound_root_agent_id
+
+        # The bridge loop runs in another thread: carry the step's world root
+        # (bound by serve_world_model per session scope) across explicitly.
+        future = asyncio.run_coroutine_threadsafe(
+            self._complete_async(
+                system, messages, max_tokens=max_tokens, archive_root_agent_id=current_bound_root_agent_id()
+            ),
+            loop,
+        )
         return future.result()
 
     async def complete_scoped(
-        self, session_id: str, prediction_id: str, system: str, messages: List["Message"], *, max_tokens: int
+        self,
+        session_id: str,
+        prediction_id: str,
+        system: str,
+        messages: List["Message"],
+        *,
+        max_tokens: int,
+        archive_root_agent_id: str | None = None,
     ) -> "Completion":
-        """Keep native work cancellable without moving Fast Cache between loops."""
+        """Keep native work cancellable without moving Fast Cache between loops.
+
+        `archive_root_agent_id` is the world's root scope: its world-model calls
+        are archived as v2 records in that root agent's trace bundle.
+        """
         loop = _wmh_async_loop()
-        coroutine = self._complete_scoped_on_loop(session_id, prediction_id, system, messages, max_tokens)
+        coroutine = self._complete_scoped_on_loop(
+            session_id, prediction_id, system, messages, max_tokens, archive_root_agent_id
+        )
         if asyncio.get_running_loop() is loop:
             return await coroutine
         return await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(coroutine, loop))
 
-    async def _complete_scoped_on_loop(self, session_id, prediction_id, system, messages, max_tokens):
+    async def _complete_scoped_on_loop(
+        self, session_id, prediction_id, system, messages, max_tokens, archive_root_agent_id=None
+    ):
         if session_id in self._native_closed_scopes:
             raise ValueError("Native provider session is retired")
         identity = hashlib.sha256(
@@ -1075,7 +1099,11 @@ class RoseWMHProvider:
         else:
             task = asyncio.create_task(
                 self._complete_async(
-                    system, messages, max_tokens=max_tokens, cache_namespace=f"wmh:session:{session_id}"
+                    system,
+                    messages,
+                    max_tokens=max_tokens,
+                    cache_namespace=f"wmh:session:{session_id}",
+                    archive_root_agent_id=archive_root_agent_id,
                 )
             )
             operations[prediction_id] = (identity, task)
@@ -1160,11 +1188,13 @@ class RoseWMHProvider:
         *,
         max_tokens: int,
         cache_namespace: str | None = None,
+        archive_root_agent_id: str | None = None,
     ) -> "Completion":
         # Import the vendored value types lazily so importing this module doesn't require
         # the `wmh` package (e.g. for unit tests that monkeypatch the client).
         from wmh.providers.base import Completion, TokenUsage
 
+        from helpers.tracing import archive_scope
         from providers.demo_cache.context import (
             current_context,
             reset_context,
@@ -1192,7 +1222,9 @@ class RoseWMHProvider:
                 "messages": rose_messages,
                 "max_tokens": max_tokens,
                 "call_site": _WMH_CALL_SITES[self._protocol],
-                "dump_context": False,
+                # Archived only when the world's root agent is known; an
+                # unscoped world has no bundle to own its records.
+                "dump_context": bool(archive_root_agent_id),
                 "cache_namespace": cache_namespace,
                 "result_required": True,
                 "prefer_azure": self._prefer_azure,
@@ -1210,13 +1242,14 @@ class RoseWMHProvider:
             )
             if response_model is not None:
                 prediction_request["response_model"] = response_model
-            response = await self._client.collect(
-                **prediction_request,
-                claude_auth=claude_auth,
-                gpt_auth=gpt_auth,
-                # The whole reply is one JSON transition: a cut-off gets Rose's
-                # shared recovery (larger output limit, then the next model).
-            )
+            with archive_scope(archive_root_agent_id):
+                response = await self._client.collect(
+                    **prediction_request,
+                    claude_auth=claude_auth,
+                    gpt_auth=gpt_auth,
+                    # The whole reply is one JSON transition: a cut-off gets Rose's
+                    # shared recovery (larger output limit, then the next model).
+                )
         except Exception as exc:
             if isinstance(exc, _WMHInvalidPrediction) or hasattr(exc, "wmh_retry_usage"):
                 self._record_usage(exc.usage, exc.actual_model)

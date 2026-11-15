@@ -20,9 +20,11 @@ tags:
   - llm-verifier
   - ocr-grounding
 sources:
+  - PR #2123
+  - PR #2101
   - agent f1802539-7e5d-5a76-9028-133ad4e9fb75
 repro: back-end/src/tests/unit/phone-saved-credential.google-semantic-fixture.json replayed by back-end/src/tests/unit/phone-saved-credential.cases.ts (sanitized prod occluded screen must not bind; visible unfocused and floated-label fields bind on the field)
-status: open
+status: fixed
 ---
 
 ## Problem
@@ -48,6 +50,8 @@ The device-passcode purpose is unchanged: its native full-screen passcode UI has
 5. Follow-up (2026-11-15): the 'tap away' guidance was replaced by a bounded, verified, non-inserting sequence. Submit the email step with input.keys enter; when the field's own label is not observed, never tap the suggestion rows; try escape, then a downward drag starting above the overlay rows, then scroll dy -300, each followed by screen.text; fill only once the label is observed; report the blocker after three failures. Exact planner replays on the c1ad83f7 dumps: step 65 old guidance gave 3/5 blind fill_saved and 2/5 heading taps, new gives 5/5 escape; step 69 old gave 4/5 blank taps and 1/5 no action, new gives 5/5 escape; step 63 new gives 2/3 enter and 1/3 off-path Settings launch. 'Show password' was excluded because it would reveal the password on screen. Golden review GROUNDED (iphone-overlay-dismiss-3). Which gesture actually clears the popup remains to be proven on the next live Connect.
 
 Remaining gap: the service still reports `filled` without a post-fill check, because masked secure-field content is not OCR-visible and a deterministic check would need a banned string classifier. The verifier remains an LLM, so 0/20 is a measured rate, not a guarantee.
+
+Shipped: PR #2101 (merge cae118243454) verifier grounding; PR #2123 (merge 5860080c279a) bounded escape -> drag -> scroll dismissal. Verified live 2026-11-15 (agent 33712aad, lease 344caa08, read-only journal): #102 input.keys enter -> password page with the AutoFill popup still present; #104 input.keys escape cleared it (#105 shows the field's own placeholder, no rows); #106 credentials.fill_saved SUCCEEDED; #107 masked dots in the field; #108 Next -> #109 Google 2-Step Verification. The saved password landed with no manual typing.
 
 ## Human feedback
 

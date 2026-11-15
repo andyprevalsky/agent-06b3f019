@@ -72,3 +72,15 @@ None recorded.
 ## Reusable lesson
 
 Retain first-signal delivery, handler order, process identity, and pipe ownership from the failing invocation before diagnosing a termination observer timeout.
+
+## Recurrence 2026-11-09 (PR #1901 deploy, Blacksmith runner)
+
+`agents-coverage-blackbox` on head 2705eba5fb8b, run
+https://github.com/Rose-Ai-Labs/rose/actions/runs/42673221026 (blacksmith-8vcpu),
+had 130/131 domains passing. `predeploy-metrics` failed `signal_cleanup`:
+`stage_process.communicate(timeout=10)` raised `TimeoutExpired` after TERM to
+`scripts/run-deploy-stage slow-stage`. The same domain passed 3/3 on the
+devbox at the same head. The changed files (`scripts/run_deploy_pipeline.py`,
+`scripts/deploy_prod.py`) are not on this path. No first-signal delivery
+evidence was captured, so the observability gap above remains open; the
+classification is unchanged.
