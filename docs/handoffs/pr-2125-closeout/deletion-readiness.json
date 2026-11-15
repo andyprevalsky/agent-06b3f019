@@ -72,9 +72,7 @@
   },
   "live_processes": [],
   "manifest": "docs/handoffs/pr-2125-closeout/closeout-manifest.json",
-  "open_items": [
-    "uncommitted changes in /home/boxes/rose: docs/handoffs/pr-2125-closeout/closeout-manifest.json, docs/handoffs/pr-2125-closeout/private-archive-receipt.json, docs/rca/cases/2026-11-13-tilion-dead-worker-release-failure-latched-browser-init.md"
-  ],
+  "open_items": [],
   "pr": 2125,
   "preserved_refs": {
     "branch:backup/cerebras-chat-quota-prepush-20261002": {
@@ -92,7 +90,7 @@
       "tip": "0e2ffe95ba40a2d0c2b8ae9e884b4a85d96af3f2"
     }
   },
-  "ready": false,
+  "ready": true,
   "worktrees": [
     {
       "branch": "refs/heads/records/pr-2125-closeout",
@@ -100,12 +98,7 @@
       "locked": false,
       "needs_integration": false,
       "path": "/home/boxes/rose",
-      "uncommitted": [
-        "docs/handoffs/pr-2125-closeout/closeout-manifest.json",
-        "docs/handoffs/pr-2125-closeout/deletion-readiness.json",
-        "docs/handoffs/pr-2125-closeout/private-archive-receipt.json",
-        "docs/rca/cases/2026-11-13-tilion-dead-worker-release-failure-latched-browser-init.md"
-      ],
+      "uncommitted": [],
       "unpushed_commits": 0
     }
   ]
