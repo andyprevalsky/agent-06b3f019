@@ -11,6 +11,9 @@
  *     --connection ready--> [CONNECTED] card shows "Connected" with every step ✓,
  *       then hides after CONNECTED_CARD_MS (fast /connection polling already stopped)
  *   connection never setting_up during this mount --> no card
+ *   while setting_up and the phone is not yet booted (IDLE/CLOSING, no holder): screen
+ *       "Starting the phone for setup…", footer "Starting" — never "idle"; once READY the
+ *       live frames and holder show as usual
  *
  * The whole view is replay-blocked (data-amp-block/mask) like PhoneOverlay.
  */
@@ -45,6 +48,7 @@ function useSetupCard() {
 export function PhoneDeviceView() {
   const model = usePhoneDevice();
   const setup = useSetupCard();
+  const settingUp = setup?.status === 'setting_up';
   return (
     <section
       data-testid="phone-device-view"
@@ -56,11 +60,11 @@ export function PhoneDeviceView() {
     >
       {setup !== null && <IPhoneSetupProgress connection={setup} variant="floating" />}
       <div className="relative flex min-h-0 flex-1 items-center justify-center overflow-hidden p-2">
-        <PhoneDeviceLive model={model} />
+        <PhoneDeviceLive model={model} settingUp={settingUp} />
       </div>
       {model.device !== null && model.device.enabled && (
         <p className="flex-none truncate px-4 pb-4 pt-1 text-center text-[11px] text-white/70">
-          <PhoneHolderLabel holder={model.device.holder} />
+          <PhoneHolderLabel holder={model.device.holder} settingUp={settingUp} />
         </p>
       )}
     </section>

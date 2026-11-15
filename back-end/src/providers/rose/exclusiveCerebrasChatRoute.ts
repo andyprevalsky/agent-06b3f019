@@ -84,6 +84,19 @@ function logBranchFailure(requestId: string, race: string, callerSignal?: AbortS
   };
 }
 
+/** Losing branches' tokens are never shown, but the archive keeps them as attempts. */
+function archiveLosers(options: CompletionOptions): {
+  onLoser?: (name: string, items: readonly RoseStreamChunk[]) => void;
+  onDrained?: (drained: Promise<void>) => void;
+} {
+  const sink = options.archive_attempts;
+  if (!sink) return {};
+  return {
+    onLoser: (name, items) => sink.lostRace(name, items),
+    onDrained: (drained) => sink.drained(drained),
+  };
+}
+
 function withBranchAbort(options: CompletionOptions, branchSignal: AbortSignal): CompletionOptions {
   return {
     ...options,
@@ -171,6 +184,7 @@ export async function* raceDirectCerebrasOpenRouterFallbacks(params: {
       'openrouter-fallback',
       params.options.abort_signal
     ),
+    ...archiveLosers(params.options),
   });
 
   for await (const chunk of raced) yield chunk;
@@ -300,6 +314,7 @@ export async function* runCerebrasChatWithWaterfallFallback(params: {
           'cerebras-hedge',
           params.options.abort_signal
         ),
+        ...archiveLosers(params.options),
       });
       for await (const chunk of hedged) {
         const output = emit(chunk);

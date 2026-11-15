@@ -399,6 +399,8 @@ def _install_root_scoped_sessions(app, world_model_name: str, world_model) -> No
     from starlette.requests import Request
     from wmh.engine.world_model import WorldModel
 
+    from helpers.tracing import archive_scope
+
     original_new_session = world_model.new_session
     original_step = world_model.step
     scope_sessions: dict[str, object] = {}
@@ -427,6 +429,8 @@ def _install_root_scoped_sessions(app, world_model_name: str, world_model) -> No
         invocation = _ROSE_STEP_INVOCATION.get()
         session_key = str(session_id)
         with state_lock:
+            # The world's root scope owns its model calls in the trace archive.
+            world_root = session_scopes.get(session_key)
             step_lock = session_locks.setdefault(session_key, threading.Lock())
             receipts = invocation_receipts.setdefault(session_key, {}) if invocation else {}
             receipt = receipts.get(invocation) if invocation else None
@@ -437,17 +441,18 @@ def _install_root_scoped_sessions(app, world_model_name: str, world_model) -> No
         if not owns_prediction:
             return receipt.result()
         try:
-            if isinstance(world_model, WorldModel):
-                observation = _parallel_pinned_wmh_step(
-                    world_model,
-                    session_id,
-                    action,
-                    step_lock,
-                    on_commit=receipt.set_result if receipt is not None else None,
-                )
-            else:
-                with step_lock:
-                    observation = original_step(session_id, action)
+            with archive_scope(world_root):
+                if isinstance(world_model, WorldModel):
+                    observation = _parallel_pinned_wmh_step(
+                        world_model,
+                        session_id,
+                        action,
+                        step_lock,
+                        on_commit=receipt.set_result if receipt is not None else None,
+                    )
+                else:
+                    with step_lock:
+                        observation = original_step(session_id, action)
         except BaseException as exc:
             if invocation and not receipt.done():
                 with state_lock:

@@ -26,6 +26,10 @@ export const verifyImessageAuthLoss: ImessageAuthLossVerifier = async (input) =>
     temperature: 0,
     max_tokens: 128,
     abort_signal: AbortSignal.timeout(Math.min(60000, input.timeoutMs)),
+    dump_context: {
+      call_site: 'phone_imessage_auth_loss',
+      archive_scope: { agentId: input.agentId },
+    },
     messages: [
       { role: 'system', content: IMESSAGE_AUTH_LOSS_PURPOSE },
       { role: 'user', content: JSON.stringify({ observations: input.evidence }) },

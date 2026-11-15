@@ -12,6 +12,15 @@ Deploy cannot run the full daily suite. Selection rules:
    attempts all passed. Existing `smoke`-tagged tasks always run. Attempts from
    predeploy / active-worktree runs are excluded from the streak so a selected
    canary cannot be invalidated by the deploy run that just assigned it.
+5. AgentCard path gate (Andy, 2026-11-15) — a task that reaches AgentCard
+   (`reaches_agentcard`: an `agentcard` service, an `AGENTCARD_*` secret, an
+   `agentcard-*` tag, an `expected_payment_lifecycle` contract, or an
+   `expected_payment_receipt` card-mint assertion) is selected ONLY when the diff
+   touches `AGENTCARD_INFRA_PATH_RE`. Otherwise no rule above (smoke floor,
+   `payment` canary, path extras) may select it, and the report names it as
+   skipped because no AgentCard infra changed. When AgentCard infra changed,
+   every eligible AgentCard task is selected: smoke-tagged ones in the floor,
+   the rest after the floor canaries (history gate and hard cap still apply).
 
 New catalog tasks auto-attach via `deploy_category` (or derived tags). Preferred
 canary order: `deploy_canary: true` → `pre-deploy`/`smoke` → `pipeline-e2e` →
@@ -114,6 +123,28 @@ TAG_TO_CATEGORY: dict[str, str] = {
     "agentcard-lifecycle-production": "payment",
 }
 
+# AgentCard infrastructure: the only paths whose change may put an AgentCard
+# task on /deploy (rule 5). Repo-relative; scripts/deploy_prod.py's production
+# `agentcard` lane uses the same set. Mixed-purpose files (run_benchmark.py,
+# local.py, cloudbench-run.sh) are deliberately absent: they change on most deploys.
+AGENTCARD_INFRA_PATH_RE = re.compile(
+    r"^(?:"
+    r"back-end/src/providers/(?:agentcard|card-provider)/"
+    r"|back-end/src/providers/(?:wallet-funding|purchase-wallet-funding(?:-repo)?|purchaseCleanup"
+    r"|purchaseFundingCompensation|purchaseIssuedEvidence|purchaseStaleReversal|benchmarkPaymentIdentity)\.ts$"
+    r"|back-end/src/domains/(?:agentcard|purchases|test-payment)/"
+    r"|back-end/scripts/(?:[^/]*agentcard[^/]*|setup-benchmark-[^/]*payment[^/]*\.ts)$"
+    r"|agents/domains/request_payment_card/"
+    r"|agents/tools/request_payment_card\.py$"
+    r"|agents/utils/(?:payment_card|purchase_approval|payment_boundary_goal)\.py$"
+    r"|front-end/src/features/test-payment/"
+    r"|scripts/[^/]*agentcard[^/]*$"
+    r")"
+)
+# Pseudo-category raised only by AGENTCARD_INFRA_PATH_RE; no task carries it.
+AGENTCARD_TRIGGER = "agentcard-infra"
+AGENTCARD_CHECK_TYPES = frozenset({"expected_payment_receipt", "expected_payment_lifecycle"})
+
 PATH_TRIGGERS: tuple[tuple[str, tuple[str, ...]], ...] = (
     (r"(^|/)agents/browser_tools/", ("browser", "browser_stateful")),
     (r"(^|/)agents/domains/browser", ("browser", "browser_stateful")),
@@ -131,6 +162,7 @@ PATH_TRIGGERS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ),
     (r"(^|/)agents/domains/.*payment", ("payment",)),
     (r"(^|/)back-end/src/domains/(agentcard|purchases|test-payment)/", ("payment",)),
+    (AGENTCARD_INFRA_PATH_RE.pattern, ("payment", AGENTCARD_TRIGGER)),
     (r"(^|/)agents/.*grep|(^|/)agents/domains/.*user_data|(^|/)agents/tools/.*grep", ("grep",)),
     (r"(^|/)agents/.*plaid|(^|/)back-end/.*/plaid", ("plaid", "grep")),
     (r"(^|/)agents/.*sms|(^|/)agents/domains/.*sms|(^|/)back-end/.*/sms", ("sms",)),
@@ -228,6 +260,10 @@ class Selection:
     skip_eligibility: dict[str, list[str]] = field(default_factory=dict)
     # Explicit user-approved omissions, never execution PASS or failure masking.
     deploy_quarantined: dict[str, str] = field(default_factory=dict)
+    # Rule 5: changed AgentCard infra paths, and the eligible AgentCard tasks left
+    # off this deploy because there were none.
+    agentcard_infra_changed: list[str] = field(default_factory=list)
+    agentcard_skipped: list[str] = field(default_factory=list)
 
     @property
     def total(self) -> int:
@@ -334,6 +370,34 @@ def format_skip_eligibility(eligibility: dict[str, list[str]]) -> str:
         lines.extend(f"  {name}: {rule}" for rule in rules)
     lines.append("All other assertions and owned-resource cleanup remain required; preserve native outcomes.")
     return "\n".join(lines)
+
+
+def reaches_agentcard(task: TaskRef) -> bool:
+    """Whether the task mints, funds or closes an AgentCard card, from catalog fields only.
+
+    Benchmark agents always route card minting to AgentCard
+    (`createCardProviderForAgent`), so a card-receipt or payment-lifecycle
+    assertion reaches it as surely as a declared `agentcard` service.
+    """
+    env = task.raw.get("environment")
+    env = env if isinstance(env, dict) else {}
+    if "agentcard" in {str(s).lower() for s in env.get("services") or []}:
+        return True
+    if any(str(s).startswith("AGENTCARD_") for s in env.get("secrets") or []):
+        return True
+    if any(tag.startswith("agentcard-") for tag in task.tags):
+        return True
+    if isinstance(task.raw.get("expected_payment_lifecycle"), dict) or task.raw.get("expected_payment_receipt"):
+        return True
+    return any(
+        isinstance(check, dict) and check.get("type") in AGENTCARD_CHECK_TYPES
+        for evaluator in task.raw.get("evaluators") or [] if isinstance(evaluator, dict)
+        for check in evaluator.get("checks") or []
+    )
+
+
+def agentcard_infra_paths(changed_files: Sequence[str]) -> list[str]:
+    return [path for path in changed_files if AGENTCARD_INFRA_PATH_RE.search(path)]
 
 
 def categories_for_task(task: TaskRef) -> set[str]:
@@ -583,6 +647,12 @@ def select_predeploy_benches(
     triggered = categories_triggered_by_paths(changed)
     attempts_path = attempts_file or DEFAULT_ATTEMPTS
     attempt_passes = load_attempt_passes(attempts_path)
+    # Rule 5: without an AgentCard infra change, AgentCard tasks leave the pool
+    # every other rule draws from.
+    agentcard_changed = agentcard_infra_paths(changed)
+    agentcard_tasks = [t for t in tasks if reaches_agentcard(t)]
+    agentcard_names = {t.name for t in agentcard_tasks}
+    pool = tasks if agentcard_changed else [t for t in tasks if t.name not in agentcard_names]
 
     reasons: dict[str, list[str]] = {}
     selected: list[str] = []
@@ -610,7 +680,7 @@ def select_predeploy_benches(
 
     # Existing smoke tags always run — history gate applies only to canaries /
     # path extras being *added* into the predeploy smoke set.
-    smoke_tasks = [t for t in tasks if t.is_smoke and _eligible(t, surface)]
+    smoke_tasks = [t for t in pool if t.is_smoke and _eligible(t, surface)]
     smoke_selected = 0
     for task in smoke_tasks:
         if not _add(task.name, floor, "floor:smoke"):
@@ -625,7 +695,7 @@ def select_predeploy_benches(
     for category in FLOOR_CATEGORIES:
         found = False
         for cand in candidates_for_category(
-            tasks,
+            pool,
             category,
             surface,
             attempt_passes=attempt_passes,
@@ -656,9 +726,23 @@ def select_predeploy_benches(
             "Shrink FLOOR_CATEGORIES / smoke set before deploying."
         )
 
+    # Rule 5: an AgentCard infra change selects every eligible AgentCard task, not
+    # one canary. Smoke-tagged ones are already in the floor; the rest still need
+    # the history streak and truncate at the hard cap with a scream.
+    if agentcard_changed:
+        for task in sorted(agentcard_tasks, key=_canary_sort_key):
+            if task.name in selected_set or not _eligible(task, surface):
+                continue
+            if not has_pass_streak(task.name, attempt_passes, streak=pass_streak):
+                if task.name not in skipped_history:
+                    skipped_history.append(task.name)
+                continue
+            if _add(task.name, path_extras, f"path:{AGENTCARD_TRIGGER}") and "payment" not in categories_covered:
+                categories_covered.append("payment")
+
     def _add_one_extra(category: str, reason_prefix: str) -> None:
         for cand in candidates_for_category(
-            tasks,
+            pool,
             category,
             surface,
             attempt_passes=attempt_passes,
@@ -675,7 +759,7 @@ def select_predeploy_benches(
             break
 
     for category in triggered:
-        if category == "harness":
+        if category in {"harness", AGENTCARD_TRIGGER}:
             continue
         _add_one_extra(category, "path")
 
@@ -715,6 +799,8 @@ def select_predeploy_benches(
         skip_eligibility=standing_skip_eligibility(tasks, selected),
         deploy_quarantined={t.name: t.raw["deploy_quarantine"] for t in tasks
                             if t.raw.get("deploy_quarantine")},
+        agentcard_infra_changed=agentcard_changed,
+        agentcard_skipped=[] if agentcard_changed else [t.name for t in agentcard_tasks if _eligible(t, surface)],
     )
 
 
@@ -735,6 +821,17 @@ def format_report(selection: Selection) -> str:
     ]
     for name, reason in selection.deploy_quarantined.items():
         lines.append(f"Deploy quarantine (not run): {name}: {reason}")
+    if selection.agentcard_infra_changed:
+        lines.append(
+            f"AgentCard infra changed ({len(selection.agentcard_infra_changed)}): "
+            f"{', '.join(selection.agentcard_infra_changed)} — every eligible AgentCard task selected "
+            "(non-smoke ones need the history streak)"
+        )
+    elif selection.agentcard_skipped:
+        lines.append(
+            f"AgentCard tasks skipped because no AgentCard infra changed "
+            f"({len(selection.agentcard_skipped)}): {', '.join(selection.agentcard_skipped)}"
+        )
     if selection.skipped_history:
         lines.append(
             f"Skipped (need last {selection.pass_streak_required} historic passes) "
@@ -747,6 +844,8 @@ def format_report(selection: Selection) -> str:
             f"{selection.pass_streak_required}-pass streak): "
             f"{', '.join(selection.uncovered_categories)}"
         )
+        if "payment" in selection.uncovered_categories and selection.agentcard_skipped:
+            lines.append("  payment: AgentCard canaries are path-gated (no AgentCard infra changed)")
     if selection.cap_hit:
         lines.append(
             CAP_SCREAM.format(
@@ -889,6 +988,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "reasons": selection.reasons,
                     "surface": selection.surface,
                     "skip_eligibility": selection.skip_eligibility,
+                    "agentcard_infra_changed": selection.agentcard_infra_changed,
+                    "agentcard_skipped": selection.agentcard_skipped,
                 },
                 indent=2,
                 sort_keys=True,

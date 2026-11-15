@@ -53,6 +53,8 @@ import {
   dropdownIconImageClassName,
   DropdownIconPreset,
 } from './DropdownIconFrame';
+import { AccountTeamShare } from '@/components/teams/TeamSharing';
+import type { AccountShareLookup, AccountShareTarget } from '@/hooks/useTeams';
 import { FileSystemIcon } from './FileSystemSection';
 import { PebbleIndexIcon } from './PebbleIndexSection';
 import {
@@ -97,6 +99,9 @@ export interface DesktopSectionView {
   description?: string;
   rows: DesktopIntegrationView[];
 }
+
+const shareCaption = (target: AccountShareTarget | undefined) =>
+  target && <AccountTeamShare {...target} />;
 
 const tile = (preset: DesktopIcon['preset'], glyph: JSX.Element): DesktopIcon => ({
   preset,
@@ -234,7 +239,10 @@ function passwordRows(p: DesktopIntegrationsProps, removal: RemovalPort) {
   return views;
 }
 
-function gmailRow(p: DesktopIntegrationsProps): DesktopIntegrationView {
+function gmailRow(
+  p: DesktopIntegrationsProps,
+  shareTarget: AccountShareLookup,
+): DesktopIntegrationView {
   const rows = p.data.connectedIntegrations;
   const row = rows.find((i) => i.name === 'gmail');
   const accounts = gmailAccountViews(rows, {
@@ -242,7 +250,7 @@ function gmailRow(p: DesktopIntegrationsProps): DesktopIntegrationView {
     resyncingEmail: p.gmail.resyncingEmail,
     onDisconnect: (email) => void p.actions.onGmailDisconnect(email),
     onResync: (email) => void p.actions.onGmailResync(email),
-  });
+  }).map((account) => ({ ...account, share: shareCaption(shareTarget('gmail', account.label)) }));
   const ownIds = gmailAccounts(row).map((account) => [account.email]);
   return {
     key: 'gmail',
@@ -257,7 +265,11 @@ function gmailRow(p: DesktopIntegrationsProps): DesktopIntegrationView {
   };
 }
 
-function messageRows(p: DesktopIntegrationsProps, removal: RemovalPort) {
+function messageRows(
+  p: DesktopIntegrationsProps,
+  removal: RemovalPort,
+  shareTarget: AccountShareLookup,
+) {
   const rows = p.data.connectedIntegrations;
   const find = (name: string) => rows.find((i) => i.name === name);
   const loading = p.messages.messageSyncLoading;
@@ -271,7 +283,7 @@ function messageRows(p: DesktopIntegrationsProps, removal: RemovalPort) {
       localSyncing: loading === 'imessage',
     },
     removal,
-  );
+  ).map((account) => ({ ...account, share: shareCaption(shareTarget('imessage')) }));
   const whatsappRow = find('whatsapp');
   const whatsapp = singleAccount(
     whatsappRow,
@@ -292,7 +304,7 @@ function messageRows(p: DesktopIntegrationsProps, removal: RemovalPort) {
       onConnect: p.isIMessageAvailable ? () => void p.actions.onIMessageSync() : undefined,
       connecting: loading === 'imessage',
     },
-    gmailRow(p),
+    gmailRow(p, shareTarget),
     {
       key: 'whatsapp',
       name: 'WhatsApp',
@@ -427,6 +439,7 @@ function pebbleIndexRow(p: DesktopIntegrationsProps): DesktopIntegrationView {
 export function desktopSectionViews(
   p: DesktopIntegrationsProps,
   removal: RemovalPort,
+  shareTarget: AccountShareLookup,
 ): DesktopSectionView[] {
   const sections: DesktopSectionView[] = [
     {
@@ -442,7 +455,7 @@ export function desktopSectionViews(
     {
       catalogKey: 'messages',
       title: INTEGRATION_CATALOG.messages.title,
-      rows: messageRows(p, removal),
+      rows: messageRows(p, removal, shareTarget),
     },
   ];
   if (p.isFullySignedIn) {

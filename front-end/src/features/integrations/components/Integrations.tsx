@@ -21,7 +21,9 @@
  * Pebble Index 01 (last row/card) --Connect--> PebbleIndexSetupModal (guided
  * webhook setup; state owned here, in both presentations).
  *
- * Team sharing uses explicit per-account, per-team opt-ins, saved independently.
+ * Team sharing lives on each shareable account (Gmail address, iMessage) in both
+ * presentations: a "Shared with …" / "Share" caption opening per-team checkboxes,
+ * saved independently. A failed sharing load shows one alert at the top.
  *
  * File System is a FE-only section: website is Download for Mac; Mac app
  * plus click stays [IDLE/READY] (no hook).
@@ -40,7 +42,7 @@ import { hasIntegrationSearchResults, integrationMatchesSearch } from '../hooks/
 import IntegrationSearch from './IntegrationSearch';
 import { Loader2 } from 'lucide-react';
 
-import { IntegrationTeamSharing } from '@/components/teams/TeamSharing';
+import { TeamShareLoadError } from '@/components/teams/TeamSharing';
 import { useRoseDesktop } from '@/hooks/roseDesktopContext';
 
 import {
@@ -174,7 +176,7 @@ export default function Integrations({ initialSearch = '' }: { initialSearch?: s
         />
 
         <div className="space-y-3">
-          <IntegrationTeamSharing />
+          <TeamShareLoadError />
           <div hidden={!integrationMatchesSearch('iphone', search)}>
             <IPhoneConnectionSection key={user?.id ?? 'signed-out'} />
           </div>

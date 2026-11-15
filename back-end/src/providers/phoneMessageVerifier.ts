@@ -65,7 +65,11 @@ export const verifyPhoneMessage: MessageVerifier = async (input) => {
         },
       },
     },
-    dump_context: { call_site: `phone_message_${input.mode}`, agent_id: input.agentId },
+    dump_context: {
+      call_site: `phone_message_${input.mode}`,
+      agent_id: input.agentId,
+      archive_scope: { agentId: input.agentId },
+    },
   });
   const accumulator = new StructuredOutputAccumulator();
   let model = '',
