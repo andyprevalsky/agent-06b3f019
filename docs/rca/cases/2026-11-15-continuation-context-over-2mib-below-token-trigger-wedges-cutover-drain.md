@@ -23,8 +23,10 @@ tags:
 sources:
   - agent 8789a5df-0119-4bbf-b90c-c7e58de56fe4
   - PR #1732
+  - PR #2239
+  - commit e5ccb8783afd990ea52f6a85397834603bef1408
 repro: agents/tests/blackbox/run_agent.blackbox.py test_run_agent_compacts_context_over_continuation_payload_budget (domain run-agent)
-status: open
+status: fixed
 ---
 
 ## Problem
@@ -112,9 +114,41 @@ compactor activity input stays under the limit.
 10k-agent behavior: one O(context) JSON encode per turn per agent, next to the
 existing O(context) token estimate. No shared state, no fan-in.
 
-Live job: 8789a5df runs on the old bank's code, so this fix can't reach it in
-place. Job a145f654 can't complete until that one workflow leaves the old queue,
-and that needs an operator decision on the user's agent (not taken here).
+Review hardening (same PR):
+- A byte-only trigger measures savings in bytes, and its "saved only …"
+  message names that unit. Token-triggered compactions are unchanged. This was
+  required by the golden review (OpenClaw's tokens-or-bytes trigger tracks byte
+  progress only for its byte trigger).
+- The regression uses the real 1.2 MB budget on a context heavy in
+  codex_reasoning_items, and asserts the budget leaves room under 2 MiB.
+- The regression is registered in run_all_tests; deploy-command-structural
+  caught the first version unregistered.
+- Simulating the real head/middle/tail split on 8789a5df's actual context
+  shrinks 1.58 MB to about 0.40 MB.
+
+Shipped: PR #2239 merged as e5ccb8783afd990ea52f6a85397834603bef1408 on
+2026-11-15. All 17 deploy gates passed, except an external Tilion DNS outage on
+browser-provider-live, which was recorded and waived. Production verification:
+- fly PASS: deploy-agents run 43761923234, job 22894081 SUCCEEDED plus
+  monitor --verify;
+- workflow-migration PASS;
+- semantic PASS, verified by descendant ce02618551.
+
+Live job: 8789a5df ran on the old bank's code, so the fix could not reach it in
+place. With Andy's authorization, the coordinator ran the supported per-agent
+replacement (`POST /api/agents/8789a5df…/restart`, agentRestartService) at
+20:09Z. That terminated only run 794ef8d4 and started a replacement on the live
+queue from DB state. The old queue's gate went to RETIRED at 20:09:50Z and job
+a145f654 reached SUCCEEDED at 20:14:04Z. The replacement then handed off
+cleanly at two later cutovers with 0 failed workflow tasks: #2210 at 20:30Z and
+#2239 at 21:17Z. Paused setup agent 87c1e09a also handed off at 21:17Z, keeping
+its PAUSED state, its user-controlled lease and its awaiting_user setup.
+
+Open follow-up: runtime_state carried about 537 KB, including
+response_schema_feedback / _rows / _sources (the same 47 entries stored three
+times, about 415 KB) and background_agents (100 KB). These are unbounded
+continuation sources. They are handed to a separate repair goal (thread
+"--ai-- RCA runtime_state continuation payload bound").
 
 ## Human feedback
 
