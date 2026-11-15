@@ -264,6 +264,19 @@ Marker status on 2026-11-15, from main's factory ledger:
 - The `browser-biometrics-webdecoy` marker is released at 7/5 consecutive deploy QUARANTINED_PASS.
 - The `agent-payment-idempotent-abandonment` marker stays, linked to its repair thread, at 2/5. Its only reset was PR #2085's run on `c8a41c131f`, which failed `orgTransfer.transferredCents expected 4396 got 3096` on a healthy session (`sess_c3d0eb`). That is a separate payment-transfer boundary, owned by the payment-interference fix PR #2107, and not this cause.
 
+PR #2125 (merged `724bc0750d`, 2026-11-15) shipped the webdecoy release and the abandonment link:
+
+- Gates passed in one round on `5728b87a06`, 16 gates. Production semantic run 43673121908 passed. The AgentCard production lane was elected out per Andy's 2026-11-15 02:13:52Z instruction "skip agent card tests".
+- In its smoke, the now-unquarantined `browser-biometrics-webdecoy` passed.
+- `agent-payment-idempotent-abandonment` was a QUARANTINED_FAIL (`Timeout after 901s`, agent `fe984243`). It is not this cause:
+  - Every browser session landed on healthy `sess_c3d0eb`, with zero `failed validation` or `before readiness` lines.
+  - Four `HTTP 503 capacity_unavailable` responses on `POST /v1/session` all recovered on retry.
+  - The checkout and payment completed. The root's verifier then scored 0.5 because the second browser sub-agent "mistakenly shared a progress message when the user said not to". The root kept working until the cap.
+  - That failure is an agent-behavior issue with its own boundary, left open on this marker.
+- Client handling of Tilion `capacity_unavailable` went to repair thread ph79ckhr5zvmd4zd34e77743m98j9t76.
+
+PR #1992's `browser-auth-guest-purchase` marker (`896710fd`, source `e7af654e05`, which lacks 7d3fc34cac) shares this cause. Its run shows 0 browser steps and a root re-spawn. The marker is owned by the same repair thread. Main's factory ledger has no deploy rows for that task yet, so its 5-pass release streak has not started.
+
 The regression stays in `/deploy`: a fixture-only change selects the
 `backend-blackbox` `browser-session` domain, whose full run reaches the fixture
 through `runLogicalBrowserCases`. `select_affected_tests.py --lanes-for` reports the
