@@ -19,12 +19,12 @@ tags:
   - browser
   - code-agent
 sources:
+  - PR #2094
   - agent 8789a5df-0119-4bbf-b90c-c7e58de56fe4
   - commit e0a3c84759e5b5c3ac33f525253a7dcfc4afa727
   - commit d7103ba60990932d0641966d82b375bd14e561ba
 repro: front-end/src/tests/blackbox/tool-artifact-ownership.blackbox.tsx
 status: fixed
-shipped_pr: https://github.com/Rose-Ai-Labs/rose/pull/2094
 ---
 
 ## Problem
@@ -102,7 +102,8 @@ Independent final review found no blocking issue on the frozen source. The final
 unchanged runs under the default eight load slots passed locally and in the
 selected Blacksmith stability gate. The captured full-list replay groups all
 318 internal artifacts under the four exact owners, preserving explicit displays.
-PR #2094 merged as 2ac670e4d6e960aec7d23f7baa68c2af0b3ad177 after all 13
+[PR #2094](https://github.com/Rose-Ai-Labs/rose/pull/2094) merged as
+2ac670e4d6e960aec7d23f7baa68c2af0b3ad177 after all 13
 selected premerge gates passed. Production verification is recorded in the
 associated closeout; no unrelated browser-session repair is claimed here.
 
