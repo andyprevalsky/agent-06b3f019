@@ -93,18 +93,32 @@ export async function archiveTargetFor(session: {
   };
 }
 
-/** Artifacts a manifest names (none for an unparseable manifest, which is still archived). */
-function manifestArtifacts(
+/**
+ * Artifacts a manifest names. A malformed manifest throws: it cannot prove which
+ * artifacts exist, so the checkpoint must never count as mirrored (and so never
+ * be pruned or retired from Supabase) on its strength.
+ */
+export function manifestArtifacts(
   manifestBytes: Buffer
 ): Array<[string, { sha256: string; size: number }]> {
-  try {
-    const parsed = JSON.parse(manifestBytes.toString('utf8')) as {
-      artifacts?: Record<string, { sha256: string; size: number }>;
-    };
-    return Object.entries(parsed.artifacts ?? {});
-  } catch {
-    return [];
+  const parsed = JSON.parse(manifestBytes.toString('utf8')) as unknown;
+  const artifacts =
+    typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)
+      ? (parsed as { artifacts?: unknown }).artifacts
+      : undefined;
+  if (typeof artifacts !== 'object' || artifacts === null || Array.isArray(artifacts)) {
+    throw new Error('checkpoint manifest has no artifacts object');
   }
+  return Object.entries(artifacts).map(([name, meta]) => {
+    const { sha256, size } = (meta ?? {}) as { sha256?: unknown; size?: unknown };
+    if (typeof sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(sha256)) {
+      throw new Error(`checkpoint manifest artifact ${name} has no sha256`);
+    }
+    if (typeof size !== 'number' || !Number.isInteger(size) || size < 0) {
+      throw new Error(`checkpoint manifest artifact ${name} has no size`);
+    }
+    return [name, { sha256, size }];
+  });
 }
 
 export interface CheckpointArchiveReceipt {

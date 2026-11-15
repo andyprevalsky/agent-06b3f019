@@ -23,6 +23,7 @@ import {
   ensureCheckpointArchived,
   mirrorCheckpointToArchive,
   scheduleCheckpointArchiveJob,
+  waitForCodeSessionArchiveJobs,
   type CheckpointArchiveTarget,
 } from './archiveMirror';
 import {
@@ -427,11 +428,104 @@ async function deleteCheckpoints(session: CodeSessionRow): Promise<void> {
   }
 }
 
-/** Kill the sandbox, delete stored checkpoints (each once archived) and mark the session retired. */
-export async function retireCodeSession(session: CodeSessionRow): Promise<void> {
-  if (await isCliTemplateSession(session.userId, session.id)) {
+/** Time a retire-time checkpoint may take: no close call waits on it. */
+const RETIRE_CHECKPOINT_BUDGET_MS = 10 * 60_000;
+
+/** The session's live filesystem for a last checkpoint, or null when it no longer exists. */
+async function retiringSessionFs(session: CodeSessionRow): Promise<CodeSessionFs | null> {
+  if (session.sandboxKind === 'e2b' && session.sandboxId !== null) {
+    const sandbox = await connectPausedSandbox(session.sandboxId, RETIRE_CHECKPOINT_BUDGET_MS);
+    return sandbox === null ? null : e2bSandboxFs(sandbox);
+  }
+  if (
+    session.homeDir !== null &&
+    isOwnedLocalHome(session.homeDir) &&
+    existsSync(session.homeDir)
+  ) {
+    return localSandboxFs(session.homeDir);
+  }
+  return null;
+}
+
+/**
+ * CLI files the latest checkpoint deferred (its close ran out of budget) exist
+ * only in the sandbox: take one more checkpoint that captures them and confirm
+ * its archive copy before the sandbox is destroyed. Any failure throws, so the
+ * session stays unretired (sandbox and checkpoints kept) for the next sweep.
+ * Returns the session row to retire (re-read when a checkpoint was added).
+ */
+async function captureDeferredCliFiles(session: CodeSessionRow): Promise<CodeSessionRow> {
+  if (session.latestCheckpointSeq < 1) return session;
+  const raw = await getCheckpointObject(
+    checkpointKey(session.userId, session.id, session.latestCheckpointSeq, MANIFEST_NAME)
+  );
+  let deferred: string[] = [];
+  try {
+    deferred =
+      raw === null
+        ? []
+        : ((JSON.parse(raw.toString('utf8')) as CheckpointManifest).cliFilesDeferred ?? []);
+  } catch {
+    deferred = [];
+  }
+  if (deferred.length === 0) return session;
+  const fs = await retiringSessionFs(session);
+  if (fs === null) {
+    log.error('Deferred CLI files are lost: the code session sandbox no longer exists', {
+      codeSessionId: session.id,
+      seq: String(session.latestCheckpointSeq),
+      deferred: String(deferred.length),
+    });
+    return session;
+  }
+  const result = await checkpointCodeSession({
+    session,
+    fs,
+    reason: 'retire',
+    agentId: session.ownerAgentId,
+    deadlineAt: Date.now() + RETIRE_CHECKPOINT_BUDGET_MS,
+  });
+  const manifest =
+    result === null
+      ? null
+      : await getCheckpointObject(
+          checkpointKey(session.userId, session.id, result.seq, MANIFEST_NAME)
+        );
+  const stillDeferred =
+    manifest === null
+      ? deferred
+      : ((JSON.parse(manifest.toString('utf8')) as CheckpointManifest).cliFilesDeferred ?? []);
+  if (result === null || stillDeferred.length > 0) {
+    log.warn('Retire checkpoint did not capture the deferred CLI files; session kept', {
+      codeSessionId: session.id,
+      deferred: String(stillDeferred.length),
+    });
+    throw new Error(
+      `Code session ${session.id} still has deferred CLI files; retire retried later`
+    );
+  }
+  // The checkpoint's own archive job may still be writing these objects: on a
+  // miss, let scheduled jobs settle and confirm once more before giving up.
+  const confirm = () => ensureCheckpointArchived(session, result.seq);
+  const archived = await confirm().catch(async () => {
+    await waitForCodeSessionArchiveJobs();
+    return confirm();
+  });
+  if (archived === 'absent') {
+    throw new Error(`Retire checkpoint ${result.seq} of code session ${session.id} is missing`);
+  }
+  return prisma.codeSession.findUniqueOrThrow({ where: { id: session.id } });
+}
+
+/**
+ * Capture deferred CLI files, kill the sandbox, delete stored checkpoints (each
+ * once archived) and mark the session retired.
+ */
+export async function retireCodeSession(retiring: CodeSessionRow): Promise<void> {
+  if (await isCliTemplateSession(retiring.userId, retiring.id)) {
     throw new Error('Disconnect the CLI integration before retiring its template');
   }
+  const session = await captureDeferredCliFiles(retiring);
   if (session.sandboxKind === 'e2b' && session.sandboxId !== null) {
     try {
       await Sandbox.kill(session.sandboxId, { apiKey: process.env.E2B_API_KEY });

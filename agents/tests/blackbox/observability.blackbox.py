@@ -192,6 +192,53 @@ def test_prod_llm_context_dump_skips_oversize_payload():
             restore()
 
 
+def test_same_millisecond_local_dumps_keep_distinct_handles():
+    """CodeRabbit 4576377086: two calls sharing agent, span, call site and millisecond must not
+    share a local handle, or the second start overwrites the first call's dump_id."""
+    from unittest.mock import patch
+
+    import structlog
+
+    import helpers.observability as observability
+    import helpers.trace_archive as trace_archive
+
+    old = (observability.logger, observability._IS_PRODUCTION, observability._DUMP_ROOT, trace_archive._LOCAL_ROOT)
+    old_env = {key: os.environ.get(key) for key in ("TRACE_ARCHIVE_ENABLED", "TRACE_ARCHIVE_BACKEND")}
+    with tempfile.TemporaryDirectory() as tmp:
+        tokens = structlog.contextvars.bind_contextvars(
+            root_agent_id="root-ms", agent_id="root-ms", span_id="span0000ms01"
+        )
+        try:
+            observability.logger = _CaptureLogger()
+            observability._IS_PRODUCTION = False
+            observability._DUMP_ROOT = Path(tmp) / "dumps"
+            trace_archive._LOCAL_ROOT = Path(tmp) / "archive"
+            os.environ.update({"TRACE_ARCHIVE_ENABLED": "1", "TRACE_ARCHIVE_BACKEND": "local"})
+            with patch.object(observability.time, "time", return_value=1_800_000_000.123):
+                first = observability.dump_llm_context("planner", [{"role": "user", "content": "one"}], model="m")
+                second = observability.dump_llm_context("planner", [{"role": "user", "content": "two"}], model="m")
+            assert first and second and first != second, (first, second)
+            first_doc, second_doc = json.loads(Path(first).read_text()), json.loads(Path(second).read_text())
+            assert first_doc["messages"][0]["content"] == "one" and second_doc["messages"][0]["content"] == "two"
+            assert first_doc["dump_id"] != second_doc["dump_id"]
+            # The span prefix and call_site segment still parse for agent_context filters.
+            from benchmarks.agent_context import parse_dump_filename
+
+            meta = parse_dump_filename(Path(first))
+            assert meta["span_id"].startswith("span0000ms01") and meta["call_site"] == "planner", meta
+            assert meta["dump_id"] == first_doc["dump_id"], meta
+        finally:
+            structlog.contextvars.reset_contextvars(**tokens)
+            observability.logger, observability._IS_PRODUCTION, observability._DUMP_ROOT, trace_archive._LOCAL_ROOT = (
+                old
+            )
+            for key, value in old_env.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+
+
 def test_update_llm_dump_merges_local_file_and_handles_edge_paths():
     import helpers.observability as observability
     import helpers.trace_archive as trace_archive
@@ -272,6 +319,7 @@ async def run_all_tests():
     r.record("agent_context_materializes_clickhouse_events", test_agent_context_materializes_clickhouse_dump_events)
     r.record("prod_llm_context_skips_oversize", test_prod_llm_context_dump_skips_oversize_payload)
     r.record("update_llm_dump_merges_local_file", test_update_llm_dump_merges_local_file_and_handles_edge_paths)
+    r.record("same_millisecond_local_dumps_distinct", test_same_millisecond_local_dumps_keep_distinct_handles)
     teardown_mock()
     return r.all_passed
 

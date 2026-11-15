@@ -157,18 +157,19 @@ function shouldCompress(objectPath: string, contentType: string, compress?: bool
 }
 
 /**
- * Synthetic nonce for create-only writes: HMAC(key, path, plaintext) makes a
- * retry of the same artifact produce byte-identical ciphertext, so an attempt
- * whose body landed but whose sidecar did not can be completed idempotently.
- * Distinct plaintexts still get distinct nonces (no GCM nonce reuse).
+ * Synthetic nonce for create-only writes: HMAC(key, path/AAD, stored bytes)
+ * makes a retry of the same artifact produce byte-identical ciphertext, so an
+ * attempt whose body landed but whose sidecar did not can be completed
+ * idempotently. It hashes the exact bytes AES-GCM encrypts (after optional
+ * gzip), so distinct encryption inputs never share a nonce under one key.
  */
-function syntheticNonce(key: Buffer, objectPath: string, plaintext: Buffer): Buffer {
+function syntheticNonce(key: Buffer, objectPath: string, storedPlaintext: Buffer): Buffer {
   return crypto
     .createHmac('sha256', key)
-    .update('rose-trace-archive-siv-v1\0')
+    .update('rose-trace-archive-siv-v2\0')
     .update(objectPath)
     .update('\0')
-    .update(crypto.createHash('sha256').update(plaintext).digest())
+    .update(crypto.createHash('sha256').update(storedPlaintext).digest())
     .digest()
     .subarray(0, 12);
 }
@@ -187,7 +188,7 @@ export function encryptArtifact(
   const useGzip = shouldCompress(normalizedPath, contentType, compress);
   const storedPlaintext = useGzip ? zlib.gzipSync(plaintext, { level: 6 }) : plaintext;
   const nonce = options.deterministic
-    ? syntheticNonce(key, normalizedPath, plaintext)
+    ? syntheticNonce(key, normalizedPath, storedPlaintext)
     : crypto.randomBytes(12);
   const cipher = crypto.createCipheriv('aes-256-gcm', key, nonce);
   cipher.setAAD(Buffer.from(normalizedPath, 'utf8'));

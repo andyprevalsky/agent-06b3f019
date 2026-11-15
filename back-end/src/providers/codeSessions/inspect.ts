@@ -487,33 +487,58 @@ export async function inspectCodeSession(params: InspectCodeParams): Promise<Cod
   let resetsAt: Date | null = null;
   const settings = await codeAgentSettingsForAgent(params.agentId);
   const tier = settings.tier;
-  for (const provider of providers) {
-    let auth: ProviderAuth;
-    try {
-      auth = await providerAuth(provider, params.userId, tier);
-    } catch (error) {
-      if (error instanceof CodeAgentCredentialError) continue;
-      throw error;
+  const inspectionId = randomUUID();
+  try {
+    for (const provider of providers) {
+      let auth: ProviderAuth;
+      try {
+        auth = await providerAuth(provider, params.userId, tier);
+      } catch (error) {
+        if (error instanceof CodeAgentCredentialError) continue;
+        throw error;
+      }
+      const attempt = await inspectOnce(
+        provider,
+        auth,
+        checkpoint,
+        question,
+        params.signal,
+        settings
+      );
+      last = { ...attempt, provider };
+      archivedAttempts.push({ provider, sandboxId: attempt.sandboxId, capture: attempt.capture });
+      const limit = attempt.outcome.usageLimit;
+      if (limit === null || provider !== 'claude') break;
+      // C15: this credential is out; the next provider (if any) answers instead.
+      resetsAt = parseResetsAt(limit.resetsAt);
+      await markClaudeUsageLimited(params.userId, auth.claude, resetsAt);
+      log.info('Code inspection hit a Claude usage limit', {
+        codeSessionId: session.id,
+        resetsAt: resetsAt?.toISOString(),
+      });
     }
-    const attempt = await inspectOnce(
-      provider,
-      auth,
-      checkpoint,
-      question,
-      params.signal,
-      settings
-    );
-    last = { ...attempt, provider };
-    archivedAttempts.push({ provider, sandboxId: attempt.sandboxId, capture: attempt.capture });
-    const limit = attempt.outcome.usageLimit;
-    if (limit === null || provider !== 'claude') break;
-    // C15: this credential is out; the next provider (if any) answers instead.
-    resetsAt = parseResetsAt(limit.resetsAt);
-    await markClaudeUsageLimited(params.userId, auth.claude, resetsAt);
-    log.info('Code inspection hit a Claude usage limit', {
-      codeSessionId: session.id,
-      resetsAt: resetsAt?.toISOString(),
-    });
+  } catch (error) {
+    // A later step failed after an attempt finished (its sandbox is already gone):
+    // archive the completed attempts with the terminal error, then fail as before.
+    if (archivedAttempts.length > 0) {
+      await archiveInspection({
+        inspectionId,
+        userId: params.userId,
+        agentId: params.agentId,
+        codeSessionId: session.id,
+        checkpointSeq: checkpoint.manifest.seq,
+        question,
+        result: {
+          ...base,
+          status: 'failed',
+          provider: last?.provider ?? null,
+          error: error instanceof Error ? error.message : String(error),
+          sandbox_id: last?.sandboxId ?? null,
+        },
+        attempts: archivedAttempts,
+      });
+    }
+    throw error;
   }
   const totalMs = Date.now() - started;
   const emptyTimings = {
@@ -546,7 +571,6 @@ export async function inspectCodeSession(params: InspectCodeParams): Promise<Cod
     sandbox_id: last?.sandboxId ?? null,
     timings: { ...(last?.timings ?? emptyTimings), total_ms: totalMs },
   };
-  const inspectionId = randomUUID();
   await archiveInspection({
     inspectionId,
     userId: params.userId,

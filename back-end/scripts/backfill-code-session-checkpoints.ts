@@ -26,8 +26,6 @@ import { createHash } from 'node:crypto';
 import { config } from 'dotenv';
 import pLimit from 'p-limit';
 
-config();
-
 interface Args {
   apply: boolean;
   sessions: string[];
@@ -56,10 +54,53 @@ function parseArgs(argv: string[]): Args {
 }
 
 interface ManifestShape {
-  artifacts?: Record<string, { sha256: string; size: number }>;
+  artifacts: Record<string, { sha256: string; size: number }>;
+}
+
+/**
+ * Sessions to scan: every one with an allocated checkpoint seq. A checkpoint whose
+ * upload finished but whose commit failed leaves latestCheckpointSeq at 0 while
+ * nextCheckpointSeq (always >= latestCheckpointSeq) has moved on.
+ */
+export function backfillSessionWhere(sessions: string[]): {
+  nextCheckpointSeq: { gt: number };
+  id?: { in: string[] };
+  state?: { not: string };
+} {
+  return {
+    nextCheckpointSeq: { gt: 0 },
+    ...(sessions.length > 0 ? { id: { in: sessions } } : { state: { not: 'RETIRED' } }),
+  };
+}
+
+/**
+ * A checkpoint manifest whose artifact list can be trusted, else a throw: a
+ * malformed manifest must fail the session, never confirm an archive that holds
+ * only the manifest itself.
+ */
+export function parseCheckpointManifest(manifestBytes: Buffer): ManifestShape {
+  const parsed = JSON.parse(manifestBytes.toString('utf8')) as unknown;
+  const artifacts =
+    typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)
+      ? (parsed as { artifacts?: unknown }).artifacts
+      : undefined;
+  if (typeof artifacts !== 'object' || artifacts === null || Array.isArray(artifacts)) {
+    throw new Error('checkpoint manifest has no artifacts object');
+  }
+  for (const [name, meta] of Object.entries(artifacts)) {
+    const { sha256, size } = (meta ?? {}) as { sha256?: unknown; size?: unknown };
+    if (typeof sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(sha256)) {
+      throw new Error(`checkpoint manifest artifact ${name} has no sha256`);
+    }
+    if (typeof size !== 'number' || !Number.isInteger(size) || size < 0) {
+      throw new Error(`checkpoint manifest artifact ${name} has no size`);
+    }
+  }
+  return { artifacts: artifacts as ManifestShape['artifacts'] };
 }
 
 async function main(): Promise<void> {
+  config(); // back-end/.env; loaded here so importing this module (tests) never reads prod credentials
   const args = parseArgs(process.argv.slice(2));
   const { prisma } = await import('../src/providers/database');
   const { checkpointKey, getCheckpointObject } =
@@ -72,10 +113,7 @@ async function main(): Promise<void> {
   if (args.apply && !archiveEnabled()) throw new Error('trace archive is not enabled');
 
   const sessions = await prisma.codeSession.findMany({
-    where: {
-      latestCheckpointSeq: { gt: 0 },
-      ...(args.sessions.length > 0 ? { id: { in: args.sessions } } : { state: { not: 'RETIRED' } }),
-    },
+    where: backfillSessionWhere(args.sessions),
     select: {
       id: true,
       userId: true,
@@ -111,6 +149,7 @@ async function main(): Promise<void> {
             const manifestBytes = await getCheckpointObject(manifestKey);
             if (manifestBytes === null) continue;
             receipt.seqs.push(seq);
+            const manifest = parseCheckpointManifest(manifestBytes);
             if (args.apply) {
               if (await checkpointArchiveConfirmed({ target, seq, manifestBytes })) {
                 receipt.confirmed += 1;
@@ -126,8 +165,7 @@ async function main(): Promise<void> {
               continue;
             }
             // Dry run: read and hash-check every artifact, write nothing.
-            const manifest = JSON.parse(manifestBytes.toString('utf8')) as ManifestShape;
-            for (const [name, expected] of Object.entries(manifest.artifacts ?? {})) {
+            for (const [name, expected] of Object.entries(manifest.artifacts)) {
               const body = await getCheckpointObject(
                 checkpointKey(session.userId, session.id, seq, name)
               );
@@ -159,7 +197,9 @@ async function main(): Promise<void> {
   if (failures > 0) process.exit(1);
 }
 
-main().catch((error: unknown) => {
-  process.stderr.write(`${error instanceof Error ? error.stack : String(error)}\n`);
-  process.exit(1);
-});
+if (require.main === module) {
+  main().catch((error: unknown) => {
+    process.stderr.write(`${error instanceof Error ? error.stack : String(error)}\n`);
+    process.exit(1);
+  });
+}

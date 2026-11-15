@@ -997,6 +997,10 @@ class RoseClient:
         _exclude_anthropic_family: bool = False,
         _skip_models: FrozenSet[str] = frozenset(),
         _skip_reasons: Optional[Mapping[str, str]] = None,
+        # Archive-only: receives the provider reasoning blocks (signatures,
+        # redacted thinking, reasoning_details) for callers that archive the
+        # call themselves (dump_context=False). Never part of usage.
+        reasoning_blocks_sink: Optional[List[Dict[str, Any]]] = None,
     ) -> AsyncIterator[StreamChunk]:
         """Run a full Rose completion, yielding normalized StreamChunks.
 
@@ -1160,10 +1164,15 @@ class RoseClient:
             if chunk.kind != "usage":
                 return chunk
             data = chunk.data
+            blocks: List[Any] = []
             if REASONING_BLOCKS_USAGE_KEY in data:
                 data = dict(data)
                 blocks = data.pop(REASONING_BLOCKS_USAGE_KEY) or []
-                dump_reasoning_blocks[:] = [dict(block) for block in blocks if isinstance(block, dict)]
+            # Every usage chunk ends one provider response: its blocks replace
+            # any earlier attempt's, so a truncation retry never inherits them.
+            dump_reasoning_blocks[:] = [dict(block) for block in blocks if isinstance(block, dict)]
+            if reasoning_blocks_sink is not None:
+                reasoning_blocks_sink[:] = [dict(block) for block in dump_reasoning_blocks]
             if cache_namespace:
                 data = {**data, "cache_sequence_id": cache_namespace}
             return chunk if data is chunk.data else StreamChunk(kind="usage", data=data)
@@ -2373,6 +2382,9 @@ class RoseClient:
         )
         # Bind failed dumps to the same request that the client attempts.
         request_id = request_id or uuid.uuid4().hex[:12]
+        # This method writes the call's archive record itself (dump_context=False
+        # below), so the provider reasoning blocks are delivered here, not via usage.
+        reasoning_blocks: List[Dict[str, Any]] = []
         from helpers.image_count_retry import collect_with_image_count_retry
         try:
             response = await collect_with_image_count_retry(
@@ -2393,6 +2405,7 @@ class RoseClient:
                 dump_context=False,
                 cache_namespace=cache_namespace,
                 browser_use=True,
+                reasoning_blocks_sink=reasoning_blocks,
             )
         except Exception as exc:
             try:
@@ -2518,6 +2531,7 @@ class RoseClient:
                     **({"tool_args_validation_error": str(tool_args_validation_error)} if tool_args_validation_error else {}),
                     "content": response.content,
                     "reasoning": response.reasoning,
+                    "reasoning_blocks": list(reasoning_blocks),
                     "tool_calls": response.tool_calls,
                     "usage": response.usage,
                     "timing": response.timing,
@@ -2619,6 +2633,7 @@ class RoseClient:
         retry_partial_errors: bool = False,
         json_mode: bool = False,
         browser_use: bool = False,
+        reasoning_blocks_sink: Optional[List[Dict[str, Any]]] = None,
     ) -> RoseResponse:
         """Consume the stream into a single `RoseResponse` — convenience for
         non-streaming callers who don't care about incremental chunks.
@@ -2653,6 +2668,7 @@ class RoseClient:
             **({"prefer_azure": True} if prefer_azure else {}),
             **({"retry_partial_errors": True} if retry_partial_errors else {}),
             **({"json_mode": True} if json_mode else {}),
+            **({"reasoning_blocks_sink": reasoning_blocks_sink} if reasoning_blocks_sink is not None else {}),
         ):
             if chunk.kind == "restart":
                 result = RoseResponse()

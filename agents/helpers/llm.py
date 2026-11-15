@@ -4282,15 +4282,29 @@ async def call_llm_structured_streaming(
         if accumulated_text and accumulated_text != last_emitted_for_chunk:
             await on_chunk(accumulated_text, len(accumulated_text) // 4)
 
-    except asyncio.CancelledError:
+    except asyncio.CancelledError as cancelled:
         logger.info("⏹️ OpenRouter streaming cancelled (asyncio.CancelledError)")
+        _archive_direct_openrouter_final(
+            direct_dump, model=model, output=_direct_openrouter_terminal_output(final_response, model, cancelled)
+        )
         raise
     except Exception as e:
         logger.error(f"Streaming LLM call failed: {str(e)}", model=model)
+        _archive_direct_openrouter_final(
+            direct_dump, model=model, output=_direct_openrouter_terminal_output(final_response, model, e)
+        )
         raise
 
     if final_response is None:
-        raise ValueError(f"Streaming LLM returned no response (model={model})")
+        empty = ValueError(f"Streaming LLM returned no response (model={model})")
+        _archive_direct_openrouter_final(
+            direct_dump, model=model, output=_direct_openrouter_terminal_output(None, model, empty)
+        )
+        raise empty
+
+    # The archive keeps the model's output exactly as received; deduplication
+    # below shapes only the response returned to the caller.
+    archived_response = _direct_openrouter_response_snapshot(final_response)
 
     # Deduplicate single-call-per-step tools (keep only first occurrence)
     # These tools should never be called more than once in the same response
@@ -4319,8 +4333,7 @@ async def call_llm_structured_streaming(
         direct_dump,
         model=model,
         output={
-            "content": final_response.model_dump_json() if hasattr(final_response, "model_dump_json") else str(final_response),
-            "structured": final_response.model_dump() if hasattr(final_response, "model_dump") else None,
+            **archived_response,
             "usage": {**usage, "estimated": True},
             "actual_model": model,
         },
@@ -4351,6 +4364,28 @@ def _archive_direct_openrouter_start(
     except Exception:
         logger.debug("llm.direct_openrouter.dump_start_failed", call_site=call_site, exc_info=True)
         return None
+
+
+def _direct_openrouter_response_snapshot(response: Any) -> Dict[str, Any]:
+    """Serialized view of an Instructor (partial) response at this moment."""
+    return {
+        "content": response.model_dump_json() if hasattr(response, "model_dump_json") else str(response),
+        "structured": response.model_dump() if hasattr(response, "model_dump") else None,
+    }
+
+
+def _direct_openrouter_terminal_output(partial: Any, model: str, error: BaseException) -> Dict[str, Any]:
+    """Final record for a direct call that failed, was cancelled or streamed nothing.
+
+    Runs inside the caller's except block, so it never raises over the original error.
+    """
+    output: Dict[str, Any] = {"content": "", "structured": None}
+    if partial is not None:
+        try:
+            output = _direct_openrouter_response_snapshot(partial)
+        except Exception:
+            logger.debug("llm.direct_openrouter.partial_snapshot_failed", exc_info=True)
+    return {**output, "actual_model": model, "error": {"type": type(error).__name__, "message": str(error)}}
 
 
 def _archive_direct_openrouter_final(handle: Optional[str], *, model: Optional[str], output: Dict[str, Any]) -> None:
@@ -4799,13 +4834,19 @@ async def call_llm(
             },
         )
         # Call OpenRouter
-        response = await client.chat.completions.create(
-            model=model,
-            messages=messages,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            response_format=effective_response_format,
-        )
+        try:
+            response = await client.chat.completions.create(
+                model=model,
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                response_format=effective_response_format,
+            )
+        except (Exception, asyncio.CancelledError) as direct_error:
+            _archive_direct_openrouter_final(
+                direct_dump, model=model, output=_direct_openrouter_terminal_output(None, model, direct_error)
+            )
+            raise
         direct_message = response.choices[0].message.model_dump() if response.choices else {}
         _archive_direct_openrouter_final(
             direct_dump,

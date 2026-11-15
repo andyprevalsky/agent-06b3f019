@@ -185,6 +185,30 @@ async def test_typesafe_call_archived_in_root_bundle():
     assert "llm.context.dumped" not in logged and "llm.context.dump_updated" not in logged, logged
 
 
+async def test_decode_rejection_archives_received_response():
+    """CodeRabbit 4576377076: a response the decoder rejects is still archived verbatim with its error."""
+    rejected = answer()
+    rejected["answers"]["remaining_batches"]["probabilities"]["0"] = float("nan")
+    client = AsyncMock()
+    response = client.post.return_value
+    response.raise_for_status = lambda: None
+    response.json = lambda: rejected
+    archived = []
+    with (
+        patch.dict(os.environ, {"TYPESAFE_API_KEY": "test"}),
+        patch.object(jev, "get_http_client", return_value=client),
+        patch.object(jev, "_archive_jev_request", return_value="dump-handle"),
+        patch.object(jev, "_archive_jev_result", side_effect=lambda *args: archived.append(args)),
+        patch.object(jev, "publish_progress_estimate", new_callable=AsyncMock) as publish,
+    ):
+        await jev.predict_jev_progress(snapshot())
+    publish.assert_not_awaited()
+    assert len(archived) == 1, archived
+    dump, raw, estimate, error = archived[0]
+    assert dump == "dump-handle" and raw is rejected and estimate is None
+    assert isinstance(error, ValueError), error
+
+
 async def test_freeze_queue_and_cancel_http():
     received = []
     gate = asyncio.Event()
@@ -300,6 +324,7 @@ async def run_all_tests():
     await r.record_async("nonblocking bounded lifecycle", test_background_lifecycle)
     await r.record_async("HTTP and pinned prompt", test_http_contract)
     await r.record_async("TypeSafe call archived in root bundle", test_typesafe_call_archived_in_root_bundle)
+    await r.record_async("decode rejection archives received response", test_decode_rejection_archives_received_response)
     await r.record_async("DEMO replay runs without JEV", test_demo_replay_runs_without_jev)
     return r.all_passed
 

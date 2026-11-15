@@ -136,13 +136,40 @@ function sidecarCiphertextSha(sidecar: Buffer): string | null {
 }
 
 /**
+ * Staged copy of a claimant's ciphertext, written BEFORE its sidecar claim so a
+ * claimant that stops between the claim and the body replacement leaves a pair
+ * any later writer can finish. The `.meta.json` suffix hides it from listings.
+ */
+function stagedCiphertextKey(key: string, ciphertextSha: string): string {
+  return `${key}.staged-${ciphertextSha}.meta.json`;
+}
+
+function sha256Hex(body: Buffer): string {
+  return createHash('sha256').update(body).digest('hex');
+}
+
+/** Finish a torn pair whose claimant stopped: its staged ciphertext becomes the body. */
+async function completeForeignClaim(
+  store: PairStore,
+  key: string,
+  existing: Buffer | null,
+  claimedSha: string | null
+): Promise<void> {
+  if (claimedSha === null || (existing !== null && sha256Hex(existing) === claimedSha)) return;
+  const staged = await store.read(stagedCiphertextKey(key, claimedSha));
+  if (staged !== null && sha256Hex(staged) === claimedSha) await store.overwrite(key, staged);
+}
+
+/**
  * Create-only body + `.meta.json` publication that a retry can always complete.
  *
  *   body new                         → create body, create sidecar
  *   body identical, sidecar missing  → complete the sidecar (prior attempt died between writes)
  *   body differs, sidecar missing    → the old body is undecryptable (its nonce lived only in the
- *                                      lost sidecar): claim the sidecar first, then replace the body
+ *                                      lost sidecar): stage our ciphertext, claim the sidecar,
+ *                                      then replace the body
  *   sidecar names OUR ciphertext     → torn pair from our earlier claim: replace the body
+ *   sidecar names another claimant   → finish its torn pair from its staged ciphertext, then EEXIST
  *   anything else                    → a different complete artifact exists (EEXIST, never overwritten)
  */
 async function storeCreateOnlyPair(
@@ -154,7 +181,7 @@ async function storeCreateOnlyPair(
 ): Promise<void> {
   const sidecarKey = `${key}.meta.json`;
   const sidecarBody = JSON.stringify(metadata, null, 2);
-  const ours = createHash('sha256').update(body).digest('hex');
+  const ours = sha256Hex(body);
   // A retry inside the same store call may find its own sidecar already landed.
   const resumingOwnWrite = creation?.bodyStored === true;
   if (!resumingOwnWrite && !(await store.create(key, body))) {
@@ -162,12 +189,17 @@ async function storeCreateOnlyPair(
     if (existing === null || !existing.equals(body)) {
       const sidecar = await store.read(sidecarKey);
       if (sidecar === null) {
+        await store.overwrite(stagedCiphertextKey(key, ours), body);
         if (!(await store.create(sidecarKey, sidecarBody))) throw existingObjectError(key);
         await store.overwrite(key, body);
         if (creation) creation.bodyStored = true;
         return;
       }
-      if (sidecarCiphertextSha(sidecar) !== ours) throw existingObjectError(key);
+      const claimed = sidecarCiphertextSha(sidecar);
+      if (claimed !== ours) {
+        await completeForeignClaim(store, key, existing, claimed);
+        throw existingObjectError(key);
+      }
       await store.overwrite(key, body);
       if (creation) creation.bodyStored = true;
       return;

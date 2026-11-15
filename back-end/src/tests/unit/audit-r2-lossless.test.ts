@@ -224,27 +224,44 @@ function emptyScan(): NonNullable<Inventory['bundleScan']> {
   };
 }
 
-function checkpointSource(seqs: Record<string, number[]>, artifacts: string[]): CheckpointSource {
+/** Checkpoint manifest naming `artifacts`, each holding its own name as bytes (as mirrorSeq writes). */
+function checkpointManifest(artifacts: string[]): {
+  artifacts: Record<string, { sha256: string; size: number }>;
+} {
   return {
-    listSeqs: async (_userId, sessionId) => seqs[sessionId] ?? [],
-    readManifest: async () => ({
-      artifacts: Object.fromEntries(artifacts.map((a) => [a, { sha256: 'x', size: 1 }])),
-    }),
+    artifacts: Object.fromEntries(
+      artifacts.map((a) => [
+        a,
+        { sha256: crypto.createHash('sha256').update(a).digest('hex'), size: a.length },
+      ])
+    ),
   };
 }
 
+function checkpointSource(seqs: Record<string, number[]>, artifacts: string[]): CheckpointSource {
+  return {
+    listSeqs: async (_userId, sessionId) => seqs[sessionId] ?? [],
+    readManifest: async () => checkpointManifest(artifacts),
+  };
+}
+
+/** Mirror `names` of one checkpoint; manifest.json lists `listed` (default: the other names). */
 async function mirrorSeq(
   rootId: string,
   sessionId: string,
   seq: number,
-  names: string[]
+  names: string[],
+  listed = names.filter((name) => name !== 'manifest.json')
 ): Promise<void> {
   for (const name of names) {
     assert.ok(
       await archiveBytes({
         rootAgentId: rootId,
         objectPath: `code/${sessionId}/${seq}/${name}`,
-        body: Buffer.from(name),
+        body:
+          name === 'manifest.json'
+            ? Buffer.from(JSON.stringify(checkpointManifest(listed)))
+            : Buffer.from(name),
         contentType: 'application/octet-stream',
         createOnly: true,
       })
@@ -403,8 +420,8 @@ async function testLossyWorld(): Promise<void> {
   const session = uuid();
   const artifacts = ['cli-log.jsonl', 'worktree.tar.gz'];
   await mirrorSeq(rootA, session, 1, ['manifest.json', ...artifacts]);
-  await mirrorSeq(rootA, session, 2, ['manifest.json', 'cli-log.jsonl']);
-  await put(rootA, `code/${session}/4/manifest.json`, { artifacts: { 'cli-log.jsonl': {} } });
+  await mirrorSeq(rootA, session, 2, ['manifest.json', 'cli-log.jsonl'], artifacts);
+  await put(rootA, `code/${session}/4/manifest.json`, checkpointManifest(['cli-log.jsonl']));
   await mirrorSeq(rootA, session, 4, ['cli-log.jsonl']);
 
   const inventory: Inventory = {
@@ -456,6 +473,10 @@ async function testLossyWorld(): Promise<void> {
   assert.equal(c0.status, 'FAIL');
   assert.equal(c0.counts.unreadable, 1);
   assert.match(c0.summary, /head_only=1\b/);
+  // The prefix-decrypted start is attributed, never counted as integrity-verified.
+  assert.equal(c0.counts.head_only_unverified, 1);
+  assert.equal(c0.examples.head_only_unverified?.length, 1);
+  assert.equal(c0.counts.verified, c0.counts.records - 2);
 
   const c1 = check(report, 'C1');
   assert.equal(c1.status, 'FAIL');

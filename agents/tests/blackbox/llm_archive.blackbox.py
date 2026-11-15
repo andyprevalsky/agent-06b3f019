@@ -620,6 +620,216 @@ async def test_reasoning_blocks_are_archived_not_returned():
     assert [tool.get("name") for tool in start["tools"]] == ["get_memories"], start["tools"]
 
 
+async def test_browser_use_archive_keeps_reasoning_blocks():
+    """CodeRabbit 4576377102: complete_browser_use archives the call itself (dump_context=False);
+    its record must still carry the provider reasoning blocks, while returned usage never does."""
+    from providers.rose import RoseClient
+    from providers.rose.streaming import REASONING_BLOCKS_USAGE_KEY
+
+    sse = _sse(
+        [
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "reasoning_details": [{"type": "reasoning.encrypted", "index": 0, "data": "enc-b"}],
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": "call-b",
+                                    "type": "function",
+                                    "function": {"name": "screenshot", "arguments": "{}"},
+                                }
+                            ],
+                        },
+                        "finish_reason": "tool_calls",
+                    }
+                ]
+            },
+            {"usage": {"prompt_tokens": 5, "completion_tokens": 3, "total_tokens": 8}},
+        ]
+    )
+    set_mock_handler(lambda request: httpx.Response(200, text=sse, headers={"Content-Type": "text/event-stream"}))
+    with _archive(clickhouse=False) as (root_dir, _), patch.dict(os.environ, {"CEREBRAS_API_KEY": ""}):
+        os.environ.pop("CEREBRAS_API_KEY", None)
+        result = await RoseClient(openrouter_key="ork-x").complete_browser_use(
+            task="look",
+            browser_state={"url": "https://example.test", "title": "t"},
+            action_history=[],
+            available_actions=["screenshot"],
+            agent_id="root-b",
+            pool="rose-1-flash",
+        )
+        finals = _read(root_dir, "root-b", "llm-updates")
+    teardown_mock()
+    assert REASONING_BLOCKS_USAGE_KEY not in (result["usage"] or {}), result["usage"]
+    assert len(finals) == 1, finals
+    blocks = finals[0]["output"]["reasoning_blocks"]
+    assert [block.get("data") for block in blocks] == ["enc-b"], blocks
+    assert not list(_validator().iter_errors(finals[0]))
+
+
+async def test_non_rose_failed_call_writes_terminal_record():
+    """CodeRabbit 4576377082: a direct OpenRouter request that raises still closes its start
+    record with a final record carrying the error, and the original exception propagates."""
+    from helpers.llm import call_llm
+
+    set_mock_handler(lambda request: httpx.Response(400, json={"error": {"message": "bad request body"}}))
+    validator = _validator()
+    raised = None
+    with _archive(clickhouse=False) as (root_dir, _):
+        structlog.contextvars.bind_contextvars(root_agent_id="root-f")
+        try:
+            await call_llm(
+                messages=[{"role": "user", "content": "q"}],
+                model="google/gemini-3-flash",
+                max_tokens=64,
+                call_site="message_person",
+                agent_id="child-f",
+            )
+        except Exception as exc:  # the provider's own error type
+            raised = exc
+        start = _read(root_dir, "root-f", "llm")
+        final = _read(root_dir, "root-f", "llm-updates")
+    teardown_mock()
+    assert raised is not None and "bad request body" in str(raised), raised
+    assert len(start) == 1 and len(final) == 1, (start, final)
+    assert final[0]["dump_id"] == start[0]["dump_id"]
+    assert final[0]["output"]["error"]["type"] == type(raised).__name__, final[0]["output"]
+    for record in (start[0], final[0]):
+        assert not list(validator.iter_errors(record)), [error.message for error in validator.iter_errors(record)]
+
+
+async def test_non_rose_streaming_archives_raw_output_and_failures():
+    """CodeRabbit 4576377084 + 4576377082: the streaming direct path archives the model's tool
+    calls before single-call deduplication, and failed or empty streams still get a final record."""
+    from unittest.mock import MagicMock
+
+    from pydantic import BaseModel
+
+    from helpers.llm import call_llm_structured_streaming
+
+    class _Call(BaseModel):
+        tool: str
+        params: dict = {}
+
+    class _Action(BaseModel):
+        response: str = ""
+        tool_calls: list[_Call] = []
+
+    duplicated = _Action(
+        response="hi there, this is the reply",
+        tool_calls=[
+            _Call(tool="send_message_to_user", params={"n": 1}),
+            _Call(tool="send_message_to_user", params={"n": 2}),
+        ],
+    )
+
+    def _client(stream):
+        fake = MagicMock()
+        fake.chat.completions.create_partial = stream
+        return fake
+
+    async def full(*args, **kwargs):
+        yield duplicated
+
+    async def broken(*args, **kwargs):
+        yield _Action(response="partial")
+        raise RuntimeError("stream broke")
+
+    async def empty(*args, **kwargs):
+        return
+        yield  # pragma: no cover
+
+    async def on_chunk(_text, _tokens):
+        return None
+
+    outcomes = []
+    with _archive(clickhouse=False) as (root_dir, _):
+        structlog.contextvars.bind_contextvars(root_agent_id="root-st")
+        for stream in (full, broken, empty):
+            with (
+                patch("helpers.llm.AsyncOpenAI"),
+                patch("helpers.llm.instructor.from_openai", return_value=_client(stream)),
+            ):
+                try:
+                    response, _, _ = await call_llm_structured_streaming(
+                        messages=[{"role": "user", "content": "q"}],
+                        model="anthropic/claude-sonnet-4",
+                        temperature=0.5,
+                        max_tokens=256,
+                        response_model=_Action,
+                        on_chunk=on_chunk,
+                        call_site=f"or-stream-{stream.__name__}",
+                        agent_id="child-st",
+                    )
+                    outcomes.append(len(response.tool_calls))
+                except (RuntimeError, ValueError) as exc:
+                    outcomes.append(type(exc).__name__)
+        starts = _read(root_dir, "root-st", "llm")
+        finals = {row["call_site"]: row for row in _read(root_dir, "root-st", "llm-updates")}
+    assert outcomes == [1, "RuntimeError", "ValueError"], outcomes
+    assert len(starts) == 3 and sorted(finals) == ["or-stream-broken", "or-stream-empty", "or-stream-full"], finals
+    archived = finals["or-stream-full"]["output"]["structured"]["tool_calls"]
+    assert [call["params"]["n"] for call in archived] == [1, 2], archived
+    assert finals["or-stream-broken"]["output"]["structured"]["response"] == "partial"
+    assert finals["or-stream-broken"]["output"]["error"]["message"] == "stream broke"
+    assert finals["or-stream-empty"]["output"]["error"]["type"] == "ValueError"
+    validator = _validator()
+    for record in [*starts, *finals.values()]:
+        assert not list(validator.iter_errors(record)), [error.message for error in validator.iter_errors(record)]
+
+
+def test_empty_archive_scope_masks_outer_root():
+    """CodeRabbit 4576377100: archive_scope(None) inside a bound root refuses records instead of
+    filing them under the enclosing root, and restores the outer identity on exit."""
+    import helpers.observability as observability
+    from helpers.llm_archive_record import archive_counters
+    from helpers.tracing import archive_scope, current_bound_root_agent_id
+
+    with _archive(clickhouse=False) as (root_dir, _):
+        structlog.contextvars.bind_contextvars(
+            root_agent_id="outer-root", agent_id="outer-root", workflow_agent_id="outer-root"
+        )
+        before = archive_counters().get("unbound_refused", 0)
+        with archive_scope(None):
+            assert current_bound_root_agent_id() is None
+            assert observability.dump_llm_context("judge", [{"role": "user", "content": "?"}]) is None
+        assert current_bound_root_agent_id() == "outer-root"
+        with archive_scope("inner-root"):
+            assert current_bound_root_agent_id() == "inner-root"
+        assert current_bound_root_agent_id() == "outer-root"
+        assert archive_counters().get("unbound_refused", 0) == before + 1
+        assert not list(root_dir.iterdir()), list(root_dir.iterdir())
+
+
+async def test_spill_write_failure_is_contained():
+    """CodeRabbit 4576377089: a saturated queue whose durable spill hits a full disk returns the
+    archive failure (None) instead of raising into the agent operation."""
+    import helpers.trace_archive as trace_archive
+    from helpers.llm_archive_record import archive_counters
+
+    def _disk_full(*args, **kwargs):
+        raise OSError(28, "No space left on device")
+
+    with _archive() as (root_dir, _):
+        os.environ["TRACE_ARCHIVE_ASYNC_WRITES"] = "1"
+        held = []
+        while trace_archive._ARCHIVE_SLOTS.acquire(blocking=False):
+            held.append(True)
+        try:
+            before = archive_counters().get("queue_spill_failed", 0)
+            with patch.object(trace_archive, "_write_local", _disk_full):
+                result = trace_archive.archive_json(
+                    root_agent_id="root-x", path="llm/full.json.gz.enc", payload={"n": 1}
+                )
+            assert result is None, result
+            assert archive_counters().get("queue_spill_failed", 0) == before + 1
+        finally:
+            for _ in held:
+                trace_archive._ARCHIVE_SLOTS.release()
+
+
 async def test_non_rose_fallback_call_is_archived():
     """Direct OpenRouter SDK calls (non-Rose models) write the same v2 start/final records."""
     from helpers.llm import call_llm
@@ -929,6 +1139,13 @@ async def run_all_tests():
     await r.record_async("parsers_capture_reasoning_fidelity", test_parsers_capture_reasoning_fidelity)
     await r.record_async("reasoning_blocks_archived_not_returned", test_reasoning_blocks_are_archived_not_returned)
     await r.record_async("non_rose_fallback_call_is_archived", test_non_rose_fallback_call_is_archived)
+    await r.record_async("non_rose_failed_call_terminal_record", test_non_rose_failed_call_writes_terminal_record)
+    await r.record_async(
+        "non_rose_streaming_raw_output_and_failures", test_non_rose_streaming_archives_raw_output_and_failures
+    )
+    r.record("empty_archive_scope_masks_outer_root", test_empty_archive_scope_masks_outer_root)
+    await r.record_async("spill_write_failure_is_contained", test_spill_write_failure_is_contained)
+    await r.record_async("browser_use_archive_keeps_reasoning_blocks", test_browser_use_archive_keeps_reasoning_blocks)
     await r.record_async("world_model_calls_bind_the_world_root", test_world_model_calls_bind_the_world_root)
     r.record("legacy_world_server_binds_session_root", test_legacy_world_server_binds_session_root_in_step)
     await r.record_async(

@@ -9,6 +9,8 @@
  *   checkpoint ──archive job──► trace-archive/<tree root>/code/<id>/<seq>/<artifact>
  *   prune / retire ──► only checkpoints whose archive copy is confirmed;
  *     archive down or failing ──► checkpoint kept, session not retired, retried later
+ *   retire with manifest.cliFilesDeferred ──► one more checkpoint captures them
+ *     (archive confirmed) before the sandbox goes; capture fails ──► kept, unretired
  *   TTL sweep ──► pages past sessions whose retirement keeps failing (no starvation)
  *   backfill seq scan ──► every allocated seq, even far above the committed one
  */
@@ -42,6 +44,7 @@ import {
   checkpointCodeSession,
   checkpointSeqsToScan,
   createExpiredCodeSessionSweeper,
+  localCodeSessionHome,
   retireCodeSession,
 } from '../../providers/codeSessions/lifecycle';
 import { localSandboxFs } from '../../providers/codeSessions/sandboxFs';
@@ -429,6 +432,78 @@ export function registerCodeSessionArchiveCases(ctx: CodeSessionArchiveContext):
         await assertArchivedCheckpoint(agentId, session.id, seq);
       }
       assert.ok(existsSync(localObjectPath(agentId, `code/${session.id}/8/manifest.json`)));
+    });
+  });
+
+  test('retire captures CLI files the last checkpoint deferred before destroying the sandbox; a failed capture keeps the session', async () => {
+    await withUser(async (userId) => {
+      const agentId = randomUUID();
+      const created = await newSession(userId, agentId);
+      const home = localCodeSessionHome(created.id);
+      ctx.seedWorkspace(home);
+      await prisma.codeSession.update({
+        where: { id: created.id },
+        data: { sandboxKind: 'local', homeDir: home },
+      });
+      // A close that ran out of budget: the file is listed as deferred, its bytes
+      // exist only in the sandbox HOME. (Archive off so seq 1 is mirrored as rewritten.)
+      const previous = process.env.TRACE_ARCHIVE_ENABLED;
+      process.env.TRACE_ARCHIVE_ENABLED = '0';
+      const deferredPath = `.claude/projects/${SLUG}/${ctx.cliSessionId}/subagents/agent-late.jsonl`;
+      const deferredBody = `${JSON.stringify({ type: 'user', isSidechain: true, late: true })}\n`;
+      try {
+        await save(created.id, home, agentId);
+        await waitForCodeSessionArchiveJobs();
+        write(join(home, deferredPath), deferredBody);
+        const m1 = await storedManifest(userId, created.id, 1);
+        assert.ok(!(m1.cliFiles ?? []).some((file) => file.path === deferredPath));
+        // The local store never overwrites, so the manifest is rewritten in place.
+        writeFileSync(
+          join(
+            process.env.CODE_SESSION_STORAGE_LOCAL_DIR ?? '',
+            checkpointKey(userId, created.id, 1, 'manifest.json')
+          ),
+          JSON.stringify({ ...m1, cliFilesDeferred: [deferredPath] })
+        );
+      } finally {
+        if (previous === undefined) delete process.env.TRACE_ARCHIVE_ENABLED;
+        else process.env.TRACE_ARCHIVE_ENABLED = previous;
+      }
+
+      // The retire-time capture fails (worktree over the artifact cap): nothing is destroyed.
+      const cap = process.env.CODE_SESSION_CHECKPOINT_MAX_ARTIFACT_BYTES;
+      process.env.CODE_SESSION_CHECKPOINT_MAX_ARTIFACT_BYTES = '1';
+      try {
+        const row = await prisma.codeSession.findUniqueOrThrow({ where: { id: created.id } });
+        await assert.rejects(retireCodeSession(row), /still has deferred CLI files/);
+      } finally {
+        if (cap === undefined) delete process.env.CODE_SESSION_CHECKPOINT_MAX_ARTIFACT_BYTES;
+        else process.env.CODE_SESSION_CHECKPOINT_MAX_ARTIFACT_BYTES = cap;
+      }
+      const held = await prisma.codeSession.findUniqueOrThrow({ where: { id: created.id } });
+      assert.notEqual(held.state, 'RETIRED');
+      assert.ok(existsSync(join(home, deferredPath)), 'the sandbox HOME is kept');
+      assert.ok(
+        await getCheckpointObject(checkpointKey(userId, created.id, 1, 'manifest.json')),
+        'checkpoints are kept'
+      );
+
+      // Next sweep: the capture succeeds, its archive copy is confirmed, then retire proceeds.
+      await retireCodeSession(held);
+      const retired = await prisma.codeSession.findUniqueOrThrow({ where: { id: created.id } });
+      assert.equal(retired.state, 'RETIRED');
+      assert.ok(retired.latestCheckpointSeq > 1, 'retire took one more checkpoint');
+      assert.ok(!existsSync(home), 'the sandbox HOME is removed only after the capture');
+      const last = await assertArchivedCheckpoint(agentId, created.id, retired.latestCheckpointSeq);
+      assert.equal(last.cliFilesDeferred, undefined, 'nothing left deferred');
+      const captured = (last.cliFiles ?? []).find((file) => file.path === deferredPath);
+      assert.ok(captured, 'the deferred file is in the retire checkpoint');
+      const body = await archived(
+        agentId,
+        codeCheckpointArchivePath(created.id, captured.seq, captured.artifact)
+      );
+      assert.equal(body?.toString('utf8'), deferredBody, 'its bytes are in the root bundle');
+      await assertArchivedCheckpoint(agentId, created.id, 1);
     });
   });
 

@@ -1,11 +1,12 @@
 /**
  * Check engine of the R2 lossless audit (V13). Evaluates, per window:
- *   C0 record_integrity            every listed record decrypts with its sidecar
+ *   C0 record_integrity            every listed record decrypts with its sidecar (head-only reads WARN)
  *   C1 terminal_roots_finalized    db/end fixture + manifest + public manifest
  *   C2 llm_calls_have_final_output records (and the ToolUsage ledger) have output
  *   C3 no_unbound_or_nonroot_writes unbound / junk / child / unknown bundles
  *   C4 v2_schema_valid             records after --v2-cutoff match the shared schema
- *   C5 code_checkpoints_mirrored   Supabase checkpoint seqs mirrored under code/
+ *   C5 code_checkpoints_mirrored   Supabase checkpoint seqs mirrored under the tree root's code/,
+ *                                  each object's sidecar matching the checkpoint manifest
  *   C6 backend_call_sites_recorded ledger-backed or UNVERIFIED per backend site
  * Waivers (Andy): W1 cancelled, W2 cache replays, W3 failed attempts are
  * classified separately and never counted as losses.
@@ -15,6 +16,7 @@ import {
   type ArchiveSource,
   type AuditOptions,
   type CallClass,
+  type CheckpointManifest,
   type CheckpointSource,
   type CodeSessionRow,
   type Inventory,
@@ -31,6 +33,7 @@ import {
   loadJson,
   loadRecord,
   mapLimit,
+  readMetadata,
 } from './audit-r2-lossless-core';
 
 export type CheckStatus = 'PASS' | 'FAIL' | 'WARN' | 'UNVERIFIED' | 'SKIP';
@@ -282,12 +285,22 @@ export async function runAudit(
   const unreadable = records.filter((r) => r.integrityError !== null);
   for (const r of unreadable)
     c0x.add(r.integrityError ?? 'error', `${r.bundle}/${r.key.split('/').slice(2).join('/')}`);
+  // A head read decrypts a prefix only: no GCM tag check and the tail is never read,
+  // so those records are attributed but not integrity-verified (WARN, never PASS).
+  const headOnly = records.filter((r) => r.integrityError === null && r.fetch === 'head');
+  for (const r of headOnly)
+    c0x.add('head_only_unverified', `${r.bundle}/${r.key.split('/').slice(2).join('/')}`);
   checks.push({
     id: 'C0',
     name: 'record_integrity',
-    status: statusOf(unreadable.length > 0, false),
-    summary: `records=${records.length} unreadable=${unreadable.length} head_only=${records.filter((r) => r.fetch === 'head').length}`,
-    counts: { records: records.length, unreadable: unreadable.length },
+    status: statusOf(unreadable.length > 0, headOnly.length > 0),
+    summary: `records=${records.length} verified=${records.length - unreadable.length - headOnly.length} unreadable=${unreadable.length} head_only=${headOnly.length}`,
+    counts: {
+      records: records.length,
+      verified: records.length - unreadable.length - headOnly.length,
+      unreadable: unreadable.length,
+      head_only_unverified: headOnly.length,
+    },
     examples: c0x.value,
   });
 
@@ -768,6 +781,44 @@ export async function runAudit(
   };
 }
 
+/**
+ * Mirrored objects of one checkpoint that do not hold the manifest's bytes: a
+ * missing or unparseable sidecar, a sidecar for another path, a plaintext
+ * hash/size other than the manifest's, or a ciphertext whose stored size is not
+ * the sidecar's. With `checkManifest`, the archived manifest itself is decrypted
+ * (GCM-authenticated) and must list the same artifacts.
+ */
+async function invalidMirroredObjects(
+  archive: ArchiveSource,
+  objects: Map<string, ListedObject>,
+  manifest: CheckpointManifest,
+  checkManifest = true
+): Promise<string[]> {
+  const invalid: string[] = [];
+  for (const [name, want] of Object.entries(manifest.artifacts ?? {})) {
+    const obj = objects.get(name);
+    if (obj === undefined) continue;
+    const meta = await readMetadata(archive, obj.key);
+    if (typeof meta === 'string') invalid.push(`${name}: ${meta}`);
+    else if (!meta.path.endsWith(`/${name}`)) invalid.push(`${name}: sidecar path ${meta.path}`);
+    else if (meta.plaintext_sha256 !== want.sha256 || meta.plaintext_bytes !== want.size) {
+      invalid.push(`${name}: archived bytes differ from the checkpoint manifest`);
+    } else if (meta.ciphertext_bytes !== obj.size) {
+      invalid.push(`${name}: ciphertext ${obj.size} bytes, sidecar ${meta.ciphertext_bytes}`);
+    }
+  }
+  const manifestObj = objects.get('manifest.json');
+  if (checkManifest && manifestObj !== undefined) {
+    const archived = (await loadJson(archive, manifestObj.key)) as CheckpointManifest | null;
+    const names = (m: CheckpointManifest | null) => Object.keys(m?.artifacts ?? {}).sort();
+    if (archived === null) invalid.push('manifest.json: unreadable');
+    else if (names(archived).join(',') !== names(manifest).join(',')) {
+      invalid.push('manifest.json: artifacts differ from the checkpoint manifest');
+    }
+  }
+  return invalid;
+}
+
 async function checkCodeSessions(
   sessions: CodeSessionRow[],
   archive: ArchiveSource,
@@ -780,6 +831,7 @@ async function checkCodeSessions(
     supabase_seqs: 0,
     mirrored: 0,
     unmirrored: 0,
+    mirror_invalid: 0,
     r2_only: 0,
     r2_incomplete: 0,
     supabase_incomplete: 0,
@@ -797,17 +849,20 @@ async function checkCodeSessions(
     };
   }
   await mapLimit(sessions, Math.min(options.concurrency, 8), async (session) => {
-    const base = `trace-archive/${session.rootAgentId}/code/${session.id}/`;
+    // The bundle the mirror writes: the tree root, not a child id stored on the session.
+    const root = session.archiveRootAgentId ?? session.rootAgentId;
+    const base = `trace-archive/${root}/code/${session.id}/`;
     const listed = (await archive.list(base)).objects.filter(isData);
-    const r2 = new Map<number, Set<string>>();
+    const r2 = new Map<number, Map<string, ListedObject>>();
     for (const obj of listed) {
       const [seqText, ...rest] = obj.key.slice(base.length).split('/');
       const seq = Number(seqText);
       if (!Number.isInteger(seq)) continue;
-      const set = r2.get(seq) ?? new Set<string>();
-      set.add(rest.join('/').replace(/\.enc$/, ''));
-      r2.set(seq, set);
+      const names = r2.get(seq) ?? new Map<string, ListedObject>();
+      names.set(rest.join('/').replace(/\.enc$/, ''), obj);
+      r2.set(seq, names);
     }
+    const label = (seq: number) => `${root}/code/${session.id}/${seq}`;
     const supabase =
       checkpoints === null ? [] : await checkpoints.listSeqs(session.userId, session.id);
     c.supabase_seqs += supabase.length;
@@ -819,33 +874,38 @@ async function checkCodeSessions(
       }
       const expected = ['manifest.json', ...Object.keys(manifest.artifacts ?? {})];
       const missing = expected.filter((name) => !r2.get(seq)?.has(name));
-      if (missing.length === 0) c.mirrored += 1;
-      else {
+      if (missing.length > 0) {
         c.unmirrored += 1;
-        x.add(
-          'unmirrored',
-          `${session.rootAgentId}/code/${session.id}/${seq} missing ${missing.join(',')}`
-        );
+        x.add('unmirrored', `${label(seq)} missing ${missing.join(',')}`);
+        continue;
+      }
+      const invalid = await invalidMirroredObjects(archive, r2.get(seq)!, manifest);
+      if (invalid.length === 0) c.mirrored += 1;
+      else {
+        c.mirror_invalid += 1;
+        x.add('mirror_invalid', `${label(seq)} ${invalid.join('; ')}`);
       }
     }
     for (const [seq, names] of r2) {
       if (supabase.includes(seq)) continue;
       c.r2_only += 1;
-      const manifestKey = [...listed.map((o) => o.key)].find(
-        (k) => k === `${base}${seq}/manifest.json` || k === `${base}${seq}/manifest.json.enc`
-      );
-      const manifest = manifestKey === undefined ? null : await loadJson(archive, manifestKey);
-      const artifacts = Object.keys(
-        (manifest as { artifacts?: Record<string, unknown> } | null)?.artifacts ?? {}
-      );
+      const manifestObj = names.get('manifest.json');
+      const manifest = (
+        manifestObj === undefined ? null : await loadJson(archive, manifestObj.key)
+      ) as CheckpointManifest | null;
       const missing =
-        manifest === null ? ['manifest.json'] : artifacts.filter((name) => !names.has(name));
+        manifest === null
+          ? ['manifest.json']
+          : Object.keys(manifest.artifacts ?? {}).filter((name) => !names.has(name));
       if (missing.length > 0) {
         c.r2_incomplete += 1;
-        x.add(
-          'r2_incomplete',
-          `${session.rootAgentId}/code/${session.id}/${seq} missing ${missing.join(',')}`
-        );
+        x.add('r2_incomplete', `${label(seq)} missing ${missing.join(',')}`);
+        continue;
+      }
+      const invalid = await invalidMirroredObjects(archive, names, manifest!, false);
+      if (invalid.length > 0) {
+        c.r2_incomplete += 1;
+        x.add('r2_incomplete', `${label(seq)} ${invalid.join('; ')}`);
       }
     }
     const latest = session.latestCheckpointSeq;
@@ -857,7 +917,7 @@ async function checkCodeSessions(
       if (!supabase.includes(seq) && !r2.has(seq)) c.absent_everywhere += 1;
     }
   });
-  const fail = c.unmirrored + c.r2_incomplete + c.latest_lost > 0;
+  const fail = c.unmirrored + c.mirror_invalid + c.r2_incomplete + c.latest_lost > 0;
   return {
     id: 'C5',
     name: 'code_checkpoints_mirrored',

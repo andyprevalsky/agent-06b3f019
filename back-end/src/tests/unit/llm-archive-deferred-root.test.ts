@@ -129,11 +129,36 @@ async function main(): Promise<void> {
     assert.equal(lookups, 1, 'the root lookup started in the background and is still pending');
     assert.deepEqual(await readRecords(root), [], 'nothing is written before the root is known');
 
+    // The caller mutates its request after the stream, before the root resolves:
+    // the start record still holds the request as sent.
+    const callerMessages: Array<{ role: string; content: string }> = [
+      { role: 'user', content: 'snapshot request' },
+    ];
+    const snapshotStream = await createStreamingCompletion({
+      model: 'rose-labs/rose-1-flash',
+      provider_route: 'openrouter-waterfall',
+      messages: callerMessages,
+      dump_context: { call_site: 'deferred_snapshot', archive_scope: { agentId: child } },
+    });
+    for await (const chunk of snapshotStream) void chunk;
+    callerMessages[0].content = 'mutated after send';
+    callerMessages.push({ role: 'assistant', content: 'appended response' });
+
     releaseLookup();
     await drainLlmCaptures([child]);
-    const records = await readRecords(root);
+    const allRecords = await readRecords(root);
+    const records = allRecords.filter((item) => item.record.call_site === 'sms_notification');
     assertBoundRecords(records, child, root);
-    assert(records.every((item) => item.record.call_site === 'sms_notification'));
+    const snapshotRecords = allRecords.filter(
+      (item) => item.record.call_site === 'deferred_snapshot'
+    );
+    assertBoundRecords(snapshotRecords, child, root);
+    const snapshotStart = snapshotRecords.find((item) => item.record.record === 'start');
+    assert(snapshotStart);
+    assert.deepEqual(snapshotStart.record.messages, [
+      { role: 'user', content: 'snapshot request' },
+    ]);
+    assert.equal(snapshotStart.record.message_count, 1);
     assert.deepEqual(await readRecords(child), [], 'never filed under the child id');
 
     // User-level scope: the documented per-user root, no lookup.

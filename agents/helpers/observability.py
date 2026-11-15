@@ -2,7 +2,7 @@
 
 In dev runs (FLY_APP_NAME unset), `dump_llm_context()` persists the full
 messages array, system prompt, tool schemas, and response format sent to
-an LLM to `.llm-dumps/<agent_id>/<ts>-<span_id>-<call_site>.json`, then
+an LLM to `.llm-dumps/<agent_id>/<ts>-<span_id>_<dump_id>-<call_site>.json`, then
 emits a structured log event `llm.context.dumped` carrying the file path.
 
 Every call is archived as schema-v2 start/final records in the ROOT agent's
@@ -322,9 +322,14 @@ def dump_llm_context(
         try:
             agent_dir = _DUMP_ROOT / _safe_filename_segment(ident["agent_id"])
             agent_dir.mkdir(parents=True, exist_ok=True)
-            # Timestamp sorts naturally; span_id + call_site disambiguate within
-            # the same millisecond (e.g. 3 parallel sub-agents share a tick).
-            filename = f"{int(time.time() * 1000)}-{ident['span_id']}-{_safe_filename_segment(ident['call_site'])}.json"
+            # Timestamp sorts naturally. The dump_id rides the span segment so two
+            # calls in one span, call site and millisecond never share a handle
+            # (the later write would re-key the earlier call's final record);
+            # the span prefix and call_site segment still parse as before.
+            filename = (
+                f"{int(time.time() * 1000)}-{ident['span_id']}_{ident['dump_id']}-"
+                f"{_safe_filename_segment(ident['call_site'])}.json"
+            )
             path = agent_dir / filename
             # `default=str` handles Pydantic BaseModel, datetime, UUID, FilePointer,
             # etc. without needing bespoke serializers per call site.

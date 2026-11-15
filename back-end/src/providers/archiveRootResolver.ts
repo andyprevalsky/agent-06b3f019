@@ -20,6 +20,7 @@
 
 import { prisma } from './database';
 import { createLogger } from './logger';
+import { retryWithBackoff } from './retry';
 import {
   type ArchiveScope,
   assertBoundArchiveId,
@@ -62,6 +63,11 @@ export async function resolveArchiveRoot(agentId: string): Promise<string> {
   if (missAt !== undefined && Date.now() - missAt < NEGATIVE_TTL_MS) return agentId;
 
   let current = agentId;
+  // Only a walk that reaches a real root (busId, or a row with no parent) is
+  // cached; a depth-limited, missing-ancestor or cyclic walk returns its best
+  // ancestor for this call but is re-resolved next time.
+  let reachedRoot = false;
+  const visited = new Set<string>([agentId]);
   for (let depth = 0; depth <= MAX_PARENT_WALK; depth += 1) {
     const row = await prisma.agent.findUnique({
       where: { id: current },
@@ -77,12 +83,19 @@ export async function resolveArchiveRoot(agentId: string): Promise<string> {
     }
     if (typeof row.busId === 'string' && row.busId !== '') {
       current = row.busId;
+      reachedRoot = true;
       break;
     }
-    if (typeof row.parentAgentId !== 'string' || row.parentAgentId === '') break;
+    if (typeof row.parentAgentId !== 'string' || row.parentAgentId === '') {
+      reachedRoot = true;
+      break;
+    }
+    if (visited.has(row.parentAgentId)) break;
+    visited.add(row.parentAgentId);
     current = row.parentAgentId;
   }
-  remember(agentId, current);
+  if (reachedRoot) remember(agentId, current);
+  else log.warn('archive.root_walk_incomplete', { agent_id: agentId, best_ancestor: current });
   return current;
 }
 
@@ -92,26 +105,45 @@ export function __resetArchiveRootCache(): void {
   unknown.clear();
 }
 
+const ROOT_LOOKUP_ATTEMPTS = 3;
+const ROOT_LOOKUP_BACKOFF_MS = 250;
+
+/**
+ * A failed lookup is retried (bounded backoff); after the last failure the
+ * binding REJECTS, so the background archive task fails loudly instead of
+ * filing the record under an unverified root (the acting agent id).
+ */
+async function resolveRootWithRetry(agentId: string): Promise<string> {
+  try {
+    return await retryWithBackoff(() => resolveArchiveRoot(agentId), {
+      maxRetries: ROOT_LOOKUP_ATTEMPTS,
+      initialBackoffMs: ROOT_LOOKUP_BACKOFF_MS,
+      isRetryable: () => true,
+      component: 'ArchiveRoot',
+    });
+  } catch (error) {
+    log.error('archive.root_resolution_failed', {
+      agent_id: agentId,
+      attempts: ROOT_LOOKUP_ATTEMPTS,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    throw error;
+  }
+}
+
 /**
  * dump_context binding for a backend LLM call: the acting agent and its tree
  * root, or — for user-level work with no agent tree — the documented per-user
  * root `user-<userId>` (agent_id defaults to that root). Null only when neither
- * is known; the archive writer then refuses the record loudly.
+ * is known; the archive writer then refuses the record loudly. Rejects when the
+ * agent's root cannot be verified (lookup kept failing after retries).
  */
 export async function archiveBindingFor(
   params: ArchiveScope
 ): Promise<{ agent_id: string; root_agent_id: string } | null> {
   const { agentId, userId } = params;
   if (isBoundArchiveId(agentId)) {
-    try {
-      return { agent_id: agentId, root_agent_id: await resolveArchiveRoot(agentId) };
-    } catch (error) {
-      log.error('archive.root_resolution_failed', {
-        agent_id: agentId,
-        error: error instanceof Error ? error.message : String(error),
-      });
-      return { agent_id: agentId, root_agent_id: agentId };
-    }
+    return { agent_id: agentId, root_agent_id: await resolveRootWithRetry(agentId) };
   }
   if (isBoundArchiveId(userId)) {
     const root = userArchiveRoot(userId);

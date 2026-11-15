@@ -1467,19 +1467,33 @@ def _spill_archive_job(
     """
     safe_root = _safe_segment(root_agent_id)
     safe_path = _safe_path(path)
-    body = body_factory()
-    encrypted = _encrypt_within_limit(
-        root_agent_id=root_agent_id, path=path, body=body, content_type=content_type, compress=compress
-    )
-    if encrypted is None:
+    try:
+        body = body_factory()
+        encrypted = _encrypt_within_limit(
+            root_agent_id=root_agent_id, path=path, body=body, content_type=content_type, compress=compress
+        )
+        if encrypted is None:
+            return None
+        ciphertext, metadata = encrypted
+        if (_is_production() or os.environ.get("TRACE_ARCHIVE_BACKEND", "").strip().lower() == "r2") and (
+            _r2_publish_permitted(path)
+        ):
+            _write_outbox(safe_root, safe_path, ciphertext, metadata)
+        else:
+            _write_local(safe_root, safe_path, ciphertext, metadata)
+    except Exception as exc:
+        # Same containment as the worker path: a full disk or a failing body
+        # factory is an archive failure (None), never the caller's exception.
+        failed = _count("queue_spill_failed")
+        logger.error(
+            "trace_archive.queue_spill_failed",
+            root_agent_id=safe_root,
+            path=safe_path,
+            error_type=type(exc).__name__,
+            error=str(exc)[:200],
+            failed=failed,
+        )
         return None
-    ciphertext, metadata = encrypted
-    if (_is_production() or os.environ.get("TRACE_ARCHIVE_BACKEND", "").strip().lower() == "r2") and (
-        _r2_publish_permitted(path)
-    ):
-        _write_outbox(safe_root, safe_path, ciphertext, metadata)
-    else:
-        _write_local(safe_root, safe_path, ciphertext, metadata)
     spilled = _count("queue_spilled")
     if spilled == 1 or spilled & (spilled - 1) == 0:
         logger.warning("trace_archive.queue_spilled", root_agent_id=safe_root, path=safe_path, spilled_jobs=spilled)

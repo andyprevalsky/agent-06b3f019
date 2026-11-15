@@ -133,6 +133,37 @@ async function testOpenRouterReasoningDetailsAndReasoningTokens(): Promise<void>
   assert.equal(usage?.kind === 'usage' ? usage.data.reasoning_tokens : null, 6);
 }
 
+async function testOpenRouterReasoningDetailsWithoutIndex(): Promise<void> {
+  // `index` is optional: successive index-less details are distinct by `id`,
+  // id fragments merge, and details with neither identity never overwrite.
+  const chunks = await collect(
+    parseOpenAISSE(
+      sse([
+        'data: {"choices":[{"index":0,"delta":{"reasoning_details":[{"type":"reasoning.encrypted","id":"a","data":"A"}]}}]}',
+        'data: {"choices":[{"index":0,"delta":{"reasoning_details":[{"type":"reasoning.encrypted","id":"b","data":"B"}]}}]}',
+        'data: {"choices":[{"index":0,"delta":{"reasoning_details":[{"type":"reasoning.text","id":"t","text":"half "}]}}]}',
+        'data: {"choices":[{"index":0,"delta":{"reasoning_details":[{"type":"reasoning.text","id":"t","text":"whole"}]}}]}',
+        'data: {"choices":[{"index":0,"delta":{"reasoning_details":[{"type":"reasoning.encrypted","data":"X"}]}}]}',
+        'data: {"choices":[{"index":0,"delta":{"reasoning_details":[{"type":"reasoning.encrypted","data":"Y"}]}}]}',
+        'data: {"choices":[{"index":0,"delta":{"content":"done"},"finish_reason":"stop"}]}',
+        'data: [DONE]',
+      ]),
+      parseOptions
+    )
+  );
+  const blocks = chunks.filter((chunk) => chunk.kind === 'reasoning_block').map((c) => c.data);
+  assert.deepEqual(
+    blocks.map((block) => [block.id ?? null, block.data ?? null, block.text ?? null]),
+    [
+      ['a', 'A', null],
+      ['b', 'B', null],
+      ['t', null, 'half whole'],
+      [null, 'X', null],
+      [null, 'Y', null],
+    ]
+  );
+}
+
 async function testResponsesReasoningItems(): Promise<void> {
   const chunks = await collect(
     parseResponsesSSE(
@@ -431,6 +462,7 @@ async function testEndToEndRecordsAndRaceLosers(): Promise<void> {
 async function main(): Promise<void> {
   await testAnthropicThinkingSignaturesAndRedaction();
   await testOpenRouterReasoningDetailsAndReasoningTokens();
+  await testOpenRouterReasoningDetailsWithoutIndex();
   await testResponsesReasoningItems();
   testUnboundRootsRefused();
   await testEndToEndRecordsAndRaceLosers();

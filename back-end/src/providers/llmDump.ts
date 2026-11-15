@@ -62,18 +62,28 @@ function safeFilenameSegment(value: string): string {
   return cleaned || 'unbound';
 }
 
+function jsonSafeChild(_key: string, child: unknown): unknown {
+  if (typeof child === 'bigint') return child.toString();
+  if (child instanceof Error) {
+    return { name: child.name, message: child.message, stack: child.stack };
+  }
+  return child;
+}
+
 function safeJson(value: unknown): string {
-  return JSON.stringify(
-    value,
-    (_key, child) => {
-      if (typeof child === 'bigint') return child.toString();
-      if (child instanceof Error) {
-        return { name: child.name, message: child.message, stack: child.stack };
-      }
-      return child;
-    },
-    2
-  );
+  return JSON.stringify(value, jsonSafeChild, 2);
+}
+
+/**
+ * Deep JSON copy, so later caller mutations cannot reach a deferred record. A
+ * value JSON cannot encode fails the archive task, never the model call.
+ */
+function jsonSnapshot<T>(value: T): { value: T } | { error: unknown } {
+  try {
+    return { value: JSON.parse(JSON.stringify(value, jsonSafeChild)) as T };
+  } catch (error) {
+    return { error };
+  }
 }
 
 export interface LlmDumpPayload {
@@ -251,6 +261,9 @@ function startDeferredCapture(
 ): DeferredIdentity | null {
   const owners = archiveScopeOwners(scope);
   if (owners === null) return null;
+  // The record is serialized only after the root lookup; the caller may append
+  // the response (or the next turn) to its messages array before then.
+  const snapshot = jsonSnapshot(fields);
   const identity = archiveBindingFor(scope).then((binding) => {
     if (binding === null) throw new Error('archive_scope lost its binding');
     return {
@@ -264,14 +277,15 @@ function startDeferredCapture(
   const deferred: DeferredIdentity = { ...owners, identity };
   ownDeferred(
     deferred,
-    identity.then((bound) =>
-      persistRecord(
+    identity.then((bound) => {
+      if ('error' in snapshot) throw snapshot.error;
+      return persistRecord(
         bound,
         startRecordPath(bound.dump_id),
-        buildStartRecord(bound, fields),
-        fields.started_at_ms
-      )
-    )
+        buildStartRecord(bound, snapshot.value),
+        snapshot.value.started_at_ms
+      );
+    })
   );
   return deferred;
 }

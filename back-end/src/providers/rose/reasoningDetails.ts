@@ -10,22 +10,40 @@ function stringValue(value: unknown): string | undefined {
 }
 
 /**
- * OpenRouter streams `delta.reasoning_details` as fragments keyed by `index`.
- * Merge them losslessly (text/summary concatenated, last signature/data/id
- * kept) so encrypted and signed reasoning can be replayed from the archive.
+ * Identity of one streamed detail: its `index`, else its `id` (both optional
+ * per OpenRouter). Per-chunk array position is not an identity across chunks,
+ * so a detail with neither stays its own entry.
+ */
+function detailKey(detail: Record<string, unknown>, nextAnonymous: () => number): string {
+  const type = String(detail.type ?? '');
+  if (detail.index !== undefined && detail.index !== null) {
+    return `index:${String(detail.index)}:${type}`;
+  }
+  const id = stringValue(detail.id);
+  if (id !== undefined) return `id:${id}:${type}`;
+  return `entry:${nextAnonymous()}`;
+}
+
+/**
+ * OpenRouter streams `delta.reasoning_details` as fragments keyed by `index`
+ * (or `id`). Merge them losslessly (text/summary concatenated, last
+ * signature/data/id kept) so encrypted and signed reasoning can be replayed
+ * from the archive.
  */
 export function createReasoningDetailsCollector(): {
   add(value: unknown): void;
   blocks(): ReasoningBlock[];
 } {
   const merged = new Map<string, Record<string, unknown>>();
+  let anonymous = 0;
+  const nextAnonymous = (): number => anonymous++;
   return {
     add(value) {
       if (!Array.isArray(value)) return;
-      value.forEach((entry: unknown, position) => {
+      value.forEach((entry: unknown) => {
         if (entry === null || typeof entry !== 'object') return;
         const detail = entry as Record<string, unknown>;
-        const key = `${String(detail.index ?? position)}:${String(detail.type ?? '')}`;
+        const key = detailKey(detail, nextAnonymous);
         const existing = merged.get(key);
         if (!existing) {
           merged.set(key, { ...detail });

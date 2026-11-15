@@ -6,7 +6,9 @@
  *     code/<session>/inspect-<id>/attempt-<n>/{stdout.jsonl, stderr.txt, exit-code.txt,
  *       instructions.txt, cli-<sha256> (transcripts + subagents the CLI wrote)}
  *     code/<session>/inspect-<id>/manifest.json (question, result, attempts) last
- *   C15 fall-over: both attempts archived (asserted from the C15 case)
+ *   C15 fall-over: both attempts archived (asserted from the C15 case); when the
+ *   fall-over provider then fails to start, the usage-limited attempt is still
+ *   archived with the terminal error before the inspection throws
  */
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
@@ -16,6 +18,7 @@ import { after, before, test } from 'node:test';
 import { prisma } from '../../providers/database';
 import { waitForCodeSessionArchiveJobs } from '../../providers/codeSessions/archiveMirror';
 import { inspectCodeSession } from '../../providers/codeSessions/inspect';
+import { __resetAnthropicApiKeyCooldown } from '../../providers/computeCredentials';
 import {
   decryptAndValidateArtifact,
   localObjectPath,
@@ -29,6 +32,8 @@ export interface InspectArchiveContext {
   setMode: (mode: string) => void;
   seedWorkspace: (home: string) => unknown;
   liveSession: (home: string) => Promise<{ id: string }>;
+  /** Make every new sandbox of `provider` fail to start (null: none fail). */
+  failSandboxFor: (provider: string | null) => void;
 }
 
 interface ArchivedInspection {
@@ -36,7 +41,7 @@ interface ArchivedInspection {
   agent_id: string;
   root_agent_id: string;
   checkpoint_seq: number;
-  result: { answer: string | null; status: string };
+  result: { answer: string | null; status: string; error?: string | null };
   attempts: Array<{
     provider: string;
     artifacts: Record<string, { sha256: string; size: number }>;
@@ -139,6 +144,39 @@ export function registerInspectArchiveCases(ctx: InspectArchiveContext): void {
       assert.ok(body?.toString().includes(question), 'the transcript holds the question');
     } finally {
       await prisma.agent.delete({ where: { id: caller.id } });
+    }
+  });
+
+  test('a usage-limited Claude attempt stays archived when the Codex fall-over fails to start', async () => {
+    const liveHome = join(ctx.fixtureDir, 'live-home-archive-failover');
+    ctx.seedWorkspace(liveHome);
+    const live = await ctx.liveSession(liveHome);
+    await __resetAnthropicApiKeyCooldown();
+    ctx.setMode('rate_limit');
+    ctx.failSandboxFor('codex');
+    try {
+      await assert.rejects(
+        inspectCodeSession({
+          userId: ctx.userA,
+          agentId: ctx.agentA,
+          codeSessionId: live.id,
+          question: 'What does feature.txt say? (fall-over fails)',
+        }),
+        /codex inspection sandbox failed to start/
+      );
+      const { base, manifest } = await archivedInspection(ctx.agentA, live.id);
+      assert.deepEqual(
+        manifest.attempts.map((attempt) => attempt.provider),
+        ['claude'],
+        'the completed Claude attempt is archived'
+      );
+      assert.equal(manifest.result.status, 'failed');
+      assert.match(manifest.result.error ?? '', /codex inspection sandbox failed to start/);
+      const stdout = await archivedObject(ctx.agentA, `${base}/attempt-1/stdout.jsonl`);
+      assert.ok(stdout && stdout.length > 0, 'the Claude CLI stream is archived');
+    } finally {
+      ctx.failSandboxFor(null);
+      await __resetAnthropicApiKeyCooldown();
     }
   });
 }

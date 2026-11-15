@@ -10,6 +10,8 @@
  *   undecryptable orphan body, no sidecar  ─► replaced by the complete artifact
  *   torn pair (our sidecar, foreign body)   ─► body repaired
  *   a different COMPLETE artifact exists    ─► never overwritten (null)
+ *   same path + body, gzip vs raw stored    ─► distinct synthetic nonces (no GCM reuse)
+ *   claimant stops after its sidecar claim  ─► next writer finishes it from the staged ciphertext
  */
 
 import assert from 'node:assert/strict';
@@ -26,6 +28,7 @@ import {
 } from '../../providers/traceArchive';
 import { validatedArtifactBatch } from '../../providers/traceArchiveBatch';
 import { storeWorkerArtifact, storeWorkerArtifacts } from '../../providers/traceArchiveLifecycle';
+import { putLocal } from '../../providers/traceArchiveWriteStorage';
 
 const originalEnv = { ...process.env };
 const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'trace-archive-bounds-'));
@@ -177,10 +180,84 @@ async function testCreateOnlyResumes(): Promise<void> {
   assert((await readBack(root, objectPath)).equals(body));
 }
 
+function testSyntheticNonceCoversStoredBytes(): void {
+  const objectPath = 'code/session-1/0004/rollout.jsonl.gz.enc';
+  const body = Buffer.from('{"same":"plaintext"}');
+  const encrypt = (compress: boolean) => {
+    const encrypted = encryptArtifact(objectPath, body, 'application/json', compress, {
+      deterministic: true,
+    });
+    assert(encrypted);
+    return encrypted;
+  };
+  const gzipped = encrypt(true);
+  const raw = encrypt(false);
+  assert.deepEqual([gzipped.metadata.compression, raw.metadata.compression], ['gzip', 'none']);
+  assert.notEqual(
+    gzipped.metadata.nonce_b64,
+    raw.metadata.nonce_b64,
+    'different stored bytes under one key and path must not share a GCM nonce'
+  );
+  assert.equal(
+    encrypt(true).metadata.nonce_b64,
+    gzipped.metadata.nonce_b64,
+    'a retry of the same stored bytes stays byte-identical (create-only resume)'
+  );
+  assert(encrypt(true).ciphertext.equals(gzipped.ciphertext));
+}
+
+/** A claimant that stops between its sidecar claim and its body replacement is recoverable. */
+async function testInterruptedClaimIsRecoverable(): Promise<void> {
+  const root = `create-only-claim-${process.pid}`;
+  const objectPath = 'code/session-1/0005/rollout.jsonl.gz.enc';
+  const target = localObjectPath(root, objectPath);
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  fs.writeFileSync(target, crypto.randomBytes(64)); // undecryptable orphan, sidecar lost
+  const encrypt = (text: string) => {
+    const encrypted = encryptArtifact(objectPath, Buffer.from(text), 'application/json', true, {
+      deterministic: true,
+    });
+    assert(encrypted);
+    return encrypted;
+  };
+  const claimant = encrypt('{"claimant":"B"}');
+  // Process B "stops" right after claiming the sidecar: its body replacement never lands.
+  const originalRename = fs.renameSync;
+  Object.assign(fs, {
+    renameSync: (from: fs.PathLike, to: fs.PathLike) => {
+      if (String(to) === target) throw new Error('claimant stopped before replacing the body');
+      originalRename(from, to);
+    },
+  });
+  try {
+    await assert.rejects(
+      putLocal(root, objectPath, claimant.ciphertext, claimant.metadata, true),
+      /claimant stopped/
+    );
+  } finally {
+    Object.assign(fs, { renameSync: originalRename });
+  }
+  assert(fs.existsSync(`${target}.meta.json`), 'the claimant sidecar was published');
+
+  // A fresh writer with different ciphertext C finishes B's pair and never overwrites it.
+  const fresh = encrypt('{"claimant":"C"}');
+  await assert.rejects(
+    putLocal(root, objectPath, fresh.ciphertext, fresh.metadata, true),
+    (error: unknown) => (error as { code?: string }).code === 'EEXIST'
+  );
+  assert.equal(
+    (await readBack(root, objectPath)).toString('utf8'),
+    '{"claimant":"B"}',
+    'the claimed pair decrypts after the interrupted publication'
+  );
+}
+
 async function main(): Promise<void> {
   try {
     await testLargeRecordsAreAccepted();
     await testCreateOnlyResumes();
+    testSyntheticNonceCoversStoredBytes();
+    await testInterruptedClaimIsRecoverable();
     process.stdout.write('trace-archive-ingest-bounds: all checks passed\n');
   } finally {
     for (const key of Object.keys(process.env)) if (!(key in originalEnv)) delete process.env[key];

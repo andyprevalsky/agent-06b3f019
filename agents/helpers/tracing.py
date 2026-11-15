@@ -116,15 +116,19 @@ def archive_scope(root_agent_id: Optional[str], agent_id: Optional[str] = None) 
 
     Benchmark harness judges, warmups and transcriptions run in the CLI
     process; their records belong to the benchmark run's root bundle. An empty
-    root binds nothing, so the archive writer refuses the record loudly.
+    root masks any outer identity for the scope (root, acting agent and
+    workflow agent), so the archive writer refuses the record loudly instead
+    of filing it under an enclosing root.
     """
-    bindings = {key: value for key, value in (("root_agent_id", root_agent_id), ("agent_id", agent_id or root_agent_id)) if value}
-    tokens = structlog.contextvars.bind_contextvars(**bindings) if bindings else {}
+    if root_agent_id:
+        bindings: Dict[str, Any] = {"root_agent_id": root_agent_id, "agent_id": agent_id or root_agent_id}
+    else:
+        bindings = {"root_agent_id": None, "agent_id": agent_id or None, "workflow_agent_id": None}
+    tokens = structlog.contextvars.bind_contextvars(**bindings)
     try:
         yield
     finally:
-        if tokens:
-            structlog.contextvars.reset_contextvars(**tokens)
+        structlog.contextvars.reset_contextvars(**tokens)
 
 
 def _sanitize_runtime_value(value: Any, depth: int = 0) -> Any:

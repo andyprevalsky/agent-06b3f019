@@ -13,6 +13,10 @@
  * C1 terminal_roots_finalized, C2 llm_calls_have_final_output, C3
  * no_unbound_or_nonroot_writes, C4 v2_schema_valid, C5 code_checkpoints_mirrored,
  * C6 backend_call_sites_recorded. Exit 1 on any FAIL, 2 on audit error.
+ *
+ * Window scope: roots created in [since, until) plus every older root whose
+ * tree recorded a ToolUsage row in the window; the tree, ledger and bundle
+ * checks all use that one root set.
  */
 import https from 'node:https';
 import fs from 'node:fs';
@@ -252,6 +256,22 @@ export async function listAllBundleIds(
 const ROLLBACK = new Error('rollback');
 const sqlTime = (ms: number) => new Date(ms).toISOString().replace('T', ' ').replace('Z', '');
 
+/**
+ * Window root filter on `"Agent" a` ($1 since, $2 until): roots created in the
+ * window, plus older roots whose tree (the root or any descendant) recorded a
+ * ToolUsage row in it, so a long-running root's later calls are audited on the
+ * days they happen.
+ */
+export const WINDOW_ROOTS_SQL = `((a."createdAt" >= $1::timestamp AND a."createdAt" < $2::timestamp)
+  OR a.id IN (WITH RECURSIVE up(id, parent, depth) AS (
+      SELECT g.id, g."parentAgentId", 0 FROM "Agent" g
+        WHERE g.id IN (SELECT tu."agentId" FROM "ToolUsage" tu
+          WHERE tu."createdAt" >= $1::timestamp AND tu."createdAt" < $2::timestamp)
+      UNION
+      SELECT p.id, p."parentAgentId", u.depth + 1 FROM "Agent" p
+        JOIN up u ON p.id = u.parent WHERE u.depth < 64)
+    SELECT id FROM up WHERE parent IS NULL))`;
+
 interface Membership {
   id: string;
   is_root: boolean;
@@ -293,11 +313,7 @@ async function readInventory(
           const rawRoots =
             args.roots.length > 0
               ? await tx.$queryRawUnsafe<RootSql[]>(`${rootSql} a.id = ANY($1::text[])`, args.roots)
-              : await tx.$queryRawUnsafe<RootSql[]>(
-                  `${rootSql} a."createdAt" >= $1::timestamp AND a."createdAt" < $2::timestamp`,
-                  since,
-                  until
-                );
+              : await tx.$queryRawUnsafe<RootSql[]>(`${rootSql} ${WINDOW_ROOTS_SQL}`, since, until);
           const rows: RootRow[] = rawRoots.map((r) => ({
             id: r.id,
             createdAtMs: r.createdAt.getTime(),
@@ -362,6 +378,22 @@ async function readInventory(
             since,
             until
           );
+          // The mirror's root resolver (archiveRootResolver.ts) in SQL: busId, else the
+          // parentAgentId walk (at most 8 hops); an unknown agent is its own root.
+          const sessionRoots = await tx.$queryRawUnsafe<Array<{ start: string; root: string }>>(
+            `WITH RECURSIVE walk(start, cur, depth, stop) AS (
+                SELECT x.id, x.id, 0, false FROM unnest($1::text[]) AS x(id)
+                UNION ALL
+                SELECT w.start,
+                  CASE WHEN coalesce(a."busId", '') <> '' THEN a."busId" ELSE a."parentAgentId" END,
+                  w.depth + 1, coalesce(a."busId", '') <> ''
+                FROM walk w JOIN "Agent" a ON a.id = w.cur
+                WHERE NOT w.stop AND w.depth <= 8
+                  AND (coalesce(a."busId", '') <> '' OR coalesce(a."parentAgentId", '') <> ''))
+              SELECT DISTINCT ON (start) start, cur AS root FROM walk ORDER BY start, depth DESC`,
+            [...new Set(codeSessions.map((s) => s.rootAgentId))]
+          );
+          const archiveRootOf = new Map(sessionRoots.map((r) => [r.start, r.root]));
           for (let i = 0; bundleIds !== null && i < bundleIds.length; i += 10_000) {
             membership.push(
               ...(await tx.$queryRawUnsafe<Membership[]>(
@@ -389,6 +421,7 @@ async function readInventory(
             })),
             codeSessions: codeSessions.map((s) => ({
               ...s,
+              archiveRootAgentId: archiveRootOf.get(s.rootAgentId) ?? s.rootAgentId,
               latestCheckpointSeq: Number(s.latestCheckpointSeq),
             })),
             bundleScan: null,

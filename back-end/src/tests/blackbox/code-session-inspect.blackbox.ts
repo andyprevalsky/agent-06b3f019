@@ -147,10 +147,15 @@ interface FakeSandbox {
 }
 
 const sandboxes: FakeSandbox[] = [];
+/** A provider whose sandbox fails to start (E2B down for that template). */
+let failingSandboxProvider: string | null = null;
 
 /** Each inspection gets a fresh HOME; `kill` records and deletes it (E2B kill). */
 function installFakeFactory(): void {
   setCodeInspectSandboxFactoryForTests(async (provider) => {
+    if (provider === failingSandboxProvider) {
+      throw new Error(`fake E2B: the ${provider} inspection sandbox failed to start`);
+    }
     const home = mkdtempSync(join(fixtureDir, 'inspect-home-'));
     const base = localSandboxFs(home);
     const fs: CodeSessionFs = {
@@ -644,4 +649,14 @@ test('C15 keeps its Codex fallback while a sibling holds the funded cooldown', (
   assert.match(child.stdout, /ok \d+ - C15: a Claude usage limit/);
 });
 
-registerInspectArchiveCases({ fixtureDir, userA, agentA, setMode, seedWorkspace, liveSession });
+registerInspectArchiveCases({
+  fixtureDir,
+  userA,
+  agentA,
+  setMode,
+  seedWorkspace,
+  liveSession,
+  failSandboxFor: (provider) => {
+    failingSandboxProvider = provider;
+  },
+});

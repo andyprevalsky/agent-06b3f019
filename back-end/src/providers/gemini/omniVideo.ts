@@ -305,22 +305,77 @@ async function pollAndDownload(uri: string, key: string, deadline: number): Prom
   return Buffer.from(await download.arrayBuffer());
 }
 
-/** Store the generated video under the capture's archive root, resolved after the model call. */
+/** Inline fallback bound: 32 MiB → ~43 MiB base64, under the 72 MiB record ciphertext cap. */
+const INLINE_VIDEO_FALLBACK_MAX_BYTES = 32 * 1024 * 1024;
+
+/**
+ * Store the generated video under the capture's archive root (resolved after
+ * the model call). Returns the stored object path, or the failure reason.
+ */
 async function archiveVideoBytes(
   capture: LlmCapture,
   objectPath: string,
   body: Buffer,
   mimeType: string | undefined
-): Promise<void> {
-  const rootAgentId = await llmCaptureRoot(capture);
-  if (rootAgentId === null) return;
-  await archiveBytes({
-    rootAgentId,
-    objectPath,
-    body,
-    contentType: mimeType || 'video/mp4',
-    compress: false,
-    createOnly: true,
+): Promise<{ path: string } | { error: string }> {
+  try {
+    const rootAgentId = await llmCaptureRoot(capture);
+    if (rootAgentId === null) return { error: 'capture has no archive root' };
+    // createOnly: a failed write throws; null means the content-addressed
+    // object already exists (or archiving is off, when no record is written).
+    await archiveBytes({
+      rootAgentId,
+      objectPath,
+      body,
+      contentType: mimeType || 'video/mp4',
+      compress: false,
+      createOnly: true,
+    });
+    return { path: objectPath };
+  } catch (error) {
+    return { error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+/**
+ * The final record's video reference: the confirmed archive path, or — when the
+ * separate write failed — the failure plus the bytes inline, so the final
+ * record (stored with its own retries) still carries the video.
+ */
+async function videoArchiveFields(
+  capture: LlmCapture,
+  bytes: Buffer,
+  mimeType: string | undefined
+): Promise<Record<string, unknown>> {
+  const videoPath = `media/video/${createHash('sha256').update(bytes).digest('hex')}.mp4`;
+  const stored = await archiveVideoBytes(capture, videoPath, bytes, mimeType);
+  if ('path' in stored) return { video_archive_path: stored.path };
+  log.warn('[GenerateVideo] video archive failed', { error: stored.error, bytes: bytes.length });
+  return {
+    video_archive_error: stored.error,
+    ...(bytes.length <= INLINE_VIDEO_FALLBACK_MAX_BYTES
+      ? { video_data_base64: bytes.toString('base64'), video_mime_type: mimeType || 'video/mp4' }
+      : {}),
+  };
+}
+
+/** Final record for a failed generation (provider error, refusal, network, download). */
+function finishFailedVideoCapture(
+  capture: LlmCapture | null,
+  model: string,
+  startedAtMs: number,
+  error: unknown
+): void {
+  if (capture === null) return;
+  finishLlmCapture(capture, {
+    model,
+    output: simpleArchiveOutput({
+      content: '',
+      actualModel: model,
+      provider: 'gemini',
+      startedAtMs,
+      error,
+    }),
   });
 }
 
@@ -369,6 +424,65 @@ export async function generateOmniVideo(request: OmniVideoRequest): Promise<Omni
     resolution: request.resolution,
     seed: request.seed ?? null,
   });
+  let generated: GeneratedVideo;
+  try {
+    generated = await requestVideo(body, key, started);
+  } catch (error) {
+    finishFailedVideoCapture(capture, model, started, error);
+    throw error;
+  }
+  const { interaction, part, bytes, durationSeconds } = generated;
+  const latencyMs = Date.now() - started;
+  const usage = readUsage(interaction);
+  if (capture !== null) {
+    finishLlmCapture(capture, {
+      model,
+      output: simpleArchiveOutput({
+        content: '',
+        actualModel: model,
+        provider: 'gemini',
+        startedAtMs: started,
+        requestId: interaction.id ?? null,
+        structured: {
+          interaction,
+          ...(await videoArchiveFields(capture, bytes, part.mime_type)),
+          duration_seconds: durationSeconds,
+        },
+      }),
+    });
+  }
+  log.info('[GenerateVideo] provider response', {
+    model,
+    interaction_id: interaction.id ?? null,
+    bytes: bytes.length,
+    duration_seconds: durationSeconds,
+    video_tokens: usage?.videoOutputTokens ?? null,
+    latency_ms: latencyMs,
+  });
+  return {
+    bytes,
+    mimeType: part.mime_type || 'video/mp4',
+    model,
+    interactionId: interaction.id ?? null,
+    durationSeconds,
+    latencyMs,
+    usage,
+  };
+}
+
+interface GeneratedVideo {
+  interaction: { id?: string; status?: string };
+  part: VideoPart;
+  bytes: Buffer;
+  durationSeconds: number;
+}
+
+/** One Interactions call plus its download; throws OmniVideoError on every failure. */
+async function requestVideo(
+  body: Record<string, unknown>,
+  key: string,
+  started: number
+): Promise<GeneratedVideo> {
   let response: Response;
   try {
     response = await providerFetch(
@@ -414,46 +528,5 @@ export async function generateOmniVideo(request: OmniVideoRequest): Promise<Omni
   if (bytes.length === 0 || durationSeconds === null) {
     throw new OmniVideoError('provider returned an unreadable video file', true);
   }
-  const latencyMs = Date.now() - started;
-  const usage = readUsage(interaction);
-  if (capture !== null) {
-    const videoPath = `media/video/${createHash('sha256').update(bytes).digest('hex')}.mp4`;
-    await archiveVideoBytes(capture, videoPath, bytes, part.mime_type).catch((error: unknown) =>
-      log.warn('[GenerateVideo] video archive failed', {
-        error: error instanceof Error ? error.message : String(error),
-      })
-    );
-    finishLlmCapture(capture, {
-      model,
-      output: simpleArchiveOutput({
-        content: '',
-        actualModel: model,
-        provider: 'gemini',
-        startedAtMs: started,
-        requestId: interaction.id ?? null,
-        structured: {
-          interaction,
-          video_archive_path: videoPath,
-          duration_seconds: durationSeconds,
-        },
-      }),
-    });
-  }
-  log.info('[GenerateVideo] provider response', {
-    model,
-    interaction_id: interaction.id ?? null,
-    bytes: bytes.length,
-    duration_seconds: durationSeconds,
-    video_tokens: usage?.videoOutputTokens ?? null,
-    latency_ms: latencyMs,
-  });
-  return {
-    bytes,
-    mimeType: part.mime_type || 'video/mp4',
-    model,
-    interactionId: interaction.id ?? null,
-    durationSeconds,
-    latencyMs,
-    usage,
-  };
+  return { interaction, part, bytes, durationSeconds };
 }

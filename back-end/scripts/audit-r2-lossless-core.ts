@@ -179,6 +179,8 @@ export interface CodeSessionRow {
   id: string;
   userId: string;
   rootAgentId: string;
+  /** The tree root the mirror archives under (busId, else parentAgentId walk); default rootAgentId. */
+  archiveRootAgentId?: string;
   state: string;
   latestCheckpointSeq: number;
 }
@@ -519,7 +521,7 @@ function decryptPrefix(prefix: Buffer, metadata: EncryptedArtifactMetadata, key:
     : stored;
 }
 
-async function readMetadata(
+export async function readMetadata(
   source: ArchiveSource,
   key: string
 ): Promise<EncryptedArtifactMetadata | string> {

@@ -36,7 +36,8 @@ export interface HedgeParams<T> {
   hedgeOnPrimaryFailure?: boolean;
   /**
    * Called once per branch that lost to a latched winner, with every item it
-   * produced (before and after the latch, until its abort took effect). The
+   * produced (before and after the latch, until its abort took effect),
+   * including a branch that finished pre-latch (ended empty or failed). The
    * caller never sees these items; this is their only record (archive).
    */
   onLoser?: (name: string, items: readonly T[]) => void;
@@ -55,6 +56,8 @@ interface BranchState<T> {
   lateItems: T[];
   done: boolean;
   failure: unknown;
+  /** onLoser already received this branch's items. */
+  reported: boolean;
   controller: AbortController;
 }
 
@@ -77,6 +80,15 @@ export async function* hedgeStreams<T>(params: HedgeParams<T>): AsyncIterable<T>
     new Promise((resolve) => {
       wake = resolve;
     });
+
+  const reportLoser = (state: BranchState<T>): void => {
+    if (winner === null || winner === state || !state.done || state.reported) return;
+    state.reported = true;
+    const items = [...state.buffer, ...state.lateItems];
+    state.buffer = [];
+    state.lateItems = [];
+    if (items.length > 0) params.onLoser?.(state.name, items);
+  };
 
   const runBranch = async (branch: HedgeBranch<T>, state: BranchState<T>): Promise<void> => {
     try {
@@ -101,12 +113,7 @@ export async function* hedgeStreams<T>(params: HedgeParams<T>): AsyncIterable<T>
       }
     } finally {
       state.done = true;
-      if (winner !== null && winner !== state) {
-        const items = [...state.buffer, ...state.lateItems];
-        state.buffer = [];
-        state.lateItems = [];
-        if (items.length > 0) params.onLoser?.(state.name, items);
-      }
+      reportLoser(state);
       notify();
     }
   };
@@ -119,6 +126,7 @@ export async function* hedgeStreams<T>(params: HedgeParams<T>): AsyncIterable<T>
       lateItems: [],
       done: false,
       failure: null,
+      reported: false,
       controller: new AbortController(),
     };
     states.push(state);
@@ -195,6 +203,9 @@ export async function* hedgeStreams<T>(params: HedgeParams<T>): AsyncIterable<T>
   } finally {
     settled = true;
     for (const state of states) {
+      // A branch that finished before the latch (empty or failed) is reported
+      // here; one still running reports when its abort lands.
+      reportLoser(state);
       if (!state.done) state.controller.abort(new Error('chat hedge race settled'));
     }
     params.onDrained?.(Promise.allSettled(runs).then(() => undefined));

@@ -225,6 +225,8 @@ async def _predict_jev_progress_impl(snapshot: dict) -> None:
                 body = request(snapshot, prompt)
                 dump = _archive_jev_request(snapshot, body, version)
                 client = get_http_client()
+                # A received response stays in the archive even when decoding rejects it.
+                raw: Any = None
                 try:
                     response = await client.post(TYPESAFE_URL, json=body,
                                                  headers={"Authorization": f"Bearer {key}"}, timeout=20)
@@ -232,7 +234,7 @@ async def _predict_jev_progress_impl(snapshot: dict) -> None:
                     raw = response.json()
                     estimate = decode(raw, snapshot, version)
                 except Exception as exc:
-                    _archive_jev_result(dump, None, None, exc)
+                    _archive_jev_result(dump, raw, None, exc)
                     raise
                 _archive_jev_result(dump, raw, estimate, None)
                 # Cancellation has no synchronous gap in which a terminal loop can race this publication.
