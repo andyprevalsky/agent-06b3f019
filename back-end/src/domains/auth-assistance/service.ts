@@ -1,5 +1,5 @@
 import { createNative, readNative } from './service.native';
-import type { NativePhoneInput } from '../../providers/nativePhoneAttention';
+import type { NativePhoneInput, NativePhoneUserAction } from '../../providers/nativePhoneAttention';
 import { canonicalAuthRealm } from '../../providers/authRealm';
 import {
   completeAuthAssistanceForUser,
@@ -320,14 +320,16 @@ export async function completeAuthAssistanceRequest(
   id: string,
   userId: string,
   userMessage?: string,
-  dependencies?: Partial<AuthAssistanceCompletionDependencies>
+  dependencies?: Partial<AuthAssistanceCompletionDependencies>,
+  action?: NativePhoneUserAction
 ) {
   const result = await completeAuthAssistanceForUser(
     id,
     userId,
     new Date(),
     dependencies,
-    userMessage
+    userMessage,
+    action
   );
 
   if (result.status === 'not_found') throw new NotFoundError('Auth assistance request not found');
