@@ -1,5 +1,5 @@
 #!/usr/bin/env tsx
-import { runSteelAwareParity } from './browser-provider.steel-persistence-outage.support';
+import { quarantinedLiveParity } from './browser-provider.live.quarantine';
 import { steelPersistenceOutageCases } from './browser-provider.steel-persistence-outage.cases';
 
 import nodeAssert from 'node:assert/strict';
@@ -596,11 +596,9 @@ async function main(): Promise<void> {
       KERNEL_RESIDENTIAL_LIVE_OVERRIDE,
       'Kernel residential proxy unavailable'
     );
-  } else if (LIVE_PROVIDERS) {
-    const parity = await runSteelAwareParity(runLiveProviderParity, true);
-    failed += parity.failed;
-    steelPersistenceSkipped = parity.skipped;
-  } else console.log('Live provider cases run in the browser-provider-live deploy probe.');
+  } else if (LIVE_PROVIDERS)
+    steelPersistenceSkipped = await quarantinedLiveParity(runLiveProviderParity);
+  else console.log('Live provider cases run in the browser-provider-live deploy probe.');
   if (LIVE_PROVIDERS) failed += await runLiveCrossProviderCases();
 
   if (failed > 0) process.exit(1);
