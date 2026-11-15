@@ -1298,6 +1298,25 @@ class OtherLanesTest(Base):
         self.assertFalse(dp.lane_wmh(ctx)[0])
         self.assertEqual(fake.kinds(), ['--build-wmh'])
 
+    def test_wmh_detached_failing_sim_cannot_pass(self) -> None:
+        # Model scripts/run-bench-fleet: without --wait the launcher detaches and exits 0 at launch while the
+        # controller later writes its real status (1 = the SIM's CHILDFAIL); --wait returns that status.
+        controller_status = 1
+
+        def run_bench(argv, cwd, env, on_line):
+            if 'raise-5m-rose-labs-brex' not in argv:
+                return 0
+            on_line('🛰️  fleet controller detached (own session; survives launcher exit)')
+            return controller_status if '--wait' in argv else 0
+        fake = Fake(self.root, [], handler=run_bench)
+        ctx = self.ctx(fake)
+        ctx.plan = dp.plan_lanes(['agents/benchmarks/world_model_harness.py'], [], NO_MAC)
+        self.assertFalse(ctx.plan['wmh'].build_wmh)
+        self.assertEqual(dp.lane_wmh(ctx), (False, 'run-bench raise-5m-rose-labs-brex --sim-on exited 1', 1))
+        controller_status = 0
+        self.assertEqual(dp.lane_wmh(ctx), (True, 'raise-5m-rose-labs-brex SIM passed', 0))
+        self.assertIn('--wait', dp.planned_commands('wmh', ctx)[-1])
+
     def test_mac_release_binds_exact_sha_after_merge(self) -> None:
         polls = [[{'databaseId': 1, 'headSha': SHA, 'createdAt': '2026-11-05T17:59:59Z'},
                   {'databaseId': 2, 'headSha': 'b' * 40, 'createdAt': '2026-11-05T18:05:00Z'}],
