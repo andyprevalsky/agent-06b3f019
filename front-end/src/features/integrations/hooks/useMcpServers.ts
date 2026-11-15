@@ -1,7 +1,8 @@
 /**
  * STATE MACHINE: useMcpServers (McpServersSection)
  *
- *   [MOUNT] --GET /integrations/mcp--> [LISTED] (merged with rows a faster connect added) | listError
+ *   [MOUNT] --GET /integrations/mcp--> [LISTED] (merged: rows a faster mutation set win,
+ *     rows removed meanwhile stay removed) | listError
  *   [LISTED] --connect(url, headers?)--> [CONNECTING]
  *     --{server}--> [LISTED] (row upserted)
  *     --{server, authorize_url}--> remember this page (MCP_RETURN_KEY) and send
@@ -72,17 +73,26 @@ export function useMcpServers() {
   const [busyId, setBusyId] = useState<string | null>(null);
   const [rowError, setRowError] = useState<string | null>(null);
   const mounted = useRef(false);
+  /** Identity of the current desktop sign-in poll; a replaced or stopped run ignores its callbacks. */
+  const pollRun = useRef(0);
+  /** Bumped by every successful mutation; poll responses started earlier are dropped. */
+  const mutation = useRef(0);
+  /** Rows removed here; a list response that was already in flight never restores them. */
+  const removed = useRef(new Set<string>());
 
   useEffect(() => {
     mounted.current = true;
     fetchMcpServers()
       .then((rows) => {
-        // Merge: a connect that finished before this first load keeps its row.
+        // Merge: rows a faster connect/reconnect set win; removed rows stay removed.
         if (mounted.current)
-          setServers((current) => [
-            ...rows,
-            ...current.filter((row) => !rows.some((loaded) => loaded.id === row.id)),
-          ]);
+          setServers((current) => {
+            const byId = new Map(
+              rows.filter((row) => !removed.current.has(row.id)).map((row) => [row.id, row]),
+            );
+            for (const row of current) byId.set(row.id, row);
+            return [...byId.values()];
+          });
       })
       .catch((cause: unknown) => {
         if (mounted.current) setListError(message(cause, 'Could not load MCP servers'));
@@ -96,10 +106,6 @@ export function useMcpServers() {
   }, []);
 
   const poll = useRef<ReturnType<typeof setInterval> | null>(null);
-  /** Identity of the current desktop sign-in poll; a replaced run ignores its own callbacks. */
-  const pollRun = useRef(0);
-  /** Bumped by every successful mutation; list responses started earlier are dropped. */
-  const mutation = useRef(0);
   useEffect(
     () => () => {
       pollRun.current += 1;
@@ -117,6 +123,8 @@ export function useMcpServers() {
     let sent = 0;
     const handle = setInterval(() => {
       const stop = () => {
+        // Invalidate this run too, so its in-flight responses cannot apply afterwards.
+        if (run === pollRun.current) pollRun.current += 1;
         clearInterval(handle);
         if (poll.current === handle) poll.current = null;
       };
@@ -204,6 +212,7 @@ export function useMcpServers() {
       async () => {
         await deleteMcpServer(id);
         mutation.current += 1;
+        removed.current.add(id);
         if (mounted.current) setServers((rows) => rows.filter((row) => row.id !== id));
       },
       'Could not remove MCP server',

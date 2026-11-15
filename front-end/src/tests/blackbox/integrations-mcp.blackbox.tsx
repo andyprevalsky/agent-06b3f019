@@ -214,6 +214,37 @@ describe.each([false, true])('MCP servers (desktop=%s)', (roseDesktop) => {
     }
   });
 
+  it('a delayed first load never restores a server removed meanwhile', async () => {
+    let releaseList!: () => void;
+    const listGate = new Promise<void>((resolve) => {
+      releaseList = resolve;
+    });
+    server.use(
+      http.get(`${API_BASE}/integrations/mcp`, async () => {
+        await listGate;
+        return HttpResponse.json({ servers: [context7] });
+      }),
+      http.delete(
+        `${API_BASE}/integrations/mcp/mcp-1`,
+        () => new HttpResponse(null, { status: 204 }),
+      ),
+    );
+    captureConnect(() => HttpResponse.json({ server: context7 }, { status: 201 }));
+    renderWithProviders(<Integrations />, { roseDesktop });
+    const card = await section();
+    const user = userEvent.setup();
+    await user.type(card.getByLabelText('MCP server URL'), 'https://mcp.context7.com/mcp');
+    await user.click(card.getByRole('button', { name: 'Connect MCP server' }));
+    expect(await card.findByText('Connected · 2 tools')).toBeVisible();
+    await user.click(card.getByRole('button', { name: 'Remove Context7' }));
+    await waitFor(() => expect(card.queryByText('Connected · 2 tools')).toBeNull());
+    expect(card.getByText('Loading...')).toBeVisible();
+    releaseList();
+    // The first load has applied once the section leaves its loading state.
+    await waitFor(() => expect(card.queryByText('Loading...')).toBeNull());
+    expect(card.queryByText('Context7')).toBeNull();
+  });
+
   it('removes a server with ×', async () => {
     const deleted: string[] = [];
     server.use(

@@ -333,6 +333,8 @@ export async function completeMcpServerOAuth(userId: string, state: string, code
       ),
     };
   } catch (error) {
+    // The row was removed or re-signed meanwhile: report that, never relabel it.
+    if (error instanceof McpServerError) throw error;
     const failure = `Signed in, but listing tools failed: ${reason(error)}`;
     const next: McpConfig = { ...config, secret: sealed(secret) };
     delete next.oauth_state;

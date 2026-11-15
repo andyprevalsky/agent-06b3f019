@@ -25,6 +25,9 @@ export interface McpFixture {
   expiresIn: number;
   tokens: Set<string>;
   refreshes: number;
+  /** When set, the authorization-code exchange waits for it (after calling `onTokenRequest`). */
+  holdToken: Promise<void> | null;
+  onTokenRequest: (() => void) | null;
   close(): Promise<void>;
 }
 
@@ -64,6 +67,8 @@ export async function startMcpFixture(): Promise<McpFixture> {
     expiresIn: 3600,
     tokens: new Set(),
     refreshes: 0,
+    holdToken: null,
+    onTokenRequest: null,
     close: () => new Promise((resolve) => server?.close(() => resolve())),
   };
   const issue = () => {
@@ -116,6 +121,8 @@ export async function startMcpFixture(): Promise<McpFixture> {
       if (url.pathname === '/token' && req.method === 'POST') {
         const form = new URLSearchParams(await body(req));
         if (form.get('grant_type') === 'authorization_code') {
+          fixture.onTokenRequest?.();
+          if (fixture.holdToken) await fixture.holdToken;
           const pending = codes.get(form.get('code') ?? '');
           const verifier = form.get('code_verifier') ?? '';
           const digest = createHash('sha256').update(verifier).digest('base64url');

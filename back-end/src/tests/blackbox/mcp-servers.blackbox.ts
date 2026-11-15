@@ -36,6 +36,7 @@ import {
   listAgentMcpServers,
   listMcpServers,
   mcpAgentToolName,
+  McpServerError,
 } from '../../providers/mcp/servers';
 import {
   BASE_URL,
@@ -269,19 +270,38 @@ const tests: BlackboxTest[] = [
       }),
   },
   {
-    name: 'a server removed during OAuth completion is not recreated',
+    name: 'a server removed while its OAuth token exchange is in flight is not recreated',
     fn: () =>
       inProcess(async () => {
-        const begun = await connectMcpServer(userA, {
-          url: `${fixture.base}/oauth-mcp`,
-          redirectUri: REDIRECT,
-        });
+        const url = `${fixture.base}/oauth-mcp`;
+        const begun = await connectMcpServer(userA, { url, redirectUri: REDIRECT });
         const { code, state } = await signIn(begun.authorize_url!);
-        await deleteMcpServer(userA, begun.server.id);
-        const stale = await completeMcpServerOAuth(userA, state, code).catch((e: Error) => e);
-        assert(stale instanceof Error, 'completion of a removed server is refused');
-        const left = await prisma.integration.count({ where: { id: begun.server.id } });
-        assert(left === 0, 'the removed server stays removed');
+        let release!: () => void;
+        fixture.holdToken = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        const exchanging = new Promise<void>((resolve) => {
+          fixture.onTokenRequest = resolve;
+        });
+        try {
+          const completion = completeMcpServerOAuth(userA, state, code).catch((e: Error) => e);
+          await exchanging; // the token exchange has started and is paused
+          await deleteMcpServer(userA, begun.server.id);
+          release();
+          const stale = await completion;
+          assert(
+            stale instanceof McpServerError && stale.status === 409,
+            `completion of a removed server is refused with 409: ${String(stale)}`
+          );
+        } finally {
+          fixture.holdToken = null;
+          fixture.onTokenRequest = null;
+          release?.();
+        }
+        const left = await prisma.integration.count({
+          where: { userId: userA, name: 'mcp', accountId: url },
+        });
+        assert(left === 0, 'no row for this user and URL, under any id');
       }),
   },
   {
