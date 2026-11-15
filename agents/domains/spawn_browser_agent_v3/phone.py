@@ -16,8 +16,11 @@ PHONE_GUIDANCE = """Cloud iPhone skill (Phone Harness 0.3.2, Rose adaptation):
 Use phone for authorized tasks where the account's dedicated cloud iPhone helps,
 including authentication, OTPs, messages, and apps. Use mode=status to inspect
 ownership/last receipt without allocating, mode=operation to ensure/reuse the
-phone, and mode=release when finished. Observe with screen.text, act once, then
-verify. iPhone coordinates are screen points; focus a field before input.text.
+phone, and mode=release when finished. Observe with screen.text, act, then
+verify. To verify without another turn, follow the action with screen.text in the
+same response; calls run in order, stop at the first failure, and only reads run
+after a tap, launch, press, drag, scroll, key or Home action.
+iPhone coordinates are screen points; focus a field before input.text.
 Use only supported cloud operations; no CLI, local bridge, Android, or shell.
 In mode=operation, set operation to the wire name and args to its arguments:
 - screen.text: {"min_confidence": 0.3} returns visible text and tap centers.

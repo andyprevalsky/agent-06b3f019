@@ -10931,7 +10931,8 @@ async def _spawn_browser_agent_activity_v3_real(
                                             (_credential_binding(), auth_realm, instruction_state.get("delivered_user_instruction_count"), schema_user_instruction_count))
                 if navigation_policy.active:
                     await action_batch.discard("Replan navigation while policy restriction is active.")
-                queued_result = None if navigation_policy.active else await action_batch.next(dom_service, batch_state)
+                queued_result = None if navigation_policy.active else await action_batch.next(
+                    dom_service, batch_state, phone_before_decision)
                 browser_stream = action_batch.stream if queued_result is not None else BrowserThinkingStream(
                     agent_id=agent_id,
                     task_id=task_id,
