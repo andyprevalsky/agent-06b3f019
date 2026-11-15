@@ -6,7 +6,7 @@
  * sync bar.
  *
  *   CLIs        row "CLIs": one chip per CLI
- *     connected  → synced chip (+ its team-sharing caption when the backend lists it shareable)
+ *     connected  → synced chip + its team-sharing caption (AccountTeamShare)
  *     setting_up → syncing chip + the shared sync bar; chip action "Open setup"
  *                  focuses the setup agent
  *     failed     → error chip, its reason under the chips; chip action "Retry"
@@ -29,7 +29,7 @@ import { useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { Loader2, Terminal } from 'lucide-react';
 
 import { AccountTeamShare } from '@/components/teams/TeamSharing';
-import { useAccountShares } from '@/hooks/useTeams';
+import { useAccountShares, type AccountShareLookup } from '@/hooks/useTeams';
 import { openAgentInCurrentClient } from '@/lib/openAgent';
 import { integrationMatchesSearch } from '../hooks/integrationSearch';
 import { useCliIntegrations } from '../hooks/useCliIntegrations';
@@ -46,7 +46,6 @@ import { TOOL_ROW_ERROR_CLASSES, TOOL_ROW_INPUT_CLASSES } from './integrationCar
 
 type Cli = ReturnType<typeof useCliIntegrations>;
 type Mcp = ReturnType<typeof useMcpServers>;
-type ShareTargetLookup = ReturnType<typeof useAccountShares>['shareTarget'];
 
 const INPUT_CLASSES = TOOL_ROW_INPUT_CLASSES;
 const CANCEL_CLASSES = 'shrink-0 text-[12.5px] text-muted-foreground hover:text-foreground';
@@ -120,22 +119,26 @@ export function RowForm({
   );
 }
 
+/** Team-sharing caption for a connected CLI account the backend lists as shareable. */
+function shareCaption(shareTarget: AccountShareLookup, id: string) {
+  const target = shareTarget('cli', id);
+  return target && <AccountTeamShare {...target} />;
+}
+
 function cliAccount(
   row: Cli['integrations'][number],
   retry: (request: string) => void,
   submitting: boolean,
-  shareTarget: ShareTargetLookup,
+  shareTarget: AccountShareLookup,
 ): DesktopAccountView {
   const base = { provider: 'cli', accountId: row.id, label: row.name };
-  if (row.status === 'connected') {
-    const share = shareTarget('cli', row.id);
+  if (row.status === 'connected')
     return {
       ...base,
       tone: 'synced',
       title: 'Connected',
-      ...(share ? { share: <AccountTeamShare {...share} /> } : {}),
+      share: shareCaption(shareTarget, row.id),
     };
-  }
   if (row.status === 'setting_up')
     return {
       ...base,
