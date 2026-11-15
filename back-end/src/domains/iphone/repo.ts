@@ -282,5 +282,11 @@ export async function lockedDevice(tx: Transaction, userId: string) {
   const user = await tx.user.findUnique({ where: { userId } });
   const enabled = device.enabled && permitted(user);
   await reconcile(tx, device, enabled);
+  // Reconcile may end an expired lease's private phase; callers must see the committed envelope.
+  const { privateInputEncrypted } = await tx.iPhoneDevice.findUniqueOrThrow({
+    where: { id: device.id },
+    select: { privateInputEncrypted: true },
+  });
+  device.privateInputEncrypted = privateInputEncrypted;
   return { device, enabled };
 }
