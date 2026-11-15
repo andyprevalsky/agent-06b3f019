@@ -843,6 +843,10 @@ class FlyTest(Base):
         self.assertNotIn(('stage-finish', 'cooperative-cutover'), fake.factory)
 
     def test_resume_fly_resumes_same_job_then_migration_uses_token(self) -> None:
+        # 2026-10-26 and 2026-11-15 (job b17fd597): the resumed cutover died on KeyError: 'FLY_API_TOKEN',
+        # which lives only in agents/.env.
+        (self.root / 'agents').mkdir()
+        (self.root / 'agents' / '.env').write_text('FLY_API_TOKEN="fo1_SEKRIT_fly_0005"\n')
         fake = Fake(self.root, ['agents/tools/c.py'], handler=self.handler(['FAILED', 'SUCCEEDED']))
         self.assertEqual(self.main(fake, '--lanes', 'fly,workflow-migration', '--resume-fly'), 1)  # semantic not selected
         lanes = self.report()['lanes']
@@ -852,6 +856,8 @@ class FlyTest(Base):
         resume_argv, resume_cwd, resume_env = fake.runs[1]
         self.assertEqual((resume_argv, resume_cwd), (dp.resume_argv(self.JOB), self.root / 'back-end'))
         self.assertEqual(resume_env['DATABASE_URL'], SECRETS['DATABASE_URL'])  # `source back-end/.env`
+        self.assertEqual(resume_env['FLY_API_TOKEN'], 'fo1_SEKRIT_fly_0005')
+        self.assertNotIn('fo1_SEKRIT_fly_0005', json.dumps(self.report()))
         _argv, cwd, env = fake.runs[3]
         self.assertEqual(cwd, self.root / 'back-end')
         self.assertEqual({k: env[k] for k in dp.migration_env(SHA, '')}, {
@@ -859,6 +865,23 @@ class FlyTest(Base):
             'TEMPORAL_WORKER_BUILD_ID': SHA, 'TEMPORAL_WORKER_DEPLOYMENT_TOKEN': '123-2'})
         self.assertIn(('stage-finish', 'cooperative-cutover'), fake.factory)
         self.assertEqual(lanes['semantic']['status'], dp.NOT_SELECTED)
+
+    def test_resume_fly_exported_fly_token_beats_agents_env(self) -> None:
+        (self.root / 'agents').mkdir()
+        (self.root / 'agents' / '.env').write_text('FLY_API_TOKEN="fo1_SEKRIT_stale_0006"\n')
+        fake = Fake(self.root, ['agents/tools/c.py'], handler=self.handler(['FAILED', 'SUCCEEDED']))
+        self.main(fake, '--lanes', 'fly', '--resume-fly', environ={'FLY_API_TOKEN': 'fo1_SEKRIT_exported_0007'})
+        self.assertEqual(fake.kinds()[:2], ['production', 'worker-deployment-queue.ts'])
+        self.assertEqual(fake.runs[1][2]['FLY_API_TOKEN'], 'fo1_SEKRIT_exported_0007')
+
+    def test_resume_fly_without_fly_token_fails_actionably_before_resuming(self) -> None:
+        fake = Fake(self.root, ['agents/tools/c.py'], handler=self.handler(['FAILED']))
+        self.assertEqual(self.main(fake, '--lanes', 'fly', '--resume-fly'), 1)
+        lanes = self.report()['lanes']
+        self.assertEqual(lanes['fly']['status'], dp.FAIL)
+        self.assertIn('FLY_API_TOKEN', lanes['fly']['reason'])
+        self.assertIn('agents/.env', lanes['fly']['reason'])
+        self.assertEqual(fake.kinds(), ['production'])
 
     def test_existing_process_mode_is_refused(self) -> None:
         fake = Fake(self.root, ['agents/tools/c.py'])
@@ -1279,6 +1302,24 @@ class OtherLanesTest(Base):
         fake = Fake(self.root, [])
         self.assertEqual(dp.lane_semantic(self.ctx(fake)), (True, 'chat-lifecycle-ratchet run 55 success', 0))
         self.assertEqual(fake.kinds(), ['production-semantic'])
+        exact = dp.lane_semantic(self.ctx(Fake(self.root, [])))[1]
+        self.assertNotIsInstance(exact, dp.Descendant)  # the exact binding stays an exact-SHA PASS
+        # Spec/live skew (run 43681354141): the live frontend served a strict descendant, whose specs ran.
+        live = 'd' * 40
+        self.write_production(status='passed', semantic={'run_id': '56', 'source_sha': live, 'binding': {
+            'kind': 'verified-by-descendant', 'live_frontend_commit': live, 'build_id': f'{live[:12]}-mw'}})
+        passed, reason, code = dp.lane_semantic(self.ctx(Fake(self.root, [])))
+        self.assertEqual((passed, code), (True, 0))
+        self.assertIsInstance(reason, dp.Descendant)
+        self.assertEqual(reason, f'verified by descendant {live}: chat-lifecycle-ratchet run 56 success with the specs '
+                                 f'of live frontend {live[:12]} (a descendant of {SHA[:12]})')
+        self.write_production(status='passed', semantic={'run_id': '57', 'source_sha': SHA, 'binding': {
+            'kind': 'verified-by-descendant', 'live_frontend_commit': live}})
+        self.assertEqual(dp.lane_semantic(self.ctx(Fake(self.root, []))), (False, (
+            f'production-semantic recorded a descendant binding to {live[:12]} but run 57 tested {SHA[:12]}; the '
+            'binding is unverified'), 1))
+        failed = Fake(self.root, [], handler=lambda argv, cwd, env, on_line: 1)
+        self.assertEqual(dp.lane_semantic(self.ctx(failed)), (False, 'production-semantic exited 1 (run 57)', 1))
 
     def test_agentcard_and_wmh_use_agents_venv(self) -> None:
         fake = Fake(self.root, [])
@@ -1297,6 +1338,25 @@ class OtherLanesTest(Base):
         ctx.plan = dp.plan_lanes(['agents/requirements-world-model.txt'], [], NO_MAC)
         self.assertFalse(dp.lane_wmh(ctx)[0])
         self.assertEqual(fake.kinds(), ['--build-wmh'])
+
+    def test_wmh_detached_failing_sim_cannot_pass(self) -> None:
+        # Model scripts/run-bench-fleet: without --wait the launcher detaches and exits 0 at launch while the
+        # controller later writes its real status (1 = the SIM's CHILDFAIL); --wait returns that status.
+        controller_status = 1
+
+        def run_bench(argv, cwd, env, on_line):
+            if 'raise-5m-rose-labs-brex' not in argv:
+                return 0
+            on_line('🛰️  fleet controller detached (own session; survives launcher exit)')
+            return controller_status if '--wait' in argv else 0
+        fake = Fake(self.root, [], handler=run_bench)
+        ctx = self.ctx(fake)
+        ctx.plan = dp.plan_lanes(['agents/benchmarks/world_model_harness.py'], [], NO_MAC)
+        self.assertFalse(ctx.plan['wmh'].build_wmh)
+        self.assertEqual(dp.lane_wmh(ctx), (False, 'run-bench raise-5m-rose-labs-brex --sim-on exited 1', 1))
+        controller_status = 0
+        self.assertEqual(dp.lane_wmh(ctx), (True, 'raise-5m-rose-labs-brex SIM passed', 0))
+        self.assertIn('--wait', dp.planned_commands('wmh', ctx)[-1])
 
     def test_mac_release_binds_exact_sha_after_merge(self) -> None:
         polls = [[{'databaseId': 1, 'headSha': SHA, 'createdAt': '2026-11-05T17:59:59Z'},

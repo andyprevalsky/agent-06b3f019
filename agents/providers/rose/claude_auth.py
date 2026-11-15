@@ -314,6 +314,11 @@ def _build_system_blocks(static_system: Optional[str], dynamic_system: Optional[
 
 
 DEFAULT_REASONING_EFFORT = "xhigh"
+# Our "max" sentinel is sent only by the planner (fixed 220s rose.complete
+# deadline): the highest tier that reliably finishes a long-horizon plan inside
+# it. On the raise-5m planner request Opus 5.5 emitted nothing for 120s (TTFT)
+# at xhigh and finished in 83s at high.
+MAX_SENTINEL_REASONING_EFFORT = "high"
 
 
 def _normalize_reasoning_effort(effort: Optional[str]) -> str:
@@ -321,9 +326,8 @@ def _normalize_reasoning_effort(effort: Optional[str]) -> str:
 
     Anthropic accepts low / medium / high / xhigh / max for output_config.effort.
     The literal "max" value is accepted by the API but causes the response stream
-    to hang without emitting a first chunk (~160s, then TTFT timeout). xhigh is
-    the highest reliably-streaming level — mirror gpt_auth which also routes
-    our "max" sentinel to "xhigh" as the de-facto top tier.
+    to hang without emitting a first chunk (~160s, then TTFT timeout). Our "max"
+    sentinel maps to MAX_SENTINEL_REASONING_EFFORT (the planner's deadline-fit tier).
 
     "minimal" is an OpenAI chat sentinel; Anthropic rejects it — map to "low".
 
@@ -333,7 +337,7 @@ def _normalize_reasoning_effort(effort: Optional[str]) -> str:
     if effort == "minimal":
         return "low"
     if effort == "max":
-        return "xhigh"
+        return MAX_SENTINEL_REASONING_EFFORT
     return effort or DEFAULT_REASONING_EFFORT
 
 
@@ -483,7 +487,7 @@ def build_anthropic_body(
     _enforce_cache_control_cap(body)
 
     # Stamp output_config.effort when the model accepts it (default xhigh;
-    # planner_llm still passes "max" → xhigh). Haiku rejects effort — omit
+    # the planner's "max" sentinel → MAX_SENTINEL_REASONING_EFFORT). Haiku rejects effort — omit
     # rather than 400 every rose-1-mini claudeAuth call (see helper docstring).
     if _model_supports_output_config_effort(pool_spec.claude_auth_model):
         oc = body.get("output_config") or {}

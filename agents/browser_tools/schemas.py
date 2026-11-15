@@ -495,6 +495,23 @@ class AttemptCompletionBrowserTool(BaseModel):
     tool: Literal["attempt_completion"]
 
 
+# Phone wire operations that may share one model response with other calls.
+# Every agent call advances the lease cursor; batch fences use the receipt
+# cursor. Navigation changes the screen, so only reads may follow it. Setup, release, credential, message and unlisted
+# operations always require their own model turn.
+PHONE_READ_OPERATIONS = frozenset({"screen.text", "screen.bounds", "apps.list"})
+PHONE_NAVIGATION_OPERATIONS = frozenset({
+    "input.tap", "input.press", "input.drag", "input.scroll", "input.keys",
+    "apps.launch", "nav.home",
+})
+PHONE_BATCHABLE_OPERATIONS = PHONE_READ_OPERATIONS | PHONE_NAVIGATION_OPERATIONS | {"input.text"}
+
+
+def phone_call_batchable(params: Dict[str, Any]) -> bool:
+    return params.get("mode") == "status" or (
+        params.get("mode") == "operation" and params.get("operation") in PHONE_BATCHABLE_OPERATIONS)
+
+
 class PhoneBrowserTool(BaseModel):
     """Operate the account's dedicated cloud iPhone through Rose."""
     model_config = {"extra": "forbid"}

@@ -43,7 +43,6 @@ const stubs: Record<string, unknown> = {
   './writeLockBody': {},
   '../smsDeliveryContract': { SMS_MAX_BODY_CHARACTERS },
   './emoji': { isEmojiOnlyMessage },
-  '../messagingAgentInteraction': { recordMessagingAgentInteraction: async () => {} },
   './notificationCards': {
     deliverNotificationCard: async () => {},
     approvalNotificationContent: () => {
