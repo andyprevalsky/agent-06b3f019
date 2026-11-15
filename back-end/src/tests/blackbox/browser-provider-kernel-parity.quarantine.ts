@@ -7,7 +7,7 @@ export const quarantinedKernelParity = (fn: () => Promise<void>) => {
   return quarantine(
     {
       since: '2026-11-15',
-      repair: 'pending-handoff:4294219ff58f44ac8d3be09cc4e4afee',
+      repair: 'https://boxes.dev/thread/ph7af24jetqdjbjrdfqhnf9f6x8j8mqc',
       error:
         'FAIL live Kernel provider parity: /rotate-proxy 500: {"error":"page.goto: Timeout 30000ms exceeded.',
       evidence:

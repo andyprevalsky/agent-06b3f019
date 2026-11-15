@@ -21,12 +21,14 @@ tags:
   - rose-1-mini
 sources:
   - PR #2210
+  - PR #2250
+  - commit 33ef570dae578831f563f9e2e446ebe73afec0fc
   - commit 8e74738f13adfe9a5db1c61cd673dd8c3dd69b73
   - agent 1772a64a-c22a-5cf7-9184-17508eda5df6
   - agent 1772a64a lease 45543f2e-e77c-4470-b258-4c19dc135226
   - agent 1772a64a lease 7c1dd8c6-b81e-4bcc-908b-15f76b23d1ed
 repro: back-end/src/tests/blackbox/iphone-control.setup-verifier-replay.cases.ts "live setup verifier: recorded proof screens and controls"
-status: open
+status: fixed
 ---
 
 ## Problem
@@ -59,13 +61,13 @@ Shipped: PR #2210, merged 8e74738f13 on 2026-11-15. Production lanes PASS: Rende
 - receive_address was a FALSE CONFIRM from the FaceTime settings page ("You can be reached by FaceTime at … Caller ID"). The #2210 checkmark-glyph rule let FaceTime checkmarks read as iMessage receive selection. imessage on the same page was unknown in prod, but confirmed 2/3 in replay.
 - Exact replay of that request on #2210's prompt: receive_address confirmed 3/3.
 
-Follow-up fix (this PR):
+Follow-up fix: PR #2250, merged 33ef570dae on 2026-11-15. Production PASS: Render live, backend probes, semantic (descendant e7b9f9ef). Backend only, so no Fly cutover, per the coordinator's hold during the live owner setup.
 - receive_address needs the phone checkmark inside the You Can Receive iMessages to and Reply From list. Start New Conversations From, FaceTime and Caller ID checkmarks do not count, and a FaceTime screen is never Send and Receive.
 - imessage: a FaceTime screen never proves iMessage, and an Apple Account line naming another identity is disabled.
 - Regressions use the real FaceTime page (as receive_address and as imessage) and the real Saved to iCloud page: messages and keychain confirm, contacts stays unproven without a Contacts row.
 - The replay case fails 3/3 runs on #2210's prompt and passes 10/10 consecutive runs after.
 
-Remaining for ready, none of them a verifier defect: device_passcode is disabled (no passcode set); imessage needs the real Send & Receive screen; icloud_contacts needs See All under Saved to iCloud. The agent-guidance wording for the last two is held until the coordinator allows a Fly cutover after the live setup. The progress reset across leases (finding 3) shipped separately in PR #2225. The Fly cutover was delayed by an unrelated drain wedge: agent 8789a5df, continuation payload TMPRL1103, RCA thread ph7dv1m8q2ye99cdta8n3q7g3s8j92q4.
+Remaining for ready, none of them a verifier defect: device_passcode is disabled (no passcode set); imessage needs the real Send & Receive screen; icloud_contacts needs See All under Saved to iCloud. The agent-guidance wording for the last two is held as draft PR #2262. The coordinator will batch it into thread ph78393fcn3's single Fly cutover once the live setup is done. The progress reset across leases (finding 3) shipped separately in PR #2225. The Fly cutover was delayed by an unrelated drain wedge: agent 8789a5df, continuation payload TMPRL1103, RCA thread ph7dv1m8q2ye99cdta8n3q7g3s8j92q4.
 
 ## Human feedback
 
