@@ -22,6 +22,8 @@ sources:
   - commit b544c29434ccbb5075952850b7701ffec14545c9
   - commit b5d81c3e240c1349439c99dab00c3ea77631e76c
   - PR #1921
+  - PR #1992
+  - commit 2af91a1ada2089205587f5cb78597962e7c7af4a
   - commit b380b1eae733dec70c4409d6ce9aa658ffe4f587
   - task .context/deploy-runs/main705-b5d81c3e2-qualification-20261016/A-FAILURE-RECEIPT.json
   - task .context/test-runs/fleet-proof-test_signal_waits_for_owned_producer_before_recovery-97jeu3ju/fixture/output.log
@@ -214,7 +216,7 @@ cancel.request check before launch and by repeated forwarding afterwards.
 The trapped top-level controller's forward_proof_cancellation, which runs every
 0.1 seconds, reads cancel.request and active-waiter.owner with builtins for
 the same reason.
-The quarantine marker on the original test was removed.
+The quarantine marker on the original test was removed (main independently released it at its 5-pass streak in dab14eab09). Shipped in PR #1992, merged 2af91a1ada on 2026-11-15; its final deploy round passed all 17 gates on 1f68ad81b, and production semantic verification passed (run 43677075875).
 
 ## Human feedback
 
