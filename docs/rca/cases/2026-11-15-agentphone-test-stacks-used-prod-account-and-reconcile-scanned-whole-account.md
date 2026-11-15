@@ -21,8 +21,9 @@ tags:
   - production-account
 sources:
   - PR #2023 gate (thread ph737139114cwdz355mzrgya098j4tmk), 2026-11-15 02:11:37Z and 02:13:37Z
+  - PR #2132 (merge 987f2b25a0)
 repro: back-end/src/tests/blackbox/agentphone-recovery-scan-bound.blackbox.ts
-status: open
+status: fixed
 ---
 
 ## Problem
@@ -98,6 +99,8 @@ number gets 409 and the user continues email-only.
 10k-agent behavior: the uncertain-create and recovery lookups read only the agents
 created since the uncertain attempt (one page in practice), independent of account
 size. The 10k bound remains a fail-closed backstop. Prod on 2026-11-15 had 5 legacy recovery markers, all on identities created on or after 2026-09-04; almost every account agent predates that.
+
+Shipped in PR #2132 (merge 987f2b25a0, 2026-11-15). Production: Render was live through descendant 1a05bfd85, the backend probes passed, and the semantic lane failed on teams-flow.spec.ts:321 (NOT_INTRODUCED; the same failure appeared in other deploys' runs on the same main head). The original failing command (`BROWSER_PROVIDER_LIVE=1 BLACKBOX_TEST_CONCURRENCY=1 bash scripts/run-blackbox-tests.sh browser-provider`) passed on the merge at 04:58Z: `live Tilion provider parity` PASS (sessions=4), and the backend logged `AGENTPHONE_API_KEY missing; agent phone creation skipped`, so the test did not touch the prod account.
 
 ## Human feedback
 
