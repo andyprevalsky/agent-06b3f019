@@ -20,7 +20,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
-import time
+import threading
 import unittest
 from unittest import mock
 from contextlib import redirect_stderr, redirect_stdout
@@ -269,7 +269,9 @@ class EvidenceArchive(unittest.TestCase):
 
         def hung(seconds, *args):
             if args[:2] == ("ssh", "console"):
-                time.sleep(10)
+                # A hung SSH call: block until the helper's SIGALRM capture deadline interrupts it.
+                # Bounded, so a missing deadline fails the assertions below instead of hanging.
+                threading.Event().wait(30)
             return real(seconds, *args)
 
         self.fly.flyctl = hung
