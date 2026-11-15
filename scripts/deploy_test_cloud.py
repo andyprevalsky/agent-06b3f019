@@ -109,6 +109,10 @@ def collect_fleet(request, root, fleet, started, native_exit):
             # Hash before any verdict: an unreadable record must stay UNVERIFIED, never a bare PASS.
             details[name] = {'native_task': {k: task.get(k) for k in ('name','status','benchmark_status','passed','failure_reason','agent_id')}, 'path': str(child),
                              'sha256': hashlib.sha256(child.read_bytes()).hexdigest()}
+            # The task's own owned cleanup confirmed the standing AgentCard release stall on its card.
+            warnings = (((task.get('logs') or {}).get('cloud_cleanup_evidence') or {}).get('warnings') or [])
+            details[name]['native_task']['release_stall_cleanup'] = any(
+                isinstance(w, str) and w.startswith(RELEASE_STALL_CLEANUP_WARNING) for w in warnings)
             if task.get('passed') is True and outcome == 'PASSED':
                 cases[name] = 'PASS'
             elif task.get('passed') is False and outcome in {'FAILED', 'ERROR', 'INFRA_ERROR', 'SKIPPED'}:
@@ -310,15 +314,22 @@ def capacity_admission_env(now, environ=os.environ):
 # Native outcomes of an ordinary task failure. SKIPPED (compute-token exhaustion, the AgentCard release
 # stall) and INFRA_ERROR are classified by the cycle's resource/external-provider /RCA paths; never rerun.
 RERUN_OUTCOMES = frozenset({'FAILED', 'ERROR'})
+# run_benchmark's owned-cleanup warning once the exact AgentCard release stall is proven on a task's card.
+RELEASE_STALL_CLEANUP_WARNING = "payment: AgentCard never released the closed card's org transfer"
 
 
 def rerun_candidates(cases, details, quarantines):
-    """Verified non-quarantined task failures eligible for the single same-source rerun."""
+    """Verified non-quarantined task failures eligible for the single same-source rerun.
+
+    A failed AgentCard lifecycle task whose own owned cleanup confirmed the release stall is never
+    rerun: a rerun mints a new card after a confirmed stall (deploy.md). Its native FAIL stays the
+    complete, triageable case."""
     out = []
     for name, verdict in cases.items():
         task = (details.get(name) or {}).get('native_task') or {}
         outcome = str(task.get('benchmark_status') or task.get('status') or '').upper()
-        if verdict == 'FAIL' and name not in quarantines and outcome in RERUN_OUTCOMES:
+        if (verdict == 'FAIL' and name not in quarantines and outcome in RERUN_OUTCOMES
+                and task.get('release_stall_cleanup') is not True):
             out.append(name)
     return out
 

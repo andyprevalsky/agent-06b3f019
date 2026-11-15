@@ -691,6 +691,23 @@ class Cloud(unittest.TestCase):
         self.assertEqual(1,len(state['attempts']))
         self.assertEqual({'smoke/failing'},set(state['skips']))
 
+    def test_owned_cleanup_release_stall_warning_marks_the_native_failure(self):
+        """The collector reads the task's own owned-cleanup evidence: the confirmed AgentCard release
+        stall flags the native failure so the single rerun never mints a new card for it."""
+        path=self.fleet/'failing/cloudbench-run.json';document=cycle.read(path)
+        task=document['tasks'][0]
+        task.update(benchmark_status='FAILED',status='PAUSED',failure_reason='Timeout after 901s (task timeout=900s)')
+        task['logs']={'cloud_cleanup_evidence':{'errors':[],'warnings':[
+            "payment: AgentCard never released the closed card's org transfer (consumed, releasedCents=0); "
+            "skipped under the standing user-approved warning policy"]}}
+        cycle.write(path,document)
+        _,details,_,_=self.collect()
+        self.assertIs(details['failing']['native_task']['release_stall_cleanup'],True)
+        task['logs']['cloud_cleanup_evidence']['warnings']=['archive: TimeoutError']
+        cycle.write(path,document)
+        _,details,_,_=self.collect()
+        self.assertIs(details['failing']['native_task']['release_stall_cleanup'],False)
+
     def test_missing_child_is_unknown_not_a_waivable_aggregate(self):
         (self.fleet/'failing/cloudbench-run.json').unlink()
         cases,_,_,_=self.collect()
@@ -867,6 +884,22 @@ class Cloud(unittest.TestCase):
         self.assertEqual([('failing','smoke/failing')],[(o['unit'],o['check']) for o,_ in opened])
         import deploy_test_quarantine as quarantine
         self.assertIn('lack /RCA attribution',quarantine.attribution_block(state['flaky']))  # merge refuses
+
+    def test_failed_agentcard_task_with_cleanup_confirmed_stall_is_never_rerun(self):
+        """Regression (PR #2005 smoke rounds 2-3, 2026-11-13): a failed AgentCard lifecycle task whose
+        own cleanup confirmed the release stall was rerun, and the rerun mints a new card after a
+        confirmed stall (deploy.md). Stopping that rerun voided the whole receipt. It is now never a
+        rerun candidate; its native FAIL stays the complete, triageable case."""
+        first=self.campaign({'passing':'PASS','failing':'FAIL'})
+        first[1]['failing']['native_task']['release_stall_cleanup']=True
+        result,launch,collect,rows,out=self.run_smoke([first])
+        self.assertEqual(1,launch.call_count)  # no rerun, no new card
+        self.assertEqual(1,collect.call_count)
+        self.assertEqual({'passing':'PASS','failing':'FAIL'},result['cases'])
+        self.assertTrue(result['complete'])
+        self.assertIsNone(result.get('rerun'))
+        self.assertNotIn('TEST_FLAKY',out)
+        # An ordinary failure is still rerun once: test_failed_smoke_task_passing_its_single_rerun_is_flaky...
 
     def test_failed_smoke_task_failing_its_rerun_fails_and_is_never_run_a_third_time(self):
         result,launch,_,rows,out=self.run_smoke([self.campaign({'passing':'PASS','failing':'FAIL'}),
