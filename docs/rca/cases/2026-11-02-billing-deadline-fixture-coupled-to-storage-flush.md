@@ -27,6 +27,7 @@ sources:
   - agent thr_edb51868b4634dc5ba02d1176d0d1bcc
   - PR #1967 gate round 3 deploy occurrence d2ae5979abb44f298a9f22fd46f36b2e (failed source f8ca329701607c1008663604a5758f5baffae1ff)
   - commit a2d48bbf18bc676c7df062ef7ab75cd24e2507cb (repair base, branch fix/billing-metadata-deadline-flake)
+  - PR #2131 recurrence repair, merged 06fe83006be2951bb0fd2cbd7462af48c183b2dd (gates 15/15, smoke 11/11, production semantic PASS)
 repro: python3 scripts/tests/cloudbench-bootstrap-recovery.test.py BillingStopRetainTests
 status: fixed
 ---
