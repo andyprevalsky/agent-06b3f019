@@ -104,6 +104,13 @@ def _validate_required_turn_tool(result: Any, required_tool: Optional[str]) -> N
 # Check credits every N iterations
 CREDIT_CHECK_INTERVAL = 5
 
+# Serialized-context byte budget that also triggers compaction. The context
+# rides every continue_as_new (generation handoff, pause, overflow) and the
+# compactor activity input, both capped by Temporal's 2 MiB payload limit. A
+# JSON-heavy context can cross that far below the token trigger (prod 8789a5df:
+# ~191k tokens, 2,124,477 bytes), wedging its handoff and the cutover drain.
+CONTEXT_PAYLOAD_COMPACTION_BYTES = 1_200_000
+
 # Buffer-based compaction trigger (mirrors Claude Code's autoCompact.ts).
 # Reserve room for output + a safety buffer before the model's hard limit, so
 # the next LLM call still fits inside the window even after the trigger fires.
@@ -997,8 +1004,12 @@ async def run_agent(
             agent_type="explore" if cache_call_site == "explore_agent" else None,
         ):
             context_tokens = _estimate_tokens(context)
+            context_bytes = _context_payload_bytes(context)
+        over_compaction_trigger = (
+            context_tokens >= compaction_trigger or context_bytes >= CONTEXT_PAYLOAD_COMPACTION_BYTES
+        )
 
-        if context_tokens >= compaction_trigger and compactor_failures >= MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES:
+        if over_compaction_trigger and compactor_failures >= MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES:
             # Breaker open while the context is still over the trigger. Falling
             # through would send an over-window context to the model on every
             # remaining iteration and fail with a provider-side length error
@@ -1006,11 +1017,13 @@ async def run_agent(
             message = (
                 "Context compression unavailable: compactor failed "
                 f"{compactor_failures} consecutive times and the context estimate "
-                f"{context_tokens} tokens still exceeds trigger {compaction_trigger}."
+                f"{context_tokens} tokens ({context_bytes} bytes) still exceeds trigger "
+                f"{compaction_trigger} tokens / {CONTEXT_PAYLOAD_COMPACTION_BYTES} bytes."
             )
             logger.error(
                 "Compactor circuit breaker open with context still over trigger",
                 context_tokens=context_tokens,
+                context_bytes=context_bytes,
                 trigger=compaction_trigger,
                 compactor_failures=compactor_failures,
             )
@@ -1026,10 +1039,12 @@ async def run_agent(
                 "message": message,
             }
 
-        if context_tokens >= compaction_trigger and compactor_failures < MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES:
+        if over_compaction_trigger and compactor_failures < MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES:
             logger.info(
                 "Context overflow",
                 context_tokens=context_tokens,
+                context_bytes=context_bytes,
+                byte_trigger=CONTEXT_PAYLOAD_COMPACTION_BYTES,
                 trigger=compaction_trigger,
                 effective_window=effective_window,
             )
@@ -1068,10 +1083,12 @@ async def run_agent(
                 # direction — it just now sees the real number.
                 saved_ratio = compaction_saved_ratio(context_tokens, compressed_tokens)
 
-                if compressed_tokens >= compaction_trigger:
+                compressed_bytes = _context_payload_bytes(compressed)
+                if compressed_tokens >= compaction_trigger or compressed_bytes >= CONTEXT_PAYLOAD_COMPACTION_BYTES:
                     message = (
                         "Context compression ineffective: compressed context estimate "
-                        f"{compressed_tokens} tokens still exceeds trigger {compaction_trigger} "
+                        f"{compressed_tokens} tokens ({compressed_bytes} bytes) still exceeds trigger "
+                        f"{compaction_trigger} tokens / {CONTEXT_PAYLOAD_COMPACTION_BYTES} bytes "
                         f"(original estimate {context_tokens})."
                     )
                     logger.error(
@@ -2853,6 +2870,11 @@ def _estimate_tokens(context: List[Dict]) -> int:
     reported as <80k); ESTIMATE_SAFETY_MULTIPLIER pads for that.
     """
     return estimate_context_tokens(context)
+
+
+def _context_payload_bytes(context: List[Dict]) -> int:
+    """Serialized size of ``context`` as continue_as_new carries it (same encoding as the workflow's check)."""
+    return len(json.dumps(context, default=str))
 
 
 async def _compress_context(

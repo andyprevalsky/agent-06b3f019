@@ -3253,6 +3253,75 @@ async def test_run_agent_errors_when_compaction_still_over_trigger():
     assert result["context"] == initial_context
 
 
+async def test_run_agent_compacts_context_over_continuation_payload_budget():
+    """A context under the token trigger but over the byte budget must still compact.
+
+    Prod 8789a5df (2026-11-15): a rose-1-ultra agent at ~191k tokens (far below
+    its window's trigger) carried 2,124,477 bytes of JSON-heavy tool results.
+    Its generation-handoff continue_as_new exceeded Temporal's 2 MiB payload
+    limit (TMPRL1103), every workflow task retry failed, the old queue never
+    retired and every agents/ cutover drain wedged. Compaction must keep the
+    serialized context under CONTEXT_PAYLOAD_COMPACTION_BYTES.
+    """
+    import loop.run_agent as run_mod
+
+    class ContinuedAsNew(Exception):
+        pass
+
+    async def system_prompt():
+        return "System prompt"
+
+    async def verifier_prompt():
+        return "Verifier prompt"
+
+    compressed = [{"role": "USER", "text": "summary", "timestamp": "2024-01-01T00:00:00Z"}]
+
+    async def fake_compress_context(**kwargs):
+        return compressed, True
+
+    overflowed = []
+
+    async def on_context_overflow(new_context):
+        overflowed.append(new_context)
+        raise ContinuedAsNew()
+
+    async def fail_llm(**kwargs):
+        raise AssertionError("LLM must not be called with a context over the payload budget")
+
+    initial_context = [{"role": "TOOL", "text": "r" * 3_000, "timestamp": "2024-01-01T00:00:00Z"}]
+    compressor = AsyncMock(side_effect=fake_compress_context)
+    with (
+        patch.object(run_mod, "CONTEXT_PAYLOAD_COMPACTION_BYTES", 2_000),
+        patch.object(run_mod, "_compress_context", new=compressor),
+        patch.object(run_mod, "call_llm_structured_streaming", new=AsyncMock(side_effect=fail_llm)),
+    ):
+        assert run_mod._estimate_tokens(initial_context) < run_mod.compaction_trigger_tokens(1_000_000)
+        try:
+            await run_mod.run_agent(
+                agent_id="agent-test",
+                user_id="user-test",
+                system_prompt=system_prompt,
+                verifier_prompt_generator=verifier_prompt,
+                model="rose-labs/rose-1-flash",
+                tools=["attempt_completion"],
+                initial_context=initial_context,
+                is_inside_temporal_activity=True,
+                build_messages=lambda context, prompt: [{"role": "system", "content": prompt}],
+                max_iterations=1,
+                max_context_tokens=1_000_000,
+                skip_verification=True,
+                skip_status_updates=True,
+                on_context_overflow=on_context_overflow,
+            )
+        except ContinuedAsNew:
+            pass
+        else:
+            raise AssertionError("run_agent must continue_as_new with the compacted context")
+
+    compressor.assert_awaited_once()
+    assert overflowed == [compressed]
+
+
 async def test_run_agent_errors_when_compactor_breaker_open_over_trigger():
     """An open compactor circuit breaker must fail loudly, not send an oversized context.
 
