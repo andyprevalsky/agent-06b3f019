@@ -225,7 +225,7 @@ def replay_transient(call, attempts=TRANSIENT_ATTEMPTS):
 # refreshing our own lease long before its TTL can lapse.
 STOPPED_WAIT_SECONDS = 20
 STOPPED_WAIT_DEADLINE_SECONDS = 900
-LEASE_TTL_SECONDS = 500
+LEASE_TTL_SECONDS = 500  # the TTL lease() acquires
 LEASE_REFRESH_AFTER_SECONDS = 240
 
 
@@ -296,9 +296,9 @@ class Fly:
 
     @contextmanager
     def lease(self):
-        self.nonce = self.request(
-            "POST", "/lease", {"ttl": LEASE_TTL_SECONDS, "description": "cooperative-worker-pool"}
-        )["data"]["nonce"]
+        self.nonce = self.request("POST", "/lease", {"ttl": 500, "description": "cooperative-worker-pool"})["data"][
+            "nonce"
+        ]
         self.leased_at = monotonic()
         try:
             yield
