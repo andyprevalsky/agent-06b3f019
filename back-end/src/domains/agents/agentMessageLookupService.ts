@@ -32,9 +32,17 @@ export async function getMessagesBatch(ids: unknown, userId: string) {
 // Generate response schema
 // ---------------------------------------------------------------------------
 
-/** Generate response schema for a goal (used by browser agent). */
-export async function generateSchema(goal: string, directAuth?: ResponseSchemaDirectAuth) {
-  return generateResponseSchema(goal, { directAuth });
+/**
+ * Generate response schema for a goal (used by browser agent). The call is
+ * archived under the caller's per-user root `user-<userId>`; an internal call
+ * without a user is refused by the archive writer (logged, never misfiled).
+ */
+export async function generateSchema(
+  goal: string,
+  directAuth?: ResponseSchemaDirectAuth,
+  userId?: string | null
+) {
+  return generateResponseSchema(goal, { directAuth, archive: { archive_scope: { userId } } });
 }
 
 // ---------------------------------------------------------------------------

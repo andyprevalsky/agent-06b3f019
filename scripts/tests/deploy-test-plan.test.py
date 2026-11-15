@@ -16,6 +16,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'lib'))
 from test_quarantine import quarantine  # scripts/lib; before deploy_test_plan imports scripts/test_quarantine.py
 import deploy_test_plan as p
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from proc_scan_scope import own_process_entries, unrelated_unreadable_process
 
 
 class Selection(unittest.TestCase):
@@ -1171,6 +1173,9 @@ class InterruptedProcessObservation(unittest.TestCase):
     re-observed a bounded number of times, skipped once the process is gone and refused, naming the pid, only while
     it stays unreadable and alive. A genuinely held namespace is still refused. The real Linux process is the
     fixture: a child that clears PR_SET_DUMPABLE is unreadable to its same-uid parent exactly like an exiting one.
+    The scan population is this test process's own tree (proc_scan_scope): an unrelated host process that is
+    exiting or sealed is outside every fixture, and on a busy runner it added re-observation sleeps
+    (FLAKY 7a087289ad244447887849683a096b6e) or refusals that no fixture here owns.
     """
     CHILD = """
 import ctypes, os, sys
@@ -1187,7 +1192,12 @@ for line in sys.stdin:
 
     def setUp(self):
         import deploy_test_interrupted_cleanup as m
+        import deploy_test_process
         self.m = m
+        self.production_process_entries = deploy_test_process.process_entries
+        hermetic = patch.object(deploy_test_process, 'process_entries', own_process_entries)
+        hermetic.start()
+        self.addCleanup(hermetic.stop)
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.namespace = Path(self.tmp.name) / 'old-namespace'
@@ -1283,6 +1293,16 @@ for line in sys.stdin:
                     self.scan()
                 self.reap(child)
 
+    @unittest.skipUnless(sys.platform.startswith('linux'), 'Linux /proc dumpable semantics')
+    def test_unrelated_unreadable_host_process_is_outside_the_fixture_scan(self):
+        # FLAKY 7a087289ad244447887849683a096b6e (PR #1928, Blacksmith): an unrelated same-user process that was
+        # unreadable mid-scan made the whole-host scan re-observe it, so a fixture scan recorded a sleep it did not own.
+        with unrelated_unreadable_process() as pid:
+            self.assertIn(pid, {int(entry.name) for entry in self.production_process_entries()})
+            self.assertNotIn(pid, {int(entry.name) for entry in own_process_entries()})
+            self.scan()
+        self.assertFalse(self.sleeps, 'no fixture of this test was unreadable')
+
     @quarantine(since="2026-11-15", repair="pending-handoff:e543556012604f01aa5b3bba4aa81b7c",
                 error="AssertionError: [0.05] is not false : the service manager is skipped on evidence, not after the grace window",
                 evidence=".context/deploy-pipeline/attempts/4/focused/deploy-command-structural (PR2126, Blacksmith, 1803238135)")
@@ -1314,9 +1334,8 @@ for line in sys.stdin:
                 ('a user unit, not the manager', f'0::{scope[:-len("init.scope")]}app.slice/run-u1.service\n', None),
                 ('scanner shares the scope', f'0::{scope}\n', f'0::{scope}\n'),
                 ('no systemd hierarchy', '3:cpu,cpuacct:/\n', None)):
-            # When the scanner shares the scope, a real manager on this host is refused first, as it must be.
-            named = r'process \d+ is' if own else r'process %d is' % manager.pid
-            with self.subTest(name), self.assertRaisesRegex(ValueError, named + ' unverifiable'):
+            # The scan covers only this test's tree, so the sealed manager fixture is the process refused.
+            with self.subTest(name), self.assertRaisesRegex(ValueError, r'process %d is unverifiable' % manager.pid):
                 scan_in(manager, cgroup, own)
         self.reap(manager)
         worker = self.child('open', cwd=self.namespace)  # readable: inspected exactly as before, never skipped

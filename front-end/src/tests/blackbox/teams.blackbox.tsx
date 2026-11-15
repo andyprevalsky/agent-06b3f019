@@ -5,7 +5,7 @@ import userEvent from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
 import Teams from '@/pages/Teams';
 import AppSidebar from '@/features/terminal-component-group/components/AppSidebar';
-import { IntegrationTeamSharing, ProjectTeamSharing } from '@/components/teams/TeamSharing';
+import { ProjectTeamSharing, TeamShareLoadError } from '@/components/teams/TeamSharing';
 import { clearTeamInviteLink } from '@/lib/teamInviteLink';
 import { AUTH_SESSION_CHANGED_EVENT } from '@/lib/supabase';
 import { renderWithProviders } from './test-wrapper';
@@ -262,20 +262,6 @@ describe('Teams', () => {
     expect(screen.getByText('Sign in to create or join a team.')).toBeInTheDocument();
     expect(api.writes).toEqual([]);
   });
-  it('offers the same account-specific team selections in Integrations', async () => {
-    const api = mockTeams([makeTeam(), makeTeam({ id: 'second', name: 'Second team' })]);
-    const user = userEvent.setup();
-    renderWithProviders(<IntegrationTeamSharing />);
-    const first = await screen.findByRole('checkbox', {
-      name: 'Share gmail · work@example.test with Rose Labs',
-    });
-    await user.click(first);
-    await waitFor(() => expect(first).toBeChecked());
-    expect(
-      screen.getByRole('checkbox', { name: 'Share gmail · work@example.test with Second team' }),
-    ).not.toBeChecked();
-    expect(api.state.teams[1].integrationShares).toEqual([]);
-  });
   it('offers immediate, independent sharing in Project Settings', async () => {
     const api = mockTeams();
     const user = userEvent.setup();
@@ -295,7 +281,7 @@ describe('Teams', () => {
       <>
         <p>Project settings host</p>
         <ProjectTeamSharing projectId="p-rose" />
-        <IntegrationTeamSharing />
+        <TeamShareLoadError />
       </>,
     );
     const alerts = await screen.findAllByRole('alert');

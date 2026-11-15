@@ -31,6 +31,18 @@ def frame(data):
     return struct.pack('<H',len(data))+data
 
 
+def send_with_stall_bound(stream,data):
+    """Send all of data, failing only when one wait for the socket to become writable exceeds the timeout.
+
+    sendall() spends the socket timeout on the whole transfer (Python >= 3.5), which turns a stall
+    bound into a throughput deadline for payloads sized to the host's kernel buffers; send() keeps
+    the timeout per wait (until the peer drains the send buffer past the kernel's writability
+    threshold), as recv() does on the read side.
+    """
+    view=memoryview(data)
+    while view:view=view[stream.send(view):]
+
+
 class FakeUnixAgent:
     """Fly v0.4.115 framing. Payload behavior tests the broker, not WireGuard.
 
@@ -337,7 +349,7 @@ class SharedRelay(unittest.TestCase):
         # send more than those hops can absorb; the relay's RSS bound below is unchanged.
         payload=b'x'*(16*1024*1024+2*kernel_socket_buffer_capacity());finished=threading.Event();errors=[]
         def sender():
-            try:client.sendall(payload)
+            try:send_with_stall_bound(client,payload)
             except OSError as error:errors.append(error)
             finally:finished.set()
         def rss():
@@ -351,18 +363,52 @@ class SharedRelay(unittest.TestCase):
             start=time.monotonic();result=f.call('check',owner,'a'*32,['--lease',lease['lease']])
             self.assertEqual(result.returncode,0,result.stdout+result.stderr)
             self.assertLess(time.monotonic()-start,2,'blocked stream stalled broker control')
-            f.agent.release.set()
+            f.agent.release.set();released=time.monotonic()
             response=bytearray()
             while len(response)<len(payload):
-                block=client.recv(65536)
+                try:block=client.recv(65536)
+                except TimeoutError:
+                    # A failed sender leaves the reader waiting for bytes never sent; report its error first.
+                    thread.join(timeout=3);self.assertFalse(errors,'sender failed before the payload was echoed');raise
                 if not block:break
                 response.extend(block)
             thread.join(timeout=3)
+            print('shared relay backpressure: payload',len(payload)>>20,'MiB, kernel buffer capacity',kernel_socket_buffer_capacity()>>20,
+                  'MiB, echoed in %.2fs'%(time.monotonic()-released),flush=True)
             self.assertFalse(errors)
             self.assertEqual(len(response),len(payload))
             self.assertEqual(hashlib.sha256(response).digest(),hashlib.sha256(payload).digest())
         finally:
             f.agent.release.set();client.close();thread.join(timeout=2)
+
+    def test_backpressure_sender_timeout_bounds_stalls_not_total_transfer_time(self):
+        # FLAKY 3b413cb2: on a large-buffer host the 1 GiB backpressure payload took longer than the
+        # 8 s socket timeout to cross the relay while making steady progress; sendall() timed out,
+        # and the reader then waited out recv() at line 357 for bytes that were never sent.
+        def transfer(reader_pause,reader_reads):
+            writer,reader=socket.socketpair()
+            # Pin the send buffer: AF_UNIX defaults to net.core.wmem_default, which a tuned host can
+            # raise far enough to absorb the payload or stretch one writability wait past 1 s.
+            writer.setsockopt(socket.SOL_SOCKET,socket.SO_SNDBUF,65536);writer.settimeout(1)
+            def drain():
+                try:
+                    for _ in range(reader_reads):
+                        time.sleep(reader_pause)
+                        if not reader.recv(65536):return
+                except OSError:pass  # The writer side is torn down once the transfer has its verdict.
+            thread=threading.Thread(target=drain,daemon=True);thread.start()
+            start=time.monotonic()
+            try:send_with_stall_bound(writer,b'x'*(8*1024*1024));return None,time.monotonic()-start
+            except TimeoutError as error:return error,time.monotonic()-start
+            finally:writer.close();thread.join(timeout=3);reader.close()
+        # A reader that keeps draining with short pauses takes well over the 1 s timeout in total.
+        error,elapsed=transfer(.025,10**6)
+        self.assertIsNone(error,'a progressing transfer failed its per-wait stall bound')
+        self.assertGreater(elapsed,1.5,'fixture transfer did not outlast the socket timeout')
+        # Negative control: a reader that stops draining still trips the same 1 s bound.
+        error,elapsed=transfer(.025,4)
+        self.assertIsInstance(error,TimeoutError,'a stalled transfer was not bounded')
+        self.assertLess(elapsed,5)
 
 
     def test_parent_death_retires_broker_and_listener_without_foreign_signals(self):

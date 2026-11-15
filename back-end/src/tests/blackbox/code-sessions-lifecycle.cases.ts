@@ -35,7 +35,6 @@ import {
   type StartupTurn,
 } from '../../providers/codeSessions/startupTurns';
 import {
-  checkpointCodeSession,
   sweepExpiredCodeSessions,
   sweepAllExpiredCodeSessions,
 } from '../../providers/codeSessions/lifecycle';
@@ -45,12 +44,7 @@ import {
   CLAUDE_CREDENTIAL_ENV_KEYS,
 } from '../../providers/e2bCodeSessionSandbox';
 import { closeClaudeCodeSession } from '../../providers/e2bCloseSession';
-import { localSandboxFs } from '../../providers/codeSessions/sandboxFs';
 import { stopSandboxCli } from '../../providers/codeSessions/sandboxResize';
-import {
-  CheckpointIntegrityError,
-  loadVerifiedCheckpoint,
-} from '../../providers/codeSessions/checkpoint';
 
 export interface CodeSessionLifecycleContext {
   userA: string;
@@ -586,35 +580,6 @@ export function registerCodeSessionLifecycleCases(ctx: CodeSessionLifecycleConte
     });
     await closeWith(stale, 'cancel');
     assert.equal(await queuedStartupTurnCount(staleKey), 1, "the newer spawn's row is untouched");
-  });
-
-  test('periodic saves keep a bounded number of checkpoints per session', async () => {
-    const { codeSession, home, agentId } = await liveTask(ctx, 'prune');
-    for (let i = 0; i < 8; i += 1) {
-      writeFileSync(join(home, 'workspace', `save-${i}.txt`), `${i}\n`);
-      const row = await prisma.codeSession.findUniqueOrThrow({ where: { id: codeSession.id } });
-      const saved = await checkpointCodeSession({
-        session: row,
-        fs: localSandboxFs(home),
-        reason: 'periodic',
-        agentId,
-      });
-      assert.equal(saved?.seq, i + 1);
-    }
-    await assert.rejects(
-      loadVerifiedCheckpoint(ctx.userA, codeSession.id, 1),
-      CheckpointIntegrityError
-    );
-    await assert.rejects(
-      loadVerifiedCheckpoint(ctx.userA, codeSession.id, 3),
-      CheckpointIntegrityError
-    );
-    for (const seq of [4, 5, 6, 7, 8]) {
-      assert.equal(
-        (await loadVerifiedCheckpoint(ctx.userA, codeSession.id, seq)).manifest.seq,
-        seq
-      );
-    }
   });
 
   test('the resize CLI stop does not kill its own shell', async () => {

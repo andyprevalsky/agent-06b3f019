@@ -133,3 +133,20 @@ export async function findStripePurchasesByAgentId(agentId: string) {
     take: 101,
   });
 }
+
+/** Owner lifecycle probe purge: the agent's owner and its purchases with wallet-funding status. */
+export async function findAgentOwnerAndProbePurchases(agentId: string) {
+  const agent = await prisma.agent.findUnique({ where: { id: agentId }, select: { userId: true } });
+  if (agent === null) return null;
+  const purchases = await prisma.purchaseSpend.findMany({
+    where: { agentId },
+    select: { id: true, status: true, walletFunding: { select: { status: true } } },
+  });
+  return { userId: agent.userId, purchases };
+}
+
+/** Delete exactly the given purchases of this agent (wallet-funding rows cascade). */
+export async function deleteAgentPurchases(agentId: string, ids: string[]): Promise<number> {
+  const { count } = await prisma.purchaseSpend.deleteMany({ where: { agentId, id: { in: ids } } });
+  return count;
+}

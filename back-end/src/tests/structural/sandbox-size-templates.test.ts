@@ -115,7 +115,7 @@ check('Claude templates pin a CLI that supports Opus 5.5', () => {
         '--source',
         'claude-code',
         '--name',
-        'claude-code-v21305',
+        'claude-code-v21311',
       ],
       { encoding: 'utf8' }
     )

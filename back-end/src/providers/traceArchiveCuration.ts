@@ -1,5 +1,7 @@
 import {
+  type ArchiveDeletionRequest,
   type ArchivedObjectSummary,
+  assertUserRequestedDeletion,
   deleteArchivedBundle,
   decryptAndValidateArtifact,
   listArchivedObjects,
@@ -52,7 +54,9 @@ export interface ArchiveGoldClassification {
 
 export interface CurateTraceArchiveOptions {
   rootAgentIds: string[];
+  /** Deletes rejected bundles; requires `userDeletionRequest` (never automated). */
   deleteRejected?: boolean;
+  userDeletionRequest?: ArchiveDeletionRequest;
   policy?: Partial<GoldArchivePolicy>;
   /** Parallel classifications (default DEFAULT_CURATION_CONCURRENCY). */
   concurrency?: number;
@@ -245,6 +249,11 @@ export async function curateTraceArchives(
     throw new Error('concurrency must be a finite number greater than or equal to 1');
   }
   const concurrency = Math.floor(requestedConcurrency);
+  // Refuse before classifying anything: deletion needs an explicit user request.
+  const deletion =
+    options.deleteRejected === true
+      ? assertUserRequestedDeletion(options.userDeletionRequest)
+      : null;
   const results: CurateTraceArchiveResult[] = new Array(options.rootAgentIds.length);
   let next = 0;
   let failed = false;
@@ -257,8 +266,9 @@ export async function curateTraceArchives(
         const rootAgentId = options.rootAgentIds[index];
         const classification = await classifyTraceArchiveGold(rootAgentId, options.policy);
         let deletedObjectCount = 0;
-        if (options.deleteRejected === true && !classification.gold) {
-          deletedObjectCount = (await deleteArchivedBundle(rootAgentId)).deletedObjectCount;
+        if (deletion !== null && !classification.gold) {
+          deletedObjectCount = (await deleteArchivedBundle(rootAgentId, deletion))
+            .deletedObjectCount;
         }
         results[index] = {
           deleted: deletedObjectCount > 0,
