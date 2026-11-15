@@ -9,6 +9,11 @@ import type { MeetingNotesProvider } from '../types';
  * addresses and Plaid institutions keep listing several, as the stock page
  * does. Compute rows render through DesktopComputeRow (they own a hook); this
  * file only contributes Compute's static Gemini row.
+ *
+ * Team sharing: every shareable account (iMessage, Gmail addresses, WhatsApp,
+ * Plaid institutions, LinkedIn, Granola, Fireflies) carries its `share` caption
+ * from shareTarget; Browser Cookies, Passwords, File System and Pebble Index 01
+ * rows never ask for one.
  */
 
 import { INTEGRATION_CATALOG } from '../config';
@@ -293,7 +298,7 @@ function messageRows(
       localSyncing: loading === 'whatsapp',
     },
     removal,
-  );
+  ).map((account) => ({ ...account, share: shareCaption(shareTarget('whatsapp')) }));
   const views: DesktopIntegrationView[] = [
     {
       key: 'imessage',
@@ -320,9 +325,14 @@ function messageRows(
   return views;
 }
 
-function plaidRow(p: DesktopIntegrationsProps): DesktopIntegrationView {
+function plaidRow(
+  p: DesktopIntegrationsProps,
+  shareTarget: AccountShareLookup,
+): DesktopIntegrationView {
   const rows = p.data.connectedIntegrations;
-  const accounts = plaidAccountViews(rows, p.plaid);
+  const accounts = plaidAccountViews(rows, p.plaid, (itemId) =>
+    shareCaption(shareTarget('plaid', itemId)),
+  );
   const ownIds = visibleInstitutionItems(p.plaid.items).map(plaidItemIds);
   return {
     key: 'plaid',
@@ -344,13 +354,17 @@ function plaidRow(p: DesktopIntegrationsProps): DesktopIntegrationView {
   };
 }
 
-function socialRows(p: DesktopIntegrationsProps, removal: RemovalPort) {
+function socialRows(
+  p: DesktopIntegrationsProps,
+  removal: RemovalPort,
+  shareTarget: AccountShareLookup,
+) {
   const linkedinRow = p.data.connectedIntegrations.find((i) => i.name === 'linkedin');
   const accounts = singleAccount(
     linkedinRow,
     { displayName: 'LinkedIn', label: stringConfig(linkedinRow, 'name') ?? 'LinkedIn account' },
     removal,
-  );
+  ).map((account) => ({ ...account, share: shareCaption(shareTarget('linkedin')) }));
   const views: DesktopIntegrationView[] = [
     comingSoon('x', 'X', tile(DropdownIconPreset.x, <XIcon />)),
     {
@@ -371,6 +385,7 @@ function meetingNotesRow(
   p: DesktopIntegrationsProps,
   removal: RemovalPort,
   provider: MeetingNotesProvider,
+  shareTarget: AccountShareLookup,
 ): DesktopIntegrationView {
   const row = p.data.connectedIntegrations.find((i) => i.name === provider);
   const connection = p.meetingNotes[provider];
@@ -391,6 +406,7 @@ function meetingNotesRow(
     onResync: () => void (expired ? connection.connect() : connection.sync()),
     resyncLabel: expired ? `Reconnect ${name}` : `Sync ${name} now`,
     resyncing: connection.busy === 'sync' || connection.busy === 'connect',
+    share: shareCaption(shareTarget(provider, connection.status?.accountEmail)),
   }));
   return {
     key: provider,
@@ -473,13 +489,13 @@ export function desktopSectionViews(
     sections.push({
       catalogKey: 'banks',
       title: INTEGRATION_CATALOG.banks.title,
-      rows: [plaidRow(p)],
+      rows: [plaidRow(p, shareTarget)],
     });
   }
   sections.push({
     catalogKey: 'socials',
     title: INTEGRATION_CATALOG.socials.title,
-    rows: socialRows(p, removal),
+    rows: socialRows(p, removal, shareTarget),
   });
   sections.push({
     catalogKey: 'files',
@@ -490,7 +506,9 @@ export function desktopSectionViews(
     sections.push({
       catalogKey: 'meetingNotes',
       title: INTEGRATION_CATALOG.meetingNotes.title,
-      rows: MEETING_NOTES_PROVIDERS.map((provider) => meetingNotesRow(p, removal, provider)),
+      rows: MEETING_NOTES_PROVIDERS.map((provider) =>
+        meetingNotesRow(p, removal, provider, shareTarget),
+      ),
     });
   }
   sections.push({

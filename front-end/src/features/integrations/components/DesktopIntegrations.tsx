@@ -19,8 +19,12 @@
  *     /integrations/:name --> full list refetch (the delta poll cannot see
  *     deletes) | error → alert
  *   Gmail / Plaid / compute chips keep their existing disconnect / reconnect flows.
- *   Gmail addresses and iMessage carry their team-sharing caption beside the chip
- *     (useAccountShares → AccountTeamShare); see TeamSharing for its states.
+ *   Every shareable account carries its team-sharing caption (useAccountShares →
+ *     AccountTeamShare; see TeamSharing for its states): beside the chip for iMessage,
+ *     Gmail addresses, WhatsApp, Plaid institutions, LinkedIn, Granola and Fireflies,
+ *     beside the label on each Claude / ChatGPT account line, and on each GitHub repo
+ *     and CLI in their shared cards. Browser Cookies, Passwords, File System, iPhone and
+ *     Pebble Index 01 never show one.
  *
  * System context:
  *   Integrations (flag) → DesktopIntegrations

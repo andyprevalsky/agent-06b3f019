@@ -14,6 +14,9 @@
  *   [LISTED] --repo URL (+ optional folder) · Connect--> [CONNECTING]
  *     --ok--> [LISTED] (form cleared) | --refused--> [LISTED] + inline error
  *   [LISTED] --× on a repo--> [DISCONNECTING] --done--> [LISTED] | inline error
+ *   each repo the backend lists as shareable (github_repo by `gh:owner/repo`) shows its
+ *     team-sharing caption (AccountTeamShare) after its badge; this card renders the
+ *     same on the stock page and in Rose Desktop
  *
  * Folders never get a repo when they are created; this section is where a repo is
  * connected and, optionally, associated with one folder (its code sessions then
@@ -22,6 +25,9 @@
 
 import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { Github, Loader2, Plus, X } from 'lucide-react';
+
+import { AccountTeamShare } from '@/components/teams/TeamSharing';
+import { useAccountShares } from '@/hooks/useTeams';
 
 import {
   GITHUB_REPOS_SECTION_ID,
@@ -249,6 +255,7 @@ export default function GithubReposSection({ github }: GithubReposSectionProps) 
   const folderName = (id: string | null) =>
     id === null ? null : (github.folders.find((folder) => folder.id === id)?.name ?? null);
   const sectionRef = useRef<HTMLElement>(null);
+  const { shareTarget } = useAccountShares();
   const [switchFolderId, setSwitchFolderId] = useState(NO_FOLDER);
   const [folderFocus, setFolderFocus] = useState<FolderFocus | null>(null);
   useEffect(() => {
@@ -298,6 +305,7 @@ export default function GithubReposSection({ github }: GithubReposSectionProps) 
             const label = `${repo.owner}/${repo.repo_name}`;
             const folder = folderName(repo.connected_rose_project_ref);
             const removing = github.disconnectingRef === repo.canonical_ref;
+            const share = shareTarget('github_repo', repo.canonical_ref);
             return (
               <li
                 key={repo.canonical_ref}
@@ -314,6 +322,7 @@ export default function GithubReposSection({ github }: GithubReposSectionProps) 
                       {label}
                     </a>
                     <SourceBadge source={repo.source} />
+                    {share && <AccountTeamShare {...share} />}
                   </div>
                   <span className="truncate text-xs text-muted-foreground">
                     {folder !== null ? `Folder: ${folder}` : 'No folder'} · {repo.default_branch}

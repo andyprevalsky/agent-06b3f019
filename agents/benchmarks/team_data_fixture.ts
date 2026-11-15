@@ -1,6 +1,14 @@
 /** Test fixture entrypoint; refuses shared/default or remote databases. */
 import { prisma } from "../../back-end/src/providers/database";
 import { seedTeamDataFixture } from "../../back-end/src/tests/blackbox/data-teams.fixture";
+import {
+  TEAM_INTEGRATIONS_MARKER,
+  TEAM_REPO_MARKER,
+  seedTeamIntegrationsFixture,
+  seedTeamRepoFixture,
+  teamIntegrationsExpectation,
+  teamRepoExpectation,
+} from "../../back-end/src/tests/blackbox/team-integrations.fixture";
 
 async function main() {
   const target = new URL(process.env.DATABASE_URL ?? "");
@@ -22,6 +30,28 @@ async function main() {
   const [userId, marker] = process.argv.slice(2);
   if (!userId || !marker?.startsWith("ROSE-TEAM-"))
     throw new Error("Missing fixture user or marker");
+  if (marker === TEAM_INTEGRATIONS_MARKER) {
+    const shared = await seedTeamIntegrationsFixture(userId, marker);
+    process.stdout.write(
+      JSON.stringify({
+        marker,
+        ...teamIntegrationsExpectation(shared),
+        fixture_user_id: userId,
+      }) + "\n",
+    );
+    return;
+  }
+  if (marker === TEAM_REPO_MARKER) {
+    const repo = await seedTeamRepoFixture(userId, marker);
+    process.stdout.write(
+      JSON.stringify({
+        marker,
+        ...teamRepoExpectation(repo),
+        fixture_user_id: userId,
+      }) + "\n",
+    );
+    return;
+  }
   const fixture = await seedTeamDataFixture(userId, marker);
   process.stdout.write(
     JSON.stringify({
