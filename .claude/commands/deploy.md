@@ -107,7 +107,7 @@ quarantine requires an explicit user instruction.
 
 ### Production
 
-- Bind every production check to the exact merge commit, never to the latest `main`.
+- Bind every production check to the exact merge commit, never to the latest `main`; only a successful live strict descendant of the merge (the commit production actually serves) verifies it instead, recorded `PASS-verified-by-descendant`.
 - An interrupted Fly cutover resumes the same job; never enqueue a replacement, release reservations on a timer, roll the pointer back or force-migrate workflows.
 - Keep automatic worker deploys off for the first managed deployment until the Render protocol is live and old instances have drained for at least 375 s.
 - On a production "column does not exist" error, compare `_prisma_migrations` with the real schema and re-apply the missing DDL idempotently.
@@ -231,7 +231,7 @@ Details: `.claude/shared/deploy-failure-policy.md` and `docs/deploy-test-cycle.m
 | Render live on the merged SHA, then endpoint probes and log scan | `back-end/` changed |
 | Fly worker cutover, then the workflow migration matrix | agent runtime or `deploy-agents.yml` changed |
 | Vercel live on the merged SHA | `front-end/` changed |
-| Production semantics | always, after the Render, Vercel and Fly lanes it exercises |
+| Production semantics: the specs of the commit the live frontend's `/version.json` names (the merge, or a strict descendant, recorded `PASS-verified-by-descendant`) | always, after the Render, Vercel and Fly lanes it exercises |
 | AgentCard production lifecycle (PASS, `SKIPPED-elected`, or `SKIPPED-stall` for the exact release stall) | AgentCard infrastructure paths changed (`AGENTCARD_INFRA_PATH_RE`) |
 | WMH SIM smoke | World Model Harness paths changed |
 | Mac release | `scripts/mac-app-release-decision` ships (shipped Mac surface changed, or the `MAC-APP-RELEASE` label) |
