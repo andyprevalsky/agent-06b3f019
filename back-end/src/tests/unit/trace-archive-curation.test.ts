@@ -19,7 +19,12 @@ import {
   curateTraceArchives,
 } from '../../providers/traceArchiveCuration';
 import { migrateLegacyTraces } from '../../providers/traceArchiveMigration';
-import { archiveJson, listArchivedObjects, storePlainArtifact } from '../../providers/traceArchive';
+import {
+  archiveJson,
+  deleteArchivedBundle,
+  listArchivedObjects,
+  storePlainArtifact,
+} from '../../providers/traceArchive';
 
 let passed = 0;
 const failures: string[] = [];
@@ -391,9 +396,25 @@ async function main(): Promise<void> {
       assert.strictEqual(dryRun[0].deleted, false);
       assert.ok((await listArchivedObjects('legacy-root')).length > 0);
 
+      // R2 is append-only: deletion without an explicit user request is refused
+      // before anything is classified or removed.
+      await assert.rejects(
+        curateTraceArchives({ rootAgentIds: ['legacy-root'], deleteRejected: true }),
+        /explicit user request/
+      );
+      await assert.rejects(
+        deleteArchivedBundle('legacy-root', undefined as never),
+        /explicit user request/
+      );
+      assert.ok((await listArchivedObjects('legacy-root')).length > 0);
       const deleted = await curateTraceArchives({
         rootAgentIds: ['legacy-root'],
         deleteRejected: true,
+        userDeletionRequest: {
+          userRequested: true,
+          requestedBy: 'unit-test-user',
+          reason: 'user asked to remove the legacy bundle',
+        },
       });
       assert.strictEqual(deleted[0].deleted, true);
       assert.ok(deleted[0].deletedObjectCount >= 8);

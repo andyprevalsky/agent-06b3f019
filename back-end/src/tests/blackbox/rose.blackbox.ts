@@ -2700,6 +2700,7 @@ async function testClient_dumpContextWritesRequestAndOutput() {
       messages: Array<{ role: string; content: string }>;
       config: Record<string, unknown>;
       response_format: unknown;
+      output: Record<string, unknown>;
       extra: Record<string, unknown>;
     };
     assertEqual(payload.call_site, 'credential_failure_classifier_test', 'dump call site');
@@ -2716,7 +2717,7 @@ async function testClient_dumpContextWritesRequestAndOutput() {
     // Read the registry rather than hardcoding: this asserted 'google/gemini-3.5-flash' and
     // would silently pin a model rose-1-flash no longer races the moment the pool moves.
     assertEqual(
-      payload.config.actual_model,
+      payload.output.actual_model,
       POOL_REGISTRY['rose-1-flash'].waterfall[0],
       'actual model dumped'
     );
@@ -2726,7 +2727,7 @@ async function testClient_dumpContextWritesRequestAndOutput() {
       'response format dumped'
     );
     assertEqual(payload.extra.task_id, 'task-1', 'caller extra dumped');
-    assertEqual(payload.extra.output, 'Hi there', 'raw model output dumped');
+    assertEqual(payload.output.content, 'Hi there', 'raw model output dumped');
   } finally {
     restoreFetch();
     fs.rmSync(dumpDir, { recursive: true, force: true });

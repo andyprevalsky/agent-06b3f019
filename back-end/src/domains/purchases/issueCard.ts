@@ -3,6 +3,7 @@ import { type WalletFundingProvider } from '../../providers/wallet-funding';
 import { BENCHMARK_PAYMENT_LIFECYCLE_PROD_USER_ID } from '../../providers/benchmarkPaymentIdentity';
 import { isAdminUser } from '../../utils/adminAccess';
 import { benchmarkForceCustomerPurchasePath } from './config';
+import { ownerLifecycleBenchmarkBilling } from '../../providers/ownerLifecycleBilling';
 import {
   chargeAndIssueCard,
   mintCaptureAndIssue,
@@ -32,8 +33,12 @@ export async function resolveAndIssuePurchaseCard(
 ): Promise<MintPurchaseResult> {
   // Admission can precede this immutable snapshot by minutes. A production probe
   // must never fund a live card from a test-mode purchase, including a resume.
+  const ownerBilling = await ownerLifecycleBenchmarkBilling(
+    input.userId,
+    purchase.agentId ?? input.agentId
+  );
   if (
-    purchase.userId === BENCHMARK_PAYMENT_LIFECYCLE_PROD_USER_ID &&
+    (purchase.userId === BENCHMARK_PAYMENT_LIFECYCLE_PROD_USER_ID || ownerBilling !== null) &&
     purchase.stripeLivemode !== true
   ) {
     if (resumedPurchase === null && purchase.status === PurchaseSpendStatus.PENDING_APPROVAL) {
@@ -49,14 +54,17 @@ export async function resolveAndIssuePurchaseCard(
   // CHARGING here (a resume re-enters mid-flight). Mirrors the non-admin path below.
   // Benchmark-only: BENCHMARK_FORCE_CUSTOMER_PURCHASE_PATH keeps isAdminUser() true for
   // credits/unlimited, but routes minting through the charged Stripe-hold path.
-  if (isAdminUser(input.userId) && !benchmarkForceCustomerPurchasePath()) {
+  // The owner's production lifecycle probe deliberately takes the charged customer path.
+  if (isAdminUser(input.userId) && !benchmarkForceCustomerPurchasePath() && ownerBilling === null) {
     if (resumedPurchase === null) {
       await repo.updatePurchaseStatus(purchase.id, PurchaseSpendStatus.CHARGING);
     }
     return issueAdminCompanyCard(purchase, input, cardProvider, walletFundingProvider);
   }
 
-  const subscription = await repo.findSubscriptionByUserId(input.userId);
+  // Never read or fall back to the owner's own Subscription for the lifecycle probe.
+  const subscription =
+    ownerBilling === null ? await repo.findSubscriptionByUserId(input.userId) : null;
   if (
     purchase.stripeCustomerId === null &&
     subscription !== null &&
@@ -67,7 +75,8 @@ export async function resolveAndIssuePurchaseCard(
       409
     );
   }
-  const stripeCustomerId = purchase.stripeCustomerId ?? subscription?.stripeCustomerId;
+  const stripeCustomerId =
+    purchase.stripeCustomerId ?? ownerBilling?.stripeCustomerId ?? subscription?.stripeCustomerId;
   if (stripeCustomerId === undefined || stripeCustomerId === null || stripeCustomerId === '') {
     await repo.updatePurchaseStatus(
       purchase.id,

@@ -19,6 +19,7 @@ tags:
   - browser
   - code-agent
 sources:
+  - PR #2094
   - agent 8789a5df-0119-4bbf-b90c-c7e58de56fe4
   - commit e0a3c84759e5b5c3ac33f525253a7dcfc4afa727
   - commit d7103ba60990932d0641966d82b375bd14e561ba

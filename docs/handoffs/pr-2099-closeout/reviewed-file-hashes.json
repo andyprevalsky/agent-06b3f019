@@ -1,0 +1,92 @@
+{
+  "at": "2026-11-15T02:42:44.866313+00:00",
+  "verdict": "CLEAR FOR REVIEWED RECORDS",
+  "readiness": "conditional on native checker",
+  "files": [
+    {
+      "path": "/home/boxes/rose/docs/handoffs/pr-2099-closeout/README.md",
+      "bytes": 8849,
+      "sha256": "d3b62f35524d32c79164ac4edc5a80970c35b46153b50e6ba3dbda352c54143b"
+    },
+    {
+      "path": "/home/boxes/rose/docs/handoffs/pr-2099-closeout/archive-index.json",
+      "bytes": 3885,
+      "sha256": "b02f20f767a581456afa600f9b6b60f1ce780c4ad6066ee0c3fb9b573bad1935"
+    },
+    {
+      "path": "/home/boxes/rose/docs/handoffs/pr-2099-closeout/archives/baseline.json",
+      "bytes": 1271,
+      "sha256": "bbd6f0c63217e53f5e9b7781d3d90d2d1420985a51651c5414d460bb76f89c37"
+    },
+    {
+      "path": "/home/boxes/rose/docs/handoffs/pr-2099-closeout/archives/bulk.json",
+      "bytes": 1264,
+      "sha256": "1cfaaeb932bca5f0ad1408c1499c29df8b9fab7f874eb27ed13dbaf69ee77d6e"
+    },
+    {
+      "path": "/home/boxes/rose/docs/handoffs/pr-2099-closeout/archives/final.json",
+      "bytes": 1259,
+      "sha256": "5df930a9c0d5bc8bbae3b46902acdbadcc57862efa46cb6cc3b0abc659c47312"
+    },
+    {
+      "path": "/home/boxes/rose/docs/handoffs/pr-2099-closeout/archives/git.json",
+      "bytes": 1263,
+      "sha256": "8acd23759d2d2022bd5275b68210467729a0fe884ab290c3b9bc36acebc55c14"
+    },
+    {
+      "path": "/home/boxes/rose/docs/handoffs/pr-2099-closeout/archives/rca.json",
+      "bytes": 1261,
+      "sha256": "f8834863cf86a89485464e6cc893aba67bd486a6eaf837d727dc656ed56bfe0c"
+    },
+    {
+      "path": "/home/boxes/rose/docs/handoffs/pr-2099-closeout/archives/validation.json",
+      "bytes": 1272,
+      "sha256": "0a42c3e24d52684eb82ff3e057ca07c422628e8f31f0d3d3efcfd63c4ca5b050"
+    },
+    {
+      "path": "/home/boxes/rose/docs/handoffs/pr-2099-closeout/coverage-summary.json",
+      "bytes": 2298,
+      "sha256": "096fb2a2f5c0ee480db9542861e2d53fb231cb132fc94d8d2479d7108a3ec3e1"
+    },
+    {
+      "path": "/home/boxes/rose/docs/handoffs/pr-2099-closeout/deletion-manifest.json",
+      "bytes": 29166,
+      "sha256": "7d484a3275046002efff3c7964e65663b51fa3fae63460a51e59db996076d868"
+    },
+    {
+      "path": "/home/boxes/rose/docs/handoffs/pr-2099-closeout/validation-and-recovery.json",
+      "bytes": 8650,
+      "sha256": "303b1d397af6181bdb45d549e786de4790973f14468a9b84be0cebdd962a607a"
+    },
+    {
+      "path": "/home/boxes/rose/docs/handoffs/pr-2099-closeout/verification-sidecars.json",
+      "bytes": 4605,
+      "sha256": "c198368a4816842b30076c8a3b103bbb8ff6e451b939f1c47c1ac4617ec99d95"
+    },
+    {
+      "path": "/home/boxes/rose/docs/rca/cases/2026-11-14-verifier-counted-completion-transport-as-forbidden-task-action.md",
+      "bytes": 14022,
+      "sha256": "7b8bbc0bc893aa8c7756891fb5493af68549ab1a11f47093d9f02c01630fa814"
+    },
+    {
+      "path": "/home/boxes/rose/agents/tests/blackbox/rose_browser_use.blackbox.py",
+      "bytes": 183370,
+      "sha256": "2a83bcb286840644202e83f9d81f294eb1a290b6fbb9975b9801e4397a4d7441"
+    },
+    {
+      "path": "/home/boxes/rose/agents/benchmarks/history/span_durations.20261115.docs-pr2099-closeout.jsonl",
+      "bytes": 6194057,
+      "sha256": "e38f39ec9726af0dd4147bd8a6637ed3e2ceb9160f5461ada9a982237a4162bb"
+    },
+    {
+      "path": "/home/boxes/rose/agents/benchmarks/history/task_attempts.20261115.docs-pr2099-closeout.jsonl",
+      "bytes": 5043,
+      "sha256": "0e5530eb06f628429392be6aa97d3a7b281fa1c705b2ea391d5c2a3a4572b787"
+    },
+    {
+      "path": "/home/boxes/rose/agents/benchmarks/history/task_durations.20261115.docs-pr2099-closeout.jsonl",
+      "bytes": 555,
+      "sha256": "a35656e8caeb4fab57ab92e4a803cbf3043ba36d9c6e1cecbeef2097d5b672ad"
+    }
+  ]
+}

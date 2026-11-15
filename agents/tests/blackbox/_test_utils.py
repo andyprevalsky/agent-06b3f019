@@ -24,6 +24,10 @@ load_dotenv(AGENTS_ROOT / ".env")
 
 # Activate capture mode
 os.environ["BLACKBOX_TEST_CAPTURE_OUTBOUND"] = "1"
+# agents/.env selects the R2 trace archive for live dev stacks. Tests must never
+# publish trace artifacts toward a real bucket (a running dev backend holds R2
+# credentials): every suite archives locally unless a case patches its backend.
+os.environ["TRACE_ARCHIVE_BACKEND"] = "local"
 # Most blackbox tests mock only the specific provider path they exercise. Do not
 # let a developer's funded GPT fallback key from agents/.env alter route order
 # process-wide; tests that cover that route set GPT_API_KEY explicitly.

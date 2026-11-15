@@ -2465,6 +2465,11 @@ def main() -> int:
         env = {**{key: value for key, value in os.environ.items()
                   if not key.startswith("DEPLOY_ADMISSION_") and key not in {"FACTORY_METADATA_FILE", "DEPLOY_LANE_SCOPED_REUSE"}},
                "DEPLOY_RUN_ROOT": str(tmp / "runs"), "DEPLOY_PIPELINE_SOURCE_ROOT": str(source_root)}
+        # Read-only gh calls ask the GitHub token pool first; scenarios never
+        # probe the real API: by default the pool has no member (GH_TOKEN reads).
+        no_pool = tmp / "no-token-pool.py"
+        no_pool.write_text("import sys\nsys.exit('github_token_pool: no member configured')\n")
+        env["DEPLOY_GH_TOKEN_POOL"] = str(no_pool)
         start_timing(tmp / "runs", env)
         marker = tmp / "slow-finished"
         plan = tmp / "plan.json"
@@ -3395,6 +3400,11 @@ def check_production_semantic(tmp: Path, env: dict[str, str]) -> None:
     (bin_dir / "gh").write_text(
         "#!/usr/bin/env bash\n"
         'echo "$*" >> "$FAKE_GH_DIR/calls.log"\n'
+        'echo "$1 $2 ${GH_TOKEN:-unset}" >> "$FAKE_GH_DIR/tokens.log"\n'
+        # A token GitHub refuses (e.g. the exhausted primary) fails every read.
+        'if [ -n "${FAKE_GH_DENY_TOKEN:-}" ] && [ "${GH_TOKEN:-}" = "$FAKE_GH_DENY_TOKEN" ]; then\n'
+        '  case "$1 $2" in "run view"|"run list") echo "$FAKE_GH_DENY_MESSAGE" >&2; exit 1 ;; esac\n'
+        'fi\n'
         'case "$1 $2" in\n'
         '  "workflow run") [ -f "$FAKE_GH_DIR/dispatch-fail" ] && { echo "HTTP 422: Unexpected inputs provided" >&2; exit 1; }; exit 0 ;;\n'
         '  "run list") [ -f "$FAKE_GH_DIR/list-fail" ] && { echo "HTTP 502: Bad Gateway" >&2; exit 1; }\n'
@@ -3411,6 +3421,7 @@ def check_production_semantic(tmp: Path, env: dict[str, str]) -> None:
     sem_env = {**env, "PATH": f"{bin_dir}:{env.get('PATH', os.environ.get('PATH', ''))}", "FAKE_GH_DIR": str(fake)}
     sem_env.pop("DEPLOY_GH_BIN", None)
     calls = fake / "calls.log"
+    tokens = fake / "tokens.log"
     past = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
     future = (datetime.now(timezone.utc) + timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
     later = (datetime.now(timezone.utc) + timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -3447,6 +3458,7 @@ def check_production_semantic(tmp: Path, env: dict[str, str]) -> None:
         for stale in list(fake.glob("list-*")) + list(fake.glob("view-*")) + list(fake.glob("rerun-*")):
             stale.unlink()
         calls.unlink(missing_ok=True)
+        tokens.unlink(missing_ok=True)
         (fake / "dispatch-fail").unlink(missing_ok=True)
         for index, rows in enumerate(lists, start=1):
             (fake / f"list-{index}.json").write_text(json.dumps(rows))
@@ -3798,6 +3810,78 @@ def check_production_semantic(tmp: Path, env: dict[str, str]) -> None:
     assert len(history) == 1 and history[0]["status"] == "dispatched" and history[0]["run_id"] is None, history
     assert history[0]["dispatch"]["at"] == stale_at and history[0]["outcome"] == "abandoned", history
     assert [w["outcome"] for w in semantic_waits(receipt) if w["kind"] == "run-start"][-2:] == ["abandoned", "found"], semantic_waits(receipt)
+
+    # 15. GH_TOKEN's REST quota is exhausted mid-run (2026-11-09, run
+    #     42668217644: `gh run view` HTTP 403 rate limit while the workflow was
+    #     still in_progress). Reads (discovery, polls) use the token pool's best
+    #     member; the dispatch keeps the workflow-scoped GH_TOKEN; the result
+    #     semantics are unchanged.
+    rate_limited = ("HTTP 403: API rate limit exceeded for user ID 25310436. (https://api.github.com/repos/"
+                    "Rose-Ai-Labs/rose/actions/runs/200/jobs?per_page=100)")
+    pool = fake / "token-pool.py"
+    pool.write_text("import os, sys\n"
+                    "open(os.environ['FAKE_GH_DIR'] + '/pool-calls.log', 'a').write(' '.join(sys.argv[1:]) + '\\n')\n"
+                    "token = os.environ.get('FAKE_GH_POOL_TOKEN')\n"
+                    "print(token) if token else sys.exit('github_token_pool: no member configured')\n")
+    pool_env = {**sem_env, "GH_TOKEN": "primary-exhausted", "DEPLOY_GH_TOKEN_POOL": str(pool),
+                "FAKE_GH_POOL_TOKEN": "pool-app", "FAKE_GH_DENY_TOKEN": "primary-exhausted",
+                "FAKE_GH_DENY_MESSAGE": rate_limited}
+
+    def token_lines() -> list[list[str]]:
+        return [line.split() for line in tokens.read_text().splitlines()] if tokens.exists() else []
+
+    state15 = tmp / "semantic-state-15"
+    run_gate(state15)
+    reset([[ours]], [view("in_progress", None, 1, running_jobs), view("completed", "success", 1, all_success)])
+    ran = run_semantic(state15, env_override=pool_env)
+    assert ran.returncode == 0 and "PIPELINE_SEMANTIC status=passed exit=0 run=200" in ran.stdout, ran.stdout
+    assert "rate limit" not in ran.stdout, ran.stdout
+    used = token_lines()
+    assert used[0] == ["workflow", "run", "primary-exhausted"], used  # the write keeps GH_TOKEN
+    assert [row for row in used[1:]] == [["run", "list", "pool-app"], ["run", "view", "pool-app"],
+                                         ["run", "view", "pool-app"]], used
+    pool_calls = (fake / "pool-calls.log").read_text().splitlines()
+    assert len(pool_calls) == 3 and all(line.startswith("pick --resource core --repo-root ") for line in pool_calls), pool_calls
+    entry = receipt_of(state15)["semantic"]
+    assert entry["outcome"] == "passed" and entry["conclusion"] == "success" and entry["run_id"] == "200", entry
+
+    # 15b. The same exhausted GH_TOKEN, and the run concludes failure: still exit
+    #      1 with the run's own conclusion (the token never turns a red run green).
+    state15b = tmp / "semantic-state-15b"
+    run_gate(state15b)
+    reset([[ours]], [view("completed", "failure", 1, semantic_failed)])
+    ran = run_semantic(state15b, env_override=pool_env)
+    assert ran.returncode == 1 and "rate limit" not in ran.stdout, ran.stdout
+    assert receipt_of(state15b)["semantic"]["conclusion"] == "failure", receipt_of(state15b)["semantic"]
+
+    # 15c. The pool's member cannot read the run (a 404 from the App or a
+    #      machine account is not authoritative): the read retries once with
+    #      GH_TOKEN (15c); both failing reports both messages and stays
+    #      blocked (15e).
+    state15c = tmp / "semantic-state-15c"
+    run_gate(state15c)
+    reset([[ours]], [view("completed", "success", 1, all_success)])
+    ran = run_semantic(state15c, env_override={**pool_env, "GH_TOKEN": "primary", "FAKE_GH_DENY_TOKEN": "pool-app",
+                                               "FAKE_GH_DENY_MESSAGE": "HTTP 404: Not Found"})
+    assert ran.returncode == 0, ran.stdout
+    assert token_lines() == [["workflow", "run", "primary"], ["run", "list", "pool-app"], ["run", "list", "primary"],
+                             ["run", "view", "pool-app"], ["run", "view", "primary"]], token_lines()
+    state15e = tmp / "semantic-state-15e"
+    run_gate(state15e)
+    reset([[ours]], [view("completed", "success", 1, all_success)])
+    (fake / "list-fail").touch()
+    ran = run_semantic(state15e, env_override={**pool_env, "FAKE_GH_DENY_TOKEN": "pool-app",
+                                               "FAKE_GH_DENY_MESSAGE": "HTTP 404: Not Found"})
+    assert ran.returncode == 1 and "failed with the token pool's member (HTTP 404: Not Found) and with GH_TOKEN: HTTP 502: Bad Gateway" in ran.stdout, ran.stdout
+    (fake / "list-fail").unlink()
+
+    # 15f. No usable pool member: reads use GH_TOKEN exactly as before.
+    state15f = tmp / "semantic-state-15f"
+    run_gate(state15f)
+    reset([[ours]], [view("completed", "success", 1, all_success)])
+    ran = run_semantic(state15f, env_override={**pool_env, "GH_TOKEN": "primary", "FAKE_GH_POOL_TOKEN": ""})
+    assert ran.returncode == 0 and "token pool picked no member" in ran.stdout, ran.stdout
+    assert {row[2] for row in token_lines()} == {"primary"}, token_lines()
 
     # Selection rule in-process: newest matching only, by createdAt then id.
     pipeline = load_module("pipeline_semantic_select", DRIVER)

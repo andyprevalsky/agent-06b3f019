@@ -26,6 +26,10 @@
  * 10k agents: one bounded request (≤ OMNI_MAX_WAIT_MS) per call and nothing held
  * between calls; the per-user in-flight cap lives in the service.
  */
+import { createHash } from 'node:crypto';
+import { archiveBytes } from '../traceArchive';
+import { finishLlmCapture, type LlmCapture, llmCaptureRoot, startLlmCapture } from '../llmDump';
+import { type ArchiveScope, simpleArchiveOutput } from '../llmArchiveRecord';
 import { createLogger } from '../logger';
 
 const log = createLogger('GeminiOmniVideo');
@@ -130,6 +134,11 @@ export interface OmniVideoRequest {
   aspectRatio: OmniAspectRatio;
   resolution: OmniResolution;
   seed?: number;
+  /**
+   * Agent tree binding: request + generated video are archived in the root
+   * bundle; the root resolves off the call path (llmDump archive_scope).
+   */
+  archive?: { archive_scope: ArchiveScope } | null;
 }
 
 export interface OmniVideoResult {
@@ -296,6 +305,80 @@ async function pollAndDownload(uri: string, key: string, deadline: number): Prom
   return Buffer.from(await download.arrayBuffer());
 }
 
+/** Inline fallback bound: 32 MiB → ~43 MiB base64, under the 72 MiB record ciphertext cap. */
+const INLINE_VIDEO_FALLBACK_MAX_BYTES = 32 * 1024 * 1024;
+
+/**
+ * Store the generated video under the capture's archive root (resolved after
+ * the model call). Returns the stored object path, or the failure reason.
+ */
+async function archiveVideoBytes(
+  capture: LlmCapture,
+  objectPath: string,
+  body: Buffer,
+  mimeType: string | undefined
+): Promise<{ path: string } | { error: string }> {
+  try {
+    const rootAgentId = await llmCaptureRoot(capture);
+    if (rootAgentId === null) return { error: 'capture has no archive root' };
+    // createOnly: a failed write throws; null means the content-addressed
+    // object already exists (or archiving is off, when no record is written).
+    await archiveBytes({
+      rootAgentId,
+      objectPath,
+      body,
+      contentType: mimeType || 'video/mp4',
+      compress: false,
+      createOnly: true,
+    });
+    return { path: objectPath };
+  } catch (error) {
+    return { error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+/**
+ * The final record's video reference: the confirmed archive path, or — when the
+ * separate write failed — the failure plus the bytes inline, so the final
+ * record (stored with its own retries) still carries the video.
+ */
+async function videoArchiveFields(
+  capture: LlmCapture,
+  bytes: Buffer,
+  mimeType: string | undefined
+): Promise<Record<string, unknown>> {
+  const videoPath = `media/video/${createHash('sha256').update(bytes).digest('hex')}.mp4`;
+  const stored = await archiveVideoBytes(capture, videoPath, bytes, mimeType);
+  if ('path' in stored) return { video_archive_path: stored.path };
+  log.warn('[GenerateVideo] video archive failed', { error: stored.error, bytes: bytes.length });
+  return {
+    video_archive_error: stored.error,
+    ...(bytes.length <= INLINE_VIDEO_FALLBACK_MAX_BYTES
+      ? { video_data_base64: bytes.toString('base64'), video_mime_type: mimeType || 'video/mp4' }
+      : {}),
+  };
+}
+
+/** Final record for a failed generation (provider error, refusal, network, download). */
+function finishFailedVideoCapture(
+  capture: LlmCapture | null,
+  model: string,
+  startedAtMs: number,
+  error: unknown
+): void {
+  if (capture === null) return;
+  finishLlmCapture(capture, {
+    model,
+    output: simpleArchiveOutput({
+      content: '',
+      actualModel: model,
+      provider: 'gemini',
+      startedAtMs,
+      error,
+    }),
+  });
+}
+
 export async function generateOmniVideo(request: OmniVideoRequest): Promise<OmniVideoResult> {
   const key = apiKey();
   const model = omniVideoModel();
@@ -322,6 +405,17 @@ export async function generateOmniVideo(request: OmniVideoRequest): Promise<Omni
     store: true,
     stream: false,
   };
+  const capture =
+    request.archive === undefined || request.archive === null
+      ? null
+      : startLlmCapture({
+          call_site: 'generate_video',
+          ...request.archive,
+          model,
+          message_count: 1,
+          messages: [{ role: 'user', content: input }],
+          config: { provider: 'gemini', request: { ...body, input: '[messages[0].content]' } },
+        });
   log.info('[GenerateVideo] provider request', {
     model,
     prompt_chars: request.prompt.length,
@@ -330,6 +424,65 @@ export async function generateOmniVideo(request: OmniVideoRequest): Promise<Omni
     resolution: request.resolution,
     seed: request.seed ?? null,
   });
+  let generated: GeneratedVideo;
+  try {
+    generated = await requestVideo(body, key, started);
+  } catch (error) {
+    finishFailedVideoCapture(capture, model, started, error);
+    throw error;
+  }
+  const { interaction, part, bytes, durationSeconds } = generated;
+  const latencyMs = Date.now() - started;
+  const usage = readUsage(interaction);
+  if (capture !== null) {
+    finishLlmCapture(capture, {
+      model,
+      output: simpleArchiveOutput({
+        content: '',
+        actualModel: model,
+        provider: 'gemini',
+        startedAtMs: started,
+        requestId: interaction.id ?? null,
+        structured: {
+          interaction,
+          ...(await videoArchiveFields(capture, bytes, part.mime_type)),
+          duration_seconds: durationSeconds,
+        },
+      }),
+    });
+  }
+  log.info('[GenerateVideo] provider response', {
+    model,
+    interaction_id: interaction.id ?? null,
+    bytes: bytes.length,
+    duration_seconds: durationSeconds,
+    video_tokens: usage?.videoOutputTokens ?? null,
+    latency_ms: latencyMs,
+  });
+  return {
+    bytes,
+    mimeType: part.mime_type || 'video/mp4',
+    model,
+    interactionId: interaction.id ?? null,
+    durationSeconds,
+    latencyMs,
+    usage,
+  };
+}
+
+interface GeneratedVideo {
+  interaction: { id?: string; status?: string };
+  part: VideoPart;
+  bytes: Buffer;
+  durationSeconds: number;
+}
+
+/** One Interactions call plus its download; throws OmniVideoError on every failure. */
+async function requestVideo(
+  body: Record<string, unknown>,
+  key: string,
+  started: number
+): Promise<GeneratedVideo> {
   let response: Response;
   try {
     response = await providerFetch(
@@ -375,23 +528,5 @@ export async function generateOmniVideo(request: OmniVideoRequest): Promise<Omni
   if (bytes.length === 0 || durationSeconds === null) {
     throw new OmniVideoError('provider returned an unreadable video file', true);
   }
-  const latencyMs = Date.now() - started;
-  const usage = readUsage(interaction);
-  log.info('[GenerateVideo] provider response', {
-    model,
-    interaction_id: interaction.id ?? null,
-    bytes: bytes.length,
-    duration_seconds: durationSeconds,
-    video_tokens: usage?.videoOutputTokens ?? null,
-    latency_ms: latencyMs,
-  });
-  return {
-    bytes,
-    mimeType: part.mime_type || 'video/mp4',
-    model,
-    interactionId: interaction.id ?? null,
-    durationSeconds,
-    latencyMs,
-    usage,
-  };
+  return { interaction, part, bytes, durationSeconds };
 }

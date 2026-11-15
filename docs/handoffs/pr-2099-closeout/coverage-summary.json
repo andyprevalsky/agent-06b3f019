@@ -1,0 +1,34 @@
+{
+  "scope": "Finite terminal checkout selection, with logical HOME representations and original metadata; explicit source/deployed bindings; no atomic all-machine assertion.",
+  "source_head_at_capture": "4e11f350f8e7fd4ae67652ea124f9ffe2b1bd439",
+  "deployed_target": "e158477bc23a0527df4500c3adf209b74ae1b7fd",
+  "capture_started_at": "2026-11-15T02:25:48.988186+00:00",
+  "capture_finished_at": "2026-11-15T02:26:21.782521+00:00",
+  "private_coverage_index_sha256": "c62435b4ada85dff56f861c2822f1b502bb3b3f814853e54f03b13d9c383d839",
+  "native_manifest_sha256": "fbfeebc02ef5060e31cb5df8180d8a1a793ef518b8ed313831f72af8b7d7917d",
+  "actions": {
+    "carry-prior": 50855,
+    "directory": 10237,
+    "selected": 193,
+    "literal-metadata": 2,
+    "compiler-output-excluded": 570,
+    "absent-at-selection": 1
+  },
+  "all_selected_file_bytes_match_independently_restored_final_members": true,
+  "all_prior_carries_match_authenticated_member_sha256_and_size": true,
+  "unresolved_selected_or_carried_files": 0,
+  "explicit_omitted_subtrees": 24,
+  "omission_classes": [
+    "Installed packages/compiler outputs with tracked pins and recipes",
+    "Decoded independently verified restore duplicates",
+    "Owned reconstructed bare repositories and stopped clean PG physical proof data",
+    "Reference bytes verified against authenticated baseline; namespace metadata retained",
+    "Own generated selection outputs handled by native manifest and explicit sidecars"
+  ],
+  "post_carrier_boundary": "Native encrypted payload embeds authoritative per-member manifest. Later safe operation receipts, hashes, counts, actual outcomes and configuration-only recovery instructions are committed in this reviewed records PR. Decrypted duplicate member maps/restore outputs are reproducible from those encrypted manifests and pinned adapters. Later public candidate versions are byte-identical to their committed records. No later raw secret/provider payload is created by this closeout. Managed thread history remains on the platform.",
+  "known_unknowns": [
+    "Five already-pruned historical reflog objects",
+    "Vanished historical ephemeral temporary bytes"
+  ],
+  "ready_status": "Native checker receipt and post-merge terminal result are authoritative; this file is preservation evidence only."
+}
