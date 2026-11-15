@@ -687,10 +687,18 @@ class RetainedWorkerTests(unittest.TestCase):
 
         api = f"http://127.0.0.1:{server.server_address[1]}/v1"
         suffix = "/metadata/" + pool.POOL_KEY
+        checks = []
+
+        class Owned(pool.Fly):
+            def assert_request_allowed(self, *request):
+                checks.append(request)
+
         with patch.object(pool, "API", api), patch("socket.create_connection", unreachable_once):
-            self.assertEqual(pool.Fly("prod", "1234").request("POST", suffix, {"value": "idle"}), {})
+            self.assertEqual(Owned("prod", "1234").request("POST", suffix, {"value": "idle"}), {})
         self.assertEqual(received, [b'{"value": "idle"}'])
         self.assertEqual(len(connects), 2)
+        # The replay re-checked managed ownership first (CodeRabbit 4577478879).
+        self.assertEqual(checks, [("POST", suffix, {"value": "idle"})])
         self.assertEqual(self.pauses, [1])
         # Negative control: a write that reached Fly and lost its answer is never replayed.
         received.clear()
@@ -739,6 +747,18 @@ class RetainedWorkerTests(unittest.TestCase):
             [("POST", "/lease"), ("GET", "/lease")] * 2 + [("POST", "/lease"), ("DELETE", "/lease")],
         )
         self.assertEqual(self.pauses, [pool.LEASE_ORPHAN_POLL_SECONDS] * 2)
+        # Every re-acquire re-checks ownership; a controller that lost it sends nothing more.
+        class LostOwnership(pool.Fly):
+            def assert_request_allowed(self, method, suffix, data):
+                if method != "GET":
+                    raise ValueError("Deployment lease lost")
+
+        native = ScriptedHTTP(http_error(409), orphan, {"data": {"nonce": "never"}})
+        with patch.object(pool, "urlopen", native), self.assertRaisesRegex(ValueError, "Deployment lease lost"):
+            with LostOwnership("prod", "1234").lease():
+                self.fail("a controller without ownership must not hold the lease")
+        self.assertEqual(native.calls, [("POST", "/lease"), ("GET", "/lease")])
+        self.pauses.clear()
         # The orphan lapses between the 409 and the holder read (404): acquire again at once.
         self.pauses.clear()
         native = ScriptedHTTP(http_error(409), http_error(404), {"data": {"nonce": "n-2"}}, {})
@@ -775,6 +795,23 @@ class RetainedWorkerTests(unittest.TestCase):
                 self.fail("an unexpired lease must not be entered")
         self.assertGreaterEqual(clock[0], pool.LEASE_TTL_SECONDS)
         self.assertLessEqual(clock[0], pool.LEASE_TTL_SECONDS + pool.LEASE_ORPHAN_MARGIN_SECONDS)
+        # Bounded too when holders keep changing between the 409 and the read (CodeRabbit 4577478883).
+        clock = [0]
+
+        def advancing():
+            clock[0] += 7
+            return clock[0]
+
+        native = ScriptedHTTP(*[http_error(409), http_error(404)] * 100)
+        with (
+            patch.object(pool, "urlopen", native),
+            patch.object(pool, "monotonic", advancing),
+            self.assertRaisesRegex(ValueError, "kept changing holders"),
+        ):
+            with pool.Fly("prod", "1234").lease():
+                self.fail("an ever-changing holder must not be entered")
+        self.assertLess(len(native.calls), 200)
+        self.assertGreaterEqual(clock[0], pool.LEASE_TTL_SECONDS + pool.LEASE_ORPHAN_MARGIN_SECONDS)
 
     def test_lost_ack_retry_rejects_empty_or_nonstring_version_before_wait(self):
         for version in ("", None, 7):

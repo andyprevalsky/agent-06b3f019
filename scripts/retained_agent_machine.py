@@ -304,7 +304,14 @@ class Fly:
             headers["fly-machine-lease-nonce"] = self.nonce
         body = None if data is None else json.dumps(data).encode()
 
+        transmissions = []
+
         def once():
+            # The caller checked the first transmission; every later one (a replay,
+            # or a re-acquire after a 409) is checked again (CodeRabbit 4577478879).
+            if transmissions:
+                self.assert_request_allowed(method, suffix, data)
+            transmissions.append(method)
             with urlopen(
                 Request(API + self.path + suffix, data=body, headers=headers, method=method),
                 timeout=timeout,
@@ -321,6 +328,9 @@ class Fly:
         if method == "POST" and suffix == "/lease" and not self.nonce:
             return self.wait_out_orphaned_lease(send)
         return send()
+
+    def assert_request_allowed(self, method, suffix, data):
+        """Per-transmission authority hook; the lease-owned controller overrides it."""
 
     def keep_lease(self, refresh_after=LEASE_REFRESH_AFTER_SECONDS):
         """Extend our own lease during a long native wait (fly-go RefreshLease).
@@ -352,7 +362,7 @@ class Fly:
         holder with our description can only be a dead controller's orphan; it
         lapses at most LEASE_TTL_SECONDS after it was taken, which was before
         now. Poll against a local monotonic deadline (no comparison with Fly's
-        clock), re-asserting managed ownership before every retried acquire.
+        clock); every re-sent acquire passes assert_request_allowed first.
         Any other holder fails at once.
         """
         deadline = monotonic() + LEASE_TTL_SECONDS + LEASE_ORPHAN_MARGIN_SECONDS
@@ -368,7 +378,10 @@ class Fly:
                     if missing.code != 404:
                         raise
                     holder = None  # the lease lapsed between the 409 and this read: acquire again at once
-                if holder is not None:
+                if holder is None:
+                    if monotonic() >= deadline:
+                        raise ValueError("Machine lease kept changing holders past the orphan deadline") from exc
+                else:
                     if holder.get("description") != LEASE_DESCRIPTION or monotonic() >= deadline:
                         raise ValueError(
                             f"Machine lease is held by {holder.get('owner')!r} "
@@ -381,9 +394,6 @@ class Fly:
                         flush=True,
                     )
                     sleep(LEASE_ORPHAN_POLL_SECONDS)
-            owned = getattr(self, "assert_managed_mutable", None)
-            if callable(owned):
-                owned()
 
     @contextmanager
     def lease(self):

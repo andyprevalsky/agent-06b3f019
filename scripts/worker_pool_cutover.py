@@ -169,18 +169,25 @@ class NativePool(WorkerRuntime):
                 ledger.assert_owned()
                 ledger.assert_mutable(machine_id)
 
-            def request(self, method, suffix="", data=None, *, replay=None):
-                # The exact runtime probe only reads, so it may replay transient failures.
-                probe = (
+            @staticmethod
+            def is_probe(method, suffix, data):
+                return (
                     method == "POST"
                     and suffix == "/exec"
                     and data == {"command": ["python", "-I", "-B", "-c", RUNTIME_QUEUE_PROBE], "timeout": 10}
                 )
+
+            def assert_request_allowed(self, method, suffix, data):
+                """Checked before every transmission, replays and re-acquires included."""
                 if method != "GET":
                     ledger.assert_owned()
-                    if not probe:
+                    if not self.is_probe(method, suffix, data):
                         ledger.assert_mutable(machine_id)
-                return super().request(method, suffix, data, replay=True if probe else replay)
+
+            def request(self, method, suffix="", data=None, *, replay=None):
+                # The exact runtime probe only reads, so it may replay transient failures.
+                self.assert_request_allowed(method, suffix, data)
+                return super().request(method, suffix, data, replay=True if self.is_probe(method, suffix, data) else replay)
 
         return OwnedFly(self.app, machine_id)
 
