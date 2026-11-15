@@ -23,8 +23,9 @@ sources:
   - PR #1584 (cutover job 5b5a47e3)
   - commit 4ae0909e85 (PR #1535, the 9 x 20s wait)
   - memory:fly-cutover-transient-reset-no-retry
+  - PR #2127 (merge 46f1f7957bd946954b9d6eabfa45cdfd8056d01f)
 repro: scripts/tests/retained-agent-machine.test.py
-status: open
+status: fixed
 ---
 
 ## Problem
@@ -47,6 +48,8 @@ Repro: `scripts/tests/retained-agent-machine.test.py` `test_slow_native_replacem
 - `deploy_prod.py --resume-fly` passes `FLY_API_TOKEN` from the environment, else from `agents/.env`, never shows it in recorded commands, and fails with an actionable message when it is missing.
 
 10k-agent behavior: deploy-time only, per-Machine and bounded (≤3 attempts per read, about 45 waits plus about 4 lease refreshes per Machine at worst). Nothing touches the agent hot path.
+
+Shipped in PR #2127, merge `46f1f7957b`, on 2026-11-15. The post-merge deploy-agents run 43686123241 succeeded: job `8a8de388` was superseded and verified by descendant cutover `ff9226db` (source `d39e7e6409`, which contains the merge), which reached SUCCEEDED. The production semantic lane passed (run 43686199135). This PR does not cover two other cutover failures from the same night: the `retire` metadata-write `URLError` Errno 101 (run 43669103359) and the orphaned-lease 409 (run 43669305097). Both are owned by PR #2147.
 
 ## Human feedback
 

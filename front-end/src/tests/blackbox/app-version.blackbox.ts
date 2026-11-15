@@ -47,6 +47,7 @@ const settle = () => new Promise((done) => setTimeout(done, 0));
 beforeEach(() => {
   window.sessionStorage.clear();
   document.body.innerHTML = '';
+  delete document.documentElement.dataset.versionCheck;
   visibility = 'visible';
   vi.spyOn(document, 'visibilityState', 'get').mockImplementation(() => visibility);
   vi.spyOn(console, 'warn').mockImplementation(() => {});
@@ -160,6 +161,40 @@ describe('stale build auto refresh', () => {
     window.name = '';
   });
 
+  it('publishes each check outcome on <html data-version-check> for e2e steps', async () => {
+    const state = () => document.documentElement.dataset.versionCheck;
+    let answer: (response: Response) => void = () => {};
+    const fetchImpl = vi.fn(() => new Promise<Response>((resolve) => (answer = resolve)));
+    const reload = watch(fetchImpl as unknown as typeof fetch);
+    expect(state()).toBe('checking');
+    answer(new Response(JSON.stringify({ buildId: RUNNING })));
+    await settle();
+    expect(state()).toBe('idle');
+
+    document.body.innerHTML = '<textarea>unsent</textarea>';
+    resume();
+    answer(new Response(JSON.stringify({ buildId: DEPLOYED })));
+    await settle();
+    expect(state()).toBe('pending');
+    expect(reload).not.toHaveBeenCalled();
+
+    document.body.innerHTML = '';
+    resume();
+    answer(new Response(JSON.stringify({ buildId: DEPLOYED })));
+    await settle();
+    expect(reload).toHaveBeenCalledTimes(1);
+    expect(state()).toBe('reloading');
+
+    // Leaving stays visible: a later check settling on the dying page does not read idle.
+    clock += APP_VERSION_MIN_CHECK_INTERVAL_MS;
+    resume();
+    answer(new Response(JSON.stringify({ buildId: RUNNING })));
+    await settle();
+    expect(state()).toBe('reloading');
+    cleanup();
+    expect(state()).toBeUndefined();
+  });
+
   it('shares one request between resumes inside the check interval', async () => {
     const fetchImpl = versionFetch(RUNNING);
     watch(fetchImpl);
@@ -250,6 +285,7 @@ describe('stale build auto refresh', () => {
     cleanup = initAppVersionWatch({ buildId: '', fetchImpl, reload: vi.fn() });
     await settle();
     expect(fetchImpl).not.toHaveBeenCalled();
+    expect(document.documentElement.dataset.versionCheck).toBeUndefined();
   });
 
   it('counts only non-empty fields as unsent text', () => {

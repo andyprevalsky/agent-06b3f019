@@ -1,11 +1,13 @@
 import { readFileSync } from 'fs';
 import { join } from 'path';
 
-/** Rose contact phone number */
-export const ROSE_PHONE =
-  process.env.SMS_PROVIDER === 'linq'
-    ? (process.env.LINQ_FROM_PHONE ?? '+14154498072')
-    : '+14154498072';
+/** Rose's Surge (SMS) number; the Linq number comes from LINQ_FROM_PHONE. */
+export const SURGE_PHONE = '+14154498072';
+
+/** Read per call: the Linq number is rollout configuration, not a build constant. */
+export function linqFromPhone(): string {
+  return process.env.LINQ_FROM_PHONE ?? '';
+}
 
 /** Rose contact email */
 export const ROSE_EMAIL = 'rose@roselabs.ai';

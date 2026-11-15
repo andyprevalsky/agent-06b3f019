@@ -19,6 +19,14 @@ export function getPersonalizedVcardUrl(userId: string): string {
   return `https://navi-j9a9.onrender.com/api/vcard/${userId}.vcf`;
 }
 
+/**
+ * Short agent link for start/finish texts. roselabs.ai/a/<id> serves the agent's
+ * link-preview tags (front-end api/og/agent.ts) and then opens /?agent-id=<id>.
+ */
+export function getAgentShareUrl(agentId: string): string {
+  return new URL(`/a/${encodeURIComponent(agentId)}`, ROSE_LABS_URL).toString();
+}
+
 export function getAgentUrl(
   agentId: string,
   browserId?: string | null,

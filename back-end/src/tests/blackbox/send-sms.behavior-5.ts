@@ -195,7 +195,7 @@ export async function testBoundary_notifyCompletionPreviewForBenchmark() {
       );
     }
     assert(
-      lines[7]?.includes(`agent-id=${agent.id}`) === true,
+      lines[7]?.includes(`roselabs.ai/a/${agent.id}`) === true,
       `Expected root agent link in completion preview`
     );
     assert(
