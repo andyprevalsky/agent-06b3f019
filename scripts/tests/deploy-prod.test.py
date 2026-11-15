@@ -213,7 +213,7 @@ class ApplicabilityTest(unittest.TestCase):
                          {'render', 'backend-probes', 'agentcard', 'semantic'})
         self.assertEqual(applicable(['agents/tools/request_payment_card.py']),
                          {'fly', 'workflow-migration', 'agentcard', 'semantic'})
-        self.assertEqual(applicable(['scripts/run.sh']), {'agentcard', 'semantic'})
+        self.assertEqual(applicable(['scripts/run.sh']), {'semantic'})  # AgentCard runs only on AgentCard infra
         plan = dp.plan_lanes(['back-end/src/domains/purchases/x.ts', 'front-end/src/features/test-payment/a.tsx'], [],
                              NO_MAC)
         self.assertEqual(plan['agentcard'].deps, ('render', 'vercel'))
@@ -226,7 +226,7 @@ class ApplicabilityTest(unittest.TestCase):
         serving = dp.plan_lanes(['agents/benchmarks/serve_world_model.py'], [], NO_MAC)
         self.assertTrue(serving['wmh'].applicable)
         self.assertFalse(serving['wmh'].build_wmh)
-        self.assertEqual(applicable(['agents/benchmarks/wmh_build_cache.py']), {'wmh', 'agentcard', 'semantic'})
+        self.assertEqual(applicable(['agents/benchmarks/wmh_build_cache.py']), {'wmh', 'semantic'})
         for path in ('agents/requirements-world-model.txt', 'agents/vendor/world-model/x.whl',
                      'agents/benchmarks/build_experiential_world_model.py', 'scripts/setup-world-model.sh'):
             plan = dp.plan_lanes([path], classify([path]), NO_MAC)

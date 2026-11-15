@@ -19,6 +19,7 @@ PASS-verified-by-descendant with the live SHA, never relabelled an exact PASS.
 from __future__ import annotations
 
 import argparse
+import importlib.util
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import json
@@ -56,11 +57,14 @@ SCHEMA = 1
 
 # deploy.md Phase 1 path rules (CHANGED_BACKEND / CHANGED_AGENTCARD_PAYMENT).
 BACKEND_RE = re.compile(r'^(back-end/|scripts/run-bench-hub-poller$)')
-AGENTCARD_RE = re.compile(
-    r'^(back-end/(scripts/setup-benchmark-payment\.ts|src/domains/(agentcard|purchases|test-payment)/|'
-    r'src/providers/(agentcard/|card-provider/|purchaseCleanup\.ts|purchase-wallet-funding|wallet-funding\.ts))|'
-    r'agents/(benchmarks/|domains/request_payment_card/|tools/request_payment_card\.py)|'
-    r'front-end/src/features/test-payment/|scripts/(run\.sh|run-agentcard-lifecycle-task\.sh))')
+# AgentCard runs only when AgentCard infra changed (Andy 2026-11-15): one path set, owned by the predeploy selector.
+_SELECTOR_SPEC = importlib.util.spec_from_file_location(
+    'deploy_prod_select_predeploy_benches',
+    Path(__file__).resolve().parents[1] / 'agents' / 'benchmarks' / 'select_predeploy_benches.py')
+assert _SELECTOR_SPEC and _SELECTOR_SPEC.loader
+_SELECTOR = sys.modules.setdefault(_SELECTOR_SPEC.name, importlib.util.module_from_spec(_SELECTOR_SPEC))
+_SELECTOR_SPEC.loader.exec_module(_SELECTOR)
+AGENTCARD_RE: re.Pattern[str] = _SELECTOR.AGENTCARD_INFRA_PATH_RE
 LEDGER_PREFIX = 'agents/benchmarks/history/'
 AGENTS_WORKFLOW_PATH = '.github/workflows/deploy-agents.yml'
 # Step 13w: `grep -F` substrings. Build inputs force --build-wmh + --refresh-wmh

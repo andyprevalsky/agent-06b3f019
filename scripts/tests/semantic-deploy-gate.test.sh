@@ -717,7 +717,8 @@ grep -Fq 'ADMIN_HEALTH_LIVE_ONLY=1 requires AMPLITUDE_API_KEY and AMPLITUDE_SECR
 # under host admission and memory sampling) and the sandbox AgentCard lifecycle
 # tasks are ordinary cloud smoke tasks (asserted in the wiring block above).
 # deploy.md states the replacement AgentCard rules.
-require_text "$DEPLOY_COMMAND" 'The sandbox lifecycle tasks are ordinary smoke tasks on the fleet; there is no separate AgentCard gate or election.' "/deploy must keep AgentCard sandbox lifecycle tasks inside the smoke lane"
+require_text "$DEPLOY_COMMAND" 'run only when the diff touches AgentCard infrastructure (`AGENTCARD_INFRA_PATH_RE`' "/deploy must run AgentCard tasks only on AgentCard infrastructure changes"
+require_text "$DEPLOY_COMMAND" 'then every eligible one runs on the fleet, with no separate AgentCard gate or election.' "/deploy must keep AgentCard tasks inside the smoke lane when they run"
 require_text "$DEPLOY_COMMAND" '`releasedCents=0`' "the AgentCard release stall must keep its exact signature"
 require_text "$DEPLOY_COMMAND" "agentcard_release_stall" "the AgentCard release stall must be triaged as a resource skip"
 require_text "$ROOT_DIR/scripts/deploy_test_cycle.py" 'AGENTCARD_RELEASE_STALL_CODE = "agentcard_release_stall"' "the staged runner must classify the AgentCard release stall"
