@@ -401,3 +401,55 @@ export async function releaseCliCredentials(
   await swap(caller.userId, integrationId, state, { kind: KIND, paths, envelope: secured(files) });
   return { released: true };
 }
+
+/** A server-side lease outlives sandbox start-up, the 30s command and capture together. */
+const OWNER_SIDE_LEASE_MS = 180_000;
+
+/**
+ * Lease the OWNER's bundle for a teammate's shared run that executes in an
+ * owner-side sandbox (cliSharedNativeRun.ts). The files go only into that
+ * sandbox, never to the teammate; `holder` (the teammate's agent and task)
+ * fences the release, and the owner's own sessions cannot release it.
+ */
+export async function acquireOwnerCliLease(
+  ownerUserId: string,
+  integrationId: string,
+  holder: { agentId: string; taskId: string }
+): Promise<{ token: string; command: string; paths: string[]; files: CliCredentialFile[] }> {
+  const connection = await ownedCli(ownerUserId, integrationId);
+  if (connection.status !== 'CONNECTED') throw new CliIntegrationError(409, 'CLI is not connected');
+  const paths = declaredPaths(connection.config);
+  const state = await loadState(ownerUserId, integrationId);
+  if (state.lease)
+    throw new CliIntegrationError(
+      409,
+      state.lease.expiresAt <= Date.now()
+        ? 'CLI credential lease expired; reconnect this CLI'
+        : 'CLI credentials are in use by another command'
+    );
+  const files = validateCliCredentialFiles(opened(state), paths);
+  const token = randomUUID();
+  const lease = { token, ...holder, expiresAt: Date.now() + OWNER_SIDE_LEASE_MS };
+  await swap(ownerUserId, integrationId, state, { ...state, lease });
+  return {
+    token,
+    command: String((connection.config as Prisma.JsonObject).command),
+    paths,
+    files,
+  };
+}
+
+/** Return the owner-side lease with the files the command left (refreshed logins persist). */
+export async function releaseOwnerCliLease(
+  ownerUserId: string,
+  integrationId: string,
+  holder: { agentId: string; taskId: string },
+  token: string,
+  value: CliCredentialFile[]
+): Promise<void> {
+  const paths = declaredPaths((await ownedCli(ownerUserId, integrationId)).config);
+  const files = validateCliCredentialFiles(value, paths);
+  const state = await loadState(ownerUserId, integrationId);
+  assertLease(state, { userId: ownerUserId, ...holder }, token);
+  await swap(ownerUserId, integrationId, state, { kind: KIND, paths, envelope: secured(files) });
+}

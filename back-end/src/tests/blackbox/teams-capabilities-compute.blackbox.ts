@@ -209,3 +209,58 @@ test('shared compute never reaches a user session, a sandbox or a Mac resolver',
   });
   assert.notEqual(optOut?.accessToken, gpt.accessToken);
 });
+
+test("team lease usage lands on the owner's account, only while the share is current", async () => {
+  const f = await teamFixture('compute-usage');
+  const shared = await seedCompute(f.owner.userId, 'claude_code');
+  await share(f, shared.id);
+  const lineageKey = `teamcap:${randomUUID()}`;
+  const leased = await lease(f.reader.userId, 'claude', { lineageKey, agentId: randomUUID() });
+  assert.equal(leased?.source, 'team');
+  const lineage = await prisma.computeTokenLineageLease.findUniqueOrThrow({
+    where: { lineageKey },
+  });
+  assert.equal(lineage.userId, f.reader.userId, 'the lease records which teammate holds it');
+
+  let minute = 0;
+  const heartbeat = async (usedPct: number, body: Record<string, unknown> = {}) => {
+    minute += 1; // each report is newer than the 15s write throttle
+    const res = await call('/api/integrations/compute-code/token/lineage-heartbeat', {
+      method: 'POST',
+      headers: apiKeyHeaders(f.reader.userId),
+      body: {
+        lineageKey,
+        integrationId: shared.id,
+        usage: {
+          observedAt: new Date(Date.now() - 600_000 + minute * 60_000).toISOString(),
+          fiveHour: { usedPct, resetsAt: new Date(Date.now() + 3_600_000).toISOString() },
+          source: 'response',
+          status: 'allowed',
+        },
+        ...body,
+      },
+    });
+    expectStatus(res, 200, 'lineage heartbeat');
+    return res.data.usageRecorded as boolean;
+  };
+  const ownerUsage = async () =>
+    (await prisma.integration.findUniqueOrThrow({ where: { id: shared.id } })).usage5hUsedPct;
+
+  assert.equal(await heartbeat(41), true, 'team usage recorded');
+  assert.equal(await ownerUsage(), 41, "on the owner's shared row");
+  const other = await seedCompute(f.owner.userId, 'claude_code');
+  assert.equal(await heartbeat(55, { integrationId: other.id }), false, 'only the leased row');
+  assert.equal(
+    (await prisma.integration.findUniqueOrThrow({ where: { id: other.id } })).usage5hUsedPct,
+    null
+  );
+
+  await unshare(f, shared.id);
+  assert.equal(await heartbeat(77), false, 'no longer shared');
+  assert.equal(await ownerUsage(), 41, 'unchanged after unshare');
+  await share(f, shared.id);
+  assert.equal(await heartbeat(62), true, 'shared again');
+  await ownerLeaves(f);
+  assert.equal(await heartbeat(90), false, 'owner left the team');
+  assert.equal(await ownerUsage(), 62);
+});

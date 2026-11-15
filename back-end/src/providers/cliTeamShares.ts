@@ -9,9 +9,9 @@
  *   native credential lease (acquire) ──────► refused: credential files never leave
  *                                            the owner's environment
  *
- * A native-template CLI keeps its login only in its owner's own code sessions,
- * which cannot run commands for a teammate, so running it returns a clear error
- * instead of leasing credentials. Every call revalidates the grant
+ * A native-template CLI runs in a fresh sandbox started from its owner's
+ * template, with the owner's credential files written there server-side
+ * (cliSharedNativeRun.ts); they are never leased to the teammate. Every call revalidates the grant
  * (resolveTeamDataAccess): unshare, disconnect, an invited-only reader or an
  * owner who left the team ends access at once.
  *
@@ -30,9 +30,6 @@ export interface CliShare {
   owner_name: string | null;
 }
 
-/** Why a teammate cannot run a shared native-template CLI (no credential lease instead). */
-export const SHARED_NATIVE_CLI_UNAVAILABLE =
-  "This shared CLI keeps its login in its owner's environment, which cannot run commands for teammates yet. Ask the owner to run it, or connect the CLI yourself.";
 /** A shared CLI whose owner login was never captured: its output cannot be scrubbed. */
 export const SHARED_CLI_UNPROTECTED =
   'This shared CLI has no stored login Rose can keep out of its output, so it cannot run for teammates. Ask the owner to connect the CLI again.';
@@ -127,10 +124,10 @@ export async function listSharedCliIntegrations(userId: string) {
     const config = row === undefined ? null : cliConfig(row.config);
     if (row === undefined || config === null) return [];
     const view = { ...cliView(row), shared: shareOf(grant) };
-    if (config.native_template === true)
-      return [{ ...view, status: 'failed', error: SHARED_NATIVE_CLI_UNAVAILABLE }];
     if (!bundles.some((item) => item.userId === row.userId && item.accountId === row.id))
       return [{ ...view, status: 'failed', error: SHARED_CLI_UNPROTECTED }];
+    // A native CLI runs in a fresh sandbox from its owner's template (cliSharedNativeRun.ts).
+    if (config.native_template === true) return [view];
     const session = sessions.find((candidate) => candidate.id === config.code_session_id);
     if (session?.userId !== row.userId)
       return [
@@ -172,6 +169,11 @@ function credentialStrings(text: string): string[] {
 export async function sharedCliSecrets(ownerUserId: string, integrationId: string) {
   const texts = await cliCredentialFileValues(ownerUserId, integrationId);
   if (texts === null) throw new CliIntegrationError(409, SHARED_CLI_UNPROTECTED);
+  return secretsOf(texts);
+}
+
+/** Every redactable value of decoded credential files (whole, lines, key=value, JSON), longest first. */
+export function secretsOf(texts: string[]): string[] {
   return [
     ...new Set(texts.flatMap(credentialStrings).filter((v) => v.length >= MIN_SECRET_LENGTH)),
   ].sort((a, b) => b.length - a.length);

@@ -19,12 +19,14 @@ import {
 import { buildNativeCliTemplate } from './nativeCliTemplateBuilder';
 import { initializeCliCredentials } from './cliNativeCredentials';
 import { withCliPublicationLease, type CliPublicationAuth } from './cliPublicationLease';
+import { scrubCliResult, sharedCliSecrets, usableCliIntegration } from './cliTeamShares';
+import { readReceipt } from './cliReceipts';
+export { readReceipt } from './cliReceipts';
 import {
-  SHARED_NATIVE_CLI_UNAVAILABLE,
-  scrubCliResult,
-  sharedCliSecrets,
-  usableCliIntegration,
-} from './cliTeamShares';
+  runSharedNativeCli,
+  startOwnerCliSandbox,
+  type OwnerCliSandboxFactory,
+} from './cliSharedNativeRun';
 
 const log = createLogger('CliIntegrations');
 
@@ -482,19 +484,21 @@ export async function runCliIntegration(
   id: string,
   args: string[],
   requestId: string,
-  execute: typeof executeTemplateCli = executeTemplateCli
+  deps: { execute?: typeof executeTemplateCli; startOwnerSandbox?: OwnerCliSandboxFactory } = {}
 ): Promise<CliResult> {
+  const execute = deps.execute ?? executeTemplateCli;
   const { row, shared } = await usableCliIntegration(caller.userId, id);
   const config = cliConfig(row.config)!;
-  // Native logins are leased only to their owner's own sessions; never to a teammate.
-  if (shared !== null && config.native_template)
-    throw new CliIntegrationError(409, SHARED_NATIVE_CLI_UNAVAILABLE);
-  if (config.native_template)
+  if (config.native_template && shared === null)
     throw new CliIntegrationError(
       409,
       'Use the installed native CLI or rose cli native for this connection'
     );
-  if (row.status !== 'CONNECTED' || !config.code_session_id || !config.command)
+  if (
+    row.status !== 'CONNECTED' ||
+    !config.command ||
+    (!config.native_template && !config.code_session_id)
+  )
     throw new CliIntegrationError(409, 'CLI is not connected');
   if (caller.taskId === null) throw new CliIntegrationError(403, 'A code session is required');
   const task = await prisma.claudeCodeSession.findUnique({
@@ -513,6 +517,18 @@ export async function runCliIntegration(
   if (previous !== null) return readReceipt(previous.metadata, fingerprint);
   // Opened before anything runs: an unreadable bundle must never return raw output.
   const secrets = shared === null ? [] : await sharedCliSecrets(row.userId, id);
+  // A teammate's native CLI runs in a fresh sandbox from its OWNER's template.
+  if (config.native_template)
+    return runSharedNativeCli({
+      caller: { ...caller, taskId: caller.taskId },
+      ownerUserId: row.userId,
+      integrationId: id,
+      args,
+      receiptId,
+      fingerprint,
+      secrets,
+      start: deps.startOwnerSandbox ?? startOwnerCliSandbox,
+    });
   // Lease before claiming: a busy template is retryable because nothing ran.
   const lease = `cli:${receiptId}`;
   const now = new Date();
@@ -602,33 +618,4 @@ export async function runCliIntegration(
       data: { leaseOwner: null, leaseExpiresAt: null, lastActiveAt: new Date() },
     });
   }
-}
-
-export function readReceipt(metadata: Prisma.JsonValue, fingerprint: string): CliResult {
-  const receipt =
-    metadata !== null && typeof metadata === 'object' && !Array.isArray(metadata)
-      ? metadata.cliRun
-      : null;
-  if (
-    receipt === null ||
-    typeof receipt !== 'object' ||
-    Array.isArray(receipt) ||
-    receipt.fingerprint !== fingerprint
-  )
-    throw new CliIntegrationError(409, 'request_id was already used for a different command');
-  const result = receipt.result;
-  if (
-    receipt.status !== 'completed' ||
-    result === null ||
-    typeof result !== 'object' ||
-    Array.isArray(result) ||
-    typeof result.exit_code !== 'number' ||
-    typeof result.stdout !== 'string' ||
-    typeof result.stderr !== 'string'
-  )
-    throw new CliIntegrationError(
-      409,
-      'This request is running or its outcome is unknown; it will not be executed again'
-    );
-  return { exit_code: result.exit_code, stdout: result.stdout, stderr: result.stderr };
 }

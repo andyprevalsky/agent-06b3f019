@@ -598,7 +598,14 @@ async function leaseComputeTokenForUser(
           now,
           lineage
         );
-        if (teamToken) return settle(teamToken);
+        if (teamToken) {
+          // The holder: usage reports on the owner's row count only while it is still shared.
+          await prisma.computeTokenLineageLease.update({
+            where: { lineageKey: lineage.lineageKey },
+            data: { userId },
+          });
+          return settle(teamToken);
+        }
       }
     }
 
