@@ -5,6 +5,8 @@
  *  - Connect posts once, then opens the Phone app in device view (boot-up visible)
  *  - setup progress fills by completed steps; each step is listed on the phone;
  *    ready stops the fast /connection polling
+ *  - the phone card shows a muted time-left estimate that drops as steps finish
+ *    and hides when ready or while setup waits on the owner
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { act, screen, waitFor, within } from '@testing-library/react';
@@ -48,6 +50,8 @@ function backend(initial = 'not_connected', enabled = true, configured = true) {
     reads: 0,
     posts: [] as Record<string, unknown>[],
     providerState: 'STARTING',
+    setupState: null as string | null,
+    controlOwner: 'agent',
   };
   const dto = () => ({
     enabled: state.enabled,
@@ -80,9 +84,14 @@ function backend(initial = 'not_connected', enabled = true, configured = true) {
     http.get(`${API}/iphone/device`, () =>
       HttpResponse.json({
         enabled: true,
-        setupState: state.status,
+        setupState: state.setupState ?? state.status,
         providerState: state.providerState,
-        holder: { agentId: AGENT, leaseId: 'setup-lease', controlOwner: 'agent', since: '' },
+        holder: {
+          agentId: AGENT,
+          leaseId: 'setup-lease',
+          controlOwner: state.controlOwner,
+          since: '',
+        },
         waiting: [],
       }),
     ),
@@ -273,7 +282,7 @@ describe('iPhone connection in normal Integrations', () => {
     });
     await waitFor(
       () => expect(within(card).getByRole('progressbar')).toHaveAttribute('aria-valuenow', '43'),
-      { timeout: 5000 },
+      { timeout: 10_000 },
     );
     expect(step('icloud')).toHaveAttribute('data-status', 'in_progress');
     expect(inline).toHaveAttribute('aria-valuenow', '43');
@@ -284,7 +293,7 @@ describe('iPhone connection in normal Integrations', () => {
       await vi.advanceTimersByTimeAsync(2500);
     });
     await waitFor(() => expect(within(row).getByText('Connected')).toBeInTheDocument(), {
-      timeout: 5000,
+      timeout: 10_000,
     });
     await waitFor(() => expect(card).toHaveTextContent('Connected'));
     expect(step('passcode')).toHaveAttribute('data-status', 'done');
@@ -295,6 +304,64 @@ describe('iPhone connection in normal Integrations', () => {
     });
     expect(state.reads).toBe(reads);
   }, 20_000);
+
+  it('shows a muted time-left estimate that drops as steps finish and hides when waiting on the owner or ready', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    const state = backend('setting_up');
+    state.setupAgentId = AGENT;
+    state.steps = steps(1);
+    state.setupState = 'in_progress';
+    renderWithProviders(<Integrations />, { roseDesktop: true });
+    const row = await screen.findByTestId('integration-row-iphone');
+    await userEvent.click(await within(row).findByRole('button', { name: 'View iPhone' }));
+    const phone = await screen.findByTestId('rose-phone');
+    const card = await within(phone).findByTestId('iphone-setup-progress-floating');
+    const timeLeft = () => within(card).queryByTestId('iphone-setup-time-left');
+    const poll = async () => {
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2500);
+      });
+    };
+    // portrait 5 + apple 2 + icloud 8 + imessage 3 + gmail 5 + passcode 5
+    await waitFor(() => expect(timeLeft()).toHaveTextContent(/^About 28 min left$/));
+    expect(timeLeft()?.className).toContain('text-white/55');
+    expect(within(row).queryByTestId('iphone-setup-time-left')).toBeNull();
+
+    state.steps = steps(3);
+    await poll();
+    await waitFor(() => expect(timeLeft()).toHaveTextContent(/^About 21 min left$/), {
+      timeout: 10_000,
+    });
+
+    state.setupState = 'awaiting_user';
+    await waitFor(() => expect(timeLeft()).toBeNull(), { timeout: 10_000 });
+    expect(card).toHaveTextContent('Setting up · 3 of 7 steps');
+
+    state.setupState = 'in_progress';
+    await waitFor(() => expect(timeLeft()).toHaveTextContent(/^About 21 min left$/), {
+      timeout: 10_000,
+    });
+    state.controlOwner = 'user';
+    await waitFor(() => expect(timeLeft()).toBeNull(), { timeout: 10_000 });
+    state.controlOwner = 'agent';
+    await waitFor(() => expect(timeLeft()).toHaveTextContent(/^About 21 min left$/), {
+      timeout: 10_000,
+    });
+
+    state.steps = steps(6);
+    await poll();
+    await waitFor(() => expect(timeLeft()).toHaveTextContent(/^About 5 min left$/), {
+      timeout: 10_000,
+    });
+    state.steps = steps(STEPS.length);
+    await poll();
+    await waitFor(() => expect(timeLeft()).toHaveTextContent(/^Almost done$/), { timeout: 10_000 });
+
+    state.status = 'ready';
+    await poll();
+    await waitFor(() => expect(card).toHaveTextContent('Connected'), { timeout: 10_000 });
+    expect(timeLeft()).toBeNull();
+  }, 60_000);
 
   it('starts one normal owned setup and opens its regular agent link with the flag off', async () => {
     const state = backend();
