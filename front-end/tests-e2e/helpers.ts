@@ -239,16 +239,21 @@ export async function acrossAppReload<T>(
 
 /**
  * Waits for this document's app-version check (src/lib/appVersion.ts, published on
- * <html data-version-check>) and fails while the app reloads itself onto a newer build, so a
- * step ending with it inside acrossAppReload is repeated on the new document. Production
- * builds only: the dev server has no build id and never checks.
+ * <html data-version-check> as the load event runs) and fails while the app reloads itself onto
+ * a newer build, so a step ending with it inside acrossAppReload is repeated on the new
+ * document. Returns false for a bundle that predates the attribute (a rollback, or a run
+ * against an older deployment): it cannot report a settled check. Production builds only: the
+ * dev server has no build id and never checks.
  */
-export async function expectAppVersionSettled(page: Page): Promise<void> {
+export async function expectAppVersionSettled(page: Page): Promise<boolean> {
+  await page.waitForLoadState('load');
   const root = page.locator('html');
+  if ((await root.getAttribute('data-version-check')) === null) return false;
   await expect(root).toHaveAttribute('data-version-check', /^(idle|pending|reloading)$/);
   if ((await root.getAttribute('data-version-check')) === 'reloading') {
     throw new Error('the app is reloading onto a newer build');
   }
+  return true;
 }
 
 export async function expectInjectedSessionRecognized(page: Page): Promise<void> {

@@ -121,6 +121,8 @@ for (const width of [1280, 390]) {
     // (run 43682337505 reloaded mid-assertion at :188). The Vite dev server has no build id.
     const versionFile = await page.request.get(`${FRONTEND_URL}/version.json`);
     const served = (await versionFile.json().catch(() => null)) as { buildId?: string } | null;
+    // Whether this bundle publishes <html data-version-check> (expectAppVersionSettled).
+    let versionCheckObservable = Boolean(served?.buildId);
     let promoted: string | null = null;
     let holdPromotedCheck = false;
     const versionReloads: string[] = [];
@@ -158,7 +160,7 @@ for (const width of [1280, 390]) {
           await navigate();
           await openSidebar();
           await expect(group).toBeVisible();
-          if (served?.buildId) await expectAppVersionSettled(page);
+          if (versionCheckObservable) versionCheckObservable = await expectAppVersionSettled(page);
         },
         1,
       );
@@ -224,7 +226,9 @@ for (const width of [1280, 390]) {
     }
     const saved = await order();
     // The deploy of run 43682337505: promoted between this page's first load and its reload.
-    if (served?.buildId) {
+    // Only a bundle that reports its version check can be held to it (a pre-attribute bundle
+    // would just replay the race).
+    if (served?.buildId && versionCheckObservable) {
       promoted = `${served.buildId}-promoted`;
       holdPromotedCheck = true;
     }
