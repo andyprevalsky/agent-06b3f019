@@ -31,6 +31,7 @@ import { persistBrowserSessionRow } from './sessionPersist';
 import {
   mintTilionConnectUrl,
   mintTilionLiveViewUrl,
+  postTilionSession,
   TilionApiError,
   tilionRequest,
   tilionRequestWithMeta,
@@ -179,26 +180,21 @@ async function postSession(
   // One key per logical create: a retried request after a lost reply returns
   // the same session instead of paying for a second browser.
   const idempotencyKey = `rose-${randomUUID()}`;
-  const record = await tilionRequest<TilionSessionRecord>('/v1/session', {
-    method: 'POST',
-    idempotencyKey,
-    retryOnTimeout: true,
-    body: {
-      ttl,
-      idle_timeout: idleTimeout,
-      // Live probe: cdp_observe solved neither reCAPTCHA v2 nor Turnstile and
-      // adds 100-250 ms per navigation, so it is opt-in.
-      cdp_observe: browserProviderEnabled('TILION_CDP_OBSERVE', false),
-      // Direct egress has no exit geo: the region alone places the browser.
-      ...(proxyType === 'direct'
-        ? { residential: false }
-        : {
-            residential: true,
-            proxy_type: proxyType,
-            geo: geoForSpecificity(location, specificity),
-          }),
-      ...(region ? { region } : {}),
-    },
+  const record = await postTilionSession<TilionSessionRecord>(idempotencyKey, {
+    ttl,
+    idle_timeout: idleTimeout,
+    // Live probe: cdp_observe solved neither reCAPTCHA v2 nor Turnstile and
+    // adds 100-250 ms per navigation, so it is opt-in.
+    cdp_observe: browserProviderEnabled('TILION_CDP_OBSERVE', false),
+    // Direct egress has no exit geo: the region alone places the browser.
+    ...(proxyType === 'direct'
+      ? { residential: false }
+      : {
+          residential: true,
+          proxy_type: proxyType,
+          geo: geoForSpecificity(location, specificity),
+        }),
+    ...(region ? { region } : {}),
   });
   // Exact-cleanup evidence: the paid browser exists from here on. Logged before
   // any further await so a process dying during validation still leaves the id
