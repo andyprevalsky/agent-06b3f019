@@ -75,6 +75,12 @@ export const savedCredentialCases: Case[] = [
           'Saved password was not typed through the backend-owned shared-store flow'
         );
         assert.equal(JSON.stringify(result.data).includes(secret), false);
+        // The fill taps exactly the verifier's bound point before typing.
+        assert.ok(
+          h.physicalOperations.some(
+            (op) => op.op === 'input.tap' && op.kw.x === 50 && op.kw.y === 70
+          )
+        );
         const replay = await send();
         assert.equal(replay.data.operation?.status, 'SUCCEEDED');
         assert.deepEqual(replay.data.operation?.result, {

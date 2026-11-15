@@ -21,6 +21,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(ROOT.parent / "scripts" / "lib"))
 
 from _test_utils import BlackboxResult, set_mock_handler, teardown_mock
 
@@ -3624,10 +3625,11 @@ async def test_phone_setup_settings_actual_handler_observation():
         assert "Do not disable iCloud" in wire and "Historical download completion" in wire
         assert "Do not wait for configurationReady to sign in" in wire
         assert "latest successful operation is screen.text for the current interaction" in wire
+        assert "first dismiss them with an observed tap" in wire and "then observe and fill again" in wire
         assert "Preserve the original authorized phone task" in wire
         import hashlib
         from domains.spawn_browser_agent_v3.phone import PHONE_GUIDANCE
-        assert hashlib.sha256(PHONE_GUIDANCE.encode()).hexdigest() == "6666d2afe09426372f9d2a3dba63e2b19a7ed4621459fe1f80e2c25d8fcc72bb", "Ordinary enabled guide must match the saved-credential binding contract"
+        assert hashlib.sha256(PHONE_GUIDANCE.encode()).hexdigest() == "3116cb5f79846dcf410cef87fe2091e382dcd0dd0ae058671ea0acc1f2257bb5", "Ordinary enabled guide must match the saved-credential binding contract"
         for marker in (None, False, "true"):
             plain_setup = {key: value for key, value in setup.items() if key != "googlePasscodeExceptionAllowed"}
             if marker is not None:

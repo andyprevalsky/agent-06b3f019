@@ -6,6 +6,7 @@ import { dedupeCodeDisplays } from '../hooks/codeDisplayIdentity';
 import { EMPTY_DISPLAY_MEDIA_GROUPING, groupDisplayMedia } from './inline-media/displayMediaGroups';
 import { useAgentExchangeGroups } from './useAgentExchangeGroups';
 import { useTrajectoryWorkGroups } from './useTrajectoryWorkGroups';
+import { groupToolArtifacts } from './toolArtifactGroups';
 import { isHiddenTrajectoryRow } from './trajectoryRowVisibility';
 import type { WebSearchTurnGrouping } from './webSearchTurnGroups';
 export function useMessageListProjection({
@@ -30,9 +31,13 @@ export function useMessageListProjection({
   onAnimationComplete: () => void;
 }) {
   const roseDesktop = useRoseDesktop();
+  const artifactGrouping = useMemo(() => groupToolArtifacts(filteredMessages), [filteredMessages]);
   const visibleMessages = useMemo(
-    () => (roseDesktop ? dedupeCodeDisplays(filteredMessages) : filteredMessages),
-    [filteredMessages, roseDesktop],
+    () =>
+      roseDesktop
+        ? dedupeCodeDisplays(artifactGrouping.visibleMessages)
+        : artifactGrouping.visibleMessages,
+    [artifactGrouping, roseDesktop],
   );
   const displayGrouping = useMemo(
     () => (roseDesktop ? groupDisplayMedia(visibleMessages) : EMPTY_DISPLAY_MEDIA_GROUPING),
@@ -71,5 +76,11 @@ export function useMessageListProjection({
       }),
     [visibleMessages, roseDesktop, workGroups, exchanges, webSearchGrouping, displayGrouping],
   );
-  return { renderedMessages, displayGrouping, localExchanges, workGroups };
+  return {
+    renderedMessages,
+    displayGrouping,
+    localExchanges,
+    workGroups,
+    artifactsByOwner: artifactGrouping.byOwner,
+  };
 }
