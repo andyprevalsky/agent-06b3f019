@@ -332,7 +332,13 @@ class Fly:
 
         # Any request, write or not, is replayed when it provably never left.
         idempotent = method == "GET" if replay is None else replay
-        return replay_transient(once, TRANSIENT_ATTEMPTS, transient if idempotent else not_sent)
+
+        def send():
+            return replay_transient(once, TRANSIENT_ATTEMPTS, transient if idempotent else not_sent)
+
+        if method == "POST" and suffix == "/lease" and not self.nonce:
+            return self.wait_out_orphaned_lease(send)
+        return send()
 
     def keep_lease(self, refresh_after=LEASE_REFRESH_AFTER_SECONDS):
         """Extend our own lease during a long native wait (fly-go RefreshLease).
@@ -355,20 +361,22 @@ class Fly:
             raise ValueError("Native lease refresh did not extend this owner's lease")
         self.leased_at = monotonic()
 
-    def acquire_lease(self):
+    def wait_out_orphaned_lease(self, send):
         """Acquire, waiting out an orphaned lease from a dead controller of this pool.
 
         2026-11-15 run 43669305097: the controller recovering a predecessor that
-        died mid-wave got 409 on a Machine lease the predecessor never released. Controllers are serialized by the global deployment lease, so
-        a live holder with our description can only be a dead controller's
-        orphan; it lapses at most LEASE_TTL_SECONDS after it was taken, which
-        was before now. Poll against a local monotonic deadline (no comparison
-        with Fly's clock). Any other holder fails at once.
+        died mid-wave got 409 on a Machine lease the predecessor never released.
+        Controllers are serialized by the global deployment lease, so a live
+        holder with our description can only be a dead controller's orphan; it
+        lapses at most LEASE_TTL_SECONDS after it was taken, which was before
+        now. Poll against a local monotonic deadline (no comparison with Fly's
+        clock), re-asserting managed ownership before every retried acquire.
+        Any other holder fails at once.
         """
         deadline = monotonic() + LEASE_TTL_SECONDS + LEASE_ORPHAN_MARGIN_SECONDS
         while True:
             try:
-                return self.request("POST", "/lease", {"ttl": 500, "description": LEASE_DESCRIPTION})["data"]["nonce"]
+                return send()
             except HTTPError as exc:
                 if exc.code != 409:
                     raise
@@ -377,23 +385,29 @@ class Fly:
                 except HTTPError as missing:
                     if missing.code != 404:
                         raise
-                    continue  # the lease lapsed between the 409 and this read: acquire again
-                if holder.get("description") != LEASE_DESCRIPTION or monotonic() >= deadline:
-                    raise ValueError(
-                        f"Machine lease is held by {holder.get('owner')!r} "
-                        f"({holder.get('description')!r}, expires_at {holder.get('expires_at')!r})"
-                    ) from exc
-                print(
-                    f"Waiting out orphaned {LEASE_DESCRIPTION} lease on {self.path} "
-                    f"(expires_at {holder.get('expires_at')!r})",
-                    file=sys.stderr,
-                    flush=True,
-                )
-                sleep(LEASE_ORPHAN_POLL_SECONDS)
+                    holder = None  # the lease lapsed between the 409 and this read: acquire again at once
+                if holder is not None:
+                    if holder.get("description") != LEASE_DESCRIPTION or monotonic() >= deadline:
+                        raise ValueError(
+                            f"Machine lease is held by {holder.get('owner')!r} "
+                            f"({holder.get('description')!r}, expires_at {holder.get('expires_at')!r})"
+                        ) from exc
+                    print(
+                        f"Waiting out orphaned {LEASE_DESCRIPTION} lease on {self.path} "
+                        f"(expires_at {holder.get('expires_at')!r})",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                    sleep(LEASE_ORPHAN_POLL_SECONDS)
+            owned = getattr(self, "assert_managed_mutable", None)
+            if callable(owned):
+                owned()
 
     @contextmanager
     def lease(self):
-        self.nonce = self.acquire_lease()
+        self.nonce = self.request("POST", "/lease", {"ttl": 500, "description": "cooperative-worker-pool"})["data"][
+            "nonce"
+        ]
         self.leased_at = monotonic()
         try:
             yield
