@@ -41816,6 +41816,7 @@ async def _exercise_native_phone_auth_manager(signal="__AUTH_ASSISTANCE_COMPLETE
         "browser_url": "https://browser.test",
         "cdp_url": "ws://browser",
         "step_count": 3,
+        "pending_tool_call_id": "native-auth-call",
     }
 
     class Handle:
@@ -41911,6 +41912,14 @@ async def _exercise_native_phone_auth_manager(signal="__AUTH_ASSISTANCE_COMPLETE
     resumed = calls[1]["args"][12]
     assert resumed["auth_target"] == target and resumed["critical_reason"] == "password"
     assert resumed["approval_type"] == (h.AUTH_ASSISTANCE_DECLINED if signal == "__REJECTED__" else "native_auth_assistance")
+    if signal == h.AUTH_ASSISTANCE_RESEND_CODE_RESPONSE:
+        assert resumed["auth_user_action"] == {
+            "action": "resend_code", "request_id": "attention-1", "tool_call_id": "native-auth-call",
+        }
+        titles = [getattr(event, "title", "") for event in events]
+        assert "User Asked To Resend The Code" in titles, titles
+    else:
+        assert "auth_user_action" not in resumed
     assert calls[1]["args"][5] == "browser-session" and calls[1]["args"][6] == "ws://browser"
     native = [e.metadata for e in events if (getattr(e, "metadata", None) or {}).get("requestUserAuthentication")]
     assert len(native) == 2
@@ -41937,6 +41946,50 @@ async def test_native_phone_auth_manager_rejection_preserves_target():
 
 async def test_native_phone_auth_generation_reattaches_exact_request():
     await _exercise_native_phone_auth_manager(handoff=True)
+
+
+async def test_native_phone_auth_resend_code_resumes_with_typed_intent():
+    from domains.spawn_browser_agent_v3 import handler as h
+    await _exercise_native_phone_auth_manager(signal=h.AUTH_ASSISTANCE_RESEND_CODE_RESPONSE)
+
+
+def test_native_phone_auth_resend_code_answers_pending_tool_call():
+    """The owner's Resend tap reaches the browser model as the pending call's real result."""
+    import json
+    from domains.spawn_browser_agent_v3 import handler as h
+
+    pending = {"success": True, "request_id": "attention-1", "criticalReason": "verification_code"}
+    call = {"id": "native-auth-call", "type": "function",
+            "function": {"name": "request_user_assistance_for_authentication", "arguments": "{}"}}
+    state = {
+        "auth_user_action": {"action": "resend_code", "request_id": "attention-1", "tool_call_id": "native-auth-call"},
+        "browser_turn_messages": [
+            {"role": "user", "content": "goal"},
+            {"role": "assistant", "content": "", "tool_calls": [call]},
+            {"role": "tool", "tool_call_id": "native-auth-call",
+             "name": "request_user_assistance_for_authentication", "content": json.dumps(pending)},
+        ],
+        "action_history": [{"step": 4, "action": "request_user_assistance_for_authentication", "result": dict(pending)}],
+    }
+    h._finalize_auth_resend_request(state)
+    messages = state["browser_turn_messages"]
+    assert len(messages) == 3, "Resend must not inject a synthetic message"
+    answered = json.loads(messages[2]["content"])
+    assert answered["status"] == "resend_code_requested" and answered["user_action"] == "resend_code"
+    assert answered["request_id"] == "attention-1" and answered["success"] is False
+    assert "Resend code" in answered["message"]
+    assert state["action_history"][0]["result"]["status"] == "resend_code_requested"
+    stale = {**state, "auth_user_action": {**state["auth_user_action"], "request_id": "other"},
+             "browser_turn_messages": [dict(m) for m in messages[:2]] + [{**messages[2], "content": json.dumps(pending)}]}
+    try:
+        h._finalize_auth_resend_request(stale)
+    except h.BrowserResumeStoreError:
+        pass
+    else:
+        raise AssertionError("A resend for another request answered this tool call")
+    plain = {"browser_turn_messages": [], "action_history": []}
+    h._finalize_auth_resend_request(plain)
+    assert plain == {"browser_turn_messages": [], "action_history": []}
 
 
 

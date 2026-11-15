@@ -282,6 +282,19 @@ logger = structlog.get_logger()
 
 # Resume marker for a sign-in-help request the user declined.
 AUTH_ASSISTANCE_DECLINED = "auth_assistance_declined"
+# Typed one-tap owner action on a native phone code request (no user text).
+AUTH_ASSISTANCE_RESEND_CODE_RESPONSE = "__AUTH_ASSISTANCE_RESEND_CODE__"
+AUTH_RESEND_CODE_RESULT = {
+    "success": False,
+    "status": "resend_code_requested",
+    "user_action": "resend_code",
+    "message": (
+        "The user did not receive the code and tapped Resend code; no code was entered. "
+        "Observe the phone, request a new code with the provider's own control (for example "
+        "Resend code, or Try another way then a text message), then request the user's help "
+        "for the new code again."
+    ),
+}
 BROWSER_PROGRESS_TITLE = "Browser Agent In Progress"
 
 
@@ -7251,6 +7264,36 @@ def _finalize_rejected_browser_approval(state: Dict[str, Any]) -> None:
         container["write_lock_approvals"] = approvals
 
 
+def _finalize_auth_resend_request(state: Dict[str, Any]) -> None:
+    """Answer the pending native auth call with the owner's typed resend intent."""
+    resend = state.get("auth_user_action") or {}
+    if resend.get("action") != "resend_code":
+        return
+    call_id = resend.get("tool_call_id")
+    for message in reversed(state.get("browser_turn_messages") or []):
+        if (message.get("role") != "tool" or message.get("name") != "request_user_assistance_for_authentication"
+                or (call_id and message.get("tool_call_id") != call_id)):
+            continue
+        try:
+            result = json.loads(message.get("content") or "")
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(result, dict) or result.get("request_id") != resend.get("request_id"):
+            continue
+        if _resolve_browser_tool_result_for_resume(
+            state.get("browser_turn_messages") or [], pending_status=result.get("status"),
+            result_updates=AUTH_RESEND_CODE_RESULT, tool_call_id=message.get("tool_call_id"),
+        ):
+            break
+    else:
+        raise BrowserResumeStoreError("Resend code request has no saved matching tool result; prior context is required")
+    for entry in reversed(state.get("action_history") or []):
+        result = entry.get("result") or {}
+        if entry.get("action") == "request_user_assistance_for_authentication" and result.get("request_id") == resend.get("request_id"):
+            entry["result"] = {**result, **AUTH_RESEND_CODE_RESULT}
+            break
+
+
 def _copy_simulated_browser_resume_fields(source: Dict[str, Any], target: Dict[str, Any]) -> None:
     if not source.get("world_model_simulated"):
         return
@@ -8401,6 +8444,7 @@ async def _spawn_browser_agent_activity_v3_real(
             hydrated_resume = dict(await hydrate_resume_context(agent_id=agent_id, resume_state=write_lock_resume_state))
             if hydrated_resume.get("rejected_action") or hydrated_resume.get("approval_type") == AUTH_ASSISTANCE_DECLINED:
                 _finalize_rejected_browser_approval(hydrated_resume)
+            _finalize_auth_resend_request(hydrated_resume)
         except BrowserResumeStoreError as error:
             return {"status": "paused", "success": False, "pause_error": str(error),
                     "conversation_checkpoint": "unavailable",
@@ -15352,8 +15396,14 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                             yield terminal_event
                         return
                     user_declined = False
+                    user_resend = False
                     if request_id in getattr(workflow_instance, "_signal_responses", {}):
                         signal_response = workflow_instance._signal_responses.pop(request_id, None)
+                        user_resend = (
+                            isinstance(signal_response, str)
+                            and signal_response.strip() == AUTH_ASSISTANCE_RESEND_CODE_RESPONSE
+                            and (result.get("auth_target") or {}).get("kind") == "iphone"
+                        )
                         # A decline used to be read as "the user signed in": the
                         # task resumed on a signed-out page and asked again.
                         user_declined = (
@@ -15386,6 +15436,12 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                             write_lock_resume_state[payment_field] = prior_resume[payment_field]
                     _copy_browser_resume_continuity_fields(result, write_lock_resume_state)
                     _copy_simulated_browser_resume_fields(result, write_lock_resume_state)
+                    if user_resend:
+                        write_lock_resume_state["auth_user_action"] = {
+                            "action": "resend_code",
+                            "request_id": request_id,
+                            "tool_call_id": result.get("pending_tool_call_id"),
+                        }
                     if user_declined:
                         write_lock_resume_state = _rejected_browser_resume_state(
                             {**result, "approval_type": "auth_assistance"}, write_lock_resume_state)
@@ -15393,7 +15449,8 @@ class SpawnBrowserAgentManagerV3(ToolManager):
 
                     yield ToolEvent(
                         type=EventType.POST_MESSAGE,
-                        title="User Declined To Sign In" if user_declined else "User Assistance Received",
+                        title=("User Declined To Sign In" if user_declined else
+                               "User Asked To Resend The Code" if user_resend else "User Assistance Received"),
                         message="",
                         status=MessageStatus.FINISHED,
                         metadata={
