@@ -26613,12 +26613,37 @@ def test_predeploy_selector_machine_formats_at_cap():
 
 def test_predeploy_selector_runs_agentcard_lifecycle_tasks_as_smoke():
     from benchmarks.select_predeploy_benches_test import (
-        test_agentcard_sandbox_lifecycle_tasks_are_ordinary_smoke_with_isolated_fixtures,
+        test_agentcard_sandbox_lifecycle_tasks_are_smoke_floor_only_on_agentcard_infra_change,
     )
 
     for surface in ("local", "cloud"):
         with tempfile.TemporaryDirectory() as folder:
-            test_agentcard_sandbox_lifecycle_tasks_are_ordinary_smoke_with_isolated_fixtures(Path(folder), surface)
+            test_agentcard_sandbox_lifecycle_tasks_are_smoke_floor_only_on_agentcard_infra_change(Path(folder), surface)
+
+
+def test_predeploy_selector_gates_agentcard_tasks_on_agentcard_infra():
+    """Rule 5 (Andy 2026-11-15): AgentCard tasks run on /deploy only when AgentCard infra changed."""
+    from benchmarks.select_predeploy_benches_test import (
+        AGENTCARD_INFRA_DIFFS,
+        NON_AGENTCARD_DIFFS,
+        test_agentcard_infra_diff_keeps_hard_cap_scream,
+        test_agentcard_infra_diff_selects_every_agentcard_task,
+        test_catalog_agentcard_tasks_are_identified_from_catalog_fields,
+        test_deploy_prod_agentcard_lane_uses_selector_path_set,
+        test_non_agentcard_diff_selects_zero_agentcard_tasks,
+    )
+
+    test_catalog_agentcard_tasks_are_identified_from_catalog_fields()
+    test_deploy_prod_agentcard_lane_uses_selector_path_set()
+    for surface in ("local", "cloud"):
+        for changed in NON_AGENTCARD_DIFFS:
+            with tempfile.TemporaryDirectory() as folder:
+                test_non_agentcard_diff_selects_zero_agentcard_tasks(Path(folder), surface, changed)
+        for path in AGENTCARD_INFRA_DIFFS:
+            with tempfile.TemporaryDirectory() as folder:
+                test_agentcard_infra_diff_selects_every_agentcard_task(Path(folder), surface, path)
+    with tempfile.TemporaryDirectory() as folder:
+        test_agentcard_infra_diff_keeps_hard_cap_scream(Path(folder))
 
 
 async def _run_benchmark_subprocess_and_judge_cases(result, subprocess_cases, judge_cases):
@@ -28058,6 +28083,9 @@ async def run_all_tests():
     r.record("independent_runs_keep_distinct_records", test_independent_runs_keep_distinct_records)
     r.record("predeploy_selector_rejects_production_only", test_predeploy_selector_rejects_production_only_tasks)
     r.record("predeploy_selector_agentcard_lifecycle_smoke", test_predeploy_selector_runs_agentcard_lifecycle_tasks_as_smoke)
+    r.record(
+        "predeploy_selector_agentcard_infra_gate", test_predeploy_selector_gates_agentcard_tasks_on_agentcard_infra
+    )
     from benchmarks.select_predeploy_benches_test import (
         test_catalog_validation_requires_ready_task_deploy_category,
         test_selector_treats_explicit_deploy_opt_out_as_uncategorized,
