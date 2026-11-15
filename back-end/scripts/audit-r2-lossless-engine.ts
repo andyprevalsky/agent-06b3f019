@@ -810,9 +810,15 @@ async function invalidMirroredObjects(
   const manifestObj = objects.get('manifest.json');
   if (checkManifest && manifestObj !== undefined) {
     const archived = (await loadJson(archive, manifestObj.key)) as CheckpointManifest | null;
-    const names = (m: CheckpointManifest | null) => Object.keys(m?.artifacts ?? {}).sort();
+    // Names, sha256 and size of every artifact must match the checkpoint manifest.
+    const entries = (m: CheckpointManifest | null): string =>
+      JSON.stringify(
+        Object.entries(m?.artifacts ?? {})
+          .map(([name, a]) => [name, a?.sha256 ?? null, a?.size ?? null])
+          .sort((a, b) => String(a[0]).localeCompare(String(b[0])))
+      );
     if (archived === null) invalid.push('manifest.json: unreadable');
-    else if (names(archived).join(',') !== names(manifest).join(',')) {
+    else if (entries(archived) !== entries(manifest)) {
       invalid.push('manifest.json: artifacts differ from the checkpoint manifest');
     }
   }

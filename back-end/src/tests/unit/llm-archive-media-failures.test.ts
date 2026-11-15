@@ -125,6 +125,34 @@ async function main(): Promise<void> {
     assert.match(String((sttFinal.output?.error as { message?: string })?.message), /429/);
     assert.equal((sttFinal.output?.structured as { status?: number }).status, 429);
 
+    // (3b) STT error whose body read fails: the record is still closed with the status.
+    const unreadableRoot = newRoot();
+    respond = (url) =>
+      url.includes('elevenlabs')
+        ? new Response(
+            new ReadableStream({
+              start(controller) {
+                controller.error(new Error('body read failed'));
+              },
+            }),
+            { status: 502 }
+          )
+        : new Response(audio, { status: 200, headers: { 'content-type': 'audio/ogg' } });
+    await processInboundAttachments(
+      [{ url: 'https://media.example/voice.ogg', type: 'audio/ogg' }],
+      unreadableRoot.slice('user-'.length)
+    ).catch(() => undefined);
+    await drainLlmCaptures([
+      `sms-supervisor-${unreadableRoot.slice('user-'.length)}`,
+      unreadableRoot,
+    ]);
+    const unreadableFinal = finalOf(await records(unreadableRoot, 'sms_voice_note_stt'));
+    assert.match(
+      String((unreadableFinal.output?.error as { message?: string })?.message),
+      /body read failed/
+    );
+    assert.equal((unreadableFinal.output?.structured as { status?: number }).status, 502);
+
     // (4) STT ok but the audio write fails: the start record carries the audio itself.
     const inlineRoot = newRoot();
     blockMediaWrites(directory, inlineRoot);

@@ -265,7 +265,14 @@ async function transcribeVoiceNote(
   }
 
   if (!response.ok) {
-    const errorText = await response.text();
+    let errorText: string;
+    try {
+      errorText = await response.text();
+    } catch (error) {
+      // The body read failed: still close the record with what is known.
+      finishFailed(error, { status: response.status });
+      throw error;
+    }
     log.error('Voice note transcription failed', {
       status: response.status,
       error: errorText.substring(0, 300),

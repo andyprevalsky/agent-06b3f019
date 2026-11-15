@@ -121,7 +121,8 @@ async function testCodeMirrorValidation(): Promise<void> {
   const childId = uuid();
   const artifacts = ['cli-log.jsonl', 'worktree.tar.gz'];
   const names = ['manifest.json', ...artifacts];
-  const [childSession, truncated, rehashed, noSidecar, badManifest] = [
+  const [childSession, truncated, rehashed, noSidecar, badManifest, hashManifest] = [
+    uuid(),
     uuid(),
     uuid(),
     uuid(),
@@ -132,6 +133,19 @@ async function testCodeMirrorValidation(): Promise<void> {
     await mirrorSeq(rootId, id, 1, names);
   }
   await mirrorSeq(rootId, badManifest, 1, names, ['cli-log.jsonl']);
+  // Same artifact names, but the archived manifest records a different hash.
+  await mirrorSeq(rootId, hashManifest, 1, artifacts);
+  const tampered = checkpointManifest(artifacts);
+  tampered.artifacts['cli-log.jsonl'].sha256 = '0'.repeat(64);
+  assert.ok(
+    await archiveBytes({
+      rootAgentId: rootId,
+      objectPath: `code/${hashManifest}/1/manifest.json`,
+      body: Buffer.from(JSON.stringify(tampered)),
+      contentType: 'application/octet-stream',
+      createOnly: true,
+    })
+  );
   const object = (id: string, name: string) =>
     path.join(directory, 'trace-archive', rootId, `code/${id}/1/${name}`);
   const ciphertext = fs.readFileSync(object(truncated, 'worktree.tar.gz'));
@@ -149,7 +163,7 @@ async function testCodeMirrorValidation(): Promise<void> {
     state: 'PAUSED',
     latestCheckpointSeq: 1,
   });
-  const sessions = [childSession, truncated, rehashed, noSidecar, badManifest];
+  const sessions = [childSession, truncated, rehashed, noSidecar, badManifest, hashManifest];
   const inventory: Inventory = {
     roots: [],
     hubRoots: [],
@@ -167,7 +181,7 @@ async function testCodeMirrorValidation(): Promise<void> {
   assert.equal(c5.status, 'FAIL');
   assert.deepEqual(
     [c5.counts.mirrored, c5.counts.mirror_invalid, c5.counts.unmirrored],
-    [1, 4, 0],
+    [1, 5, 0],
     c5.summary
   );
   const invalid = (c5.examples.mirror_invalid ?? []).join('\n');
@@ -175,6 +189,7 @@ async function testCodeMirrorValidation(): Promise<void> {
   assert.match(invalid, new RegExp(`${rehashed}/1 cli-log\\.jsonl: archived bytes differ`));
   assert.match(invalid, new RegExp(`${noSidecar}/1 worktree\\.tar\\.gz: missing \\.meta\\.json`));
   assert.match(invalid, new RegExp(`${badManifest}/1 manifest\\.json: artifacts differ`));
+  assert.match(invalid, new RegExp(`${hashManifest}/1 manifest\\.json: artifacts differ`));
   assert.ok(!invalid.includes(childSession), 'the child-stored session is mirrored under its root');
 
   // Without the resolved root the audit would look in the child's (empty) bundle.
