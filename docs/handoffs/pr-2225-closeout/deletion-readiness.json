@@ -71,24 +71,9 @@
     "scripts/__pycache__/": "reproducible",
     "scripts/lib/__pycache__/": "reproducible"
   },
-  "live_processes": [
-    {
-      "argv": "tail -8",
-      "cwd": "/home/boxes/rose",
-      "pid": 2809009
-    },
-    {
-      "argv": "cut -c1-300",
-      "cwd": "/home/boxes/rose",
-      "pid": 2809010
-    }
-  ],
+  "live_processes": [],
   "manifest": "docs/handoffs/pr-2225-closeout/closeout-manifest.json",
-  "open_items": [
-    "uncommitted changes in /home/boxes/rose: agents/tests/blackbox/rose_browser_use.blackbox.py, docs/handoffs/pr-2225-closeout/closeout-manifest.json, docs/handoffs/pr-2225-closeout/private-archive-receipt.json, docs/rca/cases/2026-11-15-iphone-new-lease-attempt-id-discarded-in-progress-setup-proofs.md",
-    "live process 2809009 in this checkout: tail -8",
-    "live process 2809010 in this checkout: cut -c1-300"
-  ],
+  "open_items": [],
   "pr": 2225,
   "preserved_refs": {
     "branch:andyprevalsky/P3-message-person-hillclimb": {
@@ -745,7 +730,7 @@
       "tip": "0e2ffe95ba40a2d0c2b8ae9e884b4a85d96af3f2"
     }
   },
-  "ready": false,
+  "ready": true,
   "worktrees": [
     {
       "branch": "refs/heads/records/pr2225-closeout",
@@ -754,10 +739,7 @@
       "needs_integration": false,
       "path": "/home/boxes/rose",
       "uncommitted": [
-        "agents/tests/blackbox/rose_browser_use.blackbox.py",
-        "docs/handoffs/pr-2225-closeout/closeout-manifest.json",
-        "docs/handoffs/pr-2225-closeout/private-archive-receipt.json",
-        "docs/rca/cases/2026-11-15-iphone-new-lease-attempt-id-discarded-in-progress-setup-proofs.md"
+        "docs/handoffs/pr-2225-closeout/deletion-readiness.json"
       ],
       "unpushed_commits": 0
     }
