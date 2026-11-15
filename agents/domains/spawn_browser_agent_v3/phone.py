@@ -19,7 +19,9 @@ ownership/last receipt without allocating, mode=operation to ensure/reuse the
 phone, and mode=release when finished. Observe with screen.text, act, then verify. After a tap, launch, press, drag,
 scroll, key, Home or input.text action, put screen.text as the next call in the
 same response instead of waiting for another turn; calls run in order, stop at
-the first failure, and only reads run after a navigating action.
+the first failure, and only reads run after a navigating action. A credentials.*,
+messages.*, setup or release call must be the only tool call in its response;
+observe its result on the next turn.
 iPhone coordinates are screen points; focus a field before input.text.
 Use only supported cloud operations; no CLI, local bridge, Android, or shell.
 In mode=operation, set operation to the wire name and args to its arguments:
