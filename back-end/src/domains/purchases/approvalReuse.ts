@@ -110,7 +110,11 @@ export function createApprovedPurchaseSelector(
           }),
         },
       ],
-      dump_context: { call_site: 'purchase_approval_reuse', agent_id: requested.agentId },
+      dump_context: {
+        call_site: 'purchase_approval_reuse',
+        agent_id: requested.agentId,
+        archive_scope: { agentId: requested.agentId, userId: requested.userId },
+      },
     });
     let text = '';
     for await (const chunk of stream) {

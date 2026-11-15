@@ -4,13 +4,15 @@ date: 2026-10-16
 title: Steel auth-persistence navigation failed once while unchanged focused and full follow-ups passed
 surface: harness
 component: browser-provider-live-qualification
-classification: unresolved
-problem_class: other
-first_bad_boundary: browser-provider.auth-persist.live.ts readSignedIn switched Steel session navigates to example.com before restored-cookie and storage assertions
+classification: test-bug
+problem_class: fixture-environment-data-mismatch
+first_bad_boundary: browser-provider.auth-persist.live.ts readSignedIn (and the first Kernel sign-in block) reached the browser's cookie jar and localStorage only by a real page.goto to https://example.com through the session's residential exit, which some exits refuse for the whole session
 symptoms:
   - 'net::ERR_TUNNEL_CONNECTION_FAILED'
   - 'FAIL live Kernel/Steel auth persist'
   - '198 passed, 1 failed, 199 total'
+  - 'page.goto: net::ERR_TUNNEL_CONNECTION_FAILED at https://example.com/'
+  - 'live-probes browser-provider FLAKY'
 tags:
   - browser-provider
   - steel
@@ -21,8 +23,12 @@ sources:
   - PR #1510
   - commit 7ced2be3325b7043f4e214b6ad970543febcd745
   - task lantern-7ced2be3-backend
-repro: 'Original normal npm run test:coverage, domain concurrency4/unit3/contract4, failed browser-provider; unchanged normal focused browser-provider and full coverage follow-ups passed. No deterministic causal reproduction.'
-status: open
+  - PR #1975
+  - PR #1734
+  - commit 910dd40a1404f1cb4abaa212e585bbff842ad14b
+  - memory:kernel-live-parity-upstream-reset-flake
+repro: 'back-end/src/tests/blackbox/browser-provider.auth-persist-origin.support.ts (browser-provider domain): real Chromium behind a local proxy that answers every CONNECT with 502; pre-fix the fixture read failed with page.goto: net::ERR_TUNNEL_CONNECTION_FAILED at https://example.com/, post-fix it passes with zero CONNECTs'
+status: fixed
 ---
 
 ## Problem
@@ -47,6 +53,35 @@ several minutes rather than being a single blip. The earlier coverage run on the
 
 ## Solution
 
+Fixed 2026-11-14 (branch `fix/steel-auth-persist-tunnel-origin`). The fixture now reads and writes its example.com
+sign-in state (`readTargetOriginState`, `signInOnTargetOrigin` in `browser-provider.auth-persist.live.ts`) through
+production's own `createOriginPayloadWriter` (`providers/steel/injectionOriginPage.ts`): a route-fulfilled synthetic
+exact-origin document that reaches the browser's cookie jar and localStorage without opening a proxy tunnel. That is
+the same path production uses to restore and to harvest origin storage (`sessionAuthPersist.ts`
+`readHarvestableLocalStorage`). All three navigation sites of the case (first Kernel sign-in, middle Steel/Tilion
+read, later Kernel read) changed; every assertion, timeout and the session/provider sequence are unchanged. The
+`quarantine` marker `pending-handoff:d8dda0b4f50146c8b81e9df5c1e965eb` was removed. Egress reachability stays covered
+by the live provider parity cases, which still navigate the live site on purpose. The Kernel/Tilion variant shares
+`readSignedIn` and is fixed by the same change.
+
+The origin pages stay open, like the user's signed-in tab, so `/close` still harvests the sign-in from the open-page
+branch of `readHarvestableLocalStorage` as before (independent review finding; the regression asserts an open
+example.com tab after sign-in).
+
+Same-class sites not changed, with reasons: `browser-provider.tilion-harvest.live.ts` (opt-in
+`RUN_TILION_HARVEST_LIVE=1`, not in any /deploy lane) and `browser-provider.browser-use-handoff.live.ts` (opt-in
+`RUN_BROWSER_USE_HANDOFF_LIVE=1`) still navigate example.com through a proxied session; both are outside the deploy
+path and out of this repair's scope. Production agents meet the same ~5% per-exit refusal on Steel; challenge recovery
+already treats `ERR_TUNNEL_CONNECTION_FAILED` as a transport failure that moves to another candidate
+(`challengeRecoveryTransport.ts`, `challengeRecoveryCandidates.ts`), so no production change is part of this fix.
+
+Regression: `browser-provider.auth-persist-origin.support.ts` (browser-provider domain, offline) launches real Chromium
+behind a local proxy that 502s every CONNECT. A control case proves the fixture reproduces the live error on a real
+navigation; the regression proves guard-cookie read, sign-in write into the cookie jar and origin storage, read-back,
+no cross-site cookie leak, a fresh context reading signed-out, and zero CONNECTs.
+
+### Earlier recovery notes (2026-10-16, superseded by the fix above)
+
 No causal code fix was established or applied. Root authorized one unchanged normal focused retry: owner60543 ran `cd back-end && bash scripts/run-blackbox-tests.sh browser-provider`, actual start04:30:05.260021Z, next eligible due04:40:05.260021Z. It passed in105916ms (wrapper118.8s); custody cleanup succeeded and its newly owned standalone DB was dropped before further work.
 
 The canonical coverage wrapper deletes raw V8 inputs at startup and EXIT; its failure bundle preserves logs, not raw V8. `--report-only` still runs the suites and only changes report enforcement. No supported partial resume or retained original V8 existed, so no synthetic report aggregation was attempted.
@@ -61,7 +96,7 @@ None recorded.
 
 ## Reusable lesson
 
-An unchanged successful retry establishes recovery, not the cause of a missing proxy-transport response; preserve the original failure and distinguish canonical requalification from fabricated coverage reuse.
+When a test asserts browser state, reach that state the way production does, not through a live network hop the test does not assert on.
 
 ## October 29 renewed investigation — U4 original target recovered
 
@@ -82,3 +117,35 @@ evidence or the installed SDK's historical APIs. This does not establish an
 outage, credential failure or malformed request. Historical U4 and attribution
 remain OPEN; no runtime fix is proposed. Evidence:
 plan:.context/unresolved-six-20261029/storage-tunnel/U4-REPORT.md.
+
+## November 14 root cause (recurrence on PR #1975 live probes)
+
+Recurrence: PR #1975 deploy live-probes on `910dd40a14` (occurrence `d8dda0b4f50146c8b81e9df5c1e965eb`, 2026-11-12
+18:52Z), passed on its same-source rerun (FLAKY) and was quarantined. Earlier recurrences: 2026-10-26 (above), PR #1734
+(waived on `466030ae3e`), PR #1658 on 2026-10-31.
+
+Live boundary probe (2026-11-14 03:39–03:45Z; script, JSONL results and pre/post-fix logs archived in the private R2 trace-archive bucket at `rca-evidence/steel-auth-persist-tunnel/20261114/rca-bundle.tar.zst`, sha256 `daeebe14b27b93ab4c83b5dc5df7777978f1cd2068bf3914527292bd5f701463`): 40 fresh Steel sessions with the
+managed residential proxy geolocated US/CA, each navigating `https://example.com/` up to 3 times with the fixture's
+1 s/2 s backoff, then `https://www.iana.org/` and `https://api.ipify.org/`. 2/40 sessions (exits `130.51.4.187` and
+`66.74.59.71`) failed all three example.com attempts with `page.goto: net::ERR_TUNNEL_CONNECTION_FAILED at
+https://example.com/` in about 450 ms each (an immediate CONNECT refusal, not a timeout), while the same sessions on the
+same exits loaded iana.org and ipify with 200. The other 38 passed on the first attempt.
+
+Causal chain: Steel pins one managed residential exit per session. About 5% of exits refuse CONNECT to example.com
+for the session's life while reaching other hosts, so `navigateKernelPage`'s same-exit retries cannot recover. The
+fixture needed that navigation only to obtain an example.com document for `document.cookie` and `localStorage`; the
+case never asserts on egress. Why the exit refuses that destination is inside Steel's upstream proxy network and not
+observable from the CONNECT response; we stop the why-ladder there. The owned defect is the fixture's dependence on a
+live network hop it does not test, while production reaches the same state through a network-free synthetic origin.
+
+Classification: test bug (fixture-environment mismatch). Golden reference: not applicable (no approval-gated hunk).
+
+Before/after, identical commands from `back-end/` on this source:
+
+| Command | Pre-fix | Post-fix |
+|---|---|---|
+| `bash scripts/run-blackbox-tests.sh browser-provider` (offline regression) | exit 1: `FAIL auth-persist sign-in state is read and written without a proxy tunnel: page.goto: net::ERR_TUNNEL_CONNECTION_FAILED at https://example.com/` | exit 0, 5/5 consecutive runs |
+| `env BROWSER_PROVIDER_LIVE=1 BLACKBOX_TEST_CONCURRENCY=1 bash scripts/run-blackbox-tests.sh browser-provider` (the live-probes recipe) | intermittent FAIL on the probed exit refusal (about 5% of Steel sessions) | exit 0, 5/5 consecutive runs, each `PASS live Kernel/steel auth persist (second=steel, later=kernel)` |
+
+Post-fix run logs: R2 trace-archive `rca-evidence/steel-auth-persist-tunnel/20261114/final-runs.tar.zst`
+(sha256 `cf2b41900e07a1af087f0441fcbb0efcdc5ea6cc9dba2fe985b7960ee4cd17ff`).

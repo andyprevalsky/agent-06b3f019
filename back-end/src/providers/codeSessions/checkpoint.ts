@@ -7,9 +7,12 @@
  *          are unchanged since HEAD (the tree of a large repo is not session state)
  *   each git repo under HOME ──git bundle --all --not --remotes──► repo-<n>.bundle
  *                               (local-only commits; refs listed in the manifest)
- *   newest Claude/Codex session log ─────────────────► cli-log.jsonl
+ *   main Claude/Codex session transcript ────────────► cli-log.jsonl (restored for --resume)
+ *   every other CLI file version (subagents, tool results, other rollouts;
+ *     cliFiles.ts) not stored by an earlier checkpoint ──► cli-<sha256>
  *   manifest.json: seq, sha256 + size of every artifact, HEAD/branch/dirty
- *                  files per repo, cli session id
+ *                  files per repo, cli session id, cliFiles (every CLI file:
+ *                  HOME path, sha256, size and the seq/artifact holding it)
  *
  * Stored under user/<userId>/code-sessions/<id>/<seq>/. The manifest is
  * written last, so a seq without a manifest is an incomplete checkpoint. A
@@ -18,13 +21,16 @@
 import { createHash } from 'crypto';
 import { createLogger } from '../logger';
 import { checkpointKey, getCheckpointObject, putCheckpointObject } from './artifactStore';
+import * as cli from './cliFiles';
+import { CLI_LOG_ARTIFACT } from './cliFiles';
 import { type CodeSessionFs, shellQuote } from './sandboxFs';
+
+export { CLI_LOG_ARTIFACT, cliSessionIdFromLog } from './cliFiles';
 
 const log = createLogger('CodeSessionCheckpoint');
 
 export const MANIFEST_NAME = 'manifest.json';
 export const WORKTREE_ARTIFACT = 'worktree.tar.gz';
-export const CLI_LOG_ARTIFACT = 'cli-log.jsonl';
 
 /** Directory names never checkpointed: dependency/build caches and CLI state. */
 const EXCLUDED_DIR_NAMES = [
@@ -89,6 +95,14 @@ export interface CheckpointManifest {
   /** CLI log path relative to HOME, restored to the same place. */
   cliLogPath: string | null;
   skippedLargeFiles: string[];
+  /**
+   * Every CLI trajectory file in HOME at this checkpoint (absent on older
+   * checkpoints, which kept only cli-log.jsonl). A version an earlier checkpoint
+   * stored points at that seq's artifact.
+   */
+  cliFiles?: cli.CheckpointCliFile[];
+  /** Listed CLI files this checkpoint could not capture (the next one retries them). */
+  cliFilesDeferred?: string[];
 }
 
 export class CheckpointIntegrityError extends Error {
@@ -177,34 +191,6 @@ function parseKeyValues(stdout: string): Map<string, string> {
     if (index > 0) out.set(line.slice(0, index), line.slice(index + 1).trim());
   }
   return out;
-}
-
-function cliLogDir(codeProvider: string): string {
-  return codeProvider === 'codex' ? '.codex/sessions' : '.claude/projects';
-}
-
-/** Claude: the JSONL basename. Codex: the rollout's session_meta payload id. */
-export function cliSessionIdFromLog(
-  codeProvider: string,
-  logPath: string,
-  content: Buffer
-): string | null {
-  if (codeProvider !== 'codex') {
-    const base = logPath.split('/').pop() ?? '';
-    return base.endsWith('.jsonl') ? base.slice(0, -'.jsonl'.length) || null : null;
-  }
-  for (const line of content.toString('utf8').split('\n').slice(0, 20)) {
-    try {
-      const entry = JSON.parse(line) as { type?: string; payload?: { id?: unknown } };
-      if (entry.type === 'session_meta' && typeof entry.payload?.id === 'string') {
-        return entry.payload.id;
-      }
-    } catch {
-      // keep scanning
-    }
-  }
-  const match = /rollout-.*-([0-9a-f]{8}-[0-9a-f-]{27})\.jsonl$/i.exec(logPath);
-  return match?.[1] ?? null;
 }
 
 const MAX_DIFF_FILES = 200;
@@ -345,12 +331,19 @@ export interface CreateCheckpointParams {
    * close timeout). Every step is bounded by it; past it the checkpoint throws.
    */
   deadlineAt?: number;
+  /** Last committed seq: its stored CLI file versions are referenced, not stored again. */
+  previousSeq?: number | null;
 }
 
-/** Capture HOME into a new checkpoint and upload it. Returns the manifest. */
-export async function createCheckpoint(
-  params: CreateCheckpointParams
-): Promise<CheckpointManifest> {
+/** A stored checkpoint: its manifest, the exact manifest bytes and every artifact. */
+export interface StoredCheckpoint {
+  manifest: CheckpointManifest;
+  manifestBytes: Buffer;
+  artifacts: Map<string, Buffer>;
+}
+
+/** Capture HOME into a new checkpoint and upload it; the bytes feed the trace-archive mirror. */
+export async function createCheckpoint(params: CreateCheckpointParams): Promise<StoredCheckpoint> {
   const { fs, userId, codeSessionId, seq, reason, codeProvider, deadlineAt } = params;
   const tmp = tmpDirFor(codeSessionId, seq, 'ckpt');
   const capBytes = maxArtifactBytes();
@@ -377,8 +370,7 @@ export async function createCheckpoint(
       '  d=${g%/.git}; d=${d#./}; [ "$d" = "." ] && d=""; [ "$g" = "./.git" ] && d=""',
       '  echo "REPO=$d"',
       'done',
-      `L=$(find ${shellQuote(cliLogDir(codeProvider))} -type f -name '*.jsonl' -printf '%T@ %p\\n' 2>/dev/null | sort -nr | head -1 | cut -d' ' -f2-)`,
-      'echo "CLILOG=$L"',
+      cli.cliFileScanScript(`${tmp}/cli-files.list`),
       'exit 0',
     ].join('\n'),
     { timeoutMs: stepTimeoutMs(deadlineAt, STEP_TIMEOUT_MS, 'scan') }
@@ -394,8 +386,7 @@ export async function createCheckpoint(
     const repoPaths = lines
       .filter((line) => line.startsWith('REPO='))
       .map((line) => line.slice('REPO='.length).trim());
-    const cliLogLine = lines.find((line) => line.startsWith('CLILOG='));
-    const cliLogPath = cliLogLine?.slice('CLILOG='.length).trim().replace(/^\.\//, '') || null;
+    const cliEntries = cli.parseCliFileScan(scan.stdout);
 
     const artifacts = new Map<string, Buffer>();
 
@@ -488,12 +479,22 @@ export async function createCheckpoint(
     }
     artifacts.set(WORKTREE_ARTIFACT, worktree);
 
-    let cliSessionId: string | null = null;
-    if (cliLogPath !== null) {
-      const content = await fs.readFile(`${home}/${cliLogPath}`, readOpts(deadlineAt, 'CLI log'));
-      artifacts.set(CLI_LOG_ARTIFACT, content);
-      cliSessionId = cliSessionIdFromLog(codeProvider, cliLogPath, content);
-    }
+    const captured = await cli.captureCheckpointCliFiles({
+      fs,
+      codeSessionId,
+      codeProvider,
+      seq,
+      entries: cliEntries,
+      mainReadOpts: () => readOpts(deadlineAt, 'CLI log'),
+      known: await cli.previousCliBlobs(codeSessionId, seq, params.previousSeq, (candidate) =>
+        getCheckpointObject(checkpointKey(userId, codeSessionId, candidate, MANIFEST_NAME))
+      ),
+      deadlineAt,
+      stepCapMs: STEP_TIMEOUT_MS,
+      storedBytes: () => [...artifacts.values()].reduce((sum, data) => sum + data.length, 0),
+    });
+    if (captured.main !== null) artifacts.set(CLI_LOG_ARTIFACT, captured.main.data);
+    for (const [name, data] of captured.blobs) artifacts.set(name, data);
 
     let skippedLargeFiles: string[] = [];
     try {
@@ -518,27 +519,31 @@ export async function createCheckpoint(
       createdAt: new Date().toISOString(),
       artifacts: {},
       repos,
-      cliSessionId,
-      cliLogPath,
+      cliSessionId: captured.cliSessionId,
+      cliLogPath: captured.main?.path ?? null,
       skippedLargeFiles,
+      cliFiles: captured.files,
+      ...(captured.deferred.length > 0 ? { cliFilesDeferred: captured.deferred } : {}),
     };
     for (const [name, data] of artifacts) {
       stepTimeoutMs(deadlineAt, STEP_TIMEOUT_MS, `upload of ${name}`);
       await putCheckpointObject(checkpointKey(userId, codeSessionId, seq, name), data);
       manifest.artifacts[name] = { sha256: sha256(data), size: data.length };
     }
+    const manifestBytes = Buffer.from(JSON.stringify(manifest), 'utf8');
     await putCheckpointObject(
       checkpointKey(userId, codeSessionId, seq, MANIFEST_NAME),
-      Buffer.from(JSON.stringify(manifest), 'utf8')
+      manifestBytes
     );
     log.info('Checkpoint stored', {
       codeSessionId,
       seq,
       reason,
-      artifacts: Object.keys(manifest.artifacts).join(','),
+      artifacts: String(Object.keys(manifest.artifacts).length),
+      cliFiles: String(captured.files.length),
       bytes: String([...artifacts.values()].reduce((sum, data) => sum + data.length, 0)),
     });
-    return manifest;
+    return { manifest, manifestBytes, artifacts };
   } finally {
     await fs
       .exec(
@@ -580,6 +585,8 @@ export async function loadVerifiedCheckpoint(
   }
   const artifacts = new Map<string, Buffer>();
   for (const [name, expected] of Object.entries(manifest.artifacts)) {
+    // Non-main CLI file versions are trajectory history, never restored.
+    if (cli.isCliBlobArtifact(name)) continue;
     const data = await getCheckpointObject(checkpointKey(userId, codeSessionId, seq, name));
     if (data === null) throw new CheckpointIntegrityError(`Checkpoint ${seq} is missing ${name}`);
     if (data.length !== expected.size || sha256(data) !== expected.sha256) {

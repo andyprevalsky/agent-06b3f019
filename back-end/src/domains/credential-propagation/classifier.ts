@@ -236,6 +236,10 @@ export async function classifyFailureBestEffort(
           schema: FAILURE_REASON_SCHEMA,
         },
       },
+      dump_context: {
+        call_site: 'credential_failure_classifier',
+        archive_scope: { agentId: agent.id, userId: agent.userId },
+      },
     });
 
     const structuredOutput = new StructuredOutputAccumulator();
