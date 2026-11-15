@@ -3430,7 +3430,7 @@ async def test_native_autofill_control_history_matches_real_serializer():
 
 @quarantine(
     since="2026-11-14",
-    repair="pending-handoff:f48b6ecc19c2402cb3abc744c0abb18d",
+    repair="https://boxes.dev/thread/thr_8cefa6e4ed4f4244ae0919c0d2b3c8b3",
     error="AssertionError: ['phone arguments rejected: - args: Input should be a valid dictionary']",
     evidence="https://github.com/Rose-Ai-Labs/rose/actions/runs/43649937439",
 )

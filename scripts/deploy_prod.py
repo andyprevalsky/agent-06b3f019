@@ -38,6 +38,7 @@ import urllib.request
 import uuid
 
 from run_deploy_pipeline import _dotenv_values  # scripts/ is sys.path[0]: one env-file parser
+from run_deploy_pipeline import gh_token_pool_argv  # one GitHub token pool pick for read-only gh calls
 
 ROOT = Path(__file__).resolve().parents[1]
 PY = sys.executable or 'python3'
@@ -248,6 +249,7 @@ class Ctx:
     secrets: list[str] = field(default_factory=list)
     records: dict = field(default_factory=dict)
     lock: threading.Lock = field(default_factory=threading.Lock)
+    pool_warned: bool = False
 
     def dotenv(self, package: str) -> dict[str, str]:
         values = _dotenv_values(self.root / package / '.env')
@@ -283,9 +285,10 @@ class Ctx:
 
     def sh(self, lane: str, argv: list[str], *, cwd: Path | None = None, extra: dict | None = None,
            drop: tuple[str, ...] = (), env_file: str | None = None,
-           watch: tuple[re.Pattern, list[str]] | None = None) -> int:
+           watch: tuple[re.Pattern, list[str]] | None = None, hidden: dict | None = None) -> int:
         """Stream one lane command, prefixed `[lane]`, and record its display form. `watch` = (pattern, hits):
-        the first group of every output line the pattern matches is appended to hits."""
+        the first group of every output line the pattern matches is appended to hits. `hidden` env (a read
+        token) reaches the child but never the displayed or recorded command."""
         cwd = cwd or self.root
         loaded = self.dotenv(env_file) if env_file else {}
         display = show(argv, cwd=cwd, root=self.root, extra=extra, drop=drop, env_file=env_file)
@@ -298,7 +301,7 @@ class Ctx:
             if matched and watch:
                 watch[1].append(matched.group(1))
             self.emit(lane, line)
-        code = self.io.run(argv, cwd, self.child_env({**loaded, **(extra or {})}, drop), on_line)
+        code = self.io.run(argv, cwd, self.child_env({**loaded, **(extra or {}), **(hidden or {})}, drop), on_line)
         self.emit(lane, f'exit {code}')
         return code
 
@@ -308,10 +311,38 @@ class Ctx:
             record['command'] = ' && '.join(filter(None, [record.get('command'), display]))
         self.emit(lane, f'$ {display}')
 
+    def read_token(self, env: dict | None = None) -> str | None:
+        """The token pool's pick for a read-only gh call when it differs from GH_TOKEN (registered as a secret so
+        output redacts it); None reads with GH_TOKEN."""
+        env = self.child_env() if env is None else env
+        code, out, err = self.io.capture(gh_token_pool_argv(self.root, env), self.root, env)
+        token = out.strip() if code == 0 else ''
+        if not token:
+            if not self.pool_warned:
+                self.pool_warned = True
+                self.emit('gh', f'token pool picked no member ({self.redact((err or out).strip())[:200] or "empty"}); '
+                                'reading with GH_TOKEN')
+            return None
+        if token == env.get('GH_TOKEN'):
+            return None
+        self.add_secrets({'GITHUB_POOL_TOKEN': token})
+        return token
+
     def gh_json(self, args: list[str]) -> object:
-        code, out, err = self.io.capture([self.gh, *args], self.root, self.child_env())
+        """A read-only gh call: the token pool's best member first (GH_TOKEN's REST quota can run out
+        mid-deploy), then once more with GH_TOKEN when that member fails (its 404 is not authoritative)."""
+        env = self.child_env()
+        token = self.read_token(env)
+        if token:
+            code, out, err = self.io.capture([self.gh, *args], self.root, {**env, 'GH_TOKEN': token})
+            pooled = None if code == 0 else self.redact((err or out).strip())[:300]
+        else:
+            code, pooled = 1, ''
         if code != 0:
-            raise LaneError(f'gh {" ".join(args[:2])} failed: {self.redact((err or out).strip())[:300]}')
+            code, out, err = self.io.capture([self.gh, *args], self.root, env)
+        if code != 0:
+            first = f" with the token pool's member ({pooled}) and with GH_TOKEN" if pooled else ''
+            raise LaneError(f'gh {" ".join(args[:2])} failed{first}: {self.redact((err or out).strip())[:300]}')
         try:
             return json.loads(out or 'null')
         except json.JSONDecodeError as error:
@@ -634,6 +665,60 @@ def vercel_rows(deployments: object) -> list[dict]:
             == 'vercel[bot]'] if isinstance(deployments, list) else []
 
 
+DEPLOYMENT_FIELDS = 'databaseId environment createdAt commitOid creator{__typename login} latestStatus{state}'
+GRAPHQL_BY_SHA = ('query($owner:String!,$name:String!,$sha:GitObjectID!){repository(owner:$owner,name:$name){'
+                  'object(oid:$sha){... on Commit{deployments(first:20,orderBy:{field:CREATED_AT,direction:DESC}){'
+                  f'nodes{{{DEPLOYMENT_FIELDS}}}}}}}}}}}}}')
+GRAPHQL_BY_ENVIRONMENT = ('query($owner:String!,$name:String!,$env:String!){repository(owner:$owner,name:$name){'
+                          'deployments(first:30,environments:[$env],orderBy:{field:CREATED_AT,direction:DESC}){'
+                          f'nodes{{{DEPLOYMENT_FIELDS}}}}}}}}}')
+
+
+def rate_limited(error: Exception) -> bool:
+    return 'rate limit' in str(error).lower()
+
+
+def graphql_deployments(ctx: Ctx, *, sha: str | None = None, environment: str | None = None) -> list[dict]:
+    """The same deployments as REST `deployments?sha=` / `?environment=`, newest first, in REST shape, each carrying
+    its latest status as `_statuses`. GraphQL has its own quota: when every REST member is rate limited (the App
+    member cannot read Deployments at all), the Vercel lane still observes the real deployment state."""
+    args = ['api', 'graphql', '-F', 'owner={owner}', '-F', 'name={repo}']
+    args += ['-f', f'sha={sha}', '-f', f'query={GRAPHQL_BY_SHA}'] if sha else \
+            ['-f', f'env={environment}', '-f', f'query={GRAPHQL_BY_ENVIRONMENT}']
+    data = ((ctx.gh_json(args) or {}).get('data') or {}).get('repository') or {}
+    nodes = (((data.get('object') or {}) if sha else data).get('deployments') or {}).get('nodes') or []
+    rows = []
+    for node in nodes:
+        if not isinstance(node, dict):
+            continue
+        creator = node.get('creator') or {}
+        login = str(creator.get('login') or '')
+        if creator.get('__typename') == 'Bot' and not login.endswith('[bot]'):
+            login += '[bot]'  # GraphQL names the Vercel app `vercel`; REST names it `vercel[bot]`
+        latest = node.get('latestStatus') or {}
+        rows.append({'id': node.get('databaseId'), 'environment': node.get('environment'),
+                     'created_at': node.get('createdAt'), 'sha': node.get('commitOid'), 'creator': {'login': login},
+                     '_statuses': [{'state': str(latest['state']).lower()}] if latest.get('state') else []})
+    return rows
+
+
+def vercel_deployments(ctx: Ctx, query: str, **graphql) -> list[dict]:
+    """vercel[bot] deployments from REST; from GraphQL only when REST is rate limited."""
+    try:
+        return vercel_rows(ctx.gh_json(['api', f'repos/{{owner}}/{{repo}}/deployments?{query}']))
+    except LaneError as error:
+        if not rate_limited(error):
+            raise
+        ctx.emit('vercel', f'REST deployments rate limited; reading them through GraphQL ({error})'[:300])
+        return vercel_rows(graphql_deployments(ctx, **graphql))
+
+
+def vercel_statuses(ctx: Ctx, row: dict) -> object:
+    if '_statuses' in row:  # read with the deployment through GraphQL
+        return row['_statuses']
+    return ctx.gh_json(['api', f'repos/{{owner}}/{{repo}}/deployments/{row.get("id")}/statuses'])
+
+
 def vercel_superseded(ctx: Ctx, mine: dict) -> tuple[str, str]:
     """The merge's Vercel deployment is `inactive`: GitHub deactivates an older deployment once a newer one in the same
     environment succeeds. (verdict, reason): `verified` only when the newest successful vercel[bot] deployment created
@@ -644,13 +729,12 @@ def vercel_superseded(ctx: Ctx, mine: dict) -> tuple[str, str]:
     if not environment or not created:
         return 'refused', f'{head}; it names no environment/created_at, so no newer production deployment is verifiable'
     query = urllib.parse.urlencode({'environment': environment, 'per_page': 30})
-    newer = sorted((row for row in vercel_rows(ctx.gh_json(['api', f'repos/{{owner}}/{{repo}}/deployments?{query}']))
+    newer = sorted((row for row in vercel_deployments(ctx, query, environment=environment)
                     if str(row.get('id')) != ours and str(row.get('created_at') or '') > str(created)),
                    key=lambda row: str(row.get('created_at')), reverse=True)
     pending = []
     for row in newer:  # newest first: the first success is the live production deployment
-        decision, state = vercel_decide(ctx.gh_json(['api', f'repos/{{owner}}/{{repo}}/deployments/{row.get("id")}'
-                                                     '/statuses']))
+        decision, state = vercel_decide(vercel_statuses(ctx, row))
         if decision == 'pending':
             pending.append(row)
         if state != 'success':
@@ -673,11 +757,10 @@ def lane_vercel(ctx: Ctx, attempts: int = 90, interval: float = 10.0) -> Result:
     ctx.note(lane, f'{ctx.gh} api repos/{{owner}}/{{repo}}/deployments?sha={ctx.sha} (vercel[bot]) + statuses')
     for attempt in range(1, attempts + 1):
         try:
-            rows = vercel_rows(ctx.gh_json(['api', f'repos/{{owner}}/{{repo}}/deployments?sha={ctx.sha}']))
+            rows = vercel_deployments(ctx, f'sha={ctx.sha}', sha=ctx.sha)
             if rows:
                 deployment = str(rows[0].get('id'))
-                statuses = ctx.gh_json(['api', f'repos/{{owner}}/{{repo}}/deployments/{deployment}/statuses'])
-                decision, state = vercel_decide(statuses)
+                decision, state = vercel_decide(vercel_statuses(ctx, rows[0]))
                 ctx.emit(lane, f'Vercel: state={state} deployment={deployment}')
                 if decision == 'success':
                     return True, f'Vercel deployment {deployment} success', 0
@@ -878,7 +961,8 @@ def mac_descendant_runs(ctx: Ctx, rows: list[dict], since: str, tried: set[str])
 def mac_watch(ctx: Ctx, lane: str, run_id: str) -> tuple[int, str]:
     """(exit code, conclusion) of `gh run watch --exit-status`; a non-zero exit reads the run's conclusion so a
     cancelled (superseded) run is told apart from a failed one."""
-    code = ctx.sh(lane, [ctx.gh, 'run', 'watch', run_id, '--exit-status'])
+    token = ctx.read_token()  # a long watch must not depend on GH_TOKEN's shared REST quota
+    code = ctx.sh(lane, [ctx.gh, 'run', 'watch', run_id, '--exit-status'], hidden={'GH_TOKEN': token} if token else None)
     if code == 0:
         return 0, 'success'
     try:

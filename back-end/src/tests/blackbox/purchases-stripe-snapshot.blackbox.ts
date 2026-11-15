@@ -1,5 +1,6 @@
 /** Actual purchase repository + Stripe SDK over loopback; isolated DB only. */
 import assert from 'node:assert/strict';
+import { assertOwnerLifecycleBilling } from './purchases-owner-lifecycle.cases';
 import { createServer } from 'node:http';
 import { randomUUID } from 'node:crypto';
 
@@ -536,6 +537,16 @@ async function main() {
         }
       });
     }
+    await assertOwnerLifecycleBilling({
+      prisma,
+      calls,
+      users,
+      check,
+      createPendingPurchaseWithLock,
+      resolveAndIssuePurchaseCard,
+      FakeCardProvider,
+      FakeWalletFundingProvider,
+    });
     assert.deepEqual(failures, []);
   } finally {
     await prisma.user.deleteMany({ where: { userId: { in: users } } });
