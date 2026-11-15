@@ -104,7 +104,7 @@ describe('Index (landing) page', () => {
       const meta = (selector: string) =>
         doc.querySelector(selector)?.getAttribute('content') ?? null;
       const description =
-        'Rose is an Agentic Supercomputer, capable of spawning 100s of thousands of agents to complete complex real world tasks over months.';
+        'Rose is the world’s first Agentic Supercomputer, capable of spawning hundreds of thousands of agents to complete complex real-world tasks over months.';
       expect(meta('meta[name="description"]')).toBe(description);
       expect(meta('meta[property="og:description"]')).toBe(description);
       expect(meta('meta[property="og:title"]')).toBe('Rose | Agentic Supercomputer by Rose Labs');
