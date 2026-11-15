@@ -25,6 +25,8 @@ sources:
   - task lantern-7ced2be3-backend
   - PR #1975
   - PR #1734
+  - PR #2039
+  - commit fe2a6668a447a6c27a50bdb0686b871e2195d6ab
   - commit 910dd40a1404f1cb4abaa212e585bbff842ad14b
   - memory:kernel-live-parity-upstream-reset-flake
   - PR #1809
@@ -55,7 +57,7 @@ several minutes rather than being a single blip. The earlier coverage run on the
 
 ## Solution
 
-Fixed 2026-11-14 (branch `fix/steel-auth-persist-tunnel-origin`). The fixture now reads and writes its example.com
+Fixed 2026-11-14, shipped in PR #2039 (merged `fe2a6668a447` on 2026-11-15; branch `fix/steel-auth-persist-tunnel-origin`). The fixture now reads and writes its example.com
 sign-in state (`readTargetOriginState`, `signInOnTargetOrigin` in `browser-provider.auth-persist.live.ts`) through
 production's own `createOriginPayloadWriter` (`providers/steel/injectionOriginPage.ts`): a route-fulfilled synthetic
 exact-origin document that reaches the browser's cookie jar and localStorage without opening a proxy tunnel. That is
@@ -183,3 +185,7 @@ Without a refund, a caller's retry still advances to the next rung on a new exit
 **Still open.**
 - Why the proxy failed the tunnel. No CONNECT response is retained. The `browser-checkpoint:restore-navigation` retry warnings now log each attempt, so a recurrence will show whether a same-session retry recovers. The November 14 finding (about 5% of Steel exits refuse example.com for a whole session) suggests some refusals will exhaust the bounded retry; that case still fails the rotation, and the caller's next rotation moves to a new exit.
 - A restore that fails after all retries leaves its replacement session bound to the row until it is superseded or closed. This predates the fix.
+
+Shipped proof (PR #2039 deploy, 2026-11-15): gates 17/17 PASS on `b9ab6ea3bb38`, including the live-probes gate with
+`PASS live Kernel/steel auth persist (second=steel, later=kernel)` as an ordinary (no longer quarantined) case and
+backend coverage with the offline regression; merged `fe2a6668a447`.
