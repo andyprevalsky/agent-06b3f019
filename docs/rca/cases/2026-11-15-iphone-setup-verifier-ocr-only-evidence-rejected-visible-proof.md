@@ -20,11 +20,13 @@ tags:
   - prompt
   - rose-1-mini
 sources:
+  - PR #2210
+  - commit 8e74738f13adfe9a5db1c61cd673dd8c3dd69b73
   - agent 1772a64a-c22a-5cf7-9184-17508eda5df6
   - agent 1772a64a lease 45543f2e-e77c-4470-b258-4c19dc135226
   - agent 1772a64a lease 7c1dd8c6-b81e-4bcc-908b-15f76b23d1ed
 repro: back-end/src/tests/blackbox/iphone-control.setup-verifier-replay.cases.ts "live setup verifier: recorded proof screens and controls"
-status: open
+status: fixed
 ---
 
 ## Problem
@@ -51,6 +53,8 @@ Class stopped at: "verifier prompts must name the OCR-observable proof for each 
 - PHONE_GUIDANCE: tell the agent the verifier sees screen.text OCR only and name the screens (Settings > your name > iCloud; Settings > Apps > Messages > Send & Receive; Gmail account Settings).
 - Regression: live rose-1-mini replay of the recorded observations with negative controls (inbox under dialog, Google Account page alone, typed sign-in form, wrong Google account, phone row without glyph, phone unchecked only under Receive, Waiting for activation, FaceTime look-alike, wrong Apple Account). Before: FAIL 3/3 (Gmail Settings and iMessage unknown); after: PASS 5/5. The independent review's Waiting-for-activation negative caught an overbroad first draft, fixed before landing.
 - 10k agents: prompt text only; no new queries or fan-in.
+
+Shipped: PR #2210, merged 8e74738f13 on 2026-11-15. Production lanes PASS: Render live via descendant 37308b16bd, backend probes, Fly verified by descendant cutover 64f91559 (a867f5d4), workflow migration, semantic via descendant 6c9aa700. Live owner retry of the gmail, imessage and receive_address verifies is still pending. The progress reset across leases (finding 3) shipped separately in PR #2225. The Fly cutover was delayed by an unrelated drain wedge: agent 8789a5df, continuation payload TMPRL1103, RCA thread ph7dv1m8q2ye99cdta8n3q7g3s8j92q4.
 
 ## Human feedback
 
