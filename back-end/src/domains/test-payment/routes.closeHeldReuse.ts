@@ -7,8 +7,10 @@ import { Router, type NextFunction, type Request, type Response } from 'express'
 import { authenticate, type AuthRequest } from '../../providers/auth';
 import { asyncHandler } from '../../utils/asyncHandler';
 import { BENCHMARK_PAYMENT_LIFECYCLE_PROD_USER_ID } from '../../providers/benchmarkPaymentIdentity';
+import { purgeOwnerLifecycleProbeRecords } from './purgeLifecycleRecords';
 import { closeHeldPurchaseReuseForLifecycleProbe } from './closeHeldReuse';
 import { isProductionEnv, PRODUCTION_BENCHMARK_USER_ID } from './config';
+import { ownerLifecycleStripeCustomerId } from '../../providers/ownerLifecycleBilling';
 import { rejectWhenDisabled, respondTestPaymentError } from './routes.guards';
 
 const router = Router();
@@ -65,6 +67,37 @@ router.post(
       res.json(result);
     } catch (error) {
       respondTestPaymentError(res, error, 'Failed to close held purchase reuse', { userId });
+    }
+  })
+);
+
+// Fail-fast readiness for the owner's live lifecycle probe: its dedicated live Stripe customer must
+// be configured before the harness spends a live card.
+router.get(
+  '/lifecycle/owner-billing',
+  requireProductionBenchmarkAccess,
+  asyncHandler(async (_req, res) => {
+    if (rejectWhenDisabled(res, { allowProductionBenchmark: true })) return;
+    res.json({ configured: ownerLifecycleStripeCustomerId() !== '' });
+  })
+);
+
+// The owner's live lifecycle probe purges its settled purchase records after its assertions pass.
+router.post(
+  '/lifecycle/purge',
+  requireProductionBenchmarkAccess,
+  asyncHandler(async (req, res) => {
+    if (rejectWhenDisabled(res, { allowProductionBenchmark: true })) return;
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const agentId = typeof body.agentId === 'string' ? body.agentId : '';
+    if (benchmarkCaller(req).privileged !== true) {
+      res.status(403).json({ error: 'Payment benchmark purge requires internal access' });
+      return;
+    }
+    try {
+      res.json(await purgeOwnerLifecycleProbeRecords(agentId));
+    } catch (error) {
+      respondTestPaymentError(res, error, 'Failed to purge lifecycle probe records', { agentId });
     }
   })
 );

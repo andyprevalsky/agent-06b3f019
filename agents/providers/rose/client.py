@@ -62,20 +62,20 @@ from providers.rose.errors import (
     RoseServerError,
     RoseStallError,
 )
+from providers.rose.flash_agent import is_flash_agent_call, pool_for_call
 from providers.rose.foundry import _NO_REASONING_MODELS, foundry_candidates, foundry_complete, foundry_configured
 from providers.rose.gpt_auth import _normalize_reasoning_effort, gpt_auth_complete, openai_api_key_complete
 from providers.rose.inter_agent_context import settle_trailing_inter_agent_messages
 from providers.rose.legacy_adapter import classify_claude_token_error, classify_gpt_token_error
 from providers.rose.policy import anthropic_family_excluded
 from providers.rose.pools import PoolName, foundry_model, get_pool
-from providers.rose.flash_agent import is_flash_agent_call, pool_for_call
 from providers.rose.schema import (
     SYNTHETIC_OUTPUT_TOOL_NAME,
     build_anthropic_tools_from_response_model,
     build_openai_response_format,
 )
 from providers.rose.speed import current_agent_speed, normalize_agent_speed
-from providers.rose.streaming import _stream_progress
+from providers.rose.streaming import REASONING_BLOCKS_USAGE_KEY, _stream_progress
 from providers.rose.structured_output import StructuredOutputAccumulator
 from providers.rose.transforms import messages_contain_images, route_model_accepts_images
 from providers.rose.truncation import model_key, needs_result, recover_truncated
@@ -997,6 +997,10 @@ class RoseClient:
         _exclude_anthropic_family: bool = False,
         _skip_models: FrozenSet[str] = frozenset(),
         _skip_reasons: Optional[Mapping[str, str]] = None,
+        # Archive-only: receives the provider reasoning blocks (signatures,
+        # redacted thinking, reasoning_details) for callers that archive the
+        # call themselves (dump_context=False). Never part of usage.
+        reasoning_blocks_sink: Optional[List[Dict[str, Any]]] = None,
     ) -> AsyncIterator[StreamChunk]:
         """Run a full Rose completion, yielding normalized StreamChunks.
 
@@ -1059,6 +1063,11 @@ class RoseClient:
                 seed=seed,
                 request_id=rid,
             ):
+                if chunk.kind == "usage" and REASONING_BLOCKS_USAGE_KEY in chunk.data:
+                    chunk = StreamChunk(
+                        kind="usage",
+                        data={k: v for k, v in chunk.data.items() if k != REASONING_BLOCKS_USAGE_KEY},
+                    )
                 yield chunk
             return
         dump_path: Optional[str] = None
@@ -1106,13 +1115,28 @@ class RoseClient:
                             ],
                         },
                         "exclude_anthropic_family": _exclude_anthropic_family,
+                        # Declared-only tools legalizing forked history (planner
+                        # get_memories) and the direct-auth projection of a
+                        # response model are sent too; record which is which.
+                        "context_tool_names": [
+                            str(tool.get("name") or (tool.get("function") or {}).get("name") or "")
+                            for tool in context_tools or []
+                            if isinstance(tool, dict)
+                        ],
+                        "direct_auth_tools": (
+                            direct_auth_tools if direct_auth_tools is not waterfall_tools else None
+                        ),
                     },
                     response_format=None if waterfall_tools else openrouter_response_format,
-                    tools=waterfall_tools,
+                    tools=(
+                        [*(waterfall_tools or []), *context_tools] if context_tools else waterfall_tools
+                    ),
                     extra=dump_extra,
                 )
             except Exception:
                 logger.debug("rose.complete.dump_start_failed", call_site=call_site, exc_info=True)
+
+        dump_finalized = False
 
         def _record_dump_chunk(chunk: StreamChunk) -> None:
             if not dump_context:
@@ -1121,25 +1145,50 @@ class RoseClient:
                 _fold(dump_result, chunk)
             except Exception:
                 logger.debug("rose.complete.dump_chunk_failed", call_site=call_site, exc_info=True)
+            if chunk.kind == "done":
+                # The output is complete once `done` is handed to the consumer.
+                # Archive it now: a consumer that stops iterating after `done`
+                # closes this generator before the post-loop finalize runs.
+                _finalize_dump()
+
+        dump_reasoning_blocks: List[Dict[str, Any]] = []
 
         def _with_cache_sequence(chunk: StreamChunk) -> StreamChunk:
-            """Expose the exact provider cache namespace on persisted usage."""
-            if chunk.kind != "usage" or not cache_namespace:
+            """Expose the exact provider cache namespace on persisted usage.
+
+            Provider reasoning blocks (thinking signatures, redacted thinking,
+            OpenRouter reasoning_details) ride the parser's usage chunk only as
+            far as here: they go to the archived output record, never to
+            callers' usage dicts or Temporal payloads.
+            """
+            if chunk.kind != "usage":
                 return chunk
-            return StreamChunk(
-                kind="usage",
-                data={**chunk.data, "cache_sequence_id": cache_namespace},
-            )
+            data = chunk.data
+            blocks: List[Any] = []
+            if REASONING_BLOCKS_USAGE_KEY in data:
+                data = dict(data)
+                blocks = data.pop(REASONING_BLOCKS_USAGE_KEY) or []
+            # Every usage chunk ends one provider response: its blocks replace
+            # any earlier attempt's, so a truncation retry never inherits them.
+            dump_reasoning_blocks[:] = [dict(block) for block in blocks if isinstance(block, dict)]
+            if reasoning_blocks_sink is not None:
+                reasoning_blocks_sink[:] = [dict(block) for block in dump_reasoning_blocks]
+            if cache_namespace:
+                data = {**data, "cache_sequence_id": cache_namespace}
+            return chunk if data is chunk.data else StreamChunk(kind="usage", data=data)
 
         def _finalize_dump(error: Optional[BaseException] = None) -> None:
-            if not dump_context or not dump_path:
+            nonlocal dump_finalized
+            if not dump_context or not dump_path or dump_finalized:
                 return
+            dump_finalized = True
             try:
                 from helpers.observability import update_llm_dump
 
                 output: Dict[str, Any] = {
                     "content": dump_result.content,
                     "reasoning": dump_result.reasoning,
+                    "reasoning_blocks": list(dump_reasoning_blocks),
                     "tool_calls": dump_result.tool_calls,
                     "codex_reasoning_items": dump_result.codex_reasoning_items,
                     "usage": dump_result.usage,
@@ -2333,6 +2382,9 @@ class RoseClient:
         )
         # Bind failed dumps to the same request that the client attempts.
         request_id = request_id or uuid.uuid4().hex[:12]
+        # This method writes the call's archive record itself (dump_context=False
+        # below), so the provider reasoning blocks are delivered here, not via usage.
+        reasoning_blocks: List[Dict[str, Any]] = []
         from helpers.image_count_retry import collect_with_image_count_retry
         try:
             response = await collect_with_image_count_retry(
@@ -2353,6 +2405,7 @@ class RoseClient:
                 dump_context=False,
                 cache_namespace=cache_namespace,
                 browser_use=True,
+                reasoning_blocks_sink=reasoning_blocks,
                 # One collected action: a tool call cut off at the output limit is
                 # retried like any other cut-off reply (providers/rose/truncation.py).
                 result_required=True,
@@ -2481,6 +2534,7 @@ class RoseClient:
                     **({"tool_args_validation_error": str(tool_args_validation_error)} if tool_args_validation_error else {}),
                     "content": response.content,
                     "reasoning": response.reasoning,
+                    "reasoning_blocks": list(reasoning_blocks),
                     "tool_calls": response.tool_calls,
                     "usage": response.usage,
                     "timing": response.timing,
@@ -2582,6 +2636,7 @@ class RoseClient:
         retry_partial_errors: bool = False,
         json_mode: bool = False,
         browser_use: bool = False,
+        reasoning_blocks_sink: Optional[List[Dict[str, Any]]] = None,
     ) -> RoseResponse:
         """Consume the stream into a single `RoseResponse` — convenience for
         non-streaming callers who don't care about incremental chunks.
@@ -2616,6 +2671,7 @@ class RoseClient:
             **({"prefer_azure": True} if prefer_azure else {}),
             **({"retry_partial_errors": True} if retry_partial_errors else {}),
             **({"json_mode": True} if json_mode else {}),
+            **({"reasoning_blocks_sink": reasoning_blocks_sink} if reasoning_blocks_sink is not None else {}),
         ):
             if chunk.kind == "restart":
                 result = RoseResponse()

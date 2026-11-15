@@ -86,7 +86,9 @@ async function main() {
       '../../providers/browser/tilion': {},
       '../../providers/browser/exitGeoLocale': {},
       '../../providers/geoip': {},
-      '../../providers/browser/sessionPersist': {},
+      '../../providers/browser/sessionPersist': {
+        isConfirmedBrowserEnd: (status: string | null) => status === 'deleted',
+      },
       './repo': {
         findSessionByTaskId: async () => session,
         findUserSettings: async (id: string) => {

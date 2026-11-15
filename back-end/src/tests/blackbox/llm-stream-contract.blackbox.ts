@@ -101,8 +101,10 @@ async function testSharedFixtures(): Promise<void> {
 
   for (const testCase of fixtures.cases) {
     const chunks = await parseFixture(testCase);
+    // reasoning_block chunks are archive-only (thinking signatures, provider
+    // reasoning details; see llm-archive-record.test.ts), not caller stream output.
     assert.deepEqual(
-      chunks.filter((chunk) => chunk.kind !== 'metadata'),
+      chunks.filter((chunk) => chunk.kind !== 'metadata' && chunk.kind !== 'reasoning_block'),
       testCase.expected_chunks,
       `${testCase.name} normalized chunks`
     );
@@ -261,7 +263,7 @@ async function testChatCompletionDumps(consumerClose = false): Promise<void> {
         assert.equal(dump.call_site, callSite);
         assert.deepEqual(dump.messages, JSON.parse(JSON.stringify(options.messages)));
         assert.deepEqual(dump.response_format, options.response_format);
-        assert.equal(dump.extra.output, expectedOutput);
+        assert.equal(dump.output.content, expectedOutput);
         if (consumerClose) assert.equal(dump.extra.consumer_closed, true);
       } catch (error) {
         failures.push(error);

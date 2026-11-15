@@ -228,6 +228,7 @@ async function produce(
     aspectRatio: body.aspect_ratio,
     resolution: body.resolution,
     seed: body.seed,
+    archive: { archive_scope: { agentId: agent.id, userId: agent.userId } },
   });
   onBilled();
   const sha256 = createHash('sha256').update(video.bytes).digest('hex');

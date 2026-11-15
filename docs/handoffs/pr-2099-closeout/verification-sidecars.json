@@ -1,0 +1,69 @@
+{
+  "final_restore": {
+    "observed_at": "2026-11-15T02:27:01.691588+00:00",
+    "source": "Official Render env reader, Navi srv-d3jga77diees73cgrvk0, values in memory only",
+    "key_fingerprint": "e351c7cc5b01303e579fe6d1df833940fdaadf325ca47314414ba10735fc7730",
+    "recipe_sha256": "2e35e736660660bb6118a939d51b0dd008abe5efaa6387cf252d5d0536b75cf4",
+    "ciphertext_sha256": "83a33bdaed23f72cbc580dee01462d5d09a97a69e29c8b7442d007badfa740b4",
+    "manifest_sha256": "fbfeebc02ef5060e31cb5df8180d8a1a793ef518b8ed313831f72af8b7d7917d",
+    "archive_key": "devbox-closeout-private/pr2099/final-private-20261115T022544Z-f0fd54abc6c8.tar.gz.aesgcm",
+    "restored_files": 255,
+    "all_member_hashes_verified": true,
+    "independent_of_local_R2_and_encryption_files": true,
+    "bootstrap_authentication": "Existing authorized Render API credential; independently managed project delivery metadata recorded separately",
+    "remote_values_persisted": false
+  },
+  "final_git": {
+    "status": "PASS",
+    "base_repository": "/home/boxes/rose/.context/closeout-2099/bulk-git-import-proof/recovered.git",
+    "proof_repository": "/home/boxes/rose/.context/closeout-2099/sixth-git-import-proof/recovered.git",
+    "base_copied_without_hardlinks": true,
+    "alternates": false,
+    "bundle_sha256": "5f41784ca9b5b593caebda788d616f0b07b8a9b56333df316c7588d74a073829",
+    "restored_bundle_member": "rose/.context/closeout-2099/sixth-final-proof/post-finish.bundle",
+    "captured_refs": 21979,
+    "available_roots": 21182,
+    "traversed_objects": 305208,
+    "fsck_exit": 0,
+    "original_refs_mutated": false,
+    "scope": "Actual independently decrypted sixth bundle imported into separate fifth-graph copy; original refs unchanged; prior absent pruned reflog objects remain unrecovered."
+  },
+  "final_git_private_proof_sha256": "5f152b67d06f92de21a85b4dd68989c841f84d4bc47cb7dbace39be3de841563",
+  "decoded_database_proof_sha256": "02cb37d9546c9c7ffbf134ad160ae5a3e0398f9370ee9676df62fc696c383b19",
+  "coherent_sqlite": "Four changed decoded coherent backups integrity-checked;37 unchanged backups retain independent baseline integrity proof. All41 logical representations have authenticated member mappings.",
+  "postgres": {
+    "dump_sha256": "fe7a89f95a8c981985eb4cec7a3fc643fb3d4c93d8ccebbbc1a891c36216d596",
+    "globals_sha256": "f75a18d6fc25160476315718bcf98280fd84c9e772413dd8c9a7d595bb899d7b",
+    "fresh_clean_cluster_restore": {
+      "status": "PASS",
+      "input_database_dump_sha256": "fe7a89f95a8c981985eb4cec7a3fc643fb3d4c93d8ccebbbc1a891c36216d596",
+      "input_globals_sha256": "f75a18d6fc25160476315718bcf98280fd84c9e772413dd8c9a7d595bb899d7b",
+      "new_cluster_initialized": true,
+      "global_roles_and_database_restored_native": true,
+      "schema_checks": {
+        "tables": 104,
+        "indexes": 411,
+        "rls_tables": 1,
+        "postgres_role_restored": true,
+        "invalid_indexes": 0,
+        "unvalidated_constraints": 0
+      },
+      "tables_read_completely": 104,
+      "source_cluster_accessed": false,
+      "tcp_listening_enabled": false,
+      "owned_cluster_stopped": true,
+      "socket_file_remaining": false,
+      "scope": "Full saved global-role SQL and saved database archive restored into a fresh private cluster; every user table read. Does not claim physical/WAL identity or independent equality to historical source rows beyond native dump semantics."
+    }
+  },
+  "history_recovery": {
+    "native_attempt_rows": 11,
+    "native_uncached_pass_durations": 3,
+    "native_available_span_rows": 14471,
+    "source_sha": "c41b933b246b8c7f9ced14bfff97c38fcb6657f7",
+    "first_recovery_commit": "4e11f350f8e7fd4ae67652ea124f9ffe2b1bd439",
+    "original_input_hash_and_id_proof_sha256": "20c1664e3e123d73bd19f097ae81da771611d300729ac6f9c067984e8e49a329",
+    "provenance": "Original run.json hashes/IDs/status/time/cache flags preserved. Native loader/writer used without save/upload; native ledger applied and checked. No SHA field invented. Recorded current cloud guest boot payload forwards neither suite nor eligibility flag, so native task-suite/default metadata is retained; complete historical ambient environment is unavailable. These are regenerated native records, not claimed byte-identical to absent guest ledgers. Eight cached passes did not feed duration history."
+  },
+  "closure": "Safe operation outcomes/aggregate hashes are committed sidecars. Raw decoded member maps and Git output are derivable from the authenticated manifests/bundle headers and pinned recipes; no later raw credential/provider payload is generated."
+}

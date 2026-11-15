@@ -17,7 +17,10 @@ type GeoFingerprintPayload = {
 };
 import { DEFAULT_GEOLOCATION } from '../../providers/geoip';
 import * as repo from './repo';
-import { recordEndedLogicalBrowser } from '../../providers/browser/sessionPersist';
+import {
+  isConfirmedBrowserEnd,
+  recordEndedLogicalBrowser,
+} from '../../providers/browser/sessionPersist';
 import { serializePasskeys, serializePasswords, toUserSettings } from './service.serializers';
 
 const log = createLogger('BrowserSession');
@@ -46,6 +49,8 @@ type TaskInfoResponse = {
   same_session_unavailable_reason?: string;
   browser_session_health?: BrowserSessionHealth;
   steel_session_health?: BrowserSessionHealth;
+  /** validateLive only: the provider confirmed this exact native ended (never a guess). */
+  provider_session_ended?: boolean;
 };
 
 export function isLiveBrowserStatus(status: string | null): boolean {
@@ -225,6 +230,7 @@ async function applyLiveSessionAvailability(
     return response;
   }
   response.browser_session_health = health;
+  response.provider_session_ended = isConfirmedBrowserEnd(health.status);
   if (health.provider === 'steel') response.steel_session_health = health;
   const availability = sameSessionAvailability(health, legacySteelResponse);
   response.same_session_available = availability.available;

@@ -1,7 +1,7 @@
 # Minimal E2B template for Codex CLI with WebSocket streaming.
 FROM ubuntu:22.04
 
-ARG CODEX_VERSION=0.159.0
+ARG CODEX_VERSION=0.169.0
 ARG NODE_VERSION=22.23.4
 
 # gh (GitHub CLI) comes from GitHub's own signed apt repository so code agents can run

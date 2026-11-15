@@ -8,9 +8,9 @@
  * alias disagree.
  */
 export const CODEX_CODE_TEMPLATE = {
-  sizedAliasPrefix: 'codex-code-v0159-node22234',
-  alias: 'codex-code-v0159-node22234-c2-m4',
-  codexVersion: '0.159.0',
+  sizedAliasPrefix: 'codex-code-v0169-node22234',
+  alias: 'codex-code-v0169-node22234-c2-m4',
+  codexVersion: '0.169.0',
   nodeVersion: '22.23.4',
 } as const;
 
@@ -25,8 +25,10 @@ export const CODEX_AZURE_SERVICE_TIER = 'priority';
 
 /**
  * Codex model catalog for the funded Azure provider (model_catalog_json).
- * Codex 0.159.0 bundles no gpt-6.1-sol metadata, so without it the CLI falls
+ * Codex 0.159.0 bundled no gpt-6.1-sol metadata, so without it the CLI fell
  * back to generic metadata that drops the priority tier and reasoning effort.
+ * 0.169.0 bundles that model, but its ChatGPT catalog entry is not Azure's:
+ * this file still limits the funded provider to the tier Azure sells.
  * The entry is the gpt-6.1-sol entry of the Codex release catalog
  * (codex-rs/models-manager/models.json, openai/codex f8bfbc45a), which
  * advertises only `priority`. It sits next to ws-server.mjs in the template

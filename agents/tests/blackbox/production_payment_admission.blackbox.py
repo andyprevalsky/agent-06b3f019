@@ -20,7 +20,7 @@ LIVE_V2_READY = {
 }
 
 
-async def admission(usage, *, status=200, task_name="agent-payment-production-abandonment", readiness=None):
+async def admission(billing, *, status=200, task_name="agent-payment-production-abandonment", readiness=None):
     from benchmarks import run_benchmark as bench
 
     requests = []
@@ -34,9 +34,9 @@ async def admission(usage, *, status=200, task_name="agent-payment-production-ab
         if request.url.path == "/api/agentcard/status":
             assert request.headers["x-user-id"] == bench.AGENT_PAYMENT_LIFECYCLE_PROD_USER_ID
             return httpx.Response(200, json=LIVE_V2_READY if readiness is None else readiness)
-        assert request.url.path == "/api/credits/usage", request.url
-        assert request.url.params["userId"] == bench.AGENT_PAYMENT_LIFECYCLE_PROD_USER_ID
-        return httpx.Response(status, json=usage)
+        # The owner probe's dedicated live billing customer must be configured on the backend.
+        assert request.url.path == "/api/test-payment/lifecycle/owner-billing", request.url
+        return httpx.Response(status, json=billing)
 
     setup_mock_fn(provider)
     try:
@@ -52,26 +52,26 @@ async def admission(usage, *, status=200, task_name="agent-payment-production-ab
         teardown_mock()
 
 
-async def test_test_mode_refused_before_any_write():
-    outcome, requests = await admission({"tier": 30, "remaining": 100, "stripeLivemode": False})
-    assert "Stripe billing mode" in outcome, outcome
-    assert [r.method for r in requests] == ["GET"], "test-mode billing reached an allocation"
+async def test_unconfigured_owner_billing_refused_before_any_write():
+    outcome, requests = await admission({"configured": False})
+    assert "BENCHMARK_PAYMENT_LIFECYCLE_STRIPE_CUSTOMER_ID is not configured" in outcome, outcome
+    assert {r.method for r in requests} == {"GET"}, "unconfigured owner billing reached an allocation"
 
 
-async def test_unknown_mode_refused_before_any_write():
-    for mode in ({}, {"stripeLivemode": None}, {"stripeLivemode": "true"}, {"stripeLivemode": 1}):
-        outcome, requests = await admission({"tier": 30, "remaining": 100, **mode})
-        assert "Stripe billing mode" in outcome, (mode, outcome)
-        assert [r.method for r in requests] == ["GET"]
+async def test_unknown_owner_billing_refused_before_any_write():
+    for billing in ({}, {"configured": None}, {"configured": "true"}, {"configured": 1}):
+        outcome, requests = await admission(billing)
+        assert "not configured" in outcome, (billing, outcome)
+        assert {r.method for r in requests} == {"GET"}
     outcome, requests = await admission({"error": "unavailable"}, status=503)
     assert "503" in outcome and outcome != "allocated", outcome
-    assert [r.method for r in requests] == ["GET"]
+    assert {r.method for r in requests} == {"GET"}
 
 
 async def test_live_identity_remains_admissible():
-    outcome, requests = await admission({"tier": 30, "remaining": 100, "stripeLivemode": True})
+    outcome, requests = await admission({"configured": True})
     assert outcome == "allocated", outcome
-    assert requests[0].url.path == "/api/credits/usage"
+    assert requests[0].url.path == "/api/test-payment/lifecycle/owner-billing"
     assert requests[-1].method == "POST" and requests[-1].url.path == "/api/agents"
 
 
@@ -83,24 +83,22 @@ async def test_live_identity_requires_scoped_v2_readiness_before_allocation():
         {**LIVE_V2_READY, "livemode": False},
         {**LIVE_V2_READY, "fundsSource": "onramp"},
     ):
-        outcome, requests = await admission(
-            {"tier": 30, "remaining": 100, "stripeLivemode": True}, readiness=readiness
-        )
+        outcome, requests = await admission({"configured": True}, readiness=readiness)
         assert "scoped live v2" in outcome, outcome
         assert [r.method for r in requests] == ["GET", "GET"], "unready identity reached a write"
 
 
 async def test_generic_sandbox_task_does_not_require_live_billing():
-    outcome, requests = await admission({"tier": 30, "remaining": 100, "stripeLivemode": False}, task_name="chat-mode")
+    outcome, requests = await admission({"configured": False}, task_name="chat-mode")
     assert outcome == "allocated", outcome
-    assert all(r.url.path != "/api/credits/usage" for r in requests)
+    assert all(r.url.path != "/api/test-payment/lifecycle/owner-billing" for r in requests)
     assert requests[-1].method == "POST" and requests[-1].url.path == "/api/agents"
 
 
 async def test_sandbox_payment_retains_test_mode_setup():
-    outcome, requests = await admission({"tier": 30, "remaining": 100, "stripeLivemode": False}, task_name="agent-payment-abandonment")
+    outcome, requests = await admission({"configured": False}, task_name="agent-payment-abandonment")
     assert outcome == "allocated", outcome
-    assert all(r.url.path != "/api/credits/usage" for r in requests)
+    assert all(r.url.path != "/api/test-payment/lifecycle/owner-billing" for r in requests)
     assert any(r.url.path == "/api/test-payment/lifecycle/agentcard-setup" for r in requests)
     assert requests[-1].method == "POST" and requests[-1].url.path == "/api/agents"
 
@@ -108,8 +106,8 @@ async def test_sandbox_payment_retains_test_mode_setup():
 async def run_all_tests():
     result = BlackboxResult()
     for test in (
-        test_test_mode_refused_before_any_write,
-        test_unknown_mode_refused_before_any_write,
+        test_unconfigured_owner_billing_refused_before_any_write,
+        test_unknown_owner_billing_refused_before_any_write,
         test_live_identity_remains_admissible,
         test_live_identity_requires_scoped_v2_readiness_before_allocation,
         test_generic_sandbox_task_does_not_require_live_billing,

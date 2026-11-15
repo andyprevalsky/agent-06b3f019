@@ -2221,7 +2221,8 @@ async def test_complete_browser_use_dumps_cerebras_context():
 
     set_mock_handler(handler)
     client = RoseClient(openrouter_key="ork-x")
-    dump_root = ROOT.parent / ".llm-dumps" / "unbound"
+    # Dumps need a bound agent: unbound records are refused (llm_archive blackbox).
+    dump_root = ROOT.parent / ".llm-dumps" / "bu-cerebras-dump-agent"
     for path in dump_root.glob("*test-bu-cerebras-dump.json"):
         path.unlink()
 
@@ -2233,6 +2234,7 @@ async def test_complete_browser_use_dumps_cerebras_context():
             available_actions=["click", "click_coordinates"],
             include_screenshot=False,
             gpt_auth=gpt_auth_from_token("good-gpt-token", "acct_123"),
+            agent_id="bu-cerebras-dump-agent",
             call_site="test-bu-cerebras-dump",
             dump_extra={
                 "browser_recording_manifest_path": "/tmp/browser-recording/manifest.json",
@@ -2285,7 +2287,7 @@ async def _assert_failed_browser_context_capture(*, dump_unavailable=False, canc
             patch.object(observability, "_IS_PRODUCTION", False),
             patch.object(observability, "archive_json", return_value=None),
             patch.object(observability, "current_span_id", return_value="offline-browser-span"),
-            patch.object(observability, "current_root_agent_id", return_value=root_id),
+            patch.object(observability, "current_bound_root_agent_id", return_value=root_id),
             patch.object(
                 observability,
                 "dump_llm_context",
@@ -2558,7 +2560,7 @@ async def test_complete_browser_use_runs_on_spawning_agents_pool():
         return httpx.Response(500, text="ultra must not reach Cerebras or OpenRouter")
 
     set_mock_handler(handler)
-    dump_root = ROOT.parent / ".llm-dumps" / "unbound"
+    dump_root = ROOT.parent / ".llm-dumps" / "bu-spawning-pool-agent"
     for path in dump_root.glob("*write_lock_notification_fork_3.json"):
         path.unlink()
     token = set_context(DemoCacheContext(enabled=True, goal="click submit", write_enabled=True))
@@ -2587,6 +2589,7 @@ async def test_complete_browser_use_runs_on_spawning_agents_pool():
                     },
                 ],
                 claude_auth=claude_auth_from_token("good-token"),
+                agent_id="bu-spawning-pool-agent",
                 call_site="write_lock_notification_fork_3",
                 pool="rose-1-ultra",
             )
@@ -3625,11 +3628,12 @@ async def test_phone_setup_settings_actual_handler_observation():
         assert "Do not disable iCloud" in wire and "Historical download completion" in wire
         assert "Do not wait for configurationReady to sign in" in wire
         assert "latest successful operation is screen.text for the current interaction" in wire
-        assert "first dismiss them with an observed tap" in wire and "then observe and fill again" in wire
+        assert "never tap the suggestion rows" in wire and "try input.keys escape" in wire
+        assert "If all three fail, report that blocker without retrying" in wire
         assert "Preserve the original authorized phone task" in wire
         import hashlib
         from domains.spawn_browser_agent_v3.phone import PHONE_GUIDANCE
-        assert hashlib.sha256(PHONE_GUIDANCE.encode()).hexdigest() == "3116cb5f79846dcf410cef87fe2091e382dcd0dd0ae058671ea0acc1f2257bb5", "Ordinary enabled guide must match the saved-credential binding contract"
+        assert hashlib.sha256(PHONE_GUIDANCE.encode()).hexdigest() == "ad0667593d0ca516ae2c76c5b11128d8d0ab084ad38e19ce0b94437b1167c4a4", "Ordinary enabled guide must match the saved-credential binding contract"
         for marker in (None, False, "true"):
             plain_setup = {key: value for key, value in setup.items() if key != "googlePasscodeExceptionAllowed"}
             if marker is not None:
