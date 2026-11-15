@@ -159,7 +159,7 @@ from helpers.llm import (
     set_response_schema_activity,
 )
 from helpers.messages import update_agent_tree_state
-from helpers.process_exit import run_then_exit
+from helpers.process_exit import drain_native_python_callbacks, run_then_exit
 from helpers.query_parent_state import query_parent_state_activity, set_temporal_client
 from helpers.save_tool_usage import save_tool_usage
 from helpers.sms_activities import (
@@ -258,7 +258,6 @@ logger = structlog.get_logger()
 import ipaddress
 import math
 import socket
-import threading
 import time
 from dataclasses import dataclass
 
@@ -1539,33 +1538,6 @@ def _start_sdk_runtime(port: int) -> tuple[Runtime, int]:
     raise AssertionError("runtime port allocation exhausted without a result")
 
 
-NATIVE_CALLBACK_DRAIN_SECONDS = 2.0
-
-
-def _foreign_threads_running_python() -> bool:
-    python_started = {
-        thread.ident for thread in threading.enumerate() if not isinstance(thread, threading._DummyThread)
-    }
-    return any(ident not in python_started for ident in sys._current_frames())
-
-
-async def _drain_native_python_callbacks(timeout: float = NATIVE_CALLBACK_DRAIN_SECONDS) -> bool:
-    """Wait until no SDK-owned native thread is executing Python code.
-
-    An SDK RPC completion resolves its asyncio future from a Tokio thread via
-    call_soon_threadsafe, whose self-pipe write releases the GIL before the
-    callback returns. If the entry point returns first, that thread re-takes
-    the GIL during interpreter finalization and the process aborts (SIGABRT
-    "PyGILState_Release ... finalizing" or SIGSEGV) after a clean shutdown.
-    """
-    deadline = time.monotonic() + timeout
-    while _foreign_threads_running_python():
-        if time.monotonic() >= deadline:
-            return False
-        await asyncio.sleep(0.005)
-    return True
-
-
 async def main():
     """Main worker entry point."""
     global SDK_METRICS_PORT, HEALTH_CHECK_PORT
@@ -2039,7 +2011,7 @@ async def main():
             out = f"worker-profile-{os.getenv('WORKER_INDEX', '0')}.prof"
             _profiler.dump_stats(out)
             logger.warning("cProfile stats dumped", path=out)
-        if not await _drain_native_python_callbacks():
+        if not await drain_native_python_callbacks():
             logger.warning("Native SDK callback still executing Python at worker exit")
         logger.info("Worker stopped")
         if metrics_error is not None and primary_error is None:

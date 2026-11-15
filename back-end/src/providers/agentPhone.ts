@@ -10,6 +10,7 @@ import {
   baseUrl,
   dataArray,
   isAgentPhoneConfigured,
+  isTestStackUsingNonTestAccount,
   parseJson,
   stringValue,
 } from './agentPhoneClient';
@@ -35,6 +36,9 @@ const CREATE_PHONE_TIMEOUT_MS = 10_000;
 const RECONCILE_PAGE_SIZE = 100;
 const MAX_RECONCILE_AGENTS = 10_000;
 const RECONCILE_TIMEOUT_MS = 90_000;
+// The agent list is newest-first, so a marker lookup stops at agents created
+// before the uncertain lease chain began; the slack covers provider clock skew.
+const RECONCILE_CREATED_AT_SLACK_MS = 5 * 60_000;
 
 export interface AgentPhoneNumber {
   agentId: string;
@@ -209,11 +213,36 @@ async function createNumber(agentId: string, areaCode: string, requestDeadlineAt
   return { id, phoneNumber };
 }
 
+function pageCreatedAtMs(
+  page: Record<string, unknown>[],
+  previousMs: number,
+  seenIds: Set<string>
+): number[] {
+  let newestAllowedMs = previousMs;
+  return page.map((payload) => {
+    // Agents created mid-scan shift offsets, so a page can repeat seen agents.
+    if (seenIds.has(stringValue(payload.id))) return Number.NaN;
+    const createdAtMs = Date.parse(stringValue(payload.createdAt));
+    if (!Number.isFinite(createdAtMs)) return Number.NaN;
+    if (createdAtMs > newestAllowedMs) {
+      throw new AgentPhoneMarkerLookupIncomplete(
+        'AgentPhone agent list is not newest-first; the reconciliation scan cannot be bounded'
+      );
+    }
+    newestAllowedMs = createdAtMs;
+    return createdAtMs;
+  });
+}
+
 async function findAgentByMarker(
   marker: string,
+  uncertainSince: number,
   requestDeadlineAt: number
 ): Promise<AgentPhoneAgent | null> {
   const matches: AgentPhoneAgent[] = [];
+  const createdAfterMs = uncertainSince - RECONCILE_CREATED_AT_SLACK_MS;
+  const seenIds = new Set<string>();
+  let previousCreatedAtMs = Infinity;
   let offset = 0;
   let scanComplete = false;
   const deadline = Math.min(requestDeadlineAt, Date.now() + RECONCILE_TIMEOUT_MS);
@@ -234,15 +263,28 @@ async function findAgentByMarker(
       );
     }
     const page = dataArray(data);
-    for (const payload of page) {
+    const createdAtMs = pageCreatedAtMs(page, previousCreatedAtMs, seenIds);
+    let reachedOlderAgents = false;
+    for (const [index, payload] of page.entries()) {
+      if (createdAtMs[index] < createdAfterMs) {
+        reachedOlderAgents = true;
+        break;
+      }
+      if (Number.isFinite(createdAtMs[index])) previousCreatedAtMs = createdAtMs[index];
       const agent = agentFromPayload(payload);
-      if (agent?.description === marker) matches.push(agent);
+      if (agent === null || seenIds.has(agent.id)) continue;
+      seenIds.add(agent.id);
+      if (agent.description === marker) matches.push(agent);
     }
     if (matches.length > 1) {
       throw new Error(`AgentPhone reconciliation found ${matches.length} resources for one marker`);
     }
     if (matches.length === 1) {
       return matches[0];
+    }
+    if (reachedOlderAgents) {
+      scanComplete = true;
+      break;
     }
     const total =
       typeof data.total === 'number' && Number.isFinite(data.total) && data.total >= 0
@@ -344,6 +386,7 @@ async function resolveAgentForProvisioning(params: {
   recoveryRequired: boolean;
   existingAgentId: string | null;
   leaseMarker: string | null;
+  uncertainSince: number;
   requestDeadlineAt: number;
 }): Promise<ResolvedProvisioningAgent> {
   if (params.existingAgentId) {
@@ -364,7 +407,11 @@ async function resolveAgentForProvisioning(params: {
 
   if (params.recoveryRequired) {
     try {
-      const recovered = await findAgentByMarker(params.marker, params.requestDeadlineAt);
+      const recovered = await findAgentByMarker(
+        params.marker,
+        params.uncertainSince,
+        params.requestDeadlineAt
+      );
       if (recovered !== null) return { agent: recovered, createdThisAttempt: false };
     } catch (error) {
       throw new AgentPhoneProvisioningError(
@@ -394,7 +441,11 @@ async function resolveAgentForProvisioning(params: {
       );
     }
     try {
-      const recovered = await findAgentByMarker(params.marker, params.requestDeadlineAt);
+      const recovered = await findAgentByMarker(
+        params.marker,
+        params.uncertainSince,
+        params.requestDeadlineAt
+      );
       if (recovered === null) {
         throw new Error('no exact provisioning marker was visible after a complete scan');
       }
@@ -421,6 +472,7 @@ async function provisionAgentPhoneNumber(
     existingAgentId: string | null;
     existingNumberId: string | null;
     marker: string;
+    uncertainSince: number;
   },
   requestDeadlineAt: number
 ): Promise<AgentPhoneNumber> {
@@ -434,6 +486,7 @@ async function provisionAgentPhoneNumber(
     recoveryRequired: claim.recoveryRequired,
     existingAgentId: claim.existingAgentId,
     leaseMarker: claim.marker,
+    uncertainSince: claim.uncertainSince,
     requestDeadlineAt,
   });
 
@@ -535,6 +588,16 @@ export async function createAgentPhoneNumber(params: {
     return null;
   }
 
+  if (isTestStackUsingNonTestAccount()) {
+    throw new AgentPhoneProvisioningError(
+      'Isolated test stacks must not provision numbers on the production AgentPhone account: ' +
+        'export AGENTPHONE_TEST_API_KEY (a dedicated test-account key) in the shell that ' +
+        'launches the test runner; blackbox-phone-env.sh exports it as AGENTPHONE_API_KEY. ' +
+        'Leave AGENTPHONE_API_KEY empty to skip phone provisioning',
+      false
+    );
+  }
+
   const requestDeadlineAt = Date.now() + AGENT_PHONE_PROVISIONING_LEASE_MS;
 
   // The database stores a committed per-user lease. Network calls happen after
@@ -565,6 +628,7 @@ export async function createAgentPhoneNumber(params: {
           existingAgentId: claim.existingAgentId,
           existingNumberId: claim.existingNumberId,
           marker: claim.marker,
+          uncertainSince: claim.uncertainSince,
         },
         requestDeadlineAt
       );
@@ -574,7 +638,8 @@ export async function createAgentPhoneNumber(params: {
       await releaseAgentPhoneProvisioning(
         params.userId,
         claim.marker,
-        !isAgentPhoneEmailFallbackSafe(error)
+        !isAgentPhoneEmailFallbackSafe(error),
+        claim.uncertainSince
       );
       throw error;
     }

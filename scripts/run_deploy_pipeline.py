@@ -287,6 +287,7 @@ import runpy
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -3675,18 +3676,66 @@ def _gh_executable() -> str:
     return os.environ.get("DEPLOY_GH_BIN") or "gh"
 
 
-def _gh_text(arguments: list[str], root: Path, *, timeout: float = GH_TIMEOUT_SECONDS) -> str:
-    """``gh ...`` stdout; a failed call raises with gh's own message."""
-    completed = subprocess.run([_gh_executable(), *arguments], cwd=root, stdout=subprocess.PIPE,
-                               stderr=subprocess.PIPE, text=True, timeout=timeout)
+def gh_token_pool_argv(root: Path, environ: Mapping[str, str]) -> list[str]:
+    """``github_token_pool.py pick`` for read-only gh calls (CLAUDE.md "GitHub
+    token pool"): it prints the member with the most core quota left. A
+    deploy's polls of a long workflow run once exhausted the primary
+    GITHUB_TOKEN (HTTP 403 rate limit) while the App had full quota.
+    ``DEPLOY_GH_TOKEN_POOL`` names the pool script so a test can stub it."""
+    pool = environ.get("DEPLOY_GH_TOKEN_POOL") or str(Path(__file__).resolve().parent / "github_token_pool.py")
+    return [sys.executable, pool, "pick", "--resource", "core", "--repo-root", str(root)]
+
+
+def _gh_read_token(root: Path) -> str | None:
+    """The token pool's pick for a read-only gh call; None (read with the
+    deploy's GH_TOKEN) when the pool has no usable member."""
+    try:
+        picked = subprocess.run(gh_token_pool_argv(root, os.environ), cwd=root, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, text=True, timeout=60)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        print(f"PIPELINE_GH token pool unavailable ({error}); reading with the deploy's GH_TOKEN", flush=True)
+        return None
+    token = picked.stdout.strip()
+    if picked.returncode != 0 or not token:
+        print(f"PIPELINE_GH token pool picked no member ({picked.stderr.strip() or 'empty'}); reading with the "
+              "deploy's GH_TOKEN", flush=True)
+        return None
+    return token
+
+
+def _gh_text(arguments: list[str], root: Path, *, timeout: float = GH_TIMEOUT_SECONDS, read_only: bool = False) -> str:
+    """``gh ...`` stdout; a failed call raises with gh's own message. Writes
+    (dispatch, rerun) run with the inherited GH_TOKEN, the workflow-scoped
+    identity. ``read_only`` calls run with the token pool's best member and,
+    if that member fails (another identity may not see the repo: a 404 is not
+    authoritative), once more with the inherited GH_TOKEN."""
+    def run(env: dict[str, str] | None) -> subprocess.CompletedProcess:
+        return subprocess.run([_gh_executable(), *arguments], cwd=root, env=env, stdout=subprocess.PIPE,
+                              stderr=subprocess.PIPE, text=True, timeout=timeout)
+
+    def message(completed: subprocess.CompletedProcess) -> str:
+        return completed.stderr.strip() or completed.stdout.strip()
+
+    token = _gh_read_token(root) if read_only else None
+    if token is not None and token != os.environ.get("GH_TOKEN"):
+        pooled = run({**os.environ, "GH_TOKEN": token})
+        if pooled.returncode == 0:
+            return pooled.stdout
+        completed = run(None)
+        if completed.returncode != 0:
+            raise ProductionGateError(f"gh {' '.join(arguments[:3])} failed with the token pool's member "
+                                      f"({message(pooled)}) and with GH_TOKEN: {message(completed)}")
+        return completed.stdout
+    completed = run(None)
     if completed.returncode != 0:
-        raise ProductionGateError(f"gh {' '.join(arguments[:3])} failed: {completed.stderr.strip() or completed.stdout.strip()}")
+        raise ProductionGateError(f"gh {' '.join(arguments[:3])} failed: {message(completed)}")
     return completed.stdout
 
 
 def _gh_json(arguments: list[str], root: Path) -> object:
-    """``gh ... --json`` parsed; a failed call raises with gh's own message."""
-    output = _gh_text(arguments, root)
+    """``gh ... --json`` parsed (always a read); a failed call raises with
+    gh's own message."""
+    output = _gh_text(arguments, root, read_only=True)
     try:
         return json.loads(output or "null")
     except json.JSONDecodeError as error:
@@ -3694,7 +3743,7 @@ def _gh_json(arguments: list[str], root: Path) -> object:
 
 
 def _gh_run_log(run_id: str, root: Path) -> str:
-    return _gh_text(["run", "view", run_id, "--log"], root, timeout=GH_TIMEOUT_SECONDS * 5)
+    return _gh_text(["run", "view", run_id, "--log"], root, timeout=GH_TIMEOUT_SECONDS * 5, read_only=True)
 
 
 def recover_job_id(log: str, run_id: str) -> str:
@@ -3809,11 +3858,35 @@ def _dotenv_values(path: Path) -> dict[str, str]:
     return values
 
 
-def surface_hash(root: Path) -> str:
-    completed = subprocess.run([sys.executable, str(root / SURFACE_HASH_SCRIPT)], cwd=root, stdout=subprocess.PIPE,
-                               stderr=subprocess.PIPE, text=True, timeout=300)
+def surface_hash(root: Path, commit: str) -> str:
+    """The surface hash deploy-agents.yml computed on its checkout of ``commit``:
+    that commit's own algorithm over that commit's own ``agents/`` Python sources
+    (the only files the walk reads), never the deployer's working tree. A
+    checkout still on its pre-merge branch head hashed a different surface and
+    the monitor refused a successful cutover (PR #2024)."""
+    def failed(detail: str) -> ProductionGateError:
+        return ProductionGateError(f"could not compute the agent workflow surface hash of {commit}: {detail}")
+
+    algorithm = subprocess.run(["git", "show", f"{commit}:{SURFACE_HASH_SCRIPT.as_posix()}"], cwd=root,
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=300)
+    if algorithm.returncode != 0:
+        raise failed(algorithm.stderr.strip())
+    # deploy-agents.yml's sparse checkout excludes agents/benchmarks/; so does this.
+    archive = subprocess.run(["git", "archive", "--format=tar", commit, "--", ":(glob)agents/**/*.py",
+                              ":(exclude)agents/benchmarks/"], cwd=root,
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=300)
+    if archive.returncode != 0:
+        raise failed(archive.stderr.decode(errors="replace").strip())
+    with tempfile.TemporaryDirectory(prefix="deploy-surface-hash-") as temporary:
+        extracted = subprocess.run(["tar", "-x", "-C", temporary], input=archive.stdout, stdout=subprocess.PIPE,
+                                   stderr=subprocess.PIPE, timeout=300)
+        if extracted.returncode != 0:
+            raise failed(extracted.stderr.decode(errors="replace").strip())
+        completed = subprocess.run([sys.executable, "-I", "-c", algorithm.stdout, "--agents-dir",
+                                    str(Path(temporary) / "agents")], cwd=temporary, stdout=subprocess.PIPE,
+                                   stderr=subprocess.PIPE, text=True, timeout=300)
     if completed.returncode != 0 or not completed.stdout.strip():
-        raise ProductionGateError(f"could not compute the agent workflow surface hash: {completed.stderr.strip()}")
+        raise failed(completed.stderr.strip())
     return completed.stdout.strip()
 
 
@@ -4012,7 +4085,7 @@ def production(merged_sha: str, state_dir: Path, dispatch: list[str] | None = No
             print(f"PIPELINE_PRODUCTION fly=completed run={fly['run_id']} attempt={fly['attempt']} "
                   f"conclusion={fly['conclusion']} job={fly['job_id']}", flush=True)
             _write_production_receipt(receipt_path, receipt)
-            expected = expected_hash or surface_hash(root)
+            expected = expected_hash or surface_hash(root, merged_sha)
             try:
                 receipt["cutover_verify"] = cutover_verify(fly, merged_sha, expected, root=root)
             except ProductionGateError:
@@ -4856,7 +4929,7 @@ def main(argv: list[str] | None = None) -> int:
                                    help="seconds to wait for the exact run to appear")
     production_parser.add_argument("--poll-seconds", type=float, default=DEFAULT_FLY_POLL_SECONDS)
     production_parser.add_argument("--expected-hash", default=None,
-                                   help="precomputed agent workflow surface hash (default: scripts/agent_workflow_surface_hash.py)")
+                                   help="precomputed agent workflow surface hash (default: the merged commit's own scripts/agent_workflow_surface_hash.py over its agents/ sources)")
     production_parser.add_argument("dispatch", nargs=argparse.REMAINDER,
                                    help="-- <command> run only once the gate is open (e.g. gh workflow run ...)")
     semantic_parser = sub.add_parser(

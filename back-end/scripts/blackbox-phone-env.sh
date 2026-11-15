@@ -6,6 +6,10 @@ if [[ -z "${CLOUD_IPHONE_ALLOWED_PHONES:-}" ]]; then
   export CLOUD_IPHONE_ALLOWED_PHONES
 fi
 export CLOUD_IPHONE_ENABLED=true
+# back-end/.env holds the PRODUCTION AgentPhone key, whose account has a hard
+# number cap shared with real users. Test stacks get only a dedicated test
+# account key, or none (phone provisioning is then skipped).
+export AGENTPHONE_API_KEY="${AGENTPHONE_TEST_API_KEY:-}"
 
 # Call after the isolated backend's port is known and before it starts. Every
 # Vapi/Twilio REST call goes to that backend's own loopback fake

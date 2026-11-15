@@ -138,7 +138,7 @@ def test_skip_display_uses_literal_catalog_contract_and_preserves_cli(tmp_path: 
     catalog.write_text(json.dumps(tasks))
     attempts.write_text("")
     args = ["--catalog", str(catalog), "--attempts-file", str(attempts),
-            "--changed-file", "README.md", "--repo-root", str(ROOT)]
+            "--changed-file", "back-end/src/providers/agentcard/runtime.ts", "--repo-root", str(ROOT)]
     expected = [task["name"] for task in tasks if not task.get("production_only")]
     assert main([*args, "--format", "names"]) == 0
     names = capsys.readouterr()
@@ -1129,21 +1129,28 @@ AGENTCARD_SANDBOX_LIFECYCLE = (
 
 
 @pytest.mark.parametrize("surface", ["local", "cloud"])
-def test_agentcard_sandbox_lifecycle_tasks_are_ordinary_smoke_with_isolated_fixtures(
+def test_agentcard_sandbox_lifecycle_tasks_are_smoke_floor_only_on_agentcard_infra_change(
     tmp_path: Path, surface: str
 ) -> None:
-    """The retired AgentCard deploy lane's four tasks run in smoke on every deploy.
+    """The four AgentCard sandbox lifecycle smoke tasks run only when AgentCard infra changed.
 
-    They are smoke-tagged, so failed attempts never evict them (no history gate),
-    they fit the hard cap with path extras, and the release-stall guidance rides
-    along. Their mutable payment fixture is isolated per task on both surfaces:
-    cloud seeds it on each task's own guest, and the local runner at the
-    predeploy concurrency gives each task an independent world.
+    Then they are smoke floor (failed attempts never evict them), fit the hard cap
+    and carry the release-stall guidance. Their mutable payment fixture is
+    isolated per task on both surfaces: cloud seeds it on each task's own guest,
+    and the local runner at the predeploy concurrency gives each task an
+    independent world.
     """
     attempts = tmp_path / "attempts.jsonl"
     _write_attempts(attempts, [(name, False) for name in AGENTCARD_SANDBOX_LIFECYCLE for _ in range(3)])
     catalog = {task["name"]: task for task in json.loads(CATALOG.read_text())}
-    for changed in (["README.md"], ["back-end/src/domains/agentcard/service.ts", "agents/loop/run_agent.py"]):
+    unrelated = select_predeploy_benches(
+        catalog=CATALOG, changed_files=["README.md", "agents/loop/run_agent.py"], surface=surface,
+        repo_root=ROOT, attempts_file=attempts,
+    )
+    assert not set(AGENTCARD_SANDBOX_LIFECYCLE) & set(unrelated.selected), unrelated.selected
+    assert set(AGENTCARD_SANDBOX_LIFECYCLE) <= set(unrelated.agentcard_skipped)
+    for changed in (["back-end/src/domains/agentcard/service.ts"],
+                    ["back-end/src/domains/agentcard/service.ts", "agents/loop/run_agent.py"]):
         selection = select_predeploy_benches(
             catalog=CATALOG,
             changed_files=changed,
@@ -1172,6 +1179,127 @@ def test_agentcard_sandbox_lifecycle_tasks_are_ordinary_smoke_with_isolated_fixt
             "agent-payment-abandonment|agent-payment-setup-resume)"
         )
         assert "BENCH_NEEDS_PAYMENT_FIXTURE=1" in driver[case : driver.index(";;", case)]
+
+
+# Every catalog task that mints, funds or closes an AgentCard card (rule 5).
+AGENTCARD_CATALOG_TASKS = {
+    *AGENTCARD_SANDBOX_LIFECYCLE,
+    "agent-payment-new-user-journey",
+    "agent-payment-production-abandonment",
+    "agent-payment-production-purchase",
+    "browser-auth-guest-purchase",
+    "browser-auth-member-discount-purchase",
+    "browser-auth-member-discount-signup-fails-purchase",
+    "browser-auth-paid-membership-purchase",
+    "browser-auth-signup-purchase",
+    "browser-auth-signup-purchase-no-subscription",
+    "browser-auth-session-expires-at-checkout",
+    "browser-alchemy-springs-sauna",
+    "browser-hotel-booking",
+    "browser-event-ticket",
+    "browser-1015-eventim-request-card",
+    "anti-bot-stripe-test-payment",
+    "gate-subscription-webhook-resume",
+    "gate-subscription-card-mint-admin-bypass",
+}
+NON_AGENTCARD_DIFFS = (
+    ["README.md"],
+    ["agents/benchmarks/run_benchmark.py", "agents/worker.py", "back-end/src/server.ts"],
+    ["agents/browser_tools/click.py", "agents/benchmarks/tasks.json", "scripts/run.sh"],
+    ["docs/rca/cases/2026-10-02-agentcard-abandonment-closed-card-transfer-never-released.md"],
+    ["back-end/src/tests/unit/agentcard-oauth.test.ts", "agents/benchmarks/history/task_attempts.jsonl"],
+)
+AGENTCARD_INFRA_DIFFS = (
+    "back-end/src/providers/agentcard/runtime.ts",
+    "back-end/src/providers/card-provider/agentcard-routing.ts",
+    "back-end/src/providers/wallet-funding.ts",
+    "back-end/src/providers/purchase-wallet-funding-repo.ts",
+    "back-end/src/domains/agentcard/service.ts",
+    "back-end/src/domains/purchases/issueCard.ts",
+    "back-end/src/domains/test-payment/lifecycle.ts",
+    "back-end/scripts/setup-benchmark-payment.ts",
+    "back-end/scripts/setup-benchmark-agentcard-world.ts",
+    "agents/domains/request_payment_card/service.py",
+    "agents/tools/request_payment_card.py",
+    "agents/utils/payment_card.py",
+    "front-end/src/features/test-payment/components/TestPaymentPage.tsx",
+    "scripts/run-agentcard-lifecycle-task.sh",
+)
+
+
+def _all_pass_attempts(path: Path) -> None:
+    _write_attempts(path, [(t["name"], True) for t in json.loads(CATALOG.read_text()) for _ in range(3)])
+
+
+def test_catalog_agentcard_tasks_are_identified_from_catalog_fields() -> None:
+    from .select_predeploy_benches import reaches_agentcard
+
+    found = {task.name for task in load_tasks(CATALOG) if reaches_agentcard(task)}
+    assert found == AGENTCARD_CATALOG_TASKS
+    # Gate tasks stop at the subscription/KYC gate before any card mint.
+    assert not found & {"gate-subscription-card-mint", "gate-kyc-card-mint"}
+
+
+@pytest.mark.parametrize("surface", ["local", "cloud"])
+@pytest.mark.parametrize("changed", NON_AGENTCARD_DIFFS)
+def test_non_agentcard_diff_selects_zero_agentcard_tasks(tmp_path: Path, surface: str, changed: list[str]) -> None:
+    """Smoke floor, payment canary, path extras and history all qualify, yet no AgentCard task runs."""
+    attempts = tmp_path / "attempts.jsonl"
+    _all_pass_attempts(attempts)
+    selection = select_predeploy_benches(
+        catalog=CATALOG, changed_files=changed, surface=surface, cap=10_000,
+        repo_root=ROOT, attempts_file=attempts,
+    )
+    assert selection.selected, "fixture must still select non-AgentCard tasks"
+    assert not set(selection.selected) & AGENTCARD_CATALOG_TASKS, selection.selected
+    assert not selection.dropped and not selection.agentcard_infra_changed
+    eligible = {t.name for t in load_tasks(CATALOG) if t.name in AGENTCARD_CATALOG_TASKS
+                and not t.production_only and not (surface == "cloud" and t.local_only)}
+    assert set(selection.agentcard_skipped) == eligible
+    assert "AgentCard tasks skipped because no AgentCard infra changed" in format_report(selection)
+
+
+@pytest.mark.parametrize("surface", ["local", "cloud"])
+@pytest.mark.parametrize("path", AGENTCARD_INFRA_DIFFS)
+def test_agentcard_infra_diff_selects_every_agentcard_task(tmp_path: Path, surface: str, path: str) -> None:
+    attempts = tmp_path / "attempts.jsonl"
+    _all_pass_attempts(attempts)
+    selection = select_predeploy_benches(
+        catalog=CATALOG, changed_files=[path, "README.md"], surface=surface, cap=10_000,
+        repo_root=ROOT, attempts_file=attempts,
+    )
+    eligible = {t.name for t in load_tasks(CATALOG) if t.name in AGENTCARD_CATALOG_TASKS
+                and not t.production_only and not (surface == "cloud" and t.local_only)}
+    assert eligible and eligible <= set(selection.selected), sorted(eligible - set(selection.selected))
+    assert selection.agentcard_infra_changed == [path] and not selection.agentcard_skipped
+    assert "payment" in selection.categories_covered and "payment" not in selection.uncovered_categories
+    # Production-only AgentCard lifecycles stay with deploy_prod's production lane.
+    assert "agent-payment-production-abandonment" not in selection.selected
+
+
+def test_agentcard_infra_diff_keeps_hard_cap_scream(tmp_path: Path) -> None:
+    attempts = tmp_path / "attempts.jsonl"
+    _all_pass_attempts(attempts)
+    selection = select_predeploy_benches(
+        catalog=CATALOG, changed_files=["back-end/src/providers/agentcard/runtime.ts"], surface="local",
+        cap=DEFAULT_CAP, repo_root=ROOT, attempts_file=attempts,
+    )
+    assert selection.total == DEFAULT_CAP and selection.cap_hit
+    assert set(AGENTCARD_SANDBOX_LIFECYCLE) <= set(selection.floor)
+    assert set(selection.dropped) & AGENTCARD_CATALOG_TASKS
+    assert "PREDEPLOY BENCH HARD CAP HIT" in format_report(selection)
+
+
+def test_deploy_prod_agentcard_lane_uses_selector_path_set() -> None:
+    sys.path.insert(0, str(ROOT / "scripts"))
+    try:
+        import deploy_prod
+    finally:
+        sys.path.remove(str(ROOT / "scripts"))
+    from .select_predeploy_benches import AGENTCARD_INFRA_PATH_RE
+
+    assert deploy_prod.AGENTCARD_RE.pattern == AGENTCARD_INFRA_PATH_RE.pattern
+
 
 def test_cli_names_at_exact_cap_keep_warning_off_inventory(tmp_path: Path) -> None:
     catalog = tmp_path / "tasks.json"
