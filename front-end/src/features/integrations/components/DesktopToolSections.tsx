@@ -6,7 +6,7 @@
  * sync bar.
  *
  *   CLIs        row "CLIs": one chip per CLI
- *     connected  → synced chip
+ *     connected  → synced chip + its team-sharing caption (AccountTeamShare)
  *     setting_up → syncing chip + the shared sync bar; chip action "Open setup"
  *                  focuses the setup agent
  *     failed     → error chip, its reason under the chips; chip action "Retry"
@@ -28,6 +28,8 @@
 import { useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { Loader2, Plug, Terminal } from 'lucide-react';
 
+import { AccountTeamShare } from '@/components/teams/TeamSharing';
+import { useAccountShares, type AccountShareLookup } from '@/hooks/useTeams';
 import { openAgentInCurrentClient } from '@/lib/openAgent';
 import { integrationMatchesSearch } from '../hooks/integrationSearch';
 import { useCliIntegrations } from '../hooks/useCliIntegrations';
@@ -110,13 +112,26 @@ function RowForm({
   );
 }
 
+/** Team-sharing caption for a connected CLI account the backend lists as shareable. */
+function shareCaption(shareTarget: AccountShareLookup, id: string) {
+  const target = shareTarget('cli', id);
+  return target && <AccountTeamShare {...target} />;
+}
+
 function cliAccount(
   row: Cli['integrations'][number],
   retry: (request: string) => void,
   submitting: boolean,
+  shareTarget: AccountShareLookup,
 ): DesktopAccountView {
   const base = { provider: 'cli', accountId: row.id, label: row.name };
-  if (row.status === 'connected') return { ...base, tone: 'synced', title: 'Connected' };
+  if (row.status === 'connected')
+    return {
+      ...base,
+      tone: 'synced',
+      title: 'Connected',
+      share: shareCaption(shareTarget, row.id),
+    };
   if (row.status === 'setting_up')
     return {
       ...base,
@@ -139,6 +154,7 @@ function cliAccount(
 }
 
 function CliRow({ cli }: { cli: Cli }) {
+  const { shareTarget } = useAccountShares();
   const [open, setOpen] = useState(false);
   const [request, setRequest] = useState('');
   const requestId = useRef<string | null>(null);
@@ -166,7 +182,7 @@ function CliRow({ cli }: { cli: Cli }) {
       preset: DropdownIconPreset.cli,
       glyph: glyph(<Terminal className="h-[70%] w-[70%]" />),
     },
-    accounts: cli.integrations.map((row) => cliAccount(row, retry, cli.submitting)),
+    accounts: cli.integrations.map((row) => cliAccount(row, retry, cli.submitting, shareTarget)),
     availability: 'ready',
     onConnect: () => setOpen(true),
     connecting: cli.submitting,
