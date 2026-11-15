@@ -4,6 +4,8 @@ Goal (Andy, 2026-11-15): every connectable integration on the Integrations page 
 through the per-account "Share" caption (PR #2097), except iPhone, Browser Cookies, Passwords and Pebble
 Index 01. Tests must prove that a teammate's agent can really use each shared integration.
 
+Shipped 2026-11-15 in PR #2238 (merge 48b03cb470). All 17 deploy gates passed at 89559ed446, and every production lane passed.
+
 ## System fit
 
 ```
