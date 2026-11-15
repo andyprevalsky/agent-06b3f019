@@ -3,7 +3,7 @@
   "grid": { "cpu": [2, 8], "memoryGb": [4, 8] },
   "maxGridPoints": 9,
   "providers": {
-    "claude": { "source": "claude-code", "dockerfile": "e2b.Dockerfile", "namePrefix": "claude-code-v21305-node22234" },
-    "codex": { "source": "codex-code", "dockerfile": "e2b.Dockerfile", "namePrefix": "codex-code-v0159-node22234" }
+    "claude": { "source": "claude-code", "dockerfile": "e2b.Dockerfile", "namePrefix": "claude-code-v21311-node22234" },
+    "codex": { "source": "codex-code", "dockerfile": "e2b.Dockerfile", "namePrefix": "codex-code-v0169-node22234" }
   }
 }
