@@ -1722,6 +1722,76 @@ cloudbench_controller_github_token() {
   cloudbench_resolve_controller_github_token "$@"
 }
 
+# A cloud guest fetches its ref minutes after the controller hands it a token
+# (Machine boot, credential handoff). On boxes.dev the controller credentials
+# above (Git helper, gh, .env GITHUB_TOKEN/GITHUB_DISPATCH_TOKEN) are the
+# daemon's user credential, which it rotates and revokes several times an hour:
+# a guest fetching after a rotation got `could not read Username` and the run
+# hit the infra stop (smoke/agent-payment-setup-resume, PR #1927 round 5).
+# Guests therefore get the GitHub App installation token, minted from the App
+# key with at least CLOUDBENCH_GUEST_GITHUB_TOKEN_MIN_TTL_SECONDS left; nothing
+# on the devbox revokes it. It is validated by a Contents read before use.
+cloudbench_guest_github_token_can_read_repo() {  # <token>
+  # Validate the operation the guest performs: a bounded git ls-remote of the
+  # private remote (needs Contents read; spends no REST quota, so an exhausted
+  # App rate window cannot push guests back onto the rotating credential).
+  # The header lives in a mode-0600 config, never in argv or the ambient config.
+  local token="${1:-}" cfg rc bound=()
+  local url="${CLOUDBENCH_GITHUB_REPO_GIT_URL:-https://github.com/Rose-Ai-Labs/rose.git}"
+  [ -n "$token" ] || return 1
+  cfg="$(umask 077; mktemp)" || return 1
+  printf '[http]\n\textraheader = Authorization: Basic %s\n' \
+    "$(printf 'x-access-token:%s' "$token" | base64 | tr -d '\n')" >"$cfg"
+  command -v timeout >/dev/null 2>&1 && bound=(timeout 30)
+  env -u GIT_CONFIG_COUNT -u GIT_CONFIG_PARAMETERS GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=true \
+    GIT_CONFIG_GLOBAL="$cfg" GIT_CONFIG_NOSYSTEM=1 ${bound[@]+"${bound[@]}"} \
+    git -c credential.helper= ls-remote --exit-code "$url" refs/heads/main >/dev/null 2>&1
+  rc=$?
+  rm -f "$cfg"
+  return "$rc"
+}
+
+cloudbench_guest_durable_github_token() {  # [workspace-root]
+  local workspace_root="${1:-${CLOUDBENCH_FLEET_ROOT:-.}}" token
+  local min_ttl="${CLOUDBENCH_GUEST_GITHUB_TOKEN_MIN_TTL_SECONDS:-2700}"
+  local bound=()
+  # An installation token lives one hour; a longer minimum could never be met.
+  case "$min_ttl" in ''|*[!0-9]*) min_ttl=2700 ;; esac
+  [ "$min_ttl" -le 3300 ] || min_ttl=3300
+  [ -f "$workspace_root/scripts/github_token_pool.py" ] || {
+    echo "guest GitHub App token unavailable: scripts/github_token_pool.py missing" >&2
+    return 1
+  }
+  # macOS has no GNU timeout without coreutils; the pool bounds its own HTTP calls.
+  command -v timeout >/dev/null 2>&1 && bound=(timeout 60)
+  # The pool's stderr names a failure reason and never a token value.
+  token="$(cd "$workspace_root" && ${bound[@]+"${bound[@]}"} python3 scripts/github_token_pool.py \
+    app-token --min-ttl "$min_ttl" --read-repository rose)" || return 1
+  cloudbench_guest_github_token_can_read_repo "$token" || {
+    echo "guest GitHub App token failed the repository Contents read" >&2
+    return 1
+  }
+  printf '%s' "$token"
+}
+
+# Token handed to a cloud guest for its private-repo fetch. An explicit
+# request-scoped CLOUDBENCH_GITHUB_TOKEN_B64 pin wins; then the durable App
+# token; otherwise the controller chain, with a warning that rotation can
+# revoke it before the guest fetches. Never prints the token anywhere else.
+cloudbench_guest_github_token() {  # [workspace-root]
+  local workspace_root="${1:-${CLOUDBENCH_FLEET_ROOT:-.}}" token=""
+  if [ -n "${CLOUDBENCH_GITHUB_TOKEN_B64:-}" ]; then
+    token="$(printf '%s' "$CLOUDBENCH_GITHUB_TOKEN_B64" | base64 -d 2>/dev/null || true)"
+    [ -n "$token" ] && { printf '%s' "$token"; return 0; }
+  fi
+  if token="$(cloudbench_guest_durable_github_token "$workspace_root")" && [ -n "$token" ]; then
+    printf '%s' "$token"
+    return 0
+  fi
+  echo "WARN: no GitHub App installation token for guest fetch; using the controller credential, which a devbox rotation can revoke before the guest fetches" >&2
+  cloudbench_resolve_controller_github_token "$workspace_root"
+}
+
 cloudbench_github_basic_auth_header() {  # <token>
   local token="$1"
   [ -n "$token" ] || return 1
@@ -3015,7 +3085,8 @@ cloudbench_controller_lock_release() {
 
 cloudbench_controller_github_token_b64() {
   local token
-  token="$(cloudbench_controller_github_token "${1:-${ROOT_DIR:-.}}")" || return 1
+  # Guest-bound token: never the devbox's rotating credential when the App is available.
+  token="$(cloudbench_guest_github_token "${1:-${ROOT_DIR:-.}}")" || return 1
   printf '%s' "$token" | base64 | tr -d '\n'
 }
 

@@ -12,6 +12,8 @@ import { RoseRefusalError, RoseStallError } from './errors';
 import { responsesErrorToException } from './responsesErrors';
 import { responsesOutputProvenance, type ResponsesOutputProvenance } from './streamProvenance';
 import type { RoseStreamChunk } from './types';
+import { createReasoningDetailsCollector } from './reasoningDetails';
+import { iterLinesWithIdleTimeout } from './sseLines';
 
 const log = createLogger('RoseStreaming');
 
@@ -59,6 +61,9 @@ export async function* parseAnthropicSSE(
   let currentToolId: string | null = null;
   let currentToolName: string | null = null;
   let currentToolArgs: string[] = [];
+  // Thinking text + signature are needed to replay the turn (archive only).
+  let currentThinking: string[] = [];
+  let currentSignature: string | null = null;
 
   const stopReasonMap: Record<string, string> = {
     end_turn: 'stop',
@@ -117,6 +122,19 @@ export async function* parseAnthropicSSE(
         currentBlockKind = 'text';
       } else if (blockType === 'thinking') {
         currentBlockKind = 'thinking';
+        currentThinking =
+          typeof block.thinking === 'string' && block.thinking ? [block.thinking] : [];
+        currentSignature =
+          typeof block.signature === 'string' && block.signature ? block.signature : null;
+      } else if (blockType === 'redacted_thinking') {
+        currentBlockKind = null;
+        yield {
+          kind: 'reasoning_block',
+          data: {
+            type: 'anthropic_redacted_thinking',
+            data: typeof block.data === 'string' ? block.data : null,
+          },
+        };
       } else {
         currentBlockKind = null;
       }
@@ -140,9 +158,14 @@ export async function* parseAnthropicSSE(
             },
           };
         }
+      } else if (delta.type === 'signature_delta') {
+        if (typeof delta.signature === 'string') {
+          currentSignature = (currentSignature ?? '') + delta.signature;
+        }
       } else if (delta.type === 'thinking_delta') {
         const text = delta.thinking ?? '';
         if (text) {
+          currentThinking.push(text);
           emittedContentOrTool = true;
           yield {
             kind: 'reasoning',
@@ -165,6 +188,16 @@ export async function* parseAnthropicSSE(
     }
 
     if (type === 'content_block_stop') {
+      if (currentBlockKind === 'thinking') {
+        yield {
+          kind: 'reasoning_block',
+          data: {
+            type: 'anthropic_thinking',
+            text: currentThinking.join(''),
+            signature: currentSignature,
+          },
+        };
+      }
       if (currentBlockKind === 'tool_use' && currentToolName !== null) {
         emittedContentOrTool = true;
         yield {
@@ -181,6 +214,8 @@ export async function* parseAnthropicSSE(
       currentToolId = null;
       currentToolName = null;
       currentToolArgs = [];
+      currentThinking = [];
+      currentSignature = null;
       continue;
     }
 
@@ -245,6 +280,7 @@ export async function* parseOpenAISSE(
   let reportedUpstreamProvider = false;
   const toolCalls = new Map<number, { id: string; name: string; arguments: string }>();
   const flushedToolIndices = new Set<number>();
+  const reasoningDetails = createReasoningDetailsCollector();
 
   const flushToolCalls = (): RoseStreamChunk[] => {
     const chunks: RoseStreamChunk[] = [];
@@ -304,6 +340,8 @@ export async function* parseOpenAISSE(
       };
     }
 
+    reasoningDetails.add(delta.reasoning_details);
+
     const reasoningText: string | undefined = delta.reasoning ?? delta.reasoning_content;
     if (reasoningText) {
       emittedContentOrTool = true;
@@ -356,6 +394,7 @@ export async function* parseOpenAISSE(
     );
   }
 
+  for (const block of reasoningDetails.blocks()) yield { kind: 'reasoning_block', data: block };
   yield {
     kind: 'usage',
     data: {
@@ -374,6 +413,11 @@ export async function* parseOpenAISSE(
           (usage.prompt_tokens_details as Record<string, unknown> | undefined)?.cached_tokens
         ) ??
         0,
+      ...optionalReasoningTokens(
+        numberValue(
+          (usage.completion_tokens_details as Record<string, unknown> | undefined)?.reasoning_tokens
+        ) ?? numberValue(usage.reasoning_tokens)
+      ),
       finish_reason: finishReason,
     },
   };
@@ -409,6 +453,7 @@ export async function* parseResponsesSSE(
   let cacheWriteTokens = 0;
   let cacheWriteReported = false;
   let cacheReadTokens = 0;
+  let reasoningTokens: number | undefined;
   let finishReason = '';
   let emittedContentOrTool = false;
   let sawDone = false;
@@ -427,6 +472,8 @@ export async function* parseResponsesSSE(
       cacheWriteReported = true;
     }
     cacheReadTokens = numberValue(details?.cached_tokens) ?? cacheReadTokens;
+    const outputDetails = usage.output_tokens_details as Record<string, unknown> | undefined;
+    reasoningTokens = numberValue(outputDetails?.reasoning_tokens) ?? reasoningTokens;
   };
 
   for await (const line of iterLinesWithIdleTimeout(body, idleTimeoutMs, options.requestId)) {
@@ -524,6 +571,18 @@ export async function* parseResponsesSSE(
           };
           continue;
         }
+        // Unencrypted reasoning items are not replayable, but their summary is
+        // part of the trajectory the archive must keep.
+        yield {
+          kind: 'reasoning_block',
+          data: {
+            type: 'openai_reasoning_item',
+            id: stringValue(item.id) ?? null,
+            summary: Array.isArray(item.summary) ? item.summary : [],
+            raw: item,
+          },
+        };
+        continue;
       }
       if (item?.type === 'function_call') {
         emittedContentOrTool = true;
@@ -584,10 +643,16 @@ export async function* parseResponsesSSE(
         ? cacheWriteTokens
         : Math.max(promptTokens - cacheReadTokens, 0),
       cache_read_input_tokens: cacheReadTokens,
+      ...optionalReasoningTokens(reasoningTokens),
       finish_reason: finishReason || 'stop',
     },
   };
   yield { kind: 'done', data: {} };
+}
+
+/** Present only when the provider reported it (keeps the shared chunk contract stable). */
+function optionalReasoningTokens(value: number | undefined): { reasoning_tokens?: number } {
+  return value === undefined ? {} : { reasoning_tokens: value };
 }
 
 function stringValue(value: unknown): string | undefined {
@@ -606,70 +671,4 @@ function reasoningDeltaText(event: Record<string, unknown>, type: string): strin
 
 function numberValue(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
-}
-
-/**
- * Read one chunk with an idle-timeout race. The timeout timer is cleared
- * as soon as the read wins so it can't later reject in the background as
- * an unhandled promise rejection.
- */
-async function readWithIdleTimeout<T>(
-  reader: ReadableStreamDefaultReader<T>,
-  idleTimeoutMs: number,
-  requestId: string
-) {
-  let timeoutId: ReturnType<typeof setTimeout> | undefined;
-  const timeoutPromise = new Promise<never>((_, reject) => {
-    timeoutId = setTimeout(
-      () =>
-        reject(
-          new RoseStallError(`SSE stream idle for >${idleTimeoutMs}ms (request_id=${requestId})`)
-        ),
-      idleTimeoutMs
-    );
-  });
-  try {
-    return await Promise.race([reader.read(), timeoutPromise]);
-  } finally {
-    if (timeoutId !== undefined) clearTimeout(timeoutId);
-  }
-}
-
-/**
- * Read SSE lines from a ReadableStream, raising RoseStallError if more
- * than `idleTimeoutMs` elapses between consecutive lines.
- */
-async function* iterLinesWithIdleTimeout(
-  body: ReadableStream<Uint8Array>,
-  idleTimeoutMs: number,
-  requestId: string
-): AsyncIterable<string> {
-  const reader = body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = '';
-
-  try {
-    for (;;) {
-      const result = await readWithIdleTimeout(reader, idleTimeoutMs, requestId);
-      if (result.done) break;
-      buffer += decoder.decode(result.value, { stream: true });
-
-      const lines = buffer.split('\n');
-      buffer = lines.pop() ?? '';
-      for (const line of lines) {
-        yield line;
-      }
-    }
-    // Truncated streams may close mid-line; yield the remainder so callers
-    // don't silently drop diagnostic data on an early provider disconnect.
-    if (buffer.length > 0) {
-      yield buffer;
-    }
-  } finally {
-    try {
-      reader.releaseLock();
-    } catch {
-      // ignore
-    }
-  }
 }
