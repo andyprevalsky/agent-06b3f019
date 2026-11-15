@@ -304,6 +304,36 @@ class Worker(unittest.TestCase):
         rows, _ = progress.read_new(folder / 'progress.jsonl')
         self.assertEqual(['first', 'second'], [r['unit'] for r in rows])
 
+    def test_cases_sharing_a_declared_sweep_run_it_once(self):
+        # The backend recipe gives all of its cases one shared `sweep` (the full sharded
+        # coverage command). Run serially per case it was 271 identical ~10-minute sweeps that
+        # could never meet the 4 h gate deadline (FLAKY 2d9047db repair, run 43633983800).
+        counter = self.root / '.context' / 'sweeps'
+        counter.parent.mkdir(exist_ok=True)
+        def sweep(code):
+            return {'command': [sys.executable, '-c',
+                                f'open({str(counter)!r},"a").write("x\\n"); raise SystemExit({code})'],
+                    'aggregate': False, 'sweep': 'backend'}
+        for code, verdict in ((0, 'PASS'), (1, 'FAIL')):
+            counter.unlink(missing_ok=True)
+            self.recipe['cases'] = {'a': sweep(code), 'b': sweep(code), 'c': sweep(code),
+                                    'own': {'command': [sys.executable, '-c', 'pass']}}
+            request = dict(self.request, token=f'sweep-token-{code}', checks=['a', 'b', 'c', 'own'])
+            result = worker.execute(request, self.root)
+            self.assertEqual({'a': verdict, 'b': verdict, 'c': verdict, 'own': 'PASS'}, result['cases'])
+            self.assertEqual(1, len(counter.read_text().splitlines()))
+            self.assertTrue(result['complete'])
+            self.assertEqual(result['evidence']['a']['log'], result['evidence']['c']['log'])
+            self.assertEqual('a', result['evidence']['c']['shared_sweep_run_by'])
+        # A case naming the same sweep with a different spec is not the same run.
+        counter.unlink()
+        other = sweep(0)
+        other['env'] = {'DIFFERENT': '1'}
+        self.recipe['cases'] = {'a': sweep(0), 'b': other}
+        result = worker.execute(dict(self.request, token='sweep-token-split', checks=['a', 'b']), self.root)
+        self.assertEqual({'a': 'PASS', 'b': 'PASS'}, result['cases'])
+        self.assertEqual(2, len(counter.read_text().splitlines()))
+
     def test_aggregate_failure_cannot_prove_all_constituents_completed(self):
         self.recipe['cases']['first']['aggregate']=True
         result=worker.execute(self.request,self.root)
