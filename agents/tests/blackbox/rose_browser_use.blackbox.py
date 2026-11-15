@@ -3483,7 +3483,7 @@ async def test_native_autofill_control_history_matches_real_serializer():
 
 @quarantine(
     since="2026-11-15",
-    repair="pending-handoff:bdc52b970d77433dab652f0fbe5f5c1b",
+    repair="https://boxes.dev/thread/ph7acytvjk02fm7513pjvmcva58j80p6",
     error="AssertionError: ['Completed browser model response did not contain a valid action']",
     evidence="https://github.com/Rose-Ai-Labs/rose/actions/runs/43744819009",
 )
