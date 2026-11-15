@@ -14,6 +14,14 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import deploy_test_plan as p
+import importlib.util as _quarantine_util
+
+# scripts/test_quarantine.py (the CLI) already owns the `test_quarantine` module name here.
+_quarantine_spec = _quarantine_util.spec_from_file_location(
+    'lib_test_quarantine', Path(__file__).resolve().parents[1] / 'lib' / 'test_quarantine.py')
+_quarantine_module = _quarantine_util.module_from_spec(_quarantine_spec)
+_quarantine_spec.loader.exec_module(_quarantine_module)
+quarantine = _quarantine_module.quarantine
 
 
 class Selection(unittest.TestCase):
@@ -1281,6 +1289,9 @@ for line in sys.stdin:
                     self.scan()
                 self.reap(child)
 
+    @quarantine(since='2026-11-15', repair='https://boxes.dev/thread/thr_246005fb0d8546518a40a6cd55d83a70',
+                error="AssertionError: [0.05] is not false : the service manager is skipped on evidence, not after the grace window",
+                evidence='PR #2059 deploy-command-structural FLAKY occurrence 5d2de19b896f4a069d2b8dc0d51d184c (source cecc5945b1); same case as 7a087289 (PR #1970 repair)')
     def test_own_user_service_manager_is_skipped_only_on_cgroup_evidence(self):
         # The Blacksmith failure (SHA 7b243b4ec, InterruptedCardRecovery / StructuralSupervisorCleanup): the
         # runner's `systemd --user` and `(sd-pam)` share our uid but are permanently non-dumpable, so cwd/fd

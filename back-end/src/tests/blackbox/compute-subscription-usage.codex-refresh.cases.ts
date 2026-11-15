@@ -15,11 +15,14 @@
  *     └─ 401/403                ─► unavailable backoff; the login is never expired here
  *
  * Runs in this process with Codex scripted on global.fetch (nothing reaches
- * chatgpt.com); the refresh is the real one listConnectedAccounts schedules.
+ * chatgpt.com). The cases that change the row go through listConnectedAccounts
+ * and wait for the change; the cases that must leave the row as it was await
+ * that same refresh (refreshCodexUsage) so they assert only after it finished.
  */
 
 import type { IntegrationType } from '@prisma/client';
 import { listConnectedAccounts } from '../../domains/compute-grants/service';
+import { refreshCodexUsage } from '../../providers/computeUsageRefresh';
 import { prisma } from '../../providers/database';
 import { CODEX_API_URL } from '../../providers/rose/transport';
 import { encryptClaudeEnvelope } from './integrations.context';
@@ -77,18 +80,12 @@ export function registerCodexUsageRefreshCases(ctx: CodexRefreshContext): void {
 
   type CodexRow = { rateLimitedUntil: Date | null; rateLimitAuthoritative: boolean | null };
 
-  /**
-   * List the accounts with Codex scripted, wait for the refresh that list
-   * scheduled to ask Codex, then for `settled` (or a short pause when the
-   * refresh must leave the row as it was).
-   */
-  async function listWithCodexScripted(
-    userId: string,
-    integrationId: string,
+  /** Script Codex on global.fetch for `token` while `body` runs; every other request passes through. */
+  async function withCodexScripted<T>(
     token: string,
     answer: () => Response,
-    settled?: (row: CodexRow) => boolean
-  ) {
+    body: (requests: Array<Record<string, unknown>>) => Promise<T>
+  ): Promise<T> {
     const requests: Array<Record<string, unknown>> = [];
     global.fetch = (async (input: unknown, init?: RequestInit) => {
       const url = typeof input === 'string' ? input : (input as URL | Request).toString();
@@ -100,25 +97,49 @@ export function registerCodexUsageRefreshCases(ctx: CodexRefreshContext): void {
       return originalFetch(input as Parameters<typeof fetch>[0], init);
     }) as typeof fetch;
     try {
+      return await body(requests);
+    } finally {
+      global.fetch = originalFetch;
+    }
+  }
+
+  /**
+   * List the accounts with Codex scripted, wait for the refresh that list
+   * scheduled to ask Codex, then for the row to reach `settled`.
+   */
+  async function listWithCodexScripted(
+    userId: string,
+    integrationId: string,
+    token: string,
+    answer: () => Response,
+    settled: (row: CodexRow) => boolean
+  ) {
+    return withCodexScripted(token, answer, async (requests) => {
       await listConnectedAccounts(userId, 'codex');
       await waitFor('the Codex quota check scheduled by the account list', () =>
         requests.length > 0 ? true : null
       );
-      if (settled) {
-        await waitFor('the Codex refresh to reconcile the cooldown', async () => {
-          const row = await prisma.integration.findUniqueOrThrow({
-            where: { id: integrationId },
-            select: { rateLimitedUntil: true, rateLimitAuthoritative: true },
-          });
-          return settled(row) ? true : null;
+      await waitFor('the Codex refresh to reconcile the cooldown', async () => {
+        const row = await prisma.integration.findUniqueOrThrow({
+          where: { id: integrationId },
+          select: { rateLimitedUntil: true, rateLimitAuthoritative: true },
         });
-      } else {
-        await new Promise((resolve) => setTimeout(resolve, 300));
-      }
+        return settled(row) ? true : null;
+      });
       return { requests };
-    } finally {
-      global.fetch = originalFetch;
-    }
+    });
+  }
+
+  /** Run the refresh listConnectedAccounts schedules, awaited, with Codex scripted. */
+  async function refreshWithCodexScripted(
+    integrationId: string,
+    token: string,
+    answer: () => Response
+  ) {
+    return withCodexScripted(token, answer, async (requests) => ({
+      requests,
+      outcome: await refreshCodexUsage(integrationId),
+    }));
   }
 
   async function cooldownOf(integrationId: string) {
@@ -167,7 +188,8 @@ export function registerCodexUsageRefreshCases(ctx: CodexRefreshContext): void {
                 'x-codex-secondary-window-minutes': '0',
               },
             }
-          )
+          ),
+        (row) => row.rateLimitAuthoritative === true
       );
       assert(requests.length === 1, `one Codex quota check, got ${requests.length}`);
       assert(
@@ -206,7 +228,8 @@ export function registerCodexUsageRefreshCases(ctx: CodexRefreshContext): void {
             'x-codex-primary-window-minutes': '10080',
             'x-codex-primary-reset-at': String(resetEpoch),
           },
-        })
+        }),
+      (row) => row.rateLimitedUntil === null
     );
     const row = await cooldownOf(integrationId);
     assert(
@@ -219,10 +242,9 @@ export function registerCodexUsageRefreshCases(ctx: CodexRefreshContext): void {
   ctx.test("a Codex 429 that is not a usage limit never lifts Rose's backoff", async () => {
     // A short-term rate limit can still carry windows under 100%; only a served
     // answer or a usage_limit_reached rejection may change the cooldown.
-    const { userId, integrationId, token } = await seedCodexLogin('burst', 4 * DAY_MS);
+    const { integrationId, token } = await seedCodexLogin('burst', 4 * DAY_MS);
     const before = await cooldownOf(integrationId);
-    const { requests } = await listWithCodexScripted(
-      userId,
+    const { requests, outcome } = await refreshWithCodexScripted(
       integrationId,
       token,
       () =>
@@ -240,6 +262,7 @@ export function registerCodexUsageRefreshCases(ctx: CodexRefreshContext): void {
         )
     );
     assert(requests.length === 1, `one Codex quota check, got ${requests.length}`);
+    assert(outcome === 'stored', `the windows are stored without a reconcile, got ${outcome}`);
     const after = await cooldownOf(integrationId);
     assert(
       after.rateLimitedUntil?.getTime() === before.rateLimitedUntil?.getTime(),
@@ -248,10 +271,9 @@ export function registerCodexUsageRefreshCases(ctx: CodexRefreshContext): void {
   });
 
   ctx.test('a served Codex answer without window headers lifts nothing', async () => {
-    const { userId, integrationId, token } = await seedCodexLogin('bare', 4 * DAY_MS);
+    const { integrationId, token } = await seedCodexLogin('bare', 4 * DAY_MS);
     const before = await cooldownOf(integrationId);
-    await listWithCodexScripted(
-      userId,
+    const { requests, outcome } = await refreshWithCodexScripted(
       integrationId,
       token,
       () =>
@@ -260,6 +282,8 @@ export function registerCodexUsageRefreshCases(ctx: CodexRefreshContext): void {
           headers: { 'content-type': 'text/event-stream' },
         })
     );
+    assert(requests.length === 1, `one Codex quota check, got ${requests.length}`);
+    assert(outcome === 'empty', `an answer without windows stores nothing, got ${outcome}`);
     const after = await cooldownOf(integrationId);
     assert(
       after.rateLimitedUntil?.getTime() === before.rateLimitedUntil?.getTime(),
@@ -268,10 +292,9 @@ export function registerCodexUsageRefreshCases(ctx: CodexRefreshContext): void {
   });
 
   ctx.test('a Codex login the provider refuses is never expired by a quota check', async () => {
-    const { userId, integrationId, token } = await seedCodexLogin('expired', 4 * DAY_MS);
+    const { integrationId, token } = await seedCodexLogin('expired', 4 * DAY_MS);
     const before = await cooldownOf(integrationId);
-    const { requests } = await listWithCodexScripted(
-      userId,
+    const { requests, outcome } = await refreshWithCodexScripted(
       integrationId,
       token,
       () =>
@@ -288,6 +311,7 @@ export function registerCodexUsageRefreshCases(ctx: CodexRefreshContext): void {
         )
     );
     assert(requests.length === 1, `one Codex quota check, got ${requests.length}`);
+    assert(outcome === 'unavailable', `a refused login backs off as unavailable, got ${outcome}`);
     const after = await cooldownOf(integrationId);
     assert(after.status === 'CONNECTED', `the login must stay CONNECTED, got ${after.status}`);
     assert(
