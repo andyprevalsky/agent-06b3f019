@@ -20,7 +20,8 @@
  *   no chips:  "Connect" ──► [FORM OPEN]   chips: "+ Add CLI" / "+ Add server" ──► [FORM OPEN]
  *   [FORM OPEN] --submit--> [SUBMITTING] --ok--> form closes, chip appears
  *                                        --refused--> error line, form stays filled
- *   [FORM OPEN] --Cancel--> [CLOSED]
+ *   [FORM OPEN] --Cancel--> [CLOSED]; inputs are disabled while [SUBMITTING]
+ *   one MCP row action at a time: while one server is busy, others' actions are disabled
  *
  * Each section hides (stays mounted) when the integrations search does not match.
  */
@@ -90,7 +91,8 @@ function RowForm({
   };
   return (
     <form aria-label={label} onSubmit={submit} className="ml-[46px] mt-2 flex flex-col gap-1.5">
-      <div className="flex flex-wrap items-center gap-2">
+      {/* Disabled while submitting, so a finishing submit never clears newer edits. */}
+      <fieldset disabled={busy} className="flex flex-wrap items-center gap-2 disabled:opacity-70">
         {children}
         <button type="submit" className={ACTION_CLASSES} disabled={busy} aria-label={label}>
           {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : 'Connect'}
@@ -98,7 +100,7 @@ function RowForm({
         <button type="button" className={CANCEL_CLASSES} disabled={busy} onClick={onCancel}>
           Cancel
         </button>
-      </div>
+      </fieldset>
       {error !== null && (
         <p role="alert" className={ERROR_CLASSES}>
           {error}
@@ -196,6 +198,8 @@ function CliRow({ cli }: { cli: Cli }) {
 
 function mcpAccount(server: Mcp['servers'][number], mcp: Mcp): DesktopAccountView {
   const busy = mcp.busyId === server.id;
+  // The hook runs one row action at a time: other servers' actions wait, visibly disabled.
+  const otherBusy = mcp.busyId !== null && !busy;
   const tools = server.tools.length;
   const base = {
     provider: 'mcp',
@@ -204,6 +208,7 @@ function mcpAccount(server: Mcp['servers'][number], mcp: Mcp): DesktopAccountVie
     onRemove: () => void mcp.remove(server.id),
     removeLabel: `Remove ${server.name}`,
     removing: busy,
+    disabled: otherBusy,
   };
   if (mcp.signingInId === server.id && server.status !== 'connected')
     return { ...base, tone: 'syncing', title: 'Signing in' };

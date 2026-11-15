@@ -385,6 +385,72 @@ describe.each([false, true])('MCP servers (desktop=%s)', (roseDesktop) => {
   });
 });
 
+describe('Rose Desktop tool rows: pending actions', () => {
+  beforeEach(() => {
+    window.history.replaceState({}, '', '/');
+    mockSession();
+    server.use(
+      http.get(`${API_BASE}/integrations`, () => HttpResponse.json({ integrations: [] })),
+      http.get(`${API_BASE}/compute-accounts`, () => HttpResponse.json({ accounts: [] })),
+    );
+  });
+  afterEach(() => {
+    localStorage.clear();
+    sessionStorage.clear();
+  });
+
+  it('keeps the MCP form disabled while its submit is pending', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    server.use(
+      http.post(`${API_BASE}/integrations/mcp`, async () => {
+        await gate;
+        return HttpResponse.json({ server: context7 }, { status: 201 });
+      }),
+    );
+    renderWithProviders(<Integrations />, { roseDesktop: true });
+    const card = within(await screen.findByRole('region', { name: 'MCP servers' }));
+    const user = userEvent.setup();
+    await user.click(card.getByRole('button', { name: 'Connect MCP servers' }));
+    const input = card.getByLabelText('MCP server URL');
+    await user.type(input, 'https://mcp.context7.com/mcp');
+    await user.click(card.getByRole('button', { name: 'Connect MCP server' }));
+    await waitFor(() => expect(input).toBeDisabled());
+    expect(card.getByLabelText('Header value')).toBeDisabled();
+    release();
+    await waitFor(() => expect(card.queryByLabelText('MCP server URL')).toBeNull());
+  });
+
+  it("disables other servers' actions while one server reconnects", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    server.use(
+      http.get(`${API_BASE}/integrations/mcp`, () =>
+        HttpResponse.json({ servers: [context7, linear] }),
+      ),
+      http.post(`${API_BASE}/integrations/mcp/mcp-2/reconnect`, async () => {
+        await gate;
+        return HttpResponse.json({ server: { ...linear, status: 'connected' } });
+      }),
+    );
+    renderWithProviders(<Integrations />, { roseDesktop: true });
+    const card = within(await screen.findByRole('region', { name: 'MCP servers' }));
+    const user = userEvent.setup();
+    await user.click(await card.findByRole('button', { name: 'Sign in' }));
+    await waitFor(() =>
+      expect(card.getByRole('button', { name: 'Remove Context7' })).toBeDisabled(),
+    );
+    release();
+    await waitFor(() =>
+      expect(card.getByRole('button', { name: 'Remove Context7' })).toBeEnabled(),
+    );
+  });
+});
+
 describe('MCP sign-in callback page', () => {
   const originalLocation = window.location;
 
