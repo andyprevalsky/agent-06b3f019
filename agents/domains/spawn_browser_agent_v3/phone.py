@@ -159,7 +159,11 @@ iCloud Contacts sync and verify explicit enabled control state; populated
 contact names or counts do not prove the iCloud Contacts setting is on.
 For receive_address use only the
 server's active expectedReceiveAddress and verify it is actually selected for
-receiving, not merely listed. For portrait_lock, open native Settings with
+receiving, not merely listed. The verifier sees only screen.text OCR, never app
+identity or switch position, so observe screens whose text states the fact:
+iCloud targets under Settings > your name > iCloud, imessage and receive_address
+on Settings > Apps > Messages > Send & Receive with its Apple Account line, and
+gmail on the account Settings screen inside the Gmail app. For portrait_lock, open native Settings with
 apps.launch name Settings. Only the route since the latest Settings launch
 counts, and its first screen.text must show the Settings root with Search; if
 Settings resumed a subpage or hid Search, return to the root with Search

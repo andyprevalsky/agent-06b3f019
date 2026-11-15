@@ -1,7 +1,8 @@
 import { ImageResponse } from '@vercel/og';
 import { fetchAgentPreview, isAgentId, statusLine, type AgentPreview } from './_agentPreview.js';
 
-export const config = { runtime: 'edge' };
+// Node runtime: Vercel's edge runtime refuses to compile @vercel/og's WebAssembly
+// ("Wasm code generation disallowed by embedder"), so every edge render was an empty PNG.
 
 const THEMES: Record<AgentPreview['state'], { background: string; accent: string }> = {
   started: { background: '#1f1e1c', accent: '#e7a36b' },
@@ -18,7 +19,7 @@ export function titleSize(title: string): number {
 }
 
 /** /api/og/agent-image?agent-id=… — the 1200×630 link-preview image for an agent. */
-export default async function handler(req: Request) {
+export async function GET(req: Request): Promise<Response> {
   const url = new URL(req.url);
   const agentId = url.searchParams.get('agent-id');
   const preview = isAgentId(agentId) ? await fetchAgentPreview(agentId) : null;
