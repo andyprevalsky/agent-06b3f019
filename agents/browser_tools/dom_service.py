@@ -688,7 +688,7 @@ class ActionHistory:
                 value = entry[key]
                 if key == "result" and entry.get("action") == "read_browser_state" and isinstance(value, dict) and isinstance(value.get("formatted_state"), str):
                     safe_entry[key] = dom_service.model_visible_value({k: v for k, v in value.items() if k != "formatted_state"})
-                    safe_entry[key]["formatted_state"] = dom_service.model_visible_value(value["formatted_state"])
+                    safe_entry[key]["formatted_state"] = dom_service.model_visible_observation(value["formatted_state"])
                 elif key == "result" and entry.get("action") == "request_payment_card" and callable(getattr(dom_service, "model_visible_action_result", None)):
                     safe_entry[key] = dom_service.model_visible_action_result(entry.get("action", ""), value)
                 else:
@@ -709,6 +709,11 @@ class ActionHistory:
         for key in ("step", "action", "index", "coordinates"):
             if key in entry:
                 safe_entry[key] = entry[key]
+        result, safe_result = entry.get("result"), safe_entry.get("result")
+        context = result.get("screenshot_context") if isinstance(result, dict) else None
+        if (isinstance(context, dict) and type(context.get("step")) is int and isinstance(safe_result, dict)
+                and isinstance(safe_result.get("screenshot_context"), dict)):
+            safe_result["screenshot_context"]["step"] = context["step"]
         return safe_entry
 
 
@@ -838,6 +843,8 @@ class ActionHistory:
         context.setdefault("session_id", session_id)
         entry.screenshot = screenshot
         entry.result["screenshot_context"] = self.model_visible_value(context)
+        # The capture's step is harness bookkeeping, not a page readback.
+        entry.result["screenshot_context"]["step"] = context["step"]
 
     def screenshot_evidence(self, session_id: str = "", task_id: str = "") -> List[Dict[str, Any]]:
         """Return captured tool results already in this history, without task-proof gating."""
@@ -1078,14 +1085,27 @@ class DOMService:
         from helpers.screenshot_history import redact_with_screenshots
         return redact_with_screenshots(value, lambda item: mask_secret_values(item, self._secret_redaction_refs))
 
+    def model_visible_observation(self, value: Any) -> Any:
+        """Redact a browser-state observation or model-authored content.
+
+        A short card value is masked where the page holds it as a value, never
+        in prose or numbers; long secrets stay masked everywhere. Raw readbacks
+        use ``model_visible_value``.
+        """
+        from helpers.screenshot_history import redact_with_screenshots
+        return redact_with_screenshots(
+            value, lambda item: mask_secret_values(item, self._secret_redaction_refs, value_scoped=True)
+        )
+
     def model_visible_action_result(self, action_name: str, result: Any) -> Any:
         """Redact page payloads while preserving trusted action bookkeeping."""
-        safe = self.model_visible_value(result)
+        from browser_tools.result_projection import preserve_output_protocol, project_result, retain_model_preview
+        observe = self.model_visible_observation
+        safe = project_result(result, action_name, self.model_visible_value, observe)
         if not isinstance(result, dict) or not isinstance(safe, dict):
             return safe
-        from browser_tools.result_projection import preserve_output_protocol, retain_model_preview
-        safe = preserve_output_protocol(result, safe, action_name, self.model_visible_value)
-        safe = retain_model_preview(result, safe, action_name, self.model_visible_value)
+        safe = preserve_output_protocol(result, safe, action_name, self.model_visible_value, scoped_redact=observe)
+        safe = retain_model_preview(result, safe, action_name, self.model_visible_value, scoped_redact=observe)
         if "credential_ref" in result:
             safe["credential_ref"] = result["credential_ref"]
         if action_name == "request_payment_card":
@@ -1106,7 +1126,7 @@ class DOMService:
         if isinstance(result.get("tabs"), list):
             safe["tabs"] = []
             for tab in result["tabs"]:
-                visible_tab = self.model_visible_value(tab)
+                visible_tab = observe(tab)
                 if isinstance(tab, dict) and "id" in tab:
                     visible_tab["id"] = tab["id"]
                 safe["tabs"].append(visible_tab)
@@ -2715,6 +2735,9 @@ class DOMService:
             result["screenshot_context"] = {"captured_at": capture_started_at, "url": result["url"]}
             self._analyze_screenshot(screenshot_to_use, viewport_width, viewport_height)
         safe_result = self.model_visible_value(result)
+        # The rendered page itself is an observation, not a script readback.
+        for key in ("url", "title", "dom_tree", "tabs"):
+            safe_result[key] = self.model_visible_observation(result[key])
         if screenshot_to_use:
             # PNG base64 is binary transport, not page text. A short CVV can
             # coincidentally occur in it; textual substitution corrupts pixels.
