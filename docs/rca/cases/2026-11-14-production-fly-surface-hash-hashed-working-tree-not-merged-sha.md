@@ -22,6 +22,9 @@ tags:
   - working-tree
 sources:
   - PR #2024
+  - PR #2028
+  - PR #2044
+  - commit 5bf22d752b7b6695e294f35bcb1933d309d6dcae
   - commit c728aea7b8c1ff0148c3ea2ad3a2b77ef1e6552d
   - commit be7284063
   - fleet run deploy-agents 43558449152
@@ -74,6 +77,10 @@ without the algorithm. Live proof: `scripts/deploy production --sha 4bc487357e
 --lanes fly` with a dirty working tree (surface 33e6681b7031) passed against the
 live job (a1af4a845f69). 10k-agent behaviour: deploy-time only, one archive of
 ~25 MB per production run; no runtime path.
+
+**Shipped:** PR #2044, merged as 5bf22d752b (2026-11-15). Post-merge proof: `scripts/deploy production --sha 5156d475 --lanes fly`, run from the PR branch checkout with a dirty working tree (surface 91e2ae867554), verified the live job with the merged hash 60760315cad0 (`fly: PASS`).
+
+**Recurrence before the fix landed:** PR #2028 (2026-11-14) ran its Fly lane from branch head 5e65165e0 (working-tree hash 664c032e5454) against merge ccc17b0348e4 (merged surface f820f8204890 = its deploy job, deploy-agents run 43564272962 succeeded); the monitor refused with the same error, and a rerun from a checkout detached at the merge passed. The fixed `surface_hash(root, "ccc17b0348e4")` returns f820f8204890.
 
 ## Human feedback
 
