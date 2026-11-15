@@ -166,3 +166,52 @@ it('resend code: the live phone overlay offers it on the pending code step and s
   render(item('request-a'));
   expect(screen.getAllByRole('button', { name: 'Resending code' })).toHaveLength(2);
 });
+
+it('resend code: shown only while a native iPhone manual_step request is pending', async () => {
+  const browserCard = {
+    ...card('request-web'),
+    metadata: {
+      attentionKind: 'auth_assistance',
+      authAssistance: {
+        requestId: 'request-web',
+        mode: 'live_view',
+        liveViewUrl: 'https://live.test',
+      },
+    },
+  } as unknown as AttentionRequest;
+  const view = render(
+    <RequestListItem
+      request={browserCard}
+      remainingCount={0}
+      responseText=""
+      loading={false}
+      actionRequestId={null}
+      onSelectAgent={vi.fn()}
+      onClose={vi.fn()}
+      onChangeResponse={vi.fn()}
+      onAccept={vi.fn()}
+      onSkip={vi.fn()}
+      onReject={vi.fn()}
+      onSendViaIMessage={vi.fn()}
+    />,
+  );
+  expect(screen.getByRole('button', { name: 'Open Live Browser' })).toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: 'Resend code' })).toBeNull();
+  view.unmount();
+  // Phone visible but no pending native request on the lease: no Resend code.
+  fixture(
+    { criticalReason: 'verification_code' },
+    {},
+    { attentionRequestId: null, controlOwner: 'agent' },
+  );
+  const overlay = render(<BrowserStatusBarFullscreen {...props()} />);
+  await screen.findByRole('region', { name: 'Cloud iPhone' });
+  await screen.findByText('Agent in progress');
+  expect(screen.queryByRole('button', { name: 'Resend code' })).toBeNull();
+  overlay.unmount();
+  // Completed request (agent verifying, no resend in flight): no Resend code.
+  fixture({ criticalReason: 'verification_code', completedAt: '2026-11-15T06:00:00Z' });
+  render(<BrowserStatusBarFullscreen {...props()} />);
+  await screen.findByText('Authentication complete. Agent will verify sign-in.');
+  expect(screen.queryByRole('button', { name: 'Resend code' })).toBeNull();
+});
