@@ -741,14 +741,12 @@
   "ready": true,
   "worktrees": [
     {
-      "branch": "refs/heads/records/pr-2044-closeout",
+      "branch": "detached",
       "current": true,
       "locked": false,
       "needs_integration": false,
       "path": "/home/boxes/rose",
-      "uncommitted": [
-        "docs/handoffs/pr-2044-closeout/deletion-readiness.json"
-      ],
+      "uncommitted": [],
       "unpushed_commits": 0
     }
   ]
