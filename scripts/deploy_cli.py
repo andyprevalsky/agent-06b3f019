@@ -821,8 +821,37 @@ def cmd_deletion_check(args: argparse.Namespace) -> int:
 
 # --- finish ----------------------------------------------------------------
 
+def completed_timing_run() -> str | None:
+    """This deploy's timing run when an earlier `finish` already closed it, else None.
+
+    `run-deploy-stage --finish` closes the run and removes its `current` pointer before the
+    outcome and ledger steps run, so a transient failure in a later step left every retry
+    failing on "no active deploy timing run". Only a completed run of this merged PR's own
+    branch qualifies; an active pointer or another deploy's run is never treated as closed.
+    """
+    runs = CONTEXT / 'deploy-runs'
+    if (runs / 'current').exists() or not (PR_FILE.is_file() and MERGED_FILE.is_file() and runs.is_dir()):
+        return None
+    pr, merged = json.loads(PR_FILE.read_text()), json.loads(MERGED_FILE.read_text())
+    if not pr.get('branch') or merged.get('pr') != pr.get('pr'):
+        return None
+    for run_dir in sorted((path for path in runs.iterdir() if path.is_dir()), reverse=True):
+        try:
+            metadata = json.loads((run_dir / 'metadata.json').read_text())
+        except (OSError, ValueError):
+            continue
+        if metadata.get('branch') == pr['branch']:
+            done = metadata.get('status') == 'completed' and metadata.get('finished_at')
+            return run_dir.name if done else None
+    return None
+
+
 def cmd_finish(args: argparse.Namespace) -> int:
-    status = run(['bash', 'scripts/run-deploy-stage', '--finish'])
+    if closed := completed_timing_run():
+        print(f'DEPLOY_FINISH timing run {closed} already completed; not re-finishing it')
+        status = 0
+    else:
+        status = run(['bash', 'scripts/run-deploy-stage', '--finish'])
     factory('outcome', args.outcome)
     status |= run([sys.executable, 'scripts/factory_ledger.py', 'publish'])
     print(f'DEPLOY_FINISH {"PASS" if status == 0 else "FAIL"} outcome={args.outcome}')
