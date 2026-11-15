@@ -1115,13 +1115,7 @@
     ],
     "group": "pre-deploy",
     "deploy_category": "harness",
-    "demo_cache": "off",
-    "quarantine": {
-      "since": "2026-11-11",
-      "repair": "pending-handoff:7bfbdd7853c2444fadec678325f57763",
-      "error": "Timeout after 182s (task timeout=180s) | Investigate: python agents/benchmarks/agent_latency.py 7798b440-5b85-4962-a8e2-9ea095ae11cf | Cache/cost: python agents/benchmarks/run_benchmark.py --compare <run.json> | Agent status: ACTIVE (expected COMPLETED)",
-      "evidence": "docs/rca/cases/2026-11-11-background-message-smoke-completed-after-deadline.md"
-    }
+    "demo_cache": "off"
   },
   {
     "name": "explore-agent-mid-run-message",
