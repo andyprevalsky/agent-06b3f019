@@ -2,7 +2,8 @@
  *
  *   recorded OCR ──► verifyPhoneSetup(target) ──► rose-1-mini ──► status
  *
- * Positives are screens that showed the proof yet returned unknown in prod; negatives are the
+ * Positives are screens that showed the proof (unknown in prod before the fix, or confirmed in the
+ * live retry after it); negatives are the
  * neighbouring screens that must stay unproven (no app identity, no checkmark, wrong account,
  * typed-but-unsigned identifier). */
 import assert from 'node:assert/strict';
@@ -103,15 +104,33 @@ async function recordedProofScreensVerify(): Promise<void> {
       'not_confirmed',
     ],
     [
-      'FaceTime look-alike page',
+      'real FaceTime page sent as imessage',
       'imessage',
-      rewrite(o.imessage_send_receive_cursor4, (t) =>
-        t === 'iMessage'
-          ? 'FaceTime'
-          : t === 'You Can Receive iMessages to and'
-            ? 'You Can Be Reached By FaceTime At'
-            : t
-      ).filter((row) => row.text !== 'Reply From' && !row.text.startsWith('Start New')),
+      o.facetime_settings_cursor71,
+      'not_confirmed',
+    ],
+    [
+      'real FaceTime page sent as receive_address',
+      'receive_address',
+      o.facetime_settings_cursor71,
+      'not_confirmed',
+    ],
+    [
+      'Saved to iCloud: Messages in iCloud On',
+      'icloud_messages',
+      o.icloud_saved_to_icloud_cursor54,
+      'confirmed',
+    ],
+    [
+      'Saved to iCloud: Passwords & Keychain On',
+      'icloud_keychain',
+      o.icloud_saved_to_icloud_cursor54,
+      'confirmed',
+    ],
+    [
+      'Saved to iCloud without a Contacts row',
+      'icloud_contacts',
+      o.icloud_saved_to_icloud_cursor54,
       'not_confirmed',
     ],
   ];

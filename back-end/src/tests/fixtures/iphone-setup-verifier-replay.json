@@ -1,5 +1,5 @@
 {
-  "source": "prod setup agent 1772a64a-c22a-5cf7-9184-17508eda5df6, 2026-11-15, server-loaded screen.text observations as sent to phone_setup_* (card digits scrubbed)",
+  "source": "prod setup agent 1772a64a-c22a-5cf7-9184-17508eda5df6, 2026-11-15, server-loaded screen.text observations as sent to phone_setup_* (card digits scrubbed); plus live retry agent 87c1e09a-28ed-5f81-b7ce-6166c18523d7 (2026-11-15 20:40Z): Saved to iCloud page and FaceTime page",
   "observations": {
     "gmail_settings_cursor119": [
       {
@@ -717,6 +717,361 @@
         "y": 1313,
         "w": 332,
         "h": 26,
+        "source": "pixels"
+      }
+    ],
+    "icloud_saved_to_icloud_cursor54": [
+      {
+        "text": "No SIM S",
+        "confidence": 1,
+        "x": 73,
+        "y": 20,
+        "w": 122,
+        "h": 24,
+        "source": "pixels"
+      },
+      {
+        "text": "<",
+        "confidence": 1,
+        "x": 74,
+        "y": 85,
+        "w": 36,
+        "h": 50,
+        "source": "pixels"
+      },
+      {
+        "text": "L: 12:40 PM",
+        "confidence": 1,
+        "x": 373,
+        "y": 22,
+        "w": 146,
+        "h": 20,
+        "source": "pixels"
+      },
+      {
+        "text": "iCloud",
+        "confidence": 1,
+        "x": 372,
+        "y": 84,
+        "w": 108,
+        "h": 28,
+        "source": "pixels"
+      },
+      {
+        "text": "Saved to iCloud",
+        "confidence": 1,
+        "x": 224,
+        "y": 392,
+        "w": 320,
+        "h": 36,
+        "source": "pixels"
+      },
+      {
+        "text": "Manage how apps and features on this",
+        "confidence": 1,
+        "x": 359,
+        "y": 447,
+        "w": 586,
+        "h": 34,
+        "source": "pixels"
+      },
+      {
+        "text": "iPhone sync to iCloud. Learn more...",
+        "confidence": 1,
+        "x": 336,
+        "y": 490,
+        "w": 552,
+        "h": 36,
+        "source": "pixels"
+      },
+      {
+        "text": "Mi",
+        "confidence": 1,
+        "x": 90,
+        "y": 1042,
+        "w": 40,
+        "h": 40,
+        "source": "pixels"
+      },
+      {
+        "text": "O",
+        "confidence": 1,
+        "x": 92,
+        "y": 1289,
+        "w": 60,
+        "h": 62,
+        "source": "pixels"
+      },
+      {
+        "text": "iCloud Photos",
+        "confidence": 1,
+        "x": 259,
+        "y": 652,
+        "w": 218,
+        "h": 28,
+        "source": "pixels"
+      },
+      {
+        "text": "8,941 Items \u2022 56.2 GB",
+        "confidence": 1,
+        "x": 304,
+        "y": 701,
+        "w": 300,
+        "h": 34,
+        "source": "pixels"
+      },
+      {
+        "text": "iCloud Drive",
+        "confidence": 1,
+        "x": 246,
+        "y": 774,
+        "w": 192,
+        "h": 28,
+        "source": "pixels"
+      },
+      {
+        "text": "187.3 GB",
+        "confidence": 1,
+        "x": 215,
+        "y": 821,
+        "w": 122,
+        "h": 30,
+        "source": "pixels"
+      },
+      {
+        "text": "iCloud Mail",
+        "confidence": 1,
+        "x": 237,
+        "y": 897,
+        "w": 178.6,
+        "h": 33.6,
+        "source": "pixels"
+      },
+      {
+        "text": "12.6 KB",
+        "confidence": 1,
+        "x": 205,
+        "y": 944,
+        "w": 106,
+        "h": 28,
+        "source": "pixels"
+      },
+      {
+        "text": "Passwords & Keychain",
+        "confidence": 1,
+        "x": 326,
+        "y": 1023,
+        "w": 344,
+        "h": 38,
+        "source": "pixels"
+      },
+      {
+        "text": "196 Items",
+        "confidence": 1,
+        "x": 220,
+        "y": 1068,
+        "w": 136.1,
+        "h": 24.6,
+        "source": "pixels"
+      },
+      {
+        "text": "Notes",
+        "confidence": 1,
+        "x": 201,
+        "y": 1145,
+        "w": 90,
+        "h": 26.2,
+        "source": "pixels"
+      },
+      {
+        "text": "10.3 MB \u2022 10.3 MB",
+        "confidence": 1,
+        "x": 279,
+        "y": 1191,
+        "w": 250,
+        "h": 30,
+        "source": "pixels"
+      },
+      {
+        "text": "Messages in iCloud",
+        "confidence": 1,
+        "x": 303,
+        "y": 1269,
+        "w": 294,
+        "h": 34,
+        "source": "pixels"
+      },
+      {
+        "text": "20.4 GB",
+        "confidence": 1,
+        "x": 210,
+        "y": 1313,
+        "w": 112,
+        "h": 30,
+        "source": "pixels"
+      },
+      {
+        "text": "On \u203a",
+        "confidence": 1,
+        "x": 647,
+        "y": 672,
+        "w": 82,
+        "h": 28,
+        "source": "pixels"
+      },
+      {
+        "text": "On >",
+        "confidence": 1,
+        "x": 647,
+        "y": 796,
+        "w": 82,
+        "h": 28,
+        "source": "pixels"
+      },
+      {
+        "text": "On >",
+        "confidence": 1,
+        "x": 647,
+        "y": 920,
+        "w": 86,
+        "h": 36,
+        "source": "pixels"
+      },
+      {
+        "text": "On >",
+        "confidence": 1,
+        "x": 648,
+        "y": 1041,
+        "w": 84.4,
+        "h": 31,
+        "source": "pixels"
+      },
+      {
+        "text": "On >",
+        "confidence": 1,
+        "x": 648,
+        "y": 1164,
+        "w": 84,
+        "h": 32,
+        "source": "pixels"
+      },
+      {
+        "text": "On >",
+        "confidence": 1,
+        "x": 647,
+        "y": 1288,
+        "w": 86,
+        "h": 36,
+        "source": "pixels"
+      }
+    ],
+    "facetime_settings_cursor71": [
+      {
+        "text": "SOS only S",
+        "confidence": 1,
+        "x": 84,
+        "y": 22,
+        "w": 144.2,
+        "h": 29,
+        "source": "pixels"
+      },
+      {
+        "text": "L: 12:42 PM",
+        "confidence": 1,
+        "x": 376,
+        "y": 22,
+        "w": 140,
+        "h": 20,
+        "source": "pixels"
+      },
+      {
+        "text": "iMessage",
+        "confidence": 1,
+        "x": 374,
+        "y": 86.5,
+        "w": 158.4,
+        "h": 39.1,
+        "source": "pixels"
+      },
+      {
+        "text": "You can be reached by FaceTime at",
+        "confidence": 1,
+        "x": 344,
+        "y": 265,
+        "w": 560,
+        "h": 34,
+        "source": "pixels"
+      },
+      {
+        "text": "V +1 (972) 977-7432",
+        "confidence": 1,
+        "x": 244,
+        "y": 348,
+        "w": 360,
+        "h": 36,
+        "source": "pixels"
+      },
+      {
+        "text": "Vandyprevalsky@icloud.com",
+        "confidence": 0.5,
+        "x": 306,
+        "y": 452,
+        "w": 496,
+        "h": 44,
+        "source": "pixels"
+      },
+      {
+        "text": "v andyprevalsky@yahoo.com",
+        "confidence": 1,
+        "x": 307,
+        "y": 555,
+        "w": 486,
+        "h": 38,
+        "source": "pixels"
+      },
+      {
+        "text": "Caller ID",
+        "confidence": 1,
+        "x": 132,
+        "y": 682,
+        "w": 132.1,
+        "h": 28.6,
+        "source": "pixels"
+      },
+      {
+        "text": "V +1 (972) 977-7432",
+        "confidence": 1,
+        "x": 246,
+        "y": 768,
+        "w": 356,
+        "h": 32,
+        "source": "pixels"
+      },
+      {
+        "text": "andyprevalsky@icloud.com",
+        "confidence": 1,
+        "x": 344,
+        "y": 871,
+        "w": 416,
+        "h": 34,
+        "source": "pixels"
+      },
+      {
+        "text": "andyprevalsky@yahoo.com",
+        "confidence": 1,
+        "x": 343,
+        "y": 974,
+        "w": 414,
+        "h": 32,
+        "source": "pixels"
+      },
+      {
+        "text": "Apple Account: andyprevalsky@yahoo.com",
+        "confidence": 1,
+        "x": 324,
+        "y": 1058,
+        "w": 520,
+        "h": 24,
         "source": "pixels"
       }
     ]
